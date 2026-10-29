@@ -750,14 +750,16 @@ func (s *serverChangeSoak) disrupt(t *testing.T, lameDuck bool) {
 	for _, gate := range s.gates {
 		gate.Close()
 	}
-	disrupted := make(chan struct{})
+	// The disruption runs on its own goroutine, since the stand-in's drop is awaited meanwhile, and
+	// reports its outcome here: testing allows FailNow only on the test's goroutine.
+	disrupted := make(chan error, 1)
 	go func() {
-		defer close(disrupted)
 		if lameDuck {
-			server.LameDuck(t)
-		} else {
-			server.Stop(t)
+			disrupted <- server.LameDuck()
+			return
 		}
+		server.Stop(t)
+		disrupted <- nil
 	}()
 	var dropped time.Time
 	select {
@@ -778,7 +780,10 @@ func (s *serverChangeSoak) disrupt(t *testing.T, lameDuck bool) {
 		t.Fatalf("the stand-in did not reconnect within %s of its gates opening after the %s of %s", serverChangeRecovery, kind, target)
 	}
 	select {
-	case <-disrupted:
+	case err := <-disrupted:
+		if err != nil {
+			t.Fatalf("the %s of %s: %v", kind, target, err)
+		}
 	case <-time.After(serverChangeRecovery):
 		t.Fatalf("the %s of %s did not finish within %s", kind, target, serverChangeRecovery)
 	}
@@ -805,22 +810,9 @@ func drain[T any](signal chan T) {
 
 // awaitReplicated waits until the notification stream and every KV bucket's stream, the three the
 // listener cannot run without among them, are at three replicas with a leader and both other
-// replicas current and online.
+// replicas current and online (testnats.AwaitStreamCopies).
 func (s *serverChangeSoak) awaitReplicated(t *testing.T) {
 	t.Helper()
-	deadline := time.Now().Add(serverChangeRecovery)
-	var why error
-	for time.Now().Before(deadline) {
-		if why = s.replicated(); why == nil {
-			return
-		}
-		time.Sleep(200 * time.Millisecond)
-	}
-	t.Fatalf("the stream and buckets were not at %d current replicas within %s: %v", serverChangeReplicas, serverChangeRecovery, why)
-}
-
-// replicated reports why the stream or a bucket is not fully replicated yet, or nil when all are.
-func (s *serverChangeSoak) replicated() error {
 	names := []string{bus.Stream}
 	for name := range s.js.StreamNames() {
 		if strings.HasPrefix(name, "KV_") {
@@ -829,30 +821,12 @@ func (s *serverChangeSoak) replicated() error {
 	}
 	for _, bucket := range []string{bus.InterestBucket, bus.RoleClaimBucket, bus.SessionBucket} {
 		if !slices.Contains(names, "KV_"+bucket) {
-			return fmt.Errorf("bucket %s is not listed among the streams %v", bucket, names)
+			t.Fatalf("bucket %s is not listed among the streams %v", bucket, names)
 		}
 	}
 	for _, name := range names {
-		info, err := s.js.StreamInfo(name)
-		if err != nil {
-			return fmt.Errorf("stream %s: %w", name, err)
-		}
-		if info.Config.Replicas != serverChangeReplicas {
-			return fmt.Errorf("stream %s is configured for %d replicas", name, info.Config.Replicas)
-		}
-		if info.Cluster == nil || info.Cluster.Leader == "" {
-			return fmt.Errorf("stream %s has no leader: %+v", name, info.Cluster)
-		}
-		if len(info.Cluster.Replicas) != serverChangeReplicas-1 {
-			return fmt.Errorf("stream %s led by %s has %d other replicas", name, info.Cluster.Leader, len(info.Cluster.Replicas))
-		}
-		for _, peer := range info.Cluster.Replicas {
-			if !peer.Current || peer.Offline {
-				return fmt.Errorf("stream %s replica %s is current %t, offline %t", name, peer.Name, peer.Current, peer.Offline)
-			}
-		}
+		testnats.AwaitStreamCopies(t, s.js, name, serverChangeReplicas)
 	}
-	return nil
 }
 
 // assert logs what each kind did and checks the plan's four assertions, each failure naming the

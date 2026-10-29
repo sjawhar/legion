@@ -301,12 +301,14 @@ func (s *Server) detach() *natsserver.Server {
 // accepting clients, hands off the JetStream leaderships it holds, and closes its clients over its
 // lame-duck window (rigLameDuck), so they move to the other servers they know rather than all at
 // once. It returns once the server has shut down, keeping its store and URL for a later Start as
-// Stop does. A stopped server does nothing.
-func (s *Server) LameDuck(t testing.TB) {
-	t.Helper()
+// Stop does. A stopped server does nothing. A lame duck that has not finished within connectTimeout
+// is shut down at once and returned as an error rather than failing the test here, so a caller may
+// run it on a goroutine of its own and fail on the test's goroutine (testing allows FailNow there
+// only).
+func (s *Server) LameDuck() error {
 	srv := s.detach()
 	if srv == nil {
-		return
+		return nil
 	}
 	go srv.LameDuckShutdown()
 	down := make(chan struct{})
@@ -316,9 +318,10 @@ func (s *Server) LameDuck(t testing.TB) {
 	}()
 	select {
 	case <-down:
+		return nil
 	case <-time.After(connectTimeout):
 		srv.Shutdown()
-		t.Fatalf("the NATS server did not finish its lame duck within %s: %s", connectTimeout, s.log.String())
+		return fmt.Errorf("the NATS server did not finish its lame duck within %s: %s", connectTimeout, s.log.String())
 	}
 }
 

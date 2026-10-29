@@ -37299,7 +37299,43 @@ var LEGION_ROLES = [
   "reviewer",
   "merger"
 ];
+var PROJECT_TOKEN = /^[a-z0-9]+$/;
 var DISPATCH_KEY_PATTERN = /^([A-Z][A-Z0-9]*)-([0-9]+)$/;
+function roleForPhase(phase) {
+  switch (phase) {
+    case "planning":
+      return "planner";
+    case "implementing":
+    case "retro":
+      return "implementer";
+    case "testing":
+      return "tester";
+    case "reviewing":
+      return "reviewer";
+    case "accepting":
+      return "architect";
+    case "merging":
+      return "merger";
+    default:
+      return;
+  }
+}
+function isLegionProjectToken(project) {
+  return PROJECT_TOKEN.test(project);
+}
+function assertLegionProjectToken(project) {
+  if (!isLegionProjectToken(project)) {
+    throw new Error(`Invalid Legion project token: ${project}`);
+  }
+}
+function roleToken(project, issue, role) {
+  assertLegionProjectToken(project);
+  const dispatchMatch = DISPATCH_KEY_PATTERN.exec(issue);
+  if (!dispatchMatch)
+    throw new Error(`Invalid IssueKey: ${issue}`);
+  const [, dispatchProject, number] = dispatchMatch;
+  return `legion-${project}-${dispatchProject?.toLowerCase()}-${number}-${role}`;
+}
 // ../contracts/src/repo.ts
 function canonicalRepo(owner, repo) {
   return `${owner.trim().toLowerCase()}/${repo.trim().toLowerCase().replace(/\.git$/, "")}`;
@@ -46011,7 +46047,7 @@ var envoyToolSpecs = [
   },
   {
     name: "envoy_publish",
-    description: `Publish an Envoy message to a notifications. topic. A role or built-in topic is delivered as its guide says; a role message errs when its holder did not confirm it within the listener's window. Any other notifications. topic you name (a team topic such as notifications.team.deploy-squad.all) reaches every session subscribed to it when you publish, and is not kept for a session that subscribes later. The listener confirms it with each other session that holds its own NATS connection and registered the topic, and errs naming each session that did not confirm; a session that stopped without unregistering stays registered for up to 5 minutes and is named in that time, and a named session is not a failed delivery to the other sessions. A session that holds its own NATS connection receives it directly, yours included; a session the listener delivers to over a serve port, such as an OpenCode agent, is not confirmed and receives it through its machine's listener when that listener subscribes to every topic (ENVOY_SUBSCRIBE_ALL_TOPICS=1; the shared hub's listener does not). ${DELIVERY_CONTRACT}`,
+    description: `Publish an Envoy message to a notifications. topic. A role or built-in topic is delivered as its guide says; any other notifications. topic you name (a team topic such as notifications.team.deploy-squad.all) is live only: it reaches every session subscribed to it when you publish, and is not retained. A session that holds its own NATS connection receives it directly, yours included; a session the listener delivers to over a serve port, such as an OpenCode agent, receives it through its machine's listener when that listener subscribes to every topic (ENVOY_SUBSCRIBE_ALL_TOPICS=1; the shared hub's listener does not). ${DELIVERY_CONTRACT}`,
     arguments: (schema) => ({ topic: schema.string(), ...messageArguments(schema) }),
     operation: EnvoyToolOperation.publish
   },
@@ -46609,11 +46645,14 @@ function parseStrictly(schema, body) {
 }
 function createLegionDaemonClient(baseUrl, fetchFn = fetch) {
   const endpoint = baseUrl.replace(/\/+$/, "");
-  const call = async (method, path, body) => {
-    const response = await fetchFn(`${endpoint}${path}`, body === undefined ? undefined : {
-      method,
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(body)
+  const call = async (method, path, body, signal) => {
+    const response = await fetchFn(`${endpoint}${path}`, {
+      ...body === undefined ? {} : {
+        method,
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(body)
+      },
+      ...signal === undefined ? {} : { signal }
     });
     const text = await response.text();
     if (response.ok)
@@ -46625,8 +46664,8 @@ function createLegionDaemonClient(baseUrl, fetchFn = fetch) {
     }
     throw new LegionDaemonApiError(method, path, response.status, undefined, `${JSON.stringify(text)} is not the daemon's refusal shape (${refusal.problem})`);
   };
-  const read = async (method, path, schema, body) => {
-    const { status, text } = await call(method, path, body);
+  const read = async (method, path, schema, body, signal) => {
+    const { status, text } = await call(method, path, body, signal);
     const parsed = parseStrictly(schema, text);
     if ("problem" in parsed) {
       throw new LegionDaemonContractError(method, path, status, parsed.problem);
@@ -46641,7 +46680,7 @@ function createLegionDaemonClient(baseUrl, fetchFn = fetch) {
     }
   };
   return {
-    state: () => read("GET", "/legion/v1/state", LegionStateResponse),
+    state: (options) => read("GET", "/legion/v1/state", LegionStateResponse, undefined, options?.signal),
     register: (input) => read("POST", "/legion/v1/claims/register", LegionRegisterResponse, input),
     registerController: (input) => read("POST", "/legion/v1/claims/register", LegionControllerRegisterResponse, input),
     ready: (input) => acknowledge("/legion/v1/claims/ready", input),
@@ -49144,7 +49183,7 @@ var import_nats2 = __toESM(require_mod4(), 1);
 var name = "@sjawhar/claude-envoy";
 var version2 = "1.0.0";
 var legion = {
-  daemonApiVersion: 41
+  daemonApiVersion: 42
 };
 
 // src/channel-forwarder.ts
@@ -50034,7 +50073,8 @@ function legionPane(env) {
   return {
     daemonUrl: required("LEGION_DAEMON_URL"),
     configDir: required("CLAUDE_CONFIG_DIR"),
-    bootToken: pointer === undefined ? required("LEGION_BOOT_TOKEN") : readSecretFile("LEGION_BOOT_TOKEN_FILE", pointer)
+    bootToken: pointer === undefined ? required("LEGION_BOOT_TOKEN") : readSecretFile("LEGION_BOOT_TOKEN_FILE", pointer),
+    launcherSaves: configuredValue(env["LEGION_CLAUDE_SESSION_ID"]) !== undefined
   };
 }
 function logLegion(line) {
@@ -50055,17 +50095,33 @@ async function waitForTranscript(configDir, sessionID, signal, pollMs = 100) {
     signal.throwIfAborted();
     for (const directory of await readdir2(projects).catch(() => [])) {
       const file = join7(projects, directory, name);
-      if (await stat2(file).then((info) => info.isFile(), () => false))
+      if (await isFile(file))
         return file;
     }
     await delay(pollMs, undefined, { signal });
   }
+}
+var SAVED_MARKER_SUFFIX = ".legion-saved";
+async function waitForSavedTranscript(transcript, signal, pollMs = 100) {
+  const marker = `${transcript}${SAVED_MARKER_SUFFIX}`;
+  for (;; ) {
+    signal.throwIfAborted();
+    if (await isFile(marker))
+      return;
+    await delay(pollMs, undefined, { signal });
+  }
+}
+function isFile(file) {
+  return stat2(file).then((info) => info.isFile(), () => false);
 }
 function startLegionClaim(deps) {
   let capability;
   const { sessionID } = deps;
   const boot = async () => {
     const transcript = await waitForTranscript(deps.pane.configDir, sessionID, deps.signal, deps.pollMs);
+    if (deps.pane.launcherSaves) {
+      await waitForSavedTranscript(transcript, deps.signal, deps.pollMs);
+    }
     await bootLegionClaim({
       daemon: deps.daemon,
       registration: {
@@ -50165,6 +50221,595 @@ function createInboxNotifier(socketPath) {
       connected().write(`${JSON.stringify({ id, content: notification.params.content })}
 `);
       return settle.promise;
+    }
+  };
+}
+
+// src/legion-phase-hook.ts
+import { randomUUID as randomUUID3 } from "crypto";
+import { readFileSync as readFileSync7, renameSync as renameSync3, rmSync as rmSync4, writeFileSync as writeFileSync3 } from "fs";
+import { dirname as dirname3, join as join8 } from "path";
+
+// ../pi-shared/src/phase-reminder.ts
+import { randomUUID as randomUUID2 } from "crypto";
+
+// ../pi-shared/src/phase-stall.ts
+var WAITING_REPLY = /^\W*WAITING\b/m;
+var TOOL_CALL_SHAPED = /<(?:[\w-]+:)?(?:function_calls\b|invoke\s+name\s*=|parameter\s+name\s*=)/;
+var REMINDER = "Your turn ended with your Legion phase still open: the `legion` tool's `handoff_complete` has " + "not succeeded since your assignment. If your phase's work is done, call the `legion` tool now " + "with op `handoff_complete` and the fields your role's instructions give. If you are waiting on " + "something (CI, a review, a person), reply with a line starting WAITING that names what you are " + "waiting on: that buys a quiet wait, and then this reminder comes again. This reminder repeats " + "at the end of every turn for as long as your phase is open.";
+var TEXT_TOOL_CALL = "Your last message holds a tool call written as text, so it did not run: make it a real tool call. ";
+function reminderText(lastAssistantText) {
+  return TOOL_CALL_SHAPED.test(lastAssistantText) ? TEXT_TOOL_CALL + REMINDER : REMINDER;
+}
+function stepPhaseStall(state, input) {
+  switch (input.kind) {
+    case "assignment":
+      return { state: { state: "open", count: 0 } };
+    case "phase-closed":
+      return { state: { state: "closed", count: 0 } };
+    case "inbound-event":
+      return state.state === "closed" ? { state } : { state: { state: "open", count: 0 } };
+    case "tool-call":
+      return { state: { state: state.state, count: 0 } };
+    case "reminded":
+      return state.state === "closed" ? { state } : { state: { state: "open", count: state.count + 1 } };
+    case "settle": {
+      if (state.state !== "open")
+        return { state };
+      if (WAITING_REPLY.test(input.lastAssistantText)) {
+        return { state: { state: "waiting", count: state.count } };
+      }
+      return { state, reminder: reminderText(input.lastAssistantText) };
+    }
+  }
+}
+function phaseStallFrom(data) {
+  if (!("state" in data) || typeof data.state !== "string")
+    return;
+  const recorded = "count" in data ? data.count : undefined;
+  const count = typeof recorded === "number" && Number.isInteger(recorded) && recorded >= 0 ? recorded : 0;
+  switch (data.state) {
+    case "closed":
+    case "open":
+    case "waiting":
+      return { state: data.state, count };
+    case "quiet":
+    case "text-call":
+      return { state: "open", count: 0 };
+    default:
+      return;
+  }
+}
+var LAST_MESSAGE_LIMIT = 500;
+function phaseStallReportFrom(data) {
+  const reported = "reported" in data && data.reported === true;
+  const key = "reportKey" in data && typeof data.reportKey === "string" ? data.reportKey : undefined;
+  return { reported, reportKey: key };
+}
+function phaseStallEntryFrom(data) {
+  if (data === undefined)
+    return;
+  const stall = phaseStallFrom(data);
+  if (stall === undefined)
+    return;
+  const report = phaseStallReportFrom(data);
+  const lastMessage = "lastMessage" in data && typeof data.lastMessage === "string" ? data.lastMessage.slice(0, LAST_MESSAGE_LIMIT) : "";
+  return {
+    state: stall.state,
+    count: stall.count,
+    reported: report.reported,
+    ...report.reportKey === undefined ? {} : { reportKey: report.reportKey },
+    ...lastMessage === "" ? {} : { lastMessage }
+  };
+}
+
+// ../pi-shared/src/phase-reminder.ts
+var RECORD_READ_BOUND_MS = 5000;
+function roleUnheld(error) {
+  if (!(error instanceof EnvoyApiError) || error.details.status !== 404)
+    return false;
+  let body;
+  try {
+    body = JSON.parse(error.details.responseBody);
+  } catch {
+    return false;
+  }
+  if (typeof body !== "object" || body === null || !("reason" in body))
+    return false;
+  return body.reason === "unclaimed" || body.reason === "holder_lapsed";
+}
+async function withBound(work, ms) {
+  const controller = new AbortController;
+  const deadline = Promise.withResolvers();
+  const timer = setTimeout(() => {
+    const late = new Error(`no answer within ${ms}ms`);
+    deadline.reject(late);
+    controller.abort(late);
+  }, ms);
+  try {
+    return await Promise.race([work(controller.signal), deadline.promise]);
+  } finally {
+    clearTimeout(timer);
+  }
+}
+function createPhaseReminder(deps) {
+  const boundMs = deps.recordBoundMs ?? RECORD_READ_BOUND_MS;
+  let stall = { state: "closed", count: 0 };
+  let reported = false;
+  let reportKey;
+  let generation = 0;
+  let turnRunning = false;
+  let continued = false;
+  let lastMessage = "";
+  let recorded = "";
+  const entryOf = () => ({
+    state: stall.state,
+    count: stall.count,
+    reported,
+    ...reportKey === undefined ? {} : { reportKey },
+    ...lastMessage === "" ? {} : { lastMessage }
+  });
+  const writeEntry = () => {
+    const entry = entryOf();
+    const written = JSON.stringify(entry);
+    if (written === recorded)
+      return;
+    recorded = written;
+    deps.saveEntry(entry);
+  };
+  recorded = JSON.stringify(entryOf());
+  const advance = (input) => {
+    const step = stepPhaseStall(stall, input);
+    stall = step.state;
+    if (stall.count === 0) {
+      reported = false;
+      reportKey = undefined;
+    }
+    writeEntry();
+    return step.reminder;
+  };
+  const recordCheck = async () => {
+    const claim = deps.claim();
+    if (claim === undefined)
+      return { reminds: true };
+    let record;
+    try {
+      record = (await withBound(deps.readState, boundMs)).issues[claim.issue];
+    } catch (error) {
+      deps.log.debug("legion: the daemon did not answer the phase reminder's record check", {
+        issue: claim.issue,
+        error: messageFor(error)
+      });
+      return { reminds: true };
+    }
+    if (record === undefined) {
+      deps.log.debug("legion: the daemon holds no record for this phase reminder's issue", {
+        issue: claim.issue
+      });
+      return { reminds: true };
+    }
+    if (roleForPhase(record.phase) !== claim.role) {
+      deps.log.debug("legion: this role no longer works this phase; no reminder is sent", {
+        issue: claim.issue,
+        phase: record.phase,
+        role: claim.role
+      });
+      return { reminds: false, record };
+    }
+    return { reminds: true, record };
+  };
+  const tellArchitect = async (record) => {
+    const claim = deps.claim();
+    if (claim === undefined)
+      return;
+    const publish = deps.publisher();
+    if (publish === undefined) {
+      deps.log.debug("legion: Envoy is off for this session; the architect is not told", {
+        issue: claim.issue,
+        reminders: stall.count
+      });
+      return;
+    }
+    reportKey ??= randomUUID2();
+    const key = reportKey;
+    writeEntry();
+    const phase = record?.phase ?? "unknown";
+    const reminders = stall.count;
+    try {
+      const live = record?.architect !== undefined && record.architect.state !== "retired" && record.architect.state !== "failed";
+      const topic = ROLE_TOPIC_PREFIX + roleToken(deps.project ?? "", live ? claim.issue : claim.tree, "architect");
+      await publish({
+        topic,
+        message: `The ${claim.role} of ${claim.issue} has let ${reminders} phase reminders go unanswered: ` + `its turns keep ending with the phase ${phase} still open and no successful ` + `handoff_complete, and nothing it does clears the reminder. ` + `What it last said was: ${lastMessage}`,
+        payload: JSON.stringify({
+          issue: claim.issue,
+          role: claim.role,
+          phase,
+          reminders,
+          lastMessage
+        }),
+        idempotencyKey: key,
+        sourceSessionID: claim.sessionID
+      });
+      if (reportKey !== key)
+        return;
+      reported = true;
+      writeEntry();
+    } catch (error) {
+      if (roleUnheld(error)) {
+        deps.log.debug("legion: no live session holds the architect role; telling it again later", {
+          issue: claim.issue,
+          reminders
+        });
+        return;
+      }
+      deps.log.warn("legion: the architect was not told its worker is stalled", {
+        issue: claim.issue,
+        reminders,
+        error: messageFor(error)
+      });
+    }
+  };
+  const deliver = async (reminder, record) => {
+    const uncounted = stall;
+    advance({ kind: "reminded" });
+    const counted = stall;
+    generation += 1;
+    const sentAt = generation;
+    try {
+      await deps.sendReminder(reminder);
+    } catch (error) {
+      deps.log.warn("legion: a phase reminder did not reach this worker; it comes again later", {
+        error: messageFor(error)
+      });
+      if (stall === counted) {
+        stall = uncounted;
+        writeEntry();
+      }
+      if (generation === sentAt)
+        armReminder(reminder, deps.limits.reminderMs);
+      return;
+    }
+    if (reported || stall.count < deps.limits.architectAfter)
+      return;
+    await tellArchitect(record);
+  };
+  const armReminder = (reminder, delayMs) => {
+    const armedAt = generation;
+    deps.armTimer(async () => {
+      if (generation !== armedAt || stall.state === "closed" || turnRunning)
+        return;
+      const check = await recordCheck();
+      if (!check.reminds)
+        return;
+      if (generation !== armedAt || turnRunning)
+        return;
+      await deliver(reminder, check.record);
+    }, delayMs);
+  };
+  return {
+    restore: (entry) => {
+      stall = entry === undefined ? { state: "closed", count: 0 } : { state: entry.state, count: entry.count };
+      reported = entry?.reported ?? false;
+      reportKey = entry?.reportKey;
+      lastMessage = entry?.lastMessage ?? "";
+      recorded = JSON.stringify(entryOf());
+    },
+    armResumeReminder: () => {
+      if (stall.state === "closed")
+        return;
+      armReminder(reminderText(""), deps.limits.resumeMs);
+    },
+    turnStarted: () => {
+      generation += 1;
+      turnRunning = true;
+    },
+    apply: (input) => {
+      if (input.kind === "phase-closed")
+        generation += 1;
+      advance(input);
+    },
+    settle: async (text, options) => {
+      turnRunning = false;
+      generation += 1;
+      if (stall.state !== "closed")
+        lastMessage = text.slice(0, LAST_MESSAGE_LIMIT);
+      const before = stall.count;
+      const reminder = advance({ kind: "settle", lastAssistantText: text });
+      if (stall.state === "waiting") {
+        continued = false;
+        armReminder(reminderText(text), deps.limits.waitingMs);
+        return;
+      }
+      if (reminder === undefined) {
+        continued = false;
+        return;
+      }
+      if (before !== 0 || continued || options?.canContinue === false) {
+        continued = false;
+        armReminder(reminder, deps.limits.reminderMs);
+        return;
+      }
+      if (!(await recordCheck()).reminds) {
+        continued = false;
+        return;
+      }
+      advance({ kind: "reminded" });
+      generation += 1;
+      continued = true;
+      return reminder;
+    },
+    sessionChanged: () => {
+      generation += 1;
+    }
+  };
+}
+
+// ../pi-shared/src/stall-limits.ts
+var DEFAULT_STALL_LIMITS = {
+  reminderMs: 300000,
+  waitingMs: 900000,
+  resumeMs: 120000,
+  architectAfter: 3
+};
+function integerSetting(env, log, name, fallback, least) {
+  const raw = env[name];
+  if (raw === undefined)
+    return fallback;
+  const value = raw.trim() === "" ? Number.NaN : Number(raw);
+  if (!Number.isInteger(value) || value < least) {
+    log.warn(`legion: ${name} is not an integer of ${least} or more; using ${fallback}`, {
+      value: raw
+    });
+    return fallback;
+  }
+  return value;
+}
+function stallLimits(env, log) {
+  return {
+    reminderMs: integerSetting(env, log, "LEGION_STALL_REMINDER_MS", DEFAULT_STALL_LIMITS.reminderMs, 0),
+    waitingMs: integerSetting(env, log, "LEGION_STALL_WAITING_MS", DEFAULT_STALL_LIMITS.waitingMs, 0),
+    resumeMs: integerSetting(env, log, "LEGION_STALL_RESUME_MS", DEFAULT_STALL_LIMITS.resumeMs, 0),
+    architectAfter: integerSetting(env, log, "LEGION_STALL_ARCHITECT_AFTER", DEFAULT_STALL_LIMITS.architectAfter, 2)
+  };
+}
+
+// ../pi-shared/src/workspace-recreated.ts
+var WORKSPACE_RECREATED_VARIABLE = "LEGION_WORKSPACE_RECREATED";
+function workspaceRecreated(environment) {
+  return environment[WORKSPACE_RECREATED_VARIABLE] === "true";
+}
+function workspaceRecreatedNotice(environment, issue) {
+  if (!workspaceRecreated(environment))
+    return;
+  return {
+    id: crypto.randomUUID(),
+    content: `Your workspace was recreated since your last turn: it holds what was pushed to legion/${issue} ` + "(the repository's default branch if nothing was), and anything you had not pushed is gone. " + "Before you continue, check the workspace against what you remember doing and re-read your " + "last handoff."
+  };
+}
+
+// src/legion-phase-hook.ts
+var PHASE_HOOK_TOOL_NAME = "legion_phase_hook";
+var PHASE_HOOK_REFUSAL = "legion_phase_hook is Claude Code's hook endpoint for Legion's phase reminder: Claude Code's " + "own hooks call it with the event they fire for, and it does nothing for a call the model " + "makes. Do not call it.";
+var HOOK_EVENTS = [
+  "Stop",
+  "StopFailure",
+  "PostToolUse",
+  "PostToolUseFailure",
+  "UserPromptSubmit"
+];
+var WRITTEN_LINES_KEPT = 32;
+var hookArguments = object({
+  event: _enum2(HOOK_EVENTS),
+  lastAssistantMessage: string2().optional(),
+  stopHookActive: string2().optional(),
+  toolName: string2().optional(),
+  agentId: string2().optional(),
+  prompt: string2().optional()
+});
+function phaseHookToolDefinition() {
+  return {
+    name: PHASE_HOOK_TOOL_NAME,
+    description: PHASE_HOOK_REFUSAL,
+    inputSchema: toJSONSchema(hookArguments)
+  };
+}
+function phaseStallFile(configDir, sessionID) {
+  return join8(configDir, `legion-phase-stall-${sessionID}.json`);
+}
+function paneReminderLog(write) {
+  const line = (level, message, context) => {
+    write(context === undefined ? `${level}: ${message}` : `${level}: ${message} ${JSON.stringify(context)}`);
+  };
+  return {
+    debug: (message, context) => line("debug", message, context),
+    warn: (message, context) => line("warn", message, context)
+  };
+}
+var NO_RECORD = { entry: undefined, recreatedNoticeSent: false };
+function readPhaseStallRecord(file, log) {
+  let raw;
+  try {
+    raw = readFileSync7(file, "utf8");
+  } catch (error) {
+    const missing = typeof error === "object" && error !== null && "code" in error && error.code === "ENOENT";
+    if (!missing) {
+      log.warn("legion: the phase-stall state could not be read; this session starts afresh", {
+        file,
+        error: messageFor(error)
+      });
+    }
+    return NO_RECORD;
+  }
+  let data;
+  try {
+    data = JSON.parse(raw);
+  } catch (error) {
+    log.warn("legion: the phase-stall state is not JSON; this session starts afresh", {
+      file,
+      error: messageFor(error)
+    });
+    return NO_RECORD;
+  }
+  if (typeof data !== "object" || data === null) {
+    log.warn("legion: the phase-stall state is not an object; this session starts afresh", { file });
+    return NO_RECORD;
+  }
+  const entry = phaseStallEntryFrom(data);
+  if (entry === undefined) {
+    log.warn("legion: the phase-stall state holds no state this build knows; starting afresh", {
+      file
+    });
+    return NO_RECORD;
+  }
+  return {
+    entry,
+    recreatedNoticeSent: "recreatedNoticeSent" in data && data.recreatedNoticeSent === true
+  };
+}
+function writePhaseStallRecord(file, entry, recreatedNoticeSent, log) {
+  const temporary = join8(dirname3(file), `.legion-phase-stall-${randomUUID3()}`);
+  try {
+    writeFileSync3(temporary, JSON.stringify({ ...entry, ...recreatedNoticeSent ? { recreatedNoticeSent } : {} }), { mode: 384 });
+    renameSync3(temporary, file);
+  } catch (error) {
+    rmSync4(temporary, { force: true });
+    log.warn("legion: the phase-stall state is not recorded for a relaunch", {
+      file,
+      error: messageFor(error)
+    });
+  }
+}
+function createPhaseHookEndpoint(deps) {
+  const limits = stallLimits(deps.env, deps.log);
+  const restored = readPhaseStallRecord(deps.stateFile, deps.log);
+  let entry = restored.entry ?? { state: "closed", count: 0, reported: false };
+  let recreatedNoticeSent = restored.recreatedNoticeSent;
+  const saveRecord = (next) => {
+    entry = next;
+    writePhaseStallRecord(deps.stateFile, next, recreatedNoticeSent, deps.log);
+  };
+  if (recreatedNoticeSent && !workspaceRecreated(deps.env)) {
+    recreatedNoticeSent = false;
+    saveRecord(entry);
+  }
+  let timer;
+  const dropTimer = () => {
+    if (timer === undefined)
+      return;
+    clearTimeout(timer);
+    timer = undefined;
+  };
+  const armTimer = (callback, delayMs) => {
+    dropTimer();
+    timer = setTimeout(() => {
+      timer = undefined;
+      callback();
+    }, delayMs);
+  };
+  let lastReminder;
+  const written = new Set;
+  const noteWritten = (content) => {
+    written.add(content);
+    for (const oldest of written) {
+      if (written.size <= WRITTEN_LINES_KEPT)
+        break;
+      written.delete(oldest);
+    }
+  };
+  const writeToSession = async (text, what) => {
+    const { inbox } = deps;
+    if (inbox === undefined) {
+      deps.log.warn(`legion: ${what} has no way to reach this worker: this session has no inbox`, {
+        text
+      });
+      return;
+    }
+    await inbox(text);
+  };
+  const sendReminder = (text) => {
+    lastReminder = text;
+    return writeToSession(text, "a phase reminder");
+  };
+  const reminder = createPhaseReminder({
+    sendReminder,
+    armTimer,
+    saveEntry: saveRecord,
+    claim: deps.claim,
+    readState: deps.readState,
+    publisher: () => deps.publish,
+    project: configuredValue(deps.env["LEGION_PROJECT"]),
+    limits,
+    log: deps.log
+  });
+  reminder.restore(restored.entry);
+  const sendRecreatedNotice = (issue) => {
+    if (recreatedNoticeSent)
+      return;
+    const notice = workspaceRecreatedNotice(deps.env, issue);
+    if (notice === undefined)
+      return;
+    recreatedNoticeSent = true;
+    saveRecord(entry);
+    noteWritten(notice.content);
+    writeToSession(notice.content, "the recreated-workspace notice").catch((error) => {
+      deps.log.warn("legion: the recreated-workspace notice did not reach this worker", {
+        error: messageFor(error)
+      });
+    });
+  };
+  deps.booted.then(() => {
+    const claim = deps.claim();
+    if (claim === undefined)
+      return;
+    sendRecreatedNotice(claim.issue);
+    if (claim.role !== "architect")
+      reminder.armResumeReminder();
+  });
+  return {
+    deliveryWritten: noteWritten,
+    phaseClosed: () => reminder.apply({ kind: "phase-closed" }),
+    stop: dropTimer,
+    handle: async (input) => {
+      const parsed = hookArguments.safeParse(input);
+      if (!parsed.success)
+        return { error: PHASE_HOOK_REFUSAL };
+      const event = parsed.data;
+      const claim = deps.claim();
+      if (claim === undefined || claim.role === "architect")
+        return {};
+      switch (event.event) {
+        case "Stop": {
+          deps.log.debug("legion: a Claude Code phase worker's turn is settling", {
+            issue: claim.issue,
+            role: claim.role,
+            stopHookActive: event.stopHookActive ?? ""
+          });
+          const reminded = await reminder.settle(event.lastAssistantMessage ?? "");
+          return reminded === undefined ? {} : { decision: "block", reason: reminded };
+        }
+        case "StopFailure": {
+          await reminder.settle(event.lastAssistantMessage ?? "", { canContinue: false });
+          return {};
+        }
+        case "PostToolUse":
+        case "PostToolUseFailure": {
+          if ((event.agentId ?? "") !== "")
+            return {};
+          reminder.apply({ kind: "tool-call" });
+          return {};
+        }
+        case "UserPromptSubmit": {
+          reminder.turnStarted();
+          dropTimer();
+          const prompt = event.prompt ?? "";
+          if (prompt === lastReminder)
+            return {};
+          const delivered = written.delete(prompt);
+          reminder.apply({ kind: delivered ? "inbound-event" : "assignment" });
+          return {};
+        }
+      }
     }
   };
 }
@@ -50343,9 +50988,9 @@ async function executeLegionTool(runtime, input, signal) {
 
 // src/replay-state.ts
 import { readFile as readFile2 } from "fs/promises";
-import { join as join8 } from "path";
+import { join as join9 } from "path";
 function replayStateFile(stateDirectory, sessionId) {
-  return join8(stateDirectory, `replay-${encodeURIComponent(sessionId)}.json`);
+  return join9(stateDirectory, `replay-${encodeURIComponent(sessionId)}.json`);
 }
 async function readReplayState(file) {
   let text;
@@ -50374,7 +51019,7 @@ async function writeReplayState(file, snapshot) {
 
 // src/session-title.ts
 import { execFileSync } from "child_process";
-import { readFileSync as readFileSync7 } from "fs";
+import { readFileSync as readFileSync8 } from "fs";
 import { basename as basename4 } from "path";
 var TMUX_PANE_FORMAT = [
   "#{session_name}",
@@ -50397,7 +51042,7 @@ function visible(value) {
 function parentPid(pid) {
   try {
     if (process.platform === "linux") {
-      const stat = readFileSync7(`/proc/${pid}/stat`, "utf8");
+      const stat = readFileSync8(`/proc/${pid}/stat`, "utf8");
       const parent = Number(stat.slice(stat.lastIndexOf(")") + 2).split(" ")[1]);
       return Number.isInteger(parent) ? parent : undefined;
     }
@@ -50420,21 +51065,45 @@ function isAncestor(candidate, pid = process.pid) {
   }
   return false;
 }
-function queryTmux(socket, pane, format) {
+async function queryTmux(socket, pane, format) {
+  let child;
   try {
-    const answer = execFileSync("tmux", ["-u", "-S", socket, "display-message", "-p", "-t", pane, format], {
-      encoding: "utf8",
-      stdio: ["ignore", "pipe", "ignore"],
-      timeout: TMUX_TIMEOUT_MS,
-      killSignal: "SIGKILL"
+    child = Bun.spawn(["tmux", "-u", "-S", socket, "display-message", "-p", "-t", pane, format], {
+      stdin: "ignore",
+      stdout: "pipe",
+      stderr: "ignore"
     });
-    return answer.trim() === "" ? undefined : answer;
   } catch {
     return;
   }
+  const reader = child.stdout.getReader();
+  const expired = Promise.withResolvers();
+  const timer = setTimeout(() => {
+    child.kill("SIGKILL");
+    reader.cancel().catch(() => {
+      return;
+    });
+    expired.resolve(undefined);
+  }, TMUX_TIMEOUT_MS);
+  const answered = (async () => {
+    const decoder = new TextDecoder;
+    let answer = "";
+    for (let chunk = await reader.read();!chunk.done; chunk = await reader.read()) {
+      answer += decoder.decode(chunk.value, { stream: true });
+    }
+    answer += decoder.decode();
+    return await child.exited === 0 && answer.trim() !== "" ? answer : undefined;
+  })().catch(() => {
+    return;
+  });
+  try {
+    return await Promise.race([answered, expired.promise]);
+  } finally {
+    clearTimeout(timer);
+  }
 }
-function tmuxPaneTitle(socket, serverPid, pane, ownPane, query = queryTmux) {
-  const fields = query(socket, pane, TMUX_PANE_FORMAT)?.replace(/\r?\n$/, "").split("\t");
+async function tmuxPaneTitle(socket, serverPid, pane, ownPane, query = queryTmux) {
+  const fields = (await query(socket, pane, TMUX_PANE_FORMAT))?.replace(/\r?\n$/, "").split("\t");
   if (fields === undefined || fields.length < 6)
     return;
   const [name = "", window2 = "", automaticRename, group = "", pid, panePid = ""] = fields.map(oneLine);
@@ -50448,7 +51117,7 @@ function tmuxPaneTitle(socket, serverPid, pane, ownPane, query = queryTmux) {
   }
   return /^[0-9]+$/.test(session) ? undefined : session;
 }
-function sessionTitle(environment, directory, sources = {}) {
+async function sessionTitle(environment, directory, sources = {}) {
   const {
     query = queryTmux,
     ownPane = (panePid) => isAncestor(panePid),
@@ -50464,7 +51133,7 @@ function sessionTitle(environment, directory, sources = {}) {
   const serverPid = parts.at(-2) ?? "";
   const pane = configuredValue(environment.TMUX_PANE)?.trim();
   const directoryName = oneLine(basename4(directory) || directory);
-  const name = (socket === "" || serverPid === "" || pane === undefined ? undefined : tmuxPaneTitle(socket, serverPid, pane, ownPane, query)) ?? (visible(directoryName) ? directoryName : "session");
+  const name = (socket === "" || serverPid === "" || pane === undefined ? undefined : await tmuxPaneTitle(socket, serverPid, pane, ownPane, query)) ?? (visible(directoryName) ? directoryName : "session");
   return (sessionId) => {
     const own = oneLine(chosen(sessionId) ?? "");
     return visible(own) ? own : `${name} ${sessionId.slice(0, SHORT_ID_LENGTH)}`;
@@ -50576,7 +51245,7 @@ function createChannelDelivery(input) {
         content,
         meta: sanitizeChannelMetadata({
           producer: envelope?.source ?? "unknown",
-          topic: envelope?.topic || subject,
+          topic: subject,
           event_id: envelope?.event_id,
           dedupe_key: envelope?.dedupe_key,
           urgency: envelope?.urgency,
@@ -51196,7 +51865,7 @@ async function runEnvoyChannelServer() {
 `);
   const overrideSessionId = process.env["ENVOY_SESSION_ID"];
   const pluginData = configuredValue(process.env["CLAUDE_PLUGIN_DATA"]);
-  const title = sessionTitle({
+  const title = await sessionTitle({
     ENVOY_SESSION_TITLE: process.env["ENVOY_SESSION_TITLE"],
     TMUX: process.env["TMUX"],
     TMUX_PANE: process.env["TMUX_PANE"]
@@ -51238,6 +51907,7 @@ async function runEnvoyChannelServer() {
   const stateDirectory = pluginStateDirectory();
   const inboxSocket = configuredValue(process.env[INBOX_VARIABLE]);
   const bundlePath = process.argv[1] ?? "";
+  const inbox = inboxSocket === undefined ? undefined : createInboxNotifier(inboxSocket);
   const channel = inboxSocket === undefined ? detectClaudeChannel({
     claudePid: process.ppid,
     bundlePath,
@@ -51259,25 +51929,52 @@ async function runEnvoyChannelServer() {
   let runtime;
   let claim;
   const daemon = pane === undefined ? undefined : createLegionDaemonClient(pane.daemonUrl);
+  const phaseLog = paneReminderLog(logLegion);
+  const claimBooted = Promise.withResolvers();
+  const phaseHook = pane === undefined || daemon === undefined ? undefined : createPhaseHookEndpoint({
+    stateFile: phaseStallFile(pane.configDir, identity.id),
+    claim: () => claim?.capability(),
+    booted: claimBooted.promise,
+    readState: (signal) => daemon.state({ signal }),
+    inbox: inbox === undefined ? undefined : (text) => inbox.notification({
+      method: CHANNEL_NOTIFICATION_METHOD,
+      params: { content: text, meta: {} }
+    }),
+    publish: client.publish,
+    env: process.env,
+    log: phaseLog
+  });
   const toolDefinitions = [
     ...channelToolDefinitions(),
-    ...daemon === undefined ? [] : [legionToolDefinition()]
+    ...daemon === undefined ? [] : [legionToolDefinition(), phaseHookToolDefinition()]
   ];
   server.setRequestHandler(ListToolsRequestSchema, async () => ({ tools: toolDefinitions }));
   server.setRequestHandler(CallToolRequestSchema, async (request, extra) => {
+    if (phaseHook !== undefined && request.params.name === PHASE_HOOK_TOOL_NAME) {
+      return mcpResult(await phaseHook.handle(request.params.arguments));
+    }
     if (daemon !== undefined && request.params.name === LEGION_TOOL_NAME) {
       const legionRuntime = {
         daemon,
         claim: () => claim?.capability(),
         handoffCommit: (phase, role) => findHandoffCommit({ phase, role, env: process.env })
       };
-      return mcpResult(await executeLegionTool(legionRuntime, request.params.arguments, extra.signal));
+      const answer = await executeLegionTool(legionRuntime, request.params.arguments, extra.signal);
+      const op = request.params.arguments?.["op"];
+      if (op === "handoff_complete" || op === "request_backward_move")
+        phaseHook?.phaseClosed();
+      return mcpResult(answer);
     }
     if (runtime === undefined)
       throw new Error("Envoy channel server is still starting");
     return mcpResult(await executeEnvoyTool(runtime, request.params.name, request.params.arguments));
   });
-  const notifier = inboxSocket === undefined ? server : createInboxNotifier(inboxSocket);
+  const notifier = inbox === undefined ? server : phaseHook === undefined ? inbox : {
+    notification: async (notification) => {
+      phaseHook.deliveryWritten(notification.params.content);
+      await inbox.notification(notification);
+    }
+  };
   const capabilities = inboxSocket !== undefined ? INBOX_CAPABILITIES : channel.loaded ? CHANNEL_CAPABILITIES : [];
   const booting = new AbortController;
   const stopped = Promise.withResolvers();
@@ -51288,6 +51985,7 @@ async function runEnvoyChannelServer() {
       return;
     stopping = true;
     booting.abort();
+    phaseHook?.stop();
     if (session === undefined) {
       stopped.resolve();
       return;
@@ -51341,6 +52039,7 @@ async function runEnvoyChannelServer() {
         log: logLegion,
         stop: endPane
       });
+      claim.booted.then(claimBooted.resolve);
     }
     if (stopping)
       await session.shutdown();

@@ -1,6 +1,6 @@
 kind: Changed
 body: |-
-    The bundled `envoy_publish` description (`dist/` rebuilt) says a role message errs when its
+    The bundled `envoy_publish` description says a role message errs when its
     holder did not confirm it within the listener's window, and a team or other ad-hoc topic errs
     naming each session holding its own NATS connection that registered the topic and did not
     confirm it; a session that stopped without unregistering stays registered for up to 5 minutes

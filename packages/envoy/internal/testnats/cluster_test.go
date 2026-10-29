@@ -108,7 +108,9 @@ func TestALameDuckMemberSendsItsClientsToAnotherMember(t *testing.T) {
 		t.Fatalf("the members advertised %v to the client, want no URL beyond the ones it was given", discovered)
 	}
 
-	cluster.Servers[0].LameDuck(t)
+	if err := cluster.Servers[0].LameDuck(); err != nil {
+		t.Fatal(err)
+	}
 
 	deadline := time.Now().Add(connectTimeout)
 	for !conn.IsConnected() || cluster.Member(conn.ConnectedServerName()) <= 0 {
