@@ -10,7 +10,6 @@ date: 2026-10-29
 status: active
 module: packages/proof-editor
 related_issues:
-  - "INFRA-532"
   - "sjawhar/legion#2472"
 ---
 
