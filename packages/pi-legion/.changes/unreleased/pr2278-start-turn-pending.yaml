@@ -1,0 +1,8 @@
+kind: Fixed
+body: |-
+  Plugin interface version 5: the operator's controller names its session in the interface's
+  `startupTurn` at `session_start` with the start due and not sent yet (`sentAt` undefined), so
+  pi-envoy keeps a card that reaches the session before `/legion-controller-start` sends the start
+  message from taking the first turn, for up to 30 s. The start command's send marks it sent; the
+  session's first run and its shutdown clear it, and so does a start claim refused before the send
+  or stopped for a session change. Install it with the `@sjawhar/pi-envoy` released beside it.

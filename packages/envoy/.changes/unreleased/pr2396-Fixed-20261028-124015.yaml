@@ -1,0 +1,5 @@
+kind: Fixed
+body: A leased periodic loop (webhook redelivery, suggestion outcomes, document compaction, reference excerpts, the block index, edit notices, the issue-ask repair, the architecture import and the delivery reconcile) counts each tick in the period it was due in, so a lone process no longer loses a period when a tick's lease or its period query is late.
+time: 2026-10-28T12:40:15.807478607Z
+custom:
+    Issue: pr2396
