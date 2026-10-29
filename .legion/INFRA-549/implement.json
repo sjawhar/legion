@@ -2,10 +2,18 @@
   "schemaVersion": 1,
   "phase": "implement",
   "issue": "INFRA-549",
-  "completed": "2026-10-28T15:11:47Z",
+  "completed": "2026-10-29T16:04:59Z",
   "pullRequest": "https://github.com/sjawhar/legion/pull/2371",
-  "headSha": "e105aef3e0445029a3f48602ee8de2d3fdf55df2",
+  "headSha": "4c0da574bf8a73de9a377e673755cf9e3b9f6533",
   "proof": [
+    {
+      "criterion": "#2371 merges cleanly into main (now carrying #2362 and #2370), its diff holding only its own change, its CI job in ci.yaml, its changelog entries as pr2371 fragments; the envoy-infra Go tests and the component proofs pass on the merged tree.",
+      "surface": "The merged tree at 4c0da574: the envoy-infra unit lane, the helm v3.20.2 render of the vendored chart, three nats-server v2.15.1 processes with the real reloader and exporter on that render, and the built plugin read by Pulumi CLI v3.268.0",
+      "command": "cd packages/envoy/infra && test -z \"$(gofmt -l .)\" && go vet -tags pulumilive,natslive ./... && go test -count=1 ./... ; TMPDIR=/legion/scratch/tmp go test -count=1 -tags natslive -run TestClusteredNatsHub(Chart|Cluster)$ -v -timeout 30m ./gcp/ ; pulumi package get-schema <plugin built at the head> (https://github.com/sjawhar/legion/pull/2371#issuecomment-6501820019)",
+      "observed": "GitHub reports #2371 MERGEABLE against main at 4c0da574. gofmt clean, vet ok, every package ok, TestDispatchConnectionsPerPodIsTheServers included (main fixed it). natslive ok: chart render; cluster formed; leader SIGKILL at 212/1000 acks, new leader 6.0 s, 1000 stored exactly once; 3 exporter series at rest; users reload with cid kept, 0 reconnects; NoAuthUser refused; (f) lower max_file_store refused with the users change, both taken after restart. Schema serves envoy-infra:gcp:ClusteredNatsHub (22 inputs, kubeconfig and tailnetAuthKey secret, 5 outputs).",
+      "headSha": "4c0da574bf8a73de9a377e673755cf9e3b9f6533",
+      "negativeControl": "Before the merge GitHub reported #2371 CONFLICTING against main (19 conflicted paths, all but four from #2362 code the branch carried, taken as main has them)."
+    },
     {
       "criterion": "Review round 5, thread PRRT_kwDORFy7ds6xLgkd (and PRRT_kwDORFy7ds6xKae8): a hub server's restart in the live test keeps the ports it has, so the exporters and the urls snapshot stay right; only a first start draws new ports when one is taken.",
       "surface": "TestClusteredNatsHubCluster: three nats-server v2.15.1 processes with the real reloader and exporter on the helm render, under a throwaway go test -overlay that holds envoy-nats-0's first client port on 0.0.0.0 for the whole test and holds the (b)-restarted server's client port for 2 s before its restart",
@@ -114,7 +122,8 @@
     "packages/envoy/infra/README.md, docs/nats-hub.md, packages/envoy/CHANGELOG.md, gcp/clusteredhub_kube.go (comment), gcp/clusteredhub_kube_test.go, gcp/clusteredhub_live_test.go: review round 2 text fixes and the no-session-user depends-on pin (round 4)",
     "Round 5 (merge only): packages/envoy/.changes/unreleased/pr2371-Added-*.yaml (changie fragments; CHANGELOG.md as the base's), gcp/clusteredhub_autopilot.go (the clustered hub's Autopilot size and priority-class rules, moved out of dispatch.go, which is now the base's), gcp/clusteredhub_live_test.go (loopbackPort replaces the removed cmdtest.FreeTCPPort), infra/AGENTS.md layout row, the workflow comment.",
     "Round 6: gcp/clusteredhub_live_test.go (loopbackPorts pool, servers' args built per start, ports redrawn on retry), gcp/clusteredhub_autopilot.go (clusteredHubPodMinCPU 250m), gcp/clusteredhub.go (comment), gcp/clusteredhub_refusals_test.go, gcp/clusteredhub_test.go, README.md sizing text.",
-    "Round 7: gcp/clusteredhub_live_test.go (a restart keeps its ports; comments on start, startBound and loopbackPorts)."
+    "Round 7: gcp/clusteredhub_live_test.go (a restart keeps its ports; comments on start, startBound and loopbackPorts).",
+    "Round 8 (merge only): .github/workflows/ci.yaml (the gcp natslive step and job comment, since main deleted envoy-and-contracts.yaml); .dispatch/architecture/envoy.md and infra/AGENTS.md merged with main text; every #2362 file and the pr-2362 fragments taken as main has them."
   ],
   "trickyParts": [
     "Chart children are not registered under Pulumi mocks, so the chart's values are pinned by mock tests and their effect by the natslive helm render; the StatefulSet's Protect transform is tested by calling it directly.",
@@ -135,6 +144,6 @@
   "openQuestions": [
     "The README's disk-growth procedure (orphan-delete the StatefulSet, state delete, recreate) and the PromQL for fewer than three current copies are documented from Kubernetes and exporter behaviour but not exercised on a cluster; the live proof on GKE is dispatch://INFRA-551's."
   ],
-  "round": 7,
+  "round": 8,
   "reviewRound": 5
 }
