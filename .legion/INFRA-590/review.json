@@ -2,23 +2,22 @@
   "schemaVersion": 1,
   "phase": "review",
   "issue": "INFRA-590",
-  "completed": "2026-10-29T15:01:30Z",
-  "round": 8,
-  "reviewedCodeHead": "c3cf88b9fcbbed4243834a8b65b26b62fcf58bea",
+  "completed": "2026-10-29T16:05:00Z",
+  "round": 9,
+  "reviewedCodeHead": "f970c3865f00840593f8781b5126a7a9ed1e74dc",
+  "reviewerProseCommit": "3ccaed9abec36e095fb1050dc726140cb83d49be (comments only in packages/envoy/internal/bus/async.go: the requestReplies count, and the timer case's claim that no write is left in flight)",
   "decision": "changes_requested",
   "critical": 0,
   "important": 1,
   "minor": 0,
-  "fingerprint": "b1168a85116a7020a912b1286c524c6c0202b94a79600cfeef1c4e47dd95f3ff at 81f124f2 (last APPROVE) -> dd8e32c3fcbb01f23f71d6b4698f697053f4990a6e9062462f7745562325f791 at c3cf88b9: changed (two merges of main, the ErrNotStored port, renumbered migrations, the tester's test), so a new round.",
-  "ci": "At CI head c3cf88b9 only changes and pr-title were queued when read (33 runs queued repo-wide); compare c3cf88b9...c306f4fb is handoffs only. A request for changes does not wait on CI.",
-  "thermonuclear": "thermonuclear-deep-review and thermonuclear-code-quality ran at c3cf88b9 over merges 03cf1385, 295f42ac and test commit c3cf88b9.",
+  "ci": "GitHub reports the pull request CONFLICTING (mergeable_state dirty) against main, which has moved past fe3153923 with #2370, #2505, #2479 and others touching packages/envoy. GitHub starts no pull_request workflow for a conflicting head, so the code head 3ccaed9a has no CI run (0 runs 4 minutes after the push, while other branches' runs were created), and f970c386's outbox suites were still queued or in progress.",
+  "thermonuclear": "thermonuclear-deep-review and thermonuclear-code-quality ran at f970c386; both approve with no correctness finding.",
+  "threads": "Round-8 thread PRRT_kwDORFy7ds6xnMRE accepted (reply 4414758060).",
   "keyFindings": [
-    {"severity": "important", "file": "packages/envoy/internal/bus/async.go:405", "description": "Main's #2362 brings an optional stream byte limit (ENVOY_STREAM_MAX_BYTES) with a clustered stream; a full clustered stream keeps a refused message's id at sequence 0, so every later publish under that id is acknowledged {seq:0, duplicate:true} for the 72 h duplicate window. The merge ports main's resend-without-MsgId to PublishAsync only; the outbox's role forward goes through window.Request with a MsgId, and for a holder with a serving port (AcceptStreamAck) answers() requires Sequence > 0, so each retry times out as ErrNotAcknowledged, the (owner, holder) chain is held, and the event stalls up to 72 h after the stream has room. Reproduced by DeepReview9 on the in-process 3-server cluster (16 KiB limit, fill, purge, three retries all not acknowledged, nothing stored; control nil). Main's listener forward had no MsgId and recovered at once. Fix: in window.request with AcceptStreamAck, a sequence-0 duplicate reply resends once without the MsgId header under the same deadline and connection checks; test as the repro."}
+    {"severity": "important", "file": "PR #2395 (mergeability)", "description": "The head conflicts with main, so no pull_request CI runs on it and the base branch cannot merge it; a forward merge of main is needed, then the tester, then a new review round per the fingerprint."}
   ],
   "verifiedCorrect": [
-    "ErrNotStored resend port (async.go:243-274): main's semantics (one resend, no MsgId, only on a sequence-0 duplicate) with the deadline and connection checks before the write; every outcome settles safely (stored reached; deadline fenced and unrecorded; connection lost released; still full failed and held).",
-    "TestAWindowSendsNoResendOfANotStoredDuplicatePastItsDeadline fails with the deadline check removed (go test -overlay).",
-    "Shutdown: waitBackground, waitUntilIdle, waitForOutbox (outboxStopBudget), deregister, pool.Close; /healthz carries outbox_publisher and idempotency_keys.",
-    "Migrations 0141_duty_holds and 0142_outbox_claim above main's 0137-0140; connections 89; ci.yaml filters cover the Dispatch and listener jobs."
+    "Round-8 finding closed: window.request resends once without Nats-Msg-Id on a sequence-0 duplicate under AcceptStreamAck with a MsgId, under the deadline and connection checks, never after the timeout is taken; every outcome settles safely in the outbox.",
+    "TestAForwardRequestTheFullClusterStreamRefusedIsStoredOnceTheStreamHasRoom fails with the resend disabled and with the deadline check removed (go test -overlay)."
   ]
 }
