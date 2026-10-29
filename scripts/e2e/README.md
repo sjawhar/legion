@@ -49,14 +49,14 @@ the kernel kill pod processes below their own limits, and the kubelet does not s
 ## On a GitHub-hosted runner
 
 [`.github/workflows/e2e.yaml`](../../.github/workflows/e2e.yaml) runs one proof per job on
-`ubuntu-24.04`, against a Postgres service. Six scripts run there: `child-adoption.sh`,
-`dispatch-claimant-delivery.sh`, `dispatch-session-settings.sh`, `merged-root-waits.sh`,
-`no-required-checks.sh` and `stage1-skeleton.sh`, which the `test` job of `ci.yaml` also runs.
-`dispatch-session-settings.sh` is the one that needs a secret: its two models read the
-`ANTHROPIC_API_KEY` and `OPENAI_API_KEY` repository secrets, and the script refuses by name when
-one of them is unset. Every other script needs a devbox, a throwaway kind cluster or a real
-cluster, and the workflow refuses it by name with what its own header says it needs.
-`.github/e2e-scripts.json` holds both lists, and a script in neither fails the run.
+`ubuntu-24.04`, against a Postgres service. Five scripts run there: `child-adoption.sh`,
+`dispatch-claimant-delivery.sh`, `merged-root-waits.sh`, `no-required-checks.sh` and
+`stage1-skeleton.sh`, which the `test` job of `ci.yaml` also runs. None of them needs a secret,
+and none there may: Sami answered dispatch://INFRA-567/ask/4fd91c78 that no API key goes into
+this repository, and that a smoke test which calls a model runs in the deployment repository on
+workload identity federation. Every other script needs a devbox, a throwaway kind cluster, a real
+cluster or a model key, and the workflow refuses it by name with what its own header says it
+needs. `.github/e2e-scripts.json` holds both lists, and a script in neither fails the run.
 
 A person or a role starts a proof two ways, and takes no devbox for either:
 

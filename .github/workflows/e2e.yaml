@@ -22,10 +22,11 @@ name: E2E proofs
 #     default branch alone, so the nightly is main's copy of this file, of the list beside it and
 #     of the scripts, never a pull request's.
 #
-# One hosted proof needs a secret: dispatch-session-settings.sh drives two models, and reads the
-# ANTHROPIC_API_KEY and OPENAI_API_KEY repository secrets. Every other hosted proof needs none.
-# The script refuses by name when a key it needs is empty, so an unset secret is a refusal that
-# says which one, never a run that proves less than it claims.
+# No hosted proof here needs a secret, and none may: Sami answered
+# dispatch://INFRA-567/ask/4fd91c78 that no API key goes into sjawhar/legion, and that a smoke
+# test which calls a model runs in the deployment repository on workload identity federation.
+# dispatch-session-settings.sh, which drives two real models, is therefore in the refused list
+# with that reason, not in the hosted one.
 #
 # Every job uploads its evidence directory as an artifact, `if: always()`, so a failed run
 # uploads its evidence too. A reader takes the result with `gh run view` and the directory with
@@ -130,8 +131,6 @@ jobs:
                   "go_version_file": row["go_version_file"],
                   "apt": " ".join(row["apt"]),
                   "bun": row["bun"],
-                  "omp": row["omp"],
-                  "model_keys": row["model_keys"],
                   "evidence_variable": row["evidence_variable"],
                   "timeout_minutes": row["timeout_minutes"],
               }
@@ -208,11 +207,6 @@ jobs:
       - if: matrix.bun
         run: bun install --frozen-lockfile
 
-      # dispatch-session-settings.sh drives a real Oh My Pi in --mode rpc, as a Legion pane runs
-      # it, and refuses without one.
-      - if: matrix.omp
-        uses: ./.github/actions/install-omp
-
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           # The module the proof builds: packages/daemon's driver, or packages/envoy's dispatch
@@ -226,13 +220,6 @@ jobs:
         env:
           SCRIPT: ${{ matrix.script }}
           EVIDENCE_VARIABLE: ${{ matrix.evidence_variable }}
-          # Empty for every proof but dispatch-session-settings.sh, whose two models need them.
-          # The script refuses by name when one it needs is empty, so an unset repository secret
-          # is a refusal that says which secret, never a run that proves less than it claims.
-          ANTHROPIC_API_KEY: ${{ matrix.model_keys && secrets.ANTHROPIC_API_KEY || '' }}
-          OPENAI_API_KEY: ${{ matrix.model_keys && secrets.OPENAI_API_KEY || '' }}
-          # apt's chromium, which the package list above installs for this one proof.
-          SESSION_SETTINGS_CHROMIUM: /usr/bin/chromium
         run: |
           set -o pipefail
           mkdir -p "$EVIDENCE_DIR"
