@@ -15,7 +15,7 @@ import type {
 import { TextAskBlockCard } from "../doc/AskBlockCard";
 import { MarkdownBody } from "./MarkdownBody";
 import { TextAskCard } from "./markdown-cards";
-import { warmMarkdownRenderer } from "./markdown-engine";
+import { setParseDeadline, warmMarkdownRenderer } from "./markdown-engine";
 import { resetMermaidDiagrams } from "./mermaid-diagrams";
 import {
   answerMermaidRequest,
@@ -1679,6 +1679,33 @@ describe("A long body parsed in the worker", () => {
     }
   });
 
+  // The worker answers with the document as plain JSON, and the page builds a document of its own
+  // schema from it. `Schema.nodeFromJSON` cannot: it checks each attribute against its type, and
+  // the Markdown parser writes `title: null` for a picture with no title where the schema's
+  // `image.title` is a string, so every body holding a picture would be refused. This row is what
+  // fails if the page reaches for `nodeFromJSON` again.
+  test("rebuilds a body holding a picture, which its own parser writes a null title for", async () => {
+    const worker = installFakeParseWorker();
+    const markdown = longBody(
+      "A picture over a list\n\n![shot.png](dispatch://CORE-1/artifact/shot-png@v1)"
+    );
+    const view = render(withQueries(<MarkdownBody markdown={markdown} />));
+
+    try {
+      await act(() => worker.answer(0));
+      await waitFor(() => expect(topItems(view.container)).toHaveLength(longItems));
+      const shot = view.container.querySelector("[data-dispatch-picture]");
+      expect(shot?.getAttribute("data-dispatch-picture")).toBe(
+        "dispatch://CORE-1/artifact/shot-png@v1"
+      );
+      expect(shot?.getAttribute("data-picture-caption")).toBe("shot.png");
+      expect(pendingMark(view.container)).toBeNull();
+      expect(fallbackMark(view.container)).toBeNull();
+    } finally {
+      view.unmount();
+    }
+  });
+
   // The live view hands each streamed delta to the same body as a longer `markdown`. Between the
   // delta and the worker's answer the reader keeps the paint they were reading: a turn that
   // flipped back to its source text on every delta would be unreadable while it streamed.
@@ -1788,11 +1815,13 @@ describe("A long body parsed in the worker", () => {
     }
   });
 
-  // Nothing ever answers this body. The engine's deadline (10 s in the design this row is
-  // written against) ends with the body parsed on the page; the 25 s below is room for a loaded
-  // runner, not a second bound.
+  // Nothing ever answers this body. The engine's deadline ends with the body parsed on the page;
+  // this row shortens it through `setParseDeadline`, the seam `resetMermaidDiagrams` is for the
+  // diagram renderer's own limit, so it proves what the deadline ends in without waiting out the
+  // page's own 10 s. The 25 s below is room for a loaded runner, not a second bound.
   test("ends formatted on the page's own thread when the worker misses its deadline", async () => {
     const worker = installFakeParseWorker();
+    setParseDeadline(50);
     const view = render(<MarkdownBody markdown={longBody("A worker that never answers")} />);
 
     try {
@@ -1804,6 +1833,7 @@ describe("A long body parsed in the worker", () => {
       expect(pendingMark(view.container)).toBeNull();
       expect(fallbackMark(view.container)).toBeNull();
     } finally {
+      setParseDeadline();
       view.unmount();
     }
   }, 40_000);
@@ -1839,6 +1869,62 @@ describe("A long body parsed in the worker", () => {
       expect(fallbackMark(view.container)).toBeNull();
     } finally {
       view.unmount();
+    }
+  });
+
+  // One body on two surfaces is one request with two waiters (the Conversation's card and the
+  // hover card of a reference to it both draw the same comment). A surface that goes away takes
+  // its own waiter and nothing else: the body stays with the worker, and the answer reaches the
+  // surface the reader is still looking at.
+  test("answers the surface still mounted when another drops the same body first", async () => {
+    const worker = installFakeParseWorker();
+    const markdown = longBody("A body two surfaces draw");
+    const leaving = render(<MarkdownBody markdown={markdown} />);
+    const staying = render(<MarkdownBody markdown={markdown} />);
+
+    try {
+      await waitFor(() => expect(pendingMark(staying.container)).toBe("true"));
+      await worker.waitForRequests(1);
+      expect(worker.requests).toHaveLength(1);
+
+      leaving.unmount();
+      await flushTasks();
+      expect(worker.requests).toHaveLength(1);
+
+      await act(() => worker.answer(0));
+      await waitFor(() => expect(topItems(staying.container)).toHaveLength(longItems));
+      expect(pendingMark(staying.container)).toBeNull();
+      expect(fallbackMark(staying.container)).toBeNull();
+    } finally {
+      staying.unmount();
+    }
+  });
+
+  // A surface that starts drawing a body the worker has already answered - the hover card of a
+  // reference the reader points at after the card below it formatted - reads the answer the
+  // engine kept, so it is formatted from its first paint and the worker hears nothing.
+  test("paints a body whose answer already landed, without asking the worker again", async () => {
+    const worker = installFakeParseWorker();
+    const markdown = longBody("A body answered before the second surface drew it");
+    const first = render(<MarkdownBody markdown={markdown} />);
+
+    try {
+      await act(() => worker.answer(0));
+      await waitFor(() => expect(topItems(first.container)).toHaveLength(longItems));
+    } finally {
+      first.unmount();
+    }
+    await flushTasks();
+
+    const later = render(<MarkdownBody markdown={markdown} />);
+    try {
+      await waitFor(() => expect(topItems(later.container)).toHaveLength(longItems));
+      expect(pendingMark(later.container)).toBeNull();
+      expect(fallbackMark(later.container)).toBeNull();
+      await flushTasks();
+      expect(worker.requests).toHaveLength(1);
+    } finally {
+      later.unmount();
     }
   });
 });

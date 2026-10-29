@@ -217,8 +217,10 @@ function inertLinks(root: HTMLElement): Map<HTMLElement, HTMLElement> {
  * phrases to wrap in a `<mark>` of `highlightClassName` once rendered (a search hit's matched
  * words; see `markPhrases`); a reference whose source holds one is marked whole, since its
  * words are replaced by its title. Until the engine has answered (one pre-paint commit once it
- * is loaded on the page) the element is empty; when the engine cannot load, the literal source
- * renders as text with `data-markdown-fallback`, as `MarkdownBody` does.
+ * is loaded on the page) the element is empty; a source too long for the page's own thread holds
+ * its own text, clamped, marked `data-markdown-pending`, until the parse worker answers
+ * (`markdown-engine.ts`); and when the engine cannot load, the literal source renders as text
+ * with `data-markdown-fallback`, as `MarkdownBody` does.
  */
 export function MarkdownPreview({
   className = "",
@@ -278,7 +280,7 @@ export function MarkdownPreview({
     },
     [highlightClassName, highlightKey, lead, links]
   );
-  const { isFallback, portals } = useRenderedMarkdown(root, markdown, paintOneLine, {
+  const { isFallback, isPending, portals } = useRenderedMarkdown(root, markdown, paintOneLine, {
     pictures: "inline",
     decorate,
   });
@@ -288,6 +290,7 @@ export function MarkdownPreview({
     <span
       className={`${CLAMP_CLASS[lines]} ${markdownClassName} max-w-none ${className}`}
       data-markdown-fallback={isFallback || undefined}
+      data-markdown-pending={isPending || undefined}
       data-markdown-preview=""
       ref={root}
       title={title?.text}

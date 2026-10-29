@@ -5,6 +5,7 @@ import { useLayoutEffect, useState } from "react";
 import type { BlockSchema } from "../../api/types";
 import { loadBlockSchema } from "../doc/schema";
 import { renderAskBlockShell, renderTypedBlock } from "../doc/typed-block-drawing";
+import type { ParseReply, ParseRequest, ParseSchema } from "./markdown-parse.worker";
 import { referenceSpans } from "./reference-spans";
 import {
   buildDispatchReference,
@@ -28,6 +29,10 @@ export type { SoftBreaks };
  */
 export interface MarkdownEngine {
   readonly serializer: DOMSerializer;
+  /** The schema this engine parses with, which the parse worker is built from too: what turns
+   *  the worker's answer, a document as `ProseMirrorNode.toJSON()` gives it, back into a document
+   *  of this page's own schema, the one carrying its `renderBlock`. */
+  readonly schema: Schema;
   /**
    * The parsed document, or `undefined` for a source the parser refuses, which the caller shows
    * as one plain-text node. The engine parses read-only: a container directive the block schema
@@ -35,12 +40,12 @@ export interface MarkdownEngine {
    * holding a heading), is drawn as its literal fence lines around its formatted content rather
    * than refused or silently dropped, a Pandoc `::: warning` fence or a `::leaf` / `:text{` line
    * reads as paragraph text, and so does a `:::` opener inside 32 open container directives, the
-   * deepest the parser nests them (INFRA-581), so none of them throws. Proof's schema has no node
-   * for CommonMark's raw-HTML spans (a bare tag-shaped substring outside a code span or fence,
-   * e.g. `<img src=x>`) or a mark span of a kind this schema does not carry, so the parser still
-   * throws for them. HTML-like text inside a code span or fence parses safely as literal text,
-   * so nothing is escaped beforehand:
-   * escaping the whole source regardless of context would print literal backslashes around any
+   * deepest the parser nests them (`directive-container.ts`), so none of them throws. Proof's
+   * schema has no node for CommonMark's raw-HTML spans (a bare tag-shaped substring outside a
+   * code span or fence, e.g. `<img src=x>`) or a mark span of a kind this schema does not carry,
+   * so the parser still throws for them. HTML-like text inside a code span or fence parses
+   * safely as literal text, so nothing is escaped beforehand: escaping the whole source
+   * regardless of context would print literal backslashes around any
    * code span or fence containing something tag-shaped. Reference-style links and images
    * (`[text][id]` with their `[id]: url` definition) resolve to the link or image they name, so
    * they do not throw.
@@ -66,6 +71,9 @@ const engines = new Map<number, Promise<MarkdownEngine>>();
  *  engine serves every soft-break policy (the policy is a parse argument), and a parse that
  *  throws no longer evicts it - the headless editor drops only its own refused parser. */
 let readyEngine: MarkdownEngine | undefined;
+/** The schema `readyEngine` was built from, which the parse worker is built from too, so a long
+ *  body reads the same above and below the threshold. */
+let readySchema: BlockSchema | undefined;
 
 /**
  * Proof's DOM serializer, except for a picture whose address is a Dispatch reference
@@ -112,6 +120,7 @@ function pictureSerializer(schema: Schema): DOMSerializer {
 
 function buildEngine(proof: HeadlessProofEditor): MarkdownEngine {
   return {
+    schema: proof.schema,
     serializer: pictureSerializer(proof.schema),
     parse(markdown, softBreaks = "space") {
       try {
@@ -141,48 +150,489 @@ function loadEngine(blockSchema: BlockSchema): Promise<MarkdownEngine> {
     .then((proof) => {
       const engine = buildEngine(proof);
       readyEngine = engine;
+      readySchema = blockSchema;
       return engine;
     });
   engines.set(blockSchema.version, created);
   return created;
 }
 
-/** Loads the schema and headless Proof chunk before Markdown-bearing UI needs to render. */
+/** Loads the schema and headless Proof chunk before Markdown-bearing UI needs to render. The
+ *  parse worker is not one of them: a page that draws no long body downloads none of it. */
 export async function warmMarkdownRenderer(): Promise<void> {
   await loadEngine(await loadBlockSchema());
 }
 
 /**
- * Calls `render` with the shared engine: synchronously when a load has already resolved, so a
- * body renders in the layout phase of the commit that mounts it (a list that inserts a turn sees
- * the turn's full height in that same commit, and `ViewportAnchor` compensates in one
- * measurement); otherwise once the schema and the engine chunk arrive. Only the very first
- * render on a page, or a schema that failed to load, takes the asynchronous path. Without the
- * server schema (or Proof's headless engine) `render` gets `undefined` and shows the literal
- * text instead: readable, never lost. The cause is reported and the schema cache does not retain
- * the failure, so the next render tries the fetch again. Returns the cancel for the asynchronous
- * path; a cancelled `render` never runs.
+ * The longest body parsed on the page's own thread. After this change's linear-time fixes the
+ * worst shape costs about 46 µs per character in Chromium on a three-core pod, so a body of this
+ * length holds the thread for about 0.2 s - five times under the second a reader may wait - and
+ * every longer one is parsed in the worker (sjawhar/legion#2403).
  */
-export function renderWithEngine(render: (engine: MarkdownEngine | undefined) => void): () => void {
-  if (readyEngine !== undefined) {
-    render(readyEngine);
+export const markdownWorkerThreshold = 4_000;
+
+/** How long the worker may hold one body before the page parses it itself. It runs from the
+ *  moment the worker can start on that body, never while its chunk is still downloading, as the
+ *  diagram renderer's own limit does (`mermaid-diagrams.ts`). */
+const PARSE_TIME_LIMIT_MS = 10_000;
+
+/** How many parsed documents the answer cache keeps; the oldest insertion goes first. A long
+ *  body's document is large, and the renders that read one again are a page's own repaints, so a
+ *  few are enough: the bodies on screen, and the streaming turn growing among them. */
+const ANSWER_LIMIT = 4;
+
+/**
+ * One rendering of a body: the engine it renders with, the document parsed from it, and whether
+ * the parse is still owed. A body of at most `markdownWorkerThreshold` characters is rendered
+ * once, parsed, in the caller's own commit. A longer one is rendered at once as pending, with no
+ * document - its literal text is what the reader reads meanwhile - and again with the document
+ * once the worker answers.
+ */
+export interface MarkdownRendering {
+  /** `undefined` where neither the schema nor the engine could load, and while the parse is
+   *  pending on a page where they are still loading. */
+  readonly engine: MarkdownEngine | undefined;
+  /** The parsed document. `undefined` while `pending`, and, once not pending, for a body the
+   *  parser refused or an engine that could not load: a body's one final failure, which a
+   *  surface shows as its literal text. */
+  readonly parsed: ProseMirrorNode | undefined;
+  /** The parse is still owed - by the worker, or by a schema and engine chunk still loading. */
+  readonly pending: boolean;
+  /** `mermaid-diagrams.ts`'s open-fence check, as the worker made it with the parse it answered;
+   *  `undefined` where the page must make it itself. */
+  readonly openMermaidFence: boolean | undefined;
+}
+
+/** Whether a body is parsed in the worker rather than on the page's own thread. `MarkdownBody`
+ *  reads it too: a body drawn from the worker's answer carries `dispatch-markdown-long`, whose
+ *  rule keeps a list of thousands of items off the layout of the page (`styles.css`). */
+export function parsesInTheWorker(markdown: string): boolean {
+  return markdown.length > markdownWorkerThreshold;
+}
+
+/** Creates the parse worker; `setParseWorkerFactory` replaces it for a test. */
+export type ParseWorkerFactory = () => Worker;
+
+/** A body's parse: the worker's answer to it, or the page's own where no worker could give one. */
+interface ParsedAnswer {
+  /** The parsed document; `undefined` for a body the parser refused. */
+  readonly parsed: ProseMirrorNode | undefined;
+  /** The open-fence check made with the parse; `undefined` where the page must make it. */
+  readonly openMermaidFence: boolean | undefined;
+}
+
+/** One render waiting on a body's parse. */
+type ParseWaiter = (answer: ParsedAnswer) => void;
+
+/** One body the worker is parsing, or is about to. */
+interface SentBody {
+  /** The engine its answer becomes a document of, and that parses it here if the worker cannot. */
+  readonly engine: MarkdownEngine;
+  readonly id: number;
+  /** Its entry in the answer cache: the schema version, the soft-break policy and the source. */
+  readonly key: string;
+  readonly markdown: string;
+  readonly schema: BlockSchema;
+  readonly softBreaks: SoftBreaks;
+  /** Every render waiting on it; a body two surfaces draw at once is sent once. */
+  readonly waiters: ParseWaiter[];
+  /** Its deadline, armed once the worker can have started on it. */
+  timer: number | undefined;
+}
+
+let createParseWorker: ParseWorkerFactory | undefined;
+let parseWorker: Worker | undefined;
+/** The worker has posted `{ ready: true }`: it starts on a body as soon as it has one. */
+let workerReady = false;
+/** The bodies the worker holds, oldest first; the first is the one it is parsing. */
+let sentBodies: SentBody[] = [];
+let lastBodyId = 0;
+/** A cancel has queued `dropAbandonedBodies` and it has not run yet. */
+let dropQueued = false;
+/** No worker will parse for this page: one could not be created, its chunk did not load, or one
+ *  crashed. Every long body is parsed on the page from then on - the reader waits, and then
+ *  reads the body formatted, which is never the parser refusing it. */
+let noParseWorker = false;
+/** `PARSE_TIME_LIMIT_MS`, unless a test shortened it through `setParseDeadline`. */
+let deadlineMs = PARSE_TIME_LIMIT_MS;
+const answers = new Map<string, ParsedAnswer>();
+
+/** A document, or one node of it, as `ProseMirrorNode.toJSON()` writes it. */
+interface DocumentJSON {
+  readonly type: string;
+  readonly attrs?: Record<string, unknown>;
+  readonly content?: readonly DocumentJSON[];
+  readonly marks?: readonly { readonly type: string; readonly attrs?: Record<string, unknown> }[];
+  readonly text?: string;
+}
+
+/**
+ * The document `json` describes, as a document of `schema`.
+ *
+ * `Schema.nodeFromJSON` is not what builds it: that checks every attribute against the type its
+ * schema gives it, and this page's own parser writes values its schema does not - milkdown's
+ * Markdown parser writes `title: null` for an image with no title, where `image.title` is a string
+ * defaulting to `""` - so a body holding a picture could never be rebuilt, though the page's own
+ * parse of it holds exactly the same attribute. That check is for JSON from somewhere else; this
+ * JSON is the page's own worker's parse of the body, with the page's own schema.
+ */
+function documentFromJSON(schema: Schema, json: DocumentJSON): ProseMirrorNode {
+  const marks = json.marks?.map(({ attrs, type }) => schema.marks[type].create(attrs));
+  if (json.type === "text") {
+    return schema.text(json.text ?? "", marks);
+  }
+  const content = json.content?.map((child) => documentFromJSON(schema, child));
+  return schema.nodes[json.type].create(json.attrs, content, marks);
+}
+
+/** Keeps `answer` under `key`, dropping the oldest entry where the cache is full. */
+function remember(key: string, answer: ParsedAnswer): void {
+  if (answers.size >= ANSWER_LIMIT) {
+    const oldest = answers.keys().next();
+    if (oldest.done !== true) answers.delete(oldest.value);
+  }
+  answers.set(key, answer);
+}
+
+/** Parses `body` here, for a worker that could not: the reader waits for a parse on their own
+ *  thread, and then reads the body formatted. A body no render waits for any more is not parsed
+ *  at all, so a page nobody is reading costs the thread nothing. */
+function parseOnThePage(body: SentBody): void {
+  if (body.waiters.length === 0) {
+    return;
+  }
+  const answer: ParsedAnswer = {
+    openMermaidFence: undefined,
+    parsed: body.engine.parse(body.markdown, body.softBreaks),
+  };
+  remember(body.key, answer);
+  for (const waiter of [...body.waiters]) {
+    waiter(answer);
+  }
+}
+
+/** Terminates the worker, which stops the parse it is running, and forgets it and every body it
+ *  held, which this answers so the caller can place them: an answer the worker posted before is
+ *  dropped, and the next body starts a fresh one. */
+function stopParseWorker(): SentBody[] {
+  const held = sentBodies;
+  sentBodies = [];
+  for (const body of held) {
+    window.clearTimeout(body.timer);
+    body.timer = undefined;
+  }
+  parseWorker?.terminate();
+  parseWorker = undefined;
+  workerReady = false;
+  return held;
+}
+
+/** Starts the deadline of the body the worker is on, once it can be on one. */
+function armDeadline(): void {
+  const oldest = sentBodies[0];
+  if (oldest === undefined || !workerReady || oldest.timer !== undefined) {
+    return;
+  }
+  oldest.timer = window.setTimeout(() => {
+    // The worker had its deadline and answered nothing: it is terminated, which stops that
+    // parse, this body is parsed on the page, and the bodies behind it go to a fresh worker.
+    for (const body of stopParseWorker()) {
+      if (body !== oldest) {
+        sendToWorker(body);
+      }
+    }
+    parseOnThePage(oldest);
+  }, deadlineMs);
+}
+
+/**
+ * Drops every body no render waits for any more, so a turn streaming into the live view leaves
+ * the worker only the frame someone is reading. It runs on the microtask after a cancel, not in
+ * it: React runs a layout effect's cleanup and the next run of it in one commit, so a body the
+ * same commit asks for again keeps its place in the worker's queue, and its answer.
+ *
+ * A body already posted is still parsed by the worker - a message cannot be taken back - and its
+ * answer is dropped on arrival, with nothing kept for a source the page has moved on from.
+ */
+function dropAbandonedBodies(): void {
+  dropQueued = false;
+  sentBodies = sentBodies.filter((body) => {
+    if (body.waiters.length > 0) {
+      return true;
+    }
+    window.clearTimeout(body.timer);
+    body.timer = undefined;
+    return false;
+  });
+  armDeadline();
+}
+
+function answerFromWorker(worker: Worker, reply: ParseReply): void {
+  // An answer from a worker since replaced says nothing about the body a fresh one holds.
+  if (worker !== parseWorker) {
+    return;
+  }
+  if ("ready" in reply) {
+    workerReady = true;
+    armDeadline();
+    return;
+  }
+  const at = sentBodies.findIndex((body) => body.id === reply.id);
+  if (at === -1) {
+    return;
+  }
+  const [body] = sentBodies.splice(at, 1);
+  window.clearTimeout(body.timer);
+  body.timer = undefined;
+  let answer: ParsedAnswer;
+  if (reply.doc === undefined) {
+    // The parser refused the body: its one final failure, which reads as its literal text.
+    answer = { openMermaidFence: undefined, parsed: undefined };
+  } else {
+    try {
+      answer = {
+        openMermaidFence: reply.openMermaidFence,
+        parsed: documentFromJSON(body.engine.schema, reply.doc as DocumentJSON),
+      };
+    } catch (error) {
+      console.error(
+        "Parsing a long Markdown body on the page, its answer does not fit the schema",
+        error
+      );
+      parseOnThePage(body);
+      armDeadline();
+      return;
+    }
+  }
+  remember(body.key, answer);
+  for (const waiter of [...body.waiters]) {
+    waiter(answer);
+  }
+  armDeadline();
+}
+
+/** Leaves every body the worker held, and every later one, to the page's own thread. */
+function parseWorkerFailed(worker: Worker, error: unknown): void {
+  if (worker !== parseWorker) {
+    return;
+  }
+  noParseWorker = true;
+  console.error("Parsing long Markdown bodies on the page, the parse worker is unavailable", error);
+  for (const body of stopParseWorker()) {
+    parseOnThePage(body);
+  }
+}
+
+/**
+ * The page's own worker: this module's sibling, which Vite bundles as a chunk of its own
+ * (`markdown-parse.worker-<hash>.js`), fetched the first time a page draws a long body. The
+ * `new Worker(new URL(…), { type: "module" })` below is written as one expression because that is
+ * the shape a bundler recognises; split in two, the worker's module is copied out as an asset and
+ * never bundled.
+ *
+ * One is started only where this module came from somewhere a page can fetch. Where nothing
+ * bundled it, its URL is a file path, which no browser starts a worker from (Chromium refuses a
+ * `file:` worker outright), so the body is parsed on the page, as it is wherever a page can hold
+ * no worker of its own.
+ */
+function newParseWorker(): Worker {
+  if (import.meta.url.startsWith("file:")) {
+    throw new Error("A parse worker's module is a file, which no page can fetch.");
+  }
+  return new Worker(new URL("./markdown-parse.worker.ts", import.meta.url), { type: "module" });
+}
+
+/** Sends `body` to the worker, starting one where none runs. A worker that cannot be created
+ *  leaves the body to the page, as a crashed one does. */
+function sendToWorker(body: SentBody): void {
+  if (parseWorker === undefined) {
+    if (noParseWorker) {
+      parseOnThePage(body);
+      return;
+    }
+    let worker: Worker;
+    try {
+      worker = (createParseWorker ?? newParseWorker)();
+    } catch (error) {
+      noParseWorker = true;
+      console.error(
+        "Parsing long Markdown bodies on the page, no parse worker can be created",
+        error
+      );
+      parseOnThePage(body);
+      return;
+    }
+    parseWorker = worker;
+    workerReady = false;
+    worker.addEventListener("message", (event: MessageEvent<ParseReply>) => {
+      answerFromWorker(worker, event.data);
+    });
+    worker.addEventListener("error", (event) => {
+      parseWorkerFailed(worker, event);
+    });
+    // The page loads one schema version per session (`doc/schema.ts`), so the worker is built
+    // from the schema of the first long body it is sent and parses every later one the same way.
+    worker.postMessage({ blockSchema: body.schema } satisfies ParseSchema);
+  }
+  sentBodies.push(body);
+  parseWorker.postMessage({
+    id: body.id,
+    markdown: body.markdown,
+    softBreaks: body.softBreaks,
+  } satisfies ParseRequest);
+  armDeadline();
+}
+
+/**
+ * Replaces the page's own `new Worker(…)` with `factory`, for the rows that drive a faked worker
+ * (`parse-worker-fixture.ts`); `undefined` puts the page's own back. Installing one leaves the
+ * engine holding no worker: the one it held is terminated and every body it held is parsed on
+ * the page, so nothing a page asked the worker before reaches the next one.
+ */
+export function setParseWorkerFactory(factory: ParseWorkerFactory | undefined): void {
+  noParseWorker = false;
+  for (const body of stopParseWorker()) {
+    parseOnThePage(body);
+  }
+  createParseWorker = factory;
+}
+
+/** How long the worker may hold one body, in place of `PARSE_TIME_LIMIT_MS` until the next call,
+ *  so a row that proves what the deadline ends in need not wait it out, as
+ *  `resetMermaidDiagrams` does for the diagram renderer's limit. With no argument it puts the
+ *  page's own deadline back. */
+export function setParseDeadline(limitMs = PARSE_TIME_LIMIT_MS): void {
+  deadlineMs = limitMs;
+}
+
+/** Renders `markdown` with a loaded engine: parsed here for a body up to the threshold; for a
+ *  longer one the answer already cached for it, or a pending rendering now and the parsed
+ *  document once the worker answers. */
+function renderLoaded(
+  engine: MarkdownEngine,
+  schema: BlockSchema,
+  markdown: string,
+  softBreaks: SoftBreaks,
+  render: (rendering: MarkdownRendering) => void
+): () => void {
+  if (!parsesInTheWorker(markdown)) {
+    render({
+      engine,
+      openMermaidFence: undefined,
+      parsed: engine.parse(markdown, softBreaks),
+      pending: false,
+    });
     return () => undefined;
   }
+  // The schema version, the soft-break policy and the source are all a parse reads, so one
+  // answer serves every later render of the same three: a new decision card, paint or decorate
+  // pass repaints the body it already has rather than asking for it again.
+  const key = `${schema.version}\u0000${softBreaks}\u0000${markdown}`;
+  const cached = answers.get(key);
+  if (cached !== undefined) {
+    render({
+      engine,
+      openMermaidFence: cached.openMermaidFence,
+      parsed: cached.parsed,
+      pending: false,
+    });
+    return () => undefined;
+  }
+  const waiter: ParseWaiter = ({ openMermaidFence, parsed }) => {
+    render({ engine, openMermaidFence, parsed, pending: false });
+  };
+  // What the reader has until the answer lands is the body's own text.
+  render({ engine, openMermaidFence: undefined, parsed: undefined, pending: true });
+  let body = sentBodies.find((waited) => waited.key === key);
+  if (body === undefined) {
+    lastBodyId += 1;
+    body = {
+      engine,
+      id: lastBodyId,
+      key,
+      markdown,
+      schema,
+      softBreaks,
+      timer: undefined,
+      waiters: [waiter],
+    };
+    sendToWorker(body);
+  } else {
+    body.waiters.push(waiter);
+  }
+  const sent = body;
+  return () => {
+    const at = sent.waiters.indexOf(waiter);
+    if (at !== -1) {
+      sent.waiters.splice(at, 1);
+    }
+    if (sent.waiters.length > 0 || dropQueued) {
+      return;
+    }
+    dropQueued = true;
+    queueMicrotask(dropAbandonedBodies);
+  };
+}
+
+/**
+ * Renders `markdown` under the soft-break policy `softBreaks`, through the shared engine.
+ *
+ * A body of at most `markdownWorkerThreshold` characters is parsed on the page's own thread and
+ * rendered synchronously, where a load has already resolved, so it renders in the layout phase of
+ * the commit that mounts it (a list that inserts a turn sees the turn's full height in that same
+ * commit, and `ViewportAnchor` compensates in one measurement); otherwise once the schema and the
+ * engine chunk arrive. Only the very first render on a page, or a schema that failed to load,
+ * takes that asynchronous path. Without the server schema (or Proof's headless engine) `render`
+ * gets no engine and no document, and the surface shows the literal text instead: readable, never
+ * lost. The cause is reported and the schema cache does not retain the failure, so the next render
+ * tries the fetch again.
+ *
+ * A longer body is parsed in the parse worker (`markdown-parse.worker.ts`), created on the first
+ * one a page draws. `render` is called at once with a pending rendering, so the reader has the
+ * body's own text, and again with the parsed document when the worker answers. A worker that
+ * cannot be created, whose chunk does not load, that crashes, or that holds a body past its
+ * deadline leaves that body to the page's own thread, so a reader always ends with a formatted
+ * body; only the parser refusing a body ends in its literal text.
+ *
+ * Returns the cancel: a cancelled `render` never runs again, and the body it was waiting for is
+ * parsed for whoever else waits.
+ */
+export function renderWithEngine(
+  markdown: string,
+  softBreaks: SoftBreaks,
+  render: (rendering: MarkdownRendering) => void
+): () => void {
+  if (readyEngine !== undefined && readySchema !== undefined) {
+    return renderLoaded(readyEngine, readySchema, markdown, softBreaks, render);
+  }
   let cancelled = false;
+  let cancelAnswer: (() => void) | undefined;
+  if (parsesInTheWorker(markdown)) {
+    // The schema and the engine chunk are still loading, and the body is one the worker will
+    // parse: the reader has its text now, as they would while the worker parsed it.
+    render({ engine: undefined, openMermaidFence: undefined, parsed: undefined, pending: true });
+  }
   void (async () => {
     let engine: MarkdownEngine | undefined;
+    let schema: BlockSchema | undefined;
     try {
-      engine = await loadEngine(await loadBlockSchema());
+      schema = await loadBlockSchema();
+      engine = await loadEngine(schema);
     } catch (error) {
       console.error("Rendering literal Markdown, the block schema is unavailable", error);
-      engine = undefined;
     }
-    if (!cancelled) {
-      render(engine);
+    if (cancelled) {
+      return;
     }
+    if (engine === undefined || schema === undefined) {
+      render({ engine: undefined, openMermaidFence: undefined, parsed: undefined, pending: false });
+      return;
+    }
+    cancelAnswer = renderLoaded(engine, schema, markdown, softBreaks, render);
   })();
   return () => {
     cancelled = true;
+    cancelAnswer?.();
   };
 }
 
@@ -239,8 +689,9 @@ export interface MarkdownHeadline {
  * its short form, and the cut happens on the projected text, so it never splits a mark (nor a
  * character outside the Basic Multilingual Plane). Blocks and hard breaks become single spaces.
  * `cut` says whether the text was cut, which an ellipsis the author typed cannot fake.
- * `undefined` until the engine has answered (one pre-paint commit once it is loaded) and for an
- * `undefined` source; the literal source, cut the same way, when the engine cannot load.
+ * `undefined` until the engine has answered (one pre-paint commit once it is loaded, and for a
+ * body the parse worker parses, until its answer lands) and for an `undefined` source; the
+ * literal source, cut the same way, when the engine cannot load.
  */
 export function useMarkdownHeadline(
   markdown: string | undefined,
@@ -252,8 +703,11 @@ export function useMarkdownHeadline(
       setHeadline(undefined);
       return;
     }
-    return renderWithEngine((engine) => {
-      const parsed = engine?.parse(markdown);
+    return renderWithEngine(markdown, "space", ({ parsed, pending }) => {
+      if (pending) {
+        // A long body's headline waits for the worker rather than reading as its own source.
+        return;
+      }
       const characters = Array.from(
         (parsed === undefined ? markdown : plainWords(parsed)).replace(/\s+/g, " ").trim()
       );

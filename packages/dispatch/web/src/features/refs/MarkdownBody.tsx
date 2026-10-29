@@ -1,7 +1,7 @@
-import type { Node as ProseMirrorNode } from "prosemirror-model";
+import { DOMSerializer, type Node as ProseMirrorNode } from "prosemirror-model";
 import { type ReactNode, useRef } from "react";
 
-import { markdownClassName, type SoftBreaks } from "./markdown-engine";
+import { markdownClassName, parsesInTheWorker, type SoftBreaks } from "./markdown-engine";
 import { drawTaskCheckboxes } from "./task-checkboxes";
 import { type PaintMarkdown, useRenderedMarkdown } from "./useRenderedMarkdown";
 
@@ -72,13 +72,78 @@ const paintInline: PaintMarkdown = (element, parsed, serializer) => {
 const paintBlock: PaintMarkdown = (element, parsed, serializer) => {
   element.replaceChildren(serializer.serializeFragment(parsed.content));
   drawTaskCheckboxes(element);
+  unwrapTightItems(element);
+};
+
+/** A tight list item's paragraph (`li[data-spread='false']`) holding nothing else is unwrapped,
+ *  so the item reads as one line rather than a paragraph of its own. */
+function unwrapTightItems(element: HTMLElement): void {
   for (const item of element.querySelectorAll("li[data-spread='false']")) {
     const paragraph = item.firstElementChild;
     if (item.childElementCount === 1 && paragraph?.tagName === "P") {
       paragraph.replaceWith(...paragraph.childNodes);
     }
   }
-};
+}
+
+/**
+ * One node into `parent`, yielding where the work can be cut: a node holding several block
+ * children - a list, a quote, the document itself - is opened with its own `toDOM`, as the
+ * serializer would, and its children go in one at a time; everything else, a textblock and its
+ * marks included, goes in whole, since splitting inline content would split a mark across
+ * elements.
+ */
+function* appendNode(
+  parent: Node,
+  node: ProseMirrorNode,
+  serializer: DOMSerializer
+): Generator<void> {
+  const toDOM = serializer.nodes[node.type.name];
+  if (node.isTextblock || node.childCount <= 1 || toDOM === undefined) {
+    parent.appendChild(serializer.serializeNode(node));
+    yield;
+    return;
+  }
+  const { contentDOM, dom } = DOMSerializer.renderSpec(document, toDOM(node));
+  parent.appendChild(dom);
+  if (contentDOM === undefined) {
+    yield;
+    return;
+  }
+  for (let child = 0; child < node.childCount; child += 1) {
+    yield* appendNode(contentDOM, node.child(child), serializer);
+  }
+}
+
+/**
+ * `paintBlock`, a piece at a time (`PaintMarkdownInSlices`), for a body the parse worker parsed:
+ * the 16,000 elements of an 8,000-item list are built across several tasks rather than in one,
+ * so no single task holds the reader's thread while the body lands.
+ *
+ * The body is built off the page and put in the element in one replacement, exactly as
+ * `paintBlock` does, rather than grown in place: a tree being built in the page is laid out and
+ * drawn again for every piece, and everything watching the document - the browser's own
+ * rendering, a `MutationObserver`, the DOM recorder a browser test runs under - pays for each of
+ * the 16,000 changes instead of one. Measured on this list (sjawhar/legion#2403): grown in the
+ * page under a recording browser the body took 45-54 s to land, with the thread running nothing
+ * at all for 7 s and then 35 s at a stretch; built off the page, 3.1 s. The reader gains the same
+ * way a single `replaceChildren` does - they never see half a list, and the page lays it out once.
+ */
+function* paintBlockInSlices(
+  element: HTMLElement,
+  parsed: ProseMirrorNode,
+  serializer: DOMSerializer
+): Generator<void> {
+  const built = document.createElement("div");
+  for (let block = 0; block < parsed.childCount; block += 1) {
+    yield* appendNode(built, parsed.child(block), serializer);
+  }
+  drawTaskCheckboxes(built);
+  yield;
+  unwrapTightItems(built);
+  yield;
+  element.replaceChildren(...built.childNodes);
+}
 
 /**
  * Renders Markdown text through Proof's own parser and schema, so every question, answer,
@@ -102,9 +167,13 @@ const paintBlock: PaintMarkdown = (element, parsed, serializer) => {
  * another website renders as Proof renders it.
  *
  * Once the schema and Proof's headless engine are loaded (the first body on the page loads
- * them), a body renders synchronously in the layout phase of the commit that mounts it
- * (`useRenderedMarkdown`); only the very first render on a page, or a schema that failed to
- * load, takes the asynchronous path. A preview that must clamp its rendered line is
+ * them), a body of at most `markdownWorkerThreshold` characters renders synchronously in the
+ * layout phase of the commit that mounts it (`useRenderedMarkdown`); only the very first render
+ * on a page, or a schema that failed to load, takes the asynchronous path. A longer body is
+ * parsed off the page's own thread, so it holds its own text, marked `data-markdown-pending`,
+ * until the parse worker answers (`markdown-engine.ts`), and the `block` variant then fills the
+ * element a piece at a time (`paintBlockInSlices`), so the 16,000 elements of an 8,000-item list
+ * never reach the page in one task. A preview that must clamp its rendered line is
  * `MarkdownPreview`, which parses with the same engine.
  */
 export function MarkdownBody({
@@ -125,25 +194,33 @@ export function MarkdownBody({
   const blockRoot = useRef<HTMLDivElement>(null);
   const inlineRoot = useRef<HTMLSpanElement>(null);
   const inline = variant === "inline";
-  const { isFallback, portals } = useRenderedMarkdown(
+  const long = parsesInTheWorker(markdown) ? " dispatch-markdown-long" : "";
+  const { isFallback, isPending, portals } = useRenderedMarkdown(
     inline ? inlineRoot : blockRoot,
     markdown,
     inline ? paintInline : paintBlock,
-    { pictures: variant, onRendered, softBreaks }
+    {
+      pictures: variant,
+      onRendered,
+      paintInSlices: inline ? undefined : paintBlockInSlices,
+      softBreaks,
+    }
   );
 
   return inline ? (
     <span
-      className={markdownClassName}
+      className={`${markdownClassName}${long}`}
       data-markdown-fallback={isFallback || undefined}
+      data-markdown-pending={isPending || undefined}
       ref={inlineRoot}
     >
       {portals}
     </span>
   ) : (
     <div
-      className={`${markdownClassName} max-w-none`}
+      className={`${markdownClassName} max-w-none${long}`}
       data-markdown-fallback={isFallback || undefined}
+      data-markdown-pending={isPending || undefined}
       ref={blockRoot}
     >
       {portals}

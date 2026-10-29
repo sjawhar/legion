@@ -176,15 +176,48 @@ function routeOf(trigger: HTMLElement): DispatchReferenceRoute | undefined {
   return reference === null ? undefined : parseNodeReference(reference);
 }
 
+/** How long after the reader's last pointer movement a boundary event still counts as theirs.
+ *  A page that reflows under a still pointer - a card above the reference settling its height,
+ *  a picture landing, a long body formatting - slides the anchor out from under the pointer, and
+ *  the browser reports that as `pointerout` with no movement behind it. */
+const POINTER_MOVE_GRACE_MS = 100;
+
+/** Where `element` sits in the viewport, rounded, for telling an anchor that moved from a
+ *  pointer that did. */
+function placeOf(element: HTMLElement): { left: number; top: number } {
+  const box = element.getBoundingClientRect();
+  return { left: Math.round(box.left), top: Math.round(box.top) };
+}
+
 /** Delegated hover/focus triggers for every reference trigger in the document, present or
  * future — React-rendered links and the anchors inside Markdown bodies and the Proof editor
  * alike, which come and go outside React's knowledge. Returns the detach function. */
 function attachTriggers(): () => void {
+  /** `event.timeStamp` of the reader's last pointer movement, so a boundary event can be told
+   *  from one the page caused by moving under a pointer that never left. */
+  let lastMoveAt = Number.NEGATIVE_INFINITY;
+  /** Where the hovered anchor sat when the pointer came to rest on it, so a boundary event can
+   *  say which of the two moved. A card the keyboard opened has none: nothing rested on it. */
+  let anchorWas: { anchor: HTMLElement; left: number; top: number } | undefined;
+  /** The page slid an open card's zone out from under a still pointer, and the card was kept.
+   *  The reader's next movement decides it: back in the zone it stays, anywhere else it goes. */
+  let keptUnderAStillPointer = false;
+  const onPointerMove = (event: PointerEvent) => {
+    lastMoveAt = event.timeStamp;
+    if (!keptUnderAStillPointer) {
+      return;
+    }
+    keptUnderAStillPointer = false;
+    if (!inHoverZone(event.target)) {
+      refPreview.leave();
+    }
+  };
   const onPointerOver = (event: PointerEvent) => {
     // Inside the zone there is nothing to open: a pointer arriving from outside it only cancels
     // the close its leaving armed, whatever kind of pointer it is.
     if (inHoverZone(event.target)) {
       if (!inHoverZone(event.relatedTarget)) {
+        keptUnderAStillPointer = false;
         refPreview.reenter();
       }
       return;
@@ -200,13 +233,36 @@ function attachTriggers(): () => void {
     }
     const route = routeOf(trigger);
     if (route !== undefined) {
+      keptUnderAStillPointer = false;
+      anchorWas = { anchor: trigger, ...placeOf(trigger) };
       refPreview.hoverStart(trigger, route);
     }
   };
   const onPointerOut = (event: PointerEvent) => {
-    if (inHoverZone(event.target) && !inHoverZone(event.relatedTarget)) {
-      refPreview.leave();
+    if (!inHoverZone(event.target) || inHoverZone(event.relatedTarget)) {
+      return;
     }
+    // A card the reader is reading is not taken away because the page moved: where the anchor
+    // has slid out from under a pointer that never moved - a card above it settling its height,
+    // a picture landing, a long body formatting - the card stays, measured where the anchor is
+    // now, until the reader themselves moves away. The reader leaving is the pointer moving,
+    // and that is what tells the two apart. A hover that has not opened yet is abandoned as
+    // before: there is nothing on screen to protect.
+    const anchor = state?.phase === "open" ? state.target.anchor : undefined;
+    if (
+      anchor !== undefined &&
+      anchorWas?.anchor === anchor &&
+      event.timeStamp - lastMoveAt > POINTER_MOVE_GRACE_MS
+    ) {
+      const place = placeOf(anchor);
+      if (place.left !== anchorWas.left || place.top !== anchorWas.top) {
+        anchorWas = { anchor, ...place };
+        keptUnderAStillPointer = true;
+        refPreview.reposition();
+        return;
+      }
+    }
+    refPreview.leave();
   };
   const onFocusIn = (event: FocusEvent) => {
     const trigger = triggerOf(event.target);
@@ -229,11 +285,13 @@ function attachTriggers(): () => void {
       refPreview.blur(trigger);
     }
   };
+  document.addEventListener("pointermove", onPointerMove, { passive: true });
   document.addEventListener("pointerover", onPointerOver);
   document.addEventListener("pointerout", onPointerOut);
   document.addEventListener("focusin", onFocusIn);
   document.addEventListener("focusout", onFocusOut);
   return () => {
+    document.removeEventListener("pointermove", onPointerMove);
     document.removeEventListener("pointerover", onPointerOver);
     document.removeEventListener("pointerout", onPointerOut);
     document.removeEventListener("focusin", onFocusIn);

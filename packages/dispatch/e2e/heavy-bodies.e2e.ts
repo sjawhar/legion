@@ -594,9 +594,11 @@ test("a long comment above the reader keeps the comment they are reading where i
 });
 
 /** How far the newest card's top sits under the docked composer, which is where Jump to latest
- *  places the reader. */
+ *  places the reader. The deep link this row lands on also opens the comment in the margin, whose
+ *  card carries a reply composer of the same name, so the docked one - the first in the page - is
+ *  the one named here. */
 async function underTheComposer(page: Page): Promise<number> {
-  const composer = await page.getByRole("form", { name: "Comment composer" }).boundingBox();
+  const composer = await page.getByRole("form", { name: "Comment composer" }).first().boundingBox();
   const newest = await page.locator("[data-turn]").first().boundingBox();
   if (composer === null || newest === null) {
     throw new Error("the composer and the newest turn must both be on screen");
@@ -674,7 +676,14 @@ test("a long body's text can be selected while the worker still owes its formatt
     if (box === null) {
       throw new Error("the pending body is not on screen");
     }
-    const from = { x: box.x + 4, y: Math.max(box.y + 4, 4) };
+    // The pending body is one run of text taller than the window, so its top sits at the top of
+    // the page, under the docked composer: the drag starts below that, inside the body itself.
+    const composer = await page
+      .getByRole("form", { name: "Comment composer" })
+      .first()
+      .boundingBox();
+    const under = composer === null ? 4 : composer.y + composer.height + 4;
+    const from = { x: box.x + 4, y: Math.max(box.y + 4, under) };
     await page.mouse.move(from.x, from.y);
     await page.mouse.down();
     await page.mouse.move(from.x + 120, from.y + 28, { steps: 8 });

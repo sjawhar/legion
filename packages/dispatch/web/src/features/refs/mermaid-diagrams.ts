@@ -21,7 +21,8 @@
  * refusal (`Dangling Mermaid edge`) until the fence closes. Every other block of the same body
  * still draws. Open is the parser's answer, never a reading of the source text: the body is parsed
  * again with a probe line after it, and the fence is open exactly when the probe lands inside the
- * block (`endsInOpenMermaidFence`).
+ * block (`endsInOpenMermaidFence`). A body parsed in the parse worker is checked there, with the
+ * parse, and the answer arrives as `drawMermaidDiagrams`'s `openFence`.
  *
  * The renderer (beautiful-mermaid and ELK) runs in one shared worker (`mermaid-render.worker.ts`),
  * created only once a body holds a mermaid block not drawn before: ELK's layout time grows faster
@@ -138,8 +139,13 @@ function lastLeafBlock(parsed: ProseMirrorNode): ProseMirrorNode | null {
  * item, and the fence with it, so a quoted diagram still being written would read as closed.
  * Only a body whose last leaf block is a mermaid block is parsed again; a re-parse the engine
  * refuses counts as closed, so the diagram draws.
+ *
+ * A body long enough to be parsed in the parse worker (`markdown-engine.ts`) is checked there,
+ * by the worker that parsed it (`markdown-parse.worker.ts`), and its answer reaches
+ * `drawMermaidDiagrams` as `openFence`: the second parse then costs the page nothing, and a
+ * streaming turn ending in an open fence costs one round trip per frame rather than two.
  */
-function endsInOpenMermaidFence(
+export function endsInOpenMermaidFence(
   parsed: ProseMirrorNode,
   markdown: string,
   reparse: Reparse
@@ -315,9 +321,11 @@ function drawBlock(pre: HTMLPreElement, drawn: Drawing): void {
 
 /**
  * Draws every mermaid code block `element` holds (painted from `parsed`, the parse of
- * `markdown`) but one whose fence is still open. `reparse` parses with the engine and soft-break
- * policy that produced `parsed`; the open-fence check runs it once, only when the body ends in a
- * mermaid block. A block whose source is cached draws now; every other one when the worker
+ * `markdown`) but one whose fence is still open. `openFence` is that check's answer where the
+ * parse worker already made it with the parse (`markdown-parse.worker.ts`); where it is
+ * `undefined` the check runs here, with `reparse`, which parses with the engine and soft-break
+ * policy that produced `parsed`, and only when the body ends in a mermaid block. A block whose
+ * source is cached draws now; every other one when the worker
  * answers, in the order the bodies were painted. Returns the cancel for those late draws: it takes
  * this call's own draws off each source's list, so a cancelled draw never runs and holds none of
  * the body's DOM while the worker draws, then queues `dropAbandoned` on a microtask, after any
@@ -327,12 +335,15 @@ export function drawMermaidDiagrams(
   element: HTMLElement,
   parsed: ProseMirrorNode,
   markdown: string,
-  reparse: Reparse
+  reparse: Reparse,
+  openFence?: boolean
 ): () => void {
   const blocks = Array.from(element.querySelectorAll<HTMLPreElement>("pre[data-language]")).filter(
     (pre) => isMermaidLanguage(pre.getAttribute("data-language"))
   );
-  if (blocks.length > 0 && endsInOpenMermaidFence(parsed, markdown, reparse)) blocks.pop();
+  if (blocks.length > 0 && (openFence ?? endsInOpenMermaidFence(parsed, markdown, reparse))) {
+    blocks.pop();
+  }
   // A code block keeps its source's line ends, and the renderer splits lines at LF alone, so a
   // source written with lone CRs reaches it as LF; CRLF too, so one diagram is one cache entry.
   const sources = new Map(

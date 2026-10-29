@@ -17,7 +17,7 @@ const blockSchema = serverBlockSchema as unknown as BlockSchema;
  *  document's plain text, or `undefined` where the engine answered nothing for it. */
 function parseThroughSharedEngine(markdown: string): Promise<string | undefined> {
   const { promise, resolve } = Promise.withResolvers<string | undefined>();
-  renderWithEngine((engine) => {
+  renderWithEngine(markdown, "space", ({ engine }) => {
     const doc = engine?.parse(markdown);
     resolve(doc === undefined ? undefined : doc.textBetween(0, doc.content.size, " ", " "));
   });
