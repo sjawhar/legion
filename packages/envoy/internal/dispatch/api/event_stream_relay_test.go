@@ -75,6 +75,30 @@ func TestEventCommittedOnAnotherProcessReachesAnOpenEventFeed(t *testing.T) {
 	}
 }
 
+// TestOutOfOrderCommitsOnAnotherProcessReachAnOpenSubscriptionInIDOrder: process A commits two
+// events out of id order -- tx A appends on issue X (id a) and stays open while tx B appends on
+// issue Y (id b > a) and commits -- and the page's socket is on process B. B's relay hears B's
+// commit and must not publish b while a is open: a relay that read `id > cursor` and moved its
+// cursor to b would never publish a, and the page would miss it for good. B's relay reads only up
+// to its own process's horizon, which A's open transaction holds below a however far the two
+// processes are apart, so the subscription on B is sent nothing past a while A is open, and a and
+// then b once A commits.
+func TestOutOfOrderCommitsOnAnotherProcessReachAnOpenSubscriptionInIDOrder(t *testing.T) {
+	first, database := newTestHandlerWithStore(t)
+	issue := createInteractionIssue(t, first, "TEST", "Issue", "A spec")
+	other := createInteractionIssue(t, first, "OTHER", "Other issue", "A spec")
+	second := httptest.NewServer(secondProcessHandler(t, database))
+	t.Cleanup(second.Close)
+	client := openLiveSocketAt(t, gws.DefaultDialer, "ws"+strings.TrimPrefix(second.URL, "http")+"/ws/live", withBearer("agent-token")).read()
+	subscribeEvents(t, client, "events", nil)
+
+	// Appended through a broker of process A's own: B learns of them only from the rows.
+	low, high, commitLow := appendOutOfOrder(t, database, events.NewBroker(), issue.Key, other.Key)
+	expectNoEventAbove(t, client, "events", low-1, time.Second, "on process B while process A's lower id is open")
+	commitLow()
+	expectEventsInOrder(t, client, "events", low, high)
+}
+
 // TestEventStreamRelayCatchesUpWhenItsListenerReconnects covers the window a redial leaves: a
 // notification sent while the relay has no connection reaches nobody, and nothing sends it again.
 // What covers it is the catch-up the listener's onConnected runs after every LISTEN, from the
@@ -192,6 +216,84 @@ func TestEventStreamRelayRecoversWhenTheEventLogIsReset(t *testing.T) {
 	for last := int64(0); last < head; {
 		last = nextEventID(t, client, "events")
 	}
+}
+
+// TestEventLogResetClearsTheRelaysHorizon: a reset log (`truncate events restart identity`, what
+// e2e/seed.ts does between browser scenarios) hands out ids from 1 again, far below the horizon the
+// relay read the old log through. The relay forgets that horizon (Horizon.Reset) and takes its new
+// cursor under one proven afresh, ends every subscription open across the reset as it always has,
+// and serves the new log to the subscriptions made after it.
+//
+// The refill here commits out of id order on process A -- id a still open, id b > a committed --
+// and the page's socket is on process B. Without Horizon.Reset, B's horizon stands at the old log's
+// head, above every new id, so its relay takes the new log's b for its cursor at once while a is
+// open, and a subscription made after that reset is never sent a when it commits, though it is sent
+// the event after it. With the horizon forgotten, the relay's new cursor waits for a to end. A
+// subscription made meanwhile finds the relay still on the old cursor, so it hands over only once
+// the relay has reset, and is sent a, which committed after it subscribed, below that new cursor.
+func TestEventLogResetClearsTheRelaysHorizon(t *testing.T) {
+	first, database := newTestHandlerWithStore(t)
+	issue := createInteractionIssue(t, first, "TEST", "Issue", "A spec")
+	other := createInteractionIssue(t, first, "OTHER", "Other issue", "A spec")
+	second := httptest.NewServer(secondProcessHandler(t, database))
+	t.Cleanup(second.Close)
+	dial := func() *socketClient {
+		t.Helper()
+		return openLiveSocketAt(t, gws.DefaultDialer, "ws"+strings.TrimPrefix(second.URL, "http")+"/ws/live", withBearer("agent-token")).read()
+	}
+
+	// B's relay publishes through the old log's head, so its cursor and horizon stand there.
+	across := dial()
+	subscribeEvents(t, across, "events", nil)
+	renameIssue(t, first, issue.Key, "Renamed before the reset")
+	head := eventHead(t, database)
+	expectEventsInOrder(t, across, "events", head)
+
+	if _, err := database.Pool.Exec(t.Context(), `truncate events restart identity cascade`); err != nil {
+		t.Fatalf("reset the event log: %v", err)
+	}
+	low, high, commitLow := appendOutOfOrder(t, database, events.NewBroker(), issue.Key, other.Key)
+	if high >= head {
+		t.Fatalf("event %d committed after the reset is not below the pre-reset head %d: the reset reused no id, so this test proves nothing", high, head)
+	}
+	// Time for B's relay to hear the refill's commit and find the reset.
+	time.Sleep(500 * time.Millisecond)
+	// This subscription hands over only once the relay's reset, which waits for a, has run, so it
+	// subscribes first and a commits once it has had time to reach the relay.
+	waiting := dial()
+	sendEventsSubscribe(t, waiting, "events", nil)
+	time.Sleep(300 * time.Millisecond)
+	commitLow()
+	renameIssue(t, first, issue.Key, "Renamed after the reset")
+
+	// The subscription open across the reset ends without an event of the new log, whose ids it has
+	// already seen stand for other events.
+	for ended := false; !ended; {
+		switch frame := across.next(t, eventFeedWait, "the end of the subscription open across the reset").(type) {
+		case LiveEventFrame:
+			if id := mustEventFrameID(t, frame); id <= head {
+				t.Fatalf("the subscription open across the reset was sent event %d of the new log", id)
+			}
+		case LiveEnded:
+			if frame.Sub != "events" || frame.Reason != "behind" {
+				t.Fatalf("ended = %+v, want the events subscription's, behind", frame)
+			}
+			ended = true
+		default:
+			t.Fatalf("frame = %+v, want the events subscription's end", frame)
+		}
+	}
+	// The subscription made while a was open is sent it first.
+	eventsStartID(t, waiting, "events")
+	if id := mustEventFrameID(t, waiting.event(t, eventFeedWait, "events")); id != low {
+		t.Fatalf("the subscription made while %d was open was sent event %d first, want %d, which committed after it subscribed", low, id, low)
+	}
+
+	// And a subscription made now is served the new log.
+	after := dial()
+	subscribeEvents(t, after, "events", nil)
+	renameIssue(t, first, issue.Key, "Renamed for the subscription made after the reset")
+	expectEventsInOrder(t, after, "events", eventHead(t, database))
 }
 
 // mustEventFrameID is the decimal id an event frame names.
