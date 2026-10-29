@@ -1,0 +1,63 @@
+{
+  "schemaVersion": 1,
+  "phase": "review",
+  "issue": "INFRA-567",
+  "completed": "2026-10-29T23:31:00Z",
+  "round": 1,
+  "reviewedHead": "b549e570669709da4591fc75f1538e64d29303fe",
+  "codeHead": "37ded4e7505541b77fc45dd98108b122e6f5cf8c",
+  "decision": "changes_requested",
+  "critical": 1,
+  "important": 3,
+  "minor": 4,
+  "ci": "Required set (rulesets): lint, typecheck, test, pr-title. The CI head is 37ded4e7; CI run 40970209130 there is queued, so no required check has run at the code head. The compare 37ded4e7...b549e570 changes only .legion/INFRA-567/ (2 files). A request for changes does not wait on CI.",
+  "thermonuclear": "Both run at b549e570. thermonuclear-deep-review: CHANGES (1 High, 3 Medium, 2 Minor hardening); every finding I carry was checked by me against the code, and the High was reproduced in the issue pod with Go 1.27.1. thermonuclear-code-quality: CHANGES (8 findings); I carry the three that are clear fixes in files this pull request touches and judge the rest as structure the plan chose (the package mode, the check-bun-version mirror rule the plan's task C2 asked for, the dispatch job's pre-pull the plan kept).",
+  "keyFindings": [
+    {
+      "severity": "critical",
+      "file": "packages/daemon/docker/worker.Dockerfile:439",
+      "description": "go.env names the warm module cache first (file://…|https://proxy.golang.org|direct). The copied cache holds an @v/list per module listing only the cached versions, and a `|` falls through only on an error, so `go get X@latest`, `go get -u`, `go list -m -u` and `go list -m -versions` answer from the cache in every repository a role opens. Reproduced: a cache holding golang.org/x/text v0.3.0 makes `go list -m -versions` print v0.3.0 alone, where proxy.golang.org gives v0.43.0 as @latest. Fix: delete the list (and any @latest) files from the copied cache, and assert none in the final-stage check."
+    },
+    {
+      "severity": "important",
+      "file": ".github/scripts/mirror-ci-images.sh:55",
+      "description": "Each copy is `crane copy <floating upstream tag> <registry>:<shared tag>`. A branch that refreshes a row moves the shared tag to its digest; every later ci-images run that does not carry the refresh then finds the tag off its row, copies the floating upstream (which lands at the new digest) and fails, and main's digest is left untagged, which is the retention risk the tag exists to stop. Fix: copy from <upstream repo>@<row digest>, and make each tag unique per digest."
+    },
+    {
+      "severity": "important",
+      "file": ".github/scripts/check-ci-images.sh:556",
+      "description": "Rule 3 refuses any oven/bun or library/golang row whose version is not the pin, so a Bun or Go bump must add the row and repoint every FROM in one commit; that commit's consumer jobs (worker-image, envoy-smoke, the Dockerfile builds) need only `changes` and pull the new digest while the ci-images job may still be copying it. The solution document says a row 'does not race its own gate' and 'Do not re-run the job', which is wrong for that case. Fix: let a row for the next version land before the pin (rule 3 requires a row for the pin and refuses a FROM on another version), say in ci-images.yaml, AGENTS.md and the solution document that a new row lands in a commit before its consumers, or order the consumers after ci-images."
+    },
+    {
+      "severity": "important",
+      "file": "scripts/e2e/stage1-skeleton.sh:153",
+      "description": "main's #2498 (172dcb5d) moved this Postgres to PostgreSQL 18 (library/postgres@sha256:979bccfd…), the version CI and Cloud SQL run; the forward merge kept a postgres:16 row and digest instead, so the devbox proof now runs another major version. Fix: a row for docker.io/library/postgres@sha256:979bccfd…, the script pointed at it, the postgres-16 row deleted."
+    },
+    {
+      "severity": "minor",
+      "file": ".github/scripts/check-ci-images.sh:917",
+      "description": "walk() is a line-for-line copy of workflow_paths.walk, which check-image-trigger-paths.sh already imports through PYTHONPATH=.github/scripts. Import it."
+    },
+    {
+      "severity": "minor",
+      "file": ".github/scripts/check-bun-version.test.sh:285",
+      "description": "The new fixtures write mirror.gcr.io/oven/bun:… as a row's upstream, where every real row names docker.io/…, and that is why check-ci-images.sh:270 had to admit this file in EXCEPTIONS. Use docker.io and delete the exception."
+    },
+    {
+      "severity": "minor",
+      "file": ".github/scripts/check-ci-images.sh:569",
+      "description": "Requiring both an oven/bun:<pin> and an oven/bun:<pin>-slim row encodes today's consumers; rule 6 already refuses a FROM whose digest has no row, so this loop can only refuse deleting a row nothing uses. Delete it."
+    },
+    {
+      "severity": "minor",
+      "file": "packages/envoy/docker/Dockerfile:10",
+      "description": "ARG BUN_VERSION is now read by nothing in this file (the FROM is a digest), and its comment says check-bun-version.sh keeps it equal. Delete the ARG and the clause, with the matching lines in check-bun-version.sh and AGENTS.md's Tech Stack bullet, or say in the comment why the ARG stays."
+    }
+  ],
+  "notProven": [
+    "E2E proofs run 40966595125 at 4d8ae1f7 is queued: all five hosted proofs passing is not yet observed.",
+    "Docs (main) run 40946334589 on #2520 is pending: upload-pages-artifact and deploy skipping on a branch are not yet observed.",
+    "CI run 40970209130 at code head 37ded4e7 is queued."
+  ],
+  "contractCensus": "Not required: the refusals this change adds are this repository's own CI gates (check-ci-images.sh, check-ci-filters.sh's ci-ok rule, select-e2e-proofs.sh, check-bun-version.sh's mirror rule), every input of which is in this tree and passes at the head; no process or package boundary changes shape."
+}
