@@ -73,9 +73,12 @@
 # exits 1 saying the build landed. Main already holding github-actions[bot]'s
 # rebuild of a newer commit, or a person's commit under the rebuild subject,
 # lands nothing and starts nothing; a rebuild of the base itself with the same
-# bytes pushes nothing. Main rewritten past the base lands nothing and starts
-# one run. A `git` wrapper first on PATH lands a merge between push-built's
-# fetch and its push: nothing lands and land_on_main's one run is the only one.
+# bytes pushes nothing. Run from packages/claude-envoy instead of the
+# checkout's root, it refuses main's newer build all the same, and lands a tar
+# named relative to that subdirectory. Main rewritten past the base lands
+# nothing and starts one run. A `git` wrapper first on PATH lands a merge
+# between push-built's fetch and its push: nothing lands and land_on_main's one
+# run is the only one.
 # A push rejected while main's tip is still the base fails and starts nothing;
 # and no DEPLOY_KEY is refused before any push. A doctored tar is refused with
 # main moved by a docs-only commit or by a build input, before any fetch. Each
@@ -1383,9 +1386,11 @@ built_tar() {
   tar -cf "$dir.tar" -C "$dir" "$@" 2>/dev/null
 }
 # push_built <clone> <base> <tar> [VAR=value...]: runs `release-push.sh push-built <base> <tar>`
-# from <clone> with the deploy key, a fresh TMPDIR, the GitHub URL rewritten to
-# <clone>/../origin.git and the stub gh first on PATH; leaves its exit code in rc, its combined
-# output in out, the stub's call log in calls and what TMPDIR holds afterwards in left.
+# from <clone>, or from $PB_SUBDIR under it when that is set, with the deploy key, a fresh TMPDIR,
+# the GitHub URL rewritten to <clone>/../origin.git and the stub gh first on PATH; leaves its exit
+# code in rc, its combined output in out, the stub's call log in calls and what TMPDIR holds
+# afterwards in left.
+PB_SUBDIR=''
 push_built() {
   local clone=$1 base=$2 tar=$3 dir
   dir=$(dirname "$clone")
@@ -1393,7 +1398,7 @@ push_built() {
   rm -rf "$dir/tmp" && mkdir "$dir/tmp"
   : > "$dir/calls"
   set +e
-  out=$(cd "$clone" && env TMPDIR="$dir/tmp" GITHUB_REPOSITORY=example/repo \
+  out=$(cd "$clone${PB_SUBDIR:+/$PB_SUBDIR}" && env TMPDIR="$dir/tmp" GITHUB_REPOSITORY=example/repo \
     DEPLOY_KEY="$(<"$work/deploy")" GIT_CONFIG_COUNT=1 \
     GIT_CONFIG_KEY_0="url.$dir/origin.git.insteadOf" GIT_CONFIG_VALUE_0="git@github.com:example/repo.git" \
     GH_TEST_DIR="$dir" GH_TEST_FAIL='' GH_TEST_QUIET='' GH_TEST_LAND='' PATH="$work/restart-bin:$PATH" \
@@ -1467,8 +1472,10 @@ check "an identical build: pushes nothing, leaves the clone clean" \
 
 # Main moved by commits that change no build input: the build lands on main's tip, starting no run.
 built_setup "$pb/moved"
-record_hook "$pb/moved/origin.git"
+# The hook goes in after move_main's seed push, which runs without PUSH_SEEN set and would fire it
+# with nowhere to write.
 move_main "$pb/moved" "fix: an empty merge landing after the build started"
+record_hook "$pb/moved/origin.git"
 built_tar moved rebuilt
 : > "$pb/moved/seen"
 push_built "$pb/moved/a" "$base" "$pb/trees/moved.tar" PUSH_SEEN="$pb/moved/seen"
@@ -1597,6 +1604,35 @@ check "$what: exits 0, pushing nothing, calling no gh, leaving nothing in TMPDIR
   "$(is "$rc|$(git -C "$pb/newer/origin.git" rev-parse main)|$calls|$left" "0|$rebuilt||0")"
 check "$what: the notice names the commit main's build was made from" \
   "$(contains "$out" "^::notice title=Nothing pushed; main holds a newer build::main already holds a build of $newer_base, newer than $base, the commit this build was made from, so nothing was pushed and no run was started$")"
+
+# Run from a subdirectory of the clone, as a job that moved into the package would: push-built
+# moves to the repository's root before it reads any repository path, so main's build is still
+# found and the newer-build rule still refuses, and a tar named relative to that subdirectory still
+# resolves from there.
+built_setup "$pb/subdir-newer"
+printf 'notes\n' > "$pb/subdir-newer/seed/notes.md"
+move_main "$pb/subdir-newer" "docs: a merge after the base"
+newer_base=$moved
+bot_rebuild "$pb/subdir-newer" newer "$newer_base"
+built_tar subdir-newer rebuilt
+PB_SUBDIR=packages/claude-envoy
+push_built "$pb/subdir-newer/a" "$base" "$pb/trees/subdir-newer.tar"
+PB_SUBDIR=''
+what="run from packages/claude-envoy, main holding a newer build"
+check "$what: exits 0, pushing nothing, calling no gh, leaving nothing in TMPDIR" \
+  "$(is "$rc|$(git -C "$pb/subdir-newer/origin.git" rev-parse main)|$calls|$left" "0|$rebuilt||0")"
+check "$what: the notice names the commit main's build was made from" \
+  "$(contains "$out" "^::notice title=Nothing pushed; main holds a newer build::main already holds a build of $newer_base, newer than $base, the commit this build was made from, so nothing was pushed and no run was started$")"
+
+built_setup "$pb/subdir-land"
+built_tar subdir-land rebuilt
+PB_SUBDIR=packages/claude-envoy
+# Four levels up from <clone>/packages/claude-envoy is $pb, which holds trees/.
+push_built "$pb/subdir-land/a" "$base" ../../../../trees/subdir-land.tar
+PB_SUBDIR=''
+what="run from packages/claude-envoy with a relative tar path"
+check "$what: exits 0, calling no gh" "$(is "$rc|$calls" "0|")"
+built_landed "$what" "$pb/subdir-land" "$pb/trees/subdir-land" "$base" "the base"
 
 built_setup "$pb/forged"
 printf 'notes\n' > "$pb/forged/seed/notes.md"

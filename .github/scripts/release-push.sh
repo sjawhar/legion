@@ -192,12 +192,17 @@
 # push-built: land a build of the Claude Envoy plugin on main, for
 #            claude-envoy-rebuild.yaml's push job. <tar> is what its build
 #            job built from <base-sha>, main's tip when that job started: the
-#            package's dist/ and legion/. HEAD must be <base-sha>, 40
-#            lower-case hex, and the work tree clean. The tar is then checked
-#            as check-built checks it, before anything reaches GitHub, so a
-#            tar that fails a check is refused however main stands. Each of
-#            these refusals is an ::error:: and exit 1 that pushes nothing and
-#            starts no run. push-built then fetches main once with the deploy
+#            package's dist/ and legion/. Every repository path push-built
+#            reads is the root's, so it moves to the repository's root (`git
+#            rev-parse --show-toplevel`) first, with <tar> made absolute
+#            before the move, since that path is the caller's: a run from a
+#            subdirectory of the checkout lands the same commit. HEAD must be
+#            <base-sha>, 40 lower-case hex, and the work tree clean, which is
+#            read from the root too. The tar is then checked as check-built
+#            checks it, before anything reaches GitHub, so a tar that fails a
+#            check is refused however main stands. Each of these refusals is
+#            an ::error:: and exit 1 that pushes nothing and starts no run.
+#            push-built then fetches main once with the deploy
 #            key (deploy_key_env, as push-tag does). The push job waits for a
 #            runner after the build job, often longer than main goes between
 #            merges, so main has usually moved past the base by then. The
@@ -611,6 +616,42 @@ extract_built() {
   # The tar is the whole of both directories: a file it lacks is deleted.
   rm -rf packages/claude-envoy/dist packages/claude-envoy/legion
   tar -xf "$tar_file" -C packages/claude-envoy --no-same-owner || fail_error "extracting $shown_tar into packages/claude-envoy failed"
+}
+
+# commit_build_on <tip> <base>: commit the build extract_built just wrote over
+# <tip>'s tree, as github-actions[bot] with the subject naming <base>, the
+# commit the build was made from, and move HEAD to it, leaving the commit in
+# $commit, or $commit empty when <tip>'s files already match the build, where
+# nothing is committed (the out-parameter build_inputs_changed sets inputs_why
+# by). The commit is not printed, because `commit=$(commit_build_on ...)` would
+# run it in a subshell, whose EXIT trap removes every on_exit_remove directory,
+# the deploy key's among them, before land_on_main pushes. The command runs
+# from the repository's root, where extract_built left it.
+commit_build_on() {
+  local tip=$1 base=$2 index_dir tree tip_tree
+  commit=''
+  # The two directories are written over the tip's tree in an index of its
+  # own, and the tip is never checked out: it may carry another
+  # release-push.sh, and a checkout would rewrite this script while bash runs
+  # it. Only the two directories can change: the index starts as the tip's
+  # tree, and `git add` is limited to them.
+  index_dir=$(mktemp -d) || fail_error "making a directory for a temporary index failed"
+  on_exit_remove "$index_dir"
+  GIT_INDEX_FILE="$index_dir/index" git read-tree "$tip" || fail_error "reading $tip's tree into a temporary index failed"
+  GIT_INDEX_FILE="$index_dir/index" git add -A -- packages/claude-envoy/dist packages/claude-envoy/legion ||
+    fail_error "staging packages/claude-envoy/dist and packages/claude-envoy/legion over $tip's tree failed"
+  tree=$(GIT_INDEX_FILE="$index_dir/index" git write-tree) || fail_error "writing the build's tree failed"
+  rm -rf "$index_dir"
+  tip_tree=$(git rev-parse "$tip^{tree}") || fail_error "reading $tip's tree failed"
+  [ "$tree" != "$tip_tree" ] || return 0
+  # The identity `tag` commits as, set for author and committer alike in the
+  # environment, which wins over any GIT_AUTHOR_* or GIT_COMMITTER_* already
+  # set. The subject names the base, the commit the build was made from, which
+  # main_build_base reads back.
+  commit=$(GIT_AUTHOR_NAME=$bot_name GIT_AUTHOR_EMAIL=$bot_email GIT_COMMITTER_NAME=$bot_name GIT_COMMITTER_EMAIL=$bot_email \
+    git commit-tree --no-gpg-sign -p "$tip" -m "chore(claude-envoy): rebuild dist/ and legion/ from ${base:0:12} [skip ci]" "$tree") ||
+    fail_error "committing the build on $tip failed"
+  git update-ref --no-deref HEAD "$commit" || fail_error "moving HEAD to $commit failed"
 }
 
 # main_build_base <tip>: print the commit main's committed build at <tip> was
@@ -1319,6 +1360,16 @@ case "$command" in
     if ! is_commit_sha "$base"; then
       fail_error "the base commit $(quote_all "$base") is not 40 lower-case hex; refusing it"
     fi
+    # Everything below is read from the repository's root: the work tree's
+    # status, the build input list, main's build and the two directories. The
+    # job runs this from the checkout's root, but a run from a subdirectory
+    # must land the same commit, where a pathspec read from there would find
+    # nothing. extract_built moves to the root as well, and main_build_base
+    # and build_inputs_changed run before it. <tar> is the caller's path, so
+    # it is made absolute before the move, as extract_built does with its own.
+    case $tar_file in /*) ;; *) tar_file=$PWD/$tar_file ;; esac
+    root=$(git rev-parse --show-toplevel) || fail_error "finding the repository's root failed"
+    cd "$root"
     head=$(git rev-parse HEAD) || fail_error "reading HEAD failed"
     if [ "$head" != "$base" ]; then
       fail_error "HEAD is $head, not $base, the commit the build was made from"
@@ -1349,42 +1400,21 @@ case "$command" in
       build_inputs_changed "$base" "$tip"
     fi
     extract_built "$tar_file"
-    # The two directories are written over the tip's tree in an index of its
-    # own, and the tip is never checked out: it may carry another
-    # release-push.sh, and a checkout would rewrite this script while bash runs
-    # it. Only the two directories can change: the index starts as the tip's
-    # tree, and `git add` is limited to them.
-    onto=$tip
-    index_dir=$(mktemp -d) || fail_error "making a directory for a temporary index failed"
-    on_exit_remove "$index_dir"
-    GIT_INDEX_FILE="$index_dir/index" git read-tree "$onto" || fail_error "reading $onto's tree into a temporary index failed"
-    GIT_INDEX_FILE="$index_dir/index" git add -A -- packages/claude-envoy/dist packages/claude-envoy/legion ||
-      fail_error "staging packages/claude-envoy/dist and packages/claude-envoy/legion over $onto's tree failed"
-    tree=$(GIT_INDEX_FILE="$index_dir/index" git write-tree) || fail_error "writing the build's tree failed"
-    rm -rf "$index_dir"
-    onto_tree=$(git rev-parse "$onto^{tree}") || fail_error "reading $onto's tree failed"
-    if [ "$tree" = "$onto_tree" ]; then
-      echo "::notice title=Nothing to push::main's packages/claude-envoy/dist and packages/claude-envoy/legion at $onto already match this build" >&2
+    commit_build_on "$tip" "$base"
+    if [ -z "$commit" ]; then
+      echo "::notice title=Nothing to push::main's packages/claude-envoy/dist and packages/claude-envoy/legion at $tip already match this build" >&2
       if [ -n "$inputs_why" ]; then
         fresh_run "$workflow" "$inputs_why" "A fresh run started" "$inputs_why, so"
       fi
       exit 0
     fi
-    # The identity `tag` commits as, set for author and committer alike in the
-    # environment, which wins over any GIT_AUTHOR_* or GIT_COMMITTER_* already
-    # set. The subject names the base, the commit the build was made from, which
-    # main_build_base reads back.
-    commit=$(GIT_AUTHOR_NAME=$bot_name GIT_AUTHOR_EMAIL=$bot_email GIT_COMMITTER_NAME=$bot_name GIT_COMMITTER_EMAIL=$bot_email \
-      git commit-tree --no-gpg-sign -p "$onto" -m "chore(claude-envoy): rebuild dist/ and legion/ from ${base:0:12} [skip ci]" "$tree") ||
-      fail_error "committing the build on $onto failed"
-    git update-ref --no-deref HEAD "$commit" || fail_error "moving HEAD to $commit failed"
     if [ "$tip" != "$base" ]; then
       echo "::notice title=Landing on main's tip::built from $base, landing on $tip, main's tip, as $commit, which changes only packages/claude-envoy/dist and packages/claude-envoy/legion: main moved since the build started" >&2
     fi
-    # land_on_main fetches main again and pushes only when its tip is still
-    # onto; when main moved again since the fetch above, it starts the one fresh
-    # run itself.
-    land_on_main "$onto" "$workflow"
+    # land_on_main fetches main again and pushes only when main's tip is still
+    # the tip the commit was made on; when main moved again since the fetch
+    # above, it starts the one fresh run itself.
+    land_on_main "$tip" "$workflow"
     if [ "$landed" = pushed ] && [ -n "$inputs_why" ]; then
       why="the build already landed on main as $commit, but $inputs_why, so main's build is one run behind its inputs"
       fresh_run "$workflow" "$why" "A fresh run started" "the build landed on main as $commit, but $inputs_why, so"
