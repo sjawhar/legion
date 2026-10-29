@@ -2,27 +2,27 @@
   "schemaVersion": 1,
   "phase": "review",
   "issue": "INFRA-593",
-  "completed": "2026-10-29T02:07:35Z",
-  "round": 2,
-  "headReviewed": "d741863c765161e472f2145d53c5c231d674ff28",
+  "completed": "2026-10-29T11:59:59Z",
+  "round": 3,
+  "headReviewed": "713982bbf92e35eb0d66dda0498b65fa74a6b5b6",
   "decision": "changes_requested",
   "critical": 0,
   "important": 1,
-  "minor": 4,
-  "ci": "At 02:05 UTC at the CI head d741863c: the required lint, typecheck, test and pr-title passed; envoy-go, envoy-go-race, dispatch, dispatch-memory, dispatch-multiprocess and the Postgres 16 Dispatch suite were still queued or running. A request for changes does not wait for them; the next round reads them.",
-  "thermonuclear": "Both run once at d741863c: deep review APPROVE (all six round-1 findings fixed correctly; 4 minors), code quality CHANGES (1 important, 5 minors).",
-  "roundOneThreads": "All 12 threads answered in my own words as accepted and fixed in 61cc109a (PRRT_kwDORFy7ds6xWob3, ...ob8, ...ocC, ...ocH, ...ocJ, ...ocL, ...ocM, ...ocQ, ...ocV, ...oca, ...ocd, ...oce); the implementer resolved them all.",
-  "census": "The PR body's Contract change census re-run at the head: the CompactAll, outbox.Deps{ and doc_updates writer searches give exactly the hits the body lists.",
+  "minor": 6,
+  "ci": "At 11:58 UTC at the CI head 713982bb: required lint, typecheck, test and pr-title passed; dispatch, dispatch-memory, dispatch-multiprocess, envoy-go-race and the rest succeeded; envoy-go failed in cmd/listener (TestListenerFollowsTheInterestRegistryAcrossNATSRestarts, 'nats: outbound buffer limit exceeded'), a package this PR does not touch, in the same class of NATS flake main's own envoy-go shows (8a911ecc: internal/bus; e21cfc61: dispatch/startup). Its failed job was re-run once (run 40849116610 attempt 2, in progress). internal/dispatch/api passed in 463 s under its 20-minute timeout. No check in this run is named the Postgres 16 Dispatch suite.",
+  "thermonuclear": "Both run once at 713982bb: deep review APPROVE (3 minors), code quality CHANGES (cleanup-only minors). Heap index invariants and the 0137->0139 renumber checked clean.",
+  "roundTwoThreads": "PRRT_kwDORFy7ds6xZA2H, ...ZA2I, ...ZA2J, ...ZA2L each answered as accepted and fixed in 299ac590; already resolved by the implementer.",
   "keyFindings": [
-    {"severity": "important", "file": "packages/envoy/internal/dispatch/docs/compaction_queue.go", "description": "note() changes nothing for a room already waiting in the heap. A room a quiet check parked until its 15-minute mark collects any number of rows older than 2 minutes before its check, so the drained-queue bound the PR body states in place of acceptance 6's 1.25x condition (fewer than 16 older rows) fails during a burst that starts after that check. Pull a waiting entry forward to firstCheck on a note, as settle already does for a room in flight."},
-    {"severity": "minor", "file": "packages/envoy/internal/dispatch/docs/compaction_sweep.go", "description": "compactionSweepTick has no production caller after the move to duty.RunLeased; only tests call it. Move it into the test file."},
-    {"severity": "minor", "file": "packages/envoy/internal/dispatch/duty/ticker_test.go", "description": "Lines 68-70 and 81 cite the daily compaction and lease document-compaction as a loop that must not tick at start; this PR removes it and runs document-compaction with TickAtStart."},
-    {"severity": "minor", "file": "packages/envoy/internal/dispatch/docs/fold.go", "description": "bufferedFolds = 4 claims to equal store's roomsPoolSize, tied only by a comment (also AGENTS.md); state the bound on its own terms or derive it."},
-    {"severity": "minor", "file": "packages/envoy/cmd/dispatch/main.go", "description": "The comment calls the hourly sweep a pass over every document; it reads only the documents doc_compaction_owed names."}
+    {"severity": "important", "file": "packages/envoy/infra/go.work.sum", "description": "The fifth merge of main (713982bb) took the branch's old copy of a file the branch never changed: against main it deletes 24 lines main added (#2449, #2456) and adds 2. Restore main's copy."},
+    {"severity": "minor", "file": "packages/envoy/internal/dispatch/docs/compaction_queue.go", "description": "note's held.index < 0 cannot be true for a held entry that is not current; it silently drops a note if the invariant broke. Remove it and fold the held case into one switch with one unlock."},
+    {"severity": "minor", "file": "packages/envoy/cmd/dispatch/main.go", "description": "Comment line 399 is 143 columns; re-wrap 397-401."},
+    {"severity": "minor", "file": "packages/envoy/AGENTS.md", "description": "Line 309: 'so at most four times 32 MiB of buffered rows' has no verb; the paragraph is wrapped raggedly."},
+    {"severity": "minor", "file": "packages/envoy/cmd/dispatch/README.md", "description": "Two blank lines before the 0139_doc_compaction_owed paragraph."},
+    {"severity": "minor", "file": "docs/site/src/content/docs/dispatch/running-dispatch.md", "description": "Line 363 runs past the paragraph's wrap (104 columns)."},
+    {"severity": "minor", "file": "packages/envoy/internal/dispatch/duty/run_leased_period_test.go", "description": "Lines 17-18 cite 'a compaction that walks every document'; the sweep now reads only the documents doc_compaction_owed names."}
   ],
   "notDefects": [
-    "compactionTry/compactionAttempt between tryCompaction and compactionStep: tryCompaction is the one mapping round 1 asked for; the step's translation is a short, readable switch.",
-    "A load waiting for a fold slot holds its rooms-pool connection idle in its transaction: latency only, no deadlock (a slot holder waits on no connection or lock), and no worse than main, where every load folded on a rooms-pool connection. Recorded in the PR body's risks.",
-    "The 2-minute tail measured on created_at (the inserting transaction's start): bounded by the transaction's length, recorded as not proven in the PR body."
+    "A load waiting for a fold slot holds its rooms-pool connection idle: latency only, recorded in the PR body's risks.",
+    "envoy-go's cmd/listener failure: an untouched package, the NATS-restart flake class main also shows; re-run once."
   ]
 }
