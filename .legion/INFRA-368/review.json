@@ -2,18 +2,23 @@
   "schemaVersion": 1,
   "phase": "review",
   "issue": "INFRA-368",
-  "completed": "2026-10-28T22:51:57Z",
-  "round": 5,
-  "decision": "approved",
-  "reviewedHead": "the handoff commit this file is pushed in (child of b7ee5494b593a111ff423947b22df5da74948a87)",
-  "codeHead": "95336ce647ab",
-  "ciHead": "d9be59ee417006f2f9eec31cd4a686f9d37bbeb0",
+  "completed": "2026-10-29T00:01:03Z",
+  "round": 6,
+  "decision": "changes_requested",
+  "reviewedHead": "the handoff commit this file is pushed in (child of 9fc3a91db5b80bb1e0b2c43ee8950845df7d412e)",
+  "codeHead": "c4006b81b15eb31f71d05f12a1e5a06c1cb44bfa",
+  "fingerprint": "214513e8: 0102908b255b6270e5ad9b3bf5e7191a55f3fd89c2fd5adc97e27803ecb46c88 → 9fc3a91d: dbc2c851484e83481d81df41faaa4d481ce8cba28c18e43227f112a75133f46f. The fingerprint changed, so this is a new round. I diffed the PR's diff before and after the merge: it changes only migration-number text (0136-0138 → 0137-0139 after main's 0136_dashboard_assets), the route-count pin (142+2=144), and pmdoc/reanchor_test.go's docstest→crafted import (#2481's fix, which is not on main).",
   "critical": 0,
-  "important": 0,
+  "important": 1,
   "minor": 0,
-  "round4Findings": "Both are fixed. (1) 0df62d6d and b2d4017a drop the skill's reply sentence and keep the three block reference forms. `bun test src/skills-guard.test.ts` passes at 1998 words, and CI's pi-envoy job passed. (2) The forward merge b2d4017a over #2324 posted its fingerprint comment, and the migrations stay 0136-0138 after main's 0135. It keeps (a) one reconcile, refs.ReplaceCountedItemEdit (comment_actions.go:195), which carries main's editedHeadTargets and the block index; (b) event-refresh.ts commentBlockReads on comment.edited, which the tester proved in Chromium with no reload; and (c) the item-block early return at reference-target.ts:232, :305 and :409 and at RefPreview.tsx:351. Each has a test. Round 5's own fix, 7fbf45cc, clears a block read only on a 404 NOT_FOUND.",
-  "keyFindings": [],
-  "ci": "Every check at d9be59ee has completed. Required: lint, typecheck, test and pr-title all succeeded. Also succeeded: both builds (the Worker Image build after one re-run of a TLS-probe flake that #2475 addresses), changes, contracts, claude-envoy, envoy-client, envoy-plugin, envoy-smoke, envoy-e2e-local, envoy-go-race, envoy-infra-go, dispatch-memory, dispatch-multiprocess, pi-envoy, pi-legion, pi-shared, and the Broker and Daemon Postgres 16 suites. Three are red, and each is main's. (1) `dispatch`: only mermaid.e2e.ts:194, in all four browsers (1213 passed). main fixed it in #2470, which this branch does not carry. (2) and (3) `envoy-go` and the Dispatch Postgres 16 suite: only deliveryaudit_test.go:121 fails to build (auth.SigningKeys). main fixed it in #2473 (d743376f2), which this branch does not carry. Neither failing file is in this PR's diff. api, refs, store, docs, itemblocks, pmdoc and text all pass. The recipients-claim row, which #2324 fixed and this branch carries, passed.",
-  "thermonuclear": "At b7ee5494: deep-review `Verdict: APPROVE at b7ee5494` (1 Minor: the word fix needed the merge commit's two tightened sentences, which leaves 2 words of headroom). code-quality `Verdict: CHANGES at b7ee5494`. Its items are structural or wording: a single block-route rule in useReferenceData, an IndexItem helper and its doc comment, a typed reply_block read in event-refresh plus the event set AGENTS.md names, the ReplaceCountedItemEdit kind parameter, an isNotFound predicate, and an e2e helper. None changes behaviour. I took none, consistent with rounds 1-4, and the architect scoped round 5 to the two items.",
-  "threads": "All 7 of my threads carry my answer and are resolved by the implementer: PRRT_kwDORFy7ds6xKL0t, PRRT_kwDORFy7ds6xKL07, PRRT_kwDORFy7ds6xKL1J, PRRT_kwDORFy7ds6xKL1R, PRRT_kwDORFy7ds6xKL1Y, PRRT_kwDORFy7ds6xM3X_, PRRT_kwDORFy7ds6xOidK. There are no bot threads."
+  "keyFindings": [
+    {
+      "severity": "important",
+      "file": "packages/envoy/internal/dispatch/docs/block_index.go",
+      "description": "GitHub reports the PR CONFLICTING (DIRTY) with main d4cbcfe6e (#2396). `git merge-tree --write-tree origin/main 9fc3a91d` conflicts only in docs/block_index.go's doc comment on RunBlockIndexReconciliation: main replaced the loop with duty.RunLeasedAfterEachPass, and this PR adds a sentence about the comment and message blocks 0138-0139 owe. GitHub runs no checks on a conflicting head, and no check at c4006b81 has run (all queued), so the head cannot be approved. Merge main forward, keep main's RunLeasedAfterEachPass paragraph and the PR's sentence, and confirm that main has added no migration (it has not, up to d4cbcfe6e)."
+    }
+  ],
+  "mergeAudit": "c4006b81 is clean (both thermonuclear agents, and my diff of diffs). The conflicts in packages/dispatch/AGENTS.md, cmd/dispatch/README.md and routes_table_test.go each keep both sides. Migrations run 0135, 0136 (main), then 0137, 0138, 0139. 0137's graph_edges is 0121's view plus the six arms, since no main migration restated it after 0121. item_blocks_migrations_test constants are 136/137. dist/ and legion/ are unchanged against the merge-base. No stale 0136-0138 reference to this PR's migrations remains.",
+  "ci": "The CI head is c4006b81. Every check there (lint, typecheck, test, pr-title, build x2, changes, the daemon Postgres 16 suite) was queued at 00:00Z, and the PR is now conflicting, so none will settle for this head.",
+  "thermonuclear": "At 9fc3a91d: deep-review `Verdict: APPROVE at 9fc3a91d`, code-quality `Verdict: APPROVE at 9fc3a91d`. Both name the docs/block_index.go conflict with d4cbcfe6e as the next merge's work."
 }
