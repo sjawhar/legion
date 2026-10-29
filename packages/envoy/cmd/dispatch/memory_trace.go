@@ -8,11 +8,14 @@ package main
 // total − released, so a resident figure past the limit is either memory outside the runtime or,
 // on a kernel that counts pages the runtime has handed back, the released class.
 //
-// The real-process memory drives read it for that second reason: this repository's sandboxes run
-// under gVisor, which keeps a page the runtime released resident unless the madvise call that
-// released it covered 2 MiB or more, and the collector's scavenger releases in smaller pieces, so
-// VmRSS there counts memory the pod's own kernel would not (memory_harness_test.go,
-// peakResident).
+// Every real-process memory drive runs its server with the trace on and reads two figures of it
+// (memory_harness_test.go, peakResident). The first is total − released, what the limit bounds,
+// which no kernel reports and which a drive weighs against the limit the server logged. The
+// second is for the reason above: this repository's sandboxes run under gVisor, which keeps a
+// page the runtime released resident unless the madvise call that released it covered 2 MiB or
+// more, and the collector's scavenger releases in smaller pieces, so VmRSS there counts memory
+// the pod's own kernel would not, and a drive on such a kernel reads the charge as
+// vmrss − heap_released instead.
 
 import (
 	"bufio"

@@ -114,8 +114,9 @@ type memoryServer struct {
 	exited  chan struct{}
 	idle    int64
 	// trace is the file the server samples its memory into (DISPATCH_MEMORY_TRACE,
-	// memory_trace.go), which peakResident reads where this kernel keeps pages the runtime
-	// released counted in VmRSS.
+	// memory_trace.go), which peakResident reads for what the pod's kernel would charge the
+	// server, where this kernel keeps pages the runtime released counted in VmRSS, and for what
+	// the server's own Go memory limit bounds, on every kernel.
 	trace string
 }
 
@@ -129,13 +130,10 @@ func (h *memoryHarness) start(t *testing.T) *memoryServer {
 	if err := listener.Close(); err != nil {
 		t.Fatalf("free the port: %v", err)
 	}
-	// Only where this kernel keeps no peak of its own, since that is where peakResident needs the
-	// server's own reading of what it has released: on a kernel with VmHWM nothing reads the
-	// trace, and a server measuring its memory is not asked to sample it.
-	trace := ""
-	if !kernelKeepsResidentPeak() {
-		trace = filepath.Join(t.TempDir(), "memory.trace")
-	}
+	// Every server samples its memory: peakResident reads the trace for what the Go memory limit
+	// bounds, what the runtime has mapped less what it has handed back, which no kernel's /proc
+	// reports, and on a kernel without VmHWM for what the pod's kernel would charge as well.
+	trace := filepath.Join(t.TempDir(), "memory.trace")
 	command := exec.Command(os.Args[0])
 	command.Env = []string{
 		"PATH=" + os.Getenv("PATH"),
@@ -160,9 +158,9 @@ func (h *memoryHarness) start(t *testing.T) *memoryServer {
 		// (memoryServer.roomLive), which loads and rebuilds nothing.
 		"DISPATCH_TEST_HOOKS=1",
 		// The server's own reading of what the runtime has mapped and what of it the runtime has
-		// handed back, which peakResident needs where this kernel keeps the handed-back pages in
-		// VmRSS (memory_trace.go). One file for each server, which its test's temporary directory
-		// takes away with it.
+		// handed back, which is what the Go memory limit bounds and what a pod's kernel charges
+		// (peakResident, memory_trace.go). One file for each server, which its test's temporary
+		// directory takes away with it.
 		"DISPATCH_MEMORY_TRACE=" + trace,
 	}
 	command.Env = append(command.Env, h.env...)
@@ -266,24 +264,52 @@ func (p *memoryServer) readResident(field string) (int64, bool, error) {
 }
 
 // peakAboveIdle runs during and reports the most the server's resident memory rose above what it
-// held idle, freshly started, while it ran.
+// held idle, freshly started, while it ran, as the pod's own kernel would charge it.
 func (p *memoryServer) peakAboveIdle(t *testing.T, during func()) int64 {
 	t.Helper()
-	return p.peakResident(t, during) - p.idle
+	peak := p.peakResident(t, during)
+	if peak.charged != peak.resident {
+		t.Logf("peak resident memory %d MiB as the pod's kernel charges it, of %d MiB VmRSS, whose difference is memory the runtime had handed back and this kernel still counts",
+			peak.charged>>20, peak.resident>>20)
+	}
+	return peak.charged - p.idle
 }
 
 // residentSampleInterval is how often peakResident reads the server's resident memory where the
 // kernel keeps no peak of it.
 const residentSampleInterval = 5 * time.Millisecond
 
-// peakResident runs during and reports the most memory the server held resident while it ran, as
-// the pod's own kernel would charge it.
+// podPeak is the most memory one step of a drive left the server holding, read three ways, so
+// that no one of them can hide another's error.
+type podPeak struct {
+	// charged is what a pod's own kernel would charge the server at its most: VmHWM where this
+	// kernel keeps one, and vmrss - heap_released over the step's trace samples where it does
+	// not. It is what the pod's 4 GiB bounds.
+	charged int64
+	// held is the most the step's trace samples read of what the runtime has mapped and not
+	// handed back, total - heap_released, which is what the Go memory limit bounds. It is read
+	// of the runtime's own accounting, so neither a kernel that keeps released pages resident nor
+	// one that drops them moves it.
+	held int64
+	// resident is the raw VmRSS peak, which on gVisor counts pages the runtime has handed back
+	// and whose scattered releases it did not drop.
+	resident int64
+	// limit is the Go memory limit the runtime reported through the step, math.MaxInt64 where it
+	// ran under none.
+	limit int64
+	// samples is how many of the server's trace samples fell in the step. A step with none was
+	// weighed on VmRSS alone: charged is then the VmRSS peak, and held and limit are zero.
+	samples int
+}
+
+// peakResident runs during and reports the most memory the server held while it ran, each way
+// podPeak records.
 //
-// Where /proc keeps a peak, as Linux does on CI's runner, that is VmHWM, reset first by writing 5
-// to clear_refs, and exact. gVisor, which this repository's sandboxes run in, keeps neither: its
-// status has no VmHWM line and its /proc no clear_refs, so there a goroutine reads VmRSS every
-// residentSampleInterval while during runs, and a spike shorter than that interval can pass
-// unseen.
+// Where /proc keeps a resident peak, as Linux does on CI's runner, that is VmHWM, reset first by
+// writing 5 to clear_refs, and exact. gVisor, which this repository's sandboxes run in, keeps
+// neither: its status has no VmHWM line and its /proc no clear_refs, so there a goroutine reads
+// VmRSS every residentSampleInterval while during runs, and a spike shorter than that interval
+// can pass unseen.
 //
 // gVisor's VmRSS also counts pages the Go runtime has handed back. It drops a page only where the
 // madvise(MADV_DONTNEED) that released it covered 2 MiB or more - measured on 2026-10-29 on this
@@ -291,72 +317,88 @@ const residentSampleInterval = 5 * time.Millisecond
 // contiguous, dropped nothing of VmRSS, and releases of 2 MiB and over dropped every byte they
 // covered - and the collector's scavenger releases in smaller pieces. The pod's kernel charges
 // what the runtime has mapped less what it has released, which is what the Go memory limit
-// bounds, so on gVisor the peak is taken from the server's own trace (memory_trace.go) as
-// vmrss - heap_released, and the VmRSS peak is logged beside it. At the heaviest step of
-// TestTheHeaviestApplyBesideAFullCopyBoundStaysUnderThePodsMemory the two were 3,665 and 4,171
-// MiB on 2026-10-29, a difference of 506 MiB the pod's kernel would not charge.
+// bounds, so on gVisor the charged peak is taken from the server's own trace (memory_trace.go) as
+// vmrss - heap_released. At the heaviest step of
+// TestTheHeaviestApplyBesideAFullCopyBoundStaysUnderThePodsMemory the two read 3,669 and 4,361
+// MiB on 2026-10-29, a difference of 692 MiB the pod's kernel would not charge.
+//
+// That correction is a subtraction this kernel can make twice: a release of 2 MiB or more leaves
+// VmRSS and is subtracted again as released heap, which undercounts the charge. What catches such
+// an undercount is the trace's other reading, total - heap_released, which no kernel touches and
+// the Go memory limit bounds (requireUnderThePod, browser_memory_test.go); a drive that weighs
+// its server against the pod asserts both. At that same step the two readings differed by 22 MiB
+// the undercount's way, where every other step of those drives read the charge 25 to 41 MiB above
+// what the runtime itself accounts for.
 //
 // Each memory drive's comment records the peaks it was last measured at this way. Figures older
 // than this correction, which those comments name as VmRSS, were read as VmRSS on a sandbox, so
 // each is the higher of the two by whatever its server had released.
-func (p *memoryServer) peakResident(t *testing.T, during func()) int64 {
+func (p *memoryServer) peakResident(t *testing.T, during func()) podPeak {
 	t.Helper()
-	if _, kept, err := p.readResident("VmHWM"); err != nil {
+	_, keepsPeak, err := p.readResident("VmHWM")
+	if err != nil {
 		t.Fatalf("%v\n%s", err, p.output.tail())
-	} else if kept {
+	}
+	var from time.Time
+	var resident int64
+	if keepsPeak {
 		if err := os.WriteFile(fmt.Sprintf("/proc/%d/clear_refs", p.command.Process.Pid), []byte("5"), 0); err != nil {
 			t.Fatalf("reset the server's peak memory: %v", err)
 		}
+		from = time.Now()
 		during()
-		return p.resident(t, "VmHWM")
-	}
-	stop, sampled := make(chan struct{}), make(chan int64, 1)
-	go func() {
-		ticker := time.NewTicker(residentSampleInterval)
-		defer ticker.Stop()
-		peak := int64(0)
-		for {
-			if resident, _, err := p.readResident("VmRSS"); err == nil {
-				peak = max(peak, resident)
+		resident = p.resident(t, "VmHWM")
+	} else {
+		stop, sampled := make(chan struct{}), make(chan int64, 1)
+		go func() {
+			ticker := time.NewTicker(residentSampleInterval)
+			defer ticker.Stop()
+			peak := int64(0)
+			for {
+				if resident, _, err := p.readResident("VmRSS"); err == nil {
+					peak = max(peak, resident)
+				}
+				select {
+				case <-stop:
+					sampled <- peak
+					return
+				case <-ticker.C:
+				}
 			}
-			select {
-			case <-stop:
-				sampled <- peak
-				return
-			case <-ticker.C:
-			}
-		}
-	}()
-	from := time.Now()
-	func() {
-		defer close(stop)
-		during()
-	}()
-	residentPeak := max(<-sampled, p.resident(t, "VmRSS"))
-	charged := p.peakCharged(t, from, time.Now())
-	if charged == 0 {
-		return residentPeak
+		}()
+		from = time.Now()
+		func() {
+			defer close(stop)
+			during()
+		}()
+		resident = max(<-sampled, p.resident(t, "VmRSS"))
 	}
-	t.Logf("peak resident memory %d MiB as the pod's kernel charges it, of %d MiB VmRSS, whose difference is memory the runtime had handed back and this kernel still counts",
-		charged>>20, residentPeak>>20)
-	return charged
+	peak := p.tracePeaks(t, from, time.Now())
+	peak.resident = resident
+	// VmHWM is the peak this kernel itself charged, with nothing the runtime released ever
+	// counted in it, and a step the trace holds no sample of - one shorter than
+	// memoryTraceInterval - leaves VmRSS as the only reading there is.
+	if keepsPeak || peak.samples == 0 {
+		peak.charged = resident
+	}
+	return peak
 }
 
-// peakCharged is the most the server's own trace (memory_trace.go) read between from and to of
-// what the pod's kernel would charge it: its resident memory less the heap it has released. It is
-// zero where the server writes no trace, as it does on a kernel that keeps a peak of its own,
-// and where the trace holds no whole sample in that window, as it does for a step shorter than
-// memoryTraceInterval; the caller then has only VmRSS.
-func (p *memoryServer) peakCharged(t *testing.T, from, to time.Time) int64 {
+// tracePeaks is what the server's own trace (memory_trace.go) read of its memory between from and
+// to: the charged and held peaks of podPeak, the Go memory limit the runtime held through them,
+// and how many samples it read. Its resident field is the caller's to fill. No sample falls in a
+// window shorter than memoryTraceInterval, and none at all where the server wrote no trace, which
+// leaves every field zero.
+func (p *memoryServer) tracePeaks(t *testing.T, from, to time.Time) podPeak {
 	t.Helper()
+	peak := podPeak{}
 	if p.trace == "" {
-		return 0
+		return peak
 	}
 	written, err := os.ReadFile(p.trace)
 	if err != nil {
 		t.Fatalf("read the server's memory trace %s: %v", p.trace, err)
 	}
-	peak := int64(0)
 	for _, line := range strings.Split(string(written), "\n") {
 		sample := map[string]string{}
 		for _, field := range strings.Fields(line) {
@@ -367,22 +409,28 @@ func (p *memoryServer) peakCharged(t *testing.T, from, to time.Time) int64 {
 		if err != nil || taken.Before(from) || taken.After(to) {
 			continue
 		}
-		resident, residentErr := strconv.ParseInt(sample["vmrss"], 10, 64)
-		released, releasedErr := strconv.ParseInt(sample["heap_released"], 10, 64)
-		if residentErr != nil || releasedErr != nil || resident <= 0 {
-			t.Fatalf("the server's memory trace holds a sample without its resident memory and released heap: %s", line)
+		read := func(field string) int64 {
+			value, err := strconv.ParseInt(sample[field], 10, 64)
+			if err != nil {
+				t.Fatalf("the server's memory trace holds a sample without its %s: %s", field, line)
+			}
+			return value
 		}
-		peak = max(peak, resident-released)
+		resident, released, total, limit := read("vmrss"), read("heap_released"), read("total"), read("go_memory_limit")
+		// A kernel that keeps none of a field writes -1 for it (memoryTraceStatus), and the
+		// runtime reports no class of memory as negative or its whole mapping as nothing.
+		if resident <= 0 || released < 0 || total <= 0 || limit <= 0 {
+			t.Fatalf("the server's memory trace holds a sample no kernel or runtime can have written: %s", line)
+		}
+		if peak.limit != 0 && limit != peak.limit {
+			t.Fatalf("the server's memory trace reads a Go memory limit of %d bytes and then of %d, so no one limit bounds the step: %s", peak.limit, limit, line)
+		}
+		peak.limit = limit
+		peak.charged = max(peak.charged, resident-released)
+		peak.held = max(peak.held, total-released)
+		peak.samples++
 	}
 	return peak
-}
-
-// kernelKeepsResidentPeak reports whether this kernel keeps a process's peak resident memory, the
-// VmHWM line of /proc/self/status, which Linux does and gVisor does not. It is read of this
-// process, which runs on the kernel every server does.
-func kernelKeepsResidentPeak() bool {
-	status, err := os.ReadFile("/proc/self/status")
-	return err == nil && strings.Contains(string(status), "VmHWM:")
 }
 
 type response struct {

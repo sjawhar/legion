@@ -41,6 +41,26 @@ const (
 	// the budget drives start their servers under, so they weigh the budget and not the library.
 	podMemory        = 4 << 30
 	podGoMemoryLimit = 3_865_470_566
+	// podGoMemoryLimitMargin is how far past that limit a drive lets the memory the limit bounds
+	// read - what the runtime has mapped less what it has handed back - before it fails the step
+	// (requireUnderThePod). The limit is what the collector steers the heap goal to, not a wall:
+	// an allocation of tens of MiB is mapped whole before the cycle it triggers can sweep or
+	// scavenge anything back, so a step that allocates in large pieces reads past the limit by
+	// megabytes. Measured at the runtime's own ratio on 2026-10-29, over the drives that weigh a
+	// server against the pod and more than one run of each: the rooms typed and pasted into
+	// stayed 2.1 GiB under the limit and the step that fills the budget a gibibyte under it; the
+	// burst of fifty browsers read from 8,094 bytes under it to 57,442 over; the burst of
+	// struct-dense documents from 142,809,214 under to 1,832,882 over; and the heaviest applies
+	// beside full copy bounds, whose frames and copies run to tens of MiB each, 5,240,914,
+	// 15,501,378 and 34,453,570 over. 128 MiB is three and a half times the worst of those, and
+	// still a bound on what a pod is charged: a step within it holds 3,999,688,294 bytes of the
+	// pod's 4,294,967,296, leaving 281 MiB for memory outside the runtime, which these steps
+	// read at 25 to 41 MiB - their charged peak less their held peak - in every one but the
+	// heaviest applies, where that difference was 22 MiB the other way, the double subtraction
+	// this margin is here to bound. That undercount - a release of 2 MiB or more subtracted
+	// twice, once as a page gVisor dropped from VmRSS and once as released heap - runs to
+	// hundreds of MiB over a step (peakResident, memory_harness_test.go).
+	podGoMemoryLimitMargin = 128 << 20
 
 	// These mirror constants of internal/dispatch/docs, which this package cannot read:
 	// roomBudgetBytes (room_budget.go:42), bytesOfHeapAnElement (:56), roomCopies (:594),
@@ -849,8 +869,9 @@ func TestTheHeaviestHandoffTheBoundsAllowIsNotClosedForSize(t *testing.T) {
 // same two ways, with the rooms of the browsers that stayed within one of the arithmetic. Then a
 // browser that stayed leaves just before the next asks: that browser is admitted into the room the
 // leaving freed, closed for it, and the one after it is refused. A browser that stayed keeps its
-// room, the server's peak resident memory stays under the pod's, and once the rest have left, a
-// browser is admitted again.
+// room, each step holds both the memory a pod's kernel would charge and the memory the server's
+// own Go limit bounds within what bounds them, and once the rest have left, a browser is
+// admitted again.
 //
 // Fifty at once, each browser hands back its whole state as soon as it has the room's, as the
 // editor does on every connect, and then edits: the budget admits within one room of the same
@@ -874,11 +895,13 @@ func TestTheHeaviestHandoffTheBoundsAllowIsNotClosedForSize(t *testing.T) {
 // answered no sooner than the loads before it can decode, whatever the counts do.
 //
 // Those runs' peaks, 3,717 to 3,802 MiB, were read as VmRSS, which on this sandbox counts the
-// pages the runtime has released as well (peakResident). Measured as the pod's kernel charges it,
-// what the runtime holds less what it has released, the run of 2026-10-29 peaked at 3,629 MiB
-// with the browsers coming one after another and 3,673 MiB over the burst, against VmRSS of 3,633
-// and 3,745 MiB, refusing the eleven by 23.2 s and admitting the last of the thirty-nine at
-// 1m27.7s, the whole drive in 378 s.
+// pages the runtime has released as well (peakResident). Read as a pod's kernel would charge it
+// and against the Go memory limit, both from the server's own trace (requireUnderThePod), the
+// run of 2026-10-29 charged 3,616 MiB with the browsers coming one after another and 3,727 MiB
+// over the burst, against VmRSS of 3,623 and 3,768 MiB, and held 3,755,968,168 and
+// 3,865,462,472 bytes of what the 3,865,470,566-byte limit bounds, 104 MiB and 8,094 bytes
+// under it; it refused the eleven by 24.3 s and admitted the last of the thirty-nine at
+// 1m37.7s, the whole drive in 388 s.
 func TestTheRoomBudgetRefusesWhereItsOwnArithmeticSays(t *testing.T) {
 	const burst, gone = 50, 5
 	memory := newMemoryHarness(t)
@@ -996,7 +1019,7 @@ func TestTheRoomBudgetRefusesWhereItsOwnArithmeticSays(t *testing.T) {
 				t.Errorf("the budget closed a room at %d -> %d of %d bytes to make room for %d, want a close that a reservation of %d needed and that made room for it", made.chargedBefore, made.charged, made.limit, made.makingRoomFor, fleet.reserved)
 			}
 		}
-		t.Logf("the first refusal came with %d rooms held by browsers that stayed, and the last, after one of them left and the next browser took its room, with %d (%v); peak resident memory %d MiB", firstRefusal, len(stayed), final, peak>>20)
+		t.Logf("the first refusal came with %d rooms held by browsers that stayed, and the last, after one of them left and the next browser took its room, with %d (%v)", firstRefusal, len(stayed), final)
 		for what, open := range map[string]int{"first": firstRefusal, "last": len(stayed)} {
 			if open < rooms-1 || open > rooms+1 {
 				t.Errorf("the %s refusal came with %d rooms held by browsers that stayed, want within one of the budget's %d", what, open, rooms)
@@ -1035,9 +1058,7 @@ func TestTheRoomBudgetRefusesWhereItsOwnArithmeticSays(t *testing.T) {
 				t.Errorf("a browser that stayed answers in its room, and the server says document %s is not live", held.room)
 			}
 		}
-		if peak >= podMemory {
-			t.Errorf("the server's resident memory peaked at %d MiB, want under the pod's %d MiB", peak>>20, podMemory>>20)
-		}
+		requireUnderThePod(t, peak, "the rooms opened one after another")
 
 		for _, held := range stayed {
 			held.leave()
@@ -1135,8 +1156,8 @@ func TestTheRoomBudgetRefusesWhereItsOwnArithmeticSays(t *testing.T) {
 				atEdit++
 			}
 		}
-		t.Logf("%d browsers at once: %d handed their state back and edited their rooms, the slowest answered after %s; %d refused at admission, the slowest after %s; %d answered 503; %d refused their handoff, %d their edit; peak resident memory %d MiB",
-			burst, applied, slowestAdmitted.Round(time.Millisecond), atAdmission, slowestRefused.Round(time.Millisecond), unavailable, atHandoff, atEdit, peak>>20)
+		t.Logf("%d browsers at once: %d handed their state back and edited their rooms, the slowest answered after %s; %d refused at admission, the slowest after %s; %d answered 503; %d refused their handoff, %d their edit",
+			burst, applied, slowestAdmitted.Round(time.Millisecond), atAdmission, slowestRefused.Round(time.Millisecond), unavailable, atHandoff, atEdit)
 		requireBudgetRefusals(t, server, fleet.reserved)
 		if applied+atAdmission != burst {
 			t.Errorf("%d browsers were admitted and %d refused by the budget, want every one of the %d one or the other", applied, atAdmission, burst)
@@ -1154,9 +1175,7 @@ func TestTheRoomBudgetRefusesWhereItsOwnArithmeticSays(t *testing.T) {
 				}
 			}
 		}
-		if peak >= podMemory {
-			t.Errorf("the server's resident memory peaked at %d MiB, want under the pod's %d MiB", peak>>20, podMemory>>20)
-		}
+		requireUnderThePod(t, peak, "the burst of fifty browsers")
 	})
 }
 
@@ -1188,20 +1207,23 @@ func TestTheRoomBudgetRefusesWhereItsOwnArithmeticSays(t *testing.T) {
 // 54,572,032, so the window runs from 435,720,192 bytes - what the eighth admission is weighed
 // against, three pairs charged whole beside the seventh room's reservation and the eighth's - to
 // one byte under 490,720,256, what the ninth is weighed against and is refused at; 448 MiB is
-// 469,762,048. Run so on 2026-10-29 the drive passed in 485, 503, 717 and 561 s, the 717 beside
-// five other containers on this sandbox: the first refusal came at room 9, the arithmetic's, the
-// largest structure part the budget read as it closed the eight rooms was the 428,032 bytes their
-// updates are priced at, and in the 561-second run the server's memory peaked at 1,518 MiB as the
-// pod's kernel charges it, of 1,521 MiB of VmRSS; the 1,490 to 1,509 MiB the earlier runs recorded
-// were VmRSS alone, which on this sandbox counts the pages the runtime has released as well
+// 469,762,048. Run so on 2026-10-29 the drive passed in 485, 503, 717, 561 and 543 s, the 717
+// beside five other containers on this sandbox: the first refusal came at room 9, the
+// arithmetic's, the largest structure part the budget read as it closed the eight rooms was the
+// 428,032 bytes their updates are priced at, and in the 543-second run the server charged
+// 1,524 MiB of a pod's memory, of 1,525 MiB of VmRSS, and held 1,556,343,672 bytes of what its
+// 3,865,470,566-byte Go limit bounds, 2.1 GiB under it; the 1,490 to 1,518 MiB the earlier runs
+// recorded were read before or without that second reading (requireUnderThePod), the older of
+// them as VmRSS alone, which on this sandbox counts the pages the runtime has released as well
 // (peakResident). The same drive against the real 2 GiB budget is 39 rooms: it passed in 2,511 s on
 // this sandbox on 2026-10-29, 41 m 2 s of that from its first admission
 // to the refusal, where CI runs the whole memory suite under one 60-minute deadline
 // (.github/workflows/envoy-and-contracts.yaml:1017). What the full budget costs in memory is not
 // this drive's to prove: the bursts that fill it,
 // TestTheRoomBudgetRefusesWhereItsOwnArithmeticSays
-// and TestABurstOfStructDenseDocumentsStaysUnderThePodsMemory, hold the server's peak resident
-// memory under the pod's 4 GiB, and this drive holds that same bound over its eight rooms.
+// and TestABurstOfStructDenseDocumentsStaysUnderThePodsMemory, hold what a pod's kernel would
+// charge under the pod's 4 GiB and what the Go limit bounds within it, and this drive holds those
+// same bounds over its eight rooms.
 //
 // The structure part charges a struct as one of its own with both the splits its integration can
 // cause, where ygo merges a run of typed characters back into one item and a keystroke splits one
@@ -1323,17 +1345,15 @@ func TestTheRoomBudgetDoesNotOverchargeTypingAndPasting(t *testing.T) {
 			time.Sleep(roomCountIntervalForTest + 2*time.Second)
 		}
 	})
-	t.Logf("the first refusal came at room %d, the arithmetic's %d, after %s; peak resident memory %d MiB, against the pod's %d MiB",
-		refusedAt, admits+1, time.Since(started).Round(time.Second), peak>>20, podMemory>>20)
+	t.Logf("the first refusal came at room %d, the arithmetic's %d, after %s",
+		refusedAt, admits+1, time.Since(started).Round(time.Second))
 	if refusedAt == 0 {
 		t.Fatalf("the budget admitted all %d rooms, want it to refuse room %d", len(fleet.copies), admits+1)
 	}
 	if refusedAt < admits || refusedAt > admits+2 {
 		t.Errorf("the first refusal came at room %d, want within one of the arithmetic's %d", refusedAt, admits+1)
 	}
-	if peak >= podMemory {
-		t.Errorf("the server's resident memory peaked at %d MiB, want under the pod's %d MiB", peak>>20, podMemory>>20)
-	}
+	requireUnderThePod(t, peak, "the rooms typed and pasted into")
 
 	// Each room's charge, read as the budget closes it once its browser has gone and it has
 	// settled: a budget of one byte closes every room nothing holds.
@@ -1455,8 +1475,9 @@ func typedAndPasted(t *testing.T, state []byte, keystrokes, runs, pasteBytes int
 // which makes it closable (unusedLocked, internal/dispatch/docs/roomstate.go:290-294), has been
 // closed the same way; that once the held rooms are past the budget the next browser is refused
 // with 4503 and DOC_BUSY at admission; that each held room's insert is then refused the same way
-// while a delete applies; and that the server's peak resident memory, as the pod's kernel
-// charges it (peakResident), stays under the pod's throughout. The documents hold every paste
+// while a delete applies; and that the memory a pod's kernel would charge the server stays under
+// the pod's throughout, with what its Go memory limit bounds within that limit
+// (requireUnderThePod). The documents hold every paste
 // their rooms took, none they were refused, the delete, and nowhere the text of the probe every
 // held room refused.
 func TestTheRoomBudgetFollowsGrowingRoomsAndClosesTheGoneOnesFirst(t *testing.T) {
@@ -1620,8 +1641,8 @@ func TestTheRoomBudgetFollowsGrowingRoomsAndClosesTheGoneOnesFirst(t *testing.T)
 			early++
 		}
 	}
-	t.Logf("%d pastes refused, the first on pass %d to room %d after it took %d, %d of them before any browser left; the next browser and every held room's insert refused, every held room's delete applied; peak resident memory %d MiB",
-		len(refusals), refusals[0].pass, refusals[0].room, refusals[0].took, early, peak>>20)
+	t.Logf("%d pastes refused, the first on pass %d to room %d after it took %d, %d of them before any browser left; the next browser and every held room's insert refused, every held room's delete applied",
+		len(refusals), refusals[0].pass, refusals[0].room, refusals[0].took, early)
 	requireBudgetRefusals(t, server, small.reserved)
 	closes := closesOf(t, server, left, 0)
 	for _, made := range closes {
@@ -1645,9 +1666,7 @@ func TestTheRoomBudgetFollowsGrowingRoomsAndClosesTheGoneOnesFirst(t *testing.T)
 			t.Errorf("room %d reads the probe its room refused", index)
 		}
 	}
-	if peak >= podMemory {
-		t.Errorf("the server's resident memory peaked at %d MiB, want under the pod's %d MiB", peak>>20, podMemory>>20)
-	}
+	requireUnderThePod(t, peak, "the growing rooms")
 }
 
 // A server whose open documents fill the real budget - no test hook shrinks it - with every room
@@ -1662,8 +1681,9 @@ func TestTheRoomBudgetFollowsGrowingRoomsAndClosesTheGoneOnesFirst(t *testing.T)
 // and the unrecorded-mark sweep writes, in a room a browser holds and in one no room held when the
 // budget filled: each such room the server's own work opened over the budget is closed once its
 // settlement has ended (closeIfOpenedOverBudget, :1507-1532), read from its absence (roomLive) and
-// from the line the server logs for the close. The server's peak resident memory stays under the
-// pod's throughout.
+// from the line the server logs for the close. The memory a pod's kernel would charge the server
+// stays under the pod's throughout, and what its Go memory limit bounds within that limit
+// (requireUnderThePod).
 //
 // The budget is filled the way the server reaches a full one. An admission never takes it past its
 // limit, since a room is charged at both copies from its reservation on (roomCopies), so browsers
@@ -1937,10 +1957,7 @@ func TestAFullServerRefusesWhatGrowsAndTakesWhatShrinks(t *testing.T) {
 		requireClosedOnceSettled(t, memory, server, unheld, "the room the mark sweep wrote in on the full server")
 		t.Log("the sweep removed the unrecorded mark from the document no room held, and its room was closed once its settlement ended")
 	})
-	t.Logf("peak resident memory %d MiB", peak>>20)
-	if peak >= podMemory {
-		t.Errorf("the server's resident memory peaked at %d MiB, want under the pod's %d MiB", peak>>20, podMemory>>20)
-	}
+	requireUnderThePod(t, peak, "the full server")
 }
 
 // The room budget charges a room the structs the server's own writes add to it, over a real
@@ -2048,8 +2065,9 @@ const gcFloodClient = 5_000_000
 // part with nothing it can close, refuses one with 4503 and DOC_BUSY; and the next room's browser
 // is refused 4503 at admission. The line the server logs for that refusal names what the open rooms
 // are charged (budgetRefusalLine), which must exceed what their admissions reserved by at least the
-// structure price of every struct the rooms took. The server's peak resident memory, as the
-// pod's kernel charges it (peakResident), stays under the pod's.
+// structure price of every struct the rooms took. The memory a pod's kernel would charge the
+// server stays under the pod's, and what its Go memory limit bounds within that limit
+// (requireUnderThePod).
 //
 // The struct total counts each struct of an update with its two splits against the decode cap,
 // and confirms a refusal by the exact count of the structs the room holds (countRoomStructs,
@@ -2157,17 +2175,15 @@ func TestABrowserThatIsNotTheEditorIsChargedWhatItAdds(t *testing.T) {
 	last := refusals[len(refusals)-1]
 	reserved := int64(len(outcomes)) * small.reserved
 	added := int64(admitted*structs) * perStruct
-	t.Logf("%d rooms took %d updates, %d GC structs, before a browser was refused at %d of %d bytes charged: %d past what their admissions reserved (%d), against %d for the structs' structure; peak resident memory %d MiB",
-		len(outcomes), admitted, admitted*structs, last.charged, last.limit, last.charged-reserved, reserved, added, peak>>20)
+	t.Logf("%d rooms took %d updates, %d GC structs, before a browser was refused at %d of %d bytes charged: %d past what their admissions reserved (%d), against %d for the structs' structure",
+		len(outcomes), admitted, admitted*structs, last.charged, last.limit, last.charged-reserved, reserved, added)
 	if admitted == 0 {
 		t.Error("no room took an update, want each to take some before a refusal")
 	}
 	if grew := last.charged - reserved; grew < added {
 		t.Errorf("the rooms' charge grew by %d bytes for %d GC structs, want at least %d, %d a struct", grew, admitted*structs, added, perStruct)
 	}
-	if peak >= podMemory {
-		t.Errorf("the server's resident memory peaked at %d MiB, want under the pod's %d MiB", peak>>20, podMemory>>20)
-	}
+	requireUnderThePod(t, peak, "the rooms a browser that is not the editor fed")
 }
 
 // A browser cannot push a document past the decode cap, over a real document socket of a real
@@ -2397,10 +2413,14 @@ const longEditFixturePath = "../../internal/dispatch/docs/testdata/long_edited_d
 
 // A burst of browsers opening struct-dense documents that render little, all at once, under the
 // Go limit a 4 GiB pod gives the server and at the runtime's own collector ratio, which the
-// server leaves alone, keeps the memory the pod's kernel charges it (peakResident) under the
-// pod's 4 GiB: 3,570 MiB on 2026-10-29, of 3,573 MiB of VmRSS, in a drive of 294 s. The 2,660 to
-// 3,727 MiB earlier runs recorded were VmRSS alone, which on this sandbox counts the pages the
-// runtime has released as well. The burst is eight copies each
+// server leaves alone, keeps the memory a pod's kernel would charge it under the pod's 4 GiB and
+// what the Go limit bounds within that limit (requireUnderThePod): 3,584 MiB charged on
+// 2026-10-29, of 3,604 MiB of VmRSS, with 3,722,661,352 bytes held of what the 3,865,470,566-byte
+// limit bounds, 136 MiB under it, in a drive of 320 s. A run of the same drive that day charged
+// 3,708 MiB and held 14 MiB under the limit, and one before the held reading was asserted read
+// 1,832,882 bytes past it (podGoMemoryLimitMargin). The 2,660 to 3,727 MiB earlier runs recorded
+// were VmRSS alone, which on this sandbox counts the pages the runtime has released as well
+// (peakResident). The burst is eight copies each
 // of the two struct-dense shapes a room keeps - the long-edited 5 KiB document typed on until
 // its state stands at the decode cap
 // (longEditedTypedTo), and the document an agent rewrote whole through the API until the decode
@@ -2512,15 +2532,13 @@ func TestABurstOfStructDenseDocumentsStaysUnderThePodsMemory(t *testing.T) {
 		t.Logf("%s: %d admitted, %d refused", shape, admitted[shape], refused[shape])
 	}
 	dense := admitted[longEdited.name] + admitted[agent.name]
-	t.Logf("%d browsers at once: %d admitted to struct-dense rooms and %d to rooms of prose, %d bytes reserved at admission against the %d-byte budget, in %s; peak resident memory %d MiB, against the pod's %d MiB",
-		len(burst), dense, admitted[ordinary], admittedReserved, roomBudgetBytesForTest, took.Round(time.Second), peak>>20, podMemory>>20)
+	t.Logf("%d browsers at once: %d admitted to struct-dense rooms and %d to rooms of prose, %d bytes reserved at admission against the %d-byte budget, in %s",
+		len(burst), dense, admitted[ordinary], admittedReserved, roomBudgetBytesForTest, took.Round(time.Second))
 	logHeapGrants(t, "the burst", heapGrants(t, server.output.String()))
 	if most := roomBudgetBytesForTest / min(longEdited.reserved, agent.reserved); dense == 0 || int64(dense) > most {
 		t.Errorf("%d struct-dense rooms were admitted, want at least one and no more than the %d their structs' price fits in the budget", dense, most)
 	}
-	if peak >= podMemory {
-		t.Errorf("the server's resident memory peaked at %d MiB, want under the pod's %d MiB", peak>>20, podMemory>>20)
-	}
+	requireUnderThePod(t, peak, "the burst of struct-dense documents")
 }
 
 // The worst case the room budget and the two heap bounds leave the pod, run at once under the Go
@@ -2530,9 +2548,10 @@ func TestABurstOfStructDenseDocumentsStaysUnderThePodsMemory(t *testing.T) {
 // each decode weighed past the copy-heap bound and holding all of it. An apply past its bound runs
 // alone among applies but not among copies, so this is the sum the bounds allow: 2 GiB of rooms,
 // 256 MiB of cache, a handoff estimated at 904 MB beside a copy at its whole 394 MB bound,
-// 3,714,003,040 bytes by the estimates, inside the 3,865,470,566-byte Go limit. The memory the
-// pod's kernel charges the server (peakResident) stays under the pod's 4 GiB through every step,
-// and every honest handoff, load and fold completes.
+// 3,714,003,040 bytes by the estimates, inside the 3,865,470,566-byte Go limit. The memory a
+// pod's kernel would charge the server stays under the pod's 4 GiB through every step, and what
+// the Go limit bounds stays within that limit and its margin (requireUnderThePod), and every
+// honest handoff, load and fold completes.
 //
 // What the garbage of all that work does to that memory is the collector's, at the runtime's own
 // ratio: the server reads and sets no GOGC, and the boot line this drive reads at the start is
@@ -2540,9 +2559,14 @@ func TestABurstOfStructDenseDocumentsStaysUnderThePodsMemory(t *testing.T) {
 // heap goal of a server whose budget is full is the limit itself, so the collector keeps every
 // byte of garbage the limit allows - and the limit bounds exactly what a pod's kernel charges,
 // what the runtime holds less what it has released. Measured on 2026-10-29, the three steps below
-// charged 2,563, 3,605 and 3,665 MiB of the pod's 4,096, 431 MiB under it, in a drive of 402 s,
-// and the keystrokes a person typed through the two heavy steps were answered in a 99th
-// percentile of 185 ms. VmRSS over the same run read 2,601, 3,615 and 4,171 MiB: the difference
+// charged 2,669, 3,578 and 3,669 MiB of the pod's 4,096, 427 MiB under it at their worst, in a
+// drive of 412 s, and the keystrokes a person typed through the two heavy steps were answered in
+// 99th percentiles of 95 and 272 ms. Of what the Go limit bounds the same steps held
+// 2,772,696,200, 3,717,172,712 and 3,870,711,480 bytes, the last 5,240,914 past the limit, which
+// is the step that reads past it: over three runs it read 5,240,914, 15,501,378 and 34,453,570
+// bytes over, the allocation of a frame or a copy of tens of MiB mapped before the cycle it
+// triggers can hand anything back (podGoMemoryLimitMargin). VmRSS over the measured run read
+// 2,682, 3,587 and 4,361 MiB, the last 265 MiB past the pod itself: the difference
 // is the pages the runtime released and gVisor keeps resident, which no unsandboxed pod is
 // charged (peakResident; the GKE Autopilot deployment names no runtimeClassName or GKE Sandbox
 // node pool, infra/gcp/dispatch_kube.go:492-501). The 4,302 and 4,424 MiB this drive once
@@ -2571,8 +2595,9 @@ func TestABurstOfStructDenseDocumentsStaysUnderThePodsMemory(t *testing.T) {
 // The server logs each grant of either bound that waited or held its whole bound (heapGrantLine),
 // from which the drive reads that a handoff holding the whole apply bound and a copy holding the
 // whole copy bound were held at the same moment, so the worst case did happen, and the longest wait
-// either bound made. It logs those beside each step's peak and duration, and the keystrokes'
-// latencies at their 50th, 90th and 99th percentiles and their most.
+// either bound made. It logs those beside each step's duration, each step's three readings of
+// what it left the server holding (requireUnderThePod), and the keystrokes' latencies at their
+// 50th, 90th and 99th percentiles and their most.
 func TestTheHeaviestApplyBesideAFullCopyBoundStaysUnderThePodsMemory(t *testing.T) {
 	const folds = 4
 	building := time.Now()
@@ -2637,8 +2662,8 @@ func TestTheHeaviestApplyBesideAFullCopyBoundStaysUnderThePodsMemory(t *testing.
 			open(t, room)
 		}
 	})
-	t.Logf("the budget is filled: the room a person types in, two rooms at F held by %d browsers and %d rooms at the decode cap, in %s; peak resident memory %d MiB, %d MiB resident now",
-		len(handing), len(filling), time.Since(step).Round(time.Second), filledPeak>>20, server.resident(t, "VmRSS")>>20)
+	t.Logf("the budget is filled: the room a person types in, two rooms at F held by %d browsers and %d rooms at the decode cap, in %s; %d MiB resident now",
+		len(handing), len(filling), time.Since(step).Round(time.Second), server.resident(t, "VmRSS")>>20)
 
 	// From here through the heaviest applies a person types in the room they opened first.
 	typist := startTyping(t, typing)
@@ -2652,8 +2677,8 @@ func TestTheHeaviestApplyBesideAFullCopyBoundStaysUnderThePodsMemory(t *testing.
 		}
 	})
 	retained := server.resident(t, "VmRSS") - before
-	t.Logf("the cache is filled by %d cold reads, in %s: %d MiB more resident than before them; peak resident memory %d MiB",
-		len(cached), time.Since(step).Round(time.Second), retained>>20, cachePeak>>20)
+	t.Logf("the cache is filled by %d cold reads, in %s: %d MiB more resident than before them",
+		len(cached), time.Since(step).Round(time.Second), retained>>20)
 	if retained < documentReadBudgetForTest/2 {
 		t.Errorf("filling the cache left %d MiB more resident, want at least %d MiB, so the cache holds what the worst case counts", retained>>20, (documentReadBudgetForTest/2)>>20)
 	}
@@ -2803,8 +2828,8 @@ func TestTheHeaviestApplyBesideAFullCopyBoundStaysUnderThePodsMemory(t *testing.
 	logHeapGrants(t, "the heaviest applies beside full copy bounds", grants)
 	logHeapGrants(t, "the whole run", heapGrants(t, server.output.String()))
 	overlap, pairs := longestOverlap(applyAlone, copyAlone)
-	t.Logf("the heaviest applies beside full copy bounds, in %s: %d handoffs held the whole apply bound and %d decodes the whole copy bound; %d pairs of them were held at once, the longest for %s; peak resident memory %d MiB, against the pod's %d MiB",
-		took.Round(time.Second), len(applyAlone), len(copyAlone), pairs, overlap.Round(time.Millisecond), worstPeak>>20, podMemory>>20)
+	t.Logf("the heaviest applies beside full copy bounds, in %s: %d handoffs held the whole apply bound and %d decodes the whole copy bound; %d pairs of them were held at once, the longest for %s",
+		took.Round(time.Second), len(applyAlone), len(copyAlone), pairs, overlap.Round(time.Millisecond))
 	if len(applyAlone) < len(handing) {
 		t.Errorf("%d grants held the whole apply bound, want one for each of the %d handoffs at F", len(applyAlone), len(handing))
 	}
@@ -2814,11 +2839,15 @@ func TestTheHeaviestApplyBesideAFullCopyBoundStaysUnderThePodsMemory(t *testing.
 	if pairs == 0 {
 		t.Error("no handoff held the whole apply bound while a decode held the whole copy bound: the worst case did not happen")
 	}
-	t.Logf("peak resident memory by step: the budget filled %d MiB, the cache filled %d MiB, the heaviest applies beside full copy bounds %d MiB", filledPeak>>20, cachePeak>>20, worstPeak>>20)
-	for _, peak := range []int64{filledPeak, cachePeak, worstPeak} {
-		if peak >= podMemory {
-			t.Errorf("the server's resident memory peaked at %d MiB, want under the pod's %d MiB", peak>>20, podMemory>>20)
-		}
+	for _, measured := range []struct {
+		step string
+		peak podPeak
+	}{
+		{"the budget filled", filledPeak},
+		{"the cache filled", cachePeak},
+		{"the heaviest applies beside full copy bounds", worstPeak},
+	} {
+		requireUnderThePod(t, measured.peak, measured.step)
 	}
 }
 
@@ -3493,6 +3522,38 @@ func requirePodGoMemoryLimit(t *testing.T, server *memoryServer) {
 	want := "go_memory_limit_bytes=" + strconv.Itoa(podGoMemoryLimit)
 	if !strings.Contains(server.output.String(), want) {
 		t.Fatalf("the server's boot did not log %s:\n%s", want, server.output.tail())
+	}
+}
+
+// requireUnderThePod logs what the step called step left the server holding, and fails the drive
+// unless both readings of it stayed within their bound (podPeak, memory_harness_test.go): what a
+// pod's kernel would charge, under the pod's memory, and what the runtime had mapped and not
+// handed back, within podGoMemoryLimitMargin of the Go memory limit the server ran under.
+//
+// Neither reading alone proves the step. The charged one subtracts the released heap from VmRSS,
+// which under gVisor is right for the scattered releases it keeps resident and wrong, by the
+// amount released, for one of 2 MiB or more, which it drops from VmRSS as well; the held one is
+// the runtime's own accounting, which no kernel touches, and the limit it is weighed against is
+// 0.9 of the pod's memory, so a charge the first undercounts by enough to matter is a step the
+// second fails. A step the server's trace holds no sample of was read neither way and fails here
+// rather than passing on VmRSS alone.
+func requireUnderThePod(t *testing.T, peak podPeak, step string) {
+	t.Helper()
+	if peak.samples == 0 {
+		t.Errorf("%s: the server's memory trace holds no sample of the step, so neither what a pod's kernel would charge nor what its Go memory limit bounds was read of it; VmRSS peaked at %d MiB", step, peak.resident>>20)
+		return
+	}
+	t.Logf("%s: a pod's kernel would charge %d MiB at most, against the pod's %d MiB; the runtime held %d bytes at most of what its %d-byte limit bounds (%+d); VmRSS peaked at %d MiB; %d trace samples",
+		step, peak.charged>>20, podMemory>>20, peak.held, peak.limit, peak.held-peak.limit, peak.resident>>20, peak.samples)
+	if peak.limit != podGoMemoryLimit {
+		t.Errorf("%s: the server ran under a Go memory limit of %d bytes, want the %d a 4 GiB pod gives it: nothing the drive can weigh bounded what the runtime held", step, peak.limit, podGoMemoryLimit)
+	}
+	if peak.charged >= podMemory {
+		t.Errorf("%s: the server's memory peaked at %d MiB as a pod's kernel would charge it, want under the pod's %d MiB", step, peak.charged>>20, podMemory>>20)
+	}
+	if peak.held > peak.limit+podGoMemoryLimitMargin {
+		t.Errorf("%s: the runtime held %d bytes of what its memory limit bounds, %d past the %d-byte limit, want no more than the %d bytes of margin a limit's overshoot takes: VmRSS less the released heap, %d bytes, read the pod's charge too low",
+			step, peak.held, peak.held-peak.limit, peak.limit, podGoMemoryLimitMargin, peak.charged)
 	}
 }
 
