@@ -196,8 +196,8 @@ stop timeout, which Dispatch's task definition leaves unset, `stop_grace_period`
 `deploy/compose/dispatch.compose.yml`, and the pod `infra`'s `gcp:Dispatch` renders, whose
 `terminationGracePeriodSeconds` is this value plus its five-second pre-stop wait, which the
 kubelet spends inside the same period - `cmd/dispatch/pod_grace_period_test.go` fails when the
-pod's budget stops covering it). Every open event stream ends at the signal through
-`api.Deps.Lifetime`, so HTTP shutdown waits only for the requests in flight, and it waits for them
+pod's budget stops covering it). Every open event stream ends at the signal through the lifetime
+`api.Register` takes, so HTTP shutdown waits only for the requests in flight, and it waits for them
 first, with no deadline of its own. The document service starts when they are done, or 11 s after
 the signal with some still running (`httpDrainBeforeDocuments`, `dispatch: settle documents with
 requests still in flight`), and gets `documentShutdownTimeout`, 5 s more than its drain budget
@@ -353,9 +353,9 @@ which every committed append and every load notes and whose one worker compacts 
 has 16 rows older than two minutes after its first row (`compactMinRows`) or one row after its
 first older than 15 minutes (`compactMaxTailAge`), retrying a compaction that found the lock busy,
 was dropped or failed after 1 s, doubling to 1 min; and the hourly sweep (`RunCompactionSweep`,
-lease `document-compaction`, first tick within 30 s of start, then every 10 minutes give or take
-one), which compacts every document due by the same rule whether or not NATS is configured, and
-so catches what a restart, `Shutdown` or `Quiesce` dropped from a queue. The sweep reads only the
+lease `document-compaction`, a `duty.RunLeased` ticker of one hour whose first tick is at start),
+which compacts every document due by the same rule whether or not NATS is configured, and so
+catches what a restart, `Shutdown` or `Quiesce` dropped from a queue. The sweep reads only the
 documents `doc_compaction_owed` (migration `0137`) names, never a scan of `doc_updates`: every
 append names its document there in the statement that inserts its row once that row is not the
 document's first, a compaction that leaves no row above its fold point removes it in its write's

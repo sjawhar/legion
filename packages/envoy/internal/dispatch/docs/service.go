@@ -1105,12 +1105,18 @@ func (s *Service) scheduleSettleAfterAppend(room string) {
 }
 
 func (s *Service) retrySettleSoon(room string) {
-	if s.stopping.Load() || s.shuttingDown(room) {
+	s.settleAfter(room, 10*time.Millisecond)
+}
+
+// settleAfter arms the document's settlement to run after delay, replacing the timer armed for it,
+// unless the service or the room is shutting down.
+func (s *Service) settleAfter(artifactID string, delay time.Duration) {
+	if s.stopping.Load() || s.shuttingDown(artifactID) {
 		return
 	}
-	state := s.lockState(room)
-	defer s.unlockState(room, state)
-	s.scheduleSettleAfterLocked(room, state, 10*time.Millisecond)
+	state := s.lockState(artifactID)
+	defer s.unlockState(artifactID, state)
+	s.scheduleSettleAfterLocked(artifactID, state, delay)
 }
 
 // nextRoomGeneration is the generation a state moves to when something invalidates what a
@@ -2193,6 +2199,15 @@ func referenceSource(event model.Event, artifactID string) (string, string, bool
 // ScheduleSettlement queues the document closer after its caller's transaction commits.
 func (s *Service) ScheduleSettlement(artifactID string) {
 	s.scheduleSettle(artifactID)
+}
+
+// SettleNow arms the document's settlement to run at once rather than at the end of the settle
+// window, as a settlement retry is armed (retrySettleSoon): it replaces the timer a write armed, and
+// a settlement with nothing owed writes nothing. Nothing in production calls it. It exists for
+// tests that hold a write unsettled across a window wide enough to land another write in it: once
+// that write has landed, the test settles the document now instead of waiting the window out.
+func (s *Service) SettleNow(artifactID string) {
+	s.settleAfter(artifactID, 0)
 }
 
 type BlockIDBackfill struct {

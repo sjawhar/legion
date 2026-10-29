@@ -9,7 +9,6 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
-	"math/rand/v2"
 	"time"
 
 	"github.com/jackc/pgx/v5"
@@ -28,46 +27,25 @@ const (
 	compactionSweepPeriod = time.Hour
 )
 
-// compactionSweepFirstTick is the span the sweep's first tick is drawn from, uniformly, after it
-// starts: soon enough that a document a restart dropped from the queue folds within its
-// compactMaxTailAge and an hour, and spread so the processes a deploy starts together do not all
-// read the database at one moment. compactionSweepInterval is the wait between later ticks, give or
-// take compactionSweepJitter: six ticks an aligned hour, so a process that boots or takes the
-// lease late in the hour still makes the hour's pass when the process that held it went away.
-const (
-	compactionSweepFirstTick = 30 * time.Second
-	compactionSweepInterval  = 10 * time.Minute
-	compactionSweepJitter    = time.Minute
-)
-
 // RunCompactionSweep compacts, once an aligned hour across every process that serves the database
 // and across restarts (duty.Exclusive, compactionSweepLease), every document due a compaction by
 // the queue's own rule (checkCompaction): a row after its first older than compactMaxTailAge, or
-// compactMinRows of them older than compactTail. It runs until ctx ends. Its first tick comes within
-// compactionSweepFirstTick of its start, then one every compactionSweepInterval, jittered; a tick
-// in an hour some process has already swept skips. It runs whether or not NATS is configured: the
-// compaction is what keeps text a write deleted out of doc_updates and its backups, and it needs
-// nothing but the database. leases is required, as it is of every leased loop.
+// compactMinRows of them older than compactTail. It runs until ctx ends. Its ticks are
+// duty.RunLeased's, a ticker's of compactionSweepPeriod: the first at the moment it starts, so a
+// document a restart dropped from the queue is swept at once unless some process has already swept
+// this hour, then one each period, which falls in the next aligned hour while a pass takes less
+// than an hour. It runs whether or not NATS is configured: the compaction is what keeps text a
+// write deleted out of doc_updates and its backups, and it needs nothing but the database. leases
+// is required, as it is of every leased loop.
 func (s *Service) RunCompactionSweep(ctx context.Context, leases duty.Leases) {
 	ctx = store.WithTransactionTracking(ctx)
-	// #nosec G404 — jitter, not a secret.
-	wait := time.Duration(rand.Int64N(int64(compactionSweepFirstTick)))
-	for {
-		select {
-		case <-ctx.Done():
-			return
-		case <-time.After(wait):
-		}
-		s.compactionSweepTick(ctx, leases)
-		// #nosec G404 — jitter, not a secret.
-		wait = compactionSweepInterval - compactionSweepJitter + time.Duration(rand.Int64N(int64(2*compactionSweepJitter)))
-	}
+	duty.RunLeased(ctx, leases, compactionSweepLease, compactionSweepPeriod, duty.TickAtStart, s.compactionSweepPass)
 }
 
-// compactionSweepTick is one tick of the sweep: the pass, when this process takes the lease and no
-// process has swept this hour.
+// compactionSweepTick is one tick of the sweep, due now: the pass, when this process takes the
+// lease and no process has swept this hour.
 func (s *Service) compactionSweepTick(ctx context.Context, leases duty.Leases) {
-	duty.Exclusive(ctx, leases, compactionSweepLease, compactionSweepPeriod, s.compactionSweepPass)
+	duty.Exclusive(ctx, leases, compactionSweepLease, time.Now(), compactionSweepPeriod, s.compactionSweepPass)
 }
 
 // compactionSweepPass lists the documents with rows to fold (compactionCandidates) and tries each

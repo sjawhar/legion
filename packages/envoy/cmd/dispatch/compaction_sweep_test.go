@@ -17,7 +17,7 @@ import (
 // Dispatch run with DISPATCH_NATS_DISABLED=1 compacts the documents it never opened: a log whose
 // rows came of age before the process started - written by the process a restart replaced, which
 // held them in a compaction queue that went with it - folds into its head within the sweep's first
-// tick, which comes within 30 s of the boot, and the document reads as it did.
+// tick, which comes at the boot, and the document reads as it did.
 func TestTheCompactionSweepFoldsABackdatedLogWithNATSDisabled(t *testing.T) {
 	ctx := context.Background()
 	database := storetest.Open(t)
