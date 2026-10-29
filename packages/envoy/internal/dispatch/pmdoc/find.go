@@ -158,21 +158,15 @@ func NewQuoteFinder(doc *Node) *QuoteFinder {
 
 // Find is FindQuote(doc, quote, occurrence, near): the same range or the same error.
 func (f *QuoteFinder) Find(quote string, occurrence, near *int) (Range, error) {
-	return f.find(quote, occurrence, near, true)
-}
-
-// FindDiscardingMiss is Find for a caller that drops a miss: where Find returns an
-// *ErrQuoteNotFound, it returns ErrTargetNotFound itself, without ranking the document's blocks
-// for the nearest ones, which costs another walk of the document a miss. Every other result is
-// Find's.
-func (f *QuoteFinder) FindDiscardingMiss(quote string, occurrence, near *int) (Range, error) {
-	return f.find(quote, occurrence, near, false)
+	return f.find(quote, occurrence, near)
 }
 
 // NearestFirst is every range quote matches, as Find matches it, ordered as Find with near chooses
 // among them: the nearest to near first, and of two as near, the earlier. Find with near returns
-// its first. A quote that matches nothing is ErrTargetNotFound, as FindDiscardingMiss answers it.
-// A caller whose first choice cannot carry what it writes there takes the next.
+// its first. A quote that matches nothing is ErrTargetNotFound itself, without ranking the
+// document's blocks for the nearest ones the way Find's miss does, which costs another walk of the
+// document: a caller that drops the miss pays nothing to describe it. A caller whose first choice
+// cannot carry what it writes there takes the next.
 func (f *QuoteFinder) NearestFirst(quote string, near int) ([]Range, error) {
 	matches, err := f.matches(quote)
 	if err != nil {
@@ -181,17 +175,24 @@ func (f *QuoteFinder) NearestFirst(quote string, near int) ([]Range, error) {
 	if len(matches) == 0 {
 		return nil, ErrTargetNotFound
 	}
+	slices.SortFunc(matches, nearerFirst(near))
 	ranges := make([]Range, len(matches))
 	for index, match := range matches {
 		ranges[index] = match.Range
 	}
-	slices.SortStableFunc(ranges, func(left, right Range) int {
+	return ranges, nil
+}
+
+// nearerFirst orders two matches of one quote as Find with near chooses between them: the nearer to
+// near first, and of two as near, the earlier. NearestFirst sorts by it and Find takes its least,
+// so the range Find chooses and the first NearestFirst lists are one rule, held in one place.
+func nearerFirst(near int) func(left, right quoteMatch) int {
+	return func(left, right quoteMatch) int {
 		if byDistance := distance(left.From, near) - distance(right.From, near); byDistance != 0 {
 			return byDistance
 		}
 		return left.From - right.From
-	})
-	return ranges, nil
+	}
 }
 
 // matches is every match of quote in the finder's document, preparing the document at the first
@@ -215,23 +216,17 @@ func (f *QuoteFinder) matches(quote string) ([]quoteMatch, error) {
 	return quoteMatches(f.text, quote), nil
 }
 
-func (f *QuoteFinder) find(quote string, occurrence, near *int, describeMiss bool) (Range, error) {
+func (f *QuoteFinder) find(quote string, occurrence, near *int) (Range, error) {
 	matches, err := f.matches(quote)
 	if err != nil {
 		return Range{}, err
 	}
 	doc, text := f.doc, f.text
 	if len(matches) == 0 {
-		if !describeMiss {
-			return Range{}, ErrTargetNotFound
-		}
 		return Range{}, quoteNotFound(doc, quote)
 	}
 	if occurrence != nil {
 		if *occurrence < 0 || *occurrence >= len(matches) {
-			if !describeMiss {
-				return Range{}, ErrTargetNotFound
-			}
 			miss := quoteNotFound(doc, quote)
 			var missing *ErrQuoteNotFound
 			if errors.As(miss, &missing) {
@@ -245,16 +240,9 @@ func (f *QuoteFinder) find(quote string, occurrence, near *int, describeMiss boo
 		return matches[0].Range, nil
 	}
 	if near != nil {
-		best := matches[0]
-		bestDistance := distance(best.From, *near)
-		for _, match := range matches[1:] {
-			candidateDistance := distance(match.From, *near)
-			if candidateDistance < bestDistance || (candidateDistance == bestDistance && match.From < best.From) {
-				best = match
-				bestDistance = candidateDistance
-			}
-		}
-		return best.Range, nil
+		// MinFunc returns the first least match, which nearerFirst's earlier-of-two-as-near tie
+		// makes the first NearestFirst lists.
+		return slices.MinFunc(matches, nearerFirst(*near)).Range, nil
 	}
 
 	candidates := make([]Candidate, 0, len(matches))

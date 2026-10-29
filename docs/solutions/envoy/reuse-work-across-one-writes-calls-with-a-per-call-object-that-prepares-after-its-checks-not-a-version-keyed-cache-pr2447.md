@@ -34,7 +34,8 @@ search or one mark per open anchor:
 
 ## Evidence
 
-- `pmdoc/find.go:111` (`QuoteFinder`: `prepared`, `err`, `FindDiscardingMiss`) and `:1040`
+- `pmdoc/find.go:111` (`QuoteFinder`: `prepared`, `err`, `NearestFirst`, whose miss is
+  `ErrTargetNotFound` itself, ranking no nearest blocks) and `:1040`
   (`MarkWriter.Mark` reads `yTextRanges` only after `MarkRange`'s range, type and nesting checks).
   `FindQuote` and `MarkRange` are their one-shot calls.
 - `ReplaceText` (`docs/mutation.go`) builds one finder and one writer for each upload. A dropped

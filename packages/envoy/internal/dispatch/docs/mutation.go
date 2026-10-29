@@ -643,16 +643,25 @@ func (s *Service) ReplaceText(ctx context.Context, artifactID, markdown string, 
 						ID:    reanchor.mark.anchor.MarkID,
 						Attrs: reanchor.attrs,
 					}.pmMark()
+					// Every occurrence the schema refuses the mark on is kept, so a quote with
+					// nowhere left to stand names each place it stands rather than the last one
+					// tried, and one fix of the markdown resolves the upload.
 					var refused error
+					var notAllowed []error
 					for _, occurrence := range occurrences {
 						refused = writer.Mark(txn, occurrence, mark)
 						if !errors.Is(refused, pmdoc.ErrMarkNotAllowed) {
 							break
 						}
+						notAllowed = append(notAllowed, refused)
 					}
-					if refused != nil && !errors.Is(refused, pmdoc.ErrTargetNotFound) {
+					if refused == nil || errors.Is(refused, pmdoc.ErrTargetNotFound) {
+						continue
+					}
+					if !errors.Is(refused, pmdoc.ErrMarkNotAllowed) {
 						return reanchorError(reanchor.mark, refused)
 					}
+					return reanchorError(reanchor.mark, notAllowed...)
 				}
 				var err error
 				write, err = pmdoc.ReadInTransaction(txn, scratchFragment)
@@ -689,22 +698,44 @@ var anchorKinds = map[string]string{
 	string(MarkSuggestion): "suggestion",
 }
 
-// reanchorError is an upload's refusal to put an open anchor back, cause being the finder's or the
-// mark writer's refusal. A mark the schema allows nowhere the anchor's quote now stands
+// reanchorError is an upload's refusal to put an open anchor back, causes being the finder's or the
+// mark writer's refusal, and, where every occurrence of the quote refuses the mark, one refusal an
+// occurrence, nearest first. A mark the schema allows nowhere the anchor's quote now stands
 // (pmdoc.MarkNotAllowedError) is the caller's markdown to fix: ErrInvalidMarkdown, naming the
-// anchor's kind and quote, where its text landed and the two ways out, holding no cause it wraps,
-// so no route reads it as a document outside its schema. Any other cause, or a mark type no open
-// anchor carries, is a fault of the stored anchor or of the server: a plain ErrDocSchema, which
-// the routes answer 500 and log, and never a stored document to repair, since the scratch
-// document no peer can reach holds nothing but the caller's target.
-func reanchorError(mark anchoredMark, cause error) error {
-	var notAllowed *pmdoc.MarkNotAllowedError
+// anchor's kind and quote, every distinct place its text landed, nearest first, so one pass over
+// the markdown resolves the upload rather than sending its author back for the next place, and the
+// two ways out, holding no cause it wraps, so no route reads it as a document outside its schema.
+// Any other cause, or a mark type no open anchor carries, is a fault of the stored anchor or of
+// the server: a plain ErrDocSchema, which the routes answer 500 and log, and never a stored
+// document to repair, since the scratch document no peer can reach holds nothing but the caller's
+// target.
+func reanchorError(mark anchoredMark, causes ...error) error {
 	kind, named := anchorKinds[mark.markType]
-	if !errors.As(cause, &notAllowed) || !named {
-		return fmt.Errorf("%w: re-anchor %s %s: %v", ErrDocSchema, mark.markType, mark.anchor.MarkID, cause)
+	places := make([]string, 0, len(causes))
+	for _, cause := range causes {
+		var notAllowed *pmdoc.MarkNotAllowedError
+		if !named || !errors.As(cause, &notAllowed) {
+			return fmt.Errorf("%w: re-anchor %s %s: %v", ErrDocSchema, mark.markType, mark.anchor.MarkID, errors.Join(causes...))
+		}
+		if place := notAllowed.Place(); !slices.Contains(places, place) {
+			places = append(places, place)
+		}
 	}
-	return fmt.Errorf("%w: the open %s anchored on %q would land in %s, where its mark is not allowed, and the upload leaves its quote nowhere it may stand; move that text out of it, or resolve the %s first",
-		ErrInvalidMarkdown, kind, mark.anchor.Quote, notAllowed.Place(), kind)
+	them := "it"
+	if len(places) > 1 {
+		them = "them"
+	}
+	return fmt.Errorf("%w: the open %s anchored on %q would land in %s, where its mark is not allowed, and the upload leaves its quote nowhere it may stand; move that text out of %s, or resolve the %s first",
+		ErrInvalidMarkdown, kind, mark.anchor.Quote, placeList(places), them, kind)
+}
+
+// placeList reads the places a refused anchor's quote stands as a person says them: "a code
+// block", "the front matter and a code block", "the front matter, a code block and a heading".
+func placeList(places []string) string {
+	if len(places) < 2 {
+		return strings.Join(places, "")
+	}
+	return strings.Join(places[:len(places)-1], ", ") + " and " + places[len(places)-1]
 }
 
 func (s *Service) refuseDroppedAskBlocks(ctx context.Context, artifactID string, target *pmdoc.Node) error {

@@ -972,9 +972,12 @@ func TestAMarkNotAllowedWhereItsTextStandsIsTheOnlyErrMarkNotAllowed(t *testing.
 
 // NearestFirst lists every match of a quote in the order Find with near chooses among them: its
 // first is Find's answer, the nearest to near, and of two as near the earlier comes first. A quote
-// that matches nothing is ErrTargetNotFound.
+// that matches nothing is ErrTargetNotFound. The first paragraph holds an even number of positions,
+// so the two matches in it and the next paragraph stand an even number of positions apart and the
+// position halfway between them is as near each: the tie is a real one, not one the fixture can
+// miss.
 func TestNearestFirstListsEveryMatchInFindsOrderOfChoice(t *testing.T) {
-	doc, err := Parse("brown one\n\nbrown two\n\nbrown three\n")
+	doc, err := Parse("brown ones\n\nbrown two\n\nbrown three\n")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1002,9 +1005,16 @@ func TestNearestFirstListsEveryMatchInFindsOrderOfChoice(t *testing.T) {
 			t.Fatalf("NearestFirst near %d = %v, want nearer first and, as near, earlier first", middle+1, nearMiddle)
 		}
 	}
-	tie, err := finder.NearestFirst("brown", (all[0].From+all[1].From)/2)
-	if err != nil || (all[1].From-all[0].From)%2 == 0 && tie[0] != all[0] {
-		t.Fatalf("NearestFirst halfway between two matches = %v, %v; want the earlier first", tie, err)
+	if (all[1].From-all[0].From)%2 != 0 {
+		t.Fatalf("the first two matches at %d and %d stand an odd number of positions apart; want a fixture where a position is as near each", all[0].From, all[1].From)
+	}
+	halfway := (all[0].From + all[1].From) / 2
+	tie, err := finder.NearestFirst("brown", halfway)
+	if err != nil || tie[0] != all[0] {
+		t.Fatalf("NearestFirst halfway between the first two matches, at %d = %v, %v; want the earlier %v first", halfway, tie, err, all[0])
+	}
+	if found, err := FindQuote(doc, "brown", nil, &halfway); err != nil || found != all[0] {
+		t.Fatalf("FindQuote halfway between the first two matches, at %d = %v, %v; want NearestFirst's first %v", halfway, found, err, all[0])
 	}
 	if _, err := finder.NearestFirst("purple", 0); !errors.Is(err, ErrTargetNotFound) {
 		t.Fatalf("NearestFirst(purple) = %v, want ErrTargetNotFound", err)
