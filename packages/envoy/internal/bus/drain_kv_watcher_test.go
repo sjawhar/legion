@@ -148,6 +148,29 @@ func TestDrainRunsItsHooksWhileTheConnectionCarriesRequests(t *testing.T) {
 	}
 }
 
+// warnOrErrorRecords takes the client under test from the moment it is connected. Nothing a
+// connected client logs carries its name: the records that do are its close's (`envoy nats
+// disconnected`, `envoy nats connection closed`, `envoy nats recovery cancelled`), which nats.go
+// reports from its own callbacks after the drain has returned. In 20 measured drains of
+// TestAStuckDeliveryStillEndsTheKVWatchers' shape, 4 had no such record when Drain returned, the
+// first landing 1.6 to 2.3 ms later, and that test reads the records with no wait of its own, so
+// a helper that refuses its caller until such a record lands makes the test race nats.go's
+// callback.
+func TestWarnOrErrorRecordsTakesAClientThatHasLoggedNothing(t *testing.T) {
+	_, uri := testnats.Start(t)
+	logs := captureBusLogs(t)
+
+	client, err := bus.ConnectOwningStream([]string{uri}, bus.WithReplicas(1), bus.WithName(t.Name()))
+	if err != nil {
+		t.Fatalf("connect: %v", err)
+	}
+	t.Cleanup(client.Close)
+
+	if got := warnOrErrorRecords(t, logs); len(got) != 0 {
+		t.Fatalf("the records of a client that has logged nothing = %q, want none", got)
+	}
+}
+
 // consumerNames lists the stream's consumers.
 func consumerNames(js natsgo.JetStreamContext, stream string) []string {
 	var names []string
