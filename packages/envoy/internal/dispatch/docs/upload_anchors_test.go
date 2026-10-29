@@ -201,24 +201,69 @@ func TestAnUploadLeavesTheAnchorsOnTheTextItKeeps(t *testing.T) {
 	}
 }
 
-// An ask mark is not allowed in a code block, so an upload that moves an open ask's quote into
-// one is refused as the caller's markdown (ErrInvalidMarkdown, which the routes answer 400), never
-// as a document outside its schema (a 500 or a repair), and the room keeps the tree it held.
-func TestAnUploadMovingAnAskQuoteIntoACodeBlockIsRefused(t *testing.T) {
-	service, artifactID := newTestService(t)
-	service.settle = time.Hour
-	seedServiceText(t, service, artifactID, "Intro.\n\nrun the tests\n")
-	placeUploadAnchors(t, service, artifactID, []uploadAnchor{{kind: MarkAsk, quote: "run the tests"}})
-	before := liveTree(t, service, artifactID)
+// An upload that moves an open anchor's quote where its mark is not allowed - an ask's into a code
+// block, a comment's into the front matter, which allows no anchor - is refused as the caller's
+// markdown (ErrInvalidMarkdown, which the routes answer 400), naming the anchor and where its text
+// landed, never as a document outside its schema (a 500 or a repair), and the room keeps the tree
+// it held.
+func TestAnUploadMovingAnAnchorsQuoteWhereItsMarkIsNotAllowedIsRefused(t *testing.T) {
+	for _, test := range []struct {
+		name, seed, upload, quote, want string
+		kind                            MarkKind
+	}{
+		{
+			name: "an ask into a code block", kind: MarkAsk, quote: "run the tests",
+			seed: "Intro.\n\nrun the tests\n", upload: "Intro.\n\n```\nrun the tests\n```\n",
+			want: `the open ask anchored on "run the tests" would land in a code block`,
+		},
+		{
+			name: "a comment into the front matter", kind: MarkComment, quote: "Hello world",
+			seed: "Hello world\n\nIntro.\n", upload: "---\ntitle: Hello world\n---\n\nIntro.\n",
+			want: `the open comment anchored on "Hello world" would land in the front matter`,
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			service, artifactID := newTestService(t)
+			service.settle = time.Hour
+			seedServiceText(t, service, artifactID, test.seed)
+			placeUploadAnchors(t, service, artifactID, []uploadAnchor{{kind: test.kind, quote: test.quote}})
+			before := liveTree(t, service, artifactID)
 
-	_, err := joinedReplaceText(service, artifactID, "Intro.\n\n```\nrun the tests\n```\n", model.Actor{Kind: "user", ID: "alice"})
-	if !errors.Is(err, ErrInvalidMarkdown) || errors.Is(err, ErrDocSchema) || errors.Is(err, ErrDocOutsideSchema) ||
-		!strings.Contains(err.Error(), `the open ask anchored on "run the tests"`) ||
-		!strings.Contains(err.Error(), `mark "dispatchAsk" is not allowed in code_block`) {
-		t.Fatalf("upload moving the ask's quote into a code block = %v, want ErrInvalidMarkdown naming the ask and why", err)
+			_, err := joinedReplaceText(service, artifactID, test.upload, model.Actor{Kind: "user", ID: "alice"})
+			if !errors.Is(err, ErrInvalidMarkdown) || errors.Is(err, ErrDocSchema) || errors.Is(err, ErrDocOutsideSchema) ||
+				!strings.Contains(err.Error(), test.want) {
+				t.Fatalf("the upload = %v, want ErrInvalidMarkdown saying %q", err, test.want)
+			}
+			if got := liveTree(t, service, artifactID); !got.EqualWithBlockIDs(before) {
+				t.Fatalf("the room after the refused upload =\n%s\nwant the tree it held\n%s", treeMarkdown(got), treeMarkdown(before))
+			}
+		})
 	}
-	if got := liveTree(t, service, artifactID); !got.EqualWithBlockIDs(before) {
-		t.Fatalf("the room after the refused upload =\n%s\nwant the tree it held\n%s", treeMarkdown(got), treeMarkdown(before))
+}
+
+// Only a mark the schema allows nowhere its quote stands is the caller's; any other refusal to
+// re-anchor is the server's or the stored anchor's, and stays a schema fault, never an invalid-
+// markdown answer. A mark type no open anchor carries is the server's too.
+func TestARefusedReanchorIsTheCallersOnlyWhenTheMarkIsNotAllowed(t *testing.T) {
+	ask := anchoredMark{markType: string(MarkAsk), anchor: model.Anchor{Quote: "run the tests"}}
+	notAllowed := &pmdoc.MarkNotAllowedError{Mark: string(MarkAsk), Textblock: "code_block"}
+	if err := refusedReanchor(ask, notAllowed); !errors.Is(err, ErrInvalidMarkdown) {
+		t.Fatalf("refusedReanchor(not allowed) = %v, want ErrInvalidMarkdown", err)
+	}
+	for _, test := range []struct {
+		name  string
+		mark  anchoredMark
+		cause error
+	}{
+		{name: "a mark the writer refuses as a mark", mark: ask, cause: fmt.Errorf("%w: mark %q", pmdoc.ErrSchema, "bogus")},
+		{name: "a fragment the writer cannot read", mark: ask, cause: fmt.Errorf("%w: unsupported Yjs text embed", pmdoc.ErrSchema)},
+		{name: "a mark type no open anchor carries", mark: anchoredMark{markType: "proofAuthored"}, cause: notAllowed},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			if err := refusedReanchor(test.mark, test.cause); err != nil {
+				t.Fatalf("refusedReanchor = %v, want nil so the refusal stays a schema fault", err)
+			}
+		})
 	}
 }
 

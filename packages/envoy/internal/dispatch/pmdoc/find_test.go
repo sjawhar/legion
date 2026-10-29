@@ -908,6 +908,68 @@ func TestMarkRangeSupportsCodeBlocksAndMultipleBlocks(t *testing.T) {
 	}
 }
 
+// A mark the schema allows nowhere its text stands - an ask in a code block, any anchor in the front
+// matter - is refused as ErrMarkNotAllowed, still ErrSchema to a caller that only knows that, and
+// names the place for a person. A refusal of the mark itself (an unknown type, an empty range) is
+// not ErrMarkNotAllowed: no text a caller wrote causes it.
+func TestAMarkNotAllowedWhereItsTextStandsIsTheOnlyErrMarkNotAllowed(t *testing.T) {
+	doc, err := Parse("---\ntitle: Hello world\n---\n\n```\nrun the tests\n```\n\nIntro.\n")
+	if err != nil {
+		t.Fatal(err)
+	}
+	state := crdt.New()
+	frag := state.GetXmlFragment("prosemirror")
+	writeUpdate(t, state, frag, doc)
+	quote := func(text string) Range {
+		t.Helper()
+		found, err := FindQuote(doc, text, nil, nil)
+		if err != nil {
+			t.Fatalf("find %q: %v", text, err)
+		}
+		return found
+	}
+	mark := func(r Range, markType string) error {
+		var err error
+		state.Transact(func(txn *crdt.Transaction) {
+			err = MarkRange(txn, frag, r, Mark{Type: markType, Attrs: Attrs{"id": "m1", "by": "session:x"}})
+		})
+		return err
+	}
+	for _, test := range []struct {
+		name, markType, place string
+		r                     Range
+	}{
+		{name: "an ask in a code block", markType: "dispatchAsk", r: quote("run the tests"), place: "code_block"},
+		{name: "a comment in the front matter", markType: "proofComment", r: quote("Hello world"), place: "the front matter"},
+		{name: "an ask in the front matter", markType: "dispatchAsk", r: quote("Hello world"), place: "the front matter"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			err := mark(test.r, test.markType)
+			var notAllowed *MarkNotAllowedError
+			if !errors.Is(err, ErrMarkNotAllowed) || !errors.Is(err, ErrSchema) || !errors.As(err, &notAllowed) || notAllowed.Place() != test.place {
+				t.Fatalf("mark %s = %v, want ErrMarkNotAllowed and ErrSchema in %q", test.markType, err, test.place)
+			}
+		})
+	}
+	if err := mark(quote("run the tests"), "proofComment"); err != nil {
+		t.Fatalf("a comment in a code block = %v, want it marked", err)
+	}
+	for _, test := range []struct {
+		name     string
+		r        Range
+		markType string
+	}{
+		{name: "an unknown mark type", r: quote("Intro."), markType: "bogus"},
+		{name: "an empty range", r: Range{From: 3, To: 3}, markType: "proofComment"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			if err := mark(test.r, test.markType); !errors.Is(err, ErrSchema) || errors.Is(err, ErrMarkNotAllowed) {
+				t.Fatalf("%s = %v, want ErrSchema that is not ErrMarkNotAllowed", test.name, err)
+			}
+		})
+	}
+}
+
 // A quote is matched by its text, and the cells a table's short rows are padded with hold none, so
 // a quote's table is read as markdown only while its rows need no padding: neither a quote of a
 // table whose 99-cell header holds `**bold**` over 99 one-cell rows, nor one whose one-cell header

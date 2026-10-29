@@ -25,6 +25,39 @@ type Range struct {
 var ErrTargetNotFound = errors.New("target not found")
 var ErrTargetSpansBlocks = errors.New("target spans textblocks")
 
+// ErrMarkNotAllowed is the refusal of a mark on text that stands where the schema allows no mark of
+// its type: an ask's in a code block, or any anchor's in front matter. The refusal is a
+// *MarkNotAllowedError, which is ErrSchema too, so a caller that only knows ErrSchema still sees
+// it, and one that wrote the text itself can tell it apart from a fault of the document or the
+// server.
+var ErrMarkNotAllowed = errors.New("mark not allowed on this text")
+
+// MarkNotAllowedError is MarkRange's refusal of Mark on text in Textblock, the textblock holding the
+// text: "code_block", or "" for text no paragraph, heading or code block holds.
+type MarkNotAllowedError struct {
+	Mark      string
+	Textblock string
+}
+
+func (e *MarkNotAllowedError) Error() string {
+	return fmt.Sprintf("%s: mark %q is not allowed in %s", ErrSchema, e.Mark, e.Place())
+}
+
+// Is reports err as ErrMarkNotAllowed and as ErrSchema.
+func (e *MarkNotAllowedError) Is(target error) bool {
+	return target == ErrMarkNotAllowed || target == ErrSchema
+}
+
+// Place names where the refused text stands: the textblock, or "the front matter" for text no
+// textblock holds, since in a document inside the schema only front matter holds text outside a
+// paragraph, heading or code block.
+func (e *MarkNotAllowedError) Place() string {
+	if e.Textblock == "" {
+		return "the front matter"
+	}
+	return e.Textblock
+}
+
 // ErrQuoteNotFound reports a quote miss with up to three closest rendered textblocks, in
 // document order among equals, and how many places the quote did match — nonzero only when an
 // occurrence was out of range. It unwraps ErrTargetNotFound so callers can preserve their
@@ -1063,7 +1096,7 @@ func (w *MarkWriter) Mark(txn *crdt.Transaction, r Range, mark Mark) error {
 	last := first
 	for ; last < len(spans) && spans[last].From < r.To; last++ {
 		if !markAllowedInTextblock(mark.Type, spans[last].textblock) {
-			return fmt.Errorf("%w: mark %q is not allowed in %s", ErrSchema, mark.Type, spans[last].textblock)
+			return &MarkNotAllowedError{Mark: mark.Type, Textblock: spans[last].textblock}
 		}
 	}
 	if first == last {

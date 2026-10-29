@@ -466,10 +466,12 @@ func (s *Service) ReplaceText(ctx context.Context, artifactID, markdown string, 
 				// the upload flattens target and reads the fragment's text ranges once, not once a row.
 				// Both read nothing until the first row needs them. A row whose quote no longer
 				// resolves keeps no mark, so its miss is never described. The scratch document holds
-				// only target, which the caller's markdown made, so any other refusal to mark it - an
-				// ask's quote now inside a code block, where an ask mark is not allowed - is that
-				// markdown's, not the stored document's or the server's: the upload is refused as
-				// invalid markdown, naming the anchor, and the room keeps the tree it held.
+				// only target, which the caller's markdown made, so a mark the schema allows nowhere
+				// the quote now stands (pmdoc.ErrMarkNotAllowed: an ask's quote inside a code block,
+				// any anchor's inside the front matter) is that markdown's to fix, refused as invalid
+				// markdown naming the anchor (refusedReanchor), and the room keeps the tree it held.
+				// Any other refusal is a fault of the stored anchor or of the server, as it was when
+				// these marks were written straight into the room.
 				finder := pmdoc.NewQuoteFinder(target)
 				writer := pmdoc.NewMarkWriter(scratchFragment)
 				for _, reanchor := range reanchors {
@@ -482,7 +484,10 @@ func (s *Service) ReplaceText(ctx context.Context, artifactID, markdown string, 
 						}.pmMark())
 					}
 					if err != nil && !errors.Is(err, pmdoc.ErrTargetNotFound) {
-						return refusedReanchor(reanchor.mark, err)
+						if refused := refusedReanchor(reanchor.mark, err); refused != nil {
+							return refused
+						}
+						return documentSchemaError(err)
 					}
 				}
 				var err error
@@ -513,21 +518,30 @@ func (s *Service) ReplaceText(ctx context.Context, artifactID, markdown string, 
 	return canonical, nil
 }
 
-// refusedReanchor is an upload's refusal of markdown that leaves an open anchor's quote where its
-// mark cannot stand, cause being the mark writer's refusal: ErrInvalidMarkdown, the caller's to fix,
-// naming the anchor's kind and quote and the two ways out. It holds cause as text rather than
-// wrapping it, so no route reads it as a document outside its schema.
+// anchorKinds names, for a person, each mark type an open anchor carries (openAnchoredMarks).
+var anchorKinds = map[string]string{
+	string(MarkAsk):        "ask",
+	string(MarkComment):    "comment",
+	string(MarkSuggestion): "suggestion",
+}
+
+// refusedReanchor is an upload's refusal of markdown that leaves an open anchor's quote where the
+// schema allows no mark of its type, cause being the mark writer's refusal: ErrInvalidMarkdown, the
+// caller's to fix, naming the anchor's kind and quote, where the text landed and the two ways out.
+// It is nil for any other cause, or for a mark type no open anchor carries, which stay the
+// server's. It holds no cause it wraps, so no route reads it as a document outside its schema.
 func refusedReanchor(mark anchoredMark, cause error) error {
-	kind := map[string]string{
-		string(MarkAsk):        "ask",
-		string(MarkComment):    "comment",
-		string(MarkSuggestion): "suggestion",
-	}[mark.markType]
-	if kind == "" {
-		kind = mark.markType
+	var notAllowed *pmdoc.MarkNotAllowedError
+	kind, named := anchorKinds[mark.markType]
+	if !errors.As(cause, &notAllowed) || !named {
+		return nil
 	}
-	return fmt.Errorf("%w: the open %s anchored on %q would land where its mark is not allowed (%v); move that text out of that block, or resolve the %s first",
-		ErrInvalidMarkdown, kind, mark.anchor.Quote, cause, kind)
+	place := notAllowed.Place()
+	if notAllowed.Textblock == "code_block" {
+		place = "a code block"
+	}
+	return fmt.Errorf("%w: the open %s anchored on %q would land in %s, where its mark is not allowed; move that text out of it, or resolve the %s first",
+		ErrInvalidMarkdown, kind, mark.anchor.Quote, place, kind)
 }
 
 func (s *Service) refuseDroppedAskBlocks(ctx context.Context, artifactID string, target *pmdoc.Node) error {
