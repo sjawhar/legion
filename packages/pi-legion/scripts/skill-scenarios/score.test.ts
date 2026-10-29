@@ -1766,13 +1766,29 @@ specRun("spec-writing-head-129", {
     finish
   ),
 });
-// The run's own spec with the person's messages, three times, and the source's answered asks
-// pasted straight after its Acceptance section, with no heading to end the spec's slice.
+// A review of the run's own draft, which the agent then rewrote: the written version keeps the
+// draft's Goals, Requirements, Decisions and Acceptance but rewrites its Summary, Problem and Design.
+// After the draft the assignment pastes about 4,500 words of unique notes with no heading, so the
+// spec's slice runs to the end. Measured over the pasted text, the share of it found in a written
+// version falls under the 0.1 floor; measured over the written version (recall), the draft still
+// covers most of it.
+const rewrittenSpec = outlined({
+  summary: " It replaces the old banner, which most terminals cut off at the top of the window.",
+  problem:
+    "Running the tool today prints a blank line and exits, so a new user cannot tell whether it worked or failed.",
+  design:
+    "The command reads the name from its first argument, trims spaces at both ends, and refuses an empty name with exit code 2.",
+});
+const uniqueNotes = Array.from(
+  { length: 500 },
+  (_, index) => `Record ${index} notes that row ${index * 3 + 1} holds value ${index * 7 + 2}.`
+).join("\n");
 specRun("spec-writing-head-128", {
+  spec: rewrittenSpec,
   transcript: evalFirst(evalCell("e1", evalSpawn, "Spawned EvalCheck.")),
   subagents: {
     EvalCheck: subagentTranscript(
-      `Read this spec alone and list each gap.\n\n${outlined()}\n${personMessages}\n${personMessages}\n${personMessages}\n${JSON.stringify(sourceAsks)}`,
+      `Read this spec alone and list each gap.\n\n${outlined()}\n${uniqueNotes}`,
       6.2,
       6.8
     ),
@@ -3210,9 +3226,6 @@ test("checked: a check started from an eval cell counts from its own transcript,
   );
   expect(rowOf("spec-writing-head-127").split("\n")[0]).toContain(" unjudged=1");
   expect(rowOf("spec-writing-head-1").split("\n")[0]).not.toContain("unjudged=");
-  // The person's words pasted straight after the spec, with no heading to end its slice: the
-  // share is of the written version, so the extra text cannot lower it.
-  expect(scoresOf("spec-writing-head-128")).toEqual(allPass);
   const own = specWork(path.join(runs, "spec-writing-head-127"), checkouts(work), {
     issue: "LWEVAL-7",
     spec_artifact: "art-spec",
@@ -3238,6 +3251,14 @@ test("checked: a check started from an eval cell counts from its own transcript,
   ).checks.map((check) => check.report);
   expect(reports[0]).toBe("1. R1 names no owner.");
   expect(scoresOf("spec-writing-head-121")).toEqual(allPass);
+});
+
+// Recall, not the share of the pasted text: head-128's draft, rewritten after its review and
+// followed by thousands of unheaded words, is still the run's own spec. Under the share of the
+// pasted text this check is rejected as a sibling's and the write is unchecked.
+test("checked: a draft rewritten after its review, with unheaded text pasted after it, is the run's own spec", () => {
+  expect(scoresOf("spec-writing-head-128")).toEqual(allPass);
+  expect(rowOf("spec-writing-head-128")).not.toContain("its spec is not this issue's");
 });
 
 test("checked: a version Dispatch recorded for the session that no shown write made is a write, and flagged", () => {
