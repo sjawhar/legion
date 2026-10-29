@@ -38,6 +38,32 @@ func TestTheBackgroundWaitHoldsForWorkARequestLeftRunning(t *testing.T) {
 	}
 }
 
+// The background wait holds for every live socket's handler, and so every subscription it ran,
+// until the socket ends: production shutdown waits for it before it closes the database pool,
+// which a subscription still reading would otherwise lose under it.
+func TestTheBackgroundWaitHoldsForAnOpenLiveSocket(t *testing.T) {
+	rig := newLiveSocketRig(t, testServerOptions{}, nil)
+	client := rig.dial(t, asUser("alice"))
+	rig.sockets(t, 1)
+
+	waited := make(chan struct{})
+	go func() {
+		defer close(waited)
+		rig.served.waitBackground()
+	}()
+	select {
+	case <-waited:
+		t.Fatal("the background wait returned while a live socket's handler was still running")
+	case <-time.After(200 * time.Millisecond):
+	}
+	_ = client.conn.Close()
+	select {
+	case <-waited:
+	case <-time.After(10 * time.Second):
+		t.Fatal("the background wait never returned once the live socket closed")
+	}
+}
+
 // A server with no lifetime is refused where it is built, not left running the hub, the relay and
 // every live socket on a context that never ends: each would outlive the process's shutdown, or
 // the test that built it, and the background wait would never return once a subscription had
