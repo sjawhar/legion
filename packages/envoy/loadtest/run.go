@@ -50,6 +50,8 @@ type runConfig struct {
 	// boxBusyBefore is the box's busy fraction read before Dispatch started (run-step.sh reads it
 	// with `loadgen box-busy` before its reset); negative means collectMeta reads it itself.
 	boxBusyBefore float64
+	// xactInterval is the transaction-id hold sampler's interval; 0 turns the sampler off.
+	xactInterval time.Duration
 	// args are the run's flags as meta.json records them: the normalized flag list, the token
 	// values redacted and the URL passwords removed (recordedArgs).
 	args []string
@@ -77,6 +79,7 @@ func runLoad(args []string) error {
 	buildCommit := fs.String("build-commit", "", "commit Dispatch was built from, for meta.json")
 	buildDirty := fs.Bool("build-dirty", false, "the build's tree had uncommitted changes, for meta.json")
 	boxBusyBefore := fs.Float64("box-busy-before", -1, "the box's busy fraction read before Dispatch started (loadgen box-busy); default: read it now")
+	xactInterval := fs.Duration("xact-interval", defaultXactInterval, "interval of the transaction-id hold sampler (0 turns it off)")
 	_ = fs.Parse(args)
 
 	// Every input is validated before the first connection.
@@ -113,6 +116,8 @@ func runLoad(args []string) error {
 		return fmt.Errorf("-sse must be 0 or more")
 	case *boxBusyBefore > 1 || !finite(*boxBusyBefore):
 		return fmt.Errorf("-box-busy-before must be a fraction between 0 and 1")
+	case *xactInterval < 0:
+		return fmt.Errorf("-xact-interval must be 0 or more")
 	}
 	if *out == "" {
 		return fmt.Errorf("-out is required")
@@ -146,7 +151,8 @@ func runLoad(args []string) error {
 		sessions: *sessions, events: *events, requests: *requests,
 		warmup: *warmup, duration: *duration, grace: *grace, mix: mix, routes: routes,
 		human: *human, sse: *sse, rngSeed: *rngSeed, natsConns: *natsConns,
-		buildCommit: *buildCommit, buildDirty: *buildDirty, boxBusyBefore: *boxBusyBefore, args: recordedArgs(fs),
+		buildCommit: *buildCommit, buildDirty: *buildDirty, boxBusyBefore: *boxBusyBefore, xactInterval: *xactInterval,
+		args: recordedArgs(fs),
 	}, sf)
 }
 
@@ -241,10 +247,13 @@ type summary struct {
 	Requests        requestsSummary   `json:"requests"`
 	Resources       *resourcesSummary `json:"resources"`
 	CommitOrderLock lockSummary       `json:"commit_order_lock"`
-	UngrantedLocks  ungrantedSummary  `json:"ungranted_locks"`
-	Sessions        sessionsSummary   `json:"sessions"`
-	SSE             sseSummary        `json:"sse"`
-	SSEBytes        int64             `json:"sse_bytes"`
+	// XIDHolds is the transaction-id hold sampler's summary; null only in a summary.json written by a
+	// loadgen without the sampler.
+	XIDHolds       *xactSummary     `json:"xid_holds"`
+	UngrantedLocks ungrantedSummary `json:"ungranted_locks"`
+	Sessions       sessionsSummary  `json:"sessions"`
+	SSE            sseSummary       `json:"sse"`
+	SSEBytes       int64            `json:"sse_bytes"`
 	// StackExits are the stack processes that exited during the step; such a step fails and its
 	// row does not measure the load.
 	StackExits []stackExit `json:"stack_exits,omitempty"`
@@ -289,8 +298,8 @@ func execute(cfg runConfig, sf seedFile) error {
 	defer logf.Close()
 	lg := log.New(io.MultiWriter(os.Stderr, logf), "", log.LstdFlags|log.Lmicroseconds)
 	nonce := newMarkerNonce()
-	lg.Printf("config: step=%s sessions=%d events=%g/s requests=%g/s event-mix=%s route-mix=%s warmup=%s duration=%s grace=%s human=%.2f sse=%d rng-seed=%d marker-nonce=%s",
-		cfg.name, cfg.sessions, cfg.events, cfg.requests, cfg.mix.Name, cfg.routes.Source, cfg.warmup, cfg.duration, cfg.grace, cfg.human, cfg.sse, cfg.rngSeed, formatNonce(nonce))
+	lg.Printf("config: step=%s sessions=%d events=%g/s requests=%g/s event-mix=%s route-mix=%s warmup=%s duration=%s grace=%s human=%.2f sse=%d rng-seed=%d xact-interval=%s marker-nonce=%s",
+		cfg.name, cfg.sessions, cfg.events, cfg.requests, cfg.mix.Name, cfg.routes.Source, cfg.warmup, cfg.duration, cfg.grace, cfg.human, cfg.sse, cfg.rngSeed, cfg.xactInterval, formatNonce(nonce))
 
 	if err := checkStack(ctx, cfg.ep); err != nil {
 		return err
@@ -518,20 +527,23 @@ func (st *step) runRequests(ctx context.Context, a *api) (load *requestLoad, don
 }
 
 // probes are the 5 s sampler, the lock probe (20 ms), the ungranted-lock sampler (1 s), the
-// transaction-id probe and the profiles.
+// transaction-id hold sampler (-xact-interval), the transaction-id probe and the profiles.
 type probes struct {
 	smp      *sampler
 	smpDone  chan struct{} // closed when the sampler, which runs until ctx ends, has returned
 	lp       *lockProbe
 	ls       *lockSampler
+	xs       *xactSampler
 	xidsPerS *float64
 	xidErr   error          // why xidsPerS is nil
 	wg       sync.WaitGroup // every probe but the sampler
 }
 
-// startProbes starts the probes. The two lock samplers run from 20 s into the window to its end.
+// startProbes starts the probes. The two lock samplers run from 20 s into the window to its end;
+// the transaction-id hold sampler, unless -xact-interval 0 turned it off, over the whole window.
 func (st *step) startProbes(ctx context.Context) *probes {
-	p := &probes{smp: newSampler(st.cfg.ep), smpDone: make(chan struct{}), lp: &lockProbe{}, ls: &lockSampler{}}
+	p := &probes{smp: newSampler(st.cfg.ep), smpDone: make(chan struct{}), lp: &lockProbe{}, ls: &lockSampler{},
+		xs: &xactSampler{tr: newXactTracker(st.cfg.xactInterval)}}
 	go func() {
 		defer close(p.smpDone)
 		p.smp.loop(ctx, st.winStart, st.winEnd, st.lg)
@@ -543,6 +555,9 @@ func (st *step) startProbes(ctx context.Context) *probes {
 	pg := st.cfg.ep.pg
 	p.wg.Go(func() { p.lp.loop(ctx, pg, lockFrom, st.winEnd, st.lg) })
 	p.wg.Go(func() { p.ls.loop(ctx, pg, lockFrom, st.winEnd, st.lg) })
+	if st.cfg.xactInterval > 0 {
+		p.wg.Go(func() { p.xs.loop(ctx, pg, "dispatch", st.winStart, st.winEnd, st.lg) })
+	}
 	p.wg.Go(func() { p.xidsPerS, p.xidErr = xidRate(ctx, pg, st.winStart, st.winEnd, st.lg) })
 	p.wg.Go(func() { st.profile(ctx) })
 	return p
@@ -617,6 +632,8 @@ func (st *step) buildSummary(ns *natsSessions, reg *registrar, writes *collector
 		sum.Events.CommitsError = commitsErr.Error()
 		st.lg.Printf("commits: %v", commitsErr)
 	}
+	xh := pr.xs.tr.summary(pr.xs.errors, sum.Events.Committed)
+	sum.XIDHolds = &xh
 	ss := pr.smp.all()
 	writeJSONFile(filepath.Join(cfg.out, "samples.json"), ss, 0o644, st.lg)
 	sum.Resources = summarizeResources(ss, sum.Events.Committed+sum.Requests.Sent, durS)
