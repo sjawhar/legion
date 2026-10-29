@@ -590,6 +590,9 @@ func (s *Service) refreshAnchors(ctx context.Context, tx pgx.Tx, artifactID stri
 			ledger.RegisterPendingAnchor(row)
 		}
 	}
+	if s.afterAnchorRefresh != nil {
+		s.afterAnchorRefresh(artifactID, len(refreshes))
+	}
 	if len(refreshes) == 0 {
 		return nil
 	}

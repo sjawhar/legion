@@ -150,6 +150,13 @@ type Service struct {
 	// (forkLive), before the write's operation runs on it. Nil outside tests; tests use it to edit
 	// the room after the fork read it.
 	afterForkRead func(room string)
+	// afterAnchorRefresh runs as soon as an anchor refresh has decided which rows it refreshes
+	// (refreshAnchors), with the document it ran on and the number of rows whose anchor it writes.
+	// Its writes are queued, so a transaction refused before its write phase refreshes rows no
+	// reader of its events ever sees; this hook says what the refresh found whichever way the
+	// transaction ends. Nil outside tests; the margin-equivalence test counts each operation's
+	// refreshes with it.
+	afterAnchorRefresh func(artifactID string, refreshed int)
 	// afterSettleAuthorsTake runs after a settlement has taken its authors and before it copies
 	// the tree it will version. Nil outside tests; tests use it to edit the room in that window.
 	afterSettleAuthorsTake func(room string)

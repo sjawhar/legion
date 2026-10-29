@@ -8,8 +8,8 @@ import (
 	"fmt"
 	"slices"
 	"strconv"
-	"strings"
 	"testing"
+	"time"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/reearth/ygo/crdt"
@@ -116,6 +116,40 @@ type observedOperation struct {
 	Name   string
 	Result string
 	Events []string
+	// Refreshed is the number of anchored rows the operation's anchor refreshes refreshed, which
+	// the side counts whether or not the transaction goes on to append their events
+	// (equivalenceSide.refreshes).
+	Refreshed int
+	// from and to are how many events the transaction had appended when the operation began and
+	// when it ended (flowRun.eventBoundary), -1 for a flow refused before its write phase ran.
+	from, to *int
+}
+
+// readEvents takes each operation's events off the ledger's appended events, once the write phase
+// has run them: a transaction appends its events then (INFRA-636), in the order their appends were
+// queued, which is the order the operations made them. An operation whose boundaries the write
+// phase never reached appended nothing.
+func (observed *flowObservation) readEvents(t *testing.T, appended []model.Event) {
+	t.Helper()
+	for index := range observed.Operations {
+		operation := &observed.Operations[index]
+		from, to := *operation.from, *operation.to
+		if from < 0 || to < 0 {
+			continue
+		}
+		if from > to || to > len(appended) {
+			t.Fatalf("operation %d (%s) appended events [%d:%d] of the %d the write phase appended",
+				index, operation.Name, from, to, len(appended))
+		}
+		for _, event := range appended[from:to] {
+			observed.Sequences = append(observed.Sequences, event.Seq)
+			event.ID, event.Seq, event.CreatedAt = 0, 0, time.Time{}
+			operation.Events = append(operation.Events, encodeObserved(event))
+		}
+		// refreshAnchors reads the open anchors in no order, so one operation's events are
+		// compared as a set; the operations keep their order.
+		slices.Sort(operation.Events)
+	}
 }
 
 // observedWrite is the transaction's write to the document as its last operation left it, before
@@ -227,6 +261,7 @@ func (side *equivalenceSide) run(t *testing.T, document *equivalenceDocument, fl
 			t.Fatalf("roll the refused flow back: %v", err)
 		}
 	}
+	observed.readEvents(t, ledger.events)
 	resident := side.service.srv.GetDoc(ids.artifact) != nil
 	if resident {
 		waitForLandedAppends(t, side.service, ids.artifact)
@@ -429,6 +464,7 @@ func compareObservations(t *testing.T, document *equivalenceDocument, margin, wh
 		name := fmt.Sprintf("operation %d (%s)", index, margin.Operations[index].Name)
 		differ(name+"'s result", margin.Operations[index].Result, whole.Operations[index].Result)
 		differ(name+"'s events", margin.Operations[index].Events, whole.Operations[index].Events)
+		differ(name+"'s refreshed anchors", margin.Operations[index].Refreshed, whole.Operations[index].Refreshed)
 	}
 	sortedSequences := func(sequences []int) []int {
 		sorted := slices.Clone(sequences)
@@ -491,16 +527,16 @@ func (observed flowObservation) checkFlow(t *testing.T, document *equivalenceDoc
 		t.Errorf("the %s's flow ended in %s, want the refusal %v", side, document.shown(observed.Err.Error()), flow.wantErr)
 	}
 	for _, name := range flow.refreshing {
-		refreshed := false
+		refreshed := 0
 		for _, operation := range observed.Operations {
-			if operation.Name != name {
-				continue
-			}
-			for _, event := range operation.Events {
-				refreshed = refreshed || strings.Contains(event, `"type":"comment.anchor_refreshed"`)
+			if operation.Name == name {
+				refreshed += operation.Refreshed
 			}
 		}
-		if !refreshed {
+		// The rows the refresh refreshed, not the events it appended: a flow the record bound
+		// refuses never runs its write phase, so it appends none of them, and its refresh is
+		// tested all the same.
+		if refreshed == 0 {
 			t.Errorf("the %s's %s refreshed no anchor, so the flow does not test the refresh", side, name)
 		}
 	}
