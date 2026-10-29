@@ -34,14 +34,21 @@
 #      `tag` or `digest`, or a digest that is not `sha256:` and 64 hex characters. A tag is
 #      required because an untagged manifest is a package version nothing names, and a retention
 #      policy may delete a digest a job pins.
-#   2. two rows with the same digest, or two rows with the same tag. The row is what says which
-#      image a digest is — which upstream it copies, and which version that upstream carries — so
-#      one digest names one row and one row names one tag.
-#   3. a row whose upstream carries a version this repository pins elsewhere and disagrees with
-#      that pin: an `oven/bun` row against `.bun-version` (two such rows, one of them with the
-#      `-slim` suffix), and a `library/golang` row against `ARG GO_VERSION` of
-#      packages/daemon/docker/worker.Dockerfile. Raising Bun or Go is then one edit per place,
-#      made together.
+#   2. two rows with the same digest, two rows with the same tag, or a tag that does not end
+#      with the first eight hex characters of its own row's digest. The row is what says which
+#      image a digest is — which upstream it copies, and which version that upstream carries —
+#      so one digest names one row and one row names one tag. The digest in the tag is what
+#      makes one tag name one digest: a row that moves to a new digest takes a new tag with it,
+#      the digest it leaves keeps the tag it had, and no copy moves a tag off a digest a
+#      consumer pins. The tag a row must carry is the upstream repository's last path element,
+#      then the upstream tag when the row names one, then those eight characters.
+#   3. a version this repository pins elsewhere that no row carries: no `oven/bun` row at the
+#      version `.bun-version` locks, with or without the `-slim` suffix, or no `library/golang`
+#      row at `ARG GO_VERSION` of packages/daemon/docker/worker.Dockerfile. A row for another
+#      version is admitted, so raising Bun or Go is two commits: the new version's row first,
+#      which ci.yaml's ci-images job copies, then the pin and every FROM. One commit holding
+#      both would let a consumer job pull the new digest while that same run's copy is still
+#      landing it.
 #   4. a reference in CI's reach that names a registry other than ghcr.io/sjawhar/legion/ci,
 #   5. a reference in CI's reach that is not pinned by digest (`@sha256:` and 64 hex characters):
 #      a tag is a name the registry can move, so only a digest names the bytes a job ran,
@@ -87,9 +94,10 @@
 # names that file. Each entry carries exactly one ground: `no CI job runs it`, or `a CI job runs
 # it, and it fetches nothing`. An entry on a file that no longer names mirror.gcr.io fails too:
 # a ground that holds nothing any more is a ground nobody reads again. An entry naming a file
-# the tree does not hold admits nothing, and is left alone. The sweep skips .git, .jj,
-# node_modules, .venv, vendor, .legion (Legion's per-issue run data, which a retro removes) and
-# this check's own two files, whose text names the registry to find it.
+# the tree does not hold admits nothing, and is left alone. The sweep walks the tree with
+# workflow_paths.walk, which skips .git, .jj, node_modules, .venv and vendor. This sweep skips
+# two more things itself: .legion (Legion's per-issue run data, which a retro removes) and this
+# check's own two files, whose text names the registry to find it.
 #
 # Files are discovered by walking the tree, not by asking git, so an unsnapshotted change cannot
 # read green locally.
@@ -123,8 +131,10 @@ case "$#:${1:-}" in
 esac
 export CI_IMAGES_MODE="$1"
 
-# PYTHONDONTWRITEBYTECODE keeps the yaml import from leaving a __pycache__ in the tree.
-PYTHONDONTWRITEBYTECODE=1 python3 <<'PY'
+# The sweep's walk is workflow_paths.py's, beside this script in the repository it checks, which
+# PYTHONPATH names. PYTHONDONTWRITEBYTECODE keeps the imports from leaving a __pycache__ in the
+# tree.
+PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=.github/scripts python3 <<'PY'
 import json
 import os
 import re
@@ -183,7 +193,9 @@ MIRROR_JOB = "ci.yaml's ci-images job"
 BUN_PIN = Path(".bun-version")
 WORKER_DOCKERFILE = Path("packages/daemon/docker/worker.Dockerfile")
 MIRROR = "mirror.gcr.io"
-SKIP_DIRS = {".git", ".jj", ".legion", "node_modules", ".venv", "vendor"}
+# The directories workflow_paths.walk skips (.git, .jj, node_modules, .venv, vendor) are every
+# directory this sweep skips but one, and this set holds that one.
+SWEEP_SKIP_DIRS = {".legion"}
 SELF = {".github/scripts/check-ci-images.sh", ".github/scripts/check-ci-images.test.sh"}
 ACCEPT = ",".join(
     (
@@ -239,8 +251,7 @@ FETCHES_NOTHING = "a CI job runs it, and it fetches nothing"
 # walkthrough recorder, the corpus copy a developer restores on a devbox, and documentation.
 # `a CI job runs it, and it fetches nothing`: a script a CI job runs whose mirror.gcr.io text no
 # job ever hands to a registry — dev-postgres.test.sh, which the envoy-go job runs, installs a
-# fake `docker` on PATH, and check-bun-version.test.sh writes its references into fixture files
-# under a temporary directory.
+# fake `docker` on PATH.
 EXCEPTIONS = {
     "AGENTS.md": NO_CI_JOB,
     "docs/kubernetes.md": NO_CI_JOB,
@@ -267,7 +278,6 @@ EXCEPTIONS = {
     "scripts/e2e/stage4a-sandbox-runtime.sh": NO_CI_JOB,
     "scripts/e2e/stage4b-sandbox-tree.sh": NO_CI_JOB,
     "scripts/e2e/verifiers-staging-token.sh": NO_CI_JOB,
-    ".github/scripts/check-bun-version.test.sh": FETCHES_NOTHING,
     "packages/daemon/internal/testpg/testpg.go": FETCHES_NOTHING,
     "packages/envoy/scripts/dev-postgres.sh": FETCHES_NOTHING,
     "packages/envoy/scripts/dev-postgres.test.sh": FETCHES_NOTHING,
@@ -413,7 +423,8 @@ for row in rows:
             f"{CI_IMAGES}:{key_line(row, 'tag')}: the row for {one_line(upstream)} has no tag. "
             f"An untagged manifest is a package version nothing names, and a retention policy "
             f"may delete a digest a job pins. Give it one: the upstream repository's last path "
-            f"element, then the upstream tag."
+            f"element, then the upstream tag when this row names one, then the first eight hex "
+            f"characters of the digest."
         )
         continue
     if not isinstance(digest, str) or not DIGEST.fullmatch(digest.strip()):
@@ -506,6 +517,19 @@ if MODE == PACKAGE:
     )
 
 
+def upstream_parts(upstream: str) -> tuple[str, str, str, str]:
+    """(host, path, tag, digest) of a row's upstream, each "" where the reference carries none."""
+    return split_reference(upstream) or ("", "", "", "")
+
+
+def tag_rule(upstream: str, digest: str) -> tuple[str, str]:
+    """(the eight characters a row's tag ends with, the whole tag the rule gives that row)."""
+    short = digest.partition(":")[2][:8]
+    _, path, carried, _ = upstream_parts(upstream)
+    parts = [part for part in (path.rpartition("/")[2], carried, short) if part]
+    return short, "-".join(parts)
+
+
 by_digest: dict[str, tuple[int, str, str, str]] = {}
 by_tag: dict[str, tuple[int, str, str, str]] = {}
 for row in readable:
@@ -528,14 +552,22 @@ for row in readable:
         )
     else:
         by_tag[tag] = row
+    short, wanted = tag_rule(upstream, digest)
+    if not tag.endswith(short):
+        problems.append(
+            f"{CI_IMAGES}:{line}: tag {tag} does not end with {short}, the first eight characters "
+            f"of this row's digest. A tag without them is a tag another digest of the same image "
+            f"can take, and the copy that takes it moves the tag off the digest consumers pin. "
+            f"Name this row {wanted}."
+        )
 
 
-def upstream_parts(upstream: str) -> tuple[str, str, str, str]:
-    """(host, path, tag, digest) of a row's upstream, each "" where the reference carries none."""
-    return split_reference(upstream) or ("", "", "", "")
-
-
-# Rule 3: a row whose upstream carries a version this repository pins elsewhere.
+# Rule 3: a version this repository pins elsewhere that no row carries. One row carrying the pin
+# is enough, and a row for another version is admitted, because a bump lands its row in the
+# commit before the pin: ci.yaml's ci-images job copies the row, and the commit that moves the
+# pin and the FROMs then pulls a digest the package already holds. Nothing loosens by admitting
+# the extra row. Rule 6 refuses a FROM whose digest no row holds, and
+# .github/scripts/check-bun-version.sh refuses a FROM on a row of any Bun but the pinned one.
 if not BUN_PIN.is_file():
     fatal(f"{BUN_PIN} is missing: the oven/bun rows of {CI_IMAGES} carry the version it pins")
 bun_pin = BUN_PIN.read_text().strip()
@@ -553,36 +585,25 @@ for text in worker_text.splitlines():
 if not go_pin:
     fatal(f"{WORKER_DOCKERFILE} declares no ARG GO_VERSION=<version>, which a golang row copies")
 
-bun_rows: list[tuple[int, str, str]] = []  # line, upstream, the tag that upstream carries
-for line, upstream, _, _ in readable:
+carried_by: dict[str, list[str]] = {"oven/bun": [], "library/golang": []}
+for _, upstream, _, _ in readable:
     _, repository, carried, _ = upstream_parts(upstream)
-    if repository == "oven/bun":
-        bun_rows.append((line, upstream, carried))
-wanted = {bun_pin, f"{bun_pin}-slim"}
-for line, upstream, carried in bun_rows:
-    if carried not in wanted:
-        problems.append(
-            f"{CI_IMAGES}:{line}: this row copies {one_line(upstream)}, and {BUN_PIN} locks "
-            f"{bun_pin}. Raise both together: edit this row to oven/bun:{bun_pin} (or "
-            f"oven/bun:{bun_pin}-slim), name its new digest, and repoint every FROM on it."
-        )
-for tag in sorted(wanted):
-    if not any(carried == tag for _, _, carried in bun_rows):
-        problems.append(
-            f"{CI_IMAGES}:{key_line(document, 'images')}: no row copies oven/bun:{tag}, and this "
-            f"repository builds FROM it ({BUN_PIN} locks {bun_pin}). Add the row, and "
-            f"{MIRROR_JOB} publishes it."
-        )
-for line, upstream, _, _ in readable:
-    _, repository, carried, _ = upstream_parts(upstream)
-    if repository != "library/golang":
-        continue
-    if carried.partition("-")[0] != go_pin:
-        problems.append(
-            f"{CI_IMAGES}:{line}: this row copies {one_line(upstream)}, and "
-            f"{WORKER_DOCKERFILE} pins ARG GO_VERSION={go_pin}. Raise both together: edit this "
-            f"row to golang:{go_pin}-alpine, name its new digest, and repoint every FROM on it."
-        )
+    if repository in carried_by:
+        carried_by[repository].append(carried)
+if not any(carried in {bun_pin, f"{bun_pin}-slim"} for carried in carried_by["oven/bun"]):
+    problems.append(
+        f"{CI_IMAGES}:{key_line(document, 'images')}: no row copies oven/bun:{bun_pin}, and "
+        f"{BUN_PIN} locks {bun_pin}. Add that row (the `-slim` suffix is a row of its own) and "
+        f"name its digest, and {MIRROR_JOB} publishes it. Raising Bun is two commits: this row "
+        f"first, then {BUN_PIN}, the ARG and every FROM."
+    )
+if not any(carried.partition("-")[0] == go_pin for carried in carried_by["library/golang"]):
+    problems.append(
+        f"{CI_IMAGES}:{key_line(document, 'images')}: no row copies library/golang at the "
+        f"version {WORKER_DOCKERFILE} pins ARG GO_VERSION={go_pin}. Add the row "
+        f"golang:{go_pin}-alpine and name its digest, and {MIRROR_JOB} publishes it. Raising Go "
+        f"is two commits: this row first, then the ARG and every FROM."
+    )
 
 # ---------------------------------------------------------------- CI's reach
 workflows = sorted(Path(".github/workflows").glob("*.yaml"))
@@ -914,26 +935,16 @@ for key, why in sorted(IMAGE_FROM.items()):
         )
 
 # ---------------------------------------------------------------- the mirror.gcr.io sweep
-def walk() -> list[Path]:
-    found = []
-    stack = [Path(".")]
-    while stack:
-        for entry in sorted(stack.pop().iterdir()):
-            if entry.is_symlink() and entry.is_dir():
-                continue
-            if entry.is_dir():
-                if entry.name not in SKIP_DIRS:
-                    stack.append(entry)
-            else:
-                found.append(entry)
-    return found
-
+# The walk is workflow_paths.walk, the one check-image-trigger-paths.sh reads the same tree
+# with. It is imported here rather than beside this check's other imports, because the package
+# mode ends above and this sweep is the one half that walks the tree.
+from workflow_paths import walk  # noqa: E402
 
 swept = 0
 naming_mirror: set[str] = set()
-for path in walk():
-    name = str(path)
-    if name in SELF:
+for name in walk():
+    path = Path(name)
+    if SWEEP_SKIP_DIRS.intersection(path.parts[:-1]) or name in SELF:
         continue
     text = read_text(path)
     if text is None:

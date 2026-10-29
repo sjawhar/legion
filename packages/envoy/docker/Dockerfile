@@ -5,9 +5,7 @@
 # Bun is pinned to the version the repo locks, like packages/daemon/docker/worker.Dockerfile:
 # bundler output differs across Bun releases, so a published SPA must not be built by whatever
 # 1.x is newest that day. The web stage runs the copy of that Bun, named by digest;
-# .github/scripts/check-bun-version.sh keeps this ARG, .bun-version and that row's upstream tag
-# equal.
-ARG BUN_VERSION=1.4.4
+# .github/scripts/check-bun-version.sh holds that row's upstream tag to .bun-version.
 # ghcr.io/sjawhar/legion/ci, the copy of oven/bun:1.4.4 (.github/ci-images.yaml)
 FROM ghcr.io/sjawhar/legion/ci@sha256:1d22548f177f4ff38e0c15baa3c2c46c6c2060ba2d1bc573bb4720b407548f1d AS web
 

@@ -3,10 +3,11 @@
 # that refusal, one per ground of its exception list, and the repository's own tree in each mode.
 #
 # Each case builds a miniature repository under a temporary directory and symlinks the real
-# script into it, so the script under test is the file CI runs, not a copy that can drift: it
-# resolves its root from its own path (`cd "$(dirname "$0")/../.."`), which the symlink puts at
-# the fixture root. A fixture holds every file CI's reach names, because the check fails on a
-# reach file that is gone.
+# script, and the path model its sweep walks the tree with (workflow_paths.py), into it, so the
+# code under test is the code CI runs, not a copy that can drift: the script resolves its root
+# from its own path (`cd "$(dirname "$0")/../.."`), which the symlink puts at the fixture root.
+# A fixture holds every file CI's reach names, because the check fails on a reach file that is
+# gone.
 #
 # NO CASE REACHES THE NETWORK. The check reads which rows the package holds through
 # CI_IMAGES_MANIFEST_HEAD: when that variable is set, it runs the command it names once per row
@@ -84,22 +85,23 @@ fixture() {
     "$root/packages/envoy/internal/tests3" "$root/packages/envoy-client/src/__tests__" \
     "$root/scripts/e2e/lib" "$root/packages/pi-legion/scripts/skill-scenarios"
   ln -s "$check_script" "$root/.github/scripts/check-ci-images.sh"
+  ln -s "$script_dir/workflow_paths.py" "$root/.github/scripts/workflow_paths.py"
   echo "1.3.14" > "$root/.bun-version"
   cat > "$root/.github/ci-images.yaml" <<YAML
 registry: $REGISTRY
 
 images:
   - upstream: docker.io/library/nats:2.10
-    tag: nats-2.10
+    tag: nats-2.10-0a1b2c3d
     digest: $NATS
   - upstream: docker.io/oven/bun:1.3.14
-    tag: bun-1.3.14
+    tag: bun-1.3.14-1b2c3d4e
     digest: $BUN
   - upstream: docker.io/oven/bun:1.3.14-slim
-    tag: bun-1.3.14-slim
+    tag: bun-1.3.14-slim-2c3d4e5f
     digest: $BUN_SLIM
   - upstream: docker.io/library/golang:1.25.0-alpine
-    tag: golang-1.25.0-alpine
+    tag: golang-1.25.0-alpine-3d4e5f60
     digest: $GOLANG
 YAML
   cat > "$root/.github/workflows/ci.yaml" <<YAML
@@ -230,14 +232,14 @@ check "and reads the package once per row" "$(is "$(wc -l < "$spy_log")" 4)"
 
 echo "case: rule 1 — a row this check cannot read"
 root=$(fixture row-no-tag)
-sed -i '/tag: nats-2.10/d' "$root/.github/ci-images.yaml"
+sed -i '/tag: nats-2.10-0a1b2c3d/d' "$root/.github/ci-images.yaml"
 run_check tree "$root"
 check "a row with no tag fails" "$(is "$status" 1)"
 check "says why a tag is needed" "$(contains "$out" 'a package version nothing names')"
 check "names the row" "$(contains "$out" 'the row for docker.io/library/nats:2.10 has no tag')"
 
 root=$(fixture row-empty-tag)
-sed -i 's/tag: nats-2.10/tag: ""/' "$root/.github/ci-images.yaml"
+sed -i 's/tag: nats-2.10-0a1b2c3d/tag: ""/' "$root/.github/ci-images.yaml"
 run_check tree "$root"
 check "an empty tag fails too" "$(is "$status" 1)"
 check "names the row" "$(contains "$out" 'has no tag')"
@@ -252,7 +254,7 @@ echo "case: rule 2 — two rows naming one digest, or one tag"
 root=$(fixture duplicate-digest)
 cat >> "$root/.github/ci-images.yaml" <<YAML
   - upstream: docker.io/library/nats:2.11
-    tag: nats-2.11
+    tag: nats-2.11-0a1b2c3d
     digest: $NATS
 YAML
 run_check tree "$root"
@@ -262,29 +264,65 @@ check "says why one digest is one row" "$(contains "$out" 'one digest names one 
 root=$(fixture duplicate-tag)
 cat >> "$root/.github/ci-images.yaml" <<YAML
   - upstream: docker.io/library/nats:2.11
-    tag: nats-2.10
+    tag: nats-2.10-0a1b2c3d
     digest: $UNKNOWN
 YAML
 run_check tree "$root"
 check "a second row on one tag fails" "$(is "$status" 1)"
 check "says the copy would move the tag" "$(contains "$out" 'would move the tag off the first')"
 
-echo "case: rule 3 — a row that disagrees with a version pinned elsewhere"
+echo "case: rule 2 — a tag that does not end with its row's digest"
+# The suffix is what makes a shared tag impossible: without it the nats row's tag is the tag
+# every digest that image ever has can take, and a later copy moves it off the digest this
+# tree's consumers pin.
+root=$(fixture tag-without-digest)
+sed -i 's/tag: nats-2.10-0a1b2c3d/tag: nats-2.10/' "$root/.github/ci-images.yaml"
+run_check tree "$root"
+check "a tag without those characters fails" "$(is "$status" 1)"
+check "names the characters it wants" "$(contains "$out" 'tag nats-2.10 does not end with 0a1b2c3d')"
+check "and the tag the row should carry" "$(contains "$out" 'Name this row nats-2.10-0a1b2c3d')"
+
+root=$(fixture tag-without-digest-untagged-upstream)
+cat >> "$root/.github/ci-images.yaml" <<YAML
+  - upstream: docker.io/library/ubuntu@$UNKNOWN
+    tag: ubuntu
+    digest: $UNKNOWN
+YAML
+run_check tree "$root"
+check "a row whose upstream names no tag fails the same way" "$(is "$status" 1)"
+check "and is named the digest alone" "$(contains "$out" 'Name this row ubuntu-9f8e7d6c')"
+
+echo "case: rule 3 — a version pinned elsewhere that no row carries"
 root=$(fixture bun-drift)
-sed -i 's|docker.io/oven/bun:1.3.14-slim|docker.io/oven/bun:1.4.2-slim|' \
+sed -i 's|upstream: docker.io/oven/bun:1.3.14|upstream: docker.io/oven/bun:1.4.2|' \
   "$root/.github/ci-images.yaml"
 run_check tree "$root"
-check "a bun row that is not the pinned release fails" "$(is "$status" 1)"
+check "a tree whose every bun row moved off the pin fails" "$(is "$status" 1)"
 check "names the pin" "$(contains "$out" '.bun-version locks 1.3.14')"
-check "and the row that is now missing" "$(contains "$out" 'no row copies oven/bun:1.3.14-slim')"
+check "and the row it wants" "$(contains "$out" 'no row copies oven/bun:1.3.14')"
+check "and the order of a bump" "$(contains "$out" 'Raising Bun is two commits')"
 
 root=$(fixture golang-drift)
 sed -i 's|ARG GO_VERSION=1.25.0|ARG GO_VERSION=1.26.3|' \
   "$root/packages/daemon/docker/worker.Dockerfile"
 run_check tree "$root"
-check "a golang row that is not the pinned release fails" "$(is "$status" 1)"
+check "a tree whose golang row is not the pinned release fails" "$(is "$status" 1)"
 check "names the pin" "$(contains "$out" 'pins ARG GO_VERSION=1.26.3')"
 check "and what to write" "$(contains "$out" 'golang:1.26.3-alpine')"
+
+# The first commit of a bump: the next version's row lands, and is copied, while the pin and
+# every FROM still name the version before it. An extra row is admitted for that reason.
+root=$(fixture next-version-rows)
+cat >> "$root/.github/ci-images.yaml" <<YAML
+  - upstream: docker.io/oven/bun:1.4.2-slim
+    tag: bun-1.4.2-slim-4e5f6071
+    digest: sha256:4e5f60718293a4b54e5f60718293a4b54e5f60718293a4b54e5f60718293a4b5
+  - upstream: docker.io/library/golang:1.26.3-alpine
+    tag: golang-1.26.3-alpine-5f607182
+    digest: sha256:5f60718293a4b5c65f60718293a4b5c65f60718293a4b5c65f60718293a4b5c6
+YAML
+run_check tree "$root"
+check "a row for the next Bun and Go, beside the pinned rows, passes" "$(is "$status" 0)"
 
 echo "case: rule 4 — a reference on another registry"
 root=$(fixture other-registry)
@@ -300,7 +338,7 @@ check "and the one package" "$(contains "$out" "a copy in $REGISTRY")"
 
 echo "case: rule 5 — a reference that is not pinned by digest"
 root=$(fixture tag-not-digest)
-sed -i "s|image: $REGISTRY@$NATS|image: $REGISTRY:nats-2.10|" "$root/.github/workflows/ci.yaml"
+sed -i "s|image: $REGISTRY@$NATS|image: $REGISTRY:nats-2.10-0a1b2c3d|" "$root/.github/workflows/ci.yaml"
 run_check tree "$root"
 check "a tagged reference fails" "$(is "$status" 1)"
 check "says a tag can move" "$(contains "$out" 'a name the registry can move')"

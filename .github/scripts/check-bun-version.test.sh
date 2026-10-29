@@ -262,6 +262,14 @@ run_check "$root"
 check "an ARG default that disagrees with the pin fails" "$(is "$status" 1)"
 check "names both versions" "$(contains "$out" 'but .bun-version locks 1.3.14')"
 
+# The fixture's Dockerfile reads the ARG (`FROM oven/bun:${BUN_VERSION}`), which is what holds
+# its default to the pin. A Dockerfile that reads it nowhere builds the same image whatever the
+# default says, so the default is left alone.
+root=$(fixture arg-unread)
+printf 'ARG BUN_VERSION=1.4.2\nFROM scratch AS empty\n' > "$root/unread.Dockerfile"
+run_check "$root"
+check "an ARG default no instruction reads passes" "$(is "$status" 0)"
+
 root=$(fixture dockerfile-suffix)
 printf 'ARG BUN_VERSION=1.3.14\nFROM oven/bun:${BUN_VERSION}-slim AS cli\n' > "$root/worker.Dockerfile"
 run_check "$root"
@@ -282,23 +290,23 @@ YAML
 }
 
 root=$(fixture mirror-bun-pinned)
-mirror_row "$root" mirror.gcr.io/oven/bun:1.3.14-slim
+mirror_row "$root" docker.io/oven/bun:1.3.14-slim
 printf 'FROM ghcr.io/sjawhar/legion/ci@sha256:0a1b2c3d4e5f60710a1b2c3d4e5f60710a1b2c3d4e5f60710a1b2c3d4e5f6071 AS plugin\n' \
   > "$root/worker.Dockerfile"
 run_check "$root"
 check "the row whose upstream is the pinned Bun, suffix and all, passes" "$(is "$status" 0)"
 
 root=$(fixture mirror-bun-drift)
-mirror_row "$root" mirror.gcr.io/oven/bun:1.4.2-slim
+mirror_row "$root" docker.io/oven/bun:1.4.2-slim
 printf 'FROM ghcr.io/sjawhar/legion/ci@sha256:0a1b2c3d4e5f60710a1b2c3d4e5f60710a1b2c3d4e5f60710a1b2c3d4e5f6071 AS plugin\n' \
   > "$root/worker.Dockerfile"
 run_check "$root"
 check "a row copying another Bun release fails" "$(is "$status" 1)"
-check "names the release that row copies" "$(contains "$out" 'is the copy of mirror.gcr.io/oven/bun:1.4.2-slim')"
+check "names the release that row copies" "$(contains "$out" 'is the copy of docker.io/oven/bun:1.4.2-slim')"
 check "and says which file to raise, to what" "$(contains "$out" 'to oven/bun:1.3.14 and name its digest here')"
 
 root=$(fixture mirror-digest-unknown)
-mirror_row "$root" mirror.gcr.io/oven/bun:1.3.14-slim
+mirror_row "$root" docker.io/oven/bun:1.3.14-slim
 printf 'FROM ghcr.io/sjawhar/legion/ci@sha256:9f8e7d6c5b4a30219f8e7d6c5b4a30219f8e7d6c5b4a30219f8e7d6c5b4a3021 AS plugin\n' \
   > "$root/worker.Dockerfile"
 run_check "$root"

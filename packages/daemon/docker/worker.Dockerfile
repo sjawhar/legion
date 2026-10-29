@@ -45,7 +45,8 @@
 # corepack's pnpm and yarn, the AWS CLI v2 and kubectl —
 # each of these on PATH at /usr/local/bin or /usr/bin; the warm Go module cache of the two modules
 # go.work binds, at /home/legion/go/pkg/mod/cache/download, which /opt/go/go.env names first in
-# GOPROXY (the go stage and the toolchain stage say why);
+# GOPROXY, and which carries no version list, so a version query falls through to the public
+# proxy (the go stage and the toolchain stage say why);
 # and the license of every third-party piece of
 # all that at /usr/share/doc/legion/THIRD_PARTY_NOTICES (the notices stage; its Debian list comes from
 # the image's own dpkg database).
@@ -324,7 +325,18 @@ ENV GOMODCACHE=/gomodcache
 COPY go.work go.work.sum ./
 COPY packages/daemon/go.mod packages/daemon/go.sum packages/daemon/
 COPY packages/envoy/go.mod packages/envoy/go.sum packages/envoy/
-RUN go mod download
+# The download writes an `@v/list` file for each module. That file names the versions this cache
+# holds, and no other. A file proxy answers a list request from it with no error, and a `|` in
+# GOPROXY falls through to the next source on an error alone, so proxy.golang.org would never be
+# asked. In every repository a role opens, `go get X@latest`, `go get -u`, `go list -m -u all`,
+# `go list -m -versions` and a `go mod tidy` that adds an import of a cached module would then
+# stop at the versions this build pinned, and nothing would tell the role. The RUN therefore
+# deletes every list file and every `@latest` file from the cache it ships. A version query gets
+# a 404 from the file proxy and falls through to the public proxy, while the `.info`, `.mod` and
+# `.zip` of a pinned version still come from the cache. The final stage's toolchain step refuses
+# an image that ships one of these files again.
+RUN go mod download \
+    && find /gomodcache/cache/download \( -path '*/@v/list' -o -name '@latest' \) -delete
 COPY packages/daemon packages/daemon
 COPY packages/envoy packages/envoy
 WORKDIR /src/packages/daemon
@@ -381,7 +393,10 @@ RUN test -n "$LEGION_REVISION" \
 # `file:///home/legion/go/pkg/mod/cache/download|https://proxy.golang.org|direct`.
 # A `|` between entries makes a go command fall through to the next source after any error. A
 # module the image's cache does not hold therefore still comes from proxy.golang.org, and an image
-# whose cache was deleted still builds. The line replaces the GOPROXY line stock go.env carries,
+# whose cache was deleted still builds. A version query falls through for the same reason: the go
+# stage deletes every `@v/list` and `@latest` file from the cache, so the file proxy answers
+# `go get X@latest` or `go list -m -versions` with a 404 and proxy.golang.org answers with the
+# releases it has (that stage says more). The line replaces the GOPROXY line stock go.env carries,
 # and the RUN fails if that line is absent. go.env is the place for it, not an `ENV` of the final
 # stage. Two facts decide that. First, a pod tells every role `GOMODCACHE=/legion/go/mod`, the
 # issue volume (roleEnvironment, packages/daemon/internal/runtime/sandbox/manifest.go). That
@@ -846,7 +861,10 @@ ENV AWS_CA_BUNDLE=/etc/ssl/certs/ca-certificates.crt COREPACK_DEFAULT_TO_LATEST=
 # read), where only /opt/go/go.env's line holds it at 0, so the build fails if that line, the default
 # a scrubbed environment depends on, is ever lost. It reads GOPROXY the same way, with GOPROXY
 # removed from the environment, and requires the line the toolchain stage wrote into the same
-# go.env: the warm module cache reaches a role through that line alone. It then holds the cache
+# go.env: the warm module cache reaches a role through that line alone. It then requires the cache
+# to carry no `@v/list` and no `@latest` file. One of those files would answer every version query
+# of every repository a role opens with the versions this image pinned, and the fall-through to
+# proxy.golang.org happens on an error alone (the go stage says more). It then holds the cache
 # itself to the runtime user and to a writable download directory. A role that cannot write there
 # cannot add a module the cache does not hold. The step prints how many modules the cache carries.
 # gofmt takes no --version; formatting a
@@ -878,6 +896,7 @@ RUN set -eu; \
     test "$(env -u CGO_ENABLED go env CGO_ENABLED)" = 0; \
     test "$(env -u GOPROXY go env GOPROXY)" = 'file:///home/legion/go/pkg/mod/cache/download|https://proxy.golang.org|direct'; \
     modcache=/home/legion/go/pkg/mod/cache/download; \
+    test -z "$(find "$modcache" \( -path '*/@v/list' -o -name '@latest' \) -print -quit)"; \
     test "$(stat -c '%U' "$modcache")" = legion; test -w "$modcache"; \
     printf 'go module cache: %s modules\n' "$(find "$modcache" -name '*.zip' | wc -l)"; \
     printf 'package main\n' | gofmt; gopls version; \

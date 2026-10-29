@@ -51,10 +51,21 @@ reads a third-party registry any more, so a failed pull is this repository's own
   the package but can never change the bytes a job pulls.
 - `.github/ci-images.yaml` holds one row per image (`upstream`, `tag`, `digest`).
   `.github/scripts/mirror-ci-images.sh` copies the rows the package does not hold yet, with
-  `crane copy`, which keeps the manifest digest. `ci.yaml`'s `ci-images` job runs that copy and
-  then the package half of the gate, so a pull request that adds a row does not race its own
-  gate. That job is the one copy path, and it runs on a pull request, on a merge group and on a
-  push to main. Adding an image, or moving one to a new version, is one edit of that file.
+  `crane copy`, which keeps the manifest digest. That copy names the upstream repository at the
+  row's digest, and never the row's upstream tag: an upstream tag floats, and two branches that
+  read it on different days would copy different bytes. Each row's tag ends with the first eight
+  characters of its digest, so one tag names one digest and no copy moves a tag off a digest a
+  job pins. `ci.yaml`'s `ci-images` job runs that copy and then the package half of the gate, in
+  that order, so a pull request that adds a row does not race **that half**. It does race the
+  other consumers: `worker-image`, `envoy-smoke` and the Dockerfile builds wait on the `changes`
+  job alone, so one of them can pull a new digest while the `ci-images` job of the same run is
+  still copying it. That job is the one copy path, and it runs on a pull request, on a merge
+  group and on a push to main. Adding an image is one edit of that file. Moving one to a new
+  version is two commits: the new version's row first, which the `ci-images` job of that run
+  copies while nothing pulls it yet, then the pin (`.bun-version`, or `ARG GO_VERSION` of
+  `packages/daemon/docker/worker.Dockerfile`) and every `FROM` onto it, with the row they leave
+  deleted. `.github/scripts/check-ci-images.sh` admits that extra row for this reason: it asks
+  for one row at each version this repository pins, and refuses no row beside it.
 - `.github/scripts/check-ci-images.sh` is the gate, and it takes one mode. Its `tree` mode
   refuses a reference in CI's reach that names anything but a digest that file holds, and names
   each file outside CI's reach that still names `mirror.gcr.io`, with the one ground that admits
@@ -68,12 +79,18 @@ reads a third-party registry any more, so a failed pull is this repository's own
 
 1. Read the failing step and the reference it names. It names `ghcr.io/sjawhar/legion/ci` and a
    digest.
-2. Do not re-run the job, and do not add a retry. The answer came from this repository's own
-   package, and a second request gets the same answer.
+2. Read the failure against this run's own `ci-images` job before you re-run anything, and add
+   no retry. One case is fixed by a re-run: a consumer that pulled before the copy landed. The
+   commit under test adds a row, the consumer job waits on `changes` alone, and it reached
+   ghcr.io while the `ci-images` job of the same run was still copying. Wait for that job to
+   finish, then re-run the failed consumer job alone. A version bump that lands its row in an
+   earlier commit never reaches this case. In every other case the answer came from this
+   repository's own package, and a second request gets the same answer.
 3. Read the failure for which of three things it is:
    - The package does not hold that digest. A row was added or edited, and the `ci-images` job
-     for that commit did not copy it. Read that job's log. It fails loudly on a copy that lands
-     at another digest, and `gh run rerun` runs it again.
+     for that commit has not copied it yet, or its copy failed. Read that job's log. A copy
+     still running is the case step 2 names. A copy that failed names its own fault — it fails
+     loudly on one that lands at another digest — and `gh run rerun` runs that job again.
    - The registry refused the read. The package is public, and a public package answers an
      anonymous pull, so a `403` means the package's visibility changed. That is an act by a
      person, not a branch's doing.

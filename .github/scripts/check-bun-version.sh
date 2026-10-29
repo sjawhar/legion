@@ -1,8 +1,11 @@
 #!/usr/bin/env bash
 # Bun is a toolchain, and CI must run the one this repository locks. The pin lives in
-# `.bun-version`; the two Dockerfile `ARG BUN_VERSION` defaults must equal it (nothing passes
-# `--build-arg`, so those defaults are what every image build resolves), and this check fails
-# until all three agree. Raising Bun is therefore three edits, made together.
+# `.bun-version`. A Dockerfile that reads `${BUN_VERSION}` must give that ARG the pinned version
+# as its default (nothing passes `--build-arg`, so the default is what every image build
+# resolves), and this check fails until the two agree. One file reads it today:
+# packages/daemon/docker/worker.Dockerfile, whose notices stage fetches Bun's licence at
+# `bun-v${BUN_VERSION}`. A Dockerfile that does not read the variable declares no ARG for it:
+# that default would decide nothing, and a bump would carry an edit that changes no build.
 #
 # What this gate is for is accidental drift: an unpinned setup-bun step, a floating Docker tag, a
 # Bun install that never reads `.bun-version`. It does not try to stop someone who is deliberately
@@ -35,8 +38,9 @@
 #   9. a `FROM oven/bun` (case-insensitive) whose tag does not come from `${BUN_VERSION}`, a
 #      `FROM` on `ghcr.io/sjawhar/legion/ci` — the package every image a CI job fetches is copied
 #      into, named by digest — whose digest no row of `.github/ci-images.yaml` holds, or whose row
-#      copies another Bun release, an `ARG BUN_VERSION` default that disagrees with the pin, or a
-#      Dockerfile `RUN` (backslash continuations joined) that installs Bun,
+#      copies another Bun release, an `ARG BUN_VERSION` default that disagrees with the pin in a
+#      Dockerfile that reads the variable, or a Dockerfile `RUN` (backslash continuations
+#      joined) that installs Bun,
 #  10. a tool-manager manifest (any mise file, `.tool-versions`) naming bun.
 #
 # Files are discovered by walking the tree, not by asking git, so an unsnapshotted change cannot
@@ -125,6 +129,8 @@ DOCKER_RUN_BUN = re.compile(r"\bdocker\s[^\n|&;]*\brun\b[^\n|&;]*\b(oven/bun(?::
 INPUT_ASSIGNMENT = re.compile(r"INPUT_[A-Za-z0-9_-]+(?:=|<<)")
 MISE_ENTRY = re.compile(r'^"?(?:tools\.)?bun"?\s*[=:]|^bun\s|^\[tools\.bun\]')
 VERSION = re.compile(r"\d+\.\d+\.\d+")
+# A read of the ARG: `$BUN_VERSION` or `${BUN_VERSION}` in an instruction of the same file.
+BUN_VARIABLE = re.compile(r"\$\{?BUN_VERSION\}?")
 
 problems = []
 wrapper_setup_steps: list[tuple[int, dict]] = []
@@ -451,11 +457,18 @@ for dockerfile in dockerfiles:
     content = read_text(dockerfile)
     if content is None:
         continue
-    for number, stripped in joined_lines(content):
+    instructions = list(joined_lines(content))
+    # The ARG's default is held to the pin where the file reads the variable, and there alone:
+    # a `FROM oven/bun:${BUN_VERSION}`, or a RUN that fetches something at that version. Where
+    # nothing reads it, the default decides no byte of the image, so holding it to the pin would
+    # add an edit to every bump and refuse nothing. joined_lines drops each comment line, so a
+    # comment naming the variable does not make a file a reader of it.
+    reads_version = any(BUN_VARIABLE.search(text) for _, text in instructions)
+    for number, stripped in instructions:
         upper = stripped.upper()
         if stripped.startswith("ARG BUN_VERSION="):
             default = stripped[len("ARG BUN_VERSION=") :].strip().strip('"')
-            if default != pinned:
+            if reads_version and default != pinned:
                 problems.append(
                     f"{dockerfile}:{number}: ARG BUN_VERSION={one_line(default)}, but {PIN_FILE} "
                     f"locks {pinned} — raise both together"

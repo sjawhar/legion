@@ -221,7 +221,14 @@ with its pod](#the-disk-dies-with-its-pod)), so the image's copy reaches a role 
 than as its `GOMODCACHE`: the build rewrites `/opt/go/go.env`'s `GOPROXY` line to
 `file:///home/legion/go/pkg/mod/cache/download|https://proxy.golang.org|direct`, and the `|` makes
 a go command fall through to the public proxy after any error, so a module the cache does not hold
-still resolves. `go.env` is the place for it rather than the final stage's `ENV`, for the reason
+still resolves. The `go` stage deletes every `@v/list` and `@latest` file from the cache before the
+runtime stage copies it, and the final stage's toolchain step fails the build if one is there. Such
+a file would name the versions of this image and no other, and a file proxy answers a list request
+from it with no error, so `go get X@latest`, `go get -u`, `go list -m -u all` and
+`go list -m -versions` would stop at this image's pins in every repository a role opens. Without
+those files the file proxy answers a version query with a 404, and the query falls through to
+`proxy.golang.org`, while the `.info`, `.mod` and `.zip` of a pinned version still come from the
+cache. `go.env` is the place for it rather than the final stage's `ENV`, for the reason
 the cgo paragraph above gives in reverse: a variable the image's `ENV` sets is one
 `runtime.kubernetes.pod.env` may not set, while a `go.env` default leaves `GOPROXY` to an operator,
 a role, or one command, each of which outranks it through the process environment.
@@ -519,7 +526,8 @@ detector, needs it), `go env CGO_ENABLED` with `CGO_ENABLED` removed from the en
 to be `0` (so the build fails if `/opt/go/go.env`'s `CGO_ENABLED=0` line, the default a scrubbed
 environment depends on, is ever lost), `go env GOPROXY` read the same way and required to be the
 `file:///home/legion/go/pkg/mod/cache/download|https://proxy.golang.org|direct` that same `go.env`
-carries, with the cache it names held to the runtime user and to a writable download directory,
+carries, with the cache it names held to the runtime user, to a writable download directory and to
+carrying no `@v/list` and no `@latest` file,
 `gofmt`, `kubectl version --client`, and trixie's
 `python3` with `python3 -c "import yaml"` for its PyYAML, `curl`, `wget`, `jq --version`, `flock --version`, `psql --version`, `redis-cli --version`,
 `sqlite3 --version`, `nc -h`, `dig -v`, `chromium --version` and `socat -V` included — the corepack shims fetching their shipped default pnpm and yarn
