@@ -215,11 +215,12 @@ test("a reopened issue's page names no unsent edit before typing, and an edit ty
     await expect(page.getByRole("status", { name: unsentNotice })).toHaveCount(0);
     expect(await pendingEditCount(page, issue.primary_artifact_id)).toBe(0);
 
-    // The issue reopens while the page is open. Its socket stays admitted read-only until the
-    // connection drops; the reconnect syncs and is then admitted writable, as the server orders it.
+    // The issue reopens while the page is open. The reopen drops the document's socket; the
+    // reconnect syncs and is then admitted writable, as the server orders it. The document socket's
+    // first reconnect is a uniform draw from [0, 2 s) (#2323), so a row must wait for the state the
+    // page settles in and never depend on which side of the draw a run lands.
     await patchIssue(issue.key, { status: "backlog" });
     await expect(page.getByText("This issue is closed. Its document is read-only.")).toBeHidden();
-    await transport.sever();
     await expect(editor).toHaveAttribute("contenteditable", "true");
     await expect(connectedDot(page)).toHaveText("connected");
     await expect.poll(() => pendingEditCount(page, issue.primary_artifact_id)).toBe(0);

@@ -146,6 +146,13 @@ type Service struct {
 	// (forkLive), before the write's operation runs on it. Nil outside tests; tests use it to edit
 	// the room after the fork read it.
 	afterForkRead func(room string)
+	// checkRendering runs where a write's rendering (liveWrite.tree, markdown, offsets) is to
+	// describe its fork, at names where: "fork" once forkLive has brought the fork up to date,
+	// "margin", "docTree" and "capture" as a margin write (applyMargin) or a read joined to the
+	// write's transaction takes the rendering in place of reading the fork (reuseRendering), and
+	// "publish" just before publishLiveWrite releases the fork. Nil outside tests; tests use it to
+	// compare the rendering with a fresh read and render of the fork.
+	checkRendering func(at string, write *liveWrite)
 	// afterSettleAuthorsTake runs after a settlement has taken its authors and before it copies
 	// the tree it will version. Nil outside tests; tests use it to edit the room in that window.
 	afterSettleAuthorsTake func(room string)
@@ -275,6 +282,9 @@ type Service struct {
 	// renderPaths counts how the renderings the rooms' update observers and the document writes
 	// need were had (renderPathCounts); every replica counts on it (keepReplica).
 	renderPaths renderPathCounts
+	// forkTrees counts the trees read off write transactions' forks and the reads that taking the
+	// write's rendering in their place avoided (forkTreeCounts).
+	forkTrees forkTreeCounts
 	// instances lists, for each resident room document, what that instance records about the
 	// durable history behind it (*roomInstance): the updates whose writes can have recorded a
 	// pending author, and the durable version the instance stands at, keyed by a weak pointer to
@@ -2341,10 +2351,12 @@ func waitGroup(ctx context.Context, wg *sync.WaitGroup) {
 	}
 }
 
-// SetIssueClosed refreshes the closed state every room of an issue remembers, and closes them when
-// the issue closes. When it reopens, a state the close left without a latest edit source takes the
-// one its document's pending-settlement row holds (restoreLastActor). A document with no state has
-// no room to tell: its next load reads the issue.
+// SetIssueClosed refreshes the closed state every room of an issue remembers, and closes every
+// room of the issue on this process, on a close and on a reopen alike (below), so each browser
+// reconnects and is admitted as the issue now stands. When it reopens, a state the close left
+// without a latest edit source takes the one its document's pending-settlement row holds
+// (restoreLastActor) before its room closes. A document no room of this process holds has nothing
+// to close: its next load reads the issue.
 // Its caller runs it after its own transaction has committed, and it takes that caller's context
 // so the pool can see it: a caller that ever runs it with a transaction still open is refused, not
 // wedged. That context is one caller holding at most one connection, so the rooms are recorded and
@@ -2406,17 +2418,27 @@ func (s *Service) SetIssueClosed(ctx context.Context, issueKey string, closed bo
 			if persisted {
 				s.lastActorPersisted(room, creditSeq)
 			}
-			// A room still loading has no state yet, and is closed once it has loaded.
-			_ = s.srv.CloseRoom(room, true)
 		}
+		// Every room of the issue closes on this process, on a close and on a reopen alike: a
+		// connection keeps the admission it was authorized with, read-only or writable, and the
+		// state's closed flag says nothing about it - a connection's own registration
+		// (addConnection) or a load after the reopen committed makes a state that reads the issue
+		// open while a browser on it was admitted read-only. A room still loading is closed once
+		// its load has returned: ygo's CloseRoom waits for the load's ready barrier.
+		_ = s.srv.CloseRoom(room, true)
 	}
 }
 
 // restoreLastActor gives the state of a reopened issue's document the latest edit source its
-// pending-settlement row holds, as a room's load does (onLoadDocument): the close moved it from
-// the state to the row (lastActorPersisted), and a room that loaded while the issue was closed
-// restored none, so without this the settlement the document owes would name no latest editor.
-// An edit observed since the reopen's snapshot (a later creditSeq) keeps its own.
+// pending-settlement row holds, before the reopen closes its room: the close moved it from the
+// state to the row (lastActorPersisted), and a room that loaded while the issue was closed
+// restored none. The load of the next room takes the row's source too (onLoadDocument), but only
+// while the state holds nothing newer than the row (rowIsCurrent). A state that still holds an
+// update whose append has not landed - the reopen's own ask writes, published into the room just
+// before this closes it - keeps its own source through a load that starts before the close's flush
+// takes that update (ygo takes the room out of its map before CloseRoom returns), and without this
+// that source would be the none the close left, so the settlement the document owes would name no
+// latest editor. An edit observed since the reopen's snapshot (a later creditSeq) keeps its own.
 func (s *Service) restoreLastActor(ctx context.Context, room string, creditSeq uint64) {
 	owed, lastActor, err := readOwedSettlement(ctx, s.store.Pool, room)
 	if err != nil {

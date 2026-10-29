@@ -240,11 +240,14 @@ func tablePositionsWeight(positions map[*pmdoc.TablePosition]struct{}) int64 {
 
 // buildDocumentRead renders tree, the document as of stamp, into everything the four reads answer,
 // with one render, one placement walk, which lays each table out once for its paths and its rows,
-// and one token encoding for the document and its blocks: an error when any of them refuses the
-// tree, a document outside the schema, as the read computing it from the tree would. The document
-// token's error is returned as nodeToken returns it, after the rendering's.
-func buildDocumentRead(artifactID string, stamp DocumentStamp, tree *pmdoc.Node) (*documentRead, error) {
-	paths, rows, err := pmdoc.BlockPathsAndTableRows(tree)
+// and one token encoding for the document and its blocks, none of which validates the tree again:
+// its caller validated it once (pmdoc.ValidDocument). Its error is the one any of them gives when
+// it refuses the tree, a document outside the schema, as the read computing it from the tree
+// would: the placement walk's as it is, the descendants', a block token's or the rendering's
+// through documentSchemaError (renderedBlocks), and the document token's as nodeToken returns it,
+// after the rendering's.
+func buildDocumentRead(artifactID string, stamp DocumentStamp, tree pmdoc.ValidDocument) (*documentRead, error) {
+	paths, rows, err := tree.BlockPathsAndTableRows()
 	if err != nil {
 		return nil, err
 	}
@@ -320,11 +323,11 @@ func (s *Service) coldRead(ctx context.Context, artifactID string) (*documentRea
 }
 
 // foldDocument loads artifactID's stored history decoded once (LoadDocument), reads its tree and
-// renders it, storing the rendering under the stamp the load read in its own transaction, never
-// the one read before the miss, so a write between the two cannot store old content under a new
-// stamp. Its error is the load's, or a panic recovered from any of it: singleflight re-panics an
-// unrecovered panic of a call it has waiters for in a goroutine nothing can recover, where a read
-// panicking on the request's own goroutine would fail that one request.
+// renders it (foldLoaded), storing the rendering under the stamp the load read in its own
+// transaction, never the one read before the miss, so a write between the two cannot store old
+// content under a new stamp. Its error is the load's, or a panic recovered from any of it:
+// singleflight re-panics an unrecovered panic of a call it has waiters for in a goroutine nothing
+// can recover, where a read panicking on the request's own goroutine would fail that one request.
 func (s *Service) foldDocument(ctx context.Context, artifactID string) (fold coldFold, err error) {
 	defer func() {
 		if recovered := recover(); recovered != nil {
@@ -341,17 +344,32 @@ func (s *Service) foldDocument(ctx context.Context, artifactID string) (fold col
 		}
 		return coldFold{}, err
 	}
+	// A rendering refused leaves the fold its tree, from which each read computes its own answer
+	// and refusal, as it would without the cache.
+	fold, _ = foldLoaded(artifactID, loaded)
+	if fold.read != nil {
+		s.reads.put(fold.read)
+	}
+	return fold, nil
+}
+
+// foldLoaded is the fold of loaded, a document its caller has just decoded and holds alone: its
+// tree read once and validated once (pmdoc.ReadUnshared) and rendered without validating it again
+// (buildDocumentRead). A tree the read refuses is the fold's treeErr, the read's error through
+// documentSchemaError as treeOf gives it; a tree the rendering refuses is the fold's tree without
+// a read, and renderErr is the rendering's refusal. A loaded state without a document is the
+// empty fold.
+func foldLoaded(artifactID string, loaded LoadedDocument) (fold coldFold, renderErr error) {
 	if loaded.Doc == nil {
 		return coldFold{}, nil
 	}
-	tree, err := treeOf(loaded.Doc)
+	valid, err := pmdoc.ReadUnshared(loaded.Doc.GetXmlFragment(fragmentName))
 	if err != nil {
-		return coldFold{treeErr: err}, nil
+		return coldFold{treeErr: documentSchemaError(err)}, nil
 	}
-	read, err := buildDocumentRead(artifactID, loaded.Stamp, tree)
+	read, err := buildDocumentRead(artifactID, loaded.Stamp, valid)
 	if err != nil {
-		return coldFold{tree: tree}, nil
+		return coldFold{tree: valid.Node()}, err
 	}
-	s.reads.put(read)
-	return coldFold{read: read, tree: tree}, nil
+	return coldFold{read: read, tree: valid.Node()}, nil
 }

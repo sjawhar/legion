@@ -188,6 +188,31 @@ func TestPanePairs(t *testing.T) {
 	}
 }
 
+// The four stall limits a phase worker's reminder runs on reach a pane as ordinary -e pairs: the
+// daemon merges the ones it holds into the spec's Env (the daemon package's workerSpawnSpec) and
+// a pane carries Env verbatim, so nothing of them is tmux's own.
+func TestPanePairsCarryTheStallLimits(t *testing.T) {
+	spec := testSpec()
+	limits := map[string]string{
+		"LEGION_STALL_REMINDER_MS":     "45000",
+		"LEGION_STALL_WAITING_MS":      "900000",
+		"LEGION_STALL_RESUME_MS":       "15000",
+		"LEGION_STALL_ARCHITECT_AFTER": "3",
+	}
+	maps.Copy(spec.Env, limits)
+	in := PaneInputs{
+		StateDir: "/state", Workspace: "/state/workspaces/LEGION-43", DaemonURL: "http://127.0.0.1:13370",
+		EnvoyURL: "http://127.0.0.1:9020", GHOwnersDir: "/state/secrets/legion-omp-legion-43-tester-gh",
+		GHDefault: "acme", GH: "/usr/bin/gh",
+	}
+	pairs := panePairs(spec, in, secretFiles("/state", spec))
+	for name, value := range limits {
+		if !slices.Contains(pairs, name+"="+value) {
+			t.Errorf("the pane's -e pairs = %q, want %q among them", pairs, name+"="+value)
+		}
+	}
+}
+
 // The tmux runtime never reads spec.Plugins: a pane always resumes on the plugin installed on
 // the daemon's host, which the boot gate already holds to the daemon's contract, so a stale-plugin
 // relaunch (LEGION-164) needs nothing of it here. panePairs and secretFiles — what builds the

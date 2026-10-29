@@ -66,7 +66,9 @@
         "!packages/proof-editor/src/directive-container.ts",
         "!packages/proof-editor/src/mermaid-svg.ts",
         "!packages/proof-editor/src/mermaid-render.ts",
+        "!packages/proof-editor/src/mermaid-code-block-view.ts",
         "!packages/proof-editor/src/typed-block-drawing.ts",
+        "!packages/proof-editor/src/ask-content.ts",
         "packages/proof-editor/upstream/**"
       ],
       "assist": { "enabled": false },
