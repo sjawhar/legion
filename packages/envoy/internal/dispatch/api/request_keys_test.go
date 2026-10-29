@@ -365,6 +365,53 @@ func TestAKeyBelongsToItsLogin(t *testing.T) {
 	}
 }
 
+// The maintenance loop sweeps the keys, as it sweeps the suggestion outcomes and resumes the owed
+// deliveries: a key past its window is deleted by a pass nobody asks for, so no key outlives its
+// window on a deployment where nothing calls the sweep by hand.
+func TestTheMaintenanceLoopSweepsKeysPastTheirWindow(t *testing.T) {
+	rig := newKeyedRig(t, answerRun)
+	rig.send(t, "a", nil, "alice", "old")
+	rig.send(t, "a", nil, "alice", "new")
+	if _, err := rig.database.Pool.Exec(context.Background(),
+		`update request_keys set created_at = now() - interval '25 hours' where idempotency_key = $1`, "old"); err != nil {
+		t.Fatalf("age the old key: %v", err)
+	}
+
+	ctx, stop := context.WithCancel(context.Background())
+	defer stop()
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		RunSuggestionOutcomeSweep(ctx, rig.database.Pool, 50*time.Millisecond, sweepLeases(t, rig.database), nil)
+	}()
+	deadline := time.Now().Add(30 * time.Second)
+	for {
+		var kept int
+		if err := rig.database.Pool.QueryRow(context.Background(),
+			`select count(*) from request_keys where idempotency_key = $1`, "old").Scan(&kept); err != nil {
+			t.Fatalf("read the keys: %v", err)
+		}
+		if kept == 0 {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("the maintenance loop never deleted the key past its window")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	stop()
+	<-done
+
+	var inside int
+	if err := rig.database.Pool.QueryRow(context.Background(),
+		`select count(*) from request_keys where idempotency_key = $1`, "new").Scan(&inside); err != nil {
+		t.Fatalf("read the keys: %v", err)
+	}
+	if inside != 1 {
+		t.Fatalf("the key inside its window was swept too (%d rows), want it kept", inside)
+	}
+}
+
 // A key is kept IdempotencyKeyTTL. The sweep deletes an older one, and a repeat that finds one the
 // sweep has not reached yet treats the key as unused: the request runs again.
 func TestAKeyPastItsWindowIsUnusedAgain(t *testing.T) {
