@@ -2,6 +2,7 @@ package api
 
 import (
 	"context"
+	"fmt"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -32,12 +33,26 @@ func startOfPeriodAfterNext(interval time.Duration) time.Time {
 func TestTheMaintenanceLoopSweepsOncePerPeriodAcrossTwoRunners(t *testing.T) {
 	database := storetest.Open(t)
 	second := storetest.SecondProcess(t, database)
+	recorders := make([]*storetest.StatementRecorder, 0, 2)
+	swept := func() int {
+		return countStatements(recorders[0].Statements(), keySweep) +
+			countStatements(recorders[1].Statements(), keySweep)
+	}
+	// The resume is the last step of a pass, run after the key sweep's delete has returned and
+	// still under the lease, so no pass of the other runner is in flight while it runs: there the
+	// key sweeps that ever started are exactly the passes that ran, this one included. The
+	// recorder sees a delete as it starts, so a count taken anywhere else could include a pass
+	// still in its round trip.
 	var resumes atomic.Int64
+	var unpaired atomic.Pointer[string]
 	resume := func(context.Context) error {
-		resumes.Add(1)
+		pass := resumes.Add(1)
+		if sweeps := swept(); int64(sweeps) != pass {
+			message := fmt.Sprintf("pass %d resumed deliveries after %d key sweeps; every pass runs both", pass, sweeps)
+			unpaired.CompareAndSwap(nil, &message)
+		}
 		return nil
 	}
-	recorders := make([]*storetest.StatementRecorder, 0, 2)
 	runners := make([]func(context.Context), 0, 2)
 	for _, process := range []*store.Store{database, second} {
 		recorder := &storetest.StatementRecorder{}
@@ -47,10 +62,6 @@ func TestTheMaintenanceLoopSweepsOncePerPeriodAcrossTwoRunners(t *testing.T) {
 		runners = append(runners, func(ctx context.Context) {
 			RunMaintenanceSweep(ctx, pool, maintenanceTestInterval, leases, resume)
 		})
-	}
-	swept := func() int {
-		return countStatements(recorders[0].Statements(), keySweep) +
-			countStatements(recorders[1].Statements(), keySweep)
 	}
 
 	// Both runners start a quarter of a period past a boundary, so every tick of both falls well
@@ -63,13 +74,12 @@ func TestTheMaintenanceLoopSweepsOncePerPeriodAcrossTwoRunners(t *testing.T) {
 	}
 
 	const passes = 6
-	waitUntil(t, 30*time.Second, "six key sweeps across the two runners", func() bool { return swept() >= passes })
-	elapsed, sweeps := time.Since(started), swept()
-	if least := (passes - 1) * maintenanceTestInterval; elapsed < least {
-		t.Fatalf("%d key sweeps over %v across the two runners; one pass per period of %v takes at least %v: both processes are sweeping every period",
-			sweeps, elapsed, maintenanceTestInterval, least)
+	waitUntil(t, 30*time.Second, "six completed passes across the two runners", func() bool { return resumes.Load() >= passes })
+	if elapsed, least := time.Since(started), (passes-1)*maintenanceTestInterval; elapsed < least {
+		t.Fatalf("%d passes over %v across the two runners; one pass per period of %v takes at least %v: both processes are sweeping every period",
+			resumes.Load(), elapsed, maintenanceTestInterval, least)
 	}
-	if resumed := resumes.Load(); resumed != int64(sweeps) {
-		t.Fatalf("%d key sweeps and %d delivery resumes; every pass runs both", sweeps, resumed)
+	if message := unpaired.Load(); message != nil {
+		t.Fatal(*message)
 	}
 }

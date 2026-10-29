@@ -386,7 +386,7 @@ func main() {
 	// whose loops would each run everywhere, so it ends here.
 	//
 	// The loops come in these shapes, so that a database nobody writes costs them nothing except
-	// where GitHub gives them nothing to wake on, and the three timers of the last shape:
+	// where GitHub gives them nothing to wake on, and the four timers of the last shape:
 	//   - woken loops, which run a pass at start and then only when a Postgres notification on the
 	//     shared listener below says their work may have changed, or when a due time their last
 	//     pass asked for comes round: the embedding queue (embedqueue.WakeChannel), the reference

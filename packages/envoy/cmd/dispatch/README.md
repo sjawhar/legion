@@ -727,7 +727,7 @@ replaced, so under load each runs no more often than that ticker did.
   later pass, which the pass asks for as its due time, so an agent's writes within a minute are
   judged together. The first pass on a database, whose cursor is null, judges every pending
   suggestion once, as every pass of the release before it did. A failed pass is retried a minute
-  later. It is the one woken loop that takes no lease: the cursor row each page holds is what
+  later. Like the embedding queue, it takes no lease: the cursor row each page holds is what
   serialises two processes woken by one commit, the first pass included, since the row is there
   from `0144` with a null `event_id`. The second process's page waits on the row and then reads
   the cursor the first advanced, so it judges what the first did not rather than the same page

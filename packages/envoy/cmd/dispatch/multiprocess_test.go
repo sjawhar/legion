@@ -1199,10 +1199,12 @@ func lockTables(t *testing.T, database *store.Store, mode string, tables ...stri
 // read before whatever woke it, so after the release each process runs at least one pass and no
 // count is held to one. The other seven are not observable, and this row says so rather than
 // pretending: document-compaction's interval is 24 h; issue-ask-repair's first leased pass is one
-// IssueAskRepairInterval (10 min) in, the boot's repair taking no lease; suggestion-outcomes,
-// which the keyed writes' maintenance sweep holds (api.RunMaintenanceSweep, the suggestion
-// outcome sweep itself taking no lease), has its first leased pass one MaintenanceSweepInterval
-// (1 min) in, and each process ticks on a phase of its own; architecture-import's and
+// IssueAskRepairInterval (10 min) in, the boot's repair taking no lease; suggestion-outcomes is
+// held only by the keyed writes' maintenance sweep now (api.RunMaintenanceSweep, the suggestion
+// outcome sweep taking no lease), which no longer touches write_suggestions, the table this row
+// once held it by, and whose first leased pass is one MaintenanceSweepInterval (1 min) in on a
+// phase of each process's own (api.TestTheMaintenanceLoopSweepsOncePerPeriodAcrossTwoRunners
+// holds what its lease is for); architecture-import's and
 // delivery-reconcile's first pass is jittered uniformly over SyncInterval/ReconcileInterval
 // (5 min) and each process draws its own, so whether their passes ever overlap is a coin toss no
 // test should turn into a flake; edit-notices is a woken loop whose passes here, with nothing
@@ -1278,7 +1280,7 @@ func TestALeasedLoopsPassesNeverOverlapAcrossBothProcesses(t *testing.T) {
 	for _, unobserved := range []struct{ lease, why string }{
 		{"document-compaction", "its interval is 24 h, so no pass is due inside any window a test can wait out"},
 		{"issue-ask-repair", "its first leased pass is one IssueAskRepairInterval (10 min) after each process started"},
-		{"suggestion-outcomes", "the keyed writes' maintenance sweep holds it, and its first leased pass is one MaintenanceSweepInterval (1 min) after each process started"},
+		{"suggestion-outcomes", "only the keyed writes' maintenance sweep holds it, which no longer touches write_suggestions; api.TestTheMaintenanceLoopSweepsOncePerPeriodAcrossTwoRunners holds its lease"},
 		{"architecture-import", "its first pass is jittered over SyncInterval (5 min) and each process draws its own"},
 		{"delivery-reconcile", "its first pass is jittered over ReconcileInterval (5 min) and each process draws its own"},
 		{"edit-notices", "a woken loop whose passes take milliseconds here, so its boot passes meet by luck"},

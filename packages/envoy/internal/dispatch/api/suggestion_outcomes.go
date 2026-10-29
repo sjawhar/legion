@@ -394,7 +394,7 @@ func runSuggestionRules(ctx context.Context, tx pgx.Tx, rules [3]string, args ..
 // nil wake leaves the loop with its start pass and the passes those ask for. With nothing
 // written and nothing due it holds no timer and makes no statement.
 //
-// It takes no lease (duty.WokenLoop.Lease empty), alone among the leased loops' work: every page
+// It takes no lease (duty.WokenLoop.Lease empty), as the embedding queue takes none: every page
 // runs in a transaction holding the suggestion_outcome_cursor row `for update`
 // (judgeSuggestionPage), which is what serialises two processes woken by one commit. The second
 // process's page waits there for the first's transaction and then reads the cursor that
