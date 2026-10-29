@@ -92,7 +92,10 @@
 # fixture and runs it on that image, to leave a pod of the previous layout running for this runtime
 # to take over; the script refuses an image whose revision main or this checkout does not contain,
 # one whose commit already runs one container, or one at a contract other than 37 or 38; STAGE4A_FROM a development entry point, which is
-# never the proof; STAGE4A_EVIDENCE_DIR where the transcript and the runtime's log go (default a
+# never the proof, any checkpoint the harness runs but identity and stale-incarnation (pod-update
+# among them: entered there, the two workers of its issue push that issue's branch to the run's
+# repository from inside their pod and the run deletes it again, as cache-lost-volume's is);
+# STAGE4A_EVIDENCE_DIR where the transcript and the runtime's log go (default a
 # fresh /tmp directory, kept and printed).
 #
 # The secrets-* checks are optional and print CHECK <name>: SKIPPED-BLOCKED when
@@ -473,7 +476,8 @@ chmod 0700 "$work/previous-harness"
 
 harness_ok=
 # -test.timeout 150m must stay under the harness's staleRunBranchAge (4 hours): another run's
-# cache-lost-volume deletes a cache-b branch older than that as a killed run's leftover.
+# cache-lost-volume deletes a branch of that shape older than that as a killed run's leftover —
+# cache-b's, and pod-update's, which its two workers push from inside their pod.
 env \
   LEGION_E2E_RUNTIME_KUBECONFIG="$runtime_kubeconfig" \
   LEGION_E2E_RUNTIME_CONTEXT="$runtime_context" \
