@@ -58,9 +58,10 @@ import { proofMarkPlugins } from 'proof-sdk-upstream/src/editor/schema/proof-mar
 import { codeBlockExtPlugins } from 'proof-sdk-upstream/src/editor/schema/code-block-ext';
 import { frontmatterSchema } from 'proof-sdk-upstream/src/editor/schema/frontmatter';
 import { libraryRemarkFrontmatterPlugin } from './lib-remark-frontmatter-plugin';
-import { libraryRemarkDirectivePlugin, typedBlockRemarkPlugin } from './lib-remark-directive-plugin';
+import { libraryRemarkDirectivePlugin } from './lib-remark-directive-plugin';
 import { libraryRemarkNestedLinksPlugin } from './nested-links';
-import { unfitTypedBlocksRemarkPlugin } from './typed-block-drawing';
+import { liveTypedBlocksRemarkPlugin } from './read-only-directives';
+import { brokenAskInputGuards, keepUnselectedAskBlocks, relaxAskContentCheck } from './ask-content';
 import { remarkProofMarksPlugin } from 'proof-sdk-upstream/src/editor/schema/remark-proof-marks-plugin';
 import { proofMarkHandler } from 'proof-sdk-upstream/src/formats/remark-proof-marks';
 
@@ -309,7 +310,6 @@ export async function createProofEditor(
     // Frontmatter and typed directives register before their node schemas claim their AST nodes.
     .use(libraryRemarkFrontmatterPlugin)
     .use(libraryRemarkDirectivePlugin)
-    .use(opts.blockSchema ? typedBlockRemarkPlugin(opts.blockSchema) : [])
     .use(frontmatterSchema)
     // `use` flattens its argument twice, so an array of composed schemas — each of them a pair
     // of plugins — is an argument Milkdown accepts but its own signature cannot express.
@@ -335,7 +335,7 @@ export async function createProofEditor(
     // `setMarkdown` builds, and `stringify` runs no transformer, so the editor's output is as it was.
     .use(libraryRemarkNestedLinksPlugin)
     // After the mark plugins, so a block-level mark span is a mark node when the fit check reads it.
-    .use(opts.blockSchema ? unfitTypedBlocksRemarkPlugin : [])
+    .use(opts.blockSchema ? liveTypedBlocksRemarkPlugin(opts.blockSchema) : [])
     // Register contexts
     .use(heatmapCtx)
     .use(agentCursorCtx)
@@ -371,6 +371,7 @@ export async function createProofEditor(
     .use(recordMarkHistoryPlugin)
     .use(editorHighlightsPlugin)
     .use(placeholderPlugin)
+    .use(keepUnselectedAskBlocks) // no read-back edit drops an unselected block of an off-rule ask (./ask-content.ts)
     .config((ctx) => {
       ctx.update(remarkStringifyOptionsCtx, (prev) => ({
         ...prev,
@@ -393,6 +394,7 @@ export async function createProofEditor(
 
   let currentReadOnly = Boolean(opts.readOnly);
   view.setProps({ editable: () => !currentReadOnly });
+  view.setProps(brokenAskInputGuards); // no input throws in an off-rule ask (./ask-content.ts)
   const setReadOnly = (readOnly: boolean) => {
     currentReadOnly = readOnly;
     view.setProps({ editable: () => !currentReadOnly });
@@ -406,6 +408,9 @@ export async function createProofEditor(
   // mapping is populated.
   editor.action((ctx) => {
     const collabService = ctx.get(collabServiceCtx);
+    // Before the shared document renders: an ask two collaborators left off its content rule
+    // must not be deleted from it (see ./ask-content.ts).
+    relaxAskContentCheck(ctx.get(schemaCtx));
     collabService.bindDoc(opts.ydoc);
     collabService.mergeOptions({
       yCursorOpts: { cursorBuilder: collabCursorBuilder, selectionBuilder: collabSelectionBuilder },

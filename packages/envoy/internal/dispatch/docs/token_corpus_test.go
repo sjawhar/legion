@@ -3,9 +3,9 @@ package docs
 // The token corpus differential reads a directory of markdown specs at two revisions and dumps
 // everything the document read builds from each, so a change to how the read computes its tokens
 // can be judged by comparing the two dumps byte for byte (cmp). Both the test and the benchmark
-// skip unless DISPATCH_TOKEN_CORPUS names the directory. The file is copied unchanged into the
-// older revision, so it uses only what both revisions have: it reaches the read through
-// buildDocumentRead and never through the token functions being changed.
+// skip unless DISPATCH_TOKEN_CORPUS names the directory. Each revision dumps with its own copy of
+// this file, which reads each spec as that revision's cold read folds it (foldLoaded here); the
+// dump's lines keep one format across revisions, so the two dumps compare.
 
 import (
 	"bufio"
@@ -129,23 +129,23 @@ func tokenCorpusMark(node, parent *pmdoc.Node, texts *int) {
 	}
 }
 
-// tokenCorpusRead reads doc's tree and builds the document read from it, the two calls the corpus
-// times. A panic is returned as its error, as tokenCorpusDoc returns one.
+// tokenCorpusRead folds doc as foldDocument folds the document it loads (foldLoaded), the call the
+// corpus times: the read and its tree, or why the fold has no read. A panic is returned as its
+// error, as tokenCorpusDoc returns one.
 func tokenCorpusRead(doc *crdt.Doc) (read *documentRead, tree *pmdoc.Node, err error) {
 	defer func() {
 		if recovered := recover(); recovered != nil {
 			read, tree, err = nil, nil, fmt.Errorf("panic: %v", recovered)
 		}
 	}()
-	tree, err = treeOf(doc)
+	fold, err := foldLoaded("corpus", LoadedDocument{Doc: doc})
+	if fold.treeErr != nil {
+		return nil, nil, fold.treeErr
+	}
 	if err != nil {
 		return nil, nil, err
 	}
-	read, err = buildDocumentRead("corpus", DocumentStamp{}, tree)
-	if err != nil {
-		return nil, nil, err
-	}
-	return read, tree, nil
+	return fold.read, fold.tree, nil
 }
 
 // tokenCorpusDescendants is the table descendants of tree, a panic returned as its error.
@@ -232,7 +232,7 @@ func TestTokenCorpus(t *testing.T) {
 	if err := out.Close(); err != nil {
 		t.Fatalf("DISPATCH_TOKEN_CORPUS_OUT: %v", err)
 	}
-	t.Logf("token corpus: %d specs, %d block tokens, %d markdown bytes, treeOf+buildDocumentRead %s",
+	t.Logf("token corpus: %d specs, %d block tokens, %d markdown bytes, foldLoaded %s",
 		specs, tokens, markdownBytes, reading)
 }
 
@@ -277,7 +277,11 @@ func BenchmarkTokenCorpusLargest(b *testing.B) {
 	b.SetBytes(int64(len(source)))
 	b.ReportAllocs()
 	for b.Loop() {
-		if _, err := buildDocumentRead("corpus", DocumentStamp{}, tree); err != nil {
+		valid, err := pmdoc.ValidateDocument(tree, "BlockPathsAndTableRows")
+		if err != nil {
+			b.Fatal(err)
+		}
+		if _, err := buildDocumentRead("corpus", DocumentStamp{}, valid); err != nil {
 			b.Fatal(err)
 		}
 	}
