@@ -1,0 +1,135 @@
+{
+  "schemaVersion": 1,
+  "phase": "plan",
+  "issue": "INFRA-550",
+  "completed": "2026-10-29T20:33:11Z",
+  "plan": "dispatch://INFRA-550/artifact/plan-md@v1",
+  "requiredSkills": {
+    "implement": [
+      "skill://legion-worker: the phase worker's workspace binding, the handoff, the push and handoff_complete; this issue is a Legion phase.",
+      "skill://legion-worker/references/pr-body.md: the PR body template and what a proof is; the plan's T8 names three surfaces and only one of them is the E2E line.",
+      "skill://legion-worker/references/conflicts-and-rewrites.md: T1 brings the base in for a need only the base meets (core.ListenerConfig's two new fields from sjawhar/legion#2371).",
+      "skill://legion-worker/references/skip-checks-trailer.md: the handoff-only push carries the trailer and the code push does not.",
+      "skill://ce-simplify-code: the one simplify pass of the first implementing round; this diff touches runtime code.",
+      "skill://legion-worker/references/tools.md: the pulumi CLI T8 needs is not in the image and is installed under $TMPDIR.",
+      "skill://envoy: how to wait for CI or a merge by subscription rather than a sleep loop.",
+      "skill://asd-ste100: the message to INFRA-14's architect that T1 and the five A-items need."
+    ],
+    "test": [
+      "skill://legion-worker: the tester's phase, its handoff and its stop rules.",
+      "skill://legion-worker/references/pr-body.md: the tester verifies the implementer's proof and adds its own E2E line; it names a missing surface rather than passing the phase. This issue has no GKE surface, so what each of T8's three surfaces proves is the thing to judge.",
+      "skill://legion-worker/references/tools.md: the pulumi CLI is needed to re-run the implementer's T8.1 command."
+    ],
+    "review": [
+      "skill://legion-worker: the reviewer's phase and its approval.",
+      "skill://legion-worker/references/review-threads.md: replying to and resolving threads, and judging a bot's finding.",
+      "skill://legion-worker/references/merge-gate.md: the approval of the head by SHA and what READY compares against it.",
+      "skill://legion-worker/references/pr-body.md: the reviewer writes 'Look at first' and 'Not proven / risk', and the second may not read 'none' while the agent-infra half is unproven."
+    ]
+  },
+  "gapAnalysis": {
+    "findings": [
+      {
+        "finding": "F1: the spec's Outcome says the bridge's network policy (agent-infra envoy-cluster/bridge.go) admits namespace dispatch. It does not: bridge.go:206-219 admits envoy and legion only, with the comment that dispatch is deliberately not admitted. Dispatch's first in-cluster dial would be refused.",
+        "answer": "Verified against agent-infra main and recorded as architect item A1 of the plan and as a spec departure. No task of this issue can change it; the plan says this issue's agent-infra apply waits on that policy change being applied, not merged, and names it to the architect."
+      },
+      {
+        "finding": "F2: the issue names no input for 'the hub is in the cluster'. Three shapes, with different costs: a flag, derivation from the URL, or a proxy-address input.",
+        "answer": "Plan T2 decides: one optional bool natsInCluster. Derivation would change every existing consumer's rendering with no input change (a breaking release); a proxy-address input adds a second spelling of the front door's address. The bool renders nothing when unset, so the release stays a minor. T2 also places its resolution in newDispatchSettings, as the module's resolve-then-register rule requires, and notes that a bool and an int need no dispatchSeededInput row."
+      },
+      {
+        "finding": "F3: core refuses a local natsUrl only while a SOCKS5 proxy is set. With the proxy gone, nats://127.0.0.1:4222 renders happily and the pod dials itself. Also, ENVOY_ALLOW_REMOTE_NATS=1 must stay, since bus.LocalNATSURL vouches only for localhost and loopback.",
+        "answer": "Plan T3 adds the in-cluster refusal inside the same ApplyT, a core.InputError naming natsUrl, written against bus.LocalNATSURL as a function so sjawhar/legion#2168's rewrite of it changes nothing; the SOCKS5 mode keeps today's message byte for byte. T3 states that ENVOY_ALLOW_REMOTE_NATS=1 stays on both containers, and T5 asserts it. The two documents that state the old rule as the contract are in T6."
+      },
+      {
+        "finding": "F4: core.ListenerConfig.NATSReplicas and .StreamMaxBytes come from INFRA-549, whose pull request #2371 is open and rewrites the two regions this change edits. The issue does not say what the implementer does if they are absent.",
+        "answer": "Plan T1: the implementer runs the grep and the gh read at its head; present means bring the base in and build on #2371's shape; absent means tell INFRA-14's architect and carry on with T2, T3, T4 and T6, which need neither field, and add the fields in exactly #2371's shape only if the architect says not to wait. A second form is never invented. Recorded as architect item A4."
+      },
+      {
+        "finding": "F5: 'After the agent-infra apply' names work no role of this issue can do (no write on theorem-labs/agent-infra), against a release that does not exist and behind INFRA-561's pin move; the event-to-session half has no command.",
+        "answer": "Architect item A2, with the recommendation that the line and the two agent-infra documents move to INFRA-561 or a new agent-infra child, and with the commands written out in the plan's acceptance table. The production check after the close reports pending with the kubectl baseline until then (T9)."
+      },
+      {
+        "finding": "F6: acceptance line 1 reads as if an in-cluster address alone made the component render a replica count, which contradicts the Outcome's 'left unset unless given'.",
+        "answer": "Plan T5 takes the consistent reading: the test sets both numbers. It adds TestDispatchInClusterNatsRendersNoNumbersWhenUnset for the unset case and makes 'renders unchanged' machine-checkable as the goldens staying byte-identical, with the diff check named."
+      },
+      {
+        "finding": "F7: 'the deployment's replica count' collides with DispatchArgs.Replicas, the app Deployment's pod count.",
+        "answer": "Plan T2 names the input natsReplicas, matching core's refusal name, bounds it 1..bus.MaxReplicas in the resolver, and requires the doc comment and the README row to say plainly that it is JetStream's copy count and not the pod count."
+      },
+      {
+        "finding": "F8: the app container's environment is hand-written and does not go through core.ListenerConfig, so 'use those fields' covers only the listener.",
+        "answer": "Plan T3 keeps the app's hand-written list, so the goldens stay byte-identical (core's Env orders NATS_NKEY_SEED_FILE differently), and computes both containers' NATS variables from the same resolved settings. T5 adds TestDispatchAppAndListenerAgreeOnNats as the invariant that stops the two renderings drifting."
+      },
+      {
+        "finding": "F9: the front door's SOCKS5 proxy, its 1055 Service, its 1055 ingress rule and the front-door DependsOn both workloads carry are left idle once the containers stop using the proxy; INFRA-14's acceptance reads 'no SOCKS5 path to NATS remain' from the cluster.",
+        "answer": "Plan T4 gates all four on the same input, which the plan-reviewer verified breaks nothing else the front door does (its probes never touch 1055; Serve proxies to 8766). Recorded as a spec departure and as architect item A3, with the apply-time consequence as A5."
+      },
+      {
+        "finding": "F10: the spec's 'No conflicting change' census is false: #2402 changes dispatch_kube.go, #2168 rewrites bus.LocalNATSURL, and #2371 rewrites both regions.",
+        "answer": "Plan T1 names all three, says to read rather than merge #2402 and #2168, and writes the new refusal against bus.LocalNATSURL as a function so #2168's merge order does not matter. Recorded as a spec departure of the Start-now section."
+      },
+      {
+        "finding": "F11: the document line points at a file with no SOCKS5 text (.dispatch/architecture/dispatch-deploy.md, agent-infra), at the wrong sentence in dispatch/README.md, and omits packages/envoy/infra/AGENTS.md, which states the refusal rule in this repository.",
+        "answer": "Plan T6 lists the documents this pull request owns, AGENTS.md:151-154 included, with the README passages by line; architect item A2 carries the correction about what actually changes in the two agent-infra files."
+      },
+      {
+        "finding": "F12: 'Running system' is checkable on the Go half alone.",
+        "answer": "Plan T7 names the three commands this pod can run and says plainly that the natslive run needs Docker the pod has not got, so CI owns it; T8 names what each reachable surface does and does not prove; T9 records that the merge itself cuts the envoy-infra release INFRA-561 later pins."
+      }
+    ]
+  },
+  "planReview": {
+    "verdict": "approved",
+    "rounds": 1
+  },
+  "specDepartures": [
+    {
+      "spec": "The Outcome ends: 'the bridge's network policy (envoy-cluster/bridge.go) admits namespace dispatch.'",
+      "plan": "The plan states the opposite as a prerequisite the tree must own: an agent-infra change must add dispatch to that policy, and this issue's apply waits on it being applied.",
+      "evidence": "theorem-labs/agent-infra envoy-cluster/bridge.go:206-219 on main: From: nsNetworkPolicyPeers(envoyNamespace, \"legion\"), with the comment 'Dispatch dials the hub through its own sidecar, so the dispatch namespace is not admitted.' A NetworkPolicy selecting a pod denies every other ingress.",
+      "outcome": {
+        "kind": "changed",
+        "summary": [
+          "The Outcome's closing clause 'the bridge's network policy (envoy-cluster/bridge.go) admits namespace dispatch' is false and must either be corrected or become a named prerequisite with an owner."
+        ]
+      }
+    },
+    {
+      "spec": "Acceptance: 'with an in-cluster address set, neither container carries a SOCKS5 setting'; the Outcome keeps the SOCKS5 path available for a deployment whose hub is not in the cluster.",
+      "plan": "T4 also stops rendering the front door's SOCKS5 proxy, its port-1055 Service, its port-1055 ingress rule and the front-door DependsOn when natsInCluster is set, so no SOCKS5 path to NATS is left in the cluster. With the input unset every one of them renders as today.",
+      "evidence": "packages/envoy/infra/README.md:746-751 already records the intent ('the SOCKS5 path is to give way to an in-cluster NATS Service'); INFRA-14's acceptance reads 'no SOCKS5 path to NATS remain' from the cluster; dispatch_kube.go:489-496 gives the proxy as the only reason both workloads wait for the front door; the front door's probes read /healthz, its ready file and the tailscaled socket and never 1055.",
+      "outcome": {
+        "kind": "changed",
+        "acceptance": [
+          "Add: with the in-cluster mode set, the component renders no <hostname>-tailnet Service, no TS_SOCKS5_SERVER, no port-1055 ingress rule, and neither the app nor the listener waits for the front door."
+        ],
+        "scope": "The pull request also changes dispatch_frontdoor.go and the front door's NetworkPolicy, not dispatch.go and dispatch_kube.go alone."
+      }
+    },
+    {
+      "spec": "Acceptance: 'After the agent-infra apply, Dispatch's server and listener pods carry the in-cluster address and no SOCKS5 variable, the server's /healthz reports NATS connected, and an event created in Dispatch reaches a subscribed session'; and 'The pull requests update packages/envoy/infra/README.md, dispatch/README.md and .dispatch/architecture/dispatch-deploy.md'.",
+      "plan": "The plan keeps only the sjawhar/legion half: the Go tests, the plugin contract read through the real pulumi CLI, and the released version. It recommends the apply line and the two agent-infra documents move to INFRA-561 or to a new agent-infra child of INFRA-14, with the commands written out, and corrects what changes in those two files.",
+      "evidence": "This issue's roles hold GitHub write on sjawhar/legion alone (theorem-labs is read-only). agent-infra dispatch/Pulumi.yaml pins envoy-infra@2.9.1, two majors below this component, and the spec itself orders this issue's apply after INFRA-561's. .dispatch/architecture/dispatch-deploy.md (857 bytes) holds no SOCKS5 text; dispatch/README.md's only SOCKS5 line (:96, the image 'must carry the SOCKS5 dialer') stays true.",
+      "outcome": {
+        "kind": "changed",
+        "acceptance": [
+          "Move the 'After the agent-infra apply' line to the issue that owns the apply.",
+          "Of the three documents, this issue's pull request owns packages/envoy/infra/README.md and adds packages/envoy/infra/AGENTS.md; the other two belong to the agent-infra issue, where the sentence that changes is the hub-address one, not a SOCKS5 description."
+        ],
+        "scope": "This issue delivers one pull request on sjawhar/legion and the envoy-infra release its merge cuts; no agent-infra change and no apply."
+      }
+    },
+    {
+      "spec": "Start now (2026-10-29): 'No conflicting change: no open INFRA-63 pull request changes dispatch_kube.go. Three change one line of packages/envoy/infra/gcp/dispatch.go.'",
+      "plan": "T1 names the three in-flight changes to these files and the order to take them in: #2371 (INFRA-549, rewrites both regions this change edits), #2168 (rewrites bus.LocalNATSURL, the predicate the new refusal rests on) and #2402 (a comment at dispatch_kube.go:537).",
+      "evidence": "gh pr view 2371 (OPEN, MERGEABLE, head db283607, issue status retro) and its diff of core/listener_env.go, gcp/dispatch.go and gcp/dispatch_kube.go; gh pr view 2168 (OPEN, touches internal/bus/reach.go and gcp/dispatch_kube.go); gh pr view 2402 (OPEN, legion/INFRA-592, +2/-2 in gcp/dispatch_kube.go).",
+      "outcome": {
+        "kind": "changed",
+        "summary": [
+          "The 'No conflicting change' census is out of date: three open pull requests touch these files, one of them rewriting both regions this change edits."
+        ]
+      }
+    }
+  ]
+}
