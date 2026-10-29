@@ -6,7 +6,6 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/pulumi/pulumi-gcp/sdk/v10/go/gcp/container"
 	kubernetes "github.com/pulumi/pulumi-kubernetes/sdk/v4/go/kubernetes"
 	apiextensions "github.com/pulumi/pulumi-kubernetes/sdk/v4/go/kubernetes/apiextensions"
 	appsv1 "github.com/pulumi/pulumi-kubernetes/sdk/v4/go/kubernetes/apps/v1"
@@ -20,19 +19,6 @@ import (
 	"github.com/sjawhar/envoy/infra/core"
 	"github.com/sjawhar/envoy/internal/bus"
 )
-
-// dispatchKubeconfig renders the cluster's exec-plugin kubeconfig, which the component exports and
-// its Kubernetes provider takes. The cluster half computes it, so a cluster-only component, which
-// registers no Kubernetes provider and no Kubernetes object, still exports it.
-func dispatchKubeconfig(dispatch string, cluster *container.Cluster) pulumi.StringOutput {
-	return pulumi.All(cluster.Endpoint, cluster.MasterAuth.ClusterCaCertificate(), cluster.Name).ApplyT(func(values []interface{}) (string, error) {
-		parts, err := outputStrings(dispatch, values, "the cluster's endpoint", "the cluster's CA certificate", "the cluster's name")
-		if err != nil {
-			return "", err
-		}
-		return renderKubeconfig(parts[0], parts[1], parts[2]), nil
-	}).(pulumi.StringOutput)
-}
 
 // dispatchSOCKS5Port is the port the front door's tailscaled binds its userspace SOCKS5 proxy on,
 // which its Service publishes, its NetworkPolicy admits, and the two workloads that dial the NATS

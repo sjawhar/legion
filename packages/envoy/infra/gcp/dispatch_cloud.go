@@ -130,6 +130,19 @@ func newDispatchCluster(ctx *pulumi.Context, comp *Dispatch, name string, s disp
 	return &dispatchCluster{cluster: cluster, issuer: issuer, kubeconfig: dispatchKubeconfig(dispatch, cluster), network: network, project: project}, nil
 }
 
+// dispatchKubeconfig renders the cluster's exec-plugin kubeconfig, which the component exports and
+// its Kubernetes provider takes. The cluster half computes it, so a cluster-only component, which
+// registers no Kubernetes provider and no Kubernetes object, still exports it.
+func dispatchKubeconfig(dispatch string, cluster *container.Cluster) pulumi.StringOutput {
+	return pulumi.All(cluster.Endpoint, cluster.MasterAuth.ClusterCaCertificate(), cluster.Name).ApplyT(func(values []interface{}) (string, error) {
+		parts, err := outputStrings(dispatch, values, "the cluster's endpoint", "the cluster's CA certificate", "the cluster's name")
+		if err != nil {
+			return "", err
+		}
+		return renderKubeconfig(parts[0], parts[1], parts[2]), nil
+	}).(pulumi.StringOutput)
+}
+
 // newDispatchDatabase registers what Dispatch itself runs on, which clusterOnly builds none of:
 // the private services range and its peering, the Cloud SQL instance with its database and user,
 // the generated passwords, and the Secret Manager grants the pods' principal needs. It takes the

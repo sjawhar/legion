@@ -61,50 +61,20 @@ func dispatchClusterOnlyGolden(t *testing.T) string {
 // With clusterOnly the component declares the cluster and what the cluster is made of, and nothing
 // else: no private services range or peering, no Cloud SQL instance, database or user, no
 // generated password, no Secret Manager grant, no Kubernetes provider and no Kubernetes object.
-// The five resources it does declare keep the names and parents the default mode gives them
+// The comparison below is of the whole registration set against the cluster set the golden
+// carries, so any of those registering is a line that comparison does not hold and fails naming
+// it. The five resources it does declare keep the names and parents the default mode gives them
 // (TestDispatchRegistrationsMatchTheGolden pins those for the default mode), so a consumer that
-// later turns the mode off keeps its cluster rather than replacing it.
+// later turns the mode off keeps its cluster rather than replacing it. The mode registers no
+// RandomPassword, so the component requires no random provider: the program below declares the
+// gcp provider alone, so the NoError is what holds the requirement gone, since with it back
+// providers.Require would refuse the component before anything registered. With the mode off the
+// random provider is still required before anything registers
+// (TestDispatchRequiresGCPAndRandomProvidersBeforeRegistering).
 func TestDispatchClusterOnlyRegistersTheClusterAlone(t *testing.T) {
 	m, err := runDispatchClusterOnly(t, dispatchClusterOnlyArgs())
 	require.NoError(t, err)
 	require.Equal(t, dispatchClusterOnlyGolden(t), dispatchRegistrations(m))
-
-	want := map[string]int{
-		"gcp:compute/network:Network":                       1,
-		"gcp:compute/subnetwork:Subnetwork":                 1,
-		"gcp:compute/router:Router":                         1,
-		"gcp:compute/routerNat:RouterNat":                   1,
-		"gcp:container/cluster:Cluster":                     1,
-		"gcp:compute/globalAddress:GlobalAddress":           0,
-		"gcp:servicenetworking/connection:Connection":       0,
-		"gcp:sql/databaseInstance:DatabaseInstance":         0,
-		"gcp:sql/database:Database":                         0,
-		"gcp:sql/user:User":                                 0,
-		"random:index/randomPassword:RandomPassword":        0,
-		"gcp:secretmanager/secretIamMember:SecretIamMember": 0,
-	}
-	for typ, count := range want {
-		require.Equal(t, count, countRegistrations(m, typ), typ)
-	}
-	for _, registration := range m.Registrations() {
-		require.False(t, strings.HasPrefix(registration.Type, "kubernetes:"),
-			"%s %s is a Kubernetes object, which clusterOnly does not register", registration.Type, registration.Name)
-	}
-	require.NotContains(t, m.Types(), "pulumi:providers:kubernetes",
-		"no Kubernetes object registers, so the component makes no provider for one")
-}
-
-// The mode registers no RandomPassword, so the component requires no random provider: a
-// cluster-only program would otherwise declare a provider it never uses. The program below
-// declares the gcp provider alone, so the NoError is what holds the requirement gone: with it
-// back, providers.Require would refuse the component before anything registered. With the mode
-// off the random provider is still required before anything registers
-// (TestDispatchRequiresGCPAndRandomProvidersBeforeRegistering).
-func TestDispatchClusterOnlyNeedsNoRandomProvider(t *testing.T) {
-	m, err := runDispatchClusterOnly(t, dispatchClusterOnlyArgs())
-	require.NoError(t, err)
-	require.Equal(t, "example-dispatch", m.One(t, "gcp:container/cluster:Cluster").Name,
-		"and the cluster registers all the same")
 }
 
 // deletionProtection is one of the four inputs the mode keeps live, and it guards the cluster as
