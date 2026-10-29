@@ -175,13 +175,21 @@ func RunSearchTermStatsRefresh(ctx context.Context, pool *store.Pool, interval t
 // pass, or a server whose first pass has not reached it) calls it and picks in probe mode
 // meanwhile; many checks of that project then cost one refresh, not one each. The refresh runs on
 // the server's lifetime, bounded by one interval, by which the leased pass would have refreshed
-// the project anyway.
+// the project anyway. It is background work - it outlives the request that started it and runs
+// outside admission - so it reads and writes through the background pool, as the leased pass
+// does, never the request pool, whose connections admission counts.
 func (s *server) ensureSearchTermStats(project string) <-chan singleflight.Result {
 	return s.termStats.DoChan(project, func() (any, error) {
 		ctx, cancel := context.WithTimeout(s.lifetime, SearchTermStatsInterval)
 		defer cancel()
 		started := time.Now()
-		items, err := refreshSearchTermStats(ctx, s.deps.Store.Pool, project)
+		background, err := s.deps.Store.Pool.Background()
+		if err != nil {
+			slog.Warn("dispatch: refresh the search term statistics of a project the related-item check found without them",
+				"project", project, "error", err)
+			return nil, err
+		}
+		items, err := refreshSearchTermStats(ctx, background, project)
 		if err != nil {
 			slog.Warn("dispatch: refresh the search term statistics of a project the related-item check found without them",
 				"project", project, "error", err)

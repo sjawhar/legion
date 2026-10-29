@@ -1502,7 +1502,14 @@ func (s *Service) settleRoomWithin(parent context.Context, room string, generati
 		state.mu.Lock()
 		state.settleWarming = true
 		s.unlockState(room, state)
-		err := s.srv.Apply(parent, room, func(_ *crdt.Doc, _ func(func(*crdt.Transaction))) {})
+		// The warm-up's injection reads the issue's state (allowInject) through the settlements
+		// pool, as the rest of the settlement reads: it is settlement work, and a read of the
+		// request pool would take a connection admission counts for requests.
+		warm := parent
+		if settlements, err := s.store.Pool.Settlements(); err == nil {
+			warm = withQueryPool(parent, settlements)
+		}
+		err := s.srv.Apply(warm, room, func(_ *crdt.Doc, _ func(func(*crdt.Transaction))) {})
 		state.mu.Lock()
 		state.settleWarming = false
 		s.unlockState(room, state)
@@ -2968,14 +2975,26 @@ func WithoutRecoveryWait(ctx context.Context) context.Context {
 	return context.WithValue(ctx, withoutRecoveryWait{}, true)
 }
 
-// queryFrom returns the caller's transaction when it is inside one. A document read made while
-// an API write transaction is open must go through that transaction: a second connection from
-// the shared pool is what deadlocks it (store.ErrNestedAcquire).
+// queryFrom returns the caller's transaction when it is inside one, else the pool its context
+// names (withQueryPool), else the request pool. A document read made while an API write
+// transaction is open must go through that transaction: a second connection from the request pool
+// is what deadlocks it (store.ErrNestedAcquire). Background work that reaches a read written for
+// requests names its own pool, so it takes no connection admission counts for requests.
 func (s *Service) queryFrom(ctx context.Context) Queryer {
 	if tx, ok := txFromContext(ctx); ok {
 		return tx
 	}
+	if pool, ok := ctx.Value(queryPoolKey{}).(*store.Pool); ok {
+		return pool
+	}
 	return s.store.Pool
+}
+
+type queryPoolKey struct{}
+
+// withQueryPool names the pool queryFrom reads through for ctx when ctx carries no transaction.
+func withQueryPool(ctx context.Context, pool *store.Pool) context.Context {
+	return context.WithValue(ctx, queryPoolKey{}, pool)
 }
 
 // Queryer is the read surface shared by the pool and a transaction, so a read can be pointed
