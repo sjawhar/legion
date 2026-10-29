@@ -8,7 +8,7 @@
 // nothing, so two runs write byte-identical files. Every document is one content form put in one
 // mark context put in one container, and ends in a single line ending.
 //
-// The forms come in three families, each written with the mark contexts that decide its reading:
+// The forms come in four families, each written with the mark contexts that decide its reading:
 //
 //   - A leaf form is an inline node that carries no text of its own - inline HTML, an image, a
 //     hard break, a footnote reference - together with a code span and an autolink, which do carry
@@ -27,6 +27,13 @@
 //     These take bare, strong and strikethrough; a form that is itself a link label wrapped in
 //     `[...](u)` is a different shape, so the link context is written only for the image control,
 //     which is no link.
+//   - An image-label form is an image whose label holds raw HTML: a tag, a lowercase declaration,
+//     an uppercase one, a comment, a processing instruction and CDATA, each with text around it
+//     and each alone in the label, with and without a title. The engine's alt text is
+//     mdast-util-to-string of the label, which writes a literal node's own value and so keeps the
+//     raw HTML, where Go built the alt from the label's text and nested images alone and dropped
+//     it. Only the label decides the alt, which no mark around the image reaches, so these take
+//     the bare context alone, in every container.
 //
 // The containers are a paragraph, a heading, a quote, a bullet item, an ordered item, a table
 // cell, a callout, a footnote definition and a quoted bullet item. A form holding a line ending -
@@ -88,6 +95,14 @@ const labelForms = [
   "[https://u.test](u)",
   "![<https://u.test>](u)",
 ] as const;
+// Raw HTML in an image's label, one form for each kind a label can hold.
+const imageLabelHTML = ["<b>", "<!a>", "<!A>", "<!-- c -->", "<?x?>", "<![CDATA[x]]>"] as const;
+const imageLabelForms = imageLabelHTML.flatMap((html) =>
+  ["i.png", 'i.png "t"'].flatMap((destination) => [
+    `![r ${html} s](${destination})`,
+    `![${html}](${destination})`,
+  ])
+);
 
 const linkContext = "[{}](u)";
 const leafContexts = [
@@ -105,6 +120,7 @@ const leafContexts = [
 ] as const;
 const declarationContexts = ["{}", "**{}**", "*{}*", linkContext] as const;
 const labelContexts = ["{}", "**{}**", "~~{}~~"] as const;
+const imageLabelContexts = ["{}"] as const;
 
 const paragraph = "{}";
 const callout = ':::callout{#c1 kind="note" title="T"}\n{}\n:::';
@@ -129,6 +145,7 @@ const forms: { md: string; contexts: readonly string[] }[] = [
     // An image label is the one label form that is not itself a link.
     contexts: md.startsWith("![") ? [...labelContexts, linkContext] : labelContexts,
   })),
+  ...imageLabelForms.map((md) => ({ md, contexts: imageLabelContexts as readonly string[] })),
 ];
 
 const seen = new Set<string>();

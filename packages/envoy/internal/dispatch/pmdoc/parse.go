@@ -834,9 +834,17 @@ func parseTableRow(row ast.Node, header bool, source []byte, footnotes map[int]s
 }
 
 // parseImage converts image. Its alt text is its label's plain text as the browser editor's parser
-// takes it (mdast-util-to-string): every text in the label, marked or not, and the alt text of an
-// image in it. inlineNesting holds images within maxInlineNesting of one another, so each alt
-// text is copied into at most that many others.
+// takes it (mdast-util-to-string): every text in the label, marked or not, the alt text of an
+// image in it, and the value of a literal node, which that function writes before it looks at an
+// alt or at children — its `one` returns `value.value` for any node carrying a `value` field. Raw
+// HTML is such a literal node: mdast reads `<b>`, `</b>`, a comment, a declaration, a processing
+// instruction and CDATA each into one `html` node, and mdast's `html` is a literal, so the one
+// `html` arm here covers every kind of raw HTML a label can hold, writing its characters as
+// written from the node's `value` attribute. A `<span data-proof=…>` and its `</span>` are no
+// `html` node at all: parseInlineMarks reads them as the anchor mark on the text between them, in
+// an image's label as anywhere else, so an anchored label holds its text alone in the alt.
+// inlineNesting holds images within maxInlineNesting of one another, so each alt text is copied
+// into at most that many others.
 func parseImage(image *ast.Image, source []byte, footnotes map[int]string) (*Node, error) {
 	alt, err := parseInline(image, source, nil, footnotes)
 	if err != nil {
@@ -850,6 +858,9 @@ func parseImage(image *ast.Image, source []byte, footnotes map[int]string) (*Nod
 		case "image":
 			nested, _ := child.Attrs["alt"].(string)
 			text.WriteString(nested)
+		case "html":
+			value, _ := child.Attrs["value"].(string)
+			text.WriteString(value)
 		}
 	}
 	return &Node{Type: "image", Attrs: Attrs{
