@@ -2,6 +2,7 @@ import type { CreateProofEditorOptions, ProofEditorHandle, StoredMark } from "@l
 import type { Doc } from "yjs";
 
 import type { BlockSchema } from "../../api/types";
+import { requestMermaidDrawing } from "../refs/mermaid-diagrams";
 import { importWhenOnline } from "../shell/DeploymentResilience";
 import { MARKS_MAP_NAME } from "./roots";
 
@@ -19,11 +20,13 @@ export const editorAttributes = {
 
 // The editor library sits behind `import()` so the issue route ships none of it until a
 // document mounts; `importWhenOnline` holds the retry policy for a chunk that fails offline.
+// Every editor's mermaid blocks (the live document, a read-only one, a past version) draw through
+// `requestMermaidDrawing`, in the Mermaid worker comments use, never on the page's thread.
 export const createEditor: CreateEditor = async (root, options) => {
   const [{ createProofEditor }] = await importWhenOnline(() =>
     Promise.all([import("@legion/proof-editor"), import("@legion/proof-editor/style.css")])
   );
-  const handle = await createProofEditor(root, options);
+  const handle = await createProofEditor(root, { ...options, drawMermaid: requestMermaidDrawing });
   for (const [name, value] of Object.entries(editorAttributes)) {
     handle.view.dom.setAttribute(name, value);
   }

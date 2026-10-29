@@ -4,11 +4,11 @@
 // share `last_reconcile_at` and `last_error`. Dispatch's issues and the agents' titles are read
 // from Dispatch's own tables while the server answers, so they are as old as the answer
 // (`readAtMs`). Events are the last GitHub event intake processed. While the page's live socket
-// (`api/delivery-live.ts`) is open, Dispatch tells it every change as it is recorded, so the
+// (`api/live-socket.ts`) is open, Dispatch tells it every change as it is recorded, so the
 // reconciled and event rows say Live, aged by the last change it applied, and the read rows are
 // current; a source Dispatch's verdict names stale, or a reconcile error, keeps today's red row.
 // No React.
-import type { DeliveryLiveState } from "../../../api/delivery-live";
+import type { LiveSocketState } from "../../../api/live-socket";
 import type { DeliveryTimelineResponse } from "../../../api/types";
 
 export type DeliveryFreshness = DeliveryTimelineResponse["freshness"];
@@ -120,9 +120,10 @@ function eventsRow(lastEventAt: string | null, nowMs: number): FreshnessRow {
   };
 }
 /** The text a Live row shows in place of its age: `Live`, the last change's age, or, while the
- *  socket reconnects, how long it has been lost. Undefined while the socket is closed. */
+ *  socket reconnects, how long it has been lost. Undefined while the socket connects or is
+ *  closed. */
 function liveText(
-  live: DeliveryLiveState,
+  live: LiveSocketState,
   nowMs: number
 ): { text: string; red: boolean } | undefined {
   if (live.state === "reconnecting") {
@@ -157,12 +158,19 @@ function asLive(
   };
 }
 
+/** The source rows, from the body's own `freshness` and whatever verdict the socket last carried.
+ *  A `freshness` frame carries the whole verdict - the reconcile's time and last error, the last
+ *  event, the unfetchable count, and the sources past their threshold - and Dispatch sends one
+ *  right after each subscription's first answer, so the frame is never older than the body: where
+ *  there is one, every row reads from it, and a verdict that changed while the socket was down,
+ *  or while the page held no delivery view, shows in full once the view is back. */
 export function sourceFreshness(
-  freshness: DeliveryFreshness,
+  body: DeliveryFreshness,
   nowMs: number,
   readAtMs: number,
-  live: DeliveryLiveState
+  live: LiveSocketState
 ): FreshnessRow[] {
+  const freshness = live.verdict?.freshness ?? body;
   const liveRow = liveText(live, nowMs);
   const stale = new Set(live.verdict?.stale ?? []);
   // The read rows are as old as the last answer; while the socket is open every change reaches the

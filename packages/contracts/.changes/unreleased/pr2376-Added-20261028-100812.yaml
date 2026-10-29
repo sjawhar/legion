@@ -1,8 +1,0 @@
-kind: Added
-body: |-
-    `dispatch doc-read --help` says that after the document it lists each open anchored comment
-    under the passage it is anchored to, with its author, time and full text and every reply in its
-    thread.
-time: 2026-10-28T10:08:12.563538183Z
-custom:
-    Issue: pr2376

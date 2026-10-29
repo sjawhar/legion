@@ -79,8 +79,7 @@ func TestCommentPayloadSuppressesResolvedRouteAndAuthorSessions(t *testing.T) {
 	authorSuppression := func(id string) map[string]any {
 		return map[string]any{
 			"id": id, "reply_to": rootID,
-			"mentions":           mentionsOf("mentioned"),
-			"suppressed_authors": []string{"mentioned"},
+			"mentions": mentionsOf("mentioned"),
 		}
 	}
 	for _, tc := range []struct {

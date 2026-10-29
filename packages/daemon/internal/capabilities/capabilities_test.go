@@ -17,8 +17,8 @@ import (
 // every Name constant, so the table is held to the declared names and nothing else.
 var names = []Name{
 	Subagents, EvalJS, EvalPython, Browser, LSP, CodeGraph, WebSearch, Skills, MCP, RepositoryExtensions,
-	DispatchEnvoyTools, GitHub, Secrets, ModelFallback, Toolchain, ResourceLimits, PoolCapacity, Network,
-	OperatorSetup, ProductionIdentities,
+	DispatchEnvoyTools, GitHub, Secrets, ModelFallback, Toolchain, ClaudeCode, ResourceLimits, PoolCapacity,
+	Network, OperatorSetup, ProductionIdentities,
 }
 
 // The table is the one declared list: every Name constant appears in it exactly once, and no row

@@ -236,7 +236,10 @@ type liveEnv struct {
 	// streamHost, when the two differ.
 	podReachability                             string
 	streamHost, streamAdvertiseHost, streamPort string
-	appID, appKeyName                           string
+	// appKeyCommand is LEGION_E2E_IMPLEMENT_APP_KEY_COMMAND: lib/github-apps.sh's own
+	// app_key_command for appKeyName, which the script hands the harness so no copy of the key
+	// runner's command lives here; resolveApp runs it with `sh -c`.
+	appID, appKeyName, appKeyCommand string
 	// storageClass is the issue volumes' StorageClass: AWS's gp2, GKE's standard-rwo, or whatever
 	// else the cluster under test defaults issue volumes to. No default of its own: the plan
 	// behind LEGION_E2E_STORAGE_CLASS is the operator's to pick, never this harness's to guess.
@@ -325,6 +328,7 @@ func readLiveEnv(t *testing.T) liveEnv {
 		runtimeIdentityKind:   get("LEGION_E2E_RUNTIME_IDENTITY_KIND"),
 		appID:                 get("LEGION_E2E_IMPLEMENT_APP_ID"),
 		appKeyName:            get("LEGION_E2E_IMPLEMENT_APP_KEY_NAME"),
+		appKeyCommand:         get("LEGION_E2E_IMPLEMENT_APP_KEY_COMMAND"),
 		record:                get("LEGION_E2E_RECORD"),
 		work:                  get("LEGION_E2E_WORK"),
 		from:                  os.Getenv("LEGION_E2E_FROM"),

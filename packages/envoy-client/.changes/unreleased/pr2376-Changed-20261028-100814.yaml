@@ -1,7 +1,0 @@
-kind: Changed
-body: |-
-    **Breaking:** `DispatchClient.getComments(issue)` loses its `artifact` argument, which no
-    caller passed.
-time: 2026-10-28T10:08:14.861250234Z
-custom:
-    Issue: pr2376

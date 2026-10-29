@@ -71,9 +71,10 @@ type GitHub interface {
 	Redeliver(ctx context.Context, deliveryID int64) error
 }
 
-// OpenState opens the sweep's KV bucket, creating it on first use.
-func OpenState(js nats.JetStreamContext) (bus.KeyValue, error) {
-	kv, err := bus.EnsureKeyValue(js, &nats.KeyValueConfig{Bucket: bus.WebhookRedeliveryBucket, TTL: retention, Storage: nats.FileStorage, Replicas: 1})
+// OpenState opens the sweep's KV bucket, creating it on first use with replicas copies, the
+// deployment's ENVOY_NATS_REPLICAS, and raising a bucket found with fewer (bus.EnsureKeyValue).
+func OpenState(js nats.JetStreamContext, replicas int) (bus.KeyValue, error) {
+	kv, err := bus.EnsureKeyValue(js, &nats.KeyValueConfig{Bucket: bus.WebhookRedeliveryBucket, TTL: retention, Storage: nats.FileStorage, Replicas: replicas})
 	if err != nil {
 		return bus.KeyValue{}, fmt.Errorf("open %s KV bucket: %w", bus.WebhookRedeliveryBucket, err)
 	}
@@ -174,7 +175,11 @@ type Options struct {
 // Sweeper lists the App webhook's failed deliveries and redelivers them.
 type Sweeper struct {
 	GitHub GitHub
-	State  bus.KeyValue
+	// Open opens the sweep's state bucket (OpenState). A sweep calls it until it has once
+	// succeeded, and every later sweep uses that bucket: a sweep it fails for returns its error
+	// and asks GitHub nothing, so a sweeper made while NATS is down opens its bucket on the first
+	// sweep that finds NATS connected.
+	Open   func() (bus.KeyValue, error)
 	Logger *slog.Logger
 	// Now is the clock; nil is time.Now.
 	Now func() time.Time
@@ -184,6 +189,10 @@ type Sweeper struct {
 	Pace time.Duration
 	// MaxRequests caps redelivery requests per sweep; zero is 300.
 	MaxRequests int
+
+	// state is the bucket Open opened, the zero KeyValue until a sweep has opened it (openState).
+	// Every read and write of the sweep's state goes to it.
+	state bus.KeyValue
 }
 
 // record is the sweep's memory of one delivery, keyed by its GUID.
@@ -232,19 +241,13 @@ const webhookRedeliveryLease = "webhook-redelivery"
 // installation's rate limit pays for that interval however many processes sweep - a process that
 // starts in the middle of another's interval, which is what a rolling update makes, finds that
 // interval swept and skips. The period is interval itself, the loop's own tick, and not the
-// package's Interval. leases is required, as it is of every leased loop (cmd/dispatch exits at
-// boot if the lease pool cannot be opened).
+// package's Interval. The ticks are duty.RunLeased's, a ticker's: the first at the moment Run
+// starts, then one each interval; the first tick a sweep overran comes at once with the moment it
+// was due, and only the ones after it are dropped, so a lone process sweeps every period its
+// sweeps do not overrun. leases is required, as it is of every leased loop
+// (cmd/dispatch exits at boot if the lease pool cannot be opened).
 func (s *Sweeper) Run(ctx context.Context, interval time.Duration, leases duty.Leases) {
-	ticker := time.NewTicker(interval)
-	defer ticker.Stop()
-	for {
-		duty.Exclusive(ctx, leases, webhookRedeliveryLease, interval, s.sweepAndReport)
-		select {
-		case <-ctx.Done():
-			return
-		case <-ticker.C:
-		}
-	}
+	duty.RunLeased(ctx, leases, webhookRedeliveryLease, interval, duty.TickAtStart, s.sweepAndReport)
 }
 
 // sweepAndReport is one sweep of the running loop and its log line.
@@ -271,8 +274,12 @@ func (s *Sweeper) sweepAndReport(ctx context.Context) {
 
 // Sweep lists the failed deliveries in its window, adds the refused deliveries the listing no
 // longer returns, and decides each: redeliver it, wait out its backoff, leave a pending
-// redelivery alone, or give up on it. A rate-limited answer from GitHub ends the sweep there.
+// redelivery alone, or give up on it. A rate-limited answer from GitHub ends the sweep there. It
+// opens the state first unless an earlier sweep has (openState).
 func (s *Sweeper) Sweep(ctx context.Context, opts Options) (Report, error) {
+	if err := s.openState(); err != nil {
+		return Report{}, err
+	}
 	now := s.now()
 	continuous := opts.Since.IsZero()
 	since := opts.Since
@@ -414,7 +421,7 @@ func nextLimit(current limitRecord, limited *githubapp.RateLimitError, now time.
 // log, so once a delivery's failed attempts are older than the window, its record is all that
 // brings it back: to be asked again, or closed when the listing shows GitHub delivered it.
 func (s *Sweeper) refusedUnlisted(listed map[string][]githubapp.Delivery) ([]githubapp.Delivery, error) {
-	watcher, err := s.State.Watch(recordPrefix+"*", nats.IgnoreDeletes())
+	watcher, err := s.state.Watch(recordPrefix+"*", nats.IgnoreDeletes())
 	if err != nil {
 		return nil, fmt.Errorf("list the redelivery records: %w", err)
 	}
@@ -653,22 +660,37 @@ func writeState(kv bus.KeyValue, key string, value any, revision uint64) (uint64
 	return kv.Update(key, data, revision)
 }
 
+// openState opens the state with Open unless a sweep already has, and keeps it for every sweep
+// after: the one place the bucket is opened. A sweep it fails for opens nothing, so the next one
+// calls Open again.
+func (s *Sweeper) openState() error {
+	if s.state.KeyValue != nil {
+		return nil
+	}
+	state, err := s.Open()
+	if err != nil {
+		return err
+	}
+	s.state = state
+	return nil
+}
+
 func (s *Sweeper) readCursor() (time.Time, uint64, error) {
-	cursor, revision, err := readState[cursorRecord](s.State, cursorKey, "cursor")
+	cursor, revision, err := readState[cursorRecord](s.state, cursorKey, "cursor")
 	return cursor.At, revision, err
 }
 
 // writeCursor records the sweep's start. A lost race means another sweeper wrote a cursor at
 // the same moment; either value serves.
 func (s *Sweeper) writeCursor(at time.Time, revision uint64) {
-	if _, err := writeState(s.State, cursorKey, cursorRecord{At: at}, revision); err != nil && !isConflict(err) {
+	if _, err := writeState(s.state, cursorKey, cursorRecord{At: at}, revision); err != nil && !isConflict(err) {
 		s.Logger.Warn("webhook redelivery cursor not written", "error", err)
 	}
 }
 
 // readLimit returns the recorded rate limit and its revision, zero when none is recorded.
 func (s *Sweeper) readLimit() (limitRecord, uint64, error) {
-	return readState[limitRecord](s.State, limitKey, "rate limit")
+	return readState[limitRecord](s.state, limitKey, "rate limit")
 }
 
 // recordLimit records GitHub's latest rate limit for every sweeper on the bucket. It counts from
@@ -683,7 +705,7 @@ func (s *Sweeper) recordLimit(limited *githubapp.RateLimitError, now time.Time) 
 			return next
 		}
 		next = nextLimit(current, limited, now)
-		_, err = writeState(s.State, limitKey, next, revision)
+		_, err = writeState(s.state, limitKey, next, revision)
 		if err == nil {
 			return next
 		}
@@ -699,19 +721,19 @@ func (s *Sweeper) recordLimit(limited *githubapp.RateLimitError, now time.Time) 
 // clearLimit forgets the rate limit a sweep read at revision once the sweep has finished clear of
 // it, and no other: a limit another sweeper recorded meanwhile stands.
 func (s *Sweeper) clearLimit(revision uint64) {
-	if err := s.State.Delete(limitKey, nats.LastRevision(revision)); err != nil && !isConflict(err) {
+	if err := s.state.Delete(limitKey, nats.LastRevision(revision)); err != nil && !isConflict(err) {
 		s.Logger.Warn("webhook redelivery rate limit not cleared", "error", err)
 	}
 }
 
 func (s *Sweeper) readRecord(guid string) (record, uint64, error) {
-	return readState[record](s.State, recordPrefix+guid, "record of "+guid)
+	return readState[record](s.state, recordPrefix+guid, "record of "+guid)
 }
 
 // claimRecord writes next only if the record is still at revision (absent when zero), so two
 // sweepers never both request one attempt. It returns the new revision.
 func (s *Sweeper) claimRecord(guid string, next record, revision uint64) (uint64, bool) {
-	written, err := writeState(s.State, recordPrefix+guid, next, revision)
+	written, err := writeState(s.state, recordPrefix+guid, next, revision)
 	if err != nil {
 		if !isConflict(err) {
 			s.Logger.Warn("webhook redelivery record not written", "guid", guid, "error", err)

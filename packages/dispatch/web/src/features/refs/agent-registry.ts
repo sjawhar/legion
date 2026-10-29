@@ -5,8 +5,9 @@ import { api } from "../../api/client";
 import type { Agent } from "../../api/types";
 
 /**
- * The agent registry (`GET /api/v1/agents`: the sessions the Envoy listener lists right now) as
- * every surface reads it. One query key, one lookup built per response, and one poller:
+ * The agent registry (`GET /api/v1/agents`: the sessions the Envoy listener lists, as of
+ * Dispatch's copy of its list, at most 5 s old) as every surface reads it. One query key, one
+ * lookup built per response, and one poller:
  * `AgentRegistryPoller`, mounted once in the app shell, refreshes the registry every 15 s while
  * anything registered through `useRegistryPolling` is mounted (each session `AgentName`, each
  * `useAgents(…, true)` caller). A reader never polls on its own: TanStack runs one interval

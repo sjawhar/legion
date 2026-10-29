@@ -3,6 +3,7 @@ import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { MemoryRouter, Route, Routes } from "react-router-dom";
 
+import { keyedAttempt } from "../../__tests__/keyed-attempt";
 import { api } from "../../api/client";
 import type { CredentialRecord } from "../../api/types";
 import { CredentialRecordPage } from "./CredentialRecordPage";
@@ -75,7 +76,7 @@ test("Approve is one plain POST for the record, with no body", async () => {
     fireEvent.click(await screen.findByRole("button", { name: "Approve" }));
 
     await waitFor(() => expect(approveCredentialRecord).toHaveBeenCalledTimes(1));
-    expect(approveCredentialRecord).toHaveBeenCalledWith("req-1");
+    expect(approveCredentialRecord).toHaveBeenCalledWith("req-1", {}, keyedAttempt);
   } finally {
     cleanup();
     getCredentialRecord.mockRestore();

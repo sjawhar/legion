@@ -1,9 +1,7 @@
 kind: Added
 body: |-
     The `dispatch` command (`dist/dispatch.js`) takes `dispatch answers`, which prints every item of
-    that list in full, and `dispatch doc-read` prints each open anchored comment's author, time and
-    full text, with its replies, under the passage it is anchored to, since `dist/` was rebuilt on
-    this release's `@legion/envoy-client` and `@legion/contracts`.
+    that list in full.
 time: 2026-10-28T10:08:07.964677772Z
 custom:
     Issue: pr2376
