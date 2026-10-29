@@ -1,0 +1,61 @@
+{
+  "schemaVersion": 1,
+  "phase": "test",
+  "issue": "INFRA-535",
+  "completed": "2026-10-29T13:58:06Z",
+  "implementerProof": {
+    "verdict": "verified",
+    "how": "Re-ran each of the four proof entries' commands at this head, in a browser harness of the tester's own (its own Postgres database, dispatch_e2e_tester, in the shared cluster of /legion/scratch/harness). (1) and (2) the browser suite: 11 passed. (3) the pmdoc differential over the same committed corpora, run against b93381d3, the merged main the branch builds on, rather than the implementer's 452e4647: every GATE 0 and 'refused by the writer' 0, which also settles the implementer's attribution of D-a's 1655 churn, 82 lost fixed points and 5 misreads to main (they are 0 against the base the branch merges onto). (4) the byte-identical dumps: cmp exits 0 for the simplify pass, the cleanups and the choice rule, each over all 435,612 documents."
+  },
+  "failures": [],
+  "failed": 0,
+  "proof": [
+    {
+      "criterion": "A1: the three tilde cases read the same in a Dispatch document and in a comment, and a document written through the API shows the same emphasis as a comment",
+      "surface": "Dispatch spec editor, the past version at ?v=1 and a Conversation comment, drawn by the browser engine in chromium against a real Go server and Postgres (Playwright)",
+      "command": "cd packages/dispatch && bun run e2e -- e2e/emphasis-beside-a-tilde.e2e.ts e2e/writer-spelling.e2e.ts e2e/strikethrough.e2e.ts",
+      "observed": "11 passed (20.8s). Every view reads 'Plain b*~* text.' as 'Plain b~ text.' with an italic '~', and the other two paragraphs as typed; the stored spec holds 'Plain &#98;*~* text.', 'Plain ~\\*\\*b<* end.' and 'Plain \\*b\\*\\*~~ end.'",
+      "headSha": "dd557fd9d40f972f154e957adf2fe3d6277fd382",
+      "negativeControl": "The same first paragraph read at 452e4647, the commit before sjawhar/legion#2360: Go reads 'Plain b*~* text.' as one plain text run while the headless engine reads 'Plain b', an emphasized '~' and ' text.'; at this head Go reads it as the engine does (both trees dumped with gen/differential.ts and TestDifferentialDump)"
+    },
+    {
+      "criterion": "A write the writer refused before is stored, and the stored document is drawn the way a comment holding the same text is drawn",
+      "surface": "POST /api/v1/projects/{key}/artifacts on the live Go server, then the stored text read back through GET /api/v1/artifacts/{id}/text and parsed by the same headless engine the document page and the comment draw with",
+      "command": "bun e2e/run.ts -- bun api-probe.ts fixed.jsonl fixed-stored.jsonl (the 181 documents the differential reports as fixed), then bun gen/differential.ts fixed-stored.jsonl fixed-engine.jsonl md stored",
+      "observed": "181 of 181 stored (0 refused, slowest 88 ms), and for every one the engine reads the stored text exactly as it reads what the author wrote: 0 documents where the two readings differ. Written a second time, all 181 store byte for byte the same text, so a document is a fixed point of the writer",
+      "headSha": "dd557fd9d40f972f154e957adf2fe3d6277fd382",
+      "negativeControl": "The same 181 documents at b93381d3, the merged main: its differential run log holds 181 'pmdoc: refused a write whose markdown reads back otherwise' lines, one per document, and the head's log holds none"
+    },
+    {
+      "criterion": "Spec (architect, 2026-10-28): the writer spells every tree Parse reads over the committed corpora, with 0 refusals, and no correctly stored document changes",
+      "surface": "The pmdoc differential: Go Parse/ParseForWrite/Render at two revisions, each rendering read back by Go and by the headless browser engine, over the in-repo corpus, delimiter-corpus.ts (20000), url-corpus.ts and exhaustive-corpus.ts (9 over '~ \\ * a' and 6 over '~ \\ * _ a space')",
+      "command": "bash packages/envoy/internal/dispatch/pmdoc/gen/differential.sh --base b93381d302ff --corpus $TMPDIR/infra-535/corpora (head: the working tree at dd557fd9)",
+      "observed": "435,612 documents. Every GATE 0 - regressions, misreads, churn, engine-tree regressions, engine-tree churn, head panics, lost fixed points and newly refused by the writer. REPORTED 'refused by the writer' 0 and 'newly refused' 0; fixed 181; head stores correctly 433,557 against the base's 433,376; exit 0",
+      "headSha": "dd557fd9d40f972f154e957adf2fe3d6277fd382",
+      "negativeControl": "3,000 random one-paragraph documents over an alphabet wider than the committed corpora (a backtick, '[', ']', '(', ')', '<', '>', '@', '.', ':', '/', '!', '|' beside the committed characters; lengths 8 to 16) written through the live API: 3,000 stored, 0 refused, and 3 whose stored text the engine reads otherwise - 'p <!a> q' and two of its kin, a CommonMark HTML declaration Go reads as text. The differential of those three against b93381d3 gives 0 on every gate and identical renderings, so they are merged main's, not this change's; reported to the tree's architect"
+    },
+    {
+      "criterion": "The cleanups (the choice rule, the split of render_inline.go with the seven review items, and the simplify pass) change no output",
+      "surface": "The differential's renderings: each revision's Go rendering of every document and its rendering of the engine's reading, dumped over the same corpus and the same engine reading, compared byte for byte",
+      "command": "TestDifferentialDump at b8fd8f8c, 814688ac, b5a09ee4 and b295a3fb over the tester-da corpus and engine reading, then cmp b8fd8f8c.jsonl head.jsonl; cmp 814688ac.jsonl b8fd8f8c.jsonl; cmp b295a3fb.jsonl b5a09ee4.jsonl",
+      "observed": "cmp exits 0 for all three pairs over 435,612 documents: the simplify pass (b8fd8f8c to the head), the split and the cleanups (814688ac to b8fd8f8c) and the choice rule (b295a3fb to b5a09ee4)",
+      "headSha": "dd557fd9d40f972f154e957adf2fe3d6277fd382",
+      "negativeControl": "cmp of the b295a3fb dump against the head's exits 1 ('differ: char 7437, line 4'), so the comparison does see a change in the writer"
+    },
+    {
+      "criterion": "The write path still refuses a document whose rendering cannot read back, rather than storing a wrong reading",
+      "surface": "POST /api/v1/projects/{key}/artifacts on the live Go server",
+      "command": "bun e2e/run.ts -- bun api-probe.ts cases.jsonl stored.jsonl (146 hand-made adversarial documents: a grid of tilde, asterisk, underscore, backslash and code spans around 'b*~*', runs of one to four tildes, one to four backslashes before a flanked letter, fused marks, tilde and backtick code fences, bare URLs, emails, footnotes, a hard break, a list, a table, a heading, a quote, and paragraphs of 200 and 400 hard runs)",
+      "observed": "142 stored and 4 refused; the engine reads every one of the 142 stored texts exactly as it reads what was written (0 differences), and each of the 142 is a fixed point when written again. The slowest document, 400 paragraphs of 'p \\~\\a*~* q', took 542 ms",
+      "headSha": "dd557fd9d40f972f154e957adf2fe3d6277fd382",
+      "negativeControl": "The four documents of TestParseForWriteRefusesADocumentItsRenderingReadsBackOtherwise, for example '> [^n]: -' then '> -', are each answered 400 INVALID_MARKDOWN 'markdown is not a Proof document: outside Proof schema: the markdown the document would be stored as reads back otherwise'"
+    }
+  ],
+  "ci": {
+    "head": "b1f5946c9788bc195b2a88d6c86aec1cbba05cc5",
+    "read": "GitHub check runs at the code head: every lane completed, none failed (lint, typecheck, test, build, changes, dispatch, dispatch-memory, dispatch-multiprocess, dispatch-browser-multiprocess, envoy-go, envoy-go-race, envoy-e2e-local, envoy-infra-go, envoy-session-stall, envoy-smoke, pr-title success; the release and package lanes skipped). The pull request head dd557fd9 is the handoff-only push carrying 'skip-checks: true', so GitHub started no run for it and the code head's verdict is the one that counts."
+  },
+  "findings": [
+    "Not this change's, reported to the tree's architect: Go's Parse reads a CommonMark HTML declaration ('<!' then a letter, then anything, then '>') as plain text, while the browser engine reads it as inline HTML. 'p <!a> q' is stored as 'p \\<!a> q' and drawn as that text in a document, while a comment holding the same line draws the declaration as raw HTML. Go agrees with the engine on '<b>', '<!-- c -->', '<?x?>' and '<![CDATA[x]]>'; only the declaration kind diverges. Merged main b93381d3 and this head render the three documents a 3,000-document fuzz found byte for byte the same, so the branch neither causes nor fixes it. It is the family dispatch://INFRA-752 covers for addresses followed by '<b>', and no open issue names the declaration shape."
+  ]
+}
