@@ -2,13 +2,29 @@
   "schemaVersion": 1,
   "phase": "implement",
   "issue": "INFRA-588",
-  "completed": "2026-10-29T23:14:15Z",
-  "round": "review round 6 answered: main merged, nine findings",
+  "completed": "2026-10-29T23:35:15Z",
+  "round": "tester's round-8 finding: record where each numbered series closed",
   "pullRequest": "https://github.com/sjawhar/legion/pull/2411",
-  "head": "9ce23f73feeaa0c60dc83ff35909ca9ae3efcfa6",
-  "proofComment": "https://github.com/sjawhar/legion/pull/2411#issuecomment-6510716704",
-  "reviewAnswered": "Review round 6 (3 Important, 6 Minor): main merged forward (650e3cb567b7, brings 0141); b5d974fdde6f one shared identifier rule (migrationid.Check, no last number, errors.Join; pgmigratetest.CheckIdentifiers and recordingTB deleted; one test helper for the integer table); 9ce23f73feea the auto-deployer and the loadtest seed compare the set of applied versions, docs state the apply order across releases, the author's rule and the release order. 5 threads answered and resolved; findings 4, 5, 9 were body-only and are fixed.",
+  "head": "0288986f2521c4350029355134ab7989a6a9876b",
+  "proofComment": "https://github.com/sjawhar/legion/pull/2411#issuecomment-6511038530",
+  "reviewAnswered": "Tester's verdict fail (round 8): with no recorded boundary a branch taking the next number passed alone. 0288986f records the closing file per runner in migrationid.Closed (daemon 0061_pull_request_head_run, Dispatch 0141_drop_broadcast_idempotency_keys) and Check refuses a number above it. The red tests 7feb642d6bbb and a25cec37291a pass unmodified. The table lives in migrationid, not beside each package's migrations, because the Dispatch red test calls migrationid.Check(versions) with no boundary argument and envoy cannot import the daemon's package.",
   "proof": [
+    {
+      "criterion": "Migration identifiers two concurrent pull requests cannot both claim: a branch that takes the next number fails on its own",
+      "surface": "branches built off the head with git plumbing (nextnumber.sh), and each package's identifier test on each tree",
+      "command": "bash $TMPDIR/i588/nextnumber.sh 0288986f $TMPDIR/i588/nn",
+      "observed": "next-number branch alone (daemon 0062_proof_nx, Dispatch 0142_proof_nx): both tests FAIL naming the file and the closing file; timestamp branch alone and two timestamp branches merged (merge-tree exit 0): both ok",
+      "headSha": "0288986f2521c4350029355134ab7989a6a9876b",
+      "negativeControl": "the same next-number branch passed both tests at 9ce23f73feea (tester, test.json round 8)"
+    },
+    {
+      "criterion": "The tester's red tests pass unmodified, and the store suites and filter check pass",
+      "surface": "go test against the real Postgres; check-ci-filters.sh",
+      "command": "go test ./internal/store/... (daemon); go test ./migrationid/ ./internal/pgmigrate/... ./internal/dispatch/store/ ./internal/broker/store/ (envoy); .github/scripts/check-ci-filters.sh",
+      "observed": "TestLoadRefusesANewMigrationNumberedAfterTheShippedSet and TestMigrationSetRefusesANewMigrationNumberedAfterTheShippedSet pass, files unchanged against 7feb642d6bbb and a25cec37291a; all suites ok (dispatch/store 272.461s); 25 gates exit 0",
+      "headSha": "0288986f2521c4350029355134ab7989a6a9876b",
+      "negativeControl": "TestCheckRefusesANumberAboveTheFileTheSeriesClosedAt: a closed set plus the next number is refused naming it"
+    },
     {
       "criterion": "Main's 0141 and the identifier rule: both packages' identifier tests pass on main's set and on a merged tree of two concurrent migrations, with no last number recorded",
       "surface": "git merge-tree on two branches off the head, and go test on the merged tree",
@@ -115,37 +131,18 @@
     }
   ],
   "filesChanged": [
-    "packages/envoy/migrationid/migrationid.go (new)",
-    "packages/envoy/migrationid/migrationid_test.go (new)",
-    "packages/daemon/internal/store/migrations/embed.go",
-    "packages/daemon/internal/store/migrations/embed_test.go",
-    "packages/daemon/internal/store/store.go",
-    "packages/daemon/internal/api/version.go",
-    "packages/envoy/internal/pgmigrate/pgmigratetest/pgmigratetest.go",
-    "packages/envoy/internal/pgmigrate/pgmigratetest/pgmigratetest_test.go",
-    "packages/envoy/internal/pgmigrate/set.go",
-    "packages/envoy/internal/dispatch/store/store_test.go",
-    "packages/envoy/internal/dispatch/store/migrate_out_of_order_test.go",
-    "packages/envoy/deploy/scripts/autodeploy.sh",
-    "packages/envoy/deploy/scripts/autodeploy_test.sh",
-    "packages/envoy/deploy/README.md",
-    "packages/envoy/loadtest/common.sh",
-    "packages/envoy/loadtest/stack.sh",
-    "packages/envoy/loadtest/README.md",
-    "packages/envoy/cmd/dispatch/README.md",
-    "packages/envoy/internal/dispatch/store/README.md",
-    "packages/envoy/.changes/unreleased/pr-2411-migration-timestamps.yaml",
-    "docs/kubernetes.md",
-    ".github/workflows/ci.yaml",
-    ".github/workflows/docs-pages.yaml",
-    "two docs/solutions/envoy learnings (status)"
+    "packages/envoy/migrationid/migrationid.go",
+    "packages/envoy/migrationid/migrationid_test.go",
+    "packages/daemon/internal/store/migrations/embed.go (doc)",
+    "packages/envoy/internal/pgmigrate/set.go (doc)",
+    "packages/envoy/cmd/dispatch/README.md"
   ],
   "trickyParts": [
-    "migrationid.Check derives the numbered series from the set: values below 10^13 must be exactly 1..N for the N present; values from 10^13 up must be real 14-digit UTC instants. It re-checks neither duplicates nor < 1, which both loaders refuse.",
-    "The auto-deployer records <max>-<count>-<sha256 of the sorted versions>; a bare-number record from the previous deployer is still compared by max while its tag stays deployed.",
-    "autodeploy_test.sh's locale precondition needs en_US.UTF-8; in the pod it was generated under $TMPDIR and passed as LOCPATH (the suite stops before any case without it, on main too)."
+    "Closed is raised only when a forward merge brings a numbered migration main took before this rule landed; a set holding none of the closing files (a test's crafted set) keeps the 1..N rule."
   ],
-  "deviations": [],
+  "deviations": [
+    "The closing numbers live in migrationid.Closed, keyed by file name, rather than as one constant beside each package's migrations: the tester's unmodified Dispatch red test calls migrationid.Check(versions) with no boundary."
+  ],
   "openQuestions": [],
   "discoveredComplexity": []
 }
