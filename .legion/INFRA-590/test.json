@@ -2,60 +2,54 @@
   "schemaVersion": 1,
   "phase": "test",
   "issue": "INFRA-590",
-  "completed": "2026-10-29T09:20:00Z",
-  "round": 10,
-  "testedHead": "90383ad764e578f7fcb98ee639ce23b7600b0812",
+  "completed": "2026-10-29T14:40:00Z",
+  "round": 11,
+  "testedHead": "295f42ac448409c085ee16b24aacdafdfa09fb59",
+  "testCommit": "c3cf88b9fcbbed4243834a8b65b26b62fcf58bea",
+  "fingerprint": "The implementer's comment 6498529810 gives 'b1168a85… -> 66d36ea6…' for the two merges of main (8a911ecca, fe3153923). It differs, because the merge ports main's ErrNotStored resend into the window, renumbers the migrations, raises the connection count and edits CI filters, so this is a full round.",
   "implementerProof": {
     "verdict": "verified",
-    "how": "Ran the implementer's commands again at 90383ad7 on this pod's Postgres 17. The multiprocess package passed (728.6 s). The outbox, deliveryaudit, duty and bus packages passed. cmd/listener passed except one intermittent test that fails on main as well (observations). I drove the review's role-move finding on real processes, with the previous head as the negative control. Interim evidence was posted before the 02:30Z daemon roll (PR comments 6486125032, 6486157275); the pod disk did not survive the roll, so the pod Postgres was rebuilt and the listener runs repeated after it."
+    "how": "Ran the implementer's commands again at 295f42ac on this pod's Postgres 17 (rebuilt after the workspace move). The multiprocess package passed (957.1 s). The outbox, deliveryaudit, duty, bus and cmd/listener packages passed. Main's CI filter-coverage check (check-ci-filters.sh) passed. I drove the merge's changes on real binaries myself (proof below)."
   },
   "failures": [],
   "failed": 0,
   "proof": [
     {
-      "criterion": "Review finding (round 6): an incomplete event whose role route reached the role's old holder holds a later forward to the new holder until its own retry",
-      "surface": "two real envoy-dispatch binaries (multiprocess harness, throwaway probe TestProbeRoleMovesUnderAnIncompleteEvent). X is routed to a role held by O. Thread A on X's spec: root by T1, reply by N. With the spec's credit list broken, a person's reply E reaches O through the role and its recipient read fails. The role then moves to N, and a person's plain comment C is forwarded to N",
-      "command": "cd packages/envoy (scratch copy) && GOWORK=off DISPATCH_TEST_DATABASE_URL=<pg> go test -tags multiprocess -count=1 -run TestProbeRoleMovesUnderAnIncompleteEvent -v ./cmd/dispatch, at 90383ad7 and at 2ba3ba48",
-      "observed": "At 90383ad7, N had not taken C 4 s after its write. After the repair, N took E (02:07:44.432) and then C (02:07:44.434)",
-      "headSha": "90383ad764e578f7fcb98ee639ce23b7600b0812",
-      "negativeControl": "At 2ba3ba48 (the previous head), N took C at once (02:08:04.104) and E only after the repair (02:08:09.913). The probe fails there: 'N took C before E: per-(owner, destination) order broken across the role's move'"
+      "criterion": "The ErrNotStored resend ported into the window is fenced: it is not sent once the window's deadline (the publisher hold's) has passed",
+      "surface": "bus.Client window on an in-process three-server JetStream cluster with a byte-limited stream: a Dispatch envelope with a MsgId refused by the full stream, the stream purged, then sent again through a window whose deadline passes after the send leaves",
+      "command": "cd packages/envoy && GOWORK=off go test -count=3 -run TestAWindowSendsNoResendOfANotStoredDuplicatePastItsDeadline -v ./internal/bus/ (new test, commit c3cf88b9)",
+      "observed": "Passes 3 of 3 at the head: the answer wraps ErrNotStored and ErrWindowDeadline, and the stream holds nothing of the envelope; the same envelope through a window whose deadline is ahead is stored",
+      "headSha": "295f42ac448409c085ee16b24aacdafdfa09fb59",
+      "negativeControl": "With the resend's deadline and connection checks removed (scratch copy), the new test fails: 'a not-stored send whose window's deadline passed = <nil>, want ErrNotStored and ErrWindowDeadline'. Before this test, the whole bus package passed under that mutation (309 s), so no test pinned the fence"
     },
     {
-      "criterion": "The fix is pinned by a test",
-      "surface": "outbox package on real Postgres and NATS, under a mutation in a scratch copy",
-      "command": "GOWORK=off go test ./internal/dispatch/outbox/ with planChains' new 'skip a delivered destination' check disabled",
-      "observed": "TestAnEarlierEventsReachedRoleRouteDoesNotNameTheRolesCurrentHolder fails",
-      "headSha": "90383ad764e578f7fcb98ee639ce23b7600b0812",
-      "negativeControl": "the mutation is the broken input; it turned the test red"
+      "criterion": "After the merge: 0141_duty_holds and 0142_outbox_claim apply above main's 0140; main's build runs on schema 142; /healthz carries outbox_publisher and idempotency_keys; shutdown releases the hold before deregistering",
+      "surface": "envoy-dispatch built at head and main's envoy-dispatch (merge base fe315392) on one database and a real NATS",
+      "command": "curl /healthz on the head build; publish a comment; SIGTERM; then main's build posts 3 comments; read schema_migrations, duty_holds and events",
+      "observed": "Head /healthz: schema_version 142, outbox_publisher true, idempotency_keys true. On SIGTERM it logged 'released the publisher hold' (14:04:24.326) before 'deregistered this server process' (.327); duty_holds empty after. Main's build booted on schema_version 142 and published 4 of 4 comment events",
+      "headSha": "295f42ac448409c085ee16b24aacdafdfa09fb59",
+      "negativeControl": "TestDispatchConnectionsPerPodIsTheServers with dispatchConnectionsPerPod set to 88 fails: expected 89, actual 88 (it passes at the head's 89)"
     },
     {
-      "criterion": "Rounds 8 and 9 still hold: a failed recipient read holds its issue's later session copies and isolates other issues; an event waiting out a back-off holds a later event only on keys it could still owe",
-      "surface": "rounds 8 and 9 throwaway probes, re-run on two real processes at this head",
-      "command": "go test -tags multiprocess -run 'TestProbeFailedRecipientRead|TestProbeNotDueEventHoldsOnlyItsStalledKey' -v ./cmd/dispatch (scratch copy)",
-      "observed": "Round 8 probe: T1 took nothing while the read failed, then the reply before the resolve; routed issue Y's comment reached R at once. Round 9 probe: the later reply reached T2 27 ms after its write while N waited on the role holder",
-      "headSha": "90383ad764e578f7fcb98ee639ce23b7600b0812",
-      "negativeControl": "Round 8's probe stalls the whole outbox at bf30591d; round 9's holds the copy 3.97 s at 2f3bf214"
-    },
-    {
-      "criterion": "After the merge of main: main's build runs on this head's schema",
-      "surface": "envoy-dispatch at head and main's envoy-dispatch (merge base d4cbcfe6) on one database and a real NATS",
-      "command": "the head build migrates a fresh database, publishes a comment, stops with SIGTERM (duty_holds empty); main's build then posts 3 comments",
-      "observed": "Schema 138. Main's build booted on schema_version 138 and published 4 of 4 comments",
-      "headSha": "90383ad764e578f7fcb98ee639ce23b7600b0812",
-      "negativeControl": "Round 6 showed the connection-count test failing at 87 against this branch's 88; the count is unchanged by this merge"
+      "criterion": "CI filters cover what each job reads after the merge",
+      "surface": "main's .github/scripts/check-ci-filters.sh at the head",
+      "command": "uv run --with pyyaml==6.0.2 bash .github/scripts/check-ci-filters.sh",
+      "observed": "'every ci.yaml filter matches every file its job reads (23 gates)'; 0 uncovered in every gate; docs-pages.yaml on.push.paths equals its filter",
+      "headSha": "295f42ac448409c085ee16b24aacdafdfa09fb59",
+      "negativeControl": "Round 5 showed this kind of check finding internal/testnats uncovered at aefcf104"
     },
     {
       "criterion": "One publisher; a killed, cut, silently cut or frozen publisher is replaced within 10 s; each session takes each event once and in order",
       "surface": "the repository's multiprocess harness at the head",
       "command": "cd packages/envoy && GOWORK=off DISPATCH_TEST_DATABASE_URL=<pg> go test -tags multiprocess -count=1 -timeout 40m -v ./cmd/dispatch",
-      "observed": "ok, 728.6 s. Take-over: SIGKILL 5.1 s, NATS cut 3.0 s, silent cut 2.3 s, SIGSTOP 5.7 s",
-      "headSha": "90383ad764e578f7fcb98ee639ce23b7600b0812",
+      "observed": "ok, 957.1 s. Take-over: SIGKILL 5.977 s, NATS cut 3.004 s, silent cut 2.397 s, SIGSTOP 4.283 s. 200 comments: watcher 200, role holder 80, author 60, each once and in order. Killed mid-batch: comment 1 at sequence 3, comment 2 at 4. TestShutdownWaitsForTheOutboxToReleaseThePublisherHold and the TestHealthz rows pass",
+      "headSha": "295f42ac448409c085ee16b24aacdafdfa09fb59",
       "negativeControl": "TestAFrozenPublisherSendsNothingWhenItResumes: the resumed process started no batch"
     }
   ],
   "observations": [
-    "cmd/listener's TestListenerFollowsTheInterestRegistryAcrossNATSRestarts fails intermittently on main too, so it is not this PR's. Each run alone on the pod: this head 2 failures in 49 runs (3+15+30, plus one failure in a run that overlapped the multiprocess suite); 2ba3ba48 1 in 18; main's merge base d4cbcfe6 1 in 49 (4+15+30). The error is the same class each time: 'ERROR envoy nats reconnect hook failed … rewatch <session|interest> cache: watch <session registry|role claims> KV bucket: context deadline exceeded' after a NATS restart, which the test treats as a failure. This PR does not change the rewatch hooks; on the reconnect path it adds only connectionChanged(), which closes a channel under c.mu. Not found tracked in Dispatch; sent to the architect as a finding outside this PR.",
-    "CI at 90383ad7: lint, typecheck, test and pr-title success; envoy-go, envoy-go-race, dispatch-multiprocess, dispatch-memory, envoy-e2e-local and envoy-smoke success. dispatch failed only on e2e/close-withdraws-asks.e2e.ts:126, the red the controller named as main's (00:56Z, 01:51Z).",
-    "Fast-follow reads none; this round adds no Dispatch key."
+    "The merge changed no outbox ordering code (comment 6498529810), so rounds 8-10's real-process probes, which the workspace move deleted from scratch, were not re-run; the outbox package's tests that pin those holds (TestALaterEventReachesNoSession…, TestABrokenCreditList…, TestAnEventBehindAnother…, TestAnEarlierEventsReachedRoleRoute…) pass at this head.",
+    "The new test commit c3cf88b9 is pushed alone, so CI runs on it; this handoff is a second push.",
+    "CI at 295f42ac was queued when read. The only known red on main is close-withdraws-asks.e2e.ts:126."
   ]
 }
