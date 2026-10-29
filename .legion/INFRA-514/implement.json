@@ -2,8 +2,32 @@
   "schemaVersion": 1,
   "phase": "implement",
   "issue": "INFRA-514",
-  "completed": "2026-10-27T17:50:00Z",
+  "completed": "2026-10-29T13:30:00Z",
   "proof": [
+    {
+      "criterion": "R6 EV-11 and R4 EV-7 at the merge head: an unchanged heartbeat writes the interest row only once it is 5 minutes old, and a rewatch after a nats-server restart resumes instead of reading every key",
+      "surface": "Real processes on the issue pod: nats-server 2.10.29 (fresh store), three envoy-listener processes built at the merge head (one takes the load, two only watch the buckets), 400 sessions heartbeating every 90 s through POST /v1/interests/subscribe; KV LastSeq read from the NATS monitor's /jsz",
+      "command": "python3 heartbeat-proof.py head bin/envoy-listener-head 400 (KV writes per heartbeat over minutes 1-6, then nats-server restarted on the same store and every listener's warm-up lines read)",
+      "observed": "1,333 heartbeats in 300 s: KV_envoy_interests 271 writes (0.203 per heartbeat), KV_envoy_sessions 1,334 (1.001), 1.204 KV writes per heartbeat; after the restart all three listeners logged interest and session warm-ups outcome resumed with 0 entries (role claims: completed, 0 entries, its bucket empty). The window ends at minute 6, before every row's first 5-minute refresh, which is why interest writes are below the 0.30 the 11-minute harness measured",
+      "headSha": "41fa18b19e7159f61f615b0c1d921e812605c83d",
+      "negativeControl": "the same driver on main's listener (8a911ecc): 2.00 KV writes per heartbeat (interest 1.00, session 1.00) and completed warm-ups reading all 400 keys of each bucket on every listener"
+    },
+    {
+      "criterion": "Round 2 at the merge head: Dispatch's subscribers list shows a subscriber that is no longer live with its session's last heartbeat, not the interest row's updated_at",
+      "surface": "Real merge-head builds of envoy-listener and envoy-dispatch, nats-server 2.10.29 and a local Postgres 16; Dispatch's GET /api/v1/issues/PRF-1/subscribers as a person (header identity)",
+      "command": "bash lastseen-proof.sh (subscribe, an identical heartbeat 60 s later, stop, wait 320 s for the session row to expire, read; restart the listener; read again)",
+      "observed": "interest row updated_at 1793279586104 (the first heartbeat; the identical second was not rewritten), listener last_seen 1793279646148; after expiry no live session and Dispatch answered live=false, last_seen=1793279646148",
+      "headSha": "41fa18b19e7159f61f615b0c1d921e812605c83d",
+      "negativeControl": "after a listener restart the row carries no last_seen and Dispatch answers last_seen=1793279586104, the row's updated_at: what the list showed for every dead session before the fix"
+    },
+    {
+      "criterion": "R1/R5 at the merge head: Get at 3,000 sessions within 2x of 400, a reaper pass at 3,000 within 10x of 400, a 25,000-record rewatch costs what an empty one does",
+      "surface": "Go benchmarks in packages/envoy on the issue pod, main 8a911ecc plus the benchmark files against the merge head",
+      "command": "go test -run '^$' -bench 'Registry/Get/|Reap' -benchmem -count 5 -benchtime 20x ./internal/session/ ./cmd/listener/; go test -run '^$' -bench Rewatch -count 3 -benchtime 3x ./internal/cistore/ (each side)",
+      "observed": "Registry/Get median 15.8/36.5/112 us -> 0.139/0.130/0.148 us at 400/1,000/3,000 (head 1.06x, main 7.1x); Reap 2.95 ms/22.1 ms/214 ms -> 6.5/17.8/48.1 us (head 7.4x, main 72x); cistore Rewatch 69.9 ms -> 4.9 ms at 1,000 records and 1.60 s -> 4.4 ms at 25,000",
+      "headSha": "41fa18b19e7159f61f615b0c1d921e812605c83d",
+      "negativeControl": "the same benchmark files on main's code give Get 7.1x and Reap 72x from 400 to 3,000 sessions, and a 25,000-record rewatch of 1.60 s"
+    },
     {
       "criterion": "Review round 2 (tester's observation, architect's instruction): Dispatch's subscribers list shows a subscriber that is no longer live with the session's last heartbeat, not the interest row's updated_at, which the heartbeat-write skip can make up to 5 minutes older",
       "surface": "Real head builds of envoy-listener and envoy-dispatch on nats-server 2.10.29 and the reproduction's Postgres snapshot; Dispatch's GET /api/v1/issues/LGA-1/subscribers as a person (header identity) and the listener's GET /v1/interests/<id>",
@@ -94,9 +118,12 @@
     "#2167's TestCompleteIsTheCurrentWatchersFirstScanDeliveringEveryKey now writes a key while its watcher is away, because a rewatch resumes and delivers nothing otherwise; it checks the same thing.",
     "Before/after numbers are main ae36683e (merge base after #2167 and INFRA-610) against the head; the earlier 1357b95c run is kept in the artifact and agrees.",
     "The restart test asserts resumed with 0 entries: the server is down during the restart, so no write lands while the listener is away; the k-writes case is resume_test.go's.",
-    "Round 2: Dispatch keys and dispatch:// links removed from the lines this pull request adds (CHANGELOG, the race step's comment) and from its body, per the repository rule relayed on 2026-10-27; the body's 'Dispatch: INFRA-514' template line stays."
+    "Round 2: Dispatch keys and dispatch:// links removed from the lines this pull request adds (CHANGELOG, the race step's comment) and from its body, per the repository rule relayed on 2026-10-27; the body's 'Dispatch: INFRA-514' template line stays.",
+    "Round 3: GitHub reported the pull request conflicting with main (8a911ecc) in packages/envoy/AGENTS.md and CHANGELOG.md, both prose; merged forward as 41fa18b1 with both sides' text on each line, fingerprint e512190a -> d7bf20aa (posted on the pull request). The proof was run again at the merge head on the new pod with a compact real-process driver (the 2-core reproduction stack did not survive the pod's recreation); the tester's full-harness readings at d7ebb1ee stand for the same code.",
+    "Round 3 test notes: go test ./internal/dispatch/api needs CI's -timeout 20m on this pod; with it, one test failed for the local database's collation only (TestIssueRanksStayOrderedPastLowercaseDigitsAndProductionShapedMoves refuses a database that already sorts in byte order, which a fresh initdb with no locale does); no file of that test's code is in this pull request."
   ],
   "openQuestions": [
-    "R7's gate is the tester's: INFRA-610's production check showing all three listeners on its build before this goes to review."
+    "The issue-topic delivery defect the controller reported went to its own child issue, by the architect's decision of 2026-10-29 11:59Z; it is not in this pull request.",
+    "R7's gate has passed: sjawhar/legion#2374's Production line records all three listeners on its build."
   ]
 }
