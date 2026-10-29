@@ -2,7 +2,7 @@
   "schemaVersion": 1,
   "phase": "implement",
   "issue": "INFRA-745",
-  "completed": "2026-10-29T18:05:00Z",
+  "completed": "2026-10-29T19:50:00Z",
   "proof": [
     {
       "criterion": "2 - a session following an issue's topic is shown an agent's comment on it, with the fix's two halves joined on one real wire frame",
@@ -51,6 +51,22 @@
       "observed": "every one of the four comment events (notify = t) is unpublished with published_destinations {} and attempt_count 1 - counted and backed off evenly, none released; /metrics reads envoy_dispatch_outbox_publish_failures_total{reason=\"denied\"} 12 with no reason=\"failed\" series at all; the process log holds zero 'NATS is unreachable' lines and zero 'dispatch outbox: event released' lines; and each of the four events has its own ERROR line naming the one subject they share, 'publish owner topic \"notifications.dispatch.issue.MANY-1.comment.created\": bus: NATS denied the publish to \"...\"'.",
       "headSha": "2efb1c87921b2bd2e3688e439ef1b74683b66b14",
       "negativeControl": "denials.go's record collapsed back to one entry per subject (recordPublishDenial replacing the subject's queue with the new violation instead of appending), everything else at this head: TestRunCountsADeniedSubjectOncePerRefusedMessage fails in 7.3 s with 'line \"... level=INFO msg=\\\"dispatch outbox: event released\\\" event_id=2 error=\\\"... bus: NATS is unreachable: nats: timeout waiting for ack\\\"\" reports a denied publish as an outage of the bus' - the tester's failure, reproduced and then removed. The new bus test's own control: reverting denials.go makes TestAWindowAnswersEachDeniedSendOfOneSubjectItsOwnDenial fail with 'the denied send of comment-1 was answered bus: NATS is unreachable: nats: timeout waiting for ack'."
+    },
+    {
+      "criterion": "review round 1's finding: the change makes main's listener documentation false, and a client meets a 403 where it met a retried 503. The documentation is corrected on main's own text, and the client-visible change is proven end to end.",
+      "surface": "the real envoy-listener binary built at the merge head, on the real nats-server whose rendered production grant withholds notifications.> from this listener's user, with a session registered through POST /v1/interests/subscribe; then the client half, the path pi-envoy's envoy_send takes: createEnvoyClient(...).send(...) from this workspace's packages/envoy-client/src/transport.ts, with an injected fetch counting the HTTP attempts",
+      "command": "go build -o rig/envoy-listener ./cmd/listener; run it with ENVOY_MACHINE_ID, PORT=9120, ENVOY_API_TOKEN, NATS_URLS=nats://127.0.0.1:4334 and NATS_NKEY_SEED_FILE=out-denied/dispatch.seed; curl -i -X POST /v1/messages/send for that session; then bun run send-denied.ts against the same listener; and the control, the same client against a listener on the granted bus at :9121",
+      "observed": "the route answers HTTP/1.1 403 Forbidden with {\"error\":\"envoy: the message bus denied the publish under this listener's own permissions: bus: NATS denied the publish to \\\"notifications.agent.4444...\\\": nats: permissions violation: Permissions Violation for Publish ...\"} and no Retry-After header at all, recorded as a 'listener send' line with outcome=publish_denied status=403 - the send route, whose publish is JetStream, which before this change was the retried 503. The client throws EnvoyApiError with status 403 and the denial's own words as its message, after exactly one HTTP attempt, and the listener recorded exactly one more send: no retry loop and no success reported to the caller.",
+      "headSha": "528d0fc9763b4f9080648c74622394b35c9c0fb6",
+      "negativeControl": "the same client, unchanged, against a second listener of the same binary on the granted bus (nats://127.0.0.1:4333, port 9121) with a session registered there: the send is answered 200 with the envelope and recipient, confirmed true, in one attempt. So the 403 is the grant's doing and not the client's or the route's."
+    },
+    {
+      "criterion": "the forward merge: the proof holds at the merge head",
+      "surface": "the Dispatch rig and the denied rig, both rebuilt from the merge head: the real envoy-dispatch binary on the real nats-servers whose authorization core.Authorization{core.DispatchPermissions, core.SessionPermissions}.Render writes, a Postgres 17 with pgvector, a SessionPermissions subscriber, and this workspace's renderInbound on the frames that server delivered",
+      "command": "rebuild the binary at 528d0fc; drive POST /api/v1/issues, /comments and /messages (targeted) as a session actor at 127.0.0.1:8755 and capture on notifications.dispatch.issue.>; bun run render-frame.ts on the captured comment frame; then, on the denied bus at 127.0.0.1:8756, three of a person's comments on a routed issue, read back with psql and curl -s /metrics",
+      "observed": "the agent's comment.created frame carries quiet:false and renderInbound shows it (944-byte card naming the body and its reply command); the targeted message.created and its message.delivery carry quiet:true and are skipped. On the denied rig every event is unpublished with attempt_count 1, /metrics reads envoy_dispatch_outbox_publish_failures_total{reason=\"denied\"} 9 with no reason=\"failed\" series, and the log holds zero 'NATS is unreachable' and zero 'event released' lines.",
+      "headSha": "528d0fc9763b4f9080648c74622394b35c9c0fb6",
+      "negativeControl": "the same captured frame three ways, as in round 1: quiet set to true -> skip=true; quiet removed (every frame published before this change) -> skip=true; the reader as the frame's own actor -> skip=true."
     }
   ],
   "filesChanged": [
@@ -74,6 +90,7 @@
     "packages/contracts/src/dispatch-api.ts - PublishedDispatchEvent declares the wire's optional quiet beside notify",
     "skills/dispatch/SKILL.md - one clause naming what an issue-topic subscription does not show",
     "packages/{envoy,envoy-client,pi-envoy,contracts}/.changes/unreleased/INFRA-745-*.yaml - five fragments, three of them #2490's renamed onto this issue",
+    "packages/envoy/docs/architecture.md, packages/envoy/AGENTS.md - corrected on main's own text (merged forward in 91610e2): a denial is produced on both transports, so the listener's send route and a publish of a topic the stream captures answer 403 publish_denied with no Retry-After where they answered the retried 503; the record's outcome list says publish_denied belongs to send and publish alike",
     "packages/envoy/AGENTS.md, packages/pi-envoy/AGENTS.md - the adopted commit's own documentation"
   ],
   "trickyParts": [
