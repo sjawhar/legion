@@ -2,10 +2,10 @@
   "schemaVersion": 1,
   "phase": "implement",
   "issue": "INFRA-590",
-  "completed": "2026-10-29T13:40:00Z",
+  "completed": "2026-10-29T15:45:00Z",
   "pullRequest": "https://github.com/sjawhar/legion/pull/2395",
-  "head": "295f42ac448409c085ee16b24aacdafdfa09fb59",
-  "round": "11 (forward merge before retro; GitHub reported CONFLICTING): main merged in twice, 8a911ecca (03cf1385) then fe3153923 (295f42ac), pushed together. Migrations renumbered to 0141_duty_holds and 0142_outbox_claim above main's 0140_issue_embedding_spec; connections per process 89 (main's #2397 lease pool 13, main's own 87, +2 this PR); main's ErrNotStored resend ported into the window and fenced by its deadline and connection; /healthz carries outbox_publisher and idempotency_keys; main's ci.yaml router gets the filter entries its coverage check names (internal/roles, session, kvwatch, store). No other change. Fingerprint comment 6498529810.",
+  "head": "f970c3865f00840593f8781b5126a7a9ed1e74dc",
+  "round": "12 (the round-8 review, changes requested at c3cf88b9): window.request, under AcceptStreamAck with a MsgId, sends the request once more to the same inbox without Nats-Msg-Id when the stream acknowledges a duplicate at sequence 0, at most once, under sendJetStream's resend fence (deadline, connection); the ErrWindowDeadline doc says the stream holds nothing of a fenced send. Code pushed first (f970c386), the handoff in a second push.",
   "proof": [
     {
       "criterion": "Exactly one process publishes at a time through a lease on the outbox's own database connection; /healthz carries boolean outbox_publisher",
@@ -134,6 +134,14 @@
       "observed": "At 295f42ac: outbox ok 262.5 s, store ok 272.4 s, duty ok 27.1 s, cmd/dispatch ok 282.6 s, multiprocess ok 907.3 s, TestDispatchConnectionsPerPodIsTheServers ok at 89, main's CI filter check 0 uncovered. At 03cf1385 also deliveryaudit, bus, listener and -race on outbox ok, multiprocess ok 899.5 s.",
       "headSha": "295f42ac448409c085ee16b24aacdafdfa09fb59",
       "negativeControl": "Before the renumbering the store package's duplicate-version guard failed: 'migrations 0137_duty_holds.up.sql and 0137_request_keys.up.sql share version 137'; before the filter entries main's CI filter check reported 117 problems (internal/roles, session, kvwatch and store uncovered by the Dispatch and listener filters)."
+    },
+    {
+      "criterion": "A role forward to a holder with a serving port that a full clustered stream refused (its MsgId held at sequence 0) is stored once the stream has room, and a resend past the window's deadline stores nothing.",
+      "surface": "the bus package on the in-process 3-server NATS cluster with a 16 KiB stream byte limit",
+      "command": "cd packages/envoy && go test -count=1 ./internal/bus/ && CGO_ENABLED=1 go test -race -count=1 -run 'NotStored|Request|Window' ./internal/bus/ && DISPATCH_TEST_DATABASE_URL=<pod Postgres> go test -count=1 -run 'Role|Forward' ./internal/dispatch/outbox/",
+      "observed": "bus ok 321.7 s; -race ok 21.1 s; outbox role and forward tests ok; TestAForwardRequestTheFullClusterStreamRefusedIsStoredOnceTheStreamHasRoom: the retried forward answers nil and the stream holds 1 message on the holder's subject; the deadline case answers ErrNotStored with ErrWindowDeadline and holds none.",
+      "headSha": "f970c3865f00840593f8781b5126a7a9ed1e74dc",
+      "negativeControl": "On c3cf88b9 the test fails: 'the forward retried once the stream had room = bus: request to \"notifications.agent.ses_forward_stored\": NATS did not acknowledge the publish: bus: no receipt inside the request window, want nil'."
     }
   ],
   "filesChanged": [
@@ -151,7 +159,8 @@
     "Round 8: outbox/{lookups.go,batch.go,publisher.go,recipients.go}, outbox tests (publisher_comment_recipients_test, publisher_test, publisher_document_authors_test), deliveryaudit/README.md, scripts/dispatch/comment-delivery/classes.ts, packages/envoy/AGENTS.md, .dispatch/architecture/dispatch-outbox.md, the changelog fragment; merge: migrations renamed to 0137_duty_holds/0138_outbox_claim and references, cmd/dispatch/README.md, cmd/dispatch/multiprocess_test.go imports, .github/workflows/envoy-and-contracts.yaml comment",
     "Round 9: outbox/{lookups.go,batch.go,publisher.go,recipients.go}, outbox tests (publisher_comment_recipients_test, order_test), packages/envoy/AGENTS.md, .dispatch/architecture/dispatch-outbox.md, docs/solutions/database-issues/...-pr2395.md",
     "Round 10: outbox/{batch.go,lookups.go}, outbox tests (publisher_comment_recipients_test.go, new lookups_test.go), packages/envoy/AGENTS.md; merge: outbox/publisher.go Deps, docs/edit_notices.go, pmdoc/{reanchor_test.go,typed_nesting_test.go} (main's fixes)",
-    "Round 11 merges: cmd/dispatch/{main.go,main_test.go,shutdown.go,shutdown_test.go,README.md}, internal/bus/{async.go,publish_not_stored_test.go,stream_replicas_test.go}, migrations renamed to 0141_duty_holds/0142_outbox_claim and references, infra/gcp/dispatch.go (89), running-dispatch.md, .github/workflows/{ci.yaml,docs-pages.yaml}, the changelog fragment"
+    "Round 11 merges: cmd/dispatch/{main.go,main_test.go,shutdown.go,shutdown_test.go,README.md}, internal/bus/{async.go,publish_not_stored_test.go,stream_replicas_test.go}, migrations renamed to 0141_duty_holds/0142_outbox_claim and references, infra/gcp/dispatch.go (89), running-dispatch.md, .github/workflows/{ci.yaml,docs-pages.yaml}, the changelog fragment",
+    "Round 12: packages/envoy/internal/bus/async.go, new packages/envoy/internal/bus/request_not_stored_test.go"
   ],
   "trickyParts": [
     "Blocked events take their blocker's next_attempt_at (no attempt), so they are not re-read on every wake while the blocker waits out a back-off; an owner whose first 100 events all wait has its later due event deferred to the earliest of them (deferPastWindow).",
