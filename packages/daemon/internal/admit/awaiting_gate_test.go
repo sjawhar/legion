@@ -1119,7 +1119,7 @@ func TestARetractionThatOpensAnotherAskKeepsTheRootWaiting(t *testing.T) {
 // spec before the architect's register_gate reads Dispatch, so the review arrives with the
 // registration. The live artifact event and the gate seed that follow find the gate as the
 // registration left it, so only the registration can answer the wait: it does, and the root takes
-// the next free slot. Without that answer the root stays suspended with nobody waiting on it.
+// the next free slot. Without that answer the root stays waiting with its architect live.
 func TestAReviewARegistrationCarriesAnswersTheRootItWaitsFor(t *testing.T) {
 	for _, tc := range []struct {
 		name     string
@@ -1451,8 +1451,8 @@ func TestAChangesRequestBetweenARegistrationsReadAndItsApplyAnswersTheWait(t *te
 // An approval answers a wait whenever it opens the gate, given before the wait began or not: a root
 // can wait on a gate the record still shows closed after an approval whose own event was lost, and
 // were that approval skipped when the gate seed or the boot catch-up applies it, the root would stay
-// suspended with its gate open and nothing left to answer it. Applied again, it answers nothing
-// more, and the root resumes once. An approval of an older version opens nothing and answers
+// waiting with its architect live, its gate open and nothing left to answer it. Applied again, it
+// answers nothing more, and the architect receives its task once the root takes a slot. An approval of an older version opens
 // nothing. (A gate already open answers a waiting root by itself: the question-wait slice's
 // answerOpenGates.)
 func TestAnApprovalThatOpensTheGateAnswersAWaitWhateverItsTime(t *testing.T) {
