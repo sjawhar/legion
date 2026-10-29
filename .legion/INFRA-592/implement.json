@@ -2,15 +2,31 @@
   "schemaVersion": 1,
   "phase": "implement",
   "issue": "INFRA-592",
-  "completed": "2026-10-28T23:03:05Z",
+  "completed": "2026-10-29T18:51:55Z",
   "proof": [
     {
-      "criterion": "Requests have deadlines; waiting for a database connection is bounded; requests beyond what the server can serve are refused early with a retryable status rather than queued without limit",
-      "surface": "INFRA-589's 2-core load reproduction (packages/envoy/loadtest), Dispatch built from the head, real Postgres through a 1 ms proxy, NATS and the listener",
-      "command": "packages/envoy/loadtest/run-step.sh proofh-10x --events 40 --sessions 1000 --requests 600 (LOADTEST_SRC = checkout at the head)",
-      "observed": "10x: 146.7 reads/s served with p99 984 ms; 80,925 reads and 6,753 writes answered 429 OVERLOADED with Retry-After (read refusal p50 16 ms, p99 110 ms; writes after the 1 s wait, p99 1,120 ms); 0 connect timeouts, refusals or resets; at most 4 goroutines waiting for a pool connection; 2.29 committed events/s",
-      "headSha": "6410259f8a808e4ae6d16574dd2142c89cb9aa70",
-      "negativeControl": "same 10x step on the merge-base build 2df3353c: 0.0% of reads 2xx, 107,351 requests timed out at 30 s, 20,174 goroutines waiting for a pool connection, 1.32 committed events/s"
+      "criterion": "The process exports pool size, in-use, waiting and acquire time per pool, the registry pool (the process heartbeat) included",
+      "surface": "Dispatch's GET /metrics on DISPATCH_METRICS_ADDR, scraped every 5 s by INFRA-589's harness during a load step, Dispatch built from the head",
+      "command": "run-step.sh p-head-1x --events 4 --sessions 400 --requests 60 (LOADTEST_ROOT=lt2, seeded by the head); cmd/dispatch TestAServingProcessScrapeListsTheRegistryPool",
+      "observed": "37 of 37 samples scraped; summary.json metrics.pools lists background, health, leases, listen, live, outbox, registry, requests, rooms, settlements; the tester's red test passes unmodified",
+      "headSha": "5ad0b4f9accacbc7f63e18a66328a9783c6f4ad1",
+      "negativeControl": "at 6410259f the same scrape listed 9 pools and no registry while pg_stat_activity showed a dispatch-registry connection (the tester's finding)"
+    },
+    {
+      "criterion": "Requests beyond what the server can serve are refused early with a retryable status; connection waits bounded; well above the collapse",
+      "surface": "INFRA-589's 2-core load reproduction, a fresh stack seeded by the head, Postgres through the 1 ms proxy, NATS and the listener",
+      "command": "run-step.sh p-head-10x --events 40 --sessions 1000 --requests 600",
+      "observed": "88,094 reads and 6,849 writes refused 429 OVERLOADED (read refusal p50 23 ms, p99 149 ms); 107.0 reads/s served, p99 1,245 ms; 1.76 events/s committed; 0 connection failures; at most 13 goroutines waiting for a pool connection",
+      "headSha": "5ad0b4f9accacbc7f63e18a66328a9783c6f4ad1",
+      "negativeControl": "same step on main e9398987 with the same harness and seed: 4 of 107,355 reads 2xx, 107,351 reads and 6,925 writes timed out at 30 s, 19,705 goroutines waiting, 1.38 events/s committed"
+    },
+    {
+      "criterion": "At 1x the server serves the load (the 2-core harness's own saturation band without INFRA-591's #2392)",
+      "surface": "the same harness and stack",
+      "command": "run-step.sh p-head-1x --events 4 --sessions 400 --requests 60",
+      "observed": "10,725 of 10,752 reads 2xx, 27 reads and 35 writes refused 429 OVERLOADED (within 0-223 reads and 0-55 writes measured without #2392; 0/0 measured with it), 3.80 of 3.99 offered events/s committed, 0 goroutines waiting for a connection, 1.15 request-pool checkouts per request",
+      "headSha": "5ad0b4f9accacbc7f63e18a66328a9783c6f4ad1",
+      "negativeControl": "the merge-base build 2df3353c at 2x: 0.0-0.4 reads/s served at 5x and 10x, every failure a 30 s timeout (round 1 campaign)"
     },
     {
       "criterion": "Before and after at 1x-10x on the committed reproduction; well above the collapse; recovery when load drops",
@@ -19,14 +35,6 @@
       "observed": "successful reads/s at 2x/5x/10x before 30-55/0.1-0.4/0.0-0.1, after 118-120/135-147/115-129 (with #2392: 96-109/90-100/64-85); committed events/s at 5x/10x before 0.54-0.56/0.97-1.32, after 2.10-2.24/1.82-2.02 (with #2392: 4.06-4.60/2.92-3.87); recovery after the drop: before 29-87% success for 80 s and p99 30 s throughout, after 99.4-100% success and every offered event committed from the first 10 s window",
       "headSha": "5e32bd09704f3e52d7b96dac3e0c971c323d8e24",
       "negativeControl": "the merge-base build at the same steps collapses: 0-0.4 reads/s served at 5x and 10x, every failure a 30 s timeout"
-    },
-    {
-      "criterion": "Pools set application_name; the process exports pool, admission, settlement, outbox, runtime and committed-event series",
-      "surface": "Dispatch's GET /metrics on DISPATCH_METRICS_ADDR, scraped by the harness's 5 s sampler during the load steps",
-      "command": "run-step.sh proofh-1x --events 4 --sessions 400 --requests 60 (samples.json and the TABLES 'Pools and admission' section)",
-      "observed": "37 of 37 samples scraped; per-pool waiting, in-use, acquire p99 and checkouts for requests, background, live, settlements, rooms, leases, outbox, health, listen; 1.16 request-pool checkouts per request; 10,752 of 10,752 reads 2xx and 0 refusals at 1x",
-      "headSha": "6410259f8a808e4ae6d16574dd2142c89cb9aa70",
-      "negativeControl": "the merge-base build serves no /metrics: every sample of its steps is counted skipped (0 / 37 scraped)"
     }
   ],
   "filesChanged": [
@@ -65,12 +73,13 @@
     "packages/envoy/cmd/dispatch/subcommands.go",
     "packages/envoy/infra/README.md",
     "packages/envoy/infra/gcp/dispatch_kube.go",
+    "packages/envoy/infra/go.work.sum",
     "packages/envoy/internal/dispatch/admission/admission.go",
     "packages/envoy/internal/dispatch/admission/admission_test.go",
     "packages/envoy/internal/dispatch/admission/answer.go",
     "packages/envoy/internal/dispatch/admission/answer_test.go",
     "packages/envoy/internal/dispatch/api/agent_artifacts.go",
-    "packages/envoy/internal/dispatch/api/agent_stream.go",
+    "packages/envoy/internal/dispatch/api/agent_message_repeat_test.go",
     "packages/envoy/internal/dispatch/api/agent_tokens.go",
     "packages/envoy/internal/dispatch/api/agents.go",
     "packages/envoy/internal/dispatch/api/anchored_write_concurrency_test.go",
@@ -123,6 +132,8 @@
     "packages/envoy/internal/dispatch/api/issue_queries.go",
     "packages/envoy/internal/dispatch/api/issue_refs.go",
     "packages/envoy/internal/dispatch/api/issue_summary.go",
+    "packages/envoy/internal/dispatch/api/live_events.go",
+    "packages/envoy/internal/dispatch/api/live_socket.go",
     "packages/envoy/internal/dispatch/api/live_write_lock_order_test.go",
     "packages/envoy/internal/dispatch/api/live_write_test.go",
     "packages/envoy/internal/dispatch/api/lostedit_test.go",
@@ -134,9 +145,14 @@
     "packages/envoy/internal/dispatch/api/project_default_assignee.go",
     "packages/envoy/internal/dispatch/api/projects.go",
     "packages/envoy/internal/dispatch/api/references.go",
+    "packages/envoy/internal/dispatch/api/related_routes.go",
+    "packages/envoy/internal/dispatch/api/related_terms.go",
     "packages/envoy/internal/dispatch/api/replies.go",
     "packages/envoy/internal/dispatch/api/repo_projects.go",
     "packages/envoy/internal/dispatch/api/request_bounds_test.go",
+    "packages/envoy/internal/dispatch/api/request_keys.go",
+    "packages/envoy/internal/dispatch/api/request_keys_precision_test.go",
+    "packages/envoy/internal/dispatch/api/request_keys_test.go",
     "packages/envoy/internal/dispatch/api/reviews.go",
     "packages/envoy/internal/dispatch/api/routes_table.go",
     "packages/envoy/internal/dispatch/api/search.go",
@@ -144,6 +160,7 @@
     "packages/envoy/internal/dispatch/api/server.go",
     "packages/envoy/internal/dispatch/api/server_test.go",
     "packages/envoy/internal/dispatch/api/settings_delivery.go",
+    "packages/envoy/internal/dispatch/api/slow_write_hook.go",
     "packages/envoy/internal/dispatch/api/state.go",
     "packages/envoy/internal/dispatch/api/storable_text.go",
     "packages/envoy/internal/dispatch/api/subscribers.go",
@@ -174,6 +191,7 @@
     "packages/envoy/internal/dispatch/docs/edit_notices_test.go",
     "packages/envoy/internal/dispatch/docs/edits.go",
     "packages/envoy/internal/dispatch/docs/edits_test.go",
+    "packages/envoy/internal/dispatch/docs/fork_reads_test.go",
     "packages/envoy/internal/dispatch/docs/growth.go",
     "packages/envoy/internal/dispatch/docs/growth_test.go",
     "packages/envoy/internal/dispatch/docs/ledger.go",
@@ -187,6 +205,7 @@
     "packages/envoy/internal/dispatch/docs/marks_test.go",
     "packages/envoy/internal/dispatch/docs/mutation.go",
     "packages/envoy/internal/dispatch/docs/mutation_test.go",
+    "packages/envoy/internal/dispatch/docs/panicked_fork_test.go",
     "packages/envoy/internal/dispatch/docs/pending_authors.go",
     "packages/envoy/internal/dispatch/docs/pending_authors_test.go",
     "packages/envoy/internal/dispatch/docs/precondition_race_test.go",
@@ -214,6 +233,7 @@
     "packages/envoy/internal/dispatch/docs/stale_room_test.go",
     "packages/envoy/internal/dispatch/docs/task_progress.go",
     "packages/envoy/internal/dispatch/docs/websocket.go",
+    "packages/envoy/internal/dispatch/docs/write_corpus_test.go",
     "packages/envoy/internal/dispatch/docs/write_hold_test.go",
     "packages/envoy/internal/dispatch/docs/writergate.go",
     "packages/envoy/internal/dispatch/docs/writergate_test.go",
@@ -228,7 +248,6 @@
     "packages/envoy/internal/dispatch/outbox/compaction_lease_test.go",
     "packages/envoy/internal/dispatch/outbox/metrics_test.go",
     "packages/envoy/internal/dispatch/outbox/publisher.go",
-    "packages/envoy/internal/dispatch/pmdoc/reanchor_test.go",
     "packages/envoy/internal/dispatch/processes/processes.go",
     "packages/envoy/internal/dispatch/redeliver/sweep.go",
     "packages/envoy/internal/dispatch/redeliver/sweep_lease_test.go",
@@ -271,9 +290,9 @@
   ],
   "trickyParts": [
     "Test Postgres in the pod: the pgserver wheel (Postgres 16 + pgvector) under /legion/scratch/tmp/infra-592/repro, DISPATCH_TEST_DATABASE_URL=postgres://postgres@127.0.0.1:25432/postgres?sslmode=disable; its collation is byte order, so api's TestIssueRanksStayOrderedPastLowercaseDigitsAndProductionShapedMoves fails here and only here, and pmdoc's linearity timing tests fail on gVisor's 10 ms timer",
-    "The load stack lives under LOADTEST_ROOT=/legion/scratch/tmp/infra-592/lt (seeded by the merge-base build, migration 134); the merge-base checkout with the harness copied in is /legion/scratch/tmp/infra-592/base-src",
     "Every live write must take docs.Service.AcquireDocumentWriter before its transaction; joinLiveWrite refuses an ungated caller, so a new applyLive caller from another tree fails its tests until it takes the gate",
-    "Admission values were chosen by INFRA-514's architect on a local merge with INFRA-591's #2392; on today's main (commit-order lock still global) 1x refuses up to a few hundred reads in a run with a GC stall"
+    "Admission values were chosen by INFRA-514's architect on a local merge with INFRA-591's #2392; on today's main (commit-order lock still global) 1x refuses up to a few hundred reads in a run with a GC stall",
+    "The round-2 proof stack is LOADTEST_ROOT=/legion/scratch/tmp/infra-592/lt2, seeded by 5ad0b4f9 (migration 140); main's checkout for the control is /legion/scratch/tmp/infra-592/main-src with this branch's harness copied in"
   ],
   "deviations": [
     "Refusal p99 is above the plan's 100 ms (reads 100-1,230 ms at 2x-10x; writes wait the 1 s bound): accepted as measured by INFRA-514's architect",
@@ -281,9 +300,13 @@
     "1x on the 2-core harness refuses 0-223 reads and 0-55 writes per 180 s run (0-9 / 5-11 with #2392): accepted as the harness's own saturation; INFRA-598's after-run on the production-size cluster copy must show 0 refusals at 1x",
     "Admission: reads 14 and writes 6 per CPU capped at 28 and 12, wait 1 s, queue 2x the limit (architect's choice), not the plan's 28/8, 75 ms, queue = limit",
     "API-7 (one connection per request on the hot reads) and the shutdown deadline were added to this issue by INFRA-514's architect",
-    "Connection budget is 86 a process (main added the registry pool, and lease names grew to 12); ConnectionsPerProcess equals infra's dispatchConnectionsPerPod",
     "Harness additions live in packages/envoy/loadtest on main's harness (#2369 merged)",
-    "pmdoc reanchor_test.go: docstest.NestedValue -> crafted.NestedValue, the one-line fix of #2481, so main's pmdoc compiles on this branch"
+    "pmdoc reanchor_test.go: docstest.NestedValue -> crafted.NestedValue, the one-line fix of #2481, so main's pmdoc compiles on this branch",
+    "Connection budget is 87 a process (main's lease names grew to 13); ConnectionsPerProcess equals infra's dispatchConnectionsPerPod; #2392's merge adds its 2-connection pool",
+    "Round 2: the registry pool is opened through store.Pool.OpenRegistry and reported in Stats and /metrics",
+    "Round 2: the api package's 600 s timeout was the Postgres 16 job main removed (#2476); measured on one pod main 826 s, branch 837 s; main's envoy-go runs api with -timeout 20m",
+    "Round 2: main's TestConcurrentSendsUnderOneKeyMakeOneMessage gets a write limit of 16 in its server; main's related-item routes count two read units and are not pinned",
+    "TestARepeatedSubReplacesAnotherKind fails under CPU load on main at the same rate as on this branch: main's flake"
   ],
   "openQuestions": []
 }
