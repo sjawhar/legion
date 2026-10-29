@@ -10,9 +10,6 @@ tags:
 date: 2026-10-29
 status: active
 module: .github/workflows
-related_issues:
-  - "INFRA-729"
-  - "sjawhar/legion#2486"
 ---
 
 # Give one job its own gate derived from an anchored shared filter, and let the workflow-only pull request prove it

@@ -9,9 +9,6 @@ tags:
 date: 2026-10-29
 status: active
 module: .github/workflows
-related_issues:
-  - "INFRA-729"
-  - "sjawhar/legion#2486"
 ---
 
 # A database-major census greps the version tags too, not only the old digest and the mount path
