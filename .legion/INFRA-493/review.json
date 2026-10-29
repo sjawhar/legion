@@ -2,21 +2,17 @@
   "schemaVersion": 1,
   "phase": "review",
   "issue": "INFRA-493",
-  "completed": "2026-10-29T13:52:05Z",
-  "decision": "changes_requested",
-  "round": 4,
-  "fingerprint": "3fc3493d… at c222f0dd → 7c1f068e… at e3ff6ad0: changed. File by file, the pull request's own lines differ in one file only: packages/envoy/internal/dispatch/api/routes_table_test.go, registeredRoutes 141 → 144 (main went 140 → 143 with three related-issue routes; this PR adds one). That resolution is correct.",
+  "completed": "2026-10-29T17:06:11Z",
+  "decision": "approved",
+  "round": 5,
+  "scope": "Narrowed by the architect: the ci.yaml envoy_go filter and the ci_job_reads.py entries for the checks-settlement fixture, check-ci-filters.sh, and ci-ok at the code head. Everything approved at c222f0dd stands.",
+  "codeHead": "72675d215998eb967c7d2cc65c7e49a541a47189",
   "critical": 0,
-  "important": 1,
+  "important": 0,
   "minor": 0,
-  "keyFindings": [
-    {
-      "severity": "important",
-      "file": ".github/workflows/ci.yaml",
-      "description": "The merge of main replaced envoy-and-contracts.yaml (whose envoy filter took packages/contracts/**) with main's ci.yaml router, whose envoy_go filter (ci.yaml:702-730) lists contracts fixtures one by one and not checks-settlement/**. This PR's packages/envoy/internal/cistore/settlement_fixture_test.go:56 reads packages/contracts/fixtures/checks-settlement/listener-rules.json, the fixture shared with daemon/internal/daemon/check_settlement_test.go:56, so a fixture-only change runs the daemon side (test) and skips envoy-go: the cross-check the fixture exists for is lost and ci-ok passes. check-ci-filters.sh does not see it because .github/scripts/ci_job_reads.py RULES lacks the reads; its header requires a test that reads a new file through `..` or starts a new go command to add it. Fix: RULES entries for settlement_fixture_test.go:56, check_settlement_test.go:56 and intake/redelivered_test.go:255 (go build -C ../../../envoy ./cmd/listener ./cmd/dispatch), and 'packages/contracts/fixtures/checks-settlement/**' in envoy_go's filter with its citation."
-    }
-  ],
-  "ci": "Required set lint, typecheck, test, pr-title. CI head 6e7e399a: runs just queued at the read (changes queued, pr-title queued); not waited on, since a request for changes stands whatever CI says.",
-  "thermonuclear": "deep-review and code-quality ran on the merge delta at e3ff6ad0; both found the filter gap independently; verified by reading ci.yaml:702-730 and check-ci-filters.sh:95-103.",
-  "threads": "No new threads; my four are answered and resolved."
+  "keyFindings": [],
+  "fix": "72675d21 adds 'packages/contracts/fixtures/checks-settlement/**' to envoy_go (ci.yaml:728) with its citation, and ci_job_reads.py RULES entries for daemon check_settlement_test.go:56, intake/redelivered_test.go:255 (go build -C ../../../envoy ./cmd/listener ./cmd/dispatch, mode build) and envoy cistore/settlement_fixture_test.go:56. Nothing else changed outside .legion/.",
+  "checkCiFilters": "Ran .github/scripts/check-ci-filters.sh at d413b19b (pyyaml 6.0.2 in a venv under $TMPDIR): exit 0, `envoy-go: 2101 files, 0 uncovered (filter envoy_go)`, `test: 3618 files, 0 uncovered`, `every ci.yaml filter matches every file its job reads (23 gates)`. The implementer's negative control (RULES entries without the filter line: exit 1 naming listener-rules.json and settlement_fixture_test.go:56) and the tester's (f6f930bc's filter does not select the fixture) are in their handoffs.",
+  "ci": "CI head 3bf3de23 (newest pull_request run; compare to d413b19b handoffsOnly true, 1 file). Run 40886929969 first finished red on envoy-go (interest_read_routes_test.go:103 claim view not complete) and envoy-go-race (stale_room_test.go: internal/dispatch/docs took 1,789 s of -timeout 30m under -race); neither file is touched by this PR, and the run had queued an hour behind a busy runner pool. Re-ran its failed jobs once: ci-ok, lint, typecheck, test, ci-filters, envoy-go and envoy-go-race success; pr-title success.",
+  "threads": "No new threads; my round-4 comment's thread is answered by the fix."
 }
