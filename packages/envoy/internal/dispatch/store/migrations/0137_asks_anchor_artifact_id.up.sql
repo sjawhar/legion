@@ -3,20 +3,29 @@
 -- Settlement's sweep reads the marks a document's asks record by the anchor's artifact alone,
 -- whatever block_artifact_id holds (docs/marks.go recordedMarkRefs), and no existing index reaches
 -- that read: asks_anchor_artifact (0032) indexes coalesce(block_artifact_id, ...), and
--- asks_anchor_block_id_idx (0023, rebuilt by 0127) is partial on anchor->>'block_id'. The
--- expression is comments_anchor_artifact's (0032) character for character, so the read's
--- predicate, the same for both tables, matches it. Partial on anchor is not null, since most asks
--- carry no anchor. The index is additive and rewrites no row; building it takes SHARE on asks, so
--- ask writes wait for the build. The release before this one never reads the index, so that
--- release serves beside it unchanged.
+-- asks_anchor_block_id_idx (0023, rebuilt by 0127) is partial on anchor->>'block_id'. Partial on
+-- anchor is not null, since most asks carry no anchor.
 --
--- The cast cannot fail on a row whose block_artifact_id is null: asks_anchor_artifact (0032)
--- already evaluates (anchor->>'artifact_id')::uuid on every one of them. Nor does any release
--- write an anchored ask with block_artifact_id set, since the only writer of that column, the
--- ask-block insert (docs/ask_blocks.go), writes no anchor. But such a row written by an earlier
--- release, whose artifact_id neither index has cast, would fail this build, so the census counts
--- exactly those rows and the pre-deploy gate refuses the database before the boot would. If one
--- reached a boot anyway, the migration would fail it naming the cast's error before the schema
--- change is recorded. Migrations run in one transaction, so the build is a plain create index,
--- not concurrently.
-create index asks_anchor_artifact_id on asks (((anchor->>'artifact_id')::uuid)) where anchor is not null;
+-- The cast is guarded because an unguarded one would fail this boot over a row an earlier release
+-- could store, and nobody can count production's asks to prove it does not: asks_anchor_artifact
+-- (0032) casts anchor->>'artifact_id' only where block_artifact_id is null, so an ask holding both
+-- columns carries an artifact_id no index has ever cast. A create index evaluates its expression
+-- on every row, so an unguarded cast over one such row fails the migration and with it the boot,
+-- and the deploy stops on data the schema before it accepted. The guard answers null for that row
+-- instead: the index is built, the row is simply not indexed under an artifact.
+--
+-- The regex accepts only the lower-case hyphenated form every server-written anchor carries (the
+-- id the server hands out and compares as text), and every string it accepts casts to uuid, so
+-- the guarded expression is the plain cast on every row that matters and raises on none. A
+-- non-canonical spelling of a real id - upper case, braces, no hyphens - is left out of the index,
+-- which costs the read nothing: the read keeps the text comparison anchor->>'artifact_id' = $1
+-- beside the uuid one, and that comparison never matched such a spelling either.
+--
+-- The guard is a regex because an index expression must be immutable: ~ is immutable, while
+-- pg_input_is_valid is only stable and create index refuses it.
+--
+-- Building the index takes SHARE on asks, so ask writes wait for the build; it rewrites no row and
+-- refuses none, so its census answers 0. The release before this one never reads the index, so
+-- that release serves beside it unchanged. Migrations run in one transaction, so the build is a
+-- plain create index, not concurrently.
+create index asks_anchor_artifact_id on asks ((case when anchor->>'artifact_id' ~ '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$' then (anchor->>'artifact_id')::uuid end)) where anchor is not null;

@@ -60,6 +60,48 @@ func TestRecordedMarkRefsListsOnlyTheDocumentsAnchoredRows(t *testing.T) {
 	}
 }
 
+// asks_anchor_artifact_id (migration 0137) guards its uuid cast with a regex, so an anchor whose
+// artifact_id is not a lower-case document id is left out of the index rather than failing its
+// build. recordedMarkRefs compares that same guarded expression, so such a row costs the read
+// neither an error nor a row: the guard answers null for it, and the text comparison beside it
+// never matched its spelling either. Both rows below also name an ask block on another document,
+// so asks_anchor_artifact's coalesce (0032) never cast their anchor - they are exactly the shape
+// an earlier release could have stored and no index has checked.
+func TestRecordedMarkRefsSkipsAnAnchorArtifactIDThatDoesNotCast(t *testing.T) {
+	database := storetest.Open(t)
+	documentA := createDocument(t, database, "")
+	documentB := createDocument(t, database, "")
+	service := New(Deps{Store: database, Events: events.NewBroker(), Settle: time.Hour})
+	t.Cleanup(func() { _ = service.Shutdown(context.Background()) })
+	seedServiceText(t, service, documentA, "The quick brown fox")
+
+	askID := insertAnchoredAsk(t, service, documentA, "brown")
+	if _, err := database.Pool.Exec(context.Background(), `update asks set block_artifact_id = $2 where id = $1`, askID, documentB); err != nil {
+		t.Fatalf("name the anchored ask's block document: %v", err)
+	}
+	insertRecordedMarkRow(t, service, `
+		insert into asks (id, issue_key, author, question, anchor, block_artifact_id)
+		values ($1, 'DOC-1', '{"kind":"user","id":"alice"}', 'Ask whose anchor names no document',
+			'{"artifact_id":"not-a-uuid","mark_id":"uncastable"}', $2)
+	`, "00000000-0000-4000-8000-0000000000a4", documentB)
+	insertRecordedMarkRow(t, service, `
+		insert into asks (id, issue_key, author, question, anchor, block_artifact_id)
+		values ($1, 'DOC-1', '{"kind":"user","id":"alice"}', 'Ask whose anchor spells A in upper case',
+			jsonb_build_object('artifact_id', $3::text, 'mark_id', 'upper-case'), $2)
+	`, "00000000-0000-4000-8000-0000000000a5", documentB, strings.ToUpper(documentA))
+
+	recorded, err := service.recordedMarkRefs(context.Background(), documentA)
+	if err != nil {
+		t.Fatalf("recordedMarkRefs: %v", err)
+	}
+	want := map[pmdoc.MarkRef]struct{}{
+		{Type: "dispatchAsk", ID: askID}: {},
+	}
+	if !maps.Equal(recorded, want) {
+		t.Fatalf("recorded marks = %v, want %v", recorded, want)
+	}
+}
+
 // recordedMarkRefs sends the artifact as a bind parameter, so its prepared read can run a generic
 // plan, which this test forces. With sequential scans disabled the planner still falls back to a
 // Seq Scan when no index matches the predicate's expression, or, for asks, to a scan of all of

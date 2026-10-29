@@ -1,13 +1,7 @@
--- The rows 0137's index would refuse: an anchored ask whose anchor->>'artifact_id' does not cast
--- to uuid, which fails the build of asks_anchor_artifact_id over every row whose anchor is set.
--- Only a row written before 0137 with block_artifact_id set can be one: asks_anchor_artifact
--- (0032) already casts that text on every row whose block_artifact_id is null, so those are
--- checked, and the ask-block insert (docs/ask_blocks.go), the only writer of block_artifact_id,
--- writes no anchor, so no release writes such a row today — but an earlier release's row is
--- unchecked by either, so the count is taken, not assumed. It calls the cast's own input function,
--- so the two cannot drift apart unnoticed. An anchor carrying no artifact_id casts to null and is
--- refused by nothing; pg_input_is_valid answers null for it, so `not` leaves it uncounted.
-select count(*)
-from asks
-where anchor is not null
-    and not pg_input_is_valid(anchor ->> 'artifact_id', 'uuid');
+-- 0137 refuses no row and rewrites none: its index expression guards the uuid cast with a regex,
+-- so it answers null rather than raising on an anchor whose artifact_id is not a document id, and
+-- the build succeeds over any data. There is therefore nothing for this census to count, and a
+-- count would be the wrong instrument: any non-zero census refuses the deploy, and the rows left
+-- out of the index are not a reason to refuse one. Each boot logs their count with a warning
+-- instead (store.AsksOutsideAnchorArtifactIndex, cmd/dispatch/main.go).
+select 0;

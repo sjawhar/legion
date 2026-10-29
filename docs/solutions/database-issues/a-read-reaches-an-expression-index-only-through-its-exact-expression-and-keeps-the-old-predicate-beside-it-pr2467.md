@@ -50,6 +50,11 @@ related_issues:
   was listed under neither document, so its mark was swept. Since sjawhar/legion#2483 the read no
   longer depends on it: asks are read by the anchor's artifact alone, the same predicate as
   comments, through `asks_anchor_artifact_id` (migration `0137`), an index added for that exact
-  expression rather than a predicate bent to fit the index that existed.
+  expression rather than a predicate bent to fit the index that existed. That index's expression
+  guards the cast with a canonical-form regex (`case when anchor->>'artifact_id' ~ '^[0-9a-f]{8}-…$'
+  then (anchor->>'artifact_id')::uuid end`), so a stored anchor that does not cast can fail
+  neither the migration nor the read: an index cast must not raise on any row a previous schema
+  allowed, and here no earlier index had cast the anchor of an ask that also set
+  `block_artifact_id`.
 - The tester added an anchor with an upper-case artifact id to the equivalence harness. The kept
   text comparison excludes it on both sides.
