@@ -759,6 +759,9 @@ func TestTheDisconnectHookSendsTheEventFeedThroughItsResume(t *testing.T) {
 	if code, _ := client.closeCode(t, 5*time.Second); code != gws.CloseServiceRestart {
 		t.Fatalf("the disconnect hook closed the socket with %d, want 1012", code)
 	}
+	// The close frame reaches the page before the handler's deferred teardown has ended its
+	// subscriptions; the socket leaves the server's set only after that teardown, so wait for it.
+	rig.sockets(t, 0)
 	if subscribers := rig.served.eventRelay.stream.SubscriberCount(); subscribers != 0 {
 		t.Fatalf("the relay holds %d subscriptions once the socket closed", subscribers)
 	}
