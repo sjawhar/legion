@@ -10,7 +10,8 @@
 // the same time cannot both claim one version the way two branches each taking
 // the next number did. A timestamp sorts after every numbered migration and
 // timestamps sort among themselves by time, and migrationid.Check holds a set
-// to that rule.
+// to that rule: the numbered series closed at 0061_pull_request_head_run.up.sql
+// (migrationid.Closed), so a set holding a number above it is refused.
 package migrations
 
 import (

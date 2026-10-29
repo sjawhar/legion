@@ -1,6 +1,7 @@
 package migrationid
 
 import (
+	"fmt"
 	"strconv"
 	"strings"
 	"testing"
@@ -105,5 +106,33 @@ func TestCheckReportsEveryProblem(t *testing.T) {
 		if !strings.Contains(err.Error(), name) {
 			t.Errorf("the refusal does not name %s: %v", name, err)
 		}
+	}
+}
+
+// A set that holds the file its numbered series closed at takes no number above it: a branch that
+// adds the next number passes on its own and collides with another that took the same number.
+func TestCheckRefusesANumberAboveTheFileTheSeriesClosedAt(t *testing.T) {
+	closing, last := "", 0
+	for name, version := range Closed {
+		closing, last = name, version
+		break
+	}
+	versions := map[int]string{}
+	for v := 1; v < last; v++ {
+		versions[v] = fmt.Sprintf("%04d_m.up.sql", v)
+	}
+	versions[last] = closing
+	versions[20261030120000] = "20261030120000_later.up.sql"
+	if err := Check(versions); err != nil {
+		t.Fatalf("a set closed at %s with a timestamp after it was refused: %v", closing, err)
+	}
+	next := fmt.Sprintf("%04d_next.up.sql", last+1)
+	versions[last+1] = next
+	err := Check(versions)
+	if err == nil {
+		t.Fatalf("a set closed at %s accepted %s", closing, next)
+	}
+	if !strings.Contains(err.Error(), next) {
+		t.Errorf("the refusal does not name %s: %v", next, err)
 	}
 }

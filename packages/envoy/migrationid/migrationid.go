@@ -1,10 +1,15 @@
 // Package migrationid holds a set of migrations to the repository's rule about the identifiers
 // their files carry, the one thing the loaders do not read: the numbered migrations a set grew up
-// with are 1 to N, each taken once, N being how many numbered identifiers the set holds, and every
-// identifier past them is the UTC moment its author created the migration, 14 digits
-// YYYYMMDDHHMMSS (date -u +%Y%m%d%H%M%S), of an instant that exists. Nothing here records where a
-// set's numbered sequence ended: an identifier is a number when it is narrower than a timestamp,
-// so a value of 13 digits reads as a number, and in a set whose numbers run 1 to N as a gap.
+// with are 1 to the last one its series closed at, each taken once, and every identifier past them
+// is the UTC moment its author created the migration, 14 digits YYYYMMDDHHMMSS
+// (date -u +%Y%m%d%H%M%S), of an instant that exists. An identifier is a number when it is
+// narrower than a timestamp, so a value of 13 digits reads as a number.
+//
+// Closed records where each runner's numbered series ended, by the file that ends it. A set that
+// holds one of those files may hold no number above it: a branch that adds the next number, as
+// every author did before, would pass on its own and collide only with another branch that took
+// the same number once both merged. A set that holds none of them (a test's crafted set) is held
+// to numbers 1 to N with no gap.
 //
 // Two branches open at once cannot both take the next number without colliding: nothing conflicts
 // in git, and the clash shows only once one of them merges. A timestamp belongs to the moment it
@@ -33,6 +38,17 @@ const timestampLayout = "20060102150405"
 // as a timestamp.
 const narrowerThanATimestamp = 10_000_000_000_000
 
+// Closed names, for each runner whose migrations moved to timestamps, the file its numbered series
+// ended at and that file's number. It is raised only when a forward merge brings a numbered
+// migration that main took before this rule reached it; once the rule is on main, no numbered
+// migration is added again and nothing here changes.
+var Closed = map[string]int{
+	// The Legion daemon: packages/daemon/internal/store/migrations.
+	"0061_pull_request_head_run.up.sql": 61,
+	// Dispatch: packages/envoy/internal/dispatch/store/migrations.
+	"0141_drop_broadcast_idempotency_keys.up.sql": 141,
+}
+
 // Check reports every way the identifiers of one set break the rule, each problem naming the file
 // that carries the identifier, joined into one error; it returns nil for a set that keeps the
 // rule. versions maps each version to the name of the file that carries it, which is what both
@@ -55,14 +71,29 @@ func Check(versions map[int]string) error {
 	slices.Sort(numbers)
 	slices.Sort(timestamps)
 
+	// The set's numbered series ends at the closing file it holds, or, for a set that holds none,
+	// at the count of its numbers.
+	last := len(numbers)
+	closing := ""
+	for version, name := range versions {
+		if closed, ok := Closed[name]; ok && closed == version {
+			last, closing = version, name
+		}
+	}
 	var problems []error
 	for i, version := range numbers {
+		if version > last && closing != "" {
+			problems = append(problems, fmt.Errorf(
+				"migration %s takes version %d: the numbered migrations ended at %s, and every migration added since is named for the UTC moment it was created, 14 digits YYYYMMDDHHMMSS (date -u +%%Y%%m%%d%%H%%M%%S), so two branches open at once cannot take one version",
+				versions[version], version, closing))
+			continue
+		}
 		if version == i+1 {
 			continue
 		}
 		problems = append(problems, fmt.Errorf(
-			"migration %s is numbered %d where %04d comes next: the %d numbered migrations of a set are versions 1 to %d, each taken once, and every migration added since is named for the UTC moment it was created, 14 digits YYYYMMDDHHMMSS (date -u +%%Y%%m%%d%%H%%M%%S)",
-			versions[version], version, i+1, len(numbers), len(numbers)))
+			"migration %s is numbered %d where %04d comes next: the numbered migrations of a set are versions 1 to %d, each taken once, and every migration added since is named for the UTC moment it was created, 14 digits YYYYMMDDHHMMSS (date -u +%%Y%%m%%d%%H%%M%%S)",
+			versions[version], version, i+1, last))
 		break
 	}
 	for _, version := range timestamps {
