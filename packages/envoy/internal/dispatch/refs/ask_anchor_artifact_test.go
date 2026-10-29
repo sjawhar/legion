@@ -32,8 +32,11 @@ func insertAnchoredReferenceAsk(t *testing.T, tx pgx.Tx, id, issueKey, anchorArt
 // An ask an earlier release could store holds an anchor artifact_id that is not a uuid beside a
 // block_artifact_id: asks_anchor_artifact (migration 0032) casts the anchor only where
 // block_artifact_id is null, so an ask carrying both columns holds an artifact_id no index has
-// ever cast. loadAskNodes guards its cast with store.CastableUUID, so that row reads as an ask
-// belonging to its issue rather than answering SQLSTATE 22P02 for the whole read, and the ask
+// ever cast. loadAskNodes guards its cast with store.CastableUUID, so that row reads rather than
+// answering SQLSTATE 22P02 for the whole read: an artifact_id that casts to no uuid names no
+// document, so the ask belongs to its ask block's document, as it would with no artifact_id at
+// all and as both search arms link it, at that branch's version - none here, since Dispatch has
+// recorded no text of the block and so does not know the version that first held it. The ask
 // anchored canonically beside it keeps the document parent and version it had.
 func TestAskNodeAnswersOverAnAnchorArtifactIDThatDoesNotCast(t *testing.T) {
 	database := storetest.Open(t)
@@ -66,8 +69,11 @@ func TestAskNodeAnswersOverAnAnchorArtifactIDThatDoesNotCast(t *testing.T) {
 	if err != nil || !found {
 		t.Fatalf("read the ask whose anchor artifact_id does not cast: found=%t err=%v", found, err)
 	}
-	wantIssue := model.NodeParent{Kind: "issue", ID: "CORE-1", Ref: "dispatch://CORE-1"}
-	if node.Parent == nil || *node.Parent != wantIssue {
-		t.Fatalf("uncastable anchor ask parent = %#v, want its issue %#v", node.Parent, wantIssue)
+	wantBlock := model.NodeParent{Kind: "artifact", ID: blockID, Ref: "dispatch://CORE/artifact/handbook-md"}
+	if node.Parent == nil || *node.Parent != wantBlock {
+		t.Fatalf("uncastable anchor ask parent = %#v, want its ask block's document %#v", node.Parent, wantBlock)
+	}
+	if node.ParentVersion != nil {
+		t.Fatalf("uncastable anchor ask parent version = %v, want none: the anchor's version is not this document's", *node.ParentVersion)
 	}
 }

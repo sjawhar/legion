@@ -1,145 +1,69 @@
 package api
 
 import (
-	"context"
-	"net/http"
+	"net/url"
 	"testing"
 
 	"github.com/sjawhar/envoy/internal/dispatch/model"
-	"github.com/sjawhar/envoy/internal/dispatch/store"
 )
 
-// openAnchoredAsk opens an ask anchored on the issue document named by slug, at quote.
-func openAnchoredAsk(t *testing.T, handler http.Handler, issueKey, slug, quote, question string) string {
-	t.Helper()
-	created := dispatchRequest(t, handler, http.MethodPost, "/api/v1/issues/"+issueKey+"/asks", map[string]any{
-		"question": question,
-		"options":  []map[string]string{{"label": "Yes"}, {"label": "No"}},
-		"anchor":   map[string]any{"artifact": slug, "quote": quote},
-	}, "alice")
-	if created.Code != http.StatusCreated {
-		t.Fatalf("create the ask anchored on %q: status=%d body=%s", quote, created.Code, created.Body.String())
-	}
-	return decodeBody[model.Ask](t, created).ID
-}
+// Every ask route that serves an anchor answers over an ask whose stored artifact_id names no
+// document, and leaves the canonically anchored ask beside it with the document it had: the
+// issue's ask list and the single-ask read (askRowFrom, whose anchor join casts
+// anchor->>'artifact_id') and the issue's event log, whose ask payloads are hydrated by the same
+// join (attachAskDocumentArtifacts). An artifact_id that is not a uuid at all answered 500 for
+// the whole route before store.CastableUUID's guard; one stored as a JSON number also has to
+// decode, which model.Anchor reads as an anchor naming no document rather than failing on a
+// number where it holds a string. Both asks below carry block_artifact_id too, the shape
+// asks_anchor_artifact (0032) never cast, which is how an earlier release could leave such a
+// value stored.
+func TestAskRoutesAnswerOverAnAnchorArtifactIDThatNamesNoDocument(t *testing.T) {
+	for _, stored := range []struct{ name, rawJSON, served string }{
+		{name: "not a uuid", rawJSON: `"not-a-uuid"`, served: "not-a-uuid"},
+		{name: "a json number", rawJSON: `5`},
+	} {
+		t.Run(stored.name, func(t *testing.T) {
+			handler, database := newTestHandlerWithStore(t)
+			issue := createInteractionIssue(t, handler, "TEST", "Anchored asks", "The quick brown fox jumps over the lazy dog")
+			blockDocument, _ := secondDocument(t, handler, issue.Key)
+			canonical := openAnchoredAsk(t, handler, issue.Key, "spec", "brown", "Why brown?")
+			nameless := openAnchoredAsk(t, handler, issue.Key, "spec", "lazy", "Why lazy?")
+			storeAnchorArtifactID(t, database, nameless, blockDocument, stored.rawJSON)
+			want := anchorDocument(t, database, issue.PrimaryArtifactID)
 
-// storeUncastableAnchor rewrites the ask's anchor into the shape only a release before
-// asks_anchor_artifact_id (migration 0141) could store: an artifact_id that is not a uuid at all,
-// beside a block_artifact_id. asks_anchor_artifact (0032) casts the anchor only where
-// block_artifact_id is null, so no index and no census has ever cast this row's anchor, and an
-// unguarded cast in a read answers SQLSTATE 22P02 for the whole statement.
-func storeUncastableAnchor(t *testing.T, database *store.Store, askID, blockDocument string) {
-	t.Helper()
-	if _, err := database.Pool.Exec(context.Background(), `
-		update asks
-		set anchor = jsonb_set(anchor, '{artifact_id}', '"not-a-uuid"'), block_artifact_id = $2
-		where id = $1
-	`, askID, blockDocument); err != nil {
-		t.Fatalf("store the anchor an earlier release could write: %v", err)
-	}
-}
+			asks := issueAsks(t, handler, issue.Key)
+			if len(asks) != 2 {
+				t.Fatalf("the issue's ask list = %#v, want both asks", asks)
+			}
+			if got := asks[canonical].AnchorArtifact; got == nil || *got != want {
+				t.Errorf("canonically anchored ask's anchor document = %#v, want %#v", got, want)
+			}
+			if got := asks[nameless].AnchorArtifact; got != nil {
+				t.Errorf("issue ask list: the anchor's document = %#v, want none: its artifact_id names no document", *got)
+			}
+			if block := asks[nameless].BlockArtifact; block == nil || block.ID != blockDocument {
+				t.Errorf("issue ask list: the ask's block document = %#v, want %q", block, blockDocument)
+			}
 
-// anchorDocument is the document an ask read resolves aa to, read straight from artifacts, so a
-// test compares the resolved fields against the row they are resolved from.
-func anchorDocument(t *testing.T, database *store.Store, artifactID string) model.AskAnchorArtifact {
-	t.Helper()
-	var document model.AskAnchorArtifact
-	if err := database.Pool.QueryRow(context.Background(), `
-		select project_key, slug, name, is_primary from artifacts where id = $1
-	`, artifactID).Scan(&document.Project, &document.Slug, &document.Name, &document.Primary); err != nil {
-		t.Fatalf("read document %q: %v", artifactID, err)
-	}
-	return document
-}
+			ask := singleAsk(t, handler, nameless)
+			if ask.AnchorArtifact != nil {
+				t.Errorf("single ask read: the anchor's document = %#v, want none", *ask.AnchorArtifact)
+			}
+			if ask.Anchor == nil || ask.Anchor.ArtifactID != stored.served {
+				t.Errorf("single ask read: the anchor = %#v, want one whose artifact_id is %q", ask.Anchor, stored.served)
+			}
 
-// secondDocument uploads a second document to the issue, the one a seeded ask names as its ask
-// block so that asks_anchor_artifact (0032) never cast its anchor, and answers its id and slug.
-func secondDocument(t *testing.T, handler http.Handler, issueKey string) (string, string) {
-	t.Helper()
-	upload := dispatchRequest(t, handler, http.MethodPost, "/api/v1/issues/"+issueKey+"/artifacts", map[string]any{
-		"content": "Block document.\n", "name": "blocks.md",
-	}, "alice")
-	if upload.Code != http.StatusCreated {
-		t.Fatalf("create the block document: status=%d body=%s", upload.Code, upload.Body.String())
-	}
-	artifact := decodeBody[struct {
-		Artifact model.Artifact `json:"artifact"`
-	}](t, upload).Artifact
-	return artifact.ID, artifact.Slug
-}
-
-// The issue's ask list reads every ask of the issue through askRowFrom, whose anchor join casts
-// anchor->>'artifact_id'. Over a stored anchor that is not a uuid an unguarded cast answers 500
-// for the whole route; store.CastableUUID's guard resolves that one ask to no anchor document and
-// leaves the canonically anchored ask beside it with the document it had.
-func TestIssueAskListAnswersOverAnAnchorArtifactIDThatDoesNotCast(t *testing.T) {
-	handler, database := newTestHandlerWithStore(t)
-	issue := createInteractionIssue(t, handler, "TEST", "Anchored asks", "The quick brown fox jumps over the lazy dog")
-	blockDocument, _ := secondDocument(t, handler, issue.Key)
-	canonical := openAnchoredAsk(t, handler, issue.Key, "spec", "brown", "Why brown?")
-	uncastable := openAnchoredAsk(t, handler, issue.Key, "spec", "lazy", "Why lazy?")
-	storeUncastableAnchor(t, database, uncastable, blockDocument)
-
-	response := dispatchRequest(t, handler, http.MethodGet, "/api/v1/issues/"+issue.Key+"/asks", nil, "alice")
-	if response.Code != http.StatusOK {
-		t.Fatalf("list the issue's asks: status=%d body=%s", response.Code, response.Body.String())
-	}
-	asks := map[string]model.Ask{}
-	for _, ask := range decodeBody[[]model.Ask](t, response) {
-		asks[ask.ID] = ask
-	}
-	if len(asks) != 2 {
-		t.Fatalf("the issue's ask list = %s, want both asks", response.Body.String())
-	}
-	want := anchorDocument(t, database, issue.PrimaryArtifactID)
-	if got := asks[canonical].AnchorArtifact; got == nil || *got != want {
-		t.Fatalf("canonically anchored ask's anchor document = %#v, want %#v", got, want)
-	}
-	if got := asks[uncastable].AnchorArtifact; got != nil {
-		t.Fatalf("uncastable anchor ask's anchor document = %#v, want none: its anchor names no document", *got)
-	}
-	if block := asks[uncastable].BlockArtifact; block == nil || block.ID != blockDocument {
-		t.Fatalf("uncastable anchor ask's block document = %#v, want %q", block, blockDocument)
-	}
-}
-
-// Every ask event payload the issue's event log serves is hydrated with its ask's anchor document
-// (attachAskDocumentArtifacts), by a read whose own anchor join casts anchor->>'artifact_id': one
-// ask whose stored anchor is not a uuid answered 500 for the whole log before the guard.
-func TestIssueEventsAnswerOverAnAnchorArtifactIDThatDoesNotCast(t *testing.T) {
-	handler, database := newTestHandlerWithStore(t)
-	issue := createInteractionIssue(t, handler, "TEST", "Anchored ask events", "The quick brown fox jumps over the lazy dog")
-	blockDocument, _ := secondDocument(t, handler, issue.Key)
-	canonical := openAnchoredAsk(t, handler, issue.Key, "spec", "brown", "Why brown?")
-	uncastable := openAnchoredAsk(t, handler, issue.Key, "spec", "lazy", "Why lazy?")
-	storeUncastableAnchor(t, database, uncastable, blockDocument)
-
-	response := dispatchRequest(t, handler, http.MethodGet, "/api/v1/issues/"+issue.Key+"/events", nil, "alice")
-	if response.Code != http.StatusOK {
-		t.Fatalf("read the issue's events: status=%d body=%s", response.Code, response.Body.String())
-	}
-	type askEvent struct {
-		Type    string `json:"type"`
-		Payload struct {
-			ID             string                   `json:"id"`
-			AnchorArtifact *model.AskAnchorArtifact `json:"anchor_artifact"`
-		} `json:"payload"`
-	}
-	opened := map[string]*model.AskAnchorArtifact{}
-	for _, event := range decodeBody[[]askEvent](t, response) {
-		if event.Type == "ask.opened" {
-			opened[event.Payload.ID] = event.Payload.AnchorArtifact
-		}
-	}
-	if len(opened) != 2 {
-		t.Fatalf("the issue's events = %s, want an ask.opened event for both asks", response.Body.String())
-	}
-	want := anchorDocument(t, database, issue.PrimaryArtifactID)
-	if got := opened[canonical]; got == nil || *got != want {
-		t.Fatalf("canonically anchored ask event's anchor document = %#v, want %#v", got, want)
-	}
-	if got := opened[uncastable]; got != nil {
-		t.Fatalf("uncastable anchor ask event's anchor document = %#v, want none: its anchor names no document", *got)
+			opened := openedAskAnchors(t, handler, issue.Key)
+			if len(opened) != 2 {
+				t.Fatalf("the issue's ask.opened events = %#v, want one for both asks", opened)
+			}
+			if got := opened[canonical]; got == nil || *got != want {
+				t.Errorf("canonically anchored ask event's anchor document = %#v, want %#v", got, want)
+			}
+			if got := opened[nameless]; got != nil {
+				t.Errorf("issue events: the anchor's ask.opened document = %#v, want none", *got)
+			}
+		})
 	}
 }
 
@@ -166,7 +90,7 @@ func TestSearchKeywordAnswersOverAnAnchorArtifactIDThatDoesNotCast(t *testing.T)
 	blockDocument, blockSlug := secondDocument(t, handler, issue.Key)
 	canonical := openAnchoredAsk(t, handler, issue.Key, "spec", "brown", "Keep the quadrant appendix?")
 	uncastable := openAnchoredAsk(t, handler, issue.Key, "spec", "lazy", "Keep the quadrant diagram?")
-	storeUncastableAnchor(t, database, uncastable, blockDocument)
+	storeAnchorArtifactID(t, database, uncastable, blockDocument, `"not-a-uuid"`)
 
 	anchorHref := "/issues/" + issue.Key + "/spec?ask=" + canonical
 	hits := askHits(searchResponse(t, handler, "q=quadrant"))
@@ -197,7 +121,7 @@ func TestSearchMeaningAnswersOverAnAnchorArtifactIDThatDoesNotCast(t *testing.T)
 	uncastable := openAnchoredAsk(t, handler, issue.Key, "spec", "lazy", "Keep the quadrant diagram?")
 	answerSearchAsk(t, handler, canonical, map[string]any{"selected": []string{"Yes"}, "text": "Yes, keep it."})
 	answerSearchAsk(t, handler, uncastable, map[string]any{"selected": []string{"Yes"}, "text": "Yes, keep it."})
-	storeUncastableAnchor(t, database, uncastable, blockDocument)
+	storeAnchorArtifactID(t, database, uncastable, blockDocument, `"not-a-uuid"`)
 	processAllPending(t, database, embedder)
 
 	anchorHref := "/issues/" + issue.Key + "/spec?ask=" + canonical
@@ -214,5 +138,25 @@ func TestSearchMeaningAnswersOverAnAnchorArtifactIDThatDoesNotCast(t *testing.T)
 	}
 	if href, want := hits[uncastable].Href, "/issues/"+issue.Key+"/artifacts/"+blockSlug+"?ask="+uncastable; href != want {
 		t.Fatalf("uncastable anchor ask hit's href = %q, want its ask block's document %q", href, want)
+	}
+}
+
+// The references graph and search put one such ask on the same document: an anchor artifact_id
+// that casts to no uuid names no document, so loadAskNodes falls through to the ask's block
+// document for the node's parent, which is the document the search hit's href already names.
+func TestRefsAndSearchPutAnAskWhoseAnchorDoesNotCastOnItsBlockDocument(t *testing.T) {
+	handler, database := newTestHandlerWithStore(t)
+	issue := createInteractionIssue(t, handler, "SRCH", "Anchored ask graph", "The quick brown fox jumps over the lazy dog")
+	blockDocument, blockSlug := secondDocument(t, handler, issue.Key)
+	ask := openAnchoredAsk(t, handler, issue.Key, "spec", "brown", "Keep the quadrant appendix?")
+	storeAnchorArtifactID(t, database, ask, blockDocument, `"not-a-uuid"`)
+
+	node := graphEdges(t, handler, url.Values{"to": {"dispatch://" + issue.Key + "/ask/" + ask}}).Node
+	wantParent := model.NodeParent{Kind: "artifact", ID: blockDocument, Ref: "dispatch://" + issue.Key + "/artifact/" + blockSlug}
+	if node.Parent == nil || *node.Parent != wantParent {
+		t.Fatalf("ask node's parent = %#v, want its ask block's document %#v", node.Parent, wantParent)
+	}
+	if href, want := askHits(searchResponse(t, handler, "q=quadrant"))[ask].Href, "/issues/"+issue.Key+"/artifacts/"+blockSlug+"?ask="+ask; href != want {
+		t.Fatalf("ask hit's href = %q, want the same document as its node's parent %q", href, want)
 	}
 }

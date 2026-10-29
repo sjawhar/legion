@@ -42,11 +42,21 @@ func TestAnchorDecodesOnlyAStringArtifactID(t *testing.T) {
 }
 
 // Only artifact_id is read leniently: another field of the wrong type is still a decode error, so
-// no malformed anchor passes as a valid one.
+// no malformed anchor passes as a valid one. That holds whichever field the decoder reaches
+// first, so the lenient read of a number artifact_id never swallows the error beside it.
 func TestAnchorDecodeStillFailsOnAnotherMalformedField(t *testing.T) {
-	var anchor Anchor
-	if err := json.Unmarshal([]byte(`{"artifact_id": "11111111-1111-4111-8111-111111111111", "version": "seven"}`), &anchor); err == nil {
-		t.Fatalf("decoding a string version = %#v, want an error", anchor)
+	const documentID = "11111111-1111-4111-8111-111111111111"
+	for _, encoded := range []struct{ name, value string }{
+		{name: "a string artifact_id", value: `{"artifact_id": "` + documentID + `", "version": "seven"}`},
+		{name: "a number artifact_id first", value: `{"artifact_id": 5, "version": "seven"}`},
+		{name: "a number artifact_id second", value: `{"version": "seven", "artifact_id": 5}`},
+	} {
+		t.Run(encoded.name, func(t *testing.T) {
+			var anchor Anchor
+			if err := json.Unmarshal([]byte(encoded.value), &anchor); err == nil {
+				t.Fatalf("decoding a string version = %#v, want an error", anchor)
+			}
+		})
 	}
 }
 

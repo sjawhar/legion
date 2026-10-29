@@ -3,6 +3,7 @@ package model
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"regexp"
 	"strings"
@@ -73,18 +74,28 @@ type Anchor struct {
 // leaves ArtifactID empty, which names no document, the same answer the SQL read gives for a value
 // that casts to no uuid. Every other field decodes as its struct tag says, errors included, and
 // encoding is unchanged.
+//
+// The plain decode runs first, so an anchor the server wrote - every anchor but the few an
+// earlier release could leave - costs exactly what it cost before this method existed. Only the
+// type error artifact_id itself raises takes the second decode, which reads that one field as raw
+// JSON; any other error is the decode's answer.
 func (a *Anchor) UnmarshalJSON(data []byte) error {
 	// anchorFields drops the methods of Anchor, so decoding into it does not call this one again.
 	type anchorFields Anchor
+	err := json.Unmarshal(data, (*anchorFields)(a))
+	if err == nil {
+		return nil
+	}
+	var wrongType *json.UnmarshalTypeError
+	if !errors.As(err, &wrongType) || wrongType.Field != "artifact_id" {
+		return err
+	}
 	decoded := struct {
 		*anchorFields
 		ArtifactID json.RawMessage `json:"artifact_id"`
 	}{anchorFields: (*anchorFields)(a)}
 	if err := json.Unmarshal(data, &decoded); err != nil {
 		return err
-	}
-	if len(decoded.ArtifactID) == 0 {
-		return nil
 	}
 	var artifactID string
 	if err := json.Unmarshal(decoded.ArtifactID, &artifactID); err != nil {

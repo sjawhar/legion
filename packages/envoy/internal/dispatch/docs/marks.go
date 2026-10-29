@@ -748,24 +748,35 @@ func loadAnchorRefreshedCommentDeliveries(ctx context.Context, tx pgx.Tx, id str
 	return deliveries, nil
 }
 
-// recordedMarksQuery is the statement that lists the anchor and mark type of every row of table,
-// asks or comments, whose anchor names the artifact $1. Both tables share the predicate but not
-// the uuid expression: asks compare store.CanonicalUUID's guarded cast, the expression
-// asks_anchor_artifact_id (migration 0141) indexes, and comments the plain cast, the expression of
-// comments_anchor_artifact (0032), so each read is an index scan. It keeps the text comparison
-// beside the uuid one, so it returns exactly the rows that comparison alone would: a row the
-// guard leaves unindexed, whose artifact_id is not a lower-case document id, is a row the text
-// comparison never matched either, since the artifact ids the server passes are lower-case.
-func recordedMarksQuery(table string) string {
-	artifactID := `(anchor->>'artifact_id')::uuid`
-	if table == "asks" {
-		artifactID = store.CanonicalUUID(`anchor->>'artifact_id'`)
-	}
+// recordedMarkTarget is one table a document's recorded marks live in: its name, the SQL
+// expression that reads an anchor's artifact_id as a uuid there, and the anchor index that
+// carries exactly that expression. The expression differs per table because the index does: an
+// ask's is store.CanonicalUUID's guarded cast, written out in migration 0141, a comment's the
+// plain cast of comments_anchor_artifact (0032).
+type recordedMarkTarget struct {
+	table      string
+	artifactID string
+	index      string
+}
+
+// recordedMarkTargets are the tables recordedMarkRefs reads, in the order it reads them.
+var recordedMarkTargets = []recordedMarkTarget{
+	{table: "asks", artifactID: store.CanonicalUUID(`anchor->>'artifact_id'`), index: "asks_anchor_artifact_id"},
+	{table: "comments", artifactID: `(anchor->>'artifact_id')::uuid`, index: "comments_anchor_artifact"},
+}
+
+// recordedMarksQuery is the statement that lists the anchor and mark type of every row of
+// target's table whose anchor names the artifact $1. It compares target's uuid expression, the
+// one that table's anchor index carries, so the read is an index scan. It keeps the text
+// comparison beside the uuid one, so it returns exactly the rows that comparison alone would: a
+// row an index guard leaves out, whose artifact_id is not a lower-case document id, is a row the
+// text comparison never matched either, since the artifact ids the server passes are lower-case.
+func recordedMarksQuery(target recordedMarkTarget) string {
 	return fmt.Sprintf(`
 		select anchor, %s
 		from %s
 		where anchor is not null and anchor->>'artifact_id' = $1 and %s = $1::uuid
-	`, commentMarkType(table), table, artifactID)
+	`, commentMarkType(target.table), target.table, target.artifactID)
 }
 
 // recordedMarkRefs is every mark an ask or comment row anchored on artifactID records, read by the
@@ -774,22 +785,22 @@ func recordedMarksQuery(table string) string {
 // other anchor readers read it.
 func (s *Service) recordedMarkRefs(ctx context.Context, artifactID string) (map[pmdoc.MarkRef]struct{}, error) {
 	recorded := make(map[pmdoc.MarkRef]struct{})
-	for _, table := range []string{"asks", "comments"} {
-		rows, err := s.queryFrom(ctx).Query(ctx, recordedMarksQuery(table), artifactID)
+	for _, target := range recordedMarkTargets {
+		rows, err := s.queryFrom(ctx).Query(ctx, recordedMarksQuery(target), artifactID)
 		if err != nil {
-			return nil, fmt.Errorf("list recorded %s marks: %w", table, err)
+			return nil, fmt.Errorf("list recorded %s marks: %w", target.table, err)
 		}
 		for rows.Next() {
 			var encoded []byte
 			var markType string
 			if err := rows.Scan(&encoded, &markType); err != nil {
 				rows.Close()
-				return nil, fmt.Errorf("scan recorded %s mark: %w", table, err)
+				return nil, fmt.Errorf("scan recorded %s mark: %w", target.table, err)
 			}
 			var anchor model.Anchor
 			if err := json.Unmarshal(encoded, &anchor); err != nil {
 				rows.Close()
-				return nil, fmt.Errorf("decode recorded %s mark: %w", table, err)
+				return nil, fmt.Errorf("decode recorded %s mark: %w", target.table, err)
 			}
 			if anchor.MarkID != "" {
 				recorded[pmdoc.MarkRef{Type: markType, ID: anchor.MarkID}] = struct{}{}
@@ -797,7 +808,7 @@ func (s *Service) recordedMarkRefs(ctx context.Context, artifactID string) (map[
 		}
 		if err := rows.Err(); err != nil {
 			rows.Close()
-			return nil, fmt.Errorf("list recorded %s marks: %w", table, err)
+			return nil, fmt.Errorf("list recorded %s marks: %w", target.table, err)
 		}
 		rows.Close()
 	}

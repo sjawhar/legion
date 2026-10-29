@@ -106,15 +106,12 @@ func TestRecordedMarkRefsSkipsAnAnchorArtifactIDThatDoesNotCast(t *testing.T) {
 // plan, which this test forces. With sequential scans disabled the planner still falls back to a
 // Seq Scan when no index matches the predicate's expression, or, for asks, to a scan of all of
 // asks_anchor_artifact_id, whose partial predicate the read's anchor is not null implies; so the
-// test requires the index's node to carry an Index Cond, and fails exactly when an edit to
-// recordedMarksQuery breaks its exact-expression match with the table's anchor index.
+// test requires the index's node to carry an Index Cond, and fails exactly when an edit to a
+// target's uuid expression breaks its exact-expression match with that table's anchor index.
 func TestRecordedMarkRefsReadsThroughTheAnchorIndexes(t *testing.T) {
 	database := storetest.Open(t)
-	for _, test := range []struct{ table, index string }{
-		{table: "asks", index: "asks_anchor_artifact_id"},
-		{table: "comments", index: "comments_anchor_artifact"},
-	} {
-		t.Run(test.table, func(t *testing.T) {
+	for _, target := range recordedMarkTargets {
+		t.Run(target.table, func(t *testing.T) {
 			ctx := context.Background()
 			tx, err := database.Pool.Begin(ctx)
 			if err != nil {
@@ -127,29 +124,29 @@ func TestRecordedMarkRefsReadsThroughTheAnchorIndexes(t *testing.T) {
 			if _, err := tx.Exec(ctx, "set local plan_cache_mode = force_generic_plan"); err != nil {
 				t.Fatalf("force generic plan mode: %v", err)
 			}
-			if _, err := tx.Exec(ctx, "prepare recorded_marks(text) as "+recordedMarksQuery(test.table)); err != nil {
-				t.Fatalf("prepare recorded %s marks query: %v", test.table, err)
+			if _, err := tx.Exec(ctx, "prepare recorded_marks(text) as "+recordedMarksQuery(target)); err != nil {
+				t.Fatalf("prepare recorded %s marks query: %v", target.table, err)
 			}
 			rows, err := tx.Query(ctx, "explain (costs off) execute recorded_marks('00000000-0000-4000-8000-00000000000a')")
 			if err != nil {
-				t.Fatalf("explain recorded %s marks query: %v", test.table, err)
+				t.Fatalf("explain recorded %s marks query: %v", target.table, err)
 			}
 			lines, err := pgx.CollectRows(rows, pgx.RowTo[string])
 			if err != nil {
-				t.Fatalf("read recorded %s marks plan: %v", test.table, err)
+				t.Fatalf("read recorded %s marks plan: %v", target.table, err)
 			}
 			if _, err := tx.Exec(ctx, "deallocate recorded_marks"); err != nil {
-				t.Fatalf("deallocate recorded %s marks query: %v", test.table, err)
+				t.Fatalf("deallocate recorded %s marks query: %v", target.table, err)
 			}
 			plan := strings.Join(lines, "\n")
 			searched := false
 			for i := 1; i < len(lines); i++ {
-				if slices.Contains(strings.Fields(lines[i-1]), test.index) && strings.HasPrefix(strings.TrimSpace(lines[i]), "Index Cond: ") {
+				if slices.Contains(strings.Fields(lines[i-1]), target.index) && strings.HasPrefix(strings.TrimSpace(lines[i]), "Index Cond: ") {
 					searched = true
 				}
 			}
 			if !searched || strings.Contains(plan, "Seq Scan") {
-				t.Fatalf("recorded %s marks plan does not search %s:\n%s", test.table, test.index, plan)
+				t.Fatalf("recorded %s marks plan does not search %s:\n%s", target.table, target.index, plan)
 			}
 		})
 	}
