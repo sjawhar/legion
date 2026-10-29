@@ -9,7 +9,8 @@ body: |-
     paragraphs and the first list after them and does the same inside any decision nested in those
     blocks, so one document edit repairs them together, then edit the ask; where one edit cannot
     (a decision holding this one is broken too, or a decision needs words written rather than
-    blocks deleted), it names no delete and says which decision to repair first; before the document has settled its block ids it says to
+    blocks deleted), it names no delete and says the decision is repaired in the document
+    editor, or once the decision holding it reads; before the document has settled its block ids it says to
     retry instead. Before, an edit of only its urgency or
     `multiple` wrote its options, joined across both lists, to the ask.
 time: 2026-10-28T10:53:52.572551815Z

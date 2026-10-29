@@ -54,7 +54,7 @@ not reach them:
 | `src/directive-container.ts` | `directiveContainerSyntax`, the micromark extension `remarkContainerDirectives` registers for the `:::name[label]{attributes}` container: a micromark document construct, held on the document tokenizer's container stack as a block quote or a list item is, in place of micromark-extension-directive's flow construct, which tokenized a block's content once for each block around it, so a body nesting `:::` a few thousand deep froze a reader's tab for about a minute (INFRA-581). It emits that package's token types, so `mdast-util-directive` builds the same `containerDirective` nodes from them; its `resolveAll` (`resolveDirectiveContainers`) and the `lazyContentEnd` construct keep the flow construct's reading of blank lines, lazy lines and the line endings after fences; and an opener standing inside `maxDirectiveNesting` (32) open directive containers does not open, so its line reads as the text it is. It reads an opener's name, label and attributes with the copied factories in `src/directive-factories.ts`; it is also biome-checked |
 | `src/tests/harness.ts` | The `bun test` registration the copied suites call instead of their own `test()` tally |
 
-Twenty-two kinds of edit are allowed in the copied files, and no others: the import specifiers of
+Twenty-three kinds of edit are allowed in the copied files, and no others: the import specifiers of
 upstream modules; `bun test` registration in the suites (`src/tests/harness.ts` replaces each
 file's own `test()` tally and its `process.exit` tail); `src/tests/headless-no-dom.test.ts`,
 whose entry named the fork's built `dist/headless.js` and now names `../lib-headless.js` — its
@@ -125,7 +125,7 @@ that make a file type-check, each of which erases before runtime (below).
 
 To audit a copied file, diff it against `jj --ignore-working-copy -R <proof-sdk> file show -r
 24a5fc94 root:src/<file>`; every file in the copied-files table but `src/directive-factories.ts`
-has that counterpart, and the only lines that differ should be the twenty-two kinds.
+has that counterpart, and the only lines that differ should be the twenty-three kinds.
 `src/directive-factories.ts`'s counterparts are those three files of micromark-extension-directive
 4.0.0 (`node_modules/.bun/micromark-extension-directive@4.0.0` at the repository root, or the
 package's npm tarball); each function there differs from its source by the join and the type
