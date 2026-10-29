@@ -32,7 +32,7 @@ pin changes nothing in the table; it changes what `node_modules/proof-sdk-upstre
 | `src/tests/*.test.ts` | The suites that came with those files |
 | `src/directive-factories.ts` | `factoryName`, `factoryLabel` and `factoryAttributes`, copied from micromark-extension-directive 4.0.0 (`lib/factory-name.js`, `lib/factory-label.js` and `lib/factory-attributes.js`), which does not export them: `src/directive-container.ts` tokenizes a `:::` opener's name, label and attributes with them. They are kept whole, the `disallowEol` branches for `false` that neither call takes included (INFRA-581) |
 
-Fourteen files under `src/` are legion's own rather than copies, so the file-by-file audit below does
+Fifteen files under `src/` are legion's own rather than copies, so the file-by-file audit below does
 not reach them:
 
 | File | What it is |

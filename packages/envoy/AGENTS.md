@@ -2225,10 +2225,13 @@ list, or a block after its list, which concurrent browser edits can leave) is re
 (`refuseAskContentEdit` in `docs/ask_block_text.go`): the route never rebuilds such an ask, so it
 never moves or drops what a collaborator wrote. The reason quotes every child block of the ask in
 full (its rendered markdown, Go-quoted) with its block id given only as Go-quoted data - no shell
-command and no ready-made ops, since a block id is document text - and names one path: delete the
-block or blocks to drop with a document edit (`dispatch doc-edit`, deleting a block by its id)
-until the ask holds its question and at most one list, last, then edit the ask, which the route
-then applies as for any valid ask. Before, an edit naming only `urgency` or `multiple` wrote the
+command and no ready-made ops, since a block id is document text - and names one path: delete,
+all in one document edit (`dispatch doc-edit`, one delete per block by its id; doc-edit refuses an
+edit that leaves the ask broken, so one list at a time would be refused), the blocks it lists,
+which keep the question's paragraphs and the first list after them, then edit the ask, which the
+route then applies as for any valid ask. While a child has no id or an id repeats in the document
+(before settlement stamps ids), it names no delete and says to retry once the document settles;
+an ask holding no paragraph names none either, since no delete leaves it valid. Before, an edit naming only `urgency` or `multiple` wrote the
 options joined across both lists to the row.
 Settlement retracts an ask whose block left the document in its own name,
 `{kind: "system", id: "document-settlement"}`, and restores only a retraction it wrote - a

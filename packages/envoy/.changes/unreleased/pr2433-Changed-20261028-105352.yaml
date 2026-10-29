@@ -5,8 +5,9 @@ body: |-
     (a second option list, or a block after its options, which two people's concurrent edits can
     leave), so the route never moves or drops what another person wrote. The reason quotes every
     block of the decision in full with its block id as quoted data, and names the path: delete the
-    block or blocks to drop with a document edit (`dispatch doc-edit`) until the decision holds its
-    question and at most one list, then edit the ask. Before, an edit of only its urgency or
+    blocks it lists, all in one document edit (`dispatch doc-edit`), which keeps the question and
+    the first list, then edit the ask; before the document has settled its block ids it says to
+    retry instead. Before, an edit of only its urgency or
     `multiple` wrote its options, joined across both lists, to the ask.
 time: 2026-10-28T10:53:52.572551815Z
 custom:
