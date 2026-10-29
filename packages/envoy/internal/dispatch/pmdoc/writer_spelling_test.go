@@ -9,8 +9,9 @@ import (
 // engine alike (sjawhar/legion#2458). Each row is a document of the
 // writer-spells-a-flanked-letter-after-a-backslash corpus document taken alone - a letter right
 // after a literal backslash, beside an emphasis run - or the same shape after two backslashes, in a
-// heading or in a table cell, or a document of each other shape the writer refused to store, and
-// the bytes the writer stores it as. For each row Parse reads it as the engine does, ParseForWrite
+// heading or in a table cell, or a document of another shape the writer refused to store at some
+// revision of this change, kept as a guard of the spelling it now takes, and the bytes the writer
+// stores it as. For each row Parse reads it as the engine does, ParseForWrite
 // stores it, Render's bytes read back as Parse's tree in both parsers, and those bytes are want.
 func TestTheWriterSpellsEveryTreeItReadsAsTheEngine(t *testing.T) {
 	rows := []struct {

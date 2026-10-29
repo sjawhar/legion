@@ -1874,8 +1874,9 @@ the same with flanking alone), and failing that under the first two, and failing
 that parser's alone (`inlineWithEscapes`), so wherever the bytes the writer before
 sjawhar/legion#2360 wrote read back as that parser reads them they stay: the one rule is that the
 writer keeps the earliest spelling of the greatest read-back prefix depth under `readBackReaders`
-(`readBackDepth`). A text
-`!` written right before a link's `[` is written `\!`, since `![` opens an image (`openInlineMark`).
+(`inlineWithEscapes`, `readsBackUnder`). A text
+`!` written right before a link's `[` is written `\!`, since `![` opens an image
+(`needsInlineEscape`'s `beforeLabel`).
 A code block whose language holds a backtick is fenced with tildes, since a backtick fence's info
 string cannot hold one (`codeBlockFence`). Every order the writer opens marks in opens a code span's
 mark innermost, since a mark opened inside the span would be its text (`codeInnermost`). Only where
@@ -2002,7 +2003,7 @@ back (`linkifyBlock.settle`), and a markdown holding no address is counted and w
 it. Its transform (`autolink_transform.go`) reads, at block close, each run of text nodes between
 other nodes, decoded, its URL pattern first and its email pattern over what that leaves
 (`linkTextAddresses`); one decoder gives each text's decoded text and the source offset each of its
-characters was written at (`decodeMarkdownTextOffsets`), where an address's edges split the text.
+characters was written at (`decodeMarkdown`), where an address's edges split the text.
 The two readers end an address differently (`x;https://x.test/a_ b` leaves the `_` out, `see
 http\://x.test/a_ b` keeps it), each as the engine does. So an address is a link after any
 punctuation, a letter outside ASCII, `]`, `|`, `!`, a character reference or an escape, a URL after
