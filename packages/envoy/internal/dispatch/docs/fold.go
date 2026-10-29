@@ -2,7 +2,8 @@ package docs
 
 // The fold and decode of a room's stored history: the state its updates make (stateThrough), the
 // document that state decodes into (documentThrough, LoadDocument), and the fold they and Compact
-// share (foldThrough, fold, readsBackOtherwise).
+// share (foldThrough, fold, readsBackOtherwise), and whether a document holds anything it cannot
+// place (parks).
 
 import (
 	"context"
@@ -15,6 +16,14 @@ import (
 	"github.com/reearth/ygo/crdt"
 	"github.com/reearth/ygo/persistence"
 )
+
+// parks reports whether doc holds anything it cannot place: an item whose origin or predecessor
+// has not arrived, or a delete of an item it does not hold. A document that parks nothing holds
+// whole every update applied to it.
+func parks(doc *crdt.Doc) bool {
+	parked := doc.PendingStats()
+	return parked.Items > 0 || parked.DeleteRanges > 0
+}
 
 // stateThrough returns the state the room's stored updates through version make, as one V1
 // update. It applies them one at a time, oldest first, to one document that collects garbage, and
@@ -154,7 +163,7 @@ func fold(ctx context.Context, tx pgx.Tx, room string, version persistence.Versi
 	}
 	state = crdt.EncodeStateAsUpdateV1(doc, nil)
 	made := doc.StateVector()
-	if parked := doc.PendingStats(); parked.Items > 0 || parked.DeleteRanges > 0 {
+	if parks(doc) {
 		parts := [][]byte{state}
 		if err := eachUpdateThrough(ctx, tx, room, version, func(update []byte) error {
 			rest, err := crdt.DiffUpdateV1(update, made)

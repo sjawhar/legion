@@ -75,10 +75,12 @@ type Deps struct {
 // VersionedStore is Dispatch's transactional extension of ygo's durable room
 // store. AppendUpdateWithCredit is the one way a room's own update reaches the store: it appends
 // the update, classified as content or not, with the browser edit's in-flight credit, which it
-// takes and lands under the document's advisory lock (UpdateCredit). Document writes that join an
-// API transaction use AppendUpdateTx, classifying the update the way the room's update observer
-// classifies a live one, and AppendUpdateTxWithCredit for a room's own update such a write stores
-// ahead of its own row, with that update's credit (storeRoomUpdatesAhead). RebuildTx replaces an
+// takes and lands under the document's advisory lock (UpdateCredit), and with what the room's
+// update observer recorded with the update, which the append is gated on (BrowserAppend).
+// Document writes that join an API transaction use AppendUpdateTx, classifying the update the way
+// the room's update observer classifies a live one, and AppendUpdateTxWithCredit for a room's own
+// update such a write stores ahead of its own row, with that update's credit
+// (storeRoomUpdatesAhead). RebuildTx replaces an
 // unreadable history inside the rebuild's transaction, through the same persistence boundary as
 // its preflight load, and only while its head is still the one that load read. Head is the
 // version Load would fold up to now, which says whether a state loaded earlier is still the
@@ -88,7 +90,7 @@ type Deps struct {
 // caches its rendering by (coldRead).
 type VersionedStore interface {
 	persistence.VersionedPersistence
-	AppendUpdateWithCredit(ctx context.Context, room string, update []byte, contentChanged bool, credit *UpdateCredit) (persistence.Version, error)
+	AppendUpdateWithCredit(ctx context.Context, room string, update []byte, contentChanged bool, credit *UpdateCredit, browser *BrowserAppend) (persistence.Version, error)
 	AppendUpdateTx(ctx context.Context, tx pgx.Tx, room string, update []byte, contentChanged bool) (persistence.Version, error)
 	AppendUpdateTxWithCredit(ctx context.Context, tx pgx.Tx, room string, update []byte, contentChanged bool, credit *UpdateCredit) (persistence.Version, error)
 	RebuildTx(ctx context.Context, tx pgx.Tx, room string, loaded persistence.Version, seed []byte) (RebuildReport, error)
@@ -2616,7 +2618,7 @@ func (s *Service) recheckResidentIssues(ctx context.Context) {
 
 // refuseClosedIssueAppend is a browser's append the gate refused because the document's issue is
 // closed and the room took the update later than closeMargin after the close (ErrIssueClosed); an
-// update the room took before then is stored (appendGate.observedBeforeClose), and never reaches
+// update the room took before then is stored (observedBeforeClose), and never reaches
 // here. When room's record still holds the issue open, the issue closed without this process
 // hearing it - its listener redialing, which outlasts the margin - and the room is closed for its
 // issue here, as the notification would close it (setRoomIssueOpen), so it stops taking edits and

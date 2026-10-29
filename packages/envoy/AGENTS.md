@@ -776,8 +776,9 @@ below zero would hold it for good.
 Two `envoy-dispatch` processes share a live document session through Postgres alone,
 and durable convergence does not depend on it: every edit is appended under the document's advisory
 lock, Yjs updates commute, and the stored history is their union, so no edit is lost whichever
-process took it. Each process holds its own room for a document, and `docs/room_sync.go` is how
-the rooms follow each other. Beside its pools, each process holds two connections of its own: its
+process took it. Each process holds its own room for a document, and `docs/room_sync.go` with
+`docs/room_catch_up.go` is how the rooms follow each other. Beside its pools, each process holds
+two connections of its own: its
 shared LISTEN connection (`pglisten.Hub`, which `cmd/dispatch` names `dispatch-listener
 <ProcessID>`), and a NOTIFY sender (`roomSyncSender`), which a request inside a transaction of the
 shared pool sends through without a second pooled connection (`store.ErrNestedAcquire`). The
@@ -813,7 +814,7 @@ when the document's issue is closed and the room took the delta more than `close
 after the close committed. A delta the room took before that is stored, even when its append
 reaches the gate after the close, and the issue's reopen settles it. A derived write
 (`appendDerived`: settlement's repair, a live write's fork, a version's capture, the block-id
-backfill) still needs the room at the head (`ErrRoomBehindHead`, `docs/pending_authors.go`), the
+backfill) still needs the room at the head (`ErrRoomBehindHead`, `docs/append_gate.go`), the
 live write taking the cold path instead. A settlement whose room
 is behind catches it up under the document's lock it holds, reading through its own transaction,
 and proceeds: the caught-up rows re-arm it, and the re-armed settlement versions every update. Its
@@ -889,7 +890,7 @@ issue of every resident room again (`recheckResidentIssues`). The gate's issue r
 browser's append that its room took more than `closeMargin` (2 s) after the close committed, and
 closes that room when its process has not heard of the close yet (`refuseClosedIssueAppend`). An
 edit the room took before that margin ran out is stored, even when its append reaches the store
-after the close (`appendGate.observedBeforeClose`). `patchIssue` stamps
+after the close (`observedBeforeClose`). `patchIssue` stamps
 `closed_at = clock_timestamp()` again as the close transaction's last statement, so the margin
 counts from the close's commit: a keystroke typed while the close runs, its ask withdrawal
 writing documents under their locks included, is stored. The `issue.closed` event, built earlier

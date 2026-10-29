@@ -117,7 +117,7 @@ func TestClosingAnIssueClosesItsRoomsFromItsCommit(t *testing.T) {
 
 // slowWithdrawal is how long the close below holds its transaction open after writing the
 // withdrawn ask's block, before a browser types: longer than the document gate's closeMargin (two
-// seconds, docs/pending_authors.go), by a margin no scheduling delay of the test eats.
+// seconds, docs/append_gate.go), by a margin no scheduling delay of the test eats.
 const slowWithdrawal = 4 * time.Second
 
 // A close's transaction writes closed_at, then withdraws the issue's open asks, writing their blocks

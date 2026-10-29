@@ -506,12 +506,12 @@ type heldStore struct {
 
 func (s *heldStore) let() { s.once.Do(func() { close(s.release) }) }
 
-func (s *heldStore) AppendUpdateWithCredit(ctx context.Context, room string, update []byte, contentChanged bool, credit *UpdateCredit) (persistence.Version, error) {
+func (s *heldStore) AppendUpdateWithCredit(ctx context.Context, room string, update []byte, contentChanged bool, credit *UpdateCredit, browser *BrowserAppend) (persistence.Version, error) {
 	if room == s.room && s.armed.CompareAndSwap(true, false) {
 		close(s.entered)
 		<-s.release
 	}
-	return s.VersionedStore.AppendUpdateWithCredit(ctx, room, update, contentChanged, credit)
+	return s.VersionedStore.AppendUpdateWithCredit(ctx, room, update, contentChanged, credit, browser)
 }
 
 // burstGate pairs the channel a burstStore closes once an append reaches it with the channel a
@@ -542,7 +542,7 @@ type burstStore struct {
 	next  int
 }
 
-func (s *burstStore) AppendUpdateWithCredit(ctx context.Context, room string, update []byte, contentChanged bool, credit *UpdateCredit) (persistence.Version, error) {
+func (s *burstStore) AppendUpdateWithCredit(ctx context.Context, room string, update []byte, contentChanged bool, credit *UpdateCredit, browser *BrowserAppend) (persistence.Version, error) {
 	if room == s.room && s.armed.Load() {
 		s.mu.Lock()
 		var gate *burstGate
@@ -556,5 +556,5 @@ func (s *burstStore) AppendUpdateWithCredit(ctx context.Context, room string, up
 			<-gate.release
 		}
 	}
-	return s.VersionedStore.AppendUpdateWithCredit(ctx, room, update, contentChanged, credit)
+	return s.VersionedStore.AppendUpdateWithCredit(ctx, room, update, contentChanged, credit, browser)
 }

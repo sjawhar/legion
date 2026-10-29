@@ -113,8 +113,10 @@ func (a *servicePersistenceAdapter) StoreUpdate(room string, update []byte) erro
 
 // StoreUpdateContext appends a room's update with the in-flight credit its update observer
 // recorded (AppendUpdateWithCredit), and with that observer's record of which room instance the
-// update was made in (documentUpdateClass.cursor) and when it took the update
-// (documentUpdateClass.observed): the append is a browser's (appendBrowser), so the gate admits it
+// update was made in (documentUpdateClass.cursor), when it took the update
+// (documentUpdateClass.observed) and where a live write of this process may have stored it
+// already (documentUpdateClass.ahead), which the append takes as one argument of its own
+// (BrowserAppend): the append is a browser's (appendBrowser), so the gate admits it
 // from a room behind the head with its history intact - it lands at the head, and the instance's
 // cursor folds it in once catch-up fills the gap (appendUpdate) - and refuses it only when the
 // room's stored history was replaced under it, or when the document's issue is closed and the room
@@ -168,8 +170,8 @@ func (a *servicePersistenceAdapter) StoreUpdateContext(ctx context.Context, room
 		return nil
 	}
 	a.service.hooks.awaitPersistenceHold(ctx, room)
-	appending := withStoredAhead(withBrowserAppend(ctx, class.cursor, class.observed), class.ahead)
-	if _, err := a.store.AppendUpdateWithCredit(appending, room, update, class.contentChanged, class.credit); err != nil {
+	browser := &BrowserAppend{cursor: class.cursor, observed: class.observed, ahead: class.ahead}
+	if _, err := a.store.AppendUpdateWithCredit(ctx, room, update, class.contentChanged, class.credit, browser); err != nil {
 		if errors.Is(err, ErrIssueClosed) {
 			a.service.refuseClosedIssueAppend(room)
 			return nil

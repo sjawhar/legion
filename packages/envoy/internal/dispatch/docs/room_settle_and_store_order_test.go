@@ -162,14 +162,14 @@ func newGatedAppends(database *store.Store) *gatedAppends {
 	return &gatedAppends{VersionedStore: NewPgVersioned(database), gate: gate}
 }
 
-func (g *gatedAppends) AppendUpdateWithCredit(ctx context.Context, room string, update []byte, contentChanged bool, credit *UpdateCredit) (persistence.Version, error) {
+func (g *gatedAppends) AppendUpdateWithCredit(ctx context.Context, room string, update []byte, contentChanged bool, credit *UpdateCredit, browser *BrowserAppend) (persistence.Version, error) {
 	g.mu.Lock()
 	gate := g.gate
 	g.mu.Unlock()
 	g.waiting.Add(1)
 	<-gate
 	g.waiting.Add(-1)
-	return g.VersionedStore.AppendUpdateWithCredit(ctx, room, update, contentChanged, credit)
+	return g.VersionedStore.AppendUpdateWithCredit(ctx, room, update, contentChanged, credit, browser)
 }
 
 // hold closes the gate to every append that reaches it from now on.

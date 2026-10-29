@@ -111,17 +111,19 @@ func (p *PgVersioned) DocumentStamp(ctx context.Context, room string) (DocumentS
 
 // AppendUpdate validates and stores one incremental V1 update as content.
 func (p *PgVersioned) AppendUpdate(ctx context.Context, room string, update []byte) (persistence.Version, error) {
-	return p.appendUpdate(ctx, room, update, true, nil)
+	return p.appendUpdate(ctx, room, update, true, nil, nil)
 }
 
 // AppendUpdateWithCredit validates and stores one incremental V1 update of a room, with its
-// rendered-content classification and the browser edit's in-flight credit: in the update's own
-// transaction, under the document's advisory lock, it writes the credit's authors to the
-// document's pending authors unless a committed version already listed them (UpdateCredit.take),
-// records the authors of the ask blocks the update introduced (UpdateCredit.askAuthors), and it
-// lands the credit before it releases that lock (UpdateCredit.landed).
-func (p *PgVersioned) AppendUpdateWithCredit(ctx context.Context, room string, update []byte, contentChanged bool, credit *UpdateCredit) (persistence.Version, error) {
-	return p.appendUpdate(ctx, room, update, contentChanged, credit)
+// rendered-content classification, the browser edit's in-flight credit, and what the room's
+// update observer recorded with the update (BrowserAppend, nil for an append no browser of a room
+// made): in the update's own transaction, under the document's advisory lock, it writes the
+// credit's authors to the document's pending authors unless a committed version already listed
+// them (UpdateCredit.take), records the authors of the ask blocks the update introduced
+// (UpdateCredit.askAuthors), and it lands the credit before it releases that lock
+// (UpdateCredit.landed).
+func (p *PgVersioned) AppendUpdateWithCredit(ctx context.Context, room string, update []byte, contentChanged bool, credit *UpdateCredit, browser *BrowserAppend) (persistence.Version, error) {
+	return p.appendUpdate(ctx, room, update, contentChanged, credit, browser)
 }
 
 // appendUpdate is a room's own append of update, in a transaction of its own under the document's
@@ -130,11 +132,19 @@ func (p *PgVersioned) AppendUpdateWithCredit(ctx context.Context, room string, u
 // the version that holds it and writes nothing, not even the credit, which the write's transaction
 // wrote with the update. Either way the update's room instance takes that version in, and its
 // marker records it (storedAhead), so a later write finds it stored.
-func (p *PgVersioned) appendUpdate(ctx context.Context, room string, update []byte, contentChanged bool, credit *UpdateCredit) (persistence.Version, error) {
+func (p *PgVersioned) appendUpdate(ctx context.Context, room string, update []byte, contentChanged bool, credit *UpdateCredit, browser *BrowserAppend) (persistence.Version, error) {
 	if err := crdt.ApplyUpdateV1(newDocumentCopy(), update, nil); err != nil {
 		return 0, err
 	}
-	ahead := storedAheadFrom(ctx)
+	// A browser's append carries the room instance its update was made in and the marker saying
+	// where a live write of this process may have stored that update already (BrowserAppend); any
+	// other append is gated on the cursor its context carries, when one marked it
+	// (withRoomCursor), and no write stores its update ahead of it.
+	var ahead *storedAhead
+	cursor := roomCursorFrom(ctx)
+	if browser != nil {
+		ahead, cursor = browser.ahead, browser.cursor
+	}
 	var version persistence.Version
 	err := p.withRoomLock(ctx, room, func(conn *pgxpool.Conn) error {
 		// The credit lands while withRoomLock still holds the document's lock, whether the
@@ -152,7 +162,7 @@ func (p *PgVersioned) appendUpdate(ctx context.Context, room string, update []by
 		}
 		if stored {
 			version = at
-		} else if version, err = p.appendUpdateTxClass(ctx, tx, room, update, contentChanged, credit); err != nil {
+		} else if version, err = p.appendUpdateTxClass(ctx, tx, room, update, contentChanged, credit, browser); err != nil {
 			return err
 		}
 		if err := tx.Commit(ctx); err != nil {
@@ -166,11 +176,11 @@ func (p *PgVersioned) appendUpdate(ctx context.Context, room string, update []by
 			p.afterAppendCommit(room, version)
 		}
 		// The room instance's cursor advances here, inside the lock the append holds, rather than
-		// where the caller marked the context with it (StoreUpdateContext): a writer that took the
-		// lock after this commit released it would otherwise read a cursor one version behind the
-		// head it reads under that lock, and the gate would refuse an agent's edit while nothing
-		// was wrong with its room.
-		advanceRoomCursor(roomCursorFrom(ctx), version)
+		// where its caller took the cursor from the update's class (StoreUpdateContext): a writer
+		// that took the lock after this commit released it would otherwise read a cursor one
+		// version behind the head it reads under that lock, and the gate would refuse an agent's
+		// edit while nothing was wrong with its room.
+		advanceRoomCursor(cursor, version)
 		return nil
 	})
 	return version, err
@@ -191,7 +201,7 @@ func (p *PgVersioned) AppendUpdateTxWithCredit(ctx context.Context, tx pgx.Tx, r
 	if err := crdt.ApplyUpdateV1(newDocumentCopy(), update, nil); err != nil {
 		return 0, itemCapError(update, err)
 	}
-	return p.appendUpdateTxClass(ctx, tx, room, update, contentChanged, credit)
+	return p.appendUpdateTxClass(ctx, tx, room, update, contentChanged, credit, nil)
 }
 
 // lockDocumentRoom serializes every durable mutation of one document. Callers
@@ -236,7 +246,7 @@ func lockDocumentRoom(ctx context.Context, tx pgx.Tx, room string) error {
 	return nil
 }
 
-func (p *PgVersioned) appendUpdateTxClass(ctx context.Context, tx pgx.Tx, room string, update []byte, contentChanged bool, credit *UpdateCredit) (persistence.Version, error) {
+func (p *PgVersioned) appendUpdateTxClass(ctx context.Context, tx pgx.Tx, room string, update []byte, contentChanged bool, credit *UpdateCredit, browser *BrowserAppend) (persistence.Version, error) {
 	if err := ctx.Err(); err != nil {
 		return 0, err
 	}
@@ -257,31 +267,31 @@ func (p *PgVersioned) appendUpdateTxClass(ctx context.Context, tx pgx.Tx, room s
 	}
 	// The gate: the room the update was made in, read after the lock and before the head, so a
 	// peer of this very room whose append committed under this lock has already advanced the
-	// cursor (appendUpdate) and two peers of one room never refuse each other. A browser's delta
-	// is admitted from a room behind an intact history, since Yjs updates commute and this lock
-	// serialises them, and from one behind a history a compaction folded, which still holds what
-	// the delta builds on (storedHistoryHolds) - its room's cursor is marked, for the room to be
-	// closed and reloaded once the append is stored (StoreUpdateContext) - unless the document's
-	// issue is closed and the room took the delta later than closeMargin after the close
-	// (ErrIssueClosed); a derived write - an upload's or a conditional edit's version, a
-	// settlement's repairs - only from a room holding the head, since what it renders from that
-	// room's document would be rendered from text the writer has not seen (appendKind). An append
-	// no room's cursor gates - a cold write, a new document's seed, a test's own append - reads the
-	// head alone.
+	// cursor (appendUpdate) and two peers of one room never refuse each other. A browser's delta,
+	// which carries its room instance (BrowserAppend), is admitted from a room behind an intact
+	// history, since Yjs updates commute and this lock serialises them, and from one behind a
+	// history a compaction folded, which still holds what the delta builds on
+	// (storedHistoryHolds) - its room's cursor is marked, for the room to be closed and reloaded
+	// once the append is stored (StoreUpdateContext) - unless the document's issue is closed and
+	// the room took the delta later than closeMargin after the close (ErrIssueClosed); a derived
+	// write - an upload's or a conditional edit's version, a settlement's repairs - only from a
+	// room holding the head, since what it renders from that room's document would be rendered
+	// from text the writer has not seen (appendKind). An append no cursor gates - a cold write, a
+	// new document's seed, a test's own append - reads the head alone.
 	var latest int64
 	var err error
-	if cursor, kind, observed := appendingCursor(ctx, room); cursor != nil {
+	if browser != nil && browser.cursor != nil {
 		var replaced bool
-		latest, replaced, err = gateAppend(ctx, tx, room, cursor.heldThrough(), kind, observed, update)
+		latest, replaced, err = gateAppend(ctx, tx, room, browser.cursor.heldThrough(), appendBrowser, browser.observed, update)
 		if replaced {
-			// Only a browser's append is admitted so, and its cursor is its room instance's.
-			if instanceCursor, ok := cursor.(*roomCursor); ok {
-				instanceCursor.markReplaced()
-			}
+			browser.cursor.markReplaced()
 			if p.storedHistoryHeld != nil {
 				p.storedHistoryHeld(room)
 			}
 		}
+	} else if cursor := appendingCursor(ctx, room); cursor != nil {
+		// Only a browser's append is admitted on a replaced history, so the decision alone is read.
+		latest, _, err = gateAppend(ctx, tx, room, cursor.heldThrough(), appendDerived, time.Time{}, update)
 	} else {
 		latest, err = currentUpdateCursor(ctx, tx, room)
 	}

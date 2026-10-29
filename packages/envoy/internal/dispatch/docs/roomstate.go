@@ -109,7 +109,7 @@ type roomState struct {
 // stands at, which gates and then takes in the update's own append (StoreUpdateContext), and
 // observed, when the observer classified the update, on this process's monotonic clock, which
 // tells the gate an update the room took before its issue closed from one taken after
-// (appendGate.observedBeforeClose); zero for a class no observer of the room's log classified.
+// (observedBeforeClose); zero for a class no observer of the room's log classified.
 //
 // An update only the room holds - not a published live write's nor a catch-up's, which are stored
 // already - also names instance, the room instance it was made in, whose list of unstored updates
