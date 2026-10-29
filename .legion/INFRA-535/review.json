@@ -1,0 +1,36 @@
+{
+  "schemaVersion": 1,
+  "phase": "review",
+  "issue": "INFRA-535",
+  "completed": "2026-10-29T14:41:00Z",
+  "decision": "changes_requested",
+  "reviewedCodeHead": "b1f5946c9788bc195b2a88d6c86aec1cbba05cc5",
+  "ci": "Required lint, typecheck, test, pr-title all completed/success at CI head b1f5946c; compare b1f5946c...dc47aa3a touches only .legion/INFRA-535/ (2 files).",
+  "thermonuclear": {
+    "deepReview": "Verdict: APPROVE at dc47aa3a (3 Minor: AGENTS.md citations, writer_spelling_test.go row comment, empty PR brief fields). Ran the writer-spelling test at merge base b93381d3 (15 of 18 rows fail), 60,000 random documents base vs head: churn 0, newly refused 0, fixed 12; a hand-built unspellable tree is still refused 'reads back otherwise'.",
+    "codeQuality": "Verdict: CHANGES at dc47aa3a: (1) e2e helpers duplicated beside the shared ones this PR adds; (2) orderMarks consolidation of the mark-order switch; (3) AGENTS.md stale citations."
+  },
+  "critical": 0,
+  "important": 1,
+  "minor": 2,
+  "keyFindings": [
+    {
+      "severity": "important",
+      "file": "packages/dispatch/e2e/users.ts",
+      "description": "The PR adds shared withAlice (users.ts:29), expectParagraphReadings and expectCommentReading (editor.ts:234,258) but leaves the old copies: withAlice in strikethrough.e2e.ts:65 and task-items.e2e.ts:226, strikethrough.e2e.ts:49-63 expectEngineReading (same evaluateAll poll), and strikethrough.e2e.ts:99-106 inline expand-thread + iphone scope. Clean cutover: migrate those callers to the shared helpers and delete the copies; re-run strikethrough and task-items e2e."
+    },
+    {
+      "severity": "minor",
+      "file": "packages/envoy/AGENTS.md",
+      "description": "Fixed by the reviewer in 09673f98: cited readBackDepth (does not exist) -> inlineWithEscapes/readsBackUnder; the \\! rule credited to openInlineMark -> needsInlineEscape's beforeLabel; decodeMarkdownTextOffsets (inlined away) -> decodeMarkdown."
+    },
+    {
+      "severity": "minor",
+      "file": "packages/envoy/internal/dispatch/pmdoc/writer_spelling_test.go",
+      "description": "Fixed by the reviewer in 09673f98: the doc comment said every other row is a shape the writer refuses; three rows (footnote document, table of www links, escaped bang) pass at merge base b93381d3 per the deep review, so the comment now says each was refused at some revision of this change and stays as a guard."
+    }
+  ],
+  "notADefect": [
+    "Code-quality finding 2 (fold the marksKeptOpen/marksByReach/marksReopened switch at render_inline.go:418-436 into one orderMarks helper): each of keepingOpen, byReach, reopening is a small self-contained function whose doc comment states its codeInnermost step; the three cases take different inputs (after-next marks, the node list, neither), so the fold widens two signatures to save six lines. A preference, not a defect; not required."
+  ]
+}
