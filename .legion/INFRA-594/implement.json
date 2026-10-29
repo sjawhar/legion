@@ -2,7 +2,7 @@
   "schemaVersion": 1,
   "phase": "implement",
   "issue": "INFRA-594",
-  "completed": "2026-10-29T17:46:50Z",
+  "completed": "2026-10-29T19:06:37Z",
   "proof": [
     {
       "criterion": "Sessions take every event (agent, issue, role) once through restarts of the session, its NATS connection, either listener and a Dispatch pod; the plugin acks after the transcript write; an unacked message is redelivered",
@@ -51,6 +51,22 @@
       "observed": "Both every event 1 except the role events of windows a and b (the old plugin sends no delivery and cannot recover a role forward). The control's window-b core role publishes counted 1 because they reached NATS at 17:33:58.51, the second the proxies came back; at the head they arrived during the cut. The head's window f comment-2 counted 2 in Claude Code: the old plugin's replay/live race, fixed for the new plugin in 3d55c803. Tables: evidence/live/mixed-head.table.txt, mixed-control.table.txt.",
       "headSha": "7c39c1c18257",
       "negativeControl": "The control run is main's listener with the same plugins; it shows the same role zeros in window a, so they are today's behaviour, not this change's."
+    },
+    {
+      "criterion": "The session-consumer grant reaches the listener user alone; Dispatch and host users keep their per-durable scope (CI envoy-infra-go)",
+      "surface": "packages/envoy/infra/core grant renderers and the gcp cloud-config goldens; the grants applied on an in-process nats-server 2.10.29",
+      "command": "cd packages/envoy/infra && go test -count=1 ./core && go test -count=1 -run 'Golden|CloudConfig' ./gcp; the bodies of TestDispatchPermissionsOnRealServers' delivery-create subtest and the listener session-consumer live test run in-process against testnats.StartConfig",
+      "observed": "ok infra/core (new TestOnlyTheListenerSetHoldsTheSessionConsumersCalls), ok infra/gcp goldens; in-process: Dispatch without the filtered create is refused exactly 'Publish $JS.API.CONSUMER.CREATE.ENVOY_NOTIFICATIONS.delivery-events.notifications.github.>' and the durable is not created (what the CI subtest asserts); the listener user creates, pulls, acks, restarts, lists and deletes a session consumer; a host user is refused CONSUMER.INFO and CONSUMER.LIST on s-* consumers.",
+      "headSha": "588a864057b9",
+      "negativeControl": "At 7c39c1c1, where DispatchPermissions inherited the listener's wildcard consumer entries, CI's TestDispatchPermissionsOnRealServers failed: 'consumer delivery-events was created despite its missing permission'."
+    },
+    {
+      "criterion": "pi-envoy and claude-envoy suites pass in one bun process, as the root bun test runs them",
+      "surface": "bun test of both packages in one invocation",
+      "command": "bun test packages/claude-envoy packages/pi-envoy",
+      "observed": "1742 pass, 39 skip, 0 fail; each package alone 0 fail.",
+      "headSha": "588a864057b9",
+      "negativeControl": "At 0cc7a492 the same command failed two pi-envoy tests ('the drift heal names the live id\u2026', 'AskGate > the session's processes are told DISPATCH_STATE_DIR\u2026'): claude-envoy tests replaced process.env, leaving Bun.env, which child shells read, stale."
     }
   ],
   "filesChanged": [
@@ -66,7 +82,8 @@
     "scripts/e2e/envoy-session-delivery.sh (new), scripts/e2e/README.md, scripts/e2e/lib/port-file.sh",
     "docs: packages/envoy/AGENTS.md, docs/architecture.md, pi-envoy and claude-envoy AGENTS/README, .dispatch/architecture, docs/site dispatch pages, skills/envoy, docs/solutions (two pages), docs/deployment.md, .github/workflows/ci.yaml comment",
     "changelog fragments: packages/{envoy,envoy-client,pi-envoy,claude-envoy}/.changes/unreleased/INFRA-594-*.yaml",
-    "Round 2: packages/envoy/loadtest/{backlog.go,restartreport.go,restartreport_test.go,restart-step.sh,relay.go,guard.go,main.go,README.md}; packages/envoy-client/test/{listener-grant.ts,envoy-stack.ts,stall-scenario.ts}; pi-envoy and claude-envoy stall tests; scripts/e2e/envoy-session-delivery.sh (--listener-grant, --plugins-from) and README; packages/claude-envoy/src/envoy-channel-server.ts (replay claim) with its test; changelog fragments"
+    "Round 2: packages/envoy/loadtest/{backlog.go,restartreport.go,restartreport_test.go,restart-step.sh,relay.go,guard.go,main.go,README.md}; packages/envoy-client/test/{listener-grant.ts,envoy-stack.ts,stall-scenario.ts}; pi-envoy and claude-envoy stall tests; scripts/e2e/envoy-session-delivery.sh (--listener-grant, --plugins-from) and README; packages/claude-envoy/src/envoy-channel-server.ts (replay claim) with its test; changelog fragments",
+    "Round 3: packages/envoy/infra/core/{permissions.go,permissions_test.go,permissions_live_test.go}, gcp goldens, infra README/AGENTS/docs/nats-hub.md, packages/envoy/AGENTS.md, the listener-permissions fragment; packages/claude-envoy/tests/{envoy-channel-server.test.ts,envoy-channel-tools.test.ts,pane-environment.ts}"
   ],
   "trickyParts": [
     "nats-server 2.10.29 reports ack floor 0 for a fresh consumer, so every session consumer is created at a start sequence (stream last+1) and the floor is read never below it",
@@ -79,7 +96,8 @@
     "Load: Dispatch commits only about 0.5-0.6 events/s of the 40/s offered on the 2-core pod, so delivery latency rests on about 1,900-2,300 receipts per run plus a labelled supplement that publishes Dispatch-shaped events straight to NATS at 40/s",
     "nats-server RSS grows over a 10-minute window on both sides (before and after); not caused by this change, and a 10-minute window cannot show whether it levels off",
     "The listener grant change (session-consumer entries, CONSUMER.LIST, envoy-roles) reaches a hub only at its next replacement or reload; until then the listener answers core and the old path runs",
-    "Mixed rollout and core path keep today's loss of role events a session misses while killed or cut off; closed only when sessions run the new plugin on a hub with the grant"
+    "Mixed rollout and core path keep today's loss of role events a session misses while killed or cut off; closed only when sessions run the new plugin on a hub with the grant",
+    "Host users' listeners (and Dispatch's) get no session-consumer grant, so their sessions stay on the core path; only the hub's listener user carries it (architect's option a)"
   ],
   "openQuestions": []
 }
