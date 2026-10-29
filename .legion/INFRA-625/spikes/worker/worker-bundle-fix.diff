@@ -1,0 +1,50 @@
+INFRA-625 spike (WorkerParse): the one change the read-only Markdown engine needs to be
+bundleable into a Web Worker.
+
+Without it the worker chunk dies at module evaluation with
+  Uncaught ReferenceError: document is not defined
+because `decode-named-character-reference` resolves to its `browser` export condition,
+`index.dom.js`, whose module body is `const element = document.createElement('i')`
+(node_modules/.bun/decode-named-character-reference@1.3.0/node_modules/decode-named-character-reference/index.dom.js:5).
+Vite resolves a worker bundle with the client conditions (`browser`), not `worker`, so the
+alias below is what picks the DOM-free implementation. `index.js` is the same package's
+default/`worker`/`deno`/`workerd` export; it answers from the `character-entities` table and is
+already what Bun, Node and the vitest suites run.
+
+Cost: `character-entities/index.js` is 37,342 bytes raw, 11,631 bytes gzipped, and it replaces a
+`document.createElement` + `innerHTML` round trip per named reference.
+
+--- a/packages/dispatch/web/vite.config.ts
++++ b/packages/dispatch/web/vite.config.ts
+@@ -88,6 +88,16 @@ export default defineConfig({
+     // module identity rather than one per workspace import path.
+     dedupe: ["prosemirror-model"],
+     alias: {
++      // micromark decodes a named character reference through this package, whose `browser`
++      // export condition is a module whose body is `document.createElement('i')`. A Web Worker
++      // has no `document`, and Vite bundles a worker with the client's conditions, so that
++      // module would throw before the worker's first message. Its default export condition is a
++      // lookup table over `character-entities` with the same answers - the one Bun, Node and the
++      // unit suites already run - so every bundle takes it.
++      "decode-named-character-reference": fileURLToPath(
++        new URL(
++          "../node_modules/decode-named-character-reference/index.js",
++          import.meta.url
++        )
++      ),
+       "@legion/contracts/repo": fileURLToPath(
+         new URL("../../contracts/src/repo.ts", import.meta.url)
+       ),
+
+Note on the path: the alias target must be the real file. Under bun's isolated layout the
+package is reachable from packages/dispatch as
+  packages/dispatch/node_modules/decode-named-character-reference/index.js
+(a symlink into node_modules/.bun/...). Resolve it with `import.meta.resolve` or
+`createRequire(import.meta.url).resolve("decode-named-character-reference/index.js")` rather
+than hard-coding a relative hop if the layout is not guaranteed.
+
+Verified by: building the spike worker with `bun build --conditions worker` (the same resolution
+the alias forces) and running it in Chromium; see
+$TMPDIR/infra625/spikes/WorkerParse/results2.txt - without it, `[pageerror] ReferenceError:
+document is not defined at parse.worker.js:1173`; with it, the worker boots in 19.5 ms and every
+shape parses.

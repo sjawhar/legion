@@ -1,0 +1,118 @@
+--- a/packages/envoy/internal/dispatch/pmdoc/block_ids.go
++++ b/packages/envoy/internal/dispatch/pmdoc/block_ids.go
+@@ -1,6 +1,7 @@
+ package pmdoc
+ 
+ import (
++	"crypto/rand"
+ 	"fmt"
+ 	"strings"
+ 	"sync"
+@@ -13,7 +14,7 @@
+ var blockIDGenerator = struct {
+ 	sync.RWMutex
+ 	mint func() string
+-}{mint: uuid.NewString}
++}{mint: newBlockID}
+ 
+ // SetBlockIDGenerator replaces the block ID generator. Passing nil restores UUID v4 IDs.
+ // Fixture generators and tests use this to make generated documents deterministic.
+@@ -21,7 +22,7 @@
+ 	blockIDGenerator.Lock()
+ 	defer blockIDGenerator.Unlock()
+ 	if mint == nil {
+-		blockIDGenerator.mint = uuid.NewString
++		blockIDGenerator.mint = newBlockID
+ 		return
+ 	}
+ 	blockIDGenerator.mint = mint
+@@ -34,6 +35,41 @@
+ 	return mint()
+ }
+ 
++// blockIDEntropy is the random bytes ids are minted from, read from crypto/rand a block at a time.
++// The kernel is asked once per read, and a write mints an id for every block that names none: a
++// document of 8,000 list items spent about half its parse inside sixteen-byte reads, one per item
++// (INFRA-625). Every id still comes from those bytes alone, 122 of them as a version 4 UUID holds.
++var blockIDEntropy struct {
++	sync.Mutex
++	bytes [blockIDEntropyIDs * len(uuid.UUID{})]byte
++	// minted is how many ids the buffer has given out; it is refilled on the first and then on
++	// every blockIDEntropyIDs-th.
++	minted int
++}
++
++// blockIDEntropyIDs is how many ids one read of crypto/rand fills. Each costs sixteen bytes, so
++// the buffer is four kibibytes.
++const blockIDEntropyIDs = 256
++
++// newBlockID is a version 4 UUID, as uuid.NewString writes one, minted from blockIDEntropy.
++func newBlockID() string {
++	var id uuid.UUID
++	blockIDEntropy.Lock()
++	at := blockIDEntropy.minted % blockIDEntropyIDs
++	if at == 0 {
++		if _, err := rand.Read(blockIDEntropy.bytes[:]); err != nil {
++			blockIDEntropy.Unlock()
++			panic(fmt.Sprintf("pmdoc: reading randomness for a block id: %v", err))
++		}
++	}
++	copy(id[:], blockIDEntropy.bytes[at*len(id):])
++	blockIDEntropy.minted++
++	blockIDEntropy.Unlock()
++	id[6] = (id[6] & 0x0f) | 0x40
++	id[8] = (id[8] & 0x3f) | 0x80
++	return id.String()
++}
++
+ // EnsureBlockIDs gives every block in tree a unique blockId. Existing unique IDs stay
+ // unchanged; on duplicate IDs, the first document-order occurrence keeps its identity.
+ func EnsureBlockIDs(tree *Node) bool {
+--- a/packages/envoy/internal/dispatch/pmdoc/lines.go
++++ b/packages/envoy/internal/dispatch/pmdoc/lines.go
+@@ -217,7 +217,7 @@
+ // so a block after a tab stood a character or two past its text, or on the next line.
+ func (p tabIndented) Open(parent ast.Node, reader gmtext.Reader, pc parser.Context) (ast.Node, parser.State) {
+ 	_, start := reader.PeekLine()
+-	if p.opens != nil {
++	if p.opens != nil && !tabFree(pc) {
+ 		expandTabIndentation(reader, p.opens)
+ 	}
+ 	line, segment := reader.PeekLine()
+@@ -233,7 +233,7 @@
+ }
+ 
+ func (p tabIndented) Continue(node ast.Node, reader gmtext.Reader, pc parser.Context) parser.State {
+-	if p.opens != nil {
++	if p.opens != nil && !tabFree(pc) {
+ 		expandTabIndentation(reader, p.opens)
+ 	}
+ 	return p.BlockParser.Continue(node, reader, pc)
+@@ -599,6 +599,19 @@
+ 	untrimmedLinesAttr = []byte("pmdoc-untrimmed-lines")
+ )
+ 
++// tabFreeKey marks a parse whose source holds no tab at all, which no line's indentation can hold
++// either, so tabIndented has nothing to expand (expandTabIndentation returns at its own tab check).
++// It is read once per open block per line - a list nested dozens deep over thousands of lines asks
++// millions of times - and set once per parse, from one scan of the source (parseSource).
++var tabFreeKey = parser.NewContextKey()
++
++// tabFree reports whether the parse's source holds no tab (tabFreeKey). A parse that never set it
++// reads as false, and its lines are expanded as before.
++func tabFree(pc parser.Context) bool {
++	free, _ := pc.Get(tabFreeKey).(bool)
++	return free
++}
++
+ func (p lineRecordingParagraph) Open(parent ast.Node, reader gmtext.Reader, pc parser.Context) (ast.Node, parser.State) {
+ 	_, segment := reader.PeekLine()
+ 	node, state := p.BlockParser.Open(parent, reader, pc)
+@@ -642,6 +655,7 @@
+ // its parse, so pmdoc registers none, and takes the backslash out of a cell's escaped pipes itself
+ // once the bounds hold (unescapeTablePipes).
+ func parseSource(p parser.Parser, source []byte, context parser.Context) (ast.Node, error) {
++	context.Set(tabFreeKey, bytes.IndexByte(source, '\t') < 0)
+ 	root := p.Parse(gmtext.NewReader(source), parser.WithContext(context))
+ 	definitionsInPlace(root, context)
+ 	if recorded := context.Get(untrimmedLinesKey); recorded != nil {
