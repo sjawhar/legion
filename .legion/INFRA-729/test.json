@@ -1,0 +1,49 @@
+{
+  "schemaVersion": 1,
+  "phase": "test",
+  "issue": "INFRA-729",
+  "completed": "2026-10-29T09:02:00Z",
+  "implementerProof": {
+    "verdict": "verified",
+    "how": "Re-ran each of the implementer's three commands myself at the head rather than reading its summary: `grep -rn 7b822b0a .github/workflows` in the workspace (no output, exit 1); `gh api repos/sjawhar/legion/commits/08cbb0a2a8ad76a65ebde32ee76b6a0c44a34bb0/check-runs?per_page=100` (dispatch-browser-multiprocess success 123224515403, dispatch skipped 123224516911, lint success 123220974710, no failure or cancellation anywhere on the head); and `gh run view -R sjawhar/legion --job 123224515403 --log`, reading the raw lines myself: `docker pull mirror.gcr.io/pgvector/pgvector@sha256:2358fcba...` (log line 52), `starting PostgreSQL 18.6 (Debian 18.6-1.pgdg12+2)` (lines 1841, 1871), the six spec `\u2713` lines, `5 passed (28.9s)` and `1 passed (1.6s)`. I also grepped the whole job log for `failed|FAIL|Error:`: the only five hits are four `retired=0 failed=0` token-retirement log lines and one pre-existing `Restore cache failed: Dependencies file is not found` warning from actions/setup-go, so the run holds no failure. Its negative control holds too: main's job 123138185821 (head af1ff09c) pulls 7b822b0a... and prints `starting PostgreSQL 16.15`, conclusion success, read by me. The PR head a8808d54 adds only .legion/INFRA-729/implement.json over 08cbb0a2 (`jj diff --from 08cbb0a2 --to a8808d54 --summary`), so that run's evidence covers the head's code."
+  },
+  "failures": [],
+  "failed": 0,
+  "proof": [
+    {
+      "criterion": "A1: `grep -rn 7b822b0a .github/workflows` on the PR head finds nothing",
+      "surface": "the repository tree at the PR head (the workspace at a8808d54)",
+      "command": "cd -- \"$LEGION_WORKSPACE\" && grep -rn 7b822b0a .github/workflows; grep -rnE 'image: .*(postgres|pgvector)' .github/workflows; grep -rnE 'postgres:1[0-7]|pg1[0-7]' .github/workflows",
+      "observed": "no output, exit 1. Every postgres service image in .github/workflows is now the one pg18 digest 2358fcba... (7 in envoy-and-contracts.yaml, 1 in pr-and-main.yaml, 1 in docs.yaml) and no `postgres:1x`/`pg1x` tag is left, so no CI job runs PostgreSQL 16; the Go suites reach Postgres through LEGION_TEST_PG_DSN, which CI points at that same pg18 service (pr-and-main.yaml:275).",
+      "headSha": "a8808d54f40072073add74d737c9f836f4b35572",
+      "negativeControl": "the same grep against the base: `jj file show -r be4567e3 .github/workflows/envoy-and-contracts.yaml | grep -n 7b822b0a` matches line 1094, the dispatch-browser-multiprocess image line"
+    },
+    {
+      "criterion": "A2: dispatch-browser-multiprocess passes on the PR (ran, not skipped) on PostgreSQL 18",
+      "surface": "GitHub Actions CI on pull request #2486: https://github.com/sjawhar/legion/actions/runs/40804774509/job/123224515403",
+      "command": "gh api \"repos/sjawhar/legion/commits/08cbb0a2a8ad76a65ebde32ee76b6a0c44a34bb0/check-runs?per_page=100\" --jq '.check_runs[] | [.name,.status,.conclusion,.id] | @tsv'; gh run view -R sjawhar/legion --job 123224515403 --log | grep -nE 'pgvector@sha256|starting PostgreSQL|[0-9]+ (passed|failed)|7b822b0a|PostgreSQL 16'; gh run view -R sjawhar/legion --job 123220975388 --log | grep -nE 'Filter dispatch_browser_multiprocess|Set output .dispatch_browser_multiprocess'",
+      "observed": "check run `dispatch-browser-multiprocess` completed success (job 123224515403, run 40804774509), not skipped. The job pulls mirror.gcr.io/pgvector/pgvector@sha256:2358fcba361ed2233a5ed81b5fe4ca779ccb304120ce531a3bf51c0ed7e2bc11, the service log prints `starting PostgreSQL 18.6 (Debian 18.6-1.pgdg12+2)` twice, and all six specs pass: the five two-builds.multiprocess specs (`5 passed (28.9s)`) and signin.multiprocess (`1 passed (1.6s)`). No `7b822b0a` and no `PostgreSQL 16` anywhere in the log. The gate itself is visible in the `changes` job 123220975388: `Filter dispatch_browser_multiprocess = true` on `.github/workflows/envoy-and-contracts.yaml [modified]` and `Set output 'dispatch_browser_multiprocess'`, while the `dispatch` check run on the same head is `skipped` \u2014 the new output is wired and the dispatch job's own gate is unchanged. The pg18 mount hazard of docs/solutions/infra/the-postgres-18-image-mounts-its-data-one-level-up-... does not apply: the service declares ports, env and health options only, no volume or tmpfs.",
+      "headSha": "08cbb0a2a8ad76a65ebde32ee76b6a0c44a34bb0",
+      "negativeControl": "main's job 123138185821 (run 40761578717, head af1ff09c, the commit before this change) pulls 7b822b0aac60967beb1ea5e576b8602c94c300a157d187f385ae3e0da199b90a and prints `starting PostgreSQL 16.15 (Debian 16.15-1.pgdg12+2)`, read by me in its log"
+    },
+    {
+      "criterion": "Spec departure (plan.json specDepartures): the new `dispatch_browser_multiprocess` gate adds this workflow without dropping any path the old `dispatch` gate carried",
+      "surface": "the pinned gate engine the `changes` job runs, dorny/paths-filter@ceb8a2b8f2d89434be7ff52d3de7ec3738c5cc9d (v4.0.3), driven against this head's real `filters:` string",
+      "command": "git clone https://github.com/dorny/paths-filter && git checkout ceb8a2b8f2d89434be7ff52d3de7ec3738c5cc9d && bun install && bun gate-check.ts \"$LEGION_WORKSPACE/.github/workflows/envoy-and-contracts.yaml\"  (the script loads jobs.changes.steps[id=filter].with.filters from the workflow and calls that checkout's own `Filter.match`)",
+      "observed": "all gate assertions passed. A dispatch-only change still runs the job: packages/dispatch/web/src/api/types.ts, packages/dispatch/e2e/two-builds.multiprocess.e2e.ts and packages/contracts/src/legion-api.ts each give dispatch=true and dispatch_browser_multiprocess=true, so the YAML alias `- *dispatch` is flattened by the real engine and the job keeps guarding every path it guarded before. The workflow file alone gives dispatch=false, dispatch_browser_multiprocess=true, which reproduces exactly what CI did on this head (dispatch skipped, dispatch-browser-multiprocess ran) and so validates the harness against the live run. The flattened lists are dispatch=41 globs and dispatch_browser_multiprocess=42: nothing missing, the one extra is '.github/workflows/envoy-and-contracts.yaml'; a concrete sample path for every one of the 41 dispatch globs matches the new filter. After the merge the job also runs on main, since the push trigger's paths already name .github/workflows/envoy-and-contracts.yaml (envoy-and-contracts.yaml:56).",
+      "headSha": "a8808d54f40072073add74d737c9f836f4b35572",
+      "negativeControl": "paths the gate must refuse: docs/plans/2026-10-14-dispatch-gcp-plan.md gives dispatch=false and dispatch_browser_multiprocess=false, and packages/daemon/internal/api/state.go gives dispatch_browser_multiprocess=false, so the new filter does not run the job on every change"
+    },
+    {
+      "criterion": "A3: no added line, path or commit subject names the private deployment repository's Dispatch keys",
+      "surface": "the required lint job on pull request #2486, and .github/scripts/check-private-names.sh at the head",
+      "command": "gh api \"repos/sjawhar/legion/commits/08cbb0a2a8ad76a65ebde32ee76b6a0c44a34bb0/check-runs?check_name=lint\" --jq '.check_runs[].conclusion'; bash .github/scripts/check-private-names.sh .github/workflows/envoy-and-contracts.yaml",
+      "observed": "lint check run 123220974710 completed success at the head, and pr-title success (123220974125, re-run 123350529875), so check-private-names.sh and check-pr-text.sh passed over the diff, the branch name, the title, the body and the commits. Run locally over the changed file at the head: `no file or path names the private deployment repository or the company, and no text names a private internal host or a Tailscale MagicDNS host`, exit 0.",
+      "headSha": "08cbb0a2a8ad76a65ebde32ee76b6a0c44a34bb0",
+      "negativeControl": "the same script over a file holding `host: machine-x.tailnet-1234.ts.net` exits 1 with `names a Tailscale MagicDNS host`, while one holding the reserved `example-host-a.example-tailnet.ts.net` exits 0 \u2014 the check refuses the forbidden shape and only that shape"
+    }
+  ],
+  "observations": [
+    "Not a failure of this change, and outside the files it touches: the devbox e2e proofs and the daemon's test guidance still name PostgreSQL 16 containers (scripts/e2e/stage1-skeleton.sh:150, stage2-tmux-supervision.sh:408, stage4b-sandbox-tree.sh:3318, controller-start-tmux.sh:130, docs/site/media/walkthroughs/legion-operator/record-casts.sh:122, and the skip message in packages/daemon/internal/testpg/testpg.go:23, all `postgres:16` with the matching /var/lib/postgresql/data mount, which is correct for a 16 image). The issue's scope is CI jobs, and every CI job is now on 18; a developer following that skip message tests the daemon against 16 while CI and production run 18. Reported to the architect; no change made here."
+  ]
+}
