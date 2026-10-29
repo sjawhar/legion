@@ -191,9 +191,9 @@ func tokenHash(encoded []byte) string {
 }
 
 // encodedTokens is tree's document token and the token of each block in it, from one encoding of
-// the tree into one buffer this call allocates and drops (spanTokens). It validates tree first,
-// for checkEditPrecondition, which holds a tree nothing has validated. An error is the tree's, as
-// nodeToken(tree) returns it.
+// the tree into one buffer this call allocates and drops (spanTokens). It validates tree first
+// (pmdoc.EncodeTokenJSON), because its caller, checkEditPrecondition, holds a plain *pmdoc.Node
+// rather than a pmdoc.ValidDocument. An error is the tree's, as nodeToken(tree) returns it.
 func encodedTokens(tree *pmdoc.Node) (document string, blocks map[string]string, err error) {
 	var spans []pmdoc.TokenSpan
 	encoded, err := pmdoc.EncodeTokenJSON(tree, &spans)
