@@ -1419,6 +1419,16 @@ describe("deadline and abandonment", () => {
     await short.device("t1", "dispatch_comment", COMMENT);
     expect(short.entries[0].deadlineMs).toBe(50);
   });
+  test("at the default 30 s ceiling the review keeps main's 25,000 ms deadline, so a review main finishes is not cut", async () => {
+    // Tester round 13, at 9aed5df8 against main 15be33d1, both at the pod's default
+    // toolCallTimeoutMs of 30 s: main's gate gave its review 25,000 ms and returned verdicts at
+    // 20,777, 21,058 and 22,849 ms, while this branch's 10 s margin cut its reviews at 20,000 ms and
+    // posted those asks unreviewed (outcome timeout, model anthropic/claude-opus-5, no fallback).
+    // The record must not take its time out of the review's deadline.
+    const defaults = bind({ ceiling: 30_000 });
+    await defaults.device("t1", "dispatch_comment", COMMENT);
+    expect(defaults.entries[0].deadlineMs).toBeGreaterThanOrEqual(25_000);
+  });
   test("a ceiling that leaves no room for a verdict throws when the gate binds, saying why", () => {
     expect(() => bind({ ceiling: 8_000 })).toThrow(/8000 ms/);
   });
