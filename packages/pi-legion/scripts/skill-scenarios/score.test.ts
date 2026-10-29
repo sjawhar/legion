@@ -1731,6 +1731,18 @@ specRun("spec-writing-head-127", {
     finish
   ),
 });
+// The run's own spec with the person's messages, three times, and the source's answered asks
+// pasted straight after its Acceptance section, with no heading to end the spec's slice.
+specRun("spec-writing-head-128", {
+  transcript: evalFirst(evalCell("e1", evalSpawn, "Spawned EvalCheck.")),
+  subagents: {
+    EvalCheck: subagentTranscript(
+      `Read this spec alone and list each gap.\n\n${outlined()}\n${personMessages}\n${personMessages}\n${personMessages}\n${JSON.stringify(sourceAsks)}`,
+      6.2,
+      6.8
+    ),
+  },
+});
 // A subagent that ends with an empty `yield` ({"type":"result"}) hands back the text it wrote just
 // before: that text is its report, not the word "result".
 specRun("spec-writing-head-121", {
@@ -3149,16 +3161,23 @@ test("checked: a check started from an eval cell counts from its own transcript,
   // A review of a sibling issue's spec, outline and all, checks no write of this run.
   expect(scoresOf("spec-writing-head-120")).toEqual({ ...allPass, checked: "false" });
   expect(rowOf("spec-writing-head-120")).toContain(
-    "check SiblingCheck (transcript SiblingCheck.jsonl) for spec write 1 does not count: its spec is not this issue's: spec 1 of 1 it pastes has 1% of its 5-word runs in a version the session wrote"
+    "check SiblingCheck (transcript SiblingCheck.jsonl) for spec write 1 does not count: its spec is not this issue's: spec 1 of 1 it pastes covers at most 1% of the 5-word runs of any version the session wrote"
   );
   expect(scoresOf("spec-writing-head-125")).toEqual(allPass);
   expect(rowOf("spec-writing-head-125")).toContain(
-    "check BothCheck (transcript BothCheck.jsonl) for spec write 1 counts, but its findings are not judged: it reviews a sibling issue's spec too (spec 2 of 2 it pastes has 1% of its 5-word runs in a version the session wrote)"
+    "check BothCheck (transcript BothCheck.jsonl) for spec write 1 counts, but its findings are not judged: it pastes a sibling issue's spec beside this one (spec 2 of 2 it pastes covers at most 1% of the 5-word runs of any version the session wrote)"
   );
+  // The row says so on its first line, and is flagged.
+  expect(rowOf("spec-writing-head-125").split("\n")[0]).toContain(" unjudged=1");
   expect(scoresOf("spec-writing-head-127")).toEqual(allPass);
   expect(rowOf("spec-writing-head-127")).toContain(
-    "check SiblingReview (call c1) for spec write 1 counts, but its findings are not judged"
+    "check SiblingReview (call c1) for spec write 1 counts, but its findings are not judged: it pastes a sibling issue's spec only"
   );
+  expect(rowOf("spec-writing-head-127").split("\n")[0]).toContain(" unjudged=1");
+  expect(rowOf("spec-writing-head-1").split("\n")[0]).not.toContain("unjudged=");
+  // The person's words pasted straight after the spec, with no heading to end its slice: the
+  // share is of the written version, so the extra text cannot lower it.
+  expect(scoresOf("spec-writing-head-128")).toEqual(allPass);
   const own = specWork(path.join(runs, "spec-writing-head-127"), checkouts(work), {
     issue: "LWEVAL-7",
     spec_artifact: "art-spec",

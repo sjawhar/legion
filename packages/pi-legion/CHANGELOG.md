@@ -48,12 +48,13 @@ before the split, and the Envoy plugin's releases after it, are in `packages/pi-
   of the runs flagged nearly every run `outside=` and voided runs that read their own skills.
 - The skill-scenario scorer tells a review of the run's own spec from one of a sibling issue's:
   each spec an assignment pastes (`## Summary` to the end of its `## Acceptance` section) is the
-  run's own when at least a tenth of its 5-word runs are in a version the run's session wrote. A
+  run's own when it holds at least a tenth of the 5-word runs of a version the run's session
+  wrote. The share is of the written version, so text pasted after the spec cannot lower it. A
   review of only a sibling's spec checks no write. One that pastes both, in one assignment or one
-  task of a call, still checks the write, but its findings are not judged (the row says so), since
-  no finding can be told to be about this spec. A call's tasks are taken one by one, so a task
-  that reviews only the run's own spec stays a judged check with its own report. Text pasted after
-  a spec is outside the measure, so it cannot dilute it.
+  task of a call, still checks the write, but its findings are not judged: the row prints why and
+  is flagged `unjudged=N`, since no finding can be told to be about this spec. A call's tasks are
+  taken one by one, so a task that reviews only the run's own spec stays a judged check with its
+  own report.
 - The skill-scenario scorer takes the report of a subagent that ends with an empty `yield`
   (`{"type":"result"}`) from the text it wrote before the yield, not the word `result`.
 - The findings judge lists each check whose report finds nothing in `clean`, and the scorer needs

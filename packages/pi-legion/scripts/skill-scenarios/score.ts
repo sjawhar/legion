@@ -1833,25 +1833,31 @@ function specSlices(assignment: string): string[] {
   }
   return slices;
 }
-/** The least share of each pasted spec's 5-word runs that a version the run's session wrote also
- * holds, for the check to be of this run's spec. An agent that splits out a sibling issue can send
- * the sibling's spec for review, alone or after its own spec in one assignment; that spec holds
- * the seven headings too, but the report's findings on it are about another spec. Each spec of an
- * assignment is measured on its own (specWork's kindOf), and one that pastes both is `mixed`. The
- * share is taken over the spec alone, so text pasted after it cannot dilute it. On the 67 spec
- * runs of the dispatch skills' acceptance measurement, each of the 9 sibling specs sent for review
- * (7 alone, 2 after the run's own) shared at most 0.02 of its runs, and each of the run's own specs
- * at least 0.34, a draft the agent rewrote in plain words after the check included: a 5-word run
- * survives a rewrite more often than a longer one. */
+/** The least share of a version the run's session wrote that a pasted spec covers, for the check
+ * to be of this run's spec. An agent that splits out a sibling issue can send the sibling's spec
+ * for review, alone or after its own spec in one assignment; that spec holds the seven headings
+ * too, but the report's findings on it are about another spec. Each spec of an assignment is
+ * measured on its own (specWork's kindOf), and one that pastes both is `mixed`. The share is
+ * recall over the written version (how much of the version's 5-word runs the pasted spec holds,
+ * the best over the versions), not over the pasted text: text pasted after the spec, with no
+ * heading to end its slice, cannot lower it, and a sibling spec that borrows a few of the parent's
+ * sections covers little of the parent. On the 67 spec runs of the dispatch skills' acceptance
+ * measurement, each of the 9 sibling specs sent for review (7 alone, 2 after the run's own)
+ * covered at most 0.01 of any version, and each of the run's own specs at least 0.24, a draft the
+ * agent rewrote in plain words after the check included. */
 const OWN_SPEC = 0.1;
-/** Each pasted spec's share of 5-word runs that `written` (the runs of every version the session
- * wrote) holds, in order. */
-function ownSpecShares(assignment: string, written: Set<string>): number[] {
+/** Each pasted spec's best share, over the versions the session wrote (each version's 5-word
+ * runs), of a version's runs that the spec holds, in order. */
+function ownSpecShares(assignment: string, versions: Set<string>[]): number[] {
   return specSlices(assignment).map((slice) => {
     const pasted = wordRuns(slice);
-    return pasted.size === 0
-      ? 1
-      : [...pasted].filter((run) => written.has(run)).length / pasted.size;
+    if (pasted.size === 0) return 1;
+    return Math.max(
+      0,
+      ...versions.map((version) =>
+        version.size === 0 ? 0 : [...version].filter((run) => pasted.has(run)).length / version.size
+      )
+    );
   });
 }
 /** The spec writes of the run's session (writesSpec, against the run's fixture.json) and the
@@ -1931,28 +1937,30 @@ export function specWork(runDir: string, reach: string[], fixture: SpecFixture):
       );
       return { ...version, index: after < 0 ? entries.length : after };
     });
-  // Every 5-word run of every version the session wrote: each spec a check pastes must share
-  // enough of them to be this run's spec, not a sibling issue's (ownSpecShares, OWN_SPEC).
-  const written = new Set<string>();
+  // The 5-word runs of each version the session wrote: each spec a check pastes must cover enough
+  // of one of them to be this run's spec, not a sibling issue's (ownSpecShares, OWN_SPEC).
+  const versionRuns: Set<string>[] = [];
   for (const { version } of recorded) {
     const file = path.join(runDir, "spec-versions", `${version}.md`);
-    if (existsSync(file)) for (const run of wordRuns(readFileSync(file, "utf8"))) written.add(run);
+    if (existsSync(file)) versionRuns.push(wordRuns(readFileSync(file, "utf8")));
   }
   // What the specs an assignment pastes are: `own` when each is the run's own (or it pastes none),
   // `sibling` when none is, `mixed` when it pastes both. Only `own` gives findings a judge can tell
   // to be about this spec; `mixed` still shows the run's own spec was reviewed before the write.
   const kindOf = (assignment: string): { kind: "own" | "sibling" | "mixed"; note: string } => {
-    const shares = ownSpecShares(assignment, written);
+    const shares = ownSpecShares(assignment, versionRuns);
     const low = shares.findIndex((share) => share < OWN_SPEC);
     if (low < 0) return { kind: "own", note: "" };
     return {
       kind: shares.some((share) => share >= OWN_SPEC) ? "mixed" : "sibling",
-      note: `spec ${low + 1} of ${shares.length} it pastes has ${Math.round((shares[low] ?? 0) * 100)}% of its 5-word runs in a version the session wrote`,
+      note: `spec ${low + 1} of ${shares.length} it pastes covers at most ${Math.round((shares[low] ?? 0) * 100)}% of the 5-word runs of any version the session wrote`,
     };
   };
   const notOwn = (note: string) => `its spec is not this issue's: ${note}`;
-  const notJudged = (note: string) =>
-    `its findings are not judged: it reviews a sibling issue's spec too (${note})`;
+  const notJudged = (kind: "sibling" | "mixed", note: string) =>
+    kind === "mixed"
+      ? `its findings are not judged: it pastes a sibling issue's spec beside this one (${note})`
+      : `its findings are not judged: it pastes a sibling issue's spec only (${note})`;
 
   const writes: SpecWork["writes"] = [];
   const checks: (SpecCheck & { started: number })[] = [];
@@ -1968,7 +1976,8 @@ export function specWork(runDir: string, reach: string[], fixture: SpecFixture):
      * judged; `judged` false with no `reject` means it counts for `checked` alone. */
     reject?: string;
     judged: boolean;
-    dropped?: { tasks: string; note: string };
+    /** The call's tasks left out of the findings, each with what it pastes and why. */
+    dropped?: { tasks: string; kind: "sibling" | "mixed"; note: string }[];
   }
   let pending: Pending[] = [];
   // A write at entry `index`: each pending `task` call's check counts for it, or is rejected.
@@ -1987,12 +1996,12 @@ export function specWork(runDir: string, reach: string[], fixture: SpecFixture):
         continue;
       }
       checked = true;
-      if (check.dropped !== undefined)
+      for (const left of check.dropped ?? [])
         unjudged.push({
-          tasks: check.dropped.tasks || tasks,
+          tasks: left.tasks || tasks,
           via,
           write: writes.length,
-          problem: notJudged(check.dropped.note),
+          problem: notJudged(left.kind, left.note),
         });
       if (check.judged)
         checks.push({
@@ -2041,10 +2050,11 @@ export function specWork(runDir: string, reach: string[], fixture: SpecFixture):
           assignment: own.map((part) => part.assignment).join("\n\n"),
           only: own.length > 0 ? own.map((part) => part.name) : undefined,
           judged: own.length > 0,
-          dropped: {
-            tasks: left.map((part) => part.name).join(", "),
-            note: first.note,
-          },
+          dropped: left.map((part) => ({
+            tasks: part.name,
+            kind: part.kind === "mixed" ? "mixed" : "sibling",
+            note: part.note,
+          })),
         });
       continue;
     }
@@ -2080,7 +2090,7 @@ export function specWork(runDir: string, reach: string[], fixture: SpecFixture):
         tasks: name,
         via: `transcript ${name}.jsonl`,
         write,
-        problem: notJudged(note),
+        problem: notJudged("mixed", note),
       });
     else
       checks.push({ assignment: run.assignment, report: run.report, write, started: run.started });
@@ -2504,7 +2514,10 @@ const indented = (text: string, depth = 6) =>
  *     transcript when it started after the write before and reported before this one. A version
  *     Dispatch recorded for the session that no write the transcript shows made is a write too
  *     (specWork), and the row is flagged `writes_seen=N versions=M` with each gap under it. Each
- *     check that counts for no write is printed with why.
+ *     check that counts for no write is printed with why. A check that counts but whose findings
+ *     are not judged (SpecWork.unjudged: it pastes a sibling issue's spec) is printed with why, and
+ *     the row is flagged `unjudged=N`: a write whose only check is one of these has no answer to
+ *     whether the agent acted on what came back.
  *   - refusals: every refused `dispatch` call (refusalBlocks: an `error` line of the CLI's ledger,
  *     or a refusal a call's output shows that the ledger holds no line of: an `eval` cell's, whose
  *     kernel knows no session, or one the CLI made with no session) is followed by a call
@@ -2706,6 +2719,7 @@ function specRow(
     )}`,
     `writes=${work.writes.length} shared=${shared.length} copies=${copies}`,
     ...(disagree ? [`writes_seen=${work.seen} versions=${work.versions}`] : []),
+    ...(work.unjudged.length > 0 ? [`unjudged=${work.unjudged.length}`] : []),
   ].join(" ");
   return {
     run,
@@ -2717,7 +2731,7 @@ function specRow(
     source,
     faults: faultCount,
     steBreaks: faults.ste_breaks,
-    flagged: disagree,
+    flagged: disagree || work.unjudged.length > 0,
   };
 }
 
@@ -3170,7 +3184,8 @@ function scoreRuns(runsDir: string, only: string | undefined) {
       "           askgate: the rule for the run's label and case (askgateReview)",
       "pass+ref   passed, and the agent read the file the rule is in (askgate: never counted)",
       "rig errors runs the rig could not score (unscored), left out of both counts",
-      "flagged    counted runs whose row carries a flag (outside=, skills=, writes_seen=): each is",
+      "flagged    counted runs whose row carries a flag (outside=, skills=, writes_seen=,",
+      "           unjudged=): each is",
       "           in the counts and medians, and its notes say what to read before trusting it",
       "ran=false  a tester-proof run the bun stand-in saw no greet.ts run in: read its transcript",
       "           before believing it, since the stand-in sees only a bun reached through PATH",
