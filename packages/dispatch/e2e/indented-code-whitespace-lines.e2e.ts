@@ -12,7 +12,7 @@ import { asUser } from "./users";
 // The whitespace-only lines that end an indented code block read as the browser's engine
 // (milkdown/micromark) reads them: a line with spaces past the block's indent stays in the block
 // as those spaces, a line without them drops off its end, and neither spreads the list or the item
-// around the block. The server's reader reads a document the same way (dispatch://INFRA-719). One
+// around the block. The server's reader reads a document the same way (sjawhar/legion#2481). One
 // spec, written by an agent, reads alike in its live editor, in a past version and in a comment
 // holding the same body; its stored text fences each block with the lines it keeps, is what
 // `dispatch doc-read` prints, and reads back the same.

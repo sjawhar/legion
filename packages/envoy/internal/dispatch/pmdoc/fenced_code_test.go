@@ -39,7 +39,7 @@ func TestFencedCodeDropsAWhitespaceLineShortOfTheFenceIndent(t *testing.T) {
 		{name: "fence at the quote's content", markdown: "> ~~~\n>  \n> x\n", codes: []string{" \nx"}},
 		{name: "fence at the item's content", markdown: "-   ~~~\n   \n    x\n", codes: []string{"\nx"}},
 		{name: "fence past a footnote definition's label", markdown: "x[^f]\n\n[^f]:   ~~~\n     \n      x\n", codes: []string{"     \n  x"}},
-		// Documents of INFRA-581's that the engine read so and goldmark did not.
+		// Documents of sjawhar/legion#2403's generator that the engine read so and goldmark did not.
 		{
 			name:     "g22-g4662-round6",
 			markdown: "Text[^f] and[^g].\n\n1. >\n   >\n   > x\n\n   > :::callout{}\n   > ~~~\n   code\n   > \n   > ***\n\n   > \n   > :::\n\n[^f]: 1. - >\n         >\n         \n       :::callout{}\n         ~~~\n         code\n    \n         \n         ***\n       \n  :::\n         \n         :::callout{kind=\"note\" title=\"T\"}\n\n         \n         :::\n    [^g]:\n        ===\n        1. 1. ***\n           \n    [^g]:>\n            >\n            > ***\n            > ***\n    > note\n            [^g]:```\n                code\n                ```\n            y\n            ===\n    \n\n    [^f]: [^f]: > ~~~\n        [^f]: > ~~~\n            > code\n            >     indented\n            \n        \n            \n        indented\n\n        :::callout{kind=\"note\" title=\"T\"}\n        - ~~~\n          code\n        > x\n        > ```\n        code\n        > ```\n        > \n        \n        :::\n        \n    \n\nafter\n",

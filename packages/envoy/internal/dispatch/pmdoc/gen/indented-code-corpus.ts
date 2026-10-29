@@ -1,5 +1,5 @@
 // indented-code-corpus.ts - a corpus of indented code blocks ending in whitespace-only lines for the
-// pmdoc differential (differential.sh), the committed evidence for dispatch://INFRA-719.
+// pmdoc differential (differential.sh), the committed evidence for sjawhar/legion#2481.
 //
 //   bun indented-code-corpus.ts <out.jsonl> [count]
 //
