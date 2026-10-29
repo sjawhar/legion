@@ -1,0 +1,5 @@
+kind: Fixed
+body: 'A document, a past version of it and a comment holding the same markdown read alike: no mark reaches an inline leaf (raw HTML, a picture, a hard break, a footnote reference), an inline HTML declaration (`<!` and any ASCII letter) is raw HTML to both readers and is stored unescaped, and an autolink inside a link label carries its own link while the label keeps its own on the runs around it, which makes such a document storable instead of refused.'
+time: 2026-10-29T19:22:35.356101818Z
+custom:
+    Issue: pr2518

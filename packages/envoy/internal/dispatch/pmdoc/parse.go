@@ -1034,20 +1034,6 @@ func parseInlineMarks(parent ast.Node, source []byte, initial []Mark, footnotes 
 	return joinTexts(children), ended, nil
 }
 
-// addToMarkSet is marks with mark added as ProseMirror's Mark.addToSet adds it to a text's mark
-// set: a mark of mark's type already in the set is dropped, since a mark excludes another of its
-// own type, so one of a type is all a text ever carries. The type alone decides it, where
-// sameMark compares a mark's attributes too: a link replaces a link whatever its href.
-func addToMarkSet(marks []Mark, mark Mark) []Mark {
-	set := make([]Mark, 0, len(marks)+1)
-	for _, other := range marks {
-		if other.Type != mark.Type {
-			set = append(set, other)
-		}
-	}
-	return append(set, mark)
-}
-
 // parseTextValue is the text value of node, under marks, as the browser editor reads it:
 // code as written, and other text decoded (decodeMarkdownText) with each line feed it holds a
 // space, as that editor's import reads every line feed in text (remarkSoftBreakAsSpace in

@@ -101,9 +101,11 @@ func diffStep(dump *diffDump, name string, step func() error) (err error) {
 
 // diffTree decodes the engine's ProseMirror JSON as Go holds the document. The engine's reading is
 // compared as it stands: both readers hold a mark on text alone, never on an inline leaf, as the
-// browser editor's store (y-prosemirror) does, so the invariant is gated by the tool rather than
-// canonicalised away. Each short table body row is padded to its header's width as Parse pads it,
-// the documented canonicalisation. No revision is judged by these.
+// browser editor's store (y-prosemirror) does, so a reading carrying one on a leaf has FromJSON
+// refuse it, diffTree return nil and TestDifferentialCompare count the document under `engine
+// cannot read`, a printed bucket no GATE line reads, which drops it out of every gate rather than
+// failing one. Each short table body row is padded to its header's width as Parse pads it, the
+// documented canonicalisation. No revision is judged by these.
 func diffTree(reading *diffReading) *Node {
 	if reading == nil || reading.Err != "" || reading.PM == nil {
 		return nil

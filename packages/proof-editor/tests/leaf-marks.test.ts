@@ -5,16 +5,17 @@ import { withMarksEditor } from "./marks-editor";
 import { pastePlainText, withHTMLElementGlobal } from "./paste";
 
 /**
- * Two readings the browser engine and Go's reader of the same document disagree on, asserted at
- * each of the engine's three parse seams. Red until the engine changes.
+ * Two readings this editor's engine once read otherwise than Go's reader of the same document,
+ * asserted at each of the engine's three parse seams. The engine's change is in this pull
+ * request, so each row reads as asserted here, and the reading it had before is named with it.
  *
- * - An inline *leaf* node - `html`, `image`, `hardbreak`, `footnote_reference` - keeps the
- *   emphasis, strong, strikethrough or link mark wrapped around it, while Go's schema holds marks
- *   on text alone and this editor's own collaborative store drops them on the way to a peer. No
- *   inline leaf may carry a mark; every text node keeps exactly the marks it has today.
- * - An autolink inside a link label ends the label's link: `[a <https://u.test> b](u)` reads
- *   today with no mark at all on ` b`. The label's link must cover both ordinary runs, and the
- *   autolink's run must carry its own link alone.
+ * - An inline *leaf* node - `html`, `image`, `hardbreak`, `footnote_reference` - carries no
+ *   mark, whatever emphasis, strong, strikethrough or link is wrapped around it, as Go's schema
+ *   holds marks on text alone and this editor's own collaborative store drops them on the way to
+ *   a peer. It kept that mark before; every text node keeps exactly the marks it always had.
+ * - An autolink inside a link label carries its own link alone, and the label's link covers both
+ *   ordinary runs: in `[a <https://u.test> b](u)` that label's link ended at the autolink
+ *   before, leaving ` b` with no mark at all.
  *
  * Each seam builds its own parser - the headless one, the editor's shared `parserCtx` that every
  * text/plain paste runs through, and the `ParserState` `setMarkdown` builds for a markdown import
@@ -80,17 +81,17 @@ interface Row {
   readonly reading: readonly InlineReading[];
 }
 
-/** The rows every seam must come to read this way; each of them reads differently today. */
+/** The rows every seam reads this way; each of them read otherwise before the change. */
 const CHANGED_ROWS: readonly Row[] = [
   {
-    // Today: text `a` [strong], html `<b>` [strong], text `c` [strong].
+    // Before the change: text `a` [strong], html `<b>` [strong], text `c` [strong].
     markdown: "**a<b>c**",
     name: "an inline html node inside strong",
     reading: [textRun("a", "strong"), leaf("html", "<b>"), textRun("c", "strong")],
   },
   {
     // The image is the paragraph's only inline node, and carries neither of the two marks
-    // wrapped around it: today it reads with both `strong` and the label's link.
+    // wrapped around it: before the change it read with both `strong` and the label's link.
     markdown: "**[![x](i.png)](https://u.test)**",
     name: "an image inside a link inside strong",
     reading: [leaf("image", "i.png")],
@@ -119,7 +120,8 @@ const CHANGED_ROWS: readonly Row[] = [
     reading: [leaf("html", "<b>")],
   },
   {
-    // Today the last run carries no mark at all: the label's link ends at the autolink.
+    // Before the change the last run carried no mark at all: the label's link ended at the
+    // autolink.
     markdown: "[a <https://u.test> b](u)",
     name: "an autolink inside a link label",
     reading: [
@@ -129,14 +131,15 @@ const CHANGED_ROWS: readonly Row[] = [
     ],
   },
   {
-    // The whole label is the autolink: one run, carrying the autolink's own link alone, today
-    // and after the change.
+    // The whole label is the autolink: one run, carrying the autolink's own link alone, before
+    // the change as after it.
     markdown: "[<mailto:a@b.test>](u)",
     name: "an autolink alone in a link label",
     reading: [textRun("mailto:a@b.test", link("mailto:a@b.test"))],
   },
   {
-    // The same three runs, each also inside the `**`: today the last one keeps `strong` only.
+    // The same three runs, each also inside the `**`: before the change the last one kept
+    // `strong` only.
     markdown: "**[a <https://u.test> b](u)**",
     name: "an autolink inside a link label inside strong",
     reading: [

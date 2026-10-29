@@ -15,9 +15,11 @@ import (
 // the html node `<!a>` between two texts, and `p <!A> q` raw HTML to both. `<!>`, `<!1>` and
 // `<! a>` open none for either.
 //
-// This is the rule's one definition: the reader (declarationParser) and the writer
-// (rawHTMLCloser's declaration) both ask it, so the two cannot drift.
-func opensDeclaration(line []byte) bool {
+// This is the rule's one definition, read from a string or from bytes as its caller holds the
+// line: the reader asks it inline (declarationParser) and for a block (declarationBlockParser),
+// and the writer asks it for a declaration's closer (rawHTMLCloser) and for the HTML block the
+// engine opens at a `<` a line begins with (htmlBlockStart), so the four cannot drift.
+func opensDeclaration[T string | []byte](line T) bool {
 	return len(line) > 2 && line[0] == '<' && line[1] == '!' && isASCIILetter(line[2])
 }
 

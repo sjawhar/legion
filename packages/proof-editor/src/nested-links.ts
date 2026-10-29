@@ -55,13 +55,30 @@ function linkOver(link: MdastNode, children: MdastNode[]): MdastNode {
 }
 
 /**
- * The siblings that replace `link`: the link itself when its label holds no link, else its label's
- * parts, with each run of label content wrapped in a copy of the link. A run is wrapped only when
- * it has content, so an inner link first or last in the label leaves no empty copy behind.
+ * Whether `node` holds a `link` below it, at any depth: the one thing `splitLink` can change
+ * about a label. It allocates nothing, so a label holding none - every label of every comment
+ * render, text/plain paste and `setMarkdown` import but the rare one around an autolink - costs
+ * the walk alone.
+ */
+function holdsLink(node: MdastNode): boolean {
+  if (node.children === undefined) return false;
+  for (const child of node.children) {
+    if (child.type === 'link' || holdsLink(child)) return true;
+  }
+  return false;
+}
+
+/**
+ * The siblings that replace `link`: the link itself when its label holds no link (`holdsLink`,
+ * asked first so such a label allocates nothing), else its label's parts, with each run of label
+ * content wrapped in a copy of the link. A run is wrapped only when it has content, so an inner
+ * link first or last in the label leaves no empty copy behind.
  */
 function splitLink(link: MdastNode): MdastNode[] {
+  if (!holdsLink(link)) return [link];
+  // Past `holdsLink` a piece is always hoisted: a label child that is a link is a hoisted piece,
+  // and a child holding one is split into parts of which at least one is hoisted.
   const pieces = (link.children ?? []).flatMap(splitInLabel);
-  if (!pieces.some((piece) => piece.hoisted)) return [link];
   const siblings: MdastNode[] = [];
   let run: MdastNode[] = [];
   for (const piece of pieces) {
@@ -111,17 +128,28 @@ function splitInLabel(node: MdastNode): Piece[] {
 
 /** Replaces every link of the tree with its own siblings; `splitLink` reaches inside each one. */
 function hoist(node: MdastNode): void {
-  if (node.children === undefined) return;
-  const children: MdastNode[] = [];
-  for (const child of node.children) {
-    if (child.type === 'link') {
-      children.push(...splitLink(child));
+  const original = node.children;
+  if (original === undefined) return;
+  // Children are copied only once a child is replaced: up to that point the walk holds no array
+  // at all, and a node whose links all stand keeps the array it came in with.
+  let children: MdastNode[] | null = null;
+  for (let index = 0; index < original.length; index += 1) {
+    const child = original[index];
+    if (child.type !== 'link') {
+      hoist(child);
+      children?.push(child);
       continue;
     }
-    hoist(child);
-    children.push(child);
+    // `splitLink` reaches inside the link's own label, so a link child is never walked into.
+    const siblings = splitLink(child);
+    if (siblings.length === 1 && siblings[0] === child) {
+      children?.push(child);
+      continue;
+    }
+    if (children === null) children = original.slice(0, index);
+    children.push(...siblings);
   }
-  node.children = children;
+  if (children !== null) node.children = children;
 }
 
 /** remark transformer — every parse seam registers it; `stringify` never runs it. */
