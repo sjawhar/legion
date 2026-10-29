@@ -1,0 +1,13 @@
+kind: Added
+body: |-
+  `@legion/envoy-client/askgate-new-asks` exports `newAsks(toolName, input)` and the `NewAsk`
+  type: the asks for a person that one Dispatch write opens, read from the write's own arguments
+  as the Dispatch server reads markdown. It sits beside `askgate-marker` because the `dispatch`
+  CLI reads it too, and AskGate in `@sjawhar/pi-envoy` imports it from here. On a gated write that
+  carries no AskGate marker — one sent outside the literal form the gate reads — the CLI counts
+  those asks, from an upload's own bytes where it read them, and writes the count into the
+  session's ledger line as `askgate.asksCarried`, in both `block` and `warn` mode. The line still
+  carries no ask text and no arguments. pi-envoy turns that one number into a Dispatch decision
+  record, so a session that holds a Dispatch token and nothing else sees the asks that went out,
+  or were refused, with no review behind them.
+time: 2026-10-29T00:00:04Z

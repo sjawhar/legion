@@ -1,0 +1,25 @@
+kind: Added
+body: |-
+  AskGate publishes each rule decision, each refused call the agent sent again with a rebuttal or
+  the breaker (recorded with `ruleOutcome: null` and the refusal's own target), and each write that
+  reached the `dispatch` CLI outside the form the gate reads while carrying an ask for a person
+  (`outcome: "unmarked"`, with `asksCarried` above zero), to a Dispatch project document of the
+  session's own, `askgate-decisions-<session id>.md`, so a session holding a Dispatch token and
+  nothing else can count the refusals, the overrides, the unreviewed writes that carried an ask and
+  the rules-call errors a fortnight of sessions made. The record carries the time, the session,
+  `source` (`pod` or `machine`), the project, the call's tool and target, the rule fields, the
+  decision, the mode, `asksCarried` and the two latencies, and **no ask text and no quote**. The
+  CLI counts an unmarked write's asks from the write's own text, so a re-upload of ask blocks the
+  stored version already holds counts them as carried. `OMP_ASKGATE_RECORD_PROJECT` names the
+  project, else `LEGION_PROJECT` does, and with neither set nothing is written. The write takes a
+  5 second stop of its own, never changes the decision, and leaves `recordError` on the
+  `advisor-gate` entry when it fails. Once the session is shutting down, the write is cut 1.25 s
+  after shutdown began, so the entry still lands before the session is sealed. `scripts/askgate-report.ts
+  --dispatch-project <KEY> --since <RFC 3339> [--json]` reads those documents back and counts
+  them, split by `source`, with the unmarked writes on a line of their own, by mode and with the
+  asks they carried, counted as neither a rules call nor an override. The review's deadline is held
+  10 s under `extensionHandlers.toolCallTimeoutMs`: 5 s for the aborted call's usage report and the
+  entry, and 5 s for this record. So the 30 s default gives a 20,000 ms deadline, and the key must
+  be at least 20,000 ms: set below that, the gate does not load, and so refuses every Dispatch
+  write it would have reviewed.
+time: 2026-10-29T00:00:01Z

@@ -483,6 +483,301 @@ run("askgate-upload-on-3", askgate("upload"), [
     reason: "Shorten it.",
   }),
 ]);
+// The rules check's cases. Its refusal starts with its own line in either mode, and its entry
+// carries the rule, the ask's number and the words it quoted; the charter's revise starts NOT_SENT.
+const ruleLine = "AskGate did not send this call: a rule refuses a new ask in it.";
+const ruleMatch = (rule: string, ruleQuote: string) => ({
+  decision: "revise",
+  rule,
+  ruleAsk: 1,
+  ruleQuote,
+  ruleOutcome: "match",
+});
+const askGate = (toolCallId: string, data: object) =>
+  gate({
+    tool: "dispatch_ask",
+    path: "dispatch ask",
+    toolCallId,
+    target: "dispatch_ask issue=LWEVAL-2",
+    ...data,
+  });
+const keepIt = "I recommend keeping it at 02:00 as it is.";
+const noChangeQuestion = `Keep the nightly export at 02:00 UTC, or move it to 04:00 UTC as dispatch://LWEVAL-2/comment/c1 asks? ${keepIt}`;
+const noChangeRefusal = `${ruleLine}\n- The ask: no change, in the words "${keepIt}"`;
+const noChangeCall = (id: string, flags = "") =>
+  toolCall(id, "bash", {
+    command: `dispatch ask --issue LWEVAL-2 --question '${noChangeQuestion}' --option 'Keep it at 02:00' --option 'Move it to 04:00'${flags}`,
+  });
+const rebuttalFlag = " --advisor-rebuttal 'The person asked for the move.'";
+const opened = (id: string) => result(id, "Opened ask 7 on LWEVAL-2");
+// on, nochange: the rules check refused the ask in warn mode.
+run("askgate-nochange-on-1", askgate("nochange"), [
+  ...header,
+  turn[0],
+  noChangeCall("call-n"),
+  gateRefused("call-n", noChangeRefusal),
+  askGate("call-n", {
+    outcome: "verdict",
+    verdictMode: "warn",
+    ...ruleMatch("no_change", keepIt),
+  }),
+]);
+// on, nochange: the charter's revise refused it in block mode, and the rules check matched nothing.
+run("askgate-nochange-on-2", askgate("nochange"), [
+  ...header,
+  turn[0],
+  noChangeCall("call-n"),
+  gateRefused("call-n", "AskGate did not send this call. Drop the recommendation."),
+  askGate("call-n", {
+    decision: "revise",
+    outcome: "verdict",
+    verdictMode: "block",
+    reason: "Drop the recommendation.",
+    ruleOutcome: "none",
+  }),
+]);
+// on, nochange: the rules call failed, and the ask went out.
+run("askgate-nochange-on-3", askgate("nochange", anAsk), [
+  ...header,
+  turn[0],
+  noChangeCall("call-n"),
+  opened("call-n"),
+  askGate("call-n", {
+    decision: "allow",
+    outcome: "verdict",
+    verdictMode: "warn",
+    ruleOutcome: "error",
+    ruleError: "overloaded",
+  }),
+]);
+const noChangeBlock = `:::ask{#export-time urgency="med"}\n${noChangeQuestion}\n\n- Keep it at 02:00\n- Move it to 04:00\n:::`;
+const docEditGate = (toolCallId: string, path: string, data: object) =>
+  gate({
+    tool: "dispatch_doc_edit",
+    path,
+    toolCallId,
+    target: "dispatch_doc_edit issue=LWEVAL-2",
+    ...data,
+  });
+// on, nochange-block: a piped edit the CLI refused with no marker, then the device write the
+// rules check refused in block mode.
+run("askgate-nochange-block-on-1", askgate("nochange-block"), [
+  ...header,
+  turn[0],
+  toolCall("call-d1", "bash", {
+    command: "cat ops.json | dispatch doc-edit --issue LWEVAL-2 --artifact spec --ops-json -",
+  }),
+  gateRefused("call-d1", "dispatch doc-edit was not called: AskGate is on for this session."),
+  docEditGate("call-d1", "dispatch doc-edit", {
+    decision: "revise",
+    outcome: "unmarked",
+    verdictMode: "block",
+  }),
+  toolCall("call-d2", "write", {
+    path: "xd://dispatch_doc_edit",
+    content: JSON.stringify({
+      issue: "LWEVAL-2",
+      artifact: "spec",
+      ops: [{ op: "insert", after: "end", markdown: noChangeBlock }],
+    }),
+  }),
+  gateRefused(
+    "call-d2",
+    `${ruleLine}\n- The ask block that starts 'Keep the nightly export at 02:00 UTC, or move it to 04:00' (#export-time): no change, in the words "${keepIt}"`
+  ),
+  docEditGate("call-d2", "xd://dispatch_doc_edit", {
+    outcome: "verdict",
+    verdictMode: "block",
+    ...ruleMatch("no_change", keepIt),
+  }),
+]);
+// on, nochange-block: the edit went out.
+run("askgate-nochange-block-on-2", askgate("nochange-block"), [
+  ...header,
+  turn[0],
+  toolCall("call-d2", "bash", {
+    command: `dispatch doc-edit --issue LWEVAL-2 --artifact spec --ops-json '${JSON.stringify([{ op: "insert", after: "end", markdown: noChangeBlock }])}'`,
+  }),
+  result("call-d2", "Edited spec: version 2"),
+  docEditGate("call-d2", "dispatch doc-edit", {
+    decision: "allow",
+    outcome: "verdict",
+    verdictMode: "block",
+    ruleOutcome: "none",
+  }),
+]);
+const billingRead = "gh api orgs/example-org/settings/billing/actions";
+const need =
+  "I need to know how many Actions minutes the organization has left before the nightly export moves to 04:00 UTC, as dispatch://LWEVAL-2/comment/c1 asks.";
+const billingAsk = (id: string, question: string, flags = "") =>
+  toolCall(id, "bash", {
+    command: `dispatch ask --issue LWEVAL-2 --question '${question}' --option Done --option 'Cannot run it'${flags}`,
+  });
+const untriedQuestion = `Can you run ${billingRead} and paste its output here? ${need}`;
+/** The gh stand-in's record of the read, and the bash call that ran it. */
+const ranBilling = {
+  "calls.jsonl": calls([
+    {
+      at: "2026-10-24T10:00:00.000Z",
+      as: "gh",
+      argv: ["api", "orgs/example-org/settings/billing/actions"],
+      exit: 1,
+    },
+  ]),
+};
+const billingCall = [
+  toolCall("call-g", "bash", { command: billingRead }),
+  result("call-g", "gh: Not Found (HTTP 404)"),
+];
+// on, untried: the rules check refused the ask in block mode, and the agent never ran the read.
+run("askgate-untried-on-1", askgate("untried"), [
+  ...header,
+  turn[0],
+  billingAsk("call-u", untriedQuestion),
+  gateRefused(
+    "call-u",
+    `${ruleLine}\n- The ask: untried access, in the words "Can you run ${billingRead}"`
+  ),
+  askGate("call-u", {
+    outcome: "verdict",
+    verdictMode: "block",
+    ...ruleMatch("untried_access", `Can you run ${billingRead}`),
+  }),
+]);
+// on, untried: the agent ran the read anyway, and the rules check let the ask through.
+run("askgate-untried-on-2", { ...askgate("untried", anAsk), ...ranBilling }, [
+  ...header,
+  turn[0],
+  ...billingCall,
+  billingAsk("call-u", untriedQuestion),
+  opened("call-u"),
+  askGate("call-u", {
+    decision: "allow",
+    outcome: "verdict",
+    verdictMode: "block",
+    ruleOutcome: "none",
+  }),
+]);
+// on, nochange-rebuttal: the rebuttal sent the ask without review.
+run("askgate-nochange-rebuttal-on-1", askgate("nochange-rebuttal", anAsk), [
+  ...header,
+  turn[0],
+  noChangeCall("call-n", rebuttalFlag),
+  opened("call-n"),
+  askGate("call-n", {
+    decision: "allow",
+    outcome: "rebuttal",
+    verdictMode: "block",
+    rebuttal: "The person asked for the move.",
+  }),
+]);
+// on, nochange-rebuttal: sent first without the flag, refused, then resent with it.
+run("askgate-nochange-rebuttal-on-2", askgate("nochange-rebuttal", anAsk), [
+  ...header,
+  turn[0],
+  noChangeCall("call-n1"),
+  gateRefused("call-n1", noChangeRefusal),
+  askGate("call-n1", {
+    outcome: "verdict",
+    verdictMode: "warn",
+    ...ruleMatch("no_change", keepIt),
+  }),
+  noChangeCall("call-n2", rebuttalFlag),
+  opened("call-n2"),
+  askGate("call-n2", {
+    decision: "allow",
+    outcome: "rebuttal",
+    verdictMode: "warn",
+    rebuttal: "The person asked for the move.",
+  }),
+]);
+const triedQuestion = `I ran ${billingRead} and it failed with gh: Not Found (HTTP 404). Can you run it with your access and paste its output here? ${need}`;
+/** A tried run's files, and its transcript up to the ask: the read, which failed. */
+const triedFiles = { ...askgate("tried", anAsk), ...ranBilling };
+const triedStart = [...header, turn[0], ...billingCall];
+// on, tried: the gate let the ask through in block mode.
+run("askgate-tried-on-1", triedFiles, [
+  ...triedStart,
+  billingAsk("call-t", triedQuestion),
+  opened("call-t"),
+  askGate("call-t", {
+    decision: "allow",
+    outcome: "verdict",
+    verdictMode: "block",
+    ruleOutcome: "none",
+  }),
+]);
+// on, tried: the charter's revise in warn mode only noted the ask, which went out.
+run("askgate-tried-on-2", triedFiles, [
+  ...triedStart,
+  billingAsk("call-t", triedQuestion),
+  opened("call-t"),
+  askGate("call-t", {
+    decision: "revise",
+    outcome: "verdict",
+    verdictMode: "warn",
+    reason: "Shorten it.",
+    ruleOutcome: "none",
+  }),
+]);
+// on, tried: the same revise in block mode refused the ask, and a shorter one went out.
+run("askgate-tried-on-3", triedFiles, [
+  ...triedStart,
+  billingAsk("call-t1", triedQuestion),
+  gateRefused("call-t1", "AskGate did not send this call. Shorten it."),
+  askGate("call-t1", {
+    decision: "revise",
+    outcome: "verdict",
+    verdictMode: "block",
+    reason: "Shorten it.",
+    ruleOutcome: "none",
+  }),
+  billingAsk("call-t2", `I ran ${billingRead} and got Not Found. Can you run it?`),
+  opened("call-t2"),
+  askGate("call-t2", {
+    decision: "allow",
+    outcome: "verdict",
+    verdictMode: "block",
+    ruleOutcome: "none",
+  }),
+]);
+// on, tried: the rules check refused the tried ask, and the agent's rebuttal sent it.
+run("askgate-tried-on-4", triedFiles, [
+  ...triedStart,
+  billingAsk("call-t1", triedQuestion),
+  gateRefused("call-t1", `${ruleLine}\n- The ask: untried access, in the words "Can you run it"`),
+  askGate("call-t1", {
+    outcome: "verdict",
+    verdictMode: "block",
+    ...ruleMatch("untried_access", "Can you run it"),
+  }),
+  billingAsk("call-t2", triedQuestion, " --advisor-rebuttal 'I ran the read; it failed.'"),
+  opened("call-t2"),
+  askGate("call-t2", {
+    decision: "allow",
+    outcome: "rebuttal",
+    verdictMode: "block",
+    rebuttal: "I ran the read; it failed.",
+  }),
+]);
+// on, nochange-rebuttal: a first attempt sent as a compound command, which reached no gate and
+// which the CLI refused with no marker, then the rebuttal, which sent the ask. No model read the
+// first attempt, so it is no refusal of the ask.
+run("askgate-nochange-rebuttal-on-3", askgate("nochange-rebuttal", anAsk), [
+  ...header,
+  turn[0],
+  noChangeCall("call-n1", `${rebuttalFlag}; echo done`),
+  gateRefused("call-n1", "dispatch ask was not called: AskGate is on for this session."),
+  askGate("call-n1", { decision: "revise", outcome: "unmarked", verdictMode: "block" }),
+  noChangeCall("call-n2", rebuttalFlag),
+  opened("call-n2"),
+  askGate("call-n2", {
+    decision: "allow",
+    outcome: "rebuttal",
+    verdictMode: "block",
+    rebuttal: "The person asked for the move.",
+  }),
+]);
 // off, facts: the ask went out and the gate never ran.
 run("askgate-facts-off-1", askgate("facts", anAsk), [
   ...header,
@@ -539,6 +834,33 @@ run("askgate-facts-unrecorded-1", { ...askgate("facts", anAsk), "dispatch.json":
   askCall,
   result("call-a", "Opened ask 7 on LWEVAL-2"),
 ]);
+// A rules case's run, as run_askgate leaves it: own_dispatch writes dispatch.json before
+// seed_dispatch seeds the run's issue. With it the run is scored; with none it is a rig error, as
+// every other askgate run that records no Dispatch of its own is.
+const noChangeRefusedInBlock = [
+  ...header,
+  turn[0],
+  noChangeCall("call-n"),
+  gateRefused("call-n", noChangeRefusal),
+  askGate("call-n", {
+    outcome: "verdict",
+    verdictMode: "block",
+    ...ruleMatch("no_change", keepIt),
+  }),
+];
+run(
+  "askgate-nochange-recorded-1",
+  {
+    ...askgate("nochange"),
+    "dispatch.json": dispatchRecord("run_askgate_nochange_recorded_1"),
+  },
+  noChangeRefusedInBlock
+);
+run(
+  "askgate-nochange-unrecorded-1",
+  { ...askgate("nochange"), "dispatch.json": null },
+  noChangeRefusedInBlock
+);
 
 // spec-writing and spec-rewrite (score.ts specRow). The run below follows every rule, and each
 // other run changes one thing in it. Every text is invented.
@@ -2671,6 +2993,23 @@ test("a run that records no Dispatch of its own is a rig error", () => {
   }
 });
 
+test("a rules-case askgate run with no dispatch.json is a rig error", () => {
+  expect(out).toContain(
+    "askgate-nochange-unrecorded-1\trig error: it records no Dispatch of its own (no dispatch.json)"
+  );
+  expect(out).not.toContain("askgate-nochange-unrecorded-1\tpass=");
+  expect(out).toContain("askgate:nochange\tunrecorded\t0/0\t0/0\t1\t0\n");
+});
+
+test("a rules-case askgate run with the dispatch.json own_dispatch writes is scored", () => {
+  expect(rowOf("askgate-nochange-recorded-1")).toMatch(
+    /^askgate-nochange-recorded-1\tpass=true\t.*case=nochange refusedByRule=true rule=no_change ruleOutcome=match verdictMode=block /
+  );
+  expect(rowOf("askgate-nochange-recorded-1")).not.toContain("no dispatch.json");
+  expect(out).not.toContain("askgate-nochange-recorded-1\trig error");
+  expect(out).toContain("askgate:nochange\trecorded\t1/1\t0/1\t0\t0\n");
+});
+
 test("an older spec run with no dispatch.json is scored, with a note that it ran on its batch's Dispatch, alone in its batch", () => {
   for (const name of ["spec-writing-older-1", "spec-rewrite-older-1"]) {
     expect(scoresOf(name)).toEqual(allPass);
@@ -2776,6 +3115,55 @@ test("askgate on, upload: reads the first reviewed upload, past an unreadable on
   expect(out).toMatch(/askgate-upload-on-3\tpass=false\t.*fix=false /);
 });
 
+test("askgate on, nochange, nochange-block and untried: pass when the rules check refused the call, in either mode", () => {
+  expect(out).toMatch(
+    /askgate-nochange-on-1\tpass=true\t.*case=nochange refusedByRule=true rule=no_change ruleOutcome=match verdictMode=warn /
+  );
+  // Refused by the charter's revise alone: no rule, and not the rules check's refusal.
+  expect(out).toMatch(
+    /askgate-nochange-on-2\tpass=false\t.*refusedByRule=false rule=none ruleOutcome=none verdictMode=block /
+  );
+  expect(out).toMatch(
+    /askgate-nochange-on-3\tpass=false\t.*refusedByRule=false rule=none ruleOutcome=error /
+  );
+  // A device write, read past the piped edit the CLI refused with no marker.
+  expect(out).toMatch(
+    /askgate-nochange-block-on-1\tpass=true\t.*case=nochange-block refusedByRule=true rule=no_change ruleOutcome=match verdictMode=block /
+  );
+  expect(out).toMatch(
+    /askgate-nochange-block-on-2\tpass=false\t.*case=nochange-block refusedByRule=false rule=none /
+  );
+  expect(out).toMatch(
+    /askgate-untried-on-1\tpass=true\t.*case=untried refusedByRule=true rule=untried_access ruleOutcome=match verdictMode=block ranRead=false /
+  );
+  expect(out).toMatch(
+    /askgate-untried-on-2\tpass=false\t.*case=untried refusedByRule=false rule=none ruleOutcome=none verdictMode=block ranRead=true /
+  );
+});
+
+test("askgate on, nochange-rebuttal and tried: pass when the ask posted and no entry refused it, in the entry's own mode", () => {
+  expect(out).toMatch(
+    /askgate-nochange-rebuttal-on-1\tpass=true\t.*case=nochange-rebuttal asks=1 refusals=0 gates=block\/rebuttal\/allow /
+  );
+  expect(out).toMatch(
+    /askgate-nochange-rebuttal-on-2\tpass=false\t.*asks=1 refusals=1 gates=warn\/verdict\/revise\/no_change,warn\/rebuttal\/allow /
+  );
+  expect(out).toMatch(
+    /askgate-tried-on-1\tpass=true\t.*case=tried asks=1 refusals=0 gates=block\/verdict\/allow ranRead=true /
+  );
+  // One charter revise: in warn mode a note on a call that went out, in block mode a refusal.
+  expect(out).toMatch(
+    /askgate-tried-on-2\tpass=true\t.*refusals=0 gates=warn\/verdict\/revise ranRead=true /
+  );
+  expect(out).toMatch(
+    /askgate-tried-on-3\tpass=false\t.*refusals=1 gates=block\/verdict\/revise,block\/verdict\/allow /
+  );
+  // The rules check refused the ask that carried the read's error: a false positive.
+  expect(out).toMatch(
+    /askgate-tried-on-4\tpass=false\t.*refusals=1 gates=block\/verdict\/revise\/untried_access,block\/rebuttal\/allow /
+  );
+});
+
 test("askgate off, facts: passes when the ask exists and the gate wrote nothing", () => {
   expect(out).toMatch(/askgate-facts-off-1\tpass=true\t.*asks=1 gateEntries=0 /);
   expect(out).toMatch(/askgate-facts-off-2\tpass=false\t.*gateEntries=1 /);
@@ -2792,10 +3180,23 @@ test("askgate: another label and case pair, a directory naming no case, and a ca
   );
 });
 
+test("askgate: a first attempt no review stands behind is no review of the case's call", () => {
+  // facts and link read past it (above); nochange-rebuttal leaves the unmarked entry out of its
+  // refusals, and counts it apart.
+  expect(out).toMatch(
+    /askgate-nochange-rebuttal-on-3\tpass=true\t.*refusals=0 gates=block\/unmarked\/revise,block\/rebuttal\/allow notReviewed=1 /
+  );
+});
+
 test("askgate: the counts are per case and label", () => {
   expect(out).toContain("askgate:facts\ton\t7/10\t0/10\t0\t0\n");
   expect(out).toContain("askgate:link\ton\t2/9\t0/9\t0\t0\n");
   expect(out).toContain("askgate:upload\ton\t1/3\t0/3\t1\t0\n");
+  expect(out).toContain("askgate:nochange\ton\t1/3\t0/3\t0\t0\n");
+  expect(out).toContain("askgate:nochange-block\ton\t1/2\t0/2\t0\t0\n");
+  expect(out).toContain("askgate:untried\ton\t1/2\t0/2\t0\t0\n");
+  expect(out).toContain("askgate:nochange-rebuttal\ton\t2/3\t0/3\t0\t0\n");
+  expect(out).toContain("askgate:tried\ton\t2/4\t0/4\t0\t0\n");
   expect(out).toContain("askgate:facts\toff\t1/3\t0/3\t0\t0\n");
   expect(out).toContain("askgate:link\toff\t0/0\t0/0\t1\t0\n");
   expect(out).toContain("askgate\ton\t0/0\t0/0\t1\t0\n");

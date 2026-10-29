@@ -514,7 +514,8 @@ live proof (`scripts/README.md`).
 ## AskGate
 
 AskGate (`extensions/askgate/`) reviews each Dispatch write of a main agent before it posts. The
-README's "AskGate" section says what it reviews, the switch, the modes and the model role.
+README's "AskGate" section says what it reviews, the switch, the modes, the model role, the rules
+check and the record.
 `envoy.ts` binds it only in a session that has Dispatch: it reads the session's own envoy.json
 with the variables over it (`readEnvoyConfig` and `dispatchSettings`, with `checkout: null`), or
 the session's settings with its checkout's file, so a checkout can turn the gate on (its own
@@ -532,15 +533,20 @@ Each call waits for the load. Once the modules load, the core binds to a `pi` th
 so no call passes between the load and the binding. A load that fails (a module, an
 `OMP_ASKGATE_TIMEOUT_MS` that is no positive integer, a handler ceiling too short for a verdict)
 is no off switch: `loadFailureGate` refuses each write the gate would review, in both modes, naming
-the error and `askgate.enabled`, and records a `load-failed` entry. A session with no envoy.json
+the error and `askgate.enabled`, and records a `load-failed` entry. The ceiling is too short under
+20,000 ms (`MIN_DEADLINE_MS` plus `CEILING_MARGIN_MS` in `askgate-core.ts`), so a session's
+`extensionHandlers.toolCallTimeoutMs` set below that loses every Dispatch write the gate would
+have reviewed. A session with no envoy.json
 location has no Dispatch either, since its `dispatch` command works the file out by the same rule,
 so nothing binds there. `session_start` waits for the
 load and shows a load failure, a switch that does not parse or a location it could not work out as
-a notice. `askgate-core.ts` holds
-every rule of the gate and takes the host through its dependencies, so `askgate.test.ts` drives it
-with fakes. The reader takes one form, the literal grammar of one `dispatch` call
-(`dispatchCommandHead`, the README's "The form the gate reads"), and refuses no call by reading
-any other: a call in another form runs, and an `eval` cell is not read.
+a notice. `askgate-core.ts` holds the gate and takes the host through its dependencies, so
+`askgate.test.ts` drives it with fakes. The reader takes one form, the literal grammar of one
+`dispatch` call (`dispatchCommandHead`, the README's "The form the gate reads"), which takes the
+override comment the gate hands a rebutted command back with (`keepOverrideVisible`) as those
+overrides, so a resend of that command is the same rebuttal and `commandArgv` never holds the
+comment; it refuses no call by reading any other form: a call in another form runs, and an `eval`
+cell is not read.
 
 Enforcement is the `dispatch` CLI's (`@legion/envoy-client/askgate-marker`, the README's
 "Everything else runs"). While the gate is bound, `envoy.ts`'s top-level instance writes one
@@ -564,7 +570,11 @@ the default for these checks, the CLI writes the ledger line before it posts. Th
 checks' mode into the session's own record for the CLI (`checkMode`: block only when the session
 chose it; `setRecordMode` keys it per session, so a switch never changes another session's mode),
 apart from the verdict's mode (`sessionMode`, block by default); `envoy.ts` turns each write the
-CLI logged as unmarked into an `unmarked` entry, and the gate appends a cause note
+CLI logged as unmarked into an `unmarked` entry, and, where the CLI's own line says the write
+carried asks for a person (`asksCarried`, counted with `newAsks` in
+`@legion/envoy-client/askgate-new-asks`), publishes one decision record for it through the
+recorder `registerAskGate` returns, under its own `RECORD_TIMEOUT_MS` stop and the shutdown cut,
+with `recordError` on the entry when that fails. The gate appends a cause note
 (`nonLiteralCause`, `causeNote`) to the result of a call outside the literal form that the CLI
 refused. A gate that did not load refuses each literal call at the hook (`loadFailureGate`) and
 mints nothing; it writes no mode, so a write that reaches the CLI — one outside the literal form,
@@ -573,13 +583,27 @@ which `bindDispatchSession` writes into the record at the bind. Precision comes 
 refuses no call that holds no Dispatch write. Every other way a write passes
 unreviewed records its outcome and tells the agent so (`renderUnreviewed`), and each one runs the
 agent's own command as written (`UNREVIEWED_OUTCOMES`): a gate that fails breaks no valid write.
-The model walk (`askModel` in `createAskGate`) is the one path a review takes to the
-model. The review's deadline is held 5 s under `extensionHandlers.toolCallTimeoutMs`, so at that
-key's 30 s default a review often times out and the write posts unreviewed: a session that loads
-this plugin sets the key to 120000 or more (the README's "The time limit"), and a deadline under
-30 s logs one warning at bind.
-`rules.md`, `askgate-system.md`, `askgate-request.md` and `askgate-upload.md` (the instruction an
-upload of a markdown document gets: failure 10 alone) are the prompts, imported as text.
+Beside the core, `@legion/envoy-client/askgate-new-asks` finds the new asks a call opens, and
+reads markdown as the Dispatch server does; the CLI reads it too. `rules-check.ts` runs the rules
+check through the model walk and the Dispatch client that the core passes in, so it never imports
+`askgate-core.ts`. `breaker.ts` holds the breaker and its keys. `decision-record.ts` publishes
+each rule decision, each override and each unmarked write that carries an ask to a Dispatch
+project document of the session's own, through the same Dispatch client, under a 5 s stop of its
+own and with no ask text in it; it too is free of the core, reading the entry's fields
+structurally, and a write that fails leaves `recordError` on the entry and changes no decision.
+Once the session is shutting down, the core cuts every record `SHUTDOWN_RECORD_MARGIN_MS` before
+its shutdown wait runs out, so the entry, which the record precedes, is appended before the
+session is sealed. `text.ts` is the leaf that holds the text helpers both checks share. The model
+walk (`walk` in `createAskGate`) is the one path either check takes to the model. The review's
+deadline is held 10,000 ms under `extensionHandlers.toolCallTimeoutMs` (`CEILING_MARGIN_MS`: 5 s
+for the aborted call's usage report and the entry, and `RECORD_TIMEOUT_MS` for the decision
+record), so at that key's 30 s default the deadline is 20,000 ms, a review often times out and the
+write posts unreviewed: a session that loads this plugin sets the key to 120000 or more (the
+README's "The time limit"), and a deadline under 30 s logs one warning at bind. `rules.md`,
+`askgate-system.md`, `askgate-request.md` and `askgate-upload.md` (the instruction an upload of a
+markdown document gets: failure 10 alone) are the charter check's prompts, and
+`rule-check-system.md`, `rule-check.md` and `rule-check-request.md` are the rules check's. The
+modules import each prompt `with { type: "text" }`.
 
 AskGate reviews the writes of a cooperating agent. It is no sandbox, and nothing in it is
 designed as one: a process that runs as the same user defeats it. That process can turn the gate
@@ -813,7 +837,9 @@ session's state directory, one line per call: the tool and its result's details)
 `tool_result` from the offset it last reached, under the id in `DISPATCH_SESSION_ID`; the offset
 starts at the ledger's end on `session_start`, `session_switch`, `session_branch` and the
 heartbeat's drift heal, so an earlier run's calls never count. A `bash` result whose command is one
-`dispatch` command (`dispatchCommandHead` in `src/shell-command.ts`), or an `eval` result, during
+`dispatch` command (`dispatchCommandHead` in `src/shell-command.ts`, which drops a comment that
+ends the first line, as bash does, so the command AskGate hands back with its override as that
+comment still counts), or an `eval` result, during
 which the ledger grew owes nothing; a `bash` command that ran `dispatch` beside anything else
 (`dispatch … && make`) is work. A `task` subagent's `dispatch` calls land in the parent's ledger (it
 carries the parent's id), so an `eval` that runs while a subagent writes to Dispatch can count as
@@ -861,7 +887,7 @@ state never nudges.
 | Shared modules and the interface | `../pi-shared/` | `@legion/pi-shared`: the interface this entry publishes (`interface`), the role-claim bridge, the injected-user-turn record, the subagent check (`subagent-session`), the host types, `toolSuccess`/`toolFailure`, and `shell-command`; inlined into `dist/envoy.js` by `bun build`. See `packages/pi-shared/AGENTS.md` |
 | The `dispatch` CLI in Oh My Pi | `bin/dispatch` (the shim, mode 755), `dist/dispatch.js` (`../envoy-client/scripts/build-dispatch-cli.sh`, the one build of the CLI bundle, in `build` and `scripts/pi-plugin-prepack.sh`), `extensions/envoy.ts`, `../pi-shared/src/shell-command.ts` | The extension registers no Dispatch tool: at load it puts the plugin's `bin/` first on `PATH`, sets `DISPATCH_HOST=omp` and hands on the session's envoy.json as `ENVOY_CONFIG_FILE`; session events and the heartbeat's drift heal set `DISPATCH_SESSION_ID` (the drift heal also calls `procmgr.refreshShellConfigCache()`); the Legion entry writes the title after naming a pane. |
 | Extension unit tests | `extensions/envoy.test.ts` | Mocked Pi and NATS surface; `beforeEach` points `ENVOY_URL` at an unroutable host and stubs `fetch` with the registration echo, so a test that forgets its own stub never registers a `ses_*` fixture on the devbox's real listener, points `ENVOY_CONFIG_FILE` at a file that holds no Dispatch or Envoy section and turns AskGate off (its "AskGate" tests turn it on, with the host modules stood in) with `OMP_PROFILE`, `PI_CODING_AGENT_DIR` and `XDG_CONFIG_HOME` unset, so no caller's envoy.json reaches a test (each loads the module fresh, `./envoy.ts?<row>`, since the file is chosen at module load), and resets the process-wide interface so no Legion suite's record reaches it |
-| AskGate | `extensions/askgate/` | `askgate.ts` the entry, `askgate-core.ts` the gate, `rules.md` and the three prompt files, `askgate.test.ts` the core's tests with fakes, `askgate-omp.test.ts` one reviewed `dispatch ask` on the real binary (`LEGION_TEST_OMP`), and `scripts/askgate-report.ts` the report over the `advisor-gate` entries |
+| AskGate | `extensions/askgate/` | `askgate.ts` the entry, `askgate-core.ts` the gate, `rules-check.ts`, `breaker.ts`, `decision-record.ts` (the Dispatch record of each rule decision, each override and each unmarked write that carries an ask) and `text.ts` its modules, the seven prompt files (`*.md`), `askgate.test.ts` the core's tests with fakes, `askgate-omp.test.ts` one reviewed `dispatch ask` on the real binary (`LEGION_TEST_OMP`), and `scripts/askgate-report.ts` the report, over the `advisor-gate` entries on disk (`--sessions`) or over a project's decision documents (`--dispatch-project`) |
 | Skills partition and its guard | `src/skills-guard.test.ts`, `scripts/prepack.test.ts`, `scripts/pi-plugin-prepack.sh` (repository root) | The five skills this package ships, staged as its prepack stages them, held to the size, name and link rules in `@legion/pi-shared/test/skills-guard` and the `dispatch-first` budget |
 | No import of the sibling | `src/no-cross-import.test.ts` | Fails on a shipped source under `extensions/` or `src/` whose relative import resolves into `packages/pi-legion` |
 | Shared HTTP/tool behavior | `../envoy-client/src/` | Do not duplicate it here |
