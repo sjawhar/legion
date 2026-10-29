@@ -217,6 +217,7 @@ func TestWhoamiRefusesWhenItCannotReadTheEventHead(t *testing.T) {
 			options.SigningKey = testSigningKey
 			options.People = people
 			options.Identity = identity.HeaderIdentity{Header: "X-Dispatch-User", People: people}
+			options.Lifetime = t.Context()
 			ctx, err := BuildAppContext(options)
 			if err != nil {
 				t.Fatalf("build context: %v", err)
@@ -248,6 +249,7 @@ func TestAnAnonymousWhoamiIsUnauthorizedWhileTheEventHeadCannotBeRead(t *testing
 		SigningKey: testSigningKey,
 		People:     people,
 		Identity:   identity.HeaderIdentity{Header: "X-Dispatch-User", People: people},
+		Lifetime:   t.Context(),
 	})
 	if err != nil {
 		t.Fatalf("build context: %v", err)
