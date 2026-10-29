@@ -37,9 +37,10 @@ var ErrMarkNotAllowed = errors.New("mark not allowed on this text")
 type MarkNotAllowedError struct {
 	Mark      string
 	Textblock string
-	// At is where the refused text begins in the document. A code block or the front matter holds
-	// its text as one run, so two refusals with the same Textblock and At are one place, and two
-	// with different At are two places of one kind.
+	// At is where the text run holding the refused text begins in the document - its block's whole
+	// text, not where the refused range starts. A code block or the front matter holds its text as
+	// one run, so two refusals with the same Textblock and At are one place, and two with different
+	// At are two places of one kind.
 	At int
 }
 
