@@ -2521,8 +2521,9 @@ jobs:
         working-directory: packages/envoy
 
   # The listener, the registry store and kvwatch under the race detector, on a runner of its own
-  # (the lane's comment above says why). The registry store runs on Postgres, so the job carries
-  # the lane's service.
+  # (the lane's comment above says why). cmd/listener/dispatch_resolution_test.go opens the
+  # Dispatch database through internal/testpg, so the job carries the lane's service; the registry
+  # store itself is the NATS KV view and needs none.
   envoy-go-race-listener:
     needs: changes
     if: needs.changes.outputs.envoy_go_race_listener == 'true'

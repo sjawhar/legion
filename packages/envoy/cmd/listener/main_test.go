@@ -1236,8 +1236,6 @@ func setupAdminTestRegistry(t *testing.T, interests map[string][]string) *store.
 			t.Fatalf("failed to upsert interest for %s: %v", sessionID, err)
 		}
 	}
-	// Allow watcher to propagate all Upsert events to cache
-	time.Sleep(500 * time.Millisecond)
 	return registry
 }
 
@@ -1448,8 +1446,9 @@ func claimRoles(t *testing.T, registry *store.Registry, sessionID string, roles 
 // (store.Registry.WaitForCacheReady): the interest cache is waited for as ready, and the role
 // claim view as complete, not merely ready. After it returns, Match sees every existing
 // subscription in the interest bucket and RolesHeldBy answers, so a route that reports a session's
-// roles - GET /v1/sessions, GET /v1/registry/<session_id>, and the sender a send or a publish
-// stamps - is served rather than refused the bus-unavailable 503 store.ErrRoleViewNotReady earns.
+// roles - GET /v1/sessions and GET /v1/registry/<session_id> - is served rather than refused the
+// bus-unavailable 503 store.ErrRoleViewNotReady earns, and the sender a send or a publish stamps
+// carries its roles rather than leaving them out (senderStamp drops them on a view that refuses).
 // A test that drives one of those routes waits here once, after its registry is open and before
 // its first request; a test that puts the view where it cannot answer and asserts the refusal
 // waits before the freeze, never after.

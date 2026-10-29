@@ -76,8 +76,8 @@ func TestAProxiedDialEndsAtTheConnectsDeadline(t *testing.T) {
 // Two connects through one dialer at once record their dial errors in the one record and read it
 // back, as a client's background recovery and a publish's replacement dial do: each dial stores on
 // the goroutine nats.go dials from while the other connect loads at the end of its attempts. Run
-// under -race (the envoy-go-race job), a record that is not synchronized fails here. Each connect
-// makes the bus's ten attempts a second apart, so this takes about ten seconds.
+// under -race (the envoy-go-race-bus job), a record that is not synchronized fails here. Each
+// connect makes the bus's ten attempts a second apart, so this takes about ten seconds.
 func TestConnectsSharingADialerRecordItsLastError(t *testing.T) {
 	dialer, err := socks5Proxy(proxiedLookup("127.0.0.1:1"))
 	if err != nil {

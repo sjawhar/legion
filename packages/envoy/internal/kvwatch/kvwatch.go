@@ -257,6 +257,9 @@ func (w *Watcher) Check() error {
 	defer w.mu.Unlock()
 	if !w.stopped && w.err == nil && !w.stream.IsZero() && !stream.Created.Equal(w.stream) {
 		w.err = fmt.Errorf("%s bucket %s was recreated under its watcher", w.name, w.bucket)
+		// Nothing completes a scan until a Rewatch resets the cache, so a caller waiting for a
+		// complete view reads this error rather than waiting its own ctx out.
+		w.wakeComplete()
 	}
 	return nil
 }
@@ -310,18 +313,20 @@ func (w *Watcher) Complete() (generation uint64, complete bool) {
 // the state again after every wake-up and returns nil only on a reading that says complete; a
 // watcher WithRescan scans again until one does. It returns early, rather than waiting ctx out,
 // when nothing will complete a scan: the current watcher's terminal error (Err), which only a
-// Rewatch clears, and a stop, after which the watcher arms nothing. Callers bound ctx, whose
-// error it returns when ctx ends first: a bucket can be unreachable.
+// Rewatch clears, and a stop, after which the watcher arms nothing. The error is read before
+// completeness, as RolesHeldBy reads it, so a watcher Check found on a recreated bucket never
+// answers this wait nil while that view still refuses every read. Callers bound ctx, whose error
+// it returns when ctx ends first: a bucket can be unreachable.
 func (w *Watcher) WaitComplete(ctx context.Context) error {
 	for {
 		w.mu.RLock()
 		complete, err, stopped, changed := w.complete, w.err, w.stopped, w.completeChanged
 		w.mu.RUnlock()
 		switch {
-		case complete:
-			return nil
 		case err != nil:
 			return err
+		case complete:
+			return nil
 		case stopped:
 			return fmt.Errorf("%s watcher stopped before its first scan completed", w.name)
 		}
