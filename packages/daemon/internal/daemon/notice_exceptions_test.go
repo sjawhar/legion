@@ -14,6 +14,7 @@ import (
 	"github.com/nats-io/nats.go"
 
 	"github.com/sjawhar/legion/daemon/internal/claim"
+	"github.com/sjawhar/legion/daemon/internal/notify"
 	"github.com/sjawhar/legion/daemon/internal/phase"
 	"github.com/sjawhar/legion/daemon/internal/record"
 	"github.com/sjawhar/legion/daemon/internal/supervise"
@@ -385,6 +386,60 @@ func TestANoticeToAnArchitectStoppedWithItsFinishedTreeIsNotSentAgain(t *testing
 					delivered, outboxRows(t, pool), logged.String())
 			}
 		})
+	}
+}
+
+// A report of a person's undelivered spec decision to a stopped tree relays it once: the first
+// report writes the controller notice, a second report of the same publish and the copy queued
+// before the close write none, and the controller is told once; the architect is told nothing.
+func TestAStoppedTreesSpecDecisionReportGoesToTheControllerOnce(t *testing.T) {
+	ctx := context.Background()
+	pool := isolatedOutboxPool(t)
+	records := record.NewStore()
+	noticeTree(t, pool, records, true)
+	sup, _ := newOutboxSupervisor(t, "legion", t.TempDir())
+	architectClaimOn(t, sup, "LEGION-1", supervise.StateSuspended, "ses_arch")
+	var logged bytes.Buffer
+	publisher := &holderPublisher{}
+	runner := &outbox{log: slog.New(slog.NewTextHandler(&logged, nil)), pool: pool, dispatchProject: "LEGION", records: records, notices: publisher, supervisor: sup,
+		project: "legion", now: time.Now}
+	notice := record.Notice{Kind: "design-approved", Version: 3, Actor: "user:alice", Ref: "dispatch://LEGION-1/spec"}
+	relayed := func() int {
+		var n int
+		if err := pool.QueryRow(ctx, `select count(*) from processed_events where source = 'parked-decision' and event_id = 'legion-outbox:78'`).Scan(&n); err != nil {
+			t.Fatalf("count the relays: %v", err)
+		}
+		return n
+	}
+	to := func(topic string) int {
+		_, delivered := publisher.snapshot()
+		n := 0
+		for _, published := range delivered {
+			if published.topic == topic {
+				n++
+			}
+		}
+		return n
+	}
+	for _, id := range []string{"evt-exception", "evt-again"} {
+		report := laneReport{id, "delivery_failed", architectTopic(t, "LEGION-1"), "design-approved on LEGION-1", notice, "legion-outbox:78", "ses_arch"}
+		if err := runner.rehold(ctx, report.envelope(t)); err != nil {
+			t.Fatalf("rehold %s: %v", id, err)
+		}
+		if got := queuedNotices(t, pool); len(got) != 0 || relayed() != 1 {
+			t.Fatalf("after %s: queued %v, %d relays; want no copy and one relay", id, got, relayed())
+		}
+	}
+	copied := notice
+	copied.Resends, copied.ResendOf = 1, 78
+	enqueueOutbox(t, pool, records, mustOutboxRow(t, "LEGION-1", copied, time.Now()))
+	if err := runner.RunOnce(ctx); err != nil {
+		t.Fatalf("run the copy queued before the close and the controller row: %v", err)
+	}
+	if relayed() != 1 || to(notify.ControllerTopic("legion")) != 1 || to(architectTopic(t, "LEGION-1")) != 0 ||
+		!strings.Contains(logged.String(), `msg="outbox parked decision already sent to the controller"`) || !strings.Contains(logged.String(), "key=legion-outbox:78") {
+		t.Fatalf("%d relays, %d to the controller, %d to the architect, log %q; want one relay told to the controller once, none to the architect, and the copy logged as already sent",
+			relayed(), to(notify.ControllerTopic("legion")), to(architectTopic(t, "LEGION-1")), logged.String())
 	}
 }
 

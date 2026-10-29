@@ -91,6 +91,10 @@ func (e *Engine) gateRegistered(ctx context.Context, tx pgx.Tx, fact intake.Gate
 		gate.ApprovedVersion, gate.ApprovedMark = stored.ApprovedVersion, stored.ApprovedMark
 	}
 	changesRequested := false
+	// Who reviewed, named on the design-approved notice the registration sends: the person whose
+	// approval the registration carries, and no person under gates.design off, which opens the gate
+	// whatever Dispatch shows.
+	var reviewer string
 	switch {
 	case off:
 		gate = classify.ApplyDesignGateEvent(gate, classify.DesignGateApproved, version, record.EventMark{})
@@ -102,6 +106,7 @@ func (e *Engine) gateRegistered(ctx context.Context, tx pgx.Tx, fact intake.Gate
 			mark = mark.Merged(stored.ApprovedMark)
 		}
 		gate = classify.ApplyDesignGateEvent(gate, classify.DesignGateApproved, fact.ApprovedVersion, mark)
+		reviewer = fact.ReviewedBy.Name()
 	case fact.ChangesRequestedVersion >= version:
 		gate = classify.ApplyDesignGateEvent(gate, classify.DesignGateChangesRequested, fact.ChangesRequestedVersion, fact.ChangesRequestedMark)
 		changesRequested = true
@@ -117,7 +122,7 @@ func (e *Engine) gateRegistered(ctx context.Context, tx pgx.Tx, fact intake.Gate
 	// recorded as told; placed after the wait began, it is named by the resume task alone, whether
 	// it answered the wait or another act did (tellChangesOnce).
 	review := intake.DispatchArtifact{Key: fact.Issue, ArtifactID: fact.ArtifactID, Kind: intake.DispatchArtifactChangesRequested,
-		Version: gate.LatestVersion, Reason: fact.ChangesReason, Mark: fact.ChangesRequestedMark}
+		Version: gate.LatestVersion, Reason: fact.ChangesReason, Mark: fact.ChangesRequestedMark, Actor: fact.ReviewedBy}
 	answered, err := e.answerRegisteredGate(ctx, tx, fact, gate, changesRequested)
 	if err != nil {
 		return intake.Result{}, err
@@ -160,7 +165,7 @@ func (e *Engine) gateRegistered(ctx context.Context, tx pgx.Tx, fact intake.Gate
 	case issue.AwaitingPerson():
 		e.logOnCommit(ctx, "workflow: a root waiting on a person is told its open gate by its resume", "issue", issue.Key, "version", gate.LatestVersion)
 	case !sameDocument || !classify.DesignGateOpen(*stored) || stored.LatestVersion != gate.LatestVersion:
-		if err := e.notice(ctx, tx, fact.Issue, record.Notice{Kind: "design-approved", Version: gate.LatestVersion}); err != nil {
+		if err := e.notice(ctx, tx, fact.Issue, record.Notice{Kind: "design-approved", Version: gate.LatestVersion, Actor: reviewer, Ref: specRef(fact.Issue)}); err != nil {
 			return intake.Result{}, err
 		}
 	default:
@@ -192,8 +197,10 @@ func (e *Engine) gateRegistered(ctx context.Context, tx pgx.Tx, fact intake.Gate
 //
 // With notify false the review is marked processed and nothing is sent: a root waiting on a person
 // has the review named by the task that resumes it, and the mark keeps a redelivery after that
-// resume from telling it again.
-func (e *Engine) tellChanges(ctx context.Context, tx pgx.Tx, key, artifact string, version int, reason string, mark record.EventMark, notify bool) error {
+// resume from telling it again. reviewer is the person who asked the changes, named on the notice:
+// the decision a parked tree's undelivered notice carries goes to the controller (the outbox's
+// parkDecision), which needs to know who made it.
+func (e *Engine) tellChanges(ctx context.Context, tx pgx.Tx, key, artifact string, version int, reason, reviewer string, mark record.EventMark, notify bool) error {
 	issue, err := e.store.Issue(ctx, tx, key)
 	if err != nil || issue == nil {
 		return err
@@ -215,7 +222,7 @@ func (e *Engine) tellChanges(ctx context.Context, tx pgx.Tx, key, artifact strin
 	if !notify {
 		return nil
 	}
-	if err := e.notice(ctx, tx, key, record.Notice{Kind: "design-changes-requested", Version: version, Reason: reason}); err != nil {
+	if err := e.notice(ctx, tx, key, record.Notice{Kind: "design-changes-requested", Version: version, Reason: reason, Actor: reviewer, Ref: specRef(key)}); err != nil {
 		return err
 	}
 	if issue.Phase != phase.Admitted || !claim.IsTreeRoot(issue.Key, issue.Tree) {
@@ -675,10 +682,13 @@ func (e *Engine) applyArtifact(ctx context.Context, tx pgx.Tx, gate record.Desig
 		}
 		// A root waiting on a person is told the opening by its resume (answerAwaitedGate,
 		// answerOpenGates), which says how its spec stands: a notice as well would say it twice.
-		opened := &record.Notice{Kind: "design-approved", Version: fact.Version}
+		// Who approved is named on the notice, since nobody in a parked tree hears it and the
+		// decision then goes to the controller instead (the outbox's parkDecision).
+		reviewer := fact.Actor.Name()
+		opened := &record.Notice{Kind: "design-approved", Version: fact.Version, Actor: reviewer, Ref: specRef(key)}
 		switch {
 		case carried:
-			opened = &record.Notice{Kind: "carried-gate-opened", Version: fact.Version, Reason: fmt.Sprintf(
+			opened = &record.Notice{Kind: "carried-gate-opened", Version: fact.Version, Actor: reviewer, Ref: specRef(fact.Key), Reason: fmt.Sprintf(
 				"a human approved %s's spec document at version %d, which opens the gate %s carried; any READY it refused is released and any child waiting on it starts", fact.Key, fact.Version, key)}
 		case issue.AwaitingPerson():
 			opened = nil
@@ -713,7 +723,7 @@ func (e *Engine) tellChangesOnce(ctx context.Context, tx pgx.Tx, fact intake.Dis
 		e.logOnCommit(ctx, "workflow: a changes request on a root waiting on a person is named by its resume, not by a notice",
 			"issue", fact.Key, "version", fact.Version)
 	}
-	return e.tellChanges(ctx, tx, fact.Key, fact.ArtifactID, fact.Version, fact.Reason, fact.Mark, !byResume)
+	return e.tellChanges(ctx, tx, fact.Key, fact.ArtifactID, fact.Version, fact.Reason, fact.Actor.Name(), fact.Mark, !byResume)
 }
 
 // placeable says whether a changes request can be placed against key's wait, and so may be told

@@ -109,6 +109,39 @@ func TestACatchUpMarksAHandedOverRootInEveryPhase(t *testing.T) {
 	}
 }
 
+// A decision kept while nobody in a running tree could hear it (its architect's claim had ended)
+// reaches the architect's next launch, a `legion claims retry` relaunch among them, in that
+// launch's catch-up: once taken, it is named again by a relaunch whose ready drops that catch-up
+// undelivered, and a delivered catch-up leaves nothing for the launch after.
+func TestARelaunchedArchitectsCatchUpNamesTheDecisionsKeptForIt(t *testing.T) {
+	ctx := context.Background()
+	pool := migratedPool(t)
+	seedAdmittedTree(t, pool, 1)
+	engine := testEngine(config.DesignGateRootIssues, nil)
+	if err := pgx.BeginFunc(ctx, pool, func(tx pgx.Tx) error {
+		return record.NewStore().AddParkedDecision(ctx, tx, record.ParkedDecision{Root: "LEGION-1", Ref: "dispatch://LEGION-1/spec",
+			Decision: record.DecisionDesignApproved, Actor: "user:alice", At: time.Date(2026, 10, 24, 9, 0, 0, 0, time.UTC)})
+	}); err != nil {
+		t.Fatalf("keep a decision: %v", err)
+	}
+	want := "While nobody in LEGION-1's tree could hear it, a person decided on the tree: dispatch://LEGION-1/spec (design-approved by user:alice). Read each before you continue."
+	claimReady(t, pool, engine, "LEGION-1", claim.RoleArchitect, 1)
+	if got := lastCatchUp(t, pool).Decided; got != want {
+		t.Fatalf("the relaunch's catch-up names %q, want %q", got, want)
+	}
+	claimReady(t, pool, engine, "LEGION-1", claim.RoleArchitect, 2)
+	if got := lastCatchUp(t, pool).Decided; got != want || len(catchUps(t, pool)) != 1 {
+		t.Fatalf("after a relaunch dropped that catch-up undelivered, catch-ups %v naming %q; want one naming %q", catchUps(t, pool), got, want)
+	}
+	if _, err := pool.Exec(t.Context(), "delete from outbox"); err != nil {
+		t.Fatalf("deliver the queued notices: %v", err)
+	}
+	claimReady(t, pool, engine, "LEGION-1", claim.RoleArchitect, 3)
+	if got := lastCatchUp(t, pool).Decided; got != "" {
+		t.Fatalf("the launch after a delivered catch-up is told %q, want nothing", got)
+	}
+}
+
 func lastCatchUp(t *testing.T, pool *pgxpool.Pool) record.CatchUp {
 	t.Helper()
 	var got *record.CatchUp

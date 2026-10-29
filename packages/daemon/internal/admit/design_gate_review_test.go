@@ -622,14 +622,14 @@ func TestAStaleChangesRequestIsToldWithoutChangingTheGate(t *testing.T) {
 			gate:   record.DesignGate{Issue: "LEGION-100", ArtifactID: "artifact-root", LatestVersion: 4},
 			before: []intake.Fact{intake.DispatchArtifact{Key: "LEGION-100", ArtifactID: "artifact-root", Kind: intake.DispatchArtifactVersion, Version: 5, Mark: record.EventMark{Seq: 21}}},
 			late:   changesOf(4, "name the rollback path", record.EventMark{Seq: 20}),
-			told:   []record.Notice{{Kind: "design-changes-requested", Version: 4, Reason: "name the rollback path"}},
+			told:   []record.Notice{{Kind: "design-changes-requested", Version: 4, Reason: "name the rollback path", Ref: "dispatch://LEGION-100/spec"}},
 		},
 		{
 			name: "a request a newer request at that version superseded",
 			gate: record.DesignGate{Issue: "LEGION-100", ArtifactID: "artifact-root", LatestVersion: 4,
 				ToldChangesVersion: new(4), ToldChangesReason: "and name who runs the restore", ToldChangesMark: record.EventMark{Seq: 12}},
 			late: changesOf(4, "name the rollback path", record.EventMark{Seq: 11}),
-			told: []record.Notice{{Kind: "design-changes-requested", Version: 4, Reason: "name the rollback path"}},
+			told: []record.Notice{{Kind: "design-changes-requested", Version: 4, Reason: "name the rollback path", Ref: "dispatch://LEGION-100/spec"}},
 		},
 		{
 			name: "an older version's request an approval followed",

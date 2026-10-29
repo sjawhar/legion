@@ -736,7 +736,7 @@ func TestACatchUpDroppedUnderItsLeaseIsNotPublished(t *testing.T) {
 		t.Fatalf("lease the first catch-up: %v", err)
 	}
 	if err := pgx.BeginFunc(ctx, pool, func(tx pgx.Tx) error {
-		if err := records.DropCatchUps(ctx, tx, "LEGION-1"); err != nil {
+		if _, err := records.DropCatchUps(ctx, tx, "LEGION-1"); err != nil {
 			return err
 		}
 		return records.Enqueue(ctx, tx, mustOutboxRow(t, "LEGION-1", catchUp(2), clock))

@@ -222,12 +222,30 @@ func (e *Engine) dispatchAskRestored(ctx context.Context, tx pgx.Tx, fact intake
 	return intake.Result{}, e.itemLeft(ctx, tx, *root, before, after, record.AnsweredByClosed, "Dispatch's settlement, which restored its earlier answer")
 }
 
-// dispatchAskClosed closes the ask's mirror row, keeping the turn it last had, records who closed
-// it (closer), and records a person's act personAct names, which answers the root's wait when it
+// dispatchAskClosed applies the close to the ask's mirror row and the root's wait (closeAsk), and
+// relays a person's answer or resolution of a question on a tree Legion is not running to the
+// controller (relayParkedDecision): nobody inside such a tree hears it. An approval ask's answer
+// arrives again as the document's review, which the gate relays, so it is not relayed as an ask.
+func (e *Engine) dispatchAskClosed(ctx context.Context, tx pgx.Tx, fact intake.DispatchAskClosed) (intake.Result, error) {
+	if _, err := e.closeAsk(ctx, tx, fact); err != nil {
+		return intake.Result{}, err
+	}
+	if !fact.Actor.Person() || fact.Kind != record.AskQuestion {
+		return intake.Result{}, nil
+	}
+	decision := record.DecisionAskResolved
+	if fact.State == "answered" {
+		decision = record.DecisionAskAnswered
+	}
+	return intake.Result{}, e.relayParkedDecision(ctx, tx, fact.Key, fact.Ask, fact.Actor, decision, itemRef(fact.Key, "ask", fact.Ask))
+}
+
+// closeAsk closes the ask's mirror row, keeping the turn it last had, records who closed it
+// (closer), and records a person's act personAct names, which answers the root's wait when it
 // would answer one (answersWait, personAnswered). A close by anyone else moves the wait when it
 // takes an ask of the wait away from the person (itemLeft): settlement's is a retraction, any other
 // a close the resume names.
-func (e *Engine) dispatchAskClosed(ctx context.Context, tx pgx.Tx, fact intake.DispatchAskClosed) (intake.Result, error) {
+func (e *Engine) closeAsk(ctx context.Context, tx pgx.Tx, fact intake.DispatchAskClosed) (intake.Result, error) {
 	root, err := e.recordedRoot(ctx, tx, fact.Key)
 	if err != nil || root == nil {
 		return intake.Result{}, err
@@ -276,7 +294,27 @@ func (e *Engine) closer(ctx context.Context, tx pgx.Tx, root record.Issue, actor
 	return record.ClosedByOther, nil
 }
 
-// dispatchAskReply applies a reply on an ask of the root, or Dispatch's hand-back of an approval
+// dispatchAskReply applies the reply to the ask's mirror row and the root's wait (replyToAsk), and,
+// on a tree Legion is not running, relays a person's reply that leaves the turn with the agent, or
+// one under a closed ask, to the controller, and logs a session's agent-turn reply there
+// (relayParkedDecision): nobody inside such a tree hears either. A reply that leaves the turn with
+// the human asks the person again, so it is no decision of theirs, and a session's reply under a
+// closed ask changes nothing anyone waits on.
+func (e *Engine) dispatchAskReply(ctx context.Context, tx pgx.Tx, fact intake.DispatchAskReply) (intake.Result, error) {
+	if _, err := e.replyToAsk(ctx, tx, fact); err != nil {
+		return intake.Result{}, err
+	}
+	if fact.WaitingOn == "human" || fact.WaitingOn == "" && !fact.Actor.Person() {
+		return intake.Result{}, nil
+	}
+	ref := itemRef(fact.Key, "ask", fact.Ask)
+	if fact.Comment != "" {
+		ref = itemRef(fact.Key, "comment", fact.Comment)
+	}
+	return intake.Result{}, e.relayParkedDecision(ctx, tx, fact.Key, fact.Ask, fact.Actor, record.DecisionAskReply, ref)
+}
+
+// replyToAsk applies a reply on an ask of the root, or Dispatch's hand-back of an approval
 // request, to the ask's mirror row: a reply on an open ask (one with a turn) says it is open on
 // that turn, and a reply on a closed ask (no turn) says only that it is closed — not who closed it
 // or where, which its own close records whenever it arrives. A reply is the newest reply of its
@@ -289,7 +327,7 @@ func (e *Engine) closer(ctx context.Context, tx pgx.Tx, root record.Issue, actor
 // tree opened, or an approval request of the root's closed, armed design gate's document, with the
 // person hands it back (declare), unless a newer turn of the ask is already recorded (handsTurn). Any other reply that takes an ask of the root's wait away from the person —
 // a session's progress note handing it to the agent's turn — moves the wait (itemLeft).
-func (e *Engine) dispatchAskReply(ctx context.Context, tx pgx.Tx, fact intake.DispatchAskReply) (intake.Result, error) {
+func (e *Engine) replyToAsk(ctx context.Context, tx pgx.Tx, fact intake.DispatchAskReply) (intake.Result, error) {
 	root, err := e.recordedRoot(ctx, tx, fact.Key)
 	if err != nil || root == nil {
 		return intake.Result{}, err
