@@ -2,21 +2,27 @@
   "schemaVersion": 1,
   "phase": "review",
   "issue": "INFRA-531",
-  "completed": "2026-10-28T23:25:00Z",
-  "round": 4,
-  "codeHead": "28ae264dce47",
+  "completed": "2026-10-29T01:00:00Z",
+  "round": 5,
+  "codeHead": "5d887d3027df",
   "decision": "changes_requested",
   "critical": 0,
-  "important": 1,
+  "important": 2,
   "minor": 0,
-  "ci": "No verdict for the code yet: at 28ae264d Tests, Legion Envoy and Contracts and Worker Image are queued (the repository had 105 queued runs at 22:50 UTC) and Docs is in progress. Required pr-title is red at 28ae264d on 'body:15: names a Tailscale MagicDNS host': a Dispatch web link the reviewer put into the PR body in round 1. The reviewer replaced it with dispatch://INFRA-531/comment/2dfdf469-5c03-4bfd-8751-462fdcc6ef3e at 22:51 UTC; the head 44bcf0a6 carries skip-checks, so pr-title re-runs only at the next code push.",
-  "thermonuclear": "Both run at 28ae264d. Deep review: round 3's finding fixed (inline raw HTML by CommonMark's and the engine's grammar, open tags, lowercase declarations, the kind-2 cache, Match side effects all checked); one High (below). Code quality: no behaviour-changing finding; merge 0771e73c keeps main's fixture list plus bare-address-after-punctuation and applies #2481's import fix.",
-  "roundThreeThreads": "PRRT_kwDORFy7ds6xTuxi (raw HTML) accepted as fixed for inline raw HTML; the block-start case is a new comment.",
+  "scope": "Not the architect's quick re-check: the block-start fix 7fd13b50 was pushed after round 4's review and had no review, so this round reviewed it and the merge 5d887d30 only.",
+  "ci": "No verdict yet: lint, typecheck, test and pr-title at 5d887d30 are queued (00:28 UTC). The compare from 5d887d30 to da40d69c touches only .legion/.",
+  "thermonuclear": "Both run at 5d887d30. Deep review: round 4's finding fixed. htmlBlockStart matches micromark html-flow state by state. Fuzz of 37,200 documents in 31 container templates: 0 misreads, 0 refusals main lacks. One Minor (task items). Code quality: htmlBlockStart matches the engine on 14,533 generated lines; two findings (below).",
+  "roundFourThreads": "PRRT_kwDORFy7ds6xW71I accepted as fixed in 7fd13b50.",
   "keyFindings": [
     {
       "severity": "important",
-      "file": "packages/envoy/internal/dispatch/pmdoc/render_inline.go:716-755 (and escape.go lineReadsAsText)",
-      "description": "At a paragraph's first character the engine (micromark html-flow) also opens an HTML block, whose kind-7 tag grammar accepts a second `=value` in an unquoted attribute and whose kind 4 accepts `<!` plus any letter; rawHTMLScan checks only inline raw HTML and the block-start check is goldmark's. Reproduced: `\\<span title=a=b;a@b.cc>` and `\\<a href=x?a=1&b=me@x.cc>` are stored escaped at main 1767c9af (or as a document the engine loads) and stored raw at 28ae264d (`<span title=a=b;[a@b.cc](mailto:a@b.cc)>`), and the engine gives no document (MilkdownError: Cannot create node for doc). The same block-start gap stores `\\<a b=x=*y*>` raw on main too, so fix the class at block start."
+      "file": "packages/envoy/internal/dispatch/pmdoc/linear_test.go:524-542,896-922",
+      "description": "The merge keeps this PR's cpuClockResolution floor in growthVerdict beside main's cputest.Measure (#2396). Measure already times a window of 50 clock steps and divides, so its per-run times are never 0. Flooring them at a whole 10 ms tick raises the failure bound up to 10x: growthVerdict([]int{1,16}, growthAllowance, size^2 ms) passes at the head ('10ms (the CPU clock's resolution; it read 1ms) ... 25.6 times') and fails on main ('256 times'). In this pod, TestBareURLShapesParseAndRenderLinearly floored 23 steps. The linearity gate is weakened; delete the floor and cpuClockResolution (cputest.resolution replaces it) and the comments citing it."
+    },
+    {
+      "severity": "important",
+      "file": "packages/envoy/internal/dispatch/pmdoc/render_inline.go:1237 (render.go:503-508)",
+      "description": "A task item's text after `[ ] ` / `[x] ` gets firstOnLine, so a `<` there is escaped where htmlBlockStart says kinds 1-6, though neither reader tries html-flow after a task checkbox. `- [ ] <!-- todo`, `- [ ] <div class=x`, `- [x] <!doctype html` are stored as written on main 56a39157 and with `\\<` at the head; both read alike, so this is byte churn that mints a new version of each such document on its next write. Clear firstOnLine on the checkbox's line."
     }
   ]
 }
