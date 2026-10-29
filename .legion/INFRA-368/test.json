@@ -2,13 +2,13 @@
   "schemaVersion": 1,
   "phase": "test",
   "issue": "INFRA-368",
-  "completed": "2026-10-29T17:40:00Z",
-  "headTested": "c4020e72b8a4092663d1da5eb8067001c573a691",
-  "codeHead": "f728a2ade613",
-  "round": "14: the merge lane's forward merge. f728a2ad merges main 7c2effba, renumbers this branch's migrations to 0141-0143 after main's 0140_issue_embedding_spec, and adds the itemblocks line to ci.yaml's dispatch_server anchor, listener_server_change, and docs-pages.yaml's on.push.paths. The fingerprint went from 9d0bfc80 at 30157984 to 2f191f08 at f728a2ad (changed), so this was a full round: check-ci-filters.sh, upgrade and rollback against main's 0140, the driver, the browser rows and my probes.",
+  "completed": "2026-10-29T21:35:00Z",
+  "headTested": "82384cf8b4076e8402467220b36097a37d01487b",
+  "codeHead": "2edec178df56",
+  "round": "15: a second forward merge of main, allowed by the architect's rule for #2422 and #2371. 2edec178 merges main 5455925b and renumbers this branch's migrations to 0142-0144, after main's new 0141_drop_broadcast_idempotency_keys. The fingerprint went from 2f191f08 at f728a2ad to 00fa33c7 at 2edec178 (changed), so this was a full round: check-ci-filters.sh, upgrade and rollback against main's 0141, the driver, the browser rows and my probes. I found no PR comment with the fingerprint for this merge (the newest fingerprint comment is from an earlier merge); I report that to the architect and do not count it as a test failure.",
   "implementerProof": {
     "verdict": "verified",
-    "how": "At f728a2ad on a fresh dispatch_tester: block-graph.sh exit 0, 133 PASS. `bunx playwright test --config e2e/playwright.config.ts --project=chromium e2e/conversation.e2e.ts e2e/block-references.e2e.ts e2e/hover-preview.e2e.ts e2e/references.e2e.ts e2e/deep-links.e2e.ts e2e/keyed-writes.e2e.ts e2e/mention-composer.e2e.ts`, with my CR LF and reload probes, gave 88 passed and 4 skipped. TestADirectMessagesBlockHasNoAddress and TestARepeatOfAKeyedMessageReplyAnswersItsBlockAgain pass. `uv run --no-project --with pyyaml==6.0.2 bash .github/scripts/check-ci-filters.sh` is clean."
+    "how": "At 2edec178 on a fresh dispatch_tester: block-graph.sh exit 0, 133 PASS. Seven Playwright files (conversation, block-references, hover-preview, references, deep-links, keyed-writes, mention-composer) with my CR LF and reload probes gave 89 passed and 4 skipped. The two Go tests pass, and check-ci-filters.sh is clean."
   },
   "failures": [],
   "failed": 0,
@@ -17,27 +17,27 @@
       "criterion": "The architect's merge-turn ask: ci.yaml's filters match every file each job reads, the itemblocks package included, and check-ci-filters.sh is clean at the merged head",
       "surface": "The repository's own CI filter check, run locally at the merged head (the ci-filters job's command)",
       "command": "cd \"$LEGION_WORKSPACE\" && uv run --no-project --with pyyaml==6.0.2 bash .github/scripts/check-ci-filters.sh. PyYAML comes from uv because the pod's python3 has no yaml; GitHub's runner image provides it",
-      "observed": "exit 0: 'every ci.yaml filter matches every file its job reads (24 gates), and every PUSH_WORKFLOWS workflow's on.push.paths equals its filter (1)'. Every gate reports 0 uncovered, and docs-pages.yaml's on.push.paths equals filter docs (163 patterns). The itemblocks line is at ci.yaml:236 (the dispatch_server anchor), ci.yaml:813 and docs-pages.yaml:138",
-      "headSha": "f728a2ade613",
-      "negativeControl": "With ci.yaml:236 (the itemblocks line in the shared anchor) deleted, the check exits 1. It names 6 uncovered files each for test, docs, dispatch, dispatch-browser-multiprocess and envoy-infra-go, e.g. '::error file=packages/envoy/internal/dispatch/itemblocks/align.go::test reads … which its filter test does not match'. I restored the file with jj restore"
+      "observed": "exit 0: 'every ci.yaml filter matches every file its job reads (24 gates), and every PUSH_WORKFLOWS workflow's on.push.paths equals its filter (1)'. Round 14's negative control at f728a2ad still stands: with the itemblocks line deleted from the dispatch_server anchor, the check names the itemblocks files for 5 gates. This merge left the filter lines unchanged",
+      "headSha": "2edec178df56",
+      "negativeControl": "At f728a2ad, with ci.yaml's itemblocks line deleted, the check exited 1, naming packages/envoy/internal/dispatch/itemblocks/*.go as uncovered for test, docs, dispatch, dispatch-browser-multiprocess and envoy-infra-go"
     },
     {
-      "criterion": "Rollout at 0141-0143: a database main migrated takes this head's migrations; the head indexes what main wrote; main runs on the migrated schema and its writes are left owed; rolling forward again indexes them",
-      "surface": "Two real Go servers on one Postgres 17 database (dispatch_upgrade, port 8977): main 7c2effba (the merge's main parent, from git archive, GOWORK=off) and this head, both through run-server.sh",
-      "command": "1. main on a fresh database (to 0140), then /legion/scratch/tmp/infra368/seed-old.sh. 2. The head on the same database. 3. main again: a new comment and a PATCH moving C's paragraphs. 4. The head again",
-      "observed": "Step 2: schema_migrations 143, 142, 141, 140. The first tick logs item_blocks=7. C reads b1 and b2, ?to=UPG-2 lists comment/C#b2, the old reply's reply_block is null, a new reply names b2, and the direct message's block answers 404. Step 3: main lists the mention from the comment node and accepts its writes, which leave 2 comments owed. Step 4: the block-index lease the stopped main held was skipped once, then a tick logged item_blocks=2. C reads revision 2 with b2 kept and b3 'Old first, moved.', the reply still names b2, and N gets b1 and b2",
-      "headSha": "f728a2ade613",
+      "criterion": "Rollout at 0142-0144: a database main migrated takes this head's migrations; the head indexes what main wrote; main runs on the migrated schema and its writes are left owed; rolling forward again indexes them",
+      "surface": "Two real Go servers on one Postgres 17 database (dispatch_upgrade, port 8977): main 5455925b (the merge's main parent, from git archive, GOWORK=off) and this head, both through run-server.sh",
+      "command": "1. main on a fresh database (to 0141_drop_broadcast_idempotency_keys), then /legion/scratch/tmp/infra368/seed-old.sh. 2. The head on the same database. 3. main again: a new comment and a PATCH moving C's paragraphs. 4. The head again",
+      "observed": "Step 2: schema_migrations 144, 143, 142, 141. The first tick logs item_blocks=7. C reads b1 and b2, ?to=UPG-2 lists comment/C#b2, the old reply's reply_block is null, a new reply names b2, and the direct message's block answers 404. Step 3: main lists the mention from the comment node and accepts its writes, which leave 2 comments owed. Step 4: the first tick logs item_blocks=2. C reads revision 2 with b2 kept and b3 'Old first, moved.', the reply still names b2, and N gets b1 and b2",
+      "headSha": "2edec178df56",
       "negativeControl": "At step 1, main answered GET /api/v1/comments/<C>/blocks with 404 and listed the mention from the comment node"
     },
     {
       "criterion": "Every earlier round's behaviour at the merged head: A7, A10 comment half, A11, A13, A15 comment half, R14, the block-card rows, the keyed reply repeat, the reload Retry cases and the CR LF unchanged save",
       "surface": "Local Dispatch harness built from the merged head (migrations 0001-0143, fresh database), the real CLI, Chromium",
       "command": "block-graph.sh; the seven Playwright files above with crlf-probe.e2e.ts and retry2-probe.e2e.ts (copied in, then removed); keyed-reply.sh; the two Go tests",
-      "observed": "Driver: exit 0, 133 PASS. Playwright: 88 passed, 4 skipped, including the passage rows, the block-card rows over the live socket, keyed-writes.e2e.ts, the CR LF save, which carries base_revision 1 and blocks b1, b2 and b3, and the two-reload and interrupted-Retry cases, which send one key and one body each. Keyed repeat: on the issue message and agent message routes, the repeat answers 201, replayed, with reply_block b2",
-      "headSha": "f728a2ade613",
+      "observed": "Driver: exit 0, 133 PASS. Playwright: 89 passed, 4 skipped, including the passage rows, the block-card rows over the live socket, keyed-writes.e2e.ts, the CR LF save (which carries base_revision 1 and blocks b1, b2 and b3), and the two-reload and interrupted-Retry cases (one key and one body each). Keyed repeat: on the issue message and agent message routes, the repeat answers 201, replayed, with reply_block b2. The two Go tests pass",
+      "headSha": "2edec178df56",
       "negativeControl": "Driver lines: a reply_to_block of b9 answers 400 INVALID_COMMENT, a carried blocks id b9 answers 400 and leaves the body unchanged, and a pinned message block on ?to= answers 400 INVALID_REFERENCE"
     }
   ],
-  "ci": "GitHub reports the pull request MERGEABLE. At handoff head c4020e72 (no skip-checks), changes is green and every other lane was queued when I read it; the runs at f728a2ad were cancelled when c4020e72 was pushed. I did not wait. This test handoff is a skip-checks push, which starts no run, so it does not cancel c4020e72's runs.",
-  "migrations": "main@origin ends at 0140_issue_embedding_spec. This head adds 0141-0143."
+  "ci": "At handoff head 82384cf8 the CI and PR Title workflow runs were queued (changes and pr-title queued) when I read them. I did not wait. GitHub reports the pull request MERGEABLE. This test handoff is a skip-checks push, which starts no run and so cancels none.",
+  "migrations": "main@origin ends at 0141_drop_broadcast_idempotency_keys. This head adds 0142-0144."
 }
