@@ -7,7 +7,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/sjawhar/envoy/internal/broker/ratelimit"
+	"github.com/sjawhar/envoy/internal/ratelimit"
 )
 
 // LauncherLimits bounds POST /v1/oauth/device_authorization and POST

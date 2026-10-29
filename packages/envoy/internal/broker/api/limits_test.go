@@ -6,7 +6,7 @@ package api
 import (
 	"testing"
 
-	"github.com/sjawhar/envoy/internal/broker/ratelimit"
+	"github.com/sjawhar/envoy/internal/ratelimit"
 )
 
 // mountedRereadBuckets are the two shared buckets a broker process can mount: cmd/broker mounts
