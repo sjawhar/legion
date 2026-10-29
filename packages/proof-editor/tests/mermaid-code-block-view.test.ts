@@ -99,14 +99,15 @@ function typeInto(view: EditorView, index: number, text: string): void {
   view.dispatch(view.state.tr.insertText(text, end));
 }
 
-/** The position of the document's last `mermaid` code block. Read it before a switch: a block
- *  that has left mermaid is not found again, and switching it back needs the position it had. */
-function mermaidBlockPos(view: EditorView): number {
-  let found = -1;
-  view.state.doc.descendants((node, pos) => {
-    if (node.attrs.language === "mermaid") found = pos;
+/** Switches the language of the document's last `mermaid` code block. The position is read once,
+ *  at this call: a block that has left mermaid is not found again, and switching it back needs
+ *  the position it had. */
+function languageSetter(view: EditorView): (language: string) => void {
+  let pos = -1;
+  view.state.doc.descendants((node, at) => {
+    if (node.attrs.language === "mermaid") pos = at;
   });
-  return found;
+  return (language) => view.dispatch(view.state.tr.setNodeAttribute(pos, "language", language));
 }
 
 /** Waits until `check` holds, for at most a second. */
@@ -275,9 +276,7 @@ test("a code block in another language keeps upstream's plain layout and asks no
 
       // Switching the mermaid block to another language cancels its request and puts the pre
       // back alone in the frame; switching back asks again.
-      const mermaidPos = mermaidBlockPos(view);
-      const setLanguage = (language: string) =>
-        view.dispatch(view.state.tr.setNodeAttribute(mermaidPos, "language", language));
+      const setLanguage = languageSetter(view);
       setLanguage("ts");
       expect(requests[0]?.cancels).toBe(1);
       expect(Array.from(mermaid.frame.children)).toEqual([mermaid.pre]);
@@ -291,25 +290,52 @@ test("a code block in another language keeps upstream's plain layout and asks no
 });
 
 // The case above switches a block that never drew, so what `showPlainLayout` clears is never
-// observed there. A block that drew and then left mermaid is the one way this clearing shows on a
-// reader's page: without it the last drawing stands above a JavaScript block it no longer matches.
-test("a mermaid block that drew and then changed language leaves an empty hidden preview and status", async () => {
+// observed there. It shows on the way back: `showMermaidLayout` puts the preview and the status
+// into the frame again and asks for the current source, and until that answer arrives whatever
+// the block held before its trip through another language is on the reader's page. These two
+// cases take that window, one for each half of what the clearing empties.
+test("a mermaid block that drew, changed language and changed back shows no drawing until its new answer", async () => {
   const { drawMermaid, requests } = fakeDrawer();
   await withMarksEditor(
     ONE_DIAGRAM,
     ({ view }) => {
       const [block] = blocks(view);
       if (!block) throw new Error("the document draws a code block");
+      const setLanguage = languageSetter(view);
       requests[0]?.answer(diagram(view.dom.ownerDocument, "drawn"));
       expect(shownDiagram(block)).toBe("drawn");
-      expect(block.preview?.hidden).toBe(false);
-      view.dispatch(view.state.tr.setNodeAttribute(mermaidBlockPos(view), "language", "js"));
 
-      expect(Array.from(block.frame.children)).toEqual([block.pre]);
+      setLanguage("js");
+      setLanguage("mermaid");
+
+      // The block asked again and nothing has answered, so the frame holds its source alone.
+      expect(requests.map((request) => request.source)).toEqual([FIRST, FIRST]);
       expect(shownDiagram(block)).toBeNull();
-      expect(block.preview?.hidden).toBe(true);
-      expect(block.status?.hidden).toBe(true);
+      expectSourceShown(block);
+    },
+    { drawMermaid }
+  );
+});
+
+test("a mermaid block the renderer refused, changed language and changed back shows no refusal until its new answer", async () => {
+  const { drawMermaid, requests } = fakeDrawer();
+  await withMarksEditor(
+    ONE_DIAGRAM,
+    ({ view }) => {
+      const [block] = blocks(view);
+      if (!block) throw new Error("the document draws a code block");
+      const setLanguage = languageSetter(view);
+      const error = "Unable to render Mermaid diagram: Dangling Mermaid edge";
+      requests[0]?.answer({ error });
+      expect(block.status?.textContent).toBe(error);
+      expect(block.status?.hidden).toBe(false);
+
+      setLanguage("js");
+      setLanguage("mermaid");
+
+      expect(requests.map((request) => request.source)).toEqual([FIRST, FIRST]);
       expect(block.status?.textContent).toBe("");
+      expectSourceShown(block);
     },
     { drawMermaid }
   );

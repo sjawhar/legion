@@ -739,7 +739,7 @@ test("a past version's comment link lands on its quote in a document with no dia
     // and so is one to the middle of the page.
     let peak = 0;
     const falls: { from: number; to: number }[] = [];
-    for (const offset of offsets.slice(started)) {
+    for (const offset of offsets) {
       if (peak - offset > MAX_SCROLL_FALL_PX) falls.push({ from: peak, to: offset });
       peak = Math.max(peak, offset);
     }
