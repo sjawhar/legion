@@ -2,10 +2,18 @@
   "schemaVersion": 1,
   "phase": "implement",
   "issue": "INFRA-549",
-  "completed": "2026-10-29T16:04:59Z",
+  "completed": "2026-10-29T16:51:32Z",
   "pullRequest": "https://github.com/sjawhar/legion/pull/2371",
-  "headSha": "4c0da574bf8a73de9a377e673755cf9e3b9f6533",
+  "headSha": "85af7fcb193b85e8ff990d36ead10d95c6041e1f",
   "proof": [
+    {
+      "criterion": "Review round 7: the CI filter gate table names the moved natslive command so ci-filters and ci-ok pass (thread PRRT_kwDORFy7ds6xp-xm); core refuses replicas by bus.MaxReplicas (thread PRRT_kwDORFy7ds6xp-xs); the live test comment names the new command.",
+      "surface": "main's CI filter check run locally on the tree, and the envoy-infra unit lane",
+      "command": "uv run --with pyyaml==6.0.2 --no-project bash .github/scripts/check-ci-filters.sh ; cd packages/envoy/infra && test -z \"$(gofmt -l .)\" && go vet -tags pulumilive,natslive ./... && go test -count=1 ./...",
+      "observed": "check-ci-filters exits 0: every ci.yaml filter matches every file its job reads (24 gates), with envoy-infra-go at 0 uncovered. gofmt is clean, vet is ok, and every package is ok (the two mkfs.ext4 data-disk tests are skipped). core's refusal rows for natsReplicas 5 and 6 pass with the same text.",
+      "headSha": "85af7fcb193b85e8ff990d36ead10d95c6041e1f",
+      "negativeControl": "The check with 4c0da574's ci_job_reads.py prints both errors (the ci.yaml step runs a command no Run lists; the table's Run is no longer run) and 2 CI filter problem(s)."
+    },
     {
       "criterion": "#2371 merges cleanly into main (now carrying #2362 and #2370), its diff holding only its own change, its CI job in ci.yaml, its changelog entries as pr2371 fragments; the envoy-infra Go tests and the component proofs pass on the merged tree.",
       "surface": "The merged tree at 4c0da574: the envoy-infra unit lane, the helm v3.20.2 render of the vendored chart, three nats-server v2.15.1 processes with the real reloader and exporter on that render, and the built plugin read by Pulumi CLI v3.268.0",
@@ -123,7 +131,8 @@
     "Round 5 (merge only): packages/envoy/.changes/unreleased/pr2371-Added-*.yaml (changie fragments; CHANGELOG.md as the base's), gcp/clusteredhub_autopilot.go (the clustered hub's Autopilot size and priority-class rules, moved out of dispatch.go, which is now the base's), gcp/clusteredhub_live_test.go (loopbackPort replaces the removed cmdtest.FreeTCPPort), infra/AGENTS.md layout row, the workflow comment.",
     "Round 6: gcp/clusteredhub_live_test.go (loopbackPorts pool, servers' args built per start, ports redrawn on retry), gcp/clusteredhub_autopilot.go (clusteredHubPodMinCPU 250m), gcp/clusteredhub.go (comment), gcp/clusteredhub_refusals_test.go, gcp/clusteredhub_test.go, README.md sizing text.",
     "Round 7: gcp/clusteredhub_live_test.go (a restart keeps its ports; comments on start, startBound and loopbackPorts).",
-    "Round 8 (merge only): .github/workflows/ci.yaml (the gcp natslive step and job comment, since main deleted envoy-and-contracts.yaml); .dispatch/architecture/envoy.md and infra/AGENTS.md merged with main text; every #2362 file and the pr-2362 fragments taken as main has them."
+    "Round 8 (merge only): .github/workflows/ci.yaml (the gcp natslive step and job comment, since main deleted envoy-and-contracts.yaml); .dispatch/architecture/envoy.md and infra/AGENTS.md merged with main text; every #2362 file and the pr-2362 fragments taken as main has them.",
+    "Round 9: .github/scripts/ci_job_reads.py (envoy-infra-go natslive Run), packages/envoy/infra/core/listener_env.go (bus.MaxReplicas), packages/envoy/infra/core/nats_auth_live_test.go (comment)."
   ],
   "trickyParts": [
     "Chart children are not registered under Pulumi mocks, so the chart's values are pinned by mock tests and their effect by the natslive helm render; the StatefulSet's Protect transform is tested by calling it directly.",
@@ -144,6 +153,6 @@
   "openQuestions": [
     "The README's disk-growth procedure (orphan-delete the StatefulSet, state delete, recreate) and the PromQL for fewer than three current copies are documented from Kubernetes and exporter behaviour but not exercised on a cluster; the live proof on GKE is dispatch://INFRA-551's."
   ],
-  "round": 8,
-  "reviewRound": 5
+  "round": 9,
+  "reviewRound": 7
 }
