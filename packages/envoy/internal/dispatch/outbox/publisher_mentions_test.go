@@ -871,39 +871,48 @@ func TestAResumedMentionsHeldCopyFollowsItsResend(t *testing.T) {
 	}
 }
 
-// denyingPublisher is a NATS whose grant denies every publish to deny and accepts the rest.
-type denyingPublisher struct {
+// failingPublisher is a NATS that answers every publish to topic with answer - a grant's denial,
+// or NATS being unreachable - and accepts the rest.
+type failingPublisher struct {
 	mu       sync.Mutex
-	deny     string
+	topic    string
+	answer   error
 	accepted []contracts.Envelope
-	denials  int
+	failures int
 }
 
-func (p *denyingPublisher) Window() bus.Sender { return p }
+func (p *failingPublisher) Window() bus.Sender { return p }
 
-func (p *denyingPublisher) PublishAsync(item contracts.Envelope) <-chan error {
+func (p *failingPublisher) PublishAsync(item contracts.Envelope) <-chan error {
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	if item.Topic == p.deny {
-		p.denials++
-		return answered(fmt.Errorf("publish %s: %w", item.Topic, bus.ErrPublishDenied))
+	if item.Topic == p.topic {
+		p.failures++
+		return answered(fmt.Errorf("publish %s: %w", item.Topic, p.answer))
 	}
 	p.accepted = append(p.accepted, item)
 	return answered(nil)
 }
 
-// allow lifts the grant's denial: every later publish is accepted.
-func (p *denyingPublisher) allow() {
+// allow lifts the failure: every later publish is accepted.
+func (p *failingPublisher) allow() {
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	p.deny = ""
+	p.topic = ""
 }
 
-// seen is how many publishes to deny were denied, and the topics of those accepted.
-func (p *denyingPublisher) seen() (int, []string) {
+// seen is how many publishes to topic failed, and the topics of those accepted.
+func (p *failingPublisher) seen() (int, []string) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	return p.denials, topicsOf(p.accepted)
+	return p.failures, topicsOf(p.accepted)
+}
+
+// all is every envelope NATS accepted, in the order it took them.
+func (p *failingPublisher) all() []contracts.Envelope {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return append([]contracts.Envelope(nil), p.accepted...)
 }
 
 // seedHeldFallbackCopy writes a comment on issue T-1, routed to session:s1, that mentions s1, whose
@@ -973,7 +982,7 @@ func TestAFallbackCopyNATSDeniesIsRetriedPastTheDeadLetterThresholdUntilItIsPubl
 
 	ctx := store.WithTransactionTracking(context.Background())
 	database := storetest.Open(t)
-	publisher := &denyingPublisher{deny: sessionTopic}
+	publisher := &failingPublisher{topic: sessionTopic, answer: bus.ErrPublishDenied}
 	deps := Deps{Store: database, Publisher: publisher, Broker: events.NewBroker()}
 	commentID := seedHeldFallbackCopy(ctx, t, deps)
 	// pass runs a fallback pass once the held copy's backoff has passed.
@@ -1041,6 +1050,76 @@ func TestAFallbackCopyNATSDeniesIsRetriedPastTheDeadLetterThresholdUntilItIsPubl
 	if denials, accepted := publisher.seen(); denials != denied || !reflect.DeepEqual(accepted, []string{issueTopic, sessionTopic}) {
 		t.Fatalf("NATS saw %d denied publishes and accepted %#v, want %d denials and the issue topic, then the copy once",
 			denials, accepted, denied)
+	}
+}
+
+// TestAFallbackCopyOutlivesANATSOutageLongerThanTheDeadLetterThreshold: NATS being unreachable
+// says nothing about a held copy, so a pass that cannot reach NATS counts no attempt on the row
+// and releases its claim at once, for the next pass to retry - however long the outage lasts.
+// After more passes than retry.DeadLetterAttempts, the threshold a counted failure is logged at,
+// the row is still unsettled, unpublished and at no attempts, and no pass has logged that line.
+// The first pass once NATS is back publishes the copy, once and under the mention's dedupe key,
+// and settles the row published; a pass after that publishes nothing.
+func TestAFallbackCopyOutlivesANATSOutageLongerThanTheDeadLetterThreshold(t *testing.T) {
+	const (
+		issueTopic   = "notifications.dispatch.issue.T-1.comment.created"
+		sessionTopic = "notifications.agent.s1"
+		deadLetter   = `level=ERROR msg="dispatch outbox: fallback copy reached dead-letter threshold"`
+	)
+	var logged lockedBuffer
+	previous := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&logged, nil)))
+	t.Cleanup(func() { slog.SetDefault(previous) })
+
+	ctx := store.WithTransactionTracking(context.Background())
+	database := storetest.Open(t)
+	publisher := &failingPublisher{topic: sessionTopic, answer: bus.ErrUnavailable}
+	deps := Deps{Store: database, Publisher: publisher, Broker: events.NewBroker()}
+	commentID := seedHeldFallbackCopy(ctx, t, deps)
+	// pass runs a fallback pass with any backoff the held copy waits on behind it. A pass that
+	// could not reach NATS leaves none, so while the outage lasts this moves nothing.
+	pass := func() {
+		t.Helper()
+		if _, err := database.Pool.Exec(ctx, `
+			update comment_fallback_copies set next_attempt_at = now() - interval '1 second'
+			where comment_id = $1 and settled_at is null and next_attempt_at is not null
+		`, commentID); err != nil {
+			t.Fatalf("pass the held copy's backoff: %v", err)
+		}
+		publishFallbackCopies(ctx, deps)
+	}
+
+	outage := retry.DeadLetterAttempts + 2
+	for down := 1; down <= outage; down++ {
+		pass()
+		row := readHeldCopy(t, database, commentID, sessionTopic)
+		if row.attempts != 0 || row.settled || row.published || row.due != nil {
+			t.Fatalf("after %d passes with NATS unreachable the held copy has attempts=%d settled=%v published=%v "+
+				"next_attempt_at=%v, want no attempt counted, unsettled, unpublished and its claim released",
+				down, row.attempts, row.settled, row.published, row.due)
+		}
+	}
+	if unreachable, accepted := publisher.seen(); unreachable != outage || !reflect.DeepEqual(accepted, []string{issueTopic}) {
+		t.Fatalf("NATS could not take %d publishes and accepted %#v, want one try a pass, %d in all, and the issue topic alone",
+			unreachable, accepted, outage)
+	}
+	if logged := logged.String(); strings.Contains(logged, deadLetter) {
+		t.Fatalf("a pass logged the dead-letter line during the outage, want none: an unreachable NATS counts no attempt; log:\n%s",
+			logged)
+	}
+
+	publisher.allow()
+	pass()
+	if row := readHeldCopy(t, database, commentID, sessionTopic); row.attempts != 0 || !row.settled || !row.published {
+		t.Fatalf("once NATS was back the held copy has attempts=%d settled=%v published=%v, "+
+			"want no attempt counted by the outage, settled and published", row.attempts, row.settled, row.published)
+	}
+	pass()
+	wantKey := contracts.AgentSendDedupeKey("s1", model.CommentMentionIdempotencyKey(commentID, "session:s1", "steer"))
+	copies := publisher.all()[1:]
+	if len(copies) != 1 || copies[0].Topic != sessionTopic || copies[0].DedupeKey != wantKey {
+		t.Fatalf("the passes after the outage published %#v, want s1's copy once, to %s keyed %q",
+			copies, sessionTopic, wantKey)
 	}
 }
 
