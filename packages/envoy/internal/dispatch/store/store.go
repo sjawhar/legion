@@ -6,6 +6,8 @@ import (
 	"embed"
 	"fmt"
 	"io/fs"
+	"math"
+	"slices"
 	"time"
 
 	"github.com/jackc/pgx/v5"
@@ -133,7 +135,9 @@ func (s *Store) migrate(ctx context.Context, fsys fs.FS) error {
 	if err != nil {
 		return fmt.Errorf("migrations refused, none applied: %w", err)
 	}
-	if err := s.createVersionTable(ctx); err != nil {
+	// Only a set holding a version past an integer widens the column: see createVersionTable.
+	widen := slices.ContainsFunc(migrations, func(m pgmigrate.Migration) bool { return m.Version > math.MaxInt32 })
+	if err := s.createVersionTable(ctx, widen); err != nil {
 		return err
 	}
 	for _, migration := range migrations {
@@ -151,18 +155,22 @@ func (s *Store) migrate(ctx context.Context, fsys fs.FS) error {
 const migrationLockKey int64 = 8150001
 
 // createVersionTable creates schema_migrations under the runner's advisory lock, as the broker's
-// runner creates its own, and widens the version column of a database that has the table from
-// before the versions became timestamps. Created outside the lock, two processes booting at once
-// against an empty database race `create table if not exists` on the catalog, and the loser exits
-// on pg_type's unique index.
+// runner creates its own, and, when widen is set, widens the version column of a database that has
+// the table from before the versions became timestamps. Created outside the lock, two processes
+// booting at once against an empty database race `create table if not exists` on the catalog, and
+// the loser exits on pg_type's unique index.
 //
 // The column is a bigint because a migration added since the set stopped being numbered is named
 // for the UTC moment it was created, 14 digits, which is past the 2147483647 an integer column
-// holds. A database created before this change has the integer the statement below used to create,
-// so the type is read and the column widened here, in the same locked transaction and before any
-// migration's row goes in. Reading the type first is what makes that idempotent: an ALTER TABLE of
-// a column already bigint rewrites nothing but still takes ACCESS EXCLUSIVE on every boot.
-func (s *Store) createVersionTable(ctx context.Context) error {
+// holds. A database created before this change has the integer the statement below used to create.
+// It is widened only by a boot whose set holds such a version (widen), as the daemon widens its
+// own in the first timestamped migration's transaction, and not by a boot that records nothing past
+// an integer: the release before this change reads `max(version)` uncast, so a widening while its
+// processes still serve fails that read once on every connection that prepared it ("cached plan
+// must not change result type"). A release whose set first holds a timestamped migration is rolled
+// out over processes of this one, which read the version cast. The type is read before the ALTER
+// TABLE, which on a column already bigint rewrites nothing but still takes ACCESS EXCLUSIVE.
+func (s *Store) createVersionTable(ctx context.Context, widen bool) error {
 	ctx = WithTransactionTracking(ctx)
 	tx, err := s.Pool.Begin(ctx)
 	if err != nil {
@@ -179,6 +187,9 @@ func (s *Store) createVersionTable(ctx context.Context) error {
 		)
 	`); err != nil {
 		return fmt.Errorf("create schema migrations table: %w", err)
+	}
+	if !widen {
+		return tx.Commit(ctx)
 	}
 	var dataType string
 	if err := tx.QueryRow(ctx, `select data_type from information_schema.columns

@@ -8,6 +8,8 @@ body: |-
     every number, and a migration that merges below one a database has already applied still runs
     there exactly once, since the runner applies every version `schema_migrations` does not
     record. `schema_migrations.version` is now a `bigint`, which a 14-digit version needs; a
-    database that has the table as an `integer` is widened once, in the locked transaction the
-    runner creates the table in. `schema_version` in `/healthz` is unchanged.
+    database that has the table as an `integer` keeps it until the first boot whose set holds a
+    timestamped migration, which widens it once, in the locked transaction the runner creates the
+    table in, so the previous release's health probe keeps answering during this one's roll.
+    `schema_version` in `/healthz` is unchanged.
 time: 2026-10-29T20:55:14.000000000Z

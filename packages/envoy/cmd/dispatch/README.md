@@ -707,8 +707,11 @@ each and collide only when the first merged — nothing conflicts in git — whi
 taken a moment apart belong to their own authors. The version is the file name's leading digits
 read as a number, as before, so every timestamp orders after every number and timestamps order
 among themselves by time. A 14-digit version is past what an `integer` column holds, so
-`schema_migrations.version` is a `bigint`; a database created before the change is widened in the
-same locked transaction that creates the table (`createVersionTable`), once, and
+`schema_migrations.version` is a `bigint`. A database created before the change keeps its
+`integer` column until a boot whose set holds a timestamped migration, which widens it once, in the
+same locked transaction that creates the table (`createVersionTable`): a boot with no timestamped
+migration leaves it alone, because the release before this change reads `max(version)` uncast and
+would fail that read once on every connection that prepared it while it still serves.
 `schema_version` in `/healthz` and the auto-deployer is still `max(version)`, the newest migration
 applied.
 
