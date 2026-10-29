@@ -2,26 +2,33 @@
   "schemaVersion": 1,
   "phase": "implement",
   "issue": "INFRA-368",
-  "completed": "2026-10-29T12:20:00Z",
+  "completed": "2026-10-29T13:20:00Z",
   "pullRequest": "https://github.com/sjawhar/legion/pull/2463",
-  "round": "forward merge with main after the roll",
+  "round": "review round 7 findings (architect's round 8)",
   "proof": [
     {
-      "criterion": "The forward merge with main 88840d35 keeps every behaviour of #2463: A7 replies naming a block, A10/A11 item-block graph nodes, A13 carried ids in the editor, A15 comment pins, and the block cards that follow edits and deletes",
-      "surface": "Local Dispatch harness (bun run dispatch:local: real Go server built from the head, migrations 0001-0141 on Postgres 17, production SPA bundle, real dispatch CLI) over HTTP, the CLI and Chromium",
-      "command": "env -u DISPATCH_TOKEN_FILE DISPATCH_URL=http://127.0.0.1:8777 DISPATCH_TOKEN=e2e-token PROJECT=CORE COMPONENT_SOURCE=fixture FAKE_GITHUB_PORT=9022 DEV_SIGNIN_LOGIN=alice bash packages/dispatch/e2e/acceptance/block-graph.sh; cd packages/dispatch && DISPATCH_E2E_REUSE_SERVERS=1 DATABASE_URL=postgres://postgres@127.0.0.1:5433/dispatch_local?sslmode=disable FAKE_ENVOY_PORT=9021 FAKE_GITHUB_PORT=9022 FAKE_BROKER_PORT=9024 DISPATCH_E2E_PORT=8777 PLAIN_HTTP_PORT=31720 PLAYWRIGHT_BROWSERS_PATH=/legion/scratch/tmp/ms-playwright bunx playwright test --config e2e/playwright.config.ts --project=chromium e2e/block-references.e2e.ts e2e/conversation.e2e.ts -g 'passage|new text once|stops showing'",
-      "observed": "A fresh database migrates to 141. Driver exit 0, 133 PASS. Playwright 6 passed: the three passage rows and the three block-card rows (new text after an edit, comment block and spec block deleted). At b82265fc the Go api package (1099 s), store, refs, text, itemblocks, pmdoc, docs and cmd/dispatch pass, with contracts 318, envoy-client 1086, dashboard web/src 2874 and the skills guard 10/0, five type checks and biome clean.",
-      "headSha": "21ec46b9",
-      "negativeControl": "At b82265fc, before 21ec46b9, the three block-card rows failed: each waited 30 s for a GET /api/v1/events response that main's #2449 no longer makes (it replaced the events stream with the /ws/live socket). With the wait moved to the /ws/live socket, as main's approval.e2e.ts does, they pass. The block-refresh rule itself is unchanged (event-refresh.ts commentBlockReads; event-feed.test.ts 109 pass)."
+      "criterion": "Finding 2: a repeated keyed message reply that names a block answers its reply_block, as the first answer did",
+      "surface": "Local Dispatch harness (bun run dispatch:local built from 8c404ede: real Go server, migrations 0001-0141, real request-key layer) over HTTP",
+      "command": "curl -H 'Authorization: Bearer e2e-token' -H 'Idempotency-Key: probe-reply-1' -X POST http://127.0.0.1:8777/api/v1/issues/KEY-1/messages -d '{\"actor\":{\"kind\":\"session\",\"id\":\"probe-session\"},\"body\":\"Answering two.\",\"in_reply_to\":\"<message id>\",\"in_reply_to_block\":\"b2\"}' twice; go test ./internal/dispatch/api/ -run TestARepeatOfAKeyedMessageReplyAnswersItsBlockAgain",
+      "observed": "First POST 201 with reply_block {block_id: b2, text: 'Two.'}; the repeat 201 with Idempotency-Replayed: ?1, the same message id and the same reply_block. The Go test passes for the issue message route and the single-session send route.",
+      "headSha": "8c404ede30a6",
+      "negativeControl": "The same key with a different body answers 422 KEY_REUSED. With the hydrateMessageReplyBlocks call removed from recoveredMessage, both Go subtests fail with 'the repeat: reply_block = null'."
+    },
+    {
+      "criterion": "Finding 1: after a reload, a Retry of a kept comment edit sends the body, base_revision and blocks its first save sent, under the same request key",
+      "surface": "The dashboard's held-sends module (held-sends.ts, the store a kept send is restored from after a reload) under Bun's DOM tests; the editor and held-send browser rows in Chromium on the harness",
+      "command": "cd packages/dispatch && bun test web/src/features/conversation/held-sends.test.ts web/src/features/conversation web/src/features/margin; bunx playwright test --config e2e/playwright.config.ts --project=chromium e2e/block-references.e2e.ts e2e/conversation.e2e.ts e2e/offline-edits.e2e.ts e2e/held-sends.e2e.ts",
+      "observed": "316 pass, 0 fail, including 'a comment edit retried after a reload sends the body its first save sent' (first and retried PATCH identical: body, base_revision 3, blocks b1/b2, key send-edit) and 'a send kept with its edit as a bare comment id still restores'. Playwright 34 passed, 1 skipped; the driver exits 0 with 133 PASS.",
+      "headSha": "8c404ede30a6",
+      "negativeControl": "With keep/restore reverted to 21ec46b9's form, the reload-then-Retry case fails: the retried PATCH carries {body} alone under the same key (the 422 KEY_REUSED the review found). A kept record in the previous build's shape restores with no ids."
     }
   ],
   "filesChanged": [
-    "merge b82265fc: 21 conflicted files resolved (routes_table.go/_test.go 142 routes; messages.go request-key recovery plus block indexing; send-request.ts, MentionComposer.tsx, ConversationTab.tsx, margin hosts carry block ids through main's keyed sendAttempt/WriteBounds; sse.test.ts deleted as on main, its block-refresh cases moved to event-feed.test.ts; docs)",
-    "migrations renumbered 0139_item_blocks, 0140_comments_item_blocks_trigger, 0141_messages_item_blocks_trigger after main's 0137_request_keys and 0138_pending_delivery_indexes, with every reference",
-    "21ec46b9: packages/dispatch/e2e/block-references.e2e.ts waits for the /ws/live socket in its three block-card rows"
+    "a21c72bb: packages/dispatch/web/src/features/conversation/held-sends.ts (KeptComposerSend.edit keeps the press-time carried ids; restore sends them), send-request.ts (carriedIds, one default saveCommentEdit), MentionComposer.tsx (uses saveCommentEdit), held-sends.test.ts",
+    "8c404ede: packages/envoy/internal/dispatch/api/messages.go (recoveredMessage hydrates reply_block), message_reply_block_repeat_test.go"
   ],
   "deviations": [
-    "The three block-card browser rows (one of them the tester's red row from round 6) waited for the GET /api/v1/events response, which main's #2449 removed; 21ec46b9 changes only that wait, to main's /ws/live socket event, and keeps every assertion.",
-    "packages/claude-envoy/dist and legion equal main's at the merge parent 88840d35; main has since moved (d157fc86), and per the controller's ruling #2463 is not merged with main again."
+    "Finding 1 keeps the carried ids rather than reusing the kept wire request: the composer's Retry builds a SentRequest, and reusing the wire would duplicate requestFor's judgement of when it still applies.",
+    "The reload-then-Retry path is proven by the held-sends unit test; the tester drives it in a browser, as the architect assigned."
   ]
 }
