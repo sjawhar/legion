@@ -317,7 +317,7 @@ RUN set -eu; \
 # neither. GOMODCACHE moves to /gomodcache here, after the gopls and go-licenses layers. That
 # keeps the modules of those two tools out of this cache. The runtime stage ships
 # /gomodcache/cache/download to the workers as their warm module cache. One download serves the
-# build and the workers. A module-cache stage of its own would read the same 379 MiB from
+# build and the workers. A module-cache stage of its own would read the same 380 MiB from
 # proxy.golang.org a second time on every build that rebuilds this layer. This image's issue
 # (dispatch://INFRA-567) counts every such read.
 ENV GOMODCACHE=/gomodcache
@@ -798,7 +798,9 @@ COPY --from=go /out/gopls /usr/local/bin/gopls
 # GOMODCACHE in its environment reads, /home/legion/go/pkg/mod: HOME is /home/legion, and GOPATH is
 # its default, $HOME/go. The extracted module trees stay out of the image. go extracts what a build
 # needs from these zips, and a role's GOMODCACHE is the issue volume anyway (the toolchain stage's
-# go.env paragraph), so the image carries the one form both uses read: 379 MiB rather than 2.2 GiB.
+# go.env paragraph), so the image carries the one form both uses read: 380 MiB of download cache,
+# 419 module zips with their .mod, .info and hash files, rather than the 2.2 GiB of the whole
+# module cache, which is that download cache and the extracted trees together.
 # --chown makes the cache the runtime user's. Its files are mode 0644 in mode 0755 directories,
 # which is what lets a role add a module the cache does not hold. The read-only 0444 files and 0555
 # directories of a module cache are in the extracted trees, which this is not. The COPY sits in the

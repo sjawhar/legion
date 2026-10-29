@@ -15,12 +15,13 @@
 #             are one string, and every consumer names this digest.
 #
 # To add an image, or to move one to a new version: add or edit its row and push. ci.yaml's
-# ci-images job copies the rows the package does not hold yet, and then runs the gate, which
-# reads the package. .github/workflows/mirror-images.yaml copies them again on a push to main.
-# The gate refuses a consumer that names anything but a digest this file holds.
+# ci-images job copies the rows the package does not hold yet, and then reads the package, which
+# is the half of the gate that answers for it. That job is the one copy path, and it runs on a
+# pull request, on a merge group and on a push to main. The gate refuses a consumer that names
+# anything but a digest this file holds.
 #
 # .github/scripts/check-ci-images.sh is the gate. It reads this file and every file a CI job
-# runs, and its header says what it refuses.
+# runs, and its header says what each of its two modes refuses.
 
 # The package every copy lives in. One package, not one per image: GitHub makes each new
 # container package of an account private, and exposes no API that makes one public, so each

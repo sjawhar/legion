@@ -723,8 +723,8 @@ def check_table(document: dict, data, filters: dict, files: set, problems: list)
                             f"{job_id}, which {path} does not have")
     return unreduced
 
-# The jobs ci-ok.sh holds to success on every run, so its SELECTED_BY maps none of them.
-ALWAYS_RUN = ("changes", "lint", "ci-images")
+# The jobs ci-ok.sh holds to success on every run, so its SELECTED_BY maps neither.
+ALWAYS_RUN = ("changes", "lint")
 # ci-ok.sh's lists of SELECTED_BY jobs whose if: admits only some events: per list, the if: term
 # that puts a job on it, what that term admits, and the events where ci-ok.sh accepts its skip.
 EVENT_LISTS = {
@@ -799,7 +799,7 @@ def check_ci_ok(document: dict, problems: list) -> None:
             continue  # the loop above already names it, and says to add it to ci-ok's needs
         if job_id not in needed:
             problems.append(f"::error file={WORKFLOW}::ci-ok's SELECTED_BY maps {job_id}, which is not a job ci-ok "
-                            f"needs other than {', '.join(ALWAYS_RUN)}; drop it")
+                            f"needs other than {' and '.join(ALWAYS_RUN)}; drop it")
         elif want is None or want == have:
             continue
         elif have is None:

@@ -210,11 +210,12 @@ The image also carries the Go module cache of the two modules `go.work` binds, s
 build in this repository reads no package registry. The build fills it in the Dockerfile's `go`
 stage, in the layer that copies `go.work`, `go.work.sum` and each module's `go.mod` and `go.sum` and
 runs `go mod download`, above every source `COPY`, so a commit never rebuilds it. The runtime stage
-copies the download cache alone — the module zips, `.mod` and `.info` files and their hashes, 379
-MiB in 3,142 files — to `/home/legion/go/pkg/mod/cache/download`, as the runtime user, its files
-0644 in 0755 directories, so a role can add a module the cache does not hold. The extracted module
-trees are left out: `go` extracts what a build needs from the zips, and 2.2 GiB in every pull buys
-nothing. A pod tells every role `GOMODCACHE=/legion/go/mod` on the issue's volume
+copies the download cache alone — the module zips, `.mod` and `.info` files and their hashes, 380
+MiB over 419 module zips — to `/home/legion/go/pkg/mod/cache/download`, as the runtime user, its
+files 0644 in 0755 directories, so a role can add a module the cache does not hold. The extracted
+module trees are left out: `go` extracts what a build needs from the zips, and the whole module
+cache — those trees and this download cache together — is 2.2 GiB, which buys nothing in every
+pull. A pod tells every role `GOMODCACHE=/legion/go/mod` on the issue's volume
 (`roleEnvironment`, `manifest.go`), which is empty in a fresh pod and dies with it ([The disk dies
 with its pod](#the-disk-dies-with-its-pod)), so the image's copy reaches a role as a proxy rather
 than as its `GOMODCACHE`: the build rewrites `/opt/go/go.env`'s `GOPROXY` line to
@@ -313,8 +314,9 @@ them it is 22 layers and 1007 MiB compressed (1,056,280,622 bytes, the `sha-ff33
 pull request that added them): the Debian layer grows from about 30 MiB to 307 MiB, almost all of it
 Chromium and the library closure it depends on; the Go toolchain is 64 MiB and `gopls` 20 MiB; Node's
 tree with the two npm language servers is 66 MiB. The warm Go module cache is a layer of its own,
-379 MiB in 3,142 files — 419 module zips with their `.mod`, `.info` and hash files — measured on
-disk from `go mod download` over `go.work`'s two
+380 MiB over 419 module zips with their `.mod`, `.info` and hash files — the download cache alone,
+not the whole 2.2 GiB module cache, whose other half is the extracted trees — measured on disk
+from `go mod download` over `go.work`'s two
 modules in a worker pod on 2026-10-29 rather than from a built image: the zips are compressed
 already, so the layer should land near that figure, and the image's first build is what measures
 it. The five client tools

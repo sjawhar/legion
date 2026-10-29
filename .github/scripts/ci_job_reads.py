@@ -363,6 +363,8 @@ STALL_CLIENT = "Stall test of envoy-client's NATS connection options"
 LOADTEST_RUN_STEP = "One-run-at-a-time test for loadtest/run-step.sh and run-series.sh (fakes go and uv; no stack)"
 LOADTEST_LOCK = "Lock test for loadtest/common.sh (inherited lock, refusals, holders in another PID namespace; no stack)"
 CHECK_STEP = "Check every CI filter matches every file its job reads"
+COPY_STEP = "Copy every image the package does not hold"
+PACKAGE_STEP = "Check the package holds every row of .github/ci-images.yaml"
 
 # docs-pages.yaml builds and publishes main's site in a workflow of its own (its header says why),
 # so its on.push.paths stands in for the docs filter on main.
@@ -755,6 +757,17 @@ GATES = [
     ) + reads(*((path, f"check-ci-filters.sh holds its on.push.paths equal to the {name} filter (PUSH_WORKFLOWS)")
                 for name, path in PUSH_WORKFLOWS.items()))
       + setup_go("ci-filters", f"{DAEMON}/go.mod") + CI_SELF),
+
+    # The ci-images job: the copy, and the package mode of the image gate, which reads ghcr.io.
+    # These are the files that decide what those two steps do. The gate's tree mode is a step of
+    # lint, which runs on every change, and no filter gates it.
+    gate("ci_images", "ci-images", reads=reads(
+        (".github/ci-images.yaml", f"{at('ci-images', COPY_STEP)} copies the rows it holds, and "
+                                   f"{at('ci-images', PACKAGE_STEP)} reads each row's digest"),
+        (".github/scripts/mirror-ci-images.sh", f"{at('ci-images', COPY_STEP)} runs it"),
+        (".github/scripts/check-ci-images.sh", f"{at('ci-images', PACKAGE_STEP)} runs it"),
+        (".github/actions/install-crane/**", at("ci-images", "./.github/actions/install-crane")),
+    ) + CI_SELF),
 ]
 
 EXCLUDED = {

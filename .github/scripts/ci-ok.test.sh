@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
-# Tests for `ci-ok.sh`: ci-ok passes only when `changes`, lint and ci-images succeeded, every job
-# `changes` selected succeeded, and every job it did not select succeeded or was skipped.
+# Tests for `ci-ok.sh`: ci-ok passes only when `changes` and lint succeeded, every job `changes`
+# selected succeeded, and every job it did not select succeeded or was skipped.
 #
 # ci-ok.sh reads only its environment, so each case hands it a `toJSON(needs)` built here and the
 # SELECTED_BY and PULL_REQUEST_ONLY its ci.yaml step sets, shrunk to four jobs: typecheck,
@@ -22,13 +22,12 @@ selected_by='{"typecheck": "typecheck", "envoy-plugin": "envoy_plugin", "worker-
 pull_request_only='["worker-image"]'
 
 # needs <changes result> <changes outputs> <lint result> [<job>=<result>]...: the toJSON(needs)
-# GitHub hands ci-ok, with ci-images succeeded and every other job with no outputs. A pair names
-# any job, ci-images included.
+# GitHub hands ci-ok, every other job with no outputs.
 needs() {
   local changes=$1 outputs=$2 lint=$3 pair doc
   shift 3
   doc=$(jq -n --arg c "$changes" --argjson o "$outputs" --arg l "$lint" \
-    '{changes: {result: $c, outputs: $o}, lint: {result: $l, outputs: {}}, "ci-images": {result: "success", outputs: {}}}')
+    '{changes: {result: $c, outputs: $o}, lint: {result: $l, outputs: {}}}')
   for pair in "$@"; do
     doc=$(jq --arg j "${pair%%=*}" --arg r "${pair#*=}" '.[$j] = {result: $r, outputs: {}}' <<<"$doc")
   done
@@ -63,11 +62,10 @@ run_ci_ok "$(needs success "$selects" success typecheck=success envoy-plugin=ski
 check "passes" "$(is "$status" 0)"
 check "prints every job's result" "$(contains "$out" '^changes: success$')"
 check "and lint's" "$(contains "$out" '^lint: success$')"
-check "and ci-images'" "$(contains "$out" '^ci-images: success$')"
 check "and the selected job's selection" "$(contains "$out" '^typecheck: success (selected: needs.changes.outputs.typecheck is true)$')"
 check "and the unselected job's" \
   "$(contains "$out" '^envoy-plugin: skipped (not selected: needs.changes.outputs.envoy_plugin is false)$')"
-check "says why it passed" "$(contains "$out" 'changes, lint and ci-images succeeded, every job changes selected succeeded')"
+check "says why it passed" "$(contains "$out" 'changes and lint succeeded, every job changes selected succeeded')"
 check "reports no error" "$(is "$(contains "$out" '::error::')" false)"
 
 echo "case: a job changes did not select, skipped, beside a selected one that succeeded"
@@ -129,15 +127,8 @@ run_ci_ok "$(needs success "$selects" skipped typecheck=success envoy-plugin=ski
 check "fails" "$(is "$status" 1)"
 check "names it and why" "$(contains "$out" '^::error::lint ended skipped; lint runs on every change')"
 
-echo "case: ci-images was skipped"
-run_ci_ok "$(needs success "$selects" success typecheck=success envoy-plugin=skipped worker-image=success docs=skipped \
-  ci-images=skipped)"
-check "fails" "$(is "$status" 1)"
-check "names it and why" "$(contains "$out" '^::error::ci-images ended skipped; ci-images runs on every change')"
-
 echo "case: a draft pull request"
-run_ci_ok "$(needs skipped '{}' skipped typecheck=skipped envoy-plugin=skipped worker-image=skipped docs=skipped \
-  ci-images=skipped)" pull_request true
+run_ci_ok "$(needs skipped '{}' skipped typecheck=skipped envoy-plugin=skipped worker-image=skipped docs=skipped)" pull_request true
 check "fails" "$(is "$status" 1)"
 check "says to mark it ready" \
   "$(contains "$out" '^::error::Draft pull request: no test job runs. Mark it ready for review to start them.$')"

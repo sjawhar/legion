@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
-# Tests for `check-ci-images.sh`: one red case per rule it enforces, one per ground of its
-# exception list, and the repository's own tree.
+# Tests for `check-ci-images.sh`: one red case per rule it enforces, under the mode that owns
+# that refusal, one per ground of its exception list, and the repository's own tree in each mode.
 #
 # Each case builds a miniature repository under a temporary directory and symlinks the real
 # script into it, so the script under test is the file CI runs, not a copy that can drift: it
@@ -11,8 +11,13 @@
 # NO CASE REACHES THE NETWORK. The check reads which rows the package holds through
 # CI_IMAGES_MANIFEST_HEAD: when that variable is set, it runs the command it names once per row
 # and reads the HTTP status code the command prints. Every case here sets it to `head.sh` below,
-# which answers 200 for every digest but the ones MISSING names, and 404 for those. So the rule
+# which answers 200 for every digest but the ones MISSING names, and 404 for those. So the check
 # that reads ghcr.io is driven by a case, and nothing is pulled.
+#
+# EVERY CASE NAMES ITS MODE. The check takes one mode: `tree` runs the checks that read the
+# files of the tree, and `package` runs the one that reads ghcr.io. Each case runs under the
+# mode that owns its refusal, and one case holds each mode to its own half — the tree mode runs
+# the stand-in for the network never, and the package mode passes a tree the tree mode refuses.
 #
 # Run from anywhere: .github/scripts/check-ci-images.test.sh
 # CI runs it in ci.yaml's test job.
@@ -49,6 +54,17 @@ case " ${MISSING:-} " in
 esac
 SH
 chmod +x "$head_script"
+
+# The spy the mode case drives the check with: it answers 200 for every digest and writes each
+# one it was asked about to $SPY_LOG. The check reads ghcr.io through this seam alone, so a run
+# that leaves the log empty made no network read.
+spy_script="$work/spy.sh"
+cat > "$spy_script" <<'SH'
+#!/usr/bin/env bash
+printf '%s\n' "$1" >> "${SPY_LOG:?}"
+echo 200
+SH
+chmod +x "$spy_script"
 
 # fixture <name>: a tree that passes — the rows, the pins, and every file of CI's reach, each
 # naming a digest the rows hold. Echoes the fixture root. Each case names its own tree: two
@@ -160,42 +176,75 @@ YAML
   echo "$root"
 }
 
-# run_check <root>: runs the script under test against that tree, setting `out` to its combined
-# output and `status` to its exit code. Not a subshell, so both survive the call. MISSING, which
-# the caller may set, names the digests the stand-in package does not hold.
+# run_check <mode> <root>: runs the script under test against that tree, in that mode, setting
+# `out` to its combined output and `status` to its exit code. Not a subshell, so both survive the
+# call. MISSING, which the caller may set, names the digests the stand-in package does not hold.
 run_check() {
-  local root=$1
+  local mode=$1 root=$2
   set +e
   out=$(CI_IMAGES_MANIFEST_HEAD="$head_script" MISSING="${MISSING:-}" \
-    "$root/.github/scripts/check-ci-images.sh" 2>&1)
+    "$root/.github/scripts/check-ci-images.sh" "$mode" 2>&1)
   status=$?
   set -e
 }
 
 echo "case: a tree whose every image is a row of .github/ci-images.yaml"
 root=$(fixture green)
-run_check "$root"
-check "exits 0" "$(is "$status" 0)"
-check "says what it read" "$(contains "$out" 'holds 4 row(s), 4 of them in the package')"
+run_check tree "$root"
+check "the tree mode exits 0" "$(is "$status" 0)"
+check "says how many rows it read" "$(contains "$out" 'holds 4 row(s);')"
 check "counts the reach" "$(contains "$out" "reference(s) in .* file(s) of CI's reach")"
+run_check package "$root"
+check "the package mode exits 0" "$(is "$status" 0)"
+check "says what the package holds" "$(contains "$out" 'holds 4 row(s), 4 of them in the package')"
+
+echo "case: each mode runs its own half"
+# The tree mode's refusals read files, and the package mode's one refusal reads ghcr.io. This
+# tree carries a refusal of the tree half (a Go string on another registry, rule 4) and a package
+# that holds every row, so each mode answers for its half alone.
+root=$(fixture mode-halves)
+cat > "$root/packages/envoy/internal/testpg/testpg.go" <<'YAML'
+package testpg
+
+const Image = "docker.io/pgvector/pgvector:pg17"
+YAML
+spy_log="$work/spy.log"
+: > "$spy_log"
+set +e
+out=$(CI_IMAGES_MANIFEST_HEAD="$spy_script" SPY_LOG="$spy_log" \
+  "$root/.github/scripts/check-ci-images.sh" tree 2>&1)
+status=$?
+set -e
+check "the tree mode refuses the reference" "$(is "$status" 1)"
+check "naming the registry it found" "$(contains "$out" 'this string names docker.io/pgvector/pgvector')"
+check "and reads the package for no row" "$(is "$(wc -l < "$spy_log")" 0)"
+
+set +e
+out=$(CI_IMAGES_MANIFEST_HEAD="$spy_script" SPY_LOG="$spy_log" \
+  "$root/.github/scripts/check-ci-images.sh" package 2>&1)
+status=$?
+set -e
+check "the package mode passes the same tree" "$(is "$status" 0)"
+check "naming that reference nowhere" "$(is "$(contains "$out" 'docker.io/pgvector')" false)"
+check "and reads the package once per row" "$(is "$(wc -l < "$spy_log")" 4)"
 
 echo "case: rule 1 — a row this check cannot read"
 root=$(fixture row-no-tag)
 sed -i '/tag: nats-2.10/d' "$root/.github/ci-images.yaml"
-run_check "$root"
+run_check tree "$root"
 check "a row with no tag fails" "$(is "$status" 1)"
 check "says why a tag is needed" "$(contains "$out" 'a package version nothing names')"
 check "names the row" "$(contains "$out" 'the row for docker.io/library/nats:2.10 has no tag')"
 
 root=$(fixture row-empty-tag)
 sed -i 's/tag: nats-2.10/tag: ""/' "$root/.github/ci-images.yaml"
-run_check "$root"
+run_check tree "$root"
 check "an empty tag fails too" "$(is "$status" 1)"
 check "names the row" "$(contains "$out" 'has no tag')"
 
 root=$(fixture row-bad-digest)
 sed -i "s|digest: $NATS|digest: sha256:notadigest|" "$root/.github/ci-images.yaml"
-run_check "$root"
+run_check tree "$root"
 check "a digest that is not 64 hex characters fails" "$(is "$status" 1)"
 check "says what to run" "$(contains "$out" 'crane digest docker.io/library/nats:2.10')"
 
@@ -206,7 +255,7 @@ cat >> "$root/.github/ci-images.yaml" <<YAML
     tag: nats-2.11
     digest: $NATS
 YAML
-run_check "$root"
+run_check tree "$root"
 check "a second row on one digest fails" "$(is "$status" 1)"
 check "says why one digest is one row" "$(contains "$out" 'one digest names one row')"
 
@@ -216,7 +265,7 @@ cat >> "$root/.github/ci-images.yaml" <<YAML
     tag: nats-2.10
     digest: $UNKNOWN
 YAML
-run_check "$root"
+run_check tree "$root"
 check "a second row on one tag fails" "$(is "$status" 1)"
 check "says the copy would move the tag" "$(contains "$out" 'would move the tag off the first')"
 
@@ -224,7 +273,7 @@ echo "case: rule 3 — a row that disagrees with a version pinned elsewhere"
 root=$(fixture bun-drift)
 sed -i 's|docker.io/oven/bun:1.3.14-slim|docker.io/oven/bun:1.4.2-slim|' \
   "$root/.github/ci-images.yaml"
-run_check "$root"
+run_check tree "$root"
 check "a bun row that is not the pinned release fails" "$(is "$status" 1)"
 check "names the pin" "$(contains "$out" '.bun-version locks 1.3.14')"
 check "and the row that is now missing" "$(contains "$out" 'no row copies oven/bun:1.3.14-slim')"
@@ -232,7 +281,7 @@ check "and the row that is now missing" "$(contains "$out" 'no row copies oven/b
 root=$(fixture golang-drift)
 sed -i 's|ARG GO_VERSION=1.25.0|ARG GO_VERSION=1.26.3|' \
   "$root/packages/daemon/docker/worker.Dockerfile"
-run_check "$root"
+run_check tree "$root"
 check "a golang row that is not the pinned release fails" "$(is "$status" 1)"
 check "names the pin" "$(contains "$out" 'pins ARG GO_VERSION=1.26.3')"
 check "and what to write" "$(contains "$out" 'golang:1.26.3-alpine')"
@@ -244,7 +293,7 @@ package testpg
 
 const Image = "docker.io/pgvector/pgvector@$NATS"
 YAML
-run_check "$root"
+run_check tree "$root"
 check "a docker.io reference fails" "$(is "$status" 1)"
 check "names the registry it found" "$(contains "$out" 'this string names docker.io/pgvector/pgvector')"
 check "and the one package" "$(contains "$out" "a copy in $REGISTRY")"
@@ -252,7 +301,7 @@ check "and the one package" "$(contains "$out" "a copy in $REGISTRY")"
 echo "case: rule 5 — a reference that is not pinned by digest"
 root=$(fixture tag-not-digest)
 sed -i "s|image: $REGISTRY@$NATS|image: $REGISTRY:nats-2.10|" "$root/.github/workflows/ci.yaml"
-run_check "$root"
+run_check tree "$root"
 check "a tagged reference fails" "$(is "$status" 1)"
 check "says a tag can move" "$(contains "$out" 'a name the registry can move')"
 check "names the service and its line" "$(contains "$out" 'ci.yaml:8: the nats service')"
@@ -260,20 +309,20 @@ check "names the service and its line" "$(contains "$out" 'ci.yaml:8: the nats s
 echo "case: rule 6 — a reference whose digest no row holds"
 root=$(fixture digest-unknown)
 sed -i "s|$NATS|$UNKNOWN|" "$root/packages/envoy-client/src/__tests__/nats-server.ts"
-run_check "$root"
+run_check tree "$root"
 check "a digest outside the file fails" "$(is "$status" 1)"
 check "names the file to add it to" "$(contains "$out" 'names a digest no row of .github/ci-images.yaml holds')"
 check "and the line to edit" "$(contains "$out" 'nats-server.ts:1:')"
 
 echo "case: rule 7 — a row the package does not hold"
 root=$(fixture not-published)
-MISSING=$GOLANG run_check "$root"
+MISSING=$GOLANG run_check package "$root"
 check "a row ghcr.io answers 404 for fails" "$(is "$status" 1)"
 check "names the row and the status" "$(contains "$out" 'is not in the package: a manifest HEAD answered 404')"
-check "and says what publishes it" "$(contains "$out" 'mirror-images.yaml publishes a row')"
+check "and says what copies it" "$(contains "$out" "ci.yaml's ci-images job copies a row")"
 
 root=$(fixture published)
-MISSING=$UNKNOWN run_check "$root"
+MISSING=$UNKNOWN run_check package "$root"
 check "a 404 on a digest no row holds changes nothing" "$(is "$status" 0)"
 
 echo "case: a docker command whose image this check cannot read"
@@ -282,14 +331,14 @@ cat > "$root/scripts/e2e/stage1-skeleton.sh" <<'YAML'
 #!/usr/bin/env bash
 docker run -d --name pg "$PG_IMAGE" >/dev/null
 YAML
-run_check "$root"
+run_check tree "$root"
 check "a variable from nowhere fails" "$(is "$status" 1)"
 check "says what to do with it" "$(contains "$out" 'add the variable that holds it to IMAGE_FROM')"
 
 echo "case: an IMAGE_FROM entry no docker command uses"
 root=$(fixture image-from-stale)
 rm -r "$root/.github/actions/pull-test-images"
-run_check "$root"
+run_check tree "$root"
 check "fails" "$(is "$status" 1)"
 check "names the variable" "$(contains "$out" 'IMAGE_FROM names \$image here')"
 check "says what to delete" "$(contains "$out" 'Delete the entry')"
@@ -299,7 +348,7 @@ root=$(fixture from-undeclared)
 cat > "$root/packages/envoy/docker/Dockerfile" <<'YAML'
 FROM ${NOT_AN_ARG} AS build
 YAML
-run_check "$root"
+run_check tree "$root"
 check "fails" "$(is "$status" 1)"
 check "names the ARG it wanted" "$(contains "$out" 'does not declare as an ARG')"
 
@@ -314,7 +363,7 @@ cat > "$root/packages/envoy/docker/Dockerfile" <<'YAML'
 ARG BASE_IMAGE=docker.io/library/debian:trixie-slim
 FROM ${BASE_IMAGE} AS build
 YAML
-run_check "$root"
+run_check tree "$root"
 check "a third-party default fails" "$(is "$status" 1)"
 check "names the image the build fetches" "$(contains "$out" 'docker.io/library/debian:trixie-slim')"
 
@@ -326,7 +375,7 @@ cat > "$root/scripts/e2e/stage1-skeleton.sh" <<'YAML'
 #!/usr/bin/env bash
 docker run -d --name pg mirror.gcr.io/library/postgres:16 >/dev/null
 YAML
-run_check "$root"
+run_check tree "$root"
 check "fails" "$(is "$status" 1)"
 check "says a CI job runs it" "$(contains "$out" 'a CI job runs this file and it names mirror.gcr.io')"
 check "and names the line" "$(contains "$out" 'stage1-skeleton.sh:2:')"
@@ -339,7 +388,7 @@ root=$(fixture mirror-in-reach-workflow)
 cat >> "$root/.github/workflows/ci.yaml" <<'YAML'
       - run: docker run --rm mirror.gcr.io/library/postgres:16 pg_isready
 YAML
-run_check "$root"
+run_check tree "$root"
 check "fails" "$(is "$status" 1)"
 check "says a CI job runs it" "$(contains "$out" 'a CI job runs this file and it names mirror.gcr.io')"
 
@@ -347,7 +396,7 @@ echo "case: a new file naming mirror.gcr.io that is in neither list"
 root=$(fixture mirror-new-file)
 mkdir -p "$root/docs"
 printf 'Start it with mirror.gcr.io/library/redis:7.\n' > "$root/docs/caching.md"
-run_check "$root"
+run_check tree "$root"
 check "fails" "$(is "$status" 1)"
 check "names the file and the line" "$(contains "$out" 'docs/caching.md:1:')"
 check "says it is in neither list" "$(contains "$out" "in neither CI's reach nor the exception list")"
@@ -358,7 +407,7 @@ echo "case: an exception the tree outgrew"
 # is a ground that holds nothing any more.
 root=$(fixture exception-stale)
 printf 'The live proofs.\n' > "$root/scripts/e2e/README.md"
-run_check "$root"
+run_check tree "$root"
 check "fails" "$(is "$status" 1)"
 check "names the file" "$(contains "$out" 'scripts/e2e/README.md:1:')"
 check "says what to delete" "$(contains "$out" 'Delete its line from EXCEPTIONS')"
@@ -366,43 +415,66 @@ check "says what to delete" "$(contains "$out" 'Delete its line from EXCEPTIONS'
 echo "case: a file of CI's reach that is gone"
 root=$(fixture reach-missing)
 rm "$root/packages/envoy/internal/tests3/seaweedfs.go"
-run_check "$root"
+run_check tree "$root"
 check "fails" "$(is "$status" 1)"
 check "says the list names it" "$(contains "$out" "CI's reach names this file, and it is gone")"
 
 echo "case: a workflow spelled .yml, which neither glob reads"
 root=$(fixture workflow-yml)
 cp "$root/.github/workflows/ci.yaml" "$root/.github/workflows/extra.yml"
-run_check "$root"
+run_check tree "$root"
 check "fails" "$(is "$status" 1)"
 check "says to rename it" "$(contains "$out" 'Rename it, or widen the two globs')"
 
 echo "case: .github/ci-images.yaml itself"
 root=$(fixture file-missing)
 rm "$root/.github/ci-images.yaml"
-run_check "$root"
+run_check tree "$root"
 check "a missing file fails" "$(is "$status" 1)"
 check "says what it is for" "$(contains "$out" 'the one place that says which image a digest is')"
 
 root=$(fixture registry-moved)
 sed -i "s|^registry: .*|registry: ghcr.io/sjawhar/legion/other|" "$root/.github/ci-images.yaml"
-run_check "$root"
+run_check tree "$root"
 check "another registry in the file itself fails" "$(is "$status" 1)"
 check "names the one every consumer reads" "$(contains "$out" "every consumer names $REGISTRY")"
 
 root=$(fixture file-unparsable)
 printf 'images: [\n' > "$root/.github/ci-images.yaml"
-run_check "$root"
+run_check tree "$root"
 check "a file that is not YAML fails" "$(is "$status" 1)"
 check "names the file, without a traceback" "$(contains "$out" 'is not valid YAML')"
 check "no traceback" "$(is "$(contains "$out" 'Traceback')" false)"
 
-echo "case: the repository's own tree"
+echo "case: a call that names no mode, and one that names both"
 set +e
-out=$(CI_IMAGES_MANIFEST_HEAD="$head_script" "$check_script" 2>&1)
+out=$("$check_script" 2>&1)
 status=$?
 set -e
-check "the real tree passes, with every row held" "$(is "$status" 0)"
+check "no mode fails" "$(is "$status" 1)"
+check "naming the tree mode" "$(contains "$out" 'this check takes one mode: .tree. reads the files of this tree')"
+check "and the package mode" "$(contains "$out" '.package. reads ghcr.io/sjawhar/legion/ci')"
+
+set +e
+out=$("$check_script" tree package 2>&1)
+status=$?
+set -e
+check "both modes in one call fails" "$(is "$status" 1)"
+check "naming them" "$(contains "$out" 'this check takes one mode')"
+
+echo "case: the repository's own tree, in each mode"
+set +e
+out=$(CI_IMAGES_MANIFEST_HEAD="$head_script" "$check_script" tree 2>&1)
+status=$?
+set -e
+check "the real tree passes the tree mode" "$(is "$status" 0)"
+check "says what it read" "$(contains "$out" "reference(s) in .* file(s) of CI's reach")"
+
+set +e
+out=$(CI_IMAGES_MANIFEST_HEAD="$head_script" "$check_script" package 2>&1)
+status=$?
+set -e
+check "the real tree passes the package mode, with every row held" "$(is "$status" 0)"
 check "says so" "$(contains "$out" "holds .* row(s), .* of them in the package")"
 
 summary "check-ci-images.sh"

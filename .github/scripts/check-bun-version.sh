@@ -93,9 +93,9 @@ LineLoader.add_constructor(yaml.resolver.BaseResolver.DEFAULT_MAPPING_TAG, _mapp
 
 PIN_FILE = ".bun-version"
 SETUP_ACTION = Path(".github/actions/setup-bun/action.yml")
-# Every image a CI job fetches is a copy in this package, named by digest
-# (.github/workflows/mirror-images.yaml publishes it from CI_IMAGES), so a Dockerfile's Bun base
-# names a digest and no version. The row that digest belongs to is what says which Bun it is.
+# Every image a CI job fetches is a copy in this package, named by digest (ci.yaml's ci-images
+# job publishes it from CI_IMAGES), so a Dockerfile's Bun base names a digest and no version.
+# The row that digest belongs to is what says which Bun it is.
 CI_IMAGES = Path(".github/ci-images.yaml")
 MIRROR_REGISTRY = "ghcr.io/sjawhar/legion/ci"
 SKIP_DIRS = {".git", ".jj", "node_modules", ".venv", "vendor"}
@@ -474,7 +474,7 @@ for dockerfile in dockerfiles:
                 problems.append(
                     f"{dockerfile}:{number}: {one_line(image)} names a digest no row of "
                     f"{CI_IMAGES} holds — a FROM on {MIRROR_REGISTRY} names the digest of one of "
-                    f"its rows, which the mirror workflow publishes"
+                    f"its rows, which ci.yaml's ci-images job publishes"
                 )
             elif "oven/bun" in upstream.lower() and not bun_tag_is_pinned(upstream, pinned):
                 problems.append(

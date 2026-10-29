@@ -52,12 +52,14 @@ reads a third-party registry any more, so a failed pull is this repository's own
 - `.github/ci-images.yaml` holds one row per image (`upstream`, `tag`, `digest`).
   `.github/scripts/mirror-ci-images.sh` copies the rows the package does not hold yet, with
   `crane copy`, which keeps the manifest digest. `ci.yaml`'s `ci-images` job runs that copy and
-  then the gate, so a pull request that adds a row does not race its own gate, and
-  `.github/workflows/mirror-images.yaml` runs the copy again on a push to main. Adding an image,
-  or moving one to a new version, is one edit of that file.
-- `.github/scripts/check-ci-images.sh` is the gate. It refuses a reference in CI's reach that
-  names anything but a digest that file holds, and it names each file outside CI's reach that
-  still names `mirror.gcr.io`, with the one ground that admits it.
+  then the package half of the gate, so a pull request that adds a row does not race its own
+  gate. That job is the one copy path, and it runs on a pull request, on a merge group and on a
+  push to main. Adding an image, or moving one to a new version, is one edit of that file.
+- `.github/scripts/check-ci-images.sh` is the gate, and it takes one mode. Its `tree` mode
+  refuses a reference in CI's reach that names anything but a digest that file holds, and names
+  each file outside CI's reach that still names `mirror.gcr.io`, with the one ground that admits
+  it. `lint` runs that mode on every change. Its `package` mode reads ghcr.io and refuses a row
+  the package does not hold, and the `ci-images` job runs it after the copy.
 - Both three-attempt `docker pull` retry loops are gone: the one in
   `.github/actions/pull-test-images/action.yml`, and the one in `ci.yaml`'s step that starts the
   file store. The registry is this repository's own, so a failed pull must be seen.
@@ -69,9 +71,9 @@ reads a third-party registry any more, so a failed pull is this repository's own
 2. Do not re-run the job, and do not add a retry. The answer came from this repository's own
    package, and a second request gets the same answer.
 3. Read the failure for which of three things it is:
-   - The package does not hold that digest. A row was added or edited, and the Mirror Images run
-     for that commit did not copy it. Read that run. It fails loudly on a copy that lands at
-     another digest.
+   - The package does not hold that digest. A row was added or edited, and the `ci-images` job
+     for that commit did not copy it. Read that job's log. It fails loudly on a copy that lands
+     at another digest, and `gh run rerun` runs it again.
    - The registry refused the read. The package is public, and a public package answers an
      anonymous pull, so a `403` means the package's visibility changed. That is an act by a
      person, not a branch's doing.
@@ -94,8 +96,8 @@ reads a third-party registry any more, so a failed pull is this repository's own
   `unknown blob` three times each: `test` (Tests run 40270870455), `dispatch` and `envoy-smoke`
   (Legion Envoy and Contracts run 40270870435). Main's last six Tests runs, through 04:25Z, were
   green. One `gh run rerun --failed` of each run passed on attempt 2, with no code change.
-- **INFRA-567, sjawhar/legion#2512, 2026-10-29.** The first Mirror Images run of this change
-  failed part way with `BLOB_UNKNOWN` from `mirror.gcr.io`, so each row's `upstream` is now the
+- **INFRA-567, sjawhar/legion#2512, 2026-10-29.** The first copy run of this change failed part
+  way with `BLOB_UNKNOWN` from `mirror.gcr.io`, so each row's `upstream` is now the
   image's own Docker Hub reference. The 12 digests are the same at both hosts, read at both. At
   17:1xZ, from a pod holding no credential, an anonymous token request
   (`GET https://ghcr.io/token?scope=repository:sjawhar/legion/ci:pull&service=ghcr.io`) and one

@@ -6,10 +6,29 @@
 # that copy by digest. .github/ci-images.yaml holds one row per distinct upstream image, and
 # .github/scripts/mirror-ci-images.sh copies the rows the package does not hold yet with
 # `crane copy`, which keeps the manifest digest. ci.yaml's ci-images job runs that script and
-# then this check, in that order. .github/workflows/mirror-images.yaml runs the script on a push
-# to main. This check holds the two sides to each other.
+# then the package mode of this check, in that order. That job is the one copy path, and it runs
+# on a pull request, on a merge group and on a push to main. This check holds the two sides to
+# each other.
+#
+# THE TWO MODES. This check takes one mode argument, and runs that half alone. A call that names
+# no mode, or that names more than one, fails naming both.
+#
+#   tree     every refusal that reads the files of this tree alone. It makes no network read, so
+#            ci.yaml's lint job runs it, and lint runs on every non-draft run. A change that
+#            names a third-party registry again can touch any file of the tree, and an image
+#            filter names few of those files, so this half must read every change.
+#   package  the one refusal that reads the package, over the network. ci.yaml's ci-images job
+#            runs it, after the copy of that same job. The ci_images filter selects that job and
+#            names every file that decides what the copy and this read do: .github/ci-images.yaml,
+#            the two scripts, .github/actions/install-crane and ci.yaml itself. The package can
+#            also change under a run that touches none of them, and a re-run reads it again.
+#
+# Both modes read .github/ci-images.yaml, because the package mode asks ghcr.io about each row's
+# digest. The package mode leaves the shape of a row to the tree mode, which runs on every change.
 #
 # It fails, naming the file, the line and the remedy, on:
+#
+# IN TREE MODE:
 #
 #   1. a row this check cannot read: a row that is not a mapping, a missing or empty `upstream`,
 #      `tag` or `digest`, or a digest that is not `sha256:` and 64 hex characters. A tag is
@@ -26,11 +45,14 @@
 #   4. a reference in CI's reach that names a registry other than ghcr.io/sjawhar/legion/ci,
 #   5. a reference in CI's reach that is not pinned by digest (`@sha256:` and 64 hex characters):
 #      a tag is a name the registry can move, so only a digest names the bytes a job ran,
-#   6. a reference in CI's reach whose digest no row of .github/ci-images.yaml holds,
+#   6. a reference in CI's reach whose digest no row of .github/ci-images.yaml holds.
+#
+# IN PACKAGE MODE:
+#
 #   7. a row whose digest the package does not hold: the manifest is read with an anonymous
-#      `HEAD` against ghcr.io. Its message names .github/ci-images.yaml and says that
-#      .github/workflows/mirror-images.yaml publishes a row when that file changes, so the usual
-#      remedy is to merge the row and let the mirror run.
+#      `HEAD` against ghcr.io. Its message names .github/ci-images.yaml and says that ci.yaml's
+#      ci-images job copies a row before this mode reads the package, so the usual remedy is to
+#      merge the row and let that job run.
 #
 # CI'S REACH is every .github/workflows/*.yaml, every .github/actions/*/action.yml, and each
 # other file a CI job runs that names an image. The first two kinds come from those two globs;
@@ -72,7 +94,7 @@
 # Files are discovered by walking the tree, not by asking git, so an unsnapshotted change cannot
 # read green locally.
 #
-# CHECK 7 AND THE NETWORK. The read of the package is one anonymous token request
+# CHECK 7 AND THE NETWORK. The package mode's read of the package is one anonymous token request
 # (`GET https://ghcr.io/token?scope=repository:sjawhar/legion/ci:pull&service=ghcr.io`) and one
 # `HEAD https://ghcr.io/v2/sjawhar/legion/ci/manifests/<digest>` per row, with an `Accept` naming
 # the four index and manifest media types. CI_IMAGES_MANIFEST_HEAD is the seam that read hangs
@@ -82,12 +104,24 @@
 # mirror-ci-images.test.sh drives this rule with it over the repository's own rows, so no case of
 # either test reaches the network.
 #
-# Run from anywhere: .github/scripts/check-ci-images.sh
-# CI runs it in ci.yaml's ci-images job, after that job's copy, and its tests in ci.yaml's test
-# job.
+# Run from anywhere: .github/scripts/check-ci-images.sh tree
+#                    .github/scripts/check-ci-images.sh package
+# CI runs the tree mode in ci.yaml's lint job, and the package mode in ci.yaml's ci-images job,
+# after that job's copy. Its tests run in ci.yaml's test job.
 set -euo pipefail
 
 cd "$(dirname "$0")/../.."
+
+# The mode is required, and names what it runs. A call with no mode, or with more than one word,
+# fails here: a caller that says neither cannot be given one half of this check by default.
+case "$#:${1:-}" in
+  1:tree | 1:package) ;;
+  *)
+    echo "::error file=.github/scripts/check-ci-images.sh::this check takes one mode: \`tree\` reads the files of this tree and makes no network read, and \`package\` reads ghcr.io/sjawhar/legion/ci. Run \`.github/scripts/check-ci-images.sh tree\` or \`.github/scripts/check-ci-images.sh package\`." >&2
+    exit 1
+    ;;
+esac
+export CI_IMAGES_MODE="$1"
 
 # PYTHONDONTWRITEBYTECODE keeps the yaml import from leaving a __pycache__ in the tree.
 PYTHONDONTWRITEBYTECODE=1 python3 <<'PY'
@@ -136,10 +170,16 @@ def key_line(mapping: object, name: str) -> int:
 
 
 # ---------------------------------------------------------------- data
+# The half this run checks. The wrapper above admits these two words alone.
+TREE = "tree"
+PACKAGE = "package"
+MODE = os.environ["CI_IMAGES_MODE"]
+
 REGISTRY = "ghcr.io/sjawhar/legion/ci"
 REPOSITORY = "sjawhar/legion/ci"
 CI_IMAGES = Path(".github/ci-images.yaml")
-MIRROR_WORKFLOW = ".github/workflows/mirror-images.yaml"
+MIRROR_SCRIPT = ".github/scripts/mirror-ci-images.sh"
+MIRROR_JOB = "ci.yaml's ci-images job"
 BUN_PIN = Path(".bun-version")
 WORKER_DOCKERFILE = Path("packages/daemon/docker/worker.Dockerfile")
 MIRROR = "mirror.gcr.io"
@@ -365,7 +405,7 @@ for row in rows:
     if not isinstance(upstream, str) or not upstream.strip():
         problems.append(
             f"{CI_IMAGES}:{key_line(row, 'upstream')}: this row has no upstream, and "
-            f"{MIRROR_WORKFLOW} copies from it"
+            f"{MIRROR_SCRIPT} copies from it"
         )
         continue
     if not isinstance(tag, str) or not tag.strip():
@@ -384,6 +424,87 @@ for row in rows:
         )
         continue
     readable.append((line, upstream.strip(), tag.strip(), digest.strip()))
+
+
+def verdict(what: str, summary: str) -> None:
+    """Prints the problems this mode found, and its own summary line. Each mode ends here."""
+    for problem in problems:
+        print(problem, file=sys.stderr)
+    if problems:
+        print(f"::error::{len(problems)} problem(s) {what}", file=sys.stderr)
+        raise SystemExit(1)
+    print(summary)
+    raise SystemExit(0)
+
+
+# ---------------------------------------------------------------- rule 7: the package
+def manifest_status(digests: list[str]) -> dict[str, str]:
+    """The HTTP status of an anonymous manifest HEAD, per digest. CI_IMAGES_MANIFEST_HEAD stands
+    in for the read, so a test drives this check without the network."""
+    command = os.environ.get("CI_IMAGES_MANIFEST_HEAD", "")
+    if command:
+        out = {}
+        for digest in digests:
+            done = subprocess.run(
+                [command, digest], capture_output=True, text=True, check=False
+            )
+            out[digest] = done.stdout.strip().split()[0] if done.stdout.strip() else "no status"
+        return out
+    try:
+        with urllib.request.urlopen(
+            f"https://ghcr.io/token?scope=repository:{REPOSITORY}:pull&service=ghcr.io",
+            timeout=30,
+        ) as answer:
+            token = json.load(answer)["token"]
+    except Exception as error:  # noqa: BLE001 - every failure to read the package is a refusal
+        problems.append(
+            f"{CI_IMAGES}:1: ghcr.io would not issue a pull token for {REPOSITORY} "
+            f"({type(error).__name__}: {one_line(error)}), so this check cannot tell which rows "
+            f"the package holds."
+        )
+        return {}
+    out = {}
+    for digest in digests:
+        request = urllib.request.Request(
+            f"https://ghcr.io/v2/{REPOSITORY}/manifests/{digest}", method="HEAD"
+        )
+        request.add_header("Authorization", f"Bearer {token}")
+        request.add_header("Accept", ACCEPT)
+        try:
+            with urllib.request.urlopen(request, timeout=30) as answer:
+                out[digest] = str(answer.status)
+        except urllib.error.HTTPError as error:
+            out[digest] = str(error.code)
+        except Exception as error:  # noqa: BLE001
+            out[digest] = f"{type(error).__name__}: {one_line(error)}"
+    return out
+
+
+if MODE == PACKAGE:
+    # Rule 1, a row's own shape, is the tree mode's, and that mode reads every change. A row
+    # this mode cannot read is one it asks ghcr.io nothing about, so this mode names the rows
+    # the package lacks and nothing else.
+    problems = []
+    held = 0
+    if readable:
+        statuses = manifest_status([row[3] for row in readable])
+        for line, upstream, tag, digest in readable:
+            status = statuses.get(digest)
+            if status == "200":
+                held += 1
+            elif status is not None:
+                problems.append(
+                    f"{CI_IMAGES}:{line}: {REGISTRY}@{digest} ({tag}, the copy of "
+                    f"{one_line(upstream)}) is not in the package: a manifest HEAD answered "
+                    f"{status}. {MIRROR_JOB} copies a row of {CI_IMAGES} before this mode reads "
+                    f"the package, so merge this row, or re-run that job, before a job pins the "
+                    f"digest."
+                )
+    verdict(
+        f"between {CI_IMAGES} and the package",
+        f"{CI_IMAGES} holds {len(readable)} row(s), {held} of them in the package",
+    )
+
 
 by_digest: dict[str, tuple[int, str, str, str]] = {}
 by_tag: dict[str, tuple[int, str, str, str]] = {}
@@ -450,7 +571,7 @@ for tag in sorted(wanted):
         problems.append(
             f"{CI_IMAGES}:{key_line(document, 'images')}: no row copies oven/bun:{tag}, and this "
             f"repository builds FROM it ({BUN_PIN} locks {bun_pin}). Add the row, and "
-            f"{MIRROR_WORKFLOW} publishes it."
+            f"{MIRROR_JOB} publishes it."
         )
 for line, upstream, _, _ in readable:
     _, repository, carried, _ = upstream_parts(upstream)
@@ -507,7 +628,7 @@ def judge(path: str, line: int, text: str, how: str) -> None:
     if named != REGISTRY:
         problems.append(
             f"{path}:{line}: {how} names {one_line(named)}, and every image a CI job fetches is "
-            f"a copy in {REGISTRY}. Add a row for it to {CI_IMAGES}, which {MIRROR_WORKFLOW} "
+            f"a copy in {REGISTRY}. Add a row for it to {CI_IMAGES}, which {MIRROR_JOB} "
             f"copies, and name that row's digest here."
         )
         return
@@ -521,7 +642,7 @@ def judge(path: str, line: int, text: str, how: str) -> None:
     if digest not in by_digest:
         problems.append(
             f"{path}:{line}: {how} names a digest no row of {CI_IMAGES} holds, so nothing copies "
-            f"it into the package. Add its row to that file, and {MIRROR_WORKFLOW} publishes it."
+            f"it into the package. Add its row to that file, and {MIRROR_JOB} publishes it."
         )
 
 
@@ -849,76 +970,10 @@ for name, ground in sorted(EXCEPTIONS.items()):
             f"the file does not name {MIRROR} any more. Delete its line from EXCEPTIONS."
         )
 
-# ---------------------------------------------------------------- rule 7: the package
-def manifest_status(digests: list[str]) -> dict[str, str]:
-    """The HTTP status of an anonymous manifest HEAD, per digest. CI_IMAGES_MANIFEST_HEAD stands
-    in for the read, so a test drives this rule without the network."""
-    command = os.environ.get("CI_IMAGES_MANIFEST_HEAD", "")
-    if command:
-        out = {}
-        for digest in digests:
-            done = subprocess.run(
-                [command, digest], capture_output=True, text=True, check=False
-            )
-            out[digest] = done.stdout.strip().split()[0] if done.stdout.strip() else "no status"
-        return out
-    try:
-        with urllib.request.urlopen(
-            f"https://ghcr.io/token?scope=repository:{REPOSITORY}:pull&service=ghcr.io",
-            timeout=30,
-        ) as answer:
-            token = json.load(answer)["token"]
-    except Exception as error:  # noqa: BLE001 - every failure to read the package is a refusal
-        problems.append(
-            f"{CI_IMAGES}:1: ghcr.io would not issue a pull token for {REPOSITORY} "
-            f"({type(error).__name__}: {one_line(error)}), so this check cannot tell which rows "
-            f"the package holds."
-        )
-        return {}
-    out = {}
-    for digest in digests:
-        request = urllib.request.Request(
-            f"https://ghcr.io/v2/{REPOSITORY}/manifests/{digest}", method="HEAD"
-        )
-        request.add_header("Authorization", f"Bearer {token}")
-        request.add_header("Accept", ACCEPT)
-        try:
-            with urllib.request.urlopen(request, timeout=30) as answer:
-                out[digest] = str(answer.status)
-        except urllib.error.HTTPError as error:
-            out[digest] = str(error.code)
-        except Exception as error:  # noqa: BLE001
-            out[digest] = f"{type(error).__name__}: {one_line(error)}"
-    return out
-
-
-held = 0
-if readable:
-    statuses = manifest_status([row[3] for row in readable])
-    for line, upstream, tag, digest in readable:
-        status = statuses.get(digest)
-        if status == "200":
-            held += 1
-        elif status is not None:
-            problems.append(
-                f"{CI_IMAGES}:{line}: {REGISTRY}@{digest} ({tag}, the copy of "
-                f"{one_line(upstream)}) is not in the package: a manifest HEAD answered "
-                f"{status}. {MIRROR_WORKFLOW} publishes a row when {CI_IMAGES} changes, so merge "
-                f"this row, or run that workflow, before a job pins the digest."
-            )
-
-for problem in problems:
-    print(problem, file=sys.stderr)
-if problems:
-    print(
-        f"::error::{len(problems)} problem(s) between {CI_IMAGES} and the images CI fetches",
-        file=sys.stderr,
-    )
-    raise SystemExit(1)
-print(
-    f"{CI_IMAGES} holds {len(readable)} row(s), {held} of them in the package; "
-    f"{len(references)} reference(s) in {len(reach)} file(s) of CI's reach name one of those "
-    f"rows; of {swept} text file(s) swept, the {len(naming_mirror)} that name {MIRROR} are all "
-    f"in the exception list"
+verdict(
+    f"between {CI_IMAGES} and the images CI fetches",
+    f"{CI_IMAGES} holds {len(readable)} row(s); {len(references)} reference(s) in {len(reach)} "
+    f"file(s) of CI's reach name one of those rows; of {swept} text file(s) swept, the "
+    f"{len(naming_mirror)} that name {MIRROR} are all in the exception list",
 )
 PY

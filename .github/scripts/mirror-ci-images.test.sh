@@ -11,10 +11,11 @@
 # root from its own path (`cd "$(dirname "$0")/../.."`), which the symlink puts at the fixture
 # root.
 #
-# The last case is the ordering ci.yaml's ci-images job keeps: check-ci-images.sh's check 7 reads
-# which rows the package holds, so the copy for this change must run before it. It runs both
-# scripts over the repository's own .github/ci-images.yaml, against a stand-in package that holds
-# every row but one, and drives the gate through its documented CI_IMAGES_MANIFEST_HEAD seam.
+# The last case is the ordering ci.yaml's ci-images job keeps: the package mode of
+# check-ci-images.sh reads which rows the package holds, so the copy for this change must run
+# before it. It runs both scripts over the repository's own .github/ci-images.yaml, against a
+# stand-in package that holds every row but one, and drives the gate through its documented
+# CI_IMAGES_MANIFEST_HEAD seam.
 #
 # Run from anywhere: .github/scripts/mirror-ci-images.test.sh
 # CI runs it in ci.yaml's test job.
@@ -158,9 +159,9 @@ check "names the row and both digests" \
 check "says what to correct" "$(contains "$out" "Correct the row's digest, or the upstream reference it copies from")"
 
 echo "case: the gate's check 7 before the copy, and after it"
-# ci.yaml's ci-images job runs this script and then check-ci-images.sh, in that order, because
-# the gate reads which rows the package holds. Here the stand-in package holds every row of
-# .github/ci-images.yaml but the last one.
+# ci.yaml's ci-images job runs this script and then the gate's package mode, in that order,
+# because that mode reads which rows the package holds. Here the stand-in package holds every row
+# of .github/ci-images.yaml but the last one.
 state="$work/ordering"
 mkdir -p "$state"
 : > "$state/copied"
@@ -184,7 +185,7 @@ PY
 )
 
 set +e
-out=$(CI_IMAGES_MANIFEST_HEAD="$head_script" CRANE_STATE="$state" "$gate_script" 2>&1)
+out=$(CI_IMAGES_MANIFEST_HEAD="$head_script" CRANE_STATE="$state" "$gate_script" package 2>&1)
 status=$?
 set -e
 check "the gate fails before the copy" "$(is "$status" 1)"
@@ -199,7 +200,7 @@ check "the copy runs" "$(is "$status" 0)"
 check "and copies that one row" "$(contains "$out" "copied $REGISTRY:$held_back ")"
 
 set +e
-out=$(CI_IMAGES_MANIFEST_HEAD="$head_script" CRANE_STATE="$state" "$gate_script" 2>&1)
+out=$(CI_IMAGES_MANIFEST_HEAD="$head_script" CRANE_STATE="$state" "$gate_script" package 2>&1)
 status=$?
 set -e
 check "the gate passes after the copy" "$(is "$status" 0)"

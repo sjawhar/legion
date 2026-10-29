@@ -241,7 +241,7 @@ judge_model=anthropic/$route_model_id
 judge_thinking=high
 # The container every judge runs in (cmd_judge_omp), by digest: Ubuntu 24.04, whose glibc runs the
 # pinned omp binary. Every image a CI job fetches is a copy in ghcr.io/sjawhar/legion/ci, named by
-# digest, which .github/workflows/mirror-images.yaml publishes from .github/ci-images.yaml.
+# digest, which ci.yaml's ci-images job publishes from .github/ci-images.yaml.
 judge_image=ghcr.io/sjawhar/legion/ci@sha256:534baea6a22c03a63003dbc8dbe78fe34bc0d7e595d9a9dc9834884ff530eb55
 # The superpowers skills a spec run's profile holds as its own user skills (cmd_profile).
 superpowers_skills=(writing-plans brainstorming)

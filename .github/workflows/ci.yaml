@@ -3,12 +3,11 @@ name: CI
 # The router: every check a pull request, the merge queue or a push to main runs, in one workflow.
 # Its first job, `changes`, reads the paths the change touched and selects, through one
 # dorny/paths-filter filter per job, the jobs that read those paths; each job runs only when its
-# filter matches (lint and ci-images run on every change, and typecheck and test also run when
-# `changes` itself failed). The last job, `ci-ok`, condenses every job's result into one check,
-# the one main's ruleset requires beside pr-title: it fails when a job `changes` selected did not
-# succeed. The docs site's build on a push to main, and its GitHub Pages deploy, are
-# docs-pages.yaml's, a workflow of its own whose header says why. Its paths are held to the docs
-# filter below.
+# filter matches (lint runs on every change, and typecheck and test also run when `changes` itself
+# failed). The last job, `ci-ok`, condenses every job's result into one check, the one main's
+# ruleset requires beside pr-title: it fails when a job `changes` selected did not succeed. The
+# docs site's build on a push to main, and its GitHub Pages deploy, are docs-pages.yaml's, a
+# workflow of its own whose header says why. Its paths are held to the docs filter below.
 #
 # A new job joins the router in six places: a filter in `changes` that names every file the job
 # reads, an output of `changes` for that filter, the job's `needs: changes` and an `if:` on that
@@ -115,6 +114,7 @@ jobs:
       envoy_session_stall: ${{ steps.filter.outputs.envoy_session_stall }}
       go_notices: ${{ steps.filter.outputs.go_notices }}
       ci_filters: ${{ steps.filter.outputs.ci_filters }}
+      ci_images: ${{ steps.filter.outputs.ci_images }}
     steps:
       # On pull_request dorny/paths-filter reads the file list from the API and never reads the
       # tree; push and merge_group diff with git and need the clone (a merge group diffs its
@@ -1112,6 +1112,17 @@ jobs:
               - '**/go.work.sum'
               - 'packages/daemon/**'
               - 'packages/envoy/**'
+            # ci.yaml's ci-images job: the copy (.github/scripts/mirror-ci-images.sh, through the
+            # crane .github/actions/install-crane installs) and the package mode of
+            # .github/scripts/check-ci-images.sh, which reads ghcr.io. These files are what
+            # decides what those two steps do. The gate's other half reads the whole tree and is
+            # a step of lint, which runs on every change.
+            ci_images:
+              - '.github/ci-images.yaml'
+              - '.github/scripts/mirror-ci-images.sh'
+              - '.github/scripts/check-ci-images.sh'
+              - '.github/actions/install-crane/**'
+              - '.github/workflows/ci.yaml'
 
   # Reads the whole tree, so it runs on every non-draft run, also when `changes` failed.
   lint:
@@ -1153,6 +1164,9 @@ jobs:
 
       - name: Check image triggers cover every image input
         run: .github/scripts/check-image-trigger-paths.sh
+
+      - name: Check every image a CI job fetches is a row of .github/ci-images.yaml
+        run: .github/scripts/check-ci-images.sh tree
 
       - name: Check every remote action is pinned to a commit SHA
         run: .github/scripts/check-action-pins.sh
@@ -1285,13 +1299,18 @@ jobs:
             ~/.cache/legion
           key: ${{ steps.go-cache.outputs.cache-primary-key }}
 
-  # Copies every row .github/ci-images.yaml names into ghcr.io/sjawhar/legion/ci, then checks the
-  # two sides against each other. The order is the point: the check reads the package, and it
-  # fails a row the package does not hold, so the copy for this change runs first. Reading the
-  # whole tree, it runs on every non-draft run, as lint does. mirror-images.yaml runs the same
-  # copy on a push to main.
+  # Copies every row .github/ci-images.yaml names into ghcr.io/sjawhar/legion/ci, then reads the
+  # package to check that it holds every row. The order is the point: the read fails a row the
+  # package does not hold, so the copy for this change runs first. The ci_images filter selects
+  # this job, and names the files that decide what its two steps do: the rows, the two scripts,
+  # the crane action and this file. The gate's other half reads the whole tree, and is a step of
+  # lint, which runs on every change: a file that names a third-party registry again can be any
+  # file, and this filter names few of them. This job is the one copy path: it runs on a pull
+  # request, on a merge group and on a push to main, which is every event that can bring a new
+  # row, and a failed copy is re-run with `gh run rerun`.
   ci-images:
-    if: ${{ !github.event.pull_request.draft }}
+    needs: changes
+    if: needs.changes.outputs.ci_images == 'true'
     runs-on: ubuntu-24.04
     timeout-minutes: 15
     # packages: write is the ghcr.io push `crane copy` makes.
@@ -1314,8 +1333,8 @@ jobs:
       - name: Copy every image the package does not hold
         run: .github/scripts/mirror-ci-images.sh
 
-      - name: Check every image a CI job fetches is a row of .github/ci-images.yaml
-        run: .github/scripts/check-ci-images.sh
+      - name: Check the package holds every row of .github/ci-images.yaml
+        run: .github/scripts/check-ci-images.sh package
 
   # lint, typecheck and test keep the names main's ruleset required before ci-ok existed. Each
   # covers the shipped daemon (packages/daemon, the Go `legion`). Fail-open: when `changes` did not
@@ -1809,7 +1828,7 @@ jobs:
       - uses: ./.github/actions/install-omp
       # scripts/skill-scenarios/rig.test.ts runs rig.sh judge-omp's container with the runner's own
       # Docker. Every image a CI job fetches is a copy in ghcr.io/sjawhar/legion/ci, named by
-      # digest, which .github/workflows/mirror-images.yaml publishes from .github/ci-images.yaml.
+      # digest, which ci.yaml's ci-images job publishes from .github/ci-images.yaml.
       # scripts/skill-scenarios/daemon-pane.test.ts runs daemon-pane.go with `go run` inside packages/daemon.
       - id: setup-go
         uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
@@ -2833,11 +2852,11 @@ jobs:
 
   # The one check that condenses every job above into a verdict: .github/scripts/ci-ok.sh, whose
   # header says what it decides and why. It passes only when `changes` succeeded (it selected the
-  # jobs from this head's diff), lint and ci-images succeeded (both run on every change), every
-  # job `changes` selected succeeded, and every job it did not select succeeded or was skipped. A
-  # selected job's skip fails: a skipped job reports success, and a failed-only re-run of a run
-  # whose `changes` failed can make `changes` succeed and leave the jobs it selects skipped.
-  # SELECTED_BY maps every needed job but those three to the output its `if:` tests, and
+  # jobs from this head's diff), lint succeeded (it runs on every change), every job `changes`
+  # selected succeeded, and every job it did not select succeeded or was skipped. A selected
+  # job's skip fails: a skipped job reports success, and a failed-only re-run of a run whose
+  # `changes` failed can make `changes` succeed and leave the jobs it selects skipped.
+  # SELECTED_BY maps every needed job but `changes` and lint to the output its `if:` tests, and
   # PULL_REQUEST_ONLY lists the jobs whose `if:` also admits only pull_request;
   # check-ci-filters.sh holds both to those `if:`s.
   ci-ok:
@@ -2906,6 +2925,7 @@ jobs:
               "envoy-e2e-local": "envoy_e2e_local",
               "envoy-session-stall": "envoy_session_stall",
               "ci-filters": "ci_filters",
+              "ci-images": "ci_images",
               "worker-image": "worker_image"
             }
           PULL_REQUEST_ONLY: '["worker-image"]'

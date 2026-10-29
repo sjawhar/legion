@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 # ci.yaml's last job, ci-ok, is the one check main's ruleset requires of the router, and this
 # script is its verdict. It passes only when `changes` succeeded (it selected the jobs from this
-# head's diff), lint and ci-images succeeded (both run on every change), every job `changes`
-# selected succeeded, and every job it did not select succeeded or was skipped.
+# head's diff), lint succeeded (it runs on every change), every job `changes` selected succeeded,
+# and every job it did not select succeeded or was skipped.
 #
 # A selected job must succeed: skipped, cancelled or absent fails. A skipped job reports success,
 # and GitHub's "Re-run failed jobs" can leave one skipped while its selector now succeeds: when
@@ -14,9 +14,9 @@
 #   NEEDS              `${{ toJSON(needs) }}`: every needed job's result, and `changes`' outputs.
 #   DRAFT              true on a draft pull request, where no test job runs: ci-ok fails saying so.
 #   EVENT              `github.event_name`.
-#   SELECTED_BY        a JSON object mapping every needed job but `changes`, lint and ci-images
-#                      to the `changes` output its `if:` tests; the job is selected when that
-#                      output is 'true'. check-ci-filters.sh holds it to ci.yaml.
+#   SELECTED_BY        a JSON object mapping every needed job but `changes` and lint to the
+#                      `changes` output its `if:` tests; the job is selected when that output is
+#                      'true'. check-ci-filters.sh holds it to ci.yaml.
 #   PULL_REQUEST_ONLY  a JSON array of the SELECTED_BY jobs whose `if:` also admits only
 #                      pull_request: one is selected only when EVENT is pull_request too.
 #                      check-ci-filters.sh holds it to ci.yaml. (A job that runs on no push, such
@@ -52,11 +52,10 @@ if ! jq -e --argjson map "$SELECTED_BY" 'type == "array" and all(.[]; type == "s
 fi
 
 # One row per line, tab-separated: `info` and the line to print, or `error` and the ::error:: text.
-# Every job is printed in NEEDS order, after `changes` and each job of $always that NEEDS lacks,
-# and before each SELECTED_BY job NEEDS lacks.
+# Every job is printed in NEEDS order, after `changes` or lint if NEEDS lacks them and before each
+# SELECTED_BY job NEEDS lacks.
 read -r -d '' program <<'JQ' || true
 (.changes.outputs // {}) as $out
-| ["lint", "ci-images"] as $always
 | def selection($job):
     $map[$job] as $output
     | ($out[$output] // "unset") as $value
@@ -72,10 +71,10 @@ read -r -d '' program <<'JQ' || true
       ["info", "changes: \($result)"],
       (select($result != "success")
        | ["error", "changes ended \($result); it selects the jobs from this head's diff, so ci-ok passes only when it succeeded"])
-    elif ($always | any(. == $job)) then
-      ["info", "\($job): \($result)"],
+    elif $job == "lint" then
+      ["info", "lint: \($result)"],
       (select($result != "success")
-       | ["error", "\($job) ended \($result); \($job) runs on every change, so ci-ok passes only when it succeeded"])
+       | ["error", "lint ended \($result); lint runs on every change, so ci-ok passes only when it succeeded"])
     elif ($map | has($job)) then
       selection($job) as $s
       | ["info", "\($job): \($result) (\(if $s.selected then "selected" else "not selected" end): \($s.why))"],
@@ -91,7 +90,7 @@ read -r -d '' program <<'JQ' || true
       ["error", "\($job) ended \($result), and ci-ok does not know what selects it; add it to ci-ok's SELECTED_BY in ci.yaml"]
     end;
   . as $needs
-  | ((["changes"] + $always)[] | select(. as $job | $needs | has($job) | not) | rows(.; "absent")),
+  | (("changes", "lint") | select(. as $job | $needs | has($job) | not) | rows(.; "absent")),
     ($needs | to_entries[] | rows(.key; .value.result // "absent")),
     ($map | keys_unsorted[] | select(. as $job | $needs | has($job) | not) | rows(.; "absent"))
 | @tsv
@@ -117,4 +116,4 @@ if [ "${#errors[@]}" -gt 0 ]; then
   done
   exit 1
 fi
-echo "changes, lint and ci-images succeeded, every job changes selected succeeded, and every other job succeeded or was skipped"
+echo "changes and lint succeeded, every job changes selected succeeded, and every other job succeeded or was skipped"
