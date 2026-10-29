@@ -1,6 +1,7 @@
 import { afterEach, expect, spyOn, test } from "bun:test";
 import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 
+import { REQUEST_DEADLINE_MS } from "../../api/client";
 import * as markdownEngine from "../refs/markdown-engine";
 import {
   DeploymentResilience,
@@ -76,6 +77,8 @@ test("Vite preload errors reload the page three times in five minutes, then not,
     now = time;
     const failure = new Event("vite:preloadError", { cancelable: true });
     window.dispatchEvent(failure);
+    // The page goes (`pagehide`), which spends the reload the failure asked for.
+    window.dispatchEvent(new Event("pagehide"));
     return failure.defaultPrevented;
   };
 
@@ -147,12 +150,14 @@ test("the once-only key of earlier builds is neither read nor written", () => {
 
   try {
     window.dispatchEvent(new Event("vite:preloadError", { cancelable: true }));
+    window.dispatchEvent(new Event("pagehide"));
 
     expect(reload).toHaveBeenCalledTimes(1);
     expect(window.sessionStorage.getItem("dispatch.reloaded-for-chunk")).toBe("true");
     // Nor written: a reload with the old key absent leaves it absent.
     window.sessionStorage.removeItem("dispatch.reloaded-for-chunk");
     window.dispatchEvent(new Event("vite:preloadError", { cancelable: true }));
+    window.dispatchEvent(new Event("pagehide"));
     expect(reload).toHaveBeenCalledTimes(2);
     expect(window.sessionStorage.getItem("dispatch.reloaded-for-chunk")).toBeNull();
   } finally {
@@ -182,9 +187,45 @@ test("a chunk that fails while the page is being left does not reload over the n
 
     expect(afterReturning.defaultPrevented).toBe(false);
     expect(reload).toHaveBeenCalledTimes(1);
+    // The page goes, and spends the reload the failure asked for.
+    window.dispatchEvent(new Event("pagehide"));
     expect(storedChunkReloads()).toHaveLength(1);
   } finally {
     window.dispatchEvent(new Event("pageshow"));
+    reload.mockRestore();
+    window.sessionStorage.clear();
+  }
+});
+
+// W20. A reload asked for is not a reload taken: an unconfirmed keyed send raises a leave prompt,
+// and a reader who answers "stay" keeps the page they are on. A recovery reload is spent from the
+// tab's budget as the page actually goes (`pagehide`), so the budget is as it was and the next
+// failed chunk can still reload; the reader's press says the page is plainly still theirs.
+test("a reload the reader cancels at the leave prompt spends nothing of the tab's budget", () => {
+  window.sessionStorage.clear();
+  installChunkFailureRecoveryForTest();
+  const reload = spyOn(window.location, "reload").mockImplementation(() => undefined);
+
+  try {
+    window.dispatchEvent(new Event("vite:preloadError", { cancelable: true }));
+    expect(reload).toHaveBeenCalledTimes(1);
+    expect(storedChunkReloads()).toBeNull();
+    // A second failure before the page goes asks for no second reload.
+    window.dispatchEvent(new Event("vite:preloadError", { cancelable: true }));
+    expect(reload).toHaveBeenCalledTimes(1);
+
+    // The prompt is answered "stay": no `pagehide`, and the reader goes on using the page.
+    window.dispatchEvent(new KeyboardEvent("keydown", { key: "a" }));
+    window.dispatchEvent(new Event("pagehide"));
+    expect(storedChunkReloads()).toBeNull();
+
+    // So the next failure still has the whole budget to spend, and spends one reload when the
+    // page does go.
+    window.dispatchEvent(new Event("vite:preloadError", { cancelable: true }));
+    expect(reload).toHaveBeenCalledTimes(2);
+    window.dispatchEvent(new Event("pagehide"));
+    expect(storedChunkReloads()).toHaveLength(1);
+  } finally {
     reload.mockRestore();
     window.sessionStorage.clear();
   }
@@ -234,6 +275,8 @@ test("a link answered with a download does not mark the page as left", () => {
     navigation.dispatchEvent(navigateEvent(false, ""));
     window.dispatchEvent(new Event("vite:preloadError", { cancelable: true }));
     expect(reload).toHaveBeenCalledTimes(1);
+    // The page goes, and spends the reload the failure asked for.
+    window.dispatchEvent(new Event("pagehide"));
     expect(storedChunkReloads()).toHaveLength(1);
   } finally {
     window.dispatchEvent(new Event("pageshow"));
@@ -469,7 +512,10 @@ test("shows a reloadable update notice when one build other than the tab's is li
     const notice = await screen.findByRole("status", { name: "A new version is available" });
     expect(notice.textContent).toContain("A new version is available - Reload");
     expect(fetch).toHaveBeenCalledTimes(1);
-    expect(fetch).toHaveBeenCalledWith("/api/v1/dashboard/builds", { cache: "no-store" });
+    expect(fetch).toHaveBeenCalledWith("/api/v1/dashboard/builds", {
+      cache: "no-store",
+      signal: expect.any(AbortSignal),
+    });
 
     fireEvent.click(screen.getByRole("button", { name: "Reload" }));
     expect(reload).toHaveBeenCalledTimes(1);
@@ -521,7 +567,10 @@ for (const [when, builds] of noNotice) {
 
       expect(screen.queryByRole("status", { name: "A new version is available" })).toBeNull();
       expect(fetch).toHaveBeenCalledTimes(1);
-      expect(fetch).toHaveBeenCalledWith("/api/v1/dashboard/builds", { cache: "no-store" });
+      expect(fetch).toHaveBeenCalledWith("/api/v1/dashboard/builds", {
+        cache: "no-store",
+        signal: expect.any(AbortSignal),
+      });
     } finally {
       fetch.mockRestore();
       currentScript.remove();
@@ -549,7 +598,10 @@ test("shows no update notice on a page that names no entry chunk, as Vite's dev 
     await settleCheck();
 
     expect(screen.queryByRole("status", { name: "A new version is available" })).toBeNull();
-    expect(fetch).toHaveBeenCalledWith("/api/v1/dashboard/builds", { cache: "no-store" });
+    expect(fetch).toHaveBeenCalledWith("/api/v1/dashboard/builds", {
+      cache: "no-store",
+      signal: expect.any(AbortSignal),
+    });
   } finally {
     fetch.mockRestore();
     devScript.remove();
@@ -585,6 +637,89 @@ test("waits one minute before checking for another deployment on focus", async (
     await waitFor(() => expect(fetch).toHaveBeenCalledTimes(2));
   } finally {
     fetch.mockRestore();
+    dateNow.mockRestore();
+    currentScript.remove();
+    view.unmount();
+  }
+});
+
+// A check Dispatch never answers would hold one of the browser's few connections to it for good,
+// as an unbounded read did (INFRA-258): its request is given up at the read deadline, its body
+// included, and the check then reports nothing.
+test("a deployment check Dispatch does not answer is given up at the read deadline", async () => {
+  const currentScript = runningPage("/assets/index-current.js");
+  let now = 100_000;
+  const dateNow = spyOn(Date, "now").mockImplementation(() => now);
+  const deadlines: { controller: AbortController; ms: number }[] = [];
+  const timeout = spyOn(AbortSignal, "timeout").mockImplementation((ms) => {
+    const controller = new AbortController();
+    deadlines.push({ controller, ms });
+    return controller.signal;
+  });
+  const signals: (AbortSignal | null | undefined)[] = [];
+  // The second check's body, for the test to finish once the check has been given up: a check
+  // still waiting on it would then read another live build and show the notice (below).
+  let buildsBody: ReadableStreamDefaultController<Uint8Array> | undefined;
+  function stalled(_input: RequestInfo | URL, init?: RequestInit): Promise<Response> {
+    signals.push(init?.signal);
+    const signal = init?.signal;
+    // The second check's answer has its headers at once, with a body that never ends.
+    if (signals.length > 1) {
+      return Promise.resolve(
+        new Response(
+          new ReadableStream<Uint8Array>({
+            start(body) {
+              buildsBody = body;
+              body.enqueue(
+                new TextEncoder().encode('{"serving":"/assets/index-new.js","live":["/')
+              );
+              signal?.addEventListener("abort", () => body.error(signal.reason), { once: true });
+            },
+          }),
+          { status: 200 }
+        )
+      );
+    }
+    const { promise, reject } = Promise.withResolvers<Response>();
+    signal?.addEventListener("abort", () => reject(signal.reason), { once: true });
+    return promise;
+  }
+  stalled.preconnect = () => {};
+  const fetch = spyOn(globalThis, "fetch").mockImplementation(stalled);
+  const view = render(<DeploymentResilience />);
+
+  try {
+    // The first check gets no answer: given up at the deadline, it ends there.
+    fireEvent.focus(window);
+    await waitFor(() => expect(fetch).toHaveBeenCalledTimes(1));
+    expect(deadlines.map(({ ms }) => ms)).toEqual([REQUEST_DEADLINE_MS]);
+    expect(signals[0]).toBe(deadlines[0]?.controller.signal);
+    deadlines[0]?.controller.abort(new DOMException("timed out", "TimeoutError"));
+    await settleCheck();
+    expect(fetch).toHaveBeenCalledTimes(1);
+
+    // The next check's answer has its headers and stalls in its body: given up at its deadline.
+    now += 60_000;
+    fireEvent.focus(window);
+    await waitFor(() => expect(fetch).toHaveBeenCalledTimes(2));
+    expect(deadlines.map(({ ms }) => ms)).toEqual([REQUEST_DEADLINE_MS, REQUEST_DEADLINE_MS]);
+    expect(signals[1]).toBe(deadlines[1]?.controller.signal);
+    deadlines[1]?.controller.abort(new DOMException("timed out", "TimeoutError"));
+    await settleCheck();
+    // The body finishes, naming another live build, after the check was given up: a check still
+    // waiting on it would read it and show the notice, so this assertion fails if the deadline
+    // did not cut the read.
+    try {
+      buildsBody?.enqueue(new TextEncoder().encode('assets/index-new.js"]}'));
+      buildsBody?.close();
+    } catch {
+      // The abort errored the stream, which is the behaviour under test.
+    }
+    await settleCheck();
+    expect(screen.queryByRole("status", { name: "A new version is available" })).toBeNull();
+  } finally {
+    fetch.mockRestore();
+    timeout.mockRestore();
     dateNow.mockRestore();
     currentScript.remove();
     view.unmount();

@@ -390,7 +390,8 @@ test("editing the parent line moves the issue across Children tabs live", async 
     await moverPage.getByRole("button", { name: "Save parent" }).click();
     await expect(moverPage.getByRole("link", { name: newParent.key })).toBeVisible();
 
-    // The new parent's open page hears child.added over SSE and gains the row without a reload.
+    // The new parent's open page hears child.added on the live event feed and gains the row
+    // without a reload.
     const movedRow = parentPage
       .getByRole("tabpanel")
       .getByRole("link", { name: `${mover.key} · Moving decision` });

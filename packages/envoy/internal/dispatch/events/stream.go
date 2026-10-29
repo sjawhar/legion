@@ -4,17 +4,17 @@ import "sync"
 
 // Stream fans values out to the subscribers of one process, each on a channel whose size the
 // subscriber chooses. A subscriber whose channel is full is dropped and its channel closed rather
-// than waited for, so it learns that it missed a value instead of missing it in silence: an SSE
-// connection subscribes again and catches up what it missed from the event log, or ends its
-// response when that backlog is past the replay's bounds (api/events.go streamEvents). A stream
-// that blocked for a subscriber that is not reading would hold up every other subscriber of this
-// process.
+// than waited for, so it learns that it missed a value instead of missing it in silence: an events
+// subscription on a page's live socket subscribes again and catches up what it missed from the
+// event log, or ends with an ended frame (behind) when that backlog is past the replay's bounds
+// (api/live_events.go). A stream that blocked for a subscriber that is not reading would hold up
+// every other subscriber of this process.
 //
 // The reader's live feed is a Stream of its own, held by the event stream relay
 // (api/event_stream_relay.go) and published into only by that relay, from the rows it reads back
-// out of Postgres once they have committed, each with its encoded frame. Nothing at a write site
-// publishes into it, so an open SSE connection sees exactly the rows the database holds, in the id
-// order the commit-order lock gives them (Broker.Append) — including the events another
+// out of Postgres once they have committed, each with its event encoded once. Nothing at a write
+// site publishes into it, so an events subscription sees exactly the rows the database holds, in
+// the id order the commit-order lock gives them (Broker.Append) — including the events another
 // envoy-dispatch process committed, which no in-process fan-out can carry. The delivery hub's
 // intake takes the same feed (api/delivery_live_hub_intake.go). Broker holds a Stream of its own
 // for the subscriber that does want this process's own writes: the outbox's local wake.
@@ -78,10 +78,8 @@ func (s *Stream[T]) Publish(value T) {
 }
 
 // CloseAll ends every subscription, closing each channel as an overflow does. The event stream
-// relay calls it when it ends a generation whose subscribers it can no longer serve in order (a
-// reset event log, api/event_stream_relay.go resetCursor) and from the test hook behind POST
-// /api/v1/events/_test/disconnect (api/events.go), which drives a client's
-// reconnect-from-last-id on demand.
+// relay calls it when it ends a generation whose subscribers it can no longer serve in order: an
+// event log that was reset under its cursor (api/event_stream_relay.go resetCursor).
 func (s *Stream[T]) CloseAll() {
 	s.mu.Lock()
 	defer s.mu.Unlock()

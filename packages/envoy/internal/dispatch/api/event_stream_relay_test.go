@@ -1,11 +1,10 @@
 package api
 
 import (
-	"bufio"
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
-	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -13,6 +12,7 @@ import (
 	"testing"
 	"time"
 
+	gws "github.com/gorilla/websocket"
 	"github.com/jackc/pgx/v5"
 
 	"github.com/sjawhar/envoy/internal/dispatch/docs"
@@ -48,33 +48,30 @@ func secondProcessHandler(t *testing.T, database *store.Store) http.Handler {
 		t.Fatalf("new API dependencies for the second process: %v", err)
 	}
 	mux := http.NewServeMux()
-	t.Cleanup(Register(mux, t.Context(), deps))
+	t.Cleanup(Register(mux, t.Context(), deps).Wait)
 	return mux
 }
 
-// TestEventCommittedOnAnotherProcessReachesAnOpenStream is what the live stream is for with two
-// envoy-dispatch processes on one Postgres: a reader whose connection landed on process B sees an
-// event process A committed, on the connection it already has. Nothing of A's reaches B but the
-// row itself -- B's relay hears the commit on `listen dispatch_events` (migration 0107) and reads
-// it back out of the log. The broker fan-out this stream used to read would have ended at A.
-func TestEventCommittedOnAnotherProcessReachesAnOpenStream(t *testing.T) {
+// TestEventCommittedOnAnotherProcessReachesAnOpenEventFeed is what the live feed is for with two
+// envoy-dispatch processes on one Postgres: a page whose socket landed on process B sees an event
+// process A committed, on the subscription it already has. Nothing of A's reaches B but the row
+// itself -- B's relay hears the commit on `listen dispatch_events` (migration 0107) and reads it
+// back out of the log. The broker fan-out the feed used to read would have ended at A.
+func TestEventCommittedOnAnotherProcessReachesAnOpenEventFeed(t *testing.T) {
 	first, database := newTestHandlerWithStore(t)
 	issue := createInteractionIssue(t, first, "TEST", "Issue", "A spec")
 	second := httptest.NewServer(secondProcessHandler(t, database))
 	t.Cleanup(second.Close)
-	scanner := openSSEStream(t, second.URL+"/api/v1/events")
+	client := openLiveSocketAt(t, gws.DefaultDialer, "ws"+strings.TrimPrefix(second.URL, "http")+"/ws/live", withBearer("agent-token")).read()
+	subscribeEvents(t, client, "events", nil)
 
-	if response := dispatchRequest(t, first, http.MethodPatch, "/api/v1/issues/"+issue.Key, map[string]string{
-		"title": "Renamed on the other process",
-	}, "alice"); response.Code != http.StatusOK {
-		t.Fatalf("rename issue on the first process: status=%d body=%s", response.Code, response.Body.String())
-	}
+	renameIssue(t, first, issue.Key, "Renamed on the other process")
 	committed := eventHead(t, database)
 
 	for id := int64(0); id != committed; {
-		id = sseFrameID(t, readSSEFrame(t, scanner))
+		id = nextEventID(t, client, "events")
 		if id > committed {
-			t.Fatalf("stream on the second process sent id %d before the event %d committed on the first", id, committed)
+			t.Fatalf("the feed on the second process sent id %d before the event %d committed on the first", id, committed)
 		}
 	}
 }
@@ -256,11 +253,24 @@ func TestEventStreamRelaySubscribeRacingTheLastCancelReceivesTheNextEvent(t *tes
 // notification sent while the relay has no connection reaches nobody, and nothing sends it again.
 // What covers it is the catch-up the listener's onConnected runs after every LISTEN, from the
 // cursor the relay has published through rather than from the log's head -- a cursor reset there
-// would silently swallow exactly the events the window dropped.
+// would silently swallow exactly the events the window dropped from every open page's feed.
 func TestEventStreamRelayCatchesUpWhenItsListenerReconnects(t *testing.T) {
-	handler, database, deps := newTestServer(t, testServerOptions{})
-	key := createStreamIssue(t, handler)
-	relay, _ := newCountedRelay(t, deps)
+<<<<<<< conflict 1 of 13
+%%%%%%% diff from: mmlowqmk d4cbcfe6 "fix: tests that fail and pass on a re-run are fixed at their cause, with the product races behind them (#2396)"
+\\\\\\\        to: zusvmkwt be5cee56 "test(dispatch): a held fallback copy outlives a NATS outage longer than the dead-letter threshold and arrives once"
+ 	handler, database, deps := newTestServer(t, testServerOptions{})
+-	issue := createInteractionIssue(t, handler, "TEST", "Issue", "A spec")
+-
+-	lifetime, stop := context.WithCancel(t.Context())
+-	relay := newEventStreamRelay(directServer(deps), lifetime)
++	key := createStreamIssue(t, handler)
++	relay, _ := newCountedRelay(t, deps)
++++++++ vvkzzusr f9c01e92 "chore: fold changelog fragments [skip ci]"
+	rig := newLiveSocketRig(t, testServerOptions{}, nil)
+	// An issue with no spec, whose document settles nothing, so nothing commits but the test's own.
+	issue := createPlainIssue(t, rig.handler, "TEST")
+	relay := rig.served.eventRelay
+>>>>>>> conflict 1 of 13 ends
 	var down atomic.Bool
 	down.Store(true)
 	var dials atomic.Int64
@@ -268,27 +278,114 @@ func TestEventStreamRelayCatchesUpWhenItsListenerReconnects(t *testing.T) {
 		if down.Load() {
 			return nil, errors.New("the listener has no connection")
 		}
+<<<<<<< conflict 2 of 13
++++++++ zusvmkwt be5cee56 "test(dispatch): a held fallback copy outlives a NATS outage longer than the dead-letter threshold and arrives once"
 		conn, err := database.Pool.Listener(ctx)
 		if err == nil {
 			dials.Add(1)
 		}
 		return conn, err
+%%%%%%% diff from: mmlowqmk d4cbcfe6 "fix: tests that fail and pass on a re-run are fixed at their cause, with the product races behind them (#2396)"
+\\\\\\\        to: vvkzzusr f9c01e92 "chore: fold changelog fragments [skip ci]"
+-		return database.Pool.Listener(ctx)
++		return rig.database.Pool.Listener(ctx)
+>>>>>>> conflict 2 of 13 ends
 	}
 	relay.backoff = func(int) time.Duration { return 5 * time.Millisecond }
-	subscription, _, opened := subscribeRelay(t, relay)
+<<<<<<< conflict 3 of 13
+%%%%%%% diff from: mmlowqmk d4cbcfe6 "fix: tests that fail and pass on a re-run are fixed at their cause, with the product races behind them (#2396)"
+\\\\\\\        to: zusvmkwt be5cee56 "test(dispatch): a held fallback copy outlives a NATS outage longer than the dead-letter threshold and arrives once"
+-	relay.coalesce = time.Millisecond
+-	t.Cleanup(func() {
+-		stop()
+-		relay.wait()
+-	})
+-	subscription, cancel, err := relay.subscribe(context.Background())
+-	if err != nil {
+-		t.Fatalf("subscribe to the relay: %v", err)
+-	}
+-	defer cancel()
+-	opened, _ := relay.at()
++	subscription, _, opened := subscribeRelay(t, relay)
++++++++ vvkzzusr f9c01e92 "chore: fold changelog fragments [skip ci]"
+	relay.coalesce = time.Millisecond
+
+	// The subscription starts the relay, with no listening connection. It resumes from before the
+	// newest event, so once that event reaches the page its catch-up has read its last page: what
+	// reaches the page after it can only come from the relay.
+	client := rig.dial(t, withBearer("agent-token"))
+	before := eventHead(t, rig.database)
+	subscribeEvents(t, client, "events", new(before-1))
+	if id := nextEventID(t, client, "events"); id != before {
+		t.Fatalf("the catch-up sent event %d, want the head %d", id, before)
+	}
+	opened, _ := relay.at()
+>>>>>>> conflict 3 of 13 ends
 
 	// Committed while the relay has no connection: its notification reaches nobody.
-	committed := seedStreamEvents(t, database, key, 1, 0)
-	select {
-	case event := <-subscription:
-		t.Fatalf("the relay published event %d with no listening connection", event.Event.ID)
-	case <-time.After(100 * time.Millisecond):
+<<<<<<< conflict 4 of 13
+%%%%%%% diff from: mmlowqmk d4cbcfe6 "fix: tests that fail and pass on a re-run are fixed at their cause, with the product races behind them (#2396)"
+\\\\\\\        to: zusvmkwt be5cee56 "test(dispatch): a held fallback copy outlives a NATS outage longer than the dead-letter threshold and arrives once"
+-	if response := dispatchRequest(t, handler, http.MethodPatch, "/api/v1/issues/"+issue.Key, map[string]string{
+-		"title": "Renamed while the listener was down",
+-	}, "alice"); response.Code != http.StatusOK {
+-		t.Fatalf("rename issue: status=%d body=%s", response.Code, response.Body.String())
+-	}
+-	committed := eventHead(t, database)
++	committed := seedStreamEvents(t, database, key, 1, 0)
+ 	select {
+ 	case event := <-subscription:
+-		t.Fatalf("the relay published event %d with no listening connection", event.ID)
++		t.Fatalf("the relay published event %d with no listening connection", event.Event.ID)
+ 	case <-time.After(100 * time.Millisecond):
+ 	}
+-	if at, _ := relay.at(); at != opened {
+-		t.Fatalf("relay cursor = %d with no connection, want the %d it opened on", at, opened)
+-	}
+-
++++++++ vvkzzusr f9c01e92 "chore: fold changelog fragments [skip ci]"
+	renameIssue(t, rig.handler, issue, "Renamed while the listener was down")
+	committed := eventHead(t, rig.database)
+	client.quiet(t, 100*time.Millisecond, "the relay with no listening connection")
+	if at, _ := relay.at(); at != opened {
+		t.Fatalf("relay cursor = %d with no connection, want the %d it opened on", at, opened)
 	}
+
+>>>>>>> conflict 4 of 13 ends
 	down.Store(false)
-	receiveRelayedThrough(t, subscription, opened, committed)
+<<<<<<< conflict 5 of 13
+%%%%%%% diff from: mmlowqmk d4cbcfe6 "fix: tests that fail and pass on a re-run are fixed at their cause, with the product races behind them (#2396)"
+\\\\\\\        to: zusvmkwt be5cee56 "test(dispatch): a held fallback copy outlives a NATS outage longer than the dead-letter threshold and arrives once"
+-	var last int64
+-	for last < committed {
+-		select {
+-		case event, open := <-subscription:
+-			if !open {
+-				t.Fatal("the relay's subscription ended")
+-			}
+-			if event.ID <= last {
+-				t.Fatalf("the relay published %d after %d; a catch-up publishes in id order", event.ID, last)
+-			}
+-			last = event.ID
+-		case <-time.After(5 * time.Second):
+-			t.Fatalf("the relay published through %d after its listener reconnected, want the %d committed while it was down", last, committed)
+-		}
+-	}
++	receiveRelayedThrough(t, subscription, opened, committed)
++++++++ vvkzzusr f9c01e92 "chore: fold changelog fragments [skip ci]"
+	for last := before; last < committed; {
+		id := nextEventID(t, client, "events")
+		if id <= last {
+			t.Fatalf("the feed sent %d after %d; a catch-up publishes in id order", id, last)
+		}
+		last = id
+	}
+>>>>>>> conflict 5 of 13 ends
 
 	// Every later LISTEN catches up the same way, from the cursor as it stands: a redial that
 	// reset it would send every open page the whole log again.
+<<<<<<< conflict 6 of 13
++++++++ zusvmkwt be5cee56 "test(dispatch): a held fallback copy outlives a NATS outage longer than the dead-letter threshold and arrives once"
 	var terminated int
 	if err := database.Pool.QueryRow(context.Background(), `
 		select count(*) from (
@@ -306,6 +403,22 @@ func TestEventStreamRelayCatchesUpWhenItsListenerReconnects(t *testing.T) {
 	}
 	next := seedStreamEvents(t, database, key, 1, 0)
 	receiveRelayedThrough(t, subscription, committed, next)
+%%%%%%% diff from: mmlowqmk d4cbcfe6 "fix: tests that fail and pass on a re-run are fixed at their cause, with the product races behind them (#2396)"
+\\\\\\\        to: vvkzzusr f9c01e92 "chore: fold changelog fragments [skip ci]"
+ 	published, _ := relay.at()
+ 	relay.onConnected()
+-	select {
+-	case event := <-subscription:
+-		if event.ID <= published {
+-			t.Fatalf("a redial republished event %d, at or below the %d the relay had published through", event.ID, published)
+-		}
+-	case <-time.After(200 * time.Millisecond):
+-	}
++	client.quiet(t, 200*time.Millisecond, "a redial with nothing committed since")
+ 	if at, _ := relay.at(); at < published {
+ 		t.Fatalf("relay cursor = %d after a redial, want at least the %d it had published through", at, published)
+ 	}
+>>>>>>> conflict 6 of 13 ends
 }
 
 // TestEventStreamRelayRecoversWhenTheEventLogIsReset: the browser suite empties the event log
@@ -313,111 +426,253 @@ func TestEventStreamRelayCatchesUpWhenItsListenerReconnects(t *testing.T) {
 // ids restart at 1, below the cursor the relay has published through, and `id > cursor` matches
 // nothing. A relay that only ever published forward would fall silent there for good: every live
 // update of every later scenario would be lost, with no error anywhere. The relay reads the reset
+<<<<<<< conflict 7 of 13
++++++++ zusvmkwt be5cee56 "test(dispatch): a held fallback copy outlives a NATS outage longer than the dead-letter threshold and arrives once"
 // through eventCursorCheck and ends its generation with every subscription
 // it holds -- the stream's answer to a reader it can no longer serve in order, which sends a
 // browser through its reconnect -- and the next subscription starts a generation on the new log.
+%%%%%%% diff from: mmlowqmk d4cbcfe6 "fix: tests that fail and pass on a re-run are fixed at their cause, with the product races behind them (#2396)"
+\\\\\\\        to: vvkzzusr f9c01e92 "chore: fold changelog fragments [skip ci]"
+ // the way the delivery hub does (eventCursorCheck), moves its cursor to the new log's head and
+-// ends every open subscription -- the stream's answer to a reader it can no longer serve in
+-// order, which sends a browser through its reconnect -- and serves the events committed after the
+-// reset to the connections opened after it.
++// drops every subscriber -- the stream's answer to a reader it can no longer serve in order --
++// which ends every open events subscription with an ended frame (behind), so the page subscribes
++// again; and it serves the events committed after the reset to the subscriptions made after it.
+>>>>>>> conflict 7 of 13 ends
 func TestEventStreamRelayRecoversWhenTheEventLogIsReset(t *testing.T) {
-	handler, database, deps := newTestServer(t, testServerOptions{})
-	key := createStreamIssue(t, handler)
-	relay, _ := newCountedRelay(t, deps)
-	subscription, _, opened := subscribeRelay(t, relay)
+<<<<<<< conflict 8 of 13
+%%%%%%% diff from: mmlowqmk d4cbcfe6 "fix: tests that fail and pass on a re-run are fixed at their cause, with the product races behind them (#2396)"
+\\\\\\\        to: zusvmkwt be5cee56 "test(dispatch): a held fallback copy outlives a NATS outage longer than the dead-letter threshold and arrives once"
+ 	handler, database, deps := newTestServer(t, testServerOptions{})
+-	issue := createInteractionIssue(t, handler, "TEST", "Issue", "A spec")
+-	rename := func(title string) {
+-		t.Helper()
+-		if response := dispatchRequest(t, handler, http.MethodPatch, "/api/v1/issues/"+issue.Key, map[string]string{
+-			"title": title,
+-		}, "alice"); response.Code != http.StatusOK {
+-			t.Fatalf("rename issue to %q: status=%d body=%s", title, response.Code, response.Body.String())
+-		}
+-	}
+-
+-	lifetime, stop := context.WithCancel(t.Context())
+-	relay := newEventStreamRelay(directServer(deps), lifetime)
+-	relay.coalesce = time.Millisecond
+-	t.Cleanup(func() {
+-		stop()
+-		relay.wait()
+-	})
+-	subscription, cancel, err := relay.subscribe(context.Background())
+-	if err != nil {
+-		t.Fatalf("subscribe to the relay: %v", err)
+-	}
+-	defer cancel()
++	key := createStreamIssue(t, handler)
++	relay, _ := newCountedRelay(t, deps)
++	subscription, _, opened := subscribeRelay(t, relay)
++++++++ vvkzzusr f9c01e92 "chore: fold changelog fragments [skip ci]"
+	rig := newLiveSocketRig(t, testServerOptions{}, nil)
+	rig.served.eventRelay.coalesce = time.Millisecond
+	issue := createInteractionIssue(t, rig.handler, "TEST", "Issue", "A spec")
+	client := rig.dial(t, withBearer("agent-token"))
+	subscribeEvents(t, client, "events", nil)
+>>>>>>> conflict 8 of 13 ends
 
 	// A cursor well above the ids the reset log will hand out.
+<<<<<<< conflict 9 of 13
++++++++ zusvmkwt be5cee56 "test(dispatch): a held fallback copy outlives a NATS outage longer than the dead-letter threshold and arrives once"
 	committed := seedStreamEvents(t, database, key, 1, 0)
 	receiveRelayedThrough(t, subscription, opened, committed)
+%%%%%%% diff from: mmlowqmk d4cbcfe6 "fix: tests that fail and pass on a re-run are fixed at their cause, with the product races behind them (#2396)"
+\\\\\\\        to: vvkzzusr f9c01e92 "chore: fold changelog fragments [skip ci]"
+-	rename("Renamed before the reset")
+-	committed := eventHead(t, database)
++	renameIssue(t, rig.handler, issue.Key, "Renamed before the reset")
++	committed := eventHead(t, rig.database)
+ 	for last := int64(0); last < committed; {
+-		select {
+-		case event, open := <-subscription:
+-			if !open {
+-				t.Fatal("the relay's subscription ended before the event log was reset")
+-			}
+-			last = event.ID
+-		case <-time.After(5 * time.Second):
+-			t.Fatalf("the relay published through %d before the reset, want the %d committed", last, committed)
+-		}
++		last = nextEventID(t, client, "events")
+ 	}
+>>>>>>> conflict 9 of 13 ends
 
-	if _, err := database.Pool.Exec(t.Context(), `truncate events restart identity cascade`); err != nil {
+	if _, err := rig.database.Pool.Exec(t.Context(), `truncate events restart identity cascade`); err != nil {
 		t.Fatalf("reset the event log: %v", err)
 	}
 	// TRUNCATE notifies nobody: it is the refill's own insert that fires migration 0107's trigger
 	// and wakes the relay onto a log that restarts at id 1.
+<<<<<<< conflict 10 of 13
++++++++ zusvmkwt be5cee56 "test(dispatch): a held fallback copy outlives a NATS outage longer than the dead-letter threshold and arrives once"
 	refilled := seedStreamEvents(t, database, key, 1, 0)
 	if refilled >= committed {
 		t.Fatalf("event %d committed after the reset is not below the pre-reset %d: the reset reused no id, so this test proves nothing", refilled, committed)
 	}
+%%%%%%% diff from: mmlowqmk d4cbcfe6 "fix: tests that fail and pass on a re-run are fixed at their cause, with the product races behind them (#2396)"
+\\\\\\\        to: vvkzzusr f9c01e92 "chore: fold changelog fragments [skip ci]"
+-	rename("Renamed after the reset")
++	renameIssue(t, rig.handler, issue.Key, "Renamed after the reset")
+>>>>>>> conflict 10 of 13 ends
 
-	// The subscription open across the reset ends without a frame of the new log, whose ids
-	// stand for other events than the ones its reader was sent.
-	for open := true; open; {
-		select {
-		case event, more := <-subscription:
-			if !more {
-				open = false
-			} else {
-				t.Fatalf("the relay published event %d into a subscription whose log was reset under it", event.Event.ID)
+<<<<<<< conflict 11 of 13
+%%%%%%% diff from: mmlowqmk d4cbcfe6 "fix: tests that fail and pass on a re-run are fixed at their cause, with the product races behind them (#2396)"
+\\\\\\\        to: zusvmkwt be5cee56 "test(dispatch): a held fallback copy outlives a NATS outage longer than the dead-letter threshold and arrives once"
+-	// The subscription open across the reset ends. An event above the pre-reset head is a row of
+-	// the old log committed between the drain above and the TRUNCATE -- a document settling, say;
+-	// one at or below it would be the relay republishing the reused ids into a reader that has
+-	// already seen those ids stand for other events.
++	// The subscription open across the reset ends without a frame of the new log, whose ids
++	// stand for other events than the ones its reader was sent.
+ 	for open := true; open; {
+ 		select {
+ 		case event, more := <-subscription:
+ 			if !more {
+ 				open = false
+-			} else if event.ID <= committed {
+-				t.Fatalf("the relay published event %d into a subscription whose log was reset under it", event.ID)
++			} else {
++				t.Fatalf("the relay published event %d into a subscription whose log was reset under it", event.Event.ID)
+ 			}
+ 		case <-time.After(5 * time.Second):
+ 			t.Fatal("the subscription open across the reset was never ended: its reader waits on a stream whose next frame can only lie")
++++++++ vvkzzusr f9c01e92 "chore: fold changelog fragments [skip ci]"
+	// The subscription open across the reset ends. An event above the pre-reset head is a row of
+	// the old log committed between the drain above and the TRUNCATE -- a document settling, say;
+	// one at or below it would be the relay republishing the reused ids to a page that has already
+	// seen those ids stand for other events.
+	for ended := false; !ended; {
+		switch frame := client.next(t, eventFeedWait, "the end of the subscription open across the reset").(type) {
+		case LiveEventFrame:
+			if id := mustEventFrameID(t, frame); id <= committed {
+				t.Fatalf("the feed sent event %d to a subscription whose log was reset under it", id)
 			}
-		case <-time.After(5 * time.Second):
-			t.Fatal("the subscription open across the reset was never ended: its reader waits on a stream whose next frame can only lie")
+		case LiveEnded:
+			if frame.Sub != "events" || frame.Reason != "behind" {
+				t.Fatalf("ended = %+v, want the events subscription's, behind", frame)
+			}
+			ended = true
+		default:
+			t.Fatalf("frame = %+v, want the events subscription's end", frame)
+>>>>>>> conflict 11 of 13 ends
 		}
 	}
 	// The reset ended the generation: its LISTEN connection closes though its subscriber has not
 	// cancelled.
 	waitForBackends(t, database, 0, relayListenBackend)
 
-	// And the next subscription starts on the new log.
-	reopened, _, head := subscribeRelay(t, relay)
-	if head != refilled {
-		t.Fatalf("a subscription after the reset has head %d, want the new log's %d", head, refilled)
+<<<<<<< conflict 12 of 13
+%%%%%%% diff from: mmlowqmk d4cbcfe6 "fix: tests that fail and pass on a re-run are fixed at their cause, with the product races behind them (#2396)"
+\\\\\\\        to: zusvmkwt be5cee56 "test(dispatch): a held fallback copy outlives a NATS outage longer than the dead-letter threshold and arrives once"
+-	// And the relay publishes again, from the new log, to a connection opened after the reset.
+-	reopened, cancelReopened, err := relay.subscribe(context.Background())
+-	if err != nil {
+-		t.Fatalf("subscribe to the relay after the reset: %v", err)
+-	}
+-	defer cancelReopened()
+-	rename("Renamed for the reopened connection")
+-	head := eventHead(t, database)
+-	for last := int64(0); last < head; {
+-		select {
+-		case event, open := <-reopened:
+-			if !open {
+-				t.Fatal("the relay ended a subscription opened after the reset")
+-			}
+-			last = event.ID
+-		case <-time.After(5 * time.Second):
+-			t.Fatalf("the relay published through %d after the reset, want the %d committed since: it is silent on the new log", last, head)
+-		}
+-	}
++	// And the next subscription starts on the new log.
++	reopened, _, head := subscribeRelay(t, relay)
++	if head != refilled {
++		t.Fatalf("a subscription after the reset has head %d, want the new log's %d", head, refilled)
++	}
++	next := seedStreamEvents(t, database, key, 1, 0)
++	receiveRelayedThrough(t, reopened, head, next)
++++++++ vvkzzusr f9c01e92 "chore: fold changelog fragments [skip ci]"
+	// And the relay publishes again, from the new log, to the page's subscription made after the
+	// reset.
+	subscribeEvents(t, client, "events", nil)
+	renameIssue(t, rig.handler, issue.Key, "Renamed for the resubscribed page")
+	head := eventHead(t, rig.database)
+	for last := int64(0); last < head; {
+		last = nextEventID(t, client, "events")
 	}
-	next := seedStreamEvents(t, database, key, 1, 0)
-	receiveRelayedThrough(t, reopened, head, next)
+}
+
+// mustEventFrameID is the decimal id an event frame names.
+func mustEventFrameID(t *testing.T, frame LiveEventFrame) int64 {
+	t.Helper()
+	var event feedEvent
+	if err := json.Unmarshal(frame.Event, &event); err != nil {
+		t.Fatalf("decode the event of frame %+v: %v", frame, err)
+	}
+	return event.ID
+>>>>>>> conflict 12 of 13 ends
 }
 
 // TestLiveAskEventFrameCarriesTheReadTimeFields: an ask payload cannot carry opened_event_id or
 // referenced_by_count from the write that appended it, so both are attached at read time
+<<<<<<< conflict 13 of 13
++++++++ zusvmkwt be5cee56 "test(dispatch): a held fallback copy outlives a NATS outage longer than the dead-letter threshold and arrives once"
 // (attachAskEventFields). Sourcing the live stream through the same row read as the replay
 // (readEventRows) and the same encoding (encodeSSEFrame) is what makes the frame a client
 // receives live and the frame it receives when it reconnects the same bytes; a hand-rolled live
 // read would hand a page an ask without them, and only a reconnect would repair it.
+%%%%%%% diff from: mmlowqmk d4cbcfe6 "fix: tests that fail and pass on a re-run are fixed at their cause, with the product races behind them (#2396)"
+\\\\\\\        to: vvkzzusr f9c01e92 "chore: fold changelog fragments [skip ci]"
+-// (attachAskEventFields). Sourcing the live stream through the same read as the replay
+-// (readEventsAfterID) is what makes the frame a client receives live and the frame it receives
+-// when it reconnects the same bytes; a hand-rolled live read would hand a page an ask without
+-// them, and only a reconnect would repair it.
++// (attachAskEventFields). Sourcing the live feed through the same read as the replay
++// (readEventsAfterID) is what makes the frame a page receives live and the frame it receives when
++// it resumes the same bytes; a hand-rolled live read would hand a page an ask without them, and
++// only a resubscribe would repair it.
+>>>>>>> conflict 13 of 13 ends
 func TestLiveAskEventFrameCarriesTheReadTimeFields(t *testing.T) {
-	handler, database := newTestHandlerWithStore(t)
-	issue := createInteractionIssue(t, handler, "TEST", "Ask fields", "A spec")
-	httpServer := httptest.NewServer(handler)
-	t.Cleanup(httpServer.Close)
-	since := eventHead(t, database)
-	live := openSSEStream(t, fmt.Sprintf("%s/api/v1/events?since=%d", httpServer.URL, since))
+	rig := newLiveSocketRig(t, testServerOptions{}, nil)
+	issue := createInteractionIssue(t, rig.handler, "TEST", "Ask fields", "A spec")
+	since := eventHead(t, rig.database)
+	live := rig.dial(t, withBearer("agent-token"))
+	subscribeEvents(t, live, "events", new(since))
 
-	created := sessionRequest(t, handler, http.MethodPost, "/api/v1/issues/"+issue.Key+"/asks", map[string]any{
+	created := sessionRequest(t, rig.handler, http.MethodPost, "/api/v1/issues/"+issue.Key+"/asks", map[string]any{
 		"question": "Which path?",
 		"actor":    sessionActor(),
 	})
 	if created.Code != http.StatusCreated {
 		t.Fatalf("create ask: status=%d body=%s", created.Code, created.Body.String())
 	}
-	liveFrame := readSSEFrameOfType(t, live, "ask.opened")
+	liveFrame, _ := eventOfType(t, live, "events", "ask.opened")
 
-	// The same event, replayed by a connection resuming from before it.
-	replay := openSSEStream(t, fmt.Sprintf("%s/api/v1/events?since=%d", httpServer.URL, since))
-	replayedFrame := readSSEFrameOfType(t, replay, "ask.opened")
+	// The same event, replayed by a subscription resuming from before it.
+	replay := rig.dial(t, withBearer("agent-token"))
+	subscribeEvents(t, replay, "events", new(since))
+	replayedFrame, _ := eventOfType(t, replay, "events", "ask.opened")
 
-	if strings.Join(liveFrame, "\n") != strings.Join(replayedFrame, "\n") {
-		t.Fatalf("live ask.opened frame\n\t%#v\ndiffers from the replayed one\n\t%#v", liveFrame, replayedFrame)
+	if liveFrame.ID != replayedFrame.ID || !bytes.Equal(liveFrame.Event, replayedFrame.Event) {
+		t.Fatalf("live ask.opened frame\n\t%s %s\ndiffers from the replayed one\n\t%s %s", liveFrame.ID, liveFrame.Event, replayedFrame.ID, replayedFrame.Event)
 	}
 	var event struct {
 		Payload map[string]json.RawMessage `json:"payload"`
 	}
-	if err := json.Unmarshal([]byte(strings.TrimPrefix(liveFrame[2], "data: ")), &event); err != nil {
-		t.Fatalf("decode the live ask.opened event %q: %v", liveFrame[2], err)
+	if err := json.Unmarshal(liveFrame.Event, &event); err != nil {
+		t.Fatalf("decode the live ask.opened event %s: %v", liveFrame.Event, err)
 	}
 	for _, field := range []string{"opened_event_id", "referenced_by_count"} {
 		value, ok := event.Payload[field]
 		if !ok || string(value) == "null" {
-			t.Fatalf("live ask.opened payload = %s, want a read-time %s", liveFrame[2], field)
+			t.Fatalf("live ask.opened payload = %s, want a read-time %s", liveFrame.Event, field)
 		}
 	}
-}
-
-// readSSEFrameOfType reads frames until one carries the named event type.
-func readSSEFrameOfType(t *testing.T, scanner *bufio.Scanner, eventType string) []string {
-	t.Helper()
-	for range maxSSEReplay {
-		frame := readSSEFrame(t, scanner)
-		if len(frame) == 3 && frame[1] == "event: "+eventType {
-			return frame
-		}
-	}
-	t.Fatalf("no %s frame arrived", eventType)
-	return nil
 }
 
 // liveEventSeed is one event a test writes directly, oldest first.

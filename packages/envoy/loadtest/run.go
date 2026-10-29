@@ -21,6 +21,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/gorilla/websocket"
 	"github.com/jackc/pgx/v5"
 )
 
@@ -42,6 +43,8 @@ type runConfig struct {
 	mix          eventMix
 	routes       routeMix
 	human        float64
+<<<<<<< conflict 1 of 11
++++++++ zusvmkwt be5cee56 "test(dispatch): a held fallback copy outlives a NATS outage longer than the dead-letter threshold and arrives once"
 	sse          int
 	// sseResume makes each SSE stream reopen as the dashboard does, with since its last event id,
 	// and records each reconnect; sseStale streams resume once, at the restart, from staleBacklog
@@ -58,6 +61,15 @@ type runConfig struct {
 	natsConns   int
 	buildCommit string
 	buildDirty  bool
+%%%%%%% diff from: mmlowqmk d4cbcfe6 "fix: tests that fail and pass on a re-run are fixed at their cause, with the product races behind them (#2396)"
+\\\\\\\        to: vvkzzusr f9c01e92 "chore: fold changelog fragments [skip ci]"
+-	sse          int
++	live         int
+ 	rngSeed      uint64
+ 	natsConns    int
+ 	buildCommit  string
+ 	buildDirty   bool
+>>>>>>> conflict 1 of 11 ends
 	// boxBusyBefore is the box's busy fraction read before Dispatch started (run-step.sh reads it
 	// with `loadgen box-busy` before its reset); negative means collectMeta reads it itself.
 	boxBusyBefore float64
@@ -79,12 +91,19 @@ func runLoad(args []string) error {
 	mixFlag := fs.String("event-mix", defaultEventMix, "event mix: a preset ("+eventMixPresetNames()+") or kind=weight,...")
 	routeFlag := fs.String("route-mix", "", "route-mix file (default: the committed "+defaultRouteMixName+")")
 	human := fs.Float64("human", 0.1, "share of writes made by a person")
+<<<<<<< conflict 2 of 11
++++++++ zusvmkwt be5cee56 "test(dispatch): a held fallback copy outlives a NATS outage longer than the dead-letter threshold and arrives once"
 	sse := fs.Int("sse", -1, "dashboard SSE streams (default max(1, round(requests/30)))")
 	sseResume := fs.Bool("sse-resume", false, "each SSE stream reopens with since its last event id, after the dashboard's backoff, and its reconnects are recorded")
 	sseStale := fs.Int("sse-stale", 0, fmt.Sprintf("SSE streams that reopen once, at the restart, with since %d below the event log's max(id) (needs -sse-resume and -restart-at)", staleBacklog))
 	restartAt := fs.Duration("restart-at", 0, "restart Dispatch (stack.sh restart-dispatch) this long into the window; 0 restarts nothing")
 	mentionFrac := fs.Float64("mention-frac", 0, "share of comment writes that mention -mentions live sessions")
 	mentions := fs.Int("mentions", 3, "sessions each mentioning comment mentions")
+%%%%%%% diff from: mmlowqmk d4cbcfe6 "fix: tests that fail and pass on a re-run are fixed at their cause, with the product races behind them (#2396)"
+\\\\\\\        to: vvkzzusr f9c01e92 "chore: fold changelog fragments [skip ci]"
+-	sse := fs.Int("sse", -1, "dashboard SSE streams (default max(1, round(requests/30)))")
++	live := fs.Int("live", -1, "dashboard live sockets (default max(1, round(requests/30)))")
+>>>>>>> conflict 2 of 11 ends
 	rngSeed := fs.Uint64("rng-seed", 1, "seed of the event and request schedules")
 	natsConns := fs.Int("nats-conns", 50, "NATS connections the sessions share")
 	out := fs.String("out", "", "output directory (required)")
@@ -125,8 +144,8 @@ func runLoad(args []string) error {
 		return fmt.Errorf("-warmup and -grace must be 0 or more, -duration more than 0")
 	case *natsConns < 1:
 		return fmt.Errorf("-nats-conns must be at least 1")
-	case *sse < -1:
-		return fmt.Errorf("-sse must be 0 or more")
+	case *live < -1:
+		return fmt.Errorf("-live must be 0 or more")
 	case *boxBusyBefore > 1 || !finite(*boxBusyBefore):
 		return fmt.Errorf("-box-busy-before must be a fraction between 0 and 1")
 	case *restartAt < 0 || *restartAt >= *duration:
@@ -158,8 +177,8 @@ func runLoad(args []string) error {
 			return fmt.Errorf("seed %s: issue %s has no quotes for anchored comments", *seedPath, is.Key)
 		}
 	}
-	if *sse < 0 {
-		*sse = max(1, int(math.Round(*requests/30)))
+	if *live < 0 {
+		*live = max(1, int(math.Round(*requests/30)))
 	}
 	if *sseStale < 0 || *sseStale > *sse || (*sseStale > 0 && (!*sseResume || *restartAt == 0)) {
 		return fmt.Errorf("-sse-stale must be 0 to -sse (%d), and needs -sse-resume and -restart-at", *sse)
@@ -174,9 +193,16 @@ func runLoad(args []string) error {
 		ep: ep, allowForeign: ef.allowForeign, name: *name, out: *out, seedPath: *seedPath,
 		sessions: *sessions, events: *events, requests: *requests,
 		warmup: *warmup, duration: *duration, grace: *grace, mix: mix, routes: routes,
+<<<<<<< conflict 3 of 11
++++++++ zusvmkwt be5cee56 "test(dispatch): a held fallback copy outlives a NATS outage longer than the dead-letter threshold and arrives once"
 		human: *human, sse: *sse, sseResume: *sseResume, sseStale: *sseStale,
 		restartAt: *restartAt, stackSh: stackSh, mentionFrac: *mentionFrac, mentions: *mentions,
 		rngSeed: *rngSeed, natsConns: *natsConns,
+%%%%%%% diff from: mmlowqmk d4cbcfe6 "fix: tests that fail and pass on a re-run are fixed at their cause, with the product races behind them (#2396)"
+\\\\\\\        to: vvkzzusr f9c01e92 "chore: fold changelog fragments [skip ci]"
+-		human: *human, sse: *sse, rngSeed: *rngSeed, natsConns: *natsConns,
++		human: *human, live: *live, rngSeed: *rngSeed, natsConns: *natsConns,
+>>>>>>> conflict 3 of 11 ends
 		buildCommit: *buildCommit, buildDirty: *buildDirty, boxBusyBefore: *boxBusyBefore, args: recordedArgs(fs),
 	}, sf)
 }
@@ -244,7 +270,7 @@ type summaryConfig struct {
 	EventsPerS   float64  `json:"events_per_s"`
 	Sessions     int      `json:"sessions"`
 	RequestsPerS float64  `json:"requests_per_s"`
-	SSE          int      `json:"sse"`
+	Live         int      `json:"live"`
 	EventMix     eventMix `json:"event_mix"`
 	RouteMix     string   `json:"route_mix"`
 	Human        float64  `json:"human"`
@@ -280,6 +306,8 @@ type summary struct {
 	CommitOrderLock lockSummary       `json:"commit_order_lock"`
 	UngrantedLocks  ungrantedSummary  `json:"ungranted_locks"`
 	Sessions        sessionsSummary   `json:"sessions"`
+<<<<<<< conflict 4 of 11
++++++++ zusvmkwt be5cee56 "test(dispatch): a held fallback copy outlives a NATS outage longer than the dead-letter threshold and arrives once"
 	SSE             sseSummary        `json:"sse"`
 	SSEBytes        int64             `json:"sse_bytes"`
 	// SSEReconnects is nil without -sse-resume, Restart without -restart-at and CommentMentions
@@ -287,6 +315,13 @@ type summary struct {
 	SSEReconnects   *reconnectSummary `json:"sse_reconnects"`
 	Restart         *restartSummary   `json:"restart"`
 	CommentMentions *mentionSummary   `json:"comment_mentions"`
+%%%%%%% diff from: mmlowqmk d4cbcfe6 "fix: tests that fail and pass on a re-run are fixed at their cause, with the product races behind them (#2396)"
+\\\\\\\        to: vvkzzusr f9c01e92 "chore: fold changelog fragments [skip ci]"
+-	SSE             sseSummary        `json:"sse"`
+-	SSEBytes        int64             `json:"sse_bytes"`
++	Live            liveSummary       `json:"live"`
++	LiveBytes       int64             `json:"live_bytes"`
+>>>>>>> conflict 4 of 11 ends
 	// StackExits are the stack processes that exited during the step; such a step fails and its
 	// row does not measure the load.
 	StackExits []stackExit `json:"stack_exits,omitempty"`
@@ -335,9 +370,23 @@ func execute(cfg runConfig, sf seedFile) error {
 	defer logf.Close()
 	lg := log.New(io.MultiWriter(os.Stderr, logf), "", log.LstdFlags|log.Lmicroseconds)
 	nonce := newMarkerNonce()
+<<<<<<< conflict 5 of 11
++++++++ zusvmkwt be5cee56 "test(dispatch): a held fallback copy outlives a NATS outage longer than the dead-letter threshold and arrives once"
 	lg.Printf("config: step=%s sessions=%d events=%g/s requests=%g/s event-mix=%s route-mix=%s warmup=%s duration=%s grace=%s human=%.2f sse=%d sse-resume=%t sse-stale=%d restart-at=%s mention-frac=%.2f mentions=%d rng-seed=%d marker-nonce=%s",
 		cfg.name, cfg.sessions, cfg.events, cfg.requests, cfg.mix.Name, cfg.routes.Source, cfg.warmup, cfg.duration, cfg.grace, cfg.human,
 		cfg.sse, cfg.sseResume, cfg.sseStale, cfg.restartAt, cfg.mentionFrac, cfg.mentions, cfg.rngSeed, formatNonce(nonce))
+%%%%%%% diff from: mmlowqmk d4cbcfe6 "fix: tests that fail and pass on a re-run are fixed at their cause, with the product races behind them (#2396)"
+\\\\\\\        to: vvkzzusr f9c01e92 "chore: fold changelog fragments [skip ci]"
+-	lg.Printf("config: step=%s sessions=%d events=%g/s requests=%g/s event-mix=%s route-mix=%s warmup=%s duration=%s grace=%s human=%.2f sse=%d rng-seed=%d marker-nonce=%s",
+-		cfg.name, cfg.sessions, cfg.events, cfg.requests, cfg.mix.Name, cfg.routes.Source, cfg.warmup, cfg.duration, cfg.grace, cfg.human, cfg.sse, cfg.rngSeed, formatNonce(nonce))
++	lg.Printf("config: step=%s sessions=%d events=%g/s requests=%g/s event-mix=%s route-mix=%s warmup=%s duration=%s grace=%s human=%.2f live=%d rng-seed=%d marker-nonce=%s",
++		cfg.name, cfg.sessions, cfg.events, cfg.requests, cfg.mix.Name, cfg.routes.Source, cfg.warmup, cfg.duration, cfg.grace, cfg.human, cfg.live, cfg.rngSeed, formatNonce(nonce))
++
++	liveURL, err := liveSocketURL(cfg.ep.dispatch)
++	if err != nil {
++		return err
++	}
+>>>>>>> conflict 5 of 11 ends
 
 	if err := checkStack(ctx, cfg.ep); err != nil {
 		return err
@@ -368,7 +417,14 @@ func execute(cfg runConfig, sf seedFile) error {
 	lg.Printf("window %s to %s", st.winStart.UTC().Format(time.RFC3339), st.winEnd.UTC().Format(time.RFC3339))
 
 	a := newAPI(cfg.ep.dispatch, cfg.ep.token, 2048)
-	sse := st.startSSE(ctx, a)
+<<<<<<< conflict 6 of 11
+%%%%%%% diff from: mmlowqmk d4cbcfe6 "fix: tests that fail and pass on a re-run are fixed at their cause, with the product races behind them (#2396)"
+\\\\\\\        to: zusvmkwt be5cee56 "test(dispatch): a held fallback copy outlives a NATS outage longer than the dead-letter threshold and arrives once"
+-	sse := st.startSSE(ctx)
++	sse := st.startSSE(ctx, a)
++++++++ vvkzzusr f9c01e92 "chore: fold changelog fragments [skip ci]"
+	live := st.startLive(ctx, liveURL)
+>>>>>>> conflict 6 of 11 ends
 	writes, eventsDone := st.runEvents(ctx, newWriter(a, sf, nonce, lg))
 	reqs, requestsDone := st.runRequests(ctx, a)
 	pr := st.startProbes(ctx)
@@ -390,7 +446,7 @@ func execute(cfg runConfig, sf seedFile) error {
 	ns.close()
 	ns.envelopes.write(cfg.out, lg)
 
-	sum := st.buildSummary(ns, reg, writes, reqs, sse, pr)
+	sum := st.buildSummary(ns, reg, writes, reqs, live, pr)
 	writeJSONFile(filepath.Join(cfg.out, "summary.json"), sum, 0o644, lg)
 	meta.End = time.Now()
 	writeJSONFile(filepath.Join(cfg.out, "meta.json"), meta, metaMode, lg)
@@ -462,6 +518,8 @@ func (st *step) inWindow(t time.Time) bool { return inWindow(t, st.winStart, st.
 
 func inWindow(t, winStart, winEnd time.Time) bool { return !t.Before(winStart) && t.Before(winEnd) }
 
+<<<<<<< conflict 7 of 11
++++++++ zusvmkwt be5cee56 "test(dispatch): a held fallback copy outlives a NATS outage longer than the dead-letter threshold and arrives once"
 // dashboard is the step's dashboard SSE streams, the frames of theirs that arrived in the window,
 // and the routes a reconnect's refetch issues.
 type dashboard struct {
@@ -470,8 +528,22 @@ type dashboard struct {
 	refetch []route
 	head    *eventHead
 	done    sync.WaitGroup
+%%%%%%% diff from: mmlowqmk d4cbcfe6 "fix: tests that fail and pass on a re-run are fixed at their cause, with the product races behind them (#2396)"
+\\\\\\\        to: vvkzzusr f9c01e92 "chore: fold changelog fragments [skip ci]"
+-// sseStreams is what the dashboard SSE streams read: their bytes and the frames that arrived in
+-// the window.
+-type sseStreams struct {
++// liveSockets is what the dashboard live sockets read: their bytes and the event frames that
++// arrived in the window.
++type liveSockets struct {
+ 	bytes  atomic.Int64
+-	frames *collector[sseFrame]
++	frames *collector[liveFrame]
+>>>>>>> conflict 7 of 11 ends
 }
 
+<<<<<<< conflict 8 of 11
++++++++ zusvmkwt be5cee56 "test(dispatch): a held fallback copy outlives a NATS outage longer than the dead-letter threshold and arrives once"
 // startSSE opens the dashboard SSE streams (sseStreams.run) until ctx ends. Every data frame is
 // timed on arrival (readSSE), and those that arrive in the window are kept. With -sse-resume each
 // stream reopens as the dashboard does, and each reconnect without a complete replay refetches the
@@ -500,7 +572,48 @@ func (st *step) startSSE(ctx context.Context, a *api) *dashboard {
 	}
 	for i := range st.cfg.sse {
 		d.done.Go(func() { d.streams.run(ctx, i) })
+%%%%%%% diff from: mmlowqmk d4cbcfe6 "fix: tests that fail and pass on a re-run are fixed at their cause, with the product races behind them (#2396)"
+\\\\\\\        to: vvkzzusr f9c01e92 "chore: fold changelog fragments [skip ci]"
+-// startSSE opens the dashboard SSE streams, each reconnecting a second after its stream ends,
+-// until ctx ends. Every data frame is timed on arrival (readSSE).
+-func (st *step) startSSE(ctx context.Context) *sseStreams {
+-	ss := &sseStreams{frames: newCollector[sseFrame](1 << 14)}
+-	client := &http.Client{}
+-	for i := range st.cfg.sse {
+-		go func() {
+-			for ctx.Err() == nil {
+-				req, _ := http.NewRequestWithContext(ctx, "GET", st.cfg.ep.dispatch+"/api/v1/events", nil)
+-				req.Header.Set("X-Dispatch-User", fmt.Sprintf("viewer-%d", i))
+-				req.Header.Set("Accept", "text/event-stream")
+-				if resp, err := client.Do(req); err == nil {
+-					n, _ := readSSE(resp.Body, st.nonce, time.Now, func(f sseFrame) {
+-						if st.inWindow(time.Unix(0, f.at)) {
+-							ss.frames.add(f)
+-						}
+-					})
+-					ss.bytes.Add(n)
+-					_ = resp.Body.Close()
+-				}
+-				sleepUntil(ctx, time.Now().Add(time.Second))
++// startLive opens the dashboard live sockets on url, each subscribed to the event feed as a
++// dashboard tab is and reconnecting a second after its socket ends, until ctx ends. Every event
++// frame is timed on arrival (readLive).
++func (st *step) startLive(ctx context.Context, url string) *liveSockets {
++	ls := &liveSockets{frames: newCollector[liveFrame](1 << 14)}
++	// A browser offers permessage-deflate, and Dispatch accepts it.
++	dialer := &websocket.Dialer{HandshakeTimeout: 10 * time.Second, EnableCompression: true}
++	for i := range st.cfg.live {
++		header := http.Header{"X-Dispatch-User": {fmt.Sprintf("viewer-%d", i)}}
++		go followLive(ctx, dialer, url, header, st.nonce, time.Second, func(f liveFrame) {
++			if st.inWindow(time.Unix(0, f.at)) {
++				ls.frames.add(f)
+ 			}
+-		}()
++		}, func(n int64) { ls.bytes.Add(n) })
+>>>>>>> conflict 8 of 11 ends
 	}
+<<<<<<< conflict 9 of 11
++++++++ zusvmkwt be5cee56 "test(dispatch): a held fallback copy outlives a NATS outage longer than the dead-letter threshold and arrives once"
 	return d
 }
 
@@ -509,6 +622,11 @@ func (st *step) startSSE(ctx context.Context, a *api) *dashboard {
 func (d *dashboard) wait() {
 	d.done.Wait()
 	d.head.close()
+%%%%%%% diff from: mmlowqmk d4cbcfe6 "fix: tests that fail and pass on a re-run are fixed at their cause, with the product races behind them (#2396)"
+\\\\\\\        to: vvkzzusr f9c01e92 "chore: fold changelog fragments [skip ci]"
+-	return ss
++	return ls
+>>>>>>> conflict 9 of 11 ends
 }
 
 // openLoop is an open-loop Poisson schedule at rate per second, from stream `stream` of rngSeed:
@@ -669,10 +787,17 @@ func (st *step) profile(ctx context.Context) {
 
 // buildSummary joins what the phases recorded into summary.json, and writes samples.json. It
 // reads the run's commit rows and names the ungranted locks' relations, so it runs after the load.
-func (st *step) buildSummary(ns *natsSessions, reg *registrar, writes *collector[writeRec], reqs *requestLoad, sse *dashboard, pr *probes) summary {
+<<<<<<< conflict 10 of 11
+%%%%%%% diff from: mmlowqmk d4cbcfe6 "fix: tests that fail and pass on a re-run are fixed at their cause, with the product races behind them (#2396)"
+\\\\\\\        to: zusvmkwt be5cee56 "test(dispatch): a held fallback copy outlives a NATS outage longer than the dead-letter threshold and arrives once"
+-func (st *step) buildSummary(ns *natsSessions, reg *registrar, writes *collector[writeRec], reqs *requestLoad, sse *sseStreams, pr *probes) summary {
++func (st *step) buildSummary(ns *natsSessions, reg *registrar, writes *collector[writeRec], reqs *requestLoad, sse *dashboard, pr *probes) summary {
++++++++ vvkzzusr f9c01e92 "chore: fold changelog fragments [skip ci]"
+func (st *step) buildSummary(ns *natsSessions, reg *registrar, writes *collector[writeRec], reqs *requestLoad, live *liveSockets, pr *probes) summary {
+>>>>>>> conflict 10 of 11 ends
 	cfg := st.cfg
 	ws := writes.snapshot()
-	frames := sse.frames.snapshot()
+	frames := live.frames.snapshot()
 	pr.ls.resolveRelations(cfg.ep.pg)
 
 	var markers []int64
@@ -691,7 +816,7 @@ func (st *step) buildSummary(ns *natsSessions, reg *registrar, writes *collector
 	durS := cfg.duration.Seconds()
 	sum := summary{
 		Config: summaryConfig{
-			Step: cfg.name, EventsPerS: cfg.events, Sessions: cfg.sessions, RequestsPerS: cfg.requests, SSE: cfg.sse,
+			Step: cfg.name, EventsPerS: cfg.events, Sessions: cfg.sessions, RequestsPerS: cfg.requests, Live: cfg.live,
 			EventMix: cfg.mix, RouteMix: cfg.routes.Source, Human: cfg.human, WarmupS: cfg.warmup.Seconds(),
 			DurationS: durS, GraceS: cfg.grace.Seconds(), RNGSeed: cfg.rngSeed, NATSConns: cfg.natsConns,
 			SSEResume: cfg.sseResume, SSEStale: cfg.sseStale, RestartAtS: cfg.restartAt.Seconds(),
@@ -705,6 +830,8 @@ func (st *step) buildSummary(ns *natsSessions, reg *registrar, writes *collector
 		},
 		CommitOrderLock: summarizeLock(pr.lp.samples, pr.lp.errors),
 		UngrantedLocks:  summarizeUngranted(pr.ls.samples, pr.ls.errors),
+<<<<<<< conflict 11 of 11
++++++++ zusvmkwt be5cee56 "test(dispatch): a held fallback copy outlives a NATS outage longer than the dead-letter threshold and arrives once"
 		SSE:             summarizeSSE(frames, ws, commits),
 		SSEBytes:        sse.streams.bytes.Load(),
 	}
@@ -719,6 +846,13 @@ func (st *step) buildSummary(ns *natsSessions, reg *registrar, writes *collector
 	}
 	if cfg.mentionFrac > 0 {
 		sum.CommentMentions = summarizeMentions(ws, cfg.mentionFrac, cfg.mentions, restartAt)
+%%%%%%% diff from: mmlowqmk d4cbcfe6 "fix: tests that fail and pass on a re-run are fixed at their cause, with the product races behind them (#2396)"
+\\\\\\\        to: vvkzzusr f9c01e92 "chore: fold changelog fragments [skip ci]"
+-		SSE:             summarizeSSE(frames, ws, commits),
+-		SSEBytes:        sse.bytes.Load(),
++		Live:            summarizeLive(frames, ws, commits),
++		LiveBytes:       live.bytes.Load(),
+>>>>>>> conflict 11 of 11 ends
 	}
 	if commitsErr != nil {
 		sum.Events.CommitsError = commitsErr.Error()

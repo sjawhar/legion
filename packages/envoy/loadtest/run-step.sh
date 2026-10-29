@@ -3,9 +3,15 @@
 #
 #   run-step.sh <name> --events <per s> --sessions <n> --requests <per s>
 #     [--duration 180s] [--warmup 30s] [--grace 20s] [--event-mix <preset or kind=w,...>]
-#     [--route-mix <file>] [--human 0.1] [--sse <n>] [--rng-seed <n>] [--out <dir>]
-#     [--sse-resume 0|1] [--sse-stale <n>] [--restart-at <duration>]
-#     [--mention-frac <0..1>] [--mentions <n>] [--envoy-rtt <duration>]
+<<<<<<< conflict 1 of 2
+%%%%%%% diff from: mmlowqmk d4cbcfe6 "fix: tests that fail and pass on a re-run are fixed at their cause, with the product races behind them (#2396)"
+\\\\\\\        to: zusvmkwt be5cee56 "test(dispatch): a held fallback copy outlives a NATS outage longer than the dead-letter threshold and arrives once"
+ #     [--route-mix <file>] [--human 0.1] [--sse <n>] [--rng-seed <n>] [--out <dir>]
++#     [--sse-resume 0|1] [--sse-stale <n>] [--restart-at <duration>]
++#     [--mention-frac <0..1>] [--mentions <n>] [--envoy-rtt <duration>]
++++++++ vvkzzusr f9c01e92 "chore: fold changelog fragments [skip ci]"
+#     [--route-mix <file>] [--human 0.1] [--live <n>] [--rng-seed <n>] [--out <dir>]
+>>>>>>> conflict 1 of 2 ends
 #
 # From a fresh checkout it sets up, starts and seeds the stack (stack.sh). Then, every step that is
 # not part of a series: it rebuilds the binaries from this checkout (stack.sh setup, incremental) and
@@ -59,6 +65,8 @@ while [ $# -gt 0 ]; do
     --events) have_events=true ;;
     --sessions) have_sessions=true ;;
     --requests) have_requests=true ;;
+<<<<<<< conflict 2 of 2
++++++++ zusvmkwt be5cee56 "test(dispatch): a held fallback copy outlives a NATS outage longer than the dead-letter threshold and arrives once"
     --duration | --warmup | --grace | --event-mix | --human | --sse | --rng-seed | --sse-stale | --restart-at | --mention-frac | --mentions) ;;
     --sse-resume)
       case $value in
@@ -73,6 +81,11 @@ while [ $# -gt 0 ]; do
       LOADTEST_ENVOY_RTT=$value
       continue
       ;;
+%%%%%%% diff from: mmlowqmk d4cbcfe6 "fix: tests that fail and pass on a re-run are fixed at their cause, with the product races behind them (#2396)"
+\\\\\\\        to: vvkzzusr f9c01e92 "chore: fold changelog fragments [skip ci]"
+-    --duration | --warmup | --grace | --event-mix | --human | --sse | --rng-seed) ;;
++    --duration | --warmup | --grace | --event-mix | --human | --live | --rng-seed) ;;
+>>>>>>> conflict 2 of 2 ends
     --route-mix)
       [ -f "$value" ] || die "--route-mix names $value, which is not a file"
       value=$(cd -- "$(dirname -- "$value")" && pwd -P)/$(basename -- "$value")

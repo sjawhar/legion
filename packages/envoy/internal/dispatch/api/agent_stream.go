@@ -1,11 +1,9 @@
 package api
 
 import (
-	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
-	"fmt"
 	"io"
 	"net/http"
 	"strings"
@@ -17,199 +15,53 @@ import (
 	"github.com/sjawhar/envoy/internal/dispatch/agentstream"
 )
 
-// The viewer's stream. A session's own conversation is the most sensitive thing Dispatch ever
-// carries — a tool result holds whatever the tool printed — so this route is humans-only, writes
-// nothing to the database, and logs no frame body. What it forwards it forgets.
+// A session's own conversation, relayed to a person watching it through an agent view on the live
+// socket (live_agent.go). It is the most sensitive thing Dispatch ever carries - a tool result
+// holds whatever the tool printed - so the view is a person's alone, writes nothing to the
+// database, and logs no frame's bytes. What it forwards it forgets.
 const (
-	// How long a viewer waits for the session's own replay before settling for the live stream.
+	// How long a viewer waits for the session's own replay before settling for the live frames.
 	// Mirrors AGENT_STREAM_REPLAY_TIMEOUT_MS in packages/contracts/src/agent-stream.ts.
 	agentStreamReplayTimeout = 2 * time.Second
 	// How often an attached viewer re-arms the session. Well inside the session's own watch
 	// window (AGENT_STREAM_WATCH_TTL_MS), so a live viewer never lets it lapse.
 	agentStreamWatchInterval = 10 * time.Second
-	// The most frame bytes a viewer holds for a browser that is reading slower than the session
-	// is producing, counted as each frame's payload length from the moment it is queued until it
-	// has been written. A session publishes a message's snapshot at most every 100 ms and a viewer
+	// The most frame bytes a view holds for a page that is reading slower than the session is
+	// producing, counted as each frame's payload length from the moment it is queued until it has
+	// been written. A session publishes a message's snapshot at most every 100 ms and a view
 	// queues for up to agentStreamReplayTimeout before its first write, so 20 snapshots of 400 KiB
-	// fit; NATS's 1 MiB max_payload caps one frame, so a single frame always fits.
+	// fit; NATS's 1 MiB max_payload caps one frame, so a single frame always fits. A view that
+	// fills it ends (behind) rather than losing a frame, and the page's subscribe rebuilds from
+	// the session's replay.
 	agentStreamBufferBytes = 8 << 20
+	// How long a view whose relay call failed waits before it ends (dropped), so a relay that keeps
+	// failing - a NATS connection that is reconnecting - is not asked again as fast as the page can
+	// subscribe.
+	agentStreamRetry = time.Second
 )
 
 // agentStreamSessionID is the one place a caller-supplied session id becomes part of a NATS
 // subject. An Envoy session id is a UUID, and anything else is refused here rather than
-// concatenated: `*` or `>` in that position is a wildcard, and one request carrying it would
-// subscribe a single viewer to every armed session on the bus at once.
-func agentStreamSessionID(w http.ResponseWriter, r *http.Request) (string, bool) {
-	raw := strings.TrimSpace(r.PathValue("session_id"))
-	if raw == "" {
-		writeError(w, "SESSION_ID_INPUT", http.StatusBadRequest, "session_id is required")
-		return "", false
+// concatenated: `*` or `>` in that position is a wildcard, and one view naming it would subscribe
+// a single viewer to every armed session on the bus at once. It answers the session id, or why raw
+// is none.
+func agentStreamSessionID(raw string) (string, string) {
+	id := strings.TrimSpace(raw)
+	if id == "" {
+		return "", "session_id is required"
 	}
-	if _, err := uuid.Parse(raw); err != nil {
-		writeError(w, "SESSION_ID_INPUT", http.StatusBadRequest,
-			"session_id must be a session uuid")
-		return "", false
+	if _, err := uuid.Parse(id); err != nil {
+		return "", "session_id must be a session uuid"
 	}
-	return raw, true
+	return id, ""
 }
 
-func (s *server) streamAgentConversation(w http.ResponseWriter, r *http.Request) {
-	if _, ok := s.requireHuman(w, r); !ok {
-		return
-	}
-	sessionID, ok := agentStreamSessionID(w, r)
-	if !ok {
-		return
-	}
-	source := s.deps.AgentStream
-	if source == nil {
-		writeError(w, "STREAM_UNAVAILABLE", http.StatusServiceUnavailable,
-			"this deployment has no agent conversation relay (it needs NATS)")
-		return
-	}
-	flusher, ok := w.(http.Flusher)
-	if !ok {
-		writeError(w, "STREAM_UNSUPPORTED", http.StatusInternalServerError, "streaming unsupported")
-		return
-	}
-
-	// Subscribing before anything else is what makes the replay below safe to stitch on: a frame
-	// published while the replay request is in flight lands in this queue rather than falling
-	// between the two.
-	//
-	// A viewer that cannot keep up ends its stream rather than losing a frame. The relay never
-	// parses a frame, so it cannot tell a superseded snapshot from a tool result or the settled
-	// frame of an earlier message, and dropping the wrong one leaves a tool call reading
-	// "running…" until the page is reloaded. Closing here costs a reconnect, and the reconnect
-	// rebuilds from the session's own replay, which is exactly the state that was lost.
-	queue := newAgentStreamQueue()
-	// The relay ending this viewer's stream, which only the in-memory source's test hook does
-	// (agentstream.Memory.Drop): a session's own frame is never nil. The e2e suite has no other
-	// way to make a browser rebuild its transcript from a second replay, which is the one event
-	// that can take a reader's place in the history away from them.
-	dropped := make(chan struct{})
-	var droppedOnce sync.Once
-	stop, err := source.Subscribe(sessionID, func(frame agentstream.Frame) {
-		if frame == nil {
-			droppedOnce.Do(func() { close(dropped) })
-			return
-		}
-		queue.push(frame)
-	})
-	if err != nil {
-		s.writeHandlerError(w, err)
-		return
-	}
-	defer stop()
-	// The session publishes only while a viewer is attached, so it has to hear from this one
-	// before the first turn, not after it. The relay's connection refuses that publish at once
-	// while it is not connected to NATS (before its first connection, or during a reconnect), so the
-	// viewer is told the relay is unavailable rather than held on a stream nothing reaches, and the
-	// dashboard's reconnect attaches once the bus answers.
-	if err := source.Watch(sessionID); err != nil {
-		writeError(w, "STREAM_UNAVAILABLE", http.StatusServiceUnavailable,
-			"the agent conversation relay cannot reach NATS; try again shortly")
-		return
-	}
-
-	w.Header().Set("Content-Type", "text/event-stream")
-	w.Header().Set("Cache-Control", "no-cache")
-	w.Header().Set("Connection", "keep-alive")
-	w.WriteHeader(http.StatusOK)
-	flusher.Flush()
-
-	// Two questions, and the viewer needs both answers. Whether anyone is listening on the
-	// session's control subject says whether it can stream at all - every plugin release that
-	// can answers, and one that predates the live view never does - and a session that answers
-	// with nothing has simply not spoken yet. A replay that failed for any other reason is not
-	// a failed stream: the viewer gets the live conversation with no history behind it.
-	replay, responding := s.replayAgentStream(r.Context(), source, sessionID)
-	if err := writeStreamEvent(w, "responder", responderEvent(responding)); err != nil {
-		return
-	}
-	flusher.Flush()
-	if len(replay) > 0 {
-		if err := writeStreamEvent(w, "replay", replay); err != nil {
-			return
-		}
-		flusher.Flush()
-	}
-
-	watch := time.NewTicker(agentStreamWatchInterval)
-	defer watch.Stop()
-	heartbeat := time.NewTicker(s.deps.StreamHeartbeat)
-	defer heartbeat.Stop()
-	shutdown := s.lifetime.Done()
-	for {
-		select {
-		case <-r.Context().Done():
-			return
-		case <-shutdown:
-			// The server is shutting down: as streamEvents does, end the stream rather than hold
-			// http.Server.Shutdown open. The reconnect rebuilds from the session's own replay.
-			return
-		case <-queue.overflow:
-			// The viewer fell behind far enough to lose a frame. Draining what is queued first
-			// would stitch a gap into the middle of the conversation; the reconnect's replay is
-			// the honest answer.
-			return
-		case <-dropped:
-			// The relay dropped this viewer, as a lost connection does: the reconnect rebuilds
-			// from the session's own replay, which is what every other end of this stream
-			// leaves the viewer to do.
-			return
-		case <-queue.wake:
-			frames, size := queue.take()
-			for _, frame := range frames {
-				if err := writeStreamEvent(w, "frame", frame); err != nil {
-					return
-				}
-			}
-			flusher.Flush()
-			queue.release(size)
-		case <-watch.C:
-			if err := source.Watch(sessionID); err != nil {
-				return
-			}
-			if responding {
-				continue
-			}
-			// The session was not on its control subject when this viewer arrived. It may be
-			// now - a session restarted onto a plugin that streams - so every re-arm asks
-			// again, and the first answer delivers its history without the viewer reloading.
-			retry, answered := s.replayAgentStream(r.Context(), source, sessionID)
-			if !answered {
-				continue
-			}
-			responding = true
-			if err := writeStreamEvent(w, "responder", responderEvent(true)); err != nil {
-				return
-			}
-			if len(retry) > 0 {
-				if err := writeStreamEvent(w, "replay", retry); err != nil {
-					return
-				}
-			}
-			flusher.Flush()
-		case <-heartbeat.C:
-			// As the event stream does: a viewer whose session has ended stops watching.
-			if _, _, err := s.optionalActor(heartbeatRequest(r)); err != nil {
-				return
-			}
-			if _, err := fmt.Fprint(w, ": heartbeat\n\n"); err != nil {
-				return
-			}
-			flusher.Flush()
-		}
-	}
-}
-
-// agentStreamQueue holds the frames a viewer has been delivered and not yet written, in the order
+// agentStreamQueue holds the frames a view has been delivered and not yet written, in the order
 // they arrived, within agentStreamBufferBytes.
 type agentStreamQueue struct {
-	// wake has one slot: a push fills it, and the loop takes every queued frame when it fires.
+	// wake has one slot: a push fills it, and the view takes every queued frame when it fires.
 	wake chan struct{}
-	// overflow closes once, when a frame would take the viewer past its budget.
+	// overflow closes once, when a frame would take the view past its budget.
 	overflow chan struct{}
 
 	mu     sync.Mutex
@@ -225,9 +77,9 @@ func newAgentStreamQueue() *agentStreamQueue {
 	return &agentStreamQueue{wake: make(chan struct{}, 1), overflow: make(chan struct{})}
 }
 
-// push queues frame, or ends the stream when frame would take the viewer past its budget. Once
-// the stream has overflowed it queues nothing more and holds nothing. It never blocks: it runs on
-// the transport's own goroutine.
+// push queues frame, or ends the view when frame would take it past its budget. Once the view has
+// overflowed it queues nothing more and holds nothing. It never blocks: it runs on the transport's
+// own goroutine.
 func (q *agentStreamQueue) push(frame agentstream.Frame) {
 	q.mu.Lock()
 	defer q.mu.Unlock()
@@ -247,7 +99,7 @@ func (q *agentStreamQueue) push(frame agentstream.Frame) {
 }
 
 // take hands over every queued frame in order, and their bytes. Those bytes stay counted against
-// the budget until release, so the budget bounds what the viewer holds while the frames are being
+// the budget until release, so the budget bounds what the view holds while the frames are being
 // written too. After an overflow it hands over nothing.
 func (q *agentStreamQueue) take() ([]agentstream.Frame, int) {
 	q.mu.Lock()
@@ -310,17 +162,18 @@ func (s *server) publishAgentStreamFrame(w http.ResponseWriter, r *http.Request)
 		writeError(w, "FRAME_INPUT", http.StatusBadRequest, "could not read the frame")
 		return
 	}
-	sessionID, valid := agentStreamSessionID(w, r)
-	if !valid {
+	sessionID, problem := agentStreamSessionID(r.PathValue("session_id"))
+	if problem != "" {
+		writeError(w, "SESSION_ID_INPUT", http.StatusBadRequest, problem)
 		return
 	}
 	switch r.URL.Query().Get("as") {
 	case "replay":
 		memory.SetReplay(sessionID, frame)
 	case "drop":
-		// Ends every open viewer stream for this session, as a lost connection does. The live
-		// stream is not resumable, so the browser's reconnect asks the session for its replay
-		// again and rebuilds the whole transcript from whatever `as=replay` set by then.
+		// Ends every agent view of this session as dropped, as a lost connection does. The page
+		// subscribes again, which asks the session for its replay again and rebuilds the whole
+		// transcript from whatever `as=replay` set by then.
 		memory.Drop(sessionID)
 	case "responder":
 		// Whether anyone is on the session's control subject, with no history behind it: a live
@@ -337,20 +190,4 @@ func (s *server) publishAgentStreamFrame(w http.ResponseWriter, r *http.Request)
 		memory.Publish(sessionID, frame)
 	}
 	WriteJSON(w, http.StatusOK, map[string]bool{"ok": true})
-}
-
-// writeStreamEvent writes one SSE event whose data is a frame this server never reads into. A
-// frame is JSON and carries no raw newline, but the split keeps the wire format correct for one
-// that somehow does rather than truncating the event at it.
-func writeStreamEvent(w http.ResponseWriter, event string, data []byte) error {
-	if _, err := fmt.Fprintf(w, "event: %s\n", event); err != nil {
-		return err
-	}
-	for _, line := range bytes.Split(data, []byte("\n")) {
-		if _, err := fmt.Fprintf(w, "data: %s\n", line); err != nil {
-			return err
-		}
-	}
-	_, err := fmt.Fprint(w, "\n")
-	return err
 }

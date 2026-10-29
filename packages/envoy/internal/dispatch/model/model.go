@@ -7,6 +7,8 @@ import (
 	"regexp"
 	"strings"
 	"time"
+
+	"github.com/sjawhar/envoy/internal/contracts"
 )
 
 // Actor identifies the user or agent session that caused a change. Service is
@@ -952,9 +954,9 @@ type AskEditEventPayload struct {
 	// since it was opened or last handed back (requested_version below the version it named): it
 	// changes only the version the request names, so like a human's unnamed artifact.version it
 	// wakes nobody (events.Broker.Notify) and reaches no follower (the outbox's follower routes),
-	// while the event log and SSE carry it as they carry every event. The first move after an
-	// opening or a hand-back is not quiet, even when a thread reply left the request waiting on its
-	// agent.
+	// while the event log and the event feed carry it as they carry every event. The first move
+	// after an opening or a hand-back is not quiet, even when a thread reply left the request
+	// waiting on its agent.
 	Quiet bool `json:"quiet,omitempty"`
 }
 
@@ -1143,64 +1145,86 @@ const DeliveryClaimLapse = time.Minute
 // seconds, for SQL that compares a delivery's claimed_at or created_at against now().
 var DeliveryClaimLapseInterval = fmt.Sprintf("interval '%d seconds'", int64(DeliveryClaimLapse/time.Second))
 
-// StrandedMentionWindow is how far back the API's mention sender resumes a stranded mention
-// attempt (MentionStrandedSQL). It covers a deploy or a crash loop; an older pending attempt has
-// been in front of its author long enough that a late delivery is worse than the retry the author
-// already has. Past it no sender takes the attempt, so the outbox counts it abandoned whoever
-// claimed it (MentionAbandonedSQL).
-const StrandedMentionWindow = time.Hour
+// MentionSweepWindow is how far back the delivery sweep resumes an owed mention attempt
+// (OwedMentionAttemptSQL): the window in which a repeat of a send is still recognised as a
+// duplicate (contracts.DeliveryDuplicateWindow), so a resend of one that did land is dropped
+// rather than delivered twice. Past it the sweep sends nothing, and the outbox counts the attempt
+// abandoned whoever claimed it (MentionAbandonedSQL).
+const MentionSweepWindow = contracts.DeliveryDuplicateWindow
 
-// StrandedMentionWindowInterval is StrandedMentionWindow as a Postgres interval literal in whole
+// MentionSweepWindowInterval is MentionSweepWindow as a Postgres interval literal in whole
 // seconds.
-var StrandedMentionWindowInterval = fmt.Sprintf("interval '%d seconds'", int64(StrandedMentionWindow/time.Second))
+var MentionSweepWindowInterval = fmt.Sprintf("interval '%d seconds'", int64(MentionSweepWindow/time.Second))
 
-// The delivery predicates are SQL over one delivery row that name its columns (claimed_at,
-// created_at) unqualified, so a statement applies them to that table alone or to a subquery over
-// it. Postgres judges each against the timestamps it wrote itself, so no process's clock moves
-// them: a task whose clock ran ahead would otherwise read every live claim as lapsed, and one that
-// ran behind would never resume a stranded attempt. MentionLiveSQL, MentionResumedSQL and
-// MentionAbandonedSQL split the pending attempts of comment_deliveries three ways, each attempt
-// into exactly one; a caller pairs each with state = 'pending'. Which process acts on an attempt
-// in each state, and what becomes of the mentioned session's copy of the comment meanwhile, is
-// described once, on publishFallbackCopies in internal/dispatch/outbox.
+// The delivery predicates are SQL over one delivery row. DeliveryClaimFreeSQL names its columns
+// unqualified, so a statement applies it to that table alone or to a subquery over it; the mention
+// predicates take the row's name in the statement - its alias, or the table's own name - because
+// each reads the attempts of the same target beside it. Postgres judges each against the
+// timestamps it wrote itself, so no process's clock moves them: a task whose clock ran ahead would
+// otherwise read every live claim as lapsed, and one that ran behind would never resume an owed
+// attempt.
+//
+// MentionLiveSQL, MentionResumedSQL and MentionAbandonedSQL split the pending attempts of
+// comment_deliveries three ways, each attempt into exactly one; a caller pairs each with
+// state = 'pending'. All three are built from OwedMentionAttemptSQL, which is what the delivery
+// sweep sends, so the outbox cannot come to a different answer from the sweep about who owes an
+// attempt. Which process acts on an attempt in each state, and what becomes of the mentioned
+// session's copy of the comment meanwhile, is described once, on publishFallbackCopies in
+// internal/dispatch/outbox.
 
 // DeliveryClaimFreeSQL is true of a delivery attempt no sender holds: never claimed, or claimed
 // more than DeliveryClaimLapse ago. The API's claim transactions take a pending attempt that reads
 // so, a comment mention's and a targeted message's alike.
 var DeliveryClaimFreeSQL = `(claimed_at is null or claimed_at < now() - ` + DeliveryClaimLapseInterval + `)`
 
-// MentionLiveSQL is true of a pending mention attempt whose send is live: created within
-// StrandedMentionWindow, and claimed within DeliveryClaimLapse or, unclaimed, created within it
-// (the mention sender leaves an attempt unclaimed until its lane starts the send). The outbox
-// holds a mentioned session's copy back while its attempt is live.
-var MentionLiveSQL = `(not ` + MentionAbandonedSQL + ` and not ` + MentionResumedSQL + `)`
+// MentionLatestAttemptSQL is true of the comment_deliveries row named row when it is the newest
+// attempt of its (comment, target): the one no retry from the card overtook, and the only one any
+// sender may still send.
+func MentionLatestAttemptSQL(row string) string {
+	return `(` + row + `.attempt = (select max(latest.attempt) from comment_deliveries latest
+		where latest.comment_id = ` + row + `.comment_id and latest.target = ` + row + `.target))`
+}
 
-// MentionResumedSQL is true of a pending mention attempt a sender claimed and never settled, whose
-// claim lapsed (more than DeliveryClaimLapse ago), created within StrandedMentionWindow: its sender
-// died with the send in flight, perhaps after the listener took it, and the API's stranded pass
-// resends it (MentionStrandedSQL) under its own idempotency key, which the listener drops as a
-// repeat when the first send landed.
-var MentionResumedSQL = `(claimed_at is not null and claimed_at < now() - ` + DeliveryClaimLapseInterval +
-	` and created_at >= now() - ` + StrandedMentionWindowInterval + `)`
+// MentionAttemptIsTheMentionsSQL is true of a pending attempt the delivery sweep owes, or will owe
+// once its first minute passes: the latest attempt of its target, created within
+// MentionSweepWindow. Its send is the mention's, live or resumed, so the outbox holds the
+// mentioned session's copy back from the comment's own event and keeps it as a
+// comment_fallback_copies row instead.
+func MentionAttemptIsTheMentionsSQL(row string) string {
+	return `(` + MentionLatestAttemptSQL(row) + ` and ` + row + `.created_at > now() - ` + MentionSweepWindowInterval + `)`
+}
 
-// MentionAbandonedSQL is true of a pending mention attempt whose send was abandoned: no sender
-// claimed it and it was created more than DeliveryClaimLapse ago (a send queued behind its lane
-// that long counts too), or it was created more than StrandedMentionWindow ago, past which no
-// sender resumes it. The outbox settles such an attempt failed before it publishes the copy in the
-// mention's place.
-var MentionAbandonedSQL = `((claimed_at is null and created_at < now() - ` + DeliveryClaimLapseInterval +
-	`) or created_at < now() - ` + StrandedMentionWindowInterval + `)`
+// OwedMentionAttemptSQL is true of a pending attempt the delivery sweep sends now: the mention's
+// (MentionAttemptIsTheMentionsSQL), held by no sender and created at least DeliveryClaimLapse ago,
+// so an attempt its own process opened is left to that process for its first minute. The sweep
+// reads it, and the outbox's MentionResumedSQL is the same attempt.
+func OwedMentionAttemptSQL(row string) string {
+	return `(` + MentionAttemptIsTheMentionsSQL(row) +
+		` and (` + row + `.claimed_at is null or ` + row + `.claimed_at < now() - ` + DeliveryClaimLapseInterval + `)` +
+		` and ` + row + `.created_at < now() - ` + DeliveryClaimLapseInterval + `)`
+}
 
-// MentionStrandedSQL is true of a pending mention attempt the API's stranded pass sends: free
-// (DeliveryClaimFreeSQL), created at least DeliveryClaimLapse ago and within
-// StrandedMentionWindow. That is every resumed attempt (MentionResumedSQL), since a claim is never
-// older than its attempt, and every unclaimed attempt within the window that the outbox counts
-// abandoned (MentionAbandonedSQL), which the pass and the outbox race for: whichever settles its row
-// first acts on it. An attempt younger than the lease is left to the process that accepted it,
-// which queued it behind that recipient's earlier comments.
-var MentionStrandedSQL = `(` + DeliveryClaimFreeSQL +
-	` and created_at > now() - ` + StrandedMentionWindowInterval +
-	` and created_at < now() - ` + DeliveryClaimLapseInterval + `)`
+// MentionResumedSQL is true of a pending mention attempt the delivery sweep owes now
+// (OwedMentionAttemptSQL): no sender holds it and it has waited a lease, so the next pass sends it
+// under its own idempotency key, which the listener drops as a repeat when the first send landed.
+// The outbox holds that session's copy as a fallback row, which the fallback pass publishes should
+// the resend fail.
+func MentionResumedSQL(row string) string { return OwedMentionAttemptSQL(row) }
+
+// MentionLiveSQL is true of a pending mention attempt whose send is live: the mention's, and not
+// yet owed - a sender claimed it within DeliveryClaimLapse, or it is unclaimed and younger than
+// that lease (the mention sender leaves an attempt unclaimed until its lane starts the send). The
+// outbox holds a mentioned session's copy back while its attempt is live.
+func MentionLiveSQL(row string) string {
+	return `(` + MentionAttemptIsTheMentionsSQL(row) + ` and not ` + OwedMentionAttemptSQL(row) + `)`
+}
+
+// MentionAbandonedSQL is true of a pending mention attempt the delivery sweep will never send:
+// created more than MentionSweepWindow ago, or overtaken by a later attempt of the same target.
+// The outbox settles such an attempt failed before it publishes the copy in the mention's place.
+func MentionAbandonedSQL(row string) string {
+	return `(not ` + MentionAttemptIsTheMentionsSQL(row) + `)`
+}
 
 // MentionSession is the one session a mention attempt counts under, ok false when it counts under
 // none: sessionID, the session the mention is pinned to ("" when it is pinned to none), or else

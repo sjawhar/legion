@@ -1,9 +1,0 @@
-kind: Fixed
-body: |-
-    An ask block whose answer selects nothing is now written `selected="[]"` in a version that a
-    settlement made from the tree it repaired, as the room holds it, where it was `selected="null"`.
-    It happened when a peer wrote the answer into the block before the settlement's own repair
-    did, and the next settlement wrote a version again that changed only that attribute.
-time: 2026-10-28T10:08:09.416922173Z
-custom:
-    Issue: pr2416

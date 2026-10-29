@@ -8,7 +8,7 @@ import {
   useState,
 } from "react";
 
-import { type ArtifactOwner, api } from "../../api/client";
+import { type ArtifactOwner, api, type WriteBounds } from "../../api/client";
 import type { AnswerAskInput, Ask, AskRead, Comment, CreateCommentInput } from "../../api/types";
 import { CopyButton } from "../../components/CopyButton";
 import { ChevronIcon } from "../../components/DisclosureToggle";
@@ -65,10 +65,14 @@ import { EarlierApproval } from "./EarlierApproval";
 import { clearReplyDraft } from "./reply-drafts";
 import { useAskAnswerForm } from "./useAskAnswerForm";
 
-const answerAsk = (id: string, input: AnswerAskInput): Promise<Ask> => api.answerAsk(id, input);
+const answerAsk = (id: string, input: AnswerAskInput, bounds: WriteBounds): Promise<Ask> =>
+  api.answerAsk(id, input, bounds);
 const getAskThread = (id: string): Promise<AskRead> => api.getAsk(id);
-const createReply = (issueKey: string, input: CreateCommentInput): Promise<Comment> =>
-  api.createComment(issueKey, input);
+const createReply = (
+  issueKey: string,
+  input: CreateCommentInput,
+  bounds: WriteBounds
+): Promise<Comment> => api.createComment(issueKey, input, bounds);
 
 export interface AskCardProps {
   artifactSlug?: string;
@@ -90,14 +94,18 @@ export interface AskCardProps {
    *  editor shows the question, and the block is the link's target, so the card renders only
    *  what the block lacks — who asked and when, the exchange, and the composer or the record. */
   frame?: AskFrame;
-  answerAsk?: (id: string, input: AnswerAskInput) => Promise<Ask>;
+  answerAsk?: (id: string, input: AnswerAskInput, bounds: WriteBounds) => Promise<Ask>;
   /** Reply-thread fetch/write seams for tests; default to the real API. */
   getAskThread?: (id: string) => Promise<AskRead>;
   /** Data the Inbox response already hydrated for the first card render. */
   initialThread?: AskRead;
   /** Timestamp of the Inbox snapshot that supplied initialThread. */
   initialThreadUpdatedAt?: number;
-  createReply?: (issueKey: string, input: CreateCommentInput) => Promise<Comment>;
+  createReply?: (
+    issueKey: string,
+    input: CreateCommentInput,
+    bounds: WriteBounds
+  ) => Promise<Comment>;
   /** Whether an approval ask's label also links its document and version. Default `true`: the
    *  Inbox, the drawer and the Conversation name it. The margin passes `false` — the reader is
    *  already on that document, so the link would point at the page under it. */

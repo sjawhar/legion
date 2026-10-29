@@ -39,25 +39,26 @@ const (
 // the relay alone listens on it, and the delivery hub takes the events from the relay's feed.
 const dispatchEventsChannel = "dispatch_events"
 
-// relayedEvent is one committed event as the relay publishes it: the event and its whole SSE
-// frame, encoded once for every subscriber (encodeSSEFrame). Every subscriber receives the same
-// event and the same frame bytes, so none of them modifies either.
+// relayedEvent is one committed event as the relay publishes it: the event and its own JSON
+// encoding, made once for every subscriber (encodeLiveEvent). Every subscriber receives the same
+// event and the same bytes, so none of them modifies either.
 type relayedEvent struct {
-	Event model.Event
-	Frame []byte
+	Event   model.Event
+	Encoded []byte
 }
 
-// eventStreamRelay is the live source of every open SSE connection on this process: while anyone
-// subscribes, it holds a `listen dispatch_events` connection of its own (migration 0107 notifies
-// on each commit) and publishes every committed event into its stream, whichever process committed
-// it. While nobody subscribes it holds no connection and reads nothing.
+// eventStreamRelay is the live source of every events subscription on this process (the event
+// feed, live_events.go) and of the delivery hub's intake: while anyone subscribes, it holds a
+// `listen dispatch_events` connection of its own (migration 0107 notifies on each commit) and
+// publishes every committed event into its stream, whichever process committed it. While nobody
+// subscribes it holds no connection and reads nothing.
 //
 // Two envoy-dispatch processes serve one Postgres. The broker's fan-out reaches only the process
-// that appended the event, so a reader whose connection landed on the other one would see nothing
-// of it until it reconnected. Re-sourcing the live stream from the database carries both
-// processes' events on the one path, and makes the live frame and the replayed frame the same
-// bytes: both are encodeSSEFrame of an event read through readEventRows, with an ask event's
-// read-time fields attached.
+// that appended the event, so a page whose socket landed on the other one would see nothing of it
+// until it subscribed again. Re-sourcing the live feed from the database carries both processes'
+// events on the one path, and makes the live frame and the replayed frame the same bytes: both
+// carry encodeLiveEvent of an event read through readEventRows, with an ask event's read-time
+// fields attached.
 //
 // Each run of the relay is a generation (relayGeneration): the first subscription starts one, and
 // the cancellation of its last subscription stops it, at once, with no grace period. A stopped
@@ -127,7 +128,7 @@ func newEventStreamRelay(s *server, lifetime context.Context) *eventStreamRelay 
 type relaySubscription struct {
 	// events carries every event above head, in id order, until it closes. It closes for one of
 	// two reasons: the consumer fell its buffer behind (Stream.Publish drops it) while its
-	// generation runs on, or its generation ended (a reset, disconnect, the lifetime).
+	// generation runs on, or its generation ended (a reset, the lifetime).
 	events <-chan relayedEvent
 	// ended is closed once the subscription's generation has ended, and always before that end
 	// closes events (endLocked stops the generation, then closes its subscriptions): events closed
@@ -186,7 +187,7 @@ func (r *eventStreamRelay) subscribe(ctx context.Context, buffer int) (relaySubs
 func (r *eventStreamRelay) startLocked(ctx context.Context) (*relayGeneration, error) {
 	cursor, cursorAt, _, err := eventCursorCheck(ctx, r.server.deps.Store.Pool, 0)
 	if err != nil {
-		return nil, fmt.Errorf("read the live event stream's cursor: %w", err)
+		return nil, fmt.Errorf("read the event stream relay's cursor: %w", err)
 	}
 	runCtx, stop := context.WithCancel(r.lifetime)
 	g := &relayGeneration{
@@ -225,16 +226,6 @@ func (r *eventStreamRelay) wait() {
 	r.closed = true
 	r.mu.Unlock()
 	r.running.Wait()
-}
-
-// disconnect ends the running generation and closes every subscription it holds, as a reset does
-// (resetCursor). The next subscription starts a new generation.
-func (r *eventStreamRelay) disconnect() {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	if r.generation != nil {
-		r.endLocked(r.generation)
-	}
 }
 
 // endLocked stops g and closes every subscription it holds, with mu held. Those subscribers'
@@ -291,7 +282,7 @@ func (r *eventStreamRelay) read(ctx context.Context, g *relayGeneration) bool {
 	switch reset, err := r.resetCursor(tracked, g); {
 	case err != nil:
 		if ctx.Err() == nil {
-			slog.Warn("dispatch: live event stream could not check its cursor against the event log; retrying", "error", err)
+			slog.Warn("dispatch: the event stream relay could not check its cursor against the event log; retrying", "error", err)
 		}
 		return false
 	case reset:
@@ -302,18 +293,18 @@ func (r *eventStreamRelay) read(ctx context.Context, g *relayGeneration) bool {
 		committed, err := r.page(tracked, cursor)
 		if err != nil {
 			if ctx.Err() == nil {
-				slog.Warn("dispatch: live event stream could not read the committed events; retrying", "error", err)
+				slog.Warn("dispatch: the event stream relay could not read the committed events; retrying", "error", err)
 			}
 			return false
 		}
 		relayed := make([]relayedEvent, len(committed))
 		for index, event := range committed {
-			frame, err := encodeSSEFrame(event)
+			encoded, err := encodeLiveEvent(event)
 			if err != nil {
-				slog.Warn("dispatch: live event stream could not encode a committed event; retrying", "id", event.ID, "error", err)
+				slog.Warn("dispatch: the event stream relay could not encode a committed event; retrying", "id", event.ID, "error", err)
 				return false
 			}
-			relayed[index] = relayedEvent{Event: event, Frame: frame}
+			relayed[index] = relayedEvent{Event: event, Encoded: encoded}
 		}
 		r.publish(g, relayed)
 		if len(committed) < eventRelayPage {
@@ -356,17 +347,17 @@ func (r *eventStreamRelay) publish(g *relayGeneration, page []relayedEvent) {
 //
 // A reset is the one thing the relay cannot publish its way out of, because its ids have been
 // reused: the rows it would read as `id > cursor` are not the ones it published, and every open
-// subscription's position (streamEvents' dedupe cursor) is in a log that no longer exists, so no
-// frame it sent could mean what its reader would take it to mean. Ending the subscriptions is the
-// honest answer: the generation ends, so each SSE connection ends its response rather than
-// catching up as it does after an overflow, and each browser goes through its
-// reconnect-from-last-id, which resolves its position against the log as it now stands. The next
-// subscription starts a new generation, whose cursor is the new log's newest row.
+// subscription's since (live_events.go) is a position in a log that no longer exists, so no frame
+// it sent could mean what its reader would take it to mean. Ending the subscriptions is the
+// honest answer: the generation ends, so each events subscription ends with an ended frame
+// (behind) rather than catching up as it does after an overflow, and its page subscribes again
+// from the last id it applied, a since the new subscription clamps to the log as it now stands.
+// The next subscription starts a new generation, whose cursor is the new log's newest row.
 //
 // The delivery hub, one of those subscriptions, answers the closed feed by subscribing again and
 // marking every view dirty rather than by dropping anything, because it holds a projection of its
-// own that it can recompute from the database; an SSE connection holds nothing but a reader's
-// stream, which only that reader can rebuild.
+// own that it can recompute from the database; an events subscription holds nothing but a
+// reader's feed, which only that reader can rebuild.
 func (r *eventStreamRelay) resetCursor(ctx context.Context, g *relayGeneration) (bool, error) {
 	cursor, at := r.at(g)
 	maxID, _, cursorAt, err := eventCursorCheck(ctx, r.server.deps.Store.Pool, cursor)
@@ -379,7 +370,7 @@ func (r *eventStreamRelay) resetCursor(ctx context.Context, g *relayGeneration) 
 	r.mu.Lock()
 	r.endLocked(g)
 	r.mu.Unlock()
-	slog.Warn("dispatch: the event log was reset; the live stream ended its open streams",
+	slog.Warn("dispatch: the event log was reset; the event stream relay ended its open subscriptions",
 		"cursor", cursor, "newest", maxID)
 	return true, nil
 }

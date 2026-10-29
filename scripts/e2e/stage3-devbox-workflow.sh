@@ -493,7 +493,14 @@ rig_sessions_json() {
 # the rig's project key, on a production project naming that key, or on an audit that cannot vouch
 # for production.
 production_audit() {
-  local sessions envoy found=0
+<<<<<<< conflict 1 of 2
+%%%%%%% diff from: mmlowqmk d4cbcfe6 "fix: tests that fail and pass on a re-run are fixed at their cause, with the product races behind them (#2396)"
+\\\\\\\        to: zusvmkwt be5cee56 "test(dispatch): a held fallback copy outlives a NATS outage longer than the dead-letter threshold and arrives once"
+-  local sessions header events envoy found=0
++  local sessions envoy found=0
++++++++ vvkzzusr f9c01e92 "chore: fold changelog fragments [skip ci]"
+  local sessions bearer events envoy found=0
+>>>>>>> conflict 1 of 2 ends
   audited=1
   sessions=$(rig_sessions_json)
   printf '%s\n' "$sessions" >"$evidence/rig-sessions.json"
@@ -508,7 +515,57 @@ production_audit() {
     printf 'no user-level Dispatch configuration exists, so no production Dispatch fallback was possible\n'
     return "$found"
   fi
-  production_dispatch_audit "$sessions" "$envoy" || found=1
+<<<<<<< conflict 2 of 2
+%%%%%%% diff from: mmlowqmk d4cbcfe6 "fix: tests that fail and pass on a re-run are fixed at their cause, with the product races behind them (#2396)"
+\\\\\\\        to: zusvmkwt be5cee56 "test(dispatch): a held fallback copy outlives a NATS outage longer than the dead-letter threshold and arrives once"
+-  header=$(prod_header_file)
+-  curl -sS -N --max-time 25 -H "@$header" "$prod_dispatch_url/api/v1/events?since=$((prod_baseline - 1))" \
+-    >"$work/production-events.sse" 2>/dev/null || true
+-  rm -f "$header"
+-  events=$(sed -n 's/^data: //p' "$work/production-events.sse" | jq -s -c --argjson ids "$sessions" --arg project "$project" --argjson baseline "$prod_baseline" '
+-    {control: any(.[]; .id == $baseline), count: length,
+-     rig: [.[] | select((.actor.id as $a | $ids | index($a)) or (tostring | contains($project)))
+-       | {id, issue_key, type, actor: .actor.id, created_at}]}')
+-  printf '%s\n' "$events" >"$evidence/production-dispatch-audit.json"
+-  if ! jq -e '.control' >/dev/null <<<"$events"; then
+-    printf 'production Dispatch replay did not return its baseline event %s\n' "$prod_baseline"
+-    return 1
+-  fi
+-  if ! jq -e '.rig == []' >/dev/null <<<"$events"; then
+-    printf 'production Dispatch has rig-authored events: %s\n' "$(jq -c .rig <<<"$events")"
+-    found=1
+-  fi
+-  printf 'production audit: %s events replayed since %s, rig events %s, rig Envoy sessions %s\n' \
+-    "$(jq -r .count <<<"$events")" "$prod_baseline" "$(jq -c .rig <<<"$events")" "$envoy"
++  production_dispatch_audit "$sessions" "$envoy" || found=1
++++++++ vvkzzusr f9c01e92 "chore: fold changelog fragments [skip ci]"
+  bearer=$work/production-dispatch-bearer
+  (umask 077 && printf '%s\n' "$prod_token" >"$bearer")
+  # A refusal of the feed is printed on stderr; the replay's close, resubscribe and duplicate lines
+  # carry no event and are not counted, so an event a redial repeats counts once. The probe takes
+  # its cursor from Dispatch's own events_start, so a --since the server clamps to its head leaves
+  # the events after that head counted, not written off as duplicates.
+  bun "$root/scripts/e2e/lib/dispatch-live-events.ts" \
+    --url "$prod_dispatch_url" --bearer-file "$bearer" --since "$((prod_baseline - 1))" --timeout 25 \
+    >"$work/production-events.jsonl" || true
+  rm -f "$bearer"
+  events=$(jq -s -c --argjson ids "$sessions" --arg project "$project" --argjson baseline "$prod_baseline" '
+    [.[] | .event | select(. != null)] |
+    {control: any(.[]; .id == $baseline), count: length,
+     rig: [.[] | select((.actor.id as $a | $ids | index($a)) or (tostring | contains($project)))
+       | {id, issue_key, type, actor: .actor.id, created_at}]}' "$work/production-events.jsonl")
+  printf '%s\n' "$events" >"$evidence/production-dispatch-audit.json"
+  if ! jq -e '.control' >/dev/null <<<"$events"; then
+    printf 'production Dispatch replay did not return its baseline event %s\n' "$prod_baseline"
+    return 1
+  fi
+  if ! jq -e '.rig == []' >/dev/null <<<"$events"; then
+    printf 'production Dispatch has rig-authored events: %s\n' "$(jq -c .rig <<<"$events")"
+    found=1
+  fi
+  printf 'production audit: %s events replayed since %s, rig events %s, rig Envoy sessions %s\n' \
+    "$(jq -r .count <<<"$events")" "$prod_baseline" "$(jq -c .rig <<<"$events")" "$envoy"
+>>>>>>> conflict 2 of 2 ends
   return "$found"
 }
 
