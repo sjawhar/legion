@@ -2,46 +2,33 @@
   "schemaVersion": 1,
   "phase": "review",
   "issue": "INFRA-228",
-  "completed": "2026-10-29T14:45:00Z",
-  "round": 1,
-  "reviewedHead": "c19d71af540f072c4a594a35b28cf94742ae4503",
-  "decision": "changes_requested",
+  "completed": "2026-10-29T15:40:00Z",
+  "round": 2,
+  "scope": "Narrowed by the architect (review round cap): the implementer's answer to round 1's three findings (bcb045fa) and the reviewer's own prose commit 95adec64.",
+  "decision": "approved",
   "critical": 0,
-  "important": 2,
-  "minor": 1,
+  "important": 0,
+  "minor": 0,
+  "roundOneFindings": [
+    {"finding": "claim fence not selected by CI on a docs/kubernetes.md-only change", "answer": "fixed in bcb045fa: 'docs/kubernetes.md' in envoy_go (.github/workflows/ci.yaml:727-728) and the RULES entry at .github/scripts/ci_job_reads.py citing claims_doc_test.go:161 (the os.ReadFile line); the tester's control removing the filter line makes check-ci-filters.sh exit 1 naming it"},
+    {"finding": "issued claims typed by hand", "answer": "fixed in bcb045fa: issuedClaims calls the production Provider.decide for a pod token (named scope) and a machine access token (person scope) and unions the session.Extra keys; decide writes the same keys for a workflow token (exchange.go:389-398), so the union covers every key decide writes today; sorted slices.Equal fails on a duplicate bullet; the tester's fifth-claim mutation of decide fails it"},
+    {"finding": "marker-sentence anchor", "answer": "fixed in bcb045fa: the heading is matched as a whole line; flattenKeepingLines and the offset step are gone"}
+  ],
   "keyFindings": [
     {
-      "severity": "important",
-      "file": "packages/envoy/internal/broker/oauth/claims_doc_test.go",
-      "description": "The fence never runs on the edit it exists to stop. It reads docs/kubernetes.md (line 66), but CI runs it only in envoy-go, whose envoy_go filter (.github/workflows/ci.yaml:702-730) does not list docs/kubernetes.md, and .github/scripts/ci_job_reads.py has no RULES entry for it (compare reclaim_doc_test.go: ci.yaml:400, ci_job_reads.py:218). A pull request that edits only the claim list merges green and breaks the next envoy pull request. Fix: add 'docs/kubernetes.md' to envoy_go and the RULES entry for claims_doc_test.go."
-    },
-    {
-      "severity": "important",
-      "file": "packages/envoy/internal/broker/oauth/claims_doc_test.go",
-      "description": "The code side is the hand-typed list on line 51, so a fifth claim written in decide (exchange.go:389-398) and Introspection (introspect.go:21-45) passes the test while the doc's 'and no others' is false, the direction the test's own comment (lines 13-14) calls dangerous and the PR body says it catches. reclaim_doc_test.go rejects exactly this. Derive the issued set from code a new claim must touch (the Introspection struct's JSON tags minus active, scope, exp, client_id, jkt; or the keys decide writes into session.Extra in a named and a person run), and compare sorted slices with slices.Equal so a duplicated bullet also fails."
-    },
-    {
       "severity": "minor",
-      "file": "packages/envoy/internal/broker/oauth/claims_doc_test.go",
-      "description": "Anchoring on the hard-wrapped marker sentence costs flattenKeepingLines, lineEnds and the offset-to-line step (lines 36-39, 75-83, 144-160), and reuses the precedent's function name with a different return. Anchor on the one-line heading '#### The Dispatch identity the broker can issue' and read the first bullet list after it. Fixed in this pull request, per the no-deferral rule."
-    },
-    {
-      "severity": "minor",
-      "file": "docs/deployment.md, docs/kubernetes.md",
-      "description": "Fixed by the reviewer in 95adec64 (prose only): 'the bearer names nobody' holds only when dispatch_token_file holds a shared agent token, since optionalActor (packages/envoy/internal/dispatch/api/server.go:838-863) takes any other bearer as a service or personal token and bearerSessionActor keeps its owner; the operator-launched controller differs only in which file it reads; a session name an entry fixes is held with no expiry (ReserveSessions, oauthstore/exchange.go); 'Kubernetes token' made 'service-account token' so it does not read against the launcher Secret at kubernetes.md:1261."
+      "file": "packages/envoy/internal/broker/oauth/claims_doc_test.go, docs/deployment.md, docs/kubernetes.md",
+      "description": "Fixed by the reviewer as prose, 416aa084 and f56d98ac: documentedClaims' comment said it sorts (its caller does); the failure message quoted the 'no others' sentence the fence no longer reads, now names the heading (the tester's round-4 observation, waived as a check under the narrowed scope); 'the acting session is then the body's' read as if only for shared tokens, now 'whatever the bearer', with the token's owner or service carried as well (bearerSessionActor, server.go:919-932); ReserveSessions skips a name another principal holds (oauthstore/exchange.go:208-225)."
     }
   ],
-  "ci": {
-    "codeHead": "c718788b0868996730f1ce83feb88b5416d0e4ef",
-    "requiredSet": ["lint", "typecheck", "test", "pr-title"],
-    "readAt": "2026-10-29T14:40Z",
-    "state": "lint, typecheck, pr-title success; test queued. Not green at review time; the request for changes does not wait on it.",
-    "handoffsOnlySinceCodeHead": true
-  },
+  "notADefect": [
+    "claims_doc_test.go: the `line != \"\"` guard in the continuation test is redundant with HasPrefix(line, \" \"), harmless, and a code change outside the narrowed round.",
+    "tester round 4 observation: the 'and no others' sentence is no longer fenced. The fence's acceptance is that the list and the code agree, which it holds in both directions; rewording the sentence weakens the document and makes nothing it says false."
+  ],
   "thermonuclear": {
-    "head": "c19d71af",
-    "deepReview": "CHANGES: the CI-selection and hand-typed-list findings above (Medium), the conditional shared-token claim (Minor, fixed by the reviewer).",
-    "codeQuality": "CHANGES: hand-typed list, marker-sentence anchor, two helpers where slices.Equal suffices, and doc duplication. Duplication judged not a defect: docs/deployment.md is the tmux operator's page and docs/kubernetes.md the pod operator's, each links the other, and the plan's D9 anchors for INFRA-264/INFRA-267 are meant to stand in each section."
+    "head": "416aa084",
+    "deepReview": "APPROVE: decide's real path is exercised, no vacuous pass, filter and citation right; Minor prose points fixed in f56d98ac.",
+    "codeQuality": "APPROVE: Minor failure-message quote (fixed) and redundant empty-line check (not a defect)."
   },
   "threads": "none on the pull request"
 }
