@@ -551,15 +551,16 @@ func (r *Registry) Upsert(item Interest, topics []string) (Interest, error) {
 // answer. That is safe: it writes the record the caller's retry writes again, it rides the
 // connection ahead of any write this listener sends on it later, so it cannot undo one, and
 // against another listener's write it is last-writer-wins, as every Put already is.
+//
 // A heartbeat re-sends the same topics every 90 seconds, so UpsertWithin returns the current row
-// without writing when writing merged would store the bytes the bucket holds, apart from
+// without writing when the encoding of merged equals that of the row it holds, apart from
 // UpdatedAt, and the row is younger than InterestRefreshAge. An unchanged row is thus rewritten
 // once per InterestRefreshAge, its UpdatedAt lags the session's last heartbeat by less than that,
 // and Reap adds InterestRefreshAge to its grace window (InterestReapAllowance), so that lag never
-// shortens a paused session's grace. A changed row is written, and so is
-// a record it cannot decode; any other failed read refuses the write (mergeForUpsert). The session
-// row (session.SessionRegistry.Put) is written on every heartbeat: its bucket's MaxAge is the
-// liveness clock, and NATS connect notices ($SYS) are not available to replace it.
+// shortens a paused session's grace. A changed row is written, and so is a record it cannot
+// decode; any other failed read refuses the write (mergeForUpsert). The session row
+// (session.SessionRegistry.Put) is written on every heartbeat: its bucket's MaxAge is the liveness
+// clock, and NATS connect notices ($SYS) are not available to replace it.
 func (r *Registry) UpsertWithin(ctx context.Context, item Interest, topics []string) (Interest, error) {
 	cur, getErr := r.Get(ctx, item.SessionID)
 	now := r.now().UnixMilli()
@@ -572,11 +573,11 @@ func (r *Registry) UpsertWithin(ctx context.Context, item Interest, topics []str
 		return Interest{}, err
 	}
 	if getErr == nil && now-cur.UpdatedAt < InterestRefreshAge.Milliseconds() {
-		// What the skip really asks is whether this write would store what the bucket already
-		// holds, so it compares the two encodings rather than the fields one by one: a field
-		// added to Interest, and the difference between a null and an empty topic list, are then
-		// covered by the encoding itself. The current row is stamped with merged's UpdatedAt,
-		// the one field a write of an unchanged row would move.
+		// What the skip asks is whether this write would store the row it holds, so it compares
+		// the encoding of merged with that of the current row rather than the fields one by one:
+		// a field added to Interest, and the difference between a null and an empty topic list,
+		// are then covered by the encoding itself. The current row is stamped with merged's
+		// UpdatedAt, the one field a write of an unchanged row would move.
 		unchanged := cur
 		unchanged.UpdatedAt = merged.UpdatedAt
 		stored, err := json.Marshal(unchanged)

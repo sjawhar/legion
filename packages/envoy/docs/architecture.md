@@ -49,7 +49,8 @@ A listener's caches follow their buckets through watchers (`internal/kvwatch`): 
 session buckets, and the CI bucket on a listener that mounts the GitHub webhook route. A start
 reads each bucket in full. A rewatch, after a NATS reconnect or a self-health rebuild, resumes
 after the last revision its cache applied, so it delivers only what was written since; it reads in
-full again when it cannot resume (a recreated bucket, or a scan that did not complete). JetStream
+full again when it cannot resume (a recreated bucket, or a scan that did not complete), and when
+its resuming watcher cannot be created, which it logs at WARN. JetStream
 delivers no event when the session bucket's 5m `MaxAge` expires a key, so the session cache gives
 each entry a deadline one TTL after its write: a read reports an entry past it as absent and
 changes nothing, and a timer removes the entry at that deadline.

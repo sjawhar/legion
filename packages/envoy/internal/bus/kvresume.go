@@ -54,7 +54,7 @@ func (kv KeyValue) WatchAllFrom(conn *nats.Conn, revision uint64) (nats.KeyWatch
 	// the watch at it rather than bound its create. The create itself waits the legacy JetStream
 	// context's default 5 s (jsm.go:1791-1796, js.go:299), under the 10 s the full WatchAll's own
 	// JetStream context gives it; a create that does not answer within that fails the resume, and
-	// kvwatch's watch then reads the bucket in full instead (its open).
+	// kvwatch's watch then reads the bucket in full instead.
 	//
 	// It is cancellable so that nothing of it outlives the watch: nats.go parks a goroutine on
 	// this context for the subscription (js.go:2053), and cancels it only in Unsubscribe

@@ -523,7 +523,7 @@ func (w *Watcher) watch(kv bus.KeyValue, conn *nats.Conn, replacing uint64) erro
 			// The resume could not be created: its consumer create is held to the legacy
 			// JetStream context's 5 s, under the 10 s this watch's own requests get, so a server
 			// slow enough answers the full read and not this one. The repair is what matters, so
-			// the watch reads the bucket in full instead of failing, which costs main's path
+			// the watch reads the bucket in full instead of failing, which costs a full read
 			// rather than a cache left frozen. One WARN names the cache and the error; the full
 			// read's own warm-up line follows.
 			w.logger().Warn(w.name+" watcher could not resume; the bucket is read in full",
