@@ -2,47 +2,55 @@
   "schemaVersion": 1,
   "phase": "test",
   "issue": "INFRA-606",
-  "completed": "2026-10-28T20:30:00Z",
-  "round": 8,
-  "headTested": "3e96e81cc3f7",
-  "handoffHead": "7c0d6f864aaadaedba6415059652c863e78aaf15",
-  "evidence": "dispatch://INFRA-606/artifact/infra606-tester-round8-tar-gz (claimant-e2e-r8.log, and round 7's failing and main's passing runs); rounds 1-7: infra606-tester-evidence-tar-gz, infra606-tester-round2..7-tar-gz",
-  "ci": "On 3e96e81c every required check (lint, typecheck, test, pr-title, build) was queued when read; 855a4bcb's runs were cancelled as superseded. Not waited for. Main's reds, not this pull request's: recipients-claim.e2e.ts route-close test (#2324), TestDispatchConnectionsPerPodIsTheServers (#2464), mermaid.e2e.ts:194 (INFRA-138's tree).",
-  "scope": "Since round 7's tested head 855a4bcb the diff touches only scripts/e2e/dispatch-claimant-delivery.ts, scripts/e2e/README.md and .legion/ handoffs: no runtime code, so round 7's stack verification (kill recovery with the listener up, down and after a landed send, the reopen race, the shared dedupe key, the NATS-down retries, the stuck burst) and rounds 1-6's (catch-up bounds, relay and hub reads, agent-stream budget, audit, browser resume, Activity tab, restart replay bytes) stand for this runtime.",
+  "completed": "2026-10-29T01:45:00Z",
+  "round": 9,
+  "headTested": "2eda91938cc2",
+  "handoffHead": "83ba969958a2f519bafe90189b26409d3589c370",
+  "evidence": "dispatch://INFRA-606/artifact/infra606-tester-round9-tar-gz (RESULTS.md, scripts, restart summaries); all scripts: infra606-tester-scripts-tar-gz; earlier rounds: infra606-tester-evidence-tar-gz, infra606-tester-round2..8-tar-gz",
+  "ci": "On 2eda9193 when read: lint, typecheck, build, pr-title, changes green; test and the Postgres 16 daemon suite in progress; the envoy/dispatch lanes queued. Not waited for. Known reds on main, not this pull request's (controller, 00:56Z): packages/dispatch/e2e/close-withdraws-asks.e2e.ts:126 (INFRA-138's tree) and pmdoc's cpuTimeOf call in typed_nesting_test.go:23 (#2484).",
   "implementerProof": {
     "verdict": "verified",
-    "how": "Ran the implementer's command myself: scripts/e2e/dispatch-claimant-delivery.sh against envoy-dispatch built from the workspace at this head, 9 of 9 ok. Every earlier red test passes at this runtime (round 7's run, unchanged runtime)."
+    "how": "Built Dispatch from the workspace (2eda9193), round 7's head (855a4bcb) and main (d4cbcfe6) and drove round 9's changes on the load-test stack: the per-destination fallback copy after a kill (listener up, down, after a landed send, NATS down), review finding 1 (a moved route and a failed Retry put nothing on the new route; round 7's build did), and criterion 5 on the committed harness (505 KB vs 119 MB replayed, CPU not lower). Every red test passes. The implementer adapted my TestAMentionClaimedByAKilledProcessStillReachesItsSessionWhenTheResendFails to count copies from comment_fallback_copies as well as event destinations; its assertion (exactly one copy) is unchanged, and the stack runs confirm one stored copy on the session's NATS subject, so I accept the change."
   },
   "failures": [],
   "failed": 0,
   "proof": [
     {
-      "criterion": "The pull request breaks no repository live proof; the claimant-delivery proof's mention cases read the settled delivery row (round 7's failure).",
-      "surface": "scripts/e2e/dispatch-claimant-delivery.sh: the real envoy-dispatch, its own NATS and the harness's fake Envoy listener, over HTTP",
-      "command": "DATABASE_URL=postgres://postgres@127.0.0.1:35432/claimant_e2e?sslmode=disable DISPATCH_BIN=<envoy-dispatch built from the workspace at 3e96e81c> bash scripts/e2e/dispatch-claimant-delivery.sh",
-      "observed": "summary: 9 ok, 0 FAIL; PASS in 35s. mention-delivered-claimant: row sent, no agent topic; mention-failed-claimant and mention-failed-follower: row failed ('no live session ...'), the comment on notifications.agent.<P or C>.",
-      "headSha": "3e96e81cc3f7",
-      "negativeControl": "Round 7's driver against the same runtime (855a4bcb): 3 FAIL, 'expected the mention's delivery row sent/failed, read pending'."
+      "criterion": "A mention reaches each session exactly once through a Dispatch kill, also when its resend fails, when the killed process's send had landed, and when NATS is down; a failed mention's copy reaches only the session whose mention failed.",
+      "surface": "The load-test stack, a person's 8 comments on LGA-10 (routed to session:ses-a) mentioning ses-a/b/c; SIGKILL 0.3 s into stack.sh restart-dispatch's drain; ENVOY_NOTIFICATIONS read with $JS.API.STREAM.MSG.GET; comment_fallback_copies",
+      "command": "AS_PERSON=1 crash.sh r9person (listener up); STOP_LISTENER=1 AS_PERSON=1 crash.sh r9down (listener at 4 s, stopped after the restart); STOP_LISTENER=1 AS_PERSON=1 crash.sh r9landed (2 s); WATCH_EVENT=1 STOP_LISTENER=1 STOP_NATS=1 AS_PERSON=1 crash.sh r9nats, then NATS started",
+      "observed": "Every case: each session stores each comment exactly once. r9down: c1's copy is a comment_fallback_copies row (agent.ses-a, published, settled); comment.created keeps its first destinations. r9landed: the fallback row is published and the stream keeps one message for c1. r9nats: the row waits with attempt_count 0 while NATS is down, then publishes once.",
+      "headSha": "2eda91938cc2",
+      "negativeControl": "Round 6's head ab61c138, r6down (round 6): ses-a never received c1."
     },
     {
-      "criterion": "A mention reaches each session exactly once through a Dispatch kill, with the listener up or down, and a session's route or author copy follows a failed mention (rounds 3-7).",
-      "surface": "The load-test stack and NATS JetStream store (round 7, same runtime)",
-      "command": "crash.sh r7person / r7down / r7landed / r7nats, stuck.sh r7head 30, and the red tests TestASilentListener..., TestAnAbandonedMention..., TestAMentionInFlightAtAKill..., TestAMentionClaimedByAKilledProcess..., TestAListenerThatAnswersNoLookup... (round 7)",
-      "observed": "Every session stores each comment exactly once in every kill case; 30 + 30 events for a stuck burst; every red test passes, unmodified.",
-      "headSha": "855a4bcb54f0",
-      "negativeControl": "Round 6's head ab61c138: with the listener down after a kill, the claimed comment never reached the route session."
+      "criterion": "A failed mention's fallback sends the comment to no new destination (review round 2, finding 1).",
+      "surface": "POST /api/v1/issues/LGA-12/comments as a person; PATCH /api/v1/issues/LGA-12 route; POST /api/v1/comments/{id}/deliveries (Retry); NATS subjects of the old and new route sessions",
+      "command": "moved.sh headb: route session:ses-ra, comment mentioning session:ses-rx (no live session, fails), route moved to session:ses-rb, Retry fails",
+      "observed": "Retry answers failed 'no live session ses-rx'; comment.created's destinations stay the issue topic and agent.ses-ra; no fallback row; ses-rb's subject holds nothing of the comment, ses-ra one copy.",
+      "headSha": "2eda91938cc2",
+      "negativeControl": "Round 7's build 855a4bcb, same run (moved-r7b): comment.created republished with agent.ses-rb added, and ses-rb stores the old comment."
     },
     {
-      "criterion": "A reconnecting stream receives a bounded catch-up or a signal to refetch once; the relay and hub read nothing while nobody subscribes; agent-stream viewers hold bounded bytes; before and after on the restart step.",
-      "surface": "GET /api/v1/events, the stack's Postgres statement log, the browser on the issue page, the agent stream test hooks, run-step.sh (rounds 1-4)",
-      "command": "sse_probe.py, reconnect_flap.py, hubflap.sh, the headless Chromium resume, agent.sh, measure.sh (rounds 1-4)",
-      "observed": "256 events replayed with complete, 257 none; no event lost over reconnects; 0 reads idle; the browser refetches after a resume past the bound; a paused agent viewer ended past 8 MiB; restart replay bytes 0.5-1.5 MB against 122 MB on base.",
-      "headSha": "da4434188526",
-      "negativeControl": "Base c3d09eec: a stale stream replays 12 MB, no reconnect carries the complete header, a paused agent viewer holds 14 MiB."
+      "criterion": "Before and after on the committed load reproduction: a Dispatch restart at tonight's step with 50 open streams, measuring reconnect catch-up bytes, CPU in the minute after the restart, and comment-create latency with mentions.",
+      "surface": "packages/envoy/loadtest (INFRA-589's harness, merged as c24ea568, with this branch's restart scenario) on this pod",
+      "command": "measure9.sh: run-step.sh t606r9-{head,base} --events 4 --sessions 400 --requests 60 --sse 50 --sse-resume 1 --sse-stale 10 --restart-at 90s --mention-frac 0.2 --mentions 3 --envoy-rtt 200ms --rng-seed 1, LOADTEST_DISPATCH_SRC = workspace, then main d4cbcfe6",
+      "observed": "Head: 505,398 replayed bytes, stale streams 0 bytes and 60 refetch requests, 40/50 complete; mentioned comments answered in the 60 s after the restart 28 of 37; Dispatch CPU-s in that minute 26.73. Main: 119,293,701 bytes, each stale stream 11.9 MB, 50/50 complete, 0 refetches; 0 of 37 mentioned comments answered after the restart; 25.62 CPU-s.",
+      "headSha": "2eda91938cc2",
+      "negativeControl": "Main d4cbcfe6 is the control: every stale stream replays 11.9 MB."
+    },
+    {
+      "criterion": "Mention delivery off the request path with one copy per session for silent and live listeners; no extra event on a stuck burst.",
+      "surface": "POST comments on the stack with Dispatch's ENVOY_URL direct or through 'loadgen proxy -rtt 30s'",
+      "command": "routecopy.sh and authorcopy.sh (silent and live); stuck.sh r9head 30",
+      "observed": "Routed issue and root-author reply: 1 copy each, silent or live. Stuck burst: comment.created=30, comment.delivery=30, 1 copy per comment.",
+      "headSha": "2eda91938cc2",
+      "negativeControl": "Round 3's head 12aada04 (round 3): 0 copies with a silent listener."
     }
   ],
   "observations": [
-    "Criterion 5's restart measurement still runs on the uncommitted restart-scenario patch (INFRA-589's PR #2369 is open); the architect scheduled the committed harness and five runs per side for after it merges. Dispatch CPU in the minute after the restart is not below base (single runs).",
-    "The Stage 3 audit needs GET /api/v1/events/log only once production runs this build; against an older Dispatch it falls back to the stream replay (proven against base in round 3)."
+    "Criterion 5's CPU expectation is not met: one run per side gives 26.7 vs 25.6 CPU-s, as the implementer's five per side (25.37 vs 24.84); the PR body records it as a risk. The other measures move as planned.",
+    "PR body line 56 (round 9's implementer E2E list) still names the stranded pass's index as migration 0136; the code, AGENTS.md and cmd/dispatch/README.md name 0137_comment_deliveries_pending and 0138_comment_fallback_copies.",
+    "The PR body is past 48,000 characters (50,320); later rounds should link their evidence rather than inline it."
   ]
 }
