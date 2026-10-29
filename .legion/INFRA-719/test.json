@@ -2,50 +2,43 @@
   "schemaVersion": 1,
   "phase": "test",
   "issue": "INFRA-719",
-  "round": 3,
-  "completed": "2026-10-29T13:15:00Z",
-  "headTested": "22814870d20dd64e235a30dd921316eeeff8a671",
+  "round": 4,
+  "completed": "2026-10-29T14:25:00Z",
+  "headTested": "2cb86cc458ba054b3fd83148412d51f0c6bfcb60",
   "implementerProof": {
     "verdict": "verified",
-    "how": "I re-ran the implementer's commands at 22814870 (code c076c8c4). The Go A1 suite passes, including my 10 no-final-line-feed red rows from 45eb7c14 and 3a32ac88, with no rows changed (the implementer added 3 rows of its own). The Chromium e2e passed 5 of 5. I ran the differential as the architect asked: with GitHub's merge of the PR (refs/pull/2481/merge 3523593b) as the head against main 14d907b6. Every GATE line is 0."
+    "how": "I re-ran the implementer's commands at 2cb86cc4 (code 1852f6a4). The Go A1 suite passes, and the whole pmdoc package passes (go test ./internal/dispatch/pmdoc -count=1 -skip Linear: ok). Every one of my 10 red rows is in the refactored tests with its name, markdown and expected code unchanged (I compared the sorted row lines at 8586a04f and at 2cb86cc4: none removed, 5 added from the review). The Chromium e2e passed 5 of 5. The differential, with GitHub's merge as head against main, has every GATE line 0."
   },
   "failed": 0,
   "failures": [],
   "proof": [
     {
-      "criterion": "A4: a document holding the shapes, written through the API, reads alike in the editor, a past version, the stored markdown, doc-read and a comment, including a spec ending with no final line feed",
+      "criterion": "A4: a document holding the shapes, written through the API, reads alike in the editor, a past version, the stored markdown, doc-read and a comment",
       "surface": "Dispatch issue page (spec editor, past version, Conversation comment), /api/v1/issues/<KEY>/artifacts/spec/text and dispatch doc-read, on the real stack: Go server and production SPA built from the checkout, Playwright Chromium, Postgres 17",
       "command": "cd packages/dispatch && . /legion/scratch/tmp/e2e-rig/env.sh && bun run e2e -- e2e/indented-code-whitespace-lines.e2e.ts --project=chromium",
-      "observed": "5 passed (13.0s)",
-      "headSha": "22814870d20dd64e235a30dd921316eeeff8a671",
+      "observed": "5 passed (12.5s)",
+      "headSha": "2cb86cc458ba054b3fd83148412d51f0c6bfcb60",
       "negativeControl": "At main a09a2f25 (round 1) the same spec: 3 failed, 1 passed (comment). The editor received lists [\"true\",\"true\"] and code \"    x\", where [\"false\",\"false\"] and \"    x\\n  \" were expected"
     },
     {
-      "criterion": "A2: differential against main, every GATE line 0, with main's own fixes on both sides",
-      "surface": "pmdoc differential, head = refs/pull/2481/merge 3523593b (parents main 14d907b6 and 22814870), base = main 14d907b6; 78,844 documents: the implementer's corpora (20,000 indented-code, url, reference, delimiter, INFRA-581), my fuzzer (20,000, seed 719), hand.ts (64), noeol.ts (6,818), noeol2.ts (8,764 documents of any block in 14 nested containers ending in containers' markers plus a tab, with no line feed), in-repo",
-      "command": "cd <archive of 3523593b>/packages/envoy/internal/dispatch/pmdoc/gen && bash differential.sh --base 14d907b6fdd3a17820fd07adbdf7b0468fe05285 --corpus /legion/scratch/tmp/infra719-test/r3/corpus --out /legion/scratch/tmp/infra719-test/r3/diff",
-      "observed": "Every GATE line 0: regressions, misreads, churn, engine-tree regressions and churn, panics, lost fixed points. Fixed 16,106 (noeol 1,100, noeol2 299). The head stores 70,252 correctly, the base 54,146. noeol and noeol2 leave 0 documents read otherwise than the engine. Of those the head still reads otherwise, the 1,345 indented-code documents are spread-only, with the same spreads as base (plan D4); fuzz 84, url 168 and delimiter 6 read the same at base",
-      "headSha": "3523593b4a44983c30edeba7a4a05c52afa3b907",
-      "negativeControl": "The same noeol corpus at round 2's head 682a89bb against main 8a911ecc gave GATE regressions 27 and churn 27 (fenced code in a quote ending in '>\\n>  ' with no line feed). Here it gives 0"
-    },
-    {
-      "criterion": "Tester failures of rounds 1 and 2: code ending a document with no final line feed reads as the browser reads it, for every reader",
-      "surface": "pmdoc Go suite, each row asserted for Parse, ParseRendering, ParseForWrite and the browser engine",
-      "command": "cd packages/envoy && go test ./internal/dispatch/pmdoc -run 'TestFencedCode|TestIndentedCodeKeeps|TestParseMatchesMilkdownForFixtures|TestRenderParseRoundTrip|TestFixturesAreWithinSchema|TestRenderMatchesMilkdownForFixtures' -count=1 -v",
-      "observed": "ok; 20 PASS lines for the no-final-line-feed rows (reader and engine subtests)",
-      "headSha": "22814870d20dd64e235a30dd921316eeeff8a671",
-      "negativeControl": "At 682a89bb: Parse(\">  ~~~\\n>  x\\n>\\n>  \") gave \"x\" (want \"x\\n\") and Parse(\"> ```\\n> x\\n>\\t\") gave \"x\" (want \"x\\n  \")"
+      "criterion": "A2: differential against main, every GATE line 0, with main's own fixes on both sides, including the review's shape: typed blocks indented in a quote or an item, ending with no line feed",
+      "surface": "pmdoc differential, head = refs/pull/2481/merge 0dc807f2 (parents main ec7d63af and 2cb86cc4), base = main ec7d63af; 101,632 documents: the head's indented-code-corpus.ts (20,000, now with indented typed blocks and documents with no final line feed), url, reference, delimiter, INFRA-581, my fuzzer (20,000), hand.ts (64), noeol.ts (6,818), noeol2.ts (8,764), and typed.ts, new this round (22,788 typed blocks indented 0-3 columns in 9 container shapes, holding indented or fenced code, ending in whitespace-only lines with or without a final line feed), in-repo",
+      "command": "cd <archive of 0dc807f2>/packages/envoy/internal/dispatch/pmdoc/gen && bash differential.sh --base ec7d63aff97e4ca349aa3ccb7c0fda454fbdbee1 --corpus /legion/scratch/tmp/infra719-test/r4/corpus --out /legion/scratch/tmp/infra719-test/r4/diff",
+      "observed": "Every GATE line 0. Fixed 20,060, of them typed.ts 4,156, noeol 1,100 and noeol2 299. The head stores 89,019 correctly, the base 68,959. typed, noeol and noeol2 leave 0 documents read otherwise. Of those the head still reads otherwise in the indented-code corpus: 1,173 differ only in list spread, with base's spreads where the tree is unchanged (plan D4); 897 differ only in the typed-block wrapper of an unclosed ':::ask{...}' (the engine reads that line as a paragraph, Go at base and head as an ask), and their code texts equal the engine's in all 897. fuzz 84, url 168 and delimiter 6 read the same at base",
+      "headSha": "0dc807f2a0cf1ba5758309ddd50e2303a13eb7fd",
+      "negativeControl": "The review's 5 new rows, copied onto round 3's head 8586a04f: all 5 fail for the Go readers (for example, in a quoted typed block with no final line feed). Round 2's head 682a89bb gave GATE regressions 27 on noeol, which is 0 here"
     },
     {
       "criterion": "A3: census of stored versions whose reading or bytes change",
-      "surface": "production Dispatch: the 11:59Z crawl of 13 projects, 6,773 documents, 32,836 versions, 32,478 distinct markdowns. The broad candidates are 172 documents holding any whitespace-only line. 0 stored markdowns lack a final line feed, so round 3's reader change reaches none",
-      "command": "bash census-run.sh 14d907b6 candidates-broad.jsonl out3 && python3 census-compare.py out3 versions-map.tsv",
+      "surface": "production Dispatch: the 11:59Z crawl of 13 projects, 6,773 documents, 32,836 versions, 32,478 distinct markdowns. The broad candidates are 172 documents holding any whitespace-only line. 0 lack a final line feed",
+      "command": "bash census-run.sh ec7d63af candidates-broad.jsonl out4 && python3 census-compare.py out4 versions-map.tsv",
       "observed": "distinct markdowns read: 172; changed: 0; stored versions: 32836 (latest 6773); changed: 0",
-      "headSha": "22814870d20dd64e235a30dd921316eeeff8a671",
+      "headSha": "2cb86cc458ba054b3fd83148412d51f0c6bfcb60",
       "negativeControl": "The same runner over my 64 hand.ts shapes reports 40 changed (round 1)"
     }
   ],
   "checks": [
-    "CI at code head c076c8c4: lint, changes and worker-image build succeeded; envoy-go, dispatch and the browser lanes were queued or running when read at 13:12Z; not waited for"
+    "Go: cd packages/envoy && go test ./internal/dispatch/pmdoc -run 'TestFencedCode|TestIndentedCodeKeeps|TestParseMatchesMilkdownForFixtures|TestRenderParseRoundTrip|TestFixturesAreWithinSchema|TestRenderMatchesMilkdownForFixtures' -count=1 -v: all PASS; go test ./internal/dispatch/pmdoc -count=1 -skip Linear: ok (138s)",
+    "CI at code head 1852f6a4: changes succeeded; lint, test, envoy-go, dispatch and the browser lanes were queued when read at 14:21Z; not waited for"
   ]
 }
