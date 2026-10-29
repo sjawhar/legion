@@ -30,6 +30,12 @@ func dispatchConstructInputs() map[string]property.Value {
 		"tailnetService":      property.New("svc:example-dispatch"),
 		"signInClientId":      property.New("example-client-id"),
 		"signInDomain":        property.New("example.com"),
+		// The three NATS settings, so every Construct test carries them through the plugin: the
+		// pods dial the hub in their own cluster, with three copies of every stream and a 64 MiB
+		// limit. natsUrl stays the tailnet name each test sets, which is remote either way.
+		"natsInCluster":  property.New(true),
+		"natsReplicas":   property.New(float64(dispatchNatsReplicas)),
+		"streamMaxBytes": property.New(float64(dispatchStreamMaxBytes)),
 	}
 }
 
