@@ -94,7 +94,7 @@ func newCorpusSearchHandler(t *testing.T, databaseURL string) http.Handler {
 	}
 
 	mux := http.NewServeMux()
-	t.Cleanup(Register(mux, t.Context(), deps))
+	t.Cleanup(Register(mux, t.Context(), deps).Wait)
 	return mux
 }
 

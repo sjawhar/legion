@@ -1,0 +1,24 @@
+kind: Added
+body: |-
+  The Legion phase reminder runs on Claude Code. A phase worker in a Legion pane whose
+  turn ends with its phase still open — no successful `handoff_complete` since its assignment — is
+  reminded at the end of every turn, for as long as that phase stays open, as an Oh My Pi worker
+  is. The machine is `@legion/pi-shared`'s, one copy for both harnesses; this plugin is its Claude
+  Code host (`src/legion-phase-hook.ts`), driven by Claude Code's own hooks: five `mcp_tool`
+  entries generated into the Legion plugin's `legion/hooks/hooks.json` (`Stop`, `StopFailure`,
+  `PostToolUse`, `PostToolUseFailure`, `UserPromptSubmit`) call the new `legion_phase_hook` tool on
+  the pane's `legion` MCP server. The first reminder of a run comes back as the `Stop` hook's
+  `{"decision":"block","reason":…}`, which Claude Code turns into one more turn of the same
+  session; every later one is written into the session over the bridge's inbox from a timer, so the
+  turn boundary the daemon reads stays intact. A WAITING reply buys a quiet wait, the count of
+  unanswered reminders resets on any tool call or inbound turn, and a run of them tells the issue's
+  architect over this server's own Envoy client. The record — the phase, the count, the architect
+  notice's key and the head of what the worker last said, which that notice quotes even after a
+  relaunch — is `<CLAUDE_CONFIG_DIR>/legion-phase-stall-<session id>.json`, written
+  before each hook answers and read again when Claude Code restarts the server inside the same
+  `claude` process; a file the Go bridge wrote reads as an open phase with no reminder yet. The
+  four `LEGION_STALL_*` numbers come from the worker's environment. The hook entries are the Legion
+  plugin's alone: a plain `@sjawhar/claude-envoy` install registers no `legion` server, so
+  `hooks/hooks.json` carries none of them. `package.json`'s `legion.daemonApiVersion` is 42.
+custom:
+  Issue: pr2186

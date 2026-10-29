@@ -6792,7 +6792,7 @@ var require_protocol = __commonJS(function(exports) {
     }
     disconnect() {
       this.dispatchStatus({ type: core_1.DebugEvents.StaleConnection, data: "" });
-      this.transport.disconnect();
+      this.transport.close();
     }
     reconnect() {
       if (this.connected) {
@@ -15633,6 +15633,7 @@ var require_node_transport = __commonJS(function(exports) {
         d.resolve(socket);
         socket.removeAllListeners();
       });
+      this.socket = socket;
       socket.on("error", (err) => {
         dialError = err;
       });
@@ -15915,8 +15916,11 @@ var require_node_transport = __commonJS(function(exports) {
     }
     _closed(err_1) {
       return __awaiter(this, arguments, undefined, function* (err, internal = true) {
-        if (!this.connected)
+        if (!this.connected) {
+          if (this.socket)
+            this.socket.destroy();
           return;
+        }
         if (this.done)
           return;
         this.closeError = err;
@@ -36256,6 +36260,21 @@ var MAX_ISSUE_PAGE_LIMIT = 250;
 var DEFAULT_ISSUE_PAGE_LIMIT = 50;
 var ASK_TURNS = ["human", "agent"];
 var DELIVERY_CAPABILITIES = ["aside", "btw", "steer"];
+var IDEMPOTENCY_KEY_HEADER = "Idempotency-Key";
+var IDEMPOTENCY_REPLAYED_HEADER = "Idempotency-Replayed";
+var IDEMPOTENCY_KEY_MAX = 128;
+var IDEMPOTENCY_KEY_PATTERN = new RegExp(`^[A-Za-z0-9._:-]{1,${IDEMPOTENCY_KEY_MAX}}$`);
+var IDEMPOTENCY_KEY_IN_FLIGHT = "KEY_IN_FLIGHT";
+var IDEMPOTENCY_KEY_COMMITTED = "KEY_COMMITTED";
+var IDEMPOTENCY_ANSWER_NOT_KEPT = "ANSWER_NOT_KEPT";
+function retriesUnderKey(status, code) {
+  return status >= 500 || status === 408 || status === 429 || status === 409 && code === IDEMPOTENCY_KEY_IN_FLIGHT;
+}
+function answerNotKept(status, replayed, body) {
+  return replayed && status >= 200 && status < 300 && typeof body === "object" && body !== null && Reflect.get(body, "code") === IDEMPOTENCY_ANSWER_NOT_KEPT;
+}
+var IDEMPOTENCY_KEY_TTL_MS = 24 * 60 * 60 * 1000;
+var IDEMPOTENCY_LEASE_MS = 60 * 1000;
 var DELIVERY_DUPLICATE_WINDOW_MS = 72 * 60 * 60 * 1000;
 var SEARCH_DEGRADED_EMBEDDER_UNAVAILABLE = "embedder_unavailable";
 var IssueDeployedEventPayloadSchema = strictObject({
@@ -38340,6 +38359,828 @@ function commandsHelp() {
 `);
 }
 
+// ../envoy-client/src/dispatch-http.ts
+class DispatchServiceError extends Error {
+  code;
+  status;
+  candidates;
+  current;
+  mismatches;
+  name = "DispatchServiceError";
+  fromDispatch = true;
+  constructor(code, status, message, candidates, current, mismatches) {
+    super(message);
+    this.code = code;
+    this.status = status;
+    this.candidates = candidates;
+    this.current = current;
+    this.mismatches = mismatches;
+  }
+}
+
+class DispatchGatewayError extends DispatchServiceError {
+  answer;
+  advice;
+  fromDispatch = false;
+  transient;
+  mayHaveReachedDispatch;
+  constructor(status, answer, advice, message = `${answer}, so ${advice}.`) {
+    super(`HTTP_${status}`, status, message);
+    this.answer = answer;
+    this.advice = advice;
+    this.transient = transientStatus(status);
+    this.mayHaveReachedDispatch = reachesDispatch(status);
+  }
+}
+
+class DispatchWriteUnsettledError extends Error {
+  last;
+  attempts;
+  name = "DispatchWriteUnsettledError";
+  constructor(last, attempts, unanswered) {
+    let answer;
+    let why = "an earlier attempt of the write may have reached Dispatch";
+    if (last instanceof DispatchGatewayError) {
+      answer = last.answer;
+    } else if (last instanceof DispatchServiceError) {
+      answer = `${last.code}: ${last.message}`;
+      if (last.code === IDEMPOTENCY_KEY_IN_FLIGHT) {
+        why = "Dispatch was still running an earlier attempt of the write";
+      }
+    } else {
+      answer = unanswered ?? last.message;
+      why = "an attempt of the write may have reached Dispatch";
+    }
+    const tried = attempts === 1 ? "its only attempt" : `the last of ${attempts} attempts`;
+    super(`${answer} (${tried}), and ${why}, so it may or may not have taken effect: check whether ` + "it did before retrying it.", { cause: last });
+    this.last = last;
+    this.attempts = attempts;
+  }
+}
+
+class DispatchWriteLandedError extends Error {
+  code;
+  status;
+  name = "DispatchWriteLandedError";
+  constructor(code, status, method, url) {
+    const lost = code === IDEMPOTENCY_ANSWER_NOT_KEPT ? "Dispatch kept no copy of its answer, which was too large" : "its answer was lost on the way back";
+    super(`${method} ${url} was made, but ${lost} (${code}), so this command cannot print what it ` + "made: read it back with `dispatch read`, or with the matching list for something it created.");
+    this.code = code;
+    this.status = status;
+  }
+}
+function asErrorShape(value) {
+  return typeof value === "object" && value !== null ? value : {};
+}
+function isJson(response) {
+  return response.headers.get("content-type")?.includes("application/json") ?? false;
+}
+function isNoRoute(error) {
+  return error instanceof DispatchServiceError && error.status === 404 && error.code === "NOT_FOUND" && error.message.startsWith("no route for ");
+}
+var ISSUE_EVENTS_PAGE_MAX = 200;
+var DISPATCH_TOOL_DEADLINE_MS = 60000;
+function requestSignal(signal) {
+  const deadline = AbortSignal.timeout(DISPATCH_TOOL_DEADLINE_MS);
+  return signal === undefined ? deadline : AbortSignal.any([signal, deadline]);
+}
+var DISPATCH_WRITE_RETRY = {
+  pausesMs: [1000, 2000, 4000, 8000],
+  withinMs: 30000,
+  silenceMs: 20000
+};
+function pauseFor(ms, signal) {
+  const { promise, resolve, reject } = Promise.withResolvers();
+  if (signal.aborted) {
+    reject(signal.reason);
+    return promise;
+  }
+  const stop = () => {
+    clearTimeout(timer);
+    reject(signal.reason);
+  };
+  const timer = setTimeout(() => {
+    signal.removeEventListener("abort", stop);
+    resolve();
+  }, ms);
+  signal.addEventListener("abort", stop, { once: true });
+  return promise;
+}
+function retryAfterMs(response) {
+  const value = response.headers.get("Retry-After")?.trim() ?? "";
+  if (/^\d+$/.test(value))
+    return Number(value) * 1000;
+  const at = Date.parse(value);
+  return Number.isNaN(at) ? 0 : Math.max(0, at - Date.now());
+}
+var KEYED_LAYER_MEMORY_MS = 5 * 60000;
+var KEYED_LAYER_SEEN = new Map;
+var KEYED_LAYER_PROBES = new Map;
+var KEY_LAYER_PROBE_MS = 5000;
+function keyEchoed(response, key) {
+  const echoed = response.headers.get(IDEMPOTENCY_KEY_HEADER)?.trim() ?? "";
+  return echoed.replace(/^"(.*)"$/, "$1") === key;
+}
+var STREAMED_BODY_MIN = 1 << 20;
+var STREAMED_BODY_CHUNK = 64 << 10;
+function attemptBody(body, headers, progress) {
+  const bytes = typeof body.content === "string" ? new TextEncoder().encode(body.content) : body.content;
+  if (bytes.byteLength < STREAMED_BODY_MIN)
+    return { body: body.content, headers };
+  let sent = 0;
+  const stream = new ReadableStream({
+    pull(controller) {
+      progress();
+      if (sent >= bytes.byteLength) {
+        controller.close();
+        return;
+      }
+      const end = Math.min(sent + STREAMED_BODY_CHUNK, bytes.byteLength);
+      controller.enqueue(bytes.subarray(sent, end));
+      sent = end;
+    }
+  });
+  return { body: stream, headers: { ...headers, "Content-Length": String(bytes.byteLength) } };
+}
+
+class WriteAttemptSilent extends Error {
+  name = "WriteAttemptSilent";
+  constructor(silenceMs) {
+    super(`made no progress for ${silenceMs / 1000} s, so it was cut off`);
+  }
+}
+var NULL_BODY_STATUSES = new Set([101, 204, 205, 304]);
+async function writeAnswer(response, key) {
+  const echoed = keyEchoed(response, key);
+  if (response.ok || NULL_BODY_STATUSES.has(response.status)) {
+    return { response, again: false, reached: false, echoed, unjudged: false };
+  }
+  const { status } = response;
+  const text = await response.text();
+  let shape = {};
+  if (isJson(response)) {
+    try {
+      shape = asErrorShape(JSON.parse(text));
+    } catch {
+      shape = {};
+    }
+  }
+  const again = retriesUnderKey(status, shape.code);
+  return {
+    response: new Response(text, {
+      status,
+      statusText: response.statusText,
+      headers: response.headers
+    }),
+    again,
+    reached: status >= 500 || again && status === 409,
+    echoed,
+    unjudged: !echoed && typeof shape.error === "string"
+  };
+}
+function whyNotAPage(answer) {
+  if (typeof answer === "string") {
+    return `text that is not a JSON page, ${GATEWAY_PAGE}, so a retry may succeed.`;
+  }
+  let what;
+  if (Array.isArray(answer)) {
+    what = `a bare array of ${answer.length} entries, the unpaged listing, which means that Dispatch ` + "is older than sjawhar/legion#1612 or that change has regressed";
+  } else if (answer === null || typeof answer !== "object") {
+    what = answer === null ? "null" : `a ${typeof answer}`;
+  } else {
+    const fields = answer;
+    const lacking = [
+      ...Array.isArray(fields.issues) ? [] : ["an issues array"],
+      ...["total", "limit", "offset"].filter((name) => typeof fields[name] !== "number").map((name) => `a numeric ${name}`)
+    ];
+    if (lacking.length === 0)
+      return;
+    what = `an object without ${lacking.join(" or ")}`;
+  }
+  return `${what}. Retrying will not help: the same request gets the same answer until that ` + "Dispatch is upgraded or fixed.";
+}
+function whyNotAnArray(answer) {
+  if (typeof answer === "string")
+    return `text that is not JSON, ${GATEWAY_PAGE}, so a retry may succeed`;
+  if (answer === null)
+    return "null";
+  if (typeof answer !== "object")
+    return `a ${typeof answer}`;
+  if ("issues" in answer && Array.isArray(answer.issues)) {
+    return "a page, so this Dispatch pages a request that carries no limit and no offset";
+  }
+  return "an object that is not the listing";
+}
+var GATEWAY_PAGE = "which looks like a proxy or gateway page rather than Dispatch's own answer";
+function gatewayAdvice(method, status) {
+  if (!transientStatus(status)) {
+    return "a retry gets the same answer until the Dispatch URL, or whatever answers in its place, is fixed";
+  }
+  if (method === "GET")
+    return "a retry may succeed";
+  return reachesDispatch(status) ? "the write may or may not have reached Dispatch: check whether it took effect before retrying it" : "the write did not reach Dispatch, and a retry may succeed";
+}
+function transientStatus(status) {
+  return status >= 500 || status === 408 || status === 429;
+}
+function reachesDispatch(status) {
+  return status >= 500;
+}
+var REDACTED = "[redacted]";
+var EXCERPT_SCAN_LIMIT = 64 * 1024;
+var BEARER_PIECE = 8;
+function redactBearer(text, bearer) {
+  if (bearer === "")
+    return text.slice(0, EXCERPT_SCAN_LIMIT);
+  const length = Math.min(BEARER_PIECE, bearer.length);
+  const scanned = text.slice(0, EXCERPT_SCAN_LIMIT + length - 1);
+  const covered = new Uint8Array(scanned.length);
+  const pieces = new Set;
+  for (let at = 0;at + length <= bearer.length; at++)
+    pieces.add(bearer.slice(at, at + length));
+  for (const piece of pieces) {
+    let found = scanned.indexOf(piece);
+    while (found !== -1) {
+      covered.fill(1, found, found + length);
+      found = scanned.indexOf(piece, found + 1);
+    }
+  }
+  let redacted = "";
+  let kept = 0;
+  for (let start = covered.indexOf(1);start !== -1; start = covered.indexOf(1, kept)) {
+    redacted += `${scanned.slice(kept, start)}${REDACTED}`;
+    const end = covered.indexOf(0, start);
+    kept = end === -1 ? scanned.length : end;
+  }
+  return `${redacted}${scanned.slice(kept, EXCERPT_SCAN_LIMIT)}`.slice(0, EXCERPT_SCAN_LIMIT);
+}
+function excerpt(text, token) {
+  const plain = redactBearer(text, token.trim()).replace(/<(script|style)\b[^<>]*>(?:[\s\S]*?<\/\1\s*>|[\s\S]*$)/gi, " ").replace(/<[^<>]*>/g, " ");
+  return textHead(plain.replace(/(\bauthorization["']?\s*[:=]\s*["']?(?:(?:bearer|basic|digest|token)\s+)?)[^\s"'<>,;]+/gi, `$1${REDACTED}`).replace(/(\bbearer\s+)[^\s"'<>,;]+/gi, `$1${REDACTED}`));
+}
+
+class DispatchClient {
+  token;
+  fetchImpl;
+  writeRetry;
+  #baseUrl;
+  #resolvedIssues = new Map;
+  #signal;
+  constructor(baseUrl, token, fetchImpl = fetch, signal, writeRetry = DISPATCH_WRITE_RETRY) {
+    this.token = token;
+    this.fetchImpl = fetchImpl;
+    this.writeRetry = writeRetry;
+    this.#baseUrl = baseUrl.replace(/\/+$/, "");
+    this.#signal = requestSignal(signal);
+  }
+  async issue(input) {
+    return this.#json("POST", ["api", "v1", "issues"], input);
+  }
+  async resolveIssue(issueReference) {
+    return this.#resolveIssue(issueReference);
+  }
+  async listIssuePage(options, page) {
+    const path = ["api", "v1", "issues"];
+    const query = { ...options, limit: page.limit, offset: page.offset };
+    const answer = await this.#json("GET", path, undefined, query);
+    const refusal = whyNotAPage(answer);
+    if (refusal === undefined)
+      return answer;
+    throw new Error(`GET ${this.#url(path, query)} asked for a page ({issues, total, limit, offset}) and got ` + refusal);
+  }
+  async listAllIssues(options) {
+    const path = ["api", "v1", "issues"];
+    const query = { ...options };
+    const answer = await this.#json("GET", path, undefined, query);
+    if (Array.isArray(answer))
+      return answer;
+    throw new Error(`GET ${this.#url(path, query)} asked for the unpaged listing and got ${whyNotAnArray(answer)}.`);
+  }
+  async listProjectArtifacts(project, unlinked = false) {
+    return this.#json("GET", ["api", "v1", "projects", project, "artifacts"], undefined, unlinked ? { unlinked: "true" } : undefined);
+  }
+  async projectArtifact(project, input) {
+    return this.#upload(["api", "v1", "projects", project, "artifacts"], input);
+  }
+  async getProjectArtifact(project, slug) {
+    return this.#json("GET", ["api", "v1", "projects", project, "artifacts", slug]);
+  }
+  async agentArtifact(sessionId, input) {
+    return this.#upload(["api", "v1", "agents", sessionId, "artifacts"], input);
+  }
+  async getAgentArtifact(sessionId, slug) {
+    return this.#json("GET", ["api", "v1", "agents", sessionId, "artifacts", slug]);
+  }
+  async getIssueArtifact(issue, slug) {
+    return this.#json("GET", [
+      "api",
+      "v1",
+      "issues",
+      await this.#resolveIssue(issue),
+      "artifacts",
+      slug
+    ]);
+  }
+  async search(query, options = {}) {
+    return this.#json("GET", ["api", "v1", "search"], undefined, { q: query, ...options });
+  }
+  async getIssue(issue) {
+    return this.#json("GET", ["api", "v1", "issues", await this.#resolveIssue(issue)]);
+  }
+  async updateIssue(issue, input) {
+    return this.#json("PATCH", ["api", "v1", "issues", await this.#resolveIssue(issue)], input);
+  }
+  async claimIssue(issue, input = {}) {
+    return this.#json("POST", ["api", "v1", "issues", await this.#resolveIssue(issue), "claim"], input);
+  }
+  async releaseIssueClaim(issue, input = {}) {
+    return this.#json("DELETE", ["api", "v1", "issues", await this.#resolveIssue(issue), "claim"], input);
+  }
+  async getIssueEvents(issue, after = 0, limit = ISSUE_EVENTS_PAGE_MAX) {
+    return this.#json("GET", ["api", "v1", "issues", await this.#resolveIssue(issue), "events"], undefined, { after, limit });
+  }
+  async read(issueReference, options = {}) {
+    const issueKey = await this.#resolveIssue(issueReference);
+    const issue = await this.getIssue(issueKey);
+    const requested = options.events;
+    const count = requested === undefined ? DEFAULT_ISSUE_READ_EVENTS : requested === "all" ? issue.last_seq : Math.min(requested, issue.last_seq);
+    const events = [];
+    let after = Math.max(0, issue.last_seq - count);
+    while (events.length < count) {
+      const limit = Math.min(ISSUE_EVENTS_PAGE_MAX, count - events.length);
+      const page = await this.getIssueEvents(issueKey, after, limit);
+      events.push(...page);
+      const last = page.at(-1);
+      if (page.length < limit || last === undefined || events.length >= count)
+        break;
+      if (last.seq <= after) {
+        throw new Error(`GET /api/v1/issues/${issueKey}/events?after=${after} answered no event after seq ${after}`);
+      }
+      after = last.seq;
+    }
+    return { issue, events };
+  }
+  async ask(issue, input) {
+    return this.#json("POST", ["api", "v1", "issues", await this.#resolveIssue(issue), "asks"], input);
+  }
+  async openAsks(sessionID, since) {
+    return this.#json("GET", ["api", "v1", "asks", "open"], undefined, {
+      author_session: sessionID,
+      ...since === undefined ? {} : { since }
+    });
+  }
+  async openAsksForProject(project) {
+    return this.#json("GET", ["api", "v1", "asks", "open"], undefined, { project });
+  }
+  async listAgents() {
+    return this.#json("GET", ["api", "v1", "agents"]);
+  }
+  async whoami() {
+    return this.#json("GET", ["api", "v1", "whoami"]);
+  }
+  async createProject(input) {
+    return this.#json("POST", ["api", "v1", "projects"], input);
+  }
+  async listProjects() {
+    return this.#json("GET", ["api", "v1", "projects"]);
+  }
+  async listArchitectureSources(project) {
+    try {
+      return await this.#json("GET", ["api", "v1", "projects", project, "architecture-sources"]);
+    } catch (error) {
+      if (!isNoRoute(error))
+        throw error;
+    }
+    try {
+      const source = await this.#json("GET", [
+        "api",
+        "v1",
+        "projects",
+        project,
+        "architecture-source"
+      ]);
+      return source === null ? [] : [source];
+    } catch (error) {
+      if (error instanceof DispatchServiceError && error.status === 404 && error.code === "SOURCE_NOT_FOUND") {
+        return [];
+      }
+      throw error;
+    }
+  }
+  async syncArchitectureSources(project) {
+    try {
+      return await this.#json("POST", [
+        "api",
+        "v1",
+        "projects",
+        project,
+        "architecture-sources",
+        "sync"
+      ]);
+    } catch (error) {
+      if (!isNoRoute(error))
+        throw error;
+    }
+    const source = await this.#json("POST", [
+      "api",
+      "v1",
+      "projects",
+      project,
+      "architecture-source",
+      "sync"
+    ]);
+    return [source];
+  }
+  async syncArchitectureSource(project, repo) {
+    const [owner, name, ...rest] = repo.split("/");
+    if (!owner || !name || rest.length > 0) {
+      throw new Error(`repository must be owner/name, got ${JSON.stringify(repo)}`);
+    }
+    return this.#json("POST", [
+      "api",
+      "v1",
+      "projects",
+      project,
+      "architecture-sources",
+      owner,
+      name,
+      "sync"
+    ]);
+  }
+  async resolveAsk(id, input) {
+    return this.#json("POST", ["api", "v1", "asks", id, "resolve"], input);
+  }
+  async requestApproval(artifactID, input) {
+    const answer = await this.#jsonAnswer("POST", ["api", "v1", "artifacts", artifactID, "approval-requests"], input);
+    return { ...answer.payload, recorded: answer.status === 201 };
+  }
+  async editAsk(id, input) {
+    return this.#json("PATCH", ["api", "v1", "asks", id], input);
+  }
+  async comment(issue, input) {
+    return this.#json("POST", ["api", "v1", "issues", await this.#resolveIssue(issue), "comments"], input);
+  }
+  async listIssueAsks(issue, state) {
+    return this.#json("GET", ["api", "v1", "issues", await this.#resolveIssue(issue), "asks"], undefined, state === undefined ? undefined : { state });
+  }
+  async getArtifactAsks(id, state) {
+    return this.#json("GET", ["api", "v1", "artifacts", id, "asks"], undefined, state === undefined ? undefined : { state });
+  }
+  async artifactAsk(id, input) {
+    return this.#json("POST", ["api", "v1", "artifacts", id, "asks"], input);
+  }
+  async suggest(issue, input) {
+    const { replace_with, ...comment } = input;
+    return this.#json("POST", ["api", "v1", "issues", await this.#resolveIssue(issue), "comments"], {
+      ...comment,
+      suggestion: { replace_with }
+    });
+  }
+  async getArtifactComments(id) {
+    return this.#json("GET", ["api", "v1", "artifacts", id, "comments"]);
+  }
+  async artifactComment(id, input) {
+    return this.#json("POST", ["api", "v1", "artifacts", id, "comments"], input);
+  }
+  async artifactSuggest(id, input) {
+    const { replace_with, ...comment } = input;
+    return this.#json("POST", ["api", "v1", "artifacts", id, "comments"], {
+      ...comment,
+      suggestion: { replace_with }
+    });
+  }
+  async message(issue, input) {
+    return this.#json("POST", ["api", "v1", "issues", await this.#resolveIssue(issue), "messages"], input);
+  }
+  async messageReply(id, input, options = {}) {
+    return this.#json("POST", ["api", "v1", "messages", id, "reply"], input, options.followUp === true ? { follow_up: "true" } : undefined);
+  }
+  async deliveryReply(resource, id, input) {
+    const collection = resource === "message" ? "messages" : "comments";
+    await this.#json("POST", ["api", "v1", collection, id, "reply"], input);
+  }
+  async getMessage(issue, id) {
+    return this.#json("GET", [
+      "api",
+      "v1",
+      "issues",
+      await this.#resolveIssue(issue),
+      "messages",
+      id
+    ]);
+  }
+  async getMessageThread(id, session) {
+    return this.#json("GET", ["api", "v1", "messages", id], undefined, { session });
+  }
+  async acceptMessageDelivery(id, attempt, input) {
+    return this.#json("POST", ["api", "v1", "messages", id, "deliveries", String(attempt), "accept"], input);
+  }
+  async artifact(issue, input) {
+    return this.#upload(["api", "v1", "issues", await this.#resolveIssue(issue), "artifacts"], input);
+  }
+  async getArtifact(id) {
+    return this.#json("GET", ["api", "v1", "artifacts", id]);
+  }
+  async docRead(id, version) {
+    return version === undefined ? this.#json("GET", ["api", "v1", "artifacts", id, "text"]) : this.#json("GET", ["api", "v1", "artifacts", id, "versions", String(version)]);
+  }
+  async fileVersion(id, version) {
+    const url = this.#url(["api", "v1", "artifacts", id, "versions", String(version)]);
+    const response = await this.#send("GET", url, undefined, "*/*");
+    if (!response.ok)
+      return this.#response("GET", url, response);
+    return {
+      mime: response.headers.get("Content-Type") ?? "application/octet-stream",
+      bytes: new Uint8Array(await response.arrayBuffer())
+    };
+  }
+  async artifactBlocks(id) {
+    return this.#json("GET", ["api", "v1", "artifacts", id, "blocks"]);
+  }
+  async docEdit(id, input) {
+    return this.#json("POST", ["api", "v1", "artifacts", id, "edits"], input);
+  }
+  async nameArtifactVersion(id, input) {
+    return this.#json("POST", ["api", "v1", "artifacts", id, "versions"], input);
+  }
+  async getArtifactEvents(id, after = 0, limit = 200) {
+    return this.#json("GET", ["api", "v1", "artifacts", id, "events"], undefined, { after, limit });
+  }
+  async getArtifactReferences(id) {
+    return this.#json("GET", ["api", "v1", "artifacts", id, "references"]);
+  }
+  async getAsk(id) {
+    return this.#json("GET", ["api", "v1", "asks", id]);
+  }
+  async followAsk(id, sessionId, actor) {
+    await this.#json("PUT", ["api", "v1", "asks", id, "followers", sessionId], { actor });
+  }
+  async unfollowAsk(id, sessionId, actor) {
+    await this.#json("DELETE", ["api", "v1", "asks", id, "followers", sessionId], { actor });
+  }
+  async getComment(id) {
+    return this.#json("GET", ["api", "v1", "comments", id]);
+  }
+  async resolveComment(id, actor) {
+    return this.#json("POST", ["api", "v1", "comments", id, "resolve"], { actor });
+  }
+  async getComments(issue) {
+    return this.#json("GET", ["api", "v1", "issues", await this.#resolveIssue(issue), "comments"]);
+  }
+  async getIssueReferences(issue) {
+    return this.#json("GET", [
+      "api",
+      "v1",
+      "issues",
+      await this.#resolveIssue(issue),
+      "references"
+    ]);
+  }
+  async getReferences(query) {
+    return this.#json("GET", ["api", "v1", "references"], undefined, {
+      ..."to" in query ? { to: query.to } : { from: query.from },
+      ...query.kind === undefined || query.kind.length === 0 ? {} : { kind: query.kind.join(",") },
+      ...query.since === undefined ? {} : { since: query.since }
+    });
+  }
+  async#resolveIssue(issueReference) {
+    if (!issueReference.includes("#"))
+      return issueReference;
+    let resolved = this.#resolvedIssues.get(issueReference);
+    if (!resolved) {
+      resolved = this.#json("GET", ["api", "v1", "issues", "resolve"], undefined, {
+        ref: issueReference
+      }).then((resolution) => resolution.key);
+      this.#resolvedIssues.set(issueReference, resolved);
+    }
+    try {
+      return await resolved;
+    } catch (error) {
+      this.#resolvedIssues.delete(issueReference);
+      throw error;
+    }
+  }
+  async#json(method, path, body, query) {
+    return (await this.#jsonAnswer(method, path, body, query)).payload;
+  }
+  async#jsonAnswer(method, path, body, query) {
+    const url = this.#url(path, query);
+    const response = await this.#send(method, url, body === undefined ? undefined : { content: JSON.stringify(body), type: "application/json" });
+    return { status: response.status, payload: await this.#response(method, url, response) };
+  }
+  async#upload(path, input) {
+    if ("content" in input)
+      return this.#json("POST", path, input);
+    const form = new FormData;
+    form.set("name", input.name);
+    if (input.summary !== undefined)
+      form.set("summary", input.summary);
+    if (input.actor !== undefined)
+      form.set("actor", JSON.stringify(input.actor));
+    form.set("file", input.file, input.name);
+    return this.#form("POST", path, form);
+  }
+  async#form(method, path, form) {
+    const url = this.#url(path);
+    const encoded = new Response(form);
+    const type = encoded.headers.get("Content-Type") ?? "multipart/form-data";
+    const content = new Uint8Array(await encoded.arrayBuffer());
+    const response = await this.#send(method, url, { content, type });
+    return this.#response(method, url, response);
+  }
+  async#send(method, url, body, accept = "application/json") {
+    const headers = {
+      Accept: accept,
+      Authorization: `Bearer ${this.token}`
+    };
+    if (body !== undefined)
+      headers["Content-Type"] = body.type;
+    if (method !== "POST" && method !== "PATCH") {
+      return this.fetchImpl(url, {
+        method,
+        headers,
+        signal: this.#signal,
+        ...body === undefined ? {} : { body: body.content }
+      });
+    }
+    const key = crypto.randomUUID();
+    headers[IDEMPOTENCY_KEY_HEADER] = key;
+    const { pausesMs, withinMs, silenceMs, pause = pauseFor } = this.writeRetry;
+    const request = `${method} ${url}`;
+    const started = this.#now();
+    let reached = false;
+    for (let attempt = 1;; attempt++) {
+      let answer;
+      let thrown;
+      try {
+        answer = await writeAnswer(await this.#attempt(url, method, headers, body, silenceMs), key);
+        if (answer.echoed)
+          KEYED_LAYER_SEEN.set(this.#baseUrl, this.#now());
+        if (!answer.again)
+          return answer.response;
+        reached ||= answer.reached;
+      } catch (error) {
+        const name = error instanceof Error || error instanceof DOMException ? error.name : "";
+        if (!(error instanceof WriteAttemptSilent) && (this.#signal.aborted || name === "AbortError" || name === "TimeoutError")) {
+          throw this.#ended(error, request, attempt, true);
+        }
+        thrown = error;
+        reached = true;
+      }
+      const scheduled = pausesMs[attempt - 1];
+      const wait = Math.max(scheduled ?? 0, answer === undefined ? 0 : retryAfterMs(answer.response));
+      const inTime = scheduled !== undefined && this.#now() - started + wait <= withinMs;
+      if (!inTime || !(answer?.echoed || await this.#runsKeyedLayer(answer?.unjudged ?? false))) {
+        if (answer !== undefined) {
+          return this.#unsettled(method, url, answer.response, reached, attempt);
+        }
+        if (thrown instanceof WriteAttemptSilent) {
+          throw new DispatchWriteUnsettledError(thrown, attempt, `${request} ${thrown.message}`);
+        }
+        throw thrown;
+      }
+      await answer?.response.body?.cancel().catch(() => {
+        return;
+      });
+      try {
+        await pause(wait, this.#signal);
+      } catch (error) {
+        throw this.#ended(error, request, attempt, reached);
+      }
+    }
+  }
+  #now() {
+    return this.writeRetry.now?.() ?? performance.now();
+  }
+  async#attempt(url, method, headers, body, silenceMs) {
+    const cut = new AbortController;
+    const silent = () => cut.abort(new WriteAttemptSilent(silenceMs));
+    let timer = setTimeout(silent, silenceMs);
+    let answered = false;
+    const progress = () => {
+      if (answered)
+        return;
+      clearTimeout(timer);
+      timer = setTimeout(silent, silenceMs);
+    };
+    try {
+      return await this.fetchImpl(url, {
+        method,
+        signal: AbortSignal.any([this.#signal, cut.signal]),
+        ...body === undefined ? { headers } : attemptBody(body, headers, progress)
+      });
+    } catch (error) {
+      if (cut.signal.aborted && !this.#signal.aborted)
+        throw cut.signal.reason;
+      throw error;
+    } finally {
+      answered = true;
+      clearTimeout(timer);
+    }
+  }
+  #ended(error, request, attempts, mayHaveReached) {
+    const reason = this.#signal.aborted ? this.#signal.reason : error;
+    const timedOut = (reason instanceof Error || reason instanceof DOMException) && reason.name === "TimeoutError";
+    if (!timedOut || !mayHaveReached || !(error instanceof Error))
+      return error;
+    return new DispatchWriteUnsettledError(error, attempts, `${request} had no definitive answer when its deadline ended it`);
+  }
+  async#runsKeyedLayer(unjudged) {
+    const origin = this.#baseUrl;
+    if (unjudged)
+      KEYED_LAYER_SEEN.delete(origin);
+    const seen = KEYED_LAYER_SEEN.get(origin);
+    if (seen !== undefined && this.#now() - seen < KEYED_LAYER_MEMORY_MS)
+      return true;
+    let probe = KEYED_LAYER_PROBES.get(origin);
+    if (probe === undefined) {
+      probe = this.#probeKeyedLayer().finally(() => KEYED_LAYER_PROBES.delete(origin));
+      KEYED_LAYER_PROBES.set(origin, probe);
+    }
+    const runs = await probe;
+    if (runs)
+      KEYED_LAYER_SEEN.set(origin, this.#now());
+    return runs;
+  }
+  async#probeKeyedLayer() {
+    try {
+      const response = await this.fetchImpl(`${this.#baseUrl}/healthz`, {
+        method: "GET",
+        headers: { Accept: "application/json", Authorization: `Bearer ${this.token}` },
+        signal: AbortSignal.any([this.#signal, AbortSignal.timeout(KEY_LAYER_PROBE_MS)])
+      });
+      if (!isJson(response))
+        return false;
+      const health = await response.json();
+      return typeof health === "object" && health !== null && Reflect.get(health, "idempotency_keys") === true;
+    } catch {
+      return false;
+    }
+  }
+  async#unsettled(method, url, response, reached, attempts) {
+    const refusal = await this.#response(method, url, response).catch((error) => error);
+    if (reached && refusal instanceof DispatchServiceError) {
+      const landedAlone = refusal instanceof DispatchGatewayError ? refusal.mayHaveReachedDispatch : refusal.status >= 500;
+      if (!landedAlone)
+        throw new DispatchWriteUnsettledError(refusal, attempts);
+    }
+    throw refusal;
+  }
+  #url(path, query) {
+    const url = new URL(`${path.map((segment) => encodeURIComponent(segment)).join("/")}`, `${this.#baseUrl}/`);
+    if (query) {
+      for (const [name, value] of Object.entries(query)) {
+        if (typeof value === "string" || typeof value === "number") {
+          url.searchParams.set(name, String(value));
+        } else if (Array.isArray(value)) {
+          for (const item of value)
+            url.searchParams.append(name, String(item));
+        }
+      }
+    }
+    return url.toString();
+  }
+  async#response(method, url, response) {
+    const text = await response.text();
+    let payload = text;
+    if (text && isJson(response)) {
+      try {
+        payload = JSON.parse(text);
+      } catch {
+        payload = text;
+      }
+    }
+    if (!response.ok) {
+      const error = asErrorShape(payload);
+      if (typeof error.error === "string") {
+        if (response.status === 409 && error.code === IDEMPOTENCY_KEY_COMMITTED) {
+          throw new DispatchWriteLandedError(IDEMPOTENCY_KEY_COMMITTED, response.status, method, url);
+        }
+        throw new DispatchServiceError(error.code ?? `HTTP_${response.status}`, response.status, error.error, error.candidates, error.current, error.mismatches);
+      }
+      const quoted = excerpt(text, this.token);
+      let body;
+      if (quoted !== "") {
+        body = `a body that is not Dispatch's error JSON (${JSON.stringify(quoted)})`;
+      } else if (text === "") {
+        body = "an empty body";
+      } else {
+        const within = text.length > EXCERPT_SCAN_LIMIT ? ` in its first ${EXCERPT_SCAN_LIMIT / 1024} KiB` : "";
+        const size = Buffer.byteLength(text).toLocaleString("en-US");
+        body = `a body of ${size} bytes and no readable text${within}`;
+      }
+      const reasonPhrase = excerpt(response.statusText, this.token);
+      const reason = reasonPhrase === "" ? "" : ` ${reasonPhrase}`;
+      throw new DispatchGatewayError(response.status, `${method} ${url} answered ${response.status}${reason} with ${body}, ${GATEWAY_PAGE}`, gatewayAdvice(method, response.status));
+    }
+    const replayed = response.headers.get(IDEMPOTENCY_REPLAYED_HEADER)?.trim() === "?1";
+    if (answerNotKept(response.status, replayed, payload)) {
+      throw new DispatchWriteLandedError(IDEMPOTENCY_ANSWER_NOT_KEPT, response.status, method, url);
+    }
+    return payload;
+  }
+}
+
 // ../envoy-client/src/dispatch-owner.ts
 function documentLabel(project, slug) {
   return `${project}/${slug}`;
@@ -38576,19 +39417,12 @@ function dispatchReplyPath(resource, id) {
   return `/api/v1/${collection}/${encodeURIComponent(id)}/reply`;
 }
 async function postDeliveryReply(config, sessionId, delivery, result) {
-  const response = await fetch(`${config.url}${dispatchReplyPath(delivery.resource, delivery.id)}`, {
-    method: "POST",
-    headers: { Authorization: `Bearer ${config.token}`, "Content-Type": "application/json" },
-    body: JSON.stringify({
-      actor: { kind: "session", id: sessionId },
-      attempt: delivery.attempt,
-      ...delivery.replyFields,
-      ...result
-    })
+  await new DispatchClient(config.url, config.token).deliveryReply(delivery.resource, delivery.id, {
+    actor: { kind: "session", id: sessionId },
+    attempt: delivery.attempt,
+    ...delivery.replyFields,
+    ...result
   });
-  if (!response.ok) {
-    throw new Error(`Dispatch reply failed: ${response.status} ${await response.text()}`);
-  }
 }
 function expectsLaneReceipt(frame) {
   return frame.reply !== undefined && frame.reply !== "" && frame.subject === frame.directSubject && frame.envelopeTopic !== undefined && frame.envelopeTopic !== frame.directSubject;
@@ -39684,563 +40518,6 @@ async function resolveOrigin(env, exec, cwd) {
       origin.pane = paneId;
   }
   return origin;
-}
-
-// ../envoy-client/src/dispatch-http.ts
-class DispatchServiceError extends Error {
-  code;
-  status;
-  candidates;
-  current;
-  mismatches;
-  name = "DispatchServiceError";
-  fromDispatch = true;
-  constructor(code, status, message, candidates, current, mismatches) {
-    super(message);
-    this.code = code;
-    this.status = status;
-    this.candidates = candidates;
-    this.current = current;
-    this.mismatches = mismatches;
-  }
-}
-
-class DispatchGatewayError extends DispatchServiceError {
-  answer;
-  advice;
-  fromDispatch = false;
-  transient;
-  mayHaveReachedDispatch;
-  constructor(status, answer, advice, message = `${answer}, so ${advice}.`) {
-    super(`HTTP_${status}`, status, message);
-    this.answer = answer;
-    this.advice = advice;
-    this.transient = transientStatus(status);
-    this.mayHaveReachedDispatch = reachesDispatch(status);
-  }
-}
-function asErrorShape(value) {
-  return typeof value === "object" && value !== null ? value : {};
-}
-function isJson(response) {
-  return response.headers.get("content-type")?.includes("application/json") ?? false;
-}
-function isNoRoute(error) {
-  return error instanceof DispatchServiceError && error.status === 404 && error.code === "NOT_FOUND" && error.message.startsWith("no route for ");
-}
-var ISSUE_EVENTS_PAGE_MAX = 200;
-var DISPATCH_TOOL_DEADLINE_MS = 60000;
-function requestSignal(signal) {
-  const deadline = AbortSignal.timeout(DISPATCH_TOOL_DEADLINE_MS);
-  return signal === undefined ? deadline : AbortSignal.any([signal, deadline]);
-}
-function whyNotAPage(answer) {
-  if (typeof answer === "string") {
-    return `text that is not a JSON page, ${GATEWAY_PAGE}, so a retry may succeed.`;
-  }
-  let what;
-  if (Array.isArray(answer)) {
-    what = `a bare array of ${answer.length} entries, the unpaged listing, which means that Dispatch ` + "is older than sjawhar/legion#1612 or that change has regressed";
-  } else if (answer === null || typeof answer !== "object") {
-    what = answer === null ? "null" : `a ${typeof answer}`;
-  } else {
-    const fields = answer;
-    const lacking = [
-      ...Array.isArray(fields.issues) ? [] : ["an issues array"],
-      ...["total", "limit", "offset"].filter((name) => typeof fields[name] !== "number").map((name) => `a numeric ${name}`)
-    ];
-    if (lacking.length === 0)
-      return;
-    what = `an object without ${lacking.join(" or ")}`;
-  }
-  return `${what}. Retrying will not help: the same request gets the same answer until that ` + "Dispatch is upgraded or fixed.";
-}
-function whyNotAnArray(answer) {
-  if (typeof answer === "string")
-    return `text that is not JSON, ${GATEWAY_PAGE}, so a retry may succeed`;
-  if (answer === null)
-    return "null";
-  if (typeof answer !== "object")
-    return `a ${typeof answer}`;
-  if ("issues" in answer && Array.isArray(answer.issues)) {
-    return "a page, so this Dispatch pages a request that carries no limit and no offset";
-  }
-  return "an object that is not the listing";
-}
-var GATEWAY_PAGE = "which looks like a proxy or gateway page rather than Dispatch's own answer";
-function gatewayAdvice(method, status) {
-  if (!transientStatus(status)) {
-    return "a retry gets the same answer until the Dispatch URL, or whatever answers in its place, is fixed";
-  }
-  if (method === "GET")
-    return "a retry may succeed";
-  return reachesDispatch(status) ? "the write may or may not have reached Dispatch: check whether it took effect before retrying it" : "the write did not reach Dispatch, and a retry may succeed";
-}
-function transientStatus(status) {
-  return status >= 500 || status === 408 || status === 429;
-}
-function reachesDispatch(status) {
-  return status >= 500;
-}
-var REDACTED = "[redacted]";
-var EXCERPT_SCAN_LIMIT = 64 * 1024;
-var BEARER_PIECE = 8;
-function redactBearer(text, bearer) {
-  if (bearer === "")
-    return text.slice(0, EXCERPT_SCAN_LIMIT);
-  const length = Math.min(BEARER_PIECE, bearer.length);
-  const scanned = text.slice(0, EXCERPT_SCAN_LIMIT + length - 1);
-  const covered = new Uint8Array(scanned.length);
-  const pieces = new Set;
-  for (let at = 0;at + length <= bearer.length; at++)
-    pieces.add(bearer.slice(at, at + length));
-  for (const piece of pieces) {
-    let found = scanned.indexOf(piece);
-    while (found !== -1) {
-      covered.fill(1, found, found + length);
-      found = scanned.indexOf(piece, found + 1);
-    }
-  }
-  let redacted = "";
-  let kept = 0;
-  for (let start = covered.indexOf(1);start !== -1; start = covered.indexOf(1, kept)) {
-    redacted += `${scanned.slice(kept, start)}${REDACTED}`;
-    const end = covered.indexOf(0, start);
-    kept = end === -1 ? scanned.length : end;
-  }
-  return `${redacted}${scanned.slice(kept, EXCERPT_SCAN_LIMIT)}`.slice(0, EXCERPT_SCAN_LIMIT);
-}
-function excerpt(text, token) {
-  const plain = redactBearer(text, token.trim()).replace(/<(script|style)\b[^<>]*>(?:[\s\S]*?<\/\1\s*>|[\s\S]*$)/gi, " ").replace(/<[^<>]*>/g, " ");
-  return textHead(plain.replace(/(\bauthorization["']?\s*[:=]\s*["']?(?:(?:bearer|basic|digest|token)\s+)?)[^\s"'<>,;]+/gi, `$1${REDACTED}`).replace(/(\bbearer\s+)[^\s"'<>,;]+/gi, `$1${REDACTED}`));
-}
-
-class DispatchClient {
-  token;
-  fetchImpl;
-  #baseUrl;
-  #resolvedIssues = new Map;
-  #signal;
-  constructor(baseUrl, token, fetchImpl = fetch, signal) {
-    this.token = token;
-    this.fetchImpl = fetchImpl;
-    this.#baseUrl = baseUrl.replace(/\/+$/, "");
-    this.#signal = requestSignal(signal);
-  }
-  async issue(input) {
-    return this.#json("POST", ["api", "v1", "issues"], input);
-  }
-  async resolveIssue(issueReference) {
-    return this.#resolveIssue(issueReference);
-  }
-  async listIssuePage(options, page) {
-    const path = ["api", "v1", "issues"];
-    const query = { ...options, limit: page.limit, offset: page.offset };
-    const answer = await this.#json("GET", path, undefined, query);
-    const refusal = whyNotAPage(answer);
-    if (refusal === undefined)
-      return answer;
-    throw new Error(`GET ${this.#url(path, query)} asked for a page ({issues, total, limit, offset}) and got ` + refusal);
-  }
-  async listAllIssues(options) {
-    const path = ["api", "v1", "issues"];
-    const query = { ...options };
-    const answer = await this.#json("GET", path, undefined, query);
-    if (Array.isArray(answer))
-      return answer;
-    throw new Error(`GET ${this.#url(path, query)} asked for the unpaged listing and got ${whyNotAnArray(answer)}.`);
-  }
-  async listProjectArtifacts(project, unlinked = false) {
-    return this.#json("GET", ["api", "v1", "projects", project, "artifacts"], undefined, unlinked ? { unlinked: "true" } : undefined);
-  }
-  async projectArtifact(project, input) {
-    return this.#upload(["api", "v1", "projects", project, "artifacts"], input);
-  }
-  async getProjectArtifact(project, slug) {
-    return this.#json("GET", ["api", "v1", "projects", project, "artifacts", slug]);
-  }
-  async agentArtifact(sessionId, input) {
-    return this.#upload(["api", "v1", "agents", sessionId, "artifacts"], input);
-  }
-  async getAgentArtifact(sessionId, slug) {
-    return this.#json("GET", ["api", "v1", "agents", sessionId, "artifacts", slug]);
-  }
-  async getIssueArtifact(issue, slug) {
-    return this.#json("GET", [
-      "api",
-      "v1",
-      "issues",
-      await this.#resolveIssue(issue),
-      "artifacts",
-      slug
-    ]);
-  }
-  async search(query, options = {}) {
-    return this.#json("GET", ["api", "v1", "search"], undefined, { q: query, ...options });
-  }
-  async getIssue(issue) {
-    return this.#json("GET", ["api", "v1", "issues", await this.#resolveIssue(issue)]);
-  }
-  async updateIssue(issue, input) {
-    return this.#json("PATCH", ["api", "v1", "issues", await this.#resolveIssue(issue)], input);
-  }
-  async claimIssue(issue, input = {}) {
-    return this.#json("POST", ["api", "v1", "issues", await this.#resolveIssue(issue), "claim"], input);
-  }
-  async releaseIssueClaim(issue, input = {}) {
-    return this.#json("DELETE", ["api", "v1", "issues", await this.#resolveIssue(issue), "claim"], input);
-  }
-  async getIssueEvents(issue, after = 0, limit = ISSUE_EVENTS_PAGE_MAX) {
-    return this.#json("GET", ["api", "v1", "issues", await this.#resolveIssue(issue), "events"], undefined, { after, limit });
-  }
-  async read(issueReference, options = {}) {
-    const issueKey = await this.#resolveIssue(issueReference);
-    const issue = await this.getIssue(issueKey);
-    const requested = options.events;
-    const count = requested === undefined ? DEFAULT_ISSUE_READ_EVENTS : requested === "all" ? issue.last_seq : Math.min(requested, issue.last_seq);
-    const events = [];
-    let after = Math.max(0, issue.last_seq - count);
-    while (events.length < count) {
-      const limit = Math.min(ISSUE_EVENTS_PAGE_MAX, count - events.length);
-      const page = await this.getIssueEvents(issueKey, after, limit);
-      events.push(...page);
-      const last = page.at(-1);
-      if (page.length < limit || last === undefined || events.length >= count)
-        break;
-      if (last.seq <= after) {
-        throw new Error(`GET /api/v1/issues/${issueKey}/events?after=${after} answered no event after seq ${after}`);
-      }
-      after = last.seq;
-    }
-    return { issue, events };
-  }
-  async ask(issue, input) {
-    return this.#json("POST", ["api", "v1", "issues", await this.#resolveIssue(issue), "asks"], input);
-  }
-  async openAsks(sessionID, since) {
-    return this.#json("GET", ["api", "v1", "asks", "open"], undefined, {
-      author_session: sessionID,
-      ...since === undefined ? {} : { since }
-    });
-  }
-  async openAsksForProject(project) {
-    return this.#json("GET", ["api", "v1", "asks", "open"], undefined, { project });
-  }
-  async listAgents() {
-    return this.#json("GET", ["api", "v1", "agents"]);
-  }
-  async whoami() {
-    return this.#json("GET", ["api", "v1", "whoami"]);
-  }
-  async createProject(input) {
-    return this.#json("POST", ["api", "v1", "projects"], input);
-  }
-  async listProjects() {
-    return this.#json("GET", ["api", "v1", "projects"]);
-  }
-  async listArchitectureSources(project) {
-    try {
-      return await this.#json("GET", ["api", "v1", "projects", project, "architecture-sources"]);
-    } catch (error) {
-      if (!isNoRoute(error))
-        throw error;
-    }
-    try {
-      const source = await this.#json("GET", [
-        "api",
-        "v1",
-        "projects",
-        project,
-        "architecture-source"
-      ]);
-      return source === null ? [] : [source];
-    } catch (error) {
-      if (error instanceof DispatchServiceError && error.status === 404 && error.code === "SOURCE_NOT_FOUND") {
-        return [];
-      }
-      throw error;
-    }
-  }
-  async syncArchitectureSources(project) {
-    try {
-      return await this.#json("POST", [
-        "api",
-        "v1",
-        "projects",
-        project,
-        "architecture-sources",
-        "sync"
-      ]);
-    } catch (error) {
-      if (!isNoRoute(error))
-        throw error;
-    }
-    const source = await this.#json("POST", [
-      "api",
-      "v1",
-      "projects",
-      project,
-      "architecture-source",
-      "sync"
-    ]);
-    return [source];
-  }
-  async syncArchitectureSource(project, repo) {
-    const [owner, name, ...rest] = repo.split("/");
-    if (!owner || !name || rest.length > 0) {
-      throw new Error(`repository must be owner/name, got ${JSON.stringify(repo)}`);
-    }
-    return this.#json("POST", [
-      "api",
-      "v1",
-      "projects",
-      project,
-      "architecture-sources",
-      owner,
-      name,
-      "sync"
-    ]);
-  }
-  async resolveAsk(id, input) {
-    return this.#json("POST", ["api", "v1", "asks", id, "resolve"], input);
-  }
-  async requestApproval(artifactID, input) {
-    const answer = await this.#jsonAnswer("POST", ["api", "v1", "artifacts", artifactID, "approval-requests"], input);
-    return { ...answer.payload, recorded: answer.status === 201 };
-  }
-  async editAsk(id, input) {
-    return this.#json("PATCH", ["api", "v1", "asks", id], input);
-  }
-  async comment(issue, input) {
-    return this.#json("POST", ["api", "v1", "issues", await this.#resolveIssue(issue), "comments"], input);
-  }
-  async listIssueAsks(issue, state) {
-    return this.#json("GET", ["api", "v1", "issues", await this.#resolveIssue(issue), "asks"], undefined, state === undefined ? undefined : { state });
-  }
-  async getArtifactAsks(id, state) {
-    return this.#json("GET", ["api", "v1", "artifacts", id, "asks"], undefined, state === undefined ? undefined : { state });
-  }
-  async artifactAsk(id, input) {
-    return this.#json("POST", ["api", "v1", "artifacts", id, "asks"], input);
-  }
-  async suggest(issue, input) {
-    const { replace_with, ...comment } = input;
-    return this.#json("POST", ["api", "v1", "issues", await this.#resolveIssue(issue), "comments"], {
-      ...comment,
-      suggestion: { replace_with }
-    });
-  }
-  async getArtifactComments(id) {
-    return this.#json("GET", ["api", "v1", "artifacts", id, "comments"]);
-  }
-  async artifactComment(id, input) {
-    return this.#json("POST", ["api", "v1", "artifacts", id, "comments"], input);
-  }
-  async artifactSuggest(id, input) {
-    const { replace_with, ...comment } = input;
-    return this.#json("POST", ["api", "v1", "artifacts", id, "comments"], {
-      ...comment,
-      suggestion: { replace_with }
-    });
-  }
-  async message(issue, input) {
-    return this.#json("POST", ["api", "v1", "issues", await this.#resolveIssue(issue), "messages"], input);
-  }
-  async messageReply(id, input, options = {}) {
-    return this.#json("POST", ["api", "v1", "messages", id, "reply"], input, options.followUp === true ? { follow_up: "true" } : undefined);
-  }
-  async getMessage(issue, id) {
-    return this.#json("GET", [
-      "api",
-      "v1",
-      "issues",
-      await this.#resolveIssue(issue),
-      "messages",
-      id
-    ]);
-  }
-  async getMessageThread(id, session) {
-    return this.#json("GET", ["api", "v1", "messages", id], undefined, { session });
-  }
-  async acceptMessageDelivery(id, attempt, input) {
-    return this.#json("POST", ["api", "v1", "messages", id, "deliveries", String(attempt), "accept"], input);
-  }
-  async artifact(issue, input) {
-    return this.#upload(["api", "v1", "issues", await this.#resolveIssue(issue), "artifacts"], input);
-  }
-  async getArtifact(id) {
-    return this.#json("GET", ["api", "v1", "artifacts", id]);
-  }
-  async docRead(id, version) {
-    return version === undefined ? this.#json("GET", ["api", "v1", "artifacts", id, "text"]) : this.#json("GET", ["api", "v1", "artifacts", id, "versions", String(version)]);
-  }
-  async fileVersion(id, version) {
-    const url = this.#url(["api", "v1", "artifacts", id, "versions", String(version)]);
-    const response = await this.fetchImpl(url, {
-      method: "GET",
-      headers: { Accept: "*/*", Authorization: `Bearer ${this.token}` },
-      signal: this.#signal
-    });
-    if (!response.ok)
-      return this.#response("GET", url, response);
-    return {
-      mime: response.headers.get("Content-Type") ?? "application/octet-stream",
-      bytes: new Uint8Array(await response.arrayBuffer())
-    };
-  }
-  async artifactBlocks(id) {
-    return this.#json("GET", ["api", "v1", "artifacts", id, "blocks"]);
-  }
-  async docEdit(id, input) {
-    return this.#json("POST", ["api", "v1", "artifacts", id, "edits"], input);
-  }
-  async nameArtifactVersion(id, input) {
-    return this.#json("POST", ["api", "v1", "artifacts", id, "versions"], input);
-  }
-  async getArtifactEvents(id, after = 0, limit = 200) {
-    return this.#json("GET", ["api", "v1", "artifacts", id, "events"], undefined, { after, limit });
-  }
-  async getArtifactReferences(id) {
-    return this.#json("GET", ["api", "v1", "artifacts", id, "references"]);
-  }
-  async getAsk(id) {
-    return this.#json("GET", ["api", "v1", "asks", id]);
-  }
-  async followAsk(id, sessionId, actor) {
-    await this.#json("PUT", ["api", "v1", "asks", id, "followers", sessionId], { actor });
-  }
-  async unfollowAsk(id, sessionId, actor) {
-    await this.#json("DELETE", ["api", "v1", "asks", id, "followers", sessionId], { actor });
-  }
-  async getComment(id) {
-    return this.#json("GET", ["api", "v1", "comments", id]);
-  }
-  async resolveComment(id, actor) {
-    return this.#json("POST", ["api", "v1", "comments", id, "resolve"], { actor });
-  }
-  async getComments(issue) {
-    return this.#json("GET", ["api", "v1", "issues", await this.#resolveIssue(issue), "comments"]);
-  }
-  async getIssueReferences(issue) {
-    return this.#json("GET", [
-      "api",
-      "v1",
-      "issues",
-      await this.#resolveIssue(issue),
-      "references"
-    ]);
-  }
-  async getReferences(query) {
-    return this.#json("GET", ["api", "v1", "references"], undefined, {
-      ..."to" in query ? { to: query.to } : { from: query.from },
-      ...query.kind === undefined || query.kind.length === 0 ? {} : { kind: query.kind.join(",") },
-      ...query.since === undefined ? {} : { since: query.since }
-    });
-  }
-  async#resolveIssue(issueReference) {
-    if (!issueReference.includes("#"))
-      return issueReference;
-    let resolved = this.#resolvedIssues.get(issueReference);
-    if (!resolved) {
-      resolved = this.#json("GET", ["api", "v1", "issues", "resolve"], undefined, {
-        ref: issueReference
-      }).then((resolution) => resolution.key);
-      this.#resolvedIssues.set(issueReference, resolved);
-    }
-    try {
-      return await resolved;
-    } catch (error) {
-      this.#resolvedIssues.delete(issueReference);
-      throw error;
-    }
-  }
-  async#json(method, path, body, query) {
-    return (await this.#jsonAnswer(method, path, body, query)).payload;
-  }
-  async#jsonAnswer(method, path, body, query) {
-    const headers = {
-      Accept: "application/json",
-      Authorization: `Bearer ${this.token}`
-    };
-    if (body !== undefined)
-      headers["Content-Type"] = "application/json";
-    const url = this.#url(path, query);
-    const response = await this.fetchImpl(url, {
-      method,
-      headers,
-      signal: this.#signal,
-      ...body === undefined ? {} : { body: JSON.stringify(body) }
-    });
-    return { status: response.status, payload: await this.#response(method, url, response) };
-  }
-  async#upload(path, input) {
-    if ("content" in input)
-      return this.#json("POST", path, input);
-    const form = new FormData;
-    form.set("name", input.name);
-    if (input.summary !== undefined)
-      form.set("summary", input.summary);
-    if (input.actor !== undefined)
-      form.set("actor", JSON.stringify(input.actor));
-    form.set("file", input.file, input.name);
-    return this.#form("POST", path, form);
-  }
-  async#form(method, path, body) {
-    const url = this.#url(path);
-    const response = await this.fetchImpl(url, {
-      method,
-      headers: { Accept: "application/json", Authorization: `Bearer ${this.token}` },
-      body,
-      signal: this.#signal
-    });
-    return this.#response(method, url, response);
-  }
-  #url(path, query) {
-    const url = new URL(`${path.map((segment) => encodeURIComponent(segment)).join("/")}`, `${this.#baseUrl}/`);
-    if (query) {
-      for (const [name, value] of Object.entries(query)) {
-        if (typeof value === "string" || typeof value === "number") {
-          url.searchParams.set(name, String(value));
-        } else if (Array.isArray(value)) {
-          for (const item of value)
-            url.searchParams.append(name, String(item));
-        }
-      }
-    }
-    return url.toString();
-  }
-  async#response(method, url, response) {
-    const text = await response.text();
-    let payload = text;
-    if (text && isJson(response)) {
-      try {
-        payload = JSON.parse(text);
-      } catch {
-        payload = text;
-      }
-    }
-    if (!response.ok) {
-      const error = asErrorShape(payload);
-      if (typeof error.error === "string") {
-        throw new DispatchServiceError(error.code ?? `HTTP_${response.status}`, response.status, error.error, error.candidates, error.current, error.mismatches);
-      }
-      const quoted = excerpt(text, this.token);
-      let body;
-      if (quoted !== "") {
-        body = `a body that is not Dispatch's error JSON (${JSON.stringify(quoted)})`;
-      } else if (text === "") {
-        body = "an empty body";
-      } else {
-        const within = text.length > EXCERPT_SCAN_LIMIT ? ` in its first ${EXCERPT_SCAN_LIMIT / 1024} KiB` : "";
-        const size = Buffer.byteLength(text).toLocaleString("en-US");
-        body = `a body of ${size} bytes and no readable text${within}`;
-      }
-      const reasonPhrase = excerpt(response.statusText, this.token);
-      const reason = reasonPhrase === "" ? "" : ` ${reasonPhrase}`;
-      throw new DispatchGatewayError(response.status, `${method} ${url} answered ${response.status}${reason} with ${body}, ${GATEWAY_PAGE}`, gatewayAdvice(method, response.status));
-    }
-    return payload;
-  }
 }
 
 // ../envoy-client/src/dispatch-picture-tools.ts
@@ -42401,7 +42678,7 @@ async function executeDispatchTool(input) {
     throw new ToolInputError(input.tool, checked.problems);
   const ownerArguments = checked.owner;
   const pictures = checked.pictures;
-  const dispatchClient = () => new DispatchClient(configUrl, configToken, fetchImpl, input.signal);
+  const dispatchClient = () => new DispatchClient(configUrl, configToken, fetchImpl, input.signal, input.writeRetry);
   if (input.tool === "dispatch_open_asks") {
     const client = dispatchClient();
     const project = optionalString(ownerArguments.args, "project");
@@ -42457,7 +42734,11 @@ async function executeDispatchTool(input) {
       throw new Error("issue or project is required");
     return owner;
   };
-  const postWithPictures = (text, limit, owner, upload) => textWithPictures(input.tool, text, pictures, limit, owner, upload, actor);
+  const postWithPictures = (text, limit, owner, upload) => textWithPictures(input.tool, text, pictures, limit, owner, (picture) => upload(picture).catch((error) => {
+    if (!(error instanceof DispatchWriteLandedError))
+      throw error;
+    throw new Error(`${error.message} That was a picture uploaded before this call's own write, so nothing else was written: run the call again, which uploads it as its next version.`, { cause: error });
+  }), actor);
   const writePictures = (resolved, text, limit) => {
     if (resolved?.owner.kind === "project") {
       const { project } = resolved.owner;
@@ -42569,6 +42850,9 @@ async function executeDispatchTool(input) {
             ref: dispatchChildRef(dispatchIssueRef(issueKey), "message", message.id)
           };
         } catch (error) {
+          if (error instanceof DispatchWriteLandedError) {
+            throw new Error(`${error.message} That was the closing reason, so the close was not sent: read the issue's messages for it, then close with a reason that points at it, since retrying this call posts its reason again.`, { cause: error });
+          }
           const told = writeMayHaveLanded(error) ? "the reason may or may not have been posted, and the close was not sent: read the issue's messages before retrying, since retrying this call posts its reason again" : "the reason was not posted, so the close was not sent";
           if (error instanceof DispatchServiceError)
             throw refusalWithCode(error, told);
@@ -42599,6 +42883,8 @@ async function executeDispatchTool(input) {
           actor
         });
       } catch (error) {
+        if (error instanceof DispatchWriteLandedError)
+          throw error;
         const taken = dispatchAnswered(error, 500) && newLinks.length > 0 ? `one of ${newLinks.join(", ")} may already be linked from another issue (a URL links exactly one issue)` : "";
         if (closingNote === undefined)
           throw refusalWithCode(error, taken);
@@ -43577,6 +43863,22 @@ function natsAuthOptions(seed) {
   return { authenticator: import_nats.nkeyAuthenticator(bytes) };
 }
 
+// ../envoy-client/src/nats-connection.ts
+var NATS_PING_INTERVAL_MS = 1e4;
+var NATS_MAX_PINGS_OUT = 2;
+function natsConnectionOptions(input) {
+  return {
+    servers: [...input.servers],
+    name: input.name,
+    ...natsAuthOptions(input.seed),
+    reconnect: true,
+    maxReconnectAttempts: -1,
+    reconnectTimeWait: 2000,
+    pingInterval: NATS_PING_INTERVAL_MS,
+    maxPingOut: NATS_MAX_PINGS_OUT
+  };
+}
+
 // ../envoy-client/src/envoy-config.ts
 import {
   chmodSync,
@@ -44185,7 +44487,9 @@ var SessionWireSchema = object({
   roles: array(string2()).optional(),
   capabilities: array(string2()).optional(),
   self_subscribed: boolean2(),
-  last_seen: number2().int().optional()
+  last_seen: number2().int().optional(),
+  plugin: string2().optional(),
+  plugin_version: string2().optional()
 });
 var RoleWireSchema = object({
   role: string2(),
@@ -44332,7 +44636,9 @@ function createEnvoyClient(config) {
       ...input.capabilities === undefined ? {} : { capabilities: input.capabilities },
       driving: input.driving,
       ...input.selfSubscribed === undefined ? {} : { self_subscribed: input.selfSubscribed },
-      host: machineID()
+      host: machineID(),
+      plugin: input.plugin.name,
+      plugin_version: input.plugin.version
     }))),
     unsubscribe: async (input) => {
       await post("/v1/interests/unsubscribe", {
@@ -45013,9 +45319,10 @@ function createReplayEngine(options) {
 function replaySuppressed(rendered) {
   return rendered.skip || rendered.malformedDelivery === true;
 }
+var REPLAYED_SUFFIX = "while this session's connection was down.";
 function replayedText(content, publishedAt) {
   return `${content}
-Published at ${publishedAt} while this session's connection was down.`;
+Published at ${publishedAt} ${REPLAYED_SUFFIX}`;
 }
 function failureNoticeFields(notice) {
   const readWith = notice.readWith === "dispatch read" ? "Read it with the `dispatch read` command on the issue or ask it concerns." : "Read it with the envoy_inbox tool.";
@@ -48832,7 +49139,9 @@ class StdioServerTransport {
 
 // src/envoy-channel-server.ts
 var import_nats2 = __toESM(require_mod4(), 1);
+
 // package.json
+var name = "@sjawhar/claude-envoy";
 var version2 = "1.0.0";
 var legion = {
   daemonApiVersion: 41
@@ -49314,13 +49623,19 @@ function claudeCommandLine(pid, read = processCommandLine, parent = parentProces
   }
   return;
 }
-function installedMarketplace(bundlePath) {
+function pluginCacheSegments(bundlePath) {
   const parts = bundlePath.split(sep);
-  for (let index = 0;index + 2 < parts.length; index++) {
+  for (let index = 0;index + 1 < parts.length; index++) {
     if (parts[index] === "plugins" && parts[index + 1] === "cache")
-      return parts[index + 2];
+      return parts.slice(index + 2);
   }
   return;
+}
+function installedMarketplace(bundlePath) {
+  return pluginCacheSegments(bundlePath)?.[0];
+}
+function installedPluginVersion(bundlePath) {
+  return pluginCacheSegments(bundlePath)?.[2];
 }
 var INLINE_MARKETPLACE = "inline";
 function loadedMarketplace(pluginRoot, bundlePath, commandLine) {
@@ -50473,7 +50788,8 @@ async function startChannelSession(options) {
       title,
       capabilities: options.capabilities,
       driving: false,
-      selfSubscribed: true
+      selfSubscribed: true,
+      plugin: { name, version: options.pluginVersion }
     });
   };
   const restoreRole = async (previousSessionID = identity.id) => {
@@ -50698,8 +51014,12 @@ async function startChannelSession(options) {
   const heartbeatTimer = setInterval(() => {
     heartbeat();
   }, options.heartbeatMs);
+  const handoffFileChanged = (current) => {
+    if (current.ino !== 0)
+      requestHeartbeat();
+  };
   if (handoffFile !== undefined) {
-    watchFile(handoffFile, { interval: HANDOFF_POLL_MS }, requestHeartbeat);
+    watchFile(handoffFile, { interval: HANDOFF_POLL_MS }, handoffFileChanged);
     requestHeartbeat();
   }
   (async () => {
@@ -50762,7 +51082,7 @@ async function startChannelSession(options) {
       shuttingDown = true;
       clearInterval(heartbeatTimer);
       if (handoffFile !== undefined)
-        unwatchFile(handoffFile, requestHeartbeat);
+        unwatchFile(handoffFile, handoffFileChanged);
       await forwarder.close();
       await serialized(() => options.client.unregisterSession(identity.id)).catch((error) => {
         process.stderr.write(`envoy-channel: session deregistration failed \u2014 ${messageFor(error)}
@@ -50917,9 +51237,10 @@ async function runEnvoyChannelServer() {
   }), directory);
   const stateDirectory = pluginStateDirectory();
   const inboxSocket = configuredValue(process.env[INBOX_VARIABLE]);
+  const bundlePath = process.argv[1] ?? "";
   const channel = inboxSocket === undefined ? detectClaudeChannel({
     claudePid: process.ppid,
-    bundlePath: process.argv[1] ?? "",
+    bundlePath,
     environment: process.env
   }) : { loaded: true };
   if (!channel.loaded) {
@@ -50988,14 +51309,11 @@ async function runEnvoyChannelServer() {
       stampOnce(() => identity.id);
       session = inboundOffChannelSession({ identity, stateDirectory, why: inbound.off });
     } else {
-      connection = await import_nats2.connect({
-        servers: [...inbound.natsUrls],
+      connection = await import_nats2.connect(natsConnectionOptions({
+        servers: inbound.natsUrls,
         name: `claude-envoy-channel-${identity.id}`,
-        ...natsAuthOptions(inbound.natsSeed),
-        reconnect: true,
-        maxReconnectAttempts: -1,
-        reconnectTimeWait: 2000
-      });
+        seed: inbound.natsSeed
+      }));
       session = await startChannelSession({
         identity,
         connection,
@@ -51006,6 +51324,7 @@ async function runEnvoyChannelServer() {
         configFile,
         stateDirectory,
         title,
+        pluginVersion: installedPluginVersion(bundlePath) ?? "source",
         ...stamping ? { stampTitle } : {},
         ...configuredValue(overrideSessionId) === undefined ? { handoffPid: process.ppid } : {}
       });
