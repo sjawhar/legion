@@ -2490,9 +2490,9 @@ listener's NATS user manages the consumer: it creates, reads, pulls, acknowledge
   relaying an entry that moves to another machine id at once, and at start it relays every such
   entry in its cache without waiting for a registration.
 - **Restart at the ack floor:** every start of a session's relay (the listener starts or gains the
-  durable binding, the session registers with a new `epoch`, the relay resumes after a pause, a
-  consumer call or a pull failed) reads the consumer's ack floor, deletes the consumer and creates
-  it again at the sequence after the floor with the current filter
+  durable binding, the session registers with a new `epoch`, a paused relay's backoff ran out or
+  its session registered, a consumer call or a pull failed) reads the consumer's ack floor, deletes
+  the consumer and creates it again at the sequence after the floor with the current filter
   (`bus.SessionConsumers.RestartAtFloor`; nats-server 2.10.29 has no consumer reset). So after any
   break the session takes its messages again in stream order, and its plugin's ledger drops the
   ones it already wrote. nats-server 2.10.29 reports a consumer's ack floor as 0 until an ack moves
@@ -2519,7 +2519,7 @@ listener's NATS user manages the consumer: it creates, reads, pulls, acknowledge
   `bus.SessionConsumers.ListSessionConsumers`), and each relay of that burst whose listed consumer
   has nothing awaiting an ack, already carries the wanted filter and settings, and has no pending
   start takes no turn and sends no call before it pulls (`bus.SessionConsumers.KeepListed`); every
-  other relay, and every relay started alone (a new `epoch`, a resume after a pause, a retry),
+  other relay, and every relay started alone (a new `epoch`, a probe after a pause, a retry),
   restarts through `RestartAtFloor`. A grant without the list costs one log line and one info per
   session. Calls made at once share their reads of the stream's state (identity, first and last
   sequence): each waits for a read that began after it was made, so a gap is still reported
@@ -2537,8 +2537,15 @@ listener's NATS user manages the consumer: it creates, reads, pulls, acknowledge
   `progress` every 20 s while it holds the frame unwritten (`InProgress`); `done` once it wrote,
   skipped or refused the frame (`Ack`, which also counts as `received`); `nak` when it cannot take
   it (`NakWithDelay` of 1 s). Up to `MaxAckPending` frames are in flight. When the oldest
-  unanswered frame gets no reply within 3 s, the relay pauses: it sends nothing more, leaves the
-  frames in flight to their ack wait, and starts again at the session's next registration.
+  unanswered frame gets no reply within 3 s (`relayReceiptWait`), the relay pauses: it sends
+  nothing more and leaves the frames in flight to their ack wait. It resumes on its own, with no
+  registration: after a backoff it restarts at the ack floor and sends the session what it has not
+  answered, so a session that was only slow has its messages again about 5 s after the frame it
+  missed. The backoff starts at 2 s (`relayPauseFirst`) and doubles to 30 s (`relayPauseMax`,
+  `relayRetryMax` again, and three times under the 90 s heartbeat that used to be the only
+  resume); a frame the session answers puts it back to 2 s, and the session's next registration
+  resumes the relay at once, whichever comes first. A pause is logged once an episode — the first
+  one since the session last answered a frame — not once a probe.
 - **Relay to a serving port:** the owner pushes each message to the port (`prompt_async`,
   `session.Deliverer.Push`), one at a time in stream order, and acks it on the port's 204. Any
   other answer, a transport error or a timeout keeps the message at the head, in progress, and

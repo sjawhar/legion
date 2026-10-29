@@ -32,6 +32,14 @@ type relayRig struct {
 
 func newRelayRig(t *testing.T) *relayRig {
 	t.Helper()
+	return newRelayRigPausing(t, relayPauseFirst, relayPauseMax)
+}
+
+// newRelayRigPausing is newRelayRig with the backoff a paused relay waits before it sends the
+// session its unanswered messages again bounded by first and max, so a test need not wait the
+// production bounds out.
+func newRelayRigPausing(t *testing.T, first, max time.Duration) *relayRig {
+	t.Helper()
 	url := testnats.URL(t)
 	client, err := bus.ConnectOwningStream([]string{url}, bus.WithReplicas(1))
 	if err != nil {
@@ -48,6 +56,8 @@ func newRelayRig(t *testing.T) *relayRig {
 		defer cancel()
 		relays.stop(ctx)
 	})
+	// Set before the first relay starts, which gaining the binding below is what does.
+	relays.pauseFirst, relays.pauseMax = first, max
 	relays.setOwned(true)
 	return &relayRig{sessionConsumerRig: rig, url: url}
 }
@@ -363,12 +373,46 @@ func TestSessionConsumerHeldFrameDoesNotDelayLaterReceiptsAndSurvivesARestart(t 
 }
 
 // A session that stops answering is taken for unreachable: within the receipt wait of the oldest
-// frame it has not answered the relay sends nothing more, and it logs that once. The session's next
-// registration resumes it from the ack floor: the unanswered frame and the one stored during the
-// pause arrive, in stream order.
-func TestSessionConsumerUnreachableSessionPausesUntilItRegisters(t *testing.T) {
-	rig := newRelayRig(t)
+// frame it has not answered the relay sends nothing more, and it logs that once. It resumes on its
+// own, with no registration: after its pause backoff it restarts at the ack floor and sends the
+// unanswered frame and the one stored during the pause, in stream order, which a session that is
+// answering again takes once.
+func TestSessionConsumerUnreachableSessionPausesAndSendsAgainAfterItsBackoff(t *testing.T) {
+	// Shorter than the production bounds, long enough that the silent window below ends before the
+	// first probe: the relay sends again relayReceiptWait + pauseFirst after the frame it got no
+	// answer for.
+	const pauseFirst, pauseMax = 2 * time.Second, 4 * time.Second
+	rig := newRelayRigPausing(t, pauseFirst, pauseMax)
 	const sessionID = "ses_unreachable"
+	agent := contracts.AgentSubject(sessionID)
+	standIn := startSessionStandIn(t, rig.url, sessionID, answerDone)
+	rig.subscribe(t, consumerRegistration(sessionID, "epoch-1"))
+	e0, _ := rig.storeEvent(t, agent)
+	requireFrames(t, standIn.collect(t, 1, 5*time.Second), e0)
+
+	standIn.silent.Store(true)
+	e1, _ := rig.storeEvent(t, agent)
+	unanswered := standIn.collect(t, 1, 5*time.Second)[0]
+	requireFrames(t, []relayedFrame{unanswered}, e1)
+	// The relay stops relayReceiptWait after that frame: a message stored once it has reaches the
+	// session only when the relay sends again, which is pauseFirst later.
+	time.Sleep(time.Until(unanswered.arrived.Add(relayReceiptWait + 300*time.Millisecond)))
+	e2, _ := rig.storeEvent(t, agent)
+	standIn.none(t, 900*time.Millisecond)
+
+	standIn.silent.Store(false)
+	requireFrames(t, standIn.collect(t, 2, relayReceiptWait+2*pauseFirst+2*time.Second), e1, e2)
+	standIn.none(t, time.Second)
+	if lines := strings.Count(rig.harness.logs.String(), "session relay paused: the session answered no frame"); lines != 1 {
+		t.Fatalf("the pause was logged %d times, want once for the episode:\n%s", lines, rig.harness.logs.String())
+	}
+}
+
+// A registration resumes a paused relay at once, long before its backoff would send again.
+func TestSessionConsumerUnreachableSessionResumesAtOnceWhenItRegisters(t *testing.T) {
+	// A backoff no test waits out: only the registration can make the relay send again here.
+	rig := newRelayRigPausing(t, time.Minute, time.Minute)
+	const sessionID = "ses_unreachable_registers"
 	agent := contracts.AgentSubject(sessionID)
 	standIn := startSessionStandIn(t, rig.url, sessionID, answerDone)
 	rig.subscribe(t, consumerRegistration(sessionID, "epoch-1"))
@@ -383,7 +427,7 @@ func TestSessionConsumerUnreachableSessionPausesUntilItRegisters(t *testing.T) {
 	e2, _ := rig.storeEvent(t, agent)
 	standIn.none(t, 1500*time.Millisecond)
 	if lines := strings.Count(rig.harness.logs.String(), "session relay paused: the session answered no frame"); lines != 1 {
-		t.Fatalf("the pause was logged %d times, want once:\n%s", lines, rig.harness.logs.String())
+		t.Fatalf("the pause was logged %d times, want once for the episode:\n%s", lines, rig.harness.logs.String())
 	}
 
 	standIn.silent.Store(false)

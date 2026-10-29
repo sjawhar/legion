@@ -16,7 +16,11 @@ body: |-
   order: over NATS as a core frame on `notifications.envoy.deliver.<id>`, which the stream does not
   store and the live topics lane skips, answered `received`, `progress`, `done` or `nak` and acked
   only on `done`; or to a serving port as the `prompt_async` push, acked on the port's 204 and
-  pushed again after 1 s doubling to 30 s otherwise, later messages waiting behind it. Every start
+  pushed again after 1 s doubling to 30 s otherwise, later messages waiting behind it. A session
+  that answers no frame within 3 s is taken for unreachable: the relay sends it nothing more and
+  sends again after a backoff of 2 s doubling to 30 s, at once when the session registers, and
+  from 2 s again once the session answers a frame, so a session that was only slow has its
+  messages about 5 s after the frame it missed rather than at its next heartbeat. Every start
   of a relay restarts the consumer at its ack floor, so a session takes its messages in stream
   order after any break, and a missing consumer starts from the plugin's resume point when that
   names the stream's current `envoy_stream_id`. A restart of a consumer with nothing awaiting an

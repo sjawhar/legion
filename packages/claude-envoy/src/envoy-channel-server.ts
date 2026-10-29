@@ -1194,7 +1194,8 @@ export async function startChannelSession(options: ChannelSessionOptions): Promi
     await restoreReplay()
     roleTransferFrom ??= previous
     // The new relay subject reaches the server before the registration that asks for it. Not
-    // fatal: a relayed frame nobody answers pauses the relay until the next registration.
+    // fatal: a relayed frame nobody answers pauses the relay, which sends again after its backoff
+    // and at the registration below.
     await withTimeout(
       options.connection.flush(),
       options.handoffFlushTimeoutMs ?? HANDOFF_FLUSH_TIMEOUT_MS,
