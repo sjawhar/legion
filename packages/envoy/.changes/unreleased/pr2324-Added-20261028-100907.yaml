@@ -10,10 +10,10 @@ body: |-
     an event written before this release. A snooze or an un-snooze of an Inbox row
     (`PUT`/`DELETE /api/v1/me/asks/{id}/snooze`), which appended no event, now appends the writer's
     `user_state.updated` when it moves the row, so the writer's other tabs and devices refetch their
-    Inbox; its payload is exactly `{login, changed: ["snoozed"]}`, since every signed-in stream
+    Inbox; its payload is exactly `{login, changed: ["snoozed"]}`, since every signed-in feed
     replays it, so it names no ask, no issue state and nobody else, and wakes no one.
-    `GET /api/v1/events` answers `X-Dispatch-Event-Replay: complete` on a resuming connection whose
-    `since` is at or below the log's head, which it replays in full (`cmd/dispatch/README.md`,
+    An events subscription's `events_start` on `GET /ws/live` says `replay_complete: true` when its
+    resume is at or below the log's head, which it replays in full (`cmd/dispatch/README.md`,
     "Routes"). `references_changed` names a cited block of a document as
     `{kind: "block", id, ref, artifact_id}` when a write adds or removes a citation of it, and when a
     version of its document changes or deletes it; a document version also names the target of each

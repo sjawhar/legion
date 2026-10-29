@@ -58,7 +58,7 @@ func newRepairFixtureSettlingAfter(t *testing.T, settle time.Duration) repairFix
 		t.Fatalf("new API dependencies: %v", err)
 	}
 	mux := http.NewServeMux()
-	t.Cleanup(Register(mux, t.Context(), deps))
+	t.Cleanup(Register(mux, t.Context(), deps).Wait)
 	return repairFixture{handler: mux, database: database, documents: documents, deps: deps}
 }
 

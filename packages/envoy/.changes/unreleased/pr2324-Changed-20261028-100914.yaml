@@ -24,11 +24,12 @@ body: |-
     do not all come back at once and a proxy's day-long `Retry-After` still retries within a
     minute; any other failure is still retried after 500 ms.
     The app's query client (`api/query-client.ts`) gives every mutation's invalidation the same
-    never-cancel rule. A reconnect whose replay the server calls complete refreshes nothing beyond
-    what its events change, where every reconnect, a tab regaining focus among them, refetched every
-    read. A `dispatch://` reference reads the new summary routes in place of the full issue, and an
-    inline link reads no document text. A reference's summary or block read is fetched again on a
-    window focus only after it failed, so a 503 past its retries recovers on the open page.
+    never-cancel rule. A resume of the event feed whose replay Dispatch calls complete
+    (`replay_complete`) refreshes nothing beyond what its events change, where every reconnect, a
+    tab regaining focus among them, refetched every read. A `dispatch://` reference reads the new
+    summary routes in place of the full issue, and an inline link reads no document text. A
+    reference's summary or block read is fetched again on a window focus only after it failed, so a
+    503 past its retries recovers on the open page.
 time: 2026-10-28T10:09:14.013992852Z
 custom:
     Issue: pr2324

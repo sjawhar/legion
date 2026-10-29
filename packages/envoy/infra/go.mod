@@ -11,6 +11,7 @@ require (
 	github.com/aws/smithy-go v1.28.5
 	github.com/blang/semver v3.5.1+incompatible
 	github.com/googleapis/gax-go/v2 v2.23.0
+	github.com/gorilla/websocket v1.5.3
 	github.com/nats-io/nats.go v1.50.0
 	github.com/nats-io/nkeys v0.4.15
 	github.com/pulumi/pulumi-aws/sdk/v7 v7.50.0
@@ -23,7 +24,7 @@ require (
 	github.com/pulumi/pulumi/sdk/v3 v3.265.0
 	github.com/sjawhar/envoy v0.0.0
 	github.com/stretchr/testify v1.12.1
-	golang.org/x/oauth2 v0.36.0
+	golang.org/x/oauth2 v0.37.0
 	google.golang.org/api v0.290.0
 	google.golang.org/grpc v1.84.0
 	google.golang.org/protobuf v1.36.12

@@ -1,4 +1,4 @@
-import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { type ReactNode, useCallback, useEffect, useMemo, useRef } from "react";
 import { Link, useSearchParams } from "react-router-dom";
 
@@ -38,6 +38,7 @@ import {
 import { Timestamp } from "../refs/Timestamp";
 import { useKeymap, useKeymapScope } from "../shell/keymap";
 import { closestMatching, roveFocus } from "../shell/roving";
+import { useKeyedWrite } from "../writes/useKeyedWrite";
 import { AttachmentLists, type AttachmentView } from "./AttachmentLists";
 import {
   type ComponentIndex,
@@ -104,11 +105,11 @@ function usePaneState(): {
  * The project's Architecture tab (LEGION-191 slice 1a): the component model as a tree of rows
  * with fill bars and `D/N issues done`, a chevron into a component's children with a breadcrumb
  * back, a component's details below the rows, and the Unassigned / Not architectural lists with
- * the component picker. Reads `GET /projects/{key}/architecture`; `api/event-refresh.ts` refreshes
- * it on an issue write that moves a status, a parent or a component attachment (or does not say
- * what it moved), on any other write of an issue the tree lists (a work row shows its title,
- * status, priority, links and `updated_at`; a side list its title and status), and on every
- * import event, so a bar moves in place when an issue closes.
+ * the component picker. Reads `GET /projects/{key}/architecture`; the live socket's event feed
+ * refreshes it (`api/event-refresh.ts`) on an issue write that moves a status, a parent or a
+ * component attachment (or does not say what it moved), on any other write of an issue the tree
+ * lists (a work row shows its title, status, priority, links and `updated_at`; a side list its
+ * title and status), and on every import event, so a bar moves in place when an issue closes.
  */
 export function ArchitecturePage({ project }: { project: string }): ReactNode {
   const queryClient = useQueryClient();
@@ -117,12 +118,12 @@ export function ArchitecturePage({ project }: { project: string }): ReactNode {
     queryFn: () => api.getArchitecture(project),
     staleTime: 15_000,
   });
-  // A rejected model comes back 200 with the reason in last_error; either way the tree's
-  // source line settles from the refetch. A failure of the request itself (transport, 5xx) has
-  // nowhere to land on the source row, so it renders beside that source's button until the
-  // next attempt.
-  const refresh = useMutation({
-    mutationFn: (repo: string) => api.syncArchitectureSource(project, repo),
+  // A rejected model comes back 200 with the reason in last_error; either way the tree's source
+  // line settles from the refetch. A refusal of the request itself is the shell's to show, with
+  // every other write's (`PendingWritesIndicator`).
+  const refresh = useKeyedWrite({
+    label: (repo: string) => `Refresh of ${project}'s architecture source ${repo}`,
+    write: (repo, bounds) => api.syncArchitectureSource(project, repo, bounds),
     onSettled: () => {
       void queryClient.invalidateQueries({ queryKey: ["architecture", project] });
       // Its key prefixes the project's own list, so both refresh.
@@ -148,13 +149,13 @@ export function ArchitecturePage({ project }: { project: string }): ReactNode {
       onRefresh={(repo) => refresh.mutate(repo)}
       project={project}
       refresh={
-        refresh.isIdle
-          ? null
-          : {
-              error: refresh.error === null ? null : refresh.error.message,
-              pending: refresh.isPending,
+        refresh.isPending
+          ? {
+              error: null,
+              pending: true,
               repo: refresh.variables,
             }
+          : null
       }
       selectedId={selectedId}
       tree={tree.data}
