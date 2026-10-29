@@ -2,7 +2,7 @@
   "schemaVersion": 1,
   "phase": "implement",
   "issue": "INFRA-757",
-  "completed": "2026-10-29T21:00:00Z",
+  "completed": "2026-10-29T22:10:00Z",
   "proof": [
     {
       "criterion": "Acceptance 1, flake A: the cause is named in the pull request, with a reproduction that fails on main's code.",
@@ -24,32 +24,32 @@
       "criterion": "Acceptance 1 and 2, flake B: the cause is named and fixed at the cause, in the product (the architect's decision DB-5), with a reproduction that fails on main's code.",
       "surface": "cmd/listener's own test binary with a forced device: one if inserted into store.Open through go test -overlay, which wraps the role claim bucket in kvwatchtest.TimingOutFirst so the first watch ends its scan as nats.go's idle timer does. The device is committed nowhere and is quoted whole in the pull request body.",
       "command": "cd packages/envoy && ENVOY_TEST_ROLE_SCAN_TIMES_OUT=1 DISPATCH_TEST_DATABASE_URL=... go test -overlay $TMPDIR/infra757/device/<row>.json ./cmd/listener/ -count=1 -run '^TestTheInterestReadRoutesAnswerABusThatStoppedAnsweringInsideTheBudget$' -timeout 10m, for rows 1 (main's kv.go, main's tests), 2 (main's kv.go, this branch's tests) and 3 (this branch), and row 4 with the device off.",
-      "observed": "Row 1 FAIL: GET /v1/sessions with the bus answering: status 503, body {\"error\":\"envoy: the message bus did not answer: the role claim view is not complete: its watcher has not delivered every claim\"}. Row 2 FAIL, same line, which is why the fix had to be in the product and not only in the rig. Row 3 ok 7.524s. Row 4 (device off, main's code) ok 6.235s, so no loop under load is claimed for this test. All four re-run at the applied head.",
-      "headSha": "8933f985c615",
+      "observed": "Row 1 FAIL: GET /v1/sessions with the bus answering: status 503, body {\"error\":\"envoy: the message bus did not answer: the role claim view is not complete: its watcher has not delivered every claim\"}. Row 2 FAIL, same line, which is why the fix had to be in the product and not only in the rig. Row 3 ok 7.524s. Row 4 (device off, main's code) ok 6.235s, so no loop under load is claimed for this test. All four re-run at the applied head. Re-run at the forward-merge head f2df6dc7e6fb with the same result.",
+      "headSha": "f2df6dc7e6fb",
       "negativeControl": "Row 4: with the device off, main's product and main's tests pass, so the device is what produces the window rather than the loop; and row 2 is the control on the fix's location, since the test-side wait alone leaves the failure in place."
     },
     {
       "criterion": "Acceptance 2, flake B: a committed regression test that fails on main's code, so the fix cannot be removed silently.",
       "surface": "internal/store's own test binary against the in-process NATS, driving the product's startup gate.",
       "command": "cd packages/envoy && go test ./internal/store/ -count=1 -run '^TestWaitForCacheReadyHoldsUntilTheRoleClaimViewAnswers$' -timeout 10m, and the same with -overlay pointing internal/store/kv.go at main's copy (jj file show -r d6d4c5d1).",
-      "observed": "At the head: ok github.com/sjawhar/envoy/internal/store 1.549s. Against main's kv.go: --- FAIL ... role_holders_test.go:300: RolesHeldBy(ses_holder) refused the read right after WaitForCacheReady returned: the role claim view is not complete: its watcher has not delivered every claim.",
-      "headSha": "8933f985c615",
+      "observed": "At the head: ok github.com/sjawhar/envoy/internal/store 1.549s. Against main's kv.go: --- FAIL ... role_holders_test.go:300: RolesHeldBy(ses_holder) refused the read right after WaitForCacheReady returned: the role claim view is not complete: its watcher has not delivered every claim. Re-run at the forward-merge head f2df6dc7e6fb with the same result.",
+      "headSha": "f2df6dc7e6fb",
       "negativeControl": "The overlay run against main's internal/store/kv.go is the negative control: it compiles and fails on the RolesHeldBy assertion, not on a build error."
     },
     {
       "criterion": "Acceptance 2, flake B: the frozen-bus assertions can no longer pass for the wrong reason (departure D-7).",
       "surface": "cmd/listener's test binary with a second device, also committed nowhere: timeOutRoleClaimScan, the package's own helper, called after the test's control request and before relay.arm, so every frozen-bus assertion meets a 503 the role claim view made rather than the silent bus's.",
       "command": "cd packages/envoy && go test -overlay $TMPDIR/infra757/device/d7-with-guard.json (and d7-no-guard.json) ./cmd/listener/ -count=1 -run '^TestTheInterestReadRoutesAnswerABusThatStoppedAnsweringInsideTheBudget$'",
-      "observed": "Without the reason check this branch adds, the sessions subtest passes on a role claim view's 503 - the wrong reason, accepted silently; the only failure in that run is the separate cache-hit assertion. With it, both subtests fail by name: GET /v1/sessions with the bus silent was refused \"... the role claim view is not complete ...\": that refusal came from the role claim view rather than the silent bus.",
-      "headSha": "8933f985c615",
+      "observed": "Without the reason check this branch adds, the sessions subtest passes on a role claim view's 503 - the wrong reason, accepted silently; the only failure in that run is the separate cache-hit assertion. With it, both subtests fail by name: GET /v1/sessions with the bus silent was refused \"... the role claim view is not complete ...\": that refusal came from the role claim view rather than the silent bus. Re-run at the forward-merge head f2df6dc7e6fb with the same result.",
+      "headSha": "f2df6dc7e6fb",
       "negativeControl": "The d7-no-guard run is the control: the same device and the same product, with only the four lines of the reason check removed, and the assertion then passes for the wrong reason."
     },
     {
       "criterion": "Acceptance 2, flake B: 200 runs in a row under the same load, at the head.",
       "surface": "The same pod and load recipe, the cmd/listener package binary run from its own package directory.",
       "command": "bash $TMPDIR/infra757/race-loop.sh B2-200-plain 200 2 1 $TMPDIR/infra757/bin/listener.head2 -test.run '^TestTheInterestReadRoutes...$' -test.count=1, and B3-200-device with ENVOY_TEST_ROLE_SCAN_TIMES_OUT=1 against the device binary; earlier, B-200-plain, B-200-device and B-200-race at 7ea4d296.",
-      "observed": "At 8933f985: plain 200 pass, 0 fail of 200 (wall=1268s); forced device on 200 pass, 0 fail of 200 (wall=1462s). At 7ea4d296: plain 200/200 (wall=1276s), forced device 200/200 (wall=1480s), -race build 200/200 (wall=1651s).",
-      "headSha": "8933f985c615",
+      "observed": "At 8933f985: plain 200 pass, 0 fail of 200 (wall=1268s); forced device on 200 pass, 0 fail of 200 (wall=1462s). At 7ea4d296: plain 200/200 (wall=1276s), forced device 200/200 (wall=1480s), -race build 200/200 (wall=1651s). Re-run at the forward-merge head f2df6dc7e6fb with the same result.",
+      "headSha": "f2df6dc7e6fb",
       "negativeControl": "The same device binary against main's product (row 2 above) fails on its first run, so the loop is not passing because the device stopped working."
     },
     {
@@ -64,16 +64,16 @@
       "criterion": "Also delivered: a test that skips because too little time is left fails instead of passing silently.",
       "surface": "This pod's Go test run of the named test under a short binary deadline.",
       "command": "cd packages/envoy && CGO_ENABLED=1 go test -race -timeout 2m ./internal/dispatch/docs/ -run TestThreeBrowsersAndTheAPIEditOneRoomAtOnce -v",
-      "observed": "room_peers_race_test.go:43: 5 of 34 runs overlapped a peer's update with 1m30s left before the test binary's deadline, want 50; --- FAIL: TestThreeBrowsersAndTheAPIEditOneRoomAtOnce (32.62s); FAIL github.com/sjawhar/envoy/internal/dispatch/docs 37.099s. It fails by name rather than skipping, so the spec's silent skip does not exist (departure D-1).",
-      "headSha": "8933f985c615",
+      "observed": "room_peers_race_test.go:43: 5 of 34 runs overlapped a peer's update with 1m30s left before the test binary's deadline, want 50; --- FAIL: TestThreeBrowsersAndTheAPIEditOneRoomAtOnce (32.62s); FAIL github.com/sjawhar/envoy/internal/dispatch/docs 37.099s. It fails by name rather than skipping, so the spec's silent skip does not exist (departure D-1). Re-run at the forward-merge head f2df6dc7e6fb with the same result.",
+      "headSha": "f2df6dc7e6fb",
       "negativeControl": "A scout enumerated every t.Skip and b.Skip in the packages/envoy Go tree: 64 of them, none reading a deadline or a clock. The guards that fail instead are overlapping (overlapMargin 90 s), roomWait (roomWaitMargin 30 s) and throughputWait."
     },
     {
       "criterion": "Also delivered: the router passes, and every new job joins it in all six places.",
       "surface": "The repository's own drift check, run offline in this pod.",
       "command": "cd $LEGION_WORKSPACE && PATH=\"$TMPDIR/venv/bin:$PATH\" .github/scripts/check-ci-filters.sh",
-      "observed": "every ci.yaml filter matches every file its job reads (25 gates), and every PUSH_WORKFLOWS workflow's on.push.paths equals its filter (1). Run again after the architect's corrections, with the same last line.",
-      "headSha": "389ca7c99260",
+      "observed": "every ci.yaml filter matches every file its job reads (25 gates), and every PUSH_WORKFLOWS workflow's on.push.paths equals its filter (1). Run again after the architect's corrections, with the same last line. Re-run at the forward-merge head f2df6dc7e6fb with the same result.",
+      "headSha": "f2df6dc7e6fb",
       "negativeControl": "The check's own sensitivity is shown by the replay's control: widening envoy_go_race_pmdoc to packages/** takes it from 650 to 1561 selected heads in the three-day window, and the two independent matchers agree head for head."
     }
   ],
@@ -94,7 +94,8 @@
     "Flake B has no reproduction in a quiet pod without a device: the window is the few milliseconds between the role claim watcher's readiness and its completeness. The device is one if in store.Open, which wraps the role bucket in kvwatchtest.TimingOutFirst, placed after roleRevisions has read the bucket - placed before it, roleRevisions' own one-shot scan fails and the test dies for the wrong reason.",
     "A test binary built with go test -c runs with whatever cwd it is started in, and cmd/listener's package has tests that read fixtures through '..'. The named test does not, and was verified to run identically from either directory, but a whole-package loop must run from packages/envoy/cmd/listener.",
     "ci.yaml's concurrency group cancels an in-progress run on every push of the pull request, so three measuring runs means three heads each left to finish. One complete run carries the figures here.",
-    "The push of 4de0638a produced no Actions run at all (0 check runs on that commit, no run listed for the branch). GitHub did not create one; the previous head's run was not cancelled either. A later push created runs as usual."
+    "The push of 4de0638a produced no Actions run at all (0 check runs on that commit, no run listed for the branch). GitHub did not create one; the previous head's run was not cancelled either. A later push created runs as usual.",
+    "GitHub ran no check at all on two heads of this pull request (4de0638a and 972026b1, each with zero check runs) because the pull request was CONFLICTING: GitHub computes no merge ref for a conflicting head. The empty check list, not a queue, is what a reader should look for. Two forward merges were needed, because main moved again between them."
   ],
   "deviations": [
     "DB-5 moved flake B's fix into the product, so the carried commit's test-side poll (waitForRoleClaimView) is gone: waitForRegistry now runs exactly the gate cmd/listener's start runs, and the tests that needed a wait take that one.",
@@ -104,7 +105,8 @@
     "No shard is delivered, and none is due: every package is under its job's bar on a runner of its own. Isolation, not sharding, took pmdoc and api under theirs.",
     "Departure D-1 stands: the silent skip the spec names does not exist. The three deadline guards fail by name, and no t.Skip in the packages/envoy Go tree reads a clock.",
     "The plan asks for the worst of three runs of this pull request. One run (40926978371) completed with the whole lane; the figures are its. The tester re-runs at the merging head.",
-    "Acceptance 3's seven-day half is dispatch://INFRA-524's under DB-3; this issue's acceptance 3 is ci-ok green on the merging head plus the production check's one scan, recorded on the pull request."
+    "Acceptance 3's seven-day half is dispatch://INFRA-524's under DB-3; this issue's acceptance 3 is ci-ok green on the merging head plus the production check's one scan, recorded on the pull request.",
+    "Forward merge of main into the branch, twice, on GitHub's CONFLICTING report: 972026b174b4 -> f2df6dc7e6fb, fingerprint 63377fff... -> 1fcc9d7a..., changed. main's #2377 rewrote internal/kvwatch/kvwatch.go, so WaitComplete and its wake-up channel are re-applied onto that file; the merged envoy-go-race job runs ./internal/session/, which main added to the listener race step; and packages/envoy/AGENTS.md carries main's listener-server-change beside this change's race jobs. Every check and every proof was re-run at the merge head and is quoted in the pull request comment."
   ],
   "openQuestions": [
     "One run of `go test ./cmd/listener/` failed while two other test processes shared this pod's two vCPUs and its one Postgres. The reporting command truncated the output, so the failing test is unknown. Three later full-log runs of the same package were green (582 s, 535 s, 460 s), as were the 200-run loops of the two named tests and the whole-package runs under the load recipe. The tester should watch for it; no evidence ties it to this change."
