@@ -1933,8 +1933,13 @@ A whitespace-only line inside fenced code whose opening fence stands past its co
 is an empty line of the code when it holds fewer columns past that content than the fence does:
 that parser takes up to the fence's indentation from each line, and goldmark kept the whole line,
 so `  ~~~\n \nx` holds the code `\nx`; a last line of the document with no line feed holding
-nothing past the fence's indentation is no line of the code, so `  ~~~\nx\n ` holds `x`
-(`fenceClosure`).
+nothing past the fence's indentation is no line of the code, so `  ~~~\nx\n ` holds `x`, as a
+quote takes such a line in place of the code's last (`fenceClosure`, `fencedCodeText`). The
+document's last line with no line feed is read as that parser reads it whatever block it ends:
+the columns its containers leave of a tab they took part of are the line's, where goldmark read no
+line past the source's end and dropped them, so `> ```\n> x\n>\t` holds the code `x\n  `, and a
+container inside them or an item takes its own columns from them (`lastLineColumns`); a typed
+block indented in its container takes its indentation from that line too (`typedDirectiveParser`).
 A task list item's marker (`[ ]`, `[x]` or `[X]` opening a list item's first paragraph) is read as
 the browser editor's parser reads it (`taskList`): followed by a space or a tab and then more text on
 the line, or by a line ending the paragraph continues past, and it takes only the one character
@@ -2035,7 +2040,7 @@ after it that hold four or more columns past where its container's content start
 measured from its content, a footnote definition from its own start), and the shorter blank lines
 between them, as that parser reads it, so they are its text, less one final line ending (a last
 line with no line feed has none of its own, so `    code\n    \n    ` holds `code\n`), and space
-nothing (`codeColumns`, `holdCodeLines`, `codeBlockText`). A list item decides by what follows its list only
+nothing (`codeColumns`, `heldCodeLines`, `markBlocksAfterHeldCode`, `codeBlockText`). A list item decides by what follows its list only
 inside its own quote or typed block; past one, that container's rule decides, so a typed block's
 fence keeps the line and a quote's end judges it by what opens right after. The renderer writes each spacing so that it reads back
 (`blanksAfterList`, `writesBlankAfterItem`): no blank line before a block that opens on the line after
