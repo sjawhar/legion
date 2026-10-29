@@ -2,30 +2,50 @@
   "schemaVersion": 1,
   "phase": "test",
   "issue": "INFRA-719",
-  "round": 2,
-  "completed": "2026-10-29T12:45:00Z",
-  "headTested": "682a89bbda9f1edf5473927f830800b81fd5925e",
+  "round": 3,
+  "completed": "2026-10-29T13:15:00Z",
+  "headTested": "22814870d20dd64e235a30dd921316eeeff8a671",
   "implementerProof": {
     "verdict": "verified",
-    "how": "I re-ran the implementer's commands at 682a89bb. The Chromium e2e passed 5 of 5 (13.0s), including the new no-final-line-feed spec. The Go A1 tests pass, and so do the round-1 red rows from 45eb7c14, whose rows and assertions are unchanged (only a comment line changed). The filtered census at the head against main 8a911ecc changes 0 of 172 broad candidates (32,836 stored versions)."
+    "how": "I re-ran the implementer's commands at 22814870 (code c076c8c4). The Go A1 suite passes, including my 10 no-final-line-feed red rows from 45eb7c14 and 3a32ac88, with no rows changed (the implementer added 3 rows of its own). The Chromium e2e passed 5 of 5. I ran the differential as the architect asked: with GitHub's merge of the PR (refs/pull/2481/merge 3523593b) as the head against main 14d907b6. Every GATE line is 0."
   },
-  "failed": 2,
-  "failures": [
+  "failed": 0,
+  "failures": [],
+  "proof": [
     {
-      "criterion": "A2: no document main reads as the browser is read otherwise at the head (differential regressions GATE 0)",
-      "evidence": "The round-2 fenced fix (lines.go fenceClosure.Continue, which clears ForceNewline on a no-line-feed last line) regresses 27 documents that main 8a911ecc reads correctly. Each is fenced code that no fence closes, in a quote, followed by a line of quote markers alone and a last line, with no line feed, holding no more than the fence's indent. The quote already takes the blank line from the code (blankTaker in fencedCodeText), so the head now drops two line endings. Example: Parse(\">  ~~~\\n>  x\\n>\\n>  \") gives \"x\" at the head, and \"x\\n\" at main and in the engine. The same holds in a quote inside an item. Red rows in TestFencedCodeDropsAWhitespaceLineShortOfTheFenceIndent, commit 3a32ac88: 'quoted, after a blank quote line, short last line with no final line feed' and 'quoted in an item, after a blank quote line, short last line with no final line feed'. They fail for Parse, ParseRendering and ParseForWrite at the head, pass at main 8a911ecc, and their engine subtests pass. Shown by: cd packages/envoy && go test ./internal/dispatch/pmdoc -run TestFencedCodeDropsAWhitespaceLineShortOfTheFenceIndent -count=1. Differential: bash differential.sh --base 8a911ecc over my noeol corpus (/legion/scratch/tmp/infra719-test/noeol.ts, 6,818 documents) gives GATE regressions 27 and churn 27, the same documents. 24 more of the same shape were wrong at main and are wrong in another way at the head (\"x\\n\\n \" at main, \"x\" at the head, \"x\\n\" in the engine)."
+      "criterion": "A4: a document holding the shapes, written through the API, reads alike in the editor, a past version, the stored markdown, doc-read and a comment, including a spec ending with no final line feed",
+      "surface": "Dispatch issue page (spec editor, past version, Conversation comment), /api/v1/issues/<KEY>/artifacts/spec/text and dispatch doc-read, on the real stack: Go server and production SPA built from the checkout, Playwright Chromium, Postgres 17",
+      "command": "cd packages/dispatch && . /legion/scratch/tmp/e2e-rig/env.sh && bun run e2e -- e2e/indented-code-whitespace-lines.e2e.ts --project=chromium",
+      "observed": "5 passed (13.0s)",
+      "headSha": "22814870d20dd64e235a30dd921316eeeff8a671",
+      "negativeControl": "At main a09a2f25 (round 1) the same spec: 3 failed, 1 passed (comment). The editor received lists [\"true\",\"true\"] and code \"    x\", where [\"false\",\"false\"] and \"    x\\n  \" were expected"
     },
     {
-      "criterion": "Tester failure 2 (round 1): fenced code that ends the document with no final line feed reads as the browser reads it",
-      "evidence": "Fenced code that no fence closes, in a quote or an item, whose last line, with no line feed, is a tab the container eats only part of: the engine keeps the columns that remain as spaces, and Go drops the line. Example: Parse(\"> ```\\n> x\\n>\\t\") gives \"x\", the engine reads \"x\\n  \"; Parse(\"- ```\\n  x\\n\\t\") gives \"x\", the engine reads \"x\\n  \". With a final line feed added, all 163 such documents of my noeol corpus read alike at main and at the head, so the defect is the no-final-line-feed path that round 2 changes (fenceClosure.Continue; the code.Padding == 0 condition leaves the padded line to goldmark, which drops it at the document's end). Main reads these wrong too. Red rows in commit 3a32ac88: 'quoted tab-only last line with no final line feed' and 'tab-only last line of an item with no final line feed'. They fail for all three Go readers at the head and at main, and their engine subtests pass."
+      "criterion": "A2: differential against main, every GATE line 0, with main's own fixes on both sides",
+      "surface": "pmdoc differential, head = refs/pull/2481/merge 3523593b (parents main 14d907b6 and 22814870), base = main 14d907b6; 78,844 documents: the implementer's corpora (20,000 indented-code, url, reference, delimiter, INFRA-581), my fuzzer (20,000, seed 719), hand.ts (64), noeol.ts (6,818), noeol2.ts (8,764 documents of any block in 14 nested containers ending in containers' markers plus a tab, with no line feed), in-repo",
+      "command": "cd <archive of 3523593b>/packages/envoy/internal/dispatch/pmdoc/gen && bash differential.sh --base 14d907b6fdd3a17820fd07adbdf7b0468fe05285 --corpus /legion/scratch/tmp/infra719-test/r3/corpus --out /legion/scratch/tmp/infra719-test/r3/diff",
+      "observed": "Every GATE line 0: regressions, misreads, churn, engine-tree regressions and churn, panics, lost fixed points. Fixed 16,106 (noeol 1,100, noeol2 299). The head stores 70,252 correctly, the base 54,146. noeol and noeol2 leave 0 documents read otherwise than the engine. Of those the head still reads otherwise, the 1,345 indented-code documents are spread-only, with the same spreads as base (plan D4); fuzz 84, url 168 and delimiter 6 read the same at base",
+      "headSha": "3523593b4a44983c30edeba7a4a05c52afa3b907",
+      "negativeControl": "The same noeol corpus at round 2's head 682a89bb against main 8a911ecc gave GATE regressions 27 and churn 27 (fenced code in a quote ending in '>\\n>  ' with no line feed). Here it gives 0"
+    },
+    {
+      "criterion": "Tester failures of rounds 1 and 2: code ending a document with no final line feed reads as the browser reads it, for every reader",
+      "surface": "pmdoc Go suite, each row asserted for Parse, ParseRendering, ParseForWrite and the browser engine",
+      "command": "cd packages/envoy && go test ./internal/dispatch/pmdoc -run 'TestFencedCode|TestIndentedCodeKeeps|TestParseMatchesMilkdownForFixtures|TestRenderParseRoundTrip|TestFixturesAreWithinSchema|TestRenderMatchesMilkdownForFixtures' -count=1 -v",
+      "observed": "ok; 20 PASS lines for the no-final-line-feed rows (reader and engine subtests)",
+      "headSha": "22814870d20dd64e235a30dd921316eeeff8a671",
+      "negativeControl": "At 682a89bb: Parse(\">  ~~~\\n>  x\\n>\\n>  \") gave \"x\" (want \"x\\n\") and Parse(\"> ```\\n> x\\n>\\t\") gave \"x\" (want \"x\\n  \")"
+    },
+    {
+      "criterion": "A3: census of stored versions whose reading or bytes change",
+      "surface": "production Dispatch: the 11:59Z crawl of 13 projects, 6,773 documents, 32,836 versions, 32,478 distinct markdowns. The broad candidates are 172 documents holding any whitespace-only line. 0 stored markdowns lack a final line feed, so round 3's reader change reaches none",
+      "command": "bash census-run.sh 14d907b6 candidates-broad.jsonl out3 && python3 census-compare.py out3 versions-map.tsv",
+      "observed": "distinct markdowns read: 172; changed: 0; stored versions: 32836 (latest 6773); changed: 0",
+      "headSha": "22814870d20dd64e235a30dd921316eeeff8a671",
+      "negativeControl": "The same runner over my 64 hand.ts shapes reports 40 changed (round 1)"
     }
   ],
-  "reach": "No stored version in production lacks a final line feed (0 of 32,478 distinct, round 1 crawl), so the census changes 0. ParseForWrite reaches both failures through API writes of caller text with no final line feed.",
   "checks": [
-    "Go A1 suite at 682a89bb (TestFencedCode|TestIndentedCodeKeeps|TestParseMatchesMilkdownForFixtures|TestRenderParseRoundTrip|TestFixturesAreWithinSchema|TestRenderMatchesMilkdownForFixtures): ok; round-1 red rows from 45eb7c14 pass for every reader, and their engine subtests pass",
-    "A4 e2e at 682a89bb: cd packages/dispatch && bun run e2e -- e2e/indented-code-whitespace-lines.e2e.ts --project=chromium -> 5 passed (13.0s)",
-    "Differential base main 8a911ecc, head 682a89bb (a scratch copy with extra flags), corpus: my fuzzer (20,000, seed 719), hand.ts (64), noeol.ts (6,818), in-repo: GATE regressions 27, churn 27 (all noeol, failure 1), misreads 0, engine-tree 0, panics 0, lost fixed points 0; fixed 3,512. Fuzz residual misreads went from 103 at 1c5f55d0 to 84 (17 fixed are round 1's two failures)",
-    "Census: the round-1 broad candidates (172 of 32,478 distinct, crawl 11:59Z) at main 8a911ecc and head 682a89bb: 0 changed; the runner over the 64 hand.ts shapes reports 40 changed (round 1 negative control)",
-    "CI at code head 2d411fe6: queued and in progress when read at 12:33Z; not waited for"
+    "CI at code head c076c8c4: lint, changes and worker-image build succeeded; envoy-go, dispatch and the browser lanes were queued or running when read at 13:12Z; not waited for"
   ]
 }
