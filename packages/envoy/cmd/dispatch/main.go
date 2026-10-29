@@ -158,9 +158,11 @@ func setGoMemoryLimit(provider memlimit.Provider) {
 
 // collectorRatioSetter is how the collector's ratio is set from here on: the runtime's own
 // debug.SetGCPercent, for the room budget to call with the ratio its charge leaves the collector
-// (docs.CollectorRatio, internal/dispatch/docs/peer_update.go:1483-1550, which the budget follows
+// (docs.CollectorRatio, internal/dispatch/docs/peer_update.go:1483-1557, which the budget follows
 // in roomBudget.followChargeLocked), or nil where a GOGC in the environment, which the runtime
-// has already read, is to be left as it is, as GOMEMLIMIT is (setGoMemoryLimit). Nothing is set
+// has already read, is to be left as it is, as GOMEMLIMIT is (setGoMemoryLimit). GOGC is a row of
+// the settings table, so the one read of it is processSettings' and `envoy-dispatch settings`
+// names it; GOMEMLIMIT is not, since automemlimit reads it inside memlimit.Set. Nothing is set
 // here: an empty budget's ratio is the runtime's own default, which a server with no GOGC boots
 // at, and the budget sets the first ratio its charges lower it to.
 //
@@ -171,8 +173,8 @@ func setGoMemoryLimit(provider memlimit.Provider) {
 // where the burst the heap bounds do allow takes it past the container's own limit and Kubernetes
 // kills it. It logs one line naming the ratios the budget will hold the collector between, or the
 // GOGC it left.
-func collectorRatioSetter() func(percent int) (previous int) {
-	if gogc, set := os.LookupEnv("GOGC"); set {
+func collectorRatioSetter(env settingValues) func(percent int) (previous int) {
+	if gogc, set := env.lookup("GOGC"); set {
 		slog.Info("dispatch: collector ratio taken from GOGC; the room budget's charge does not set it",
 			"gogc", gogc, "gc_percent_at_a_full_room_budget", docs.CollectorRatioFloor)
 		return nil
@@ -184,15 +186,19 @@ func collectorRatioSetter() func(percent int) (previous int) {
 
 func main() {
 	slog.SetDefault(slog.New(slog.NewTextHandler(os.Stderr, nil)))
-	// First, before the server allocates anything the collector would have to catch up on. The
-	// collector's own ratio is the room budget's from here on, through the setter this hands the
-	// document service below.
+	// First, before the server allocates anything the collector would have to catch up on.
 	setGoMemoryLimit(memlimit.FromCgroup)
-	collectorRatio := collectorRatioSetter()
 	env := processSettings()
 	if len(os.Args) > 1 {
 		os.Exit(runSubcommand(context.Background(), os.Args[1:], env, os.Stdout, os.Stderr))
 	}
+	// The collector's own ratio is the room budget's from here on, through the setter this hands
+	// the document service below.
+	collectorRatio := collectorRatioSetter(env)
+	// Before the server serves, so an operator's trace holds the whole of what it then maps; a
+	// subcommand, which has exited by here, writes none. Its context never ends, so the trace
+	// runs to the end of the process.
+	startMemoryTrace(context.Background(), env.get("DISPATCH_MEMORY_TRACE"))
 	boot, err := resolveBootConfig(env)
 	if err != nil {
 		slog.Error("dispatch: resolve boot config", "error", err)

@@ -905,7 +905,7 @@ func TestTheCollectorsRatioIsTheRoomBudgetsToSet(t *testing.T) {
 			slog.SetDefault(slog.New(slog.NewJSONHandler(&logged, nil)))
 			t.Cleanup(func() { slog.SetDefault(previousLogger) })
 
-			setter := collectorRatioSetter()
+			setter := collectorRatioSetter(processSettings())
 
 			if handed := setter != nil; handed != row.setter {
 				t.Errorf("the boot handed the room budget a setter: %t, want %t", handed, row.setter)

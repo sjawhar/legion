@@ -1419,7 +1419,7 @@ func structTotalOf(tally updateTally, err error, pending crdt.PendingStats) uint
 var errApplyTooHeavy = errors.New("the update is heavier to apply than the pod can hold")
 
 // goMemoryLimitBytes is the Go runtime's soft memory limit on the production pod: 90 per cent of
-// the container's 4 GiB, which the server sets at boot (setGoMemoryLimit, cmd/dispatch/main.go:121-156).
+// the container's 4 GiB, which the server sets at boot (setGoMemoryLimit, cmd/dispatch/main.go:122-157).
 const goMemoryLimitBytes = 4 << 30 * 9 / 10
 
 // heapAboveTheReserve is what the Go memory limit leaves above the room budget, the cold reads'
@@ -1514,36 +1514,43 @@ const CollectorRatioFloor = 100 * heapSlackBytes / (roomBudgetBytes + documentRe
 // collection; past half the Go memory limit the limit is the smaller of the two, so with a full
 // budget the heap goal is the limit itself and the collector keeps every byte of garbage the
 // limit allows - the budget's unused room, both heap bounds and this slack together. The pod's
-// resident memory then parks just under the limit whatever the design's sum is, and the burst the
-// bounds do allow on top of it is what the container is killed for. Measured on 2026-10-29 with
-// the real-process drive of the worst case the bounds allow (cmd/dispatch,
+// resident memory then parks just under the limit whatever the design's sum is. What the pod is
+// charged stays under the limit even so, because that is what the limit bounds: measured on
+// 2026-10-29 with the real-process drive of the worst case the bounds allow (cmd/dispatch,
 // TestTheHeaviestApplyBesideAFullCopyBoundStaysUnderThePodsMemory, three steps: the budget
 // filled, the cold reads' cache filled, the heaviest handoffs applying beside full copy bounds),
-// the server's peak resident memory by step: at the default 100 per cent 2,677, 3,601 and 4,302
-// MiB in one run and 2,743, 3,581 and 4,424 MiB in another, both past the pod's 4,096 MiB, with
-// the collector's own trace showing a heap goal pinned at the limit (GODEBUG=gctrace=1, 3,398 to
-// 3,413 MiB) and a live heap of 2,344 to 2,859 MiB under it; with the floor set at boot for every
-// charge 2,260, 2,715 and 3,606 MiB, 490 MiB under the pod, and the keystrokes a person typed
-// through both heavy steps answered in a 99th percentile of 131 ms; following the charge, which
-// set 91, 57, 32 and 15 per cent as that drive's rooms filled the budget, 2,372 to 2,501, 3,258
-// to 3,322 and 3,917 to 4,018 MiB over four runs, 78 MiB under the pod at the worst of them,
-// and a 99th percentile of 110 to 181 ms.
+// a traced run at either ratio held what it had mapped less what it had released within 106,786
+// bytes of the 3,865,470,566-byte limit at its heaviest sample, the collector's CPU limiter
+// engaging on one of the 25 cycles the default took and on four of the 34 that following the
+// charge took. By step, the memory the pod's kernel charges: at the
+// default 100 per cent 2,653, 3,586 and 3,680 MiB, 416 MiB under the pod's 4,096; following the
+// charge, which set 91, 57, 32 and 15 per cent as that drive's rooms filled the budget, 2,414 to
+// 2,439, 3,241 to 3,272 and 3,691 to 3,695 MiB over two runs. The two are the same bound reached
+// two ways, and the drive took 395 s at the default against 539 and 547 s following the charge.
+// The keystrokes a person typed through both
+// heavy steps were answered in a 99th percentile of 161 ms at the default and 183 ms following
+// the charge.
 //
-// Following the charge peaks higher than the floor does because resident memory is a high-water
-// mark: the steps that fill the budget and the cache run at the looser ratio their charge asks
-// for, and the memory the runtime took for that garbage is still mapped when the heaviest step
-// collects at 15 per cent. What it is held to at every charge is the arithmetic above - the
-// garbage, the live heap it is a ratio of and both bounds inside the Go memory limit - which is
-// what the floor alone held a full budget to.
+// The VmRSS those runs read was 4,346 and 3,942 MiB, past the pod, and is not what the pod is
+// charged: this repository's sandboxes run under gVisor, whose VmRSS keeps every page the
+// runtime has handed back unless the madvise(MADV_DONTNEED) that released it covered 2 MiB or
+// more, and the scavenger releases in smaller pieces (cmd/dispatch, peakResident, which reads
+// the pod's figure from the server's own memory trace). Dispatch's own pods are not sandboxed -
+// the GKE Autopilot deployment names no runtimeClassName and no GKE Sandbox node pool
+// (infra/gcp/dispatch_kube.go:492-501) - so what is charged there is what the limit bounds.
 //
-// Paying the floor only where the charge asks for it is what keeps its cost off the servers whose
-// rooms are light. The floor took 31 per cent of that drive's CPU for the collector against 14 at
-// the default, and set at boot whatever the charge it took the over-charge typing drive
-// (TestTheRoomBudgetDoesNotOverchargeTypingAndPasting), whose eight rooms charge 436,576,256
-// bytes and whose slack is therefore free, from 503 s to 2,072 s, after which its sweep closed
-// seven of its eight rooms inside the wait an admission gives those closes rather than all eight.
-// At that charge this answers 100, the collector's own, which the drive measured 485, 503 and
-// 717 s at, the last of the three beside five other containers on the sandbox.
+// So the ratio does not hold resident memory under the pod that the Go memory limit would not:
+// what it holds is the garbage inside the slack this file's arithmetic leaves, rather than
+// inside whatever the limit happens to allow once the charges fill it.
+//
+// Paying a tighter ratio only where the charge asks for it is what keeps its cost off the
+// servers whose rooms are light. Held at the floor set at boot whatever the charge, the
+// over-charge typing drive (TestTheRoomBudgetDoesNotOverchargeTypingAndPasting), whose eight
+// rooms charge 436,576,256 bytes and whose slack is therefore free, went from 503 s to 2,072 s,
+// after which its sweep closed seven of its eight rooms inside the wait an admission gives those
+// closes rather than all eight. At that charge this answers 100, the collector's own, which the
+// drive measured 485, 503 and 717 s at, the last of the three beside five other containers on
+// the sandbox.
 func CollectorRatio(charged int64) int {
 	garbage := heapSlackBytes + roomBudgetBytes - charged
 	live := charged + documentReadBudget + pressureReserveBytes

@@ -1458,9 +1458,10 @@ func typedAndPasted(t *testing.T, state []byte, keystrokes, runs, pasteBytes int
 // which makes it closable (unusedLocked, internal/dispatch/docs/roomstate.go:290-294), has been
 // closed the same way; that once the held rooms are past the budget the next browser is refused
 // with 4503 and DOC_BUSY at admission; that each held room's insert is then refused the same way
-// while a delete applies; and that the server's peak resident memory, read from /proc, stays under
-// the pod's throughout. The documents hold every paste their rooms took, none they were refused,
-// the delete, and nowhere the text of the probe every held room refused.
+// while a delete applies; and that the server's peak resident memory, as the pod's kernel
+// charges it (peakResident), stays under the pod's throughout. The documents hold every paste
+// their rooms took, none they were refused, the delete, and nowhere the text of the probe every
+// held room refused.
 func TestTheRoomBudgetFollowsGrowingRoomsAndClosesTheGoneOnesFirst(t *testing.T) {
 	const pasteBytes, leaveAt, probeText, pasted = 64 << 10, 256 << 10, " Probe.", "## Pasted section 0\n"
 	memory := newMemoryHarness(t)
@@ -2050,8 +2051,8 @@ const gcFloodClient = 5_000_000
 // part with nothing it can close, refuses one with 4503 and DOC_BUSY; and the next room's browser
 // is refused 4503 at admission. The line the server logs for that refusal names what the open rooms
 // are charged (budgetRefusalLine), which must exceed what their admissions reserved by at least the
-// structure price of every struct the rooms took. The server's peak resident memory, read from
-// /proc, stays under the pod's.
+// structure price of every struct the rooms took. The server's peak resident memory, as the
+// pod's kernel charges it (peakResident), stays under the pod's.
 //
 // The struct total counts each struct of an update with its two splits against the decode cap,
 // and confirms a refusal by the exact count of the structs the room holds (countRoomStructs,
@@ -2385,11 +2386,11 @@ const (
 	// granted the whole copy bound and decodes alone among the copies.
 	copyHeapPerByteForTest = 48
 	// heaviestHandoffEstimate is the hook's estimate of the heaviest honest handoff at F, measured
-	// into the room holding it (internal/dispatch/docs/peer_update.go:1511-1515): the long-edited
-	// document typed on until 4,096 structs short of the decode cap and padded to F, the shape the
-	// heaviest-apply drive hands back. The server logs no estimate, only that each handoff held the
-	// whole apply bound (heapGrantLine), which an estimate past applyHeapBoundForTest does; the
-	// drive quotes it in its arithmetic.
+	// into the room holding it (peerWeighing.applyHeap, internal/dispatch/docs/peer_update.go:1659):
+	// the long-edited document typed on until 4,096 structs short of the decode cap and padded to
+	// F, the shape the heaviest-apply drive hands back. The server logs no estimate, only that
+	// each handoff held the whole apply bound (heapGrantLine), which an estimate past
+	// applyHeapBoundForTest does; the drive quotes it in its arithmetic.
 	heaviestHandoffEstimate = 904_378_600
 )
 
@@ -2400,7 +2401,7 @@ const longEditFixturePath = "../../internal/dispatch/docs/testdata/long_edited_d
 // A burst of browsers opening struct-dense documents that render little, all at once, under the
 // Go limit a 4 GiB pod gives the server and the collector ratio the room budget's charge leaves
 // it (docs.CollectorRatio, 74 per cent as the first rooms loaded and 16 with the budget full),
-// keeps the server's peak resident memory, read from /proc, under the pod's 4 GiB: 2,660 and
+// keeps the server's peak resident memory (peakResident) under the pod's 4 GiB: 2,660 and
 // 2,715 MiB over two runs on 2026-10-29, where the collector's own default ratio left that peak
 // at 3,727 MiB and a fixed 14 per cent set at boot at 2,814 MiB. The burst is eight copies each
 // of the two struct-dense shapes a room keeps - the long-edited 5 KiB document typed on until
@@ -2533,23 +2534,26 @@ func TestABurstOfStructDenseDocumentsStaysUnderThePodsMemory(t *testing.T) {
 // each decode weighed past the copy-heap bound and holding all of it. An apply past its bound runs
 // alone among applies but not among copies, so this is the sum the bounds allow: 2 GiB of rooms,
 // 256 MiB of cache, a handoff estimated at 904 MB beside a copy at its whole 394 MB bound,
-// 3,714,003,040 bytes by the estimates, inside the 3,865,470,566-byte Go limit. The server's peak
-// resident memory, read from /proc, stays under the pod's 4 GiB through every step, and every
-// honest handoff, load and fold completes.
+// 3,714,003,040 bytes by the estimates, inside the 3,865,470,566-byte Go limit. The memory the
+// pod's kernel charges the server (peakResident) stays under the pod's 4 GiB through every step,
+// and every honest handoff, load and fold completes.
 //
-// What the garbage of all that work does to the resident memory is the collector's ratio, which
-// follows what the room budget charges (docs.CollectorRatio, roomBudget.followChargeLocked) from
-// the setter the boot hands the document service (collectorRatioSetter, main.go:159-183), whose
-// line this drive reads at the start (requirePodGoMemoryLimit) and whose every ratio it logs at
-// the end (logCollectorRatios): at the collector's own default the heap goal of a server whose
-// budget is full is the Go limit itself, and the three steps below peaked at 2,677, 3,601 and
-// 4,302 MiB in one run and 2,743, 3,581 and 4,424 MiB in another, past the pod; at a fixed 14 per
-// cent set at boot, 2,260, 2,715 and 3,606 MiB; following the charge, which took the ratio to 91
-// per cent as the first rooms loaded and 15 with the budget full, 2,372 to 2,501, 3,258 to 3,322
-// and 3,917 to 4,018 MiB over four runs, 78 MiB under the pod at the worst of them
-// (2026-10-29). Following the charge peaks the highest of the three that hold:
-// resident memory is a high-water mark, and the budget's first two steps collect at the looser
-// ratio their charge asks for.
+// What the garbage of all that work does to that memory is the collector's ratio, which follows
+// what the room budget charges (docs.CollectorRatio, roomBudget.followChargeLocked) from the
+// setter the boot hands the document service (collectorRatioSetter, main.go:159-185), whose line
+// this drive reads at the start (requirePodGoMemoryLimit) and whose every ratio it logs at the
+// end (logCollectorRatios): at the collector's own default the heap goal of a server whose
+// budget is full is the Go limit itself, so it keeps every byte of garbage the limit allows,
+// where following the charge it keeps what the budget's arithmetic leaves. Measured on
+// 2026-10-29, the three steps below charged 2,653, 3,586 and 3,680 MiB at the default, 416 MiB
+// under the pod, and 2,414 to 2,439, 3,241 to 3,272 and 3,691 to 3,695 MiB over two runs
+// following the charge, which took the ratio to 91 per cent as the first rooms loaded and 15
+// with the budget full: the Go memory limit holds the charge under the pod either way, and the
+// drive took 395 s at the default against 539 and 547 s following the charge. What the two
+// differ in is VmRSS on this sandbox - 4,346 MiB against 3,942 and 3,907 - which counts the
+// pages the runtime released and gVisor keeps resident, and which no
+// unsandboxed pod is charged (peakResident; the GKE Autopilot deployment names no
+// runtimeClassName or GKE Sandbox node pool, infra/gcp/dispatch_kube.go:492-501).
 //
 // On one server: first the budget is filled by browsers that stay - a browser of an ordinary small
 // document, two rooms of the long-edited document typed on until 4,096 structs short of the decode
@@ -3488,13 +3492,20 @@ func requireInsertsNothing(t *testing.T, update []byte) {
 
 // requirePodGoMemoryLimit fails the test unless the server took the Go limit a 4 GiB pod gives it
 // and left the collector's ratio to the room budget's charge (collectorRatioSetter,
-// main.go:159-183), which is what holds the garbage waiting to be freed inside the slack the
-// budget's arithmetic leaves rather than inside the whole limit once the charges fill it.
+// main.go:159-185), which is what holds the garbage waiting to be freed inside the slack the
+// budget's arithmetic leaves rather than inside the whole limit once the charges fill it. Where
+// the run pins GOGC, which the harness passes to every server (memory_harness_test.go), it fails
+// unless the server took that ratio instead: a run so pinned is measuring the drive against a
+// fixed ratio.
 func requirePodGoMemoryLimit(t *testing.T, server *memoryServer) {
 	t.Helper()
+	ratio := "msg=\"dispatch: collector ratio follows the room budget's charge\""
+	if gogc, set := os.LookupEnv("GOGC"); set {
+		ratio = "gogc=" + gogc
+	}
 	for _, want := range []string{
 		"go_memory_limit_bytes=" + strconv.Itoa(podGoMemoryLimit),
-		"msg=\"dispatch: collector ratio follows the room budget's charge\"",
+		ratio,
 		"gc_percent_at_a_full_room_budget=" + strconv.Itoa(docs.CollectorRatioFloor),
 	} {
 		if !strings.Contains(server.output.String(), want) {

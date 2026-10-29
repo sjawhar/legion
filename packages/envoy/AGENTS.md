@@ -838,12 +838,15 @@ with nothing set). An empty budget leaves the runtime's own 100 per cent, which 
 charges stay within 1,002,159,035 bytes; past that the ratio falls to the 14 per cent a full budget
 leaves (`CollectorRatioFloor`). At the collector's own default throughout, the heap goal of a
 server whose budget is full is the memory limit itself, so the garbage waiting to be freed fills
-every byte the limit leaves and the pod's resident memory parks under it: the worst case the two
-bounds allow peaked at 4,302 and 4,424 MiB of the pod's 4,096 at that default, at 3,606 MiB with a
-fixed 14 per cent set at boot and at 3,917 to 4,018 MiB following the charge
-(`TestTheHeaviestApplyBesideAFullCopyBoundStaysUnderThePodsMemory`). The fixed ratio cost every
-server all the time: the drive whose eight rooms charge 437 MB took 2,072 s under it against the
-503 s the ratio their charge asks for, the runtime's own, leaves it at
+every byte the limit leaves and the pod's resident memory parks under it; the limit bounds that
+memory either way, and the worst case the two bounds allow charged the pod 3,680 MiB of its
+4,096 at the default and 3,691 to 3,695 MiB following the charge, the drive taking 395 s at the
+default against 539 and 547 s (`TestTheHeaviestApplyBesideAFullCopyBoundStaysUnderThePodsMemory`).
+The VmRSS a sandboxed run reads is higher - 4,346 MiB against 3,942 and 3,907 - because gVisor
+keeps the pages the runtime released resident; Dispatch's own pods are not sandboxed, and the
+drive reads what the pod's kernel charges (`peakResident`). A fixed ratio cost every server all
+the time: the drive whose eight rooms charge 437 MB took 2,072 s under the floor set at boot
+against the 503 s the ratio their charge asks for, the runtime's own, leaves it at
 (`TestTheRoomBudgetDoesNotOverchargeTypingAndPasting`). The apply-heap bound
 (`applyHeapBound`, 393,705,335 bytes) holds the estimated heap of the browsers' applies the hook
 weighs: an update whose own share of the estimate passes 2 MiB

@@ -22,7 +22,7 @@ import (
 
 // roomBudgetBytes is the most heap the open rooms are charged together (roomCharge): 2 GiB of the
 // task's 4 GiB, under the 3.6 GiB Go memory limit the server takes from its container at boot
-// (setGoMemoryLimit, cmd/dispatch/main.go:121-156). Open documents are the largest thing the pod
+// (setGoMemoryLimit, cmd/dispatch/main.go:122-157). Open documents are the largest thing the pod
 // holds; the rest is the request path's, the cold reads' cache's (documentReadBudget, 256 MiB,
 // which this does not count) and the collector's slack. At the measured cost of a room
 // (bytesOfHeapAnElement) it holds thirty-nine documents of a mebibyte of prose (57,600 elements,

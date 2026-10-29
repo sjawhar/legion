@@ -13,6 +13,7 @@ import (
 	"net/http"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"runtime"
 	"strconv"
 	"strings"
@@ -112,6 +113,10 @@ type memoryServer struct {
 	output  *lockedBuffer
 	exited  chan struct{}
 	idle    int64
+	// trace is the file the server samples its memory into (DISPATCH_MEMORY_TRACE,
+	// memory_trace.go), which peakResident reads where this kernel keeps pages the runtime
+	// released counted in VmRSS.
+	trace string
 }
 
 func (h *memoryHarness) start(t *testing.T) *memoryServer {
@@ -123,6 +128,13 @@ func (h *memoryHarness) start(t *testing.T) *memoryServer {
 	port := strconv.Itoa(listener.Addr().(*net.TCPAddr).Port)
 	if err := listener.Close(); err != nil {
 		t.Fatalf("free the port: %v", err)
+	}
+	// Only where this kernel keeps no peak of its own, since that is where peakResident needs the
+	// server's own reading of what it has released: on a kernel with VmHWM nothing reads the
+	// trace, and a server measuring its memory is not asked to sample it.
+	trace := ""
+	if !kernelKeepsResidentPeak() {
+		trace = filepath.Join(t.TempDir(), "memory.trace")
 	}
 	command := exec.Command(os.Args[0])
 	command.Env = []string{
@@ -147,9 +159,21 @@ func (h *memoryHarness) start(t *testing.T) *memoryServer {
 		// The test-only routes, for the one the drives read whether a room is resident through
 		// (memoryServer.roomLive), which loads and rebuilds nothing.
 		"DISPATCH_TEST_HOOKS=1",
+		// The server's own reading of what the runtime has mapped and what of it the runtime has
+		// handed back, which peakResident needs where this kernel keeps the handed-back pages in
+		// VmRSS (memory_trace.go). One file for each server, which its test's temporary directory
+		// takes away with it.
+		"DISPATCH_MEMORY_TRACE=" + trace,
+	}
+	// A GOGC in this process's environment reaches every server, so a drive can be measured
+	// against a collector ratio pinned at the runtime's own instead of the one the room budget's
+	// charge sets (collectorRatioSetter), which is how the ratio's worth is read: the drives'
+	// comments name the runs that were made so. It is never set in CI.
+	if gogc, set := os.LookupEnv("GOGC"); set {
+		command.Env = append(command.Env, "GOGC="+gogc)
 	}
 	command.Env = append(command.Env, h.env...)
-	server := &memoryServer{command: command, base: "http://127.0.0.1:" + port, output: &lockedBuffer{}, exited: make(chan struct{})}
+	server := &memoryServer{command: command, base: "http://127.0.0.1:" + port, output: &lockedBuffer{}, exited: make(chan struct{}), trace: trace}
 	command.Stdout, command.Stderr = server.output, server.output
 	if err := command.Start(); err != nil {
 		t.Fatalf("start a Dispatch server: %v", err)
@@ -259,11 +283,29 @@ func (p *memoryServer) peakAboveIdle(t *testing.T, during func()) int64 {
 // kernel keeps no peak of it.
 const residentSampleInterval = 5 * time.Millisecond
 
-// peakResident runs during and reports the most memory the server held resident while it ran.
+// peakResident runs during and reports the most memory the server held resident while it ran, as
+// the pod's own kernel would charge it.
+//
 // Where /proc keeps a peak, as Linux does on CI's runner, that is VmHWM, reset first by writing 5
 // to clear_refs, and exact. gVisor, which this repository's sandboxes run in, keeps neither: its
 // status has no VmHWM line and its /proc no clear_refs, so there a goroutine reads VmRSS every
-// residentSampleInterval while during runs, and a spike shorter than that interval can pass unseen.
+// residentSampleInterval while during runs, and a spike shorter than that interval can pass
+// unseen.
+//
+// gVisor's VmRSS also counts pages the Go runtime has handed back. It drops a page only where the
+// madvise(MADV_DONTNEED) that released it covered 2 MiB or more - measured on 2026-10-29 on this
+// sandbox: of a touched 1 GiB mapping, releases of 4 KiB and of 64 KiB at a time, scattered or
+// contiguous, dropped nothing of VmRSS, and releases of 2 MiB and over dropped every byte they
+// covered - and the collector's scavenger releases in smaller pieces. The pod's kernel charges
+// what the runtime has mapped less what it has released, which is what the Go memory limit
+// bounds, so on gVisor the peak is taken from the server's own trace (memory_trace.go) as
+// vmrss - heap_released, and the VmRSS peak is logged beside it. At the heaviest step of
+// TestTheHeaviestApplyBesideAFullCopyBoundStaysUnderThePodsMemory the two were 3,691 and 3,942
+// MiB following the room budget's charge, and 3,680 and 4,346 at the collector's own ratio.
+//
+// That drive's comment is the one whose recorded peaks were measured this way. Every other
+// drive's were read as VmRSS on a sandbox before this correction, so each is the higher of the
+// two by whatever its server had released.
 func (p *memoryServer) peakResident(t *testing.T, during func()) int64 {
 	t.Helper()
 	if _, kept, err := p.readResident("VmHWM"); err != nil {
@@ -292,11 +334,62 @@ func (p *memoryServer) peakResident(t *testing.T, during func()) int64 {
 			}
 		}
 	}()
+	from := time.Now()
 	func() {
 		defer close(stop)
 		during()
 	}()
-	return max(<-sampled, p.resident(t, "VmRSS"))
+	residentPeak := max(<-sampled, p.resident(t, "VmRSS"))
+	charged := p.peakCharged(t, from, time.Now())
+	if charged == 0 {
+		return residentPeak
+	}
+	t.Logf("peak resident memory %d MiB as the pod's kernel charges it, of %d MiB VmRSS, whose difference is memory the runtime had handed back and this kernel still counts",
+		charged>>20, residentPeak>>20)
+	return charged
+}
+
+// peakCharged is the most the server's own trace (memory_trace.go) read between from and to of
+// what the pod's kernel would charge it: its resident memory less the heap it has released. It is
+// zero where the server writes no trace, as it does on a kernel that keeps a peak of its own,
+// and where the trace holds no whole sample in that window, as it does for a step shorter than
+// memoryTraceInterval; the caller then has only VmRSS.
+func (p *memoryServer) peakCharged(t *testing.T, from, to time.Time) int64 {
+	t.Helper()
+	if p.trace == "" {
+		return 0
+	}
+	written, err := os.ReadFile(p.trace)
+	if err != nil {
+		t.Fatalf("read the server's memory trace %s: %v", p.trace, err)
+	}
+	peak := int64(0)
+	for _, line := range strings.Split(string(written), "\n") {
+		sample := map[string]string{}
+		for _, field := range strings.Fields(line) {
+			name, value, _ := strings.Cut(field, "=")
+			sample[name] = value
+		}
+		taken, err := time.Parse(time.RFC3339Nano, sample["time"])
+		if err != nil || taken.Before(from) || taken.After(to) {
+			continue
+		}
+		resident, residentErr := strconv.ParseInt(sample["vmrss"], 10, 64)
+		released, releasedErr := strconv.ParseInt(sample["heap_released"], 10, 64)
+		if residentErr != nil || releasedErr != nil || resident <= 0 {
+			t.Fatalf("the server's memory trace holds a sample without its resident memory and released heap: %s", line)
+		}
+		peak = max(peak, resident-released)
+	}
+	return peak
+}
+
+// kernelKeepsResidentPeak reports whether this kernel keeps a process's peak resident memory, the
+// VmHWM line of /proc/self/status, which Linux does and gVisor does not. It is read of this
+// process, which runs on the kernel every server does.
+func kernelKeepsResidentPeak() bool {
+	status, err := os.ReadFile("/proc/self/status")
+	return err == nil && strings.Contains(string(status), "VmHWM:")
 }
 
 type response struct {

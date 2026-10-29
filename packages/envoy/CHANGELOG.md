@@ -4,6 +4,16 @@
 
 ### Added
 
+- Dispatch writes a memory trace where `DISPATCH_MEMORY_TRACE` names a file: one line every 50 ms
+  holding every class of memory the Go runtime has mapped, the collector's limit, goal, cycles
+  and CPU limiter, the process's resident memory from `/proc/self/status` and the container's
+  `memory.current`, so a pod near its memory limit can be told from one the runtime is holding
+  comfortably inside it. The limit the boot sets bounds what the runtime has mapped less what it
+  has released, so that difference, not `vmrss`, is the figure to compare with the container's: a
+  kernel can keep released pages counted resident, and gVisor does. Unset — every deployment —
+  nothing is sampled and no file is written. `GOGC` is a row of the settings table with it, since
+  the boot reads whether it is set to know whether the room budget's charge may move the
+  collector's ratio.
 - A release of a `github-app` secret can be narrowed: `POST /v1/grants/{id}/values` takes an
   optional `github_app` body (`owner`, `repositories`, `read_only`) that mints the token of one
   account `github-owners` lists alone, sent to GitHub as the `access_tokens` body, limited to
