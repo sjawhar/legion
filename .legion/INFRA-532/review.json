@@ -2,35 +2,21 @@
   "schemaVersion": 1,
   "phase": "review",
   "issue": "INFRA-532",
-  "completed": "2026-10-28T23:15:57Z",
-  "round": 3,
-  "decision": "changes_requested",
-  "reviewedCodeHead": "c7ed921aa5aa",
+  "completed": "2026-10-29T01:15:11Z",
+  "round": 4,
+  "decision": "approved",
+  "reviewedCodeHead": "ffb93ba02c00",
   "critical": 0,
-  "important": 3,
+  "important": 0,
   "minor": 0,
-  "keyFindings": [
-    {
-      "severity": "important",
-      "file": "(pull request)",
-      "description": "GitHub reports #2472 as CONFLICTING with main, which has 39 commits past the fork point adee0aba. Files both sides change: biome.json, packages/dispatch/AGENTS.md, packages/dispatch/e2e/mermaid.e2e.ts, packages/dispatch/web/src/features/refs/MarkdownBody.test.tsx, packages/dispatch/web/src/features/refs/mermaid-diagrams.ts, packages/dispatch/web/vite.config.ts, packages/proof-editor/AGENTS.md. GitHub runs no checks on a conflicting head, and the merge cannot happen. Reintegrate main by a merge, then rerun the proof on the merged head."
-    },
-    {
-      "severity": "important",
-      "file": "(CI)",
-      "description": "No CI ran at the code head. The newest pull_request run is at f3f2427a (lint, typecheck, test and pr-title passed there). 496afccf and c7ed921a change packages/dispatch/e2e/mermaid.e2e.ts and were pushed under a head that carries skip-checks: true, so the compare from f3f2427a to 59c090e1 is not handoffs-only. The forward-merge push carries no trailer and starts the runs. The four required checks must be green at that code head before approval (the INFRA-138 architect, 23:10Z)."
-    },
-    {
-      "severity": "important",
-      "file": "packages/dispatch/web/src/features/doc/VersionView.test.tsx",
-      "description": "The remount fix (f3f2427a) is held only by browser rows that catch it some of the time: the round-2 VersionView failed only 5 of 40 runs. One CI pass would likely miss a revert of the memo, or a lint-driven re-add of `highlight` to the effect's dependencies. Add a unit case: rerender with an equal new highlight object and expect `editors` to stay at length 1; rerender with a different comment and expect a second editor."
-    }
-  ],
-  "roundTwoThreads": "PRRT_kwDORFy7ds6xVEJw answered as accepted (fixed in f3f2427a); the implementer has already resolved it.",
-  "cleanupFastFollow": "The VersionView.tsx:55-59 comment names ArtifactDocument as the parent, but the parent is ProofDocument; state the rule in the present tense. Move the no-diagram version row and recordScrollEachFrame to doc.e2e.ts. Make the scroll-each-frame row fail on a large drop, not only on a drop to 0. Round-2 items still stand: split mermaid.e2e.ts (now 1226 lines), remove focusInEditor's unused refocus parameter, merge the view's two clear-preview copies, use an Exclude type for the cache.",
-  "thermonuclear": {
-    "head": "c7ed921aa5aa",
-    "deepReview": "APPROVE. No Medium or High. Minor: no deterministic regression lock (raised above), and the scroll row only catches a drop to exactly 0. Checked: the effect re-runs on a change of comment, quote, markdown, blockSchema, user or createEditor, and on nothing else; blockSchema and userQuery.data stay stable through structural sharing.",
-    "codeQuality": "The memo is the simplest key that passes lint. Findings are a deterministic unit test, the row's placement and the comment wording."
-  }
+  "keyFindings": [],
+  "roundThreeItems": {
+    "conflict": "Resolved by the forward merge 71249005 against main 571f729b; GitHub now reports MERGEABLE. The merge resolved five files by hand. packages/dispatch/AGENTS.md: one paragraph that keeps #2470's hold sentence and this PR's document, unavailable and focus text. packages/proof-editor/AGENTS.md: 15 legion-own rows, counted at the head, and 22 edit kinds (main's 21 plus this PR's). e2e/mermaid.e2e.ts: both time-limit rows on #2470's holdWorkerSource with a 2-node flowchart, and stallMermaidWorker and largeFlowchart removed. pmdoc/reanchor_test.go: docstest -> crafted, identical to main's own fix in #2482.",
+    "ci": "Required checks (lint, typecheck, test, pr-title, from main's ruleset) all completed success at code head ffb93ba0, the newest pull_request run head, read at 01:14Z. The compare from ffb93ba0 to c36f93a0 is handoffsOnly true (2 files).",
+    "unitLock": "ffb93ba0 adds a VersionView.test.tsx case. Two rerenders with an equal new highlight keep one editor (not destroyed, focused once); a different comment builds a second editor and destroys the first. Negative control (implementer, re-run by the tester): with `highlight` back in the effect dependencies, the case fails with length 2."
+  },
+  "productDelta": "Runtime code is byte-identical to round 3's c7ed921a in every PR file except one doc comment in mermaid-diagrams.ts (RENDER_TIME_LIMIT_MS). I compared each file's PR diff before (adee0aba..c7ed921a) and after (571f729b..ffb93ba0) the merge.",
+  "thermonuclear": "Not run again: this round changes no runtime code. The pair ran at c7ed921a on the same runtime code (deep review APPROVE, no Medium or High finding).",
+  "proof": "Tester at 96d5b429 (code ffb93ba0): mermaid.e2e.ts 21 passed in each of chromium, iphone, webkit and firefox; past-version rows 40/40 in chromium.",
+  "fastFollow": "Version-view and mermaid e2e cleanup from rounds 2-3: the VersionView.tsx comment names ArtifactDocument as the parent (it is ProofDocument), the no-diagram version row belongs in doc.e2e.ts, the scroll row fails only on a drop to exactly 0, split mermaid.e2e.ts, remove focusInEditor's unused refocus parameter, merge the view's two clear-preview copies, use an Exclude type for the cache."
 }
