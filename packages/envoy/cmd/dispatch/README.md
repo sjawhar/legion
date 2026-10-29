@@ -559,9 +559,12 @@ earlier release brings the same hazard back, the other way: a tab still open, an
 client that saw this release keep keys within the last five minutes (`KEYED_LAYER_MEMORY_MS`),
 retry a write whose answer was lost against the earlier server, which runs it again. Fix forward
 instead; if you must roll back, stop this release first, knowing a write in flight at that moment
-may land twice. A tab opened before the deploy needs a reload: `GET /api/v1/events` is gone,
-so it shows `Live updates unavailable`, and its broadcast body still carries `idempotency_key`,
-which this release refuses as an unknown field (`400 INVALID_JSON`).
+may land twice. Once `0141_drop_broadcast_idempotency_keys` has applied, a rollback past this
+release also loses broadcasts: the earlier build's broadcast send reads and writes the table `0141`
+drops, so every broadcast send fails while the rest of that build keeps working. A tab opened
+before the deploy needs a reload: `GET /api/v1/events` is gone, so it shows
+`Live updates unavailable`, and its broadcast body still carries `idempotency_key`, which this
+release refuses as an unknown field (`400 INVALID_JSON`).
 
 What the two processes share, and what each keeps to itself:
 
@@ -1220,10 +1223,9 @@ release before it neither reads nor writes; its census answers `0`. It follows
 `0131_asks_written_version`, `0132_component_facts`,
 `0133_comments_written_version_backfill`, `0134_asks_written_version_backfill`,
 `0135_server_processes` and `0136_dashboard_assets`, which already use the preceding migration
-numbers. From its release on,
-nothing reads or writes `broadcast_idempotency_keys` (`0055`), the broadcast's own key table before
-it, and the table is kept: dropping it is a contracting migration, so it ships no earlier than the
-release after this one.
+numbers. From its release on, nothing reads or writes `broadcast_idempotency_keys` (`0055`), the
+broadcast's own key table before it; it was kept through that release so a deploy of it could roll
+back, and `0141_drop_broadcast_idempotency_keys` drops it in a later release.
 
 Migration `0138_pending_delivery_indexes` adds two partial indexes, `message_deliveries_pending`
 and `comment_deliveries_pending`, on the delivery attempts still pending, which the delivery sweep
@@ -1263,6 +1265,14 @@ its title and spec; nothing is re-embedded by the migration itself, and its cens
 While the release before it still serves, its coverage pass points those rows back at the title
 alone, and each pass of either release queues them again, so a roll that spans passes embeds some
 issues more than once; a deployment with no embedder runs no pass and sees none of this.
+
+Migration `0141_drop_broadcast_idempotency_keys` drops `broadcast_idempotency_keys`, the
+contracting half of `0137`: a deploy that carries it can no longer roll back to a build from before
+`0137`, whose broadcast send writes that table. It reads no row; dropping the table takes `ACCESS
+EXCLUSIVE` on `broadcasts` too, because the table's foreign key puts triggers there, so a broadcast
+read or send waits for the instant the migration's transaction lasts. Its census answers `0`. It
+follows `0139_related_checks` and `0140_issue_embedding_spec`, which already use the preceding
+migration numbers.
 
 Migration `0009_project_artifacts` deletes malformed derived artifact references, reports their
 count, and re-derives them from source text on the next write. It aborts server boot before a
