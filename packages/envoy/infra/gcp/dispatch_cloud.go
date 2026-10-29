@@ -17,11 +17,9 @@ import (
 	"github.com/pulumi/pulumi/sdk/v3/go/pulumi/internals"
 )
 
-// dispatchCloud is what the component's cloud resources give the rest of it. cluster, issuer,
-// kubeconfig, network and project are newDispatchCluster's, so they are set in either mode; every
-// field below them is newDispatchDatabase's, so each is nil with clusterOnly on, where no Cloud
-// SQL instance, generated password, grant or principal is registered.
-type dispatchCloud struct {
+// dispatchCluster is what the component's cluster resources give the rest of it. Both modes build
+// them, so every field here is set in either mode.
+type dispatchCluster struct {
 	cluster *container.Cluster
 	// issuer is the cluster's service-account token issuer, and kubeconfig the cluster's
 	// exec-plugin kubeconfig, which the component exports and its Kubernetes provider takes.
@@ -31,7 +29,12 @@ type dispatchCloud struct {
 	// and id name the principal and the issuer.
 	network *compute.Network
 	project organizations.LookupProjectResultOutput
+}
 
+// dispatchDatabase is what the component's database resources give the rest of it: the Cloud SQL
+// instance, the generated secrets, and the pods' principal with the grants it holds. clusterOnly
+// registers none of them, so that mode builds no dispatchDatabase at all.
+type dispatchDatabase struct {
 	instance      *sql.DatabaseInstance
 	password      *random.RandomPassword
 	signing       *random.RandomPassword
@@ -64,7 +67,7 @@ func providerFor(ctx context.Context, pkg string, opts ...pulumi.ResourceOption)
 // subnetwork, the router and Cloud NAT its private nodes reach the internet through, and the
 // Autopilot cluster itself. It is all clusterOnly builds, and it computes the two values derived
 // from the cluster alone, the service-account token issuer and the kubeconfig.
-func newDispatchCluster(ctx *pulumi.Context, comp *Dispatch, name string, s dispatchSettings, opts ...pulumi.ResourceOption) (*dispatchCloud, error) {
+func newDispatchCluster(ctx *pulumi.Context, comp *Dispatch, name string, s dispatchSettings, opts ...pulumi.ResourceOption) (*dispatchCluster, error) {
 	dispatch := dispatchType + " " + name
 	gcpProvider, err := providerFor(ctx.Context(), "gcp", opts...)
 	if err != nil {
@@ -118,24 +121,20 @@ func newDispatchCluster(ctx *pulumi.Context, comp *Dispatch, name string, s disp
 	// the cluster's selfLink, which the provider documents only as "the server-defined URL for the
 	// resource", a form it does not promise.
 	issuer := pulumi.All(project.ProjectId(), cluster.Location, cluster.Name).ApplyT(func(values []interface{}) (string, error) {
-		parts := make([]string, len(values))
-		for i, what := range []string{"the project's id", "the cluster's location", "the cluster's name"} {
-			value, err := outputString(values[i])
-			if err != nil {
-				return "", fmt.Errorf("%s: %s: %w", dispatch, what, err)
-			}
-			parts[i] = value
+		parts, err := outputStrings(dispatch, values, "the project's id", "the cluster's location", "the cluster's name")
+		if err != nil {
+			return "", err
 		}
 		return fmt.Sprintf("https://container.googleapis.com/v1/projects/%s/locations/%s/clusters/%s", parts[0], parts[1], parts[2]), nil
 	}).(pulumi.StringOutput)
-	return &dispatchCloud{cluster: cluster, issuer: issuer, kubeconfig: dispatchKubeconfig(dispatch, cluster), network: network, project: project}, nil
+	return &dispatchCluster{cluster: cluster, issuer: issuer, kubeconfig: dispatchKubeconfig(dispatch, cluster), network: network, project: project}, nil
 }
 
 // newDispatchDatabase registers what Dispatch itself runs on, which clusterOnly builds none of:
 // the private services range and its peering, the Cloud SQL instance with its database and user,
-// the generated passwords, and the Secret Manager grants the pods' principal needs. It fills in
-// the fields of cloud the cluster half leaves nil.
-func newDispatchDatabase(ctx *pulumi.Context, comp *Dispatch, name string, args *DispatchArgs, s dispatchSettings, cloud *dispatchCloud) error {
+// the generated passwords, and the Secret Manager grants the pods' principal needs. It takes the
+// cluster half's resources and answers with its own.
+func newDispatchDatabase(ctx *pulumi.Context, comp *Dispatch, name string, args *DispatchArgs, s dispatchSettings, cloud *dispatchCluster) (*dispatchDatabase, error) {
 	dispatch := dispatchType + " " + name
 	child := pulumi.Parent(comp)
 	network, project, cluster := cloud.network, cloud.project, cloud.cluster
@@ -143,13 +142,13 @@ func newDispatchDatabase(ctx *pulumi.Context, comp *Dispatch, name string, args 
 		Purpose: pulumi.String("VPC_PEERING"), AddressType: pulumi.String("INTERNAL"), PrefixLength: pulumi.Int(16), Network: network.ID(),
 	}, child)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	connection, err := servicenetworking.NewConnection(ctx, s.hostname+"-services", &servicenetworking.ConnectionArgs{
 		Network: network.ID(), Service: pulumi.String("servicenetworking.googleapis.com"), ReservedPeeringRanges: pulumi.StringArray{address.Name},
 	}, child)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	// AvailabilityType is databaseAvailabilityType. The bridged Terraform provider declares
 	// settings.availability_type without ForceNew (terraform-provider-google-beta v8.6.0, commit
@@ -167,26 +166,26 @@ func newDispatchDatabase(ctx *pulumi.Context, comp *Dispatch, name string, args 
 		},
 	}, child, pulumi.DependsOn([]pulumi.Resource{connection}))
 	if err != nil {
-		return err
+		return nil, err
 	}
 	password, err := random.NewRandomPassword(ctx, s.hostname+"-password", &random.RandomPasswordArgs{Length: pulumi.Int(32), Special: pulumi.Bool(false)}, child)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	signing, err := random.NewRandomPassword(ctx, s.hostname+"-signing-key", &random.RandomPasswordArgs{Length: pulumi.Int(64), Special: pulumi.Bool(false)}, child)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	agentToken, err := random.NewRandomPassword(ctx, s.hostname+"-agent-token", &random.RandomPasswordArgs{Length: pulumi.Int(48), Special: pulumi.Bool(false)}, child)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	// The listener binds 0.0.0.0 in a pod of its own, where its API refuses to start without a
 	// bearer, and its credential is its own, never a key of the Secret holding the database URL
 	// and the signing key.
 	listenerToken, err := random.NewRandomPassword(ctx, s.hostname+"-listener-token", &random.RandomPasswordArgs{Length: pulumi.Int(48), Special: pulumi.Bool(false)}, child)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	// deletionProtection also keeps the database itself: PREVENT refuses its delete, which an
 	// instance replacement would otherwise make first.
@@ -196,11 +195,11 @@ func newDispatchDatabase(ctx *pulumi.Context, comp *Dispatch, name string, args 
 	}
 	_, err = sql.NewDatabase(ctx, s.hostname, &sql.DatabaseArgs{Instance: instance.Name, Name: pulumi.String("dispatch"), DeletionPolicy: pulumi.String(databasePolicy)}, child)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	_, err = sql.NewUser(ctx, s.hostname, &sql.UserArgs{Instance: instance.Name, Name: pulumi.String("dispatch"), Password: password.Result}, child)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	// The principal lives in the cluster's Workload Identity pool, which Google creates with the
 	// cluster. It is built from the cluster's own WorkloadIdentityConfig, so it resolves only once
@@ -212,19 +211,15 @@ func newDispatchDatabase(ctx *pulumi.Context, comp *Dispatch, name string, args 
 	// the principal's known form, not from the output; whether IAM accepts it before the pool
 	// exists is the same unproven question.
 	principal := pulumi.All(project.Number(), cluster.WorkloadIdentityConfig.WorkloadPool()).ApplyT(func(values []interface{}) (string, error) {
-		number, err := outputString(values[0])
+		parts, err := outputStrings(dispatch, values, "the project's number", "the cluster's Workload Identity pool")
 		if err != nil {
-			return "", fmt.Errorf("%s: the project's number: %w", dispatch, err)
+			return "", err
 		}
-		pool, err := outputString(values[1])
-		if err != nil {
-			return "", fmt.Errorf("%s: the cluster's Workload Identity pool: %w", dispatch, err)
-		}
-		return fmt.Sprintf("principal://iam.googleapis.com/projects/%s/locations/global/workloadIdentityPools/%s/subject/ns/%s/sa/%s", number, pool, s.namespace, s.hostname), nil
+		return fmt.Sprintf("principal://iam.googleapis.com/projects/%s/locations/global/workloadIdentityPools/%s/subject/ns/%s/sa/%s", parts[0], parts[1], s.namespace, s.hostname), nil
 	}).(pulumi.StringOutput)
 	seedAccessor, err := secretmanager.NewSecretIamMember(ctx, s.hostname+"-nats-seed-accessor", &secretmanager.SecretIamMemberArgs{SecretId: refuseDispatchSeed(args.NatsSeedSecret, dispatch, "natsSeedSecret"), Role: pulumi.String("roles/secretmanager.secretAccessor"), Member: principal}, child, pulumi.DependsOn([]pulumi.Resource{cluster}))
 	if err != nil {
-		return err
+		return nil, err
 	}
 	var azureKeyAccessor *secretmanager.SecretIamMember
 	if s.azure.key {
@@ -232,11 +227,12 @@ func newDispatchDatabase(ctx *pulumi.Context, comp *Dispatch, name string, args 
 		// principal needs the same per-secret accessor grant the NATS seed has.
 		azureKeyAccessor, err = secretmanager.NewSecretIamMember(ctx, s.hostname+"-azure-embed-key-accessor", &secretmanager.SecretIamMemberArgs{SecretId: refuseDispatchSeed(args.AzureEmbedKeySecret, dispatch, "azureEmbedKeySecret"), Role: pulumi.String("roles/secretmanager.secretAccessor"), Member: principal}, child, pulumi.DependsOn([]pulumi.Resource{cluster}))
 		if err != nil {
-			return err
+			return nil, err
 		}
 	}
-	cloud.instance, cloud.password, cloud.signing = instance, password, signing
-	cloud.agentToken, cloud.listenerToken = agentToken, listenerToken
-	cloud.principal, cloud.seedAccessor, cloud.azureKeyAccessor = principal, seedAccessor, azureKeyAccessor
-	return nil
+	return &dispatchDatabase{
+		instance: instance, password: password, signing: signing,
+		agentToken: agentToken, listenerToken: listenerToken,
+		principal: principal, seedAccessor: seedAccessor, azureKeyAccessor: azureKeyAccessor,
+	}, nil
 }

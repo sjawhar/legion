@@ -6,7 +6,6 @@ import (
 	"strings"
 	"testing"
 
-	gcpsdk "github.com/pulumi/pulumi-gcp/sdk/v10/go/gcp"
 	"github.com/pulumi/pulumi/sdk/v3/go/pulumi"
 	"github.com/stretchr/testify/require"
 
@@ -19,8 +18,7 @@ import (
 // mode keeps live and is left to its default here; every other input is refused by name
 // (TestDispatchClusterOnlyRefusesEveryDispatchInput).
 func dispatchClusterOnlyArgs() *gcp.DispatchArgs {
-	clusterOnly := true
-	return &gcp.DispatchArgs{Region: "us-central1", Hostname: "example-dispatch", ClusterOnly: &clusterOnly}
+	return &gcp.DispatchArgs{Region: "us-central1", Hostname: "example-dispatch", ClusterOnly: pulumi.BoolRef(true)}
 }
 
 // runDispatchClusterOnly runs args through the mock engine with a gcp provider and no random one,
@@ -28,16 +26,7 @@ func dispatchClusterOnlyArgs() *gcp.DispatchArgs {
 // requires no random provider.
 func runDispatchClusterOnly(t *testing.T, args *gcp.DispatchArgs) (*pulumitest.Mocks, error) {
 	t.Helper()
-	m := newMocks()
-	err := m.Run(func(ctx *pulumi.Context) error {
-		gcpProvider, err := gcpsdk.NewProvider(ctx, "gcp-example", &gcpsdk.ProviderArgs{})
-		if err != nil {
-			return err
-		}
-		_, err = gcp.NewDispatch(ctx, "example-dispatch", args, pulumi.Providers(gcpProvider))
-		return err
-	})
-	return m, err
+	return runDispatchWithProviders(t, "example-dispatch", args, newGCPProvider)
 }
 
 // dispatchClusterOnlyTypes are the resources the mode registers: the VPC, its subnetwork, the
@@ -94,16 +83,9 @@ func TestDispatchClusterOnlyRegistersTheClusterAlone(t *testing.T) {
 		"random:index/randomPassword:RandomPassword":        0,
 		"gcp:secretmanager/secretIamMember:SecretIamMember": 0,
 	}
-	got := map[string]int{}
-	for typ := range want {
-		got[typ] = 0
+	for typ, count := range want {
+		require.Equal(t, count, countRegistrations(m, typ), typ)
 	}
-	for _, registration := range m.Registrations() {
-		if _, counted := got[registration.Type]; counted {
-			got[registration.Type]++
-		}
-	}
-	require.Equal(t, want, got)
 	for _, registration := range m.Registrations() {
 		require.False(t, strings.HasPrefix(registration.Type, "kubernetes:"),
 			"%s %s is a Kubernetes object, which clusterOnly does not register", registration.Type, registration.Name)
@@ -113,13 +95,14 @@ func TestDispatchClusterOnlyRegistersTheClusterAlone(t *testing.T) {
 }
 
 // The mode registers no RandomPassword, so the component requires no random provider: a
-// cluster-only program would otherwise declare a provider it never uses. With the mode off the
-// random provider is still required before anything registers
+// cluster-only program would otherwise declare a provider it never uses. The program below
+// declares the gcp provider alone, so the NoError is what holds the requirement gone: with it
+// back, providers.Require would refuse the component before anything registered. With the mode
+// off the random provider is still required before anything registers
 // (TestDispatchRequiresGCPAndRandomProvidersBeforeRegistering).
 func TestDispatchClusterOnlyNeedsNoRandomProvider(t *testing.T) {
 	m, err := runDispatchClusterOnly(t, dispatchClusterOnlyArgs())
 	require.NoError(t, err)
-	require.NotContains(t, m.Types(), randomProviderType, "the program declares no random provider")
 	require.Equal(t, "example-dispatch", m.One(t, "gcp:container/cluster:Cluster").Name,
 		"and the cluster registers all the same")
 }

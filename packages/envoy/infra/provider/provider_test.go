@@ -205,7 +205,6 @@ func TestSchemaServesTheDispatchComponentWithItsSecrets(t *testing.T) {
 	require.Equal(t, "boolean", dispatch.InputProperties["clusterOnly"].Type)
 	require.True(t, dispatch.InputProperties["clusterOnly"].Plain)
 	require.False(t, dispatch.InputProperties["clusterOnly"].Secret)
-	require.NotContains(t, dispatch.RequiredInputs, "clusterOnly")
 	// region and hostname, which name every cloud resource, are the only inputs the schema
 	// requires: every other input configures Dispatch itself, which clusterOnly does not build.
 	require.ElementsMatch(t, []string{"region", "hostname"}, dispatch.RequiredInputs)

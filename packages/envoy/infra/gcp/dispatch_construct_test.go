@@ -42,13 +42,26 @@ func setConstructApp(inputs map[string]property.Value) {
 	inputs["appPrivateKeySecretKey"] = property.New("private-key.b64")
 }
 
+// dispatchConstructGCP and dispatchConstructRandom are the references a consumer's program gives
+// Construct, one per provider package it declares.
+var (
+	dispatchConstructGCP    = p.ProviderReference{Urn: resource.URN("urn:pulumi:s::p::" + gcpProviderType + "::gcp-example"), ID: "gcp-example-id"}
+	dispatchConstructRandom = p.ProviderReference{Urn: resource.URN("urn:pulumi:s::p::" + randomProviderType + "::random-example"), ID: "random-example-id"}
+)
+
 func constructDispatch(t *testing.T, inputs map[string]property.Value, dryRun bool) (*pulumitest.Mocks, p.ConstructResponse, error) {
 	t.Helper()
-	m := newMocks()
-	response, err := pulumitest.Construct(t, m, dispatchType, "example-dispatch", inputs, dryRun, map[tokens.Package]p.ProviderReference{
-		"gcp":    {Urn: resource.URN("urn:pulumi:s::p::" + gcpProviderType + "::gcp-example"), ID: "gcp-example-id"},
-		"random": {Urn: resource.URN("urn:pulumi:s::p::" + randomProviderType + "::random-example"), ID: "random-example-id"},
+	return constructDispatchWithProviders(t, inputs, dryRun, map[tokens.Package]p.ProviderReference{
+		"gcp": dispatchConstructGCP, "random": dispatchConstructRandom,
 	})
+}
+
+// constructDispatchWithProviders constructs the component through the plugin's own Construct, the
+// path a consumer's pulumi up takes, with the provider references the consumer's program declares.
+func constructDispatchWithProviders(t *testing.T, inputs map[string]property.Value, dryRun bool, providers map[tokens.Package]p.ProviderReference) (*pulumitest.Mocks, p.ConstructResponse, error) {
+	t.Helper()
+	m := newMocks()
+	response, err := pulumitest.Construct(t, m, dispatchType, "example-dispatch", inputs, dryRun, providers)
 	return m, response, err
 }
 
@@ -431,15 +444,11 @@ func TestConstructTakesAWholeDispatchIntegerSentAsAFloat(t *testing.T) {
 // declares no random provider.
 func constructDispatchClusterOnly(t *testing.T, dryRun bool) (*pulumitest.Mocks, p.ConstructResponse, error) {
 	t.Helper()
-	m := newMocks()
-	response, err := pulumitest.Construct(t, m, dispatchType, "example-dispatch", map[string]property.Value{
+	return constructDispatchWithProviders(t, map[string]property.Value{
 		"clusterOnly": property.New(true),
 		"region":      property.New("us-central1"),
 		"hostname":    property.New("example-dispatch"),
-	}, dryRun, map[tokens.Package]p.ProviderReference{
-		"gcp": {Urn: resource.URN("urn:pulumi:s::p::" + gcpProviderType + "::gcp-example"), ID: "gcp-example-id"},
-	})
-	return m, response, err
+	}, dryRun, map[tokens.Package]p.ProviderReference{"gcp": dispatchConstructGCP})
 }
 
 // A cluster-only component answers with all eight outputs. Three carry the cluster's own values,

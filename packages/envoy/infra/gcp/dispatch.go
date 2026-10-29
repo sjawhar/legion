@@ -571,21 +571,46 @@ func dispatchClusterOnlyRefusals(args *DispatchArgs) []dispatchClusterOnlyInput 
 	}
 }
 
+// refuseDispatchHostname refuses a hostname that is not hostnameRule's shape. Both resolvers run
+// it, so a cluster-only component holds its hostname, which names every cloud resource, to the
+// rule the full resolver holds it to, with the same refusal.
+func refuseDispatchHostname(hostname string) error {
+	if !hostnameRule.MatchString(hostname) {
+		return fmt.Errorf("hostname %q must match %s", hostname, hostnameRule)
+	}
+	return nil
+}
+
+// refuseDispatchRegion refuses an unset region, which both modes need: it is the location of the
+// cluster and of every resource around it.
+func refuseDispatchRegion(region string) error {
+	if region == "" {
+		return errors.New("region is required")
+	}
+	return nil
+}
+
+// dispatchDeletionProtection resolves deletionProtection, true when the consumer sets nothing. It
+// guards the cluster as well as the database, so both resolvers default it the same way.
+func dispatchDeletionProtection(value *bool) bool {
+	if value == nil {
+		return true
+	}
+	return *value
+}
+
 // newDispatchClusterOnlySettings resolves the inputs clusterOnly leaves live, hostname, region and
 // deletionProtection, each as the full resolver resolves it, and refuses every input that
 // configures Dispatch, which this mode does not build. It validates nothing else and applies no
 // other default: no other value reaches a resource here.
 func newDispatchClusterOnlySettings(args *DispatchArgs) (dispatchSettings, error) {
-	if !hostnameRule.MatchString(args.Hostname) {
-		return dispatchSettings{}, fmt.Errorf("hostname %q must match %s", args.Hostname, hostnameRule)
+	if err := refuseDispatchHostname(args.Hostname); err != nil {
+		return dispatchSettings{}, err
 	}
-	if args.Region == "" {
-		return dispatchSettings{}, errors.New("region is required")
+	if err := refuseDispatchRegion(args.Region); err != nil {
+		return dispatchSettings{}, err
 	}
-	s := dispatchSettings{clusterOnly: true, hostname: args.Hostname, region: args.Region, deletionProtection: true}
-	if args.DeletionProtection != nil {
-		s.deletionProtection = *args.DeletionProtection
-	}
+	s := dispatchSettings{clusterOnly: true, hostname: args.Hostname, region: args.Region, deletionProtection: dispatchDeletionProtection(args.DeletionProtection)}
 	for _, in := range dispatchClusterOnlyRefusals(args) {
 		if in.set {
 			return dispatchSettings{}, fmt.Errorf("%s configures Dispatch, which clusterOnly does not build: unset it, or unset clusterOnly", in.input)
@@ -603,8 +628,8 @@ func newDispatchSettings(args *DispatchArgs) (dispatchSettings, error) {
 	if args.ClusterOnly != nil && *args.ClusterOnly {
 		return newDispatchClusterOnlySettings(args)
 	}
-	if !hostnameRule.MatchString(args.Hostname) {
-		return dispatchSettings{}, fmt.Errorf("hostname %q must match %s", args.Hostname, hostnameRule)
+	if err := refuseDispatchHostname(args.Hostname); err != nil {
+		return dispatchSettings{}, err
 	}
 	if !tailnetDNSNameRule.MatchString(args.TailnetDnsName) {
 		return dispatchSettings{}, fmt.Errorf("tailnetDnsName %q must match %s", args.TailnetDnsName, tailnetDNSNameRule)
@@ -627,8 +652,8 @@ func newDispatchSettings(args *DispatchArgs) (dispatchSettings, error) {
 			return dispatchSettings{}, fmt.Errorf("%s %q must be pinned by digest, as <name>@sha256:<64 lowercase hex digits>", image.field, image.ref)
 		}
 	}
-	if args.Region == "" {
-		return dispatchSettings{}, errors.New("region is required")
+	if err := refuseDispatchRegion(args.Region); err != nil {
+		return dispatchSettings{}, err
 	}
 	if args.SignInClientId == "" {
 		return dispatchSettings{}, errors.New("signInClientId is required")
@@ -705,14 +730,13 @@ func newDispatchSettings(args *DispatchArgs) (dispatchSettings, error) {
 	}
 
 	s := dispatchSettings{
-		hostname:           args.Hostname,
-		tailnetDNSName:     args.TailnetDnsName,
-		region:             args.Region,
-		tags:               args.Tags,
-		databaseVersion:    defaultDispatchDatabaseVersion,
-		databaseTier:       defaultDispatchDatabaseTier,
-		deletionProtection: true,
-		namespace:          defaultDispatchNamespace,
+		hostname:        args.Hostname,
+		tailnetDNSName:  args.TailnetDnsName,
+		region:          args.Region,
+		tags:            args.Tags,
+		databaseVersion: defaultDispatchDatabaseVersion,
+		databaseTier:    defaultDispatchDatabaseTier,
+		namespace:       defaultDispatchNamespace,
 	}
 	s.images.envoy = args.EnvoyImage
 	s.images.tailscale = args.TailscaleImage
@@ -749,9 +773,7 @@ func newDispatchSettings(args *DispatchArgs) (dispatchSettings, error) {
 				availability, dispatchAvailabilityZonal, dispatchAvailabilityRegional, dispatchAvailabilityZonal)
 		}
 	}
-	if args.DeletionProtection != nil {
-		s.deletionProtection = *args.DeletionProtection
-	}
+	s.deletionProtection = dispatchDeletionProtection(args.DeletionProtection)
 	if s.replicas, err = dispatchReplicas("replicas", args.Replicas, defaultDispatchReplicas); err != nil {
 		return dispatchSettings{}, err
 	}
@@ -1120,15 +1142,16 @@ func NewDispatch(ctx *pulumi.Context, name string, args *DispatchArgs, opts ...p
 		comp.AgentToken, comp.ServiceAccountSubject = empty, empty
 		return comp, nil
 	}
-	if err := newDispatchDatabase(ctx, comp, name, args, s, cloud); err != nil {
+	database, err := newDispatchDatabase(ctx, comp, name, args, s, cloud)
+	if err != nil {
 		return nil, err
 	}
-	if err := newDispatchKubernetes(ctx, comp, name, args, s, cloud); err != nil {
+	if err := newDispatchKubernetes(ctx, comp, name, args, s, cloud, database); err != nil {
 		return nil, err
 	}
-	comp.DatabaseInstance = cloud.instance.ConnectionName
-	comp.Principal = cloud.principal
-	comp.AgentToken = cloud.agentToken.Result
+	comp.DatabaseInstance = database.instance.ConnectionName
+	comp.Principal = database.principal
+	comp.AgentToken = database.agentToken.Result
 	comp.Url = pulumi.String("https://" + core.TailnetHostName(s.hostname, s.tailnetDNSName)).ToStringOutput()
 	// The app's and the listener's pods run as ServiceAccount <hostname> in the component's
 	// namespace, the account newDispatchKubernetes registers, and Kubernetes names a token's subject
