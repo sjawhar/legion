@@ -1,0 +1,68 @@
+{
+  "schemaVersion": 1,
+  "phase": "implement",
+  "issue": "INFRA-594",
+  "completed": "2026-10-29T13:32:35Z",
+  "proof": [
+    {
+      "criterion": "Sessions take every event (agent, issue, role) once through restarts of the session, its NATS connection, either listener and a Dispatch pod; the plugin acks after the transcript write; an unacked message is redelivered",
+      "surface": "Real Oh My Pi (omp 18.12.2, this checkout's pi-envoy) and real Claude Code 2.1.311 under this checkout's `legion claude-bridge` with claude-envoy built from the checkout; natsd with JetStream; two real envoy-listener processes; real envoy-dispatch on Postgres 17 with pgvector; in the issue pod",
+      "command": "LEGION_TEST_PG_DSN='postgres://postgres@127.0.0.1:5433/postgres?sslmode=disable' ANTHROPIC_API_KEY=$LEGION_MODEL_GATEWAY_KEY bash scripts/e2e/envoy-session-delivery.sh",
+      "observed": "ENVOY SESSION DELIVERY: PASS (every event once, the issue in order), exit 0: all 60 events of windows a-f (session kill and resume, NATS cut, listener shared killed, listener dispatch killed, Dispatch SIGKILLed after its writes, control) counted exactly 1 in each session they were meant for, the two Dispatch messages Dispatch refused in window d counted 0 as expected, and LIVE-1's comments appear in stream order in both transcripts. Table: .legion/INFRA-594/evidence/live/head-4dc7.table.txt",
+      "headSha": "4dc7ce76a57cdd9f7ae3d38e0f83da1eac28b6b5",
+      "negativeControl": "Same script with the listener and plugins of main before sjawhar/legion#2228 (`--build-from c3d09eec --expect-lost agent,issue,role`): every agent, issue and role event of window a counted 0 in both sessions (NEGATIVE CONTROL HOLDS); with #2228's head (`--build-from 926040d9 --expect-lost role`): every role event of window a counted 0. Also, the bridge run without --replay-user-messages (a script bug found at this head and fixed in 4dc7ce76) showed Claude Code each event 2-8 times: frames the session never answered done were redelivered, as designed."
+    },
+    {
+      "criterion": "Replay after a reconnect is driven by the stored stream (session consumer and relay), not by polling; done-gated ack; restart at the ack floor keeps order",
+      "surface": "envoy-listener (in-process and real binary) on the in-process nats-server 2.10.29 with session stand-ins on their own NATS connections; envoy-client relay protocol on fakes",
+      "command": "cd packages/envoy && DISPATCH_TEST_DATABASE_URL=... go test -count=1 ./cmd/listener; go test -count=1 ./internal/bus; bun test packages/envoy-client packages/pi-envoy; (cd packages/claude-envoy && bun test)",
+      "observed": "ok cmd/listener 558.7s (TestSessionConsumer*: away session gets each message once in order with no /v1/replay call; no ack before done; held frame does not delay later receipts; owner SIGKILLed mid-flight delivers within 10 s; one relayer across two listeners; restart whose create fails recreates at the floor; 200-session restart burst delivers every backlog once in 0.4 s; paused relay probes again after its backoff), ok internal/bus 305.0s, bun 2,630 tests 0 fail, claude-envoy 259 pass 0 fail",
+      "headSha": "bc6f4dff699acff2d5a0a8d9481e269b6154de62",
+      "negativeControl": "Each regression test reverted its change temporarily and failed: pending start disabled -> 'the session received 0 of 4 frames within 10s'; keep path disabled -> 'the restart created consumer s-ses_kept'; pause backoff resume removed -> 'the session received 0 of 2 frames within 9s'; replay engine polling injected in consumer mode -> the envoy-client consumer-mode test fails."
+    },
+    {
+      "criterion": "One role message stored and forwarded once across listeners; a slow holder stalls no other role; nothing dropped for queueing",
+      "surface": "Two real envoy-listener binaries on one in-process NATS",
+      "command": "cd packages/envoy && go test -count=1 -run TestRoleLane ./cmd/listener",
+      "observed": "100 role messages -> holder got 100 frames, stream stores 100 forwards, the listeners forwarded 100 in all; silent holder plus 40 msg/s to another role: receipt p99 10-12 ms, 0 slow-consumer errors; refused shared queue -> per-machine groups, one stored copy per message",
+      "headSha": "bc6f4dff699acff2d5a0a8d9481e269b6154de62",
+      "negativeControl": "With the per-machine queue group and the blocking handler put back: 'the holder received 200 forwards, the listeners logged 200'; silent-holder test 'p99 not received, slowest received 17.4s'."
+    },
+    {
+      "criterion": "Load at 40 events/s, 1,000 sessions: delivery p99, nothing lost, listener and nats-server CPU and memory; and a listener restart gives every session its backlog within 10 s",
+      "surface": "packages/envoy/loadtest (INFRA-589's committed harness, sjawhar/legion#2369) on one issue pod, step-10x, before (main c24ea568, core path) and after (legion/INFRA-594 ae635cba and a93f1181, LOADTEST_SESSION_DELIVERY=consumer)",
+      "command": "packages/envoy/loadtest/run-step.sh step-10x --duration 600s, 5 runs per side alternating; restart: SIGKILL the listener at +120 s, publish 3,000 envelopes to the 1,000 sessions while it is down, restart (5 runs with resume points, 5 without)",
+      "observed": "Steady (a93f1181... ae635cba): from-publish p99 33 ms median of runs (worst 91 ms), 0 lost, 1,000 of 1,000 sessions on consumer delivery, listener and nats CPU flat; nats-server RSS grows 1-2 MiB/min on both sides (before 1.16, after 1.97 MiB/min whole window; last third 1.49 vs 1.39). Restart: every session had its backlog in median 3.9 s (worst 6.1 s) with resume points, 4.4 s (worst 8.4 s) without, 0 lost, 0 duplicates. Labelled direct-NATS 40/s supplement at a93f1181: 114,085 of 114,085 frames, 0 duplicates, p99 668 ms. Evidence: .legion/INFRA-594/evidence/load2-results.md, load3-backoff-results.md",
+      "headSha": "a93f11815d557c01e1e0b155a3130224c6182060",
+      "negativeControl": "Before the restart fixes the same restart procedure gave every session its backlog only after 96 s, and sessions without a resume point lost 2,820 of 3,000 backlog messages; before the pause backoff the direct-NATS supplement had p99 2,146 ms, max 84.8 s, 82 duplicates."
+    }
+  ],
+  "filesChanged": [
+    "packages/envoy/internal/bus: session_consumers.go (new: per-session pull consumers, paged list, pending starts, keep path, raw pull), role_lane.go (new), nats.go (RequestCoreTo Nats-Msg-Id + PubAck, ErrForwardNotStored, StartRequestCoreTo/StartRequestStoredTo, SlowConsumers), stream.go, stored.go, confirm.go and tests",
+    "packages/envoy/cmd/listener: session_delivery.go and session_relay.go (new: registration delivery field, consumer manager, relay with received/progress/done/nak, ownership by durable binding, restart at the ack floor, pause backoff), role_lane.go (new), serve_port_workers.go (new), delivery.go, api.go, claim_wiring.go, main.go, live_topics.go, durable.go and tests",
+    "packages/envoy/internal/session (SessionEntry delivery/epoch, OnChange, Push/Resolve), internal/store (subject index, cached role holder)",
+    "packages/envoy/infra/core/permissions.go and tests, gcp goldens, infra README and docs/nats-hub.md (session-consumer API grant incl. CONSUMER.LIST, envoy-roles queue)",
+    "packages/envoy/loadtest: relay.go (new), sessions.go, delivery.go, run.go, sample.go, tables.go, stack.sh, util.go, README.md (consumer-delivery mode)",
+    "packages/envoy-client: consumer-delivery.ts, stream-topics.ts (new), transport.ts, replay.ts, tool-contract.ts, README, test/stall-scenario.ts",
+    "packages/pi-envoy/extensions/envoy.ts, src/missed-messages.ts and tests",
+    "packages/claude-envoy/src (envoy-channel-server.ts, channel-forwarder.ts, replay-state.ts, legion-inbox.ts) and tests",
+    "packages/daemon/internal/claudebridge (ack on Claude Code's replayed user message), internal/claudelaunch (--replay-user-messages), sandbox manifest test",
+    "scripts/e2e/envoy-session-delivery.sh (new), scripts/e2e/README.md, scripts/e2e/lib/port-file.sh",
+    "docs: packages/envoy/AGENTS.md, docs/architecture.md, pi-envoy and claude-envoy AGENTS/README, .dispatch/architecture, docs/site dispatch pages, skills/envoy, docs/solutions (two pages), docs/deployment.md, .github/workflows/ci.yaml comment",
+    "changelog fragments: packages/{envoy,envoy-client,pi-envoy,claude-envoy}/.changes/unreleased/INFRA-594-*.yaml"
+  ],
+  "trickyParts": [
+    "nats-server 2.10.29 reports ack floor 0 for a fresh consumer, so every session consumer is created at a start sequence (stream last+1) and the floor is read never below it",
+    "nats-server 2.10 handles one connection's JetStream API requests one at a time; a 1,000-session restart was bounded by that until the listener read all consumers in one paged CONSUMER.LIST and started pulls without a consumer info",
+    "A restart that deleted a consumer and failed its create lost the position; the pending start is now recorded before the delete and used by whichever call creates the consumer next (in-process only; a second listener does not know it)",
+    "The Claude Code bridge answers an inbox delivery only on Claude Code's isReplay echo of that user message; the live test's flag check had to follow main moving the argv into claudelaunch.go"
+  ],
+  "deviations": [
+    "Plan's replay-without-polling is proven on the consumer path; the core path keeps #2228's /v1/replay catch-up as the fallback (planned departure 1)",
+    "Load: Dispatch commits only about 0.5-0.6 events/s of the 40/s offered on the 2-core pod, so delivery latency rests on about 1,900-2,300 receipts per run plus a labelled supplement that publishes Dispatch-shaped events straight to NATS at 40/s",
+    "nats-server RSS grows over a 10-minute window on both sides (before and after); not caused by this change, and a 10-minute window cannot show whether it levels off",
+    "No real-stack test covers the core path's recovery after a frozen NATS path any more: the shared stall scenario (INFRA-548) now checks consumer delivery, since the stack's listener answers consumer; mocked unit tests in both plugins still cover the core path",
+    "The listener grant change (session-consumer entries, CONSUMER.LIST, envoy-roles) reaches a hub only at its next replacement or reload; until then the listener answers core and the old path runs"
+  ],
+  "openQuestions": []
+}
