@@ -2,7 +2,7 @@
   "schemaVersion": 1,
   "phase": "test",
   "issue": "INFRA-757",
-  "completed": "2026-10-29T22:45:00Z",
+  "completed": "2026-10-29T23:13:00Z",
   "implementerProof": {
     "verdict": "verified",
     "how": "Every command of the implementer's nine proof entries was re-run here from binaries and overlays this phase built itself, never the implementer's: the flake A before/after loop under the load recipe against this pod's durable PostgreSQL 17 (fsync=on, synchronous_commit=on), the four flake B device rows from a device this phase wrote into store.Open by go test -overlay, the committed regression test with and without main's internal/store/kv.go, the D-7 wrong-reason control from two overlays of interest_read_routes_test.go this phase wrote, the CI filter drift check with a negative control, the deadline-guard control, and every figure of the headroom table read again from the job logs of run 40926978371. Each observation matched the implementer's within noise. Two of its figures read differently here and neither changes a verdict: the flake A reproduction failed 7 of 30 where the implementer saw 17 of 30 (the same assertion, started_test.go:271 FleetCommit = <nil>; the window is the lock holder's commit, so the rate follows the pod's load), and the drift check counts 26 gates at this head where the implementer recorded 25."
@@ -86,7 +86,7 @@
       "criterion": "Also delivered: every race-lane job has real time headroom, each figure the package's own seconds.",
       "surface": "GitHub Actions job logs of this pull request's run 40926978371 (head cfb0d9c3), read here through the jobs API rather than taken from the body.",
       "command": "gh api repos/sjawhar/legion/actions/jobs/<id>/logs --allow-escape-sequences | sed 's/\\x1b\\[[0-9;]*m//g' | grep -aE '^ok' for jobs 123650917188, 123650917295, 123650917332, 123650917374 and 123650917408.",
-      "observed": "pmdoc 1023.519 s (71.1 % of its 40-minute job's 1440 s bar), api 746.718 s (69.1 % of 1080 s), cmd/listener 365.787 s, internal/bus 286.931 s, dispatch/store 200.358 s, delivery 68.298 s, kvwatch 62.877 s, internal/store 31.204 s, delivery/measures 1.045 s, docs 1336.200 s. Every figure in the body's table is this reading. The merged envoy-go-race job holds the bus and listener groups, whose largest package is 365.787 s, a third of the 1080 s bar, so the merge keeps the headroom; its own first measurement is due from the run at this head.",
+      "observed": "pmdoc 1023.519 s (71.1 % of its 40-minute job's 1440 s bar), api 746.718 s (69.1 % of 1080 s), cmd/listener 365.787 s, internal/bus 286.931 s, dispatch/store 200.358 s, delivery 68.298 s, kvwatch 62.877 s, internal/store 31.204 s, delivery/measures 1.045 s, docs 1336.200 s. Every figure in the body's table is this reading. The merged envoy-go-race job holds the bus and listener groups, whose largest package is 365.787 s, a third of the 1080 s bar, so the merge keeps the headroom. One figure of the head's own run was in before this handoff: run 40959437771, job 123758981314, envoy-go-race-pmdoc at this code head, ok github.com/sjawhar/envoy/internal/dispatch/pmdoc 891.414 s, 61.9 % of its 1440 s bar and 132 s better than the first measurement, so pmdoc's headroom holds on a second run. envoy-go-race and envoy-go-race-api of that run were still queued when this handoff was written.",
       "headSha": "6ef8bf3f3ff275ca0fee83c035190d244b5dfc35",
       "negativeControl": "The same packages contending in one job on main, run 40877712458 job 123461966609: docs 1772.969 s, pmdoc 1563.552 s, api 1099.487 s, bus 315.651 s FAIL, store 277.864 s, delivery 93.562 s, and no line at all for the listener step, since the bus's red ended the job first. That is the reading the split replaces.",
       "status": "pass"
@@ -112,8 +112,8 @@
   ],
   "ciAtTheHead": {
     "head": "6ef8bf3f3ff275ca0fee83c035190d244b5dfc35",
-    "readAt": "2026-10-29T22:45Z",
-    "state": "The handoff head carries no run of its own (handoff-only push, skip-checks: true, 0 check runs). The code head f2df6dc7, whose tree is this head's but for .legion/INFRA-757/, has CI run 40959437771, queued at 21:38Z and still running: changes, typecheck, envoy-plugin, pi-shared and worker-image / build green, test, lint and dispatch-browser-multiprocess in progress, and the rest queued, envoy-go-race, envoy-go-race-pmdoc and envoy-go-race-api among them. sjawhar/legion's runners are backed up repository-wide (every other branch's run was queued at the same time), so this is a lane still running, read as running and never waited for. The reviewer and the merger read ci-ok at the merging head, as DA-4 binds acceptance 3."
+    "readAt": "2026-10-29T23:12Z",
+    "state": "The handoff head carries no run of its own (handoff-only push, skip-checks: true, 0 check runs). The code head f2df6dc7, whose tree is this head's but for .legion/INFRA-757/, has CI run 40959437771, queued at 21:38Z and still running 95 minutes later: changes, typecheck, envoy-plugin, pi-shared, worker-image / build and envoy-go-race-pmdoc green (the one race job that had a runner, 891.414 s for its package), and pi-envoy, envoy-go, envoy-go-race, envoy-go-race-api, envoy-infra-go, dispatch, envoy-smoke, envoy-session-stall and ci-filters still queued or running. sjawhar/legion's runners are backed up repository-wide: every other branch's run was queued at the same time. A lane still running is read as running and never waited for, so this is the reading at the time of writing. The reviewer and the merger read ci-ok at the merging head, as DA-4 binds acceptance 3, and the daemon returns the issue to implementing by itself if CI settles red."
   },
   "observations": [
     {
