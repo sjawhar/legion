@@ -1,0 +1,6 @@
+kind: Added
+body: |-
+    `core.ListenerPermissions`, and through it `HostPermissions` and `DispatchPermissions`, grants `$JS.API.STREAM.UPDATE.KV_envoy_sessions`, the one call that changes the session registry's window in place. The subject names that one stream, so it updates the session bucket and no other stream and no other bucket. It changes the rendered users of every `gcp:NatsHub` with a `listener`, a `machineId` user or a `dispatchMachineId` user, so moving such a hub to this release replaces its VM once.
+time: 2026-10-29T12:00:01.000000000Z
+custom:
+    Issue: envoy-session-ttl-10m

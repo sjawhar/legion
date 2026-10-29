@@ -23,16 +23,18 @@ const Heartbeat = 90 * time.Second
 const probeTimeout = 10 * time.Second
 
 // LivenessWindow is how stale the controller holder's `last_seen` may be before the controller
-// counts as gone: four heartbeats at least, since one would flap on every tick, and never less
-// than the boot timeout — 360 s at the defaults.
+// counts as gone: seven heartbeats at least, since one would flap on every tick, and never less
+// than the boot timeout — 630 s at the defaults.
 //
-// Four rather than three: three heartbeats is 270 s, short of the 300 s a live holder's
+// Seven rather than fewer: six heartbeats is 540 s, short of the 600 s a live holder's
 // `last_seen` can reach, since that is the listener's own session record lifetime
-// (OpenSessionRegistry's default ttl, packages/envoy/internal/session/registry.go). Four is 360 s,
-// still wider than the 240 s this replaced, so a pane that has not restarted and still refreshes
-// every 120 s stays live and no release ordering is forced.
+// (OpenSessionRegistry's default ttl, packages/envoy/internal/session/registry.go). Seven is
+// 630 s, wider than the 360 s this replaced, so a pane that has not restarted and still refreshes
+// every 120 s stays live and no release ordering is forced. A window narrower than that lifetime
+// would call a controller gone while the listener still names it the holder and its pane is still
+// running; .github/scripts/check-heartbeat-margin.sh holds the two together.
 func LivenessWindow(bootTimeout time.Duration) time.Duration {
-	return max(bootTimeout, 4*Heartbeat)
+	return max(bootTimeout, 7*Heartbeat)
 }
 
 // Liveness is what the Envoy listener says of the registered controller session.

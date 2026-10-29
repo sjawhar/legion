@@ -2118,7 +2118,13 @@ as its `Publish` and `Subscribe`. Below, `<m>` is the machine id with each space
   stream `KV_<bucket>`, its direct and stream message gets, `$KV.<bucket>.>`, and its watchers'
   consumer create and delete and their flow-control replies;
 - `$JS.API.STREAM.PURGE.KV_envoy_interests`, which the interest bucket's delete-marker collection
-  sends.
+  sends;
+- `$JS.API.STREAM.UPDATE.KV_envoy_sessions`, the one call that changes the session registry's
+  window (`envoy_sessions`'s `MaxAge`) in place. nats.go creates a key-value bucket and never
+  updates one, so a bucket an earlier build created keeps the window it was created with; with
+  this entry the listener raises it to the window its own build declares at every start, and
+  nobody edits the live bucket by hand. The subject names that one stream, so the entry updates
+  the session bucket and no other stream and no other bucket.
 
 It subscribes to `_INBOX.>`, and to the role lanes in the machine's queue group,
 `notifications.role.> envoy-listener-<m>`.

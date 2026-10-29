@@ -134,6 +134,20 @@ session missed while its NATS subscription was down. It can create, change or de
 `SessionPermissions` does not hold it, so the session user reads what it missed only through a
 listener.
 
+It also holds `$JS.API.STREAM.UPDATE.KV_envoy_sessions`, the one call that changes the session
+registry's window in place. A listener creates the `envoy_sessions` bucket with the window its
+build declares (`OpenSessionRegistry`'s default `ttl`), and nats.go creates a KV bucket and never updates one, so a
+bucket an earlier build created keeps the window it was created with until something updates the
+bucket's own stream. With this grant the listener raises that window itself at every start
+(`bus.RaiseKeyValueMaxAge`), and nobody edits the live bucket by hand: the window is whatever the
+deployed listener image declares, and raising it is a listener deploy. The subject names that one
+stream, so the grant updates the session bucket and no other stream and no other bucket; it is not
+`$JS.API.STREAM.UPDATE.>`, and the hub still has no system account and no operator. The grant only
+ever raises the window, since a fleet that is not all on one build would otherwise push the bucket
+back and forth at every start; lowering it is an operator's `nats stream edit KV_envoy_sessions
+--max-age=<d>`, which the next listener start leaves alone while it is at or above the declared
+window.
+
 `nkey` is the public key `envoy-infra seed generate` prints, and the seed stays in the secret
 store it wrote (see [NATS seeds](../README.md#nats-seeds)): a host's listener reads it from there
 into its `seed` with the hub's `natsUrl` as its `natsUrls`, and a Legion daemon reads its own. In the authorization `core`
@@ -513,7 +527,8 @@ new template. So does a plugin release that changes the rendering itself: the re
 so upgrading to it replaces every existing hub's VM once, with the outage below, even a hub that
 sets neither input. The release that rendered `ENVOY_ALLOWED_HOSTS` into the listener's unit
 replaced, once and with that same outage, the VM of every hub that runs a listener, and no hub
-without one. This release adds `$JS.API.STREAM.MSG.GET.ENVOY_NOTIFICATIONS` to
+without one. This release adds `$JS.API.STREAM.MSG.GET.ENVOY_NOTIFICATIONS` and
+`$JS.API.STREAM.UPDATE.KV_envoy_sessions` to
 `ListenerPermissions`, and so to `HostPermissions` and `DispatchPermissions`, which changes the
 rendered users of every hub with a `listener`, a `machineId` user or a `dispatchMachineId` user:
 moving such a hub to it replaces its VM once, with the outage below, and a hub with none of them

@@ -46,6 +46,45 @@ func OpenKeyValue(js nats.JetStreamContext, bucket string) (KeyValue, error) {
 	return KeyValue{kv}, nil
 }
 
+// KeyValueStream is the stream JetStream keeps a KV bucket's messages in, KV_<bucket>. nats.go
+// exports no name for it, and its JetStreamContext creates a bucket and never updates one, so a
+// deployed bucket's MaxAge can be changed only through that stream's own configuration.
+func KeyValueStream(bucket string) string {
+	return "KV_" + bucket
+}
+
+// RaiseKeyValueMaxAge raises bucket's MaxAge to want when the deployed bucket holds a shorter one,
+// and answers the MaxAge the bucket holds when it returns. A bucket that already holds want or
+// more is read and left as it is, so the call costs one STREAM.INFO in the ordinary case, and so
+// is one that holds no MaxAge at all, which in JetStream is a bucket that expires nothing: raising
+// that to want would shorten it to want.
+//
+// It only ever raises. JetStream's stream update has no compare-and-swap, and a fleet whose
+// listeners are not all on one build would push a bucket that is set exactly back and forth at
+// every start; a window that shrinks under a live session is the fault a longer one exists to keep
+// out. Lowering a bucket's MaxAge is an operator's `nats stream edit`.
+//
+// The caller's NATS user needs publish on `$JS.API.STREAM.UPDATE.KV_<bucket>` for the raise, and
+// on `$JS.API.STREAM.INFO.KV_<bucket>` for the read. Without the update the server answers a
+// permissions violation, which is returned as it is: a caller that can live with the deployed
+// MaxAge logs it and carries on.
+func RaiseKeyValueMaxAge(js nats.JetStreamContext, bucket string, want time.Duration) (time.Duration, error) {
+	info, err := js.StreamInfo(KeyValueStream(bucket))
+	if err != nil {
+		return 0, err
+	}
+	if info.Config.MaxAge == 0 || info.Config.MaxAge >= want {
+		return info.Config.MaxAge, nil
+	}
+	raised := info.Config
+	raised.MaxAge = want
+	updated, err := js.UpdateStream(&raised)
+	if err != nil {
+		return info.Config.MaxAge, err
+	}
+	return updated.Config.MaxAge, nil
+}
+
 // The subjects nats.go builds from a key of bucket, each as the bytes it puts around the key. A put
 // or a delete publishes to `$KV.<bucket>.<key>`; a get is a direct get,
 // `$JS.API.DIRECT.GET.KV_<bucket>.$KV.<bucket>.<key>`; a watch or a history creates a watcher on the
