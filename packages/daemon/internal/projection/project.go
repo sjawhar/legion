@@ -159,6 +159,7 @@ func Project(ctx context.Context, tx pgx.Tx, s record.Store, project string, cla
 				Number:         pr.Number,
 				Head:           pr.HeadSHA,
 				State:          string(pr.State),
+				MergeState:     string(pr.MergeState),
 				ChecksVerdict:  classify.HeadVerdict(*pr),
 				ReviewDecision: reviewDecision,
 				FixAttempts:    pr.FixAttempts,

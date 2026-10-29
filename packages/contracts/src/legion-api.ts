@@ -169,6 +169,13 @@ const legionPullRequestView = z.strictObject({
   head: nonEmptyString,
   /** `open`, `merged` or `closed` (contract 36), `record.PullRequestState`'s values. */
   state: z.enum(["open", "merged", "closed"]),
+  /** GitHub's own merge state for the head, in GitHub's lowercase spelling, as the daemon's last
+   * read of the pull request found it (`record.MergeState`); absent until that read has run. It
+   * says whether GitHub would merge the head now (`clean`) or holds it on a check or a review the
+   * repository requires (`blocked`). */
+  mergeState: z
+    .enum(["clean", "unstable", "has_hooks", "blocked", "dirty", "behind", "draft", "unknown"])
+    .optional(),
   checksVerdict: nonEmptyString.optional(),
   reviewDecision: nonEmptyString.optional(),
   fixAttempts: z.number().int().nonnegative(),

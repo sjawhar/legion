@@ -76,14 +76,17 @@ func (e *Engine) requiredChecks(ctx context.Context, tx pgx.Tx, fact intake.Requ
 // awaiting_merge the read is recorded and nothing moves: a conflict is no red for RedSendsBack to
 // act on (GitHub runs no checks on it for a verdict to stand), and the tester or implementer
 // already at work will see it on its own pass or push. Leaving awaiting_merge is what stops a
-// repeated CONFLICTING read from withdrawing twice.
+// repeated CONFLICTING read from withdrawing twice. GitHub's own merge state for the head rides
+// along on the same fact and is recorded with the verdict, deciding nothing of itself: it is what
+// the read found, kept for a reader that needs to tell a head GitHub holds on a check or a review
+// the repository requires from one GitHub would merge now.
 func (e *Engine) mergeability(ctx context.Context, tx pgx.Tx, fact intake.PullRequestMergeability) (intake.Result, error) {
 	pr, err := e.pullRequest(ctx, tx, fact.Repo, fact.Number)
 	if err != nil || pr == nil {
 		return intake.Result{}, err
 	}
-	if pr.Mergeability != fact.Mergeable {
-		pr.Mergeability = fact.Mergeable
+	if pr.Mergeability != fact.Mergeable || pr.MergeState != fact.MergeState {
+		pr.Mergeability, pr.MergeState = fact.Mergeable, fact.MergeState
 		if err := e.store.PutPullRequest(ctx, tx, *pr); err != nil {
 			return intake.Result{}, err
 		}

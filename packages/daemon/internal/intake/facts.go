@@ -527,12 +527,16 @@ func (RequiredChecks) isFact() {}
 // decoded from an event, applied as a synthetic fact by the daemon's own read of each open pull
 // request (workflowRuntime.readRequiredChecks), before requiredFor's own rulesets and workflow
 // reads run. Mergeable is record.MergeabilityUnknown while GitHub is still computing it,
-// record.MergeabilityMergeable or record.MergeabilityConflicting once it has.
+// record.MergeabilityMergeable or record.MergeabilityConflicting once it has. MergeState is
+// GitHub's own merge state for the head from the same answer's `mergeable_state`, which the
+// engine records beside Mergeable and decides nothing on: it tells a head GitHub holds on a check
+// or a review the repository requires from one GitHub would merge now, which Mergeable cannot.
 type PullRequestMergeability struct {
-	Repo      string
-	Number    int
-	Base      string
-	Mergeable record.Mergeability
+	Repo       string
+	Number     int
+	Base       string
+	Mergeable  record.Mergeability
+	MergeState record.MergeState
 }
 
 func (PullRequestMergeability) isFact() {}

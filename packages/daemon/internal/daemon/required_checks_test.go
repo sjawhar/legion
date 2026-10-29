@@ -51,10 +51,10 @@ func rulesetsStandIn(t *testing.T, failing *atomic.Bool, requires string) *httpt
 	return server
 }
 
-// mergeableStandIn is GitHub's REST API for acme/widgets as the required-checks read sees it: pull
-// request 86 on base main, whose GitHub `mergeable` field is the literal JSON state, whose
-// rulesets require pr-checks-result and whose branch protection requires nothing.
-func mergeableStandIn(t *testing.T, state string) *httptest.Server {
+// requiredChecksStandIn is GitHub's REST API for acme/widgets as the required-checks read sees it:
+// pull request 86 answered with pull, whose rulesets require pr-checks-result and whose branch
+// protection requires nothing.
+func requiredChecksStandIn(t *testing.T, pull string) *httptest.Server {
 	t.Helper()
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Header.Get("Authorization") != "Bearer outbox-token" {
@@ -63,7 +63,7 @@ func mergeableStandIn(t *testing.T, state string) *httptest.Server {
 		}
 		switch r.URL.Path {
 		case "/repos/acme/widgets/pulls/86":
-			w.Write([]byte(`{"number":86,"base":{"ref":"main"},"mergeable":` + state + `}`))
+			w.Write([]byte(pull))
 		case "/repos/acme/widgets/rules/branches/main":
 			w.Write([]byte(`[{"type":"pull_request"},{"type":"required_status_checks","parameters":{"required_status_checks":[{"context":"pr-checks-result"}]}}]`))
 		case "/repos/acme/widgets/branches/main":
@@ -74,6 +74,22 @@ func mergeableStandIn(t *testing.T, state string) *httptest.Server {
 	}))
 	t.Cleanup(server.Close)
 	return server
+}
+
+// mergeableStandIn answers pull request 86 on base main with state as the literal JSON of GitHub's
+// `mergeable` field, and no merge state at all.
+func mergeableStandIn(t *testing.T, state string) *httptest.Server {
+	t.Helper()
+	return requiredChecksStandIn(t, `{"number":86,"base":{"ref":"main"},"mergeable":`+state+`}`)
+}
+
+// mergeStateStandIn answers pull request 86 on base main with state as GitHub's `mergeable_state`,
+// beside the `mergeable: true` GitHub computes with it: GitHub answers true for every state its
+// own rules leave rather than a conflict, a head it blocks on a required check included, which is
+// what makes the merge state the only answer that tells those apart.
+func mergeStateStandIn(t *testing.T, state string) *httptest.Server {
+	t.Helper()
+	return requiredChecksStandIn(t, `{"number":86,"base":{"ref":"main"},"mergeable":true,"mergeable_state":"`+state+`"}`)
 }
 
 // seedUnjudgedRound records a round as a live tree had one before the daemon read required sets:
@@ -440,6 +456,42 @@ func TestTheRequiredChecksPassCatchesAHeadThatStartsConflictingWithItsBase(t *te
 			reasons := noticeReasons(t, pool, "checks-red")
 			if len(reasons) != 1 || !strings.Contains(reasons[0], want) {
 				t.Fatalf("checks-red notices %q, want one saying %q", reasons, want)
+			}
+		})
+	}
+}
+
+// The same one read carries GitHub's merge state for the head, which is the answer the spec's
+// mergeable is written in: clean, unstable or has_hooks, and never blocked. The daemon records
+// GitHub's own spelling, since the tri-state mergeability it decodes from the same response
+// cannot tell the two apart - a head GitHub holds on a check or a review the repository requires
+// answers `mergeable: true` exactly as a clean one does - and recording it moves no issue: what
+// the merge state decides is a later change's.
+func TestTheRequiredChecksPassRecordsGitHubsMergeStateForTheHead(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		state     string
+		want      record.MergeState
+		mergeable bool
+	}{
+		{"blocked on what the repository requires", "blocked", record.MergeStateBlocked, false},
+		{"clean", "clean", record.MergeStateClean, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			pool := isolatedOutboxPool(t)
+			seedCapture(t, pool, phase.AwaitingMerge, "retro",
+				record.PhaseRow{Issue: "CAPTURE-1", Role: claim.RoleMerger, Claim: "merge-claim", HandoffCommit: "code", Summary: "READY #86 at code"})
+			w := requiredRuntime(pool, mergeStateStandIn(t, tc.state).URL, quietLogger())
+			w.readRequiredChecks(context.Background())
+			got, pr := capturePhase(t, pool)
+			if pr.MergeState != tc.want {
+				t.Fatalf("recorded merge state = %q, want %q", pr.MergeState, tc.want)
+			}
+			if pr.MergeState.Mergeable() != tc.mergeable {
+				t.Fatalf("%q reads as mergeable = %t, want %t", pr.MergeState, pr.MergeState.Mergeable(), tc.mergeable)
+			}
+			if got != phase.AwaitingMerge {
+				t.Fatalf("after the pass the issue is in %s, want awaiting_merge: recording the merge state moves nothing", got)
 			}
 		})
 	}

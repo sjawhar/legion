@@ -66,20 +66,22 @@ func (w *workflowRuntime) watchRequiredChecks(ctx context.Context) {
 // synchronize the webhook would have carried and goes on with the record that leaves (followHead);
 // when following fails short of GitHub's rate limit, it goes on with the record as it stands.
 // It applies an intake.PullRequestMergeability fact whenever GitHub's lazily computed mergeability
-// is CONFLICTING or differs from the one recorded - workflow's mergeability decides a CONFLICTING
-// read every time, even one that only confirms the stored value, so a conflict the poll recorded
-// before the issue reached awaiting_merge is still acted on once it gets there. It then reads the
-// pull request's reviews and applies a deciding one the daemon has not recorded, whose webhook
-// never arrived (readReviews), whatever phase the issue is in, and, for a review round whose
-// approval is set aside below the head, GitHub's compare of the approved head with the head,
-// applying the handoff-only push it shows (readApprovalCarry). It then reads what the base branch
-// requires with the implement App's installation token, the credential the daemon reads GitHub
-// with for its own work (requiredchecks.Required, which this pass is the only reader of), and, when
-// that includes a workflow, each required workflow's latest run on the head whose settlement stands
-// for the pull request's (classify.WorkflowHead, requiredchecks.Workflows). It applies an
-// intake.RequiredChecks fact when that read differs from the one recorded, which decides the head's
-// verdict again (workflow's requiredChecks). Last it looks up the open pull request of each issue
-// whose implementer completed with none recorded (readUnrecordedPullRequests). A read that fails is
+// is CONFLICTING, or when either it or GitHub's merge state differs from the one recorded -
+// workflow's mergeability decides a CONFLICTING read every time, even one that only confirms the
+// stored value, so a conflict the poll recorded before the issue reached awaiting_merge is still
+// acted on once it gets there, and a merge state that moved while the mergeability stood still is
+// recorded as the read found it. It then reads the pull request's reviews and applies a deciding
+// one the daemon has not recorded, whose webhook never arrived (readReviews), whatever phase the
+// issue is in, and, for a review round whose approval is set aside below the head, GitHub's
+// compare of the approved head with the head, applying the handoff-only push it shows
+// (readApprovalCarry). It then reads what the base branch requires with the implement App's
+// installation token, the credential the daemon reads GitHub with for its own work
+// (requiredchecks.Required, which this pass is the only reader of), and, when that includes a
+// workflow, each required workflow's latest run on the head whose settlement stands for the pull
+// request's (classify.WorkflowHead, requiredchecks.Workflows). It applies an intake.RequiredChecks
+// fact when that read differs from the one recorded, which decides the head's verdict again
+// (workflow's requiredChecks). Last it looks up the open pull request of each issue whose
+// implementer completed with none recorded (readUnrecordedPullRequests). A read that fails is
 // logged with the repository, the pull request and GitHub's HTTP status, and changes nothing: the
 // pull request keeps the set and runs last read, and one never read keeps no checks verdict,
 // neither red nor green, until a later pass reads it. A rate-limit answer ends the pass there,
@@ -129,10 +131,10 @@ func (w *workflowRuntime) readRequiredChecks(ctx context.Context) {
 		// The reads below start their bound only now: following a head waits on the fact lock,
 		// which the GitHub consumer's backlog can hold for a while.
 		prCtx, cancel := context.WithTimeout(ctx, requiredChecksRead)
-		base, mergeable := pull.Base.Ref, pull.mergeability()
-		if pr.Mergeability != mergeable || mergeable == record.MergeabilityConflicting {
+		base, mergeable, state := pull.Base.Ref, pull.mergeability(), pull.mergeState()
+		if pr.Mergeability != mergeable || pr.MergeState != state || mergeable == record.MergeabilityConflicting {
 			eventID := fmt.Sprintf("mergeability:%s:%s:%s#%d:%d", w.dispatchProject, w.bootID, pr.Repo, pr.Number, time.Now().UnixNano())
-			fact := intake.PullRequestMergeability{Repo: pr.Repo, Number: pr.Number, Base: base, Mergeable: mergeable}
+			fact := intake.PullRequestMergeability{Repo: pr.Repo, Number: pr.Number, Base: base, Mergeable: mergeable, MergeState: state}
 			if _, err := intake.ApplyFact(ctx, w.pool, "github", eventID, fact, w.handlers...); err != nil {
 				w.log.Warn("apply whether a pull request's head can be merged into its base", "repo", pr.Repo, "pullRequest", pr.Number, "error", err)
 			}
@@ -187,7 +189,8 @@ func (w *workflowRuntime) logPassFailure(pr record.PullRequest, action string, e
 
 // githubPullRequest is one pull request as GitHub answers GET /pulls/{number} and lists it in
 // GET /pulls: its number, state (open or closed), page, body, base branch, head branch and commit,
-// when it last changed, and its nullable, lazily computed `mergeable`, which the list leaves out.
+// when it last changed, its nullable, lazily computed `mergeable`, which the list leaves out, and
+// `mergeable_state`, GitHub's own merge state for the head, which the list leaves out too.
 type githubPullRequest struct {
 	Number  int    `json:"number"`
 	State   string `json:"state"`
@@ -200,8 +203,9 @@ type githubPullRequest struct {
 		Ref string `json:"ref"`
 		SHA string `json:"sha"`
 	} `json:"head"`
-	UpdatedAt time.Time `json:"updated_at"`
-	Mergeable *bool     `json:"mergeable"`
+	UpdatedAt      time.Time `json:"updated_at"`
+	Mergeable      *bool     `json:"mergeable"`
+	MergeableState string    `json:"mergeable_state"`
 }
 
 // mergeability is the pull request's `mergeable` as the mergeability fact decides a READY by: null
@@ -217,6 +221,24 @@ func (p githubPullRequest) mergeability() record.Mergeability {
 		return record.MergeabilityMergeable
 	default:
 		return record.MergeabilityConflicting
+	}
+}
+
+// mergeState is the pull request's `mergeable_state` as the record keeps it: GitHub's own merge
+// state for the head, in GitHub's spelling, which the daemon records and decides nothing on yet.
+// An answer with no `mergeable_state` at all - a list entry, which leaves it out - is
+// record.MergeStateUnread, since the read found none, and a spelling outside the eight GitHub
+// documents is record.MergeStateUnknown, the one state that already means "GitHub has not said
+// this head can be merged": the record's values are then exactly the set the state view and the
+// contract name, and an unrecognised state is never read as one the issue may advance on
+// (record.MergeState.Mergeable).
+func (p githubPullRequest) mergeState() record.MergeState {
+	switch state := record.MergeState(p.MergeableState); state {
+	case record.MergeStateUnread, record.MergeStateClean, record.MergeStateUnstable, record.MergeStateHasHooks,
+		record.MergeStateBlocked, record.MergeStateDirty, record.MergeStateBehind, record.MergeStateDraft:
+		return state
+	default:
+		return record.MergeStateUnknown
 	}
 }
 

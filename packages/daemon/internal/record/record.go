@@ -480,6 +480,13 @@ type PullRequest struct {
 	// yet, either), MergeabilityMergeable once GitHub can merge the head automatically, and
 	// MergeabilityConflicting once it cannot. "" means the read has never run.
 	Mergeability Mergeability
+	// MergeState is GitHub's own merge state for this head, read from `mergeable_state` on the
+	// same /pulls/{number} answer Mergeability is decoded from (daemon.readRequiredChecks), in
+	// GitHub's lowercase spelling; "" means the read has never run. It is kept beside
+	// Mergeability because the tri-state cannot tell a head GitHub holds on the repository's own
+	// required checks or reviews (MergeStateBlocked) from one GitHub would merge now
+	// (MergeStateClean): GitHub answers `mergeable: true` for both.
+	MergeState MergeState
 	// MergeSHA is the merge commit GitHub reported for the pull request (the production check
 	// looks for it in a build): empty until the merge, and for a pull request merged before the
 	// column existed, whose check's first compare fills it from GitHub.
@@ -629,6 +636,43 @@ const (
 	MergeabilityMergeable   Mergeability = "MERGEABLE"
 	MergeabilityConflicting Mergeability = "CONFLICTING"
 )
+
+// MergeState is GitHub's merge state for a pull request's head, read from `mergeable_state` on
+// GitHub's /pulls/{number} answer (daemon.readRequiredChecks). It is kept in GitHub's own
+// lowercase spelling rather than one of the daemon's: the state is GitHub's judgement, weighing
+// the repository's required checks and reviews, and the daemon only records what it read.
+// "" (the zero value) means the daemon has never read it, which no GitHub answer ever spells.
+type MergeState string
+
+// The eight states GitHub spells in `mergeable_state`: clean, which GitHub would merge now;
+// unstable, where a check that the repository does not require failed; has_hooks, clean on a
+// repository whose pre-receive hooks run on the merge; blocked, held by a check or review the
+// repository requires; dirty, conflicting with the base; behind, whose base requires the head be
+// up to date and it is not; draft; and unknown, which GitHub answers while it is still computing
+// the merge.
+const (
+	MergeStateUnread   MergeState = ""
+	MergeStateClean    MergeState = "clean"
+	MergeStateUnstable MergeState = "unstable"
+	MergeStateHasHooks MergeState = "has_hooks"
+	MergeStateBlocked  MergeState = "blocked"
+	MergeStateDirty    MergeState = "dirty"
+	MergeStateBehind   MergeState = "behind"
+	MergeStateDraft    MergeState = "draft"
+	MergeStateUnknown  MergeState = "unknown"
+)
+
+// Mergeable says whether this is a merge state the issue may advance on. The spec's R1 reads:
+// "Mergeable means GitHub's merge state for the head is CLEAN, UNSTABLE (only checks the
+// repository does not require failed) or HAS_HOOKS" (dispatch://INFRA-714/spec). unstable counts
+// because the only thing it says failed is a check the repository does not require, which is no
+// reason to hold the work; has_hooks counts because it is clean on a repository whose pre-receive
+// hooks run on the merge. blocked does not count: GitHub holds the head on a check or a review
+// the repository itself requires, and GitHub weighs those rules, so the daemon reads no rulesets
+// of its own. dirty, behind, draft and unknown are not states GitHub would merge from either.
+func (m MergeState) Mergeable() bool {
+	return m == MergeStateClean || m == MergeStateUnstable || m == MergeStateHasHooks
+}
 
 // ProductionCheck is an issue's production check: the work after the close in which the
 // implementer drives the merged change in production and reports what it saw. There is one record
