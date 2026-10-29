@@ -1,0 +1,49 @@
+{
+  "schemaVersion": 1,
+  "phase": "review",
+  "issue": "INFRA-514",
+  "completed": "2026-10-29T15:21:00Z",
+  "round": 1,
+  "reviewedCodeHead": "469224906252b9a0284c776c49eb8c6f54f3f38e",
+  "decision": "changes_requested",
+  "critical": 0,
+  "important": 3,
+  "minor": 3,
+  "keyFindings": [
+    {
+      "severity": "important",
+      "file": "packages/envoy/CHANGELOG.md:2526-2565",
+      "description": "The four entries are written into CHANGELOG.md under '## Before changelog fragments' (line 604). The repository rule (AGENTS.md, 'Changelog entries are fragment files') forbids editing CHANGELOG.md, and an open PR that merges main must move such entries into fragments. The fold reads only fragments, so the release that ships this build would carry no notes, including its rollout warning. Fix: revert the hunk and add packages/envoy/.changes/unreleased/INFRA-514-<slug>.yaml fragments (kind: Fixed, body: |-)."
+    },
+    {
+      "severity": "important",
+      "file": "packages/envoy/internal/bus/kvresume.go:50-57",
+      "description": "The resumed watch's consumer create waits 5 s, where the full path's waits 10 s: jetstream's kvs subscribes through legacyJetStream() (nats.go jetstream/kv.go:887), which sets no MaxWait, and getJSContextOpts wraps a context with no deadline in that default (jsm.go:1791-1796, js.go:299). A deadline cannot be passed either: nats.go unsubscribes a JetStream subscription when its context is done (js.go:2053-2057). So on a slow JetStream after a server restart a resume fails the repair where main's full read would have succeeded, and the comments at :14-15 and :50-51 are wrong ('keeps nothing of it once the consumer exists'). Also, nats.go cancels that context only in Unsubscribe (nats.go:5210-5220), which a closed connection refuses (nats.go:5063), so each resumed watcher whose connection closes leaves one goroutine holding its subscription. Fix: fall back to the full open when the resume's open fails (or otherwise give the create the 10 s), pass a context.WithCancel that forward cancels when the inner watcher ends, correct both comments, test the fallback."
+    },
+    {
+      "severity": "important",
+      "file": "packages/envoy/internal/kvwatch/kvwatch.go:676",
+      "description": "consume reads idleTimeout(watcher) after a resumed watch's nil marker. resumedWatcher.forward puts the end cause on Error as soon as the inner watcher closes (kvresume.go:107-110), so a close right after the marker makes the resumed warm-up log outcome 'timed out' at WARN, leaves the generation incomplete, and terminalError then reads the closed channel and records '<name> watcher stopped' instead of the ErrConnectionClosed cause. A resumed watch has no idle timer. Fix: timedOut := !resumed && idleTimeout(watcher) != nil, with a test."
+    },
+    {
+      "severity": "minor",
+      "file": "packages/envoy/internal/store/kv.go:593-603",
+      "description": "sameStoredInterest repeats Interest's fields by hand with its own nil-versus-[] rule; a field added to Interest and missed here makes UpsertWithin skip a changed row for up to 5 minutes, silently. Fix: compare the marshalled bytes of merged with those of cur stamped with merged.UpdatedAt (UpsertWithin marshals merged on the next line anyway) and delete the helper."
+    },
+    {
+      "severity": "minor",
+      "file": "packages/envoy/cmd/listener/main.go:782",
+      "description": "The reaper's allowance (grace + store.InterestRefreshAge) is computed in Reap (kv.go:1162) and again here for WithLastSeenRetention; a change to one silently drops last_seen from rows the reaper still holds. Fix: one exported store function both call."
+    },
+    {
+      "severity": "minor",
+      "file": "packages/envoy/cmd/listener/heartbeat_writes_test.go:18-85",
+      "description": "The test asserts only the session write per heartbeat, which main already did, and only logs the interest write rate this PR changes. Every heartbeat lands inside InterestRefreshAge, so interestWrites == 0 is deterministic: assert it, so the route-level test catches a regression of the skip."
+    }
+  ],
+  "ci": "At code head 46922490 CI run 40889828326 was still running at 15:20Z: lint, typecheck, docs, changes, contracts, envoy-plugin, envoy-client, envoy-session-stall, claude-envoy, dispatch-browser-multiprocess and worker-image/build success; test, envoy-go-race, dispatch, dispatch-memory and pi-legion in progress; envoy-go, envoy-infra-go, envoy-e2e-local, envoy-smoke, ci-filters and the multiprocess jobs queued. The request for changes does not wait on it.",
+  "threads": "0 review threads on the pull request.",
+  "proofLines": "E2E (implementer) and E2E (tester) are both present in the PR body, each with surface, command, observation, head and negative control.",
+  "thermonuclear": "Both run at 46922490. Deep review: findings 1-3 above (its proposed fix for 2, a deadline on the watch context, would unsubscribe the watch at the deadline; I replaced it). Code quality: findings 1 and 4-6 above; its other items (kvwatch's atomics and repeated drop sequence, the reaper's revision-0 branch and re-read, expireDue's re-check) I judged not defects.",
+  "mergeWithInfra743": "sjawhar/legion#2504 (INFRA-743, head b7cccdc9) and this PR conflict in two files; git merge-tree of the two heads names packages/envoy/AGENTS.md and packages/envoy/internal/kvwatch/kvwatch.go. kvwatch.go Rewatch: the doc comment takes #2504's failure sentence (a failed Rewatch reports nothing of its own; the wait armed at the stop reports at bus.RepairGrace) and keeps this PR's resume paragraph; the body calls w.watch(kv, conn, 0) with no reportFailedRepair, which #2504 deletes. AGENTS.md: the NATS reconnect bullet takes #2504's added hook-failure sentence; the cache warm-up bullet keeps this PR's outcome resumed and Rewatch-resume text and takes #2504's rewording of the unrepaired-stop report; this PR's session cache bullet stays. Everything else auto-merges. With that resolution the merged tree built, go vet passed on internal/kvwatch, internal/bus, cmd/listener, internal/session and internal/store, and go test passed on internal/kvwatch (62.6 s) and internal/bus (319.8 s). restart_test.go does not conflict: this PR changes cmd/listener/restart_test.go and #2504 changes internal/bus/restart_test.go."
+}
