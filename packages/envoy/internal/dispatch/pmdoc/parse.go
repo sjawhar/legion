@@ -205,9 +205,20 @@ func LineFeedAttrs(attrs map[string]any) map[string]any {
 // block that names none has none yet. Without readFrontmatter a closed front-matter block is read
 // as the blocks its lines make. at is where markdown stands in what the caller wrote, which a
 // refusal's line number counts from.
+//
+// Every U+0000 in markdown is read as U+FFFD (nulAsReplacement) before any parser sees a byte of
+// it, as CommonMark requires of a reader (§2.3 Insecure characters) and the browser editor's parser
+// does. Goldmark keeps the character as it is, while the rendering writes it as U+FFFD
+// (withNulsWritten), so a write holding one was accepted and left the live tree holding a character
+// the markdown it is stored as does not: the tree a read serves and the bytes a version carries
+// then disagreed. The replacement is three bytes where the character was one, so every offset taken
+// after it is an offset into source and never into markdown: a refusal's line number counts
+// source's line feeds, which the replacement neither adds nor removes, and at.server measures a
+// prefix the server itself wrote ahead of the caller's text (parseTableRows), which holds no
+// U+0000 and so keeps its length.
 func parseUnstamped(markdown string, at origin, readFrontmatter bool, budget *WriteBudget) (doc *Node, err error) {
 	defer recoverPanic(&doc, &err, "reading markdown")
-	source := []byte(markdown)
+	source := []byte(nulAsReplacement(markdown))
 	var front *Node
 	unclosedFrontmatter := false
 	if readFrontmatter {
@@ -333,17 +344,21 @@ func referencedLabels(nodes []*Node) []string {
 
 // ParseInline converts one textblock's worth of inline markdown into inline nodes, spending
 // budget, its caller write's, on the elements it makes. Markdown that forms more than one
-// paragraph, or holds text after its paragraph's last line, is ErrSchema.
+// paragraph, or holds text after its paragraph's last line, is ErrSchema. Every U+0000 in it is
+// read as U+FFFD, as it is in a document's markdown (readInline, parseUnstamped).
 func ParseInline(markdown string, budget *WriteBudget) (nodes []*Node, err error) {
 	return readInline(markdown, inlineMarkdown.run, parser.NewContext(), budget)
 }
 
 // readInline is ParseInline read with inline, one of an inlineReader's parsers, in context, a new
 // parse context its caller may read after the parse (parseInlineWithDefinitions), counting the
-// elements it makes on budget, a caller write's, or none when budget is nil (a read-back).
+// elements it makes on budget, a caller write's, or none when budget is nil (a read-back). Its
+// source is the caller's markdown with its line endings and its U+0000 characters read as the
+// parser of a document's markdown reads them (LineFeeds, nulAsReplacement, parseUnstamped); a
+// read-back's markdown, which the renderer wrote, holds neither, so both leave it as it is.
 func readInline(markdown string, inline parser.Parser, context parser.Context, budget *WriteBudget) (nodes []*Node, err error) {
 	defer recoverPanic(&nodes, &err, "reading inline markdown")
-	source := []byte(LineFeeds(markdown))
+	source := []byte(nulAsReplacement(LineFeeds(markdown)))
 	var count *parseCount
 	if budget != nil {
 		context.Set(writeBudgetKey, budget)
