@@ -1118,6 +1118,14 @@ export default function envoyExtension(pi: PiApi): void {
   // on the message it writes. An `inert` card is a steer that starts no turn on an idle host; a
   // turn streaming when it is handed takes it and runs another model turn for it, so
   // `UnwrittenFrames` hands an inert card only to a settled host (`hostSettled`).
+  //
+  // A card handed while a turn runs goes as an aside, not a steer: the host drains its steering
+  // queue one message per turn, so cards arriving faster than a session takes turns fell behind
+  // without end, while every pending aside is folded in whole at the next step boundary. A card
+  // handed to an idle host stays a steer with `triggerTurn`, which starts a turn also after an
+  // interrupt and in plan mode, where an idle aside starts none, so wake-on-message is unchanged.
+  // A targeted Aside is an aside either way. The state is the host's own (`ctx.isIdle()`); a
+  // context without it keeps the steer.
   const handCard = (
     content: string | readonly ContentBlock[],
     deliverAs: CardDelivery,
@@ -1133,7 +1141,10 @@ export default function envoyExtension(pi: PiApi): void {
       },
       deliverAs === "inert"
         ? { deliverAs: "steer", triggerTurn: false }
-        : { deliverAs, triggerTurn: true }
+        : {
+            deliverAs: activeSessionContext?.isIdle?.() === false ? "aside" : deliverAs,
+            triggerTurn: true,
+          }
     );
   };
 
