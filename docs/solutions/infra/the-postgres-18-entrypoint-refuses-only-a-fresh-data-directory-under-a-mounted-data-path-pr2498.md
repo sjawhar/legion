@@ -11,7 +11,6 @@ status: active
 module: scripts/e2e
 supersedes: docs/solutions/infra/the-postgres-18-image-mounts-its-data-one-level-up-so-move-the-mount-with-the-image-pr2364.md
 related_issues:
-  - "INFRA-741"
   - "sjawhar/legion#2498"
 ---
 
@@ -40,7 +39,7 @@ whole condition, and a negative control written from it can pass while proving n
   `[ -s "$PGDATA/PG_VERSION" ]`; the `/var/lib/postgresql/data (unused mount/volume)` entry is
   added only when `PGDATA` equals `/var/lib/postgresql/$PG_MAJOR/docker`, no older data directory
   was found, `PG_MAJOR` is at least 18, and the path answers its mount-point test.
-- sjawhar/legion#2498 (dispatch://INFRA-741) left the `docker run` line printed by the daemon's
+- sjawhar/legion#2498 left the `docker run` line printed by the daemon's
   four test skip messages mountless, from the image config's
   `Volumes {"/var/lib/postgresql":{}}`, and that line served `select 1` with
   `data_directory /var/lib/postgresql/18/docker` and no volume in its pod at all.

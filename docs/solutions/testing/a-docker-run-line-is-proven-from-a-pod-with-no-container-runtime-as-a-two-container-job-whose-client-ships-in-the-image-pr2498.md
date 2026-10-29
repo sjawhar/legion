@@ -11,7 +11,6 @@ date: 2026-10-29
 status: active
 module: scripts/e2e
 related_issues:
-  - "INFRA-741"
   - "sjawhar/legion#2498"
 ---
 
@@ -61,7 +60,7 @@ subject, the check is the second container, and the Job never completes.
 
 ## Evidence
 
-- sjawhar/legion#2498 (dispatch://INFRA-741) moved five devbox `docker run` sites and the daemon's
+- sjawhar/legion#2498 moved five devbox `docker run` sites and the daemon's
   four test skip messages to a digest-pinned PostgreSQL 18. No CI lane runs any of those lines:
   `.github/workflows/pr-and-main.yaml:291` sets `LEGION_E2E_PG_DSN` for the `test` job, and
   `scripts/e2e/stage1-skeleton.sh:148` guards the edited `docker run` with
@@ -91,6 +90,6 @@ subject, the check is the second container, and the Job never completes.
   `Volumes {"/var/lib/postgresql":{}}`. That last field is why the four Go skip messages, which
   carry no `--mount`, needed no mount edit: the image's one anonymous volume is already the path
   the entrypoint accepts.
-- The driver was recorded as `dispatch://INFRA-741/artifact/pg18-job-proof-sh` before the
+- The driver was recorded as a Dispatch artifact before the
   implementer completed, and the tester re-ran that same file for three of its cases (run
   `54fc4ca8`) beside its own driver.
