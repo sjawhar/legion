@@ -2,7 +2,6 @@ package api
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"log/slog"
 	"net/http"
@@ -403,22 +402,30 @@ func (r *eventStreamRelay) window() time.Duration {
 // and the created_at of the event at cursor (nil when no row holds it): the relay starts a
 // generation's cursor from the first two, and compares them with what it read for its cursor to
 // tell an event log that was reset (resetCursor).
+//
+// All three come from one statement, so they describe one log. A `truncate events restart
+// identity` (e2e/seed.ts) takes an ACCESS EXCLUSIVE lock, and a statement holds its ACCESS SHARE
+// lock on events until it ends, so the reset lands wholly before or wholly after this read. Read
+// as two statements, a reset committing between them would answer the old log's newest id with
+// no row at the cursor: the relay would take the old log's head for the new log's, and close the
+// next subscription opened after the reset as a second reset.
 func eventCursorCheck(ctx context.Context, q queryer, cursor int64) (maxID int64, maxAt time.Time, cursorAt *time.Time, err error) {
+	var newestID *int64
 	var newestAt *time.Time
-	if err := q.QueryRow(ctx, `select id, created_at from events order by id desc limit 1`).Scan(&maxID, &newestAt); err != nil && !errors.Is(err, pgx.ErrNoRows) {
+	if err := q.QueryRow(ctx, `
+		select newest.id, newest.created_at, (select created_at from events where id = $1)
+		from (select 1) one
+		left join lateral (select id, created_at from events order by id desc limit 1) newest on true
+	`, cursor).Scan(&newestID, &newestAt, &cursorAt); err != nil {
 		return 0, time.Time{}, nil, err
+	}
+	if newestID != nil {
+		maxID = *newestID
 	}
 	if newestAt != nil {
 		maxAt = *newestAt
 	}
-	var rowAt time.Time
-	switch err := q.QueryRow(ctx, `select created_at from events where id = $1`, cursor).Scan(&rowAt); {
-	case errors.Is(err, pgx.ErrNoRows):
-		return maxID, maxAt, nil, nil
-	case err != nil:
-		return 0, time.Time{}, nil, err
-	}
-	return maxID, maxAt, &rowAt, nil
+	return maxID, maxAt, cursorAt, nil
 }
 
 // readEventsAfterID reads up to limit committed events after an id, in id order, ask fields

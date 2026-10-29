@@ -595,9 +595,7 @@ func TestMentionRecoverySendsAStrandedAttemptOnceAndLeavesALiveClaimAlone(t *tes
 	ageAttempts(t, database, stranded.ID, held.ID)
 
 	next, stopNext := context.WithCancel(t.Context())
-	nextDeps := deps
-	nextDeps.Lifetime = next
-	restarted := register(http.NewServeMux(), nextDeps)
+	restarted := register(http.NewServeMux(), next, deps)
 	settled := waitForCommentDeliveries(t, database, stranded.ID, "the stranded attempt sent", allSent)
 	stopNext()
 	restarted.waitBackground()
@@ -653,7 +651,7 @@ func countedStranded(
 
 // A rolling update starts the successor before the old process is stopped, so the successor's
 // pass at start runs before the old process leaves anything. SIGTERM ends the old process's
-// Lifetime before its HTTP drain, so a comment that commits during that drain is refused by the
+// lifetime before its HTTP drain, so a comment that commits during that drain is refused by the
 // old process's sender and its attempt stays pending with no claim. The successor's next periodic
 // pass sends it, once.
 func TestARollingUpdatesSuccessorSendsTheMentionTheOldProcessAcceptedWhileDraining(t *testing.T) {
@@ -664,9 +662,8 @@ func TestARollingUpdatesSuccessorSendsTheMentionTheOldProcessAcceptedWhileDraini
 
 	// The successor is up first. Its passes after the one at start wait until the test lets them.
 	successorLifetime, stopSuccessor := context.WithCancel(t.Context())
-	successorDeps := deps
-	successorDeps.Lifetime = successorLifetime
-	successor := directServer(successorDeps)
+	successor := directServer(deps)
+	successor.lifetime = successorLifetime
 	passes := make(chan struct{}, 1)
 	gate := make(chan struct{})
 	letPassesRun := sync.OnceFunc(func() { close(gate) })
@@ -691,13 +688,13 @@ func TestARollingUpdatesSuccessorSendsTheMentionTheOldProcessAcceptedWhileDraini
 		t.Fatal("the successor's pass at start never read")
 	}
 
-	// SIGTERM: the old process's Lifetime ends, and then its HTTP drain answers a comment.
+	// SIGTERM: the old process's lifetime ends, and then its HTTP drain answers a comment.
 	stop()
 	drained := decodeMentionedComment(t, postMentionedComment(t, handler, issue.Key, map[string]any{
 		"body": "Accepted during the HTTP drain.", "mentions": []map[string]any{{"target": "session:s1"}},
 	}))
 	if !unclaimedPending(t, database, drained.ID, "session:s1") {
-		t.Fatal("a comment the old process accepted after its Lifetime ended had its attempt taken before the successor's pass")
+		t.Fatal("a comment the old process accepted after its lifetime ended had its attempt taken before the successor's pass")
 	}
 	// A pass leaves an attempt younger than a claim lease to the process that accepted it; this
 	// one has waited that long once the test moves its creation back a lease.

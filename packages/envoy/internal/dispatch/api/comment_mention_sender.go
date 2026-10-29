@@ -22,7 +22,7 @@ const mentionSendLanes = 8
 // it has waited a claim lease and the queue has room (strandedCommentMentions).
 const maxQueuedMentionSends = 4096
 
-// mentionDrainTimeout is how long the sends in flight when the server's Lifetime ends may run
+// mentionDrainTimeout is how long the sends in flight when the server's lifetime ends may run
 // before their context is cancelled. It overlaps the HTTP and document drain inside the runtime's
 // stop grace (cmd/dispatch/shutdown.go).
 const mentionDrainTimeout = 10 * time.Second
@@ -76,7 +76,7 @@ func (m mentionSend) lane() string {
 // Every database statement the sender makes goes through its two functions, send and stranded,
 // which register binds to the server (sendCommentMention, strandedCommentMentions).
 //
-// Sends run on the server's Lifetime without its cancellation: once the Lifetime ends nothing more
+// Sends run on the server's lifetime without its cancellation: once the lifetime ends nothing more
 // is queued and no queued send starts, and the sends in flight get mentionDrainTimeout before their
 // context is cancelled. A send refused once the sender stopped - a comment that commits during the
 // HTTP drain - or for the queue's bound, or queued and never started, leaves its attempt pending
@@ -118,13 +118,12 @@ type mentionSender struct {
 }
 
 // startMentionSender builds the server's mention sender (register), which sends on the server's
-// Lifetime and drains for at most mentionDrainTimeout once it ends, and starts its stranded pass,
+// lifetime and drains for at most mentionDrainTimeout once it ends, and starts its stranded pass,
 // at start and every strandedPassInterval, for the attempts any process left pending - only on a
-// server with a Lifetime and a store: one without either, a test's or a zero Deps, reads nothing
-// until a comment queues a send.
+// server with a store: one without, an empty Deps, reads nothing until a comment queues a send.
 func (s *server) startMentionSender() *mentionSender {
-	sender := newMentionSender(s.lifetime(), strandedPassInterval, s.sendCommentMention, s.strandedCommentMentions)
-	if s.deps.Lifetime != nil && s.deps.Store != nil && s.deps.Store.Pool != nil {
+	sender := newMentionSender(s.lifetime, strandedPassInterval, s.sendCommentMention, s.strandedCommentMentions)
+	if s.deps.Store != nil && s.deps.Store.Pool != nil {
 		sender.start()
 	}
 	return sender
@@ -145,7 +144,7 @@ func newMentionSender(
 	}
 }
 
-// stoppedLocked reports whether the sender starts nothing more: the Lifetime ended, or wait ran.
+// stoppedLocked reports whether the sender starts nothing more: the lifetime ended, or wait ran.
 func (m *mentionSender) stoppedLocked() bool {
 	return m.closed || m.lifetime.Err() != nil
 }
@@ -314,7 +313,7 @@ func (m *mentionSender) recoverStranded() {
 }
 
 // wait stops the sender from starting anything more, ends its periodic stranded pass and waits for
-// the sends in flight and a pass that is running. Call it once the Lifetime has ended, before the
+// the sends in flight and a pass that is running. Call it once the lifetime has ended, before the
 // pool closes.
 func (m *mentionSender) wait() {
 	m.mu.Lock()
@@ -350,7 +349,7 @@ func (s *server) sendCommentMention(ctx context.Context, item mentionSend) {
 // where state = 'pending'), so a pass with nothing stranded is that one statement and reads no
 // row; otherwise it reads the rows of its window and each comment's comment.created event. It
 // runs on a timer because no event announces a stranded attempt: a killed process sends no
-// signal, and a stopping one refuses its sends after its Lifetime ends.
+// signal, and a stopping one refuses its sends after its lifetime ends.
 func (s *server) strandedCommentMentions(ctx context.Context, limit int, held []mentionKey) ([]mentionSend, error) {
 	ctx = store.WithTransactionTracking(ctx)
 	heldComments := make([]string, len(held))
