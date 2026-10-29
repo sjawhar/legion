@@ -330,3 +330,79 @@ func TestRunRetriesAnIssueTopicNATSDenies(t *testing.T) {
 		t.Fatalf("/metrics body = %q, want the denied publish counted once", body)
 	}
 }
+
+// A notifying event has more than one JetStream destination - its owner topic and a session
+// route, a mention's copy, a claimant's or a document author's, every one of them a
+// notifications.agent.* subject the stream holds - and a grant that withholds those prefixes
+// denies every one of them. Each is named a denial, counted and backed off, as the single
+// destination above is: a reader of the issue topic is as silent either way, and the deployment's
+// alert is on the line that names the denial.
+//
+// What makes this its own test is that nats.go keeps one last error per connection, so the
+// violations of the destinations one publish window sent together overwrite one another, and
+// window.acknowledged can match only the subject the connection kept. Every other denied
+// destination answers the window's acknowledgement timeout instead, which settle reads as
+// bus.ErrUnavailable and so as an outage of the bus rather than a refusal of the event: the event
+// is released with no attempt counted, the counter records `failed` where the denial belongs, no
+// line names the subject, and publishBatch abandons the rest of that scan's backlog. That is the
+// whole pathology this change exists to remove, and it survives for the shape a notifying event
+// has in production.
+func TestRunCountsEveryDeniedJetStreamDestinationOfOneEvent(t *testing.T) {
+	var logged lockedBuffer
+	logtest.SetDefault(t, slog.NewTextHandler(&logged, nil))
+
+	// notifications.dispatch.> (the owner topic) and notifications.agent.> (the session route)
+	// are both withheld and both are stream subjects, so the event's two publishes are both
+	// JetStream and both denied. $JS.API.> stays, so the stream is still created.
+	client, _, _ := grantedNATS(t, "notifications.role.>", "_INBOX.>", "$JS.API.>")
+	database := storetest.Open(t)
+	broker := events.NewBroker()
+	route := "session:33333333-3333-4333-8333-333333333333"
+	seedIssue(t, database, "T-1", &route)
+	event := appendEvent(t, database, broker, model.Event{
+		IssueKey: new("T-1"), Type: "issue.updated", Actor: model.Actor{Kind: "user", ID: "alice"},
+		Payload: map[string]any{"title": "A person renamed the issue"},
+	})
+	if !event.Notify {
+		t.Fatalf("the appended event does not notify, so it has one destination and proves nothing: %#v", event)
+	}
+	registry := metrics.New()
+	stop := runDeps(t, Deps{
+		Store: database, Publisher: client, Broker: broker,
+		PublishFailures: registry.NewCounter("envoy_dispatch_outbox_publish_failures_total",
+			"Destinations of an outbox publish attempt that did not reach NATS"),
+	})
+	defer stop()
+
+	// An outage line settles the wait as an attempt does, so the assertions below name it rather
+	// than this timing out.
+	waitFor(t, 30*time.Second, "the outbox's first attempt at the event settled", func() bool {
+		_, attempts := publishedDestinations(t, database, event.ID)
+		return attempts > 0 || publishedAt(t, database, event.ID) != nil ||
+			strings.Contains(logged.String(), bus.ErrUnavailable.Error())
+	})
+	for _, line := range strings.Split(logged.String(), "\n") {
+		if strings.Contains(line, bus.ErrUnavailable.Error()) {
+			t.Fatalf("line %q reports a denied publish as an outage of the bus", line)
+		}
+	}
+	destinations, attempts := publishedDestinations(t, database, event.ID)
+	if at := publishedAt(t, database, event.ID); at != nil {
+		t.Fatalf("event marked published at %s with destinations %v, though NATS denied both", at, destinations)
+	}
+	if len(destinations) != 0 {
+		t.Fatalf("published_destinations = %v records a denied destination", destinations)
+	}
+	if attempts != 1 {
+		t.Fatalf("attempt_count = %d, want the one backed-off attempt", attempts)
+	}
+	response := httptest.NewRecorder()
+	registry.Handler().ServeHTTP(response, httptest.NewRequest(http.MethodGet, "/metrics", nil))
+	body := response.Body.String()
+	if !strings.Contains(body, `envoy_dispatch_outbox_publish_failures_total{reason="denied"} 2`) {
+		t.Fatalf("/metrics body = %q, want both denied destinations counted as denials", body)
+	}
+	if strings.Contains(body, `reason="failed"`) {
+		t.Fatalf("/metrics body = %q counts a denied destination as a failure", body)
+	}
+}
