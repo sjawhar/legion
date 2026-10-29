@@ -2410,7 +2410,10 @@ jobs:
   # five groups left it no headroom: that step died on go test's own deadline at job 123503246603.
   # Its own filter is the closure of this one package, not packages/envoy/**, so a change
   # elsewhere in the module does not start this job. No Bun: no test file here runs it, and
-  # envoy-go-race's Bun is pmdoc's.
+  # envoy-go-race's Bun is pmdoc's. It runs under -race because a read that walks a live document
+  # without its lock races the room's peers, which no ordinary run shows
+  # (TestReadsOfALiveDocumentRunBesideItsPeers, internal/dispatch/docs/live_read_race_test.go:39,
+  # LEGION-499).
   envoy-go-race-docs:
     needs: changes
     if: needs.changes.outputs.envoy_go_race_docs == 'true'
@@ -2446,8 +2449,9 @@ jobs:
         with:
           go-version-file: packages/envoy/go.mod
           cache: false
-      # go-envoy, restored only: its modules are the envoy module's, but this job builds no
-      # binary, where the family's saving jobs build the listener and natsd, so it saves none.
+      # go-envoy, restored only: its modules are the envoy module's, but this job builds the
+      # document service's race test binary, not the listener and natsd the family's saving jobs
+      # build, so it saves none.
       - id: go-cache
         uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
