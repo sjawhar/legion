@@ -1,0 +1,5 @@
+kind: Fixed
+body: A closed issue's document no longer says "Reload to edit.", which a reload cannot make true; the dashboard shows that line only for a read-only admission that came while the issue was open, while the issue is open and the document's socket is connected.
+time: 2026-10-29T06:00:01.000000000Z
+custom:
+    Issue: fix-close-withdraws-asks-reopen

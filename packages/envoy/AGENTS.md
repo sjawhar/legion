@@ -109,8 +109,8 @@ read, since the room and its browsers hold it; one that wrote nothing leaves a m
 the settlement the move scheduled. A repair is written only into the document the settlement read
 (`applySuppressed`): one whose room was evicted and reloaded since is refused and retried. Every
 close of a room the service makes - a failed room's eviction, the close of a room behind the
-durable head (`closeRoomInstance`), `Evict` (tests) and `Quiesce`, an issue's close, `Shutdown`'s
-close of a room with an editor - goes through its server's close gate (`roomServer`: its
+durable head (`closeRoomInstance`), `Evict` (tests) and `Quiesce`, an issue's close or reopen,
+`Shutdown`'s close of a room with an editor - goes through its server's close gate (`roomServer`: its
 `CloseRoom`, which shadows ygo's, so a call written against ygo's API is gated too, its
 `closeInstance` for the instance-only close, or its `closeOwned` for a failed room's eviction).
 That close waits for a repair committing into the room and refuses new repairs
