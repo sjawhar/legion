@@ -1,0 +1,14 @@
+kind: Added
+body: |-
+    `GET /v1/roles` lists every role claim and its holder, sorted by role, and changes none of
+    them: one request answers "who holds the roles?", where one `GET /v1/roles/<role>` per role
+    costs one request each and `GET /v1/sessions` answers by session, so it can show no claim whose
+    holder is gone - the claim worth watching. Each row is `{role, state, holder}` with the live
+    holder's `title`, `dir`, `machine_id`, `host`, `capabilities` and `last_seen`; `state` is
+    `live` or `holder_lapsed`, and a lapsed row carries the final last-seen time the listener still
+    keeps. The claims come from the registry's watched view of the role bucket
+    (`store.Registry.RoleHolders`), so the list makes no bucket call for them and a view that is
+    not complete is the bus-unavailable 503, never a role reported unclaimed.
+time: 2026-10-29T22:50:01.000000000Z
+custom:
+    Issue: envoy-role-read-is-a-read

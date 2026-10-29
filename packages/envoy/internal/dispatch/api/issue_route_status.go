@@ -29,12 +29,12 @@ import (
 //
 // no_holder is one read and says only "nobody right now": a session that restarts or moves
 // between agent boxes keeps its id but is absent from the listener for minutes. The read does not
-// try to tell that gap from a vacancy with a last-seen time, because the listener offers none
-// that a read may take: GET /v1/roles/{role} reports a lapsed holder's last_seen only by
-// releasing the expired claim as it answers (cmd/listener resolveRoleHolder), so a read
-// would mutate role state and the next read would see "unclaimed" with no last_seen, and the
-// last-seen memory behind it is the answering listener's own process cache, not the shared
-// registry. The owner audit (skills/legion-controller/references/backlog-stewardship.md) and
+// try to tell that gap from a vacancy with a last-seen time. It judges every issue against one
+// roster read rather than a lookup per issue, and the last seen a lapsed holder's lookup gives
+// (GET /v1/roles/{role}, which releases nothing and so may be read as often as a caller likes:
+// cmd/listener keepLapsedRoleClaim) is the answering listener's own process cache, not the shared
+// registry, so two listeners answer it differently and neither answer is the registry's. The
+// owner audit (skills/legion-controller/references/backlog-stewardship.md) and
 // `dispatch issues --help` (route_status) ask for two reads ten minutes apart instead.
 
 // routeRoster is one listener answer about who is running. answered is false when the listener

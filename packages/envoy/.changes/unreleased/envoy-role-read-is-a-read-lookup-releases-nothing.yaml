@@ -1,0 +1,15 @@
+kind: Fixed
+body: |-
+    `GET /v1/roles/<role>` releases nothing. It released a lapsed holder's claim as a side effect
+    of answering, so a monitor that watched a role changed what it measured, and no caller could
+    ask "who holds this?" without possibly taking the answer away: the read deleted the claim, its
+    404 said `claim_released: true`, and the next read of the same role answered `unclaimed` with
+    no holder and no last-seen time. The lookup now keeps the claim (`keepLapsedRoleClaim`), its
+    404 says `claim_released: false` and `claim retained`, and a second read answers the same. What
+    ends a lapsed claim is unchanged: the role reaper every five minutes, and the next claim of the
+    role, whose soft claim supersedes a holder that is gone. Only the two paths that decide where a
+    message goes - role delivery and a role send through `POST /v1/messages/publish` - still
+    release one, and their answers are unchanged.
+time: 2026-10-29T22:50:00.000000000Z
+custom:
+    Issue: envoy-role-read-is-a-read
