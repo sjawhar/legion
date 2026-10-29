@@ -492,8 +492,12 @@ func normalizeAskOptions(options []model.AskOption) []model.AskOption {
 // edit deletes, in one edit, the blocks the refusal names (planAskRepair), and the ask edit
 // follows. Until the document settles its block ids (a child with no id, or an id repeated in the
 // tree, which ApplyOps would restamp first) the refusal names no delete and asks for a retry.
-// Where no one edit of deletes leaves every decision it changes readable, the refusal names none
-// and says which decision must be repaired, so that following the refusals cannot circle.
+// Where no one edit of deletes leaves every decision it changes readable, the refusal names no
+// delete and no decision to edit: it says the decision is repaired where a person writes it, in
+// the document editor, or by an ask edit of its own once the decision holding it reads. It sends
+// no caller to an ask edit of another decision, which is not the caller's to make: a decision
+// that does not parse is refused before its content rule is read (askBlockOf), and a decided one,
+// or one another person opened, is refused by the route above.
 //
 // The refusal quotes every block of the decision in full, nested content and all, so a caller
 // deleting one can restore every word, and gives each block id as quoted data, never inside a
@@ -537,18 +541,18 @@ func refuseAskContentEdit(tree *pmdoc.Node, block askBlock) error {
 			"by its id; one edit holding one delete per block), which keeps the question's paragraphs and the " +
 			"first list after them, here and in every decision nested in the blocks it keeps; the blocks to " +
 			"delete are " + strings.Join(plan.drop, ", ") + "; then edit the ask"
-	case plan.holder != "":
+	case plan.holder:
 		reason += ", and no document edit deleting blocks of this decision leaves every decision it changes " +
-			"readable: a delete inside this one changes ask block " + strconv.Quote(plan.holder) + ", which holds " +
-			"it, and an edit may not leave a decision it changes unreadable, where " + plan.blocked.Error() +
-			"; edit ask block " + strconv.Quote(plan.holder) + " first"
+			"readable: a delete inside this one changes the decision holding it, which such an edit may not " +
+			"leave unreadable, and these deletes would; this decision is repaired in the document editor, or " +
+			"by an ask edit once the decision holding it reads as one"
 	case plan.blocked != nil:
 		reason += ", and no document edit deleting this decision's blocks, or those of a decision nested in it, " +
 			"leaves it valid, since with them deleted " + plan.blocked.Error() + ", which needs words written, " +
-			"not blocks deleted"
+			"not blocks deleted; this decision is repaired in the document editor"
 	default:
 		reason += ", and no document edit deleting this decision's blocks, or those of a decision nested in it, " +
-			"leaves it valid"
+			"leaves it valid; this decision is repaired in the document editor"
 	}
 	return &ErrAskBlockUnrepresentable{Field: "block", Reason: reason + quoted}
 }
@@ -558,12 +562,13 @@ type askRepairPlan struct {
 	// drop is the id of each block to delete, Go-quoted, in document order. It is empty when no
 	// one edit of deletes leaves the decision valid.
 	drop []string
-	// blocked is why the deletes the plan would have named leave a decision the edit changes
-	// unreadable, nil when they do not.
+	// blocked is why the deletes the plan would have named leave the edited decision, or one
+	// nested in it, unreadable, nil when they do not or when a decision holding it is the one
+	// they would leave unreadable (holder).
 	blocked error
-	// holder is the block id of the decision holding the edited one that blocked is about, "" when
-	// blocked is about the edited decision or one nested in it.
-	holder string
+	// holder reports whether the deletes the plan would have named leave a decision holding the
+	// edited one unreadable, which no ask edit of this decision can repair.
+	holder bool
 }
 
 // planAskRepair is the one document edit that repairs ask, the decision of tree being edited,
@@ -579,9 +584,9 @@ type askRepairPlan struct {
 // nested in it that loses a block and every decision holding ask must read strictly
 // (readAskBlockStrictly, which the deletes alone cannot give a decision with no question left, or
 // one whose options the parse cannot read). Where one would not, the plan names no delete and
-// carries why. A decision holding this one comes first, outermost first: its own repair holds the
-// repair of every decision nested in it, this one among them, so a caller sent to it is sent to
-// the one edit that repairs them all, where a caller sent inwards could be sent back out again.
+// carries why: a decision holding ask, which this repair may not leave unreadable (holder), or
+// ask itself, or one nested in it (blocked). Either way the caller is sent to no other decision's
+// ask edit, which can be one no caller may make.
 func planAskRepair(tree, ask *pmdoc.Node) askRepairPlan {
 	drop, changed := askRepairDrops(ask)
 	if len(drop) == 0 {
@@ -595,7 +600,7 @@ func planAskRepair(tree, ask *pmdoc.Node) askRepairPlan {
 	for _, id := range askHolderIDs(tree, ask) {
 		if node, found := repaired[id]; found {
 			if reason := readAskBlockStrictly(node); reason != nil {
-				return askRepairPlan{blocked: reason, holder: id}
+				return askRepairPlan{holder: true}
 			}
 		}
 	}

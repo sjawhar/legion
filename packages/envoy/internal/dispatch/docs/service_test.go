@@ -958,6 +958,9 @@ func TestSetAskBlockTextRefusalOfEveryBrokenBodyLeadsToAValidDecision(t *testing
 			if !errors.As(err, &unrepresentable) {
 				t.Fatalf("ask edit of the broken body = %v, want ErrAskBlockUnrepresentable", err)
 			}
+			if sendsTheCallerOn(unrepresentable.Reason) {
+				t.Fatalf("the refusal sends the caller to edit another decision first: %v", err)
+			}
 			if !blocksToDelete.MatchString(unrepresentable.Reason) {
 				why := noDeleteExplanation(ask, unrepresentable.Reason)
 				if why == "" || strings.Contains(unrepresentable.Reason, "delete the blocks") {
@@ -1080,18 +1083,24 @@ func askBodies(kinds []string, longest int) [][]string {
 }
 
 // noDeleteExplanation is why reason, a refusal of an edit of ask naming no delete, names none, as
-// it says it - or "" when it does not say, or says what is not so.
+// it says it - or "" when it does not say, or says what is not so. A refusal that names no delete
+// because no edit of deletes repairs the decision says so too: the decision is repaired in the
+// document editor, the one way out it offers, since no ask edit of another decision is one.
 func noDeleteExplanation(ask *pmdoc.Node, reason string) string {
 	question := slices.ContainsFunc(ask.Children, func(child *pmdoc.Node) bool {
 		return child.Type == "paragraph" && strings.TrimSpace(pmdoc.TextContent(child)) != ""
 	})
-	for _, explanation := range []string{
-		`ask block "ask-lists" has an empty question`,
-		"no document edit deleting this decision's blocks, or those of a decision nested in it, leaves it valid",
-	} {
-		if strings.Contains(reason, explanation) && !question {
-			return explanation
-		}
+	if question {
+		return ""
+	}
+	// A decision settlement cannot read at all is refused before its content rule is weighed
+	// (askBlockOf), with settlement's own reason and no way out of its own.
+	if strings.Contains(reason, `ask block "ask-lists" has an empty question`) {
+		return `ask block "ask-lists" has an empty question`
+	}
+	const explanation = "no document edit deleting this decision's blocks, or those of a decision nested in it, leaves it valid"
+	if strings.Contains(reason, explanation) && strings.Contains(reason, repairedInTheEditor) {
+		return explanation
 	}
 	return ""
 }
@@ -1270,10 +1279,12 @@ func TestSetAskBlockTextRefusalOfEveryBrokenBodyHoldingADecisionLeadsToAValidDec
 	}
 }
 
-// The two shapes the review of sjawhar/legion#2433 found, word for word: a decision and the one an
-// option holds both breaking the rule, where one edit must repair both, and a decision holding
-// one that reads as no decision for another reason (an empty question) before the one that breaks
-// the rule, which the refusal must not name in its place.
+// The four shapes the review of sjawhar/legion#2433 found, word for word: a decision and the one
+// an option holds both breaking the rule, where one edit must repair both; a decision holding one
+// that reads as no decision for another reason (an empty question) before the one that breaks the
+// rule, which the refusal must not name in its place; and the two where the decision holding the
+// edited one would have to change - it has no question of its own, or it is decided and broken
+// too - where the refusal names no delete and no decision to edit.
 func TestSetAskBlockTextRefusalOfNestedDecisionsNamesOnlyWhatBreaksTheRule(t *testing.T) {
 	t.Run("the decision and the one it holds both broken", func(t *testing.T) {
 		service, artifactID := seedIndexedShipAsk(t, "ask-lists")
@@ -1292,12 +1303,13 @@ func TestSetAskBlockTextRefusalOfNestedDecisionsNamesOnlyWhatBreaksTheRule(t *te
 		tuesday, _ := outer.Children[1].Children[0].Children[1].Children[2].Attrs[pmdoc.BlockIDAttr].(string)
 		defer_, _ := outer.Children[2].Attrs[pmdoc.BlockIDAttr].(string)
 		// The decision an option holds cannot be repaired on its own: the delete changes the
-		// decision holding it, which the edit may not leave unreadable, so its refusal names the
-		// decision to edit instead of a delete that a document edit would refuse.
+		// decision holding it, which the edit may not leave unreadable, so its refusal names no
+		// delete - and no decision to edit either, since an ask edit of the one holding it is not
+		// the caller's to make.
 		held := editAskUrgency(service, artifactID, "ask-nested")
-		if held == nil || !strings.Contains(held.Error(), `edit ask block "ask-lists" first`) ||
-			blocksToDelete.MatchString(held.Error()) {
-			t.Fatalf("the refusal of the held decision = %v, want it to name no delete and send the caller to the decision holding it", held)
+		if held == nil || blocksToDelete.MatchString(held.Error()) || sendsTheCallerOn(held.Error()) ||
+			noDeleteReason(held.Error()) != heldBackByItsHolder {
+			t.Fatalf("the refusal of the held decision = %v, want it to name no delete and no decision to edit", held)
 		}
 		if !liveTree(t, service, artifactID).EqualWithBlockIDs(before) {
 			t.Fatalf("the refused ask edit wrote to the document: %v", held)
@@ -1367,6 +1379,90 @@ func TestSetAskBlockTextRefusalOfNestedDecisionsNamesOnlyWhatBreaksTheRule(t *te
 			t.Fatalf("the decision with no question is invalid = %#v, want settlement's own reason", reason)
 		}
 	})
+
+	// The decision holding the broken one has no question of its own, so no delete inside the
+	// broken one leaves it readable. Its refusal names no delete and no decision to edit: an ask
+	// edit of the one holding it is refused before its content rule is read (askBlockOf), so a
+	// caller sent there would be sent back.
+	t.Run("the decision holding it has no question", func(t *testing.T) {
+		service, artifactID := seedIndexedShipAsk(t, "ask-lists")
+		editLiveTree(t, service, artifactID, func(tree *pmdoc.Node) *pmdoc.Node {
+			ask := firstAsk(tree)
+			decision := parsedBlock(t, ":::ask{#ask-nested urgency=\"med\" multiple=\"false\" state=\"open\"}\nWhich day?\n\n- Monday\n:::\n")
+			decision.Children = append(decision.Children, parsedBlock(t, "- Tuesday\n"))
+			ask.Children[0].Children = nil
+			item := ask.Children[1].Children[0]
+			item.Children = append(item.Children, decision)
+			return tree
+		})
+		settleCurrentGeneration(t, service, artifactID)
+		before := liveTree(t, service, artifactID)
+		err := editAskUrgency(service, artifactID, "ask-nested")
+		if got, want := err.Error(), heldBackRefusal(t, before); got != want {
+			t.Fatalf("refusal =\n%s\nwant\n%s", got, want)
+		}
+		assertAskEditWroteNothing(t, service, artifactID, before, err)
+		// The decision holding it is no ask edit's to repair either: its own edit is refused for
+		// the question it no longer holds.
+		holder := editAskUrgency(service, artifactID, "ask-lists")
+		if holder == nil || holder.Error() != `block: ask block "ask-lists" has an empty question` {
+			t.Fatalf("the ask edit of the decision holding it = %v, want settlement's own reason for its empty question", holder)
+		}
+	})
+
+	// The decision holding the broken one is decided and broken too: deleting inside the held one
+	// leaves it broken still, and its own ask edit is one the route refuses a caller outright
+	// (`ASK_NOT_OPEN`). The refusal names no delete and no decision to edit.
+	t.Run("the decision holding it is decided and broken too", func(t *testing.T) {
+		service, artifactID := seedIndexedShipAsk(t, "ask-lists")
+		answerIndexedAsk(t, service, artifactID, "ask-lists")
+		settleCurrentGeneration(t, service, artifactID)
+		editLiveTree(t, service, artifactID, func(tree *pmdoc.Node) *pmdoc.Node {
+			ask := firstAsk(tree)
+			decision := parsedBlock(t, ":::ask{#ask-nested urgency=\"med\" multiple=\"false\" state=\"open\"}\nWhich day?\n\n- Monday\n:::\n")
+			decision.Children = append(decision.Children, parsedBlock(t, "- Tuesday\n"))
+			item := ask.Children[1].Children[0]
+			item.Children = append(item.Children, decision)
+			ask.Children = append(ask.Children, parsedBlock(t, "- Defer: Wait a week\n"))
+			return tree
+		})
+		settleCurrentGeneration(t, service, artifactID)
+		before := liveTree(t, service, artifactID)
+		if state := blockByID(before, "ask-lists").Attrs["state"]; state != "answered" {
+			t.Fatalf("the decision holding it is %v, want it answered", state)
+		}
+		err := editAskUrgency(service, artifactID, "ask-nested")
+		if got, want := err.Error(), heldBackRefusal(t, before); got != want {
+			t.Fatalf("refusal =\n%s\nwant\n%s", got, want)
+		}
+		assertAskEditWroteNothing(t, service, artifactID, before, err)
+	})
+}
+
+// heldBackRefusal is the refusal of an ask edit of the decision ask-nested of tree, word for
+// word: a decision whose repair would have to change the decision holding it, so that no delete
+// of its own repairs it. It names no delete and no decision to edit, and quotes its three blocks
+// - its question, its options and the second list breaking its rule - by their ids, as data.
+func heldBackRefusal(t *testing.T, tree *pmdoc.Node) string {
+	t.Helper()
+	held := blockByID(tree, "ask-nested")
+	ids := make([]string, 0, len(held.Children))
+	for _, child := range held.Children {
+		id, _ := child.Attrs[pmdoc.BlockIDAttr].(string)
+		ids = append(ids, strconv.Quote(id))
+	}
+	if len(ids) != 3 {
+		t.Fatalf("the held decision holds %d blocks, want its question, its options and a second list", len(ids))
+	}
+	return `block: ask block "ask-nested", asking "Which day?", holds a second bullet list where its content rule, ` +
+		`paragraph+ bullet_list?, allows one or more paragraphs and then at most one bullet list, last; ` +
+		`the ask-edit route does not rebuild a decision that breaks its content rule, and no document edit ` +
+		`deleting blocks of this decision leaves every decision it changes readable: a delete inside this one ` +
+		`changes the decision holding it, which such an edit may not leave unreadable, and these deletes would; ` +
+		heldBackByItsHolder + `; its blocks are: ` +
+		`block ` + ids[0] + ` (paragraph) reads "Which day?"; ` +
+		`block ` + ids[1] + ` (bullet_list) reads "- Monday"; ` +
+		`block ` + ids[2] + ` (bullet_list) reads "- Tuesday"`
 }
 
 // namedAskBlock matches a decision a refusal names, its block id Go-quoted.
@@ -1403,6 +1499,9 @@ func followAskRefusal(t *testing.T, service *Service, artifactID, blockID string
 	var unrepresentable *ErrAskBlockUnrepresentable
 	if !errors.As(err, &unrepresentable) {
 		t.Fatalf("ask edit of the broken decision %q = %v, want ErrAskBlockUnrepresentable", blockID, err)
+	}
+	if sendsTheCallerOn(unrepresentable.Reason) {
+		t.Fatalf("the refusal of the edit of %q sends the caller to edit another decision first: %v", blockID, err)
 	}
 	for _, named := range namedAsks(t, err) {
 		if found := blockByID(before, named); found == nil || pmdoc.AskContentError(found) == nil {
@@ -1478,12 +1577,21 @@ func followAskRefusal(t *testing.T, service *Service, artifactID, blockID string
 	return ""
 }
 
+// repairedInTheEditor is the way out a refusal naming no delete offers: the decision is repaired
+// where a person writes it, never by an ask edit of another decision, which the route can refuse
+// outright - a decision that does not parse, a decided one, or another person's.
+const repairedInTheEditor = "this decision is repaired in the document editor"
+
+// heldBackByItsHolder is that way out for a decision whose repair would have to change the one
+// holding it: the editor, or this decision's own ask edit once the one holding it reads.
+const heldBackByItsHolder = repairedInTheEditor + ", or by an ask edit once the decision holding it reads as one"
+
 // noDeleteReason is how a refusal that names no delete says why, or "" when it says none of the
 // three things it can say.
 func noDeleteReason(reason string) string {
 	for _, why := range []string{
-		"no document edit deleting blocks of this decision leaves every decision it changes readable",
-		"no document edit deleting this decision's blocks, or those of a decision nested in it, leaves it valid",
+		heldBackByItsHolder,
+		repairedInTheEditor,
 		"the document has not settled its block ids yet",
 	} {
 		if strings.Contains(reason, why) {
@@ -1491,6 +1599,22 @@ func noDeleteReason(reason string) string {
 		}
 	}
 	return ""
+}
+
+// sendsTheCallerOn reports whether a refusal tells the caller to edit something else before this
+// decision. No refusal may: a decision it would send them to can be one no ask edit reaches - one
+// that does not parse, one already decided, or another person's - so following the refusals would
+// circle. The one "first" a refusal may hold names the first list it keeps.
+func sendsTheCallerOn(reason string) bool {
+	if strings.Contains(reason, "edit ask block") {
+		return true
+	}
+	for _, match := range regexp.MustCompile(`\bfirst\b[a-z ]*`).FindAllString(reason, -1) {
+		if !strings.HasPrefix(match, "first list") {
+			return true
+		}
+	}
+	return false
 }
 
 // assertAskEditWroteNothing checks a refused ask edit left the document as before.
@@ -1708,20 +1832,26 @@ func assertBrokenAskEditRefused(t *testing.T, service *Service, artifactID strin
 	assertShipAskRow(t, service, artifactID, "ask-lists")
 }
 
-// A decided ask given a second list is marked invalid and keeps its decided row; once the second
-// list is gone, settlement clears invalid and the block carries its decided wording again.
-func TestSettlementMarksADecidedAskWithASecondBulletListInvalid(t *testing.T) {
-	service, artifactID := seedIndexedShipAsk(t, "ask-lists")
-	answer := model.AskAnswer{User: "alice", Selected: []string{"Ship"}, At: time.Now().UTC()}
-	answerJSON, err := json.Marshal(answer)
+// answerIndexedAsk marks the ask row of blockID answered by alice, as a person deciding it does;
+// the next settlement projects that back into its block.
+func answerIndexedAsk(t *testing.T, service *Service, artifactID, blockID string) {
+	t.Helper()
+	answerJSON, err := json.Marshal(model.AskAnswer{User: "alice", Selected: []string{"Ship"}, At: time.Now().UTC()})
 	if err != nil {
 		t.Fatalf("encode answer: %v", err)
 	}
 	if _, err := service.store.Pool.Exec(context.Background(), `
 		update asks set state = 'answered', answer = $3 where block_artifact_id = $1 and block_id = $2
-	`, artifactID, "ask-lists", answerJSON); err != nil {
+	`, artifactID, blockID, answerJSON); err != nil {
 		t.Fatalf("answer indexed ask: %v", err)
 	}
+}
+
+// A decided ask given a second list is marked invalid and keeps its decided row; once the second
+// list is gone, settlement clears invalid and the block carries its decided wording again.
+func TestSettlementMarksADecidedAskWithASecondBulletListInvalid(t *testing.T) {
+	service, artifactID := seedIndexedShipAsk(t, "ask-lists")
+	answerIndexedAsk(t, service, artifactID, "ask-lists")
 	settleCurrentGeneration(t, service, artifactID)
 	assertAnsweredShipAsk := func(stage string) {
 		t.Helper()
