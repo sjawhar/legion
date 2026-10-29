@@ -149,10 +149,11 @@ func TestDrainRunsItsHooksWhileTheConnectionCarriesRequests(t *testing.T) {
 	}
 }
 
-// warnOrErrorRecords takes the client under test from the moment it is connected. Nothing a
-// connected client logs carries its name: the records that do are its close's (`envoy nats
-// disconnected`, `envoy nats connection closed`, `envoy nats recovery cancelled`), which nats.go
-// reports from its own callbacks after the drain has returned. In 20 measured drains of
+// warnOrErrorRecords takes the client under test from the moment it is connected, though that
+// client may have logged nothing under its name yet: a healthy client of these tests first names
+// itself in its close's records (`envoy nats disconnected`, `envoy nats connection closed`, `envoy
+// nats recovery cancelled`), which nats.go reports from its own callbacks after the drain has
+// returned. In 20 measured drains of
 // TestAStuckDeliveryStillEndsTheKVWatchers' shape, 4 had no such record when Drain returned, the
 // first landing 1.6 to 2.3 ms later, and that test reads the records with no wait of its own, so
 // a helper that refuses its caller until such a record lands makes the test race nats.go's
@@ -184,14 +185,15 @@ func consumerNames(js natsgo.JetStreamContext, stream string) []string {
 // warnOrErrorRecords is every WARN or ERROR record the client named name logged so far, each as
 // its level and message, with the error for an async error report. name is the name that client
 // was connected with (bus.WithName), and the caller passes it rather than the helper deriving it:
-// nothing a connected client logs carries its name until its close, so a helper that waited for a
-// record of the client under test would make its caller race nats.go's callbacks
+// a healthy client of these tests may have logged nothing under its name when the assertion reads,
+// its first such records being its close's, so a helper that waited for a record of the client
+// under test would make its caller race nats.go's callbacks
 // (TestWarnOrErrorRecordsTakesAClientThatHasLoggedNothing). The capture (captureBusLogs) is the
 // process's default logger, so every client of every test running in this binary writes into it,
 // and a record naming another client is dropped: without that, a client an earlier test left
 // connected to a cluster it has stopped fails this test with its reconnect warning. A caller that
-// names no client is refused, since this assertion would otherwise read every client of the
-// binary or drop the records it is for. A record naming no client is kept, since the records
+// names no client is refused, since the filter would then drop every record that names a client,
+// the client under test's among them. A record naming no client is kept, since the records
 // these tests require are a watcher's and a reconcile's, which name none.
 func warnOrErrorRecords(t *testing.T, logs *busLogs, name string) []string {
 	t.Helper()
