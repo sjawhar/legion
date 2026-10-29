@@ -22,11 +22,120 @@ it launches, handing it instead the `legion-pane` seed file it holds as `NATS_NK
 it has one. `@legion/envoy-client/delivery` is the sole inbound
 renderer: it produces a tolerant TOON block and never exposes raw envelope bytes. A targeted
 Dispatch **BTW** frame runs the host's side turn (`ctx.runEphemeralTurn`, Oh My Pi 18.3 on) and
-posts its body or error to the correlated delivery attempt; **Aside** and **Steer** call
-`pi.sendMessage` with their respective delivery mode, except a person's direct Send or Aside
-(below). A BTW side turn still running when the handler that subscribed the agent subject
-(`session_start`, a session switch, or a Legion handler re-establishing through the claim bridge)
-reaches the host's 30 s handler budget is aborted, and Dispatch gets the abort as the reply's error.
+posts its body or error to the correlated delivery attempt. Every other frame that is not a
+person's direct Send or Aside (below) is a card, which `pi.sendMessage` delivers with `triggerTurn`:
+an aside while a turn runs, and a steer on an idle session unless the frame is a targeted Aside,
+which is an aside in both states. Which state the session is in is the host's `ctx.isIdle()`, read
+when the card is sent; a context without it gets every card but a targeted Aside as a steer, as
+before. The rules live in `src/card-wake.ts` (`CardWake`), tested there without NATS. The host drains
+its steering queue one message per step, first in, first out (`steeringMode` one-at-a-time), so a
+card there would hold a person's Send back a step; an aside is folded in at the next step, after
+any steer, without ending the running tool batch. An aside still queued at an interrupt (an Esc, or
+the RPC `abort` a Legion daemon sends) is folded into the context with no run and read at the next
+turn, where an Esc dropped a queued steer and an RPC `abort` resumed the run on it.
+The host also folds an aside with no turn when it lands after the run's last step (during the
+run's `agent_end` handlers or an automatic compaction) while an interrupt since the last user
+prompt is still in effect (a card-started run does not end it) or plan mode is on, and an aside
+that reaches an idle session in either state, where the steer it replaced started a turn. So every
+card carries a marker in its `details` (`EnvoyCardMarker`), and its `message_end` arms one check on
+the host's timer: when the session is idle, no run has started since the card, no interrupt is in
+effect and no assistant message follows the card in the branch, the check sends one hidden wake for
+every card it found unread, `deliverAs: "nextTurn"` with `triggerTurn` and `LOCAL_ENVOY_NOTICE`,
+which starts a turn on an idle host and, on one that turned busy, waits in the hidden next-turn
+queue rather than ahead of a person's Send. The branch decides, not the order of events, since the
+host emits an extension's `agent_end` unawaited and a fold's `message_end` can reach the extension
+before or after it. An interrupt shows to an extension only as the interrupted run's aborted
+assistant message (`Interrupted by user`), an aborted automatic compaction, or a retry cancelled in
+its backoff (`auto_retry_end`, `Retry cancelled`); each holds the wake off until the next run
+starts, so the cards an interrupt finds wait for the next turn. An interrupt while the host sets up
+a prompt (busy, before the run's `agent_start`) shows as nothing at all, so a card sent while the
+host is busy and no run has started, or after the run's `agent_end` while the host still settles,
+is never woken: the run that starts reads it, or the host folds it and the next turn reads it. A
+run the host drops with no `agent_end` for extensions, as a switch to a new or resumed session and
+a manual or extension compaction do (they disconnect from the agent before they abort it), ends
+once the host is seen idle: by a card or a check that finds it idle, or at a `session_switch`, a
+`session_compact` or a typed input (the `input` event an RPC prompt, a terminal Enter and
+`sendUserInput` emit before they prompt) that finds `isIdle` true (`CardWake.noteIfIdle`). The
+abort leaves the host idle at the switch's or the compaction's event, and a prompt sent from idle
+is typed while the host is idle, while an automatic compaction runs with the host busy and leaves a
+live run going, whatever order its `session_compact` and `auto_compaction_end` arrive in. A folded
+targeted Aside gets no wake, since it was an aside before too and the host folded it with no turn
+under the latch or in plan mode just the same.
+A card that reaches an RPC session while Oh My Pi starts must not start a turn there: the host
+settles every extension send of its startup before it returns from `initializeExtensions`, and RPC
+mode reads no command until then, while an idle card with `triggerTurn` is a send that lasts its
+whole run, so such a card held the daemon's `get_state` and task back until that turn ended. The
+host gives an extension no event once that drain is over, so the card is its own witness: in the
+startup phase (`ctx.mode` "rpc": RPC mode, and ACP, which initialises extensions in it too and whose
+bridge defers a turn the agent starts, so there the wake is hidden next-turn context, as main's idle
+steer was) a card that finds the host idle, a targeted Aside included, goes as a `followUp` with
+no `triggerTurn`, which the host appends with no turn only once its startup hold has settled, and
+the check its `message_end` arms runs on the host's timer, when an idle host has no startup send
+pending; it sends the wake outside the drain and ends the phase. A card the host has not yet
+emitted holds the check back for up to 30 s (`STARTUP_CARD_CAP_MS`), and a busy check leaves the
+startup cards to the running turn and checks again at its `agent_end`. Print and json mode prompt
+right after their own startup awaits, where a wake's turn would make that prompt fail as busy, and
+the terminal reads its input on its own, so in every other mode an idle card is a steer from the
+first, unless the start-turn mark holds.
+The start-turn mark (`EnvoyPluginInterface.startupTurn`, which `@sjawhar/pi-legion` sets for its
+controller's start and clears at that session's first `agent_start`) keeps that start the session's
+first turn. The operator's controller in a terminal is marked at its `session_start` with the start
+unsent (`sentAt` undefined), since it sends the start message only from `/legion-controller-start`,
+which Oh My Pi runs after its startup, and that send marks it sent; the daemon's controller in RPC
+mode is marked sent right before its `claims/ready`, after which the daemon writes the start prompt.
+Without the mark, a terminal's idle card would start its turn ahead of the start command, and in
+RPC mode a card's wake would fire once the host is idle after its startup, which can be before the
+daemon's prompt arrives. While the mark names this session (the instance's own and the host's live
+one) and its start was sent less than 30 s ago (`STARTUP_TURN_CAP_MS`), or is unsent and pi-envoy
+first read that unsent mark less than 30 s ago, the startup phase holds whatever `ctx.mode` is: an
+idle card goes as a `followUp` with no turn, and an idle check sends no wake, keeps the phase and
+checks again at the sent mark's cap, or every second while the start is unsent
+(`STARTUP_TURN_POLL_MS`, since no event tells pi-envoy of the send, nor of a start claim refused
+before the send, which clears the mark), until that mark's cap. The unsent mark's cap is not
+renewed, so a start that never comes (a start claim that never answers, a session started with no
+`/legion-controller-start`) holds the cards back for 30 s once, and a refused start claim releases
+them at the next poll. Every startup card seen while the mark held is owed the one wake the check
+sends once the hold ends (after the start turn's `agent_end`, or at the release), unless a reply
+after the start turn read it: the start turn's own replies, its tool calls' included, ran the
+start procedure and do not count, but any assistant message after the first one after the card
+that ends a model turn (one that called no tool and did not error) does, whether a later run or
+the start turn's run going on for an aside it took at the model's stop wrote it; the branch's
+order decides, as for every other card. An interrupt that stopped the start turn (its aborted
+reply, an aborted automatic compaction, a cancelled retry) leaves the owed cards folded for the
+person's next turn with no wake, which would start the turn the person stopped. A sent mark past
+its cap (a start the host failed) or a mark naming another session (a `task` subagent's, a
+session switched away from) changes nothing, and a session change drops the owed cards with the
+rest. A card that reaches the session before
+the Legion entry's `session_start` has set the unsent mark (inside the Envoy entry's own
+`session_start`, when Oh My Pi runs that first) finds no mark.
+The limits: a card sent as a session turns busy, before the host has marked it busy, is a steer,
+can wait in that queue and is dropped by an Esc, and an Esc puts a person's queued Sends back in the
+input box merged and without their Dispatch ids, until the session runs an Oh My Pi release with
+dispatch://INFRA-498; an interrupt during a run's post-run steps other than compaction and a retry
+backoff (its goal and usage bookkeeping, the todo check, a `session_stop` hook, which the Legion
+plugin registers) shows to no extension, so the cards it folds get one wake; a card sent while a
+prompt is set up, or after a run's `agent_end` while a continuation follows (`willContinue`), that
+the host then folds with no interrupt an extension sees gets no wake: that fold needs plan mode or
+a latch an earlier interrupt still holds (a prompt refused before its run, a continuation the host
+skips), and pi-envoy cannot tell it apart at the pinned Oh My Pi, which needs a host signal (the
+interrupt latch, the setup's abort signal, or the prompt's refusal), Oh My Pi work like
+dispatch://INFRA-498, which dispatch://INFRA-577 tracks for pi-envoy; a run the host drops with
+no `agent_end` still counts as running until the
+host is seen idle, so a card sent in a later prompt's setup before that, and an Esc there, gets a
+wake. That takes a failure path and then a prompt the host is not seen idle before: a manual
+compaction that fails or is cancelled after aborting the run, or a switch that fails between its
+abort and its `session_switch`, then a prompt sent while the host is busy, or one that reaches it
+with no `input` event (another extension's `sendUserMessage` or triggered message, an ACP prompt,
+a wake of the host's own); or a run another sender starts with no wait while a manual compaction
+has the agent disconnected (`agent-session.ts` `#promptAgentInitiatedMessage`, ~9083-9095), which
+leaves the host busy at that `session_compact`. Another extension's startup send
+still loading its pictures on an idle host can let the startup wake join the host's startup drain;
+the drain of `/reload-plugins` is not covered; a startup targeted Aside in plan mode gets a wake an
+aside never got; and an RPC session that receives no card while it starts stays in the startup
+phase until its first idle card, which gets its turn through the wake. A BTW
+side turn still running when the handler that subscribed the agent subject (`session_start`, a
+session switch, or a Legion handler re-establishing through the claim bridge) reaches the host's
+30 s handler budget is aborted, and Dispatch gets the abort as the reply's error.
 A card whose text embeds Dispatch pictures (`RenderInboundResult.pictures`) carries them as image
 blocks after the text (`src/delivery-pictures.ts`, the same bounds as `dispatch read`), and so does
 a person's turn (below): `sendUserMessage` takes the blocks with the text, and `sendUserInput`, which
@@ -64,8 +173,14 @@ transcript entry (`envoy-dispatch-handled-attempt`, `{message_id, attempt}`), re
 entry of the session file (`sessionManager.getEntries()`) on each restore, and a frame naming a
 recorded attempt is a card with no accept call. So a replay, a frame forged inside the minute for
 a Send that arrived as a card, and one forged after a restart are each a card, while a person's
-retry, a new attempt, can still be their turn. Every refusal, error and timeout (10 s), a Dispatch
-configuration that no longer resolves included, keeps the card and posts nothing.
+retry, a new attempt, can still be their turn. The accept is keyed like every Dispatch write: it
+carries one `Idempotency-Key` and asks again under it after a transport failure, a 5xx, a 408, a
+429 or a `409 KEY_IN_FLIGHT` inside its 10 s bound (at 0, 1, 3 and 7 s), so an accept whose 200
+was lost becomes the person's turn on the replay rather than a card, against a Dispatch that runs
+the keyed layer, which the client proves by Dispatch's own echo of the key or by its `/healthz`
+(`packages/envoy-client/README.md`); against an older one it is a single attempt, then the card.
+Every refusal, every error and the timeout (10 s), a Dispatch configuration that no longer
+resolves included, keeps the card and posts nothing.
 
 On a host with `pi.sendUserInput` (our Oh My Pi fork, can1357/oh-my-pi#14323) the body runs as if
 typed at the session's terminal (`runTypedInput`), with the Dispatch message id as the host's `tag`
@@ -167,7 +282,7 @@ its `seq` beats the one it applied, and a page held open while the session is re
 `--resume` holds the earlier process's numbers, so every later process must count above them.
 
 The record's limit: it keys on the attempt a frame names, so a forger who reads `message.created`
-(every authenticated caller's event stream carries it, and Dispatch publishes it before its own
+(every authenticated caller's event feed carries it, and Dispatch publishes it before its own
 frame goes out) and names the attempt first spends it. If the accept answers 200, the person's
 stored body is the turn, and Dispatch's frame then arrives as a duplicate card when the forger used
 a key of its own, or is dropped by the session's dedupe when it used Dispatch's own idempotency key
@@ -309,11 +424,13 @@ messages, which stay live only (a frame whose dedupe key starts `envoy.role.forw
 topic is a role lane is passed over); team and other ad-hoc topics, which the stream does not keep
 (the listener answers them `not_retained`) and which stay live only; anything published before
 the session followed the subject; and anything older than the stream's 72 hours. A replayed frame
-(`showReplayed`) is rendered by `renderInbound` and shown as an `envoy-message` card
-(`deliverAs: "steer"`, `triggerTurn: true`) whose last line says when it was published while the
-session's connection was down. A replayed targeted frame (BTW, Aside, Steer, a person's Send) is
-that card and nothing more: it runs no side turn, asks Dispatch to accept no user turn and posts no
-Dispatch reply, since a person's stale input run late could act on an old instruction. Dispatch
+(`showReplayed`) is rendered by `renderInbound` and shown as an `envoy-message` card, sent as a live
+card is (`CardWake`, above: an aside with `triggerTurn` while a turn runs, a steer with
+`triggerTurn` on an idle session, a `followUp` with no turn in the RPC startup phase), whose last
+line says when it was published while the session's connection was down. A replayed targeted frame
+(BTW, Aside, Steer, a person's Send) is that card and nothing more: it runs no side turn, asks
+Dispatch to accept no user turn and posts no Dispatch reply, since a person's stale input run late
+could act on an old instruction. Dispatch
 recorded that attempt as sent when the listener stored it, and nothing later accepts or answers
 it. A frame the renderer skips (`notify: false`, the session's own event, another session's
 follow) records nothing, so an eligible copy of it on another subject still shows. A replayed
@@ -756,7 +873,7 @@ state never nudges.
 ## Critical conventions
 
 - Register every schema through the injected `pi.zod`. Every field counts, not just the outer object: OMP's converter reads internals (`.ir`) only its own Zod produces, and a field from another Zod instance fails the whole extension load (`undefined is not an object (evaluating 'e.ir.desc')`). `envoy.test.ts` proves every registered field came from the injected instance. |
-- Keep direct NATS subscription lifecycle and Pi delivery adapter-local. Register `["aside", "btw", "steer"]` when the host has a side turn (`ctx.runEphemeralTurn`, Oh My Pi 18.3 on; pi-envoy wraps the question in the /btw prompt itself, since the host sends the prompt as given) and `["aside", "steer"]` otherwise — both built from the contracts' `DELIVERY_CAPABILITIES`, never spelled here; an advertised `btw` frame never falls back to steering. Deliver targeted **Aside** / **Steer** with `triggerTurn: true`; reject an unparsed targeted frame without primary-turn injection, log it, and post its error to Dispatch whenever it has a reply address. Once the host wrote a live frame to the transcript (the `message_end` of its card or user turn), record it in the replay ledger (`recordDelivered`) before its claim settles, never sooner, and drop a live frame the ledger already holds; a replayed frame (`showReplayed`) is a card and runs nothing, whatever it carries ("Missed messages").
+- Keep direct NATS subscription lifecycle and Pi delivery adapter-local. Register `["aside", "btw", "steer"]` when the host has a side turn (`ctx.runEphemeralTurn`, Oh My Pi 18.3 on; pi-envoy wraps the question in the /btw prompt itself, since the host sends the prompt as given) and `["aside", "steer"]` otherwise — both built from the contracts' `DELIVERY_CAPABILITIES`, never spelled here; an advertised `btw` frame never falls back to steering. Deliver every card but an inert one (a replayed BTW and its failure notices, which start no turn: `CardDelivery` in `src/unwritten-frames.ts`) with `triggerTurn: true`, live or replayed and handed again alike (`handCard`), as an aside while a turn runs and a steer on an idle session (a targeted **Aside** stays an aside, and a host context without `isIdle` gets a steer), so a running turn's cards do not wait in the steering queue ahead of a person's Send; in the startup phase of a session whose `ctx.mode` is "rpc", and in any mode while the start-turn mark (`EnvoyPluginInterface.startupTurn`) names this session within its cap, a card that finds the host idle goes as a `followUp` with no `triggerTurn` instead, so no card's turn runs inside the host's startup drain or ahead of the Legion controller's start turn. A card the host folds with no turn gets one wake (`nextTurn` with `triggerTurn`, `LOCAL_ENVOY_NOTICE`) unless an interrupt is in effect, decided by the branch's order and never by the order of events, and a startup card seen while the start-turn mark held gets it after the start turn whatever the branch shows (the rules and limits are under "Overview"; the code is `src/card-wake.ts`). `extensions/card-delivery-omp.test.ts` proves all of it on the pinned Oh My Pi in RPC mode with a real NATS server: `LEGION_TEST_OMP=<omp> LEGION_TEST_NATS_URL=nats://127.0.0.1:<port> bun test extensions/card-delivery-omp.test.ts`, where a pod without Docker runs `GOBIN="$TMPDIR/gobin" go install github.com/nats-io/nats-server/v2@<the version packages/envoy/go.mod pins>` and `"$TMPDIR/gobin/nats-server" -a 127.0.0.1 -p <port>`; it skips without either variable and refuses on GitHub Actions, whose pi-envoy job runs NATS as a service container. The start-turn mark's own real-binary cases are `packages/pi-legion/extensions/controller-start-omp.test.ts`'s, which run the controller with both plugins. Run the package's whole suite with `bun run test`, never a plain `bun test`: `extensions/envoy.test.ts` replaces the `nats` module for its whole process (`mock.module`), so the `test` script runs `extensions/card-delivery-omp.test.ts` in a process of its own after the rest (keep it so), and a plain `bun test` with both variables set can load that mock into the real-binary file's process, where the file fails at once naming `bun run test`. Reject an unparsed targeted frame without primary-turn injection, log it, and post its error to Dispatch whenever it has a reply address. Once the host wrote a live frame to the transcript (the `message_end` of its card or user turn), record it in the replay ledger (`recordDelivered`) before its claim settles, never sooner, and drop a live frame the ledger already holds; a replayed frame (`showReplayed`) is a card and runs nothing, whatever it carries ("Missed messages").
 - Render every inbound envelope through `renderInbound`. Keep its bounded 50-item `envoy_inbox` metadata-only; use the shared `envoy_role_get` transport operation for current role holders.
 - Session state converges in one serialized pass (`reconcile`), which every session event (`session_start`, `session_switch`, `session_branch`, `session_tree`), every registration heartbeat tick (`ensureHeartbeat`, `ENVOY_HEARTBEAT_MS`, default 90 s) and every bridge call for a session not yet established runs. Both serial queues (`passes` and `roleMoves`) give each task a deadline (`passDeadlineMs`, `ENVOY_PASS_DEADLINE_MS`, default `max(heartbeatMs, 30 s)` and never shorter than `heartbeatMs`, since a deadline under one tick abandons every pass before the next and so disables the registration backstop, which runs inside the heartbeat's `healing` latch; an explicit value below the heartbeat is raised to it): past it the caller's promise rejects with `AbandonedTaskError`, the queue starts the next task, and the abandoned task is fenced, so its late continuation writes nothing. The heartbeat tick also re-posts the registration itself, outside both queues, when a pass is still running and the last accepted registration is a whole refresh interval old; a stall counts as a failed registration, so the next healthy tick re-asserts the role and fires the regain hook with reason `"reregistered"`, and it is said once per episode — one `context.ui.notify` and one `logger.warn`. A pass reads what is true now: the host's session id (`sessionManager.getSessionId()`, which Oh My Pi moves before it dispatches a switch's event), that session's own records (the last `envoy-role-claim` entry on its branch), and the one hold this process owns at the listener (`claimedRoleTopic` under `claimedRoleSessionID`). It converges to them idempotently: the host session's agent subject open and registered and Dispatch bound to it (refreshing the shell's environment when no event did), every other agent subject this process opened closed, and, in its turn of the role moves (`roleMoves`, `settleRole`), the role that session should hold held for it — the role its records name; else the role this process holds when its hold is under that session or one it continues; else, until a pass has decided for it, the listener's rows for it and for the sessions it continues; none of them while the listener has refused that role to that session (`refusedRoles`, below) — with any other role handed back at the listener. Only opening the agent subject needs NATS: the registration and the role go over HTTP, so an outage of the plugin's own NATS connection stops neither, a Legion claim through the bridge included; the pass throws `InboundError` once both are settled, the session's start or switch warns of the outage, and the next pass opens the subject and starts a sweep, which shows what the stream stored for the session while it was closed ("Missed messages"; the sweep runs on its own chain, never in either queue). What a session continues is how it was born (`continues`, `noteMove`): a fork or branch continues the session it left, learned from `session_before_switch` or `session_before_branch` or else the switch's event; a `/new` or resume continues nothing; a move with no word to an id never seen here carries the session on, as the drift heal always has; a move back to a session seen before (a resume Oh My Pi rolled back) changes nothing. An announcement lasts until a pass sees the host move, the next session event wherever it lands (a `/reload` lands on its own session), or the end, with a reply not aborted, of a run that started under it on the session it announced leaving: a switch that goes ahead aborts a run still going, and one another extension cancelled does not (a run that starts and ends while another extension's announcement handler still runs reads the same, and no host event tells the two apart). Every automatic claim is soft, naming the hold it may supersede — this process's own, wherever the listener names it, or whichever session the claimant continues the listener names — and the listener decides. A pass that finds the host moved after any await stops, and the pass the move queues converges, so the order of host events never matters; a claim the move outran stays this process's hold for that pass to keep or hand back. A switch's event also ends at once a role the new session's records rule out, so a `/new` never takes the old role's notices while an earlier pass finishes; the next pass hands that hold back whether or not its registration succeeds (`pendingHandBacks`), unless the hold is under the session open here, read at that moment (`sessionOpen`), and that session wants its role, whose hold it is again (a resume Oh My Pi rolled back) — unconfirmed until a soft claim naming it checks it at the listener (`holdUnconfirmed`) — and a claim of the role drops such a hand-back. A hold under a session this process has left is never its own again, since another process may run that session now. One the listener does not take back is abandoned (`abandonedHolds`), whatever session it is under, and waits for the listener's reaping until this process registers that session again; a claim the listener refuses naming it records no refusal while the listener's `last_seen` for that session stands still, so a pass claims again once the listener has reaped it. A `last_seen` that moved means another process registers that session, which is then the newer holder; any registration of that session by this process, in a pass or not and answered or not, first takes the hold back as its own, a pending hand-back under that id (`registerSession`). A heartbeat pass whose session already holds its role reads `GET /v1/roles/<role>` and claims softly only when the listener does not name it, so a healthy tick writes nothing and appends no transcript entry. A 409 to any automatic claim (a different live holder) drops the local claim, since the newer holder is correct, and no pass claims that role for that session again — each session's refusal its own — until a session event lands on it, the model or a plugin claims a role for it, or the process restarts and reads its records afresh. A regain — or the first pass that decides after a failed registration, when a surviving claim may still have been unresolvable — fires `onEnvoyRoleRegained` detached from the heartbeat chain (a slow daemon never blocks the next re-registration), which re-runs a claim's `claims/ready` with bounded retries; a pass the host overtook keeps that regain for the next. A role end after a move no session event announced is one no plugin heard: it warns, naming the role and who claims it again (the plugin that opened its notices, on its next session switch or restart, or the model with `envoy_role_set`), and a pass that claims or takes back a role whose plugin notices are still closed says they stay closed. A carried switch tells the agent its id changed once, from the pass that converges to it, in the session the notice names. The controller re-runs nothing, since the daemon holds nothing for it. `packages/pi-legion/src/claim-session.ts` registers that listener on the shared interface's `roleClaim.regained` slot (`@legion/pi-shared/interface`, `packages/pi-shared/AGENTS.md`) only once it holds a Legion identity, since a `task` subagent's re-bound instance shares the process and would otherwise replace it.
 - A `task` subagent's session shares its parent's identity in both plugins (`subagentSessionCheck` in `@legion/pi-shared/subagent-session`): in a Legion process it claims no role, calls no daemon route, and never exits (`packages/pi-legion/extensions/legion.ts`), and in every process `extensions/envoy.ts` skips its `session_start` and switch events entirely — no listener registration, no agent-subject subscription, no heartbeat — so `envoy ps` lists only top-level sessions and a finished subagent leaves no row heartbeating for the life of the parent process. Both entries ask the host's own roster first (`registeredSubagent`: `AgentRegistry.global()` from `@oh-my-pi/pi-coding-agent`, where `createAgentSession` registers every session as `main`, `sub`, or `advisor` before `session_start` fires), which needs no transcript and no write, so it also covers a subagent under `OMP_SESSION_STORAGE=sql` or of a `--no-session` parent, and stays per session rather than per process (an ACP host runs several top-level sessions in one process). The roster's answer outranks the transcript layout. Only where the roster gives no opinion (a host build without the export, or a session the global roster does not list) does the transcript decide, once `ensureOnDisk` has published it; that publish stays, since the transcript is then the only signal and has to be on disk to read as top-level. It fails while another writer holds the transcript's publish lock (Oh My Pi's `SessionLockError`); the check then answers that one call from the transcript as it is on disk, logs a warning, and asks again at the next call, so a lost race never fails a hook or the tool call it gates. Each hook calls the check once and passes the answer on, and each extension instance keeps only a settled answer, for its life. The transcript check is recognised by either of two signals: the process-local one — the claim session's boot and a launched controller's claim (`packages/pi-legion/src/claim-session.ts`, `packages/pi-legion/src/controller-session.ts`) record the bootstrapped session's transcript path on the shared interface (`bootstrappedSession` in `@legion/pi-shared/interface`), and any later `session_start` in the same process with a different transcript path is a subagent — or OMP's on-disk layout for file storage (the parent's `.jsonl` sits beside the subagent's transcript directory). The process-local signal is what holds when the transcript is a SQL row rather than a file (LEGION-80: `OMP_SESSION_STORAGE=sql`); the on-disk check stays as the fallback for a process that has not bootstrapped anything. The identity it shares is its reply address. Every top-level instance publishes its own session on `globalThis` under `Symbol.for("legion.pi-envoy.envoy-session")` (`src/envoy-session.ts`), keyed by its transcript path, at the one chokepoint that moves the module id — `restoreLocalSessionState`, which a start, a switch and the heartbeat's drift heal all run — and deletes its previous key when its id or transcript path changes, so a retired session leaves no entry to resolve. A session is recorded from its `session_start`, before the host has minted its id — under its transcript path, with the empty id it has — so a fresh TUI's subagent resolves that session and reports no address until the drift heal fills the id in, rather than falling through to another live session; and `session_shutdown` deletes the entry, since a deregistered session is not an address a reply reaches. It is a map, not one slot, because an ACP host runs several top-level sessions in one process: one slot would hand a subagent whichever of them last started. A subagent, whose module `sessionID` stays empty, resolves its own by walking OMP's layout up — `dirname(<own transcript>) + ".jsonl"`, repeated for a nested subagent — until a recorded session matches, and `envoy_whoami`, the `/whoami` command, and the `source_session` of `envoy_send` and `envoy_publish` all name that session. `envoy_whoami` reports it as `session_id` and the subagent's own host id under `subagent`. Where the walk matches nothing, one recorded session is used only when it is the only one in the process; otherwise there is no reply address at all — `session_id` is empty, the `subagent` note says so, and `packages/envoy-client/src/transport.ts` omits `source_session` rather than send an empty one, which the listener's `omitempty` erases on the way out, costing the recipient both the sender label and the reply hint. Naming an unrelated live session is never the answer. A subagent's `envoy_publish` never reaches its own parent: the listener delivers nothing to the session an envelope names as its source — `roleTopicDelivery` skips the resolved holder and `fanoutDelivery` skips any interest whose session is the source — so a publish to a role the parent holds, or to any topic it subscribes to, is accepted and delivered to nobody. The publish tool result says so for the role case, where the answer names the holder; the hop a subagent actually has to its parent is a `write` to the parent's `agent://` address. A direct `envoy_send` is unaffected, the agent-subject lane having no such skip. The host's own `AgentRegistry` carries a `parentId`, but it is undocumented and a host upgrade could change it silently; the published record is this package's own.

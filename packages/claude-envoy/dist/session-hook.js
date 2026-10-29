@@ -13610,6 +13610,21 @@ var MAX_ISSUE_PAGE_LIMIT = 250;
 var DEFAULT_ISSUE_PAGE_LIMIT = 50;
 var ASK_TURNS = ["human", "agent"];
 var DELIVERY_CAPABILITIES = ["aside", "btw", "steer"];
+var IDEMPOTENCY_KEY_HEADER = "Idempotency-Key";
+var IDEMPOTENCY_REPLAYED_HEADER = "Idempotency-Replayed";
+var IDEMPOTENCY_KEY_MAX = 128;
+var IDEMPOTENCY_KEY_PATTERN = new RegExp(`^[A-Za-z0-9._:-]{1,${IDEMPOTENCY_KEY_MAX}}$`);
+var IDEMPOTENCY_KEY_IN_FLIGHT = "KEY_IN_FLIGHT";
+var IDEMPOTENCY_KEY_COMMITTED = "KEY_COMMITTED";
+var IDEMPOTENCY_ANSWER_NOT_KEPT = "ANSWER_NOT_KEPT";
+function retriesUnderKey(status, code) {
+  return status >= 500 || status === 408 || status === 429 || status === 409 && code === IDEMPOTENCY_KEY_IN_FLIGHT;
+}
+function answerNotKept(status, replayed, body) {
+  return replayed && status >= 200 && status < 300 && typeof body === "object" && body !== null && Reflect.get(body, "code") === IDEMPOTENCY_ANSWER_NOT_KEPT;
+}
+var IDEMPOTENCY_KEY_TTL_MS = 24 * 60 * 60 * 1000;
+var IDEMPOTENCY_LEASE_MS = 60 * 1000;
 var DELIVERY_DUPLICATE_WINDOW_MS = 72 * 60 * 60 * 1000;
 var SEARCH_DEGRADED_EMBEDDER_UNAVAILABLE = "embedder_unavailable";
 var IssueDeployedEventPayloadSchema = strictObject({
@@ -14634,7 +14649,43 @@ var LEGION_ROLES = [
   "reviewer",
   "merger"
 ];
+var PROJECT_TOKEN = /^[a-z0-9]+$/;
 var DISPATCH_KEY_PATTERN = /^([A-Z][A-Z0-9]*)-([0-9]+)$/;
+function roleForPhase(phase) {
+  switch (phase) {
+    case "planning":
+      return "planner";
+    case "implementing":
+    case "retro":
+      return "implementer";
+    case "testing":
+      return "tester";
+    case "reviewing":
+      return "reviewer";
+    case "accepting":
+      return "architect";
+    case "merging":
+      return "merger";
+    default:
+      return;
+  }
+}
+function isLegionProjectToken(project) {
+  return PROJECT_TOKEN.test(project);
+}
+function assertLegionProjectToken(project) {
+  if (!isLegionProjectToken(project)) {
+    throw new Error(`Invalid Legion project token: ${project}`);
+  }
+}
+function roleToken(project, issue, role) {
+  assertLegionProjectToken(project);
+  const dispatchMatch = DISPATCH_KEY_PATTERN.exec(issue);
+  if (!dispatchMatch)
+    throw new Error(`Invalid IssueKey: ${issue}`);
+  const [, dispatchProject, number] = dispatchMatch;
+  return `legion-${project}-${dispatchProject?.toLowerCase()}-${number}-${role}`;
+}
 // ../contracts/src/repo.ts
 function canonicalRepo(owner, repo) {
   return `${owner.trim().toLowerCase()}/${repo.trim().toLowerCase().replace(/\.git$/, "")}`;
@@ -15316,6 +15367,43 @@ class DispatchGatewayError extends DispatchServiceError {
     this.mayHaveReachedDispatch = reachesDispatch(status);
   }
 }
+
+class DispatchWriteUnsettledError extends Error {
+  last;
+  attempts;
+  name = "DispatchWriteUnsettledError";
+  constructor(last, attempts, unanswered) {
+    let answer;
+    let why = "an earlier attempt of the write may have reached Dispatch";
+    if (last instanceof DispatchGatewayError) {
+      answer = last.answer;
+    } else if (last instanceof DispatchServiceError) {
+      answer = `${last.code}: ${last.message}`;
+      if (last.code === IDEMPOTENCY_KEY_IN_FLIGHT) {
+        why = "Dispatch was still running an earlier attempt of the write";
+      }
+    } else {
+      answer = unanswered ?? last.message;
+      why = "an attempt of the write may have reached Dispatch";
+    }
+    const tried = attempts === 1 ? "its only attempt" : `the last of ${attempts} attempts`;
+    super(`${answer} (${tried}), and ${why}, so it may or may not have taken effect: check whether ` + "it did before retrying it.", { cause: last });
+    this.last = last;
+    this.attempts = attempts;
+  }
+}
+
+class DispatchWriteLandedError extends Error {
+  code;
+  status;
+  name = "DispatchWriteLandedError";
+  constructor(code, status, method, url) {
+    const lost = code === IDEMPOTENCY_ANSWER_NOT_KEPT ? "Dispatch kept no copy of its answer, which was too large" : "its answer was lost on the way back";
+    super(`${method} ${url} was made, but ${lost} (${code}), so this command cannot print what it ` + "made: read it back with `dispatch read`, or with the matching list for something it created.");
+    this.code = code;
+    this.status = status;
+  }
+}
 function asErrorShape(value) {
   return typeof value === "object" && value !== null ? value : {};
 }
@@ -15330,6 +15418,100 @@ var DISPATCH_TOOL_DEADLINE_MS = 60000;
 function requestSignal(signal) {
   const deadline = AbortSignal.timeout(DISPATCH_TOOL_DEADLINE_MS);
   return signal === undefined ? deadline : AbortSignal.any([signal, deadline]);
+}
+var DISPATCH_WRITE_RETRY = {
+  pausesMs: [1000, 2000, 4000, 8000],
+  withinMs: 30000,
+  silenceMs: 20000
+};
+function pauseFor(ms, signal) {
+  const { promise, resolve, reject } = Promise.withResolvers();
+  if (signal.aborted) {
+    reject(signal.reason);
+    return promise;
+  }
+  const stop = () => {
+    clearTimeout(timer);
+    reject(signal.reason);
+  };
+  const timer = setTimeout(() => {
+    signal.removeEventListener("abort", stop);
+    resolve();
+  }, ms);
+  signal.addEventListener("abort", stop, { once: true });
+  return promise;
+}
+function retryAfterMs(response) {
+  const value = response.headers.get("Retry-After")?.trim() ?? "";
+  if (/^\d+$/.test(value))
+    return Number(value) * 1000;
+  const at = Date.parse(value);
+  return Number.isNaN(at) ? 0 : Math.max(0, at - Date.now());
+}
+var KEYED_LAYER_MEMORY_MS = 5 * 60000;
+var KEYED_LAYER_SEEN = new Map;
+var KEYED_LAYER_PROBES = new Map;
+var KEY_LAYER_PROBE_MS = 5000;
+function keyEchoed(response, key) {
+  const echoed = response.headers.get(IDEMPOTENCY_KEY_HEADER)?.trim() ?? "";
+  return echoed.replace(/^"(.*)"$/, "$1") === key;
+}
+var STREAMED_BODY_MIN = 1 << 20;
+var STREAMED_BODY_CHUNK = 64 << 10;
+function attemptBody(body, headers, progress) {
+  const bytes = typeof body.content === "string" ? new TextEncoder().encode(body.content) : body.content;
+  if (bytes.byteLength < STREAMED_BODY_MIN)
+    return { body: body.content, headers };
+  let sent = 0;
+  const stream = new ReadableStream({
+    pull(controller) {
+      progress();
+      if (sent >= bytes.byteLength) {
+        controller.close();
+        return;
+      }
+      const end = Math.min(sent + STREAMED_BODY_CHUNK, bytes.byteLength);
+      controller.enqueue(bytes.subarray(sent, end));
+      sent = end;
+    }
+  });
+  return { body: stream, headers: { ...headers, "Content-Length": String(bytes.byteLength) } };
+}
+
+class WriteAttemptSilent extends Error {
+  name = "WriteAttemptSilent";
+  constructor(silenceMs) {
+    super(`made no progress for ${silenceMs / 1000} s, so it was cut off`);
+  }
+}
+var NULL_BODY_STATUSES = new Set([101, 204, 205, 304]);
+async function writeAnswer(response, key) {
+  const echoed = keyEchoed(response, key);
+  if (response.ok || NULL_BODY_STATUSES.has(response.status)) {
+    return { response, again: false, reached: false, echoed, unjudged: false };
+  }
+  const { status } = response;
+  const text = await response.text();
+  let shape = {};
+  if (isJson(response)) {
+    try {
+      shape = asErrorShape(JSON.parse(text));
+    } catch {
+      shape = {};
+    }
+  }
+  const again = retriesUnderKey(status, shape.code);
+  return {
+    response: new Response(text, {
+      status,
+      statusText: response.statusText,
+      headers: response.headers
+    }),
+    again,
+    reached: status >= 500 || again && status === 409,
+    echoed,
+    unjudged: !echoed && typeof shape.error === "string"
+  };
 }
 function whyNotAPage(answer) {
   if (typeof answer === "string") {
@@ -15415,12 +15597,14 @@ function excerpt(text, token) {
 class DispatchClient {
   token;
   fetchImpl;
+  writeRetry;
   #baseUrl;
   #resolvedIssues = new Map;
   #signal;
-  constructor(baseUrl, token, fetchImpl = fetch, signal) {
+  constructor(baseUrl, token, fetchImpl = fetch, signal, writeRetry = DISPATCH_WRITE_RETRY) {
     this.token = token;
     this.fetchImpl = fetchImpl;
+    this.writeRetry = writeRetry;
     this.#baseUrl = baseUrl.replace(/\/+$/, "");
     this.#signal = requestSignal(signal);
   }
@@ -15646,6 +15830,10 @@ class DispatchClient {
   async messageReply(id, input, options = {}) {
     return this.#json("POST", ["api", "v1", "messages", id, "reply"], input, options.followUp === true ? { follow_up: "true" } : undefined);
   }
+  async deliveryReply(resource, id, input) {
+    const collection = resource === "message" ? "messages" : "comments";
+    await this.#json("POST", ["api", "v1", collection, id, "reply"], input);
+  }
   async getMessage(issue, id) {
     return this.#json("GET", [
       "api",
@@ -15673,11 +15861,7 @@ class DispatchClient {
   }
   async fileVersion(id, version) {
     const url = this.#url(["api", "v1", "artifacts", id, "versions", String(version)]);
-    const response = await this.fetchImpl(url, {
-      method: "GET",
-      headers: { Accept: "*/*", Authorization: `Bearer ${this.token}` },
-      signal: this.#signal
-    });
+    const response = await this.#send("GET", url, undefined, "*/*");
     if (!response.ok)
       return this.#response("GET", url, response);
     return {
@@ -15755,19 +15939,8 @@ class DispatchClient {
     return (await this.#jsonAnswer(method, path, body, query)).payload;
   }
   async#jsonAnswer(method, path, body, query) {
-    const headers = {
-      Accept: "application/json",
-      Authorization: `Bearer ${this.token}`
-    };
-    if (body !== undefined)
-      headers["Content-Type"] = "application/json";
     const url = this.#url(path, query);
-    const response = await this.fetchImpl(url, {
-      method,
-      headers,
-      signal: this.#signal,
-      ...body === undefined ? {} : { body: JSON.stringify(body) }
-    });
+    const response = await this.#send(method, url, body === undefined ? undefined : { content: JSON.stringify(body), type: "application/json" });
     return { status: response.status, payload: await this.#response(method, url, response) };
   }
   async#upload(path, input) {
@@ -15782,15 +15955,151 @@ class DispatchClient {
     form.set("file", input.file, input.name);
     return this.#form("POST", path, form);
   }
-  async#form(method, path, body) {
+  async#form(method, path, form) {
     const url = this.#url(path);
-    const response = await this.fetchImpl(url, {
-      method,
-      headers: { Accept: "application/json", Authorization: `Bearer ${this.token}` },
-      body,
-      signal: this.#signal
-    });
+    const encoded = new Response(form);
+    const type = encoded.headers.get("Content-Type") ?? "multipart/form-data";
+    const content = new Uint8Array(await encoded.arrayBuffer());
+    const response = await this.#send(method, url, { content, type });
     return this.#response(method, url, response);
+  }
+  async#send(method, url, body, accept = "application/json") {
+    const headers = {
+      Accept: accept,
+      Authorization: `Bearer ${this.token}`
+    };
+    if (body !== undefined)
+      headers["Content-Type"] = body.type;
+    if (method !== "POST" && method !== "PATCH") {
+      return this.fetchImpl(url, {
+        method,
+        headers,
+        signal: this.#signal,
+        ...body === undefined ? {} : { body: body.content }
+      });
+    }
+    const key = crypto.randomUUID();
+    headers[IDEMPOTENCY_KEY_HEADER] = key;
+    const { pausesMs, withinMs, silenceMs, pause = pauseFor } = this.writeRetry;
+    const request = `${method} ${url}`;
+    const started = this.#now();
+    let reached = false;
+    for (let attempt = 1;; attempt++) {
+      let answer;
+      let thrown;
+      try {
+        answer = await writeAnswer(await this.#attempt(url, method, headers, body, silenceMs), key);
+        if (answer.echoed)
+          KEYED_LAYER_SEEN.set(this.#baseUrl, this.#now());
+        if (!answer.again)
+          return answer.response;
+        reached ||= answer.reached;
+      } catch (error) {
+        const name = error instanceof Error || error instanceof DOMException ? error.name : "";
+        if (!(error instanceof WriteAttemptSilent) && (this.#signal.aborted || name === "AbortError" || name === "TimeoutError")) {
+          throw this.#ended(error, request, attempt, true);
+        }
+        thrown = error;
+        reached = true;
+      }
+      const scheduled = pausesMs[attempt - 1];
+      const wait = Math.max(scheduled ?? 0, answer === undefined ? 0 : retryAfterMs(answer.response));
+      const inTime = scheduled !== undefined && this.#now() - started + wait <= withinMs;
+      if (!inTime || !(answer?.echoed || await this.#runsKeyedLayer(answer?.unjudged ?? false))) {
+        if (answer !== undefined) {
+          return this.#unsettled(method, url, answer.response, reached, attempt);
+        }
+        if (thrown instanceof WriteAttemptSilent) {
+          throw new DispatchWriteUnsettledError(thrown, attempt, `${request} ${thrown.message}`);
+        }
+        throw thrown;
+      }
+      await answer?.response.body?.cancel().catch(() => {
+        return;
+      });
+      try {
+        await pause(wait, this.#signal);
+      } catch (error) {
+        throw this.#ended(error, request, attempt, reached);
+      }
+    }
+  }
+  #now() {
+    return this.writeRetry.now?.() ?? performance.now();
+  }
+  async#attempt(url, method, headers, body, silenceMs) {
+    const cut = new AbortController;
+    const silent = () => cut.abort(new WriteAttemptSilent(silenceMs));
+    let timer = setTimeout(silent, silenceMs);
+    let answered = false;
+    const progress = () => {
+      if (answered)
+        return;
+      clearTimeout(timer);
+      timer = setTimeout(silent, silenceMs);
+    };
+    try {
+      return await this.fetchImpl(url, {
+        method,
+        signal: AbortSignal.any([this.#signal, cut.signal]),
+        ...body === undefined ? { headers } : attemptBody(body, headers, progress)
+      });
+    } catch (error) {
+      if (cut.signal.aborted && !this.#signal.aborted)
+        throw cut.signal.reason;
+      throw error;
+    } finally {
+      answered = true;
+      clearTimeout(timer);
+    }
+  }
+  #ended(error, request, attempts, mayHaveReached) {
+    const reason = this.#signal.aborted ? this.#signal.reason : error;
+    const timedOut = (reason instanceof Error || reason instanceof DOMException) && reason.name === "TimeoutError";
+    if (!timedOut || !mayHaveReached || !(error instanceof Error))
+      return error;
+    return new DispatchWriteUnsettledError(error, attempts, `${request} had no definitive answer when its deadline ended it`);
+  }
+  async#runsKeyedLayer(unjudged) {
+    const origin = this.#baseUrl;
+    if (unjudged)
+      KEYED_LAYER_SEEN.delete(origin);
+    const seen = KEYED_LAYER_SEEN.get(origin);
+    if (seen !== undefined && this.#now() - seen < KEYED_LAYER_MEMORY_MS)
+      return true;
+    let probe = KEYED_LAYER_PROBES.get(origin);
+    if (probe === undefined) {
+      probe = this.#probeKeyedLayer().finally(() => KEYED_LAYER_PROBES.delete(origin));
+      KEYED_LAYER_PROBES.set(origin, probe);
+    }
+    const runs = await probe;
+    if (runs)
+      KEYED_LAYER_SEEN.set(origin, this.#now());
+    return runs;
+  }
+  async#probeKeyedLayer() {
+    try {
+      const response = await this.fetchImpl(`${this.#baseUrl}/healthz`, {
+        method: "GET",
+        headers: { Accept: "application/json", Authorization: `Bearer ${this.token}` },
+        signal: AbortSignal.any([this.#signal, AbortSignal.timeout(KEY_LAYER_PROBE_MS)])
+      });
+      if (!isJson(response))
+        return false;
+      const health = await response.json();
+      return typeof health === "object" && health !== null && Reflect.get(health, "idempotency_keys") === true;
+    } catch {
+      return false;
+    }
+  }
+  async#unsettled(method, url, response, reached, attempts) {
+    const refusal = await this.#response(method, url, response).catch((error) => error);
+    if (reached && refusal instanceof DispatchServiceError) {
+      const landedAlone = refusal instanceof DispatchGatewayError ? refusal.mayHaveReachedDispatch : refusal.status >= 500;
+      if (!landedAlone)
+        throw new DispatchWriteUnsettledError(refusal, attempts);
+    }
+    throw refusal;
   }
   #url(path, query) {
     const url = new URL(`${path.map((segment) => encodeURIComponent(segment)).join("/")}`, `${this.#baseUrl}/`);
@@ -15819,6 +16128,9 @@ class DispatchClient {
     if (!response.ok) {
       const error = asErrorShape(payload);
       if (typeof error.error === "string") {
+        if (response.status === 409 && error.code === IDEMPOTENCY_KEY_COMMITTED) {
+          throw new DispatchWriteLandedError(IDEMPOTENCY_KEY_COMMITTED, response.status, method, url);
+        }
         throw new DispatchServiceError(error.code ?? `HTTP_${response.status}`, response.status, error.error, error.candidates, error.current, error.mismatches);
       }
       const quoted = excerpt(text, this.token);
@@ -15835,6 +16147,10 @@ class DispatchClient {
       const reasonPhrase = excerpt(response.statusText, this.token);
       const reason = reasonPhrase === "" ? "" : ` ${reasonPhrase}`;
       throw new DispatchGatewayError(response.status, `${method} ${url} answered ${response.status}${reason} with ${body}, ${GATEWAY_PAGE}`, gatewayAdvice(method, response.status));
+    }
+    const replayed = response.headers.get(IDEMPOTENCY_REPLAYED_HEADER)?.trim() === "?1";
+    if (answerNotKept(response.status, replayed, payload)) {
+      throw new DispatchWriteLandedError(IDEMPOTENCY_ANSWER_NOT_KEPT, response.status, method, url);
     }
     return payload;
   }
@@ -18191,7 +18507,7 @@ async function executeDispatchTool(input) {
     throw new ToolInputError(input.tool, checked.problems);
   const ownerArguments = checked.owner;
   const pictures = checked.pictures;
-  const dispatchClient = () => new DispatchClient(configUrl, configToken, fetchImpl, input.signal);
+  const dispatchClient = () => new DispatchClient(configUrl, configToken, fetchImpl, input.signal, input.writeRetry);
   if (input.tool === "dispatch_open_asks") {
     const client = dispatchClient();
     const project = optionalString(ownerArguments.args, "project");
@@ -18247,7 +18563,11 @@ async function executeDispatchTool(input) {
       throw new Error("issue or project is required");
     return owner;
   };
-  const postWithPictures = (text, limit, owner, upload) => textWithPictures(input.tool, text, pictures, limit, owner, upload, actor);
+  const postWithPictures = (text, limit, owner, upload) => textWithPictures(input.tool, text, pictures, limit, owner, (picture) => upload(picture).catch((error) => {
+    if (!(error instanceof DispatchWriteLandedError))
+      throw error;
+    throw new Error(`${error.message} That was a picture uploaded before this call's own write, so nothing else was written: run the call again, which uploads it as its next version.`, { cause: error });
+  }), actor);
   const writePictures = (resolved, text, limit) => {
     if (resolved?.owner.kind === "project") {
       const { project } = resolved.owner;
@@ -18359,6 +18679,9 @@ async function executeDispatchTool(input) {
             ref: dispatchChildRef(dispatchIssueRef(issueKey), "message", message.id)
           };
         } catch (error) {
+          if (error instanceof DispatchWriteLandedError) {
+            throw new Error(`${error.message} That was the closing reason, so the close was not sent: read the issue's messages for it, then close with a reason that points at it, since retrying this call posts its reason again.`, { cause: error });
+          }
           const told = writeMayHaveLanded(error) ? "the reason may or may not have been posted, and the close was not sent: read the issue's messages before retrying, since retrying this call posts its reason again" : "the reason was not posted, so the close was not sent";
           if (error instanceof DispatchServiceError)
             throw refusalWithCode(error, told);
@@ -18389,6 +18712,8 @@ async function executeDispatchTool(input) {
           actor
         });
       } catch (error) {
+        if (error instanceof DispatchWriteLandedError)
+          throw error;
         const taken = dispatchAnswered(error, 500) && newLinks.length > 0 ? `one of ${newLinks.join(", ")} may already be linked from another issue (a URL links exactly one issue)` : "";
         if (closingNote === undefined)
           throw refusalWithCode(error, taken);

@@ -1,9 +1,0 @@
-kind: Fixed
-body: |-
-    Dispatch's time-gated writes use the database's clock rather than the serving process's: a
-    sign-in's confirmation (`people.confirmed_at`, and the hour it is measured against), a delivery
-    pull request's `last_event_at`, `deployed_event_at`, and the cutoff of the delivery changes
-    prune, so server processes whose clocks differ agree on them.
-time: 2026-10-28T09:38:47.56444082Z
-custom:
-    Issue: pr2390

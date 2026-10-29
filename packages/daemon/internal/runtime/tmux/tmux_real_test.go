@@ -16,6 +16,7 @@ import (
 	"io"
 	"io/fs"
 	"log/slog"
+	"maps"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -1108,7 +1109,22 @@ var procFile = regexp.MustCompile(`^/proc/[0-9]+/(stat|cmdline)$`)
 // Panes of one issue share its window, while a pane there still verifies; another issue gets a
 // window of its own; and one claim never has two processes.
 func TestRealTmuxSplitsIntoTheIssueWindow(t *testing.T) {
-	r := newRig(t)
+	// Each mint is a fresh token, as a daemon's re-minted lease is, so a refused launch that
+	// wrote its credential would change the live pane's gh files.
+	var mintMu sync.Mutex
+	mints := 0
+	minting := func(ctx context.Context, role claim.Role, owner string) (ghconfig.Bundle, error) {
+		bundle, err := staticCredential(ctx, role, owner)
+		mintMu.Lock()
+		mints++
+		token := fmt.Sprintf("ghs_mint_%d", mints)
+		mintMu.Unlock()
+		written := bundle.Owners[bundle.Default]
+		bundle.Owners[bundle.Default] = ghconfig.Render(token, written.App, staticCredentialExpiry)
+		return bundle, err
+	}
+	withMinting := func(o *Options) { o.GitHubCredential = minting }
+	r := newRig(t, withMinting)
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer cancel()
 
@@ -1116,7 +1132,8 @@ func TestRealTmuxSplitsIntoTheIssueWindow(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Spawn architect: %v", err)
 	}
-	tester, err := r.rt.Spawn(ctx, r.spec("LEGION-2", "LEGION-2", claim.RoleTester))
+	testerSpec := r.spec("LEGION-2", "LEGION-2", claim.RoleTester)
+	tester, err := r.rt.Spawn(ctx, testerSpec)
 	if err != nil {
 		t.Fatalf("Spawn tester: %v", err)
 	}
@@ -1148,18 +1165,49 @@ func TestRealTmuxSplitsIntoTheIssueWindow(t *testing.T) {
 		t.Errorf("the issue's window is not named for it and marked as the daemon's:\n%s", windows)
 	}
 
-	// One claim, one process: a second spawn of a live claim is refused, and a resume waits for
-	// the previous incarnation to go — and refuses when it does not.
+	// One claim, one process: a second spawn of a live claim is refused, leaving the files the live
+	// process reads as they were, and a resume waits for the previous incarnation to go — and
+	// refuses when it does not.
+	readSecrets := func() map[string]string {
+		t.Helper()
+		contents := map[string]string{}
+		for _, file := range secretFiles(r.stateDir, testerSpec) {
+			raw, err := os.ReadFile(file.Path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			contents[file.Variable] = string(raw)
+		}
+		root := runtime.GHConfigDir(r.stateDir, testerSpec.Claim)
+		if err := filepath.WalkDir(root, func(path string, d fs.DirEntry, err error) error {
+			if err != nil || d.IsDir() {
+				return err
+			}
+			raw, err := os.ReadFile(path)
+			contents[path] = string(raw)
+			return err
+		}); err != nil {
+			t.Fatal(err)
+		}
+		return contents
+	}
+	before := readSecrets()
 	if _, err := r.rt.Spawn(ctx, r.spec("LEGION-2", "LEGION-2", claim.RoleTester)); err == nil ||
 		!strings.Contains(err.Error(), "is still running in pane "+tester.Tmux.Pane) {
 		t.Errorf("a second spawn of a live claim = %v", err)
 	}
-	impatient := r.newRuntime(func(o *Options) { o.StopGrace = 300 * time.Millisecond })
+	if after := readSecrets(); !maps.Equal(after, before) {
+		t.Errorf("the refused second spawn rewrote the live tester's secret files from %q to %q", before, after)
+	}
+	impatient := r.newRuntime(withMinting, func(o *Options) { o.StopGrace = 300 * time.Millisecond })
 	resume := r.spec("LEGION-2", "LEGION-2", claim.RoleTester)
 	resume.ResumeSessionFile = r.rolePrompt
 	if _, err := impatient.Resume(ctx, &tester, resume); err == nil ||
 		!strings.Contains(err.Error(), "previous incarnation "+tester.Incarnation+" is still running") {
 		t.Errorf("a resume over a live incarnation = %v", err)
+	}
+	if after := readSecrets(); !maps.Equal(after, before) {
+		t.Errorf("the refused resume rewrote the live tester's secret files from %q to %q", before, after)
 	}
 }
 

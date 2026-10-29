@@ -14,6 +14,7 @@ import (
 	"testing"
 
 	"github.com/sjawhar/envoy/internal/broker/secrets"
+	"github.com/sjawhar/envoy/internal/logtest"
 )
 
 // tokenRequest is one POST .../access_tokens the stub GitHub received: the installation it named,
@@ -443,9 +444,7 @@ func TestGitHubAppMintRefusesATokenWiderThanTheNarrowing(t *testing.T) {
 // 500) is logged at WARN, never naming the token, and the wider token is still refused.
 func TestGitHubAppMintStillRefusesWhenGitHubDoesNotRevoke(t *testing.T) {
 	var logged bytes.Buffer
-	previous := slog.Default()
-	slog.SetDefault(slog.New(slog.NewTextHandler(&logged, nil)))
-	t.Cleanup(func() { slog.SetDefault(previous) })
+	logtest.SetDefault(t, slog.NewTextHandler(&logged, nil))
 	key, err := testAppKey()
 	if err != nil {
 		t.Fatal(err)
