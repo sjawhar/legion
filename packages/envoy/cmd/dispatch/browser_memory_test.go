@@ -6,6 +6,7 @@ import (
 	"bytes"
 	"compress/gzip"
 	"context"
+	"encoding/binary"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -81,13 +82,18 @@ const (
 	// (internal/dispatch/docs/room_budget.go:80), the heap one copy of a room holds for each struct
 	// of its state, measured (TestAResidentRoomsHeapPerStructOfItsState); bytesOfHeapAStructForTest
 	// mirrors bytesOfHeapAStruct (:158), what the structure part charges each struct an update adds
-	// and each split it can cause, and splitsAStructCanCauseForTest splitsAStructCanCause
-	// (peer_update.go:652). TestARoomFedOnlyByAPIWritesIsChargedTheStructsTheyAdd weighs a room's
-	// growth against them; a wrong mirror moves only how much growth it asks for, and its log line
-	// prints each figure beside the server's own.
+	// and each split it can cause, splitsAStructCanCauseForTest splitsAStructCanCause
+	// (peer_update.go:652), and bytesOfHeapAByteOfTextForTest bytesOfHeapAByteOfText
+	// (room_budget.go:167), what it charges each byte of text an update's struct carries as the
+	// walk reads it, its length prefix included (unrenderedContentHeap, peer_update.go:697-713).
+	// TestARoomFedOnlyByAPIWritesIsChargedTheStructsTheyAdd weighs a room's growth against them; a
+	// wrong mirror moves only how much growth it asks for, and its log line prints each figure
+	// beside the server's own. TestTheRoomBudgetDoesNotOverchargeTypingAndPasting prices each
+	// typed room's structure part from them, and fails once the budget charges a room more.
 	bytesOfHeapAStructHeldForTest = 170
 	bytesOfHeapAStructForTest     = 620
 	splitsAStructCanCauseForTest  = 2
+	bytesOfHeapAByteOfTextForTest = 2
 
 	// pressureReserveBytesForTest mirrors pressureReserveBytes
 	// (internal/dispatch/docs/room_budget.go:209), how far past its limit the deletes admitted while
@@ -1126,6 +1132,232 @@ func TestTheRoomBudgetRefusesWhereItsOwnArithmeticSays(t *testing.T) {
 			t.Errorf("the server's resident memory peaked at %d MiB, want under the pod's %d MiB", peak>>20, podMemory>>20)
 		}
 	})
+}
+
+// The room budget does not over-charge typing and pasting: thirty-nine rooms of a mebibyte of prose
+// (mebibyteFleet), each typed into as a person types - 200 one-character keystrokes in ten runs of
+// twenty, each run in the middle of a paragraph of its own across the document, and one paste of 4
+// KiB in another (typedAndPasted) - and left until its count lands, under the Go limit a 4 GiB pod
+// gives the server. The first refusal comes within one room of the budget's arithmetic computed
+// with the structure part included, and each room's structure part, read from the budget's figures
+// as it closes the room, is no more than its updates are priced at.
+//
+// The arithmetic is the server's prices, mirrored. A typed room is charged its count - the
+// heaviest of its elements', rendered bytes' and structs' prices at both copies (copyHeap,
+// internal/dispatch/docs/room_budget.go:592-602), for prose its elements' - beside its structure
+// part (roomCharge, :295-339): each update's struct with the two splits its integration can cause
+// at bytesOfHeapAStruct, and its text as the walk reads it, its length prefix included, at
+// bytesOfHeapAByteOfText, both at both copies (peerWeighing.structureHeap,
+// peer_update.go:677-680): 3,728 bytes a keystroke and 20,112 for the paste, 765,712 a room. An
+// admission reserves the stored version's count, which is what the room's load charges until its
+// browser types. Rooms are typed into two at a time, the server's two processors' worth, each pair
+// admitted one after the other before either types, so the second of a pair is admitted beside the
+// first's load alone; the arithmetic follows the drive room by room.
+//
+// The structure part charges a struct as one of its own with both its splits, where ygo merges a
+// run of typed characters back into one item, so it charges typing far past what typing adds; what
+// bounds that over-charge is TestATypedAndPastedRoomIsChargedAtLeastItsHeapAndWithinTheFactor
+// (internal/dispatch/docs), which weighs a room typed with ten times these keystrokes and ten
+// pastes against the heap it holds. This drive has the real server charge what those prices say,
+// no more, room by room. Its profile is a tenth of that one because each update costs the server a
+// render of the whole document (renderedReplica.observe): one room of that profile over a real
+// socket took 12 m 30 s, about 0.37 s an update. REDUCED_NUMBERS
+func TestTheRoomBudgetDoesNotOverchargeTypingAndPasting(t *testing.T) {
+	const rooms, keystrokes, runs, pasteBytes, together = 39, 200, 10, 4 << 10, 2
+	building := time.Now()
+	memory := newMemoryHarness(t)
+	memory.env = append(memory.env, "GOMEMLIMIT="+strconv.Itoa(podGoMemoryLimit))
+	fleet := memory.mebibyteFleet(t, func(int64) int { return rooms + 1 })
+	updates := typedAndPasted(t, fleet.state, keystrokes, runs, pasteBytes)
+	withSplits := int64(bytesOfHeapAStructForTest * (1 + splitsAStructCanCauseForTest))
+	keystroke := (withSplits + encodedTextBytes(1)*bytesOfHeapAByteOfTextForTest) * roomCopiesForTest
+	paste := (withSplits + encodedTextBytes(pasteBytes)*bytesOfHeapAByteOfTextForTest) * roomCopiesForTest
+	bound := keystrokes*keystroke + paste
+	typing := newBrowserDocument(t, fleet.state)
+	for _, update := range updates {
+		if err := crdt.ApplyUpdateV1(typing.doc, update, nil); err != nil {
+			t.Fatal(err)
+		}
+	}
+	size := typing.size(t)
+	stateStructs, err := docs.StateStructsForTest(crdt.EncodeStateAsUpdateV1(typing.doc, nil))
+	if err != nil {
+		t.Fatal(err)
+	}
+	counted := roomCopiesForTest * max(int64(size.Elements)*bytesOfHeapAnElementForTest, int64(size.Bytes)*bytesOfHeapARenderedByteForTest, stateStructs*bytesOfHeapAStructHeldForTest)
+	perRoom := counted + bound
+	// admits is how many rooms the budget admits, opened as the drive opens them: each pair's
+	// second admission is weighed beside the first's load, and the pair's typing is charged before
+	// the next pair's first.
+	admits, charged := 0, int64(0)
+	for admits < len(fleet.copies) && charged+fleet.reserved <= roomBudgetBytesForTest {
+		admits++
+		charged += fleet.reserved
+		if admits%together == 0 {
+			charged += together * (perRoom - fleet.reserved)
+		}
+	}
+	t.Logf("%d updates typed into a room (%d keystrokes in %d runs, a paste of %d bytes): its structure part priced at %d bytes, its count %d (%d elements, %d bytes, %d structs) against the %d its admission reserves, %d a room; the %d-byte budget admits %d rooms typed %d at a time and refuses the next; the documents took %s to build",
+		len(updates), keystrokes, runs, pasteBytes, bound, counted, size.Elements, size.Bytes, stateStructs, fleet.reserved, perRoom,
+		roomBudgetBytesForTest, admits, together, time.Since(building).Round(time.Second))
+	if admits >= len(fleet.copies) {
+		t.Fatalf("the budget's arithmetic admits all %d copies, want it to refuse one", len(fleet.copies))
+	}
+
+	server := memory.start(t)
+	requirePodGoMemoryLimit(t, server)
+	var held []*browser
+	t.Cleanup(func() {
+		for _, opened := range held {
+			opened.leave()
+		}
+	})
+	typed := map[string]bool{}
+	refusedAt := 0
+	started := time.Now()
+	peak := server.peakResident(t, func() {
+		for first := 0; first < len(fleet.copies) && refusedAt == 0; first += together {
+			var group []*browser
+			for index := first; index < min(first+together, len(fleet.copies)); index++ {
+				opened, err := server.tryOpenBrowser(fleet.copies[index])
+				if closed := (*gws.CloseError)(nil); errors.As(err, &closed) {
+					requireClose(t, closed, contracts.DocumentBusyCloseCode, contracts.DocumentBusyCloseReason, "the browser past the budget")
+					refusedAt = index + 1
+					break
+				} else if err != nil {
+					t.Fatal(err)
+				}
+				held = append(held, opened)
+				group = append(group, opened)
+			}
+			if refusedAt != 0 {
+				break
+			}
+			took := make([]time.Duration, len(group))
+			failed := make([]error, len(group))
+			var typists sync.WaitGroup
+			for index, opened := range group {
+				typists.Go(func() {
+					began := time.Now()
+					for number, update := range updates {
+						if applied, closed, err := opened.send(opened.updateFrame(update)); err != nil || !applied {
+							failed[index] = fmt.Errorf("update %d: applied %t, closed %v, %v", number+1, applied, closed, err)
+							return
+						}
+					}
+					took[index] = time.Since(began)
+				})
+			}
+			typists.Wait()
+			for index, opened := range group {
+				if failed[index] != nil {
+					t.Fatalf("room %d, %s: %v", first+index+1, opened.room, failed[index])
+				}
+				typed[opened.room] = true
+			}
+			t.Logf("rooms %d to %d took their %d updates each in %v; %d MiB resident", first+1, first+len(group), len(updates), took, server.resident(t, "VmRSS")>>20)
+			// Each room's count of what it took lands within the measurer's interval.
+			time.Sleep(roomCountIntervalForTest + 2*time.Second)
+		}
+	})
+	t.Logf("the first refusal came at room %d, the arithmetic's %d, after %s; peak resident memory %d MiB, against the pod's %d MiB",
+		refusedAt, admits+1, time.Since(started).Round(time.Second), peak>>20, podMemory>>20)
+	if refusedAt == 0 {
+		t.Fatalf("the budget admitted all %d rooms, want it to refuse room %d", len(fleet.copies), admits+1)
+	}
+	if refusedAt < admits || refusedAt > admits+2 {
+		t.Errorf("the first refusal came at room %d, want within one of the arithmetic's %d", refusedAt, admits+1)
+	}
+	if peak >= podMemory {
+		t.Errorf("the server's resident memory peaked at %d MiB, want under the pod's %d MiB", peak>>20, podMemory>>20)
+	}
+
+	// Each room's charge, read as the budget closes it once its browser has gone and it has
+	// settled: a budget of one byte closes every room nothing holds.
+	open := make([]string, len(held))
+	for index, opened := range held {
+		opened.leave()
+		open[index] = opened.room
+	}
+	for _, room := range open {
+		memory.waitForSettled(t, room)
+	}
+	server.setRoomBudget(t, 1)
+	closes := closesOf(t, server, open, len(open))
+	if len(closes) != len(open) {
+		t.Fatalf("the budget closed %d of the %d rooms the drive opened, want each", len(closes), len(open))
+	}
+	most := int64(0)
+	for _, made := range closes {
+		weight := made.chargedBefore - made.charged
+		structure, want := weight-counted, bound
+		if !typed[made.room] {
+			want = 0
+		}
+		most = max(most, structure)
+		if structure > want {
+			t.Errorf("room %s was charged %d bytes, a structure part of %d past its count's %d, more than the %d its updates are priced at", made.room, weight, structure, counted, want)
+		}
+	}
+	t.Logf("the budget closed %d rooms; the largest structure part was %d bytes, against the %d a typed room's updates are priced at", len(closes), most, bound)
+}
+
+// encodedTextBytes is what the walk reads of a string of bytes bytes: the bytes, after a varuint of
+// their length (updateStruct.content, internal/dispatch/docs/update_walk.go:308-310).
+func encodedTextBytes(bytes int) int64 {
+	return int64(bytes + len(binary.AppendUvarint(nil, uint64(bytes))))
+}
+
+// typedAndPasted is the updates one browser sends typing into state as a person types: keystrokes
+// one-character keystrokes in runs runs, each run at the middle of a paragraph of its own, one
+// character after another, and a paste of pasteBytes bytes at a third of a paragraph of its own
+// after half the runs, the paragraphs evenly spaced across the document. Each keystroke and the
+// paste is a transaction of the browser's own copy, whose update is the one ygo encodes for it and
+// carries the one struct it adds; the same bytes apply to every copy of state (cloneDocuments).
+func typedAndPasted(t *testing.T, state []byte, keystrokes, runs, pasteBytes int) [][]byte {
+	t.Helper()
+	document := newBrowserDocument(t, state)
+	var texts []*crdt.YXmlText
+	for _, child := range document.fragment.Children() {
+		if element, ok := child.(*crdt.YXmlElement); ok && element.NodeName == "paragraph" {
+			if text := firstXMLText(element); text != nil {
+				texts = append(texts, text)
+			}
+		}
+	}
+	if len(texts) < runs+1 {
+		t.Fatalf("the document holds %d paragraphs, want at least the %d the runs and the paste go to", len(texts), runs+1)
+	}
+	var updates [][]byte
+	stop := document.doc.OnUpdate(func(made []byte, _ any) { updates = append(updates, made) })
+	defer stop()
+	places := 0
+	next := func() *crdt.YXmlText {
+		text := texts[places*len(texts)/(runs+1)]
+		places++
+		return text
+	}
+	paste := strings.Repeat("pasted ", pasteBytes/7) + strings.Repeat("x", pasteBytes%7)
+	for run := range runs {
+		text := next()
+		at := text.Len() / 2
+		for typed := range keystrokes / runs {
+			document.doc.Transact(func(txn *crdt.Transaction) { text.Insert(txn, at+typed, "k", nil) })
+		}
+		if run == runs/2-1 {
+			pasted := next()
+			document.doc.Transact(func(txn *crdt.Transaction) { pasted.Insert(txn, pasted.Len()/3, paste, nil) })
+		}
+	}
+	if len(updates) != keystrokes+1 {
+		t.Fatalf("the browser made %d updates, want %d", len(updates), keystrokes+1)
+	}
+	for index, update := range updates {
+		if structs, err := docs.StateStructsForTest(update); err != nil || structs != 1 {
+			t.Fatalf("update %d carries %d structs (%v), want the one it adds", index+1, structs, err)
+		}
+	}
+	return updates
 }
 
 // Rooms admitted small grow under their browsers, and the budget follows them up, closing the rooms

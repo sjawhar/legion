@@ -1,14 +1,17 @@
 package docs
 
 import (
+	"encoding/binary"
 	"fmt"
 	"math"
 	"os"
 	"runtime"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/reearth/ygo/crdt"
+	"github.com/reearth/ygo/provider/websocket"
 
 	"github.com/sjawhar/envoy/internal/dispatch/pmdoc"
 )
@@ -189,6 +192,194 @@ func TestAResidentRoomsHeapPerStructOfItsState(t *testing.T) {
 			}
 		})
 	}
+}
+
+// typedRoomHeapMeasurement is the environment variable that runs
+// TestATypedAndPastedRoomIsChargedAtLeastItsHeapAndWithinTheFactor, about thirteen minutes.
+const typedRoomHeapMeasurement = "DISPATCH_MEASURE_TYPED_ROOM_HEAP"
+
+// A room typed into is charged no less than the heap it holds, and no more than the factor the
+// other shapes' prices may run past theirs. The structure part charges every struct a browser's
+// update adds as one of its own with both its splits at the heaviest kind's price
+// (bytesOfHeapAStruct), where ygo merges a run of typed characters back into one item (roomCharge),
+// so it charges typing far past what typing adds; this weighs whether that leaves the room's whole
+// charge within what the heap tests let a priced shape be charged. Those tests hold a copy of a
+// shape to no less than 0.85 of the price that prices it: the element price
+// (TestAResidentRoomsHeapPerByteOfItsMarkdown, leastPerElement) and the struct price of the
+// struct-dense shapes (TestAResidentRoomsHeapPerStructOfItsState, dense). So a priced shape may be
+// charged up to 1/0.85, 1.18 times its heap, and that is the factor here: the room's charge is at
+// least its heap and its heap at least leastHeldOfCharge of its charge. The 0.75 a run of
+// keystrokes may hold of the rendered-byte price is that price's own spread over run lengths
+// (bytesOfHeapARenderedByte), which prices no part of this room's charge.
+//
+// The room is a mebibyte of prose (residentRoomState), loaded as a room's load leaves it - the live
+// document, and the load's own decode of the stored state as the replica, its update log open and
+// its update observer registered (websocket.go:597-617) - and typed into as a person types:
+// 2,000 one-character keystrokes in a hundred runs of twenty, each run in the middle of a
+// paragraph of its own across the document, and a paste of 4 KiB after every tenth run, each in a
+// paragraph of its own, every one a browser's update the peer hook weighs and charges
+// (Service.weighPeerUpdate) and the observer renders (renderedReplica.observe). Once the
+// measurer's count of the last rendering has landed, the room is weighed as
+// TestAResidentRoomsHeapPerByteOfItsMarkdown weighs a room (heldByResidentRoom): what stays
+// allocated after two collections, a first build of the same state discarded beforehand, both
+// copies and everything the room holds besides. It takes one reading rather than the least of
+// three, since each build is the 2,010 updates' run; the readings of a room's heap agree to the
+// byte from one build to the next in a process of its own (heldByUpdates), and this one is
+// measured in one (measuredAlone). The structure part is checked against the prices too: each
+// update's struct with its splits at bytesOfHeapAStruct and its text at bytesOfHeapAByteOfText,
+// as the walk reads the text, its length prefix included (updateStruct.content) - two bytes for a
+// keystroke, 4,098 for a paste - at both copies, and nothing for the delete set each update
+// carries, which the room holds.
+//
+// Measured on 2026-10-29: TYPED_ROOM_NUMBERS.
+func TestATypedAndPastedRoomIsChargedAtLeastItsHeapAndWithinTheFactor(t *testing.T) {
+	const keystrokes, runs, pastes, pasteBytes, leastHeldOfCharge = 2_000, 100, 10, 4 << 10, 0.85
+	if os.Getenv(typedRoomHeapMeasurement) == "" {
+		t.Skip("set " + typedRoomHeapMeasurement + "=1 to run it, about thirteen minutes")
+	}
+	if !measuredAlone(t) {
+		return
+	}
+	state, rendering := residentRoomState(t, 1<<20)
+	updates := typedAndPastedUpdates(t, state, keystrokes, runs, pastes, pasteBytes)
+	// The walk prices a string's content as encoded: its bytes after a varuint of their length.
+	encoded := func(bytes int) int64 { return int64(bytes + len(binary.AppendUvarint(nil, uint64(bytes)))) }
+	keystroke := ((1+splitsAStructCanCause)*bytesOfHeapAStruct + encoded(1)*bytesOfHeapAByteOfText) * roomCopies
+	paste := ((1+splitsAStructCanCause)*bytesOfHeapAStruct + encoded(pasteBytes)*bytesOfHeapAByteOfText) * roomCopies
+	priced := keystrokes*keystroke + pastes*paste
+
+	// The loaded room, untyped, weighed as the heap test weighs it; its first build is the
+	// discarded one that keeps the decoder's one-time setup out of the typed room's reading.
+	loaded := heldByResidentRoom(t, state, false)
+	var before, after runtime.MemStats
+	runtime.GC()
+	runtime.GC()
+	runtime.ReadMemStats(&before)
+	started := time.Now()
+	room := loadAndType(t, state, updates)
+	took := time.Since(started)
+	runtime.GC()
+	runtime.GC()
+	runtime.ReadMemStats(&after)
+	held := int64(after.HeapAlloc) - int64(before.HeapAlloc)
+	structure, content, measuredAt, weight := chargeParts(room.charge)
+	bytes, elements, _ := room.replica.size()
+	structs := room.replica.structs.countedStructs()
+	runtime.KeepAlive(room)
+
+	counted := copyHeap(bytes, elements, structs) * roomCopies
+	t.Logf("%d B of markdown making %d elements; the loaded room holds %d B of heap", rendering.Bytes, rendering.Elements, loaded)
+	t.Logf("%d updates (%d keystrokes in %d runs, %d pastes of %d B) in %s; the room renders %d B making %d elements from %d structs",
+		len(updates), keystrokes, runs, pastes, pasteBytes, took.Round(time.Second), bytes, elements, structs)
+	t.Logf("the typed room holds %d B of heap, %d more than loaded; it is charged %d B: its count %d and a structure part of %d, against %d its updates are priced at",
+		held, held-loaded, weight, counted, structure, priced)
+	t.Logf("the charge is %.3fx the heap, want 1.000x to %.3fx (1/%.2f)", float64(weight)/float64(held), 1/leastHeldOfCharge, leastHeldOfCharge)
+	if content != measuredAt {
+		t.Fatalf("the room's charge holds %d B of content its last count did not measure, want every update counted before it is weighed", content-measuredAt)
+	}
+	if weight != counted+structure {
+		t.Fatalf("the room is charged %d B, want its count's %d beside its %d-byte structure part", weight, counted, structure)
+	}
+	if structure != priced {
+		t.Errorf("the room's structure part is %d B, want the %d its updates' structs, splits and text are priced at", structure, priced)
+	}
+	if weight < held {
+		t.Errorf("the room is charged %d B for the %d B of heap it holds, under it", weight, held)
+	}
+	if float64(held) < leastHeldOfCharge*float64(weight) {
+		t.Errorf("the room holds %d B of heap for the %d B it is charged, %.3f of it, want at least %.2f: the structure part over-charges typing",
+			held, weight, float64(held)/float64(weight), leastHeldOfCharge)
+	}
+}
+
+// typedResidentRoom is a room typed into (loadAndType): the room as heldByResidentRoom holds one,
+// with its update log and its charge in the room budget.
+type typedResidentRoom struct {
+	residentRoom
+	log    *crdt.UpdateLog
+	charge *roomCharge
+}
+
+// loadAndType loads state as a room's load does (onLoadDocument, websocket.go:597-617): the
+// live document decoded from state, the load's own decode of it as the replica, the room's update
+// log opened, the replica kept and its scan total set from that decode, the room charged in a
+// budget of roomBudgetBytes, and an update observer on live that moves the replica through each
+// commit. It then hands each of updates to the peer hook as one browser's, applied as the room
+// applies a peer's update, and returns once the measurer has counted the room's last rendering.
+func loadAndType(t *testing.T, state []byte, updates [][]byte) *typedResidentRoom {
+	t.Helper()
+	live := newDocumentCopy()
+	if err := crdt.ApplyUpdateV1(live, state, nil); err != nil {
+		t.Fatalf("decode the stored state: %v", err)
+	}
+	markdown, err := renderDocument(live)
+	if err != nil {
+		t.Fatalf("render the loaded room: %v", err)
+	}
+	decoded, err := decodeStoredState(state)
+	if err != nil {
+		t.Fatalf("decode the stored state's copy: %v", err)
+	}
+	service := &Service{}
+	service.budget.limit = roomBudgetBytes
+	log := live.OpenUpdateLog()
+	t.Cleanup(log.Close)
+	replica := service.keepReplica(live, log, &markdown, decoded.doc)
+	replica.scans.rescanned(decoded.scans)
+	charge := service.chargeLoadedRoom("room", live, replica)
+	live.OnUpdate(func([]byte, any) { replica.observe("room", nil) })
+	browser := new(int)
+	for index, update := range updates {
+		info := websocket.PeerUpdateInfo{Room: "room", Doc: live, Update: update, Origin: browser}
+		if err := service.weighPeerUpdate(info, func() error { return crdt.ApplyUpdateV1(live, update, browser) }); err != nil {
+			t.Fatalf("update %d of %d: the hook answered %v, want it admitted", index+1, len(updates), err)
+		}
+	}
+	service.measurer.waitIdle()
+	return &typedResidentRoom{residentRoom: residentRoom{service: service, live: live, replica: replica}, log: log, charge: charge}
+}
+
+// typedAndPastedUpdates is the updates one browser sends typing into state as a person types:
+// keystrokes one-character keystrokes in runs runs, each run at the middle of a paragraph of its
+// own, one character after another, and pastes pastes of pasteBytes bytes, one after each
+// runs/pastes runs, each at a third of a paragraph of its own, the paragraphs evenly spaced across
+// the document. Each keystroke and each paste is a transaction of the browser's own copy, and its
+// update is the one ygo encodes for it.
+func typedAndPastedUpdates(t *testing.T, state []byte, keystrokes, runs, pastes, pasteBytes int) [][]byte {
+	t.Helper()
+	browser := newDocumentCopy()
+	if err := crdt.ApplyUpdateV1(browser, state, nil); err != nil {
+		t.Fatal(err)
+	}
+	texts := paragraphTexts(browser)
+	if len(texts) < runs+pastes {
+		t.Fatalf("the document holds %d paragraphs, want at least the %d runs and pastes go to", len(texts), runs+pastes)
+	}
+	var updates [][]byte
+	stop := browser.OnUpdate(func(update []byte, _ any) { updates = append(updates, update) })
+	defer stop()
+	paste := strings.Repeat("pasted ", pasteBytes/7) + strings.Repeat("x", pasteBytes%7)
+	places := 0
+	next := func() *crdt.YXmlText {
+		text := texts[places*len(texts)/(runs+pastes)]
+		places++
+		return text
+	}
+	for run := range runs {
+		text := next()
+		at := text.Len() / 2
+		for typed := range keystrokes / runs {
+			browser.Transact(func(txn *crdt.Transaction) { text.Insert(txn, at+typed, "k", nil) })
+		}
+		if (run+1)%(runs/pastes) == 0 {
+			pasted := next()
+			browser.Transact(func(txn *crdt.Transaction) { pasted.Insert(txn, pasted.Len()/3, paste, nil) })
+		}
+	}
+	if len(updates) != keystrokes+pastes {
+		t.Fatalf("the browser made %d updates, want %d", len(updates), keystrokes+pastes)
+	}
+	return updates
 }
 
 // longRunState is the state of a small document whose paragraphs, paragraphs of them, together
