@@ -2,34 +2,28 @@
   "schemaVersion": 1,
   "phase": "test",
   "issue": "INFRA-624",
-  "completed": "2026-10-28T23:08:25Z",
-  "round": 10,
-  "headSha": "73d363c5dd413f89fea18c05c0bd70d9329625db",
+  "completed": "2026-10-29T00:39:24Z",
+  "round": 11,
+  "headSha": "0a1716e7d87917952620c8fdd97308fce339d22a",
   "implementerProof": {
     "verdict": "verified",
-    "how": "Followed every refusal with the real dispatch CLI on decisions real editors broke, using the ids parsed from the refusal text. Re-ran its refusal tests (4 pass) and the browser specs (17 passed, chromium and iphone) at 73d363c5. My round 2 and round 8 red tests were removed or replaced under the architect's design change (the route no longer rebuilds a broken decision), as the implement handoff records."
+    "how": "Followed the refusal's named deletes, as one doc-edit, with the real dispatch CLI on decisions real editors broke. Re-ran its 6 refusal tests and the browser specs (17 passed, chromium and iphone) at 0a1716e7."
   },
   "failures": [],
   "failed": 0,
   "proof": [
     {
-      "criterion": "Architect's design change: every ask edit of a broken decision is refused, quoting every block with its id as data; following the named path (doc-edit deleting blocks by id, then edit-ask) ends valid with every word the agent did not delete",
+      "criterion": "Review round 7 item 1 (architect's request): the refusal says to delete the blocks in one document edit and lists every delete it needs; following it ends valid with every word the agent did not delete",
       "surface": "Dispatch ask-edit route and document edits through the real dispatch CLI against the real Go server and Postgres 17; decisions broken by two or three real editors in headless Chromium",
-      "command": "Throwaway Playwright probes W1-W5: edit-ask --urgency high; doc-edit deleting block ids parsed from the refusal; edit-ask with every option. Record https://github.com/sjawhar/legion/pull/2433#issuecomment-6483048479",
-      "observed": "Each refusal exits 1, quoting every block as 'block \"<id>\" (<type>) reads \"<markdown>\"', with no shell command or --ops-json. Two lists: delete the 2nd list, then edit-ask → '- Option A\\n- Option B'. Three lists: both extra lists deleted in one doc-edit, then edit-ask → '- Option A\\n- Option B\\n- Option C'. Repeated label, with 'Option C' in the duplicate's list: that list is quoted whole and deleted, then edit-ask [Option A: cheap, Option A2: fast, Option C] → every word kept. Paragraph after the list: delete it, then edit-ask → valid. Nested sub-item: the list is quoted whole and deleted, then edit-ask 'Option B: only if finance agrees' → every word kept. In every final state the pages are unmarked and the row equals the options sent.",
-      "headSha": "73d363c5dd413f89fea18c05c0bd70d9329625db",
-      "negativeControl": "edit-ask --urgency high on each broken decision → exit 1; document and row unchanged"
+      "command": "Throwaway Playwright probes W1-W5: edit-ask --urgency high; one doc-edit holding a delete for each id parsed from the refusal's 'the blocks to delete are …'; edit-ask with every option. Record https://github.com/sjawhar/legion/pull/2433#issuecomment-6484589156",
+      "observed": "Two lists: names the 2nd list; one doc-edit applies, then edit-ask → '- Option A\\n- Option B'. Three lists: names both lists after the first; 'Applied 2 ops', then edit-ask → '- Option C\\n- Option A\\n- Option B'. Repeated label, with 'Option C' in the duplicate's list: names that list; applies, then edit-ask [Option A: cheap, Option A2: fast, Option C]. Paragraph after the list: names 'Context'; applies, then edit-ask. Nested sub-item in the first list: names the other list and keeps the first list with its sub-item; applies, then edit-ask 'Option B: only if finance agrees'. Every final state: pages unmarked, row equals the options sent, no named doc-edit refused.",
+      "headSha": "0a1716e7d87917952620c8fdd97308fce339d22a",
+      "negativeControl": "edit-ask --urgency high on each broken decision → exit 1; document and row unchanged. At 73d363c5 (round 10), deleting one of three lists per doc-edit was refused."
     }
   ],
-  "findings": [
-    {
-      "severity": "minor (wording; a path exists)",
-      "description": "The refusal says 'delete the block or blocks to drop with a document edit … until it holds its question and at most one list'. With three lists, deleting one list per doc-edit, as 'until' suggests, is refused with only the content-rule text, because doc-edit refuses an edit that leaves the decision broken. Deleting both extra lists in one doc-edit applies. Sent to the architect; not counted as a failure, because the named step ('with a document edit', the blocks to drop) applies when the deletes go in one edit."
-    }
-  ],
-  "ci": "Read on GitHub at 73d363c5 during testing: build x2, changes, lint, pr-title x2, test, typecheck and the daemon Postgres 16 suite were pending. Not re-run.",
+  "ci": "Read on GitHub at 0a1716e7 during testing: build x2, changes, lint, pr-title x2, test, typecheck and the daemon Postgres 16 suite were pending. Not re-run.",
   "notes": [
-    "The merge of main (635805f8) carries main's one-line pmdoc import fix (docstest → crafted), as the controller described.",
+    "The unsettled-id refusal (no delete named; retry) is not reachable from a browser. The implementer's TestSetAskBlockTextRefusalBeforeBlockIDsSettleNamesNoDelete covers it, and I read it at this head.",
     "Throwaway probe specs were moved out of the workspace. The working copy holds only this handoff."
   ]
 }
