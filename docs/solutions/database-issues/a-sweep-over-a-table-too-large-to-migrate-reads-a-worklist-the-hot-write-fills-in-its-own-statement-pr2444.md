@@ -11,7 +11,6 @@ date: 2026-10-29
 status: active
 module: packages/envoy
 related_issues:
-  - "INFRA-593"
   - "sjawhar/legion#2444"
 ---
 
@@ -37,5 +36,4 @@ related_issues:
 - On 100,000 one-row documents, the old listing
   (`select artifact_id from doc_updates group by artifact_id having count(*) > 1`) took 42 ms and
   read 624 buffers per hourly pass. The table's listing took 0.054 ms. The append's latency
-  stayed within run-to-run spread over 5 harness runs per side
-  (dispatch://INFRA-593/artifact/infra-593-round-2-sweep-and-append-txt).
+  stayed within run-to-run spread over 5 harness runs per side.
