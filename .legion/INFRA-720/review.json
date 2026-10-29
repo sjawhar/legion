@@ -1,0 +1,41 @@
+{
+  "schemaVersion": 1,
+  "phase": "review",
+  "issue": "INFRA-720",
+  "completed": "2026-10-29T17:09:00Z",
+  "reviewedHead": "3a08add9d4eff96bff908f5b74f43d2c46259548",
+  "codeHead": "3a3a08ab1cb4b7af3fb77e0e8cca4f2a0ea59e5b",
+  "decision": "changes_requested",
+  "critical": 0,
+  "important": 2,
+  "minor": 3,
+  "keyFindings": [
+    {
+      "severity": "important",
+      "file": "packages/envoy/internal/dispatch/refs/graph.go",
+      "description": "loadAskNodes (:522, :530) tests `anchor->>'artifact_id' is not null` before the guarded cast, so an ask whose anchor does not cast never falls through to block_artifact_id: its refs parent becomes the issue, while a null artifact_id falls through to the block document and both search arms (search.go:95, :329) link the same ask to the block document. The function's own doc says an ask written on a document belongs to that document. Test the castable expression (`CastableUUID(...) is not null`) in both the document join and the version case, and update TestAskNodeAnswersOverAnAnchorArtifactIDThatDoesNotCast (refs/ask_anchor_artifact_test.go:69) to expect the block document."
+    },
+    {
+      "severity": "important",
+      "file": "packages/envoy/internal/dispatch/model/model.go",
+      "description": "Anchor.UnmarshalJSON (:76) decodes every anchor twice through a wrapper: measured 3.4-3.8 us, 176 B, 4 allocs per decode vs 1.7-1.9 us, 80 B, 1 alloc for the plain struct. It runs on every anchor recordedMarkRefs decodes, and A3's proof (benchstat and replay) ran at 1f4f79e7, before this method existed. Decode into (*anchorFields)(a) first and take the slow path only on a *json.UnmarshalTypeError whose Field is artifact_id; re-run task 5(a)'s benchstat at the new head."
+    },
+    {
+      "severity": "minor",
+      "file": "packages/envoy/internal/dispatch/docs/marks.go",
+      "description": "recordedMarksQuery (:759-763) replaced base's table-to-indexed-expression data pairing with `if table == \"asks\"`. Keep the pairing as data (a package var of {table, artifactID}) that recordedMarkRefs and TestRecordedMarkRefsReadsThroughTheAnchorIndexes both range over."
+    },
+    {
+      "severity": "minor",
+      "file": "packages/envoy/internal/dispatch/api/ask_anchor_number_test.go",
+      "description": "The three api anchor test files each carry their own copy of the stored-anchor rewrite (storeUncastableAnchor, storeNumberAnchorArtifactID, the inline update in the spelling test), the ask-list map loop and the ask.opened event decode. One storeAnchorArtifactID(t, db, askID, blockDoc, rawJSON) helper and one helper per reader."
+    },
+    {
+      "severity": "minor",
+      "file": "packages/envoy/internal/dispatch/store/canonical_uuid.go",
+      "description": "Both doc comments enumerate their callers (`Those three are its only callers`, :20, and :40-43); a new caller or rename makes them false. State each helper's own contract only."
+    }
+  ],
+  "ci": "Required set lint, typecheck, test, pr-title (rulesets; no branch protection checks). CI head 3a3a08ab (compare to 3a08add9: handoffsOnly true, 2 files). At read: lint success, typecheck skipped, pr-title success, test in_progress.",
+  "thermonuclear": "deep-review: APPROVE at 3a08add9 with two Minors (decode cost, graph vs search parent), both raised here as Important since each changes behaviour or leaves A3 unproven at head; code-quality: CHANGES at 3a08add9 (four findings; its vacuous-search-tests finding not adopted: those tests pin search's href for the both-column row shape, a consumer-visible answer that the graph fix makes the refs graph agree with)."
+}
