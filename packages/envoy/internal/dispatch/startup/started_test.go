@@ -26,12 +26,14 @@ const (
 )
 
 // recordingPublisher stands in for the bus client: it records every envelope it is asked to
-// publish while it is connected and not failing, and refuses the rest. delay is how long each
-// publish takes before it answers, as a stream's acknowledgement does; a publish whose ctx ends
-// first records nothing and returns ctx's error, as the bus client sends nothing once its ctx has
-// ended. A hanging publisher's publish never answers before its ctx ends.
+// publish while it is connected and not failing, and refuses the rest. A held publisher's
+// publishes answer only once release is called, as a stream's acknowledgement takes what time it
+// takes; a publish whose ctx ends first records nothing and returns ctx's error, as the bus client
+// sends nothing once its ctx has ended. A hanging publisher's publish never answers before its ctx
+// ends.
 type recordingPublisher struct {
-	delay        time.Duration
+	// held, when set, holds every publish until release closes it.
+	held         chan struct{}
 	mu           sync.Mutex
 	disconnected bool
 	hanging      bool
@@ -50,16 +52,19 @@ func (p *recordingPublisher) Connected() bool {
 func (p *recordingPublisher) PublishReportingDuplicateWithin(ctx context.Context, item contracts.Envelope) (bool, error) {
 	p.mu.Lock()
 	p.running++
-	hanging := p.hanging
+	hanging, answered := p.hanging, p.held
 	p.mu.Unlock()
 	defer func() {
 		p.mu.Lock()
 		defer p.mu.Unlock()
 		p.running--
 	}()
-	var answered <-chan time.Time
-	if !hanging {
-		answered = time.After(p.delay)
+	switch {
+	case hanging:
+		answered = nil // a nil channel never answers
+	case answered == nil:
+		answered = make(chan struct{})
+		close(answered)
 	}
 	select {
 	case <-ctx.Done():
@@ -79,6 +84,11 @@ func (p *recordingPublisher) hang(hanging bool) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	p.hanging = hanging
+}
+
+// release answers every held publish, and lets every later one answer at once.
+func (p *recordingPublisher) release() {
+	close(p.held)
 }
 
 func (p *recordingPublisher) inFlight() int {
@@ -244,28 +254,52 @@ func TestAnUnstampedBuildIsNeverAnnounced(t *testing.T) {
 }
 
 // Two processes passing at once, each on a pool of its own, announce one build once and publish
-// it once between them, though each publish takes long enough for the other process to read the
-// announcement as unpublished meanwhile.
+// it once between them, though one of them reads the announcement as unpublished while the
+// other's publish of it is in flight: the publish answers only once a process has passed
+// meanwhile, and that pass finds the lock held, reads the announcement and leaves the publish to
+// the lock's holder. Each then names the build as the fleet's.
 func TestTwoAnnouncersAtOnceAnnounceAndPublishOnce(t *testing.T) {
 	database := storetest.Open(t)
 	register(t, database, c1)
-	publisher := &recordingPublisher{delay: 100 * time.Millisecond}
+	publisher := &recordingPublisher{held: make(chan struct{})}
 	announcers := []*Announcer{
 		New(Deps{Pool: database.Pool, Publisher: publisher}),
 		New(Deps{Pool: storetest.SecondProcess(t, database).Pool, Publisher: publisher}),
 	}
+	// Ends the passes only if a regression keeps them from ever overlapping the publish: a pass
+	// takes milliseconds, and the overlap comes within a few of them.
+	ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
+	defer cancel()
 	start := make(chan struct{})
+	finished := make(chan struct{}, len(announcers))
 	var passes sync.WaitGroup
 	for _, a := range announcers {
 		passes.Go(func() {
 			<-start
-			for range 20 {
-				a.pass(context.Background())
+			// A count of passes alone does not reach the publish. A pass that misses the lock and
+			// finds nothing announced ends in a fraction of a millisecond, so the process that
+			// misses it can spend twenty passes inside the other's announcing transaction, before
+			// the announcement commits, and never read it. So each process passes until one of its
+			// passes began while the other's publish was in flight, or the publish has answered.
+			overlapped := false
+			done := func() bool { return overlapped || len(publisher.envelopes()) > 0 }
+			for i := 0; ctx.Err() == nil && (i < 20 || !done()); i++ {
+				inFlight := publisher.inFlight() > 0
+				a.pass(ctx)
+				overlapped = overlapped || inFlight
 			}
+			finished <- struct{}{}
 		})
 	}
 	close(start)
+	// The first process to finish is not the one whose publish is held, so it has passed while
+	// that publish was in flight.
+	<-finished
+	publisher.release()
 	passes.Wait()
+	if err := ctx.Err(); err != nil {
+		t.Errorf("the passes ran until the bound ended them, so no process finished passing while the other's publish was held: %v", err)
+	}
 	requireEnvelopes(t, database, publisher, c1)
 	for _, a := range announcers {
 		requireFleetCommit(t, a, c1)
