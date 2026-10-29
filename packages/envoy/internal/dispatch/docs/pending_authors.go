@@ -362,6 +362,12 @@ type roomCursor struct {
 	mu      sync.Mutex
 	through int64
 	above   []int64
+	// replaced is set once the gate admitted a browser's append from the instance on a stored
+	// history replaced under it (storedHistoryHolds, markReplaced): no stored row at or below
+	// through remains, so no catch-up fills the gap above it and the instance never stands at the
+	// head again. closeTaken is set once an append stored that way has asked for the instance's
+	// close (takeReplaced), so later ones do not ask again.
+	replaced, closeTaken bool
 }
 
 // advanceRoomCursor records that cursor's room instance now holds the durable update stored at
@@ -433,6 +439,30 @@ func (cursor *roomCursor) held() (through int64, above []int64) {
 	return cursor.through, slices.Clone(cursor.above)
 }
 
+// markReplaced records that the gate found the stored history replaced under the instance and
+// admitted a browser's append from it all the same (storedHistoryHolds).
+func (cursor *roomCursor) markReplaced() {
+	cursor.mu.Lock()
+	defer cursor.mu.Unlock()
+	cursor.replaced = true
+}
+
+// takeReplaced reports whether the instance was found on a replaced history (markReplaced) and no
+// caller has taken that yet: true once, to the append whose close of the instance it asks for
+// (Service.closeRoomOnReplacedHistory). A nil cursor answers false.
+func (cursor *roomCursor) takeReplaced() bool {
+	if cursor == nil {
+		return false
+	}
+	cursor.mu.Lock()
+	defer cursor.mu.Unlock()
+	if !cursor.replaced || cursor.closeTaken {
+		return false
+	}
+	cursor.closeTaken = true
+	return true
+}
+
 // documentCursor is the durable version the document a write was made on holds every update
 // through: a room instance's cursor for an update made in a room, or a transaction's own view of
 // it (liveWrite.heldThrough), which adds the versions that transaction has appended itself and no
@@ -475,11 +505,16 @@ const (
 // closeMargin is how long after an issue's close committed a browser update the room observed is
 // still taken as one made while the issue was open (observedBeforeClose). The close's notification
 // (dispatch_issue_open_changed) normally reaches every process's rooms within milliseconds of its
-// commit, and closes them (setRoomIssueOpen); the margin covers that latency, the close's own
-// transaction committing a moment after the closed_at it wrote, and the drift between this
-// process's clock and the database's over the update's age. An update observed later than this
-// is the case the gate's issue read exists for: a room on a process that has not heard the close -
-// its listener redialing, up to RedialBackoff's ceiling - still taking edits on a closed issue.
+// commit, and closes them (setRoomIssueOpen); the margin covers that latency, the moment between
+// the close's last statement and its commit, and the drift between this process's clock and the
+// database's over the update's age. It is measured from closed_at, which the close's transaction
+// stamps as its last statement before it commits (clock_timestamp(), in PATCH
+// /api/v1/issues/{key}), not from the transaction's start: the close withdraws the issue's open
+// asks first, writing their blocks under each document's lock until it commits, and a browser
+// update waiting on that lock is no later for how long that took. An update observed later than
+// this is the case the gate's issue read exists for: a room on a process that has not heard the
+// close - its listener redialing, up to RedialBackoff's ceiling - still taking edits on a closed
+// issue.
 const closeMargin = 2 * time.Second
 
 // appendGateStatement is the gate's one read, under the document's advisory lock the appending
@@ -553,11 +588,12 @@ func queueAppendGate(b *pgx.Batch, room string, through int64, kind appendKind, 
 
 // observedBeforeClose is whether a browser update the room's observer took age ago, on this
 // process's monotonic clock, was taken no later than closeMargin after its issue's close
-// committed, closedFor ago on the database's clock. Both are measured at the gate's read, so the
-// two clocks need not agree, only run at about the same rate. Such an update was made while the
-// issue was open, or before its room could have heard of the close, and is stored as it would have
-// been had its append reached the store just ahead of the close: the document owes a settlement
-// for it, which runs once the issue reopens. An update with no observed time is not taken as one.
+// committed, closedFor ago on the database's clock (closed_at, which the close stamps as its last
+// statement before its commit). Both are measured at the gate's read, so the two clocks need not
+// agree, only run at about the same rate. Such an update was made while the issue was open, or
+// before its room could have heard of the close, and is stored as it would have been had its
+// append reached the store just ahead of the close: the document owes a settlement for it, which
+// runs once the issue reopens. An update with no observed time is not taken as one.
 func (g *appendGate) observedBeforeClose() bool {
 	return !g.observed.IsZero() && g.age+closeMargin >= *g.closedFor
 }
@@ -593,27 +629,30 @@ func (g *appendGate) head() (int64, error) {
 // one statement on tx, and its decision for update. A browser's update refused for a replaced
 // history above its room's cursor is admitted at the head after all when that history still holds
 // every item the update builds on (storedHistoryHolds): a compaction folded the rows the room held
-// into a later one, keeping their items, which is no replacement for a delta that commutes. The
-// room cannot catch up to such a history and is closed and reloaded (catchUpReplaced) as before;
-// refused, its update was dropped with it, and a browser whose issue closed meanwhile reconnects
-// read-only and cannot send it again.
-func gateAppend(ctx context.Context, tx pgx.Tx, room string, through int64, kind appendKind, observed time.Time, update []byte) (int64, error) {
+// into a later one, keeping their items, which is no replacement for a delta that commutes.
+// Refused, the update was dropped with its room, and a browser whose issue closed meanwhile
+// reconnects read-only and cannot send it again. replaced reports such an admission: the room
+// cannot catch up to that history, so its caller marks the room's cursor (markReplaced), and once
+// the append is stored the room is closed and reloaded at the head
+// (Service.closeRoomOnReplacedHistory), rather than taking every later update of its browsers down
+// this path, a decode of the whole stored document under the document's lock each.
+func gateAppend(ctx context.Context, tx pgx.Tx, room string, through int64, kind appendKind, observed time.Time, update []byte) (latest int64, replaced bool, err error) {
 	batch := &pgx.Batch{}
 	gate := queueAppendGate(batch, room, through, kind, observed)
 	if err := tx.SendBatch(ctx, batch).Close(); err != nil && gate.err == nil {
-		return 0, fmt.Errorf("read the document's head for the append gate: %w", err)
+		return 0, false, fmt.Errorf("read the document's head for the append gate: %w", err)
 	}
-	latest, err := gate.head()
+	latest, err = gate.head()
 	if errors.Is(err, ErrRoomBehindHead) && gate.kind == appendBrowser && gate.latest > gate.through {
 		holds, holdsErr := storedHistoryHolds(ctx, tx, room, gate.latest, update)
 		if holdsErr != nil {
-			return 0, holdsErr
+			return 0, false, holdsErr
 		}
 		if holds {
-			return gate.latest, nil
+			return gate.latest, true, nil
 		}
 	}
-	return latest, err
+	return latest, false, err
 }
 
 // storedHistoryHolds reports whether room's stored history through head holds every item update

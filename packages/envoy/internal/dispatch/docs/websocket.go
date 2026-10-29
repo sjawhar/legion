@@ -121,12 +121,14 @@ func (a *servicePersistenceAdapter) StoreUpdate(room string, update []byte) erro
 // took the update later than closeMargin after the close. A history a compaction folded past the
 // room's cursor is no replacement for the update when it still holds every item the update builds
 // on (storedHistoryHolds): it is stored, and the room, which cannot catch up to that history, is
-// closed and reloaded by its catch-up. An update the room took before the close and whose append
-// reaches the gate after it - queued behind the room's earlier appends, waiting on the document's
-// lock behind a settlement or a compaction, or handed here by the close of the room itself
-// (setRoomIssueOpen) - is stored, and settled once the issue reopens, a compaction's fold of the
-// history meanwhile included: a room closing for its issue takes in no catch-up while its close
-// waits for this append (holdOpen).
+// closed and reloaded at the head once it is (closeRoomOnReplacedHistory): this append asks for
+// that itself, so it needs no room-sync lane and waits on no later notification. An update the
+// room took before the close and whose append reaches the gate after it - queued behind the room's
+// earlier appends, waiting on the document's lock behind a settlement or a compaction, or handed
+// here by the close of the room itself (setRoomIssueOpen) - is stored, and settled once the issue
+// reopens, a compaction's fold of the history meanwhile included: a room closing for its issue
+// takes in no catch-up while its close waits for this append (holdOpen), and that close is the
+// reload a folded history needs.
 // A replaced history fails the room, as any failed append does: the room reloads from the store,
 // which is the close-and-reload a replaced history needs (plan D3.3), and the browser resends the
 // update to the reloaded room. A refused update on a closed issue is dropped and closes the room
@@ -177,6 +179,9 @@ func (a *servicePersistenceAdapter) StoreUpdateContext(ctx context.Context, room
 	}
 	if found && class.durable && class.contentChanged {
 		a.service.scheduleSettleAfterAppend(room)
+	}
+	if class.cursor.takeReplaced() {
+		a.service.closeRoomOnReplacedHistory(room, class.instance)
 	}
 	return nil
 }

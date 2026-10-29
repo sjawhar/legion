@@ -262,8 +262,34 @@ func TestAKeystrokeTakenBeforeTheIssueClosedIsStoredWhenACompactionFoldedTheHist
 		t.Fatal("task A's close of its room never came to wait on the document's lock behind alice's append")
 	}
 
-	// Another process's write past the room's cursor, then the fold Compact makes of it with
-	// compactKeep: one row, the head, holding the state of every row through it.
+	foldHistoryPastRoom(t, holder, artifactID, head)
+	if taskA.srv.GetDoc(artifactID) == nil {
+		t.Fatal("task A's room closed before its append reached the store, so nothing here is tested")
+	}
+	if err := holder.Commit(ctx); err != nil {
+		t.Fatalf("release the document's lock: %v", err)
+	}
+
+	requireEnds(t, alice, "closing the issue left alice's browser on task A connected")
+	waitFor(t, roomWait(t), "task A's room to finish closing", func() bool {
+		return taskA.srv.GetDoc(artifactID) == nil
+	})
+	if stored := storedMarkdown(t, database, artifactID); !strings.Contains(stored, "typed before the close") {
+		t.Fatalf("the keystroke alice typed while the issue was open was dropped: the store holds %q", stored)
+	}
+	if failed.Load() {
+		t.Fatal("the keystroke's append failed task A's room")
+	}
+}
+
+// foldHistoryPastRoom writes artifactID as another process would, in holder, which holds the
+// document's lock, past head, the cursor of the room a test holds, and then folds the history as
+// Compact does with compactKeep: one row, the head, holding the state of every row through it. No
+// row at or below head remains, and the fold keeps every item of the history, so the room's
+// browser updates still build on it (storedHistoryHolds).
+func foldHistoryPastRoom(t *testing.T, holder pgx.Tx, artifactID string, head int64) {
+	t.Helper()
+	ctx := context.Background()
 	stored, err := documentThrough(ctx, holder, artifactID, persistence.Version(head))
 	if err != nil {
 		t.Fatalf("read the stored document: %v", err)
@@ -287,23 +313,6 @@ func TestAKeystrokeTakenBeforeTheIssueClosedIsStoredWhenACompactionFoldedTheHist
 	}
 	if _, err := holder.Exec(ctx, `delete from doc_updates where artifact_id = $1 and version < $2`, artifactID, writtenAt); err != nil {
 		t.Fatalf("delete the folded rows: %v", err)
-	}
-	if taskA.srv.GetDoc(artifactID) == nil {
-		t.Fatal("task A's room closed before its append reached the store, so nothing here is tested")
-	}
-	if err := holder.Commit(ctx); err != nil {
-		t.Fatalf("release the document's lock: %v", err)
-	}
-
-	requireEnds(t, alice, "closing the issue left alice's browser on task A connected")
-	waitFor(t, roomWait(t), "task A's room to finish closing", func() bool {
-		return taskA.srv.GetDoc(artifactID) == nil
-	})
-	if stored := storedMarkdown(t, database, artifactID); !strings.Contains(stored, "typed before the close") {
-		t.Fatalf("the keystroke alice typed while the issue was open was dropped: the store holds %q", stored)
-	}
-	if failed.Load() {
-		t.Fatal("the keystroke's append failed task A's room")
 	}
 }
 

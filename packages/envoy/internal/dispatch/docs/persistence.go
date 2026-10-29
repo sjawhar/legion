@@ -33,6 +33,11 @@ type PgVersioned struct {
 	// Nil outside tests; tests use it to hold a reader of the cursor and the head in that window
 	// (TestAWriteDoesNotForkFromTheStoreInsideAnAppendsCursorWindow).
 	afterAppendCommit func(room string, version persistence.Version)
+	// storedHistoryHeld runs when the gate admits a browser's append on a stored history that was
+	// replaced under its room and still holds every item the update builds on
+	// (storedHistoryHolds), inside the append's transaction. Nil outside tests; tests count the
+	// appends that take that path.
+	storedHistoryHeld func(room string)
 	// processID is the id of the process this store writes for (Service.ProcessID), which every
 	// announcement of a stored change carries (documentHeadChannel) so that process's own room
 	// sync knows the change for its own. New sets it on the store it builds; a store built
@@ -255,16 +260,28 @@ func (p *PgVersioned) appendUpdateTxClass(ctx context.Context, tx pgx.Tx, room s
 	// cursor (appendUpdate) and two peers of one room never refuse each other. A browser's delta
 	// is admitted from a room behind an intact history, since Yjs updates commute and this lock
 	// serialises them, and from one behind a history a compaction folded, which still holds what
-	// the delta builds on (storedHistoryHolds), unless the document's issue is closed and the room
-	// took the delta later than closeMargin after the close (ErrIssueClosed); a derived write - an
-	// upload's or a conditional edit's version, a settlement's repairs - only from a room holding
-	// the head, since what it renders from that room's document would be rendered from text the
-	// writer has not seen (appendKind). An append no room's cursor gates - a cold write, a new
-	// document's seed, a test's own append - reads the head alone.
+	// the delta builds on (storedHistoryHolds) - its room's cursor is marked, for the room to be
+	// closed and reloaded once the append is stored (StoreUpdateContext) - unless the document's
+	// issue is closed and the room took the delta later than closeMargin after the close
+	// (ErrIssueClosed); a derived write - an upload's or a conditional edit's version, a
+	// settlement's repairs - only from a room holding the head, since what it renders from that
+	// room's document would be rendered from text the writer has not seen (appendKind). An append
+	// no room's cursor gates - a cold write, a new document's seed, a test's own append - reads the
+	// head alone.
 	var latest int64
 	var err error
 	if cursor, kind, observed := appendingCursor(ctx, room); cursor != nil {
-		latest, err = gateAppend(ctx, tx, room, cursor.heldThrough(), kind, observed, update)
+		var replaced bool
+		latest, replaced, err = gateAppend(ctx, tx, room, cursor.heldThrough(), kind, observed, update)
+		if replaced {
+			// Only a browser's append is admitted so, and its cursor is its room instance's.
+			if instanceCursor, ok := cursor.(*roomCursor); ok {
+				instanceCursor.markReplaced()
+			}
+			if p.storedHistoryHeld != nil {
+				p.storedHistoryHeld(room)
+			}
+		}
 	} else {
 		latest, err = currentUpdateCursor(ctx, tx, room)
 	}

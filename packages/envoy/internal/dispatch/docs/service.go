@@ -2617,6 +2617,49 @@ func (s *Service) refuseClosedIssueAppend(room string) {
 	}()
 }
 
+// closeRoomOnReplacedHistory closes instance, room's instance whose browser append was just stored
+// on a history replaced under it (storedHistoryHolds, roomCursor.markReplaced). No stored row at or
+// below its cursor remains, so no catch-up brings it to the head, and every later append of its
+// browsers would take the same path, a decode of the whole stored document under the document's
+// lock each. It is closed as a catch-up closes a room on a replaced history (closeRoomBehindHead),
+// and its browsers reconnect to a room loaded at the head. The append's own gate found the history
+// replaced, under the document's lock, so this needs no room-sync lane and no confirming read
+// (historyReplacedUnderLock). A close held off by this process's open write, or one that failed,
+// fails the room instead, whose eviction reloads it as well. An instance the room no longer holds
+// has been closed already, and a room whose record is closed for its issue is being closed by that
+// close (setRoomIssueOpen), whose flush may be what stored the append. It runs on a goroutine of
+// its own, which Shutdown joins: the caller is ygo's persistence worker, which a close waits for. A
+// shutdown already under way closes every room itself.
+func (s *Service) closeRoomOnReplacedHistory(room string, instance *roomInstance) {
+	if !s.addUnlessStopping(&s.evictWG) {
+		return
+	}
+	go func() {
+		defer s.evictWG.Done()
+		live := s.srv.GetDoc(room)
+		if live == nil || s.instanceOf(live) != instance {
+			return
+		}
+		if state := s.lockExistingState(room); state != nil {
+			closing := state.closed
+			s.unlockState(room, state)
+			if closing {
+				return
+			}
+		}
+		closed, err := s.closeRoomBehindHead(store.WithTransactionTracking(context.Background()), room, live)
+		switch {
+		case err != nil:
+			if s.srv.GetDoc(room) == live {
+				s.failRoom(room, fmt.Errorf("%w: room %s took a browser's update on a stored history replaced under it, and its close did not go through: %w",
+					ErrRoomBehindHead, room, err))
+			}
+		case closed:
+			slog.Info("dispatch: closed a document room whose browser's update was stored on a history replaced under it", "room", room)
+		}
+	}()
+}
+
 // setRoomIssueOpen gives room's record open, its issue's state, and when the record held the other
 // state closes the room, so every browser reconnects with the scope the issue now allows: ygo fixes
 // a connection's read-only flag when it connects (sjawhar/ygo provider/websocket/peer.go), so a

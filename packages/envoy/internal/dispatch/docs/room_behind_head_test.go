@@ -1967,3 +1967,72 @@ func TestARoomBehindTheHeadKeepsWritingAndCatchesUp(t *testing.T) {
 	}
 	requireRoomStillWrites(t, pair.taskA, pair.artifactID, 3)
 }
+
+// A browser's append admitted on a history a compaction folded past its room's cursor
+// (storedHistoryHolds) lands at the head, past a gap the cursor can never fill: no row at or below
+// it is left for a catch-up to read. Left open, the room would send every later keystroke down that
+// path again - the whole stored document decoded under the document's lock for each - until a
+// notification or a settlement found the history replaced and closed it, which can take tens of
+// seconds while the listener redials. So the room is closed once that append is stored, with no
+// room sync running here, and the browser's next keystroke reaches a room loaded at the head.
+func TestARoomIsReloadedOnceAKeystrokeLandsOnAHistoryACompactionFolded(t *testing.T) {
+	ctx := context.Background()
+	database := storetest.Open(t)
+	artifactID := createDocument(t, database, "before")
+	service, server := newTestServiceInstance(t, database)
+	seedServiceText(t, service, artifactID, "before")
+	waitForLandedAppends(t, service, artifactID)
+	appends, ok := service.persistence.(*PgVersioned)
+	if !ok {
+		t.Fatalf("the service appends through %T, which has no seam for the folded-history path", service.persistence)
+	}
+	var held atomic.Int32
+	appends.storedHistoryHeld = func(room string) {
+		if room == artifactID {
+			held.Add(1)
+		}
+	}
+	alice := connectWithScope(t, server.URL, artifactID, "alice", "read-write", "before\n")
+	waitForLandedAppends(t, service, artifactID)
+	head := storedHead(t, database, artifactID)
+	room := service.srv.GetDoc(artifactID)
+
+	holder, err := database.Pool.Begin(ctx)
+	if err != nil {
+		t.Fatalf("begin the transaction that holds the document's lock: %v", err)
+	}
+	defer holder.Rollback(ctx)
+	if err := lockDocumentRoom(ctx, holder, artifactID); err != nil {
+		t.Fatalf("hold the document's lock: %v", err)
+	}
+	typeOver(t, alice, "before", "first keystroke")
+	if waiting := storetest.WaitForLockWaiters(t, holder, 1, roomWait(t)); waiting < 1 {
+		t.Fatal("alice's append never came to wait on the document's lock")
+	}
+	foldHistoryPastRoom(t, holder, artifactID, head)
+	if err := holder.Commit(ctx); err != nil {
+		t.Fatalf("release the document's lock: %v", err)
+	}
+	waitFor(t, roomWait(t), "alice's first keystroke to be stored", func() bool {
+		return strings.Contains(storedMarkdown(t, database, artifactID), "first keystroke")
+	})
+	if got := held.Load(); got != 1 {
+		t.Fatalf("%d appends were admitted on the folded history, want alice's first keystroke's alone", got)
+	}
+
+	waitFor(t, roomWait(t), "the room whose history was folded under it to be closed", func() bool {
+		return service.srv.GetDoc(artifactID) != room
+	})
+	requireEnds(t, alice, "the room whose history was folded under it left alice's browser connected")
+	alice = connectWithScope(t, server.URL, artifactID, "alice", "read-write", "first keystroke\n")
+	if through, stored := service.cursorOf(service.srv.GetDoc(artifactID)).heldThrough(), storedHead(t, database, artifactID); through != stored {
+		t.Fatalf("the reloaded room holds the document through update %d, the stored head is %d", through, stored)
+	}
+	typeOver(t, alice, "first keystroke", "second keystroke")
+	waitFor(t, roomWait(t), "alice's second keystroke to be stored", func() bool {
+		return strings.Contains(storedMarkdown(t, database, artifactID), "second keystroke")
+	})
+	if got := held.Load(); got != 1 {
+		t.Fatalf("%d appends were admitted on the folded history, want alice's first keystroke's alone: the second went that way too", got)
+	}
+}
