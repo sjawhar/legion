@@ -246,12 +246,12 @@ func loadLookups(ctx context.Context, db queryer, want *wanted) (*lookups, error
 	if err := loadMessageAuthors(ctx, db, messages, found); err != nil {
 		return nil, err
 	}
-	loadRecipients(ctx, db, loadDocumentSessionAuthors, documents, "document", found.documents, found.failed)
+	_ = loadRecipients(ctx, db, loadDocumentSessionAuthors, documents, "document", found.documents, found.failed)
 	if err := loadMentionDeliveries(ctx, db, mentions, found); err != nil {
 		return nil, err
 	}
-	loadRecipients(ctx, db, loadCommentRecipients, threads, "thread", found.threads, found.failed)
-	loadRecipients(ctx, db, loadPrimaryDocumentAuthors, issues, "issue", found.primaries, found.failed)
+	_ = loadRecipients(ctx, db, loadCommentRecipients, threads, "thread", found.threads, found.failed)
+	_ = loadRecipients(ctx, db, loadPrimaryDocumentAuthors, issues, "issue", found.primaries, found.failed)
 	return found, nil
 }
 
@@ -291,50 +291,34 @@ type recipientRead func(ctx context.Context, db queryer, ids []string) (map[stri
 
 // loadRecipients runs read over ids in one statement and adds each id's sessions to into. A
 // statement Postgres refuses (refusedStatement) - over a row of one id no read can take, a credit
-// list jsonb_array_elements refuses - names no id, so its ids are run again in halves
-// (bisectRecipients) until each refused row is run alone: an id in a run that answers gets its
-// sessions, and one whose own run Postgres refuses is recorded failed (failRecipients) with that
-// run's error. So one id's row fails only the events that asked that id, whichever owners asked the
-// statement's other ids, and costs about 2*log2(len(ids)) more statements. A statement that fails
-// otherwise - ctx ended, or the connection was lost, refused or never made - would fail every run
-// alike, so every id it read is recorded failed with its error, which releases the events when it
-// is the stop (batchEvent.resolveLost).
-func loadRecipients(ctx context.Context, db queryer, read recipientRead, ids []string, kind string, into map[string][]string, failed map[string]error) {
+// list jsonb_array_elements refuses - names no id, so its ids are run again in halves, each half
+// the same way, recursing only into a half Postgres refuses, until each refused row is run alone:
+// an id in a run that answers gets its sessions, and one whose own run Postgres refuses is recorded
+// failed (failRecipients) with that run's error. So one id's row fails only the events that asked
+// that id, whichever owners asked the statement's other ids, and costs about 2*log2(len(ids)) more
+// statements. A run that fails otherwise - ctx ended, or the connection was lost, refused or never
+// made - would fail every later run alike, so it records its ids failed with its error, runs
+// nothing more, and returns the error, on which each run it was a half of records its own ids not
+// yet run failed too and returns it in turn: every id not yet run is recorded failed, which
+// releases the events when the error is the stop (batchEvent.resolveLost). The error the outermost
+// run returns leaves nothing to record, and loadLookups drops it.
+func loadRecipients(ctx context.Context, db queryer, read recipientRead, ids []string, kind string, into map[string][]string, failed map[string]error) error {
 	sessions, err := read(ctx, db, ids)
-	if err == nil {
+	switch {
+	case err == nil:
 		maps.Copy(into, sessions)
-		return
-	}
-	if len(ids) == 1 || !refusedStatement(ctx, err) {
+		return nil
+	case !refusedStatement(ctx, err):
 		failRecipients(ids, kind, err, failed)
-		return
+		return err
+	case len(ids) == 1:
+		failRecipients(ids, kind, err, failed)
+		return nil
 	}
-	_ = bisectRecipients(ctx, db, read, ids, kind, into, failed)
-}
-
-// bisectRecipients runs read again over each half of ids, which Postgres refused as one statement
-// (loadRecipients): a half that answers adds its sessions to into, a half of one id that Postgres
-// refuses has that id recorded failed, and a larger refused half is split again the same way. A run
-// that fails otherwise (refusedStatement) would fail every later run alike, so it records its ids
-// and every id not yet run failed with its error, runs nothing more, and returns the error, on which
-// each caller records its own ids not yet run too.
-func bisectRecipients(ctx context.Context, db queryer, read recipientRead, ids []string, kind string, into map[string][]string, failed map[string]error) error {
 	for start, end := 0, len(ids)/2; start < len(ids); start, end = end, len(ids) {
-		half := ids[start:end]
-		sessions, err := read(ctx, db, half)
-		switch {
-		case err == nil:
-			maps.Copy(into, sessions)
-		case !refusedStatement(ctx, err):
-			failRecipients(ids[start:], kind, err, failed)
+		if err := loadRecipients(ctx, db, read, ids[start:end], kind, into, failed); err != nil {
+			failRecipients(ids[end:], kind, err, failed)
 			return err
-		case len(half) == 1:
-			failRecipients(half, kind, err, failed)
-		default:
-			if err := bisectRecipients(ctx, db, read, half, kind, into, failed); err != nil {
-				failRecipients(ids[end:], kind, err, failed)
-				return err
-			}
 		}
 	}
 	return nil

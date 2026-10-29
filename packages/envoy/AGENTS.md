@@ -2753,7 +2753,7 @@ the synchronous listener call records the sent or failed attempt instead of blin
   fail. A statement Postgres refuses over the rows it read (`refusedStatement`: a
   `*pgconn.PgError` outside SQLSTATE classes 08, 40, 53, 57 and 58, and not a
   `*pgconn.ConnectError`) names no id, so its ids are run again in halves, and each refused half's
-  halves, until each refused row is run alone (`loadRecipients`, `bisectRecipients`): an id in a
+  halves, until each refused row is run alone (`loadRecipients`, recursively): an id in a
   run that answers gets its sessions, and one whose own run is refused has its error recorded
   against it (`failRecipients`, `lookups.failed`), so the events of other owners asking the same
   statement for healthy ids publish, and one broken row among n ids costs at most

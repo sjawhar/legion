@@ -374,12 +374,15 @@ type chain struct {
 // subject, or a role route's key - that the incomplete event neither names in its list nor already
 // reached (batchEvent.delivered), behind a blocker that falls due when the incomplete event is
 // tried again: the event itself when it is due, whose back-off or release its outcome carries,
-// and its nextAttempt when it is not. A key the list names, reached or not, chains as any other,
-// and a key the event already reached holds nothing back: the owner's topic comes before every
-// read (eventDestinations), so the owner's topic family is never held this way. So a recipient
-// read that fails holds back, until the retry of the event that asked it, its owner's later
-// session copies on the keys that event could still owe, and nothing else; an event whose reads
-// all answered holds back only the destinations it has not reached.
+// and its nextAttempt when it is not. A key the list names and the event has not reached chains as
+// any other, and a key the event already reached holds nothing back: a destination reached counts
+// by the subject it recorded, not by its key now, so a role route reached names its role topic and
+// not the agent subject of whoever holds the role in this batch, a session the failed read may yet
+// name. The owner's topic comes before every read (eventDestinations), so the owner's topic family
+// is never held this way. So a recipient read that fails holds back, until the retry of the event
+// that asked it, its owner's later session copies on the keys that event could still owe, and
+// nothing else; an event whose reads all answered holds back only the destinations it has not
+// reached.
 //
 // The order is kept per destination key, not per session: a session that subscribes to an issue's
 // topic family and is also routed to by its events receives on two keys, so when event N's topic
@@ -395,8 +398,9 @@ type chain struct {
 // An event with no owner has no destination and forms no chain; an event that cannot be read has
 // none either, and holds nothing back.
 func planChains(events []*batchEvent) []*chain {
-	// unknownSessions is an incomplete event's hold: the keys its list names or it already reached
-	// (named), and what holds the owner's later events back from every other session key.
+	// unknownSessions is an incomplete event's hold: the keys of the destinations its list names
+	// and it has not reached, and of the subjects it recorded reached (named), and what holds the
+	// owner's later events back from every other session key.
 	type unknownSessions struct {
 		named map[string]struct{}
 		by    blocker
@@ -458,6 +462,9 @@ func planChains(events []*batchEvent) []*chain {
 				hold.by = blocker{until: event.nextAttempt}
 			}
 			for _, dest := range event.destinationsOf {
+				if _, ok := event.delivered[dest.subject]; ok {
+					continue
+				}
 				hold.named[dest.key()] = struct{}{}
 			}
 			for subject := range event.delivered {
