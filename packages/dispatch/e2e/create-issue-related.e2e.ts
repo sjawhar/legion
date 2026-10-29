@@ -65,6 +65,68 @@ test.beforeEach(async () => {
   await resetDatabase();
 });
 
+/** The phone-sized window the dashboard's own sheet layout is for: the dialog is full-bleed
+ *  below `xl`, so everything it offers has to stand in these 667 pixels. */
+const phone = { height: 667, width: 375 };
+
+/** Four long-titled issues on one subject, so the check fills the section with its three items
+ *  and the title typed in the dialog is a possible duplicate of them. */
+async function seedCrowdedProject(): Promise<void> {
+  await createProject({ key: "CORE", name: "Core" });
+  for (let index = 0; index < 4; index += 1) {
+    await createIssue({
+      force: true,
+      project: "CORE",
+      spec: `Astrolabe drift ${index} spoils the mooring calibration of the quadrant bezel and the sextant mirror, read against the chronometer every watch.`,
+      title: `Astrolabe drift ${index} spoils the mooring calibration of the quadrant bezel and the sextant mirror assembly`,
+    });
+  }
+}
+
+/** A control a person can press: brought into view as a browser brings it, it stands whole in
+ *  the window. A dialog that scrolls meets this; one that paints past the bottom edge with
+ *  nothing to scroll does not. */
+async function expectReachable(control: Locator, page: Page, what: string): Promise<void> {
+  await control.scrollIntoViewIfNeeded();
+  const box = await control.boundingBox();
+  const height = page.viewportSize()?.height ?? 0;
+  expect(box, `${what} has no box`).not.toBeNull();
+  const top = box?.y ?? 0;
+  const bottom = top + (box?.height ?? 0);
+  expect(
+    { bottom: bottom <= height, top: top >= 0 },
+    `${what} stands outside the ${height}px window: top ${top}, bottom ${bottom}`
+  ).toEqual({ bottom: true, top: true });
+}
+
+test("the dialog's own actions stay in the window once the section fills", async ({ browser }) => {
+  await seedCrowdedProject();
+  const context = await asUser(browser, "alice", { viewport: phone });
+  try {
+    const page = await context.newPage();
+    await page.goto("/");
+    await expect(page.getByRole("heading", { name: "Inbox" })).toBeVisible();
+    const { dialog, related, title } = await openCreateDialog(page);
+
+    await title.fill("Astrolabe drift mooring calibration quadrant bezel sextant mirror");
+    await expect(related.getByRole("link")).toHaveCount(3);
+    await expectReachable(
+      dialog.getByRole("button", { exact: true, name: "Create" }),
+      page,
+      "Create"
+    );
+
+    // The refusal and its override sit below the section too, and the override is the only way
+    // past a possible duplicate - which is what a title this close to the listed items gets.
+    await title.press("Enter");
+    const anyway = dialog.getByRole("button", { name: "Create anyway" });
+    await expect(anyway).toBeAttached();
+    await expectReachable(anyway, page, "Create anyway");
+  } finally {
+    await context.close();
+  }
+});
+
 test("a title whose rare words match an existing issue lists it with its link", async ({
   browser,
 }, testInfo) => {
