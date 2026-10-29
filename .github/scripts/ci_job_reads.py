@@ -629,9 +629,9 @@ GATES = [
                  "./internal/dispatch/delivery/... ./internal/dispatch/store/... ./internal/bus/",
                  ENVOY, ["./internal/dispatch/docs/", "./internal/dispatch/api/", "./internal/dispatch/pmdoc/...",
                          "./internal/dispatch/delivery/...", "./internal/dispatch/store/...", "./internal/bus/"], race=True),
-        step_run("envoy-go-race", "Race-test the listener, the registry store and kvwatch",
-                 "go test -race -timeout 30m ./cmd/listener/ ./internal/store/ ./internal/kvwatch/...", ENVOY,
-                 ["./cmd/listener/", "./internal/store/", "./internal/kvwatch/..."], race=True),
+        step_run("envoy-go-race", "Race-test the listener, the registry store, the session cache and kvwatch",
+                 "go test -race -timeout 30m ./cmd/listener/ ./internal/store/ ./internal/session/ ./internal/kvwatch/...", ENVOY,
+                 ["./cmd/listener/", "./internal/store/", "./internal/session/", "./internal/kvwatch/..."], race=True),
     ], reads=reads(
         (f"{ENVOY}/internal/dispatch/pmdoc/schema/blocks.json", "packages/envoy/internal/dispatch/pmdoc/gen/decode.ts:16, differential.ts:21, edit-blocks.ts:21"),
         ("packages/proof-editor/src/**", "packages/envoy/internal/dispatch/pmdoc/gen/decode.ts:6, differential.ts:12-13, edit-blocks.ts:10 import @legion/proof-editor"),
