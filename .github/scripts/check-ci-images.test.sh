@@ -303,6 +303,21 @@ run_check "$root"
 check "fails" "$(is "$status" 1)"
 check "names the ARG it wanted" "$(contains "$out" 'does not declare as an ARG')"
 
+echo "case: a FROM on an ARG whose default is a third-party image"
+# A Dockerfile may name its base image through an ARG. Docker builds FROM that ARG's default
+# value when no --build-arg overrides it, so the default is the image the build fetches and is a
+# reference like any other. This is the shape the FROM lines had before this change
+# (`ARG BUN_VERSION=1.4.4` with `FROM oven/bun:${BUN_VERSION}`), so it is the shape a return to a
+# third-party registry takes.
+root=$(fixture from-arg-default)
+cat > "$root/packages/envoy/docker/Dockerfile" <<'YAML'
+ARG BASE_IMAGE=docker.io/library/debian:trixie-slim
+FROM ${BASE_IMAGE} AS build
+YAML
+run_check "$root"
+check "a third-party default fails" "$(is "$status" 1)"
+check "names the image the build fetches" "$(contains "$out" 'docker.io/library/debian:trixie-slim')"
+
 echo "case: a file of the \`no CI job runs it\` ground, moved into CI's reach"
 # scripts/e2e/stage3-devbox-workflow.sh may name mirror.gcr.io, because no CI job runs it. The
 # same line in stage1-skeleton.sh, which the test job runs, is refused.
