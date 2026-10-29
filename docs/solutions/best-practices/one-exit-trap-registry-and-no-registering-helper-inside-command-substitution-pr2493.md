@@ -9,9 +9,6 @@ tags:
 date: 2026-10-29
 status: active
 module: .github/scripts
-related_issues:
-  - "INFRA-723"
-  - "sjawhar/legion#2493"
 ---
 
 # One EXIT trap registry, and no registering helper inside command substitution

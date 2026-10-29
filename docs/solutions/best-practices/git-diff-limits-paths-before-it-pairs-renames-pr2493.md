@@ -9,9 +9,6 @@ tags:
 date: 2026-10-29
 status: active
 module: .github/scripts
-related_issues:
-  - "INFRA-723"
-  - "sjawhar/legion#2493"
 ---
 
 # git diff limits paths before it pairs renames

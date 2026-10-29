@@ -9,9 +9,6 @@ tags:
 date: 2026-10-29
 status: active
 module: .github/scripts
-related_issues:
-  - "INFRA-723"
-  - "sjawhar/legion#2493"
 ---
 
 # Read a bot's commit back only under author, exact-subject and ancestor guards

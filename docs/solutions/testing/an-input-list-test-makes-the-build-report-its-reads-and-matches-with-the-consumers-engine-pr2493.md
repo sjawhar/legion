@@ -10,9 +10,6 @@ tags:
 date: 2026-10-29
 status: active
 module: packages/claude-envoy
-related_issues:
-  - "INFRA-723"
-  - "sjawhar/legion#2493"
 ---
 
 # An input-list test makes the build report its reads and matches them with the consumer's engine

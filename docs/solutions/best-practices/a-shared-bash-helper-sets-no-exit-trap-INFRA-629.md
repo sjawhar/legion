@@ -22,7 +22,7 @@ related_issues:
    per shell, so the helper's trap silently replaces the caller's, such as the one that removes a
    key directory. The one exception is a registry whose trap removes every directory registered
    with it, so no caller's cleanup is replaced (`on_exit_remove`,
-   docs/solutions/best-practices/one-exit-trap-registry-and-no-registering-helper-inside-command-substitution-INFRA-723.md).
+   docs/solutions/best-practices/one-exit-trap-registry-and-no-registering-helper-inside-command-substitution-pr2493.md).
 2. Keep the helper's state out of files: read a listing through process substitution
    (`while … done < <(find "$dir" -mindepth 1 -print0 | sort -z)`), then check its status with
    `wait "$!" || fail …`, so a failed `find` still fails the command.

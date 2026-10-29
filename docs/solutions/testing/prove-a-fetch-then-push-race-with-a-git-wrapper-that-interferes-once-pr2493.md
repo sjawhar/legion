@@ -10,9 +10,6 @@ tags:
 date: 2026-10-29
 status: active
 module: .github/scripts
-related_issues:
-  - "INFRA-723"
-  - "sjawhar/legion#2493"
 ---
 
 # Prove a fetch-then-push race with a git wrapper that interferes once
