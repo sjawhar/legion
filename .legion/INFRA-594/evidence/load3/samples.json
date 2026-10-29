@@ -1,0 +1,7214 @@
+[
+  {
+    "at": "2026-10-29T09:41:35.675524402Z",
+    "cpu_ticks": {
+      "dispatch": 14,
+      "listener": 417,
+      "loadgen": 58,
+      "nats": 378,
+      "postgres": 35665,
+      "proxy": 16501
+    },
+    "rss_kib": {
+      "dispatch": 52432,
+      "listener": 93412,
+      "loadgen": 80872,
+      "nats": 107408,
+      "postgres": 896984,
+      "proxy": 81256
+    },
+    "sys_busy_ticks": 267162,
+    "sys_total_ticks": 2721447,
+    "pg_conns": {
+      "active|": 1,
+      "idle|Client": 21
+    },
+    "pg_total": 22,
+    "goroutines": 255,
+    "pool_acquire_goroutines": 48,
+    "heap_inuse": 7733248,
+    "heap_alloc": 6052104,
+    "heap_sys": 10223616,
+    "nats": {
+      "connections": 56,
+      "cpu_pct": 88,
+      "in_msgs": 7460,
+      "js_api_errors": 1007,
+      "js_api_total": 3458,
+      "js_consumers": 1004,
+      "js_messages": 2000,
+      "js_streams": 4,
+      "mem": 109985792,
+      "out_msgs": 9463,
+      "pull_requests": 1000,
+      "session_pull_requests": 1000,
+      "slow_consumers": 0,
+      "subscriptions": 11102
+    },
+    "in_window": false
+  },
+  {
+    "at": "2026-10-29T09:41:40.693260716Z",
+    "cpu_ticks": {
+      "dispatch": 210,
+      "listener": 441,
+      "loadgen": 338,
+      "nats": 393,
+      "postgres": 36127,
+      "proxy": 16571
+    },
+    "rss_kib": {
+      "dispatch": 287560,
+      "listener": 93412,
+      "loadgen": 201056,
+      "nats": 107408,
+      "postgres": 5891864,
+      "proxy": 89704
+    },
+    "sys_busy_ticks": 268220,
+    "sys_total_ticks": 2722986,
+    "pg_conns": {
+      "active|": 3,
+      "active|Lock": 10,
+      "idle in transaction|Client": 35,
+      "idle|": 3,
+      "idle|Client": 29
+    },
+    "pg_total": 80,
+    "goroutines": 6174,
+    "pool_acquire_goroutines": 2973,
+    "heap_inuse": 0,
+    "heap_alloc": 0,
+    "heap_sys": 0,
+    "nats": {
+      "connections": 56,
+      "cpu_pct": 7,
+      "in_msgs": 7732,
+      "js_api_errors": 1007,
+      "js_api_total": 3572,
+      "js_consumers": 1004,
+      "js_messages": 2002,
+      "js_streams": 4,
+      "mem": 109985792,
+      "out_msgs": 9861,
+      "pull_requests": 1000,
+      "session_pull_requests": 1000,
+      "slow_consumers": 0,
+      "subscriptions": 11103
+    },
+    "in_window": false
+  },
+  {
+    "at": "2026-10-29T09:41:45.695737965Z",
+    "cpu_ticks": {
+      "dispatch": 663,
+      "listener": 469,
+      "loadgen": 502,
+      "nats": 414,
+      "postgres": 36472,
+      "proxy": 16632
+    },
+    "rss_kib": {
+      "dispatch": 674144,
+      "listener": 93412,
+      "loadgen": 311312,
+      "nats": 109456,
+      "postgres": 6508860,
+      "proxy": 92008
+    },
+    "sys_busy_ticks": 269289,
+    "sys_total_ticks": 2724453,
+    "pg_conns": {
+      "active|": 3,
+      "active|Lock": 57,
+      "idle in transaction|Client": 3,
+      "idle|Client": 17
+    },
+    "pg_total": 80,
+    "goroutines": 11954,
+    "pool_acquire_goroutines": 5864,
+    "heap_inuse": 0,
+    "heap_alloc": 0,
+    "heap_sys": 0,
+    "nats": {
+      "connections": 56,
+      "cpu_pct": 7,
+      "in_msgs": 8395,
+      "js_api_errors": 1007,
+      "js_api_total": 3683,
+      "js_consumers": 1004,
+      "js_messages": 2022,
+      "js_streams": 4,
+      "mem": 112082944,
+      "out_msgs": 10736,
+      "pull_requests": 1000,
+      "session_pull_requests": 1000,
+      "slow_consumers": 0,
+      "subscriptions": 11103
+    },
+    "in_window": false
+  },
+  {
+    "at": "2026-10-29T09:41:50.686240875Z",
+    "cpu_ticks": {
+      "dispatch": 1156,
+      "listener": 507,
+      "loadgen": 668,
+      "nats": 451,
+      "postgres": 36720,
+      "proxy": 16688
+    },
+    "rss_kib": {
+      "dispatch": 1048208,
+      "listener": 93412,
+      "loadgen": 406920,
+      "nats": 119952,
+      "postgres": 6792656,
+      "proxy": 92008
+    },
+    "sys_busy_ticks": 270332,
+    "sys_total_ticks": 2725956,
+    "pg_conns": {
+      "active|": 1,
+      "active|Lock": 58,
+      "idle in transaction|Client": 3,
+      "idle|Client": 18
+    },
+    "pg_total": 80,
+    "goroutines": 17800,
+    "pool_acquire_goroutines": 8758,
+    "heap_inuse": 917929984,
+    "heap_alloc": 887788224,
+    "heap_sys": 921698304,
+    "nats": {
+      "connections": 56,
+      "cpu_pct": 7,
+      "in_msgs": 9524,
+      "js_api_errors": 1007,
+      "js_api_total": 3807,
+      "js_consumers": 1004,
+      "js_messages": 2071,
+      "js_streams": 4,
+      "mem": 122830848,
+      "out_msgs": 12987,
+      "pull_requests": 1000,
+      "session_pull_requests": 1000,
+      "slow_consumers": 0,
+      "subscriptions": 11104
+    },
+    "in_window": false
+  },
+  {
+    "at": "2026-10-29T09:41:55.675661655Z",
+    "cpu_ticks": {
+      "dispatch": 1595,
+      "listener": 539,
+      "loadgen": 849,
+      "nats": 486,
+      "postgres": 36987,
+      "proxy": 16741
+    },
+    "rss_kib": {
+      "dispatch": 1264912,
+      "listener": 93412,
+      "loadgen": 533652,
+      "nats": 124048,
+      "postgres": 7059580,
+      "proxy": 102248
+    },
+    "sys_busy_ticks": 271354,
+    "sys_total_ticks": 2727468,
+    "pg_conns": {
+      "active|": 1,
+      "active|Lock": 57,
+      "idle in transaction|Client": 4,
+      "idle|": 1,
+      "idle|Client": 17
+    },
+    "pg_total": 80,
+    "goroutines": 23651,
+    "pool_acquire_goroutines": 11706,
+    "heap_inuse": 0,
+    "heap_alloc": 0,
+    "heap_sys": 0,
+    "nats": {
+      "connections": 56,
+      "cpu_pct": 8,
+      "in_msgs": 10439,
+      "js_api_errors": 1007,
+      "js_api_total": 3909,
+      "js_consumers": 1004,
+      "js_messages": 2105,
+      "js_streams": 4,
+      "mem": 127025152,
+      "out_msgs": 14167,
+      "pull_requests": 1000,
+      "session_pull_requests": 1000,
+      "slow_consumers": 0,
+      "subscriptions": 11103
+    },
+    "in_window": false
+  },
+  {
+    "at": "2026-10-29T09:42:00.68951422Z",
+    "cpu_ticks": {
+      "dispatch": 2066,
+      "listener": 572,
+      "loadgen": 1009,
+      "nats": 520,
+      "postgres": 37266,
+      "proxy": 16807
+    },
+    "rss_kib": {
+      "dispatch": 1567636,
+      "listener": 93412,
+      "loadgen": 608424,
+      "nats": 130256,
+      "postgres": 7284156,
+      "proxy": 110440
+    },
+    "sys_busy_ticks": 272394,
+    "sys_total_ticks": 2728953,
+    "pg_conns": {
+      "active|": 2,
+      "active|Lock": 55,
+      "idle in transaction|": 2,
+      "idle in transaction|Client": 2,
+      "idle|Client": 19
+    },
+    "pg_total": 80,
+    "goroutines": 29609,
+    "pool_acquire_goroutines": 14670,
+    "heap_inuse": 0,
+    "heap_alloc": 0,
+    "heap_sys": 0,
+    "nats": {
+      "connections": 56,
+      "cpu_pct": 7,
+      "in_msgs": 11462,
+      "js_api_errors": 1007,
+      "js_api_total": 4026,
+      "js_consumers": 1004,
+      "js_messages": 2139,
+      "js_streams": 4,
+      "mem": 133382144,
+      "out_msgs": 15545,
+      "pull_requests": 1000,
+      "session_pull_requests": 1000,
+      "slow_consumers": 0,
+      "subscriptions": 11103
+    },
+    "in_window": false
+  },
+  {
+    "at": "2026-10-29T09:42:05.687795031Z",
+    "cpu_ticks": {
+      "dispatch": 2506,
+      "listener": 613,
+      "loadgen": 1238,
+      "nats": 583,
+      "postgres": 37488,
+      "proxy": 16855
+    },
+    "rss_kib": {
+      "dispatch": 1861596,
+      "listener": 93412,
+      "loadgen": 728832,
+      "nats": 134680,
+      "postgres": 7448160,
+      "proxy": 110440
+    },
+    "sys_busy_ticks": 273450,
+    "sys_total_ticks": 2730453,
+    "pg_conns": {
+      "active|": 1,
+      "active|Lock": 58,
+      "idle in transaction|Client": 3,
+      "idle|": 1,
+      "idle|Client": 17
+    },
+    "pg_total": 80,
+    "goroutines": 35777,
+    "pool_acquire_goroutines": 17736,
+    "heap_inuse": 1665417216,
+    "heap_alloc": 1610802880,
+    "heap_sys": 1668022272,
+    "nats": {
+      "connections": 56,
+      "cpu_pct": 12,
+      "in_msgs": 13520,
+      "js_api_errors": 1007,
+      "js_api_total": 4160,
+      "js_consumers": 1004,
+      "js_messages": 2175,
+      "js_streams": 4,
+      "mem": 137912320,
+      "out_msgs": 18977,
+      "pull_requests": 2000,
+      "session_pull_requests": 2000,
+      "slow_consumers": 0,
+      "subscriptions": 11104
+    },
+    "in_window": true
+  },
+  {
+    "at": "2026-10-29T09:42:10.675836324Z",
+    "cpu_ticks": {
+      "dispatch": 2970,
+      "listener": 657,
+      "loadgen": 1477,
+      "nats": 612,
+      "postgres": 37675,
+      "proxy": 16922
+    },
+    "rss_kib": {
+      "dispatch": 1992716,
+      "listener": 93412,
+      "loadgen": 823304,
+      "nats": 134680,
+      "postgres": 7509072,
+      "proxy": 110440
+    },
+    "sys_busy_ticks": 274485,
+    "sys_total_ticks": 2731947,
+    "pg_conns": {
+      "active|": 1,
+      "active|Lock": 61,
+      "idle in transaction|": 1,
+      "idle|": 1,
+      "idle|Client": 16
+    },
+    "pg_total": 80,
+    "goroutines": 37831,
+    "pool_acquire_goroutines": 18761,
+    "heap_inuse": 0,
+    "heap_alloc": 0,
+    "heap_sys": 0,
+    "nats": {
+      "connections": 56,
+      "cpu_pct": 8,
+      "in_msgs": 14491,
+      "js_api_errors": 1007,
+      "js_api_total": 4248,
+      "js_consumers": 1004,
+      "js_messages": 2215,
+      "js_streams": 4,
+      "mem": 137912320,
+      "out_msgs": 20211,
+      "pull_requests": 2000,
+      "session_pull_requests": 2000,
+      "slow_consumers": 0,
+      "subscriptions": 11103
+    },
+    "in_window": true
+  },
+  {
+    "at": "2026-10-29T09:42:15.67601449Z",
+    "cpu_ticks": {
+      "dispatch": 3283,
+      "listener": 674,
+      "loadgen": 1949,
+      "nats": 623,
+      "postgres": 37709,
+      "proxy": 16936
+    },
+    "rss_kib": {
+      "dispatch": 2131164,
+      "listener": 93412,
+      "loadgen": 890996,
+      "nats": 134680,
+      "postgres": 6499788,
+      "proxy": 110440
+    },
+    "sys_busy_ticks": 275349,
+    "sys_total_ticks": 2733450,
+    "pg_conns": {
+      "active|": 1,
+      "active|Lock": 48,
+      "idle in transaction (aborted)|Client": 1,
+      "idle in transaction|": 1,
+      "idle in transaction|Client": 1,
+      "idle|Client": 18
+    },
+    "pg_total": 70,
+    "goroutines": 36775,
+    "pool_acquire_goroutines": 18239,
+    "heap_inuse": 0,
+    "heap_alloc": 0,
+    "heap_sys": 0,
+    "nats": {
+      "connections": 56,
+      "cpu_pct": 4,
+      "in_msgs": 14774,
+      "js_api_errors": 1007,
+      "js_api_total": 4340,
+      "js_consumers": 1004,
+      "js_messages": 2217,
+      "js_streams": 4,
+      "mem": 137977856,
+      "out_msgs": 20617,
+      "pull_requests": 2000,
+      "session_pull_requests": 2000,
+      "slow_consumers": 0,
+      "subscriptions": 11105
+    },
+    "in_window": true
+  },
+  {
+    "at": "2026-10-29T09:42:20.675528492Z",
+    "cpu_ticks": {
+      "dispatch": 3520,
+      "listener": 710,
+      "loadgen": 2366,
+      "nats": 648,
+      "postgres": 37848,
+      "proxy": 16992
+    },
+    "rss_kib": {
+      "dispatch": 2131676,
+      "listener": 93412,
+      "loadgen": 891060,
+      "nats": 134744,
+      "postgres": 3640368,
+      "proxy": 112488
+    },
+    "sys_busy_ticks": 276264,
+    "sys_total_ticks": 2734950,
+    "pg_conns": {
+      "active|": 1,
+      "idle in transaction|Client": 23,
+      "idle|Client": 42
+    },
+    "pg_total": 66,
+    "goroutines": 38908,
+    "pool_acquire_goroutines": 19298,
+    "heap_inuse": 1373888512,
+    "heap_alloc": 1206192400,
+    "heap_sys": 1781628928,
+    "nats": {
+      "connections": 56,
+      "cpu_pct": 4,
+      "in_msgs": 15045,
+      "js_api_errors": 1007,
+      "js_api_total": 4456,
+      "js_consumers": 1004,
+      "js_messages": 2217,
+      "js_streams": 4,
+      "mem": 137977856,
+      "out_msgs": 21832,
+      "pull_requests": 2000,
+      "session_pull_requests": 2000,
+      "slow_consumers": 0,
+      "subscriptions": 11104
+    },
+    "in_window": true
+  },
+  {
+    "at": "2026-10-29T09:42:25.676064052Z",
+    "cpu_ticks": {
+      "dispatch": 3785,
+      "listener": 733,
+      "loadgen": 2747,
+      "nats": 669,
+      "postgres": 38098,
+      "proxy": 17080
+    },
+    "rss_kib": {
+      "dispatch": 2131676,
+      "listener": 93412,
+      "loadgen": 899892,
+      "nats": 134744,
+      "postgres": 2629536,
+      "proxy": 112488
+    },
+    "sys_busy_ticks": 277294,
+    "sys_total_ticks": 2736447,
+    "pg_conns": {
+      "active|": 3,
+      "idle in transaction|Client": 8,
+      "idle|Client": 35
+    },
+    "pg_total": 46,
+    "goroutines": 39109,
+    "pool_acquire_goroutines": 19407,
+    "heap_inuse": 0,
+    "heap_alloc": 0,
+    "heap_sys": 0,
+    "nats": {
+      "connections": 56,
+      "cpu_pct": 3,
+      "in_msgs": 15270,
+      "js_api_errors": 1007,
+      "js_api_total": 4554,
+      "js_consumers": 1004,
+      "js_messages": 2217,
+      "js_streams": 4,
+      "mem": 137977856,
+      "out_msgs": 22322,
+      "pull_requests": 2000,
+      "session_pull_requests": 2000,
+      "slow_consumers": 0,
+      "subscriptions": 11103
+    },
+    "in_window": true
+  },
+  {
+    "at": "2026-10-29T09:42:30.680143684Z",
+    "cpu_ticks": {
+      "dispatch": 4028,
+      "listener": 754,
+      "loadgen": 3070,
+      "nats": 693,
+      "postgres": 38462,
+      "proxy": 17167
+    },
+    "rss_kib": {
+      "dispatch": 2131676,
+      "listener": 93412,
+      "loadgen": 950524,
+      "nats": 136792,
+      "postgres": 2637492,
+      "proxy": 112488
+    },
+    "sys_busy_ticks": 278362,
+    "sys_total_ticks": 2737956,
+    "pg_conns": {
+      "active|": 2,
+      "idle in transaction|Client": 4,
+      "idle|Client": 43
+    },
+    "pg_total": 49,
+    "goroutines": 38847,
+    "pool_acquire_goroutines": 19273,
+    "heap_inuse": 0,
+    "heap_alloc": 0,
+    "heap_sys": 0,
+    "nats": {
+      "connections": 56,
+      "cpu_pct": 4,
+      "in_msgs": 15524,
+      "js_api_errors": 1007,
+      "js_api_total": 4667,
+      "js_consumers": 1004,
+      "js_messages": 2217,
+      "js_streams": 4,
+      "mem": 140075008,
+      "out_msgs": 22697,
+      "pull_requests": 2000,
+      "session_pull_requests": 2000,
+      "slow_consumers": 0,
+      "subscriptions": 11104
+    },
+    "in_window": true
+  },
+  {
+    "at": "2026-10-29T09:42:35.676424357Z",
+    "cpu_ticks": {
+      "dispatch": 4268,
+      "listener": 783,
+      "loadgen": 3442,
+      "nats": 719,
+      "postgres": 38791,
+      "proxy": 17263
+    },
+    "rss_kib": {
+      "dispatch": 2131676,
+      "listener": 93412,
+      "loadgen": 1011460,
+      "nats": 136792,
+      "postgres": 2867112,
+      "proxy": 112488
+    },
+    "sys_busy_ticks": 279459,
+    "sys_total_ticks": 2739456,
+    "pg_conns": {
+      "active|": 1,
+      "idle in transaction|Client": 5,
+      "idle|Client": 47
+    },
+    "pg_total": 53,
+    "goroutines": 38539,
+    "pool_acquire_goroutines": 19122,
+    "heap_inuse": 1635377152,
+    "heap_alloc": 1500662344,
+    "heap_sys": 1733885952,
+    "nats": {
+      "connections": 56,
+      "cpu_pct": 5,
+      "in_msgs": 16795,
+      "js_api_errors": 1007,
+      "js_api_total": 4786,
+      "js_consumers": 1004,
+      "js_messages": 2217,
+      "js_streams": 4,
+      "mem": 140107776,
+      "out_msgs": 25088,
+      "pull_requests": 3000,
+      "session_pull_requests": 3000,
+      "slow_consumers": 0,
+      "subscriptions": 11104
+    },
+    "in_window": true
+  },
+  {
+    "at": "2026-10-29T09:42:40.680549245Z",
+    "cpu_ticks": {
+      "dispatch": 4544,
+      "listener": 820,
+      "loadgen": 3790,
+      "nats": 738,
+      "postgres": 39131,
+      "proxy": 17343
+    },
+    "rss_kib": {
+      "dispatch": 2132060,
+      "listener": 93412,
+      "loadgen": 1084812,
+      "nats": 136824,
+      "postgres": 2969124,
+      "proxy": 112488
+    },
+    "sys_busy_ticks": 280567,
+    "sys_total_ticks": 2740968,
+    "pg_conns": {
+      "active|": 2,
+      "idle in transaction|": 1,
+      "idle in transaction|Client": 5,
+      "idle|Client": 48
+    },
+    "pg_total": 56,
+    "goroutines": 38552,
+    "pool_acquire_goroutines": 19128,
+    "heap_inuse": 0,
+    "heap_alloc": 0,
+    "heap_sys": 0,
+    "nats": {
+      "connections": 56,
+      "cpu_pct": 7,
+      "in_msgs": 17037,
+      "js_api_errors": 1007,
+      "js_api_total": 4889,
+      "js_consumers": 1004,
+      "js_messages": 2217,
+      "js_streams": 4,
+      "mem": 140107776,
+      "out_msgs": 25436,
+      "pull_requests": 3000,
+      "session_pull_requests": 3000,
+      "slow_consumers": 0,
+      "subscriptions": 11103
+    },
+    "in_window": true
+  },
+  {
+    "at": "2026-10-29T09:42:45.675623934Z",
+    "cpu_ticks": {
+      "dispatch": 4795,
+      "listener": 850,
+      "loadgen": 4109,
+      "nats": 744,
+      "postgres": 39428,
+      "proxy": 17428
+    },
+    "rss_kib": {
+      "dispatch": 2210860,
+      "listener": 93412,
+      "loadgen": 1145984,
+      "nats": 137080,
+      "postgres": 2970952,
+      "proxy": 112488
+    },
+    "sys_busy_ticks": 281545,
+    "sys_total_ticks": 2742447,
+    "pg_conns": {
+      "active|": 2,
+      "idle in transaction|Client": 3,
+      "idle|Client": 49
+    },
+    "pg_total": 54,
+    "goroutines": 38565,
+    "pool_acquire_goroutines": 19134,
+    "heap_inuse": 0,
+    "heap_alloc": 0,
+    "heap_sys": 0,
+    "nats": {
+      "connections": 56,
+      "cpu_pct": 0,
+      "in_msgs": 17295,
+      "js_api_errors": 1007,
+      "js_api_total": 5003,
+      "js_consumers": 1004,
+      "js_messages": 2217,
+      "js_streams": 4,
+      "mem": 140369920,
+      "out_msgs": 25807,
+      "pull_requests": 3000,
+      "session_pull_requests": 3000,
+      "slow_consumers": 0,
+      "subscriptions": 11104
+    },
+    "in_window": true
+  },
+  {
+    "at": "2026-10-29T09:42:50.684092355Z",
+    "cpu_ticks": {
+      "dispatch": 5025,
+      "listener": 872,
+      "loadgen": 4482,
+      "nats": 757,
+      "postgres": 39750,
+      "proxy": 17490
+    },
+    "rss_kib": {
+      "dispatch": 2290856,
+      "listener": 93412,
+      "loadgen": 1161312,
+      "nats": 139128,
+      "postgres": 2652744,
+      "proxy": 112488
+    },
+    "sys_busy_ticks": 282573,
+    "sys_total_ticks": 2743953,
+    "pg_conns": {
+      "active|": 1,
+      "idle in transaction|Client": 2,
+      "idle|Client": 44
+    },
+    "pg_total": 47,
+    "goroutines": 38375,
+    "pool_acquire_goroutines": 19038,
+    "heap_inuse": 1911406592,
+    "heap_alloc": 1785718880,
+    "heap_sys": 1915387904,
+    "nats": {
+      "connections": 56,
+      "cpu_pct": 3,
+      "in_msgs": 17586,
+      "js_api_errors": 1007,
+      "js_api_total": 5121,
+      "js_consumers": 1004,
+      "js_messages": 2223,
+      "js_streams": 4,
+      "mem": 144564224,
+      "out_msgs": 27226,
+      "pull_requests": 3000,
+      "session_pull_requests": 3000,
+      "slow_consumers": 0,
+      "subscriptions": 11103
+    },
+    "in_window": true
+  },
+  {
+    "at": "2026-10-29T09:42:55.67568987Z",
+    "cpu_ticks": {
+      "dispatch": 5239,
+      "listener": 894,
+      "loadgen": 4811,
+      "nats": 771,
+      "postgres": 40092,
+      "proxy": 17560
+    },
+    "rss_kib": {
+      "dispatch": 2368304,
+      "listener": 93412,
+      "loadgen": 1161376,
+      "nats": 141176,
+      "postgres": 2967084,
+      "proxy": 112488
+    },
+    "sys_busy_ticks": 283574,
+    "sys_total_ticks": 2745450,
+    "pg_conns": {
+      "active|": 2,
+      "idle|Client": 50
+    },
+    "pg_total": 52,
+    "goroutines": 38592,
+    "pool_acquire_goroutines": 19154,
+    "heap_inuse": 0,
+    "heap_alloc": 0,
+    "heap_sys": 0,
+    "nats": {
+      "connections": 56,
+      "cpu_pct": 1,
+      "in_msgs": 17782,
+      "js_api_errors": 1007,
+      "js_api_total": 5214,
+      "js_consumers": 1004,
+      "js_messages": 2223,
+      "js_streams": 4,
+      "mem": 144564224,
+      "out_msgs": 27517,
+      "pull_requests": 3000,
+      "session_pull_requests": 3000,
+      "slow_consumers": 0,
+      "subscriptions": 11103
+    },
+    "in_window": true
+  },
+  {
+    "at": "2026-10-29T09:43:00.675905398Z",
+    "cpu_ticks": {
+      "dispatch": 5597,
+      "listener": 926,
+      "loadgen": 5132,
+      "nats": 787,
+      "postgres": 40323,
+      "proxy": 17642
+    },
+    "rss_kib": {
+      "dispatch": 2513600,
+      "listener": 93412,
+      "loadgen": 1161440,
+      "nats": 143224,
+      "postgres": 2740408,
+      "proxy": 112488
+    },
+    "sys_busy_ticks": 284616,
+    "sys_total_ticks": 2746950,
+    "pg_conns": {
+      "active|": 2,
+      "idle in transaction|Client": 1,
+      "idle|Client": 51
+    },
+    "pg_total": 54,
+    "goroutines": 38645,
+    "pool_acquire_goroutines": 19179,
+    "heap_inuse": 0,
+    "heap_alloc": 0,
+    "heap_sys": 0,
+    "nats": {
+      "connections": 56,
+      "cpu_pct": 4,
+      "in_msgs": 18024,
+      "js_api_errors": 1007,
+      "js_api_total": 5329,
+      "js_consumers": 1004,
+      "js_messages": 2224,
+      "js_streams": 4,
+      "mem": 146661376,
+      "out_msgs": 27871,
+      "pull_requests": 3000,
+      "session_pull_requests": 3000,
+      "slow_consumers": 0,
+      "subscriptions": 11103
+    },
+    "in_window": true
+  },
+  {
+    "at": "2026-10-29T09:43:05.675595081Z",
+    "cpu_ticks": {
+      "dispatch": 5827,
+      "listener": 947,
+      "loadgen": 5482,
+      "nats": 813,
+      "postgres": 40624,
+      "proxy": 17691
+    },
+    "rss_kib": {
+      "dispatch": 2513600,
+      "listener": 93412,
+      "loadgen": 1161504,
+      "nats": 147392,
+      "postgres": 2486520,
+      "proxy": 112488
+    },
+    "sys_busy_ticks": 285591,
+    "sys_total_ticks": 2748447,
+    "pg_conns": {
+      "active|": 1,
+      "idle|Client": 44
+    },
+    "pg_total": 45,
+    "goroutines": 38870,
+    "pool_acquire_goroutines": 19288,
+    "heap_inuse": 1425620992,
+    "heap_alloc": 1182391200,
+    "heap_sys": 2087485440,
+    "nats": {
+      "connections": 56,
+      "cpu_pct": 8,
+      "in_msgs": 19271,
+      "js_api_errors": 1007,
+      "js_api_total": 5447,
+      "js_consumers": 1004,
+      "js_messages": 2224,
+      "js_streams": 4,
+      "mem": 150929408,
+      "out_msgs": 30237,
+      "pull_requests": 4000,
+      "session_pull_requests": 4000,
+      "slow_consumers": 0,
+      "subscriptions": 11103
+    },
+    "in_window": true
+  },
+  {
+    "at": "2026-10-29T09:43:10.676848869Z",
+    "cpu_ticks": {
+      "dispatch": 6060,
+      "listener": 961,
+      "loadgen": 5818,
+      "nats": 832,
+      "postgres": 41055,
+      "proxy": 17777
+    },
+    "rss_kib": {
+      "dispatch": 2513600,
+      "listener": 93412,
+      "loadgen": 1161632,
+      "nats": 147456,
+      "postgres": 2619996,
+      "proxy": 112488
+    },
+    "sys_busy_ticks": 286722,
+    "sys_total_ticks": 2749950,
+    "pg_conns": {
+      "active|": 1,
+      "idle in transaction|Client": 1,
+      "idle|Client": 44
+    },
+    "pg_total": 46,
+    "goroutines": 38674,
+    "pool_acquire_goroutines": 19194,
+    "heap_inuse": 0,
+    "heap_alloc": 0,
+    "heap_sys": 0,
+    "nats": {
+      "connections": 56,
+      "cpu_pct": 3,
+      "in_msgs": 19499,
+      "js_api_errors": 1007,
+      "js_api_total": 5550,
+      "js_consumers": 1004,
+      "js_messages": 2228,
+      "js_streams": 4,
+      "mem": 150994944,
+      "out_msgs": 30570,
+      "pull_requests": 4000,
+      "session_pull_requests": 4000,
+      "slow_consumers": 0,
+      "subscriptions": 11103
+    },
+    "in_window": true
+  },
+  {
+    "at": "2026-10-29T09:43:15.676051792Z",
+    "cpu_ticks": {
+      "dispatch": 6275,
+      "listener": 977,
+      "loadgen": 6203,
+      "nats": 846,
+      "postgres": 41343,
+      "proxy": 17857
+    },
+    "rss_kib": {
+      "dispatch": 2513600,
+      "listener": 93412,
+      "loadgen": 1161696,
+      "nats": 147456,
+      "postgres": 2867184,
+      "proxy": 112488
+    },
+    "sys_busy_ticks": 287724,
+    "sys_total_ticks": 2751456,
+    "pg_conns": {
+      "active|": 1,
+      "idle in transaction|Client": 4,
+      "idle|Client": 48
+    },
+    "pg_total": 53,
+    "goroutines": 38849,
+    "pool_acquire_goroutines": 19282,
+    "heap_inuse": 0,
+    "heap_alloc": 0,
+    "heap_sys": 0,
+    "nats": {
+      "connections": 56,
+      "cpu_pct": 2,
+      "in_msgs": 19721,
+      "js_api_errors": 1007,
+      "js_api_total": 5660,
+      "js_consumers": 1004,
+      "js_messages": 2228,
+      "js_streams": 4,
+      "mem": 150994944,
+      "out_msgs": 30904,
+      "pull_requests": 4000,
+      "session_pull_requests": 4000,
+      "slow_consumers": 0,
+      "subscriptions": 11103
+    },
+    "in_window": true
+  },
+  {
+    "at": "2026-10-29T09:43:20.677688713Z",
+    "cpu_ticks": {
+      "dispatch": 6486,
+      "listener": 1000,
+      "loadgen": 6591,
+      "nats": 860,
+      "postgres": 41617,
+      "proxy": 17921
+    },
+    "rss_kib": {
+      "dispatch": 2513600,
+      "listener": 93412,
+      "loadgen": 1161952,
+      "nats": 147456,
+      "postgres": 2740296,
+      "proxy": 112488
+    },
+    "sys_busy_ticks": 288698,
+    "sys_total_ticks": 2752950,
+    "pg_conns": {
+      "active|": 1,
+      "idle in transaction|Client": 2,
+      "idle|": 1,
+      "idle|Client": 43
+    },
+    "pg_total": 47,
+    "goroutines": 38929,
+    "pool_acquire_goroutines": 19314,
+    "heap_inuse": 1589477376,
+    "heap_alloc": 1413977808,
+    "heap_sys": 2114682880,
+    "nats": {
+      "connections": 56,
+      "cpu_pct": 1,
+      "in_msgs": 19966,
+      "js_api_errors": 1007,
+      "js_api_total": 5781,
+      "js_consumers": 1004,
+      "js_messages": 2228,
+      "js_streams": 4,
+      "mem": 150994944,
+      "out_msgs": 32273,
+      "pull_requests": 4000,
+      "session_pull_requests": 4000,
+      "slow_consumers": 0,
+      "subscriptions": 11104
+    },
+    "in_window": true
+  },
+  {
+    "at": "2026-10-29T09:43:25.676087918Z",
+    "cpu_ticks": {
+      "dispatch": 6740,
+      "listener": 1026,
+      "loadgen": 7002,
+      "nats": 868,
+      "postgres": 41941,
+      "proxy": 18000
+    },
+    "rss_kib": {
+      "dispatch": 2513600,
+      "listener": 93412,
+      "loadgen": 1162016,
+      "nats": 147456,
+      "postgres": 2604152,
+      "proxy": 112488
+    },
+    "sys_busy_ticks": 289806,
+    "sys_total_ticks": 2754447,
+    "pg_conns": {
+      "active|": 1,
+      "idle in transaction|Client": 1,
+      "idle|": 1,
+      "idle|Client": 44
+    },
+    "pg_total": 47,
+    "goroutines": 39006,
+    "pool_acquire_goroutines": 19340,
+    "heap_inuse": 0,
+    "heap_alloc": 0,
+    "heap_sys": 0,
+    "nats": {
+      "connections": 56,
+      "cpu_pct": 1,
+      "in_msgs": 20159,
+      "js_api_errors": 1007,
+      "js_api_total": 5878,
+      "js_consumers": 1004,
+      "js_messages": 2228,
+      "js_streams": 4,
+      "mem": 150994944,
+      "out_msgs": 32563,
+      "pull_requests": 4000,
+      "session_pull_requests": 4000,
+      "slow_consumers": 0,
+      "subscriptions": 11104
+    },
+    "in_window": true
+  },
+  {
+    "at": "2026-10-29T09:43:30.677263598Z",
+    "cpu_ticks": {
+      "dispatch": 6993,
+      "listener": 1055,
+      "loadgen": 7337,
+      "nats": 883,
+      "postgres": 42286,
+      "proxy": 18070
+    },
+    "rss_kib": {
+      "dispatch": 2513600,
+      "listener": 93412,
+      "loadgen": 1162080,
+      "nats": 147456,
+      "postgres": 2943124,
+      "proxy": 112488
+    },
+    "sys_busy_ticks": 290852,
+    "sys_total_ticks": 2755950,
+    "pg_conns": {
+      "active|": 1,
+      "idle|Client": 53
+    },
+    "pg_total": 54,
+    "goroutines": 39149,
+    "pool_acquire_goroutines": 19395,
+    "heap_inuse": 0,
+    "heap_alloc": 0,
+    "heap_sys": 0,
+    "nats": {
+      "connections": 56,
+      "cpu_pct": 1,
+      "in_msgs": 20384,
+      "js_api_errors": 1007,
+      "js_api_total": 5994,
+      "js_consumers": 1004,
+      "js_messages": 2228,
+      "js_streams": 4,
+      "mem": 150994944,
+      "out_msgs": 32900,
+      "pull_requests": 4000,
+      "session_pull_requests": 4000,
+      "slow_consumers": 0,
+      "subscriptions": 11104
+    },
+    "in_window": true
+  },
+  {
+    "at": "2026-10-29T09:43:35.681346355Z",
+    "cpu_ticks": {
+      "dispatch": 7224,
+      "listener": 1086,
+      "loadgen": 7693,
+      "nats": 903,
+      "postgres": 42594,
+      "proxy": 18157
+    },
+    "rss_kib": {
+      "dispatch": 2513792,
+      "listener": 93412,
+      "loadgen": 1162144,
+      "nats": 147456,
+      "postgres": 2801276,
+      "proxy": 112488
+    },
+    "sys_busy_ticks": 291888,
+    "sys_total_ticks": 2757447,
+    "pg_conns": {
+      "active|": 1,
+      "idle in transaction|Client": 1,
+      "idle|Client": 49
+    },
+    "pg_total": 51,
+    "goroutines": 39110,
+    "pool_acquire_goroutines": 19365,
+    "heap_inuse": 1794441216,
+    "heap_alloc": 1647611184,
+    "heap_sys": 2103672832,
+    "nats": {
+      "connections": 56,
+      "cpu_pct": 0,
+      "in_msgs": 21638,
+      "js_api_errors": 1007,
+      "js_api_total": 6119,
+      "js_consumers": 1004,
+      "js_messages": 2228,
+      "js_streams": 4,
+      "mem": 150994944,
+      "out_msgs": 35283,
+      "pull_requests": 5000,
+      "session_pull_requests": 5000,
+      "slow_consumers": 0,
+      "subscriptions": 11103
+    },
+    "in_window": true
+  },
+  {
+    "at": "2026-10-29T09:43:40.676928015Z",
+    "cpu_ticks": {
+      "dispatch": 7456,
+      "listener": 1117,
+      "loadgen": 8049,
+      "nats": 916,
+      "postgres": 42871,
+      "proxy": 18224
+    },
+    "rss_kib": {
+      "dispatch": 2514112,
+      "listener": 93412,
+      "loadgen": 1162208,
+      "nats": 147456,
+      "postgres": 2556740,
+      "proxy": 112488
+    },
+    "sys_busy_ticks": 292875,
+    "sys_total_ticks": 2758956,
+    "pg_conns": {
+      "active|": 1,
+      "idle in transaction|Client": 1,
+      "idle|Client": 46
+    },
+    "pg_total": 48,
+    "goroutines": 39288,
+    "pool_acquire_goroutines": 19444,
+    "heap_inuse": 0,
+    "heap_alloc": 0,
+    "heap_sys": 0,
+    "nats": {
+      "connections": 56,
+      "cpu_pct": 6,
+      "in_msgs": 21832,
+      "js_api_errors": 1007,
+      "js_api_total": 6216,
+      "js_consumers": 1004,
+      "js_messages": 2228,
+      "js_streams": 4,
+      "mem": 150994944,
+      "out_msgs": 35574,
+      "pull_requests": 5000,
+      "session_pull_requests": 5000,
+      "slow_consumers": 0,
+      "subscriptions": 11103
+    },
+    "in_window": true
+  },
+  {
+    "at": "2026-10-29T09:43:45.6768807Z",
+    "cpu_ticks": {
+      "dispatch": 7691,
+      "listener": 1138,
+      "loadgen": 8427,
+      "nats": 931,
+      "postgres": 43137,
+      "proxy": 18281
+    },
+    "rss_kib": {
+      "dispatch": 2514368,
+      "listener": 93412,
+      "loadgen": 1162272,
+      "nats": 147456,
+      "postgres": 3062304,
+      "proxy": 112488
+    },
+    "sys_busy_ticks": 293847,
+    "sys_total_ticks": 2760453,
+    "pg_conns": {
+      "active|": 1,
+      "idle in transaction|Client": 1,
+      "idle|Client": 54
+    },
+    "pg_total": 56,
+    "goroutines": 39139,
+    "pool_acquire_goroutines": 19353,
+    "heap_inuse": 0,
+    "heap_alloc": 0,
+    "heap_sys": 0,
+    "nats": {
+      "connections": 56,
+      "cpu_pct": 1,
+      "in_msgs": 22047,
+      "js_api_errors": 1007,
+      "js_api_total": 6323,
+      "js_consumers": 1004,
+      "js_messages": 2228,
+      "js_streams": 4,
+      "mem": 150994944,
+      "out_msgs": 35899,
+      "pull_requests": 5000,
+      "session_pull_requests": 5000,
+      "slow_consumers": 0,
+      "subscriptions": 11103
+    },
+    "in_window": true
+  },
+  {
+    "at": "2026-10-29T09:43:50.707229944Z",
+    "cpu_ticks": {
+      "dispatch": 7941,
+      "listener": 1168,
+      "loadgen": 8817,
+      "nats": 944,
+      "postgres": 43460,
+      "proxy": 18362
+    },
+    "rss_kib": {
+      "dispatch": 2514624,
+      "listener": 93412,
+      "loadgen": 1173024,
+      "nats": 149504,
+      "postgres": 3024788,
+      "proxy": 112488
+    },
+    "sys_busy_ticks": 294930,
+    "sys_total_ticks": 2761962,
+    "pg_conns": {
+      "active|": 1,
+      "idle in transaction|Client": 1,
+      "idle|Client": 54
+    },
+    "pg_total": 56,
+    "goroutines": 39136,
+    "pool_acquire_goroutines": 19345,
+    "heap_inuse": 2015805440,
+    "heap_alloc": 1883125064,
+    "heap_sys": 2103934976,
+    "nats": {
+      "connections": 56,
+      "cpu_pct": 3,
+      "in_msgs": 22303,
+      "js_api_errors": 1007,
+      "js_api_total": 6450,
+      "js_consumers": 1004,
+      "js_messages": 2228,
+      "js_streams": 4,
+      "mem": 153092096,
+      "out_msgs": 37285,
+      "pull_requests": 5000,
+      "session_pull_requests": 5000,
+      "slow_consumers": 0,
+      "subscriptions": 11103
+    },
+    "in_window": true
+  },
+  {
+    "at": "2026-10-29T09:43:55.675739436Z",
+    "cpu_ticks": {
+      "dispatch": 8250,
+      "listener": 1191,
+      "loadgen": 9246,
+      "nats": 957,
+      "postgres": 43571,
+      "proxy": 18407
+    },
+    "rss_kib": {
+      "dispatch": 2518912,
+      "listener": 93412,
+      "loadgen": 1173216,
+      "nats": 149504,
+      "postgres": 2599200,
+      "proxy": 112488
+    },
+    "sys_busy_ticks": 295859,
+    "sys_total_ticks": 2763447,
+    "pg_conns": {
+      "active|": 1,
+      "idle in transaction|Client": 1,
+      "idle|Client": 45
+    },
+    "pg_total": 47,
+    "goroutines": 39104,
+    "pool_acquire_goroutines": 19333,
+    "heap_inuse": 0,
+    "heap_alloc": 0,
+    "heap_sys": 0,
+    "nats": {
+      "connections": 56,
+      "cpu_pct": 3,
+      "in_msgs": 22481,
+      "js_api_errors": 1007,
+      "js_api_total": 6533,
+      "js_consumers": 1004,
+      "js_messages": 2228,
+      "js_streams": 4,
+      "mem": 153092096,
+      "out_msgs": 37558,
+      "pull_requests": 5000,
+      "session_pull_requests": 5000,
+      "slow_consumers": 0,
+      "subscriptions": 11103
+    },
+    "in_window": true
+  },
+  {
+    "at": "2026-10-29T09:44:00.675698917Z",
+    "cpu_ticks": {
+      "dispatch": 8499,
+      "listener": 1219,
+      "loadgen": 9600,
+      "nats": 968,
+      "postgres": 43967,
+      "proxy": 18501
+    },
+    "rss_kib": {
+      "dispatch": 2518912,
+      "listener": 93412,
+      "loadgen": 1173216,
+      "nats": 149504,
+      "postgres": 2966032,
+      "proxy": 112488
+    },
+    "sys_busy_ticks": 296998,
+    "sys_total_ticks": 2764953,
+    "pg_conns": {
+      "active|": 1,
+      "idle in transaction|Client": 1,
+      "idle|": 1,
+      "idle|Client": 52
+    },
+    "pg_total": 55,
+    "goroutines": 39082,
+    "pool_acquire_goroutines": 19322,
+    "heap_inuse": 0,
+    "heap_alloc": 0,
+    "heap_sys": 0,
+    "nats": {
+      "connections": 56,
+      "cpu_pct": 1,
+      "in_msgs": 22704,
+      "js_api_errors": 1007,
+      "js_api_total": 6646,
+      "js_consumers": 1004,
+      "js_messages": 2228,
+      "js_streams": 4,
+      "mem": 153092096,
+      "out_msgs": 37892,
+      "pull_requests": 5000,
+      "session_pull_requests": 5000,
+      "slow_consumers": 0,
+      "subscriptions": 11104
+    },
+    "in_window": true
+  },
+  {
+    "at": "2026-10-29T09:44:05.6755891Z",
+    "cpu_ticks": {
+      "dispatch": 8733,
+      "listener": 1256,
+      "loadgen": 9990,
+      "nats": 988,
+      "postgres": 44203,
+      "proxy": 18562
+    },
+    "rss_kib": {
+      "dispatch": 2518912,
+      "listener": 93412,
+      "loadgen": 1173216,
+      "nats": 149504,
+      "postgres": 2953824,
+      "proxy": 112488
+    },
+    "sys_busy_ticks": 297976,
+    "sys_total_ticks": 2766456,
+    "pg_conns": {
+      "active|": 1,
+      "idle in transaction|Client": 4,
+      "idle|": 1,
+      "idle|Client": 50
+    },
+    "pg_total": 56,
+    "goroutines": 38945,
+    "pool_acquire_goroutines": 19256,
+    "heap_inuse": 1366654976,
+    "heap_alloc": 1161600392,
+    "heap_sys": 2097086464,
+    "nats": {
+      "connections": 56,
+      "cpu_pct": 5,
+      "in_msgs": 23967,
+      "js_api_errors": 1007,
+      "js_api_total": 6778,
+      "js_consumers": 1004,
+      "js_messages": 2228,
+      "js_streams": 4,
+      "mem": 153092096,
+      "out_msgs": 40287,
+      "pull_requests": 6000,
+      "session_pull_requests": 6000,
+      "slow_consumers": 0,
+      "subscriptions": 11104
+    },
+    "in_window": true
+  },
+  {
+    "at": "2026-10-29T09:44:10.675600079Z",
+    "cpu_ticks": {
+      "dispatch": 9008,
+      "listener": 1279,
+      "loadgen": 10368,
+      "nats": 1001,
+      "postgres": 44576,
+      "proxy": 18635
+    },
+    "rss_kib": {
+      "dispatch": 2518912,
+      "listener": 93412,
+      "loadgen": 1173216,
+      "nats": 149504,
+      "postgres": 2680676,
+      "proxy": 112488
+    },
+    "sys_busy_ticks": 299115,
+    "sys_total_ticks": 2767947,
+    "pg_conns": {
+      "active|": 1,
+      "idle in transaction|Client": 1,
+      "idle|Client": 47
+    },
+    "pg_total": 49,
+    "goroutines": 38689,
+    "pool_acquire_goroutines": 19125,
+    "heap_inuse": 0,
+    "heap_alloc": 0,
+    "heap_sys": 0,
+    "nats": {
+      "connections": 56,
+      "cpu_pct": 1,
+      "in_msgs": 24146,
+      "js_api_errors": 1007,
+      "js_api_total": 6869,
+      "js_consumers": 1004,
+      "js_messages": 2228,
+      "js_streams": 4,
+      "mem": 153092096,
+      "out_msgs": 40557,
+      "pull_requests": 6000,
+      "session_pull_requests": 6000,
+      "slow_consumers": 0,
+      "subscriptions": 11105
+    },
+    "in_window": true
+  },
+  {
+    "at": "2026-10-29T09:44:15.679345958Z",
+    "cpu_ticks": {
+      "dispatch": 9258,
+      "listener": 1307,
+      "loadgen": 10796,
+      "nats": 1013,
+      "postgres": 44812,
+      "proxy": 18690
+    },
+    "rss_kib": {
+      "dispatch": 2518912,
+      "listener": 93412,
+      "loadgen": 1173216,
+      "nats": 149504,
+      "postgres": 2582092,
+      "proxy": 112488
+    },
+    "sys_busy_ticks": 300129,
+    "sys_total_ticks": 2769450,
+    "pg_conns": {
+      "active|": 1,
+      "idle in transaction|Client": 1,
+      "idle|": 1,
+      "idle|Client": 41
+    },
+    "pg_total": 44,
+    "goroutines": 38844,
+    "pool_acquire_goroutines": 19205,
+    "heap_inuse": 0,
+    "heap_alloc": 0,
+    "heap_sys": 0,
+    "nats": {
+      "connections": 56,
+      "cpu_pct": 1,
+      "in_msgs": 24370,
+      "js_api_errors": 1007,
+      "js_api_total": 6979,
+      "js_consumers": 1004,
+      "js_messages": 2228,
+      "js_streams": 4,
+      "mem": 153092096,
+      "out_msgs": 40894,
+      "pull_requests": 6000,
+      "session_pull_requests": 6000,
+      "slow_consumers": 0,
+      "subscriptions": 11104
+    },
+    "in_window": true
+  },
+  {
+    "at": "2026-10-29T09:44:20.677100148Z",
+    "cpu_ticks": {
+      "dispatch": 9522,
+      "listener": 1327,
+      "loadgen": 11166,
+      "nats": 1029,
+      "postgres": 45116,
+      "proxy": 18790
+    },
+    "rss_kib": {
+      "dispatch": 2518912,
+      "listener": 93412,
+      "loadgen": 1173216,
+      "nats": 149504,
+      "postgres": 2596004,
+      "proxy": 112488
+    },
+    "sys_busy_ticks": 301205,
+    "sys_total_ticks": 2770950,
+    "pg_conns": {
+      "active|": 1,
+      "idle in transaction|Client": 3,
+      "idle|Client": 42
+    },
+    "pg_total": 46,
+    "goroutines": 38643,
+    "pool_acquire_goroutines": 19110,
+    "heap_inuse": 1544527872,
+    "heap_alloc": 1390132296,
+    "heap_sys": 2109669376,
+    "nats": {
+      "connections": 56,
+      "cpu_pct": 3,
+      "in_msgs": 24603,
+      "js_api_errors": 1007,
+      "js_api_total": 7095,
+      "js_consumers": 1004,
+      "js_messages": 2228,
+      "js_streams": 4,
+      "mem": 153092096,
+      "out_msgs": 42246,
+      "pull_requests": 6000,
+      "session_pull_requests": 6000,
+      "slow_consumers": 0,
+      "subscriptions": 11106
+    },
+    "in_window": true
+  },
+  {
+    "at": "2026-10-29T09:44:25.675534273Z",
+    "cpu_ticks": {
+      "dispatch": 9770,
+      "listener": 1358,
+      "loadgen": 11623,
+      "nats": 1041,
+      "postgres": 45320,
+      "proxy": 18858
+    },
+    "rss_kib": {
+      "dispatch": 2518912,
+      "listener": 93412,
+      "loadgen": 1193696,
+      "nats": 149504,
+      "postgres": 2401748,
+      "proxy": 112488
+    },
+    "sys_busy_ticks": 302231,
+    "sys_total_ticks": 2772450,
+    "pg_conns": {
+      "active|": 1,
+      "idle in transaction|Client": 1,
+      "idle|Client": 42
+    },
+    "pg_total": 44,
+    "goroutines": 38936,
+    "pool_acquire_goroutines": 19251,
+    "heap_inuse": 0,
+    "heap_alloc": 0,
+    "heap_sys": 0,
+    "nats": {
+      "connections": 56,
+      "cpu_pct": 2,
+      "in_msgs": 24807,
+      "js_api_errors": 1007,
+      "js_api_total": 7194,
+      "js_consumers": 1004,
+      "js_messages": 2228,
+      "js_streams": 4,
+      "mem": 153092096,
+      "out_msgs": 42555,
+      "pull_requests": 6000,
+      "session_pull_requests": 6000,
+      "slow_consumers": 0,
+      "subscriptions": 11103
+    },
+    "in_window": true
+  },
+  {
+    "at": "2026-10-29T09:44:30.675800004Z",
+    "cpu_ticks": {
+      "dispatch": 10010,
+      "listener": 1390,
+      "loadgen": 12004,
+      "nats": 1055,
+      "postgres": 45623,
+      "proxy": 18941
+    },
+    "rss_kib": {
+      "dispatch": 2518912,
+      "listener": 93412,
+      "loadgen": 1193696,
+      "nats": 149504,
+      "postgres": 2435712,
+      "proxy": 112488
+    },
+    "sys_busy_ticks": 303284,
+    "sys_total_ticks": 2773944,
+    "pg_conns": {
+      "active|": 1,
+      "idle in transaction|Client": 1,
+      "idle|Client": 40
+    },
+    "pg_total": 42,
+    "goroutines": 39023,
+    "pool_acquire_goroutines": 19296,
+    "heap_inuse": 0,
+    "heap_alloc": 0,
+    "heap_sys": 0,
+    "nats": {
+      "connections": 56,
+      "cpu_pct": 6,
+      "in_msgs": 25032,
+      "js_api_errors": 1007,
+      "js_api_total": 7309,
+      "js_consumers": 1004,
+      "js_messages": 2228,
+      "js_streams": 4,
+      "mem": 153092096,
+      "out_msgs": 42891,
+      "pull_requests": 6000,
+      "session_pull_requests": 6000,
+      "slow_consumers": 0,
+      "subscriptions": 11104
+    },
+    "in_window": true
+  },
+  {
+    "at": "2026-10-29T09:44:35.675728979Z",
+    "cpu_ticks": {
+      "dispatch": 10248,
+      "listener": 1417,
+      "loadgen": 12361,
+      "nats": 1072,
+      "postgres": 45962,
+      "proxy": 19015
+    },
+    "rss_kib": {
+      "dispatch": 2518976,
+      "listener": 93412,
+      "loadgen": 1193696,
+      "nats": 149568,
+      "postgres": 2579776,
+      "proxy": 112488
+    },
+    "sys_busy_ticks": 304339,
+    "sys_total_ticks": 2775447,
+    "pg_conns": {
+      "active|": 2,
+      "idle in transaction|Client": 2,
+      "idle|Client": 42
+    },
+    "pg_total": 46,
+    "goroutines": 39490,
+    "pool_acquire_goroutines": 19527,
+    "heap_inuse": 1749901312,
+    "heap_alloc": 1619946776,
+    "heap_sys": 2106523648,
+    "nats": {
+      "connections": 56,
+      "cpu_pct": 1,
+      "in_msgs": 26277,
+      "js_api_errors": 1007,
+      "js_api_total": 7432,
+      "js_consumers": 1004,
+      "js_messages": 2228,
+      "js_streams": 4,
+      "mem": 153157632,
+      "out_msgs": 45259,
+      "pull_requests": 7000,
+      "session_pull_requests": 7000,
+      "slow_consumers": 0,
+      "subscriptions": 11104
+    },
+    "in_window": true
+  },
+  {
+    "at": "2026-10-29T09:44:40.676223659Z",
+    "cpu_ticks": {
+      "dispatch": 10506,
+      "listener": 1450,
+      "loadgen": 12733,
+      "nats": 1077,
+      "postgres": 46240,
+      "proxy": 19102
+    },
+    "rss_kib": {
+      "dispatch": 2519232,
+      "listener": 93412,
+      "loadgen": 1193952,
+      "nats": 149568,
+      "postgres": 2203120,
+      "proxy": 112488
+    },
+    "sys_busy_ticks": 305383,
+    "sys_total_ticks": 2776956,
+    "pg_conns": {
+      "active|": 1,
+      "idle|Client": 36,
+      "|": 1
+    },
+    "pg_total": 38,
+    "goroutines": 39738,
+    "pool_acquire_goroutines": 19656,
+    "heap_inuse": 0,
+    "heap_alloc": 0,
+    "heap_sys": 0,
+    "nats": {
+      "connections": 56,
+      "cpu_pct": 2,
+      "in_msgs": 26481,
+      "js_api_errors": 1007,
+      "js_api_total": 7534,
+      "js_consumers": 1004,
+      "js_messages": 2228,
+      "js_streams": 4,
+      "mem": 153157632,
+      "out_msgs": 45566,
+      "pull_requests": 7000,
+      "session_pull_requests": 7000,
+      "slow_consumers": 0,
+      "subscriptions": 11104
+    },
+    "in_window": true
+  },
+  {
+    "at": "2026-10-29T09:44:45.675655018Z",
+    "cpu_ticks": {
+      "dispatch": 10740,
+      "listener": 1468,
+      "loadgen": 13095,
+      "nats": 1086,
+      "postgres": 46579,
+      "proxy": 19189
+    },
+    "rss_kib": {
+      "dispatch": 2519488,
+      "listener": 93412,
+      "loadgen": 1193952,
+      "nats": 149568,
+      "postgres": 2735460,
+      "proxy": 112488
+    },
+    "sys_busy_ticks": 306432,
+    "sys_total_ticks": 2778447,
+    "pg_conns": {
+      "active|": 1,
+      "idle in transaction|Client": 2,
+      "idle|Client": 47
+    },
+    "pg_total": 50,
+    "goroutines": 39629,
+    "pool_acquire_goroutines": 19589,
+    "heap_inuse": 0,
+    "heap_alloc": 0,
+    "heap_sys": 0,
+    "nats": {
+      "connections": 56,
+      "cpu_pct": 1,
+      "in_msgs": 26696,
+      "js_api_errors": 1007,
+      "js_api_total": 7642,
+      "js_consumers": 1004,
+      "js_messages": 2228,
+      "js_streams": 4,
+      "mem": 153157632,
+      "out_msgs": 45890,
+      "pull_requests": 7000,
+      "session_pull_requests": 7000,
+      "slow_consumers": 0,
+      "subscriptions": 11104
+    },
+    "in_window": true
+  },
+  {
+    "at": "2026-10-29T09:44:50.675785766Z",
+    "cpu_ticks": {
+      "dispatch": 11005,
+      "listener": 1491,
+      "loadgen": 13536,
+      "nats": 1106,
+      "postgres": 46753,
+      "proxy": 19243
+    },
+    "rss_kib": {
+      "dispatch": 2519936,
+      "listener": 93412,
+      "loadgen": 1193952,
+      "nats": 153664,
+      "postgres": 2405380,
+      "proxy": 112488
+    },
+    "sys_busy_ticks": 307411,
+    "sys_total_ticks": 2779947,
+    "pg_conns": {
+      "active|": 1,
+      "idle in transaction|Client": 1,
+      "idle|Client": 42
+    },
+    "pg_total": 44,
+    "goroutines": 39870,
+    "pool_acquire_goroutines": 19718,
+    "heap_inuse": 1266737152,
+    "heap_alloc": 1019218280,
+    "heap_sys": 2068905984,
+    "nats": {
+      "connections": 56,
+      "cpu_pct": 2,
+      "in_msgs": 26967,
+      "js_api_errors": 1007,
+      "js_api_total": 7767,
+      "js_consumers": 1004,
+      "js_messages": 2228,
+      "js_streams": 4,
+      "mem": 157351936,
+      "out_msgs": 47307,
+      "pull_requests": 7000,
+      "session_pull_requests": 7000,
+      "slow_consumers": 0,
+      "subscriptions": 11103
+    },
+    "in_window": true
+  },
+  {
+    "at": "2026-10-29T09:44:55.688358869Z",
+    "cpu_ticks": {
+      "dispatch": 11213,
+      "listener": 1504,
+      "loadgen": 13971,
+      "nats": 1121,
+      "postgres": 46978,
+      "proxy": 19302
+    },
+    "rss_kib": {
+      "dispatch": 2519936,
+      "listener": 93412,
+      "loadgen": 1200232,
+      "nats": 153664,
+      "postgres": 2732048,
+      "proxy": 112488
+    },
+    "sys_busy_ticks": 308368,
+    "sys_total_ticks": 2781453,
+    "pg_conns": {
+      "active|": 1,
+      "idle in transaction|Client": 1,
+      "idle|Client": 48
+    },
+    "pg_total": 50,
+    "goroutines": 39385,
+    "pool_acquire_goroutines": 19476,
+    "heap_inuse": 0,
+    "heap_alloc": 0,
+    "heap_sys": 0,
+    "nats": {
+      "connections": 56,
+      "cpu_pct": 3,
+      "in_msgs": 27119,
+      "js_api_errors": 1007,
+      "js_api_total": 7842,
+      "js_consumers": 1004,
+      "js_messages": 2228,
+      "js_streams": 4,
+      "mem": 157351936,
+      "out_msgs": 47537,
+      "pull_requests": 7000,
+      "session_pull_requests": 7000,
+      "slow_consumers": 0,
+      "subscriptions": 11104
+    },
+    "in_window": true
+  },
+  {
+    "at": "2026-10-29T09:45:00.677493256Z",
+    "cpu_ticks": {
+      "dispatch": 11469,
+      "listener": 1537,
+      "loadgen": 14349,
+      "nats": 1133,
+      "postgres": 47256,
+      "proxy": 19367
+    },
+    "rss_kib": {
+      "dispatch": 2519936,
+      "listener": 93412,
+      "loadgen": 1200232,
+      "nats": 153664,
+      "postgres": 2379792,
+      "proxy": 112488
+    },
+    "sys_busy_ticks": 309390,
+    "sys_total_ticks": 2782953,
+    "pg_conns": {
+      "active|": 1,
+      "idle|": 1,
+      "idle|Client": 39,
+      "|LWLock": 1
+    },
+    "pg_total": 42,
+    "goroutines": 39649,
+    "pool_acquire_goroutines": 19610,
+    "heap_inuse": 0,
+    "heap_alloc": 0,
+    "heap_sys": 0,
+    "nats": {
+      "connections": 56,
+      "cpu_pct": 2,
+      "in_msgs": 27341,
+      "js_api_errors": 1007,
+      "js_api_total": 7956,
+      "js_consumers": 1004,
+      "js_messages": 2228,
+      "js_streams": 4,
+      "mem": 157351936,
+      "out_msgs": 47870,
+      "pull_requests": 7000,
+      "session_pull_requests": 7000,
+      "slow_consumers": 0,
+      "subscriptions": 11103
+    },
+    "in_window": true
+  },
+  {
+    "at": "2026-10-29T09:45:05.676680121Z",
+    "cpu_ticks": {
+      "dispatch": 11683,
+      "listener": 1562,
+      "loadgen": 14722,
+      "nats": 1155,
+      "postgres": 47576,
+      "proxy": 19441
+    },
+    "rss_kib": {
+      "dispatch": 2519936,
+      "listener": 93412,
+      "loadgen": 1200232,
+      "nats": 153664,
+      "postgres": 2465384,
+      "proxy": 112488
+    },
+    "sys_busy_ticks": 310419,
+    "sys_total_ticks": 2784447,
+    "pg_conns": {
+      "active|": 1,
+      "idle in transaction|Client": 2,
+      "idle|Client": 39
+    },
+    "pg_total": 42,
+    "goroutines": 39415,
+    "pool_acquire_goroutines": 19488,
+    "heap_inuse": 1421549568,
+    "heap_alloc": 1237903944,
+    "heap_sys": 2109571072,
+    "nats": {
+      "connections": 56,
+      "cpu_pct": 6,
+      "in_msgs": 28588,
+      "js_api_errors": 1007,
+      "js_api_total": 8082,
+      "js_consumers": 1004,
+      "js_messages": 2228,
+      "js_streams": 4,
+      "mem": 157351936,
+      "out_msgs": 50241,
+      "pull_requests": 8000,
+      "session_pull_requests": 8000,
+      "slow_consumers": 0,
+      "subscriptions": 11105
+    },
+    "in_window": true
+  },
+  {
+    "at": "2026-10-29T09:45:10.676707435Z",
+    "cpu_ticks": {
+      "dispatch": 11911,
+      "listener": 1594,
+      "loadgen": 15107,
+      "nats": 1168,
+      "postgres": 47868,
+      "proxy": 19496
+    },
+    "rss_kib": {
+      "dispatch": 2519936,
+      "listener": 93412,
+      "loadgen": 1200232,
+      "nats": 153664,
+      "postgres": 2858648,
+      "proxy": 112488
+    },
+    "sys_busy_ticks": 311437,
+    "sys_total_ticks": 2785959,
+    "pg_conns": {
+      "active|": 1,
+      "idle|Client": 51
+    },
+    "pg_total": 52,
+    "goroutines": 39274,
+    "pool_acquire_goroutines": 19419,
+    "heap_inuse": 0,
+    "heap_alloc": 0,
+    "heap_sys": 0,
+    "nats": {
+      "connections": 56,
+      "cpu_pct": 2,
+      "in_msgs": 28789,
+      "js_api_errors": 1007,
+      "js_api_total": 8178,
+      "js_consumers": 1004,
+      "js_messages": 2228,
+      "js_streams": 4,
+      "mem": 157351936,
+      "out_msgs": 50543,
+      "pull_requests": 8000,
+      "session_pull_requests": 8000,
+      "slow_consumers": 0,
+      "subscriptions": 11103
+    },
+    "in_window": true
+  },
+  {
+    "at": "2026-10-29T09:45:15.680132599Z",
+    "cpu_ticks": {
+      "dispatch": 12118,
+      "listener": 1621,
+      "loadgen": 15502,
+      "nats": 1178,
+      "postgres": 48135,
+      "proxy": 19564
+    },
+    "rss_kib": {
+      "dispatch": 2519936,
+      "listener": 93412,
+      "loadgen": 1200232,
+      "nats": 153664,
+      "postgres": 2960168,
+      "proxy": 112488
+    },
+    "sys_busy_ticks": 312402,
+    "sys_total_ticks": 2787453,
+    "pg_conns": {
+      "active|": 1,
+      "idle|": 1,
+      "idle|Client": 52
+    },
+    "pg_total": 54,
+    "goroutines": 39378,
+    "pool_acquire_goroutines": 19467,
+    "heap_inuse": 0,
+    "heap_alloc": 0,
+    "heap_sys": 0,
+    "nats": {
+      "connections": 56,
+      "cpu_pct": 2,
+      "in_msgs": 29015,
+      "js_api_errors": 1007,
+      "js_api_total": 8291,
+      "js_consumers": 1004,
+      "js_messages": 2228,
+      "js_streams": 4,
+      "mem": 157351936,
+      "out_msgs": 50883,
+      "pull_requests": 8000,
+      "session_pull_requests": 8000,
+      "slow_consumers": 0,
+      "subscriptions": 11104
+    },
+    "in_window": true
+  },
+  {
+    "at": "2026-10-29T09:45:20.678948583Z",
+    "cpu_ticks": {
+      "dispatch": 12355,
+      "listener": 1642,
+      "loadgen": 15856,
+      "nats": 1192,
+      "postgres": 48509,
+      "proxy": 19656
+    },
+    "rss_kib": {
+      "dispatch": 2519936,
+      "listener": 93412,
+      "loadgen": 1200232,
+      "nats": 153664,
+      "postgres": 2485280,
+      "proxy": 112488
+    },
+    "sys_busy_ticks": 313498,
+    "sys_total_ticks": 2788956,
+    "pg_conns": {
+      "active|": 1,
+      "idle in transaction|Client": 2,
+      "idle|Client": 44
+    },
+    "pg_total": 47,
+    "goroutines": 39137,
+    "pool_acquire_goroutines": 19350,
+    "heap_inuse": 1614594048,
+    "heap_alloc": 1474190776,
+    "heap_sys": 2108063744,
+    "nats": {
+      "connections": 56,
+      "cpu_pct": 0,
+      "in_msgs": 29248,
+      "js_api_errors": 1007,
+      "js_api_total": 8407,
+      "js_consumers": 1004,
+      "js_messages": 2228,
+      "js_streams": 4,
+      "mem": 157351936,
+      "out_msgs": 52234,
+      "pull_requests": 8000,
+      "session_pull_requests": 8000,
+      "slow_consumers": 0,
+      "subscriptions": 11103
+    },
+    "in_window": true
+  },
+  {
+    "at": "2026-10-29T09:45:25.677914747Z",
+    "cpu_ticks": {
+      "dispatch": 12587,
+      "listener": 1654,
+      "loadgen": 16182,
+      "nats": 1204,
+      "postgres": 48795,
+      "proxy": 19723
+    },
+    "rss_kib": {
+      "dispatch": 2519936,
+      "listener": 93412,
+      "loadgen": 1200232,
+      "nats": 153664,
+      "postgres": 2688776,
+      "proxy": 112488
+    },
+    "sys_busy_ticks": 314440,
+    "sys_total_ticks": 2790450,
+    "pg_conns": {
+      "active|": 1,
+      "idle in transaction|Client": 2,
+      "idle|": 1,
+      "idle|Client": 44
+    },
+    "pg_total": 48,
+    "goroutines": 39329,
+    "pool_acquire_goroutines": 19444,
+    "heap_inuse": 0,
+    "heap_alloc": 0,
+    "heap_sys": 0,
+    "nats": {
+      "connections": 56,
+      "cpu_pct": 2,
+      "in_msgs": 29458,
+      "js_api_errors": 1007,
+      "js_api_total": 8513,
+      "js_consumers": 1004,
+      "js_messages": 2228,
+      "js_streams": 4,
+      "mem": 157351936,
+      "out_msgs": 52550,
+      "pull_requests": 8000,
+      "session_pull_requests": 8000,
+      "slow_consumers": 0,
+      "subscriptions": 11104
+    },
+    "in_window": true
+  },
+  {
+    "at": "2026-10-29T09:45:30.680189164Z",
+    "cpu_ticks": {
+      "dispatch": 12816,
+      "listener": 1684,
+      "loadgen": 16592,
+      "nats": 1224,
+      "postgres": 49151,
+      "proxy": 19813
+    },
+    "rss_kib": {
+      "dispatch": 2519936,
+      "listener": 93412,
+      "loadgen": 1219240,
+      "nats": 153664,
+      "postgres": 2524196,
+      "proxy": 112488
+    },
+    "sys_busy_ticks": 315571,
+    "sys_total_ticks": 2791947,
+    "pg_conns": {
+      "active|": 1,
+      "idle in transaction|Client": 1,
+      "idle|Client": 42
+    },
+    "pg_total": 44,
+    "goroutines": 39127,
+    "pool_acquire_goroutines": 19345,
+    "heap_inuse": 0,
+    "heap_alloc": 0,
+    "heap_sys": 0,
+    "nats": {
+      "connections": 56,
+      "cpu_pct": 2,
+      "in_msgs": 29673,
+      "js_api_errors": 1007,
+      "js_api_total": 8622,
+      "js_consumers": 1004,
+      "js_messages": 2228,
+      "js_streams": 4,
+      "mem": 157351936,
+      "out_msgs": 52874,
+      "pull_requests": 8000,
+      "session_pull_requests": 8000,
+      "slow_consumers": 0,
+      "subscriptions": 11103
+    },
+    "in_window": true
+  },
+  {
+    "at": "2026-10-29T09:45:35.676916708Z",
+    "cpu_ticks": {
+      "dispatch": 12999,
+      "listener": 1711,
+      "loadgen": 16977,
+      "nats": 1249,
+      "postgres": 49455,
+      "proxy": 19886
+    },
+    "rss_kib": {
+      "dispatch": 2519936,
+      "listener": 93412,
+      "loadgen": 1219240,
+      "nats": 153664,
+      "postgres": 2623812,
+      "proxy": 112488
+    },
+    "sys_busy_ticks": 316574,
+    "sys_total_ticks": 2793447,
+    "pg_conns": {
+      "active|": 1,
+      "idle in transaction|Client": 1,
+      "idle|Client": 46
+    },
+    "pg_total": 48,
+    "goroutines": 39528,
+    "pool_acquire_goroutines": 19547,
+    "heap_inuse": 1825996800,
+    "heap_alloc": 1702874576,
+    "heap_sys": 2105540608,
+    "nats": {
+      "connections": 56,
+      "cpu_pct": 1,
+      "in_msgs": 30915,
+      "js_api_errors": 1007,
+      "js_api_total": 8740,
+      "js_consumers": 1004,
+      "js_messages": 2228,
+      "js_streams": 4,
+      "mem": 157351936,
+      "out_msgs": 55238,
+      "pull_requests": 9000,
+      "session_pull_requests": 9000,
+      "slow_consumers": 0,
+      "subscriptions": 11103
+    },
+    "in_window": true
+  },
+  {
+    "at": "2026-10-29T09:45:40.675699492Z",
+    "cpu_ticks": {
+      "dispatch": 13255,
+      "listener": 1733,
+      "loadgen": 17333,
+      "nats": 1265,
+      "postgres": 49712,
+      "proxy": 19962
+    },
+    "rss_kib": {
+      "dispatch": 2519936,
+      "listener": 93412,
+      "loadgen": 1219240,
+      "nats": 153664,
+      "postgres": 2680516,
+      "proxy": 112488
+    },
+    "sys_busy_ticks": 317558,
+    "sys_total_ticks": 2794950,
+    "pg_conns": {
+      "active|": 1,
+      "idle|Client": 49
+    },
+    "pg_total": 50,
+    "goroutines": 39592,
+    "pool_acquire_goroutines": 19577,
+    "heap_inuse": 0,
+    "heap_alloc": 0,
+    "heap_sys": 0,
+    "nats": {
+      "connections": 56,
+      "cpu_pct": 3,
+      "in_msgs": 31119,
+      "js_api_errors": 1007,
+      "js_api_total": 8842,
+      "js_consumers": 1004,
+      "js_messages": 2228,
+      "js_streams": 4,
+      "mem": 157351936,
+      "out_msgs": 55545,
+      "pull_requests": 9000,
+      "session_pull_requests": 9000,
+      "slow_consumers": 0,
+      "subscriptions": 11103
+    },
+    "in_window": true
+  },
+  {
+    "at": "2026-10-29T09:45:45.677202869Z",
+    "cpu_ticks": {
+      "dispatch": 13496,
+      "listener": 1752,
+      "loadgen": 17708,
+      "nats": 1277,
+      "postgres": 50079,
+      "proxy": 20017
+    },
+    "rss_kib": {
+      "dispatch": 2520128,
+      "listener": 93412,
+      "loadgen": 1219240,
+      "nats": 153664,
+      "postgres": 2979224,
+      "proxy": 112488
+    },
+    "sys_busy_ticks": 318627,
+    "sys_total_ticks": 2796450,
+    "pg_conns": {
+      "active|": 1,
+      "idle|Client": 55
+    },
+    "pg_total": 56,
+    "goroutines": 39471,
+    "pool_acquire_goroutines": 19519,
+    "heap_inuse": 0,
+    "heap_alloc": 0,
+    "heap_sys": 0,
+    "nats": {
+      "connections": 56,
+      "cpu_pct": 2,
+      "in_msgs": 31340,
+      "js_api_errors": 1007,
+      "js_api_total": 8953,
+      "js_consumers": 1004,
+      "js_messages": 2228,
+      "js_streams": 4,
+      "mem": 157351936,
+      "out_msgs": 55878,
+      "pull_requests": 9000,
+      "session_pull_requests": 9000,
+      "slow_consumers": 0,
+      "subscriptions": 11103
+    },
+    "in_window": true
+  },
+  {
+    "at": "2026-10-29T09:45:50.676655557Z",
+    "cpu_ticks": {
+      "dispatch": 13714,
+      "listener": 1776,
+      "loadgen": 18150,
+      "nats": 1291,
+      "postgres": 50316,
+      "proxy": 20078
+    },
+    "rss_kib": {
+      "dispatch": 2520384,
+      "listener": 93412,
+      "loadgen": 1219240,
+      "nats": 153664,
+      "postgres": 2516952,
+      "proxy": 112488
+    },
+    "sys_busy_ticks": 319624,
+    "sys_total_ticks": 2797950,
+    "pg_conns": {
+      "active|": 2,
+      "idle in transaction|Client": 2,
+      "idle|Client": 43
+    },
+    "pg_total": 47,
+    "goroutines": 39553,
+    "pool_acquire_goroutines": 19562,
+    "heap_inuse": 2054332416,
+    "heap_alloc": 1937218480,
+    "heap_sys": 2105049088,
+    "nats": {
+      "connections": 56,
+      "cpu_pct": 4,
+      "in_msgs": 31598,
+      "js_api_errors": 1007,
+      "js_api_total": 9082,
+      "js_consumers": 1004,
+      "js_messages": 2228,
+      "js_streams": 4,
+      "mem": 157351936,
+      "out_msgs": 57268,
+      "pull_requests": 9000,
+      "session_pull_requests": 9000,
+      "slow_consumers": 0,
+      "subscriptions": 11103
+    },
+    "in_window": true
+  },
+  {
+    "at": "2026-10-29T09:45:55.676851965Z",
+    "cpu_ticks": {
+      "dispatch": 14029,
+      "listener": 1800,
+      "loadgen": 18556,
+      "nats": 1310,
+      "postgres": 50512,
+      "proxy": 20144
+    },
+    "rss_kib": {
+      "dispatch": 2580616,
+      "listener": 93412,
+      "loadgen": 1221288,
+      "nats": 153664,
+      "postgres": 2377544,
+      "proxy": 112488
+    },
+    "sys_busy_ticks": 320656,
+    "sys_total_ticks": 2799450,
+    "pg_conns": {
+      "active|": 1,
+      "idle|Client": 42
+    },
+    "pg_total": 43,
+    "goroutines": 39372,
+    "pool_acquire_goroutines": 19473,
+    "heap_inuse": 0,
+    "heap_alloc": 0,
+    "heap_sys": 0,
+    "nats": {
+      "connections": 56,
+      "cpu_pct": 5,
+      "in_msgs": 31781,
+      "js_api_errors": 1007,
+      "js_api_total": 9172,
+      "js_consumers": 1004,
+      "js_messages": 2228,
+      "js_streams": 4,
+      "mem": 157351936,
+      "out_msgs": 57543,
+      "pull_requests": 9000,
+      "session_pull_requests": 9000,
+      "slow_consumers": 0,
+      "subscriptions": 11103
+    },
+    "in_window": true
+  },
+  {
+    "at": "2026-10-29T09:46:00.675669071Z",
+    "cpu_ticks": {
+      "dispatch": 14254,
+      "listener": 1829,
+      "loadgen": 18956,
+      "nats": 1329,
+      "postgres": 50755,
+      "proxy": 20237
+    },
+    "rss_kib": {
+      "dispatch": 2580616,
+      "listener": 93412,
+      "loadgen": 1221288,
+      "nats": 155712,
+      "postgres": 3014540,
+      "proxy": 112488
+    },
+    "sys_busy_ticks": 321662,
+    "sys_total_ticks": 2800950,
+    "pg_conns": {
+      "active|": 2,
+      "idle in transaction|Client": 2,
+      "idle|Client": 53
+    },
+    "pg_total": 57,
+    "goroutines": 39398,
+    "pool_acquire_goroutines": 19484,
+    "heap_inuse": 0,
+    "heap_alloc": 0,
+    "heap_sys": 0,
+    "nats": {
+      "connections": 56,
+      "cpu_pct": 1,
+      "in_msgs": 32009,
+      "js_api_errors": 1007,
+      "js_api_total": 9294,
+      "js_consumers": 1004,
+      "js_messages": 2228,
+      "js_streams": 4,
+      "mem": 159449088,
+      "out_msgs": 57883,
+      "pull_requests": 9000,
+      "session_pull_requests": 9000,
+      "slow_consumers": 0,
+      "subscriptions": 11105
+    },
+    "in_window": true
+  },
+  {
+    "at": "2026-10-29T09:46:05.675644048Z",
+    "cpu_ticks": {
+      "dispatch": 14496,
+      "listener": 1861,
+      "loadgen": 19391,
+      "nats": 1348,
+      "postgres": 50965,
+      "proxy": 20299
+    },
+    "rss_kib": {
+      "dispatch": 2580616,
+      "listener": 93412,
+      "loadgen": 1223336,
+      "nats": 157760,
+      "postgres": 2826428,
+      "proxy": 112488
+    },
+    "sys_busy_ticks": 322668,
+    "sys_total_ticks": 2802450,
+    "pg_conns": {
+      "active|": 1,
+      "idle in transaction|Client": 1,
+      "idle|Client": 50
+    },
+    "pg_total": 52,
+    "goroutines": 39025,
+    "pool_acquire_goroutines": 19299,
+    "heap_inuse": 1360306176,
+    "heap_alloc": 1152923432,
+    "heap_sys": 2144862208,
+    "nats": {
+      "connections": 56,
+      "cpu_pct": 4,
+      "in_msgs": 33239,
+      "js_api_errors": 1007,
+      "js_api_total": 9402,
+      "js_consumers": 1004,
+      "js_messages": 2228,
+      "js_streams": 4,
+      "mem": 161546240,
+      "out_msgs": 60231,
+      "pull_requests": 10000,
+      "session_pull_requests": 10000,
+      "slow_consumers": 0,
+      "subscriptions": 11104
+    },
+    "in_window": true
+  },
+  {
+    "at": "2026-10-29T09:46:10.67567162Z",
+    "cpu_ticks": {
+      "dispatch": 14772,
+      "listener": 1892,
+      "loadgen": 19825,
+      "nats": 1368,
+      "postgres": 51144,
+      "proxy": 20361
+    },
+    "rss_kib": {
+      "dispatch": 2580616,
+      "listener": 93412,
+      "loadgen": 1223336,
+      "nats": 157760,
+      "postgres": 2731528,
+      "proxy": 112488
+    },
+    "sys_busy_ticks": 323676,
+    "sys_total_ticks": 2803947,
+    "pg_conns": {
+      "active|": 1,
+      "idle|": 1,
+      "idle|Client": 48
+    },
+    "pg_total": 50,
+    "goroutines": 38919,
+    "pool_acquire_goroutines": 19247,
+    "heap_inuse": 0,
+    "heap_alloc": 0,
+    "heap_sys": 0,
+    "nats": {
+      "connections": 56,
+      "cpu_pct": 5,
+      "in_msgs": 33445,
+      "js_api_errors": 1007,
+      "js_api_total": 9504,
+      "js_consumers": 1004,
+      "js_messages": 2228,
+      "js_streams": 4,
+      "mem": 161546240,
+      "out_msgs": 60541,
+      "pull_requests": 10000,
+      "session_pull_requests": 10000,
+      "slow_consumers": 0,
+      "subscriptions": 11103
+    },
+    "in_window": true
+  },
+  {
+    "at": "2026-10-29T09:46:15.675563985Z",
+    "cpu_ticks": {
+      "dispatch": 14976,
+      "listener": 1920,
+      "loadgen": 20185,
+      "nats": 1385,
+      "postgres": 51536,
+      "proxy": 20428
+    },
+    "rss_kib": {
+      "dispatch": 2580616,
+      "listener": 93412,
+      "loadgen": 1229480,
+      "nats": 157760,
+      "postgres": 2636872,
+      "proxy": 112488
+    },
+    "sys_busy_ticks": 324745,
+    "sys_total_ticks": 2805447,
+    "pg_conns": {
+      "active|": 2,
+      "idle in transaction|Client": 2,
+      "idle|Client": 43
+    },
+    "pg_total": 47,
+    "goroutines": 38901,
+    "pool_acquire_goroutines": 19231,
+    "heap_inuse": 0,
+    "heap_alloc": 0,
+    "heap_sys": 0,
+    "nats": {
+      "connections": 56,
+      "cpu_pct": 6,
+      "in_msgs": 33664,
+      "js_api_errors": 1007,
+      "js_api_total": 9614,
+      "js_consumers": 1004,
+      "js_messages": 2228,
+      "js_streams": 4,
+      "mem": 161546240,
+      "out_msgs": 60870,
+      "pull_requests": 10000,
+      "session_pull_requests": 10000,
+      "slow_consumers": 0,
+      "subscriptions": 11104
+    },
+    "in_window": true
+  },
+  {
+    "at": "2026-10-29T09:46:20.675974078Z",
+    "cpu_ticks": {
+      "dispatch": 15206,
+      "listener": 1946,
+      "loadgen": 20597,
+      "nats": 1400,
+      "postgres": 51805,
+      "proxy": 20517
+    },
+    "rss_kib": {
+      "dispatch": 2580616,
+      "listener": 93412,
+      "loadgen": 1229480,
+      "nats": 157824,
+      "postgres": 2992460,
+      "proxy": 112488
+    },
+    "sys_busy_ticks": 325793,
+    "sys_total_ticks": 2806947,
+    "pg_conns": {
+      "active|": 1,
+      "idle in transaction|Client": 1,
+      "idle|Client": 51
+    },
+    "pg_total": 53,
+    "goroutines": 38976,
+    "pool_acquire_goroutines": 19270,
+    "heap_inuse": 1533812736,
+    "heap_alloc": 1375857816,
+    "heap_sys": 2162393088,
+    "nats": {
+      "connections": 56,
+      "cpu_pct": 3,
+      "in_msgs": 33919,
+      "js_api_errors": 1007,
+      "js_api_total": 9742,
+      "js_consumers": 1004,
+      "js_messages": 2228,
+      "js_streams": 4,
+      "mem": 161611776,
+      "out_msgs": 62254,
+      "pull_requests": 10000,
+      "session_pull_requests": 10000,
+      "slow_consumers": 0,
+      "subscriptions": 11104
+    },
+    "in_window": true
+  },
+  {
+    "at": "2026-10-29T09:46:25.676098924Z",
+    "cpu_ticks": {
+      "dispatch": 15459,
+      "listener": 1978,
+      "loadgen": 20995,
+      "nats": 1409,
+      "postgres": 52106,
+      "proxy": 20596
+    },
+    "rss_kib": {
+      "dispatch": 2580616,
+      "listener": 93412,
+      "loadgen": 1229480,
+      "nats": 157824,
+      "postgres": 3175084,
+      "proxy": 112488
+    },
+    "sys_busy_ticks": 326872,
+    "sys_total_ticks": 2808456,
+    "pg_conns": {
+      "active|": 1,
+      "idle in transaction|Client": 1,
+      "idle|": 1,
+      "idle|Client": 59
+    },
+    "pg_total": 62,
+    "goroutines": 39105,
+    "pool_acquire_goroutines": 19337,
+    "heap_inuse": 0,
+    "heap_alloc": 0,
+    "heap_sys": 0,
+    "nats": {
+      "connections": 56,
+      "cpu_pct": 2,
+      "in_msgs": 34090,
+      "js_api_errors": 1007,
+      "js_api_total": 9826,
+      "js_consumers": 1004,
+      "js_messages": 2228,
+      "js_streams": 4,
+      "mem": 161611776,
+      "out_msgs": 62512,
+      "pull_requests": 10000,
+      "session_pull_requests": 10000,
+      "slow_consumers": 0,
+      "subscriptions": 11104
+    },
+    "in_window": true
+  },
+  {
+    "at": "2026-10-29T09:46:30.675657249Z",
+    "cpu_ticks": {
+      "dispatch": 15681,
+      "listener": 2011,
+      "loadgen": 21418,
+      "nats": 1419,
+      "postgres": 52379,
+      "proxy": 20657
+    },
+    "rss_kib": {
+      "dispatch": 2580616,
+      "listener": 93412,
+      "loadgen": 1229480,
+      "nats": 157832,
+      "postgres": 2528216,
+      "proxy": 112488
+    },
+    "sys_busy_ticks": 327896,
+    "sys_total_ticks": 2809947,
+    "pg_conns": {
+      "active|": 1,
+      "idle|Client": 43,
+      "|": 1
+    },
+    "pg_total": 45,
+    "goroutines": 39004,
+    "pool_acquire_goroutines": 19285,
+    "heap_inuse": 0,
+    "heap_alloc": 0,
+    "heap_sys": 0,
+    "nats": {
+      "connections": 56,
+      "cpu_pct": 0,
+      "in_msgs": 34328,
+      "js_api_errors": 1007,
+      "js_api_total": 9946,
+      "js_consumers": 1004,
+      "js_messages": 2228,
+      "js_streams": 4,
+      "mem": 161619968,
+      "out_msgs": 63871,
+      "pull_requests": 10000,
+      "session_pull_requests": 10000,
+      "slow_consumers": 0,
+      "subscriptions": 11104
+    },
+    "in_window": true
+  },
+  {
+    "at": "2026-10-29T09:46:35.676190982Z",
+    "cpu_ticks": {
+      "dispatch": 15925,
+      "listener": 2041,
+      "loadgen": 21834,
+      "nats": 1438,
+      "postgres": 52584,
+      "proxy": 20711
+    },
+    "rss_kib": {
+      "dispatch": 2580616,
+      "listener": 93412,
+      "loadgen": 1231528,
+      "nats": 157832,
+      "postgres": 2725664,
+      "proxy": 112488
+    },
+    "sys_busy_ticks": 328867,
+    "sys_total_ticks": 2811447,
+    "pg_conns": {
+      "active|": 1,
+      "idle|Client": 49
+    },
+    "pg_total": 50,
+    "goroutines": 38977,
+    "pool_acquire_goroutines": 19273,
+    "heap_inuse": 1735737344,
+    "heap_alloc": 1597804536,
+    "heap_sys": 2167832576,
+    "nats": {
+      "connections": 56,
+      "cpu_pct": 6,
+      "in_msgs": 35571,
+      "js_api_errors": 1007,
+      "js_api_total": 10066,
+      "js_consumers": 1004,
+      "js_messages": 2228,
+      "js_streams": 4,
+      "mem": 161619968,
+      "out_msgs": 66237,
+      "pull_requests": 11000,
+      "session_pull_requests": 11000,
+      "slow_consumers": 0,
+      "subscriptions": 11103
+    },
+    "in_window": true
+  },
+  {
+    "at": "2026-10-29T09:46:40.678552915Z",
+    "cpu_ticks": {
+      "dispatch": 16178,
+      "listener": 2079,
+      "loadgen": 22183,
+      "nats": 1447,
+      "postgres": 52948,
+      "proxy": 20790
+    },
+    "rss_kib": {
+      "dispatch": 2580616,
+      "listener": 93412,
+      "loadgen": 1231528,
+      "nats": 157832,
+      "postgres": 3084820,
+      "proxy": 112488
+    },
+    "sys_busy_ticks": 329962,
+    "sys_total_ticks": 2812953,
+    "pg_conns": {
+      "active|": 1,
+      "idle|Client": 56
+    },
+    "pg_total": 57,
+    "goroutines": 39055,
+    "pool_acquire_goroutines": 19316,
+    "heap_inuse": 0,
+    "heap_alloc": 0,
+    "heap_sys": 0,
+    "nats": {
+      "connections": 56,
+      "cpu_pct": 2,
+      "in_msgs": 35771,
+      "js_api_errors": 1007,
+      "js_api_total": 10167,
+      "js_consumers": 1004,
+      "js_messages": 2228,
+      "js_streams": 4,
+      "mem": 161619968,
+      "out_msgs": 66538,
+      "pull_requests": 11000,
+      "session_pull_requests": 11000,
+      "slow_consumers": 0,
+      "subscriptions": 11104
+    },
+    "in_window": true
+  },
+  {
+    "at": "2026-10-29T09:46:45.680840206Z",
+    "cpu_ticks": {
+      "dispatch": 16410,
+      "listener": 2102,
+      "loadgen": 22559,
+      "nats": 1460,
+      "postgres": 53214,
+      "proxy": 20851
+    },
+    "rss_kib": {
+      "dispatch": 2580616,
+      "listener": 93412,
+      "loadgen": 1231528,
+      "nats": 157832,
+      "postgres": 2620516,
+      "proxy": 112488
+    },
+    "sys_busy_ticks": 330937,
+    "sys_total_ticks": 2814450,
+    "pg_conns": {
+      "active|": 1,
+      "idle|Client": 44
+    },
+    "pg_total": 45,
+    "goroutines": 39110,
+    "pool_acquire_goroutines": 19344,
+    "heap_inuse": 0,
+    "heap_alloc": 0,
+    "heap_sys": 0,
+    "nats": {
+      "connections": 56,
+      "cpu_pct": 3,
+      "in_msgs": 35995,
+      "js_api_errors": 1007,
+      "js_api_total": 10278,
+      "js_consumers": 1004,
+      "js_messages": 2228,
+      "js_streams": 4,
+      "mem": 161619968,
+      "out_msgs": 66875,
+      "pull_requests": 11000,
+      "session_pull_requests": 11000,
+      "slow_consumers": 0,
+      "subscriptions": 11103
+    },
+    "in_window": true
+  },
+  {
+    "at": "2026-10-29T09:46:50.67574146Z",
+    "cpu_ticks": {
+      "dispatch": 16640,
+      "listener": 2132,
+      "loadgen": 22938,
+      "nats": 1480,
+      "postgres": 53521,
+      "proxy": 20923
+    },
+    "rss_kib": {
+      "dispatch": 2580808,
+      "listener": 93412,
+      "loadgen": 1231528,
+      "nats": 157832,
+      "postgres": 2678792,
+      "proxy": 112488
+    },
+    "sys_busy_ticks": 331972,
+    "sys_total_ticks": 2815947,
+    "pg_conns": {
+      "active|": 1,
+      "idle in transaction|Client": 1,
+      "idle|Client": 46
+    },
+    "pg_total": 48,
+    "goroutines": 38818,
+    "pool_acquire_goroutines": 19176,
+    "heap_inuse": 1952276480,
+    "heap_alloc": 1826404440,
+    "heap_sys": 2168717312,
+    "nats": {
+      "connections": 56,
+      "cpu_pct": 6,
+      "in_msgs": 36263,
+      "js_api_errors": 1007,
+      "js_api_total": 10412,
+      "js_consumers": 1004,
+      "js_messages": 2228,
+      "js_streams": 4,
+      "mem": 161619968,
+      "out_msgs": 68278,
+      "pull_requests": 11000,
+      "session_pull_requests": 11000,
+      "slow_consumers": 0,
+      "subscriptions": 11103
+    },
+    "in_window": true
+  },
+  {
+    "at": "2026-10-29T09:46:55.675579504Z",
+    "cpu_ticks": {
+      "dispatch": 16890,
+      "listener": 2161,
+      "loadgen": 23372,
+      "nats": 1495,
+      "postgres": 53686,
+      "proxy": 20974
+    },
+    "rss_kib": {
+      "dispatch": 2581128,
+      "listener": 93412,
+      "loadgen": 1231528,
+      "nats": 157832,
+      "postgres": 2993312,
+      "proxy": 112488
+    },
+    "sys_busy_ticks": 332919,
+    "sys_total_ticks": 2817450,
+    "pg_conns": {
+      "active|": 1,
+      "idle|Client": 53
+    },
+    "pg_total": 54,
+    "goroutines": 38709,
+    "pool_acquire_goroutines": 19142,
+    "heap_inuse": 0,
+    "heap_alloc": 0,
+    "heap_sys": 0,
+    "nats": {
+      "connections": 56,
+      "cpu_pct": 2,
+      "in_msgs": 36439,
+      "js_api_errors": 1007,
+      "js_api_total": 10500,
+      "js_consumers": 1004,
+      "js_messages": 2228,
+      "js_streams": 4,
+      "mem": 161619968,
+      "out_msgs": 68543,
+      "pull_requests": 11000,
+      "session_pull_requests": 11000,
+      "slow_consumers": 0,
+      "subscriptions": 11103
+    },
+    "in_window": true
+  },
+  {
+    "at": "2026-10-29T09:47:00.678133929Z",
+    "cpu_ticks": {
+      "dispatch": 17123,
+      "listener": 2189,
+      "loadgen": 23757,
+      "nats": 1512,
+      "postgres": 54037,
+      "proxy": 21039
+    },
+    "rss_kib": {
+      "dispatch": 2581384,
+      "listener": 93412,
+      "loadgen": 1231528,
+      "nats": 157832,
+      "postgres": 2813984,
+      "proxy": 112488
+    },
+    "sys_busy_ticks": 333999,
+    "sys_total_ticks": 2818947,
+    "pg_conns": {
+      "active|": 1,
+      "idle in transaction|Client": 3,
+      "idle|": 2,
+      "idle|Client": 45
+    },
+    "pg_total": 51,
+    "goroutines": 38729,
+    "pool_acquire_goroutines": 19153,
+    "heap_inuse": 0,
+    "heap_alloc": 0,
+    "heap_sys": 0,
+    "nats": {
+      "connections": 56,
+      "cpu_pct": 6,
+      "in_msgs": 36665,
+      "js_api_errors": 1007,
+      "js_api_total": 10616,
+      "js_consumers": 1004,
+      "js_messages": 2228,
+      "js_streams": 4,
+      "mem": 161619968,
+      "out_msgs": 68881,
+      "pull_requests": 11000,
+      "session_pull_requests": 11000,
+      "slow_consumers": 0,
+      "subscriptions": 11104
+    },
+    "in_window": true
+  },
+  {
+    "at": "2026-10-29T09:47:05.691299183Z",
+    "cpu_ticks": {
+      "dispatch": 17418,
+      "listener": 2218,
+      "loadgen": 24235,
+      "nats": 1527,
+      "postgres": 54138,
+      "proxy": 21076
+    },
+    "rss_kib": {
+      "dispatch": 2616976,
+      "listener": 93412,
+      "loadgen": 1231528,
+      "nats": 157832,
+      "postgres": 2750880,
+      "proxy": 112488
+    },
+    "sys_busy_ticks": 334955,
+    "sys_total_ticks": 2820453,
+    "pg_conns": {
+      "active|": 1,
+      "idle in transaction|Client": 1,
+      "idle|Client": 47
+    },
+    "pg_total": 49,
+    "goroutines": 38705,
+    "pool_acquire_goroutines": 19139,
+    "heap_inuse": 1255161856,
+    "heap_alloc": 998172792,
+    "heap_sys": 2162196480,
+    "nats": {
+      "connections": 56,
+      "cpu_pct": 4,
+      "in_msgs": 37921,
+      "js_api_errors": 1007,
+      "js_api_total": 10739,
+      "js_consumers": 1004,
+      "js_messages": 2228,
+      "js_streams": 4,
+      "mem": 161619968,
+      "out_msgs": 71271,
+      "pull_requests": 12000,
+      "session_pull_requests": 12000,
+      "slow_consumers": 0,
+      "subscriptions": 11103
+    },
+    "in_window": true
+  },
+  {
+    "at": "2026-10-29T09:47:10.680200763Z",
+    "cpu_ticks": {
+      "dispatch": 17656,
+      "listener": 2250,
+      "loadgen": 24673,
+      "nats": 1543,
+      "postgres": 54430,
+      "proxy": 21159
+    },
+    "rss_kib": {
+      "dispatch": 2616976,
+      "listener": 93412,
+      "loadgen": 1237672,
+      "nats": 157832,
+      "postgres": 2597068,
+      "proxy": 112488
+    },
+    "sys_busy_ticks": 336060,
+    "sys_total_ticks": 2821953,
+    "pg_conns": {
+      "active|": 1,
+      "idle in transaction|Client": 1,
+      "idle|Client": 44
+    },
+    "pg_total": 46,
+    "goroutines": 38661,
+    "pool_acquire_goroutines": 19119,
+    "heap_inuse": 0,
+    "heap_alloc": 0,
+    "heap_sys": 0,
+    "nats": {
+      "connections": 56,
+      "cpu_pct": 2,
+      "in_msgs": 38092,
+      "js_api_errors": 1007,
+      "js_api_total": 10824,
+      "js_consumers": 1004,
+      "js_messages": 2228,
+      "js_streams": 4,
+      "mem": 161619968,
+      "out_msgs": 71528,
+      "pull_requests": 12000,
+      "session_pull_requests": 12000,
+      "slow_consumers": 0,
+      "subscriptions": 11104
+    },
+    "in_window": true
+  },
+  {
+    "at": "2026-10-29T09:47:15.675549491Z",
+    "cpu_ticks": {
+      "dispatch": 17864,
+      "listener": 2270,
+      "loadgen": 25090,
+      "nats": 1562,
+      "postgres": 54667,
+      "proxy": 21228
+    },
+    "rss_kib": {
+      "dispatch": 2616976,
+      "listener": 93412,
+      "loadgen": 1239720,
+      "nats": 157832,
+      "postgres": 2820724,
+      "proxy": 112488
+    },
+    "sys_busy_ticks": 337032,
+    "sys_total_ticks": 2823453,
+    "pg_conns": {
+      "active|": 1,
+      "idle in transaction|Client": 1,
+      "idle|Client": 50
+    },
+    "pg_total": 52,
+    "goroutines": 38544,
+    "pool_acquire_goroutines": 19060,
+    "heap_inuse": 0,
+    "heap_alloc": 0,
+    "heap_sys": 0,
+    "nats": {
+      "connections": 56,
+      "cpu_pct": 4,
+      "in_msgs": 38312,
+      "js_api_errors": 1007,
+      "js_api_total": 10931,
+      "js_consumers": 1004,
+      "js_messages": 2228,
+      "js_streams": 4,
+      "mem": 161619968,
+      "out_msgs": 71862,
+      "pull_requests": 12000,
+      "session_pull_requests": 12000,
+      "slow_consumers": 0,
+      "subscriptions": 11103
+    },
+    "in_window": true
+  },
+  {
+    "at": "2026-10-29T09:47:20.686836624Z",
+    "cpu_ticks": {
+      "dispatch": 18088,
+      "listener": 2290,
+      "loadgen": 25438,
+      "nats": 1576,
+      "postgres": 54999,
+      "proxy": 21288
+    },
+    "rss_kib": {
+      "dispatch": 2616976,
+      "listener": 93412,
+      "loadgen": 1239720,
+      "nats": 157832,
+      "postgres": 2808876,
+      "proxy": 112488
+    },
+    "sys_busy_ticks": 338030,
+    "sys_total_ticks": 2824947,
+    "pg_conns": {
+      "active|": 1,
+      "idle in transaction|Client": 1,
+      "idle|Client": 49
+    },
+    "pg_total": 51,
+    "goroutines": 38778,
+    "pool_acquire_goroutines": 19176,
+    "heap_inuse": 1407819776,
+    "heap_alloc": 1219830912,
+    "heap_sys": 2193358848,
+    "nats": {
+      "connections": 56,
+      "cpu_pct": 5,
+      "in_msgs": 38560,
+      "js_api_errors": 1007,
+      "js_api_total": 11055,
+      "js_consumers": 1004,
+      "js_messages": 2228,
+      "js_streams": 4,
+      "mem": 161619968,
+      "out_msgs": 73235,
+      "pull_requests": 12000,
+      "session_pull_requests": 12000,
+      "slow_consumers": 0,
+      "subscriptions": 11103
+    },
+    "in_window": true
+  },
+  {
+    "at": "2026-10-29T09:47:25.676330586Z",
+    "cpu_ticks": {
+      "dispatch": 18345,
+      "listener": 2317,
+      "loadgen": 25812,
+      "nats": 1593,
+      "postgres": 55324,
+      "proxy": 21368
+    },
+    "rss_kib": {
+      "dispatch": 2616976,
+      "listener": 93412,
+      "loadgen": 1239720,
+      "nats": 157832,
+      "postgres": 2883568,
+      "proxy": 112488
+    },
+    "sys_busy_ticks": 339115,
+    "sys_total_ticks": 2826456,
+    "pg_conns": {
+      "active|": 1,
+      "idle in transaction|Client": 1,
+      "idle|Client": 51
+    },
+    "pg_total": 53,
+    "goroutines": 38829,
+    "pool_acquire_goroutines": 19203,
+    "heap_inuse": 0,
+    "heap_alloc": 0,
+    "heap_sys": 0,
+    "nats": {
+      "connections": 56,
+      "cpu_pct": 3,
+      "in_msgs": 38759,
+      "js_api_errors": 1007,
+      "js_api_total": 11156,
+      "js_consumers": 1004,
+      "js_messages": 2228,
+      "js_streams": 4,
+      "mem": 161619968,
+      "out_msgs": 73534,
+      "pull_requests": 12000,
+      "session_pull_requests": 12000,
+      "slow_consumers": 0,
+      "subscriptions": 11103
+    },
+    "in_window": true
+  },
+  {
+    "at": "2026-10-29T09:47:30.675532411Z",
+    "cpu_ticks": {
+      "dispatch": 18610,
+      "listener": 2344,
+      "loadgen": 26153,
+      "nats": 1611,
+      "postgres": 55611,
+      "proxy": 21447
+    },
+    "rss_kib": {
+      "dispatch": 2616976,
+      "listener": 93412,
+      "loadgen": 1239720,
+      "nats": 159880,
+      "postgres": 2852456,
+      "proxy": 112488
+    },
+    "sys_busy_ticks": 340133,
+    "sys_total_ticks": 2827950,
+    "pg_conns": {
+      "active|": 1,
+      "idle in transaction|Client": 2,
+      "idle|Client": 49
+    },
+    "pg_total": 52,
+    "goroutines": 38962,
+    "pool_acquire_goroutines": 19264,
+    "heap_inuse": 0,
+    "heap_alloc": 0,
+    "heap_sys": 0,
+    "nats": {
+      "connections": 56,
+      "cpu_pct": 3,
+      "in_msgs": 38983,
+      "js_api_errors": 1007,
+      "js_api_total": 11269,
+      "js_consumers": 1004,
+      "js_messages": 2228,
+      "js_streams": 4,
+      "mem": 163717120,
+      "out_msgs": 73869,
+      "pull_requests": 12000,
+      "session_pull_requests": 12000,
+      "slow_consumers": 0,
+      "subscriptions": 11104
+    },
+    "in_window": true
+  },
+  {
+    "at": "2026-10-29T09:47:35.67570618Z",
+    "cpu_ticks": {
+      "dispatch": 18857,
+      "listener": 2365,
+      "loadgen": 26561,
+      "nats": 1635,
+      "postgres": 55899,
+      "proxy": 21509
+    },
+    "rss_kib": {
+      "dispatch": 2616976,
+      "listener": 93412,
+      "loadgen": 1239720,
+      "nats": 159880,
+      "postgres": 2871060,
+      "proxy": 112488
+    },
+    "sys_busy_ticks": 341185,
+    "sys_total_ticks": 2829450,
+    "pg_conns": {
+      "active|": 1,
+      "idle in transaction|Client": 1,
+      "idle|Client": 49
+    },
+    "pg_total": 51,
+    "goroutines": 39307,
+    "pool_acquire_goroutines": 19439,
+    "heap_inuse": 1607827456,
+    "heap_alloc": 1466683928,
+    "heap_sys": 2204106752,
+    "nats": {
+      "connections": 56,
+      "cpu_pct": 5,
+      "in_msgs": 40230,
+      "js_api_errors": 1007,
+      "js_api_total": 11393,
+      "js_consumers": 1004,
+      "js_messages": 2228,
+      "js_streams": 4,
+      "mem": 163717120,
+      "out_msgs": 76241,
+      "pull_requests": 13000,
+      "session_pull_requests": 13000,
+      "slow_consumers": 0,
+      "subscriptions": 11104
+    },
+    "in_window": true
+  },
+  {
+    "at": "2026-10-29T09:47:40.675551738Z",
+    "cpu_ticks": {
+      "dispatch": 19133,
+      "listener": 2394,
+      "loadgen": 27032,
+      "nats": 1647,
+      "postgres": 56057,
+      "proxy": 21567
+    },
+    "rss_kib": {
+      "dispatch": 2616976,
+      "listener": 93412,
+      "loadgen": 1239720,
+      "nats": 160136,
+      "postgres": 2970420,
+      "proxy": 112488
+    },
+    "sys_busy_ticks": 342191,
+    "sys_total_ticks": 2830947,
+    "pg_conns": {
+      "active|": 1,
+      "idle in transaction|Client": 1,
+      "idle|Client": 51
+    },
+    "pg_total": 53,
+    "goroutines": 39363,
+    "pool_acquire_goroutines": 19469,
+    "heap_inuse": 0,
+    "heap_alloc": 0,
+    "heap_sys": 0,
+    "nats": {
+      "connections": 56,
+      "cpu_pct": 1,
+      "in_msgs": 40423,
+      "js_api_errors": 1007,
+      "js_api_total": 11485,
+      "js_consumers": 1004,
+      "js_messages": 2228,
+      "js_streams": 4,
+      "mem": 163979264,
+      "out_msgs": 76535,
+      "pull_requests": 13000,
+      "session_pull_requests": 13000,
+      "slow_consumers": 0,
+      "subscriptions": 11104
+    },
+    "in_window": true
+  },
+  {
+    "at": "2026-10-29T09:47:45.675588548Z",
+    "cpu_ticks": {
+      "dispatch": 19385,
+      "listener": 2427,
+      "loadgen": 27391,
+      "nats": 1657,
+      "postgres": 56410,
+      "proxy": 21649
+    },
+    "rss_kib": {
+      "dispatch": 2616976,
+      "listener": 93412,
+      "loadgen": 1239720,
+      "nats": 160136,
+      "postgres": 2827468,
+      "proxy": 112488
+    },
+    "sys_busy_ticks": 343286,
+    "sys_total_ticks": 2832453,
+    "pg_conns": {
+      "active|": 1,
+      "idle in transaction|Client": 1,
+      "idle|Client": 47
+    },
+    "pg_total": 49,
+    "goroutines": 39553,
+    "pool_acquire_goroutines": 19559,
+    "heap_inuse": 0,
+    "heap_alloc": 0,
+    "heap_sys": 0,
+    "nats": {
+      "connections": 56,
+      "cpu_pct": 1,
+      "in_msgs": 40647,
+      "js_api_errors": 1007,
+      "js_api_total": 11598,
+      "js_consumers": 1004,
+      "js_messages": 2228,
+      "js_streams": 4,
+      "mem": 163979264,
+      "out_msgs": 76872,
+      "pull_requests": 13000,
+      "session_pull_requests": 13000,
+      "slow_consumers": 0,
+      "subscriptions": 11104
+    },
+    "in_window": true
+  },
+  {
+    "at": "2026-10-29T09:47:50.675976236Z",
+    "cpu_ticks": {
+      "dispatch": 19621,
+      "listener": 2465,
+      "loadgen": 27811,
+      "nats": 1677,
+      "postgres": 56596,
+      "proxy": 21690
+    },
+    "rss_kib": {
+      "dispatch": 2616976,
+      "listener": 93412,
+      "loadgen": 1239720,
+      "nats": 160136,
+      "postgres": 2781228,
+      "proxy": 112488
+    },
+    "sys_busy_ticks": 344255,
+    "sys_total_ticks": 2833947,
+    "pg_conns": {
+      "active|": 1,
+      "idle in transaction|Client": 1,
+      "idle|Client": 48
+    },
+    "pg_total": 50,
+    "goroutines": 39189,
+    "pool_acquire_goroutines": 19370,
+    "heap_inuse": 1811529728,
+    "heap_alloc": 1681700440,
+    "heap_sys": 2201878528,
+    "nats": {
+      "connections": 56,
+      "cpu_pct": 7,
+      "in_msgs": 40911,
+      "js_api_errors": 1007,
+      "js_api_total": 11728,
+      "js_consumers": 1004,
+      "js_messages": 2228,
+      "js_streams": 4,
+      "mem": 163979264,
+      "out_msgs": 78271,
+      "pull_requests": 13000,
+      "session_pull_requests": 13000,
+      "slow_consumers": 0,
+      "subscriptions": 11104
+    },
+    "in_window": true
+  },
+  {
+    "at": "2026-10-29T09:47:55.675597641Z",
+    "cpu_ticks": {
+      "dispatch": 19875,
+      "listener": 2496,
+      "loadgen": 28218,
+      "nats": 1700,
+      "postgres": 56838,
+      "proxy": 21770
+    },
+    "rss_kib": {
+      "dispatch": 2617040,
+      "listener": 93412,
+      "loadgen": 1239720,
+      "nats": 160136,
+      "postgres": 3149888,
+      "proxy": 112488
+    },
+    "sys_busy_ticks": 345291,
+    "sys_total_ticks": 2835450,
+    "pg_conns": {
+      "active|": 1,
+      "idle|Client": 56
+    },
+    "pg_total": 57,
+    "goroutines": 39168,
+    "pool_acquire_goroutines": 19362,
+    "heap_inuse": 0,
+    "heap_alloc": 0,
+    "heap_sys": 0,
+    "nats": {
+      "connections": 56,
+      "cpu_pct": 3,
+      "in_msgs": 41087,
+      "js_api_errors": 1007,
+      "js_api_total": 11816,
+      "js_consumers": 1004,
+      "js_messages": 2228,
+      "js_streams": 4,
+      "mem": 163979264,
+      "out_msgs": 78536,
+      "pull_requests": 13000,
+      "session_pull_requests": 13000,
+      "slow_consumers": 0,
+      "subscriptions": 11104
+    },
+    "in_window": true
+  },
+  {
+    "at": "2026-10-29T09:48:00.676732927Z",
+    "cpu_ticks": {
+      "dispatch": 20109,
+      "listener": 2520,
+      "loadgen": 28642,
+      "nats": 1717,
+      "postgres": 56989,
+      "proxy": 21807
+    },
+    "rss_kib": {
+      "dispatch": 2617296,
+      "listener": 93412,
+      "loadgen": 1239720,
+      "nats": 160136,
+      "postgres": 2708700,
+      "proxy": 112488
+    },
+    "sys_busy_ticks": 346286,
+    "sys_total_ticks": 2836947,
+    "pg_conns": {
+      "active|": 1,
+      "idle|Client": 47
+    },
+    "pg_total": 48,
+    "goroutines": 39123,
+    "pool_acquire_goroutines": 19322,
+    "heap_inuse": 0,
+    "heap_alloc": 0,
+    "heap_sys": 0,
+    "nats": {
+      "connections": 56,
+      "cpu_pct": 0,
+      "in_msgs": 41299,
+      "js_api_errors": 1007,
+      "js_api_total": 11919,
+      "js_consumers": 1004,
+      "js_messages": 2228,
+      "js_streams": 4,
+      "mem": 163979264,
+      "out_msgs": 78859,
+      "pull_requests": 13000,
+      "session_pull_requests": 13000,
+      "slow_consumers": 0,
+      "subscriptions": 11105
+    },
+    "in_window": true
+  },
+  {
+    "at": "2026-10-29T09:48:05.675642785Z",
+    "cpu_ticks": {
+      "dispatch": 20352,
+      "listener": 2563,
+      "loadgen": 29051,
+      "nats": 1741,
+      "postgres": 57163,
+      "proxy": 21877
+    },
+    "rss_kib": {
+      "dispatch": 2617552,
+      "listener": 93412,
+      "loadgen": 1239720,
+      "nats": 160136,
+      "postgres": 2938116,
+      "proxy": 112488
+    },
+    "sys_busy_ticks": 347377,
+    "sys_total_ticks": 2838459,
+    "pg_conns": {
+      "active|": 1,
+      "idle|Client": 55
+    },
+    "pg_total": 56,
+    "goroutines": 39005,
+    "pool_acquire_goroutines": 19282,
+    "heap_inuse": 2019311616,
+    "heap_alloc": 1900413904,
+    "heap_sys": 2202796032,
+    "nats": {
+      "connections": 56,
+      "cpu_pct": 2,
+      "in_msgs": 42548,
+      "js_api_errors": 1007,
+      "js_api_total": 12041,
+      "js_consumers": 1004,
+      "js_messages": 2228,
+      "js_streams": 4,
+      "mem": 163979264,
+      "out_msgs": 81234,
+      "pull_requests": 14000,
+      "session_pull_requests": 14000,
+      "slow_consumers": 0,
+      "subscriptions": 11103
+    },
+    "in_window": true
+  },
+  {
+    "at": "2026-10-29T09:48:10.68469164Z",
+    "cpu_ticks": {
+      "dispatch": 20617,
+      "listener": 2581,
+      "loadgen": 29505,
+      "nats": 1770,
+      "postgres": 57364,
+      "proxy": 21947
+    },
+    "rss_kib": {
+      "dispatch": 2617872,
+      "listener": 93412,
+      "loadgen": 1239720,
+      "nats": 160136,
+      "postgres": 3010648,
+      "proxy": 112488
+    },
+    "sys_busy_ticks": 348419,
+    "sys_total_ticks": 2839950,
+    "pg_conns": {
+      "active|": 2,
+      "idle|Client": 52
+    },
+    "pg_total": 54,
+    "goroutines": 39123,
+    "pool_acquire_goroutines": 19346,
+    "heap_inuse": 0,
+    "heap_alloc": 0,
+    "heap_sys": 0,
+    "nats": {
+      "connections": 56,
+      "cpu_pct": 4,
+      "in_msgs": 42735,
+      "js_api_errors": 1007,
+      "js_api_total": 12132,
+      "js_consumers": 1004,
+      "js_messages": 2228,
+      "js_streams": 4,
+      "mem": 163979264,
+      "out_msgs": 81518,
+      "pull_requests": 14000,
+      "session_pull_requests": 14000,
+      "slow_consumers": 0,
+      "subscriptions": 11105
+    },
+    "in_window": true
+  },
+  {
+    "at": "2026-10-29T09:48:15.677075113Z",
+    "cpu_ticks": {
+      "dispatch": 20923,
+      "listener": 2599,
+      "loadgen": 29993,
+      "nats": 1790,
+      "postgres": 57539,
+      "proxy": 21991
+    },
+    "rss_kib": {
+      "dispatch": 2618064,
+      "listener": 93412,
+      "loadgen": 1249960,
+      "nats": 160136,
+      "postgres": 2773620,
+      "proxy": 112488
+    },
+    "sys_busy_ticks": 349472,
+    "sys_total_ticks": 2841447,
+    "pg_conns": {
+      "active|": 1,
+      "idle|Client": 50
+    },
+    "pg_total": 51,
+    "goroutines": 38991,
+    "pool_acquire_goroutines": 19281,
+    "heap_inuse": 0,
+    "heap_alloc": 0,
+    "heap_sys": 0,
+    "nats": {
+      "connections": 56,
+      "cpu_pct": 4,
+      "in_msgs": 42956,
+      "js_api_errors": 1007,
+      "js_api_total": 12243,
+      "js_consumers": 1004,
+      "js_messages": 2228,
+      "js_streams": 4,
+      "mem": 163979264,
+      "out_msgs": 81851,
+      "pull_requests": 14000,
+      "session_pull_requests": 14000,
+      "slow_consumers": 0,
+      "subscriptions": 11104
+    },
+    "in_window": true
+  },
+  {
+    "at": "2026-10-29T09:48:20.676798289Z",
+    "cpu_ticks": {
+      "dispatch": 21161,
+      "listener": 2616,
+      "loadgen": 30375,
+      "nats": 1809,
+      "postgres": 57836,
+      "proxy": 22054
+    },
+    "rss_kib": {
+      "dispatch": 2618064,
+      "listener": 93412,
+      "loadgen": 1249960,
+      "nats": 160136,
+      "postgres": 2711880,
+      "proxy": 112488
+    },
+    "sys_busy_ticks": 350491,
+    "sys_total_ticks": 2842947,
+    "pg_conns": {
+      "active|": 1,
+      "idle|": 1,
+      "idle|Client": 45
+    },
+    "pg_total": 47,
+    "goroutines": 39357,
+    "pool_acquire_goroutines": 19466,
+    "heap_inuse": 1307500544,
+    "heap_alloc": 1082789088,
+    "heap_sys": 2165637120,
+    "nats": {
+      "connections": 56,
+      "cpu_pct": 2,
+      "in_msgs": 43206,
+      "js_api_errors": 1007,
+      "js_api_total": 12367,
+      "js_consumers": 1004,
+      "js_messages": 2228,
+      "js_streams": 4,
+      "mem": 163979264,
+      "out_msgs": 83229,
+      "pull_requests": 14000,
+      "session_pull_requests": 14000,
+      "slow_consumers": 0,
+      "subscriptions": 11104
+    },
+    "in_window": true
+  },
+  {
+    "at": "2026-10-29T09:48:25.675635789Z",
+    "cpu_ticks": {
+      "dispatch": 21426,
+      "listener": 2647,
+      "loadgen": 30828,
+      "nats": 1826,
+      "postgres": 58078,
+      "proxy": 22141
+    },
+    "rss_kib": {
+      "dispatch": 2618064,
+      "listener": 93412,
+      "loadgen": 1249960,
+      "nats": 160136,
+      "postgres": 3035892,
+      "proxy": 112488
+    },
+    "sys_busy_ticks": 351586,
+    "sys_total_ticks": 2844444,
+    "pg_conns": {
+      "active|": 1,
+      "idle|Client": 55
+    },
+    "pg_total": 56,
+    "goroutines": 39629,
+    "pool_acquire_goroutines": 19598,
+    "heap_inuse": 0,
+    "heap_alloc": 0,
+    "heap_sys": 0,
+    "nats": {
+      "connections": 56,
+      "cpu_pct": 6,
+      "in_msgs": 43399,
+      "js_api_errors": 1007,
+      "js_api_total": 12462,
+      "js_consumers": 1004,
+      "js_messages": 2228,
+      "js_streams": 4,
+      "mem": 163979264,
+      "out_msgs": 83519,
+      "pull_requests": 14000,
+      "session_pull_requests": 14000,
+      "slow_consumers": 0,
+      "subscriptions": 11104
+    },
+    "in_window": true
+  },
+  {
+    "at": "2026-10-29T09:48:30.676756781Z",
+    "cpu_ticks": {
+      "dispatch": 21652,
+      "listener": 2670,
+      "loadgen": 31195,
+      "nats": 1837,
+      "postgres": 58390,
+      "proxy": 22215
+    },
+    "rss_kib": {
+      "dispatch": 2618064,
+      "listener": 93412,
+      "loadgen": 1249960,
+      "nats": 160136,
+      "postgres": 2905160,
+      "proxy": 112488
+    },
+    "sys_busy_ticks": 352605,
+    "sys_total_ticks": 2845959,
+    "pg_conns": {
+      "active|": 1,
+      "idle in transaction|Client": 3,
+      "idle|Client": 45
+    },
+    "pg_total": 49,
+    "goroutines": 39535,
+    "pool_acquire_goroutines": 19550,
+    "heap_inuse": 0,
+    "heap_alloc": 0,
+    "heap_sys": 0,
+    "nats": {
+      "connections": 56,
+      "cpu_pct": 6,
+      "in_msgs": 43630,
+      "js_api_errors": 1007,
+      "js_api_total": 12580,
+      "js_consumers": 1004,
+      "js_messages": 2228,
+      "js_streams": 4,
+      "mem": 163979264,
+      "out_msgs": 83864,
+      "pull_requests": 14000,
+      "session_pull_requests": 14000,
+      "slow_consumers": 0,
+      "subscriptions": 11104
+    },
+    "in_window": true
+  },
+  {
+    "at": "2026-10-29T09:48:35.675971918Z",
+    "cpu_ticks": {
+      "dispatch": 21899,
+      "listener": 2702,
+      "loadgen": 31573,
+      "nats": 1861,
+      "postgres": 58718,
+      "proxy": 22283
+    },
+    "rss_kib": {
+      "dispatch": 2618320,
+      "listener": 93412,
+      "loadgen": 1249960,
+      "nats": 160136,
+      "postgres": 2749552,
+      "proxy": 112488
+    },
+    "sys_busy_ticks": 353693,
+    "sys_total_ticks": 2847459,
+    "pg_conns": {
+      "active|": 2,
+      "idle in transaction|Client": 2,
+      "idle|Client": 45
+    },
+    "pg_total": 49,
+    "goroutines": 39348,
+    "pool_acquire_goroutines": 19463,
+    "heap_inuse": 1480736768,
+    "heap_alloc": 1328686744,
+    "heap_sys": 2202009600,
+    "nats": {
+      "connections": 56,
+      "cpu_pct": 6,
+      "in_msgs": 44872,
+      "js_api_errors": 1007,
+      "js_api_total": 12701,
+      "js_consumers": 1004,
+      "js_messages": 2228,
+      "js_streams": 4,
+      "mem": 163979264,
+      "out_msgs": 86229,
+      "pull_requests": 15000,
+      "session_pull_requests": 15000,
+      "slow_consumers": 0,
+      "subscriptions": 11103
+    },
+    "in_window": true
+  },
+  {
+    "at": "2026-10-29T09:48:40.678247093Z",
+    "cpu_ticks": {
+      "dispatch": 22155,
+      "listener": 2732,
+      "loadgen": 31979,
+      "nats": 1874,
+      "postgres": 58944,
+      "proxy": 22351
+    },
+    "rss_kib": {
+      "dispatch": 2618320,
+      "listener": 93412,
+      "loadgen": 1249960,
+      "nats": 160136,
+      "postgres": 2879512,
+      "proxy": 112488
+    },
+    "sys_busy_ticks": 354683,
+    "sys_total_ticks": 2848950,
+    "pg_conns": {
+      "active|": 1,
+      "idle in transaction|Client": 2,
+      "idle|Client": 47
+    },
+    "pg_total": 50,
+    "goroutines": 39472,
+    "pool_acquire_goroutines": 19524,
+    "heap_inuse": 0,
+    "heap_alloc": 0,
+    "heap_sys": 0,
+    "nats": {
+      "connections": 56,
+      "cpu_pct": 5,
+      "in_msgs": 45068,
+      "js_api_errors": 1007,
+      "js_api_total": 12800,
+      "js_consumers": 1004,
+      "js_messages": 2228,
+      "js_streams": 4,
+      "mem": 163979264,
+      "out_msgs": 86524,
+      "pull_requests": 15000,
+      "session_pull_requests": 15000,
+      "slow_consumers": 0,
+      "subscriptions": 11105
+    },
+    "in_window": true
+  },
+  {
+    "at": "2026-10-29T09:48:45.677747191Z",
+    "cpu_ticks": {
+      "dispatch": 22406,
+      "listener": 2765,
+      "loadgen": 32439,
+      "nats": 1887,
+      "postgres": 59168,
+      "proxy": 22413
+    },
+    "rss_kib": {
+      "dispatch": 2618320,
+      "listener": 93412,
+      "loadgen": 1252008,
+      "nats": 160136,
+      "postgres": 2813772,
+      "proxy": 112488
+    },
+    "sys_busy_ticks": 355731,
+    "sys_total_ticks": 2850450,
+    "pg_conns": {
+      "active|": 1,
+      "idle in transaction|Client": 1,
+      "idle|Client": 49
+    },
+    "pg_total": 51,
+    "goroutines": 39494,
+    "pool_acquire_goroutines": 19536,
+    "heap_inuse": 0,
+    "heap_alloc": 0,
+    "heap_sys": 0,
+    "nats": {
+      "connections": 56,
+      "cpu_pct": 3,
+      "in_msgs": 45279,
+      "js_api_errors": 1007,
+      "js_api_total": 12900,
+      "js_consumers": 1004,
+      "js_messages": 2228,
+      "js_streams": 4,
+      "mem": 163979264,
+      "out_msgs": 86845,
+      "pull_requests": 15000,
+      "session_pull_requests": 15000,
+      "slow_consumers": 0,
+      "subscriptions": 11105
+    },
+    "in_window": true
+  },
+  {
+    "at": "2026-10-29T09:48:50.677073955Z",
+    "cpu_ticks": {
+      "dispatch": 22649,
+      "listener": 2786,
+      "loadgen": 32876,
+      "nats": 1903,
+      "postgres": 59354,
+      "proxy": 22470
+    },
+    "rss_kib": {
+      "dispatch": 2618320,
+      "listener": 93412,
+      "loadgen": 1252008,
+      "nats": 160136,
+      "postgres": 2775376,
+      "proxy": 112488
+    },
+    "sys_busy_ticks": 356696,
+    "sys_total_ticks": 2851947,
+    "pg_conns": {
+      "active|": 2,
+      "active|Client": 1,
+      "idle in transaction|Client": 1,
+      "idle|Client": 46
+    },
+    "pg_total": 50,
+    "goroutines": 39460,
+    "pool_acquire_goroutines": 19517,
+    "heap_inuse": 1680596992,
+    "heap_alloc": 1546062352,
+    "heap_sys": 2202370048,
+    "nats": {
+      "connections": 56,
+      "cpu_pct": 5,
+      "in_msgs": 45541,
+      "js_api_errors": 1007,
+      "js_api_total": 13029,
+      "js_consumers": 1004,
+      "js_messages": 2228,
+      "js_streams": 4,
+      "mem": 163979264,
+      "out_msgs": 88241,
+      "pull_requests": 15000,
+      "session_pull_requests": 15000,
+      "slow_consumers": 0,
+      "subscriptions": 11105
+    },
+    "in_window": true
+  },
+  {
+    "at": "2026-10-29T09:48:55.675542865Z",
+    "cpu_ticks": {
+      "dispatch": 22913,
+      "listener": 2816,
+      "loadgen": 33285,
+      "nats": 1917,
+      "postgres": 59564,
+      "proxy": 22542
+    },
+    "rss_kib": {
+      "dispatch": 2618320,
+      "listener": 93412,
+      "loadgen": 1252008,
+      "nats": 160136,
+      "postgres": 2756728,
+      "proxy": 112488
+    },
+    "sys_busy_ticks": 357706,
+    "sys_total_ticks": 2853447,
+    "pg_conns": {
+      "active|": 1,
+      "idle|Client": 48
+    },
+    "pg_total": 49,
+    "goroutines": 39525,
+    "pool_acquire_goroutines": 19547,
+    "heap_inuse": 0,
+    "heap_alloc": 0,
+    "heap_sys": 0,
+    "nats": {
+      "connections": 56,
+      "cpu_pct": 2,
+      "in_msgs": 45726,
+      "js_api_errors": 1007,
+      "js_api_total": 13123,
+      "js_consumers": 1004,
+      "js_messages": 2228,
+      "js_streams": 4,
+      "mem": 163979264,
+      "out_msgs": 88519,
+      "pull_requests": 15000,
+      "session_pull_requests": 15000,
+      "slow_consumers": 0,
+      "subscriptions": 11104
+    },
+    "in_window": true
+  },
+  {
+    "at": "2026-10-29T09:49:00.677080402Z",
+    "cpu_ticks": {
+      "dispatch": 23132,
+      "listener": 2848,
+      "loadgen": 33714,
+      "nats": 1935,
+      "postgres": 59772,
+      "proxy": 22614
+    },
+    "rss_kib": {
+      "dispatch": 2618320,
+      "listener": 93412,
+      "loadgen": 1252008,
+      "nats": 160136,
+      "postgres": 2924884,
+      "proxy": 112488
+    },
+    "sys_busy_ticks": 358682,
+    "sys_total_ticks": 2854950,
+    "pg_conns": {
+      "active|": 1,
+      "idle|Client": 52
+    },
+    "pg_total": 53,
+    "goroutines": 39470,
+    "pool_acquire_goroutines": 19520,
+    "heap_inuse": 0,
+    "heap_alloc": 0,
+    "heap_sys": 0,
+    "nats": {
+      "connections": 56,
+      "cpu_pct": 1,
+      "in_msgs": 45951,
+      "js_api_errors": 1007,
+      "js_api_total": 13236,
+      "js_consumers": 1004,
+      "js_messages": 2228,
+      "js_streams": 4,
+      "mem": 163979264,
+      "out_msgs": 88855,
+      "pull_requests": 15000,
+      "session_pull_requests": 15000,
+      "slow_consumers": 0,
+      "subscriptions": 11104
+    },
+    "in_window": true
+  },
+  {
+    "at": "2026-10-29T09:49:05.678537788Z",
+    "cpu_ticks": {
+      "dispatch": 23397,
+      "listener": 2875,
+      "loadgen": 34080,
+      "nats": 1956,
+      "postgres": 60064,
+      "proxy": 22688
+    },
+    "rss_kib": {
+      "dispatch": 2618320,
+      "listener": 93412,
+      "loadgen": 1252008,
+      "nats": 160136,
+      "postgres": 2563752,
+      "proxy": 112488
+    },
+    "sys_busy_ticks": 359731,
+    "sys_total_ticks": 2856456,
+    "pg_conns": {
+      "active|": 1,
+      "idle in transaction|Client": 1,
+      "idle|Client": 40
+    },
+    "pg_total": 42,
+    "goroutines": 39414,
+    "pool_acquire_goroutines": 19494,
+    "heap_inuse": 1885184000,
+    "heap_alloc": 1762578640,
+    "heap_sys": 2201976832,
+    "nats": {
+      "connections": 56,
+      "cpu_pct": 4,
+      "in_msgs": 47198,
+      "js_api_errors": 1007,
+      "js_api_total": 13361,
+      "js_consumers": 1004,
+      "js_messages": 2228,
+      "js_streams": 4,
+      "mem": 163979264,
+      "out_msgs": 91228,
+      "pull_requests": 16000,
+      "session_pull_requests": 16000,
+      "slow_consumers": 0,
+      "subscriptions": 11104
+    },
+    "in_window": true
+  },
+  {
+    "at": "2026-10-29T09:49:10.67581584Z",
+    "cpu_ticks": {
+      "dispatch": 23647,
+      "listener": 2902,
+      "loadgen": 34507,
+      "nats": 1969,
+      "postgres": 60281,
+      "proxy": 22753
+    },
+    "rss_kib": {
+      "dispatch": 2618320,
+      "listener": 93412,
+      "loadgen": 1252008,
+      "nats": 160136,
+      "postgres": 2732052,
+      "proxy": 112488
+    },
+    "sys_busy_ticks": 360730,
+    "sys_total_ticks": 2857944,
+    "pg_conns": {
+      "active|": 1,
+      "idle|Client": 45
+    },
+    "pg_total": 46,
+    "goroutines": 39095,
+    "pool_acquire_goroutines": 19334,
+    "heap_inuse": 0,
+    "heap_alloc": 0,
+    "heap_sys": 0,
+    "nats": {
+      "connections": 56,
+      "cpu_pct": 3,
+      "in_msgs": 47393,
+      "js_api_errors": 1007,
+      "js_api_total": 13457,
+      "js_consumers": 1004,
+      "js_messages": 2228,
+      "js_streams": 4,
+      "mem": 163979264,
+      "out_msgs": 91521,
+      "pull_requests": 16000,
+      "session_pull_requests": 16000,
+      "slow_consumers": 0,
+      "subscriptions": 11104
+    },
+    "in_window": true
+  },
+  {
+    "at": "2026-10-29T09:49:15.675968545Z",
+    "cpu_ticks": {
+      "dispatch": 23896,
+      "listener": 2927,
+      "loadgen": 34993,
+      "nats": 1987,
+      "postgres": 60498,
+      "proxy": 22821
+    },
+    "rss_kib": {
+      "dispatch": 2618512,
+      "listener": 93412,
+      "loadgen": 1252008,
+      "nats": 160136,
+      "postgres": 2764568,
+      "proxy": 112488
+    },
+    "sys_busy_ticks": 361799,
+    "sys_total_ticks": 2859450,
+    "pg_conns": {
+      "active|": 1,
+      "idle in transaction|Client": 1,
+      "idle|Client": 47
+    },
+    "pg_total": 49,
+    "goroutines": 39098,
+    "pool_acquire_goroutines": 19335,
+    "heap_inuse": 0,
+    "heap_alloc": 0,
+    "heap_sys": 0,
+    "nats": {
+      "connections": 56,
+      "cpu_pct": 1,
+      "in_msgs": 47603,
+      "js_api_errors": 1007,
+      "js_api_total": 13559,
+      "js_consumers": 1004,
+      "js_messages": 2228,
+      "js_streams": 4,
+      "mem": 163979264,
+      "out_msgs": 91839,
+      "pull_requests": 16000,
+      "session_pull_requests": 16000,
+      "slow_consumers": 0,
+      "subscriptions": 11104
+    },
+    "in_window": true
+  },
+  {
+    "at": "2026-10-29T09:49:20.685965078Z",
+    "cpu_ticks": {
+      "dispatch": 24133,
+      "listener": 2955,
+      "loadgen": 35417,
+      "nats": 2002,
+      "postgres": 60750,
+      "proxy": 22891
+    },
+    "rss_kib": {
+      "dispatch": 2618768,
+      "listener": 93412,
+      "loadgen": 1252008,
+      "nats": 160136,
+      "postgres": 3112936,
+      "proxy": 112488
+    },
+    "sys_busy_ticks": 362830,
+    "sys_total_ticks": 2860953,
+    "pg_conns": {
+      "active|": 2,
+      "idle|Client": 54
+    },
+    "pg_total": 56,
+    "goroutines": 38870,
+    "pool_acquire_goroutines": 19220,
+    "heap_inuse": 2094563328,
+    "heap_alloc": 1980244760,
+    "heap_sys": 2203090944,
+    "nats": {
+      "connections": 56,
+      "cpu_pct": 6,
+      "in_msgs": 47858,
+      "js_api_errors": 1007,
+      "js_api_total": 13687,
+      "js_consumers": 1004,
+      "js_messages": 2228,
+      "js_streams": 4,
+      "mem": 163979264,
+      "out_msgs": 93223,
+      "pull_requests": 16000,
+      "session_pull_requests": 16000,
+      "slow_consumers": 0,
+      "subscriptions": 11104
+    },
+    "in_window": true
+  },
+  {
+    "at": "2026-10-29T09:49:25.677550927Z",
+    "cpu_ticks": {
+      "dispatch": 24458,
+      "listener": 2992,
+      "loadgen": 35897,
+      "nats": 2030,
+      "postgres": 60873,
+      "proxy": 22938
+    },
+    "rss_kib": {
+      "dispatch": 2619024,
+      "listener": 93412,
+      "loadgen": 1252008,
+      "nats": 160136,
+      "postgres": 2534056,
+      "proxy": 112488
+    },
+    "sys_busy_ticks": 363870,
+    "sys_total_ticks": 2862447,
+    "pg_conns": {
+      "active|": 1,
+      "idle|": 2,
+      "idle|Client": 41
+    },
+    "pg_total": 44,
+    "goroutines": 38936,
+    "pool_acquire_goroutines": 19253,
+    "heap_inuse": 0,
+    "heap_alloc": 0,
+    "heap_sys": 0,
+    "nats": {
+      "connections": 56,
+      "cpu_pct": 6,
+      "in_msgs": 48047,
+      "js_api_errors": 1007,
+      "js_api_total": 13780,
+      "js_consumers": 1004,
+      "js_messages": 2228,
+      "js_streams": 4,
+      "mem": 163979264,
+      "out_msgs": 93510,
+      "pull_requests": 16000,
+      "session_pull_requests": 16000,
+      "slow_consumers": 0,
+      "subscriptions": 11103
+    },
+    "in_window": true
+  },
+  {
+    "at": "2026-10-29T09:49:30.679476294Z",
+    "cpu_ticks": {
+      "dispatch": 24699,
+      "listener": 3020,
+      "loadgen": 36364,
+      "nats": 2049,
+      "postgres": 61094,
+      "proxy": 23003
+    },
+    "rss_kib": {
+      "dispatch": 2619024,
+      "listener": 93412,
+      "loadgen": 1252008,
+      "nats": 162184,
+      "postgres": 2756776,
+      "proxy": 112488
+    },
+    "sys_busy_ticks": 364913,
+    "sys_total_ticks": 2863947,
+    "pg_conns": {
+      "active|": 1,
+      "idle|Client": 49
+    },
+    "pg_total": 50,
+    "goroutines": 39121,
+    "pool_acquire_goroutines": 19349,
+    "heap_inuse": 0,
+    "heap_alloc": 0,
+    "heap_sys": 0,
+    "nats": {
+      "connections": 56,
+      "cpu_pct": 4,
+      "in_msgs": 48270,
+      "js_api_errors": 1007,
+      "js_api_total": 13894,
+      "js_consumers": 1004,
+      "js_messages": 2228,
+      "js_streams": 4,
+      "mem": 166076416,
+      "out_msgs": 93844,
+      "pull_requests": 16000,
+      "session_pull_requests": 16000,
+      "slow_consumers": 0,
+      "subscriptions": 11104
+    },
+    "in_window": true
+  },
+  {
+    "at": "2026-10-29T09:49:35.676147404Z",
+    "cpu_ticks": {
+      "dispatch": 24947,
+      "listener": 3059,
+      "loadgen": 36836,
+      "nats": 2079,
+      "postgres": 61294,
+      "proxy": 23059
+    },
+    "rss_kib": {
+      "dispatch": 2619024,
+      "listener": 93412,
+      "loadgen": 1252008,
+      "nats": 162184,
+      "postgres": 2870304,
+      "proxy": 112488
+    },
+    "sys_busy_ticks": 365965,
+    "sys_total_ticks": 2865450,
+    "pg_conns": {
+      "active|": 2,
+      "idle|Client": 50
+    },
+    "pg_total": 52,
+    "goroutines": 39521,
+    "pool_acquire_goroutines": 19551,
+    "heap_inuse": 1355816960,
+    "heap_alloc": 1153356576,
+    "heap_sys": 2177007616,
+    "nats": {
+      "connections": 56,
+      "cpu_pct": 3,
+      "in_msgs": 49520,
+      "js_api_errors": 1007,
+      "js_api_total": 14019,
+      "js_consumers": 1004,
+      "js_messages": 2228,
+      "js_streams": 4,
+      "mem": 166076416,
+      "out_msgs": 96219,
+      "pull_requests": 17000,
+      "session_pull_requests": 17000,
+      "slow_consumers": 0,
+      "subscriptions": 11104
+    },
+    "in_window": true
+  },
+  {
+    "at": "2026-10-29T09:49:40.675804297Z",
+    "cpu_ticks": {
+      "dispatch": 25246,
+      "listener": 3086,
+      "loadgen": 37264,
+      "nats": 2092,
+      "postgres": 61527,
+      "proxy": 23121
+    },
+    "rss_kib": {
+      "dispatch": 2619024,
+      "listener": 93412,
+      "loadgen": 1252008,
+      "nats": 162184,
+      "postgres": 3057660,
+      "proxy": 112488
+    },
+    "sys_busy_ticks": 367033,
+    "sys_total_ticks": 2866947,
+    "pg_conns": {
+      "active|": 1,
+      "active|LWLock": 1,
+      "idle in transaction|Client": 1,
+      "idle|Client": 51
+    },
+    "pg_total": 54,
+    "goroutines": 39338,
+    "pool_acquire_goroutines": 19463,
+    "heap_inuse": 0,
+    "heap_alloc": 0,
+    "heap_sys": 0,
+    "nats": {
+      "connections": 56,
+      "cpu_pct": 1,
+      "in_msgs": 49715,
+      "js_api_errors": 1007,
+      "js_api_total": 14116,
+      "js_consumers": 1004,
+      "js_messages": 2228,
+      "js_streams": 4,
+      "mem": 166076416,
+      "out_msgs": 96514,
+      "pull_requests": 17000,
+      "session_pull_requests": 17000,
+      "slow_consumers": 0,
+      "subscriptions": 11104
+    },
+    "in_window": true
+  },
+  {
+    "at": "2026-10-29T09:49:45.692531658Z",
+    "cpu_ticks": {
+      "dispatch": 25485,
+      "listener": 3108,
+      "loadgen": 37670,
+      "nats": 2106,
+      "postgres": 61836,
+      "proxy": 23193
+    },
+    "rss_kib": {
+      "dispatch": 2619024,
+      "listener": 93412,
+      "loadgen": 1252008,
+      "nats": 162184,
+      "postgres": 2740732,
+      "proxy": 112488
+    },
+    "sys_busy_ticks": 368093,
+    "sys_total_ticks": 2868450,
+    "pg_conns": {
+      "active|": 1,
+      "idle in transaction|Client": 2,
+      "idle|Client": 43
+    },
+    "pg_total": 46,
+    "goroutines": 39293,
+    "pool_acquire_goroutines": 19426,
+    "heap_inuse": 0,
+    "heap_alloc": 0,
+    "heap_sys": 0,
+    "nats": {
+      "connections": 56,
+      "cpu_pct": 2,
+      "in_msgs": 49944,
+      "js_api_errors": 1007,
+      "js_api_total": 14228,
+      "js_consumers": 1004,
+      "js_messages": 2228,
+      "js_streams": 4,
+      "mem": 166076416,
+      "out_msgs": 96859,
+      "pull_requests": 17000,
+      "session_pull_requests": 17000,
+      "slow_consumers": 0,
+      "subscriptions": 11103
+    },
+    "in_window": true
+  },
+  {
+    "at": "2026-10-29T09:49:50.67554777Z",
+    "cpu_ticks": {
+      "dispatch": 25706,
+      "listener": 3131,
+      "loadgen": 38142,
+      "nats": 2125,
+      "postgres": 62026,
+      "proxy": 23233
+    },
+    "rss_kib": {
+      "dispatch": 2619024,
+      "listener": 93412,
+      "loadgen": 1252008,
+      "nats": 162184,
+      "postgres": 2964436,
+      "proxy": 112488
+    },
+    "sys_busy_ticks": 369060,
+    "sys_total_ticks": 2869947,
+    "pg_conns": {
+      "active|": 1,
+      "idle in transaction|Client": 1,
+      "idle|Client": 51
+    },
+    "pg_total": 53,
+    "goroutines": 39055,
+    "pool_acquire_goroutines": 19321,
+    "heap_inuse": 1527316480,
+    "heap_alloc": 1370305184,
+    "heap_sys": 2205581312,
+    "nats": {
+      "connections": 56,
+      "cpu_pct": 5,
+      "in_msgs": 50212,
+      "js_api_errors": 1007,
+      "js_api_total": 14353,
+      "js_consumers": 1004,
+      "js_messages": 2228,
+      "js_streams": 4,
+      "mem": 166076416,
+      "out_msgs": 98269,
+      "pull_requests": 17000,
+      "session_pull_requests": 17000,
+      "slow_consumers": 0,
+      "subscriptions": 11104
+    },
+    "in_window": true
+  },
+  {
+    "at": "2026-10-29T09:49:55.678296005Z",
+    "cpu_ticks": {
+      "dispatch": 25984,
+      "listener": 3160,
+      "loadgen": 38552,
+      "nats": 2146,
+      "postgres": 62192,
+      "proxy": 23287
+    },
+    "rss_kib": {
+      "dispatch": 2619024,
+      "listener": 93412,
+      "loadgen": 1252008,
+      "nats": 162184,
+      "postgres": 3105108,
+      "proxy": 112488
+    },
+    "sys_busy_ticks": 370024,
+    "sys_total_ticks": 2871453,
+    "pg_conns": {
+      "active|": 1,
+      "idle in transaction|Client": 1,
+      "idle|Client": 54
+    },
+    "pg_total": 56,
+    "goroutines": 39091,
+    "pool_acquire_goroutines": 19333,
+    "heap_inuse": 0,
+    "heap_alloc": 0,
+    "heap_sys": 0,
+    "nats": {
+      "connections": 56,
+      "cpu_pct": 5,
+      "in_msgs": 50348,
+      "js_api_errors": 1007,
+      "js_api_total": 14422,
+      "js_consumers": 1004,
+      "js_messages": 2228,
+      "js_streams": 4,
+      "mem": 166076416,
+      "out_msgs": 98475,
+      "pull_requests": 17000,
+      "session_pull_requests": 17000,
+      "slow_consumers": 0,
+      "subscriptions": 11104
+    },
+    "in_window": true
+  },
+  {
+    "at": "2026-10-29T09:50:00.676422292Z",
+    "cpu_ticks": {
+      "dispatch": 26215,
+      "listener": 3185,
+      "loadgen": 38955,
+      "nats": 2163,
+      "postgres": 62453,
+      "proxy": 23348
+    },
+    "rss_kib": {
+      "dispatch": 2619024,
+      "listener": 93412,
+      "loadgen": 1252008,
+      "nats": 162184,
+      "postgres": 2812112,
+      "proxy": 112488
+    },
+    "sys_busy_ticks": 371025,
+    "sys_total_ticks": 2872953,
+    "pg_conns": {
+      "active|": 1,
+      "idle|Client": 47
+    },
+    "pg_total": 48,
+    "goroutines": 39013,
+    "pool_acquire_goroutines": 19302,
+    "heap_inuse": 0,
+    "heap_alloc": 0,
+    "heap_sys": 0,
+    "nats": {
+      "connections": 56,
+      "cpu_pct": 2,
+      "in_msgs": 50577,
+      "js_api_errors": 1007,
+      "js_api_total": 14538,
+      "js_consumers": 1004,
+      "js_messages": 2228,
+      "js_streams": 4,
+      "mem": 166076416,
+      "out_msgs": 98817,
+      "pull_requests": 17000,
+      "session_pull_requests": 17000,
+      "slow_consumers": 0,
+      "subscriptions": 11104
+    },
+    "in_window": true
+  },
+  {
+    "at": "2026-10-29T09:50:05.675549047Z",
+    "cpu_ticks": {
+      "dispatch": 26460,
+      "listener": 3220,
+      "loadgen": 39315,
+      "nats": 2185,
+      "postgres": 62759,
+      "proxy": 23433
+    },
+    "rss_kib": {
+      "dispatch": 2619024,
+      "listener": 93412,
+      "loadgen": 1252008,
+      "nats": 162184,
+      "postgres": 3253532,
+      "proxy": 112488
+    },
+    "sys_busy_ticks": 372077,
+    "sys_total_ticks": 2874450,
+    "pg_conns": {
+      "active|": 1,
+      "idle in transaction|Client": 4,
+      "idle|Client": 54
+    },
+    "pg_total": 59,
+    "goroutines": 38939,
+    "pool_acquire_goroutines": 19264,
+    "heap_inuse": 1725407232,
+    "heap_alloc": 1584488968,
+    "heap_sys": 2206203904,
+    "nats": {
+      "connections": 56,
+      "cpu_pct": 9,
+      "in_msgs": 51826,
+      "js_api_errors": 1007,
+      "js_api_total": 14663,
+      "js_consumers": 1004,
+      "js_messages": 2228,
+      "js_streams": 4,
+      "mem": 166076416,
+      "out_msgs": 101192,
+      "pull_requests": 18000,
+      "session_pull_requests": 18000,
+      "slow_consumers": 0,
+      "subscriptions": 11103
+    },
+    "in_window": true
+  },
+  {
+    "at": "2026-10-29T09:50:10.675933515Z",
+    "cpu_ticks": {
+      "dispatch": 26717,
+      "listener": 3249,
+      "loadgen": 39750,
+      "nats": 2207,
+      "postgres": 62982,
+      "proxy": 23492
+    },
+    "rss_kib": {
+      "dispatch": 2619024,
+      "listener": 93412,
+      "loadgen": 1252008,
+      "nats": 162184,
+      "postgres": 3082640,
+      "proxy": 112488
+    },
+    "sys_busy_ticks": 373101,
+    "sys_total_ticks": 2875947,
+    "pg_conns": {
+      "active|": 1,
+      "idle|": 1,
+      "idle|Client": 55
+    },
+    "pg_total": 57,
+    "goroutines": 39177,
+    "pool_acquire_goroutines": 19384,
+    "heap_inuse": 0,
+    "heap_alloc": 0,
+    "heap_sys": 0,
+    "nats": {
+      "connections": 56,
+      "cpu_pct": 3,
+      "in_msgs": 52021,
+      "js_api_errors": 1007,
+      "js_api_total": 14760,
+      "js_consumers": 1004,
+      "js_messages": 2228,
+      "js_streams": 4,
+      "mem": 166076416,
+      "out_msgs": 101486,
+      "pull_requests": 18000,
+      "session_pull_requests": 18000,
+      "slow_consumers": 0,
+      "subscriptions": 11104
+    },
+    "in_window": true
+  },
+  {
+    "at": "2026-10-29T09:50:15.677802012Z",
+    "cpu_ticks": {
+      "dispatch": 26951,
+      "listener": 3285,
+      "loadgen": 40155,
+      "nats": 2218,
+      "postgres": 63217,
+      "proxy": 23545
+    },
+    "rss_kib": {
+      "dispatch": 2619024,
+      "listener": 93412,
+      "loadgen": 1252008,
+      "nats": 162184,
+      "postgres": 2711052,
+      "proxy": 112488
+    },
+    "sys_busy_ticks": 374079,
+    "sys_total_ticks": 2877447,
+    "pg_conns": {
+      "active|": 3,
+      "idle|Client": 40
+    },
+    "pg_total": 43,
+    "goroutines": 39237,
+    "pool_acquire_goroutines": 19413,
+    "heap_inuse": 0,
+    "heap_alloc": 0,
+    "heap_sys": 0,
+    "nats": {
+      "connections": 56,
+      "cpu_pct": 6,
+      "in_msgs": 52244,
+      "js_api_errors": 1007,
+      "js_api_total": 14870,
+      "js_consumers": 1004,
+      "js_messages": 2228,
+      "js_streams": 4,
+      "mem": 166076416,
+      "out_msgs": 101823,
+      "pull_requests": 18000,
+      "session_pull_requests": 18000,
+      "slow_consumers": 0,
+      "subscriptions": 11103
+    },
+    "in_window": true
+  },
+  {
+    "at": "2026-10-29T09:50:20.678633409Z",
+    "cpu_ticks": {
+      "dispatch": 27165,
+      "listener": 3310,
+      "loadgen": 40645,
+      "nats": 2243,
+      "postgres": 63442,
+      "proxy": 23596
+    },
+    "rss_kib": {
+      "dispatch": 2619024,
+      "listener": 93412,
+      "loadgen": 1252008,
+      "nats": 162184,
+      "postgres": 2531284,
+      "proxy": 112488
+    },
+    "sys_busy_ticks": 375113,
+    "sys_total_ticks": 2878953,
+    "pg_conns": {
+      "active|": 1,
+      "idle|Client": 43
+    },
+    "pg_total": 44,
+    "goroutines": 39361,
+    "pool_acquire_goroutines": 19477,
+    "heap_inuse": 1929691136,
+    "heap_alloc": 1800147504,
+    "heap_sys": 2203615232,
+    "nats": {
+      "connections": 56,
+      "cpu_pct": 4,
+      "in_msgs": 52489,
+      "js_api_errors": 1007,
+      "js_api_total": 14991,
+      "js_consumers": 1004,
+      "js_messages": 2228,
+      "js_streams": 4,
+      "mem": 166076416,
+      "out_msgs": 103192,
+      "pull_requests": 18000,
+      "session_pull_requests": 18000,
+      "slow_consumers": 0,
+      "subscriptions": 11105
+    },
+    "in_window": true
+  },
+  {
+    "at": "2026-10-29T09:50:25.676098052Z",
+    "cpu_ticks": {
+      "dispatch": 27425,
+      "listener": 3329,
+      "loadgen": 41046,
+      "nats": 2260,
+      "postgres": 63701,
+      "proxy": 23660
+    },
+    "rss_kib": {
+      "dispatch": 2619024,
+      "listener": 93412,
+      "loadgen": 1252008,
+      "nats": 162184,
+      "postgres": 3137428,
+      "proxy": 112488
+    },
+    "sys_busy_ticks": 376139,
+    "sys_total_ticks": 2880459,
+    "pg_conns": {
+      "active|": 2,
+      "idle in transaction|Client": 3,
+      "idle|": 1,
+      "idle|Client": 51
+    },
+    "pg_total": 57,
+    "goroutines": 39404,
+    "pool_acquire_goroutines": 19496,
+    "heap_inuse": 0,
+    "heap_alloc": 0,
+    "heap_sys": 0,
+    "nats": {
+      "connections": 56,
+      "cpu_pct": 4,
+      "in_msgs": 52683,
+      "js_api_errors": 1007,
+      "js_api_total": 15089,
+      "js_consumers": 1004,
+      "js_messages": 2228,
+      "js_streams": 4,
+      "mem": 166076416,
+      "out_msgs": 103484,
+      "pull_requests": 18000,
+      "session_pull_requests": 18000,
+      "slow_consumers": 0,
+      "subscriptions": 11104
+    },
+    "in_window": true
+  },
+  {
+    "at": "2026-10-29T09:50:30.675973938Z",
+    "cpu_ticks": {
+      "dispatch": 27665,
+      "listener": 3358,
+      "loadgen": 41440,
+      "nats": 2279,
+      "postgres": 63951,
+      "proxy": 23728
+    },
+    "rss_kib": {
+      "dispatch": 2619024,
+      "listener": 93412,
+      "loadgen": 1252008,
+      "nats": 162184,
+      "postgres": 2846920,
+      "proxy": 112488
+    },
+    "sys_busy_ticks": 377135,
+    "sys_total_ticks": 2881950,
+    "pg_conns": {
+      "active|": 1,
+      "idle in transaction|Client": 3,
+      "idle|Client": 45
+    },
+    "pg_total": 49,
+    "goroutines": 39638,
+    "pool_acquire_goroutines": 19614,
+    "heap_inuse": 0,
+    "heap_alloc": 0,
+    "heap_sys": 0,
+    "nats": {
+      "connections": 56,
+      "cpu_pct": 5,
+      "in_msgs": 52912,
+      "js_api_errors": 1007,
+      "js_api_total": 15205,
+      "js_consumers": 1004,
+      "js_messages": 2228,
+      "js_streams": 4,
+      "mem": 166076416,
+      "out_msgs": 103826,
+      "pull_requests": 18000,
+      "session_pull_requests": 18000,
+      "slow_consumers": 0,
+      "subscriptions": 11104
+    },
+    "in_window": true
+  },
+  {
+    "at": "2026-10-29T09:50:35.688439841Z",
+    "cpu_ticks": {
+      "dispatch": 27943,
+      "listener": 3382,
+      "loadgen": 41845,
+      "nats": 2300,
+      "postgres": 64201,
+      "proxy": 23800
+    },
+    "rss_kib": {
+      "dispatch": 2619152,
+      "listener": 93412,
+      "loadgen": 1252008,
+      "nats": 162184,
+      "postgres": 2907512,
+      "proxy": 112488
+    },
+    "sys_busy_ticks": 378187,
+    "sys_total_ticks": 2883453,
+    "pg_conns": {
+      "active|": 1,
+      "idle in transaction|Client": 1,
+      "idle|": 1,
+      "idle|Client": 49
+    },
+    "pg_total": 52,
+    "goroutines": 39329,
+    "pool_acquire_goroutines": 19430,
+    "heap_inuse": 1543749632,
+    "heap_alloc": 1314361272,
+    "heap_sys": 2159312896,
+    "nats": {
+      "connections": 56,
+      "cpu_pct": 4,
+      "in_msgs": 54168,
+      "js_api_errors": 1007,
+      "js_api_total": 15329,
+      "js_consumers": 1004,
+      "js_messages": 2228,
+      "js_streams": 4,
+      "mem": 166076416,
+      "out_msgs": 106215,
+      "pull_requests": 19000,
+      "session_pull_requests": 19000,
+      "slow_consumers": 0,
+      "subscriptions": 11103
+    },
+    "in_window": true
+  },
+  {
+    "at": "2026-10-29T09:50:40.675757728Z",
+    "cpu_ticks": {
+      "dispatch": 28224,
+      "listener": 3413,
+      "loadgen": 42257,
+      "nats": 2317,
+      "postgres": 64384,
+      "proxy": 23862
+    },
+    "rss_kib": {
+      "dispatch": 2623248,
+      "listener": 93412,
+      "loadgen": 1252008,
+      "nats": 162184,
+      "postgres": 2672288,
+      "proxy": 112488
+    },
+    "sys_busy_ticks": 379181,
+    "sys_total_ticks": 2884950,
+    "pg_conns": {
+      "active|": 1,
+      "idle|Client": 46
+    },
+    "pg_total": 47,
+    "goroutines": 39522,
+    "pool_acquire_goroutines": 19555,
+    "heap_inuse": 0,
+    "heap_alloc": 0,
+    "heap_sys": 0,
+    "nats": {
+      "connections": 56,
+      "cpu_pct": 4,
+      "in_msgs": 54342,
+      "js_api_errors": 1007,
+      "js_api_total": 15417,
+      "js_consumers": 1004,
+      "js_messages": 2228,
+      "js_streams": 4,
+      "mem": 166076416,
+      "out_msgs": 106476,
+      "pull_requests": 19000,
+      "session_pull_requests": 19000,
+      "slow_consumers": 0,
+      "subscriptions": 11104
+    },
+    "in_window": true
+  },
+  {
+    "at": "2026-10-29T09:50:45.684259052Z",
+    "cpu_ticks": {
+      "dispatch": 28455,
+      "listener": 3435,
+      "loadgen": 42660,
+      "nats": 2333,
+      "postgres": 64677,
+      "proxy": 23932
+    },
+    "rss_kib": {
+      "dispatch": 2623248,
+      "listener": 93412,
+      "loadgen": 1252008,
+      "nats": 162184,
+      "postgres": 3017948,
+      "proxy": 112488
+    },
+    "sys_busy_ticks": 380215,
+    "sys_total_ticks": 2886447,
+    "pg_conns": {
+      "active|": 2,
+      "idle in transaction|Client": 1,
+      "idle|Client": 50
+    },
+    "pg_total": 53,
+    "goroutines": 39243,
+    "pool_acquire_goroutines": 19415,
+    "heap_inuse": 0,
+    "heap_alloc": 0,
+    "heap_sys": 0,
+    "nats": {
+      "connections": 56,
+      "cpu_pct": 3,
+      "in_msgs": 54568,
+      "js_api_errors": 1007,
+      "js_api_total": 15530,
+      "js_consumers": 1004,
+      "js_messages": 2228,
+      "js_streams": 4,
+      "mem": 166076416,
+      "out_msgs": 106817,
+      "pull_requests": 19000,
+      "session_pull_requests": 19000,
+      "slow_consumers": 0,
+      "subscriptions": 11104
+    },
+    "in_window": true
+  },
+  {
+    "at": "2026-10-29T09:50:50.676921354Z",
+    "cpu_ticks": {
+      "dispatch": 28697,
+      "listener": 3453,
+      "loadgen": 43044,
+      "nats": 2347,
+      "postgres": 64883,
+      "proxy": 23993
+    },
+    "rss_kib": {
+      "dispatch": 2623248,
+      "listener": 93412,
+      "loadgen": 1252008,
+      "nats": 162184,
+      "postgres": 2781852,
+      "proxy": 112488
+    },
+    "sys_busy_ticks": 381144,
+    "sys_total_ticks": 2887947,
+    "pg_conns": {
+      "active|": 1,
+      "idle|Client": 48
+    },
+    "pg_total": 49,
+    "goroutines": 39451,
+    "pool_acquire_goroutines": 19517,
+    "heap_inuse": 1401913344,
+    "heap_alloc": 1210402368,
+    "heap_sys": 2183987200,
+    "nats": {
+      "connections": 56,
+      "cpu_pct": 1,
+      "in_msgs": 54808,
+      "js_api_errors": 1007,
+      "js_api_total": 15651,
+      "js_consumers": 1004,
+      "js_messages": 2228,
+      "js_streams": 4,
+      "mem": 166076416,
+      "out_msgs": 108179,
+      "pull_requests": 19000,
+      "session_pull_requests": 19000,
+      "slow_consumers": 0,
+      "subscriptions": 11104
+    },
+    "in_window": true
+  },
+  {
+    "at": "2026-10-29T09:50:55.67732054Z",
+    "cpu_ticks": {
+      "dispatch": 28967,
+      "listener": 3481,
+      "loadgen": 43494,
+      "nats": 2360,
+      "postgres": 65127,
+      "proxy": 24044
+    },
+    "rss_kib": {
+      "dispatch": 2623248,
+      "listener": 93412,
+      "loadgen": 1254056,
+      "nats": 162184,
+      "postgres": 2889500,
+      "proxy": 112488
+    },
+    "sys_busy_ticks": 382204,
+    "sys_total_ticks": 2889447,
+    "pg_conns": {
+      "active|": 1,
+      "idle|Client": 50
+    },
+    "pg_total": 51,
+    "goroutines": 39442,
+    "pool_acquire_goroutines": 19514,
+    "heap_inuse": 0,
+    "heap_alloc": 0,
+    "heap_sys": 0,
+    "nats": {
+      "connections": 56,
+      "cpu_pct": 4,
+      "in_msgs": 54996,
+      "js_api_errors": 1007,
+      "js_api_total": 15742,
+      "js_consumers": 1004,
+      "js_messages": 2228,
+      "js_streams": 4,
+      "mem": 166076416,
+      "out_msgs": 108463,
+      "pull_requests": 19000,
+      "session_pull_requests": 19000,
+      "slow_consumers": 0,
+      "subscriptions": 11103
+    },
+    "in_window": true
+  },
+  {
+    "at": "2026-10-29T09:51:00.675535666Z",
+    "cpu_ticks": {
+      "dispatch": 29203,
+      "listener": 3500,
+      "loadgen": 43846,
+      "nats": 2384,
+      "postgres": 65444,
+      "proxy": 24114
+    },
+    "rss_kib": {
+      "dispatch": 2623248,
+      "listener": 93412,
+      "loadgen": 1254056,
+      "nats": 162184,
+      "postgres": 2807544,
+      "proxy": 112488
+    },
+    "sys_busy_ticks": 383227,
+    "sys_total_ticks": 2890947,
+    "pg_conns": {
+      "active|": 2,
+      "idle in transaction|Client": 3,
+      "idle|": 1,
+      "idle|Client": 42
+    },
+    "pg_total": 48,
+    "goroutines": 39071,
+    "pool_acquire_goroutines": 19326,
+    "heap_inuse": 0,
+    "heap_alloc": 0,
+    "heap_sys": 0,
+    "nats": {
+      "connections": 56,
+      "cpu_pct": 6,
+      "in_msgs": 55222,
+      "js_api_errors": 1007,
+      "js_api_total": 15857,
+      "js_consumers": 1004,
+      "js_messages": 2228,
+      "js_streams": 4,
+      "mem": 166076416,
+      "out_msgs": 108800,
+      "pull_requests": 19000,
+      "session_pull_requests": 19000,
+      "slow_consumers": 0,
+      "subscriptions": 11104
+    },
+    "in_window": true
+  },
+  {
+    "at": "2026-10-29T09:51:05.675792534Z",
+    "cpu_ticks": {
+      "dispatch": 29473,
+      "listener": 3528,
+      "loadgen": 44221,
+      "nats": 2412,
+      "postgres": 65720,
+      "proxy": 24193
+    },
+    "rss_kib": {
+      "dispatch": 2623248,
+      "listener": 93412,
+      "loadgen": 1254056,
+      "nats": 162184,
+      "postgres": 3122244,
+      "proxy": 112488
+    },
+    "sys_busy_ticks": 384287,
+    "sys_total_ticks": 2892453,
+    "pg_conns": {
+      "active|": 1,
+      "idle in transaction|Client": 1,
+      "idle|": 1,
+      "idle|Client": 52
+    },
+    "pg_total": 55,
+    "goroutines": 39338,
+    "pool_acquire_goroutines": 19458,
+    "heap_inuse": 1589837824,
+    "heap_alloc": 1439093344,
+    "heap_sys": 2208169984,
+    "nats": {
+      "connections": 56,
+      "cpu_pct": 3,
+      "in_msgs": 56465,
+      "js_api_errors": 1007,
+      "js_api_total": 15979,
+      "js_consumers": 1004,
+      "js_messages": 2228,
+      "js_streams": 4,
+      "mem": 166076416,
+      "out_msgs": 111166,
+      "pull_requests": 20000,
+      "session_pull_requests": 20000,
+      "slow_consumers": 0,
+      "subscriptions": 11104
+    },
+    "in_window": true
+  },
+  {
+    "at": "2026-10-29T09:51:10.675719955Z",
+    "cpu_ticks": {
+      "dispatch": 29746,
+      "listener": 3552,
+      "loadgen": 44583,
+      "nats": 2425,
+      "postgres": 65979,
+      "proxy": 24267
+    },
+    "rss_kib": {
+      "dispatch": 2623248,
+      "listener": 93412,
+      "loadgen": 1254056,
+      "nats": 162184,
+      "postgres": 2751160,
+      "proxy": 112488
+    },
+    "sys_busy_ticks": 385295,
+    "sys_total_ticks": 2893947,
+    "pg_conns": {
+      "active|": 1,
+      "idle in transaction|Client": 1,
+      "idle|Client": 45
+    },
+    "pg_total": 47,
+    "goroutines": 39266,
+    "pool_acquire_goroutines": 19423,
+    "heap_inuse": 0,
+    "heap_alloc": 0,
+    "heap_sys": 0,
+    "nats": {
+      "connections": 56,
+      "cpu_pct": 2,
+      "in_msgs": 56671,
+      "js_api_errors": 1007,
+      "js_api_total": 16081,
+      "js_consumers": 1004,
+      "js_messages": 2228,
+      "js_streams": 4,
+      "mem": 166076416,
+      "out_msgs": 111476,
+      "pull_requests": 20000,
+      "session_pull_requests": 20000,
+      "slow_consumers": 0,
+      "subscriptions": 11103
+    },
+    "in_window": true
+  },
+  {
+    "at": "2026-10-29T09:51:15.675823968Z",
+    "cpu_ticks": {
+      "dispatch": 29984,
+      "listener": 3579,
+      "loadgen": 44976,
+      "nats": 2435,
+      "postgres": 66284,
+      "proxy": 24318
+    },
+    "rss_kib": {
+      "dispatch": 2623248,
+      "listener": 93412,
+      "loadgen": 1254056,
+      "nats": 162184,
+      "postgres": 2828588,
+      "proxy": 112488
+    },
+    "sys_busy_ticks": 386329,
+    "sys_total_ticks": 2895459,
+    "pg_conns": {
+      "active|": 1,
+      "idle|Client": 47
+    },
+    "pg_total": 48,
+    "goroutines": 39384,
+    "pool_acquire_goroutines": 19475,
+    "heap_inuse": 0,
+    "heap_alloc": 0,
+    "heap_sys": 0,
+    "nats": {
+      "connections": 56,
+      "cpu_pct": 4,
+      "in_msgs": 56885,
+      "js_api_errors": 1007,
+      "js_api_total": 16190,
+      "js_consumers": 1004,
+      "js_messages": 2228,
+      "js_streams": 4,
+      "mem": 166076416,
+      "out_msgs": 111798,
+      "pull_requests": 20000,
+      "session_pull_requests": 20000,
+      "slow_consumers": 0,
+      "subscriptions": 11105
+    },
+    "in_window": true
+  },
+  {
+    "at": "2026-10-29T09:51:20.675926835Z",
+    "cpu_ticks": {
+      "dispatch": 30200,
+      "listener": 3610,
+      "loadgen": 45365,
+      "nats": 2447,
+      "postgres": 66632,
+      "proxy": 24390
+    },
+    "rss_kib": {
+      "dispatch": 2623248,
+      "listener": 93412,
+      "loadgen": 1254056,
+      "nats": 162184,
+      "postgres": 2882412,
+      "proxy": 112488
+    },
+    "sys_busy_ticks": 387399,
+    "sys_total_ticks": 2896947,
+    "pg_conns": {
+      "active|": 1,
+      "idle|": 1,
+      "idle|Client": 48
+    },
+    "pg_total": 50,
+    "goroutines": 39357,
+    "pool_acquire_goroutines": 19468,
+    "heap_inuse": 1805901824,
+    "heap_alloc": 1668253520,
+    "heap_sys": 2206138368,
+    "nats": {
+      "connections": 56,
+      "cpu_pct": 5,
+      "in_msgs": 57134,
+      "js_api_errors": 1007,
+      "js_api_total": 16312,
+      "js_consumers": 1004,
+      "js_messages": 2228,
+      "js_streams": 4,
+      "mem": 166076416,
+      "out_msgs": 113173,
+      "pull_requests": 20000,
+      "session_pull_requests": 20000,
+      "slow_consumers": 0,
+      "subscriptions": 11103
+    },
+    "in_window": true
+  },
+  {
+    "at": "2026-10-29T09:51:25.67602508Z",
+    "cpu_ticks": {
+      "dispatch": 30422,
+      "listener": 3630,
+      "loadgen": 45749,
+      "nats": 2463,
+      "postgres": 66848,
+      "proxy": 24473
+    },
+    "rss_kib": {
+      "dispatch": 2623248,
+      "listener": 93412,
+      "loadgen": 1254120,
+      "nats": 162184,
+      "postgres": 2910692,
+      "proxy": 112488
+    },
+    "sys_busy_ticks": 388346,
+    "sys_total_ticks": 2898462,
+    "pg_conns": {
+      "active|": 1,
+      "idle in transaction|Client": 2,
+      "idle|Client": 51
+    },
+    "pg_total": 54,
+    "goroutines": 39431,
+    "pool_acquire_goroutines": 19508,
+    "heap_inuse": 0,
+    "heap_alloc": 0,
+    "heap_sys": 0,
+    "nats": {
+      "connections": 56,
+      "cpu_pct": 3,
+      "in_msgs": 57337,
+      "js_api_errors": 1007,
+      "js_api_total": 16413,
+      "js_consumers": 1004,
+      "js_messages": 2228,
+      "js_streams": 4,
+      "mem": 166076416,
+      "out_msgs": 113479,
+      "pull_requests": 20000,
+      "session_pull_requests": 20000,
+      "slow_consumers": 0,
+      "subscriptions": 11103
+    },
+    "in_window": true
+  },
+  {
+    "at": "2026-10-29T09:51:30.676422994Z",
+    "cpu_ticks": {
+      "dispatch": 30641,
+      "listener": 3648,
+      "loadgen": 46195,
+      "nats": 2478,
+      "postgres": 67196,
+      "proxy": 24552
+    },
+    "rss_kib": {
+      "dispatch": 2623248,
+      "listener": 93412,
+      "loadgen": 1262448,
+      "nats": 162184,
+      "postgres": 2848948,
+      "proxy": 112488
+    },
+    "sys_busy_ticks": 389466,
+    "sys_total_ticks": 2899947,
+    "pg_conns": {
+      "active|": 1,
+      "idle in transaction|Client": 1,
+      "idle|Client": 46
+    },
+    "pg_total": 48,
+    "goroutines": 39628,
+    "pool_acquire_goroutines": 19608,
+    "heap_inuse": 0,
+    "heap_alloc": 0,
+    "heap_sys": 0,
+    "nats": {
+      "connections": 56,
+      "cpu_pct": 1,
+      "in_msgs": 57567,
+      "js_api_errors": 1007,
+      "js_api_total": 16533,
+      "js_consumers": 1004,
+      "js_messages": 2228,
+      "js_streams": 4,
+      "mem": 166076416,
+      "out_msgs": 114820,
+      "pull_requests": 20000,
+      "session_pull_requests": 20000,
+      "slow_consumers": 0,
+      "subscriptions": 11103
+    },
+    "in_window": true
+  },
+  {
+    "at": "2026-10-29T09:51:35.676789367Z",
+    "cpu_ticks": {
+      "dispatch": 30869,
+      "listener": 3675,
+      "loadgen": 46593,
+      "nats": 2493,
+      "postgres": 67396,
+      "proxy": 24613
+    },
+    "rss_kib": {
+      "dispatch": 2623248,
+      "listener": 93412,
+      "loadgen": 1262448,
+      "nats": 162184,
+      "postgres": 2913996,
+      "proxy": 112488
+    },
+    "sys_busy_ticks": 390406,
+    "sys_total_ticks": 2901450,
+    "pg_conns": {
+      "active|": 2,
+      "idle|Client": 51
+    },
+    "pg_total": 53,
+    "goroutines": 39617,
+    "pool_acquire_goroutines": 19604,
+    "heap_inuse": 2018107392,
+    "heap_alloc": 1891984872,
+    "heap_sys": 2205417472,
+    "nats": {
+      "connections": 56,
+      "cpu_pct": 7,
+      "in_msgs": 58801,
+      "js_api_errors": 1007,
+      "js_api_total": 16649,
+      "js_consumers": 1004,
+      "js_messages": 2228,
+      "js_streams": 4,
+      "mem": 166076416,
+      "out_msgs": 117174,
+      "pull_requests": 21000,
+      "session_pull_requests": 21000,
+      "slow_consumers": 0,
+      "subscriptions": 11103
+    },
+    "in_window": true
+  },
+  {
+    "at": "2026-10-29T09:51:40.675537053Z",
+    "cpu_ticks": {
+      "dispatch": 31128,
+      "listener": 3696,
+      "loadgen": 46978,
+      "nats": 2518,
+      "postgres": 67737,
+      "proxy": 24696
+    },
+    "rss_kib": {
+      "dispatch": 2623248,
+      "listener": 93412,
+      "loadgen": 1262448,
+      "nats": 166288,
+      "postgres": 2677080,
+      "proxy": 112488
+    },
+    "sys_busy_ticks": 391521,
+    "sys_total_ticks": 2902947,
+    "pg_conns": {
+      "active|": 1,
+      "idle in transaction|Client": 1,
+      "idle|Client": 43
+    },
+    "pg_total": 45,
+    "goroutines": 39748,
+    "pool_acquire_goroutines": 19645,
+    "heap_inuse": 0,
+    "heap_alloc": 0,
+    "heap_sys": 0,
+    "nats": {
+      "connections": 56,
+      "cpu_pct": 1,
+      "in_msgs": 58999,
+      "js_api_errors": 1007,
+      "js_api_total": 16748,
+      "js_consumers": 1004,
+      "js_messages": 2228,
+      "js_streams": 4,
+      "mem": 170278912,
+      "out_msgs": 117474,
+      "pull_requests": 21000,
+      "session_pull_requests": 21000,
+      "slow_consumers": 0,
+      "subscriptions": 11104
+    },
+    "in_window": true
+  },
+  {
+    "at": "2026-10-29T09:51:45.675534328Z",
+    "cpu_ticks": {
+      "dispatch": 31388,
+      "listener": 3723,
+      "loadgen": 47474,
+      "nats": 2526,
+      "postgres": 67898,
+      "proxy": 24736
+    },
+    "rss_kib": {
+      "dispatch": 2623312,
+      "listener": 93412,
+      "loadgen": 1262448,
+      "nats": 166288,
+      "postgres": 3140004,
+      "proxy": 112488
+    },
+    "sys_busy_ticks": 392516,
+    "sys_total_ticks": 2904453,
+    "pg_conns": {
+      "active|": 1,
+      "idle in transaction|Client": 1,
+      "idle|Client": 56
+    },
+    "pg_total": 58,
+    "goroutines": 39759,
+    "pool_acquire_goroutines": 19680,
+    "heap_inuse": 0,
+    "heap_alloc": 0,
+    "heap_sys": 0,
+    "nats": {
+      "connections": 56,
+      "cpu_pct": 1,
+      "in_msgs": 59213,
+      "js_api_errors": 1007,
+      "js_api_total": 16847,
+      "js_consumers": 1004,
+      "js_messages": 2228,
+      "js_streams": 4,
+      "mem": 170278912,
+      "out_msgs": 117802,
+      "pull_requests": 21000,
+      "session_pull_requests": 21000,
+      "slow_consumers": 0,
+      "subscriptions": 11104
+    },
+    "in_window": true
+  },
+  {
+    "at": "2026-10-29T09:51:50.675910912Z",
+    "cpu_ticks": {
+      "dispatch": 31618,
+      "listener": 3752,
+      "loadgen": 47849,
+      "nats": 2541,
+      "postgres": 68214,
+      "proxy": 24810
+    },
+    "rss_kib": {
+      "dispatch": 2623312,
+      "listener": 93412,
+      "loadgen": 1262448,
+      "nats": 166288,
+      "postgres": 3036728,
+      "proxy": 112488
+    },
+    "sys_busy_ticks": 393557,
+    "sys_total_ticks": 2905947,
+    "pg_conns": {
+      "active|": 1,
+      "idle in transaction|Client": 3,
+      "idle|Client": 49
+    },
+    "pg_total": 53,
+    "goroutines": 39521,
+    "pool_acquire_goroutines": 19556,
+    "heap_inuse": 1308418048,
+    "heap_alloc": 1082123992,
+    "heap_sys": 2166882304,
+    "nats": {
+      "connections": 56,
+      "cpu_pct": 0,
+      "in_msgs": 59488,
+      "js_api_errors": 1007,
+      "js_api_total": 16977,
+      "js_consumers": 1004,
+      "js_messages": 2228,
+      "js_streams": 4,
+      "mem": 170278912,
+      "out_msgs": 119223,
+      "pull_requests": 21000,
+      "session_pull_requests": 21000,
+      "slow_consumers": 0,
+      "subscriptions": 11104
+    },
+    "in_window": true
+  },
+  {
+    "at": "2026-10-29T09:51:55.676974876Z",
+    "cpu_ticks": {
+      "dispatch": 31855,
+      "listener": 3778,
+      "loadgen": 48231,
+      "nats": 2548,
+      "postgres": 68424,
+      "proxy": 24864
+    },
+    "rss_kib": {
+      "dispatch": 2623312,
+      "listener": 93412,
+      "loadgen": 1262448,
+      "nats": 166288,
+      "postgres": 3097056,
+      "proxy": 112488
+    },
+    "sys_busy_ticks": 394476,
+    "sys_total_ticks": 2907450,
+    "pg_conns": {
+      "active|": 1,
+      "idle|Client": 55
+    },
+    "pg_total": 56,
+    "goroutines": 39445,
+    "pool_acquire_goroutines": 19520,
+    "heap_inuse": 0,
+    "heap_alloc": 0,
+    "heap_sys": 0,
+    "nats": {
+      "connections": 56,
+      "cpu_pct": 1,
+      "in_msgs": 59642,
+      "js_api_errors": 1007,
+      "js_api_total": 17054,
+      "js_consumers": 1004,
+      "js_messages": 2228,
+      "js_streams": 4,
+      "mem": 170278912,
+      "out_msgs": 119455,
+      "pull_requests": 21000,
+      "session_pull_requests": 21000,
+      "slow_consumers": 0,
+      "subscriptions": 11104
+    },
+    "in_window": true
+  },
+  {
+    "at": "2026-10-29T09:52:00.67606953Z",
+    "cpu_ticks": {
+      "dispatch": 32117,
+      "listener": 3810,
+      "loadgen": 48596,
+      "nats": 2559,
+      "postgres": 68727,
+      "proxy": 24934
+    },
+    "rss_kib": {
+      "dispatch": 2623312,
+      "listener": 93412,
+      "loadgen": 1262512,
+      "nats": 166288,
+      "postgres": 3162796,
+      "proxy": 112488
+    },
+    "sys_busy_ticks": 395521,
+    "sys_total_ticks": 2908950,
+    "pg_conns": {
+      "active|": 1,
+      "idle|": 1,
+      "idle|Client": 55
+    },
+    "pg_total": 57,
+    "goroutines": 39223,
+    "pool_acquire_goroutines": 19404,
+    "heap_inuse": 0,
+    "heap_alloc": 0,
+    "heap_sys": 0,
+    "nats": {
+      "connections": 56,
+      "cpu_pct": 3,
+      "in_msgs": 59867,
+      "js_api_errors": 1007,
+      "js_api_total": 17169,
+      "js_consumers": 1004,
+      "js_messages": 2228,
+      "js_streams": 4,
+      "mem": 170278912,
+      "out_msgs": 119792,
+      "pull_requests": 21000,
+      "session_pull_requests": 21000,
+      "slow_consumers": 0,
+      "subscriptions": 11104
+    },
+    "in_window": true
+  },
+  {
+    "at": "2026-10-29T09:52:05.677501248Z",
+    "cpu_ticks": {
+      "dispatch": 32361,
+      "listener": 3833,
+      "loadgen": 49047,
+      "nats": 2581,
+      "postgres": 68945,
+      "proxy": 25008
+    },
+    "rss_kib": {
+      "dispatch": 2623312,
+      "listener": 93412,
+      "loadgen": 1281520,
+      "nats": 166288,
+      "postgres": 2803640,
+      "proxy": 112488
+    },
+    "sys_busy_ticks": 396559,
+    "sys_total_ticks": 2910459,
+    "pg_conns": {
+      "active|": 1,
+      "idle|Client": 42
+    },
+    "pg_total": 43,
+    "goroutines": 39074,
+    "pool_acquire_goroutines": 19328,
+    "heap_inuse": 1633501184,
+    "heap_alloc": 1470412744,
+    "heap_sys": 2384068608,
+    "nats": {
+      "connections": 56,
+      "cpu_pct": 1,
+      "in_msgs": 61436,
+      "js_api_errors": 1007,
+      "js_api_total": 17448,
+      "js_consumers": 1004,
+      "js_messages": 2228,
+      "js_streams": 4,
+      "mem": 170278912,
+      "out_msgs": 122653,
+      "pull_requests": 22000,
+      "session_pull_requests": 22000,
+      "slow_consumers": 0,
+      "subscriptions": 11104
+    },
+    "in_window": true
+  },
+  {
+    "at": "2026-10-29T09:52:14.313030851Z",
+    "cpu_ticks": {
+      "dispatch": 33159,
+      "listener": 3874,
+      "loadgen": 49276,
+      "nats": 2602,
+      "postgres": 69056,
+      "proxy": 25036
+    },
+    "rss_kib": {
+      "dispatch": 2750432,
+      "listener": 93412,
+      "loadgen": 1281520,
+      "nats": 166288,
+      "postgres": 2399892,
+      "proxy": 112488
+    },
+    "sys_busy_ticks": 397793,
+    "sys_total_ticks": 2913072,
+    "pg_conns": {
+      "active|": 1,
+      "idle in transaction|Client": 1,
+      "idle|Client": 38
+    },
+    "pg_total": 40,
+    "goroutines": 28002,
+    "pool_acquire_goroutines": 13778,
+    "heap_inuse": 0,
+    "heap_alloc": 0,
+    "heap_sys": 0,
+    "nats": {
+      "connections": 56,
+      "cpu_pct": 4,
+      "in_msgs": 61459,
+      "js_api_errors": 1007,
+      "js_api_total": 17458,
+      "js_consumers": 1004,
+      "js_messages": 2228,
+      "js_streams": 4,
+      "mem": 170278912,
+      "out_msgs": 122689,
+      "pull_requests": 22000,
+      "session_pull_requests": 22000,
+      "slow_consumers": 0,
+      "subscriptions": 11105
+    },
+    "in_window": false
+  },
+  {
+    "at": "2026-10-29T09:52:15.691644687Z",
+    "cpu_ticks": {
+      "dispatch": 33242,
+      "listener": 3880,
+      "loadgen": 49303,
+      "nats": 2607,
+      "postgres": 69104,
+      "proxy": 25051
+    },
+    "rss_kib": {
+      "dispatch": 2750432,
+      "listener": 93412,
+      "loadgen": 1281520,
+      "nats": 166288,
+      "postgres": 3706800,
+      "proxy": 114536
+    },
+    "sys_busy_ticks": 397976,
+    "sys_total_ticks": 2913453,
+    "pg_conns": {
+      "active|": 1,
+      "idle in transaction|Client": 1,
+      "idle|Client": 69
+    },
+    "pg_total": 71,
+    "goroutines": 26270,
+    "pool_acquire_goroutines": 12927,
+    "heap_inuse": 0,
+    "heap_alloc": 0,
+    "heap_sys": 0,
+    "nats": {
+      "connections": 56,
+      "cpu_pct": 5,
+      "in_msgs": 61507,
+      "js_api_errors": 1007,
+      "js_api_total": 17480,
+      "js_consumers": 1004,
+      "js_messages": 2228,
+      "js_streams": 4,
+      "mem": 170278912,
+      "out_msgs": 122762,
+      "pull_requests": 22000,
+      "session_pull_requests": 22000,
+      "slow_consumers": 0,
+      "subscriptions": 11104
+    },
+    "in_window": false
+  },
+  {
+    "at": "2026-10-29T09:52:20.676665008Z",
+    "cpu_ticks": {
+      "dispatch": 33440,
+      "listener": 3900,
+      "loadgen": 49404,
+      "nats": 2617,
+      "postgres": 69531,
+      "proxy": 25136
+    },
+    "rss_kib": {
+      "dispatch": 2750432,
+      "listener": 93412,
+      "loadgen": 1281520,
+      "nats": 166288,
+      "postgres": 2442312,
+      "proxy": 116584
+    },
+    "sys_busy_ticks": 398842,
+    "sys_total_ticks": 2914956,
+    "pg_conns": {
+      "active|": 1,
+      "idle in transaction|Client": 2,
+      "idle|Client": 34
+    },
+    "pg_total": 37,
+    "goroutines": 20130,
+    "pool_acquire_goroutines": 9858,
+    "heap_inuse": 1741152256,
+    "heap_alloc": 1598130584,
+    "heap_sys": 2402910208,
+    "nats": {
+      "connections": 56,
+      "cpu_pct": 3,
+      "in_msgs": 61757,
+      "js_api_errors": 1007,
+      "js_api_total": 17604,
+      "js_consumers": 1004,
+      "js_messages": 2228,
+      "js_streams": 4,
+      "mem": 170278912,
+      "out_msgs": 124139,
+      "pull_requests": 22000,
+      "session_pull_requests": 22000,
+      "slow_consumers": 0,
+      "subscriptions": 11104
+    },
+    "in_window": false
+  },
+  {
+    "at": "2026-10-29T09:52:25.681668454Z",
+    "cpu_ticks": {
+      "dispatch": 33622,
+      "listener": 3926,
+      "loadgen": 49487,
+      "nats": 2630,
+      "postgres": 70125,
+      "proxy": 25216
+    },
+    "rss_kib": {
+      "dispatch": 2750432,
+      "listener": 93412,
+      "loadgen": 1281520,
+      "nats": 166288,
+      "postgres": 2965372,
+      "proxy": 116584
+    },
+    "sys_busy_ticks": 399820,
+    "sys_total_ticks": 2916459,
+    "pg_conns": {
+      "active|": 1,
+      "idle in transaction|Client": 1,
+      "idle|Client": 51
+    },
+    "pg_total": 53,
+    "goroutines": 13938,
+    "pool_acquire_goroutines": 6763,
+    "heap_inuse": 0,
+    "heap_alloc": 0,
+    "heap_sys": 0,
+    "nats": {
+      "connections": 56,
+      "cpu_pct": 4,
+      "in_msgs": 61939,
+      "js_api_errors": 1007,
+      "js_api_total": 17694,
+      "js_consumers": 1004,
+      "js_messages": 2228,
+      "js_streams": 4,
+      "mem": 170278912,
+      "out_msgs": 124414,
+      "pull_requests": 22000,
+      "session_pull_requests": 22000,
+      "slow_consumers": 0,
+      "subscriptions": 11103
+    },
+    "in_window": false
+  },
+  {
+    "at": "2026-10-29T09:52:30.690433388Z",
+    "cpu_ticks": {
+      "dispatch": 33805,
+      "listener": 3948,
+      "loadgen": 49571,
+      "nats": 2648,
+      "postgres": 70811,
+      "proxy": 25312
+    },
+    "rss_kib": {
+      "dispatch": 2750432,
+      "listener": 93412,
+      "loadgen": 1281520,
+      "nats": 166288,
+      "postgres": 2963340,
+      "proxy": 116584
+    },
+    "sys_busy_ticks": 400918,
+    "sys_total_ticks": 2917962,
+    "pg_conns": {
+      "active|": 1,
+      "idle|Client": 50
+    },
+    "pg_total": 51,
+    "goroutines": 7607,
+    "pool_acquire_goroutines": 3598,
+    "heap_inuse": 0,
+    "heap_alloc": 0,
+    "heap_sys": 0,
+    "nats": {
+      "connections": 56,
+      "cpu_pct": 7,
+      "in_msgs": 62158,
+      "js_api_errors": 1007,
+      "js_api_total": 17806,
+      "js_consumers": 1004,
+      "js_messages": 2228,
+      "js_streams": 4,
+      "mem": 170278912,
+      "out_msgs": 124741,
+      "pull_requests": 22000,
+      "session_pull_requests": 22000,
+      "slow_consumers": 0,
+      "subscriptions": 11103
+    },
+    "in_window": false
+  },
+  {
+    "at": "2026-10-29T09:52:35.678911804Z",
+    "cpu_ticks": {
+      "dispatch": 33983,
+      "listener": 3982,
+      "loadgen": 49644,
+      "nats": 2668,
+      "postgres": 71371,
+      "proxy": 25385
+    },
+    "rss_kib": {
+      "dispatch": 2750432,
+      "listener": 93412,
+      "loadgen": 1281520,
+      "nats": 166288,
+      "postgres": 2581784,
+      "proxy": 116584
+    },
+    "sys_busy_ticks": 401851,
+    "sys_total_ticks": 2919450,
+    "pg_conns": {
+      "active|": 2,
+      "idle in transaction|Client": 1,
+      "idle|Client": 36
+    },
+    "pg_total": 39,
+    "goroutines": 1360,
+    "pool_acquire_goroutines": 475,
+    "heap_inuse": 1857601536,
+    "heap_alloc": 1719493088,
+    "heap_sys": 2455109632,
+    "nats": {
+      "connections": 56,
+      "cpu_pct": 2,
+      "in_msgs": 63422,
+      "js_api_errors": 1007,
+      "js_api_total": 17939,
+      "js_consumers": 1004,
+      "js_messages": 2228,
+      "js_streams": 4,
+      "mem": 170278912,
+      "out_msgs": 127138,
+      "pull_requests": 23000,
+      "session_pull_requests": 23000,
+      "slow_consumers": 0,
+      "subscriptions": 11103
+    },
+    "in_window": false
+  },
+  {
+    "at": "2026-10-29T09:52:40.692697976Z",
+    "cpu_ticks": {
+      "dispatch": 34407,
+      "listener": 4022,
+      "loadgen": 49662,
+      "nats": 2684,
+      "postgres": 71942,
+      "proxy": 25465
+    },
+    "rss_kib": {
+      "dispatch": 2750688,
+      "listener": 93412,
+      "loadgen": 1281520,
+      "nats": 166288,
+      "postgres": 6020208,
+      "proxy": 116584
+    },
+    "sys_busy_ticks": 403001,
+    "sys_total_ticks": 2920965,
+    "pg_conns": {
+      "active|": 2,
+      "active|Lock": 5,
+      "idle in transaction|Client": 59,
+      "idle|Client": 13
+    },
+    "pg_total": 79,
+    "goroutines": 1366,
+    "pool_acquire_goroutines": 389,
+    "heap_inuse": 0,
+    "heap_alloc": 0,
+    "heap_sys": 0,
+    "nats": {
+      "connections": 56,
+      "cpu_pct": 2,
+      "in_msgs": 63715,
+      "js_api_errors": 1007,
+      "js_api_total": 18030,
+      "js_consumers": 1004,
+      "js_messages": 2233,
+      "js_streams": 4,
+      "mem": 170278912,
+      "out_msgs": 127548,
+      "pull_requests": 23000,
+      "session_pull_requests": 23000,
+      "slow_consumers": 0,
+      "subscriptions": 11104
+    },
+    "in_window": false
+  },
+  {
+    "at": "2026-10-29T09:52:45.676350702Z",
+    "cpu_ticks": {
+      "dispatch": 35011,
+      "listener": 4049,
+      "loadgen": 49669,
+      "nats": 2700,
+      "postgres": 72246,
+      "proxy": 25519
+    },
+    "rss_kib": {
+      "dispatch": 2750944,
+      "listener": 93412,
+      "loadgen": 1281520,
+      "nats": 166288,
+      "postgres": 6844364,
+      "proxy": 116584
+    },
+    "sys_busy_ticks": 404016,
+    "sys_total_ticks": 2922453,
+    "pg_conns": {
+      "active|": 3,
+      "active|Lock": 35,
+      "idle in transaction|": 1,
+      "idle in transaction|Client": 30,
+      "idle|Client": 10
+    },
+    "pg_total": 79,
+    "goroutines": 1097,
+    "pool_acquire_goroutines": 341,
+    "heap_inuse": 0,
+    "heap_alloc": 0,
+    "heap_sys": 0,
+    "nats": {
+      "connections": 56,
+      "cpu_pct": 3,
+      "in_msgs": 64016,
+      "js_api_errors": 1007,
+      "js_api_total": 18136,
+      "js_consumers": 1004,
+      "js_messages": 2237,
+      "js_streams": 4,
+      "mem": 170278912,
+      "out_msgs": 127977,
+      "pull_requests": 23000,
+      "session_pull_requests": 23000,
+      "slow_consumers": 0,
+      "subscriptions": 11103
+    },
+    "in_window": false
+  },
+  {
+    "at": "2026-10-29T09:52:50.676525809Z",
+    "cpu_ticks": {
+      "dispatch": 35512,
+      "listener": 4077,
+      "loadgen": 49689,
+      "nats": 2737,
+      "postgres": 72588,
+      "proxy": 25594
+    },
+    "rss_kib": {
+      "dispatch": 2751200,
+      "listener": 93412,
+      "loadgen": 1281520,
+      "nats": 166288,
+      "postgres": 7501332,
+      "proxy": 116584
+    },
+    "sys_busy_ticks": 405024,
+    "sys_total_ticks": 2923947,
+    "pg_conns": {
+      "active|": 1,
+      "active|Lock": 59,
+      "idle in transaction|Client": 5,
+      "idle|Client": 14
+    },
+    "pg_total": 79,
+    "goroutines": 1038,
+    "pool_acquire_goroutines": 226,
+    "heap_inuse": 1762115584,
+    "heap_alloc": 1670521880,
+    "heap_sys": 2674884608,
+    "nats": {
+      "connections": 56,
+      "cpu_pct": 11,
+      "in_msgs": 65218,
+      "js_api_errors": 1007,
+      "js_api_total": 18264,
+      "js_consumers": 1004,
+      "js_messages": 2280,
+      "js_streams": 4,
+      "mem": 170278912,
+      "out_msgs": 130336,
+      "pull_requests": 23000,
+      "session_pull_requests": 23000,
+      "slow_consumers": 0,
+      "subscriptions": 11103
+    },
+    "in_window": false
+  },
+  {
+    "at": "2026-10-29T09:52:55.67657266Z",
+    "cpu_ticks": {
+      "dispatch": 36098,
+      "listener": 4103,
+      "loadgen": 49714,
+      "nats": 2778,
+      "postgres": 72814,
+      "proxy": 25660
+    },
+    "rss_kib": {
+      "dispatch": 2751200,
+      "listener": 93412,
+      "loadgen": 1281520,
+      "nats": 166288,
+      "postgres": 7766480,
+      "proxy": 116584
+    },
+    "sys_busy_ticks": 405997,
+    "sys_total_ticks": 2925447,
+    "pg_conns": {
+      "active|": 1,
+      "active|IO": 1,
+      "active|Lock": 60,
+      "idle in transaction|Client": 2,
+      "idle|": 1,
+      "idle|Client": 14
+    },
+    "pg_total": 79,
+    "goroutines": 1074,
+    "pool_acquire_goroutines": 194,
+    "heap_inuse": 0,
+    "heap_alloc": 0,
+    "heap_sys": 0,
+    "nats": {
+      "connections": 56,
+      "cpu_pct": 15,
+      "in_msgs": 65999,
+      "js_api_errors": 1007,
+      "js_api_total": 18358,
+      "js_consumers": 1004,
+      "js_messages": 2307,
+      "js_streams": 4,
+      "mem": 170278912,
+      "out_msgs": 131380,
+      "pull_requests": 23000,
+      "session_pull_requests": 23000,
+      "slow_consumers": 0,
+      "subscriptions": 11104
+    },
+    "in_window": false
+  },
+  {
+    "at": "2026-10-29T09:53:00.675738728Z",
+    "cpu_ticks": {
+      "dispatch": 36734,
+      "listener": 4142,
+      "loadgen": 49734,
+      "nats": 2829,
+      "postgres": 72969,
+      "proxy": 25719
+    },
+    "rss_kib": {
+      "dispatch": 2817832,
+      "listener": 93412,
+      "loadgen": 1281520,
+      "nats": 166288,
+      "postgres": 8064560,
+      "proxy": 116584
+    },
+    "sys_busy_ticks": 406960,
+    "sys_total_ticks": 2926947,
+    "pg_conns": {
+      "active|": 1,
+      "active|Lock": 61,
+      "idle in transaction|Client": 4,
+      "idle|Client": 13
+    },
+    "pg_total": 79,
+    "goroutines": 1108,
+    "pool_acquire_goroutines": 166,
+    "heap_inuse": 0,
+    "heap_alloc": 0,
+    "heap_sys": 0,
+    "nats": {
+      "connections": 56,
+      "cpu_pct": 21,
+      "in_msgs": 67329,
+      "js_api_errors": 1007,
+      "js_api_total": 18472,
+      "js_consumers": 1004,
+      "js_messages": 2362,
+      "js_streams": 4,
+      "mem": 170278912,
+      "out_msgs": 133091,
+      "pull_requests": 23000,
+      "session_pull_requests": 23000,
+      "slow_consumers": 0,
+      "subscriptions": 11103
+    },
+    "in_window": false
+  },
+  {
+    "at": "2026-10-29T09:53:05.688342802Z",
+    "cpu_ticks": {
+      "dispatch": 37488,
+      "listener": 4173,
+      "loadgen": 49740,
+      "nats": 2862,
+      "postgres": 73137,
+      "proxy": 25782
+    },
+    "rss_kib": {
+      "dispatch": 3150176,
+      "listener": 93412,
+      "loadgen": 1281520,
+      "nats": 166288,
+      "postgres": 8351220,
+      "proxy": 116584
+    },
+    "sys_busy_ticks": 408019,
+    "sys_total_ticks": 2928453,
+    "pg_conns": {
+      "active|": 1,
+      "active|Lock": 58,
+      "idle in transaction|Client": 5,
+      "idle|Client": 15
+    },
+    "pg_total": 79,
+    "goroutines": 1168,
+    "pool_acquire_goroutines": 184,
+    "heap_inuse": 2436415488,
+    "heap_alloc": 2240388512,
+    "heap_sys": 3065118720,
+    "nats": {
+      "connections": 56,
+      "cpu_pct": 7,
+      "in_msgs": 69565,
+      "js_api_errors": 1007,
+      "js_api_total": 18606,
+      "js_consumers": 1004,
+      "js_messages": 2406,
+      "js_streams": 4,
+      "mem": 170278912,
+      "out_msgs": 136765,
+      "pull_requests": 24000,
+      "session_pull_requests": 24000,
+      "slow_consumers": 0,
+      "subscriptions": 11103
+    },
+    "in_window": false
+  },
+  {
+    "at": "2026-10-29T09:53:10.687943209Z",
+    "cpu_ticks": {
+      "dispatch": 38177,
+      "listener": 4205,
+      "loadgen": 49763,
+      "nats": 2908,
+      "postgres": 73379,
+      "proxy": 25842
+    },
+    "rss_kib": {
+      "dispatch": 3309112,
+      "listener": 93412,
+      "loadgen": 1281520,
+      "nats": 166288,
+      "postgres": 8553400,
+      "proxy": 116584
+    },
+    "sys_busy_ticks": 409115,
+    "sys_total_ticks": 2929956,
+    "pg_conns": {
+      "active|": 3,
+      "active|Lock": 59,
+      "idle in transaction|": 1,
+      "idle in transaction|Client": 3,
+      "idle|Client": 13
+    },
+    "pg_total": 79,
+    "goroutines": 1150,
+    "pool_acquire_goroutines": 107,
+    "heap_inuse": 0,
+    "heap_alloc": 0,
+    "heap_sys": 0,
+    "nats": {
+      "connections": 56,
+      "cpu_pct": 9,
+      "in_msgs": 70585,
+      "js_api_errors": 1007,
+      "js_api_total": 18694,
+      "js_consumers": 1004,
+      "js_messages": 2445,
+      "js_streams": 4,
+      "mem": 170278912,
+      "out_msgs": 138066,
+      "pull_requests": 24000,
+      "session_pull_requests": 24000,
+      "slow_consumers": 0,
+      "subscriptions": 11103
+    },
+    "in_window": false
+  },
+  {
+    "at": "2026-10-29T09:53:15.686346134Z",
+    "cpu_ticks": {
+      "dispatch": 38905,
+      "listener": 4234,
+      "loadgen": 49776,
+      "nats": 2939,
+      "postgres": 73557,
+      "proxy": 25899
+    },
+    "rss_kib": {
+      "dispatch": 3515012,
+      "listener": 93412,
+      "loadgen": 1281520,
+      "nats": 166288,
+      "postgres": 8758136,
+      "proxy": 116584
+    },
+    "sys_busy_ticks": 410157,
+    "sys_total_ticks": 2931450,
+    "pg_conns": {
+      "active|": 1,
+      "active|Client": 1,
+      "active|Lock": 59,
+      "idle in transaction|Client": 4,
+      "idle|Client": 14
+    },
+    "pg_total": 79,
+    "goroutines": 1152,
+    "pool_acquire_goroutines": 52,
+    "heap_inuse": 0,
+    "heap_alloc": 0,
+    "heap_sys": 0,
+    "nats": {
+      "connections": 56,
+      "cpu_pct": 3,
+      "in_msgs": 71860,
+      "js_api_errors": 1007,
+      "js_api_total": 18806,
+      "js_consumers": 1004,
+      "js_messages": 2501,
+      "js_streams": 4,
+      "mem": 170278912,
+      "out_msgs": 139685,
+      "pull_requests": 24000,
+      "session_pull_requests": 24000,
+      "slow_consumers": 0,
+      "subscriptions": 11103
+    },
+    "in_window": false
+  },
+  {
+    "at": "2026-10-29T09:53:20.675868865Z",
+    "cpu_ticks": {
+      "dispatch": 39329,
+      "listener": 4268,
+      "loadgen": 49796,
+      "nats": 2991,
+      "postgres": 73796,
+      "proxy": 25993
+    },
+    "rss_kib": {
+      "dispatch": 3517252,
+      "listener": 93412,
+      "loadgen": 1281520,
+      "nats": 166288,
+      "postgres": 8988924,
+      "proxy": 116584
+    },
+    "sys_busy_ticks": 411023,
+    "sys_total_ticks": 2932947,
+    "pg_conns": {
+      "active|": 1,
+      "active|Client": 1,
+      "active|Lock": 35,
+      "idle in transaction|Client": 3,
+      "idle|": 1,
+      "idle|Client": 38
+    },
+    "pg_total": 79,
+    "goroutines": 1014,
+    "pool_acquire_goroutines": 0,
+    "heap_inuse": 3421634560,
+    "heap_alloc": 3288460400,
+    "heap_sys": 3429826560,
+    "nats": {
+      "connections": 56,
+      "cpu_pct": 7,
+      "in_msgs": 73998,
+      "js_api_errors": 1007,
+      "js_api_total": 18960,
+      "js_consumers": 1004,
+      "js_messages": 2591,
+      "js_streams": 4,
+      "mem": 170278912,
+      "out_msgs": 142905,
+      "pull_requests": 24000,
+      "session_pull_requests": 24000,
+      "slow_consumers": 0,
+      "subscriptions": 11103
+    },
+    "in_window": false
+  },
+  {
+    "at": "2026-10-29T09:53:25.675994589Z",
+    "cpu_ticks": {
+      "dispatch": 39968,
+      "listener": 4303,
+      "loadgen": 49818,
+      "nats": 3020,
+      "postgres": 73925,
+      "proxy": 26056
+    },
+    "rss_kib": {
+      "dispatch": 3871404,
+      "listener": 93412,
+      "loadgen": 1281520,
+      "nats": 166288,
+      "postgres": 9092624,
+      "proxy": 116584
+    },
+    "sys_busy_ticks": 411941,
+    "sys_total_ticks": 2934447,
+    "pg_conns": {
+      "active|": 1,
+      "active|Lock": 5,
+      "idle in transaction|Client": 2,
+      "idle|Client": 71
+    },
+    "pg_total": 79,
+    "goroutines": 906,
+    "pool_acquire_goroutines": 0,
+    "heap_inuse": 0,
+    "heap_alloc": 0,
+    "heap_sys": 0,
+    "nats": {
+      "connections": 56,
+      "cpu_pct": 7,
+      "in_msgs": 74959,
+      "js_api_errors": 1007,
+      "js_api_total": 19028,
+      "js_consumers": 1004,
+      "js_messages": 2633,
+      "js_streams": 4,
+      "mem": 170278912,
+      "out_msgs": 144176,
+      "pull_requests": 24000,
+      "session_pull_requests": 24000,
+      "slow_consumers": 0,
+      "subscriptions": 11103
+    },
+    "in_window": false
+  },
+  {
+    "at": "2026-10-29T09:53:30.676081077Z",
+    "cpu_ticks": {
+      "dispatch": 40032,
+      "listener": 4324,
+      "loadgen": 49830,
+      "nats": 3043,
+      "postgres": 73949,
+      "proxy": 26111
+    },
+    "rss_kib": {
+      "dispatch": 3871404,
+      "listener": 93412,
+      "loadgen": 1281520,
+      "nats": 166288,
+      "postgres": 9111016,
+      "proxy": 116584
+    },
+    "sys_busy_ticks": 412142,
+    "sys_total_ticks": 2935947,
+    "pg_conns": {
+      "active|": 1,
+      "idle|Client": 78
+    },
+    "pg_total": 79,
+    "goroutines": 896,
+    "pool_acquire_goroutines": 0,
+    "heap_inuse": 0,
+    "heap_alloc": 0,
+    "heap_sys": 0,
+    "nats": {
+      "connections": 56,
+      "cpu_pct": 7,
+      "in_msgs": 75470,
+      "js_api_errors": 1007,
+      "js_api_total": 19142,
+      "js_consumers": 1004,
+      "js_messages": 2650,
+      "js_streams": 4,
+      "mem": 170278912,
+      "out_msgs": 144940,
+      "pull_requests": 24000,
+      "session_pull_requests": 24000,
+      "slow_consumers": 0,
+      "subscriptions": 11103
+    },
+    "in_window": false
+  },
+  {
+    "at": "2026-10-29T09:53:35.675967809Z",
+    "cpu_ticks": {
+      "dispatch": 40040,
+      "listener": 4349,
+      "loadgen": 49840,
+      "nats": 3081,
+      "postgres": 73950,
+      "proxy": 26121
+    },
+    "rss_kib": {
+      "dispatch": 3871404,
+      "listener": 93412,
+      "loadgen": 1281520,
+      "nats": 166288,
+      "postgres": 9112012,
+      "proxy": 116584
+    },
+    "sys_busy_ticks": 412234,
+    "sys_total_ticks": 2937447,
+    "pg_conns": {
+      "active|": 1,
+      "idle|Client": 78
+    },
+    "pg_total": 79,
+    "goroutines": 896,
+    "pool_acquire_goroutines": 0,
+    "heap_inuse": 2538586112,
+    "heap_alloc": 2290982600,
+    "heap_sys": 3788505088,
+    "nats": {
+      "connections": 56,
+      "cpu_pct": 13,
+      "in_msgs": 76786,
+      "js_api_errors": 1007,
+      "js_api_total": 19270,
+      "js_consumers": 1004,
+      "js_messages": 2657,
+      "js_streams": 4,
+      "mem": 170278912,
+      "out_msgs": 147501,
+      "pull_requests": 24972,
+      "session_pull_requests": 24972,
+      "slow_consumers": 0,
+      "subscriptions": 11103
+    },
+    "in_window": false
+  },
+  {
+    "at": "2026-10-29T09:53:40.676597369Z",
+    "cpu_ticks": {
+      "dispatch": 40118,
+      "listener": 4369,
+      "loadgen": 49861,
+      "nats": 3104,
+      "postgres": 74006,
+      "proxy": 26124
+    },
+    "rss_kib": {
+      "dispatch": 3871404,
+      "listener": 93412,
+      "loadgen": 1283568,
+      "nats": 166288,
+      "postgres": 9113220,
+      "proxy": 116584
+    },
+    "sys_busy_ticks": 412441,
+    "sys_total_ticks": 2938947,
+    "pg_conns": {
+      "active|": 1,
+      "idle|Client": 78
+    },
+    "pg_total": 79,
+    "goroutines": 896,
+    "pool_acquire_goroutines": 0,
+    "heap_inuse": 0,
+    "heap_alloc": 0,
+    "heap_sys": 0,
+    "nats": {
+      "connections": 56,
+      "cpu_pct": 5,
+      "in_msgs": 77005,
+      "js_api_errors": 1007,
+      "js_api_total": 19364,
+      "js_consumers": 1004,
+      "js_messages": 2657,
+      "js_streams": 4,
+      "mem": 170278912,
+      "out_msgs": 147843,
+      "pull_requests": 25000,
+      "session_pull_requests": 25000,
+      "slow_consumers": 0,
+      "subscriptions": 11103
+    },
+    "in_window": false
+  },
+  {
+    "at": "2026-10-29T09:53:45.676095801Z",
+    "cpu_ticks": {
+      "dispatch": 40157,
+      "listener": 4399,
+      "loadgen": 49868,
+      "nats": 3128,
+      "postgres": 74016,
+      "proxy": 26153
+    },
+    "rss_kib": {
+      "dispatch": 3871404,
+      "listener": 93412,
+      "loadgen": 1283568,
+      "nats": 166288,
+      "postgres": 9123420,
+      "proxy": 116584
+    },
+    "sys_busy_ticks": 412582,
+    "sys_total_ticks": 2940444,
+    "pg_conns": {
+      "active|": 1,
+      "idle|Client": 78
+    },
+    "pg_total": 79,
+    "goroutines": 889,
+    "pool_acquire_goroutines": 0,
+    "heap_inuse": 0,
+    "heap_alloc": 0,
+    "heap_sys": 0,
+    "nats": {
+      "connections": 56,
+      "cpu_pct": 2,
+      "in_msgs": 77562,
+      "js_api_errors": 1007,
+      "js_api_total": 19476,
+      "js_consumers": 1004,
+      "js_messages": 2687,
+      "js_streams": 4,
+      "mem": 170278912,
+      "out_msgs": 148570,
+      "pull_requests": 25000,
+      "session_pull_requests": 25000,
+      "slow_consumers": 0,
+      "subscriptions": 11103
+    },
+    "in_window": false
+  }
+]
