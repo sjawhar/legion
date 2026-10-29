@@ -1,0 +1,55 @@
+{
+  "schemaVersion": 1,
+  "phase": "review",
+  "issue": "INFRA-743",
+  "completed": "2026-10-29T16:30:00Z",
+  "decision": "changes_requested",
+  "reviewedCodeHead": "b7cccdc95ba8d589e551c43507b5df0b0ea65b3f",
+  "ci": "Code head b7cccdc9: every required check (lint, typecheck, test, pr-title) completed success, ci-ok success; compare b7cccdc9...8d3660c4 touches only .legion/INFRA-743/ (2 files).",
+  "thermonuclear": "deep-review: Verdict CHANGES at b7cccdc9 (1 High, 2 Minor); code-quality: Verdict CHANGES at b7cccdc9 (3 Medium, 4 Low). Findings below are the ones the reviewer verified in the code.",
+  "critical": 0,
+  "important": 3,
+  "minor": 5,
+  "keyFindings": [
+    {
+      "severity": "important",
+      "file": "packages/envoy/cmd/listener/main.go",
+      "description": "The new /healthz 503 (main.go:435-447) is the ECS listener's container health check (infra/aws/rendering/listener.go:202-203, curl -sf /healthz, 30 s x 3 retries; webhooklistener.go:227 DesiredCount 1), so in the band this PR targets ECS replaces the only task. The replacement's first KV watch needs the same consumer creation, its warm-up times out and it serves with an empty registry (main.go:795-800, 820-825) while the existing durable binds without a create (durable.go:141-158), so fanoutDelivery ACKs every general-topic message as 'no matching interests' (delivery.go:667-675): messages lost, against acceptance 4 (no change to delivery semantics). On GKE every replica reaches the grace in the same minute and readiness (dispatch_kube.go:516) empties the Service. The plan's basis ('Liveness and startup read /livez, never /healthz, so no pod is restarted') is false for ECS, and neither the PR body nor the docs name or bound it. Design decision (503 vs 200 degraded plus a paging log signal) sent to the architect."
+    },
+    {
+      "severity": "important",
+      "file": "packages/envoy/cmd/listener/healthz_hook_stall_test.go",
+      "description": "No test pins that a listener that never reconnected reports no stall however long it runs: marking the hooks due at the first connection would answer 503 on every listener a minute after start with every test green. Advance the clock by bus.RepairGrace before the ForceReconnect and assert 200 healthy (the architect's request, dispatch://INFRA-743/comment/3313691b-6e3d-4f9a-a977-54e2ce89c421)."
+    },
+    {
+      "severity": "important",
+      "file": "PR body",
+      "description": "The PR adds a refusal at a process boundary (/healthz 503 read by the ECS health check and GKE readiness) and renames a log line operators read; it carries no '## Contract change census' naming those consumers and a rollout line."
+    },
+    {
+      "severity": "minor",
+      "file": "packages/envoy/cmd/dispatch/settings.go",
+      "description": "settings.go:83 and :85 (ENVOY_NATS_REPLICAS, ENVOY_STREAM_MAX_BYTES), packages/envoy/AGENTS.md:2500 and the unreleased fragments pr-2362-replica-count.yaml:18 and pr-2362-stream-byte-limit.yaml:27 still name the old line 'envoy nats reconnect hook failed' at each retry; it is now a WARN '...; it is retried' under a minute and the ERROR 'envoy nats reconnect hooks have not succeeded' past it."
+    },
+    {
+      "severity": "minor",
+      "file": "packages/envoy/internal/kvwatch/kvwatch.go",
+      "description": "kvwatch.go:105-108 says 'one outage reports once at one bound'; past the grace recoverUntilHealthy logs the bus ERROR on every failed attempt (recovery.go:355-357, up to 30 s apart) and a stopped watcher adds its own 'watcher was not repaired'. Same claim in the PR body's Change list. kvwatch.go:191-197 and :594-601 say the bus arms another repair within seconds; for a watcher that stopped on its own, with the hooks current, the next Rewatch is the self-health rebuild on the monitor's tick (main.go:123, 177)."
+    },
+    {
+      "severity": "minor",
+      "file": "packages/envoy/internal/kvwatch/kvwatch.go",
+      "description": "reportUnrepaired (kvwatch.go:657-666) is now called only from the timer's own callback (kvwatch.go:601), so timer.Stop() and the timer local are dead since reportFailedRepair went."
+    },
+    {
+      "severity": "minor",
+      "file": "packages/envoy/internal/bus/nats.go",
+      "description": "HookStall's doc comment says the error is 'nil while none has [failed]', but a run that succeeds clears it (recovery.go:217), and the IsZero branch's 'return 0, c.lastHookErr' always returns nil. The grace comparison is repeated in two packages (recovery.go:249, main.go:435)."
+    },
+    {
+      "severity": "minor",
+      "file": "packages/envoy/internal/bus/recovery.go",
+      "description": "reportHookFailure (recovery.go:247-260) repeats the same three attributes in its Warn and Error calls; pick level and message, then one slog.Log call."
+    }
+  ]
+}
