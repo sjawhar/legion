@@ -282,12 +282,11 @@ gate_registered() {
   daemon_state | jq -e --arg issue "$1" --arg artifact "$2" \
     '.issues[$issue].designGate.artifactId == $artifact and .issues[$issue].designGate.currentVersion > 0'
 }
-# wait_for_architect ISSUE waits for a root's live architect to register. With the design gate
-# armed, its root may already wait on a person (awaiting_person) by the time a proof looks, but the
-# architect remains live and its endpoints are still checked.
-architect_up_or_awaiting() { issue_worker_live "$1" architect; }
+# architect_is_live ISSUE checks the root architect's live claim, including while the root waits on
+# a person. It no longer treats awaiting_person as a substitute for a live claim.
+architect_is_live() { issue_worker_live "$1" architect; }
 wait_for_architect() {
-  until_true 300 "live architect on $1 to register" architect_up_or_awaiting "$1"
+  until_true 300 "live architect on $1 to register" architect_is_live "$1"
   assert_claim_endpoints "$1" architect
 }
 # architect_registers_gate ISSUE LABEL waits for a root's architect to register its gate on its

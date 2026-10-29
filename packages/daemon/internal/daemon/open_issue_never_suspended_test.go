@@ -202,15 +202,10 @@ func TestAnOpenIssuesClaimsNeverSuspend(t *testing.T) {
 	assertOpen("boot, tick, and outbox drain")
 }
 
+// TestOpenIssueSuspensionInvariantKeepsTheExceptions covers the daemon-owned suspensions an open
+// issue must still allow. TestTheStoreRecordsWhoSuspendedAClaim covers the operator's real POST
+// /legion/v1/operator/claims/{token}/suspend route.
 func TestOpenIssueSuspensionInvariantKeepsTheExceptions(t *testing.T) {
-	t.Run("operator", func(t *testing.T) {
-		sup, _ := newOutboxSupervisor(t, "legion", t.TempDir())
-		token := launchedClaim(t, sup, "LEGION-810", "LEGION-810", claim.RoleArchitect)
-		operatorSuspend(t, sup, token)
-		if got, _ := sup.Machine(token); got.Claim().SuspendedBy != supervise.SuspendedByOperator {
-			t.Fatalf("operator suspension source = %q, want operator", got.Claim().SuspendedBy)
-		}
-	})
 
 	t.Run("tree move", func(t *testing.T) {
 		carriedChildStops(t, "LEGION-811", "LEGION-812", func(apply func(string, intake.Fact)) {
