@@ -2,40 +2,50 @@
   "schemaVersion": 1,
   "phase": "test",
   "issue": "INFRA-557",
-  "completed": "2026-10-29T00:50:00Z",
-  "round": 7,
-  "testedHead": "75ad248670bd7b5b1a100e9e5976e21407ee7257",
-  "handoffHead": "8a7c7fe3148114d34ad93dd4616c3b8861c53c3d",
-  "scope": "Round 6 tested merged head 6ee80831 in full and failed only on the required lint check. `git diff --stat 6ee80831 75ad2486` shows the only change outside .legion/ is one line of biome.json (`!!packages/envoy/internal/testnats/testdata`). No listener code changed, so this round checks the fix and runs the smoke gate; round 6's real-surface results stand for the unchanged code.",
+  "completed": "2026-10-29T12:10:00Z",
+  "round": 8,
+  "testedHead": "9c5cd05b99938e552b237ca0c73c270eb69e1bc3",
+  "handoffHead": "5d48bb7893e60de89005d04a83ea0cb707b4fa06",
+  "scope": "Scoped by the INFRA-63 architect (2026-10-29 09:34Z and 11:49Z): test the two review-round-2 fixes on the real surface under the rendered grant. Fix A: repeated graceful hand-overs keep the 3 s hold and deliver within 10 s, including after a node loss. Fix B: a hard take-over after an abandon keeps its settle hold and per-session order. A full test of the merged head follows the forward merge.",
+  "ci": "No CI ran at 9c5cd05b or 5d48bb78: gh api shows mergeable false, mergeable_state dirty, and 0 workflow runs for either SHA. CI waits on the conflict with main and on the controller's hold on forward merges until INFRA-520's merge queue is on (architect 09:34Z). Per the architect, the issue was not sent back for it.",
   "implementerProof": {
     "verdict": "verified",
-    "how": "The implementer's fix is one biome.json line. `bunx @biomejs/biome@2.4.11 check` on both grant fixtures answers 'These paths were provided but ignored' (diagnosis only; the lint lane is CI's). The implementer's multiprocess command passed all 26 rows at 6ee80831 in round 6; its code is unchanged since."
+    "how": "Re-ran `cd packages/envoy && go test -tags multiprocess -count=1 -timeout 40m -v -run '^Test(TwoPods|TwoBuilds)' ./cmd/listener` at 9c5cd05b (before the 10:08Z drain, same code head): 28 rows PASS, ok 624.258s, including TestTwoPodsEveryGracefulStopWithAPromptInHandAndARetryOutstandingDeliversWithin10s and TestTwoPodsEveryGracefulStopAfterANodeLossWithAPromptInHandAndARetryOutstandingDeliversWithin10s. Finding B's in-process test is a unit-lane test (CI's), so I drove the same scenario on real binaries instead (proof 3)."
   },
   "failures": [],
   "failed": 0,
   "proof": [
     {
-      "criterion": "Smoke gate at the new head: one deliverer, take-over under the rendered grant",
-      "surface": "two real cmd/listener processes built at 75ad2486, signed in with machine box-smoke's nkey under exactly the rendered ListenerPermissions grant (internal/testnats/testdata/listener-permissions.json), against a real nats-server 2.10.29 process; a port session on a local HTTP server; 40 sends through the standby with curl",
-      "command": "bash $TMPDIR/infra557-test/grant-smoke.sh $TMPDIR/infra557-test/listener-head7 g7-KILL KILL",
-      "observed": "active and standby at start; 0 sends refused; all 40 messages delivered in send order, the last 6.30 s after the SIGKILL; pod-b active afterwards; 0 permission lines in either pod's log; m15 (in flight at the kill) prompted twice with the same event id",
-      "headSha": "75ad248670bd7b5b1a100e9e5976e21407ee7257",
-      "negativeControl": "as machine box-other's NATS user: put lease.listener-box-smoke and delivery.listener-box-smoke.<hash>.ses_x refused with 'Permissions Violation for Publish to \"$KV.envoy_listener....\"'; put lease.listener-box-other accepted"
+      "criterion": "Review round 2 finding A: every graceful hand-over, not only the first, delivers within 10 s (3 s hold)",
+      "surface": "real cmd/listener processes built at 9c5cd05b for machine box-smoke, each signed in with box-smoke's nkey under the rendered ListenerPermissions grant, against a real nats-server 2.10.29 process; a fake serving port (204, 500 for a failing session, never answers a prompt in hand); sends via /v1/messages/send",
+      "command": "python3 $TMPDIR/infra557-test/roll.py $TMPDIR/infra557-test/listener-head8 h8-roll roll (graceful stops A->B->C->D, each a second into a prompt in hand, a failing session's 30 s retry outstanding, a send every 100 ms to two healthy sessions)",
+      "observed": "hand-overs 3.58 / 3.80 / 3.55 s; 257 messages, 0 missing, 0 repeats, slowest 7.60 s, 0 later than 10 s, each session in order, 0 permission violations (the run before the drain gave 7.57 s too)",
+      "headSha": "9c5cd05b99938e552b237ca0c73c270eb69e1bc3",
+      "negativeControl": "the same run with a binary built at 75ad2486: slowest 11.09 s, 12 messages later than 10 s"
     },
     {
-      "criterion": "Round-6 failure: the PR's tree passes the Biome check that the required lint job runs",
-      "surface": "the repository's biome.json at 75ad2486",
-      "command": "bunx @biomejs/biome@2.4.11 check packages/envoy/internal/testnats/testdata/listener-permissions.json packages/envoy/internal/testnats/testdata/host-permissions.json",
-      "observed": "'These paths were provided but ignored' for both fixtures; the required lint check at 75ad2486 was queued when read, and CI settles it",
-      "headSha": "75ad248670bd7b5b1a100e9e5976e21407ee7257",
-      "negativeControl": "the same command at 6ee80831: 'listener-permissions.json format ... Found 1 error' (round 6), and lint completed failure there"
+      "criterion": "Review round 2 finding A after a node loss: every graceful hand-over delivers within 10 s",
+      "surface": "as above; the active pod SIGSTOPped (its connections stay open, as on a lost node), then the pod that took its expired lease and each later holder stopped gracefully",
+      "command": "python3 $TMPDIR/infra557-test/roll.py $TMPDIR/infra557-test/listener-head8 h8-loss loss",
+      "observed": "pod-b took the frozen pod's lease after 4.9 s; hand-overs 3.55 / 3.54 s; 183 messages, 0 missing, 0 repeats, slowest 7.55 s, 0 later than 10 s, each session in order",
+      "headSha": "9c5cd05b99938e552b237ca0c73c270eb69e1bc3",
+      "negativeControl": "the same run at 75ad2486: slowest 11.59 s, 33 messages later than 10 s"
+    },
+    {
+      "criterion": "Review round 2 finding B: a hard take-over by a pod that gave the lease up while waiting out a binding keeps its settle hold and per-session order",
+      "surface": "real processes under the rendered grant on a real nats-server 2.10.29: a pre-lease build (main 571f729b) binds the durable; pod-x (nkey box-x, box-smoke's grant) takes the lease and waits the binding out; a config reload (SIGHUP) drops box-x's CONSUMER.INFO/CREATE for the durable; pod-y (nkey box-smoke) takes over; the grant is restored and the old build stops; pod-y prompts 'older', which is never answered, and is SIGSTOPped; 30 'newer' sends follow, one every 200 ms",
+      "command": "python3 $TMPDIR/infra557-test/abandon.py $TMPDIR/infra557-test/listener-head8 $TMPDIR/infra557-test/listener-main h8-ab2",
+      "observed": "pod-x logged ERROR 'lease holder cannot deliver from the durable' 143 s after the reload and gave the lease up; pod-y took it. After the freeze, pod-x took the expired lease (settle true), logged 'term must settle', and the settle hold ended after 6.0 s (outcome settled, 31 messages). The session took older, newer-1 ... newer-30 in publish order, the last 11.16 s after the freeze",
+      "headSha": "9c5cd05b99938e552b237ca0c73c270eb69e1bc3",
+      "negativeControl": "the same run at 75ad2486: pod-x took the expired lease, logged 'durable is push-bound by a subscriber without the lease; waiting for its binding to end', and delivered nothing within 60 s"
     }
   ],
   "observations": [
-    "In the smoke run, the message in flight at the SIGKILL (m15) reached the session twice with the same event id. The killed pod's prompt landed before its ledger recorded the delivery, and the new holder took the former holder's attempt over at once. The spec allows a repeat with the same id; this is the architect's take-over rule (round 5 observation).",
-    "CI at 75ad2486 when read: lint, build, changes, test, typecheck and the Daemon Go suite queued. Not waited on."
+    "A SIGKILL form of the finding-B run kept order at both heads: the dead pod's message was back before the take-over, so that form cannot tell the heads apart. The frozen-node form above is deterministic and is the one recorded.",
+    "The multiprocess run was made on the pod before the 10:08Z drain. The real-surface runs were repeated on the new pod after the resume, at the same code head."
   ],
   "notes": [
-    "Round 6's real-surface evidence (https://github.com/sjawhar/legion/pull/2404#issuecomment-6484392580) is for code identical to this head's, apart from biome.json."
+    "Scripts roll.py and abandon.py are throwaway, in $TMPDIR/infra557-test; not committed. The legion/INFRA-557-wip branch (c6c4f897) held only round-8 notes and roll.py, whose content is in this handoff; it is deleted.",
+    "Evidence: https://github.com/sjawhar/legion/pull/2404#issuecomment-6496215001"
   ]
 }
