@@ -1,0 +1,20 @@
+{
+  "schemaVersion": 1,
+  "phase": "review",
+  "issue": "INFRA-723",
+  "completed": "2026-10-29T13:55:00Z",
+  "decision": "approved",
+  "round": 3,
+  "codeHead": "af843c867d997a6040cf51362511dc8494dcf66e",
+  "ci": "Required set read from the rulesets at this round: lint, typecheck, test, pr-title (not ci-ok; no branch protection). The reviewer's prose push above af843c86 carries the code; its required checks are waited for green before the approval.",
+  "thermonuclear": "deep-review: Verdict APPROVE at 2ea9bdda (merge byte-identical to both sides apart from the moved 5-line step; router `test` filter covers every build-inputs.txt entry the test can read; check-ci-filters 23 gates pass; release-push.test.sh 623 passed; docs/solutions citations and both negative controls re-run). code-quality: Verdict CHANGES at 2ea9bdda on one prose finding: the new EXIT-trap learning contradicted INFRA-629's active rule 1.",
+  "critical": 0,
+  "important": 0,
+  "minor": 4,
+  "keyFindings": [
+    {"severity": "minor", "file": "docs/solutions/best-practices/one-exit-trap-registry-and-no-registering-helper-inside-command-substitution-INFRA-723.md", "description": "Fixed by the reviewer's prose commit: it said it extends INFRA-629's learning while contradicting that learning's rule 1; it now says it narrows rule 1, INFRA-629's rule names the registry as the one exception, and INFRA-629's evidence no longer says deploy_key_env sets its own trap."},
+    {"severity": "minor", "file": "packages/claude-envoy/scripts/verify-build.sh", "description": "Fixed by the reviewer's prose commit: verify-build.sh:7-8 and release-push.sh:188 named pr-and-main.yaml and envoy-and-contracts.yaml, which #2316 folded into ci.yaml."},
+    {"severity": "minor", "file": "docs/solutions/best-practices/git-diff-limits-paths-before-it-pairs-renames-INFRA-723.md", "description": "Fixed by the reviewer's prose commit: the '614 passed, 1 failed' control now names d7b3cc91, beside the af843c86 count."},
+    {"severity": "minor", "file": "PR body", "description": "Fixed in the PR body: it called ci-ok required (the rulesets require lint, typecheck, test, pr-title) and its Size line predated the docs/solutions files."}
+  ]
+}
