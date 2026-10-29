@@ -1,5 +1,81 @@
 # Changelog
 
+## [main@c4cea404651d] - 2026-10-29
+
+### Added
+
+- Every Dispatch write the bundled `dispatch` command and the channel server make carries one `Idempotency-Key` and is asked again under it after a transport failure, a 5xx, a 408, a 429, a `409 KEY_IN_FLIGHT` or an attempt that hears nothing for 20 s (INFRA-258, through `@sjawhar/envoy-client`'s `DispatchClient`), so a write whose answer was lost is made once. A session's reply to a delivery attempt goes through that client too, keyed and bounded by its deadline. The hooks read Dispatch and write nothing, so they carry no key. `dist/dispatch.js`, `dist/envoy-channel.js` and `dist/session-hook.js` are rebuilt.
+
+## [main@a09a2f257406] - 2026-10-29
+
+### Added
+
+- Every registration names the plugin: `plugin` `@sjawhar/claude-envoy` and `plugin_version` the
+  version directory Claude Code's plugin cache installed it under (the marketplace commit's first
+  12 characters), or `source` for a bundle outside the plugin cache, which the listener's
+  `GET /v1/sessions` and `GET /v1/registry/<id>`, and `envoy_sessions`, show. `dist/` was rebuilt.
+
+### Changed
+
+- Pull requests no longer commit `dist/` and `legion/`: main's Rebuild Claude Envoy plugin
+  workflow commits them after each merge, so main's built files lag its sources by one run of
+  that workflow, runner queues included, while the merge's hand-written files (`hooks/hooks.json`,
+  `.mcp.json`, `bin/`) are live at once beside the previous build.
+  `scripts/build.ts` takes `--check` or `--out <dir>` (a runnable copy of the plugin in a new or
+  empty directory outside the repository), refuses a run that names no mode, and never writes the
+  package's own `dist/` or `legion/`.
+- The `dispatch` skill this plugin ships (its `skills/dispatch` link to the repository's skill)
+  and the bundled `dispatch_claim` description, since `dist/` was regenerated, say what a claim
+  delivers, where the skill said a claim delivers no comments: while a session holds an issue's
+  claim, a person's answers, comments and messages on that issue reach it directly, and a new
+  comment that mentions it arrives once, as the mention, when the mention reached it, and still
+  reaches it directly when the mention's send fails (a mention whose receipt timed out can arrive
+  twice: the second copy is the same comment). A `session:` route to the session brings a person's
+  answers, comments and messages as a claim does; a subscription to the issue brings other agents'
+  activity, beyond a reply in an ask the session follows.
+- The `dispatch` command (`dist/dispatch.js`) prints every open thread anchored on a document
+  `dispatch doc-read` reads in full: an open ask with its question and every reply under it, and
+  a comment thread with its root and every reply's author, time and text, in place of the one line
+  of ask and comment ids that never showed a reply. The bundled `dispatch_doc_read` description
+  says so, since `dist/` was regenerated (#2366).
+- The plugin's regenerated `legion/` copy of the `legion-worker` skill's merge gate says a
+  production check of `sjawhar/legion` wakes on Dispatch's `server.started` announcing that every
+  server process serves a build containing the merge, named in the look's task as
+  `Dispatch serving build <sha> on every server process`.
+- The bundled `dist/` and `legion/` were regenerated: the contracts' ask payload
+  schema parses the `withdrawn` resolution kind an issue's close writes, the actor label reads a
+  `legion-daemon:` session id whole, the `dispatch_issue_update` and `dispatch_resolve_ask`
+  descriptions say a close withdraws an issue's open asks and a reopen brings them back, and the
+  plugin's copies of the `legion-controller` and `legion-worker` skills say the same.
+- The plugin declares daemon API contract 41 in `package.json`'s `legion.daemonApiVersion`:
+  `legion controller start` ends the operator's Oh My Pi command line with
+  `/legion-controller-start`, and pi-legion sends the controller's start message from that
+  command rather than from `session_start`, so the start turn runs after Oh My Pi's startup;
+  nothing this plugin reads or writes moved, and a session of it registers with a daemon at 41.
+  `dist/envoy-channel.js`, which embeds the number, is rebuilt.
+- The `legion-controller` skill this plugin ships says when the controller is registered: at session
+  startup, or, in a controller an operator started, from its first command once Oh My Pi has
+  started, where it said the extension's startup claim; its takeover note's reason not to set
+  `LEGION_CONTROLLER=1` says that marker makes the session the launched controller, which needs a
+  start message.
+
+### Fixed
+
+- A session whose NATS path freezes (packets stop, neither side closes) reconnects within 30 s,
+  52 s when its first redial also hangs, instead of after up to 6 minutes: the channel server
+  dials with `@legion/envoy-client/nats-connection`'s options, a ping every 10 s and the
+  connection dropped after two unanswered pings, in place of nats.js's default 120 s ping. The
+  reconnect runs the catch-up, so the session is handed the messages sent meanwhile once. `dist/`
+  was rebuilt.
+- A channel server whose NATS redial once hung (its TCP connect, or a server that never sends
+  `INFO`) still exits on SIGTERM: nats.js gave up on that redial at its 20 s dial timeout but left
+  its socket open, which held the process alive. The bundle carries `patches/nats@2.29.3.patch`,
+  which makes nats.js destroy the socket of a transport that never finished connecting. The patch
+  also makes nats.js close a stale connection without flushing it first, so a channel server whose
+  connection holds data the frozen path never acknowledged still reconnects: the flush never
+  completed behind that data, and the server never redialed. `dist/` was rebuilt.
+- A channel session whose handoff file is missing at startup runs one heartbeat, not two, so during a listener outage it makes no more registry attempts than its bounded retry allows.
+
 ## Before changelog fragments
 
 ### Added
