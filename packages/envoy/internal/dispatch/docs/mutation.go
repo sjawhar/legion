@@ -823,13 +823,18 @@ func (s *Service) TextWithBlocks(ctx context.Context, artifactID string) (string
 
 // documentBlocks renders tree once into its canonical markdown and the blocks whose byte ranges
 // index into it, each with its token and, for a table, the blocks it holds and its rows. It leaves
-// out the document's token, which none of its callers reads.
+// out the document's token, which none of its callers reads. It validates tree once, refusing it
+// as pmdoc.TableRows does, and reads it thereafter without validating it again.
 func documentBlocks(tree *pmdoc.Node) (string, []model.ArtifactBlock, error) {
-	rows, err := pmdoc.TableRows(tree)
+	valid, err := pmdoc.ValidateDocument(tree, "TableRows")
 	if err != nil {
 		return "", nil, documentSchemaError(err)
 	}
-	rendered, err := renderedBlocks(tree, rows)
+	rows, err := valid.TableRows()
+	if err != nil {
+		return "", nil, documentSchemaError(err)
+	}
+	rendered, err := renderedBlocks(valid, rows)
 	if err != nil {
 		return "", nil, err
 	}
@@ -849,11 +854,13 @@ type renderedDocument struct {
 
 // renderedBlocks is documentBlocks with each table's rows already listed (pmdoc.TableRows), and the
 // document's token, from the same one encoding of the tree as its blocks' tokens (documentTokens).
-// A table block carries the rows of the table its id addresses: where two tables carry one id, the
-// first in document order, the one an edit naming that id changes. Its error is a block token's or
-// the rendering's, never the document token's, which is tokenErr.
-func renderedBlocks(tree *pmdoc.Node, rows map[string][]pmdoc.TableRow) (renderedDocument, error) {
-	tableDescendants, err := pmdoc.TableDescendantIDs(tree)
+// It reads tree, validated once by its caller, without validating it again: its descendants, its
+// tokens and its rendering (pmdoc.ValidDocument). A table block carries the rows of the table its
+// id addresses: where two tables carry one id, the first in document order, the one an edit naming
+// that id changes. Its error is a block token's or the rendering's, never the document token's,
+// which is tokenErr.
+func renderedBlocks(tree pmdoc.ValidDocument, rows map[string][]pmdoc.TableRow) (renderedDocument, error) {
+	tableDescendants, err := tree.TableDescendantIDs()
 	if err != nil {
 		return renderedDocument{}, documentSchemaError(err)
 	}
@@ -861,7 +868,7 @@ func renderedBlocks(tree *pmdoc.Node, rows map[string][]pmdoc.TableRow) (rendere
 	if tokens.blocksErr != nil {
 		return renderedDocument{}, documentSchemaError(tokens.blocksErr)
 	}
-	markdown, offsets, err := pmdoc.RenderWithBlockOffsets(tree)
+	markdown, offsets, err := tree.RenderWithBlockOffsets()
 	if err != nil {
 		return renderedDocument{}, documentSchemaError(err)
 	}

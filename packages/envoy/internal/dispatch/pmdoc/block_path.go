@@ -43,7 +43,7 @@ type TablePosition struct {
 
 // BlockPathOf is the path of the block carrying blockID, or ErrTargetNotFound when no block does.
 func BlockPathOf(doc *Node, blockID string) (BlockPath, error) {
-	if err := wantDocument(doc, "BlockPathOf"); err != nil {
+	if _, err := ValidateDocument(doc, "BlockPathOf"); err != nil {
 		return BlockPath{}, err
 	}
 	indexes, _, ok := findBlock(doc, blockID)
@@ -194,11 +194,23 @@ type TableCell struct {
 // each cell placed as BlockPathOf places it, with the document's tables laid out once each, in
 // document order, on one span budget (tableLayout) and no block's path built. Where two tables
 // carry one id, the first in document order is listed under it, as BlockPathOf finds it. A table it
-// does not list is laid out only for what its spans spend, and only while the budget lasts.
+// does not list is laid out only for what its spans spend, and only while the budget lasts. It
+// validates doc first (ValidateDocument).
 func TableRows(doc *Node) (map[string][]TableRow, error) {
-	if err := wantDocument(doc, "TableRows"); err != nil {
+	valid, err := ValidateDocument(doc, "TableRows")
+	if err != nil {
 		return nil, err
 	}
+	return valid.TableRows()
+}
+
+// TableRows is TableRows of d's tree without validating it again; the zero ValidDocument is
+// TableRows' error for a nil tree.
+func (d ValidDocument) TableRows() (map[string][]TableRow, error) {
+	if d.doc == nil {
+		return TableRows(nil)
+	}
+	doc := d.doc
 	rows := map[string][]TableRow{}
 	spans := &renderer{spanBudget: maxSpanCells}
 	Walk(doc, func(node *Node) bool {
@@ -229,13 +241,23 @@ func TableRows(doc *Node) (map[string][]TableRow, error) {
 // (tableLayout), for both, so its cost is linear in the document's size: every path of a row shares
 // one read-only Cells slice, every block in a cell shares one read-only TablePosition, their Row,
 // Column and Header point into storage the table's paths share, and a listed cell's opening words
-// and header are the strings its path holds.
+// and header are the strings its path holds. It validates doc first (ValidateDocument).
 func BlockPathsAndTableRows(doc *Node) (map[string]BlockPath, map[string][]TableRow, error) {
-	if err := wantDocument(doc, "BlockPathsAndTableRows"); err != nil {
+	valid, err := ValidateDocument(doc, "BlockPathsAndTableRows")
+	if err != nil {
 		return nil, nil, err
 	}
+	return valid.BlockPathsAndTableRows()
+}
+
+// BlockPathsAndTableRows is BlockPathsAndTableRows of d's tree without validating it again; the
+// zero ValidDocument is BlockPathsAndTableRows' error for a nil tree.
+func (d ValidDocument) BlockPathsAndTableRows() (map[string]BlockPath, map[string][]TableRow, error) {
+	if d.doc == nil {
+		return BlockPathsAndTableRows(nil)
+	}
 	walker := blockPathWalker{paths: map[string]BlockPath{}, rows: map[string][]TableRow{}, spans: &renderer{spanBudget: maxSpanCells}}
-	walker.children(doc, nil)
+	walker.children(d.doc, nil)
 	return walker.paths, walker.rows, nil
 }
 

@@ -96,6 +96,7 @@ jobs:
       envoy_go_race: ${{ steps.filter.outputs.envoy_go_race }}
       dispatch_memory: ${{ steps.filter.outputs.dispatch_memory }}
       dispatch_multiprocess: ${{ steps.filter.outputs.dispatch_multiprocess }}
+      listener_server_change: ${{ steps.filter.outputs.listener_server_change }}
       broker_multiprocess: ${{ steps.filter.outputs.broker_multiprocess }}
       envoy_smoke: ${{ steps.filter.outputs.envoy_smoke }}
       envoy_e2e_local: ${{ steps.filter.outputs.envoy_e2e_local }}
@@ -778,6 +779,55 @@ jobs:
               - *go_workspace
               - *dispatch_command_tests
               - 'packages/envoy/internal/testnats/*'
+            # The server-change soak (listener-server-change): `go test -tags serverchange
+            # ./cmd/listener`. The listener's own packages, and what its test binary compiles
+            # beyond them - the in-process NATS and Postgres helpers, the builder of the binary it
+            # starts, and the Dispatch packages cmd/listener's tests drive - each package's
+            # testdata included.
+            listener_server_change:
+              - '.github/workflows/ci.yaml'
+              - *go_workspace
+              - *listener_command
+              - 'packages/envoy/internal/bus/bustest/*'
+              - 'packages/envoy/internal/cmdtest/*'
+              - 'packages/envoy/internal/contracts/testdata/**'
+              - 'packages/envoy/internal/dispatch/accesslog/*'
+              - 'packages/envoy/internal/dispatch/agentsecrets/*'
+              - 'packages/envoy/internal/dispatch/agentstream/*'
+              - 'packages/envoy/internal/dispatch/api/*'
+              - 'packages/envoy/internal/dispatch/architecture/*'
+              - 'packages/envoy/internal/dispatch/asks/*'
+              - 'packages/envoy/internal/dispatch/auth/*'
+              - 'packages/envoy/internal/dispatch/delivery/**'
+              - 'packages/envoy/internal/dispatch/docs/*'
+              - 'packages/envoy/internal/dispatch/docs/crafted/*'
+              - 'packages/envoy/internal/dispatch/duty/*'
+              - 'packages/envoy/internal/dispatch/embed/*'
+              - 'packages/envoy/internal/dispatch/embedqueue/*'
+              - 'packages/envoy/internal/dispatch/envoy/*'
+              - 'packages/envoy/internal/dispatch/events/*'
+              - 'packages/envoy/internal/dispatch/files/*'
+              - 'packages/envoy/internal/dispatch/githubapp/*'
+              - 'packages/envoy/internal/dispatch/identity/*'
+              - 'packages/envoy/internal/dispatch/model/*'
+              - 'packages/envoy/internal/dispatch/pmdoc/**'
+              - 'packages/envoy/internal/dispatch/processes/*'
+              - 'packages/envoy/internal/dispatch/rank/*'
+              - 'packages/envoy/internal/dispatch/refs/*'
+              - 'packages/envoy/internal/dispatch/retry/*'
+              - 'packages/envoy/internal/dispatch/store/*'
+              - 'packages/envoy/internal/dispatch/store/migrations/**'
+              - 'packages/envoy/internal/dispatch/text/**'
+              - 'packages/envoy/internal/githubappjwt/*'
+              - 'packages/envoy/internal/kvwatch/kvwatchtest/*'
+              - 'packages/envoy/internal/oidc/oidctest/*'
+              - 'packages/envoy/internal/pglisten/*'
+              - 'packages/envoy/internal/pgmigrate/*'
+              - 'packages/envoy/internal/testnats/*'
+              - 'packages/envoy/internal/testpg/*'
+              - 'packages/envoy/internal/webhook/testdata/**'
+              # cmd/listener/api_test.go:191,436,480, which the soak's run compiles too.
+              - 'packages/contracts/fixtures/dispatch-targeted-delivery.json'
             # `go test -tags multiprocess ./cmd/broker`, and the agent-secrets binary
             # cmd/broker/outage_test.go:317-318 builds.
             broker_multiprocess:
@@ -2387,6 +2437,51 @@ jobs:
         run: go test -tags multiprocess -count=1 -timeout 20m -v ./cmd/dispatch
         working-directory: packages/envoy
 
+  # The server-change soak (packages/envoy/cmd/listener/server_change_test.go, INFRA-547): it
+  # drives two real envoy-listener binaries over a three-server NATS cluster, with a session
+  # stand-in moved between the servers by lame-duck shutdowns and forced kills and three senders
+  # publishing through the listener, and holds every message to reaching its session or failing
+  # its sender. It builds only under the `serverchange` tag, so envoy-go's unit run leaves it
+  # out, and it is a job of its own because it outlives that step: it sends for at least a minute
+  # and waits out each server's restart and the JetStream catch-up after it, which, beside the
+  # listener's other tests, is past what envoy-go's unit step holds under go test's default
+  # ten-minute package deadline. It runs the soak alone (-run TestServerChange), since envoy-go
+  # runs the package's untagged tests already; the cluster runs in the test process
+  # (internal/testnats), so it needs no container runtime and no database.
+  listener-server-change:
+    needs: changes
+    if: needs.changes.outputs.listener_server_change == 'true'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - id: setup-go
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: packages/envoy/go.mod
+          cache: false
+      # go-envoy: the test binary, and the listener cmdtest.Build makes from the same packages.
+      - id: go-cache
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            ~/go/pkg/mod
+            ~/.cache/go-build
+          key: go-envoy-${{ runner.os }}-go${{ steps.setup-go.outputs.go-version }}
+          restore-keys: ${{ github.ref != 'refs/heads/main' && format('go-envoy-{0}-', runner.os) || '' }}
+      - name: Server-change soak of the listener
+        run: go test -tags serverchange -count=1 -timeout 15m -v -run TestServerChange ./cmd/listener
+        working-directory: packages/envoy
+      - if: github.event_name == 'push' && success() && steps.go-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            ~/go/pkg/mod
+            ~/.cache/go-build
+          key: ${{ steps.go-cache.outputs.cache-primary-key }}
+
   # The two-process tests of the secrets broker (packages/envoy/cmd/broker/multiprocess_test.go,
   # INFRA-236): each row starts real cmd/broker binaries against one Postgres - which is what the
   # broker's Deployment runs once it carries more than one replica - and drives them over real
@@ -2752,6 +2847,7 @@ jobs:
       - envoy-go-race
       - dispatch-memory
       - dispatch-multiprocess
+      - listener-server-change
       - broker-multiprocess
       - envoy-smoke
       - envoy-e2e-local
@@ -2788,6 +2884,7 @@ jobs:
               "envoy-go-race": "envoy_go_race",
               "dispatch-memory": "dispatch_memory",
               "dispatch-multiprocess": "dispatch_multiprocess",
+              "listener-server-change": "listener_server_change",
               "broker-multiprocess": "broker_multiprocess",
               "envoy-smoke": "envoy_smoke",
               "envoy-e2e-local": "envoy_e2e_local",
