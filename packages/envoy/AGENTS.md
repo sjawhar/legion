@@ -411,7 +411,7 @@ mutate starts from the tree `applyLive` already read (`startTree`, `editTree`) r
 its own; `applyLive` lets that tree go before the one check that decodes a second copy of the
 state (`refuseUndecodable`); and a write drops its fork and rendering once it commits, before its
 publish loads the room (`releaseFork`), since a pooled connection's context can keep the write
-reachable long after it answered (LEGION-504). A token's encoding (`pmdoc.AppendTokenJSON`) is
+reachable long after it answered (LEGION-504). A token's encoding (`pmdoc.EncodeTokenJSON`) is
 held once per call, in one buffer for the document and all its blocks, and dropped when the call
 returns; LEGION-504's concern was more copies per token and their retention, and neither holds.
 The handler ends the transaction with
@@ -556,7 +556,11 @@ however many paths share them; `TestADocumentReadWeighsAboutTheHeapItHolds` hold
 entries, which callers write, and shares a table's descendant ids and a path's table position with
 every later read of that head, which no caller writes (`documentRead`). Concurrent misses of one
 head share one bounded document fold, while a request that ends leaves that fold running for the
-other callers. A document outside the schema stores no rendering and keeps the tree/error behavior
+other callers. The fold reads the history it has just decoded, which nothing else holds, through
+`pmdoc.ReadUnshared` (`docs.foldLoaded`): each text's items walked directly rather than through
+ygo's `ToDelta`, the tree copied as `pmdoc.Read` copies it and validated once, and the rendering's
+placement walk, token encoding and render take that `pmdoc.ValidDocument` without validating it
+again. A document outside the schema stores no rendering and keeps the tree/error behavior
 each read had before. Websocket admission still uses `loadTree`, because it needs the raw stored
 update to preload the room.
 
