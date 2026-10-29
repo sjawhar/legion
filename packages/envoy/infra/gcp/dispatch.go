@@ -508,9 +508,9 @@ func dispatchStrategyFor(replicas int) dispatchStrategy {
 }
 
 // dispatchClusterOnlyInput is one row of the cluster-only refusal table: an input's schema name,
-// and whether the consumer set it. An input is judged set as newDispatchAzure judges one: a plain
-// string when it is not empty, a slice when it has an element, a pointer or a pulumi.*Input when
-// it is not nil, so a value unknown at preview is set as it will be at update.
+// and whether the consumer set it. A plain string is set when it is not empty, a slice when it has
+// an element, and a pointer or a pulumi.*Input when it is not nil, as newDispatchAzure judges its
+// pointers and Inputs, so a value unknown at preview is set as it will be at update.
 type dispatchClusterOnlyInput struct {
 	input string
 	set   bool
