@@ -1,0 +1,22 @@
+{
+  "schemaVersion": 1,
+  "phase": "review",
+  "issue": "INFRA-493",
+  "completed": "2026-10-29T13:52:05Z",
+  "decision": "changes_requested",
+  "round": 4,
+  "fingerprint": "3fc3493d… at c222f0dd → 7c1f068e… at e3ff6ad0: changed. File by file, the pull request's own lines differ in one file only: packages/envoy/internal/dispatch/api/routes_table_test.go, registeredRoutes 141 → 144 (main went 140 → 143 with three related-issue routes; this PR adds one). That resolution is correct.",
+  "critical": 0,
+  "important": 1,
+  "minor": 0,
+  "keyFindings": [
+    {
+      "severity": "important",
+      "file": ".github/workflows/ci.yaml",
+      "description": "The merge of main replaced envoy-and-contracts.yaml (whose envoy filter took packages/contracts/**) with main's ci.yaml router, whose envoy_go filter (ci.yaml:702-730) lists contracts fixtures one by one and not checks-settlement/**. This PR's packages/envoy/internal/cistore/settlement_fixture_test.go:56 reads packages/contracts/fixtures/checks-settlement/listener-rules.json, the fixture shared with daemon/internal/daemon/check_settlement_test.go:56, so a fixture-only change runs the daemon side (test) and skips envoy-go: the cross-check the fixture exists for is lost and ci-ok passes. check-ci-filters.sh does not see it because .github/scripts/ci_job_reads.py RULES lacks the reads; its header requires a test that reads a new file through `..` or starts a new go command to add it. Fix: RULES entries for settlement_fixture_test.go:56, check_settlement_test.go:56 and intake/redelivered_test.go:255 (go build -C ../../../envoy ./cmd/listener ./cmd/dispatch), and 'packages/contracts/fixtures/checks-settlement/**' in envoy_go's filter with its citation."
+    }
+  ],
+  "ci": "Required set lint, typecheck, test, pr-title. CI head 6e7e399a: runs just queued at the read (changes queued, pr-title queued); not waited on, since a request for changes stands whatever CI says.",
+  "thermonuclear": "deep-review and code-quality ran on the merge delta at e3ff6ad0; both found the filter gap independently; verified by reading ci.yaml:702-730 and check-ci-filters.sh:95-103.",
+  "threads": "No new threads; my four are answered and resolved."
+}
