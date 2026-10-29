@@ -10,7 +10,7 @@ import {
 import { createDecoder, readVarUint } from "lib0/decoding";
 
 import { readField } from "../web/src/features/doc/sync-frame";
-import { createIssue, createProject, getArtifactText, getIssue } from "./api";
+import { createIssue, createProject, getArtifactBlocks, getArtifactText, getIssue } from "./api";
 import { asUser } from "./users";
 
 export function documentEditor(page: Page): Locator {
@@ -439,18 +439,31 @@ export async function openIssue(browser: Browser, title: string, spec: string) {
   return { alice, issue, page };
 }
 
+/** The id of the block of `artifactId` whose markdown is exactly `text`. A paragraph's id is a
+ *  minted UUID, which `encodeBlockId` writes unchanged, so the id is also its `#b-` fragment. */
+export async function blockId(artifactId: string, text: string): Promise<string> {
+  const { markdown } = await getArtifactText(artifactId);
+  const blocks = await getArtifactBlocks(artifactId);
+  const block = blocks.find((candidate) => markdown.slice(candidate.from, candidate.to) === text);
+  if (block === undefined) {
+    throw new Error(`no block of ${artifactId} reads ${JSON.stringify(text)}: ${markdown}`);
+  }
+  expect(block.id).toMatch(/^[A-Za-z0-9-]+$/);
+  return block.id;
+}
+
 /** Waits until the issue's spec block has been indexed into an open ask and returns it. */
-export async function indexedBlockAsk(issueKey: string, blockId: string) {
+export async function indexedBlockAsk(issueKey: string, block: string) {
   await expect
     .poll(async () =>
-      (await getIssue(issueKey)).open_asks.some((candidate) => candidate.block_id === blockId)
+      (await getIssue(issueKey)).open_asks.some((candidate) => candidate.block_id === block)
     )
     .toBe(true);
   const blockAsk = (await getIssue(issueKey)).open_asks.find(
-    (candidate) => candidate.block_id === blockId
+    (candidate) => candidate.block_id === block
   );
   if (blockAsk === undefined) {
-    throw new Error(`the ${blockId} decision was not indexed`);
+    throw new Error(`the ${block} decision was not indexed`);
   }
   return blockAsk;
 }
