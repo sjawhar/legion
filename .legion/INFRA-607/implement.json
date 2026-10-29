@@ -2,7 +2,7 @@
   "schemaVersion": 1,
   "phase": "implement",
   "issue": "INFRA-607",
-  "completed": "2026-10-29T16:45:00Z",
+  "completed": "2026-10-29T17:25:00Z",
   "proof": [
     {
       "criterion": "Each changed loop is silent at idle at the merged head, and main's once-a-minute key and delivery sweep keeps main's cadence across processes",
@@ -22,7 +22,8 @@
     }
   ],
   "filesChanged": [
-    "Forward merges of main be4567e3 (03f27579, keeping #2396's due-time race fixes) and 88840d35 (5660b5be, keeping #2449's shutdown and keyed-write sweep); migrations now 0139-0145; connections 87",
+    "Forward merge of main 7c2effba (a01bc655): migrations renumbered to 0141-0147; leasePoolSize 13 on main, so ConnectionsPerProcess and dispatchConnectionsPerPod 88; #2397's issue-spec embedding trigger kept (it calls embeddings_enqueue, so it notifies)",
+    "Forward merges of main be4567e3 (03f27579, keeping #2396's due-time race fixes) and 88840d35 (5660b5be, keeping #2449's shutdown and keyed-write sweep); then renumbered at the next merge",
     "packages/envoy/internal/dispatch/architecture/ticker_test.go: transaction framing counted apart from writes (main's importer now writes in a transaction)",
     "packages/envoy/internal/dispatch/api/maintenance.go (new), suggestion_outcomes.go, sweep_runners_test.go, maintenance_test.go, cmd/dispatch/main.go, multiprocess_test.go, docs: key sweep and owed-delivery resume on main's once-a-minute leased timer; woken suggestion sweep unleased, serialised on its cursor row"
   ],
@@ -32,7 +33,8 @@
   ],
   "deviations": [
     "The outbox's 5 s retry ticker stays: INFRA-590's #2395 is still open.",
-    "Stop-path checks ran at 4444ead7; 141face2 changes only the suggestion and maintenance loops."
+    "Stop-path checks ran at 4444ead7; 141face2 changes only the suggestion and maintenance loops.",
+    "The idle and stop-path measurements ran at 141face2 and 4444ead7 against fork point 88840d35; a01bc655 only merges newer main (fingerprint comment on the PR), and build, vet and the embedqueue and connection tests pass at it."
   ],
   "openQuestions": [],
   "discoveredComplexity": [
