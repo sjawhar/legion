@@ -2,50 +2,21 @@
   "schemaVersion": 1,
   "phase": "test",
   "issue": "INFRA-547",
-  "completed": "2026-10-29T12:26:00Z",
-  "round": 12,
-  "headTested": "f77d3650c15eb256504dbabf31b7b19d02701548",
-  "codeHead": "60a40dbaaa06cbdf65f62fceac0225e4cb8ce1d0",
-  "scope": "60a40dba merges main, which brings in INFRA-546's sjawhar/legion#2362: the shared three-server cluster rig, and every stream and bucket at the deployment's replica count with a stream byte limit (DiscardNew, ENVOY_STREAM_MAX_BYTES). It also brings main's bus changes (keeper.go, connect.go, nats.go, stream.go) and envoy-client registration plugin fields. The fingerprint changed (59ea64fc 2baaad68… → 60a40dba 29fbdbc7…). Per-file, the PR's own diff changed in three places: its copy of testnats/cluster.go is gone in favor of main's; cluster_test.go and nats.go changed; and docs in AGENTS.md, envoy-listener.md and the docs site changed. Main changed 42 files on the delivery path between the two merge bases, so this is a full round. The workspace was recreated before the previous turn and matched my pushed round-11 handoff (79126db0).",
+  "completed": "2026-10-29T13:16:00Z",
+  "round": 13,
+  "headTested": "103e2e6e52c2b95aad16ad7d5ce62a44241c977e",
+  "codeHead": "4a2789e12c707b1808a9a072cd4c667ad5172a03",
+  "scope": "One commit since round 12 (60a40dba), 4a2789e1. It answers review round 7: main's built claude-envoy dist/ and legion/ files are kept; testnats Server.LameDuck now returns its timeout as an error, so the soak's disruption goroutine no longer calls FailNow; the soak uses main's testnats.AwaitStreamCopies in place of its own replication check; and one AGENTS.md line and the claude-envoy fragment are corrected. Outside the built claude-envoy files, jj diff 60a40dba..4a2789e1 touches only server_change_test.go, testnats/cluster_test.go, testnats/nats.go, AGENTS.md and one fragment. No listener or daemon runtime code changed, so round 12's real-binary verification at 60a40dba stands.",
   "implementerProof": {
     "verdict": "verified",
-    "how": "Re-ran its command at 60a40dba, now on main's cluster rig: cd packages/envoy && go test -tags serverchange -count=1 -timeout 20m -v -run TestServerChange ./cmd/listener -> --- PASS: TestServerChange (145.73s). Lane off: 9 disruptions, role 272/272, ad-hoc 272/272, captured 199 live + 73 only by replay, errored 0. Lane on: 8 disruptions, role 245/245, ad-hoc 245/245, captured 178 live + 67 only by replay, errored 0."
+    "how": "Re-ran its command at 4a2789e1 with the refactored soak: cd packages/envoy && go test -tags serverchange -count=1 -timeout 20m -v -run TestServerChange ./cmd/listener -> --- PASS: TestServerChange (143.54s). Lane off: 8 disruptions, role 253/253, ad-hoc 253/253, captured 188 live + 65 only by replay, errored 0. Lane on: 8 disruptions, role 253/253, ad-hoc 253/253, captured 187 live + 66 only by replay, errored 0."
   },
-  "failed": 0,
-  "failures": [],
-  "ci": "At 12:24Z on 60a40dba every check completed: lint, typecheck, test, pr-title, build x2 and changes succeeded, as did every Envoy and package job (envoy-go, envoy-go-race, envoy-e2e-local, listener-server-change, envoy-smoke, envoy-session-stall, envoy-client, claude-envoy, pi-envoy, pi-legion, pi-shared, envoy-plugin, envoy-infra-go, the dispatch jobs, broker-multiprocess); attest, contracts and deploy were skipped. This is the first head carrying main's merge where CI completed. GitHub reports MERGEABLE.",
-  "proof": [
+  "failed": 1,
+  "failures": [
     {
-      "criterion": "A role message through the sending listener is received by the holder or its sender's call errs, at the head that merges INFRA-546's stream changes",
-      "surface": "two real envoy-listener binaries built at 60a40dba (host-a with ENVOY_SUBSCRIBE_ALL_TOPICS=1, both with ENVOY_STREAM_MAX_BYTES=262144) on a nats-server 2.10.29 whose 'listener' user is denied publish to notifications.agent.ses_denied12. Session stand-ins on their own connections. Driven with curl and envoy-client's publish (bun)",
-      "command": "POST http://127.0.0.1:18892/v1/messages/publish {topic: notifications.role.t12-live|t12-silent|t12-none|t12-denied}, a btw payload, envoy-client publish, then the hub frozen with SIGSTOP on its exact PID",
-      "observed": "confirming holder -> 200 in 48 ms; a repeat -> 200 with no second forward; silent holder -> 504 receipt_timeout in 4.029 s; denied forward -> 403 in 31 ms; envoy-client -> OK holder=ses_holder12 in 15 ms. Hub frozen -> 503 with Retry-After: 1 in 3.50 s; envoy-client retried once and threw EnvoyApiError 503 after 7.26 s",
-      "headSha": "60a40dbaaa06cbdf65f62fceac0225e4cb8ce1d0",
-      "negativeControl": "unclaimed -> 404 {reason unclaimed}; btw to a holder without it -> 403 {reason capability}"
-    },
-    {
-      "criterion": "A full stream (#2362's byte limit, DiscardNew) does not break the confirmed send: role and ad-hoc forwards go over core NATS and still reach a confirming session",
-      "surface": "same rig. The 256 KiB stream was filled with 30 KB captured-topic publishes until main's refusal",
-      "command": "nine POSTs of notifications.github.fill (the 9th -> 503 'the message bus refused the message because its stream is full'); then, with the stream still full, role t12-live and t12-silent through host-b and ad-hoc notifications.team.t12 through host-a; then a captured probe publish",
-      "observed": "role to the confirming holder -> 200 holder=ses_holder12 in 35 ms, and the stand-in printed the forward (event dd0eab5c…). Silent holder -> 504 receipt_timeout in 4.03 s. Ad-hoc -> 504 not_confirmed naming the silent subscriber, while ses_holder12 got both the topic copy and the forward (event b55a1f47…). The probe captured publish was still 503 stream full, so the stream stayed full throughout",
-      "headSha": "60a40dbaaa06cbdf65f62fceac0225e4cb8ce1d0",
-      "negativeControl": "a captured-topic publish on the same full stream is refused 503, so the stream really was full when the forwards got through"
-    },
-    {
-      "criterion": "The daemon finishes a notice the listener's own grant denies, retries any other JSON 403, and delivers to a live holder (also with the stream full)",
-      "surface": "the daemon's real outbox runner and notify.HTTPPublisher (a throwaway test in internal/daemon, deleted after the run), against the real host-b listener and an httptest proxy answering 403 {\"error\":\"forbidden\"}. Embedded Postgres 16.4",
-      "command": "ZZ_LISTENER_URL=http://127.0.0.1:18892 LEGION_TEST_PG_DSN=<embedded Postgres> go test -count=1 -v -run TestZZOutboxAgainstRealListener ./internal/daemon",
-      "observed": "denied holder: rows left 0, one WARN 'outbox notice finished undelivered: the listener's NATS grant denied the forward to its architect'. Proxy JSON 403: rows left 1, 'outbox row failed', so it is retried. Live holder with the stream still full: rows left 0. The deny, capability, retry-without-cap and MergeQueue outbox tests and TestHTTPPublisher* pass",
-      "headSha": "60a40dbaaa06cbdf65f62fceac0225e4cb8ce1d0",
-      "negativeControl": "the proxy's JSON 403 is the refused input: the row is kept and retried"
-    },
-    {
-      "criterion": "Messages sent every 250 ms for at least 60 s arrive or err while the holder's server is lame-ducked and force-killed (role, ad-hoc, captured), with the live topics lane off and on",
-      "surface": "the real envoy-listener binary, two processes over main's shared three-server in-process cluster rig (TestServerChange)",
-      "command": "cd packages/envoy && go test -tags serverchange -count=1 -timeout 20m -v -run TestServerChange ./cmd/listener",
-      "observed": "--- PASS (145.73s). Lane off: role 272/272, ad-hoc 272/272, captured 199 live + 73 by replay. Lane on: role 245/245, ad-hoc 245/245, captured 178 live + 67 by replay. errored 0. CI's listener-server-change also passed at 60a40dba",
-      "headSha": "60a40dbaaa06cbdf65f62fceac0225e4cb8ce1d0",
-      "negativeControl": "the same test on base 3ea454d3 (round 1, independent run) -> --- FAIL assertion 1: 10 role and 67 ad-hoc messages answered 200 and never received"
+      "criterion": "CI green at the head under test, on a head that can merge, with the soak still run by CI (plan task 5: CI job listener-server-change)",
+      "evidence": "gh pr view 2370 at 13:14Z: mergeable CONFLICTING, mergeStateStatus DIRTY; check-runs on 4a2789e1: total_count 0. git merge-tree --write-tree main@origin (fe315392) 103e2e6e reports a single conflict: 'CONFLICT (modify/delete): .github/workflows/envoy-and-contracts.yaml deleted in fe315392 and modified in 103e2e6e'. Main's #2316 ('run pull-request CI as one router workflow whose final job, ci-ok, condenses the selected jobs') deleted that workflow; this PR's change to it is the listener-server-change job. Main's .github/workflows/ci.yaml has no such job: grep -c 'serverchange|listener-server-change' over every workflow file on main prints 0. Its Envoy jobs are envoy-go, envoy-go-race, envoy-e2e-local, envoy-smoke and envoy-session-stall, behind ci-ok. Resolving the conflict by taking main's deletion would leave the soak, this change's acceptance test, run by no CI job. So the merge needs the listener-server-change job moved into ci.yaml, gated on the same envoy change filter and counted by ci-ok."
     }
-  ]
+  ],
+  "proof": []
 }
