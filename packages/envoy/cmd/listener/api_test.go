@@ -640,7 +640,7 @@ func TestRoleHolderNotFoundResponsesIdentifyState(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			client := setupPublishTestClient(t)
 			registry, sessions := setupSessionsTest(t, nil, nil)
-			handler := tc.handler(&listenerDeps{client: client, registry: registry, sessions: sessions})
+			handler := tc.handler(withPublishRoute(t, &listenerDeps{client: client, registry: registry, sessions: sessions}))
 
 			unclaimedRecorder := httptest.NewRecorder()
 			handler.ServeHTTP(unclaimedRecorder, tc.request())
@@ -702,7 +702,7 @@ func TestRoleHolderNotFoundResponsesIdentifyState(t *testing.T) {
 	}
 }
 
-func TestResolveLiveRoleHolderReresolvesSupersededClaim(t *testing.T) {
+func TestResolveRoleHolderReresolvesSupersededClaim(t *testing.T) {
 	registry, sessions := setupSessionsTest(t, nil, nil)
 	if _, err := registry.SetRole("ses_lapsed", "test-machine", "reviewer", false); err != nil {
 		t.Fatalf("set lapsed holder: %v", err)
@@ -722,7 +722,7 @@ func TestResolveLiveRoleHolderReresolvesSupersededClaim(t *testing.T) {
 		},
 	}
 
-	result, err := resolveLiveRoleHolder(context.Background(), resolver, sessions, "reviewer")
+	result, err := resolveRoleHolder(context.Background(), resolver, sessions, "reviewer", registered)
 	if err != nil {
 		t.Fatalf("resolve superseded role holder: %v", err)
 	}
@@ -749,7 +749,7 @@ func TestRoleHolderLapsedResponseDoesNotClaimConcurrentRemoval(t *testing.T) {
 		},
 	}
 
-	result, err := resolveLiveRoleHolder(context.Background(), resolver, sessions, role)
+	result, err := resolveRoleHolder(context.Background(), resolver, sessions, role, registered)
 	if err != nil {
 		t.Fatalf("resolve concurrently removed role holder: %v", err)
 	}
@@ -1071,8 +1071,11 @@ func TestPublishHandler_ReportsRoleHolderOnlyWhenLive(t *testing.T) {
 	if _, err := registry.SetRole("ses_holder", "test-machine", "reviewer", false); err != nil {
 		t.Fatalf("set holder: %v", err)
 	}
-	state := &listenerDeps{client: client, registry: registry, sessions: sessions}
+	state := withPublishRoute(t, &listenerDeps{client: client, registry: registry, sessions: sessions})
 	handler := publishHandler(state, logging.New("test"))
+	// Each subtest is a test of its own to testnats.URL, with an account of its own, so the holder
+	// stand-in connects with the parent's.
+	uri := testnats.URL(t)
 
 	t.Run("unheld role returns 404 without publishing", func(t *testing.T) {
 		roleProbe, err := client.Conn.SubscribeSync("notifications.role.unheld")
@@ -1114,6 +1117,7 @@ func TestPublishHandler_ReportsRoleHolderOnlyWhenLive(t *testing.T) {
 	})
 
 	t.Run("live holder is returned", func(t *testing.T) {
+		startStandIn(t, uri, "ses_holder", always)
 		recorder := httptest.NewRecorder()
 		request := httptest.NewRequest(http.MethodPost, "/v1/messages/publish", strings.NewReader(`{"topic":"notifications.role.reviewer","message":"please review"}`))
 		handler.ServeHTTP(recorder, request)
@@ -2042,7 +2046,7 @@ func TestV1RoutesAnswerAKeyNATSWouldRefuseWith4xx(t *testing.T) {
 		t.Fatalf("register ses_live: %v", err)
 	}
 	mux := http.NewServeMux()
-	registerV1Routes(mux, &listenerDeps{client: client, registry: registry, sessions: sessions}, "test-machine", logging.New("test"))
+	registerV1Routes(mux, withPublishRoute(t, &listenerDeps{client: client, registry: registry, sessions: sessions}), "test-machine", logging.New("test"))
 
 	long := strings.Repeat("s", 5000)
 	longRole := strings.Repeat("r", 4100)
@@ -2447,6 +2451,56 @@ func TestSubscribeHandlerStoresAndListsCapabilities(t *testing.T) {
 	}
 	if payload[1].SessionID != "ses_legacy" || len(payload[1].Capabilities) != 0 {
 		t.Fatalf("legacy session = %#v, want empty capabilities", payload[1])
+	}
+}
+
+// A registration names its plugin and that plugin's build; both reach the session list and the
+// per-session route, trimmed. A registration from a plugin predating the fields lists neither key.
+func TestSubscribeHandlerStoresAndListsThePluginAndItsVersion(t *testing.T) {
+	registry, sessions := setupSessionsTest(t, nil, nil)
+	state := &listenerDeps{registry: registry, sessions: sessions}
+	handler := subscribeHandler(state, "test-machine", logging.New("test"))
+	for _, body := range []string{
+		`{"session_id":"ses_versioned","topics":[],"self_subscribed":true,"plugin":" @sjawhar/pi-envoy ","plugin_version":" 11.0.0 "}`,
+		`{"session_id":"ses_unversioned","topics":[],"self_subscribed":true}`,
+	} {
+		recorder := httptest.NewRecorder()
+		handler.ServeHTTP(recorder, httptest.NewRequest(http.MethodPost, "/v1/interests/subscribe", strings.NewReader(body)))
+		if recorder.Code != http.StatusOK {
+			t.Fatalf("subscribe: status=%d body=%s", recorder.Code, recorder.Body.String())
+		}
+	}
+
+	list := httptest.NewRecorder()
+	sessionsHandler(registry, sessions).ServeHTTP(list, httptest.NewRequest(http.MethodGet, "/v1/sessions", nil))
+	if list.Code != http.StatusOK {
+		t.Fatalf("list sessions: status=%d body=%s", list.Code, list.Body.String())
+	}
+	var rows []map[string]any
+	if err := json.NewDecoder(list.Body).Decode(&rows); err != nil {
+		t.Fatalf("decode sessions: %v", err)
+	}
+	byID := map[string]map[string]any{}
+	for _, row := range rows {
+		byID[row["session_id"].(string)] = row
+	}
+	versioned, unversioned := byID["ses_versioned"], byID["ses_unversioned"]
+	if versioned["plugin"] != "@sjawhar/pi-envoy" || versioned["plugin_version"] != "11.0.0" {
+		t.Fatalf("versioned row = %#v, want plugin @sjawhar/pi-envoy at 11.0.0", versioned)
+	}
+	if _, ok := unversioned["plugin"]; ok {
+		t.Fatalf("unversioned row = %#v, want no plugin key", unversioned)
+	}
+	if _, ok := unversioned["plugin_version"]; ok {
+		t.Fatalf("unversioned row = %#v, want no plugin_version key", unversioned)
+	}
+
+	answer := sessionEntryRoute(t, state, "ses_versioned")
+	if answer.Code != http.StatusOK {
+		t.Fatalf("GET /v1/registry/ses_versioned: status %d %s, want 200", answer.Code, answer.Body.String())
+	}
+	if got := decodeSessionInfo(t, answer); got.Plugin != "@sjawhar/pi-envoy" || got.PluginVersion != "11.0.0" {
+		t.Fatalf("the route answered %#v, want plugin @sjawhar/pi-envoy at 11.0.0", got)
 	}
 }
 

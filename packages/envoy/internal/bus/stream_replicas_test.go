@@ -576,7 +576,7 @@ func TestASecondStartOnASingleServerWritesNothing(t *testing.T) {
 		t.Fatalf("create the bucket: %v", err)
 	}
 	counting := &countingJetStream{JetStreamContext: client.JS()}
-	cfg := parseConnectOptions(nil).streamConfig()
+	cfg := parseConnectOptions([]ConnectOption(nil)).streamConfig()
 	if err := ensureStreamWithConfig(counting, &cfg); err != nil {
 		t.Fatalf("second start: %v", err)
 	}

@@ -152,7 +152,7 @@ func TestTheKeeperEndsTheMixedSettingsRaceAtThreeCopiesTheByteLimitAndTheID(t *t
 		t.Fatalf("deploy the R1 stream with the old subjects: %v", err)
 	}
 
-	defaults := parseConnectOptions(nil).streamConfig()
+	defaults := parseConnectOptions([]ConnectOption(nil)).streamConfig()
 	defaultStart := &interleavedJetStream{JetStreamContext: js, beforeUpdate: func() {
 		startOnCluster(t, cluster, WithReplicas(3), WithStreamMaxBytes(keeperByteLimit), withKeepInterval(testKeepInterval))
 		if info, err := js.StreamInfo(Stream); err != nil || !keptAtSettings(id)(info) {
@@ -195,7 +195,7 @@ func TestEachReleasesKeeperAddsBackItsOwnSubjectAConcurrentWriteTookAway(t *test
 	js := streamTestJetStream(t)
 	const added = "notifications.newer.>"
 	limited := parseConnectOptions([]ConnectOption{WithStreamMaxBytes(keeperByteLimit)}).streamConfig()
-	newer := parseConnectOptions(nil).streamConfig()
+	newer := parseConnectOptions([]ConnectOption(nil)).streamConfig()
 	newer.Subjects = append(slices.Clone(streamSubjects), added)
 	if err := ensureStreamWithConfig(js, &limited); err != nil {
 		t.Fatalf("the limited program's start: %v", err)
@@ -250,7 +250,7 @@ func TestTheKeeperNeverPutsBackARoleLaneAStartMovedOffTheStream(t *testing.T) {
 		t.Fatalf("deploy the stream with the role lanes: %v", err)
 	}
 	limited := parseConnectOptions([]ConnectOption{WithStreamMaxBytes(keeperByteLimit)}).streamConfig()
-	defaults := parseConnectOptions(nil).streamConfig()
+	defaults := parseConnectOptions([]ConnectOption(nil)).streamConfig()
 
 	keeper := &interleavedJetStream{JetStreamContext: js, afterRead: func() {
 		if err := ensureStreamWithConfig(js, &defaults); err != nil {
@@ -306,9 +306,9 @@ func TestTheKeepersSubjectsAddOnlyItsOwnThatOverlapNothingDeployed(t *testing.T)
 // keeper sends an update, with both new subjects in the list.
 func TestTwoKeepersWithDifferentSubjectListsNeverSwitchTheStream(t *testing.T) {
 	js := streamTestJetStream(t)
-	alpha := parseConnectOptions(nil).streamConfig()
+	alpha := parseConnectOptions([]ConnectOption(nil)).streamConfig()
 	alpha.Subjects = append(slices.Clone(streamSubjects), "notifications.alpha.>")
-	beta := parseConnectOptions(nil).streamConfig()
+	beta := parseConnectOptions([]ConnectOption(nil)).streamConfig()
 	beta.Subjects = append(slices.Clone(streamSubjects), "notifications.beta.>")
 	beta.Subjects[slices.Index(beta.Subjects, "notifications.github.>")] = "notifications.github.pr.>"
 	if err := ensureStreamWithConfig(js, &alpha); err != nil {
@@ -592,6 +592,113 @@ func TestStoppingTheClientStopsItsKeeper(t *testing.T) {
 				t.Fatalf("the keeper logged %v for the pass the stop interrupted, want nothing", failures)
 			}
 			heldFor(t, js, Stream, "one copy", 6, func(info *nats.StreamInfo) bool { return info.Config.Replicas == 1 })
+		})
+	}
+}
+
+// The keeper of an owning client that connects in the background runs no pass before that
+// client's first reconcile has succeeded (ensureStreamOnce). The deployed stream holds
+// notifications.github.*, which the reconcile replaces with this binary's notifications.github.>
+// (reconcileSubjects), and no byte limit, which the keeper restores. A pass that read the stream
+// before the reconcile's write and wrote after it would put the replaced subject back, and as the
+// keeper only adds subjects, nothing would ever remove it again. The client is made while the
+// server is down and its keeper's period is a millisecond, so a keeper started before the reconcile
+// races it on most runs; with the gate the replaced subject never comes back over many periods, and
+// no keeper pass fails on a stream not reconciled yet.
+func TestTheKeeperOfABackgroundClientRunsNoPassBeforeItsFirstReconcile(t *testing.T) {
+	const replaced, replacing = "notifications.github.*", "notifications.github.>"
+	srv, uri := testnats.Start(t)
+	deploy := testnats.Connect(t, uri)
+	js, err := deploy.JetStream()
+	if err != nil {
+		t.Fatalf("JetStream context: %v", err)
+	}
+	deployed := *streamCfg
+	deployed.Subjects = slices.Clone(streamSubjects)
+	deployed.Subjects[slices.Index(deployed.Subjects, replacing)] = replaced
+	deployed.Metadata = map[string]string{StreamIDMetadataKey: "deployed-id"}
+	if _, err := js.AddStream(&deployed); err != nil {
+		t.Fatalf("deploy the stream holding %s: %v", replaced, err)
+	}
+	deploy.Close()
+	srv.Stop(t)
+
+	logs := captureLogs(t)
+	client, err := ConnectOwningStream([]string{uri}, WithConnectInBackground(), WithStreamMaxBytes(keeperByteLimit), withKeepInterval(time.Millisecond))
+	if err != nil {
+		t.Fatalf("connect owning the stream while the server is down: %v", err)
+	}
+	t.Cleanup(client.Close)
+	srv.Start(t)
+
+	reader := testnats.Connect(t, uri)
+	t.Cleanup(reader.Close)
+	if js, err = reader.JetStream(); err != nil {
+		t.Fatalf("JetStream context: %v", err)
+	}
+	reconciled := func(info *nats.StreamInfo) bool {
+		return slices.Contains(info.Config.Subjects, replacing) && !slices.Contains(info.Config.Subjects, replaced)
+	}
+	for deadline := time.Now().Add(keepWait); ; {
+		info, err := js.StreamInfo(Stream)
+		if err == nil && reconciled(info) {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("the first connection's reconcile did not replace %s with %s within %s: %+v (%v)", replaced, replacing, keepWait, info, err)
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	// A hundred keeper periods: a pass that read the stream before the reconcile lands in them.
+	for deadline := time.Now().Add(100 * time.Millisecond); time.Now().Before(deadline); {
+		info, err := js.StreamInfo(Stream)
+		if err != nil {
+			t.Fatalf("read %s: %v", Stream, err)
+		}
+		if !reconciled(info) {
+			t.Fatalf("subjects after the reconcile = %v, want %s kept and %s gone", info.Config.Subjects, replacing, replaced)
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	if failures := logs.recordsWithMsg(t, "envoy nats keeper could not restore the stream"); len(failures) != 0 {
+		t.Fatalf("the keeper logged %v, want no pass before the reconcile", failures)
+	}
+}
+
+// An owning client that connects in the background and stops before its server ever answered
+// started no keeper, and Close and Drain return at once rather than wait for one.
+func TestStoppingABackgroundClientBeforeItsFirstConnectionStartsNoKeeper(t *testing.T) {
+	for _, stop := range []struct {
+		name string
+		stop func(*Client)
+	}{
+		{name: "close", stop: (*Client).Close},
+		{name: "drain", stop: func(client *Client) { _ = client.Drain(5 * time.Second) }},
+	} {
+		t.Run(stop.name, func(t *testing.T) {
+			srv, uri := testnats.Start(t)
+			srv.Stop(t)
+			client, err := ConnectOwningStream([]string{uri}, WithConnectInBackground(), withKeepInterval(time.Millisecond))
+			if err != nil {
+				t.Fatalf("connect owning the stream while the server is down: %v", err)
+			}
+			time.Sleep(20 * time.Millisecond)
+			stopped := make(chan struct{})
+			go func() {
+				stop.stop(client)
+				close(stopped)
+			}()
+			select {
+			case <-stopped:
+			case <-time.After(10 * time.Second):
+				t.Fatalf("%s of a client that never connected did not return within 10s", stop.name)
+			}
+			client.mu.Lock()
+			started := client.keeperDone != nil
+			client.mu.Unlock()
+			if started {
+				t.Fatalf("a client that never reconciled the stream started a keeper")
+			}
 		})
 	}
 }

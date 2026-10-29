@@ -13,7 +13,7 @@ on:
       - "packages/pi-legion/package.json"
       - "packages/pi-shared/package.json"
       - "packages/envoy-plugin/package.json"
-      - "packages/claude-envoy/package.json"
+      - "packages/claude-envoy/**"
       - "packages/proof-editor/package.json"
       - "packages/dispatch/package.json"
       - "packages/envoy/internal/dispatch/pmdoc/gen/package.json"
@@ -39,6 +39,7 @@ on:
       - ".github/go-release-targets.json"
       # The worker image's remaining inputs (worker_image below).
       - ".omp-pin"
+      - ".bun-version"
       - ".dockerignore"
       - ".github/workflows/worker-image.yaml"
   workflow_dispatch:
@@ -103,16 +104,18 @@ env:
   # only a placeholder 0.0.0 until its first publish, so reading it would restart the line at 0.x.
   # scripts/pi-plugin-prepack.sh copies this plugin's five skills into dist/skills, which every Oh
   # My Pi session loads as the plugin's skills, so a commit there releases whatever its type. Its
-  # notices generator and the prepack itself are shipped build inputs too, so they get the same
-  # patch release.
+  # notices generator, the prepack itself and patches/ (the bundle inlines nats.js with
+  # patches/nats@2.29.3.patch applied) are shipped build inputs too, so they get the same patch
+  # release.
   PI_ENVOY_VERSION_ARGS: >-
     --package-dir packages/pi-envoy --first-npm @sjawhar/pi-legion-envoy
     --patch-path skills/asd-ste100/ --patch-path skills/dispatch/ --patch-path skills/dispatch-first/
     --patch-path skills/dispatch-writing-specs/ --patch-path skills/envoy/
     --patch-path scripts/third-party-notices.ts --patch-path scripts/pi-plugin-prepack.sh
+    --patch-path patches/
     -- packages/pi-envoy/ packages/pi-shared/ packages/envoy-client/ packages/contracts/
     skills/asd-ste100/ skills/dispatch/ skills/dispatch-first/ skills/dispatch-writing-specs/ skills/envoy/
-    scripts/third-party-notices.ts scripts/pi-plugin-prepack.sh
+    scripts/third-party-notices.ts scripts/pi-plugin-prepack.sh patches/
   # The Legion Oh My Pi plugin, seeded as the Envoy one is. scripts/pi-plugin-prepack.sh copies
   # this plugin's nine skills into dist/skills, which a Legion pane's prompts load, so a commit
   # there releases whatever its type. Its notices generator and the prepack itself are shipped
@@ -223,13 +226,21 @@ jobs:
             echo "pi_legion_version=$legion_version"
             echo "pi_envoy_version=$envoy_version"
           } >> "$GITHUB_OUTPUT"
-      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+      - id: setup-go
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         if: steps.version.outputs.skip != 'true'
         with:
           go-version-file: packages/daemon/go.mod
-          cache-dependency-path: |
-            packages/daemon/go.sum
-            packages/envoy/go.sum
+          cache: false
+      # ci.yaml's go-daemon, restored and never saved: only ci.yaml's main-push jobs write Go caches.
+      - uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        if: steps.version.outputs.skip != 'true'
+        with:
+          path: |
+            ~/go/pkg/mod
+            ~/.cache/go-build
+          key: go-daemon-${{ runner.os }}-go${{ steps.setup-go.outputs.go-version }}
+          restore-keys: go-daemon-${{ runner.os }}-
       # CGO_ENABLED=0: a static binary, as the worker image builds it, so a linux archive runs on any
       # distribution. One archive per target .github/go-release-targets.json lists (the pull
       # request's notices check reads the same list), each holding one top-level directory,

@@ -63,7 +63,7 @@ import { askgateSetting, readEnvoyConfig } from "@legion/envoy-client/envoy-conf
 import { MIN_PASS_DEADLINE_MS } from "@legion/envoy-client/envoy-settings";
 import { messageFor } from "@legion/envoy-client/errors";
 import { machineID } from "@legion/envoy-client/machine";
-import { natsAuthOptions } from "@legion/envoy-client/nats-auth";
+import { natsConnectionOptions } from "@legion/envoy-client/nats-connection";
 import {
   closeReplayedRemoval,
   createReplayEngine,
@@ -135,11 +135,15 @@ import type { UserInputBuiltinCommand } from "@oh-my-pi/pi-coding-agent/extensib
 import { logger, procmgr, VERSION } from "@oh-my-pi/pi-utils";
 import { encode } from "@toon-format/toon";
 import { connect, Events, type NatsConnection, StringCodec, type Subscription } from "nats";
+import { name as packageName, version as packageVersion } from "../package.json" with {
+  type: "json",
+};
 import {
   AgentStreamPublisher,
   type AgentStreamSettingsState,
   modelReference,
 } from "../src/agent-stream";
+import { CardWake } from "../src/card-wake";
 import { transcriptPictures, withDeliveredPictures } from "../src/delivery-pictures";
 import { withDispatchFirst } from "../src/dispatch-first";
 import {
@@ -1053,16 +1057,14 @@ export default function envoyExtension(pi: PiApi): void {
   const ensureConnection = async (live: Fence = UNFENCED): Promise<NatsConnection> => {
     if (connection?.isClosed() === false) return connection;
     const { natsUrls, natsSeed } = requireInbound();
-    const dialled = await connect({
-      servers: [...natsUrls],
-      name: `omp-${sessionID || "unknown"}`,
-      ...natsAuthOptions(natsSeed),
-      // Survive NATS drops after the first connection: nats.js re-subscribes
-      // existing subscriptions on its own once reconnected.
-      reconnect: true,
-      maxReconnectAttempts: -1,
-      reconnectTimeWait: 2_000,
-    });
+    // nats.js re-subscribes existing subscriptions on its own once reconnected.
+    const dialled = await connect(
+      natsConnectionOptions({
+        servers: natsUrls,
+        name: `omp-${sessionID || "unknown"}`,
+        seed: natsSeed,
+      })
+    );
     // Another pass can establish the connection, and the session's shutdown drop it, while this
     // dial is in flight, and an abandoned pass must not put its dial in the shared field: cleanup
     // drains `connection` alone, and `maxReconnectAttempts: -1` keeps anything else alive for the
@@ -1108,32 +1110,59 @@ export default function envoyExtension(pi: PiApi): void {
   // A typed input's pictures, until the host's message carrying its Dispatch id starts
   // (`src/typed-pictures.ts`).
   const typedPictures = new TypedPictures();
-  pi.on("input", async (event) => {
+  pi.on("input", async (event, context) => {
+    // An input that finds the host idle is a prompt sent from idle: any run, one the host dropped
+    // with no `agent_end` included, is over (`../src/card-wake`).
+    cardWake.noteIfIdle(context);
     if (event.source !== "extension") return undefined;
     const images = typedPictures.handOver(event.text);
     return images === undefined ? undefined : { images: [...(event.images ?? []), ...images] };
   });
 
+  // How a card that starts a turn goes, and the wake for one the host folds into the context with
+  // no turn (`../src/card-wake`). A card the host's dispose flushes at shutdown wakes nothing. The
+  // start-turn mark the Legion entry keeps, as published at this build's interface version, holds
+  // the startup phase while it names the session open here (`sessionOpen`: this instance's own and
+  // the host's live one), never a `task` subagent's.
+  const cardWake = new CardWake({
+    now: () => Date.now(),
+    sendMessage: (message, options) => pi.sendMessage(message, options),
+    startupTurn: () => publishedInterface?.startupTurn,
+    isOwnSession: (session) => sessionOpen(session),
+  });
+
   // A card's message: its `details` name the frame (`replayLedgerIdentity`), which the host keeps
-  // on the message it writes. An `inert` card is a steer that starts no turn on an idle host; a
-  // turn streaming when it is handed takes it and runs another model turn for it, so
-  // `UnwrittenFrames` hands an inert card only to a settled host (`hostSettled`).
+  // on the message it writes, beside the wake's card marker. An `inert` card is a steer that starts
+  // no turn on an idle host; a turn streaming when it is handed takes it and runs another model
+  // turn for it, so `UnwrittenFrames` hands an inert card only to a settled host (`hostSettled`).
+  // Every other card goes as the wake says (`CardWake.deliveryFor`), which records a startup card
+  // before the host has it; a targeted Aside stays an aside.
   const handCard = (
     content: string | readonly ContentBlock[],
     deliverAs: CardDelivery,
     identity: DedupeIdentity | undefined
   ): void => {
     const known = identity === undefined ? {} : replayLedgerIdentity(identity);
+    const frame = unwrittenCardKeys(known).length === 0 ? undefined : { ...known };
+    if (deliverAs === "inert") {
+      pi.sendMessage(
+        {
+          customType: "envoy-message",
+          content,
+          display: true,
+          ...(frame === undefined ? {} : { details: frame }),
+        },
+        { deliverAs: "steer", triggerTurn: false }
+      );
+      return;
+    }
+    const { details, ...options } = cardWake.deliveryFor(
+      deliverAs === "aside",
+      activeSessionContext
+    );
     pi.sendMessage(
-      {
-        customType: "envoy-message",
-        content,
-        display: true,
-        ...(unwrittenCardKeys(known).length === 0 ? {} : { details: { ...known } }),
-      },
-      deliverAs === "inert"
-        ? { deliverAs: "steer", triggerTurn: false }
-        : { deliverAs, triggerTurn: true }
+      { customType: "envoy-message", content, display: true, details: { ...frame, ...details } },
+      options
     );
   };
 
@@ -1373,14 +1402,17 @@ export default function envoyExtension(pi: PiApi): void {
     receivedAt: number
   ): Promise<void> => {
     const rendered = renderInbound(raw, sessionID, subject);
-    // Acknowledge first. The listener's role lane waits two seconds for this
-    // receipt and reports a miss as a failed delivery, which the daemon answers
-    // by re-sending the message (LEGION-101); everything below — the inbox
-    // update, a Dispatch round trip, the injection — can outlast that window
-    // under load. A frame renderInbound throws on never reaches this line, so
-    // an undecodable frame is still not acknowledged. A receipt that cannot be
-    // published is logged and delivery goes on: the message must not be lost
-    // locally because the acknowledgement was.
+    // Acknowledge first. The listener waits two seconds for this receipt: its
+    // publish route, which forwards a role message or an ad-hoc topic's copy
+    // here, forwards again until a receipt arrives within its four-second window
+    // and answers a miss to the sender as an error, which the daemon answers by
+    // re-sending the message; its role lane, for a role topic published straight
+    // onto NATS, reports a miss as a failed delivery (LEGION-101). Everything
+    // below — the inbox update, a Dispatch round trip, the injection — can
+    // outlast that window under load. A frame renderInbound throws on never
+    // reaches this line, so an undecodable frame is still not acknowledged. A
+    // receipt that cannot be published is logged and delivery goes on: the
+    // message must not be lost locally because the acknowledgement was.
     const directSubject = agentSubject(sessionID);
     if (
       expectsLaneReceipt({
@@ -1409,9 +1441,6 @@ export default function envoyExtension(pi: PiApi): void {
       if (closeIntentionally(topic)) removed = true;
     }
     if (removed) void replayFollowedChanged();
-    // Steering: mid-turn the message is injected at the next tool boundary
-    // instead of waiting for the turn to finish; idle it still starts a turn
-    // (triggerTurn), so wake-on-message behavior is unchanged.
     const dedupeIdentity = ClaimIdentitySchema.safeParse(rendered.envelope);
     const identity = dedupeIdentity.success ? dedupeIdentity.data : undefined;
     const claim = rendered.skip ? undefined : delivered.claim(identity);
@@ -1502,7 +1531,8 @@ export default function envoyExtension(pi: PiApi): void {
               true,
               shown
             );
-            // Settled once the host writes the card, or at once when nothing waits on that.
+            // Settled once the host writes the card, or at once when nothing waits on that. How
+            // the card goes, and why, is the wake's (`handCard`, `../src/card-wake`).
             unwritten.sendCard(
               card.content,
               rendered.delivery?.mode === "aside" ? "aside" : "steer",
@@ -2047,12 +2077,21 @@ export default function envoyExtension(pi: PiApi): void {
   pi.on("message_update", async (event) => {
     recordAgentStreamMessage(event.message, true);
   });
+
   // The host writes a message to the transcript as it ends it: a card or a person's turn handed to
-  // it, idle or taken by a turn after it streamed, is shown from here on (`UnwrittenFrames`).
-  pi.on("message_end", async (event) => {
-    recordAgentStreamMessage(event.message, false);
-    await unwritten.written(event.message);
+  // it, idle or taken by a turn after it streamed, is shown from here on (`UnwrittenFrames`). A
+  // card the host appended also arms the wake's check (`../src/card-wake`).
+  pi.on("message_end", async (event, context) => {
+    const { message } = event;
+    if (!shuttingDown) cardWake.messageEnd(message, context);
+    recordAgentStreamMessage(message, false);
+    await unwritten.written(message);
   });
+  // The host asks whether any extension handles `session_before_compact`, which turns its
+  // background compaction off, but never these two: handling them changes nothing it does.
+  pi.on("session_compact", async (_event, context) => cardWake.noteIfIdle(context));
+  pi.on("auto_compaction_end", async (event) => cardWake.autoCompactionEnd(event));
+  pi.on("auto_retry_end", async (event) => cardWake.autoRetryEnd(event));
 
   // A turn runs on the model and level set when it starts, and a retry's fallback moves the session
   // onto another model: either can follow a change no event announced. A subagent's instance knows
@@ -2176,6 +2215,7 @@ export default function envoyExtension(pi: PiApi): void {
             : DELIVERY_CAPABILITIES,
         driving: false,
         selfSubscribed: true,
+        plugin: { name: packageName, version: packageVersion },
       })
       .then((result) => {
         registeredFor = registeringFor;
@@ -3190,6 +3230,8 @@ export default function envoyExtension(pi: PiApi): void {
     reason: SessionSwitchReason | undefined,
     context: SessionContext
   ): Promise<void> => {
+    // The cards a check was armed for belong to the session the host left.
+    cardWake.cancel();
     if (await isSubagent(context)) return;
     const host = context.sessionManager.getSessionId();
     noteMove(host, { kind: reason });
@@ -3225,7 +3267,10 @@ export default function envoyExtension(pi: PiApi): void {
     }
     await rebind(reason, context);
   };
-  pi.on("session_switch", (event, context) => rebindDispatch(event.reason, context));
+  pi.on("session_switch", (event, context) => {
+    cardWake.noteIfIdle(context);
+    return rebindDispatch(event.reason, context);
+  });
   pi.on("session_branch", (_event, context) => rebindDispatch(undefined, context));
   pi.on("session_tree", (_event, context) => rebind(undefined, context));
   // Oh My Pi emits these before it moves its session manager: the session the host leaves and
@@ -3233,6 +3278,7 @@ export default function envoyExtension(pi: PiApi): void {
   // a session the host has yet to give an id have nothing to leave. A switch another extension
   // cancels changes nothing: the host's id never moves, so the announcement teaches nothing.
   const announce = (reason: SessionSwitchReason | undefined, context: SessionContext): void => {
+    cardWake.cancel();
     const from = context.sessionManager.getSessionId();
     // An earlier announcement whose move came with no event and no pass since is learned from now,
     // before this one replaces it.
@@ -3245,6 +3291,7 @@ export default function envoyExtension(pi: PiApi): void {
 
   pi.on("session_shutdown", async (_event, context) => {
     shuttingDown = true;
+    cardWake.cancel();
     if (publishedInterface !== undefined) {
       const bound = publishedInterface.roleClaim.instances.indexOf(claimInstance);
       if (bound !== -1) publishedInterface.roleClaim.instances.splice(bound, 1);
@@ -3370,6 +3417,7 @@ export default function envoyExtension(pi: PiApi): void {
   // switch went ahead (`runUnderAnnouncement`).
   pi.on("agent_start", async (_event, context) => {
     runSeq += 1;
+    cardWake.agentStart();
     runUnderAnnouncement =
       announced?.from === context.sessionManager.getSessionId() ? announced : undefined;
   });
@@ -3409,6 +3457,7 @@ export default function envoyExtension(pi: PiApi): void {
   // ACP host, but a client that defers agent-initiated turns gets the steer queued as hidden
   // next-turn context instead of a turn of its own, consumed when the user next prompts.
   pi.on("agent_end", async (event, context) => {
+    cardWake.agentEnd(context);
     const id = context.sessionManager.getSessionId();
     const lastReply = event.messages?.findLast((message) => message.role === "assistant");
     // An interrupted run may have taken back the cards it held (`UnwrittenFrames`): those handed

@@ -10,6 +10,8 @@ import {
   createProject,
   createProjectDocument,
   editArtifact,
+  getIssue,
+  putIssueState,
   resolveAsk,
   resolveComment,
   search,
@@ -627,6 +629,11 @@ for (const journey of hiddenEditorJourneys) {
     if (journey.namedVersion) {
       await createNamedVersion(issue.primary_artifact_id, "Initial long document");
     }
+    // Alice has read the issue, so its Conversation shows no New mark and writes no read mark.
+    // That write lands a second after the Conversation opens, and its answer drops the New mark
+    // and moves the cards up: a press on View in document caught between its down and its up
+    // releases off the link, and the click navigates nowhere.
+    await putIssueState(issue.key, { last_read_seq: (await getIssue(issue.key)).last_seq });
     const context = await asUser(browser, "alice");
 
     try {
@@ -677,7 +684,7 @@ test("a resolving reference above a linked card does not end the hold", async ({
 
   try {
     const page = await context.newPage();
-    await page.route(new RegExp(`/api/v1/issues/${target.key}$`), async (route) => {
+    await page.route(new RegExp(`/api/v1/issues/${target.key}/summary$`), async (route) => {
       await referenceHeld.promise;
       await route.continue();
     });

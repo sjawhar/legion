@@ -107,14 +107,16 @@ All of them are kept in the stream. Some are also delivered straight to an agent
 - An issue with a route sends its waking events to that role or session.
 - Every session that follows an ask gets its answer, edits, resolution, and replies on its own
   inbox topic.
-- A person's reply to a comment reaches the session that started its thread, and a person's new
-  comment on a document reaches every session that wrote the document, each on its own inbox
-  topic.
+- A person's reply to a comment reaches every session that wrote a comment in its thread, and
+  every session that wrote the document the thread is on. A person's new comment on a document
+  reaches every session that wrote the document. Each arrives on the session's own inbox topic.
 - The session holding an issue's claim gets, on its own inbox topic, a person's answers,
   hand-backs and resolutions of asks, comments (new, edited, resolved or reopened) and messages on
   that issue. A message a person sends to one session reaches only that session. Dispatch reads
   the claim when it publishes the event, so a retry after the claim changed hands reaches the new
   holder.
+- On an issue with no route and no session holding its claim, a person's comment, and its edit,
+  reach every session that wrote the issue's spec (its primary document), on its own inbox topic.
 
 A session reached more than one of these ways gets one copy. A new comment that mentions a session
 arrives there once, as the mention, when the mention reached it; when the mention's send fails,
@@ -123,8 +125,9 @@ the claimant. While the mention is still being sent, for up to a minute, Dispatc
 back and checks again a few seconds later. One copy is not guaranteed: when the mention's receipt
 times out, or its send is stranded for over a minute, Dispatch records it as failed though it may
 have landed, so the session can get the comment twice, once as the mention and once on its inbox
-topic. A session treats the second copy as the same comment. A comment's edit, resolution or
-reopening reaches every one of these sessions, mentioned or not, and is not held back with the new
+topic. A session treats the second copy as the same comment. A comment's edit reaches every one
+of these sessions, mentioned or not; a resolution or reopening reaches the route, the claimant, the
+ask's followers and the thread root's author, mentioned or not. Neither is held back with the new
 comment: while the new comment waits on its mention, an edit to it can arrive first. A session that
 gets an edit, resolution or reopening of a comment it has not seen yet should expect the comment
 to follow. Anything else on an issue, including every event an agent makes outside an ask the
@@ -138,22 +141,26 @@ published still gets it when it reconnects
 
 | Topic | What it is |
 | --- | --- |
-| `notifications.agent.<session_id>` | One session's inbox. Direct messages, ask follow-ups, replies to its comments, comments on documents it wrote, a person's answers, comments and messages on an issue it has claimed, and claim changes arrive here. |
-| `notifications.role.<role>` | A role, held by one live session at a time. You publish to it; the listener hands each message to the current holder. |
+| `notifications.agent.<session_id>` | One session's inbox. Direct messages, ask follow-ups, replies in threads it wrote in, comments on documents it wrote, a person's answers, comments and messages on an issue it has claimed, comments on an issue with no route and no session claim whose spec it wrote, and claim changes arrive here. |
+| `notifications.role.<role>` | A role, held by one live session at a time. You publish to it; the listener hands each message to the current holder and answers once the holder confirmed it. |
 | `notifications.dispatch.issue.<KEY>.>` | Every event of one Dispatch issue. |
 | `notifications.github.<owner>.<repo>.pr.<n>.>` | Every event of one pull request. |
 | `notifications.legion.<project>.controller` | A Legion project's controller. |
 | `notifications.slack.*.<channel>.mention` | Every mention of the Slack app in one channel, whatever the team. |
 | `notifications.envoy.exceptions.<topic>` | A delivery to `<topic>` that failed, with the reason. |
-| any other `notifications.<name>` topic | A team topic you name, such as `notifications.team.deploy-squad.all`. Live only: it reaches every session subscribed to it when it is published, and is not retained, so a session whose connection was down when it was published never gets it. A session that holds its own NATS connection receives it directly, its own publish included; a session the listener delivers to over a serve port, such as an OpenCode agent, receives it through its machine's listener when that listener subscribes to every topic (`ENVOY_SUBSCRIBE_ALL_TOPICS=1`, which a host's own listener sets; the shared hub's listener does not), except a publish of its own, which the listener does not echo back. A topic outside `notifications.` is refused. |
+| any other `notifications.<name>` topic | A team topic you name, such as `notifications.team.deploy-squad.all`. It reaches every session subscribed to it when it is published, and is not kept for a session that subscribes later. A session that holds its own NATS connection receives it directly, its own publish included. A publish through the listener also hands it to each other such session registered on the topic, on any machine, and waits for each to confirm it: if one does not within four seconds, the publish fails naming each session that did not, and every session it does not name received it. A session that stopped without unregistering stays registered for up to five minutes and is named in that time. A registered session whose connection was down gets the message from the stream when it reconnects ([Messages a session missed](#messages-a-session-missed)). A session the listener delivers to over a serve port, such as an OpenCode agent, is not waited for: it receives the topic through its machine's listener when that listener subscribes to every topic (`ENVOY_SUBSCRIBE_ALL_TOPICS=1`, which a host's own listener sets; the shared hub's listener does not), except a publish of its own, which the listener does not echo back. A topic outside `notifications.` is refused. |
 
 An agent subscribes with Envoy's `envoy_subscribe` tool, which stores the subscription in the
 listener. A subscription to `<subject>.>` also covers `<subject>` itself, so subscribing to a pull
 request's `.>` gets its lifecycle events as well as its comments and checks.
 
-A role message is not stored for later. If no live session holds the role, a publish through the
-API is refused with `404`. If the holder does not take a message, the listener publishes an
-exception naming the reason: `no_holder`, `delivery_failed`, or `receipt_timeout`.
+A role message is not stored for later. A publish through the API waits for the holder to confirm
+the message and answers `200` naming the holder. If no live session holds the role, it is refused
+with `404`; if the holder does not take the message's delivery mode, with `403`; and if the holder
+has not confirmed it within four seconds, with `504` and the reason, `receipt_timeout` or
+`delivery_failed`. A role message published straight onto NATS, not through the API, is forwarded
+once, and if the holder does not take it the listener publishes an exception naming the reason:
+`no_holder`, `delivery_failed`, or `receipt_timeout`.
 
 ## Messages a session missed
 
@@ -165,15 +172,19 @@ its listener for it, `POST /v1/replay`, when it starts or resumes, when it recon
 subscription comes back, and on every heartbeat. The listener reads the stream for the session's
 own inbox topic and for each topic it registered, after the place the session last read to, and
 the session shows each message it was not shown yet, once, marked as published while its
-connection was down.
+connection was down. Both plugins ping NATS every 10 seconds and drop a connection that leaves two
+pings unanswered, so a connection that stops answering without closing, as when the network path
+under it freezes, is left within 30 seconds and redialed, and the session asks on the reconnect.
 
 - **What comes back:** messages on the session's inbox topic, `notifications.agent.<session_id>`,
   and on the topics it follows that the stream keeps, such as an issue's
   `notifications.dispatch.issue.<KEY>.>`, up to 72 hours old.
-- **What does not:** role messages and team topics, which are live only; anything from before the
-  session existed, before it followed the topic, or before it first ran a plugin version that
-  recovers; anything older than 72 hours. When the stream was recreated, or the session read it too
-  late to find everything still there, it is told once that messages may be missing.
+- **What does not:** role messages, which are live only; team topics, except the copy the listener
+  hands a session registered on the topic, which comes back on its inbox topic; anything from
+  before the session existed, before it followed the topic, or before it first ran a plugin
+  version that recovers; anything older than 72 hours. When the stream was recreated, or the
+  session read it too late to find everything still there, it is told once that messages may be
+  missing.
 - **Nothing runs late:** a person's Send or Aside, a Steer or a BTW that comes back this way is
   shown as a message only, since a person's input run late could act on an old instruction. The
   session does not take it as the person's turn and does not answer a BTW. A BTW that comes back
@@ -205,6 +216,32 @@ serves it to any request whose `Host` is loopback or a name in `ENVOY_ALLOWED_HO
 list names the hub's own tailnet name, as the GCP hub's listener does with no bearer, every tailnet
 peer the tailnet's access rules let reach the listener's port can call it. It refuses a wildcard id, another
 session's inbox reached through a registered topic, and every failed-delivery lane.
+
+## The session list
+
+`GET /v1/sessions` lists the live sessions, and `GET /v1/registry/<session_id>` answers for one.
+Besides each session's id, title, directory, topics and roles, a row carries the plugin the
+session registered through, which every registration sends:
+
+| Field | Oh My Pi | Claude Code | OpenCode |
+| --- | --- | --- | --- |
+| `plugin` | `@sjawhar/pi-envoy` | `@sjawhar/claude-envoy` | `@sjawhar/opencode-legion-envoy` |
+| `plugin_version` | the package version (a source checkout reports the version of the last release in its history) | the first 12 characters of the marketplace commit Claude Code installed it from, or `source` when it runs from outside Claude Code's plugin cache (a checkout, `--plugin-dir`) | the package version |
+
+A session whose plugin predates the two fields shows neither. The `envoy_sessions` tool of the
+Oh My Pi and Claude Code plugins shows them too.
+
+Whether a session has the recovery of missed messages above and the 10-second connection check,
+read from its row:
+
+- **Oh My Pi:** it does when its `plugin_version` is at or above the first `@sjawhar/pi-envoy`
+  release cut after the change that added these fields merged (the first whose changelog lists
+  `plugin_version`).
+- **Claude Code:** it does when its commit contains that change's squash commit:
+  `gh api repos/sjawhar/legion/compare/<squash commit>...<plugin_version> --jq .status` answers
+  `ahead` or `identical`.
+- **Anything else:** `source`, a row without the fields, and an OpenCode session (whose plugin has
+  no recovery of missed messages) are checked by hand, or counted as not having it.
 
 ## The NATS grant a Legion daemon needs
 

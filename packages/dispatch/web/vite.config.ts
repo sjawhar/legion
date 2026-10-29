@@ -79,8 +79,10 @@ export default defineConfig({
   worker: { format: "es", plugins: () => [notices.worker()] },
   define: {
     // Keep the entry chunk distinct across deployments, including no-source-change image rebuilds.
+    // DISPATCH_BUILD wins over GITHUB_SHA, which CI sets on every step, so one job can build two
+    // distinct dashboards of one commit (`bun run e2e:multiprocess`'s second build).
     __DISPATCH_BUILD__: JSON.stringify(
-      process.env.GITHUB_SHA ?? process.env.DISPATCH_BUILD ?? Date.now().toString()
+      process.env.DISPATCH_BUILD ?? process.env.GITHUB_SHA ?? Date.now().toString()
     ),
   },
   resolve: {
@@ -124,11 +126,13 @@ export default defineConfig({
   },
   build: {
     outDir: "dist",
-    // The editor (Milkdown) is a lazy chunk loaded only on the document tab, and it carries
-    // beautiful-mermaid and ELK (~1.9 MB raw). A body's diagrams draw in the Mermaid worker
-    // (features/refs/mermaid-render.worker.ts), a bundle of its own with the same renderer,
-    // fetched only once a body holds a mermaid block.
-    chunkSizeWarningLimit: 3000,
+    // The largest chunk is ECharts (an `index-*.js` of 1,134,772 bytes raw), which only the
+    // Delivery page loads, and the entry is 781,007 bytes, both past Vite's 500 kB default.
+    // beautiful-mermaid and ELK live only in the Mermaid worker's bundle
+    // (features/refs/mermaid-render.worker.ts, 1,565,608 bytes), fetched once a body or a
+    // document holds a mermaid block; Vite emits it as an asset and holds it to no chunk limit.
+    // The editor's lazy chunk (`lib-*.js`, 204,492 bytes) carries none of the renderer.
+    chunkSizeWarningLimit: 1200,
     emptyOutDir: true,
   },
   server: {

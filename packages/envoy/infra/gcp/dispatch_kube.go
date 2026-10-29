@@ -451,9 +451,10 @@ func newDispatchKubernetes(ctx *pulumi.Context, comp *Dispatch, name string, arg
 		// The budget covers its own Deployment's pods alone, by the label that Deployment's
 		// selector matches, under the Deployment's own name. It keeps the default
 		// unhealthyPodEvictionPolicy (IfHealthyBudget), so it also holds a pod that is not ready
-		// while the budget is not met: envoy-dispatch and envoy-listener report not ready whenever
-		// NATS or Postgres is briefly unreachable, a front-door pod's own eviction in the same drain
-		// among the causes, and evicting then would turn a blip into a cold restart.
+		// while the budget is not met: envoy-dispatch reports not ready whenever Postgres is
+		// briefly unreachable (a Cloud SQL failover, the proxy sidecar restarting) and
+		// envoy-listener whenever NATS is, a front-door pod's own eviction in the same drain among
+		// the causes, and evicting then would turn a blip into a cold restart.
 		if pdbMinAvailable > 0 {
 			if _, err := policyv1.NewPodDisruptionBudget(ctx, name, &policyv1.PodDisruptionBudgetArgs{
 				Metadata: metadata(name),
@@ -492,10 +493,13 @@ func newDispatchKubernetes(ctx *pulumi.Context, comp *Dispatch, name string, arg
 	}
 
 	// Both other workloads dial the NATS hub through the front door's proxy, so each waits for its
-	// pod and its Service: envoy-dispatch exits 1 when it cannot reach NATS and answers 503 on
-	// /healthz until it connects, and envoy-listener exits on a failed initial connect
-	// (packages/envoy/cmd/listener/main.go), so a pod started before the proxy exists never goes
-	// ready and the rollout waits it out.
+	// pod and its Service, for a reason of its own. envoy-listener exits on a failed initial
+	// connect (packages/envoy/cmd/listener/main.go), so a listener pod started before the proxy
+	// exists never goes ready and the rollout waits it out. envoy-dispatch serves without NATS:
+	// its /healthz readiness reads only Postgres, reporting nats false meanwhile, and its bus
+	// clients connect in the background once the proxy answers. So an app pod started first would
+	// go ready and serve without the bus (no outbox publish, no delivery intake) until then; the app
+	// waits for the front door only so that it starts connected.
 	frontDoor := pulumi.DependsOn([]pulumi.Resource{tailnet, tailnetService})
 	// Both also mount the NATS seed, which the pod can read only once its principal holds
 	// roles/secretmanager.secretAccessor on the secret, so each waits for that grant too rather

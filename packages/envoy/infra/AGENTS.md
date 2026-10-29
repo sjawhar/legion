@@ -387,8 +387,7 @@ the tools takes minutes on a cold module cache, which is why CI runs the `natsli
 go test -count=1 -tags natslive -run 'TestClusteredNatsHub(Chart|Cluster)' -v -timeout 20m ./gcp/
 ```
 
-The `envoy-infra-go` job in `.github/workflows/envoy-and-contracts.yaml` runs, from
-`packages/envoy/infra`:
+The `envoy-infra-go` job in `.github/workflows/ci.yaml` runs, from `packages/envoy/infra`:
 
 ```sh
 test -z "$(gofmt -l .)"
@@ -402,8 +401,8 @@ changes. That filter includes every package `cmd/dispatch` and `cmd/listener` im
 `core/permissions_live_test.go:298-299` builds them; `packages/envoy/AGENTS.md` (Critical
 conventions) says what keeps it current.
 
-The release workflow's `build` job runs vet and the unit tests again before it builds. The required
-`lint` job of `.github/workflows/pr-and-main.yaml` compiles the module's commands for every release
+The release workflow's `build` job runs vet and the unit tests again before it builds. The
+`lint` job of `.github/workflows/ci.yaml` compiles the module's commands for every release
 target. Run those steps from those jobs after changing what they cover.
 
 A component's tests run on `pulumitest.Mocks`, which records every registration and answers with
