@@ -1,4 +1,4 @@
--- 0141_item_blocks.up.sql
+-- 0142_item_blocks.up.sql
 --
 -- Every comment and message is a collection of blocks, its body split as the document parser reads
 -- it (internal/dispatch/itemblocks). A block is a graph node: its node id is
@@ -6,7 +6,7 @@
 -- refs.to_kind is `comment_block` or `message_block`, a kind a build without these tables skips as
 -- unknown. A block is part_of its item, a mention written inside it is an edge out of it, and a
 -- reply can name the block it answers. Additive while the previous build serves: new tables, two
--- nullable columns, a function no trigger calls yet (0142 and 0143 attach it, and seed the state
+-- nullable columns, a function no trigger calls yet (0143 and 0144 attach it, and seed the state
 -- rows of the items already stored), and the view restated with six more arms.
 --
 -- A node id is the item's uuid, '#' and a block id; the primary key makes it unique within the
@@ -70,7 +70,7 @@ create table comment_block_texts (
 
 -- An item's indexing state. revision counts a comment's indexed revisions (1 is the first
 -- indexing, 0 none yet) and next_block is the number of the next block id it mints, so no id is
--- reused. body_sha256 is the body last indexed. owed_at is set by 0142's and 0143's triggers on
+-- reused. body_sha256 is the body last indexed. owed_at is set by 0143's and 0144's triggers on
 -- every write of any build and cleared by the index a block-aware build runs in the same
 -- transaction, so a row still owed was written by a build without this index; the partial index
 -- serves the reconciliation's read of the oldest owed.
@@ -128,7 +128,7 @@ alter table messages add column replies_to_block text;
 create index comments_replies_to_block on comments (replies_to_block) where replies_to_block is not null;
 create index messages_replies_to_block on messages (replies_to_block) where replies_to_block is not null;
 
--- The one trigger function of 0142 and 0143: the item's kind is the trigger's argument. A write
+-- The one trigger function of 0143 and 0144: the item's kind is the trigger's argument. A write
 -- that lands on a state row moves only its owed_at, never its revision or next_block, so a drain
 -- that read the earlier time leaves the row owed.
 create or replace function item_blocks_owe() returns trigger language plpgsql as $$

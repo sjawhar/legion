@@ -4,15 +4,23 @@
 #
 # This is the one statement of what main's rebuild must accept. The rebuild's build job
 # (.github/workflows/claude-envoy-rebuild.yaml) runs it and hands <tar> to its push job, whose
-# `release-push.sh push-built` checks the same tar again before it commits it; pr-and-main.yaml's
-# required test job and envoy-and-contracts.yaml's claude-envoy job run the very same command on a
-# pull request, so a pull request fails a check for whatever main's push job would refuse instead
-# of merging and then failing every rebuild on main.
+# `release-push.sh push-built` checks the same tar again before it commits it; ci.yaml's required
+# test job and its claude-envoy job run the very same command on a pull request, so a pull request
+# fails a check for whatever main's push job would refuse instead of merging and then failing every
+# rebuild on main.
 #
 # It writes no file of the checkout: a pull request never commits dist/ or legion/, and jj records
 # whatever a command writes into the working copy. Every build goes into a scratch directory
 # outside the repository, and <tar> must be outside it too. The jobs that then put <tar> into a
 # checkout are named at `release-push.sh extract-built`.
+#
+# Every file this script and scripts/build.ts read is a build input, so scripts/build-inputs.txt
+# must name it: main's push job lands a build on a moved main and decides from that list alone
+# whether the move changed the build. tests/build-inputs.test.ts checks the list against what the
+# bundles and the Legion plugin read, but not against what this script, build.ts or the workflow
+# read by path, which the list's header names as listed by hand (check-private-names.sh, the
+# .gitignore files, release-push.sh, .bun-version, the scripts build.ts imports or runs, the
+# workflow and setup-bun): a new file read here goes into the list by hand.
 #
 # In order, whatever the caller's directory:
 #   1. `bun scripts/build.ts --out` twice, into two scratch directories, and the two builds'

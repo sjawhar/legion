@@ -726,6 +726,8 @@ jobs:
               - 'packages/contracts/fixtures/github-envelopes/**'
               - 'packages/contracts/fixtures/delivery-live/**'
               - 'packages/contracts/fixtures/decision-blocks/**'
+              # The claim list its fence reads: internal/broker/oauth/claims_doc_test.go:161.
+              - 'docs/kubernetes.md'
               - '.github/actions/pull-test-images/**'
               # Its pack step writes each archive's notices, for each target the list names.
               - 'scripts/go-third-party-notices.sh'
@@ -1355,6 +1357,11 @@ jobs:
       # ci-ok is). What it builds and checks: packages/claude-envoy/scripts/verify-build.sh.
       - name: Build, check and pack the Claude Code plugin as main's rebuild does
         run: bun run verify-build "$RUNNER_TEMP/claude-envoy-built.tar"
+        working-directory: packages/claude-envoy
+
+      # Main's push job decides from scripts/build-inputs.txt whether a moved main changed the build.
+      - name: Check the Claude Code plugin's build input list covers what the build reads
+        run: bun test tests/build-inputs.test.ts
         working-directory: packages/claude-envoy
 
       - name: Test release scripts
