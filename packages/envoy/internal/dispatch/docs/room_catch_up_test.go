@@ -559,7 +559,7 @@ func TestACatchUpForADocumentWithNoRoomHereDoesNothing(t *testing.T) {
 }
 
 // A notification sent while the listener has no connection reaches nobody and is never sent
-// again, and a redial backs off as far as thirty seconds (pglisten.RedialBackoff): the sweep after
+// again, and one redial wait can last up to 45 seconds (pglisten.RedialBackoff): the sweep after
 // each LISTEN stands catches up every room this process has loaded (roomSync.connected,
 // roomCatchUps.sweep), which is why the wait below is on the reconnect and not on a notification.
 func TestARoomLeftBehindWhileTheListenerWasDownIsCaughtUpOnTheReconnect(t *testing.T) {

@@ -555,15 +555,17 @@ process holds its own room for a document. Postgres is the only channel between 
   batch. The room stays open, and its browsers see the edit on the socket they already have.
 - **Closes.** Room sync closes and reloads a room only when its stored history is replaced: a
   rebuild, a prune, a delete, or a compaction that folds rows the room has not taken in yet. A
-  compaction keeps the head row, so it closes only a room that is behind at that moment. The
-  service also closes a room in three other cases: its issue closes or reopens, the room fails
-  and its eviction closes it (`failRoom`), or the process shuts down with an editor connected to
-  the room. No other close disconnects a browser. After a close, the browser reconnects and syncs
-  a reloaded room.
+  compaction keeps the head row, so it closes only a room that is behind at that moment. A
+  browser's append that such a fold lets through closes its room at once in the same way (below).
+  The service also closes a room in three other cases: its issue closes or reopens, the room
+  fails and its eviction closes it (`failRoom`), or the process shuts down with an editor
+  connected to the room. No other close disconnects a browser. After a close, the browser
+  reconnects and syncs a reloaded room.
 - **Appends from a room that is behind.** A browser's edit is accepted: it is stored at the head,
   and the room's cursor takes it in when the catch-up fills the gap. It is accepted too when a
-  compaction folded the rows the room holds, because the fold keeps every item the edit builds on;
-  the room itself is then closed and reloaded. A write computed from the room's content (a
+  compaction folded the rows the room holds, because the fold keeps every item the edit builds on.
+  The append that stored the edit then closes the room at once (`closeRoomOnReplacedHistory`), and
+  its browsers reconnect to a room reloaded at the head. A write computed from the room's content (a
   settlement's repair, a live write's fork, a version's capture) still needs a room at the head
   (`ErrRoomBehindHead`). A settlement catches its room up under the document's lock and then
   continues. A version whose room is behind is rendered from the stored document (`storedTree`).
@@ -580,7 +582,13 @@ process holds its own room for a document. Postgres is the only channel between 
   transaction. The append is refused when its room took the edit more than 2 seconds
   (`closeMargin`) after the close committed. An edit that the room took before then is stored,
   even when its append reaches the database after the close, and the document settles it when
-  the issue reopens.
+  the issue reopens. A close through `PATCH` stamps `closed_at` again as its last statement before
+  it commits, so the 2 seconds count from the commit. An edit typed while the close's transaction
+  runs is stored, however long the close takes to withdraw the issue's open asks. The
+  `issue.closed` event carries the earlier stamp, from the start of the close's transaction. The
+  response and every later read carry the stored one. A close made through the earlier build
+  stamps `closed_at` only at the start of its transaction, so for that close the 2 seconds count
+  from that start.
 - **Questions about a room.** A process asks the other members about a room on
   `dispatch_doc_query`, and each member answers on `dispatch_doc_answer`. For each question, the
   asker waits 500 ms at most. Then it continues without the members that did not answer, and
@@ -603,9 +611,11 @@ process holds its own room for a document. Postgres is the only channel between 
   (`doc_ask_block_authors`, migration `0138`), so a settlement on any process names who wrote it.
   The cap of 32 queued conditional edits of one document counts the queue of this process and of
   every other member (`doc_conditional_edit_queue`, migration `0139`). Each process first queues a
-  document's conditional edits in memory and admits them one at a time. Only the edit being
-  admitted holds a database connection, and an admitted edit holds none while it waits for its
-  turn.
+  document's conditional edits in memory and admits them one at a time, and the admitted edits
+  take turns. On each process, at most two of a document's conditional edits hold a database
+  connection at once: the edit being admitted holds one for its short admission transaction, and
+  the edit whose turn it is holds its write transaction. An edit that waits for its admission, or
+  for its turn, holds none.
 - **Which process served a socket.** Every answer that the document service's handler sends to a
   `/ws/doc/{room}` request carries `X-Dispatch-Process: <host name>`: the pod's name in
   production. That includes the `101` upgrade and the handler's `401`, `404` and `503` answers. A
@@ -639,7 +649,11 @@ During the roll that releases this behaviour, processes of the earlier build beh
 - They relay no awareness and apply none, so they show no other process's cursors.
 - They do not listen on `dispatch_issue_open_changed`, so they do not act on a close or reopen made
   through this build. Their open rooms of the issue's documents keep the scope that their browsers
-  connected with.
+  connected with, unless the close or reopen writes the document. A close writes the resolved
+  state of the issue's open asks into the blocks that show them, and a reopen writes them open
+  again (`WriteIssueAskStates`). That write moves the document's head, so an earlier-build room of
+  the document closes as a room that falls behind, and its browsers reconnect with the scope the
+  issue now allows.
 - They are not members, so no question waits for them.
 
 Every change this build writes still notifies `dispatch_doc_changed`, which the earlier build

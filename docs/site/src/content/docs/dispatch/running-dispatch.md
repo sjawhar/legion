@@ -368,9 +368,10 @@ What a reader sees while two servers are serving:
     match.
   - The session fails on its server, which then reloads it.
   - Its server shuts down while an editor is connected.
-- A server keeps an edit that it took before an issue closed, or up to 2 seconds after the close,
-  even when the edit reaches the database after the close. It refuses an edit that it took later
-  than that, and the session reconnects read-only.
+- A server keeps an edit that it took before an issue's close was saved, or up to 2 seconds after
+  that, even when the edit reaches the database after the close. An edit typed while the close is
+  still being saved is kept too, however long the close takes. The server refuses an edit that it
+  took later than that, and the session reconnects read-only.
 - When a server's listener connection to the database drops, the server reconnects. Its first
   wait is 1 second, plus up to half again. Each next wait doubles, up to 30 seconds plus up to half
   again, so one wait can last 45 seconds. Until it reconnects, the editors open on that server do
@@ -380,7 +381,11 @@ What a reader sees while two servers are serving:
 - During the rollout that brings this version, a server of the earlier version behaves as before.
   It still closes a session that falls behind, and its browsers reconnect. It sends no cursors to
   the other servers and shows none of theirs. It does not act when an issue is closed or reopened
-  through a server of this version: its open sessions of that issue keep the access they had.
+  through a server of this version, so its open sessions of that issue keep the access they had.
+  A document that the close or reopen writes is the exception. A close writes the issue's open
+  asks into their documents as resolved, and a reopen writes them open again. The earlier server's
+  session of such a document falls behind, so it closes, and its browsers reconnect with the
+  access the issue now allows.
 - A page of either version keeps loading. Each server stores its version of the dashboard's files
   in the database when it starts, before it takes traffic, and serves the other version's files
   from there, so a page one server sent finds its files whichever server answers next. A server

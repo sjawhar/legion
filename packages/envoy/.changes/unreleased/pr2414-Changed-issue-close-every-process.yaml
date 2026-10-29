@@ -7,7 +7,11 @@ body: |-
   browser's append also reads the issue's state in its own transaction. An edit that the room took
   before the close, or up to 2 s after the close committed, is stored even when its append reaches
   the database after the close, and is settled when the issue reopens. An edit taken later is
-  refused. Before, only the process that took the `PATCH` changed its rooms, and only on a close.
+  refused. A close now stamps `closed_at` again as its last statement before it commits, so the
+  2 s count from the commit. An edit typed while the close runs is stored, however long the close
+  takes to withdraw the issue's asks. The stored `closed_at` is that much later than the one the
+  `issue.closed` event carries. Before, only the process that took the `PATCH` changed its rooms,
+  and only on a close.
   During the roll that releases this, processes of the earlier build do not listen on the channel,
   so they do not act on a close or reopen made through this build.
 time: 2026-10-28T12:12:13Z

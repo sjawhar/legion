@@ -8,9 +8,13 @@ body: |-
   conditional edits of one document counts the queue of every member
   (`doc_conditional_edit_queue`, migration `0139`), so the 33rd answers `429 EDIT_QUEUE_FULL`
   whichever process takes it. Each process first queues a document's conditional edits in memory
-  and admits them one at a time. Only the edit being admitted holds a database connection, and an
-  admitted edit holds none while it waits for its turn. An agent's write to a document that no
-  room holds on its process no longer loads a room there.
+  and admits them one at a time, and the admitted edits take turns. On each process, at most two
+  of a document's conditional edits hold a database connection at once: the edit being admitted,
+  for its short admission transaction, and the edit whose turn it is, for its write transaction.
+  An edit that waits for its admission, or for its turn, holds none. An agent's write to a
+  document that no room holds on its process no longer loads a room there. One case remains: a
+  room that retires between the write's check for a room and its publish is loaded again by the
+  publish, from a store that holds the write.
 time: 2026-10-28T12:12:17Z
 custom:
   Issue: pr2414

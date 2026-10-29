@@ -316,13 +316,13 @@ func foldHistoryPastRoom(t *testing.T, holder pgx.Tx, artifactID string, head in
 	}
 }
 
-// The notification may not reach a process in time: its listener can be redialing for up to thirty
-// seconds (pglisten.RedialBackoff). Here no room sync runs at all, so nothing tells the room the
-// issue closed, and the issue closed longer ago than closeMargin before alice types: the gate
-// refuses her browser's append (ErrIssueClosed), which is not stored, and the room is closed for
-// its issue rather than failed, so the browser reconnects read-only. (A keystroke the room takes
-// within closeMargin of the close is stored instead: the close's notification may not have reached
-// the room yet.)
+// The notification may not reach a process in time: one wait between its listener's redials can
+// last up to 45 seconds (pglisten.RedialBackoff). Here no room sync runs at all, so nothing tells
+// the room the issue closed, and the issue closed longer ago than closeMargin before alice types:
+// the gate refuses her browser's append (ErrIssueClosed), which is not stored, and the room is
+// closed for its issue rather than failed, so the browser reconnects read-only. (A keystroke the
+// room takes within closeMargin of the close is stored instead: the close's notification may not
+// have reached the room yet.)
 func TestABrowserAppendOnAClosedIssueIsRefusedWithoutItsNotification(t *testing.T) {
 	database := storetest.Open(t)
 	artifactID := createDocument(t, database, "before")

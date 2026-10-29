@@ -407,16 +407,17 @@ to the document: settlement weighs each such answer and leaves out the ones the 
 room for (`withholdAnswers`). A joined
 operation never writes the room: it runs on the transaction's fork of the room's document
 (`docs/livewrite.go`), appends its update inside the transaction, and reads through the same fork.
-A document no room holds is forked from the store (`coldFork`) and loads no room until the
-committed write is published, so a cold edit holds one copy of the document rather than a room
-beside its fork; an upload's version on such a fork takes out the stored updates through the head
-that read loaded and no in-flight credit. A browser's room load takes no lock the write holds, so
+A document no room holds is forked from the store (`coldFork`), and the write loads no room while
+it runs. Its publish loads one only in a race (`publishLiveWrite`, below). So a cold edit holds one
+copy of the document rather than a room beside its fork; an upload's version on such a fork takes
+out the stored updates through the head that read loaded and no in-flight credit. A browser's room
+load takes no lock the write holds, so
 a room that loads while `coldFork` reads the store is forked from instead and the stored copy is
 dropped undecoded, and one that loads later is forked from at the write's next operation. Every
 mutate starts from the tree `applyLive` already read (`startTree`, `editTree`) rather than reading
 its own; `applyLive` lets that tree go before the one check that decodes a second copy of the
 state (`refuseUndecodable`); and a write drops its fork and rendering once it commits, before its
-publish loads the room (`releaseFork`), since a pooled connection's context can keep the write
+publish (`releaseFork`), since a pooled connection's context can keep the write
 reachable long after it answered (LEGION-504). A token's encoding (`pmdoc.AppendTokenJSON`) is
 held once per call, in one buffer for the document and all its blocks, and dropped when the call
 returns; LEGION-504's concern was more copies per token and their retention, and neither holds.
@@ -785,7 +786,10 @@ versions above it that the instance holds with a gap below them, which fold in a
 The append gate (`appendGateStatement`, one read under the document's lock) has two rules. A
 browser's raw delta (`appendBrowser`) is accepted from a room behind an intact history and lands
 at the head. It is refused when the history was replaced, unless that history still holds every
-item the delta builds on (`storedHistoryHolds`), as a compaction's fold does. A refused delta is
+item the delta builds on (`storedHistoryHolds`), as a compaction's fold does. Such a delta is
+stored, and the append that stored it closes the room at once, so its browsers reconnect to a room
+reloaded at the head (`closeRoomOnReplacedHistory`): no catch-up can bring that room to the head,
+and each later append of its browsers would decode the whole stored document. A refused delta is
 dropped and its browser resends it to the reloaded room, which a browser whose issue closed
 meanwhile cannot do: it reconnects read-only. It is also refused (`ErrIssueClosed`)
 when the document's issue is closed and the room took the delta more than `closeMargin` (2 s)
@@ -813,6 +817,8 @@ lock (`historyReplacedUnderLock`) and closes the room (`closeRoomBehindHead`, ca
 cases only:
 
 - room sync finds its stored history replaced, as above;
+- a browser's append is stored on a history replaced under its room
+  (`closeRoomOnReplacedHistory`, above);
 - a settlement finds its stored history replaced (below);
 - its issue closes or reopens (`setRoomIssueOpen`, below);
 - the room fails (`failRoom`), and its eviction closes it;
@@ -866,7 +872,11 @@ issue of every resident room again (`recheckResidentIssues`). The gate's issue r
 browser's append that its room took more than `closeMargin` (2 s) after the close committed, and
 closes that room when its process has not heard of the close yet (`refuseClosedIssueAppend`). An
 edit the room took before that margin ran out is stored, even when its append reaches the store
-after the close (`appendGate.observedBeforeClose`).
+after the close (`appendGate.observedBeforeClose`). `patchIssue` stamps
+`closed_at = clock_timestamp()` again as the close transaction's last statement, so the margin
+counts from the close's commit: a keystroke typed while the close runs, its ask withdrawal
+writing documents under their locks included, is stored. The `issue.closed` event, built earlier
+in that transaction, keeps the stamp of the transaction's start.
 
 Room queries (`docs/room_query.go`) are a process's questions to the other members:
 `dispatch_doc_query` (`holds`, `flush` or `share`) and `dispatch_doc_answer`, both through the
@@ -877,10 +887,13 @@ write asks up to three questions, so it can wait up to 1.5 s in all: a flush bef
 its published loss is judged (`recordPublishedLoss`). A live write's first join has every
 member that holds the room store its updates before the write forks (`flushOtherRooms`), an open
 write's kept fork follows the stored head (`followStoredHead`), the lost-edit check judges the
-write with the other rooms' unstored updates (`share`) and names every member's connected actors
-(`lostWriteParticipants`), the published loss is judged at the stored head after a second flush
-(`recordPublishedLoss`), and a rebuild answers `ErrDocumentLive` when any member holds the room. A
-cold write publishes only into a resident room (`publishLiveWrite`), so it leaves no room behind.
+write with the other rooms' unstored updates (`share`) and names the connected actors of every
+member that answers within 500 ms (`lostWriteParticipants`), the published loss is judged at the
+stored head after a second flush (`recordPublishedLoss`), and a rebuild answers `ErrDocumentLive`
+when this process holds the room or a member that answers within 500 ms holds it. A cold write
+publishes only into a room this process holds, resident or loading (`publishLiveWrite`). A room
+that retires between that check and the publish's `Apply` is loaded again by that `Apply`, from a
+store that holds the write, and idles out like any room a write loads.
 An ask block's author is stored in `doc_ask_block_authors` (migration 0138) in the transaction that
 makes the block durable, and a settlement on any process reads it (`askBlockSources.author`). The
 cap of 32 queued conditional edits counts every member's row of `doc_conditional_edit_queue`
@@ -898,7 +911,11 @@ and the issue under the document's lock. During the roll that releases this, pro
 earlier build still close a room that falls behind, relay no awareness and are not members. They
 do not listen on `dispatch_issue_open_changed`, so they do not act on a close or reopen made
 through this build: their open rooms of the issue's documents keep the scope their browsers
-connected with. They show no other process's cursors.
+connected with, unless the close or reopen writes the document. A close writes the resolved state
+of the issue's open asks into the blocks that show them, and a reopen writes them open again
+(`WriteIssueAskStates`). That write moves the document's head, so an earlier-build room of the
+document closes as a room that falls behind, and its browsers reconnect with the scope the issue
+now allows. They show no other process's cursors.
 
 The document socket's cap of 1,000 rooms (`maxLiveRooms`, `canOpenRoom`) counts ygo's live rooms,
 never documents touched since the process started (LEGION-513). A room an `Apply` opened with no
@@ -930,7 +947,9 @@ already in the room and are never published, so none reaches the observer as a w
 And an update whose version is at or below the head the room instance's load folded
 (`roomInstance.loadedHead`) is already in the replica, which starts from the room as of its first
 commit, so applying it changes nothing: a cold write's publish into a room whose load read the
-store after the write committed is never rendered (a publish loads no room: `publishLiveWrite`).
+store after the write committed is never rendered (a publish loads a room only when one retires
+between `publishLiveWrite`'s check and its `Apply`, and that load also reads a store that holds
+the write).
 So every committed update is classified, and its authors credited, exactly once, by whichever
 observer reaches the log first, against the room as the
 commit before it left it. Catching the replica up to the room instead took in every commit since
