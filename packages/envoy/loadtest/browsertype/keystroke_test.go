@@ -11,7 +11,7 @@ import (
 // "Revision token rN" with the next token on every edit, and reads it back before an upload. A
 // browser peer that types into that paragraph breaks the quote, so every later edit of that
 // document answers 404 TARGET_NOT_FOUND and every upload stops with "revision token found false",
-// and the document gains no version. Measured in the INFRA-707 cluster run
+// and the document gains no version. Measured in the stored-order cluster run
 // lt-20261029t183153-14f8, step 10x-typing: 212 edits and 61 uploads failed that way, and the 20
 // typed documents ended with 0 to 3 versions where the step's plan writes 13 to 17.
 //
@@ -43,7 +43,7 @@ func TestAPeerNeverTypesIntoAProtectedParagraph(t *testing.T) {
 	random := rand.New(rand.NewPCG(1, 2))
 	before := openText.ToXML()
 	for range 2000 {
-		document.Transact(func(txn *crdt.Transaction) { keystroke(txn, fragment, random) })
+		document.Transact(func(txn *crdt.Transaction) { keystroke(txn, fragment, random, []string{protected}) })
 	}
 
 	if got := protectedText.ToXML(); got != protected {
@@ -92,7 +92,7 @@ func TestAProtectedParagraphIsFoundAnywhereInTheTree(t *testing.T) {
 
 	random := rand.New(rand.NewPCG(3, 4))
 	for range 2000 {
-		document.Transact(func(txn *crdt.Transaction) { keystroke(txn, fragment, random) })
+		document.Transact(func(txn *crdt.Transaction) { keystroke(txn, fragment, random, []string{protected}) })
 	}
 
 	if got := protectedText.ToXML(); got != protected {

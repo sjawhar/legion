@@ -49,10 +49,11 @@ type config struct {
 	duration       time.Duration
 	connectTimeout time.Duration
 	seed           uint64
+	protect        []string
 }
 
 // result is what one peer did: the updates it sent, the keystrokes it skipped because the document
-// held no paragraph text then, and the error that ended it early, if any.
+// held no paragraph text it may edit then, and the error that ended it early, if any.
 type result struct {
 	artifact string
 	peer     int
@@ -122,14 +123,15 @@ func parseFlags(args []string) (config, error) {
 		fmt.Fprintf(flags.Output(), "Usage: browsertype -url URL -token-file FILE -session ID (-artifact ID ... | -artifacts-file FILE) [flags]\n\n"+
 			"Connects -peers browser peers to each document's websocket room and types into its paragraphs at\n"+
 			"-rate keystrokes per second per peer until -duration ends or SIGINT/SIGTERM: about 80%% type one\n"+
-			"letter, 10%% replace a short range in one transaction, 10%% delete a short range. Prints one line\n"+
-			"per peer (artifact, peer, sent, skipped, errors, error); exits 1 when a peer failed to connect or\n"+
-			"ended early with an error, 2 on a usage error.\n\nFlags:\n")
+			"letter, 10%% replace a short range in one transaction, 10%% delete a short range. A paragraph whose\n"+
+			"text holds a -protect value is never edited. Prints one line per peer (artifact, peer, sent,\n"+
+			"skipped, errors, error); exits 1 when a peer failed to connect or ended early with an error, 2 on\n"+
+			"a usage error.\n\nFlags:\n")
 		flags.PrintDefaults()
 	}
 	var cfg config
 	var rawURL, tokenFile, artifactsFile string
-	var artifacts stringList
+	var artifacts, protect stringList
 	flags.StringVar(&rawURL, "url", "", "Dispatch base URL, http(s)://host:port; peers connect to <url>/ws/doc/<artifact>")
 	flags.StringVar(&tokenFile, "token-file", "", "file holding the agent bearer token (DISPATCH_AGENT_TOKEN); never printed")
 	flags.StringVar(&cfg.session, "session", "", "session id the peers act as, sent as the "+docs.ActorHeader+" header's session actor")
@@ -140,6 +142,7 @@ func parseFlags(args []string) (config, error) {
 	flags.DurationVar(&cfg.duration, "duration", time.Minute, "how long the peers type")
 	flags.DurationVar(&cfg.connectTimeout, "connect-timeout", 30*time.Second, "how long a peer may take to connect and receive the room's document")
 	flags.Uint64Var(&cfg.seed, "seed", 1, "seed of the peers' random choices (each peer draws from its own stream of it)")
+	flags.Var(&protect, "protect", "text marking a paragraph the peers never edit: one whose text holds it, anywhere in the document (repeatable)")
 	if err := flags.Parse(args); err != nil {
 		return config{}, err
 	}
@@ -166,6 +169,12 @@ func parseFlags(args []string) (config, error) {
 		return config{}, errors.New("-session is required")
 	}
 	cfg.artifacts = artifacts
+	for _, text := range protect {
+		if text == "" {
+			return config{}, errors.New("-protect must name some text")
+		}
+	}
+	cfg.protect = protect
 	if artifactsFile != "" {
 		content, err := os.ReadFile(artifactsFile)
 		if err != nil {
@@ -238,9 +247,9 @@ func typePeer(ctx context.Context, cfg config, room string, header http.Header, 
 	}
 	fragment := peer.Doc.GetXmlFragment(fragmentName)
 	var texts int
-	peer.Doc.Transact(func(*crdt.Transaction) { texts = len(paragraphTexts(fragment)) })
+	peer.Doc.Transact(func(*crdt.Transaction) { texts = len(editableTexts(fragment, cfg.protect)) })
 	if texts == 0 {
-		r.err = errors.New("the document holds no paragraph text to type into")
+		r.err = errors.New("the document holds no paragraph text the peer may type into")
 		return
 	}
 
@@ -257,7 +266,7 @@ func typePeer(ctx context.Context, cfg config, room string, header http.Header, 
 			return
 		case <-ticker.C:
 		}
-		update := docstest.Transact(peer.Doc, func(txn *crdt.Transaction) { keystroke(txn, fragment, random) })
+		update := docstest.Transact(peer.Doc, func(txn *crdt.Transaction) { keystroke(txn, fragment, random, cfg.protect) })
 		if update == nil {
 			r.skipped++
 			continue
@@ -273,10 +282,12 @@ func typePeer(ctx context.Context, cfg config, room string, header http.Header, 
 }
 
 // keystroke makes one edit to a paragraph's text chosen at random, reading the document inside the
-// transaction so the edit lands on what the peer holds now, room edits included. It changes
-// nothing when the document holds no paragraph text, and never deletes a text's last character.
-func keystroke(txn *crdt.Transaction, fragment *crdt.YXmlFragment, random *rand.Rand) {
-	texts := paragraphTexts(fragment)
+// transaction so the edit lands on what the peer holds now, room edits included. A paragraph whose
+// text holds one of protect is never chosen: a load generator's own writes quote it. It changes
+// nothing when the document holds no paragraph text it may edit, and never deletes a text's last
+// character.
+func keystroke(txn *crdt.Transaction, fragment *crdt.YXmlFragment, random *rand.Rand, protect []string) {
+	texts := editableTexts(fragment, protect)
 	if len(texts) == 0 {
 		return
 	}
@@ -315,19 +326,66 @@ func word(random *rand.Rand, n int) string {
 // (top level, lists, quotes, cells), in document order. Callers hold the document's transaction.
 func paragraphTexts(fragment *crdt.YXmlFragment) []*crdt.YXmlText {
 	var texts []*crdt.YXmlText
-	var walk func(*crdt.YXmlFragment, bool)
-	walk = func(parent *crdt.YXmlFragment, inParagraph bool) {
-		for _, child := range parent.Children() {
-			switch node := child.(type) {
-			case *crdt.YXmlText:
-				if inParagraph {
-					texts = append(texts, node)
-				}
-			case *crdt.YXmlElement:
-				walk(&node.YXmlFragment, node.NodeName == "paragraph")
-			}
+	for _, paragraph := range paragraphs(fragment) {
+		texts = append(texts, paragraph...)
+	}
+	return texts
+}
+
+// editableTexts is paragraphTexts without the texts of a paragraph whose whole text, read now,
+// holds one of protect. Callers hold the document's transaction.
+func editableTexts(fragment *crdt.YXmlFragment, protect []string) []*crdt.YXmlText {
+	var texts []*crdt.YXmlText
+	for _, paragraph := range paragraphs(fragment) {
+		if !holdsAny(paragraph, protect) {
+			texts = append(texts, paragraph...)
 		}
 	}
-	walk(fragment, false)
 	return texts
+}
+
+// paragraphs is the texts of each paragraph element anywhere in fragment's tree, one slice per
+// paragraph, in document order.
+func paragraphs(fragment *crdt.YXmlFragment) [][]*crdt.YXmlText {
+	var found [][]*crdt.YXmlText
+	var walk func(*crdt.YXmlFragment)
+	walk = func(parent *crdt.YXmlFragment) {
+		for _, child := range parent.Children() {
+			element, ok := child.(*crdt.YXmlElement)
+			if !ok {
+				continue
+			}
+			if element.NodeName != "paragraph" {
+				walk(&element.YXmlFragment)
+				continue
+			}
+			var texts []*crdt.YXmlText
+			for _, inner := range element.Children() {
+				if text, ok := inner.(*crdt.YXmlText); ok {
+					texts = append(texts, text)
+				}
+			}
+			found = append(found, texts)
+		}
+	}
+	walk(fragment)
+	return found
+}
+
+// holdsAny reports whether the paragraph made of texts holds one of protect in its plain text,
+// read inside the caller's transaction (YText.ToString would wait on the lock that holds).
+func holdsAny(texts []*crdt.YXmlText, protect []string) bool {
+	if len(protect) == 0 {
+		return false
+	}
+	var plain strings.Builder
+	for _, text := range texts {
+		plain.WriteString(pmdoc.TextInTransaction(text))
+	}
+	for _, marker := range protect {
+		if strings.Contains(plain.String(), marker) {
+			return true
+		}
+	}
+	return false
 }
