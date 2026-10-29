@@ -2,82 +2,67 @@
   "schemaVersion": 1,
   "phase": "test",
   "issue": "INFRA-715",
-  "completed": "2026-10-29T19:12:00Z",
-  "round": 7,
-  "codeHead": "4be0d238b669",
-  "pullRequestHead": "e3f722fd8d9e5abe8e73842b509f41627181632a",
+  "completed": "2026-10-29T19:48:00Z",
+  "round": 8,
+  "codeHead": "37f334f05032",
+  "pullRequestHead": "7cf7f3b6a9f1916c9dbccbaba84f29d22abb5909",
   "implementerProof": {
     "verdict": "verified",
-    "how": "Round 7 answers the review's six minors, the first of which changes what a person reads. I drove it on a real Dispatch server of both builds rather than reading the implementer's output. At the head an upload that leaves an ask's quote in two separate code blocks is refused 400 saying 'would land in two code blocks ... move that text out of them'; at the previous head e0629eed the same upload says 'a code block ... out of it', the under-count the review found. The counting boundary holds at the place rather than the match: one code block holding the quote twice still reads 'a code block ... out of it'. The ordering case the review asked for is right at the head - an ask at the end of a long document whose quote lands in a code block where it stood and in the front matter far above is named 'a code block and the front matter' - and it was already right at e0629eed, so that case pins behaviour rather than fixing it, which I say rather than claiming a fix. The other four minors I checked by reading and by running: Find holds find's body and the package builds and passes, the NearestFirst miss is asserted as ErrTargetNotFound itself, the loop decides each outcome where it happens with a labelled continue and only the all-refused return after it, and the solutions note and the PR body's Look at first line name symbols that exist."
+    "how": "This round changes no production code: the whole diff over packages/envoy since my round-7 head is find.go's At doc comment, which the reviewer wrote, and one row of upload_anchors_test.go. The row answers the review's finding that no committed test caught At being changed from the block's text-run start to the refused range's start. I did not take the row's passing as proof. I reproduced the mutation the review used, in a throwaway tree at this head, and ran the refusal table: exactly one row fails, the new one, reading 'two code blocks ... out of them' where it wants 'a code block ... out of it'. So the lock holds against the change that previously slipped through. Unmutated, all six rows pass, and the room tests, both anchor oracles, the copy test, the eight reanchorError cases and the two browser files pass at this head."
   },
   "failed": 0,
   "failures": [],
   "reviewFindingsClosed": [
     {
-      "finding": "minor - places were deduped by their wording, so a quote left in two separate code blocks read as one, contradicting the 'one pass over the markdown resolves it' claim.",
-      "closed": "pmdoc.MarkNotAllowedError now carries At, the start of the refused text run (find.go:1138, spans[last].From), and docs.refusedPlace groups by the pair of wording and At. Two code blocks are two places and read 'two code blocks'; two matches inside one code block share At and read 'a code block'. Verified over HTTP at both builds and by the two new reanchorError cases. PlacePlural is empty for the front matter, so a document that holds one of a kind is never counted."
+      "finding": "minor - no committed test pinned that two matches of a quote inside one code block count as one place; both review agents mutated MarkNotAllowedError.At and every docs and pmdoc test still passed.",
+      "closed": "upload_anchors_test.go gains the row 'an ask into one code block twice', seed 'Intro.\\n\\nrun the tests\\n' and upload 'Intro.\\n\\n```\\nrun the tests\\nand run the tests\\n```\\n', expecting 'a code block ... out of it'. I verified it is a lock rather than a passing row by rerunning the review's own mutation against it (proof entry 1). The unit case 'one place its quote stands in twice' stays as the message-level check it is; the new row is the one that runs the mark writer."
     },
     {
-      "finding": "minor - no test told nearest order from document order.",
-      "closed": "The new service case 'an ask into a code block where it stood and the front matter far above' does, and I drove the same shape over HTTP: the head names 'a code block and the front matter'. Honest note: e0629eed names it the same way, so this case pins behaviour that was already right rather than fixing a defect. A short-filler variant of mine named the front matter first, which is correct for that geometry - the front matter is the nearer place there - so the order follows the distance and not the document."
-    },
-    {
-      "finding": "minor - find_test.go asserted errors.Is(err, ErrTargetNotFound), which a full *ErrQuoteNotFound also satisfies, so the cheap miss was not pinned.",
-      "closed": "The assertion is now err != ErrTargetNotFound, the sentinel itself. I ran the test."
-    },
-    {
-      "finding": "minor - Find was a pass-through to find, its only caller.",
-      "closed": "find is gone and Find holds its body. go build ./... is clean and the pmdoc package's targeted tests pass."
-    },
-    {
-      "finding": "minor - the re-anchor loop re-tested `refused` after it to learn why it stopped.",
-      "closed": "Each outcome is decided where it happens: a mark written or a quote whose range covers no text continues the outer reanchors loop by label, a cause that is not ErrMarkNotAllowed returns the server's error at once, and only the all-refused return stands after the loop. The behaviour is unchanged, which the five refusal cases and the two copy cases at this head show."
-    },
-    {
-      "finding": "minor - the solutions note cited stale line numbers, and the PR body's Look at first named refusedReanchor, which no longer exists.",
-      "closed": "Both fixed by the reviewer in prose. The body now names reanchorError, which is the function in mutation.go."
+      "finding": "minor - the At doc read as where the refused text begins.",
+      "closed": "The reviewer rewrote it in 8ca80716 (comment only): the start of the text run holding the refused text, its block's whole text, not where the refused range starts. That matches the code, which sets At to spans[last].From."
     }
   ],
   "proof": [
     {
-      "criterion": "A refused re-anchor counts the places of each kind its quote stands in and names them nearest first, so one pass over the markdown resolves the upload",
-      "surface": "a real Dispatch server process of both builds (go build ./cmd/dispatch) on a real Postgres 16, driven over its HTTP API as an agent does - dispatch issue, POST /api/v1/issues/{key}/asks and dispatch comment for the anchors, POST /api/v1/issues/{key}/artifacts for the upload - with the server's own log, the artifact_versions rows and each anchor read back",
-      "command": "bash $TMPDIR/rig/copyanchor.sh $TMPDIR/bin/dispatch-r7 18897 tester_ca_r7 and two further runs of it for the ordering and the one-block-twice cases, then the same driver with a binary built from the previous code head e0629eed",
-      "observed": "At the head 4be0d238: the quote left in two separate code blocks is 400 'would land in two code blocks, where its mark is not allowed, and the upload leaves its quote nowhere it may stand; move that text out of them, or resolve the ask first'; the quote left twice inside one code block is 400 naming 'a code block' and saying 'out of it'; an ask at the end of a long document whose quote lands in a code block where it stood and in the front matter far above is 400 naming 'a code block and the front matter'. The five cases of the earlier rounds are unchanged: two copies accepted 201 with the anchor on the original heading and paragraph, the single-place moves naming that one place, and the front-matter-and-code-block case naming both. Every refusal leaves the artifact at version 1, the anchor open and not orphaned, and writes no level=ERROR line.",
-      "headSha": "4be0d238b669",
-      "negativeControl": "The same driver against a binary built from the previous code head e0629eed: two separate code blocks are named 'a code block' and 'out of it', the under-count this review found, reproduced. The ordering case reads the same at both heads, so I record it as pinned rather than fixed. Further back, at 090ae14d a two-place refusal named only the farthest place, at bf2118ca the copy cases were refused, and on main bb9fe49c every one of them was 500 DOC_SCHEMA with a server ERROR line."
+      "criterion": "The test added for the review's finding fails on the change it was written to catch, so the place-counting boundary is pinned",
+      "surface": "the real docs.Service on a live room over its websocket on Postgres 16, in a throwaway tree of this head with one line of pmdoc mutated, so the mark writer runs for real and the refusal travels the whole re-anchor path",
+      "command": "git archive 37f334f05032 into $TMPDIR/mut-check, change pmdoc/find.go:1138 from `At: spans[last].From` to `At: r.From`, then DISPATCH_TEST_DATABASE_URL=… go test ./internal/dispatch/docs/ -run TestAnUploadMovingAnAnchorsQuoteWhereItsMarkIsNotAllowedIsRefused -count=1",
+      "observed": "Exactly one of the six rows fails, the new 'an ask into one code block twice': 'the upload = ... would land in two code blocks, where its mark is not allowed, and the upload leaves its quote nowhere it may stand; move that text out of them ... want ... would land in a code block ... move that text out of it'. That is the wording the review predicted the mutation would produce, and the row that produces it is the one the review asked for. Unmutated at this head the same six rows pass, the two-code-blocks row and the one-block-twice row among them. The throwaway tree is deleted.",
+      "headSha": "37f334f05032",
+      "negativeControl": "The mutation is itself the control: before this row, the review reports that every docs and pmdoc test passed with At changed, so nothing caught it. After it, the suite fails on that change and on nothing else, which is what distinguishes a lock from a row that happens to pass."
     },
     {
-      "criterion": "The counting boundary is the place, not the match, and the re-anchor loop's restructuring changed no outcome",
-      "surface": "pmdoc's mark writer over a real CRDT document, docs.reanchorError over every cause and combination the loop can carry, and the real docs.Service on a live room for each service-level case",
-      "command": "cd packages/envoy && go build ./... && go test ./internal/dispatch/pmdoc/ -run 'TestNearestFirstListsEveryMatchInFindsOrderOfChoice|TestAMarkNotAllowedWhereItsTextStandsIsTheOnlyErrMarkNotAllowed|TestAnUploadKeepsTheIDsOfTheBlocksItLeavesUnchanged' -count=1; DISPATCH_TEST_DATABASE_URL=… go test ./internal/dispatch/docs/ -run 'TestAnUploadMovingAnAnchorsQuoteWhereItsMarkIsNotAllowedIsRefused|TestAnUploadCopyingAnAnchorsQuoteWhereItsMarkIsNotAllowedKeepsTheAnchorOnTheOriginal|TestAReanchorErrorIsTheCallersOnlyWhenTheMarkIsNotAllowed' -count=1 -v",
-      "observed": "The build is clean, so nothing calls the removed find. All pass. The five service refusal cases include the two new ones; both copy cases still leave the mark on the original textblock; and the eight reanchorError cases pass - one place, two places nearer first, two places of one kind, one place its quote stands in twice, and four that must stay a plain ErrDocSchema, among them a mark-not-allowed refusal paired with a server fault. Reading the code for the boundary: At is spans[last].From, the refused text run's start, so two matches in one code block carry the same At and two code blocks carry different ones, which is what the HTTP cases show.",
-      "headSha": "4be0d238b669",
-      "negativeControl": "The four server-fault cases are the control for the classification: each is refused the caller's label and given a plain ErrDocSchema that is neither ErrDocOutsideSchema nor ErrInvalidMarkdown. None is reachable over HTTP by design, since every mark in a room was written through this same writer against the same closed type set and the scratch document holds only the uploaded tree."
-    },
-    {
-      "criterion": "A3 and the reader-facing proof at this round's head: the room memory bounds, the anchor oracle, the block-id carry and the browser block-reference test still hold",
+      "criterion": "A3 and the reader-facing proof at this round's head: the room memory bounds, the anchor oracle, the refusal table, the block-id carry and the browser block-reference test still hold",
       "surface": "the real docs.Service on a live room over its websocket on Postgres 16; pmdoc.ParseForWrite; and Dispatch's own browser suite in Chromium and on the phone profile against a real server",
-      "command": "cd packages/envoy && DISPATCH_TEST_DATABASE_URL=… go test ./internal/dispatch/docs/ -run 'KeepMemoryWithinTheBound|KeepsMemoryWithinTheBound|TestAnUploadChangingOneTokenWritesASmallUpdateOverOpenAnchors|TestAnUploadLeavesTheAnchorsOnTheTextItKeeps|…' -count=1 -v; cd packages/dispatch && DATABASE_URL=… PLAYWRIGHT_BROWSERS_PATH=… bun e2e/run.ts -- bunx playwright test --config e2e/playwright.config.ts e2e/block-references.e2e.ts e2e/anchors.e2e.ts",
-      "observed": "All pass. The docs package in 66.1 s: 200 one-token uploads 678 B per upload against 879 B stored; 250 writes 2,979 B per write against 929 B stored; 400 writes in the production mix 1,480 B per write against 2,092 B stored, each inside its stored-plus-2-MiB bound. Both anchor oracles pass, the comment-into-a-code-block case among them. The pmdoc carry test passes every case, and the browser run gives 7 passed (46.7s).",
-      "headSha": "4be0d238b669",
+      "command": "cd packages/envoy && go build ./... && DISPATCH_TEST_DATABASE_URL=… go test ./internal/dispatch/docs/ -run 'KeepMemoryWithinTheBound|KeepsMemoryWithinTheBound|TestAnUploadChangingOneTokenWritesASmallUpdateOverOpenAnchors|TestAnUploadLeavesTheAnchorsOnTheTextItKeeps|TestAnUploadMovingAnAnchorsQuoteWhereItsMarkIsNotAllowedIsRefused|TestAnUploadCopyingAnAnchorsQuoteWhereItsMarkIsNotAllowedKeepsTheAnchorOnTheOriginal|TestAReanchorErrorIsTheCallersOnlyWhenTheMarkIsNotAllowed' -count=1 -v; cd packages/dispatch && DATABASE_URL=… PLAYWRIGHT_BROWSERS_PATH=… bun e2e/run.ts -- bunx playwright test --config e2e/playwright.config.ts e2e/block-references.e2e.ts e2e/anchors.e2e.ts",
+      "observed": "The build is clean and everything passes in 64.6 s: 200 one-token uploads 680 B per upload against 880 B stored; 250 writes 1,963 B per write against 927 B stored; 400 writes in the production mix 1,492 B per write against 2,092 B stored, each inside its stored-plus-2-MiB bound. Both anchor oracles pass, the comment-into-a-code-block case among them; all six refusal rows and both copy rows pass; the eight reanchorError cases pass. The browser run gives 7 passed (35.3s).",
+      "headSha": "37f334f05032",
       "negativeControl": "Round 1, on a clean tree of main bb9fe49c with the same test files: every room bound exceeded (97,907,216 B against 18,933,230 B; 79,822,416 B against 17,521,628 B; 14,948,664 B against 8,032,262 B), the pmdoc carry test reporting 1,658 of 1,658 ids changed, and the browser test failing at block-references.e2e.ts:275 with 'element(s) not found'."
+    },
+    {
+      "criterion": "The refusal a person meets is unchanged by this round, since no production code moved",
+      "surface": "the diff itself, read over packages/envoy, and the real-server HTTP drives of round 7 that it leaves standing",
+      "command": "jj diff --from 4be0d238b669 --to 37f334f05032 --stat, then the two file diffs",
+      "observed": "Two files: pmdoc/find.go, four comment lines of the At field, and docs/upload_anchors_test.go, one table row of seven lines. No production statement changes, so round 7's HTTP measurements still name this head - two separate code blocks read 'two code blocks ... out of them', one code block holding the quote twice reads 'a code block ... out of it', an ask at the end of a long document whose quote lands in a code block where it stood and the front matter far above reads 'a code block and the front matter', the two copies are accepted 201 with the anchor on the original block, and no refusal writes a version or a level=ERROR line.",
+      "headSha": "37f334f05032",
+      "negativeControl": "Round 7's control stands: at the previous code head e0629eed two separate code blocks read 'a code block ... out of it', and on main bb9fe49c every one of these uploads was 500 DOC_SCHEMA with a server ERROR line."
     }
   ],
   "risks": [
-    "The 200-upload room test stays noisy: 674 to 2,979 B per upload across seven runs of this change. The bound holds with at least 2.8x margin in every run and the main-side control is 489,536 B per upload. Already on the PR body's Not proven line.",
-    "This container needs more than go test's default 10-minute package timeout for internal/dispatch/pmdoc, where the package passed in 701 s at the previous head. I ran the targeted pmdoc tests this round rather than the package; CI's envoy-go lane is what judges it."
+    "No code head of this pull request has finished its CI lanes, and that is now a pattern rather than one bad push: each round's push cancels the previous head's run before the Go and browser lanes settle. The only required lane that has ever finished on this branch is `lint`, green at e0629eed. If the rounds keep landing at this pace, the reviewer will be asked to approve a head whose checks have never run, and the merge will then wait on required checks that start only after the last push. This is for the architect to weigh, not a defect of the change; I raise it with my report.",
+    "The 200-upload room test stays noisy: 674 to 2,979 B per upload across eight runs of this change, 680 B at this head. The bound holds with at least 2.8x margin in every run and the main-side control is 489,536 B per upload. Already on the PR body's Not proven line.",
+    "The place counting is quadratic in the number of refused places, which the review measured at about a second for 65,536 refused code blocks and recorded under Not proven. I did not re-measure it; it is on the error path only."
   ],
   "ci": {
-    "head": "4be0d238 is the code head; the pull-request head e3f722fd is the handoff-only push",
-    "read": "GitHub, 2026-10-29T19:08Z, not re-run and not waited for",
-    "state": "At 4be0d238 only `changes` and `pr-title` runs exist, queued; the CI workflow has created no job check runs yet. At the previous code head e0629eed `lint` finished green - one of the four required checks - and `changes` and `pr-title` too, before this round's push cancelled the rest. So no code head of this pull request has a finished envoy-go, dispatch or test lane yet. A queued lane is read as queued; a required red that settles later sends the work back from testing on its own, and the reviewer reads the head's checks before it approves.",
-    "mergeability": "GitHub reports #2480 mergeable MERGEABLE, mergeStateStatus BLOCKED (the base's required review), reviewDecision CHANGES_REQUESTED from the round-5 review this round answers."
+    "head": "37f334f0 is the code head; the pull-request head 7cf7f3b6 is the handoff-only push",
+    "read": "GitHub, 2026-10-29T19:44Z, not re-run and not waited for",
+    "state": "At 37f334f0 only `changes` and two `pr-title` runs exist, all queued; the CI workflow has created no job check runs yet. At 4be0d238 `changes` finished green and the rest were cancelled by the reviewer's comment push; at 8ca80716 every lane was cancelled by this round's push. A queued lane is read as queued; a required red that settles later sends the work back from testing on its own, and the reviewer reads the head's checks before it approves.",
+    "mergeability": "GitHub reports #2480 mergeable MERGEABLE, mergeStateStatus BLOCKED (the base's required review), reviewDecision CHANGES_REQUESTED from the round-6 review this round answers."
   },
   "notRun": [
     "The cluster hour was not re-run: the copy is down, and A2 is verified by re-deriving it from that run's own files, done in rounds 1 and 2.",
-    "The real-server upload-memory driver of round 1 was not re-run: every Go change since has been the class, the wording, the choice of occurrence or the counting of one refusal and touches no write path, which the four room tests at this head confirm.",
-    "The whole internal/dispatch/pmdoc package was not re-run this round; the targeted tests of it were.",
+    "The real-server HTTP drivers were not re-run this round: no production code changed since round 7, which the diff shows, so round 7's drives name this head.",
+    "The whole internal/dispatch/pmdoc package was not re-run; this container needs more than go test's default 10-minute package timeout for it, where it passed in 701 s at an earlier head, and CI's envoy-go lane is what judges it.",
     "No CI lane was re-run as evidence, and no queued lane was waited for."
   ]
 }
