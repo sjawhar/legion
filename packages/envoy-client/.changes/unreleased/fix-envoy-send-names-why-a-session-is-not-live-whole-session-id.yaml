@@ -1,0 +1,9 @@
+kind: Changed
+body: |-
+    `envoy_send`'s `session_id` argument now tells the model what it is: the target's whole session
+    ID, a UUID, found with `envoy_sessions` or `envoy_whoami` and never completed or guessed, since
+    a UUID's first group is shared by every session started inside the same 65-second window and
+    part of an id names no session. The listener refuses such a target outright.
+time: 2026-10-29T06:40:00.000000000Z
+custom:
+    Issue: fix-envoy-send-names-why-a-session-is-not-live

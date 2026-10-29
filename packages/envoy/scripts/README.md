@@ -80,9 +80,16 @@ notification envelopes, and proves both the Go prompt text and the shared
 TypeScript renderer print the full direct message once, with no separate
 summary line repeating its first line.
 
-It also proves the three answers a sender gets when a send cannot be delivered:
+It also proves the answers a sender gets when a send cannot be delivered:
 a send to a session the store does not hold is refused `404 {"error":"no live
-session <id>"}`; each send leaves exactly one `listener send` record in
+session <id>: no registration, and none lapsed in the last <ttl>; check the
+session id"}`, the wording for an id this listener never held a registration
+for (one it watched lapse names that registration's last heartbeat instead);
+a send to a target that is not a session id at all — the run sends to
+`01a17b06`, a UUID's first group — is refused `400 {"error":"01a17b06 is not a
+session id and nothing is registered under it: …"}` with
+`outcome=not_a_session_id`, never as a session that is not live;
+each send leaves exactly one `listener send` record in
 `listener.log`, INFO when accepted and WARN when refused, carrying
 `target_session`, `event_id`, `source`, `source_session`, `payload_summary`,
 `outcome` and `status`; and a send whose bus is gone is refused `503` with

@@ -1,0 +1,14 @@
+kind: Changed
+body: |-
+    A send the listener refuses because the session store holds no record of its target now says
+    which of the two absences it is, in place of the one sentence both had: `no live session <id>:
+    its registration lapsed, last seen <age> ago` for a registration this listener held until it
+    aged out, whose session may come back, and `no live session <id>: no registration, and none
+    lapsed in the last <ttl>; check the session id` when it holds neither, which a stale or
+    mistyped id reads as. Both keep the `no live session <id>` prefix Dispatch classifies a
+    delivery failure on, and the send's own record line carries `last_seen` for the first, so the
+    two can be counted apart in the log. The second sentence speaks only for the window a lapsed
+    registration's last heartbeat is kept (one registry TTL) and never says the id never existed.
+time: 2026-10-29T06:20:00.000000000Z
+custom:
+    Issue: fix-envoy-send-names-why-a-session-is-not-live
