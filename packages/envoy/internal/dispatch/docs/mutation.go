@@ -498,7 +498,7 @@ func (s *Service) SeedText(ctx context.Context, artifactID, markdown string, act
 	if !joined {
 		return "", errUnjoined
 	}
-	tree, err := parseInput(markdown)
+	tree, read, err := parseWrittenReplacing(nil, markdown)
 	if err != nil {
 		return "", err
 	}
@@ -525,6 +525,10 @@ func (s *Service) SeedText(ctx context.Context, artifactID, markdown string, act
 	// records it once the transaction commits (Ledger.creditRooms), so a seed that never commits
 	// leaves the document no state.
 	ledgerFrom(ctx).seeded(artifactID, renderedTree{tree: tree, markdown: canonical, offsets: offsets}, actor)
+	// The parse read its markdown back already, to refuse a document that reads back otherwise;
+	// the rest of the request reads the rendering through that parse rather than making a second
+	// one of it (Ledger.ReadBackOf).
+	ledgerFrom(ctx).wroteReadBack(artifactID, read)
 	return canonical, nil
 }
 
@@ -551,6 +555,7 @@ func (s *Service) ReplaceText(ctx context.Context, artifactID, markdown string, 
 		return "", err
 	}
 	var canonical string
+	var read pmdoc.WrittenReadBack
 	var unchanged bool
 	err = s.applyLive(ctx, artifactID, actor, func(doc *crdt.Doc, current *pmdoc.Node, transact func(func(*crdt.Transaction))) error {
 		fragment := doc.GetXmlFragment(fragmentName)
@@ -568,10 +573,11 @@ func (s *Service) ReplaceText(ctx context.Context, artifactID, markdown string, 
 		if repairing {
 			current = nil
 		}
-		target, err := parseReplacing(current, markdown)
+		target, read2, err := parseWrittenReplacing(current, markdown)
 		if err != nil {
 			return err
 		}
+		read = read2
 		// A repair is a whole new document, held to the ask content rule for every ask, as
 		// RebuildDocument holds supplied markdown, and it keeps every open ask block.
 		if repairing {
@@ -656,11 +662,16 @@ func (s *Service) ReplaceText(ctx context.Context, artifactID, markdown string, 
 		return nil
 	})
 	if unchanged && errors.Is(err, websocket.ErrNoChanges) {
+		ledgerFrom(ctx).wroteReadBack(artifactID, read)
 		return canonical, nil
 	}
 	if err != nil {
 		return "", wrapUnlessTooLarge(err, "replace live document")
 	}
+	// The parse read its markdown back already, to refuse a document that reads back otherwise;
+	// the rest of the request reads the rendering through that parse rather than making a second
+	// one of it (Ledger.ReadBackOf).
+	ledgerFrom(ctx).wroteReadBack(artifactID, read)
 	return canonical, nil
 }
 

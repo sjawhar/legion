@@ -507,6 +507,10 @@ func (s *server) storeArtifact(
 	documentCtx, ledger := s.deps.Docs.Join(r.Context(), tx)
 	defer ledger.Discard()
 	var documentMarkdown string
+	// documentReadBack is the rendering this write stored, read back by its own parse
+	// (docs' Ledger.ReadBackOf): the task count and the advice's blocks read that tree rather
+	// than parsing the same markdown again, and parse it themselves when the write left none.
+	var documentReadBack *pmdoc.Node
 	var documentChanges model.ReferenceChanges
 	var movedEvents []model.Event
 	if kind == "doc" {
@@ -527,8 +531,14 @@ func (s *server) storeArtifact(
 		// The version credits the uploader alone, and holds the upload's write to the document,
 		// which clears the credit of every edit that write read when it changed the document.
 		ledger.WroteVersion(artifact.ID, version)
+		documentReadBack = ledger.ReadBackOf(artifact.ID, documentMarkdown)
 		// The version row exists now, so the count names it (LEGION-542).
-		if err := docs.RecordTaskProgressMarkdown(r.Context(), tx, artifact.ID, documentMarkdown); err != nil {
+		if documentReadBack != nil {
+			err = docs.RecordTaskProgress(r.Context(), tx, artifact.ID, documentReadBack)
+		} else {
+			err = docs.RecordTaskProgressMarkdown(r.Context(), tx, artifact.ID, documentMarkdown)
+		}
+		if err != nil {
 			s.writeHandlerError(w, err)
 			return
 		}
@@ -624,7 +634,11 @@ func (s *server) storeArtifact(
 	}
 	s.publish(published...)
 	var blocks *documentBlocks
-	if kind == "doc" {
+	switch {
+	case kind != "doc":
+	case documentReadBack != nil:
+		blocks = documentBlocksOf(documentReadBack)
+	default:
 		blocks = readDocumentBlocks(documentMarkdown)
 	}
 	if advice != nil {

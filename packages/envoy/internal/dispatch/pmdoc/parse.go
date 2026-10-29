@@ -121,16 +121,28 @@ func parseStampedAt(markdown string, at origin, budget *WriteBudget) (*Node, err
 // (RepeatedBlockID), and the repair keeps it for its first block, as settlement would. A block id
 // of any length is written; one longer than text.MaxBlockIDBytes is simply no graph node
 // (refs.IndexBlocks). A document whose rendering, the markdown it is stored as, reads back
-// otherwise is refused (RefuseMisreadDocument).
+// otherwise is refused (RefuseMisreadDocument); ParseWritten is this parse with that read-back,
+// for a write that goes on to read the same rendering.
 func ParseForWrite(markdown string, live *Node) (*Node, error) {
+	doc, _, err := ParseWritten(markdown, live)
+	return doc, err
+}
+
+// ParseWritten is ParseForWrite with the read-back its refusal of a document that reads back
+// otherwise already made: the markdown the document is stored as and that markdown's tree
+// (WrittenReadBack). A write that stores that rendering and reads it again - for its task items,
+// for its blocks - shares this parse rather than making a second one of the same markdown. A
+// refused parse answers the zero read-back.
+func ParseWritten(markdown string, live *Node) (*Node, WrittenReadBack, error) {
 	doc, err := parseForWrite(markdown, live, true, NewWriteBudget())
 	if err != nil {
-		return nil, err
+		return nil, WrittenReadBack{}, err
 	}
-	if err := RefuseMisreadDocument(doc); err != nil {
-		return nil, err
+	read, misread, err := documentMisread(doc)
+	if err := refuseMisread(misread, err); err != nil {
+		return nil, WrittenReadBack{}, err
 	}
-	return doc, nil
+	return doc, read, nil
 }
 
 // ParseFragment parses markdown a caller writes into a document, rather than one that begins it,

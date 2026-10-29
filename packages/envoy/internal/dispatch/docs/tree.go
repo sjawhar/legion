@@ -128,7 +128,22 @@ func opensDocument(tree *pmdoc.Node, position int) bool {
 // for none), refusing a block id the markdown repeats that live does not already repeat
 // (pmdoc.ParseForWrite).
 func parseReplacing(live *pmdoc.Node, markdown string) (*pmdoc.Node, error) {
-	return uploadedInput(pmdoc.ParseForWrite(markdown, live))
+	tree, _, err := parseWrittenReplacing(live, markdown)
+	return tree, err
+}
+
+// parseWrittenReplacing is parseReplacing with the read-back of the markdown the parse already
+// made (pmdoc.ParseWritten), which a write that stores that markdown and reads it again shares
+// rather than parsing it a second time (Ledger.ReadBackOf). The tree it returns is the parse's
+// as an upload is taken (asUploaded), so the read-back stands for what this write stores only
+// where the two render alike, which its caller compares markdown for.
+func parseWrittenReplacing(live *pmdoc.Node, markdown string) (*pmdoc.Node, pmdoc.WrittenReadBack, error) {
+	parsed, read, err := pmdoc.ParseWritten(markdown, live)
+	tree, err := uploadedInput(parsed, err)
+	if err != nil {
+		return nil, pmdoc.WrittenReadBack{}, err
+	}
+	return tree, read, nil
 }
 
 // uploadedInput is a tree parsed from caller markdown as an upload is taken (asUploaded). A

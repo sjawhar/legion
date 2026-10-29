@@ -282,13 +282,20 @@ const (
 var typedOpening = regexp.MustCompile(`:{3,}[A-Za-z0-9_-]+\{`)
 
 // readDocumentBlocks reads markdown, a document's canonical markdown - the rendering a write
-// stored, read back (pmdoc.ParseRendering) - for its advice, or nil when it does not read.
+// stored, read back (pmdoc.ParseRendering) - for its advice, or nil when it does not read. A
+// caller whose own write already read that rendering back hands documentBlocksOf the tree instead
+// (docs' Ledger.ReadBackOf), which is this parse of the same markdown.
 func readDocumentBlocks(markdown string) *documentBlocks {
 	tree, err := pmdoc.ParseRendering(markdown)
 	if err != nil {
 		slog.Warn("dispatch: decision block count failed", "error", err)
 		return nil
 	}
+	return documentBlocksOf(tree)
+}
+
+// documentBlocksOf reads tree, a document's canonical markdown parsed, for its advice.
+func documentBlocksOf(tree *pmdoc.Node) *documentBlocks {
 	blocks := &documentBlocks{}
 	pmdoc.Walk(tree, func(node *pmdoc.Node) bool {
 		switch node.Type {
