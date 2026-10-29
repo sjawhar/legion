@@ -243,9 +243,11 @@ test("a link to a block of a comment shows the block's new text once its author 
     body: `The detail is in dispatch://${issue.key}/comment/${cited.id}#b-b2 today.`,
   });
 
-  // The server subscribes the stream before it answers, so every write after this reaches the page.
-  const stream = page.waitForResponse(
-    (response) => /\/api\/v1\/events(\?|$)/.test(response.url()) && response.status() === 200
+  // The first events subscription resumes from the sign-in check's head, so once the live socket
+  // opens, every write after this reaches the page.
+  const stream = page.waitForEvent(
+    "websocket",
+    (socket) => new URL(socket.url()).pathname === "/ws/live"
   );
   await page.goto(`/issues/${issue.key}/conversation`);
   await stream;
@@ -278,8 +280,9 @@ test("a link to a block of a comment stops showing the block's text once its aut
     body: `The detail was in dispatch://${issue.key}/comment/${cited.id}#b-b2 today.`,
   });
 
-  const stream = page.waitForResponse(
-    (response) => /\/api\/v1\/events(\?|$)/.test(response.url()) && response.status() === 200
+  const stream = page.waitForEvent(
+    "websocket",
+    (socket) => new URL(socket.url()).pathname === "/ws/live"
   );
   await page.goto(`/issues/${issue.key}/conversation`);
   await stream;
@@ -312,8 +315,9 @@ test("a link to a block of a spec stops showing the block's text once a document
     body: `The detail was in dispatch://${issue.key}/spec#b-${paragraph} today.`,
   });
 
-  const stream = page.waitForResponse(
-    (response) => /\/api\/v1\/events(\?|$)/.test(response.url()) && response.status() === 200
+  const stream = page.waitForEvent(
+    "websocket",
+    (socket) => new URL(socket.url()).pathname === "/ws/live"
   );
   await page.goto(`/issues/${issue.key}/conversation`);
   await stream;
