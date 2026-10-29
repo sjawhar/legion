@@ -2,37 +2,22 @@
   "schemaVersion": 1,
   "phase": "review",
   "issue": "INFRA-568",
-  "completed": "2026-10-29T09:36:58Z",
-  "decision": "changes_requested",
-  "round": 12,
-  "reviewedCodeHead": "dc9071e65c3b",
+  "completed": "2026-10-29T12:34:21Z",
+  "decision": "approved",
+  "round": 13,
+  "reviewedCodeHead": "ca85bfa9816a4af2e13595e5701af169ff65a435",
   "critical": 0,
-  "important": 1,
-  "minor": 2,
-  "keyFindings": [
-    {
-      "severity": "important",
-      "file": "packages/envoy/internal/dispatch/api/suggestions.go:861 (with server.go:343-347, 392-394, 417-418, 427)",
-      "description": "The related_checks record retry runs on its own sync.WaitGroup (relatedRecordRetries) next to main's backgroundWork, which #2449 brought in this merge. backgroundWork exists because work may start while wait is already waiting (server.go:430-433): cmd/dispatch/shutdown.go calls waitBackground once httpDrainBeforeDocuments has passed with requests still in flight. A late unkeyed create (a script, the daemon outbox) whose first record attempt fails can then call relatedRecordRetries.Go after Wait began from zero, which sync.WaitGroup forbids and which can panic in the window where Wait is releasing; otherwise the retry runs after waitBackground returned. Fix: run the retry with s.detached.goDetached, and delete the relatedRecordRetries field, its Wait at server.go:427 and the related-check clauses in the Register and waitBackground comments. Keep relatedRecordRetrying, which enforces the retry limit."
-    },
-    {
-      "severity": "minor",
-      "file": "packages/envoy/internal/dispatch/api/keyed_write_guard_test.go:63-65",
-      "description": "The allowlist reason says the rows are written after the write marked its key, but respondWithExistingExternalIssue commits only a read, marks no key, and records an already_exists row. Say the row records the check whether or not the write wrote, and a duplicate after a takeover only adds one row of statistics."
-    },
-    {
-      "severity": "minor",
-      "file": "packages/envoy/internal/dispatch/api/suggestions.go:146-150 (and 0139_related_checks.up.sql:38, README)",
-      "description": "'cancelled' is described as the request ending first. Under #2449 a keyed handler's context is detached from the client and ends only at keyedRunLimit, with no cause, so for a keyed write cancelled means the keyed run's own bound. Say so where cancelled is described."
-    }
-  ],
+  "important": 0,
+  "minor": 0,
+  "keyFindings": [],
   "verified": {
-    "fingerprint": "Last review commit_id 19841c71: 7cced850...; code head dc9071e6: b8970b00..., changed. Narrowed round; thermonuclear pair run.",
-    "keyedLayer": "A replayed create returns its stored status (request_keys.go:990), so the client's created (201) and already-held (200) stay right on a replay. Keyed handlers run on WithoutCancel(r.Context()) bounded by keyedRunLimit (10 min), so the 5 s allowance ends first and a slow check records timeout. POST /projects/{key}/related is keyed like every POST, as main keys its other read-only POSTs; it writes nothing and stores only its answer.",
-    "counts": "leasePoolSize 13 and ConnectionsPerProcess 87 = dispatchConnectionsPerPod; main added no pool or lease. Migrations 0139/0140 follow main's 0137_request_keys and 0138_pending_delivery_indexes; no stale numbers.",
-    "merge": "main.go keeps main's moved RunSuggestionOutcomeSweep once; insertRelatedChecks is allowlisted in the keyed-write guard; registeredRoutes 143 = 140 + 3; dc9071e6's census row covers DispatchClient.related.",
-    "thermonuclear": "deep-review APPROVE (two Minor items above); code-quality CHANGES (the WaitGroup item above).",
-    "ci": "Not waited on: a request for changes does not wait.",
-    "threads": "All ten earlier threads resolved."
+    "scope": "Narrowed to round 12's three items. ca85bfa9 is the only code commit since ea818458.",
+    "retry": "recordRelatedChecks' retry runs through s.detached.goDetached. The relatedRecordRetries field, its Wait in waitBackground and its comment clauses are deleted, and grep finds no use left. relatedRecordRetrying, which enforces the retry limit, stays.",
+    "test": "In a scratch copy against Postgres, TestRelatedCheckRecordRetryStartedWhileShutdownWaitsIsWaitedFor and the related bounds, record and keyed-write tests pass under -race. Negative control: with the retry on a plain goroutine (an overlay), the new test fails with 'the shutdown wait returned (panic <nil>) while the record's retry still held its row'.",
+    "wording": "The keyed-write guard reason for insertRelatedChecks says the row records the check whether or not its write wrote. 'cancelled' is described for keyed writes (the keyed run's own 10-minute bound) in suggestions.go, the 0139 migration comment and both README passages.",
+    "thermonuclear": "Not run: the round's diff is one call site moved onto main's existing helper, comment and doc text, and a test; this round's own overlay negative control covers the behaviour.",
+    "ci": "Required lint, typecheck, test and pr-title all success at the CI head ca85bfa9. The compare to f8c9c34b changes only .legion/.",
+    "threads": "PRRT_kwDORFy7ds6xfdMk, PRRT_kwDORFy7ds6xfdMq and PRRT_kwDORFy7ds6xfdMv carry my accepting replies and are resolved; all thirteen threads are resolved.",
+    "e2eLines": "E2E (implementer) and E2E (tester) present."
   }
 }
