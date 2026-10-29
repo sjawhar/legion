@@ -2,52 +2,58 @@
   "schemaVersion": 1,
   "phase": "implement",
   "issue": "INFRA-251",
-  "completed": "2026-10-29T18:30:00Z",
+  "completed": "2026-10-29T21:05:00Z",
   "proof": [
     {
-      "criterion": "PR #2163 no longer conflicts with main, and nothing of #2131's old code remains: main merged forward (never a rebase), main's side kept for every file, only INFRA-251's own change re-applied on top",
-      "surface": "GitHub pull request sjawhar/legion#2163 and the issue branch legion/INFRA-251",
-      "command": "jj new legion/INFRA-251 main@origin (64d2ad0be7da) with jj restore --from main@origin; re-apply INFRA-251's diff (b423af833..bd3892e47727 + c3955ada, db300b63, 028510c1); jj new legion/INFRA-251 main@origin (2b427f930eac); jj git push --bookmark legion/INFRA-251; gh pr view 2163 --json mergeable,mergeStateStatus",
-      "observed": "legion/INFRA-251 moved forward 19257e958f11 -> e7beb692c21f -> 6b07c0197b42 (fast-forwards). GitHub reports mergeable=MERGEABLE, mergeStateStatus=BLOCKED (reviews and CI pending). The diff against main is 47 files, +3105/-127, all INFRA-251's own paths. CI run 40928051868 and PR Title run 40928051863 were queued at the head. Fingerprint 2ccf97d5... -> 9ef46f13..., posted at https://github.com/sjawhar/legion/pull/2163#issuecomment-6504637074",
-      "headSha": "6b07c0197b428c37727dcf441fc54310c9b3c458",
-      "negativeControl": "At 19257e958f11 GitHub reported CONFLICTING/DIRTY. At e7beb692 it reported CONFLICTING/DIRTY again, after main moved to 2b427f93 (#2370): git merge-tree named conflicts in daemon/outbox.go and daemon/notice_exceptions.go. The second merge cured that."
+      "criterion": "Review finding 1: a decision on a root that waits for its slot is kept and goes to no controller on either path; both paths use one relay",
+      "surface": "The Legion daemon's outbox notice executor and workflow ask handlers, against a real PostgreSQL 17.2 (127.0.0.1:55432) and nats-server 2.10.29 (127.0.0.1:54222) in this issue's pod",
+      "command": "cd packages/daemon && LEGION_TEST_PG_DSN=postgres://postgres:pw@127.0.0.1:55432/postgres?sslmode=disable LEGION_TEST_NATS_URL=nats://127.0.0.1:54222 LEGION_TEST_NATS_MONITOR_URL=http://127.0.0.1:58222 go test -count=1 -p 1 ./internal/record/ ./internal/store/ ./internal/api/ ./internal/admit/ ./internal/workflow/ ./internal/intake/ ./internal/notify/ ./internal/dispatch/ ./internal/classify/ ./internal/prompts/... && go test -count=1 -p 1 ./internal/daemon/ -skip 'TestDaemonPermissionsOnRealServers|TestTheWorkflowConnectsAsTheNatsSeedTheDaemonResolved|TestTheWorkflowConnectsAsTheDaemonSeedOverThePaneSeed|TestChooseNATSConnectionNamesTheUserTheDaemonConnectsAs|TestNoLaunchCarriesTheDaemonSeed|TestTmuxBootRewritesEveryOlderClonesCredentialHelper|TestATerminalAttempt|ScratchDispatch'",
+      "observed": "All ok: record 45.406s, store 67.192s, api 167.087s, admit 329.960s, workflow 499.710s, intake 29.403s, notify, dispatch, classify, prompts, daemon 565.729s. go build, go vet and gofmt are clean. Both the outbox parkDecision and the workflow ask path call record.RelayParkedDecision, which checks WaitsForSlot first and only keeps the decision for such a root.",
+      "headSha": "45a8bf012b43e4a478c75e74fdcc51e97ca4b608",
+      "negativeControl": "Before the fix, the reviewer traced the outbox path relaying carried-gate-opened for a handed-over root in todo, because architectEnded is true when the claim state is empty (thread PRRT_kwDORFy7ds6v-NK4)."
     },
     {
-      "criterion": "INFRA-251's behaviour works on main's awaiting-person machinery: a person's decision on a parked tree reaches the controller once and is named at the root's next start; main's awaiting-person behaviour is unchanged",
-      "surface": "The Legion daemon's outbox, admission path, ask handlers and record store against a real PostgreSQL 17.2 (127.0.0.1:55432) and a real nats-server 2.10.29 (127.0.0.1:54222) in this issue's pod",
-      "command": "cd packages/daemon && LEGION_TEST_PG_DSN=postgres://postgres:pw@127.0.0.1:55432/postgres?sslmode=disable LEGION_TEST_NATS_URL=nats://127.0.0.1:54222 LEGION_TEST_NATS_MONITOR_URL=http://127.0.0.1:58222 go build ./... && go vet ./... && gofmt -l internal cmd && go test -count=1 -p 1 ./internal/notify/ ./internal/record/ ./internal/store/ ./internal/admit/ ./internal/workflow/ ./internal/api/ && go test -count=1 -p 1 ./internal/daemon/ -skip 'TestDaemonPermissionsOnRealServers|TestTheWorkflowConnectsAsTheNatsSeedTheDaemonResolved|TestTheWorkflowConnectsAsTheDaemonSeedOverThePaneSeed|TestChooseNATSConnectionNamesTheUserTheDaemonConnectsAs|TestNoLaunchCarriesTheDaemonSeed|TestTmuxBootRewritesEveryOlderClonesCredentialHelper|TestATerminalAttempt|ScratchDispatch'",
-      "observed": "vet exit 0, gofmt empty. notify ok 0.025s, record ok 46.770s, store ok 68.447s, admit ok 328.942s, workflow ok 530.245s, api ok 174.110s, daemon ok 560.991s at 6b07c019. At the first merge head, intake, dispatch, classify and prompts were also ok. INFRA-251's 22 named tests PASS, including TestASpecDecisionNobodyInItsTreeHearsGoesToTheController, TestAPersonsAnswerOnAParkedTreeGoesToTheController, TestAPersonsReplyOnAParkedChildNamesItsRoot, TestAnAnswerOnARunningTreeSendsNothing, TestARootReadmittedOnAnOlderApprovalIsToldBothVersions and TestParkedDecisionsArriveWith0062AndGoWithTheirRoot. Every main awaiting-person test passes unchanged.",
-      "headSha": "6b07c0197b428c37727dcf441fc54310c9b3c458",
-      "negativeControl": "With the relay call removed from dispatchAskClosed, TestAPersonsAnswerOnAParkedTreeGoesToTheController FAILs with 'parked-decision notices = []admit.effect(nil)', and TestAPersonsResolutionAndReplyAreRelayed FAILs because the ask-resolved reference is missing. The change was then reverted with jj restore."
+      "criterion": "Review finding 2: a kept decision is forgotten only when the start or catch-up that named it is delivered",
+      "surface": "The Legion daemon outbox supervise start branch and catch-up notice publish, with the record store on real PostgreSQL",
+      "command": "go test -count=1 -run 'TestOnlyADeliveredStartForgetsTheDecisionsItNamed|TestOnlyADeliveredCatchUpForgetsTheDecisionsItNamed' ./internal/daemon/ ; go test -count=1 -run 'TestAParkedDecisionKeepsTheNewestPerRefAndIsForgottenOnlyWhereItWasNamed|TestAReadmittedApprovalIsKeptUntilTheStartThatNamedItIsDelivered' ./internal/record/ (inside the whole-package runs above)",
+      "observed": "PASS. A start or catch-up that finishes without delivering leaves the rows, and the next one names them again. A delivered start, or a published catch-up, forgets exactly the (root, ref, at) it named. A newer decision on the same ref survives the forget.",
+      "headSha": "45a8bf012b43e4a478c75e74fdcc51e97ca4b608",
+      "negativeControl": "The old code deleted the rows inside ParkedDecisionTask (TakeParkedDecisions). The new record tests assert that the rows are still present after a named but undelivered task, which that code fails by construction."
     },
     {
-      "criterion": "The controller skill's parked-decision rules sit in main's rewritten skill, and every skill:// link resolves",
-      "surface": "The staged Legion skills that the controller loads (skills/legion-controller)",
-      "command": "cd packages/pi-legion && bun test src/skills-guard.test.ts; bun test scripts/e2e/lib",
-      "observed": "skills-guard: 13 pass, 0 fail. scripts/e2e/lib: 707 pass, 2 fail; both failures are nats-stream.test.ts, which needs docker. The parked-decision wake, the walk at start and on tick, the Parked by Legion mark in held, and the hold re-admission bullet are each present once.",
-      "headSha": "6b07c0197b428c37727dcf441fc54310c9b3c458",
-      "negativeControl": "Last round, with the branch's old parked-decisions.md on main's skills, the anchor test failed (10 pass, 1 fail, naming dead #wake-routing-table, #new-issue-triage and #free-slots-go-daemon). The retargeted file passes here."
+      "criterion": "Review finding 3: committed tests guard the AwaitingPerson and slot terms of WaitsForSlot",
+      "surface": "admit package tests on real PostgreSQL",
+      "command": "go test -count=1 -run TestADecisionOnARootThatWaitsForNoSlotKeepsNothing ./internal/admit/",
+      "observed": "PASS for both cases: an awaiting_person root set to todo, and a slotted root at todo. In each, a person's reply and a person's answer keep nothing and send no parked-decision notice.",
+      "headSha": "45a8bf012b43e4a478c75e74fdcc51e97ca4b608",
+      "negativeControl": "With root.AwaitingPerson() removed from record.WaitsForSlot, the awaiting_person case FAILs ('want nothing kept for a root that waits for no slot'). With the slot check emptied, the slotted case FAILs. Both mutations were reverted."
+    },
+    {
+      "criterion": "Review finding 4: a lingering root at a status nobody parked gets no parked-decision, and the controller skill covers any other status",
+      "surface": "record.RelayParkedDecision and the controller skill (skills/legion-controller/references/parked-decisions.md step 1)",
+      "command": "cd packages/pi-legion && bun test src/skills-guard.test.ts; bun test scripts/e2e/lib/parked-decision-verdict.test.ts scripts/e2e/lib/parked-decision-cleanup.test.ts",
+      "observed": "skills-guard 13 pass, 0 fail. Verdict and cleanup tests 11 pass, 0 fail. The relay returns RelayNotParked, and logs 'outbox parked decision not relayed: its root is not parked', for a lingering root whose status is outside backlog/icebox/done/triage. Step 1 names and leaves any other status.",
+      "headSha": "45a8bf012b43e4a478c75e74fdcc51e97ca4b608",
+      "negativeControl": "Before the fix, step 1 had no branch for a lingering in_progress root, and the relay checked no status (thread PRRT_kwDORFy7ds6xtcYE)."
     }
   ],
   "filesChanged": [
-    "packages/daemon/** (34 files: record, store migration 0062 and its test, admit, api, daemon outbox/notice_exceptions/parked_decision, dispatch, intake, notify, prompts/go/architect-root.md, workflow ask_mirror/catch_up/gate/parked_decision, and INFRA-251's tests)",
-    "skills/legion-controller/SKILL.md, references/wakes.md, references/parked-decisions.md; skills/AGENTS.md; AGENTS.md",
-    "docs/site/src/content/docs/legion/concepts.md, troubleshooting.md",
-    "scripts/e2e/parked-decision-devbox.sh, scripts/e2e/README.md, scripts/e2e/lib/parked-decision-*.{jq,test.ts}",
-    "packages/pi-legion/.changes/unreleased/INFRA-251-parked-decision-controller.yaml"
+    "packages/daemon/internal/record/parked_decision.go (new: RelayParkedDecision, WaitsForSlot, KeptDecisions)",
+    "packages/daemon/internal/record/{record.go,store.go,outbox.go,store_test.go}",
+    "packages/daemon/internal/workflow/{parked_decision.go,ask_mirror.go,catch_up.go,catch_up_test.go}",
+    "packages/daemon/internal/admit/{admit.go,parked_decision_test.go}",
+    "packages/daemon/internal/daemon/{parked_decision.go,outbox.go,parked_decision_test.go,notice_routing_test.go}",
+    "scripts/e2e/lib/parked-decision-verdict.jq and its test",
+    "skills/legion-controller/references/{parked-decisions.md,wakes.md}, AGENTS.md, docs/site/src/content/docs/legion/troubleshooting.md"
   ],
   "trickyParts": [
-    "Main moved ask handling into workflow/ask_mirror.go, where recordedRoot skips children. The relay runs after main's unchanged handlers (now closeAsk/replyToAsk), so a reply on a parked child still reaches the controller and names its root.",
-    "The relay returns early for any root that is admitted, slotted or awaiting_person, so main's root_asks/reconcile/ResumeAwaitedRoot path stays the only owner of those roots.",
-    "main's #2370 replaced rehold with reholdNotice. The parked-decision call there is keyed by record.OutboxKey(reported.row), which is the original row's dedupe key, as before."
+    "Forget matches on (root, ref, at), so a newer decision upserted on the same ref after the naming survives.",
+    "DropCatchUps is back to main's signature: rows now stay until delivery, so nothing has to be carried from a dropped catch-up."
   ],
   "deviations": [
-    "No daemon API contract bump, unlike the architect's instruction. INFRA-251's own diff changes no state wire field; the old 36->37 bump was for #2131's shapes, which main shipped at 40. DaemonAPIVersion stays at main's 42.",
-    "Fast-follow item 3 (reorder claude-envoy CHANGELOG.md) needed no edit. The misordered contract-37 entry left with #2131's code, and main now writes every CHANGELOG.md from fragments.",
-    "The PR body's Fast-follow line now reads 'none' (the pr-body template requires the line), and the Chain and Gate G1 text is replaced with 'not stacked'.",
-    "main tests changed only where INFRA-251 deliberately changes behaviour: admit/design_gate_review_test.go (changes notice carries the spec Ref) and intake/ask_events_decode_test.go (the reply carries its Comment id)."
+    "A start that finds the root's architect already running names kept decisions twice: once in the catch-up from its running-claim ready, and once in its own task. Telling them twice is the at-least-once side of not losing them.",
+    "parkDecision marks the row's dedupe key processed for every outcome, so a rerun of a not-relayed row logs 'already sent'.",
+    "Under gates.design off, a kept readmitted approval is never named or forgotten. Each later keep replaces it, so there is at most one row per root."
   ],
-  "openQuestions": [
-    "Kept decisions on a root that main's answered-resume path (ResumeAwaitedRoot) brings back are not named in that resume task; they reach the architect in the next launch's catch-up. The relay never keeps a decision for an awaiting_person root, so this needs a root parked with kept decisions to later become awaiting_person before admission; I found no path that does this."
-  ]
+  "openQuestions": []
 }
