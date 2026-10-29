@@ -49,6 +49,7 @@
     "@milkdown/theme-nord": "^7.5.0",
     "@milkdown/transformer": "^7.5.0",
     "mdast-util-directive": "^3.1.0",
+    "micromark-core-commonmark": "^2.0.3",
     "micromark-factory-space": "^2.0.1",
     "micromark-factory-whitespace": "^2.0.1",
     "micromark-util-character": "^2.1.1",

@@ -15,7 +15,9 @@ import (
 
 // maxNesting is how many blocks a markdown document may open inside one another. Quotes, lists,
 // list items, typed blocks, and footnote definitions each count one. The next block is refused
-// before any deep tree is built.
+// before any deep tree is built. It is also the bound past which the browser editor's parser reads
+// a list or a quote opener as the text it is (maxBlockNesting, proof-editor's block-nesting.ts),
+// so a document this refuses is the one the browser draws as text.
 const maxNesting = 100
 
 // maxTypedNesting is how many typed blocks a markdown document may open inside one another, the

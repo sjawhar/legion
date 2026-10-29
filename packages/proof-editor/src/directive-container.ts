@@ -51,6 +51,7 @@ import type {
   Token,
   TokenizeContext,
 } from "micromark-util-types";
+import { openAround as blocksAround, maxBlockNesting, recordContinued } from "./block-nesting.js";
 import { factoryAttributes, factoryLabel, factoryName } from "./directive-factories.js";
 
 declare module "micromark-util-types" {
@@ -96,6 +97,12 @@ interface DirectiveBlock {
   indent: number;
   /** How many directive containers stand around it, itself included. */
   depth: number;
+  /**
+   * How many blocks the document service counts around its content, itself included: quotes,
+   * lists, list items, typed blocks and footnote definitions (`maxBlockNesting`,
+   * ./block-nesting.ts).
+   */
+  blocks: number;
   /** The line its opening fence is on. */
   line: number;
   /** Whether a closing fence has closed it. */
@@ -515,12 +522,15 @@ function tokenizeDirectiveContainerStart(
       : 0;
   let sizeOpen = 0;
   let depth = 0;
+  let blocks = 0;
   let opener: Token;
   return start;
 
   function start(code: Code): State | undefined {
     depth = openAround(self) + 1;
     if (depth > maxDirectiveNesting) return nok(code);
+    blocks = blocksAround(self) + 1;
+    if (blocks > maxBlockNesting) return nok(code);
     opener = effects.enter("directiveContainer", { _container: true });
     effects.enter("directiveContainerFence");
     effects.enter("directiveContainerSequence");
@@ -559,6 +569,7 @@ function tokenizeDirectiveContainerStart(
       fenceSize: sizeOpen,
       indent: initialSize,
       depth,
+      blocks,
       line: self.now().line,
       closed: false,
       contentStarts: [],
@@ -569,6 +580,7 @@ function tokenizeDirectiveContainerStart(
     }
     state.directive = block;
     opener._directive = block;
+    opener._nestDepth = blocks;
     if (someContainerEnded(self, opener)) self.parser.lazy[block.line] = true;
     // A start that micromark ran inside `effects.check` runs again at once, after any exits.
     parseRecord(self).open = depth;
@@ -618,6 +630,7 @@ function tokenizeDirectiveContainerContinuation(
       return nok(code);
     }
     recordOpenAround(self, block.depth);
+    recordContinued(self, block.blocks);
     // Only a line that opens with a colon or a blank can hold a closing fence, and an attempt on
     // every line at every level is what nesting costs.
     if (code !== 58 && !markdownSpace(code)) return content(code);
@@ -630,6 +643,7 @@ function tokenizeDirectiveContainerContinuation(
   function closed(code: Code): State | undefined {
     block.closed = true;
     recordOpenAround(self, block.depth - 1);
+    recordContinued(self, block.blocks - 1);
     parseRecord(self).open = block.depth - 1;
     if (blockQuoteOpenInside(self.events, block)) self.parser.lazy[self.now().line] = true;
     state._closeFlow = true;
