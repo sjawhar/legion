@@ -63,11 +63,12 @@ func (s *Service) SetAskBlockText(
 	actor model.Actor,
 ) (AskBlockText, error) {
 	var stored *AskBlockText
-	err := s.applyLive(ctx, artifactID, actor, func(doc *crdt.Doc, current *pmdoc.Node, transact func(func(*crdt.Transaction))) error {
-		tree, err := startTree(current, doc)
+	err := s.applyLive(ctx, artifactID, actor, func(doc *crdt.Doc, current pmdoc.ValidDocument, transact func(func(*crdt.Transaction))) error {
+		valid, err := startTree(current, doc)
 		if err != nil {
 			return err
 		}
+		tree := valid.Node()
 		block, err := askBlockOf(tree, blockID)
 		if err != nil {
 			return err

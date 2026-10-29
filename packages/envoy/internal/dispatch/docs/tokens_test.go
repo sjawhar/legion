@@ -181,7 +181,7 @@ func TestDocumentTokensRefuseAnUnencodableValueInsideABlockAsTheBlockDoes(t *tes
 		t.Fatalf("buildDocumentRead error %v is not a *json.UnsupportedValueError", err)
 	}
 
-	err = checkEditPrecondition(tree, model.EditPrecondition{Blocks: []model.EditBlockPrecondition{{ID: "intro", Token: "sha256:stale"}}})
+	_, err = checkEditPrecondition(tree, model.EditPrecondition{Blocks: []model.EditBlockPrecondition{{ID: "intro", Token: "sha256:stale"}}})
 	if !sameError(err, wantDocumentErr) {
 		t.Fatalf("checkEditPrecondition error = %v, want %v", err, wantDocumentErr)
 	}

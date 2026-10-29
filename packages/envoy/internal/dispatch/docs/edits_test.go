@@ -144,7 +144,7 @@ func TestVerifyTableAnchorSnapshotsRejectsMarkAddedAfterPrevalidation(t *testing
 	if !markText(tree) {
 		t.Fatal("delete cell text missing")
 	}
-	err = verifyTableAnchorSnapshots(tree, []model.EditOp{op}, []tableAnchorSnapshot{snapshot})
+	err = verifyTableAnchorSnapshots(tree, []model.EditOp{op}, []tableAnchorSnapshot{snapshot}, "")
 	var invalid *ErrInvalidOp
 	if !errors.As(err, &invalid) || invalid.Field != "index" || !strings.Contains(invalid.Reason, "changed during validation") {
 		t.Fatalf("table snapshot validation error = %v", err)
@@ -2858,7 +2858,15 @@ func TestReplacementBrokePassesAPanicOnAsAnError(t *testing.T) {
 		}},
 	} {
 		t.Run(test.name, func(t *testing.T) {
-			block, broke, err := replacementBroke(before, after, match, test.check)
+			valid, err := pmdoc.ValidateDocument(before, "BlockIndex")
+			if err != nil {
+				t.Fatal(err)
+			}
+			found, err := matchedBlocks(valid, match)
+			if err != nil {
+				t.Fatal(err)
+			}
+			block, broke, err := replacementBroke(before, after, found.span(after), test.check)
 			if block != -1 || broke != nil || !errors.Is(err, pmdoc.ErrPanic) {
 				t.Fatalf("replacementBroke = (%d, %v, %v), want an ErrPanic error and no verdict", block, broke, err)
 			}
@@ -2868,5 +2876,5 @@ func TestReplacementBrokePassesAPanicOnAsAnError(t *testing.T) {
 
 // applyAlone applies op to tree as a write of its own, on a budget of its own.
 func applyAlone(tree *pmdoc.Node, op model.EditOp) (*pmdoc.Node, error) {
-	return applyOperation(tree, op, pmdoc.NewWriteBudget())
+	return applyOperation(newBatchTree(tree), op, pmdoc.NewWriteBudget())
 }
