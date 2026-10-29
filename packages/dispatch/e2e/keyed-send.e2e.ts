@@ -355,19 +355,18 @@ test("two live-view sends pressed during an outage go out in press order, each o
 });
 
 // A comment's @-mention is delivered once even when the page gives up on the comment while
-// Dispatch is still delivering it. Dispatch is slow on its own side (the slow-write hook holds the
-// comment 12 s once its key is claimed) and the listener takes 4 s to answer the mention's send,
-// so the delivery runs from about 12 s to 16 s, and the page's attempt, silent all that time, is
-// cut off at 15 s, mid-delivery. The first run finishes the delivery regardless; the page's
-// repeat waits on it and is answered with the comment, and the session hears the mention once.
-test("a comment whose @-mention is cut off mid-delivery by the page is delivered once @phone", async ({
+// Dispatch is still writing it. Dispatch is slow on its own side (the slow-write hook holds the
+// comment 18 s once its key is claimed, inside the request), so the page's attempt, silent all
+// that time, is cut off at 15 s. The first run still commits the comment and answers; the page's
+// repeat under the same key waits on it and is answered with the comment, and the mention, sent
+// after the first run's answer, reaches the session once.
+test("a comment the page gives up on while Dispatch still writes it is answered from its key, its @-mention delivered once @phone", async ({
   browser,
 }) => {
   test.setTimeout(120_000);
   const issueKey = await seedAgents();
   const path = `/api/v1/issues/${issueKey}/comments`;
-  await slowWrites("POST", path, 12_000);
-  await setSessionSendDelay(plannerSession.session_id, 4_000);
+  await slowWrites("POST", path, 18_000);
   const alice = await asUser(browser, "alice");
   try {
     const page = await alice.newPage();
@@ -387,10 +386,10 @@ test("a comment whose @-mention is cut off mid-delivery by the page is delivered
     const answer = await landed;
     expect(answer.status()).toBe(201);
     const comment: { id: string } = await answer.json();
-    // The page gave up on its first attempt mid-delivery and asked again under the same key.
+    // The page gave up on its first attempt and asked again under the same key.
     expect(posts.length).toBeGreaterThanOrEqual(2);
     expect(new Set(posts.map((post) => post.key)).size).toBe(1);
-    // The mention's one attempt was delivered, within the first run, not by a later sweep.
+    // The mention's one attempt was delivered by the first run's sender, not by a later sweep.
     await expect
       .poll(
         async () =>
@@ -408,6 +407,71 @@ test("a comment whose @-mention is cut off mid-delivery by the page is delivered
     await expect(page.getByText(/^Couldn't send/)).toHaveCount(0);
   } finally {
     await slowWrites("POST", path, 0);
+    await alice.close();
+  }
+});
+
+// A comment answers once it commits, before its @-mention is sent. The listener takes 4 s to
+// answer the mention's send (inside the listener client's 5 s window, so the send succeeds), and
+// the page is answered while that send is still under way: the mention's attempt reads pending
+// beside the answer, the page never repeats the write, and the mention reaches the session once,
+// by the send that runs after the answer.
+test("a comment whose @-mention's send is slow is answered before the send, with no repeat, and delivered once @phone", async ({
+  browser,
+}) => {
+  test.setTimeout(120_000);
+  const issueKey = await seedAgents();
+  const path = `/api/v1/issues/${issueKey}/comments`;
+  await setSessionSendDelay(plannerSession.session_id, 4_000);
+  const alice = await asUser(browser, "alice");
+  try {
+    const page = await alice.newPage();
+    const posts = watchWrites(page, "POST", path);
+    const answered = page.waitForResponse(
+      (response) =>
+        response.request().method() === "POST" && new URL(response.url()).pathname === path
+    );
+    await page.goto(`/issues/${issueKey}/conversation`);
+    const form = page.getByRole("form", { name: "Comment composer" }).last();
+    const field = form.getByLabel("Comment");
+    await field.fill("Heads up @");
+    await page
+      .getByRole("listbox", { name: "Mention suggestions" })
+      .getByRole("option", { exact: true, name: "Planner" })
+      .first()
+      .click();
+    await form.getByRole("button", { exact: true, name: "Send" }).click();
+
+    const answer = await answered;
+    expect(answer.status()).toBe(201);
+    expect(answer.headers()["idempotency-replayed"]).toBeUndefined();
+    const comment: { id: string; deliveries: { session_id?: string; state: string }[] } =
+      await answer.json();
+    // The answer carries the attempt pending: the send is not part of the request.
+    expect(
+      comment.deliveries
+        .filter((delivery) => delivery.session_id === plannerSession.session_id)
+        .map((delivery) => delivery.state)
+    ).toEqual(["pending"]);
+    await expect(field).toHaveValue("");
+    // The send finishes after the answer, once.
+    await expect
+      .poll(
+        async () =>
+          (await listComments(issueKey))
+            .find((listed) => listed.id === comment.id)
+            ?.deliveries.filter((delivery) => delivery.session_id === plannerSession.session_id)
+            .map((delivery) => ({ attempt: delivery.attempt, state: delivery.state })),
+        { timeout: 20_000 }
+      )
+      .toEqual([{ attempt: 1, state: "sent" }]);
+    expect(
+      (await getSentMessages()).filter((sent) => sent.target_session === plannerSession.session_id)
+    ).toHaveLength(1);
+    // The page asked once.
+    expect(posts).toHaveLength(1);
+    await expect(page.getByText(/^Couldn't send/)).toHaveCount(0);
+  } finally {
     await setSessionSendDelay(plannerSession.session_id, 0);
     await alice.close();
   }
