@@ -245,7 +245,7 @@ import {
 import requestTemplate from "./askgate-request.md" with { type: "text" };
 import systemTemplate from "./askgate-system.md" with { type: "text" };
 import uploadRule from "./askgate-upload.md" with { type: "text" };
-import { Breaker, breakerKey, callKeys, refusalThings, targetLabel } from "./breaker";
+import { Breaker, breakerKey, callKeys, refusalThings } from "./breaker";
 import type { DecisionRecorder } from "./decision-record";
 import ruleCheckRules from "./rule-check.md" with { type: "text" };
 import ruleCheckSystem from "./rule-check-system.md" with { type: "text" };
@@ -257,6 +257,7 @@ import {
   RULE_FAILURE_OUTCOMES,
   type RuleName,
   type RuleOutcome,
+  type RulesCheck,
   renderRuleRefusal,
   runRulesCheck,
   type Usage,
@@ -379,9 +380,6 @@ const SEPARATOR = "\n\n";
 
 export type Mode = (typeof MODES)[number];
 type Input = Record<string, unknown>;
-
-/** Every attempt's spend, as both checks report it (`rules-check.ts` declares it for both). */
-export type { Usage };
 
 /** Both model calls' spend on one entry; undefined when neither was billed. */
 function addUsage(a: Usage | undefined, b: Usage | undefined): { usage: Usage } | undefined {
@@ -1924,9 +1922,6 @@ export function parseVerdict(
   return undefined;
 }
 
-/** The prompt renderer both checks share (`text.ts`), which the entry's tests read from here. */
-export { renderTemplate };
-
 /**
  * The gate's user message: the agent's system prompt and transcript as escaped data, then the call,
  * its arguments as `renderArgs` rendered them. An upload of a markdown document carries
@@ -2769,18 +2764,88 @@ export function createAskGate(deps: Deps): (pi: Pi) => void {
       };
     };
 
-    const decide = async (
-      event: ToolCallEvent,
-      ctx: GateCtx,
-      started: number,
-      base: Base,
-      key: string,
-      rebuttal: Rebuttal | undefined,
-      override: Override,
-      stop: Stop,
-      directory: () => Promise<string | undefined>,
-      upload = false
-    ): Promise<Decision> => {
+    /**
+     * One gated call, as the review and each of its branches read it: the call and the session it
+     * came from, when the handler took it, what its entry already holds, its breaker key, the
+     * rebuttal it carries and the surface an override is written on, the one stop everything the
+     * call waits on is raced against, the directory its command runs in, and whether its dry run
+     * showed an upload (which the charter request names).
+     */
+    type GatedCall = {
+      event: ToolCallEvent;
+      ctx: GateCtx;
+      started: number;
+      base: Base;
+      key: string;
+      rebuttal: Rebuttal | undefined;
+      override: Override;
+      stop: Stop;
+      directory: () => Promise<string | undefined>;
+      upload: boolean;
+    };
+
+    /**
+     * A call whose new ask a rule matched: refused in every mode, the charter's revise reason
+     * after the rules reason. The charter's own outcome stays on the record and alone moves the
+     * halt count. The rules reason is never kept for the breaker, so it never feeds the charter
+     * request. `keys` is the call's own breaker keys, read once for the trip check and the count.
+     */
+    const ruleRefusal = (
+      call: GatedCall,
+      keys: () => readonly string[],
+      ruled: RulesCheck,
+      charter: Charter,
+      called: Partial<GateEntry>
+    ): Decision => {
+      const { event, base, key, override } = call;
+      const { matches } = ruled;
+      const rulesReason = [
+        ...matchLines(matches, ruled.names),
+        ...(ruled.reason === "" ? [] : [ruled.reason]),
+      ].join("\n");
+      // The refusal is the rules check's in either mode, so it counts on the asks that check
+      // refused, and a charter revise beside it adds its reason only: a rules refusal counts the
+      // same in warn and block mode.
+      const tripsNext = breaker.refused(
+        key,
+        refusalThings(event.toolName, keys(), ruled),
+        charter.reason
+      );
+      const delivered = [
+        agentFacing(rulesReason),
+        ...(charter.reason === undefined
+          ? []
+          : [agentFacing(`AskGate's charter check also answered revise: ${charter.reason}`)]),
+      ].join("\n");
+      const [first] = matches;
+      return {
+        fields: {
+          decision: "revise",
+          outcome: charter.outcome,
+          ...charter.fields,
+          deliveredReason: delivered,
+          revisesForKey: base.revisesForKey + 1,
+          rule: first.rule,
+          ruleAsk: first.ask,
+          ruleQuote: first.quote,
+          ...called,
+        },
+        result: {
+          block: true,
+          reason: renderRuleRefusal(
+            delivered,
+            matches.map((match) => match.rule),
+            tripsNext,
+            override,
+            SECOND_REVISE
+          ),
+        },
+        effect: charter.effect,
+      };
+    };
+
+    const decide = async (call: GatedCall): Promise<Decision> => {
+      const { event, ctx, started, base, key, rebuttal, override, stop, directory, upload } = call;
       // Before any path that lets the write out: a session with no model role refuses in both
       // modes, and a rebuttal, a halt, a breaker trip or a shutdown is no exception, since none
       // of them is a review and the gate cannot review anything at all here.
@@ -2837,12 +2902,12 @@ export function createAskGate(deps: Deps): (pi: Pi) => void {
       // The arguments as the model sees them, cut at GATE_ARGS_MAX_BYTES, also go in the entry, so a
       // later read of the review has the text the model judged, not the command or a mutable file.
       const args = renderArgs(event.input);
-      const call = { toolCallId: event.toolCallId, stop };
+      const walked = { toolCallId: event.toolCallId, stop };
       // The charter call starts first (its request is rendered and started before this returns); a call
       // that opens a new ask also gets the rules call, beside it on the same chain, deadline and stop.
       const charterRun = walk(
         ctx,
-        call,
+        walked,
         {
           system,
           label: "",
@@ -2865,7 +2930,7 @@ export function createAskGate(deps: Deps): (pi: Pi) => void {
           now: deps.now,
           env: deps.env,
           dispatchClient: deps.dispatchClient,
-          walk: (prompt) => walk(ctx, call, prompt, chain),
+          walk: (prompt) => walk(ctx, walked, prompt, chain),
         },
         {
           toolName: event.toolName,
@@ -2901,55 +2966,8 @@ export function createAskGate(deps: Deps): (pi: Pi) => void {
               ...(ruled.asksPartial ? { ruleAsksPartial: true as const } : {}),
             }),
       };
-      const matches = ruled?.matches ?? [];
-      if (ruled !== undefined && matches.length > 0) {
-        // A rule matched: refused in every mode, the charter's revise reason after the rules reason. The
-        // charter's own outcome stays on the record and alone moves the halt count. The rules reason is
-        // never kept for the breaker, so it never feeds the charter request.
-        const rulesReason = [
-          ...matchLines(matches, ruled.names),
-          ...(ruled.reason === "" ? [] : [ruled.reason]),
-        ].join("\n");
-        // The refusal is the rules check's in either mode, so it counts on the asks that check
-        // refused, and a charter revise beside it adds its reason only: a rules refusal counts the
-        // same in warn and block mode.
-        const tripsNext = breaker.revised(
-          key,
-          refusalThings(event.toolName, thisCallKeys(), ruled),
-          charter.reason
-        );
-        const delivered = [
-          agentFacing(rulesReason),
-          ...(charter.reason === undefined
-            ? []
-            : [agentFacing(`AskGate's charter check also answered revise: ${charter.reason}`)]),
-        ].join("\n");
-        const [first] = matches;
-        return {
-          fields: {
-            decision: "revise",
-            outcome: charter.outcome,
-            ...charter.fields,
-            deliveredReason: delivered,
-            revisesForKey: base.revisesForKey + 1,
-            rule: first.rule,
-            ruleAsk: first.ask,
-            ruleQuote: first.quote,
-            ...called,
-          },
-          result: {
-            block: true,
-            reason: renderRuleRefusal(
-              delivered,
-              matches.map((match) => match.rule),
-              tripsNext,
-              override,
-              SECOND_REVISE
-            ),
-          },
-          effect: charter.effect,
-        };
-      }
+      if (ruled !== undefined && ruled.matches.length > 0)
+        return ruleRefusal(call, thisCallKeys, ruled, charter, called);
       // No rule matched, or the rules check ended without a verdict: the charter decides, as it did
       // before there was one.
       if (charter.outcome === "abandoned" || charter.outcome === "shutdown")
@@ -2969,7 +2987,7 @@ export function createAskGate(deps: Deps): (pi: Pi) => void {
       // next charter request on this target carries the reasons already given. A block-mode one
       // refuses the call, which counts on each of its things.
       const refused = base.verdictMode === "block";
-      const tripsNext = breaker.revised(
+      const tripsNext = breaker.refused(
         key,
         refused ? refusalThings(event.toolName, thisCallKeys(), ruled) : [],
         charter.reason
@@ -3396,25 +3414,25 @@ export function createAskGate(deps: Deps): (pi: Pi) => void {
               else if ("failure" in run) decision = pass("error", { reason: run.failure });
               else {
                 dryRun = { args: run.args, files: run.files };
-                const key = breakerKey(scoped.tool, run.review);
+                const { key, label } = breakerKey(scoped.tool, run.review);
                 base = {
                   ...base,
                   revisesForKey: breaker.revises(key),
                   argsDigest: createHash("sha256").update(JSON.stringify(run.review)).digest("hex"),
-                  target: targetLabel(key),
+                  target: label,
                 };
-                decision = await decide(
-                  { toolName: scoped.tool, toolCallId: event.toolCallId, input: run.review },
+                decision = await decide({
+                  event: { toolName: scoped.tool, toolCallId: event.toolCallId, input: run.review },
                   ctx,
                   started,
                   base,
                   key,
-                  scoped.rebuttal,
-                  override ?? (scoped.readsFile ? FILE_OVERRIDE : COMMAND_OVERRIDE),
+                  rebuttal: scoped.rebuttal,
+                  override: override ?? (scoped.readsFile ? FILE_OVERRIDE : COMMAND_OVERRIDE),
                   stop,
-                  run.directory,
-                  scoped.upload === true
-                );
+                  directory: run.directory,
+                  upload: scoped.upload === true,
+                });
               }
             } finally {
               stop.close();
@@ -3425,27 +3443,28 @@ export function createAskGate(deps: Deps): (pi: Pi) => void {
           const rebuttal = rebuttals.get(event.toolCallId);
           rebuttals.delete(event.toolCallId);
           if (!scopedDevice(event.toolName, event.input)) return undefined;
-          const key = breakerKey(event.toolName, event.input);
+          const { key, label } = breakerKey(event.toolName, event.input);
           base = {
             ...identity(event, mode),
             revisesForKey: breaker.revises(key),
             argsDigest: createHash("sha256").update(JSON.stringify(event.input)).digest("hex"),
-            target: targetLabel(key),
+            target: label,
           };
           const stop = openStop(event.toolCallId);
           try {
             // A device call runs in the session's own directory; it has no `cd` of its own.
-            decision = await decide(
+            decision = await decide({
               event,
               ctx,
               started,
               base,
               key,
               rebuttal,
-              DEVICE_OVERRIDE,
+              override: DEVICE_OVERRIDE,
               stop,
-              async () => ctx.cwd
-            );
+              directory: async () => ctx.cwd,
+              upload: false,
+            });
           } finally {
             stop.close();
           }

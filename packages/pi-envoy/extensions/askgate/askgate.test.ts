@@ -34,7 +34,6 @@ import {
   type Message,
   parseMode,
   parseVerdict,
-  renderTemplate,
   renderTranscript,
   scopedDevice,
   sessionMode,
@@ -42,6 +41,7 @@ import {
 import * as fx from "./askgate-fixtures";
 import { createDecisionRecorder, RECORD_TIMEOUT_MS, type RecordClient } from "./decision-record";
 import type { DispatchSession, RuleMatch } from "./rules-check";
+import { renderTemplate } from "./text";
 
 /** Runs a `dispatch` command's --dry-run as the entry's binding does. */
 type DryRunner = (script: string, opts: DryRunOptions) => Promise<DryRunResult>;

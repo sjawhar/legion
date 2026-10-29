@@ -35,8 +35,6 @@ export interface NewAsk {
   id?: string;
   /** The text's first words, which name the ask in a refusal. */
   opening: string;
-  /** Set when the ask's text could not be read, so it was judged without it. */
-  textMissing?: boolean;
 }
 
 /** How many code points of an ask's text name it: as many as `dispatch doc-read --blocks` shows. */

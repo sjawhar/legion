@@ -40,7 +40,13 @@ const ID_MAX_BYTES = 128;
 /** How many matching asks a refusal names before it only counts the rest. */
 const REFUSAL_MATCHES = 5;
 
-export type RuleName = "no_change" | "untried_access";
+/**
+ * The rules the check knows, in the order a report lists them: the names the answer gives, and the
+ * only names `RULES` below, the report (`scripts/askgate-report.ts`) and the scenario score
+ * (pi-legion's `scripts/skill-scenarios/score.ts`) read, so a rule added here is in each of them.
+ */
+export const RULE_NAMES = ["no_change", "untried_access"] as const;
+export type RuleName = (typeof RULE_NAMES)[number];
 /** The two rules, by the name the answer gives each: how the agent reads it, and what to do instead. */
 const RULES: Record<RuleName, { label: string; fix: string }> = {
   no_change: {
@@ -57,19 +63,23 @@ const RULES: Record<RuleName, { label: string; fix: string }> = {
 export type RuleMatch = { ask: number; rule: RuleName; quote: string };
 
 /**
- * How the rules check ended, recorded as `ruleOutcome`. `unjudged` is the one no model call made:
- * an upload whose stored version could not be read and whose every opener carries an `#id`, so the
- * check left every ask of the call unjudged — never a judgement that nothing matched.
+ * How the rules check ended, recorded as `ruleOutcome`, in the order a report lists them. The
+ * array is what a reader counts over, so a new outcome is in every report that reads it.
  */
-export type RuleOutcome =
-  | "match"
-  | "none"
-  | "error"
-  | "timeout"
-  | "no-verdict"
-  | "abandoned"
-  | "shutdown"
-  | "unjudged";
+export const RULE_OUTCOMES = [
+  "match",
+  "none",
+  "error",
+  "timeout",
+  "no-verdict",
+  "abandoned",
+  "shutdown",
+  // The one no model call made: an upload whose stored version could not be read and whose every
+  // opener carries an `#id`, so the check left every ask of the call unjudged — never a
+  // judgement that nothing matched.
+  "unjudged",
+] as const;
+export type RuleOutcome = (typeof RULE_OUTCOMES)[number];
 
 /**
  * The outcomes of a rules check that reached no verdict, which the gate counts toward its one
@@ -221,6 +231,14 @@ export interface RuleOverride {
 }
 
 /**
+ * How a rules refusal opens, on every surface and in both modes. Exported because a reader of a
+ * refused call's result tells it from the charter's revise by this line (pi-legion's
+ * `scripts/skill-scenarios/score.ts`), so the two must not drift apart.
+ */
+export const RULE_REFUSAL_OPENING =
+  "AskGate did not send this call: a rule refuses a new ask in it.";
+
+/**
  * The refusal for a call whose new ask a rule matched, in every mode: each matching ask, its rule and
  * the quoted words (already agent-facing), what to do for each rule that matched, and the override.
  * A long list is cut to the first few matches and counted.
@@ -233,7 +251,7 @@ export function renderRuleRefusal(
   secondRevise: string
 ): string {
   return [
-    "AskGate did not send this call: a rule refuses a new ask in it.",
+    RULE_REFUSAL_OPENING,
     delivered,
     ...[...new Set(rules)].map((rule) => `For "${RULES[rule].label}": ${RULES[rule].fix}`),
     `If the person is needed anyway, send the call again with ${override.again}, naming which of the person's authority, taste or risk appetite it needs. An override is always sent and recorded, and ${override.fate}.`,
@@ -260,6 +278,14 @@ const attribute = (value: string) => escapeXml(value).replaceAll('"', "&quot;");
 /** What an ask whose text could not be read is listed as, in place of that text. */
 const MISSING_TEXT =
   "The text of this block is not available, so judge it on what the call and the transcript show.";
+
+/**
+ * An ask as this check judges it: the scan's own fields (`NewAsk`), and `textMissing` where the
+ * document holding its text could not be read. The field is this check's alone — the CLI and the
+ * scan never read it — so it is kept here and never written onto the scan's objects: `readAsks`
+ * copies the ask it judges.
+ */
+export type JudgedAsk = NewAsk & { textMissing?: true };
 
 /**
  * How many bytes of each ask's text the list carries, by the order the needs are given in: an
@@ -299,7 +325,7 @@ function textBudgets(needs: readonly number[], budget: number): number[] {
  * a session does not make. Such a call still lists every ask at the floor and goes past the
  * bound: a longer request is better than an ask no check ever saw.
  */
-export function describeAsks(asks: readonly NewAsk[]): {
+export function describeAsks(asks: readonly JudgedAsk[]): {
   list: string;
   names: string[];
   asksCut: number;
@@ -359,12 +385,13 @@ const uploadName = (input: Readonly<Record<string, unknown>>) =>
  * block's own text from the document, and an upload leaves out the asks the version it replaces
  * already holds. An empty list is two different facts, which `asksPartial` tells apart: unset,
  * the call opens no new ask; set, the read failed and the gate judges none of the call's asks.
+ * An ask the read changes is copied, never written to: the scan's objects are the breaker's too.
  */
 async function readAsks(
   deps: RulesCheckDeps,
   call: RulesCheckCall,
   first: NewAsk[]
-): Promise<{ asks: NewAsk[]; textMissing: boolean; asksPartial: boolean }> {
+): Promise<{ asks: JudgedAsk[]; textMissing: boolean; asksPartial: boolean }> {
   const upload = call.toolName === "dispatch_artifact";
   const retypes = first.filter((ask) => ask.kind === "retype");
   if (!upload && retypes.length === 0)
@@ -377,25 +404,27 @@ async function readAsks(
     // would refuse a re-upload of an unchanged document for its own ask block. Only the openers
     // with no id, which no stored version can hold, are judged, as a read that found the rest
     // would leave them out.
-    for (const ask of retypes) ask.textMissing = true;
-    const asks = upload ? first.filter((ask) => ask.id === undefined) : first;
+    const judged = first.map((ask) =>
+      ask.kind === "retype" ? { ...ask, textMissing: true as const } : ask
+    );
+    const asks = upload ? judged.filter((ask) => ask.id === undefined) : judged;
     return { asks, textMissing: retypes.length > 0, asksPartial: asks.length < first.length };
   }
   if (!upload) {
     const blocks = read === "not-found" ? [] : read.blocks;
     let textMissing = false;
-    for (const ask of retypes) {
+    const asks = first.map((ask): JudgedAsk => {
+      if (ask.kind !== "retype") return ask;
       // The server does not strip a `#` from the block a retype names; the block list never holds one.
       const block = blocks.find((held) => held.id === (ask.id ?? "").replace(/^#/, ""));
       if (block === undefined) {
-        ask.textMissing = true;
         textMissing = true;
-        continue;
+        return { ...ask, textMissing: true as const };
       }
-      ask.text = block.text.trim();
-      ask.opening = openingOf(ask.text);
-    }
-    return { asks: first, textMissing, asksPartial: false };
+      const text = block.text.trim();
+      return { ...ask, text, opening: openingOf(text) };
+    });
+    return { asks, textMissing, asksPartial: false };
   }
   // An upload replaces the document of its name, as the server matches one; the asks that version
   // already holds are not new. Any other document the reference found says nothing about this

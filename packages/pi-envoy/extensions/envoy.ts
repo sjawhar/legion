@@ -48,7 +48,6 @@ import {
   dispatchFirstSkillFile,
   readDispatchFirstContext,
 } from "@legion/envoy-client/dispatch-first";
-import { DispatchClient } from "@legion/envoy-client/dispatch-http";
 import { forgetShownPictures, shownPictures } from "@legion/envoy-client/dispatch-picture-tools";
 import { pictureAddresses } from "@legion/envoy-client/dispatch-pictures";
 import {
@@ -80,6 +79,7 @@ import {
   routeReplayNotice,
 } from "@legion/envoy-client/replay";
 import {
+  type SessionConfigFile,
   sessionConfigFile,
   sessionDispatchSettings,
   sessionSettings,
@@ -146,6 +146,7 @@ import {
 import { CardWake } from "../src/card-wake";
 import { transcriptPictures, withDeliveredPictures } from "../src/delivery-pictures";
 import { withDispatchFirst } from "../src/dispatch-first";
+import { sessionDispatchClient } from "../src/dispatch-session";
 import {
   type AcceptedUserTurn,
   HANDLED_ATTEMPT_ENTRY,
@@ -308,20 +309,6 @@ function serialQueue(deadlineMs: () => number) {
     },
     settled: (): Promise<unknown> => tail,
   };
-}
-
-/**
- * A Dispatch client on the configuration as it stands now in the session's envoy.json
- * (`CONFIG_FILE`), every request of it ending after `timeoutMs`, or undefined when Dispatch is not
- * configured. A configuration that cannot be read throws, as `activeDispatchSettings` does.
- */
-function timedDispatchClient(timeoutMs: number): DispatchClient | undefined {
-  const config = activeDispatchSettings(
-    sessionDispatchSettings(CONFIG_FILE, process.env, { cwd: process.cwd() }).dispatch
-  );
-  return config === null
-    ? undefined
-    : new DispatchClient(config.url, config.token, fetch, AbortSignal.timeout(timeoutMs));
 }
 
 /**
@@ -655,17 +642,19 @@ export default function envoyExtension(pi: PiApi): void {
   // that reached the CLI outside the form the gate reads, and what cuts a record still in flight
   // at shutdown.
   let askgateRecorder: AskGateRegistration | undefined;
-  let askgateFile: string | null = null;
-  const configPath = CONFIG_FILE.path;
+  // The session's envoy.json as the gate's own reads go through it, set only where the switch is
+  // on: the file object the session resolved, not a path rebuilt from it.
+  let askgateFile: Extract<SessionConfigFile, { error: null }> | null = null;
+  const configFile = CONFIG_FILE.error === null ? CONFIG_FILE : null;
   const ownDispatch = (file: string): boolean => {
     const own = readEnvoyConfig(file, process.env, { cwd: process.cwd() });
     return dispatchSettings(process.env, own.kind === "read" ? { ...own, checkout: null } : own)
       .enabled;
   };
-  if (configPath !== null && (atStart.dispatch.enabled || ownDispatch(configPath))) {
-    const setting = askgateSetting(configPath);
+  if (configFile !== null && (atStart.dispatch.enabled || ownDispatch(configFile.path))) {
+    const setting = askgateSetting(configFile.path);
     if (setting.error !== null) askgateNotices.push(setting.error);
-    if (setting.enabled) askgateFile = configPath;
+    if (setting.enabled) askgateFile = configFile;
   }
   // The record that makes the `dispatch` CLI require AskGate's marker for a gated write
   // (`@legion/envoy-client/askgate-marker`): written, while the gate is bound, for each session id
@@ -898,7 +887,11 @@ export default function envoyExtension(pi: PiApi): void {
     requestedSessionID: string,
     since?: string
   ): Promise<OpenAsksResponse | null> => {
-    const dispatch = timedDispatchClient(OPEN_ASKS_TIMEOUT_MS);
+    const dispatch = sessionDispatchClient(
+      CONFIG_FILE,
+      process.cwd(),
+      AbortSignal.timeout(OPEN_ASKS_TIMEOUT_MS)
+    )?.client;
     if (dispatch === undefined) return null;
     const snapshot = await dispatch.openAsks(requestedSessionID, since);
     availabilityWarningSessionIDs.delete(requestedSessionID);
@@ -1372,7 +1365,11 @@ export default function envoyExtension(pi: PiApi): void {
     handledDispatchAttempts.add(key);
     pi.appendEntry(HANDLED_ATTEMPT_ENTRY, { attempt: delivery.attempt, message_id: delivery.id });
     try {
-      const dispatch = timedDispatchClient(USER_TURN_ACCEPT_TIMEOUT_MS);
+      const dispatch = sessionDispatchClient(
+        CONFIG_FILE,
+        process.cwd(),
+        AbortSignal.timeout(USER_TURN_ACCEPT_TIMEOUT_MS)
+      )?.client;
       if (dispatch === undefined) return undefined;
       const accepted = await dispatch.acceptMessageDelivery(delivery.id, delivery.attempt, {
         actor: { id: acceptedSessionID, kind: "session" },
@@ -1528,7 +1525,12 @@ export default function envoyExtension(pi: PiApi): void {
             const card = await withDeliveredPictures(
               rendered.content,
               rendered.pictures ?? [],
-              () => timedDispatchClient(DELIVERY_PICTURES_TIMEOUT_MS),
+              () =>
+                sessionDispatchClient(
+                  CONFIG_FILE,
+                  process.cwd(),
+                  AbortSignal.timeout(DELIVERY_PICTURES_TIMEOUT_MS)
+                )?.client,
               true,
               shown
             );
@@ -1548,7 +1550,12 @@ export default function envoyExtension(pi: PiApi): void {
             const delivery = await withDeliveredPictures(
               turn.body,
               pictureAddresses(turn.body),
-              () => timedDispatchClient(DELIVERY_PICTURES_TIMEOUT_MS),
+              () =>
+                sessionDispatchClient(
+                  CONFIG_FILE,
+                  process.cwd(),
+                  AbortSignal.timeout(DELIVERY_PICTURES_TIMEOUT_MS)
+                )?.client,
               false,
               shown
             );
@@ -3681,7 +3688,7 @@ export default function envoyExtension(pi: PiApi): void {
   // call; it waits for the modules the gate loads (`registerAskGate`). Only a session with
   // Dispatch and the switch on has one (`askgateFile`, above).
   if (askgateFile !== null) {
-    const configFile = askgateFile;
+    const gateFile = askgateFile;
     // What the gate logs at bind is also a notice at session start: the one it logs there says
     // the review deadline is under 30 s, which at the host's default handler limit is every
     // profile that sets nothing, and a review that times out lets the write post. A warning a
@@ -3694,13 +3701,13 @@ export default function envoyExtension(pi: PiApi): void {
       },
     };
     const registration = registerAskGate(pi, {
-      configFile: { path: configFile, error: null },
+      configFile: gateFile,
       logger: gateLogger,
       runtimeLogger: logger,
     });
     askgateRecorder = registration;
     askgateLoad = registration.loaded.catch((error: unknown) => {
-      const notice = `AskGate did not load, so it refuses each Dispatch write it would review: ${messageFor(error)}. To turn AskGate off for this session, set askgate.enabled to false in ${configFile}.`;
+      const notice = `AskGate did not load, so it refuses each Dispatch write it would review: ${messageFor(error)}. To turn AskGate off for this session, set askgate.enabled to false in ${gateFile.path}.`;
       logger.warn(notice);
       askgateNotices.push(notice);
     });

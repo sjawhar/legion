@@ -13,21 +13,21 @@ type Input = Record<string, unknown>;
 const BREAKER_KEYS = ["issue", "ask", "artifact", "project", "in_reply_to"] as const;
 
 /** Refusals of one thing on one target after which the next attempt at it goes out unreviewed. */
-export const GATE_BREAKER_REVISES = 2;
+export const GATE_BREAKER_REFUSALS = 2;
 
 /**
  * The call's target: its tool and each of the issue, ask, artifact, project and reply its arguments
- * name. The parts are a JSON array, never joined on a separator: a value is the agent's argument and
- * can hold any character, so a joined key would let one target forge another and give it the
- * refusals counted on the forgery. `targetLabel` is the same parts joined with spaces, which the
- * entry records and a reader joins calls on.
+ * name, as the `key` every count is held under and the `label` the entry records and a reader joins
+ * calls on. The key's parts are a JSON array, never joined on a separator: a value is the agent's
+ * argument and can hold any character, so a joined key would let one target forge another and give
+ * it the refusals counted on the forgery. The label is those same parts joined with spaces, built
+ * here beside the key rather than read back out of it.
  */
-export function breakerKey(toolName: string, input: Input): string {
+export function breakerKey(toolName: string, input: Input): { key: string; label: string } {
   const parts = [toolName];
   for (const k of BREAKER_KEYS) if (input[k] !== undefined) parts.push(`${k}=${String(input[k])}`);
-  return JSON.stringify(parts);
+  return { key: JSON.stringify(parts), label: parts.join(" ") };
 }
-export const targetLabel = (key: string) => (JSON.parse(key) as string[]).join(" ");
 
 /**
  * How the breaker tells one new ask of a call from another: a block's `#id` and its opening, the
@@ -118,7 +118,7 @@ type Held = { refusals: Map<string, number>; revises: number; charter: string[] 
  * The breaker: a loop of refusals of one thing on one target ends on the third attempt, which goes
  * out unreviewed. It counts refusals, since a warn-mode revise sends the call and leaves no loop.
  *
- * A call trips when one of its own keys (`callKeys`) has been refused GATE_BREAKER_REVISES times,
+ * A call trips when one of its own keys (`callKeys`) has been refused GATE_BREAKER_REFUSALS times,
  * and the refusal that brings a thing to that count warns of it. A refusal counts only keys of the
  * call it refused (`refusalThings`), so the warning and the pass are about the same thing, and the
  * call that warning names, sent again, trips. A call with several keys trips on any one of them: a
@@ -134,16 +134,16 @@ type Held = { refusals: Map<string, number>; revises: number; charter: string[] 
 export class Breaker {
   readonly #held = new Map<string, Held>();
   /**
-   * Records one revise on a target: the charter's reason when it gave one, and the things it
-   * refused, none for a revise that sent the call. Returns whether a thing it refused has now
-   * been refused GATE_BREAKER_REVISES times, so this refusal must warn that the same call again
-   * goes out unreviewed.
+   * Records one answer of the gate on a target: the charter's reason when it gave one, and the
+   * things the gate refused, none for a revise that sent the call. Returns whether a thing it
+   * refused has now been refused GATE_BREAKER_REFUSALS times, so this refusal must warn that the
+   * same call again goes out unreviewed.
    *
    * One refusal moves each thing once, however often it is named: both callers can name a thing
    * twice (two asks of one call that share an identity, or two rules matches on them), and a
    * count moved twice would warn on a first refusal and pass the next send unreviewed.
    */
-  revised(key: string, refused: readonly string[], charter?: string): boolean {
+  refused(key: string, refused: readonly string[], charter?: string): boolean {
     let held = this.#held.get(key);
     if (held === undefined) {
       held = { refusals: new Map(), revises: 0, charter: [] };
@@ -155,7 +155,7 @@ export class Breaker {
     for (const thing of new Set(refused)) {
       const count = (held.refusals.get(thing) ?? 0) + 1;
       held.refusals.set(thing, count);
-      if (count >= GATE_BREAKER_REVISES) tripsNext = true;
+      if (count >= GATE_BREAKER_REFUSALS) tripsNext = true;
     }
     return tripsNext;
   }
@@ -166,7 +166,7 @@ export class Breaker {
   tripped(key: string, things: () => readonly string[]): boolean {
     const refusals = this.#held.get(key)?.refusals;
     if (refusals === undefined || refusals.size === 0) return false;
-    return things().some((thing) => (refusals.get(thing) ?? 0) >= GATE_BREAKER_REVISES);
+    return things().some((thing) => (refusals.get(thing) ?? 0) >= GATE_BREAKER_REFUSALS);
   }
   reset(key: string): void {
     this.#held.delete(key);

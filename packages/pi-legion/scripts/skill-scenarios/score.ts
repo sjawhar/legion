@@ -18,6 +18,11 @@ import path from "node:path";
 import { cliRefusals } from "@legion/envoy-client/dispatch-cli";
 import { sessionDirectory } from "@legion/envoy-client/dispatch-session-state";
 import { z } from "zod";
+// The gate's own names for its rules and the line its refusal opens with, read from the module
+// that writes them, so this rig scores what AskGate actually says. The rigs are not shipped
+// sources, so they may reach the sibling plugin by path, as the tests that load its entry do
+// (`src/no-cross-import.test.ts`).
+import { RULE_NAMES, RULE_REFUSAL_OPENING } from "../../../pi-envoy/extensions/askgate/rules-check";
 import { ENTRY_HEADER } from "./fetch-spec-sources";
 import {
   CheckableFile,
@@ -388,14 +393,15 @@ const GateEntry = z.looseObject({
   outcome: z.string(),
   verdictMode: z.string(),
   reason: z.string().nullish(),
-  rule: z.enum(["no_change", "untried_access"]).nullish(),
+  rule: z.enum(RULE_NAMES).nullish(),
   ruleOutcome: z.string().nullish(),
 });
 type GateEntry = z.infer<typeof GateEntry>;
 /** How a refused call's error result starts when a model's revise in block mode stopped it. */
 const NOT_SENT = "AskGate did not send this call.";
-/** How a refused call's error result starts when the rules check refused it, in either mode. */
-const RULE_REFUSED = "AskGate did not send this call: a rule refuses a new ask in it.";
+// How a refused call's error result starts when the rules check refused it, in either mode, is
+// `RULE_REFUSAL_OPENING`, read from the module that writes it (pi-envoy's rules-check.ts), so a
+// rewording there is a change here rather than a silently failing scenario score.
 /** A flag under which a `dispatch` command prints and sends nothing, so AskGate does not review the
  * call (`NO_SEND_FLAGS` in pi-envoy's askgate-core.ts). */
 const NO_SEND = /(?:^|\s)--(?:help|dry-run)(?=\s|$)/;
@@ -496,7 +502,7 @@ const NOT_REVIEWS = ["unreadable", "unmarked"];
  *   - on, nochange, nochange-block and untried: the first gate entry of the case's call
  *     (RULE_REFUSED_CASES: `dispatch ask`, or `dispatch doc-edit` for nochange-block) that no rule
  *     of NOT_REVIEWS covers has `rule` set, and that call got an error result starting
- *     RULE_REFUSED, whatever the mode;
+ *     RULE_REFUSAL_OPENING, whatever the mode;
  *   - on, nochange-rebuttal and tried: an ask is on the issue, and no gate entry of a `dispatch
  *     ask` call refused it (refusedCall);
  *   - off, facts: an ask is on the issue, and the transcript holds no gate entry.
@@ -578,7 +584,7 @@ function askgateReview(runDir: string, run: string, label: string, dirCase: stri
     const reviewed = gates.find((g) => g.tool === refusedTool && !NOT_REVIEWS.includes(g.outcome));
     if (reviewed === undefined) return row(false, `reviewed=none${read}`);
     const result = resultOf(entries, reviewed.toolCallId);
-    const byRule = result.isError && result.text.startsWith(RULE_REFUSED);
+    const byRule = result.isError && result.text.startsWith(RULE_REFUSAL_OPENING);
     return row(
       byRule && reviewed.rule != null,
       `refusedByRule=${byRule} rule=${reviewed.rule ?? "none"} ruleOutcome=${reviewed.ruleOutcome ?? "none"} verdictMode=${reviewed.verdictMode}${read} result=${JSON.stringify(result.text.slice(0, 300))}`

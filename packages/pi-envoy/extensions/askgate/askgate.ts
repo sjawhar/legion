@@ -18,16 +18,14 @@
 import * as fs from "node:fs";
 import * as os from "node:os";
 import { selfOwner, setRecordMode } from "@legion/envoy-client/askgate-marker";
-import { activeDispatchSettings } from "@legion/envoy-client/dispatch-config";
-import { dispatchServerUrls } from "@legion/envoy-client/dispatch-execute";
-import { DispatchClient } from "@legion/envoy-client/dispatch-http";
 import { sessionDirectory, sessionStateRoot } from "@legion/envoy-client/dispatch-session-state";
-import { sessionDispatchSettings } from "@legion/envoy-client/session-settings";
+import type { SessionConfigFile } from "@legion/envoy-client/session-settings";
 import type { PiApi, PiEventContract } from "@legion/pi-shared/pi-types";
 import type { ApiKeyResolver, AssistantMessage, Model } from "@oh-my-pi/pi-ai";
 import type { ModelLookupRegistry } from "@oh-my-pi/pi-coding-agent/config/model-resolver";
 import type { RetryFallbackResolutionContext } from "@oh-my-pi/pi-coding-agent/session/retry-fallback-chains";
 import type { SessionEntry } from "@oh-my-pi/pi-coding-agent/session/session-context";
+import { sessionDispatchClient } from "../../src/dispatch-session";
 import {
   type CompleteRequest,
   type Completion,
@@ -42,14 +40,13 @@ import {
   spawnDryRun,
   type ToolCallEvent,
   type ToolCallResult,
-  type Usage,
 } from "./askgate-core";
 import {
   createDecisionRecorder,
   type DecisionRecorder,
   type RecordRequest,
 } from "./decision-record";
-import type { DispatchSession } from "./rules-check";
+import type { Usage } from "./rules-check";
 
 /** What the entry hands the gate from its own extension: where the switch lives, and where notices go. */
 export interface AskGateHost {
@@ -58,7 +55,7 @@ export interface AskGateHost {
    * named in the notice for an OMP_ASKGATE the gate ignores, and its Dispatch section is what the
    * gate's own reads of a document and its decision records go through.
    */
-  readonly configFile: { readonly path: string; readonly error: null };
+  readonly configFile: Extract<SessionConfigFile, { error: null }>;
   /** Where the gate's bind-time warning goes: the host shows it again at each session start. */
   readonly logger: { warn(message: string): void };
   /** The host's plain log, for a warning one session's gated calls raise while it runs. */
@@ -93,28 +90,6 @@ function appendDump(p: string, text: string): void {
   }
 }
 
-/**
- * The session's Dispatch as the directory the gated command runs in configures it (a checkout's
- * own `.envoy/envoy.json` names its own server), with the caller's stop as the signal of every
- * request, so a stopped run ends the read. `timedDispatchClient` in envoy.ts builds the
- * session's own client the same way, with a timeout in place of the stop.
- */
-function sessionDispatchClient(
-  host: AskGateHost,
-  directory: string,
-  signal: AbortSignal
-): DispatchSession | undefined {
-  const config = activeDispatchSettings(
-    sessionDispatchSettings(host.configFile, process.env, { cwd: directory }).dispatch
-  );
-  return config === null
-    ? undefined
-    : {
-        client: new DispatchClient(config.url, config.token, fetch, signal),
-        serverUrls: dispatchServerUrls(config),
-      };
-}
-
 type ToolCallHandler = (event: ToolCallEvent, ctx: GateCtx) => Promise<ToolCallResult>;
 
 /**
@@ -147,7 +122,8 @@ export function registerAskGate(pi: PiApi, host: AskGateHost): AskGateRegistrati
   const record = createDecisionRecorder({
     env: process.env,
     now: Date.now,
-    dispatchClient: (directory, signal) => sessionDispatchClient(host, directory, signal),
+    dispatchClient: (directory, signal) =>
+      sessionDispatchClient(host.configFile, directory, signal),
   });
   const loading = loadAskGate(pi, host, record);
   // A rejection is handled here and by the caller's notice; never an unhandled one.
@@ -341,7 +317,8 @@ async function loadAskGate(
     logger: host.logger,
     runtimeLogger: host.runtimeLogger,
     configFile: host.configFile.path,
-    dispatchClient: (directory, signal) => sessionDispatchClient(host, directory, signal),
+    dispatchClient: (directory, signal) =>
+      sessionDispatchClient(host.configFile, directory, signal),
     recordDecision: record,
     // The dump holds the primary system prompt and transcript: owner-only, like the session files.
     appendFile: appendDump,
