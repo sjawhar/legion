@@ -814,14 +814,15 @@ function parseDispatchFrame(rawPayload: string): DispatchFrame {
   if (isObject(value) && "delivery" in value) {
     const targeted = DispatchTargetedFrameSchema.safeParse(value);
     if (targeted.success) {
+      // `notify` and `quiet` are fields of the event the frame wraps, which is where the
+      // outbox marshals them, and the schema drops both as unknown keys.
       const wireFrame = value as {
-        readonly event: DispatchEvent & { readonly notify?: unknown };
-        readonly quiet?: unknown;
+        readonly event: DispatchEvent & { readonly notify?: unknown; readonly quiet?: unknown };
       };
       return {
         event: targeted.data.event,
         notify: wireFrame.event.notify,
-        quiet: wireFrame.quiet,
+        quiet: wireFrame.event.quiet,
         delivery: targeted.data.delivery,
       };
     }

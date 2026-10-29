@@ -257,7 +257,7 @@ func Quiet(e model.Event) bool {
 		return true
 	}
 	if e.Type == "message.created" || e.Type == "message.answered" {
-		if message, ok := e.Payload.(model.MessageEventPayload); ok && message.Target != nil {
+		if targetedMessage(e.Payload) {
 			return true
 		}
 	}
@@ -276,7 +276,7 @@ func Quiet(e model.Event) bool {
 	case "ask.edited":
 		// A version move of an approval request that an earlier version already moved since it was
 		// opened or last handed back changes only the version it names.
-		if edit, ok := e.Payload.(model.AskEditEventPayload); ok && edit.Quiet {
+		if quietAskEdit(e.Payload) {
 			return true
 		}
 	case "artifact.version":
@@ -318,6 +318,42 @@ func namedVersion(payload any) bool {
 	case map[string]any:
 		named, _ := version["named"].(bool)
 		return named
+	default:
+		return false
+	}
+}
+
+// targetedMessage reports whether a message event names the session the message was aimed at.
+//
+// Quiet is asked of one event from two payload shapes, and must answer the same for both: at
+// append time (Broker.Notify) the payload is the typed value the caller built, and at publish
+// time it is the event the outbox scanned out of Postgres, whose payload JSON decodes into a
+// map[string]any (outbox/publisher.go, scanPendingEvents). quietAskEdit and namedVersion read
+// their field the same way.
+func targetedMessage(payload any) bool {
+	switch message := payload.(type) {
+	case model.MessageEventPayload:
+		return message.Target != nil
+	case map[string]any:
+		// Target is a *string, so the decoded field is a string on a targeted message and
+		// nil ("target": null) on every other.
+		_, targeted := message["target"].(string)
+		return targeted
+	default:
+		return false
+	}
+}
+
+// quietAskEdit reports whether an ask edit marks itself a version move that changes only the
+// version the request names (model.AskEditEventPayload.Quiet), from either payload shape.
+func quietAskEdit(payload any) bool {
+	switch edit := payload.(type) {
+	case model.AskEditEventPayload:
+		return edit.Quiet
+	case map[string]any:
+		// Quiet is omitempty, so the decoded field is absent unless the edit set it.
+		quiet, _ := edit["quiet"].(bool)
+		return quiet
 	default:
 		return false
 	}

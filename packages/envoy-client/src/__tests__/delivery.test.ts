@@ -42,8 +42,7 @@ function dispatchEvent(
   type: string,
   payload: object,
   eventActor = actor,
-  notify = true,
-  quiet?: boolean
+  { notify = true, quiet }: { notify?: boolean; quiet?: boolean } = {}
 ): string {
   return JSON.stringify(
     envelope({
@@ -1348,7 +1347,9 @@ describe("renderInbound dispatch events", () => {
 
   test("renders a non-notifying Dispatch event on an agent subject", () => {
     const rendered = renderInbound(
-      dispatchEvent("message.created", { body: "Agent subject remains visible" }, actor, false),
+      dispatchEvent("message.created", { body: "Agent subject remains visible" }, actor, {
+        notify: false,
+      }),
       reader,
       `notifications.agent.${reader}`
     );
@@ -1363,7 +1364,9 @@ describe("renderInbound dispatch events", () => {
 
   test("renders a non-notifying Dispatch event on a role subject", () => {
     const rendered = renderInbound(
-      dispatchEvent("message.created", { body: "Role subject remains visible" }, actor, false),
+      dispatchEvent("message.created", { body: "Role subject remains visible" }, actor, {
+        notify: false,
+      }),
       reader,
       "notifications.role.legion-controller"
     );
@@ -1379,7 +1382,9 @@ describe("renderInbound dispatch events", () => {
   test("drops an event that does not request an agent wake", () => {
     expect(
       renderInbound(
-        dispatchEvent("message.created", { body: "Persist without steering" }, actor, false),
+        dispatchEvent("message.created", { body: "Persist without steering" }, actor, {
+          notify: false,
+        }),
         reader
       )
     ).toMatchObject({ skip: true, content: "" });
@@ -1391,13 +1396,10 @@ describe("renderInbound dispatch events", () => {
   // and claimant, so a reader that skipped on notify saw none of them.
   test("shows an agent's comment on the issue topic it subscribed to", () => {
     const rendered = renderInbound(
-      dispatchEvent(
-        "comment.created",
-        { id: "comment-9", body: "Slice 3 is pushed." },
-        actor,
-        false,
-        false
-      ),
+      dispatchEvent("comment.created", { id: "comment-9", body: "Slice 3 is pushed." }, actor, {
+        notify: false,
+        quiet: false,
+      }),
       reader,
       dispatchIssueSubject("DSP-1", "comment.created")
     );
@@ -1413,13 +1415,10 @@ describe("renderInbound dispatch events", () => {
   test("drops a quiet event on an issue topic however it was authored", () => {
     expect(
       renderInbound(
-        dispatchEvent(
-          "comment.delivery",
-          { id: "comment-9", state: "delivered" },
-          actor,
-          false,
-          true
-        ),
+        dispatchEvent("comment.delivery", { id: "comment-9", state: "delivered" }, actor, {
+          notify: false,
+          quiet: true,
+        }),
         reader,
         dispatchIssueSubject("DSP-1", "comment.delivery")
       )
@@ -1430,8 +1429,7 @@ describe("renderInbound dispatch events", () => {
           "artifact.version",
           { version: { number: 4, named: false } },
           { kind: "user", id: "alice" },
-          false,
-          true
+          { notify: false, quiet: true }
         ),
         reader,
         dispatchIssueSubject("DSP-1", "artifact.version")
@@ -1444,7 +1442,9 @@ describe("renderInbound dispatch events", () => {
   test("judges a frame published before `quiet` by its notify flag", () => {
     expect(
       renderInbound(
-        dispatchEvent("comment.created", { id: "comment-9", body: "Older frame" }, actor, false),
+        dispatchEvent("comment.created", { id: "comment-9", body: "Older frame" }, actor, {
+          notify: false,
+        }),
         reader,
         dispatchIssueSubject("DSP-1", "comment.created")
       )
@@ -1455,7 +1455,7 @@ describe("renderInbound dispatch events", () => {
           "comment.created",
           { id: "comment-9", body: "Older frame a person wrote" },
           { kind: "user", id: "alice" },
-          true
+          { notify: true }
         ),
         reader,
         dispatchIssueSubject("DSP-1", "comment.created")

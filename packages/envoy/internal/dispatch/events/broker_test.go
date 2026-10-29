@@ -74,6 +74,41 @@ func TestQuietSeparatesAnAgentsActivityFromBookkeeping(t *testing.T) {
 			}},
 			quiet: true,
 		},
+		// The outbox asks Quiet of the event it scanned out of Postgres, whose payload JSON
+		// decoded into a map (outbox/publisher.go, scanPendingEvents): one event is quiet
+		// whichever shape its payload reached Quiet in.
+		{
+			name: "that targeted message as the outbox scanned it",
+			event: model.Event{Type: "message.created", Actor: person, Payload: map[string]any{
+				"id":     "d7657c0d-71b9-43d5-8783-a5d98f7812e0",
+				"target": "5a660655-04ad-4ce0-8a9b-93dd03c412b7",
+			}},
+			quiet: true,
+		},
+		{
+			name: "a message the outbox scanned that names no session",
+			event: model.Event{Type: "message.created", Actor: person, Payload: map[string]any{
+				"id":     "d7657c0d-71b9-43d5-8783-a5d98f7812e0",
+				"target": nil,
+			}},
+			quiet: false,
+		},
+		{
+			name: "an ask edit that only moved the version it names",
+			event: model.Event{Type: "ask.edited", Actor: person, Payload: model.AskEditEventPayload{
+				Ask:   model.Ask{ID: "ask-1"},
+				Quiet: true,
+			}},
+			quiet: true,
+		},
+		{
+			name: "that ask edit as the outbox scanned it",
+			event: model.Event{Type: "ask.edited", Actor: person, Payload: map[string]any{
+				"id":    "ask-1",
+				"quiet": true,
+			}},
+			quiet: true,
+		},
 		{
 			name:  "an unnamed version",
 			event: model.Event{Type: "artifact.version", Actor: agent, Payload: map[string]any{"version": map[string]any{"named": false}}},

@@ -1216,7 +1216,9 @@ func publishedDestinationSet(subjects []string) map[string]struct{} {
 // reached, or this attempt already sent, is skipped. The answer is read later (attempt.wait),
 // except one that came back before anything was sent: a refusal or a denial is kept for wait to
 // read, and any other failure - NATS unreachable (bus.ErrUnavailable), say - ends the attempt,
-// named by label and id.
+// named by label and id. Such a failure is counted here, as attempt.answer counts the ones it
+// reads, and counted once: a destination that ends the attempt is never added to a.sent, so wait
+// never reads its answer.
 func publishDestination(deps Deps, eventID int64, item contracts.Envelope, a *attempt, label, id string) error {
 	if _, ok := a.delivered[item.Topic]; ok {
 		return nil
@@ -1226,6 +1228,7 @@ func publishDestination(deps Deps, eventID int64, item contracts.Envelope, a *at
 	select {
 	case err := <-sent.answer:
 		if err != nil && !errors.Is(err, bus.ErrPublishDenied) && !errors.Is(err, bus.ErrRefused) {
+			deps.countPublishFailure("failed")
 			return fmt.Errorf("%s %q: %w", label, id, err)
 		}
 		answered := make(chan error, 1)

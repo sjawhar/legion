@@ -5,6 +5,8 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"reflect"
 	"strings"
@@ -21,6 +23,7 @@ import (
 	"github.com/sjawhar/envoy/internal/dispatch/retry"
 	"github.com/sjawhar/envoy/internal/dispatch/store"
 	"github.com/sjawhar/envoy/internal/dispatch/store/storetest"
+	"github.com/sjawhar/envoy/internal/metrics"
 )
 
 // answered is a channel already holding err, the outcome of a test publisher that answers each
@@ -1268,6 +1271,72 @@ func TestEnvelopePayloadStatesWhetherTheEventIsQuiet(t *testing.T) {
 				t.Fatalf("payload notify = true, want false: an agent's event wakes no route")
 			}
 		})
+	}
+
+	// What a reader is actually given: the outbox answers Quiet for the event it scanned out of
+	// Postgres, whose payload decoded into a map rather than the typed value the append held, and
+	// a targeted message is quiet either way - the session it names already had it through the
+	// synchronous listener send, so the issue's followers are not shown it a second time.
+	t.Run("a targeted message the outbox scanned out of Postgres", func(t *testing.T) {
+		database := storetest.Open(t)
+		broker := events.NewBroker()
+		seedIssue(t, database, "T-1", nil)
+		target := "session:ses_target"
+		appendEvent(t, database, broker, model.Event{
+			IssueKey: new("T-1"), Type: "message.created", Actor: model.Actor{Kind: "user", ID: "alice"},
+			Payload: model.MessageEventPayload{Message: model.Message{
+				ID: "5a660655-04ad-4ce0-8a9b-93dd03c412b7", IssueKey: new("T-1"),
+				Body: "Target this update", Target: &target,
+			}},
+		})
+		publisher := &recordingPublisher{}
+		scan(context.Background(), Deps{Store: database, Publisher: publisher})
+
+		items := publisher.all()
+		if len(items) != 1 {
+			t.Fatalf("published %#v, want the issue topic alone", topicsOf(items))
+		}
+		var payload struct {
+			Quiet bool `json:"quiet"`
+		}
+		if err := json.Unmarshal([]byte(items[0].Payload), &payload); err != nil {
+			t.Fatalf("decode event payload %s: %v", items[0].Payload, err)
+		}
+		if !payload.Quiet {
+			t.Fatalf("payload quiet = false for a targeted message: %s", items[0].Payload)
+		}
+	})
+}
+
+// Every destination that did not reach NATS is counted, the one that ends the attempt included:
+// an answer already in when the send returns - NATS unreachable, the outage the metric exists for
+// - ends the attempt there, so attempt.wait never reads it and only publishDestination can count
+// it. It is counted once, because that destination is never added to the attempt's sent list.
+func TestAPublishFailureThatEndsTheAttemptIsCountedOnce(t *testing.T) {
+	database := storetest.Open(t)
+	broker := events.NewBroker()
+	seedIssue(t, database, "T-1", nil)
+	event := appendEvent(t, database, broker, model.Event{
+		IssueKey: new("T-1"), Type: "message.created", Actor: model.Actor{Kind: "user", ID: "alice"},
+		Payload: model.Message{ID: "5a660655-04ad-4ce0-8a9b-93dd03c412b7", IssueKey: new("T-1"), Body: "NATS is unreachable"},
+	})
+	registry := metrics.New()
+	publisher := &countingPublisher{fail: fmt.Errorf("bus: %w", bus.ErrUnavailable)}
+	deps := Deps{Store: database, Publisher: publisher,
+		PublishFailures: registry.NewCounter("envoy_dispatch_outbox_publish_failures_total",
+			"Destinations of an outbox publish attempt that did not reach NATS")}
+
+	err := publish(context.Background(), deps, event, "", routing{}, map[string]struct{}{})
+	if !errors.Is(err, bus.ErrUnavailable) {
+		t.Fatalf("publish returned %v, want the unreachable connection", err)
+	}
+	if topics := publisher.attempted(); len(topics) != 1 {
+		t.Fatalf("published %#v, want the attempt ended at its first destination", topics)
+	}
+	response := httptest.NewRecorder()
+	registry.Handler().ServeHTTP(response, httptest.NewRequest(http.MethodGet, "/metrics", nil))
+	if body := response.Body.String(); !strings.Contains(body, `envoy_dispatch_outbox_publish_failures_total{reason="failed"} 1`) {
+		t.Fatalf("/metrics body = %q, want the unreachable destination counted once", body)
 	}
 }
 
