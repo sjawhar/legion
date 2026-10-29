@@ -199,7 +199,10 @@ stop timeout, which Dispatch's task definition leaves unset, `stop_grace_period`
 kubelet spends inside the same period - `cmd/dispatch/pod_grace_period_test.go` fails when the
 pod's budget stops covering it). Every open live socket ends at the signal through the lifetime
 `api.Register` takes, closing with 1012 and ending its subscriptions, so HTTP shutdown waits only
-for the requests in flight, and it waits for them first, with no deadline of its own. The document service starts when they are done, or 11 s after
+for the requests in flight and for any connection that has not sent its first request yet, which
+net/http's `Server.Shutdown` counts as busy until it is more than 5 s old (by whole seconds, so up
+to 6 s), in case that request is on its way. It waits for them first, with no deadline of its own.
+The document service starts when they are done, or 11 s after
 the signal with some still running (`httpDrainBeforeDocuments`, `dispatch: settle documents with
 requests still in flight`), and gets `documentShutdownTimeout`, 5 s more than its drain budget
 (14 s total - the reserve outlasting a settlement still committing when the budget ends, not only
@@ -594,6 +597,10 @@ document it was read from
 (`pmdoc.Read` copies each mark's attributes and every list or object an attribute holds), so a
 reader that edits its tree changes nothing a later read of the replica meets
 (`TestEditingALiveReadsTreeChangesNoLaterRead`).
+Inside a write transaction, `docTree` and a version's capture take the write's own rendering in
+place of reading the fork whenever it describes the fork (`liveWrite.rendering`), so a caller of
+`docTree` must not change the tree it gets; `heldTree` still reads the fork and returns a tree its
+reader owns.
 
 A read takes up to three locks, in one order: the room's state lock; then the replica's, which a
 read only tries; then the live document's, for the copy's encode. A version's
@@ -1064,8 +1071,8 @@ splices its `replace_with`, which unlike an edit's `with` may be blocks, with Pr
 fitting (`pmdoc.Splice`). A non-empty replacement fitted into a typed block stays inside it, and a
 fit never replaces the typed block it lands in: a callout takes what its content rule allows, a
 code block included (the engine oracle's `callout-paragraph-and-code` case), and an ask takes any
-block at this step, since `Validate` lets an ask hold other blocks while a browser edit passes
-through. The one exception is a replacement holding exactly one block of the typed block's own
+block at this step, since `Validate` lets an ask hold other blocks, which concurrent browser edits
+can leave there. The one exception is a replacement holding exactly one block of the typed block's own
 type under its id, at any depth, which is that block rewritten: it replaces the block in place
 rather than nesting inside it, and the replacement's other blocks, and any it sits inside (a
 blockquote, a list item, a typed block under another id), go in the same parent, where they stand
@@ -1074,8 +1081,9 @@ like any other. Either way the accept keeps only what reads back as it wrote it 
 then reads each ask by its id before and after the splice (`docs/ask_blocks.go` `askReadability`,
 `docs/marks.go` `refuseBrokenAsks`): an ask is unreadable when settlement's parse fails, when its
 children break the content rule `paragraph+ bullet_list?` (`pmdoc.AskContentError`: a paragraph
-after its options or a second bullet list parses, but the browser editor drops such an ask from the
-shared document when it renders it, and settlement then retracts it), or when it repeats an earlier
+after its options or a second bullet list parses, but the browser's card takes its question from
+the ask's first child and its options from its last, so settlement marks such an ask `invalid` and
+keeps its row as it was, open or decided, `readAskBlockStrictly`), or when it repeats an earlier
 ask's id. The first ask left unreadable whose id was readable before is `400 INVALID_ASK_BLOCK` with
 that reason, so a question given a code block, a paragraph after the options, a second list or an
 emptied question is refused. An ask under a held id is refused one step earlier, by the write's
@@ -1951,11 +1959,24 @@ five or more columns in allows, by a wide ordered marker, spaces or tabs - or ri
 on the line after the quote's last, is refused when it holds more than one line: the browser
 editor's parser keeps the list or quote open across the code's first line, which it does not
 continue, and reads the code's later lines as a second code block. A blank line before the code
-ends a quote, so there the code is read whole.
+ends a quote, so there the code is read whole. Code right after such a list, or right after a quote
+with no blank line between, keeps none of the whitespace-only lines after it, which that parser
+leaves to the list or quote it holds open (`codeColumns.Close`).
 A fenced code block whose language - the info string's first word - holds a backslash escape or a
 character reference is refused: that parser decodes both, and goldmark keeps them as written. What
 it leaves as written (`\q`, `&bogus;`) is read as before, as is the rest of the info string, which
 both drop.
+A whitespace-only line inside fenced code whose opening fence stands past its container's content
+is an empty line of the code when it holds fewer columns past that content than the fence does:
+that parser takes up to the fence's indentation from each line, and goldmark kept the whole line,
+so `  ~~~\n \nx` holds the code `\nx`; a last line of the document with no line feed holding
+nothing past the fence's indentation is no line of the code, so `  ~~~\nx\n ` holds `x`, as a
+quote takes such a line in place of the code's last (`fenceClosure`, `fencedCodeText`). The
+document's last line with no line feed is read as that parser reads it whatever block it ends:
+the columns its containers leave of a tab they took part of are the line's, where goldmark read no
+line past the source's end and dropped them, so `> ```\n> x\n>\t` holds the code `x\n  `, and a
+container inside them or an item takes its own columns from them (`lastLineColumns`); a typed
+block indented in its container takes its indentation from that line too (`typedDirectiveParser`).
 A task list item's marker (`[ ]`, `[x]` or `[X]` opening a list item's first paragraph) is read as
 the browser editor's parser reads it (`taskList`): followed by a space or a tab and then more text on
 the line, or by a line ending the paragraph continues past, and it takes only the one character
@@ -2099,7 +2120,17 @@ and spreads nothing, even where the code's text drops it, unless a quote between
 (`keepsBlankLinesAfter`). The code's text drops that line where it ends a list item or a footnote
 definition that flow content follows (a paragraph, a heading, a rule, a fence, a typed block or a
 table), or a quote no container opens right after, and keeps it before a quote, a list item or a
-definition, as that parser reads it (`blankTaker`). A list item decides by what follows its list only
+definition, as that parser reads it (`blankTaker`). Indented code keeps the whitespace-only lines
+after it that hold four or more columns past where its container's content starts (a list item
+measured from its content, a footnote definition from its own start), and the shorter blank lines
+between them, as that parser reads it, so they are its text, less one final line ending (a last
+line with no line feed has none of its own, so `    code\n    \n    ` holds `code\n`), and space
+nothing (`codeColumns`, `heldCodeLines`, `markBlocksAfterHeldCode`, `codeBlockText`). The two
+refusals the lines alone do not decide, of a typed block holding a blank line inside a list item
+(`blankInside`) and of a blank line in a quote at or after a list that quotes and typed blocks nest
+around more than once (`nestedQuotedListBlank`), still read those lines, and a last line
+`lastLineColumns` kept, as the blank lines they were before (`asHeldBefore`), so they refuse what
+they refused before. A list item decides by what follows its list only
 inside its own quote or typed block; past one, that container's rule decides, so a typed block's
 fence keeps the line and a quote's end judges it by what opens right after. The renderer writes each spacing so that it reads back
 (`blanksAfterList`, `writesBlankAfterItem`): no blank line before a block that opens on the line after
@@ -2302,6 +2333,30 @@ markdown a version records, never a list of forbidden characters: whatever the b
 back unchanged is refused, and an option label containing `": "` - the separator between a label
 and its description - is one example rather than the only one. A single newline is
 carried as a hard break; surrounding whitespace is trimmed, as the parser trims it.
+An edit of an ask whose body breaks its content rule (`pmdoc.AskContentError`: a second bullet
+list, or a block after its list, which concurrent browser edits can leave) is refused
+`400 ASK_BLOCK_TEXT` with field `block` (`ErrAskBlockUnrepresentable`), whatever it names
+(`refuseAskContentEdit` in `docs/ask_block_text.go`): the route never rebuilds such an ask, so it
+never moves or drops what a collaborator wrote. The reason quotes every child block of the ask in
+full (its rendered markdown, Go-quoted) with its block id given only as Go-quoted data - no shell
+command and no ready-made ops, since a block id is document text - and names one path: delete,
+all in one document edit (`dispatch doc-edit`, one delete per block by its id; doc-edit refuses an
+edit that leaves the ask broken, so one list at a time would be refused), the blocks it lists,
+which keep the question's paragraphs (from the first paragraph holding text) and the first list
+after them, then edit the ask, which the route then applies as for any valid ask. While a child
+has no id or an id repeats in the document (before settlement stamps ids), it names no delete and
+says to retry once the document settles. The one edit it names also deletes, by id, the extra
+blocks of every decision nested in the blocks it keeps that breaks its own rule, so one doc-edit
+repairs them together; before naming it, the refusal checks that, with those deletes applied, the
+ask, every nested decision losing a block and every decision holding the ask read strictly, as
+doc-edit requires (`planAskRepair`). When no such edit exists - a delete here would leave a
+decision holding this one unreadable, or a decision needs words written rather than blocks
+deleted - it names no delete and no ask edit of another decision, and says the decision is
+repaired in the document editor. An ask with no paragraph holding text is refused earlier, as having an empty
+question. Tests follow the refusal for every body of up to five blocks drawn from paragraphs,
+empty paragraphs, lists and lists holding a nested list, and for every body of up to four that
+adds an option holding a decision of up to three such blocks. Before, an edit naming only `urgency` or `multiple` wrote the
+options joined across both lists to the row.
 Settlement retracts an ask whose block left the document in its own name,
 `{kind: "system", id: "document-settlement"}`, and restores only a retraction it wrote - a
 person's or a session's retract stands however the document moves, which is why `resolve`
@@ -2310,8 +2365,13 @@ refuses a caller reason beginning `removed from the document in version`. The `a
 records the ask's return to the state it had, never a new answer. A restore the release before the
 mark writes - every one already in the event log, and one written during a rollout or an image
 rollback - carries none, so a missing mark does not prove a new answer.
-An invalid browser-edited ask retains its indexed ask, carries the server-owned `invalid` parse-error
-attribute, and emits `block.invalid`; repairing its body clears `invalid` before updating the ask row.
+A browser-edited ask settlement cannot read (`readAskBlockStrictly`) - one its parse refuses, such
+as a heading or code block in it, an emptied question or an option without a label, or one that
+breaks its content rule, a second bullet list or a paragraph after its list, which concurrent edits
+can leave and the browser editor keeps - carries the server-owned `invalid` attribute naming the
+reason and emits `block.invalid`. An open ask's indexed row stays open and unchanged; an answered
+or resolved ask keeps its decided row and answer. Repairing its body clears `invalid` before
+updating the ask row, and writes a decided ask's decided wording back into the block.
 Markdown that becomes a whole document - a spec at issue creation, an uploaded document or version -
 is refused with `400 INVALID_ASK_BLOCK` when an ask's body breaks its content rule,
 `paragraph+ bullet_list?` - one or more paragraphs, then at most one bullet list, last
@@ -2801,9 +2861,10 @@ slow to finish with it.
 A key is kept 24 hours (`IDEMPOTENCY_KEY_TTL_MS`): the suggestion-outcome sweep's pass deletes
 every older row (`sweepRequestKeys`), a row a dead process left in flight with it, and a repeat
 that finds an older row not yet swept treats the key as unused. The hand-written key path before
-it is gone: `broadcast_idempotency_keys` (migration `0055`), which this release neither reads nor
-writes and a later release drops. Neither send route takes a body `idempotency_key` any more; the
-header carries the key.
+it is gone, and so is its table: `broadcast_idempotency_keys` (migration `0055`), dropped by
+`0141_drop_broadcast_idempotency_keys`, in a release later than `0137`'s, which stopped reading and
+writing it.
+Neither send route takes a body `idempotency_key` any more; the header carries the key.
 
 ## Targeted Dispatch messages
 
@@ -2946,18 +3007,18 @@ order the send named them; all three routes are human-only, like the one-session
 built from.
 
 A broadcast is keyed by its `Idempotency-Key` header like every write ("Keyed Dispatch writes"
-above); the body's `idempotency_key` of LEGION-446 and its `broadcast_idempotency_keys` table
-are gone from the route. The send commits the broadcast and its exclusions, with their reasons,
-as the key's recovery point (`broadcastRecovery`) in the broadcast's own transaction, so a repeat
-under the key is answered by `replayBroadcast` however the first request ended, even while the
-listener is down: the broadcast is read as `GET /api/v1/broadcasts/{id}` reads it, every
-recipient's attempts as they stand, with the send's own `excluded`, under the send's own `201` and
-`Idempotency-Replayed: ?1`, answered at once as the send was, while
-`sendOwedBroadcastRecipients` puts every recipient the broadcast still owes on its way behind the
-answer (`owedMessageAttempts`, the rule a single send's repeat, `sendHeldMessageOn`, also reads:
-the first attempt of a message with none, or its latest attempt when that is pending under a
-claim that has lapsed). A different request under the key is `422 KEY_REUSED`, and nothing is
-written.
+above); the body's `idempotency_key` of LEGION-446 is gone from the route and its
+`broadcast_idempotency_keys` table from the schema. The send commits the broadcast and its
+exclusions, with their reasons, as the key's recovery point (`broadcastRecovery`) in the
+broadcast's own transaction, so a repeat under the key is answered by `replayBroadcast` however the
+first request ended, even while the listener is down: the broadcast is read as
+`GET /api/v1/broadcasts/{id}` reads it, every recipient's attempts as they stand, with the send's
+own `excluded`, under the send's own `201` and `Idempotency-Replayed: ?1`, answered at once as the
+send was, while `sendOwedBroadcastRecipients` puts every recipient the broadcast still owes on its
+way behind the answer (`owedMessageAttempts`, the rule a single send's repeat,
+`sendHeldMessageOn`, also reads: the first attempt of a message with none, or its latest attempt
+when that is pending under a claim that has lapsed). A different request under the key is
+`422 KEY_REUSED`, and nothing is written.
 
 The event feed retains the targeted `message.created`, `message.delivery`, and `message.answered`
 events for the Conversation card. Issue-less targeted-message events have no issue owner, use

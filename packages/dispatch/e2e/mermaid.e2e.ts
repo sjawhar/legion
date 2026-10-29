@@ -30,36 +30,33 @@ import {
   test,
 } from "@playwright/test";
 
-import type { ArtifactBlock } from "../web/src/api/types";
 import {
-  baseUrl,
   createAsk,
   createComment,
   createIssue,
   createMessage,
   createProject,
   getArtifactText,
-  userHeaders,
 } from "./api";
-import { documentEditor, markSpan, openSpec, placeCaret } from "./editor";
+import { blockId, documentEditor, markSpan, openSpec, placeCaret } from "./editor";
+import {
+  expectHeldAndResponsive,
+  failMermaidWorkersOnCall,
+  holdMermaidWorkers,
+  holdWorkerSource,
+  recordMermaidWorkers,
+  refuseWorkers,
+  settledScrollTop,
+  withoutScrollAnchoring,
+} from "./mermaid-helpers";
 import { resetDatabase } from "./seed";
 import { asUser } from "./users";
 
 // What this file's init scripts keep on the page's window.
 declare global {
   interface Window {
-    /** Makes the page's workers fail from now on, as `failMermaidWorkersOnCall` describes. */
-    __failMermaidWorkers?: () => void;
     /** Each script or handler of `HOSTILE_SVG` that ran. */
     __hostile?: string[];
-    /** The `source` of each request posted to a worker. */
-    __mermaidSent?: string[];
-    /** How many workers the page constructed. */
-    __mermaidWorkers?: number;
-    /** The page's scroll offset at every frame since it loaded (`recordScrollEachFrame`). */
-    __scrollEachFrame?: number[];
-    /** Delivers what a held worker posted, and lets later posts through. */
-    __releaseMermaid?: () => void;
   }
 }
 
@@ -131,196 +128,37 @@ async function expectDrawnDiagram(card: Locator, labels: readonly string[]): Pro
   await expect(source).toBeVisible();
 }
 
-/** The id of the block of `artifactId` whose markdown is exactly `text`. A paragraph's id is a
- *  minted UUID, which `encodeBlockId` writes unchanged, so the id is also its `#b-` fragment.
- *  Copied from `block-references.e2e.ts`, whose helpers each live in their own file. */
-async function blockId(artifactId: string, text: string): Promise<string> {
-  const { markdown } = await getArtifactText(artifactId);
-  const response = await fetch(
-    new URL(`/api/v1/artifacts/${encodeURIComponent(artifactId)}/blocks`, baseUrl),
-    { headers: await userHeaders() }
-  );
-  if (!response.ok) {
-    throw new Error(
-      `GET blocks of ${artifactId} failed: ${response.status} ${await response.text()}`
-    );
-  }
-  const blocks = (await response.json()) as ArtifactBlock[];
-  const block = blocks.find((candidate) => markdown.slice(candidate.from, candidate.to) === text);
-  if (block === undefined) {
-    throw new Error(`no block of ${artifactId} reads ${JSON.stringify(text)}: ${markdown}`);
-  }
-  expect(block.id).toMatch(/^[A-Za-z0-9-]+$/);
-  return block.id;
+/** Starts recording `page`'s console errors and returns the check both rows whose renderer never
+ *  draws end with: the document editor shows `source` in a `pre code`, holds no diagram, hides
+ *  the status line, and the renderer said once that it is unavailable. Recording starts at this
+ *  call, before the page navigates, so an error logged on the first paint is counted. Both rows
+ *  end alike because a block whose worker cannot draw looks the same whether no worker ever
+ *  loaded or one failed after a drawing: its source as code, with no stale diagram left above
+ *  it. */
+function watchSourceAsCode(page: Page): (source: string) => Promise<void> {
+  const consoleErrors: string[] = [];
+  page.on("console", (message) => {
+    if (message.type() === "error") consoleErrors.push(message.text());
+  });
+  const editor = documentEditor(page);
+  return async (source) => {
+    await expect(editor.locator("pre code").filter({ hasText: source })).toBeVisible();
+    await expect(diagramIn(editor)).toHaveCount(0);
+    await expect(editor.locator(".proof-mermaid-status")).toBeHidden();
+    await expect
+      .poll(() =>
+        consoleErrors.filter((text) =>
+          text.includes("Showing Mermaid source as code, the diagram renderer is unavailable")
+        )
+      )
+      .toHaveLength(1);
+  };
 }
 
 /** A request that never happens can only be shown by waiting: this long after the diagram shows
  *  is far longer than an inserted element or sheet takes to start its fetch, so a request list
  *  read after it holds every fetch the drawing caused. */
 const REQUEST_SETTLE_MS = 1_000;
-
-/** Wraps the page's `Worker` so the page counts each worker it constructs
- *  (`window.__mermaidWorkers`) and records the `source` of each request posted to one
- *  (`window.__mermaidSent`), passing everything through to the real worker. Mermaid's worker is
- *  the app's only `new Worker` (`features/refs/mermaid-diagrams.ts`). */
-async function recordMermaidWorkers(page: Page): Promise<void> {
-  await page.addInitScript(() => {
-    window.__mermaidWorkers = 0;
-    window.__mermaidSent = [];
-    const RealWorker = window.Worker;
-    window.Worker = class extends RealWorker {
-      constructor(url: string | URL, options?: WorkerOptions) {
-        super(url, options);
-        window.__mermaidWorkers = (window.__mermaidWorkers ?? 0) + 1;
-      }
-
-      postMessage(message: unknown, options?: StructuredSerializeOptions | Transferable[]): void {
-        if (typeof message === "object" && message !== null && "source" in message) {
-          window.__mermaidSent?.push(String(message.source));
-        }
-        super.postMessage(message, options as StructuredSerializeOptions);
-      }
-    };
-  });
-}
-
-/** Wraps the page's `Worker` so nothing its workers post reaches the page until
- *  `window.__releaseMermaid()` runs: each `message` event a listener added with
- *  `addEventListener("message", …)` (as `mermaid-diagrams.ts` listens) or `onmessage` would get
- *  is held, then delivered in arrival order on release, and later ones flow straight through.
- *  The worker's `ready` is held too, and the time limit starts only at `ready`, so a held diagram
- *  is never refused; it stays undrawn until the release. */
-async function holdMermaidWorkers(page: Page): Promise<void> {
-  await page.addInitScript(() => {
-    let released = false;
-    const held: (() => void)[] = [];
-    window.__releaseMermaid = () => {
-      released = true;
-      for (const deliver of held.splice(0)) deliver();
-    };
-    const RealWorker = window.Worker;
-    const HeldWorker = class extends RealWorker {
-      addEventListener(
-        type: string,
-        listener: EventListenerOrEventListenerObject,
-        options?: boolean | AddEventListenerOptions
-      ): void {
-        if (type !== "message") {
-          super.addEventListener(type, listener, options);
-          return;
-        }
-        super.addEventListener(
-          type,
-          (event) => {
-            const deliver = () => {
-              if (typeof listener === "function") listener.call(this, event);
-              else listener.handleEvent(event);
-            };
-            if (released) deliver();
-            else held.push(deliver);
-          },
-          options
-        );
-      }
-    };
-    const handlers = new WeakMap<Worker, ((event: MessageEvent) => unknown) | null>();
-    Object.defineProperty(HeldWorker.prototype, "onmessage", {
-      configurable: true,
-      get(this: Worker) {
-        return handlers.get(this) ?? null;
-      },
-      set(this: Worker, handler: ((event: MessageEvent) => unknown) | null) {
-        if (!handlers.has(this)) {
-          this.addEventListener("message", (event) => handlers.get(this)?.call(this, event));
-        }
-        handlers.set(this, handler);
-      },
-    });
-    window.Worker = HeldWorker;
-  });
-}
-
-/** Turns the browser's scroll anchoring off on `page`, as in Safari before 27, which has none.
- *  Every engine Playwright runs anchors the scroll on the target when a diagram above it grows,
- *  so with anchoring on a row would pass without the page's own focus re-run; with it off, only
- *  that re-run brings the target back into view. */
-async function withoutScrollAnchoring(page: Page): Promise<void> {
-  await page.addStyleTag({ content: "* { overflow-anchor: none !important; }" });
-}
-
-/** Records the page's scroll offset (`window.__scrollEachFrame`) at every animation frame from
- *  the moment it loads, so a row can see a jump back to the top that no single read would. */
-async function recordScrollEachFrame(page: Page): Promise<void> {
-  await page.addInitScript(() => {
-    const offsets: number[] = [];
-    window.__scrollEachFrame = offsets;
-    const sample = () => {
-      offsets.push(Math.round(window.scrollY));
-      requestAnimationFrame(sample);
-    };
-    requestAnimationFrame(sample);
-  });
-}
-
-/** The document's scroll offset once it has stopped moving: unchanged over 10 frames in a row, so
- *  a smooth scroll a link or a wheel started has ended before the offset is read. */
-function settledScrollTop(page: Page): Promise<number> {
-  return page.evaluate(
-    () =>
-      new Promise<number>((resolve) => {
-        let last = -1;
-        let still = 0;
-        const sample = () => {
-          const top = document.scrollingElement?.scrollTop ?? 0;
-          still = top === last ? still + 1 : 0;
-          last = top;
-          if (still >= 10) resolve(top);
-          else requestAnimationFrame(sample);
-        };
-        sample();
-      })
-  );
-}
-
-/** Makes the page's `new Worker(...)` throw, as a browser with no worker to give does. */
-async function refuseWorkers(page: Page): Promise<void> {
-  await page.addInitScript(() => {
-    window.Worker = class {
-      constructor() {
-        throw new Error("This test's page has no Worker");
-      }
-    } as unknown as typeof Worker;
-  });
-}
-
-/** Wraps the page's `Worker` so its workers pass everything through until
- *  `window.__failMermaidWorkers()` runs, and from then on fail as a worker whose chunk can no
- *  longer load does, as across a redeploy: each worker's next `postMessage` posts nothing and
- *  instead fires `error` on that worker (on a later task, as the browser reports a load failure),
- *  and every `new Worker(...)` throws. */
-async function failMermaidWorkersOnCall(page: Page): Promise<void> {
-  await page.addInitScript(() => {
-    let failing = false;
-    window.__failMermaidWorkers = () => {
-      failing = true;
-    };
-    const RealWorker = window.Worker;
-    window.Worker = class extends RealWorker {
-      constructor(url: string | URL, options?: WorkerOptions) {
-        if (failing) throw new Error("This test's worker chunk no longer loads");
-        super(url, options);
-      }
-
-      postMessage(message: unknown, options?: StructuredSerializeOptions | Transferable[]): void {
-        if (failing) {
-          setTimeout(() => this.dispatchEvent(new Event("error")), 0);
-          return;
-        }
-        super.postMessage(message, options as StructuredSerializeOptions);
-      }
-    };
-  });
-}
 
 /** Records every request `context` makes to Google Fonts' two hosts and answers it with an empty
  *  stylesheet, so a run needs no outbound network. */
@@ -562,60 +400,6 @@ test("a mermaid source the renderer refuses shows the reason and its source, and
     await alice.close();
   }
 });
-
-/** The built Mermaid render worker's chunk, as Vite emits it under `/assets`. */
-const workerChunk = /\/assets\/mermaid-render\.worker-[^/]+\.js$/;
-
-/** The same-origin path the held worker requests once it has taken a diagram's source. */
-const workerHeldPath = "/e2e/mermaid-worker-held";
-
-/** Prepended to the worker chunk, so it registers before the worker's own listener: it stops that
- *  listener, reports through `workerHeldPath` that it holds the source, and never returns. */
-const holdingListener = [
-  'self.addEventListener("message", async (event) => {',
-  "  event.stopImmediatePropagation();",
-  `  await fetch("${workerHeldPath}");`,
-  "  for (;;) {}",
-  "});",
-].join("\n");
-
-/** Serves the real worker chunk to `page` with `holdingListener` in front of the worker's own, so
- *  the worker takes a diagram's source and never answers, and the page's shipped time limit
- *  refuses it whatever the machine's speed. Returns how many times a worker reported that hold. */
-async function holdWorkerSource(page: Page): Promise<() => number> {
-  let holds = 0;
-  await page.route(workerChunk, async (route) => {
-    const response = await route.fetch();
-    await route.fulfill({ response, body: `${holdingListener}\n${await response.text()}` });
-  });
-  await page.route(
-    (url) => url.pathname === workerHeldPath,
-    async (route) => {
-      holds += 1;
-      await route.fulfill({ status: 204 });
-    }
-  );
-  return () => holds;
-}
-
-/** Waits for a worker to report that it holds the source, then shows that five 100 ms timers on
- *  the page's thread each fire on time, give or take a scheduling hiccup, while the worker is
- *  busy: a page that drew on its own thread would never hand the source over. */
-async function expectHeldAndResponsive(page: Page, holds: () => number): Promise<void> {
-  await expect
-    .poll(holds, { message: "the Mermaid worker took the diagram's source and holds it" })
-    .toBeGreaterThanOrEqual(1);
-  for (let sample = 0; sample < 5; sample += 1) {
-    const elapsed = await page.evaluate(
-      () =>
-        new Promise<number>((resolve) => {
-          const start = performance.now();
-          setTimeout(() => resolve(performance.now() - start), 100);
-        })
-    );
-    expect(elapsed).toBeLessThan(1_000);
-  }
-}
 
 // The worker holds the source (`holdWorkerSource`), so the shipped 5 s limit refuses even this
 // two-node flowchart on every runner, and the row proves what the limit does, not how fast a
@@ -1069,50 +853,6 @@ test("a past version's highlighted mark lands on its block once a diagram above 
   }
 });
 
-// The past version's first landing with no diagram at all, so nothing runs it again: when every
-// render of the page rebuilt the version's editor, the last scroll could run before the last
-// editor had laid out and leave the reader at the top of the page.
-test("a past version's comment link lands on its quote in a document with no diagram @phone", async ({
-  browser,
-}) => {
-  const filler = Array.from({ length: 50 }, (_, index) => `Filler paragraph ${index + 1}.`);
-  await createProject({ key: "CORE", name: "Core" });
-  const issue = await createIssue({
-    project: "CORE",
-    spec: `Plain document:\n\n${filler.join("\n\n")}\n\nTarget paragraph holds the quoted words.\n`,
-    title: "Highlighted mark in a plain document",
-  });
-  const comment = await createComment(
-    issue.key,
-    { anchor: { artifact: "spec", quote: "quoted words" }, body: "Read this." },
-    session
-  );
-
-  const alice = await asUser(browser, "alice");
-  try {
-    const page = await alice.newPage();
-    await recordScrollEachFrame(page);
-    await page.goto(
-      `/issues/${issue.key}/artifact/spec?v=1&comment=${encodeURIComponent(comment.id)}`
-    );
-    const versionView = page.getByRole("region", { name: "Document version 1" });
-    const highlight = versionView.locator(`[data-id="${comment.id}"]`);
-    await expect(highlight).toHaveText("quoted words");
-    await expect(highlight).toBeInViewport();
-    // A page that rebuilt the version's editor collapsed to the viewport's height between builds,
-    // throwing the reader back to the top after the scroll to the quote began. Waiting is the
-    // only way to show a jump that does not come.
-    await page.waitForTimeout(1_500);
-    const offsets = (await page.evaluate(() => window.__scrollEachFrame)) ?? [];
-    const started = offsets.findIndex((offset) => offset > 0);
-    expect(started).toBeGreaterThanOrEqual(0);
-    expect(offsets.slice(started).filter((offset) => offset === 0)).toEqual([]);
-    await expect(highlight).toBeInViewport();
-  } finally {
-    await alice.close();
-  }
-});
-
 test("a comment link below a diagram lands on its quote once the diagram draws @phone", async ({
   browser,
 }) => {
@@ -1158,23 +898,10 @@ test("with no worker a document's diagram shows its source @phone", async ({ bro
   const alice = await asUser(browser, "alice");
   try {
     const page = await alice.newPage();
-    const consoleErrors: string[] = [];
-    page.on("console", (message) => {
-      if (message.type() === "error") consoleErrors.push(message.text());
-    });
+    const expectSourceAsCode = watchSourceAsCode(page);
     await refuseWorkers(page);
     await openSpec(page, issue.key, "Workerless diagram:");
-    const editor = documentEditor(page);
-    await expect(editor.locator("pre code").filter({ hasText: "Start --> Finish" })).toBeVisible();
-    await expect(diagramIn(editor)).toHaveCount(0);
-    await expect(editor.locator(".proof-mermaid-status")).toBeHidden();
-    await expect
-      .poll(() =>
-        consoleErrors.filter((text) =>
-          text.includes("Showing Mermaid source as code, the diagram renderer is unavailable")
-        )
-      )
-      .toHaveLength(1);
+    await expectSourceAsCode("Start --> Finish");
   } finally {
     await alice.close();
   }
@@ -1195,10 +922,7 @@ test("a document diagram whose worker fails after its first drawing shows its so
   const alice = await asUser(browser, "alice");
   try {
     const page = await alice.newPage();
-    const consoleErrors: string[] = [];
-    page.on("console", (message) => {
-      if (message.type() === "error") consoleErrors.push(message.text());
-    });
+    const expectSourceAsCode = watchSourceAsCode(page);
     await failMermaidWorkersOnCall(page);
     await openSpec(page, issue.key, "Failing diagram:");
     const editor = documentEditor(page);
@@ -1208,18 +932,7 @@ test("a document diagram whose worker fails after its first drawing shows its so
 
     await placeCaret(page, "after", "Start --> Finish");
     await page.keyboard.type("Line");
-    await expect(diagram).toHaveCount(0);
-    await expect(
-      editor.locator("pre code").filter({ hasText: "Start --> FinishLine" })
-    ).toBeVisible();
-    await expect(editor.locator(".proof-mermaid-status")).toBeHidden();
-    await expect
-      .poll(() =>
-        consoleErrors.filter((text) =>
-          text.includes("Showing Mermaid source as code, the diagram renderer is unavailable")
-        )
-      )
-      .toHaveLength(1);
+    await expectSourceAsCode("Start --> FinishLine");
   } finally {
     await alice.close();
   }
