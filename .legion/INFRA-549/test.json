@@ -2,43 +2,50 @@
   "schemaVersion": 1,
   "phase": "test",
   "issue": "INFRA-549",
-  "completed": "2026-10-28T15:21:28Z",
-  "round": 7,
-  "headSha": "aebf0159552021658c069b9b055bf93cf46be1b1",
-  "codeHeadSha": "e105aef3e044",
+  "completed": "2026-10-29T16:23:02Z",
+  "round": 8,
+  "headSha": "660e3a20c892f88a1dbef21fd452cd943cca26bc",
+  "codeHeadSha": "4c0da574bf8a73de9a377e673755cf9e3b9f6533",
   "evidence": [
-    "https://github.com/sjawhar/legion/pull/2371#issuecomment-6472998571",
-    "https://github.com/sjawhar/legion/pull/2371#issuecomment-6472259776"
+    "https://github.com/sjawhar/legion/pull/2371#issuecomment-6502253529",
+    "https://github.com/sjawhar/legion/pull/2371#issuecomment-6472998571"
   ],
-  "ci": "Read on GitHub at e105aef3 when this was written: build, changes, lint, test, typecheck queued (superseded pr-title runs cancelled). Read as queued, not as a pass. The PR is MERGEABLE/CLEAN.",
-  "scope": "e105aef3 changes only packages/envoy/infra/gcp/clusteredhub_live_test.go (a restart keeps its ports; only a first start draws new ones). git diff 16234e5e..e105aef3 over packages/envoy/infra outside that file is empty, so round 6's Pulumi-engine and Autopilot-floor evidence stands.",
+  "rebaseCheck": "sjawhar/legion#2362 merged at 2026-10-29T09:30:43Z and the PR now targets main; 4c0da574 merges main@origin. Fingerprint at my round-7 head aebf0159 (fork 91d30dea, its base then): 11394bc6c37da71281954ee08f348f32cb61f9f984e0d338ddffddbb1ad675ec; at 660e3a20 (fork 30ecdcd4 on main): e99f1ccbfab768ee1fa1402821afea312af37f65e169317bc6ce38d83f0c62fd. Changed, so this is a full round. The PR's own diff differs only by main's rename of envoy-and-contracts.yaml to ci.yaml (the natslive step and the docs that name it) and the context of the architecture line. The merge also brings main's rewrite of the listener's NATS connection (internal/bus, cmd/listener, #2370) under the tailnet hosts' listener.",
+  "ci": "Read on GitHub at 4c0da574 when this was written: changes queued, pr-title success, .github/dependabot.yml success; no build, lint, test or typecheck run yet. Read as not run, not as a pass. The PR is MERGEABLE (mergeStateStatus BLOCKED, awaiting required checks).",
   "implementerProof": {
     "verdict": "verified",
-    "how": "Re-ran the implementer's command at e105aef3: cd packages/envoy/infra && TMPDIR=/legion/scratch/tmp go test -count=1 -tags natslive -run 'TestClusteredNatsHub(Chart|Cluster)$' -v -timeout 30m ./gcp/ -> ok 86.397s (leader kill at 203/1000 acks with a new leader in 4.2 s, users reloaded with cid 40 and 0 reconnects). The finding was driven independently with a holder on a different port, at every restart rather than in (b) only."
+    "how": "Re-ran the implementer's natslive command at 4c0da574: cd packages/envoy/infra && TMPDIR=/legion/scratch/tmp go test -count=1 -tags natslive -run 'TestClusteredNatsHub(Chart|Cluster)$' -v -timeout 30m ./gcp/ -> ok 34.180s (leader kill at 206/1000 acks with a new leader in 6.0 s, users reloaded with cid 20 and 0 reconnects, (f) admits after a restart). The merged surfaces were driven independently (proofs below)."
   },
   "failures": [],
   "failed": 0,
   "proof": [
     {
-      "criterion": "Review round 6: a hub server's restart in the live test keeps its ports, since the clients' urls and the exporters' scrape targets name them, so a restart that has to retry does not fail a later assertion.",
-      "surface": "The natslive live test's three nats-server v2.15.1 processes with the real exporter and reloader, with another program holding a restarting server's monitor port on 0.0.0.0 for 1.5 s at each restart ((b), (c), (e), (f))",
-      "command": "go test -count=1 -tags natslive -overlay <throwaway: at the top of hubServer.start, when s.proc != nil, net.Listen on 0.0.0.0:<s.monitor>, closed after 1.5 s> -run 'TestClusteredNatsHubCluster$' -v -timeout 20m ./gcp/",
-      "observed": "Head: ok 39.544s. envoy-nats-0 restarted on monitor port 63868 each time. (b) current at seq 1000 1.241 s after the restart; (c) 3/2/1 nats_stream_last_seq series; (e) the restarted server uses the new session user; (f) the restarted server admits live-added.",
-      "headSha": "e105aef3e044",
-      "negativeControl": "The same overlay over the 16234e5e test -> FAIL at (c). The restarted server logged '[FTL] Can't start monitoring: ... listen tcp 0.0.0.0:37862: bind: address already in use' and came up on a new port, and the exporter kept the old target: '3 nats_stream_last_seq series of LIVE_R3 at 1000: not within 30s: 2 series'."
+      "criterion": "Users are applied by reload alone; a change of the no-credential session user or the store limit rolls the pods after the ConfigMap; the StatefulSet is protected; refusals name their input.",
+      "surface": "The plugin built at 4c0da574 run by the Pulumi CLI v3.268.0 on the README's YAML program against a real kube-apiserver v1.33.0 + etcd + kube-controller-manager v1.33.0",
+      "command": "pulumi up; pulumi preview --json after: one user added; sessionUser.nkey changed; streamMaxBytes 40000000000 with diskSizeGb 53 and natsMemory 5Gi; diskSizeGb 60; natsCpu 0.149. Then pulumi up of the session-user change and kubectl get pods -o json",
+      "observed": "16 objects created; in state the StatefulSet depends on envoy-nats-config, is protected, and carries max-file-store and no-auth-user. User add -> only auth.conf. Session change -> auth.conf plus the no-auth-user annotation. Store lower -> nats.conf, max-file-store and the listener's ENVOY_STREAM_MAX_BYTES. Applied session change: the ConfigMap updated first (0.06 s), then the StatefulSet; the controller replaced envoy-nats-2 with revision envoy-nats-c85b8b8b carrying the new session user (UDJB63HI -> UAS5AOGB).",
+      "headSha": "4c0da574bf8a73de9a377e673755cf9e3b9f6533",
+      "negativeControl": "diskSizeGb 60 -> preview fails, the StatefulSet 'currently marked for protection'; natsCpu 0.149 -> refused 'natsCpu \"0.149\" must be at least 150m'."
+    },
+    {
+      "criterion": "The tailnet session listener (now on main's #2370 NATS connection code) takes the replica count and byte limit, keeps serving when its hub server goes away, and raises its buckets under the hub's grants, which include INFRA-546's bucket update grant.",
+      "surface": "envoy-listener built at 4c0da574 with the tailnet Deployment's exact environment (only NATS_URLS and the seed path changed) on three nats-server v2.15.1 that use the engine-rendered nats.conf and auth.conf",
+      "command": "run.sh servers; run.sh listener 1; run.sh listener 3; curl /jsz and /v1/sessions; kill -KILL the server holding the listener's connection (found by /connz authorized_user); curl /healthz every 5 s; run.sh server 0; nats req '$JS.API.STREAM.UPDATE.KV_envoy_interests' <config with num_replicas 1> as the host user",
+      "observed": "ENVOY_NOTIFICATIONS at R3/max_bytes 44023414784 and the three KV buckets at R3 on all servers, no permission violation; /v1/sessions 200 for envoy-hub.example-tailnet.ts.net:9020, 421 for evil.example.com. After SIGKILL of envoy-nats-0 (the listener's server) the listener was on envoy-nats-1 by t+5 s and /healthz stayed 200 healthy for the 30 s watched. After envoy-nats-0 restarted, KV_envoy_interests lowered to R1 was back at R3 on all three servers within 20 s.",
+      "headSha": "4c0da574bf8a73de9a377e673755cf9e3b9f6533",
+      "negativeControl": "With $JS.API.STREAM.UPDATE.KV_envoy_interests removed from the listener user (servers reloaded) and the bucket lowered again -> 'Publish Violation - Subject \"$JS.API.STREAM...' from the listener's nkey, and the bucket stayed R1 for the 50 s watched."
     },
     {
       "criterion": "The rendered NATS configuration is run by three local nats-server processes: they form a cluster, a stream created at three copies survives one server's kill with a leader and no lost publish, and a user added and removed through the rendered auth file reloads with no restart and no client reconnect.",
       "surface": "Three local nats-server v2.15.1 processes with the real nats-server-config-reloader v0.24.0 and prometheus-nats-exporter v0.20.2, on the helm v3.20.2 render of the component's values",
       "command": "cd packages/envoy/infra && TMPDIR=/legion/scratch/tmp go test -count=1 -tags natslive -run 'TestClusteredNatsHub(Chart|Cluster)$' -v -timeout 30m ./gcp/",
-      "observed": "ok 86.397s. SIGKILL of R3 leader envoy-nats-2 after 203 of 1000 acks; envoy-nats-0 led 4.209 s later; every acknowledged message stored exactly once. Users reloaded with cid 40 and 0 reconnects and 0 disconnects.",
-      "headSha": "e105aef3e044",
+      "observed": "ok 34.180s. SIGKILL of R3 leader envoy-nats-0 after 206 of 1000 acks; envoy-nats-1 led 6.016 s later; every acknowledged message stored exactly once. Users reloaded with cid 20 and 0 reconnects and 0 disconnects.",
+      "headSha": "4c0da574bf8a73de9a377e673755cf9e3b9f6533",
       "negativeControl": "(e) and (f) of the same run: a no_auth_user change and a lower max_file_store are each refused by reload, and only a restart applies them."
     }
   ],
   "observations": [
-    "A first holder bound 127.0.0.1 and made both versions of the test fail the same way. nats-server binds its monitor and client ports on 0.0.0.0, so both binds succeeded and the test's /connz request reached the more specific holder. This was a rig artefact; the holder was rebound on 0.0.0.0. The round-6 route-port thief on 127.0.0.1 was valid, since nats-server binds the route port on 127.0.0.1, as its FTL lines showed.",
-    "My go test runs touched packages/envoy/infra/go.work.sum in the working copy; I restored it before committing.",
-    "Carried from round 6: GKE's 0.25 vCPU rounding on clusters without bursting is not modelled by the ratio check (it came with the helper from gcp:Dispatch). Autopilot admission itself, claim expansion, a real tailscaled, the README PromQL and GKE-only behaviour belong to INFRA-551's live proof."
+    "The workspace was recreated before this round; every tool was installed again under $TMPDIR. The working copy stayed clean.",
+    "Not reachable on this surface, unchanged: claim expansion, a real tailscaled, Autopilot admission, the README PromQL, and GKE-only behaviour (GMP, Dataplane V2, Autopilot scheduling) belong to INFRA-551's live proof."
   ]
 }
