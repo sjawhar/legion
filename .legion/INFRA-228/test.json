@@ -2,97 +2,66 @@
   "schemaVersion": 1,
   "phase": "test",
   "issue": "INFRA-228",
-  "completed": "2026-10-29T13:48:00Z",
-  "round": 2,
-  "forwardMerge": {
-    "oldHead": "c1823f2959611c668b1ac29e5ddc3df893a343b9",
-    "newHead": "4d4f19d115c97886e215f8df110b2ee00e2c1a28",
-    "mergeCommit": "c718788b0868996730f1ce83feb88b5416d0e4ef",
-    "fingerprintBefore": "8652a9574d6cfd9b9a4892b2baf858d236b3301a07361e696cfbf527f7df538e",
+  "completed": "2026-10-29T14:02:00Z",
+  "round": 3,
+  "reCheck": {
+    "verifiedHead": "4d4f19d115c97886e215f8df110b2ee00e2c1a28",
+    "newHead": "fe5b55fb90e34b5b4a0338d35da86a7857d50654",
+    "fingerprintBefore": "f70a6f99640c36db0e93a23aa90289f1afec6dee371df4f939226a5af5eae3ad",
     "fingerprintAfter": "f70a6f99640c36db0e93a23aa90289f1afec6dee371df4f939226a5af5eae3ad",
-    "result": "changed: docs/kubernetes.md only (the three citation fixes and 'projects for a role' in place of 'projects into a role container'), so this was a full test round, not a bare-gate re-check",
-    "conflictResolution": "correct: main's sentence 'Every role is told `LEGION_GH_OWNERS_DIR=…`, the bundle's root (its own, bound there in its namespaces)' is kept at docs/kubernetes.md:3274 with this branch's three new paragraphs above it at :3240, :3250 and :3260; nothing of either side was dropped."
+    "result": "unchanged, bare gates only",
+    "why": "Round 3 is one commit, fe5b55fb, touching only .legion/INFRA-228/implement.json (6 insertions, 5 deletions): proof row 6's negativeControl no longer quotes the host, its observed line is restated, a round-3 deviation note is added, and round goes to 3. No file of the product moved, so the fingerprint computed over '~(.legion | docs/solutions)' is the same hash at both heads and round 2's real-surface verification stands as it was recorded. The push is handoff-only and carries the skip-checks: true trailer in the right shape (last line, two empty lines above it)."
   },
   "implementerProof": {
     "verdict": "verified",
-    "how": "All six round-1 proofs plus round 2's new row were re-run on the merged tree at 4d4f19d1, and every behavioural one held. dispatch whoami in the tester's own container: 'Session 01a187bc-f2ec-74d6-a202-a42d37d50c1b runs under the shared token: no owner, …' exit 0, with the one-byte flip refusing 'invalid bearer token' exit 1. Production broker: three subject token types driven (kubernetes-service-account and github-workflow-run each 'not supported as a subject_token_type', access_token 'Token is not valid or has expired', which is the control that the route serves the exchange). The broker binary was rebuilt from the merge head, because main moved 913 files under packages/envoy between this branch's old and new base, the broker's own packages among them: boot line 'token exchange state=on kubernetes=true github=false accounts=1 workflows=0', exchange http=200 DPoP expires_in 899, introspection carrying exactly session, person, project_scope and project plus exp, client_id and jkt, jkt equal to a fresh key's thumbprint, with five negative controls (unlisted service account, no DPoP proof, introspection by an unlisted account, introspection of a token never issued, unknown client_id). The fence test passes and all six mutations of the claim list still fail with the right message. The skills guard is 13 pass, 0 fail. Row 2 (every role presents the same bytes) was proven at c1823f29 tester-to-architect and is not disturbed by a merge of main, so it was not re-driven. Round 2's new row (the forward merge and the citation fixes) is verified: the fingerprints it records are the two this handoff records, the merge is a fast-forward of b822e651 and main, gh reports MERGEABLE, and the citation sweep below confirms each moved citation. Evidence: https://github.com/sjawhar/legion/pull/2503#issuecomment-6498347545",
-    "roundOneFailureTwoFixed": "implement.json proof row 6's negativeControl now records a real refusal (check-private-names exiting 1 with its remediation block) instead of the check passing on clean input. That is round 1's second failure closed -- and the wording of the new field is this round's failure 1."
+    "how": "Round 3 carries no new proof of its own and needs none: its whole change is the handoff text round 2 failed on, and the fingerprint shows the product untouched. The implement handoff's row 6 'observed' now claims check-private-names passes over the whole tree with the handoff included, and that is the claim this round checks: it does, exit 0 over 6224 files, run at this head. Round 2's verified proofs are unchanged and are not re-driven; the bare gates below are what this round adds."
   },
-  "failed": 1,
-  "failures": [
-    {
-      "criterion": "Root spec v17 acceptance line 11 and plan section 7: .github/scripts/check-private-names.sh passes, as the required lint job runs it. AGENTS.md: this repository is public, so a test or example names a Tailscale MagicDNS host only as <tailnet>.ts.net, <name>.<tailnet>.ts.net or a host under the reserved example-tailnet.ts.net.",
-      "evidence": "At head 4d4f19d1 the check exits 1: '::error file=.legion/INFRA-228/implement.json,line=54::.legion/INFRA-228/implement.json:54: names a Tailscale MagicDNS host', then 'check-private-names: 1 finding(s) (6224 files in the repository)' with the remediation block. Line 54 is round 2's own proof row 6, whose negativeControl field quotes the fabricated MagicDNS host it wrote into a scratch file, spelled as an ordinary tailnet name rather than under the reserved placeholder. The check cannot tell a fabricated tailnet name from a real one, which is why the rule asks for the placeholder, so it refuses -- and the name is now in this public branch's history, the same shape as the incident at dispatch://INFRA-416. Control, run to show that this one field is the whole of the failure: with that field reworded to name the host instead of quoting it and nothing else touched, the check exits 0 over the same 6224 files; docs/kubernetes.md and .legion/INFRA-228/implement.json were restored afterwards and jj diff --stat is empty. The pull request's own text is clean: check-pr-text's rule finds no host in the title, the body or any comment, and this handoff and the tester's evidence comment were both scanned through check-private-names before they were written and posted. Why CI has not reported it: c718788b, the code head the CI router workflow is running on, predates that file, so its lint will pass, and 4d4f19d1 carries the skip-checks: true trailer, so nothing runs on it; the next push that is not handoff-only -- the reviewer's own prose-fix commit is one -- runs lint over a tree that carries the line and turns that required check red. No red test is needed: check-private-names is that test, and it is already red. Fix: reword .legion/INFRA-228/implement.json line 54 so it names the host rather than quoting it, or use example-tailnet.ts.net."
-    }
-  ],
+  "failed": 0,
+  "failures": [],
   "proof": [
     {
-      "criterion": "Plan section 4 row 1: the credential a role holds names nobody, and Dispatch reads the session from the request body.",
-      "surface": "production Dispatch, from the tester container of pod legion-infra-infra-228",
-      "command": "printf 'length=%s\\n' \"$(wc -c < \"$DISPATCH_TOKEN_FILE\")\"; dispatch whoami",
-      "observed": "length=48; 'Session 01a187bc-f2ec-74d6-a202-a42d37d50c1b runs under the shared token: no owner, so an issue you create without an assignee takes its parent's assignee, else the project's default assignee, else nobody.' exit 0, at 13:37Z on the merged tree.",
-      "headSha": "4d4f19d115c97886e215f8df110b2ee00e2c1a28",
-      "negativeControl": "DISPATCH_TOKEN_FILE pointed at a copy with one byte flipped (only the differing-byte count printed, 1): 'invalid bearer token', exit 1."
+      "criterion": "Tester round 2's one failure, now closed: root spec v17 acceptance line 11 and plan section 7 -- .github/scripts/check-private-names.sh passes, as the required lint job runs it, with no text of the tree naming a Tailscale MagicDNS host outside the reserved placeholder.",
+      "surface": "the repository's own check, run over the whole issue workspace at the round-3 head",
+      "command": "cd -- \"$LEGION_WORKSPACE\" && .github/scripts/check-private-names.sh; echo \"exit=$?\"",
+      "observed": "exit=0, 'check-private-names: no file or path names the private deployment repository or the company, and no text names a private internal host or a Tailscale MagicDNS host (6224 files in the repository)'. The line the check named at round 2 (.legion/INFRA-228/implement.json:54) now describes the control's host instead of quoting it, and nothing else of the tree changed. The same check also passes over this handoff, which was scanned as a tracked file before it was committed.",
+      "headSha": "fe5b55fb90e34b5b4a0338d35da86a7857d50654",
+      "negativeControl": "the refusal this check produces is the one it produced at round 2, at the previous head and on the same tree but for that one field: exit 1 with '::error file=.legion/INFRA-228/implement.json,line=54::… names a Tailscale MagicDNS host' and the remediation block. The field is the only difference between the two runs, so the pass is that field's and not a check that stopped checking."
     },
     {
-      "criterion": "docs/kubernetes.md: the one Kubernetes token this runtime projects for a role is the broker's and it reaches the secrets broker and nothing else, Dispatch verifying only a token minted for its own audience, with the operator's own pod volumes outside the statement.",
-      "surface": "the live pod and production Dispatch, from the tester container",
-      "command": "DISPATCH_TOKEN_FILE=/var/run/secrets/kubernetes.io/serviceaccount/token dispatch whoami; DISPATCH_TOKEN_FILE=/var/run/legion/agent-secrets-token/token dispatch whoami",
-      "observed": "both 'invalid bearer token'. The pod carries two projected ServiceAccount tokens -- the runtime's agent-secrets-token (audience agent-secrets) and the operator's kube-api volume at the default path, which is what this role's kubectl uses -- and Dispatch takes neither, so the sentence holds on main's single-roles-container layout exactly as it did before, and its carve-out for the operator's pod volumes is what makes it true.",
-      "headSha": "4d4f19d115c97886e215f8df110b2ee00e2c1a28",
-      "negativeControl": "the broker's own projected token presented to Dispatch as a bearer -- the credential the prose says reaches the broker and nothing else: 'invalid bearer token'."
+      "criterion": "Bare gate, the smoke check: the documented operator command and the one code artifact still behave at the new head.",
+      "surface": "production Dispatch from the tester container, and the repository's Go and Bun suites for the two files this change touches",
+      "command": "dispatch whoami; cd packages/envoy && go test ./internal/broker/oauth/ -run TestTheDocumentedClaimsAreTheClaimsAnExchangedTokenCarries -count=1; cd ../pi-legion && bun test src/skills-guard.test.ts",
+      "observed": "'Session 01a187bc-f2ec-74d6-a202-a42d37d50c1b runs under the shared token: no owner, …' exit 0; ok github.com/sjawhar/envoy/internal/broker/oauth 0.034s; skills guard 13 pass, 0 fail.",
+      "headSha": "fe5b55fb90e34b5b4a0338d35da86a7857d50654",
+      "negativeControl": "DISPATCH_TOKEN_FILE pointed at a copy of the credential with one byte flipped (only the differing-byte count printed, 1): 'invalid bearer token', exit 1."
     },
     {
-      "criterion": "Plan section 4 row 4 (corrected): a broker with no subject token issuer set takes no pod's and no workflow run's token, while the access-token subject type stays registered.",
-      "surface": "production secrets broker (host redacted as <the broker host>)",
-      "command": "three POSTs to <the broker host>/v1/oauth/token with grant_type=urn:ietf:params:oauth:grant-type:token-exchange, client_id=dispatch-token-exchange, subject_token=not-a-token and subject_token_type in {kubernetes-service-account, github-workflow-run, access_token}",
-      "observed": "2026-10-29T13:37:29Z: the two JWT types each http=400 \"The '<type>' token type is not supported as a 'subject_token_type'\", the access-token type http=400 \"Token is not valid or has expired\". No token minted.",
-      "headSha": "4d4f19d115c97886e215f8df110b2ee00e2c1a28",
-      "negativeControl": "the access-token refusal is the control for the other two: it proves the endpoint serves the exchange, so 'not supported' names the missing issuer rather than a dead route."
-    },
-    {
-      "criterion": "Plan section 4 row 3: the broker issues a DPoP-bound Dispatch token carrying session, person, project_scope and project, and introspection reports them -- re-driven at the merge head because main moved the broker's own packages under this branch.",
-      "surface": "the real broker binary rebuilt from the merged tree by packages/envoy/scripts/dev-broker.sh, on an embedded Postgres 16.4, driven by a throwaway client with a fresh P-256 key",
-      "command": "DEV_BROKER_POSTGRES_URL=postgres://postgres@127.0.0.1:54329/postgres?sslmode=disable bash $TMPDIR/infra228/dev-broker-proof.sh; then the exchange client with session infra228-tester-round2",
-      "observed": "boot 'token exchange state=on kubernetes=true github=false accounts=1 workflows=0'; exchange http=200 token_type DPoP expires_in 899 against the documented 900-second default (BROKER_ACCESS_TOKEN_SECONDS, config.go, which main changed and whose default is still 900); introspect {\"active\":true,\"session\":\"infra228-tester-round2\",\"person\":\"ada@example.com\",\"project_scope\":\"named\",\"project\":\"EXAMPLE\",\"exp\":1793282046,\"client_id\":\"dispatch-token-exchange\",\"jkt\":\"T_vdJx2MVsPmq2HwX5LJ-bHZEX5evTJUCurLasiQSeQ\"}; jkt equals this run's key thumbprint: True. Exactly the four documented claims plus the three the prose says introspection adds.",
-      "headSha": "4d4f19d115c97886e215f8df110b2ee00e2c1a28",
-      "negativeControl": "the same exchange presenting system:serviceaccount:example-ns:example-stranger's token, which no entry lists: http=400 'exchange: no entry lists this identity'. Four more: no DPoP proof -> 400 invalid_dpop_proof; introspection by an account outside BROKER_API_ACCOUNTS -> 401 ACCOUNT_TOKEN_INVALID; introspection of a token the broker never issued -> 200 {\"active\":false}; client_id=not-a-client -> 401 invalid_client, so the client is checked before the subject type."
-    },
-    {
-      "criterion": "Plan section 4 row 5 / D6: the claim names in docs/kubernetes.md are the claim names in the code, and the fence cannot pass while they differ.",
-      "surface": "the repository's Go suite for packages/envoy/internal/broker/oauth, on the merged tree",
-      "command": "go test ./internal/broker/oauth/ -run TestTheDocumentedClaimsAreTheClaimsAnExchangedTokenCarries -count=1, then the same binary against six mutations of docs/kubernetes.md",
-      "observed": "PASS unmutated. Each mutation fails with the message a reader needs: the `project` bullet deleted -> 'issued but not documented: project'; an `extra` bullet added -> 'documented but not issued: extra'; renamed to `projekt` -> both directions; the marker sentence reworded -> 'has no \"An issued token carries these claims and no others:\"'; the em dash replaced by a colon -> the shape refusal naming line 5948; the whole list deleted -> 'names no claim after'. The first is the 'miss wearing a pass' the test's own comment claims to defend against, since `project` still appears inside the project_scope bullet's prose. docs/kubernetes.md restored after each; jj diff --stat empty.",
-      "headSha": "4d4f19d115c97886e215f8df110b2ee00e2c1a28",
-      "negativeControl": "the six mutations are the control: every one fails, none silently skips, so no edit of the list can pass unnoticed."
-    },
-    {
-      "criterion": "The new operator prose's citations resolve on the merged tree, the three the architect moved in round 2 included (the change is documentation, so its citations are its behaviour).",
-      "surface": "the issue workspace at 4d4f19d1, read with grep and go test",
-      "command": "every backticked path in the three new sections checked for existence; every cited symbol grepped in its cited file; the broker's boot condition, claim constants, retention and token lifetime read at their lines",
-      "observed": "All 24 cited paths exist and every cited symbol is in its cited file, with no miss. The three round-2 fixes land: DISPATCH_OIDC_AUDIENCE is cited at packages/envoy/cmd/dispatch/settings.go where it is read, serviceTokenActor at packages/envoy/internal/dispatch/api/server.go where it is checked, and claimSession and ExchangeConfig.tokenTypes by full path in packages/envoy/internal/broker/oauth/exchange.go -- the `oauth/exchange.go` shorthand is gone. Unchanged by main's 913 files under packages/envoy: the four Claim constants are session, person, project_scope and project; BROKER_ACCESS_TOKEN_SECONDS defaults to 900; SessionRetention is 90 days; the two boot lines are cmd/broker/main.go under exactly the stated condition; Set.Pod, Set.Workflow and Set.Machine derive the claims the prose describes, Set.Machine returning ProjectScopePerson with no project; WriteDispatchTokenFile's own doc comment still carries 'The value never enters tmux's argv or a pane's environment'; and 'Settings -> Agent tokens' and 'Exchange a pod's token' are still verbatim in the cited pages.",
-      "headSha": "4d4f19d115c97886e215f8df110b2ee00e2c1a28",
-      "negativeControl": "the sweep is not vacuous: in round 1 it reported one path and three symbols as absent from what the prose then cited, which is what the architect's three fixes answered; run again at this head with the same code it reports none."
-    },
-    {
-      "criterion": "Plan section 4 row 6 / section 7, second half: the skills guard's refused phrases stay out of docs/kubernetes.md.",
-      "surface": "the repository's own check, on the merged tree",
-      "command": "cd packages/pi-legion && bun test src/skills-guard.test.ts",
-      "observed": "13 pass, 0 fail (main added a thirteenth case since round 1's 12).",
-      "headSha": "4d4f19d115c97886e215f8df110b2ee00e2c1a28",
-      "negativeControl": "the guard's own cases are the control, and the private-names half of this row is this round's failure, recorded above with the refusal it produced."
+      "criterion": "The handoff ledger itself passes the required lint job's other components, so no head between here and retro's removal of .legion/<issue>/ carries a latent red of this class.",
+      "surface": "the repository's Biome configuration and the check over the ledger",
+      "command": "bunx biome check .legion/; grep -n '.legion' biome.json",
+      "observed": "exit 0, and biome.json line 19 carries '!!.legion', so Biome does not read the ledger at all; check-pr-text's rule finds no host in the pull request's title, body or any comment. With the private-names finding closed, there is no tree between this head and retro's removal of .legion/INFRA-228/ that the required lint job would refuse.",
+      "headSha": "fe5b55fb90e34b5b4a0338d35da86a7857d50654",
+      "negativeControl": "the private-names component of the same job is the control: it did refuse this ledger one commit ago, so 'lint passes over .legion/' is a measured result for each component rather than an assumption that the job ignores the directory."
     }
   ],
+  "roundTwoProofStands": {
+    "head": "4d4f19d115c97886e215f8df110b2ee00e2c1a28",
+    "what": "The seven proof entries of round 2's handoff, recorded at commit 47e95e51b41b: the role credential naming nobody on production Dispatch, both of the pod's projected Kubernetes tokens refused by Dispatch, the production broker's three subject-token refusals, the broker binary rebuilt from the merged tree issuing a DPoP-bound token carrying exactly session, person, project_scope and project with five negative controls, the claim-list fence under six mutations, the full citation sweep, and the skills guard. The fingerprint is identical at this head, so none of it is repeated.",
+    "roundOne": "Round 1's tester-to-architect credential-digest comparison ('length=48', 'equal'), at head c1823f29, which no later head disturbs."
+  },
   "ciRead": {
     "codeHead": "c718788b0868996730f1ce83feb88b5416d0e4ef",
-    "prHead": "4d4f19d115c97886e215f8df110b2ee00e2c1a28",
-    "readAt": "2026-10-29T13:40Z",
-    "state": "At the code head the CI router workflow queued at 13:29:43Z and PR Title queued at 13:31:07Z, both still queued; check runs 'changes' and 'pr-title' queued, '.github/dependabot.yml' success. The pull request head carries the skip-checks: true trailer and has no runs, as intended. A queued lane is recorded as queued; nothing was waited for.",
-    "caveat": "A green lint at c718788b does not clear the failure above: that commit predates .legion/INFRA-228/implement.json's round-2 content, which is the file the check refuses.",
+    "prHead": "fe5b55fb90e34b5b4a0338d35da86a7857d50654",
+    "readAt": "2026-10-29T13:58Z",
+    "state": "Running, not green yet. At the code head the CI router workflow is queued overall: 'changes' and 'pr-title' completed success, the skipped lanes (contracts, dispatch, envoy-client, envoy-plugin, pi-envoy, pi-shared, worker-image and the rest) completed skipped, 'docs' and 'dispatch-browser-multiprocess' in progress, and 'lint', 'typecheck', 'test', 'ci-filters', 'pi-legion', 'envoy-go', 'envoy-go-race', 'envoy-smoke', 'envoy-session-stall' and 'broker-multiprocess' queued. The two handoff heads 47e95e51 and fe5b55fb carry skip-checks: true and have no runs, as intended.",
+    "howThisWasHandled": "A queued or in-progress lane is read as such and never waited for: a required check that settles red sends the work back from testing on its own, and the reviewer reads the head's checks before it approves. The private-names component of lint is the one this round's failure lived in, and it was run here against the real tree rather than inferred from CI, because the code head CI runs on predates the corrected file.",
     "rerunsByTheTester": "none"
   },
   "redTests": {
     "written": 0,
-    "why": "The failure is already pinned by a test the repository owns and the base requires: .github/scripts/check-private-names.sh, which exits 1 at this head and names the file and line. A second test would be a check of a check, which this deployment's instructions forbid."
+    "why": "Round 2's failure was pinned by a test the repository already owns and the base requires, .github/scripts/check-private-names.sh, which refused the head and now passes it. Nothing is left unpinned."
+  },
+  "correction": {
+    "what": "Round 2's failures entry called the finding 'the same shape as the incident at dispatch://INFRA-416'. The architect corrected that on 2026-10-29T13:51Z: the host was a made-up tailnet, not this deployment's, so nothing private was ever in the branch history and the comparison does not hold. The clause is withdrawn; the failure itself stood on the required check alone and is now closed. Posted on the pull request at https://github.com/sjawhar/legion/pull/2503#issuecomment-6498521573, since testing was complete and the workspace read-only when the correction arrived."
   }
 }
