@@ -2,31 +2,38 @@
   "schemaVersion": 1,
   "phase": "review",
   "issue": "INFRA-745",
-  "completed": "2026-10-29T19:25:00Z",
-  "round": 1,
+  "completed": "2026-10-29T22:45:00Z",
+  "round": 2,
   "decision": "changes_requested",
-  "reviewedCodeHead": "2efb1c87921b2bd2e3688e439ef1b74683b66b14",
+  "reviewedCodeHead": "954e01a2c4e9dfb732766a105dcb26fedb386187",
+  "fingerprint": "d8bd6568 b09fe4f9... -> ac2d8870 35560573...: changed (packages/envoy/AGENTS.md send/publish rows, packages/envoy/docs/architecture.md), so a new round with the thermonuclear pair again",
   "critical": 0,
-  "important": 1,
+  "important": 3,
   "minor": 0,
   "keyFindings": [
     {
       "severity": "important",
-      "file": "packages/envoy/docs/architecture.md, packages/envoy/AGENTS.md (on main)",
-      "description": "This change makes main's listener documentation false. internal/bus/nats.go:1337 now names a denied JetStream publish ErrPublishDenied, so cmd/listener writeBusUnavailable answers a denied /v1/messages/send, and a denied /v1/messages/publish to a topic the stream captures, with 403 publish_denied (no Retry-After) where it answered a retried 503. Main still says the opposite: architecture.md:99-102 ('Only a topic the stream does not capture ... can be denied this way ... a send ... goes through JetStream and never meets it') and AGENTS.md:2589 (send row: 'The publish row's 403 for a denied publish never reaches this route ... bus.ErrPublishDenied is made only where a core publish is confirmed') and :2590 (publish row: 'which only a core publish's confirmation produces, so only a role send's forward or an ad-hoc topic's own publish can be denied this way'). Main (#2370) rewrote those paragraphs after this branch's base, so they cannot be corrected without the base: the reviewer's correction in 76c7b80 made the pull request CONFLICTING and GitHub ran no check, and f5ea044 put the three files back. Fix: merge main (a sentence only the base holds), correct those sentences on main's text, re-run the proof at the merge head, and say the 403 in the docs."
+      "file": "packages/envoy/infra/core/dispatch_permissions_live_test.go:317",
+      "description": "The PR's own live test is red at the merge head (envoy-infra-go, job 123735869041, both 2.10 and hub): requireCommentQuietPublished's POST /api/v1/issues with title \"quiet example\" is refused 409 POSSIBLE_DUPLICATE of ACME-1 \"example\", which requireIssueEventPublished created first. Main's related-item check (#2397, internal/dispatch/api/issue_create.go:205-216) arrived with the forward merge. Fix: send \"force\":true in that create (issue_create.go:196), or a title that shares no term with the earlier issue, and run the lane."
+    },
+    {
+      "severity": "important",
+      "file": ".github/workflows/ci.yaml (the changes job's filters)",
+      "description": "ci-filters is red (job 123735869153): cmd/dispatch now imports internal/metrics, so docs, dispatch, dispatch-browser-multiprocess, dispatch-memory and dispatch-multiprocess read packages/envoy/internal/metrics/metrics.go, which none of their filters match, and a change to it would skip them. Fix: add the path to those filters, as .github/scripts/check-ci-filters.sh asks."
+    },
+    {
+      "severity": "important",
+      "file": "skills/dispatch/SKILL.md:48",
+      "description": "pi-envoy is red (job 123735869279): packages/pi-envoy/src/skills-guard.test.ts:100 wants the three Dispatch skills under 2,000 words. Main has 1999, and this head has 2016: the clause this PR adds to skills/dispatch/SKILL.md:48 crosses it. Fix: bring the three skills back under 2,000 words, by cutting at least 17 words from that clause or as many elsewhere in them."
     }
   ],
+  "notAttributed": [
+    "envoy-go-race (job 123735868902): internal/dispatch/docs hit the 30 m package timeout (the running test had run 0 s), in a package this PR does not change. It is not judged a finding here; read it again at the next head."
+  ],
   "proseFixes": [
-    "76c7b80 + f5ea044 (reviewer): internal/bus/confirm.go ErrPublishDenied's doc names the JetStream source; cmd/listener/api.go writeBusUnavailable's citation names deniedPublish beside confirmPublished; envoy-client/src/replay.ts says `suppressed` is a quiet frame, not `notify: false`; the envoy changelog fragment says the listener's 403. The edits to AGENTS.md, architecture.md and request_record.go were reverted because main rewrote those paragraphs; request_record.go on main is already correct."
+    "8ebb15fb and 954e01a2 (reviewer): the deniedPublishes field comment and install's comment in internal/bus/nats.go and clearPublishDenials' doc in denials.go now say that only a reconnect clears the record, that install finds it empty, and what covers ensureConnWithContext's replacement; two comments in internal/dispatch/outbox/core_denied_test.go name the per-subject record; packages/envoy/docs/architecture.md's send table carries the 403 for a denied publish, which is no longer one of the publish route's own refusals; cmd/dispatch/main.go and the metric's changelog fragment say /metrics is readable by whoever reaches Dispatch's HTTP port."
   ],
-  "adjudicated": [
-    "deep-review minor 2 / code-quality important 2 (PublishedDispatchEvent has no importer): not a defect. It declares the published wire shape in the contracts package for any reader of the NATS frame; renderInbound reads quiet off the untrusted raw value as unknown and compares it === true, which a `quiet?: boolean` type would assert falsely.",
-    "deep-review minor 3 (a shutdown mid-batch counts reason=failed): not a defect. attempt.wait's own rule (publisher.go:756-758) is that an answer not in before ctx ends is a failure and the destination is published again; the counter counts the destinations the outbox will republish.",
-    "code-quality important 1 (Quiet read from two payload shapes; persist a column instead): not a defect in this change. Quiet is a pure function of type and payload; a column needs a migration and still needs the map reading for every event appended before it; both map arms are pinned on the wire by TestEnvelopePayloadStatesWhetherTheEventIsQuiet (scanned case) and broker_test's map rows. Named as a risk in the PR body.",
-    "code-quality minor 3 (nil PublishFailures counts nothing) and minor 4 (attempt carries Deps beside publishDestination's deps): style, not defects; the production wiring is proven by the implementer's real-binary run reading reason=\"denied\" on /metrics."
-  ],
-  "contractCensus": "Not required. quiet is an added optional field; nothing is made required, removed or renamed; no input that succeeds today is refused: the listener's 403 answers a publish that already failed as a 503, so only the status of a failing request changes. The changelog now says it.",
-  "ci": "Not read green. The code head 2efb1c8's CI run 40925705028 stayed queued behind the repository's Actions backlog; 76c7b80 got no run because it conflicted with main. A request for changes does not wait on CI.",
-  "threads": "none open on the pull request",
-  "e2eLines": "E2E (implementer) rounds 1-3 and E2E (tester) round 3 PASS at 57a5fdb are present"
+  "thermonuclear": "Round 2 pair at 8ebb15fb: deep-review approve, no critical or important, 3 minor (stale test comments, install's dead clear and comment, /metrics reach), all prose and fixed in 954e01a2; code-quality 1 important (architecture.md send table had no 403 row) and 1 minor (install's clear), prose, fixed in 954e01a2. Neither read CI.",
+  "threads": "PRRT_kwDORFy7ds6xtlYL (round 1, the listener docs): fixed in 91610e26 and 528d0fc9; I replied and accepted it, and the implementer resolved it. No other thread.",
+  "ci": "CI run 40952537039 at 954e01a2: required lint, typecheck, test, pr-title green; red: envoy-infra-go, ci-filters, pi-envoy (findings above) and envoy-go-race (not attributed); dispatch and dispatch-memory were still running at the read."
 }
