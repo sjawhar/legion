@@ -1,6 +1,6 @@
 import { PROJECT_NAME_MAX } from "@legion/contracts";
 import type { Mutation } from "@tanstack/react-query";
-import { useMutation, useMutationState, useQuery, useQueryClient } from "@tanstack/react-query";
+import { useMutationState, useQuery, useQueryClient } from "@tanstack/react-query";
 import { type FormEvent, type ReactNode, useState } from "react";
 
 import { api, apiErrorMessage } from "../../api/client";
@@ -19,6 +19,8 @@ import {
   textSecondaryOnSurface,
 } from "../../theme/classes";
 import { Timestamp } from "../refs/Timestamp";
+import { LandedWithoutAnswer } from "../writes/LandedWithoutAnswer";
+import { useKeyedWrite } from "../writes/useKeyedWrite";
 import {
   settingsFieldLabel,
   settingsMonoInput,
@@ -38,9 +40,14 @@ export function ProjectsSection(): ReactNode {
   const [projectName, setProjectName] = useState("");
   const projectSubmitGuard = useSubmitGuard();
   const projects = useQuery(projectsQuery());
-  const createProject = useMutation({
-    mutationFn: (input: CreateProjectInput) => api.createProject(input),
+  // The form shows a refused create beside the key it was refused over.
+  const createProject = useKeyedWrite({
+    inline: true,
+    label: (input: CreateProjectInput) => `New project ${input.key}`,
+    write: (input, bounds) => api.createProject(input, bounds),
     onSettled: () => projectSubmitGuard.release(),
+    // Made either way, so the form empties; with no answer to give, it says what was made
+    // (`createProject.unanswered`).
     onSuccess: () => {
       void queryClient.invalidateQueries({ queryKey: projectsQuery().queryKey });
       setProjectKey("");
@@ -49,6 +56,8 @@ export function ProjectsSection(): ReactNode {
   });
   const submitProject = (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault();
+    // An emptied form - a create that landed - sends nothing, whatever submits it.
+    if (projectKey === "" || projectName.trim() === "") return;
     projectSubmitGuard.guard(() => createProject.mutate({ key: projectKey, name: projectName }));
   };
   const defaults = useQuery(projectDefaultAssigneesQuery());
@@ -159,7 +168,10 @@ export function ProjectsSection(): ReactNode {
                 className={settingsMonoInput}
                 disabled={createProject.isPending}
                 id="project-key"
-                onChange={(event) => setProjectKey(event.target.value.trim().toUpperCase())}
+                onChange={(event) => {
+                  createProject.forgetUnanswered();
+                  setProjectKey(event.target.value.trim().toUpperCase());
+                }}
                 placeholder="CORE"
                 required
                 value={projectKey}
@@ -186,6 +198,11 @@ export function ProjectsSection(): ReactNode {
               New project
             </button>
           </form>
+          {createProject.unanswered === undefined ? null : (
+            <div className="mt-4">
+              <LandedWithoutAnswer what={`Project ${createProject.unanswered.variables.key}`} />
+            </div>
+          )}
           {createProject.isError ? (
             <div className="mt-4">
               <QueryError
@@ -251,7 +268,7 @@ type DefaultAssigneePick = { assignee: string | null };
 type DefaultAssigneeSuperseded = { superseded: true };
 
 type DefaultAssigneeSave = Mutation<
-  ProjectDefaultAssignee | DefaultAssigneeSuperseded,
+  ProjectDefaultAssignee | DefaultAssigneeSuperseded | null,
   Error,
   DefaultAssigneePick
 >;
@@ -283,30 +300,34 @@ function useDefaultAssigneeWrite(project: string): {
   const queryClient = useQueryClient();
   const defaultsKey = projectDefaultAssigneesQuery().queryKey;
   const mutationKey = ["project-default-assignee", project];
-  const mutation = useMutation({
+  const mutation = useKeyedWrite<
+    ProjectDefaultAssignee | DefaultAssigneeSuperseded,
+    DefaultAssigneePick
+  >({
     mutationKey,
     scope: { id: `project-default-assignee:${project}` },
     // A refused save stays in the cache, with no row observing it, until a newer save of the
     // project settles and removes it (see onSettled), so a row mounted later can still say so.
     gcTime: Number.POSITIVE_INFINITY,
-    mutationFn: async (
-      pick: DefaultAssigneePick,
-      { client }
-    ): Promise<ProjectDefaultAssignee | DefaultAssigneeSuperseded> => {
+    // The row shows its newest save's refusal itself, beside the control it was refused over.
+    inline: true,
+    label: (pick) => `${project}'s default assignee ${pick.assignee ?? "cleared"}`,
+    write: async (pick, bounds): Promise<ProjectDefaultAssignee | DefaultAssigneeSuperseded> => {
       // The cache lists mutations in the order they were made, so the last pending one is the
       // newest pick. Any other is waiting behind this save, and only it need reach the server.
-      const waiting = client
+      const waiting = queryClient
         .getMutationCache()
         .findAll({ exact: true, mutationKey, status: "pending" });
       if (waiting.at(-1)?.state.variables !== pick) {
         return { superseded: true };
       }
-      return api.putProjectDefaultAssignee(project, { assignee: pick.assignee });
+      return api.putProjectDefaultAssignee(project, { assignee: pick.assignee }, bounds);
     },
     // A defaults read already out was asked before this save and could land over its answer.
     onMutate: () => queryClient.cancelQueries({ queryKey: defaultsKey }),
     onSuccess: (saved) => {
-      if ("superseded" in saved) {
+      // Saved with no answer to give: the store reads every query again.
+      if (saved === null || "superseded" in saved) {
         return;
       }
       queryClient.setQueryData<ProjectDefaultAssignee[]>(defaultsKey, (rows) => {
@@ -330,7 +351,7 @@ function useDefaultAssigneeWrite(project: string): {
       }
       // A superseded save changed nothing on the server. Not awaited: the next pick in the scope
       // need not wait for this refetch.
-      if (saved === undefined || !("superseded" in saved)) {
+      if (saved == null || !("superseded" in saved)) {
         void queryClient.invalidateQueries({ queryKey: defaultsKey });
       }
     },

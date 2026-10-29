@@ -37,10 +37,11 @@ func withdrawnReason(issueKey string) string {
 // yet, and the close's sweep marks them resolved (sweepClosedIssueAsks). An issue already closed,
 // or none, settles nothing: its close is refused.
 //
-// ctx must not be cancelled by the client (context.WithoutCancel): a settlement runs to its end
-// whether or not the client waits for the close, as the settlement it stands in for would.
-// issueSettleBudget (docs.SettleIssueDocuments) bounds only the waits for the rooms' durable
-// appends and whether a retry starts, not a settlement already running.
+// ctx must not end when the client goes away (outlivingTheClient): a settlement runs to its end
+// whether or not the client waits for the close, as the settlement it stands in for would. On a
+// keyed request it still ends at the keyed run's bound (keyedRunLimit). issueSettleBudget
+// (docs.SettleIssueDocuments) bounds only the waits for the rooms' durable appends and whether a
+// retry starts, not a settlement already running.
 func (s *server) settleIssueBeforeClose(ctx context.Context, issueKey string) {
 	if s.deps.Store == nil || s.deps.Store.Pool == nil {
 		return
@@ -180,7 +181,7 @@ func (s *server) restoreIssueAsksTx(ctx context.Context, tx pgx.Tx, issueKey str
 }
 
 // sweepClosedIssueAsks is the close's last pass over its issue's documents, run once the close
-// has committed. The commit's notification (migration 0137's trigger) closes the issue's rooms on
+// has committed. The commit's notification (migration 0141's trigger) closes the issue's rooms on
 // every process, so a room stops taking a browser's ask block within moments of it; the sweep
 // catches the blocks written before then. In a transaction of its own, holding the issue's row, it
 // writes the blocks of withdrawn - the asks the close withdrew - and of every other resolved block
@@ -194,7 +195,7 @@ func (s *server) restoreIssueAsksTx(ctx context.Context, tx pgx.Tx, issueKey str
 // settlement runs while the issue is closed, which the repair's interval pass sweeps
 // (RunIssueAskRepair).
 //
-// ctx must not be cancelled by the client (context.WithoutCancel), and no transaction is open.
+// ctx must not end when the client goes away (outlivingTheClient), and no transaction is open.
 func (s *server) sweepClosedIssueAsks(ctx context.Context, issueKey string, withdrawn []model.Ask, actor model.Actor) {
 	if err := s.sweepClosedIssueAsksTx(ctx, issueKey, withdrawn, actor); err != nil {
 		slog.Error("dispatch: sweep the ask blocks of a closed issue", "issue", issueKey, "error", err)

@@ -30,22 +30,16 @@ const settlementResumptionLease = "settlement-resumption"
 
 // RunSettlementResumption arms the settlement of every document owing one past
 // settlementResumeAge, at start and every SettlementResumeInterval, until ctx ends. Each pass runs
-// under settlementResumptionLease for the period SettlementResumeInterval, so one of the
-// envoy-dispatch processes serving the database runs it per period, in that process. A document
-// nobody opens therefore settles too: its ask blocks reach the open asks without anyone loading it.
+// under settlementResumptionLease for the period SettlementResumeInterval (duty.RunLeased), so one
+// of the envoy-dispatch processes serving the database runs it per period, in that process. A
+// document nobody opens therefore settles too: its ask blocks reach the open asks without anyone
+// loading it.
 func (s *Service) RunSettlementResumption(ctx context.Context, leases duty.Leases) {
-	for {
-		duty.Exclusive(ctx, leases, settlementResumptionLease, SettlementResumeInterval, func(ctx context.Context) {
-			if err := s.resumeOwedSettlements(ctx, settlementResumeAge); err != nil && ctx.Err() == nil {
-				slog.Error("dispatch: resume owed document settlements", "error", err)
-			}
-		})
-		select {
-		case <-ctx.Done():
-			return
-		case <-time.After(SettlementResumeInterval):
+	duty.RunLeased(ctx, leases, settlementResumptionLease, SettlementResumeInterval, duty.TickAtStart, func(ctx context.Context) {
+		if err := s.resumeOwedSettlements(ctx, settlementResumeAge); err != nil && ctx.Err() == nil {
+			slog.Error("dispatch: resume owed document settlements", "error", err)
 		}
-	}
+	})
 }
 
 // resumeOwedSettlements arms the settlement of each document whose pending-settlement row is at

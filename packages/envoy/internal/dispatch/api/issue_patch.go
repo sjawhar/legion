@@ -1,7 +1,6 @@
 package api
 
 import (
-	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -14,6 +13,16 @@ import (
 	"github.com/sjawhar/envoy/internal/contracts"
 	"github.com/sjawhar/envoy/internal/dispatch/model"
 )
+
+// issueUpdatedNow is the value every write that stamps an issue's updated_at itself sets it to:
+// the statement's own moment, clock_timestamp(), and never below what the row already holds. A
+// write's transaction begins before it takes the issue's locks, and now() is that beginning, so
+// a write that waited behind another one would otherwise stamp a time older than the one that
+// write committed, and updated_at would move backwards; the page's issue cache keeps the newest
+// updated_at it has seen and drops an older answer. An event append keeps its own rule,
+// greatest(updated_at, the event's created_at) (events.Broker.Append), which never moves the
+// column backwards either.
+const issueUpdatedNow = "greatest(updated_at, clock_timestamp())"
 
 func (s *server) patchIssue(w http.ResponseWriter, r *http.Request) {
 	var input struct {
@@ -132,7 +141,7 @@ func (s *server) patchIssue(w http.ResponseWriter, r *http.Request) {
 	closes := input.Status != nil && status == "done"
 	if closes {
 		// Before the transaction, which settlement's own would queue behind on the issue's row.
-		s.settleIssueBeforeClose(context.WithoutCancel(r.Context()), key)
+		s.settleIssueBeforeClose(outlivingTheClient(r), key)
 	}
 	tx, err := s.begin(r.Context())
 	if err != nil {
@@ -244,7 +253,9 @@ func (s *server) patchIssue(w http.ResponseWriter, r *http.Request) {
 	}
 	// Every provided column lands in one UPDATE, updated_at with it; a components-only PATCH
 	// still touches updated_at. The row write runs before the components write so a component
-	// validation error surfaces after it, and the transaction rolls both back.
+	// validation error surfaces after it, and the transaction rolls both back. updated_at is the
+	// statement's own moment (issueUpdatedNow), never the transaction's start: the locks above may
+	// have waited while another write committed a later stamp on this issue.
 	var sets []string
 	args := []any{key}
 	set := func(column string, value any) {
@@ -303,7 +314,7 @@ func (s *server) patchIssue(w http.ResponseWriter, r *http.Request) {
 	}
 	changed := len(sets) > 0 || componentsProvided || input.BlockedBy != nil
 	if changed {
-		sets = append(sets, "updated_at = now()")
+		sets = append(sets, "updated_at = "+issueUpdatedNow)
 		if _, err := tx.Exec(r.Context(), `update issues set `+strings.Join(sets, ", ")+` where key = $1`, args...); err != nil {
 			s.writeHandlerError(w, err)
 			return
@@ -523,7 +534,7 @@ func (s *server) patchIssue(w http.ResponseWriter, r *http.Request) {
 		// flush to every process and the waits on other writers included: a keystroke that waited
 		// on that lock reaches the gate only after the commit, and was made while the issue was
 		// still open however long the transaction ran. The second write of closed_at fires
-		// migration 0137's trigger again, whose notification Postgres folds into the first (same
+		// migration 0141's trigger again, whose notification Postgres folds into the first (same
 		// channel, same payload, one transaction). The events appended above carry the first
 		// stamp; the response carries this one, the stored value.
 		if err := tx.QueryRow(r.Context(), `
@@ -538,14 +549,14 @@ func (s *server) patchIssue(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	// A change of closed_at reaches the document rooms of every process, this one's included, from
-	// the commit itself: migration 0137's trigger notifies, and each process closes its rooms of
+	// the commit itself: migration 0141's trigger notifies, and each process closes its rooms of
 	// the issue's documents so their browsers reconnect with the scope the issue now allows.
 	s.publish(events...)
 	if closing {
 		// The commit's notification closes the issue's rooms on every process; the sweep catches
 		// the ask blocks written since the close forked each document (sweepClosedIssueAsks).
 		// It runs after the publish so every event reaches subscribers in commit order.
-		s.sweepClosedIssueAsks(context.WithoutCancel(r.Context()), key, withdrawn, actor)
+		s.sweepClosedIssueAsks(outlivingTheClient(r), key, withdrawn, actor)
 	}
 	WriteJSON(w, http.StatusOK, withAdvice(after, advice))
 }

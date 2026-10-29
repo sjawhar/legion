@@ -1,5 +1,113 @@
 # Changelog
 
+## [main@1f5b08286a6d] - 2026-10-29
+
+### Added
+
+- `dispatch related --project <KEY> [--title <title>] [--text <text>] [--exclude-issue <KEY>]
+  [--keywords-only]` runs the related-item check a new issue or ask gets, through
+  `POST /api/v1/projects/{key}/related` (`DispatchClient.related`), writes nothing, and prints the
+  check's form as `dispatch issue` does. Use it to check a draft before filing it.
+
+### Changed
+
+- `dispatch issue`, `dispatch ask` and `dispatch doc-edit` print the related-item check their
+  write got right under the line naming what was written, in exactly one of three forms, so a
+  check that never ran cannot read as one that found nothing: `Related items (searched
+  by meaning and keywords):` (or `keywords only: <why>`) with one line per item, an ask item
+  followed by the lines `dispatch search` prints under an ask hit (`Open: no answer yet.`,
+  `Answered by <who> at <when> · options chosen: <options>` and its `Answer text:`, `Closed with
+  no answer: …` or `Closed after an answer: …` and its `Last answer by …`, or `Answer state not
+  reported by this Dispatch; open the link to read the ask.` from a server that sends none);
+  `Related-item check searched (<mode>) and found nothing.`; or `No related-item check was made:
+  <reason>. Search before you rely on this being new: dispatch search --project <KEY> --query
+  '<words>'`, the words the server's `search_query` or else the first three words of four or
+  more letters of the text it checked. A past decision, followed by the same lines for its ask,
+  and, for a forced create, `Title overlaps you forced past: <KEY> [<status>] <title> → <link>`
+  follow the form. A
+  `dispatch doc-edit` that adds decision blocks prints `Decision block <id>:` and that block's
+  form for each, in document order. These replace `Possibly related, found by search:` and
+  `Related-item search was skipped: <reason>.`. A server that sends no check result, or the
+  older shapes (`missing` alone, items with no `outcome`, nothing with no `outcome`, a count of
+  new decision blocks with no checks), maps to one of the forms, the not-made one when it says
+  nothing; a result this client cannot read prints the not-made form, and advice that fails to
+  render prints `Other advice could not be shown: <error>` in place of the rest, keeping the
+  `Created` line and the form. `dispatch issue` on an external issue Dispatch already holds says
+  it already holds it and that nothing was created (`Dispatch already holds <KEY>: <title> →
+  <link>; nothing was created`), instead of `Created`, and prints no related-item check
+  (`DispatchClient.issue` answers `created`, true only for Dispatch's 201).
+
+## [main@c4cea404651d] - 2026-10-29
+
+### Added
+
+- Every Dispatch write a `dispatch` command makes carries one `Idempotency-Key` (INFRA-258): `DispatchClient.#send` mints a UUID per `POST` and `PATCH` call, sends it on every attempt of that call, and encodes the body once, so Dispatch runs the write once however many attempts reach it. A transport failure, any 5xx, a 408, a 429 and Dispatch's `409 KEY_IN_FLIGHT` are asked again under the key: at most five attempts, 1, 2, 4 and 8 s apart, a longer `Retry-After` waited instead, none starting more than 30 s after the first, all inside the call's 60 s deadline. An attempt that goes 20 s without progress before its answer begins is cut off and asked again the same way. A `GET`, `PUT` or `DELETE` carries no key and is sent once. A write is resent only against a Dispatch this process has seen run the keyed layer within the last five minutes: an answer echoing the key, or a `GET /healthz` answering `idempotency_keys: true` when no echo could arrive. Against a Dispatch without the layer nothing is resent, and the write is reported as one that may or may not have taken effect.
+
+  `DispatchClient.deliveryReply` sends a session's reply to a delivery attempt (`POST /api/v1/{messages,comments}/{id}/reply`), which `postDeliveryReply` used to send as a bare `fetch`: it is now keyed, retried and bounded by the client's 60 s deadline, and its refusals are `DispatchServiceError`s like every other call's.
+
+## [main@a09a2f257406] - 2026-10-29
+
+### Added
+
+- `@legion/envoy-client/nats-connection`: `natsConnectionOptions({ servers, name, seed })`, the
+  nats.js `connect` options every session plugin dials with: its credential, reconnecting forever
+  2 s apart, and a ping every 10 s (`NATS_PING_INTERVAL_MS`) with the connection dropped after
+  two unanswered pings (`NATS_MAX_PINGS_OUT`), so a path that freezes without closing is left
+  within 30 s, where nats.js's default 120 s interval left it for up to 6 minutes. Bun-only test
+  helpers in `test/`, exported as `@legion/envoy-client/test/stall-proxy` (a TCP proxy whose
+  `freeze()` stops forwarding and reading without closing either side, recording when each
+  connection was accepted, first subscribed and closed), `@legion/envoy-client/test/envoy-stack`
+  (a real natsd and listener each stack builds with `go build` from `packages/envoy` into its own
+  scratch directory, for tests gated on `LEGION_E2E_ENVOY_STACK=1`) and
+  `@legion/envoy-client/test/stall-scenario` (`runFreezeScenario`, the freeze both plugins' stall
+  tests run), back `src/__tests__/nats-stall.test.ts` and the plugins' stall tests. `replay`
+  exports `REPLAYED_SUFFIX`, the words a replayed frame's text ends with.
+
+### Changed
+
+- `dispatch claim`'s answer says what the claim now delivers: `A person's answers, comments and
+  messages on <KEY> now reach you directly.`, after the status advice and before the note that the
+  session is not subscribed to the issue, which still names the subscription every other event on
+  it needs.
+- `dispatch doc-read` prints every open thread anchored on the document in full, after the
+  document token and approval lines, under `Open anchored threads:`: an open ask as
+  `ask <id> · <author> · <time>`, its quote and `Question: <question>`; a comment thread as
+  `comment <id> · <author> · <time>`, its quote and `Body: <text>`. Under either, each reply
+  follows as `reply <id> · <author> · <time>` and `Body: <text>`, oldest first, none cut: an ask's
+  replies are the comments whose `ask_id` names it. It replaces the
+  `Open anchored asks/comments: ask <id>, comment <id>` line, which named a thread a person had
+  reopened by replying by its root's id alone and never showed the reply. A resolved thread, and
+  an ask that is answered or resolved, is not printed, nor are its replies. The threads come from
+  one read of the issue's comments without the `artifact` filter (a reply carries no anchor, so
+  the filter dropped every reply), or of a project document's own
+  `GET /api/v1/artifacts/{id}/comments`, grouped by ask or root; `DispatchClient.getComments`
+  loses its `artifact` argument (#2366).
+- **Breaking:** `subscribe()` takes a required `plugin: { name, version }` and sends it on every
+  registration as `plugin` and `plugin_version`, so the listener's session list names the plugin
+  and build each session runs. `SessionWireSchema` (and so `listSessions` and `envoy_sessions`)
+  keeps both as optional strings, so a row from an older listener or plugin still parses.
+- **Breaking:** `@legion/envoy-client/nats-auth` is no longer a package export: `src/nats-auth.ts`
+  stays the module `natsConnectionOptions` builds its credential with, so a session dials NATS
+  only with those options and their ping settings. No package imported it.
+
+### Fixed
+
+- A delivered `ask.resolved` whose record is the `withdrawn` kind an issue's close writes now
+  parses through the contracts' ask payload schema, which refused the kind before, so the
+  delivery carries its resolution (`withdrawn: Withdrawn by the close of <KEY>.`) like any other;
+  `dispatch read --ref dispatch://<KEY>/ask/<id>` prints `Kind: withdrawn`, the closer and the
+  reason.
+- A NATS redial that hangs (its TCP connect, or a server that never sends `INFO`) no longer keeps
+  its socket open after nats.js gives up on it at its 20 s dial timeout: nats.js 2.29.3 closed
+  only a transport that had finished connecting, so the abandoned socket held the process alive.
+  `patches/nats@2.29.3.patch`, which bun applies at install, makes nats.js's `NodeTransport` keep
+  the socket from the moment it dials and destroy it when a transport that never connected is
+  closed. The patch also makes nats.js close a stale connection (two unanswered pings) without
+  flushing it first: behind data the dead path never acknowledged that flush never completed, so
+  the transport never closed and a session that had published since the path froze never
+  redialed. `src/__tests__/nats-stall.test.ts` checks the hung redial is closed, and that a client
+  that wrote 32 MiB the frozen path never read reconnects within 60 s.
+
 ## Before changelog fragments
 
 ### Changed

@@ -21,6 +21,7 @@ import (
 	"github.com/sjawhar/envoy/internal/dispatch/store"
 	"github.com/sjawhar/envoy/internal/dispatch/store/storetest"
 	"github.com/sjawhar/envoy/internal/dispatch/text"
+	"github.com/sjawhar/envoy/internal/logtest"
 )
 
 // The repair pass (RepairIssueAsks) brings the asks of an issue a release older than the
@@ -48,7 +49,7 @@ func newRepairFixtureSettlingAfter(t *testing.T, settle time.Duration) repairFix
 	database := storetest.Open(t)
 	documents := docs.New(docs.Deps{Store: database, Identity: headerIdentity(database), Settle: settle})
 	t.Cleanup(func() { _ = documents.Shutdown(context.Background()) })
-	// A close or reopen reaches the document rooms from its commit (migration 0137's trigger),
+	// A close or reopen reaches the document rooms from its commit (migration 0141's trigger),
 	// whoever wrote it, an older release's SQL below included.
 	runDocumentRoomSync(t, database, documents)
 	seedPeople(t, database, "alice", "bob")
@@ -63,7 +64,7 @@ func newRepairFixtureSettlingAfter(t *testing.T, settle time.Duration) repairFix
 		t.Fatalf("new API dependencies: %v", err)
 	}
 	mux := http.NewServeMux()
-	Register(mux, deps)
+	t.Cleanup(Register(mux, t.Context(), deps).Wait)
 	return repairFixture{handler: mux, database: database, documents: documents, deps: deps}
 }
 
@@ -178,9 +179,7 @@ func repairNow(t *testing.T, f repairFixture) IssueAskRepair {
 func captureLogs(t *testing.T) *storetest.LockedLog {
 	t.Helper()
 	logs := &storetest.LockedLog{}
-	previous := slog.Default()
-	slog.SetDefault(slog.New(slog.NewTextHandler(logs, nil)))
-	t.Cleanup(func() { slog.SetDefault(previous) })
+	logtest.SetDefault(t, slog.NewTextHandler(logs, nil))
 	return logs
 }
 
