@@ -101,7 +101,9 @@ function thirdPartyNotices() {
   };
 }
 
-// Published by .github/workflows/docs.yaml to GitHub Pages at https://sjawhar.github.io/legion/.
+// Built by the docs job of .github/workflows/ci.yaml on pull requests and merge groups, and
+// built and published to GitHub Pages at https://sjawhar.github.io/legion/ by
+// .github/workflows/docs-pages.yaml on a push to main.
 export default defineConfig({
   site: "https://sjawhar.github.io",
   base: "/legion",

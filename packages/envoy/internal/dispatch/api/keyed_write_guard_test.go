@@ -60,6 +60,11 @@ var keyedWriteGuardAllowed = map[string]string{
 	// The suggestions a write offered, recorded after that write's own transaction committed and
 	// marked the key; a failure is only logged, and the write is never undone for it.
 	"api.server.persistSuggestions": "records what a committed write offered, after that write marked its key",
+	// The related-item check's own record: one row per check, whether or not the write it checked
+	// wrote anything (an external issue Dispatch already holds commits only a read, so no key is
+	// marked). A failure is only logged, and a duplicate after a takeover adds only one more row of
+	// statistics.
+	"api.server.insertRelatedChecks": "records a check whether or not its write wrote; a takeover's duplicate only adds a statistics row",
 }
 
 // keyedWriteOffence is one statement a keyed route's handler can reach that commits a write outside
