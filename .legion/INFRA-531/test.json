@@ -2,61 +2,49 @@
   "schemaVersion": 1,
   "phase": "test",
   "issue": "INFRA-531",
-  "completed": "2026-10-29T00:05:00Z",
-  "round": 6,
-  "headTested": "3bd8f20f05dd9c80a7c82e141ce5970c4a8e4826",
-  "codeHead": "7fd13b5083c14c112c3a1fcc60e7adf775383c95",
-  "mainBase": "1767c9af61ededa3c55688d3cb7cd298f0468588",
+  "completed": "2026-10-29T00:30:00Z",
+  "round": 7,
+  "headTested": "086a13dfe88562cbf0e3b10937b99207220d86e5",
+  "codeHead": "5d887d3027df2bad503a2be3157cc4c4ada602fb",
+  "mainBase": "d4cbcfe6e067d07846f6f4d32d3b3d12fb9cd7bb",
+  "rebaseCheck": "rebase 7fd13b50 → 5d887d30; fingerprint 91f7c8cb… → b082a420…; changed. The only differences are test code: linear_test.go's timing harness merged with main's #2396 (cpuTimeOf(again(…))), and typed_nesting_test.go adapted to main's broken compile. So a full round, run on the real surface, with main's server-side docs changes since 1767c9af (service.go, block_index.go, edit_notices.go, reference_excerpts.go) in the build.",
   "implementerProof": {
     "verdict": "verified",
-    "how": "Re-ran its browser proof (bash $TMPDIR/infra531-e2e/run-e2e.sh --build-web e2e/address-links.e2e.ts): 3 passed (17.3s). Negative control with pmdoc restored to main 1767c9af: 3 failed (Document editor link 'http://lower.test' not found; createIssue 400 INVALID_MARKDOWN twice). Drove its block-start rows through the API independently, and re-ran the differential and the probe sets."
+    "how": "Re-ran its browser proof at the merged head (bash $TMPDIR/infra531-e2e/run-e2e.sh --build-web e2e/address-links.e2e.ts): 3 passed (13.6s). Negative control with pmdoc restored to main d4cbcfe6: 3 failed. Drove every review-finding row of rounds 3-6 through the API in one document, and re-ran the differential and the probe sets."
   },
-  "failed": 1,
-  "failures": [
-    {
-      "criterion": "Merge gate: the required checks run and are read at the head; the pull request merges with main",
-      "evidence": "The pull request conflicts with main again: main moved to d4cbcfe6, and packages/envoy/internal/dispatch/pmdoc/linear_test.go conflicts (git merge-tree). GitHub reports mergeable_state dirty, and every workflow at 7fd13b50 is still queued. The implementer reintegrates main on this real conflict; per the rebase rule, the tester re-runs bare gates if the merge's fingerprint is unchanged. gh api repos/sjawhar/legion/pulls/2373 → dirty at 00:02 UTC; merge-tree of d4cbcfe6 and 7fd13b50 → CONFLICT (content) in linear_test.go. The behaviour of this change passes every check below; the failure is only that main must be brought in on this real conflict before CI can run."
-    }
-  ],
+  "failed": 0,
+  "failures": [],
   "risks": [
     {
       "finding": "Unchanged and pre-existing, sent to the architect in round 5: a NUL byte in text is refused as 'reads back otherwise', at main as at the head.",
-      "evidence": "The same 40 generated NUL shapes and the 4 nul.txt shapes fail at the head as at main 1767c9af."
+      "evidence": "The same 40 generated NUL shapes fail at the head as at main."
     }
   ],
-  "ciAtCodeHead": "7fd13b50: every workflow queued at 00:02 UTC (the head conflicts with main); not read as a result.",
+  "ciAtCodeHead": "5d887d30: every workflow (lint, typecheck, test, build, Daemon Go suite, pr-title) queued at 00:25 UTC; the pull request no longer conflicts (mergeable_state blocked). Not read as a result.",
   "proof": [
     {
       "criterion": "A1/A2/A3: every web-address and email row is the engine's link in the conversation and the live Document editor, and the stored spec holds no '\\:'",
-      "surface": "Dispatch's browser suite: real Go server built from the workspace, production SPA bundle, Postgres 17 + pgvector, Chromium",
+      "surface": "Dispatch's browser suite: real Go server built from the merged workspace, production SPA bundle, Postgres 17 + pgvector, Chromium",
       "command": "bash $TMPDIR/infra531-e2e/run-e2e.sh --build-web e2e/address-links.e2e.ts --reporter=line",
-      "observed": "3 passed (17.3s). Evidence: the round-6 tester comment on https://github.com/sjawhar/legion/pull/2373",
-      "headSha": "3bd8f20f05dd9c80a7c82e141ce5970c4a8e4826",
-      "negativeControl": "pmdoc restored to main 1767c9af: 3 failed (Document editor link 'http://lower.test' not found; createIssue 400 INVALID_MARKDOWN twice)"
+      "observed": "3 passed (13.6s). Evidence: the round-7 tester comment on https://github.com/sjawhar/legion/pull/2373",
+      "headSha": "086a13dfe88562cbf0e3b10937b99207220d86e5",
+      "negativeControl": "pmdoc restored to main d4cbcfe6: 3 failed (Document editor link 'http://lower.test' not found; createIssue 400 INVALID_MARKDOWN twice)"
     },
     {
-      "criterion": "Review finding: a text '<' at a block's start where the engine would open an HTML block (CommonMark's seven kinds) is escaped, so the engine reads Go's stored markdown as Go does",
-      "surface": "the Dispatch API and pages on the browser-suite server (each row alone, all together, as a comment, two edits); and Go against the engine, including the engine's reading of Go's own rendering",
-      "command": "throwaway e2e/zz-tester-r6.e2e.ts (removed) at the head; probe2.sh r6gen (14,982 block-start shapes from tester-rig/gen-r6.py.txt) at the head, 28ae264d and 1767c9af",
-      "observed": "'\\<span title=a=b;a@span.cc>' stored '\\<span title=a=b;[a@span.cc](mailto:a@span.cc)>'; '\\<a href=x?a=1&b=me@href.cc>', the quote and list rows, '\\<div x;https://div.test/> tail' and '\\<!a x;…>' stored with '\\<'; editor and comment hrefs equal; v3 differs from v1 only in the edited paragraphs. All 14,982 block-start shapes read as the engine reads them, write back, and the engine reads Go's writing as Go's tree. The round-2 to round-5 sets give the same result as round 5 (only '**](u)\\~\\\\~***b***' and the NUL shapes fail, as at main).",
-      "headSha": "3bd8f20f05dd9c80a7c82e141ce5970c4a8e4826",
-      "negativeControl": "At 28ae264d, 275 of the 14,982 block-start shapes are written so the engine reads them otherwise than Go, and some give the engine no document (MilkdownError: Cannot create node for doc)"
+      "criterion": "Every review finding of rounds 3-6 holds on the merged server: entity and control-character destinations, a text '<' before an autolink, inline raw HTML, a declaration, a control byte, and an HTML block start, each stored so the editor and the comment agree, with bytes kept across edits",
+      "surface": "the Dispatch API and pages on the browser-suite server: each row alone, all in one spec and one comment, the live Document editor, GET /artifacts/{id}/versions/{n}, two POST /artifacts/{id}/edits",
+      "command": "throwaway e2e/zz-tester-r7.e2e.ts (removed) through run-e2e.sh at the merged head",
+      "observed": "'[amp](https://amp.test/?a=1&amp;b=2)' stored '[amp](https://amp.test/?a=1&b=2)'; '[lf](…&#10;b)' as written; '&lt;javascript:…'a@js.cc'>' stored '\\<javascript:…'[a@js.cc](mailto:a@js.cc)'>'; 'Set \\<input value=…>', 'Set \\<!x;…>', '\\<a b=\\u0001;…>', '\\<span title=a=b;…>' and its quote form stored with '\\<'; editor and comment hrefs equal for all nine links; v3 equals v1 with only the two edits applied",
+      "headSha": "086a13dfe88562cbf0e3b10937b99207220d86e5",
+      "negativeControl": "Rounds 3-6 recorded each row failing at its previous code head (a60f8177, 634c3824, 3ff56757, 28ae264d)"
     },
     {
-      "criterion": "No regression against main",
-      "surface": "gen/differential.sh with main's compile fix applied to the archived trees (tester-rig/differential-fix.sh.txt), Go at main and at the head, each read back by Go and the browser engine",
-      "command": "bash gen/zz-differential-fix.sh (removed) --base 1767c9af --head 3bd8f20f --corpus $TMPDIR/infra531-test/fuzz --corpus $TMPDIR/infra531-test/urls --out $TMPDIR/infra531-test/diff",
-      "observed": "18,101 documents: regressions 0, engine-tree regressions 0, head panics 0, every gate equal to round 5; head and base output byte-identical to round 5",
-      "headSha": "3bd8f20f05dd9c80a7c82e141ce5970c4a8e4826",
-      "negativeControl": "Base 1767c9af stores 8,441 of the same documents incorrectly that the head stores correctly"
-    },
-    {
-      "criterion": "Cost and stored documents unchanged",
-      "surface": "ParseForWrite timed in this pod; production's stored versions read by Go at main and at the head",
-      "command": "throwaway TestZZTiming at the head; census.sh on the 3,227 stored versions holding &lt;, \\< or a control-character reference",
-      "observed": "Reviewer's unreadable run at 64 KiB 5.61 s, typical address paragraph at 256 KiB 0.20 s (round 5: 5.49 and 0.19 s); census classification identical to round 5 (0 links whose reading changes, 0 first writes that change a link)",
-      "headSha": "3bd8f20f05dd9c80a7c82e141ce5970c4a8e4826",
-      "negativeControl": "Main 1767c9af: 2.65 s and 0.16 s (round 5)"
+      "criterion": "No regression against the new main",
+      "surface": "gen/differential.sh with main's two broken pmdoc tests fixed in the archived trees (tester-rig/differential-fix.sh.txt), Go at main and at the head, each read back by Go and the browser engine; the probe sets, including the engine's reading of Go's rendering",
+      "command": "bash gen/zz-differential-fix.sh (removed) --base d4cbcfe6 --head 086a13df --corpus $TMPDIR/infra531-test/fuzz --corpus $TMPDIR/infra531-test/urls --out $TMPDIR/infra531-test/diff; probe2.sh r6gen, r5gen, r4, r3, amp at the head",
+      "observed": "18,101 documents: regressions 0, engine-tree regressions 0, head panics 0, every gate equal to round 6; head and base output byte-identical to round 6. Probe sets: 14,982 block-start shapes 0 bad; 1,840 raw-HTML shapes 40 bad, all NUL (as at main); r4 0, r3 0, amp 1 ('**](u)\\~\\\\~***b***', INFRA-535)",
+      "headSha": "086a13dfe88562cbf0e3b10937b99207220d86e5",
+      "negativeControl": "Base d4cbcfe6 stores 8,441 of the same documents incorrectly that the head stores correctly"
     }
   ]
 }

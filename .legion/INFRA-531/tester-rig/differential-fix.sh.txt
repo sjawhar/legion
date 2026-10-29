@@ -54,6 +54,7 @@ build() { # <name> <rev or empty for the working tree>
     tree=$root/packages/envoy/internal/dispatch/pmdoc
     cp "$pmdoc/differential_test.go" "$tree/"
     sed -i 's#dispatch/docs/docstest"#dispatch/docs/crafted"#; s#docstest\.NestedValue#crafted.NestedValue#' "$tree/reanchor_test.go"
+    sed -i 's#cpuTimeOf(func() { _, err = ParseForWrite(test.markdown, nil) })#cpuTimeOf(again(func() { _, err = ParseForWrite(test.markdown, nil) }))#' "$tree/typed_nesting_test.go"
   fi
   (cd "$tree" && GOWORK=off go test -c -o "$out/$1.test" .)
 }
