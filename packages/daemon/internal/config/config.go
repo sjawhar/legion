@@ -166,6 +166,11 @@ type Config struct {
 	// WorkerBackends is `worker_backends`: the phase-worker roles that run on a backend other than
 	// Oh My Pi, by role; a role it leaves out runs on Oh My Pi (BackendFor).
 	WorkerBackends map[claim.Role]runtime.Backend
+	// RoleConfigFiles is `role_config_files`: the Oh My Pi settings overlays one role names in its
+	// PI_CONFIG_FILES and no other role does, by role, each after the overlays every role names
+	// (runtime.tmux.pi_config_files, or runtime.kubernetes.pod.env's PI_CONFIG_FILES); a role it
+	// leaves out names those alone. Nil while the file names none.
+	RoleConfigFiles map[claim.Role][]string
 }
 
 const (
@@ -277,6 +282,7 @@ type fileConfig struct {
 	Durations              map[string]int
 	Counts                 map[string]int
 	WorkerBackends         map[claim.Role]runtime.Backend
+	RoleConfigFiles        map[claim.Role][]string
 }
 
 // Load reads the daemon's complete runtime configuration. App private-key commands and secrets
@@ -412,6 +418,8 @@ func readKeys(root *yaml.Node) (fileConfig, error) {
 			file.Capabilities, err = readCapabilities(value, key)
 		case "worker_backends":
 			file.WorkerBackends, err = readWorkerBackends(value, key)
+		case "role_config_files":
+			file.RoleConfigFiles, err = readRoleConfigFiles(value, key)
 		default:
 			if isDurationKey(key) || isCountKey(key) {
 				err = readPositive(value, key, file)
@@ -942,7 +950,8 @@ func resolve(file fileConfig, env func(string) string, configDir string) (Config
 		cfg.Capabilities = *file.Capabilities
 	}
 	cfg.WorkerBackends = file.WorkerBackends
-	if err := checkWorkerBackends(cfg); err != nil {
+	cfg.RoleConfigFiles = file.RoleConfigFiles
+	if err := checkRoleConfigFiles(cfg); err != nil {
 		return Config{}, err
 	}
 	if cfg.Runtime.Name == "kubernetes" {

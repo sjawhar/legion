@@ -1,8 +1,86 @@
 # Changelog
 
-## [Unreleased]
+## [main@c4cea404651d] - 2026-10-29
+
+### Added
+
+- Every Dispatch write a `dispatch` command makes carries one `Idempotency-Key` (INFRA-258): `DispatchClient.#send` mints a UUID per `POST` and `PATCH` call, sends it on every attempt of that call, and encodes the body once, so Dispatch runs the write once however many attempts reach it. A transport failure, any 5xx, a 408, a 429 and Dispatch's `409 KEY_IN_FLIGHT` are asked again under the key: at most five attempts, 1, 2, 4 and 8 s apart, a longer `Retry-After` waited instead, none starting more than 30 s after the first, all inside the call's 60 s deadline. An attempt that goes 20 s without progress before its answer begins is cut off and asked again the same way. A `GET`, `PUT` or `DELETE` carries no key and is sent once. A write is resent only against a Dispatch this process has seen run the keyed layer within the last five minutes: an answer echoing the key, or a `GET /healthz` answering `idempotency_keys: true` when no echo could arrive. Against a Dispatch without the layer nothing is resent, and the write is reported as one that may or may not have taken effect.
+
+  `DispatchClient.deliveryReply` sends a session's reply to a delivery attempt (`POST /api/v1/{messages,comments}/{id}/reply`), which `postDeliveryReply` used to send as a bare `fetch`: it is now keyed, retried and bounded by the client's 60 s deadline, and its refusals are `DispatchServiceError`s like every other call's.
+
+## [main@a09a2f257406] - 2026-10-29
+
+### Added
+
+- `@legion/envoy-client/nats-connection`: `natsConnectionOptions({ servers, name, seed })`, the
+  nats.js `connect` options every session plugin dials with: its credential, reconnecting forever
+  2 s apart, and a ping every 10 s (`NATS_PING_INTERVAL_MS`) with the connection dropped after
+  two unanswered pings (`NATS_MAX_PINGS_OUT`), so a path that freezes without closing is left
+  within 30 s, where nats.js's default 120 s interval left it for up to 6 minutes. Bun-only test
+  helpers in `test/`, exported as `@legion/envoy-client/test/stall-proxy` (a TCP proxy whose
+  `freeze()` stops forwarding and reading without closing either side, recording when each
+  connection was accepted, first subscribed and closed), `@legion/envoy-client/test/envoy-stack`
+  (a real natsd and listener each stack builds with `go build` from `packages/envoy` into its own
+  scratch directory, for tests gated on `LEGION_E2E_ENVOY_STACK=1`) and
+  `@legion/envoy-client/test/stall-scenario` (`runFreezeScenario`, the freeze both plugins' stall
+  tests run), back `src/__tests__/nats-stall.test.ts` and the plugins' stall tests. `replay`
+  exports `REPLAYED_SUFFIX`, the words a replayed frame's text ends with.
 
 ### Changed
+
+- `dispatch claim`'s answer says what the claim now delivers: `A person's answers, comments and
+  messages on <KEY> now reach you directly.`, after the status advice and before the note that the
+  session is not subscribed to the issue, which still names the subscription every other event on
+  it needs.
+- `dispatch doc-read` prints every open thread anchored on the document in full, after the
+  document token and approval lines, under `Open anchored threads:`: an open ask as
+  `ask <id> · <author> · <time>`, its quote and `Question: <question>`; a comment thread as
+  `comment <id> · <author> · <time>`, its quote and `Body: <text>`. Under either, each reply
+  follows as `reply <id> · <author> · <time>` and `Body: <text>`, oldest first, none cut: an ask's
+  replies are the comments whose `ask_id` names it. It replaces the
+  `Open anchored asks/comments: ask <id>, comment <id>` line, which named a thread a person had
+  reopened by replying by its root's id alone and never showed the reply. A resolved thread, and
+  an ask that is answered or resolved, is not printed, nor are its replies. The threads come from
+  one read of the issue's comments without the `artifact` filter (a reply carries no anchor, so
+  the filter dropped every reply), or of a project document's own
+  `GET /api/v1/artifacts/{id}/comments`, grouped by ask or root; `DispatchClient.getComments`
+  loses its `artifact` argument (#2366).
+- **Breaking:** `subscribe()` takes a required `plugin: { name, version }` and sends it on every
+  registration as `plugin` and `plugin_version`, so the listener's session list names the plugin
+  and build each session runs. `SessionWireSchema` (and so `listSessions` and `envoy_sessions`)
+  keeps both as optional strings, so a row from an older listener or plugin still parses.
+- **Breaking:** `@legion/envoy-client/nats-auth` is no longer a package export: `src/nats-auth.ts`
+  stays the module `natsConnectionOptions` builds its credential with, so a session dials NATS
+  only with those options and their ping settings. No package imported it.
+
+### Fixed
+
+- A delivered `ask.resolved` whose record is the `withdrawn` kind an issue's close writes now
+  parses through the contracts' ask payload schema, which refused the kind before, so the
+  delivery carries its resolution (`withdrawn: Withdrawn by the close of <KEY>.`) like any other;
+  `dispatch read --ref dispatch://<KEY>/ask/<id>` prints `Kind: withdrawn`, the closer and the
+  reason.
+- A NATS redial that hangs (its TCP connect, or a server that never sends `INFO`) no longer keeps
+  its socket open after nats.js gives up on it at its 20 s dial timeout: nats.js 2.29.3 closed
+  only a transport that had finished connecting, so the abandoned socket held the process alive.
+  `patches/nats@2.29.3.patch`, which bun applies at install, makes nats.js's `NodeTransport` keep
+  the socket from the moment it dials and destroy it when a transport that never connected is
+  closed. The patch also makes nats.js close a stale connection (two unanswered pings) without
+  flushing it first: behind data the dead path never acknowledged that flush never completed, so
+  the transport never closed and a session that had published since the path froze never
+  redialed. `src/__tests__/nats-stall.test.ts` checks the hung redial is closed, and that a client
+  that wrote 32 MiB the frozen path never read reconnects within 60 s.
+
+## Before changelog fragments
+
+### Changed
+
+- The `dispatch` CLI reads an AskGate store with no recorded mode as warn, not block, and refuses
+  a gated write without a matching marker only when a live owner's store records `block`.
+- `dispatch ask` and `dispatch edit-ask` take a question of up to 2,000 characters, from 800, and
+  their `--help` asks for the concrete case first and the choice in its terms
+  (`@legion/contracts`' question contract). On `dispatch ask`, which alone takes `--ref` and
+  `--image`, the appended `Ref:` line and picture lines count toward the limit.
 
 - **Breaking:** `dispatch architecture-sync` imports every architecture source of the project,
   one per repository, and prints each source's answer in turn: `Synced P architecture from
@@ -42,6 +120,87 @@
 
 ### Added
 
+- `askgate-marker` holds AskGate's enforcement at the `dispatch` CLI, shared by the CLI and
+  pi-envoy's gate: `gatedWrite(tool, args)`, the one list of gated writes (`ask`, `message`,
+  `edit-ask`, `comment`, `doc-edit`, `request-approval`, an `issue` with a spec, an `artifact`
+  that uploads a markdown document); the record a live Oh My Pi process keeps in a session's
+  state directory, one owner-only file per process under `askgate/` (`<pid>-<start>.json`), naming
+  its pid, its Linux start time and its marker store, so two processes that bind one session never
+  drop each other (an owner whose process is gone, or whose pid another process holds, is inert);
+  and single-use markers (version 2), minted exclusively and owner-only, keyed by the argv's
+  digest and bound to the dry run's arguments and to the sha256 of each file the argv names
+  (`fileOperands`) for a reviewed write. A marker older than two hours, longer than any tool's
+  time limit, is refused. Before a gated write posts, after `--help`, `--dry-run` and the session
+  and Dispatch settings, the CLI reads the session's record; with a live one it reads each named
+  file once and consumes one matching marker by unlinking it, and an upload by `--path` sends the
+  bytes of that read. In block mode it refuses a write with no matching marker
+  (`dispatch <command> was not called: AskGate is on for this session, …`, logged to the ledger
+  with an `askgate` field), and a file that changed after the review with the advice to send the
+  call again in a later message. In warn mode it writes that ledger line before it posts, refuses
+  the write when the ledger cannot take it, and posts with a `dispatch: warning:` line. A record
+  that cannot be read, or names a store that is gone, is a refusal; a session no live record names
+  needs no marker, so a terminal, CI, Claude Code, OpenCode and a pod without pi-envoy are
+  unchanged. `pruneSessions` keeps a directory whose record is live, and removes the marker store
+  of a process that is gone and that nothing changed for two hours (`sweepStores`).
+- The `dispatch` refusal for a missing `DISPATCH_HOST` says to send the command as a bash call from
+  an agent's session, or to set your own session id to run it by hand.
+- `@legion/envoy-client/replay`: `createReplayEngine` shows a session, once, each message the
+  notification stream stored on a subject it follows while its own NATS subscription was down,
+  through the listener's `POST /v1/replay`. A sweep reads each followed subject after its cursor,
+  merges subjects by stream sequence, passes over role forwards, leaves a frame the live path is
+  still delivering for later, and hands the host each frame neither path showed; one sweep runs at
+  a time and none rejects. A ledger of the frames the session finished with (event id, and dedupe
+  key when it names its event), kept 72 hours from when each was recorded and capped at 20,000,
+  lets the live path drop a repeat after a restart. A frame the host fails to show three times
+  becomes a failure notice the host shows instead, and `liveFailed` shows it at once for a live
+  frame no sweep will show, a frame received before its subject's cursor started included (a host
+  stamps when the frame arrived with `readArrivals` from `@legion/envoy-client/delivery`, which
+  reads a subscription as its messages arrive, so a frame queued behind a slow delivery is not
+  stamped late, and yields every message it read before the subscription's end or error, as
+  nats.js's own iterator does);
+  `envoyNoticeText` renders a notice in TOON, so a sender's multi-line summary cannot forge a
+  field; a recreated stream (a stored `stream_id` the listener's `stream.id` no longer matches, or,
+  from a listener that answers no id, a changed `created`; a `created` that moved under the same
+  id is no recreation, and a state stored before ids takes the answer's id), a stream that moved
+  back, a cursor older than the stream's oldest message,
+  and a listener that does not replay (404) or cannot (503 `REPLAY_UNAVAILABLE`, 401, 403) are
+  each told once. A stream that is not recreated has moved back when any cursor stands past its
+  end (restored from a backup older than the cursor, or re-added empty from its exported
+  configuration, keeping its id): every followed subject is read again from the stream's oldest
+  message, so the session is shown what was published after the restore and, through the ledger,
+  nothing it was shown before, and is told once (`stream_moved_back`) that messages may be shown
+  again and any published between the backup and the restore are missing. A sweep that only moved
+  its cursors to the stream's end is written at most hourly; a recreation's cursor reset, a
+  moved-back stream's cursor rewind and a retention gap's cursor move are written at once with
+  their
+  notice pending in the state (`notices`), so a session that ends before the notice is raised
+  raises it once at its first sweep after the restart, and a resume does not find the gap again.
+  A host that handed a frame or a failure
+  notice on without writing it yet answers `queued`: the frame stays claimed and unrecorded, its
+  cursor before it, until the host records it once written (`recordDelivered`), so a process that
+  ends first shows it after the restart;
+  `recordDeliveredFor` records for the session a frame was delivered in while the host shuts down
+  (through the host's optional `writeSessionID`); `replayLedgerIdentity` names a frame as the
+  ledger does. The transport gains `replay()` (one
+  try, 10 s) and `EnvoyApiError.code`; a `createDeliveryDedupe` claim gains `settle()` and the
+  dedupe `pending()`, true until the claim is settled or released. Beside the engine sits the host
+  policy both plugins share: the subjects followed for replay (`replayFollowedSubjects`), never a
+  role's or one reaching a private stream subject (`reachesPrivateStreamSubject`, the listener's
+  rule in `packages/envoy/internal/bus/stream.go`: another session's `notifications.agent.<id>`,
+  a failed-delivery lane `notifications.envoy.exceptions.notifications.agent.<id>` the session's
+  own included, a `notifications.legion.` controller lane, or a wildcard reaching one such as
+  `notifications.agent.*` or `notifications.>`, which the listener neither stores as an interest
+  nor replays), the topics a restore follows again (`rememberedTopics`), a replayed removal's
+  close and unregister (`closeReplayedRemoval`), and which one-time notices are a card or a
+  warning (`routeReplayNotice`) (INFRA-439).
+- Every reference-graph node now carries `made_by`, `made_at`, `changed_by`, `changed_at`, `parent`
+  and `parent_version`, and `dispatch read` prints them on a `Node:` line. The line comes before
+  `Referenced by:` on the read of an issue, a document, a block, an ask, a comment and an issue
+  message:
+  `Node: <kind> <ref> · made by <actors> at <time> · changed by <actors> at <time> · part of <parent> (version <N>)`,
+  an empty actor list written `nobody recorded` and a null time, version or parent left out.
+  Against a Dispatch older than the facts, whose nodes carry no `made_by`, the read prints no
+  `Node:` line.
 - `renderInbound` renders an `artifact.human_edited` card as `edit: spec.md v4 to v7, edited by
   person@example.com`, then the diff in a fenced `diff` block after the card, then `(diff cut at
   4,096 bytes)` when Dispatch cut it; an issue's event log (`dispatch read dispatch://KEY/log`)
@@ -96,6 +255,21 @@
   session's start notice (`sessionSettings`' `notice`, which pi-envoy shows at `session_start`)
   names that value beside the deadline in force. The field reports that one raise: the 25 ms
   interval floor and the timer's ceiling are applied in silence and are not reported by it.
+
+- `dispatch search` prints, under each ask hit, where the ask stands: `Answered by <user> at
+  <time> · options chosen: <labels>` and `Answer text: <text>` (each `none` when empty);
+  `Closed with no answer: <resolved|retracted> by <actor> at <time>: <reason>`; `Closed after an
+  answer: …` followed by `Last answer by …` and its `Answer text:`; or `Open: no answer yet.`. A
+  later line of a multi-line answer is indented four spaces, so it stays under its hit. A Dispatch
+  older than this release reports no state, and its ask hits read `Answer state not reported by
+  this Dispatch; open the link to read the ask.` rather than passing for open ones. `actorText`
+  moves to `actor-text.ts`, shared by the event log and the search answer (INFRA-569).
+
+- `askgateSetting(file)` reads AskGate's switch, the top-level `askgate` section of the session's
+  envoy.json: `{"askgate":{"enabled":false}}` turns AskGate off. A section that does not parse
+  leaves AskGate on and names the file and `askgate.enabled`, and never fails the Dispatch or Envoy
+  read. A checkout's `askgate` section is not read: `CheckoutEnvoyConfig.askgateError` names it,
+  and `sessionSettings` says it in its notice.
 
 ### Fixed
 

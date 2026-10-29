@@ -12,6 +12,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/sjawhar/envoy/internal/bus"
 	"github.com/sjawhar/envoy/internal/dispatch/auth"
 	"github.com/sjawhar/envoy/internal/dispatch/githubapp"
 	"github.com/sjawhar/envoy/internal/dispatch/githubapp/githubapptest"
@@ -82,7 +83,7 @@ func TestWebhookRedelivery_TheSweepRecoversFailedDeliveriesThroughTheListener(t 
 	}
 	github.Record(malformed, "", 7, http.StatusBadRequest, time.Now().Add(-time.Minute))
 
-	state, err := redeliver.OpenState(env.client.JS())
+	state, err := redeliver.OpenState(env.client.JS(), 1)
 	if err != nil {
 		t.Fatalf("open redelivery state: %v", err)
 	}
@@ -91,7 +92,7 @@ func TestWebhookRedelivery_TheSweepRecoversFailedDeliveriesThroughTheListener(t 
 		t.Fatalf("App client: %v", err)
 	}
 	var logs bytes.Buffer
-	sweeper := &redeliver.Sweeper{GitHub: client, State: state, Logger: slog.New(slog.NewTextHandler(&logs, nil))}
+	sweeper := &redeliver.Sweeper{GitHub: client, Open: func() (bus.KeyValue, error) { return state, nil }, Logger: slog.New(slog.NewTextHandler(&logs, nil))}
 	if _, err := sweeper.Sweep(context.Background(), redeliver.Options{}); err != nil {
 		t.Fatalf("sweep: %v", err)
 	}

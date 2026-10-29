@@ -34,7 +34,11 @@ import (
 // first indexing (no block rows yet), a new pair dates instead from the document's own refs row
 // for that target, when one exists. The version is recorded as indexed, and as the version the
 // document's blocks stand at (document_block_versions). It returns the targets of the pairs it
-// inserted or deleted, whose counts moved: a node is counted once for each block citing it.
+// inserted or deleted, whose counts moved: a node is counted once for each block citing it. It
+// also returns what else a Referenced by panel or a link shows that the version moved: the target
+// of each pair it kept in a block whose text it changed (the block's text is that link's excerpt),
+// and each block it changed or deleted that some source cites (citedBlocks), whose text every
+// link to it and its own panel show.
 func IndexBlocks(
 	ctx context.Context,
 	tx pgx.Tx,
@@ -62,8 +66,7 @@ func IndexBlocks(
 	var texts []*string
 	for _, block := range nodes {
 		body := markdown[block.From:block.To]
-		sum := sha256.Sum256([]byte(body))
-		hexSum := hex.EncodeToString(sum[:])
+		hexSum := BlockTextSum(body)
 		previous, held := stored[block.ID]
 		delete(stored, block.ID)
 		if held && previous == hexSum {
@@ -112,10 +115,26 @@ func IndexBlocks(
 		}
 	}
 
-	moved, err := replaceBlockRefs(ctx, tx, artifactID, version, versionAt, firstIndexing, blockPairs(nodes, located))
+	pairs := blockPairs(nodes, located)
+	moved, err := replaceBlockRefs(ctx, tx, artifactID, version, versionAt, firstIndexing, pairs)
 	if err != nil {
 		return nil, err
 	}
+	changedBlocks := make(map[string]struct{}, len(ids))
+	for _, id := range ids {
+		changedBlocks[id] = struct{}{}
+	}
+	for _, pair := range pairs {
+		if _, changed := changedBlocks[pair.blockID]; changed {
+			moved = append(moved, pair.target)
+		}
+	}
+	// textIDs is every block this version changed, restored or deleted.
+	cited, err := citedBlocks(ctx, tx, artifactID, textIDs)
+	if err != nil {
+		return nil, err
+	}
+	moved = append(moved, cited...)
 	if _, err := tx.Exec(ctx, `
 		insert into document_indexed_versions (artifact_id, version) values ($1, $2)
 		on conflict (artifact_id, version) do nothing
@@ -131,6 +150,35 @@ func IndexBlocks(
 		return nil, fmt.Errorf("record the blocks of %s indexed at version %d: %w", artifactID, version, err)
 	}
 	return moved, nil
+}
+
+// citedBlocks is, of the document's blocks named by ids, each that a source cites (a refs or a
+// block_refs row points at its node), as a block target.
+func citedBlocks(ctx context.Context, tx pgx.Tx, artifactID string, ids []string) ([]Target, error) {
+	if len(ids) == 0 {
+		return nil, nil
+	}
+	cited, err := scanTargets(tx.Query(ctx, `
+		select 'block', b.node_id
+		from (
+			select a.ref_key || '#' || t.id as node_id
+			from unnest($2::text[]) as t (id)
+			cross join (select ref_key from artifacts where id = $1::uuid) a
+		) b
+		where exists (select 1 from refs r where r.to_kind = 'block' and r.to_id = b.node_id)
+		   or exists (select 1 from block_refs r where r.to_kind = 'block' and r.to_id = b.node_id)
+	`, artifactID, ids))
+	if err != nil {
+		return nil, fmt.Errorf("read the cited blocks of %s: %w", artifactID, err)
+	}
+	return cited, nil
+}
+
+// BlockTextSum is the sha256 (hex) of a block's text (markdown[From:To]), as document_blocks
+// stores it in text_sha256.
+func BlockTextSum(body string) string {
+	sum := sha256.Sum256([]byte(body))
+	return hex.EncodeToString(sum[:])
 }
 
 // storedBlockSums is each block the document's index holds, by id, with its text's sha256.
@@ -291,6 +339,106 @@ func BlockLinks(ctx context.Context, q Queryer, fromArtifact, toArtifact string)
 		})
 	}
 	return result, nil
+}
+
+// blockFirstVersion is a left join lateral, aliased alias, over the first version that held block
+// block of document artifact (SQL expressions of the outer row): F, the lowest version
+// document_block_texts records a text of the block in, as alias.version, and F's authors and
+// time as alias.authors and alias.created_at. alias.known is whether Dispatch knows the block was
+// made in F: F is 1, or a block-aware build indexed version F-1, which did not hold it. A block
+// first seen when its document was first indexed, or after a version no block-aware build
+// indexed, may be older than F. A block with no recorded text leaves every column null.
+func blockFirstVersion(alias, artifact, block string) string {
+	return `left join lateral (
+		select t.version,
+		       t.version = 1 or exists (
+		         select 1 from document_indexed_versions i where i.artifact_id = t.artifact_id and i.version = t.version - 1
+		       ) as known,
+		       v.authors, v.created_at
+		from document_block_texts t
+		left join artifact_versions v on v.artifact_id = t.artifact_id and v.number = t.version
+		where t.artifact_id = ` + artifact + ` and t.block_id = ` + block + ` and t.text is not null
+		order by t.version limit 1
+	) ` + alias + ` on true`
+}
+
+// blockFirstColumns selects blockFirstVersion's columns, aliased alias, in blockFirst.targets'
+// order.
+func blockFirstColumns(alias string) string {
+	return alias + `.version, ` + alias + `.known, ` + alias + `.authors, ` + alias + `.created_at`
+}
+
+// blockFirst is the first version that held a block, as blockFirstColumns selects it.
+type blockFirst struct {
+	version   *int
+	known     *bool
+	authors   []byte
+	createdAt *time.Time
+}
+
+func (f *blockFirst) targets() []any {
+	return []any{&f.version, &f.known, &f.authors, &f.createdAt}
+}
+
+// maker is who made the block and when: the authors and time of the version that first held it
+// when Dispatch knows the block was made there, else nobody recorded at no time. Authors that do
+// not decode (storedActors) fail.
+func (f blockFirst) maker() ([]model.Actor, *time.Time, error) {
+	if f.known == nil || !*f.known {
+		return []model.Actor{}, nil, nil
+	}
+	authors, err := storedActors(f.authors)
+	if err != nil {
+		return nil, nil, err
+	}
+	return authors, f.createdAt, nil
+}
+
+// RemovedBlockNode is the node nodeID of block blockID of document (its resolved artifact node),
+// which no current version holds since version removedVersion deleted it, built as loadBlockNodes
+// builds a current block's but with no text or changed version: made as a current block is
+// (blockFirstVersion), last changed by that deletion, with its version's authors and time, and
+// part of the document at the latest version a block-aware build indexed below removedVersion, the
+// last one known to hold it (null when none is). The caller adds its pin. Authors that do not
+// decode (storedActors) fail the read.
+func RemovedBlockNode(ctx context.Context, q Queryer, document model.GraphNode, nodeID, blockID string, removedVersion int) (model.GraphNode, error) {
+	var first blockFirst
+	var removedBy []byte
+	var removedAt *time.Time
+	var held *int
+	documentID := document.ID
+	if err := q.QueryRow(ctx, `
+		select `+blockFirstColumns("first")+`, removed.authors, removed.created_at,
+		       (select max(i.version) from document_indexed_versions i where i.artifact_id = b.artifact_id and i.version < $3)
+		from (select $1::uuid as artifact_id, $2::text as block_id) b
+		`+blockFirstVersion("first", "b.artifact_id", "b.block_id")+`
+		left join artifact_versions removed on removed.artifact_id = b.artifact_id and removed.number = $3
+	`, documentID, blockID, removedVersion).Scan(append(first.targets(), &removedBy, &removedAt, &held)...); err != nil {
+		return model.GraphNode{}, fmt.Errorf("read the facts of removed block %q of %s: %w", blockID, documentID, err)
+	}
+	madeBy, madeAt, err := first.maker()
+	if err != nil {
+		return model.GraphNode{}, fmt.Errorf("decode the maker of removed block %q of %s: %w", blockID, documentID, err)
+	}
+	changedBy, err := storedActors(removedBy)
+	if err != nil {
+		return model.GraphNode{}, fmt.Errorf("decode the last change of removed block %q of %s: %w", blockID, documentID, err)
+	}
+	return model.GraphNode{
+		Kind:          "block",
+		ID:            nodeID,
+		BlockID:       blockID,
+		IssueKey:      document.IssueKey,
+		Project:       document.Project,
+		Ref:           BlockRef(document.Ref, blockID),
+		Document:      document.Ref,
+		MadeBy:        madeBy,
+		MadeAt:        madeAt,
+		ChangedBy:     changedBy,
+		ChangedAt:     removedAt,
+		Parent:        &model.NodeParent{Kind: "artifact", ID: documentID, Ref: document.Ref},
+		ParentVersion: held,
+	}, nil
 }
 
 // uniqueBlocks keeps the first block of each id, in order, as the node GET …/blocks addresses by

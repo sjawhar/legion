@@ -1,9 +1,12 @@
 import { expect, type Locator, type Page, test } from "@playwright/test";
-import type { Message } from "../web/src/api/types";
+import type { CreateBroadcastInput, Message } from "../web/src/api/types";
 import {
   agentRow,
+  BROADCAST_REFUSED,
+  broadcastSends,
   type FakeSession,
   getSentMessages,
+  isBroadcastInput,
   postedBroadcasts,
   refuseBroadcasts,
   setLiveSessions,
@@ -17,7 +20,7 @@ import {
   createIssue,
   createMessage,
   createProject,
-  disconnectAllStreams,
+  disconnectLiveSockets,
   getAgentStates,
   listAgentMessages,
   putAgentState,
@@ -25,7 +28,9 @@ import {
 } from "./api";
 import { recordClipboard } from "./clipboard";
 import { holdFirstRequest } from "./editor";
+import { type KeyedWrite, keyedWrite } from "./keyed-writes";
 import { resetDatabase, setCreatedAt } from "./seed";
+import { sessionIds } from "./session-ids";
 import { assertPageFits, assertWhole } from "./unclipped";
 import { asUser } from "./users";
 
@@ -35,7 +40,7 @@ const planner: FakeSession = {
   last_seen: Date.now() - 30_000,
   machine_id: "planner-host",
   roles: ["planner"],
-  session_id: "planner-session",
+  session_id: sessionIds.planner,
   title: "Planner",
 };
 const reviewer: FakeSession = {
@@ -44,7 +49,7 @@ const reviewer: FakeSession = {
   last_seen: Date.now() - 5 * 60_000,
   machine_id: "reviewer-host",
   roles: ["reviewer"],
-  session_id: "reviewer-session",
+  session_id: sessionIds.reviewer,
   title: "Reviewer",
 };
 const silent: FakeSession = {
@@ -53,7 +58,7 @@ const silent: FakeSession = {
   last_seen: Date.now() - 10_000,
   machine_id: "silent-host",
   roles: [],
-  session_id: "silent-session",
+  session_id: sessionIds.silent,
   title: "Silent",
 };
 const archivist: FakeSession = {
@@ -62,7 +67,7 @@ const archivist: FakeSession = {
   last_seen: Date.now() - 45 * 60_000,
   machine_id: "archivist-host",
   roles: [],
-  session_id: "archivist-session",
+  session_id: sessionIds.archivist,
   title: "Archivist",
 };
 
@@ -70,7 +75,7 @@ test.beforeEach(async () => {
   await resetDatabase();
 });
 
-test("Agents puts who needs you first, folds silent and inactive sessions, shows one whose-turn pill per side, pins a card, copies identifiers, and holds an issue-less BTW conversation", async ({
+test("Agents puts who needs you first, folds silent and inactive sessions, shows one whose-turn pill per side, pins a card, copies identifiers, and holds an issue-less BTW conversation @phone", async ({
   browser,
 }, testInfo) => {
   await setLiveSessions([planner, reviewer, silent, archivist]);
@@ -212,23 +217,28 @@ test("Agents puts who needs you first, folds silent and inactive sessions, shows
     await expect(reviewerComposer).toBeHidden();
 
     // The identifiers copy from the collapsed row.
-    await plannerCard.getByRole("button", { name: "Copy session ID planner-session" }).click();
+    await plannerCard
+      .getByRole("button", { name: `Copy session ID ${planner.session_id}` })
+      .click();
     await expect(plannerCard.getByText("Copied", { exact: true })).toBeVisible();
     await plannerCard.getByRole("button", { name: "Copy session title Planner" }).click();
-    await expect.poll(copied).toEqual(["planner-session", "Planner"]);
+    await expect.poll(copied).toEqual([planner.session_id, "Planner"]);
 
     // One pill per side of the turn, each counted in its own right: what waits on the reader
     // themselves - a question whose next move is a person's, on an issue assigned to them - and
     // what waits on the session, on anybody's issue. A card with no open asks shows neither.
     const needsYou = plannerCard.getByRole("link", { name: "Needs you 1" });
-    await expect(needsYou).toHaveAttribute("href", "/?agent=planner-session&section=needs-you");
+    await expect(needsYou).toHaveAttribute(
+      "href",
+      `/?agent=${planner.session_id}&section=needs-you`
+    );
     const waitingOnAgent = plannerCard.getByRole("link", { name: "Waiting on agent 2" });
     // The Inbox opens on the reader's own work, and these two questions are on two people's
     // issues, so the link clears the filter: nothing it counted is left out of the list it
     // opens (the rows are counted below, where it is followed).
     await expect(waitingOnAgent).toHaveAttribute(
       "href",
-      "/?agent=planner-session&assignee=everyone"
+      `/?agent=${planner.session_id}&assignee=everyone`
     );
     await expect(plannerCard.getByText(/^Open asks/)).toHaveCount(0);
     // Every card carries the Open action; what this card must not carry is a whose-turn pill.
@@ -264,7 +274,10 @@ test("Agents puts who needs you first, folds silent and inactive sessions, shows
     await expect(composer).toHaveValue(`/btw ${sentBody}`);
     await composer.press("Control+Enter");
     const request = await sent;
-    expect(request.request().postDataJSON()).toEqual({ body: sentBody, delivery: "btw" });
+    expect(keyedWrite(request.request())).toEqual({
+      input: { body: sentBody, delivery: "btw" },
+      key: expect.any(String),
+    });
     const message = (await request.json()) as { id: string };
     expect(await getSentMessages()).toMatchObject([{ target_session: planner.session_id }]);
 
@@ -285,7 +298,9 @@ test("Agents puts who needs you first, folds silent and inactive sessions, shows
     // Each pill's number is the number of rows the list its link opens holds. Needs you opens
     // the reader's own questions waiting on them, from this session: its one row.
     await needsYou.click();
-    await expect(page).toHaveURL(/\/\?agent=planner-session&section=needs-you$/);
+    await expect(page).toHaveURL(
+      new RegExp(`\\?agent=${planner.session_id}&section=needs-you$`, "u")
+    );
     await expect(page.locator("[data-inbox-row]")).toHaveCount(1);
     await expect(page.getByText("First", { exact: true })).toBeVisible();
     await page.goBack();
@@ -294,7 +309,9 @@ test("Agents puts who needs you first, folds silent and inactive sessions, shows
     // Waiting on agent opens this session's questions with the filter cleared, where the two it
     // counted are both listed - Bob's included - under the band it named.
     await waitingOnAgent.click();
-    await expect(page).toHaveURL(/\/\?agent=planner-session&assignee=everyone$/);
+    await expect(page).toHaveURL(
+      new RegExp(`\\?agent=${planner.session_id}&assignee=everyone$`, "u")
+    );
     const inbox = page.locator("main");
     const chip = inbox.getByRole("link", { name: "Clear agent filter" });
     await expect(chip).toHaveText("Asks from Planner · clear");
@@ -315,7 +332,7 @@ test("Agents puts who needs you first, folds silent and inactive sessions, shows
   }
 });
 
-test("Agents shows the newest exchange, folds the older ones, and lets the viewer clear the conversation", async ({
+test("Agents shows the newest exchange, folds the older ones, and lets the viewer clear the conversation @phone", async ({
   browser,
 }, testInfo) => {
   await setLiveSessions([planner]);
@@ -481,11 +498,12 @@ test("a reconnect picks up a Clear made from another device", async ({ browser }
     const conversation = plannerCard.getByRole("list", { name: "Conversation with Planner" });
     await expect(conversation).toContainText("Can this ship?");
 
-    // Another of alice's devices clears the conversation. No event describes her own per-agent
-    // state, so this tab learns it only when the stream reopens - and a reconnect has to
-    // refresh every query the app holds, not the ones some hand-written list remembered.
+    // Another of alice's devices clears the conversation. The Clear appends her
+    // `user_agent_state.updated`, which refreshes her per-agent state in this tab
+    // (`api/event-refresh.ts`), whether the feed carries it live or replays it after the socket
+    // drops: a resume Dispatch replays in full refreshes nothing else.
     await putAgentState(planner.session_id, { cleared_before: new Date().toISOString() });
-    await disconnectAllStreams();
+    await disconnectLiveSockets();
     await expect(plannerCard.getByRole("button", { name: "Show anyway" })).toBeVisible();
     await expect(conversation).toHaveCount(0);
   } finally {
@@ -1272,7 +1290,7 @@ test("a typed broadcast survives clearing the selection and picking again, and a
     await expect(composer).toHaveCount(0);
     const failed = sends.getByRole("listitem").filter({ hasText: "Keep this draft." });
     await expect(failed.getByRole("status")).toHaveText(
-      "Could not send to 2 agents: Envoy listener unreachable"
+      `Could not send to 2 agents: ${BROADCAST_REFUSED}`
     );
     // A message or a selection started since that press would be lost to Restore draft, so it
     // refuses, and says why under its row, until both are cleared. Playwright waits out a click
@@ -1327,13 +1345,19 @@ test("a second broadcast pressed while the first is on the wire waits its turn, 
   const alice = await asUser(browser, "alice");
   try {
     const page = await alice.newPage();
-    // Each POST waits until the test lets it through, so each row's states can be read in turn
-    // and the second press lands while the first is still on the wire.
+    // Each send's first POST waits until the test lets it through, so each row's states can be
+    // read in turn and the second press lands while the first is still on the wire. A repeat under
+    // a key already let through goes straight on: the page asks again while Dispatch's answer
+    // shows a recipient still pending (`broadcastSends`).
     const held = [Promise.withResolvers<void>(), Promise.withResolvers<void>()];
-    const posted: unknown[] = [];
+    const posted: KeyedWrite<CreateBroadcastInput>[] = [];
     await page.route("**/api/v1/broadcasts", async (route) => {
       if (route.request().method() !== "POST") return route.fallback();
-      const index = posted.push(route.request().postDataJSON()) - 1;
+      const send = keyedWrite(route.request(), isBroadcastInput);
+      if (posted.some(({ key }) => key === send.key)) {
+        return route.fallback();
+      }
+      const index = posted.push(send) - 1;
       await held[index]?.promise;
       return route.fallback();
     });
@@ -1363,7 +1387,7 @@ test("a second broadcast pressed while the first is on the wire waits its turn, 
     await composer.getByRole("button", { name: "Send to 2" }).click();
     await expect(row("Second.").getByRole("status")).toHaveText("Queued: to 2 agents");
     // One at a time: the second has not left the browser while the first is unanswered.
-    expect(posted).toMatchObject([{ body: "First." }]);
+    expect(posted).toMatchObject([{ input: { body: "First." } }]);
     // The reader switches to another tab while the first is on the wire. The second still goes
     // the moment the first is answered: a hidden tab holds nothing back. This sets the two inputs
     // TanStack's `focusManager` reads.
@@ -1376,7 +1400,9 @@ test("a second broadcast pressed while the first is on the wire waits its turn, 
     held[0]?.resolve();
     await expect(row("First.").getByRole("link", { name: "Sent to 2 agents" })).toBeVisible();
     await expect(row("Second.").getByRole("status")).toHaveText("Sending to 2 agents…");
-    await expect.poll(() => posted).toMatchObject([{ body: "First." }, { body: "Second." }]);
+    await expect
+      .poll(() => posted)
+      .toMatchObject([{ input: { body: "First." } }, { input: { body: "Second." } }]);
     // Nothing navigates while a send is still out.
     await expect(page).toHaveURL(/\/agents$/);
     await setVisibility("visible");
@@ -1406,7 +1432,7 @@ test("a send the server refuses keeps its row after a later send succeeds, and R
   const alice = await asUser(browser, "alice");
   try {
     const page = await alice.newPage();
-    const posted = postedBroadcasts(page);
+    const posted = broadcastSends(page);
     await page.goto("/agents");
     const agents = page.getByRole("region", { name: "Agents" });
     const header = agents.getByRole("checkbox", { name: "Select all matching agents" });
@@ -1422,7 +1448,7 @@ test("a send the server refuses keeps its row after a later send succeeds, and R
     await composer.getByRole("button", { name: "Send to 2" }).click();
     const failed = row("Refused first.");
     await expect(failed.getByRole("status")).toHaveText(
-      "Could not send to 2 agents: Envoy listener unreachable"
+      `Could not send to 2 agents: ${BROADCAST_REFUSED}`
     );
 
     refusal.allow();
@@ -1436,20 +1462,24 @@ test("a send the server refuses keeps its row after a later send succeeds, and R
     await expect(failed.getByRole("status")).toHaveText(/^Could not send to 2 agents: /);
     await expect(failed.getByRole("button", { name: "Restore draft" })).toBeVisible();
 
-    // Retry sends the very message again: the same body, mode and recipients.
+    // Retry sends the very message again: the same body, mode and recipients, under a new key,
+    // since Dispatch keeps the answer it gave the refused one and would only refuse it again.
     await failed.getByRole("button", { name: "Retry" }).click();
     await expect(
       row("Refused first.").getByRole("link", { name: "Sent to 2 agents" })
     ).toBeVisible();
     await expect(sends.getByText(/^Could not send/)).toHaveCount(0);
     expect(posted).toHaveLength(3);
-    expect(posted[2]).toEqual(posted[0]);
     expect(posted[0]).toEqual({
-      body: "Refused first.",
-      delivery: "aside",
-      idempotency_key: expect.any(String),
-      session_ids: pair.map((session) => session.session_id),
+      input: {
+        body: "Refused first.",
+        delivery: "aside",
+        session_ids: pair.map((session) => session.session_id),
+      },
+      key: expect.any(String),
     });
+    expect(posted[2]).toEqual({ input: posted[0]?.input, key: expect.any(String) });
+    expect(posted[2]?.key).not.toBe(posted[0]?.key);
   } finally {
     await alice.close();
   }
@@ -1465,7 +1495,7 @@ test("a human-paced double click on one Retry sends that message once, and never
   const alice = await asUser(browser, "alice");
   try {
     const page = await alice.newPage();
-    const posted = postedBroadcasts(page);
+    const posted = broadcastSends(page);
     await page.goto("/agents");
     const agents = page.getByRole("region", { name: "Agents" });
     const header = agents.getByRole("checkbox", { name: "Select all matching agents" });
@@ -1499,11 +1529,12 @@ test("a human-paced double click on one Retry sends that message once, and never
       row("Retried once.").getByRole("link", { name: "Sent to 2 agents" })
     ).toBeVisible();
     await page.waitForTimeout(500);
-    expect(posted.map((request) => request.body)).toEqual([
+    expect(posted.map((request) => request.input.body)).toEqual([
       "Retried once.",
       "Never retried.",
       "Retried once.",
     ]);
+    await expect(sends.getByRole("listitem")).toHaveCount(2);
     await expect(sends.getByRole("listitem").last()).toContainText("Retried once.");
     await expect(row("Never retried.").getByRole("status")).toHaveText(
       /^Could not send to 2 agents: /
@@ -1725,7 +1756,7 @@ test("the Agents page loads through one dropped request for its agents", async (
   }
 });
 
-test("an agent row shows the whole session name at every width, and shortens its directory only where a hover can show the path", async ({
+test("an agent row shows the whole session name at every width, and shortens its directory only where a hover can show the path @phone", async ({
   browser,
 }, testInfo) => {
   // The row is sized against what these fixtures put in it, so each one's length is asserted

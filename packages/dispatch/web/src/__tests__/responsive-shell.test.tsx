@@ -83,7 +83,7 @@ function setViewport(width: number): void {
 
 function renderShellAt(width: number, inbox: InboxRow[] = [], unreadThreads = 0): void {
   setViewport(width);
-  api.whoAmI = async () => ({ kind: "user", login: "alice" });
+  api.whoAmI = async () => ({ event_head: "0", kind: "user", login: "alice" });
   api.listMyReplies = async (query) => ({
     limit: query.limit,
     offset: 0,
@@ -183,7 +183,16 @@ test("compact top bar shows only asks waiting on the viewer", async () => {
       multiple: false,
       opened_event_id: 1,
       options: [],
-      thread: { answers: [], edits: [], followers: [], replies: [] },
+      thread: {
+        answers: [],
+        claimant: null,
+        edits: [],
+        followers: [],
+        replies: [],
+        route: null,
+        route_status: null,
+        route_holder: null,
+      },
       priority: null,
       snoozed_until: null,
       question: "Choose a direction",
@@ -204,7 +213,16 @@ test("compact top bar shows only asks waiting on the viewer", async () => {
       multiple: false,
       opened_event_id: 2,
       options: [],
-      thread: { answers: [], edits: [], followers: [], replies: [] },
+      thread: {
+        answers: [],
+        claimant: null,
+        edits: [],
+        followers: [],
+        replies: [],
+        route: null,
+        route_status: null,
+        route_holder: null,
+      },
       priority: null,
       snoozed_until: null,
       question: "Clarify this",

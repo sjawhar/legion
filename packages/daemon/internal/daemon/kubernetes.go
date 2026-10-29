@@ -237,13 +237,14 @@ func sandboxBootOf(cfg config.Config, reads sandboxReads) (sandboxBoot, error) {
 
 // probeReservation is the image probe pod's own reservation, fixed: `legion probe-image` starts
 // one Oh My Pi at a time, each briefly (pi.agents, the plugin's load, the session-storage
-// setting), runs no lane and no browser (the browser check runs Chromium's --version), and exits,
-// so 250m and 1Gi hold it, over a 5Gi bound on the node's disk and a 1Gi disk request. It is no
-// pod's share on purpose: the probe runs at every boot, before anything is served, and a probe that
-// reserved a pod's share — the controller's 1 CPU and 4Gi, or an issue pod's 3 CPU and 19Gi —
-// could leave the daemon unable to boot on a pool full enough to place nothing that large, while a
-// 250m / 1Gi pod still fits (stage 4b's daemon-controller-liveness restart, whose controller
-// reservation no node can hold, met exactly that).
+// setting), runs no lane, navigates headless Chromium to the two compromised chains and its
+// control, and exits. Five fresh runs at 250m / 1Gi took 57.68–77.43 s, so those limits hold the
+// browser probe while the smaller reservation still fits a pool that cannot place a controller or
+// issue pod. It has a 5Gi bound on node disk and a 1Gi disk request. The probe runs at every boot,
+// before anything is served, and a probe that reserved a pod's share — the controller's 1 CPU and
+// 4Gi, or an issue pod's 3 CPU and 19Gi — could leave the daemon unable to boot on a pool full
+// enough to place nothing that large (stage 4b's daemon-controller-liveness restart, whose
+// controller reservation no node can hold, met exactly that).
 var probeReservation = config.Reservation{CPU: "250m", CPURequest: "250m", Memory: "1Gi", MemoryRequest: "1Gi", EphemeralStorage: "5Gi", EphemeralStorageRequest: "1Gi"}
 
 // imageProbe is the probe of the daemon's worker image: this daemon's contract, the role prompts
@@ -337,6 +338,7 @@ func sandboxOptions(cfg config.Config, k config.Kubernetes, project, dispatchTok
 		ControllerSlackChannels: cfg.Projects[cfg.Project].SlackChannels,
 		Tools:                   workerImageTools,
 		Pod:                     sandbox.Pod(k.Pod),
+		RoleConfigFiles:         cfg.RoleConfigFiles,
 		ProviderKeys:            providerSecretKeys(cfg.ProviderKeys),
 		LaunchSecrets:           launchSecretNames(cfg, lookup),
 		ProvidersSecrets:        providersSecrets(cfg, lookup),

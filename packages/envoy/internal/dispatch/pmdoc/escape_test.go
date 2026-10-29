@@ -18,6 +18,7 @@ func TestRenderEscapesBlockMarkerLinesInsideParagraphs(t *testing.T) {
 		"___",
 		"-  -  -",
 		":::callout{kind=\"warning\"}",
+		":::ask{#a1}",
 		":::",
 		"::foo",
 		"::::x{a=\"b\"}",
@@ -95,7 +96,8 @@ func TestRenderKeepsTheBlocksAfterALineThatWouldOpenAFenceOrCloseATypedBlock(t *
 // misread. A `---` there opens front matter: a later line that is just `---` - a second rule, a
 // code line - closes it, and everything up to there reads as front matter; and with no such line
 // the browser editor's parser, having tried the front matter to the document's end, reads no
-// list, quote or footnote definition in the rest. Those documents write the rule `***`.
+// list, quote, footnote definition or typed block in the rest. Those documents write the rule
+// `***`.
 func TestRenderWritesALeadingRuleAsAsterisksOnlyWhereDashesAreMisread(t *testing.T) {
 	for name, test := range map[string]struct{ after, opener string }{
 		"alone":                     {"", "---"},
@@ -104,7 +106,7 @@ func TestRenderWritesALeadingRuleAsAsterisksOnlyWhereDashesAreMisread(t *testing
 		"a heading":                 {"# a\n", "---"},
 		"code":                      {"```\nc\n```\n", "---"},
 		"an image":                  {"![a](https://x.test/i.png)\n", "---"},
-		"a callout":                 {":::callout{#c1 kind=\"note\" title=\"T\"}\nx\n:::\n", "---"},
+		"a callout":                 {":::callout{#c1 kind=\"note\" title=\"T\"}\nx\n:::\n", "***"},
 		"a heading, then text":      {"## title: x\n\nBody.\n", "---"},
 		"a second rule":             {"x\n\n***\n\ny\n", "***"},
 		"a code line ---":           {"x\n\n```\n---\n```\n", "***"},
@@ -168,7 +170,9 @@ func TestRenderEscapesBlockFormsInAListNestedInABlockquote(t *testing.T) {
 // GFM reads a single tilde as strikethrough too, and refuses a delimiter run of three: text
 // `~a~` came back struck, and struck text ending or starting with a tilde lost its strike. Such a
 // paragraph writes its tildes as references; a paragraph whose tildes pair with nothing - "about
-// ~200ms" - and an ordinary strikethrough keep the bytes they have always had.
+// ~200ms" - and an ordinary strikethrough keep the bytes they have always had. Runs of different
+// lengths pair by goldmark's rules though not the browser editor's, so they are written as
+// references too, which both read back.
 func TestRenderKeepsTildesAsTheyWereWritten(t *testing.T) {
 	text := func(value string, marks ...Mark) *Node { return &Node{Type: "text", Text: value, Marks: marks} }
 	struck := Mark{Type: "strike_through"}
@@ -199,9 +203,16 @@ func TestRenderKeepsTildesAsTheyWereWritten(t *testing.T) {
 	}{
 		{paragraph(text("about ~200ms")), "about ~200ms\n"},
 		{paragraph(text("done", struck), text(" tail")), "~~done~~ tail\n"},
+		{paragraph(text("a ~b~~ c")), "a &#126;b&#126;&#126; c\n"},
+		{paragraph(text("Plain ~a~~ text.")), "Plain &#126;a&#126;&#126; text.\n"},
+		{paragraph(text("Plain "), text("~", struck), text(" end.")), "Plain ~~&#126;~~ end.\n"},
+		{paragraph(text("approx ~5", struck)), "~~approx &#126;5~~\n"},
+		// Main wrote `\~~~x~~`, which main read back as this text and the engine reads as a struck
+		// `x` after a `~`; the bytes change so both read the text.
+		{paragraph(text("~~~x~~")), "&#126;&#126;&#126;x&#126;&#126;\n"},
 	} {
 		if got := mustRender(t, test.doc); got != test.want {
-			t.Fatalf("Render() = %q, want the bytes main writes, %q", got, test.want)
+			t.Errorf("Render() = %q, want %q", got, test.want)
 		}
 	}
 }
@@ -462,6 +473,11 @@ func TestRenderKeepsImageAltText(t *testing.T) {
 		"a]b":                       "![a\\]b](https://x.test/i.png) after\n",
 		"a*b":                       "![a*b](https://x.test/i.png) after\n",
 		"Screenshot 2024-01-01.png": "![Screenshot 2024-01-01.png](https://x.test/i.png) after\n",
+		"~b~~":                      "![\\~b\\~\\~](https://x.test/i.png) after\n",
+		"**a*_":                     "![**a*_](https://x.test/i.png) after\n",
+		"*a**_":                     "![*a**_](https://x.test/i.png) after\n",
+		"_**a*":                     "![_**a*](https://x.test/i.png) after\n",
+		"_*a**":                     "![_*a**](https://x.test/i.png) after\n",
 	} {
 		if got := mustRender(t, image(alt)); got != want {
 			t.Fatalf("Render(alt %q) = %q, want the bytes main writes, %q", alt, got, want)
@@ -862,6 +878,12 @@ func TestRenderKeepsStoredMarkdownThatReadsBack(t *testing.T) {
 		"*___*\n",
 		"~~---~~\n",
 		"## ~~~ tildes\n",
+		"Plain &#126;a&#126;&#126; text.\n",
+		"~~approx &#126;5~~\n",
+		"![\\~b\\~\\~](u)\n",
+		// Main's own rendering of a struck `**` inside emphasis, which the engine reads back as written.
+		"*[~~**é~~*\n",
+		`x ~~\_\_\*\*é\_b~~**\ y [~~\_\_\*\*é\_b~~**]\(u) z` + "\n",
 		"| a | b |\n| :--- | :--- |\n| ::1 | --- |\n",
 		"<br is an element.\n",
 		"<span class is not closed.\n",

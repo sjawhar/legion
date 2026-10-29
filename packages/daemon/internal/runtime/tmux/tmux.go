@@ -26,6 +26,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -125,6 +126,10 @@ type Options struct {
 	// settings overlays every pane names in PI_CONFIG_FILES ahead of the turn-scoping overlay, which
 	// stays last so its keys outrank theirs. Nil is none.
 	PiConfigFiles []string
+	// RoleConfigFiles is the operator's `role_config_files`: absolute paths of Oh My Pi settings
+	// overlays a pane of that role alone names in PI_CONFIG_FILES, after PiConfigFiles and ahead of
+	// the turn-scoping overlay, by role, the controller's pane included. Nil is none.
+	RoleConfigFiles map[claim.Role][]string
 	// TakeOver is the operator's `runtime.tmux.take_over`: TakeOverKubernetes to take over the
 	// claims a daemon running the project under runtime kubernetes left in the store (foreign), ""
 	// to refuse them, as every locator of another runtime is refused without it.
@@ -177,6 +182,7 @@ type Runtime struct {
 	providerKeys     []string
 	operatorEnv      map[string]string
 	piConfigFiles    []string
+	roleConfigFiles  map[claim.Role][]string
 	// takeOver is the runtime whose locators this runtime takes over (Options.TakeOver):
 	// runtime.RuntimeSandbox under TakeOverKubernetes, "" for none.
 	takeOver string
@@ -188,7 +194,8 @@ type Runtime struct {
 	readProc func(path string) ([]byte, error)
 
 	// launchMu serializes everything that decides which window a pane lands in and every change
-	// to the private server's set of panes the runtime must not race: session creation, window
+	// to the private server's set of panes the runtime must not race: session creation, a launch's
+	// refusal of a claim whose process still runs and the files it then writes for the claim, window
 	// choice, the pane's opening and recording, orphan reaping, and the scrub.
 	launchMu sync.Mutex
 
@@ -273,7 +280,11 @@ func New(opts Options) (*Runtime, error) {
 	if err := checkPaneEnv(opts.PaneEnv, providerKeys); err != nil {
 		return nil, err
 	}
-	for _, path := range opts.PiConfigFiles {
+	overlays := slices.Clone(opts.PiConfigFiles)
+	for _, files := range opts.RoleConfigFiles {
+		overlays = append(overlays, files...)
+	}
+	for _, path := range overlays {
 		if !filepath.IsAbs(path) || strings.Contains(path, ":") {
 			return nil, fmt.Errorf("tmux runtime: Oh My Pi overlay %q is not an absolute path PI_CONFIG_FILES can name", path)
 		}
@@ -317,6 +328,7 @@ func New(opts Options) (*Runtime, error) {
 		providerKeys:     providerKeys,
 		operatorEnv:      opts.PaneEnv,
 		piConfigFiles:    opts.PiConfigFiles,
+		roleConfigFiles:  opts.RoleConfigFiles,
 		takeOver:         takeOver,
 		readProc:         os.ReadFile,
 		tracked:          map[string]*trackedProcess{},
@@ -336,6 +348,14 @@ func New(opts Options) (*Runtime, error) {
 	}
 	sort.Strings(r.environ)
 	r.run = r.runTmux
+	if r.takeOver != "" {
+		// One line at boot, in the log an operator reads first: while the key is set the
+		// same-agent refusal is off for the whole project — every session found nowhere starts a
+		// fresh agent (takingOverSession) — and a forgotten key leaves it off with no other trace
+		// than a per-launch warning and `take_over` in `legion state --json`.
+		r.log.Warn("tmux runtime: runtime.tmux.take_over is set, so every session found nowhere starts a fresh agent and no launch is charged for it; remove the key once the move is done (docs/deployment.md, \"Moving a project onto tmux\", step 5)",
+			"takeOver", opts.TakeOver, "takesOver", r.takeOver)
+	}
 	return r, nil
 }
 
