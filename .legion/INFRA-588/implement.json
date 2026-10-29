@@ -2,13 +2,37 @@
   "schemaVersion": 1,
   "phase": "implement",
   "issue": "INFRA-588",
-  "completed": "2026-10-29T17:45:34Z",
-  "round": "forward merge of main + conflicts steps routed in ci.yaml (audit item 2)",
+  "completed": "2026-10-29T21:31:44Z",
+  "round": "migration identifiers folded in (plan.md v3, from the closed migration-numbering issue)",
   "pullRequest": "https://github.com/sjawhar/legion/pull/2411",
-  "head": "ddd6873c284d518d8e05eeb16e7ecc7ee04b20e8",
-  "proofComment": "https://github.com/sjawhar/legion/pull/2411#issuecomment-6504098735",
-  "reviewAnswered": "Architect send-back: main deleted .github/workflows/pr-and-main.yaml (#2316) and GitHub reported #2411 CONFLICTING; the controller audit (dispatch://INFRA-588/comment/30c74574-b42a-48e6-8484-d55f70ecf1c0, item 2) asks the three scripts/conflicts steps be routed. One merge head ddd6873c284d: takes the deletion and adds the routed job conflicts-script with filter conflicts_script, its ci-ok entries and its ci_job_reads.py gate. scripts/conflicts/ unchanged. Fingerprint 0acec12c... -> a4cfcab7... (changed, as expected).",
+  "head": "7fcdf0e1d50804a23fd05ace20be96de3785e53a",
+  "proofComment": "https://github.com/sjawhar/legion/pull/2411#issuecomment-6508771513",
+  "reviewAnswered": "New scope, not a review: migration identifiers for the daemon and Dispatch runners. Commits 6cab7987 (daemon), 6a8ede0d (Dispatch + pgmigrate), c635b7a9 (Dispatch health probe across the widening, found by the proof), 7fcdf0e1 (two renumbering learnings marked superseded). The router move (a4ca5918) is unchanged; no existing migration file changed.",
   "proof": [
+    {
+      "criterion": "Two concurrent branches that each add a migration to each runner merge in either order with no conflict",
+      "surface": "git merge-tree on commits built off the head with git plumbing (concurrent.sh)",
+      "command": "bash $TMPDIR/i588/concurrent.sh c635b7a9 $TMPDIR/i588/cc2 (branch a 20261030100000_concurrent_a, branch b 20261030110000_concurrent_b; daemon and Dispatch with census)",
+      "observed": "merge-tree a into b and b into a: exit 0, the same tree ce3554a71b75972d4b78654845feed6f6136f45a",
+      "headSha": "7fcdf0e1d50804a23fd05ace20be96de3785e53a",
+      "negativeControl": "the same tree with b renamed to a's timestamp also merges in git, and both packages' identifier tests fail on it naming 20261030100000_concurrent_a and _b"
+    },
+    {
+      "criterion": "Each migration runs exactly once on a database migrated before either merge and on a fresh one, against a real Postgres",
+      "surface": "each tree's own runner (store.Open + Migrate) on PostgreSQL 18.6 + pgvector 0.8.7",
+      "command": "bash $TMPDIR/i588/pgproof2.sh $TMPDIR/i588/cc2 (databases migrated by main's code, at this head, with b merged first, and fresh; then the merged tree twice)",
+      "observed": "every database ends with 20261030100000 x1 and 20261030110000 x1 recorded, 1 row in each new table and a bigint version column; daemon from main applied=2 then 0, b-first applied=1 then 0, fresh 63 then 0; Dispatch from main reads schema_version 140 -> 20261030110000",
+      "headSha": "7fcdf0e1d50804a23fd05ace20be96de3785e53a",
+      "negativeControl": "before c635b7a9 the main-to-merged Dispatch run read 140 -> 0; TestHealthyAnswersAcrossTheWideningOfTheVersionColumn fails with cached plan must not change result type without it"
+    },
+    {
+      "criterion": "A test in each package fails when two migration files share an identifier; existing migrations unchanged; the suites and the router's filter check pass",
+      "surface": "go test against the real Postgres, and .github/scripts/check-ci-filters.sh",
+      "command": "go test ./internal/store/... ./internal/api/ (daemon); go test ./internal/pgmigrate/... ./internal/dispatch/store/ ./internal/broker/store/ and ./cmd/dispatch -run 'Healthz|Census|Migrat' (envoy); .github/scripts/check-ci-filters.sh",
+      "observed": "all ok (daemon store 99.983s, api 201.983s; dispatch/store 277.887s); check-ci-filters exit 0, 25 gates; the new daemon files are selected by the test job and the Dispatch ones by envoy-go; 0 existing migration .sql files changed",
+      "headSha": "7fcdf0e1d50804a23fd05ace20be96de3785e53a",
+      "negativeControl": "CheckIdentifiers refuses a missing number, a new next-number file, a 13-digit and an impossible timestamp (asserted in both packages)"
+    },
     {
       "criterion": "The scripts/conflicts steps run in ci.yaml's router only when the script can change, and check-ci-filters.sh passes",
       "surface": "ci.yaml's changes filter and router job, read by .github/scripts/check-ci-filters.sh and workflow_paths.PathsFilter (dorny/paths-filter's model)",
@@ -43,14 +67,38 @@
     }
   ],
   "filesChanged": [
-    ".github/workflows/ci.yaml",
-    ".github/scripts/ci_job_reads.py",
-    ".github/workflows/pr-and-main.yaml (deleted by main; merge takes the deletion)"
+    "packages/daemon/internal/store/migrations/embed.go",
+    "packages/daemon/internal/store/migrations/embed_test.go",
+    "packages/daemon/internal/store/store.go",
+    "packages/daemon/internal/store/migrate_timestamped_test.go",
+    "packages/daemon/internal/api/version.go (comment)",
+    "docs/kubernetes.md (rollback note)",
+    "packages/envoy/internal/pgmigrate/set.go",
+    "packages/envoy/internal/pgmigrate/set_test.go",
+    "packages/envoy/internal/pgmigrate/pgmigratetest/pgmigratetest.go",
+    "packages/envoy/internal/pgmigrate/pgmigratetest/pgmigratetest_test.go",
+    "packages/envoy/internal/dispatch/store/store.go",
+    "packages/envoy/internal/dispatch/store/pool.go",
+    "packages/envoy/internal/dispatch/store/store_test.go",
+    "packages/envoy/internal/dispatch/store/migrate_guard_test.go",
+    "packages/envoy/internal/dispatch/store/migrate_out_of_order_test.go",
+    "packages/envoy/cmd/dispatch/README.md",
+    "packages/envoy/internal/dispatch/store/README.md",
+    "packages/envoy/.changes/unreleased/pr-2411-migration-timestamps.yaml",
+    "two docs/solutions/envoy renumbering learnings (front-matter status)"
   ],
   "trickyParts": [
-    "The steps were in pr-and-main.yaml's test job; on main that workflow is gone, so they become a job of their own in the router (filter, changes output, needs/if, ci-ok needs and SELECTED_BY, gate), as docs/solutions/github/join-a-job-to-the-ci-router.md lists. The conflict resolution and the move are in the merge commit itself, so the push has one head commit."
+    "The version columns are int4; a 14-digit timestamp needs bigint. The daemon's schema_version is created by migration 0001, so the runner widens it inside the first timestamped migration's transaction; Dispatch's schema_migrations is created by the runner, so createVersionTable creates bigint and widens an existing integer under its lock.",
+    "pgx encodes a parameter for the column type it finds, so the exists check and the insert cast $1::bigint, or a 14-digit version is refused client-side before the widening runs.",
+    "A connection that prepared max(version) while the column was integer fails once after the widening (cached plan must not change result type): the daemon's SchemaVersion and Dispatch's Healthy cast the result to bigint. The live upgrade proof found the Dispatch case (140 -> 0); TestHealthyAnswersAcrossTheWideningOfTheVersionColumn reproduces it.",
+    "The secrets broker also uses pgmigrate; it stays numbered (CheckNumberedOneToN, integer column), and its tests pass."
   ],
-  "deviations": [],
+  "deviations": [
+    "Duplicate-identifier refusals already existed in both loaders; this round adds a timestamped-pair case to each, and a CheckIdentifiers rule (numbered 1..last each once, every later version a real 14-digit UTC instant) that replaces Dispatch's TestMigrationSetIsNumberedOneToN.",
+    "Two docs/solutions learnings about renumbering are marked superseded in their front matter."
+  ],
   "openQuestions": [],
-  "discoveredComplexity": []
+  "discoveredComplexity": [
+    "The pod's test Postgres is a rootless PostgreSQL 18.6 (zonky binaries, as scripts/dispatch/README.md stands one up) with pgvector 0.8.7 from the PGDG package, on 127.0.0.1:55432; the census tests that append &search_path need a DSN with a query string (?sslmode=disable)."
+  ]
 }
