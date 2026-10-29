@@ -1,0 +1,158 @@
+{
+  "schemaVersion": 1,
+  "phase": "plan",
+  "issue": "INFRA-264",
+  "completed": "2026-10-29T12:44:04Z",
+  "plan": "dispatch://INFRA-264/artifact/plan-md@v1",
+  "requiredSkills": {
+    "implement": [
+      "skill://legion-worker: the phase's own contract (commit only this phase's paths, push before completing, no deferral), which this change's five scopes make easy to breach.",
+      "skill://legion-worker/references/pr-body.md: what a proof is, the six fields each one needs, and the simplify pass; every acceptance line of this issue is proven on a named surface at the head that merges.",
+      "skill://legion-worker/references/tools.md: the Go suites need a Postgres and this pod has no Docker and no root, so the unpacked-Debian recipe is how the implementer gets one.",
+      "skill://legion-worker/references/default-branch-check.md: the identity check before each of the several pushes this change needs.",
+      "skill://legion-worker/references/skip-checks-trailer.md: only the handoff-only pushes carry the trailer and the code pushes must not, and this change pushes both kinds.",
+      "skill://ce-simplify-code: the simplify head over a change that touches the broker, Dispatch, a shared package move and a new package.",
+      "skill://dispatch: any write to the issue, and the literal form AskGate reads."
+    ],
+    "test": [
+      "skill://legion-worker: the tester's phase contract and its handoff.",
+      "skill://legion-worker/references/pr-body.md: each proof entry's six fields and its negative control, which the plan's table in section 5 supplies per acceptance line.",
+      "skill://legion-worker/references/tools.md: the same Postgres recipe, plus the rule that a suite which skips proves nothing (INFRA-379), which decides whether the broker and Dispatch suites count at all."
+    ],
+    "review": [
+      "skill://legion-worker: the reviewer's phase contract, and the rule that a prose-only finding is fixed by the reviewer itself.",
+      "skill://legion-worker/references/merge-gate.md: approving the head by SHA and what READY then compares against it.",
+      "skill://legion-worker/references/review-threads.md: replying on, listing and resolving threads, and judging a bot's finding.",
+      "skill://ce-simplify-code: the structure of a change this wide, where the root plan's own section 8 asks review to check the route classification, the cache rules and the absence of any credential in a pod against the code rather than the description."
+    ]
+  },
+  "gapAnalysis": {
+    "findings": [
+      {
+        "finding": "A broker token presented as Authorization: Bearer cannot be validated at all: the library's resource half reads the token only from Authorization: DPoP and refuses a bound token under any other scheme, while Dispatch turns a non-Bearer Authorization header into 401 before any kind is tried. The root plan's D9 ordering assumes Bearer.",
+        "answer": "Decision P1: optionalActor branches on the authentication scheme first. DPoP goes to the new kind; Bearer keeps today's three branches in today's order; no header is the cookie. Recorded as departure 1 from the root plan's D9, which it also makes cheaper: a personal token never costs a broker call."
+      },
+      {
+        "finding": "Nothing in the tree can sign the proof the new door demands: helper/dpop.go, the only DPoP producer, builds no ath claim, which the library's resource check requires, so this issue's own live acceptance would have no client.",
+        "answer": "Decision P13 and task T5: helper/dpop.go gains a resource-request mode carrying ath. It is a defect in code this change depends on, so it is fixed here, and INFRA-267's client signs with the same producer rather than writing a second one."
+      },
+      {
+        "finding": "INFRA-382's relaunch acceptance cannot be driven from this issue: a Legion pod projects one token, at the enrolment audience, and the pod-side exchange client belongs to INFRA-267.",
+        "answer": "Departure 4 and the architect question in plan section 3: the line is proven at the broker's own surface, where a relaunch is a second projected token of the same account with a different pod UID, which is the whole of a pod's identity to the exchange. The architect decides whether INFRA-267 carries the real-pod relaunch or this issue takes its client; the plan assumes the former, as the architect's own instruction not to plan a child's work requires."
+      },
+      {
+        "finding": "No issue in the tree sets the broker's exchange settings in the deployment repository (BROKER_EXCHANGE_K8S_AUDIENCE, BROKER_EXCHANGE_ACCOUNTS, BROKER_EXCHANGE_WORKFLOWS, BROKER_ACCESS_TOKEN_SECONDS); INFRA-380 is sign-in only, so the exchange stays dark and no broker token exists.",
+        "answer": "Plan section 7 names the exact delta and that it belongs before any pod presents a token, which is INFRA-267's slice; plan section 3 puts the placement question to the architect. This issue needs none of them in production: its own live proof runs against scripts/dev-broker.sh, which already sets them."
+      },
+      {
+        "finding": "INFRA-401's authority has to key on something, and the only thing accountCaller returns is the configured caller name, which config.go says nothing reads.",
+        "answer": "Decision P9: each accountAuth row declares its power, the broker holds a name-to-powers table in code (dispatch: the nine relays and introspection; listener: introspection alone), and an unknown name refuses the boot. No deployment change rides the binary, since the live value is already named dispatch; the config comment is rewritten in the same change."
+      },
+      {
+        "finding": "Introspection runs before any authorization, so every unknown token would cost one broker call charged to the bucket a person's approval needs; Dispatch has no limiter of its own.",
+        "answer": "Decision P5 and task T6: single-flight per token hash and a per-source-address bucket in front of introspection, keyed by auth.ForwardedAddress. Decision P6 moves internal/broker/ratelimit to internal/ratelimit rather than writing a second limiter. The machine criterion is in the proof table: K unknown tokens from one address, introspections counted at a stub broker, the limiter removed as the control."
+      },
+      {
+        "finding": "\"A revoked token stops working\" has no revocation path for a pod's or a workflow's exchanged token: the provider mounts no revocation endpoint and the one deactivation keys on credential_id, which such a token does not carry.",
+        "answer": "Decision P14 and departure 3: the line is proven on the only revocable kind, a dev box session's token, through revoke-by-approver, with an expiry test covering the others. A revocation route for exchanged tokens is in no spec and costs a second broker restart, so it is argued out rather than deferred."
+      },
+      {
+        "finding": "The cache's \"few seconds\" is never a number, so the revocation and sizing lines are unmeasurable, and the merged comment demands it be sized deliberately against the broker's shared bucket.",
+        "answer": "Decision P4: five seconds, a constant, never past the answer's own exp, never holding a refusal, with the arithmetic written down (under 128 live tokens per Dispatch pod, so under 26 introspections a second against one broker process's fifty, with each Dispatch pod holding its own bucket). Three machine criteria follow in the proof table: one introspection for many requests inside the TTL, refusal after it, and nothing cached past exp."
+      },
+      {
+        "finding": "\"The session comes from the token\" leaves the body's actor undecided, which decides whether 25 requireActor call sites change; today an absent actor is 400 ACTOR_KIND, and Origin is carried only on the body actor.",
+        "answer": "Decision P7: absent is accepted and the session comes from the token; a matching actor is accepted and its Origin kept; a mismatching one is 403 ACTOR_SESSION_MISMATCH naming the token's session. The call sites do not change, and a credential carrying no session keeps today's behaviour exactly."
+      },
+      {
+        "finding": "The agent-facing whoami tool prints the host's session id, not Dispatch's answer, so the acceptance line about what Dispatch reports is not met by the server alone.",
+        "answer": "Task T9: whoami answers the session, the person and the project; the route index text is rewritten; dispatch_whoami prints the token's session and says plainly when it differs from the host session, and reads an omitted field as an older build, as it already does for a verified service token, because Dispatch deploys by hand."
+      },
+      {
+        "finding": "Every document sentence the root plan tells this slice to edit has moved or gone: skills/dispatch/references/asks.md no longer exists, and docs/site's for-agents.md carries whoami sentences the root plan never named.",
+        "answer": "Task T12: the list is re-derived by text at implementation time with a grep over skills/ and docs/site/, editing only the clauses this change makes untrue and leaving the assignee chain to the slice that owns it, which is the root plan's own rule for a sentence two slices edit."
+      },
+      {
+        "finding": "Deleting the document websocket's bearer branch leaves live code and a published contract behind: the ActorHeader constant, its validator in storable_text.go, README and AGENTS rows, and five test files.",
+        "answer": "Task T10 lists every one of them, and the root plan's gating check is recorded as made: the browser connects with a same-origin cookie, envoy-client, claude-envoy and proof-editor hold no /ws/doc caller, and every bearer connection in the tree is a Go test. The gate becomes machine-checkable: afterwards the header name appears in no file but CHANGELOG.md, which is history."
+      },
+      {
+        "finding": "\"Every write route is covered\" and \"a test fails if a route gains a caller that was not listed for it\" are open-ended as written.",
+        "answer": "Tasks T3 and T11: two table-driven tests, one walking Dispatch's routes() and failing on a mutating row with no class, one walking the broker's table and failing on an accountAuth row with no power, so a row added without either breaks CI. The plan also states that the two socket mounts outside the table are cookie-only after T10, so no project-scoped credential reaches them."
+      },
+      {
+        "finding": "The three write classes do not cover the shapes the data has: an agent-conversation artifact has neither issue nor project, a direct message has no project, and asks and comments reach a project only by a join.",
+        "answer": "Task T11 names each shape with its class rather than leaving it to be discovered, and names the resolver per addressing kind with the query that already exists for it, with the note that owner.go is collaboration ownership and not this resolver."
+      },
+      {
+        "finding": "Dispatch re-resolves a caller on an open stream every fifteen seconds from a detached copy of the original request; a DPoP proof is single-use, so replaying the original headers would refuse and close the socket.",
+        "answer": "Decision P8 and task T8: the proof authenticated the upgrade and is not checked again; liveness on re-resolution is the introspection answer alone, cached or fresh. Cheap now because only the browser opens these sockets today."
+      },
+      {
+        "finding": "\"The proof checked with the library\" carries four unstated requirements: a replay store, a nonce decision, an htu that a proxy can choose, and a sweeper.",
+        "answer": "Decisions P2 and P3 with tasks T6 and T7: the library's strategy over a Postgres replay store in Dispatch's own schema keyed on jti and htu with a sweep, requireNonce false and no nonce table unless the library asks for one, and htu verified against DISPATCH_SERVER_URL plus the path rather than any forwarded header, exactly as the broker rewrites to BROKER_PUBLIC_URL."
+      },
+      {
+        "finding": "The root plan's Child A assigns the approver assertion to this slice, but that design was superseded by INFRA-314, whose pull request is open and which the broker's own route table names.",
+        "answer": "Decision P12 and departure 2: no approver assertion here, and no new Dispatch setting for the introspection client, which reuses the account-token file Dispatch already reads for the relays. Named to the architect for confirmation."
+      },
+      {
+        "finding": "INFRA-402's \"verify through the key cache\" is a verifier rewrite, and Keys answers a key rather than a token; the verifier it would change is shared by pod enrolment, renewal, a service's token login and account auth, whose callers branch on its error classes.",
+        "answer": "Decision P10 and task T2: a KeySet adapter over Keys and a verifier built with gooidc.NewVerifier, for the whole Kubernetes verifier rather than VerifyAccount alone, since scoping it to one caller would leave two key caches for one issuer; every sentinel, the classify mapping and the issuer, audience and expiry checks survive, and the residue-is-signature comment is revisited."
+      },
+      {
+        "finding": "\"A key rotation is picked up within the cache's own bound\" names a bound the cache does not have: Keys has a fifteen-minute lifetime and a one-minute minimum refresh, and which applies depends on whether the rotation brings a new kid.",
+        "answer": "The proof table states the line as the code can prove it: a token signed by a key whose kid the cache has not seen is accepted within MinRefresh, one minute, proven by publishing a key at the test issuer and counting fetches; the flood line is counted the same way, with the pre-change RemoteKeySet path as the control."
+      },
+      {
+        "finding": "\"Proven against the running binary\" and the two \"the pull request body states…\" lines name no surface a machine checks.",
+        "answer": "Tasks T3 and T4 and the proof table: the 401 refusal is a real cmd/broker binary test with two listed accounts, asserted per route and code, and dev-broker.sh gains a second caller so a person can drive it; the per-account power table and the paragraph on what the session binding holds and does not both go in packages/envoy/AGENTS.md beside the pull request body, kept true by the two enumeration tests, and the reviewer checks each sentence against the code."
+      }
+    ]
+  },
+  "planReview": {
+    "verdict": "approved",
+    "rounds": 1
+  },
+  "specDepartures": [
+    {
+      "spec": "The root plan's D9 orders the door as: a JWT-shaped bearer to the Kubernetes check, otherwise one indexed lookup in agent_tokens, otherwise one introspection call to the broker.",
+      "plan": "A broker token is presented under the DPoP authentication scheme and optionalActor branches on the scheme first; the Bearer branches keep today's order and never reach introspection.",
+      "evidence": "handler/rfc9449/resource.go:23-28 reads the token only from Authorization: DPoP and :51-64 refuses a bound token under any other scheme; internal/dispatch/auth/agent_token.go:33-43 with api/server.go:835-838 turns a non-Bearer header into 401 before any kind is tried, so a conforming caller would be refused at the door.",
+      "outcome": {
+        "kind": "unchanged"
+      }
+    },
+    {
+      "spec": "The root plan's Child A says Dispatch signs the approver assertion in this slice, replacing the approver's login in the request body, and needs a setting naming its own token file.",
+      "plan": "No approver assertion and no new setting; the introspection client reuses the account-token file Dispatch already reads for the approval relays.",
+      "evidence": "dispatch://INFRA-314 (sjawhar/legion#2198, open) replaces that design and the broker's own route table names it at internal/broker/api/routes_table.go:133-137; internal/dispatch/agentsecrets/client.go:127-144 already reads DISPATCH_AGENT_SECRETS_ACCOUNT_TOKEN_FILE and presents it as the bearer.",
+      "outcome": {
+        "kind": "unchanged"
+      }
+    },
+    {
+      "spec": "INFRA-264's acceptance: a revoked token stops working within the cache's few seconds, and a refusal is never served from a cache.",
+      "plan": "Proven on the only token the broker can revoke, a dev box session's, through POST /v1/launcher-credentials/{id}/revoke-by-approver, with an expiry test covering a pod's and a workflow's token; no revocation route for exchanged tokens is added.",
+      "evidence": "internal/broker/oauthstore/store.go:672 states this provider mounts no revocation endpoint; EndCredential keys on credential_id at :744, and store.go:358-365 says outright that an exchanged machine token carries the credential while a pod's or a run's holds none.",
+      "outcome": {
+        "kind": "changed",
+        "acceptance": [
+          "A revoked token stops working within the cache's few seconds, and a refusal is never served from a cache: proven for a dev box session's token, the only kind the broker can revoke; a pod's and a workflow's token are proven refused the moment their own exp passes."
+        ]
+      }
+    },
+    {
+      "spec": "INFRA-382's acceptance: a pod that legitimately resumes its own issue's session after a relaunch is not refused, and this is proven by relaunching rather than by argument.",
+      "plan": "Proven at the broker's own surface, where a relaunch is a second projected token of the same account carrying a different pod UID: register the replacement UID for the session, exchange, and introspect under the same session and person, with the unregistered replacement refused as the control. A relaunch of a real Kubernetes pod is not driven from this issue.",
+      "evidence": "exchange/exchange.go:457-464 reads the pod UID as the whole of a pod's identity and :280 states the exchange asks the cluster nothing, so a pod instance is exactly a UID to this code; packages/daemon/internal/runtime/sandbox/manifest.go:603-632 projects one token at the enrolment audience, not the exchange audience, and the pod-side exchange client is dispatch://INFRA-267's, which the architect's own note tells this planner not to take.",
+      "outcome": {
+        "kind": "changed",
+        "acceptance": [
+          "A pod that legitimately resumes its own issue's session after a relaunch is not refused, proven by relaunching at the broker's surface (a second pod UID of the same account presenting a fresh projected token); the relaunch of a real Kubernetes pod is proven in dispatch://INFRA-267, which owns the pod's exchange client, unless the architect moves that client here."
+        ],
+        "scope": "The broker half of INFRA-382 is built here; the daemon's registration call, the pod's second token projection at the exchange audience and the pod's exchange client stay with dispatch://INFRA-267."
+      }
+    }
+  ]
+}
