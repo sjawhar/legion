@@ -2,44 +2,44 @@
   "schemaVersion": 1,
   "phase": "test",
   "issue": "INFRA-624",
-  "completed": "2026-10-29T12:57:51Z",
-  "round": 14,
-  "headSha": "d78e7cbb2ecb3db493cb66d2ef4ff81fc4500146",
-  "codeHead": "ea3cfcb04e83",
+  "completed": "2026-10-29T14:36:18Z",
+  "round": 15,
+  "headSha": "791bc94356956b666b85b109e73c60366c74ee6e",
+  "codeHead": "df85ed05c26d",
   "implementerProof": {
     "verdict": "verified",
-    "how": "Re-ran its 11 refusal tests at the head (pass) and read what each count in the 780-body test means. Followed the refusal with the real dispatch CLI in five break shapes. Re-ran the browser specs (17 passed, chromium and iphone), which the architect asked for although only Go changed."
+    "how": "Re-ran its 11 refusal tests at the head (pass), including the two new held-back rows that repair the holder's own problem and then follow the held decision's refusal to a valid end. Followed the refusal with the real dispatch CLI in five break shapes. Re-ran the browser specs (17 passed, chromium and iphone)."
   },
   "failures": [],
   "failed": 0,
   "proof": [
     {
-      "criterion": "Architect's check (12:42Z): what the 780-body test's numbers count, and that every broken body ends in exactly one of two outcomes with no word lost",
-      "surface": "Go document service against Postgres (packages/envoy/internal/dispatch/docs, service_test.go:1168)",
+      "criterion": "Review round 11: a held-back refusal says only that the editor repairs it, and a test proves the refusal true by repairing the holder and then following the held decision's refusal to a valid end",
+      "surface": "Go document service against Postgres (packages/envoy/internal/dispatch/docs); a nested broken decision is not reachable through the browser or a write (round 13)",
       "command": "cd packages/envoy && DISPATCH_TEST_DATABASE_URL=postgres://postgres@127.0.0.1:55432/postgres go test ./internal/dispatch/docs/ -count=1 -run TestSetAskBlockTextRefus -v",
-      "observed": "Logged '780 bodies enumerated, 715 breaking the content rule: 348 refusals followed to a valid decision, 765 naming no delete and saying why; 348 of the 715 bodies end with the decision reading as one'. broken (715) counts bodies. followed (348) and unnamed (765) count refusals: one per broken nested decision plus the outer one when it still breaks, 1,113 refusals over 715 bodies. The 765 are 541 'does not read as one at all', 186 'repaired in the document editor, or by an ask edit once the decision holding it reads as one' and 38 'repaired in the document editor'. valid (348) counts bodies whose outer decision reads strictly at the end; it equals followed only by coincidence. The test fails a body unless it ends valid, or every decision still unreadable was unreadable before and its next ask edit is refused with no delete (:1239-1252): 348 valid + 367 terminal = 715. followAskRefusal checks every word not named for deletion survives and every named word is quoted; assertAskEditWroteNothing checks a no-delete refusal wrote nothing.",
-      "headSha": "d78e7cbb2ecb3db493cb66d2ef4ff81fc4500146",
-      "negativeControl": "The reviewer's TestProbeR10QEmptyHolder at 9d737655: the refusal sent the caller to an ask edit of the holder ('edit ask block \"O\" first'), which is refused with no path"
+      "observed": "11 tests pass. TestSetAskBlockTextRefusalOfNestedDecisionsNamesOnlyWhatBreaksTheRule passes its new subtests 'the decision holding it holds its question again' and 'the decision holding it is decided and repaired'. The 1,364-body test logs 1,242 broken: 892 followed + 350 'has an empty question', 0 failing.",
+      "headSha": "791bc94356956b666b85b109e73c60366c74ee6e",
+      "negativeControl": "The reviewer's mutation at 21bde3dd (holder:true for every nested decision) passed every Ask test then. The new rows follow the held decision's refusal to deletes after the holder is repaired, which that mutation would refuse."
     },
     {
       "criterion": "Every ask edit of a broken decision is refused naming, as one document edit, the deletes that leave it valid; following them, then edit-ask, ends valid with every word the agent did not delete",
       "surface": "Dispatch ask-edit route and document edits through the real dispatch CLI against the real Go server and Postgres 17; decisions broken by two or three real editors in headless Chromium",
-      "command": "Throwaway Playwright probes W1-W5 (corpus in https://github.com/sjawhar/legion/pull/2433#issuecomment-6485995991): edit-ask --urgency high; one doc-edit holding the refusal's named deletes; edit-ask with every option. Record https://github.com/sjawhar/legion/pull/2433#issuecomment-6497302402",
+      "command": "Throwaway Playwright probes W1-W5 (corpus in https://github.com/sjawhar/legion/pull/2433#issuecomment-6485995991). Record https://github.com/sjawhar/legion/pull/2433#issuecomment-6499609715",
       "observed": "Two lists, three lists ('Applied 2 ops'), repeated label, paragraph after the list, nested sub-item: each named doc-edit applied, then edit-ask applied. Each decision ended valid, with pages unmarked, the row equal to the options sent and every word kept.",
-      "headSha": "d78e7cbb2ecb3db493cb66d2ef4ff81fc4500146",
+      "headSha": "791bc94356956b666b85b109e73c60366c74ee6e",
       "negativeControl": "edit-ask --urgency high on each broken decision → exit 1; document and row unchanged"
     },
     {
-      "criterion": "A1 regression lock: crossed edits keep every word; the input guards and read-back filter hold",
+      "criterion": "A1 regression lock after main's merge: crossed edits keep every word; the input guards and read-back filter hold",
       "surface": "Dispatch document editor in headless Chromium (chromium and iphone), real Go server and Postgres 17",
       "command": "cd packages/dispatch && source /legion/scratch/harness/env.sh && bun run e2e -- ask-concurrent-edit.e2e.ts typed-block-content-rule.e2e.ts --project chromium --project iphone",
-      "observed": "17 passed (2.8m)",
-      "headSha": "d78e7cbb2ecb3db493cb66d2ef4ff81fc4500146",
+      "observed": "17 passed (2.9m). Main's merge changes nothing in this PR's editor or settlement code; its docs change is addedAskBlocks (reporting new asks).",
+      "headSha": "791bc94356956b666b85b109e73c60366c74ee6e",
       "negativeControl": "Round 1 base tree b295a3fb: the ask-concurrent-edit rows fail with element(s) not found (the decision deleted)"
     }
   ],
-  "ci": "Read on GitHub: at ea3cfcb0 every lane was cancelled (superseded). At d78e7cbb, lint, typecheck, pr-title, changes, build x2, envoy-e2e-local, envoy-infra-go and dispatch-browser-multiprocess succeeded; the other lanes were queued or in progress. Not re-run.",
+  "ci": "Read on GitHub: at code head df85ed05 every lane was cancelled (superseded); at 791bc943, changes and pr-title were queued. Not re-run.",
   "notes": [
-    "The workspace was recreated: I re-ran bun install (then restored bun.lock, which the install had changed), rebuilt contracts and installed the matching chromium. The throwaway spec was moved out; the working copy holds only this handoff."
+    "The workspace was recreated; the harness and dependencies were in place. The throwaway spec was moved out. The working copy holds only this handoff."
   ]
 }
