@@ -2,17 +2,20 @@ package store
 
 import (
 	"context"
+	"strings"
 	"testing"
 )
 
 const asksAnchorArtifactIDVersion = 137
 
-// 0137 builds asks_anchor_artifact_id over (anchor->>'artifact_id')::uuid on every anchored ask.
-// asks_anchor_artifact (0032) casts the same text only where block_artifact_id is null, so an ask
-// that names a block document and whose anchor's artifact_id does not cast is a row the schema
-// before 0137 holds and 0137 refuses: the census counts it, so the pre-deploy gate refuses before
-// the boot would, while an ask whose two columns both name documents counts nothing.
-func TestCensusCountsAnAskWhoseBlockColumnHidesAnAnchorArtifactIDThatDoesNotCast(t *testing.T) {
+// 0137 must boot over any data a schema before it accepted. asks_anchor_artifact (0032) casts
+// anchor->>'artifact_id' only where block_artifact_id is null, so an ask holding both columns can
+// carry an artifact_id no index has ever cast, and production's asks cannot be counted to show
+// none does. The index expression's regex guard answers null for such a row instead of raising,
+// so 0137 applies, refuses nothing (its census answers 0), and leaves those rows out of
+// asks_anchor_artifact_id, where AsksOutsideAnchorArtifactIndex counts them for the boot log. A
+// non-canonical spelling of a real document id is left out the same way.
+func TestMigration0137BootsOverAnAskWhoseAnchorArtifactIDDoesNotCast(t *testing.T) {
 	ctx := context.Background()
 	store := openEmptyTestStore(t)
 	if err := store.migrate(ctx, migrationsThrough(t, asksAnchorArtifactIDVersion-1)); err != nil {
@@ -42,23 +45,44 @@ func TestCensusCountsAnAskWhoseBlockColumnHidesAnAnchorArtifactIDThatDoesNotCast
 	`, documentA, documentB); err != nil {
 		t.Fatalf("seed an ask naming both documents: %v", err)
 	}
-	if got := censusCount(t, store, asksAnchorArtifactIDVersion); got != 0 {
-		t.Fatalf("census over an ask whose anchor names a document = %d, want 0", got)
-	}
 	if _, err := store.Pool.Exec(ctx, `
 		insert into asks (issue_key, author, question, anchor, block_artifact_id)
 		values ('CORE-1', '{"kind":"user","id":"alice"}', 'Uncastable anchor?',
-			'{"artifact_id":"not-a-uuid","mark_id":"refused"}', $1::uuid)
+			'{"artifact_id":"not-a-uuid","mark_id":"uncastable"}', $1::uuid)
 	`, documentB); err != nil {
 		t.Fatalf("seed an ask whose anchor's artifact_id does not cast: %v", err)
 	}
-	if got := censusCount(t, store, asksAnchorArtifactIDVersion); got != 1 {
-		t.Fatalf("census = %d, want 1: the ask whose anchor names not-a-uuid is a row 0137's index refuses", got)
+	if _, err := store.Pool.Exec(ctx, `
+		insert into asks (issue_key, author, question, anchor, block_artifact_id)
+		values ('CORE-1', '{"kind":"user","id":"alice"}', 'Upper-case anchor?',
+			jsonb_build_object('artifact_id', $1::text, 'mark_id', 'upper'), $2::uuid)
+	`, strings.ToUpper(documentA), documentB); err != nil {
+		t.Fatalf("seed an ask whose anchor's artifact_id is upper-case: %v", err)
 	}
-	if err := store.migrate(ctx, migrationsThrough(t, asksAnchorArtifactIDVersion)); err == nil {
-		t.Fatal("0137 applied over an anchored ask whose artifact_id does not cast")
+
+	if got := censusCount(t, store, asksAnchorArtifactIDVersion); got != 0 {
+		t.Fatalf("census = %d, want 0: 0137 refuses no row", got)
 	}
-	if got := schemaVersion(t, store); got != asksAnchorArtifactIDVersion-1 {
-		t.Fatalf("schema version after the refusal = %d, want %d", got, asksAnchorArtifactIDVersion-1)
+	if err := store.migrate(ctx, migrationsThrough(t, asksAnchorArtifactIDVersion)); err != nil {
+		t.Fatalf("migrate through %d over an anchored ask whose artifact_id does not cast: %v", asksAnchorArtifactIDVersion, err)
+	}
+	if got := schemaVersion(t, store); got != asksAnchorArtifactIDVersion {
+		t.Fatalf("schema version = %d, want %d", got, asksAnchorArtifactIDVersion)
+	}
+	outside, err := store.AsksOutsideAnchorArtifactIndex(ctx)
+	if err != nil {
+		t.Fatalf("count the asks left out of asks_anchor_artifact_id: %v", err)
+	}
+	if outside != 2 {
+		t.Fatalf("asks left out of asks_anchor_artifact_id = %d, want 2: the uncastable and the upper-case anchor", outside)
+	}
+	var indexed bool
+	if err := store.Pool.QueryRow(ctx, `
+		select exists (select 1 from pg_indexes where indexname = 'asks_anchor_artifact_id')
+	`).Scan(&indexed); err != nil {
+		t.Fatalf("look up asks_anchor_artifact_id: %v", err)
+	}
+	if !indexed {
+		t.Fatal("asks_anchor_artifact_id was not created")
 	}
 }
