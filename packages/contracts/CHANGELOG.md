@@ -1,5 +1,70 @@
 # Changelog
 
+## [main@a09a2f257406] - 2026-10-29
+
+### Added
+
+- `AskReach`, the reach every ask read carries, shared by `AskThread` and `AskRead`: `claimant`
+  (the session holding the claim on the ask's issue), `route` (the issue's route, `session:<id>` or
+  `role:<name>`), whom a person's answer and replies on the ask reach beside its followers, and,
+  since it extends `IssueRouteReach`, `route_status` (`live`, `no_holder` or `unknown`) and
+  `route_holder` (the live session that route reaches), resolved per read as on the issue reads, so
+  a reader counts each session once and tells a route nobody holds from one Dispatch could not
+  judge; each is null when absent and on a project document's ask.
+- `withdrawn`, a third `AskResolution.kind` beside `retracted` and `resolved`, which the ask event
+  payload schema (`AskEventPayloadSchema`) now parses: Dispatch writes it alone, on each open ask
+  an issue's close withdraws, and reopening the issue opens those asks again. `dispatch_resolve_ask`
+  still takes only `retracted` and `resolved`, so no caller can write one.
+- `IssueReferenceSummary` and `IssueReferenceSummaryDocument`, the body of
+  `GET /api/v1/issues/{key}/summary`, and `DocumentReferenceSummary`, the body of
+  `GET /api/v1/projects/{key}/artifacts/{slug}/summary`: what a reference to an issue or a
+  document shows, without the full read. `IssueReferenceSummaryDocument.primary` marks the
+  issue's spec, the document a reference to a block of the spec names. The event payloads gain
+  optional fields saying what a write moved: `IssueEventChanges` (`changed`, `ancestors`,
+  `thread_logins`) on `IssueEventPayload`, `ThreadLoginsPayload` (`thread_logins`) on
+  `AskEventPayload`, `CommentEventPayload` and `MessageEventPayload`,
+  `UserStateUpdatedEventPayload.changed` (which names `snoozed` for a snooze or an un-snooze, whose
+  event carries only `login` and `changed`, so `UserStateUpdatedEventPayload.state` is now
+  optional); `IssueEventPayloadSchema` and the ask, comment and message event schemas carry the
+  same optional fields. `ReferenceChangesPayload` gains `references_changed_truncated_kinds`, the
+  kinds a write cut from `references_changed` past the server's cap of 100 targets of each kind,
+  beside the still-named targets of every other kind and `references_changed_truncated: true`.
+  `ChangedReference` gains `kind: "artifact"`, a cited document or file named by its uuid, the
+  optional `ref`, its `dispatch://` address, and `kind: "block"`, a block of a document named by
+  its node id, its `ref` and its document's uuid as `artifact_id`, named when a write moves its
+  citations or its text. Each is absent from an event written before Dispatch sent it, which a
+  reader takes as "anything may have moved".
+
+### Changed
+
+- `dispatch_claim`'s description, which is also `dispatch claim --help`, says that while a session
+  holds the claim a person's answers, comments and messages on the issue reach it directly, a new
+  comment that mentions it arrives once, as the mention, when the mention reached it, and still
+  reaches it directly when the mention's send fails (a mention whose receipt timed out can arrive
+  twice, and the second copy is the same comment), and that an agent's events and every other
+  change on the issue still need a subscription to it, except in an ask you follow: anyone else's
+  answer, hand-back, resolution or edit of it (other than a quiet edit), and every reply there
+  (new, edited, resolved or reopened), reach you as its follower.
+- The `dispatch_doc_read` description says a read prints every open thread anchored on the
+  document in full after the markdown, an open ask's replies included, and no resolved thread or
+  closed ask (#2366).
+- `DISPATCH_SERVER_STARTED_SUBJECT` and `DispatchServerStartedPayloadSchema` mean the build every
+  live Dispatch server process serves, announced once each time that build changes, rather than one
+  process's start: a rolling update is announced once its last process of the earlier build has
+  gone, a restart on the announced build is not announced, and a rollback is announced again.
+  `started_at` is the database's time of the announcement, and the event id is
+  `dispatch-server-started-<commit>-<seq>`. The subject and the payload's two fields are unchanged,
+  so the schema still parses every envelope; a shared fixture
+  (`packages/daemon/internal/intake/testdata/dispatch/server-started.json`) holds the Dispatch
+  writer, the daemon's intake and this schema to one envelope.
+- `shortSessionId` reads the Legion daemon's write identity, a session id beginning
+  `legion-daemon:`, whole rather than as `session:` and its first 8 characters, which name nobody,
+  so the shared actor label names the daemon that closed an issue. `dispatch_issue_update`'s
+  description says closing an issue withdraws its open asks and reopening it brings them back, and
+  `dispatch_resolve_ask`'s says a closed issue's asks were withdrawn by its close, that only
+  Dispatch writes `withdrawn`, and that an ask on a closed issue is `409 ISSUE_CLOSED` until the
+  issue reopens.
+
 ## Before changelog fragments
 
 ### Added
