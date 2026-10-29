@@ -2,18 +2,26 @@
   "schemaVersion": 1,
   "phase": "test",
   "issue": "INFRA-520",
-  "completed": "2026-10-29T02:24:00Z",
-  "round": 14,
-  "headTested": "bf327d74c05182fa3991df4f4dca2510b99e5f01 (code head f78f383ede82)",
-  "previousRound": "Review round 5 (review.json at bbda9d75) found #2316 CONFLICTING with main be4567e3. af395f91 merges main and carries #2476 (removes the three Postgres 16 jobs) and #2278 (pi-envoy's NATS service and LEGION_TEST_NATS_URL). f78f383e makes changes set docs' output false on a push (ci.yaml:83, `github.event_name != 'push' && steps.filter.outputs.docs || 'false'`) and drops ci-ok's NOT_ON_PUSH. Round 13's run result stands for the router at bb1a700a.",
-  "ci": "No CI run at f78f383e was read this round (the INFRA daemon roll suspends claims at 02:30Z). Round 13's router run 40768558349 at bb1a700a: ci-ok failed on main's two browser reds alone.",
+  "completed": "2026-10-29T09:20:00Z",
+  "round": 15,
+  "headTested": "9863a5a3d346fb2685120f00ab817e47ae43f031 (code head 5e6cac9ba234, merge of main 88840d35)",
+  "previousRound": "Review round 6 (review.json at 4fcff042) found #2316 CONFLICTING with main 88840d35 (#2449). 5e6cac9b merges main through 88840d35. The only main change to a deleted workflow is #2449's envoy-go unit-test step: `-timeout 20m` on both go commands. ci.yaml:2127-2131 carries it word for word, and ci_job_reads.py:315-317 pins the new script exactly. #2487's change is to .github/scripts/changelog-fold.test.sh, a kept file, and equals main. packages/envoy/cmd/dispatch/AGENTS.md differs from main only in naming ci.yaml where main names envoy-and-contracts.yaml (4 lines). Neither main nor ci.yaml sets a job timeout on envoy-go. Main has no commit after 88840d35.",
+  "ci": "CI run 40845855821 at 5e6cac9b (created 08:57:07Z) was queued at 09:15Z. Read as queued; I did not wait for it. The previous head's run 40805326445 (f78f383e): 23 success, 3 failure, 1 skipped. ci-ok's annotations name envoy-go and dispatch, which the reviewer recorded as not this pull request's (review.json ci).",
   "implementerProof": {
     "verdict": "verified",
-    "how": "At bf327d74. ci.yaml has no Postgres 16 job, filter, output or 7b822b0a digest left (grep count 0). pi-envoy carries #2278's nats:2.10@sha256:5498ba57\u2026 service and LEGION_TEST_NATS_URL nats://127.0.0.1:4222. ci-ok.test.sh: 40 passed, 0 failed. check-ci-filters.test.sh: 127 passed, 0 failed. check-ci-filters.sh on the tree exits 0 with 23 gates, and docs-pages' paths equal the docs filter. The docs job's if: is `needs.changes.outputs.docs == 'true'`."
+    "how": "At 9863a5a3: GitHub reports #2316 MERGEABLE (BLOCKED on checks and review). check-ci-filters.test.sh 127 passed, 0 failed. ci-ok.test.sh 40 passed. check-ci-filters.sh on the tree exits 0: 23 gates (envoy-go 2055 files, 0 uncovered), and docs-pages' paths equal the docs filter."
   },
   "failures": [],
   "failed": 0,
   "proof": [
+    {
+      "criterion": "Filter drift: the ported envoy-go unit-test script is held to its exact pin, so a change to it falls to everything",
+      "surface": ".github/scripts/check-ci-filters.sh on the repository tree",
+      "command": "ci.yaml:2129 changed back to `go test ./internal/dispatch/api` (dropping #2449's -timeout 20m), check-ci-filters.sh, reverted",
+      "observed": "exit 1, 22 file errors, each '\u2026 pinned script, which this check does not reduce (the step's script is not the pinned text) \u2026'. The unmodified tree exits 0 with 23 gates",
+      "headSha": "5e6cac9ba234",
+      "negativeControl": "the edit itself; the unedited script passes"
+    },
     {
       "criterion": "ci-ok on main pushes: the docs job, which docs-pages.yaml replaces there, is not selected on a push, and stays selected on pull requests and merge groups",
       "surface": ".github/scripts/ci-ok.sh with the env of ci.yaml's ci-ok step (SELECTED_BY and the rest, read from ci.yaml at f78f383e)",
@@ -80,7 +88,7 @@
     }
   ],
   "notProven": [
-    "No CI run at f78f383e has been read: the INFRA daemon roll at 02:30Z suspends this claim. A green ci-ok still needs main's fixes for close-withdraws-asks.e2e.ts:126 and mermaid.e2e.ts:194 (round 13).",
+    "No CI run of 5e6cac9b has completed: run 40845855821 is queued. ci-ok has not yet been green at a #2316 head: main's reds (close-withdraws-asks.e2e.ts:126 in dispatch, and the envoy-go listener test the reviewer recorded) failed it at f78f383e.",
     "docs-pages.yaml runs only on a push to main. Its first run, queue order and deploy are the production check's.",
     "By the architect's decision (comment bafbc258), the check does not read environment writes made inside local actions or repository scripts (check-ci-filters.sh:84-88)."
   ]
