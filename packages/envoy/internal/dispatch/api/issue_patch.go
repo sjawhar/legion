@@ -514,6 +514,25 @@ func (s *server) patchIssue(w http.ResponseWriter, r *http.Request) {
 	advice := s.writeAdvice(
 		r.Context(), tx, "PATCH /api/v1/issues/{key}", key, actor, "", after.Status,
 	)
+	if closing {
+		// The close's last statement before its commit stamps closed_at again, at the moment it
+		// runs (clock_timestamp()), over the start of the transaction (now()) the update above
+		// wrote. The document append gate takes a browser's update the room observed no later than
+		// closeMargin after closed_at as one made while the issue was open (docs.closeMargin), and
+		// the asks' withdrawal above holds each document it writes locked until this commit, a
+		// flush to every process and the waits on other writers included: a keystroke that waited
+		// on that lock reaches the gate only after the commit, and was made while the issue was
+		// still open however long the transaction ran. The second write of closed_at fires
+		// migration 0137's trigger again, whose notification Postgres folds into the first (same
+		// channel, same payload, one transaction). The events appended above carry the first
+		// stamp; the response carries this one, the stored value.
+		if err := tx.QueryRow(r.Context(), `
+			update issues set closed_at = clock_timestamp() where key = $1 and closed_at is not null returning closed_at
+		`, key).Scan(&after.ClosedAt); err != nil {
+			s.writeHandlerError(w, err)
+			return
+		}
+	}
 	if err := ledger.Commit(r.Context()); err != nil {
 		s.writeHandlerError(w, err)
 		return
