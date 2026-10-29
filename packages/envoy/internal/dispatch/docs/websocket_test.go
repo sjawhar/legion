@@ -14,10 +14,8 @@ import (
 	gws "github.com/gorilla/websocket"
 	"github.com/reearth/ygo/crdt"
 	"github.com/reearth/ygo/encoding"
-	"github.com/sjawhar/envoy/internal/dispatch/auth"
 	"github.com/sjawhar/envoy/internal/dispatch/docs/docstest"
 	"github.com/sjawhar/envoy/internal/dispatch/events"
-	"github.com/sjawhar/envoy/internal/dispatch/model"
 	"github.com/sjawhar/envoy/internal/dispatch/pmdoc"
 	"github.com/sjawhar/envoy/internal/dispatch/store/storetest"
 )
@@ -568,110 +566,6 @@ func TestFailedRoomEvictsAndReloadsOnNextAccess(t *testing.T) {
 		t.Fatalf("reloaded room access: response=%#v err=%v", response, err)
 	}
 	_ = connection.Close()
-}
-
-// TestDocumentBearerCannotForgeVerifiedServiceSubject: Actor.Service means "the
-// server verified this Kubernetes subject from a projected token", and both
-// renderers show it as that. The document websocket takes its actor from a
-// caller-supplied header, so a shared-token holder must not be able to put one
-// there — nor an owner, which seeds the default assignee.
-func TestDocumentBearerCannotForgeVerifiedServiceSubject(t *testing.T) {
-	database := storetest.Open(t)
-	artifactID := createDocument(t, database, "# First")
-	service := New(Deps{
-		Store:       database,
-		Events:      events.NewBroker(),
-		Identity:    headerIdentity(database),
-		AgentTokens: sharedAgentTokens(t, "doc-agent-token"),
-		ServerURL:   "https://dispatch.example",
-		Settle:      20 * time.Millisecond,
-	})
-	t.Cleanup(func() {
-		if err := service.Shutdown(context.Background()); err != nil {
-			t.Errorf("shutdown document service: %v", err)
-		}
-	})
-	service.settle = time.Hour
-	seedServiceText(t, service, artifactID, "before")
-
-	httpServer := httptest.NewServer(http.HandlerFunc(service.ServeHTTP))
-	t.Cleanup(httpServer.Close)
-	headers := http.Header{
-		"Authorization": []string{"Bearer doc-agent-token"},
-		"X-Dispatch-Actor": []string{`{"kind":"session","id":"session-0123456789abcdef",` +
-			`"origin":{"host":"forge"},` +
-			`"service":"system:serviceaccount:legion:legion-worker","owner":"mallory"}`},
-	}
-	wsURL := "ws" + strings.TrimPrefix(httpServer.URL, "http") + "/ws/doc/" + artifactID
-	connection, response, err := gws.DefaultDialer.Dial(wsURL, headers)
-	if err != nil {
-		t.Fatalf("connect as document bearer: response=%#v err=%v", response, err)
-	}
-	t.Cleanup(func() { _ = connection.Close() })
-	// A connection is credited with the browser edits made while it is open, and a raw room edit is
-	// one, so this change puts the connection's actor on the next version, as the server persists it.
-	editLiveTree(t, service, artifactID, replaceRun("before", "after"))
-
-	named, err := namedVersion(t, service, artifactID,
-		"checkpoint", model.Actor{Kind: "user", ID: "alice"})
-	if err != nil {
-		t.Fatalf("name document version: %v", err)
-	}
-	version := named.Version
-	var session *model.Actor
-	for index, author := range version.Authors {
-		if author.Kind == "session" {
-			session = &version.Authors[index]
-		}
-	}
-	if session == nil {
-		t.Fatalf("version authors = %#v, want the bearer connection's session actor among them", version.Authors)
-	}
-	if session.Service != nil {
-		t.Fatalf("the header's service reached the persisted author: %q", *session.Service)
-	}
-	if session.Owner != nil {
-		t.Fatalf("the header's owner reached the persisted author: %q", *session.Owner)
-	}
-	if session.ID != "session-0123456789abcdef" {
-		t.Fatalf("author id = %q, want the header's session id", session.ID)
-	}
-	if session.Origin == nil || session.Origin.Host != "forge" {
-		t.Fatalf("author origin = %#v, want the header's origin preserved", session.Origin)
-	}
-}
-
-// sharedAgentTokens is a DISPATCH_AGENT_TOKEN setting parsed as the server parses it at boot.
-func sharedAgentTokens(t *testing.T, setting string) *auth.SharedAgentTokens {
-	t.Helper()
-	tokens, err := auth.ParseSharedAgentTokens(setting)
-	if err != nil {
-		t.Fatalf("ParseSharedAgentTokens(%q): %v", setting, err)
-	}
-	return tokens
-}
-
-// The document websocket takes a bearer's session actor only when the bearer is one of the shared
-// agent token's values; one byte off, or a value the setting does not list, the same actor is
-// refused.
-func TestDocumentBearerMustBeTheSharedToken(t *testing.T) {
-	service := &Service{agentTokens: sharedAgentTokens(t, "doc-agent-token old-doc-token")}
-	for _, test := range []struct {
-		authorization string
-		admitted      bool
-	}{
-		{authorization: "Bearer doc-agent-token", admitted: true},
-		{authorization: "Bearer old-doc-token", admitted: true},
-		{authorization: "Bearer doc-agent-tokem", admitted: false},
-		{authorization: "Bearer other-doc-token", admitted: false},
-	} {
-		request := httptest.NewRequest(http.MethodGet, "/ws/doc/room", nil)
-		request.Header.Set("Authorization", test.authorization)
-		request.Header.Set("X-Dispatch-Actor", `{"kind":"session","id":"session-0123456789abcdef"}`)
-		if _, err := service.requestActor(request); (err == nil) != test.admitted {
-			t.Errorf("requestActor(Authorization %q) err = %v, want admitted %t", test.authorization, err, test.admitted)
-		}
-	}
 }
 
 func TestWebsocketRejectsUnauthenticatedConnection(t *testing.T) {

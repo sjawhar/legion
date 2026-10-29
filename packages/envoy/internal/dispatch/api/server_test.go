@@ -1880,6 +1880,56 @@ func TestRevokedCookieIsRejectedAcrossDispatchSurfaces(t *testing.T) {
 	}
 }
 
+// The document socket takes a signed-in person's cookie and nothing else (INFRA-264). The shared
+// agent token the HTTP API accepts is no credential for it: the handshake is refused, where the
+// same room admits the cookie. A bearer once named its own session in a header the socket read,
+// which made it a second, weaker door into Dispatch.
+func TestTheDocumentSocketTakesACookieAndNotTheSharedAgentToken(t *testing.T) {
+	handler, _, cookie, request := newCookieServer(t)
+	if response := request(http.MethodPost, "/api/v1/projects", map[string]string{"key": "TEST", "name": "Test"}); response.Code != http.StatusCreated {
+		t.Fatalf("create project: status=%d body=%s", response.Code, response.Body.String())
+	}
+	created := request(http.MethodPost, "/api/v1/issues", map[string]string{"project": "TEST", "title": "Document door"})
+	if created.Code != http.StatusCreated {
+		t.Fatalf("create issue: status=%d body=%s", created.Code, created.Body.String())
+	}
+	issue := decodeBody[struct {
+		PrimaryArtifactID string `json:"primary_artifact_id"`
+	}](t, created)
+	httpServer := httptest.NewServer(handler)
+	t.Cleanup(httpServer.Close)
+	wsURL := "ws" + strings.TrimPrefix(httpServer.URL, "http") + "/ws/doc/" + issue.PrimaryArtifactID
+
+	// The same token answers GET /api/v1/whoami as the shared agent, so the socket's refusal is
+	// the socket's own and not an unknown value.
+	whoami := httptest.NewRequest(http.MethodGet, "/api/v1/whoami", nil)
+	whoami.Header.Set("Authorization", "Bearer agent-token")
+	whoamiResponse := httptest.NewRecorder()
+	handler.ServeHTTP(whoamiResponse, whoami)
+	if whoamiResponse.Code != http.StatusOK {
+		t.Fatalf("GET /api/v1/whoami with the shared agent token: status=%d body=%s, want 200", whoamiResponse.Code, whoamiResponse.Body.String())
+	}
+	connection, response, err := gws.DefaultDialer.Dial(wsURL, http.Header{"Authorization": []string{"Bearer agent-token"}})
+	if connection != nil {
+		_ = connection.Close()
+	}
+	if err == nil || response == nil || response.StatusCode != http.StatusUnauthorized {
+		t.Fatalf("the document socket with the shared agent token: response=%#v err=%v, want a refused handshake (401)", response, err)
+	}
+	// The same room admits the person the browser signs in as, and a bearer beside that cookie is
+	// no second credential: the person is who the connection is.
+	for name, header := range map[string]http.Header{
+		"the signed-in person's cookie":             {"Cookie": []string{cookie.Name + "=" + cookie.Value}},
+		"that cookie beside the shared agent token": {"Cookie": []string{cookie.Name + "=" + cookie.Value}, "Authorization": []string{"Bearer agent-token"}},
+	} {
+		connection, response, err := gws.DefaultDialer.Dial(wsURL, header)
+		if err != nil {
+			t.Fatalf("the document socket with %s: response=%#v err=%v", name, response, err)
+		}
+		_ = connection.Close()
+	}
+}
+
 func TestArtifactUploadSummaryCreatesNamedVersions(t *testing.T) {
 	handler := newTestHandler(t)
 	issue := createInteractionIssue(t, handler, "TEST", "Named uploads", "before")

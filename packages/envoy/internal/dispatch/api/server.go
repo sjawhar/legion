@@ -192,11 +192,10 @@ func NewDeps(input DepsInput) (Deps, error) {
 	}
 	if input.Docs == nil {
 		input.Docs = docs.New(docs.Deps{
-			Store:       input.Store,
-			Events:      input.Events,
-			Identity:    input.Identity,
-			AgentTokens: input.AgentTokens,
-			ServerURL:   input.ServerURL,
+			Store:     input.Store,
+			Events:    input.Events,
+			Identity:  input.Identity,
+			ServerURL: input.ServerURL,
 		})
 	}
 	var envoyClient *envoy.Client
@@ -371,8 +370,7 @@ type queryer interface {
 // production.
 //
 // Every route refuses a path or query parameter holding U+0000 or a byte that is not UTF-8 before
-// its handler runs (refuseUnstorableParameters), as decodeJSON refuses a U+0000 in a body, and the
-// document websocket refuses one in the actor its bearer names (refuseUnstorableActor).
+// its handler runs (refuseUnstorableParameters), as decodeJSON refuses a U+0000 in a body.
 //
 // Every POST and PATCH route takes an Idempotency-Key, and a repeat under one is answered from the
 // key rather than run again (keyedWrites, request_keys.go). Every write route - a POST, PATCH, PUT
@@ -381,14 +379,15 @@ type queryer interface {
 //
 // The server holds the delivery hub (LEGION-690), which starts its goroutines on the first
 // subscription and runs them until lifetime ends, and mounts GET /ws/live beside the document
-// websocket, under the same wrappers. It also holds the event stream relay (INFRA-66), which every
-// events subscription reads and which starts its own listening connection on the first of them,
-// also on lifetime. lifetime is the process's own context, cancelled when the server is shutting
-// down (server.lifetime says what else it ends). The returned Background's Wait blocks until every
-// keyed write's handler and every delivery a handler detached from its request (a broadcast's
-// recipients) has settled, and until the hub, every live socket (and every subscription it ran)
-// and the relay have ended. Call it only after lifetime has been cancelled and before the database
-// pool closes.
+// websocket. The live socket takes a bearer as well as a cookie, so it runs under
+// decideBrokerToken; the document websocket takes a cookie alone and does not. It also holds the
+// event stream relay (INFRA-66), which every events subscription reads and which starts its own
+// listening connection on the first of them, also on lifetime. lifetime is the process's own
+// context, cancelled when the server is shutting down (server.lifetime says what else it ends).
+// The returned Background's Wait blocks until every keyed write's handler and every delivery a
+// handler detached from its request (a broadcast's recipients) has settled, and until the hub,
+// every live socket (and every subscription it ran) and the relay have ended. Call it only after
+// lifetime has been cancelled and before the database pool closes.
 //
 // Register panics when lifetime is nil: the hub and the relay would run on no context that ever
 // ends, so they would outlive the process's shutdown, or the test that built the server, and the
@@ -528,7 +527,7 @@ func register(mux *http.ServeMux, lifetime context.Context, deps Deps) *server {
 		ServeHTTP(http.ResponseWriter, *http.Request)
 	}); ok {
 		const pattern = "/ws/doc/{room}"
-		mux.Handle("GET "+pattern, accesslog.Handler(pattern, s.whileCallerResolves(s.decideBrokerToken(trackTransactions(s.refuseUnstorableParameters(pattern, s.refuseUnstorableActor(websocket.ServeHTTP)))))))
+		mux.Handle("GET "+pattern, accesslog.Handler(pattern, s.whileCallerResolves(trackTransactions(s.refuseUnstorableParameters(pattern, websocket.ServeHTTP)))))
 	}
 	const livePattern = "/ws/live"
 	mux.Handle("GET "+livePattern, accesslog.Handler(livePattern, s.whileCallerResolves(s.decideBrokerToken(trackTransactions(s.refuseUnstorableParameters(livePattern, s.serveLiveSocket))))))

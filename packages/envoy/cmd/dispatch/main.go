@@ -67,8 +67,8 @@ var buildCommit string
 
 type bootConfig struct {
 	DatabaseURL string
-	// AgentTokens is DISPATCH_AGENT_TOKEN parsed: every value the API and the document websocket
-	// accept as the shared agent token, the first the current one.
+	// AgentTokens is DISPATCH_AGENT_TOKEN parsed: every value the API accepts as the shared agent
+	// token, the first the current one.
 	AgentTokens    *auth.SharedAgentTokens
 	RepoProjects   string
 	DefaultProject string
@@ -311,7 +311,7 @@ func main() {
 	requestIdentity := requestIdentityFor(boot, signingKey, people, sessions, signIn)
 
 	broker := events.NewBroker()
-	documentService := newDocumentService(boot, docs.Deps{
+	documentService := docs.New(docs.Deps{
 		Store:           database,
 		Events:          broker,
 		Identity:        requestIdentity,
@@ -1010,15 +1010,6 @@ func devSignInSharedSigningKey(shared string) string {
 	mac := hmac.New(sha256.New, []byte(shared))
 	mac.Write([]byte(devSignInSharedSigningKeyLabel))
 	return base64.RawURLEncoding.EncodeToString(mac.Sum(nil))
-}
-
-// newDocumentService is the document service main serves the document websocket and the API's
-// documents from: built, what main made from the rest of the configuration, with every setting the
-// service takes from boot filled in. The settings tests build it through here, as they build the
-// router through appContextOptions, so dropping a hand-off here fails a case.
-func newDocumentService(boot bootConfig, built docs.Deps) *docs.Service {
-	built.AgentTokens = boot.AgentTokens
-	return docs.New(built)
 }
 
 // dashboardPublishTimeout bounds the boot's publish of its dashboard build and the prune after it.
