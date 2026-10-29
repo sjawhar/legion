@@ -65,6 +65,41 @@ test.beforeEach(async () => {
   await resetDatabase();
 });
 
+test("a title checked before an issue was filed is checked again, not answered from before", async ({
+  browser,
+}) => {
+  await createProject({ key: "CORE", name: "Core" });
+  await createIssue({ project: "CORE", title: "Quadrant bezel polishing rota" });
+  const context = await asUser(browser, "alice");
+  try {
+    const page = await context.newPage();
+    await page.goto("/");
+    await expect(page.getByRole("heading", { name: "Inbox" })).toBeVisible();
+
+    const draft = "Astrolabe drift spoils the mooring calibration";
+    const first = await openCreateDialog(page);
+    await first.title.fill(draft);
+    await expect(first.related.getByText(/searched .*and found nothing\.$/u)).toBeVisible();
+    await page.keyboard.press("Escape");
+    await expect(first.dialog).toHaveCount(0);
+
+    // Filed between the two checks, as a colleague's issue would be. The section is advice about
+    // what exists now, so the second draft of the same title must be checked again rather than
+    // answered from what the dialog already held for it.
+    const filed = await createIssue({
+      project: "CORE",
+      spec: "The astrolabe drifts while the mooring mast is calibrated.",
+      title: draft,
+    });
+
+    const second = await openCreateDialog(page);
+    await second.title.fill(draft);
+    await expect(second.related.getByRole("link", { name: `${filed.key} ${draft}` })).toBeVisible();
+  } finally {
+    await context.close();
+  }
+});
+
 /** The phone-sized window the dashboard's own sheet layout is for: the dialog is full-bleed
  *  below `xl`, so everything it offers has to stand in these 667 pixels. */
 const phone = { height: 667, width: 375 };

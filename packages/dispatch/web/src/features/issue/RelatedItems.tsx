@@ -16,10 +16,7 @@ import { statusText } from "../project/board-model";
 import { Timestamp } from "../refs/Timestamp";
 import { AskHitStatus } from "../search/AskHitStatus";
 import { kindLabel } from "../search/search-model";
-import { RELATED_DEBOUNCE_MS } from "./related-timing";
-
-/** Shorter than this, every item in the project would match, so nothing is asked. */
-const RELATED_TITLE_MIN = 2;
+import { RELATED_DEBOUNCE_MS, RELATED_TITLE_MIN } from "./related-timing";
 
 /**
  * The check's answer for the title in the box, and whether that answer is still out. The query
@@ -40,8 +37,15 @@ function useRelatedItems(project: string, title: string) {
   const shown = project !== "" && trimmed.length >= RELATED_TITLE_MIN;
   const query = useQuery({
     enabled,
+    // This check opts out of the app's `staleTime: 30_000` (`web/src/main.tsx`) and of
+    // react-query's five-minute `gcTime`: nothing invalidates this key, and the answer is
+    // advice about what exists right now, so an answer kept from before an issue was filed
+    // would tell the reader the opposite of the truth. Every settled title is asked fresh, and
+    // the debounce bounds how often that is.
+    gcTime: 0,
     queryFn: ({ signal }) => api.relatedItems(project, debounced, { signal }),
     queryKey: ["related", project, debounced],
+    staleTime: 0,
   });
   // The answer on screen is always the answer to the title in the box: while the debounced copy
   // lags the box, what the query holds answers a title the reader has already left.
@@ -123,7 +127,11 @@ function RelatedForm({
         </p>
         <ul className="space-y-2">
           {check.related.map((item) => (
-            <RelatedItemRow item={item} key={`${item.kind}:${item.id}`} withAsk={true} />
+            <RelatedItemRow item={item} key={`${item.kind}:${item.id}`}>
+              {item.kind === "ask" && item.ask !== undefined ? (
+                <AskHitStatus ask={item.ask} muted={false} />
+              ) : null}
+            </RelatedItemRow>
           ))}
         </ul>
       </>
@@ -146,20 +154,23 @@ function RelatedForm({
             A past decision may already answer this:
           </p>
           <ul>
-            {/* One item per owner can collapse the decision's ask out of the related items, so
-                where its ask stands is shown below, once, under who answered it. */}
-            <RelatedItemRow item={decision} withAsk={false} />
+            <RelatedItemRow item={decision}>
+              <p className={`text-xs ${textMutedOnSurface}`}>
+                Answered by {decision.answered_by}
+                {decision.answered_at === undefined ? null : (
+                  <>
+                    {" · "}
+                    <Timestamp at={decision.answered_at} />
+                  </>
+                )}
+              </p>
+              {/* One item per owner can collapse the decision's ask out of the related items,
+                  so where its ask stands is named here, inside the decision's own item. */}
+              {decision.ask === undefined ? null : (
+                <AskHitStatus ask={decision.ask} muted={false} />
+              )}
+            </RelatedItemRow>
           </ul>
-          <p className={`text-xs ${textMutedOnSurface}`}>
-            Answered by {decision.answered_by}
-            {decision.answered_at === undefined ? null : (
-              <>
-                {" · "}
-                <Timestamp at={decision.answered_at} />
-              </>
-            )}
-          </p>
-          {decision.ask === undefined ? null : <AskHitStatus ask={decision.ask} muted={false} />}
         </div>
       )}
     </>
@@ -169,9 +180,16 @@ function RelatedForm({
 /**
  * One item: its kind, where it stands, and a link whose whole text is the owner's label, so a
  * screen reader's link list names the item and nothing else. It opens in a new tab, since the
- * draft in the dialog would be lost by navigating away from it.
+ * draft in the dialog would be lost by navigating away from it. `children` renders under the
+ * link, inside this item, so whatever an owner adds about the item is read as part of it.
  */
-function RelatedItemRow({ item, withAsk }: { item: WriteSuggestion; withAsk: boolean }): ReactNode {
+function RelatedItemRow({
+  children,
+  item,
+}: {
+  children: ReactNode;
+  item: WriteSuggestion;
+}): ReactNode {
   const { owner } = item;
   return (
     <li className="min-w-0">
@@ -193,9 +211,7 @@ function RelatedItemRow({ item, withAsk }: { item: WriteSuggestion; withAsk: boo
       >
         {owner.kind === "issue" ? `${owner.key} ${owner.title}` : owner.name}
       </a>
-      {withAsk && item.kind === "ask" && item.ask !== undefined ? (
-        <AskHitStatus ask={item.ask} muted={false} />
-      ) : null}
+      {children}
     </li>
   );
 }

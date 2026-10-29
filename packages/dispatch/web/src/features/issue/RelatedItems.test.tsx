@@ -1,6 +1,6 @@
 import { expect, spyOn, test } from "bun:test";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { act, render, screen } from "@testing-library/react";
+import { act, render, screen, within } from "@testing-library/react";
 import { MemoryRouter } from "react-router-dom";
 
 import { api } from "../../api/client";
@@ -146,9 +146,12 @@ test("a past decision is named with its link and who answered it", async () => {
     await screen.findByText("A past decision may already answer this:", undefined, {
       timeout: 2000,
     });
-    const link = screen.getByRole("link", { name: "CORE-30 Which order do we send in?" });
+    // The decision's own list item holds who answered it, so a screen reader's item for the
+    // decision names the decision and its answer together.
+    const item = screen.getByRole("listitem");
+    const link = within(item).getByRole("link", { name: "CORE-30 Which order do we send in?" });
     expect(link.getAttribute("href")).toBe("/issues/CORE-30/asks/ask-1");
-    const answered = screen.getByText(/Answered by alice/);
+    const answered = within(item).getByText(/Answered by alice/);
     // The time is a <time>, so it reads as "4 weeks ago" and carries the exact value for
     // assistive tech; asserting its relative words would make this row age.
     expect(answered.querySelector("time")?.getAttribute("datetime")).toBe("2026-10-02T00:00:00Z");
