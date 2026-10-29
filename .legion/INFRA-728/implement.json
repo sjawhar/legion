@@ -2,77 +2,77 @@
   "schemaVersion": 1,
   "phase": "implement",
   "issue": "INFRA-728",
-  "completed": "2026-10-29T13:22:00Z",
+  "completed": "2026-10-29T15:14:00Z",
+  "round": 2,
   "pullRequest": "https://github.com/sjawhar/legion/pull/2502",
+  "answeredReview": {
+    "head": "d8edf35006e622e0fcd58c3d27a924a84cb1af07",
+    "threads": [
+      "PRRT_kwDORFy7ds6xmB9m: blockId's raw fetch beside api.ts's request. Fixed - getArtifactBlocks added to e2e/api.ts beside getArtifactText, blockId calls it, editor.ts drops baseUrl, userHeaders and the ArtifactBlock type. The review is right that the round-1 skip reason was false: api.ts:169 pins the process only when options.process is set, and the call passes none.",
+      "PRRT_kwDORFy7ds6xmB9r: the unit case asserted on a detached preview. Fixed - the case now switches to js and back to mermaid and reads the window before the new answer, which is where showMermaidLayout puts the preview and status back on the page. Title, comment and the PR body's Change bullet rewritten to that case.",
+      "PRRT_kwDORFy7ds6xmB9u: the status half of the case could not fail. Fixed by the review's first option, as a second case whose first answer is an { error }: dropping only clearPreview's two status lines now fails that case alone.",
+      "PRRT_kwDORFy7ds6xmB9w: the leftover slice(started) in the fall loop. Fixed - the loop reads offsets, and started keeps its own assertion above it."
+    ]
+  },
   "proof": [
     {
-      "criterion": "A1. The Mermaid, doc and deep-links browser specs pass at the head, in the projects each one selects.",
+      "criterion": "A1. The Mermaid, doc and deep-links browser specs pass at the head, in the projects each one selects, with blockId now reading its blocks through api.ts.",
       "surface": "Dispatch's document page /issues/<KEY>/spec, a past version /issues/<KEY>/artifact/spec?v=1&comment=<id> and the Conversation, in a real browser against the real Go Dispatch server and a real Postgres 17 with pgvector",
-      "command": "cd packages/dispatch && bun run build:web && bun e2e/run.ts -- bunx playwright test --config e2e/playwright.config.ts e2e/mermaid.e2e.ts e2e/doc.e2e.ts e2e/deep-links.e2e.ts e2e/block-references.e2e.ts e2e/ask-blocks.e2e.ts e2e/task-items.e2e.ts --project chromium --workers=1 (then --project iphone; then the same with e2e/mermaid.e2e.ts e2e/deep-links.e2e.ts for --project webkit and --project firefox, which select neither doc nor block-references)",
-      "observed": "chromium 94 passed and 2 skipped in 9.5m; iphone 39 passed in 3.9m; webkit 38 passed and 2 skipped in 5.4m; firefox 38 passed and 2 skipped in 4.7m. ask-blocks and task-items are in the chromium and iphone runs because the simplify pass renamed indexedBlockAsk's parameter in e2e/editor.ts, which those two specs call.",
-      "headSha": "71c76b6292d162f1718bf0dd20051926b7b0d276",
-      "negativeControl": "The refocusAfterDiagrams call dropped from web/src/features/doc/VersionView.tsx and the SPA rebuilt: the row 'a past version's highlighted mark lands on its block once a diagram above it draws' failed in chromium with 'expect(locator).toBeInViewport() failed, Received: viewport ratio 0'. Restored, it passes."
+      "command": "cd packages/dispatch && bun run build:web && bun e2e/run.ts -- bunx playwright test --config e2e/playwright.config.ts e2e/mermaid.e2e.ts e2e/doc.e2e.ts e2e/deep-links.e2e.ts e2e/block-references.e2e.ts e2e/ask-blocks.e2e.ts e2e/task-items.e2e.ts --project chromium --workers=1 (then --project iphone; then e2e/mermaid.e2e.ts e2e/deep-links.e2e.ts for --project webkit and --project firefox, which select neither doc nor block-references)",
+      "observed": "chromium 94 passed and 2 skipped in 8.4m; iphone 39 passed in 3.4m; webkit 38 passed and 2 skipped in 4.8m; firefox 38 passed and 2 skipped in 4.4m. block-references and mermaid are the specs that call blockId; ask-blocks and task-items are in the run because e2e/editor.ts changed.",
+      "headSha": "9e9177533be6e559731e6ba83b24ab8f22b87a4b",
+      "negativeControl": "The refocusAfterDiagrams call dropped from web/src/features/doc/VersionView.tsx and the SPA rebuilt: 'a past version's highlighted mark lands on its block once a diagram above it draws' failed in chromium with 'Received: viewport ratio 0'. Restored, it passes."
     },
     {
       "criterion": "A2. The moved past-version row still fails when the page's landing is broken again.",
       "surface": "The same past-version page, /issues/<KEY>/artifact/spec?v=1&comment=<id>, in chromium",
-      "command": "highlight put back in VersionView.tsx's effect dependency list in place of the highlighted memo, then cd packages/dispatch && bun run build:web && bun e2e/run.ts -- bunx playwright test --config e2e/playwright.config.ts e2e/deep-links.e2e.ts --project chromium --workers=1 -g \"no diagram\" --repeat-each 20, run twice",
-      "observed": "2 of 40 runs failed: one on expect(locator).toBeInViewport(), one on the new fall rule with falls [{from: 1964, to: 991}]. The bar was at least one failure in 40, because round 3 of sjawhar/legion#2472 measured the unfixed view failing 5 of 40. With the mutation restored, the same 40 runs pass.",
-      "headSha": "71c76b6292d162f1718bf0dd20051926b7b0d276",
-      "negativeControl": "The mutation itself is the control: at the head the row passed 20 of 20 in each of chromium, iphone, webkit and firefox, with a largest measured fall of 0 px."
+      "command": "highlight put back in VersionView.tsx's effect dependency list in place of the highlighted memo, then cd packages/dispatch && bun run build:web && bun e2e/run.ts -- bunx playwright test --config e2e/playwright.config.ts e2e/deep-links.e2e.ts --project chromium --workers=1 -g \"no diagram\" --repeat-each 20, run four times",
+      "observed": "2 of 80 runs failed, both on the new fall rule; the four batches were 0, 0, 2, 0. That matches the tester's 0 of 40 and round 1's 2 of 40: the regression is a race, so this row is a probabilistic guard and web/src/features/doc/VersionView.test.tsx is the deterministic lock on the fix. With the mutation restored the row passes 20 of 20.",
+      "headSha": "9e9177533be6e559731e6ba83b24ab8f22b87a4b",
+      "negativeControl": "The mutation itself is the control: at the head the row passed 20 of 20 in each of chromium, iphone, webkit and firefox in round 1, with a largest measured fall of 0 px."
     },
     {
-      "criterion": "A2. The stricter scroll rule fails on a fall to mid-page that the old rule read as no fall at all.",
+      "criterion": "A2. The stricter scroll rule fails on a fall to mid-page that the old rule read as no fall at all, and still does with the leftover slice gone.",
       "surface": "The same past-version page in chromium, with a scratch line that scrolls the page to half its landing offset once the quote is in view and back 200 ms later, so the end state is right and only the fall is wrong",
       "command": "cd packages/dispatch && bun e2e/run.ts -- bunx playwright test --config e2e/playwright.config.ts e2e/deep-links.e2e.ts --project chromium --workers=1 -g \"no diagram\"",
-      "observed": "The row failed, naming falls [{from: 1964, to: 991}] - a 973 px fall, more than fifteen times the 64 px bound. The same injected row with the old 'offset === 0' filter restored in place of the new rule passed, which is the proof that the new rule catches what the old one missed.",
-      "headSha": "71c76b6292d162f1718bf0dd20051926b7b0d276",
-      "negativeControl": "The old 'offset === 0' filter under the same injection: 1 passed. The plan's own injection (scroll to half and stay there) does not isolate the rule, since the row's own toBeInViewport assertion fails on it whichever rule is in place; that is why the injected dip returns."
+      "observed": "The row failed on expect(falls).toEqual([]) naming {from: 1980, to: 990} - a 990 px fall, over fifteen times the 64 px bound. The same injected row with the old 'offset === 0' filter restored in place of the fall rule passed.",
+      "headSha": "9e9177533be6e559731e6ba83b24ab8f22b87a4b",
+      "negativeControl": "The old 'offset === 0' filter under the same injection: 1 passed. Dropping slice(started) changes nothing here, since peak starts at 0 and the offsets before the scroll began can never be a fall."
     },
     {
-      "criterion": "A3. No runtime behaviour change: a mermaid block that drew and then left mermaid still clears its preview and status.",
+      "criterion": "A3. No runtime behaviour change: a block that leaves mermaid and comes back shows neither its old drawing nor its old refusal until its new answer arrives.",
       "surface": "The editor's code-block node view in happy-dom, through the package's own unit harness (withMarksEditor, the real ProseMirror view)",
       "command": "cd packages/proof-editor && bun test tests/mermaid-code-block-view.test.ts",
-      "observed": "8 pass, 0 fail, 94 expect() calls. The new case drives a mermaid block that drew, then switches it to js, and reads an empty hidden preview and an empty hidden status.",
-      "headSha": "71c76b6292d162f1718bf0dd20051926b7b0d276",
-      "negativeControl": "The clearPreview() call deleted from showPlainLayout: the new case fails with expect(shownDiagram(block)).toBeNull() receiving \"drawn\". 7 pass, 1 fail. Restored, 8 pass."
+      "observed": "9 pass, 0 fail, 106 expect() calls. One case answers a drawing, switches to js and back, and reads an empty preview and the source alone before the new answer; the other answers an { error } first and reads an empty hidden status the same way.",
+      "headSha": "9e9177533be6e559731e6ba83b24ab8f22b87a4b",
+      "negativeControl": "The whole clearPreview() call deleted from showPlainLayout: 7 pass, 2 fail, both new cases. Only its two status lines deleted and the call kept: 8 pass, 1 fail, the refusal case alone. Each half of the clearing fails on its own. Restored: 9 pass."
     },
     {
       "criterion": "A3. Typecheck, lint and the unit suites pass in both packages.",
       "surface": "The repository's own package recipes",
       "command": "cd packages/dispatch && bunx tsc --noEmit && bunx biome check web/src e2e && bun run test; cd packages/proof-editor && bun run typecheck && bun run lint && bun run test",
-      "observed": "dispatch: tsc exit 0, biome clean over 695 files, 2887 pass / 0 fail across 203 files. proof-editor: tsc exit 0, biome clean over 40 files, 174 pass / 0 fail across 23 files.",
-      "headSha": "71c76b6292d162f1718bf0dd20051926b7b0d276",
-      "negativeControl": "A bare 'bun test web/src e2e/__tests__' (one process, no --parallel) reports about 35 failures in web/src, as packages/dispatch/AGENTS.md:1207 describes; the package recipe 'bun run test' passes --parallel and is the command CI and this proof use."
+      "observed": "dispatch: tsc exit 0, biome clean over 695 files, 2887 pass / 0 fail across 203 files. proof-editor: tsc exit 0, biome clean over 40 files, 175 pass / 0 fail across 23 files.",
+      "headSha": "9e9177533be6e559731e6ba83b24ab8f22b87a4b",
+      "negativeControl": "Biome refused the first shape of getArtifactBlocks (a multi-line signature the formatter would have printed on one line) and the push waited for the fix, so the lane is live rather than assumed."
     }
   ],
   "filesChanged": [
-    "packages/dispatch/e2e/mermaid-helpers.ts (new): the worker and scroll init-script helpers moved out of mermaid.e2e.ts, with the four Window keys they own",
-    "packages/dispatch/e2e/mermaid.e2e.ts: imports those helpers; one file-local watchSourceAsCode for the two rows whose renderer never draws; the no-diagram past-version row and recordScrollEachFrame removed; its blockId copy deleted",
-    "packages/dispatch/e2e/deep-links.e2e.ts: the no-diagram past-version row and recordScrollEachFrame moved in, with MAX_SCROLL_FALL_PX and the fall rule that replaces the exact-zero filter",
-    "packages/dispatch/e2e/editor.ts: blockId moved in as an export; indexedBlockAsk's parameter renamed block, so it no longer shadows it",
-    "packages/dispatch/e2e/block-references.e2e.ts: its blockId copy deleted, imported from ./editor, and the file comment that said each helper lives in this file corrected",
-    "packages/dispatch/web/src/features/refs/mermaid-diagrams.ts: local CachedDrawing = Exclude<MermaidDrawing, { unavailable: true }> narrowing the cache, settle's parameter, refusal's return and answer's local",
-    "packages/dispatch/web/src/features/doc/VersionView.tsx: the highlight comment in the present tense, naming ProofDocument (renders and forwards) and ArtifactDocument (rebuilds the object)",
-    "packages/proof-editor/src/mermaid-code-block-view.ts: one private clearPreview replacing the two copies of its four statements",
-    "packages/proof-editor/tests/mermaid-code-block-view.test.ts: the new case, and mermaidBlockPos for the position scan both language-switch cases need"
+    "packages/dispatch/e2e/api.ts: getArtifactBlocks beside getArtifactText, going through request, with ArtifactBlock added to the type import",
+    "packages/dispatch/e2e/editor.ts: blockId calls getArtifactBlocks; baseUrl, userHeaders and the ArtifactBlock type import dropped",
+    "packages/dispatch/e2e/deep-links.e2e.ts: the fall loop reads offsets rather than offsets.slice(started)",
+    "packages/proof-editor/tests/mermaid-code-block-view.test.ts: mermaidBlockPos becomes languageSetter, used by all three cases that switch a block's language; the single clear-preview case becomes two, each taking the window after the switch back to mermaid and before the new answer"
   ],
   "trickyParts": [
-    "The browser harness is not in the image and does not survive a pod replacement. It is rebuilt by /legion/scratch/harness/setup.sh, whose text is recorded verbatim in comment 6a00901c-b262-4c0e-946f-3ad9ab38bd54 on dispatch://INFRA-728 together with env.sh. Source env.sh around harness commands only, never leave it on the working shell.",
-    "Harness facts for the next role: Postgres 17 with pgvector at 127.0.0.1:55432, data under /legion/scratch/harness/pgdata, started by the implementer and never to be stopped by anyone else. PATH gains /legion/scratch/harness/root/usr/lib/postgresql/17/bin; LD_LIBRARY_PATH gains /legion/scratch/harness/root/usr/lib/x86_64-linux-gnu and .../postgresql/17/lib. DATABASE_URL is postgres://postgres@127.0.0.1:55432/dispatch_${LEGION_ROLE}_e2e?sslmode=disable, so each role gets its own database from LEGION_ROLE. e2e/run.ts chooses every harness port itself, so two roles no longer meet on one.",
-    "@legion/contracts must be built before any browser run, or e2e/agents.ts fails with 'Cannot find module @legion/contracts/dist/index.js'. setup.sh now runs 'bun run build' in packages/contracts for that reason.",
-    "bun install rewrites bun.lock in this workspace (three workspace package versions that main's lockfile has not caught up with). It is restored from the parent commit before every commit; it is not part of this change.",
-    "Rebuild the SPA (bun run build:web) after every web/src change, including each negative control's mutation and its restore: the rows serve web/dist, so an unrebuilt dist silently tests the previous head and reports the wrong answer for a control."
+    "The browser harness survived this pod but not the last one. It is rebuilt by /legion/scratch/harness/setup.sh, recorded verbatim with env.sh in comment 6a00901c-b262-4c0e-946f-3ad9ab38bd54 on dispatch://INFRA-728. Postgres 17 with pgvector at 127.0.0.1:55432, data under /legion/scratch/harness/pgdata; DATABASE_URL carries LEGION_ROLE, so each role gets its own database; e2e/run.ts chooses every other port itself.",
+    "Rebuild the SPA (bun run build:web) after every web/src change, including each control's mutation and its restore: the rows serve web/dist.",
+    "Control 1's regression is a race. It failed 2 of 40 in round 1, 0 of 40 for the tester and 2 of 80 here, in batches of 0, 0, 2, 0. Budget 80 runs for it, and read VersionView.test.tsx's 'keeps its editor when the parent renders again with an equal highlight' as the deterministic lock."
   ],
   "deviations": [
-    "The plan moves the no-diagram past-version row into e2e/doc.e2e.ts. The architect changed that to e2e/deep-links.e2e.ts (09:04Z), which is in the webkit and firefox testMatch, so the row keeps all four projects and plan departure 2 (the coverage loss) is void.",
-    "The plan has task 1 export every moved symbol. workerChunk, workerHeldPath and holdingListener have no caller outside holdWorkerSource, so they stay module-private in e2e/mermaid-helpers.ts; exporting them would be API surface nothing imports.",
-    "A2 control 3's injection is a dip that returns, not the plan's scroll-to-half-and-stay. With the plan's injection the row fails on its own toBeInViewport assertion whichever scroll rule is in place, so it does not isolate the rule; the dip-and-return leaves the end state correct, and under it the new rule fails while the old exact-zero filter passes.",
-    "MAX_SCROLL_FALL_PX is 64 against a measured maximum of 0 px. The plan asked for the constant to sit above the largest legitimate adjustment with room and at least five times below the fault; 0 px of legitimate fall makes any positive bound satisfy that, and 64 px (about two lines of text) leaves room for an engine-specific anchor nudge that 80 runs did not show while staying fifteen times below the 973 px fault."
+    "The review offered two ways to make the status half of the clear-preview case bite: answer an { error } first, or drop the status half from the case and its title. I took the first, as a second case rather than a longer one, because the preview half and the status half cannot both be dirty at once - show() always empties one when it fills the other - so one case cannot lock both.",
+    "The round-1 Thermo line's skip reason for routing blockId through request was wrong, as the review says. The PR body now records the finding as applied in round 2 and names the error rather than hiding it."
   ],
   "openQuestions": [],
   "discoveredComplexity": [
-    "The plan said no changelog fragment is needed because neither package has a .changes directory; that still holds (only packages/envoy has one).",
-    "block-references.e2e.ts carried a file comment stating that each of its helpers lives in that file, so a run at the base copies one file. Moving blockId out made it false, so it now names editor.ts as the second file."
+    "request() sends Content-Type: application/json on the GET that blockId's raw fetch did not. The server ignores it on a GET and all four projects pass, so the move is behaviour-preserving in practice."
   ]
 }
