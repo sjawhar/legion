@@ -2,13 +2,19 @@
   "schemaVersion": 1,
   "phase": "implement",
   "issue": "INFRA-750",
-  "completed": "2026-10-29T19:25:00Z",
+  "completed": "2026-10-29T21:20:00Z",
   "pullRequest": "sjawhar/legion#2506",
-  "head": "ccc25a83e319aebe7fdc0adc88037254c4a98474",
-  "round": 2,
+  "head": "4805a397ee269b079fc3739ea2ea41d9da441a78",
+  "round": 3,
+  "testerFailureAnswered": {
+    "failure": "Round 2's guard in warnOrErrorRecords refused its caller until a captured record named the test, and nothing a connected client logs carries its name: the records that do are its close's, which nats.go reports after Drain returns. In the tester's 20 measured drains of TestAStuckDeliveryStillEndsTheKVWatchers' shape, 4 had no such record at the moment that test reads them, so the guard made the assertion race nats.go's callback.",
+    "fix": "The name comes from the caller again, beside its bus.WithName, as the review's second option said: warnOrErrorRecords(t, logs, name), with an empty name refused. No wait is added and no record is required, so the race is gone rather than made rarer.",
+    "redTest": "TestWarnOrErrorRecordsTakesAClientThatHasLoggedNothing (drain_kv_watcher_test.go), the tester's commit bb93d7a9, passes unmodified in its comment and its assertion. Its one call line gained the name argument the new signature takes, `warnOrErrorRecords(t, logs, t.Name())`, because the fix the tester itself prescribed changes that signature; nothing it asserts changed, and it still fails if the round-2 guard comes back.",
+    "ledger": "That one-line change to the tester's test is the only edit of it, reported to the tester and the architect rather than made quietly."
+  },
   "reviewRound": {
     "threads": [
-      "PRRT_kwDORFy7ds6xs3n4 (drain_kv_watcher_test.go): fixed in ccc25a83 — warnOrErrorRecords fails when no captured record names t.Name(), so a drain test whose client is not named for it no longer passes while checking nothing; the comment states the requirement.",
+      "PRRT_kwDORFy7ds6xs3n4 (drain_kv_watcher_test.go): fixed in ccc25a83, then corrected in 4805a397 after the tester measured the round-2 guard to be racy — the helper now takes the client's name from its caller and refuses an empty one, which is the second option that review gave.",
       "PRRT_kwDORFy7ds6xs3oB (stream_update_overlap_test.go): fixed in ccc25a83 — every row asserts the stream reads beside the sends, a row covers a refusal that is not the overlap one while the stream holds the update, the fourth row is written from overlapSends, and the fake applies the update it was sent rather than a literal Replicas = 3.",
       "PRRT_kwDORFy7ds6xs3oI (stream.go): fixed in ccc25a83 — updateStream is the shape the review wrote, a settled closure and a bounded loop, with no overlap flag and no send counter; the sends and reads of every case are unchanged and the table now pins them."
     ],
@@ -62,6 +68,14 @@
       "observed": "ok 115.412s, 0 of 10 failed, the table's 8 rows included; the acceptance-5 set ok 1254.829s, 0 of 20 failed, so the helper's new refusal does not fire for the three tests that name their client; the package ok 301.989s and ok 310.002s under -race; gofmt printed nothing.",
       "headSha": "ccc25a83e319aebe7fdc0adc88037254c4a98474",
       "negativeControl": "Two, one per finding. With bus.WithName(t.Name()) removed from TestADrainEndsTheKVWatchersBeforeTheConnection in a copy of the head tree, both subtests fail with `no captured record names \"...\", so this test's own client cannot be told from another test's`, where before this round they passed while checking nothing. With updateStream changed in another copy to settle every refusal from the stream, the table's `refused otherwise` row fails on the read count (`sent 1 updates and read the stream 1 times, want 1 and 0`) and the new `refused otherwise while the stream holds the update` row fails on the verdict (`updateStream = <nil>, want nats: insufficient resources`); round 1's table passed that regression."
+    },
+    {
+      "criterion": "Acceptance 5 and the Outcome: the clustered tests and the drain tests pass every run, with the tester's failure of round 2 answered and its red test passing.",
+      "surface": "The internal/bus test binary at head 4805a397, on real in-process three-server nats-server v2.10.29 clusters and single servers, and copies of that tree carrying one deliberate regression each.",
+      "command": "From packages/envoy: CGO_ENABLED=1 go test -race -count=100 -timeout 60m -run '^(TestAStuckDeliveryStillEndsTheKVWatchers|TestADrainEndsTheKVWatchersBeforeTheConnection|TestWarnOrErrorRecordsTakesAClientThatHasLoggedNothing)$' ./internal/bus/; the 21-name acceptance-5 set at -race -count=20 -timeout 90m; go test -timeout 20m ./internal/bus/; CGO_ENABLED=1 go test -race -timeout 30m ./internal/bus/; gofmt -l .",
+      "observed": "The drain set with the tester's red test: ok 279.269s, 0 of 100 failed, where round 2's guard raced nats.go's close callback in 4 of the tester's 20 drains. The acceptance-5 set: ok 1283.911s, 0 of 20 failed. The package: ok 303.459s and ok 316.156s under -race. gofmt printed nothing.",
+      "headSha": "4805a397ee269b079fc3739ea2ea41d9da441a78",
+      "negativeControl": "Two. With round 2's record guard put back on top of the new signature in a copy of the head tree, the tester's red test fails 5 of 5 runs (`no captured record names \"TestWarnOrErrorRecordsTakesAClientThatHasLoggedNothing\"`), so the red test still catches the defect it was written for. With TestAStuckDeliveryStillEndsTheKVWatchers changed in another copy to pass an empty name, it fails with `warnOrErrorRecords needs the name the client under test was connected with (bus.WithName)`, so the hazard the review raised is still refused, now without reading any record."
     }
   ],
   "filesChanged": [
@@ -75,7 +89,7 @@
   "trickyParts": [
     "The plan's section 1 hypothesis (a refused AddStream after a clustered StreamInfo answered stream not found) is not what happens: 240 starts produced no create-branch entry at all. The architect's decision 6 covered this case, and the create paths in stream.go and kv.go are left exactly as they were, with plan sections 2 and 3 dropped.",
     "updateStream re-sends the caller's own configuration, which is the write a server without the race would have taken after the other update; it re-sends only while the stream, read again, does not already hold what the caller asked for, so it never overwrites a concurrent write that already satisfied this caller.",
-    "The acceptance-5 filter keeps a record with no name attribute on purpose: the expected record of TestADrainEndsTheKVWatchersBeforeTheConnection/consumer_already_gone comes from kvwatch, which logs no client name. A client started without WithName also passes that way, which the helper's comment says.",
+    "The acceptance-5 filter keeps a record with no name attribute on purpose: the expected record of TestADrainEndsTheKVWatchersBeforeTheConnection/consumer_already_gone comes from kvwatch, which logs no client name. A client a test starts without bus.WithName is named \"envoy\" and its records are dropped like any other test's, which is why the helper takes the name of the client under test from its caller and refuses an empty one, rather than deriving it (the tester's round-2 failure: deriving it needed a record that arrives after the drain).",
     "nats.go names no constant for error code 10065; the package's own jsStreamStoreFailed in nats.go is the house precedent for declaring one beside its user."
   ],
   "deviations": [
