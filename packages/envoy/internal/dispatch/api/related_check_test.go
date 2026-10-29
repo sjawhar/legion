@@ -10,6 +10,7 @@ import (
 	"net/http/httptest"
 	"slices"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -490,6 +491,68 @@ func TestRelatedCheckRecordBlockedPastItsSecondIsWrittenOnceTheLockIsReleased(t 
 	}
 	if row := rows[0]; deref(row.Reason) != "timeout" || row.SourceKind != "issue" || row.ActorID != "alice" {
 		t.Fatalf("related_checks row = %+v (reason %q), want the timeout check of the issue", row, deref(row.Reason))
+	}
+}
+
+// Shutdown waits for background work while requests may still be running, so a check's record can
+// start its retry after the wait has begun - here while a keyed handler, still in flight, holds the
+// wait open. The retry is counted with that work: the wait neither returns while the retry still
+// holds its row nor panics, and the row is written once the lock holding it up is released.
+func TestRelatedCheckRecordRetryStartedWhileShutdownWaitsIsWaitedFor(t *testing.T) {
+	handler, database, _, srv := newRegisteredTestServer(t, testServerOptions{})
+	createSuggestionProject(t, handler, "SHUT")
+	createSearchIssue(t, handler, "SHUT", "Quarterly zymurgy ledger drifts", "")
+	source := createSearchIssue(t, handler, "SHUT", "Zymurgy ledger totals drift", "")
+	srv.suggestionTimeout = 500 * time.Millisecond
+
+	lockTx, err := database.Pool.Begin(context.Background())
+	if err != nil {
+		t.Fatalf("begin lock tx: %v", err)
+	}
+	t.Cleanup(func() { _ = lockTx.Rollback(context.Background()) })
+	if _, err := lockTx.Exec(context.Background(), "lock table asks in access exclusive mode"); err != nil {
+		t.Fatalf("lock asks: %v", err)
+	}
+
+	// A keyed handler still in flight when shutdown begins its wait.
+	srv.detached.start()
+	handlerDone := sync.OnceFunc(srv.detached.done)
+	t.Cleanup(handlerDone)
+	waited := make(chan any, 1)
+	go func() {
+		defer func() { waited <- recover() }()
+		srv.waitBackground()
+	}()
+
+	srv.relatedCheck(context.Background(), relatedInput{
+		project: "SHUT", text: "Zymurgy ledger totals drift",
+		source: suggestionSource{kind: "issue", issueKey: source, actor: model.Actor{Kind: "user", ID: "alice"}},
+		record: true,
+	})
+	if got := srv.relatedRecordRetrying.Load(); got != 1 {
+		t.Fatalf("records being retried after the check answered = %d, want 1 (its first attempt held up by the lock)", got)
+	}
+	handlerDone()
+	select {
+	case recovered := <-waited:
+		t.Fatalf("the shutdown wait returned (panic %v) while the record's retry still held its row", recovered)
+	case <-time.After(300 * time.Millisecond):
+	}
+
+	if err := lockTx.Rollback(context.Background()); err != nil {
+		t.Fatalf("release the lock: %v", err)
+	}
+	select {
+	case recovered := <-waited:
+		if recovered != nil {
+			t.Fatalf("the shutdown wait panicked: %v", recovered)
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("the shutdown wait did not return within 10s of the lock's release")
+	}
+	rows := readRelatedCheckRows(t, database, "source_issue_key = $1 and outcome = 'not_made'", source)
+	if len(rows) != 1 || deref(rows[0].Reason) != "timeout" {
+		t.Fatalf("not-made related_checks rows for %s once the wait returned = %+v, want the one timeout row", source, rows)
 	}
 }
 

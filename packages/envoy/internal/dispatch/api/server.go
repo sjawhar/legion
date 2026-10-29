@@ -340,11 +340,9 @@ type server struct {
 	// termStats is the per-project term-statistics refreshes a related-item check started
 	// (ensureSearchTermStats), keyed by project, so a project's many checks start one.
 	termStats singleflight.Group
-	// relatedRecordRetries is the related_checks rows being retried in the background
-	// (recordRelatedChecks), which waitBackground waits out before the pool closes under them, and
-	// relatedRecordRetrying how many of them hold or wait on a pool connection right now, at most
-	// relatedRecordRetryLimit.
-	relatedRecordRetries  sync.WaitGroup
+	// relatedRecordRetrying is how many related_checks records being retried in the background
+	// (recordRelatedChecks, run as detached work) hold or wait on a pool connection right now, at
+	// most relatedRecordRetryLimit.
 	relatedRecordRetrying atomic.Int32
 }
 
@@ -388,10 +386,9 @@ type queryer interface {
 // also on lifetime. lifetime is the process's own context, cancelled when the server is shutting
 // down (server.lifetime says what else it ends). The returned Background's Wait blocks until every
 // keyed write's handler and every delivery a handler detached from its request (a broadcast's
-// recipients) has settled, until the hub, every live socket (and every subscription it ran) and
-// the relay have ended, and until every related-item check record still being retried
-// (recordRelatedChecks, bounded by lifetime) has ended. Call it only after lifetime has been
-// cancelled and before the database pool closes.
+// recipients) has settled, and until the hub, every live socket (and every subscription it ran)
+// and the relay have ended. Call it only after lifetime has been cancelled and before the database
+// pool closes.
 //
 // Register panics when lifetime is nil: the hub and the relay would run on no context that ever
 // ends, so they would outlive the process's shutdown, or the test that built the server, and the
@@ -414,17 +411,15 @@ type Background struct {
 
 // waitBackground waits for every keyed handler and every delivery a request left running past
 // its client, then for every live socket and the subscriptions it ran, then for the hub's
-// goroutines and the relay's, and for the related-item check records still being retried. The
-// detached work comes first because it is the only work lifetime does not stop: a keyed handler
-// is bounded by keyedHandlerLimit, a delivery by the listener client's receipt timeout per
-// recipient, and each reads and writes through the database pool this wait is holding open for
-// it.
+// goroutines and the relay's. The detached work comes first because it is the only work lifetime
+// does not stop: a keyed handler is bounded by keyedHandlerLimit, a delivery by the listener
+// client's receipt timeout per recipient, and each reads and writes through the database pool this
+// wait is holding open for it.
 func (s *server) waitBackground() {
 	s.detached.wait()
 	s.liveSockets.wait()
 	s.deliveryHub.wait()
 	s.eventRelay.wait()
-	s.relatedRecordRetries.Wait()
 }
 
 // backgroundWork counts the work a server runs past its requests' clients, and waits for none to

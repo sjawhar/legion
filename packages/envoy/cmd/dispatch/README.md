@@ -1223,11 +1223,13 @@ once it has answered (a check that ran out of time, or whose request ended first
 no-write related route records nothing): its project and source, the actor, the outcome (`found`,
 `none` or `not_made`), how it searched (`meaning_and_keywords` or `keywords_only`, none when not
 made), the reason it was not made (`timeout` for the check's own allowance running out, apart from
-`cancelled` for its request ending first) or searched by keywords alone, the lexemes it searched
-for, its keyword, meaning and total milliseconds and how many items it listed. `search_term_stats`
-(how many of a project's searchable items hold each lexeme) and `search_term_totals` (how many
-searchable items the project has, and when they were counted) are the statistics the check picks
-its keywords from; the term-statistics refresh, added with it, rebuilds a project's rows
+`cancelled` for the request that ran it ending first: its client leaving for a write sent without
+an `Idempotency-Key`, the keyed run's own 10-minute bound for a keyed one) or searched by keywords
+alone, the lexemes it searched for, its keyword, meaning and total milliseconds and how many items
+it listed. `search_term_stats` (how many of a project's searchable items hold each lexeme) and
+`search_term_totals` (how many searchable items the project has, and when they were counted) are
+the statistics the check picks its keywords from; the term-statistics refresh, added with it,
+rebuilds a project's rows
 at boot and every 10 minutes, and the check only reads them. Every row names its project with `on
 delete cascade`, and a check's row also cascades from its issue, document or ask. The tables are
 new, so the migration rewrites and refuses no row and its census answers `0`; its foreign keys
@@ -1632,8 +1634,10 @@ made. It searches the write's own project in two stages started together:
   fuses the same keyword arms with the nearest vectors. If it answers within 3 s of the check's
   start, its result is the check's (searched by meaning and keywords); otherwise stage 1's is
   (searched by keywords only, with the reason). If stage 1 has not answered when the 5 s end, the
-  check was not made, for time (reason `timeout`); if the request that ran it ends first, it was
-  not made, cancelled (reason `cancelled`), which says nothing of the search's time.
+  check was not made, for time (reason `timeout`); if the request that ran it ends first (its
+  client leaving, for a write sent without an `Idempotency-Key`; for a keyed write, which no
+  client's leaving ends, the keyed run's own 10-minute bound), it was not made, cancelled (reason
+  `cancelled`), which says nothing of the search's time.
 
 df and N come from `search_term_stats` and `search_term_totals` (`0139`), which the term-statistics
 refresh (`api.RunSearchTermStatsRefresh`, lease `search-term-stats`) rebuilds for every project at

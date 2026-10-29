@@ -145,7 +145,9 @@ const (
 
 // errRelatedAllowanceEnded is the cause a check's allowance context ends with when its own
 // deadline fires. A check whose context ended with any other cause stopped because the request
-// that ran it went away, which says nothing of how long the search takes, so it is recorded as
+// that ran it ended first - its client leaving, for a write sent without an Idempotency-Key; for a
+// keyed write, whose context no client's leaving ends (keyedWrites), the keyed run's own bound,
+// keyedHandlerLimit - which says nothing of how long the search takes, so it is recorded as
 // cancelled rather than timeout (GET /api/v1/related-checks counts only timeout as skipped for
 // time).
 var errRelatedAllowanceEnded = errors.New("the related-item check's allowance ended")
@@ -858,7 +860,7 @@ func (s *server) recordRelatedChecks(ctx context.Context, rows ...relatedCheckRe
 			"rows", len(inserts), "error", err)
 		return
 	}
-	s.relatedRecordRetries.Go(func() {
+	s.detached.goDetached(func() {
 		defer s.relatedRecordRetrying.Add(-1)
 		ctx, cancel := context.WithTimeout(s.lifetime, relatedRecordRetryTimeout)
 		defer cancel()

@@ -35,7 +35,9 @@ create table related_checks (
   -- already_exists, project_unresolved), or why a check that was made searched by keywords alone
   -- (no_embedder, meaning_timeout, embed_failed, meaning_failed, keywords_only_requested). Null
   -- for a check that searched by meaning and keywords. timeout is the check's own allowance
-  -- running out; cancelled is the request that ran it ending first.
+  -- running out; cancelled is the context of the request that ran it ending first: for a write
+  -- sent without a key its client leaving, for a keyed write, which no client's leaving ends, the
+  -- keyed run's own 10-minute bound.
   reason text check (reason in (
     'blank_text', 'timeout', 'cancelled', 'search_failed', 'too_many_blocks', 'already_exists',
     'project_unresolved', 'no_embedder', 'meaning_timeout', 'embed_failed', 'meaning_failed',
