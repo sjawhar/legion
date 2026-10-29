@@ -1,0 +1,84 @@
+{
+  "schemaVersion": 1,
+  "phase": "test",
+  "issue": "INFRA-692",
+  "completed": "2026-10-29T12:56:00Z",
+  "implementerProof": {
+    "verdict": "verified",
+    "how": "Re-ran each criterion independently from my own git-archive exports of base 1767c9af (main, the merge parent) and head 33abf269: a fresh LINUX corpus (1,205 specs) through TestTokenCorpus, my own HTTP collector on my own seeded stack with real specs and edits added, the route tests at base and head, both fuzzers, and six new alternating load-test runs with my own pprof reads. Every implementer claim held. The one difference: on this base, which already carries #2447, #2467 and #2448, the base fold share is about 22.6 %, not 24.65 %, and the CPU gap is narrower than the implementer measured on 8b4a862b, though clause 1 still holds."
+  },
+  "failures": [],
+  "failed": 0,
+  "mergeRule": {
+    "base": "1767c9af61ed (main with #2447, #2467, #2448)",
+    "head": "33abf269688c",
+    "runOrder": "b1 h1 b2 h2 b3 h3, strict, 2026-10-29T12:13:48Z-12:53:28Z",
+    "baseCpuS": [63.30, 63.65, 63.57],
+    "headCpuS": [61.13, 60.56, 61.88],
+    "baseCpuMedian": 63.57,
+    "headCpuMedian": 61.13,
+    "clause1": "pass: max head 61.88 < min base 63.30",
+    "baseFoldShare": [23.29, 22.25, 22.57],
+    "headFoldShare": [20.37, 21.96, 20.91],
+    "foldShareMedianDrop": 1.66,
+    "shareTest": {"r0.246": {"E": 5.55, "halfE": 2.78, "result": "fail"}, "r0.14": {"E": 3.16, "halfE": 1.58, "result": "pass"}},
+    "contradiction": "none: head median 61.13 < base max 63.65",
+    "verdict": "pass on clause 1 (architect's rule 1)",
+    "earlierPartialSet": "Before the 10:05Z drain, on another seeded stack, b1 h1 b2 h2 gave base 54.45/51.68 and head 54.51/56.62 CPU-s (fold share 18.19/17.56 vs 16.76/16.97 %). The drain cut that set at four runs, and on the architect's instruction the verdict rests on the full six-run set after the resume. Records: dispatch://INFRA-692/artifact/tester-records-round1b-tar-gz"
+  },
+  "proof": [
+    {
+      "criterion": "A4 merge rule (dispatch://INFRA-512/comment/63dcf4bd-d37e-47a6-9040-beeaea4cd364): every head run uses less Dispatch CPU than every base run",
+      "surface": "INFRA-589 load test (packages/envoy/loadtest at 1767c9af, identical in both exports) on a local Dispatch/Postgres/NATS/listener stack seeded by the base build",
+      "command": "LOADTEST_SRC=<base|head export> run-step.sh 692t-<b|h>-<n> --events 0 --sessions 1000 --requests 60 --duration 300s, order b1 h1 b2 h2 b3 h3 (driver ab.sh in dispatch://INFRA-692/artifact/tester-records-round1c-tar-gz)",
+      "observed": "Dispatch CPU-s base 63.30/63.65/63.57, head 61.13/60.56/61.88; max head < min base; fold share median 22.57 % -> 20.91 %; box_busy_before <= 1.7 % and 18,037/18,037 2xx in every run; binaries base f0021939..., head e234e2d3...",
+      "headSha": "33abf269688ce8bc1dfb4b1b47af7f66951f41a1",
+      "negativeControl": "CPU has no refusal; the control is the base side itself, three base runs with 0.35 s spread, all above every head run. The earlier four-run set, cut by the drain, is recorded in mergeRule.earlierPartialSet"
+    },
+    {
+      "criterion": "A1/A2 the fold validates its tree once and calls no ToDelta",
+      "surface": "Dispatch CPU profiles of the six runs",
+      "command": "go tool pprof -peek 'pmdoc\\.\\(\\*Node\\)\\.Validate$' '-show_from=docs\\.\\(\\*Service\\)\\.foldDocument' <bin> cpu.pprof; go tool pprof -top -cum -show_from=foldDocument (prof.sh)",
+      "observed": "base: 4 callers of Validate (wantDocument, readDocument, render, AppendTokenJSON) in all three runs; head: 1 (readDocument) in all three; crdt.(*YText).ToDelta under foldDocument in every base profile, in no head profile",
+      "headSha": "33abf269688ce8bc1dfb4b1b47af7f66951f41a1",
+      "negativeControl": "The same peek on the base profiles finds four callers and ToDelta, so it finds them when present"
+    },
+    {
+      "criterion": "A6 tokens, /text and /blocks byte-identical on every LINUX spec",
+      "surface": "(a) the fold's own code over all 1,205 LINUX specs fetched fresh from production; (b) Dispatch's HTTP API on the local stack",
+      "command": "(a) GOWORK=off DISPATCH_TOKEN_CORPUS=<corpus> DISPATCH_TOKEN_CORPUS_OUT=tokens-<side>.jsonl go test ./internal/dispatch/docs/ -run '^TestTokenCorpus$' at base and head, cmp; (b) httpget.py: GET /text and /blocks for 1,060 artifacts and /blocks/{id} for every block of 110, base binary then head binary, diff -r",
+      "observed": "(a) both dumps sha256 d632f4062968f3729b6979c51d13f43de23ad45c7d52be2a5c68d98fa454db60, 1,205 lines, identical; (b) 7,048 requests per side, all 200, diff -r of bodies and headers empty, including 60 real LINUX specs carrying 15 edits and 150 anchored comments across bold, link and code runs",
+      "headSha": "33abf269688ce8bc1dfb4b1b47af7f66951f41a1",
+      "negativeControl": "A head binary whose run snapshot aliases the live mark set (runAttrs = current) changes 2,230 of 7,048 HTTP answers (1,060 /text, 1,170 /blocks)"
+    },
+    {
+      "criterion": "ReadUnshared reads what Read reads on the browser's own histories",
+      "surface": "pmdoc read of Yjs-written updates, decoded as the fold decodes a history",
+      "command": "bun gen.mjs out 15000 23 (Yjs 13.6.32, 2-4 concurrent clients, partial syncs, gc on/off); TESTER_YJS_DIR=out go test ./internal/dispatch/pmdoc/ -run TestTesterYjsHistories (throwaway, in dispatch://INFRA-692/artifact/tester-records-round1-tar-gz); FuzzTesterMultiClient -fuzztime 10m",
+      "observed": "29,998 documents, 162,876 marked text nodes, 660 map embeds refused alike; readers agree on all; multi-client fuzz 33,367 execs, nothing found",
+      "headSha": "33abf269688ce8bc1dfb4b1b47af7f66951f41a1",
+      "negativeControl": "A run join that ignores mark values (DeepEqual disabled) fails at history 00005"
+    },
+    {
+      "criterion": "A5/A8 refusals unchanged on every path; token cleanups change nothing",
+      "surface": "Dispatch API routes over stored trees outside the schema; Go fuzzing",
+      "command": "DISPATCH_TEST_DATABASE_URL=<local pg16+pgvector> go test ./internal/dispatch/api/ -run '^(TestEveryRouteAnswersAStoredTreeOutsideTheSchemaAlike|TestOutsideSchemaArtifactIsRepairableThroughUpload)$' at base (head test file and testhooks, base buildDocumentRead call) and head; -fuzz FuzzReadUnshared -fuzztime 10m; -fuzz FuzzTokenJSON -fuzztime 5m",
+      "observed": "19 subtests pass at base and at head; FuzzReadUnshared 640,259 execs and FuzzTokenJSON 635,795 execs, nothing found",
+      "headSha": "33abf269688ce8bc1dfb4b1b47af7f66951f41a1",
+      "negativeControl": "foldLoaded returning the read error without documentSchemaError fails 8 of 9 corruptions: 500 INTERNAL instead of 409 DOC_SCHEMA"
+    },
+    {
+      "criterion": "A7 nothing more stays in memory",
+      "surface": "end-of-window heap profiles of the six runs; changed pmdoc source",
+      "command": "go tool pprof -top -sample_index=inuse_space <bin> heap.pprof; search of the changed pmdoc files for sync.Pool and package-level buffers",
+      "observed": "no sync.Pool or package-level buffer; ReadUnshared in-use 0.5-3 MB at head; read-cache placement data 173-182 MB head vs 168-191 MB base; total in-use 267-286 MB head vs 252-278 MB base, within run-to-run spread",
+      "headSha": "33abf269688ce8bc1dfb4b1b47af7f66951f41a1",
+      "negativeControl": "None that refuses: a heap reading has no refusal; the base runs bound the spread"
+    }
+  ],
+  "notes": [
+    "The implementer's tests catch every planted bug I tried except one: a walk that reads deleted format items is caught only by items/deleted_items_are_skipped. Neither the fuzzers nor 15,000 Yjs histories produced a deleted format item, so the hand-built case is the only lock, and it holds.",
+    "The LINUX corpus cannot see a run join that ignores mark values (its dumps stay identical); TestReadUnsharedReadsWhatReadReads and FuzzReadUnshared seeds catch it.",
+    "CI at d86f193e: every lane green except dispatch's browser test close-withdraws-asks.e2e.ts:126, which the INFRA-512 architect names as main's own failure, being fixed by INFRA-138's tree."
+  ]
+}
