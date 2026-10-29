@@ -1,0 +1,72 @@
+{
+  "schemaVersion": 1,
+  "phase": "implement",
+  "issue": "INFRA-570",
+  "completed": "2026-10-29T15:20:00Z",
+  "proof": [
+    {
+      "criterion": "A browser-suite test types a title matching an existing issue's meaning or rare words and sees that issue listed with its link; fails at the commit before, passes at head.",
+      "surface": "Dispatch dashboard new-issue dialog in Chromium, real Go Dispatch server, production SPA bundle from packages/dispatch/web/dist, Postgres 18.6 with pgvector; harness started by bun e2e/run.ts",
+      "command": "source /legion/harness/env.sh && cd packages/dispatch && bun run build:web && bun e2e/run.ts -- bunx playwright test --config e2e/playwright.config.ts --project=chromium --repeat-each=3 e2e/create-issue-related.e2e.ts",
+      "observed": "9 passed (29.2s). Row A: with CORE-1 'Astrolabe drift spoils the mooring calibration' seeded, typing 'Astrolabe drift during mooring' shows a link named 'CORE-1 Astrolabe drift spoils the mooring calibration' with href=/issues/CORE-1 and target=_blank, and no link to the unrelated CORE-2; the server answered the check keywords-only (no embedder in the harness), so the match is by rare words.",
+      "headSha": "18b691b0cc5b",
+      "negativeControl": "The same spec run against a clean `git archive fe31539233c0` extract under $TMPDIR, with only e2e/create-issue-related.e2e.ts and web/src/features/issue/related-timing.ts copied in and its own Postgres database (port 15438, dispatch_e2e_basefails): 3 failed, 0 passed; row A failed at `await expect(hit).toBeVisible()` (line 77) with 'element(s) not found' after 15000 ms."
+    },
+    {
+      "criterion": "Typing does not send a request per keystroke.",
+      "surface": "same browser suite, row B, with the page's clock installed and paused (page.clock.pauseAt) and the related route counted through page.route",
+      "command": "source /legion/harness/env.sh && cd packages/dispatch && bun e2e/run.ts -- bunx playwright test --config e2e/playwright.config.ts --project=chromium --repeat-each=3 e2e/create-issue-related.e2e.ts:100",
+      "observed": "3 passed. Fifteen keystrokes ('Astrolabe drift') with the page clock held send 0 checks; clock.runFor(399) still 0; clock.runFor(1) exactly 1; clock.runFor(1200) still 1, so a settled title is not re-asked.",
+      "headSha": "18b691b0cc5b",
+      "negativeControl": "RELATED_DEBOUNCE_MS set to 0 in web/src/features/issue/related-timing.ts and the SPA rebuilt: row B red 3 of 3 at `expect(checks).toBe(0)` (line 117), 'Expected: 0, Received: 1'; rows A and C stayed green, so the red is the debounce and nothing else."
+    },
+    {
+      "criterion": "An answer that arrives after the title changed is not shown for the new title.",
+      "surface": "same browser suite, row C: the first title's check held in a page.route handler and released while the box already holds the second title, inside its debounce window",
+      "command": "source /legion/harness/env.sh && cd packages/dispatch && bun e2e/run.ts -- bunx playwright test --config e2e/playwright.config.ts --project=chromium --repeat-each=3 e2e/create-issue-related.e2e.ts:137",
+      "observed": "3 passed. After the held answer for 'Astrolabe drift during mooring' reaches the page (page.waitForResponse), one clock.runFor(1) delivers react-query's batched notification and a 250 ms Node-side margin passes, the section still reads 'Checking for related items…' and holds 0 links to CORE-1; clock.runFor(400) then brings the second title's own answer, CORE-2's link, with CORE-1 still absent.",
+      "headSha": "18b691b0cc5b",
+      "negativeControl": "The display gate removed (useRelatedItems returning `waiting: false`) and the SPA rebuilt: row C red 3 of 3 at `expect(related.getByText(\"Checking for related items…\")).toBeVisible()` (line 185), 'element(s) not found'; rows A and B stayed green, so the red is the gate and nothing else."
+    },
+    {
+      "criterion": ".dispatch/architecture/dispatch-web.md updated in the same PR.",
+      "surface": "the pull request diff on GitHub",
+      "command": "gh pr diff 2511 --repo sjawhar/legion --name-only",
+      "observed": "Lists .dispatch/architecture/dispatch-web.md, packages/dispatch/AGENTS.md and docs/site/src/content/docs/dispatch/issues-and-projects.md beside the code.",
+      "headSha": "18b691b0cc5b",
+      "negativeControl": "The same command filtered for a path the pull request does not touch (packages/daemon/) returns nothing, so the listing is the diff's own and not a match-anything read."
+    }
+  ],
+  "filesChanged": [
+    "packages/dispatch/web/src/api/client.ts — api.relatedItems(project, title, { signal }) beside search",
+    "packages/dispatch/web/src/api/types.ts — Suggestions and WriteSuggestion re-exported",
+    "packages/dispatch/web/src/features/search/AskHitStatus.tsx — new; askStateLabel, ANSWER_PREVIEW_CHARS and AskHitStatus moved out of SearchPalette.tsx unchanged, doc comments reworded for its second caller",
+    "packages/dispatch/web/src/features/search/SearchPalette.tsx — those three declarations removed, AskHitStatus imported, now-unused imports dropped",
+    "packages/dispatch/web/src/features/search/SearchPalette.test.tsx — ANSWER_PREVIEW_CHARS imported from its new module",
+    "packages/dispatch/web/src/features/issue/RelatedItems.tsx — new; useRelatedItems + RelatedItems + RelatedForm + RelatedItemRow",
+    "packages/dispatch/web/src/features/issue/related-timing.ts — new; RELATED_DEBOUNCE_MS, a module importing nothing so the Playwright spec reads it",
+    "packages/dispatch/web/src/features/issue/RelatedItems.test.tsx — new; five unit rows",
+    "packages/dispatch/web/src/features/issue/CreateIssueDialog.tsx — renders <RelatedItems> between Spec and the refusal; doc comment",
+    "packages/dispatch/web/src/features/issue/CreateIssueDialog.test.tsx — renderDialog spies api.relatedItems with a 'none' answer",
+    "packages/dispatch/e2e/create-issue-related.e2e.ts — new; the three browser rows",
+    ".dispatch/architecture/dispatch-web.md, packages/dispatch/AGENTS.md, docs/site/src/content/docs/dispatch/issues-and-projects.md — docs",
+    "packages/envoy/.changes/unreleased/pr2511-Added-20261029-151500.yaml — changelog fragment"
+  ],
+  "trickyParts": [
+    "Playwright's page.clock.install() alone leaves the page clock running at real speed; page.clock.pauseAt(Date.now() + 1000) is what holds it still (the lead is for Node/page skew, as e2e/hover-preview.e2e.ts records). Without the pause, row C's held answer was overtaken by the second title's own 400 ms debounce and the row measured nothing.",
+    "With the page clock held, react-query delivers nothing: notifyManager batches its notifications on a zero-delay timer, which is one of the faked timers. Row C therefore needs one page.clock.runFor(1) after the response reaches the page before the dialog can have rendered it — without it the row passed whether the display gate was there or not, which is how the first draft's false green was found.",
+    "page.waitForTimeout is the page's clock and never returns under a held clock; row C's margin is Node's own timer (node:timers/promises).",
+    "The e2e harness has no embedder, so the check answers keywords_only with a search_note; the fixtures match on rare words and no row asserts the search mode's wording.",
+    "The web cannot import @legion/envoy-client, so the check's three forms are worded again in RelatedItems.tsx. RelatedForm tests the not-made form before the item list, in the same order as relatedCheckForm, so an answer carrying both reads the same on both surfaces."
+  ],
+  "deviations": [
+    "The plan's task 1 named a types.ts re-export of Suggestions and WriteSuggestion only; RelatedCheckOutcome and RelatedCheckSearch were not needed and were not added.",
+    "The plan put RELATED_DEBOUNCE_MS in RelatedItems.tsx. It is in features/issue/related-timing.ts instead, a module importing nothing, because the Playwright spec reads the value the dialog runs on and importing a .tsx into the Node-side spec would pull React (the precedent is features/refs/ref-preview-timing.ts).",
+    "The not-made form names the words to search Dispatch for rather than a dispatch search command line, as plan decision 5 allows for the web."
+  ],
+  "openQuestions": [],
+  "discoveredComplexity": [
+    "The pod had no browser harness. /legion/harness/setup.sh and env.sh build one on the issue volume: Postgres 18.6 with pgvector 0.8.7 from the PGDG trixie packages, ICU initdb, Playwright's Chromium, and the contracts bundle Playwright's Node resolution needs. Two packages the existing recipe does not name are required for Postgres 18: libnuma1 and liburing2, which the 18.6 postgres binary links for its io_uring AIO.",
+    "The simplify pass applied seven findings over three reviewers and left three: a shared useSettled hook and a shared pauseClock module would both edit files this pull request does not touch, and debouncing the project alongside the title (efficiency, confidence 0.45) would change row B's arithmetic for a cost that only arises when a keyboard user arrows through the project select mid-draft; the display gate already keeps a previous project's answer off screen."
+  ]
+}
