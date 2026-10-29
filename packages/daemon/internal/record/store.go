@@ -585,6 +585,13 @@ func (s *Postgres) KeepReadmittedApproval(ctx context.Context, tx pgx.Tx, root s
 	return nil
 }
 
+func (s *Postgres) DropReadmittedApproval(ctx context.Context, tx pgx.Tx, root string) error {
+	if _, err := tx.Exec(ctx, "delete from readmitted_approvals where root = $1", root); err != nil {
+		return fmt.Errorf("drop the approval kept for %s: %w", root, err)
+	}
+	return nil
+}
+
 func (s *Postgres) ReadmittedApproval(ctx context.Context, tx pgx.Tx, root string) (approved, latest int, err error) {
 	err = tx.QueryRow(ctx, "select approved_version, latest_version from readmitted_approvals where root = $1", root).Scan(&approved, &latest)
 	if errors.Is(err, pgx.ErrNoRows) {

@@ -968,6 +968,9 @@ type Store interface {
 	// approved and the spec's latest version, which its re-admission found above the approved one
 	// before it cleared the old generation's gate; a later keep replaces it.
 	KeepReadmittedApproval(ctx context.Context, tx pgx.Tx, root string, approved, latest int) error
+	// DropReadmittedApproval deletes the pair root keeps, if any: a re-admission that finds no stale
+	// approval leaves nothing an earlier one kept (one gates.design off never named, so never forgot).
+	DropReadmittedApproval(ctx context.Context, tx pgx.Tx, root string) error
 	// ReadmittedApproval is the pair root keeps, zeros when it keeps none. It stays until the start
 	// task that named it reached its architect (ForgetKeptDecisions).
 	ReadmittedApproval(ctx context.Context, tx pgx.Tx, root string) (approved, latest int, err error)

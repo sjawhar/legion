@@ -952,19 +952,6 @@ func (r *outbox) supervise(ctx context.Context, row record.OutboxRow, payload re
 				return fmt.Errorf("relaunch retired claim %s: %w", token, err)
 			}
 		}
-		// A start that finds a tree's root architect running is a re-admission while its session
-		// lived on. The linger suspends the root's claim, so that happens only when the claim was
-		// mid-launch when the suspend ran (the machine ignores a suspend while launching), or the
-		// re-admission's start ran before the suspend. No ready follows, and a ready is what tells
-		// the architect its tree (workflow's claimReady), so the start applies that fact itself,
-		// for the running launch, once per start row, and the architect is told its tree's new
-		// generation.
-		if claimTookRole(state) && claim.IsTreeArchitect(payload.Role, issue.Key, issue.Tree) {
-			if _, err := intake.ApplyFact(ctx, r.pool, "outbox", fmt.Sprintf("start-running:%s:%d", token, row.ID),
-				intake.ClaimReady{Issue: issue.Key, Role: payload.Role, Launch: machine.Claim().Generation}, r.handlers...); err != nil {
-				return fmt.Errorf("tell the running architect of %s its tree: %w", issue.Key, err)
-			}
-		}
 		// A claim that, once relaunched, still holds a task of this row's phase and run that it will
 		// work is given that task: one not yet confirmed (a failed claim keeps the task it held, and a
 		// death in a turn takes the task back unconfirmed, behind the sentence saying so), or one
@@ -982,9 +969,7 @@ func (r *outbox) supervise(ctx context.Context, row record.OutboxRow, payload re
 			pending.StillWorked(payload.Generation, payload.Phase, held.State) {
 			r.log.Info("outbox start of a claim that holds its phase's task; not delivered again", "row", row.ID, "issue", issue.Key,
 				"role", payload.Role, "phase", payload.Phase, "held", pending.ID)
-			return nil
-		}
-		if payload.Task != "" {
+		} else if payload.Task != "" {
 			// The row's phase, already held to the issue's above, travels with the delivery: it is
 			// what says the task is still the work to do once the delivery has outlived its id.
 			if err := machine.Handle(ctx, supervise.RequestDeliver{Claim: token, Task: payload.Task, Phase: payload.Phase, Generation: payload.Generation,
@@ -995,6 +980,21 @@ func (r *outbox) supervise(ctx context.Context, row record.OutboxRow, payload re
 			// finishes without delivering leaves them kept for the next start or catch-up.
 			if err := r.forgetKept(ctx, issue.Tree, payload.Kept); err != nil {
 				return err
+			}
+		}
+		// A start that finds a tree's root architect running is a re-admission while its session
+		// lived on. The linger suspends the root's claim, so that happens only when the claim was
+		// mid-launch when the suspend ran (the machine ignores a suspend while launching), or the
+		// re-admission's start ran before the suspend. No ready follows, and a ready is what tells
+		// the architect its tree (workflow's claimReady), so the start applies that fact itself,
+		// for the running launch, once per start row, and the architect is told its tree's new
+		// generation. It does so after the task is delivered and the decisions it names are
+		// forgotten, so the catch-up never names a kept decision the task already names; a retry
+		// of the row re-delivers under the same delivery id and applies the fact once.
+		if claimTookRole(state) && claim.IsTreeArchitect(payload.Role, issue.Key, issue.Tree) {
+			if _, err := intake.ApplyFact(ctx, r.pool, "outbox", fmt.Sprintf("start-running:%s:%d", token, row.ID),
+				intake.ClaimReady{Issue: issue.Key, Role: payload.Role, Launch: machine.Claim().Generation}, r.handlers...); err != nil {
+				return fmt.Errorf("tell the running architect of %s its tree: %w", issue.Key, err)
 			}
 		}
 		return nil

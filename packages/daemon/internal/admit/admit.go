@@ -954,14 +954,18 @@ func (a *Admission) readmit(ctx context.Context, tx pgx.Tx, stored record.Issue,
 // keepStaleApproval keeps, for the architect start of the root key re-admission is clearing, the
 // person's approval its gate holds of a version the spec has since moved past: the new
 // generation's architect registers its spec again on a cleared gate, and its start task
-// (workflow.Engine.ParkedDecisionTask) tells it to request approval of the latest version.
+// (workflow.Engine.ParkedDecisionTask) tells it to request approval of the latest version. A
+// re-admission whose gate holds no stale approval drops any pair an earlier one kept: under
+// gates.design off the start never names one, so its delivery never forgets it, and a later
+// re-admission under an armed gate would otherwise name a pair this generation's gate no longer
+// holds.
 func (a *Admission) keepStaleApproval(ctx context.Context, tx pgx.Tx, key string) error {
 	gate, err := a.store.Gate(ctx, tx, key)
 	if err != nil {
 		return fmt.Errorf("read the gate of re-admitted %s: %w", key, err)
 	}
 	if gate == nil || gate.ApprovedVersion == nil || *gate.ApprovedVersion >= gate.LatestVersion {
-		return nil
+		return a.store.DropReadmittedApproval(ctx, tx, key)
 	}
 	return a.store.KeepReadmittedApproval(ctx, tx, key, *gate.ApprovedVersion, gate.LatestVersion)
 }

@@ -399,6 +399,47 @@ func TestARootReadmittedOnAnOlderApprovalIsToldBothVersions(t *testing.T) {
 	}
 }
 
+// A pair an earlier re-admission kept that no start ever named (gates.design off names none, so
+// its delivery forgets none) is dropped by a later re-admission whose gate holds no stale
+// approval, so a later start under an armed gate never names a pair the gate no longer holds.
+func TestAReadmissionWithNoStaleApprovalDropsTheOneAnEarlierKept(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		gate *record.DesignGate
+	}{
+		{"a gate approved at its latest version", &record.DesignGate{Issue: "LEGION-ROOT", ArtifactID: "artifact-root", LatestVersion: 4, ApprovedVersion: new(4)}},
+		{"a gate approved at no version", &record.DesignGate{Issue: "LEGION-ROOT", ArtifactID: "artifact-root", LatestVersion: 4}},
+		{"no gate", nil},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx := context.Background()
+			pool := migratedPool(t)
+			engine := workflow.New(record.NewStore(), workflow.Config{Project: testProject, Repositories: testRepositories,
+				Clock: func() time.Time { return fixedNow }, DesignGate: config.DesignGateOff}, nil)
+			admission := New(record.NewStore(), engine, 1, testProject, nil)
+			admission.now = func() time.Time { return fixedNow }
+			parkedRoot(t, pool)
+			inTx(t, pool, func(tx pgx.Tx) {
+				records := record.NewStore()
+				if err := records.KeepReadmittedApproval(ctx, tx, "LEGION-ROOT", 2, 3); err != nil {
+					t.Fatalf("keep the earlier re-admission's pair: %v", err)
+				}
+				if tc.gate != nil {
+					if err := records.PutGate(ctx, tx, *tc.gate); err != nil {
+						t.Fatalf("put the gate: %v", err)
+					}
+				}
+			})
+			readmitRoot(t, pool, admission)
+			inTx(t, pool, func(tx pgx.Tx) {
+				if approved, latest, err := record.NewStore().ReadmittedApproval(ctx, tx, "LEGION-ROOT"); err != nil || approved != 0 || latest != 0 {
+					t.Fatalf("kept approval after the re-admission = %d, %d, %v; want none: the gate held no stale approval", approved, latest, err)
+				}
+			})
+		})
+	}
+}
+
 // assertGateNotice fails unless key's one notice of kind names actor and ref.
 func assertGateNotice(t *testing.T, pool *pgxpool.Pool, key string, kind record.NoticeKind, actor, ref string) record.Notice {
 	t.Helper()
