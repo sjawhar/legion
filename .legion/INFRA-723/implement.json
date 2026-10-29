@@ -1,0 +1,71 @@
+{
+  "schemaVersion": 1,
+  "phase": "implement",
+  "issue": "INFRA-723",
+  "completed": "2026-10-29T08:16:43Z",
+  "pullRequest": "https://github.com/sjawhar/legion/pull/2493",
+  "proof": [
+    {
+      "criterion": "1: push-built lands on a moved tip with no input change (only dist/ and legion/ change); lands and starts one fresh run when an input changed; lands nothing when main holds a newer build; a tar that fails a check is refused whether or not main moved",
+      "surface": "the .github/scripts shell test against a local bare origin, through the deploy key, the insteadOf rewrite and the stub gh, as the push job reaches GitHub",
+      "command": "bash .github/scripts/release-push.test.sh",
+      "observed": "Results: 615 passed, 0 failed. Cases: unmoved changed build; identical build; moved by an empty commit (one key directory for both fetches); docs-only (main's build an ordinary commit, plan case g); excluded packages/contracts/CHANGELOG.md; src/channel.ts (lands + exactly one gh workflow run); rename out of the plugin; rename inside the inputs; the list itself; no list (::warning + one run); gh failing after a landing (exit 1, says the build landed, names the by-hand command); newer bot rebuild (nothing, no run); forged non-bot rebuild subject; equal bot rebuild (Nothing to push); rewritten main (one run); a merge between fetch and push via a git wrapper (nothing landed, exactly one run); rejected push; no DEPLOY_KEY; doctored tar with main moved by docs and by an input (exit 1, origin untouched, no gh). push-fold's land_on_main notice regex updated and passing. PR comment: https://github.com/sjawhar/legion/pull/2493#issuecomment-6491547551",
+      "headSha": "d7b3cc91756db18b0ec722e4f69ffa9f71c6c35b",
+      "negativeControl": "Removed --no-renames from build_inputs_changed: 'FAIL: main moved by renaming packages/claude-envoy/src/channel.ts to packages/claude-envoy/src/transport.ts: the fresh run's notice names the old path and the new one (git diff --no-renames)', 614 passed, 1 failed; restored (cmp clean)."
+    },
+    {
+      "criterion": "1 on real history and a real build (plan row 1')",
+      "surface": "this branch's release-push.sh push-built on a bare clone of sjawhar/legion whose main is Y' (X..Y replayed onto X' = X plus the branch's list and script), with a tar from `bun run verify-build` (Bun 1.4.4) at X and a stub gh logging calls",
+      "command": "bash $TMPDIR/infra723/proof.sh (pairs f45c6716->1767c9af, a409c128->1767c9af, f45c6716->305a1033; log in the PR comment)",
+      "observed": "f45c6716->1767c9af: '::notice title=Landing on main's tip', one github-actions[bot] commit 'chore(claude-envoy): rebuild dist/ and legion/ from <X'12> [skip ci]' whose one parent is Y', 0 paths outside dist/legion, 0 gh calls, no warning. f45c6716->305a1033 (main just before the first real rebuild ea8d72a0; envoy-channel-server.ts, package.json, pi-shared changed): lands the same way and exactly one 'gh workflow run claude-envoy-rebuild.yaml --repo sjawhar/legion --ref main' with the notice naming the changed inputs. a409c128->1767c9af: a409c128 committed its own build, so 'Nothing to push' and, inputs having changed, exactly one fresh run. The script run was byte-identical to the committed release-push.sh (cmp).",
+      "headSha": "d7b3cc91756db18b0ec722e4f69ffa9f71c6c35b",
+      "negativeControl": "Base f45c6716 itself (no list), origin main 1767c9af: '::warning title=No build input list::f45c6716... holds no pathspec in packages/claude-envoy/scripts/build-inputs.txt', the build lands, and exactly one fresh run follows."
+    },
+    {
+      "criterion": "2': the list covers every file the build reads, in the required test job",
+      "surface": "packages/claude-envoy/tests/build-inputs.test.ts (runs the real build in a subprocess, stages the skills, matches with git), added to pr-and-main.yaml's required test job",
+      "command": "cd packages/claude-envoy && bun test tests/build-inputs.test.ts (Bun 1.4.4)",
+      "observed": "1 pass, 0 fail, 4 expect() calls",
+      "headSha": "d7b3cc91756db18b0ec722e4f69ffa9f71c6c35b",
+      "negativeControl": "packages/pi-shared line removed from build-inputs.txt: the test fails listing packages/pi-shared/LICENSE, NOTICE, package.json, src/daemon-client.ts, src/git-lock.ts, src/handoff-commit.ts, ...; file restored (cmp clean)."
+    },
+    {
+      "criterion": "2: check-release-credentials and its test; lint, typecheck, test; the rebuild workflow's build job on the PR",
+      "surface": "the repository scripts and the workflow's pull_request run",
+      "command": "uv run --with pyyaml==6.0.2 --no-project bash -c 'bash .github/scripts/check-release-credentials.test.sh; bash .github/scripts/check-release-credentials.sh'; bunx biome check .; (cd packages/claude-envoy && bun run typecheck && bun run lint); bash .github/scripts/check-private-names.sh; gh run list -R sjawhar/legion --workflow claude-envoy-rebuild.yaml --branch legion/INFRA-723",
+      "observed": "credentials test 265 passed 0 failed; 'check-release-credentials: 7 credentialed job(s) and 10 build job(s) across 5 workflows keep credentials out of jobs that run dependency code'; biome 1254 files, no errors (the one warning is main's, tests/dist-fresh.test.ts:241); tsc clean; claude-envoy lint clean; private-names clean; rebuild run 40840840023 at d7b3cc91 completed success.",
+      "headSha": "d7b3cc91756db18b0ec722e4f69ffa9f71c6c35b",
+      "negativeControl": "Without PyYAML the credentials test cannot run (151 failed, ModuleNotFoundError: yaml), so the green run above is with the parser present, as CI's runner has it."
+    }
+  ],
+  "filesChanged": [
+    ".github/scripts/release-push.sh",
+    ".github/scripts/release-push.test.sh",
+    ".github/workflows/claude-envoy-rebuild.yaml",
+    ".github/workflows/pr-and-main.yaml",
+    "docs/deployment.md",
+    "packages/claude-envoy/.changes/unreleased/pr2493-rebuild-lands-on-moved-main.yaml",
+    "packages/claude-envoy/AGENTS.md",
+    "packages/claude-envoy/README.md",
+    "packages/claude-envoy/scripts/build-inputs.txt",
+    "packages/claude-envoy/scripts/build.ts",
+    "packages/claude-envoy/scripts/verify-build.sh",
+    "packages/claude-envoy/tests/build-inputs.test.ts"
+  ],
+  "trickyParts": [
+    "push-built never checks out main's tip: a temporary index (read-tree tip, add -A the two directories from the work tree at base, write-tree, commit-tree) builds the commit, because the tip may carry another release-push.sh and a checkout would rewrite the running script.",
+    "deploy_key_env is idempotent and every temp directory shares one EXIT trap (on_exit_remove), since push-built and land_on_main both set up the key.",
+    "land_on_main records landed=pushed|restarted so push-built never starts a second fresh run after land_on_main already started one (main moved again between fetch and push).",
+    "git diff limits paths before pairing renames, so a rename out of the inputs lists its old path with or without --no-renames; --no-renames matters for a rename inside the inputs (test case rename-inside).",
+    "main_build_base reads only a github-actions[bot] commit with the exact rebuild subject whose named commit is its ancestor; anything else touching dist/legion counts as a build of at most itself.",
+    "My first implementing turn died before pushing; the workspace and $TMPDIR were recreated, and this turn redid the list/test commit from its reviewed content before the rest."
+  ],
+  "deviations": [
+    "Spec Acceptance 1, second sentence ('lands nothing and starts a fresh run' when an input changed) is superseded by the architect's 22:40Z Scope decision, as the plan records: with an input changed, push-built lands the newer build and also starts one fresh run; it lands nothing only when main holds a newer build.",
+    "The real-history pair with an input change uses tip 305a1033 (main just before the first real rebuild commit ea8d72a0) instead of 1767c9af->later main: main now holds real bot rebuilds of d317f218, so any older base is correctly refused as not newer (observed: 'main already holds a build of ..., newer than ...').",
+    "Simplify pass applied one finding (fresh_run gives its own notice); the rest skipped with reasons in the PR body's Thermo line."
+  ],
+  "openQuestions": [
+    "Acceptance 1's second sentence in the spec still reads the pre-decision text; the architect may want to correct it in the plan or a note (the plan's specDepartures entry)."
+  ]
+}
