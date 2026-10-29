@@ -129,17 +129,19 @@ async function expectDrawnDiagram(card: Locator, labels: readonly string[]): Pro
 }
 
 /** Starts recording `page`'s console errors and returns the check both rows whose renderer never
- *  draws end with: `editor` shows `source` in a `pre code`, holds no diagram, hides the status
- *  line, and the renderer said once that it is unavailable. Recording starts at this call, before
- *  the page navigates, so an error logged on the first paint is counted. Both rows end alike
- *  because a block whose worker cannot draw looks the same whether no worker ever loaded or one
- *  failed after a drawing: its source as code, with no stale diagram left above it. */
-function watchSourceAsCode(page: Page): (editor: Locator, source: string) => Promise<void> {
+ *  draws end with: the document editor shows `source` in a `pre code`, holds no diagram, hides
+ *  the status line, and the renderer said once that it is unavailable. Recording starts at this
+ *  call, before the page navigates, so an error logged on the first paint is counted. Both rows
+ *  end alike because a block whose worker cannot draw looks the same whether no worker ever
+ *  loaded or one failed after a drawing: its source as code, with no stale diagram left above
+ *  it. */
+function watchSourceAsCode(page: Page): (source: string) => Promise<void> {
   const consoleErrors: string[] = [];
   page.on("console", (message) => {
     if (message.type() === "error") consoleErrors.push(message.text());
   });
-  return async (editor, source) => {
+  const editor = documentEditor(page);
+  return async (source) => {
     await expect(editor.locator("pre code").filter({ hasText: source })).toBeVisible();
     await expect(diagramIn(editor)).toHaveCount(0);
     await expect(editor.locator(".proof-mermaid-status")).toBeHidden();
@@ -899,7 +901,7 @@ test("with no worker a document's diagram shows its source @phone", async ({ bro
     const expectSourceAsCode = watchSourceAsCode(page);
     await refuseWorkers(page);
     await openSpec(page, issue.key, "Workerless diagram:");
-    await expectSourceAsCode(documentEditor(page), "Start --> Finish");
+    await expectSourceAsCode("Start --> Finish");
   } finally {
     await alice.close();
   }
@@ -930,7 +932,7 @@ test("a document diagram whose worker fails after its first drawing shows its so
 
     await placeCaret(page, "after", "Start --> Finish");
     await page.keyboard.type("Line");
-    await expectSourceAsCode(editor, "Start --> FinishLine");
+    await expectSourceAsCode("Start --> FinishLine");
   } finally {
     await alice.close();
   }

@@ -463,17 +463,17 @@ export async function blockId(artifactId: string, text: string): Promise<string>
 }
 
 /** Waits until the issue's spec block has been indexed into an open ask and returns it. */
-export async function indexedBlockAsk(issueKey: string, blockId: string) {
+export async function indexedBlockAsk(issueKey: string, block: string) {
   await expect
     .poll(async () =>
-      (await getIssue(issueKey)).open_asks.some((candidate) => candidate.block_id === blockId)
+      (await getIssue(issueKey)).open_asks.some((candidate) => candidate.block_id === block)
     )
     .toBe(true);
   const blockAsk = (await getIssue(issueKey)).open_asks.find(
-    (candidate) => candidate.block_id === blockId
+    (candidate) => candidate.block_id === block
   );
   if (blockAsk === undefined) {
-    throw new Error(`the ${blockId} decision was not indexed`);
+    throw new Error(`the ${block} decision was not indexed`);
   }
   return blockAsk;
 }

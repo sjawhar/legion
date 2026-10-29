@@ -99,6 +99,16 @@ function typeInto(view: EditorView, index: number, text: string): void {
   view.dispatch(view.state.tr.insertText(text, end));
 }
 
+/** The position of the document's last `mermaid` code block. Read it before a switch: a block
+ *  that has left mermaid is not found again, and switching it back needs the position it had. */
+function mermaidBlockPos(view: EditorView): number {
+  let found = -1;
+  view.state.doc.descendants((node, pos) => {
+    if (node.attrs.language === "mermaid") found = pos;
+  });
+  return found;
+}
+
 /** Waits until `check` holds, for at most a second. */
 async function until(check: () => boolean): Promise<void> {
   const deadline = performance.now() + 1000;
@@ -265,10 +275,7 @@ test("a code block in another language keeps upstream's plain layout and asks no
 
       // Switching the mermaid block to another language cancels its request and puts the pre
       // back alone in the frame; switching back asks again.
-      let mermaidPos = -1;
-      view.state.doc.descendants((node, pos) => {
-        if (node.attrs.language === "mermaid") mermaidPos = pos;
-      });
+      const mermaidPos = mermaidBlockPos(view);
       const setLanguage = (language: string) =>
         view.dispatch(view.state.tr.setNodeAttribute(mermaidPos, "language", language));
       setLanguage("ts");
@@ -296,12 +303,7 @@ test("a mermaid block that drew and then changed language leaves an empty hidden
       requests[0]?.answer(diagram(view.dom.ownerDocument, "drawn"));
       expect(shownDiagram(block)).toBe("drawn");
       expect(block.preview?.hidden).toBe(false);
-
-      let mermaidPos = -1;
-      view.state.doc.descendants((node, pos) => {
-        if (node.attrs.language === "mermaid") mermaidPos = pos;
-      });
-      view.dispatch(view.state.tr.setNodeAttribute(mermaidPos, "language", "js"));
+      view.dispatch(view.state.tr.setNodeAttribute(mermaidBlockPos(view), "language", "js"));
 
       expect(Array.from(block.frame.children)).toEqual([block.pre]);
       expect(shownDiagram(block)).toBeNull();

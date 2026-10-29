@@ -736,7 +736,7 @@ test("a past version's comment link lands on its quote in a document with no dia
     expect(started).toBeGreaterThanOrEqual(0);
     // The scroll to the quote only goes down, so the one fall a reader sees is the collapse: the
     // page rebuilt the version's editor and threw them back. A fall to the top is one of these,
-    // and so is one to the middle of the page, which the old rule read as no fall at all.
+    // and so is one to the middle of the page.
     let peak = 0;
     const falls: { from: number; to: number }[] = [];
     for (const offset of offsets.slice(started)) {
