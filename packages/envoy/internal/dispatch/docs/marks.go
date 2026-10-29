@@ -16,6 +16,7 @@ import (
 	"github.com/sjawhar/envoy/internal/dispatch/events"
 	"github.com/sjawhar/envoy/internal/dispatch/model"
 	"github.com/sjawhar/envoy/internal/dispatch/pmdoc"
+	"github.com/sjawhar/envoy/internal/dispatch/store"
 )
 
 // MarkKind identifies the Proof or Dispatch mark type written into a document tree.
@@ -594,7 +595,7 @@ func loadAnchorRefreshedAsk(ctx context.Context, tx pgx.Tx, id string) (model.As
 			aa.project_key, aa.slug, aa.name, aa.is_primary
 		from asks a
 		left join artifacts ba on ba.id = a.block_artifact_id
-		left join artifacts aa on aa.id = (a.anchor->>'artifact_id')::uuid
+		left join artifacts aa on aa.id = `+store.CanonicalUUID(`a.anchor->>'artifact_id'`)+`
 		where a.id = $1
 	`, id), &blockArtifactID, &blockArtifactSlug, &blockArtifactPrimary, &anchorProject, &anchorSlug, &anchorName, &anchorPrimary)
 	if err != nil {
@@ -753,20 +754,10 @@ func loadAnchorRefreshedCommentDeliveries(ctx context.Context, tx pgx.Tx, id str
 	return deliveries, nil
 }
 
-// asksAnchorArtifactIDExpression is the expression of asks_anchor_artifact_id (migration 0137),
-// and must stay character for character the expression that migration indexes: Postgres reaches
-// an expression index only through a predicate comparing its exact expression, so an edit here
-// the migration does not carry costs the asks read its index scan. The regex guards the cast
-// because an ask written by an earlier release can hold an anchor artifact_id that does not cast
-// (asks_anchor_artifact, 0032, casts it only where block_artifact_id is null); the guard answers
-// null for such a row instead of raising, which is what keeps both the index build and this read
-// from failing over it. Every string the regex accepts casts to uuid.
-const asksAnchorArtifactIDExpression = `(case when anchor->>'artifact_id' ~ '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$' then (anchor->>'artifact_id')::uuid end)`
-
 // recordedMarksQuery is the statement that lists the anchor and mark type of every row of table,
 // asks or comments, whose anchor names the artifact $1. Both tables share the predicate but not
-// the uuid expression: asks compare asksAnchorArtifactIDExpression, the expression of
-// asks_anchor_artifact_id (migration 0137), and comments the plain cast, the expression of
+// the uuid expression: asks compare store.CanonicalUUID's guarded cast, the expression
+// asks_anchor_artifact_id (migration 0137) indexes, and comments the plain cast, the expression of
 // comments_anchor_artifact (0032), so each read is an index scan. It keeps the text comparison
 // beside the uuid one, so it returns exactly the rows that comparison alone would: a row the
 // guard leaves unindexed, whose artifact_id is not a lower-case document id, is a row the text
@@ -774,7 +765,7 @@ const asksAnchorArtifactIDExpression = `(case when anchor->>'artifact_id' ~ '^[0
 func recordedMarksQuery(table string) string {
 	artifactID := `(anchor->>'artifact_id')::uuid`
 	if table == "asks" {
-		artifactID = asksAnchorArtifactIDExpression
+		artifactID = store.CanonicalUUID(`anchor->>'artifact_id'`)
 	}
 	return fmt.Sprintf(`
 		select anchor, %s

@@ -34,6 +34,14 @@ related_issues:
   prepared with a text parameter under `plan_cache_mode = force_generic_plan`, since the server
   sends `$1` as a bind parameter; and an old-predicate-versus-new-predicate `except` in both
   directions over every key, which must return no rows.
+- One guarded expression, one definition. Every reader that casts the same stored value - the
+  index, the census counting what it leaves out, and each read - builds it from one exported
+  helper, so the copies cannot drift; only the migration keeps a literal, because a migration's
+  text is immutable.
+- A `coalesce` whose cast sits behind another column hides which rows a cast ever reached:
+  `coalesce(block_artifact_id, (anchor->>'artifact_id')::uuid)` evaluates the cast only where
+  `block_artifact_id` is null, so that index proves nothing about an ask that sets both. Read the
+  index expression argument by argument before concluding a stored row casts.
 
 ## Evidence
 
@@ -58,3 +66,14 @@ related_issues:
   `block_artifact_id`.
 - The tester added an anchor with an upper-case artifact id to the equivalence harness. The kept
   text comparison excludes it on both sides.
+- That same unguarded cast was in every other reader of an ask's anchor, and `GET
+  /api/v1/issues/{key}/asks` answered 500 (`SQLSTATE 22P02`) over such a row on a real server.
+  `store.CanonicalUUID` (`internal/dispatch/store/canonical_uuid.go`) is now the single definition
+  of the guard, used by `api/ask_rows.go`, `api/events.go`, both ask arms of `api/search.go`,
+  `refs/graph.go`'s ask node, `docs/marks.go` (the sweep read and `loadAnchorRefreshedAsk`) and
+  `store.AsksOutsideAnchorArtifactIndex`. The comment readers stay unguarded: 0032's
+  `comments_anchor_artifact` casts every comment row, so no stored comment anchor fails a cast.
+- The two search arms read `coalesce(artifact_id, block_artifact_id, <anchor>)`, which never
+  reaches the anchor for the rows that do not cast, since they all set `block_artifact_id`; they
+  are guarded all the same, so neither arm depends on the order of its own `coalesce` or on an
+  index to stay correct.

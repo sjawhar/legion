@@ -11,6 +11,7 @@ import (
 	"github.com/sjawhar/envoy/internal/dispatch/docs"
 	"github.com/sjawhar/envoy/internal/dispatch/model"
 	"github.com/sjawhar/envoy/internal/dispatch/refs"
+	"github.com/sjawhar/envoy/internal/dispatch/store"
 )
 
 // askRowColumns are docs.AskColumns plus the documents a block ask, a quoted anchor or an
@@ -20,9 +21,12 @@ const askRowColumns = docs.AskColumns + `, ba.id::text, ba.slug, ba.is_primary,
 	aa.project_key, aa.slug, aa.name, aa.is_primary,
 	pa.project_key, pa.slug, pa.name, pa.is_primary`
 
-const askRowFrom = `from asks a
+// askRowFrom is a var, not a const, because its anchor join is built from store.CanonicalUUID: the
+// guard every ask anchor cast shares, so a stored anchor whose artifact_id is not a canonical id
+// resolves to no document instead of failing the read with SQLSTATE 22P02.
+var askRowFrom = `from asks a
 	left join artifacts ba on ba.id = a.block_artifact_id
-	left join artifacts aa on aa.id = (a.anchor->>'artifact_id')::uuid
+	left join artifacts aa on aa.id = ` + store.CanonicalUUID(`a.anchor->>'artifact_id'`) + `
 	left join artifacts pa on pa.id = (a.approval->>'artifact_id')::uuid`
 
 // newestReply selects the newest comment in the thread of the ask aliased a: the one that
@@ -87,7 +91,7 @@ func askWaitingOn(ctx context.Context, q queryer, askID string) (string, error) 
 // never carry WaitingOn.
 const askReadColumns = askRowColumns + `, lr.author, lr.created_at, ` + waitingOnExpression + ` as waiting_on`
 
-const askReadFrom = askRowFrom + lastReplyJoin
+var askReadFrom = askRowFrom + lastReplyJoin
 
 // nullableAskArtifactRef holds the nullable columns of one optional document an ask names - a
 // quoted anchor's or an approval request's artifact_id, both resolved through a left join that
