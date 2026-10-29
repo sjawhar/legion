@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"slices"
 	"strconv"
@@ -241,9 +242,28 @@ func (s *server) documentMentionExcerpts(ctx context.Context, query refs.Query, 
 	return nil
 }
 
+// getIssueReferences answers an issue's reference closure. ?versions=latest leaves each member's
+// artifact.versions holding only its latest version, under its own ETag; absent, empty or all is
+// the full answer. A repeated versions is refused rather than read by its first value.
 func (s *server) getIssueReferences(w http.ResponseWriter, r *http.Request) {
 	if !s.requireAuthenticated(w, r) {
 		return
+	}
+	versionsValues := r.URL.Query()["versions"]
+	if len(versionsValues) > 1 {
+		s.writeHandlerError(w, r, errorf(http.StatusBadRequest, "INVALID_QUERY", "versions must be given once, as all or latest"))
+		return
+	}
+	var latestOnly bool
+	if len(versionsValues) == 1 {
+		switch versionsValues[0] {
+		case "", "all":
+		case "latest":
+			latestOnly = true
+		default:
+			s.writeHandlerError(w, r, errorf(http.StatusBadRequest, "INVALID_QUERY", "versions must be all or latest"))
+			return
+		}
 	}
 	issue, err := s.loadIssue(r.Context(), s.deps.Store.Pool, r.PathValue("key"))
 	if err != nil {
@@ -259,7 +279,7 @@ func (s *server) getIssueReferences(w http.ResponseWriter, r *http.Request) {
 	for index, member := range closure {
 		refKeys[index] = member.RefKey
 	}
-	artifacts, err := s.loadArtifactsByRefKey(r.Context(), s.deps.Store.Pool, refKeys)
+	artifacts, err := s.loadArtifactsByRefKey(r.Context(), s.deps.Store.Pool, refKeys, latestOnly)
 	if err != nil {
 		s.writeHandlerError(w, r, err)
 		return
@@ -272,12 +292,12 @@ func (s *server) getIssueReferences(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		members = append(members, model.ReferenceMember{
-			Artifact: artifact,
+			Artifact: *artifact,
 			Depth:    closureMember.Depth,
 			Via:      closureMember.Via,
 		})
 	}
-	etag := referencesETag(issue.LastSeq, members, truncated)
+	etag := referencesETag(issue.LastSeq, members, truncated, latestOnly)
 	w.Header().Set("ETag", etag)
 	if r.Header.Get("If-None-Match") == etag {
 		w.WriteHeader(http.StatusNotModified)
@@ -308,26 +328,40 @@ func (s *server) getArtifactReferences(w http.ResponseWriter, r *http.Request) {
 	WriteJSON(w, http.StatusOK, model.ArtifactReferences{Outgoing: outgoing, ReferencedBy: referencedBy})
 }
 
-func referencesETag(lastSeq int, members []model.ReferenceMember, truncated bool) string {
+// referencesETag hashes what an issue references answer depends on. The trimmed answer
+// (latestOnly) hashes one more line naming its variant, so the full and trimmed answers of one
+// issue never share an ETag; the full answer hashes no such line.
+func referencesETag(lastSeq int, members []model.ReferenceMember, truncated, latestOnly bool) string {
 	hash := sha256.New()
 	_, _ = fmt.Fprintf(hash, "%d\n%t\n", lastSeq, truncated)
+	if latestOnly {
+		_, _ = io.WriteString(hash, "versions=latest\n")
+	}
 	for _, member := range members {
 		_, _ = fmt.Fprintf(hash, "%s@%d\n", member.Artifact.ID, member.Artifact.Versions[len(member.Artifact.Versions)-1].Number)
 	}
 	return `"` + hex.EncodeToString(hash.Sum(nil)) + `"`
 }
 
-func (s *server) loadArtifactsByRefKey(ctx context.Context, q queryer, refKeys []string) (map[string]model.Artifact, error) {
-	artifacts := make(map[string]model.Artifact, len(refKeys))
+// loadArtifactsByRefKey reads the documents refKeys name, each with every version in number
+// order, or with latestOnly only its latest version. A document with no version is absent.
+func (s *server) loadArtifactsByRefKey(ctx context.Context, q queryer, refKeys []string, latestOnly bool) (map[string]*model.Artifact, error) {
+	artifacts := make(map[string]*model.Artifact, len(refKeys))
 	if len(refKeys) == 0 {
 		return artifacts, nil
+	}
+	versions := `join artifact_versions v on v.artifact_id = a.id`
+	if latestOnly {
+		versions = `join lateral (
+			select * from artifact_versions v where v.artifact_id = a.id order by v.number desc limit 1
+		) v on true`
 	}
 	rows, err := q.Query(ctx, `
 		select a.id::text, a.issue_key, coalesce(a.project_key, ''), a.session_id, a.ref_key, a.slug, a.name, a.kind, a.is_primary,
 		       a.created_by, a.created_at,
 		       `+versionColumns+`
 		from artifacts a
-		join artifact_versions v on v.artifact_id = a.id
+		`+versions+`
 		where a.ref_key = any($1)
 		order by a.ref_key, v.number
 	`, refKeys)
@@ -371,7 +405,8 @@ func (s *server) loadArtifactsByRefKey(ctx context.Context, q queryer, refKeys [
 			if err := json.Unmarshal(createdBy, &artifact.CreatedBy); err != nil {
 				return nil, fmt.Errorf("decode artifact author: %w", err)
 			}
-			current = artifact
+			current = &artifact
+			artifacts[artifact.RefKey] = current
 		}
 		decoded, ok := authorsByJSON[string(authors)]
 		if !ok {
@@ -383,7 +418,6 @@ func (s *server) loadArtifactsByRefKey(ctx context.Context, q queryer, refKeys [
 		}
 		version.Authors = decoded
 		current.Versions = append(current.Versions, version)
-		artifacts[artifact.RefKey] = current
 	}
 	if err := rows.Err(); err != nil {
 		return nil, err

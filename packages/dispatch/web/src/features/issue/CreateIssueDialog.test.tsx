@@ -43,6 +43,13 @@ function renderDialog(
   onClose = () => {}
 ) {
   const listProjects = spyOn(api, "listProjects").mockResolvedValue(projects);
+  // Every row types a title, so the dialog's related-item check is answered here instead of
+  // reaching the network.
+  const relatedItems = spyOn(api, "relatedItems").mockResolvedValue({
+    outcome: "none",
+    related: [],
+    search: "keywords_only",
+  });
   const queryClient = new QueryClient({
     defaultOptions: { mutations: { retry: false }, queries: { retry: false } },
   });
@@ -61,6 +68,7 @@ function renderDialog(
       view.unmount();
       queryClient.clear();
       listProjects.mockRestore();
+      relatedItems.mockRestore();
     },
   };
 }
