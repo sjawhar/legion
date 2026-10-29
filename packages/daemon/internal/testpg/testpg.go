@@ -17,7 +17,8 @@ import (
 
 // Image is the Postgres server image a developer starts for the daemon's own tests: PostgreSQL 18
 // (tag 18, server 18.6-1.pgdg13+2), pinned by digest through the mirror. 18 is also the major
-// version CI's Postgres service runs, and the version envoy-infra gives a new Cloud SQL instance.
+// version of the Postgres service CI's daemon test job runs (pr-and-main.yaml's `test` job), and
+// the version envoy-infra gives a new Cloud SQL instance.
 const Image = "mirror.gcr.io/library/postgres@sha256:979bccfde35445db618c65107d27d08c6c21339d8dc3ad4c830c6633947be0e4"
 
 // Database is the URL of a new, empty database named <prefix>_<random>, dropped at the test's end.
