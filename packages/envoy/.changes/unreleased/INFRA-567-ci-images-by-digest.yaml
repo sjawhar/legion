@@ -6,7 +6,7 @@ body: |-
     build stage (`infra/host/heldportwrapper/Dockerfile`), and the servers the Go test helpers
     start (`internal/testpg`'s pgvector, `internal/testnats`'s NATS and NATS hub,
     `internal/tests3`'s SeaweedFS). `.github/ci-images.yaml` holds one row per image, and
-    `.github/workflows/mirror-images.yaml` publishes the rows the package does not hold yet with
+    `.github/scripts/mirror-ci-images.sh` copies the rows the package does not hold yet with
     `crane copy`, which keeps the digest, so each copy's digest is its upstream's. No build or
     test of this package reads a third-party registry, and a failed pull is this repository's own
     fault. The developer scripts under `scripts/` and the compose files under `deploy/compose/`,

@@ -50,9 +50,11 @@ reads a third-party registry any more, so a failed pull is this repository's own
   `ghcr.io/sjawhar/legion/ci`. Each consumer names its copy by digest, so a push can add bytes to
   the package but can never change the bytes a job pulls.
 - `.github/ci-images.yaml` holds one row per image (`upstream`, `tag`, `digest`).
-  `.github/workflows/mirror-images.yaml` publishes the rows the package does not hold yet, with
-  `crane copy`, which keeps the manifest digest. Adding an image, or moving one to a new version,
-  is one edit of that file.
+  `.github/scripts/mirror-ci-images.sh` copies the rows the package does not hold yet, with
+  `crane copy`, which keeps the manifest digest. `ci.yaml`'s `ci-images` job runs that copy and
+  then the gate, so a pull request that adds a row does not race its own gate, and
+  `.github/workflows/mirror-images.yaml` runs the copy again on a push to main. Adding an image,
+  or moving one to a new version, is one edit of that file.
 - `.github/scripts/check-ci-images.sh` is the gate. It refuses a reference in CI's reach that
   names anything but a digest that file holds, and it names each file outside CI's reach that
   still names `mirror.gcr.io`, with the one ground that admits it.
