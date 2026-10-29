@@ -1,0 +1,6 @@
+kind: Fixed
+body: |-
+  An upload that moves an open ask's quote into a code block, where an ask cannot be anchored, is
+  answered `400 INVALID_MARKDOWN`, naming the ask and its quote, so the uploader can move the text
+  out of the code block or resolve the ask first. Before, it was answered `500 DOC_SCHEMA` and
+  logged as the server's error.

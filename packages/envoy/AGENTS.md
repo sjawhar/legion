@@ -68,8 +68,11 @@ block, every block holding a change, and a typed block whose markdown names no i
 so does every block a moved block passes, since the alignment pairs it with its changed neighbour.
 An upload over open anchors builds its tree with the anchors on it in a scratch document and writes
 that tree into the room with one `pmdoc.Update`, so anchored text it left unchanged is not
-re-formatted. Without either, every upload wrote a `blockId` tombstone for every block, and one per
-open anchor, which a live room keeps decoded for the document's life (INFRA-715). Document
+re-formatted. A refusal to mark that scratch document - an open ask's quote moved into a code
+block, where an ask mark is not allowed - is the caller's markdown: `400 INVALID_MARKDOWN`, naming
+the anchor's kind and quote, and the room keeps its tree (`refusedReanchor`). Without either change,
+every upload wrote a `blockId` tombstone for every block, and one per open anchor, which a live
+room keeps decoded for the document's life (INFRA-715). Document
 settlement is two-phase: it first writes its repairs into the room (`EnsureBlockIDs`, then the
 server-owned attributes of each ask block it reconciled) and persists the updates they captured in
 the same Postgres transaction as any resulting version and event, then renders and compares

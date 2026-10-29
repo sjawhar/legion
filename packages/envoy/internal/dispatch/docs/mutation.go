@@ -465,20 +465,24 @@ func (s *Service) ReplaceText(ctx context.Context, artifactID, markdown string, 
 				// One finder over target and one writer over the scratch fragment serve every row, so
 				// the upload flattens target and reads the fragment's text ranges once, not once a row.
 				// Both read nothing until the first row needs them. A row whose quote no longer
-				// resolves keeps no mark, so its miss is never described.
+				// resolves keeps no mark, so its miss is never described. The scratch document holds
+				// only target, which the caller's markdown made, so any other refusal to mark it - an
+				// ask's quote now inside a code block, where an ask mark is not allowed - is that
+				// markdown's, not the stored document's or the server's: the upload is refused as
+				// invalid markdown, naming the anchor, and the room keeps the tree it held.
 				finder := pmdoc.NewQuoteFinder(target)
 				writer := pmdoc.NewMarkWriter(scratchFragment)
 				for _, reanchor := range reanchors {
 					range_, err := finder.FindDiscardingMiss(reanchor.mark.anchor.Quote, nil, &reanchor.range_.From)
 					if err == nil {
-						err = documentSchemaError(writer.Mark(txn, range_, MarkSpec{
+						err = writer.Mark(txn, range_, MarkSpec{
 							Kind:  MarkKind(reanchor.mark.markType),
 							ID:    reanchor.mark.anchor.MarkID,
 							Attrs: reanchor.attrs,
-						}.pmMark()))
+						}.pmMark())
 					}
 					if err != nil && !errors.Is(err, pmdoc.ErrTargetNotFound) {
-						return err
+						return refusedReanchor(reanchor.mark, err)
 					}
 				}
 				var err error
@@ -507,6 +511,23 @@ func (s *Service) ReplaceText(ctx context.Context, artifactID, markdown string, 
 		return "", wrapUnlessTooLarge(err, "replace live document")
 	}
 	return canonical, nil
+}
+
+// refusedReanchor is an upload's refusal of markdown that leaves an open anchor's quote where its
+// mark cannot stand, cause being the mark writer's refusal: ErrInvalidMarkdown, the caller's to fix,
+// naming the anchor's kind and quote and the two ways out. It holds cause as text rather than
+// wrapping it, so no route reads it as a document outside its schema.
+func refusedReanchor(mark anchoredMark, cause error) error {
+	kind := map[string]string{
+		string(MarkAsk):        "ask",
+		string(MarkComment):    "comment",
+		string(MarkSuggestion): "suggestion",
+	}[mark.markType]
+	if kind == "" {
+		kind = mark.markType
+	}
+	return fmt.Errorf("%w: the open %s anchored on %q would land where its mark is not allowed (%v); move that text out of that block, or resolve the %s first",
+		ErrInvalidMarkdown, kind, mark.anchor.Quote, cause, kind)
 }
 
 func (s *Service) refuseDroppedAskBlocks(ctx context.Context, artifactID string, target *pmdoc.Node) error {

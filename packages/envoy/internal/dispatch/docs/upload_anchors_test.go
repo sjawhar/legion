@@ -202,8 +202,8 @@ func TestAnUploadLeavesTheAnchorsOnTheTextItKeeps(t *testing.T) {
 }
 
 // An ask mark is not allowed in a code block, so an upload that moves an open ask's quote into
-// one is refused, as a write that would leave the document outside its schema, and the room keeps
-// the tree it held.
+// one is refused as the caller's markdown (ErrInvalidMarkdown, which the routes answer 400), never
+// as a document outside its schema (a 500 or a repair), and the room keeps the tree it held.
 func TestAnUploadMovingAnAskQuoteIntoACodeBlockIsRefused(t *testing.T) {
 	service, artifactID := newTestService(t)
 	service.settle = time.Hour
@@ -212,8 +212,10 @@ func TestAnUploadMovingAnAskQuoteIntoACodeBlockIsRefused(t *testing.T) {
 	before := liveTree(t, service, artifactID)
 
 	_, err := joinedReplaceText(service, artifactID, "Intro.\n\n```\nrun the tests\n```\n", model.Actor{Kind: "user", ID: "alice"})
-	if !errors.Is(err, ErrDocSchema) || !strings.Contains(err.Error(), `mark "dispatchAsk" is not allowed in code_block`) {
-		t.Fatalf("upload moving the ask's quote into a code block = %v, want the ask mark refused there", err)
+	if !errors.Is(err, ErrInvalidMarkdown) || errors.Is(err, ErrDocSchema) || errors.Is(err, ErrDocOutsideSchema) ||
+		!strings.Contains(err.Error(), `the open ask anchored on "run the tests"`) ||
+		!strings.Contains(err.Error(), `mark "dispatchAsk" is not allowed in code_block`) {
+		t.Fatalf("upload moving the ask's quote into a code block = %v, want ErrInvalidMarkdown naming the ask and why", err)
 	}
 	if got := liveTree(t, service, artifactID); !got.EqualWithBlockIDs(before) {
 		t.Fatalf("the room after the refused upload =\n%s\nwant the tree it held\n%s", treeMarkdown(got), treeMarkdown(before))
