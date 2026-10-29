@@ -2,35 +2,47 @@
   "schemaVersion": 1,
   "phase": "test",
   "issue": "INFRA-651",
-  "completed": "2026-10-29T16:03:27Z",
-  "headTested": "43ad5b4419e339ac5ee64b6e2a749483a9ebc5f9",
-  "codeHead": "e510068fceaa6253513273e48f790374357223a6",
-  "round": 6,
-  "forwardMerge": {
-    "previousVerifiedHead": "ceba343c5405451405b6938ab2276a68e9c234b3",
-    "merge": "e510068fceaa (main 30ecdcd4ee8c)",
-    "fingerprints": "ceba343c: 5d08eedf6dd63fd0b9fb314eca1e000bd55e927f12d2280237c2f14faf388a99; 43ad5b44: 5d08eedf6dd63fd0b9fb314eca1e000bd55e927f12d2280237c2f14faf388a99",
-    "verdict": "unchanged: bare gates only. The diff from each head's fork point holds the same lines, so the README conflict kept main's two #2397 rows (a dropped row would appear as a removed line) and this PR's row unchanged."
-  },
+  "completed": "2026-10-29T17:48:34Z",
+  "headTested": "f117b21bb354f5ff8801b5c5ac33136e8bed186c",
+  "codeHead": "c281bc3c6d8e",
+  "round": 7,
+  "scope": "As the architect narrowed it (Envoy, 2026-10-29 16:16Z): delete from request_keys in the seed step before the vacuum with a check that the template holds none; the reviewer's three minor cleanups. The tester checks a fresh seed has 0 request_keys rows, the counts stay 1,000 / 19,471 / 310 / 51,071 and refs-shape passes.",
   "implementerProof": {
     "verdict": "verified",
-    "how": "Computed the unchanged-diff fingerprint at ceba343c and 43ad5b44 myself; rebuilt the load-test stack's binaries from the merge and smoke-ran the seed commands and the route on the round-5 seed."
+    "how": "Repeated it on a fresh load-test stack of my own built from this head: stack.sh seed, request_keys in the template and after a reset, seed.meta.json counts, refs-shape, refs-fetch; the seed-refs probe with this head's and main's loadgen; seed --force with main's loadgen."
   },
   "failed": 0,
   "failures": [],
   "proof": [
     {
-      "criterion": "Forward-merge re-check: the round-5 failures are answered and the merged head still serves the change (bare gates)",
-      "surface": "packages/envoy/loadtest stack rebuilt from 43ad5b44 (stack.sh setup) on the round-5 seed (built at ceba343c, migration 0138), Dispatch migrating it to 0140 on start",
-      "command": "stack.sh setup; start; reset; loadgen refs-shape; loadgen refs-fetch -out full.tsv; curl LGA-202 references with '', versions=latest, versions=all, versions=latest&versions=bogus, versions=last, and with no identity; diff of status and bytes per issue against round 5's full-head.tsv",
-      "observed": "refs-shape PASS (mean rows 2,508, share 0.0539, 231.0 bytes/row); refs-fetch 1,000 issues, 310 with members, 0 not 200, status and bytes per issue equal to round 5; LGA-202 200 7,145,360 bytes, versions=latest 200 943,398, versions=all 200 7,145,360. The merge head e510068f carries no skip-checks line and GitHub no longer reports CONFLICTING (UNKNOWN while it recomputes)",
-      "headSha": "43ad5b4419e339ac5ee64b6e2a749483a9ebc5f9",
-      "negativeControl": "versions=latest&versions=bogus -> 400, versions=last -> 400, repeated versions with no identity -> 401"
+      "criterion": "A fresh seed's template holds no request_keys rows, the counts stay 1,000 / 19,471 / 310 / 51,071, and refs-shape passes",
+      "surface": "packages/envoy/loadtest at this head: stack.sh setup, start, seed on a fresh LOADTEST_ROOT (Postgres 16.2 + pgvector, real migrations, latency proxy, NATS, listener)",
+      "command": "stack.sh seed; psql dispatch_seed: select count(*) from request_keys; stack.sh reset; psql dispatch: same; stack.sh loadgen refs-shape; stack.sh loadgen refs-fetch -out full.tsv; curl LGA-202 references with '', versions=latest",
+      "observed": "seed done in 2,317 s, log line 'deleting the seed's idempotency keys (request_keys)' before 'vacuum analyze'; request_keys 0 in dispatch_seed and 0 after reset; seed.meta.json migration 140, build f117b21b dirty false, counts projects 4, issues 1,000, comments 8,000, artifacts 2,310, artifact_versions 20,781, ref_targets 1,000, ref_target_versions 19,471, ref_sources 310, artifact_refs 51,071; refs-shape PASS (mean rows 2,508, distinct share 0.0539, 231.0 author bytes per row); refs-fetch 1,000 issues, 310 with members, 0 not 200; LGA-202 7,145,324 bytes full, 943,396 trimmed",
+      "headSha": "f117b21bb354f5ff8801b5c5ac33136e8bed186c",
+      "negativeControl": "the template seeded at ceba343c (round 5, before this change) held 19,781 request_keys rows; ?versions=latest&versions=bogus -> 400 at this head"
+    },
+    {
+      "criterion": "The seed-refs probe (reviewer cleanup: usage grep replaced by `loadgen seed-refs -h`) still refuses an older loadgen before anything is dropped",
+      "surface": "stack.sh seed --force at this head with $BIN/loadgen replaced by main's (git archive of fork point 30ecdcd4, built with GOWORK=off)",
+      "command": "loadgen seed-refs -h with each loadgen; cp loadgen-main $BIN/loadgen; stack.sh seed --force; sha256 of seed.json and seed.meta.json before and after; count dispatch_seed's target versions; restore the head loadgen",
+      "observed": "head loadgen exit 0, main's exit 2 ('loadgen: unknown command \"seed-refs\"'); seed --force exit 1 'the loadgen at .../bin was built from a checkout that has no seed-refs; ...'; seed files unchanged; dispatch_seed still holds 19,471 target versions",
+      "headSha": "f117b21bb354f5ff8801b5c5ac33136e8bed186c",
+      "negativeControl": "main's loadgen itself is the refused input; the round-4 stack.sh with no probe dropped the seed within 6 s (round 5)"
+    },
+    {
+      "criterion": "Reviewer cleanup (digest without re-sort): TestMakeRefPlan still pins the plan",
+      "surface": "packages/envoy/loadtest refs_test.go with go test -overlay mutations of the current refs.go",
+      "command": "go test -run 'TestMakeRefPlan|TestRefWriterAuthorBytes' -count=1 .; the same with -overlay for last_m (the reviewer's citation mutation) and first_writer",
+      "observed": "unmutated ok with the unchanged constant 7414809c...; both mutations fail at refs_test.go:101 'the plan hashes to ...'",
+      "headSha": "f117b21bb354f5ff8801b5c5ac33136e8bed186c",
+      "negativeControl": "the two mutations are the negative controls"
     }
   ],
   "notes": [
-    "The round-5 seed proofs stand at this head by the unchanged fingerprint: dispatch://INFRA-651/artifact/infra651-tester-evidence-tgz version 5 and round 5's proof entries (commit f115e4e1).",
-    "CI on e510068f was queued when read (changes, pr-title); not waited on. close-withdraws-asks.e2e.ts:126 in the dispatch browser job is main's known red unless INFRA-138's fix is on main by then.",
-    "Evidence: dispatch://INFRA-651/artifact/infra651-tester-evidence-r6-tgz (sha256 f2db2ae7d6935f897200ef7097b2908f5dfb21f2515023ec5b8ae69d92071885)."
+    "The die branch for rows left after the delete was not forced (the delete cannot leave rows short of a concurrent writer, and Dispatch is stopped by then); it was read, not driven.",
+    "Dropping seed-refs' own count checks leaves the plan's totals to seed.meta.json and refs-shape, both checked above; round 5's dropped-answer run showed each write lands once.",
+    "CI at c281bc3c: lint, test, pr-title and every other finished job success; typecheck skipped; dispatch and envoy-go-race in progress when read; not waited on. The code commit carries no skip-checks line and GitHub reads the pull request MERGEABLE.",
+    "Evidence: dispatch://INFRA-651/artifact/infra651-tester-evidence-r7-tgz (sha256 60617348534c2b6595aebf91ebf04cdf7c7aa74abb3892d7481f84303ad4f847)."
   ]
 }
