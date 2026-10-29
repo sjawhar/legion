@@ -326,14 +326,15 @@ func lastResorts(needs runNeeds, spellings []runSpelling) []runSpelling {
 }
 
 // orderMarks orders next, the marks the text nodes[index] is written under, and returns it with
-// following, the marks of the text after it (nil after the last), ordered as spelling.order orders
-// a run's marks (markOrder). marksAsWritten leaves both in their written order. marksKeptOpen keeps
-// the marks written open before a text open around it, then opens the marks the next text still
-// carries (keepingOpen). marksByReach opens outermost the mark the texts after it carry furthest
-// (byReach). marksReopened closes the marks a text shares with the one before and opens them again
-// inside its new ones (reopening). following is ordered with next as the marks written open before
-// it, so next is ordered first, and each order moves a code span's mark innermost itself
-// (codeInnermost), since the ordering after it reads its result that way.
+// following, the marks of the text after it (empty after the last), ordered as spelling.order
+// orders a run's marks (markOrder). marksAsWritten leaves both in their written order.
+// marksKeptOpen keeps the marks written open before a text open around it, then opens the marks
+// the next text still carries (keepingOpen). marksByReach also keeps them open, then opens
+// outermost the mark the texts after it carry furthest (byReach). marksReopened closes the marks a
+// text shares with the one before and opens them again inside its new ones (reopening). following
+// is ordered with next as the marks written open before it, so next is ordered first, and each
+// order moves a code span's mark innermost itself (codeInnermost), since the ordering after it
+// reads its result that way.
 func orderMarks(active, next []Mark, nodes []*Node, index int, escapePipes, wwwBare bool, spelling runSpelling) ([]Mark, []Mark) {
 	var following []Mark
 	if index+1 < len(nodes) {
