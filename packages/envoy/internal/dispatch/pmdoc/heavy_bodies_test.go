@@ -49,14 +49,9 @@ type heavyBody struct {
 	// refusal is what a write of the shape is refused with, under ErrSchema, or "" where the body
 	// is stored.
 	refusal string
-	// repeats is how many times growsLinearly's measurement parses the shape inside one timed
-	// window. A body is capped at bodyCap characters, and the two lazy shapes cost about 20 ms
-	// there, which an eighth of the way down stands at the resolution the operating system reports
-	// this process's CPU time at: the ratio of two such measurements is noise, or a division by
-	// zero. Parsing the same body several times lifts both sides of the comparison above that
-	// resolution and leaves the ratio the parse's own, since the count is the same at both sizes.
-	// Each shape's count takes its full size to a few hundred milliseconds.
-	repeats int
+	// (the count of runs one timed window holds is cputest.Measure's own, through cpuTimeOf: it
+	// raises a cheap shape above the resolution this process's CPU time is reported at and divides
+	// the window by the runs it held, so no shape carries a repeat count of its own.)
 }
 
 // nestedItems is depth list items, each indented one level deeper than the item before it, so the
@@ -90,36 +85,31 @@ func heavyBodyShapes() []heavyBody {
 	const bracketOpeners = 15_000
 	return []heavyBody{
 		{
-			name:    "a plain list of 8,000 items",
-			body:    func(size int) string { return strings.Repeat("- x\n", size/4) },
-			grown:   bodyCap,
-			repeats: 1,
+			name:  "a plain list of 8,000 items",
+			body:  func(size int) string { return strings.Repeat("- x\n", size/4) },
+			grown: bodyCap,
 		},
 		{
-			name:    "a quote then lines carrying no marker",
-			body:    func(size int) string { return "> x\n" + strings.Repeat("x\n", size/2) },
-			grown:   bodyCap - len("> x\n"),
-			repeats: 16,
+			name:  "a quote then lines carrying no marker",
+			body:  func(size int) string { return "> x\n" + strings.Repeat("x\n", size/2) },
+			grown: bodyCap - len("> x\n"),
 		},
 		{
-			name:    "a list item then lines carrying no marker",
-			body:    func(size int) string { return "- x\n" + strings.Repeat("x\n", size/2) },
-			grown:   bodyCap - len("- x\n"),
-			repeats: 16,
+			name:  "a list item then lines carrying no marker",
+			body:  func(size int) string { return "- x\n" + strings.Repeat("x\n", size/2) },
+			grown: bodyCap - len("- x\n"),
 		},
 		{
 			name: "a run of 15,000 brackets and as many closers",
 			body: func(size int) string {
 				return strings.Repeat("[", size/2) + strings.Repeat("]", size-size/2)
 			},
-			grown:   30_000,
-			repeats: 1,
+			grown: 30_000,
 		},
 		{
-			name:    "49 items nested by indentation then blank lines",
-			body:    func(size int) string { return nest49 + strings.Repeat("\n", size) },
-			grown:   bodyCap - len(nest49),
-			repeats: 1,
+			name:  "49 items nested by indentation then blank lines",
+			body:  func(size int) string { return nest49 + strings.Repeat("\n", size) },
+			grown: bodyCap - len(nest49),
 		},
 		{
 			name:    "100 items nested by indentation then blank lines",
@@ -156,7 +146,7 @@ func TestHeavyBodiesAtTheBodyCapAreStoredOrRefusedInTime(t *testing.T) {
 			}
 			var err error
 			took := timedWithDeadline(t, "parsing "+shape.name, perCallDeadline, func() (time.Duration, error) {
-				return cpuTimeOf(func() { _, err = ParseForWrite(body, nil) })
+				return cpuTimeOf(again(func() { _, err = ParseForWrite(body, nil) }))
 			})
 			if shape.refusal == "" {
 				if err != nil {
@@ -177,8 +167,7 @@ func TestHeavyBodiesAtTheBodyCapAreStoredOrRefusedInTime(t *testing.T) {
 // Every shape a write stores parses in time proportional to its length, measured at an eighth of
 // what the shape grows and then at the whole of it, in both builds: a shape whose cost grew with
 // the square of its length would grow growthStep² times where a linear one may grow
-// linearSlack*growthStep (growthStep, linear_test.go). Each window parses the shape repeats
-// times, which the clock the CPU time is read from needs of the cheaper shapes.
+// linearSlack*growthStep (growthStep, linear_test.go).
 func TestHeavyBodiesAtTheBodyCapParseInTimeProportionalToTheirLength(t *testing.T) {
 	for _, shape := range heavyBodyShapes() {
 		if shape.refusal != "" {
@@ -188,13 +177,12 @@ func TestHeavyBodiesAtTheBodyCapParseInTimeProportionalToTheirLength(t *testing.
 			sizes := []int{shape.grown / growthStep, shape.grown}
 			growsLinearly(t, "parsing "+shape.name, sizes, linearSlack, func(size int) (time.Duration, error) {
 				body := shape.body(size)
-				return cpuTimeOf(func() {
-					for range shape.repeats {
-						if _, err := ParseForWrite(body, nil); err != nil {
-							t.Fatalf("parsing %d characters of %s: %v", size, shape.name, err)
-						}
-					}
-				})
+				var err error
+				took, measureErr := cpuTimeOf(again(func() { _, err = ParseForWrite(body, nil) }))
+				if err != nil {
+					return 0, fmt.Errorf("parsing %d characters of %s: %w", size, shape.name, err)
+				}
+				return took, measureErr
 			})
 		})
 	}
