@@ -104,8 +104,13 @@ export function claudeAgent(file: string, source: string): string {
  *  (packages/daemon/internal/runtime/tmux/claude.go): its manifest, named `legion`, so Claude Code
  *  names its skills and agents `legion:<name>`; the skills pi-legion ships, staged by the one script
  *  that partitions them (scripts/pi-plugin-prepack.sh --stage-skills); and pi-legion's task agents
- *  in Claude Code's format (`claudeAgent`). Generated, never edited by hand. */
-export async function buildLegionPlugin(outdir: string): Promise<void> {
+ *  in Claude Code's format (`claudeAgent`). Generated, never edited by hand.
+ *
+ *  Returns, as `buildBundles` does, the absolute path of every repository file it read: each agent
+ *  file, and the source each staged skill file was copied from. tests/build-inputs.test.ts checks
+ *  the input list against it, so a source added here is one the list must name rather than one the
+ *  test can miss. Callers that only want the output ignore the result. */
+export async function buildLegionPlugin(outdir: string): Promise<string[]> {
   await mkdir(join(outdir, ".claude-plugin"), { recursive: true })
   await writeFile(
     join(outdir, ".claude-plugin", "plugin.json"),
@@ -119,22 +124,38 @@ export async function buildLegionPlugin(outdir: string): Promise<void> {
       2,
     )}\n`,
   )
+  const stagedSkills = join(outdir, "skills")
   const staged = Bun.spawnSync([
     "bash",
     join(repoRoot, "scripts", "pi-plugin-prepack.sh"),
     "--stage-skills",
     "@sjawhar/pi-legion",
-    join(outdir, "skills"),
+    stagedSkills,
   ])
   if (staged.exitCode !== 0) {
     throw new Error(`staging pi-legion's skills failed: ${staged.stderr.toString().trim()}`)
+  }
+  // Each staged file is a copy of skills/<the same path>, since stage_skills copies whole skill
+  // directories (`cp -R "$root/skills/$skill" "$dest/$skill"`), so the file read is that source and
+  // not the copy written here. A source that is not there means this mapping, not a skill, is wrong.
+  const reads: string[] = []
+  for (const entry of await readdir(stagedSkills, { recursive: true, withFileTypes: true })) {
+    if (entry.isDirectory()) continue
+    const relativePath = relative(stagedSkills, join(entry.parentPath, entry.name))
+    const source = join(repoRoot, "skills", relativePath)
+    if (!(await Bun.file(source).exists())) {
+      throw new Error(`staged skill file ${relativePath} does not come from ${source}`)
+    }
+    reads.push(source)
   }
   const agents = join(repoRoot, "packages", "pi-legion", "agents")
   await mkdir(join(outdir, "agents"))
   for (const name of (await readdir(agents)).filter((file) => file.endsWith(".md")).sort()) {
     const source = await readFile(join(agents, name), "utf8")
     await writeFile(join(outdir, "agents", name), claudeAgent(name, source))
+    reads.push(join(agents, name))
   }
+  return reads
 }
 
 /** Each file under `fresh` or `committed` that is missing from the other or differs in bytes,

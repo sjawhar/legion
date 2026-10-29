@@ -1,6 +1,6 @@
 import { expect, test } from "bun:test"
 import { existsSync } from "node:fs"
-import { mkdir, mkdtemp, readdir, readFile, rm, writeFile } from "node:fs/promises"
+import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { dirname, isAbsolute, join, relative, resolve, sep } from "node:path"
 
@@ -26,20 +26,38 @@ async function run(command: string[], cwd: string, env?: Record<string, string>)
   return stdout
 }
 
-/** Every file the build reads, repository-relative, by running it. The build runs in a process of
- *  its own because a second Bun.build in a test process that has already run other test files
- *  fails reading its sources with EISDIR (tests/dist-fresh.test.ts builds the same way). */
+/** Every file the build reads, repository-relative, by running it: both halves of the build report
+ *  what they read, so a source either of them starts reading is covered here without this test
+ *  listing any of them itself. The build runs in a process of its own because a second Bun.build in
+ *  a test process that has already run other test files fails reading its sources with EISDIR
+ *  (tests/dist-fresh.test.ts builds the same way). */
 async function filesTheBuildReads(scratch: string): Promise<string[]> {
+  const build = JSON.stringify(join(packageRoot, "scripts", "build.ts"))
   const script = [
-    `import { buildBundles } from ${JSON.stringify(join(packageRoot, "scripts", "build.ts"))}`,
-    `console.log(JSON.stringify(await buildBundles(${JSON.stringify(join(scratch, "dist"))})))`,
+    `import { buildBundles, buildLegionPlugin } from ${build}`,
+    "console.log(",
+    "  JSON.stringify({",
+    `    bundles: await buildBundles(${JSON.stringify(join(scratch, "dist"))}),`,
+    `    legion: await buildLegionPlugin(${JSON.stringify(join(scratch, "legion"))}),`,
+    "  }),",
+    ")",
   ].join("\n")
-  const inputs: string[] = JSON.parse(await run([process.execPath, "--eval", script], packageRoot))
-  const bundleInputs = inputs.map((input) => relative(repoRoot, input))
-  const outside = bundleInputs.filter((input) => input.startsWith("..") || isAbsolute(input))
+  const read: { bundles: string[]; legion: string[] } = JSON.parse(
+    await run([process.execPath, "--eval", script], packageRoot),
+  )
+  const bundleInputs = read.bundles.map((input) => relative(repoRoot, input))
+  const legionInputs = read.legion.map((input) => relative(repoRoot, input))
+  const outside = [...bundleInputs, ...legionInputs].filter(
+    (input) => input.startsWith("..") || isAbsolute(input),
+  )
   expect(outside).toEqual([])
 
-  const probes = new Set<string>()
+  // The node_modules and package-root probes below are about how Bun resolved and transpiled a
+  // bundled source, so only the bundles' inputs go through them. `buildLegionPlugin` reads the
+  // skills and agents as plain files, with no resolution or notices behind them, and probing their
+  // package roots would demand packages/pi-legion/package.json and the like from the list for
+  // files the build never reads.
+  const probes = new Set<string>(legionInputs)
   const local = bundleInputs.filter((input) => !input.split(sep).includes("node_modules"))
   for (const input of local) probes.add(input)
   // A module under node_modules is whatever `bun install` put there, which the lockfile, the root
@@ -65,30 +83,6 @@ async function filesTheBuildReads(scratch: string): Promise<string[]> {
     for (const name of ["package.json", "tsconfig.json", "LICENSE", "NOTICE"]) {
       probes.add(join(directory, name))
     }
-  }
-
-  // legion/skills: what the staging script copies, each file from skills/<the same path>.
-  const staged = join(scratch, "skills")
-  await run(
-    [
-      "bash",
-      join(repoRoot, "scripts", "pi-plugin-prepack.sh"),
-      "--stage-skills",
-      "@sjawhar/pi-legion",
-      staged,
-    ],
-    repoRoot,
-  )
-  const stagedFiles = (await readdir(staged, { recursive: true, withFileTypes: true }))
-    .filter((entry) => !entry.isDirectory())
-    .map((entry) => join("skills", relative(staged, join(entry.parentPath, entry.name))))
-  expect(stagedFiles.filter((file) => !existsSync(join(repoRoot, file)))).toEqual([])
-  for (const file of stagedFiles) probes.add(file)
-
-  // legion/agents: each of pi-legion's agent files.
-  const agents = join("packages", "pi-legion", "agents")
-  for (const name of await readdir(join(repoRoot, agents))) {
-    if (name.endsWith(".md")) probes.add(join(agents, name))
   }
   return [...probes].sort()
 }
