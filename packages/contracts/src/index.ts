@@ -10,6 +10,7 @@ export * from "./dispatch-text-rules";
 export * from "./dispatch-tools";
 export * from "./envelope";
 export * from "./legion-roles";
+export * from "./related-forms";
 export * from "./repo";
 export * from "./slack";
 export * from "./subject";
