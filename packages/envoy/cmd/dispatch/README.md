@@ -703,27 +703,38 @@ the loader below refuses a set holding a file named anything else.
 
 A migration added from now on is named `<UTC timestamp>_<name>.up.sql`, the timestamp the moment
 its author created it, `YYYYMMDDHHMMSS` (`date -u +%Y%m%d%H%M%S`), with its census as
-`<same timestamp>_<name>.census.sql`. The versions through `0140_issue_embedding_spec.up.sql` are
-the sequence the set grew up with; every one of those files keeps the number it landed with, and
-nothing is added at or below 140 again. Two pull requests open at once used to take one number
-each and collide only when the first merged — nothing conflicts in git — while two timestamps
-taken a moment apart belong to their own authors. The version is the file name's leading digits
-read as a number, as before, so every timestamp orders after every number and timestamps order
-among themselves by time. A 14-digit version is past what an `integer` column holds, so
-`schema_migrations.version` is a `bigint`. A database created before the change keeps its
-`integer` column until a boot whose set holds a timestamped migration, which widens it once, in the
-same locked transaction that creates the table (`createVersionTable`): a boot with no timestamped
-migration leaves it alone, because the release before this change reads `max(version)` uncast and
-would fail that read once on every connection that prepared it while it still serves.
-`schema_version` in `/healthz` and the auto-deployer is still `max(version)`, the newest migration
-applied.
+`<same timestamp>_<name>.census.sql`. The numbered versions are the sequence the set grew up with;
+every one of those files keeps the number it landed with, and no number is added again, whatever
+the highest of them is: the rule derives that from the set itself (`migrationid.Check`), so no
+document records it. Two pull requests open at once used to take one number each and collide only
+when the first merged — nothing conflicts in git — while two timestamps taken a moment apart
+belong to their own authors. The version is the file name's leading digits read as a number, as
+before, so every timestamp orders after every number and timestamps order among themselves by
+time. A 14-digit version is past what an `integer` column holds, so `schema_migrations.version` is
+a `bigint`. A database created before the change keeps its `integer` column until a boot whose set
+holds a timestamped migration, which widens it once, in the same locked transaction that creates
+the table (`createVersionTable`): a boot with no timestamped migration leaves it alone, because
+the release before this change reads `max(version)` uncast and would fail that read once on every
+connection that prepared it while it still serves. So this release is rolled out before any
+release that carries a timestamped migration: a deployment that skips it costs the release it
+replaces one failed `/healthz` schema read on each connection that prepared the uncast read, which
+pgx then drops. `schema_version` in `/healthz` is still `max(version)`, the highest version
+applied — which is not proof that every version below it is applied, since a migration can merge
+below one a database already has. The auto-deployer's rollback guard compares the whole set of
+recorded versions for that reason, rather than `max(version)`
+(`packages/envoy/deploy/README.md`, "Auto-deployer").
 
 A migration that merges below one a database has already applied still runs there, exactly once,
 at the next boot: the runner applies every version `schema_migrations` does not record, not only
 those above the highest it does, each in its own transaction with its version row
 (`TestMigrateAppliesAMigrationThatArrivedBelowOneAlreadyApplied` and the proofs beside it in
-`internal/dispatch/store/migrate_out_of_order_test.go`). The order a database applies a release's
-migrations in is therefore the versions' order wherever it starts from.
+`internal/dispatch/store/migrate_out_of_order_test.go`). Within one boot the runner applies the
+versions the database lacks in version order, so a fresh database applies the whole set in that
+order; but a deployed database applies a migration when the release carrying it deploys. If T2
+deploys before T1 merges, that database applies T2 then T1 while a fresh one applies T1 then T2. So
+a migration must not depend on its order relative to one written in a concurrent pull request,
+another branch open at the same time; one that needs another's effect is written after that one has
+merged.
 
 The runner records a migration by its version alone, so before it touches the database it reads
 the whole directory (`pgmigrate.Load`) and refuses to start, applying nothing and naming every

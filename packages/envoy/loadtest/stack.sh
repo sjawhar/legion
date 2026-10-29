@@ -575,8 +575,12 @@ cmd_seed() {
   note "installing the commit-time trigger (loadtest.event_commits)"
   loadgen trigger-sql | psql_db dispatch >/dev/null
 
-  local migration counts
+  # migrations is every version the seed has applied, and migration the highest of them. A build is
+  # compared against the set (common.sh, seed_migration_check): a migration whose version is below
+  # one the seed already holds leaves the highest version where it was.
+  local migration migrations counts
   migration=$(sql dispatch 'select max(version) from schema_migrations')
+  migrations=$(sql dispatch "select coalesce(json_agg(version order by version), '[]'::json) from schema_migrations")
   counts=$(sql dispatch "select json_build_object(
       'projects', (select count(*) from projects),
       'issues', (select count(*) from issues),
@@ -588,11 +592,12 @@ cmd_seed() {
       'ref_sources', (select count(*) from artifacts where name = 'references.md'),
       'artifact_refs', (select count(*) from refs where to_kind = 'artifact'),
       'events', (select count(*) from events))")
-  jq -n --argjson migration "$migration" --arg commit "$(build_commit)" --argjson dirty "$(build_dirty)" \
+  jq -n --argjson migration "$migration" --argjson migrations "$migrations" --arg commit "$(build_commit)" \
+    --argjson dirty "$(build_dirty)" \
     --argjson counts "$counts" --arg at "$(date -u +%FT%TZ)" --arg pg "$("$PGBIN/postgres" --version)" \
     --argjson seconds "$((SECONDS - started))" \
-    '{migration: $migration, build_commit: $commit, build_dirty: $dirty, created_at: $at,
-      seed_seconds: $seconds, postgres_version: $pg, counts: $counts}' >"$SEED_META"
+    '{migration: $migration, migrations: $migrations, build_commit: $commit, build_dirty: $dirty,
+      created_at: $at, seed_seconds: $seconds, postgres_version: $pg, counts: $counts}' >"$SEED_META"
   sql postgres 'alter database dispatch rename to dispatch_seed' >/dev/null
   note "seed done in $((SECONDS - started)) s: template database dispatch_seed; $(jq -c . "$SEED_META")"
 }

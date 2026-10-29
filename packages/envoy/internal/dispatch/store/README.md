@@ -10,6 +10,16 @@ than in it because the directory is embedded with `all:` and `pgmigrate.Load` re
 holding a file named anything but `<version>_<name>.up.sql`, `.down.sql` or `.census.sql`, which
 would refuse every boot.
 
+Boot applies every version `schema_migrations` lacks, in version order, so a fresh database
+applies the whole set in that order, and a migration that merges below one a database has already
+applied still runs there, once. A deployed database applies a migration when the release carrying
+it deploys: if T2's release deploys before T1 merges, that database applies T2 then T1 while a
+fresh one applies T1 then T2. So a migration must not depend on its order relative to one written
+in a concurrent pull request, another branch open at the same time; one that needs another's
+effect is written after that one has merged. `max(version)`, the `schema_version` `/healthz`
+reports, is the highest version applied, not proof that every version below it is applied, which
+is why the auto-deployer's rollback guard compares the whole set of recorded versions.
+
 **A migration must leave the release before it able to read and write the schema.** A Dispatch
 release rolls, so the old build and the new build run against this schema at once, and nothing at
 boot refuses a schema newer than the binary knows. A change is therefore expand-then-contract

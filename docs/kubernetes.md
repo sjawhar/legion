@@ -2070,7 +2070,16 @@ record, every Sandbox, its uid, its annotations and its tree label. In this orde
    written after the numbered series takes the UTC moment it was created as its version, the
    14 digits its file name begins with (`20261030120000_<slug>.up.sql` records
    `version = 20261030120000`), so reversing one deletes that 14-digit value and not a small
-   number.
+   number. `schemaVersion` is the highest version applied, not proof that every version below it
+   is applied: `Migrate` applies every version `schema_version` lacks, in version order, so a
+   migration that merges below one a database already has still runs there, once. A deployed
+   database applies each migration as the release carrying it deploys, so it can apply two
+   migrations written on branches open at the same time in the other order than a fresh database
+   does; a migration must not depend on that order, and one that needs another's effect is written
+   after that one has merged. Roll this release out before any release that carries a timestamped
+   migration: this one reads the version cast to `bigint` and the release before it does not, so a
+   deployment that skips it costs the daemon it replaces one failed state read on each connection
+   that prepared the uncast read, which pgx then drops.
 4. **Return every one-container issue Sandbox to the earlier layout's template.** With
    `<namespace>` and `<project>` as in [Upgrading a deployment with running
    trees](#upgrading-a-deployment-with-running-trees) step 4, each patch suspends the Sandbox, which
