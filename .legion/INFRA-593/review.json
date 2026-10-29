@@ -2,22 +2,21 @@
   "schemaVersion": 1,
   "phase": "review",
   "issue": "INFRA-593",
-  "completed": "2026-10-29T13:46:42Z",
-  "round": 4,
-  "headReviewed": "3e89ac6ff215e6e163e9e206ce40ea74c8ac3cbd",
-  "reviewerProseCommits": ["44f459e21b7dc6b089a3215fad47f11057ca7863", "9502de11bf04fdc981f83502891e4119ee43632e"],
-  "decision": "changes_requested",
+  "completed": "2026-10-29T17:47:26Z",
+  "round": 5,
+  "headReviewed": "26953da81fab26d7c6488541eccf0208aaf22ee0",
+  "codeTestedByTester": "9ed339343b1eb7f05c3a8bf5c0ac1b876c7cb749",
+  "reviewerProseCommits": ["26953da81fab26d7c6488541eccf0208aaf22ee0"],
+  "decision": "approved",
   "critical": 0,
-  "important": 1,
+  "important": 0,
   "minor": 0,
-  "ci": "At 13:45 UTC at 3e89ac6f: required lint, typecheck, test and pr-title passed; dispatch, dispatch-memory, dispatch-multiprocess and the rest passed. envoy-go-race failed in this PR's own package: TestTheCompactionQueueFoldsTheOldRowsOfADocumentItsWritesNoted/browser_edits timed out at compaction_queue_test.go:70 (run 40876511289). envoy-go failed in cmd/listener (TestTheInterestReadRoutesAnswerABusThatStoppedAnsweringInsideTheBudget), a package this PR does not touch, which main has changed since the fork point. GitHub started no workflow run for the reviewer's two prose commits 44f459e2 and 9502de11 (actions/runs?head_sha total_count 0 at 13:22 and 13:27 UTC); the architect was told.",
-  "thermonuclear": "Both run once on the delta at 44f459e2: deep review APPROVE (one minor short line, fixed in 9502de11), code quality one cleanup minor (settle's equality guard before delete), judged not a defect.",
-  "roundThreeThreads": "PRRT_kwDORFy7ds6xiiMl, ...iiMv, ...iiM2, ...iiM6, ...iiNA, ...iiNE answered as accepted and fixed in 3e89ac6f; already resolved by the implementer.",
-  "keyFindings": [
-    {"severity": "important", "file": "packages/envoy/internal/dispatch/docs/compaction_queue_test.go", "description": "Red in envoy-go-race at the code head. Since 299ac590 a note brings a waiting room's check forward, and quickCompactionQueue's timing leaves firstCheck at 0, so the notes of writes 20-21 (lines 60-62) move the parked check to now and the queue can compact the document before the test reads `before` (line 64) and `from` (line 68). The await at line 70 then waits for a second compaction that never comes. The test must capture `from` before those writes, or hold the queue (pause) across them, so it is deterministic under -race."}
-  ],
+  "ci": "At 17:46 UTC at the CI head 26953da8: the required lint, typecheck, test and pr-title passed, and so did every lane that exercises the document path: dispatch, dispatch-memory, dispatch-multiprocess, dispatch-browser-multiprocess, envoy-go, envoy-go-race, envoy-e2e-local, envoy-smoke, envoy-session-stall, broker-multiprocess, envoy-infra-go, pi-legion, docs and worker-image build. The non-required aggregator ci-ok was still queued. Main's new CI workflow has no separate Postgres 16 Dispatch check.",
+  "thermonuclear": "Both run once on the delta at 9ed33934 (test fix 35636880 and the forward merge): deep review APPROVE; code quality two cleanup minors (the migration test's name still said 0139 and its seed messages 0135; the burst test's wait label contradicted its new comment), both fixed by the reviewer in 26953da8, test code only, go vet of both packages clean.",
+  "mergeCheck": "The merge 9ed33934 against its main parent lists only the PR's 58 files; no main change reverted; migration renumbered to 0141 with every reference updated; connection ceiling 89 matches ConnectionsPerProcess with main's 13-connection lease pool.",
+  "threads": "PRRT_kwDORFy7ds6xlFtA answered as accepted and fixed in 35636880; every earlier thread answered in its round; all 23 resolved by the implementer.",
+  "keyFindings": [],
   "notDefects": [
-    "settle's `q.rooms[entry.room] == entry` guard before the delete: it protects another room's entry and drops nothing, unlike note's removed guard.",
-    "envoy-go's cmd/listener failure: an untouched package; main changed cmd/listener after the fork point."
+    "settle's equality guard before delete (round 4): protects another room's entry and drops nothing."
   ]
 }
