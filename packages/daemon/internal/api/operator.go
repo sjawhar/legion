@@ -64,6 +64,12 @@ type OperatorClaim struct {
 	// PluginContract is the contract the claim's current registration declared, 0 when none
 	// recorded, always emitted.
 	PluginContract int `json:"pluginContract"`
+	// LastTurnStart and LastTurnEnd are when the claim's agent last began a turn and last ended
+	// one, each absent until that happens, and both absent for a claim that last ran before this
+	// release recorded them. An operator reads them to tell a worker still making progress from
+	// one wedged in a turn or idle since long before now.
+	LastTurnStart *time.Time `json:"lastTurnStart,omitempty"`
+	LastTurnEnd   *time.Time `json:"lastTurnEnd,omitempty"`
 }
 
 // BudgetsView is the claim's retry counters (`supervise.Budgets`).
@@ -128,6 +134,8 @@ func operatorView(c supervise.Claim) OperatorClaim {
 		SuspendedBy:     string(c.SuspendedBy),
 		SuspensionHeld:  c.SuspensionHeld,
 		PluginContract:  c.PluginContract,
+		LastTurnStart:   instant(c.LastTurnStart),
+		LastTurnEnd:     instant(c.LastTurnEnd),
 	}
 	if p := c.Pending; p != nil {
 		view.Pending = &DeliveryView{

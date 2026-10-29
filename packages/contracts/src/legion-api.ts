@@ -137,6 +137,12 @@ const legionClaimView = z.strictObject({
   capabilities: legionCapabilityReportView.optional(),
   /** 0 = no contract recorded. */
   pluginContract: z.number().int().nonnegative(),
+  /** When the claim's agent last began a turn and last ended one, each absent until that happens
+   * and both absent for a claim whose last turn ran before the daemon recorded them. A working
+   * claim whose `lastTurnStart` is hours old is wedged; an idle claim's `lastTurnEnd` is when it
+   * last did anything. */
+  lastTurnStart: timestamp.optional(),
+  lastTurnEnd: timestamp.optional(),
 });
 
 /** `api.PhaseView` — one phase worker's claim, its committed handoff, and the two counts the phase
@@ -604,6 +610,10 @@ export const LegionOperatorClaimResponse = z.strictObject({
   suspensionHeld: z.literal(true).optional(),
   /** 0 = no contract recorded. */
   pluginContract: z.number().int().nonnegative(),
+  /** When the claim's agent last began a turn and last ended one, each absent until that happens
+   * and both absent for a claim whose last turn ran before the daemon recorded them. */
+  lastTurnStart: timestamp.optional(),
+  lastTurnEnd: timestamp.optional(),
 });
 
 export type LegionOperatorClaim = z.output<typeof LegionOperatorClaimResponse>;

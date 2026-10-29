@@ -337,6 +337,13 @@ type ClaimView struct {
 	// PluginContract is the contract the claim's current registration declared, 0 when none
 	// recorded, always emitted.
 	PluginContract int `json:"pluginContract"`
+	// LastTurnStart and LastTurnEnd are when the claim's agent last began a turn and last ended
+	// one, each absent until that happens: a claim that has worked since this release records
+	// them, and one that last ran before it records neither. They are what says whether a worker
+	// is still making progress — a working claim whose turn began hours ago is wedged, and an idle
+	// one that last ended a turn yesterday has been told nothing since.
+	LastTurnStart *time.Time `json:"lastTurnStart,omitempty"`
+	LastTurnEnd   *time.Time `json:"lastTurnEnd,omitempty"`
 }
 
 // CapabilityReportView is one session's capability report as the state shows it: when the session

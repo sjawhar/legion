@@ -131,6 +131,12 @@ type Claim struct {
 	// retry and persisted so a daemon restart can report the same failure to the workflow.
 	Failure string
 	Pending *Delivery
+	// LastTurnStart and LastTurnEnd are when the agent last began a turn and when it last ended
+	// one, each zero until that event happens. They are persisted, so a restart keeps them: they
+	// are what a reader has to tell a worker still making progress from one wedged in a turn or
+	// idle since yesterday, and a claim rebuilt without them would look as if it had never worked.
+	LastTurnStart time.Time
+	LastTurnEnd   time.Time
 	// BootTokenHash is the hash of the current launch's boot token, which the shim's hello and the
 	// agent's registration are resolved by. CapabilityHash is the hash of the secret the agent's
 	// registration was issued.

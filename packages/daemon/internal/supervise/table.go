@@ -926,10 +926,13 @@ func agentBusy(reason string) bool {
 // turnStarted is a turn starting in a ready or idle claim. It confirms the pending delivery when
 // it is that delivery's turn: a replay naming it, or — B1 — Oh My Pi's own agent_start while the
 // delivery is in flight (sent and not yet answered, acknowledged and waiting, or possibly sent by
-// an earlier daemon). Any other turn is a foreign one, and confirms nothing.
+// an earlier daemon). Any other turn is a foreign one, and confirms nothing. Either way the claim
+// records when this turn began (Claim.LastTurnStart), which is persisted with it: the time is a
+// reader's only handle on how long the agent has been in the turn it is in.
 func turnStarted(m *Machine, ctx context.Context, ev Event) error {
 	start := ev.(StreamTurnStart)
 	m.claim.State = StateWorking
+	m.claim.LastTurnStart = m.deps.Clock.Now()
 	p := m.claim.Pending
 	_, awaiting := m.timers[TimerTurn]
 	inFlight := m.send != nil || awaiting || m.askFirst
@@ -943,8 +946,11 @@ func turnStarted(m *Machine, ctx context.Context, ev Event) error {
 // unless a suspension is held for this turn (holdSuspension), which runs instead; a stop the
 // runtime refuses leaves the claim idle, still holding it. A turn interrupted for a start that takes
 // over the issue's phase lets that start go on (Quiesce). The agent just said where it is, so
-// nothing is left to ask it after a restart.
+// nothing is left to ask it after a restart. The claim records when the turn ended
+// (Claim.LastTurnEnd) before any of that: every path out of here persists the claim, and the time
+// is what tells an idle worker that finished a moment ago from one idle since yesterday.
 func turnEnded(m *Machine, ctx context.Context, _ Event) error {
+	m.claim.LastTurnEnd = m.deps.Clock.Now()
 	m.askFirst = false
 	m.interruptOver()
 	if m.held != nil {
