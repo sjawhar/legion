@@ -2,102 +2,60 @@
   "schemaVersion": 1,
   "phase": "test",
   "issue": "INFRA-588",
-  "completed": "2026-10-29T17:52:00Z",
-  "round": 5,
-  "head": "0dac5afce6be4b170138d238c0cb78a7eace05e5",
-  "codeHead": "ddd6873c284d518d8e05eeb16e7ecc7ee04b20e8",
-  "roundNote": "Round 5, narrowed by the architect (Envoy 9e837cd5, 2026-10-29 17:38Z). It covers two things: the forward merge of main, which deleted pr-and-main.yaml in #2316, and the move of the three scripts/conflicts steps into ci.yaml's router behind the conflicts_script filter. scripts/conflicts/ is byte-identical to b5484b414155, so the round-2 code proofs and round 4's key proof below still apply.",
+  "completed": "2026-10-29T21:45:00Z",
+  "round": 6,
+  "head": "44e09fbe2f08d15098355b5554c1f527b43ebf4b",
+  "codeHead": "7fcdf0e1d50804a23fd05ace20be96de3785e53a",
+  "roundNote": "Round 6 tests the migration identifiers folded in from INFRA-537 (plan.md 'Migration numbering', the INFRA-537 spec v2 checklist) and the architect's added point (Envoy c4f2e430, 21:32Z). That point: after the version columns widen from int4 to bigint, show that no prepared or cached read of them fails, including on old pods' open connections during a rolling deploy. The broker stays numbered by the architect's decision, so I do not count that. scripts/conflicts/ and the ci.yaml router are unchanged since a4ca5918 (0 files), so rounds 2-5's proofs of them still apply.",
   "implementerProof": {
     "verdict": "verified",
-    "how": "I re-ran the implementer's commands at ddd6873c284d. check-ci-filters.sh exits 0 with 'conflicts-script: 37 files, 0 uncovered'. check-ci-filters.test.sh and ci-ok.test.sh pass. scripts/conflicts/ shows 0 files changed. bun test gives 40 pass. P1 gives 126/80/253. I checked the routing another way: the conflicts_script filter, read from ci.yaml with the repository's PathsFilter model under the workflow's quantifier, over the real file lists of this pull request and 12 other open pull requests. My own negative control: a scratch copy without 'scripts/conflicts/**' in the filter fails check-ci-filters.sh."
+    "how": "I re-ran the implementer's claims with my own Postgres (PostgreSQL 18.6 + pgvector 0.8.7 on 127.0.0.1:55433, a separate data directory), my own scratch clone and branches, and drivers that call each runner's real entry points (daemon store.Open + Migrate + SchemaVersion/SchemaVersionTx; Dispatch store.Open + Migrate + Pool.Healthy; store.Census), built from main 2b427f930eac, this head 7fcdf0e1, a B-only tree and the merged tree. Every claim of the implementer's held: no conflict in either merge order, each migration recorded once in every order, the duplicate tests fail on a shared timestamp, the census reads both column types. The proof is not wrong; it misses the rolling-deploy case below, which fails."
   },
-  "failures": [],
-  "failed": 0,
+  "failures": [
+    {
+      "criterion": "After the version columns widen from int4 to bigint, no prepared or cached read of them fails, including old pods' open connections during a rolling deploy (architect, Envoy c4f2e430, 2026-10-29 21:32Z)",
+      "evidence": "Dispatch's createVersionTable widens schema_migrations.version at every boot of this head, with or without a timestamped migration to record (store.go, 'if dataType == \"integer\"'), so the first new pod of this merge's roll widens the column while main's pods still serve. Main's Pool.Healthy reads 'select coalesce(max(version), 0) from schema_migrations' uncast on its one health-pool connection (healthPoolSize = 1). Reproduced with main's real code: a main-built process looping Pool.Healthy on a database migrated by main, while a head-built process runs Migrate on it. Output: '21:39:09.940 old-dispatch Healthy=0 err=ERROR: cached plan must not change result type (SQLSTATE 0A000)', one failed read among 20, then 140 again. In production each old pod answers one /healthz with 503 and db:false and logs 'dispatch: health probe failed' (main.go:1318-1323). Readiness needs 3 failures in a row (dispatch_kube.go readyProbe(8766, 10, 3, 3)), so no pod leaves the Service, but any single read of /healthz at that moment fails. The same head-built old process (this head's ::bigint cast) across the merged tree's widening: 10 clean reads, 0 failed. So the cast protects a widening only once the old pods carry it, and widening at a boot with no timestamped migration is what breaks main's pods now. Red test: packages/envoy/internal/dispatch/store/migrate_out_of_order_test.go TestMigrateWithNoTimestampedMigrationKeepsThePreviousReleasesHealthProbeAnswering, commit 017d1df01dcb. It holds a connection of the store's separate pools, runs main's uncast probe, migrates a set with no timestamped migration, and runs the probe again. Command: cd packages/envoy && DISPATCH_TEST_DATABASE_URL=postgres://postgres@127.0.0.1:55433/postgres?sslmode=disable go test ./internal/dispatch/store/ -run '^TestMigrateWithNoTimestampedMigrationKeepsThePreviousReleasesHealthProbeAnswering$' -count=1, which fails with 'the previous release's health probe after a boot that applied no timestamped migration: ERROR: cached plan must not change result type (SQLSTATE 0A000)'. A throwaway change in a scratch tree, widening only when the loaded set holds a version above 2147483647 as the daemon already does, turns it green with TestHealthyAnswersAcrossTheWideningOfTheVersionColumn, TestMigrateWidensAnIntegerVersionColumnAndRecordsATimestamp, both out-of-order tests, TestMigrateCreatesEmptySchemaAndIsIdempotent and TestMigrateSkipsVersionRecordedOutsideTheRunner all passing. The fix is the implementer's to choose."
+    }
+  ],
+  "failed": 1,
   "proof": [
     {
-      "criterion": "The router selects the conflicts-script job for a change under scripts/conflicts and skips it otherwise, and check-ci-filters.sh passes (round 5)",
-      "surface": ".github/workflows/ci.yaml's changes job filter conflicts_script, the conflicts-script job and the ci-ok gate, as check-ci-filters.sh and the repository's dorny/paths-filter model read them",
-      "command": "uv run --no-project --with pyyaml==6.0.2 -- bash .github/scripts/check-ci-filters.sh (and check-ci-filters.test.sh, ci-ok.test.sh); a Python script that loads ci.yaml's filter step, flattens conflicts_script's patterns and applies workflow_paths.PathsFilter under the step's predicate-quantifier to gh pr list's file lists of 12 other open pull requests and to this one's diff against main",
-      "observed": "check-ci-filters.sh exit 0: 'conflicts-script: 37 files, 0 uncovered (filter conflicts_script)', 25 gates; both test scripts PASS. Quantifier some-with-excludes. #2411 SELECT (ci.yaml, scripts/conflicts/README.md, __fixtures__/*). 9 of the 12 other PRs skip. #2516 and #2503 select through ci.yaml, #2507 through bun.lock and a package.json; the filter names those on purpose. Single paths: scripts/conflicts/measure.ts and __fixtures__/after.json select; scripts/dispatch/ask-census.ts, scripts/conflictsx/a.ts and packages/envoy/CHANGELOG.md skip. ci.yaml wires the job into ci-ok's needs and its job-to-filter map ('conflicts-script': 'conflicts_script'), and its if: reads needs.changes.outputs.conflicts_script",
-      "headSha": "0dac5afce6be4b170138d238c0cb78a7eace05e5",
-      "negativeControl": "a git scratch copy of the tree with 'scripts/conflicts/**' removed from the conflicts_script filter -> check-ci-filters.sh exit 1, 'conflicts-script: 37 files, 15 uncovered', one ::error per file (README.md, both fixtures, each test...); the same copy with ci.yaml restored -> exit 0"
+      "criterion": "Two concurrent branches that each add a daemon migration and a Dispatch migration (with its census) merge in either order with no conflict",
+      "surface": "git merge-tree on real commits in a scratch clone of the repository, built off this head",
+      "command": "branches bra (20261029200000_t588_a) and brb (20261029210000_t588_b) off 7fcdf0e1, each adding packages/daemon/internal/store/migrations/<ts>_t588_<n>.up.sql and packages/envoy/internal/dispatch/store/migrations/<ts>_t588_<n>.up.sql + .census.sql; git merge-tree --write-tree bra brb, then brb bra",
+      "observed": "both orders exit 0 with the same tree b2db0900ccd4d71dc983aafec0ad85957d5249fe; merged commit dc5606b26",
+      "headSha": "7fcdf0e1d50804a23fd05ace20be96de3785e53a",
+      "negativeControl": "the merged tree with b renamed to a's timestamp: daemon TestTheEmbeddedMigrationsKeepTheIdentifierRule and Dispatch TestMigrationSetTakesNumbersThenTimestamps each fail with 'migrations 20261029200000_t588_a.up.sql and 20261029200000_t588_b.up.sql share version 20261029200000'; both pass on the merged tree. A daemon built from that tree refuses Migrate with the same error and creates no schema_version table"
     },
     {
-      "criterion": "The forward merge takes main's deletion of pr-and-main.yaml, and the script and its tests are unchanged (round 5)",
-      "surface": "the merge commit ddd6873c284d against main 2b427f930eac and against the last code head b5484b414155",
-      "command": "jj diff --from 2b427f930eac --to ddd6873c284d --stat; jj diff --from b5484b414155 --to ddd6873c284d --stat -- scripts/conflicts; ls .github/workflows/pr-and-main.yaml; bun test scripts/conflicts; bun scripts/conflicts/measure.ts --from-json before.json --branch-prefix legion/",
-      "observed": "against main: 21 files, all additions. Outside the PR's own scripts/conflicts/ and .legion/ files there are only .github/workflows/ci.yaml (+29) and .github/scripts/ci_job_reads.py (+5). scripts/conflicts against b5484b414155: 0 files changed. pr-and-main.yaml: no such file. 40 pass, 0 fail. P1: 126 PRs read, 80 carrying, 253 conflicting, tiers 89 and 108. GitHub: MERGEABLE at 0dac5afce6be",
-      "headSha": "0dac5afce6be4b170138d238c0cb78a7eace05e5",
-      "negativeControl": "--since 2026-10-28 --until 2026-10-27 -> exit 2 (unchanged code path; round 3)"
+      "criterion": "Each migration runs exactly once on a database migrated before either merge, with the newer one merged first, and on a fresh one, against a real Postgres",
+      "surface": "each runner's real Migrate, from binaries built at main, at the B-only tree and at the merged tree, on PostgreSQL 18.6 + pgvector 0.8.7",
+      "command": "for each runner, three databases: main's binary migrate then the merged binary migrate twice; the B-only binary then the merged binary twice; the merged binary twice on a fresh database. Each run prints applied count, the version reader, the column type and every version above the numbered set with its row count. Then psql counts the rows of each new table",
+      "observed": "daemon: main 61 -> merged applied=2 then 0; B-first applied=62 (column bigint, 20261029210000 x1) -> merged applied=1 then 0; fresh 63 then 0; every database ends with 20261029200000 x1 and 20261029210000 x1, column bigint, SchemaVersion 20261029210000. Dispatch: main (140 rows, integer) -> merged 142 rows, bigint, Healthy 20261029210000; B-first 141 -> 142; fresh 142; a second run adds nothing. Every new table holds 1 row in all six databases",
+      "headSha": "7fcdf0e1d50804a23fd05ace20be96de3785e53a",
+      "negativeControl": "the duplicate-timestamp tree's daemon refuses to migrate (above)"
     },
     {
-      "criterion": "No public file the pull request adds names a Dispatch key, and the squash subject (the PR title) does not either (round 4, the controller's ruling under dispatch://INFRA-472)",
-      "surface": "the files the pull request adds or changes outside .legion/, and its title on GitHub",
-      "command": "jj diff --from c892b97df887 --to b808af2f --git over the 16 changed files outside .legion/, added lines grepped -E '\\b[A-Z][A-Z0-9]+-[0-9]+\\b'; grep -nE 'dispatch://|INFRA|LEGSMOKE' scripts/conflicts/**; gh pr view 2411 --json title; bash .github/scripts/check-private-names.sh; the README's 'Reproduce the before measurement' block run with <KEY> filled in",
-      "observed": "no hit in any added line or file (grep exit 1); title 'feat(scripts): measure Legion pull requests' merge conflicts before and after a fix', conventional (exit 0), no key; check-private-names clean (5485 files); README example exit 0, 126 PRs read, 80 carrying, 253 conflicting",
-      "headSha": "b808af2f7f88ad2ee9396dd9d12f58598a419a2b",
-      "negativeControl": "the same grep on scripts/conflicts/README.md at 5cfd10800698 counts 4 lines naming the key"
+      "criterion": "Readers of the version columns across the widening, beyond Dispatch's health probe (architect's point)",
+      "surface": "every reader of schema_version and schema_migrations in non-test code: daemon SchemaVersion/SchemaVersionTx (daemon.go:1713 State), versionRecorded and the insert; Dispatch Healthy (/healthz, registry.go:44, shutdown.go:146), the runner and pgmigrate.Census; autodeploy.sh and loadtest/stack.sh",
+      "command": "main-built daemon looping SchemaVersion and SchemaVersionTx while the merged tree's daemon migrates (it widens with its first timestamped migration); this head's daemon in the same loop; this head's Dispatch looping Healthy while the merged tree migrates; the merged tree's store.Census on a main-migrated (integer, 2 pending) database and on a widened one",
+      "observed": "main's daemon: 1 failed SchemaVersion ('cached plan must not change result type') among 11 reads. The daemon widens only when its first timestamped migration applies, and none exists yet, so in the normal order the running daemon is then this head's code: this head's daemon loop gives 10 clean reads, 0 failed. This head's Dispatch Healthy across the widening: 10 clean, 0 failed. Census: integer column reports SchemaVersion 140 and both pending; widened reports 20261029210000 and nothing pending. Census opens its own connection per run, and autodeploy.sh and stack.sh read through a fresh psql session each time, so none of them holds a statement across a widening",
+      "headSha": "7fcdf0e1d50804a23fd05ace20be96de3785e53a",
+      "negativeControl": "main's Dispatch Healthy across this head's boot fails once (the failure above)"
     },
     {
-      "criterion": "The pull request title passes the required pr-title check (round 3, the red check)",
-      "surface": "the pull request title on GitHub, as .github/workflows/pr-title.yaml's 'Require a conventional PR title' step reads it",
-      "command": "gh pr view 2411 --repo sjawhar/legion --json title --jq .title | grep -qE '^[a-z]+(\\([^)]+\\))?!?: .+'; gh run view 40658794266 --repo sjawhar/legion --json event,headSha,conclusion,jobs; gh api repos/sjawhar/legion/commits/<sha>/check-runs for 5cfd10800698, c156b68bd6f6 and 9a4755c2",
-      "observed": "the title 'feat(scripts): measure Legion pull requests' merge conflicts before and after a fix (INFRA-588)' matches (exit 0); run 40658794266 (event pull_request_review, head c156b68bd6f6) is success at every step, the conventional-title step included; at code head 5cfd10800698 lint, typecheck and test are success (completed 18:45-19:01Z on 2026-10-27)",
-      "headSha": "9a4755c2aee076da6867b65cc179e0f6f5830c1a",
-      "negativeControl": "the old title 'Measure Legion pull requests' merge conflicts before and after a fix (scripts/conflicts, INFRA-588)' fails the same regex (exit 1); run 40551347938 at 5cfd10800698 failed on it with the step's '::error::PR title must be a conventional commit subject'"
-    },
-    {
-      "criterion": "Smoke in the recreated workspace (round 3; code unchanged since 5cfd10800698)",
-      "surface": "the CLI on the before records, re-fetched from dispatch://INFRA-588/artifact/conflict-baseline-2026-10-20-to-27-json",
-      "command": "dispatch doc-read --issue INFRA-588 --artifact conflict-baseline-2026-10-20-to-27-json | tail -n +3 > $TMPDIR/t588/before.json && bun scripts/conflicts/measure.ts --from-json $TMPDIR/t588/before.json --branch-prefix legion/",
-      "observed": "285 records; 126 PRs read (68 merged, 58 other), 80 carrying, 253 conflicting, clean 29, tiers 89 and 108, the same as rounds 0-2",
-      "headSha": "9a4755c2aee076da6867b65cc179e0f6f5830c1a",
-      "negativeControl": "--since 2026-10-28 --until 2026-10-27 -> '--since 2026-10-28 is after --until 2026-10-27', exit 2, no workdir created"
-    },
-    {
-      "criterion": "The port reproduces the before measurement (P1, unchanged by round 2)",
-      "surface": "the CLI on the Python run's raw records (dispatch://INFRA-588/artifact/conflict-baseline-2026-10-20-to-27-json)",
-      "command": "bun scripts/conflicts/measure.ts --from-json \"$TMPDIR/before.json\" --branch-prefix legion/ (and without --branch-prefix); cmp against my round-0 outputs, whose table rows equal baseline.md Part 1 (638 rows) and Part 2 (870 rows)",
-      "observed": "exit 0; both outputs byte-identical to round 0's: combined 126 / 80 / 253, tiers 89 and 108, packages/envoy/CHANGELOG.md 89 in 39; merged section 68/38/117/106 (36 PRs)/11. Round-0 and round-1 live raw files still read (128 and 36 PRs)",
-      "headSha": "06db6c23cd6e0d1eaf34e014c24652ad7967f4fa",
-      "negativeControl": "before records with prs[0].createdAt removed -> 'prs[0].createdAt is missing or not a string', exit 2; with prs[0].mergedAt = 5, and with it removed -> 'prs[0].mergedAt is missing or not a string or null', exit 2"
-    },
-    {
-      "criterion": "A run counts every PR open through the window, whenever it is made (round-2 finding)",
-      "surface": "the CLI against sjawhar/legion on GitHub, one clone shared by this head and the previous code head",
-      "command": "bun scripts/conflicts/measure.ts --since 2026-10-27T17:08:19Z --until 2026-10-27T17:28:19Z --branch-prefix legion/ --no-fetch, once at this head and once with ebeda2541e7f's scripts/conflicts; alongside, gh pr list --repo sjawhar/legion --state open --limit 1000 --json number,headRefName,createdAt,updatedAt",
-      "observed": "this head: 61 PRs read (0 merged in the window, 61 other); gh lists 61 open legion/ PRs created by 17:28:19Z, 41 of them not updated since 17:08:19Z",
-      "headSha": "06db6c23cd6e0d1eaf34e014c24652ad7967f4fa",
-      "negativeControl": "the same window with ebeda2541e7f's code reads 19 PRs: the open PRs nothing updated in the window are missed"
-    },
-    {
-      "criterion": "The script measures live GitHub history the same way (P2)",
-      "surface": "the CLI against sjawhar/legion on GitHub, fresh workdir",
-      "command": "rm -rf $TMPDIR/ct-r2 && bun scripts/conflicts/measure.ts --since 2026-10-20 --until 2026-10-27T11:21:00Z --branch-prefix legion/ --workdir \"$TMPDIR/ct-r2\"; jq + awk over the raw file applying the README's existed-in-window rule",
-      "observed": "exit 0, 226 s, 619 MB; merged section cmp-equal to P1's; combined 128 / 82 / 259; my rule over the 142 listed PRs keeps 128 (the before run's 126 plus #2235 and #2397) and drops 14, so the open list added no PR that did not exist in the window",
-      "headSha": "06db6c23cd6e0d1eaf34e014c24652ad7967f4fa",
-      "negativeControl": "--since 2026-10-28 --until 2026-10-27 -> exit 2 with no workdir (round 1, unchanged code path)"
-    },
-    {
-      "criterion": "Fix states work on real history, and a missing parent is refused (P3)",
-      "surface": "the CLI with --fixed against the live clone, and --fixed on --from-json records with an absent parent",
-      "command": "P2's command with --no-fetch plus --fixed 'packages/envoy/CHANGELOG.md=1b8d5c13e496' --fixed 'packages/claude-envoy/legion/**=1b8d5c13e496', then my own git merge-base --is-ancestor loop over the raw file; then the raw file with merge cd3c748767ee's upstream_parent set to 0123456789abcdef0123456789abcdef01234567 and --from-json --no-fetch --fixed 'packages/envoy/CHANGELOG.md=1b8d5c13e496'",
-      "observed": "91 merges (39 PRs) = before 79 + transition 10 + after 2, equal to my loop; claude-envoy/legion/** 25 merges in 11 PRs, all before",
-      "headSha": "06db6c23cd6e0d1eaf34e014c24652ad7967f4fa",
-      "negativeControl": "the absent-parent records -> exit 1, 'merge cd3c748767ee…: parent 0123…4567 is missing and could not be fetched', empty stdout"
-    },
-    {
-      "criterion": "The comparison the production check runs works before the merge (P4)",
-      "surface": "the CLI with --compare-with the before records, live window since the Python run",
-      "command": "bun scripts/conflicts/measure.ts --since 2026-10-27T11:21:00Z --branch-prefix legion/ --workdir \"$TMPDIR/ct-r2\" --compare-with \"$TMPDIR/before.json\"",
-      "observed": "exit 0, 61 s; before 126 / 80 (63.5%) / 253 (2.01), equal to P1; after 73 read / 38 carrying (52.1%) / 63; my rule keeps all 73 listed PRs; 387 file rows = union of the 337 before and 99 after files",
-      "headSha": "06db6c23cd6e0d1eaf34e014c24652ad7967f4fa",
-      "negativeControl": "--compare-with a non-JSON file -> exit 2 (rounds 0-1, unchanged code path)"
+      "criterion": "Existing numbered migrations unchanged; the script, its tests and the router unchanged since the last round",
+      "surface": "the diff from main 2b427f930eac and from a4ca5918 to 7fcdf0e1",
+      "command": "jj diff --name-only from main filtered to /migrations/; jj diff --stat from a4ca5918 -- scripts/conflicts .github",
+      "observed": "only embed.go and embed_test.go change under migrations/; no .sql file changes. scripts/conflicts and .github: 0 files changed",
+      "headSha": "7fcdf0e1d50804a23fd05ace20be96de3785e53a",
+      "negativeControl": "the same filter lists the two crafted .sql files on the merged scratch tree"
     }
   ],
   "observations": [
-    "CI at the merge head ddd6873c284d: the changes job was queued when I read it (17:50Z), and no conflicts-script, lint, typecheck or test result exists yet. 0dac5afce6be is handoff-only and has no runs. The pod's python3 has no PyYAML, so I ran check-ci-filters.sh with uv run --with pyyaml==6.0.2. CI's ci-filters job runs it on the runner's Python. The real GitHub skip for a pull request that does not touch scripts/conflicts cannot be seen before the merge: only a branch with this ci.yaml has the job. So the skip proof is the repository's filter model over real file lists.",
-    "Squash commit body: the repository's squash_merge_commit_message is COMMIT_MESSAGES. The 10 code commit subjects end in '(INFRA-588)', so main's commit body will name the key. I reported this to the architect over Envoy. The architect chose to keep the subjects, the same as the branch name and the 'Dispatch:' line, and is raising commit messages with the controller under INFRA-472 (Envoy d02df0df, 10:13Z). The PR body still names the key in the implementer's Before and E2E lines and on the required 'Dispatch:' line; my own E2E line no longer does.",
-    "The round-1 note still applies: no test pins a PR merged exactly at `since`, and the CLI keeps it."
+    "CI at code head 7fcdf0e1: only the changes job (queued) and pr-title (queued, one cancelled) exist; no lint, typecheck or test result yet. 44e09fbe is handoff-only and has no runs.",
+    "Daemon, not a failure of this pull request: a deployment that skips this release, going from a pre-change daemon straight to a release with its first timestamped migration while the old daemon still holds pool connections, would see main's uncast SchemaVersion fail once per connection, as the old-daemon loop shows. In the normal order this release (with the cast) runs first.",
+    "My Postgres instance was initialised with SQL_ASCII, so TestScannedTimestampsCarryUTCWhateverTheHostZone fails on it ('client_encoding=UTF8'). That has nothing to do with this change, and I ran only named tests.",
+    "Round 4's note on the squash body (the commit subjects naming the key) and round 1's note on a PR merged exactly at `since` still apply."
   ]
 }
