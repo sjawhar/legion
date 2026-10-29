@@ -1,10 +1,14 @@
 # Dispatch store
 
 `migrations/` holds every `<version>_<name>.up.sql` boot applies in version order, with the
-`<version>_<name>.census.sql` each one declares for the pre-deploy census. This file sits beside
-that directory rather than in it because the directory is embedded with `all:` and
-`pgmigrate.Load` refuses a set holding a file named anything but `<version>_<name>.up.sql`,
-`.down.sql` or `.census.sql`, which would refuse every boot.
+`<version>_<name>.census.sql` each one declares for the pre-deploy census. `<version>` is a
+number through 140, the sequence the set grew up with, each of whose files keeps the number it
+landed with, and for every migration added since the UTC moment its author created it,
+`YYYYMMDDHHMMSS` (`date -u +%Y%m%d%H%M%S`): two pull requests open at once cannot both claim one
+timestamp, while both would claim the next number. This file sits beside that directory rather
+than in it because the directory is embedded with `all:` and `pgmigrate.Load` refuses a set
+holding a file named anything but `<version>_<name>.up.sql`, `.down.sql` or `.census.sql`, which
+would refuse every boot.
 
 **A migration must leave the release before it able to read and write the schema.** A Dispatch
 release rolls, so the old build and the new build run against this schema at once, and nothing at
@@ -16,4 +20,4 @@ be written that way is a stop-the-world migration, deployed with no server of th
 running, and that is an exception named in the pull request, not a default.
 
 `../../../cmd/dispatch/README.md` ("Database migrations") has the rule with its examples, the
-naming and numbering a set is refused for, and what the census is held to.
+naming and the identifiers a set is refused for, and what the census is held to.

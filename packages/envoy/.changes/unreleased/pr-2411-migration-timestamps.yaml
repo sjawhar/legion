@@ -1,0 +1,13 @@
+kind: Changed
+body: |-
+    A Dispatch migration added from now on is named for the UTC moment its author created it,
+    `YYYYMMDDHHMMSS` (`date -u +%Y%m%d%H%M%S`), with its census under the same timestamp, instead
+    of the next free number: two pull requests open at once each took the next number, nothing
+    conflicted in git, and the clash showed only once one of them merged. The versions through
+    `0140_issue_embedding_spec.up.sql` keep the numbers they landed with, a timestamp orders after
+    every number, and a migration that merges below one a database has already applied still runs
+    there exactly once, since the runner applies every version `schema_migrations` does not
+    record. `schema_migrations.version` is now a `bigint`, which a 14-digit version needs; a
+    database that has the table as an `integer` is widened once, in the locked transaction the
+    runner creates the table in. `schema_version` in `/healthz` is unchanged.
+time: 2026-10-29T20:55:14.000000000Z

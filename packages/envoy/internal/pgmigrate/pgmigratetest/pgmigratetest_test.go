@@ -1,12 +1,16 @@
 package pgmigratetest
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"syscall"
 	"testing"
 	"testing/fstest"
+
+	"github.com/sjawhar/envoy/internal/pgmigrate"
 )
 
 // Each entry the binary leaves out gets the advice that fixes it: all: brings in a _ or . name, and
@@ -144,6 +148,111 @@ func TestCheckNumberedOneToNAcceptsOneToN(t *testing.T) {
 	}
 	if err := CheckNumberedOneToN(set, "migrations"); err != nil {
 		t.Fatalf("CheckNumberedOneToN = %v, want nil", err)
+	}
+}
+
+// recordingTB reads back what a check reports: CheckIdentifiers names each file that breaks the
+// rule through the test it is given, so the test that holds it to its own rule records those
+// reports instead of failing on them. Every other method is the real test's.
+type recordingTB struct {
+	testing.TB
+	reported []string
+}
+
+func (r *recordingTB) Errorf(format string, args ...any) {
+	r.reported = append(r.reported, fmt.Sprintf(format, args...))
+}
+
+// identifiers is a set of migrations named as a store's are, each file's version its leading
+// digits, which is what pgmigrate.Load reads.
+func identifiers(t *testing.T, names ...string) []pgmigrate.Migration {
+	t.Helper()
+	set := make([]pgmigrate.Migration, 0, len(names))
+	for _, name := range names {
+		digits, _, _ := strings.Cut(strings.TrimSuffix(name, ".up.sql"), "_")
+		version, err := strconv.Atoi(digits)
+		if err != nil {
+			t.Fatalf("test set names %s, whose version is not digits: %v", name, err)
+		}
+		set = append(set, pgmigrate.Migration{Version: version, Name: name})
+	}
+	return set
+}
+
+// Each identifier the rule does not allow is named with its file: a number of the store's own
+// sequence that no file takes, a new migration taking the number after the last numbered one
+// rather than a timestamp, digits that are not 14, an instant that does not exist, and a version
+// two files take.
+func TestCheckIdentifiersNamesEachFileThatBreaksTheRule(t *testing.T) {
+	for _, tc := range []struct {
+		name         string
+		set          []pgmigrate.Migration
+		lastNumbered int
+		want         string
+	}{
+		{
+			name:         "a numbered migration no file takes",
+			set:          identifiers(t, "0001_a.up.sql", "0003_c.up.sql"),
+			lastNumbered: 3,
+			want:         "migration 0002 is missing: versions 1 through 3 are the numbered migrations",
+		},
+		{
+			name:         "a new migration taking the next number",
+			set:          identifiers(t, "0001_a.up.sql", "0002_b.up.sql", "0003_c.up.sql"),
+			lastNumbered: 2,
+			want:         "migration 0003_c.up.sql takes version 3: 2 is the last numbered migration, and every migration added since is named for the UTC moment it was created, 14 digits YYYYMMDDHHMMSS (date -u +%Y%m%d%H%M%S)",
+		},
+		{
+			name:         "a timestamp of thirteen digits",
+			set:          identifiers(t, "0001_a.up.sql", "2026103012000_short.up.sql"),
+			lastNumbered: 1,
+			want:         "migration 2026103012000_short.up.sql takes version 2026103012000",
+		},
+		{
+			name:         "a timestamp of an instant that does not exist",
+			set:          identifiers(t, "0001_a.up.sql", "20261332120000_month_thirteen.up.sql"),
+			lastNumbered: 1,
+			want:         "migration 20261332120000_month_thirteen.up.sql takes version 20261332120000",
+		},
+		{
+			name:         "two files taking one version",
+			set:          identifiers(t, "20261030120000_a.up.sql", "20261030120000_b.up.sql"),
+			lastNumbered: 0,
+			want:         "migrations 20261030120000_a.up.sql and 20261030120000_b.up.sql share version 20261030120000",
+		},
+		{
+			// pgmigrate.Load refuses this one itself, so the set is written out here: a check
+			// handed a version no file of a loaded set carries still names it.
+			name:         "a version below one",
+			set:          []pgmigrate.Migration{{Version: 0, Name: "0000_zero.up.sql"}},
+			lastNumbered: 0,
+			want:         "migration 0000_zero.up.sql takes version 0: a version is a positive number",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			recorder := &recordingTB{TB: t}
+			CheckIdentifiers(recorder, tc.set, tc.lastNumbered)
+			if len(recorder.reported) != 1 || !strings.Contains(recorder.reported[0], tc.want) {
+				t.Fatalf("CheckIdentifiers reported %q, want one report holding %q", recorder.reported, tc.want)
+			}
+		})
+	}
+}
+
+// The set a store really has: its numbered migrations, each taken once and in no particular file
+// order, and timestamped ones past them, including an instant a leap day makes real.
+func TestCheckIdentifiersAcceptsNumbersThenTimestamps(t *testing.T) {
+	set := identifiers(t,
+		"0002_b.up.sql",
+		"0001_a.up.sql",
+		"3_c.up.sql",
+		"20240229235959_leap_day.up.sql",
+		"20261030120000_t1.up.sql",
+	)
+	recorder := &recordingTB{TB: t}
+	CheckIdentifiers(recorder, set, 3)
+	if len(recorder.reported) != 0 {
+		t.Fatalf("CheckIdentifiers reported %q, want nothing", recorder.reported)
 	}
 }
 

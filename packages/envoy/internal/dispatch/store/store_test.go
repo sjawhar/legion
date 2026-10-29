@@ -348,11 +348,21 @@ func TestMigrateCreatesEmptySchemaAndIsIdempotent(t *testing.T) {
 	assertRecordsEveryVersion(t, ctx, store)
 }
 
-// Dispatch's set is numbered 1 to N with none missing; pgmigratetest.CheckNumberedOneToN says why.
-func TestMigrationSetIsNumberedOneToN(t *testing.T) {
-	if err := pgmigratetest.CheckNumberedOneToN(migrationFiles, "migrations"); err != nil {
+// lastNumberedMigration is the highest version Dispatch's numbered migrations reached,
+// 0140_issue_embedding_spec.up.sql. Nothing is added at or below it again: every migration added
+// since is named for the UTC moment its author created it, so two pull requests open at once
+// cannot both claim one version.
+const lastNumberedMigration = 140
+
+// Dispatch's set hands its identifiers out the way the repository requires: 1 to
+// lastNumberedMigration each taken once, and a real UTC timestamp above it;
+// pgmigratetest.CheckIdentifiers says why.
+func TestMigrationSetTakesNumbersThenTimestamps(t *testing.T) {
+	migrations, err := pgmigrate.Load(migrationFiles, "migrations")
+	if err != nil {
 		t.Fatal(err)
 	}
+	pgmigratetest.CheckIdentifiers(t, migrations, lastNumberedMigration)
 }
 
 // Every file in Dispatch's migrations directory reaches the runner; pgmigratetest.CheckEmbedsEveryFile
@@ -366,7 +376,8 @@ func TestEveryMigrationFileIsEmbedded(t *testing.T) {
 // censusRequiredFrom is the first migration number that must declare a census (LEGION-459): one
 // more than the highest migration on main when the census landed, so no migration written before
 // the rule is caught by it. Every migration below it that declares one is a worked example. Read
-// from origin/main on 2026-10-01, where the set ended at 0055.
+// from origin/main on 2026-10-01, where the set ended at 0055. Every timestamped migration is
+// above it, so every migration added from now on declares a census.
 const censusRequiredFrom = 56
 
 // Every migration from censusRequiredFrom on declares a census: the count a deployment reads before
@@ -603,9 +614,11 @@ func assertDatabaseObjectsAbsent(t *testing.T, ctx context.Context, pool *Pool, 
 func migrateThrough(t *testing.T, store *Store, maxVersion int) {
 	t.Helper()
 	ctx := context.Background()
+	// The runner's own DDL (createVersionTable), bigint included: a test that created the table
+	// as an integer would make the runner widen it, which is not what these tests are about.
 	if _, err := store.Pool.Exec(ctx, `
 		create table if not exists schema_migrations (
-			version integer primary key,
+			version bigint primary key,
 			applied_at timestamptz not null default now()
 		)
 	`); err != nil {
