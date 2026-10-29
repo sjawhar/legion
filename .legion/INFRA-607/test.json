@@ -2,41 +2,34 @@
   "schemaVersion": 1,
   "phase": "test",
   "issue": "INFRA-607",
-  "completed": "2026-10-28T22:36:28Z",
-  "testedHead": "c0d4ab95e31a8775db978032707026fc91d6b07c",
+  "completed": "2026-10-29T00:53:59Z",
+  "testedHead": "7c1bf2cb3a13983100f5176893c5fc1f104659f6",
   "codeHead": "a56be7397f910bc0ec90d4b16fa1d73a9131bc77",
-  "round": 7,
-  "scope": "Review round 2's fixes (a56be739) change only the shutdown and intake stop paths: main.go/shutdown.go (stopIntakesOnExit), delivery intake.go, intake_delivery.go, jobs.go and intakes.go (the stop budget runs from the signal and bounds the bind), and bus nats.go/recovery.go (DrainSubscription gives up the registration). This round drives those paths on my own build of a56be739, including NATS frozen with SIGSTOP. Round 6's idle result stands: no loop code changed.",
+  "round": 8,
+  "scope": "As the architect asked: wait for the non-required suites at a56be739 to finish, pass only if each is green or its failure is main's, and correct the PR body's 'Not proven' line on the connection-replacement stop. No code changed since round 7, so round 7's real-surface proof stands. Every pull_request run tested GitHub's merge ref 72525059, which is a56be739 merged onto main 1767c9af (#2448).",
   "implementerProof": {
     "verdict": "verified",
-    "how": "On my build of a56be739, with config B and a fake GitHub (FAKE_PULL_MERGED=1): with GitHub holding a fetch 50 s and SIGTERM 2 s in, the process exited 15.10 s after the signal (implementer: 15.05 s), and the fetch was given up 15.0 s after the signal. The regression tests pass: ./cmd/dispatch -run 'Shutdown|Panic|StopIntakes' (including the startup-panic test), ./internal/dispatch/delivery -run 'Stop|HandOver|Budget|Bind', and ./internal/bus -run 'Drain|Release'."
+    "how": "Unchanged since round 7 (verified on the real binary at a56be739). This round adds CI's results at the same code."
   },
   "failures": [],
   "failed": 0,
   "proof": [
     {
-      "criterion": "Shutdown stays inside the stop grace when the bus does not answer, with a handler in flight and with a standby",
-      "surface": "Two real head processes (a56be739) on one database and NATS: one bound to both durables, one standing by. NATS was frozen with SIGSTOP so every JetStream call waits for its timeout.",
-      "command": "publish-pr.sh 901 (GitHub holds the fetch 3 s); kill -STOP <nats-server>; kill -TERM <both>; then a second pair with NATS frozen 2.5 s before SIGTERM to the standby, then to the bound process",
-      "observed": "First pair: the bound process exited 3.18 s after SIGTERM, once GitHub answered. Row 901 was written, and the log shows the 'deregistered this server process' line with no error. The standby exited 0.37 s after SIGTERM. Second pair: the standby exited 0.17 s and the bound process 0.40 s after SIGTERM. server_processes was empty afterwards, so every process deregistered before its pool closed.",
+      "criterion": "The suites that exercise the changed stop path and loops are green at a56be739, or each failure is main's",
+      "surface": "GitHub Actions at a56be739 (merge ref 72525059 = a56be739 + main 1767c9af)",
+      "command": "gh api repos/sjawhar/legion/commits/a56be739.../check-runs; job logs 123157155669 (envoy-go), 123157155382 (envoy-go-race), 123157155446 (Dispatch Go suite on Postgres 16), 123157155251 (dispatch)",
+      "observed": "Green: Broker Go suite on Postgres 16, Daemon Go suite on Postgres 16, broker-multiprocess, dispatch-multiprocess, dispatch-browser-multiprocess, dispatch-memory, envoy-e2e-local, envoy-infra-go, envoy-session-stall, envoy-smoke, pi-legion, lint, typecheck, test and build. Red, each main's: (1) envoy-go, envoy-go-race and the Dispatch Postgres 16 suite each failed on one package, `internal/dispatch/pmdoc [build failed]`, `reanchor_test.go:387:49: undefined: docstest.NestedValue`. That is the breakage of main's #2448, which is merge parent 1767c9af; current main 56a39157 fixes it (#2482). In those same jobs every package this PR touches passed: api, bus, delivery, docs, duty, embedqueue, pglisten, redeliver, refs, store and cmd/dispatch. There were 0 DATA RACE warnings in envoy-go-race. (2) The dispatch browser job failed three tests and no others: mermaid.e2e.ts:194 on chromium and on iphone (#2470, which fixes it, is not in base 1767c9af), and close-withdraws-asks.e2e.ts:126 at line 161 (`ul[aria-label=\"Options\"] li` expected 2, received 0).",
       "headSha": "a56be7397f910bc0ec90d4b16fa1d73a9131bc77",
-      "negativeControl": "The review traced 14be5104's budget starting only after a bind's JetStream calls returned (up to nats.MaxWait 10 s each), so a stop could push deregister and pool.Close past the 30 s stop grace. TestABindThatReturnsAfterTheSignalStopsByTheBudgetFromTheSignal fails on that code with 'Run returned 5.002s after its ctx ended' (implementer's run)."
-    },
-    {
-      "criterion": "A handler cut off by the stop budget is given up 15 s after the signal and its message handed back",
-      "surface": "The head binary bound to the delivery durable, fake GitHub holding pulls/902 for 50 s",
-      "command": "publish-pr.sh 902; kill -TERM <pid> 2 s after the fake logged the hold; NATS /jsz?consumers=true",
-      "observed": "SIGTERM at 22:35:56.458. The fake logged 'caller gone' at 22:36:11.474, 15.0 s later. The process exited 15.10 s after the signal. The consumer then showed push_bound absent and the message unacknowledged (delivered 2, ack_floor 1, 1 pending), ready for the next holder.",
-      "headSha": "a56be7397f910bc0ec90d4b16fa1d73a9131bc77",
-      "negativeControl": "With GitHub answering, the process exits within about 3 s of the signal with the message acknowledged (first proof above; round 6: 2.17 s)."
+      "negativeControl": "close-withdraws-asks is main's. The same three tests, and only those, fail at the same line 161 in the dispatch job of five unrelated pull requests the same evening: INFRA-605 (job 123163225156), INFRA-715 (123142835867), INFRA-594 (123138105539), INFRA-556 (123135429032) and INFRA-631 (123131072867). Locally, `run1.sh <export> e2e/close-withdraws-asks.e2e.ts:126` fails on an export of main 1767c9af, on the merge ref 72525059 and on current main 56a39157 alike (locally at line 84, the same in all three). The merge ref's web app is byte-identical to main's: `git diff 1767c9af 72525059 -- packages/dispatch` touches only AGENTS.md."
     }
   ],
-  "ci": "At 22:36Z at a56be739: changes, lint, typecheck, build x2, test and the Daemon Go suite are queued; pr-title runs were cancelled by later pushes, and the newest is queued. GitHub reports the PR MERGEABLE.",
+  "prBody": "I corrected the 'Not proven' line on the connection-replacement stop: I re-drove it on the real binary at 14be5104 at 21:48Z. Result: no drain ERROR, the durable released within 0.45 s, the fetch in hand was acknowledged, a post-signal message was not delivered to the stopping process, and the next process handled both messages once each. a56be739's DrainSubscription change rests on the regression tests.",
   "mainReds": [
-    "Unchanged: recipients-claim.e2e.ts:310, TestDispatchConnectionsPerPodIsTheServers and mermaid.e2e.ts:194 are main's. The pmdoc compile failure from #2448 is main's if a later merge picks it up; this head's base (c24ea568) predates it."
+    "pmdoc build at main 1767c9af (#2448), fixed on main by #2482. #2481 covers the second pmdoc error the controller relayed.",
+    "mermaid.e2e.ts:194 at bases before #2470.",
+    "close-withdraws-asks.e2e.ts:126, line 161, is new to the known-red list. It fails on five other pull requests' CI and on main locally."
   ],
   "notes": [
-    "I did not inject a real startup panic into the binary. The startup-panic fix is proven by its regression test, and main.go:568 now defers stopIntakesOnExit(cancel, waitIntakes), which cancels the context before waiting.",
-    "Frozen NATS: the ack of message 901 could not reach the server, so the next holder will handle it again. The upserts are idempotent and nothing about this changed in this PR."
+    "Exports used for the local check: /legion/scratch/tmp/infra607/e2e/{base1767,merge7252,main56a3}; logs at e2e/logs/*-t1.log."
   ]
 }
