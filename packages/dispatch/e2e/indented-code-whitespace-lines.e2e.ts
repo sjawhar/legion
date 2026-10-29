@@ -151,3 +151,47 @@ test("the stored spec fences each code block with its whitespace lines, reads ba
     await expectEngineReading(documentEditor(page));
   });
 });
+
+// A body an API write can carry that ends in such a line with no line feed after it: the engine
+// keeps one line ending of the block's two trailing whitespace-only lines, where a reader that
+// expects every line to end in a line feed drops both and reads `code`.
+const noFinalLineFeedBody = "Before.\n\n    code\n    \n    ";
+
+/** The spec the body is written as, stored: the block fenced, holding the line ending the engine
+ *  keeps in it. */
+const noFinalLineFeedStored = "# Code\n\nBefore.\n\n```\ncode\n\n```\n";
+
+/** The whole text of every code block `view` draws, as one JSON line so that a failure prints the
+ *  whitespace escaped. Read once the body's paragraph shows, so the view has drawn. */
+async function codeReading(view: Locator): Promise<string> {
+  await expect(view.getByText("Before.", { exact: true })).toBeVisible();
+  return JSON.stringify(
+    await view.locator("pre code").evaluateAll((blocks) => blocks.map((block) => block.textContent))
+  );
+}
+
+test("an indented code block's whitespace-only line ending a spec with no final line feed reads in its editor as it does in a comment", async ({
+  browser,
+}) => {
+  await createProject({ key: "CORE", name: "Core" });
+  const issue = await createIssue(
+    { project: "CORE", spec: `# Code\n\n${noFinalLineFeedBody}`, title: "No final line feed" },
+    agentSession
+  );
+  const comment = await createComment(issue.key, { body: noFinalLineFeedBody }, agentSession);
+
+  await withAlice(browser, async (page) => {
+    // The comment holds the body itself, so the engine reads it here.
+    await page.goto(`/issues/${issue.key}/conversation`);
+    const turn = page.locator(`[data-turn="comment:${comment.id}"]`);
+    await turn.getByRole("button", { name: "Expand thread" }).click();
+    const engine = await codeReading(turn.locator(".dispatch-markdown"));
+    expect(engine).toBe(JSON.stringify(["code\n"]));
+
+    // The editor draws what the server's reader made of the same body.
+    await openSpec(page, issue.key, "Before.");
+    await expect.poll(() => codeReading(documentEditor(page))).toBe(engine);
+  });
+
+  expect((await getIssueArtifactText(issue.key, "spec")).markdown).toBe(noFinalLineFeedStored);
+});
