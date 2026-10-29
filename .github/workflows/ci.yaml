@@ -725,6 +725,8 @@ jobs:
               - 'packages/contracts/fixtures/github-envelopes/**'
               - 'packages/contracts/fixtures/delivery-live/**'
               - 'packages/contracts/fixtures/decision-blocks/**'
+              # The claim list its fence reads: internal/broker/oauth/claims_doc_test.go:161.
+              - 'docs/kubernetes.md'
               - '.github/actions/pull-test-images/**'
               # Its pack step writes each archive's notices, for each target the list names.
               - 'scripts/go-third-party-notices.sh'
