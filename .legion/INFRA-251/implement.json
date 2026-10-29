@@ -2,52 +2,52 @@
   "schemaVersion": 1,
   "phase": "implement",
   "issue": "INFRA-251",
-  "completed": "2026-10-26T08:05:00Z",
+  "completed": "2026-10-29T18:30:00Z",
   "proof": [
     {
-      "criterion": "PR #2163 no longer conflicts with main: forward merge of main@origin 63cd684a82, no rebase, nothing existing rewritten",
+      "criterion": "PR #2163 no longer conflicts with main, and nothing of #2131's old code remains: main merged forward (never a rebase), main's side kept for every file, only INFRA-251's own change re-applied on top",
       "surface": "GitHub pull request sjawhar/legion#2163 and the issue branch legion/INFRA-251",
-      "command": "jj new legion/INFRA-251 main@origin -m 'merge: resolve conflict against main@origin'; resolve; jj git push --bookmark legion/INFRA-251; git merge-tree --write-tree --name-only edd6044b011338469568540f7b12be9a580b7976 84e8f052ab6c",
-      "observed": "Push moved legion/INFRA-251 forward from a7bf0f7fa522 to edd6044b0113 (a fast-forward). git merge-tree against the newer main 84e8f052ab6c printed only a tree id, exit 0, so there is no conflict. GitHub started Tests 40287856845, PR Title 40287856803, Legion Envoy and Contracts 40287856895, Docs 40287856781 and Worker Image 40287856824 at the new head; all were queued when read. Fingerprint cb5c1756176e… -> 2ccf97d53d40…, changed, posted at https://github.com/sjawhar/legion/pull/2163#issuecomment-6410897565",
-      "headSha": "edd6044b011338469568540f7b12be9a580b7976",
-      "negativeControl": "At a7bf0f7fa522 GitHub reported mergeable=CONFLICTING, mergeStateStatus=DIRTY, and jj new reported 9 two-sided conflicts (the architect and controller skills, wake-routing.md, admission.md, their claude-envoy copies, pi-legion/CHANGELOG.md)."
+      "command": "jj new legion/INFRA-251 main@origin (64d2ad0be7da) with jj restore --from main@origin; re-apply INFRA-251's diff (b423af833..bd3892e47727 + c3955ada, db300b63, 028510c1); jj new legion/INFRA-251 main@origin (2b427f930eac); jj git push --bookmark legion/INFRA-251; gh pr view 2163 --json mergeable,mergeStateStatus",
+      "observed": "legion/INFRA-251 moved forward 19257e958f11 -> e7beb692c21f -> 6b07c0197b42 (fast-forwards). GitHub reports mergeable=MERGEABLE, mergeStateStatus=BLOCKED (reviews and CI pending). The diff against main is 47 files, +3105/-127, all INFRA-251's own paths. CI run 40928051868 and PR Title run 40928051863 were queued at the head. Fingerprint 2ccf97d5... -> 9ef46f13..., posted at https://github.com/sjawhar/legion/pull/2163#issuecomment-6504637074",
+      "headSha": "6b07c0197b428c37727dcf441fc54310c9b3c458",
+      "negativeControl": "At 19257e958f11 GitHub reported CONFLICTING/DIRTY. At e7beb692 it reported CONFLICTING/DIRTY again, after main moved to 2b427f93 (#2370): git merge-tree named conflicts in daemon/outbox.go and daemon/notice_exceptions.go. The second merge cured that."
     },
     {
-      "criterion": "Every skill hunk of this branch survives INFRA-353's (#2197) rewrite, ported to the reference that now holds its block, and every skill:// link still resolves",
-      "surface": "The staged Legion skills that Oh My Pi and the claude-envoy plugin load (skills/ and packages/claude-envoy/legion/skills/)",
-      "command": "cd packages/pi-legion && bun test src/skills-guard.test.ts; cd packages/claude-envoy && bun run check-dist; grep -c for each ported sentence in skills/ and packages/claude-envoy/legion/skills/",
-      "observed": "skills-guard: 11 pass, 0 fail, the anchor test included. check-dist: 'dist/ and legion/ match a fresh build'. Each ported sentence occurs once per copy: the architect's slot return and register_gate (SKILL.md, design-gate.md, wake-routing.md), and the controller's awaiting-person and parked-decision wakes, the walk at start and on tick, the Parked by Legion mark (SKILL.md, wakes.md), and the awaiting_person admission row.",
-      "headSha": "edd6044b011338469568540f7b12be9a580b7976",
-      "negativeControl": "With the branch's old skills/legion-controller/references/parked-decisions.md put back on this head, the anchor test fails (10 pass, 1 fail). It names SKILL.md#wake-routing-table (twice), #new-issue-triage and #free-slots-go-daemon as 'names no heading'. The file was then restored, and jj status shows no change."
+      "criterion": "INFRA-251's behaviour works on main's awaiting-person machinery: a person's decision on a parked tree reaches the controller once and is named at the root's next start; main's awaiting-person behaviour is unchanged",
+      "surface": "The Legion daemon's outbox, admission path, ask handlers and record store against a real PostgreSQL 17.2 (127.0.0.1:55432) and a real nats-server 2.10.29 (127.0.0.1:54222) in this issue's pod",
+      "command": "cd packages/daemon && LEGION_TEST_PG_DSN=postgres://postgres:pw@127.0.0.1:55432/postgres?sslmode=disable LEGION_TEST_NATS_URL=nats://127.0.0.1:54222 LEGION_TEST_NATS_MONITOR_URL=http://127.0.0.1:58222 go build ./... && go vet ./... && gofmt -l internal cmd && go test -count=1 -p 1 ./internal/notify/ ./internal/record/ ./internal/store/ ./internal/admit/ ./internal/workflow/ ./internal/api/ && go test -count=1 -p 1 ./internal/daemon/ -skip 'TestDaemonPermissionsOnRealServers|TestTheWorkflowConnectsAsTheNatsSeedTheDaemonResolved|TestTheWorkflowConnectsAsTheDaemonSeedOverThePaneSeed|TestChooseNATSConnectionNamesTheUserTheDaemonConnectsAs|TestNoLaunchCarriesTheDaemonSeed|TestTmuxBootRewritesEveryOlderClonesCredentialHelper|TestATerminalAttempt|ScratchDispatch'",
+      "observed": "vet exit 0, gofmt empty. notify ok 0.025s, record ok 46.770s, store ok 68.447s, admit ok 328.942s, workflow ok 530.245s, api ok 174.110s, daemon ok 560.991s at 6b07c019. At the first merge head, intake, dispatch, classify and prompts were also ok. INFRA-251's 22 named tests PASS, including TestASpecDecisionNobodyInItsTreeHearsGoesToTheController, TestAPersonsAnswerOnAParkedTreeGoesToTheController, TestAPersonsReplyOnAParkedChildNamesItsRoot, TestAnAnswerOnARunningTreeSendsNothing, TestARootReadmittedOnAnOlderApprovalIsToldBothVersions and TestParkedDecisionsArriveWith0062AndGoWithTheirRoot. Every main awaiting-person test passes unchanged.",
+      "headSha": "6b07c0197b428c37727dcf441fc54310c9b3c458",
+      "negativeControl": "With the relay call removed from dispatchAskClosed, TestAPersonsAnswerOnAParkedTreeGoesToTheController FAILs with 'parked-decision notices = []admit.effect(nil)', and TestAPersonsResolutionAndReplyAreRelayed FAILs because the ask-resolved reference is missing. The change was then reverted with jj restore."
     },
     {
-      "criterion": "main's daemon changes and this branch's product code still work together after the merge",
-      "surface": "The Legion daemon's admission, workflow, intake, api, record and store packages against a real PostgreSQL 17.2 (127.0.0.1:55432) and a real nats-server 2.10.29 (127.0.0.1:54222) in this issue's pod",
-      "command": "LEGION_TEST_PG_DSN=postgres://postgres:pw@127.0.0.1:55432/postgres?sslmode=disable LEGION_TEST_NATS_URL=nats://127.0.0.1:54222 LEGION_TEST_NATS_MONITOR_URL=http://127.0.0.1:58222 go test -p 1 ./internal/admit/ ./internal/workflow/ ./internal/intake/ ./internal/daemon/ ; go test ./internal/api/ ./internal/record/ ./internal/store/ ; go build ./... ; go vet ./...",
-      "observed": "admit ok 221.242s, workflow ok 445.359s, intake ok 21.287s, api ok 203.601s, record ok 64.886s, store ok 98.183s. go build and go vet exit 0. internal/daemon passes except for tests that need what the pod does not have: Docker for the nkey NATS servers (TestDaemonPermissionsOnRealServers and 4 more), pgvector for scratch Dispatch (3 tests), gVisor /proc SigIgn (2), and git helper reset (1).",
-      "headSha": "edd6044b011338469568540f7b12be9a580b7976",
-      "negativeControl": "Without LEGION_TEST_PG_DSN, the admit tests fail with 'LEGION_TEST_PG_DSN is required for real Postgres admission tests'. Without LEGION_TEST_NATS_URL, the NATS tests panic with 'rootless Docker not found'. So the green runs above used the real servers, not skips."
+      "criterion": "The controller skill's parked-decision rules sit in main's rewritten skill, and every skill:// link resolves",
+      "surface": "The staged Legion skills that the controller loads (skills/legion-controller)",
+      "command": "cd packages/pi-legion && bun test src/skills-guard.test.ts; bun test scripts/e2e/lib",
+      "observed": "skills-guard: 13 pass, 0 fail. scripts/e2e/lib: 707 pass, 2 fail; both failures are nats-stream.test.ts, which needs docker. The parked-decision wake, the walk at start and on tick, the Parked by Legion mark in held, and the hold re-admission bullet are each present once.",
+      "headSha": "6b07c0197b428c37727dcf441fc54310c9b3c458",
+      "negativeControl": "Last round, with the branch's old parked-decisions.md on main's skills, the anchor test failed (10 pass, 1 fail, naming dead #wake-routing-table, #new-issue-triage and #free-slots-go-daemon). The retargeted file passes here."
     }
   ],
   "filesChanged": [
-    "skills/legion-architect/SKILL.md",
-    "skills/legion-architect/references/design-gate.md",
-    "skills/legion-architect/references/wake-routing.md",
-    "skills/legion-controller/SKILL.md",
-    "skills/legion-controller/references/wakes.md",
-    "skills/legion-controller/references/admission.md",
-    "skills/legion-controller/references/parked-decisions.md",
-    "packages/claude-envoy/legion/skills/ (regenerated copies of the seven files above)",
-    "packages/pi-legion/CHANGELOG.md"
+    "packages/daemon/** (34 files: record, store migration 0062 and its test, admit, api, daemon outbox/notice_exceptions/parked_decision, dispatch, intake, notify, prompts/go/architect-root.md, workflow ask_mirror/catch_up/gate/parked_decision, and INFRA-251's tests)",
+    "skills/legion-controller/SKILL.md, references/wakes.md, references/parked-decisions.md; skills/AGENTS.md; AGENTS.md",
+    "docs/site/src/content/docs/legion/concepts.md, troubleshooting.md",
+    "scripts/e2e/parked-decision-devbox.sh, scripts/e2e/README.md, scripts/e2e/lib/parked-decision-*.{jq,test.ts}",
+    "packages/pi-legion/.changes/unreleased/INFRA-251-parked-decision-controller.yaml"
   ],
   "trickyParts": [
-    "#2197 moved every block this branch edits into new references (design-gate.md, wakes.md, session.md). Those new files merged cleanly with main's older wording, so each hunk was ported by hand and checked by grep. Taking main's side alone would have dropped all of them with every lane green.",
-    "parked-decisions.md had no conflict, but its links pointed at anchors the rewrite removed. Only the skills-guard anchor test shows this."
+    "Main moved ask handling into workflow/ask_mirror.go, where recordedRoot skips children. The relay runs after main's unchanged handlers (now closeAsk/replyToAsk), so a reply on a parked child still reaches the controller and names its root.",
+    "The relay returns early for any root that is admitted, slotted or awaiting_person, so main's root_asks/reconcile/ResumeAwaitedRoot path stays the only owner of those roots.",
+    "main's #2370 replaced rehold with reholdNotice. The parked-decision call there is keyed by record.OutboxKey(reported.row), which is the original row's dedupe key, as before."
   ],
   "deviations": [
-    "admission.md's 'no slot' paragraph now also excludes phase: awaiting_person. That root is never unslotted (admit.go:935). Without this, the controller could read an awaiting_person root as one the daemon will take out of the workflow."
+    "No daemon API contract bump, unlike the architect's instruction. INFRA-251's own diff changes no state wire field; the old 36->37 bump was for #2131's shapes, which main shipped at 40. DaemonAPIVersion stays at main's 42.",
+    "Fast-follow item 3 (reorder claude-envoy CHANGELOG.md) needed no edit. The misordered contract-37 entry left with #2131's code, and main now writes every CHANGELOG.md from fragments.",
+    "The PR body's Fast-follow line now reads 'none' (the pr-body template requires the line), and the Chain and Gate G1 text is replaced with 'not stacked'.",
+    "main tests changed only where INFRA-251 deliberately changes behaviour: admit/design_gate_review_test.go (changes notice carries the spec Ref) and intake/ask_events_decode_test.go (the reply carries its Comment id)."
   ],
   "openQuestions": [
-    "Gate G1 in the PR body still blocks READY: #2131 is OPEN, and compare/main...edd6044b lists packages/contracts/src/legion-api.ts (index 21, not null)."
+    "Kept decisions on a root that main's answered-resume path (ResumeAwaitedRoot) brings back are not named in that resume task; they reach the architect in the next launch's catch-up. The relay never keeps a decision for an awaiting_person root, so this needs a root parked with kept decisions to later become awaiting_person before admission; I found no path that does this."
   ]
 }
