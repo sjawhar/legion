@@ -87,7 +87,7 @@ type testServerOptions struct {
 	// files is the uploaded-file store; nil keeps every upload's bytes in Postgres, as a
 	// deployment with no bucket does.
 	files files.Store
-	// lifetime is the server's Deps.Lifetime, on which Register builds the delivery hub GET
+	// lifetime is the lifetime Register runs the server on, building on it the delivery hub GET
 	// /ws/delivery serves and the event stream relay every SSE connection reads. Nil is the
 	// test's own context (t.Context()), which ends before the cleanups that wait those
 	// goroutines out; a test that stops the server before it ends (the socket's) passes one it
@@ -192,7 +192,6 @@ func newRegisteredTestServer(t testing.TB, options testServerOptions) (http.Hand
 		App:              options.app,
 		GitHubAPIBase:    options.githubAPIBase,
 		TestHooksEnabled: options.testHooks,
-		Lifetime:         lifetime,
 		StreamHeartbeat:  options.streamHeartbeat,
 		EnvoyURL:         options.envoyURL,
 		EnvoyTimeout:     options.envoyTimeout,
@@ -206,12 +205,10 @@ func newRegisteredTestServer(t testing.TB, options testServerOptions) (http.Hand
 		t.Fatalf("new API dependencies: %v", err)
 	}
 	mux := http.NewServeMux()
-	served := register(mux, deps)
+	served := register(mux, lifetime, deps)
 	t.Cleanup(served.eventRelay.wait)
-	if served.deliveryHub != nil {
-		t.Cleanup(served.deliveryHub.wait)
-		t.Cleanup(served.deliverySockets.wait)
-	}
+	t.Cleanup(served.deliveryHub.wait)
+	t.Cleanup(served.deliverySockets.wait)
 	return mux, database, deps, served
 }
 
@@ -539,7 +536,7 @@ func TestDocumentTextReportsUnavailableService(t *testing.T) {
 		t.Fatalf("new API dependencies: %v", err)
 	}
 	mux := http.NewServeMux()
-	Register(mux, deps)
+	t.Cleanup(Register(mux, t.Context(), deps))
 
 	if response := dispatchRequest(t, mux, http.MethodPost, "/api/v1/projects", map[string]string{
 		"key": "TEST", "name": "Test project",
@@ -1901,7 +1898,7 @@ func newCookieServer(t *testing.T) (http.Handler, *store.PgSessionStore, *http.C
 		t.Fatalf("new API dependencies: %v", err)
 	}
 	handler := http.NewServeMux()
-	Register(handler, deps)
+	t.Cleanup(Register(handler, t.Context(), deps))
 	generation, err := sessions.EnsureSession(context.Background(), "alice@d.example")
 	if err != nil {
 		t.Fatalf("establish alice's session: %v", err)
@@ -2184,15 +2181,14 @@ func newTestHandlerWithBroker(t *testing.T) (http.Handler, *store.Store, *events
 		ServerURL:   "https://dispatch.example",
 		Docs:        documentService,
 		Events:      broker,
-		// The event stream relay runs on this, and the wait below is what keeps its listening
-		// connection from outliving the database the test drops.
-		Lifetime: t.Context(),
 	})
 	if err != nil {
 		t.Fatalf("new API dependencies: %v", err)
 	}
 	mux := http.NewServeMux()
-	t.Cleanup(Register(mux, deps))
+	// The event stream relay runs on t.Context(), and the wait is what keeps its listening
+	// connection from outliving the database the test drops.
+	t.Cleanup(Register(mux, t.Context(), deps))
 
 	return mux, database, broker
 }

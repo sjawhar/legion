@@ -124,6 +124,7 @@ on:
       - 'packages/envoy/internal/dispatch/dashboard/*'
       - 'packages/envoy/internal/dispatch/delivery/**'
       - 'packages/envoy/internal/dispatch/docs/*'
+      - 'packages/envoy/internal/dispatch/docs/crafted/*'
       - 'packages/envoy/internal/dispatch/duty/*'
       - 'packages/envoy/internal/dispatch/embed/*'
       - 'packages/envoy/internal/dispatch/embedqueue/*'

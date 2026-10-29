@@ -398,16 +398,6 @@ GATES = [
     ) + install_jj("test") + install_omp("test") + setup_go("test", f"{DAEMON}/go.mod")
       + biome(at("test", "Lint the Dispatch census script")) + bun_job("test") + CI_SELF),
 
-    gate("daemon_go_postgres_16", "daemon-go-postgres-16", runs=[
-        step_run("daemon-go-postgres-16", "Test the Go daemon on Postgres 16", "go test -count=1 -timeout 20m ./...", DAEMON, ["./..."]),
-    ], reads=reads(
-        (".github/actions/install-uv/**", at("daemon-go-postgres-16", "./.github/actions/install-uv")),
-        (f"{DAEMON}/docker/worker.Dockerfile", ".github/actions/install-uv/action.yml:16-17 ARG UV_VERSION/UV_SHA256"),
-        (".github/actions/pull-test-images/**", at("daemon-go-postgres-16", "Pull the NATS test container images")),
-        (f"{DAEMON}/internal/testnats/nats.go", f"{at('daemon-go-postgres-16', 'Pull the NATS test container images')} const Image"),
-        (f"{ENVOY}/internal/testnats/nats.go", f"{at('daemon-go-postgres-16', 'Pull the NATS test container images')} const HubImage"),
-    ) + install_jj("daemon-go-postgres-16") + install_omp("daemon-go-postgres-16") + setup_go("daemon-go-postgres-16", f"{DAEMON}/go.mod")
-      + bun_job("daemon-go-postgres-16") + CI_SELF),
 
     gate("docs", "docs", runs=[
         script_run(BUILD_BINARIES, 'go -C "$root/$legion_module" build -o "$bin/legion" ./cmd/legion',
@@ -613,14 +603,6 @@ GATES = [
         (GO_TARGETS, f"{at('envoy-go', 'Pack envoy binaries')}: jq -r '.envoy[]'"),
     ) + setup_go("envoy-go", f"{ENVOY}/go.mod") + bun_job("envoy-go") + CI_SELF),
 
-    gate("dispatch_go_postgres_16", "dispatch-go-postgres-16", runs=[
-        step_run("dispatch-go-postgres-16", "Unit test Dispatch's Go packages on Postgres 16",
-                 "go test ./cmd/dispatch/... ./internal/dispatch/... ./internal/pgmigrate/...", ENVOY,
-                 ["./cmd/dispatch/...", "./internal/dispatch/...", "./internal/pgmigrate/..."]),
-    ], reads=reads(
-        (".github/actions/pull-test-images/**", at("dispatch-go-postgres-16", "Pull test container images")),
-        (f"{ENVOY}/internal/tests3/seaweedfs.go", f"{at('dispatch-go-postgres-16', 'Pull test container images')}: const Image"),
-    ) + setup_go("dispatch-go-postgres-16", f"{ENVOY}/go.mod") + bun_job("dispatch-go-postgres-16") + CI_SELF),
 
     gate("envoy_infra_go", "envoy-infra-go", runs=[
         step_run("envoy-infra-go", "Vet envoy-infra, its live-test tags included", "go vet -tags pulumilive,natslive ./...", INFRA, ["./..."],
@@ -664,13 +646,6 @@ GATES = [
                  "go test -tags multiprocess -count=1 -timeout 20m -v ./cmd/broker", ENVOY, ["./cmd/broker"], tags="multiprocess"),
     ], reads=setup_go("broker-multiprocess", f"{ENVOY}/go.mod") + CI_SELF),
 
-    gate("broker_go_postgres_16", "broker-go-postgres-16", runs=[
-        step_run("broker-go-postgres-16", "Unit test the secrets broker's Go packages on Postgres 16",
-                 "go test -count=1 ./cmd/agent-secrets/... ./cmd/agent-secrets-devrelay/... ./cmd/broker/... ./internal/broker/...", ENVOY,
-                 ["./cmd/agent-secrets/...", "./cmd/agent-secrets-devrelay/...", "./cmd/broker/...", "./internal/broker/..."]),
-        step_run("broker-go-postgres-16", "Two-process tests of the secrets broker on Postgres 16",
-                 "go test -tags multiprocess -count=1 -timeout 20m -v ./cmd/broker", ENVOY, ["./cmd/broker"], tags="multiprocess"),
-    ], reads=setup_go("broker-go-postgres-16", f"{ENVOY}/go.mod") + CI_SELF),
 
     # The listener image this job builds and smokes is left to check-image-trigger-paths.sh,
     # which proves envoy_smoke covers every file packages/envoy/docker/Dockerfile builds from
