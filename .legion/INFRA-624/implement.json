@@ -2,9 +2,17 @@
   "schemaVersion": 1,
   "phase": "implement",
   "issue": "INFRA-624",
-  "completed": "2026-10-29T12:50:00Z",
+  "completed": "2026-10-29T15:05:00Z",
   "pullRequest": "https://github.com/sjawhar/legion/pull/2433",
   "proof": [
+    {
+      "criterion": "Review round 11: a held-back refusal says only what is true (the decision is repaired in the document editor), and a test proves every held-back refusal is held back",
+      "surface": "Go document service against Postgres 17 (ICU) in the issue pod, through SetAskBlockText and ApplyOps; Dispatch browser suite in Chromium and iPhone",
+      "command": "cd packages/envoy && DISPATCH_TEST_DATABASE_URL=postgres://postgres@127.0.0.1:55433/postgres go test ./internal/dispatch/docs/ ./internal/dispatch/api/ -count=1 -timeout 60m; cd packages/dispatch && bun run e2e -- ask-concurrent-edit.e2e.ts typed-block-content-rule.e2e.ts unknown-directive.e2e.ts ask-blocks.e2e.ts editor-paste.e2e.ts text-typed-blocks.e2e.ts --project chromium --project iphone",
+      "observed": "ok docs 2175s, ok api 2092s at the merge head. 780-body test: 186 held back, each checked by assertHeldBackByItsHolder; the reason ends 'this decision is repaired in the document editor'. The rows 'holds its question again' and 'is decided and repaired' follow to a valid end. Browser: 177 passed.",
+      "headSha": "df85ed05c26d9725920c515a044a0c1c0f3307ed",
+      "negativeControl": "With planAskRepair returning holder:true for any decision that has a holder (the reviewer's mutation), TestSetAskBlockTextRefusalOfNestedDecisionsNamesOnlyWhatBreaksTheRule and TestSetAskBlockTextRefusalOfEveryBrokenBodyHoldingADecisionLeadsToAValidDecision fail; they pass without it."
+    },
     {
       "criterion": "Review round 10 (architect's scope cut): a refused ask edit whose repair would need the decision holding it changed (empty question, decided, another author) names no delete and no ask edit, says the decision is repaired in the document editor or once its holder reads, and no refusal sends a caller to edit another decision first",
       "surface": "Go document service against Postgres 17 (ICU) in the issue pod, through SetAskBlockText and ApplyOps",
@@ -142,5 +150,5 @@
     "Round 15: the INFRA-138 architect cut round 10's items 1-3 to removing the 'edit ask block X first' path; a refusal blocked by its holder names no delete and no ask edit."
   ],
   "openQuestions": [],
-  "round": 15
+  "round": 16
 }
