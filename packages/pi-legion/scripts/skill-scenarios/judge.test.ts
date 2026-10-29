@@ -607,7 +607,10 @@ test("a run with no spec-only check runs no findings judge and writes findings.j
   const ran: Seen[] = [];
   await judgeRun(dir, { runner: fakeRunner(ran) });
   expect(ran.map((judge) => path.basename(judge.dir))).not.toContain("findings");
-  expect(JSON.parse(readFileSync(path.join(dir, "findings.json"), "utf8"))).toEqual({ rows: [] });
+  expect(JSON.parse(readFileSync(path.join(dir, "findings.json"), "utf8"))).toEqual({
+    rows: [],
+    clean: [],
+  });
 });
 
 // A check the agent started from an eval cell has no `task` call in the transcript, only a transcript

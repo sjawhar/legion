@@ -46,6 +46,15 @@ before the split, and the Envoy plugin's releases after it, are in `packages/pi-
 - The skill-scenario scorer takes a run's own directory, work directory and profile from the cwd
   its session's header records (`<run dir>/cwd`), not from where the run is scored. Scoring a copy
   of the runs flagged nearly every run `outside=` and voided runs that read their own skills.
+- The skill-scenario scorer counts a spec-only check only when its pasted spec is the run's own: at
+  least a tenth of its 8-word runs must be in a version the run's session wrote. An agent that
+  split out a sibling issue and sent the sibling's spec for review had that review counted as a
+  check of its own spec, and its findings judged against the wrong spec.
+- The skill-scenario scorer takes the report of a subagent that ends with an empty `yield`
+  (`{"type":"result"}`) from the text it wrote before the yield, not the word `result`.
+- The findings judge lists each check whose report finds nothing in `clean`, and the scorer needs
+  each check to have a row or a `clean` entry. A findings file that covered only some checks
+  passed, and a run whose every check found nothing could never be scored.
 - The skill-scenario scorer reads a spec-only check from the subagent's own transcript
   (`sessions/<session>/<name>.jsonl`), not only from a `task` tool call. A check the agent started
   from an eval cell (`tool.task(…)` with the spec pasted in, or the `agent(…)` helper) leaves no

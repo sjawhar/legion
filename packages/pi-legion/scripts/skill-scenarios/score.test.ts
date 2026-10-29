@@ -3,6 +3,7 @@ import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { homedir, tmpdir } from "node:os";
 import path from "node:path";
 import { cliRefusals } from "@legion/envoy-client/dispatch-cli";
+import { checkouts, specWork } from "./score";
 
 // A run whose agent never got a model turn (Oh My Pi exits before its first request, as when the
 // profile's gateway key command runs past its budget) says nothing about the skill under test: the
@@ -934,6 +935,19 @@ function specRun(name: string, fixture: SpecFixture = {}) {
       transcript.map((entry) => `${JSON.stringify(entry)}\n`).join("")
     );
   }
+  // The default findings judge (cleanJudges) gives check 1 its row; every other check the run's
+  // transcript holds is clean, so the file covers each check as coverage requires.
+  if (fixture.judges?.["findings.json"] === undefined) {
+    const fixtureJson = { issue: "LWEVAL-7", spec_artifact: "art-spec" };
+    const checks = specWork(dir, checkouts(work), fixtureJson).checks.length;
+    writeFileSync(
+      path.join(dir, "findings.json"),
+      JSON.stringify({
+        rows: checks > 0 ? [{ check: 1, finding: "R1 names no check.", verdict: "fixed" }] : [],
+        clean: Array.from({ length: Math.max(0, checks - 1) }, (_, index) => index + 2),
+      })
+    );
+  }
   if (fixture.ledger === false) return;
   const state = path.join(ledgerDir(name));
   mkdirSync(state, { recursive: true });
@@ -971,7 +985,12 @@ specRun("spec-writing-head-3", {
 });
 // A finding the agent neither fixed nor recorded.
 specRun("spec-writing-head-4", {
-  judges: { "findings.json": { rows: [{ check: 1, finding: "No owner.", verdict: "neither" }] } },
+  judges: {
+    "findings.json": {
+      rows: [{ check: 1, finding: "No owner.", verdict: "neither" }],
+      clean: [2],
+    },
+  },
 });
 const refusal = "dispatch ask: the question gives no recommendation; end it with one";
 const refused = sh("x1", "dispatch ask --issue LWEVAL-7 --question 'Which name?'", 2, refusal);
@@ -1614,6 +1633,67 @@ specRun("spec-writing-head-99", {
     NoReport: subagentTranscript(`Read this spec alone.\n\n${outlined()}`, 6.2, 6.8, ""),
   },
 });
+// A review of a sibling issue's spec: its assignment holds the seven headings too, but no 8-word
+// run of it is in a version the session wrote, so it checks no write of this run.
+const siblingSpec = [
+  "## Summary",
+  "",
+  "The billing service sends each invoice by email on the first day of every month.",
+  "## Problem",
+  "",
+  "Customers in three regions receive their invoices late because the mail queue stalls overnight.",
+  "## Goals and non-goals",
+  "",
+  "Goals: invoices arrive on time. Non-goals: a new payment provider or tax rules.",
+  "## Requirements",
+  "",
+  "- **R1.** The queue retries a stalled invoice within ten minutes of the stall. From: the ticket.",
+  "## Design",
+  "",
+  "A watchdog process restarts the mail worker whenever its heartbeat stops for two minutes.",
+  "## Decisions",
+  "",
+  "### Restart rather than replace the worker",
+  "",
+  "Restarting keeps the existing worker code and its tested retry logic in place for now.",
+  "## Acceptance",
+  "",
+  "- **A1.** A stalled test invoice arrives within fifteen minutes of the stall. (R1)",
+  "",
+].join("\n");
+specRun("spec-writing-head-120", {
+  transcript: evalFirst(evalCell("e1", evalSpawn, "Spawned SiblingCheck.")),
+  subagents: {
+    SiblingCheck: subagentTranscript(
+      `Review the spec of the sibling issue LWEVAL-8.\n\n${siblingSpec}`,
+      6.2,
+      6.8
+    ),
+  },
+});
+// A subagent that ends with an empty `yield` ({"type":"result"}) hands back the text it wrote just
+// before: that text is its report, not the word "result".
+specRun("spec-writing-head-121", {
+  transcript: evalFirst(evalCell("e1", evalSpawn, "Spawned EvalCheck.")),
+  subagents: {
+    EvalCheck: [
+      ...subagentTranscript(
+        `Read this spec alone and list each gap.\n\n${outlined()}`,
+        6.2,
+        6.6,
+        "1. R1 names no owner."
+      ),
+      {
+        type: "message",
+        timestamp: second(6.8),
+        message: {
+          role: "assistant",
+          content: [{ type: "toolCall", id: "y1", name: "yield", arguments: { type: "result" } }],
+        },
+      },
+    ],
+  },
+});
 // checked: a write through a helper function of the agent's own shows no command the scorer reads,
 // but Dispatch recorded its version for the session. That version is a spec write at its own time
 // (version 3 below, at second 12.5 or 14.5, during the eval cell), and the row is flagged.
@@ -2119,6 +2199,21 @@ specRun("spec-writing-head-53", {
 // findings: no row at all for the run's two checks, as a findings.json judged when the scorer saw
 // no check is: not "no finding left", but a judge that never read these checks.
 specRun("spec-writing-head-102", { judges: { "findings.json": { rows: [] } } });
+// findings: a row for check 1 of the run's two and nothing for check 2, which a judge that skipped
+// a check gives; and check 1 both with rows and in `clean`.
+specRun("spec-writing-head-122", {
+  judges: { "findings.json": { rows: [{ check: 1, finding: "No owner.", verdict: "fixed" }] } },
+});
+specRun("spec-writing-head-123", {
+  judges: {
+    "findings.json": {
+      rows: [{ check: 1, finding: "No owner.", verdict: "fixed" }],
+      clean: [1, 2],
+    },
+  },
+});
+// findings: both checks reported nothing, and the judge says so in `clean`: no finding is left.
+specRun("spec-writing-head-124", { judges: { "findings.json": { rows: [], clean: [1, 2] } } });
 // Spec writes: only a write Dispatch made, of the run's own primary spec, counts. Each call below is
 // something else, and the run's two checked writes still stand. Each result is the one Dispatch
 // gives, so the calls that Dispatch did apply are left out for what they name, not for their result.
@@ -2896,8 +2991,12 @@ test("judged: a judge file that leaves out, repeats or invents what judge.ts gav
   uncovered(
     "spec-writing-head-102",
     "findings.json",
-    "no row for any of the 2 checks it was given"
+    "no row for check 1, and it is not in clean; no row for check 2, and it is not in clean"
   );
+  uncovered("spec-writing-head-122", "findings.json", "no row for check 2, and it is not in clean");
+  uncovered("spec-writing-head-123", "findings.json", "check 1 has rows and is in clean");
+  // Two clean reports, recorded as such, leave no finding.
+  expect(scoresOf("spec-writing-head-124")).toEqual(allPass);
 });
 
 test("refusals: each dispatch command of a call is scored in order, with the reads between them", () => {
@@ -2987,6 +3086,20 @@ test("checked: a check started from an eval cell counts from its own transcript,
     "check NoReport (transcript NoReport.jsonl) for spec write 1 does not count: its transcript holds no report"
   );
   expect(row).not.toContain("check Summary");
+  // A review of a sibling issue's spec, outline and all, checks no write of this run.
+  expect(scoresOf("spec-writing-head-120")).toEqual({ ...allPass, checked: "false" });
+  expect(rowOf("spec-writing-head-120")).toContain(
+    "check SiblingCheck (transcript SiblingCheck.jsonl) for spec write 1 does not count: its spec is not this issue's: 0% of its 8-word runs are in a version the session wrote"
+  );
+  // An empty `yield` hands back the text before it, which is the report.
+  const fixtureJson = { issue: "LWEVAL-7", spec_artifact: "art-spec" };
+  const reports = specWork(
+    path.join(runs, "spec-writing-head-121"),
+    checkouts(work),
+    fixtureJson
+  ).checks.map((check) => check.report);
+  expect(reports[0]).toBe("1. R1 names no owner.");
+  expect(scoresOf("spec-writing-head-121")).toEqual(allPass);
 });
 
 test("checked: a version Dispatch recorded for the session that no shown write made is a write, and flagged", () => {

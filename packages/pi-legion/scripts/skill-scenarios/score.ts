@@ -1741,20 +1741,34 @@ function specOnly(assignment: string, reach: string[]): boolean {
 }
 /** A subagent's run as its own transcript records it: its assignment (the first user message) and
  * when that came, and its report and when that came. The report is the subagent's last assistant
- * message: the arguments of the `yield` call it ends with, else its text. A last message that is
+ * message: the arguments of the `yield` call it ends with, else its text. A `yield` that carries
+ * nothing but its `type` (`{"type":"result"}`) hands back the text the subagent wrote before it, so
+ * the report is then the text of the last assistant message that has text. A last message that is
  * neither (the subagent never finished) is no report. */
 function subagentRun(
   entries: SessionEntry[]
 ): { assignment: string; started: number; report: string; reported: number } | undefined {
   const first = entries.find((entry) => entry.message?.role === "user");
   if (first === undefined) return undefined;
-  const last = entries.findLast((entry) => entry.message?.role === "assistant");
-  const parts = last?.message?.content ?? [];
-  const ending = parts.find((part) => part.type === "toolCall" && part.name === "yield");
-  const report =
-    ending === undefined
-      ? parts.flatMap((part) => (part.type === "text" ? [part.text ?? ""] : [])).join("")
-      : strings(ending.arguments).join("\n\n");
+  const assistant = entries.filter((entry) => entry.message?.role === "assistant");
+  const last = assistant.at(-1);
+  const textOf = (entry: SessionEntry | undefined) =>
+    (entry?.message?.content ?? [])
+      .flatMap((part) => (part.type === "text" ? [part.text ?? ""] : []))
+      .join("");
+  const ending = (last?.message?.content ?? []).find(
+    (part) => part.type === "toolCall" && part.name === "yield"
+  );
+  let report = textOf(last);
+  if (ending !== undefined) {
+    const { type: _type, ...carried } =
+      typeof ending.arguments === "object" && ending.arguments !== null
+        ? (ending.arguments as Record<string, unknown>)
+        : {};
+    report = strings(carried).join("\n\n");
+    if (report.trim() === "")
+      report = textOf(assistant.findLast((entry) => textOf(entry).trim() !== ""));
+  }
   return {
     assignment: (first.message?.content ?? [])
       .flatMap((part) => (part.type === "text" ? [part.text ?? ""] : []))
@@ -1763,6 +1777,29 @@ function subagentRun(
     report: report.trim(),
     reported: Date.parse(last?.timestamp ?? ""),
   };
+}
+/** The 8-word runs of a text, lowercased, its words its runs of letters and digits. */
+function wordRuns(text: string): Set<string> {
+  const words = text.toLowerCase().match(/[a-z0-9]+/g) ?? [];
+  const runs = new Set<string>();
+  for (let start = 0; start + 8 <= words.length; start++)
+    runs.add(words.slice(start, start + 8).join(" "));
+  return runs;
+}
+/** The least share of a check's pasted spec (from its `## Summary` line on) whose 8-word runs some
+ * version the run's session wrote also holds, for the check to be of this run's spec (OWN_SPEC).
+ * An agent that splits out a sibling issue can send the sibling's spec for review: that assignment
+ * holds the seven headings too, but its report is about another spec. On the 113 checks of the
+ * INFRA-140 acceptance runs, each check of a sibling's spec shared none of its runs (0.00), and
+ * each check of the run's own spec at least 0.20, an early draft the agent rewrote included. */
+const OWN_SPEC = 0.1;
+/** The share of the pasted spec's 8-word runs that `written` (the runs of every version the
+ * session wrote) holds; 1 when the assignment pastes no run of 8 words. */
+function ownSpecShare(assignment: string, written: Set<string>): number {
+  const start = assignment.search(/^[ \t]*## Summary[ \t]*$/m);
+  const pasted = wordRuns(assignment.slice(Math.max(0, start)));
+  if (pasted.size === 0) return 1;
+  return [...pasted].filter((run) => written.has(run)).length / pasted.size;
 }
 /** The spec writes of the run's session (writesSpec, against the run's fixture.json) and the
  * spec-only checks before them: the one list of checks that both specRow's `checked` and the
@@ -1778,6 +1815,8 @@ function subagentRun(
  *   (subagentRun). It counts for the first spec write after its report when it started after the
  *   write before that one, by the transcripts' timestamps. A subagent that a `task` call names is
  *   that call's check alone, so a call rejected for its path or its failed task stays rejected.
+ * Either kind counts for no write when its pasted spec is not this run's (ownSpecShare): a review
+ * of a sibling issue's spec holds the seven headings too, and is rejected.
  * Each `dispatch` command of a call is a write of its own (operationsOf), so two writes in one
  * call with no check between them leave the second unchecked.
  *
@@ -1835,6 +1874,19 @@ export function specWork(runDir: string, reach: string[], fixture: SpecFixture):
       );
       return { ...version, index: after < 0 ? entries.length : after };
     });
+  // Every 8-word run of every version the session wrote: a check's pasted spec must share enough of
+  // them to be this run's spec, not a sibling issue's (ownSpecShare, OWN_SPEC).
+  const written = new Set<string>();
+  for (const { version } of recorded) {
+    const file = path.join(runDir, "spec-versions", `${version}.md`);
+    if (existsSync(file)) for (const run of wordRuns(readFileSync(file, "utf8"))) written.add(run);
+  }
+  const foreign = (assignment: string) => {
+    const share = ownSpecShare(assignment, written);
+    return share < OWN_SPEC
+      ? `its spec is not this issue's: ${Math.round(share * 100)}% of its 8-word runs are in a version the session wrote`
+      : undefined;
+  };
 
   const writes: SpecWork["writes"] = [];
   const checks: (SpecCheck & { started: number })[] = [];
@@ -1846,7 +1898,11 @@ export function specWork(runDir: string, reach: string[], fixture: SpecFixture):
     let checked = false;
     for (const check of pending) {
       const result = results.get(check.step.id);
-      const outcome = checkOutcome(entries, check.step, result, index);
+      const notOwn = foreign(check.assignment);
+      const outcome =
+        notOwn === undefined
+          ? checkOutcome(entries, check.step, result, index)
+          : { problem: notOwn };
       if ("problem" in outcome)
         rejected.push({
           tasks: taskNames(check.step, result).join(", ") || "(unnamed)",
@@ -1902,7 +1958,7 @@ export function specWork(runDir: string, reach: string[], fixture: SpecFixture):
         ? "its transcript holds no report"
         : before !== undefined && run.started <= before
           ? `it started before spec write ${write}, so it checked an earlier version`
-          : undefined;
+          : foreign(run.assignment);
     if (problem !== undefined) {
       rejected.push({ tasks: name, via: `transcript ${name}.jsonl`, write, problem });
       continue;
@@ -2216,9 +2272,10 @@ function covered(what: string, given: string[], named: string[], exact: boolean)
  * - proposal.json: each `ask` a row names is one given;
  * - preamble.json: each `source` is spec.md, a given document, or agent-texts.json#<given id>;
  * - faults.json: each row's count is the number of its items;
- * - findings.json: at least one row when it was given a check, and each `check` is 1 to the number
- *   of checks given. A file with no row for one or more checks is one judged before the checks were
- *   known (judge.ts writes no row only when there is no check), so it is a rig error too. */
+ * - findings.json: each check 1 to the number of checks given has a row or is in `clean`, never
+ *   both, and no row or `clean` entry names another number. A file with neither for a check is one
+ *   judged before that check was known (judge.ts writes an empty file only when there is no
+ *   check), or one whose judge skipped the check, so it is a rig error too. */
 export function coverage(file: string, answer: unknown, inputs: JudgeInputs): string[] {
   const asks = inputs.asks.map((ask) => ask.id);
   const texts = inputs.texts.map((text) => text.id);
@@ -2268,17 +2325,21 @@ export function coverage(file: string, answer: unknown, inputs: JudgeInputs): st
       });
     }
     case "findings.json": {
-      const rows = FindingsOutput.parse(answer).rows;
+      const { rows, clean } = FindingsOutput.parse(answer);
+      const given = Array.from({ length: inputs.checks }, (_, index) => String(index + 1));
+      const found = new Set(rows.map((row) => String(row.check)));
+      const cleanIds = clean.map(String);
       return [
-        ...(inputs.checks > 0 && rows.length === 0
-          ? [`no row for any of the ${inputs.checks} checks it was given`]
-          : []),
-        ...covered(
-          "check",
-          Array.from({ length: inputs.checks }, (_, index) => String(index + 1)),
-          rows.map((row) => String(row.check)),
-          false
+        ...given.flatMap((id) =>
+          found.has(id) && cleanIds.includes(id)
+            ? [`check ${id} has rows and is in clean`]
+            : !found.has(id) && !cleanIds.includes(id)
+              ? [`no row for check ${id}, and it is not in clean`]
+              : []
         ),
+        ...covered("check", given, [...found], false),
+        ...covered("clean check", given, cleanIds, false),
+        ...(new Set(cleanIds).size < cleanIds.length ? ["a check is in clean twice"] : []),
       ];
     }
     default:
