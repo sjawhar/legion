@@ -13,7 +13,7 @@ on:
       - "packages/pi-legion/package.json"
       - "packages/pi-shared/package.json"
       - "packages/envoy-plugin/package.json"
-      - "packages/claude-envoy/package.json"
+      - "packages/claude-envoy/**"
       - "packages/proof-editor/package.json"
       - "packages/dispatch/package.json"
       - "packages/envoy/internal/dispatch/pmdoc/gen/package.json"
@@ -39,6 +39,7 @@ on:
       - ".github/go-release-targets.json"
       # The worker image's remaining inputs (worker_image below).
       - ".omp-pin"
+      - ".bun-version"
       - ".dockerignore"
       - ".github/workflows/worker-image.yaml"
   workflow_dispatch:

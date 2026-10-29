@@ -87,10 +87,12 @@ func TestRealGitHubCredentialSurface(t *testing.T) {
 // command are written.
 var githubAppsLib = filepath.Join("..", "..", "..", "..", "scripts", "e2e", "lib", "github-apps.sh")
 
-// liveProofAppInputs is the four inputs githubAppsLib reads, each overriding one default.
+// liveProofAppInputs is the five inputs githubAppsLib reads, each overriding one default: the two
+// Apps' ids and key names, and the key runner both key commands run.
 var liveProofAppInputs = []string{
 	"LEGION_E2E_IMPLEMENT_APP_ID", "LEGION_E2E_IMPLEMENT_APP_KEY_NAME",
 	"LEGION_E2E_REVIEW_APP_ID", "LEGION_E2E_REVIEW_APP_KEY_NAME",
+	"LEGION_E2E_APP_KEY_RUNNER",
 }
 
 // liveProofApp is one role's App as githubAppsLib resolves it.

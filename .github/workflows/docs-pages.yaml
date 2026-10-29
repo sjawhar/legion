@@ -64,6 +64,7 @@ on:
       - 'packages/daemon/internal/claim/*'
       - 'packages/daemon/internal/classify/*'
       - 'packages/daemon/internal/claudebridge/*'
+      - 'packages/daemon/internal/claudelaunch/*'
       - 'packages/daemon/internal/config/*'
       - 'packages/daemon/internal/controller/*'
       - 'packages/daemon/internal/credential/*'
