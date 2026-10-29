@@ -48,8 +48,10 @@ const (
 	// it is live and what it carries. A resource server needs this and nothing else.
 	readsTokensBack power = 1 << iota
 	// relaysDecisions is reading what a person has to decide and relaying the decisions
-	// themselves — approvals, denials and both revocations by approver. It is an approval
-	// credential over every person's secrets, so Dispatch's server alone holds it.
+	// themselves — approvals, denials and both revocations by approver — and ending one of the
+	// broker's own access tokens (RFC 7009), which is that same authority over a credential
+	// someone holds. It is an approval credential over every person's secrets, so Dispatch's
+	// server alone holds it.
 	relaysDecisions
 )
 
@@ -199,6 +201,14 @@ func routes() []apiRoute {
 		// is, the session, the person and the project it carries, and the key it is bound to.
 		// Mounted only when the broker runs its OAuth provider.
 		{http.MethodPost, "/v1/oauth/introspect", accountAuth(readsTokensBack, (*server).introspect)},
+		// End one of the broker's own access tokens (RFC 7009), an exchanged pod's or workflow
+		// run's included, which nothing else can end before its own expiry: the form names the
+		// token, the client it was issued to, and optionally which kind to look for first. It
+		// needs relaysDecisions rather than readsTokensBack because ending one of the broker's
+		// tokens is the same authority class as ending a machine login or a grant, both already
+		// behind that power; a caller listed only to read a token back must not be able to end
+		// one. Mounted only when the broker runs its OAuth provider.
+		{http.MethodPost, "/v1/oauth/revoke", accountAuth(relaysDecisions, (*server).revokeOAuthToken)},
 		// Register that one pod may exchange under one session name: the row the token exchange
 		// reads before it mints a token for a pod of an account that fixes no session, written by
 		// the deployment's own daemon as it starts that pod. Mounted only when the broker runs its

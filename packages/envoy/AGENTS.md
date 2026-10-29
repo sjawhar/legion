@@ -4228,8 +4228,9 @@ that trusts no Kubernetes issuer, `ACCOUNT_TOKEN_EXPIRED`, `ACCOUNT_TOKEN_INVALI
 credential is good and it is the broker's list that refuses — and `ACCOUNT_LACKS_POWER`, for a
 listed caller reaching a route its name does not carry, naming that caller and that route. No
 refusal repeats the token. Each `accountAuth` row declares the power it needs, `readsTokensBack`
-(`POST /v1/oauth/introspect`) or `relaysDecisions` (the nine routes Dispatch's server relays a
-person's decisions and reads through), `accountPowers` says which powers each caller name
+(`POST /v1/oauth/introspect`) or `relaysDecisions` (the ten routes Dispatch's server relays a
+person's decisions, ends one of the broker's tokens and reads through), `accountPowers` says
+which powers each caller name
 carries, and `authenticate` checks the two before the handler runs, so listing an account for
 introspection alone never gives it approval or revocation authority
 (`TestEveryAccountRouteDeclaresItsPower` fails on a row that declares none).
@@ -4425,6 +4426,36 @@ passes. Only the broker's own failure to read its storage is a refusal (503), si
 that as "not live" would deny a sound token and hide the outage. It spends its source address's
 own bucket (`DefaultIntrospectLimit`) before the provider reads anything, `429 RATE_LIMITED` with
 `Retry-After`, and logs no caller: reading a token back acts on nobody's behalf.
+
+`POST /v1/oauth/revoke` (RFC 7009, `handlers_revoke.go`, `oauth.Provider.Revoke`) is how one of
+those tokens is ended before its own expiry, and the only way an exchanged one can be: a pod's or
+a workflow run's access token carries no `credential_id`, so the credential revocations above
+reach it nowhere. The form is RFC 7009's — `token`, the optional `token_type_hint`, and
+`client_id` naming the client the token was issued to, `dispatch-token-exchange` for an exchanged
+token and the machine-login client for a dev box session's. It is an `accountAuth` route needing
+`relaysDecisions`, not `readsTokensBack`: ending one of the broker's tokens is the same authority
+class as ending a machine login or a grant, both already behind that power, so `dispatch` reaches
+it and `listener`, listed to read a token back, is `403 ACCOUNT_LACKS_POWER` and ends nothing.
+The whole request runs in one store transaction (`BeginTX`/`Commit`/`Rollback`, as `exchangeGrant`
+does), because `oauthstore.Store.RevokeRefreshToken` writes only through the transaction it is
+handed. The handler gives the provider the request with its `Authorization` header removed
+(`withoutCallerToken`): that header is the route's own credential, and the library reads any
+Authorization header as an OAuth client credential and refuses every scheme but Basic, so
+leaving it on would refuse every request the route had just authenticated. The library then
+authenticates the client — the exchange client presenting nothing is answered
+by the broker's own strategy, as it is at the token endpoint (`credentialLessRevocation`), since
+what the request is judged on here is the broker's own account authentication on the route and
+not a client credential — then refuses a token issued to any other client than the one named
+(`400 unauthorized_client`), and ends what it found. A token this broker never issued is `200`
+exactly as a token it just ended is (Section 2.2), so the answer discloses nothing; a `200`
+carries no body. The provider sets `RevokeRefreshTokensExplicit`, so revoking an access token
+ends that request's access tokens and nothing else: a machine login whose access token is ended
+still refreshes, and only a caller presenting that login's own refresh token ends the family and
+with it the launcher credential it names (`Reused`). The one consequence a reader needs: a
+revoked access token is `active: false` to `POST /v1/oauth/introspect` at once, so a resource
+server that cached an affirmative introspection refuses it within that cache's life and no
+longer — the broker's answer changes the moment the revocation commits, and nothing recalls a
+cache.
 
 A service, such as the Legion daemon, logs in with its own projected Kubernetes ServiceAccount
 token (`POST /v1/launcher-credentials/token`: `machine.Service.VerifyServiceToken`, then

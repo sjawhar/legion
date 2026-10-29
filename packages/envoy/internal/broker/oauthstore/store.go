@@ -670,15 +670,18 @@ func (s *Store) RotateRefreshToken(ctx context.Context, requestID string, signat
 }
 
 // RevokeRefreshToken deactivates every refresh token of the request, the whole rotation family
-// (which shares the request id), and ends the launcher credential the family names (Reused). The
-// library calls it only when a refresh presents a rotated token past its grace (its reuse
-// response, in its own transaction): this provider mounts no revocation endpoint and issues no
-// authorization code. The library has already deleted the presented token's row in this
-// transaction before it calls here, so Reused locks the credential's row after a token row, the
-// reverse of the order a revoke, a retire (enroll.Service.RetireCredential, which locks the
-// credential and then deletes its token rows) or a refresh takes them. A revoke, a retire, or a
-// second redemption inside the grace, racing this can therefore deadlock with it: Postgres aborts
-// one of them, which answers 500 and clears on a retry, and the credential ends either way.
+// (which shares the request id), and ends the launcher credential the family names (Reused). Two
+// callers reach it. One is a refresh presenting a rotated token past its grace (the library's
+// reuse response, in its own transaction), which has already deleted the presented token's row
+// in this transaction before it calls here, so Reused locks the credential's row after a token
+// row, the reverse of the order a revoke, a retire (enroll.Service.RetireCredential, which locks
+// the credential and then deletes its token rows) or a refresh takes them. A revoke, a retire, or
+// a second redemption inside the grace, racing this can therefore deadlock with it: Postgres
+// aborts one of them, which answers 500 and clears on a retry, and the credential ends either
+// way. The other is POST /v1/oauth/revoke presenting a refresh token itself: the provider sets
+// RevokeRefreshTokensExplicit, so revoking an access token never reaches here and a caller that
+// ends a family, and with it the login behind it, is one that presented that family's own token.
+// This provider issues no authorization code, so nothing else calls it.
 func (s *Store) RevokeRefreshToken(ctx context.Context, requestID string) error {
 	state, err := txOf(ctx)
 	if err != nil {

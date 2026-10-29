@@ -61,8 +61,9 @@ var DefaultLauncherLimits = LauncherLimits{
 var DefaultTokenLimit = ratelimit.Limit{Every: 500 * time.Millisecond, Burst: 60}
 
 // DefaultAccountLimit bounds every route accountAuth authenticates per source address, in one
-// bucket the whole class shares: the nine Dispatch's server relays a person's pages and decisions
-// through, and POST /v1/oauth/introspect. It is a burst of 200 and fifty a second, per process,
+// bucket the whole class shares: the ten Dispatch's server relays a person's pages and decisions
+// through, POST /v1/oauth/revoke among them, and POST /v1/oauth/introspect. It is a burst of 200
+// and fifty a second, per process,
 // so a fleet of N broker pods allows N times it. Each request spends it before the caller's token
 // is verified, as a token login spends its address's bucket, since a token signed under a key the
 // broker does not hold makes the verifier fetch the issuer's keys again, and the issuer and

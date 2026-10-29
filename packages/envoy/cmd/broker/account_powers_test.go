@@ -3,8 +3,8 @@
 // against a local OpenID issuer standing in for the cluster's. Being listed is not being allowed:
 // the caller's name says which of the broker's named-caller routes that account reaches, so the
 // introspection-only caller is refused every route Dispatch's server relays a person's decisions
-// through, and the dispatch caller still reaches all ten. Nothing here is a unit test — the binary
-// is the one cmd/broker builds and every request crosses a socket.
+// through, and the dispatch caller still reaches all eleven. Nothing here is a unit test — the
+// binary is the one cmd/broker builds and every request crosses a socket.
 package main
 
 import (
@@ -37,9 +37,9 @@ const (
 
 // TestAListedAccountReachesOnlyItsOwnRoutes lists two callers and drives every route accountAuth
 // authenticates from both. The listener caller, listed for introspection alone, is refused each
-// of the nine relay routes — approve, deny and both revoke-by-approver among them — 403
-// ACCOUNT_LACKS_POWER naming itself and the route, and still reads a token back; the dispatch
-// caller reaches all ten.
+// of the ten relay routes — approve, deny, both revoke-by-approver and the RFC 7009 token
+// revocation among them — 403 ACCOUNT_LACKS_POWER naming itself and the route, and still reads a
+// token back; the dispatch caller reaches all eleven.
 func TestAListedAccountReachesOnlyItsOwnRoutes(t *testing.T) {
 	databaseURL := storetest.URL(t)
 	cluster := oidctest.New(t)
@@ -71,6 +71,11 @@ func TestAListedAccountReachesOnlyItsOwnRoutes(t *testing.T) {
 	}{
 		{method: http.MethodPost, pattern: "/v1/oauth/introspect", path: "/v1/oauth/introspect",
 			contentType: "application/x-www-form-urlencoded", body: "token=a-token-nobody-issued"},
+		// The revocation body names no client, so the dispatch caller it reaches is refused by
+		// the provider's own client authentication rather than answered 200 with an empty body:
+		// what this walk reads is the authority, and callBroker reads a JSON answer.
+		{method: http.MethodPost, pattern: "/v1/oauth/revoke", path: "/v1/oauth/revoke",
+			contentType: "application/x-www-form-urlencoded", body: "token=a-token-nobody-issued", relays: true},
 		{method: http.MethodGet, pattern: "/v1/pending", path: "/v1/pending?approver=" + powersApprover, relays: true},
 		{method: http.MethodGet, pattern: "/v1/credential-requests/{record}", path: "/v1/credential-requests/" + unknownID, relays: true},
 		{method: http.MethodPost, pattern: "/v1/credential-requests/{record}/approve", path: "/v1/credential-requests/" + unknownID + "/approve",

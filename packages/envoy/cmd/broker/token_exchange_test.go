@@ -378,7 +378,8 @@ func TestAPodWritesOnlyUnderASessionRegisteredForIt(t *testing.T) {
 // exchangeEnv is what one broker run of this test needs beyond productionEnv: the fresh schema it
 // migrates and serves from, the cluster issuer with the audience a pod enrols with and the one it
 // exchanges with, the GitHub issuer, the two listed accounts with their projects and persons, the
-// listed caller of the introspection route, the registrar that logs in as the deployment's daemon
+// two listed callers — dispatch, which reads a token back and ends one, and listener, which only
+// reads one back — the registrar that logs in as the deployment's daemon
 // and registers its pods' session names, and how long an access token it mints lasts.
 func exchangeEnv(t *testing.T, databaseURL string, cluster, github *oidctest.Issuer, accessSeconds int) []string {
 	t.Helper()
@@ -397,7 +398,7 @@ func exchangeEnv(t *testing.T, databaseURL string, cluster, github *oidctest.Iss
 		"BROKER_EXCHANGE_ACCOUNTS=" + podAccount + "=" + project + "=" + person + " " + listedAccount + "=OTHER=mallory@example.com",
 		"BROKER_EXCHANGE_GITHUB_ISSUER=" + github.URL(),
 		"BROKER_EXCHANGE_GITHUB_AUDIENCE=" + workflowAudience,
-		"BROKER_API_ACCOUNTS=dispatch=" + apiAccount,
+		"BROKER_API_ACCOUNTS=dispatch=" + apiAccount + " listener=" + listenerAccount,
 		"BROKER_SERVICE_LOGINS=legion-daemon=" + registrarAccount,
 		"BROKER_ACCESS_TOKEN_SECONDS=" + strconv.Itoa(accessSeconds),
 	}
