@@ -65,8 +65,8 @@
 # instead, extracted with `git archive <rev> | tar -x` into the run's directory; natsd and Dispatch
 # stay this checkout's. claude-envoy is that tree's `scripts/build.ts --out` build when its
 # build.ts takes `--out`, else (a revision from before pull requests stopped committing dist/) its
-# committed dist/ and legion/. The bridge's argv carries
-# --replay-user-messages only when <rev>'s claude.go does. --expect-lost names the kinds that rev
+# committed dist/ and legion/. The bridge's argv carries --replay-user-messages only when <rev>'s
+# argv source (claudelaunch.go, or tmux/claude.go before it) does. --expect-lost names the kinds that rev
 # is expected to lose under disruption a: the run then exits 0 only when every event of those kinds
 # in window a counted 0 in both sessions (the negative control), and the rest of the table is
 # printed and not judged.
@@ -378,10 +378,13 @@ else
   claude_plugin="$tree/packages/claude-envoy"
 fi
 [ -r "$claude_plugin/dist/envoy-channel.js" ] || fail "$claude_plugin has no dist/envoy-channel.js"
+# The bridge argv Legion builds: claudelaunch.Argv since main moved it there, tmux/claude.go before.
 replay_flag=()
-if grep -q -- '--replay-user-messages' "$tree/packages/daemon/internal/runtime/tmux/claude.go"; then
-  replay_flag=(--replay-user-messages)
-fi
+for argv_source in packages/daemon/internal/claudelaunch/claudelaunch.go packages/daemon/internal/runtime/tmux/claude.go; do
+  if [ -r "$tree/$argv_source" ] && grep -q -- '--replay-user-messages' "$tree/$argv_source"; then
+    replay_flag=(--replay-user-messages)
+  fi
+done
 plugin_dirs=(--plugin-dir "$claude_plugin")
 [ -d "$claude_plugin/legion" ] && plugin_dirs+=(--plugin-dir "$claude_plugin/legion")
 printf '#!/bin/sh\nexec bunx --package @anthropic-ai/claude-code@%s claude "$@"\n' "$claude_version" >"$work/bin/claude"

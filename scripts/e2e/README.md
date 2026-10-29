@@ -3038,8 +3038,8 @@ build run with the `bun` on `PATH` (`c3d09eec` and `926040d9` pin Bun 1.3.14 and
 pack under 1.4.4). claude-envoy is that tree's `scripts/build.ts --out` build when its `build.ts`
 takes `--out`; a revision whose `build.ts` does not (`c3d09eec` and `926040d9` among them) is from
 before pull requests stopped committing `dist/`, and its committed `dist/` and `legion/` are used.
-natsd and Dispatch stay this checkout's. The bridge's argv carries
-`--replay-user-messages` only when that revision's `claude.go` does. `--expect-lost <kinds>` turns
+natsd and Dispatch stay this checkout's. The bridge's argv carries `--replay-user-messages` only
+when that revision's `claudelaunch.go` (or, before it existed, `runtime/tmux/claude.go`) does. `--expect-lost <kinds>` turns
 the run into a negative control: it exits 0 only when every event of those kinds in window a
 counted 0 in both sessions. It prints the rest of the table and does not judge it. Main before
 sjawhar/legion#2228 (`c3d09eec`) loses agent, issue and role events under a session restart. The
