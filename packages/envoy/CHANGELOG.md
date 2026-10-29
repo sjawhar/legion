@@ -1,5 +1,19 @@
 # Changelog
 
+## [21.1.2] - 2026-10-29
+
+### Fixed
+
+- A Mermaid diagram in a Dispatch document no longer restyles the rest of the page, and no reader's
+  browser fetches Google Fonts or any address in the diagram's markup for it; the document draws it
+  with the same stricter sanitizer, in its own shadow root and off the page's main thread, as
+  comments do, so a large diagram no longer freezes the tab while it draws or on each edit. A
+  document diagram that takes longer than 5 seconds to draw shows `Unable to render Mermaid
+  diagram: it did not finish within 5 seconds` above its source, and an edited diagram redraws once
+  typing pauses.
+- Reopening an issue closes its document rooms on the server process that reopened it, as closing it does, so a page whose socket was admitted read-only while the issue was closed reconnects and is admitted writable, instead of staying read-only until the person reloads.
+- A closed issue's document no longer says "Reload to edit.", which a reload cannot make true; the dashboard shows that line only for a read-only admission that came while the issue was open, while the issue is open and the document's socket is connected.
+
 ## [21.1.1] - 2026-10-29
 
 ### Fixed
