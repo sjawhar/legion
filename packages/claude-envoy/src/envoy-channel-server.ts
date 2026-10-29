@@ -1,4 +1,4 @@
-import { unwatchFile, watchFile } from "node:fs"
+import { type Stats, unwatchFile, watchFile } from "node:fs"
 import { rm } from "node:fs/promises"
 import {
   agentSubject,
@@ -22,7 +22,7 @@ import {
 import { subscriptionRemovedTopics } from "@legion/envoy-client/dispatch-subscribe"
 import { messageFor } from "@legion/envoy-client/errors"
 import { machineID } from "@legion/envoy-client/machine"
-import { natsAuthOptions } from "@legion/envoy-client/nats-auth"
+import { natsConnectionOptions } from "@legion/envoy-client/nats-connection"
 import {
   closeReplayedRemoval,
   createReplayEngine,
@@ -67,14 +67,16 @@ import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js"
 import { CallToolRequestSchema, ListToolsRequestSchema } from "@modelcontextprotocol/sdk/types.js"
 import { connect } from "nats"
 import { z } from "zod"
-import { version as packageVersion } from "../package.json" with { type: "json" }
+import { name as packageName, version as packageVersion } from "../package.json" with {
+  type: "json",
+}
 import {
   type ChannelForwarder,
   type ChannelForwarderConnection,
   type ChannelInboundMessage,
   createChannelForwarder,
 } from "./channel-forwarder"
-import { type ChannelGate, detectClaudeChannel } from "./claude-channel"
+import { type ChannelGate, detectClaudeChannel, installedPluginVersion } from "./claude-channel"
 import { claudeProjectDirectory, claudeSessionId, configuredValue } from "./claude-session"
 import { inboundOffChannelSession, serveEnvoyOff } from "./envoy-off"
 import {
@@ -277,6 +279,11 @@ export interface ChannelSessionOptions {
    * My Pi session; omitted, nothing is written.
    */
   readonly stampTitle?: (sessionId: string, title: string) => void
+  /**
+   * The build every registration names (`installedPluginVersion` of the bundle Claude Code runs,
+   * or `source` for a bundle outside its plugin cache).
+   */
+  readonly pluginVersion: string
 }
 
 // The shared tool contract builds schemas from each host's Zod API. Claude's
@@ -738,6 +745,7 @@ export async function startChannelSession(options: ChannelSessionOptions): Promi
       capabilities: options.capabilities,
       driving: false,
       selfSubscribed: true,
+      plugin: { name: packageName, version: options.pluginVersion },
     })
   }
 
@@ -1123,8 +1131,17 @@ export async function startChannelSession(options: ChannelSessionOptions): Promi
   // at the next heartbeat minutes later. The hook replaces the file by rename,
   // which a directory watch reports only as its temporary file, so the file is
   // polled by path; the first tick picks up a file written before polling began.
+  //
+  // `watchFile` also calls the listener, with every stat field zeroed, when the file
+  // is missing as polling begins and when it is removed. A missing file names no id
+  // to adopt, and the request below already covers startup: a tick there would be a
+  // second one for the same moment, and in an outage one more attempt than the
+  // bounded retry allows.
+  const handoffFileChanged = (current: Stats): void => {
+    if (current.ino !== 0) requestHeartbeat()
+  }
   if (handoffFile !== undefined) {
-    watchFile(handoffFile, { interval: HANDOFF_POLL_MS }, requestHeartbeat)
+    watchFile(handoffFile, { interval: HANDOFF_POLL_MS }, handoffFileChanged)
     requestHeartbeat()
   }
   // nats.js resubscribes by itself after a reconnect; what was published while it was away is in
@@ -1187,7 +1204,7 @@ export async function startChannelSession(options: ChannelSessionOptions): Promi
       if (shuttingDown) return
       shuttingDown = true
       clearInterval(heartbeatTimer)
-      if (handoffFile !== undefined) unwatchFile(handoffFile, requestHeartbeat)
+      if (handoffFile !== undefined) unwatchFile(handoffFile, handoffFileChanged)
       await forwarder.close()
       await serialized(() => options.client.unregisterSession(identity.id)).catch(
         (error: unknown) => {
@@ -1398,6 +1415,8 @@ export async function runEnvoyChannelServer(): Promise<void> {
   const stateDirectory = pluginStateDirectory()
   // The Legion bridge's inbox takes the events itself; otherwise they go to Claude Code's channel.
   const inboxSocket = configuredValue(process.env[INBOX_VARIABLE])
+  // The plugin's own bundle, which Claude Code runs from its plugin cache when installed.
+  const bundlePath = process.argv[1] ?? ""
   // Claude Code drops a notification from a channel it did not load without telling this server,
   // so such a session advertises no delivery mode and Dispatch refuses a message to it rather than
   // reporting it delivered. The bridge's inbox needs no channel.
@@ -1405,7 +1424,7 @@ export async function runEnvoyChannelServer(): Promise<void> {
     inboxSocket === undefined
       ? detectClaudeChannel({
           claudePid: process.ppid,
-          bundlePath: process.argv[1] ?? "",
+          bundlePath,
           environment: process.env,
         })
       : { loaded: true }
@@ -1491,14 +1510,13 @@ export async function runEnvoyChannelServer(): Promise<void> {
       stampOnce(() => identity.id)
       session = inboundOffChannelSession({ identity, stateDirectory, why: inbound.off })
     } else {
-      connection = await connect({
-        servers: [...inbound.natsUrls],
-        name: `claude-envoy-channel-${identity.id}`,
-        ...natsAuthOptions(inbound.natsSeed),
-        reconnect: true,
-        maxReconnectAttempts: -1,
-        reconnectTimeWait: 2_000,
-      })
+      connection = await connect(
+        natsConnectionOptions({
+          servers: inbound.natsUrls,
+          name: `claude-envoy-channel-${identity.id}`,
+          seed: inbound.natsSeed,
+        }),
+      )
       session = await startChannelSession({
         identity,
         connection,
@@ -1509,6 +1527,7 @@ export async function runEnvoyChannelServer(): Promise<void> {
         configFile,
         stateDirectory,
         title,
+        pluginVersion: installedPluginVersion(bundlePath) ?? "source",
         ...(stamping ? { stampTitle } : {}),
         // The QA override names a fixed identity; only a Claude-minted id follows `/clear`.
         ...(configuredValue(overrideSessionId) === undefined ? { handoffPid: process.ppid } : {}),

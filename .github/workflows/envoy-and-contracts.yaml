@@ -49,7 +49,7 @@ on:
       - ".github/actions/install-omp/**"
       # The Pulumi CLI envoy-smoke's envoy-infra live tests run.
       - ".github/actions/install-pulumi/**"
-      # The image pull envoy-go, dispatch-go-postgres-16, envoy-infra-go and envoy-smoke run first.
+      # The image pull envoy-go, envoy-infra-go and envoy-smoke run first.
       - ".github/actions/pull-test-images/**"
       # The envoy-smoke job builds packages/envoy/docker/Dockerfile, so this list owes every
       # file that build reads: the six below before the target list are the ones the entries
@@ -145,6 +145,7 @@ jobs:
       envoy_client: ${{ steps.filter.outputs.envoy_client }}
       envoy: ${{ steps.filter.outputs.envoy }}
       envoy_e2e_local: ${{ steps.filter.outputs.envoy_e2e_local }}
+      envoy_session_stall: ${{ steps.filter.outputs.envoy_session_stall }}
       envoy_image: ${{ steps.filter.outputs.envoy_image }}
       plugin: ${{ steps.filter.outputs.plugin }}
       claude_plugin: ${{ steps.filter.outputs.claude_plugin }}
@@ -219,7 +220,8 @@ jobs:
             # (infra/core/dispatch_permissions_live_test.go:51, through
             # infra/core/permissions_live_test.go:298-299). packages/envoy/listenfd: added by
             # #2229 (cmd/dispatch, cmd/listener, internal/config and infra/host/heldportwrapper
-            # import it).
+            # import it). internal/dispatch/dashboard and internal/dispatch/processes: cmd/dispatch
+            # imports them (INFRA-559, INFRA-555).
             dispatch_server: &dispatch_server
               - 'packages/envoy/cmd/dispatch/*'
               - 'packages/envoy/internal/bus/*'
@@ -232,6 +234,7 @@ jobs:
               - 'packages/envoy/internal/dispatch/asks/*'
               - 'packages/envoy/internal/dispatch/auth/*'
               - 'packages/envoy/internal/dispatch/config/*'
+              - 'packages/envoy/internal/dispatch/dashboard/*'
               - 'packages/envoy/internal/dispatch/delivery/**'
               - 'packages/envoy/internal/dispatch/docs/*'
               - 'packages/envoy/internal/dispatch/duty/*'
@@ -245,6 +248,7 @@ jobs:
               - 'packages/envoy/internal/dispatch/identity/*'
               - 'packages/envoy/internal/dispatch/model/*'
               - 'packages/envoy/internal/dispatch/outbox/*'
+              - 'packages/envoy/internal/dispatch/processes/*'
               - 'packages/envoy/internal/dispatch/pmdoc/**'
               - 'packages/envoy/internal/dispatch/rank/*'
               - 'packages/envoy/internal/dispatch/redeliver/*'
@@ -395,12 +399,14 @@ jobs:
               - 'packages/contracts/**'
               - 'package.json'
               - 'bun.lock'
+              # nats.js runs patched (patches/nats@2.29.3.patch); bun.lock names the patch only by
+              # path.
+              - 'patches/**'
               - *bun_toolchain
               # src/__tests__/dispatch-advice.test.ts holds every skill section a notice cites to a
               # heading of that skill's SKILL.md.
               - 'skills/**'
-            # The gate of envoy-go and of the two Envoy Go jobs on production's Postgres 16
-            # (dispatch-go-postgres-16, broker-go-postgres-16); every other Go job has its own.
+            # The gate of envoy-go; every other Go job has its own.
             envoy:
               - '.github/workflows/envoy-and-contracts.yaml'
               - 'packages/envoy/**'
@@ -427,7 +433,7 @@ jobs:
               # Its pack step writes each archive's notices, for each target the list names.
               - 'scripts/go-third-party-notices.sh'
               - '.github/go-release-targets.json'
-              # The image pull envoy-go and dispatch-go-postgres-16 run before their tests.
+              # The image pull envoy-go runs before its tests.
               - '.github/actions/pull-test-images/**'
             # Every file packages/envoy/docker/Dockerfile builds from, so the envoy-smoke job
             # runs whenever the image it smokes changes. `envoy` is deliberately not widened to
@@ -480,7 +486,30 @@ jobs:
               - 'packages/daemon/go.sum'
               - 'package.json'
               - 'bun.lock'
+              # Its subscriber runs nats.js, patched; bun.lock names the patch only by path.
+              - 'patches/**'
               - *bun_toolchain
+            # The session stall suites (envoy-session-stall): envoy-client's stall proxy and stack
+            # build natsd and the listener with go build in workspace mode (envoy's note above)
+            # and run each plugin's NATS client through them; the plugins inline pi-shared, and
+            # the workflow file holds the job.
+            envoy_session_stall:
+              - 'packages/envoy/**'
+              - 'packages/envoy-client/**'
+              - 'packages/pi-envoy/**'
+              - 'packages/claude-envoy/**'
+              - 'packages/pi-shared/**'
+              - 'packages/contracts/**'
+              - 'go.work'
+              - 'go.work.sum'
+              - 'packages/daemon/go.mod'
+              - 'packages/daemon/go.sum'
+              - 'package.json'
+              - 'bun.lock'
+              # The suites run nats.js, patched; bun.lock names the patch only by path.
+              - 'patches/**'
+              - *bun_toolchain
+              - '.github/workflows/envoy-and-contracts.yaml'
             plugin:
               - 'packages/envoy-plugin/**'
               - 'packages/envoy-client/**'
@@ -500,6 +529,8 @@ jobs:
               - 'packages/contracts/**'
               - 'package.json'
               - 'bun.lock'
+              # The committed bundle inlines nats.js, patched; bun.lock names the patch only by path.
+              - 'patches/**'
               # The build writes dist/THIRD_PARTY_NOTICES.
               - 'scripts/third-party-notices.ts'
               # scripts/build.ts, which the job's build step and tests/dist-fresh.test.ts run,
@@ -533,8 +564,8 @@ jobs:
               - 'scripts/pi-plugin-prepack.sh'
               - '.github/workflows/release.yaml'
             # The Envoy plugin: its own sources, the workspace packages its bundle inlines, and the
-            # Oh My Pi pin its real-binary tests run (extensions/dispatch-first-omp.test.ts and
-            # extensions/askgate/askgate-omp.test.ts),
+            # Oh My Pi pin its real-binary tests run (extensions/dispatch-first-omp.test.ts,
+            # extensions/askgate/askgate-omp.test.ts and extensions/card-delivery-omp.test.ts),
             # installed through the mise install-jj leaves. Every skill and every daemon prompt:
             # src/skills-guard.test.ts stages its five skills through the prepack script and resolves
             # their skill:// links across all of skills/, and its native-tool-name rule scans every
@@ -549,6 +580,8 @@ jobs:
               - 'packages/contracts/**'
               - 'package.json'
               - 'bun.lock'
+              # The bundle inlines nats.js, patched; bun.lock names the patch only by path.
+              - 'patches/**'
               - *bun_toolchain
               # Its pack step writes dist/THIRD_PARTY_NOTICES.
               - 'scripts/third-party-notices.ts'
@@ -585,6 +618,9 @@ jobs:
               - 'packages/contracts/**'
               - 'package.json'
               - 'bun.lock'
+              # The Envoy entry its tests load runs nats.js, patched; bun.lock names the patch only
+              # by path.
+              - 'patches/**'
               - *bun_toolchain
               - 'scripts/third-party-notices.ts'
               - 'scripts/pi-plugin-prepack.sh'
@@ -625,6 +661,21 @@ jobs:
               - 'packages/envoy/internal/routing/**'
               - 'packages/envoy/listenfd/**'
               - 'packages/envoy/internal/tests3/seaweedfs.go'
+              # The dev OIDC issuer the multiprocess job's sign-in step signs the browser in at
+              # (e2e/run-signin-issuer.sh), and the packages it compiles beyond those above
+              # (`go list -deps ./cmd/dev-oidc-issuer` in packages/envoy).
+              - 'packages/envoy/cmd/dev-oidc-issuer/**'
+              - 'packages/envoy/internal/broker/enroll/**'
+              - 'packages/envoy/internal/broker/exchange/**'
+              - 'packages/envoy/internal/broker/machine/**'
+              - 'packages/envoy/internal/broker/oauth/**'
+              - 'packages/envoy/internal/broker/oauthstore/**'
+              - 'packages/envoy/internal/broker/oauthwire/**'
+              - 'packages/envoy/internal/broker/policy/**'
+              - 'packages/envoy/internal/broker/proof/**'
+              - 'packages/envoy/internal/broker/record/**'
+              - 'packages/envoy/internal/broker/secrets/**'
+              - 'packages/envoy/internal/broker/store/**'
               # e2e/__tests__/local-instance-support.test.ts holds shellQuote to this table, which
               # dev-postgres.test.sh (envoy-go) reads too.
               - 'packages/envoy/scripts/fixtures/shell-quote.json'
@@ -758,6 +809,13 @@ jobs:
     needs: changes
     if: needs.changes.outputs.pi_envoy == 'true'
     runs-on: ubuntu-24.04
+    # The NATS server extensions/card-delivery-omp.test.ts delivers Envoy cards and a person's Send
+    # through (LEGION_TEST_NATS_URL on the test step): the 2.10 image the envoy-client job pulls,
+    # pinned by digest as this file's other service images are.
+    services:
+      nats:
+        image: mirror.gcr.io/library/nats:2.10@sha256:5498ba57b9471840be3d15b033a4eec554d1c02fa6c2cc0ca2d888637f6c6e2f
+        ports: ["4222:4222"]
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -766,10 +824,10 @@ jobs:
       # Only for the mise it leaves at ~/.local/bin/mise, which install-omp installs the pin through:
       # nothing in this package drives jj.
       - uses: ./.github/actions/install-jj
-      # extensions/dispatch-first-omp.test.ts and extensions/askgate/askgate-omp.test.ts run the
-      # pinned Oh My Pi against stand-ins (packages/pi-shared/test/omp-harness.ts) and refuse on
-      # GitHub Actions without one. The pin is read from .omp-pin, the repository's one copy of it
-      # (.github/actions/install-omp).
+      # extensions/dispatch-first-omp.test.ts, extensions/askgate/askgate-omp.test.ts and
+      # extensions/card-delivery-omp.test.ts run the pinned Oh My Pi against stand-ins
+      # (packages/pi-shared/test/omp-harness.ts) and refuse on GitHub Actions without one. The pin
+      # is read from .omp-pin, the repository's one copy of it (.github/actions/install-omp).
       - uses: ./.github/actions/install-omp
       - run: bun install --frozen-lockfile
       - name: Build contracts for pi-envoy
@@ -784,6 +842,8 @@ jobs:
       - name: Test pi-envoy
         run: bun run test
         working-directory: packages/pi-envoy
+        env:
+          LEGION_TEST_NATS_URL: nats://127.0.0.1:4222
       # The release's pack (release.yaml's pi_envoy_build job), which is also this job's build: the
       # manifest pointed at the one bundle, then scripts/pi-plugin-prepack.sh, which bundles
       # envoy.ts, writes dist/THIRD_PARTY_NOTICES (failing the pack on a bundled package whose
@@ -967,6 +1027,11 @@ jobs:
       - name: Check dispatch dashboard CSS classes
         run: bun run check:classes
         working-directory: packages/dispatch
+      # The server refuses to boot on a build holding an asset over 8 MiB (it publishes every
+      # asset to its database at boot), which would stall a roll; refuse the build here instead.
+      - name: Check dispatch dashboard asset sizes
+        run: bun run check:asset-sizes
+        working-directory: packages/dispatch
       - name: Install Playwright Chromium, WebKit and Firefox
         # The runner image preconfigures Google's chrome-stable apt source, whose
         # index intermittently fails `apt-get update` with a hash-sum mismatch and
@@ -1013,6 +1078,72 @@ jobs:
         if: failure()
         with:
           name: dispatch-e2e-test-results-${{ github.run_attempt }}
+          path: packages/dispatch/e2e/test-results
+
+  # The browser suite's two-process mode (packages/dispatch/e2e/harness-processes.ts): two
+  # envoy-dispatch processes against one Postgres, behind e2e/round-robin-proxy.ts, B serving a
+  # second build of the dashboard, which is what a rolling release puts in front of a browser. It
+  # runs only the *.multiprocess.e2e.ts specs, in Chromium, in a job of its own so the default
+  # suite's job does not wait on a second Vite build and two more servers.
+  dispatch-browser-multiprocess:
+    needs: changes
+    if: needs.changes.outputs.dispatch == 'true'
+    runs-on: ubuntu-24.04
+    services:
+      postgres:
+        image: mirror.gcr.io/pgvector/pgvector@sha256:7b822b0aac60967beb1ea5e576b8602c94c300a157d187f385ae3e0da199b90a
+        env:
+          POSTGRES_PASSWORD: ci
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+    env:
+      DATABASE_URL: postgres://postgres:ci@localhost:5432/postgres?sslmode=disable
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: packages/envoy/go.mod
+      - uses: ./.github/actions/setup-bun
+      - run: bun install --frozen-lockfile
+      - name: Build contracts for dispatch e2e
+        # The e2e helpers the specs import read some of contracts' values from its built dist/,
+        # through Playwright's own Node resolution (the dispatch job's step of the same name).
+        run: bun run build
+        working-directory: packages/contracts
+      - name: Build the Dispatch server
+        # run-server.sh builds it too, inside the harness's boot wait for each server
+        # (e2e/harness-start.ts, bounded by the listener's bootMs); built here, both servers find it
+        # current and start in seconds.
+        run: go build -o ./dispatch-e2e ./cmd/dispatch
+        working-directory: packages/envoy
+      - name: Install Playwright Chromium
+        # The runner image's chrome-stable apt source intermittently fails `apt-get update`; the
+        # dispatch job's install step says why dropping it is safe.
+        run: |
+          grep -rl dl.google.com /etc/apt/sources.list.d | xargs -r sudo rm -f
+          bunx playwright install --with-deps chromium
+        working-directory: packages/dispatch
+      - name: Browser-test dispatch dashboard against two server processes
+        # Builds the dashboard twice (A's and B's, with distinct build ids) and runs the
+        # multiprocess specs through the round-robin proxy.
+        run: bun run e2e:multiprocess
+        working-directory: packages/dispatch
+      - name: Browser-test a sign-in across two server processes
+        # Both processes sign people in through the dev OIDC issuer (DISPATCH_E2E_SIGNIN=oidc,
+        # e2e/harness-signin.ts), and its one spec starts a sign-in on A and completes it on B. The
+        # step before built the dashboard; B serves A's build, which this spec does not tell apart.
+        run: DISPATCH_E2E_PROCESSES=2 DISPATCH_E2E_SIGNIN=oidc bun e2e/run.ts -- bunx playwright test --config e2e/playwright.config.ts
+        working-directory: packages/dispatch
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        if: failure()
+        with:
+          name: dispatch-browser-multiprocess-test-results-${{ github.run_attempt }}
           path: packages/dispatch/e2e/test-results
 
   claude-envoy:
@@ -1114,11 +1245,13 @@ jobs:
             packages/envoy/internal/tests3/seaweedfs.go Image
       # The API package owns the largest set of Postgres-backed tests. Running it with the other
       # package binaries makes all of their per-test database cleanup queue on the service's one
-      # checkpointer, so run it before the rest of the module.
+      # checkpointer, so run it before the rest of the module. Alone it takes close to go test's
+      # default ten minutes (523 s on a workstation), and the documents package about nine with the
+      # rest, so every package here gets 20.
       - name: Unit test envoy Go package
         run: |
-          go test ./internal/dispatch/api
-          go list ./... | grep -Ev '/integration|/internal/dispatch/api$' | xargs go test
+          go test -timeout 20m ./internal/dispatch/api
+          go list ./... | grep -Ev '/integration|/internal/dispatch/api$' | xargs go test -timeout 20m
         working-directory: packages/envoy
       # internal/testnats runs its server in the test process, so the untagged step above starts
       # no container. The two-image matrix, which proves a rendered authorization on nats:2.10 and
@@ -1135,6 +1268,12 @@ jobs:
         working-directory: packages/envoy
       - name: Verdict test for listener-deploy-probe.sh (two fake listener tasks on 127.0.0.1 and 127.0.0.2)
         run: bash scripts/listener-deploy-probe.test.sh
+        working-directory: packages/envoy
+      - name: One-run-at-a-time test for loadtest/run-step.sh and run-series.sh (fakes go and uv; no stack)
+        run: bash loadtest/run-step.test.sh
+        working-directory: packages/envoy
+      - name: Lock test for loadtest/common.sh (inherited lock, refusals, holders in another PID namespace; no stack)
+        run: bash loadtest/common.test.sh
         working-directory: packages/envoy
       # The test runs its URL cases under en_US.UTF-8, where bash's [[ =~ ]] ranges reach past ASCII,
       # to hold the deployer's URL grammar to ASCII; it refuses to run without that locale.
@@ -1168,54 +1307,6 @@ jobs:
             out/pr-artifacts/legion-envoy-amd64.tar.gz
             out/pr-artifacts/legion-envoy-arm64.tar.gz
 
-  # Production Dispatch runs Postgres 16 until its Cloud SQL instance moves to 18, so until then
-  # Dispatch's Go suite also runs here on the pgvector-on-16 image production's database matches;
-  # delete this job once production runs Postgres 18. The packages are Dispatch's server, its
-  # internal packages and the migrations. Their NATS runs in the test process (internal/testnats);
-  # the one container they start is internal/dispatch/files' S3 server, tests3.Image, pulled first
-  # for the reason .github/actions/pull-test-images gives. pmdoc's tests shell out to the generated
-  # TypeScript fixtures, so Bun is set up as in envoy-go.
-  dispatch-go-postgres-16:
-    name: Dispatch Go suite on production's Postgres 16 (until production runs Postgres 18)
-    needs: changes
-    if: needs.changes.outputs.envoy == 'true'
-    runs-on: ubuntu-24.04
-    services:
-      postgres:
-        image: mirror.gcr.io/pgvector/pgvector@sha256:7b822b0aac60967beb1ea5e576b8602c94c300a157d187f385ae3e0da199b90a
-        env:
-          POSTGRES_PASSWORD: ci
-        ports: ["5432:5432"]
-        options: >-
-          --health-cmd "pg_isready -U postgres"
-          --health-interval 10s
-          --health-timeout 5s
-          --health-retries 5
-    env:
-      DISPATCH_TEST_DATABASE_URL: postgres://postgres:ci@localhost:5432/postgres?sslmode=disable
-      # internal/dispatch/api's broker contract test skips without it, as in envoy-go.
-      BROKER_TEST_DATABASE_URL: postgres://postgres:ci@localhost:5432/postgres?sslmode=disable
-      TESTCONTAINERS_RYUK_DISABLED: "true"
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          persist-credentials: false
-      - uses: ./.github/actions/setup-bun
-      - run: bun install --frozen-lockfile
-      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
-        with:
-          go-version-file: packages/envoy/go.mod
-      - name: Postgres service version
-        run: |
-          docker exec "${{ job.services.postgres.id }}" psql -U postgres -Atc "select current_setting('server_version_num'), coalesce((select default_version from pg_available_extensions where name = 'vector'), 'no vector')"
-      - name: Pull test container images
-        uses: ./.github/actions/pull-test-images
-        with:
-          consts: |
-            packages/envoy/internal/tests3/seaweedfs.go Image
-      - name: Unit test Dispatch's Go packages on Postgres 16
-        run: go test ./cmd/dispatch/... ./internal/dispatch/... ./internal/pgmigrate/...
-        working-directory: packages/envoy
 
   # The envoy-infra Pulumi plugin's module (packages/envoy/infra). It is not in the root go.work:
   # its own go.work binds it and packages/envoy, so Pulumi's requirements never move the versions
@@ -1461,50 +1552,6 @@ jobs:
         run: go test -tags multiprocess -count=1 -timeout 20m -v ./cmd/broker
         working-directory: packages/envoy
 
-  # Production's Cloud SQL instance runs Postgres 16 until it moves to 18, and it also holds the
-  # secrets broker's database, so until then the broker's Go suite also runs here on the
-  # pgvector-on-16 image production's database matches; delete this job once production runs
-  # Postgres 18. The packages are every one whose tests reach BROKER_TEST_DATABASE_URL
-  # (through storetest, the rig, or the variable itself) but internal/dispatch/api, which
-  # dispatch-go-postgres-16 runs: the broker binary, the agent-secrets CLI and its dev relay, and
-  # the broker's internal tree. Then the two-process tests, as broker-multiprocess runs them. None
-  # starts a container or runs Bun, so the job sets up Go alone, as broker-multiprocess does.
-  broker-go-postgres-16:
-    name: Broker Go suite on production's Postgres 16 (until production runs Postgres 18)
-    needs: changes
-    if: needs.changes.outputs.envoy == 'true'
-    runs-on: ubuntu-24.04
-    timeout-minutes: 45
-    services:
-      postgres:
-        image: mirror.gcr.io/pgvector/pgvector@sha256:7b822b0aac60967beb1ea5e576b8602c94c300a157d187f385ae3e0da199b90a
-        env:
-          POSTGRES_PASSWORD: ci
-        ports: ["5432:5432"]
-        options: >-
-          --health-cmd "pg_isready -U postgres"
-          --health-interval 10s
-          --health-timeout 5s
-          --health-retries 5
-    env:
-      BROKER_TEST_DATABASE_URL: postgres://postgres:ci@localhost:5432/postgres?sslmode=disable
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          persist-credentials: false
-      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
-        with:
-          go-version-file: packages/envoy/go.mod
-      - name: Postgres service version
-        run: |
-          docker exec "${{ job.services.postgres.id }}" psql -U postgres -Atc "select current_setting('server_version_num'), coalesce((select default_version from pg_available_extensions where name = 'vector'), 'no vector')"
-      - name: Unit test the secrets broker's Go packages on Postgres 16
-        run: go test -count=1 ./cmd/agent-secrets/... ./cmd/agent-secrets-devrelay/... ./cmd/broker/... ./internal/broker/...
-        working-directory: packages/envoy
-      - name: Two-process tests of the secrets broker on Postgres 16
-        run: go test -tags multiprocess -count=1 -timeout 20m -v ./cmd/broker
-        working-directory: packages/envoy
-
   # The container smoke test, the envoy-infra plugin's live tests, and the image both run. Its own
   # job, gated on envoy_image rather than envoy: the image is built from the Dispatch SPA and the
   # Bun workspace as well as the Go sources, so a Dispatch-only change changes the image and must
@@ -1690,6 +1737,61 @@ jobs:
         with:
           name: envoy-e2e-local-evidence-${{ github.run_attempt }}
           path: packages/envoy/out/e2e
+      - uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        if: github.ref == 'refs/heads/main' && steps.go_cache.outputs.cache-hit != 'true'
+        with:
+          path: |
+            ~/go/pkg/mod
+            ~/.cache/go-build
+          key: ${{ steps.go_cache.outputs.cache-primary-key }}
+
+  # The session stall suites (INFRA-548): each freezes a session's NATS path behind
+  # envoy-client's stall proxy (test/stall-proxy.ts) on a real natsd and listener, which
+  # test/envoy-stack.ts builds with go build from packages/envoy, and holds the client to a
+  # reconnect within 60 s: envoy-client's shared connection options on their own, then the real
+  # pi-envoy extension and the real claude-envoy channel server, each showing the message sent
+  # while it was cut off once, replayed. They run only with LEGION_E2E_ENVOY_STACK=1, which only
+  # this job sets, so the envoy-client, pi-envoy and claude-envoy jobs, which set up no Go, skip
+  # them.
+  envoy-session-stall:
+    needs: changes
+    if: needs.changes.outputs.envoy_session_stall == 'true'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    env:
+      LEGION_E2E_ENVOY_STACK: "1"
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: ./.github/actions/setup-bun
+      - run: bun install --frozen-lockfile
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        id: setup_go
+        with:
+          go-version-file: packages/envoy/go.mod
+          cache: false
+      # Restored on every run, saved at the end of the job only on main (the pi-legion job says why).
+      - uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        id: go_cache
+        with:
+          path: |
+            ~/go/pkg/mod
+            ~/.cache/go-build
+          key: go-envoy-${{ runner.os }}-${{ steps.setup_go.outputs.go-version }}-${{ hashFiles('packages/envoy/go.sum') }}
+          restore-keys: ${{ github.ref != 'refs/heads/main' && format('go-envoy-{0}-{1}-', runner.os, steps.setup_go.outputs.go-version) || '' }}
+      - name: Build contracts for the stall suites
+        run: bun run build
+        working-directory: packages/contracts
+      - name: Stall test of envoy-client's NATS connection options
+        run: bun test src/__tests__/nats-stall.test.ts
+        working-directory: packages/envoy-client
+      - name: Stall test of pi-envoy
+        run: bun test extensions/envoy.test.ts -t "NATS path freezes"
+        working-directory: packages/pi-envoy
+      - name: Stall test of claude-envoy
+        run: bun test tests/envoy-channel-stall.test.ts
+        working-directory: packages/claude-envoy
       - uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         if: github.ref == 'refs/heads/main' && steps.go_cache.outputs.cache-hit != 'true'
         with:

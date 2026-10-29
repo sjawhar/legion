@@ -3656,6 +3656,91 @@ parse ends that watch. On 410 Gone it lists the Secrets again, so a value a Secr
 the last version seen and that list is not seen; every value a list or a watch event shows is. It
 exits 2 when it cannot start.
 
+## lib/h2-settings.ts
+
+Whether a front proxy in front of Dispatch advertises HTTP/2 extended CONNECT
+(`SETTINGS_ENABLE_CONNECT_PROTOCOL`, RFC 8441). Dispatch's live updates ride one WebSocket per tab
+on a connection of its own; a proxy that advertises it lets a browser open that socket as a stream
+of the page's shared HTTP/2 connection instead, where the never-ending request
+dispatch://INFRA-258 fixed can come back. Run it against a deployment's front proxy:
+
+```sh
+bun scripts/e2e/lib/h2-settings.ts https://<dispatch host>/     # exit 0: not advertised
+```
+
+It offers `h2` and `http/1.1` over TLS as a browser does and prints one JSON line: `url`, `alpn`
+(the protocol the server chose, `false` for none) and `settings` (the server's SETTINGS as Node's
+HTTP/2 client reads them, `null` without HTTP/2). It exits 1 when `settings.enableConnectProtocol`
+is true, naming the origin on stderr; 0 when it is false or the server speaks no HTTP/2; 2 on a
+usage error, or when it has no answer: a TLS or certificate failure, or no SETTINGS within 10 s.
+Certificates are verified, so a proxy behind a private CA needs `NODE_EXTRA_CA_CERTS`.
+`h2-settings.test.ts` (`bun test scripts/e2e/lib`) runs it against a TLS server that writes a
+SETTINGS frame advertising extended CONNECT by hand (the pinned Bun's `http2.createSecureServer`
+sends none), against a local `http2.createSecureServer` that does not advertise it, against an https
+server with no HTTP/2, against a certificate it cannot verify, and against two servers that answer
+nothing — one that chooses h2 and sends no SETTINGS, one that never finishes the handshake — which
+it leaves after the 10 s deadline with exit 2.
+
+## lib/dispatch-live-events.ts
+
+A Dispatch deployment's event feed as a page reads it, for a stage proof's audit of what a run
+wrote and for the production check after a deploy. It opens `/ws/live`, subscribes the event feed
+and writes one JSON line per frame until an event matches `--until` (exit 0) or `--timeout`
+seconds pass (exit 1); Dispatch's refusal of the feed is printed on stderr (exit 1), a usage error
+exits 2:
+
+```sh
+bun scripts/e2e/lib/dispatch-live-events.ts --url https://<dispatch host> \
+  --bearer-file <token file> --since <event id> --until '"state":"answered"' --timeout 70
+```
+
+`--user <email>` takes the place of `--bearer-file` against a server in header identity (the e2e
+harness), and `--cookie-file <file>` against one in cookie identity: the file holds the `Cookie`
+request header a browser signed in to the deployment sends it, copied from the developer tools'
+Network panel. `--from-whoami` starts the feed where a page starts its first one (INFRA-292): it
+reads `GET /auth/whoami` as that person, prints `{"whoami": {"event_head": <id>, "login": …}}`,
+waits `--subscribe-after <s>` seconds (`{"subscribing_in": <s>}`) and subscribes from that
+`event_head`, so a write committed in the wait - after whoami answered, before the socket opened -
+is replayed to it; whoami names a person, so it takes `--cookie-file` or `--user` and no `--since`.
+The lines are `{"event": …}` for each event, `{"close": <code>, "reason": …}` and
+`{"resubscribed": <cursor>}` around each reopen - a socket closed at its age (`4001`) or a restart
+(`1012`) reopens at once, anything else after a backoff - `{"ended": <reason>, "resubscribed":
+<cursor>}` where Dispatch drops the feed and leaves the socket open, and `{"duplicate": <id>}` for
+an event at or below the cursor, which is written once as an event and never again. The cursor is
+Dispatch's own `events_start.since` at every subscribe, since Dispatch starts a feed at what it
+was asked or below it, never above: a `--since` past its head, and a resume across a reset of its
+event log, both start lower, and the events after that start are new rather than duplicates. So an
+audit that counts the `event` lines counts each event once, however often the feed reopened.
+`dispatch-live-events.test.ts` (`bun test scripts/e2e/lib`) runs it against a Bun websocket server
+that rotates, ends the feed, repeats events, clamps a start and answers whoami a head under a
+cookie.
+
+## lib/dispatch-keyed-comment.ts
+
+The production check of Dispatch's keyed writes: a comment whose first answer is lost lands once.
+
+```sh
+bun scripts/e2e/lib/dispatch-keyed-comment.ts --url https://<dispatch host> \
+  --bearer-file <token file> --issue <scratch issue key> [--cli]
+```
+
+It reads `/healthz` and fails unless the body says `idempotency_keys: true` (a 503's body
+included: the field is a fact of the build), then posts one comment on the issue it names as the
+bearer's session (`--session <id>`, `deploy-check-<uuid>` by default). Without `--cli` it posts
+the comment twice under one `Idempotency-Key`, as a page whose first answer was lost asks again,
+and requires the repeat to be Dispatch's stored `201` with `Idempotency-Replayed: ?1`, the same
+comment id and the key echoed on both. With `--cli` this checkout's `dispatch comment`
+(`packages/envoy-client/bin/dispatch.ts`, under `DISPATCH_HOST=omp` and a scratch `HOME`) posts
+it through a proxy on `127.0.0.1` that forwards everything and hands the command a gateway's
+`502` page in place of Dispatch's answer to its first comment POST; the command must ask again
+under that POST's key, be answered the replay and exit 0. Either way the issue must then hold
+exactly one comment with the check's body. Each step prints one JSON line (`healthz`, `post` or
+`proxy` and `cli`, `comments_with_body`), then `{"ok":true}` and exit 0; a failed check prints
+`{"failed": "<why>"}` and exits 1, a usage error exits 2. The comment stays on the issue, so name
+a scratch one. `dispatch-keyed-comment.test.ts` (`bun test scripts/e2e/lib`) runs it against a
+stand-in Dispatch that keys comments, one that makes every POST, a `/healthz` without the field
+and a `503` with it, and with `--cli`.
+
 ## lib/stage4b-tools.jq
 
 What a tool returned in a role's Oh My Pi session, for a Stage 4b checkpoint to prove a tool ran

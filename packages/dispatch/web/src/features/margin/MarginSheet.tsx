@@ -1,5 +1,6 @@
 import { type ReactNode, type RefObject, useRef } from "react";
 
+import type { WriteBounds } from "../../api/client";
 import type { Artifact, Ask, Event } from "../../api/types";
 import { QueryError } from "../../components/QueryError";
 import {
@@ -41,7 +42,7 @@ export interface MarginSheetModel {
     closeComposer: (composer: MarginComposer) => void;
     onAction: (id: string, action: MarginItemAction) => void;
     onComposerKindChange: (kind: ComposerKind) => string | undefined;
-    onEdit: (id: string, body: string) => Promise<unknown>;
+    onEdit: (id: string, body: string, bounds: WriteBounds) => Promise<unknown>;
     onRetryAction: () => void;
     onUnpin: (eventId: number) => void;
     onUnpinConversation: (id: string) => void;

@@ -21,6 +21,7 @@ import (
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 
+	"github.com/sjawhar/envoy/internal/contracts"
 	"github.com/sjawhar/envoy/internal/dispatch/docs"
 	"github.com/sjawhar/envoy/internal/dispatch/files"
 	"github.com/sjawhar/envoy/internal/dispatch/model"
@@ -105,6 +106,68 @@ func (s *server) uploadArtifact(w http.ResponseWriter, r *http.Request) {
 	s.uploadArtifactFor(w, r, artifactTarget{IssueKey: &issueKey})
 }
 
+// issueUploadRoute is the upload to an issue, which refuseUploadToAClosedIssue guards.
+const issueUploadRoute = http.MethodPost + " /api/v1/issues/{key}/artifacts"
+
+// refuseUploadToAClosedIssue answers an upload to an issue that is closed, or missing, with the
+// refusal its handler would make (requireOpenOwnerStatus) before anything spools or parses the
+// upload's body: the keyed layer spools a keyed body whole to disk before its handler runs
+// (readKeyedBody), and the multipart parser spools an unkeyed one whole before the handler reaches
+// the issue, so an upload to a closed issue would otherwise be written out in full only to be
+// refused. The body is still read off the connection, and discarded, before the refusal is written
+// (drainBeforeAnswer), so a client that sends it whole before it reads the answer gets the
+// answer. register mounts it ahead of the keyed layer, so the refusal claims no key. The handler's
+// locked check still decides an issue that closes meanwhile; this one only spares the spool. A
+// caller that resolves to nobody is left to the route's own 401, and a malformed Idempotency-Key
+// to the keyed layer's 400, which spools no body either and refuses the request's form before
+// anything is looked up.
+//
+// The refusal stands in for the handler, so it answers only a request whose handler would run. A
+// repeat under a key the keyed layer answers itself (requestKeyAnswersItself) - its first upload's
+// stored answer, a first upload still running, one that committed and lost its answer - goes on to
+// that layer whatever the issue's state now: an upload that landed before the issue closed is
+// replayed its 201, and one still running is told KEY_IN_FLIGHT, unspooled, until the first
+// answers.
+func (s *server) refuseUploadToAClosedIssue(handler http.HandlerFunc) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		requestKey, keyed, err := requestKeyHeader(r)
+		if keyed && err != nil {
+			handler(w, r)
+			return
+		}
+		actor, human, err := s.optionalActor(r)
+		if err != nil {
+			handler(w, r)
+			return
+		}
+		// The caller is resolved once a request: the key layer and the handler read this.
+		r = r.WithContext(context.WithValue(r.Context(), resolvedCallerKey{}, resolvedCaller{actor: actor, human: human}))
+		refusal := s.refuseClosedOwnerBeforeResolving(r.Context(), issueOwner(r.PathValue("key")))
+		if refusal == nil {
+			handler(w, r)
+			return
+		}
+		// Only the issue's own refusal (closed, missing) stands aside for the key: a check that
+		// failed is answered as it always was.
+		var ownerRefusal *apiError
+		if keyed && errors.As(refusal, &ownerRefusal) && ownerRefusal.status < http.StatusInternalServerError {
+			answers, err := s.requestKeyAnswersItself(r.Context(), requestKeyLogin(actor, human), requestKey)
+			if err != nil {
+				// As the keyed layer answers its own failed lookup: under the key, which nothing has
+				// claimed, so the client asks again under it.
+				w.Header().Set(contracts.IdempotencyKeyHeader, requestKey)
+				s.writeHandlerError(w, err)
+				return
+			}
+			if answers {
+				handler(w, r)
+				return
+			}
+		}
+		s.writeHandlerError(w, refusal)
+	}
+}
+
 func (s *server) uploadArtifactFor(w http.ResponseWriter, r *http.Request, target artifactTarget) {
 	r.Body = http.MaxBytesReader(w, r.Body, maxArtifactBlobSize+(1<<20))
 	requestType, _, err := mime.ParseMediaType(r.Header.Get("Content-Type"))
@@ -140,7 +203,7 @@ func (s *server) uploadArtifactFor(w http.ResponseWriter, r *http.Request, targe
 		return
 	}
 	if len(input.content) > maxArtifactBlobSize {
-		writeError(w, "CAP_EXCEEDED", http.StatusRequestEntityTooLarge, "artifact blob exceeds 25 MB")
+		s.writeHandlerError(w, errUploadTooLarge)
 		return
 	}
 	mediaType, _, err := mime.ParseMediaType(input.contentType)
@@ -183,7 +246,7 @@ func (s *server) jsonArtifactUpload(w http.ResponseWriter, r *http.Request) (art
 	if err := decoder.Decode(&body); err != nil {
 		var maxBytesError *http.MaxBytesError
 		if errors.As(err, &maxBytesError) {
-			writeError(w, "CAP_EXCEEDED", http.StatusRequestEntityTooLarge, "artifact blob exceeds 25 MB")
+			s.writeHandlerError(w, errUploadTooLarge)
 		} else {
 			writeError(w, "INVALID_JSON", http.StatusBadRequest, "invalid JSON body")
 		}
@@ -227,7 +290,7 @@ func (s *server) multipartArtifactUpload(w http.ResponseWriter, r *http.Request)
 		var spool *fs.PathError
 		switch {
 		case errors.As(err, &tooLarge):
-			writeError(w, "CAP_EXCEEDED", http.StatusRequestEntityTooLarge, "artifact blob exceeds 25 MB")
+			s.writeHandlerError(w, errUploadTooLarge)
 		case errors.Is(err, multipart.ErrMessageTooLarge):
 			writeError(w, "CAP_EXCEEDED", http.StatusRequestEntityTooLarge, "the upload's form fields are too large to read")
 		case errors.As(err, &spool):
