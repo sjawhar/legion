@@ -144,7 +144,7 @@ func (s *server) streamAgentConversation(w http.ResponseWriter, r *http.Request)
 	defer watch.Stop()
 	heartbeat := time.NewTicker(s.deps.StreamHeartbeat)
 	defer heartbeat.Stop()
-	shutdown := s.lifetime().Done()
+	shutdown := s.lifetime.Done()
 	for {
 		select {
 		case <-r.Context().Done():
