@@ -410,12 +410,7 @@ func (r *renderer) writeInlineNodes(nodes []*Node, prefix string, context inline
 			var common int
 			var flankFirst bool
 			for {
-				next = spelledMarks(n, escapePipes, bareHere, spelling)
-				following = nil
-				if index+1 < len(nodes) {
-					following = spelledMarks(nodes[index+1], escapePipes, wwwBare, spelling)
-				}
-				next, following = orderMarks(active, next, following, nodes, index, escapePipes, wwwBare, spelling)
+				next, following = orderMarks(active, spelledMarks(n, escapePipes, bareHere, spelling), nodes, index, escapePipes, wwwBare, spelling)
 				common = sharedMarks(active, next)
 				for i := len(active) - 1; i >= common; i-- {
 					r.closeInlineMark(active[i], escapePipes)
