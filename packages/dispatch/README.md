@@ -10,8 +10,8 @@ suggestions, artifacts, and durable event history. The Go server in
 `AuthGate` requests `GET /auth/whoami` and sends unauthenticated visitors to the
 Google sign-in flow. All application requests are same-origin. React Router serves
 the Inbox at `/`, an issue workspace at `/issues/:key/*`, and the human-only
-repository-to-project settings page at `/settings`; TanStack Query and SSE keep
-the issue, Inbox, documents, and sidebar current.
+repository-to-project settings page at `/settings`; TanStack Query and the live socket's events
+feed keep the issue, Inbox, documents, and sidebar current.
 
 The desktop shell has a sidebar, issue content, and review margin. Issue content has Spec,
 Conversation, Children, Artifacts, and Activity tabs; the Conversation lists one card per
@@ -323,7 +323,10 @@ local proxy), a plain-HTTP origin that is not loopback and so not a secure conte
 forwards to the dev sign-in server at its loopback origin. The project proves a document takes a
 new paragraph and a comment renders formatted there, where `crypto.randomUUID` does not exist, and
 that the proxy refuses any other `Host` as the server's own fence does and keeps no request open
-upstream once a page has closed.
+upstream once a page has closed. `chromium-plain-http-sign-out` runs the sign-out rows of
+`e2e/keyed-writes.e2e.ts` on that same origin, where the browser has no `navigator.locks`, so a
+tab holds the person's writes for another tab's sign-out on a renewed lease rather than on that
+tab's lock.
 `bun run e2e:install` installs all three browsers.
 
 ## Phone check

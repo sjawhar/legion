@@ -14,6 +14,7 @@ import (
 	"github.com/sjawhar/envoy/internal/dispatch/events"
 	"github.com/sjawhar/envoy/internal/dispatch/model"
 	"github.com/sjawhar/envoy/internal/dispatch/store/storetest"
+	"github.com/sjawhar/envoy/internal/logtest"
 )
 
 // refusingPublisher refuses one topic as NATS refuses an envelope it cannot take, and publishes
@@ -74,9 +75,7 @@ func (b *lockedBuffer) String() string {
 // published, and the event is marked published instead of backing off forever.
 func TestRunTreatsADestinationNATSRefusesAsDone(t *testing.T) {
 	var logged lockedBuffer
-	previous := slog.Default()
-	slog.SetDefault(slog.New(slog.NewTextHandler(&logged, nil)))
-	t.Cleanup(func() { slog.SetDefault(previous) })
+	logtest.SetDefault(t, slog.NewTextHandler(&logged, nil))
 
 	database := storetest.Open(t)
 	broker := events.NewBroker()

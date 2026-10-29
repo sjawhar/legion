@@ -3,6 +3,7 @@
 // narration line was written to its measured clip and starts at the cue it names.
 import type { Page } from "@playwright/test";
 
+import { sessionIds } from "../../../../packages/dispatch/e2e/session-ids";
 import { type DispatchWorkspace, dispatchApi, expect, seedDispatchWorkspace } from "../harness";
 import { linger, pointTo, type Walkthrough } from "../recording";
 
@@ -25,11 +26,11 @@ interface Seeded extends DispatchWorkspace {
   sent?: string;
 }
 
-const sessionOf = (title: string) => ({
-  id: `${title.toLowerCase()}-session`,
-  kind: "session" as const,
-  origin: { session_title: title },
-});
+const sessionOf = (title: string) => {
+  const id: string | undefined = sessionIds[title.toLowerCase() as keyof typeof sessionIds];
+  if (id === undefined) throw new Error(`the workspace seeds no session titled ${title}`);
+  return { id, kind: "session" as const, origin: { session_title: title } };
+};
 
 /** The e2e workspace, with every recipient of its broadcast answered, so the video can open on a
  *  finished broadcast. */
@@ -173,7 +174,7 @@ const broadcastAndReplies: Walkthrough<Seeded> = {
             { attempt: 1, body: reply },
             sessionOf(title)
           );
-          // The open page hears the reply on its event stream; nothing reloads it.
+          // The open page hears the reply through its live socket's events view; nothing reloads it.
           await expect(card(page, title)).toContainText(reply);
           await expect(answered(page, index + 1)).toBeVisible();
           // The pointer follows each reply but the last, which lands as the line ends.
