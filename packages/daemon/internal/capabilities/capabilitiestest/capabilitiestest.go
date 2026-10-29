@@ -1,6 +1,6 @@
 // Package capabilitiestest is the worker image in miniature that internal/capabilities and
 // cmd/legion's probe-image tests each build: a bin of stub binaries for the image rows that check
-// PATH alone, the plugin lock `omp plugin install` writes in the worker image, with the CodeGraph
+// PATH alone, the plugin lock the worker image's `omp plugin link` writes, with the CodeGraph
 // plugin enabled, and the claude-envoy root and Claude Code pin the claude-code row reads.
 package capabilitiestest
 
@@ -22,7 +22,7 @@ version) echo "go version go1.27.1 linux/amd64" ;;
 esac
 `
 
-// CodeGraphLock is the plugin lock `omp plugin install` writes in the worker image, with the
+// CodeGraphLock is the plugin lock the worker image's `omp plugin link` writes, with the
 // CodeGraph plugin enabled.
 const CodeGraphLock = `{"plugins":{"@bopstack/pi-codegraph":{"version":"0.1.1","enabledFeatures":null,"enabled":true}}}`
 

@@ -109,7 +109,8 @@ test("VersionView reports an ambiguous or missing quote as changed text", async 
   try {
     await waitFor(() => expect(editors).toHaveLength(1));
     expect(editors[0]?.markdown).toBe("o o");
-    expect(within(view.container).getByRole("status").textContent).toBe(
+    const status = await within(view.container).findByRole("status");
+    expect(status.textContent).toBe(
       "Text changed. The selected range no longer exists in this document."
     );
   } finally {

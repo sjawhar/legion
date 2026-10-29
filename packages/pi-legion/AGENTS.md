@@ -16,7 +16,7 @@ in the environment: a person's own session gets no tool, no title and no daemon 
 The Legion entry claims roles, matches injected user turns and reads the bootstrapped session
 through the interface the Envoy entry publishes: one process-wide object on `globalThis` under
 `Symbol.for("legion.pi-shared.envoy-plugin-interface")`, at `ENVOY_PLUGIN_INTERFACE_VERSION`
-(currently 4), described in `packages/pi-shared/AGENTS.md`. At factory time `extensions/legion.ts`
+(currently 5), described in `packages/pi-shared/AGENTS.md`. At factory time `extensions/legion.ts`
 sets its own load marker, `Symbol.for("legion.pi-legion.loaded")`, to
 `{ from: import.meta.url, envoyInterface: ENVOY_PLUGIN_INTERFACE_VERSION }`, which the daemon's load
 probe reads.
@@ -375,15 +375,23 @@ while an Envoy card is a steer that starts its own turn: a role claim made durin
 card on the role's lane, or a notice on the controller topic, start its turn ahead of the held start
 message, and a turn started there runs inside the startup wait, before the TUI shows it or reads any
 input — no start message and no busy row on screen, Enter not taking typed text, Esc doing nothing.
+The Envoy entry still opens the session's agent subject at its own `session_start`, so with its
+start message not yet sent the operator's controller names the session at `session_start` in the
+interface's `startupTurn` with the start due and unsent (`{session, sentAt: undefined}`,
+`markStartupTurnPending`): while that mark names the session, a card that reaches it idle starts
+no turn and its wake waits for the start turn, for at most 30 s while the start is unsent
+(pi-envoy's `src/card-wake.ts`). The start command's send overwrites it with the sent mark; a
+claim refused before the send clears it, and so does a claim that stops for a session change, for
+the replaced session.
 Oh My Pi runs command-line words after its startup, once the TUI listens, and the extension command
 `legion-controller-start` (`extensions/legion.ts`, `startCommand`) answers the word:
 
 | When the command runs | What it does |
 | --- | --- |
 | The operator's controller (`LEGION_CONTROLLER=1`, not the daemon's) that has not sent its start message in this process | Runs the whole claim: reads and validates `LEGION_CONTROLLER_START_MESSAGE` before any daemon call, reads the daemon's state, registers on `claims/register` (from here on the `legion` tool answers for the session with the registration's secret), sets `startupTurn` to `{session, sentAt: now}` for the session current at the send and sends the start message as the session's first turn — or, when the operator already started a turn (`isIdle()` false), sets no mark and sends it as a follow-up behind that turn (`deliverAs: "followUp"`), which starts no turn of its own — then claims the Envoy role and subscribes to the controller topic |
-| That claim is refused before the send | Logs it (`[legion] the controller claim failed: …`, through `logger`) and shows one warning notice naming the refusal and `/legion-claim-controller`, which claims again and sends the start message once the claim succeeds; the command itself does not fail |
+| That claim is refused before the send | Logs it (`[legion] the controller claim failed: …`, through `logger`), clears the unsent `startupTurn` mark `session_start` set, and shows one warning notice naming the refusal and `/legion-claim-controller`, which claims again and sends the start message once the claim succeeds; the command itself does not fail |
 | That claim is refused after the send (the role claim or the subscription) | Logs it the same way and shows one warning that the claim failed after the start message was sent: the start turn has the controller's registration, and `/legion-claim-controller` claims the role and its wakes again, sending nothing more |
-| The session changed (a `/new`) while that claim ran, before the send | Stops that claim at its registration, sending nothing and claiming no role for the replaced session, and shows nothing itself: the session change's re-claim registers the new session and sends the start message there, marking it, and says the claim for the new session followed in the host's extension widget (`legion-controller-claim`, `reclaimAfterSessionChange`), since Oh My Pi's `/new` resets the transcript only after its handlers return and would wipe a notice shown before, while the widget stays; no warning |
+| The session changed (a `/new`) while that claim ran, before the send | Stops that claim at its registration, sending nothing, claiming no role for the replaced session and clearing that session's unsent mark, and shows nothing itself: the session change's re-claim registers the new session and sends the start message there, marking it, and says the claim for the new session followed in the host's extension widget (`legion-controller-claim`, `reclaimAfterSessionChange`), since Oh My Pi's `/new` resets the transcript only after its handlers return and would wipe a notice shown before, while the widget stays; no warning |
 | The start message was sent in this process but the last claim that registered (the one that sent it, or a later one) did not finish | A warning naming `/legion-claim-controller`; the command claims nothing |
 | The claim already succeeded in this process (the command run again), the session is the daemon-launched controller, or it is a hand-started session | An info notice that there is nothing to do |
 | Another claim is still running (Oh My Pi reads the terminal while it runs, so the operator can type the command again) | Waits for that claim, then decides by the rows above |
@@ -406,10 +414,11 @@ reset; the session's next run, other than the start message's own, or a later cl
 takes it down. A host with no widget gets them as notices from its timer once the handler returns.
 The next navigation, even one that changes nothing, claims again while the last claim is
 unfinished. `startupTurn` names the
-session until its first run starts: that session's first `agent_start` (the start turn) clears it,
-and so does its `session_shutdown`; a `task` subagent's run, under its own session id, clears
-nothing. A start message queued behind the operator's turn is never marked: that run's one
-`agent_start` has already fired, and Oh My Pi drains the follow-up inside the same run. The
+session until its first run starts, unsent from the operator's controller's `session_start` and
+sent from the send: that session's first `agent_start` (the start turn) clears it, and so does its
+`session_shutdown`; a `task` subagent's run, under its own session id, clears nothing. A start
+message queued behind the operator's turn is never marked sent: that run's one `agent_start` has
+already fired, clearing the unsent mark, and Oh My Pi drains the follow-up inside the same run. The
 daemon-launched controller keeps its whole claim at `session_start`: it sends no start message,
 sets the mark with `sentAt` now right before `claims/ready`, after which the daemon delivers its
 start prompt, and exits on any failure.

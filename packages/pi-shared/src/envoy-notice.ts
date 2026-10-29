@@ -1,5 +1,6 @@
 /** The `details` of an `envoy-message` the Envoy extension writes into its own session (the
- * session-id-changed notice): the session's own doing, never an event from outside, so Legion's
+ * session-id-changed notice, and the wake that starts a turn for cards the host folded into the
+ * context with no turn): the session's own doing, never an event from outside, so Legion's
  * phase-stall check does not re-arm a quiet stall on it.
  *
  * It lives in this leaf module, and `./interface` re-exports it for the two plugins that read it

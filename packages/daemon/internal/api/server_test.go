@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
+	"log"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
@@ -140,9 +141,15 @@ func TestStateRouteUsesARepeatableReadOnlyTransaction(t *testing.T) {
 
 func TestStateRouteReportsASourceFailure(t *testing.T) {
 	// The handler logs the failure through the default logger; keep it out of the test output.
-	previous := slog.Default()
+	// slog.SetDefault also points the log package's output at the handler and clears its flags,
+	// and setting the previous default back undoes neither, so both are put back too.
+	previous, output, flags := slog.Default(), log.Writer(), log.Flags()
 	slog.SetDefault(slog.New(slog.NewTextHandler(io.Discard, nil)))
-	t.Cleanup(func() { slog.SetDefault(previous) })
+	t.Cleanup(func() {
+		slog.SetDefault(previous)
+		log.SetOutput(output)
+		log.SetFlags(flags)
+	})
 
 	recorder := serve(t, fakeSource{err: errors.New("dial db.internal: refused")}, http.MethodGet, "/legion/v1/state")
 

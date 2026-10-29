@@ -156,7 +156,8 @@ type deliveryHub struct {
 	clock    hubClock
 	lifetime context.Context
 	// dial, listenIdle, pingTimeout and backoff are the listener's (pglisten.Listener); dial is the
-	// shared pool's Listener, and a test sets them otherwise before the first Subscribe.
+	// shared pool's Listener, read from the server when the listener dials, and a test sets them
+	// otherwise before the first Subscribe.
 	dial                    func(ctx context.Context) (*pgx.Conn, error)
 	listenIdle, pingTimeout time.Duration
 	backoff                 func(attempt int) time.Duration
@@ -325,7 +326,9 @@ var deliveryReconciledSources = []string{"prs", "runs", "ci"}
 func newDeliveryHub(s *server, lifetime context.Context, clock hubClock) *deliveryHub {
 	return &deliveryHub{
 		server: s, clock: clock, lifetime: lifetime,
-		dial:     s.deps.Store.Pool.Listener,
+		dial: func(ctx context.Context) (*pgx.Conn, error) {
+			return s.deps.Store.Pool.Listener(ctx)
+		},
 		ready:    make(chan struct{}),
 		wakeWork: make(chan struct{}, 1), wakeChanges: make(chan struct{}, 1),
 		wakeEvents: make(chan struct{}, 1), connected: make(chan struct{}, 1),

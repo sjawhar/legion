@@ -134,13 +134,12 @@ func newRig(t *testing.T) *rig {
 		EnvoyURL:    listener.URL,
 		Docs:        documents,
 		Events:      broker,
-		Lifetime:    t.Context(),
 	})
 	if err != nil {
 		t.Fatalf("API dependencies: %v", err)
 	}
 	mux := http.NewServeMux()
-	t.Cleanup(api.Register(mux, deps))
+	t.Cleanup(api.Register(mux, t.Context(), deps))
 	return &rig{handler: mux, database: database, broker: broker, documents: documents, sent: &recorder{topics: map[string][]string{}}}
 }
 

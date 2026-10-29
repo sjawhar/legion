@@ -328,11 +328,15 @@ func TestAPromptDuringATurnIsRefusedBusy(t *testing.T) {
 }
 
 // An abort becomes an interrupt; its answer is Claude Code's acknowledgement, and the interrupted
-// user message's result ends the turn.
+// user message's result ends the turn. Until then the turn is streaming: the
+// "hang" turn cannot end before the abort, so the state asked during it is the turn's own.
 func TestAnAbortInterruptsAndEndsTheTurn(t *testing.T) {
 	r := newRig(t, "-p", "--resume", sessionID)
 	r.prompt("p1", "hang")
 	r.expect("agent_start", nil)
+	if !r.state("g1") {
+		t.Error("isStreaming during the turn is false")
+	}
 	r.send(shimwire.Abort{ID: "a1"})
 	r.expect("response", map[string]any{"id": "a1", "command": "abort", "success": true})
 	r.expect("agent_end", nil)

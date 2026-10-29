@@ -3632,13 +3632,19 @@ describe("the operator-launched controller (LEGION_CONTROLLER=1)", () => {
   });
 
   // The operator's own first turn started before the command ran: that run's one `agent_start` has
-  // fired, and the follow-up runs inside it (Oh My Pi drains follow-ups in the same run), so no
-  // later `agent_start` would clear a mark. None is set.
+  // fired, clearing the unsent mark `session_start` set (a `task` subagent's run leaves it), and the
+  // follow-up runs inside it (Oh My Pi drains follow-ups in the same run), so no later
+  // `agent_start` would clear a mark. None is set.
   test("the start command run while the operator's own first turn runs queues the start message behind it as a follow-up and leaves no startup-turn mark", async () => {
     const controller = await launchedController({ sessionId: "ses_controller_typed_first" });
     const context = controller.context("ses_controller_typed_first");
     await controller.handlers.get("session_start")?.({}, context);
+    const unsent = { session: "ses_controller_typed_first", sentAt: undefined };
+    expect(envoyPluginInterface().startupTurn).toEqual(unsent);
+    await controller.handlers.get("agent_start")?.({}, controller.context("ses_task_subagent"));
+    expect(envoyPluginInterface().startupTurn).toEqual(unsent);
     await controller.handlers.get("agent_start")?.({}, context);
+    expect(envoyPluginInterface().startupTurn).toBeUndefined();
 
     expect(await runStartCommand(controller, context, { idle: false })).toEqual([]);
 
@@ -3728,13 +3734,18 @@ describe("the operator-launched controller (LEGION_CONTROLLER=1)", () => {
     let current = before;
     const firstRegistration = Promise.withResolvers<void>();
     const held = Promise.withResolvers<void>();
-    const sentAtRegister: { session: string; sent: string[] }[] = [];
+    const sentAtRegister: {
+      session: string;
+      sent: string[];
+      mark: EnvoyPluginInterface["startupTurn"];
+    }[] = [];
     const controller = await launchedController({
       sessionId: before,
       register: async (body) => {
         sentAtRegister.push({
           session: String(body.sessionId),
           sent: [...controller.sentUserMessages],
+          mark: envoyPluginInterface().startupTurn,
         });
         if (sentAtRegister.length === 1) {
           firstRegistration.resolve();
@@ -3790,11 +3801,12 @@ describe("the operator-launched controller (LEGION_CONTROLLER=1)", () => {
       },
     ]);
     expect(scheduledTimeouts).toEqual([]);
-    // The start claim registered the replaced session and sent nothing; the re-claim registered
-    // the new one, then sent the start message into it.
+    // The start claim registered the replaced session and sent nothing, and its unsent mark from
+    // session_start is gone by the re-claim, which registered the new one, then sent the start
+    // message into it.
     expect(sentAtRegister).toEqual([
-      { session: before, sent: [] },
-      { session: after, sent: [] },
+      { session: before, sent: [], mark: { session: before, sentAt: undefined } },
+      { session: after, sent: [], mark: undefined },
     ]);
     expect(controller.sentUserMessages).toEqual([message]);
     expect(envoyPluginInterface().startupTurn).toEqual({
@@ -3834,6 +3846,147 @@ describe("the operator-launched controller (LEGION_CONTROLLER=1)", () => {
       controller.context("ses_controller_shutdown")
     );
 
+    expect(envoyPluginInterface().startupTurn).toBeUndefined();
+  });
+
+  // The operator's controller claims and sends only from `/legion-controller-start`, which Oh My
+  // Pi runs after its startup, while the Envoy entry opens the session's agent subject at its own
+  // `session_start`: a card arriving in between would start its turn ahead of the start message.
+  // So `session_start` marks the start turn unsent, which the Envoy entry reads
+  // (packages/pi-envoy/src/card-wake.ts), and claims nothing; the start command's send marks it
+  // sent.
+  test("the operator's controller marks its start turn unsent at session_start and claims nothing, and the start command's send marks it sent", async () => {
+    const marksAtRegister: EnvoyPluginInterface["startupTurn"][] = [];
+    const controller = await launchedController({
+      sessionId: "ses_controller_pending",
+      onRequest: (path) => {
+        if (path === "/legion/v1/claims/register") {
+          marksAtRegister.push(envoyPluginInterface().startupTurn);
+        }
+      },
+    });
+    const context = controller.context("ses_controller_pending");
+    await controller.handlers.get("session_start")?.({}, context);
+
+    expect(envoyPluginInterface().startupTurn).toEqual({
+      session: "ses_controller_pending",
+      sentAt: undefined,
+    });
+    expect(daemonRequests(controller.requests)).toEqual([]);
+    expect(controller.requests.map((request) => request.path)).not.toContain("/v1/roles/set");
+
+    const before = Date.now();
+    expect(await runStartCommand(controller, context)).toEqual([]);
+
+    expect(marksAtRegister).toEqual([{ session: "ses_controller_pending", sentAt: undefined }]);
+    expect(controller.sentUserMessages).toEqual([
+      "Legion controller start: follow skill://legion-controller",
+    ]);
+    const sent = envoyPluginInterface().startupTurn;
+    expect(sent?.session).toBe("ses_controller_pending");
+    expect(sent?.sentAt).toBeGreaterThanOrEqual(before);
+    expect(sent?.sentAt).toBeLessThanOrEqual(Date.now());
+  });
+
+  // Only a controller with a start message of its own to send has a start turn to keep first: the
+  // daemon's controller is marked sent at its ready (whatever start message it inherited), and
+  // registers with no mark before that; a controller session with no start message sends none;
+  // and a hand-started takeover's session, which is no controller (it claims from
+  // `/legion-claim-controller`), has none either. Each row's marks are the ones read as each claim
+  // request reached the daemon.
+  for (const [name, arrange, marks] of [
+    [
+      "the daemon-launched controller",
+      async (controller: LaunchedController) => {
+        const bootFile = path.join(controller.secretsDir, "LEGION_BOOT_TOKEN");
+        await writeFile(bootFile, "launch-boot-token\n", { mode: 0o600 });
+        delete process.env.LEGION_CONTROLLER_SECRET_FILE;
+        process.env.LEGION_BOOT_TOKEN_FILE = bootFile;
+        process.env.LEGION_SLACK_CHANNELS = "";
+      },
+      [
+        { path: "/legion/v1/claims/register", mark: undefined },
+        {
+          path: "/legion/v1/claims/ready",
+          mark: { session: "ses_no_pending_mark", sentAt: expect.any(Number) },
+        },
+      ],
+    ],
+    [
+      "a controller session with no start message",
+      async () => {
+        delete process.env.LEGION_CONTROLLER_START_MESSAGE;
+      },
+      [],
+    ],
+    [
+      "a hand-started takeover's session",
+      async () => {
+        delete process.env.LEGION_CONTROLLER;
+        delete process.env.LEGION_ROLE;
+      },
+      [],
+    ],
+  ] as const) {
+    test(`${name} marks no unsent start turn at session_start`, async () => {
+      const marksAtRequest: { path: string; mark: EnvoyPluginInterface["startupTurn"] }[] = [];
+      const controller = await launchedController({
+        sessionId: "ses_no_pending_mark",
+        stateFixture: "state-controller-claim.json",
+        onRequest: (path) => {
+          if (path.startsWith("/legion/v1/claims/")) {
+            marksAtRequest.push({ path, mark: envoyPluginInterface().startupTurn });
+          }
+        },
+      });
+      await arrange(controller);
+      try {
+        await controller.handlers.get("session_start")?.(
+          {},
+          controller.context("ses_no_pending_mark")
+        );
+      } finally {
+        delete process.env.LEGION_BOOT_TOKEN_FILE;
+      }
+
+      expect(marksAtRequest).toEqual([...marks]);
+      if (marks.length === 0) expect(envoyPluginInterface().startupTurn).toBeUndefined();
+    });
+  }
+
+  // A phase worker is no controller: whatever LEGION_CONTROLLER_START_MESSAGE it inherited, its
+  // `session_start` boots its claim and marks no start turn.
+  test("a phase worker marks no unsent start turn at session_start", async () => {
+    const pane = await claimPane({ role: "implementer", sessionId: "ses_worker_no_mark" });
+    process.env.LEGION_CONTROLLER_START_MESSAGE = "Legion controller start: inherited";
+
+    await pane.start();
+
+    expect(pane.exits).toEqual([]);
+    expect(pane.requests.map((request) => request.path)).toContain("/legion/v1/claims/ready");
+    expect(envoyPluginInterface().startupTurn).toBeUndefined();
+  });
+
+  // A claim refused before the send leaves no start coming: the unsent mark goes, so the Envoy
+  // entry stops holding its startup cards for it.
+  test("a start command whose claim is refused before the send clears the unsent mark", async () => {
+    const controller = await launchedController({
+      sessionId: "ses_controller_pending_refused",
+      register: () => Response.json({ error: "capability revoked" }, { status: 403 }),
+    });
+    const context = controller.context("ses_controller_pending_refused");
+    await controller.handlers.get("session_start")?.({}, context);
+    expect(envoyPluginInterface().startupTurn).toEqual({
+      session: "ses_controller_pending_refused",
+      sentAt: undefined,
+    });
+
+    const { value: notices } = await loggedErrors(() => runStartCommand(controller, context));
+
+    expect(notices).toEqual([
+      claimRefused("POST /legion/v1/claims/register failed with 403: capability revoked"),
+    ]);
+    expect(controller.sentUserMessages).toEqual([]);
     expect(envoyPluginInterface().startupTurn).toBeUndefined();
   });
 

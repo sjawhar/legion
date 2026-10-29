@@ -887,6 +887,7 @@ func newFailingAdviceHandler(t *testing.T, query string, suggestionTimeout time.
 	}
 	s := &server{
 		deps:              deps,
+		lifetime:          t.Context(),
 		suggestionTimeout: suggestionTimeout,
 		adviceQueryHook: func(ctx context.Context, tx pgx.Tx, got string) error {
 			if got != query {

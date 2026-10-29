@@ -1,4 +1,3 @@
-# syntax=mirror.gcr.io/docker/dockerfile:1.7
 # Legion worker image: every Legion agent process under `runtime: kubernetes` runs from this image.
 # Build context: the repo root. Built by .github/workflows/worker-image.yaml on the GitHub-hosted runner
 # (called from release.yaml beside its publish job, build only, then attested by a second call after
@@ -16,7 +15,8 @@
 # packages/pi-legion at /opt/legion/pi-envoy and /opt/legion/pi-legion, the two roots a pod names as
 # Oh My Pi's explicit extensions with discovery on, linked into no profile (a plugin both linked and
 # explicit loads twice; the pod lane's probe refuses an image whose pi-envoy does), and
-# @bopstack/pi-codegraph (from npm, pinned), the one plugin linked into the isolated OMP profile
+# @bopstack/pi-codegraph (installed at /opt/omp-plugins from the committed lockfile at
+# packages/daemon/docker/omp-plugins), the one plugin linked into the isolated OMP profile
 # `legion`, where discovery loads it — backed by the CodeGraph CLI (@colbymchenry/codegraph, pinned) at
 # /opt/codegraph/bin; @sjawhar/claude-envoy built from this checkout's packages/claude-envoy at
 # /opt/legion/claude-envoy, the plugin root a phase worker on the `claude` backend loads (its
@@ -123,13 +123,16 @@ ARG KUBECTL_SHA256=3cfeaf80be482b435b0aa214aff6e0b2c312ee23c0ff20810c75517b6004c
 # apt packages carry no version pin (hadolint DL3008, ignored at each `apt-get install`): Debian's
 # archive serves only a suite's current version of a package, so a pinned version stops resolving at
 # the suite's next update. The base image's suite is the pin.
-# CodeGraph CLI and the Oh My Pi tool that wraps it, pinned to the
-# versions the devbox runs (`@colbymchenry/codegraph --version`, `omp/plugins/package.json`).
+# The CodeGraph CLI and the Oh My Pi tool that wraps it, pinned to the versions the devbox runs
+# (`@colbymchenry/codegraph --version`, `omp/plugins/package.json`). The tool, @bopstack/pi-codegraph,
+# installs from the committed lockfile at packages/daemon/docker/omp-plugins (the plugin stage's frozen
+# install): that package.json pins it and its bun.lock pins everything Bun installs beside it, so, as
+# for the language servers, there is no ARG pin to keep in step with them.
 ARG CODEGRAPH_VERSION=1.5.0
-ARG PI_CODEGRAPH_VERSION=0.1.1
 
 # ------------------------------------------------------------------------------------------------
-# plugin: workspace install, the CodeGraph CLI, and the two packed plugins.
+# plugin: workspace install, the CodeGraph CLI, the Oh My Pi plugins' frozen install, and the two packed
+# plugins.
 FROM mirror.gcr.io/oven/bun:${BUN_VERSION}-slim AS plugin
 WORKDIR /repo
 # jq: the same omp.extensions rewrite release.yaml's pi_envoy_build and pi_legion_build jobs run.
@@ -168,6 +171,18 @@ COPY packages/dispatch/package.json packages/dispatch/package.json
 COPY packages/envoy/internal/dispatch/pmdoc/gen/package.json packages/envoy/internal/dispatch/pmdoc/gen/package.json
 COPY docs/site/package.json docs/site/package.json
 RUN bun install --frozen-lockfile
+# The Oh My Pi plugins the runtime stage links into the `legion` profile (its step 3), installed with
+# `bun install --frozen-lockfile` from the committed lockfile at packages/daemon/docker/omp-plugins, a
+# project of its own (no root workspace), into its own prefix, /opt/omp-plugins, which the runtime
+# stage copies whole. The tree is the lockfile's whatever the registry has published since, and a
+# package.json the lockfile does not match fails the install instead of resolving afresh; lifecycle
+# scripts stay off, as for the language servers. It follows the workspace install because every
+# frozen Bun install in this file comes after the root workspace manifests
+# (.github/scripts/check-bun-workspace-manifests.sh).
+WORKDIR /opt/omp-plugins
+COPY packages/daemon/docker/omp-plugins/package.json packages/daemon/docker/omp-plugins/bun.lock ./
+RUN bun install --frozen-lockfile --ignore-scripts
+WORKDIR /repo
 COPY packages/contracts packages/contracts
 COPY packages/envoy-client packages/envoy-client
 COPY packages/pi-shared packages/pi-shared
@@ -583,7 +598,7 @@ COPY --from=toolchain /opt/language-servers/node_modules/pyright/LICENSE.txt /in
 COPY --from=toolchain /opt/language-servers/node_modules/pyright/dist/typeshed-fallback/LICENSE /in/pyright-typeshed-LICENSE
 RUN set -eu; mkdir -p /out; . /in/tags.env; \
     assemble-third-party-notices.sh /out/THIRD_PARTY_NOTICES \
-      "Third-party software in the Legion worker image, with the license of each piece. Legion's own code is under the Apache License 2.0. The Debian packages the image installs, listed in the first section below, carry their terms in /usr/share/doc/<package>/copyright. npm packages installed unmodified carry their own license files beside them: the CodeGraph plugin and its dependencies under /home/legion/.omp/profiles/legion/plugins/node_modules, the CodeGraph CLI's dependencies under /opt/codegraph/lib/node_modules, and the language servers under /opt/language-servers/node_modules (their sections below)." \
+      "Third-party software in the Legion worker image, with the license of each piece. Legion's own code is under the Apache License 2.0. The Debian packages the image installs, listed in the first section below, carry their terms in /usr/share/doc/<package>/copyright. npm packages installed unmodified carry their own license files beside them: the CodeGraph plugin and its dependencies under /opt/omp-plugins/node_modules, the CodeGraph CLI's dependencies under /opt/codegraph/lib/node_modules, and the language servers under /opt/language-servers/node_modules (their sections below)." \
       "Debian packages installed in the image, one per line, each with its terms in /usr/share/doc/<package>/copyright" /in/debian-packages \
       "Go modules compiled into /opt/legion/bin/legion and /opt/legion/bin/agent-secrets" /in/go-notices \
       "npm packages inlined into the pi-envoy plugin, /opt/legion/pi-envoy (also its dist/THIRD_PARTY_NOTICES)" /in/pi-envoy-notices \
@@ -618,7 +633,6 @@ RUN set -eu; mkdir -p /out; . /in/tags.env; \
 # runtime: the final stage, the image itself, on runtime-base.
 FROM runtime-base AS runtime
 LABEL org.opencontainers.image.source=https://github.com/sjawhar/legion
-ARG PI_CODEGRAPH_VERSION
 # Pinned Bun: the binary the plugin stage packed with (oven/bun:${BUN_VERSION}-slim).
 COPY --from=plugin /usr/local/bin/bun /usr/local/bin/bun
 RUN ln -s bun /usr/local/bin/bunx
@@ -642,6 +656,9 @@ COPY --from=plugin /out/claude-envoy /opt/legion/claude-envoy
 # CodeGraph CLI (@colbymchenry/codegraph): the self-contained per-platform bundle alone (bundled
 # Node runtime + app), never the npm package's own launcher shim — see the plugin stage's comment.
 COPY --from=plugin /out/codegraph /opt/codegraph
+# The Oh My Pi plugins' frozen install (the plugin stage's), root's like the two plugins above, so no
+# role can change the CodeGraph plugin code the profile's link (step 3 below) resolves to.
+COPY --from=plugin /opt/omp-plugins /opt/omp-plugins
 # OMP_PROFILE=legion: the isolated profile the CodeGraph plugin is linked into (plugins resolve to
 # /home/legion/.omp/profiles/legion/plugins/node_modules); the Envoy and Legion plugins stay unlinked,
 # named by path (step 3 below). LEGION_OMP_PATH: how `legion probe-image`
@@ -673,8 +690,12 @@ WORKDIR /home/legion
 #    container, with no network. A git older than 2.42 fails it (`Git does not recognize required
 #    option: porcelain`), which is how bookworm's 2.39.5 shipped in an image that passed every probe:
 #    `legion probe-image` never runs jj, and the daemon host's own git is newer.
-# 3. Link the CodeGraph plugin from npm into the legion profile (omp-plugins.lock.json records it
-#    enabled), and nothing else: /opt/legion/pi-envoy and /opt/legion/pi-legion are the two roots a
+# 3. Link the CodeGraph plugin's frozen install, /opt/omp-plugins/node_modules/@bopstack/pi-codegraph,
+#    into the legion profile: `omp plugin link` symlinks that directory into the profile's
+#    plugins/node_modules and records it enabled in omp-plugins.lock.json, resolving nothing from a
+#    registry (an npm spec given to `omp plugin install` runs `bun install` in the profile with no
+#    lockfile, which is how a dependency published moments before a build once failed it). Link it
+#    and nothing else: /opt/legion/pi-envoy and /opt/legion/pi-legion are the two roots a
 #    pod names as Oh My Pi's explicit extensions (--extension, discovery on;
 #    packages/daemon/internal/runtime/sandbox/manifest.go agentArgv), and must never be linked into
 #    the profile too. Oh My Pi loads an installed plugin and an explicit one by their own paths, so a
@@ -685,7 +706,7 @@ WORKDIR /home/legion
 #    from the profile instead, as a pane does, would stop the image probe certifying the two roots by
 #    path (bootgate.go's pod lane reads the explicit root's manifest for the contract and holds
 #    pi-envoy to its root): explicit roots and an unlinked profile are one decision. This is OMP's
-#    first run in the image, so the CodeGraph install also extracts OMP's native module from the
+#    first run in the image, so the CodeGraph link also extracts OMP's native module from the
 #    binary (no network) into /home/legion/.omp/natives/<version>/ — the build's success is the
 #    check. From 18.11.0 OMP writes only the variant the CPU selects, so this is the build runner's
 #    (ubuntu-24.04, AVX2), 111 MiB; this layer ships it, so a pod whose node selects the same
@@ -699,7 +720,7 @@ RUN set -eu; \
     git init --quiet --bare "$scratch/origin.git"; \
     jj git clone "$scratch/origin.git" "$scratch/clone"; \
     rm -rf "$scratch"; \
-    omp plugin install "@bopstack/pi-codegraph@${PI_CODEGRAPH_VERSION}"; \
+    omp plugin link /opt/omp-plugins/node_modules/@bopstack/pi-codegraph; \
     rm -rf /home/legion/.omp/profiles/legion/logs
 # The toolchain goes in after the probe layer, so a new toolchain pin never rebuilds that layer and its
 # natives, and before `legion`, which changes on every commit. It lands outside HOME, in /opt and

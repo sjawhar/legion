@@ -341,8 +341,9 @@ func readPinFile(path string, v any) error {
 const codeGraphPlugin = "@bopstack/pi-codegraph"
 
 // codeGraph needs both halves: the CodeGraph CLI on PATH, and its plugin enabled in the profile's
-// plugin lock, where `omp plugin install` recorded it; a CLI without the plugin, or a plugin
-// disabled behind the CLI, gives an agent no codegraph tool. Both failures are named at once.
+// plugin lock, where the image's `omp plugin link` of its frozen install recorded it
+// (worker.Dockerfile); a CLI without the plugin, or a plugin disabled behind the CLI, gives an
+// agent no codegraph tool. Both failures are named at once.
 func codeGraph(_ context.Context, img Image) (string, bool) {
 	var evidence, why []string
 	if path, ok := lookpath.On(envValue(img.Env, "PATH"), "codegraph"); ok {
