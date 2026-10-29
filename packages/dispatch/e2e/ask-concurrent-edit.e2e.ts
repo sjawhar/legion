@@ -19,7 +19,7 @@ import {
 import { resetDatabase } from "./seed";
 import { asUser } from "./users";
 
-// INFRA-624: two collaborators editing one decision block at once can leave it holding what its
+// sjawhar/legion#2433: two collaborators editing one decision block at once can leave it holding what its
 // content rule (`paragraph+ bullet_list?`) refuses: each adds an option list while their edits
 // cross, and the merged block holds two lists. y-prosemirror could not build such a block and
 // deleted it from the shared document, so every editor and the server lost the question and every

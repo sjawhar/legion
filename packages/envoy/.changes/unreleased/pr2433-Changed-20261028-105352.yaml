@@ -6,7 +6,10 @@ body: |-
     leave), so the route never moves or drops what another person wrote. The reason quotes every
     block of the decision in full with its block id as quoted data, and names the path: delete the
     blocks it lists, all in one document edit (`dispatch doc-edit`), which keeps the question's
-    paragraphs and the first list after them, then edit the ask; before the document has settled its block ids it says to
+    paragraphs and the first list after them and does the same inside any decision nested in those
+    blocks, so one document edit repairs them together, then edit the ask; where one edit cannot
+    (a decision holding this one is broken too, or a decision needs words written rather than
+    blocks deleted), it names no delete and says which decision to repair first; before the document has settled its block ids it says to
     retry instead. Before, an edit of only its urgency or
     `multiple` wrote its options, joined across both lists, to the ask.
 time: 2026-10-28T10:53:52.572551815Z

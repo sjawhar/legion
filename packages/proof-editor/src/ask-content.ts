@@ -16,7 +16,7 @@ import { ySyncPluginKey } from "y-prosemirror";
  * (two lists, a paragraph after the list) can leave a shared document holding an ask that rule
  * refuses. y-prosemirror builds each node through `createChecked`, and when that throws it deletes
  * the whole element from the shared Yjs document, so every editor and the server lose the ask's
- * text (INFRA-624). Only `validContent` changes, which is what `createChecked`, a step's own
+ * text (sjawhar/legion#2433). Only `validContent` changes, which is what `createChecked`, a step's own
  * check and `Node.check` read; content matching (`contentMatch`, `canReplace`, `createAndFill`)
  * keeps the rule, so every command, input rule, paste and markdown parse still holds a local edit
  * to it, and the typed-block drawing's fit check is untouched.

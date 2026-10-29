@@ -2246,11 +2246,17 @@ edit that leaves the ask broken, so one list at a time would be refused), the bl
 which keep the question's paragraphs (from the first paragraph holding text) and the first list
 after them, then edit the ask, which the route then applies as for any valid ask. While a child
 has no id or an id repeats in the document (before settlement stamps ids), it names no delete and
-says to retry once the document settles; when the kept blocks would not read as a decision (an
-ask nested in one of them breaks its own rule), it names no delete and says so. An ask with no
-paragraph holding text is refused earlier, as having an empty question. A test follows the
-refusal for every body of up to five blocks drawn from paragraphs, empty paragraphs, lists and
-lists holding a nested list. Before, an edit naming only `urgency` or `multiple` wrote the
+says to retry once the document settles. The one edit it names also deletes, by id, the extra
+blocks of every decision nested in the blocks it keeps that breaks its own rule, so one doc-edit
+repairs them together; before naming it, the refusal checks that, with those deletes applied, the
+ask, every nested decision losing a block and every decision holding the ask read strictly, as
+doc-edit requires (`planAskRepair`). When no such edit exists it names no delete and names the
+decision to repair first: the outermost decision holding this one when a delete here would leave
+it unreadable, else the decision the content rule check reports, which needs words written rather
+than blocks deleted. An ask with no paragraph holding text is refused earlier, as having an empty
+question. Tests follow the refusal for every body of up to five blocks drawn from paragraphs,
+empty paragraphs, lists and lists holding a nested list, and for every body of up to four that
+adds an option holding a decision of up to three such blocks. Before, an edit naming only `urgency` or `multiple` wrote the
 options joined across both lists to the row.
 Settlement retracts an ask whose block left the document in its own name,
 `{kind: "system", id: "document-settlement"}`, and restores only a retraction it wrote - a

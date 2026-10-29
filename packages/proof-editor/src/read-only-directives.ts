@@ -80,7 +80,7 @@ export function remarkReadOnlyDirectives(blockSchema: BlockSchema | undefined, s
 }
 
 /**
- * The live editor's typed-block step (INFRA-624): the read-only parse's drawing decision, made
+ * The live editor's typed-block step (sjawhar/legion#2433): the read-only parse's drawing decision, made
  * against the editor's schema, read the first time it parses (the remark processor is built
  * before the schema is). A refusal thrown from a paste let the browser insert the plain text
  * itself, its lines joined, so a directive the block schema refuses is drawn as its lines and a

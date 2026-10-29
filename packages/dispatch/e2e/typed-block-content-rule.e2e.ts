@@ -66,7 +66,7 @@ test("an ask with a paragraph after its options, pasted as plain text, keeps eve
   }
 });
 
-// INFRA-624: a block of a type the editor does not know, pasted from the system clipboard, keeps
+// sjawhar/legion#2433: a block of a type the editor does not know, pasted from the system clipboard, keeps
 // every word as its lines too; the paste handler threw `unknown typed block "note"` and drew
 // nothing.
 test("an unknown typed block pasted as plain text keeps every word as its lines", async ({

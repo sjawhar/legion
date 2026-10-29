@@ -1,7 +1,7 @@
 /**
  * An ask two collaborators' concurrent edits leave off its `paragraph+ bullet_list?` rule (here
  * a second option list) stays in every editor and in the shared Yjs document, where y-prosemirror
- * used to delete it, with all its text, the moment its `createChecked` threw (INFRA-624). Local
+ * used to delete it, with all its text, the moment its `createChecked` threw (sjawhar/legion#2433). Local
  * edits on it still hold to the rule, and every other check y-prosemirror relies on is as before.
  */
 

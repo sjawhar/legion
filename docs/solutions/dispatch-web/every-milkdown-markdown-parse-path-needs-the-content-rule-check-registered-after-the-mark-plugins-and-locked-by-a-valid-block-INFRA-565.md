@@ -63,7 +63,7 @@ a parse that never threw for content (the editor's default mode) drops the block
   holding only `Intro text.` and an empty paragraph
   (`packages/dispatch/e2e/typed-block-content-rule.e2e.ts`, run against a tree of the base).
 
-**Note 2026-10-27 (INFRA-624):** `unfitTypedBlocksRemarkPlugin` is gone. The live editor's step is
+**Note 2026-10-27 (sjawhar/legion#2433):** `unfitTypedBlocksRemarkPlugin` is gone. The live editor's step is
 now `liveTypedBlocksRemarkPlugin` in `packages/proof-editor/src/read-only-directives.ts`,
 which makes the read-only parse's drawing decision (`remarkDecideTypedBlocks` with the shared
 `acceptedTypedBlock`) against the editor's schema (read on the first parse) and keeps the `server`

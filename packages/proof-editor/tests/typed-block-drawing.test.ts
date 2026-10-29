@@ -6,7 +6,7 @@
  * blocks as the read-only mode does (`liveTypedBlocksRemarkPlugin`): a container directive the
  * block schema refuses is drawn as its lines too, and a paragraph line that opens like a
  * directive stays the text it is, where a refusal thrown from a paste let the browser insert the
- * plain text itself, its lines joined (INFRA-624).
+ * plain text itself, its lines joined (sjawhar/legion#2433).
  */
 
 import { expect, spyOn, test } from "bun:test";

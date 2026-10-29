@@ -49,7 +49,7 @@ trigger goes away. Then look for input that is now lost without any error.
   the headless engine without `readOnly` and the live editor dropped an `:::ask` holding a
   heading, pasted or imported, with all its text. The headless default mode now runs the same
   check after `remarkTypedBlocks` (`remarkUnfitTypedBlocks`), and the live editor runs it after
-  the mark plugins (`liveTypedBlocksRemarkPlugin` in `src/lib.ts`, since INFRA-624 the read-only
+  the mark plugins (`liveTypedBlocksRemarkPlugin` in `src/lib.ts`, since sjawhar/legion#2433 the read-only
   parse's drawing decision, `remarkDecideTypedBlocks` with the shared `acceptedTypedBlock`, against
   the editor's schema, keeping the `server` attributes that `remarkReadOnlyDirectives` drops);
   `packages/dispatch/e2e/typed-block-content-rule.e2e.ts`
