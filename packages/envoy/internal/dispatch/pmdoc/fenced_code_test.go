@@ -41,6 +41,11 @@ func TestFencedCodeDropsAWhitespaceLineShortOfTheFenceIndent(t *testing.T) {
 		// columns the container leaves, as spaces, as it does with a line feed after it.
 		{name: "quoted tab-only last line with no final line feed", markdown: "> ```\n> x\n>\t", codes: []string{"x\n  "}},
 		{name: "tab-only last line of an item with no final line feed", markdown: "- ```\n  x\n\t", codes: []string{"x\n  "}},
+		// A container inside the one that took part of the tab takes its own columns from the rest,
+		// and an item whose content stands past them takes them all.
+		{name: "tab-only last line of a quoted item, with no final line feed", markdown: "> - ```\n>   x\n>\t", codes: []string{"x"}},
+		{name: "tab-only last line short of a quoted item's content, with no final line feed", markdown: "> -  ```\n>    x\n>\t", codes: []string{"x"}},
+		{name: "tab-only last line past the fence's indent in a quote, with no final line feed", markdown: ">  ```\n>  x\n>\t", codes: []string{"x\n "}},
 		// A line as long as the fence's indentation, or a fence at its container's content, keeps
 		// what the line holds past them.
 		{name: "fence at the line's start", markdown: "~~~\n \nx\n", codes: []string{" \nx"}},

@@ -368,7 +368,9 @@ func (p listItemColumns) Continue(node ast.Node, reader gmtext.Reader, pc parser
 // a whitespace-only line holding fewer is an empty line of the code. Goldmark keeps all such a line
 // holds, so `  ~~~\n \nx` held the code ` \nx`, where that parser reads `\nx`. A last line of the
 // document with no line feed that holds nothing past the fence's indentation is no line of the code
-// to that parser, where goldmark ends it with a line feed, so `  ~~~\nx\n ` holds the code `x`.
+// to that parser, as one holding nothing past its containers' markers is no line to goldmark
+// (lastLineColumns), so it is dropped as goldmark drops that one: `  ~~~\nx\n ` holds the code `x`,
+// and in a quote the quote takes that line in place of the code's last (droppedQuoteLine).
 type fenceClosure struct{ parser.BlockParser }
 
 var (
@@ -407,7 +409,8 @@ func (p fenceClosure) Continue(node ast.Node, reader gmtext.Reader, pc parser.Co
 		code.ForceNewline = true
 	}
 	if code.Start >= code.Stop && code.Padding == 0 && !bytes.HasSuffix(line, []byte("\n")) {
-		code.ForceNewline = false
+		node.Lines().SetSliced(0, last)
+		return state
 	}
 	node.Lines().Set(last, code)
 	return state
@@ -732,7 +735,7 @@ func recordLine(line gmtext.Segment, source []byte, pc parser.Context) {
 // its parse, so pmdoc registers none, and takes the backslash out of a cell's escaped pipes itself
 // once the bounds hold (unescapeTablePipes).
 func parseSource(p parser.Parser, source []byte, context parser.Context) (ast.Node, error) {
-	root := p.Parse(gmtext.NewReader(source), parser.WithContext(context))
+	root := p.Parse(&lastLineColumns{Reader: gmtext.NewReader(source)}, parser.WithContext(context))
 	definitionsInPlace(root, context)
 	if recorded := context.Get(untrimmedLinesKey); recorded != nil {
 		root.SetAttribute(untrimmedLinesAttr, recorded)
@@ -742,6 +745,64 @@ func parseSource(p parser.Parser, source []byte, context parser.Context) (ast.No
 	}
 	unescapeTablePipes(root, source)
 	return root, nil
+}
+
+// lastLineColumns is goldmark's reader keeping the document's last line where it has no line feed
+// and its containers' markers leave only columns of a tab they took part of: goldmark reads no
+// line past the source's end, so it dropped that line, where the browser editor's parser reads the
+// columns left as the line's (`> ```\n> x\n>\t` holds the code `x\n  `, as it does with a line
+// feed after the tab). The line is the columns, as goldmark's reader writes a padded line's value
+// (Segment.Value); a last line its containers leave nothing of stays no line to either parser.
+type lastLineColumns struct {
+	gmtext.Reader
+}
+
+func (r *lastLineColumns) PeekLine() ([]byte, gmtext.Segment) {
+	line, segment := r.Reader.PeekLine()
+	if line == nil && segment.Padding > 0 && segment.Start == len(r.Source()) {
+		return segment.Value(r.Source()), segment
+	}
+	return line, segment
+}
+
+// AdvanceLine drops the columns left at the source's end, which goldmark's reader keeps there, so
+// the last line is read once.
+func (r *lastLineColumns) AdvanceLine() {
+	r.Reader.AdvanceLine()
+	if _, segment := r.Reader.Position(); segment.Start >= len(r.Source()) {
+		r.Reader.SetPadding(0)
+	}
+}
+
+// AdvanceToEOL takes every column left at the source's end, as it takes the rest of any line, so
+// an item whose content stands past them takes them all (`> -  ```\n>    x\n>\t` holds the code
+// `x`).
+func (r *lastLineColumns) AdvanceToEOL() {
+	r.Reader.AdvanceToEOL()
+	if _, segment := r.Reader.Position(); segment.Start >= len(r.Source()) && segment.Padding > 0 {
+		r.Reader.Advance(0) // forgets the line offset and the peeked line
+		r.Reader.SetPadding(0)
+	}
+}
+
+// Advance takes n of the columns left at the source's end, where goldmark's reader takes none, so
+// a container inside the one that left them takes its own columns from them too (`> - ```\n>   x\n>\t`
+// leaves the item nothing, and holds the code `x`).
+func (r *lastLineColumns) Advance(n int) {
+	_, segment := r.Reader.Position()
+	if segment.Start < len(r.Source()) || segment.Padding == 0 {
+		r.Reader.Advance(n)
+		return
+	}
+	r.Reader.Advance(0) // forgets the line offset and the peeked line
+	r.Reader.SetPadding(max(segment.Padding-n, 0))
+}
+
+func (r *lastLineColumns) AdvanceAndSetPadding(n, padding int) {
+	r.Advance(n)
+	if _, segment := r.Reader.Position(); padding > segment.Padding {
+		r.Reader.SetPadding(padding)
+	}
 }
 
 // multilineCodeSpanText is the text of a code span that runs over more than one line, as the
