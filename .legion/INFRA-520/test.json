@@ -2,18 +2,26 @@
   "schemaVersion": 1,
   "phase": "test",
   "issue": "INFRA-520",
-  "completed": "2026-10-29T09:55:00Z",
-  "round": 16,
-  "headTested": "625fe2b80de1064c446867d61c60833b4cb88bab (code head 0dc57a01ebfa, merge of main 5443d99b)",
-  "previousRound": "Review round 7 (review.json at 029b5024) found #2316 CONFLICTING with main a7c762f6 (#2186). 0dc57a01 merges main through 5443d99b (#2186, #2362). Against main, worker-image.yaml differs only by this pull request's design: no pull_request trigger (ci.yaml calls it), concurrency on the build job, the gha cache with mode=min and ignore-error. release.yaml differs only in this pull request's Go cache restore, so #2186's release.yaml lines are present. packages/daemon/internal/claudebridge/bridge_test.go equals main.",
-  "ci": "No CI run at 0dc57a01 was read: the worker-image re-pin drain suspends this claim at 10:08Z.",
+  "completed": "2026-10-29T12:00:00Z",
+  "round": 17,
+  "headTested": "27b103a1451f1a56bc031bdd69825189afc6b492 (code head ae8b66d6f233, merge of main 8a911ecc)",
+  "previousRound": "Review round 8 (review.json at 2a21eebc) found #2316 CONFLICTING with main 8a911ecc (#2486), a modify/delete on the deleted envoy-and-contracts.yaml. ae8b66d6 keeps the deletion. #2486 gives dispatch-browser-multiprocess the pgvector-on-18 image (2358fcba\u2026) and a filter of its own (the dispatch list plus its workflow file). ci.yaml already has both at 0dc57a01: line 1956's `if: needs.changes.outputs.dispatch_browser_multiprocess == 'true'`, the 2358fcba image at 1960, and the filter `*dispatch`, whose anchor names .github/workflows/ci.yaml. No file under .github differs between 0dc57a01 and ae8b66d6. The merge adds only main's content and a docs/solutions note.",
+  "ci": "First green verdict of the router on a #2316 head: CI run 40851398418 at code head 0dc57a01 completed at 11:36:21Z. 26 jobs succeeded and 1 was skipped (worker-image / attest). All 23 selected jobs succeeded, dispatch (job 123373744487) and envoy-go (123373744508) among them. ci-ok (123422951059) succeeded: 'changes and lint succeeded, every job changes selected succeeded, and every other job succeeded or was skipped'. CI run 40867902214 at ae8b66d6 was in progress at 11:50Z. Read as in progress; I did not wait for it. Its .github tree equals 0dc57a01's.",
   "implementerProof": {
     "verdict": "verified",
-    "how": "At 625fe2b8. ci.yaml's worker_image filter matches packages/claude-envoy/** and .bun-version, the two inputs #2186 added. I ran workflow_paths over every file at 0dc57a01: main's worker-image.yaml pull_request paths match 3813 files, and the worker_image filter misses 772. Every miss is a file the .dockerignore drops (**/dist, packages/envoy/**/*_test.go \u2026), which the filter's `!` patterns leave out by design (round 1). check-image-trigger-paths.sh passes ('every image trigger covers every input its build reads (5 image build(s))'). check-ci-filters.sh passes 23 gates, docs-pages' paths included (they gain daemon/internal/claudelaunch). GitHub reports #2316 MERGEABLE."
+    "how": "Read #2486's diff against ci.yaml at ae8b66d6 (lines 658, 1956, 1960, and the dispatch_browser_multiprocess filter). jj diff 0dc57a01..ae8b66d6 shows no .github change. check-ci-filters.sh and check-image-trigger-paths.sh pass at ae8b66d6. GitHub reports #2316 MERGEABLE, and main has no commit after 8a911ecc."
   },
   "failures": [],
   "failed": 0,
   "proof": [
+    {
+      "criterion": "The router's own verdict on a real head: ci-ok green with every selected job succeeded",
+      "surface": "GitHub Actions on sjawhar/legion#2316, CI run 40851398418 at code head 0dc57a01",
+      "command": "https://github.com/sjawhar/legion/actions/runs/40851398418; jobs API; ci-ok job 123422951059's log; ci-filters job 123373744464's log",
+      "observed": "Completed, 26 success and 1 skipped (worker-image / attest). ci-ok's log lists 23 selected jobs, every one success, and ends 'changes and lint succeeded, every job changes selected succeeded, and every other job succeeded or was skipped'. ci-filters: 23 gates, 0 uncovered",
+      "headSha": "0dc57a01ebfa132e386ccabe9fabbf1db68d7584",
+      "negativeControl": "Run 40768558349 at bb1a700a (round 13): the same ci-ok failed naming dispatch when dispatch's browser tests failed, so the green verdict here is not a vacuous pass"
+    },
     {
       "criterion": "Filter drift: the ported envoy-go unit-test script is held to its exact pin, so a change to it falls to everything",
       "surface": ".github/scripts/check-ci-filters.sh on the repository tree",
@@ -29,14 +37,6 @@
       "observed": "push/false/skipped: exit 0. pull_request/true/success: exit 0. pull_request/true/skipped: exit 1, '::error::docs ended skipped, but changes selected it (needs.changes.outputs.docs is true); a selected job must succeed \u2026'. merge_group/true/skipped: exit 1, the same error",
       "headSha": "f78f383ede82",
       "negativeControl": "the pull_request and merge_group skips are refused, so dropping NOT_ON_PUSH opened no skip on the events where docs runs"
-    },
-    {
-      "criterion": "The router's own verdict on a real head: ci-ok reports, and every selected job but main's known reds succeeds",
-      "surface": "GitHub Actions on sjawhar/legion#2316, CI run 40768558349 at code head bb1a700a",
-      "command": "https://github.com/sjawhar/legion/actions/runs/40768558349, watched to completion; jobs API; ci-ok check run 123182985083's annotations and log; ci-filters job 123128575345's log; dispatch job 123128575617's log",
-      "observed": "Completed at 01:06:29Z. changes success, every filter true. 29 of 30 selected jobs succeeded, ci-filters among them (26 gates, 0 uncovered). ci-ok's log prints each job's result and why it was selected. It ends with the one error naming dispatch, which failed on 5 Playwright tests: close-withdraws-asks.e2e.ts:126 (chromium) and mermaid.e2e.ts:194 (chromium, iphone, webkit, firefox), 1210 passed. Both are main's reds (see mainReds).",
-      "headSha": "bb1a700af2f3",
-      "negativeControl": "ci-ok's own verdict is the control: it failed this run because a selected job failed, with 'dispatch ended failure, but changes selected it'. A green ci-ok here would have meant the condense step missed a failure"
     },
     {
       "criterion": "Filter drift, conservative rule (round-3 review): a step script bash would read differently, and an env name go can reach, fall to everything; allowed test configuration does not",
@@ -88,8 +88,9 @@
     }
   ],
   "notProven": [
-    "No CI run of 0dc57a01 has been read, and ci-ok has not yet been green at a #2316 head (main's reds at earlier heads).",
+    "The run at the current code head ae8b66d6 (40867902214) was in progress at 11:50Z. ae8b66d6's .github tree equals that of 0dc57a01, whose run was green.",
     "docs-pages.yaml runs only on a push to main. Its first run, queue order and deploy are the production check's.",
     "By the architect's decision (comment bafbc258), the check does not read environment writes made inside local actions or repository scripts (check-ci-filters.sh:84-88)."
-  ]
+  ],
+  "ciFilters": "ci-filters (job 123373744464, run 40851398418) succeeded: 'every ci.yaml filter matches every file its job reads (23 gates), and every PUSH_WORKFLOWS workflow's on.push.paths equals its filter (1)'. Locally at ae8b66d6 the same check exits 0 with the same line, and check-image-trigger-paths.sh passes (5 image builds)."
 }
