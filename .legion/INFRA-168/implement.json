@@ -2,31 +2,35 @@
   "schemaVersion": 1,
   "phase": "implement",
   "issue": "INFRA-168",
-  "completed": "2026-10-29T20:30:00Z",
-  "round": "the round after tester round 13 (verdict fail at 9aed5df8; red test e2e88a97)",
-  "design": "Chose the architect's preferred design: the Dispatch decision record no longer runs inside the tool_call handler. handleCall appends the advisor-gate entry (main's record-failure refusal kept), keeps the override comment, mints, delivers notices and returns; the record then starts in the background under its own RECORD_TIMEOUT_MS stop, tracked in a pending set that session_shutdown waits for and cuts at its record deadline before markers are released. Oh My Pi's appendEntry stays open until shutdown seals the session, so a record that fails, hits its stop or is cut lands as a follow-up entry of the new type advisor-gate-record {toolCallId, tool, recordError} and a runtimeLogger line; askgate-report.ts reads only advisor-gate entries, so its counts are unchanged. CEILING_MARGIN_MS is main's 5,000 ms again, so the review deadline at the default 30 s ceiling is 25,000 ms and the minimum ceiling 15,000 ms. Bounding the record by the remaining budget was not needed, so no count is cut by the review's time.",
+  "completed": "2026-10-29T23:50:00Z",
+  "round": "the round answering the review of a43bfa38 (20 inline findings, all fixed here; no Fast-follow)",
   "proof": [
     {
-      "criterion": "At the default 30 s ceiling the review keeps main's 25,000 ms deadline (red test e2e88a97), and the Dispatch record still lands.",
-      "surface": "Nested headless Oh My Pi sessions on this branch's build in this Legion pod at the pod's default tool-call ceiling, branch dispatch CLI first on PATH, model anthropic/claude-opus-5, production Dispatch, scratch issue INFRA-766; and pi-envoy's suite.",
-      "command": "The G6 run.sh invocation, one session at a time, with p5.txt in block mode (run r14-c5-block) and p1.txt in warn mode (run r14-c1-warn), then dispatch doc-read of each session's askgate-decisions document; cd packages/pi-envoy && bun test (1620 pass, 0 fail) and bun test extensions/askgate/askgate.test.ts -t \"keeps main's 25,000 ms deadline\" (pass, test unmodified).",
-      "observed": "Both entries carry deadlineMs 25000 at the default ceiling (20000 at 9aed5df8). r14-c1-warn: rules no_change match, charter 14,898 ms, refused; its session document holds the record (rule no_change, outcome verdict) written after the call returned. r14-c5-block: the charter answered after 24,767 ms, past even main's 25,000 ms under the pod's load, so it is a timeout on both trees; its record landed. A first r14-c1-warn run whose rules call the provider refused (reasoning_extraction) was rerun, not counted.",
-      "headSha": "bd250c480ce4750433d886f125097fd60a371b24",
-      "negativeControl": "At 9aed5df8 the same pin read deadlineMs 20000 and the tester's paired runs cut reviews at 20,000 ms that main finished at 20.8-22.8 s; the red test fails there (expected >= 25000). New tests (a)-(d) fail with the record awaited in the handler again or the follow-up entry suppressed."
+      "criterion": "Security[untrusted-input]: no rebuttal text can expand or run, and the override comment stands only where bash ends the command's line, so dispatch receives exactly the agent's argv without the override and the marker key matches it.",
+      "surface": "Real bash under pi-envoy's suite (a stand-in dispatch printing its argv and stdin, plus a sentinel file), and a nested headless Oh My Pi session on this branch's build in this Legion pod with the branch CLI first on PATH, model anthropic/claude-opus-5, production Dispatch.",
+      "command": "cd packages/pi-envoy && bun test extensions/askgate/askgate.test.ts -t 'the override comment, wherever' (30-row table: $(...), backticks, quotes in the rebuttal; multi-line single-quoted --body, here-document, | head -n 5, 2>&1, leading cd); live: run.sh r15 block with `dispatch comment --issue INFRA-766 --body '<two lines>' --advisor-rebuttal 'the probe needs $(touch /legion/scratch/tmp/g6/PWNED) kept as text'`, and run.sh r15b block with a rebutted `dispatch ask … | head -n 5`.",
+      "observed": "Table: 30 pass; argv equals the agent's without the override, stdin equals the here-document body, the sentinel never exists, the gate reads its own output back as the same rebuttal (or, where a value cannot be quoted in the grammar, the comment is dropped and the acknowledgement says the flag was removed). Live: the recorded command ends `…A second line of the same body.' # '--advisor-rebuttal' 'the probe needs $(touch …/PWNED) kept as text'`, outcome rebuttal, and /legion/scratch/tmp/g6/PWNED was not created; the piped ask was recorded `… | head -n 5 # '--advisor-rebuttal' 'the person asked for the move'` and reached Dispatch with its marker accepted (Dispatch answered `issue is closed`, the scratch issue having been closed, not a marker refusal).",
+      "headSha": "e061d9edfc2e667f1dedec283e1593133dd6bd8b",
+      "negativeControl": "With bd250c48's keepOverrideVisible restored, the table fails 18 of 30 rows and the `$(touch …)` row on a multi-line body creates the sentinel (ran: true), the reviewer's reproduction."
+    },
+    {
+      "criterion": "The record starts after the mint with the decision the call finally got; the recorder owns its stop, the shutdown cut and each session's order, and never replaces a session's document.",
+      "surface": "pi-envoy's suite (the real gate, the real recorder, a fake Dispatch that versions a project document by name as artifacts.go:445 does).",
+      "command": "cd packages/pi-envoy && bun test (1660 pass, 0 fail) incl. 'a mint that refuses makes the record say the call was sent back', 'a record the session's shutdown cuts says so, not that it ran to its own stop', 'a recorder holding no id for the session appends…', 'the records of one session land in the order they were made…', 'a gate that does not load cuts its own records…'.",
+      "observed": "All green; A1's pin green with MEASURED unedited.",
+      "headSha": "e061d9edfc2e667f1dedec283e1593133dd6bd8b",
+      "negativeControl": "Each test fails with its change reverted: the record before the mint says allow for a refused call; a cut unmarked record says 'within 5000 ms'; a fresh recorder uploads a second time; three records land out of order; rules test 20 sees one notice; a tool_result during the review still mints."
     }
   ],
   "filesChanged": [
-    "packages/pi-envoy/extensions/askgate/askgate-core.ts — CEILING_MARGIN_MS 5,000; startRecord/records/noteRecordFailure; ADVISOR_GATE_RECORD_ENTRY_TYPE and GateRecordEntry; session_shutdown waits handlers then records; header comment.",
-    "packages/pi-envoy/extensions/askgate/decision-record.ts — header note.",
-    "packages/pi-envoy/extensions/askgate/askgate.test.ts, packages/pi-envoy/extensions/envoy.test.ts — tests adapted to the new order and figures, four new tests.",
-    "packages/pi-envoy/README.md, AGENTS.md, docs/kubernetes.md, deploy/kubernetes/operator-route/overlay.yml, packages/pi-envoy/.changes/unreleased/INFRA-168-askgate-decision-record.yaml — 25,000 ms / 5,000 ms margin / 15,000 ms minimum, and the record's timing."
+    "e361a909: askgate-core.ts (lineEnd, overrideComment, literalWord/overrideWords/sameArgv, keepOverrideVisible -> {input, kept}, Override.removed, record after mint), askgate.test.ts (bash table, tests), envoy.test.ts, pi-shared shell-command.test.ts corpus, README, AGENTS, rules-check fragment.",
+    "2d7d78a4: decision-record.ts (recorder object with record/cut/settled, list-by-name append, per-session serialisation) and test, askgate-core.ts (required recordDecision, no duplicate timers, dry-run timeout branch removed), askgate.ts, envoy.ts, askgate.test.ts, envoy.test.ts, README, decision-record fragment.",
+    "e061d9ed: askgate-core.ts (GatedCall object, ruleRefusal), scripts/askgate-report-dispatch.ts and askgate-report-common.ts split from askgate-report.ts with tests, rules-check.ts (RULE_NAMES, RULE_OUTCOMES, RULE_REFUSAL_OPENING, JudgedAsk), score.ts, src/dispatch-session.ts, askgate.ts, envoy.ts, breaker.ts (refused(), {key, label}), envoy-client askgate-new-asks.ts (textMissing removed), AGENTS."
   ],
   "trickyParts": [
-    "A record whose advisor-gate entry append threw (the call refused for it) is still published, as main published the record before that append; the Dispatch document is then the only account of the decision.",
-    "Design 9's ended/mintSkipped guard now covers the review window, the only await left between a call's arrival and its mint."
+    "Every word of the override comment is quoted, the flag included, so the quotes stay paired; a rebuttal value holding both a single quote and one of $ ` \\ \" (or a newline) cannot be quoted in the literal grammar, so its comment is dropped and the acknowledgement says the flag was removed. The gate keeps the comment only when re-reading the returned command gives the same command, the same rebuttal and the same argv.",
+    "The scratch issue INFRA-766 was closed during the round (Dispatch answered `issue is closed`), so the live pipe-stage run proves the CLI accepted the marker but posted nothing."
   ],
   "deviations": [],
-  "openQuestions": [
-    "sjawhar/legion#2159 is merged; nothing waits on another pull request."
-  ]
+  "openQuestions": []
 }
