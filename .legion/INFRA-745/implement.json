@@ -2,7 +2,7 @@
   "schemaVersion": 1,
   "phase": "implement",
   "issue": "INFRA-745",
-  "completed": "2026-10-29T15:15:00Z",
+  "completed": "2026-10-29T17:05:00Z",
   "proof": [
     {
       "criterion": "2 - a session following an issue's topic is shown an agent's comment on it, with the fix's two halves joined on one real wire frame",
@@ -35,9 +35,20 @@
       "observed": "PASS in 5.1 s: the publish under a grant that withholds notifications.dispatch.> answers an error that is bus.ErrPublishDenied, wraps nats.ErrPermissionViolation, carries the server's 'Permissions Violation for Publish to \"notifications.dispatch.issue.ACME-1.message.created\"' and is not bus.ErrUnavailable; the same publish under a grant that allows the subject is accepted and the stream retains it (JS().GetLastMsg).",
       "headSha": "71128319b1d2ab2b31f4c7127f271a42f8164e41",
       "negativeControl": "internal/bus/nats.go restored to its content before this commit, everything else at this head: the same test fails in 5.05 s with 'denied JetStream publish returned context deadline exceeded, want ErrPublishDenied wrapping the permissions violation' - the publish window running out, which is what a caller met before. The granted leg in the same test is the other control: it must still publish and be retained."
+    },
+    {
+      "criterion": "the tester's failure of round 1: a notifying event whose several JetStream destinations are all denied is named, counted and backed off - not released as an outage with the scan's backlog abandoned",
+      "surface": "the denied rig again, at this head: the real envoy-dispatch binary on the real nats-server whose rendered grant withholds notifications.> from the Dispatch user, with a person signed in through the dev sign-in and an issue routed to a session, so the comment event notifies and has two JetStream destinations (its owner topic and notifications.agent.<session>)",
+      "command": "build the binary at this head and run it against nats://127.0.0.1:4334 on a fresh database (d745round2) at 127.0.0.1:8749; POST /api/v1/projects and /api/v1/issues as a session actor, PATCH /api/v1/issues/RTE-1 with route session:3333...; GET /auth/_dev/signin?login=alice@example.com into a cookie jar; POST /api/v1/issues/RTE-1/comments with that cookie and an Origin header; then psql 'select id, type, notify, attempt_count, published_at, published_destinations from events' and curl -s http://127.0.0.1:8749/metrics",
+      "observed": "the comment event (notify = t) has published_at null, published_destinations {} and attempt_count 2 and climbing, so it is backed off rather than released; /metrics reads envoy_dispatch_outbox_publish_failures_total{reason=\"denied\"} 12 and carries no reason=\"failed\" series at all; the process log holds zero 'NATS is unreachable' lines; and one ERROR line names both destinations by their own subjects: 'publish owner topic \"notifications.dispatch.issue.RTE-1.comment.created\": bus: NATS denied the publish to \"...\"' and 'publish route \"session:3333...\": bus: NATS denied the publish to \"notifications.agent.3333...\"'.",
+      "headSha": "f56c285b573204e9569a68d89fd20da9774a4d25",
+      "negativeControl": "three, each run and restored: (1) async.go's read put back to the connection's single last error - TestAWindowAnswersEachDeniedJetStreamSendItsOwnDenial fails, 'the denied send to notifications.dispatch.issue.ACME-7.message.created was answered bus: NATS is unreachable: nats: timeout waiting for ack'; (2) ErrPublishDenied reworded to 'NATS refused the publish' - TestRunRetriesAnIssueTopicNATSDenies fails, 'does not carry \"NATS denied the publish\", which the deployment's alert matches on'; (3) backOff's slog.Error lowered to slog.Warn - the same test fails, 'does not carry \"level=ERROR\"'."
     }
   ],
   "filesChanged": [
+    "packages/envoy/internal/bus/denials.go - the per-subject record of the server's publish refusals, its retention and its one spelling of the denial error",
+    "packages/envoy/internal/bus/nats.go, recovery.go - onAsyncError records a publish refusal under its own subject; a reconnect and a replacement connection clear the record",
+    "packages/envoy/internal/bus/publish_denied_window_test.go - one window, two denied subjects, each send answered its own denial",
     "packages/envoy/internal/bus/confirm.go - publishDenial, the violation predicate extracted from confirmPublished",
     "packages/envoy/internal/bus/async.go - window.acknowledged takes the publish's topic and names a denial on the windowed JetStream path",
     "packages/envoy/internal/bus/nats.go - Client.lastError, and publishJetStream names a denial on the synchronous path every other caller takes (the architect's D5 decision)",
