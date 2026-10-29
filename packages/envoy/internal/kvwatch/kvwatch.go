@@ -598,9 +598,7 @@ func (w *Watcher) consume(watcher nats.KeyWatcher, generation uint64, started ti
 	// says only that the outage is still running. That refines, and does not drop, what INFRA-182
 	// settled - an ERROR when nothing has repaired the watcher within a minute - by making
 	// unrepairedDelay the single point it is reported at.
-	w.repairTimer = w.after(unrepairedDelay, func() {
-		w.reportUnrepaired("no repair within "+unrepairedDelay.String(), generation)
-	})
+	w.repairTimer = w.after(unrepairedDelay, func() { w.reportUnrepaired(generation) })
 	w.mu.Unlock()
 	w.logger().Warn(w.name+" watcher stopped", slog.String("error", err.Error()))
 	w.signalReady()
@@ -649,14 +647,14 @@ func (w *Watcher) rescanFrom(generation uint64) {
 }
 
 // reportUnrepaired logs the one ERROR for the stop nobody asked for that the watcher of generation
-// made, naming reason, which is now the wait's own alone: unrepairedDelay passed with no repair.
-// It returns silently unless that stop is still outstanding: repairTimer is set and generation is
-// still current. The generation tells a wait's own stop from a later one. time.AfterFunc's
-// callback can already be running when Stop returns false, so a wait a repair cleared can still
-// call here after the replacement has ended on its own and armed a wait of its own; reporting then
-// would log that stop moments after it happened and leave its own wait nothing to report. Clearing
-// repairTimer under the same mu is what makes the ERROR exactly one.
-func (w *Watcher) reportUnrepaired(reason string, generation uint64) {
+// made: unrepairedDelay passed with no repair, which is the stop's one report. It returns silently
+// unless that stop is still outstanding: repairTimer is set and generation is still current. The
+// generation tells a wait's own stop from a later one. time.AfterFunc's callback can already be
+// running when Stop returns false, so a wait a repair cleared can still call here after the
+// replacement has ended on its own and armed a wait of its own; reporting then would log that stop
+// moments after it happened and leave its own wait nothing to report. Clearing repairTimer under
+// the same mu is what makes the ERROR exactly one.
+func (w *Watcher) reportUnrepaired(generation uint64) {
 	w.mu.Lock()
 	timer := w.repairTimer
 	if timer == nil || generation != w.generation {
@@ -673,7 +671,7 @@ func (w *Watcher) reportUnrepaired(reason string, generation uint64) {
 	}
 	w.logger().Error(w.name+" watcher was not repaired",
 		slog.String("bucket", w.bucket),
-		slog.String("reason", reason),
+		slog.String("reason", "no repair within "+unrepairedDelay.String()),
 		slog.String("error", recorded))
 }
 

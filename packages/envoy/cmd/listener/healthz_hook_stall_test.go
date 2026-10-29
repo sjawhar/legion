@@ -47,9 +47,9 @@ var errHookStallRewatch = errors.New("rewatch interest cache: watch role claims 
 // /healthz answers 503 unhealthy, naming "KV watch rebuild", once the bus's reconnect hooks have
 // been due a whole bus.RepairGrace without a run that succeeded, and 200 healthy while the stall is
 // under it. A rewatch that keeps failing after a reconnect ends no watcher and clears no cache, so
-// before this branch every other check here passed - WatchErr stayed nil, the bucket ping answered,
-// and the durable was bound - and /healthz called a listener whose caches follow buckets they no
-// longer watch healthy, which is the regression this catches (INFRA-743). The negative control is
+// every other check here passes - WatchErr stays nil, the bucket ping answers, and the durable is
+// bound - and the regression this catches is /healthz calling a listener healthy whose caches
+// follow buckets they no longer watch (INFRA-743). The negative control is
 // the same request on the same rig after a connection event and a failed run, with the stall still
 // under the grace: the bus runs the hooks again within seconds, so that must stay 200 healthy
 // rather than fail the container health check over every reconnect.

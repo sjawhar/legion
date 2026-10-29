@@ -441,7 +441,7 @@ func healthzHandler(deps *atomic.Pointer[listenerDeps]) http.HandlerFunc {
 				// The last failure says what is broken; the stall, for how long. A run still in
 				// flight past the grace has no error of its own, and writeDependencyHealth needs
 				// one, so then the stall is the whole report.
-				rebuild = fmt.Errorf("%w (no rebuild has succeeded for %s)", hookErr, stall.Round(time.Second))
+				rebuild = fmt.Errorf("%w (%w)", hookErr, rebuild)
 			}
 			writeDependencyHealth(w, "KV watch rebuild", rebuild, true)
 			return

@@ -211,10 +211,12 @@ func (c *Client) rewatch() error {
 	}
 	c.mu.Lock()
 	c.hookedEvents = events
+	// The run succeeded, so every failure before it is past, whether or not an event landed while
+	// it was under way: an error kept here would name a fault this run repaired, and /healthz
+	// reports it beside the stall.
+	c.lastHookErr = nil
 	if c.connEvents == events {
-		// Every event is covered: the hooks are current, and the failures before this run are past.
 		c.hooksDueSince = time.Time{}
-		c.lastHookErr = nil
 	} else {
 		// An event landed while the run was under way, so the hooks are due again for it. Its
 		// stall begins here rather than at the event, which this run was already past when it was

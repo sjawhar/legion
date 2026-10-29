@@ -13,13 +13,13 @@ import (
 )
 
 // The acceptance clause this holds: a hook failure the recovery repairs by itself logs no ERROR.
-// The retry itself is not what it pins, since that is on main already
-// (TestAFailedRunOfTheReconnectHooksRunsAgainWithoutAnotherConnectionEvent); the report of it is.
-// The regression it catches is the one this change was made for: a rewatch that failed once after
-// a server restart and succeeded a second later paged as an ERROR, which is the level a stall
-// nothing repairs must have for itself. So the failed run reports at WARN, the whole restart logs
-// no ERROR at all, and HookStall, which /healthz reads, is back to no stall and no error once the
-// retry has covered the reconnect.
+// The retry itself is not what it pins - that is
+// TestAFailedRunOfTheReconnectHooksRunsAgainWithoutAnotherConnectionEvent's - but the report of
+// it. The regression it catches: a rewatch that fails once after a server restart and succeeds a
+// second later pages as an ERROR, which is the level a stall nothing repairs must have for
+// itself. So the failed run reports at WARN, the whole restart logs no ERROR at all, and
+// HookStall, which /healthz reads, is back to no stall and no error once the retry has covered
+// the reconnect.
 func TestRewatchRetryAfterAReconnectLogsNoError(t *testing.T) {
 	srv, uri := testnats.Start(t)
 	client, err := bus.ConnectOwningStream([]string{uri})
