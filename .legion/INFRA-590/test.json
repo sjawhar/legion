@@ -2,54 +2,52 @@
   "schemaVersion": 1,
   "phase": "test",
   "issue": "INFRA-590",
-  "completed": "2026-10-29T19:00:00Z",
-  "round": 13,
-  "testedHead": "5ea3ce58dd9aa6838e0ef69863f4b9c97acac7b7",
-  "testCommit": "24d206a67ed534782b501e9a3f399b5b8f640d4f",
-  "fingerprint": "The implementer's comment 6503673013 gives 'de32e067… -> 0803828c…' for the merge of main 7c2effba4 (#2370, #2505 in the listener and bus). It differs, so this is a full round.",
+  "completed": "2026-10-29T22:55:00Z",
+  "round": 14,
+  "testedHead": "bb6c22f975342594a32f777ac87c66b8059aa32d",
+  "fingerprint": "The implementer's comment 6509670093 gives the fingerprint 61f47ca7… at 5d0cf73b -> 826725e2… at the merge 4f2995f2 -> bd52726b… at bb6c22f9: the merge renumbers the migrations above main's 0141, and the new test commit adds a test. Full round.",
   "implementerProof": {
     "verdict": "verified",
-    "how": "Ran the suites again at 5ea3ce58, one at a time on this pod's Postgres 17: multiprocess ok (917.4 s); outbox, bus and roles ok; cmd/listener ok (476.4 s, the whole package, no flake this run). scripts/e2e-local.sh on a real listener and NATS passed. I mutated the merged listener code (proof below)."
+    "how": "Ran the suites again at bb6c22f9, one at a time on this pod's Postgres 17: multiprocess ok (928.7 s); outbox, bus, roles, session and kvwatch ok; cmd/listener ok (481.6 s, the new TestCoreRoleDeliverySkipsAHolderThatStoppedHeartbeating and round 13's TestPublishRouteStoresOneCopyOfARoleMessageItForwardsTwice included). scripts/e2e-local.sh on a real listener passed. I mutated the code the new test pins and checked the renumbered migrations against main's build (proof below)."
   },
   "failures": [],
   "failed": 0,
   "proof": [
     {
-      "criterion": "The merged listener (main's #2370 resolver over roles.ResolveHolder, and the publish route's forwards) delivers role and topic messages as before, and its role forwards keep one stored copy",
-      "surface": "a real envoy-listener and NATS (scripts/e2e-local.sh: fixtures, a direct message, an unheld and a held role publish, both renderers), and the cmd/listener package",
-      "command": "cd packages/envoy && GOWORK=off bash scripts/e2e-local.sh; GOWORK=off DISPATCH_TEST_DATABASE_URL=<pg> go test -count=1 -v ./cmd/listener/",
-      "observed": "e2e-local: both PASS lines; the held role publish reached the holder. cmd/listener ok in 476.4 s",
-      "headSha": "5ea3ce58dd9aa6838e0ef69863f4b9c97acac7b7",
-      "negativeControl": "e2e-local's bus-down step: with NATS stopped the direct send is refused with HTTP 503"
+      "criterion": "The gap round 13 found is closed: the role lane delivers nothing to a holder whose session stopped heartbeating, and a test pins it",
+      "surface": "cmd/listener's real role lane (TestCoreRoleDeliverySkipsAHolderThatStoppedHeartbeating) over a real NATS, under a mutation in a scratch copy",
+      "command": "cd packages/envoy && GOWORK=off go test -count=1 -run TestCoreRoleDeliverySkipsAHolderThatStoppedHeartbeating -v ./cmd/listener/, at the head and with laneHolderFresh forced to true",
+      "observed": "At the head the test passes, both subtests: the stale holder (heartbeat 6 min ago) gets nothing, and the holder that heartbeated 1 s ago is delivered to",
+      "headSha": "bb6c22f975342594a32f777ac87c66b8059aa32d",
+      "negativeControl": "With laneHolderFresh returning true, the test fails: 'the role lane delivered event … to ses_role_heartbeat on notifications.agent.ses_role_heartbeat, whose session entry last hea[rtbeated …]'. Round 13 showed that mutation passing every listener test"
     },
     {
-      "criterion": "The publish route's role forward is stored once per message and recipient however many attempts it takes (the merge moved the MsgId choice to RequestCoreTo's callers)",
-      "surface": "the publish route (POST /v1/messages/publish) over a real NATS with the agent stream, a holder stand-in that confirms only the second forward",
-      "command": "cd packages/envoy && GOWORK=off go test -count=3 -run TestPublishRouteStoresOneCopyOfARoleMessageItForwardsTwice -v ./cmd/listener/ (new test, commit 24d206a6)",
-      "observed": "Passes 3 of 3: two forwards, the 200 answer, and one copy on the holder's subject",
-      "headSha": "5ea3ce58dd9aa6838e0ef69863f4b9c97acac7b7",
-      "negativeControl": "With confirmed.go's two forwards passing no MsgId (scratch copy), the new test fails: 'the stream holds 2 copies on notifications.agent.ses_stored_once after two forwards of one role message, want 1'. Before this test the whole listener package passed under that mutation (156 s), and so did main's base 7c2effba4 with RequestCoreTo's MsgId removed"
+      "criterion": "After the merge: 0142_duty_holds and 0143_outbox_claim apply above main's 0141_drop_broadcast_idempotency_keys; main's build runs on schema 143; the count stays 89",
+      "surface": "envoy-dispatch built at head and main's envoy-dispatch (merge base dfd128f14) on one database and a real NATS; infra/gcp's count test as CI runs it",
+      "command": "head build migrates a fresh database (healthz), publishes a comment, stops with SIGTERM; then main's build posts 3 comments; go test -run TestDispatchConnectionsPerPodIsTheServers ./gcp/ in a scratch copy",
+      "observed": "Head /healthz: schema_version 143, outbox_publisher true; duty_holds empty after SIGTERM. Main's build booted on schema_version 143 and published 4 of 4 comment events. The count test passes at 89",
+      "headSha": "bb6c22f975342594a32f777ac87c66b8059aa32d",
+      "negativeControl": "Round 11 showed the count test failing at 88 (expected 89); the merge changed no pool"
     },
     {
-      "criterion": "The role lane's MsgId rule (set only for a key that names its event) is still pinned after the merge",
-      "surface": "cmd/listener under a mutation in a scratch copy",
-      "command": "delivery.go's DedupeKeyNamesTheUpstreamEvent check forced true; go test -run Role ./cmd/listener/",
-      "observed": "TestARoleForwardIsStoredOnceOnlyWhenItsEnvelopeNamesItsEvent fails",
-      "headSha": "5ea3ce58dd9aa6838e0ef69863f4b9c97acac7b7",
-      "negativeControl": "the mutation is the broken input"
+      "criterion": "The merged listener (main's #2377) and the PR's role delivery work on a real listener",
+      "surface": "scripts/e2e-local.sh: a real envoy-listener and NATS, fixtures, direct and role messages, both renderers",
+      "command": "cd packages/envoy && GOWORK=off bash scripts/e2e-local.sh",
+      "observed": "both PASS lines",
+      "headSha": "bb6c22f975342594a32f777ac87c66b8059aa32d",
+      "negativeControl": "its bus-down step: with NATS stopped the direct send is refused with HTTP 503"
     },
     {
       "criterion": "One publisher; take-over within 10 s; each session takes each event once and in order",
       "surface": "the repository's multiprocess harness",
       "command": "cd packages/envoy && GOWORK=off DISPATCH_TEST_DATABASE_URL=<pg> go test -tags multiprocess -count=1 -timeout 40m -v ./cmd/dispatch",
-      "observed": "ok, 917.4 s. Take-over: SIGKILL 5.962 s, NATS cut 3.005 s, silent cut 2.233 s, SIGSTOP 4.433 s; 200 comments each once and in order; role holder whose connection moves gets each event once and in order",
-      "headSha": "5ea3ce58dd9aa6838e0ef69863f4b9c97acac7b7",
+      "observed": "ok, 928.7 s. Take-over: SIGKILL 5.705 s, NATS cut 3.004 s, silent cut 2.428 s, SIGSTOP 4.662 s; 200 comments each once and in order; a role holder whose connection moves gets each event once and in order",
+      "headSha": "bb6c22f975342594a32f777ac87c66b8059aa32d",
       "negativeControl": "TestAFrozenPublisherSendsNothingWhenItResumes: the resumed process started no batch"
     }
   ],
   "observations": [
-    "Forcing the role lane's freshness test (laneHolderFresh) to true is caught by no listener test at this head, and the same mutation of main's inline rule at 7c2effba4 is caught by none either: a gap on main, not this merge's. The merge's roles.Fresh is the same rule (UpdatedAt > 0 and younger than session.ClaimStaleAfter), and the outbox's TestARoleRouteToAStaleHolderStaysPending fails if roles.Fresh itself is broken. Sent to the architect.",
-    "No migration or count change in this merge (0141/0142, 89); the PR is MERGEABLE now. CI at 5ea3ce58: 25 queued, 2 green when read.",
-    "The test commit 24d206a6 is pushed alone so CI runs on it; this handoff is a second push."
+    "CI at bb6c22f9: 2 checks queued when read; GitHub's mergeable state was still being computed (UNKNOWN).",
+    "The only known red on main is close-withdraws-asks.e2e.ts:126."
   ]
 }
