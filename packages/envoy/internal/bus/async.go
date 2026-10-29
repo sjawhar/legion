@@ -277,8 +277,9 @@ func (w *window) sendJetStream(item contracts.Envelope, data []byte) (func() err
 	}, nil
 }
 
-// requestReplies is how many replies to one Request wait to be read: it expects at most an empty
-// receipt and the stream's acknowledgement, or the server's no-responders answer, and nats.go
+// requestReplies is how many replies to one Request wait to be read: it expects at most two
+// empty receipts and two stream acknowledgements (the first send's, and the send without its id
+// that a duplicate with no sequence calls for), or the server's no-responders answer, and nats.go
 // drops a reply that finds the channel full.
 const requestReplies = 4
 
@@ -422,7 +423,9 @@ func (w *window) request(subject string, item contracts.Envelope, opts RequestOp
 				changed = w.client.ConnectionChanged()
 			case <-timer.C:
 				// The request is out of time: its answer is the timeout's, and no resend goes out
-				// after it, so the request leaves no write of the window in flight.
+				// once the timeout is taken. A resend already sent may still be stored after it, as a
+				// publish whose acknowledgement runs out of time may; the holder drops the copy by
+				// its event id.
 				if settled, err := drained(false); settled {
 					return err
 				}
