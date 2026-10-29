@@ -4,7 +4,6 @@ import (
 	"context"
 	"encoding/base64"
 	"encoding/json"
-	"net/http/httptest"
 	"reflect"
 	"slices"
 	"strings"
@@ -14,8 +13,6 @@ import (
 	"github.com/reearth/ygo/encoding"
 
 	"github.com/sjawhar/envoy/internal/dispatch/docs/docstest"
-	"github.com/sjawhar/envoy/internal/dispatch/store"
-	"github.com/sjawhar/envoy/internal/dispatch/store/storetest"
 )
 
 // Awareness - readers' cursors and presence - crosses processes through the awareness relay
@@ -30,27 +27,6 @@ const (
 	aliceClient uint64 = 1001
 	bobClient   uint64 = 2002
 )
-
-// awarenessPair is one document served by two processes, each with its own document socket.
-type awarenessPair struct {
-	database   *store.Store
-	artifactID string
-	taskA      *Service
-	serverA    *httptest.Server
-	taskB      *Service
-	serverB    *httptest.Server
-}
-
-func newAwarenessPair(t *testing.T) awarenessPair {
-	t.Helper()
-	database := storetest.Open(t)
-	artifactID := createDocument(t, database, "# First")
-	taskA, serverA := newTestServiceInstance(t, database)
-	taskB, serverB := newTestServiceInstance(t, storetest.SecondProcess(t, database))
-	seedServiceText(t, taskA, artifactID, "First.\n\nSecond.\n")
-	settleCurrentGeneration(t, taskA, artifactID)
-	return awarenessPair{database: database, artifactID: artifactID, taskA: taskA, serverA: serverA, taskB: taskB, serverB: serverB}
-}
 
 // runAwareness runs service's room sync, as cmd/dispatch does, and returns a channel that receives
 // each awareness notification once the service's relay has handled it.
@@ -74,16 +50,6 @@ func runAwareness(t *testing.T, service *Service) <-chan awarenessMessage {
 	}
 	runRoomSync(t, rs)
 	return handled
-}
-
-// openReader connects login's reader to the document on server and waits for the document.
-func (pair awarenessPair) openReader(t *testing.T, server *httptest.Server, login string) *docstest.Peer {
-	t.Helper()
-	reader := connectPeer(t, server.URL, pair.artifactID, login)
-	if err := reader.WaitForText(peerMarkdown, storedMarkdown(t, pair.database, pair.artifactID), roomWait(t)); err != nil {
-		t.Fatalf("%s's reader never received the document: %v", login, err)
-	}
-	return reader
 }
 
 // cursorOf is a reader's awareness state as the dashboard announces it.
@@ -145,7 +111,7 @@ func requireAwareness(t *testing.T, reader *docstest.Peer, holds func(map[uint64
 // A reader's cursor set on one process reaches a reader of the same document on the other, each
 // way, and so does its next move.
 func TestAwarenessSetOnOneProcessReachesAReaderOnTheOther(t *testing.T) {
-	pair := newAwarenessPair(t)
+	pair := newProcessPair(t)
 	runAwareness(t, pair.taskA)
 	runAwareness(t, pair.taskB)
 	alice := pair.openReader(t, pair.serverA, "alice")
@@ -163,7 +129,7 @@ func TestAwarenessSetOnOneProcessReachesAReaderOnTheOther(t *testing.T) {
 // at once: the room that loads for it asks the other processes for their readers' states, and
 // they answer. The test's readers send no heartbeat, so nothing else would bring it.
 func TestAReaderOpeningSecondOnTheOtherProcessSeesTheFirstReadersAwareness(t *testing.T) {
-	pair := newAwarenessPair(t)
+	pair := newProcessPair(t)
 	runAwareness(t, pair.taskA)
 	runAwareness(t, pair.taskB)
 	alice := pair.openReader(t, pair.serverA, "alice")
@@ -180,7 +146,7 @@ func TestAReaderOpeningSecondOnTheOtherProcessSeesTheFirstReadersAwareness(t *te
 // A reader who joins a room already resident on its process, and that loaded with no reader in
 // it, asks for the other processes' readers' states as it joins: the load asked nobody.
 func TestAReaderJoiningAResidentRoomOnTheOtherProcessSeesTheFirstReadersAwareness(t *testing.T) {
-	pair := newAwarenessPair(t)
+	pair := newProcessPair(t)
 	runAwareness(t, pair.taskA)
 	handledB := runAwareness(t, pair.taskB)
 	alice := pair.openReader(t, pair.serverA, "alice")
@@ -201,7 +167,7 @@ func TestAReaderJoiningAResidentRoomOnTheOtherProcessSeesTheFirstReadersAwarenes
 // A reader leaving on one process leaves on the other: ygo's removal of the departing peer's
 // states is relayed like any other change.
 func TestADisconnectOnOneProcessRemovesTheClientsAwarenessOnTheOther(t *testing.T) {
-	pair := newAwarenessPair(t)
+	pair := newProcessPair(t)
 	runAwareness(t, pair.taskA)
 	runAwareness(t, pair.taskB)
 	alice := pair.openReader(t, pair.serverA, "alice")
@@ -217,7 +183,7 @@ func TestADisconnectOnOneProcessRemovesTheClientsAwarenessOnTheOther(t *testing.
 // or a failed room's eviction makes - removes its readers' states on the other processes too,
 // though the close disconnects them and tears the room's relay down together.
 func TestARoomThisProcessClosesRemovesItsReadersAwarenessOnTheOther(t *testing.T) {
-	pair := newAwarenessPair(t)
+	pair := newProcessPair(t)
 	runAwareness(t, pair.taskA)
 	runAwareness(t, pair.taskB)
 	alice := pair.openReader(t, pair.serverA, "alice")
@@ -257,7 +223,7 @@ func waitForAwarenessState(t *testing.T, handled <-chan awarenessMessage, artifa
 // own in it: it does not load the document on a process no reader of it is on, and it does not
 // reach - nor restamp the idle clock of - a room resident here with nobody reading it.
 func TestRelayedAwarenessNeitherLoadsNorKeepsARoomWithNoReaderOfItsOwn(t *testing.T) {
-	pair := newAwarenessPair(t)
+	pair := newProcessPair(t)
 	runAwareness(t, pair.taskA)
 	handledB := runAwareness(t, pair.taskB)
 	alice := pair.openReader(t, pair.serverA, "alice")
@@ -281,7 +247,7 @@ func TestRelayedAwarenessNeitherLoadsNorKeepsARoomWithNoReaderOfItsOwn(t *testin
 // A client state too large for one notification is dropped and counted rather than sent, and
 // what the room relays after it still crosses.
 func TestAnAwarenessStateTooLargeToRelayIsDroppedAndCounted(t *testing.T) {
-	pair := newAwarenessPair(t)
+	pair := newProcessPair(t)
 	runAwareness(t, pair.taskA)
 	runAwareness(t, pair.taskB)
 	alice := pair.openReader(t, pair.serverA, "alice")
@@ -301,6 +267,73 @@ func TestAnAwarenessStateTooLargeToRelayIsDroppedAndCounted(t *testing.T) {
 	if dropped := pair.taskA.awarenessRelay.oversized.Load(); dropped != 1 {
 		t.Fatalf("task A's relay counted %d oversized states, want 1", dropped)
 	}
+}
+
+// awarenessFlood is one y-protocols awareness update announcing clients 1 through clients, each
+// with a cursor-sized state, as one peer's frame can.
+func awarenessFlood(clients uint64) []byte {
+	return encoding.EncodeBytes(func(encoder *encoding.Encoder) {
+		encoder.WriteVarUint(clients)
+		for client := uint64(1); client <= clients; client++ {
+			encoder.WriteVarUint(client)
+			encoder.WriteVarUint(1)
+			encoder.WriteVarString(`{"user":{"name":"flood"}}`)
+		}
+	})
+}
+
+// One frame inventing far more awareness clients than a room holds costs the other processes the
+// bound and no more: ygo takes maxAwarenessClientsPerRoom of them and drops every client the room
+// has not seen before past that (Server.MaxAwarenessClientsPerRoom), so the relay is handed the
+// bound's clients at most and sends the few notifications they fill, not one per client.
+func TestAnAwarenessFrameOverTheClientBoundRelaysNoMoreThanTheBound(t *testing.T) {
+	pair := newProcessPair(t)
+	handledB := runAwareness(t, pair.taskB)
+	if err := pair.taskA.warmLiveDocument(context.Background(), pair.artifactID); err != nil {
+		t.Fatalf("load task A's room: %v", err)
+	}
+	aw, resident := pair.taskA.srv.GetAwareness(pair.artifactID)
+	if !resident {
+		t.Fatal("task A's room is not resident, so it has no awareness to flood")
+	}
+
+	const flood = 8 * maxAwarenessClientsPerRoom
+	if err := aw.ApplyUpdate(awarenessFlood(flood), "a peer of task A"); err != nil {
+		t.Fatalf("apply a frame of %d awareness clients: %v", flood, err)
+	}
+	if held := len(aw.GetStates()); held != maxAwarenessClientsPerRoom {
+		t.Fatalf("task A's room holds %d awareness clients of the %d the frame claimed, want the %d-client bound",
+			held, flood, maxAwarenessClientsPerRoom)
+	}
+
+	deadline := time.After(roomWait(t))
+	sends, relayed := 0, 0
+	for relayed < maxAwarenessClientsPerRoom {
+		select {
+		case message := <-handledB:
+			if message.Room != pair.artifactID || message.Query {
+				continue
+			}
+			sends++
+			update, err := base64.StdEncoding.DecodeString(message.Data)
+			if err != nil {
+				t.Fatalf("decode a relayed awareness update: %v", err)
+			}
+			entries, err := decodeAwarenessEntries(update)
+			if err != nil {
+				t.Fatalf("read a relayed awareness update: %v", err)
+			}
+			relayed += len(entries)
+		case <-deadline:
+			t.Fatalf("task B heard %d awareness clients in %d notifications within %v, want the bound's %d",
+				relayed, sends, roomWait(t), maxAwarenessClientsPerRoom)
+		}
+	}
+	if relayed > maxAwarenessClientsPerRoom || sends > maxAwarenessClientsPerRoom {
+		t.Fatalf("a frame of %d clients relayed %d of them in %d notifications, past the %d-client bound",
+			flood, relayed, sends, maxAwarenessClientsPerRoom)
+	}
+	t.Logf("a frame of %d awareness clients relayed %d of them in %d notifications", flood, relayed, sends)
 }
 
 // awarenessEntryUpdate is a one-client awareness update, as y-protocols encodes one.
@@ -371,7 +404,7 @@ func TestAnAwarenessBatchIsSplitAcrossNotificationsWithinTheLimit(t *testing.T) 
 
 // Every document socket's upgrade names the process serving it.
 func TestTheDocumentWebsocketUpgradeNamesItsProcess(t *testing.T) {
-	pair := newAwarenessPair(t)
+	pair := newProcessPair(t)
 	reader := pair.openReader(t, pair.serverA, "alice")
 	if pair.taskA.hostname == "" {
 		t.Fatal("the service read no host name")

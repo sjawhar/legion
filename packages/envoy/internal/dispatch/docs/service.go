@@ -721,6 +721,14 @@ func New(deps Deps) *Service {
 	// A room forgets an awareness client it has not heard from in awarenessExpiry: a reader
 	// relayed from another process that died without removing it goes once its heartbeats stop.
 	srv.AwarenessExpiry = awarenessExpiry
+	// What a room's awareness may hold, whoever sent it: the distinct clients it tracks and the
+	// bytes of their states (maxAwarenessClientsPerRoom, maxAwarenessBytesPerRoom). Unbounded,
+	// ygo's default, one peer's frame can claim 10,000 client ids, each with a state of up to
+	// 1 MiB, and this service relays every one of them to the other processes: the awareness
+	// relay splits a batch into whole-client notifications within roomSyncPayloadLimit, so that
+	// one frame would become thousands of pg_notify sends on the process's one sender.
+	srv.MaxAwarenessClientsPerRoom = maxAwarenessClientsPerRoom
+	srv.MaxAwarenessBytesPerRoom = maxAwarenessBytesPerRoom
 
 	service.srv = newRoomServer(srv)
 	// Every close the service makes removes the room's local awareness first, so the other

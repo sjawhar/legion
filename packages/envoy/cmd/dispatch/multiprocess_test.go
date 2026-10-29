@@ -1477,67 +1477,9 @@ const liveWithin = time.Second
 // come through the agent token (dispatchAgentToken).
 const multiprocessAgentSession = "multiprocess-agent"
 
-// asUser is the header a signed-in person's request carries (X-Dispatch-User, which these
-// processes trust).
-func asUser(login string) http.Header {
-	return http.Header{"X-Dispatch-User": {login}}
-}
-
 // asAgent is the header an agent's request carries: the agent token and no person.
 func asAgent() http.Header {
 	return http.Header{"Authorization": {"Bearer " + dispatchAgentToken}}
-}
-
-// httpAnswer is one answer of a process's API.
-type httpAnswer struct {
-	status int
-	body   []byte
-}
-
-// code is the answer's error code ({"code": ...}), or "" for an answer that names none.
-func (a httpAnswer) code() string {
-	var coded struct {
-		Code string `json:"code"`
-	}
-	_ = json.Unmarshal(a.body, &coded)
-	return coded.Code
-}
-
-func (a httpAnswer) String() string {
-	return fmt.Sprintf("%d %s", a.status, strings.TrimSpace(string(a.body)))
-}
-
-// request sends body to path with header and answers whatever the process answers. It never
-// fails the test, so a goroutine may call it.
-func (p *dispatchProcess) request(method, path, body string, header http.Header) (httpAnswer, error) {
-	request, err := http.NewRequest(method, p.url(path), strings.NewReader(body))
-	if err != nil {
-		return httpAnswer{}, err
-	}
-	request.Header.Set("Content-Type", "application/json")
-	for name, values := range header {
-		request.Header[name] = values
-	}
-	response, err := http.DefaultClient.Do(request)
-	if err != nil {
-		return httpAnswer{}, err
-	}
-	defer response.Body.Close()
-	answer, err := io.ReadAll(response.Body)
-	if err != nil {
-		return httpAnswer{}, err
-	}
-	return httpAnswer{status: response.StatusCode, body: answer}, nil
-}
-
-// mustRequest is request on the test's goroutine: a process it cannot reach fails the test.
-func (p *dispatchProcess) mustRequest(t *testing.T, method, path, body string, header http.Header) httpAnswer {
-	t.Helper()
-	answer, err := p.request(method, path, body, header)
-	if err != nil {
-		t.Fatalf("%s %s: %v", method, path, err)
-	}
-	return answer
 }
 
 func editPath(artifactID string) string {
@@ -1997,13 +1939,8 @@ const (
 )
 
 // Spec item 1: two people on one document, each connected to a different process, see each
-// other's typing and cursors within a second, and nobody is disconnected.
-//
-// At this row's first commit the processes share no live document: an append on one leaves the
-// other's room behind the stored head, the stale-room evictor closes that room (or the room's
-// next append is refused and fails it), and its browsers reconnect; awareness never leaves the
-// process it was sent to. Each subtest has a document of its own, so one behaviour failing does
-// not decide another's.
+// other's typing and cursors within a second, and nobody is disconnected. Each subtest has a
+// document of its own, so one behaviour failing does not decide another's.
 func TestTwoEditorsOnTwoProcessesSeeEachOthersEditsAndCursorsLive(t *testing.T) {
 	pair := startPair(t, nil)
 	project := uniqueProjectKey(t, "LIVE")
@@ -2063,7 +2000,7 @@ func TestTwoEditorsOnTwoProcessesSeeEachOthersEditsAndCursorsLive(t *testing.T) 
 	t.Run("an edit through B's API reaches an editor on A within a second", func(t *testing.T) {
 		_, artifactID := pair.a.createIssueIn(t, project, "Written through the other API", "x")
 		alice := pair.a.openEditorAs(t, "alice", artifactID, "x\n")
-		if answer := pair.b.mustRequest(t, http.MethodPost, editPath(artifactID), editBody(t, "x", "y", "", false), asUser("bob")); answer.status != http.StatusOK {
+		if answer := pair.b.send(t, http.MethodPost, editPath(artifactID), editBody(t, "x", "y", "", false), asUser("bob")); answer.status != http.StatusOK {
 			t.Fatalf("bob's edit through B: %v", answer)
 		}
 		if err := alice.WaitForText(markdown, "y\n", liveWithin); err != nil {
@@ -2207,10 +2144,6 @@ func reconnectWithScope(t *testing.T, process *dispatchProcess, login, artifactI
 // Spec item 2: closing or reopening an issue changes every process's copy of its documents at
 // once. A tab on the process that did not take the request is closed with the others and comes
 // back with the scope the issue now allows; an update sent on the closed issue is not stored.
-//
-// At this row's first commit only the process that took the PATCH refreshes its rooms
-// (SetIssueClosed, called from patchIssue), so the room on the other process keeps taking edits on
-// a closed issue until it is reloaded for some other reason.
 //
 // Bob opens his tab on B before alice opens hers on A, so the room alice is in stands at the
 // stored head when the issue closes: what closes her socket, if anything does, is the close.
@@ -2442,7 +2375,7 @@ func TestAnAskBlockKeepsItsAuthorWhenAnotherProcessSettlesIt(t *testing.T) {
 	head := storedHead(t, pair, artifactID)
 	appendMarkdown(t, bob, ":::ask{#"+blockID+` urgency="med" multiple="false"}`+"\nWhich region goes first?\n:::\n")
 	pair.waitStoredPast(t, artifactID, head, 10*time.Second, "bob's ask block")
-	if answer := pair.b.mustRequest(t, http.MethodPost, editPath(artifactID), editBody(t, "Intro.", "Intro, edited.", "", false), asUser("alice")); answer.status != http.StatusOK {
+	if answer := pair.b.send(t, http.MethodPost, editPath(artifactID), editBody(t, "Intro.", "Intro, edited.", "", false), asUser("alice")); answer.status != http.StatusOK {
 		t.Fatalf("alice's edit through B after bob's ask block: %v", answer)
 	}
 	if _, found := pair.b.askOfBlock(t, issueKey, blockID); found {
@@ -2490,7 +2423,7 @@ type backgroundRequest struct {
 func (p *dispatchProcess) requestInBackground(method, path, body string, header http.Header) backgroundRequest {
 	pending := backgroundRequest{answered: make(chan httpAnswer, 1), failed: make(chan error, 1)}
 	go func() {
-		answer, err := p.request(method, path, body, header)
+		answer, err := p.trySend(method, path, body, header)
 		if err != nil {
 			pending.failed <- err
 			return
@@ -2542,10 +2475,6 @@ func decodeLostEdit(t *testing.T, answer httpAnswer) lostEditAnswer {
 // typed before it, and its lost-edit check judges against every process. Bob's tab is on B, with a
 // second tab of his there that shows when B's room has applied his delete; A holds no room of
 // the document, so the agent's write forks it from the store. Each case has its own document.
-//
-// At this row's first commit nothing asks B: A's cold fork is the store alone, B's update that is
-// not stored yet is invisible to it, and the lost-edit check and its participants read A's room
-// alone - which, for a cold write, is the room its publish loads from the store.
 func TestAnAgentWriteSeesEditsInFlightOnTheOtherProcess(t *testing.T) {
 	pair := startPair(t, nil)
 	project := uniqueProjectKey(t, "AGNT")
@@ -2581,7 +2510,7 @@ func TestAnAgentWriteSeesEditsInFlightOnTheOtherProcess(t *testing.T) {
 		pair.b.holdPersistence(t, artifactID, 300*time.Millisecond)
 		deleted := time.Now()
 		deleteP(t, artifactID, bob, bobsOtherTab, agentRowWithoutP)
-		answer := pair.a.mustRequest(t, http.MethodPost, editPath(artifactID), editBody(t, "pear", "plum", "", true), asAgent())
+		answer := pair.a.send(t, http.MethodPost, editPath(artifactID), editBody(t, "pear", "plum", "", true), asAgent())
 		t.Logf("the agent's edit through A answered %v after bob's delete", time.Since(deleted))
 		if answer.status == http.StatusOK {
 			t.Fatalf("the agent's edit through A of a paragraph bob had already deleted on B answered 200: A forked the document from a store that did not hold the delete B's room had applied (its append was held 300 ms), so the write landed in a deleted paragraph; want 404 TARGET_NOT_FOUND. Answer: %v", answer)
@@ -2632,7 +2561,7 @@ func TestAnAgentWriteSeesEditsInFlightOnTheOtherProcess(t *testing.T) {
 	t.Run("after the commit: a delete on the other process is reported in lost_ops", func(t *testing.T) {
 		artifactID, bob, bobsOtherTab := open(t, "Deleted before the agent publishes")
 		const earlier = "Intro, first.\n\nThe pear is ripe.\n\nOutro.\n"
-		if answer := pair.a.mustRequest(t, http.MethodPost, editPath(artifactID), editBody(t, "Intro.", "Intro, first.", "", true), asAgent()); answer.status != http.StatusOK {
+		if answer := pair.a.send(t, http.MethodPost, editPath(artifactID), editBody(t, "Intro.", "Intro, first.", "", true), asAgent()); answer.status != http.StatusOK {
 			t.Fatalf("the agent's earlier write through A: %v", answer)
 		}
 		var evicted time.Time
@@ -2697,14 +2626,6 @@ func (p *dispatchPair) reconnectStored(t *testing.T, process *dispatchProcess, l
 }
 
 // Spec item 5: a read never returns text older than the store holds, whichever process serves it.
-//
-// At this row's first commit a read is served from the process's resident room with no look at
-// the stored head. The evictor closes a room another process's write left behind, but at most
-// once every two seconds per room, so a write on A that lands in the window of an earlier
-// eviction on B - the second write of the loop below, once bob's tab has reconnected as a
-// browser does - leaves B's room, and every read B serves from it, behind the store
-// (burstLeavingTheRoomBehind is the same shape). That is what makes the stale read here
-// deterministic rather than a race.
 func TestAReadOnTheOtherProcessIsNeverOlderThanTheStore(t *testing.T) {
 	pair := startPair(t, nil)
 	project := uniqueProjectKey(t, "READ")
@@ -2721,7 +2642,7 @@ func TestAReadOnTheOtherProcessIsNeverOlderThanTheStore(t *testing.T) {
 				reconnects++
 				bob = pair.reconnectStored(t, pair.b, "bob", artifactID)
 			}
-			answer := pair.a.mustRequest(t, http.MethodPost, editPath(artifactID), editBody(t, before, after, token, false), asUser("alice"))
+			answer := pair.a.send(t, http.MethodPost, editPath(artifactID), editBody(t, before, after, token, false), asUser("alice"))
 			if answer.status != http.StatusOK {
 				t.Fatalf("write %d through A, conditional on the token of the read B served after write %d, answered %v: that read's token was not the stored document's",
 					write, write-1, answer)
@@ -2740,12 +2661,8 @@ func TestAReadOnTheOtherProcessIsNeverOlderThanTheStore(t *testing.T) {
 	// the comment goes through B, where bob's tab keeps a room of the document.
 	//
 	// While alice connects and marks, a write through B is parked after its commit, in its
-	// publish (the live-write pause hook), and released once the mark is stored. At this row's
-	// first commit an open live write is what holds the evictor off a room (hasOpenLiveWrite), and
-	// each notification it holds off defers that room's next look by at least two seconds, so B's
-	// room stays resident and behind the mark for longer than the comment's verification waits:
-	// a stale read by construction, not by the evictor's timing. A process that keeps its rooms
-	// current shows the mark whatever that write does.
+	// publish (the live-write pause hook), and released once the mark is stored: a process that
+	// keeps its rooms current shows the mark whatever that write does.
 	t.Run("a mark placed by an editor on A is verified by a comment anchored through B", func(t *testing.T) {
 		issueKey, artifactID := pair.b.createIssueIn(t, project, "Marked on A, anchored through B", "The quick brown fox")
 		bob := pair.openStoredEditor(t, pair.b, "bob", artifactID, "The quick brown fox\n")
@@ -2765,7 +2682,7 @@ func TestAReadOnTheOtherProcessIsNeverOlderThanTheStore(t *testing.T) {
 		}
 		pair.requireConnected(t, artifactID, "bob on B", bob, "before the comment")
 		body := fmt.Sprintf(`{"body":"why","anchor":{"artifact":%q,"mark_id":%q}}`, artifactID, markID)
-		answer := pair.b.mustRequest(t, http.MethodPost, "/api/v1/issues/"+issueKey+"/comments", body, asUser("bob"))
+		answer := pair.b.send(t, http.MethodPost, "/api/v1/issues/"+issueKey+"/comments", body, asUser("bob"))
 		if answer.status != http.StatusCreated {
 			t.Fatalf("bob's comment through B, anchored on the mark alice placed on A and the store holds, answered %v; want 201: B verified the mark against a room older than the store", answer)
 		}
@@ -2838,7 +2755,7 @@ func TestRebuildResumptionQueueAndColdWritesHoldAcrossProcesses(t *testing.T) {
 		_, artifactID := pair.b.createIssueIn(t, project, "Live on B, rebuilt through A", "before")
 		pair.openStoredEditor(t, pair.b, "bob", artifactID, "before\n")
 		corruptHistory(t, pair, artifactID)
-		answer := pair.a.mustRequest(t, http.MethodPost, rebuildPath(artifactID), `{}`, asUser("alice"))
+		answer := pair.a.send(t, http.MethodPost, rebuildPath(artifactID), `{}`, asUser("alice"))
 		if answer.status != http.StatusConflict || answer.code() != "DOCUMENT_LIVE" {
 			t.Fatalf("a rebuild through A while bob's tab holds a room of the document on B answered %v; want 409 DOCUMENT_LIVE: A asked only its own rooms whether the document is live", answer)
 		}
@@ -2970,7 +2887,7 @@ func TestRebuildResumptionQueueAndColdWritesHoldAcrossProcesses(t *testing.T) {
 		if pair.a.holdsRoom(t, artifactID) {
 			t.Fatalf("A holds a room of the document before the write, so the write would not be cold")
 		}
-		if answer := pair.a.mustRequest(t, http.MethodPost, editPath(artifactID), editBody(t, "before", "after", "", true), asAgent()); answer.status != http.StatusOK {
+		if answer := pair.a.send(t, http.MethodPost, editPath(artifactID), editBody(t, "before", "after", "", true), asAgent()); answer.status != http.StatusOK {
 			t.Fatalf("the agent's write through A: %v", answer)
 		}
 		if pair.a.holdsRoom(t, artifactID) {

@@ -18,16 +18,13 @@ import (
 // tests here run two services on one database, each on a pool of its own and each with its room
 // sync running, so each is a member, as two envoy-dispatch processes are.
 
-// newQueueProcesses is one document served by two member services.
-func newQueueProcesses(t *testing.T) (database *store.Store, artifactID string, taskA, taskB *Service) {
+// newQueueProcesses is the two-process pair (processPair, room_behind_head_test.go) with both
+// processes' room sync running, which is what makes each of them a member.
+func newQueueProcesses(t *testing.T) processPair {
 	t.Helper()
-	database = storetest.Open(t)
-	artifactID = createDocument(t, database, "# First")
-	taskA, _ = newTestServiceInstance(t, database)
-	taskB, _ = newTestServiceInstance(t, storetest.SecondProcess(t, database))
-	runRoomSync(t, newRoomSync(taskA))
-	runRoomSync(t, newRoomSync(taskB))
-	return database, artifactID, taskA, taskB
+	pair := newProcessPair(t)
+	pair.runRoomSync(t)
+	return pair
 }
 
 // queuedAcrossProcesses is the sum of every process's row of artifactID's queue.
@@ -46,7 +43,8 @@ func queuedAcrossProcesses(t *testing.T, database *store.Store, artifactID strin
 // (task B's first holds its own turn). The 33rd is refused on either process, though neither
 // process's own queue is near 32. Once every edit has left, no row remains.
 func TestTheConditionalEditQueueIsCappedAcrossProcesses(t *testing.T) {
-	database, artifactID, taskA, taskB := newQueueProcesses(t)
+	pair := newQueueProcesses(t)
+	database, artifactID, taskA, taskB := pair.database, pair.artifactID, pair.taskA, pair.taskB
 	first, err := taskA.AcquireConditionalEdit(context.Background(), artifactID)
 	if err != nil {
 		t.Fatalf("acquire the first conditional edit on task A: %v", err)
@@ -119,7 +117,8 @@ func TestTheConditionalEditQueueIsCappedAcrossProcesses(t *testing.T) {
 // down - counts for nothing: a full queue written by such a process does not refuse an edit, and
 // the admission deletes its row. A member's row counts.
 func TestANonMembersConditionalEditsCountForNothingAndAreDeleted(t *testing.T) {
-	database, artifactID, taskA, taskB := newQueueProcesses(t)
+	pair := newQueueProcesses(t)
+	database, artifactID, taskA, taskB := pair.database, pair.artifactID, pair.taskA, pair.taskB
 	gone := uuid.NewString()
 	if _, err := database.Pool.Exec(context.Background(), `
 		insert into doc_conditional_edit_queue (artifact_id, process_id, queued) values ($1, $2, $3), ($1, $4, $5)

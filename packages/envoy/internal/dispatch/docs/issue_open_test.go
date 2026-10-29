@@ -304,9 +304,12 @@ func foldHistoryPastRoom(t *testing.T, holder pgx.Tx, artifactID string, head in
 		artifactID, writtenAt, crdt.EncodeStateAsUpdateV1(stored, before)); err != nil {
 		t.Fatalf("write the document as task B: %v", err)
 	}
-	state, err := stateThrough(ctx, holder, artifactID, persistence.Version(writtenAt))
+	state, misread, err := foldThrough(ctx, holder, artifactID, persistence.Version(writtenAt))
 	if err != nil {
 		t.Fatalf("fold the document's history: %v", err)
+	}
+	if misread != nil {
+		t.Fatalf("the folded history does not read back as the rows it folds, so a compaction would leave them: %v", misread)
 	}
 	if _, err := holder.Exec(ctx, `update doc_updates set update = $3 where artifact_id = $1 and version = $2`, artifactID, writtenAt, state); err != nil {
 		t.Fatalf("fold the document's history into task B's write: %v", err)

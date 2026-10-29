@@ -60,6 +60,24 @@ const (
 	// on its home process too; the y-protocols client then sees its own state removed and
 	// announces itself again, which is how it comes back everywhere.
 	awarenessExpiry = 30 * time.Second
+	// maxAwarenessClientsPerRoom is how many distinct awareness clients a room tracks - the ones
+	// present and the tombstones of the ones that left (Server.MaxAwarenessClientsPerRoom, which
+	// ygo forwards to the room's awareness.Awareness.SetMaxClients). A document's readers are a
+	// handful of browser tabs, each one client, on every process together, so 256 is far past
+	// what any real one holds. It is what bounds the relay's fan-out: ygo hands the relay the
+	// clients the room took a frame for, and they go out whole clients to a notification within
+	// roomSyncPayloadLimit (awarenessNotifications), so one frame inventing client ids costs a
+	// handful of pg_notify sends and not thousands. Past the bound ygo drops the entries of
+	// clients the room has not seen before, and the ones it has keep updating and leaving.
+	maxAwarenessClientsPerRoom = 256
+	// maxAwarenessBytesPerRoom is how many bytes of those clients' states, as they arrived on the
+	// wire, a room holds at once (Server.MaxAwarenessBytesPerRoom, which ygo forwards to
+	// awareness.Awareness.SetMaxBytes). It is the bound's clients each holding a state as large
+	// as one notification carries (roomSyncPayloadLimit), so no state small enough for the relay
+	// to send is refused for the room's total, and presence costs a room no more than this. Past
+	// it ygo takes the state as null, which removes that client's presence; the client's next
+	// announcement, under a room back below the bound, brings it back.
+	maxAwarenessBytesPerRoom = maxAwarenessClientsPerRoom * roomSyncPayloadLimit
 )
 
 // awarenessMessage is one documentAwarenessChannel notification (see the wire format above).

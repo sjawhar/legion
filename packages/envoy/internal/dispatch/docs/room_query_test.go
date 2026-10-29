@@ -24,45 +24,23 @@ import (
 )
 
 // Room queries (room_query.go) are how one process asks every other one about a document room: a
-// flush waits for the other process's room to store what it applied, a share hands over what it
-// holds and has not stored, and both answer who is connected there. The tests here run two
+// flush waits for the other process's room to store what it applied, and a share hands over what
+// it holds and has not stored, with who is connected there. The tests here run two
 // services on one database, each on a pool of its own and each with its room sync running, as two
 // envoy-dispatch processes do. Task B's room appends pass a gate the test holds (gatedAppends), so
 // an update its room applied stays unstored for as long as a test needs.
 
-// queryPair is one document served by task A and task B, both running room sync, with task B's
-// room resident and its appends gated.
-type queryPair struct {
-	database   *store.Store
-	artifactID string
-	taskA      *Service
-	taskB      *Service
-	gateB      *gatedAppends
-}
-
-func newQueryPair(t *testing.T) queryPair {
+// newQueryProcesses is the two-process pair (processPair, room_behind_head_test.go) the room
+// queries are asked over: the lost-edit document, both processes' room sync running, and task B's
+// room resident, while task A holds none.
+func newQueryProcesses(t *testing.T) processPair {
 	t.Helper()
-	database := storetest.Open(t)
-	artifactID := createDocument(t, database, "# First")
-	taskA, _ := newTestServiceInstance(t, database)
-	taskB, gateB := newGatedServiceInstance(t, storetest.SecondProcess(t, database))
-	seedServiceText(t, taskA, artifactID, lostEditDocument)
-	runRoomSync(t, newRoomSync(taskA))
-	runRoomSync(t, newRoomSync(taskB))
-	if err := taskB.warmLiveDocument(context.Background(), artifactID); err != nil {
+	pair := newSeededProcessPair(t, lostEditDocument)
+	pair.runRoomSync(t)
+	if err := pair.taskB.warmLiveDocument(context.Background(), pair.artifactID); err != nil {
 		t.Fatalf("load task B's room: %v", err)
 	}
-	return queryPair{database: database, artifactID: artifactID, taskA: taskA, taskB: taskB, gateB: gateB}
-}
-
-// heldEditOnB holds task B's appends and has actor's browser on task B make edit, which task B's
-// room applies and then waits to store at the gate. actor stays connected to task B's room.
-func (pair queryPair) heldEditOnB(t *testing.T, connection uint64, actor model.Actor, edit func(tree *pmdoc.Node) *pmdoc.Node) {
-	t.Helper()
-	pair.gateB.hold()
-	pair.taskB.addConnection(pair.artifactID, connection, actor)
-	editAsPeer(t, pair.taskB, pair.artifactID, edit)
-	waitFor(t, roomWait(t), "task B's append of the edit to wait at the gate", func() bool { return pair.gateB.waiting.Load() == 1 })
+	return pair
 }
 
 // captureWarnings sends every log line at WARN and above to the returned log until the test ends.
@@ -104,10 +82,10 @@ func storedDocumentWith(t *testing.T, database *store.Store, artifactID string, 
 
 // A flush is answered only once the other process's room has stored what it applied: task B's
 // room applied bob's edit and holds its append at the gate, and task A's flush returns once the
-// gate opens, with the edit stored and task B's answer saying it holds the room and that bob is
-// connected there.
+// gate opens, with the edit stored and task B's answer saying it holds the room. It names no
+// actors: only a share's asker reads them.
 func TestAFlushWaitsForTheOtherProcessesHeldAppend(t *testing.T) {
-	pair := newQueryPair(t)
+	pair := newQueryProcesses(t)
 	bob := model.Actor{Kind: "user", ID: "bob"}
 	pair.heldEditOnB(t, 1, bob, replaceRun("Bravo paragraph.", "Bravo paragraph, by bob."))
 	if stored := storedMarkdown(t, pair.database, pair.artifactID); strings.Contains(stored, "by bob") {
@@ -132,8 +110,8 @@ func TestAFlushWaitsForTheOtherProcessesHeldAppend(t *testing.T) {
 	if len(answers) != 1 || answers[0].process != pair.taskB.ProcessID() || !answers[0].holds {
 		t.Fatalf("task A's flush answers = %+v, want task B's one, holding the room", answers)
 	}
-	if !reflect.DeepEqual(answers[0].actors, []model.Actor{bob}) {
-		t.Fatalf("task B answered actors %+v, want bob, connected to its room", answers[0].actors)
+	if len(answers[0].actors) != 0 {
+		t.Fatalf("task B's flush answer names actors %+v, which no asker of a flush reads", answers[0].actors)
 	}
 	if stored := storedMarkdown(t, pair.database, pair.artifactID); !strings.Contains(stored, "by bob") {
 		t.Fatalf("the store reads %q once task B answered the flush, without bob's edit", stored)
@@ -144,7 +122,7 @@ func TestAFlushWaitsForTheOtherProcessesHeldAppend(t *testing.T) {
 // and the store does not - here bob's paragraph, whose append is under way and held at the gate -
 // and an answer that large crosses in several notifications and is put back together whole.
 func TestAShareReturnsTheOtherProcessesInFlightAppend(t *testing.T) {
-	pair := newQueryPair(t)
+	pair := newQueryProcesses(t)
 	bob := model.Actor{Kind: "user", ID: "bob"}
 	paragraph := "Bob's long paragraph " + strings.Repeat("with many words ", 1200) + "ends."
 	pair.heldEditOnB(t, 1, bob, appendBlocks(t, paragraph+"\n"))
@@ -183,7 +161,7 @@ func TestAShareReturnsTheOtherProcessesInFlightAppend(t *testing.T) {
 // What a share holds past roomShareLimit is not sent: the answer says too_large, carries no
 // updates, and the asker logs a WARN and judges without them.
 func TestAShareTooLargeForOneQueryAnswersTooLarge(t *testing.T) {
-	pair := newQueryPair(t)
+	pair := newQueryProcesses(t)
 	pair.heldEditOnB(t, 1, model.Actor{Kind: "user", ID: "bob"}, appendBlocks(t, strings.Repeat("Bob's huge paragraph. ", 4000)+"\n"))
 	logs := captureWarnings(t)
 
@@ -203,7 +181,7 @@ func TestAShareTooLargeForOneQueryAnswersTooLarge(t *testing.T) {
 // the wait and no more, and a WARN naming it. The silent member here holds the listener
 // connection's name, which is all membership reads, and listens to nothing.
 func TestAMemberThatNeverAnswersCostsTheWaitAndAWarn(t *testing.T) {
-	pair := newQueryPair(t)
+	pair := newQueryProcesses(t)
 	silent := uuid.NewString()
 	conn, err := pair.database.Pool.Dedicated(context.Background(), ListenerApplicationPrefix+silent)
 	if err != nil {
@@ -235,7 +213,7 @@ func TestAMemberThatNeverAnswersCostsTheWaitAndAWarn(t *testing.T) {
 // process's append waits on: it would wait out every member. The query reads the lock from the
 // database, skips the flush at once and logs it at ERROR.
 func TestAFlushIsNeverSentUnderTheDocumentsAdvisoryLock(t *testing.T) {
-	pair := newQueryPair(t)
+	pair := newQueryProcesses(t)
 	logs := captureWarnings(t)
 	ctx := context.Background()
 	tx, err := pair.database.Pool.Begin(ctx)
@@ -276,7 +254,7 @@ func TestAFlushIsNeverSentUnderTheDocumentsAdvisoryLock(t *testing.T) {
 // (in two tabs) on task B - once each, and not the writer, connected on task B too. The refused
 // write leaves bob's delete to be stored, once the gate opens.
 func TestALostWriteNamesTheParticipantsOfEveryProcess(t *testing.T) {
-	pair := newQueryPair(t)
+	pair := newQueryProcesses(t)
 	alice := model.Actor{Kind: "user", ID: "alice"}
 	bob := model.Actor{Kind: "user", ID: "bob"}
 	if err := pair.taskA.warmLiveDocument(context.Background(), pair.artifactID); err != nil {
@@ -319,7 +297,7 @@ func TestALostWriteNamesTheParticipantsOfEveryProcess(t *testing.T) {
 // through task A, which holds no room, waits for the append rather than forking a store without
 // the delete, and is refused as an edit whose target is gone.
 func TestALiveWriteForksOnlyOnceTheOtherProcessHasStoredItsRoom(t *testing.T) {
-	pair := newQueryPair(t)
+	pair := newQueryProcesses(t)
 	pair.heldEditOnB(t, 1, model.Actor{Kind: "user", ID: "bob"}, withoutTopLevelBlock("Alpha paragraph."))
 	released := time.AfterFunc(150*time.Millisecond, pair.gateB.release)
 	defer released.Stop()
@@ -339,7 +317,7 @@ func TestALiveWriteForksOnlyOnceTheOtherProcessHasStoredItsRoom(t *testing.T) {
 // for that append, and the write's lost operations name the one bob removed. The write loads no
 // room on task A, publishing into none.
 func TestAPublishedWritesLossIsJudgedAtTheStoredHeadAfterTheOtherProcessFlushes(t *testing.T) {
-	pair := newQueryPair(t)
+	pair := newQueryProcesses(t)
 	bob := model.Actor{Kind: "user", ID: "bob"}
 	var once sync.Once
 	pair.taskA.afterLiveCommit = func(string) {

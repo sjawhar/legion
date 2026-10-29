@@ -237,21 +237,14 @@ func TestSIGTERMWithAKeyedSendAtTheListenerSettlesItSentBeforeExit(t *testing.T)
 	})
 	process.waitHealthy(t)
 	type answer struct {
-		status int
-		body   []byte
-		err    error
+		httpAnswer
+		err error
 	}
 	answered := make(chan answer, 1)
 	go func() {
-		response, err := process.sendKeyed(http.MethodPost, "/api/v1/agents/"+sessionID+"/messages",
-			`{"body":"Ship it once the checks are green.","delivery":"steer"}`, "press-1")
-		if err != nil {
-			answered <- answer{err: err}
-			return
-		}
-		defer response.Body.Close()
-		body, err := io.ReadAll(response.Body)
-		answered <- answer{status: response.StatusCode, body: body, err: err}
+		sent, err := process.trySend(http.MethodPost, "/api/v1/agents/"+sessionID+"/messages",
+			`{"body":"Ship it once the checks are green.","delivery":"steer"}`, asKeyed(dispatchTestLogin, "press-1"))
+		answered <- answer{httpAnswer: sent, err: err}
 	}()
 	select {
 	case <-held:
@@ -383,11 +376,10 @@ func TestSIGTERMWithABroadcastAtTheListenerSettlesEveryRecipientBeforeExit(t *te
 		Env: map[string]string{"ENVOY_URL": listener.URL},
 	})
 	process.waitHealthy(t)
-	if response, err := process.sendKeyed(http.MethodPost, "/api/v1/broadcasts",
-		`{"body":"Status before the deploy?","delivery":"btw","session_ids":["s1","s2","s3"]}`, "press-1"); err != nil {
-		t.Fatalf("broadcast: %v", err)
-	} else if response.Body.Close(); response.StatusCode != http.StatusCreated {
-		t.Fatalf("broadcast: status %d, want 201", response.StatusCode)
+	if answer := process.send(t, http.MethodPost, "/api/v1/broadcasts",
+		`{"body":"Status before the deploy?","delivery":"btw","session_ids":["s1","s2","s3"]}`,
+		asKeyed(dispatchTestLogin, "press-1")); answer.status != http.StatusCreated {
+		t.Fatalf("broadcast: status %d, want 201", answer.status)
 	}
 	select {
 	case <-held:
@@ -534,13 +526,11 @@ func (p *dispatchProcess) renameIssue(key, title string) (int, error) {
 	if err != nil {
 		return 0, err
 	}
-	response, err := p.send(http.MethodPatch, "/api/v1/issues/"+key, string(body))
+	answer, err := p.trySend(http.MethodPatch, "/api/v1/issues/"+key, string(body), asUser(dispatchTestLogin))
 	if err != nil {
 		return 0, err
 	}
-	defer response.Body.Close()
-	_, _ = io.Copy(io.Discard, response.Body)
-	return response.StatusCode, nil
+	return answer.status, nil
 }
 
 // A deploy usually finds someone with a document open: the spec tab holds the document's websocket,
@@ -1032,39 +1022,81 @@ func (p *dispatchProcess) waitPromptExit(t *testing.T, signalled time.Time) {
 	}
 }
 
+// asUser is the header a signed-in person's request carries (X-Dispatch-User, which these
+// processes trust).
+func asUser(login string) http.Header {
+	return http.Header{"X-Dispatch-User": {login}}
+}
+
+// asKeyed is login's header for a write sent under an idempotency key, as the dashboard sends
+// one.
+func asKeyed(login, key string) http.Header {
+	header := asUser(login)
+	header.Set("Idempotency-Key", key)
+	return header
+}
+
+// httpAnswer is one answer of a process's API.
+type httpAnswer struct {
+	status int
+	header http.Header
+	body   []byte
+}
+
+// code is the answer's error code ({"code": ...}), or "" for an answer that names none.
+func (a httpAnswer) code() string {
+	var coded struct {
+		Code string `json:"code"`
+	}
+	_ = json.Unmarshal(a.body, &coded)
+	return coded.Code
+}
+
+func (a httpAnswer) String() string {
+	return fmt.Sprintf("%d %s", a.status, strings.TrimSpace(string(a.body)))
+}
+
 // call sends body as the test's login and requires status, returning the response body.
 func (p *dispatchProcess) call(t *testing.T, method, path, body string, status int) []byte {
 	t.Helper()
-	response, err := p.send(method, path, body)
+	answer := p.send(t, method, path, body, asUser(dispatchTestLogin))
+	if answer.status != status {
+		t.Fatalf("%s %s: status %d, want %d: %s", method, path, answer.status, status, answer.body)
+	}
+	return answer.body
+}
+
+// send is trySend on the test's goroutine: a process it cannot reach fails the test.
+func (p *dispatchProcess) send(t *testing.T, method, path, body string, header http.Header) httpAnswer {
+	t.Helper()
+	answer, err := p.trySend(method, path, body, header)
 	if err != nil {
 		t.Fatalf("%s %s: %v", method, path, err)
-	}
-	defer response.Body.Close()
-	answer, _ := io.ReadAll(response.Body)
-	if response.StatusCode != status {
-		t.Fatalf("%s %s: status %d, want %d: %s", method, path, response.StatusCode, status, answer)
 	}
 	return answer
 }
 
-// send sends body to path as the test's login.
-func (p *dispatchProcess) send(method, path, body string) (*http.Response, error) {
-	return p.sendKeyed(method, path, body, "")
-}
-
-// sendKeyed sends body to path as the test's login, under the Idempotency-Key key when it is not
-// empty, as the dashboard sends a write.
-func (p *dispatchProcess) sendKeyed(method, path, body, key string) (*http.Response, error) {
+// trySend sends body to path as JSON, under header, and answers whatever the process answers. It
+// never fails the test, so a goroutine may call it.
+func (p *dispatchProcess) trySend(method, path, body string, header http.Header) (httpAnswer, error) {
 	request, err := http.NewRequest(method, p.url(path), strings.NewReader(body))
 	if err != nil {
-		return nil, err
+		return httpAnswer{}, err
 	}
 	request.Header.Set("Content-Type", "application/json")
-	request.Header.Set("X-Dispatch-User", dispatchTestLogin)
-	if key != "" {
-		request.Header.Set("Idempotency-Key", key)
+	for name, values := range header {
+		request.Header[name] = values
 	}
-	return http.DefaultClient.Do(request)
+	response, err := http.DefaultClient.Do(request)
+	if err != nil {
+		return httpAnswer{}, err
+	}
+	defer response.Body.Close()
+	answer, err := io.ReadAll(response.Body)
+	if err != nil {
+		return httpAnswer{}, err
+	}
+	return httpAnswer{status: response.StatusCode, header: response.Header, body: answer}, nil
 }
 
 // createIssue creates a project and an issue whose spec is one word, returning the issue's key and

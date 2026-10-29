@@ -147,8 +147,7 @@ func replaceStoredHistory(t *testing.T, database *store.Store, artifactID, markd
 
 // A write on process B reaches the browser on process A's room within the notification's round
 // trip, and the room is not closed: the browser's socket stays open, the room is the instance it
-// was, its cursor stands at the head, and it writes again. This is the behaviour the stale-room
-// eviction used to answer with a close and a reconnect.
+// was, its cursor stands at the head, and it writes again.
 func TestAWriteOnTheOtherProcessReachesThisProcessesBrowserWithoutAClose(t *testing.T) {
 	pair := newProcessPair(t)
 	runCatchUps(t, pair.taskA)

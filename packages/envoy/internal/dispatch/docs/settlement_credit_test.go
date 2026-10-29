@@ -764,9 +764,16 @@ func newTestServiceInstance(t *testing.T, database *store.Store) (*Service, *htt
 			t.Errorf("shutdown document service: %v", err)
 		}
 	})
+	return service, newTestServer(t, service)
+}
+
+// newTestServer serves service's HTTP and document websocket for a test's browsers, until the
+// test ends.
+func newTestServer(t *testing.T, service *Service) *httptest.Server {
+	t.Helper()
 	server := httptest.NewServer(http.HandlerFunc(service.ServeHTTP))
 	t.Cleanup(server.Close)
-	return service, server
+	return server
 }
 
 // versionAuthors is the authors artifactID's version number credits.

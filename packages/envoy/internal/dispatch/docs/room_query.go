@@ -20,9 +20,9 @@ import (
 )
 
 // Room queries are how one envoy-dispatch process asks every other one about a document room and
-// waits for the answers (plan D7): whether it holds the room, and who is connected to it there;
-// to make every update its room applied durable (flush); or to hand over the updates its room
-// holds that the store does not hold yet (share). They travel, as the rest of room sync does,
+// waits for the answers (plan D7): whether it holds the room; to make every update its room
+// applied durable (flush); or to hand over the updates its room holds that the store does not
+// hold yet, and who is connected to it there (share). They travel, as the rest of room sync does,
 // through Postgres alone: a query on documentQueryChannel and each member's answer on
 // documentAnswerChannel, both sent through the process's NOTIFY sender (roomSyncSender), so a
 // request inside a transaction of the shared pool asks and hears back at once, not at its commit.
@@ -34,14 +34,16 @@ import (
 //	         "updates": base64 of a Yjs update, "too_large": bool, "part": n, "last": bool}
 //
 // Every member but the asker answers every query (roomSyncMembers): a member holding no room of
-// the document answers {"holds": false} at once. "actors" is the distinct actors connected to the
-// member's room. A "flush" is answered only once every update the member's room applied before
-// the query arrived has left its room's unstored updates - appended, or dropped with a room that
-// failed, whose browsers send it again (roomInstance.unstored) - so the asker reads the store
-// knowing it holds them. A "share" is answered at once, appending nothing, with "updates": the
-// merge of the member's unstored updates, the one whose append is under way included, since an
-// update stays listed until its append has returned (StoreUpdateContext). One over
-// roomShareLimit answers "too_large" and no updates. An answer whose notification would pass
+// the document answers {"holds": false} at once. A "flush" is answered only once every update the
+// member's room applied before the query arrived has left its room's unstored updates - appended,
+// or dropped with a room that failed, whose browsers send it again (roomInstance.unstored) - so
+// the asker reads the store knowing it holds them. A "share" is answered at once, appending
+// nothing, with "updates": the merge of the member's unstored updates, the one whose append is
+// under way included, since an update stays listed until its append has returned
+// (StoreUpdateContext). One over roomShareLimit answers "too_large" and no updates. A share's
+// answer carries "actors" as well, the distinct actors connected to the member's room, which is
+// what names a lost write's participants (lostedit.go); a holds or a flush answer carries none,
+// since no asker of those reads them. An answer whose notification would pass
 // roomSyncPayloadLimit is split into parts numbered from 0, actors and then the base64 of the
 // updates spread across them in order, the last part flagged "last"; the asker puts them back
 // together before it reads the answer.
@@ -322,7 +324,6 @@ func (r *roomQueries) query(ctx context.Context, payload string) {
 		return
 	}
 	answer := roomAnswerPart{Holds: true}
-	actors := s.connectedActors(query.Room)
 	switch query.Kind {
 	case roomQueryShare:
 		updates, err := s.unstoredShare(query.Room, live)
@@ -334,7 +335,7 @@ func (r *roomQueries) query(ctx context.Context, payload string) {
 		if len(updates) > roomShareLimit {
 			answer.TooLarge, updates = true, nil
 		}
-		r.send(ctx, query, answer, actors, updates)
+		r.send(ctx, query, answer, s.connectedActors(query.Room), updates)
 	case roomQueryFlush:
 		classes := s.unstoredSnapshot(query.Room, live)
 		go func() {
@@ -345,10 +346,10 @@ func (r *roomQueries) query(ctx context.Context, payload string) {
 					"room", query.Room, "asker", query.Sender, "waiting", len(classes), "error", err)
 				return
 			}
-			r.send(ctx, query, answer, actors, nil)
+			r.send(ctx, query, answer, nil, nil)
 		}()
 	default:
-		r.send(ctx, query, answer, actors, nil)
+		r.send(ctx, query, answer, nil, nil)
 	}
 }
 

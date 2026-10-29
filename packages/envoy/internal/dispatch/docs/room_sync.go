@@ -50,8 +50,8 @@ const documentHeadChannel = "dispatch_doc_head"
 // announcement wakes a catch-up (roomCatchUps.changed).
 const documentChangedChannel = "dispatch_doc_changed"
 
-// The room-sync channels beside documentChangedChannel. Each has a slot in roomSync.handlers;
-// a slot with no handler is still listened on, and drops what arrives on its channel.
+// The room-sync channels beside documentChangedChannel. Each has a slot in roomSync.handlers,
+// whose handler runs its notifications.
 const (
 	// documentAwarenessChannel carries a room's awareness (cursors, presence) between processes,
 	// and the queries for it; awareness_relay.go has its wire format.
@@ -136,7 +136,7 @@ type roomSyncHandler struct {
 	attach func(lane *roomSyncLane)
 }
 
-// roomSyncChannel is one channel and what runs each of its notifications; nil drops them.
+// roomSyncChannel is one channel and what runs each of its notifications.
 type roomSyncChannel struct {
 	name     string
 	notified func(ctx context.Context, payload string)
@@ -149,10 +149,10 @@ type roomSync struct {
 	service *Service
 	// awareness, issueOpenChanged, query and answer handle the four channels beside the
 	// document-change channels the service's catch-up follows (handlers): documentAwarenessChannel,
-	// issueOpenChangedChannel, documentQueryChannel and documentAnswerChannel. Nil drops that
-	// channel's notifications. awareness is the service's awareness relay (awarenessRelay.received),
-	// issueOpenChanged the service's Service.issueOpenChanged, and query and answer the service's
-	// room queries (roomQueries.query, roomQueries.answer).
+	// issueOpenChangedChannel, documentQueryChannel and documentAnswerChannel. awareness is the
+	// service's awareness relay (awarenessRelay.received), issueOpenChanged the service's
+	// Service.issueOpenChanged, and query and answer the service's room queries
+	// (roomQueries.query, roomQueries.answer).
 	awareness, issueOpenChanged, query, answer func(ctx context.Context, payload string)
 	// listening runs after each LISTEN's connected work has run (connected). Nil outside tests: a
 	// test waits on it before the write whose notification it expects, since a notification sent
@@ -229,33 +229,19 @@ func (r *roomSync) connected(ctx context.Context) {
 }
 
 // register registers every handler's channels on hub and returns what runs the lanes. Each handler
-// with work to do gets a lane of its own, and what the hub calls - on its own goroutine, which
-// must not block - only queues work there. A channel with no func is still listened on, and its
-// notifications are dropped as they arrive; a handler with no work at all gets no lane.
+// gets a lane of its own, and what the hub calls - on its own goroutine, which must not block -
+// only queues work there.
 func (r *roomSync) register(hub *pglisten.Hub) (run func(ctx context.Context)) {
 	handlers := r.handlers()
 	lanes := make([]*roomSyncLane, 0, len(handlers))
 	for _, handler := range handlers {
-		working := handler.connected != nil || handler.woke != nil
-		for _, channel := range handler.channels {
-			working = working || channel.notified != nil
-		}
-		if !working {
-			for _, channel := range handler.channels {
-				hub.Handle(channel.name, func(string) {})
-			}
-			continue
-		}
 		lane := newRoomSyncLane(handler)
 		lanes = append(lanes, lane)
 		for _, channel := range handler.channels {
-			if notified := channel.notified; notified != nil {
-				hub.Handle(channel.name, func(payload string) {
-					lane.push(func(ctx context.Context) { notified(ctx, payload) })
-				})
-			} else {
-				hub.Handle(channel.name, func(string) {})
-			}
+			notified := channel.notified
+			hub.Handle(channel.name, func(payload string) {
+				lane.push(func(ctx context.Context) { notified(ctx, payload) })
+			})
 		}
 		if connected := handler.connected; connected != nil {
 			hub.OnConnected(func() { lane.push(connected) })
