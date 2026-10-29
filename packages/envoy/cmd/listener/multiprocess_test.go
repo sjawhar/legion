@@ -1949,6 +1949,55 @@ func TestTwoPodsGracefulStopAfterANodeLossHandsOverWithin10s(t *testing.T) {
 	mpWaitActive(t, other, time.Second)
 }
 
+// A lost node, then a graceful stop of the pod that took its expired lease with no standby
+// running at all, then a pod started after it. The lost pod's connection still holds the durable's
+// push binding, and the stopping pod's linger ends "not taken" a second after its release
+// (lingerUntaken), so from then on that binding is the deliver subject's only subscriber: what the
+// stopping pod handed back, and every message published after it drained, reaches a connection
+// that acknowledges nothing and comes back only at its ack wait. The pod started then takes the
+// released record, which no linger bridged to it (leaseHandBackBridge), so its term settles for an
+// ack wait, 7 s, not for a hand-back's 2 s delay: every message reaches its session in the order it
+// was published. At d3787812 (INFRA-557 review finding) the released record counted as a graceful
+// hand-back however long it had stood, so the new pod held for 3 s and delivered the messages
+// published after the stop before the older ones still due from the lost node's binding.
+func TestTwoPodsGracefulStopWithNoStandbyAfterANodeLossKeepsOrder(t *testing.T) {
+	uri := mpNATS(t)
+	binary := cmdtest.Build(t, "envoy-listener")
+	a, b := mpStartPair(t, binary, uri)
+	serving := mpStartServingPort(t)
+	sessions := []string{"ses_mp_alone_one", "ses_mp_alone_two"}
+	for _, sessionID := range sessions {
+		a.registerPort(t, serving, sessionID)
+	}
+	publisher := mpConnectPublisher(t, uri)
+
+	var thaw func()
+	frozen := publisher.quiesce(t, serving, func() { thaw = a.relay.freeze() })
+	t.Cleanup(thaw)
+	stop := publisher.every(100*time.Millisecond, sessions...)
+	mpWaitActive(t, b, mpHardBound)
+	serving.awaitAll(t, publisher.since(frozen), mpHardBound+5*time.Second)
+
+	// No standby is left: the lease record is released to nobody, and the lost node's binding has
+	// the deliver subject to itself until a pod starts.
+	b.Terminate(t)
+	b.WaitExit(t, "SIGTERM")
+	time.Sleep(3 * time.Second) // publish on with no pod receiving
+	c := mpStartPod(t, binary, uri, "pod-c")
+	mpWaitActive(t, c, 30*time.Second)
+	time.Sleep(2 * time.Second) // publish on past the take-over
+	stop()
+
+	messages := publisher.all()
+	serving.awaitAll(t, messages, mpHardBound+20*time.Second)
+	serving.requireKnown(t, messages)
+	serving.requireOrder(t, messages)
+	if line := mpLineWith(c.Output.String(), "listener lease term must settle", `"cap":"7s"`); line == "" {
+		t.Fatalf("%s did not hold for an ack wait after a stop no linger of its own bridged to it:\n%s",
+			c.instance, mpTail(mpLinesWithout(c.Output.String()), 40))
+	}
+}
+
 // A lost node, then, while the pod that took its expired lease still holds what it received for
 // one ack wait, a graceful stop of that pod, with a second standby running. The lost pod is gone
 // for good by then (killed, its connection closed), so no push binding outlives it. The messages

@@ -70,10 +70,13 @@ wait only once the pod holding it has died or lost the lease.
   writes once its subscription is up), or for 3 s (`lingerMax`) after the batch at most. When no
   other pod has taken the record 1 s after the release (`lingerUntaken`, two standby polls), there
   is no standby to wait for and it stops waiting. Then it drains the subscription. So everything it
-  handed back is back within the standby's 3 s cap. The standby delivers about 2 to 3 s after the
-  stop (the hand-back delay and a settle read), about 3 to 4 s after it when a message waits out a
-  retry's delay and holds the hold to its cap, plus the message in hand's grace when it takes it.
-  The tests bound it at 10 s.
+  handed back is back within the standby's 3 s cap, as long as a standby took the record while
+  that linger could still have bridged to it: a pod that takes the record later (none was running,
+  so the linger ended "not taken") finds what the durable pushed meanwhile gone to no subscriber,
+  or to a lost node's binding alone, and settles for an ack wait instead (below). The standby
+  delivers about 2 to 3 s after the stop (the hand-back delay and a settle read), about 3 to 4 s
+  after it when a message waits out a retry's delay and holds the hold to its cap, plus the
+  message in hand's grace when it takes it. The tests bound it at 10 s.
 - **Hard stop** (SIGKILL, node or network loss): a standby takes the expired lease about 5 to 6 s
   after the last renewal (the TTL and one poll). Its term must settle: it subscribes at once,
   beside the dead pod's push binding when the server still counts a lost node's connection, and
@@ -97,29 +100,31 @@ wait only once the pod holding it has died or lost the lease.
   renewal, release and take-over, and cleared by a holder that finds the durable not push-bound.
   `unsettled` is written from the acquiring write of a term that must settle until its hold ends,
   and a release keeps it, so a pod stopped mid-hold hands the hold on; a graceful stop that hands
-  messages back always releases it set. `ack_wait_owed` is written by a release, set when the
-  releasing pod stopped before the end of a hold that waits out an ack wait, false otherwise, and
-  written false by every take-over. A pod that takes a released record carrying `stale_binding`
-  or `unsettled` settles too, subscribing at once beside any binding rather than waiting it out as
-  a pre-lease build's. Its cap is the hand-back delay and a second when the record carries
-  `unsettled` without `ack_wait_owed` (a graceful hand-back, `stale_binding` or not), and one ack
-  wait and a second otherwise: the messages the stopping pod handed back come back after the
+  messages back always releases it set. `ack_wait_owed` is the ack wait the releasing term still
+  owed its successor: a term that must settle owes one from its acquiring write until its own hold
+  ends, and a term taken from a graceful hand-back until it has subscribed, so every release -
+  a stop, a lapse, a give-up, a stop before the term ever subscribed - writes the debt as the term
+  stands, and every take-over writes it false. A pod that takes a released record carrying
+  `stale_binding` or `unsettled` settles too, subscribing at once beside any binding rather than
+  waiting it out as a pre-lease build's. Its cap is the hand-back delay and a second when the
+  record carries `unsettled` without `ack_wait_owed` and the take-over's write is less than 1.5 s
+  after the release (`leaseHandBackBridge`, by the server's timestamps of the two writes), and one
+  ack wait and a second otherwise: the messages the stopping pod handed back come back after the
   hand-back delay to the next pod and to a lingering binding alike, but one that went to such a
-  binding alone, or that a dead pod before the stopping one still held, comes back one ack wait
-  later, and only a pod whose own hold for those had not ended leaves the next pod's hold to wait
-  for it.
+  binding alone, or to no subscriber at all once the linger ended, or that a dead pod before the
+  stopping one still held, comes back one ack wait later.
 - **A holder that cannot use the durable.** A holder whose reads, creations, policy corrections or
   subscribes of the durable fail retries every second (`durableBindPoll`) and times the failures
   from the start of the first since its term began or an attempt last succeeded. Once they have
   lasted 135 s (`durableTakeoverAlarmAfter`) it logs `lease holder cannot deliver from the durable`
   at ERROR, with the failure as `reason` and `waited_ms`, which the AWS `subscribe-exhausted` alarm
-  matches, and gives the lease up: it releases the record, keeping `unsettled` as its term left it
-  and setting `ack_wait_owed` when its term would have settled for an ack wait, so the next holder
-  settles as this one would have, and a standby takes the record at its next poll. The pod goes
-  back to standby and does not take back the record it released for two standby polls (1 s), so
-  every other standby has its chance first; a pod that runs alone takes it back after that and
-  tries again, alarming again at the end of each stuck term. A listener without a lease has no one
-  to give it to: it keeps retrying and logs the line again every 5 min
+  matches, and gives the lease up: it releases the record, keeping `unsettled` and `ack_wait_owed`
+  as its term left them, so the next holder settles as this one would have, and a standby takes
+  the record at its next poll. The pod goes back to standby and does not take back the record it
+  released for two standby polls (1 s), so every other standby has its chance first; a pod that
+  runs alone takes it back after that and tries again, alarming again at the end of each stuck
+  term. A listener without a lease has no one to give it to: it keeps retrying and logs the line
+  again every 5 min
   (`durableTakeoverAlarmEvery`).
 
 The lines to read are `listener lease acquired` (with `from`: `absent`, `released` or `expired`,
@@ -164,8 +169,8 @@ answered by then makes the answer `503 {"status":"unhealthy"}`.
 | --- | --- |
 | `503 {"status":"starting"}` | Until the pod can serve: NATS connected, the webhook and `/v1` gates open over warm caches, the receive loop started and, with an OIDC issuer configured, its discovery succeeded. A NATS or issuer that does not answer keeps the pod here, up and retrying; it never exits for that. |
 | `200 {"status":"healthy","role":"active",…}` | The pod receives the durable. The body carries the durable's lag, `num_pending` and `num_ack_pending`. |
-| `200 {"status":"healthy","role":"standby",…}` | The pod is ready and does not deliver. `active_instance` names the holder when the lease record names one; `receive` says what a pod that holds the lease but does not receive yet waits for (`preparing the durable`, or `waiting for another subscriber's push binding to end`). |
-| `200 {"status":"degraded",…}` | A transient KV failure the monitor and the NATS reconnect retry, or, on the active pod, a durable whose lag could not be read. Also a pod holding the lease (or running without one) whose reads, creations, corrections or subscribes of the durable fail: `role` `standby`, `receive` what it was doing, `error` `durable consumer unavailable: <failure>` and `receive_failing_ms` how long it has failed. |
+| `200 {"status":"healthy","role":"standby",…}` | The pod is ready, does not deliver, and another pod of the machine holds the lease: `active_instance` names it. |
+| `200 {"status":"degraded",…}` | A transient KV failure the monitor and the NATS reconnect retry, or, on the active pod, a durable whose lag could not be read. Also a pod that is the machine's deliverer and does not receive yet - it holds the lease, or runs without one, or has read no holder at all: nothing of the durable reaches a session until it receives, so no such answer is healthy. `role` is `standby` and `receive` says what it waits for (`preparing the durable`, or `waiting for another subscriber's push binding to end`); when its reads, creations, corrections or subscribes of the durable fail, `error` is `durable consumer unavailable: <failure>` and `receive_failing_ms` how long it has failed. It stays `200`, as a standby does, so a readiness probe keeps it in service. |
 | `503 {"status":"unhealthy",…}` | A NATS flush failed (`nats unavailable`), the role lane's subscription is not valid (`role subscription inactive`), the live topics lane is disconnected or refused (`live subscription inactive`), a cache watcher stopped; on the active pod also its subscription is not valid, the durable is gone, or the durable delivers to another subject than its subscription's (`not bound to this listener's subscription`, which a durable deleted and created again under it leaves). Also the failing durable above once it has failed for 135 s: a lease holder gives the lease up then and answers as a standby, so only a listener without a lease, which keeps retrying, stays unready. |
 
 Every healthy answer also carries the body fields it always did (`live_topics`, `ci_cache`, the

@@ -259,7 +259,7 @@ func TestADurableMessageReceivedWithoutTheLeaseIsDroppedAndRedeliveredToTheHolde
 	if err != nil {
 		t.Fatalf("create the durable: %v", err)
 	}
-	if err := stray.receiver.begin(info.Config.DeliverSubject, settleHold{}, 0); err != nil {
+	if err := stray.receiver.begin(info.Config.DeliverSubject, 0, 0); err != nil {
 		t.Fatalf("subscribe the stray pod: %v", err)
 	}
 
@@ -853,29 +853,42 @@ func TestASettleHoldEndsAtItsCap(t *testing.T) {
 // A settle hold lasts at most as long as the previous holder can still have messages outstanding,
 // counted from the subscribe: one ack wait and a second after a take-over over an expired record or
 // from a released one that is no graceful hand-back (carrying stale_binding without unsettled, or
-// ack_wait_owed), the hand-back delay and a second after a graceful hand-back (a released record
-// carrying unsettled and not ack_wait_owed, with stale_binding or without). A message NAKed for a
-// retry a minute later stays outstanding past either, so the hold runs to its cap and then
-// delivers what it holds; at the old cap of two ack waits and a second, 13 s, a graceful take-over
-// delivered 14 s after the stop and a hard one 19 s after the kill.
+// ack_wait_owed, or released longer ago than the stopping pod's linger can have lasted), the
+// hand-back delay and a second after a graceful hand-back (a released record carrying unsettled
+// and not ack_wait_owed, taken within leaseHandBackBridge of the release, with stale_binding or
+// without). A message NAKed for a retry a minute later stays outstanding past either, so the hold
+// runs to its cap and then delivers what it holds; at the old cap of two ack waits and a second,
+// 13 s, a graceful take-over delivered 14 s after the stop and a hard one 19 s after the kill.
 func TestASettleHoldsCapIsWhatThePreviousHolderCanStillHaveOutstanding(t *testing.T) {
 	for _, row := range []struct {
 		name, machineID, record string
 		how                     leaseAcquisition
-		limit                   time.Duration
+		// aged leaves the record standing leaseHandBackBridge before the take-over, as a record
+		// released to no standby stands: no linger of the stopping pod can have bridged to it.
+		aged  bool
+		limit time.Duration
 	}{
-		{"expired", "box-cap-expired", `{"holder":"pod-dead","boot":"0123456789abcdef"}`, leaseTakenExpired, consumerAckWait + settleMargin},
-		{"released with a stale binding", "box-cap-stale", `{"holder":"pod-gone","boot":"0123456789abcdef","released":true,"stale_binding":true}`, leaseTakenReleased, consumerAckWait + settleMargin},
-		{"released owing an ack wait", "box-cap-owed", `{"holder":"pod-gone","boot":"0123456789abcdef","released":true,"unsettled":true,"ack_wait_owed":true}`, leaseTakenReleased, consumerAckWait + settleMargin},
-		{"handed back", "box-cap-handed-back", `{"holder":"pod-gone","boot":"0123456789abcdef","released":true,"unsettled":true}`, leaseTakenReleased, handBackDelay + settleMargin},
-		{"handed back with a stale binding", "box-cap-handed-back-stale", `{"holder":"pod-gone","boot":"0123456789abcdef","released":true,"unsettled":true,"stale_binding":true}`, leaseTakenReleased, handBackDelay + settleMargin},
+		{"expired", "box-cap-expired", `{"holder":"pod-dead","boot":"0123456789abcdef"}`, leaseTakenExpired, false, consumerAckWait + settleMargin},
+		{"released with a stale binding", "box-cap-stale", `{"holder":"pod-gone","boot":"0123456789abcdef","released":true,"stale_binding":true}`, leaseTakenReleased, false, consumerAckWait + settleMargin},
+		{"released owing an ack wait", "box-cap-owed", `{"holder":"pod-gone","boot":"0123456789abcdef","released":true,"unsettled":true,"ack_wait_owed":true}`, leaseTakenReleased, false, consumerAckWait + settleMargin},
+		{"handed back", "box-cap-handed-back", `{"holder":"pod-gone","boot":"0123456789abcdef","released":true,"unsettled":true}`, leaseTakenReleased, false, handBackDelay + settleMargin},
+		{"handed back with a stale binding", "box-cap-handed-back-stale", `{"holder":"pod-gone","boot":"0123456789abcdef","released":true,"unsettled":true,"stale_binding":true}`, leaseTakenReleased, false, handBackDelay + settleMargin},
+		{"handed back past the linger", "box-cap-handed-back-old", `{"holder":"pod-gone","boot":"0123456789abcdef","released":true,"unsettled":true,"stale_binding":true}`, leaseTakenReleased, true, consumerAckWait + settleMargin},
 	} {
 		t.Run(row.name, func(t *testing.T) {
 			uri := testnats.URL(t)
-			putLeaseRecord(t, uri, row.machineID, row.record)
 			client := leaveARetryOutstanding(t, uri, row.machineID, "retry")
 			handle, received := recordingHandler()
-			rig := startReceiverRig(t, uri, row.machineID, "pod-b", handle, testReceiveTiming(), testLeaseTiming())
+			// The record is written once everything else is ready, so a hand-back row's take-over
+			// lands inside leaseHandBackBridge of it, as a standby's does; an aged row waits that
+			// out first.
+			rig := newReceiverRig(t, uri, row.machineID, "pod-b", handle, testReceiveTiming(), testLeaseTiming())
+			putLeaseRecord(t, uri, row.machineID, row.record)
+			if row.aged {
+				time.Sleep(leaseHandBackBridge)
+			}
+			rig.lease.Start(context.Background())
+			rig.receiver.Start()
 			subscribed := rig.awaitState(t, receiveActive, 10*time.Second)
 			if status := rig.lease.Status(); status.How != row.how || !status.Settle {
 				t.Fatalf("pod-b's lease = %+v, want taken from a record %s, settling", status, row.how)
@@ -1019,7 +1032,6 @@ func TestAReleasedRecordUnsettledOrWithAStaleBindingSettlesBesideTheBinding(t *t
 	} {
 		t.Run(row.name, func(t *testing.T) {
 			uri := testnats.URL(t)
-			putLeaseRecord(t, uri, row.machineID, row.record)
 			var handedBack atomic.Bool
 			client, _ := bindAsAHolder(t, uri, row.machineID, func(msg *natsgo.Msg) {
 				if row.handBack && handedBack.CompareAndSwap(false, true) {
@@ -1028,7 +1040,12 @@ func TestAReleasedRecordUnsettledOrWithAStaleBindingSettlesBesideTheBinding(t *t
 			})
 			pushed := publishToTheDeadHolder(t, client, row.machineID, "older")
 			handle, received := recordingHandler()
-			rig := startReceiverRig(t, uri, row.machineID, "pod-b", handle, testReceiveTiming(), testLeaseTiming())
+			// The record is written once the rig is ready, so pod-b takes it inside
+			// leaseHandBackBridge of the release, as a standby takes a hand-back.
+			rig := newReceiverRig(t, uri, row.machineID, "pod-b", handle, testReceiveTiming(), testLeaseTiming())
+			putLeaseRecord(t, uri, row.machineID, row.record)
+			rig.lease.Start(context.Background())
+			rig.receiver.Start()
 			waitFor(t, 10*time.Second, "pod-b to take the released lease", rig.lease.Holding)
 			if status := rig.lease.Status(); status.How != leaseTakenReleased || status.Settle != row.settle {
 				t.Fatalf("pod-b's lease = %+v, want taken from a released record, settle %v", status, row.settle)
@@ -1295,9 +1312,11 @@ func TestAHolderThatCannotPrepareItsDurableAlarmsAndGivesTheLeaseUp(t *testing.T
 	get := healthzFor(t, stuck.client, stuck.receiver)
 	var code int
 	var body map[string]any
+	// A holder that does not receive yet is already degraded; this waits for the failed read it
+	// reports with that.
 	waitFor(t, 15*time.Second, "pod-stuck's /healthz to report its failing durable", func() bool {
 		code, body = get()
-		return body["status"] != "healthy"
+		return body["receive_failing_ms"] != nil
 	})
 	if code != http.StatusOK || body["status"] != "degraded" || body["role"] != "standby" || body["receive"] != receivePreparing.String() ||
 		!strings.Contains(fmt.Sprint(body["error"]), "read the durable consumer") {
@@ -1425,6 +1444,178 @@ func TestAPodThatGaveTheLeaseUpWhileWaitingOutABindingSettlesAHardTakeoverAfterI
 	}
 }
 
+// Two pods of one machine, each connected as the machine's nkey user holding exactly the grant
+// envoy-infra renders for a listener. pod-x takes the lease while a pre-lease build binds the
+// durable and waits that binding out; then its lease connection stalls past the lease's validity,
+// so its term ends with the lease lost rather than given up. pod-y takes the expired record,
+// receives beside the old build's binding, and dies hard (its connections cut, no release) with a
+// message in hand. pod-x takes pod-y's expired record: the lease reports it no resume of pod-x's
+// own record (leaseStatus.Resumed), so the binding pod-x once waited out counts for nothing and
+// the term settles, holding what it receives until the dead pod's message is back at its ack wait
+// and delivering that before the newer one. At d3787812 (INFRA-557 review finding) the flag
+// outlived a term that ended by losing the lease, so the term did not settle and pod-x delivered
+// the newer message first, the dead pod's one ack wait later.
+func TestAPodThatLostTheLeaseWhileWaitingOutABindingSettlesAHardTakeoverAfterIt(t *testing.T) {
+	const machineID = "box-lost-lease"
+	seed, public := testnats.User(t)
+	granted := testnats.StartGranted(t, testnats.GrantedUser{Public: public, Grant: testnats.ListenerGrant(t, machineID)})
+	consumer := bus.ListenerDurable(machineID)
+	old, _ := durableHeldElsewhere(t, granted.AdminURL, consumer)
+	admin, err := bus.ConnectOwningStream([]string{granted.AdminURL}, bus.WithReplicas(1), bus.WithName("receive-test admin"))
+	if err != nil {
+		t.Fatalf("connect the admin: %v", err)
+	}
+	t.Cleanup(admin.Close)
+
+	// pod-x's lease is on a connection through a relay the test freezes; its bus connection
+	// answers throughout, so nothing but the lease ends its term.
+	xLeaseLink := startListenerRelay(t, granted.URL())
+	handle, received := recordingHandler()
+	x := newReceiverRigAs(t, granted.URL(), xLeaseLink.relayed, seed, machineID, "pod-x", handle, testReceiveTiming(), testLeaseTiming())
+	x.lease.Start(context.Background())
+	x.receiver.Start()
+	x.awaitState(t, receiveAwaitingBinding, 10*time.Second)
+
+	// pod-y's connections both go through relays, which the test severs for its hard death.
+	yLink, yLeaseLink := startListenerRelay(t, granted.URL()), startListenerRelay(t, granted.URL())
+	inHand, release := make(chan struct{}, 1), make(chan struct{})
+	y := newReceiverRigAs(t, yLink.relayed, yLeaseLink.relayed, seed, machineID, "pod-y", func(context.Context, *natsgo.Msg) {
+		select {
+		case inHand <- struct{}{}:
+		default:
+		}
+		<-release
+	}, testReceiveTiming(), testLeaseTiming())
+	t.Cleanup(func() { close(release) })
+	y.lease.Start(context.Background())
+	y.receiver.Start()
+	waitFor(t, 5*time.Second, "pod-y to read pod-x's lease", func() bool { return y.lease.Status().ActiveInstance == "pod-x" })
+
+	thaw := xLeaseLink.freeze()
+	t.Cleanup(thaw)
+	waitFor(t, 30*time.Second, "pod-y to take pod-x's expired record", y.lease.Holding)
+	// The lapse is logged by the renewal that first starts past the validity, which the frozen
+	// relay holds up, so it can follow pod-y's take-over.
+	waitFor(t, 30*time.Second, "pod-x's lease to lapse, ending its term", func() bool {
+		return strings.Contains(x.logs.String(), "listener lease lapsed")
+	})
+	if strings.Contains(x.logs.String(), "giving the listener lease up") {
+		t.Fatalf("pod-x gave the lease up; this row ends its term by losing the lease:\n%s", x.logs.String())
+	}
+	y.awaitState(t, receiveActive, 10*time.Second)
+	old.Close()
+	thaw()
+	waitFor(t, 30*time.Second, "pod-x to step down to a standby", func() bool {
+		return !x.lease.Holding() && x.lease.Status().ActiveInstance == "pod-y"
+	})
+
+	publishDurable(t, admin, "older")
+	select {
+	case <-inHand:
+	case <-time.After(5 * time.Second):
+		t.Fatal("pod-y never took the older message")
+	}
+	yLink.sever() // pod-y dies hard: both its connections go, and it releases nothing
+	yLeaseLink.sever()
+	waitFor(t, 5*time.Second, "the server to drop pod-y's binding, the older message still outstanding with it", func() bool {
+		info, err := admin.JS().ConsumerInfo(bus.Stream, consumer)
+		return err == nil && !info.PushBound && info.NumAckPending == 1
+	})
+	publishDurable(t, admin, "newer")
+
+	waitFor(t, 10*time.Second, "pod-x to take pod-y's expired lease", x.lease.Holding)
+	if status := x.lease.Status(); status.How != leaseTakenExpired || !status.Settle || status.Resumed {
+		t.Fatalf("pod-x's lease = %+v, want taken over pod-y's expired record, settling, no resume of its own", status)
+	}
+	first := awaitReceived(t, received, consumerAckWait+5*time.Second, "pod-x's first message")
+	second := awaitReceived(t, received, consumerAckWait+5*time.Second, "pod-x's second message")
+	if first.data != "older" || second.data != "newer" {
+		t.Fatalf("pod-x delivered %q then %q, want the older message pod-y died holding first", first.data, second.data)
+	}
+	if end := x.settleHoldEnd(t, time.Second); end["outcome"] != "settled" || end["messages"] != float64(2) {
+		t.Fatalf("pod-x's settle hold ended %v, want settled holding both messages", end)
+	}
+}
+
+// A term taken from a graceful hand-back that ends before it ever subscribed - a holder stuck on
+// its durable that gives the lease up, or a stop while it prepares - releases the record owing an
+// ack wait. The stopping pod's linger reached no subscription of this pod, and a lost node's
+// binding had the deliver subject to itself meanwhile, so what the durable pushed comes back only
+// at its ack wait: the next holder's hold is the 7 s one, and the message the lost binding was
+// pushed reaches its session before a newer one. At d3787812 (INFRA-557 review finding) such a
+// release carried no debt, the next holder took it for a graceful hand-back, held for 3 s and
+// delivered the newer message first.
+func TestATermThatNeverSubscribedOwesTheNextHolderAnAckWait(t *testing.T) {
+	for _, row := range []struct {
+		name, machineID string
+		giveUp          bool
+	}{
+		{"gives the lease up", "box-handback-giveup", true},
+		{"stops before it subscribed", "box-handback-stop", false},
+	} {
+		t.Run(row.name, func(t *testing.T) {
+			t.Parallel()
+			granted, denied := consumerInfoDeniedNATS(t)
+			// A lost node's connection still push-binds the durable and acknowledges nothing.
+			client := bindAsADeadHolder(t, granted, row.machineID)
+			timing := testReceiveTiming()
+			timing.alarmAfter, timing.alarmEvery = 2*time.Second, time.Hour
+			// pod-a polls slowly as a standby, so after it has released the record it does not
+			// take its own back while the row reads it.
+			stuckLease := testLeaseTiming()
+			stuckLease.standbyPoll = 2 * time.Second
+			stuckHandle, stuckReceived := recordingHandler()
+			stuck := newReceiverRigVia(t, denied, granted, row.machineID, "pod-a", stuckHandle, timing, stuckLease)
+			// The record is written last, so pod-a takes it inside leaseHandBackBridge of the
+			// release, as a standby takes a graceful hand-back.
+			putLeaseRecord(t, granted, row.machineID, `{"holder":"pod-gone","boot":"0123456789abcdef","released":true,"unsettled":true}`)
+			stuck.lease.Start(context.Background())
+			stuck.receiver.Start()
+			waitFor(t, 10*time.Second, "pod-a to take the hand-back", func() bool {
+				status := stuck.lease.Status()
+				return status.Holding && status.Settle && status.HandedBack
+			})
+			stuck.awaitState(t, receivePreparing, 10*time.Second)
+
+			if row.giveUp {
+				waitFor(t, 30*time.Second, "pod-a to give the lease up", func() bool {
+					return strings.Contains(stuck.logs.String(), "giving the listener lease up")
+				})
+			} else {
+				ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+				stuck.receiver.Stop(ctx)
+				cancel()
+			}
+			noneReceived(t, stuckReceived, time.Millisecond, "pod-a, which never subscribed")
+			stuck.awaitRecord(t, "released, unsettled and owing an ack wait", func(record leaseRecord) bool {
+				return record.Holder == "pod-a" && record.Released && record.Unsettled && record.AckWaitOwed
+			})
+
+			handle, received := recordingHandler()
+			next := newReceiverRig(t, granted, row.machineID, "pod-b", handle, testReceiveTiming(), testLeaseTiming())
+			next.lease.Start(context.Background())
+			waitFor(t, 15*time.Second, "pod-b to take the released record", next.lease.Holding)
+			if status := next.lease.Status(); !status.Settle || status.HandedBack {
+				t.Fatalf("pod-b's lease = %+v, want settling and no hand-back: pod-a's term never subscribed", status)
+			}
+			// The lost node's binding takes the older message alone, before pod-b subscribes.
+			publishToTheDeadHolder(t, client, row.machineID, "older")
+			next.receiver.Start()
+			must := next.logRecord(t, "listener lease term must settle; receiving at once and holding what arrives until the durable's outstanding messages are in hand", 10*time.Second)
+			if must["cap"] != (consumerAckWait + settleMargin).String() {
+				t.Fatalf("pod-b's settle hold = %v, want the %s cap of a term owed an ack wait", must, consumerAckWait+settleMargin)
+			}
+			next.awaitState(t, receiveActive, 10*time.Second)
+			publishDurable(t, client, "newer")
+			for _, want := range []string{"older", "newer"} {
+				if message := awaitReceived(t, received, consumerAckWait+10*time.Second, "pod-b's "+want); message.data != want {
+					t.Fatalf("pod-b delivered %q, want %q: the messages in the order they were published", message.data, want)
+				}
+			}
+		})
+	}
+}
+
 // A pod that cannot prepare its durable and has no other pod to give the lease to tries again: a
 // sole lease holder gives the lease up at the alarm bound and takes it back once no other pod has,
 // and a listener without a lease, the machine's one deliverer, keeps retrying and answers /healthz
@@ -1480,9 +1671,11 @@ func TestAPodThatCannotPrepareItsDurableAloneTriesAgain(t *testing.T) {
 		get := healthzFor(t, client, receiver)
 		var code int
 		var body map[string]any
+		// A listener without a lease that does not receive yet is degraded from the start; this
+		// waits for the answer past the alarm bound, which is the unready one.
 		waitFor(t, 15*time.Second, "/healthz to report the failing durable", func() bool {
 			code, body = get()
-			return body["status"] != "healthy"
+			return code != http.StatusOK
 		})
 		if code != http.StatusServiceUnavailable || body["status"] != "unhealthy" || body["receive"] != receivePreparing.String() ||
 			!strings.Contains(fmt.Sprint(body["error"]), "read the durable consumer") {

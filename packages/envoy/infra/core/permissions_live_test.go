@@ -158,7 +158,9 @@ func TestHostPermissionsOnRealServers(t *testing.T) {
 					require.Equal(t, []string{"Publish", removed}, v[1:], "the server refused something else too: %s", v[0])
 				}
 				t.Logf("server violation (%d alike): %s", len(logged), logged[0][0])
-				require.Contains(t, process.Output.String(), "subscribe failed, retrying")
+				// The lease holder retries the create it cannot make; `subscribe failed, retrying`
+				// was the line of the start-time bind this listener no longer has.
+				require.Contains(t, process.Output.String(), "durable consumer read failed; retrying")
 			})
 		})
 	}

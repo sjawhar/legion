@@ -123,13 +123,14 @@ func TestTheV1APIIsServedWhileAPreLeaseBuildHoldsTheDurable(t *testing.T) {
 		t.Fatalf("the role holder received no forward while another task holds the durable:\n%s", listener.Output.String())
 	}
 
-	// The waiting pod is healthy, a standby until it receives: a 503 would have the runtime kill it
-	// while the old build still holds the durable.
+	// The waiting pod is ready, a degraded standby until it receives: it holds the lease and
+	// delivers nothing, which is no healthy answer, but a 503 would have the runtime kill it while
+	// the old build still holds the durable.
 	status, answer = do(t, mustRequest(t, http.MethodGet, "http://127.0.0.1:"+strconv.Itoa(listener.port)+"/healthz"))
 	var health map[string]any
 	_ = json.Unmarshal([]byte(answer), &health)
-	if status != http.StatusOK || health["status"] != "healthy" || health["role"] != "standby" || health["receive"] != receiveAwaitingBinding.String() {
-		t.Fatalf("/healthz while the old build holds the durable: status %d %q, want 200 healthy, a standby waiting for the binding", status, answer)
+	if status != http.StatusOK || health["status"] != "degraded" || health["role"] != "standby" || health["receive"] != receiveAwaitingBinding.String() {
+		t.Fatalf("/healthz while the old build holds the durable: status %d %q, want 200 degraded, a standby waiting for the binding", status, answer)
 	}
 
 	// The old build exits, which releases its binding.

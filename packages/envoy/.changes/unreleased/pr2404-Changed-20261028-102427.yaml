@@ -25,13 +25,18 @@ body: |-
     too: messages arrive about 5 to 6 s after the dead holder's last renewal when nothing was
     outstanding and about 12 to 13 s after it otherwise; a NAK-delayed retry stays outstanding,
     holds the hold to its cap and arrives after it. After a graceful stop the cap is the 2 s
-    hand-back delay and a second, 3 s, every hand-over alike. The lease record carries
+    hand-back delay and a second, 3 s, every hand-over alike, as long as a standby took the
+    released record while the stopping pod's linger could still have bridged to it. The lease
+    record carries
     `stale_binding` (its holder subscribed beside a lingering push binding), `unsettled` (its
     term's hold had not ended, kept by a release, or its holder handed messages back on a graceful
-    stop), `ack_wait_owed` (its holder stopped or gave the lease up during a hold that waits out
-    an ack wait) and `receiving` (its holder's subscription is up), and a pod that takes a released
-    record carrying `stale_binding` or `unsettled` settles the same way, capped at 3 s when it
-    carries `unsettled` without `ack_wait_owed` and at 7 s otherwise. A holder that
+    stop), `ack_wait_owed` (the ack wait the releasing term still owed: a term that must settle
+    owes one from its acquiring write until its hold ends, and a term taken from a hand-back until
+    it has subscribed, so a stop, a lapse, a give-up or a stop before the term ever subscribed
+    hands the debt on) and `receiving` (its holder's subscription is up), and a pod that takes a
+    released record carrying `stale_binding` or `unsettled` settles the same way, capped at 3 s
+    when it carries `unsettled` without `ack_wait_owed` and the take-over's write is less than
+    1.5 s after the release, and at 7 s otherwise. A holder that
     takes an absent record, or a released one with neither flag, and finds the durable push-bound
     by a listener build from before the lease waits for that binding to end and subscribes within
     a second of it; past 135 s it logs `lease holder cannot deliver from the durable` at ERROR,

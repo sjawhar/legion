@@ -373,17 +373,22 @@ type healthAnswer struct {
 // while it receives the durable (it holds the lease and is subscribed, or it runs without a lease
 // and receives), with the durable's lag (num_pending, num_ack_pending), or "standby" otherwise,
 // naming the holder in "active_instance" when the lease record names one and, while it holds the
-// lease but does not receive yet, what it waits for in "receive". A standby is ready: it serves
-// /v1, the webhooks and the role lane, and takes over delivery when the lease comes free. A
-// listener without the lease's grant says so in "lease" (listenerLeaseUnavailable). It answers 503
-// "unhealthy" when NATS is unavailable, the role lane's core subscription is not valid, a cache's
-// watcher has stopped, a bus check did not answer within healthzBudget, or on the active pod when
-// its subscription is inactive, the durable consumer is gone, or the durable consumer is "not bound
-// to this listener's subscription" because it was recreated server-side and now delivers
-// elsewhere; and 200 "degraded" for a transient KV failure the self-health monitor and the NATS
-// reconnect retry, or an active pod's durable lag that could not be read. A pod that holds the
-// lease, or runs without one, and fails to read, create, correct or subscribe to the durable
-// answers 200 "degraded" with the failure in "error" and how long it has failed in
+// lease but does not receive yet, what it waits for in "receive". A pod that is the machine's
+// deliverer and does not receive yet - it holds the lease, or runs without one, or has read no
+// holder at all - is 200 "degraded" rather than healthy, however well its dependencies answer:
+// nothing of the durable reaches a session until it receives. It stays ready, since a readiness
+// probe that takes any 200 keeps routing /v1 to it, as it does to a standby. A standby of another
+// holder is ready and healthy: it serves /v1, the webhooks and the role lane, and takes over
+// delivery when the lease comes free. A listener without the lease's grant says so in "lease"
+// (listenerLeaseUnavailable). It answers 503 "unhealthy" when NATS is unavailable, the role
+// lane's core subscription is not valid, a cache's watcher has stopped, a bus check did not
+// answer within healthzBudget, or on the active pod when its subscription is inactive, the
+// durable consumer is gone, or the durable consumer is "not bound to this listener's
+// subscription" because it was recreated server-side and now delivers elsewhere; and 200
+// "degraded" for a transient KV failure the self-health monitor and the NATS reconnect retry, or
+// an active pod's durable lag that could not be read. A pod that holds the lease, or runs
+// without one, and fails to read, create, correct or subscribe to the durable answers 200
+// "degraded" with the failure in "error" and how long it has failed in
 // "receive_failing_ms", and 503 "unhealthy" once that has lasted the alarm bound
 // (durableTakeoverAlarmAfter): a holder gives the lease up then and is a standby again, so only a
 // listener without a lease, which keeps retrying, stays there. A listener that mounts no GitHub
@@ -474,6 +479,14 @@ func listenerHealth(ctx context.Context, d *listenerDeps, verifier *apiVerifier)
 		}
 		if report.State != receiveStandby {
 			response["receive"] = report.State.String()
+		}
+		if report.NoLease || report.Lease.Holding || report.Lease.ActiveInstance == "" {
+			// This pod is the machine's deliverer and does not receive yet (it holds the lease,
+			// or runs without one), or no pod of the machine holds the lease as this one last
+			// read the record: nothing of the durable reaches a session until that changes, which
+			// no answer of this pod may call healthy. It stays 200, as a standby does, so a
+			// readiness probe keeps sending it /v1.
+			response["status"] = "degraded"
 		}
 		if report.Failing > 0 {
 			response["error"] = "durable consumer unavailable: " + report.FailingReason

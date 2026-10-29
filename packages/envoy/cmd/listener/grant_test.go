@@ -1,8 +1,10 @@
 package main
 
 import (
+	"encoding/json"
 	"errors"
 	"net/http"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -162,5 +164,57 @@ func TestAMachinesGrantRefusesAnotherMachinesLeaseAndLedger(t *testing.T) {
 		case <-time.After(5 * time.Second):
 			t.Fatalf("the server did not refuse box-a's write of %s", refused.key)
 		}
+	}
+}
+
+// A listener whose grant lacks the create of its own durable consumer never receives: it takes
+// the machine's lease, its create is refused, and it delivers nothing. No answer of /healthz may
+// then be "healthy", which is what the infra live row
+// TestHostPermissionsOnRealServers/*/without_its_durable's_consumer_create_the_listener_never_reaches_healthy
+// guards, watching it for a minute. It answers 200 "degraded" as a standby preparing its durable,
+// so a readiness probe (`curl -fsS`) keeps it in service while another pod of the machine could
+// deliver. Before, a holder that had not received yet answered 200 "healthy" until its first
+// durable attempt failed, about ten seconds in, and the live row failed on that answer.
+func TestAListenerWithoutItsDurablesConsumerCreateNeverAnswersHealthy(t *testing.T) {
+	t.Parallel()
+	const (
+		machineID = "box-no-create"
+		instance  = "pod-a"
+		// liveHealthWindow is how long packages/envoy/infra's live row watches this answer.
+		liveHealthWindow = 60 * time.Second
+	)
+	seed, public := testnats.User(t)
+	grant := testnats.ListenerGrant(t, machineID)
+	refused := "$JS.API.CONSUMER.CREATE." + bus.Stream + "." + bus.ListenerDurable(machineID)
+	held := len(grant.Publish.Allow)
+	grant.Publish.Allow = slices.DeleteFunc(grant.Publish.Allow, func(subject string) bool { return subject == refused })
+	if len(grant.Publish.Allow) != held-1 {
+		t.Fatalf("the listener's grant does not hold %s alone: %q", refused, grant.Publish.Allow)
+	}
+	granted := testnats.StartGranted(t, testnats.GrantedUser{Public: public, Grant: grant})
+	listener := startListenerProcess(t, cmdtest.Build(t, "envoy-listener"), granted.URL(), machineID,
+		"NATS_NKEY_SEED="+seed, "ENVOY_INSTANCE_ID="+instance)
+
+	var degraded map[string]any
+	for deadline := time.Now().Add(liveHealthWindow); time.Now().Before(deadline); time.Sleep(time.Second) {
+		status, body := callListener(t, listener.port, http.MethodGet, "/healthz", "")
+		var health map[string]any
+		_ = json.Unmarshal([]byte(body), &health)
+		if health["status"] == "healthy" {
+			t.Fatalf("the listener answered healthy without its durable's consumer create: %d %s\n%s",
+				status, body, listener.Output.String())
+		}
+		if status == http.StatusOK && health["status"] == "degraded" {
+			degraded = health
+		}
+	}
+	if degraded == nil {
+		t.Fatalf("the listener never answered 200 degraded; a standby's 200 keeps it ready:\n%s", listener.Output.String())
+	}
+	if degraded["role"] != "standby" || degraded["receive"] != receivePreparing.String() {
+		t.Fatalf("the degraded answer = %v, want role standby, receive %q", degraded, receivePreparing.String())
+	}
+	if !strings.Contains(listener.Output.String(), "durable consumer read failed; retrying") {
+		t.Fatalf("the listener never logged a retry of its refused durable create:\n%s", listener.Output.String())
 	}
 }
