@@ -1,8 +1,8 @@
 # Legion worker image: every Legion agent process under `runtime: kubernetes` runs from this image.
 # Build context: the repo root. Built by .github/workflows/worker-image.yaml on the GitHub-hosted runner
 # (called from release.yaml beside its publish job, build only, then attested by a second call after
-# publish; on every head of a pull request against main that touches a file it builds from; or
-# dispatched post-merge). Never build it on a workstation — no `docker build`,
+# publish; from ci.yaml's worker-image job on every head of a pull request that touches a file it
+# builds from; or dispatched post-merge). Never build it on a workstation — no `docker build`,
 # `docker buildx`, or `docker compose build` (Sami, 2026-09-12); the CI runner is not a workstation.
 #
 # Contents: pinned Bun; the Go `legion` (packages/daemon) compiled from this checkout at go.work's
