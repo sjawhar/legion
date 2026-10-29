@@ -2,6 +2,7 @@ package api
 
 import (
 	"context"
+	"fmt"
 	"net/http"
 	"net/url"
 	"strconv"
@@ -190,19 +191,27 @@ func TestAnEventsSubscriptionStaysAliveWhileTheHorizonIsHeld(t *testing.T) {
 // waits for that reset and subscribes again, with its socket open and heartbeating meanwhile: a
 // cold subscription starts then, and one resuming from an id of the new log is replayed every event
 // after it. Either way the new log's events reach the page on the subscription it already has.
+//
+// The new log can also have climbed past the old cursor by then, as the browser suite's next
+// scenario does while it seeds: the cursor then stands at or below the new log's newest id, on an
+// id whose row carries another created_at than the relay read. Started there, the subscription
+// would be sent its events_start and then be ended by the relay's reset, which the page answers by
+// subscribing again on the same socket. It waits for that reset too.
 func TestAnEventsSubscriptionOnARelayStillOnAReplacedLogWaitsForItsReset(t *testing.T) {
 	for _, subscription := range []struct {
-		name  string
-		since *int64
+		name      string
+		since     *int64
+		climbPast bool
 	}{
 		{name: "cold", since: nil},
 		{name: "resuming from the new log's start", since: new(int64(0))},
+		{name: "cold, the new log past the old cursor", since: nil, climbPast: true},
 	} {
-		t.Run(subscription.name, func(t *testing.T) { replacedLogConnection(t, subscription.since) })
+		t.Run(subscription.name, func(t *testing.T) { replacedLogConnection(t, subscription.since, subscription.climbPast) })
 	}
 }
 
-func replacedLogConnection(t *testing.T, since *int64) {
+func replacedLogConnection(t *testing.T, since *int64, climbPast bool) {
 	t.Helper()
 	rig := newLiveSocketRig(t, testServerOptions{streamHeartbeat: liveHorizonHeartbeat}, nil)
 	issue := createInteractionIssue(t, rig.handler, "TEST", "Issue", "A spec")
@@ -222,7 +231,11 @@ func replacedLogConnection(t *testing.T, since *int64) {
 	}
 	renameIssue(t, rig.handler, issue.Key, "Renamed after the reset")
 	afterReset := eventHead(t, rig.database)
-	if afterReset >= old {
+	for i := 0; climbPast && afterReset <= old; i++ {
+		renameIssue(t, rig.handler, issue.Key, fmt.Sprintf("Renamed past the old cursor %d", i))
+		afterReset = eventHead(t, rig.database)
+	}
+	if !climbPast && afterReset >= old {
 		t.Fatalf("the new log's head %d is not below the old log's %d: the relay's cursor would not stand above it, so this test proves nothing", afterReset, old)
 	}
 

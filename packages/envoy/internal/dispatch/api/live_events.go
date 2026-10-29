@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"log/slog"
 	"strconv"
+	"time"
 
 	"github.com/sjawhar/envoy/internal/dispatch/model"
 )
@@ -82,9 +83,11 @@ func (s *server) startEventsSubscription(ctx context.Context, stream liveStreame
 //
 // The relay keeps a reset log's cursor until its reset check has run (resetCursor), which waits for
 // a horizon proven after the reset. A relay subscription taken meanwhile carries a published cursor
-// above the new log's newest id: started there, the subscription would drop the new log's events
-// up to it, and the relay's reset would then end it, sending the page through a resubscribe and,
-// for a page with no complete replay, the whole refresh it owes a gap. So the subscription waits
+// that names a position in the old log: above the new log's newest id, or at an id whose row is
+// gone or carries another created_at than the relay read (eventLogWasReset). Started there, the
+// subscription would drop the new log's events up to it, or start and then be ended by the relay's
+// reset, sending the page through a resubscribe and, for a page with no complete replay, the whole
+// refresh it owes a gap. So the subscription waits
 // for that reset, which ends the relay subscription, and subscribes again on the cursor the relay
 // moved to. A subscription with no since then starts at replacedFrom, read when it found the relay
 // on the replaced log, rather than at the relay's new cursor: that cursor is taken under a horizon
@@ -103,19 +106,23 @@ func (s *server) feedEvents(ctx context.Context, stream liveStreamer, sub string
 	var published, head int64
 	for {
 		var err error
-		relayed, unsubscribe, published, err = s.eventRelay.subscribe(ctx)
+		var publishedAt time.Time
+		var cursorAt *time.Time
+		relayed, unsubscribe, published, publishedAt, err = s.eventRelay.subscribe(ctx)
 		if err != nil {
 			unsubscribe = nil
 			endEventsAfterFailure(ctx, stream, sub, "subscribe to the event stream relay", err)
 			return
 		}
-		// The log's newest id as it stands now, after the relay subscription began. A published
-		// cursor above it is a relay whose reset check has not yet run.
-		if head, err = s.eventLogHead(ctx); err != nil {
+		// The log's newest id, and the row at the relay's cursor, as they stand now, after the
+		// relay subscription began. A cursor above the newest id, or one whose row is gone or
+		// carries another created_at, is a relay whose reset check has not yet run
+		// (eventLogWasReset, the relay's own test).
+		if head, cursorAt, err = eventCursorCheck(ctx, s.deps.Store.Pool, published); err != nil {
 			endEventsAfterFailure(ctx, stream, sub, "read the event log's head", err)
 			return
 		}
-		if published <= head {
+		if !eventLogWasReset(published, publishedAt, head, cursorAt) {
 			break
 		}
 		if since == nil && replacedFrom < 0 {

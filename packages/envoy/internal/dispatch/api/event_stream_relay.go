@@ -169,14 +169,14 @@ func newEventStreamRelay(s *server, lifetime context.Context) *eventStreamRelay 
 // increasing id order. Read apart, a page published between the two would reach the caller twice
 // or, read in the other order, not at all. A start that fails starts nothing and is the caller's
 // error; the next subscription tries again.
-func (r *eventStreamRelay) subscribe(ctx context.Context) (<-chan model.Event, func(), int64, error) {
+func (r *eventStreamRelay) subscribe(ctx context.Context) (<-chan model.Event, func(), int64, time.Time, error) {
 	if err := r.start(ctx); err != nil {
-		return nil, nil, 0, err
+		return nil, nil, 0, time.Time{}, err
 	}
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	subscription, cancel := r.stream.Subscribe()
-	return subscription, cancel, r.cursor, nil
+	return subscription, cancel, r.cursor, r.cursorAt, nil
 }
 
 // start reads the first cursor and runs the relay's two goroutines, once. The first cursor stands
