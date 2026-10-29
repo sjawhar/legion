@@ -150,9 +150,9 @@ func issuedClaims(t *testing.T) []string {
 	return slices.Sorted(maps.Keys(issued))
 }
 
-// documentedClaims reads the claim names from the bullet list under claimsDocHeading, sorted: the
-// backticked name each bullet opens with, and only that one. Sorting is what makes a name the list
-// carries twice a failure rather than a duplicate nobody notices.
+// documentedClaims reads the claim names from the bullet list under claimsDocHeading, in the list's
+// order: the backticked name each bullet opens with, and only that one. A name the list carries
+// twice is returned twice, so the caller's slices.Equal fails on it rather than a set hiding it.
 func documentedClaims(t *testing.T) []string {
 	t.Helper()
 	// The document is at the repository root, five directories above this package. Read it, and
