@@ -2,9 +2,17 @@
   "schemaVersion": 1,
   "phase": "implement",
   "issue": "INFRA-493",
-  "completed": "2026-10-29T01:05:00Z",
+  "completed": "2026-10-29T09:45:00Z",
   "pullRequest": "https://github.com/sjawhar/legion/pull/2478",
   "proof": [
+    {
+      "criterion": "Round 4 (architect's send-back): main merged forward with the conflict resolved, the approval's six follow-up items done, and every package the merge touches green",
+      "surface": "the daemon's and Envoy's real suites on a real Postgres and nats-server 2.10.22, the Envoy listener's GitHub handler, and GitHub's required checks at the code head",
+      "command": "cd packages/daemon && go test -count=1 -timeout 50m ./... (Docker/gVisor tests skipped by name); cd packages/envoy && go test -count=1 ./internal/... ./cmd/...; bun test in contracts, pi-legion (src, extensions), pi-shared; bunx biome check .; gh pr checks 2478",
+      "observed": "daemon: every package ok but natsauth (Docker, untouched); envoy: every package ok but broker/helper, cmd/agent-secrets, cmd/agent-secrets-helper (SO_PEERPIDFD unavailable under gVisor, 64 tests), broker/store (the test role has a password) and dispatch/files (Docker), none touched by this pull request; contracts 324 pass, pi-legion 510 pass, pi-shared 76 pass, biome clean; GitHub at 19a25586: lint, typecheck, test, pr-title green; TestAnOverLongGitHubDeliveryIsNeverRememberedAsAFailure PASS (a 65-byte X-GitHub-Delivery answered 422 twice, the counted line logged both times, nothing remembered)",
+      "headSha": "19a255867f7fdf372683d93692cf7dd0d365362a",
+      "negativeControl": "a 64-byte delivery is remembered (its second failure logs `redelivery <delivery>: \u2026`); a record closed without merging is still refused HANDOFF_NO_PULL_REQUEST through the shared record.LetsImplementationMove predicate"
+    },
     {
       "criterion": "Review round 1, finding 2: before the NATS grant rolls out, every consumer's waiting count is still read (each consumer within its own bound)",
       "surface": "the branch's real `legion start` and `legion state` / `--json`, a real nats-server whose daemon nkey user is denied publish on `$JS.API.STREAM.MSG.GET.>`, a real Postgres",
@@ -109,7 +117,8 @@
     "The local legion start proof uses its own stand-in rather than scripts/e2e/lib/live-daemon-proof.sh, which runs an in-process driver rather than the `legion start` binary",
     "Round 2 changes only packages/daemon/internal/intake/drain_test.go (the tester's one failure); no production code changed, so the round-1 proofs at 55eb11c8 stand for the code",
     "Round 3: the reviewer's fast-follow cleanup items are done in a8a2c1b1 rather than deferred; the push-read id now has one shape (without the branch) for both the compare and the activity paths",
-    "Round 3: the real-grant lag test needs Docker (testnats.StartNkeyAuthorizedUsers), as the daemon package's other real-grant tests do; it was shown failing on the old code and passing on the new against a local nats-server"
+    "Round 3: the real-grant lag test needs Docker (testnats.StartNkeyAuthorizedUsers), as the daemon package's other real-grant tests do; it was shown failing on the old code and passing on the new against a local nats-server",
+    "Round 4: main merged forward a third time (conflict in routes_table_test.go: the pin is main's 140 plus this branch's route); the six follow-up items of the approval are done in 19a25586; nothing else added (architect 06:56Z)"
   ],
   "openQuestions": [
     "Environment-only failures in this pod, not touched by this change: packages/daemon launcher session_store tests (the pod's OMP_SESSION_* variables), runtime/tmux TestNewRefusesLaunchersItCannotRun (no tmux), natsauth (Docker); packages/envoy agent-secrets CLI tests and dispatch/api TestIssueRanksStayOrderedPastLowercaseDigitsAndProductionShapedMoves (C collation); check-bun-version, check-image-trigger-paths and check-release-credentials need python's yaml module"
