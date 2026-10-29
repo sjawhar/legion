@@ -3,6 +3,7 @@ package daemon
 import (
 	"bytes"
 	"context"
+	"errors"
 	"log/slog"
 	"reflect"
 	"strings"
@@ -380,6 +381,102 @@ func TestARetriedStartDeliversItsTaskOnce(t *testing.T) {
 	}
 	if got := len(conn.Prompts()) - prompts; got != 0 {
 		t.Fatalf("the retried start prompted the architect %d more times, want none", got)
+	}
+}
+
+// forgetFailsOnce is the record store with its first ForgetKeptDecisions failing, as a database
+// error (or the daemon dying) between a start's delivery and its forget's commit leaves it.
+type forgetFailsOnce struct {
+	record.Store
+	failed bool
+}
+
+func (s *forgetFailsOnce) ForgetKeptDecisions(ctx context.Context, tx pgx.Tx, root string, kept record.KeptDecisions, row int64) error {
+	if !s.failed {
+		s.failed = true
+		return errors.New("tester: the forget's transaction did not commit")
+	}
+	return s.Store.ForgetKeptDecisions(ctx, tx, root, kept, row)
+}
+
+// A start row whose task named kept decisions is delivered, and its forget (with the delivered
+// mark it writes) fails, so the row retries. If the architect's turn on that task ends and the
+// delivery is retired before the retry, the retry must not deliver the task again: the architect
+// was told each decision once already.
+func TestAStartWhoseForgetFailedIsNotDeliveredAgainAfterItsTurn(t *testing.T) {
+	ctx := context.Background()
+	pool := isolatedOutboxPool(t)
+	store := record.NewStore()
+	records := &forgetFailsOnce{Store: store}
+	issue := record.Issue{Key: "LEGION-1", Repo: "acme/widgets", DefaultBranch: "main", GitHubRepo: "acme/widgets", Project: "LEGION",
+		Tree: "LEGION-1", Title: "Root", Phase: phase.Admitted, Generation: 1, Status: "in_progress"}
+	putOutboxIssue(t, pool, store, issue)
+	ref, at := "dispatch://LEGION-1/ask/ask-1", time.Date(2026, 10, 24, 9, 0, 0, 0, time.UTC)
+	if err := pgx.BeginFunc(ctx, pool, func(tx pgx.Tx) error {
+		return store.AddParkedDecision(ctx, tx, record.ParkedDecision{Root: issue.Key, Ref: ref, Decision: record.DecisionAskAnswered, Actor: "user:alice", At: at})
+	}); err != nil {
+		t.Fatalf("keep the decision: %v", err)
+	}
+	sup, _ := newOutboxSupervisor(t, "legion", t.TempDir())
+	token, err := claim.NewToken("legion", issue.Key, claim.RoleArchitect)
+	if err != nil {
+		t.Fatalf("claim token: %v", err)
+	}
+	machine, _, err := sup.Create(ctx, supervise.Claim{Token: token, Project: "legion", Tree: issue.Tree, Issue: issue.Key, Role: claim.RoleArchitect,
+		State: supervise.StateQueued}, "")
+	if err != nil {
+		t.Fatalf("create the architect claim: %v", err)
+	}
+	conn := fake.NewConn()
+	sup.deps.Conns.(*fake.Conns).Register(token, conn)
+	runner := &outbox{log: quietLogger(), pool: pool, dispatchProject: "LEGION", records: records, supervisor: sup,
+		tokens: outboxTokens{}, project: "legion", stateDir: t.TempDir(), now: time.Now,
+		provision: func(context.Context, workspace.Request) (workspace.Workspace, error) {
+			return workspace.Workspace{Dir: t.TempDir(), Bookmark: "legion/LEGION-1"}, nil
+		},
+	}
+	start := mustOutboxRow(t, issue.Key, record.SuperviseRequest{Op: "start", Tree: issue.Tree, Role: claim.RoleArchitect, Generation: 1,
+		Task: "a person decided on the tree: " + ref, Kept: &record.KeptDecisions{Decisions: []record.DecisionMark{{Ref: ref, At: at}}}}, time.Now())
+	start.ID = 72
+	if err := runner.execute(ctx, start); err == nil {
+		t.Fatal("the start's first run finished; want its failed forget to retry the row")
+	}
+	launch := machine.Claim().Generation
+	for _, ev := range []supervise.Event{
+		supervise.StreamHello{Claim: token, Generation: launch},
+		supervise.RequestRegister{Claim: token, Generation: launch, Session: "ses-architect", SessionFile: "/tmp/architect.jsonl"},
+		supervise.RequestReady{Claim: token, Generation: launch, Session: "ses-architect"},
+	} {
+		if err := machine.Handle(ctx, ev); err != nil {
+			t.Fatalf("handle %T: %v", ev, err)
+		}
+	}
+	testwait.Eventually(t, "the start's task to be acknowledged", func() bool {
+		p := machine.Claim().Pending
+		return p != nil && !p.DeliveredAt.IsZero()
+	})
+	for _, ev := range []supervise.Event{supervise.StreamTurnStart{Claim: token}, supervise.StreamTurnEnd{Claim: token}} {
+		if err := machine.Handle(ctx, ev); err != nil {
+			t.Fatalf("handle %T: %v", ev, err)
+		}
+	}
+	machine.Wait()
+	if pending := machine.Claim().Pending; pending != nil {
+		t.Fatalf("the delivery after its turn ended = %#v, want it retired", pending)
+	}
+	prompts := len(conn.Prompts())
+	if err := runner.execute(ctx, start); err != nil {
+		t.Fatalf("retry the start row: %v", err)
+	}
+	machine.Wait()
+	if pending := machine.Claim().Pending; pending != nil {
+		t.Fatalf("the retried start queued %#v again after the architect's turn on it ended; want each decision told once", pending)
+	}
+	if got := len(conn.Prompts()) - prompts; got != 0 {
+		t.Fatalf("the retried start prompted the architect %d more times, want none", got)
+	}
+	if left := keptDecisions(t, pool, store, issue.Key); len(left) != 0 {
+		t.Fatalf("kept after the retried start = %#v, want the told decision forgotten", left)
 	}
 }
 
