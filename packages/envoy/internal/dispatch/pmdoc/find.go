@@ -48,12 +48,15 @@ func (e *MarkNotAllowedError) Is(target error) bool {
 	return target == ErrMarkNotAllowed || target == ErrSchema
 }
 
-// Place names where the refused text stands: the textblock, or "the front matter" for text no
-// textblock holds, since in a document inside the schema only front matter holds text outside a
-// paragraph, heading or code block.
+// Place names, for a person, where the refused text stands: "a code block", or "the front matter"
+// for text no textblock holds, since in a document inside the schema only front matter holds text
+// outside a paragraph, heading or code block.
 func (e *MarkNotAllowedError) Place() string {
-	if e.Textblock == "" {
+	switch e.Textblock {
+	case "":
 		return "the front matter"
+	case "code_block":
+		return "a code block"
 	}
 	return e.Textblock
 }
@@ -166,9 +169,36 @@ func (f *QuoteFinder) FindDiscardingMiss(quote string, occurrence, near *int) (R
 	return f.find(quote, occurrence, near, false)
 }
 
-func (f *QuoteFinder) find(quote string, occurrence, near *int, describeMiss bool) (Range, error) {
+// NearestFirst is every range quote matches, as Find matches it, ordered as Find with near chooses
+// among them: the nearest to near first, and of two as near, the earlier. Find with near returns
+// its first. A quote that matches nothing is ErrTargetNotFound, as FindDiscardingMiss answers it.
+// A caller whose first choice cannot carry what it writes there takes the next.
+func (f *QuoteFinder) NearestFirst(quote string, near int) ([]Range, error) {
+	matches, err := f.matches(quote)
+	if err != nil {
+		return nil, err
+	}
+	if len(matches) == 0 {
+		return nil, ErrTargetNotFound
+	}
+	ranges := make([]Range, len(matches))
+	for index, match := range matches {
+		ranges[index] = match.Range
+	}
+	slices.SortStableFunc(ranges, func(left, right Range) int {
+		if byDistance := distance(left.From, near) - distance(right.From, near); byDistance != 0 {
+			return byDistance
+		}
+		return left.From - right.From
+	})
+	return ranges, nil
+}
+
+// matches is every match of quote in the finder's document, preparing the document at the first
+// call: a heading quote's headings, otherwise the plain matcher cascade's.
+func (f *QuoteFinder) matches(quote string) ([]quoteMatch, error) {
 	if f.doc == nil {
-		return Range{}, fmt.Errorf("%w: FindQuote wants a document", ErrSchema)
+		return nil, fmt.Errorf("%w: FindQuote wants a document", ErrSchema)
 	}
 	if !f.prepared {
 		f.prepared = true
@@ -177,15 +207,20 @@ func (f *QuoteFinder) find(quote string, occurrence, near *int, describeMiss boo
 		}
 	}
 	if f.err != nil {
-		return Range{}, f.err
+		return nil, f.err
+	}
+	if marker := atxHeadingMarker.FindString(quote); marker != "" && marker != quote {
+		return headingQuoteMatches(f.doc, f.text, quote[len(marker):]), nil
+	}
+	return quoteMatches(f.text, quote), nil
+}
+
+func (f *QuoteFinder) find(quote string, occurrence, near *int, describeMiss bool) (Range, error) {
+	matches, err := f.matches(quote)
+	if err != nil {
+		return Range{}, err
 	}
 	doc, text := f.doc, f.text
-	var matches []quoteMatch
-	if marker := atxHeadingMarker.FindString(quote); marker != "" && marker != quote {
-		matches = headingQuoteMatches(doc, text, quote[len(marker):])
-	} else {
-		matches = quoteMatches(text, quote)
-	}
 	if len(matches) == 0 {
 		if !describeMiss {
 			return Range{}, ErrTargetNotFound

@@ -939,7 +939,7 @@ func TestAMarkNotAllowedWhereItsTextStandsIsTheOnlyErrMarkNotAllowed(t *testing.
 		name, markType, place string
 		r                     Range
 	}{
-		{name: "an ask in a code block", markType: "dispatchAsk", r: quote("run the tests"), place: "code_block"},
+		{name: "an ask in a code block", markType: "dispatchAsk", r: quote("run the tests"), place: "a code block"},
 		{name: "a comment in the front matter", markType: "proofComment", r: quote("Hello world"), place: "the front matter"},
 		{name: "an ask in the front matter", markType: "dispatchAsk", r: quote("Hello world"), place: "the front matter"},
 	} {
@@ -967,6 +967,47 @@ func TestAMarkNotAllowedWhereItsTextStandsIsTheOnlyErrMarkNotAllowed(t *testing.
 				t.Fatalf("%s = %v, want ErrSchema that is not ErrMarkNotAllowed", test.name, err)
 			}
 		})
+	}
+}
+
+// NearestFirst lists every match of a quote in the order Find with near chooses among them: its
+// first is Find's answer, the nearest to near, and of two as near the earlier comes first. A quote
+// that matches nothing is ErrTargetNotFound.
+func TestNearestFirstListsEveryMatchInFindsOrderOfChoice(t *testing.T) {
+	doc, err := Parse("brown one\n\nbrown two\n\nbrown three\n")
+	if err != nil {
+		t.Fatal(err)
+	}
+	finder := NewQuoteFinder(doc)
+	all, err := finder.NearestFirst("brown", 0)
+	if err != nil || len(all) != 3 {
+		t.Fatalf("NearestFirst(brown) = %v, %v; want three matches", all, err)
+	}
+	middle := all[1].From
+	nearMiddle, err := finder.NearestFirst("brown", middle+1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want, err := FindQuote(doc, "brown", nil, &[]int{middle + 1}[0])
+	if err != nil {
+		t.Fatal(err)
+	}
+	if nearMiddle[0] != want || nearMiddle[0].From != middle {
+		t.Fatalf("NearestFirst near the middle starts %v, want Find's %v at %d", nearMiddle[0], want, middle)
+	}
+	gap := func(r Range) int { return max(r.From-(middle+1), middle+1-r.From) }
+	for index := 1; index < len(nearMiddle); index++ {
+		before, after := nearMiddle[index-1], nearMiddle[index]
+		if gap(before) > gap(after) || (gap(before) == gap(after) && before.From > after.From) {
+			t.Fatalf("NearestFirst near %d = %v, want nearer first and, as near, earlier first", middle+1, nearMiddle)
+		}
+	}
+	tie, err := finder.NearestFirst("brown", (all[0].From+all[1].From)/2)
+	if err != nil || (all[1].From-all[0].From)%2 == 0 && tie[0] != all[0] {
+		t.Fatalf("NearestFirst halfway between two matches = %v, %v; want the earlier first", tie, err)
+	}
+	if _, err := finder.NearestFirst("purple", 0); !errors.Is(err, ErrTargetNotFound) {
+		t.Fatalf("NearestFirst(purple) = %v, want ErrTargetNotFound", err)
 	}
 }
 

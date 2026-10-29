@@ -71,11 +71,13 @@ block, every block holding a change, and a typed block whose markdown names no i
 so does every block a moved block passes, since the alignment pairs it with its changed neighbour.
 An upload over open anchors builds its tree with the anchors on it in a scratch document and writes
 that tree into the room with one `pmdoc.Update`, so anchored text it left unchanged is not
-re-formatted. An upload that moves an open anchor's quote where the schema allows no mark of its
-type - an ask's into a code block, any anchor's into the front matter - is the caller's markdown:
-`pmdoc.ErrMarkNotAllowed` becomes `400 INVALID_MARKDOWN` naming the anchor's kind and quote and
-where its text landed, and the room keeps its tree (`refusedReanchor`). Any other refusal to mark
-the scratch document stays a schema fault, answered 500 and logged as the server's. Without either change,
+re-formatted. Each open anchor is put back at the occurrence of its quote nearest where it stood
+that may carry its mark (`pmdoc.QuoteFinder.NearestFirst`): an occurrence where the schema allows no
+mark of its type - an ask's quote in a code block, any anchor's in the front matter - is passed over,
+so a copy there leaves the anchor on the original. An upload that leaves the quote nowhere it may
+stand is the caller's markdown: `pmdoc.ErrMarkNotAllowed` becomes `400 INVALID_MARKDOWN` naming the
+anchor's kind and quote and where its text landed, and the room keeps its tree (`reanchorError`).
+Any other refusal to re-anchor is a plain `ErrDocSchema`, answered 500 and logged as the server's. Without either change,
 every upload wrote a `blockId` tombstone for every block, and one per open anchor, which a live
 room keeps decoded for the document's life (INFRA-715). Document
 settlement is two-phase: it first writes its repairs into the room (`EnsureBlockIDs`, then the

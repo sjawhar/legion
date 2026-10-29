@@ -476,7 +476,7 @@ func TestMarkWriterRefusesInMarkRangesOrder(t *testing.T) {
 		ask := Mark{Type: "dispatchAsk", Attrs: Attrs{"id": "q1"}}
 		writer := NewMarkWriter(frag)
 		doc.Transact(func(txn *crdt.Transaction) {
-			checkSame(t, "a mark the code block does not allow", writer.Mark(txn, code, ask), MarkRange(txn, frag, code, ask), "not allowed in code_block")
+			checkSame(t, "a mark the code block does not allow", writer.Mark(txn, code, ask), MarkRange(txn, frag, code, ask), "not allowed in a code block")
 			past := Range{From: Size(tree) + 1, To: Size(tree) + 3}
 			if got, want := writer.Mark(txn, past, comment), MarkRange(txn, frag, past, comment); got != ErrTargetNotFound || want != ErrTargetNotFound {
 				t.Errorf("a range past the text: the writer refused with %v, MarkRange with %v; want ErrTargetNotFound", got, want)
