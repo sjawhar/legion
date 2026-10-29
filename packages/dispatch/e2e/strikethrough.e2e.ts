@@ -1,9 +1,9 @@
-import { expect, type Locator, test } from "@playwright/test";
+import { expect, test } from "@playwright/test";
 
 import { createComment, createIssue, createProject, getIssueArtifactText } from "./api";
 import {
-  conversationThreadScope,
   documentEditor,
+  expectCommentReading,
   expectParagraphReadings,
   openSpec,
   type ParagraphReading,
@@ -50,23 +50,13 @@ const engineReading: ParagraphReading[] = [
   { emphasized: [], strong: [], struck: ["b"], text: "Plain b text." },
 ];
 
-/** Asserts the paragraphs `view` draws read as `engineReading`. The control row strikes under
- *  either reader, so once it shows the view has drawn, and the whole table is then compared at
- *  once. */
-async function expectEngineReading(view: Locator): Promise<void> {
-  const rows = view.locator("p");
-  await expect(rows).toHaveCount(engineReading.length);
-  await expect(rows.nth(3).locator("del")).toHaveText(["b"]);
-  await expectParagraphReadings(view, engineReading);
-}
-
 test("tilde runs of different lengths stay text in the spec editor, and a run after an escaped tilde strikes", async ({
   browser,
 }) => {
   const { key } = await seed();
   await withAlice(browser, async (page) => {
     await openSpec(page, key, "Plain b text.");
-    await expectEngineReading(documentEditor(page));
+    await expectParagraphReadings(documentEditor(page), engineReading);
   });
 });
 
@@ -76,7 +66,7 @@ test("tilde runs of different lengths stay text in a past version of the spec, a
   const { key } = await seed();
   await withAlice(browser, async (page) => {
     await page.goto(`/issues/${key}/artifacts/spec?v=1`);
-    await expectEngineReading(page.getByTestId("version-view"));
+    await expectParagraphReadings(page.getByTestId("version-view"), engineReading);
   });
 });
 
@@ -85,13 +75,7 @@ test("tilde runs of different lengths stay text in a comment, and a run after an
 }, testInfo) => {
   const { commentId, key } = await seed();
   await withAlice(browser, async (page) => {
-    await page.goto(`/issues/${key}/conversation`);
-    // A collapsed card previews the body inline; the expanded thread draws its paragraphs, in
-    // place on a wide screen and in the Thread sheet on a phone.
-    const turn = page.locator(`[data-turn="comment:${commentId}"]`);
-    await turn.getByRole("button", { name: "Expand thread" }).click();
-    const thread = conversationThreadScope(page, testInfo.project.name, turn);
-    await expectEngineReading(thread.locator(".dispatch-markdown"));
+    await expectCommentReading(page, key, commentId, testInfo.project.name, engineReading);
   });
 });
 
