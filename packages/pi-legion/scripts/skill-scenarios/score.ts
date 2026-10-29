@@ -1523,6 +1523,11 @@ export interface SpecWork {
    * (`unseen`), at its place in time. */
   writes: { index: number; at: string; text: string; checked: boolean }[];
   checks: SpecCheck[];
+  /** Spec-only checks that count for a write's `checked` but whose findings are not judged: the
+   * assignment pastes the run's own spec and a sibling issue's spec together (in one assignment,
+   * or in one task of a call), so a finding of its report cannot be told to be about this spec. A
+   * call's tasks that review only the run's own spec stay in `checks`, with their reports alone. */
+  unjudged: RejectedCheck[];
   rejected: RejectedCheck[];
   /** The spec writes the transcript shows, and the versions spec-versions.json records for the
    * session. */
@@ -1630,7 +1635,9 @@ function checkOutcome(
   entries: SessionEntry[],
   step: Step,
   own: Outcome | undefined,
-  before: number
+  before: number,
+  /** The tasks whose reports make the check's report; every task of the call must still end. */
+  only?: string[]
 ): { report: string } | { problem: string } {
   if (own === undefined) return { problem: "the task call has no result" };
   if (own.index > before) return { problem: "the task call's result arrived after the spec write" };
@@ -1726,9 +1733,26 @@ function checkOutcome(
       );
     else if (end.status !== "completed") problems.push(`task ${name} ended ${end.status}`);
     else if (end.report === "") problems.push(`the report of task ${name} is empty`);
-    else reports.push(end.report);
+    else if (only === undefined || only.includes(name)) reports.push(end.report);
   }
   return problems.length > 0 ? { problem: problems.join("; ") } : { report: reports.join("\n\n") };
+}
+/** A `task` call's tasks, each with the assignment it was given: the call's shared arguments (its
+ * `context`) and the task's own. Undefined for a call of one task, or one whose every task does not
+ * carry a name, since a task's report is found by its name. */
+function namedTasks(step: Step): { name: string; assignment: string }[] | undefined {
+  const tasks = step.args.tasks;
+  if (!Array.isArray(tasks) || tasks.length < 2) return undefined;
+  const shared = strings(
+    Object.fromEntries(Object.entries(step.args).filter(([key]) => key !== "tasks"))
+  );
+  const parts: { name: string; assignment: string }[] = [];
+  for (const task of tasks) {
+    const name = field(task, "name");
+    if (typeof name !== "string" || name === "") return undefined;
+    parts.push({ name, assignment: [...shared, ...strings(task)].join("\n\n") });
+  }
+  return parts;
 }
 /** Whether a check's assignment is a spec-only check's: it holds the seven outline headings as `##`
  * lines and names no path under a checkout in `reach`. */
@@ -1813,12 +1837,12 @@ function specSlices(assignment: string): string[] {
  * holds, for the check to be of this run's spec. An agent that splits out a sibling issue can send
  * the sibling's spec for review, alone or after its own spec in one assignment; that spec holds
  * the seven headings too, but the report's findings on it are about another spec. Each spec of an
- * assignment must pass on its own, so one that pastes both is no check of either. The share is
- * taken over the spec alone, so text pasted after it cannot dilute it. On the 67 spec runs of the
- * dispatch skills' acceptance measurement, each of the 7 sibling specs sent for review shared at
- * most 0.02 of its runs, and each of the run's own specs at least 0.34, a draft the agent rewrote
- * in plain words after the check included: a 5-word run survives a rewrite more often than a
- * longer one. */
+ * assignment is measured on its own (specWork's kindOf), and one that pastes both is `mixed`. The
+ * share is taken over the spec alone, so text pasted after it cannot dilute it. On the 67 spec
+ * runs of the dispatch skills' acceptance measurement, each of the 9 sibling specs sent for review
+ * (7 alone, 2 after the run's own) shared at most 0.02 of its runs, and each of the run's own specs
+ * at least 0.34, a draft the agent rewrote in plain words after the check included: a 5-word run
+ * survives a rewrite more often than a longer one. */
 const OWN_SPEC = 0.1;
 /** Each pasted spec's share of 5-word runs that `written` (the runs of every version the session
  * wrote) holds, in order. */
@@ -1844,8 +1868,12 @@ function ownSpecShares(assignment: string, written: Set<string>): number[] {
  *   (subagentRun). It counts for the first spec write after its report when it started after the
  *   write before that one, by the transcripts' timestamps. A subagent that a `task` call names is
  *   that call's check alone, so a call rejected for its path or its failed task stays rejected.
- * Either kind counts for no write when its pasted spec is not this run's (ownSpecShare): a review
- * of a sibling issue's spec holds the seven headings too, and is rejected.
+ * Each spec a check pastes is the run's own or a sibling issue's (ownSpecShares). A check of only
+ * a sibling's spec counts for no write. One that pastes both, in one assignment or in one task of
+ * a call, counts for `checked`, since the run's own spec was reviewed, but is in `unjudged`, not
+ * `checks`: no finding of its report can be told to be about this spec. A call's tasks are taken
+ * one by one, so its tasks that review only the run's own spec stay in `checks`, their reports
+ * alone.
  * Each `dispatch` command of a call is a write of its own (operationsOf), so two writes in one
  * call with no check between them leave the second unchecked.
  *
@@ -1910,45 +1938,69 @@ export function specWork(runDir: string, reach: string[], fixture: SpecFixture):
     const file = path.join(runDir, "spec-versions", `${version}.md`);
     if (existsSync(file)) for (const run of wordRuns(readFileSync(file, "utf8"))) written.add(run);
   }
-  const foreign = (assignment: string) => {
+  // What the specs an assignment pastes are: `own` when each is the run's own (or it pastes none),
+  // `sibling` when none is, `mixed` when it pastes both. Only `own` gives findings a judge can tell
+  // to be about this spec; `mixed` still shows the run's own spec was reviewed before the write.
+  const kindOf = (assignment: string): { kind: "own" | "sibling" | "mixed"; note: string } => {
     const shares = ownSpecShares(assignment, written);
-    const index = shares.findIndex((share) => share < OWN_SPEC);
-    return index < 0
-      ? undefined
-      : `its spec is not this issue's: spec ${index + 1} of ${shares.length} it pastes has ${Math.round((shares[index] ?? 0) * 100)}% of its 5-word runs in a version the session wrote`;
+    const low = shares.findIndex((share) => share < OWN_SPEC);
+    if (low < 0) return { kind: "own", note: "" };
+    return {
+      kind: shares.some((share) => share >= OWN_SPEC) ? "mixed" : "sibling",
+      note: `spec ${low + 1} of ${shares.length} it pastes has ${Math.round((shares[low] ?? 0) * 100)}% of its 5-word runs in a version the session wrote`,
+    };
   };
+  const notOwn = (note: string) => `its spec is not this issue's: ${note}`;
+  const notJudged = (note: string) =>
+    `its findings are not judged: it reviews a sibling issue's spec too (${note})`;
 
   const writes: SpecWork["writes"] = [];
   const checks: (SpecCheck & { started: number })[] = [];
+  const unjudged: RejectedCheck[] = [];
   const rejected: RejectedCheck[] = [];
   const named = new Set<string>();
-  let pending: { step: Step; assignment: string }[] = [];
+  interface Pending {
+    step: Step;
+    assignment: string;
+    /** The tasks whose reports are the check's report, when the call's other tasks are left out. */
+    only?: string[];
+    /** Why the check counts for no write (no spec of the run's own), or why its findings are not
+     * judged; `judged` false with no `reject` means it counts for `checked` alone. */
+    reject?: string;
+    judged: boolean;
+    dropped?: { tasks: string; note: string };
+  }
+  let pending: Pending[] = [];
   // A write at entry `index`: each pending `task` call's check counts for it, or is rejected.
   const record = (index: number, at: string, text: string) => {
     let checked = false;
     for (const check of pending) {
       const result = results.get(check.step.id);
-      const notOwn = foreign(check.assignment);
+      const tasks = taskNames(check.step, result).join(", ") || "(unnamed)";
+      const via = `call ${check.step.id}`;
       const outcome =
-        notOwn === undefined
-          ? checkOutcome(entries, check.step, result, index)
-          : { problem: notOwn };
-      if ("problem" in outcome)
-        rejected.push({
-          tasks: taskNames(check.step, result).join(", ") || "(unnamed)",
-          via: `call ${check.step.id}`,
+        check.reject === undefined
+          ? checkOutcome(entries, check.step, result, index, check.only)
+          : { problem: check.reject };
+      if ("problem" in outcome) {
+        rejected.push({ tasks, via, write: writes.length, problem: outcome.problem });
+        continue;
+      }
+      checked = true;
+      if (check.dropped !== undefined)
+        unjudged.push({
+          tasks: check.dropped.tasks || tasks,
+          via,
           write: writes.length,
-          problem: outcome.problem,
+          problem: notJudged(check.dropped.note),
         });
-      else {
+      if (check.judged)
         checks.push({
           assignment: check.assignment,
           report: outcome.report,
           write: writes.length,
           started: Date.parse(check.step.at),
         });
-        checked = true;
-      }
     }
     writes.push({ index, at, text, checked });
     pending = [];
@@ -1968,7 +2020,32 @@ export function specWork(runDir: string, reach: string[], fixture: SpecFixture):
     if (step.tool === "task") {
       for (const name of taskNames(step, results.get(step.id))) named.add(name);
       const assignment = strings(step.args).join("\n\n");
-      if (specOnly(assignment, reach)) pending.push({ step, assignment });
+      if (!specOnly(assignment, reach)) continue;
+      // A call of several named tasks is judged task by task: a task that reviews only the run's
+      // own spec is the check, with its report alone; one that pastes a sibling's spec too, or only
+      // a sibling's, is left out of the findings. The call counts for `checked` when any task
+      // reviews the run's own spec.
+      const parts = (namedTasks(step) ?? [{ name: "", assignment }]).map((part) => ({
+        ...part,
+        ...kindOf(part.assignment),
+      }));
+      const own = parts.filter((part) => part.kind === "own");
+      const left = parts.filter((part) => part.kind !== "own");
+      const first = left[0];
+      if (first === undefined) pending.push({ step, assignment, judged: true });
+      else if (!parts.some((part) => part.kind === "mixed") && own.length === 0)
+        pending.push({ step, assignment, judged: false, reject: notOwn(first.note) });
+      else
+        pending.push({
+          step,
+          assignment: own.map((part) => part.assignment).join("\n\n"),
+          only: own.length > 0 ? own.map((part) => part.name) : undefined,
+          judged: own.length > 0,
+          dropped: {
+            tasks: left.map((part) => part.name).join(", "),
+            note: first.note,
+          },
+        });
       continue;
     }
     for (const write of shown) record(step.index, step.at, write.text);
@@ -1983,25 +2060,37 @@ export function specWork(runDir: string, reach: string[], fixture: SpecFixture):
     );
     if (write < 0) continue;
     const before = writeTimes[write - 1];
+    const { kind, note } = kindOf(run.assignment);
     const problem =
       run.report === ""
         ? "its transcript holds no report"
         : before !== undefined && run.started <= before
           ? `it started before spec write ${write}, so it checked an earlier version`
-          : foreign(run.assignment);
+          : kind === "sibling"
+            ? notOwn(note)
+            : undefined;
     if (problem !== undefined) {
       rejected.push({ tasks: name, via: `transcript ${name}.jsonl`, write, problem });
       continue;
     }
     const counted = writes[write];
     if (counted !== undefined) counted.checked = true;
-    checks.push({ assignment: run.assignment, report: run.report, write, started: run.started });
+    if (kind === "mixed")
+      unjudged.push({
+        tasks: name,
+        via: `transcript ${name}.jsonl`,
+        write,
+        problem: notJudged(note),
+      });
+    else
+      checks.push({ assignment: run.assignment, report: run.report, write, started: run.started });
   }
   return {
     writes,
     checks: checks
       .toSorted((a, b) => a.write - b.write || a.started - b.started)
       .map(({ assignment, report, write }) => ({ assignment, report, write })),
+    unjudged: unjudged.toSorted((a, b) => a.write - b.write),
     rejected: rejected.toSorted((a, b) => a.write - b.write),
     seen: calls.reduce((sum, call) => sum + call.shown.length, 0),
     versions: recorded.length,
@@ -2497,6 +2586,10 @@ function specRow(
   for (const check of work.rejected)
     details.push(
       `check ${check.tasks} (${check.via}) for spec write ${check.write + 1} does not count: ${check.problem}`
+    );
+  for (const check of work.unjudged)
+    details.push(
+      `check ${check.tasks} (${check.via}) for spec write ${check.write + 1} counts, but ${check.problem}`
     );
 
   const id = sessionId(entries);

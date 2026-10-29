@@ -46,12 +46,14 @@ before the split, and the Envoy plugin's releases after it, are in `packages/pi-
 - The skill-scenario scorer takes a run's own directory, work directory and profile from the cwd
   its session's header records (`<run dir>/cwd`), not from where the run is scored. Scoring a copy
   of the runs flagged nearly every run `outside=` and voided runs that read their own skills.
-- The skill-scenario scorer counts a spec-only check only when each spec its assignment pastes
-  (`## Summary` to the end of its `## Acceptance` section) is the run's own: at least a tenth of
-  that spec's 5-word runs must be in a version the run's session wrote. An agent that split out a
-  sibling issue and sent the sibling's spec for review, alone or after its own, had that review
-  counted as a check of its own spec, and its findings judged against the wrong spec. Text pasted
-  after a spec is outside the measure, so it cannot dilute it.
+- The skill-scenario scorer tells a review of the run's own spec from one of a sibling issue's:
+  each spec an assignment pastes (`## Summary` to the end of its `## Acceptance` section) is the
+  run's own when at least a tenth of its 5-word runs are in a version the run's session wrote. A
+  review of only a sibling's spec checks no write. One that pastes both, in one assignment or one
+  task of a call, still checks the write, but its findings are not judged (the row says so), since
+  no finding can be told to be about this spec. A call's tasks are taken one by one, so a task
+  that reviews only the run's own spec stays a judged check with its own report. Text pasted after
+  a spec is outside the measure, so it cannot dilute it.
 - The skill-scenario scorer takes the report of a subagent that ends with an empty `yield`
   (`{"type":"result"}`) from the text it wrote before the yield, not the word `result`.
 - The findings judge lists each check whose report finds nothing in `clean`, and the scorer needs

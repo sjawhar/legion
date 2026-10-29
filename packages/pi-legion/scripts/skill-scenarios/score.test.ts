@@ -1671,8 +1671,9 @@ specRun("spec-writing-head-120", {
     ),
   },
 });
-// One assignment that pastes the run's own spec and then the sibling's: each spec must pass on its
-// own, so the check is of neither.
+// One assignment that pastes the run's own spec and then the sibling's: the run's own spec was
+// reviewed, so the write counts as checked, but no finding of its report can be told to be about
+// this spec, so its findings are not judged.
 specRun("spec-writing-head-125", {
   transcript: evalFirst(evalCell("e1", evalSpawn, "Spawned BothCheck.")),
   subagents: {
@@ -1694,6 +1695,41 @@ specRun("spec-writing-head-126", {
       6.8
     ),
   },
+});
+// A `task` call of two named tasks, one reviewing the run's own spec and one a sibling's: the call
+// checks the write, and its findings are the own-spec task's report alone.
+specRun("spec-writing-head-127", {
+  transcript: conversation(
+    routedRead,
+    [
+      toolCall("c1", "task", {
+        context: "Review the spec in your task and list each gap.",
+        tasks: [
+          { name: "OwnReview", task: `The spec:\n\n${outlined()}` },
+          { name: "SiblingReview", task: `The spec:\n\n${siblingSpec}` },
+        ],
+      }),
+      {
+        type: "message",
+        message: {
+          role: "toolResult",
+          toolCallId: "c1",
+          content: [{ type: "text", text: "Two tasks completed." }],
+          details: {
+            results: [
+              { id: "OwnReview", exitCode: 0, output: "No gaps." },
+              { id: "SiblingReview", exitCode: 0, output: "The watchdog has no owner." },
+            ],
+          },
+        },
+      },
+    ],
+    specEdit("w1"),
+    askStep,
+    checkOf("c2"),
+    specEdit("w2"),
+    finish
+  ),
 });
 // A subagent that ends with an empty `yield` ({"type":"result"}) hands back the text it wrote just
 // before: that text is its report, not the word "result".
@@ -3115,10 +3151,20 @@ test("checked: a check started from an eval cell counts from its own transcript,
   expect(rowOf("spec-writing-head-120")).toContain(
     "check SiblingCheck (transcript SiblingCheck.jsonl) for spec write 1 does not count: its spec is not this issue's: spec 1 of 1 it pastes has 1% of its 5-word runs in a version the session wrote"
   );
-  expect(scoresOf("spec-writing-head-125")).toEqual({ ...allPass, checked: "false" });
+  expect(scoresOf("spec-writing-head-125")).toEqual(allPass);
   expect(rowOf("spec-writing-head-125")).toContain(
-    "check BothCheck (transcript BothCheck.jsonl) for spec write 1 does not count: its spec is not this issue's: spec 2 of 2 it pastes has 1% of its 5-word runs in a version the session wrote"
+    "check BothCheck (transcript BothCheck.jsonl) for spec write 1 counts, but its findings are not judged: it reviews a sibling issue's spec too (spec 2 of 2 it pastes has 1% of its 5-word runs in a version the session wrote)"
   );
+  expect(scoresOf("spec-writing-head-127")).toEqual(allPass);
+  expect(rowOf("spec-writing-head-127")).toContain(
+    "check SiblingReview (call c1) for spec write 1 counts, but its findings are not judged"
+  );
+  const own = specWork(path.join(runs, "spec-writing-head-127"), checkouts(work), {
+    issue: "LWEVAL-7",
+    spec_artifact: "art-spec",
+  });
+  expect(own.checks.map((check) => check.report)).toEqual(["No gaps.", "No gaps."]);
+  expect(own.checks[0]?.assignment).not.toContain("watchdog");
   expect(scoresOf("spec-writing-head-126")).toEqual(allPass);
   // An empty `yield` hands back the text before it, which is the report.
   const fixtureJson = { issue: "LWEVAL-7", spec_artifact: "art-spec" };
