@@ -68,8 +68,14 @@ func htmlFlowLines(node ast.Node) map[int]struct{} {
 // nil where it reads none of them so. It wraps ErrBlockHTML, the refusal of the block of HTML
 // goldmark opens itself, because the document is unreadable for the same reason and a caller
 // telling the two apart would learn nothing (docs/edits.go, unreadableReason).
+//
+// A paragraph of that one line is read alike by both and is not refused: the browser's block of
+// HTML holds the same one line, and the editor draws such a block as a paragraph holding it as
+// inline HTML (packages/proof-editor, remarkHtmlBlockParagraphs), which is goldmark's reading of
+// it. What differs, and what this refuses, is a block that swallows the paragraph's other lines
+// into one node where goldmark reads them as the paragraph's own text.
 func htmlFlowRefusal(lines *gmtext.Segments, recorded map[int]struct{}, source []byte, firstLine int) error {
-	if recorded == nil {
+	if recorded == nil || lines.Len() < 2 {
 		return nil
 	}
 	for index := range lines.Len() {
