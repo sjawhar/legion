@@ -428,7 +428,7 @@ func (s *Service) authorize(r *http.Request) (websocket.ConnectionConfig, bool) 
 	connection.room = room
 	connection.id = s.nextConnection.Add(1)
 	connection.added = true
-	state.connected[connection.id] = connection.actor
+	s.registerConnectionLocked(state, connection.id, connection.actor)
 	s.unlockState(room, state)
 	return websocket.ConnectionConfig{
 		ReadOnly: schemaReadOnly(open, r.URL.Query().Get("schema_version")),
@@ -817,18 +817,14 @@ func (s *Service) creditContentChange(room string, origin any, hold *roomHold) *
 	return &UpdateCredit{service: s, room: room, state: state, record: record, hold: hold}
 }
 
-// addConnection registers a browser connected to room. It is credited only with browser edits
-// observed while it is connected (creditContentChange), never for connecting or for an agent's
-// edit. The service's count of connections (connections, which reserveConnection reads) counts
-// each id once, however often it is registered. A document socket's browser is registered by
-// authorize instead, whose count is the place ServeHTTP reserved for it.
-func (s *Service) addConnection(room string, id uint64, actor model.Actor) {
-	state := s.lockState(room)
-	if _, registered := state.connected[id]; !registered {
-		s.connections.Add(1)
-	}
+// registerConnectionLocked registers a browser connected to the room whose state is state, which
+// the caller holds locked. It is credited only with browser edits observed while it is connected
+// (creditContentChange), never for connecting or for an agent's edit. It counts nothing: the
+// browser's count (connections) is the place under the connection cap reserveConnection took for
+// it before, which removeConnection gives back as it forgets the browser. authorize registers each
+// document socket's browser through it.
+func (s *Service) registerConnectionLocked(state *roomState, id uint64, actor model.Actor) {
 	state.connected[id] = actor
-	s.unlockState(room, state)
 }
 
 // removeConnection forgets a browser that left room, and with the last one, once ygo has retired

@@ -785,7 +785,7 @@ and the stored history is their union, so no edit is lost whichever process took
 writes durable state for a document from a room that is not at the durable head: each resident
 instance carries the version it holds the document through, and an append, a settlement, a fork
 of the live tree or a rebuild from a room behind the head is refused (`ErrRoomBehindHead`,
-`docs/pending_authors.go`), the live write taking the cold path instead. A settlement refused so
+`docs/room_instance.go`), the live write taking the cold path instead. A settlement refused so
 closes the room rather than retrying on it (`reloadRoomBehindHead`), since no retry on that room
 can pass the gate and three would fail the room, refusing every transaction on the document until
 its eviction ran; the settlement re-arms on the reloaded room (INFRA-218). It leaves the room open

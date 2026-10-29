@@ -493,17 +493,20 @@ func commentMarkType(table string) string {
 }
 
 // changedAnchor is an open anchor whose quote or orphaned flag its current tree mark changes.
+// comment is whether its row is a comment's (a comment or a suggestion) rather than an ask's.
 type changedAnchor struct {
 	mark      anchoredMark
 	refreshed model.Anchor
+	comment   bool
 }
 
-// anchorTable is the table of mark's row: comments for a comment or suggestion, asks otherwise.
-func anchorTable(mark anchoredMark) string {
-	if mark.markType == string(MarkComment) || mark.markType == string(MarkSuggestion) {
-		return "comments"
-	}
-	return "asks"
+// refreshedAnchors is the changed anchors of one table as the columns its update writes, one
+// entry per anchor, in the order found.
+type refreshedAnchors struct {
+	table    string
+	ids      []string
+	quotes   []string
+	orphaned []bool
 }
 
 // refreshAnchors updates each open anchor from its current tree mark. Each
@@ -546,22 +549,24 @@ func (s *Service) refreshAnchors(ctx context.Context, tx pgx.Tx, artifactID stri
 		if refreshed == mark.anchor {
 			continue
 		}
-		changed = append(changed, changedAnchor{mark: mark, refreshed: refreshed})
+		comment := mark.markType == string(MarkComment) || mark.markType == string(MarkSuggestion)
+		changed = append(changed, changedAnchor{mark: mark, refreshed: refreshed, comment: comment})
 	}
 	if len(changed) == 0 {
 		return nil
 	}
-	ids := map[string][]string{}
-	quotes := map[string][]string{}
-	orphaned := map[string][]bool{}
+	changedAsks, changedComments := refreshedAnchors{table: "asks"}, refreshedAnchors{table: "comments"}
 	for _, anchor := range changed {
-		table := anchorTable(anchor.mark)
-		ids[table] = append(ids[table], anchor.mark.id)
-		quotes[table] = append(quotes[table], anchor.refreshed.Quote)
-		orphaned[table] = append(orphaned[table], anchor.refreshed.Orphaned)
+		into := &changedAsks
+		if anchor.comment {
+			into = &changedComments
+		}
+		into.ids = append(into.ids, anchor.mark.id)
+		into.quotes = append(into.quotes, anchor.refreshed.Quote)
+		into.orphaned = append(into.orphaned, anchor.refreshed.Orphaned)
 	}
-	for _, table := range []string{"asks", "comments"} {
-		if len(ids[table]) == 0 {
+	for _, update := range []refreshedAnchors{changedAsks, changedComments} {
+		if len(update.ids) == 0 {
 			continue
 		}
 		// Only the two fields this refresh owns are written. The rows were read before the
@@ -574,21 +579,21 @@ func (s *Service) refreshAnchors(ctx context.Context, tx pgx.Tx, artifactID stri
 				'{orphaned}', to_jsonb(refreshed.orphaned))
 			from unnest($1::uuid[], $2::text[], $3::boolean[]) as refreshed(id, quote, orphaned)
 			where target.id = refreshed.id
-		`, table), ids[table], quotes[table], orphaned[table]); err != nil {
-			return fmt.Errorf("update %s anchor: %w", table, err)
+		`, update.table), update.ids, update.quotes, update.orphaned); err != nil {
+			return fmt.Errorf("update %s anchor: %w", update.table, err)
 		}
 	}
-	asks, err := loadAnchorRefreshedAsks(ctx, tx, ids["asks"])
+	asks, err := loadAnchorRefreshedAsks(ctx, tx, changedAsks.ids)
 	if err != nil {
 		return err
 	}
-	comments, err := loadAnchorRefreshedCommentPayloads(ctx, tx, ids["comments"])
+	comments, err := loadAnchorRefreshedCommentPayloads(ctx, tx, changedComments.ids)
 	if err != nil {
 		return err
 	}
 	refreshEvents := make([]model.Event, 0, len(changed))
 	for _, anchor := range changed {
-		if anchorTable(anchor.mark) == "asks" {
+		if !anchor.comment {
 			ask := asks[anchor.mark.id]
 			// Re-anchoring moves the mark, never the question text, so it cites nothing new.
 			refreshEvents = append(refreshEvents, model.Event{

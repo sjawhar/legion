@@ -91,15 +91,13 @@ const (
 // A browser opens a document's socket on every page load and every reconnect, and an eviction or a
 // deploy reconnects every browser of a room at once. Admitting one reads what it needs once: the
 // document's issue once and the caller once, whether the room is warm or cold and with the
-// Hocuspocus authentication frame the provider sends once the socket is open, and it walks no list
-// of rooms to decide the caps.
+// Hocuspocus authentication frame the provider sends once the socket is open.
 func TestASocketOpenReadsTheIssueAndTheCallerOnce(t *testing.T) {
 	ctx := context.Background()
 	counter := &statementCounter{}
 	counted := storetest.Traced(t, storetest.Open(t), counter)
 	// No heartbeat resolves the caller again while the test counts.
 	handler, _, cookie, request, documentService := newCookieServerOn(t, counted, time.Hour)
-	scans := documentService.CountRoomScansForTest()
 	if response := request(http.MethodPost, "/api/v1/projects", map[string]string{"key": "TEST", "name": "Test"}); response.Code != http.StatusCreated {
 		t.Fatalf("create project: status=%d body=%s", response.Code, response.Body.String())
 	}
@@ -123,7 +121,6 @@ func TestASocketOpenReadsTheIssueAndTheCallerOnce(t *testing.T) {
 	header := http.Header{"Cookie": []string{cookie.Name + "=" + cookie.Value}}
 	for _, open := range []string{"a cold open", "a warm open"} {
 		since := counter.mark()
-		scansBefore := scans.Load()
 		connection, response, err := gws.DefaultDialer.Dial(url, header)
 		if err != nil {
 			t.Fatalf("%s: connect the document socket: response=%v err=%v", open, response, err)
@@ -137,9 +134,6 @@ func TestASocketOpenReadsTheIssueAndTheCallerOnce(t *testing.T) {
 		}
 		if reads := counter.count(since, actorReadText, signedInLogin); reads != 1 {
 			t.Errorf("%s resolved the caller %d times, want once", open, reads)
-		}
-		if scanned := scans.Load() - scansBefore; scanned != 0 {
-			t.Errorf("%s walked the rooms %d times to decide the caps, want none", open, scanned)
 		}
 	}
 }

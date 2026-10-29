@@ -30,13 +30,13 @@ import (
 // A connection can also stand and carry nothing - half-open, its socket up, no error, as a dropped
 // NAT entry or a failover leaves it - which pglisten's own idle ping finds only after about 35 s
 // (pglisten.DefaultListenIdle and DefaultPingTimeout). So the tracker trusts itself only while the
-// connection has delivered something within headTrustWindow (delivered), and the evictor keeps an
-// idle healthy connection delivering with a ping of its own on documentPingChannel
-// (staleRoomEvictor.pingWhileQuiet) while this process holds something that trust serves - a
-// resident room, a cached cold read or a preload - and the connection has delivered nothing for
-// the evictor's quiet window, headPingAfter plus a jitter drawn afresh after each delivery and
-// each ping. Notifications arrive in commit order, so a delivery says every write committed before
-// what it carried has been heard; on a half-open connection a write is served stale for at most
+// connection has delivered something within headTrustWindow (delivered), and its liveness
+// (headLiveness.pingWhileQuiet) keeps an idle healthy connection delivering with a ping of its own
+// on documentPingChannel while this process holds something that trust serves - a resident room, a
+// cached cold read or a preload - and the connection has delivered nothing for the process's quiet
+// window, headPingAfter plus a jitter drawn afresh after each delivery and each ping (headLiveness).
+// Notifications arrive in commit order, so a delivery says every write committed before what it
+// carried has been heard; on a half-open connection a write is served stale for at most
 // headTrustWindow past the last delivery plus one notification's delivery, about 3 s, after which
 // every read falls back to the store. Every process's ping reaches every listener and draws each
 // one's window afresh, so the first holder whose window ends pings for all of them: a deployment
@@ -133,14 +133,6 @@ var closedIdle = func() chan struct{} {
 	close(idle)
 	return idle
 }()
-
-// headTrustWindow is how long after its LISTEN's connection last delivered anything the tracker
-// still trusts itself. While some process holds something the trust serves, the longest gap
-// between deliveries on a healthy connection is one holder's quiet window - headPingAfter plus a
-// jitter under headPingAfter, so under 2 s - plus its ping's delivery (pingWhileQuiet), which is
-// inside this window; and it is short enough that a half-open connection stops being trusted well
-// inside the notification delay a reader is promised.
-const headTrustWindow = 3 * time.Second
 
 func newHeadTracker() *headTracker {
 	return &headTracker{now: time.Now, entries: map[string]*headEntry{}}
@@ -264,7 +256,7 @@ func (t *headTracker) delivered() {
 }
 
 // quiet is how long the LISTEN's connection has delivered nothing, and whether the LISTEN stands:
-// what the evictor's ping asks before it sends one (staleRoomEvictor.pingWhileQuiet).
+// what the liveness's ping asks before it sends one (headLiveness.pingWhileQuiet).
 func (t *headTracker) quiet() (time.Duration, bool) {
 	t.mu.Lock()
 	defer t.mu.Unlock()

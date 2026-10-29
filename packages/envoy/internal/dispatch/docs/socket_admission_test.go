@@ -3,6 +3,7 @@ package docs
 import (
 	"context"
 	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strconv"
@@ -80,6 +81,20 @@ func registeredConnections(service *Service) int {
 		return true
 	})
 	return count
+}
+
+// addConnection registers a browser connected to room as a document socket's admission does: it
+// takes a place under the connection cap (reserveConnection), as ServeHTTP does, and registers the
+// browser against it (registerConnectionLocked), as authorize does. An id registered already keeps
+// its one place, so the count counts each id once however often a test registers it. A test that
+// registers past the cap panics, since the browser it means to connect would have been refused.
+func (s *Service) addConnection(room string, id uint64, actor model.Actor) {
+	state := s.lockState(room)
+	defer s.unlockState(room, state)
+	if _, registered := state.connected[id]; !registered && !s.reserveConnection() {
+		panic(fmt.Sprintf("register connection %d on room %s: the connection cap (%d) is reached", id, room, s.connectionCap))
+	}
+	s.registerConnectionLocked(state, id, actor)
 }
 
 // A socket's admission refuses a room outside the Proof schema, which it decides by rendering the
@@ -196,9 +211,9 @@ func warmRooms(t *testing.T, service *Service, ids []string) {
 // registered on it to the record that replaces it (handOverFailedRoomLocked).
 //
 // The rooms are real: the service loads a thousand of them, as API reads do. The connections
-// beyond the test's own sockets are registered through the service's own path for a browser that
-// joins (addConnection), since a thousand real sockets would test the operating system's limits
-// more than the service's count.
+// beyond the test's own sockets are registered as a socket's admission registers its browser
+// (addConnection), since a thousand real sockets would test the operating system's limits more
+// than the service's count.
 func TestTheConnectionAndRoomCapsCountWithoutScanning(t *testing.T) {
 	ctx := context.Background()
 	database := storetest.Open(t)
@@ -212,7 +227,6 @@ func TestTheConnectionAndRoomCapsCountWithoutScanning(t *testing.T) {
 	if live := len(service.srv.Rooms()); live != maxLiveRooms {
 		t.Fatalf("%d rooms are live after the test loaded %d, so the cap is not what is tested", live, maxLiveRooms)
 	}
-	scans := service.CountRoomScansForTest()
 
 	// The room cap: the 1,001st room is refused, while a live room still admits a socket.
 	refuseSocket(t, server.URL, spare[0], "the 1,001st room")
@@ -257,10 +271,6 @@ func TestTheConnectionAndRoomCapsCountWithoutScanning(t *testing.T) {
 	service.removeConnection(failed, firstHandedOver)
 	admitSocket(t, server.URL, resident[4], "a connection once a handed-over browser left")
 	refuseSocket(t, server.URL, resident[5], "the 1,001st connection after a handed-over browser left")
-
-	if scanned := scans.Load(); scanned != 0 {
-		t.Errorf("the socket opens above walked the rooms %d times, want none: each cap is a count kept as rooms and connections come and go", scanned)
-	}
 }
 
 // The caps DISPATCH_MAX_LIVE_ROOMS and DISPATCH_MAX_DOC_CONNECTIONS set hold for sockets that open

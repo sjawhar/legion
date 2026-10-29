@@ -138,8 +138,9 @@ type Pool struct {
 	listen      *pgxpool.Pool
 	leases      *pgxpool.Pool
 	outbox      *pgxpool.Pool
-	// closed refuses every separate pool but the health probe's from the moment Close begins;
-	// healthClosed refuses that one too, once Close has closed every other pool (Healthy).
+	// closed refuses every separate pool but the health probe's from the moment Close begins
+	// (separate); healthClosed refuses that one too, once Close has closed every other pool
+	// (healthPool).
 	closed       bool
 	healthClosed bool
 }
@@ -261,7 +262,7 @@ func (p *Pool) RoomAppends() (*pgxpool.Pool, error) {
 // answering; once Close has closed every other pool it closes this one and Healthy refuses
 // (ErrPoolClosed).
 func (p *Pool) Healthy(ctx context.Context) (int, error) {
-	health, err := p.separate(&p.health, healthPoolSize, "health probe", "")
+	health, err := p.healthPool()
 	if err != nil {
 		return 0, err
 	}
@@ -364,17 +365,36 @@ func (p *Pool) Outbox() (*Pool, error) {
 	return NewPool(opened), nil
 }
 
-// separate opens the pool held at field on demand, sized at size and copied from the shared
-// pool's configuration, and closes it with the shared pool. Its connections name themselves
-// applicationName in pg_stat_activity, or keep the shared pool's name when it is empty. Each
-// caller holds mu for the whole check-and-open so two of them cannot open two pools, and one
-// opened after Close would be a pool nobody closes.
+// separate opens the pool held at field on demand (openSeparateLocked) and closes it with the
+// shared pool. It refuses from the moment Close begins (ErrPoolClosed). Each caller holds mu for
+// the whole check-and-open so two of them cannot open two pools, and one opened after Close would
+// be a pool nobody closes.
 func (p *Pool) separate(field **pgxpool.Pool, size int32, name, applicationName string) (*pgxpool.Pool, error) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	if p.healthClosed || (p.closed && field != &p.health) {
+	if p.closed {
 		return nil, ErrPoolClosed
 	}
+	return p.openSeparateLocked(field, size, name, applicationName)
+}
+
+// healthPool is separate for the health probe's pool, whose close rule is its own: it opens and
+// is handed out while Close waits for the other pools' connections, and refuses once Close has
+// closed every other pool (healthClosed), so Healthy answers for as long as Close waits.
+func (p *Pool) healthPool() (*pgxpool.Pool, error) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if p.healthClosed {
+		return nil, ErrPoolClosed
+	}
+	return p.openSeparateLocked(&p.health, healthPoolSize, "health probe", "")
+}
+
+// openSeparateLocked is the pool held at field, opened when there is none, sized at size and
+// copied from the shared pool's configuration. Its connections name themselves applicationName in
+// pg_stat_activity, or keep the shared pool's name when it is empty. Its caller holds mu and has
+// checked the pool is not closed for it.
+func (p *Pool) openSeparateLocked(field **pgxpool.Pool, size int32, name, applicationName string) (*pgxpool.Pool, error) {
 	if *field != nil {
 		return *field, nil
 	}
@@ -601,6 +621,19 @@ func (p *Pool) SendBatch(ctx context.Context, batch *pgx.Batch) pgx.BatchResults
 		return errBatchResults{err: err}
 	}
 	return p.pool.SendBatch(ctx, batch)
+}
+
+// QueueExec queues sql with args into b; its error, wrapped in what as a statement sent alone
+// would wrap it, is what b's Close returns when the statement is the first of b's to fail. One
+// helper for every caller that pipelines statements, so a batch's statements report their errors
+// alike.
+func QueueExec(b *pgx.Batch, what, sql string, args ...any) {
+	b.Queue(sql, args...).Fn = func(results pgx.BatchResults) error {
+		if _, err := results.Exec(); err != nil {
+			return fmt.Errorf("%s: %w", what, err)
+		}
+		return nil
+	}
 }
 
 // Begin opens a transaction and marks the request as holding one.

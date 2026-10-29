@@ -4,12 +4,9 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
-	"fmt"
 	"log/slog"
-	"math/rand/v2"
 	"slices"
 	"sync"
-	"sync/atomic"
 	"time"
 
 	"github.com/jackc/pgx/v5"
@@ -17,104 +14,6 @@ import (
 	"github.com/sjawhar/envoy/internal/dispatch/store"
 	"github.com/sjawhar/envoy/internal/pglisten"
 )
-
-// documentChangedChannel carries the artifact id of a document whose stored history has just
-// changed, to every envoy-dispatch process. Two processes serve one Postgres (INFRA-66) and do
-// not share a live document: a room resident in one of them never receives the other's updates,
-// so without an announcement a reader sits on text another process replaced until the room leaves
-// at roomIdleTimeout. Every write of this build sends documentHeadChannel's notice beside this, in
-// the same statement, and that notice is what a process of this build decides its rooms on
-// (staleRoomEvictor.headNotified): the process that holds a room the write left behind closes it,
-// and the browser reconnects and re-syncs from the durable document. This channel keeps its bare
-// payload for the builds before that notice, which listen on it alone, and for what a write of such
-// a build has to reach on this one during a roll: a cold read cached before it
-// (headTracker.invalidate).
-const documentChangedChannel = "dispatch_doc_changed"
-
-// notifyDocumentChangedStatement names the channel itself, not a parameter, so the statement
-// reads as what it is; the artifact id is the parameter, because it is a value.
-const notifyDocumentChangedStatement = `select pg_notify('` + documentChangedChannel + `', $1)`
-
-// documentHeadChannel carries, beside documentChangedChannel's bare id and in the same statement,
-// a documentHeadNotice: which document changed, the head its stored history stands at once the
-// sending transaction commits, and which process sent it (Service.ProcessID). A listener can then
-// tell a change its room already holds, or one its own process made, from one it has to read.
-// documentChangedChannel keeps its bare payload, so a process of an older build, which listens on
-// that channel alone, still hears every change while two builds serve one database.
-const documentHeadChannel = "dispatch_doc_head"
-
-// notifyDocumentHeadStatement sends both notifications of a write in one statement: the bare id on
-// documentChangedChannel ($1) and the documentHeadNotice on documentHeadChannel ($2).
-const notifyDocumentHeadStatement = `select pg_notify('` + documentChangedChannel + `', $1), pg_notify('` + documentHeadChannel + `', $2)`
-
-// documentPingChannel carries the stale-room evictor's liveness ping, whose payload is the id of
-// the process that sent it (Service.ProcessID) and whose only use is to arrive: every evictor
-// listens on it on its LISTEN connection, and a delivery of it, like any other, keeps that
-// process's head tracker trusting itself (headTracker.delivered, staleRoomEvictor.pingWhileQuiet).
-const documentPingChannel = "dispatch_doc_ping"
-
-// notifyDocumentPingStatement sends one ping on documentPingChannel; the process id is the
-// parameter.
-const notifyDocumentPingStatement = `select pg_notify('` + documentPingChannel + `', $1)`
-
-// headPingAfter is the least a process's LISTEN may deliver nothing before its evictor pings, and
-// the most a ping may take (pingWhileQuiet): each evictor's quiet window is headPingAfter plus a
-// jitter drawn uniformly from [0, headPingAfter) afresh after each delivery and each ping
-// (drawQuietWindow), so the window runs from one to two seconds and a ping a process sends
-// arrives well inside headTrustWindow.
-const headPingAfter = time.Second
-
-// documentHeadNotice is documentHeadChannel's payload, encoded as JSON with one-letter keys to keep
-// it small inside Postgres's 8000-byte notification limit: {"r":"<artifact uuid>","v":<head after
-// commit>,"p":"<process id>"}. Process is empty for a store no Service was built on, which no
-// process takes for its own.
-type documentHeadNotice struct {
-	Room    string `json:"r"`
-	Head    int64  `json:"v"`
-	Process string `json:"p"`
-}
-
-// headNotice is the documentHeadChannel payload of a write of this store that leaves room's stored
-// history at head.
-func (p *PgVersioned) headNotice(room string, head int64) (string, error) {
-	notice, err := json.Marshal(documentHeadNotice{Room: room, Head: head, Process: p.processID})
-	if err != nil {
-		return "", fmt.Errorf("encode the document's head notification: %w", err)
-	}
-	return string(notice), nil
-}
-
-// notifyDocumentChanged announces room's durable change inside tx, the transaction that made it,
-// which holds the document's advisory lock (lockDocumentRoom): documentChangedChannel's bare id
-// and documentHeadChannel's notice of head, the head the change leaves the history at, in one
-// statement (notifyDocumentHeadStatement). It is the announcement of a rebuild, of a prune's
-// checkpoint and of a deletion, one per write; an append folds the same two pg_notify calls into
-// its own insert rather than spending a second round trip on them under that lock
-// (appendUpdatesStatement). A compaction announces nothing: it changes no content and no head.
-//
-// Inside that transaction for two reasons. Postgres delivers a notification only if the
-// transaction that sent it commits, so an append the gate refused (ErrRoomBehindHead), or one
-// whose commit failed, evicts nobody's room: nothing announces a change the store does not hold.
-// And the lock orders the announcement with the history it announces - a listener that hears this
-// and reads the head (currentUpdateCursor) reads one at or past the version this transaction
-// wrote, never one before it, and the notices of one document arrive in the order their writes
-// committed, so the head the last of them names is the head the history stands at.
-//
-// It is a statement, not a trigger on doc_updates, and there is no queue table: a trigger or a
-// table would need a migration, and Dispatch's pre-deploy census refuses a migration touching a
-// table at or above 1 GiB, which doc_updates is. Nothing durable is wanted either. What a process
-// does with this - close the room it holds - is worth nothing once that process is gone, so rows
-// nobody would ever read back are the whole cost of a table.
-func (p *PgVersioned) notifyDocumentChanged(ctx context.Context, tx pgx.Tx, room string, head int64) error {
-	notice, err := p.headNotice(room, head)
-	if err != nil {
-		return err
-	}
-	if _, err := tx.Exec(ctx, notifyDocumentHeadStatement, room, notice); err != nil {
-		return fmt.Errorf("notify the document's change: %w", err)
-	}
-	return nil
-}
 
 // staleRoomEvictInterval is the least time between two evictions of one room. A room's browser
 // updates are stored in batches, each lingering at most roomAppendLinger for the updates after its
@@ -132,25 +31,25 @@ func (p *PgVersioned) notifyDocumentChanged(ctx context.Context, tx pgx.Tx, room
 const staleRoomEvictInterval = 2 * time.Second
 
 // staleRoomEvictor closes the rooms this process holds for documents another process has written,
-// and feeds the service's head tracker (headTracker). It holds one LISTEN connection, on
-// documentHeadChannel and documentChangedChannel both, and on documentPingChannel, whose ping it
-// sends itself to keep that connection proving it still delivers (pingWhileQuiet). Each notice
-// decides what it can on that connection's goroutine, where it costs no query: the tracker's
-// record of the head, and a look at the room's cursor (headNotified). A room this process does not
-// hold, or one whose cursor stands at the head the notice names, is the whole of nearly every
-// notice - every write of this process's own included, which its own commit already moved the
-// room's cursor over. What is left is decided off that goroutine, one decision at a time per room
-// (decideHead): a write of this process that has not finished its bookkeeping yet is waited for,
-// with no query, and anything else is the decision documentChanged makes, which reads max(version)
-// twice - an unlocked read through the pool, and for a room that read finds behind a second read
-// under the document's advisory xact lock (roomBehindDurableHead), which waits for whatever writer
-// holds that lock. pglisten calls OnNotify, OnWake and OnConnected inline on its one listener
-// goroutine, so a wait there would be every other room's notification waiting too, and the head
-// tracker trusting a connection nobody reads; on a room's own goroutine it is that room's alone.
-// So the re-examinations a passed window and a new LISTEN make go to the same goroutines (woke,
-// sweep), and a notice heard while the room is still loading goes to the load, which hands the
-// room to its goroutine as the instance starts, to be decided once ygo publishes the room
-// (noticeLoading, awaitResidence).
+// and feeds the service's head tracker (headTracker) through its liveness (headLiveness). It holds
+// one LISTEN connection, on documentHeadChannel and documentChangedChannel both, and on
+// documentPingChannel, whose ping the liveness sends to keep that connection proving it still
+// delivers (headLiveness.pingWhileQuiet). Each notice decides what it can on that connection's
+// goroutine, where it costs no query: the tracker's record of the head, and a look at the room's
+// cursor (headNotified). A room this process does not hold, or one whose cursor stands at the
+// head the notice names, is the whole of nearly every notice - every write of this process's own
+// included, which its own commit already moved the room's cursor over. What is left is decided off
+// that goroutine, one decision at a time per room (decideHead): a write of this process that has
+// not finished its bookkeeping yet is waited for, with no query, and anything else is the decision
+// documentChanged makes, which reads max(version) twice - an unlocked read through the pool, and
+// for a room that read finds behind a second read under the document's advisory xact lock
+// (roomBehindDurableHead), which waits for whatever writer holds that lock. pglisten calls
+// OnNotify, OnWake and OnConnected inline on its one listener goroutine, so a wait there would be
+// every other room's notification waiting too, and the head tracker trusting a connection nobody
+// reads; on a room's own goroutine it is that room's alone. So the re-examinations a passed window
+// and a new LISTEN make go to the same goroutines (woke, sweep), and a notice heard while the room
+// is still loading goes to the load, which hands the room to its goroutine as the instance starts,
+// to be decided once ygo publishes the room (noticeLoading, awaitResidence).
 //
 // The locked confirmation stays, because without it a write of this process's own, between its
 // commit and its own cursor advance, reads as another process's and a healthy room is closed
@@ -207,11 +106,9 @@ type staleRoomEvictor struct {
 	// again for windows that goroutine is about to take.
 	waking bool
 
-	// quietWindow is how long, in nanoseconds, the LISTEN may deliver nothing before this
-	// evictor pings: headPingAfter plus a jitter drawn afresh after each delivery, each LISTEN
-	// and each ping (drawQuietWindow). The listener's goroutine draws it, and so does the ping's,
-	// which reads it.
-	quietWindow atomic.Int64
+	// liveness is what the listener's connection, its loss and each delivery are forwarded to,
+	// and what pings while the connection is quiet (headLiveness).
+	liveness *headLiveness
 
 	// decidingMu guards deciding: each room with a decision goroutine running (decide), and what
 	// that goroutine decides on next. stopped is set once the listener has returned, after which
@@ -241,17 +138,16 @@ type roomDecisions struct {
 }
 
 func newStaleRoomEvictor(service *Service) *staleRoomEvictor {
-	e := &staleRoomEvictor{
+	return &staleRoomEvictor{
 		service:  service,
 		dial:     service.store.Pool.Listener,
 		now:      service.now,
+		liveness: newHeadLiveness(service),
 		evicted:  map[string]time.Time{},
 		deferred: map[string]time.Time{},
 		attempts: map[string]int{},
 		deciding: map[string]*roomDecisions{},
 	}
-	e.drawQuietWindow()
-	return e
 }
 
 // RunStaleRoomEviction closes each room this process holds whose document another envoy-dispatch
@@ -279,9 +175,9 @@ func (s *Service) RunStaleRoomEviction(ctx context.Context) {
 // nobody, and the tracker can trust itself that long; a reconnect starts a new epoch in which
 // nothing it heard before counts, and the sweep re-examines every room. A connection that stands
 // and delivers nothing is a third case pglisten finds only at its idle ping, so the tracker stops
-// trusting itself headTrustWindow after the last delivery, and pingWhileQuiet, on a goroutine of
-// its own that ends with ctx, keeps a healthy idle connection delivering while this process holds
-// something that trust serves.
+// trusting itself headTrustWindow after the last delivery, and the liveness's ping
+// (headLiveness.pingWhileQuiet), on a goroutine of its own that ends with ctx, keeps a healthy
+// idle connection delivering while this process holds something that trust serves.
 //
 // That goroutine is a caller of the shared pool beside the listener's and the decisions', so its
 // context carries a hold mark of its own (store.WithTransactionTracking), made from the caller's
@@ -293,7 +189,7 @@ func (e *staleRoomEvictor) run(ctx context.Context) {
 	listener := &pglisten.Listener{
 		Owner: "dispatch",
 		Dial: func(ctx context.Context) (*pgx.Conn, error) {
-			e.service.heads.disconnected()
+			e.liveness.disconnected()
 			return e.dial(ctx)
 		},
 		Channels:    []string{documentHeadChannel, documentChangedChannel, documentPingChannel},
@@ -308,10 +204,10 @@ func (e *staleRoomEvictor) run(ctx context.Context) {
 	pinging := make(chan struct{})
 	go func() {
 		defer close(pinging)
-		e.pingWhileQuiet(pingCtx)
+		e.liveness.pingWhileQuiet(pingCtx)
 	}()
 	listener.Run(ctx)
-	e.service.heads.disconnected()
+	e.liveness.disconnected()
 	<-pinging
 	e.decidingMu.Lock()
 	e.stopped = true
@@ -319,94 +215,14 @@ func (e *staleRoomEvictor) run(ctx context.Context) {
 	e.decisions.Wait()
 }
 
-// pingWhileQuiet sends a ping on documentPingChannel (notifyDocumentPingStatement), until ctx
-// ends, whenever the LISTEN stands, it has delivered nothing for this evictor's quiet window
-// (quietWindow), and this process holds something the head tracker's trust serves
-// (Service.holdsWhatTheTrackerProtects). The ping arrives on every process's evictor, this one's
-// included, so a healthy idle connection goes on delivering and its tracker trusting itself
-// (headTracker.delivered), while a half-open one delivers nothing and its tracker stops within
-// headTrustWindow. A process that holds nothing the trust serves sends none, and still counts
-// what it hears as delivery.
-//
-// Every delivery draws the window afresh, on every process that hears it, and so does each ping
-// its sender, so processes that heard the same ping or notice do not ping together: the first
-// holder whose window ends pings, and its ping resets every other window. A deployment therefore
-// sends about one ping a second - one per headPingAfter plus the least of its holders' jitters -
-// while some process holds a room, a cached read or a preload and no document write is announced,
-// and none otherwise. While any process holds something, the longest gap between deliveries is a
-// holder's window, under two seconds, plus the ping's own delivery: inside headTrustWindow.
-//
-// The ping goes through a connection of the shared pool, never the LISTEN connection, which would
-// prove only itself, and waits for it at most headPingAfter: a pool too busy to lend a connection
-// that soon skips the ping, and if it stays that busy the tracker's trust lapses and cold reads
-// and preloads read the store, which is the answer a saturated pool costs and nothing worse.
-// After a ping, and while the LISTEN is down or the process holds nothing, it looks again
-// headPingAfter later.
-func (e *staleRoomEvictor) pingWhileQuiet(ctx context.Context) {
-	for {
-		wait := headPingAfter
-		window := time.Duration(e.quietWindow.Load())
-		if quiet, listening := e.service.heads.quiet(); listening && quiet < window {
-			wait = window - quiet
-		} else if listening && e.service.holdsWhatTheTrackerProtects() {
-			e.ping(ctx)
-			e.drawQuietWindow()
-		}
-		timer := time.NewTimer(wait)
-		select {
-		case <-ctx.Done():
-			timer.Stop()
-			return
-		case <-timer.C:
-		}
-	}
-}
-
-// drawQuietWindow draws this evictor's quiet window afresh (quietWindow): headPingAfter plus a
-// jitter uniform in [0, headPingAfter), from math/rand/v2's source, which each process seeds on
-// its own.
-func (e *staleRoomEvictor) drawQuietWindow() {
-	e.quietWindow.Store(int64(headPingAfter + rand.N(headPingAfter)))
-}
-
-// ping sends one documentPingChannel notification, bounded at headPingAfter. A ping that fails
-// is only a ping skipped (pingWhileQuiet), so it is logged at debug level: a saturated pool fails
-// one a window.
-func (e *staleRoomEvictor) ping(ctx context.Context) {
-	pingCtx, cancel := context.WithTimeout(ctx, headPingAfter)
-	defer cancel()
-	if _, err := e.service.store.Pool.Exec(pingCtx, notifyDocumentPingStatement, e.service.processID); err != nil && ctx.Err() == nil {
-		slog.Debug("dispatch: ping the document listener", "error", err)
-	}
-}
-
-// holdsWhatTheTrackerProtects is whether this process holds anything the head tracker's trust
-// answers without the database: a resident room, a cold read's cached rendering, or a cold
-// socket's preload. Tracker entries are not counted: beside those holders the tracker keeps one
-// only for a cold read in flight, which ends as a cached rendering or as nothing, and for a write
-// of this process, during which nothing about the document is trusted (headTracker). Each is a
-// counter or a map's length under its lock, and the preloads a sync.Map whose first entry ends the
-// look, so the ping asks it every window without walking the rooms or reading the store.
-func (s *Service) holdsWhatTheTrackerProtects() bool {
-	if s.residentRooms.Load() > 0 || s.reads.figures().Entries > 0 {
-		return true
-	}
-	held := false
-	s.preloads.Range(func(_, _ any) bool {
-		held = true
-		return false
-	})
-	return held
-}
-
-// connected is the listener's OnConnected: the head tracker's new epoch (headTracker.connected)
-// and a fresh quiet window for the ping (drawQuietWindow), the LISTEN being the connection's first
-// delivery, then every room this process holds, handed to its decision goroutine after each LISTEN
-// stands (sweep). It is what covers the notifications sent while the listener had no connection -
-// a redial backs off as far as thirty seconds (pglisten.RedialBackoff) - because each of those
-// reached nobody, nothing sends them again, and a document nobody writes again notifies nobody
-// again. The epoch and the window are the listener's own and cost nothing; the sweep runs aside,
-// so the listener reads the notifications that follow the LISTEN while the rooms are decided.
+// connected is the listener's OnConnected: the liveness's new epoch and fresh quiet window
+// (headLiveness.connected), the LISTEN being the connection's first delivery, then every room this
+// process holds, handed to its decision goroutine after each LISTEN stands (sweep). It is what
+// covers the notifications sent while the listener had no connection - a redial backs off as far
+// as thirty seconds (pglisten.RedialBackoff) - because each of those reached nobody, nothing sends
+// them again, and a document nobody writes again notifies nobody again. The epoch and the window
+// are the listener's own and cost nothing; the sweep runs aside, so the listener reads the
+// notifications that follow the LISTEN while the rooms are decided.
 //
 // The test hook runs once the sweep's decisions have ended, so a test that waits on it waits for
 // the sweep too.
@@ -418,8 +234,7 @@ func (e *staleRoomEvictor) connected(ctx context.Context) func() {
 		}
 	})
 	return func() {
-		e.service.heads.connected()
-		e.drawQuietWindow()
+		e.liveness.connected()
 		sweep()
 	}
 }
@@ -511,17 +326,15 @@ func (e *staleRoomEvictor) aside(work func()) func() {
 }
 
 // notified is the listener's OnNotify. Every notification, whatever its channel, is first a
-// delivery the head tracker counts (headTracker.delivered) and a fresh quiet window for the ping
-// (drawQuietWindow), and a documentPingChannel ping is nothing else. A documentHeadChannel notice
-// goes to headNotified. A bare documentChangedChannel id only invalidates the head tracker's entry
-// for the document (headTracker.invalidate): every write of this build sends the notice beside
-// it, which does the room's work, so the bare id alone is an older build's write during a roll,
-// which this build's rooms do not follow (their next durable write is refused by the gate, and
-// they reload), and which costs no query.
+// delivery the liveness counts (headLiveness.delivered), and a documentPingChannel ping is nothing
+// else. A documentHeadChannel notice goes to headNotified. A bare documentChangedChannel id only
+// invalidates the head tracker's entry for the document (headTracker.invalidate): every write of
+// this build sends the notice beside it, which does the room's work, so the bare id alone is an
+// older build's write during a roll, which this build's rooms do not follow (their next durable
+// write is refused by the gate, and they reload), and which costs no query.
 func (e *staleRoomEvictor) notified(ctx context.Context) func(channel, payload string) {
 	return func(channel, payload string) {
-		e.service.heads.delivered()
-		e.drawQuietWindow()
+		e.liveness.delivered()
 		if channel == documentPingChannel {
 			return
 		}

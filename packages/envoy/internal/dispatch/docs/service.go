@@ -257,12 +257,6 @@ type Service struct {
 	// wait ran out (retrySettleSoon, rearmSettleLocked), which runs under the room's state lock.
 	// Nil outside tests; tests count the wake-ups a room whose appends lag costs.
 	settlementWoke func(room string)
-	// roomScanned runs at each walk over the room records, or copy of ygo's room names, that a
-	// document socket's admission makes. Admission makes none - its caps are counts
-	// (reserveRoom, reserveConnection) - so nothing calls it, and a walk added to admission would.
-	// Nil outside tests; tests count through it (CountRoomScansForTest) that one socket open walks
-	// no rooms.
-	roomScanned func()
 	// admissionRendered runs at each render of a whole document that admitting a socket makes:
 	// ServeHTTP's check of the tree it loaded against the Proof schema (admitDocument), and
 	// onLoadDocument's check of a room it loads without a socket's rendered tree. Nil outside

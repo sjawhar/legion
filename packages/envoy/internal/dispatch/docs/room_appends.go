@@ -10,10 +10,9 @@ import (
 	"time"
 
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/reearth/ygo/crdt"
 	"github.com/reearth/ygo/persistence"
-
-	"github.com/sjawhar/envoy/internal/dispatch/store"
 )
 
 // A room's browser updates reach the store through ygo's per-room persistence worker, which calls
@@ -162,8 +161,8 @@ var errUpdateStored = errors.New("the update was stored by another append of its
 // ends the batch before itself (roomAppend.cut), where any other append fails on it; and once the
 // first pipeline holds the document's lock, the append keeps only the classes still queued and
 // not stored (roomAppend.recheck), which may answer errUpdateStored. The gate decides on the cursor
-// as read once the document's lock is held (appendGate.throughUnderLock). Any database error rolls
-// back what is open and still releases the session lock, as lockRoom's does.
+// as read once the document's lock is held (appendGate.head). Any database error rolls back what
+// is open and still releases the session lock, as lockRoom's does.
 func (p *PgVersioned) AppendUpdatesWithCredit(ctx context.Context, room string, updates []BrowserUpdate) (persistence.Version, error) {
 	if len(updates) == 0 {
 		return 0, errors.New("append document updates: no update to append")
@@ -179,38 +178,39 @@ func (p *PgVersioned) AppendUpdatesWithCredit(ctx context.Context, room string, 
 			break
 		}
 	}
-	if err := ctx.Err(); err != nil {
-		return 0, err
-	}
-	lock := p.acquireRoomLock(room)
-	defer p.releaseRoomLock(room, lock)
-	lock.Lock()
-	defer lock.Unlock()
-	appends, err := p.store.Pool.RoomAppends()
+	conn, ctx, release, err := p.holdRoom(ctx, room, true, func(ctx context.Context) (*pgxpool.Conn, error) {
+		appends, err := p.store.Pool.RoomAppends()
+		if err != nil {
+			return nil, err
+		}
+		conn, err := appends.Acquire(ctx)
+		if err != nil {
+			return nil, fmt.Errorf("acquire document append connection: %w", err)
+		}
+		return conn, nil
+	})
 	if err != nil {
 		return 0, err
 	}
-	conn, err := appends.Acquire(ctx)
-	if err != nil {
-		return 0, fmt.Errorf("acquire document append connection: %w", err)
-	}
-	defer conn.Release()
-	// The transaction holds this connection and the document's advisory lock; anything it reads
-	// reads through them, never through a second pooled connection.
-	ctx, releaseMark := store.HoldsConnection(ctx)
-	defer releaseMark()
+	defer release()
 
 	trips := 0
 	send := func(ctx context.Context, batch *pgx.Batch) error {
 		trips++
 		return conn.SendBatch(ctx, batch).Close()
 	}
-	defer func() { appending.spent(trips) }()
-	open, landing := true, updates
-	defer func() {
-		// The credits land while the session lock is still held, whether the transaction committed
-		// or not: no version reads the pending authors between a commit and its credits leaving the
-		// room's in-flight credits.
+	// The head tracker follows the transaction as this process's write from its gate until the
+	// commit's bookkeeping is done, the cursor's advance among it (beginOwnWrite, ownWrite.end).
+	write := p.heads.beginOwnWrite(room)
+	open, landing, stored := true, updates, int64(-1)
+	// finish ends the append however it ends, in this order: the head tracker's write ends while
+	// the session lock still orders it with every other writer of the document; the credits land
+	// while that lock is still held, whether the transaction committed or not, so no version reads
+	// the pending authors between a commit and its credits leaving the room's in-flight credits;
+	// then what is open is rolled back and the session lock released; and last the room's side of
+	// the append counts the round trips spent, the unlock's among them.
+	finish := func() {
+		write.end(stored >= 0, stored)
 		for _, update := range landing {
 			update.Credit.landed()
 		}
@@ -220,20 +220,16 @@ func (p *PgVersioned) AppendUpdatesWithCredit(ctx context.Context, room string, 
 		}
 		end.Queue(`select pg_advisory_unlock(hashtext($1))`, room)
 		_ = send(context.Background(), end)
-	}()
-	// The head tracker follows the transaction as this process's write from its gate until the
-	// commit's bookkeeping is done, the cursor's advance among it, and before the session lock goes:
-	// this deferred call, registered after the one that releases the lock, runs before it.
-	write := p.heads.beginOwnWrite(room)
-	stored := int64(-1)
-	defer func() { write.end(stored >= 0, stored) }()
+		appending.spent(trips)
+	}
+	defer finish()
 
 	first := &pgx.Batch{}
 	first.Queue(`select pg_advisory_lock(hashtext($1))`, room)
 	first.Queue(`begin`)
 	first.Queue(`select pg_advisory_xact_lock(hashtext($1))`, room)
 	first.Queue(recoverPruneStatement, room)
-	gate := queueAppendGate(first, room, appendingThrough(ctx, room), appendBrowser)
+	gate := queueAppendGate(first, room, appendBrowser)
 	if err := send(ctx, first); err != nil {
 		return 0, fmt.Errorf("begin document update: %w", err)
 	}
@@ -242,8 +238,7 @@ func (p *PgVersioned) AppendUpdatesWithCredit(ctx context.Context, room string, 
 	if err != nil {
 		return 0, err
 	}
-	gate.throughUnderLock(appendingThrough(ctx, room))
-	head, err := gate.head()
+	head, err := gate.head(appendingThrough(ctx, room))
 	if err != nil {
 		return 0, err
 	}

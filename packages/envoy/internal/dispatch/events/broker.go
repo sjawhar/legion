@@ -12,6 +12,7 @@ import (
 	"github.com/jackc/pgx/v5"
 
 	"github.com/sjawhar/envoy/internal/dispatch/model"
+	"github.com/sjawhar/envoy/internal/dispatch/store"
 )
 
 // commitOrderAdvisoryLock serializes event inserts until their transaction commits.
@@ -210,7 +211,7 @@ func (b *Broker) AppendAll(ctx context.Context, tx pgx.Tx, events []model.Event)
 		if err != nil {
 			return nil, fmt.Errorf("encode ask.opened payload: %w", err)
 		}
-		queueExec(&batch, "record ask.opened event identity", `update events set payload = $2 where id = $1`, e.ID, payload)
+		store.QueueExec(&batch, "record ask.opened event identity", `update events set payload = $2 where id = $1`, e.ID, payload)
 		e.Payload = opened
 	}
 	last := make(map[string]int, len(owners))
@@ -230,31 +231,20 @@ func (b *Broker) AppendAll(ctx context.Context, tx pgx.Tx, events []model.Event)
 	return appended, nil
 }
 
-// queueExec queues sql with args into b; its error, wrapped in what, is what b's Close returns
-// when the statement is the first of b's to fail.
-func queueExec(b *pgx.Batch, what, sql string, args ...any) {
-	b.Queue(sql, args...).Fn = func(results pgx.BatchResults) error {
-		if _, err := results.Exec(); err != nil {
-			return fmt.Errorf("%s: %w", what, err)
-		}
-		return nil
-	}
-}
-
 // queueOwnerSeq queues into b the write recording e, its owner's last appended event, as that
 // owner's last sequence.
 func queueOwnerSeq(b *pgx.Batch, e model.Event) {
 	switch {
 	case e.IssueKey != nil:
-		queueExec(b, "advance issue event sequence", `
+		store.QueueExec(b, "advance issue event sequence", `
 			update issues set last_seq = $2, updated_at = greatest(updated_at, $3) where key = $1
 		`, *e.IssueKey, e.Seq, e.CreatedAt)
 	case e.ArtifactID != nil:
-		queueExec(b, "advance artifact event sequence", `
+		store.QueueExec(b, "advance artifact event sequence", `
 			update artifacts set last_seq = $2 where id = $1
 		`, *e.ArtifactID, e.Seq)
 	case e.ProjectKey != nil:
-		queueExec(b, "advance project event sequence", `
+		store.QueueExec(b, "advance project event sequence", `
 			update projects set last_seq = $2 where key = $1
 		`, *e.ProjectKey, e.Seq)
 	}
