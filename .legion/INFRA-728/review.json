@@ -2,41 +2,31 @@
   "schemaVersion": 1,
   "phase": "review",
   "issue": "INFRA-728",
-  "completed": "2026-10-29T14:58:00Z",
-  "decision": "changes_requested",
-  "reviewedHead": "c9ec51907e19dcf03b4aa4b626505e174dd1ea8d",
-  "ci": "Required set (rulesets): lint, typecheck, test, pr-title; branch protection none. CI head 71c76b6292d1 (newest pull_request run); compare to c9ec5190 is handoffs only (2 files, .legion/INFRA-728/). lint, typecheck, test, pr-title all completed/success. envoy-go-race failed (TestTwoStartsRaisingOneStreamAtOnceBothSucceed, TestAStuckDeliveryStillEndsTheKVWatchers in packages/envoy/internal/bus): not required, no Go file in this diff, tracked by dispatch://INFRA-750.",
-  "thermo": "thermonuclear-deep-review at c9ec5190: no Medium/High, two Minor on the new unit case; Security: no sensitive surface. thermonuclear-code-quality at c9ec5190: CHANGES, one important (blockId's raw fetch), two minor.",
+  "completed": "2026-10-29T16:05:00Z",
+  "round": 2,
+  "decision": "approved",
+  "reviewedCode": "9b39c9f31c3e91466311de2eddba711446e83b83 (code head 9e9177533be6) plus the reviewer's prose commit above it",
+  "ci": "Required set (rulesets): lint, typecheck, test, pr-title; branch protection none. At code head 9e9177533be6: lint success, pr-title success, typecheck and test skipped by the CI workflow's path routing (GitHub counts skipped as passing); compare to 9b39c9f3 handoffs only (2 files). The reviewer's prose head is read separately before approval.",
+  "thermo": "thermonuclear-deep-review at 9b39c9f3: APPROVE, three Minor (two comment sentences, the stale block-references comment, the stale Look at first line); it mutated each of clearPreview's four lines and each fails a new case on its own. thermonuclear-code-quality at 9b39c9f3: three minor (the block-references comment, the test comment at :311, the started index). Security: no sensitive surface in this diff.",
+  "threads": "Four threads of round 1, all fixed in 9e917753 and verified in the diff; each answered by the reviewer, all four already resolved by the implementer.",
   "critical": 0,
-  "important": 2,
-  "minor": 2,
+  "important": 0,
+  "minor": 3,
   "keyFindings": [
     {
-      "severity": "important",
-      "file": "packages/dispatch/e2e/editor.ts:447",
-      "description": "blockId moves its own HTTP client into editor.ts (raw fetch, userHeaders, baseUrl, status check, JSON parse) beside api.ts's request<T>() (api.ts:146-182), which every other read uses, getArtifactText in this same function included. The implementer's skip reason ('request pins the process') is false: api.ts:169 pins only when options.process is set. Fix: getArtifactBlocks in api.ts through request; blockId keeps the find and the id check; editor.ts drops the three new imports."
-    },
-    {
-      "severity": "important",
-      "file": "packages/proof-editor/tests/mermaid-code-block-view.test.ts:293-312",
-      "description": "The new case's comment and the PR body's Change bullet claim that without clearPreview the drawing stands above the JavaScript block; showPlainLayout's replaceChildren(this.pre) (mermaid-code-block-view.ts:158) detaches the preview either way. The reader-visible effect is on the switch back to mermaid: showMermaidLayout (:147-151) re-inserts the preview, and without the clear the old drawing stands above the source until the new answer. The case should switch back and assert the empty hidden preview before requests[1] answers. Its status assertions cannot fail (the svg answer already empties the status, :196-197): cover them with an error answer or drop them."
+      "severity": "minor",
+      "file": "packages/dispatch/e2e/block-references.e2e.ts:17-18",
+      "description": "Prose, fixed in the reviewer's commit: the comment said a base run copies this file and editor.ts; blockId now reads getArtifactBlocks, which only api.ts at the head has, so it names api.ts as the third file."
     },
     {
       "severity": "minor",
-      "file": "packages/dispatch/e2e/deep-links.e2e.ts:742",
-      "description": "offsets.slice(started) is left over from the exact-zero rule: with peak starting at 0, the zeros before the scroll begins can never count as a fall. Loop over offsets; keep started for its assertion."
+      "file": "packages/proof-editor/tests/mermaid-code-block-view.test.ts:293,311",
+      "description": "Prose, fixed in the reviewer's commit: showMermaidLayout does not ask for the source (update's requestDrawing does), and after the switch back the frame holds preview, status and details, not 'its source alone'; the comments now say what the code does and what the case asserts."
     },
     {
       "severity": "minor",
-      "file": "packages/dispatch/e2e/mermaid-helpers.ts:1-3",
-      "description": "Prose, fixed in the reviewer's own commit: the header said 'the scroll helpers those rows read offsets with', but withoutScrollAnchoring reads no offset."
+      "file": "packages/dispatch/e2e/deep-links.e2e.ts:735-736",
+      "description": "Not a defect: the quality audit called started a leftover index, but its assertion is the row's check that the landing scroll began at all, named for what it checks; no change."
     }
-  ],
-  "verified": [
-    "The 11 moved chunks of mermaid-helpers.ts are byte-identical to their base copies in mermaid.e2e.ts apart from export; recordScrollEachFrame differs only in its doc comment; blockId's body matches both deleted copies.",
-    "CachedDrawing is sound: every cache write goes through settle, fed by { svg } or refusal(); { unavailable: true } only reaches draws.",
-    "VersionView's comment is true of ProofDocument.tsx:918-926 and ArtifactDocument.tsx:59-70.",
-    "The moved row keeps all four projects: deep-links is in the webkit and firefox testMatch, and @phone keeps iphone.",
-    "The fall rule catches a fall to mid-page that the old exact-zero filter missed (both E2E lines' control 3/2)."
   ]
 }
