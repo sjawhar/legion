@@ -2,7 +2,7 @@
   "schemaVersion": 1,
   "phase": "implement",
   "issue": "INFRA-723",
-  "completed": "2026-10-29T09:48:49Z",
+  "completed": "2026-10-29T10:05:20Z",
   "pullRequest": "https://github.com/sjawhar/legion/pull/2493",
   "proof": [
     {
@@ -55,9 +55,11 @@
     "The subdirectory landing case passes even without the new cd (extract_built moves to the root itself); the newer-build subdirectory case is the one that proves the fix.",
     "buildLegionPlugin maps each staged skill file to skills/<same path> and throws when the source is missing, so a changed staging layout fails loudly rather than under-reporting reads."
   ],
-  "deviations": [],
+  "deviations": [
+    "Round-1 push wrongly ended on a skip-checks handoff commit while carrying code; fixed forward with this trailer-free handoff commit (no force push, no rewrite)."
+  ],
   "openQuestions": [],
-  "round": "review round 1 (changes requested at 359cbd66): six threads fixed",
+  "round": "test round 2 sent back (verdict fail, no CI): the round-1 code at 38789e67 reached GitHub only under a push whose head 3894a46c carried skip-checks: true, so no workflow ran; this handoff commit carries no skip keyword, so lint, typecheck, test and pr-title run on a head holding all of that code. Code unchanged since 38789e67; the proofs below stand at that commit.",
   "threads": [
     "PRRT_kwDORFy7ds6xe-nV fixed in b36421220f41",
     "PRRT_kwDORFy7ds6xe-nZ fixed in 2d7200de83ad",
