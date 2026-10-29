@@ -2,7 +2,7 @@
   "schemaVersion": 1,
   "phase": "implement",
   "issue": "INFRA-593",
-  "completed": "2026-10-29T14:06:00Z",
+  "completed": "2026-10-29T14:16:00Z",
   "pullRequest": "https://github.com/sjawhar/legion/pull/2444",
   "proof": [
     {
@@ -176,12 +176,13 @@
     "Review round 2 fixed in 299ac590: a note brings a waiting room's check forward (entries keep their heap index); compactionSweepTick moved into the test file; bufferedFolds = store.RoomsPoolSize (exported); main.go's sweep comment; duty/ticker_test.go no longer cites the removed daily compaction and uses the issue-ask-repair lease.",
     "Fifth forward merge of main (conflicting) at 713982bb: main took migrations 0137 and 0138, so doc_compaction_owed is now migration 0139; running-dispatch.md, cmd/dispatch/README.md and deliveryaudit_test.go resolved; pmdoc test files are main's.",
     "Round 5: envoy-go's cmd/listener failure at 713982bb (nats: outbound buffer limit exceeded) is main's NATS-restart flake, fixed by INFRA-743; this PR does not touch cmd/listener.",
-    "Round 6: the test's second-phase note is made by the test (service.compactions.note) after the pause, since the pause drops the notes of writes 20-21; the first phase still proves each way of writing notes the document itself."
+    "Round 6: the test's second-phase note is made by the test (service.compactions.note) after the pause, since the pause drops the notes of writes 20-21; the first phase still proves each way of writing notes the document itself.",
+    "Round 7: this handoff-only push deliberately carries no skip-checks trailer, so CI runs at a head containing 35636880 (the architect's instruction after the tester's fail)."
   ],
   "openQuestions": [
     "The memory-tag suite (cmd/dispatch history_memory_test.go, memory_test.go) cannot run on this gVisor pod (/proc/<pid>/clear_refs permission denied); history_memory_test.go now backdates rows before the deploy-style stop so the stop's tail-rule compaction folds them. CI's memory lane passed at 4bbe8232 (Legion Envoy and Contracts: success)."
   ],
-  "round": 6,
-  "answersTest": "dispatch://INFRA-593/artifact/infra-593-tester-round-1-txt (failure: the hourly sweep read one entry per document)",
+  "round": 7,
+  "answersTest": "Tester round 6 at 35636880 (fail): no CI ran after 3e89ac6f because both pushes ended on a handoff commit carrying skip-checks. No code change; this handoff commit carries no skip-checks line, on the architect's instruction, so GitHub runs the required checks at a head containing the test fix 35636880.",
   "answersReview": "Round 4 at 3e89ac6f (REQUEST_CHANGES, review head c2fafb44): the envoy-go-race timeout in TestTheCompactionQueueFoldsTheOldRowsOfADocumentItsWritesNoted/browser_edits (thread PRRT_kwDORFy7ds6xlFtA), answered and resolved at 35636880."
 }
