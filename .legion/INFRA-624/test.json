@@ -2,44 +2,44 @@
   "schemaVersion": 1,
   "phase": "test",
   "issue": "INFRA-624",
-  "completed": "2026-10-29T10:15:22Z",
-  "round": 13,
-  "headSha": "164b3e2248dee878b6ce16136206856e6615eb87",
-  "codeHead": "d3e0a98a5e3e",
+  "completed": "2026-10-29T12:57:51Z",
+  "round": 14,
+  "headSha": "d78e7cbb2ecb3db493cb66d2ef4ff81fc4500146",
+  "codeHead": "ea3cfcb04e83",
   "implementerProof": {
     "verdict": "verified",
-    "how": "Re-ran its 11 refusal tests at the head (pass, including the nested-decision shape test and the test that names only what breaks the rule) and the browser specs (17 passed, chromium and iphone). Followed the refusal with the real dispatch CLI in five break shapes. Tried to drive a nested-decision break on the real surface; it is not reachable (see proof 3)."
+    "how": "Re-ran its 11 refusal tests at the head (pass) and read what each count in the 780-body test means. Followed the refusal with the real dispatch CLI in five break shapes. Re-ran the browser specs (17 passed, chromium and iphone), which the architect asked for although only Go changed."
   },
   "failures": [],
   "failed": 0,
   "proof": [
     {
-      "criterion": "Every ask edit of a broken decision is refused naming, as one document edit, the deletes that leave it and every decision nested in what it keeps valid; following them, then edit-ask, ends valid with every word the agent did not delete",
+      "criterion": "Architect's check (12:42Z): what the 780-body test's numbers count, and that every broken body ends in exactly one of two outcomes with no word lost",
+      "surface": "Go document service against Postgres (packages/envoy/internal/dispatch/docs, service_test.go:1168)",
+      "command": "cd packages/envoy && DISPATCH_TEST_DATABASE_URL=postgres://postgres@127.0.0.1:55432/postgres go test ./internal/dispatch/docs/ -count=1 -run TestSetAskBlockTextRefus -v",
+      "observed": "Logged '780 bodies enumerated, 715 breaking the content rule: 348 refusals followed to a valid decision, 765 naming no delete and saying why; 348 of the 715 bodies end with the decision reading as one'. broken (715) counts bodies. followed (348) and unnamed (765) count refusals: one per broken nested decision plus the outer one when it still breaks, 1,113 refusals over 715 bodies. The 765 are 541 'does not read as one at all', 186 'repaired in the document editor, or by an ask edit once the decision holding it reads as one' and 38 'repaired in the document editor'. valid (348) counts bodies whose outer decision reads strictly at the end; it equals followed only by coincidence. The test fails a body unless it ends valid, or every decision still unreadable was unreadable before and its next ask edit is refused with no delete (:1239-1252): 348 valid + 367 terminal = 715. followAskRefusal checks every word not named for deletion survives and every named word is quoted; assertAskEditWroteNothing checks a no-delete refusal wrote nothing.",
+      "headSha": "d78e7cbb2ecb3db493cb66d2ef4ff81fc4500146",
+      "negativeControl": "The reviewer's TestProbeR10QEmptyHolder at 9d737655: the refusal sent the caller to an ask edit of the holder ('edit ask block \"O\" first'), which is refused with no path"
+    },
+    {
+      "criterion": "Every ask edit of a broken decision is refused naming, as one document edit, the deletes that leave it valid; following them, then edit-ask, ends valid with every word the agent did not delete",
       "surface": "Dispatch ask-edit route and document edits through the real dispatch CLI against the real Go server and Postgres 17; decisions broken by two or three real editors in headless Chromium",
-      "command": "Throwaway Playwright probes W1-W5 (the corpus in https://github.com/sjawhar/legion/pull/2433#issuecomment-6485995991): edit-ask --urgency high; one doc-edit holding a delete per id the refusal names; edit-ask with every option. Record https://github.com/sjawhar/legion/pull/2433#issuecomment-6493951371",
-      "observed": "Two lists, three lists ('Applied 2 ops'), repeated label with Option C, paragraph after the list, nested sub-item: each named doc-edit applied, then edit-ask applied. Each decision ended valid, with pages unmarked, the row equal to the options sent and every word kept.",
-      "headSha": "164b3e2248dee878b6ce16136206856e6615eb87",
+      "command": "Throwaway Playwright probes W1-W5 (corpus in https://github.com/sjawhar/legion/pull/2433#issuecomment-6485995991): edit-ask --urgency high; one doc-edit holding the refusal's named deletes; edit-ask with every option. Record https://github.com/sjawhar/legion/pull/2433#issuecomment-6497302402",
+      "observed": "Two lists, three lists ('Applied 2 ops'), repeated label, paragraph after the list, nested sub-item: each named doc-edit applied, then edit-ask applied. Each decision ended valid, with pages unmarked, the row equal to the options sent and every word kept.",
+      "headSha": "d78e7cbb2ecb3db493cb66d2ef4ff81fc4500146",
       "negativeControl": "edit-ask --urgency high on each broken decision → exit 1; document and row unchanged"
     },
     {
-      "criterion": "A1 regression lock after main's merge: crossed edits keep every word; the input guards and read-back filter hold",
+      "criterion": "A1 regression lock: crossed edits keep every word; the input guards and read-back filter hold",
       "surface": "Dispatch document editor in headless Chromium (chromium and iphone), real Go server and Postgres 17",
       "command": "cd packages/dispatch && source /legion/scratch/harness/env.sh && bun run e2e -- ask-concurrent-edit.e2e.ts typed-block-content-rule.e2e.ts --project chromium --project iphone",
-      "observed": "17 passed (2.9m), after restarting the harness Postgres, which had been stopped at 10:09:14Z ('terminating connection due to administrator command'). That stop failed a first run of 15 rows with 'connection refused'.",
-      "headSha": "164b3e2248dee878b6ce16136206856e6615eb87",
+      "observed": "17 passed (2.8m)",
+      "headSha": "d78e7cbb2ecb3db493cb66d2ef4ff81fc4500146",
       "negativeControl": "Round 1 base tree b295a3fb: the ask-concurrent-edit rows fail with element(s) not found (the decision deleted)"
-    },
-    {
-      "criterion": "Review round 9 items 1-2: refusals for decisions nested in an option do not loop and name only what breaks the rule",
-      "surface": "Go document service against Postgres (the only surface that reaches the path; see observed)",
-      "command": "cd packages/envoy && DISPATCH_TEST_DATABASE_URL=postgres://postgres@127.0.0.1:55432/postgres go test ./internal/dispatch/docs/ -count=1 -run TestSetAskBlockTextRefus -v",
-      "observed": "11 pass, including TestSetAskBlockTextRefusalOfEveryBrokenBodyHoldingADecisionLeadsToAValidDecision and TestSetAskBlockTextRefusalOfNestedDecisionsNamesOnlyWhatBreaksTheRule. Real-surface attempt: with a nested decision a2 seeded in an option of a1, a2's question paragraph is not visible in the editor (isVisible false). A DOM caret placed on it types into a1's question; this is identical on a main tree, so it is not this change. Writes that leave a decision broken are refused. So a nested decision breaks only through a raw Yjs write.",
-      "headSha": "164b3e2248dee878b6ce16136206856e6615eb87",
-      "negativeControl": "The reviewer's probes TestProbeR9NestedAndOuterBothBroken and TestProbeR9NestedMisattributed, at 6c80533d: the refusal looped, or named the wrong nested decision"
     }
   ],
-  "ci": "Read on GitHub at code head d3e0a98a: lint, typecheck, pr-title, changes, envoy-infra-go and one build succeeded; the other lanes were queued or in progress. Not re-run.",
+  "ci": "Read on GitHub: at ea3cfcb0 every lane was cancelled (superseded). At d78e7cbb, lint, typecheck, pr-title, changes, build x2, envoy-e2e-local, envoy-infra-go and dispatch-browser-multiprocess succeeded; the other lanes were queued or in progress. Not re-run.",
   "notes": [
-    "The workspace was recreated again. The implementer had restored the harness; I restarted its Postgres and restored my probe corpus from the PR. The throwaway spec and the main tree used for the nested-caret comparison were removed. The working copy holds only this handoff."
+    "The workspace was recreated: I re-ran bun install (then restored bun.lock, which the install had changed), rebuilt contracts and installed the matching chromium. The throwaway spec was moved out; the working copy holds only this handoff."
   ]
 }
