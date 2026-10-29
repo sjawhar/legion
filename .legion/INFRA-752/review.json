@@ -1,0 +1,73 @@
+{
+  "schemaVersion": 1,
+  "phase": "review",
+  "issue": "INFRA-752",
+  "completed": "2026-10-29T23:34:00Z",
+  "round": 1,
+  "reviewedHead": "6dc06c24728584d98c7db94e34753eec28c0ef78",
+  "codeHead": "e3e93747d320e11414141f546795574f195a032d",
+  "decision": "changes_requested",
+  "critical": 0,
+  "important": 3,
+  "minor": 7,
+  "ci": "Required set (rulesets): lint, typecheck, test, pr-title; branch protection none. CI head e3e93747d320 (compare to 6dc06c24: handoffsOnly true, 2 files). At 23:30Z typecheck completed skipped, pr-title and changes success, lint, test, envoy-go, envoy-go-race, dispatch and the rest queued (the Actions queue is backed up). No required check red; none decided for lint or test yet. A request for changes does not wait on it.",
+  "thermonuclear": "Both run once at 6dc06c24: thermonuclear-deep-review Verdict CHANGES (one Medium, Security[transport], the quadratic declaration parse; two Minor), thermonuclear-code-quality Verdict CHANGES (five code findings, three prose findings). Every finding below was checked against the code or a run before it was kept.",
+  "keyFindings": [
+    {
+      "severity": "important",
+      "file": "packages/envoy/internal/dispatch/pmdoc/raw_html_declaration.go",
+      "description": "Security[transport]: declarationParser.Parse (line 59) walks to the block's end from every `<!` and letter with no `>`, and keeps nothing between tries, so parsing is quadratic. Measured by the reviewer: Parse of `p ` + `<!a` repeated to 1 MiB takes 9.9 s at the head against 0.22 s at the fork point 08c2e8ad; ParseForWrite accepts that 1 MiB write after 18.9 s; `<!A` doubles (10.0 s to 19.5 s for Parse, 48.9 s for ParseForWrite) because goldmark's raw HTML parser at 400 repeats the same walk after this one fails. The deep review measured the multi-line form (`x <!a` per line) at 9.6 s for 64 KiB and about 4x per doubling (≈7 min of one core per 1 MiB write). Fix: remember in parser.Context where no `>` remains in the block, as rawHTMLScan.ends already does on the writer side; read every declaration with one parser (wrap goldmark's raw HTML parser in place at 400, as declarationBlockParser wraps the block parser) so `<!A` is not scanned twice; add single-line and multi-line `<!a` and `<!A` shapes to linear_test.go. The pre-existing goldmark walks for `<!--`, `<?` and CDATA (linear_test.go:306-307) are reported to the INFRA-138 architect."
+    },
+    {
+      "severity": "important",
+      "file": "packages/envoy/internal/dispatch/pmdoc/parse.go",
+      "description": "parseImage's new comment (line 845) states as parity that an anchored label holds its text alone in the alt. The engine does not: bun gen/differential.ts reads `![a <span data-proof=\"comment\" data-id=\"c1\" data-by=\"user:x\">b</span> c](i.png)` with alt holding the span's characters, where Go reads `a b c`. Same alt-divergence class as the round-1 finding, in the function this change rewrote: make the alt keep the span's characters as mdast-util-to-string writes an html node's value (a row in TestParseKeepsRawHTMLInAnImageAltText and the corpus), or send the case to the architect with evidence if it cannot be stored."
+    },
+    {
+      "severity": "important",
+      "file": "packages/envoy/internal/dispatch/pmdoc/differential_test.go",
+      "description": "With dropUnstoredMarks gone, an engine reading that puts a mark on an inline leaf is refused by FromJSON and counted under `engine cannot read`, a bucket no GATE line reads (the new comment at line 111 says so). The invariant this change establishes, that the engine never marks a leaf, therefore has no gate in the differential: a later engine regression drops documents out of the measurement and nothing fails. Fix: count an engine reading Go's schema refuses apart from an engine throw, with a GATE line (0 at this head per the implementer's two-engine measurement)."
+    },
+    {
+      "severity": "minor",
+      "file": "packages/envoy/internal/dispatch/pmdoc/marks.go",
+      "description": "addToMarkSet (line 215) claims ProseMirror's addToSet semantics and that one mark of a type is all a text carries; false for anchor marks, which may overlap (node.go:48-49). One caller, with a link. Inline it at the autolink arm (the idiom of render_table.go:126) or narrow it to links."
+    },
+    {
+      "severity": "minor",
+      "file": "packages/proof-editor/src/nested-links.ts",
+      "description": "The run-grouping loop is written twice (lines 84 and 114), differing only in the two wrap functions; one helper. `link.children ?? []` after holdsLink is unreachable."
+    },
+    {
+      "severity": "minor",
+      "file": "packages/dispatch/e2e/leaf-marks.e2e.ts",
+      "description": "The comment test retypes expectCommentReading's navigation (editor.ts:276-293) and drops its `[data-markdown-fallback]` check; expectEngineReading repeats expectParagraphReadings' frame. Reuse the helpers, parameterising the paragraph reader."
+    },
+    {
+      "severity": "minor",
+      "file": "packages/envoy/internal/dispatch/pmdoc/parse_test.go",
+      "description": "The comment over TestParseKeepsRawHTMLInAnImageAltText (lines 71-90) describes the defect as present (`parseImage takes text and nested images alone`, `The server stores neither`, `are dropped now`) and carries a Dispatch key (`INFRA-752`), which plan D11 keeps out of the tree."
+    },
+    {
+      "severity": "minor",
+      "file": "packages/envoy/internal/dispatch/pmdoc/render_inline.go",
+      "description": "Line 211: rawHTMLParser is said to be what every reader reads raw HTML with; the reader now reads declarations with declarationParser first. True again once the first finding's single wrapped parser is used."
+    },
+    {
+      "severity": "minor",
+      "file": "packages/envoy/internal/dispatch/pmdoc/gen/leaf-marks-corpus.ts",
+      "description": "Change history written as current prose: the corpus header (lines 20, 25) says a lowercase declaration `is text in Go` and `Go stacks the label's link`; escape.go:354 `is no longer one of them`, parse.go:986 `which this arm did`, packages/envoy/AGENTS.md:1881 `were stacked before`, packages/proof-editor/tests/leaf-marks.test.ts:9 `in this pull request`. State the rule as it stands."
+    },
+    {
+      "severity": "minor",
+      "file": "packages/envoy/.changes/unreleased/pr2518-Fixed-20261029-192235.yaml",
+      "description": "The fragment does not name the new refusal: any line beginning with `<!` and a letter is now an HTML block and the write is refused (`<!doctype html> starts every page.` was stored escaped on main). The PR body's Change bullet was corrected by the reviewer."
+    }
+  ],
+  "proseFixedByReviewer": [
+    "PR body only (no commit): the Change bullet on the declaration block now names every line opening with `<!` and a letter, the Size line is measured (27 files, +13038/−6330; 26 files, +1519/−101 without fixtures.json), the wide backstop census is attributed to the round-1 head binary, and Look at first / Not proven / risk are filled."
+  ],
+  "proseLeftToImplementer": "The prose findings in code comments, the corpus header and the changelog fragment sit in files the code findings also change, so they go back with them in one push instead of a reviewer commit that would start a full CI run of its own in a backed-up queue.",
+  "threads": "0 review threads on the pull request (gh api graphql at 23:33Z); none to answer.",
+  "e2eLines": "E2E (implementer) and E2E (tester) both present in the body."
+}
