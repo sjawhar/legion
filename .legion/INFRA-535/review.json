@@ -2,36 +2,37 @@
   "schemaVersion": 1,
   "phase": "review",
   "issue": "INFRA-535",
-  "completed": "2026-10-29T17:12:00Z",
-  "round": 2,
+  "completed": "2026-10-29T19:05:00Z",
+  "round": 3,
   "decision": "changes_requested",
-  "reviewedCodeHead": "e20dacbb7a5aad491a6420b69d00535be7c9c69d",
-  "ci": "CI run 40895602388 at e20dacbb completed success: lint, test, pr-title success, typecheck skipped; dispatch, dispatch-browser-multiprocess, envoy-go, envoy-go-race also success. Compare e20dacbb...0c65ea25 touches only .legion/INFRA-535/ (2 files).",
-  "thermonuclear": "Not re-run: the round's code delta (7c0df1f1..e20dacbb) is two e2e test files only, no runtime code. Round 1's pair at dc47aa3a stands for the runtime code, which is unchanged.",
-  "direction": "The INFRA-138 architect, 2026-10-29 17:02-17:03Z, under the 17:00Z no-deferral ruling: request longestRun, orderMarks and the 'main' comment wordings in this round; no Fast-follow items.",
+  "reviewedCodeHead": "2e357b5b69436f6511f0076735f7179b08ff4729",
+  "reviewerProseCommits": [
+    "f3cda761: escape_test.go:283 cited sjawhar/legion#1594 (a skills PR that only reflowed the line) -> #1429, the PR that wrote it; TestRenderRespellsAFusedRunAsMainDoesBeforeKeepingMarksOpen -> TestRenderRespellsAFusedRunPlainlyBeforeKeepingMarksOpen",
+    "f4d26d77: TestRenderKeepsStoredMarkdownThatReadsBack's header claimed every row is the #1383 writer's own rendering (false for later rows, deep review ran them at 6e4bd145e^); the alt-text failure message claimed #1429's bytes for rows #2360 added"
+  ],
+  "ci": "CI at code head 2e357b5b was queued when read; this round requests changes, which waits on no CI. The reviewer's prose pushes start a new run.",
+  "forwardMerge": "2e357b5b merges main 2b427f93 at the architect's request, no conflict; implementer's fingerprint unchanged (04a881ce...). Not a confirmation: the branch's own diff changed this round (7c8ff872, 7511136b).",
+  "thermonuclear": {
+    "deepReview": "Verdict: APPROVE at f3cda761. longestRun equal to both old loops over 3,000,000 random samples incl. invalid UTF-8; orderMarks moves the old switch verbatim; merge diff equals pre-merge diff up to offsets; every cited PR number checked by blame. Two Minor comment findings, fixed by the reviewer in f4d26d77.",
+    "codeQuality": "Verdict: CHANGES at f3cda761: (1) orderMarks takes following from the caller while computing nodes[index+2] itself; (2) orderMarks' doc comment is wrong for marksReopened, and three back-reference lines repeat the markOrder mapping."
+  },
   "critical": 0,
   "important": 0,
-  "minor": 4,
+  "minor": 2,
   "keyFindings": [
     {
       "severity": "minor",
-      "file": "packages/dispatch/e2e/strikethrough.e2e.ts",
-      "description": "Round-1 item partly done: the withAlice copies and the evaluateAll poll are gone, but the comment test (lines 82-95) still opens the thread itself (goto, data-turn locator, Expand thread click) instead of calling expectCommentReading, which also checks that no literal-text fallback is drawn. The control-row wait is redundant before expectParagraphReadings' poll."
+      "file": "packages/envoy/internal/dispatch/pmdoc/run_spellings.go",
+      "description": "orderMarks (run_spellings.go:334) gets following from writeInlineNodes (render_inline.go:414-417 compute spelledMarks(nodes[index+1], ..., wwwBare, ...)) but computes nodes[index+2]'s marks itself, so the lookahead lives in two files. Drop the following parameter, compute it at the top of orderMarks, return (next, following). Differential dumps byte-identical."
     },
     {
       "severity": "minor",
-      "file": "packages/envoy/internal/dispatch/pmdoc/render.go",
-      "description": "codeBlockFence (render.go:674-700) and inlineCodeFence (render_inline.go:635-655) each count the longest run of one character: one longestRun helper. Differential dumps must stay byte-identical."
-    },
-    {
-      "severity": "minor",
-      "file": "packages/envoy/internal/dispatch/pmdoc/render_inline.go",
-      "description": "Fold writeInlineNodes' three mark-order cases (render_inline.go:418-436) into one orderMarks in run_spellings.go that applies codeInnermost once. Differential dumps must stay byte-identical. Round 1 judged this not required; the architect now requests it."
-    },
-    {
-      "severity": "minor",
-      "file": "packages/envoy/internal/dispatch/pmdoc/strikethrough_test.go",
-      "description": "Comments say 'main' where they mean a particular writer (strikethrough_test.go:75, escape_test.go:210, readback_test.go:95,110-112, packages/envoy/AGENTS.md:2047, and the other hits of grep -rnw 'main\\|Main\\|main'\\''s' in pmdoc/*.go): each names the writer it means (for example 'the writer before sjawhar/legion#2360'), with no Dispatch key."
+      "file": "packages/envoy/internal/dispatch/pmdoc/run_spellings.go",
+      "description": "orderMarks' doc (run_spellings.go:330-331) says every order other than marksAsWritten keeps the open marks open around the text where it can; reopening does the opposite by design. Reword per order, and drop the three 'orderMarks orders each text this way under the ... spelling' lines (run_spellings.go:362-363, 393, 433), which repeat the markOrder constants' mapping (197-204)."
     }
+  ],
+  "notHeld": [
+    ".legion/INFRA-535/implement.json deviations[3] still says the orderMarks fold is not done; the architect said not to hold the round for handoff text, since retro removes .legion/. The PR body was corrected by the reviewer instead.",
+    "Three 'main' comments in files sjawhar/legion#2481 owns (source_lines.go:175, lines.go:379, fenced_code_test.go:27) go to INFRA-722's pull request, per the architect."
   ]
 }
