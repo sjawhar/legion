@@ -18,8 +18,8 @@ body: |-
     events of its owner, and nothing else. A role route is no longer published on
     `notifications.role.<role>`: Dispatch resolves the holder as the listener does and forwards the
     event to the holder's own subject, publishing it only once the holder's receipt arrives (for a
-    holder with a serving port, the stream's acknowledgement of the stored copy). The listener's own
-    role forward (`bus.Client.RequestCoreTo`) carries a `Nats-Msg-Id` of its dedupe key and subject
+    holder with a serving port, the stream's acknowledgement of the stored copy). The listener's role
+    lane's forward (`bus.Client.RequestCoreTo`) carries a `Nats-Msg-Id` of its dedupe key and subject
     (`bus.ForwardMsgID`) when the original envelope's key names its event
     (`contracts.DedupeKeyNamesTheUpstreamEvent`, asked of the key without
     `contracts.RoleForwardDedupePrefix`), so a forward sent again until its receipt arrives is stored

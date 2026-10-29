@@ -667,8 +667,9 @@ func TestDurableAcknowledgesAStoredForwardCopyAndDeliversNothing(t *testing.T) {
 // A role message the publish route forwards twice, because its holder's first receipt never came,
 // is stored once on the holder's agent subject: each forward carries the same Nats-Msg-Id
 // (bus.ForwardMsgID of the forward's dedupe key and the subject), which the route chooses itself
-// since RequestCoreTo takes its MsgId from its caller, so the durable that delivers stored copies
-// to a holder with a serving port has one copy to deliver, not one per attempt.
+// since RequestCoreTo takes its MsgId from its caller, so the stream holds one copy per message
+// and recipient, not one per attempt; the durable acknowledges a stored forward copy and delivers
+// nothing.
 func TestPublishRouteStoresOneCopyOfARoleMessageItForwardsTwice(t *testing.T) {
 	harness := newListenerDeliveryHarness(t, nil)
 	const role = "stored-once"
