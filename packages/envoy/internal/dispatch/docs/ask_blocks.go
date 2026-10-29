@@ -254,7 +254,7 @@ func (s *Service) reconcileAskBlocks(
 	// breaks its content rule (pmdoc.AskContentError) is flagged as one the parse refuses is, and
 	// its row left as it was. A decided ask flagged so keeps its decided row and skips
 	// writeDecidedWording until repaired. The collector reads such an ask leniently, so the
-	// ask-edit route can find it (askBlockOf) and rebuild its options as one list.
+	// ask-edit route finds it (askBlockOf) to refuse it, quoting its blocks (refuseAskContentEdit).
 	readable := blocks[:0]
 	for _, block := range blocks {
 		if err := readAskBlockStrictly(block.node); err != nil {

@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"maps"
 	"reflect"
+	"strconv"
 	"strings"
 
 	"github.com/reearth/ygo/crdt"
@@ -74,7 +75,7 @@ func (s *Service) SetAskBlockText(
 		}
 		// The content rule is decided once, before the edit is built: askBlockChildren then
 		// yields the question's paragraphs and at most one list, which keeps the rule.
-		if err := refuseAskContentEdit(block); err != nil {
+		if err := refuseAskContentEdit(tree, block); err != nil {
 			return err
 		}
 		want := AskBlockText{
@@ -487,18 +488,22 @@ func normalizeAskOptions(options []model.AskOption) []model.AskOption {
 // options, where the browser's card reads its question from the first child and its options from
 // the last, so the row must not take that reading, and rebuilding the body from it would move,
 // merge or flatten what a collaborator wrote. The route rebuilds no broken decision: a document
-// edit deletes the blocks to drop until the decision keeps its rule, and the ask edit follows.
+// edit deletes, in one edit, the blocks the refusal names (askBlocksToDrop), and the ask edit
+// follows. Until the document settles its block ids (a child with no id, or an id repeated in the
+// tree, which ApplyOps would restamp first) the refusal names no delete and asks for a retry.
 //
 // The refusal quotes every block of the decision in full, nested content and all, so a caller
 // deleting one can restore every word, and gives each block id as quoted data, never inside a
 // command a caller might paste into a shell.
-func refuseAskContentEdit(block askBlock) error {
+func refuseAskContentEdit(tree *pmdoc.Node, block askBlock) error {
 	broken := pmdoc.AskContentError(block.node)
 	if broken == nil {
 		return nil
 	}
-	parts := make([]string, 0, len(block.node.Children))
-	for _, child := range block.node.Children {
+	children := block.node.Children
+	parts := make([]string, 0, len(children))
+	settled := pmdoc.BlockIDRepairCount(tree) == 0
+	for _, child := range children {
 		markdown, err := pmdoc.Render(&pmdoc.Node{Type: "doc", Children: []*pmdoc.Node{child}})
 		if err != nil {
 			return fmt.Errorf("render a block of a broken ask: %w", err)
@@ -506,14 +511,56 @@ func refuseAskContentEdit(block askBlock) error {
 		name := "a block with no id"
 		if id, _ := child.Attrs[pmdoc.BlockIDAttr].(string); id != "" {
 			name = fmt.Sprintf("block %q", id)
+		} else {
+			settled = false
 		}
 		parts = append(parts, fmt.Sprintf("%s (%s) reads %q", name, child.Type, strings.TrimSpace(markdown)))
 	}
-	return &ErrAskBlockUnrepresentable{
-		Field: "block",
-		Reason: broken.Error() + "; the ask-edit route does not rebuild a decision that breaks its content rule, " +
-			"so delete the block or blocks to drop with a document edit (dispatch doc-edit, deleting a block by its id) " +
-			"until it holds its question and at most one list, last, then edit the ask; its blocks are: " +
-			strings.Join(parts, "; "),
+	reason := broken.Error() + "; the ask-edit route does not rebuild a decision that breaks its content rule"
+	quoted := "; its blocks are: " + strings.Join(parts, "; ")
+	drop := askBlocksToDrop(children)
+	switch {
+	case !settled:
+		reason += ", and the document has not settled its block ids yet (a block has no id, or an id repeats), " +
+			"so a document edit (dispatch doc-edit, deleting a block by its id) cannot name its blocks now; " +
+			"retry the edit once the document settles (a few seconds)"
+	case drop == nil:
+		reason += ", and it holds no paragraph to keep as its question, so no document edit " +
+			"(dispatch doc-edit, deleting a block by its id) leaves it valid"
+	default:
+		ids := make([]string, len(drop))
+		for i, child := range drop {
+			ids[i] = strconv.Quote(child.Attrs[pmdoc.BlockIDAttr].(string))
+		}
+		reason += ", so delete the blocks to drop, all in one document edit (dispatch doc-edit, deleting a block " +
+			"by its id; one edit holding one delete per block), which keeps its question and its first list; " +
+			"the blocks to delete are " + strings.Join(ids, ", ") + "; then edit the ask"
 	}
+	return &ErrAskBlockUnrepresentable{Field: "block", Reason: reason + quoted}
+}
+
+// askBlocksToDrop names the children of a broken ask whose deletion leaves it valid: it keeps the
+// run of paragraphs starting at the first paragraph and the bullet list right after them, and
+// drops every other child, in document order. It returns nil when no child is a paragraph.
+func askBlocksToDrop(children []*pmdoc.Node) []*pmdoc.Node {
+	first := -1
+	for i, child := range children {
+		if child.Type == "paragraph" {
+			first = i
+			break
+		}
+	}
+	if first < 0 {
+		return nil
+	}
+	end := first
+	for end < len(children) && children[end].Type == "paragraph" {
+		end++
+	}
+	if end < len(children) && children[end].Type == "bullet_list" {
+		end++
+	}
+	drop := make([]*pmdoc.Node, 0, len(children)-(end-first))
+	drop = append(drop, children[:first]...)
+	return append(drop, children[end:]...)
 }
