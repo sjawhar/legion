@@ -10,7 +10,7 @@ import (
 
 	"github.com/reearth/ygo/crdt"
 
-	"github.com/sjawhar/envoy/internal/dispatch/docs/crafted"
+	"github.com/sjawhar/envoy/internal/dispatch/docs/docstest"
 )
 
 // reanchorOutcome is what re-anchoring one mark did: the range its quote resolved to, the error
@@ -384,7 +384,7 @@ func TestQuoteFinderAnswersLikeFindQuote(t *testing.T) {
 // checks pass.
 func TestMarkWriterRefusesInMarkRangesOrder(t *testing.T) {
 	comment := Mark{Type: "proofComment", Attrs: Attrs{"id": "c1", "by": "user:alice"}}
-	nested := Attrs{"id": "c1", "nested": crafted.NestedValue(expectedMaxMarkAttrNesting + 1)}
+	nested := Attrs{"id": "c1", "nested": docstest.NestedValue(expectedMaxMarkAttrNesting + 1)}
 	// misaligned writes a paragraph "abc" ending in a hard break that holds text, which
 	// yTextRanges refuses, and returns the hard break.
 	misaligned := func(t *testing.T) (*crdt.Doc, *crdt.YXmlFragment, *crdt.YXmlElement) {

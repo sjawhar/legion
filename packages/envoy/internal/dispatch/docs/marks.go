@@ -86,11 +86,8 @@ type Anchored struct {
 	BlockID string
 }
 
-// MarkQuote marks one matching quote and returns what the new mark anchors to. What the mark
-// anchors to is read off the tree applyLive reads after the write (its readBack), which also
-// serves as the tree the write is weighed and versioned with, so the fork is not read twice.
+// MarkQuote marks one matching quote and returns what the new mark anchors to.
 func (s *Service) MarkQuote(ctx context.Context, artifactID string, mark MarkSpec, quote string, occurrence *int) (Anchored, error) {
-	var anchored Anchored
 	err := s.applyLive(ctx, artifactID, mark.By, func(doc *crdt.Doc, current *pmdoc.Node, transact func(func(*crdt.Transaction))) error {
 		fragment := doc.GetXmlFragment(fragmentName)
 		tree, err := startTree(current, doc)
@@ -103,14 +100,16 @@ func (s *Service) MarkQuote(ctx context.Context, artifactID string, mark MarkSpe
 			_, markErr = markQuoteInTxn(txn, fragment, tree, quote, occurrence, nil, mark)
 		})
 		return markErr
-	}, func(tree *pmdoc.Node) error {
-		var err error
-		anchored, err = readAnchored(tree, mark.Kind, mark.ID)
-		if errors.Is(err, ErrAnchorMissing) {
-			return fmt.Errorf("%w: written mark %q is missing", ErrDocSchema, mark.ID)
-		}
-		return err
 	})
+	if err != nil {
+		return Anchored{}, err
+	}
+	// applyLive keeps the tree it read from the fork after this callback as the write's rendering,
+	// so the anchor is read off it rather than off a second read of the fork.
+	anchored, err := readAnchored(ledgerFrom(ctx).writtenRendering(artifactID).tree, mark.Kind, mark.ID)
+	if errors.Is(err, ErrAnchorMissing) {
+		return Anchored{}, fmt.Errorf("%w: written mark %q is missing", ErrDocSchema, mark.ID)
+	}
 	if err != nil {
 		return Anchored{}, err
 	}
@@ -357,7 +356,7 @@ func (s *Service) applySuggestion(ctx context.Context, artifactID, id, replaceWi
 			return err
 		}
 		return write(next)
-	}, nil)
+	})
 }
 
 // refuseBrokenAsks refuses the first ask a write left unreadable whose id the document could read

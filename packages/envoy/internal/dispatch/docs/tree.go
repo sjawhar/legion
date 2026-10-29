@@ -407,19 +407,16 @@ type renderPathCounts struct {
 	beforeRendered atomic.Uint64
 }
 
-// forkTreeCounts counts the trees read off a write transaction's fork, and the reads that taking a
-// tree already in hand avoided, so a test can assert that a write reads its fork no more often than
-// it means to, and a measurement build can report how often each read is avoided. The service
-// keeps one (Service.forkTrees). Nothing in the service reads them.
+// forkTreeCounts counts the trees read off a write transaction's fork, and the reads that taking
+// the write's rendering in place of one avoided, so a test can assert that a write reads its fork
+// no more often than it means to, and a measurement build can report how often the read is
+// avoided. The service keeps one (Service.forkTrees). Nothing in the service reads them.
 type forkTreeCounts struct {
 	// read counts the trees read off a write transaction's fork (readFork): an operation's reads
-	// before and after its write, or its read-back's read in place of the latter (applyLive), a
-	// margin write's read when the write holds no rendering of its fork (applyMargin), and the
-	// reads joined to the transaction (docTree, heldTree, captureLiveTextAndAuthors).
+	// before and after its write (applyLive), a margin write's read when the write holds no
+	// rendering of its fork (applyMargin), and the reads joined to the transaction (docTree,
+	// heldTree, captureLiveTextAndAuthors).
 	read atomic.Uint64
-	// afterShared counts the operations whose tree after the write was the one their read-back
-	// read (applyLive), each a fork read avoided.
-	afterShared atomic.Uint64
 	// renderingReused counts the margin writes (applyMargin) and the joined reads that took the
 	// write's rendering in place of reading the fork (reuseRendering), each a fork read avoided.
 	renderingReused atomic.Uint64

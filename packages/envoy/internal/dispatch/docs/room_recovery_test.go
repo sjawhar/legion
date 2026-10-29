@@ -477,7 +477,7 @@ func TestARoomFailingDuringAJoinedWriteFailsTheWrite(t *testing.T) {
 				updateErr = pmdoc.Update(txn, fragment, next)
 			})
 			return updateErr
-		}, nil)
+		})
 	})
 	if err := tx.Rollback(ctx); err != nil {
 		t.Fatalf("roll back: %v", err)

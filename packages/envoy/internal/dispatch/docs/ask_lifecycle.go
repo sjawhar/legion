@@ -176,7 +176,7 @@ func (s *Service) writeDocumentAskStates(
 		// A document none of them changes is left as it was, and applyLive writes nothing for it.
 		_, _, err = rewriteLive(doc, nil, writes.apply)
 		return err
-	}, nil)
+	})
 	switch {
 	case err == nil, errors.Is(err, websocket.ErrNoChanges):
 	case errors.Is(err, ErrDocumentUnloadable) && !errors.Is(err, ErrServiceUnavailable):

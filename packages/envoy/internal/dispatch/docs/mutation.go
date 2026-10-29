@@ -103,10 +103,11 @@ func (s *Service) openLiveOperation(ctx context.Context, artifactID string) (liv
 // abandon, deferred once the operation is open, undoes what an operation that changed the fork but
 // does not reach its record leaves on its write: the fork holds changes its transaction never
 // recorded, so it goes, and the next operation rebuilds it. One that changed nothing leaves the
-// fork as it was, so the next operation keeps it - unless its change panicked: the fork is then in
-// a state nothing vouches for, whatever updates holds, since ygo emits a panicking transaction's
-// update except where its own buildPhase2 panics, and the rendering a joined read may take
-// (liveWrite.rendering) must never outlive such a fork.
+// fork as it was, so the next operation keeps it. One whose change panicked goes whatever updates
+// holds: ygo emits a panicking transaction's update, except when its phase 2 fails before handing
+// the update on (buildPhase2, or a type observer it fires first), which leaves the fork holding a
+// change no update carries, so neither the fork nor the rendering a joined read takes of it
+// (liveWrite.rendering) describes what the transaction records.
 func (op *liveOperation) abandon() {
 	if !op.panicked && (op.recorded || len(op.updates) == 0) {
 		return
@@ -239,13 +240,7 @@ func (s *Service) recordLiveOperation(ctx context.Context, op *liveOperation, ac
 // is deterministic over one state - pmdoc.Read and ReadForRendering differ only in copying
 // attributes, and both trees render through pmdoc.RenderWithBlockOffsets - so either is the very
 // string the render would make. A fork no rendering is known for is rendered here.
-//
-// readBack, when not nil, is handed the fork's tree as mutate left it, for a caller that reads its
-// own write back (MarkQuote). It runs inside the closure that guards mutate (change), so its
-// failure or panic is the operation's and is answered as mutate's would be, before the change
-// check and every refusal after it. Between it and applyLive's read after the write only reads
-// touch the fork, so the tree it was handed is the one that read would make, and serves as both.
-func (s *Service) applyLive(ctx context.Context, artifactID string, actor model.Actor, mutate func(doc *crdt.Doc, current *pmdoc.Node, transact func(func(*crdt.Transaction))) error, readBack func(after *pmdoc.Node) error) error {
+func (s *Service) applyLive(ctx context.Context, artifactID string, actor model.Actor, mutate func(doc *crdt.Doc, current *pmdoc.Node, transact func(func(*crdt.Transaction))) error) error {
 	op, err := s.openLiveOperation(ctx, artifactID)
 	if err != nil {
 		return err
@@ -294,20 +289,8 @@ func (s *Service) applyLive(ctx context.Context, artifactID string, actor model.
 	// applyMargin reads neither: a marks-map Set always adds an item, so its write always moves the
 	// fork, and the two whole-store walks would buy it nothing.
 	wasClocks, wasDeletes := fork.StateVector(), crdt.DeleteSetFromDoc(fork)
-	var readBackTree *pmdoc.Node
 	margin, mutateErr := op.change(func() error {
-		if err := mutate(fork, before, func(inner func(*crdt.Transaction)) { fork.Transact(inner) }); err != nil {
-			return err
-		}
-		if readBack == nil {
-			return nil
-		}
-		tree, err := s.readFork(fork)
-		if err != nil {
-			return err
-		}
-		readBackTree = tree
-		return readBack(tree)
+		return mutate(fork, before, func(inner func(*crdt.Transaction)) { fork.Transact(inner) })
 	})
 	if mutateErr != nil {
 		return joinedSchemaError(mutateErr, start)
@@ -322,14 +305,7 @@ func (s *Service) applyLive(ctx context.Context, artifactID string, actor model.
 	if len(op.updates) == 0 {
 		return websocket.ErrNoChanges
 	}
-	// The tree the write left: the one the read-back read, when there was one (see readBack above),
-	// else read now.
-	tree := readBackTree
-	if tree != nil {
-		s.forkTrees.afterShared.Add(1)
-	} else {
-		tree, err = s.readFork(fork)
-	}
+	tree, err := s.readFork(fork)
 	var markdown string
 	var offsets []pmdoc.BlockOffset
 	if err == nil {
@@ -678,7 +654,7 @@ func (s *Service) ReplaceText(ctx context.Context, artifactID, markdown string, 
 			return updateErr
 		}
 		return nil
-	}, nil)
+	})
 	if unchanged && errors.Is(err, websocket.ErrNoChanges) {
 		return canonical, nil
 	}
@@ -1291,7 +1267,7 @@ func (s *Service) ApplyOps(ctx context.Context, artifactID string, ops []model.E
 			return mutationErr
 		}
 		return nil
-	}, nil)
+	})
 	if err != nil {
 		// A batch that resolved and wrote nothing is not a failure: it is the verdict the route
 		// mints no version for.
@@ -1351,7 +1327,7 @@ func (s *Service) applyOpsUnconditional(ctx context.Context, artifactID string, 
 			})
 			return updateErr
 		})
-	}, nil)
+	})
 	if err != nil {
 		if errors.Is(err, websocket.ErrNoChanges) {
 			return outcome, nil
@@ -1449,7 +1425,7 @@ func (s *Service) setBlockAttributes(ctx context.Context, artifactID, blockID st
 			return updateErr
 		}
 		return nil
-	}, nil)
+	})
 }
 
 // NamedVersion records the live document as a deliberately named immutable version. Like

@@ -20,26 +20,25 @@ import (
 )
 
 // The tests here hold a write transaction's reads of its fork (forkTreeCounts) to what reading the
-// fork would have answered: MarkQuote's tree after its write is the one its read-back read
-// (applyLive's readBack), and a read joined to the transaction - docTree, a version's capture -
-// takes the write's own rendering in place of reading the fork (liveWrite.rendering). Every
-// expected value comes from a read of its own, never from the code under test: a rendering the
-// write holds is compared, wherever the service hands it on (checkRendering), with a fresh read and
-// render of the fork, and what a write answers is compared with the document its store holds once
-// it commits, decoded into a document of the test's own (persistedProofTree). Each operation also
-// asserts the exact number of fork reads, read-backs shared and renderings reused it made, so none
-// passes by reading where it means to reuse, or by reusing where it means to read.
+// fork would have answered: a read joined to the transaction - docTree, a version's capture - and
+// a margin write take the write's own rendering in place of reading the fork
+// (liveWrite.rendering). Every expected value comes from a read of its own, never from the code
+// under test: a rendering the write holds is compared, wherever the service hands it on
+// (checkRendering), with a fresh read and render of the fork, and what a write answers is compared
+// with the document its store holds once it commits, decoded into a document of the test's own
+// (persistedProofTree). Each operation also asserts the exact number of fork reads and renderings
+// reused it made, so none passes by reading where it means to reuse, or by reusing where it means
+// to read.
 
 // forkReads is a reading of the service's forkTreeCounts.
 type forkReads struct {
-	read, afterShared, renderingReused uint64
+	read, renderingReused uint64
 }
 
 func readForkReads(service *Service) forkReads {
 	counts := &service.forkTrees
 	return forkReads{
 		read:            counts.read.Load(),
-		afterShared:     counts.afterShared.Load(),
 		renderingReused: counts.renderingReused.Load(),
 	}
 }
@@ -47,7 +46,6 @@ func readForkReads(service *Service) forkReads {
 func (r forkReads) minus(base forkReads) forkReads {
 	return forkReads{
 		read:            r.read - base.read,
-		afterShared:     r.afterShared - base.afterShared,
 		renderingReused: r.renderingReused - base.renderingReused,
 	}
 }
@@ -221,14 +219,14 @@ func requireForkReads(t *testing.T, what string, got, want forkReads) {
 	}
 }
 
-// A MarkQuote reads the fork twice - before its write, and once after it, which serves both its
-// read-back and the write's own weighing and rendering - and a version later in its transaction
+// A MarkQuote reads the fork twice - before its write, and once after it, the tree the write is
+// weighed and versioned with and its anchor is read off - and a version later in its transaction
 // reads it no more. What it answers is what the committed document's mark anchors to: in a list
 // item, a table cell or a callout, the nested block holding the quote; across top-level siblings,
-// no block. A refusal keeps its error and precedence, and leaves no rendering its fork disagrees
-// with: a document outside the schema answers its own refusal, which a read of it answers too,
-// before a written mark that is missing; a written mark that is missing is the write's own schema
-// fault; a mark the growth weigh refuses answers that refusal; a mark already written is no change.
+// no block. A refusal leaves no rendering its fork disagrees with, and a version after it takes the
+// rendering only where the write kept it: a mark the growth weigh refuses drops the fork with its
+// rendering, a mark already written is no change and keeps both, and a document outside the
+// schema answers its own refusal, which a read of it answers too.
 func TestForkReadsAMarkQuoteReadsTheForkItWroteOnce(t *testing.T) {
 	service, artifactID := newForkReadsRoom(t)
 	checks := checkRenderings(service)
@@ -268,7 +266,7 @@ func TestForkReadsAMarkQuoteReadsTheForkItWroteOnce(t *testing.T) {
 					if anchored, err = service.MarkQuote(ctx, artifactID, MarkSpec{Kind: MarkComment, ID: id, By: reuseAlice}, anchor.quote, nil); err != nil {
 						return err
 					}
-					requireForkReads(t, "MarkQuote", readForkReads(service).minus(base), forkReads{read: 2, afterShared: 1})
+					requireForkReads(t, "MarkQuote", readForkReads(service).minus(base), forkReads{read: 2})
 					if problem := renderingProblem(mode.requireForkedAs(t, ctx, artifactID)); problem != "" {
 						t.Errorf("after MarkQuote: %s", problem)
 					}
@@ -319,26 +317,14 @@ func TestForkReadsAMarkQuoteReadsTheForkItWroteOnce(t *testing.T) {
 			abandoned bool
 		}{
 			{
-				name: "a written mark that is missing",
-				mark: MarkSpec{Kind: MarkComment, ID: "c-asked", By: reuseAlice, Attrs: pmdoc.Attrs{"id": "c-written", "by": ActorRef(reuseAlice)}},
-				refused: func(t *testing.T, err error) {
-					var outside *OutsideSchemaError
-					if !errors.Is(err, ErrDocSchema) || errors.Is(err, ErrDocOutsideSchema) || errors.As(err, &outside) || !strings.Contains(err.Error(), `written mark "c-asked" is missing`) {
-						t.Errorf("got %v, want the write's own ErrDocSchema naming the missing mark", err)
-					}
-				},
-				reads:     forkReads{read: 2},
-				abandoned: true,
-			},
-			{
 				name: "a mark the growth weigh refuses",
 				mark: MarkSpec{Kind: MarkComment, ID: "c-heavy", By: heavy},
 				refused: func(t *testing.T, err error) {
-					if !errors.Is(err, ErrDocumentTooLarge) || errors.Is(err, ErrDocSchema) || strings.Contains(err.Error(), "is missing") {
-						t.Errorf("got %v, want the growth refusal (ErrDocumentTooLarge) alone", err)
+					if !errors.Is(err, ErrDocumentTooLarge) {
+						t.Errorf("got %v, want the growth refusal (ErrDocumentTooLarge)", err)
 					}
 				},
-				reads:     forkReads{read: 2, afterShared: 1},
+				reads:     forkReads{read: 2},
 				abandoned: true,
 			},
 			{
@@ -349,13 +335,13 @@ func TestForkReadsAMarkQuoteReadsTheForkItWroteOnce(t *testing.T) {
 						t.Errorf("got %v, want websocket.ErrNoChanges", err)
 					}
 				},
-				reads: forkReads{read: 2},
+				reads: forkReads{read: 1},
 			},
 		} {
 			t.Run(mode.name+"/"+refusal.name, func(t *testing.T) {
 				mode.prepare(t, service, artifactID)
 				first := MarkSpec{Kind: MarkComment, ID: fmt.Sprintf("c-%s-first-%d", mode.name, index), By: reuseAlice}
-				// Steps 11 to 13 for the warm write, 21 to 23 for the cold one: each quote unique.
+				// Steps 11 and 12 for the warm write, 21 and 22 for the cold one: each quote unique.
 				section := 11 + index
 				if mode.cold {
 					section += 10
@@ -408,10 +394,8 @@ func TestForkReadsAMarkQuoteReadsTheForkItWroteOnce(t *testing.T) {
 				checks.requireNoRenderingFailures(t)
 				committed := persistedProofTree(t, service.store, artifactID)
 				committedAnchor(t, committed, MarkComment, first.ID)
-				for _, id := range []string{"c-asked", "c-written", "c-heavy"} {
-					if _, _, found := pmdoc.FindMark(committed, string(MarkComment), id); found {
-						t.Errorf("the committed document holds the refused mark %q", id)
-					}
+				if _, _, found := pmdoc.FindMark(committed, string(MarkComment), "c-heavy"); found {
+					t.Error("the committed document holds the refused mark")
 				}
 				requireVersionIsTheCommittedDocument(t, service, artifactID, version)
 			})
@@ -419,8 +403,7 @@ func TestForkReadsAMarkQuoteReadsTheForkItWroteOnce(t *testing.T) {
 	}
 
 	// A document outside the schema - one the reader refuses, or only the renderer - answers the
-	// refusal of the tree the write started from, the one a read of the document answers, and
-	// answers it before a written mark that is missing.
+	// refusal of the tree the write started from, the one a read of the document answers.
 	readerRefused := func(t *testing.T) (string, string) {
 		id := createDocument(t, service.store, "")
 		seedServiceText(t, service, id, "Readable text.\n")
@@ -434,20 +417,17 @@ func TestForkReadsAMarkQuoteReadsTheForkItWroteOnce(t *testing.T) {
 		}
 		return id, "Unreadable"
 	}
-	asAsked := MarkSpec{Kind: MarkComment, ID: "c-outside", By: reuseAlice}
-	missing := MarkSpec{Kind: MarkComment, ID: "c-asked", By: reuseAlice, Attrs: pmdoc.Attrs{"id": "c-written", "by": ActorRef(reuseAlice)}}
+	mark := MarkSpec{Kind: MarkComment, ID: "c-outside", By: reuseAlice}
 	for _, mode := range forkReadsModes {
 		for _, outside := range []struct {
 			name     string
 			document func(t *testing.T) (string, string)
-			mark     MarkSpec
 			reads    forkReads
 			// abandoned is a refused write that changed the fork, which is dropped.
 			abandoned bool
 		}{
-			{"the reader refuses it", readerRefused, asAsked, forkReads{read: 1}, false},
-			{"only the renderer refuses it", rendererRefused, asAsked, forkReads{read: 2, afterShared: 1}, true},
-			{"only the renderer refuses it, and the written mark is missing", rendererRefused, missing, forkReads{read: 2}, true},
+			{"the reader refuses it", readerRefused, forkReads{read: 1}, false},
+			{"only the renderer refuses it", rendererRefused, forkReads{read: 2}, true},
 		} {
 			t.Run(mode.name+"/outside the schema/"+outside.name, func(t *testing.T) {
 				document, quote := outside.document(t)
@@ -459,7 +439,7 @@ func TestForkReadsAMarkQuoteReadsTheForkItWroteOnce(t *testing.T) {
 				}
 				err := joinedWrite(service, func(ctx context.Context) error {
 					base := readForkReads(service)
-					_, err := service.MarkQuote(ctx, document, outside.mark, quote, nil)
+					_, err := service.MarkQuote(ctx, document, mark, quote, nil)
 					requireForkReads(t, "MarkQuote", readForkReads(service).minus(base), outside.reads)
 					write := mode.requireForkedAs(t, ctx, document)
 					if problem := renderingProblem(write); problem != "" {
@@ -543,7 +523,7 @@ func TestForkReadsEveryReuseOfAWritesRenderingDescribesItsFork(t *testing.T) {
 				_, err := service.MarkQuote(ctx, artifactID, MarkSpec{Kind: kind, ID: id, By: reuseAlice}, quote, nil)
 				return err
 			},
-			reads: forkReads{read: 2, afterShared: 1},
+			reads: forkReads{read: 2},
 			sites: map[string]int{"fork": 1},
 		}
 	}

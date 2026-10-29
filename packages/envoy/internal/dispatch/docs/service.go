@@ -279,8 +279,8 @@ type Service struct {
 	// renderPaths counts how the renderings the rooms' update observers and the document writes
 	// need were had (renderPathCounts); every replica counts on it (keepReplica).
 	renderPaths renderPathCounts
-	// forkTrees counts the trees read off write transactions' forks and the reads that taking a
-	// tree already in hand avoided (forkTreeCounts).
+	// forkTrees counts the trees read off write transactions' forks and the reads that taking the
+	// write's rendering in their place avoided (forkTreeCounts).
 	forkTrees forkTreeCounts
 	// instances lists, for each resident room document, what that instance records about the
 	// durable history behind it (*roomInstance): the updates whose writes can have recorded a

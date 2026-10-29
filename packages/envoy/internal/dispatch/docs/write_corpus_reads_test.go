@@ -10,11 +10,11 @@ import (
 )
 
 // On every spec of the write corpus (runWriteCorpus), warm and cold, each anchored MarkQuote reads
-// its fork twice and shares its read-back with the tree after its write, and each read joined to
-// the write - every SnapshotVersion after a write, and the suggestion's SuggestionKind - and each
-// ProjectMark's margin write take the write's rendering in place of reading the fork, and every
-// rendering the write hands on is a fresh read and render of its fork (checkRendering). The test
-// skips unless DISPATCH_TOKEN_CORPUS names the directory.
+// its fork twice, before and after its write, and each read joined to the write - every
+// SnapshotVersion after a write, and the suggestion's SuggestionKind - and each ProjectMark's
+// margin write take the write's rendering in place of reading the fork, and every rendering the
+// write hands on is a fresh read and render of its fork (checkRendering). The test skips unless
+// DISPATCH_TOKEN_CORPUS names the directory.
 func TestWriteCorpusReadsOnce(t *testing.T) {
 	dir := os.Getenv("DISPATCH_TOKEN_CORPUS")
 	if dir == "" {
@@ -24,7 +24,7 @@ func TestWriteCorpusReadsOnce(t *testing.T) {
 	if err != nil {
 		t.Fatalf("DISPATCH_TOKEN_CORPUS: %v", err)
 	}
-	markQuote := forkReads{read: 2, afterShared: 1}
+	markQuote := forkReads{read: 2}
 	reused := forkReads{renderingReused: 1}
 	want := map[string]forkReads{
 		"comment/MarkQuote":          markQuote,

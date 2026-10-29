@@ -80,5 +80,5 @@ func wholeDocumentWrite(ctx context.Context, s *Service, artifactID, markID stri
 			marks.Set(txn, markID, plain)
 		})
 		return nil
-	}, nil)
+	})
 }

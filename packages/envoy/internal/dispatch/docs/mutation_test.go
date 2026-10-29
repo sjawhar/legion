@@ -735,7 +735,7 @@ func TestAJoinedWriteWhoseTransactionChangesNothingAppendsNoUpdateAndKeepsItsSet
 			return service.applyLive(ctx, artifactID, closer, func(doc *crdt.Doc, _ *pmdoc.Node, _ func(func(*crdt.Transaction))) error {
 				_, _, err := rewriteLive(doc, nil, func(*pmdoc.Node) bool { return false })
 				return err
-			}, nil)
+			})
 		}},
 	} {
 		t.Run(unchanged.name, func(t *testing.T) {
