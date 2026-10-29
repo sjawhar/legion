@@ -172,7 +172,8 @@ func (l sourceLines) blankLines(from, until ast.Node, blank func([]byte) bool) [
 // code's here, nor the columns of a last line lastLineColumns kept: the two refusals that call it,
 // of a blank line the lines alone do not decide (blankInside, nestedQuotedListBlank), read them on
 // asHeldBefore's lines as the blank lines they were before the code held them, so they refuse what
-// they refused then, and nothing more.
+// they refused then. They also refuse a document main misread whose last whitespace-only line a
+// typed block's indentation now takes out of its fenced code (typedDirectiveParser.Continue).
 func (l sourceLines) blanksOutsideCode(within ast.Node, blanks []int) []int {
 	code := map[int]bool{}
 	_ = ast.Walk(within, func(node ast.Node, entering bool) (ast.WalkStatus, error) {
@@ -285,7 +286,9 @@ func (l sourceLines) blank(line int, blank func([]byte) bool) bool {
 // blankInside reports whether a line between typed block directive's opening and closing fences
 // is blank, outside the code it holds; one that runs to its parent's end runs to the next block. A
 // blank line of code is the code's text, as are the blank lines a fenced code block no fence closed
-// takes up to the next block, which space nothing (keepsBlankLinesAfter).
+// takes up to the next block, which space nothing (keepsBlankLinesAfter); indented code's held
+// lines and a last line lastLineColumns kept are read as the blank lines they were before the code
+// held them (asHeldBefore, blanksOutsideCode).
 func (l sourceLines) blankInside(directive *typedDirective) bool {
 	l = l.asHeldBefore()
 	// In a quote, a line blank but for the quote's markers is blank, and a line without them ends

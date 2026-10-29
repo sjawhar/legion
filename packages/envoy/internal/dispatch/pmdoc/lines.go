@@ -375,7 +375,9 @@ type fenceClosure struct{ parser.BlockParser }
 var (
 	fenceClosedAttr = []byte("pmdoc-fence-closed")
 	// fenceEndsEmptyAttr marks a fenced code block whose last line is the document's, with no line
-	// feed, holding nothing past the fence's indentation (fencedCodeText).
+	// feed, holding nothing past the fence's indentation. The line stays among the code's lines, as
+	// goldmark appends it, so the counters of blank lines read it as main did; only the code's text
+	// drops it (fencedCodeText).
 	fenceEndsEmptyAttr = []byte("pmdoc-fence-ends-empty")
 	// fenceIndentAttr is how many columns a fenced code block's opening fence stands past its
 	// container's content, as goldmark measures them (fenceClosure.Open).

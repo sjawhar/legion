@@ -2040,7 +2040,12 @@ after it that hold four or more columns past where its container's content start
 measured from its content, a footnote definition from its own start), and the shorter blank lines
 between them, as that parser reads it, so they are its text, less one final line ending (a last
 line with no line feed has none of its own, so `    code\n    \n    ` holds `code\n`), and space
-nothing (`codeColumns`, `heldCodeLines`, `markBlocksAfterHeldCode`, `codeBlockText`). A list item decides by what follows its list only
+nothing (`codeColumns`, `heldCodeLines`, `markBlocksAfterHeldCode`, `codeBlockText`). The two
+refusals the lines alone do not decide, of a typed block holding a blank line inside a list item
+(`blankInside`) and of a blank line in a quote at or after a list that quotes and typed blocks nest
+around more than once (`nestedQuotedListBlank`), still read those lines, and a last line
+`lastLineColumns` kept, as the blank lines they were before (`asHeldBefore`), so they refuse what
+they refused before. A list item decides by what follows its list only
 inside its own quote or typed block; past one, that container's rule decides, so a typed block's
 fence keeps the line and a quote's end judges it by what opens right after. The renderer writes each spacing so that it reads back
 (`blanksAfterList`, `writesBlankAfterItem`): no blank line before a block that opens on the line after
