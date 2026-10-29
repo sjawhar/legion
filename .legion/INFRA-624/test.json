@@ -2,28 +2,42 @@
   "schemaVersion": 1,
   "phase": "test",
   "issue": "INFRA-624",
-  "completed": "2026-10-29T00:39:24Z",
-  "round": 11,
-  "headSha": "0a1716e7d87917952620c8fdd97308fce339d22a",
+  "completed": "2026-10-29T07:46:23Z",
+  "round": 12,
+  "headSha": "2b0cac11dbe47c20a68725605f552079a6534ec7",
+  "codeHead": "608e4e9f82fa",
   "implementerProof": {
     "verdict": "verified",
-    "how": "Followed the refusal's named deletes, as one doc-edit, with the real dispatch CLI on decisions real editors broke. Re-ran its 6 refusal tests and the browser specs (17 passed, chromium and iphone) at 0a1716e7."
+    "how": "Full round at the head, since I had not tested the round-12 code (c7b6cb35, 43e5a4c7) and the merge brings main's #2449 into the editor path. Re-ran its 9 refusal tests (pass, the 1,364-body shape test included) and the browser specs (17 passed, chromium and iphone). Followed the refusal's named deletes with the real dispatch CLI on decisions real editors broke."
   },
   "failures": [],
   "failed": 0,
   "proof": [
     {
-      "criterion": "Review round 7 item 1 (architect's request): the refusal says to delete the blocks in one document edit and lists every delete it needs; following it ends valid with every word the agent did not delete",
+      "criterion": "Every ask edit of a broken decision is refused naming, as one document edit, the deletes that leave it valid; following them, then edit-ask, ends valid with every word the agent did not delete",
       "surface": "Dispatch ask-edit route and document edits through the real dispatch CLI against the real Go server and Postgres 17; decisions broken by two or three real editors in headless Chromium",
-      "command": "Throwaway Playwright probes W1-W5: edit-ask --urgency high; one doc-edit holding a delete for each id parsed from the refusal's 'the blocks to delete are …'; edit-ask with every option. Record https://github.com/sjawhar/legion/pull/2433#issuecomment-6484589156",
-      "observed": "Two lists: names the 2nd list; one doc-edit applies, then edit-ask → '- Option A\\n- Option B'. Three lists: names both lists after the first; 'Applied 2 ops', then edit-ask → '- Option C\\n- Option A\\n- Option B'. Repeated label, with 'Option C' in the duplicate's list: names that list; applies, then edit-ask [Option A: cheap, Option A2: fast, Option C]. Paragraph after the list: names 'Context'; applies, then edit-ask. Nested sub-item in the first list: names the other list and keeps the first list with its sub-item; applies, then edit-ask 'Option B: only if finance agrees'. Every final state: pages unmarked, row equals the options sent, no named doc-edit refused.",
-      "headSha": "0a1716e7d87917952620c8fdd97308fce339d22a",
-      "negativeControl": "edit-ask --urgency high on each broken decision → exit 1; document and row unchanged. At 73d363c5 (round 10), deleting one of three lists per doc-edit was refused."
+      "command": "Throwaway Playwright probes W1-W5 (the corpus in https://github.com/sjawhar/legion/pull/2433#issuecomment-6485995991): edit-ask --urgency high; one doc-edit holding a delete per id from the refusal's 'the blocks to delete are …'; edit-ask with every option. Record https://github.com/sjawhar/legion/pull/2433#issuecomment-6491006889",
+      "observed": "Two lists, three lists ('Applied 2 ops'), repeated label with Option C in the duplicate's list, paragraph after the list, and nested sub-item: each named doc-edit applied, then edit-ask applied. Each final decision is valid, both pages are unmarked, the row equals the options sent and every word is kept. The reason reads 'keeps the question's paragraphs and the first list after them'.",
+      "headSha": "2b0cac11dbe47c20a68725605f552079a6534ec7",
+      "negativeControl": "edit-ask --urgency high on each broken decision → exit 1; document and row unchanged"
+    },
+    {
+      "criterion": "A1 regression lock after main's #2449 merge: two editors' crossed edits keep every word; the input guards and read-back filter hold",
+      "surface": "Dispatch document editor in headless Chromium (chromium and iphone projects), real Go server and Postgres 17",
+      "command": "cd packages/dispatch && source /legion/scratch/harness/env.sh && bun run e2e -- ask-concurrent-edit.e2e.ts typed-block-content-rule.e2e.ts --project chromium --project iphone",
+      "observed": "17 passed (2.9m)",
+      "headSha": "2b0cac11dbe47c20a68725605f552079a6534ec7",
+      "negativeControl": "Round 1 base tree b295a3fb: the ask-concurrent-edit rows fail with element(s) not found (the decision deleted)"
     }
   ],
-  "ci": "Read on GitHub at 0a1716e7 during testing: build x2, changes, lint, pr-title x2, test, typecheck and the daemon Postgres 16 suite were pending. Not re-run.",
+  "findings": [
+    {
+      "severity": "for the architect (no step a refusal names fails; a person can repair it)",
+      "description": "Two real editors: alice selects the question and deletes it while each editor adds a list. Stored '(empty paragraph) / - Option B / * Option A'; malformed on both pages; ask open with its pre-break row; no unselected word lost. With the real CLI, edit-ask (urgency; question; question and options) exits 1 with 'block: ask block \"a1\" has an empty question', which names no step. doc-edit deleting the second list by id is refused with the same text. One doc-edit inserting a question paragraph and deleting the second list is refused with the same text; adding a delete of the empty paragraph is refused with 'holds a bullet list before its question'. The message is main's (parseAskBlock, docs/ask_blocks.go:668 on main) and runs before this PR's refusal; main gives an agent the same dead end for any decision whose question a person empties. The implementer's shape test accepts it on purpose (noDeleteExplanation). Before this PR the decision was deleted; now it is kept, so an agent meets this state. Sent to the architect."
+    }
+  ],
+  "ci": "Read on GitHub at code head 608e4e9f (the head 2b0cac11 is handoff-only, skip-checks): lint, typecheck, build x2, changes, envoy-e2e-local, envoy-infra-go, envoy-smoke, envoy-session-stall and dispatch-browser-multiprocess succeeded. dispatch-multiprocess failed; its log was not readable while the run was in progress, so whether the failure is this change's or main's is unknown. dispatch, dispatch-memory, envoy-go, envoy-go-race and test were in progress. Not re-run.",
   "notes": [
-    "The unsettled-id refusal (no delete named; retry) is not reachable from a browser. The implementer's TestSetAskBlockTextRefusalBeforeBlockIDsSettleNamesNoDelete covers it, and I read it at this head.",
-    "Throwaway probe specs were moved out of the workspace. The working copy holds only this handoff."
+    "The workspace was recreated after the 02:30Z roll. I restored the e2e harness (chromium install, contracts build) and the probe corpus from the PR comment. The throwaway spec was moved out of the workspace, which holds only this handoff."
   ]
 }
