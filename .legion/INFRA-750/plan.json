@@ -1,0 +1,114 @@
+{
+  "schemaVersion": 1,
+  "phase": "plan",
+  "issue": "INFRA-750",
+  "completed": "2026-10-29T13:59:00Z",
+  "plan": "dispatch://INFRA-750/artifact/plan-md (version 2)",
+  "requiredSkills": {
+    "implement": [
+      "legion-worker: the phase worker's whole contract — the workspace binding, the commit and push shape, the handoff; its references/pr-body.md defines the proof entries and the simplify pass this change must carry, and references/skip-checks-trailer.md the handoff-only push.",
+      "ce-simplify-code: the simplify pass on the settled diff that references/pr-body.md requires before the tester starts, re-proven at the simplified head.",
+      "dispatch-first and dispatch: every Dispatch read or write of this phase (the plan document, any ask) goes through them, and dispatch-first's search rule applies before any finding is raised.",
+      "asd-ste100: the report to the architect and any message a person reads."
+    ],
+    "test": [
+      "legion-worker: the tester's phase contract, and references/pr-body.md for what a proof entry must hold (criterion, surface, command, observed, headSha, negativeControl) and the rule that evidence is re-run at the head it reports — this change's evidence is counted runs, so the counting rule in the plan's section 7 is what the tester re-runs.",
+      "asd-ste100: the tester's report."
+    ],
+    "review": [
+      "legion-worker: the reviewer's phase contract, with references/review-threads.md for the threads and references/merge-gate.md for the approval of a head by SHA and what may sit above it.",
+      "ce-simplify-code: to judge the implementer's simplify pass on the settled diff.",
+      "asd-ste100: the review's prose."
+    ]
+  },
+  "gapAnalysis": {
+    "findings": [
+      {
+        "finding": "The Outcome names nats-server v2.15.1, but every acceptance line runs the in-process test on the v2.10.29 the module pins, and the tree has no container-backed or multi-binary cluster helper (internal/testnats/image.go starts one single container behind the natslive tag).",
+        "answer": "Plan section 6: a one-off three-member v2.15.1 cluster from real binaries (GOBIN=$TMPDIR/bin go install github.com/nats-io/nats-server/v2@v2.15.1, which the planner proved reachable from the pod), driven by a throwaway test that takes the URLs from the environment, counts quoted at the base and the head, the scaffold removed before the handoff and the method recorded in the solutions doc. The repository's own precedent is docs/solutions/testing/...-pr2362.md:23-26. No permanent CI lane: the pod has no container runtime and a download step in CI is a workflow change this issue does not carry."
+      },
+      {
+        "finding": "Acceptance 3 forces 'product race or test artefact' and leaves no slot for a cause specific to nats-server v2.10.29 that the deployed v2.15.1 never shows.",
+        "answer": "Plan sections 1, 4 and 10: a version-specific server answer is still a product race, because the client must survive the answer it gets; the deterministic tests of section 4 inject the server's answers through a nats.JetStreamContext wrapper, so the fix is proven on any version, and section 6 reads the hub's. The pull request names the cause from the instrumented run, not from a version argument."
+      },
+      {
+        "finding": "Acceptance 4's envoy-go green is not in this issue's control: the job runs the whole module and carries INFRA-747's by-chance failures; the four required checks are lint, typecheck, test and pr-title, and envoy-go is not among them.",
+        "answer": "Plan section 10, decided: this pull request neither takes INFRA-747's work nor waits on it. A red envoy-go at the head on a test this change does not touch is named in the body with its run, the job is re-run once, and a second red on the same foreign test goes to the architect. The four required checks must be green with no excuse."
+      },
+      {
+        "finding": "The Outcome covers 'the stream and every bucket', but the named test pre-creates the bucket, so the EnsureKeyValue create race (kv.go:38-41, with nats.go's CreateKeyValue returning the create's error unless the deployed config deep-equals the request) is never exercised, though production creates five buckets on that path at start.",
+        "answer": "Plan section 3 fixes the bucket create path with the same re-read rule, and section 4's third test proves it twice: two goroutines ensuring a bucket that does not exist on a three-server cluster, and a deterministic wrapper twin. Section 3 also keeps the error text infra/core/bucket_raise_test.go:62 asserts and section 7 runs that second module at the head."
+      },
+      {
+        "finding": "'A create that fails because another start's stream now exists is read again and reconciled' does not say what bounds the re-read or how a genuine overlap with a foreign stream must behave; today a second ErrStreamNotFound returns bare at stream.go:421-423.",
+        "answer": "Plan section 2: the re-read is bounded (at most three reads about 100 ms apart, the window the server's own handler covers with one 10 ms retry); the re-read, not the error code, is the discriminator, so a refusal that is really about the settings still fails the start with its own message; a re-read that answers anything other than ErrStreamNotFound ends the loop and the create's refusal is returned. Section 4's second test is the machine check that a genuine refusal still fails, naming ENVOY_NATS_REPLICAS=3."
+      },
+      {
+        "finding": "The acceptance command cannot be run as quoted (the pod's CGO is off, so -race exits 2) and carries no -timeout, while go test's default package deadline is 10 minutes and one 50-iteration run takes about 9.",
+        "answer": "Plan sections 0 and 7: every -race command carries CGO_ENABLED=1 and every -count command an explicit -timeout, and the planner's own base runs in the issue pod are quoted with their commands and the commit they ran at. The pod is the measurement environment; CI's two lanes are the cross-check."
+      },
+      {
+        "finding": "'The failing count' and 'passes 50 of 50' have no counting rule, and the escape clause 'if it cannot be made to fail there' has no budget.",
+        "answer": "Plan section 7 fixes the rule: one invocation per command, the failing count is the number of '--- FAIL:' lines in it, quoted with the package line. Section 10 bounds the escape clause: a second 50-run in the lane without -race, after which the counts are quoted as they stand — the planner's run already reproduced it once in 50, so the clause does not apply."
+      },
+      {
+        "finding": "Acceptance 1 and 2 run under -race, while the lane that went red (envoy-go) runs ./internal/bus/ without it.",
+        "answer": "Plan sections 0 and 7: both lanes are run at the base and at the head, and the planner measured the difference — 0 of 50 failed under -race, 1 of 50 failed without it, with the message the issue quotes."
+      },
+      {
+        "finding": "Nothing in the issue addresses the production surface, though the change is in the start path of every deployed Envoy program (the listener's log.Fatal, Dispatch's background ensureStreamOnce retry), and today's deployment is one server with one copy and one listener.",
+        "answer": "Plan section 12 names the surface, says plainly that no surface outside the test binary reaches the path before the merge, and states what the implementer's post-close production check must do: publish the merge commit to the deploy role, drive a listener start on the build that carries it for a pass, and report pending while it does not."
+      },
+      {
+        "finding": "'Change only what the cause needs, in packages/envoy' sits against three facts: packages/envoy/infra is a second module whose test asserts EnsureKeyValue's exact error text and runs in envoy-infra-go, which acceptance 4 does not name; the docs/solutions file lives outside packages/envoy; and the changelog fragment's Issue value must carry no Dispatch key.",
+        "answer": "Plan sections 3, 7 and 8: the bucket change keeps the asserted prefix and the head runs that module's tests; the solutions doc is retro's, named <slug>-pr<number>.md under docs/solutions/envoy/; the fragment follows packages/envoy/.changes/unreleased/pr-2362-replica-count.yaml, named pr-<number>-<slug>.yaml with custom Issue: pr<number>, and the body line Dispatch: INFRA-750 stays in the pull request body alone, as PR #2362 carries Dispatch: INFRA-546."
+      },
+      {
+        "finding": "The cause cannot be named from the CI error text, because refusedSettings prefixes ENVOY_NATS_REPLICAS=3 for both the refused create and the refused update, and the rig's request recorder cannot watch a cluster.",
+        "answer": "Plan section 1, Task 1: the implementer reproduces with temporary instrumentation that prints which call was refused, its *nats.APIError ErrorCode and what StreamInfo answers immediately afterwards, quotes that output as the pull request's Cause section, and removes the instrumentation. If the refusal turns out to come from UpdateStream, the plan's fix is the wrong fix and the implementer reports to the architect before changing anything."
+      },
+      {
+        "finding": "Unverified claim in the issue: 'and at times envoy-go-race' fails on this test — in main's last twelve runs no envoy-go-race red names it.",
+        "answer": "The plan does not rely on the claim: section 7 measures both lanes at the base and the head, and the planner's own measurement shows the failure in the lane without -race and not under it."
+      }
+    ]
+  },
+  "planReview": {
+    "verdict": "approved",
+    "rounds": 1
+  },
+  "specDepartures": [
+    {
+      "spec": "Acceptance 1 and 2 name one command: `go test -race -count=50 -run 'TestTwoStartsRaisingOneStreamAtOnceBothSucceed$' ./internal/bus/`, at the base and at the head.",
+      "plan": "The same measurement is run in two lanes at the base and at the head — with `-race` (and `CGO_ENABLED=1`, without which the pod's go test exits 2) and without it — and both counts are quoted, with an explicit `-timeout` on each.",
+      "evidence": "At 8a911ecc in the issue pod: `CGO_ENABLED=1 go test -race -count=50 -timeout 40m -run ... ./internal/bus/` answered `ok ... 526.804s` with 0 of 50 iterations failing; `go test -count=50 -timeout 40m -run ... ./internal/bus/` answered `FAIL ... 513.330s` with 1 of 50 failing: `stream_replicas_test.go:430: start 0: ENVOY_NATS_REPLICAS=3: nats: subjects overlap with an existing stream`. CI's red lane, job envoy-go in run 40857522211, also runs ./internal/bus/ without -race (.github/workflows/envoy-and-contracts.yaml:1260-1263), while envoy-go-race was green there.",
+      "outcome": {
+        "kind": "changed",
+        "acceptance": [
+          "Acceptance 1: the base measurement is the two commands, not the one, and the quoted counts name their lane.",
+          "Acceptance 2: the head must pass 50 of 50 in both lanes."
+        ]
+      }
+    },
+    {
+      "spec": "Acceptance 5: 'the 13 cluster tests plus TestAStuckDeliveryStillEndsTheKVWatchers, run together under -race with -count=20'.",
+      "plan": "The set is every internal/bus test that starts a cluster — 18 of them — plus the drain test, 19 in all, with the exact -run regex written into the plan and a rule that a new cluster test joins the set.",
+      "evidence": "Counted in the tree at 8a911ecc: the tests that call startClusterJetStream or testnats.StartCluster are 11 in stream_replicas_test.go, 6 in keeper_test.go and 1 in publish_not_stored_test.go.",
+      "outcome": {
+        "kind": "changed",
+        "acceptance": [
+          "Acceptance 5 is measured over 19 named tests, not 13."
+        ]
+      }
+    },
+    {
+      "spec": "Constraints: 'Change only what the cause needs, in packages/envoy.' No acceptance line exercises the bucket create path, and the named test pre-creates its bucket.",
+      "plan": "EnsureKeyValue's create path gets the same re-read as the stream's, with its own tests, because it is the same defect in the same start sequence and the Outcome asks that 'every bucket' end at the deployment's replica count.",
+      "evidence": "internal/bus/kv.go:36-41: js.KeyValue answers ErrBucketNotFound and js.CreateKeyValue's failure is returned with no re-read; nats.go v1.50.0's CreateKeyValue returns the create's error unless the deployed stream deep-equals the request, so a bucket another start created at one copy fails this start. Production opens five buckets on this path at start (internal/bus, WithKeptBuckets), and stream_replicas_test.go:407-410 pre-creates the bucket, so no test covers it.",
+      "outcome": {
+        "kind": "changed",
+        "scope": "The pull request also changes packages/envoy/internal/bus/kv.go and adds two bucket tests; the architect may cut this and leave the bucket create race to another issue."
+      }
+    }
+  ]
+}
