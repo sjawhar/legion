@@ -2,7 +2,7 @@
   "schemaVersion": 1,
   "phase": "implement",
   "issue": "INFRA-745",
-  "completed": "2026-10-29T19:50:00Z",
+  "completed": "2026-10-29T22:55:00Z",
   "proof": [
     {
       "criterion": "2 - a session following an issue's topic is shown an agent's comment on it, with the fix's two halves joined on one real wire frame",
@@ -67,6 +67,14 @@
       "observed": "the agent's comment.created frame carries quiet:false and renderInbound shows it (944-byte card naming the body and its reply command); the targeted message.created and its message.delivery carry quiet:true and are skipped. On the denied rig every event is unpublished with attempt_count 1, /metrics reads envoy_dispatch_outbox_publish_failures_total{reason=\"denied\"} 9 with no reason=\"failed\" series, and the log holds zero 'NATS is unreachable' and zero 'event released' lines.",
       "headSha": "528d0fc9763b4f9080648c74622394b35c9c0fb6",
       "negativeControl": "the same captured frame three ways, as in round 1: quiet set to true -> skip=true; quiet removed (every frame published before this change) -> skip=true; the reader as the frame's own actor -> skip=true."
+    },
+    {
+      "criterion": "review round 2's three red lanes, all of them the forward merge's doing: the live test's issue create, ci.yaml's filters for a path cmd/dispatch now reads, and the Dispatch skills' word guard",
+      "surface": "for the live test, the real envoy-dispatch binary built from this branch, driven through its HTTP API, since the lane itself needs a container runtime the pod has none of; for the filters, the repository's own .github/scripts/check-ci-filters.sh, which recomputes what every gate reads from live go list closures; for the skills, the guard test that every session's cost is held by",
+      "command": "curl -X POST /api/v1/issues twice at 127.0.0.1:8755 ('example', then 'quiet example' unforced and then with \"force\":true), and a comment on the forced issue; bash .github/scripts/check-ci-filters.sh; cat skills/dispatch/*.md skills/dispatch-first/*.md skills/dispatch-writing-specs/*.md | wc -w; cd packages/pi-envoy && bun test src/skills-guard.test.ts; cd packages/envoy/infra && gofmt -l core && go vet -tags natslive ./core/",
+      "observed": "the unforced create answers 409 POSSIBLE_DUPLICATE naming ACME-1, which is the lane's failure; the forced one answers 201 with key ACME-2, and the comment the helper posts next on it answers 201. check-ci-filters.sh exits 0, ending 'every ci.yaml filter matches every file its job reads (24 gates), and every PUSH_WORKFLOWS workflow's on.push.paths equals its filter (1)'. The three skills are 1998 words, and skills-guard.test.ts is 10 pass, 0 fail, 1 environmental skip (it needs LEGION_TEST_OMP). The live test compiles under its own tag.",
+      "headSha": "e09361f829a93e872a2a26fecb74cca55daa67ee",
+      "negativeControl": "each lane's failure reproduced at this head before its fix: the unforced create's 409 above, the filter check's refusal naming what it lacked ('on.push.paths lacks packages/envoy/internal/metrics/*' once the filter had grown and the push workflow had not), and the word count at 2016 against the guard's 2000."
     }
   ],
   "filesChanged": [
@@ -91,7 +99,9 @@
     "skills/dispatch/SKILL.md - one clause naming what an issue-topic subscription does not show",
     "packages/{envoy,envoy-client,pi-envoy,contracts}/.changes/unreleased/INFRA-745-*.yaml - five fragments, three of them #2490's renamed onto this issue",
     "packages/envoy/docs/architecture.md, packages/envoy/AGENTS.md - corrected on main's own text (merged forward in 91610e2): a denial is produced on both transports, so the listener's send route and a publish of a topic the stream captures answer 403 publish_denied with no Retry-After where they answered the retried 503; the record's outcome list says publish_denied belongs to send and publish alike",
-    "packages/envoy/AGENTS.md, packages/pi-envoy/AGENTS.md - the adopted commit's own documentation"
+    "packages/envoy/AGENTS.md, packages/pi-envoy/AGENTS.md - the adopted commit's own documentation",
+    ".github/workflows/ci.yaml, .github/workflows/docs-pages.yaml - packages/envoy/internal/metrics/* on the two anchors the five Dispatch gates flatten, and on the docs push workflow the check holds equal to the docs filter",
+    "skills/dispatch/SKILL.md, skills/dispatch-writing-specs/SKILL.md - three sentences reworded to keep the three Dispatch skills under their 2,000-word guard, the quiet clause kept in substance"
   ],
   "trickyParts": [
     "The rig that proves this change is still standing on the issue's volume and the tester can reuse it rather than rebuild it: /legion/scratch/pgharness (Postgres 17 + pgvector unpacked from Debian packages, started by `bash /legion/scratch/pgharness/start.sh`, which is idempotent; it serves 127.0.0.1:5433 as DISPATCH_TEST_DATABASE_URL=postgres://postgres@127.0.0.1:5433/postgres?sslmode=disable, which every Postgres-backed Go test here needs), and /legion/scratch/tmp/rig (the scratch Go module whose `render` and `render-denied` call Envoy's own production renderer, `sub` subscribes as a session, `render-frame.ts` drives renderInbound, plus the built envoy-dispatch and the captured frames under frames2/). Two nats-servers are running on 127.0.0.1:4333 (granted) and :4334 (notifications.> withheld). Nothing of it is in the workspace or the commit.",
