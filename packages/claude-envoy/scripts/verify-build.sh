@@ -18,8 +18,9 @@
 # must name it: main's push job lands a build on a moved main and decides from that list alone
 # whether the move changed the build. tests/build-inputs.test.ts checks the list against what the
 # bundles and the Legion plugin read, but not against what this script, build.ts or the workflow
-# read by path (check-private-names.sh, the .gitignore files, release-push.sh, .bun-version, the
-# scripts build.ts runs): a new file read here goes into the list by hand.
+# read by path, which the list's header names as listed by hand (check-private-names.sh, the
+# .gitignore files, release-push.sh, .bun-version, the scripts build.ts imports or runs, the
+# workflow and setup-bun): a new file read here goes into the list by hand.
 #
 # In order, whatever the caller's directory:
 #   1. `bun scripts/build.ts --out` twice, into two scratch directories, and the two builds'

@@ -253,17 +253,18 @@ above says how to run it).
   files are a build of a recent main, at most one run behind its inputs (runner queues included,
   which can take more than an hour when the Actions queue is long), and never move backward.
   `tests/build-inputs.test.ts`, in the required test job, fails when the bundles' module graph (with
-  each reached package's manifest, tsconfig and license files, and what `bun install` reads) or the
-  skills and agents `buildLegionPlugin` reads reach a file the list does not match. The files the
-  build's scripts and workflow read by path (`.bun-version`, `scripts/third-party-notices.ts`,
-  `scripts/pi-plugin-prepack.sh`, `check-private-names.sh`, the `.gitignore` files,
-  `release-push.sh`, the workflow and `setup-bun`) are listed by hand: a pull request that makes
-  `build.ts`, `verify-build.sh` or the workflow read a new file adds it to the list itself. The
-  hand-written plugin files (`hooks/hooks.json`, `.mcp.json`, `bin/`, `.claude-plugin/`) go live at
-  the merge, beside the previous build, so a change that makes one of them name a new or renamed
-  bundle is broken on main until the rebuild lands: add the bundle in one pull request and the
-  entry that runs it in a later one, once the rebuild commit is on main. A pull request that
-  already carries changes under `dist/` or `legion/` drops them at its next merge of main with
+  each reached package's manifest, tsconfig and license files, and the lockfile, root manifest and
+  patches `bun install` applies) or the skills and agents `buildLegionPlugin` reads reach a file
+  the list does not match. The rest of the list is listed by hand, as its header names it
+  (`.bun-version`, `bunfig.toml`, the `.gitignore` and `.gitattributes` files, the scripts
+  `build.ts` imports or runs, and the files the workflow and `verify-build.sh` read): a pull
+  request that makes `build.ts`, `verify-build.sh` or the workflow read a new file adds it to the
+  list itself. The hand-written plugin files (`hooks/hooks.json`, `.mcp.json`, `bin/`,
+  `.claude-plugin/`) go live at the merge, beside the previous build, so a change that makes one of
+  them name a new or renamed bundle is broken on main until the rebuild lands: add the bundle in
+  one pull request and the entry that runs it in a later one, once the rebuild commit is on main. A
+  pull request that already carries changes under `dist/` or `legion/` drops them at its next merge
+  of main with
   `jj -R "$LEGION_WORKSPACE" restore --from main@origin packages/claude-envoy/dist packages/claude-envoy/legion`.
   To run the plugin from a tree, build it with `bun scripts/build.ts --out <dir>` into a directory
   outside the repository. A reviewer asks for any change under the two directories to be dropped.
