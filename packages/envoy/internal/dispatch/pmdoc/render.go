@@ -103,17 +103,39 @@ func (b *SpanBudget) Render(doc *Node) (string, error) {
 }
 
 // RenderWithBlockOffsets renders a document and records each identified block's
-// byte range in the returned markdown.
+// byte range in the returned markdown. It validates doc first.
 func RenderWithBlockOffsets(doc *Node) (string, []BlockOffset, error) {
-	r, err := render(doc, maxSpanCells)
+	return renderWithBlockOffsets(doc, true)
+}
+
+// RenderWithBlockOffsets is RenderWithBlockOffsets of d's tree without validating it again: the
+// renderer's own refusals still run, and a panic in it is still an ErrPanic. The zero
+// ValidDocument is RenderWithBlockOffsets' error for a nil tree.
+func (d ValidDocument) RenderWithBlockOffsets() (string, []BlockOffset, error) {
+	return renderWithBlockOffsets(d.doc, false)
+}
+
+// renderWithBlockOffsets is the markdown of doc and its blocks' byte ranges in it, validating doc
+// first only when validate says so (renderDocument).
+func renderWithBlockOffsets(doc *Node, validate bool) (string, []BlockOffset, error) {
+	r, err := renderDocument(doc, maxSpanCells, validate)
 	if err != nil {
 		return "", nil, err
 	}
 	return r.b.String(), r.blockOffsets, nil
 }
 
-// render writes doc, its tables' spans adding at most spanCells empty cells (tableGrid).
-func render(doc *Node, spanCells int) (r *renderer, err error) {
+// render writes doc, its tables' spans adding at most spanCells empty cells (tableGrid), after
+// validating doc.
+func render(doc *Node, spanCells int) (*renderer, error) {
+	return renderDocument(doc, spanCells, true)
+}
+
+// renderDocument is render, validating doc first only when validate says so: ValidDocument's
+// rendering passes false for the tree it validated once already. A nil or non-doc tree is refused
+// either way, every refusal of the renderer's own runs either way, and a panic is an ErrPanic
+// either way.
+func renderDocument(doc *Node, spanCells int, validate bool) (r *renderer, err error) {
 	// The renderer reads back what it writes (blockKinds, parseInlineWithDefinitions).
 	defer recoverPanic(&r, &err, "rendering a document")
 	if doc == nil || doc.Type != "doc" {
@@ -122,8 +144,10 @@ func render(doc *Node, spanCells int) (r *renderer, err error) {
 		}
 		return nil, fmt.Errorf("%w: Render wants a doc, got %q", ErrSchema, doc.Type)
 	}
-	if err := doc.Validate(); err != nil {
-		return nil, err
+	if validate {
+		if err := doc.Validate(); err != nil {
+			return nil, err
+		}
 	}
 	// Anchor marks render nothing, but one that starts or ends inside a word splits its text into
 	// runs, and an escape is decided within one run: rendering the document without them merges
