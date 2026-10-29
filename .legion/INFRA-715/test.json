@@ -48,6 +48,12 @@
       "negativeControl": "Refused inputs at the head: markdown naming one block id on two blocks is refused whole - `replace live document: markdown is not a Proof document: outside Proof schema: block id \"43bad687-...\" would name two blocks; give one of them another id, or omit {#43bad687-...} to have one minted`, exit 1, and the document is left as it was. The carry is refused where it would move identity: in the moved-paragraph upload both swapped paragraphs take fresh ids (af74ad2b -> 062b4b7c, 359e953b -> d790ebc7), so no anchor or reference follows onto other text."
     }
   ],
+  "unverified": [
+    "A2's clause \"the curve is quoted against the 2026-10-28 baseline\": I verified the head run's own shape from its files (40 events/s, 1,000 sessions, 600 requests/s, 60 minutes, mix production-2026-10-26 at anchored 33 / comment 3 / edit 22 / reply 35 / upload 7, Postgres 18, Dispatch 16 CPU and 32Gi, 143,881 committed writes, 0 errors, 0 restarts) and that its harness commit 4fa0bee2 is the one the implementer names as the 2026-10-28 run's. I could not verify the 2026-10-28 run's own shape or its 11.25 -> 21.23 GiB: its record, the reference INFRA-715 carries, is unreadable from this pod (`dispatch read --project INFRA --artifact cluster-load-test-2026-10-28-md` answers `project not found`, and its artifact id 750a5f46-c925-4999-9b4e-d49477a793da answers `not found`), and the cluster copy is down. The comparison rests on the implementer's reading of that earlier run. This belongs on the reviewer's `Not proven / risk` line."
+  ],
+  "notes": [
+    "The evidence tarball dispatch://INFRA-715/artifact/infra715-cluster-hour-2026-10-29-tgz carries cluster2/state.json, whose `secrets` object holds four values of the load-test cluster: pg_password, dispatch_token, listener_token and signing_key. The namespace is torn down, so each is dead, and Dispatch is internal. It is still a credential in a place no one scrubs. Remedy, while the implementer is here: upload the tarball again with that object removed."
+  ],
   "ci": {
     "head": "a0659390db336ad1465d2e0de1ff6b68350e8c4c",
     "read": "GitHub, 2026-10-29T12:10Z, not re-run",
