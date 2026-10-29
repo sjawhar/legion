@@ -1,0 +1,75 @@
+{
+  "schemaVersion": 1,
+  "phase": "test",
+  "issue": "INFRA-743",
+  "completed": "2026-10-29T16:10:00Z",
+  "implementerProof": {
+    "verdict": "verified",
+    "how": "Every one of the implementer's four proof entries was re-driven independently, with the tester's own script ($TMPDIR/t/tester-smoke.sh and $TMPDIR/t/transient.sh, written here, not the implementer's $TMPDIR/smoke/smoke.sh), the tester's own binary built from this workspace at b7cccdc9, and the tester's own base binary built from a fresh tarball of main 1f5b0828 (the commit this branch's forward merge brought in), on ports of the tester's own so no process of the implementer's could answer: (1) the transient-failure scenario reproduced the WARN-and-no-ERROR report at the head and the ERROR at the base; (2) the deny scenario reproduced 200 under the grace, the first 503 at a stall of exactly 1m0s, the ERROR past the grace, and 200 again with the deny lifted, and the base binary answered 200 for every one of 150 samples in the same window; (3) the 200-run loop was run again here: 200 PASS, 0 FAIL; (4) CI at the code head was read on GitHub rather than re-run, and every lane that builds internal/bus, internal/kvwatch or cmd/listener is green there."
+  },
+  "failures": [],
+  "failed": 0,
+  "proof": [
+    {
+      "criterion": "Acceptance 1: the first rewatch attempt after a reconnect fails, the retry repairs it, the listener ends with a live watch and current caches, and no ERROR is logged for a retry that later succeeds.",
+      "surface": "The built envoy-listener binary (go build -o $TMPDIR/t/listener-head ./cmd/listener in this workspace) against a real nats-server v2.10.29 with JetStream, restarted under it; /healthz and POST/GET /v1/interests/ over HTTP on 127.0.0.1:29120.",
+      "command": "bash $TMPDIR/t/transient.sh $TMPDIR/t/listener-head head - start the server and the listener, write an interest, restart the server under a configuration that denies only $JS.API.CONSUMER.CREATE.KV_envoy_{interests,roles,sessions}.>, wait 25 s (well inside bus.RepairGrace), lift the deny, then read /healthz, GET /v1/interests/ and every ERROR and WARN line of the listener's log.",
+      "observed": "The failed runs were reported at WARN only: 'WARN envoy nats reconnect hook failed; it is retried ... stall_ms=20009' and 'stall_ms=30019'. The listener's log holds no reconnect-hook ERROR at all; its only ERROR lines are the 8 'envoy nats async error ... Permissions Violation for Publish to \"$JS.API.CONSUMER.CREATE.KV_envoy_*\"' the deny itself causes, which the base run logs identically. /healthz answered 200 healthy at every read, and after the repair GET /v1/interests/ served both the interest written before the restart (ses_before) and one written after it (ses_after), so the watch is live and the cache current.",
+      "headSha": "b7cccdc95ba8d589e551c43507b5df0b0ea65b3f",
+      "negativeControl": "The same script and the same scenario against a listener built from main 1f5b0828 (tarball fetched with gh api repos/sjawhar/legion/tarball/1f5b08286a6d, built to $TMPDIR/t/listener-base): the transient failure logged 'ERROR envoy nats reconnect hook failed name=envoy error=\"rewatch interest cache: watch interest registry KV bucket: context deadline exceeded\\nrewatch session cache: ...\"' and 'ERROR envoy nats recovery resubscribe failed name=envoy attempt=1', the two lines this change removes, although that run repaired itself exactly as the head's did."
+    },
+    {
+      "criterion": "Acceptance 2: the rewatch is retried until it succeeds or the listener stops, and a rewatch still failing after the stated bound (bus.RepairGrace, one minute from the connection event) is reported on the listener's health, not only logged.",
+      "surface": "The same built envoy-listener binary and real nats-server on 127.0.0.1:24222, /healthz over HTTP on 29020, sampled once a second for the whole of each window.",
+      "command": "bash $TMPDIR/t/tester-smoke.sh $TMPDIR/t/listener-head head - step 4 restarts the server under the deny configuration and samples /healthz every second for 150 s; step 5 lifts the deny, samples for 120 s and writes an interest.",
+      "observed": "The sampler saw 200 healthy from the reconnect through +56 s and the first 503 at +57 s, whose body reads 'KV watch rebuild unavailable: rewatch interest cache: watch interest registry KV bucket: context deadline exceeded\\nrewatch session cache: watch session registry KV bucket: context deadline exceeded (no rebuild has succeeded for 1m0s)' - the bound is measured from the connection event, which the log puts 3 s before the sampling started, so the 503 begins at a stall of exactly one minute. The log holds 'ERROR envoy nats reconnect hooks have not succeeded ... stall_ms=61054' and, before it, two WARN lines of the same failure. With the deny lifted, /healthz returned to 200 healthy and 119 of the next 120 samples were 200; an interest written then (ses_tester_after_repair) was served by GET /v1/interests/.",
+      "headSha": "b7cccdc95ba8d589e551c43507b5df0b0ea65b3f",
+      "negativeControl": "The same script and the same deny window against the base binary ($TMPDIR/t/listener-base, main 1f5b0828): 150 of 150 samples answered 200 healthy over two and a half minutes in which every KV watch rebuild failed, and the base's one 'ERROR envoy nats reconnect hook failed' line reached no health answer at all. The base keeps calling a listener healthy whose caches follow buckets nothing is watching, which is the regression this criterion is about."
+    },
+    {
+      "criterion": "Acceptance 3: TestListenerFollowsTheInterestRegistryAcrossNATSRestarts passes 200 of 200 isolated runs at the head.",
+      "surface": "The listener's own test harness, which builds and runs the listener binary against a real NATS (cmdtest.Build runs go build . in the process's working directory), driven from packages/envoy/cmd/listener in this workspace.",
+      "command": "cd $LEGION_WORKSPACE/packages/envoy/cmd/listener && go test -c -o $TMPDIR/t/listener-tester.test . then, for i in 1..200, \"$TMPDIR/t/listener-tester.test\" -test.run '^TestListenerFollowsTheInterestRegistryAcrossNATSRestarts$' -test.count=1 (serial, one process per run, no -race; $TMPDIR/t/loop200.sh, log $TMPDIR/t/loop-200.log).",
+      "observed": "FINAL PASS=200 FAIL=0, in blocks of 25 from 15:31Z to 15:57Z (25/50/75/100/125/150/175/200, each PASS=n FAIL=0). An earlier run of the same loop, cut short at 61 runs when its shell was interrupted, was 61 PASS, 0 FAIL, so 261 runs of this head have now passed with no failure.",
+      "headSha": "b7cccdc95ba8d589e551c43507b5df0b0ea65b3f",
+      "negativeControl": "The failure mode the loop watches for, produced deterministically at the base rather than sampled: restart_test.go fails the test on any ERROR line, and the base binary logs exactly that line - 'ERROR envoy nats reconnect hook failed ... rewatch session cache: ...' - for a rewatch failure the retry repairs (the transient run above). At the head the same failure logs WARN, so the run that fails the test at the base passes at the head."
+    },
+    {
+      "criterion": "The new 503 cannot trip during a normal NATS restart, nor on a listener that has simply been up past the bound (the architect's check 3).",
+      "surface": "The same built envoy-listener binary and real nats-server; /healthz over HTTP, sampled once a second for the whole of both windows.",
+      "command": "bash $TMPDIR/t/tester-smoke.sh $TMPDIR/t/listener-head head - step 2 samples /healthz every second for 75 s with no restart at all (past bus.RepairGrace), step 3 stops and starts the server and samples every second for 100 s.",
+      "observed": "Idle window: 200=75, other=0. Plain restart: 200=100, other=0, so the answer never left 200 healthy at any second of the window; the log held 'INFO envoy nats reconnected name=envoy url=nats://127.0.0.1:24222', 0 ERROR lines and 0 WARN hook lines, and an interest written after the restart (ses_tester_after_plain_restart) was served by GET /v1/interests/. The idle window matters because the initial connection must not count as an uncovered connection event: it does not (bus.Client.install does not call markHooksDueLocked, only the reconnect callback and a replacement dial do), so an idle listener reports a zero stall however long it runs.",
+      "headSha": "b7cccdc95ba8d589e551c43507b5df0b0ea65b3f",
+      "negativeControl": "The deny window of the same run, in which the server is restarted the same way but refuses KV consumer creation: there /healthz did leave 200 at +57 s with 'KV watch rebuild unavailable'. The 503 answers the fault and not the restart."
+    }
+  ],
+  "ciAtCodeHead": {
+    "head": "b7cccdc95ba8d589e551c43507b5df0b0ea65b3f",
+    "readAt": "2026-10-29T16:05:58Z",
+    "note": "Read on GitHub, not re-run. Every check run at the code head is completed and successful (ci-ok success). The lanes that build the three packages this change touches are all green: envoy-go, envoy-go-race (which runs go test -race over ./internal/bus/ and over ./cmd/listener/ ./internal/store/ ./internal/kvwatch/...), envoy-smoke, envoy-e2e-local, envoy-session-stall, and the four lanes that build cmd/dispatch and so internal/bus (dispatch, dispatch-memory, dispatch-multiprocess, dispatch-browser-multiprocess), plus lint, typecheck, test, docs, envoy-infra-go and worker-image / build. The pull request's head commit 66a4f4d6 is the handoff-only push and carries the skip-checks trailer, so it reports no checks of its own, as intended."
+  },
+  "siblingTrialMerges": {
+    "note": "The architect's check 1, run in a throwaway clone at $TMPDIR/merge-trial, each sibling head merged into this code head b7cccdc9. Neither is clean; both resolve mechanically, and each tree's implementer has been told which.",
+    "pr2377": {
+      "head": "8a3b81a7a",
+      "result": "conflict in packages/envoy/internal/kvwatch/kvwatch.go and packages/envoy/AGENTS.md",
+      "resolution": "kvwatch.go: take #2377's call shape, w.watch(kv, conn, 0), and drop the three w.reportFailedRepair() calls this change deletes, keeping this change's Rewatch doc paragraph and #2377's resume paragraph beside it; AGENTS.md: keep both bullets, #2377's warm-up outcome wording and this change's reconnect-report wording, which touch different sentences. INFRA-514's implementer stated the same resolution unprompted (message 8e51e1dc, 15:00Z): 'If #2504 merges first, I delete those calls and reword the doc when I merge forward.'"
+    },
+    "pr2446": {
+      "head": "37cdf6dde",
+      "result": "conflict in packages/envoy/internal/bus/nats.go, packages/envoy/AGENTS.md and docs/site/src/content/docs/dispatch/envoy.md",
+      "resolution": "nats.go: both sides add new methods at the same point; keep both blocks (this change's RepairGrace, HookStall, now and markHooksDueLocked, and #2446's currentConn), in either order. The two documents are additions to different list items and keep both. No call site of either side is touched by the other."
+    }
+  },
+  "siblingNotifications": {
+    "note": "The architect's check 2. The implementer named, for each of the three trees, the topic, its own message id, the holder session and the answer (message 0f4afd70, 15:00Z). Two of the three implementers confirmed it to me directly, unprompted by the implementer.",
+    "INFRA-514 (#2377)": "Confirmed by its implementer (session 01a17bae, message eded5add, 15:00:25Z): files in message 32c1c070 at 13:57Z, the bus.RepairGrace contract in message 2a949487 at 14:59Z, answered with 962e77ed and 8e51e1dc.",
+    "INFRA-590 (#2395)": "Confirmed by its implementer (session 01a17baa, message a127c7fd, 15:00:29Z): files in message 9c04beb9 at 13:57:52Z, the bus.RepairGrace contract in message 831b4451 at 14:59:17Z, answered with 40f84fcb and b9327bc1.",
+    "INFRA-594 (#2446)": "Not confirmed by its implementer directly: my question (message cd7c5404, 15:00Z) had no answer by the end of this round. The record is the implementer's citation: topic notifications.role.legion-infra-infra-594-implementer, message 1786785396723b5d5f383777c7d936e1, holder 01a17bb3, answered at 13:58:39Z with message 3c53a16a, plus the RepairGrace follow-up 8de3dfd7 at 14:59Z."
+  },
+  "observations": [
+    "No test pins that a client with no connection event reports a zero stall however long it runs. TestHealthzAnswersAHookStallPastTheRepairGrace reads /healthz before any reconnect, but at a stall of zero; a change that marked the hooks due at the first connection (bus.Client.install, or the background-connect path, where onConnect already calls markHooksDueLocked for the first connection) would keep every assertion of that test green and would answer 503 on every listener a minute after it started. The behaviour is right at this head - 75 of 75 idle samples 200 healthy on the real binary - so this is a lock that is missing, not a defect. One line in that test would hold it: advance the clock by bus.RepairGrace before the hook is added and assert 200 healthy.",
+    "The 503 answers a rebuild that has been failing for a minute whatever the cause, so a JetStream recovery that takes longer than a minute after a server comes back takes the pod out of its Service until the rebuild succeeds. That is the plan's decision 1 as written (a readiness answer, never a liveness one: /livez is untouched), and the smoke shows the answer returning to 200 within a second of the repair.",
+    "Both halves of the band behaved as the plan states on the real binary: one hook run costs tens of seconds (the first WARN read stall_ms=20009, two KV watch attempts of 10 s each), so the WARN-then-ERROR split, rather than a deadline on the run, is what keeps a repaired restart quiet."
+  ]
+}
