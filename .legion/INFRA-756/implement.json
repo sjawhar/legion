@@ -2,41 +2,45 @@
   "schemaVersion": 1,
   "phase": "implement",
   "issue": "INFRA-756",
-  "completed": "2026-10-29T20:08:00Z",
-  "round": 3,
-  "roundSummary": "Round 2's one failure was acceptance 5, the race jobs of their own for internal/dispatch/pmdoc and internal/dispatch, which spec version 2 added after that head was built. The tree's architect withdrew that work from this issue at 2026-10-29T19:59Z: sjawhar/legion#2517 has already built per-package race jobs for pmdoc and api, measured in isolation at 1023.5 s and 746.7 s, so building them here too would duplicate them. This round therefore changes no file of the product: the working copy is byte-identical to the head the tester judged, the pull request body records the scope decision, and the handoff is the only commit.",
+  "completed": "2026-10-29T20:35:00Z",
+  "round": 4,
+  "roundSummary": "Review round 1 requested two comment fixes in .github/workflows/ci.yaml, which the review App cannot push (GitHub refuses a GitHub App a workflow file without workflows permission). Both are made in commit f51c9b08: the job's comment now says why the document service runs under -race at all, and its cache comment no longer claims the job builds no binary. Both threads carry a disposition reply and are resolved; nothing else of the change moved.",
   "proof": [
     {
-      "criterion": "Acceptance 5 (spec version 2): pmdoc and internal/dispatch get race jobs of their own. Withdrawn from this issue by the tree's architect; sjawhar/legion#2517 owns it.",
-      "surface": "The architect's decision on the Envoy role topic, and this pull request's body, which is where a reader of the change meets the scope.",
-      "command": "The architect's message of 2026-10-29T19:59:21Z on notifications.role.legion-infra-infra-490-architect: 'STOP on pmdoc and api: withdraw my 19:52Z and 19:56Z answers. INFRA-757's #2517 has already built per-package race jobs for pmdoc and api (measured isolated: pmdoc 1023.5 s, api 746.7 s, both under the bar) … INFRA-756 stays as round 1 built it: envoy-go-race-docs only, -timeout 60m. In the round the tester just opened, change nothing for acceptance 5 except to state in the body that pmdoc and api are #2517's'; then gh api repos/sjawhar/legion/pulls/2516 --method PATCH -F body=@<body>",
-      "observed": "The body now carries a Scope paragraph naming sjawhar/legion#2517 as the owner of the pmdoc and api race jobs, with each package's isolated measurement, and a Round 3 paragraph stating that no file changed. The pull request is unchanged otherwise; its head keeps the green run the tester read.",
-      "headSha": "52d91f1c74419b30ece514bd5050e0f00872ce3d",
-      "negativeControl": "The work was built before it was withdrawn and then taken back out, so the revert is proven rather than assumed: `jj -R \"$LEGION_WORKSPACE\" restore .github/workflows/ci.yaml .github/scripts/ci_job_reads.py` answers 'Added 0 files, modified 2 files, removed 0 files', after which `jj status` reads 'The working copy has no changes' and `grep -n 'go test -race' .github/workflows/ci.yaml` returns exactly the three steps of the judged head (api+pmdoc+delivery+store+bus at 30m, listener+store+kvwatch at 30m, docs at 60m) and no envoy-go-race-pmdoc or envoy-go-race-api."
+      "criterion": "Review thread PRRT_kwDORFy7ds6xva7v: the go-envoy cache comment claimed the job builds no binary, which a `go test -race` step does, so a later editor of the cache step would act on a false reason.",
+      "surface": "The pull request on GitHub: the thread, its disposition reply and its resolution, which is where the reviewer and the merger read a round's answer.",
+      "command": "gh api graphql -f query='mutation($t:ID!,$b:String!){addPullRequestReviewThreadReply(input:{pullRequestReviewThreadId:$t,body:$b}){comment{id}}}' -F t=PRRT_kwDORFy7ds6xva7v -F b=<the reply>; then gh api graphql -f query='mutation($id:ID!){resolveReviewThread(input:{threadId:$id}){thread{isResolved}}}' -F id=PRRT_kwDORFy7ds6xva7v",
+      "observed": "The reply posted as PRRC_kwDORFy7ds8AAAABB07C0Q and the resolution answered isResolved true. The comment now reads, in the reviewer's own requested wording: 'go-envoy, restored only: its modules are the envoy module's, but this job builds the document service's race test binary, not the listener and natsd the family's saving jobs build, so it saves none.'",
+      "headSha": "f51c9b08cb0575dd5a20dbdbd8d2a9ec3d4a3b20",
+      "negativeControl": "The reviewer's own attempt is the control: GitHub refused the review App's push of this same file with 'refusing to allow a GitHub App to create or update workflow .github/workflows/ci.yaml without workflows permission', which is why the edit is the implementer's and why a reviewer cannot close this class of finding itself."
     },
     {
-      "criterion": "1a, 1b and 2 still hold at the head this round completes on: the docs package runs under -race in its own job at -timeout 60m under timeout-minutes 70, its filter is its closure, and the router's own gate passes.",
-      "surface": "The CI router's own gate program, .github/scripts/check-ci-filters.sh, what the ci-filters job runs, against the real .github/workflows/ci.yaml in the issue pod.",
-      "command": "cd -- \"$LEGION_WORKSPACE\" && PATH=/legion/scratch/tmp/yamlenv/bin:$PATH bash .github/scripts/check-ci-filters.sh",
-      "observed": "exit 0, with 'envoy-go-race-docs: 755 files, 0 uncovered (filter envoy_go_race_docs)', 'envoy-go-race: 2072 files, 0 uncovered (filter envoy_go_race)' and 'every ci.yaml filter matches every file its job reads (25 gates)' — the same numbers the tester read at this head, which is what proves the revert put the tree back exactly.",
-      "headSha": "52d91f1c74419b30ece514bd5050e0f00872ce3d",
-      "negativeControl": "Run on the tree with the withdrawn work still in it, the same command answered '27 gates' with envoy-go-race-pmdoc at 388 files and envoy-go-race-api at 1959 files; 25 gates and the two numbers above are therefore a positive statement about which tree is on disk, not a check that passes either way."
+      "criterion": "Review thread PRRT_kwDORFy7ds6xva73: the job's comment said why the package has a job of its own but not why it runs under -race at all; that reason lived only in envoy-go-race's comment, whose direct test now runs here.",
+      "surface": "The same: the thread, its reply and its resolution on the pull request, and the comment in the workflow a later editor reads.",
+      "command": "The same two graphql calls with -F t=PRRT_kwDORFy7ds6xva73 / -F id=PRRT_kwDORFy7ds6xva73; and cd -- \"$LEGION_WORKSPACE\" && grep -n 'func TestReadsOfALiveDocumentRunBesideItsPeers' packages/envoy/internal/dispatch/docs/live_read_race_test.go",
+      "observed": "The reply posted as PRRC_kwDORFy7ds8AAAABB07EKg and the resolution answered isResolved true. The job comment now ends 'It runs under -race because a read that walks a live document without its lock races the room's peers, which no ordinary run shows (TestReadsOfALiveDocumentRunBesideItsPeers, internal/dispatch/docs/live_read_race_test.go:39, LEGION-499).' The grep answers '39:func TestReadsOfALiveDocumentRunBesideItsPeers(t *testing.T) {', so the citation names the right file and line. The sentence stays in envoy-go-race's comment as well, since it holds for the api package too.",
+      "headSha": "f51c9b08cb0575dd5a20dbdbd8d2a9ec3d4a3b20",
+      "negativeControl": "The line number is the part a comment gets wrong silently, so it was read rather than copied: the grep above prints line 39, and a citation of any other line would have printed a different number or nothing."
+    },
+    {
+      "criterion": "Nothing else of the change moved: the router's gate still passes at the new head, and the job, its filter and its wiring are as the reviewer approved them.",
+      "surface": "The CI router's own gate program, .github/scripts/check-ci-filters.sh, what the ci-filters job runs, against the real .github/workflows/ci.yaml in the issue pod, plus the required lint step check-private-names.sh.",
+      "command": "cd -- \"$LEGION_WORKSPACE\" && PATH=/legion/scratch/tmp/yamlenv/bin:$PATH bash .github/scripts/check-ci-filters.sh; bash .github/scripts/check-private-names.sh",
+      "observed": "exit 0, with 'envoy-go-race: 2072 files, 0 uncovered (filter envoy_go_race)', 'envoy-go-race-docs: 755 files, 0 uncovered (filter envoy_go_race_docs)' and 'every ci.yaml filter matches every file its job reads (25 gates)' — the same numbers the tester and the reviewer read, which is what shows the two edits are comments and nothing else. check-private-names.sh green over 6279 files.",
+      "headSha": "f51c9b08cb0575dd5a20dbdbd8d2a9ec3d4a3b20",
+      "negativeControl": "The gate holds each job's pinned step name and run text in ci_job_reads.py to ci.yaml character for character, so an edit that strayed from a comment into a step name or a run line would have failed it; earlier in this issue the same command answered '27 gates' the moment two jobs were added, and 8 uncovered files the moment one filter pattern was deleted."
     }
   ],
   "filesChanged": [
-    "No file of the product changed in this round. The only commit is .legion/INFRA-756/implement.json, this handoff.",
-    "Off the branch: the pull request body gained a Scope paragraph naming sjawhar/legion#2517 as the owner of the pmdoc and api race jobs, and a Round 3 paragraph; its Not proven / risk list lost the two items the tester's own CI read answered."
+    ".github/workflows/ci.yaml: two comments of the envoy-go-race-docs job — the reason the package runs under -race, and what the go-envoy restore is for. No step, filter, timeout or wiring changed."
   ],
   "trickyParts": [
-    "The withdrawn work was built in this workspace before the architect withdrew it and was taken back out with `jj restore` of the two files from the parent commit, not by editing them back by hand, so the tree is the judged head byte for byte rather than something that merely looks like it. The gate's '25 gates' and the two file counts are the check that it is.",
-    "A round that changes no code still pushes and completes: its push carries only .legion/INFRA-756/, so its head's commit message ends with the skip-checks trailer and the daemon carries the code head's green verdict to it."
+    "This class of finding can only be the implementer's: GitHub refuses a GitHub App a push that creates or updates a file under .github/workflows/ without the workflows permission, which the review App does not hold. A prose fix the reviewer would ordinarily make itself comes back as a changes request whenever it lands in a workflow file.",
+    "This round's push carries code, so it carries no skip-checks trailer and GitHub runs the router on it; the green run the body quotes was at 793974db, and the tester reads the new head's own run."
   ],
-  "deviations": [
-    "Acceptance 5 and 6 of spec version 2 are not delivered in this pull request. The tree's architect withdrew them from this issue at 19:59Z and recorded that sjawhar/legion#2517 has built them; a spec note follows on the issue. This round delivers acceptance 1, 2 and 3 as the earlier rounds built them, and states the boundary in the body."
-  ],
+  "deviations": [],
   "openQuestions": [],
   "discoveredComplexity": [
-    "Two trees planned the same lane at once. Between 19:48Z and 19:59Z this issue's spec gained the pmdoc and api jobs, the architect answered twice on how to size them, and the work was built here; meanwhile sjawhar/legion#2517 had already built both with better numbers, each package measured alone (pmdoc 1023.5 s against 1210.064 s when it shares the step, api 746.7 s against 871.539 s). The cost was one implementing round in this tree. The signal that would have caught it earlier is the sibling pull request itself: before building a lane change, read what the other tree's open pull request already has in it.",
-    "The architect's first form of acceptance 5 named internal/dispatch as a package; it is a directory of 30 subpackages with no Go file of its own, and the timeout the spec's evidence cites was the docs package again, which the panic's own stack names (docs.TestMain through storetest.Main). Reading the stack rather than the package line is what told the two apart."
+    "Both findings were about a comment that had drifted from what the code does: one named a binary the job does not build, the other left the reason for -race in the job that no longer runs the test which proves it. Moving a package between jobs moves the reasons with it, and the reasons live in prose no gate reads."
   ]
 }
