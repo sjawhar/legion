@@ -10,6 +10,8 @@ import (
 	"strings"
 	"time"
 
+	"github.com/jackc/pgx/v5"
+
 	"github.com/sjawhar/envoy/internal/dispatch/model"
 	"github.com/sjawhar/envoy/internal/dispatch/text"
 )
@@ -59,6 +61,10 @@ var AskBacklinkExclusions = []string{"replies_to"}
 // and counts a document's mention once for each of its blocks citing the node, in place of the
 // document's own edge (heldByABlock). A node with no inbound edge is absent from the result; the
 // caller decides what zero means.
+//
+// It is the sequential half of the one count: BacklinkCountsStatement and ScanBacklinkCounts are
+// the same statement and the same scan, which the issue read queues in a batch of its own
+// (api.getIssue), so the two paths cannot drift.
 func BacklinkCounts(
 	ctx context.Context,
 	q Queryer,
@@ -70,6 +76,22 @@ func BacklinkCounts(
 	if len(ids) == 0 {
 		return counts, nil
 	}
+	sql, args := BacklinkCountsStatement(toKind, ids, excludeKinds)
+	rows, err := q.Query(ctx, sql, args...)
+	if err != nil {
+		return nil, fmt.Errorf("count %s backlinks: %w", toKind, err)
+	}
+	defer rows.Close()
+	if err := ScanBacklinkCounts(rows, toKind, counts); err != nil {
+		return nil, err
+	}
+	return counts, nil
+}
+
+// BacklinkCountsStatement is the statement and arguments BacklinkCounts runs, for a caller that
+// queues the count beside its other reads instead of spending a round trip on it (the issue
+// read's batch, api.getIssue). ScanBacklinkCounts reads the rows it returns.
+func BacklinkCountsStatement(toKind string, ids []string, excludeKinds []string) (string, []any) {
 	sql := `select g.to_id, count(*)::int from graph_edges g
 		where g.to_kind = $1 and g.to_id = any($2) and g.from_kind = any($3) and not ` + heldByABlock("g")
 	args := []any{toKind, ids, nodeKinds}
@@ -77,20 +99,26 @@ func BacklinkCounts(
 		args = append(args, excludeKinds)
 		sql += " and not (g.kind = any($4))"
 	}
-	rows, err := q.Query(ctx, sql+" group by g.to_id", args...)
-	if err != nil {
-		return nil, fmt.Errorf("count %s backlinks: %w", toKind, err)
+	return sql + " group by g.to_id", args
+}
+
+// ScanBacklinkCounts reads the rows BacklinkCountsStatement returns into counts, which a node
+// with no inbound edge stays absent from. A batched caller reaches the statement's own failure
+// through the rows it is handed, so that failure is wrapped here exactly as BacklinkCounts wraps
+// the error its Query returns.
+func ScanBacklinkCounts(rows pgx.Rows, toKind string, counts map[string]int) error {
+	if err := rows.Err(); err != nil {
+		return fmt.Errorf("count %s backlinks: %w", toKind, err)
 	}
-	defer rows.Close()
 	for rows.Next() {
 		var id string
 		var count int
 		if err := rows.Scan(&id, &count); err != nil {
-			return nil, fmt.Errorf("scan %s backlink count: %w", toKind, err)
+			return fmt.Errorf("scan %s backlink count: %w", toKind, err)
 		}
 		counts[id] = count
 	}
-	return counts, rows.Err()
+	return rows.Err()
 }
 
 // resolvedEdge is a graph edge plus the ref_key of an artifact node, which the legacy

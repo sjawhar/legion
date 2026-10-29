@@ -9,6 +9,9 @@ import (
 	"strings"
 	"time"
 
+	"github.com/jackc/pgx/v5"
+
+	"github.com/sjawhar/envoy/internal/dispatch/events"
 	"github.com/sjawhar/envoy/internal/dispatch/model"
 	"github.com/sjawhar/envoy/internal/dispatch/refs"
 )
@@ -309,38 +312,39 @@ func (s *server) scanIssueSummaries(ctx context.Context, listQuery string, argum
 	return issues, rows.Err()
 }
 
+// getIssue answers the issue page's read. Its database work is two batches, each one round trip
+// on one pooled connection, where it was a statement at a time: the issue row, its links, its
+// artifacts, a version query per artifact, its documents' reviews and approval requests, its
+// open asks with their events and counts, its children and its own backlink count, every one of
+// them a connection taken and given back in turn (store.sharedPoolSize says what that costs a
+// loaded server).
+//
+// Batch 1 is everything keyed on the issue key alone: the issue row, its external links, its
+// artifacts, its open asks, its children and its backlink count. The issue row is queued first,
+// so a missing issue answers that row's pgx.ErrNoRows - 404 NOT_FOUND - whatever the others
+// found, since a batch returns its first error.
+//
+// Batch 2 is what only batch 1's answers name: every artifact's versions in one statement, the
+// documents' latest reviews and open approval requests, and the open asks' identity events and
+// backlink counts. An issue with no artifact and no open ask names nothing, so it makes no
+// second round trip at all.
+//
+// Each batch's results are closed before anything else reads: a batch holds its connection until
+// then, and a second one taken while it is held is what the pool refuses (store.ErrNestedAcquire).
+// readRouteRoster is an HTTP read of the listener with a cache of its own, not a database read,
+// and runs after both.
 func (s *server) getIssue(w http.ResponseWriter, r *http.Request) {
 	if !s.requireAuthenticated(w, r) {
 		return
 	}
-	issue, progress, err := s.loadIssueWithProgress(r.Context(), s.deps.Store.Pool, r.PathValue("key"))
-	if err != nil {
-		s.writeHandlerError(w, err)
-		return
-	}
-	artifacts, err := s.loadArtifacts(r.Context(), s.deps.Store.Pool, issue.Key)
-	if err != nil {
-		s.writeHandlerError(w, err)
-		return
-	}
-	openAsks, err := s.loadOpenAsks(r.Context(), s.deps.Store.Pool, issue.Key)
-	if err != nil {
-		s.writeHandlerError(w, err)
-		return
-	}
-	children, err := s.loadChildren(r.Context(), s.deps.Store.Pool, issue.Key)
-	if err != nil {
-		s.writeHandlerError(w, err)
-		return
-	}
-	counts, err := refs.BacklinkCounts(r.Context(), s.deps.Store.Pool, "issue", []string{issue.Key}, nil)
+	read, err := s.readIssue(r.Context(), r.PathValue("key"))
 	if err != nil {
 		s.writeHandlerError(w, err)
 		return
 	}
 	var reach model.IssueRouteReach
-	if issue.Route != nil {
-		reach = s.readRouteRoster(r.Context()).reach(issue.Route)
+	if read.issue.Route != nil {
+		reach = s.readRouteRoster(r.Context()).reach(read.issue.Route)
 	}
 	WriteJSON(w, http.StatusOK, struct {
 		model.Issue
@@ -354,14 +358,143 @@ func (s *server) getIssue(w http.ResponseWriter, r *http.Request) {
 		// its own; the edges themselves are read only when the reader opens the panel.
 		ReferencedByCount int `json:"referenced_by_count"`
 	}{
-		Issue:             issue,
+		Issue:             read.issue,
 		IssueRouteReach:   reach,
-		Progress:          progress,
-		Artifacts:         artifacts,
-		OpenAsks:          openAsks,
-		Children:          children,
-		ReferencedByCount: counts[issue.Key],
+		Progress:          read.progress,
+		Artifacts:         read.artifacts,
+		OpenAsks:          read.openAsks,
+		Children:          read.children,
+		ReferencedByCount: read.referencedByCount,
 	})
+}
+
+// issueRead is everything getIssue answers from the database, in the shape its response carries.
+type issueRead struct {
+	issue             model.Issue
+	progress          model.IssueProgress
+	artifacts         []model.Artifact
+	openAsks          []issueOpenAsk
+	children          []model.IssueChild
+	referencedByCount int
+}
+
+// readIssue runs getIssue's two batches, whose statements and scans are the ones the sequential
+// loaders run - loadIssueWithProgress, loadArtifacts, loadOpenAsks, loadChildren and
+// refs.BacklinkCounts - so the two paths answer the same bytes.
+func (s *server) readIssue(ctx context.Context, key string) (issueRead, error) {
+	var read issueRead
+	var links []model.ExternalLink
+	var asks []model.Ask
+	var replies map[string]model.AskLastReply
+	issueCounts := map[string]int{}
+
+	first := &pgx.Batch{}
+	first.Queue(issueRowStatement, key).QueryRow(func(row pgx.Row) error {
+		issue, progress, err := scanIssueRow(row)
+		read.issue, read.progress = issue, progress
+		return err
+	})
+	first.Queue(issueExternalLinksStatement, key).Query(func(rows pgx.Rows) error {
+		scanned, err := scanExternalLinks(rows)
+		links = scanned
+		return err
+	})
+	first.Queue(issueArtifactsStatement, key).Query(func(rows pgx.Rows) error {
+		scanned, err := collectArtifacts(rows)
+		read.artifacts = scanned
+		return err
+	})
+	first.Queue(listIssueAsksQueryOpen, key).Query(func(rows pgx.Rows) error {
+		scannedAsks, scannedReplies, err := scanAskReads(rows)
+		asks, replies = scannedAsks, scannedReplies
+		return err
+	})
+	first.Queue(issueChildrenStatement, key).Query(func(rows pgx.Rows) error {
+		scanned, err := scanIssueChildren(rows)
+		read.children = scanned
+		return err
+	})
+	issueCountsSQL, issueCountsArgs := refs.BacklinkCountsStatement("issue", []string{key}, nil)
+	first.Queue(issueCountsSQL, issueCountsArgs...).Query(func(rows pgx.Rows) error {
+		return refs.ScanBacklinkCounts(rows, "issue", issueCounts)
+	})
+	if err := s.deps.Store.Pool.SendBatch(ctx, first).Close(); err != nil {
+		return issueRead{}, err
+	}
+	read.issue.ExternalLinks = links
+	read.referencedByCount = issueCounts[read.issue.Key]
+
+	artifacts := artifactPointers(read.artifacts)
+	askRows := askReadPointers(asks)
+	versionIDs := artifactIDs(artifacts)
+	approvalIDs, approvalTargetsByID := approvalTargets(artifacts)
+	askIDs := distinctAskIDs(askRows)
+	if len(versionIDs) > 0 || len(askIDs) > 0 {
+		if err := s.readIssueDetails(ctx, artifacts, askRows, versionIDs, approvalIDs, approvalTargetsByID, askIDs); err != nil {
+			return issueRead{}, err
+		}
+	}
+	read.openAsks = issueOpenAsksOf(asks, replies)
+	return read, nil
+}
+
+// readIssueDetails is getIssue's second batch: what only the first batch's answers name, filled
+// into the artifacts and asks it read.
+func (s *server) readIssueDetails(
+	ctx context.Context,
+	artifacts []*model.Artifact,
+	asks []*model.Ask,
+	versionIDs, approvalIDs []string,
+	approvalTargetsByID map[string]*model.Artifact,
+	askIDs []string,
+) error {
+	versions := map[string][]model.Version{}
+	latestReviews := map[string]model.ArtifactReview{}
+	requests := map[string]openApprovalRequest{}
+	openedEventIDs := map[string]int64{}
+	askCounts := map[string]int{}
+
+	batch := &pgx.Batch{}
+	if len(versionIDs) > 0 {
+		batch.Queue(artifactVersionsStatement, versionIDs).Query(func(rows pgx.Rows) error {
+			scanned, err := scanVersionsByArtifact(rows)
+			versions = scanned
+			return err
+		})
+	}
+	if len(approvalIDs) > 0 {
+		batch.Queue(latestReviewsStatement, approvalIDs).Query(func(rows pgx.Rows) error {
+			scanned, err := scanLatestReviews(rows)
+			latestReviews = scanned
+			return err
+		})
+		batch.Queue(openApprovalAsksStatement, approvalIDs).Query(func(rows pgx.Rows) error {
+			scanned, err := scanOpenApprovalRequests(rows)
+			requests = scanned
+			return err
+		})
+	}
+	if len(askIDs) > 0 {
+		batch.Queue(events.OpenedEventIDsStatement, askIDs).Query(func(rows pgx.Rows) error {
+			scanned, err := events.ScanOpenedEventIDs(rows, len(askIDs))
+			openedEventIDs = scanned
+			return err
+		})
+		askCountsSQL, askCountsArgs := refs.BacklinkCountsStatement("ask", askIDs, refs.AskBacklinkExclusions)
+		batch.Queue(askCountsSQL, askCountsArgs...).Query(func(rows pgx.Rows) error {
+			return refs.ScanBacklinkCounts(rows, "ask", askCounts)
+		})
+	}
+	if err := s.deps.Store.Pool.SendBatch(ctx, batch).Close(); err != nil {
+		return err
+	}
+	applyVersions(artifacts, versions)
+	applyApprovals(approvalTargetsByID, latestReviews, requests)
+	if err := applyOpenedEventIDs(asks, openedEventIDs); err != nil {
+		return err
+	}
+	applyAskBacklinkCounts(asks, askCounts)
+	return nil
 }
 
 // issueOpenAsk is an open ask on the issue detail together with the newest
@@ -381,6 +514,12 @@ func (s *server) loadOpenAsks(ctx context.Context, q queryer, key string) ([]iss
 	if err != nil {
 		return nil, err
 	}
+	return issueOpenAsksOf(asks, replies), nil
+}
+
+// issueOpenAsksOf pairs each ask with the newest reply in its thread, the shape the detail
+// response lists; an ask nobody has replied to carries a null last_reply.
+func issueOpenAsksOf(asks []model.Ask, replies map[string]model.AskLastReply) []issueOpenAsk {
 	openAsks := make([]issueOpenAsk, len(asks))
 	for index, ask := range asks {
 		openAsks[index] = issueOpenAsk{Ask: ask}
@@ -388,7 +527,7 @@ func (s *server) loadOpenAsks(ctx context.Context, q queryer, key string) ([]iss
 			openAsks[index].LastReply = &reply
 		}
 	}
-	return openAsks, nil
+	return openAsks
 }
 
 func (s *server) loadIssue(ctx context.Context, q queryer, key string) (model.Issue, error) {
@@ -396,9 +535,33 @@ func (s *server) loadIssue(ctx context.Context, q queryer, key string) (model.Is
 	return issue, err
 }
 
-// loadIssueWithProgress is loadIssue together with the issue's progress, which the read response
-// carries beside the issue (model.IssueProgress says why it is not a field of it).
-func (s *server) loadIssueWithProgress(ctx context.Context, q queryer, key string) (model.Issue, model.IssueProgress, error) {
+// issueRowStatement reads one issue with its progress, $1 its key; scanIssueRow decodes it. It
+// is the issue read's first queued statement (getIssue), so a missing issue answers this row's
+// pgx.ErrNoRows whatever the rest of the batch found.
+var issueRowStatement = `
+		select i.key, i.project_key, i.number, i.title, i.status, i.priority, i.rank, i.labels, i.parent_key,
+		       coalesce((select array_agg(l.target_key order by l.target_key) from issue_links l where l.issue_key = i.key and l.kind = 'blocked_by'), '{}'),
+		       i.assignee, i.route, i.created_by, i.created_at, i.updated_at, i.closed_at,
+		       coalesce((select a.id::text from artifacts a where a.issue_key = i.key and a.is_primary), ''),
+		       i.last_seq, ` + issueClaimColumns + `,
+		       ` + issueProgressColumns + `,
+		       ` + issueComponentsColumns + `,
+		       ` + issueRepoColumns + `
+		from issues i
+		` + issueProgressLateral + `
+		` + issueComponentsLateral + `
+		` + issueRepoLateral + `
+		where i.key = $1
+	`
+
+// issueExternalLinksStatement reads an issue's external links, $1 its key, in the order the
+// response lists them; scanExternalLinks decodes them.
+const issueExternalLinksStatement = `select url, kind from issue_external_links where issue_key = $1 order by url`
+
+// scanIssueRow decodes one issueRowStatement row into the issue and the progress the read
+// carries beside it. ExternalLinks is left nil: issueExternalLinksStatement carries them, run
+// after this row or queued beside it.
+func scanIssueRow(row pgx.Row) (model.Issue, model.IssueProgress, error) {
 	var issue model.Issue
 	var createdBy []byte
 	var components componentsScan
@@ -413,21 +576,7 @@ func (s *server) loadIssueWithProgress(ctx context.Context, q queryer, key strin
 	targets = append(targets, claim.targets()...)
 	targets = append(targets, progress.targets()...)
 	targets = append(targets, components.targets()...)
-	if err := q.QueryRow(ctx, `
-		select i.key, i.project_key, i.number, i.title, i.status, i.priority, i.rank, i.labels, i.parent_key,
-		       coalesce((select array_agg(l.target_key order by l.target_key) from issue_links l where l.issue_key = i.key and l.kind = 'blocked_by'), '{}'),
-		       i.assignee, i.route, i.created_by, i.created_at, i.updated_at, i.closed_at,
-		       coalesce((select a.id::text from artifacts a where a.issue_key = i.key and a.is_primary), ''),
-		       i.last_seq, `+issueClaimColumns+`,
-		       `+issueProgressColumns+`,
-		       `+issueComponentsColumns+`,
-		       `+issueRepoColumns+`
-		from issues i
-		`+issueProgressLateral+`
-		`+issueComponentsLateral+`
-		`+issueRepoLateral+`
-		where i.key = $1
-	`, key).Scan(append(targets, repo.targets()...)...); err != nil {
+	if err := row.Scan(append(targets, repo.targets()...)...); err != nil {
 		return model.Issue{}, model.IssueProgress{}, err
 	}
 	own, resolvedRepo, err := repo.resolve(issue.Key)
@@ -444,37 +593,57 @@ func (s *server) loadIssueWithProgress(ctx context.Context, q queryer, key strin
 	if err := json.Unmarshal(createdBy, &issue.CreatedBy); err != nil {
 		return model.Issue{}, model.IssueProgress{}, fmt.Errorf("decode issue actor: %w", err)
 	}
-	rows, err := q.Query(ctx, `select url, kind from issue_external_links where issue_key = $1 order by url`, key)
+	return issue, progress.resolve(), nil
+}
+
+// scanExternalLinks reads the rows issueExternalLinksStatement returns. An issue with none keeps
+// a non-nil empty list, which the response carries as [].
+func scanExternalLinks(rows pgx.Rows) ([]model.ExternalLink, error) {
+	links := []model.ExternalLink{}
+	for rows.Next() {
+		var link model.ExternalLink
+		if err := rows.Scan(&link.URL, &link.Kind); err != nil {
+			return nil, err
+		}
+		links = append(links, link)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return links, nil
+}
+
+// loadIssueWithProgress is loadIssue together with the issue's progress, which the read response
+// carries beside the issue (model.IssueProgress says why it is not a field of it).
+func (s *server) loadIssueWithProgress(ctx context.Context, q queryer, key string) (model.Issue, model.IssueProgress, error) {
+	issue, progress, err := scanIssueRow(q.QueryRow(ctx, issueRowStatement, key))
+	if err != nil {
+		return model.Issue{}, model.IssueProgress{}, err
+	}
+	rows, err := q.Query(ctx, issueExternalLinksStatement, key)
 	if err != nil {
 		return model.Issue{}, model.IssueProgress{}, err
 	}
 	defer rows.Close()
-	issue.ExternalLinks = []model.ExternalLink{}
-	for rows.Next() {
-		var link model.ExternalLink
-		if err := rows.Scan(&link.URL, &link.Kind); err != nil {
-			return model.Issue{}, model.IssueProgress{}, err
-		}
-		issue.ExternalLinks = append(issue.ExternalLinks, link)
-	}
-	if err := rows.Err(); err != nil {
+	links, err := scanExternalLinks(rows)
+	if err != nil {
 		return model.Issue{}, model.IssueProgress{}, err
 	}
-	return issue, progress.resolve(), nil
+	issue.ExternalLinks = links
+	return issue, progress, nil
 }
 
-// loadChildren returns the issue's direct children, each with a rollup over its whole
-// subtree (the child itself included, every status): done/total counts and the newest
+// issueChildrenStatement reads the issue's direct children, $1 its key, each with a rollup over
+// its whole subtree (the child itself included, every status): done/total counts and the newest
 // updated_at. The recursive walk uses `union` with parentDepthCap like refs.Closure, so it
-// terminates even if a raced reparent ever commits a cycle.
-func (s *server) loadChildren(ctx context.Context, q queryer, key string) ([]model.IssueChild, error) {
-	rows, err := q.Query(ctx, `
+// terminates even if a raced reparent ever commits a cycle. scanIssueChildren decodes its rows.
+var issueChildrenStatement = `
 		with recursive subtree as (
 			select key as root, key, 1 as depth from issues where parent_key = $1
 			union
 			select s.root, i.key, s.depth + 1
 			from issues i join subtree s on i.parent_key = s.key
-			where s.depth < `+parentDepthCapSQL+`
+			where s.depth < ` + parentDepthCapSQL + `
 		), rollup as (
 			select s.root,
 			       count(distinct s.key) as total,
@@ -488,11 +657,11 @@ func (s *server) loadChildren(ctx context.Context, q queryer, key string) ([]mod
 		                 from issue_external_links l where l.issue_key = c.key), '[]')
 		from issues c join rollup r on r.root = c.key
 		where c.parent_key = $1 order by c.key
-	`, key)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
+	`
+
+// scanIssueChildren reads the rows issueChildrenStatement returns. An issue with no child keeps
+// a non-nil empty list, which the response carries as [].
+func scanIssueChildren(rows pgx.Rows) ([]model.IssueChild, error) {
 	children := []model.IssueChild{}
 	for rows.Next() {
 		var child model.IssueChild
@@ -507,4 +676,15 @@ func (s *server) loadChildren(ctx context.Context, q queryer, key string) ([]mod
 		children = append(children, child)
 	}
 	return children, rows.Err()
+}
+
+// loadChildren returns the issue's direct children, each with its subtree rollup
+// (issueChildrenStatement).
+func (s *server) loadChildren(ctx context.Context, q queryer, key string) ([]model.IssueChild, error) {
+	rows, err := q.Query(ctx, issueChildrenStatement, key)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	return scanIssueChildren(rows)
 }
