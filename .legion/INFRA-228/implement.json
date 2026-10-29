@@ -1,0 +1,75 @@
+{
+  "schemaVersion": 1,
+  "phase": "implement",
+  "issue": "INFRA-228",
+  "completed": "2026-10-29T13:12:00Z",
+  "pullRequest": "https://github.com/sjawhar/legion/pull/2503",
+  "proof": [
+    {
+      "criterion": "Plan section 4 row 1: the credential a role pod (and a pane) holds names nobody, and Dispatch reads the session from the request body (docs/kubernetes.md 'Anatomy of a Sandbox pod' paragraph, docs/deployment.md 'What a pane's Dispatch credential is').",
+      "surface": "production Dispatch, from the implementer container of pod legion-infra-infra-228",
+      "command": "printf 'length=%s\\n' \"$(wc -c < \"$DISPATCH_TOKEN_FILE\")\"; dispatch whoami",
+      "observed": "length=48; 'Session 01a17989-65e2-77b0-a225-6c5ba9152b74 runs under the shared token: no owner, so an issue you create without an assignee takes its parent's assignee, else the project's default assignee, else nobody.' exit 0. Evidence: https://github.com/sjawhar/legion/pull/2503#issuecomment-6497256523",
+      "headSha": "b01d0dad988d",
+      "negativeControl": "DISPATCH_TOKEN_FILE pointed at a copy with one byte flipped (only the differing-byte count printed): 'invalid bearer token', exit 1."
+    },
+    {
+      "criterion": "Plan section 4 row 2: every role of the pod presents the same Dispatch bytes (and so, by the code, every issue's roles and the daemon-launched controller).",
+      "surface": "two role containers (implementer, architect) of pod legion-infra-infra-228",
+      "command": "implementer: sha256(random salt || $DISPATCH_TOKEN_FILE); architect in its own container: the same salted digest over its own file compared to the implementer's, printing only length and equal/differs (exact command in the evidence comment).",
+      "observed": "architect at 2026-10-29T12:44Z: 'length=48' and 'equal'.",
+      "headSha": "b01d0dad988d",
+      "negativeControl": "the same salted digest of a one-byte file: 'differs'."
+    },
+    {
+      "criterion": "Plan section 4 row 4 (corrected): a broker with no subject token issuer set takes no pod's token, while the access-token subject type stays registered (docs/kubernetes.md 'The Dispatch identity the broker can issue').",
+      "surface": "production secrets broker (host redacted as <the broker host>)",
+      "command": "curl -X POST https://<the broker host>/v1/oauth/token with grant_type=urn:ietf:params:oauth:grant-type:token-exchange, client_id=dispatch-token-exchange, subject_token=not-a-token, subject_token_type=urn:envoy:params:oauth:token-type:kubernetes-service-account",
+      "observed": "2026-10-29T12:43:46Z: http=400 invalid_request \"The 'urn:envoy:params:oauth:token-type:kubernetes-service-account' token type is not supported as a 'subject_token_type'.\" No token minted.",
+      "headSha": "b01d0dad988d",
+      "negativeControl": "same call with subject_token_type=urn:ietf:params:oauth:token-type:access_token: http=400 'Token is not valid or has expired.', so the route serves the exchange and the first refusal is the missing issuer."
+    },
+    {
+      "criterion": "Plan section 4 row 3: the broker issues a DPoP-bound Dispatch token carrying session, person, project_scope and project, and introspection reports them.",
+      "surface": "the real broker binary built from this branch by packages/envoy/scripts/dev-broker.sh (copy under $TMPDIR with WORK_DIR on the issue volume and a third dev-oidc-issuer token for an unlisted account), on an embedded Postgres 16.4 at 127.0.0.1:54329",
+      "command": "DEV_BROKER_POSTGRES_URL=postgres://postgres@127.0.0.1:54329/postgres?sslmode=disable bash $TMPDIR/infra228/dev-broker-proof.sh; then uv run --with cryptography==43.0.3 --no-project python $TMPDIR/infra228/exchange_proof.py <broker url> <exchange-token> <account-token> infra228-proof",
+      "observed": "boot 'token exchange state=on kubernetes=true github=false accounts=1 workflows=0'; exchange http=200 token_type DPoP expires_in 899; introspect {\"active\":true,\"session\":\"infra228-proof\",\"person\":\"ada@example.com\",\"project_scope\":\"named\",\"project\":\"EXAMPLE\",\"exp\":…,\"client_id\":\"dispatch-token-exchange\",\"jkt\":…}; jkt equals the client's key thumbprint: True.",
+      "headSha": "14cd0def756e (b01d0dad changes only claims_doc_test.go, which the broker binary does not build)",
+      "negativeControl": "the same exchange with the token of system:serviceaccount:example-ns:example-stranger, which no entry lists: http=400 'exchange: no entry lists this identity: no entry lists the service account system:serviceaccount:example-ns:example-stranger.'"
+    },
+    {
+      "criterion": "Plan section 4 row 5 / D6: the claim names in docs/kubernetes.md are the claim names in the code.",
+      "surface": "the repository's Go suite for packages/envoy/internal/broker/oauth",
+      "command": "cd packages/envoy && go test ./internal/broker/oauth/ -count=1",
+      "observed": "ok github.com/sjawhar/envoy/internal/broker/oauth 8.001s",
+      "headSha": "b01d0dad988d",
+      "negativeControl": "the `project` bullet deleted: FAIL 'issued but not documented: project'; the `project_scope` bullet deleted: FAIL naming project_scope; a `- `extra` — x.` bullet added: FAIL 'documented but not issued: extra'. docs/kubernetes.md restored after each."
+    },
+    {
+      "criterion": "Plan section 4 row 6 / section 7: the tree names no private host, and the skills guard's refused phrases stay out of docs/kubernetes.md.",
+      "surface": "the repository's own checks",
+      "command": ".github/scripts/check-private-names.sh; cd packages/pi-legion && bun test src/skills-guard.test.ts",
+      "observed": "check-private-names passed over 5193 files; skills guard 12 pass 0 fail.",
+      "headSha": "b01d0dad988d",
+      "negativeControl": "check-private-names over the PR body and the evidence comment as scratch files: passed, so the redaction of the broker host held; a .ts.net host in a scanned file is what the script refuses (plan D7)."
+    }
+  ],
+  "filesChanged": [
+    "docs/kubernetes.md",
+    "docs/deployment.md",
+    "packages/envoy/internal/broker/oauth/claims_doc_test.go"
+  ],
+  "trickyParts": [
+    "The plan's 'a deployment that configures no issuer exchanges nothing' is false: the access-token subject type is always registered (ExchangeConfig.tokenTypes) and Set.Machine needs no entry, so a machine login's token still exchanges. The docs say that, and the production negative control shows the type registered.",
+    "The plan said the pod's bearer goes into a 'generation Secret'; the code puts it in each launch's secrets, which travel in the generation's start command and the launcher writes into g<generation>. The docs follow the code.",
+    "The operator-launched controller presents controller.yaml's own dispatch_token_file (controllerEnvironment), not the daemon's bearer; the docs say so, and subsection A distinguishes the daemon-launched controller.",
+    "An embedded Postgres 16.4 (zonky jar) is left unpacked and stopped at $TMPDIR/pg; start it with LD_LIBRARY_PATH=$TMPDIR/pg/lib $TMPDIR/pg/bin/pg_ctl -D $TMPDIR/pg/data -o \"-p 54329 -k $TMPDIR/pg -c listen_addresses=127.0.0.1\" -l $TMPDIR/pg/pg.log start. The proof's dev-broker copy and exchange client are at $TMPDIR/infra228/dev-broker-proof.sh and $TMPDIR/infra228/exchange_proof.py.",
+    "Comparing two roles' credentials needs a second container: the architect ran the salted-digest comparison, since a role cannot read another role's private directory."
+  ],
+  "deviations": [
+    "Subsection 'The Dispatch identity the broker can issue' sits after the Operator configuration bullet list, before '#### Network shares', rather than directly after the agent_secrets bullet, so the list is not split by a heading.",
+    "Plan section 4 row 4's expected statement was corrected as in trickyParts; the measured refusals are the plan's.",
+    "The pane statement (a pane reads the daemon's bearer through DISPATCH_TOKEN_FILE) has no tmux run: the architect accepted it on its code citation (dispatch://INFRA-228/comment/f6faadf0, point 3), recorded in the PR body's 'Not proven / risk'."
+  ],
+  "openQuestions": []
+}
