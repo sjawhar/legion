@@ -1,0 +1,44 @@
+{
+  "schemaVersion": 1,
+  "phase": "implement",
+  "issue": "INFRA-729",
+  "completed": "2026-10-29T09:17:30Z",
+  "proof": [
+    {
+      "criterion": "A1: `grep -rn 7b822b0a .github/workflows` on the PR head finds nothing",
+      "surface": "the repository tree at the PR head",
+      "command": "cd -- \"$LEGION_WORKSPACE\" && grep -rn 7b822b0a .github/workflows",
+      "observed": "no output, exit 1. The diff from the code head 08cbb0a2 to 85fe82dc touches only docs/solutions/ and .legion/ (`jj diff --from 08cbb0a2 --to 85fe82dc --name-only | grep -v -E '^(docs/solutions/|\\.legion/)'` prints nothing), so the workflow is byte-identical to the proven head",
+      "headSha": "85fe82dc51ed0923cb2d425213f2902d80239c8d",
+      "negativeControl": "the same grep on be4567e3 (the base) matches .github/workflows/envoy-and-contracts.yaml:1094, the dispatch-browser-multiprocess image line"
+    },
+    {
+      "criterion": "A2: dispatch-browser-multiprocess passes on the PR (ran, not skipped) on PostgreSQL 18",
+      "surface": "GitHub Actions CI on pull request #2486: https://github.com/sjawhar/legion/actions/runs/40804774509/job/123224515403",
+      "command": "gh api \"repos/sjawhar/legion/commits/08cbb0a2a8ad76a65ebde32ee76b6a0c44a34bb0/check-runs?per_page=100\" --jq '.check_runs[] | [.name,.status,.conclusion,.id] | @tsv'; gh run view -R sjawhar/legion --job 123224515403 --log | grep -E 'pgvector@sha256|starting PostgreSQL|[0-9]+ (passed|failed)|7b822b0a|PostgreSQL 16'",
+      "observed": "dispatch-browser-multiprocess completed success (job 123224515403, run 40804774509) at the code head 08cbb0a2; docker pull mirror.gcr.io/pgvector/pgvector@sha256:2358fcba361ed2233a5ed81b5fe4ca779ccb304120ce531a3bf51c0ed7e2bc11; service log `starting PostgreSQL 18.6 (Debian 18.6-1.pgdg12+2)`; test steps `5 passed (28.9s)` and `1 passed (1.6s)`; no `failed`, no 7b822b0a, no `PostgreSQL 16`. Gate control: the same head's `dispatch` check run is skipped. This round changes no code (only docs/solutions file names and front matter), and the job runs again on 85fe82dc's own CI, queued at writing",
+      "headSha": "08cbb0a2a8ad76a65ebde32ee76b6a0c44a34bb0",
+      "negativeControl": "main's job 123138185821 (run 40761578717, head af1ff09c, before the change) pulls 7b822b0aac60967beb1ea5e576b8602c94c300a157d187f385ae3e0da199b90a and prints `starting PostgreSQL 16.15`"
+    },
+    {
+      "criterion": "A3: no added line, path or commit subject names the private deployment repository's Dispatch keys",
+      "surface": "the two retro learnings' file names and front matter at the PR head, and the required lint job",
+      "command": "cd -- \"$LEGION_WORKSPACE\" && jj -R \"$LEGION_WORKSPACE\" diff --from 9351b67d --to 85fe82dc --summary; grep -n 'INFRA-729\\|related_issues' docs/solutions/github/*pr2486.md docs/solutions/infra/*pr2486.md; bash .github/scripts/check-private-names.sh",
+      "observed": "both learnings renamed from ...-INFRA-729.md to ...-pr2486.md, and the grep for the key or related_issues in them prints nothing; commit 85fe82dc's subject carries no key; the PR body's Why line no longer names the key. The only key-bearing text left in them is the exact paths of two existing learnings on main (...-INFRA-583.md, ...-INFRA-584.md), kept on the architect's ruling. lint at the code head 08cbb0a2: success (check run 123220974710)",
+      "headSha": "85fe82dc51ed0923cb2d425213f2902d80239c8d",
+      "negativeControl": "the same grep at 9351b67d (before the rename) matches `- \"INFRA-729\"` in both files' related_issues and both file names end -INFRA-729.md"
+    }
+  ],
+  "filesChanged": [
+    ".github/workflows/envoy-and-contracts.yaml (round 1)",
+    "docs/solutions/github/give-one-job-its-own-gate-derived-from-an-anchored-shared-filter-and-let-the-workflow-only-pull-request-prove-it-pr2486.md (retro, renamed this round)",
+    "docs/solutions/infra/a-database-major-census-greps-the-version-tags-too-not-only-the-old-digest-and-the-mount-path-pr2486.md (retro, renamed this round)"
+  ],
+  "trickyParts": [
+    "This round exists because the rename the architect asked for (no Dispatch key in public file names) moved the head past READY's 9351b67d. It touches only docs/solutions/, which may sit above the approved head, so no code or workflow changed and the round-1 proofs stand at the code head 08cbb0a2."
+  ],
+  "deviations": [
+    "Kept the exact paths of two existing learnings on main whose file names carry keys, and the pushed retro removal commit's subject, on the architect's ruling; the 'Dispatch:' body line stays as the template requires."
+  ],
+  "openQuestions": []
+}
