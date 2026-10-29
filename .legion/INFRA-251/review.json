@@ -2,29 +2,25 @@
   "schemaVersion": 1,
   "phase": "review",
   "issue": "INFRA-251",
-  "completed": "2026-10-26T08:30:04Z",
-  "decision": "approved",
+  "completed": "2026-10-29T19:01:00Z",
+  "decision": "changes_requested",
+  "round": "full round: the change was rebuilt on main's awaiting-person machinery after #2131 was replaced on main (#2273/#2280); fingerprint 2ccf97d5 -> 9ef46f13 at code head 6b07c0197b42",
+  "reviewedHead": "f88ea3fa27eaee7a8c5f1239ada3b23596b9cb98 (code head 6b07c0197b42)",
+  "ci": "At 6b07c0197b42 (read 2026-10-29T19:00Z) main's required lint, typecheck and test were still queued (run 40928051868); pr-title success (run 40928432740). A request for changes does not wait on CI.",
   "critical": 0,
-  "important": 0,
-  "minor": 3,
-  "reviewedHead": "the handoff push above cfbd3587d28388d36e6acaa8df073ca977cc1c18; code head edd6044b011338469568540f7b12be9a580b7976",
-  "round": "new round: unchanged-diff fingerprint at my last approval 4d9fba63c3bd (cb5c1756176e802a) differs from cfbd3587d283 (2ccf97d53d4071fa); only the 14 skill files' branch diff moved (the port into #2197's rewritten skills)",
-  "ci": "main's required set lint, typecheck, test, pr-title completed/success at edd6044b011338469568540f7b12be9a580b7976 (runs 40287856845, 40288249773), read 2026-10-26T08:28Z; compare edd6044b...cfbd3587 only .legion/; the non-required Legion Envoy and Contracts run 40287856895 was still queued",
+  "important": 4,
+  "minor": 7,
   "keyFindings": [
-    {
-      "severity": "minor",
-      "file": "packages/daemon/internal/workflow/parked_decision.go:108",
-      "description": "The re-admitted architect's start task says to request approval 'as skill://legion-architect section 1 says'; after #2197 the request-approval steps live in references/design-gate.md, which section 1 (SKILL.md:30-31) points to. One extra hop, nothing broken. Fast-follow wording."
-    },
-    {
-      "severity": "minor",
-      "file": "skills/legion-controller/references/wakes.md:64-75",
-      "description": "The parked-decision wake section restates the own-hold and foreign-park rules parked-decisions.md#deciding owns, faithfully ported from the old table row; a second copy to keep in step. Fast-follow duplication."
-    },
-    {
-      "severity": "minor",
-      "file": "packages/daemon/internal/daemon/workflow.go:468-613",
-      "description": "Code-quality pass: the file passes 1,000 lines (951 -> 1,101) through the awaiting-root boot catch-up. Every branch commit touching the file is #2131's (sami/gate-frees-slot), none of INFRA-251's, so the decomposition belongs to #2131's review, which gate G1 lands first."
-    }
+    {"severity": "important", "file": "packages/daemon/internal/daemon/outbox.go:729", "description": "The outbox relay sends a controller notice for a root that waits for its slot (architectEnded is true for a claim state of \"\"), for example carried-gate-opened on a handed-over root in todo. This contradicts AGENTS.md:404 and the ask relay's waitsForSlot rule. Fix: one shared relay helper that checks the person, keeps the decision, and leaves out the controller notice for a root that waits for its slot. Both relay paths call it. This also closes thread PRRT_kwDORFy7ds6v-NK4."},
+    {"severity": "important", "file": "packages/daemon/internal/admit/admit.go:1196", "description": "ParkedDecisionTask deletes the kept rows when the start or catch-up row is queued, not when it is delivered. A start that finishes without acting (the tree lingers again, a stale generation) or a catch-up that finishes undelivered loses the decision. For a root that waits for its slot, no controller notice was sent either, so the decision is lost. Fix: take the decisions when they are delivered, or keep them again on each finish-without-acting branch. This also closes thread PRRT_kwDORFy7ds6v-NK2."},
+    {"severity": "important", "file": "packages/daemon/internal/workflow/parked_decision.go:72", "description": "No committed test fails when the `root.AwaitingPerson()` guard or the `admittedRoot` guard is removed from waitsForSlot (the tester's mutation; TestAnAnswerOnARunningTreeSendsNothing seeds in_progress, so it returns before admittedRoot runs). Add an awaiting_person root at todo and a slotted root at todo, each with a person's reply that keeps nothing and sends nothing."},
+    {"severity": "important", "file": "skills/legion-controller/references/parked-decisions.md:42", "description": "The relay fires for any root that lingers, including one that releaseUnslotted leaves at in_progress, testing, needs_review or retro. Step 1 has branches only for backlog/icebox, done and triage, so the controller has no instruction for those statuses. Fix: add a branch for any other status (set nothing, name it), or limit the relay to those statuses."},
+    {"severity": "minor", "file": "packages/daemon/internal/workflow/parked_decision.go:46", "description": "relayParkedDecision has three modes and checks for a person with two different predicates, `actor.Person()` at its callers and record.PersonActor inside. It checks Lingers again inside waitsForSlot. dispatchAskReply should log a session's reply itself. Fold this into the shared helper."},
+    {"severity": "minor", "file": "packages/daemon/internal/workflow/ask_mirror.go:230", "description": "closeAsk/replyToAsk return intake.Result{} on every path, and their callers discard it. Make them return only error."},
+    {"severity": "minor", "file": "packages/daemon/internal/record/outbox.go:352", "description": "SpecDecision casts NoticeKind to DecisionKind, which works only because the two sets of constants share their text. Use an explicit mapping."},
+    {"severity": "minor", "file": "packages/daemon/internal/daemon/parked_decision.go:33", "description": "`row any` is always int64: type it."},
+    {"severity": "minor", "file": "packages/daemon/internal/admit/admit.go:948", "description": "readmit reuses `gate`, which means the carried gate at :851, for the key's own gate. Use a helper with its own local variable."},
+    {"severity": "minor", "file": "skills/legion-controller/references/wakes.md:80", "description": "The parked-decision section repeats the own-hold rule from parked-decisions.md#deciding and has drifted from it: it leaves out the 10-minute window. Cut it to the payload and a pointer."},
+    {"severity": "minor", "file": "packages/daemon/internal/workflow/parked_decision.go:108", "description": "The start task points at `skill://legion-architect section 1` for requesting approval. The steps are in skill://legion-architect/references/design-gate.md."}
   ]
 }
