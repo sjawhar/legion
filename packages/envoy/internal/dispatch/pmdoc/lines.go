@@ -157,7 +157,7 @@ func (p emptyItemGuard) Open(parent ast.Node, reader gmtext.Reader, pc parser.Co
 	if last, paragraph := pc.LastOpenedBlock().Node.(*ast.Paragraph); paragraph && last.Parent() == parent {
 		return nil, parser.NoChildren
 	}
-	if interruptsOpenBlock(parent, reader.Source(), lineStart(reader.Source(), segment.Start)) {
+	if interruptsOpenBlock(parent, reader.Source(), lineStart(reader.Source(), segment.Start), pc) {
 		return nil, parser.NoChildren
 	}
 	return p.BlockParser.Open(parent, reader, pc)
@@ -493,7 +493,7 @@ func columnOf(text []byte) int {
 // container continues, so the code has ended and the line interrupts nothing (which is also why it
 // reads a second code line there as a second code block). A container opened on a line after the
 // code, such as a typed block's fence, starts a flow of its own that holds nothing open.
-func interruptsOpenBlock(parent ast.Node, source []byte, start int) bool {
+func interruptsOpenBlock(parent ast.Node, source []byte, start int, pc parser.Context) bool {
 	previous := parent.LastChild()
 	opensContainers := previous == nil
 	for node := parent; previous == nil && node != nil && node.Kind() != ast.KindDocument; node = node.Parent() {
@@ -506,7 +506,7 @@ func interruptsOpenBlock(parent ast.Node, source []byte, start int) bool {
 		if !opensContainers || previous.Lines().Len() == 0 {
 			return false
 		}
-		if table, _ := formsTable(previous, source); table {
+		if table, _ := formsTable(previous, source, pc); table {
 			return false
 		}
 		last := previous.Lines().At(previous.Lines().Len() - 1)

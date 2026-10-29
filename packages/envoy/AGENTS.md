@@ -1105,9 +1105,12 @@ tables (`pmdoc.PadTables`). A larger write is refused before its cells are alloc
 replacement, `INVALID_OP` on an edit's `markdown`, on an accept's `replace_with` for the tables
 its splice cuts, or on a reject's `anchor`), naming the table, the cells it writes, the cells
 padding its rows to the table's width would make, and the limit. Every table
-goldmark reads is charged, however it is written, a header narrower than its delimiter row among
-them, which goldmark pads with the rest: `findTableRows` reads a paragraph's lines as goldmark's
-table transformer does, and `TestFindTableRowsReadsWhatGoldmarkReads` holds the two together. A
+goldmark reads is charged, however it is written, the body rows narrower than the delimiter row
+that goldmark pads with the rest among them. A header of other than the delimiter row's width is
+no table at all, in GFM as in the browser editor's parser, and goldmark's padding of a narrower
+one never runs: `findTableRows` reads a paragraph's lines as that parser reads them and nothing
+else reaches goldmark's table transformer, and `TestFindTableRowsReadsWhatGoldmarkReads` holds the
+two together. A
 conditional batch runs its operations to check its anchors and preconditions as well as to apply
 them, each run on a budget of its own, so its padding is charged once. A read-back, a check that
 parses the rendering a write would store, pads the tree's own short rows, as a rendering leaves
@@ -1857,11 +1860,15 @@ ends with are dropped, as that parser drops them, and are a hard break only wher
 spaces or more and no tab (`trimLineSuffixes`); goldmark kept all but the last and broke at any two
 spaces. A backslash ending the line keeps what stands before it. A lazy continuation line - one that
 continues a paragraph in a list item, a quote or a footnote definition without the container's
-prefix - is never a table's header or delimiter row (`lazyTableRows`), as in GFM, and a table one
-would be a body row of is refused (`markLazyRows`): goldmark continues the paragraph the table is
-made of with the line, where the browser editor's parser ends the table, and every container the
-line does not continue, before it. So is a table a line opening another block would be a row of - a
-list item that cannot interrupt a paragraph, whatever its marker, or indented code
+prefix, whichever of the containers around it the line leaves (`lazyLinesAttr`) - is never a
+table's delimiter row (`lazyTableRows`), as in GFM, whose tokenizer refuses a delimiter row there
+(`micromark-extension-gfm-table`, `headDelimiterStart`), although a header row on such a line opens
+a table as it does in the browser editor's parser, which reads the delimiter row's line alone for
+laziness; and a table a lazy line would be a body row of is refused (`markLazyRows`): goldmark
+continues the paragraph the table is made of with the line, where the browser editor's parser ends
+the table, and every container the line does not continue, before it. So is a table a line opening
+another block would be a row of - a list item that cannot interrupt a paragraph, whatever its
+marker, or indented code
 (`markBlockRows`): goldmark's table is a paragraph, which such a line continues, where that parser's
 table is no paragraph and ends there, reading the line as that block. So is a table a body row of
 which holds text in a cell past its delimiter row's width (`markWideRows`), naming the row and both
@@ -1871,7 +1878,17 @@ every `|` not written `\|`, inside code and links too, and at a `|` after an eve
 backslashes (`\\|`), which `splitAtEvenEscapedPipes` splits where goldmark's cell runs on, so a
 code span holding a bare `|` in a row that fills its table lost the rest of the row's text when it
 was stored. A row whose cells past
-the width are blank loses nothing and is read at the table's width. A bare-row insert
+the width are blank loses nothing and is read at the table's width. A table forms only where its
+header row holds as many cells as its delimiter row has columns (`headerCells`, GFM's rule, the
+cells counted as the browser editor's parser counts them, so `a||` is two), where goldmark padded
+a narrower header out to the delimiter row's width and read a table there. Neither of those two
+rows may stand four columns or more past its container: a header row there is indented code to
+that parser, which a paragraph's line only continues, and goldmark reads a delimiter row there
+because the close it makes for a setext underline trims a paragraph's lines before its transformer
+reads them, so pmdoc reads them as they were written (`lineRecordingParagraph`, `tableLines`).
+That parser tries a header and a delimiter row at every line, where goldmark's transformer gives
+the table up at the first pair that fails, so the lines of the pairs it refused are left a
+paragraph before the table it reads further on (`textBeforeTable`). A bare-row insert
 (`InsertTableRows`) decides in three steps. First, its fragment, less its blank lines at either
 end, must have every line yield a cell and an unescaped `|` (a lone `|` yields no cell, and a line
 whose only pipe is `\|` has no separator), with no line delimiter-shaped (cells of three hyphens

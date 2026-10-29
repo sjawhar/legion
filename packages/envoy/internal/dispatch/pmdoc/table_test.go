@@ -23,9 +23,13 @@ import (
 // The budget pays for the cells goldmark's table transformer will pad before it runs, so
 // findTableRows must read the table goldmark reads: whether one forms, where its header is, and how
 // many cells it writes, split where the browser editor's parser ends a cell goldmark does not, and
-// holds once padded. A header that parser reads wider than its delimiter row makes no table there,
-// so findTableRows finds none where goldmark would form one. Each shape here, and every paragraph
-// of the corpus fixtures, is read by both, the transformer on a copy apart from any document.
+// holds once padded. A header that parser reads otherwise than its delimiter row - wider, whose
+// cells past the delimiter row goldmark drops, or narrower, which goldmark pads out - makes no
+// table there, so findTableRows finds none where goldmark would form one. Where that parser reads
+// a table after a pair of rows it refused, which goldmark reads no table in at all, the lines of
+// the refused pair are left a paragraph before the table (textBeforeTable), so the transformer
+// reads the header findTableRows read. Each shape here, and every paragraph of the corpus
+// fixtures, is read by both, the transformer on a copy apart from any document.
 func TestFindTableRowsReadsWhatGoldmarkReads(t *testing.T) {
 	shapes := []string{
 		"| a | b |\n| - | - |\n| 1 | 2 |\n",
@@ -61,6 +65,9 @@ func TestFindTableRowsReadsWhatGoldmarkReads(t *testing.T) {
 		"| a |\n| : |\n",
 		"| a |\n| :-: | ::- |\n",
 		"text only\nno table here\n",
+		"q\n-|-\nx\n-|\n",
+		"q\n-|-\nx\n-|\ny\n",
+		"| a |\n| - | - |\n| b |\n| - |\n| 1 |\n",
 	}
 	for _, shape := range shapes {
 		assertTableModelMatchesGoldmark(t, shape, splitLines([]byte(shape)), []byte(shape))
@@ -91,14 +98,15 @@ func TestFindTableRowsReadsWhatGoldmarkReads(t *testing.T) {
 
 func assertTableModelMatchesGoldmark(t *testing.T, name string, lines *gmtext.Segments, source []byte) {
 	t.Helper()
-	rows, found, _ := findTableRows(lines, source, 1)
+	rows, found, _ := findTableRows(tableLines{lines: lines, source: source}, 1)
 	trial := ast.NewParagraph()
 	trial.SetLines(lines)
 	holder := ast.NewDocument()
 	holder.AppendChild(holder, trial)
 	// Goldmark's transformer, followed by the splits pmdoc makes in the table it forms
-	// (splitAtEvenEscapedPipes). It reads a copy of lines, which keep their segments.
-	lazyTableRows{table: tableTransformer}.transform(trial, gmtext.NewReader(source), parser.NewContext())
+	// (splitAtEvenEscapedPipes), and the paragraph it leaves of the text before a table goldmark
+	// reads none of (textBeforeTable). It reads a copy of lines, which keep their segments.
+	lazyTableRows{table: tableTransformer}.transform(trial, rows, gmtext.NewReader(source), parser.NewContext())
 	var table *extensionast.Table
 	for child := holder.FirstChild(); child != nil; child = child.NextSibling() {
 		if formed, ok := child.(*extensionast.Table); ok {
@@ -110,11 +118,12 @@ func assertTableModelMatchesGoldmark(t *testing.T, name string, lines *gmtext.Se
 		if before, ok := table.PreviousSibling().(*ast.Paragraph); ok {
 			header = before.Lines().Len()
 		}
-		// The browser editor's parser splits the header as it splits a bare row (tableRowCells).
+		// The browser editor's parser reads a table only where its header row holds as many cells
+		// as its delimiter row (headerCells).
 		written := tabExpandedLine(lines.At(header), source)
-		if cells, _ := tableRowCells(string(written.Value(source))); len(cells) > len(table.Alignments) {
+		if cells := headerCells(written, source); cells != len(table.Alignments) {
 			if found {
-				t.Errorf("%q: findTableRows found a table under a header of %d cells, which the browser editor's parser reads as no table over %d columns", name, len(cells), len(table.Alignments))
+				t.Errorf("%q: findTableRows found a table under a header of %d cells, which the browser editor's parser reads as no table over %d columns", name, cells, len(table.Alignments))
 			}
 			return
 		}
@@ -156,8 +165,8 @@ func splitLines(source []byte) *gmtext.Segments {
 	return lines
 }
 
-// Every table goldmark reads is paid for before its cells are built, however it is written: a
-// header narrower than its delimiter row, which goldmark pads with the rest; a setext underline
+// Every table goldmark reads is paid for before its cells are built, however it is written: body
+// rows narrower than the delimiter row, which goldmark pads with the rest; a setext underline
 // under the table, which goldmark's setext parser asks the table transformer about first; and
 // rows of `=`, each such a question.
 func TestParseChargesEveryTableGoldmarkReads(t *testing.T) {
@@ -166,8 +175,8 @@ func TestParseChargesEveryTableGoldmarkReads(t *testing.T) {
 		name, markdown string
 	}{
 		{
-			name:     "a one-cell header over a 500-column delimiter row",
-			markdown: "| header |\n" + strings.Repeat("| --- ", 500) + "|\n" + strings.Repeat("| body |\n", 500),
+			name:     "500 one-cell rows under a 500-column delimiter row",
+			markdown: tablePaddingBomb(500),
 		},
 		{
 			name:     "a setext underline under the table",
