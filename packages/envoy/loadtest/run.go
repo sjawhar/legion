@@ -21,6 +21,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/gorilla/websocket"
 	"github.com/jackc/pgx/v5"
 )
 
@@ -48,11 +49,14 @@ type runConfig struct {
 	mix          eventMix
 	routes       routeMix
 	human        float64
-	sse          int
-	rngSeed      uint64
-	natsConns    int
-	buildCommit  string
-	buildDirty   bool
+	live         int
+	// dashboard is the dashboard stream the build under test serves, probed once before the
+	// window (probeDashboard): dashboardLive or dashboardSSE.
+	dashboard   string
+	rngSeed     uint64
+	natsConns   int
+	buildCommit string
+	buildDirty  bool
 	// boxBusyBefore is the box's busy fraction read before Dispatch started (run-step.sh reads it
 	// with `loadgen box-busy` before its reset); negative means collectMeta reads it itself.
 	boxBusyBefore float64
@@ -77,7 +81,7 @@ func runLoad(args []string) error {
 	mixFlag := fs.String("event-mix", defaultEventMix, "event mix: a preset ("+eventMixPresetNames()+") or kind=weight,...")
 	routeFlag := fs.String("route-mix", "", "route-mix file (default: the committed "+defaultRouteMixName+")")
 	human := fs.Float64("human", 0.1, "share of writes made by a person")
-	sse := fs.Int("sse", -1, "dashboard SSE streams (default max(1, round(requests/30)))")
+	live := fs.Int("live", -1, "dashboard live sockets (default max(1, round(requests/30)))")
 	rngSeed := fs.Uint64("rng-seed", 1, "seed of the event and request schedules")
 	natsConns := fs.Int("nats-conns", 50, "NATS connections the sessions share")
 	out := fs.String("out", "", "output directory (required)")
@@ -136,8 +140,8 @@ func runLoad(args []string) error {
 		return fmt.Errorf("-warmup and -grace must be 0 or more, -duration more than 0")
 	case *natsConns < 1:
 		return fmt.Errorf("-nats-conns must be at least 1")
-	case *sse < -1:
-		return fmt.Errorf("-sse must be 0 or more")
+	case *live < -1:
+		return fmt.Errorf("-live must be 0 or more")
 	case *boxBusyBefore > 1 || !finite(*boxBusyBefore):
 		return fmt.Errorf("-box-busy-before must be a fraction between 0 and 1")
 	}
@@ -157,8 +161,8 @@ func runLoad(args []string) error {
 		}
 		*duration = o.to - o.from
 		*sessions = len(rs.roster)
-		if *sse < 0 {
-			*sse = 2
+		if *live < 0 {
+			*live = 2
 		}
 	} else {
 		if *seedPath == "" {
@@ -176,8 +180,8 @@ func runLoad(args []string) error {
 			}
 		}
 	}
-	if *sse < 0 {
-		*sse = max(1, int(math.Round(*requests/30)))
+	if *live < 0 {
+		*live = max(1, int(math.Round(*requests/30)))
 	}
 	if *name == "" {
 		*name = filepath.Base(filepath.Clean(*out))
@@ -189,7 +193,7 @@ func runLoad(args []string) error {
 		ep: ep, allowForeign: ef.allowForeign, name: *name, out: *out, seedPath: *seedPath,
 		sessions: *sessions, events: *events, requests: *requests,
 		warmup: *warmup, duration: *duration, grace: *grace, mix: mix, routes: routes,
-		human: *human, sse: *sse, rngSeed: *rngSeed, natsConns: *natsConns,
+		human: *human, live: *live, rngSeed: *rngSeed, natsConns: *natsConns,
 		buildCommit: *buildCommit, buildDirty: *buildDirty, boxBusyBefore: *boxBusyBefore, args: recordedArgs(fs),
 		source: *source, replay: rs,
 	}, sf)
@@ -264,19 +268,23 @@ type requestsSummary struct {
 }
 
 type summaryConfig struct {
-	Step         string   `json:"step"`
-	EventsPerS   float64  `json:"events_per_s"`
-	Sessions     int      `json:"sessions"`
-	RequestsPerS float64  `json:"requests_per_s"`
-	SSE          int      `json:"sse"`
-	EventMix     eventMix `json:"event_mix"`
-	RouteMix     string   `json:"route_mix"`
-	Human        float64  `json:"human"`
-	WarmupS      float64  `json:"warmup_s"`
-	DurationS    float64  `json:"duration_s"`
-	GraceS       float64  `json:"grace_s"`
-	RNGSeed      uint64   `json:"rng_seed"`
-	NATSConns    int      `json:"nats_conns"`
+	Step         string  `json:"step"`
+	EventsPerS   float64 `json:"events_per_s"`
+	Sessions     int     `json:"sessions"`
+	RequestsPerS float64 `json:"requests_per_s"`
+	Live         int     `json:"live"`
+	// Dashboard is the dashboard stream those live streams ran on: live (one socket per tab on
+	// /ws/live) or sse (GET /api/v1/events, a build before that route was removed). The harness
+	// probes the build under test once before the window (probeDashboard).
+	Dashboard string   `json:"dashboard"`
+	EventMix  eventMix `json:"event_mix"`
+	RouteMix  string   `json:"route_mix"`
+	Human     float64  `json:"human"`
+	WarmupS   float64  `json:"warmup_s"`
+	DurationS float64  `json:"duration_s"`
+	GraceS    float64  `json:"grace_s"`
+	RNGSeed   uint64   `json:"rng_seed"`
+	NATSConns int      `json:"nats_conns"`
 	// MarkerNonce is the run's marker nonce (markerTag): every marker the run wrote starts with it,
 	// and the run counts only the commit rows that carry it.
 	MarkerNonce string `json:"marker_nonce"`
@@ -300,8 +308,8 @@ type summary struct {
 	CommitOrderLock lockSummary       `json:"commit_order_lock"`
 	UngrantedLocks  ungrantedSummary  `json:"ungranted_locks"`
 	Sessions        sessionsSummary   `json:"sessions"`
-	SSE             sseSummary        `json:"sse"`
-	SSEBytes        int64             `json:"sse_bytes"`
+	Live            liveSummary       `json:"live"`
+	LiveBytes       int64             `json:"live_bytes"`
 	// StackExits are the stack processes that exited during the step; such a step fails and its
 	// row does not measure the load.
 	StackExits []stackExit `json:"stack_exits,omitempty"`
@@ -350,13 +358,19 @@ func execute(cfg runConfig, sf seedFile) error {
 	defer logf.Close()
 	lg := log.New(io.MultiWriter(os.Stderr, logf), "", log.LstdFlags|log.Lmicroseconds)
 	nonce := newMarkerNonce()
-	lg.Printf("config: step=%s source=%s sessions=%d events=%g/s requests=%g/s event-mix=%s route-mix=%s warmup=%s duration=%s grace=%s human=%.2f sse=%d rng-seed=%d marker-nonce=%s",
-		cfg.name, cfg.source, cfg.sessions, cfg.events, cfg.requests, cfg.mix.Name, cfg.routes.Source, cfg.warmup, cfg.duration, cfg.grace, cfg.human, cfg.sse, cfg.rngSeed, formatNonce(nonce))
+	lg.Printf("config: step=%s source=%s sessions=%d events=%g/s requests=%g/s event-mix=%s route-mix=%s warmup=%s duration=%s grace=%s human=%.2f live=%d rng-seed=%d marker-nonce=%s",
+		cfg.name, cfg.source, cfg.sessions, cfg.events, cfg.requests, cfg.mix.Name, cfg.routes.Source, cfg.warmup, cfg.duration, cfg.grace, cfg.human, cfg.live, cfg.rngSeed, formatNonce(nonce))
 
 	if err := checkStack(ctx, cfg.ep); err != nil {
 		return err
 	}
 	lg.Printf("guard: NATS, Dispatch and the listener are the stack's own (%s)", cfg.ep.stack)
+	dashboard, dashURL, err := probeDashboard(ctx, cfg.ep.dispatch)
+	if err != nil {
+		return err
+	}
+	cfg.dashboard = dashboard
+	lg.Printf("dashboard: %d %s stream(s) on %s", cfg.live, dashboard, redactURL(dashURL))
 	meta := collectMeta(ctx, cfg, lg)
 	meta.MarkerNonce = formatNonce(nonce)
 	writeJSONFile(filepath.Join(cfg.out, "meta.json"), meta, metaMode, lg)
@@ -383,7 +397,7 @@ func execute(cfg runConfig, sf seedFile) error {
 	lg.Printf("window %s to %s", st.winStart.UTC().Format(time.RFC3339), st.winEnd.UTC().Format(time.RFC3339))
 
 	a := newAPI(cfg.ep.dispatch, cfg.ep.token, 2048)
-	sse := st.startSSE(ctx)
+	live := st.startDashboard(ctx, dashURL)
 	writes, eventsDone := st.runEvents(ctx, newWriter(a, sf, nonce, lg))
 	var reqs *requestLoad
 	var requestsDone <-chan struct{}
@@ -404,7 +418,7 @@ func execute(cfg runConfig, sf seedFile) error {
 	ns.close()
 	ns.envelopes.write(cfg.out, lg)
 
-	sum := st.buildSummary(ns, reg, writes, reqs, sse, pr)
+	sum := st.buildSummary(ns, reg, writes, reqs, live, pr)
 	writeJSONFile(filepath.Join(cfg.out, "summary.json"), sum, 0o644, lg)
 	meta.End = time.Now()
 	writeJSONFile(filepath.Join(cfg.out, "meta.json"), meta, metaMode, lg)
@@ -474,38 +488,39 @@ func (st *step) inWindow(t time.Time) bool { return inWindow(t, st.winStart, st.
 
 func inWindow(t, winStart, winEnd time.Time) bool { return !t.Before(winStart) && t.Before(winEnd) }
 
-// sseStreams is what the dashboard SSE streams read: their bytes and the frames that arrived in
-// the window.
-type sseStreams struct {
+// liveSockets is what the dashboard's streams read, live sockets or SSE streams: their bytes and
+// the event frames that arrived in the window.
+type liveSockets struct {
 	bytes  atomic.Int64
-	frames *collector[sseFrame]
+	frames *collector[liveFrame]
 }
 
-// startSSE opens the dashboard SSE streams, each reconnecting a second after its stream ends,
-// until ctx ends. Every data frame is timed on arrival (readSSE).
-func (st *step) startSSE(ctx context.Context) *sseStreams {
-	ss := &sseStreams{frames: newCollector[sseFrame](1 << 14)}
+// startDashboard opens the dashboard's streams on url, as many as -live: the live sockets of a
+// build that serves /ws/live, else the SSE streams of one that serves GET /api/v1/events
+// (probeDashboard). Each stream subscribes to the event feed as a dashboard tab does and
+// reconnects a second after it ends, until ctx ends. Every event frame is timed on arrival
+// (readLive, readSSE).
+func (st *step) startDashboard(ctx context.Context, url string) *liveSockets {
+	ls := &liveSockets{frames: newCollector[liveFrame](1 << 14)}
+	// A browser offers permessage-deflate, and Dispatch accepts it.
+	dialer := &websocket.Dialer{HandshakeTimeout: 10 * time.Second, EnableCompression: true}
 	client := &http.Client{}
-	for i := range st.cfg.sse {
-		go func() {
-			for ctx.Err() == nil {
-				req, _ := http.NewRequestWithContext(ctx, "GET", st.cfg.ep.dispatch+"/api/v1/events", nil)
-				req.Header.Set("X-Dispatch-User", fmt.Sprintf("viewer-%d", i))
-				req.Header.Set("Accept", "text/event-stream")
-				if resp, err := client.Do(req); err == nil {
-					n, _ := readSSE(resp.Body, st.nonce, time.Now, func(f sseFrame) {
-						if st.inWindow(time.Unix(0, f.at)) {
-							ss.frames.add(f)
-						}
-					})
-					ss.bytes.Add(n)
-					_ = resp.Body.Close()
-				}
-				sleepUntil(ctx, time.Now().Add(time.Second))
+	for i := range st.cfg.live {
+		header := http.Header{"X-Dispatch-User": {fmt.Sprintf("viewer-%d", i)}}
+		onFrame := func(f liveFrame) {
+			if st.inWindow(time.Unix(0, f.at)) {
+				ls.frames.add(f)
 			}
-		}()
+		}
+		onBytes := func(n int64) { ls.bytes.Add(n) }
+		if st.cfg.dashboard == dashboardSSE {
+			header.Set("Accept", "text/event-stream")
+			go followSSE(ctx, client, url, header, st.nonce, time.Second, onFrame, onBytes)
+			continue
+		}
+		go followLive(ctx, dialer, url, header, st.nonce, time.Second, onFrame, onBytes)
 	}
-	return ss
+	return ls
 }
 
 // openLoop is an open-loop Poisson schedule at rate per second, from stream `stream` of rngSeed:
@@ -661,10 +676,10 @@ func (st *step) profile(ctx context.Context) {
 
 // buildSummary joins what the phases recorded into summary.json, and writes samples.json. It
 // reads the run's commit rows and names the ungranted locks' relations, so it runs after the load.
-func (st *step) buildSummary(ns *natsSessions, reg *registrar, writes *collector[writeRec], reqs *requestLoad, sse *sseStreams, pr *probes) summary {
+func (st *step) buildSummary(ns *natsSessions, reg *registrar, writes *collector[writeRec], reqs *requestLoad, live *liveSockets, pr *probes) summary {
 	cfg := st.cfg
 	ws := writes.snapshot()
-	frames := sse.frames.snapshot()
+	frames := live.frames.snapshot()
 	pr.ls.resolveRelations(cfg.ep.pg)
 
 	var markers []int64
@@ -683,8 +698,9 @@ func (st *step) buildSummary(ns *natsSessions, reg *registrar, writes *collector
 	durS := cfg.duration.Seconds()
 	sum := summary{
 		Config: summaryConfig{
-			Step: cfg.name, EventsPerS: cfg.events, Sessions: cfg.sessions, RequestsPerS: cfg.requests, SSE: cfg.sse,
-			EventMix: cfg.mix, RouteMix: cfg.routes.Source, Human: cfg.human, WarmupS: cfg.warmup.Seconds(),
+			Step: cfg.name, EventsPerS: cfg.events, Sessions: cfg.sessions, RequestsPerS: cfg.requests, Live: cfg.live,
+			Dashboard: cfg.dashboard,
+			EventMix:  cfg.mix, RouteMix: cfg.routes.Source, Human: cfg.human, WarmupS: cfg.warmup.Seconds(),
 			DurationS: durS, GraceS: cfg.grace.Seconds(), RNGSeed: cfg.rngSeed, NATSConns: cfg.natsConns,
 			MarkerNonce: formatNonce(st.nonce), Source: cfg.source,
 		},
@@ -696,8 +712,8 @@ func (st *step) buildSummary(ns *natsSessions, reg *registrar, writes *collector
 		},
 		CommitOrderLock: summarizeLock(pr.lp.samples, pr.lp.errors),
 		UngrantedLocks:  summarizeUngranted(pr.ls.samples, pr.ls.errors),
-		SSE:             summarizeSSE(frames, ws, commits),
-		SSEBytes:        sse.bytes.Load(),
+		Live:            summarizeLive(frames, ws, commits),
+		LiveBytes:       live.bytes.Load(),
 	}
 	if commitsErr != nil {
 		sum.Events.CommitsError = commitsErr.Error()

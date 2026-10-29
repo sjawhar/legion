@@ -1,0 +1,9 @@
+{
+  "type": "agent",
+  "sub": "agent-1",
+  "event": "responder",
+  "data": {
+    "v": 1,
+    "responding": true
+  }
+}

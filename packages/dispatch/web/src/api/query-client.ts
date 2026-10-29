@@ -10,7 +10,7 @@ import {
 import { ApiError } from "./client";
 
 /** The wait before a failed read's retry when the server asked for none. */
-const RETRY_DELAY_MS = 500;
+export const QUERY_RETRY_DELAY_MS = 500;
 
 /** The longest `Retry-After` a retry honours. With its jitter of up to as much again, a read
  *  refused by a proxy that answers a day (or more than `setTimeout` can hold) still retries within
@@ -34,7 +34,7 @@ export function queryRetryDelay(
     const retryAfterMs = Math.min(error.retryAfterMs, RETRY_AFTER_CEILING_MS);
     return retryAfterMs + Math.floor(random() * retryAfterMs);
   }
-  return RETRY_DELAY_MS;
+  return QUERY_RETRY_DELAY_MS;
 }
 
 /**

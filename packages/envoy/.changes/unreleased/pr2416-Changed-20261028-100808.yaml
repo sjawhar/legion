@@ -1,9 +1,0 @@
-kind: Changed
-body: |-
-    A settlement of a Dispatch document that wrote nothing into the room and repaired nothing in
-    the tree it read now renders that tree once, where it rendered it twice: its version reuses the
-    first rendering, block offsets included. Versions, their block index and the reference
-    excerpts are what they were.
-time: 2026-10-28T10:08:08.404567215Z
-custom:
-    Issue: pr2416

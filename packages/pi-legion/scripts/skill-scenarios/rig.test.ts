@@ -125,10 +125,10 @@ describe("a setup that fails after install_model_route", () => {
     mkdirSync(path.join(co, "skills/asd-ste100"), { recursive: true });
     writeFileSync(path.join(co, "skills/asd-ste100/SKILL.md"), "# STE\n");
     writeFileSync(path.join(co, ".omp-pin"), "omp@pin\n");
-    cpSync(
-      path.join(root, "scripts/e2e/lib/install-key-file-model-route.sh"),
-      path.join(co, "scripts/e2e/lib/install-key-file-model-route.sh")
-    );
+    // The real key-file route, with the lib it sources for its base URL's check.
+    for (const file of ["install-key-file-model-route.sh", "model-endpoint.sh"]) {
+      cpSync(path.join(root, "scripts/e2e/lib", file), path.join(co, "scripts/e2e/lib", file));
+    }
     writeFileSync(
       path.join(co, "scripts/e2e/lib/omp-home.sh"),
       'make_omp_home() { mkdir -p "$1/.omp"; }\n'

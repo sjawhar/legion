@@ -204,16 +204,15 @@ func dispatchMux(t *testing.T, database *dispatchstore.Store, envoyURL string) h
 		EnvoyURL:    envoyURL,
 		Docs:        documents,
 		Events:      broker,
-		Lifetime:    t.Context(),
 	})
 	if err != nil {
 		t.Fatalf("new Dispatch API dependencies: %v", err)
 	}
 	mux := http.NewServeMux()
-	// The wait returns once Lifetime is cancelled, which t.Context() is just before the
-	// cleanups run, and it must finish before the database pool closes — the cleanup registered
-	// first, so the one registered here runs first.
-	t.Cleanup(dispatchapi.Register(mux, deps))
+	// The wait returns once the server's lifetime, t.Context(), is cancelled, which it is just
+	// before the cleanups run, and it must finish before the database pool closes — the cleanup
+	// registered first, so the one registered here runs first.
+	t.Cleanup(dispatchapi.Register(mux, t.Context(), deps).Wait)
 	return mux
 }
 
@@ -512,10 +511,9 @@ func TestDispatchBroadcastResolvesSessionsTheCacheHasNotRefilled(t *testing.T) {
 	tester := rig.registerSession(t, "ses_tester", "Tester")
 
 	response := rig.asHuman(t, http.MethodPost, "/api/v1/broadcasts", map[string]any{
-		"body":            "Stand down and report status.",
-		"delivery":        rigDeliveryMode,
-		"session_ids":     []string{planner.id, tester.id},
-		"idempotency_key": "cross-service-broadcast",
+		"body":        "Stand down and report status.",
+		"delivery":    rigDeliveryMode,
+		"session_ids": []string{planner.id, tester.id},
 	})
 	if response.Code != http.StatusCreated {
 		t.Fatalf("broadcast to two sessions the cache has not refilled: status=%d body=%s",
@@ -555,10 +553,9 @@ func TestDispatchRefusesABroadcastWhenASessionReadDoesNotAnswer(t *testing.T) {
 	stallSessionReads(t, rig.cold.sessions)
 
 	response := rig.asHuman(t, http.MethodPost, "/api/v1/broadcasts", map[string]any{
-		"body":            "Stand down and report status.",
-		"delivery":        rigDeliveryMode,
-		"session_ids":     []string{planner.id, tester.id},
-		"idempotency_key": "cross-service-unanswered",
+		"body":        "Stand down and report status.",
+		"delivery":    rigDeliveryMode,
+		"session_ids": []string{planner.id, tester.id},
 	})
 	if response.Code != http.StatusServiceUnavailable {
 		t.Fatalf("broadcast while the session bucket cannot be read: status=%d body=%s, want 503",
