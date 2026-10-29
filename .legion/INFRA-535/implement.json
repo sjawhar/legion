@@ -2,8 +2,16 @@
   "schemaVersion": 1,
   "phase": "implement",
   "issue": "INFRA-535",
-  "completed": "2026-10-29T13:55:00Z",
+  "completed": "2026-10-29T14:51:24Z",
   "proof": [
+    {
+      "criterion": "Review round 1: the strikethrough and task-item browser tests use the shared reading, thread and sign-in helpers, and every browser test this change runs still passes",
+      "surface": "Dispatch browser suite (Playwright, chromium) against a real Go server and Postgres",
+      "command": "cd packages/dispatch && bun run e2e -- e2e/strikethrough.e2e.ts e2e/task-items.e2e.ts e2e/emphasis-beside-a-tilde.e2e.ts e2e/writer-spelling.e2e.ts; bun run lint && bun run typecheck",
+      "observed": "20 passed; lint and typecheck clean. strikethrough.e2e.ts has no evaluateAll poll and no local withAlice, and task-items.e2e.ts has no local withAlice",
+      "headSha": "e20dacbb7a5aad491a6420b69d00535be7c9c69d",
+      "negativeControl": "At 7c0df1f1 (before this round), grep finds 'async function withAlice' in strikethrough.e2e.ts:65 and task-items.e2e.ts:226 and an evaluateAll poll in strikethrough.e2e.ts:52, the copies the review named"
+    },
     {
       "criterion": "A1: a document written through the API shows the same emphasis as a comment for the three tilde cases",
       "surface": "Dispatch spec editor, past version (?v=1) and Conversation comment, against a real Go server and Postgres (Playwright, chromium)",
@@ -56,7 +64,9 @@
     "packages/dispatch/e2e/emphasis-beside-a-tilde.e2e.ts (new)",
     "packages/dispatch/e2e/writer-spelling.e2e.ts (new)",
     "packages/dispatch/e2e/editor.ts",
-    "packages/dispatch/e2e/users.ts"
+    "packages/dispatch/e2e/users.ts",
+    "packages/dispatch/e2e/strikethrough.e2e.ts",
+    "packages/dispatch/e2e/task-items.e2e.ts"
   ],
   "trickyParts": [
     "The new spellings are last resorts. lastResorts is consulted only when no writing reaches depth 1 under inlineMarkdown. Letting them compete freely churned 1644 documents and lost 892 fixed points.",
@@ -66,7 +76,8 @@
   "deviations": [
     "The plan's 'D-a churn and lost fixed points 0' does not hold against 452e4647, because main changed stored bytes between 452e4647 and b93381d3 (sjawhar/legion#2373 and others). The flagged documents give the same counts with head = main and 0 against main with head = this branch, so this branch adds none.",
     "escapeDestination's fast path stays removed, as the spec's #2373 cleanup list asks, even though the simplify reviewers proposed restoring it for the allocation.",
-    "The flanked spelling the writer picks for 'p \\~\\a*~* q' is 'p &#126;\\\\&#97;*&#126;* q', the earliest of the greatest depth. It is not the 'p \\~\\\\a*~* q' that the plan listed."
+    "The flanked spelling the writer picks for 'p \\~\\a*~* q' is 'p &#126;\\\\&#97;*&#126;* q', the earliest of the greatest depth. It is not the 'p \\~\\\\a*~* q' that the plan listed.",
+    "Review round 1: the reviewer's code-quality item (2), folding the three mark-order cases into one orderMarks, was judged not required by the reviewer and is not done."
   ],
   "openQuestions": [
     "Five address documents (for example '**www\\.a!b@c.test/q?a=1&b=2<b> and more**') read differently in Go and the engine on main since sjawhar/legion#2373. Main stores them, and they are reported to the architect."
