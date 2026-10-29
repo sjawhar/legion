@@ -3,6 +3,7 @@ package gcp_test
 import (
 	"encoding/json"
 	"fmt"
+	"slices"
 	"strconv"
 	"strings"
 	"testing"
@@ -1520,6 +1521,37 @@ func TestDispatchListenerPodMatchesGolden(t *testing.T) {
 	m, err := runDispatch(t, dispatchArgs(), true)
 	require.NoError(t, err)
 	requirePodGolden(t, m, "example-dispatch-listener", "dispatch-listener-pod.golden")
+}
+
+// dispatchRegistrations renders every registration the mock engine recorded as one line holding
+// the registration's type, its name and the URN of the parent it was registered under. A read,
+// which the engine records with no register request, renders an empty parent. The lines are
+// sorted: the Go SDK registers each resource from a goroutine of its own, so the order the engine
+// sees them in is the scheduler's and differs from run to run, and only the set of registrations
+// is the component's to decide.
+func dispatchRegistrations(m *pulumitest.Mocks) string {
+	registrations := m.Registrations()
+	lines := make([]string, 0, len(registrations))
+	for _, registration := range registrations {
+		parent := ""
+		if registration.RPC != nil {
+			parent = registration.RPC.GetParent()
+		}
+		lines = append(lines, fmt.Sprintf("%s %s parent=%s\n", registration.Type, registration.Name, parent))
+	}
+	slices.Sort(lines)
+	return strings.Join(lines, "")
+}
+
+// This golden is the component's declaration: every resource the default inputs register, and the
+// name and the parent each is given, captured before the cluster-only mode existed. A change that
+// leaves the default path alone leaves this file byte-identical, so a failure says the default
+// path moved — a resource renamed, reparented, added or dropped — and the fix is the component,
+// never the golden.
+func TestDispatchRegistrationsMatchTheGolden(t *testing.T) {
+	m, err := runDispatch(t, dispatchArgs(), true)
+	require.NoError(t, err)
+	require.Equal(t, readGolden(t, "dispatch-registrations.golden"), dispatchRegistrations(m))
 }
 
 // Every workload's pods keep apart at any replica count, over that Deployment's own selector:
