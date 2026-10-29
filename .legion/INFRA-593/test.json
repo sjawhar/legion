@@ -1,0 +1,49 @@
+{
+  "schemaVersion": 1,
+  "phase": "test",
+  "issue": "INFRA-593",
+  "completed": "2026-10-29T18:20:00Z",
+  "round": 8,
+  "headTested": "2dfde180b5995d963a349eb5e80df02afc5da43c",
+  "codeHead": "fd69c20e4e6a0d5090424bd49381c5bd62969ae4",
+  "report": "dispatch://INFRA-593/artifact/infra-593-tester-round-8-txt",
+  "previousRounds": [
+    "dispatch://INFRA-593/artifact/infra-593-tester-round-1-txt",
+    "dispatch://INFRA-593/artifact/infra-593-tester-round-2-txt",
+    "dispatch://INFRA-593/artifact/infra-593-tester-round-3-txt",
+    "dispatch://INFRA-593/artifact/infra-593-tester-round-4-txt",
+    "dispatch://INFRA-593/artifact/infra-593-tester-round-5-txt",
+    "dispatch://INFRA-593/artifact/infra-593-tester-round-6-txt",
+    "dispatch://INFRA-593/artifact/infra-593-tester-round-7-txt"
+  ],
+  "fingerprint": {
+    "from": "9ed33934 a8d3e428fd7c0475",
+    "to": "2dfde180 2a47723b5a6817af",
+    "result": "changed only in two *_test.go files' strings (TestMigrate0139 -> 0141, seed messages, a wait message); 0 paths changed outside .legion/, docs/solutions/ and *_test.go"
+  },
+  "implementerProof": {
+    "verdict": "verified",
+    "how": "Re-ran the implementer's e2e steps (scenA.sh, hour pass cleared) with envoy-dispatch built from 2dfde180: the sweep's first tick logged candidates=1 compacted=1 rows_deleted=37, the 3 young rows unchanged in version/xmin/md5, text sha256 identical, a 31st upload reads back. Its second proof (the head moved only in files no runtime reads) checked by jj diff --name-only and by the byte-identical binary."
+  },
+  "failed": 0,
+  "failures": [],
+  "proof": [
+    {
+      "criterion": "The head READY will name carries exactly the runtime round 7 tested: no runtime change since 9ed33934.",
+      "surface": "envoy-dispatch built from 9ed33934 and from 2dfde180 (go build -trimpath ./cmd/dispatch, GOWORK=off, one toolchain)",
+      "command": "jj diff --from 9ed33934 --to 2dfde180 --name-only; go build -trimpath -o dispatch-r7 / dispatch-r8; sha256sum",
+      "observed": "Changed paths outside .legion/ and docs/solutions/: compaction_queue_test.go and doc_compaction_owed_migration_test.go only. Both binaries hash 02c47a4deb7c46b7dd47..., byte-identical, so round 7's real-process scenarios (upgrade through 0141, rolling update, failed loads, writes during a sweep, unfoldable log, burst after a quiet check) ran on this head's binary.",
+      "headSha": "2dfde180b5995d963a349eb5e80df02afc5da43c",
+      "negativeControl": "Round 7's binary differed from round 6's (migration 0141, ceiling 89), which is why round 7 ran a full round; here the hashes are equal."
+    },
+    {
+      "criterion": "Acceptance 1, 2 and 5 at the head that merges, and the changed tests.",
+      "surface": "envoy-dispatch built from 2dfde180, real process on Postgres 16.2, DISPATCH_NATS_DISABLED=1, HTTP API; the docs and store packages against the same Postgres",
+      "command": "BIN=<2dfde180 build> CLEAR_PASS=1 bash scenA.sh; CGO_ENABLED=1 go test -race -count=3 ./internal/dispatch/docs ./internal/dispatch/store -run '^(TestABurstAfterAQuietCheckBringsTheDocumentsCheckForward|TestTheCompactionQueueFoldsTheOldRowsOfADocumentItsWritesNoted|TestMigrate0141NamesEveryDocumentOfMoreThanOneRow)$'",
+      "observed": "scenA: 37 rows folded at the sweep's first tick, the 3 young rows unchanged, text identical, a 31st upload reads back. Tests: 9 of 9 PASS.",
+      "headSha": "2dfde180b5995d963a349eb5e80df02afc5da43c",
+      "negativeControl": "scenA's 3 rows younger than 2 minutes are the case the tail rule must leave: version, xmin and md5 match before and after the fold."
+    }
+  ],
+  "ci": "Read on GitHub at the PR head 2dfde180, 18:14 UTC: run 40927706871 (CI) queued. The runs at 03356355, 11581bf6 and fd69c20e were cancelled by the pushes after them; no CI run has completed at a head after 3e89ac6f."
+}
