@@ -2,137 +2,32 @@
   "schemaVersion": 1,
   "phase": "implement",
   "issue": "INFRA-549",
-  "completed": "2026-10-29T16:51:32Z",
+  "completed": "2026-10-29T17:15:46Z",
   "pullRequest": "https://github.com/sjawhar/legion/pull/2371",
-  "headSha": "85af7fcb193b85e8ff990d36ead10d95c6041e1f",
+  "headSha": "ba83edd7d606d45d56964e7deb4ef9e007980110",
   "proof": [
     {
-      "criterion": "Review round 7: the CI filter gate table names the moved natslive command so ci-filters and ci-ok pass (thread PRRT_kwDORFy7ds6xp-xm); core refuses replicas by bus.MaxReplicas (thread PRRT_kwDORFy7ds6xp-xs); the live test comment names the new command.",
-      "surface": "main's CI filter check run locally on the tree, and the envoy-infra unit lane",
-      "command": "uv run --with pyyaml==6.0.2 --no-project bash .github/scripts/check-ci-filters.sh ; cd packages/envoy/infra && test -z \"$(gofmt -l .)\" && go vet -tags pulumilive,natslive ./... && go test -count=1 ./...",
-      "observed": "check-ci-filters exits 0: every ci.yaml filter matches every file its job reads (24 gates), with envoy-infra-go at 0 uncovered. gofmt is clean, vet is ok, and every package is ok (the two mkfs.ext4 data-disk tests are skipped). core's refusal rows for natsReplicas 5 and 6 pass with the same text.",
-      "headSha": "85af7fcb193b85e8ff990d36ead10d95c6041e1f",
-      "negativeControl": "The check with 4c0da574's ci_job_reads.py prints both errors (the ci.yaml step runs a command no Run lists; the table's Run is no longer run) and 2 CI filter problem(s)."
+      "criterion": "Review round 8: gcp:Dispatch and gcp:ClusteredNatsHub run one priority-class rule, podPriorityClass, beside dnsSubdomain in gcp/dispatch.go, with Dispatch messages unchanged",
+      "surface": "envoy-infra gcp unit tests on Pulumi mocks (both components resolvers), plus a go test -overlay that breaks the shared rule",
+      "command": "cd packages/envoy/infra && go test -count=1 -skip TestTheDataDiskIsFormattedOnlyWhenItReadsAsZerosToItsEnd|TestARefusedDataDiskIsNeverFormattedOnALaterBoot ./...",
+      "observed": "every package ok (gcp 73.4s); dispatch_test.go unchanged and passing; gofmt clean; go vet -tags pulumilive,natslive ./... ok",
+      "headSha": "ba83edd7d606d45d56964e7deb4ef9e007980110",
+      "negativeControl": "podPriorityClass system- case changed to never- by overlay -> TestDispatchResolverRefusesInvalidInputs (system-cluster-critical, system-node-critical rows) and TestClusteredNatsHubResolverRefusesInvalidInputs/a_system_priority_class all fail"
     },
     {
-      "criterion": "#2371 merges cleanly into main (now carrying #2362 and #2370), its diff holding only its own change, its CI job in ci.yaml, its changelog entries as pr2371 fragments; the envoy-infra Go tests and the component proofs pass on the merged tree.",
-      "surface": "The merged tree at 4c0da574: the envoy-infra unit lane, the helm v3.20.2 render of the vendored chart, three nats-server v2.15.1 processes with the real reloader and exporter on that render, and the built plugin read by Pulumi CLI v3.268.0",
-      "command": "cd packages/envoy/infra && test -z \"$(gofmt -l .)\" && go vet -tags pulumilive,natslive ./... && go test -count=1 ./... ; TMPDIR=/legion/scratch/tmp go test -count=1 -tags natslive -run TestClusteredNatsHub(Chart|Cluster)$ -v -timeout 30m ./gcp/ ; pulumi package get-schema <plugin built at the head> (https://github.com/sjawhar/legion/pull/2371#issuecomment-6501820019)",
-      "observed": "GitHub reports #2371 MERGEABLE against main at 4c0da574. gofmt clean, vet ok, every package ok, TestDispatchConnectionsPerPodIsTheServers included (main fixed it). natslive ok: chart render; cluster formed; leader SIGKILL at 212/1000 acks, new leader 6.0 s, 1000 stored exactly once; 3 exporter series at rest; users reload with cid kept, 0 reconnects; NoAuthUser refused; (f) lower max_file_store refused with the users change, both taken after restart. Schema serves envoy-infra:gcp:ClusteredNatsHub (22 inputs, kubeconfig and tailnetAuthKey secret, 5 outputs).",
-      "headSha": "4c0da574bf8a73de9a377e673755cf9e3b9f6533",
-      "negativeControl": "Before the merge GitHub reported #2371 CONFLICTING against main (19 conflicted paths, all but four from #2362 code the branch carried, taken as main has them)."
-    },
-    {
-      "criterion": "Review round 5, thread PRRT_kwDORFy7ds6xLgkd (and PRRT_kwDORFy7ds6xKae8): a hub server's restart in the live test keeps the ports it has, so the exporters and the urls snapshot stay right; only a first start draws new ports when one is taken.",
-      "surface": "TestClusteredNatsHubCluster: three nats-server v2.15.1 processes with the real reloader and exporter on the helm render, under a throwaway go test -overlay that holds envoy-nats-0's first client port on 0.0.0.0 for the whole test and holds the (b)-restarted server's client port for 2 s before its restart",
-      "command": "cd packages/envoy/infra && TMPDIR=/legion/scratch/tmp go test -count=1 -overlay <overlay> -tags natslive -run 'TestClusteredNatsHubCluster$' -v -timeout 30m ./gcp/ ; and the unmodified TestClusteredNatsHub(Chart|Cluster) natslive run and the unit lane",
-      "observed": "Overlay run ok (43.9 s). envoy-nats-0 came up on new ports. envoy-nats-2 restarted in (b) on its own ports [32924 24813 40133] after the holder let go. Phase (c) exporters showed 3/2/1 series and phase (d) kept cid 28 with 0 reconnects. The unmodified natslive run is ok (97.2 s). gofmt, vet and go test ./gcp/ ./core/ ./provider/ are ok (TestDispatchConnectionsPerPodIsTheServers skipped: it is main's).",
-      "headSha": "e105aef3e0445029a3f48602ee8de2d3fdf55df2",
-      "negativeControl": "The same overlay on the 16234e5e test -> 'the restart keeps its ports' fails: expected [49314 30976 30136], actual [16726 37769 36928]."
-    },
-    {
-      "criterion": "Review round 4, thread PRRT_kwDORFy7ds6xKae8: the live test's hub servers get distinct ports, and a start that finds a port taken retries on new ones, so the natslive lane cannot fail at random on a port collision.",
-      "surface": "TestClusteredNatsHubCluster: three nats-server v2.15.1 processes with the real reloader and exporter on the helm render",
-      "command": "cd packages/envoy/infra && TMPDIR=/legion/scratch/tmp go test -count=1 -tags natslive -run 'TestClusteredNatsHub(Chart|Cluster)$' -v -timeout 30m ./gcp/ ; the same run under go test -overlay with envoy-nats-0's client port held on 0.0.0.0 for the whole test",
-      "observed": "ok (31.2 s). With the port held, envoy-nats-0 retried and came up on three new ports, and the whole test passed. A throwaway test made 5,000 nine-port draws: bind-and-release repeated a port 2 times, loopbackPorts 0 times.",
-      "headSha": "16234e5e20b8981bbd9250aa9a1097f386633500",
-      "negativeControl": "The same held port with the 253b920c live test -> 'envoy-nats-0 did not start (attempt 10)', 'bind: address already in use'."
-    },
-    {
-      "criterion": "Review round 4, thread PRRT_kwDORFy7ds6xKafG: the hub's pods are held to GKE Autopilot's floor for their own shape (250m CPU, 512Mi, no pod anti-affinity or safe-to-evict), and the refusal names that rule.",
-      "surface": "The component's resolver under Pulumi mocks; the README sizing text",
-      "command": "cd packages/envoy/infra && go test -count=1 -run 'TestClusteredNatsHubTakesPodsAboveTheirOwnAutopilotFloor|TestClusteredNatsHubResolverRefusesInvalidInputs' ./gcp/",
-      "observed": "natsCpu 300m (a 400m pod) and tailnet.listener.cpu 150m (a 450m pod) are taken. natsCpu 100m (a 200m pod) is refused naming natsCpu: 'at least 150m ... less than 250m, below which Autopilot raises a pod with neither pod anti-affinity nor the safe-to-evict annotation'. GKE's autopilot-resource-requests page (read 2026-10-28) gives 250m CPU and 512 MiB for clusters without bursting. The whole unit lane passes (TestDispatchConnectionsPerPodIsTheServers is skipped: it is main's, 83 vs 84).",
-      "headSha": "16234e5e20b8981bbd9250aa9a1097f386633500",
-      "negativeControl": "At 253b920c the same natsCpu 300m was refused with 'must be at least 400m ... less than 500m, below which Autopilot raises it'."
-    },
-    {
-      "criterion": "#2371 merges cleanly into legion/INFRA-546 (which carries main and #2228), with its changelog entries as changie fragments carrying no Dispatch key and CHANGELOG.md as the base has it, and the unit lane, the helm render test and the three-server natslive test pass on the merged tree.",
-      "surface": "The merged tree at 253b920c: the module's unit lane, the helm v3.20.2 render of the vendored chart, and three nats-server v2.15.1 processes with the real reloader and exporter on that render",
-      "command": "cd packages/envoy/infra && test -z \"$(gofmt -l .)\" && go vet -tags pulumilive,natslive ./... && go test -count=1 ./... ; TMPDIR=/legion/scratch/tmp go test -count=1 -tags natslive -run 'TestClusteredNatsHub(Chart|Cluster)$' -v -timeout 30m ./gcp/ (https://github.com/sjawhar/legion/pull/2371#issuecomment-6470643160)",
-      "observed": "GitHub reports #2371 MERGEABLE at 253b920c. gofmt clean, vet ok, every package ok except TestDispatchConnectionsPerPodIsTheServers (expected 84, actual 83), which fails on the base's own unchanged files (dispatch.go 83 vs store.ConnectionsPerProcess 84, the same on main@origin; reported to the controller); ./gcp/ with it skipped ok. natslive: chart render ok; cluster formed; leader SIGKILL after 201/1000 acks, new leader 4.8 s, 1000 stored exactly once; users reload with cid kept, 0 reconnects; NoAuthUser refused; (f) a lower max_file_store refused with the users change, both taken after restart. CHANGELOG.md equals the base's; fragments pr2371-Added-*.yaml hold no Dispatch key.",
-      "headSha": "253b920c5f57c4e78a5b768b0f627d79df9ee7ea",
-      "negativeControl": "Before the merge GitHub reported #2371 CONFLICTING against legion/INFRA-546; the merged tree without the loopbackPort helper fails vet with 'undefined: cmdtest.FreeTCPPort' (the base removed it in #2229)."
-    },
-    {
-      "criterion": "Review round 2 (threads PRRT_kwDORFy7ds6wndgk, -gp, -gv): the docs, the depends-on comment and the CHANGELOG say what the code does; the depends-on order holds without a session user.",
-      "surface": "The component under Pulumi mocks and the helm v3.20.2 render of the vendored chart; the README, docs/nats-hub.md and CHANGELOG text read against the code",
-      "command": "cd packages/envoy/infra && go test -count=1 -run 'TestClusteredNatsHub|TestTailnetService' ./gcp/ && TMPDIR=/legion/scratch/tmp go test -count=1 -tags natslive -run 'TestClusteredNatsHubChart$' ./gcp/",
-      "observed": "ok (111.8 s) and ok (11.2 s). TestClusteredNatsHubRollsThePodsOnlyForASessionUserOrStoreChange now holds the StatefulSet's depends-on equal with and without a session user; the render asserts the depends-on names the ConfigMap holding nats.conf and auth.conf. README step 5 pins maxFileStoreGb from the pods' max-file-store annotation so the recreated StatefulSet adopts the pods; step 6 raises it as a rolling update; the list of pod-template changes names the store limit. gcp/tailnet_service.go and its test are identical to legion/INFRA-560@origin (6151bc54).",
-      "headSha": "f589463471e3f9d0c9dca4a732c9a427c2cb4006",
-      "negativeControl": "go test -overlay with the depends-on set only when a session user exists -> the roll test fails: 'the StatefulSet is applied after the ConfigMap without a session user'."
-    },
-    {
-      "criterion": "Review finding 1 (thread PRRT_kwDORFy7ds6wmI-h): a change of the file store's limit must not leave the servers refusing every later reload, a users change's included; users are applied by the reloader and the pods roll for what nats-server cannot reload.",
-      "surface": "Three local nats-server v2.15.1 processes with the real reloader and exporter on the helm v3.20.2 render of the component's values, and the component under Pulumi mocks",
-      "command": "cd packages/envoy/infra && TMPDIR=/legion/scratch/tmp go test -count=1 -tags natslive -run 'TestClusteredNatsHub(Chart|Cluster)$' -v -timeout 30m ./gcp/ (https://github.com/sjawhar/legion/pull/2371#issuecomment-6437362977); go test -count=1 -run TestClusteredNatsHubRollsThePodsOnlyForASessionUserOrStoreChange ./gcp/",
-      "observed": "ok. (f) envoy-nats-0 refused the reload of a lower max_file_store ('config reload not supported for decreasing jetstream max memory and store') and with it the users change written beside it (live-added refused); restarted, it admitted live-added. The render pins the pod annotations no-auth-user and max-file-store; on the mocks maxFileStoreGb 8 changes the annotation to 8Gi beside maxSize and nothing else, and a users change still changes only auth.conf.",
-      "headSha": "22e1c3aef576556ee672cb14e2c97539495ca0f6",
-      "negativeControl": "go test -overlay with the max-file-store annotation removed from clusteredHubChartValues -> the roll test fails: expected \"9Gi\", actual <nil>."
-    },
-    {
-      "criterion": "Review finding 2 (thread PRRT_kwDORFy7ds6wmI-o): the tailnet advertiser exits on SIGTERM, so a host pod does not wait out its 60 s grace period.",
-      "surface": "The rendered advertiser script under /bin/sh (dash) and ENVOY_TEST_SHELL=bash with a real 30 s sleep",
-      "command": "cd packages/envoy/infra && go test -count=1 -run TestTailnetService ./gcp/ && ENVOY_TEST_SHELL=bash go test -count=1 -run TestTailnetService ./gcp/",
-      "observed": "ok under both shells; TestTailnetServiceAdvertiserExitsOnSIGTERM: SIGTERM mid-wait gives exit status 0 at once. The PID-1 drop is Linux's (pid_namespaces(7)); this pod's gVisor kernel delivers it anyway, so an unshare -Urpf run here exited for the old script too and cannot show the before.",
-      "headSha": "22e1c3aef576556ee672cb14e2c97539495ca0f6",
-      "negativeControl": "go test -overlay without the trap -> 'signal: terminated'; with the trap but a foreground sleep -> exits after 29.99 s."
-    },
-    {
-      "criterion": "A change of the no-credential session user rolls the pods onto the new session user (spec: \"a change of the no-credential session user rolls the pods one at a time\"); the tester observation that the chart StatefulSet and ConfigMap had no order.",
-      "surface": "The plugin built at this head through the real Pulumi engine (CLI v3.268.0) on the README program (tailnet, priority class, session user) against a local kube-apiserver v1.33.0 + etcd (envtest binaries, RBAC on) with the namespace, PriorityClass, PodMonitoring CRD and seed Secret applied; and the helm v3.20.2 render of the vendored chart",
-      "command": "pulumi preview --json | jq the chart StatefulSet step newState.dependencies; and cd packages/envoy/infra && TMPDIR=/legion/scratch/tmp go test -count=1 -tags natslive -run TestClusteredNatsHub(Chart|Cluster) -v -timeout 30m ./gcp/ (https://github.com/sjawhar/legion/pull/2371#issuecomment-6436311075)",
-      "observed": "The StatefulSet envoy-nats:envoy/envoy-nats depends on urn ...$kubernetes:helm.sh/v4:Chart$kubernetes:core/v1:ConfigMap::envoy-nats:envoy/envoy-nats-config; the rendered StatefulSet carries config.kubernetes.io/depends-on: /namespaces/envoy/ConfigMap/envoy-nats-config and that ConfigMap is the chart one holding auth.conf; the three-server run passed again (leader SIGKILL after 210/1000 acks, new leader 4.8 s, 1000 stored exactly once; users reload with cid kept, 0 reconnects; NoAuthUser reload refused).",
-      "headSha": "e0040d229bba89bf903069f8f4b12ff12f04779f",
-      "negativeControl": "The plugin built at the previous head c8a0205b358f, same program and cluster: the StatefulSet step has dependencies null."
-    },
-    {
-      "criterion": "The rendered NATS configuration is run by three local nats-server processes: they form a cluster, a stream created at three copies survives one server's kill with a leader and no lost publish, and a user added and removed through the rendered auth file reloads with no restart and no client reconnect.",
-      "surface": "Three local nats-server v2.15.1 processes with the real nats-server-config-reloader v0.24.0 and prometheus-nats-exporter v0.20.2 (the chart's versions, go-installed), on the nats.conf and auth.conf that helm v3.20.2 renders from the component's registered chart values against the vendored chart nats-2.15.1.tgz (SHA-256 b209c627...58cc1 checked)",
-      "command": "cd packages/envoy/infra && TMPDIR=/legion/scratch/tmp go test -count=1 -tags natslive -run 'TestClusteredNatsHub(Chart|Cluster)' -v -timeout 30m ./gcp/ (log: https://github.com/sjawhar/legion/pull/2371#issuecomment-6435432090); re-run at e0040d229bba89bf903069f8f4b12ff12f04779f: ok 37.5s",
-      "observed": "At e0040d22 (re-run, ok 37.5s): cluster formed; SIGKILL of the R3 stream leader envoy-nats-0 after 210 of 1000 acknowledged messages, envoy-nats-1 led 4.815s later; 1000 acknowledged messages stored exactly once (5 retries); a user added then removed: the client kept server_id and cid 20 with 0 reconnects and 0 disconnects, PIDs unchanged [12792 12741 12749]; each server logged 'config reload not supported for NoAuthUser' for the session-user change, and a restarted server took the new one. Round 1 at c8a0205b also showed the exporter's nats_stream_last_seq at 3 series at rest, 2 with one server down, 1 for an R1 stream.",
-      "headSha": "e0040d229bba89bf903069f8f4b12ff12f04779f",
-      "negativeControl": "The chart test with natsBox enabled in the values fails (extra 'Deployment envoy-nats-box', 'Secret envoy-nats-box-contexts', 'Pod envoy-nats-test-request-reply'); with the expected archive checksum changed it fails on the SHA-256 (run with go test -overlay on throwaway copies, 2026-10-27)."
-    },
-    {
-      "criterion": "Unit tests on Pulumi mocks pin each point above (chart, users rendering, session-user roll, Service, NetworkPolicy, tailnet hosts, disruption budgets, priority class, metrics, replica count and byte limit into the listener, sizing, INFRA-546's bucket grant).",
-      "surface": "The component under Pulumi mocks and through the plugin's Construct path (provider.New via pulumitest.Construct), the module's whole unit lane",
-      "command": "cd packages/envoy/infra && test -z \"$(gofmt -l .)\" && go vet -tags pulumilive,natslive ./... && go test -count=1 ./...  (at c8a0205b with mkfs.ext4 1.47.4 from Debian's e2fsprogs on PATH for the existing data-disk tests); at e0040d22 the same with -skip of the two data-disk tests, this pod having no mkfs.ext4 then",
-      "observed": "At e0040d22: gofmt clean, vet ok, every package ok (gcp 135.4s). At c8a0205b with mkfs.ext4 on PATH: every package ok including the data-disk tests.",
-      "headSha": "e0040d229bba89bf903069f8f4b12ff12f04779f",
-      "negativeControl": "go test -overlay with jsAPI+\"STREAM.UPDATE.\"+stream removed from core's bucketPermissions -> TestClusteredNatsHubUsersHoldTheBucketRaise fails ('the tailnet listener raises envoy_interests'); each refusal row (e.g. natsMemory 4Gi with streamMaxBytes 44023414784, natsReplicas 4, a listener cpu of 100m) is refused naming its input."
-    },
-    {
-      "criterion": "The component is released in an envoy-infra version (pre-merge: the built plugin serves it).",
-      "surface": "The built plugin binary, read by the Pulumi CLI v3.268.0 that .github/actions/install-pulumi pins",
-      "command": "cd packages/envoy/infra && go build -ldflags \"-X main.version=0.0.0-dev\" -o $TMPDIR/infra549/p/pulumi-resource-envoy-infra ./cmd/pulumi-resource-envoy-infra && pulumi package get-schema $TMPDIR/infra549/p/pulumi-resource-envoy-infra | jq '.resources[\"envoy-infra:gcp:ClusteredNatsHub\"]'",
-      "observed": "inputs clientNamespaces, diskSizeGb, exporterImage, kubeconfig, maxFileStoreGb, metricsNamespaces, monitorNamespaces, name, namespace, natsCpu, natsImage, natsMemory, natsReplicas, priorityClassName, reloaderImage, serviceName, sessionUser, storageClassName, streamMaxBytes, tailnet, tailnetAuthKey, users; required kubeconfig, namespace, name, serviceName, natsImage, reloaderImage, exporterImage, clientNamespaces; secret kubeconfig, tailnetAuthKey; outputs podSelector, serviceUrl, statefulSetName, tailnetEnvoyUrl, tailnetNatsUrl; types gcp:ClusteredHubListener and gcp:ClusteredHubTailnet.",
-      "headSha": "c8a0205b358f516a0e0a7dd31bc8b59a50028002",
-      "negativeControl": "The released envoy-infra v2.5.0 plugin (gh release download, SHA256SUMS checked) -> get-schema gives {\"version\":\"2.5.0\",\"hasClustered\":false,\"hasNatsHub\":true}."
+      "criterion": "Review round 8: loopbackPorts.mu deleted; the live three-server test still passes",
+      "surface": "three local nats-server v2.15.1 processes with the real reloader and exporter on the helm-rendered configuration",
+      "command": "cd packages/envoy/infra && TMPDIR=/legion/scratch/tmp go test -count=1 -tags natslive -run TestClusteredNatsHub(Chart|Cluster)$ -v -timeout 30m ./gcp/",
+      "observed": "TestClusteredNatsHubChart PASS (9.0s); TestClusteredNatsHubCluster PASS (31.9s): cluster formed in 112ms, leader envoy-nats-1 SIGKILLed at 203 of 1000 acknowledged, envoy-nats-2 led 4.8s later, all 1000 stored exactly once",
+      "headSha": "ba83edd7d606d45d56964e7deb4ef9e007980110",
+      "negativeControl": "same overlay mechanism as round 6: a held port with the 253b920c test fails after 10 attempts with bind: address already in use"
     }
   ],
   "filesChanged": [
-    "packages/envoy/infra/core/listener_env.go, listener_env_test.go: NATSReplicas and StreamMaxBytes render ENVOY_NATS_REPLICAS / ENVOY_STREAM_MAX_BYTES only when set",
-    "packages/envoy/infra/gcp/natshub.go: authorization takes the listener's machine id and key, shared by both hubs",
-    "packages/envoy/infra/gcp/clusteredhub.go: args, resolver, refusals, sizing from streamMaxBytes, outputs",
-    "packages/envoy/infra/gcp/clusteredhub_kube.go: own Kubernetes provider, priority-class read, nats chart 2.15.1 with protected StatefulSet, NetworkPolicy, PodMonitoring",
-    "packages/envoy/infra/gcp/clusteredhub_tailnet.go: tailnet hosts (Secret, ConfigMap, ServiceAccount, Deployment, PDB)",
-    "packages/envoy/infra/gcp/tailnet_service.go, tailnet_service_test.go: byte for byte legion/INFRA-560 commit b1c6c868",
-    "packages/envoy/infra/gcp/dispatch.go, dispatch_kube.go: shared autopilotPodSize, podPriorityClass, NetworkPolicy, objectMeta and envVars helpers (gcp:Dispatch's texts unchanged)",
-    "packages/envoy/infra/gcp/clusteredhub_*_test.go, export_test.go, testdata/clustered-hub-*.golden, testdata/nats-2.15.1.tgz",
-    "packages/envoy/infra/provider/provider.go, provider_test.go: registration and schema test",
-    ".github/workflows/envoy-and-contracts.yaml: natslive step runs ./gcp/ with -timeout 30m; .gitignore: tracks the vendored chart",
-    "packages/envoy/infra/README.md, AGENTS.md, docs/nats-hub.md, .dispatch/architecture/envoy.md, docs/site/src/content/docs/dispatch/envoy.md, packages/envoy/CHANGELOG.md",
-    "packages/envoy/infra/gcp/clusteredhub_kube.go, clusteredhub_kube_test.go, clusteredhub_live_test.go, README.md, docs/nats-hub.md: the StatefulSet carries config.kubernetes.io/depends-on naming the chart ConfigMap <name>-config (round 2)",
-    "packages/envoy/infra/gcp/tailnet_service.go, tailnet_service_test.go: advertiser trap and nap (round 3; sent to INFRA-560 to copy byte for byte)",
-    "packages/envoy/infra/gcp/clusteredhub_kube.go, clusteredhub_kube_test.go, clusteredhub_live_test.go, clusteredhub_tailnet.go, testdata/clustered-hub-tailnet-pod.golden: store-limit annotation, live phase (f), grace comment (round 3)",
-    "packages/envoy/infra/README.md, docs/nats-hub.md, packages/envoy/CHANGELOG.md: what rolls the pods; the listener build INFRA-557's take-over requires (round 3)",
-    "packages/envoy/infra/README.md, docs/nats-hub.md, packages/envoy/CHANGELOG.md, gcp/clusteredhub_kube.go (comment), gcp/clusteredhub_kube_test.go, gcp/clusteredhub_live_test.go: review round 2 text fixes and the no-session-user depends-on pin (round 4)",
-    "Round 5 (merge only): packages/envoy/.changes/unreleased/pr2371-Added-*.yaml (changie fragments; CHANGELOG.md as the base's), gcp/clusteredhub_autopilot.go (the clustered hub's Autopilot size and priority-class rules, moved out of dispatch.go, which is now the base's), gcp/clusteredhub_live_test.go (loopbackPort replaces the removed cmdtest.FreeTCPPort), infra/AGENTS.md layout row, the workflow comment.",
-    "Round 6: gcp/clusteredhub_live_test.go (loopbackPorts pool, servers' args built per start, ports redrawn on retry), gcp/clusteredhub_autopilot.go (clusteredHubPodMinCPU 250m), gcp/clusteredhub.go (comment), gcp/clusteredhub_refusals_test.go, gcp/clusteredhub_test.go, README.md sizing text.",
-    "Round 7: gcp/clusteredhub_live_test.go (a restart keeps its ports; comments on start, startBound and loopbackPorts).",
-    "Round 8 (merge only): .github/workflows/ci.yaml (the gcp natslive step and job comment, since main deleted envoy-and-contracts.yaml); .dispatch/architecture/envoy.md and infra/AGENTS.md merged with main text; every #2362 file and the pr-2362 fragments taken as main has them.",
-    "Round 9: .github/scripts/ci_job_reads.py (envoy-infra-go natslive Run), packages/envoy/infra/core/listener_env.go (bus.MaxReplicas), packages/envoy/infra/core/nats_auth_live_test.go (comment)."
+    "packages/envoy/infra/gcp/dispatch.go",
+    "packages/envoy/infra/gcp/clusteredhub_autopilot.go",
+    "packages/envoy/infra/gcp/clusteredhub_live_test.go",
+    "packages/envoy/infra/AGENTS.md"
   ],
   "trickyParts": [
     "Chart children are not registered under Pulumi mocks, so the chart's values are pinned by mock tests and their effect by the natslive helm render; the StatefulSet's Protect transform is tested by calling it directly.",
@@ -140,19 +35,11 @@
     "pulumi-go-provider keys component outputs by the whole pulumi tag, so tailnetNatsUrl/tailnetEnvoyUrl are StringPtrOutput without ',optional' and are null without tailnet."
   ],
   "deviations": [
-    "main@origin (sjawhar/legion#2283 and others) was merged into the branch before the first code commit, as plan task 0 says, because the component reuses #2283's priority-class lookup; the skill otherwise reintegrates the base only on a conflict.",
-    "Per the INFRA-14 architect (Envoy, 2026-10-27 05:42Z, option C), the branch is stacked on legion/INFRA-546 (forward merge of 0681b1218da2) and the PR's base is legion/INFRA-546, so the bucket-grant test passes against #2362's code.",
-    "Plan 1.1's natsMemory floor is divided by 0.8 because nats-server now runs with GOMEMLIMIT at 80% of its memory limit (the chart README's recommendation); without GOMEMLIMIT the heap can grow to about twice its live size and the pod be OOM-killed. INFRA-546's 41 GiB gives 47 / 53 / 5Gi; the architect accepted these.",
-    "Plan 4.3's 10 s new-leader bound is 15 s: nats-server v2.15.1's Raft election timeout is a random 4-9 s (server/raft.go:317-318).",
-    "Plan 1.3 item 6 puts the advertiser and preStop scripts in the ConfigMap; the shared tailnet_service.go renders them inline for /bin/sh -c, so the ConfigMap holds serve.json alone.",
-    "natsReplicas is refused without tailnet (it renders only into the tailnet listener: the owned-input rule); the tailnet pod's total is held to Autopilot's floors like the hub pod's.",
-    "Round 2: legion/INFRA-546@origin (5fbe7ca51666) merged forward because GitHub reported the pull request CONFLICTING; the only resolution is packages/claude-envoy/dist/envoy-channel.js taken as the base has it (comment https://github.com/sjawhar/legion/pull/2371#issuecomment-6436308171).",
-    "Round 5: the old Changed changelog entry (gcp:Dispatch's refusals as core.InputError) is dropped, since the base's #2368 rewrote gcp:Dispatch's sizing and this PR no longer changes dispatch.go.",
-    "Round 7: the reviewer's cleanup (drop loopbackPorts.mu) is not done: the INFRA-14 architect narrowed this round to the restart finding alone."
+    "gcp:Dispatch priorityClassName refusals are now core.InputError values (same text); no changelog fragment, since the message and behaviour a consumer sees are unchanged"
   ],
   "openQuestions": [
     "The README's disk-growth procedure (orphan-delete the StatefulSet, state delete, recreate) and the PromQL for fewer than three current copies are documented from Kubernetes and exporter behaviour but not exercised on a cluster; the live proof on GKE is dispatch://INFRA-551's."
   ],
-  "round": 9,
-  "reviewRound": 7
+  "round": 10,
+  "reviewRound": 8
 }
