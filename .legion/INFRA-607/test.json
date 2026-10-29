@@ -2,29 +2,30 @@
   "schemaVersion": 1,
   "phase": "test",
   "issue": "INFRA-607",
-  "completed": "2026-10-29T18:27:33Z",
-  "testedHead": "b560260fbe9aa4cd25d46de20a26a9d372bb9341",
-  "codeHead": "84d139a3081a42151483832938b3c77355f9aa68",
-  "round": 10,
-  "scope": "Review round 5's fix (84d139a3) changes a test and prose only. maintenance_test.go and multiprocess_test.go are tests. In main.go and api/suggestion_outcomes.go only one comment line each changed ('the four timers', 'as the embedding queue takes none'). The rest are the README and two .dispatch/architecture files. No compiled behaviour changed since round 9's code a01bc655, so round 9's real-surface results stand for this head. This round runs the fixed test repeatedly.",
+  "completed": "2026-10-29T22:04:18Z",
+  "testedHead": "d1eddece5557920ab73340de9c3d7b43abe82194",
+  "codeHead": "bc54fc4fdd2ee70e20f101e4d4f098b0f3e4ce13",
+  "round": 11,
+  "scope": "bc54fc4f is a forward merge of main 5455925b. Main added 0141_drop_broadcast_idempotency_keys, so the branch's migrations moved from 0141-0147 to 0142-0148. The unchanged-diff fingerprint differs: 84d139a3 gives b2755e7f…, bc54fc4f gives 9c3fe489…. With migration numbers normalised, the two PR diffs are byte-identical (0 differing lines). So the only change is the renumbering, and this round drives the paths a renumbered migration chain could break: a deploy from main's schema 141, beside the main build.",
   "implementerProof": {
     "verdict": "verified",
-    "how": "`go test ./internal/dispatch/api/ -run TestTheMaintenanceLoopSweepsOncePerPeriodAcrossTwoRunners -count=30` on an export of 84d139a3 against Postgres 16 passed 30 of 30 in 67.5 s (implementer: 200 of 200). `go build ./cmd/dispatch` and `go vet ./internal/dispatch/api/ ./cmd/dispatch/` are clean."
+    "how": "I built bc54fc4f and its fork point 5455925b myself, on a fresh Postgres 16 cluster with every statement logged, NATS 2.10.29 and the Envoy listener (config A). The main build created the database at schema 141 and seeded 18 suggestions. A head process started beside it and migrated: schema_migrations holds 140-148 with no gap, and there was no ERROR line in either log."
   },
   "failures": [],
   "failed": 0,
   "proof": [
     {
-      "criterion": "The maintenance sweep's two-runner test no longer races (review round 5), and no runtime behaviour changed",
-      "surface": "The api package's test suite against real Postgres, and the diff of the PR from a01bc655 to 84d139a3",
-      "command": "go test ./internal/dispatch/api/ -run TestTheMaintenanceLoopSweepsOncePerPeriodAcrossTwoRunners -count=30; jj diff --from a01bc6556a49 --to 84d139a3081a --git on main.go and suggestion_outcomes.go",
-      "observed": "ok in 67.5 s for 30 runs. The non-test Go change is two comment lines. Round 9's real-binary results at a01bc655 (rolling deploy beside main, identical outcomes, one keyed-write sweep per minute, idle 3.30/s with the changed loops at 0) apply unchanged.",
-      "headSha": "84d139a3081a42151483832938b3c77355f9aa68",
-      "negativeControl": "The reviewer traced the race on the previous test: the delete was counted at query start and the resume only after it returned, so a poll in between saw 6 sweeps and 5 resumes."
+      "criterion": "The renumbered migrations deploy on main's schema, and the woken loops they serve still work beside the previous release",
+      "surface": "The fork-point build (5455925b) seeding through POST /api/v1/projects, /issues and /issues/{key}/comments, then a head process (bc54fc4f) migrating that database while the old build runs. A person's edit through POST /api/v1/artifacts/{id}/edits, and refs rows cleared with psql.",
+      "command": "start.sh main 0 t8; seed SUG-1..8; start.sh head 1 t8; comments through both ports; agent spec plus person edit on SUG-8; after 100 s psql -f mainrules.sql and diff; update refs set excerpt_version = null for a new spec citing two issues",
+      "observed": "schema_migrations: 140,141,...,148. Suggestions: the 18 live outcomes (9 judged) are identical row for row to main's full-table rules. The head skipped the suggestion-outcomes lease in the minutes the old build held it. Edit notice: due 21:56:03.262; 'dispatch: sent edit notices notices=1' at 21:56:03.273; one artifact.human_edited event; row gone. Excerpts: re-recorded about 1 s after they were cleared.",
+      "headSha": "bc54fc4fdd2ee70e20f101e4d4f098b0f3e4ce13",
+      "negativeControl": "ses-other's comment on SUG-3 resolved nothing in either the live table or main's rules."
     }
   ],
-  "ci": "At 18:27Z, at 84d139a3: changes and pr-title are queued. I did not wait for them.",
+  "ci": "At bc54fc4f (21:59Z): changes and pr-title were queued. At 84d139a3, the code whose PR diff is identical up to migration numbers: ci-ok failed on one job, envoy-go-race. Every other job passed: dispatch, envoy-go, envoy-infra-go, the multiprocess jobs, dispatch-memory, envoy-e2e-local, envoy-smoke, envoy-session-stall, listener-server-change, docs, lint, typecheck, test and worker-image build. envoy-go-race failed on two packages; this PR's api, delivery and store passed in that job. (1) internal/dispatch/docs hit go test's 30-minute timeout. That is main's: main ea721a28 (job 123634394657) and five unrelated pull requests the same day (INFRA-715 123694353510, INFRA-592 123686573540, INFRA-590 123684426467, INFRA-720 123648206657, INFRA-588 123643922299) all fail docs at about 1801 s. (2) internal/dispatch/pmdoc's CPU-time linearity tests failed (TestBareURLShapesParseAndRenderLinearly: a 1 MiB read 'did not return within 1m0s'; TestUpdateIsLinearInTheBlockCount refused to measure while that run was still going). pmdoc passed in those six jobs. Its test dependency closure (pmdoc, docs/crafted, docs/docstest, cputest, stacktest) holds no file this PR changes, so this is a timing flake of a package the PR cannot affect. I recorded it for the controller and did not re-run CI.",
   "mainReds": [
-    "close-withdraws-asks.e2e.ts:126 is the only known main red."
+    "close-withdraws-asks.e2e.ts:126 (the controller's list).",
+    "envoy-go-race: internal/dispatch/docs times out at 30 minutes under the race detector on main and on every PR I checked. New to the list."
   ]
 }
