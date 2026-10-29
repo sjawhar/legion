@@ -552,14 +552,15 @@ func (c *Client) Connected() bool {
 const RepairGrace = time.Minute
 
 // HookStall reports how long the reconnect hooks have been due without a run that succeeded, zero
-// while none is due, and the error of the last run that failed, nil while none has. The listener's
-// /healthz reads it, so it reads the client's state under mu and touches no connection, as
-// Connected and SubOK do.
+// while none is due, and the error of the last run that failed, nil while the hooks are current:
+// a run that succeeds clears that error in the same locked section that zeroes the stall. The
+// listener's /healthz reads it, so it reads the client's state under mu and touches no
+// connection, as Connected and SubOK do.
 func (c *Client) HookStall() (time.Duration, error) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	if c.hooksDueSince.IsZero() {
-		return 0, c.lastHookErr
+		return 0, nil
 	}
 	// A clock a test moves itself can stand before the event it timed, and a wall clock can step
 	// back, so the stall never reads as a negative duration.

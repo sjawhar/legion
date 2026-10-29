@@ -370,22 +370,33 @@ func sessionHealthFields(sessions *session.SessionRegistry) map[string]interface
 // healthzBudget, or the durable consumer is
 // "not bound to this listener's subscription" because it was recreated server-side and now
 // delivers elsewhere; and 200 "degraded" for a transient KV failure the self-health monitor and
-// the NATS reconnect retry. A listener that mounts no GitHub webhook route keeps no CI cache,
-// and its answer carries "ci_cache": "not_applicable". "live_topics" says whether the live topics
-// lane is "subscribed" or, with ENVOY_SUBSCRIBE_ALL_TOPICS off, "not_applicable"; with it on, a
-// live client that is not connected or holds no valid subscription is 503 "live subscription
-// inactive", since every topic the stream does not store then reaches no session.
+// the NATS reconnect retry, and for a KV watch rebuild stalled past bus.RepairGrace (below). A
+// listener that mounts no GitHub webhook route keeps no CI cache, and its answer carries
+// "ci_cache": "not_applicable". "live_topics" says whether the live topics lane is "subscribed"
+// or, with ENVOY_SUBSCRIBE_ALL_TOPICS off, "not_applicable"; with it on, a live client that is
+// not connected or holds no valid subscription is 503 "live subscription inactive", since every
+// topic the stream does not store then reaches no session.
 //
 // A rewatch of the KV caches that keeps failing after a reconnect ends no watcher and clears no
 // cache, so every check above still passes while the caches follow buckets they no longer watch
 // (INFRA-743). The handler therefore reads the client's HookStall, how long the bus's reconnect
-// hooks have been due without a run that succeeded, and answers 503 "unhealthy" as the dependency
-// "KV watch rebuild" once it reaches bus.RepairGrace. A shorter stall is reported nowhere here:
-// the bus runs the hooks again within seconds of a failure (internal/bus/recovery.go,
+// hooks have been due without a run that succeeded, and reports the dependency "KV watch rebuild"
+// once it reaches bus.RepairGrace. That answer is 200 "degraded" and not 503, because the probes
+// act on /healthz: the ECS container health check is curl -sf /healthz, every 30 s with 3 retries
+// (infra/aws/rendering/listener.go:202-203), on a service of one task
+// (infra/aws/webhooklistener.go:227), and GKE's readiness probe reads it too
+// (infra/gcp/dispatch_kube.go:516). A 503 would replace, or unroute, the only listener there is,
+// and its replacement rebuilds into the same failing rewatch with cold caches that warm up empty,
+// whose fanout then acknowledges general-topic messages as unmatched and loses them (delivery.go,
+// fanoutDelivery), while the running task still serves from the caches it holds, stale but not
+// empty. The paging signal for this state is the bus's ERROR "envoy nats reconnect hooks have not
+// succeeded" (internal/bus/recovery.go, reportHookFailure), which the AWS rendering counts as a
+// log metric filter (infra/aws/rendering/metricfilters.go). A shorter stall is reported nowhere
+// here: the bus runs the hooks again within seconds of a failure (internal/bus/recovery.go,
 // recoverUntilHealthy), so a rebuild under the bound is being repaired, and a listener would
-// otherwise fail its container health check over every reconnect. The stall is one bus.Client's,
-// naming no cache, so a listener that keeps no CI cache needs no branch of its own, and the live
-// topics lane's client, which carries no reconnect hook, has no stall to report.
+// otherwise read as degraded over every reconnect. The stall is one bus.Client's, naming no
+// cache, so a listener that keeps no CI cache needs no branch of its own, and the live topics
+// lane's client, which carries no reconnect hook, has no stall to report.
 //
 // The checks that go to the bus share one healthzBudget taken from the request's own context: the
 // flush, each cache's KV ping and the durable consumer's info read. A ping or that read that has
@@ -435,7 +446,10 @@ func healthzHandler(deps *atomic.Pointer[listenerDeps]) http.HandlerFunc {
 		if stall, hookErr := d.client.HookStall(); stall >= bus.RepairGrace {
 			// The rebuild has been due a whole grace with no run that succeeded, so the caches
 			// behind it follow buckets nothing is repairing. A rewatch that keeps failing ends no
-			// watcher and clears no cache, so neither loop above reports it (INFRA-743).
+			// watcher and clears no cache, so neither loop above reports it (INFRA-743). The
+			// answer is 200 "degraded": a 503 here would take the probes' only listener out and
+			// its replacement would rebuild into the same failure with empty caches, losing the
+			// fanout messages this task's stale caches still place (see the doc comment above).
 			rebuild := fmt.Errorf("no rebuild has succeeded for %s", stall.Round(time.Second))
 			if hookErr != nil {
 				// The last failure says what is broken; the stall, for how long. A run still in
@@ -443,7 +457,7 @@ func healthzHandler(deps *atomic.Pointer[listenerDeps]) http.HandlerFunc {
 				// one, so then the stall is the whole report.
 				rebuild = fmt.Errorf("%w (%w)", hookErr, rebuild)
 			}
-			writeDependencyHealth(w, "KV watch rebuild", rebuild, true)
+			writeDependencyHealth(w, "KV watch rebuild", rebuild, false)
 			return
 		}
 		response := map[string]interface{}{"status": "healthy"}

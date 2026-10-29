@@ -44,15 +44,18 @@ func (c *hookStallClock) Advance(d time.Duration) {
 // own rewatch failure reads, so the answer is checked against the text an operator would see.
 var errHookStallRewatch = errors.New("rewatch interest cache: watch role claims KV bucket: context deadline exceeded")
 
-// /healthz answers 503 unhealthy, naming "KV watch rebuild", once the bus's reconnect hooks have
-// been due a whole bus.RepairGrace without a run that succeeded, and 200 healthy while the stall is
-// under it. A rewatch that keeps failing after a reconnect ends no watcher and clears no cache, so
-// every other check here passes - WatchErr stays nil, the bucket ping answers, and the durable is
-// bound - and the regression this catches is /healthz calling a listener healthy whose caches
-// follow buckets they no longer watch (INFRA-743). The negative control is
-// the same request on the same rig after a connection event and a failed run, with the stall still
-// under the grace: the bus runs the hooks again within seconds, so that must stay 200 healthy
-// rather than fail the container health check over every reconnect.
+// /healthz answers 200 "degraded", naming "KV watch rebuild", once the bus's reconnect hooks have
+// been due a whole bus.RepairGrace without a run that succeeded, and 200 "healthy" while the
+// stall is under it. A rewatch that keeps failing after a reconnect ends no watcher and clears no
+// cache, so every other check here passes - WatchErr stays nil, the bucket ping answers, and the
+// durable is bound - and the regression this catches is /healthz calling a listener healthy whose
+// caches follow buckets they no longer watch (INFRA-743). The answer stays 200 because the probes
+// act on it: a 503 would replace the only listener there is (the ECS container health check is
+// curl -sf /healthz) into the same failing rebuild, whose empty caches then lose the fanout
+// messages this task's stale ones still place. There are two negative controls. One is the same
+// request on the same rig after a connection event and a failed run, with the stall still under
+// the grace: the bus runs the hooks again within seconds, so that must stay 200 healthy rather
+// than report every reconnect. The other is a whole grace of clock before any reconnect, below.
 func TestHealthzAnswersAHookStallPastTheRepairGrace(t *testing.T) {
 	clock := &hookStallClock{now: time.Now()}
 	client, err := bus.ConnectOwningStream([]string{testnats.URL(t)},
@@ -99,6 +102,19 @@ func TestHealthzAnswersAHookStallPastTheRepairGrace(t *testing.T) {
 		t.Fatalf("/healthz before any reconnect = %d %v, want 200 healthy", code, body)
 	}
 
+	// A whole grace of clock with no connection event leaves the stall at zero: it begins at an
+	// event the hooks have yet to cover, not at the connection that first ran them. This is the
+	// lock on that, because a change marking the hooks due at the first connection would have
+	// every listener answer degraded a minute after it started, with nothing wrong and no
+	// reconnect anywhere, and every other test in the tree would stay green.
+	clock.Advance(bus.RepairGrace)
+	if stall, hookErr := client.HookStall(); stall != 0 || hookErr != nil {
+		t.Fatalf("HookStall a whole bus.RepairGrace after the first connection = %v %v, want 0 and no error", stall, hookErr)
+	}
+	if code, body := get(); code != http.StatusOK || body["status"] != "healthy" {
+		t.Fatalf("/healthz a whole bus.RepairGrace after the first connection = %d %v, want 200 healthy", code, body)
+	}
+
 	// The hook stands for the listener's own rewatch of its caches, failing however often it is
 	// run, as a rewatch whose bucket read never answers does.
 	client.AddReconnectHook(func(*natsgo.Conn) error { return errHookStallRewatch })
@@ -115,8 +131,8 @@ func TestHealthzAnswersAHookStallPastTheRepairGrace(t *testing.T) {
 
 	clock.Advance(bus.RepairGrace)
 	code, body := get()
-	if code != http.StatusServiceUnavailable || body["status"] != "unhealthy" {
-		t.Fatalf("/healthz a whole bus.RepairGrace into the stall = %d %v, want 503 unhealthy", code, body)
+	if code != http.StatusOK || body["status"] != "degraded" {
+		t.Fatalf("/healthz a whole bus.RepairGrace into the stall = %d %v, want 200 degraded", code, body)
 	}
 	reported := fmt.Sprint(body["error"])
 	if !strings.Contains(reported, "KV watch rebuild") || !strings.Contains(reported, errHookStallRewatch.Error()) {

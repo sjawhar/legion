@@ -246,14 +246,14 @@ func (c *Client) hooksDue() bool {
 // close the outage is to that point.
 func (c *Client) reportHookFailure(err error) {
 	stall, _ := c.HookStall()
-	if stall < RepairGrace {
-		slog.Warn("envoy nats reconnect hook failed; it is retried",
-			slog.String("name", c.name),
-			slog.String("error", err.Error()),
-			slog.Int64("stall_ms", stall.Milliseconds()))
-		return
+	// One call for both lines, so an attribute added later goes on the WARN and the ERROR alike.
+	// The two messages and the three attributes are matched by an operator's filter and by the
+	// AWS log-metric filter, so neither is rewritten here.
+	level, msg := slog.LevelWarn, "envoy nats reconnect hook failed; it is retried"
+	if stall >= RepairGrace {
+		level, msg = slog.LevelError, "envoy nats reconnect hooks have not succeeded"
 	}
-	slog.Error("envoy nats reconnect hooks have not succeeded",
+	slog.Log(context.Background(), level, msg,
 		slog.String("name", c.name),
 		slog.String("error", err.Error()),
 		slog.Int64("stall_ms", stall.Milliseconds()))
