@@ -11,13 +11,13 @@
 # without `time:`) and one written by `changie new`, all shipped by a bump-shaped release tag (on
 # a child of the built commit, as the npm releases tag it); the fold indents that body's
 # continuation lines two spaces under the bullet and leaves its blank line empty. The release's
-# version is one major above the newest release the copied CHANGELOG.md names, so the fold, which
-# places a release's block among the others by version, puts it on top whatever pi-legion has
-# released since. push-fold
+# major is one above that of the copied CHANGELOG.md's first `## [x.y.z]` heading, its newest
+# release since the fold keeps the file newest first, so the fold, which places a release's block
+# among the others by version, puts it on top whatever pi-legion has released since. push-fold
 # reaches a bare origin as release-push.test.sh's push-main cases do: through a deploy key, with
 # the GitHub URL rewritten to the local origin by GIT_CONFIG_*, and a stub `gh` that logs each
-# call. A last case gives fold-notes a fragment of an unknown kind, which changie refuses without
-# naming the file, and checks fold-notes names it.
+# call. A last case gives fold-notes a fragment of an unknown kind, in a later release of the same
+# major, which changie refuses without naming the file, and checks fold-notes names it.
 #
 # Needs changie v1.26.0 on PATH (.github/actions/install-changie installs it) and exits 1 without
 # it: the test never passes by skipping.
@@ -45,11 +45,7 @@ source "$script_dir/test-lib.sh"
 
 # The repository: clone a, whose main holds the fragments; the release tag pi-legion-v<version> on
 # a child of main's tip, committed at 20:00 on June 30 in UTC-6, which is July 1 in UTC; and a bare
-# origin whose main is that tip. The version is <major>.2.3, its major one above the newest release
-# heading of the copied CHANGELOG.md, and the version before it <major>.2.2.
-newest=$(grep -m 1 -oE '^## \[[0-9]+\.[0-9]+\.[0-9]+\]' "$package_src/CHANGELOG.md" | grep -oE '^## \[[0-9]+' | grep -oE '[0-9]+$' || true)
-major=$((${newest:-0} + 1))
-version="$major.2.3"
+# origin whose main is that tip. The version is <major>.2.3 and the one before it <major>.2.2.
 a="$work/a"
 pkg="$a/packages/pi-legion"
 unreleased="$pkg/.changes/unreleased"
@@ -59,6 +55,11 @@ git -C "$a" config user.name "fold test"
 git -C "$a" config user.email "fold-test@example.com"
 cp "$package_src/.changie.yaml" "$package_src/CHANGELOG.md" "$pkg/"
 cp "$pkg/CHANGELOG.md" "$work/old-CHANGELOG.md"
+# The major: one above the copy's first `## [x.y.z]` heading's, read from the copy the fold is
+# compared with; 1 when it names no release.
+newest=$(sed -nE '/^## \[([0-9]+)\.[0-9]+\.[0-9]+\].*/{s//\1/p;q;}' "$work/old-CHANGELOG.md")
+major=$((10#${newest:-0} + 1))
+version="$major.2.3"
 printf '{"name": "@sjawhar/pi-legion", "version": "%s"}\n' "$major.2.2" > "$pkg/package.json"
 git -C "$a" add -A
 git -C "$a" commit -q -m "chore: seed"
@@ -187,10 +188,10 @@ printf 'kind: Fixed\nbody: a good fix\n' > "$unreleased/INFRA-14-good.yaml"
 printf 'kind: Deprecated\nbody: no such kind\n' > "$unreleased/INFRA-14-bogus.yaml"
 git -C "$a" add -A
 git -C "$a" commit -q -m "feat: more entries"
-git -C "$a" tag pi-legion-v1.2.4
+git -C "$a" tag "pi-legion-v$major.2.4"
 run fold-notes "$work/notes-bogus"
 check "an unknown kind: fold-notes exits 1 with an ::error:: naming the package and the label" \
-  "$(is "$rc|$(contains "$out" "^::error::release-push.sh fold-notes: changie could not render packages/pi-legion's notes for 1\.2\.4")" "1|true")"
+  "$(is "$rc|$(contains "$out" "^::error::release-push.sh fold-notes: changie could not render packages/pi-legion's notes for $major\.2\.4")" "1|true")"
 check "an unknown kind: the error names the fragment, and only that one" \
   "$(contains "$out" "refused alone: packages/pi-legion/\.changes/unreleased/INFRA-14-bogus\.yaml; changie said: .*Deprecated")"
 
