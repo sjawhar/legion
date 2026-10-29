@@ -2,9 +2,17 @@
   "schemaVersion": 1,
   "phase": "implement",
   "issue": "INFRA-493",
-  "completed": "2026-10-29T09:45:00Z",
+  "completed": "2026-10-29T12:50:00Z",
   "pullRequest": "https://github.com/sjawhar/legion/pull/2478",
   "proof": [
+    {
+      "criterion": "Round 5: main merged forward with #2362 and #2186; the listener's capped failure memory works with #2362's republish without Nats-Msg-Id after bus.ErrNotStored",
+      "surface": "the Envoy listener's GitHub handler on a real three-server NATS cluster with a byte-limited three-copy stream (#2362's setup)",
+      "command": "cd packages/envoy && go test -count=1 ./internal/webhook/ -run NotStored -v",
+      "observed": "TestAGitHubDeliveryAnsweredNotStoredIsRepublishedWithoutItsID PASS: the first refused publish answers 503 with one counted `github publish failed: \u2026` line; the same GUID again answers 503 with one `redelivery d-full: github publish failed: \u2026` naming bus.ErrNotStored and bus.ErrStreamFull; after a purge the redelivery's republish without the id is stored, answered 200, no log line, one message with the delivery's dedupe key and no Nats-Msg-Id",
+      "headSha": "fa20b0e239362ab286f9e9bda8c63dd5eb20c4e4",
+      "negativeControl": "with bus's republish branch short-circuited the test fails: the redelivery logs only the duplicate-not-held error and never names the full stream"
+    },
     {
       "criterion": "Round 4 (architect's send-back): main merged forward with the conflict resolved, the approval's six follow-up items done, and every package the merge touches green",
       "surface": "the daemon's and Envoy's real suites on a real Postgres and nats-server 2.10.22, the Envoy listener's GitHub handler, and GitHub's required checks at the code head",
@@ -118,7 +126,8 @@
     "Round 2 changes only packages/daemon/internal/intake/drain_test.go (the tester's one failure); no production code changed, so the round-1 proofs at 55eb11c8 stand for the code",
     "Round 3: the reviewer's fast-follow cleanup items are done in a8a2c1b1 rather than deferred; the push-read id now has one shape (without the branch) for both the compare and the activity paths",
     "Round 3: the real-grant lag test needs Docker (testnats.StartNkeyAuthorizedUsers), as the daemon package's other real-grant tests do; it was shown failing on the old code and passing on the new against a local nats-server",
-    "Round 4: main merged forward a third time (conflict in routes_table_test.go: the pin is main's 140 plus this branch's route); the six follow-up items of the approval are done in 19a25586; nothing else added (architect 06:56Z)"
+    "Round 4: main merged forward a third time (conflict in routes_table_test.go: the pin is main's 140 plus this branch's route); the six follow-up items of the approval are done in 19a25586; nothing else added (architect 06:56Z)",
+    "Round 5: daemon API contract renumbered 42 -> 43 at the merge of fa20b0e2 (main's #2186 took 42); local checks at fa20b0e2: daemon api, projection, prompts, intake, workflow, daemon (plugin/version/probe/webhook/pass/stall), cmd/legion; envoy webhook, redeliver, contracts, cistore, integration, bus, infra (DataDisk skipped: no mkfs.ext4); Bun contracts 324, pi-legion 521, pi-shared 90, claude-envoy daemon-api-version 1; biome no errors"
   ],
   "openQuestions": [
     "Environment-only failures in this pod, not touched by this change: packages/daemon launcher session_store tests (the pod's OMP_SESSION_* variables), runtime/tmux TestNewRefusesLaunchersItCannotRun (no tmux), natsauth (Docker); packages/envoy agent-secrets CLI tests and dispatch/api TestIssueRanksStayOrderedPastLowercaseDigitsAndProductionShapedMoves (C collation); check-bun-version, check-image-trigger-paths and check-release-credentials need python's yaml module"
