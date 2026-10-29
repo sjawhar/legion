@@ -100,7 +100,9 @@ const DeliverSubjectPrefix = NotificationTopicPrefix + "envoy.deliver."
 
 // DeliverSubject is the relay subject of session sessionID: the subject the listener that owns the
 // session publishes each message of its consumer (SessionConsumerName) on, and the session
-// subscribes to.
+// subscribes to. Every message a session gets travels on it; a plain subscription of the session's
+// own carries only a lane receipt, a live ad-hoc topic and the core fallback ("Session consumers"
+// in packages/envoy/AGENTS.md).
 func DeliverSubject(sessionID string) string {
 	return DeliverSubjectPrefix + sessionID
 }

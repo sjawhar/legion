@@ -110,7 +110,7 @@ describe("envoyToolSpecs", () => {
     expect(publish?.description).toContain("id for dedupe and at for freshness");
     for (const description of [subscribe?.description, publish?.description]) {
       expect(description).toContain(
-        "reach each subscribed session once, also one that was away or restarted, when its listener supports consumer delivery"
+        "reach each subscribed session once from the durable consumer its listener relays to it, also one that was away or restarted"
       );
       expect(description).toContain("Team and other ad-hoc topics are live only.");
     }

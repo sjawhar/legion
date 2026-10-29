@@ -150,7 +150,7 @@ published still gets it when it reconnects
 | `notifications.legion.<project>.controller` | A Legion project's controller. |
 | `notifications.slack.*.<channel>.mention` | Every mention of the Slack app in one channel, whatever the team. |
 | `notifications.envoy.exceptions.<topic>` | A delivery to `<topic>` that failed, with the reason. |
-| any other `notifications.<name>` topic | A team topic you name, such as `notifications.team.deploy-squad.all`. It reaches every session subscribed to it when it is published, and is not kept for a session that subscribes later. A session that holds its own NATS connection receives it directly, its own publish included. A publish through the listener also hands it to each other such session registered on the topic, on any machine, and waits for each to confirm it: if one does not within four seconds, the publish fails naming each session that did not, and every session it does not name received it. A session that stopped without unregistering stays registered for up to five minutes and is named in that time. A registered session whose connection was down gets the message from the stream when it reconnects ([Messages a session missed](#messages-a-session-missed)). A session the listener delivers to over a serve port, such as an OpenCode agent, is not waited for: it receives the topic through its machine's listener when that listener subscribes to every topic (`ENVOY_SUBSCRIBE_ALL_TOPICS=1`, which a host's own listener sets; the shared hub's listener does not), except a publish of its own, which the listener does not echo back. A topic outside `notifications.` is refused. |
+| any other `notifications.<name>` topic | A team topic you name, such as `notifications.team.deploy-squad.all`. It reaches every session subscribed to it when it is published, and is not kept for a session that subscribes later. The stream keeps no such topic, so it is the one family a session still takes live, on its own NATS connection, its own publish included. A publish through the listener also hands it to each other such session registered on the topic, on any machine, and waits for each to confirm it: if one does not within four seconds, the publish fails naming each session that did not, and every session it does not name received it. A session that stopped without unregistering stays registered for up to five minutes and is named in that time. A registered session whose connection was down gets the message from the stream when it reconnects ([Messages a session missed](#messages-a-session-missed)). A session the listener delivers to over a serve port, such as an OpenCode agent, is not waited for: it receives the topic through its machine's listener when that listener subscribes to every topic (`ENVOY_SUBSCRIBE_ALL_TOPICS=1`, which a host's own listener sets; the shared hub's listener does not), except a publish of its own, which the listener does not echo back. A topic outside `notifications.` is refused. |
 
 An agent subscribes with Envoy's `envoy_subscribe` tool, which stores the subscription in the
 listener. A subscription to `<subject>.>` also covers `<subject>` itself, so subscribing to a pull
@@ -168,22 +168,23 @@ holder that restarts or loses its connection gets the forward once when it is ba
 
 ## Messages a session missed
 
-An Oh My Pi session (`@sjawhar/pi-envoy`) and a Claude Code session (`claude-envoy`) hold their
-own NATS connection, and NATS keeps nothing for a subscriber that is not connected. So the
-listener keeps a durable consumer on the stream for each such session, and for each session on a
-serving port, filtered on the session's inbox and on each topic it follows that the stream keeps.
-The listener that owns the session sends it the stored messages in the order they were published,
-on `notifications.envoy.deliver.<session_id>`, a subject the stream does not keep, and marks each
-one delivered only when the session answers that it has it. A message published while the
-session was not running, was restarting or had lost its connection, or while its listener
-restarted, reaches the session once when it is back, up to 72 hours later.
+Every message a session gets comes from a durable consumer the listener keeps for it on the
+stream: one per Oh My Pi session (`@sjawhar/pi-envoy`), per Claude Code session (`claude-envoy`)
+and per session on a serving port, filtered on the session's inbox and on each topic it follows
+that the stream keeps. The listener that owns the session sends it those messages in the order
+they were published, on `notifications.envoy.deliver.<session_id>`, a subject the stream does not
+keep, and marks each one delivered only when the session answers that it has it. No session takes
+its messages from a NATS subscription of its own, so a message published while the session was not
+running, was restarting or had lost its connection, or while its listener restarted, reaches the
+session once when it is back, up to 72 hours later.
 
 - **What comes this way:** the session's inbox, `notifications.agent.<session_id>` (direct
   messages, Dispatch deliveries, and the forwards of role messages to a role it holds), and the
   topics it follows that the stream keeps, such as an issue's
   `notifications.dispatch.issue.<KEY>.>`.
-- **What does not:** team and other ad-hoc topics, which are live only, and anything published on
-  a topic before the session followed it.
+- **What does not:** team and other ad-hoc topics, which the stream does not keep and which a
+  session therefore still takes live, on its own NATS connection; and anything published on a
+  topic before the session followed it.
 - **When a message counts as delivered:** an Oh My Pi session answers once the message is in its
   session file. A Claude Code session under Legion's bridge answers once Claude Code took the
   message as a user message. A Claude Code session in channel mode answers once Claude Code
@@ -208,15 +209,16 @@ delivered; such a client already reads every session's traffic.
 
 ### Without session consumers
 
-A listener whose NATS user may not manage session consumers, a listener of an earlier release,
-and a plugin of an earlier release keep the earlier path: the session receives on its own NATS
-subscriptions, and a message published while its connection is down, NATS is restarting, or the
-session is not running never reaches that subscription. The stream keeps what it captures, so the
-session asks its listener for it, `POST /v1/replay`, when it starts or resumes, when it reconnects,
-when a subscription comes back, and on every heartbeat. The listener reads the stream for the
-session's own inbox topic and for each topic it registered, after the place the session last read
-to, and the session shows each message it was not shown yet, once, marked as published while its
-connection was down.
+While the rollout lasts, a listener whose NATS user may not manage session consumers, a listener
+of an earlier release, and a plugin of an earlier release fall back to the earlier path: the
+session receives on its own NATS subscriptions, and a message published while its connection is
+down, NATS is restarting, or the session is not running never reaches that subscription. The
+stream keeps what it captures, so the session asks its listener for it, `POST /v1/replay`, when it
+starts or resumes, when it reconnects, when a subscription comes back, and on every heartbeat. The
+listener reads the stream for the session's own inbox topic and for each topic it registered,
+after the place the session last read to, and the session shows each message it was not shown yet,
+once, marked as published while its connection was down. This fallback exists only until every
+session reads its own consumer (`dispatch://INFRA-771`), and nothing should be built on it.
 
 - **What comes back:** messages on the session's inbox topic, `notifications.agent.<session_id>`,
   and on the topics it follows that the stream keeps, such as an issue's

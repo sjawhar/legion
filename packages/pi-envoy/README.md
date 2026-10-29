@@ -41,16 +41,19 @@ and `summary`) for recovery after an interrupt. `envoy_role_get` returns the cur
 last-seen timestamp for a role. `envoy_subscribe` reports listener warnings in both its text and
 details result, including subscriptions whose stream currently has no matching event.
 
-When the listener supports consumer delivery, it keeps a durable consumer for the session on
-Envoy's notification stream and relays it on `notifications.envoy.deliver.<session id>`, which
+The session's messages come from a durable consumer the listener keeps for it on Envoy's
+notification stream and relays on `notifications.envoy.deliver.<session id>`, which
 the session subscribes before it registers: its own agent subject, the stored copies of role
 messages to a role it holds, and every followed topic the stream stores, in stream order. The
 session answers each frame `received` as it decodes and `done` once Oh My Pi wrote the card or
 turn to the session file, so a frame not written when the session stops, or published while it
 was down or disconnected, comes again and is shown once, for up to 72 hours. Team and other
-ad-hoc topics stay live only. "Consumer delivery" in `AGENTS.md` has the rules.
+ad-hoc topics, which the stream does not store, stay live only on the session's own
+subscription. "Consumer delivery" in `AGENTS.md` has the rules, and
+`packages/envoy/AGENTS.md`, "Session consumers", states them once for every host.
 
-On the core path (a listener that answers `core`, or one of an earlier release), a message
+The core path is the rollout fallback dispatch://INFRA-771 removes, for a listener that answers
+`core` and for a plugin of an earlier release. There a message
 published while the session's NATS connection or one of its subscriptions was down is
 recovered from Envoy's notification stream, which keeps messages for 72 hours: the session asks
 its listener (`POST /v1/replay`) for what the stream stored on its own agent subject and on each

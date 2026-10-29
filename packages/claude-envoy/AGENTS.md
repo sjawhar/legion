@@ -5,7 +5,9 @@ Claude Code channel plugin package for Legion's Envoy subsystem.
 ## Overview
 
 One MCP stdio process is the channel ingress. It subscribes NATS directly to the session's
-`notifications.agent.<session_id>` subject and every topic the session follows, renders each
+`notifications.agent.<session_id>` subject and every topic the session follows — the lane receipts,
+the live team topics and the core fallback ride those subscriptions, not the session's messages,
+which come from the relay below. It renders each
 envelope through `@legion/envoy-client/delivery`, then writes a supported
 `notifications/claude/channel` notification. A core-NATS direct delivery gets its empty receipt
 when the server enqueues the notification; that means adapter-accepted, not processed by Claude.
@@ -13,9 +15,10 @@ There is no Monitor and no native Claude messaging socket path. The server's too
 `envoyToolSpecs` alone, the ten `envoy_*` tools and `slack_post`: agents reach Dispatch through the
 `dispatch` command, which `bin/dispatch` puts on the Bash tool's `PATH`.
 
-When the listener supports consumer delivery, it keeps a durable consumer for the session and
-relays it on `notifications.envoy.deliver.<session_id>` ("Session consumers" in
-`packages/envoy/AGENTS.md`), with the protocol both plugins share,
+The listener holds a durable consumer for the session and
+relays it on `notifications.envoy.deliver.<session_id>`, which is where the session's messages
+come from ("Session consumers" in
+`packages/envoy/AGENTS.md` states the rule), with the protocol both plugins share,
 `@legion/envoy-client/consumer-delivery`. The server subscribes the current id's relay subject
 before it registers, and every registration asks for consumer delivery with the relay's epoch
 (one per NATS connection; a nats.js `reconnect` begins another and registers at once,
@@ -31,9 +34,11 @@ answers `nak`, and from the frame's third delivery `done` with a notice naming i
 arrives after a `/clear` moved the session to another id is answered `nak`. The core copies of
 those subjects answer only a lane's receipt (`relaysCoreTopic`), and the replay engine makes no
 `/v1/replay` call. The relay's snapshot (the resume point and each topic's follow time) is the
-`consumer` part of the id's state file. Answered `core`, or not at all, the core path below runs.
+`consumer` part of the id's state file. Answered `core`, or not at all, the core path below runs:
+the rollout fallback for a plugin or listener of an earlier release and for a listener whose NATS
+user lacks the session-consumer grant, which dispatch://INFRA-771 removes.
 
-On the core path, what those subscriptions missed while they were down, the server reads back
+On that fallback, what those subscriptions missed while they were down, the server reads back
 from Envoy's notification stream through its listener (`POST /v1/replay`) with the shared engine
 `@legion/envoy-client/replay`, which pi-envoy uses too (its rules are "Missed messages" in
 `packages/pi-envoy/AGENTS.md`). A sweep runs at channel start (a resume included), on each nats.js

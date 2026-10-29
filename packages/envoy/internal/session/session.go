@@ -88,14 +88,18 @@ func (d Deliverer) Resolve(item contracts.Envelope, interest store.Interest, ent
 	if entry.Delivery == DeliveryConsumer && bus.StreamCaptures(item.Topic) {
 		// The session's consumer holds this stored message, and the listener that owns the session
 		// relays it from there, serving port or not: the durable path pushes nothing and reports
-		// nothing for it. A topic the stream does not store reaches the session as before (the live
-		// lane's push to a serving port; a self-subscribed session's own subscription).
+		// nothing for it. A topic the stream does not store reaches the session as before (the
+		// live lane's push to a serving port; a session's own subscription, which is where a team
+		// or other ad-hoc topic still arrives).
 		return DeliveryResult{Skipped: true}, nil
 	}
 	if entry.SelfSubscribed && entry.Port == 0 {
-		// The session consumes its own NATS subscription; there is nothing to push to. This is a
-		// delivered outcome, not ErrNoPushTarget: the message reaches the session over its own
-		// subscription, and only the push this listener would have made is skipped.
+		// A portless session on the core path, the rollout fallback of "Session consumers" in
+		// packages/envoy/AGENTS.md: it has no consumer of its own (an older plugin, or a listener
+		// with no session-consumer grant), there is nothing to push to, and the message reaches it
+		// on its own NATS subscription. So this is a delivered outcome, not ErrNoPushTarget: only
+		// the push this listener would have made is skipped. A session on consumer delivery took
+		// the branch above and takes this message from its consumer.
 		return DeliveryResult{Skipped: true}, nil
 	}
 	if entry.Port > 0 {

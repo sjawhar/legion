@@ -45,6 +45,14 @@ The agent-subject receiver sends its reply only after it has accepted the envelo
 
 Session registry and KV checks remain valuable gates, but they must not be promoted into proof of active delivery. They establish that a route was recently registered; the receipt establishes that a live receiver accepted this specific message.
 
+This pattern covers a live control lane — a role, lease or leader-election message — and nothing
+else. A session's own messages do not come from a core-NATS subscription: they come from the
+session's durable JetStream consumer, which its listener relays and acknowledges only once the
+session wrote the message (`packages/envoy/AGENTS.md`, "Session consumers", states that rule). What
+the holder's core agent-subject subscription carries here is the receipt; the listener's forward is
+stored on that agent subject, so the holder's own consumer delivers it once as well, also after a
+restart.
+
 ## Why This Matters
 
 A direct core-NATS publish has no subscriber-count error path. Treating `Publish` success as delivery turns any “deliver to the current holder of X” route into a silent black hole when the holder crashes, its subscription disappears, or its pump has gone deaf.

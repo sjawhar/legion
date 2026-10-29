@@ -10,10 +10,11 @@ Legion pane loads beside this plugin and which reaches it through the interface 
 
 ## Overview
 
-This package owns Pi-specific tool registration, direct NATS subscriptions, consumer delivery from
-the listener ("Consumer delivery" below), the recovery of what the subscriptions missed while down
-on the core path ("Missed messages" below), targeted Dispatch delivery, and
-self-subscription registration for every session. HTTP transport, tool metadata, and
+This package owns Pi-specific tool registration, consumer delivery from the listener ("Consumer
+delivery" below), which is how a session takes its messages, the direct NATS subscriptions that
+carry a receipt, a team topic and the core fallback, the recovery of what those subscriptions
+missed while down on that fallback ("Missed messages" below), targeted Dispatch delivery, and
+registration for every session. HTTP transport, tool metadata, and
 subject construction come from the Envoy core packages. Its NATS connection (the agent subjects in
 `extensions/envoy.ts`) connects as the nkey user whose seed `envoySettings` resolves
 (`NATS_NKEY_SEED_FILE`, then `NATS_NKEY_SEED`, then `envoy.natsSeed` for the same file's own
@@ -333,8 +334,10 @@ the listener's `GET /v1/sessions` and `GET /v1/registry/<id>`, and `envoy_sessio
 
 ## Consumer delivery
 
-The listener can hold a durable consumer for the session and relay it to the session in stream
-order ("Session consumers" in `packages/envoy/AGENTS.md`). `@legion/envoy-client/consumer-delivery`
+The listener holds a durable consumer for the session and relays it to the session in stream
+order; that relay, not a subscription of this plugin's, is where the session's messages come from
+("Session consumers" in `packages/envoy/AGENTS.md` states the rule).
+`@legion/envoy-client/consumer-delivery`
 (`createConsumerDelivery`) speaks that protocol, and `extensions/envoy.ts` wires it (`createRelay`,
 `deliverRelayed`, `takeDeliveryAnswer`).
 
@@ -377,9 +380,10 @@ order ("Session consumers" in `packages/envoy/AGENTS.md`). `@legion/envoy-client
 
 ## Missed messages
 
-This is the core path's recovery: it runs when the listener answers a registration `core`, or
-answers no `delivery` field. On consumer delivery (above) the relay carries every stored subject,
-and no sweep calls the listener.
+This is the core path's recovery, the rollout fallback `packages/envoy/AGENTS.md` ("Session
+consumers") says dispatch://INFRA-771 removes: it runs when the listener answers a registration
+`core`, or answers no `delivery` field. On consumer delivery (above) the relay carries every
+stored subject, and no sweep calls the listener.
 
 nats.js keeps nothing for a client that is disconnected, so a message published while this
 session's NATS connection, or one of its subscriptions, is down never reaches that subscription.

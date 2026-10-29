@@ -48,10 +48,11 @@ events and sends them to the current Claude Code session as supported
   (below, "Session title"); its `timeout` is 5 s, and it is a bundle of its own because Claude
   Code holds the prompt until it returns.
 - The channel server subscribes directly to `notifications.agent.<session_id>` and to every topic
-  followed by `envoy_subscribe`. It renders every envelope with the shared
-  `@legion/envoy-client/delivery` renderer and never exposes raw envelope bytes.
-- When the listener supports consumer delivery, it keeps a durable consumer for the session on
-  Envoy's notification stream and relays it on `notifications.envoy.deliver.<session_id>`, which
+  followed by `envoy_subscribe`; those subscriptions carry the lane receipts, the live team topics
+  and the core fallback, never the session's own messages. It renders every envelope with the
+  shared `@legion/envoy-client/delivery` renderer and never exposes raw envelope bytes.
+- The session's messages come from a durable consumer the listener keeps for it on
+  Envoy's notification stream and relays on `notifications.envoy.deliver.<session_id>`, which
   the server subscribes before it registers: the session's own subject, the stored copies of role
   messages to a role it holds, and every followed topic the stream stores, in stream order. The
   server answers each frame `received` as it decodes and `done` once Claude Code has it: in a
@@ -59,9 +60,11 @@ events and sends them to the current Claude Code session as supported
   the channel notification is written, the last signal Claude Code gives there, so a notification
   Claude Code drops after that (a channel it did not load) is not sent again. A frame not taken
   yet when Claude Code stops, or published while the session was not running or disconnected,
-  comes again and is delivered once, for up to 72 hours. Team and other ad-hoc topics stay live
-  only. The resume point is kept in `replay-<session id>.json` with the replay state below.
-- On the core path (a listener that answers `core`, or one of an earlier release), a message
+  comes again and is delivered once, for up to 72 hours. Team and other ad-hoc topics, which the
+  stream does not store, stay live only. The resume point is kept in `replay-<session id>.json`
+  with the replay state below. `packages/envoy/AGENTS.md`, "Session consumers", states the rule.
+- The core path is the rollout fallback dispatch://INFRA-771 removes (a listener that answers
+  `core`, or one of an earlier release). There a message
   published while those subscriptions were down (NATS restarting, the connection dropped, the
   session not running) is recovered from Envoy's notification stream, which keeps
   messages for 72 hours: the server asks its listener (`POST /v1/replay`) for what the stream

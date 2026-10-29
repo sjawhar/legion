@@ -4190,9 +4190,10 @@ export default function envoyExtension(pi: PiApi): void {
           });
           // The skip is the listener's own delivery: the role lane skips the resolved holder,
           // and the fanout skips its push to any interest whose session is the message's source.
-          // A session that holds its own NATS subscription — every Oh My Pi session — takes no
-          // push at all and still receives the message on any topic it subscribes to, built-in
-          // or ad-hoc, so its own publish, and a subagent's, does reach it. Only the role lane,
+          // A session with no serving port — every Oh My Pi session — takes no push at all and
+          // still gets the message: a topic the stream stores comes back on its own consumer's
+          // relay, and an ad-hoc topic on its core subscription, so its own publish, and a
+          // subagent's, does reach it. Only the role lane,
           // which its holder does not subscribe to, actually goes undelivered: a subagent's
           // source is its parent, so a publish to a role that parent holds is accepted, answers
           // with that holder, and reaches nobody. Only the role case is visible here (a plain

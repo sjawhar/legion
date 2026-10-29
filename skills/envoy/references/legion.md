@@ -9,5 +9,5 @@ Read this in a Legion pane before you touch a role claim, or when a Legion role 
   - `no_holder`: no live session holds the role.
   - `delivery_failed`: the message is not known to have reached the holder: the holder lookup failed, the holder was stale, the publish errored, or the stream did not store the forward. In the last case the holder can have seen the message live, and its dedupe drops a re-sent copy.
   - `receipt_timeout`: the listener forwarded the message to a live holder and no receipt arrived in time. Its payload keeps `original_topic`, `event_id`, `payload` and the original `dedupe_key`, so the daemon can re-send it and the receiver's dedupe drops a copy that did arrive.
-- A role message forwarded to you is kept on your inbox in the stream. When your listener supports consumer delivery, your session gets it once, also after the pane restarts or reconnects.
+- A role message forwarded to you is kept on your inbox in the stream, which your own durable consumer reads, so your session gets it once, also after the pane restarts or reconnects.
 - Never forward these failure payloads to an architect, because the daemon already acts on them.

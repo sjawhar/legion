@@ -53,8 +53,10 @@ which of its subscriptions the relay carries. On `core` a host runs the replay e
 
 ## Missed messages
 
-`createReplayEngine` (`@legion/envoy-client/replay`) shows a session, once, each message the
-notification stream stored on a subject it follows while its own NATS subscription was down. A
+`createReplayEngine` (`@legion/envoy-client/replay`) is the core fallback's recovery, for a
+listener that answers `core` and for a plugin of an earlier release: it shows a session, once,
+each message the notification stream stored on a subject it follows while its own NATS
+subscription was down. A
 host makes one per session process and hands it its live path's `createDeliveryDedupe`, the
 listener client and callbacks (`ReplayHost`): the session id, the followed subjects, how to show
 a stored frame (as a card that runs nothing), a failure notice and a one-time notice, and how to
