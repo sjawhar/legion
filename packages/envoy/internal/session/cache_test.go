@@ -364,7 +364,7 @@ func TestSessionList_CacheOnlyAfterNATSShutdown(t *testing.T) {
 func TestOpenSessionRegistry_PrunesUsingBucketTTL(t *testing.T) {
 	client := setupNATS(t)
 	// Create the bucket with a 20-minute window, longer than the 2 minutes the second open
-	// configures and longer than SessionTTL, so nothing raises it.
+	// configures and longer than the registry's own default, so nothing raises it.
 	if _, err := OpenSessionRegistry(client.Conn, WithSessionReplicas(1), WithSessionTTL(20*time.Minute)); err != nil {
 		t.Fatalf("create bucket: %v", err)
 	}
@@ -405,8 +405,11 @@ func TestOpenSessionRegistry_RaisesABucketBelowTheDeclaredTTL(t *testing.T) {
 	if err != nil {
 		t.Fatalf("open: %v", err)
 	}
-	if reg.ttl != SessionTTL {
-		t.Fatalf("expected the registry to prune against the raised window %v, got %v", SessionTTL, reg.ttl)
+	// The default OpenSessionRegistry declares (registry.go), which the check in
+	// .github/scripts/check-heartbeat-margin.sh reads as the session record lifetime.
+	const declared = 10 * time.Minute
+	if reg.ttl != declared {
+		t.Fatalf("expected the registry to prune against the raised window %v, got %v", declared, reg.ttl)
 	}
 	js, err := client.Conn.JetStream()
 	if err != nil {
@@ -416,8 +419,8 @@ func TestOpenSessionRegistry_RaisesABucketBelowTheDeclaredTTL(t *testing.T) {
 	if err != nil {
 		t.Fatalf("stream info: %v", err)
 	}
-	if info.Config.MaxAge != SessionTTL {
-		t.Fatalf("expected the bucket raised to %v, got %v", SessionTTL, info.Config.MaxAge)
+	if info.Config.MaxAge != declared {
+		t.Fatalf("expected the bucket raised to %v, got %v", declared, info.Config.MaxAge)
 	}
 	// An entry 3 minutes old is past the window the bucket was created with and inside the one
 	// the registry raised it to, so it is live.

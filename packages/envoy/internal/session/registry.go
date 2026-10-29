@@ -16,18 +16,6 @@ import (
 	"github.com/sjawhar/envoy/internal/kvwatch"
 )
 
-// SessionTTL is how long the envoy_sessions bucket keeps a session's registration after its last
-// heartbeat, and so how long a session that stops heartbeating still resolves: the bucket's MaxAge,
-// and the window every reader of the registry prunes against. A session whose process stalls past
-// it drops out of the registry and a peer's send to it is refused `no live session` although the
-// session is alive and resumes, so the window is the false-dead window of a stall. Ten minutes
-// halves how often an ordinary stall under load reaches it; it is also how long a session that has
-// really ended goes on resolving, which costs a sender one refused delivery of its own.
-//
-// OpenSessionRegistry creates the bucket with it and raises a deployed bucket that holds less
-// (bus.RaiseKeyValueMaxAge), so this constant is where the window is declared.
-const SessionTTL = 10 * time.Minute
-
 type SessionEntry struct {
 	Port         int      `json:"port"`
 	MachineID    string   `json:"machine_id"`
@@ -137,8 +125,21 @@ type SessionRegistry struct {
 	log *slog.Logger
 }
 
+// OpenSessionRegistry opens the session registry on conn, creating the envoy_sessions bucket when
+// it is not there.
+//
+// The default ttl below is the session window: how long the bucket keeps a session's registration
+// after its last heartbeat, and so how long a session that stops heartbeating still resolves. A
+// session whose process stalls past it drops out of the registry and a peer's send to it is
+// refused `no live session` although the session is alive and resumes, so the window is the
+// false-dead window of a stall; it is also how long a session that has really ended goes on
+// resolving, which costs a sender one refused delivery of its own. At the plugin's 90 s
+// registration heartbeat, ten minutes is six missed heartbeats where five minutes was three.
+// .github/scripts/check-heartbeat-margin.sh reads this literal as the record lifetime and holds
+// the heartbeat, the daemon's controller liveness window and the daemon's hand-copies of this
+// window against it, so it is written here as a literal and nowhere else.
 func OpenSessionRegistry(conn *nats.Conn, options ...SessionRegistryOption) (*SessionRegistry, error) {
-	opts := sessionRegistryOpts{replicas: 1, ttl: SessionTTL}
+	opts := sessionRegistryOpts{replicas: 1, ttl: 10 * time.Minute}
 	for _, o := range options {
 		o(&opts)
 	}

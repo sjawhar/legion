@@ -136,7 +136,7 @@ listener.
 
 It also holds `$JS.API.STREAM.UPDATE.KV_envoy_sessions`, the one call that changes the session
 registry's window in place. A listener creates the `envoy_sessions` bucket with the window its
-build declares (`session.SessionTTL`), and nats.go creates a KV bucket and never updates one, so a
+build declares (`OpenSessionRegistry`'s default `ttl`), and nats.go creates a KV bucket and never updates one, so a
 bucket an earlier build created keeps the window it was created with until something updates the
 bucket's own stream. With this grant the listener raises that window itself at every start
 (`bus.RaiseKeyValueMaxAge`), and nobody edits the live bucket by hand: the window is whatever the

@@ -62,9 +62,12 @@
 #
 # - It compares the defaults in the source, not the live deployment. `bus.EnsureKeyValue` creates
 #   the `envoy_sessions` bucket only when it does not exist
-#   (packages/envoy/internal/bus/kv.go:27-37), and `OpenSessionRegistry` then adopts whatever
-#   `MaxAge` the live bucket reports (packages/envoy/internal/session/registry.go), so a bucket
-#   created by an older build keeps its old lifetime however this constant moves. The live value is
+#   (packages/envoy/internal/bus/kv.go), and `OpenSessionRegistry` then raises a bucket whose
+#   `MaxAge` is below this default and adopts whatever the bucket reports afterwards
+#   (packages/envoy/internal/session/registry.go, `bus.RaiseKeyValueMaxAge`), so a bucket created
+#   by an older build keeps its old lifetime until a listener that may update that bucket's stream
+#   (`$JS.API.STREAM.UPDATE.KV_envoy_sessions`) starts against it, and keeps a lifetime longer than
+#   this default whatever starts against it. The live value is
 #   in the listener's boot log, which names the record lifetime it resolved; `nats kv info
 #   envoy_sessions` is the other way to read it.
 # - It cannot see a pane started with `ENVOY_HEARTBEAT_MS` set: that overrides the interval for

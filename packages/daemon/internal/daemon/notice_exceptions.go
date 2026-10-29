@@ -34,7 +34,7 @@ const noticeExceptionSubjects = "notifications.envoy.exceptions." + notify.RoleT
 // registered holder for up to the longer of the two windows, and until then the listener accepts a
 // publish for it, forwards it, and reports it undelivered.
 const (
-	listenerSessionTTL = 5 * time.Minute
+	listenerSessionTTL = 10 * time.Minute
 	listenerClaimStale = 5 * time.Minute
 	pluginHeartbeat    = 90 * time.Second
 )

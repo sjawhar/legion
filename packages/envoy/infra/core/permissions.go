@@ -50,7 +50,8 @@ var listenerBuckets = []string{bus.InterestBucket, bus.RoleClaimBucket, bus.Sess
 //   - the purge of the interest bucket, which its delete-marker collection sends, and the update
 //     of the session bucket's own stream, the one call that raises that bucket's MaxAge: nats.go
 //     creates a KV bucket and never updates one, so the listener changes the session window
-//     (session.SessionTTL) through `$JS.API.STREAM.UPDATE.KV_envoy_sessions` and through nothing
+//     (OpenSessionRegistry's default ttl, packages/envoy/internal/session/registry.go) through
+//     `$JS.API.STREAM.UPDATE.KV_envoy_sessions` and through nothing
 //     wider. The subject names that one stream: no other stream, and no other bucket, is updatable
 //     under it.
 //
