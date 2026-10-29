@@ -948,3 +948,53 @@ func TestIdempotentBlockAskEditRewritesNothing(t *testing.T) {
 		t.Fatalf("the idempotent retry orphaned the comment's anchor: %#v", after.Anchor)
 	}
 }
+
+// An options edit that keeps what a person wrote under an option splices that item, which the
+// list's own markdown spaces, into a list the parser built. Get the spread wrong and the block's
+// markdown stops reading back as the block, which leaves the ask reading as changed to the next
+// write and marks it `invalid` at the next settlement. Neither happens: the settlement after the
+// edit rewrites nothing and the ask keeps the options the edit sent.
+func TestAskBlockOptionsEditKeepingContentSettlesUnchanged(t *testing.T) {
+	handler, _ := blockAskHandler(t)
+	const nestedAsk = ":::ask{#decision urgency=\"high\" multiple=\"false\"}\nWhich transport?\n\n" +
+		"- REST: Matches the platform\n" +
+		"- gRPC: Adds streaming\n\n" +
+		"  - only behind the [proxy](https://proxy.test)\n" +
+		":::\n"
+	issue, askID := seedBlockAsk(t, handler, "Block ask preserving options", "decision", nestedAsk, "Which transport?")
+
+	edited := sessionRequest(t, handler, http.MethodPatch, "/api/v1/asks/"+askID, map[string]any{
+		"options": []map[string]string{
+			{"label": "REST", "description": "Ship now"},
+			{"label": "gRPC", "description": "Adds streaming"},
+		},
+		"actor": sessionActor(),
+	})
+	if edited.Code != http.StatusOK {
+		t.Fatalf("options edit: status=%d body=%s", edited.Code, edited.Body.String())
+	}
+	written := documentMarkdown(t, handler, issue.PrimaryArtifactID)
+	for _, want := range []string{"- REST: Ship now", "- gRPC: Adds streaming", "  - only behind the [proxy](https://proxy.test)"} {
+		if !strings.Contains(written, want) {
+			t.Fatalf("the document does not carry %q after the edit:\n%s", want, written)
+		}
+	}
+
+	settleDocument(t, handler, issue.PrimaryArtifactID, issue.Key, "after-preserving")
+
+	// settleDocument appends its marker block, so the document settlement left is the markdown
+	// the edit wrote with that block after it: settlement rewrote none of the ask.
+	if settled := documentMarkdown(t, handler, issue.PrimaryArtifactID); !strings.HasPrefix(settled, written) {
+		t.Fatalf("settlement rewrote the edited ask:\nafter the edit:\n%s\nafter settling:\n%s", written, settled)
+	}
+	for _, event := range issueAskEvents(t, handler, issue.Key) {
+		if event.Type == "block.invalid" && event.Payload.BlockID != nil && *event.Payload.BlockID == "decision" {
+			t.Fatalf("settlement marked the edited ask invalid: %#v", event)
+		}
+	}
+	ask := readBlockAsk(t, handler, askID)
+	if len(ask.Options) != 2 || ask.Options[0] != (model.AskOption{Label: "REST", Description: "Ship now"}) ||
+		ask.Options[1] != (model.AskOption{Label: "gRPC", Description: "Adds streaming"}) {
+		t.Fatalf("the ask reads %#v after settling, want the options the edit sent", ask.Options)
+	}
+}

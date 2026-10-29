@@ -2032,6 +2032,232 @@ func TestSetAskBlockTextRefusalGivesABlockIDOnlyAsQuotedData(t *testing.T) {
 	}
 }
 
+// richHoldAsk is seedIndexedShipAsk's ask with what a person wrote under its Hold option: a
+// nested sub-list, a second paragraph, bold text and a link. No ask row holds any of it, so an
+// options edit that rebuilt the list would delete words its caller never saw.
+const richHoldAsk = ":::ask{#ask-lists urgency=\"med\" multiple=\"false\" state=\"open\"}\n" +
+	"Should we ship?\n\n" +
+	"- Ship: Release it\n" +
+	"- Hold: Wait for review\n\n" +
+	"  - only if **finance** agrees\n\n" +
+	"  See [the memo](https://memo.test) first.\n" +
+	":::\n"
+
+// seedIndexedRichAsk is seedIndexedShipAsk over richHoldAsk: the same question, options and row,
+// with the Hold option's item holding what the row cannot show.
+func seedIndexedRichAsk(t *testing.T) (*Service, string) {
+	t.Helper()
+	service, artifactID := newTestService(t)
+	service.settle = time.Hour
+	seedServiceText(t, service, artifactID, richHoldAsk)
+	settleCurrentGeneration(t, service, artifactID)
+	assertShipAskRow(t, service, artifactID, "ask-lists")
+	return service, artifactID
+}
+
+// askOptionList is the document's first ask's bullet list, the one an options edit writes.
+func askOptionList(t *testing.T, service *Service, artifactID string) *pmdoc.Node {
+	t.Helper()
+	ask := firstAsk(liveTree(t, service, artifactID))
+	for _, child := range ask.Children {
+		if child.Type == "bullet_list" {
+			return child
+		}
+	}
+	t.Fatalf("the ask holds no bullet list")
+	return nil
+}
+
+// askOptionItemMarkdown is item read as a document holding one bullet list holding it alone,
+// which is how a refusal quotes an option's item.
+func askOptionItemMarkdown(t *testing.T, list, item *pmdoc.Node) string {
+	t.Helper()
+	markdown, err := pmdoc.Render(&pmdoc.Node{Type: "doc", Children: []*pmdoc.Node{
+		{Type: "bullet_list", Attrs: list.Attrs, Children: []*pmdoc.Node{item}},
+	}})
+	if err != nil {
+		t.Fatalf("render an option's item: %v", err)
+	}
+	return strings.TrimSpace(markdown)
+}
+
+// An options edit writes the lines it sends and nothing else: an option it sends unchanged keeps
+// the very node the document holds, so the sub-list, the second paragraph, the bold run and the
+// link's address under it survive with their own block ids and marks.
+func TestAskOptionsEditKeepsWhatItDoesNotWrite(t *testing.T) {
+	service, artifactID := seedIndexedRichAsk(t)
+	list := askOptionList(t, service, artifactID)
+	before := list.Children[1]
+
+	options := []model.AskOption{
+		{Label: "Ship", Description: "Release it today"},
+		{Label: "Hold", Description: "Wait for review"},
+	}
+	if err := sendAskOptions(service, artifactID, AskBlockEdit{Options: &options}); err != nil {
+		t.Fatalf("options edit: %v", err)
+	}
+
+	after := askOptionList(t, service, artifactID)
+	if len(after.Children) != 2 {
+		t.Fatalf("the list holds %d items after the edit, want 2", len(after.Children))
+	}
+	if !after.Children[1].EqualWithBlockIDs(before) {
+		t.Fatalf("the unchanged option was rewritten:\nbefore %q\nafter  %q",
+			askOptionItemMarkdown(t, list, before), askOptionItemMarkdown(t, after, after.Children[1]))
+	}
+	settleCurrentGeneration(t, service, artifactID)
+	assertAskRepaired(t, service, artifactID, "ask-lists", "Should we ship?", options)
+}
+
+// An option whose description the edit changes is rewritten where it stands: its first paragraph
+// carries the new line, and every other node the item holds is the one that was there.
+func TestAskOptionsEditRewritesAnOptionAndKeepsTheRest(t *testing.T) {
+	service, artifactID := seedIndexedRichAsk(t)
+	list := askOptionList(t, service, artifactID)
+	before := list.Children[1]
+
+	options := []model.AskOption{
+		{Label: "Ship", Description: "Release it"},
+		{Label: "Hold", Description: "Wait for the sign-off"},
+	}
+	if err := sendAskOptions(service, artifactID, AskBlockEdit{Options: &options}); err != nil {
+		t.Fatalf("options edit: %v", err)
+	}
+
+	after := askOptionList(t, service, artifactID).Children[1]
+	if after.Attrs[pmdoc.BlockIDAttr] != before.Attrs[pmdoc.BlockIDAttr] {
+		t.Fatalf("the rewritten item's block id = %v, want the original's %v",
+			after.Attrs[pmdoc.BlockIDAttr], before.Attrs[pmdoc.BlockIDAttr])
+	}
+	if got := strings.TrimSpace(pmdoc.TextContent(after.Children[0])); got != "Hold: Wait for the sign-off" {
+		t.Fatalf("the rewritten item's first paragraph reads %q, want the line the edit sent", got)
+	}
+	if len(after.Children) != len(before.Children) {
+		t.Fatalf("the rewritten item holds %d nodes, want the original's %d", len(after.Children), len(before.Children))
+	}
+	for index := 1; index < len(before.Children); index++ {
+		if !after.Children[index].EqualWithBlockIDs(before.Children[index]) {
+			t.Fatalf("the rewritten item's node %d was rebuilt, want the one the document held", index)
+		}
+	}
+	settleCurrentGeneration(t, service, artifactID)
+	assertAskRepaired(t, service, artifactID, "ask-lists", "Should we ship?", options)
+}
+
+// An edit that leaves an option out, renames it, or sends no option at all drops that option's
+// item. An item holding nothing but its plain line is the edit's to drop; one holding what a
+// person wrote is not, and the whole edit is refused, quoting the item so the caller can restore
+// every word of it.
+func TestAskOptionsEditRefusesDroppingAnItemHoldingContent(t *testing.T) {
+	ship := model.AskOption{Label: "Ship", Description: "Release it"}
+	hold := model.AskOption{Label: "Hold", Description: "Wait for review"}
+	for _, test := range []struct {
+		name    string
+		options []model.AskOption
+		refused bool
+	}{
+		{name: "a removal", options: []model.AskOption{ship}, refused: true},
+		{name: "a rename", options: []model.AskOption{ship, {Label: "Wait", Description: "Wait for review"}}, refused: true},
+		{name: "an empty options list", options: []model.AskOption{}, refused: true},
+		{name: "an item holding nothing but its plain line", options: []model.AskOption{hold}},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			service, artifactID := seedIndexedRichAsk(t)
+			before := liveTree(t, service, artifactID)
+			list := askOptionList(t, service, artifactID)
+			options := test.options
+			err := sendAskOptions(service, artifactID, AskBlockEdit{Options: &options})
+			if !test.refused {
+				if err != nil {
+					t.Fatalf("options edit dropping a plain item: %v", err)
+				}
+				after := askOptionList(t, service, artifactID)
+				if len(after.Children) != 1 || !after.Children[0].EqualWithBlockIDs(list.Children[1]) {
+					t.Fatalf("the list holds %d items, want the Hold item alone as it was", len(after.Children))
+				}
+				return
+			}
+			var unrepresentable *ErrAskBlockUnrepresentable
+			if !errors.As(err, &unrepresentable) || unrepresentable.Field != "options" {
+				t.Fatalf("err = %v, want ErrAskBlockUnrepresentable on the options", err)
+			}
+			want := `options: the edit drops the option "Hold", whose list item holds more than its plain line, ` +
+				`and the ask-edit route does not delete what a person wrote under an option; its item reads ` +
+				strconv.Quote(askOptionItemMarkdown(t, list, list.Children[1])) +
+				`; send that option back with this edit, or remove what the item holds with a document edit ` +
+				`first (dispatch doc-edit, deleting a block by its id)`
+			if err.Error() != want {
+				t.Fatalf("refusal =\n%v\nwant\n%s", err, want)
+			}
+			for _, word := range []string{"finance", "the memo", "https://memo.test", "dispatch doc-edit"} {
+				if !strings.Contains(err.Error(), word) {
+					t.Fatalf("err = %v, want it to quote %q", err, word)
+				}
+			}
+			if after := liveTree(t, service, artifactID); !after.EqualWithBlockIDs(before) {
+				t.Fatalf("the refused edit changed the document")
+			}
+			assertShipAskRow(t, service, artifactID, "ask-lists")
+		})
+	}
+}
+
+// A comment anchored inside what a person wrote under an option is anchored to the same words
+// after an options edit: the nodes it points into are the document's own, not a rebuilt copy.
+func TestAskOptionsEditKeepsACommentAnchoredUnderAnOption(t *testing.T) {
+	service, artifactID := seedIndexedRichAsk(t)
+	if _, err := joinedMarkQuote(service, artifactID, MarkSpec{
+		Kind: MarkComment, ID: "c1", By: model.Actor{Kind: "user", ID: "alice"},
+	}, "finance", nil); err != nil {
+		t.Fatalf("anchor a comment inside the sub-list: %v", err)
+	}
+
+	options := []model.AskOption{
+		{Label: "Ship", Description: "Release it today"},
+		{Label: "Hold", Description: "Wait for review"},
+	}
+	if err := sendAskOptions(service, artifactID, AskBlockEdit{Options: &options}); err != nil {
+		t.Fatalf("options edit: %v", err)
+	}
+
+	_, quote, found := pmdoc.FindMark(liveTree(t, service, artifactID), "proofComment", "c1")
+	if !found || quote != "finance" {
+		t.Fatalf("the comment anchors to %q (found %t), want it still on \"finance\"", quote, found)
+	}
+}
+
+// Settlement writes a decided ask's recorded wording back into a block a person reworded after
+// the decision. That restore goes through the same options write, so the sub-list a person wrote
+// under an option it does not reword stays where they wrote it.
+func TestAskOptionsEditRestoringADecidedWordingKeepsASubList(t *testing.T) {
+	service, artifactID := seedIndexedRichAsk(t)
+	answerIndexedAsk(t, service, artifactID, "ask-lists")
+	settleCurrentGeneration(t, service, artifactID)
+
+	// A person rewords the Ship option in the document, after the ask was decided.
+	editLiveTree(t, service, artifactID, func(tree *pmdoc.Node) *pmdoc.Node {
+		item := firstAsk(tree).Children[1].Children[0]
+		item.Children[0].Children = []*pmdoc.Node{{Type: "text", Text: "Ship: Release it tomorrow"}}
+		return tree
+	})
+	before := askOptionList(t, service, artifactID).Children[1]
+
+	settleCurrentGeneration(t, service, artifactID)
+
+	ask := firstAsk(liveTree(t, service, artifactID))
+	block, err := parseAskBlock(ask)
+	if err != nil {
+		t.Fatalf("parse the restored ask: %v", err)
+	}
+	want := []model.AskOption{{Label: "Ship", Description: "Release it"}, {Label: "Hold", Description: "Wait for review"}}
+	if !slices.Equal(block.options, want) {
+		t.Fatalf("the restored block asks %#v, want the wording the ask was decided on", block.options)
+	}
+	if after := askOptionList(t, service, artifactID).Children[1]; !after.EqualWithBlockIDs(before) {
+		t.Fatalf("the decided-wording restore flattened what a person wrote under the option it left alone")
+	}
+}
+
 // sendAskOptions sends edit to the ask-lists block as alice.
 func sendAskOptions(service *Service, artifactID string, edit AskBlockEdit) error {
 	return joinedWrite(service, func(ctx context.Context) error {
