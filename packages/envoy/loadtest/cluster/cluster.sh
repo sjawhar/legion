@@ -6,22 +6,26 @@
 #
 #   cluster.sh up --namespace NS --storage-class SC --dispatch-commit SHA --pg-major 16|18
 #                 --production-repo OWNER/REPO [--listener-image REF] [--stored-order-commit SHA]
+#                 [--browsertype-commit SHA]
 #       Refuses, before it creates anything, a commit with no ghcr.io envoy:<commit> image (naming
 #       the newest first-parent ancestor that has one), a --pg-major other than the production
 #       repository's dispatch/main.go databaseVersion, an image tag that does not resolve to a
-#       digest, and a --stored-order-commit that this checkout's git store does not hold or whose
-#       tree has no packages/envoy/cmd/dispatch/storedorder.go. Refuses with exit 2 while the lock
-#       ConfigMap dispatch-loadtest-lock exists. Then takes the lock, installs the copy (Postgres 16
-#       CPU / 60Gi, Dispatch 16 / 32Gi, listener 500m / 512Mi, NATS 3 × 2 / 4Gi, runner 8 / 16Gi),
-#       builds loadgen and (with --stored-order-commit) a static envoy-dispatch of that commit for
-#       the stored-order check (below), starts the heartbeat and the sampler, and prints each copy
-#       container's requests and limits.
+#       digest, a --stored-order-commit that this checkout's git store does not hold or whose
+#       tree has no packages/envoy/cmd/dispatch/storedorder.go, and a --browsertype-commit that
+#       the git store does not hold or whose tree has no packages/envoy/loadtest/browsertype.
+#       Refuses with exit 2 while the lock ConfigMap dispatch-loadtest-lock exists. Then takes the
+#       lock, installs the copy (Postgres 16 CPU / 60Gi, Dispatch 16 / 32Gi, listener 500m /
+#       512Mi, NATS 3 × 2 / 4Gi, runner 8 / 16Gi), builds loadgen, (with --stored-order-commit) a
+#       static envoy-dispatch of that commit for the stored-order check and (with
+#       --browsertype-commit) a static browsertype of that commit for browser typing (below),
+#       starts the heartbeat and the sampler, and prints each copy container's requests and limits.
 #   cluster.sh seed --namespace NS            loadgen seed and seed-finish, then the template
 #                                             database dispatch_seed.
-#   cluster.sh step --namespace NS NAME FACTOR [--duration 10m] [--reads-only]
+#   cluster.sh step --namespace NS NAME FACTOR [--duration 10m] [--reads-only] [--typing
+#                   [--typing-peers 2] [--typing-rate 5] [--typing-docs 20]]
 #       Reset, then one loadgen run at FACTOR × (4 events/s, 60 requests/s) with the
 #       series-sessions count (--reads-only: 0 events), then the crash check, the stored-order
-#       check, cgroup-merge, tables.
+#       check, cgroup-merge, tables. --typing adds browser typing (below).
 #       FACTOR may be fractional (8.5). Postgres's write-out counters (pg_stat_bgwriter, and
 #       pg_stat_checkpointer from Postgres 17) go into pg-stats-before.json and pg-stats-after.json.
 #   cluster.sh series --namespace NS [--duration 10m]   1x 2x 3x 5x 7x 10x, then 10x-reads, then
@@ -46,17 +50,20 @@
 #       loadgen replay-checksum, and renames the database to dispatch_replay. Writes
 #       <run>/replay-prepared.json, and keeps the manifest as <run>/replay-manifest.json. A
 #       template of the same seed dump is reused.
-#   cluster.sh replay --namespace NS NAME [--from 0] [--to 39m]
+#   cluster.sh replay --namespace NS NAME [--from 0] [--to 39m] [--typing [--typing-peers 2]
+#                     [--typing-rate 5] [--typing-docs 20]]
 #       The reset from dispatch_replay (refused without it), the bundle into the runner, then
 #       loadgen run -allow-foreign -source replay at rate 1 over the sub-window, then the step's
 #       after-work and loadgen codepaths beside the outage (11.1-13.8 cores, 13.8 GiB, the
 #       residual <run>/replay-residual.md: replay-residual.md's lines, then the seed check's anchors
-#       by placement rule and sign-flipped versions from <run>/replay-manifest.json).
+#       by placement rule and sign-flipped versions from <run>/replay-manifest.json). --typing
+#       adds browser typing (below).
 #   cluster.sh collect --namespace NS [--upload-issue KEY]
 #       Every step in the order the steps ran (meta.json start): the cross-step STORED-ORDER.md
-#       and TABLES.md, loadgen curves into <run>/curves over every step but the phase replay's,
-#       loadgen codepaths in each step directory (a replay step's beside the outage, as replay
-#       runs it); then each phase's step directories, and the results (curves/, TABLES.md,
+#       (with each step's browser typing) and TABLES.md, loadgen curves into <run>/curves over
+#       every step but the phase replay's and those that ran browser typing, loadgen codepaths
+#       in each step directory (a replay step's beside the outage, as replay runs it); then each
+#       phase's step directories, and the results (curves/, TABLES.md,
 #       STORED-ORDER.md, each step's CODEPATHS.md and codepaths.json), as zstd tar parts under
 #       24 MiB in <run>/upload/; with --upload-issue, each part goes to that Dispatch issue. A
 #       failure is reported, the rest still runs, and collect exits 1.
@@ -70,7 +77,8 @@
 #       db-size 4 15Gi, step 1x-db4, replay r4, collect, down; any exit runs down unless --keep.
 #       quick: 2 min steps, a 5 min hour, replays over 0-5m; full: 10 and 60 min, replays over
 #       0-39m. A manifest whose seed is null or fails its check skips the replay phases, one
-#       line each.
+#       line each. all runs no browser typing; with --browsertype-commit and --keep, the run
+#       stays up for typing steps and replays named by the caller.
 #
 # The stored-order check (INFRA-707's oracle): after each step's and each replay's loadgen run,
 # while Dispatch still runs, the runner runs `envoy-dispatch stored-order --since <meta.json
@@ -88,13 +96,34 @@
 # <run>/STORED-ORDER.md. Without --stored-order-commit, each step prints one line saying that the
 # check is skipped.
 #
+# Browser typing (step and replay --typing, INFRA-707's race of agent writes and browser typing):
+# INFRA-707's browsertype of --browsertype-commit, refused without it, types into the K
+# (--typing-docs) documents the step writes most, --typing-peers peers each at --typing-rate
+# keystroke updates per second, through Dispatch's document websocket as session
+# ses-browsertype with the copy's agent token, which goes into the runner's /work/typing/token on
+# kubectl exec's standard input (never on a command line, in no recorded file, never printed) and
+# is removed when typing stops. A replay's documents are the artifacts with the most agent
+# writes (artifact.version events the replay sends) in the bundle's window.jsonl over the
+# sub-window, mapped to the copy's ids through loadtest.replay_ids; a load step's are K spec
+# documents of the issues its sessions work on (seed.json), chosen by the step's rng seed. It
+# starts detached in the runner just before loadgen run, so its peers connect during loadgen's
+# warm-up, with a -duration that outlasts loadgen's window, grace and the stored-order check, and
+# stops with SIGTERM right after the stored-order command. Its output goes into
+# <step>/browsertype.txt, and its exit and per-peer sums into <step>/browsertype.json; a peer
+# error is reported, never a step failure.
+#
+# A read-only kubectl exec (psql reads, nats-box reads, the runner's file reads) that fails on a
+# transient API server error (error dialing backend, a refused or reset connection to the API
+# server) is retried once, 5 s later; a write is never retried.
+#
 # Every subcommand needs --namespace (no default; a Legion pod's own namespace is builds), and
 # every kubectl call names it. Subcommands after up find the run from the lock's `run` and its
 # directory ${LOADTEST_CLUSTER_ROOT:-$TMPDIR/dispatch-loadtest-cluster}/<run id>/ (state.json, mode
 # 600, holds the digests and the run's random credentials; cgroup.jsonl; steps/; logs/); --run ID
 # names the run instead. Needs kubectl, jq, curl, gh, go, setsid, timeout, tar, gzip, base64,
-# sha256sum, uv (collect), git (up --stored-order-commit), dispatch (collect --upload-issue), and
-# DISPATCH_URL and DISPATCH_TOKEN_FILE (replay-prepare's downloads, without --from-dir).
+# sha256sum, uv (collect), git (up --stored-order-commit and --browsertype-commit), dispatch
+# (collect --upload-issue), and DISPATCH_URL and DISPATCH_TOKEN_FILE (replay-prepare's downloads,
+# without --from-dir).
 set -euo pipefail
 
 here=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
@@ -139,6 +168,18 @@ STORED_ORDER_SECONDS=1800
 STORED_ORDER_EVIDENCE_SECONDS=600
 STORED_ORDER_TABLES=(artifacts:id doc_checkpoints:artifact_id artifact_versions:artifact_id:number doc_updates:artifact_id:version doc_snapshots:artifact_id:name)
 STORED_ORDER_START_TABLES=(doc_checkpoints:artifact_id artifact_versions:artifact_id:number doc_updates:artifact_id:version doc_snapshots:artifact_id:name)
+# Browser typing: the session INFRA-707's browsertype peers act as, and the runner's files: the
+# agent token (written on kubectl exec's standard input, removed when typing stops) and each
+# step's document list.
+TYPING_SESSION=ses-browsertype
+TYPING_DIR=/work/typing
+# A step's --typing settings (typing_parse); TYPING is empty for a step without --typing. The
+# step's documents (TYPING_LIST) and, once browsertype runs, the step's name and directory for
+# typing_stop_at_exit (TYPING_STEP).
+TYPING=""
+TYPING_PEERS="" TYPING_RATE="" TYPING_DOCS=""
+TYPING_LIST=()
+TYPING_STEP=()
 # What down deletes and then lists: the kinds of `kubectl get all` that the load-test Role may
 # read (it may not list replicationcontrollers, daemonsets, horizontalpodautoscalers or
 # cronjobs, so `get all` itself is refused), and the claims, ConfigMaps and Secrets.
@@ -147,6 +188,11 @@ DELETE_KINDS=deployments,statefulsets,jobs,pods,services,persistentvolumeclaims,
 SSA=(apply --server-side --force-conflicts --field-manager=dispatch-loadtest -f -)
 # The nats-box pod that reset_copy looked up for nats_box; empty outside a reset.
 NATS_BOX_POD=""
+# The transient API server errors on which kube_read retries a read-only kubectl call once: the
+# API server could not dial the kubelet ("error dialing backend: dial timeout, backstop", or a
+# refused dial), or the connection to the API server was refused or reset.
+TRANSIENT_RE='^(Error from server: error dialing backend: |The connection to the server .* was refused|Unable to connect to the server: |error: .*(connect: connection refused|connection reset by peer))'
+TRANSIENT_RETRY_SECONDS=5
 
 utc_now() { date -u +%Y-%m-%dT%H:%M:%SZ; }
 
@@ -160,6 +206,31 @@ kube_for() {
   local seconds=$1
   shift
   timeout "$seconds" kubectl -n "$NS" "$@"
+}
+
+# kube_read ARGS: kube ARGS for a call that only reads (an exec that reads a file, a psql query,
+# a nats-box listing), retried once TRANSIENT_RETRY_SECONDS later when it fails with a
+# TRANSIENT_RE line on its standard error, saying so. Its standard output and error are those of
+# the last try (held in files until then, so a failed try leaves nothing on them); its exit
+# status is the last try's. Never for a write: a write's failure is never retried.
+kube_read() {
+  local out err rc try
+  out=$(mktemp "${TMPDIR:-/tmp}/cluster-read.XXXXXX") || return 1
+  err=$(mktemp "${TMPDIR:-/tmp}/cluster-read.XXXXXX") || {
+    rm -f -- "$out"
+    return 1
+  }
+  for try in 1 2; do
+    rc=0
+    kube "$@" >"$out" 2>"$err" || rc=$?
+    if ((rc == 0 || try == 2)) || ! grep -qE -- "$TRANSIENT_RE" "$err"; then break; fi
+    note "kubectl $1 failed on a transient API server error ($(grep -m1 -E -- "$TRANSIENT_RE" "$err")); retrying once in $TRANSIENT_RETRY_SECONDS s"
+    sleep "$TRANSIENT_RETRY_SECONDS"
+  done
+  cat -- "$out"
+  cat -- "$err" >&2
+  rm -f -- "$out" "$err"
+  return "$rc"
 }
 
 # valid KIND VALUE: VALUE has KIND's shape. Every value cluster.sh puts into a manifest, a URL or a
@@ -441,6 +512,7 @@ set_run() {
   STATE=$RUN_DIR/state.json
   LOADGEN=$RUN_DIR/loadgen
   STORED_ORDER_BIN=$RUN_DIR/envoy-dispatch
+  BROWSERTYPE_BIN=$RUN_DIR/browsertype
 }
 
 # state FILTER: one value of state.json.
@@ -719,8 +791,13 @@ cmd__sampler() {
 
 # ---- the copy -------------------------------------------------------------------------------------
 
-# psql_at DB SQL: one value per line, through psql in the Postgres pod.
+# psql_at DB SQL: one value per line, through psql in the Postgres pod, for SQL that only reads
+# (kube_read retries it once on a transient API server error). psql_write DB SQL: the same for
+# SQL that writes, never retried.
 psql_at() {
+  kube_read exec postgres-0 -c postgres -- psql -X -U dispatch -d "$1" -v ON_ERROR_STOP=1 -At -c "$2"
+}
+psql_write() {
   kube exec postgres-0 -c postgres -- psql -X -U dispatch -d "$1" -v ON_ERROR_STOP=1 -At -c "$2"
 }
 
@@ -756,8 +833,12 @@ nats_box() {
     pod=$(find_pod nats-box) || die "kubectl could not list the nats-box pod"
     [ -n "$pod" ] || die "no running nats-box pod in $NS"
   fi
-  # The server named explicitly, so no nats-box context decides which NATS this purges.
-  kube exec "$pod" -c nats-box -- nats --server "nats://nats.$NS.svc:4222" "$@"
+  # The server named explicitly, so no nats-box context decides which NATS this purges. A listing
+  # or an info only reads, so kube_read retries it; a removal is never retried.
+  case "${1:-} ${2:-}" in
+    "stream info" | "stream ls" | "kv ls") kube_read exec "$pod" -c nats-box -- nats --server "nats://nats.$NS.svc:4222" "$@" ;;
+    *) kube exec "$pod" -c nats-box -- nats --server "nats://nats.$NS.svc:4222" "$@" ;;
+  esac
 }
 
 # scale_to DEPLOYMENT N [SECONDS]: scale it; with 0, wait until none of its pods is left, else
@@ -869,8 +950,8 @@ reset_copy() {
     die "the copy's Postgres has no template database $template; cluster.sh seed first"
   fi
   stop_copy
-  psql_at postgres 'drop database if exists dispatch with (force)' >/dev/null || die "drop database dispatch failed"
-  psql_at postgres "create database dispatch template $template" >/dev/null || die "create database dispatch from $template failed"
+  psql_write postgres 'drop database if exists dispatch with (force)' >/dev/null || die "drop database dispatch failed"
+  psql_write postgres "create database dispatch template $template" >/dev/null || die "create database dispatch from $template failed"
   if [ "$template" = "$REPLAY_TEMPLATE" ]; then
     checksum=$(replay_checksum dispatch) || die "loadgen replay-checksum of database dispatch failed"
   fi
@@ -899,16 +980,20 @@ runner_put() { kube cp "$1" "runner:$2" -c runner >/dev/null || die "kubectl cp 
 runner_has() {
   local got
   # shellcheck disable=SC2016 # expanded by the runner's sh
-  got=$(kube exec runner -c runner -- sh -c 'test "$1" "$2" && sha256sum "$2"' sh "$3" "$2" 2>/dev/null) || return 1
+  got=$(kube_read exec runner -c runner -- sh -c 'test "$1" "$2" && sha256sum "$2"' sh "$3" "$2" 2>/dev/null) || return 1
   [ "${got%% *}" = "$(sha256_of "$1")" ]
 }
 
-# put_loadgen: the run's loadgen into the runner as /work/loadgen, executable, unless it is there.
-put_loadgen() {
-  if runner_has "$LOADGEN" /work/loadgen -x; then return 0; fi
-  runner_put "$LOADGEN" /work/loadgen
-  kube exec runner -c runner -- chmod 755 /work/loadgen || die "chmod of /work/loadgen in the runner failed"
+# put_executable FILE DEST: FILE into the runner as DEST, executable, unless the runner holds it
+# (runner_has: only when its sha256 differs there).
+put_executable() {
+  if runner_has "$1" "$2" -x; then return 0; fi
+  runner_put "$1" "$2"
+  kube exec runner -c runner -- chmod 755 "$2" || die "chmod of $2 in the runner failed"
 }
+
+# put_loadgen: the run's loadgen into the runner as /work/loadgen (put_executable).
+put_loadgen() { put_executable "$LOADGEN" /work/loadgen; }
 
 # runner_start NAME CMD...: CMD detached in the runner pod, its output in /work/logs/NAME.log, its
 # pid in NAME.pid and its exit status in NAME.rc.
@@ -926,7 +1011,7 @@ runner_start() {
 runner_wait() {
   local name=$1 deadline=$((EPOCHSECONDS + $2)) log_dir=${3:-$RUN_DIR/logs} rc
   while :; do
-    if rc=$(kube exec runner -c runner -- cat "/work/logs/$name.rc" 2>/dev/null) && [[ $rc =~ ^[0-9]+$ ]]; then
+    if rc=$(kube_read exec runner -c runner -- cat "/work/logs/$name.rc" 2>/dev/null) && [[ $rc =~ ^[0-9]+$ ]]; then
       break
     fi
     if ((EPOCHSECONDS >= deadline)); then
@@ -937,41 +1022,36 @@ runner_wait() {
     fi
     sleep 15
   done
-  kube exec runner -c runner -- cat "/work/logs/$name.log" >"$log_dir/$name.log" 2>/dev/null || true
+  kube_read exec runner -c runner -- cat "/work/logs/$name.log" >"$log_dir/$name.log" 2>/dev/null || true
   printf '%s\n' "$rc"
 }
 
-# ---- the stored-order check -----------------------------------------------------------------------
-
-# stored_order_source COMMIT: refuse a --stored-order-commit that this checkout's git store (which
-# `jj git fetch` fills) does not hold, or whose tree has no cmd/dispatch/storedorder.go, naming it.
-stored_order_source() {
-  command -v git >/dev/null || die "up: --stored-order-commit needs git on PATH"
-  git -C "$REPO_DIR" cat-file -e "$1^{commit}" 2>/dev/null ||
-    die "up: --stored-order-commit $1 is not a commit in this checkout's git store ($REPO_DIR); fetch it (jj git fetch) or name another"
-  git -C "$REPO_DIR" cat-file -e "$1:packages/envoy/cmd/dispatch/storedorder.go" 2>/dev/null ||
-    die "up: --stored-order-commit $1 has no packages/envoy/cmd/dispatch/storedorder.go, so its envoy-dispatch has no stored-order command (INFRA-707); name a commit that has it"
+# commit_source FLAG COMMIT PATH WHY: refuse a --FLAG commit that this checkout's git store (which
+# `jj git fetch` fills) does not hold, or whose tree has no PATH (a file or a directory), naming
+# it; WHY says what a tree without PATH lacks.
+commit_source() {
+  command -v git >/dev/null || die "up: --$1 needs git on PATH"
+  git -C "$REPO_DIR" cat-file -e "$2^{commit}" 2>/dev/null ||
+    die "up: --$1 $2 is not a commit in this checkout's git store ($REPO_DIR); fetch it (jj git fetch) or name another"
+  git -C "$REPO_DIR" cat-file -e "$2:$3" 2>/dev/null ||
+    die "up: --$1 $2 has no $3, $4; name a commit that has it"
 }
 
-# build_stored_order COMMIT OUT: a static envoy-dispatch of COMMIT's packages/envoy at OUT (an
-# absolute path): `git archive` of this checkout's git store unpacked in a scratch directory beside
-# OUT, built there outside any workspace, then the scratch directory removed.
-build_stored_order() {
-  local commit=$1 out=$2 src rc=0
-  src=$(mktemp -d "${out%/*}/.stored-order-src.XXXXXX") || return 1
+# build_at_commit COMMIT PACKAGE OUT: a static binary of COMMIT's Go package PACKAGE (a path under
+# packages/envoy, as ./cmd/dispatch) at OUT (an absolute path): `git archive` of this checkout's
+# git store unpacked in a scratch directory beside OUT, built there outside any workspace, then
+# the scratch directory removed. It builds the stored-order check's envoy-dispatch and browser
+# typing's browsertype.
+build_at_commit() {
+  local commit=$1 pkg=$2 out=$3 src rc=0
+  src=$(mktemp -d "${out%/*}/.build-src.XXXXXX") || return 1
   { git -C "$REPO_DIR" archive "$commit" packages/envoy | tar -C "$src" -xf - &&
-    (cd -- "$src/packages/envoy" && CGO_ENABLED=0 GOWORK=off go build -buildvcs=false -o "$out" ./cmd/dispatch); } || rc=$?
+    (cd -- "$src/packages/envoy" && CGO_ENABLED=0 GOWORK=off go build -buildvcs=false -o "$out" "$pkg"); } || rc=$?
   rm -rf -- "$src"
   return "$rc"
 }
 
-# put_stored_order: the run's envoy-dispatch into the runner as /work/envoy-dispatch, executable,
-# unless it is there (put_loadgen's rule).
-put_stored_order() {
-  if runner_has "$STORED_ORDER_BIN" /work/envoy-dispatch -x; then return 0; fi
-  runner_put "$STORED_ORDER_BIN" /work/envoy-dispatch
-  kube exec runner -c runner -- chmod 755 /work/envoy-dispatch || die "chmod of /work/envoy-dispatch in the runner failed"
-}
+# ---- the stored-order check -----------------------------------------------------------------------
 
 # The runner's script: DATABASE_URL from its standard input, so the password is on no command line
 # and in no file, then stored-order since $2, bounded at $1 seconds (timeout's exit status 124).
@@ -1173,8 +1253,9 @@ stored_order_evidence() {
 # error), DIR/stored-order.json (stored_order_summary, and evidence: stored_order_evidence's
 # export of each mismatched or refused document, made here, before the next reset drops the
 # database) and one line naming the counts. A non-zero exit is a finding, never the step's failure.
-# Without the run's envoy-dispatch (up was given no --stored-order-commit), one line says that the
-# check is skipped.
+# Browser typing, when the step runs it, stops right after the command (typing_stop). Without the
+# run's envoy-dispatch (up was given no --stored-order-commit), one line says that the check is
+# skipped.
 stored_order_check() {
   local name=$1 dir=$2 commit since evidence rc=0 txt=$2/stored-order.txt
   commit=$(state '.stored_order.commit // empty')
@@ -1184,7 +1265,7 @@ stored_order_check() {
   fi
   since=$(jq -r '.window_start // empty' "$dir/meta.json" 2>/dev/null || true)
   if valid rfc3339 "$since"; then
-    put_stored_order
+    put_executable "$STORED_ORDER_BIN" /work/envoy-dispatch
     printf '%s\n' "$(pg_url)" | kube_for $((STORED_ORDER_SECONDS + 60)) exec -i runner -c runner -- \
       sh -c "$STORED_ORDER_SCRIPT" sh "$STORED_ORDER_SECONDS" "$since" >"$txt" 2>&1 || rc=$?
     ((rc != 124)) || printf 'stored-order: timed out after %s s (exit 124)\n' "$STORED_ORDER_SECONDS" >>"$txt"
@@ -1192,6 +1273,7 @@ stored_order_check() {
     printf 'stored-order: not run: %s/meta.json holds no RFC 3339 window_start\n' "$name" >"$txt"
     since="" rc=null
   fi
+  typing_stop "$name" "$dir"
   stored_order_summary "$txt" "$commit" "$rc" "$since" >"$dir/stored-order.json"
   note "$(jq -r --arg name "$name" 'def n: if . == null then "null" else tostring end;
     "step \($name): stored-order (envoy-dispatch of \(.commit[0:12])) since \(.since | n): "
@@ -1208,11 +1290,14 @@ stored_order_check() {
 
 # stored_order_table DIR...: <run>/STORED-ORDER.md: the commit the check's envoy-dispatch was built
 # from, then one row per step directory in the order given (the run's) from its stored-order.json,
-# "not run" for a step without one. A count that no summary line gave is null, never 0.
+# "not run" for a step without one. A count that no summary line gave is null, never 0. The
+# Typing column is the keystroke updates browser typing sent during the step (browsertype.json
+# sent, null when its output held no peer line), or none for a step without --typing.
 stored_order_table() {
-  local commit sha d out=$RUN_DIR/STORED-ORDER.md
+  local commit sha bt d typing out=$RUN_DIR/STORED-ORDER.md
   commit=$(state '.stored_order.commit // empty')
   sha=$(state '.stored_order.sha256 // empty')
+  bt=$(state '.browsertype.commit // empty')
   {
     printf '# Stored order\n\n'
     if [ -n "$commit" ]; then
@@ -1220,19 +1305,182 @@ stored_order_table() {
     else
       printf "No step ran INFRA-707's oracle \`envoy-dispatch stored-order\`: up was given no \`--stored-order-commit\`.\n\n"
     fi
-    printf '| Step | Since | Exit | Documents | Clean | Mismatched | Refused | Failed |\n'
-    printf '| --- | --- | --- | --- | --- | --- | --- | --- |\n'
+    if [ -n "$bt" ]; then
+      printf "Typing: the keystroke updates that INFRA-707's \`browsertype\`, built from commit %s, sent into the step's documents from its warm-up until the check ended (\`<step>/browsertype.json\`); \`none\` for a step run without \`--typing\`.\n\n" "$bt"
+    else
+      printf "Typing: \`none\` for every step: up was given no \`--browsertype-commit\`.\n\n"
+    fi
+    printf '| Step | Since | Exit | Documents | Clean | Mismatched | Refused | Failed | Typing |\n'
+    printf '| --- | --- | --- | --- | --- | --- | --- | --- | --- |\n'
     for d in "$@"; do
+      typing=none
+      if [ -f "$d/browsertype.json" ]; then
+        typing=$(jq -r '.sent | if . == null then "null" else tostring end' "$d/browsertype.json") || return 1
+      fi
       if [ -f "$d/stored-order.json" ]; then
-        jq -r --arg step "${d##*/}" 'def n: if . == null then "null" else tostring end;
-          "| \($step) | \(.since | n) | \(if .exit == null then "not run" else .exit | tostring end) | \(.documents | n) | \(.clean | n) | \(.mismatched | n) | \(.refused | n) | \(.failed | n) |"' \
+        jq -r --arg step "${d##*/}" --arg typing "$typing" 'def n: if . == null then "null" else tostring end;
+          "| \($step) | \(.since | n) | \(if .exit == null then "not run" else .exit | tostring end) | \(.documents | n) | \(.clean | n) | \(.mismatched | n) | \(.refused | n) | \(.failed | n) | \($typing) |"' \
           "$d/stored-order.json" || return 1
       else
-        printf '| %s | | not run | | | | | |\n' "${d##*/}"
+        printf '| %s | | not run | | | | | | %s |\n' "${d##*/}" "$typing"
       fi
     done
   } >"$out.tmp" || return 1
   mv -- "$out.tmp" "$out"
+}
+
+# ---- browser typing -------------------------------------------------------------------------------
+
+# typing_parse: a step's or a replay's --typing flags from OPT, into TYPING (1 with --typing, else
+# empty), TYPING_PEERS, TYPING_RATE and TYPING_DOCS; refused, before anything is touched, when a
+# value has the wrong shape, when a --typing-* flag comes without --typing, or when the run has
+# no browsertype (up was given no --browsertype-commit). Called after use_run.
+typing_parse() {
+  local f
+  TYPING=""
+  if [ -z "${OPT[typing]:-}" ]; then
+    for f in typing-peers typing-rate typing-docs; do
+      [ -z "${OPT[$f]+set}" ] || die "$CMD: --$f needs --typing"
+    done
+    return 0
+  fi
+  TYPING_PEERS=${OPT[typing-peers]:-2} TYPING_RATE=${OPT[typing-rate]:-5} TYPING_DOCS=${OPT[typing-docs]:-20}
+  [[ $TYPING_PEERS =~ ^[1-9][0-9]{0,2}$ ]] || die "$CMD: --typing-peers '$TYPING_PEERS' is not a whole number from 1 to 999"
+  if ! [[ $TYPING_RATE =~ ^(0|[1-9][0-9]{0,3})(\.[0-9]{1,3})?$ ]] || ! awk -v r="$TYPING_RATE" 'BEGIN { exit !(r > 0) }'; then
+    die "$CMD: --typing-rate '$TYPING_RATE' is not a number of keystroke updates per second above 0 (for example 5 or 2.5)"
+  fi
+  [[ $TYPING_DOCS =~ ^[1-9][0-9]{0,3}$ ]] || die "$CMD: --typing-docs '$TYPING_DOCS' is not a whole number from 1 to 9999"
+  [ -n "$(state '.browsertype.commit // empty')" ] ||
+    die "$CMD: --typing needs INFRA-707's browsertype, and up was given no --browsertype-commit; bring the copy up with --browsertype-commit <sha>"
+  TYPING=1
+}
+
+# typing_docs_step SEED_JSON SESSIONS K RNG_SEED: a load step's typing documents: of the spec
+# documents (artifact_id) of the issues its sessions work on (the first SESSIONS issues in key
+# order, as loadgen run maps sessions onto them), the K whose sha256 of "<RNG_SEED>:<artifact id>"
+# sorts first, one per line.
+typing_docs_step() {
+  local id h
+  jq -r --argjson n "$2" '.issues // [] | sort_by(.key) | .[:$n][] | .artifact_id | strings' "$1" |
+    while IFS= read -r id; do
+      valid uid "$id" || continue
+      h=$(printf '%s:%s' "$4" "$id" | sha256sum)
+      printf '%s %s\n' "${h%% *}" "$id"
+    done | sort | awk -v k="$3" 'NR <= k { print $2 }'
+}
+
+# The jq program over a replay bundle's window.jsonl (typing_docs_replay): each document's agent
+# writes in the sub-window, the artifact.version events that the replay sends as an edit or an
+# upload (not a person's, which a browser made, and not a named version with no diff, a
+# settlement), at $from <= created_at - state.json at < $to seconds; the documents of state.json
+# (kind doc) that loadtest.replay_ids maps ($ids: "<logged id>|<local id>" lines), most writes
+# first (ties by logged id), the first $k as their local ids.
+# shellcheck disable=SC2016 # jq's variables
+TYPING_REPLAY_JQ='def secs: capture("^(?<d>[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2})(?<f>\\.[0-9]+)?(?<z>Z|[+-][0-9]{2}:[0-9]{2})$") as $c
+    | ($c.d + "Z" | fromdateiso8601) + ("0" + ($c.f // "") | tonumber)
+      - (if $c.z == "Z" then 0 else ($c.z[0:1] | if . == "-" then -1 else 1 end) * (($c.z[1:3] | tonumber) * 3600 + ($c.z[4:6] | tonumber) * 60) end);
+  ($state[0].at | secs) as $at
+  | ([$state[0].issues[]? | .artifacts[]? | select(.kind == "doc") | {key: .id, value: true}] | from_entries) as $docs
+  | ([$ids | split("\n")[] | select(. != "") | split("|") | select(length == 2) | {key: .[0], value: .[1]}] | from_entries) as $local
+  | [inputs | select(.type == "artifact.version" and .actor.kind != "user")
+      | select((.created_at | secs) - $at | . >= $from and . < $to)
+      | .payload | select((.version.named == true and .diff == null) | not) | .artifact_id
+      | select(type == "string" and $docs[.] == true and $local[.] != null)]
+  | group_by(.) | map({id: .[0], n: length}) | sort_by(-.n, .id) | .[:$k][] | $local[.id]'
+
+# typing_docs_replay BUNDLE FROM_S TO_S K IDS: a replay's typing documents over the sub-window
+# FROM_S to TO_S seconds after the bundle's state (TYPING_REPLAY_JQ over BUNDLE/window.jsonl and
+# BUNDLE/state.json), IDS being loadtest.replay_ids's artifact rows as "<logged id>|<local id>"
+# lines; one copy id per line.
+typing_docs_replay() {
+  jq -nr --slurpfile state "$1/state.json" --rawfile ids "$5" --argjson from "$2" --argjson to "$3" --argjson k "$4" \
+    "$TYPING_REPLAY_JQ" "$1/window.jsonl"
+}
+
+# typing_replay_ids OUT: loadtest.replay_ids's artifact rows of the copy's database dispatch (the
+# replay's reset copies them from dispatch_replay) into OUT, as psql -At prints them:
+# "<logged id>|<local id>".
+typing_replay_ids() {
+  psql_at dispatch "select logged_id, local_id from loadtest.replay_ids where kind = 'artifact' order by logged_id" >"$1"
+}
+
+# typing_chosen NAME: refuse a typing step whose document choice (TYPING_LIST) is empty, and say
+# which documents it types into.
+typing_chosen() {
+  ((${#TYPING_LIST[@]})) || die "step $1: --typing found no document to type into"
+  note "step $1: browser typing into ${#TYPING_LIST[@]} documents (of --typing-docs $TYPING_DOCS): ${TYPING_LIST[*]}"
+}
+
+# typing_start NAME DIR SECONDS: when the step runs browser typing, browsertype detached in the
+# runner as job typing-NAME, just before loadgen run (whose bound is SECONDS) starts, so its peers
+# connect during the warm-up: the binary (put_executable), the copy's agent token into
+# TYPING_DIR/token through kubectl exec's standard input (never on a command line, in no recorded
+# file, never printed), the document list, then browsertype for SECONDS, the stored-order check's
+# bound and 600 s more, which outlasts loadgen's window, grace, the after-work and the check;
+# typing_stop ends it before that. A step that dies before typing_stop stops it on its way out
+# (an EXIT trap of the shell the step runs in), so no browsertype types into a later step.
+typing_start() {
+  local name=$1 dir=$2 seconds=$3 docs
+  [ -n "$TYPING" ] || return 0
+  put_executable "$BROWSERTYPE_BIN" /work/browsertype
+  # shellcheck disable=SC2016 # expanded by the runner's sh
+  state .secrets.dispatch_token | kube exec -i runner -c runner -- sh -c 'umask 077 && mkdir -p "$1" && cat >"$1/token"' sh "$TYPING_DIR" ||
+    die "step $name: writing the agent token for browsertype into the runner failed"
+  docs=$RUN_DIR/tmp/typing-$name.docs
+  printf '%s\n' "${TYPING_LIST[@]}" >"$docs"
+  runner_put "$docs" "$TYPING_DIR/$name.docs"
+  rm -f -- "$docs"
+  runner_start "typing-$name" /work/browsertype -url "http://dispatch.$NS.svc:8766" -token-file "$TYPING_DIR/token" \
+    -session "$TYPING_SESSION" -artifacts-file "$TYPING_DIR/$name.docs" -peers "$TYPING_PEERS" -rate "$TYPING_RATE" \
+    -duration "$((seconds + STORED_ORDER_SECONDS + 600))s" -seed 1
+  note "step $name: browsertype (commit $(state '.browsertype.commit[0:12]')) started: $TYPING_PEERS peers on each of ${#TYPING_LIST[@]} documents at $TYPING_RATE keystroke updates/s, until the stored-order check ends"
+  TYPING_STEP=("$name" "$dir")
+  trap typing_stop_at_exit EXIT
+}
+
+# typing_stop_at_exit: typing_start's EXIT trap: typing_stop of the step it started, which does
+# nothing once that step has stopped its typing.
+typing_stop_at_exit() { typing_stop "${TYPING_STEP[@]}" || true; }
+
+# typing_summary TXT EXIT: browsertype.json from browsertype's output TXT: the commit it was built
+# from, the documents (TYPING_LIST), peers, rate, its exit status (null when it gave none in time)
+# and the sums of its peer lines' sent, skipped and errors, each null (never 0) when TXT holds no
+# peer line.
+typing_summary() {
+  jq -Rn --arg commit "$(state '.browsertype.commit')" --argjson exit "$2" --argjson peers "$TYPING_PEERS" --argjson rate "$TYPING_RATE" '
+    [inputs | capture("^artifact=[^ ]+ peer=[0-9]+ sent=(?<sent>[0-9]+) skipped=(?<skipped>[0-9]+) errors=(?<errors>[0-9]+) ") | map_values(tonumber)] as $l
+    | {commit: $commit, docs: $ARGS.positional, peers: $peers, rate: $rate, exit: $exit}
+      + (if $l == [] then {sent: null, skipped: null, errors: null}
+        else {sent: ($l | map(.sent) | add), skipped: ($l | map(.skipped) | add), errors: ($l | map(.errors) | add)} end)' \
+    --args "${TYPING_LIST[@]}" <"$1"
+}
+
+# typing_stop NAME DIR: when the step runs browser typing and has not stopped it yet (no
+# DIR/browsertype.json): SIGTERM to browsertype, its exit status (at most 120 s later), its output
+# into DIR/browsertype.txt and typing_summary into DIR/browsertype.json, the token removed from the
+# runner, and one line naming the sums. A peer error or a non-zero exit is said, never a step
+# failure. Called right after the stored-order command, and again after the check (which a step
+# without --stored-order-commit skips), so it never fails.
+typing_stop() {
+  local name=$1 dir=$2 job=typing-$1 rc
+  { [ -n "$TYPING" ] && [ ! -f "$dir/browsertype.json" ]; } || return 0
+  # shellcheck disable=SC2016 # expanded by the runner's sh
+  kube exec runner -c runner -- sh -c 'kill -TERM "$(cat "/work/logs/$1.pid")"' sh "$job" >/dev/null 2>&1 ||
+    note "step $name: SIGTERM to browsertype failed (it may have ended already)"
+  rc=$(runner_wait "$job" 120 "$dir") || rc=timeout
+  if [ -f "$dir/$job.log" ]; then mv -f -- "$dir/$job.log" "$dir/browsertype.txt"; else : >"$dir/browsertype.txt"; fi
+  kube exec runner -c runner -- rm -f "$TYPING_DIR/token" "$TYPING_DIR/$name.docs" >/dev/null 2>&1 ||
+    note "step $name: removing the agent token from the runner failed"
+  [[ $rc =~ ^[0-9]+$ ]] || rc=null
+  if ! typing_summary "$dir/browsertype.txt" "$rc" >"$dir/browsertype.json.tmp"; then
+    rm -f -- "$dir/browsertype.json.tmp"
+    note "step $name: summing browsertype's output failed; no browsertype.json"
+    return 0
+  fi
+  mv -- "$dir/browsertype.json.tmp" "$dir/browsertype.json"
+  note "$(jq -r --arg name "$name" 'def n: if . == null then "null" else tostring end;
+    "step \($name): browsertype \(if .exit == null then "gave no exit status within 120 s of SIGTERM" else "exit \(.exit)" end): sent=\(.sent | n) skipped=\(.skipped | n) errors=\(.errors | n)"
+    + (if .exit == 0 and .errors == 0 then "" else "; a peer error is reported, not a step failure: \($name)/browsertype.txt" end)' "$dir/browsertype.json")"
 }
 
 # ---- steps ----------------------------------------------------------------------------------------
@@ -1293,7 +1541,7 @@ crash_check() {
 }
 
 cpu_model() {
-  kube exec "$1" -c "$2" -- grep -m1 '^model name' /proc/cpuinfo | sed 's/^model name[[:space:]]*:[[:space:]]*//' || echo unknown
+  kube_read exec "$1" -c "$2" -- grep -m1 '^model name' /proc/cpuinfo | sed 's/^model name[[:space:]]*:[[:space:]]*//' || echo unknown
 }
 
 # save_pg_settings FILE: SHOW ALL of the copy's Postgres.
@@ -1344,7 +1592,8 @@ save_pod_logs() {
   wait "${pids[@]}" || true
 }
 
-# run_step NAME FACTOR DURATION READS_ONLY PHASE: one step (see the header), into steps/NAME.
+# run_step NAME FACTOR DURATION READS_ONLY PHASE: one step (see the header), into steps/NAME; with
+# --typing (TYPING), browser typing into typing_docs_step's documents.
 run_step() {
   local name=$1 factor=$2 duration=$3 reads=$4 phase=$5
   valid step "$name" || die "step name '$name' may hold only letters, digits, '.', '_' and '-'"
@@ -1356,11 +1605,15 @@ run_step() {
   [ ! -e "$dir" ] || die "$dir exists: name another step, or remove it"
   [ -f "$RUN_DIR/seed.json" ] || die "no $RUN_DIR/seed.json: cluster.sh seed first"
   ensure_daemons
-  local events requests sessions
+  local events requests sessions rng_seed=1
   events=$(awk -v f="$factor" 'BEGIN { printf "%g", 4 * f }')
   requests=$(awk -v f="$factor" 'BEGIN { printf "%g", 60 * f }')
   sessions=$(loadgen_local series-sessions "$factor") || die "loadgen series-sessions $factor failed"
   [ "$reads" = true ] && events=0
+  if [ -n "$TYPING" ]; then
+    mapfile -t TYPING_LIST < <(typing_docs_step "$RUN_DIR/seed.json" "$sessions" "$TYPING_DOCS" "$rng_seed")
+    typing_chosen "$name"
+  fi
   mkdir -p -- "$dir" "$RUN_DIR/phases"
   printf '%s\n' "$name" >>"$RUN_DIR/phases/$phase"
   note "step $name: factor $factor, $events events/s, $sessions sessions, $requests requests/s, window $duration"
@@ -1378,21 +1631,24 @@ run_step() {
     /work/loadgen run -allow-foreign -name "$name" -out "/work/steps/$name" \
     -seed /work/seed.json -copy-meta "/work/meta/$name.json" -build-commit "$(state .dispatch_commit)" \
     -events "$events" -sessions "$sessions" -requests "$requests" -duration "$duration" \
-    -warmup 30s -grace 20s -rng-seed 1 "${ENDPOINTS[@]}"
+    -warmup 30s -grace 20s -rng-seed "$rng_seed" "${ENDPOINTS[@]}"
   note "step $name done: $dir"
 }
 
 # run_in_runner NAME DIR JOB SECONDS CMD...: a step's loadgen run CMD as the runner job JOB (at
 # most SECONDS), with Postgres's write-out counters before and after it (pg-stats-before.json,
-# pg-stats-after.json), then the after-work of every step: /work/steps/NAME copied back into DIR
-# (and, once copied, removed from the runner with /work/meta/NAME.json), the crash check, the
-# container logs, a non-zero exit recorded, the stored-order check while Dispatch still runs (one
-# that dies leaves the step going), cgroup-merge and tables.
+# pg-stats-after.json) and, with --typing, browser typing from just before it (typing_start) until
+# the stored-order command ends (typing_stop, and at the latest when the step ends); then the
+# after-work of every step: /work/steps/NAME copied back into DIR (and, once copied, removed from
+# the runner with /work/meta/NAME.json), the crash check, the container logs, a non-zero exit
+# recorded, the stored-order check while Dispatch still runs (one that dies leaves the step
+# going), cgroup-merge and tables.
 run_in_runner() {
   local name=$1 dir=$2 job=$3 seconds=$4 started rc
   shift 4
   pg_stats "$dir/pg-stats-before.json"
   started=$(utc_now)
+  typing_start "$name" "$dir" "$seconds"
   runner_start "$job" "$@"
   rc=$(runner_wait "$job" "$seconds" "$dir")
   pg_stats "$dir/pg-stats-after.json"
@@ -1409,6 +1665,7 @@ run_in_runner() {
   save_pod_logs "$dir" "$started"
   [ "$rc" = 0 ] || record_failure "$dir" loadgen_exit "" "loadgen run ended with exit status $rc (see run.log and loadgen.out)"
   go_on "step $name: the stored-order check" stored_order_check "$name" "$dir"
+  go_on "step $name: stopping browser typing" typing_stop "$name" "$dir"
   loadgen_local cgroup-merge "$dir" "$RUN_DIR/cgroup.jsonl" || note "step $name: loadgen cgroup-merge failed"
   loadgen_local tables "$dir" || note "step $name: loadgen tables failed"
 }
@@ -1518,7 +1775,7 @@ resize_postgres() {
   kube_for 960 wait --for=condition=Ready pod/postgres-0 --timeout=900s >/dev/null ||
     die "postgres-0 was not ready within 15 min"
   want="$((cpu * 100000)) 100000"
-  got=$(kube exec postgres-0 -c postgres -- cat /sys/fs/cgroup/cpu.max) || die "reading postgres-0's cpu.max failed"
+  got=$(kube_read exec postgres-0 -c postgres -- cat /sys/fs/cgroup/cpu.max) || die "reading postgres-0's cpu.max failed"
   [ "$got" = "$want" ] || die "postgres-0's cpu.max reads '$got', not '$want'"
   save_pg_settings "$RUN_DIR/postgres-settings.txt"
   note "Postgres at $(state .postgres.tier): cpu.max $got; SHOW ALL in $RUN_DIR/postgres-settings.txt"
@@ -1644,9 +1901,9 @@ replay_prepare_run() {
   # The dump, restored into a fresh database dispatch.
   rm -f -- "$rec"
   stop_copy
-  psql_at postgres "drop database if exists $REPLAY_TEMPLATE with (force)" >/dev/null || die "drop database $REPLAY_TEMPLATE failed"
-  psql_at postgres 'drop database if exists dispatch with (force)' >/dev/null || die "drop database dispatch failed"
-  psql_at postgres 'create database dispatch' >/dev/null || die "create database dispatch failed"
+  psql_write postgres "drop database if exists $REPLAY_TEMPLATE with (force)" >/dev/null || die "drop database $REPLAY_TEMPLATE failed"
+  psql_write postgres 'drop database if exists dispatch with (force)' >/dev/null || die "drop database dispatch failed"
+  psql_write postgres 'create database dispatch' >/dev/null || die "create database dispatch failed"
   t0=$EPOCHREALTIME
   note "streaming the seed dump (sha256 $dump_sha) into postgres-0:$REPLAY_POD_DUMP"
   # shellcheck disable=SC2016 # expanded by the pod's sh
@@ -1691,7 +1948,7 @@ replay_prepare_run() {
   stop_copy
 
   t0=$EPOCHREALTIME
-  psql_at dispatch 'vacuum analyze' >/dev/null || die "vacuum analyze of database dispatch failed"
+  psql_write dispatch 'vacuum analyze' >/dev/null || die "vacuum analyze of database dispatch failed"
   s_vacuum=$(elapsed_since "$t0")
   local after checksum
   after=$(psql_at dispatch 'select max(version) from schema_migrations') || die "reading the migrated seed's migration failed"
@@ -1699,7 +1956,7 @@ replay_prepare_run() {
   put_loadgen
   checksum=$(replay_checksum dispatch) || die "loadgen replay-checksum of the restored template failed"
   s_checksum=$(elapsed_since "$t0")
-  psql_at postgres "alter database dispatch rename to $REPLAY_TEMPLATE" >/dev/null || die "renaming dispatch to $REPLAY_TEMPLATE failed"
+  psql_write postgres "alter database dispatch rename to $REPLAY_TEMPLATE" >/dev/null || die "renaming dispatch to $REPLAY_TEMPLATE failed"
   jq -n --arg template "$REPLAY_TEMPLATE" --arg manifest "${manifest##*/}" --arg dump "$dump_sha" \
     --arg tar "$(jq -r .bundle.tar_zst_sha256 "$manifest")" --arg meta "$bundle_meta_sha" \
     --arg commit "$(state .dispatch_commit)" --arg image "$(state .images.dispatch)" \
@@ -1750,7 +2007,9 @@ replay_codepaths() {
     -outage-cores "$OUTAGE_CORES" -outage-memory "$OUTAGE_MEMORY_GIB" -residual-notes "$notes" -window-offset "$2"
 }
 
-# run_replay NAME FROM TO PHASE: one replay step (see the header), into steps/NAME.
+# run_replay NAME FROM TO PHASE: one replay step (see the header), into steps/NAME; with --typing
+# (TYPING), browser typing into typing_docs_replay's documents, mapped through the reset
+# database's loadtest.replay_ids.
 run_replay() {
   local name=$1 from=$2 to=$3 phase=$4 window
   valid step "$name" || die "step name '$name' may hold only letters, digits, '.', '_' and '-'"
@@ -1771,6 +2030,13 @@ run_replay() {
   container_snapshot "$dir/containers-before.tsv"
   write_copy_meta "$dir/copy-meta.json" "$dir"
   cp -- "$rec" "$dir/replay-prepared.json"
+  if [ -n "$TYPING" ]; then
+    local ids=$RUN_DIR/tmp/replay-ids-$name.txt
+    typing_replay_ids "$ids" || die "replay $name: reading loadtest.replay_ids for browser typing failed"
+    mapfile -t TYPING_LIST < <(typing_docs_replay "$RUN_DIR/replay/bundle" "$(duration_seconds "$from")" "$(duration_seconds "$to")" "$TYPING_DOCS" "$ids")
+    rm -f -- "$ids"
+    typing_chosen "$name"
+  fi
   # What loadgen run reads under $LOADTEST_ROOT for the replay's inputs: the reset
   # (seed_dump_sha256) and the build (dispatch_commit).
   jq -n --slurpfile p "$rec" --slurpfile r "$dir/reset.json" \
@@ -1790,7 +2056,7 @@ run_replay() {
   # Dispatch's GOMAXPROCS is its container's CPU limit, rounded up (Go's default in a cgroup).
   local dpod cmax gomaxprocs
   dpod=$(find_pod dispatch) || die "kubectl could not list the Dispatch pod"
-  cmax=$(kube exec "$dpod" -c envoy-dispatch -- cat /sys/fs/cgroup/cpu.max) || die "reading Dispatch's cpu.max failed"
+  cmax=$(kube_read exec "$dpod" -c envoy-dispatch -- cat /sys/fs/cgroup/cpu.max) || die "reading Dispatch's cpu.max failed"
   [[ $cmax =~ ^([0-9]+)\ ([0-9]+)$ ]] || die "Dispatch's cpu.max reads '$cmax': no CPU limit, so its GOMAXPROCS is not known"
   gomaxprocs=$(((BASH_REMATCH[1] + BASH_REMATCH[2] - 1) / BASH_REMATCH[2]))
 
@@ -1873,7 +2139,8 @@ pack_results() {
 
 # collect_run [ISSUE]: the cross-step outputs, with every step in the order the steps ran:
 # STORED-ORDER.md over every step directory, TABLES.md over the steps that wrote summary.json,
-# loadgen curves over every step directory but the phase replay's into <run>/curves, and loadgen
+# loadgen curves over every step directory but the phase replay's and those that ran browser
+# typing (browsertype.json: the curves run without it) into <run>/curves, and loadgen
 # codepaths in each step directory that holds summary.json (a step that wrote none has no profile;
 # a replay step's as replay_codepaths runs it); then each phase's tar and the results tar. A
 # failure is reported, the rest still runs, and collect_run returns 1.
@@ -1883,7 +2150,7 @@ collect_run() {
   steps_in_run_order
   for d in "${DIRS[@]}"; do
     if [ -f "$d/summary.json" ]; then ran+=("$d") names+=("${d##*/}"); fi
-    if [[ $replays != *" ${d##*/} "* ]]; then curve_dirs+=("$d"); fi
+    if [[ $replays != *" ${d##*/} "* ]] && [ ! -f "$d/browsertype.json" ]; then curve_dirs+=("$d"); fi
   done
   if stored_order_table "${DIRS[@]}"; then
     note "wrote $RUN_DIR/STORED-ORDER.md over ${#DIRS[@]} steps, in the order they ran"
@@ -1954,7 +2221,7 @@ down_run() {
 # ---- subcommands ----------------------------------------------------------------------------------
 
 cmd_up() {
-  parse "namespace storage-class dispatch-commit pg-major production-repo listener-image stored-order-commit" "" "$@"
+  parse "namespace storage-class dispatch-commit pg-major production-repo listener-image stored-order-commit browsertype-commit" "" "$@"
   positional 0 "no positional arguments"
   trap up_exit EXIT
   up_run
@@ -1973,7 +2240,7 @@ up_exit() {
 # up_run: up from OPT (also all's first phase).
 up_run() {
   local sc=${OPT[storage-class]:-} commit=${OPT[dispatch-commit]:-} major=${OPT[pg-major]:-}
-  local so_commit=${OPT[stored-order-commit]:-}
+  local so_commit=${OPT[stored-order-commit]:-} bt_commit=${OPT[browsertype-commit]:-}
   PRODUCTION_REPO=${OPT[production-repo]:-}
   local tool
   for tool in kubectl jq curl gh go setsid timeout sha256sum awk tar gzip base64; do
@@ -1996,7 +2263,13 @@ up_run() {
   valid issue "${LEGION_ISSUE:-}" || die "up: LEGION_ISSUE ('${LEGION_ISSUE:-}') is not an issue key; the lock names it (a Legion pod sets LEGION_ISSUE)"
   if [ -n "$so_commit" ]; then
     valid commit "$so_commit" || die "up: --stored-order-commit '$so_commit' is not a full 40-hex commit sha"
-    stored_order_source "$so_commit"
+    commit_source stored-order-commit "$so_commit" packages/envoy/cmd/dispatch/storedorder.go \
+      "so its envoy-dispatch has no stored-order command (INFRA-707)"
+  fi
+  if [ -n "$bt_commit" ]; then
+    valid commit "$bt_commit" || die "up: --browsertype-commit '$bt_commit' is not a full 40-hex commit sha"
+    commit_source browsertype-commit "$bt_commit" packages/envoy/loadtest/browsertype \
+      "so it has no browsertype for browser typing (INFRA-707)"
   fi
 
   # Production's facts, from the production repository's main.
@@ -2034,7 +2307,7 @@ up_run() {
     --arg sk "$(random_hex 32)" '{namespace: $ns, run: $run, storage_class: $sc, dispatch_commit: $commit,
       pg_major: $major, production_repo: $repo, created: $created, holder_pod: $holder,
       images: ({dispatch: $dispatch, listener: $listener, postgres: $pg, socat: $socat, runner: $runner} + $nats),
-      image_sources: {listener: $listener_ref}, postgres: $tier, stored_order: null,
+      image_sources: {listener: $listener_ref}, postgres: $tier, stored_order: null, browsertype: null,
       secrets: {pg_password: $pgpw, dispatch_token: $dt, listener_token: $lt, signing_key: $sk}}' >"$STATE")
   chmod 600 "$STATE"
   start_daemon heartbeat
@@ -2043,9 +2316,15 @@ up_run() {
   (cd -- "$ENVOY_DIR" && CGO_ENABLED=0 go build -o "$LOADGEN" ./loadtest) || die "go build of loadgen failed"
   if [ -n "$so_commit" ]; then
     note "building envoy-dispatch (static) of commit $so_commit into $STORED_ORDER_BIN, for the stored-order check"
-    build_stored_order "$so_commit" "$STORED_ORDER_BIN" || die "go build of envoy-dispatch at commit $so_commit failed"
+    build_at_commit "$so_commit" ./cmd/dispatch "$STORED_ORDER_BIN" || die "go build of envoy-dispatch at commit $so_commit failed"
     # shellcheck disable=SC2016 # $c and $s are jq's variables
     state_set '.stored_order = {commit: $c, sha256: $s}' --arg c "$so_commit" --arg s "$(sha256_of "$STORED_ORDER_BIN")"
+  fi
+  if [ -n "$bt_commit" ]; then
+    note "building browsertype (static) of commit $bt_commit into $BROWSERTYPE_BIN, for browser typing"
+    build_at_commit "$bt_commit" ./loadtest/browsertype "$BROWSERTYPE_BIN" || die "go build of browsertype at commit $bt_commit failed"
+    # shellcheck disable=SC2016 # $c and $s are jq's variables
+    state_set '.browsertype = {commit: $c, sha256: $s}' --arg c "$bt_commit" --arg s "$(sha256_of "$BROWSERTYPE_BIN")"
   fi
 
   note "installing the copy in $NS"
@@ -2061,7 +2340,8 @@ up_run() {
   kube_for 960 wait --for=condition=Ready pod/runner --timeout=900s >/dev/null || die "the runner was not ready within 15 min"
   start_copy
   put_loadgen
-  [ -z "$so_commit" ] || put_stored_order
+  [ -z "$so_commit" ] || put_executable "$STORED_ORDER_BIN" /work/envoy-dispatch
+  [ -z "$bt_commit" ] || put_executable "$BROWSERTYPE_BIN" /work/browsertype
   save_pg_settings "$RUN_DIR/postgres-settings.txt"
   psql_at postgres 'select version()' >"$RUN_DIR/postgres-version.txt" || die "select version() failed"
   start_daemon sampler
@@ -2115,7 +2395,7 @@ seed_run() {
   runner_start seed-finish /work/loadgen seed-finish -pg "$(pg_url)" -timeout 15m
   rc=$(runner_wait seed-finish 2400)
   [ "$rc" = 0 ] || die "loadgen seed-finish ended with $rc; see $RUN_DIR/logs/seed-finish.log"
-  kube exec runner -c runner -- cat /work/seed.json >"$RUN_DIR/seed.json.tmp" || die "copying seed.json back failed"
+  kube_read exec runner -c runner -- cat /work/seed.json >"$RUN_DIR/seed.json.tmp" || die "copying seed.json back failed"
   mv -- "$RUN_DIR/seed.json.tmp" "$RUN_DIR/seed.json"
   local migration counts
   migration=$(psql_at dispatch 'select max(version) from schema_migrations') || die "reading the seed's migration failed"
@@ -2123,7 +2403,7 @@ seed_run() {
     'issues', (select count(*) from issues), 'comments', (select count(*) from comments),
     'artifacts', (select count(*) from artifacts), 'events', (select count(*) from events))") || die "counting the seed failed"
   stop_copy
-  psql_at postgres 'alter database dispatch rename to dispatch_seed' >/dev/null || die "renaming dispatch to dispatch_seed failed"
+  psql_write postgres 'alter database dispatch rename to dispatch_seed' >/dev/null || die "renaming dispatch to dispatch_seed failed"
   jq -n --argjson migration "$migration" --arg commit "$(state .dispatch_commit)" --arg at "$started" \
     --argjson seconds "$(elapsed_since "$t0")" --argjson counts "$counts" \
     '{migration: $migration, build_commit: $commit, created_at: $at, seed_seconds: $seconds, counts: $counts}' >"$RUN_DIR/seed.meta.json"
@@ -2131,9 +2411,10 @@ seed_run() {
 }
 
 cmd_step() {
-  parse "namespace run duration" "reads-only" "$@"
+  parse "namespace run duration typing-peers typing-rate typing-docs" "reads-only typing" "$@"
   positional 2 "NAME FACTOR"
   use_run
+  typing_parse
   local reads=false
   [ -z "${OPT[reads-only]:-}" ] || reads=true
   run_step "${POS[0]}" "${POS[1]}" "${OPT[duration]:-10m}" "$reads" steps
@@ -2209,9 +2490,10 @@ cmd_replay_prepare() {
 }
 
 cmd_replay() {
-  parse "namespace run from to" "" "$@"
+  parse "namespace run from to typing-peers typing-rate typing-docs" "typing" "$@"
   positional 1 "NAME"
   use_run
+  typing_parse
   run_replay "${POS[0]}" "${OPT[from]:-0}" "${OPT[to]:-39m}" replay
 }
 
@@ -2268,7 +2550,7 @@ cmd_down() {
 }
 
 cmd_all() {
-  parse "namespace storage-class dispatch-commit pg-major production-repo listener-image stored-order-commit profile manifest upload-issue" "keep" "$@"
+  parse "namespace storage-class dispatch-commit pg-major production-repo listener-image stored-order-commit browsertype-commit profile manifest upload-issue" "keep" "$@"
   positional 0 "no positional arguments"
   local step_d hour_d replay_to refine collect_rc issue=${OPT[upload-issue]:-} manifest=${OPT[manifest]:-$REPLAY_MANIFEST} why
   case ${OPT[profile]:-} in

@@ -13,9 +13,11 @@
 #
 # Asserts that: (a) every subcommand refuses a missing --namespace; (b) up refuses a commit that is
 # not 40 hex, a commit with no image (naming its newest first-parent ancestor with one), a
-# --pg-major other than the production repository's (naming both), and a --stored-order-commit
-# that the git store does not hold or whose tree has no cmd/dispatch/storedorder.go (naming it),
-# each before any kubectl call creates anything, and refuses with exit 2 while the lock exists,
+# --pg-major other than the production repository's (naming both), a --stored-order-commit that
+# the git store does not hold or whose tree has no cmd/dispatch/storedorder.go, and a
+# --browsertype-commit that the git store does not hold or whose tree has no loadtest/browsertype
+# (naming it), each before any kubectl call creates anything, and refuses with exit 2 while the
+# lock exists,
 # naming the holder and the heartbeat's age, and past 15 min calling it stale and naming the down
 # command; down refuses another run's lock; replay-prepare refuses a manifest whose seed is null and
 # a seed check that failed (check.passed false, version_size_mismatches or
@@ -63,7 +65,19 @@
 # line, a timeout (exit 124) and a check not run; (k) the evidence export takes each mismatched or
 # refused document once with its mismatched versions, never a clean or failed one, and counts CSV
 # records past quoted line breaks; (l) a replay step's start-* tables come from dispatch_replay, and
-# a step whose reset.json names no template exports none, naming each.
+# a step whose reset.json names no template exports none, naming each; (c) step and replay refuse
+# --typing on a run without --browsertype-commit, naming it, before anything; up
+# --browsertype-commit builds browsertype with the stored-order build code and records it; step
+# and replay --typing write the agent token into the runner from standard input (on no command
+# line, in no file under the step directory, never printed), start browsertype with the step's
+# flags before loadgen's run and stop it with SIGTERM after the stored-order command (their order
+# in the fake kubectl's log), type into the K documents the step writes most, and write
+# browsertype.txt and browsertype.json, a peer error being no step failure; collect's
+# STORED-ORDER.md has a typing column (sent updates, or none) and its curves leave typing steps
+# out; (m) a replay's typing documents are the most-written documents of its sub-window in the
+# bundle fixture, mapped through replay_ids, and a load step's come from its sessions' issues by
+# its rng seed; (n) a read-only kubectl exec is retried once 5 s after a dial timeout or a refused
+# or reset API server connection, never after another error, and a write is never retried.
 set -euo pipefail
 
 here=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
@@ -160,6 +174,12 @@ case $verb in
     fi
     ;;
   exec)
+    # FAKE_EXEC_ERRORS=FILE: an exec fails with FILE's first line, which it uses up.
+    if [ -n "${FAKE_EXEC_ERRORS:-}" ] && [ -s "$FAKE_EXEC_ERRORS" ]; then
+      head -n1 "$FAKE_EXEC_ERRORS" >&2
+      sed -i 1d "$FAKE_EXEC_ERRORS"
+      exit 1
+    fi
     case $c in
       "sh -c while :; do"*)
         if [ -n "${FAKE_EXEC_FAIL:-}" ]; then
@@ -183,6 +203,12 @@ case $verb in
         ;;
       # A step's directory and copy-meta file, removed from the runner once copied back.
       "rm -rf /work/steps/"*) ;;
+      # Browser typing: the agent token written into the runner from standard input, the token and
+      # document list removed when typing stops.
+      'sh -c umask 077 && mkdir -p "$1" && cat >"$1/token" sh '*)
+        mkdir -p "$FAKE_DIR/runner${cmd[4]}" && cat >"$FAKE_DIR/runner${cmd[4]}/token"
+        ;;
+      "rm -f /work/typing/"*) ;;
       # A replay step: the runner's directories, the bundle copied in and verified there.
       "sh -c rm -rf /work/bundle"*) ;;
       "tar -C /work -xf -") cat >/dev/null ;;
@@ -202,6 +228,7 @@ case $verb in
       "nats --server nats://nats.$FAKE_NS.svc:4222 stream ls --names") echo ENVOY_NOTIFICATIONS ;;
       "nats --server nats://nats.$FAKE_NS.svc:4222 kv ls --names") echo interests ;;
       "nats --server nats://nats.$FAKE_NS.svc:4222 "*) ;;
+      *"loadtest.replay_ids"*) cat "$FAKE_DIR/replay-ids" ;;
       *"datname = 'dispatch_seed'"*) if [ -f "$FAKE_DIR/seeded" ]; then echo 1; else echo 0; fi ;;
       *"rename to dispatch_seed"*) : >"$FAKE_DIR/seeded" ;;
       *"datname = 'dispatch_replay'"*) if [ -f "$FAKE_DIR/replay-template" ]; then echo 1; else echo 0; fi ;;
@@ -234,6 +261,13 @@ case $verb in
       *cpuinfo*) printf 'model name\t: Fake CPU @ 2.00GHz\n' ;;
       # Dispatch's container keeps its 16-core limit; Postgres's reads FAKE_DIR/cpu.max.
       "cat /sys/fs/cgroup/cpu.max") if [ "$ctr" = envoy-dispatch ]; then echo '1600000 100000'; else cat "$FAKE_DIR/cpu.max"; fi ;;
+      # browsertype's exit status (FAKE_TYPING_RC, default 0) and its peer lines: with exit 1, a
+      # third peer that failed to connect.
+      "cat /work/logs/typing-"*.rc) echo "${FAKE_TYPING_RC:-0}" ;;
+      "cat /work/logs/typing-"*.log)
+        printf 'artifact=a peer=0 sent=40 skipped=1 errors=0 error=""\nartifact=a peer=1 sent=38 skipped=0 errors=0 error=""\n'
+        [ "${FAKE_TYPING_RC:-0}" = 0 ] || printf 'artifact=b peer=0 sent=0 skipped=0 errors=1 error="websocket: bad handshake"\n'
+        ;;
       "cat /work/logs/"*.rc) echo 0 ;;
       "cat /work/logs/"*) echo 'fake runner log' ;;
       "cat /work/seed.json") echo '{"projects": ["LGA"]}' ;;
@@ -327,9 +361,11 @@ EOF
 
 cat >"$bin/go" <<'EOF'
 #!/usr/bin/env bash
-# The fake go: `go build -o PATH ./loadtest` writes a fake loadgen to PATH, and `go build ... -o PATH
+# The fake go: `go build -o PATH ./loadtest` writes a fake loadgen to PATH, `go build ... -o PATH
 # ./cmd/dispatch`, in a directory that holds cmd/dispatch/storedorder.go, a fake envoy-dispatch,
-# with GOWORK and CGO_ENABLED recorded in FAKE_DIR/go-dispatch.log.
+# with GOWORK and CGO_ENABLED recorded in FAKE_DIR/go-dispatch.log, and `go build ... -o PATH
+# ./loadtest/browsertype`, in a directory that holds loadtest/browsertype, a fake browsertype,
+# recorded so in FAKE_DIR/go-browsertype.log.
 printf '%s\n' "$*" >>"$FAKE_DIR/go.log"
 out=""
 prev=""
@@ -341,6 +377,16 @@ done
   echo "fake go: unexpected call: $*" >&2
   exit 1
 }
+if [ "${*: -1}" = ./loadtest/browsertype ]; then
+  [ -d loadtest/browsertype ] || {
+    echo "fake go: $PWD holds no loadtest/browsertype" >&2
+    exit 1
+  }
+  printf 'GOWORK=%s CGO_ENABLED=%s go %s\n' "${GOWORK:-}" "${CGO_ENABLED:-}" "$*" >>"$FAKE_DIR/go-browsertype.log"
+  printf '#!/usr/bin/env bash\necho "fake browsertype: $*"\n' >"$out"
+  chmod +x "$out"
+  exit 0
+fi
 if [ "${*: -1}" = ./cmd/dispatch ]; then
   [ -f cmd/dispatch/storedorder.go ] || {
     echo "fake go: $PWD holds no cmd/dispatch/storedorder.go" >&2
@@ -391,8 +437,11 @@ done
 case $1 in
   series-sessions) echo 400 ;;
   replay-unpack)
+    # The bundle: its meta, and FAKE_DIR/bundle-fixture's files (state.json, window.jsonl) when the
+    # test wrote them.
     mkdir -p "$out"
     echo '{"project": "FAKE"}' >"$out/bundle.meta.json"
+    [ ! -d "$FAKE_DIR/bundle-fixture" ] || cp "$FAKE_DIR/bundle-fixture"/* "$out/"
     ;;
   replay-verify-bundle) echo '{"bundle_meta_sha256": "feed", "files": 1}' ;;
   tables) [ -z "$out" ] || echo '# Load test tables' >"$out" ;;
@@ -417,8 +466,9 @@ EOF
 
 cat >"$bin/git" <<'EOF'
 #!/usr/bin/env bash
-# The fake git: the git store holds a commit SHA when FAKE_DIR/git-trees/SHA lists its tree's files;
-# `archive SHA PATH` writes a tar of those files (empty) under PATH.
+# The fake git: the git store holds a commit SHA when FAKE_DIR/git-trees/SHA lists its tree's files,
+# and its tree holds each listed file and each directory above one; `archive SHA PATH` writes a
+# tar of those files (empty) under PATH.
 printf '%s\n' "$*" >>"$FAKE_DIR/git.log"
 [ "${1:-}" != -C ] || shift 2
 case ${1:-} in
@@ -426,7 +476,10 @@ case ${1:-} in
     obj=$3
     case $obj in
       *'^{commit}') [ -f "$FAKE_DIR/git-trees/${obj%'^{commit}'}" ] ;;
-      *:*) [ -f "$FAKE_DIR/git-trees/${obj%%:*}" ] && grep -qxF -- "${obj#*:}" "$FAKE_DIR/git-trees/${obj%%:*}" ;;
+      *:*)
+        tree=$FAKE_DIR/git-trees/${obj%%:*} path=${obj#*:}
+        [ -f "$tree" ] && { grep -qxF -- "$path" "$tree" || awk -v p="$path/" 'index($0, p) == 1 { f = 1 } END { exit !f }' "$tree"; }
+        ;;
       *) exit 1 ;;
     esac
     ;;
@@ -465,11 +518,12 @@ cat >"$bin/hostname" <<'EOF'
 echo test-worker-0
 EOF
 
-# The fake sleep: apply_manifest's 3 s wait between tries is recorded and returns at once; every
-# other sleep (the daemons' loops, their start waits) is the real one.
+# The fake sleep: apply_manifest's 3 s wait between tries, and a wait of FAKE_FAST_SLEEP seconds
+# (kube_read's 5 s, where a test sets it), are recorded and return at once; every other sleep (the
+# daemons' loops, their start waits) is the real one.
 cat >"$bin/sleep" <<EOF
 #!/usr/bin/env bash
-if [ "\$*" = 3 ]; then
+if [ "\$*" = 3 ] || [ "\$*" = "\${FAKE_FAST_SLEEP:-none}" ]; then
   printf '%s\n' "\$*" >>"\$FAKE_DIR/sleep.log"
   exit 0
 fi
@@ -481,7 +535,8 @@ export FAKE_DIR=$fake FAKE_NS=$ns
 export LOADTEST_CLUSTER_ROOT=$tmp/root
 export POD_UID=00000000-1111-2222-3333-444444444444 LEGION_ISSUE=TEST-1
 export PATH="$bin:$PATH"
-unset FAKE_EXEC_FAIL FAKE_SAMPLE FAKE_PROD_MAJOR FAKE_LOADGEN_FAIL FAKE_APPLY_FAIL FAKE_QUIET FAKE_STORED_ORDER
+unset FAKE_EXEC_FAIL FAKE_SAMPLE FAKE_PROD_MAJOR FAKE_LOADGEN_FAIL FAKE_APPLY_FAIL FAKE_QUIET FAKE_STORED_ORDER \
+  FAKE_EXEC_ERRORS FAKE_FAST_SLEEP FAKE_TYPING_RC
 export DISPATCH_URL=http://dispatch.invalid DISPATCH_TOKEN_FILE=$fake/token
 echo fake-token >"$fake/token"
 
@@ -499,6 +554,9 @@ readonly commit_unknown=0123456789abcdef0123456789abcdef01234567
 mkdir -p "$fake/git-trees"
 printf '%s\n' packages/envoy/go.mod packages/envoy/cmd/dispatch/main.go packages/envoy/cmd/dispatch/storedorder.go >"$fake/git-trees/$commit_so"
 printf '%s\n' packages/envoy/go.mod packages/envoy/cmd/dispatch/main.go >"$fake/git-trees/$commit_old"
+# The browsertype commit, whose tree has loadtest/browsertype (commit_so's has none).
+readonly commit_bt=abababababababababababababababababababab
+printf '%s\n' packages/envoy/go.mod packages/envoy/cmd/dispatch/main.go packages/envoy/loadtest/browsertype/main.go >"$fake/git-trees/$commit_bt"
 jq -n '{window_start: "2026-10-28T10:00:00Z", window_end: "2026-10-28T10:01:00Z"}' >"$fake/stepdir/meta.json"
 echo '{"config": {"step": "fake"}}' >"$fake/stepdir/summary.json"
 
@@ -552,8 +610,8 @@ write_pods() {
 reset_fake() {
   rm -f -- "$fake/lock.json" "$fake/applied.yaml" "$fake/kubectl.log" "$fake/seeded" "$fake/runner-starts" "$fake/dispatch.log" "$fake/loadgen.log" "$fake"/refine.[0-9]* \
     "$fake/sleep.log" "$fake/apply-errors" "$fake/replay-template" "$fake/restores" "$fake/pod-dump" \
-    "$fake/stored-order.log" "$fake/go-dispatch.log" "$fake/git.log"
-  rm -rf -- "$fake/runner"
+    "$fake/stored-order.log" "$fake/go-dispatch.log" "$fake/go-browsertype.log" "$fake/git.log"
+  rm -rf -- "$fake/runner" "$fake/bundle-fixture"
   write_pods
   echo '1600000 100000' >"$fake/cpu.max"
 }
@@ -634,6 +692,20 @@ for c in "9b92ac1|--stored-order-commit '9b92ac1' is not a full 40-hex commit sh
 done
 pass "up refuses a --stored-order-commit that is not 40 hex, that the git store lacks, or whose tree has no cmd/dispatch/storedorder.go, naming it, before creating anything"
 
+reset_fake
+for c in "abab|--browsertype-commit 'abab' is not a full 40-hex commit sha" \
+  "$commit_unknown|--browsertype-commit $commit_unknown is not a commit in this checkout's git store" \
+  "$commit_so|--browsertype-commit $commit_so has no packages/envoy/loadtest/browsertype, so it has no browsertype"; do
+  run_cluster up "${up_args[@]}" --dispatch-commit "$commit_ok" --stored-order-commit "$commit_so" --browsertype-commit "${c%%|*}"
+  ((RC != 0)) || fail "up accepted --browsertype-commit ${c%%|*}"
+  grep -qF -- "${c#*|}" "$tmp/out" || fail "up's refusal of --browsertype-commit ${c%%|*} does not say '${c#*|}'"
+  no_create || fail "up created something before refusing --browsertype-commit ${c%%|*}"
+  [ ! -f "$fake/lock.json" ] || fail "up took the lock before refusing --browsertype-commit ${c%%|*}"
+  { [ ! -s "$fake/go-browsertype.log" ] && [ ! -s "$fake/go-dispatch.log" ]; } ||
+    fail "up built a binary before refusing --browsertype-commit ${c%%|*}"
+done
+pass "up refuses a --browsertype-commit that is not 40 hex, that the git store lacks, or whose tree has no loadtest/browsertype, naming it, before creating anything"
+
 # ---- (b) replay-prepare's refusals ---------------------------------------------------------------------
 
 # The committed manifest's seed is null until INFRA-639 uploads it; a seed check that failed any of
@@ -703,7 +775,8 @@ grep -qx -- "-C $(cd -- "$here/../../../.." && pwd) archive $commit_so packages/
   fail "up did not git archive packages/envoy of $commit_so from the checkout's git store: $(cat "$fake/git.log")"
 grep -qx -- "GOWORK=off CGO_ENABLED=0 go build -buildvcs=false -o $run_dir/envoy-dispatch ./cmd/dispatch" "$fake/go-dispatch.log" ||
   fail "up did not build a static envoy-dispatch outside the workspace: $(cat "$fake/go-dispatch.log" 2>/dev/null)"
-[ -z "$(find "$run_dir" -maxdepth 1 -name '.stored-order-src.*')" ] || fail "up left the build's scratch source in the run directory"
+[ -z "$(find "$run_dir" -maxdepth 1 -name '.build-src.*')" ] || fail "up left the build's scratch source in the run directory"
+jq -e '.browsertype == null' "$run_dir/state.json" >/dev/null || fail "state.json without --browsertype-commit does not record browsertype null"
 [ "$(grep -c -- "^-n $ns cp $run_dir/envoy-dispatch runner:/work/envoy-dispatch " "$fake/kubectl.log")" = 1 ] ||
   fail "up did not copy envoy-dispatch into the runner"
 pg_password=$(jq -r .secrets.pg_password "$run_dir/state.json")
@@ -746,6 +819,24 @@ grep -qF "step smoke: stored-order (envoy-dispatch of eeeeeeeeeeee) since 2026-1
 # A clean run exports no evidence.
 ! grep -qF -- '\copy' "$fake/kubectl.log" || fail "a clean stored-order run exported evidence: $(grep -F -- '\copy' "$fake/kubectl.log")"
 [ ! -e "$run_dir/steps/smoke/stored-order-evidence" ] || fail "a clean stored-order run wrote stored-order-evidence/"
+
+# --typing on a run that up gave no --browsertype-commit: refused, naming the flag, before the step
+# or the replay touches anything (no scale, no psql; the daemons' calls go on beside it); and a
+# --typing-* flag without --typing.
+for sub in "step --namespace $ns typed 1 --duration 1m --typing" "replay --namespace $ns typed --typing"; do
+  calls=$(wc -l <"$fake/kubectl.log")
+  read -ra words <<<"$sub"
+  run_cluster "${words[@]}"
+  ((RC != 0)) || fail "${words[0]} --typing ran although up was given no --browsertype-commit"
+  grep -qF -- "${words[0]}: --typing needs INFRA-707's browsertype, and up was given no --browsertype-commit" "$tmp/out" ||
+    fail "${words[0]} --typing without browsertype does not name --browsertype-commit"
+  [ ! -e "$run_dir/steps/typed" ] || fail "${words[0]} --typing without browsertype made its step directory"
+  ! grep -qE ' (scale|cp) | psql ' <<<"$(tail -n +$((calls + 1)) "$fake/kubectl.log")" ||
+    fail "${words[0]} --typing without browsertype touched the copy: $(tail -n +$((calls + 1)) "$fake/kubectl.log")"
+done
+run_cluster step --namespace "$ns" typed 1 --typing-peers 3
+{ ((RC != 0)) && grep -qF -- '--typing-peers needs --typing' "$tmp/out"; } || fail "step accepted --typing-peers without --typing"
+pass "step and replay refuse --typing when up was given no --browsertype-commit, naming it, before anything"
 
 boxes=$(grep -c -- "-l dispatch-loadtest/run=$run,dispatch-loadtest/role=nats-box -o json" "$fake/kubectl.log" || true)
 FAKE_STORED_ORDER=mismatch run_cluster step --namespace "$ns" reads 10 --duration 1m --reads-only
@@ -893,8 +984,9 @@ run_cluster collect --namespace "$ns" --upload-issue TEST-1
 part=$(find "$run_dir/upload" -name 'cluster-load-test-*-raw-steps.tar.zst.part00' | head -n1)
 [ -n "$part" ] || fail "collect wrote no part of phase steps"
 grep -q -- "artifact --issue TEST-1 --name ${part##*/} --path $part" "$fake/dispatch.log" || fail "collect did not upload ${part##*/}"
-# The evidence stays on the pod: the steps tar leaves it out, and collect leaves it in place.
-tar -tf "$part" | grep -qx 'reads/stored-order.json' || fail "the steps tar lacks reads/stored-order.json: $(tar -tf "$part" | tr '\n' ' ')"
+# The evidence stays on the pod: the steps tar leaves it out, and collect leaves it in place. (Each
+# listing is read whole before grep -q, so its early exit cannot fail tar with SIGPIPE.)
+grep -qx 'reads/stored-order.json' <<<"$(tar -tf "$part")" || fail "the steps tar lacks reads/stored-order.json: $(tar -tf "$part" | tr '\n' ' ')"
 ! tar -tf "$part" | grep -q stored-order-evidence || fail "the steps tar, which collect uploads, holds the stored-order evidence"
 [ -f "$ev/$so_mismatch/doc_updates.csv.gz" ] || fail "collect did not leave the stored-order evidence in the step directory"
 [ "$(logged_steps 'tables -tops=false')" = "smoke reads r16" ] ||
@@ -911,8 +1003,8 @@ for s in smoke reads; do
 done
 [ "$(grep -c -- "^codepaths -step $run_dir/steps/r16 .* -residual-notes " "$fake/loadgen.log")" = 2 ] ||
   fail "collect did not run the replay step's loadgen codepaths beside the outage"
-printf '%s\n' '| smoke | 2026-10-28T10:00:00Z | 0 | 2 | 2 | 0 | 0 | 0 |' '| reads | 2026-10-28T10:00:00Z | 1 | 3 | 1 | 1 | 1 | 0 |' \
-  '| r16 | 2026-10-28T10:00:00Z | 1 | null | null | null | null | null |' >"$tmp/want-stored-order"
+printf '%s\n' '| smoke | 2026-10-28T10:00:00Z | 0 | 2 | 2 | 0 | 0 | 0 | none |' '| reads | 2026-10-28T10:00:00Z | 1 | 3 | 1 | 1 | 1 | 0 | none |' \
+  '| r16 | 2026-10-28T10:00:00Z | 1 | null | null | null | null | null | none |' >"$tmp/want-stored-order"
 sed -n '/^| --- /,$p' "$run_dir/STORED-ORDER.md" | tail -n +2 | diff -u "$tmp/want-stored-order" - >&2 ||
   fail "STORED-ORDER.md does not hold one row per step, in the order they ran, with their counts and exit"
 grep -qF "built from commit $commit_so (binary sha256 $(jq -r .stored_order.sha256 "$run_dir/state.json"))" "$run_dir/STORED-ORDER.md" ||
@@ -921,7 +1013,7 @@ grep -qF "built from commit $commit_so (binary sha256 $(jq -r .stored_order.sha2
 results=$(find "$run_dir/upload" -name 'cluster-load-test-*-raw-results.tar.zst.part00' | head -n1)
 [ -n "$results" ] || fail "collect wrote no part of phase results"
 for f in curves/CURVES.md curves/refine.txt TABLES.md STORED-ORDER.md steps/smoke/CODEPATHS.md steps/reads/CODEPATHS.md steps/r16/CODEPATHS.md; do
-  tar -tf "$results" | grep -qx -- "$f" || fail "the results tar lacks $f: $(tar -tf "$results" | tr '\n' ' ')"
+  grep -qx -- "$f" <<<"$(tar -tf "$results")" || fail "the results tar lacks $f: $(tar -tf "$results" | tr '\n' ' ')"
 done
 grep -q -- "artifact --issue TEST-1 --name ${results##*/} --path $results" "$fake/dispatch.log" || fail "collect did not upload ${results##*/}"
 ! grep -q 'curves command' "$tmp/out" || fail "collect still says loadgen has no curves command"
@@ -1008,7 +1100,7 @@ db4=$(line_of ' sh step-1x-db4 ') r4=$(line_of ' sh replay-r4 ')
 [ "$(tr '\n' ' ' <"$run_dir/phases/replay")" = "r16 r4 " ] || fail "the phase replay holds '$(cat "$run_dir/phases/replay")', not r16 and r4"
 part=$(find "$run_dir/upload" -name 'cluster-load-test-*-raw-replay.tar.zst.part00' | head -n1)
 { [ -n "$part" ] && grep -q -- "--name ${part##*/} --path $part" "$fake/dispatch.log"; } || fail "all did not pack and upload the phase replay"
-tar -tf "$part" | grep -q '^\./r4/\|^r4/' || fail "the phase replay's tar lacks r4: $(tar -tf "$part" | head -n5)"
+grep -q '^\./r4/\|^r4/' <<<"$(tar -tf "$part")" || fail "the phase replay's tar lacks r4: $(tar -tf "$part" | head -n5)"
 [ -f "$run_dir/steps/1x/pg-stats-after.json" ] || fail "all's step 1x has no pg-stats-after.json"
 ! grep -q -- "^curves -out .*/steps/r16" "$fake/loadgen.log" || fail "all's loadgen curves took a replay step"
 # all --stored-order-commit: every step and replay runs the check while Dispatch runs, before the
@@ -1050,6 +1142,155 @@ done
 [ -n "$(find "$run_dir/upload" -name 'cluster-load-test-*-raw-refinement.tar.zst.part00')" ] || fail "all packed no phase refinement"
 [ ! -f "$fake/lock.json" ] || fail "all --profile full left the lock"
 pass "all --profile full runs one refinement step per refine.txt factor, then curves again, until refine.txt is empty, and each replay over 0-39m"
+
+# ---- (c) browser typing ----------------------------------------------------------------------------
+
+# The replay fixture for browser typing: a bundle state of one issue with four documents and a
+# file, its window's events, and loadtest.replay_ids's artifact rows. In 0-5m after the state's
+# 22:55: doc-1 has 3 agent writes (one at a fractional second, one with a +00:00 offset), doc-2 2
+# (and 2 by a person and a settlement, which do not count), doc-3 2 (and 3 more after 5m and one
+# before 22:55); doc-4 4 but no replay_ids row; file-1 5 but a file; doc-5 5 but not in the state
+# (a document the window creates); and comment events on doc-3, which are no document writes.
+readonly typing_l1=10000000-0000-4000-8000-000000000001 typing_l2=10000000-0000-4000-8000-000000000002
+readonly typing_l3=10000000-0000-4000-8000-000000000003
+# typing_event TYPE ACTOR_KIND CREATED_AT ARTIFACT [NAMED DIFF]: one window.jsonl line.
+typing_event() {
+  jq -nc --arg t "$1" --arg k "$2" --arg at "$3" --arg a "$4" --argjson named "${5:-false}" --argjson diff "${6:-\"@@ -1 +1 @@\"}" \
+    '{id: 1, issue_key: "FAKE-1", artifact_id: $a, project: "FAKE", seq: 1, type: $t, actor: {kind: $k, id: "s-1"}, notify: false,
+      created_at: $at, payload: {artifact_id: $a, name: "doc", diff: $diff, version: {named: $named, size: 10}}}'
+}
+# write_typing_bundle DIR IDS: the fixture's state.json and window.jsonl into DIR, its
+# replay_ids rows ("<logged>|<local>", as psql -At prints them) into IDS.
+write_typing_bundle() {
+  local v=artifact.version t
+  mkdir -p "$1"
+  jq -n '{project: "FAKE", at: "2026-10-26T22:55:00Z", until: "2026-10-26T23:34:00Z", issues: [{key: "FAKE-1", number: 1, exists: true,
+    created_at: "2026-10-01T00:00:00Z", artifacts: ([("doc-1", "doc-2", "doc-3", "doc-4") | {id: ., name: ., slug: ., kind: "doc"}]
+      + [{id: "file-1", name: "f", slug: "f", kind: "file"}])}]}' >"$1/state.json"
+  {
+    typing_event "$v" session 2026-10-26T22:55:10Z doc-1
+    typing_event "$v" session 2026-10-26T22:55:20.5Z doc-1
+    typing_event "$v" session 2026-10-26T22:56:00+00:00 doc-1
+    typing_event "$v" session 2026-10-26T22:57:00Z doc-2
+    typing_event "$v" user 2026-10-26T22:57:30Z doc-2
+    typing_event "$v" user 2026-10-26T22:57:31Z doc-2
+    typing_event "$v" session 2026-10-26T22:58:00Z doc-2
+    typing_event "$v" session 2026-10-26T22:59:00Z doc-2 true null
+    typing_event "$v" session 2026-10-26T22:54:00Z doc-3
+    typing_event "$v" session 2026-10-26T22:56:30Z doc-3
+    typing_event "$v" session 2026-10-26T22:59:59.999Z doc-3
+    for t in 23:01:00 23:02:00 23:03:00; do typing_event "$v" session "2026-10-26T${t}Z" doc-3; done
+    for t in 22:55:01 22:55:02 22:55:03; do typing_event comment.created session "2026-10-26T${t}Z" doc-3; done
+    for t in 22:56:01 22:56:02 22:56:03 22:56:04; do typing_event "$v" session "2026-10-26T${t}Z" doc-4; done
+    for t in 22:57:01 22:57:02 22:57:03 22:57:04 22:57:05; do typing_event "$v" session "2026-10-26T${t}Z" file-1; done
+    for t in 22:58:01 22:58:02 22:58:03 22:58:04 22:58:05; do typing_event "$v" session "2026-10-26T${t}Z" doc-5; done
+  } >"$1/window.jsonl"
+  printf '%s\n' "doc-1|$typing_l1" "doc-2|$typing_l2" "doc-3|$typing_l3" "doc-5|10000000-0000-4000-8000-000000000005" \
+    "file-1|10000000-0000-4000-8000-00000000000f" >"$2"
+}
+
+reset_fake
+echo '400000 100000' >"$fake/cpu.max"
+export LOADTEST_CLUSTER_ROOT=$tmp/root-typing
+write_typing_bundle "$fake/bundle-fixture" "$fake/replay-ids"
+run_cluster up "${up_args[@]}" --dispatch-commit "$commit_ok" --stored-order-commit "$commit_so" --browsertype-commit "$commit_bt"
+((RC == 0)) || fail "up --browsertype-commit exited $RC"
+run=$(jq -r .data.run "$fake/lock.json")
+run_dir=$LOADTEST_CLUSTER_ROOT/$run
+jq -e --arg c "$commit_bt" --arg s "$(sha256sum <"$run_dir/browsertype" | cut -d' ' -f1)" '.browsertype == {commit: $c, sha256: $s}' \
+  "$run_dir/state.json" >/dev/null || fail "state.json does not record the browsertype commit and binary's sha256: $(jq -c .browsertype "$run_dir/state.json")"
+grep -qx -- "-C $(cd -- "$here/../../../.." && pwd) archive $commit_bt packages/envoy" "$fake/git.log" ||
+  fail "up did not git archive packages/envoy of $commit_bt: $(cat "$fake/git.log")"
+grep -qx -- "GOWORK=off CGO_ENABLED=0 go build -buildvcs=false -o $run_dir/browsertype ./loadtest/browsertype" "$fake/go-browsertype.log" ||
+  fail "up did not build a static browsertype with build_at_commit: $(cat "$fake/go-browsertype.log" 2>/dev/null)"
+grep -qx -- "GOWORK=off CGO_ENABLED=0 go build -buildvcs=false -o $run_dir/envoy-dispatch ./cmd/dispatch" "$fake/go-dispatch.log" ||
+  fail "up --browsertype-commit did not build envoy-dispatch too"
+[ -z "$(find "$run_dir" -maxdepth 1 -name '.build-src.*')" ] || fail "up left a build's scratch source in the run directory"
+[ "$(grep -c -- "^-n $ns cp $run_dir/browsertype runner:/work/browsertype " "$fake/kubectl.log")" = 1 ] || fail "up did not copy browsertype into the runner"
+dispatch_token=$(jq -r .secrets.dispatch_token "$run_dir/state.json")
+run_cluster seed --namespace "$ns"
+((RC == 0)) || fail "seed exited $RC"
+# Five issues, out of key order; the step's sessions (400) cover them all.
+jq -n '{projects: ["LGA"], issues: [3, 1, 5, 2, 4 | {key: "LGA-\(.)", project: "LGA", artifact_id: "20000000-0000-4000-8000-00000000000\(.)"}]}' >"$run_dir/seed.json"
+for c in "--typing-rate 0|--typing-rate '0' is not a number" "--typing-peers x|--typing-peers 'x' is not a whole number" \
+  "--typing-docs 0|--typing-docs '0' is not a whole number"; do
+  read -ra words <<<"${c%%|*}"
+  run_cluster step --namespace "$ns" bad 1 --typing "${words[@]}"
+  { ((RC != 0)) && grep -qF -- "${c#*|}" "$tmp/out"; } || fail "step accepted --typing ${c%%|*}"
+  [ ! -e "$run_dir/steps/bad" ] || fail "step --typing ${c%%|*} made its step directory"
+done
+
+run_cluster step --namespace "$ns" 10x-typing 10 --duration 1m --typing --typing-docs 3 --typing-peers 3 --typing-rate 2.5
+((RC == 0)) || fail "step --typing exited $RC"
+tdir=$run_dir/steps/10x-typing
+# The load step's documents: of the seed's spec documents, the 3 whose sha256 of "<rng seed>:<id>"
+# (rng seed 1) sorts first.
+want_docs=$(for i in 1 2 3 4 5; do
+  id=20000000-0000-4000-8000-00000000000$i
+  printf '%s %s\n' "$(printf '1:%s' "$id" | sha256sum | cut -c1-64)" "$id"
+done | sort | head -n3 | cut -d' ' -f2)
+[ "$(cat "$fake/runner/work/typing/10x-typing.docs")" = "$want_docs" ] ||
+  fail "the step's typing documents are not the 3 the rng seed chooses: $(cat "$fake/runner/work/typing/10x-typing.docs" 2>/dev/null)"
+grep -qxF -- "typing-10x-typing /work/browsertype -url http://dispatch.$ns.svc:8766 -token-file /work/typing/token -session ses-browsertype -artifacts-file /work/typing/10x-typing.docs -peers 3 -rate 2.5 -duration 3410s -seed 1" \
+  "$fake/runner-starts" || fail "browsertype did not start with the step's flags: $(grep '^typing-' "$fake/runner-starts")"
+# The token: written into the runner from standard input, on no command line, in no file under the
+# step directory, never printed.
+[ "$(cat "$fake/runner/work/typing/token")" = "$dispatch_token" ] || fail "the runner's token file does not hold the copy's agent token"
+# (loadgen run's own command line carries -token; browsertype's calls are those naming it, its
+# job or its runner directory.)
+grep -E 'browsertype|/work/typing|sh typing-' "$fake/kubectl.log" >"$tmp/typing-calls" || fail "kubectl.log holds no browsertype call"
+! grep -qF -- "$dispatch_token" "$tmp/typing-calls" || fail "a browsertype kubectl call carries the agent token on its command line"
+! grep -rqF -- "$dispatch_token" "$tdir" || fail "a file under the step directory holds the agent token: $(grep -rlF -- "$dispatch_token" "$tdir")"
+! grep -qF -- "$dispatch_token" "$tmp/out" || fail "step --typing printed the agent token"
+# The order in kubectl.log: the token, browsertype's start, loadgen's start (its warm-up, then its
+# window), the stored-order command, then browsertype's SIGTERM.
+# shellcheck disable=SC2016 # the token write's runner script, as kubectl.log holds it
+token_at=$(line_of 'cat >"$1/token"') bt_at=$(line_of 'sh typing-10x-typing /work/browsertype ') lg_at=$(line_of ' sh step-10x-typing ')
+so_at=$(line_of '/work/envoy-dispatch stored-order' last) kill_at=$(line_of 'kill -TERM' last)
+grep -n -- 'kill -TERM' "$fake/kubectl.log" | tail -n1 | grep -qF 'sh typing-10x-typing' || fail "the SIGTERM did not go to typing-10x-typing"
+((token_at < bt_at && bt_at < lg_at && lg_at < so_at && so_at < kill_at)) ||
+  fail "the order is not token, browsertype, loadgen, stored-order, SIGTERM (kubectl.log lines $token_at, $bt_at, $lg_at, $so_at, $kill_at)"
+grep -qx 'artifact=a peer=1 sent=38 skipped=0 errors=0 error=""' "$tdir/browsertype.txt" || fail "browsertype.txt does not hold browsertype's output"
+jq -e --arg c "$commit_bt" --argjson d "$(jq -Rn '[inputs]' <<<"$want_docs")" \
+  '. == {commit: $c, docs: $d, peers: 3, rate: 2.5, exit: 0, sent: 78, skipped: 1, errors: 0}' "$tdir/browsertype.json" >/dev/null ||
+  fail "browsertype.json is wrong: $(cat "$tdir/browsertype.json")"
+grep -qF 'step 10x-typing: browsertype exit 0: sent=78 skipped=1 errors=0' "$tmp/out" || fail "step --typing did not print browsertype's sums"
+[ ! -f "$tdir/step-failed.json" ] || fail "a typing step was marked failed: $(cat "$tdir/step-failed.json")"
+
+FAKE_TYPING_RC=1 run_cluster step --namespace "$ns" 10x-typing-err 10 --duration 1m --typing
+((RC == 0)) || fail "step --typing with a peer error exited $RC"
+grep -q '^typing-10x-typing-err .* -peers 2 -rate 5 ' "$fake/runner-starts" || fail "step --typing's defaults are not 2 peers at 5 keystrokes/s"
+jq -e '.exit == 1 and .errors == 1 and .sent == 78 and (.docs | length) == 5' "$run_dir/steps/10x-typing-err/browsertype.json" >/dev/null ||
+  fail "browsertype.json with a peer error is wrong: $(cat "$run_dir/steps/10x-typing-err/browsertype.json")"
+grep -qF 'step 10x-typing-err: browsertype exit 1: sent=78 skipped=1 errors=1; a peer error is reported, not a step failure' "$tmp/out" ||
+  fail "step --typing did not report the peer error"
+[ ! -f "$run_dir/steps/10x-typing-err/step-failed.json" ] || fail "a peer error failed the step"
+
+FAKE_QUIET=1 run_cluster replay-prepare --namespace "$ns" --manifest "$seeded"
+((RC == 0)) || fail "replay-prepare for the typing replay exited $RC"
+run_cluster replay --namespace "$ns" r16-typing --to 5m --typing --typing-docs 2
+((RC == 0)) || fail "replay --typing exited $RC"
+grep -qF -- "-d dispatch -v ON_ERROR_STOP=1 -At -c select logged_id, local_id from loadtest.replay_ids where kind = 'artifact'" "$fake/kubectl.log" ||
+  fail "replay --typing did not read loadtest.replay_ids from database dispatch"
+jq -e --arg a "$typing_l1" --arg b "$typing_l2" '.docs == [$a, $b] and .exit == 0' "$run_dir/steps/r16-typing/browsertype.json" >/dev/null ||
+  fail "replay --typing did not type into the 2 documents the window writes most: $(cat "$run_dir/steps/r16-typing/browsertype.json")"
+bt_at=$(line_of 'sh typing-r16-typing /work/browsertype ') lg_at=$(line_of ' sh replay-r16-typing ') kill_at=$(line_of 'kill -TERM' last)
+so_at=$(line_of '/work/envoy-dispatch stored-order' last)
+((bt_at < lg_at && lg_at < so_at && so_at < kill_at)) || fail "replay --typing's order is not browsertype, loadgen, stored-order, SIGTERM"
+
+run_cluster step --namespace "$ns" plain 1 --duration 1m
+((RC == 0)) || fail "step plain exited $RC"
+{ [ ! -e "$run_dir/steps/plain/browsertype.json" ] && ! grep -q '^typing-plain ' "$fake/runner-starts"; } || fail "a step without --typing ran browsertype"
+run_cluster collect --namespace "$ns"
+((RC == 0)) || fail "collect of the typing run exited $RC"
+sed -n '/^| --- /,$p' "$run_dir/STORED-ORDER.md" | tail -n +2 | awk -F' [|] ' '{ print $1 " " $NF }' >"$tmp/typing-column"
+printf '%s\n' '| 10x-typing 78 |' '| 10x-typing-err 78 |' '| r16-typing 78 |' '| plain none |' | diff -u - "$tmp/typing-column" >&2 ||
+  fail "STORED-ORDER.md's typing column is not each step's sent updates, or none"
+grep -qF "built from commit $commit_bt" "$run_dir/STORED-ORDER.md" || fail "STORED-ORDER.md does not name the browsertype commit"
+[ "$(logged_steps 'curves -out')" = plain ] || fail "collect's curves took a typing step: '$(logged_steps 'curves -out')'"
+run_cluster down --namespace "$ns"
+((RC == 0)) || fail "down of the typing run exited $RC"
+pass "up --browsertype-commit builds browsertype; step and replay --typing start it before loadgen with the token from standard input, type into the documents the step writes most, stop it after stored-order, and record browsertype.txt and browsertype.json; a peer error is no step failure; collect's STORED-ORDER.md has the typing column and its curves leave typing steps out"
 
 [ -s "$fake/kubectl.log" ] || fail "no kubectl call was recorded"
 if [ -s "$fake/kubectl-no-ns.log" ]; then
@@ -1340,3 +1581,82 @@ pass "the stored-order evidence takes each mismatched or refused document once w
     fail "the evidence without a template does not name each start-* table as not exported: $(cat "$dir/none.json")"
 )
 pass "the evidence export reads the start-* tables from the template the step was reset from (dispatch_replay for a replay), the rest and the issue events since the window start from dispatch, and names each start-* table when reset.json names no template"
+
+# ---- (m) browser typing's documents ---------------------------------------------------------------
+
+(
+  # shellcheck source=packages/envoy/loadtest/cluster/cluster.sh
+  source "$cluster"
+  dir=$tmp/typing-docs
+  write_typing_bundle "$dir/bundle" "$dir/ids"
+  # 0-5m: doc-1 (3 writes), then doc-2 and doc-3 (2 each, doc-2 first by logged id); doc-4 has no
+  # replay_ids row, file-1 is a file, doc-5 is not in the state.
+  [ "$(typing_docs_replay "$dir/bundle" 0 300 2 "$dir/ids" | tr '\n' ' ')" = "$typing_l1 $typing_l2 " ] ||
+    fail "the replay's 2 typing documents in 0-5m are not doc-1 and doc-2's copy ids: $(typing_docs_replay "$dir/bundle" 0 300 2 "$dir/ids" | tr '\n' ' ')"
+  [ "$(typing_docs_replay "$dir/bundle" 0 300 20 "$dir/ids" | tr '\n' ' ')" = "$typing_l1 $typing_l2 $typing_l3 " ] ||
+    fail "the replay's typing documents in 0-5m are not doc-1, doc-2 and doc-3's copy ids, most writes first"
+  [ "$(typing_docs_replay "$dir/bundle" 300 600 20 "$dir/ids")" = "$typing_l3" ] ||
+    fail "the replay's typing documents in 5-10m are not doc-3's copy id alone: $(typing_docs_replay "$dir/bundle" 300 600 20 "$dir/ids")"
+  [ -z "$(typing_docs_replay "$dir/bundle" 0 300 20 /dev/null)" ] || fail "a replay with no replay_ids rows still chose typing documents"
+  # A load step: only the issues its sessions work on (the first 2 in key order here), by the rng seed.
+  jq -n '{issues: [3, 1, 5, 2, 4 | {key: "LGA-\(.)", artifact_id: "20000000-0000-4000-8000-00000000000\(.)"}]}' >"$dir/seed.json"
+  got=$(typing_docs_step "$dir/seed.json" 2 5 1 | sort | tr '\n' ' ')
+  [ "$got" = "20000000-0000-4000-8000-000000000001 20000000-0000-4000-8000-000000000002 " ] ||
+    fail "a load step's typing documents are not the spec documents of its sessions' issues: $got"
+  { [ "$(typing_docs_step "$dir/seed.json" 400 3 1)" = "$(typing_docs_step "$dir/seed.json" 400 3 1)" ] &&
+    [ "$(typing_docs_step "$dir/seed.json" 400 3 1 | wc -l)" = 3 ]; } || fail "a load step's typing documents are not 3, the same for the same rng seed"
+)
+pass "a replay types into the documents with the most agent writes in its sub-window, mapped through replay_ids; a load step into spec documents of its sessions' issues chosen by its rng seed"
+
+# ---- (n) the retry of a read-only kubectl exec ----------------------------------------------------
+
+(
+  # shellcheck source=packages/envoy/loadtest/cluster/cluster.sh
+  source "$cluster"
+  NS=$ns
+  export FAKE_EXEC_ERRORS=$tmp/exec-errors FAKE_FAST_SLEEP=5
+  dial='Error from server: error dialing backend: dial timeout, backstop'
+  notfound='Error from server (NotFound): pods "postgres-0" not found'
+  # calls_after ERRORS... CMD...: CMD after the exec errors ERRORS (up to --), with its output in
+  # $tmp/retry.out and .err, its status in RC, and the kubectl calls and sleeps it made in CALLS
+  # and SLEEPS.
+  calls_after() {
+    : >"$FAKE_EXEC_ERRORS"
+    while [ "$1" != -- ]; do
+      printf '%s\n' "$1" >>"$FAKE_EXEC_ERRORS"
+      shift
+    done
+    shift
+    : >"$fake/kubectl.log"
+    rm -f "$fake/sleep.log"
+    RC=0
+    "$@" >"$tmp/retry.out" 2>"$tmp/retry.err" || RC=$?
+    CALLS=$(wc -l <"$fake/kubectl.log")
+    SLEEPS=""
+    [ ! -f "$fake/sleep.log" ] || SLEEPS=$(tr '\n' ' ' <"$fake/sleep.log")
+  }
+  calls_after "$dial" -- psql_at postgres 'select version()'
+  { ((RC == 0)) && [ "$(cat "$tmp/retry.out")" = 'PostgreSQL 16.4 (fake)' ] && ((CALLS == 2)) && [ "$SLEEPS" = "5 " ]; } ||
+    fail "a psql read did not retry once 5 s after a dial timeout: rc $RC, $CALLS calls, sleeps '$SLEEPS', output $(cat "$tmp/retry.out")"
+  grep -qF "retrying once in 5 s" "$tmp/retry.err" || fail "the retry was not said: $(cat "$tmp/retry.err")"
+  for e in 'The connection to the server 10.0.0.1:443 was refused - did you specify the right host or port?' \
+    'error: read tcp 10.0.0.2:41000->10.0.0.1:443: read: connection reset by peer' \
+    'Error from server: error dialing backend: dial tcp 10.0.0.3:10250: connect: connection refused'; do
+    calls_after "$e" -- runner_has "$fake/token" /work/none -f
+    { ((CALLS == 2)) && [ "$SLEEPS" = "5 " ]; } || fail "a runner read was not retried after '$e': $CALLS calls, sleeps '$SLEEPS'"
+  done
+  calls_after "$dial" "$dial" -- psql_at postgres 'select version()'
+  { ((RC != 0)) && ((CALLS == 2)) && [ "$SLEEPS" = "5 " ] && grep -qxF "$dial" "$tmp/retry.err"; } ||
+    fail "two dial timeouts in a row were not one retry, then the failure: rc $RC, $CALLS calls, sleeps '$SLEEPS'"
+  calls_after "$notfound" -- psql_at postgres 'select version()'
+  { ((RC != 0)) && ((CALLS == 1)) && [ -z "$SLEEPS" ] && grep -qxF "$notfound" "$tmp/retry.err"; } ||
+    fail "a read was retried after an error that is not transient: rc $RC, $CALLS calls, sleeps '$SLEEPS'"
+  calls_after "$dial" -- psql_write postgres 'drop database if exists dispatch with (force)'
+  { ((RC != 0)) && ((CALLS == 1)) && [ -z "$SLEEPS" ]; } || fail "a psql write was retried after a dial timeout: rc $RC, $CALLS calls"
+  NATS_BOX_POD='nats-box-7f6d'
+  calls_after "$dial" -- nats_box stream ls --names
+  { ((RC == 0)) && ((CALLS == 2)) && [ "$(cat "$tmp/retry.out")" = ENVOY_NOTIFICATIONS ]; } || fail "a nats-box listing was not retried after a dial timeout"
+  calls_after "$dial" -- nats_box kv del interests -f
+  { ((RC != 0)) && ((CALLS == 1)) && [ -z "$SLEEPS" ]; } || fail "a nats-box removal was retried after a dial timeout"
+)
+pass "a read-only kubectl exec is retried once 5 s after a dial timeout or a refused or reset API server connection, and never after another error; a write is never retried"
