@@ -2,39 +2,39 @@
   "schemaVersion": 1,
   "phase": "test",
   "issue": "INFRA-606",
-  "completed": "2026-10-29T20:50:00Z",
-  "round": 11,
-  "headTested": "dc3ad918de21",
-  "handoffHead": "3eccb582fc625b6252abfb699bb52c0c48969873",
-  "evidence": "dispatch://INFRA-606/artifact/infra606-tester-round11-tar-gz (keyed-r11-head.log, keyed-r11-main.log, the per-file fingerprint diffs); round 10's runtime evidence: infra606-tester-round10-tar-gz",
-  "ci": "No check run was reported on dc3ad918 or 3eccb582 when read; not waited for.",
-  "scope": "The forward merge at ab986cd2 changes the pull request's own diff (fork_point(main@origin | head)..head, '~(.legion | docs/solutions)') only in packages/envoy/internal/dispatch/api/live_socket_test.go and live_subscriptions_test.go; every runtime file's lines are as at fd8e7981, so round 10's real-surface results (bounded events-view resume, overflow catch-up, reconnects, event-log reads, kill cases through a 12-minute NATS outage, restart step) stand. dc3ad918 changes packages/dispatch/e2e/keyed-send.e2e.ts, docs and a changelog fragment.",
+  "completed": "2026-10-29T23:45:00Z",
+  "round": 12,
+  "headTested": "74779becb2c8",
+  "handoffHead": "9ac0b806d181278f9ccb3cd85e8df969fd4a1a81",
+  "evidence": "dispatch://INFRA-606/artifact/infra606-tester-round12-tar-gz (RESULTS.md, steal/, crash-r12*, rolling/); earlier rounds: infra606-tester-evidence-tar-gz, infra606-tester-round2..11-tar-gz",
+  "ci": "On 74779bec only pr-title and changes were queued (some pr-title runs cancelled) when read; nothing on 9ac0b806. Not waited for.",
   "implementerProof": {
     "verdict": "verified",
-    "how": "Ran the browser suite myself at this head: both keyed-send mention tests pass twice each in chromium; the new slow-send test fails against main's server (negative control), so it pins this PR's contract. Read the new docs sentence against live_socket.go: liveSocketWriteWait 10 s, liveSocketQueue 16, liveSocketStream 64, as stated."
+    "how": "Built Dispatch from the workspace (74779bec, migrations through main's 0141 and this PR's 0142, applied over the stack's seed at boot) and round 11's head (dc3ad918), and drove review round 4 finding 2 on the load-test stack: a recipient behind a lane backlog longer than the lease receives its comments in order at head and out of order at dc3ad918. The kill and rolling-update paths, which the new claim-holding changes, deliver every attempt once. Every red test passes, unmodified this round."
   },
   "failures": [],
   "failed": 0,
   "proof": [
     {
-      "criterion": "The pull request breaks no repository test; main's keyed-send test of a cut-off comment with a mention holds under the moved mention send (round 10's failure).",
-      "surface": "Dispatch's browser suite (packages/dispatch/e2e) against the real envoy-dispatch built from this checkout, chromium",
-      "command": "cd packages/dispatch && DATABASE_URL=<scratch postgres> bun run e2e -- e2e/keyed-send.e2e.ts -g '@-mention' --project chromium --repeat-each 2",
-      "observed": "4 passed (1.1 m): 'a comment the page gives up on while Dispatch still writes it is answered from its key, its @-mention delivered once' (23.6-24.1 s) and 'a comment whose @-mention's send is slow is answered before the send, with no repeat, and delivered once' (7.9 s), twice each.",
-      "headSha": "dc3ad918de21",
-      "negativeControl": "The same command in a copy of the workspace whose packages/envoy is main's 7c2effba: the slow-send test fails ('expect(received).toEqual(expected)': the answer's attempt is not pending, because main sends the mention inside the request); round 10's head failed the old cut-off test in every browser."
+      "criterion": "Mention delivery runs off the request path, in order per recipient within a live process (review round 4 finding 2): the delivery sweep never sends a live process's queued mention ahead of the recipient's earlier comments.",
+      "surface": "The load-test stack with two live envoy-dispatch processes on one database (A on 38777, B on 38778), Dispatch's ENVOY_URL through a 2 s round-trip proxy; ses-a's NATS subject read with $JS.API.STREAM.MSG.GET",
+      "command": "swap.sh head 2s; MAXWAIT=500 steal.sh 45 (45 comments to A, each mentioning only session:ses-a, back to back)",
+      "observed": "All 45 settled 190 s after the first post (a backlog of more than three leases); ses-a stores c1..c45 once each, in order; every attempt is attempt 1, none marked duplicate; no comment_fallback_copies row.",
+      "headSha": "74779becb2c8",
+      "negativeControl": "Round 11's build dc3ad918, same run: ses-a stores c30..c33 as c33, c30, c32, c31 - the sweep sent queued attempts a minute old while the lane was still sending earlier ones."
     },
     {
-      "criterion": "A reconnecting stream receives a bounded catch-up or a signal to refetch once; mention delivery reaches each session once through a kill; before and after on the restart step.",
-      "surface": "GET /ws/live and the load-test stack (round 10, runtime unchanged since)",
-      "command": "livep events resumes, ovf.sh, rflap.sh, hubflap.sh, crash.sh r10person/r10down/r10landed/r10nats, measure10.sh and basemeasure.sh (round 10)",
-      "observed": "256 events replayed with replay_complete true, 257 none; overflow caught up 360/360; 0 event-log reads idle; one copy per session in every kill case including a 12-minute NATS outage; 3.3 MB replayed vs 125 MB on main.",
-      "headSha": "fd8e79810484",
-      "negativeControl": "Main 7c2effba: replays all 300, ends an overflowed view with 44 missing, keeps reading the log after the last view, replays 12.1 MB per stale socket."
+      "criterion": "Mention delivery is not lost and reaches each session once through a Dispatch kill and a rolling update, now that queued attempts hold claims.",
+      "surface": "The stack, a person's 8 comments on LGA-10 (routed to session:ses-a) mentioning ses-a/b/c; SIGKILL 0.3 s into stack.sh restart-dispatch's drain; a successor process beside one sent SIGTERM",
+      "command": "AS_PERSON=1 crash.sh r12person (listener up); STOP_LISTENER=1 AS_PERSON=1 crash.sh r12down (listener at 4 s, stopped after the restart); rolling.sh (successor up, SIGTERM to the old process after 6 comments x 3 mentions)",
+      "observed": "r12person: 24 attempts claimed at the kill, all sent 60-90 s later; each session stores each comment once; the 8 fallback rows settled unpublished. r12down: each comment once on ses-a, from 8 published fallback rows. Rolling: all 18 attempts sent once by the successor, the last about 2 minutes after the SIGTERM; ses-a received c3 before c2 (both resumed after the handoff, which the PR's order rule does not cover), ses-b and ses-c in order.",
+      "headSha": "74779becb2c8",
+      "negativeControl": "Round 6's head ab61c138 (round 6): with the listener down after a kill, the claimed comment never reached the route session."
     }
   ],
   "observations": [
-    "Criterion 5's CPU expectation: one run per side on /ws/live gave 15.3 vs 17.1 CPU-s (head lower); the implementer's five per side gave 18.59 vs 21.50. The earlier SSE-era runs did not show it lower.",
-    "The PR body is 55 KB of GitHub's 65,536-character limit."
+    "In the rolling run the four comments posted during the old process's SIGTERM were refused at connect (curl status 000), so the drain-window path was not exercised; main's lifetime model (#2396) closes the listener at SIGTERM.",
+    "A rolling update now delivers the old process's queued mentions up to about two minutes after its SIGTERM (claims refreshed until it exits, a lease to lapse, then a sweep pass); round 9's bound was lease plus one 30 s pass.",
+    "Round 10's /ws/live results and round 11's browser tests are not re-run: this round's runtime change is the mention sender, the sweep's owed rule and the outbox's fallback wait."
   ]
 }
