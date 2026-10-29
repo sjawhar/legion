@@ -2,9 +2,17 @@
   "schemaVersion": 1,
   "phase": "implement",
   "issue": "INFRA-645",
-  "completed": "2026-10-29T12:55:00Z",
+  "completed": "2026-10-29T13:50:00Z",
   "pullRequest": "https://github.com/sjawhar/legion/pull/2497",
   "proof": [
+    {
+      "criterion": "The changelog fragment names no Dispatch key (the controller's ruling, the architect's one change at acceptance)",
+      "surface": "packages/envoy/.changes/unreleased on the issue branch, which changelog-fold.yaml folds into CHANGELOG.md on main",
+      "command": "cd packages/envoy && go run github.com/miniscruff/changie@v1.26.0 new --kind Fixed --body <the same text> --custom Issue=pr2497; rm .changes/unreleased/INFRA-645-write-rendering-reuse.yaml; jj diff --stat -r f009ee1a",
+      "observed": "f009ee1a deletes INFRA-645-write-rendering-reuse.yaml and adds pr2497-Fixed-20261029-134737.yaml, written by changie with the same kind and body text and custom Issue pr2497. No other path changes, and no file name or text in the fragment holds a Dispatch key.",
+      "headSha": "f009ee1aaa2dd44813381870ef8d5b8ffd1da9b2",
+      "negativeControl": "Before the change, `ls packages/envoy/.changes/unreleased | grep INFRA-` matches the old file; at f009ee1a it matches nothing."
+    },
     {
       "criterion": "The required checks and suites (A5): the docs package fits envoy-go-race's 30 m limit, adding at most 30 s over main's slowest run (the tester's failure)",
       "surface": "the docs package's new tests under go test -race on a real Postgres 17 + pgvector in the issue pod (2 cores); CI's envoy-go-race lane reads the same package",
@@ -49,7 +57,8 @@
     "packages/envoy/internal/dispatch/docs/write_corpus_reads_test.go",
     "packages/envoy/AGENTS.md",
     "packages/envoy/.changes/unreleased/INFRA-645-write-rendering-reuse.yaml",
-    "packages/envoy/internal/dispatch/docs/fork_reads_test.go (round 1: small fixture document)"
+    "packages/envoy/internal/dispatch/docs/fork_reads_test.go (round 1: small fixture document)",
+    "packages/envoy/.changes/unreleased/pr2497-Fixed-20261029-134737.yaml (round 2: replaces the key-named fragment)"
   ],
   "trickyParts": [
     "write_corpus_test.go must compile unchanged at main, so the base and head dumps can be compared with cmp; it uses no head-only symbol.",
@@ -63,5 +72,5 @@
     "Round 1: the real-size proof of the rendering reuse stays in the HTTP equivalence run and the benchmark; go test runs on a 7.3 KB document so envoy-go-race fits its limit."
   ],
   "openQuestions": [],
-  "round": 1
+  "round": 2
 }
