@@ -1502,19 +1502,20 @@ func TestRenderReuseABrowserTypingScript(t *testing.T) {
 // replica starts from, in place of rendering that base again, when its first run starts while the
 // rendering is still there; a collection since the load, or a recover, leaves the run to render its
 // base. Either way the replica equals the shadow's independent render after every commit. Each case
-// that needs the load's rendering alive runs with the collector off (withoutCollections), since
-// the replica holds it only weakly and a collection between the load and the first commit would
-// otherwise decide the counts.
+// that needs the load's rendering alive turns the collector off from just before the load until the
+// replica has started (pauseCollections), since the replica holds the rendering only weakly and a
+// collection in between would otherwise decide the counts; the collector runs again before the
+// shadow renders, so a race build's memory does not grow through the whole test.
 func TestRenderReuseACatchUpTakesTheLoadsRendering(t *testing.T) {
 	t.Run("the first commit takes the load's rendering", func(t *testing.T) {
-		withoutCollections(t)
 		service, artifactID, sh := newRenderReuseService(t)
 		m := sh.measure()
+		resume := pauseCollections(t)
 		replica := loadRoomForCatchUp(t, service, artifactID)
 		if heldLoadRendering(replica) == nil {
 			t.Fatal("the replica holds no rendering of the load before its first commit")
 		}
-		firstCatchUpCommit(t, service, artifactID, sh, m)
+		firstCatchUpCommit(t, service, artifactID, sh, m, resume)
 		expectCatchUps(t, m, 1, 0)
 		if heldLoadRendering(replica) != nil {
 			t.Error("the replica still holds the load's rendering after its first run")
@@ -1528,15 +1529,15 @@ func TestRenderReuseACatchUpTakesTheLoadsRendering(t *testing.T) {
 		if heldLoadRendering(replica) != nil {
 			t.Fatal("the load's rendering outlived a collection, so something holds it strongly")
 		}
-		firstCatchUpCommit(t, service, artifactID, sh, m)
+		firstCatchUpCommit(t, service, artifactID, sh, m, func() {})
 		expectCatchUps(t, m, 0, 1)
 	})
 	t.Run("a run after a recover renders", func(t *testing.T) {
-		withoutCollections(t)
 		service, artifactID, sh := newRenderReuseService(t)
 		m := sh.measure()
+		resume := pauseCollections(t)
 		replica := loadRoomForCatchUp(t, service, artifactID)
-		firstCatchUpCommit(t, service, artifactID, sh, m)
+		firstCatchUpCommit(t, service, artifactID, sh, m, resume)
 		expectCatchUps(t, m, 1, 0)
 		m = sh.measure()
 		// As E8 does: a replica that holds no document hands the next update to recover.
@@ -1552,9 +1553,9 @@ func TestRenderReuseACatchUpTakesTheLoadsRendering(t *testing.T) {
 		expectCatchUps(t, m, 0, 1)
 	})
 	t.Run("a recover before the first run drops the load's rendering", func(t *testing.T) {
-		withoutCollections(t)
 		service, artifactID, sh := newRenderReuseService(t)
 		m := sh.measure()
+		resume := pauseCollections(t)
 		replica := loadRoomForCatchUp(t, service, artifactID)
 		if heldLoadRendering(replica) == nil {
 			t.Fatal("the replica holds no rendering of the load before its first commit")
@@ -1562,20 +1563,25 @@ func TestRenderReuseACatchUpTakesTheLoadsRendering(t *testing.T) {
 		replica.mu.Lock()
 		replica.recover(artifactID, nil, nil)
 		replica.mu.Unlock()
+		resume()
 		if heldLoadRendering(replica) != nil {
 			t.Fatal("the recovered replica still holds the load's rendering")
 		}
-		firstCatchUpCommit(t, service, artifactID, sh, m)
+		firstCatchUpCommit(t, service, artifactID, sh, m, func() {})
 		expectCatchUps(t, m, 0, 1)
 	})
 }
 
-// withoutCollections turns the garbage collector off for the rest of t, so nothing collects the
-// load's rendering, which the replica holds only weakly, before the test's first commit.
-func withoutCollections(t *testing.T) {
+// pauseCollections turns the garbage collector off until the answered resume is called, or t
+// ends, so nothing collects the load's rendering, which the replica holds only weakly, before the
+// test's first commit has started the replica.
+func pauseCollections(t *testing.T) (resume func()) {
 	t.Helper()
 	previous := debug.SetGCPercent(-1)
-	t.Cleanup(func() { debug.SetGCPercent(previous) })
+	var once sync.Once
+	resume = func() { once.Do(func() { debug.SetGCPercent(previous) }) }
+	t.Cleanup(resume)
+	return resume
 }
 
 // loadRoomForCatchUp loads artifactID's room, committing nothing, and answers its replica, which
@@ -1605,11 +1611,13 @@ func heldLoadRendering(replica *renderedReplica) *loadedRendering {
 }
 
 // firstCatchUpCommit makes the loaded room's first commit, a browser's edit of one paragraph,
-// which starts the replica and is spliced in, and checks the replica against the shadow.
-func firstCatchUpCommit(t *testing.T, service *Service, artifactID string, sh *renderShadow, m renderMeasure) {
+// which starts the replica and is spliced in, calls resume once that commit has landed, and checks
+// the replica against the shadow.
+func firstCatchUpCommit(t *testing.T, service *Service, artifactID string, sh *renderShadow, m renderMeasure, resume func()) {
 	t.Helper()
 	editAsConnectedPeer(t, service, artifactID, 1, reuseBob, replaceRun("Paragraph 0 opens", "Paragraph 0 first opens"))
 	waitForLandedAppends(t, service, artifactID)
+	resume()
 	sh.check(t)
 	m.expect(t, renderPaths{observerIncremental: 1}, 0)
 }
