@@ -1,0 +1,57 @@
+{
+  "schemaVersion": 1,
+  "phase": "implement",
+  "issue": "INFRA-598",
+  "completed": "2026-10-29T21:43:45Z",
+  "proof": [
+    {
+      "criterion": "One command stands the copy up at production's sizes in the INFRA-597 namespace, seeds it, runs the steps, collects the tables and profiles, and tears it down",
+      "surface": "GKE namespace loadtest, from this Legion worker pod (kubectl through the legion-worker Role)",
+      "command": "packages/envoy/loadtest/cluster/cluster.sh all --namespace loadtest --storage-class premium-rwo --dispatch-commit 9b92ac14351a926361c982edb7953e0325fab0de --pg-major 18 --production-repo <deployment repo> --stored-order-source 1febe317da128054b6c50e5882cbf8251ae42513 --profile quick (run lt-20261029t203116-a71c, 20:31-21:42Z); log dispatch://INFRA-598/artifact/cluster-load-test-quick-lt-20261029t203116-a71c-log-txt; PR comment https://github.com/sjawhar/legion/pull/2462#issuecomment-6509018534",
+      "observed": "all exit 0; copy-meta.json: Dispatch 16/32Gi, Postgres 16/60Gi (4/15Gi after db-size), listener 500m/512Mi, NATS 3 x 2/4Gi, runner 8/16Gi, every image by digest; 11 steps, none marked failed; every step's dir holds summary.json, TABLES.md, CODEPATHS.md, cpu.pprof, heap.pprof, cgroup.json; stored order clean in every step (1,000/1,000; 1,783/1,783 in each replay); down printed 'No resources found in loadtest namespace.' and the lock ConfigMap is gone",
+      "headSha": "2519ed36c1bfe65fc0264086a1b8fbc6fbd4d717",
+      "negativeControl": "up while another run's lock exists exits 2 naming the holder pod, uid, issue and heartbeat age; --dispatch-commit b295a3fb (no image) exits 1 naming the newest ancestor with one before creating anything; --pg-major 16 while production runs 18 exits 1 naming both (dispatch://INFRA-598/artifact/cluster-load-test-negative-controls-2026-10-28-txt)"
+    },
+    {
+      "criterion": "Steps from 1x to 10x, each at least 10 minutes, plus one hour at 10x, the reads-only control and 1x on the 4 vCPU database, with curves and knees",
+      "surface": "GKE namespace loadtest, full-size copy, Dispatch 9b92ac14",
+      "command": "run lt-20261029t115927-655c (11:59-18:19Z, harness at ac06c36f): up, seed, series --duration 10m (refinement 8.5x, 9.5x), soak --duration 60m, step 10x-typing, replay-prepare, replay r16-typing, db-size 4 15Gi, step 1x-db4, replay r4-typing, collect --upload-issue INFRA-514, down",
+      "observed": "knee 9.5x to 10x: delivery p99 from arrival 863 ms at 37.9 writes/s, 1,004 ms at 39.9; the hour at 10x collapses after minute 20 (pool waiters p50 8,152, lock held 82%, working set +13.5 GiB/h); results dispatch://INFRA-514/artifact/cluster-load-test-2026-10-28-md v4; raw tars on INFRA-514",
+      "headSha": "ac06c36f63c4",
+      "negativeControl": "the Dispatch pod deleted 80 s into step 2x (run lt-20261028t154844-2eba) marks that step failed (restart) and the curves take no number from it"
+    },
+    {
+      "criterion": "The replay of LINUX's 22:55-23:34Z write log for its full 39 minutes on the 16 and 4 vCPU databases, beside the outage, with the residual",
+      "surface": "GKE namespace loadtest, full-size copy, INFRA-639's seed and bundle read from Dispatch",
+      "command": "run lt-20261028t223135-7f42 (harness 0d832115): replay-prepare; replay r16 --from 0 --to 39m; db-size 4 15Gi; replay r4 --from 0 --to 39m; collect --upload-issue INFRA-514; codepaths regenerated at 783dc4b7",
+      "observed": "r16: Dispatch 10.69 cores mean, 7.53 GiB at the end; r4: 10.72 cores, 7.62 GiB; outage 11.1-13.8 cores, 13.8 GiB; residual 0.41-3.11 cores, 6.27 GiB; Postgres 0.44 cores",
+      "headSha": "0d8321157ecb",
+      "negativeControl": "a replay part with one byte changed is refused by the download check (sha256 mismatch, part deleted)"
+    },
+    {
+      "criterion": "loadgen drives a Dispatch from before #2449, which serves no /ws/live, with the dashboard streams of the step's shape",
+      "surface": "GKE namespace loadtest, Dispatch 9b92ac14, the quick run above",
+      "command": "the quick run lt-20261029t203116-a71c; jq .live.transport,.live.live_frames on each step's summary.json; run.log 'config: ... live=2 (sse)'",
+      "observed": "every step chose sse and received frames: 960 at 1x, 96,520 at 10x, 238,060 in the hour, 1,710 in r16; 0 in 10x-reads, which writes no event",
+      "headSha": "2519ed36c1bfe65fc0264086a1b8fbc6fbd4d717",
+      "negativeControl": "TestDecideLiveTransport: a server answering 404 at /ws/live and at /api/v1/events is refused before any load, naming both URLs and both 404s; before 4e33cee7 the same Dispatch got a 404 handshake and the step ran with no dashboard stream and no mark"
+    }
+  ],
+  "filesChanged": [
+    "packages/envoy/loadtest/cluster/ (cluster.sh, cluster.test.sh, manifests, render-nats.sh, replay-residual.md)",
+    "packages/envoy/loadtest/: seedfinish.go, cgroup*.go, curves.go, codepaths.go, plandocs.go, pgclock.go, copymeta.go, live.go, sse.go, run.go, sample.go, tables.go and their tests, README.md, stack.sh, run-step.sh",
+    ".github/workflows/ci.yaml (the cluster.test.sh step)",
+    "packages/envoy/AGENTS.md, packages/envoy/go.mod, packages/envoy/go.sum",
+    "packages/envoy/.changes/unreleased/INFRA-598-*.yaml"
+  ],
+  "trickyParts": [
+    "#2449 removed Dispatch's SSE endpoint and loadgen's SSE client; the commit this issue measures serves only SSE, so loadgen probes /ws/live once per step and falls back to /api/v1/events on a 404 handshake.",
+    "browsertype typed into the 'Revision token rN' paragraph that loadgen's edits replace, failing every later edit and upload of a typed document; cluster.sh passes -protect 'Revision token' and up refuses a driver without it, before the lock.",
+    "The 5 s sampler's text heap read took 29% of Dispatch's CPU in the replay; it now reads the binary profile off its loop. Results v4 carries only fixed-sampler runs."
+  ],
+  "deviations": [
+    "Typing steps with -protect are not run live: INFRA-707's driver has no -protect yet (its implementer adds it in INFRA-707's next round). cluster.test.sh covers the flag and the refusal; INFRA-707's tester runs both typed passes on this harness once that commit exists.",
+    "Typed replays still lose about 10% of their edits (82 and 85 of 874), because typing changes logged text that replay edits find; -protect does not cover it, and the README and results say the typed replays are not compared with the outage."
+  ],
+  "openQuestions": []
+}
