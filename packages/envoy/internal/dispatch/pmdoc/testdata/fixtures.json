@@ -25178,7 +25178,7 @@
   },
   {
     "name": "html-declarations",
-    "markdown": "p <!a> q\n\np <!a b> q\n\np <!a \"x\"> q\n\np <!a>q\n\np <!a>*b*\n\n**<!a>**\n\n*<!a>*\n\n[<!a>](u)\n\n# p <!a> q\n\n> p <!a> q\n\n- p <!a> q\n\n| a |\n| --- |\n| p <!a> q |\n\n:::callout{#c1 kind=\"note\" title=\"T\"}\np <!a> q\n:::\n\nText[^z].\n\n[^z]: p <!a> q\n\np <!a\nb> q\n\np <!A> q\n\np <!DOCTYPE html> q\n\np <!> q\n\np <!1> q\n\np <! a> q\n\np \\<!a> q\n\np `<!a>` q\n",
+    "markdown": "p <!a> q\n\np <!a b> q\n\np <!a \"x\"> q\n\np <!a>q\n\np <!a>*b*\n\np **<!a>** q\n\np *<!a>* q\n\np [<!a>](u) q\n\n# p <!a> q\n\n> p <!a> q\n\n- p <!a> q\n\n| a |\n| --- |\n| p <!a> q |\n\n:::callout{#c1 kind=\"note\" title=\"T\"}\np <!a> q\n:::\n\nText[^z].\n\n[^z]: p <!a> q\n\np <!a\nb> q\n\np <!A> q\n\np <!DOCTYPE html> q\n\np <!> q\n\np <!1> q\n\np <! a> q\n\np \\<!a> q\n\np `<!a>` q\n",
     "pm_json": {
       "type": "doc",
       "content": [
@@ -25312,11 +25312,19 @@
           },
           "content": [
             {
+              "type": "text",
+              "text": "p "
+            },
+            {
               "type": "html",
               "attrs": {
                 "value": "<!a>",
                 "blockId": null
               }
+            },
+            {
+              "type": "text",
+              "text": " q"
             }
           ]
         },
@@ -25327,11 +25335,19 @@
           },
           "content": [
             {
+              "type": "text",
+              "text": "p "
+            },
+            {
               "type": "html",
               "attrs": {
                 "value": "<!a>",
                 "blockId": null
               }
+            },
+            {
+              "type": "text",
+              "text": " q"
             }
           ]
         },
@@ -25342,11 +25358,19 @@
           },
           "content": [
             {
+              "type": "text",
+              "text": "p "
+            },
+            {
               "type": "html",
               "attrs": {
                 "value": "<!a>",
                 "blockId": null
               }
+            },
+            {
+              "type": "text",
+              "text": " q"
             }
           ]
         },
@@ -25764,8 +25788,8 @@
         }
       ]
     },
-    "yjs_update_v1_b64": "AcMBAQAHAQtwcm9zZW1pcnJvcgMJcGFyYWdyYXBoBwABAAYEAAEBAnAghwEBAwRodG1sKAABBAV2YWx1ZQF3BDwhYT6HAQQGBAABBgIgcSgAAQAHYmxvY2tJZAF3CGItMDAwMDAxhwEAAwlwYXJhZ3JhcGgHAAEKBgQAAQsCcCCHAQsDBGh0bWwoAAEOBXZhbHVlAXcGPCFhIGI+hwEOBgQAARACIHEoAAEKB2Jsb2NrSWQBdwhiLTAwMDAwMocBCgMJcGFyYWdyYXBoBwABFAYEAAEVAnAghwEVAwRodG1sKAABGAV2YWx1ZQF3CDwhYSAieCI+hwEYBgQAARoCIHEoAAEUB2Jsb2NrSWQBdwhiLTAwMDAwM4cBFAMJcGFyYWdyYXBoBwABHgYEAAEfAnAghwEfAwRodG1sKAABIgV2YWx1ZQF3BDwhYT6HASIGBAABJAFxKAABHgdibG9ja0lkAXcIYi0wMDAwMDSHAR4DCXBhcmFncmFwaAcAAScGBAABKAJwIIcBKAMEaHRtbCgAASsFdmFsdWUBdwQ8IWE+hwErBgYAAS0IZW1waGFzaXMOeyJtYXJrZXIiOiIqIn2EAS4BYoYBLwhlbXBoYXNpcwRudWxsKAABJwdibG9ja0lkAXcIYi0wMDAwMDWHAScDCXBhcmFncmFwaAcAATIDBGh0bWwoAAEzBXZhbHVlAXcEPCFhPigAATIHYmxvY2tJZAF3CGItMDAwMDA2hwEyAwlwYXJhZ3JhcGgHAAE2AwRodG1sKAABNwV2YWx1ZQF3BDwhYT4oAAE2B2Jsb2NrSWQBdwhiLTAwMDAwN4cBNgMJcGFyYWdyYXBoBwABOgMEaHRtbCgAATsFdmFsdWUBdwQ8IWE+KAABOgdibG9ja0lkAXcIYi0wMDAwMDiHAToDB2hlYWRpbmcHAAE+BgQAAT8CcCCHAT8DBGh0bWwoAAFCBXZhbHVlAXcEPCFhPocBQgYEAAFEAiBxKAABPgJpZAF3ACgAAT4FbGV2ZWwBfQEoAAE+B2Jsb2NrSWQBdwhiLTAwMDAwOYcBPgMKYmxvY2txdW90ZQcAAUoDCXBhcmFncmFwaAcAAUsGBAABTAJwIIcBTAMEaHRtbCgAAU8FdmFsdWUBdwQ8IWE+hwFPBgQAAVECIHEoAAFLB2Jsb2NrSWQBdwhiLTAwMDAxMSgAAUoHYmxvY2tJZAF3CGItMDAwMDEwhwFKAwtidWxsZXRfbGlzdAcAAVYDCWxpc3RfaXRlbQcAAVcDCXBhcmFncmFwaAcAAVgGBAABWQJwIIcBWQMEaHRtbCgAAVwFdmFsdWUBdwQ8IWE+hwFcBgQAAV4CIHEoAAFYB2Jsb2NrSWQBdwhiLTAwMDAxNCgAAVcFbGFiZWwBdwPigKIoAAFXCGxpc3RUeXBlAXcGYnVsbGV0KAABVwZzcHJlYWQBeSgAAVcHYmxvY2tJZAF3CGItMDAwMDEzKAABVgZzcHJlYWQBeSgAAVYHYmxvY2tJZAF3CGItMDAwMDEyhwFWAwV0YWJsZQcAAWgDEHRhYmxlX2hlYWRlcl9yb3cHAAFpAwx0YWJsZV9oZWFkZXIHAAFqAwlwYXJhZ3JhcGgHAAFrBgQAAWwBYSgAAWsHYmxvY2tJZAF3CGItMDAwMDE4KAABagdjb2xzcGFuAX0BKAABagdyb3dzcGFuAX0BKAABagdibG9ja0lkAXcIYi0wMDAwMTcoAAFpB2Jsb2NrSWQBdwhiLTAwMDAxNocBaQMJdGFibGVfcm93BwABcwMKdGFibGVfY2VsbAcAAXQDCXBhcmFncmFwaAcAAXUGBAABdgJwIIcBdgMEaHRtbCgAAXkFdmFsdWUBdwQ8IWE+hwF5BgQAAXsCIHEoAAF1B2Jsb2NrSWQBdwhiLTAwMDAyMSgAAXQHY29sc3BhbgF9ASgAAXQHcm93c3BhbgF9ASgAAXQHYmxvY2tJZAF3CGItMDAwMDIwKAABcwdibG9ja0lkAXcIYi0wMDAwMTkoAAFoB2Jsb2NrSWQBdwhiLTAwMDAxNYcBaAMHY2FsbG91dAcAAYQBAwlwYXJhZ3JhcGgHAAGFAQYEAAGGAQJwIIcBhgEDBGh0bWwoAAGJAQV2YWx1ZQF3BDwhYT6HAYkBBgQAAYsBAiBxKAABhQEHYmxvY2tJZAF3CGItMDAwMDIyKAABhAEEa2luZAF3BG5vdGUoAAGEAQV0aXRsZQF3AVQoAAGEAQdibG9ja0lkAXcCYzGHAYQBAwlwYXJhZ3JhcGgHAAGSAQYEAAGTAQRUZXh0hwGTAQMSZm9vdG5vdGVfcmVmZXJlbmNlKAABmAEFbGFiZWwBdwF6hwGYAQYEAAGaAQEuKAABkgEHYmxvY2tJZAF3CGItMDAwMDIzhwGSAQMTZm9vdG5vdGVfZGVmaW5pdGlvbgcAAZ0BAwlwYXJhZ3JhcGgHAAGeAQYEAAGfAQJwIIcBnwEDBGh0bWwoAAGiAQV2YWx1ZQF3BDwhYT6HAaIBBgQAAaQBAiBxKAABngEHYmxvY2tJZAF3CGItMDAwMDI1KAABnQEFbGFiZWwBdwF6KAABnQEHYmxvY2tJZAF3CGItMDAwMDI0hwGdAQMJcGFyYWdyYXBoBwABqgEGBAABqwECcCCHAasBAwRodG1sKAABrgEFdmFsdWUBdwY8IWEKYj6HAa4BBgQAAbABAiBxKAABqgEHYmxvY2tJZAF3CGItMDAwMDI2hwGqAQMJcGFyYWdyYXBoBwABtAEGBAABtQECcCCHAbUBAwRodG1sKAABuAEFdmFsdWUBdwQ8IUE+hwG4AQYEAAG6AQIgcSgAAbQBB2Jsb2NrSWQBdwhiLTAwMDAyN4cBtAEDCXBhcmFncmFwaAcAAb4BBgQAAb8BAnAghwG/AQMEaHRtbCgAAcIBBXZhbHVlAXcPPCFET0NUWVBFIGh0bWw+hwHCAQYEAAHEAQIgcSgAAb4BB2Jsb2NrSWQBdwhiLTAwMDAyOIcBvgEDCXBhcmFncmFwaAcAAcgBBgQAAckBB3AgPCE+IHEoAAHIAQdibG9ja0lkAXcIYi0wMDAwMjmHAcgBAwlwYXJhZ3JhcGgHAAHSAQYEAAHTAQhwIDwhMT4gcSgAAdIBB2Jsb2NrSWQBdwhiLTAwMDAzMIcB0gEDCXBhcmFncmFwaAcAAd0BBgQAAd4BCXAgPCEgYT4gcSgAAd0BB2Jsb2NrSWQBdwhiLTAwMDAzMYcB3QEDCXBhcmFncmFwaAcAAekBBgQAAeoBCHAgPCFhPiBxKAAB6QEHYmxvY2tJZAF3CGItMDAwMDMyhwHpAQMJcGFyYWdyYXBoBwAB9AEGBAAB9QECcCCGAfcBCmlubGluZUNvZGUCe32EAfgBBDwhYT6GAfwBCmlubGluZUNvZGUEbnVsbIQB/QECIHEoAAH0AQdibG9ja0lkAXcIYi0wMDAwMzMA",
-    "rendered_by_milkdown": "p <!a> q\n\np <!a b> q\n\np <!a \"x\"> q\n\np <!a>q\n\np <!a>*b*\n\n<!a>\n\n<!a>\n\n<!a>\n\n# p <!a> q\n\n> p <!a> q\n\n* p <!a> q\n\n| a        |\n| -------- |\n| p <!a> q |\n\n:::callout{#c1 kind=\"note\" title=\"T\"}\np <!a> q\n:::\n\nText[^z].\n\n[^z]: p <!a> q\n\np <!a\nb> q\n\np <!A> q\n\np <!DOCTYPE html> q\n\np \\<!> q\n\np \\<!1> q\n\np \\<! a> q\n\np \\<!a> q\n\np `<!a>` q\n"
+    "yjs_update_v1_b64": "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",
+    "rendered_by_milkdown": "p <!a> q\n\np <!a b> q\n\np <!a \"x\"> q\n\np <!a>q\n\np <!a>*b*\n\np <!a> q\n\np <!a> q\n\np <!a> q\n\n# p <!a> q\n\n> p <!a> q\n\n* p <!a> q\n\n| a        |\n| -------- |\n| p <!a> q |\n\n:::callout{#c1 kind=\"note\" title=\"T\"}\np <!a> q\n:::\n\nText[^z].\n\n[^z]: p <!a> q\n\np <!a\nb> q\n\np <!A> q\n\np <!DOCTYPE html> q\n\np \\<!> q\n\np \\<!1> q\n\np \\<! a> q\n\np \\<!a> q\n\np `<!a>` q\n"
   },
   {
     "name": "html",

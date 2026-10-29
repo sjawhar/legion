@@ -81,3 +81,44 @@ func (declarationParser) Parse(_ ast.Node, block text.Reader, _ parser.Context) 
 	block.SetPosition(savedLine, savedSegment)
 	return nil
 }
+
+// declarationBlockParser is goldmark's HTML block parser opening its type 4, a declaration block,
+// wherever CommonMark 0.31 and the browser editor's engine (micromark) open one: `<!` and an ASCII
+// letter, after up to three spaces of indentation. goldmark opens that type only after an
+// uppercase letter (parser/html_block.go:88 at v1.8.6), so a line holding a lone `<!a>` was a
+// paragraph of inline raw HTML to the reader, stored unescaped, where the engine reads an HTML
+// block, a reading the Proof schema has no node for. Opening the block here has such a document
+// refused on the write path (ErrBlockHTML), which is already what a line holding a lone `<b>`
+// does: the two readers then agree instead of disagreeing silently.
+//
+// It asks opensDeclaration, the one definition of `<!` and an ASCII letter, which the inline
+// reader (declarationParser) and the writer ask too, so block and inline cannot drift.
+//
+// The real parser answers first, so every line it already opened - `<!DOCTYPE html>`, `<!A>`, a
+// comment, a CDATA section, a processing instruction, a tag - opens exactly the block it opened
+// before, and only a line goldmark declines is looked at again. Everything else is the embedded
+// parser's: Trigger, Continue and Close read a type 4 block from the node alone
+// (parser/html_block.go:157-218), closing it at the first `>` however many lines that takes, and
+// CanInterruptParagraph stays true, as CommonMark has a type 4 block interrupt a paragraph.
+type declarationBlockParser struct{ parser.BlockParser }
+
+func (p declarationBlockParser) Open(parent ast.Node, reader text.Reader, pc parser.Context) (ast.Node, parser.State) {
+	if node, state := p.BlockParser.Open(parent, reader, pc); node != nil {
+		return node, state
+	}
+	line, segment := reader.PeekLine()
+	// goldmark's own opening patterns allow three spaces of indentation and no tab
+	// (parser/html_block.go:79-96), a fourth space being indented code; this reads the same
+	// indentation before asking the rule.
+	indent := 0
+	for indent < 3 && indent < len(line) && line[indent] == ' ' {
+		indent++
+	}
+	if !opensDeclaration(line[indent:]) {
+		return nil, parser.NoChildren
+	}
+	node := ast.NewHTMLBlock(ast.HTMLBlockType4)
+	reader.AdvanceToEOL()
+	node.Lines().Append(segment)
+	return node, parser.NoChildren
+}

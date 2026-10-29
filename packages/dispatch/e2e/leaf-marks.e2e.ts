@@ -113,13 +113,17 @@ const engineReading: Row[] = [
 ];
 
 /** Reads every paragraph `view` draws in one pass over the rendered DOM, so a failure reports the
- *  whole table rather than the first row that differs. */
+ *  whole table rather than the first row that differs. Only the document's own leaves are read:
+ *  after a paragraph whose last child is a leaf node, ProseMirror appends an
+ *  `<img class="ProseMirror-separator" alt="">` of its own, beside its trailing `<br>`, so that
+ *  the line keeps its height and the caret has somewhere to stand. That image is editor chrome,
+ *  carrying no `src` and standing for nothing in the document, so it is no leaf of it. */
 function readParagraphs(view: Locator): Promise<Row[]> {
   return view.locator("p").evaluateAll((rendered) =>
     rendered.map((paragraph) => ({
       leaves: [
         ...paragraph.querySelectorAll(
-          'span[data-type="html"], img, sup[data-type="footnote_reference"]'
+          'span[data-type="html"], img:not(.ProseMirror-separator), sup[data-type="footnote_reference"]'
         ),
       ].map((leaf) => {
         const marks: string[] = [];

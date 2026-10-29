@@ -55,7 +55,8 @@ var blockReader = markdownReader{md: goldmark.New(
 // quote parsers recording where their containers' lines end (endsContainers), its list and quote
 // parsers opening nothing at the document's level after an unclosed front-matter opener
 // (frontmatterAttempt), its list parser closing a list once a write's markdown has passed the
-// element guard (elementListGuard), and every one placing the block it opens where its text starts
+// element guard (elementListGuard), its HTML block parser opening a declaration block at any ASCII
+// letter (declarationBlockParser), and every one placing the block it opens where its text starts
 // (tabIndented).
 func blockParsers() []util.PrioritizedValue {
 	parsers := parser.DefaultBlockParsers()
@@ -65,6 +66,7 @@ func blockParsers() []util.PrioritizedValue {
 	fenceParser := reflect.TypeOf(parser.NewFencedCodeBlockParser())
 	quoteParser := reflect.TypeOf(parser.NewBlockquoteParser())
 	codeParser := reflect.TypeOf(parser.NewCodeBlockParser())
+	htmlParser := reflect.TypeOf(parser.NewHTMLBlockParser())
 	for index, prioritized := range parsers {
 		block := prioritized.Value.(parser.BlockParser)
 		switch reflect.TypeOf(block) {
@@ -80,6 +82,8 @@ func blockParsers() []util.PrioritizedValue {
 			parsers[index].Value = tabIndented{fenceClosure{block}, fenceStart}
 		case codeParser:
 			parsers[index].Value = tabIndented{codeColumns{block}, nil}
+		case htmlParser:
+			parsers[index].Value = tabIndented{declarationBlockParser{block}, nil}
 		default:
 			parsers[index].Value = tabIndented{block, nil}
 		}
