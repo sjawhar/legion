@@ -2,9 +2,33 @@
   "schemaVersion": 1,
   "phase": "implement",
   "issue": "INFRA-493",
-  "completed": "2026-10-28T22:40:00Z",
+  "completed": "2026-10-29T01:05:00Z",
   "pullRequest": "https://github.com/sjawhar/legion/pull/2478",
   "proof": [
+    {
+      "criterion": "Review round 1, finding 2: before the NATS grant rolls out, every consumer's waiting count is still read (each consumer within its own bound)",
+      "surface": "the branch's real `legion start` and `legion state` / `--json`, a real nats-server whose daemon nkey user is denied publish on `$JS.API.STREAM.MSG.GET.>`, a real Postgres",
+      "command": "hold one message on the Dispatch consumer (its issue read answering 503) and one on the GitHub consumer (its permission read answering 503); time legion state; legion state --json | jq .consumers",
+      "observed": "`consumer legion-go-PROOF-dispatch: 1 waiting, oldest unknown; STALLED: none handled for 1m25s, \u2026; unavailable: read the oldest waiting message: context deadline exceeded`, `consumer legion-go-PROOF-dispatch-server: 0 waiting`, `consumer legion-go-PROOF-github: 1 waiting, oldest unknown; \u2026; unavailable: read the oldest waiting message: context deadline exceeded`; no consumer shows `read the consumer's info`; real 0m1.059s",
+      "headSha": "a8a2c1b1c24800e5d2fa651328a0077ae0828e06",
+      "negativeControl": "the same held messages read by an unrestricted daemon user: `1 waiting, oldest 1m36s` for both, no unavailable, real 0m0.066s; on the old code the real-server test gives github `waiting 0, read the consumer's info: context deadline exceeded`"
+    },
+    {
+      "criterion": "Review round 1, finding 3: a GitHub delivery that keeps failing is counted by the listener's alarm filters once per listener task, not on every redelivery",
+      "surface": "the real Envoy listener binary built from packages/envoy, a real nats-server whose stream lacks notifications.github.>, signed GitHub deliveries posted over HTTP",
+      "command": "post pull_request delivery 6d1f0a00-\u2026-0001 twice and 6d1f0a00-\u2026-0002 once; read the listener's log",
+      "observed": "HTTP 503, 503, 503; log lines `github publish failed: nats: no response from stream`, `redelivery 6d1f0a00-0000-4000-8000-000000000001: github publish failed: nats: no response from stream`, `github publish failed: nats: no response from stream`",
+      "headSha": "a8a2c1b1c24800e5d2fa651328a0077ae0828e06",
+      "negativeControl": "the `publish-failure` filter's positional words (3 source=github, 4 publish, 5 failed*) match the first and third lines and not the redelivery line, whose word 3 is `redelivery`"
+    },
+    {
+      "criterion": "Review round 1, finding 1: a pull request merged while the issue is in implementing does not stall the issue: the implementer's completion moves it to testing",
+      "surface": "the daemon's real `POST /legion/v1/handoff/complete` route and workflow on Postgres with a GitHub stand-in listing no open pull request",
+      "command": "cd packages/daemon && go test -count=1 ./internal/api/ ./internal/workflow/ -run 'Handoff' -v",
+      "observed": "TestHandoffCompleteOnAMergedPullRequestMovesTheIssueToTesting and TestAnImplementerHandoffAfterAMergeInImplementingMovesTheIssueToTesting PASS: completion applied, issue in testing, #42 stays merged; the pass sends no pull-request-missing for a merged record",
+      "headSha": "a8a2c1b1c24800e5d2fa651328a0077ae0828e06",
+      "negativeControl": "a record closed without merging: 409 HANDOFF_NO_PULL_REQUEST `\u2026 pull request #42 is closed; your architect was told and decides this issue's phase.`, record unchanged, and the pass sends one pull-request-missing"
+    },
     {
       "criterion": "Tester's failure (round 2): the drain test (acceptance 3.3) is green on any database collation, so the required test job passes",
       "surface": "the daemon's real consumer with the real handlers on real NATS and Postgres through the 3 ms proxy (TestABacklogOfOtherPullRequestsDrainsAndAppliesEveryLegionEvent)",
@@ -83,7 +107,9 @@
     "Daemon API contract is 42, since main took 41 for the controller start command",
     "A sweep with a saved cursor still lists back to its cursor (or the last hour); only a cursorless sweep looks back 72 h; open records older than the listing window are decided from the bucket",
     "The local legion start proof uses its own stand-in rather than scripts/e2e/lib/live-daemon-proof.sh, which runs an in-process driver rather than the `legion start` binary",
-    "Round 2 changes only packages/daemon/internal/intake/drain_test.go (the tester's one failure); no production code changed, so the round-1 proofs at 55eb11c8 stand for the code"
+    "Round 2 changes only packages/daemon/internal/intake/drain_test.go (the tester's one failure); no production code changed, so the round-1 proofs at 55eb11c8 stand for the code",
+    "Round 3: the reviewer's fast-follow cleanup items are done in a8a2c1b1 rather than deferred; the push-read id now has one shape (without the branch) for both the compare and the activity paths",
+    "Round 3: the real-grant lag test needs Docker (testnats.StartNkeyAuthorizedUsers), as the daemon package's other real-grant tests do; it was shown failing on the old code and passing on the new against a local nats-server"
   ],
   "openQuestions": [
     "Environment-only failures in this pod, not touched by this change: packages/daemon launcher session_store tests (the pod's OMP_SESSION_* variables), runtime/tmux TestNewRefusesLaunchersItCannotRun (no tmux), natsauth (Docker); packages/envoy agent-secrets CLI tests and dispatch/api TestIssueRanksStayOrderedPastLowercaseDigitsAndProductionShapedMoves (C collation); check-bun-version, check-image-trigger-paths and check-release-credentials need python's yaml module"
