@@ -2,39 +2,57 @@
   "schemaVersion": 1,
   "phase": "implement",
   "issue": "INFRA-557",
-  "completed": "2026-10-29T09:50:00Z",
-  "round": "review round 2",
+  "completed": "2026-10-29T23:50:00Z",
+  "round": "review round 3 and the forward merges",
   "pullRequest": "https://github.com/sjawhar/legion/pull/2404",
-  "codeHead": "9c5cd05b99938e552b237ca0c73c270eb69e1bc3",
-  "answersReview": "1fe15e1b7cefbcb0859bc8f03350986ab5308630",
+  "codeHead": "57c6d1c5b12d9534b8811a6b8aff8596a84b5902",
+  "answersReview": "a2226d444d4d65b0eb585a570587c39539037d75",
   "proof": [
     {
-      "criterion": "Review round 2 finding A: every graceful hand-over, not only the first, delivers within 10 s (also after a node loss)",
-      "surface": "real cmd/listener binaries, each pod a NATS user holding exactly the rendered core.ListenerPermissions grant, in-process nats-server; a prompt held past the 3 s grace at each SIGTERM and a session whose prompts fail",
-      "command": "cd packages/envoy && go test -tags multiprocess -count=1 -timeout 30m -v -run '^Test(TwoPods|TwoBuilds)' ./cmd/listener",
-      "observed": "28 rows PASS, ok 615.526s; TestTwoPodsEveryGracefulStopWithAPromptInHandAndARetryOutstandingDeliversWithin10s and TestTwoPodsEveryGracefulStopAfterANodeLossWithAPromptInHandAndARetryOutstandingDeliversWithin10s pass (slowest message about 7.5 s). https://github.com/sjawhar/legion/pull/2404#issuecomment-6493091523",
-      "headSha": "9c5cd05b99938e552b237ca0c73c270eb69e1bc3",
-      "negativeControl": "fix A reverted: '12 of 285 messages reached their session later than 10s' (3 of 3); flag split reverted: '28 of 210 messages reached their session later than 10s'"
+      "criterion": "Round 3 item 2: ack_wait_owed is right on every way a term ends (graceful stop with no standby, give-up after a hand-back, stop before subscribing)",
+      "surface": "real cmd/listener binaries under the rendered grant (multiprocess row) and in-process receivers on grant users",
+      "command": "cd packages/envoy && go test -tags multiprocess -count=1 -timeout 30m -run '^Test(TwoPods|TwoBuilds)' ./cmd/listener; go test -count=1 -run 'Lease|NeverSubscribed|SettleHoldsCap' ./cmd/listener/",
+      "observed": "full multiprocess run ok 626.062s on the merged tree, TestTwoPodsGracefulStopWithNoStandbyAfterANodeLossKeepsOrder included; TestATermThatNeverSubscribedOwesTheNextHolderAnAckWait rows pass",
+      "headSha": "57c6d1c5b12d9534b8811a6b8aff8596a84b5902",
+      "negativeControl": "debt reverted: 'took evt-mp-0153 ... before evt-mp-0055 ... out of the publish order'; give-up and stop-before-subscribe rows 'AckWaitOwed:false'"
     },
     {
-      "criterion": "Review round 2 finding B: a hard take-over after an abandon keeps per-session order",
-      "surface": "two in-process receivers whose bus and lease connections are a NATS user holding the rendered grant; a pre-lease binding, a frozen bus link to force the give-up, a hard death of the other pod",
-      "command": "cd packages/envoy && go test -count=3 -run '^TestAPodThatGaveTheLeaseUpWhileWaitingOutABindingSettlesAHardTakeoverAfterIt$' -v ./cmd/listener/",
-      "observed": "PASS 3 of 3: pod-x takes the expired record, settles, delivers 'older' then 'newer'",
-      "headSha": "9c5cd05b99938e552b237ca0c73c270eb69e1bc3",
-      "negativeControl": "fix B reverted: 'pod-x delivered \"newer\" then \"older\", want the older message pod-y died holding first'"
+      "criterion": "Round 3 item 3: awaitedBinding cleared on every term end, lease loss included",
+      "surface": "two in-process receivers on grant users",
+      "command": "cd packages/envoy && go test -count=1 -run 'TestAPodThatLostTheLeaseWhileWaitingOutABindingSettlesAHardTakeoverAfterIt' ./cmd/listener/",
+      "observed": "passes: the pod settles and delivers in stream order",
+      "headSha": "57c6d1c5b12d9534b8811a6b8aff8596a84b5902",
+      "negativeControl": "Resumed gate reverted: 'pod-x delivered \"newer\" then \"older\"'"
+    },
+    {
+      "criterion": "Round 3 item 4: /healthz never answers healthy while the holder is still preparing its durable",
+      "surface": "a real listener under a grant lacking the durable's consumer create",
+      "command": "cd packages/envoy && go test -count=1 -run 'TestAListenerWithoutItsDurablesConsumerCreateNeverAnswersHealthy' ./cmd/listener/",
+      "observed": "answers 200 degraded, never healthy, for the live test's 60 s window",
+      "headSha": "57c6d1c5b12d9534b8811a6b8aff8596a84b5902",
+      "negativeControl": "fix reverted: '200 {... \"receive\":\"preparing the durable\" ... \"status\":\"healthy\"}'"
+    },
+    {
+      "criterion": "Forward merge: the PR merges into main, listener-multiprocess is in ci.yaml's router and ci-ok, and both sides' behaviours hold together",
+      "surface": "GitHub pull request #2404; ci.yaml router checks; the merged tree's suites",
+      "command": "gh api repos/sjawhar/legion/pulls/2404 --jq '{mergeable,mergeable_state}'; .github/scripts/check-ci-filters.sh; untagged listener suite and multiprocess run",
+      "observed": "{mergeable: true, mergeable_state: blocked}; check-ci-filters: every filter matches every file its job reads (25 gates); untagged ok 833.749s; multiprocess ok 626.062s; new TestAPodThatSawTheSessionReportsItsLastSeenAfterTheBucketsRecordIsGone passes. Fingerprints: https://github.com/sjawhar/legion/pull/2404#issuecomment-6510533845",
+      "headSha": "57c6d1c5b12d9534b8811a6b8aff8596a84b5902",
+      "negativeControl": "at fe171299 GitHub read mergeable_state dirty (main moved: #2377, #2371); the last-seen test with seenLocal filled only without the bucket: 'reports no last-seen time once the bucket's record is gone'"
     }
   ],
   "filesChanged": [
-    "d3787812: cmd/listener/receive.go (no stale_binding on a hand-back term; abandon clears awaitedBinding; OweAckWait at a mid-hold stop or give-up), lease.go (ack_wait_owed field, OweAckWait, handedBack = released && unsettled && !ack_wait_owed), lease_test.go, receive_test.go, multiprocess_test.go (two rows), README.md",
-    "9c5cd05b: packages/envoy/AGENTS.md and the pr2404 changie fragment describe the flags as they now are"
+    "a919b77c: lease.go/receive.go term-state debt and Resumed; main.go degraded health; tests; docs",
+    "50dbe7f0: the former Fast-follow items (receive_term.go split, test file splits, session.OwnedBy, ledgerSettle, alarmThrottle, attemptHolds, grant after the bucket loop)",
+    "fe171299: merge of main (ci.yaml router join of listener-multiprocess, envoy-and-contracts.yaml removed, dedupe.Cache restored for main's publish route, stream/nats/permissions/goldens/fixtures)",
+    "57c6d1c5: merge of main 1489a445 (#2377 session cache and reaper combined with CAS writes and seen records; LastSeen falls back to the pod's own record after the bucket's MaxAge)"
   ],
   "trickyParts": [
-    "stale_binding had two meanings (subscribe beside a lingering binding; owe the 7 s hold); after a node loss it stayed set on every later record, so every graceful hand-over kept 7 s. ack_wait_owed now carries the second meaning alone."
+    "#2377 keeps a lapsed session's last-seen for the reaper's allowance (about 20 min), longer than the state bucket's 10-minute MaxAge; every pod now keeps its own record too, and the bucket's record serves only a pod that never saw the session."
   ],
   "deviations": [
-    "Finding B's test is in process, not with binaries: the 135 s alarm bound is a constant the binary cannot shorten, and a test-only environment variable was ruled out.",
-    "TestListenerFollowsTheInterestRegistryAcrossNATSRestarts failed once in the untagged suite (the known load flake, failing on main too) and passed 2 of 2 on rerun."
+    "seen.> is not scoped per machine: a role holder's last_seen is read by any machine's listener; the reason is beside the grant.",
+    "The memory ledger's hold boundary moved from <= to < to share one rule with the KV ledger (two tests moved by 1 ns)."
   ],
   "openQuestions": [],
   "discoveredComplexity": []
