@@ -1,0 +1,4 @@
+// Copy to packages/dispatch/e2e/zz-smoke.ts; run: DATABASE_URL=... bun e2e/run.ts -- bun e2e/zz-smoke.ts
+// Rows: see http\://lower.test b | x;https://semi.test b | \*https://star.test b | see www\.www1.test b |
+// x;a@semi.cc end | &lt;javascript:alert(1);'a@js.cc'> | Set \<!x;a@decl.cc> now | \<span title=a=b;a@span.cc> |
+// - [ ] <!-- todo later | [amp](https://amp.test/?a=1&amp;b=2) c — each through createIssue then getArtifactText.

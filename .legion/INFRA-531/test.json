@@ -2,56 +2,33 @@
   "schemaVersion": 1,
   "phase": "test",
   "issue": "INFRA-531",
-  "completed": "2026-10-29T02:42:00Z",
-  "round": 8,
-  "headTested": "a09a1f52096b328a5e879b5de5afadd2c080d547",
-  "codeHead": "b80be2083a4b268dbef3ecd9e59ddad536bbae0e",
+  "completed": "2026-10-29T07:40:00Z",
+  "round": 9,
+  "headTested": "5a21adfe32cebff09ecddae234ca0652517b2544",
+  "codeHead": "04628c45a261937befc251a3fc7b54baf1434dfd",
   "mainBase": "d4cbcfe6e067d07846f6f4d32d3b3d12fb9cd7bb",
+  "rebaseCheck": "re-check b80be208 → 04628c45: fingerprint 2def420c… → 2def420c…; unchanged (04628c45 is an empty commit; b80be208..04628c45 touches only .legion/). Bare gates only: CI at the new head, read on GitHub, and a smoke check. Round 8's real-surface verification at b80be208 stands.",
   "implementerProof": {
     "verdict": "verified",
-    "how": "Re-ran its browser proof (bash $TMPDIR/infra531-e2e/run-e2e.sh --build-web e2e/address-links.e2e.ts): 3 passed (12.2s). Negative control with pmdoc restored to main d4cbcfe6: 3 failed. Drove its checkbox rows through the API at the head and at main, ran the linear-time gate in this pod, and re-ran the differential and the probe sets."
+    "how": "The implementer's round adds only an empty commit so GitHub tests a fresh merge with main; its code proofs are round 8's at b80be208, which round 8 verified. Smoke at the new head: the API write path on the real Go server built from the workspace."
   },
   "failed": 0,
   "failures": [],
   "risks": [
     {
       "finding": "Unchanged and pre-existing, sent to the architect in round 5: a NUL byte in text is refused as 'reads back otherwise', at main as at the head.",
-      "evidence": "The same 40 generated NUL shapes fail at the head as at main."
+      "evidence": "Round 8's probe; no code changed since."
     }
   ],
-  "ciAtCodeHead": "b80be208: changes and build green; lint, typecheck, test, pr-title, dispatch, envoy-go, envoy-go-race and the rest in progress at 02:39 UTC; not read as a result. The pull request does not conflict (mergeable_state blocked).",
+  "ciAtCodeHead": "04628c45 at 07:38 UTC: required lint, typecheck, pr-title success; required test in progress (the run on a fresh merge with main holding #2487); dispatch, envoy-go, envoy-go-race and others in progress; dispatch-browser-multiprocess, envoy-e2e-local, envoy-infra-go, build success. Not read as a result for the lanes still running.",
   "proof": [
     {
-      "criterion": "A1/A2/A3: every web-address and email row is the engine's link in the conversation and the live Document editor, and the stored spec holds no '\\:'",
-      "surface": "Dispatch's browser suite: real Go server built from the workspace, production SPA bundle, Postgres 17 + pgvector, Chromium",
-      "command": "bash $TMPDIR/infra531-e2e/run-e2e.sh --build-web e2e/address-links.e2e.ts --reporter=line",
-      "observed": "3 passed (12.2s). Evidence: the round-8 tester comment on https://github.com/sjawhar/legion/pull/2373",
-      "headSha": "a09a1f52096b328a5e879b5de5afadd2c080d547",
-      "negativeControl": "pmdoc restored to main d4cbcfe6: 3 failed (Document editor link 'http://lower.test' not found; createIssue 400 INVALID_MARKDOWN twice)"
-    },
-    {
-      "criterion": "Review finding 2: a '<' right after a task item's checkbox is stored as written, as on main (no byte churn), while a '<' that can open an HTML block stays escaped",
-      "surface": "the Dispatch API and pages on the browser-suite server, at the head and at main (each row alone, all together, as a comment, two edits); and Go against the engine on 1,414 generated task-checkbox shapes (tester-rig/gen-r8.py.txt) at the head, 5d887d30 and d4cbcfe6",
-      "command": "throwaway e2e/zz-tester-r8.e2e.ts (removed) at the head and with pmdoc at d4cbcfe6; probe2.sh r8gen head|prev|base",
-      "observed": "'- [ ] <!-- todo later', '- [ ] <div class=x' and '- [x] <!doctype html' are stored as written at the head, byte for byte as at main; '- [ ] see x;https://task.test/ done' is stored with no 'https\\:' and links as in the comment; '- <!doctype html' (no checkbox) is stored '- \\<!doctype html', where main's raw form is an HTML block the engine drops while Go reads text; editor and comment hrefs equal; v3 equals v1 with only the two edits. Over the 1,414 shapes: 0 task rows where the head writes more '\\<' than main; 210 task rows where 5d887d30 wrote a '\\<' that main does not and the head writes none; 0 shapes where the head reads, writes back or is read by the engine worse than main",
-      "headSha": "a09a1f52096b328a5e879b5de5afadd2c080d547",
-      "negativeControl": "At 5d887d30, 210 of the task-checkbox shapes are written with a '\\<' that main does not write (the reviewer's three among them, e.g. '- [ ] \\<!-- todo')"
-    },
-    {
-      "criterion": "Review finding 1: the linear-time gate is main's, with no CPU-clock floor, and it passes in this pod",
-      "surface": "pmdoc's growth tests in this gVisor pod",
-      "command": "go test -count=1 -v -run 'TestBareURLShapesParseAndRenderLinearly|Quadratic|TestRenderReadsEachWritingBackUnderAReaderOnce' ./internal/dispatch/pmdoc/; git diff d4cbcfe6 b80be208 -- linear_test.go",
-      "observed": "TestBareURLShapesParseAndRenderLinearly PASS (274.8 s), TestGrowsLinearlyCatchesQuadraticAtThisFilesGrowthStepAndSlack PASS, TestRenderReadsEachWritingBackUnderAReaderOnce PASS; the diff against main adds only the address and raw-HTML shapes and readsAndWritesLinearly; growthVerdict and cpuClockResolution are not in the diff, and cpuClockResolution appears nowhere in packages/envoy",
-      "headSha": "a09a1f52096b328a5e879b5de5afadd2c080d547",
-      "negativeControl": "TestGrowsLinearlyCatchesQuadraticAtThisFilesGrowthStepAndSlack fails a synthetic quadratic shape under the same growthVerdict, and passes"
-    },
-    {
-      "criterion": "No regression against main",
-      "surface": "gen/differential.sh with main's two broken pmdoc tests fixed in the archived trees; the probe sets, including the engine's reading of Go's rendering",
-      "command": "bash gen/zz-differential-fix.sh (removed) --base d4cbcfe6 --head a09a1f52 --corpus $TMPDIR/infra531-test/fuzz --corpus $TMPDIR/infra531-test/urls --out $TMPDIR/infra531-test/diff; probe2.sh r6gen, r5gen, r4, r3, amp at the head",
-      "observed": "18,101 documents: regressions 0, engine-tree regressions 0, head panics 0, every gate equal to round 7; head and base output byte-identical to round 7. 14,982 block-start shapes 0 bad; 1,840 raw-HTML shapes 40 bad, all NUL (as at main); r4 0, r3 0, amp 1 ('**](u)\\~\\\\~***b***', INFRA-535)",
-      "headSha": "a09a1f52096b328a5e879b5de5afadd2c080d547",
-      "negativeControl": "Base d4cbcfe6 stores 8,441 of the same documents incorrectly that the head stores correctly"
+      "criterion": "Smoke at the new head: the document write path that A1/A2/A3 and the review findings change",
+      "surface": "POST /api/v1/issues and GET /artifacts/{id}/text on the real Go server built from the workspace (e2e harness via bun e2e/run.ts, rootless Postgres 17 + pgvector rebuilt on the new pod per docs/solutions/testing/...INFRA-42.md)",
+      "command": "bun e2e/run.ts -- bun e2e/zz-smoke.ts (throwaway, removed; saved as tester-rig/zz-smoke.ts.txt)",
+      "observed": "10 rows stored as round 8 recorded: 'see http\\://lower.test b' → 'see http://lower.test b'; 'x;https://semi.test b' as written; 'see www\\.www1.test b' → 'see www.www1.test b'; 'x;a@semi.cc end' → 'x;[a@semi.cc](mailto:a@semi.cc) end'; '&lt;javascript:…'a@js.cc'>' → '\\<javascript:…'[a@js.cc](mailto:a@js.cc)'>'; 'Set \\<!x;a@decl.cc> now' and '\\<span title=a=b;a@span.cc>' stored with '\\<' and a mailto: link; '- [ ] <!-- todo later' as written; '[amp](…&amp;b=2)' → '[amp](…&b=2)'",
+      "headSha": "5a21adfe32cebff09ecddae234ca0652517b2544",
+      "negativeControl": "Same smoke with pmdoc restored to main d4cbcfe6: 'x;https\\://semi.test b' and 'see http\\://lower.test b' stored with the escape and no link, 'see www\\.www1.test b' refused 400 INVALID_MARKDOWN, emails stored without a link"
     }
   ]
 }
