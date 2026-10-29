@@ -98,3 +98,72 @@ func TestAWindowAnswersEachDeniedJetStreamSendItsOwnDenial(t *testing.T) {
 		}
 	}
 }
+
+// batchEnvelope is one event of a batch the outbox's scan sends through one window: its own event
+// and its own dedupe key, under the topic it shares with the batch's other events, as two comments
+// a person writes a moment apart on one issue share their issue topic.
+func batchEnvelope(topic, event string) contracts.Envelope {
+	item := streamEnvelope(topic)
+	item.EventID = "evt-" + event
+	item.SourceEventID = "source-" + event
+	item.DedupeKey = "dedupe-" + event
+	return item
+}
+
+// Each denied JetStream send of one subject a publish window sent twice is answered a denial of
+// its own message. nats-server refuses every message and reports a violation of each, so a record
+// holding one violation per subject answered one of the two sends and left the other to the
+// acknowledgement timeout, which reads as an unreachable NATS; the client queues the violations of
+// a subject in arrival order (recordPublishDenial) and each send takes the oldest recorded since
+// it was sent (deniedPublish). Both messages go out before either answer is read, which is how the
+// outbox sends a scan's batch. Under a grant that covers the subject, both are accepted and the
+// stream holds both.
+func TestAWindowAnswersEachDeniedSendOfOneSubjectItsOwnDenial(t *testing.T) {
+	window := jetStreamGrantedClient(t).Window()
+	first := window.PublishAsync(batchEnvelope(deniedIssueTopic, "comment-1"))
+	second := window.PublishAsync(batchEnvelope(deniedIssueTopic, "comment-2"))
+
+	for _, send := range []struct {
+		event   string
+		outcome <-chan error
+	}{
+		{event: "comment-1", outcome: first},
+		{event: "comment-2", outcome: second},
+	} {
+		err := windowAnswer(t, deniedIssueTopic, send.outcome)
+		if !errors.Is(err, bus.ErrPublishDenied) || !errors.Is(err, natsgo.ErrPermissionViolation) {
+			t.Fatalf("the denied send of %s was answered %v, want ErrPublishDenied wrapping the permissions violation",
+				send.event, err)
+		}
+		if errors.Is(err, bus.ErrUnavailable) {
+			t.Fatalf("the denied send of %s was answered %v, which reads as an unreachable NATS", send.event, err)
+		}
+		if !strings.Contains(err.Error(), `Permissions Violation for Publish to "`+deniedIssueTopic+`"`) {
+			t.Fatalf("the denied send of %s was answered %q, which does not carry the server's violation of that subject",
+				send.event, err)
+		}
+	}
+
+	client := jetStreamGrantedClient(t, "notifications.dispatch.>")
+	granted := client.Window()
+	first = granted.PublishAsync(batchEnvelope(deniedIssueTopic, "comment-1"))
+	second = granted.PublishAsync(batchEnvelope(deniedIssueTopic, "comment-2"))
+	for _, send := range []struct {
+		event   string
+		outcome <-chan error
+	}{
+		{event: "comment-1", outcome: first},
+		{event: "comment-2", outcome: second},
+	} {
+		if err := windowAnswer(t, deniedIssueTopic, send.outcome); err != nil {
+			t.Fatalf("the granted send of %s was answered %v, want accepted", send.event, err)
+		}
+	}
+	info, err := client.JS().StreamInfo(bus.Stream)
+	if err != nil {
+		t.Fatalf("read the stream: %v", err)
+	}
+	if info.State.Msgs != 2 {
+		t.Fatalf("the stream holds %d messages of the granted sends, want both", info.State.Msgs)
+	}
+}

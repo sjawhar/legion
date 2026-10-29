@@ -296,15 +296,18 @@ type Client struct {
 	reconnectWaitTick func()
 	mu                sync.Mutex
 
-	// deniedPublishes holds, under mu, the server's refusal of a publish per subject it refused a
-	// publish to, as the connection reported it (recordPublishDenial), for the publish of that
-	// subject to read once (deniedPublish). nats.go keeps one last error per connection, so a
-	// publish window that sent several denied subjects at once could name only the violation that
-	// landed last and left every other denied send to its acknowledgement timeout; a record per
-	// subject names each of them. It belongs to the connection in Conn: a reconnect and a
-	// replacement connection each clear it (clearPublishDenials), a record retention has spent is
-	// dropped when the next one is recorded, and a read takes its record out.
-	deniedPublishes map[string]publishViolation
+	// deniedPublishes holds, under mu, the server's refusals of publishes per subject it refused a
+	// publish to, as the connection reported them (recordPublishDenial), queued in arrival order
+	// for the sends of that subject to take one each (deniedPublish). nats.go keeps one last error
+	// per connection, so a publish window that sent several denied subjects at once could name
+	// only the violation that landed last and left every other denied send to its acknowledgement
+	// timeout; and nats-server reports one violation per refused message, so a record of one
+	// violation per subject would leave every send but one of a subject a window sent twice to
+	// that same timeout. It belongs to the connection in Conn: a reconnect and a replacement
+	// connection each clear it (clearPublishDenials), a record retention has spent and anything
+	// past publishDenialDepth are dropped when the next one is recorded, and a read takes the
+	// violation it answers with out.
+	deniedPublishes map[string][]publishViolation
 
 	// subscriptionsMu guards subscriptions and stopMode. It is held to read and write them, never
 	// across a bind's request to the server, so a reconnect's restore, the health reads and Drain
