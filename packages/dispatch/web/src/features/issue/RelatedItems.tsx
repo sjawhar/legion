@@ -15,7 +15,10 @@ import { statusText } from "../project/board-model";
 import { Timestamp } from "../refs/Timestamp";
 import { AskHitStatus } from "../search/AskHitStatus";
 import { kindLabel } from "../search/search-model";
-import { RELATED_DEBOUNCE_MS, RELATED_TITLE_MIN } from "./related-timing";
+import { RELATED_DEBOUNCE_MS } from "./related-timing";
+
+/** Shorter than this, every item in the project would match, so nothing is asked. */
+const RELATED_TITLE_MIN = 2;
 
 /**
  * The check's answer for the title in the box, and whether that answer is still out. The query
@@ -30,6 +33,10 @@ function useRelatedItems(project: string, title: string) {
     return () => window.clearTimeout(timeout);
   }, [trimmed]);
   const enabled = project !== "" && debounced.length >= RELATED_TITLE_MIN;
+  // What is shown follows the same floor over the title in the box rather than the debounced
+  // copy, so the section empties the moment the reader clears the box and nothing restates the
+  // rule outside this hook.
+  const shown = project !== "" && trimmed.length >= RELATED_TITLE_MIN;
   const query = useQuery({
     enabled,
     queryFn: ({ signal }) => api.relatedItems(project, debounced, { signal }),
@@ -37,7 +44,7 @@ function useRelatedItems(project: string, title: string) {
   });
   // The answer on screen is always the answer to the title in the box: while the debounced copy
   // lags the box, what the query holds answers a title the reader has already left.
-  return { query, trimmed, waiting: debounced !== trimmed };
+  return { query, shown, trimmed, waiting: debounced !== trimmed };
 }
 
 /**
@@ -48,9 +55,9 @@ function useRelatedItems(project: string, title: string) {
  * announced rather than silently replacing the one a screen reader just read.
  */
 export function RelatedItems({ project, title }: { project: string; title: string }): ReactNode {
-  const { query, trimmed, waiting } = useRelatedItems(project, title);
-  let body: ReactNode = null;
-  if (project === "" || trimmed.length < RELATED_TITLE_MIN) {
+  const { query, shown, trimmed, waiting } = useRelatedItems(project, title);
+  let body: ReactNode;
+  if (!shown) {
     body = null;
   } else if (!waiting && query.isError) {
     body = (
@@ -90,7 +97,11 @@ function RelatedForm({
     <p className={textMutedOnSurface}>{notMadeText(reason, title, suggestions.search_query)}</p>
   );
   let form: ReactNode;
-  if (related.length > 0) {
+  if (outcome === "not_made" || (outcome === undefined && missing !== undefined)) {
+    // The CLI tests this first (`relatedCheckForm`), so an answer carrying both items and a
+    // not-made marker reads the same on both surfaces.
+    form = notMade(missing ?? "the server gave no reason");
+  } else if (related.length > 0) {
     form = (
       <>
         <p className={`font-medium ${textSecondaryOnSurface}`}>
@@ -104,8 +115,6 @@ function RelatedForm({
         </ul>
       </>
     );
-  } else if (outcome === "not_made" || (outcome === undefined && missing !== undefined)) {
-    form = notMade(missing ?? "the server gave no reason");
   } else if (outcome === undefined) {
     form = notMade("the server did not say whether it searched");
   } else if (outcome === "found" || outcome === "none") {
@@ -198,13 +207,15 @@ function searchModeWords(suggestions: Suggestions): string | undefined {
  * draft; with no such word it says what to search for instead of guessing.
  */
 function notMadeText(reason: string, title: string, searchQuery?: string): string {
-  const found = searchQuery?.trim() || searchWords(title);
+  const found = searchQuery?.trim() || longWords(title);
   const words = found === "" ? "two or three of its words" : `“${found}”`;
   return `No related-item check was made: ${reason}. Search Dispatch for ${words} before you rely on this being new.`;
 }
 
-/** The first three words of four or more letters: short words are mostly ones every item holds. */
-function searchWords(text: string): string {
+/** The first three words of four or more letters: short words are mostly ones every item holds.
+ *  Named apart from `features/agents/agent-search.ts`'s exported `searchWords`, which splits a
+ *  query into each of its lowercased words. */
+function longWords(text: string): string {
   return (text.match(/[\p{L}\p{N}_]+/gu) ?? [])
     .filter((word) => (word.match(/\p{L}/gu) ?? []).length >= 4)
     .slice(0, 3)

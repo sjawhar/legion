@@ -41,13 +41,6 @@ const askItem: WriteSuggestion = {
   snippet: "which order do we send in",
 };
 
-/** Past the debounce, with real time: the component waits that long before it asks at all. */
-function pastDebounce(): Promise<void> {
-  const { promise, resolve } = Promise.withResolvers<void>();
-  setTimeout(resolve, RELATED_DEBOUNCE_MS + 200);
-  return promise;
-}
-
 function renderRelated(
   check: () => Promise<Suggestions>,
   project = "CORE",
@@ -179,7 +172,8 @@ test("a failed check says so and offers Retry", async () => {
 test("a title below the floor and a dialog with no project ask nothing", async () => {
   const short = renderRelated(async () => ({ outcome: "none", related: [] }), "CORE", "a");
   try {
-    await act(pastDebounce);
+    // Past the debounce, with real time: the component waits that long before it asks at all.
+    await act(() => Bun.sleep(RELATED_DEBOUNCE_MS + 200));
     expect(short.relatedItems).toHaveBeenCalledTimes(0);
   } finally {
     short.unmount();
@@ -187,7 +181,8 @@ test("a title below the floor and a dialog with no project ask nothing", async (
 
   const noProject = renderRelated(async () => ({ outcome: "none", related: [] }), "");
   try {
-    await act(pastDebounce);
+    // Past the debounce, with real time: the component waits that long before it asks at all.
+    await act(() => Bun.sleep(RELATED_DEBOUNCE_MS + 200));
     expect(noProject.relatedItems).toHaveBeenCalledTimes(0);
   } finally {
     noProject.unmount();

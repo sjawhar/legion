@@ -1,3 +1,5 @@
+import { setTimeout as sleep } from "node:timers/promises";
+
 import { expect, type Locator, type Page, test } from "@playwright/test";
 
 import { RELATED_DEBOUNCE_MS } from "../web/src/features/issue/related-timing";
@@ -11,6 +13,16 @@ const relatedRoute = /\/api\/v1\/projects\/[^/]+\/related(\?|$)/u;
 const astrolabeTitle = "Astrolabe drift spoils the mooring calibration";
 const zeppelinTitle = "Zeppelin ballast valve sticks in the cold";
 
+/** The check the dialog asks for a title holding `word`, awaited where the row needs its answer
+ *  to have reached the page. */
+function checkFor(page: Page, word: string): Promise<unknown> {
+  return page.waitForResponse(
+    (response) =>
+      relatedRoute.test(response.url()) &&
+      (new URL(response.url()).searchParams.get("title") ?? "").includes(word)
+  );
+}
+
 /** Hold the page's clock still, so a check about the debounce cannot race it. `install()` alone
  * leaves the clock running at real speed; `pauseAt` is what stops it. It takes a time on the
  * page's own installed clock, and the Node process's `Date.now()` can already be behind that
@@ -19,14 +31,6 @@ const zeppelinTitle = "Zeppelin ballast valve sticks in the cold";
  * empty, so no check is armed and the jump arms none. */
 async function pauseClock(page: Page): Promise<void> {
   await page.clock.pauseAt(Date.now() + 1000);
-}
-
-/** A margin on Node's clock, for a page whose own clock is held still: `page.waitForTimeout` is
- *  the page's clock and would never return. */
-function settle(ms: number): Promise<void> {
-  const { promise, resolve } = Promise.withResolvers<void>();
-  setTimeout(resolve, ms);
-  return promise;
 }
 
 async function seedProject(): Promise<{ astrolabe: string; zeppelin: string }> {
@@ -170,15 +174,11 @@ test("an answer that arrives after the title changed is not shown for the new ti
     // title's own 400 ms pause, which must not fire yet. The margin is Node's clock, since a
     // page-side wait would never return. It is proven by the mutation the pull request
     // records: with the display gate removed, this assertion fails, three runs of three.
-    const answered = page.waitForResponse(
-      (response) =>
-        relatedRoute.test(response.url()) &&
-        (new URL(response.url()).searchParams.get("title") ?? "").includes("Astrolabe")
-    );
+    const answered = checkFor(page, "Astrolabe");
     release();
     await answered;
     await page.clock.runFor(1);
-    await settle(250);
+    await sleep(250);
 
     // The answer that landed is the first title's, so the dialog still says it is checking and
     // shows no link to the issue that answer named.
@@ -186,11 +186,7 @@ test("an answer that arrives after the title changed is not shown for the new ti
     await expect(related.getByRole("link", { name: new RegExp(seeded.astrolabe) })).toHaveCount(0);
 
     // The second title's own pause then brings its own answer, and the dropped one never appears.
-    const second = page.waitForResponse(
-      (response) =>
-        relatedRoute.test(response.url()) &&
-        (new URL(response.url()).searchParams.get("title") ?? "").includes("Zeppelin")
-    );
+    const second = checkFor(page, "Zeppelin");
     await page.clock.runFor(RELATED_DEBOUNCE_MS);
     await second;
     await page.clock.runFor(1);
