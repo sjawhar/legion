@@ -58,8 +58,15 @@ func TestAnImportPassSyncsEverySourceAndGoesOnPastAFailure(t *testing.T) {
 	}
 }
 
-// writeStatement is a statement that writes rows directly, or opens a transaction to.
-var writeStatement = regexp.MustCompile(`(?is)^\s*(insert|update|delete|begin)\b`)
+// writeStatement is a statement that writes rows.
+var writeStatement = regexp.MustCompile(`(?is)^\s*(insert|update|delete)\b`)
+
+// transactionStatement frames a transaction instead of writing anything itself. Every write the
+// importer makes runs in a transaction of its own (Importer.inTransaction), so the freshness stamp
+// carries one begin and one commit; what a frame carries is recorded too, so a write other than the
+// stamp is still caught, and counting the frames still catches a second transaction (a row lock,
+// say) the unchanged-head pass has no business opening.
+var transactionStatement = regexp.MustCompile(`(?is)^\s*(begin|commit|rollback)\b`)
 
 // touchStatement is the unchanged-head short-circuit's one write (Importer.touch).
 var touchStatement = regexp.MustCompile(`(?is)^\s*update\s+architecture_sources\s+set\s+last_sync_at\s*=\s*now\(\),\s*last_commit\s*=\s*\$5\b`)
@@ -108,16 +115,21 @@ func TestAnImportPassOverUnchangedHeadsFetchesNothingAndTouchesEachSourceOnce(t 
 	if err := database.Pool.QueryRow(ctx, `select count(*) from architecture_sources where last_sync_at > $1`, lastSync).Scan(&fresh); err != nil || fresh != 3 {
 		t.Fatalf("%d of 3 sources carry a freshness stamp from the pass over unchanged heads (err %v); want every one", fresh, err)
 	}
-	touches := 0
+	touches, framing := 0, 0
 	for _, sql := range recorder.Statements() {
 		switch {
 		case touchStatement.MatchString(sql):
 			touches++
+		case transactionStatement.MatchString(sql):
+			framing++
 		case writeStatement.MatchString(sql):
 			t.Errorf("the pass over unchanged heads ran a write other than the freshness stamp: %s", strings.TrimSpace(sql))
 		}
 	}
 	if touches != 3 {
 		t.Fatalf("the pass over unchanged heads stamped freshness %d times over 3 sources; want one each", touches)
+	}
+	if framing != 2*touches {
+		t.Fatalf("the pass over unchanged heads ran %d transaction statements around %d freshness stamps; want each stamp's own begin and commit and no other transaction", framing, touches)
 	}
 }
