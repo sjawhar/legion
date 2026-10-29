@@ -2,41 +2,41 @@
   "schemaVersion": 1,
   "phase": "implement",
   "issue": "INFRA-719",
-  "completed": "2026-10-29T02:05:00Z",
+  "completed": "2026-10-29T12:32:30Z",
   "pullRequest": "https://github.com/sjawhar/legion/pull/2481",
-  "head": "1c5f55d01360b5769704a7124f4414c4e7086841",
+  "head": "2d411fe65657f2067376c3ae4ce8ef01b338fd04",
   "proof": [
     {
-      "criterion": "A4: a document holding the shapes, written through the API, reads alike in the editor, the stored markdown, doc-read and a comment",
+      "criterion": "A4 and tester failure 1: a document written through the API reads alike in the editor, the stored markdown, doc-read and a comment, a spec ending in indented code's whitespace-only line with no final line feed included",
       "surface": "Dispatch issue page (spec editor, past version ?v=1, Conversation comment), /api/v1/issues/<KEY>/artifacts/spec/text and dispatch doc-read, on the real stack: Go server and production SPA built from the checkout, Playwright Chromium, rootless Postgres 17 + pgvector",
-      "command": "cd packages/dispatch && DATABASE_URL='postgres://postgres@127.0.0.1:5439/dispatch_e2e?sslmode=disable' bun run e2e -- e2e/indented-code-whitespace-lines.e2e.ts --project=chromium",
-      "observed": "4 passed (16.1s): every view draws lists [false,false], items [false,true,false], code [\"code\\n\\nnote\",\"    x\\n  \",\"      y\\n    \\n   \"]; the stored spec is the pinned fenced literal and doc-read prints it. Evidence: https://github.com/sjawhar/legion/pull/2481#issuecomment-6485770862",
-      "headSha": "1c5f55d01360b5769704a7124f4414c4e7086841",
-      "negativeControl": "The same spec in a git-archive extract of main f45c6716: 3 failed, 1 passed (comment): the editor and past version draw lists [true,true] and code \"    x\", \"      y\". The spec with items expected [false,false,false]: all 4 fail showing the real [false,true,false]."
+      "command": "cd packages/dispatch && . /legion/scratch/tmp/e2e-rig/env.sh && bun run e2e -- e2e/indented-code-whitespace-lines.e2e.ts --project=chromium",
+      "observed": "5 passed (12.4s): the four round-1 tests, and a spec written as 'Before.\\n\\n    code\\n    \\n    ' with no final line feed draws [\"code\\n\"] in its editor as in its comment and is stored '# Code\\n\\nBefore.\\n\\n```\\ncode\\n\\n```\\n'",
+      "headSha": "2d411fe65657f2067376c3ae4ce8ef01b338fd04",
+      "negativeControl": "The same spec in a git-archive extract of the previous head 1c5f55d0: the new test fails, editor Received [\"code\"] against the engine's [\"code\\n\"], the other 4 pass; at main f45c6716 the first 4 fail 3 of 4 (round 1)"
     },
     {
-      "criterion": "A1: the shapes and INFRA-581's documents main accepts are corpus fixtures, passing at the head and failing at main",
-      "surface": "pmdoc Go suite: TestIndentedCodeKeepsTheWhitespaceLinesTheEngineKeeps, TestFencedCodeDropsAWhitespaceLineShortOfTheFenceIndent, TestParseMatchesMilkdownForFixtures over 28 new fixtures, each row also asserted against the browser engine's reading",
-      "command": "cd packages/envoy && go test ./internal/dispatch/pmdoc -run 'TestFencedCode|TestIndentedCodeKeeps|TestParseMatchesMilkdownForFixtures|TestRenderParseRoundTrip|TestFixturesAreWithinSchema|TestRenderMatchesMilkdownForFixtures' -count=1 -v",
-      "observed": "All pass at the head (ok 2.581s); go test -p 1 ./internal/dispatch/pmdoc/... -skip Linear ok; go vet ./internal/dispatch/... clean",
-      "headSha": "1c5f55d01360b5769704a7124f4414c4e7086841",
-      "negativeControl": "The same tests, fixtures.json and corpus files in a git-archive extract of f45c6716 (main after #2403): 48 FAIL lines, every code-text and spread row, the 4 fenced shapes and 2 documents, and 28 fixture subtests, e.g. Parse(\"- a\\n\\n          x\\n        \\n- b\\n\"): list spread [true], want [false]; the engine rows pass at both"
+      "criterion": "Tester failures 1 and 2: code ending a document with no final line feed drops one line ending for every reader, ParseForWrite included",
+      "surface": "pmdoc Go suite with the tester's red rows (45eb7c14, unchanged), each asserted for Parse, ParseRendering, ParseForWrite and the browser engine",
+      "command": "cd packages/envoy && go test ./internal/dispatch/pmdoc -run 'TestFencedCode|TestIndentedCodeKeeps|TestParseMatchesMilkdownForFixtures|TestRenderParseRoundTrip|TestFixturesAreWithinSchema|TestRenderMatchesMilkdownForFixtures' -count=1; go test -p 1 ./internal/dispatch/pmdoc/... -count=1 -skip Linear; go vet ./internal/dispatch/pmdoc/",
+      "observed": "ok for both; vet clean",
+      "headSha": "2d411fe65657f2067376c3ae4ce8ef01b338fd04",
+      "negativeControl": "The same tests before 2781d3d5 (at 45eb7c14): 6 failing rows, e.g. Parse(\"    code\\n    \\n    \"): code [\"code\"], want [\"code\\n\"] and Parse(\"  ~~~\\nx\\n \"): code [\"x\\n\"], want [\"x\"]"
     },
     {
-      "criterion": "A2: differential.sh against main, every GATE line 0",
-      "surface": "pmdoc differential: 43,197 documents (20,000 from gen/indented-code-corpus.ts, 10,000 url, 8,000 reference, 5,000 delimiter, INFRA-581's 69, the in-repo corpus), each read at base and head and read back by Go and by the engine",
-      "command": "cd packages/envoy/internal/dispatch/pmdoc/gen && bash differential.sh --base f45c6716eacfa82bed5ad29d2371c52aacfadde2 --corpus /legion/scratch/tmp/infra719-impl/corpus --out <dir>",
-      "observed": "Every GATE line 0 (regressions, misreads, churn, engine-tree regressions, engine-tree churn, head panics, lost fixed points); fixed 12,136; head stores correctly 36,667 vs base 24,531. The 1,276 generated documents still read otherwise are spread-only with the same spreads at base (typed-block-in-an-item policy, plan D4)",
-      "headSha": "eeb3099b836f8e5830ed1a82ddc050291bfba567",
-      "negativeControl": "The base side of the same run reads 12,136 documents otherwise than the engine that the head reads alike (the fixed count), so the gate compares two different readers rather than one twice"
+      "criterion": "A2: differential against main, every GATE line 0",
+      "surface": "pmdoc differential over 43,197 documents (20,000 indented-code-corpus.ts, url, reference, delimiter, INFRA-581's 69, in-repo)",
+      "command": "cd packages/envoy/internal/dispatch/pmdoc/gen && bash differential.sh --base a09a2f25 --corpus /legion/scratch/tmp/infra719-r2/corpus --out /legion/scratch/tmp/infra719-r2/diff",
+      "observed": "Every GATE line 0; fixed 12,136; head stores correctly 36,667 against base 24,531",
+      "headSha": "4586f5ab7e41 tree (reader identical to 2d411fe6)",
+      "negativeControl": "The base side reads 12,136 documents otherwise than the engine that the head reads alike, so the gate compares two readers"
     },
     {
-      "criterion": "A3: a census of every stored version with the count whose reading or bytes change",
-      "surface": "production Dispatch through the pod's agent token: every project's issue and project documents, every version's stored markdown",
-      "command": "bun infra-719-crawl.ts versions.jsonl; python3 infra-719-dedupe.py; bash infra-719-census-run.sh f45c6716 distinct.jsonl census-final-full; python3 infra-719-census-compare.py census-final-full versions-map.tsv (tools on dispatch://INFRA-719)",
-      "observed": "13 projects, 6,601 documents, 32,187 versions (6,633 latest), 31,842 distinct markdowns: 0 change in tree, Parse refusal, ParseForWrite refusal or rendering bytes, so 0 documents to rewrite",
-      "headSha": "eeb3099b836f8e5830ed1a82ddc050291bfba567",
-      "negativeControl": "The same runner over the 28 markdown rows of indented_code_test.go and fenced_code_test.go reports 18 changed"
+      "criterion": "A3: census of stored versions whose reading or bytes change",
+      "surface": "production Dispatch stored versions (round 1 census at eeb3099b: 0 of 32,187 change; tester's census at 1c5f55d0: 0 of 32,478 distinct)",
+      "command": "Round-2 change reads only a document whose last line has no line feed; tester's crawl (test.json reach) found 0 of 32,478 distinct stored markdowns without a final line feed",
+      "observed": "0 stored versions can change from round 2; 0 from round 1",
+      "headSha": "2d411fe65657f2067376c3ae4ce8ef01b338fd04",
+      "negativeControl": "Round 1's runner over the 28 test rows reports 18 changed"
     }
   ],
   "filesChanged": [
@@ -53,11 +53,11 @@
     "packages/envoy/internal/dispatch/pmdoc/testdata/corpus/indented-code-trailing-whitespace-lines.md",
     "packages/envoy/internal/dispatch/pmdoc/testdata/corpus/lists-spaced-by-indented-code-whitespace-lines.md",
     "packages/envoy/internal/dispatch/pmdoc/testdata/corpus/fenced-code-whitespace-lines-short-of-the-fence-indent.md",
-    "packages/envoy/internal/dispatch/pmdoc/testdata/corpus/infra-581-indented-code-*.md (25)",
     "packages/envoy/internal/dispatch/pmdoc/gen/indented-code-corpus.ts",
     "packages/dispatch/e2e/indented-code-whitespace-lines.e2e.ts",
     "packages/envoy/AGENTS.md",
-    "packages/envoy/.changes/unreleased/INFRA-719-indented-code-whitespace-lines.yaml"
+    "packages/envoy/.changes/unreleased/pr2481-Fixed-20261029-121242.yaml (replaces the INFRA-719 fragment)",
+    "packages/envoy/internal/dispatch/pmdoc/testdata/corpus/generated-indented-code-*.md (renamed from infra-581-indented-code-*)"
   ],
   "trickyParts": [
     "codeColumns.Close keeps goldmark's trim for code right after a list or a quote with no blank line before it (heldOpenBefore, shared with interruptsOpenBlock), so refusals.go's line count is main's",
@@ -69,11 +69,14 @@
     "Fenced-code fix added: two of INFRA-581's 30 accepted documents still misread at the head because of a pre-existing fenced-code defect in pmdoc (a whitespace-only line short of the fence's indent); fixed here with fenced_code_test.go and a fixture",
     "Of INFRA-581's 30 accepted documents, 25 are fixtures; 5 stay in the differential corpus only because TestRenderMatchesMilkdownForFixtures's plain-text normaliser cannot compare their code text (=== and 1. lines inside code)",
     "Red runs and comparisons use base f45c6716 (main after #2403) rather than the fork point 1767c9af/cc5ccf19, whose pmdoc test package did not compile; the pmdoc reader is identical",
-    "The branch carried the two pmdoc compile fixes main needed (reanchor_test.go NestedValue from docs/crafted, typed_nesting_test.go cpuTimeOf(again(...))); main now has both through #2482 and #2484 (opened from this session as a separate PR at the controller's direction)"
+    "The branch carried the two pmdoc compile fixes main needed (reanchor_test.go NestedValue from docs/crafted, typed_nesting_test.go cpuTimeOf(again(...))); main now has both through #2482 and #2484 (opened from this session as a separate PR at the controller's direction)",
+    "Round 2: a comment line in the tester's fenced_code_test.go changed from 'INFRA-581's' to 'sjawhar/legion#2403's generator' under the controller's no-key ruling; no row or assertion of the tester's changed",
+    "Round 2: the census was not re-crawled; the round-2 change reads only documents without a final line feed, of which production stores none (tester's crawl)"
   ],
   "openQuestions": [],
   "discoveredComplexity": [
     "39 of INFRA-581's 69 documents (all of round 5) are refused at main and at the head by #2403's remaining refusal of a footnote definition inside a typed block; they stay in the differential corpus",
     "Linear tests time out or fail with '+Inf times' on the pod's gVisor clock; CI's envoy-go is their run"
-  ]
+  ],
+  "round": 2
 }
