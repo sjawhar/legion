@@ -2,9 +2,17 @@
   "schemaVersion": 1,
   "phase": "implement",
   "issue": "INFRA-520",
-  "completed": "2026-10-29T02:17:01Z",
+  "completed": "2026-10-29T09:02:38Z",
   "pullRequest": "https://github.com/sjawhar/legion/pull/2316",
   "proof": [
+    {
+      "criterion": "Review at 4fcff042: the pull request merges with main 88840d35, and #2449's edit to the deleted envoy-and-contracts.yaml is carried so the filter check passes",
+      "surface": "GitHub mergeability and the local checks on the merged tree",
+      "command": "gh pr view 2316 -R sjawhar/legion --json mergeable,mergeStateStatus; .github/scripts/check-ci-filters.sh; actionlint ci.yaml",
+      "observed": "MERGEABLE/BLOCKED at 5e6cac9b. envoy-go's 'Unit test envoy Go package' runs both go commands with -timeout 20m as main does, and its exact entry pins that script: check-ci-filters.sh exit 0, 23 gates 0 uncovered (envoy-go 2055 files). AGENTS.md takes main's text, naming ci.yaml. actionlint 0; image-trigger, action-pins, private-names, bun-version, release-credentials checks 0; check-ci-filters tests 127/0, ci-ok tests 40/0. Fingerprint comment 6492443581.",
+      "headSha": "5e6cac9ba2349401fda2292093f90dd0da476852",
+      "negativeControl": "The exact entry compares the step's whole script: carried into ci.yaml without updating the pinned script, the envoy-go Runs would fall to everything ('the step's script is not the pinned text'), as round 10's one-character negative control on 'Pack envoy binaries' showed (908 uncovered)."
+    },
     {
       "criterion": "Review at bbda9d75: the pull request merges with main, #2476's Postgres 16 removal and #2278's pi-envoy NATS service are in ci.yaml, and the filter check passes",
       "surface": "GitHub mergeability and the local checks on the merged tree (main a09a2f25)",
