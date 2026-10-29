@@ -2,34 +2,40 @@
   "schemaVersion": 1,
   "phase": "implement",
   "issue": "INFRA-557",
-  "completed": "2026-10-29T00:45:00Z",
-  "round": "lint fix after the forward merge",
+  "completed": "2026-10-29T09:50:00Z",
+  "round": "review round 2",
   "pullRequest": "https://github.com/sjawhar/legion/pull/2404",
-  "codeHead": "75ad248670bd7b5b1a100e9e5976e21407ee7257",
-  "answersTest": "332a2c57b5f31c978d9bcc206d80bc2809b49701",
+  "codeHead": "9c5cd05b99938e552b237ca0c73c270eb69e1bc3",
+  "answersReview": "1fe15e1b7cefbcb0859bc8f03350986ab5308630",
   "proof": [
     {
-      "criterion": "CI's required lint check passes: Biome's whole-tree check reports no error",
-      "surface": "the repository's lint lane command (pr-and-main.yaml: `bunx biome check .`) on the working tree, Biome 2.4.11 as bun.lock pins",
-      "command": "cd $LEGION_WORKSPACE && bunx biome check .",
-      "observed": "Checked 1240 files in 33s. No fixes applied. Found 1 warning. Found 5 infos. exit 0 (no errors); the generated grant fixtures stay byte-equal to testnats.EncodeGrant's output",
-      "headSha": "75ad248670bd7b5b1a100e9e5976e21407ee7257",
-      "negativeControl": "at 6ee80831 CI's lint failed (https://github.com/sjawhar/legion/actions/runs/40787900265/job/123165594270): Biome reformats packages/envoy/internal/testnats/testdata/listener-permissions.json"
+      "criterion": "Review round 2 finding A: every graceful hand-over, not only the first, delivers within 10 s (also after a node loss)",
+      "surface": "real cmd/listener binaries, each pod a NATS user holding exactly the rendered core.ListenerPermissions grant, in-process nats-server; a prompt held past the 3 s grace at each SIGTERM and a session whose prompts fail",
+      "command": "cd packages/envoy && go test -tags multiprocess -count=1 -timeout 30m -v -run '^Test(TwoPods|TwoBuilds)' ./cmd/listener",
+      "observed": "28 rows PASS, ok 615.526s; TestTwoPodsEveryGracefulStopWithAPromptInHandAndARetryOutstandingDeliversWithin10s and TestTwoPodsEveryGracefulStopAfterANodeLossWithAPromptInHandAndARetryOutstandingDeliversWithin10s pass (slowest message about 7.5 s). https://github.com/sjawhar/legion/pull/2404#issuecomment-6493091523",
+      "headSha": "9c5cd05b99938e552b237ca0c73c270eb69e1bc3",
+      "negativeControl": "fix A reverted: '12 of 285 messages reached their session later than 10s' (3 of 3); flag split reverted: '28 of 210 messages reached their session later than 10s'"
     },
     {
-      "criterion": "Every behaviour of the change holds at the code head (75ad2486 changes only biome.json above 6ee80831)",
-      "surface": "real cmd/listener binaries per row under the rendered grant, in-process nats-server",
-      "command": "cd packages/envoy && go test -tags multiprocess -count=1 -timeout 30m -v -run '^Test(TwoPods|TwoBuilds)' ./cmd/listener (at 6ee80831)",
-      "observed": "26 rows PASS, ok 532.418s; untagged listener suite ok 627.851s",
-      "headSha": "75ad248670bd7b5b1a100e9e5976e21407ee7257",
-      "negativeControl": "review round 1 fail-first runs: https://github.com/sjawhar/legion/pull/2404#issuecomment-6483359326"
+      "criterion": "Review round 2 finding B: a hard take-over after an abandon keeps per-session order",
+      "surface": "two in-process receivers whose bus and lease connections are a NATS user holding the rendered grant; a pre-lease binding, a frozen bus link to force the give-up, a hard death of the other pod",
+      "command": "cd packages/envoy && go test -count=3 -run '^TestAPodThatGaveTheLeaseUpWhileWaitingOutABindingSettlesAHardTakeoverAfterIt$' -v ./cmd/listener/",
+      "observed": "PASS 3 of 3: pod-x takes the expired record, settles, delivers 'older' then 'newer'",
+      "headSha": "9c5cd05b99938e552b237ca0c73c270eb69e1bc3",
+      "negativeControl": "fix B reverted: 'pod-x delivered \"newer\" then \"older\", want the older message pod-y died holding first'"
     }
   ],
   "filesChanged": [
-    "biome.json: files.includes excludes packages/envoy/internal/testnats/testdata, as it already excludes the pmdoc and text testdata"
+    "d3787812: cmd/listener/receive.go (no stale_binding on a hand-back term; abandon clears awaitedBinding; OweAckWait at a mid-hold stop or give-up), lease.go (ack_wait_owed field, OweAckWait, handedBack = released && unsettled && !ack_wait_owed), lease_test.go, receive_test.go, multiprocess_test.go (two rows), README.md",
+    "9c5cd05b: packages/envoy/AGENTS.md and the pr2404 changie fragment describe the flags as they now are"
   ],
-  "trickyParts": [],
-  "deviations": [],
+  "trickyParts": [
+    "stale_binding had two meanings (subscribe beside a lingering binding; owe the 7 s hold); after a node loss it stayed set on every later record, so every graceful hand-over kept 7 s. ack_wait_owed now carries the second meaning alone."
+  ],
+  "deviations": [
+    "Finding B's test is in process, not with binaries: the 135 s alarm bound is a constant the binary cannot shorten, and a test-only environment variable was ruled out.",
+    "TestListenerFollowsTheInterestRegistryAcrossNATSRestarts failed once in the untagged suite (the known load flake, failing on main too) and passed 2 of 2 on rerun."
+  ],
   "openQuestions": [],
   "discoveredComplexity": []
 }
