@@ -10,7 +10,6 @@ import (
 	"errors"
 	"flag"
 	"fmt"
-	"io"
 	"log"
 	"math/rand/v2"
 	"net/http"
@@ -37,7 +36,8 @@ const (
 	refRNGSeed = 650
 	// refTargetCount is how many cited documents the plan writes, refWriterPool how many session
 	// actors write them, and refAuthorBytes the size production's author list of one version row
-	// has on average, which each writer's padded origin reproduces.
+	// has on average, which each writer's padded origin reproduces and the shape check holds the
+	// seed's answers to.
 	refTargetCount  = 1000
 	refWriterPool   = 600
 	refAuthorBytes  = 231
@@ -47,9 +47,9 @@ const (
 	// refTimeout is this client's own timeout: a references answer of a seeded LGA issue is
 	// megabytes, and the 2-vCPU box can take minutes to build one.
 	refTimeout = 5 * time.Minute
-	// The shape check's figures from production, with the band each one holds in.
+	// The shape check's figures from production, with the band each one holds in. Its author
+	// bytes per row are refAuthorBytes, the measurement the padding reproduces.
 	refProdRows      = 3187
-	refProdBytes     = 231
 	refShapeBand     = 0.25
 	refDistinctLow   = 0.03
 	refDistinctHigh  = 0.12
@@ -242,8 +242,18 @@ func runSeedRefs(args []string) error {
 	return nil
 }
 
+// refTargetKey is the idempotency key of version v (1-based) of target n, and refSourceKey that of
+// the source document of one issue: one key per write the plan holds, the same on every attempt of
+// it. Dispatch writes version max+1 of a document on every POST, so a retry without a key would add
+// a version the plan does not hold.
+func refTargetKey(n, v int) string { return fmt.Sprintf("refs-t%d-v%d", n, v) }
+
+func refSourceKey(issue string) string { return "refs-s-" + issue }
+
 // writeRefTargets writes every version of every target, longest target first so the long tail
-// does not finish alone at the end. One target's versions are written in order by one worker.
+// does not finish alone at the end: g.Go blocks while the limit is reached, so the targets start
+// in that order. One target's versions are written in order by one goroutine. It counts the 201s,
+// one per key, and fails when they are not the plan's versions.
 func writeRefTargets(ctx context.Context, a *api, p refPlan) (int, error) {
 	start := time.Now()
 	total := 0
@@ -253,97 +263,76 @@ func writeRefTargets(ctx context.Context, a *api, p refPlan) (int, error) {
 	order := append([]refTarget(nil), p.targets...)
 	sort.SliceStable(order, func(i, j int) bool { return order[i].versions > order[j].versions })
 
-	jobs := make(chan refTarget)
 	var done, written atomic.Int64
 	g, gctx := errgroup.WithContext(ctx)
-	for range refWorkers {
+	g.SetLimit(refWorkers)
+	for _, t := range order {
 		g.Go(func() error {
-			for t := range jobs {
-				name := fmt.Sprintf("%s%d.md", refTargetPrefix, t.n)
-				for v := range t.versions {
-					body := map[string]any{
-						"name":    name,
-						"content": fmt.Sprintf("# Reference target %d\n\nRevision %d of a document other issues cite.\n", t.n, v+1),
-						"actor":   refWriter(t.order[v]),
-					}
-					res := a.callRetry(gctx, "POST", "/api/v1/issues/"+t.issue+"/artifacts", who{}, body)
-					if !res.ok() {
-						return fmt.Errorf("write %s version %d on %s: %d %s %v", name, v+1, t.issue, res.status, trunc(res.body), res.err)
-					}
-					if n := written.Add(1); n%refProgressEvery == 0 {
-						log.Printf("seed-refs: %d/%d versions, %d targets done, %s", n, total, done.Load(), time.Since(start).Round(time.Second))
-					}
+			name := fmt.Sprintf("%s%d.md", refTargetPrefix, t.n)
+			for v := range t.versions {
+				body := map[string]any{
+					"name":    name,
+					"content": fmt.Sprintf("# Reference target %d\n\nRevision %d of a document other issues cite.\n", t.n, v+1),
+					"actor":   refWriter(t.order[v]),
 				}
-				done.Add(1)
+				res := a.callRetryKeyed(gctx, "POST", "/api/v1/issues/"+t.issue+"/artifacts", who{}, body, refTargetKey(t.n, v+1))
+				if res.err != nil || res.status != http.StatusCreated {
+					return fmt.Errorf("write %s version %d on %s: %d %s %v, want 201", name, v+1, t.issue, res.status, trunc(res.body), res.err)
+				}
+				if n := written.Add(1); n%refProgressEvery == 0 {
+					log.Printf("seed-refs: %d/%d versions, %d targets done, %s", n, total, done.Load(), time.Since(start).Round(time.Second))
+				}
 			}
+			done.Add(1)
 			return nil
 		})
 	}
-	g.Go(func() error {
-		defer close(jobs)
-		for _, t := range order {
-			select {
-			case jobs <- t:
-			case <-gctx.Done():
-				return nil
-			}
-		}
-		return nil
-	})
 	if err := g.Wait(); err != nil {
 		return 0, err
 	}
-	log.Printf("seed-refs: wrote %d targets, %d versions in %s", len(p.targets), total, time.Since(start).Round(time.Second))
-	return total, nil
+	if int(written.Load()) != total {
+		return 0, fmt.Errorf("seed-refs wrote %d target versions, the plan holds %d", written.Load(), total)
+	}
+	log.Printf("seed-refs: wrote %d targets, %d versions in %s", len(p.targets), written.Load(), time.Since(start).Round(time.Second))
+	return int(written.Load()), nil
 }
 
 // writeRefSources writes one references.md per LGA issue that cites at least one target. Each
 // citation is a dispatch:// reference to a target document, which is what makes the references
-// answer of that issue do member work.
+// answer of that issue do member work. It counts the 201s, one per key, and fails when they are
+// not the issues the plan cites from.
 func writeRefSources(ctx context.Context, a *api, p refPlan) (issues, cites int, err error) {
 	start := time.Now()
-	jobs := make(chan string)
+	var written atomic.Int64
 	g, gctx := errgroup.WithContext(ctx)
-	for range refWorkers {
-		g.Go(func() error {
-			for key := range jobs {
-				var b strings.Builder
-				b.WriteString("# References\n\nThe documents this issue builds on:\n\n")
-				for _, n := range p.sources[key] {
-					fmt.Fprintf(&b, "- dispatch://%s/artifact/%s%d-md\n", p.targets[n].issue, refTargetPrefix, n)
-				}
-				body := map[string]any{"name": refSourceName, "content": b.String(), "actor": refWriter(0)}
-				res := a.callRetry(gctx, "POST", "/api/v1/issues/"+key+"/artifacts", who{}, body)
-				if !res.ok() {
-					return fmt.Errorf("write %s on %s: %d %s %v", refSourceName, key, res.status, trunc(res.body), res.err)
-				}
-			}
-			return nil
-		})
-	}
+	g.SetLimit(refWorkers)
 	for _, key := range p.lga {
-		if len(p.sources[key]) == 0 {
+		cited := p.sources[key]
+		if len(cited) == 0 {
 			continue
 		}
 		issues++
-		cites += len(p.sources[key])
+		cites += len(cited)
+		g.Go(func() error {
+			var b strings.Builder
+			b.WriteString("# References\n\nThe documents this issue builds on:\n\n")
+			for _, n := range cited {
+				fmt.Fprintf(&b, "- dispatch://%s/artifact/%s%d-md\n", p.targets[n].issue, refTargetPrefix, n)
+			}
+			body := map[string]any{"name": refSourceName, "content": b.String(), "actor": refWriter(0)}
+			res := a.callRetryKeyed(gctx, "POST", "/api/v1/issues/"+key+"/artifacts", who{}, body, refSourceKey(key))
+			if res.err != nil || res.status != http.StatusCreated {
+				return fmt.Errorf("write %s on %s: %d %s %v, want 201", refSourceName, key, res.status, trunc(res.body), res.err)
+			}
+			written.Add(1)
+			return nil
+		})
 	}
-	g.Go(func() error {
-		defer close(jobs)
-		for _, key := range p.lga {
-			if len(p.sources[key]) == 0 {
-				continue
-			}
-			select {
-			case jobs <- key:
-			case <-gctx.Done():
-				return nil
-			}
-		}
-		return nil
-	})
 	if err := g.Wait(); err != nil {
 		return 0, 0, err
+	}
+	if int(written.Load()) != issues {
+		return 0, 0, fmt.Errorf("seed-refs wrote %s on %d issues, the plan cites from %d", refSourceName, written.Load(), issues)
 	}
 	log.Printf("seed-refs: wrote %s on %d of %d LGA issues, citing %d targets in %s", refSourceName, issues, len(p.lga), cites, time.Since(start).Round(time.Second))
 	return issues, cites, nil
@@ -381,8 +370,8 @@ func runRefsShape(args []string) error {
 // seed gives with what production gives: the version rows per answer, the share of author lists
 // that differ, and the bytes an author list takes.
 func refsShape(ctx context.Context, a *api, sf seedFile) error {
-	var members, rows, bodyBytes, authorBytes []float64
-	distinct, allRows := 0.0, 0.0
+	var members, rows, bodyBytes []float64
+	distinct, sumRows, sumAuthorBytes := 0.0, 0.0, 0.0
 	for _, is := range sf.Issues {
 		if is.Project != "LGA" {
 			continue
@@ -409,34 +398,30 @@ func refsShape(ctx context.Context, a *api, sf seedFile) error {
 		members = append(members, float64(len(answer.Members)))
 		rows = append(rows, float64(r))
 		bodyBytes = append(bodyBytes, float64(len(res.body)))
-		authorBytes = append(authorBytes, float64(ab))
 		distinct += float64(len(seen))
-		allRows += float64(r)
+		sumRows += float64(r)
+		sumAuthorBytes += float64(ab)
 	}
 	if len(rows) == 0 {
 		return errors.New("the seed holds no LGA issue")
 	}
-	var sumRows, sumAB float64
-	for i := range rows {
-		sumRows += rows[i]
-		sumAB += authorBytes[i]
-	}
-	meanRows := sumRows / float64(len(rows))
-	share := distinct / allRows
-	perRow := sumAB / sumRows
+	meanRows := refMean(rows)
+	share := distinct / sumRows
+	perRow := sumAuthorBytes / sumRows
 	fmt.Printf("issues %d (LGA), empty %d\n", len(rows), refCountZero(members))
 	fmt.Printf("%-16s %10s %10s %10s %12s\n", "per issue", "p50", "p90", "max", "mean")
 	for _, s := range []struct {
 		name string
 		v    []float64
 	}{{"members", members}, {"version rows", rows}, {"response bytes", bodyBytes}} {
-		fmt.Printf("%-16s %10.0f %10.0f %10.0f %12.1f\n", s.name, refPct(s.v, 50), refPct(s.v, 90), refPct(s.v, 100), refMean(s.v))
+		st := mkStat(s.v)
+		fmt.Printf("%-16s %10.0f %10.0f %10.0f %12.1f\n", s.name, st.P50, st.P90, st.Max, refMean(s.v))
 	}
 	fmt.Printf("distinct author lists / version rows: %.4f (sum over issues of distinct per issue / rows)\n", share)
 	fmt.Printf("author bytes per row: %.1f\n", perRow)
-	ok := refWithin(meanRows, refProdRows, refShapeBand) && share >= refDistinctLow && share <= refDistinctHigh && refWithin(perRow, refProdBytes, refShapeBand)
+	ok := refWithin(meanRows, refProdRows, refShapeBand) && share >= refDistinctLow && share <= refDistinctHigh && refWithin(perRow, refAuthorBytes, refShapeBand)
 	fmt.Printf("shape check: mean rows %.0f vs %d (±%.0f%%), distinct share %.4f in [%.2f,%.2f], author bytes/row %.1f vs %d (±%.0f%%): %s\n",
-		meanRows, refProdRows, refShapeBand*100, share, refDistinctLow, refDistinctHigh, perRow, refProdBytes, refShapeBand*100,
+		meanRows, refProdRows, refShapeBand*100, share, refDistinctLow, refDistinctHigh, perRow, refAuthorBytes, refShapeBand*100,
 		map[bool]string{true: "PASS", false: "FAIL"}[ok])
 	if !ok {
 		return errors.New("the references answers do not have production's shape")
@@ -465,7 +450,8 @@ func runRefsFetch(args []string) error {
 }
 
 // refsFetch records the references answer of every seeded issue, in key order, so two builds'
-// answers compare byte for byte.
+// answers compare byte for byte. It records every status, and counts the answers that have
+// members among the 200s alone: another status carries no answer to count.
 func refsFetch(ctx context.Context, a *api, sf seedFile, out string) error {
 	keys := make([]string, 0, len(sf.Issues))
 	for _, is := range sf.Issues {
@@ -473,52 +459,30 @@ func refsFetch(ctx context.Context, a *api, sf seedFile, out string) error {
 	}
 	sort.Strings(keys)
 	var tsv strings.Builder
-	nonEmpty, total := 0, 0
+	nonEmpty, notOK, total := 0, 0, 0
 	for _, key := range keys {
-		status, etag, body, err := refsGet(ctx, a, "/api/v1/issues/"+key+"/references")
-		if err != nil {
-			return fmt.Errorf("references of %s: %w", key, err)
+		res := a.call(ctx, "GET", "/api/v1/issues/"+key+"/references", who{}, nil)
+		if res.err != nil {
+			return fmt.Errorf("references of %s: %w", key, res.err)
 		}
-		sum := sha256.Sum256(body)
-		fmt.Fprintf(&tsv, "%s\t%d\t%s\t%s\t%d\n", key, status, etag, hex.EncodeToString(sum[:]), len(body))
-		total += len(body)
-		if !bytes.HasPrefix(body, []byte(`{"members":[]`)) {
+		sum := sha256.Sum256(res.body)
+		fmt.Fprintf(&tsv, "%s\t%d\t%s\t%s\t%d\n", key, res.status, res.etag, hex.EncodeToString(sum[:]), len(res.body))
+		total += len(res.body)
+		switch {
+		case res.status != http.StatusOK:
+			notOK++
+		case !bytes.HasPrefix(res.body, []byte(`{"members":[]`)):
 			nonEmpty++
 		}
 	}
 	if err := os.WriteFile(out, []byte(tsv.String()), 0o644); err != nil {
 		return err
 	}
-	fmt.Printf("fetched %d issues, %d with members, %d bytes in all -> %s\n", len(keys), nonEmpty, total, out)
+	fmt.Printf("fetched %d issues, %d with members, %d not 200, %d bytes in all -> %s\n", len(keys), nonEmpty, notOK, total, out)
 	return nil
 }
 
-// refsGet reads one answer with its ETag, over the package client's own connections: a
-// callResult carries the body alone, and the fetch records the header too.
-func refsGet(ctx context.Context, a *api, path string) (int, string, []byte, error) {
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, a.base+path, nil)
-	if err != nil {
-		return 0, "", nil, err
-	}
-	req.Header.Set("Accept", "application/json")
-	req.Header.Set("Authorization", "Bearer "+a.token)
-	resp, err := a.client.Do(req)
-	if err != nil {
-		return 0, "", nil, err
-	}
-	defer resp.Body.Close()
-	body, err := io.ReadAll(resp.Body)
-	return resp.StatusCode, resp.Header.Get("ETag"), body, err
-}
-
-// refPct is percentile p of v by nearest rank over a copy, and refMean its mean. The shape check
-// reads a few hundred values, so the copy costs nothing.
-func refPct(v []float64, p int) float64 {
-	s := append([]float64(nil), v...)
-	sort.Float64s(s)
-	return s[(len(s)-1)*p/100]
-}
-
+// refMean is the mean of v. The shape check's percentiles come from mkStat (sample.go).
 func refMean(v []float64) float64 {
 	t := 0.0
 	for _, x := range v {

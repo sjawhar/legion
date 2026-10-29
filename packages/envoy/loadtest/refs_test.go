@@ -1,10 +1,13 @@
 package main
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"testing"
 )
@@ -63,7 +66,7 @@ func TestMakeRefPlan(t *testing.T) {
 		switch project {
 		case "LGB", "LGC", "LGD":
 		default:
-			t.Fatalf("target %d lives on %s; a target lives on an issue of LGB, LGC or LGD, which no step writes to", target.n, target.issue)
+			t.Fatalf("target %d lives on %s; a target lives on an issue of LGB, LGC or LGD, where no step writes a %s document", target.n, target.issue, refTargetPrefix+"*")
 		}
 		if len(target.writers) < 1 || len(target.writers) > 3 {
 			t.Fatalf("target %d has %d writers, want 1 to 3", target.n, len(target.writers))
@@ -83,11 +86,10 @@ func TestMakeRefPlan(t *testing.T) {
 	if versions != 19471 {
 		t.Errorf("the plan writes %d target versions, want 19,471", versions)
 	}
-	cited, cites := 0, 0
+	cited := 0
 	for _, key := range p.lga {
-		if n := len(p.sources[key]); n > 0 {
+		if len(p.sources[key]) > 0 {
 			cited++
-			cites += n
 		}
 	}
 	if cited != 310 {
@@ -96,9 +98,35 @@ func TestMakeRefPlan(t *testing.T) {
 	if len(p.lga) != 400 || len(p.sources) != 400 {
 		t.Errorf("the plan holds %d LGA issues and %d source entries, want 400 of each", len(p.lga), len(p.sources))
 	}
-	if cites == 0 {
-		t.Error("no LGA issue cites a target")
+	if digest := refPlanDigest(p); digest != refPlanSHA256 {
+		t.Errorf("the plan hashes to %s, want %s: a draw changed, so this seed's references differ from the ones measured", digest, refPlanSHA256)
 	}
+}
+
+// refPlanSHA256 is refPlanDigest of the plan the committed sample and seed draw. It pins the whole
+// plan, not its totals: a change of which targets an issue cites, or of which writer writes a
+// version, moves it while every total stays.
+const refPlanSHA256 = "7414809c6e1617d6a0e25749a60ae834966a410ca911d691ff4747b4a756279b"
+
+// refPlanDigest is a sha256 over the whole plan in a fixed serialization: every target's number,
+// issue, version count, writers and writer of each version, in target order; then every LGA key,
+// in sorted order, with the targets it cites, sorted.
+func refPlanDigest(p refPlan) string {
+	h := sha256.New()
+	for _, t := range p.targets {
+		fmt.Fprintf(h, "target %d %s %d %v %v\n", t.n, t.issue, t.versions, t.writers, t.order)
+	}
+	keys := make([]string, 0, len(p.sources))
+	for key := range p.sources {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+	for _, key := range keys {
+		cited := append([]int(nil), p.sources[key]...)
+		sort.Ints(cited)
+		fmt.Fprintf(h, "source %s %v\n", key, cited)
+	}
+	return hex.EncodeToString(h.Sum(nil))
 }
 
 // TestRefWriterAuthorBytes pins the padding: a version row's author list must encode to the bytes

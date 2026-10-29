@@ -315,7 +315,8 @@ more for the references (2,232 s for the whole seed on 2026-10-29). It does thes
    `$LOADTEST_ROOT/logs/seed-refs.log`), so `GET /api/v1/issues/{key}/references` does the work it
    does in production:
    - 1,000 target documents, `ref-target-<n>.md`, on the 600 issues of `LGB`, `LGC` and `LGD`:
-     target n on the n mod 600-th of them, in key order. No step writes to those three projects.
+     target n on the n mod 600-th of them, in key order. No step writes a `ref-target-*` document,
+     so the targets stay as the seed wrote them.
    - 19,471 versions in all. Each target's version count is drawn from
      `refs-sample-2026-10-27.json`, the per-member version counts of 160 production issues'
      references answers on 2026-10-27. Each target has 1 to 3 writers from a pool of 600, and the
@@ -389,27 +390,35 @@ The generator's revision tokens start at `r0`, because the database is at the se
 ## Before and after across commits
 
 ```bash
-export LOADTEST_SRC=<older checkout>
-packages/envoy/loadtest/stack.sh setup        # build the older Dispatch, listener and loadgen
+packages/envoy/loadtest/stack.sh setup         # build this checkout's Dispatch, listener and loadgen
 packages/envoy/loadtest/stack.sh start
-packages/envoy/loadtest/stack.sh seed --force  # seed with the older build
-packages/envoy/loadtest/run-step.sh step-1x-before --events 4 --sessions 400 --requests 60
-LOADTEST_SRC=<newer checkout> packages/envoy/loadtest/run-step.sh step-1x-after \
+packages/envoy/loadtest/stack.sh seed --force  # seed with a build that has loadgen seed-refs
+LOADTEST_SRC=<older checkout> packages/envoy/loadtest/run-step.sh step-1x-before \
   --events 4 --sessions 400 --requests 60
+packages/envoy/loadtest/run-step.sh step-1x-after --events 4 --sessions 400 --requests 60
 ```
 
+Seed with a checkout that has `loadgen seed-refs`. The references are part of the seed, and a
+loadgen older than them cannot write them: `stack.sh seed` reads that loadgen's usage and refuses
+to drop the template, naming the cause. The references add no Dispatch migration, so a seed with
+them sits at the migration level a seed without them sat at, and an older build's steps run on it.
+
 `stack.sh seed` builds nothing. It uses the binaries of the last `setup`, so run `setup` with the
-older checkout first. `setup` builds `loadgen` from `LOADTEST_SRC` too, so the older checkout must
+checkout that seeds first. `setup` builds `loadgen` from `LOADTEST_SRC` too, so that checkout must
 hold this package.
 
-A newer build migrates the restored copy forward when Dispatch starts. An older build cannot start
-on a seed that a newer build made. `run-step.sh` compares the highest migration file in the
-checkout (`packages/envoy/internal/dispatch/store/migrations`) with `seed.meta.json`. It refuses a
-build that is older than the seed, and names both levels. For a build that is newer than the seed,
-it prints a note: a backfill that the new migrations start runs inside each step of that build.
-For example, a build at migration 0128 on a seed at 0120 indexes the blocks of all 1,000 specs in
-every step. To measure one build alone, seed with it (`stack.sh seed --force`). `meta.json`
-records the build commit and whether the tree had uncommitted changes.
+`run-step.sh` with another `LOADTEST_SRC` prepares the stack for that checkout: it runs `setup`,
+which builds that checkout's Dispatch, listener and loadgen into `$LOADTEST_ROOT/bin` over the ones
+the seed used, `start` and `seed`, which does nothing while the template and `seed.meta.json` exist.
+Then it compares the highest migration file in that checkout
+(`packages/envoy/internal/dispatch/store/migrations`) with `seed.meta.json`. It refuses a build
+that is older than the seed, and names both levels; a build at the seed's level runs. For a build
+that is newer than the seed, it prints a note: a backfill that the new migrations start runs inside
+each step of that build. For example, a build at migration 0128 on a seed at 0120 indexes the
+blocks of all 1,000 specs in every step. A newer build migrates the restored copy forward when
+Dispatch starts; an older build cannot start on a seed that a newer build made. To measure one
+build alone, seed with it (`stack.sh seed --force`, with a checkout that has `seed-refs`).
+`meta.json` records the build commit and whether the tree had uncommitted changes.
 
 Committed rate at 1x varies from run to run. Across the runs of 2026-10-27 it was 0.34 to 2.14
 events/s. The lowest ran a build at migration 0128 on a seed at 0120, with the block-index backfill

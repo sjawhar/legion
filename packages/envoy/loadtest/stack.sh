@@ -507,6 +507,15 @@ cmd_seed() {
     note "already seeded: database dispatch_seed and $SEED_META exist (stack.sh seed --force reseeds)"
     return 0
   fi
+  # This drops the template, seed.meta.json and seed.json below, and reaches seed-refs only after
+  # the 14 to 27 minutes of loadgen seed. A loadgen built from a checkout older than the references
+  # (README.md, "Before and after across commits") knows no seed-refs and would exit 2 there, with
+  # the old seed already gone, so its usage is read first. loadgen with no argument prints that
+  # usage and exits 2, which is not a failure here.
+  local loadgen_usage
+  loadgen_usage=$(loadgen 2>&1) || true
+  grep -q '^  seed-refs ' <<<"$loadgen_usage" ||
+    die "the loadgen at $BIN was built from a checkout that has no seed-refs; seed with a loadgen that has it, then run the older build on that seed"
   local started=$SECONDS
   stop_one dispatch
   sql postgres 'drop database if exists dispatch' >/dev/null
@@ -516,7 +525,7 @@ cmd_seed() {
   trap 'stop_one dispatch' EXIT
   start_dispatch "$LOGS/dispatch-seed.log"
 
-  note "seeding through Dispatch (18 to 27 min on 2 vCPU); log $LOGS/seed.log"
+  note "seeding through Dispatch (14 to 27 min on 2 vCPU); log $LOGS/seed.log"
   loadgen seed -out "$ROOT/seed.json" 2>&1 | tee "$LOGS/seed.log" >&2
 
   note "writing production-shaped references (about 23 min on 2 vCPU); log $LOGS/seed-refs.log"

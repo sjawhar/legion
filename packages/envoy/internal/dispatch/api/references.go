@@ -243,8 +243,8 @@ func (s *server) documentMentionExcerpts(ctx context.Context, query refs.Query, 
 }
 
 // getIssueReferences answers an issue's reference closure. ?versions=latest leaves each member's
-// artifact.versions holding only its latest version, under its own ETag; absent or all is the
-// full answer. A repeated versions is refused rather than read by its first value.
+// artifact.versions holding only its latest version, under its own ETag; absent, empty or all is
+// the full answer. A repeated versions is refused rather than read by its first value.
 func (s *server) getIssueReferences(w http.ResponseWriter, r *http.Request) {
 	if !s.requireAuthenticated(w, r) {
 		return
