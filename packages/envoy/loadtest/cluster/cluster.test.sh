@@ -292,7 +292,12 @@ case $verb in
         # Each step's meta.json starts now, so the steps' start order is the order they ran.
         jq --arg start "$(date -u +%Y-%m-%dT%H:%M:%S.%NZ)" '.start = $start' "$FAKE_DIR/stepdir/meta.json" >"$FAKE_DIR/meta.tmp"
         mv "$FAKE_DIR/meta.tmp" "$FAKE_DIR/stepdir/meta.json"
-        tar -C "$FAKE_DIR/stepdir" -cf - .
+        # The copy-back streams everything but heap.txt, compressed; heap.txt comes separately.
+        tar -C "$FAKE_DIR/stepdir" --exclude=./heap.txt -czf - .
+        ;;
+      "sh -c if test -f "*) if [ -f "$FAKE_DIR/stepdir/heap.txt" ]; then echo yes; else echo no; fi ;;
+      "gzip -1 -c /work/steps/"*)
+        gzip -1 -c "$FAKE_DIR/stepdir/heap.txt"
         ;;
       chmod* | mkdir*) ;;
       # The stored-order check: the runner's own script, on the fake runner's /work (where cp put
@@ -644,6 +649,7 @@ readonly commit_bt=abababababababababababababababababababab
 printf '%s\n' packages/envoy/go.mod packages/envoy/cmd/dispatch/main.go packages/envoy/loadtest/browsertype/main.go >"$fake/git-trees/$commit_bt"
 jq -n '{window_start: "2026-10-28T10:00:00Z", window_end: "2026-10-28T10:01:00Z"}' >"$fake/stepdir/meta.json"
 echo '{"config": {"step": "fake"}}' >"$fake/stepdir/summary.json"
+printf 'heap profile: fake\n# runtime.MemStats\n# HeapInuse = 1\n' >"$fake/stepdir/heap.txt"
 
 # The replay's fixture: two bundle parts and one seed dump part, served by the fake curl by slug.
 mkdir -p "$fake/parts"
@@ -924,6 +930,10 @@ for f in reset.json copy-meta.json meta.json summary.json postgres-settings.txt 
   [ -f "$run_dir/steps/smoke/$f" ] || fail "the step directory has no $f"
 done
 [ ! -f "$run_dir/steps/smoke/step-failed.json" ] || fail "a step with no restart was marked failed"
+# heap.txt comes back by its own compressed stream (one tar of a 1 GB heap.txt once ended early),
+# byte for byte, and the step's other files by the first.
+cmp -s "$fake/stepdir/heap.txt" "$run_dir/steps/smoke/heap.txt" || fail "heap.txt did not come back from the runner"
+grep -q -- 'gzip -1 -c /work/steps/smoke/heap.txt' "$fake/kubectl.log" || fail "heap.txt did not come back by its own stream"
 start=$(grep '^step-smoke ' "$fake/runner-starts") || fail "the step started no loadgen run in the runner"
 for want in "run -allow-foreign" "-events 4 " "-sessions 400 " "-requests 60 " "-duration 1m " "-warmup 30s " "-grace 20s " \
   "-rng-seed 1 " "-copy-meta /work/meta/smoke.json" "-nats-server-name nats-0" "-pg postgres://dispatch:"; do

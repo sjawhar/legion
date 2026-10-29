@@ -1896,6 +1896,35 @@ run_step() {
   note "step $name done: $dir"
 }
 
+# runner_copy_back NAME DIR: the runner's /work/steps/NAME into DIR, in two gzip-compressed
+# streams: every file but heap.txt first, then heap.txt alone. With typing at 10x, heap.txt (the
+# step-end heap profile in text form) passed 1 GB, and one uncompressed tar stream of it through
+# kubectl exec ended early ("Unexpected EOF in archive", run lt-20261029t115927-655c, r16-typing),
+# which lost meta.json and summary.json with it. Each stream is tried twice; a failure of either
+# leaves the step in the runner, so nothing is removed there.
+runner_copy_back() {
+  local name=$1 dir=$2 src="/work/steps/$1" try
+  for try in 1 2; do
+    if kube exec runner -c runner -- tar -C "$src" --exclude=./heap.txt -czf - . | tar -C "$dir" -xzf -; then break; fi
+    ((try < 2)) || return 1
+    note "step $name: copying $src back failed (try $try of 2); retrying"
+  done
+  local has
+  # shellcheck disable=SC2016 # expanded by the runner's sh
+  has=$(kube_read exec runner -c runner -- sh -c 'if test -f "$1"; then echo yes; else echo no; fi' sh "$src/heap.txt") ||
+    return 1
+  [ "$has" = yes ] || return 0
+  for try in 1 2; do
+    if kube exec runner -c runner -- gzip -1 -c "$src/heap.txt" | gzip -d >"$dir/heap.txt.part" &&
+      mv -- "$dir/heap.txt.part" "$dir/heap.txt"; then
+      return 0
+    fi
+    rm -f -- "$dir/heap.txt.part"
+    note "step $name: copying $src/heap.txt back failed (try $try of 2)"
+  done
+  return 1
+}
+
 # run_in_runner NAME DIR JOB SECONDS CMD...: a step's loadgen run CMD as the runner job JOB (at
 # most SECONDS), with Postgres's write-out counters before and after it (pg-stats-before.json,
 # pg-stats-after.json) and, with --typing, browser typing from just before it (typing_start) until
@@ -1914,11 +1943,11 @@ run_in_runner() {
   rc=$(runner_wait "$job" "$seconds" "$dir")
   pg_stats "$dir/pg-stats-after.json"
   [ ! -f "$dir/$job.log" ] || mv -- "$dir/$job.log" "$dir/loadgen.out"
-  if kube exec runner -c runner -- tar -C "/work/steps/$name" -cf - . | tar -C "$dir" -xf -; then
+  if runner_copy_back "$name" "$dir"; then
     kube exec runner -c runner -- rm -rf "/work/steps/$name" "/work/meta/$name.json" ||
       note "step $name: removing /work/steps/$name from the runner failed"
   else
-    note "step $name: copying /work/steps/$name back from the runner failed"
+    note "step $name: copying /work/steps/$name back from the runner failed; it stays in the runner"
   fi
 
   container_snapshot "$dir/containers-after.tsv"
