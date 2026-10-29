@@ -501,6 +501,8 @@ every operation that changes the document - `ReplaceText`, `MarkQuote`, `SetBloc
 Main's own `applyLive`/`applyJoined` fold (#1693) removed the unjoined branch this used to carve out as a tests-only exception, which walked the room's own live document directly inside `Server.Apply`, holding no lock across its callback, and so could read a peer's write halfway through as a tree outside the schema;
 every write now reads through its own transaction's fork instead, which is always a consistent copy no peer's concurrent write can tear.
 A tree a read returns shares no map or slice with the document it was read from (`pmdoc.Read` copies each mark's attributes and every list or object an attribute holds), so a reader that edits its tree changes nothing a later read of the replica meets (`TestEditingALiveReadsTreeChangesNoLaterRead`).
+Inside a write transaction, `docTree` and a version's capture take the write's own rendering in place of reading the fork whenever it describes the fork (`liveWrite.rendering`), so a caller of `docTree` must not change the tree it gets;
+`heldTree` still reads the fork and returns a tree its reader owns.
 
 A read takes up to three locks, in one order:
 the room's state lock; then the replica's, which a read only tries; then the live document's, for the copy's encode.
