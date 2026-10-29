@@ -2,66 +2,85 @@
   "schemaVersion": 1,
   "phase": "test",
   "issue": "INFRA-228",
-  "completed": "2026-10-29T14:02:00Z",
-  "round": 3,
-  "reCheck": {
-    "verifiedHead": "4d4f19d115c97886e215f8df110b2ee00e2c1a28",
-    "newHead": "fe5b55fb90e34b5b4a0338d35da86a7857d50654",
+  "completed": "2026-10-29T14:52:00Z",
+  "round": 4,
+  "scope": {
+    "verifiedHeadBefore": "4d4f19d115c97886e215f8df110b2ee00e2c1a28",
+    "newHead": "f75187637ec232292670adba200582071562efd7",
     "fingerprintBefore": "f70a6f99640c36db0e93a23aa90289f1afec6dee371df4f939226a5af5eae3ad",
-    "fingerprintAfter": "f70a6f99640c36db0e93a23aa90289f1afec6dee371df4f939226a5af5eae3ad",
-    "result": "unchanged, bare gates only",
-    "why": "Round 3 is one commit, fe5b55fb, touching only .legion/INFRA-228/implement.json (6 insertions, 5 deletions): proof row 6's negativeControl no longer quotes the host, its observed line is restated, a round-3 deviation note is added, and round goes to 3. No file of the product moved, so the fingerprint computed over '~(.legion | docs/solutions)' is the same hash at both heads and round 2's real-surface verification stands as it was recorded. The push is handoff-only and carries the skip-checks: true trailer in the right shape (last line, two empty lines above it)."
+    "fingerprintAfter": "034f3db92c3a091c710e172ab1751fce532b7aac5d4aa5d3517f03cddc4ef191",
+    "result": "changed, so a full round",
+    "whatChanged": "The reviewer's prose commit 95adec64 (docs/deployment.md, docs/kubernetes.md) and the implementer's commit bcb045fa answering the review's two important findings: packages/envoy/internal/broker/oauth/claims_doc_test.go rewritten, 'docs/kubernetes.md' added to ci.yaml's envoy_go filter, and the RULES entry for claims_doc_test.go added to .github/scripts/ci_job_reads.py.",
+    "notRedriven": "The broker binary was not rebuilt and the live exchange was not driven again. Between 4d4f19d1, where round 2 drove it, and this head the only file under packages/envoy that changed is internal/broker/oauth/claims_doc_test.go, which the binary does not build, and no merge brought new base code in, so round 2's exchange proof still names the code that runs."
   },
   "implementerProof": {
     "verdict": "verified",
-    "how": "Round 3 carries no new proof of its own and needs none: its whole change is the handoff text round 2 failed on, and the fingerprint shows the product untouched. The implement handoff's row 6 'observed' now claims check-private-names passes over the whole tree with the handoff included, and that is the claim this round checks: it does, exit 0 over 6224 files, run at this head. Round 2's verified proofs are unchanged and are not re-driven; the bare gates below are what this round adds."
+    "how": "Round 4's implement handoff claims the two important review findings are fixed. Each was checked by removing the fix and watching the repository's own check reproduce the gap the review named. Finding 1 (the fence never runs on the edit it exists to stop): check-ci-filters.sh passes over 23 gates at this head, and with the one filter line removed it exits 1 with '::error file=docs/kubernetes.md::envoy-go reads docs/kubernetes.md, which its filter envoy_go does not match, so a change to it skips the job: internal/broker/oauth/claims_doc_test.go:161'. Finding 2 (the code side was a hand-typed list): the fence now calls provider.decide for a pod subject token and a machine access token and unions the keys written into session.Extra, so a fifth claim added in exchange.go fails it and a dropped ClaimPerson fails it, both directions that passed before. The reviewer's own prose commit was checked against the code it cites. Evidence: https://github.com/sjawhar/legion/pull/2503#issuecomment-6499952101",
+    "priorRounds": "Round 2's seven proofs at 4d4f19d1 (production Dispatch, both projected Kubernetes tokens refused, three production broker refusals, the rebuilt broker binary's exchange and introspection with five controls, the fence under six mutations, the citation sweep, the skills guard) and round 1's tester-to-architect credential digest stand; the part of them this round's diff can touch is re-driven above."
   },
   "failed": 0,
   "failures": [],
-  "proof": [
+  "observations": [
     {
-      "criterion": "Tester round 2's one failure, now closed: root spec v17 acceptance line 11 and plan section 7 -- .github/scripts/check-private-names.sh passes, as the required lint job runs it, with no text of the tree naming a Tailscale MagicDNS host outside the reserved placeholder.",
-      "surface": "the repository's own check, run over the whole issue workspace at the round-3 head",
-      "command": "cd -- \"$LEGION_WORKSPACE\" && .github/scripts/check-private-names.sh; echo \"exit=$?\"",
-      "observed": "exit=0, 'check-private-names: no file or path names the private deployment repository or the company, and no text names a private internal host or a Tailscale MagicDNS host (6224 files in the repository)'. The line the check named at round 2 (.legion/INFRA-228/implement.json:54) now describes the control's host instead of quoting it, and nothing else of the tree changed. The same check also passes over this handoff, which was scanned as a tracked file before it was committed.",
-      "headSha": "fe5b55fb90e34b5b4a0338d35da86a7857d50654",
-      "negativeControl": "the refusal this check produces is the one it produced at round 2, at the previous head and on the same tree but for that one field: exit 1 with '::error file=.legion/INFRA-228/implement.json,line=54::… names a Tailscale MagicDNS host' and the remediation block. The field is the only difference between the two runs, so the pass is that field's and not a check that stopped checking."
-    },
-    {
-      "criterion": "Bare gate, the smoke check: the documented operator command and the one code artifact still behave at the new head.",
-      "surface": "production Dispatch from the tester container, and the repository's Go and Bun suites for the two files this change touches",
-      "command": "dispatch whoami; cd packages/envoy && go test ./internal/broker/oauth/ -run TestTheDocumentedClaimsAreTheClaimsAnExchangedTokenCarries -count=1; cd ../pi-legion && bun test src/skills-guard.test.ts",
-      "observed": "'Session 01a187bc-f2ec-74d6-a202-a42d37d50c1b runs under the shared token: no owner, …' exit 0; ok github.com/sjawhar/envoy/internal/broker/oauth 0.034s; skills guard 13 pass, 0 fail.",
-      "headSha": "fe5b55fb90e34b5b4a0338d35da86a7857d50654",
-      "negativeControl": "DISPATCH_TOKEN_FILE pointed at a copy of the credential with one byte flipped (only the differing-byte count printed, 1): 'invalid bearer token', exit 1."
-    },
-    {
-      "criterion": "The handoff ledger itself passes the required lint job's other components, so no head between here and retro's removal of .legion/<issue>/ carries a latent red of this class.",
-      "surface": "the repository's Biome configuration and the check over the ledger",
-      "command": "bunx biome check .legion/; grep -n '.legion' biome.json",
-      "observed": "exit 0, and biome.json line 19 carries '!!.legion', so Biome does not read the ledger at all; check-pr-text's rule finds no host in the pull request's title, body or any comment. With the private-names finding closed, there is no tree between this head and retro's removal of .legion/INFRA-228/ that the required lint job would refuse.",
-      "headSha": "fe5b55fb90e34b5b4a0338d35da86a7857d50654",
-      "negativeControl": "the private-names component of the same job is the control: it did refuse this ledger one commit ago, so 'lint passes over .legion/' is a measured result for each component rather than an assumption that the job ignores the directory."
+      "severity": "for the reviewer to require or waive; fails nothing",
+      "what": "The minor anchor fix lost one check the old fence had. The old anchor was the sentence 'An issued token carries these claims and no others:', so rewording it failed the test (round 1, control D). The new anchor is the section heading, and that same mutation now passes, while the test's own failure message still quotes the sentence as the thing a resource server believes. The promise can therefore be reworded or deleted with the fence green and that message no longer true.",
+      "why it is not a failure": "The acceptance criterion is that the claim list and the code agree, and it holds and is now better held: the code side is derived from decide, duplicates fail, and a renamed heading or a vanished list fails loudly. Nothing is red, and the direction that matters -- the list drifting from the code -- is covered in both directions.",
+      "fix if wanted": "The reviewer's objection to the old anchor was its cost (flattenKeepingLines, lineEnds, the offset-to-line step), and that does not apply to restoring the check alone: the sentence is a whole line of its own at docs/kubernetes.md:5946, so one slices.Index(lines, claimsDocPromise) beside the heading lookup brings it back with no flattening. One line, in a file this pull request owns.",
+      "noRedTest": "None is possible: the sentence is present at this head, so a test of that invariant would be green today. The mutation above is the evidence instead."
     }
   ],
-  "roundTwoProofStands": {
-    "head": "4d4f19d115c97886e215f8df110b2ee00e2c1a28",
-    "what": "The seven proof entries of round 2's handoff, recorded at commit 47e95e51b41b: the role credential naming nobody on production Dispatch, both of the pod's projected Kubernetes tokens refused by Dispatch, the production broker's three subject-token refusals, the broker binary rebuilt from the merged tree issuing a DPoP-bound token carrying exactly session, person, project_scope and project with five negative controls, the claim-list fence under six mutations, the full citation sweep, and the skills guard. The fingerprint is identical at this head, so none of it is repeated.",
-    "roundOne": "Round 1's tester-to-architect credential-digest comparison ('length=48', 'equal'), at head c1823f29, which no later head disturbs."
-  },
+  "proof": [
+    {
+      "criterion": "Review finding 1, fixed: a pull request that edits only the claim list selects the job that runs its fence, so it cannot merge green and break the next envoy pull request.",
+      "surface": "the repository's own CI-selection check, .github/scripts/check-ci-filters.sh (its engine ci_filter_coverage.py), run over the tree at this head",
+      "command": "PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=.github/scripts python -c 'import sys, ci_filter_coverage; sys.exit(ci_filter_coverage.main())' (the script's own last line; pyyaml supplied by uv run --with pyyaml==6.0.2, which the pod's python lacks)",
+      "observed": "exit 0: 'every ci.yaml filter matches every file its job reads (23 gates), and every PUSH_WORKFLOWS workflow's on.push.paths equals its filter (1)', with 'ci-filters: 2503 files, 0 uncovered' and 'envoy-go: 2091 files, 0 uncovered' among them. The registry entry's citation is right: claims_doc_test.go:161 is the os.ReadFile of docs/kubernetes.md.",
+      "headSha": "f75187637ec232292670adba200582071562efd7",
+      "negativeControl": "the one '- docs/kubernetes.md' line removed from ci.yaml's envoy_go filter, nothing else touched: exit 1, 'envoy-go: 2091 files, 1 uncovered (filter envoy_go)' and '::error file=docs/kubernetes.md::envoy-go reads docs/kubernetes.md, which its filter envoy_go does not match, so a change to it skips the job: internal/broker/oauth/claims_doc_test.go:161'. ci.yaml restored; jj diff --stat empty. So the registry entry and the filter line bind, and the check names this gap when either is missing."
+    },
+    {
+      "criterion": "Review finding 2, fixed: a claim written in decide that the document does not list fails the fence, which the hand-typed list let pass.",
+      "surface": "the repository's Go suite for packages/envoy/internal/broker/oauth, with the non-test source mutated",
+      "command": "go test -c -o oauth.test ./internal/broker/oauth/ after each mutation of packages/envoy/internal/broker/oauth/exchange.go, then the test binary with -test.run TestTheDocumentedClaimsAreTheClaimsAnExchangedTokenCarries",
+      "observed": "decide writing a fifth claim (session.Extra[\"tenant\"] beside ClaimPerson): FAIL, 'documented: person, project, project_scope, session / issued: person, project, project_scope, session, tenant'. decide no longer writing person: FAIL, 'issued: project, project_scope, session'. Unmutated: PASS. exchange.go restored after each; jj diff --stat empty.",
+      "headSha": "f75187637ec232292670adba200582071562efd7",
+      "negativeControl": "the two mutations are themselves the control, and they are the direction the review called dangerous: at round 3's head the same fifth claim passed, because the code side was the hand-typed constant list."
+    },
+    {
+      "criterion": "Plan section 4 row 5 / D6 still holds on the document side, and the new heading anchor does not read the wrong list.",
+      "surface": "the same test binary against seven mutations of docs/kubernetes.md",
+      "command": "the test binary run once per mutation, the file restored after each",
+      "observed": "unmutated PASS; the `project` bullet deleted FAIL naming project; an `extra` bullet added FAIL naming extra; the `person` bullet duplicated FAIL ('documented: person, person, …', which the old test's unsorted compare would have let through and which the review asked slices.Equal to catch); the heading renamed FAIL naming the heading line; a colon in place of the em dash FAIL naming line 5951; the whole list deleted FAIL ('reaches \"#### Network shares\" under \"#### The Dispatch identity the broker can issue\" with no bullet list between them'); an unrelated bullet list inserted between the heading and the claim list FAIL ('documented: note'), so reading 'the section's first list' fails loudly rather than checking the wrong one. docs/kubernetes.md restored after each; jj diff --stat empty.",
+      "headSha": "f75187637ec232292670adba200582071562efd7",
+      "negativeControl": "the seven mutations are the control; the one that now passes is recorded under observations, not here."
+    },
+    {
+      "criterion": "The reviewer's prose commit 95adec64 is true of the code it cites: the bearer names nobody only when it is a shared agent token, an operator-launched controller differs only in the file it reads, a session name an entry fixes is held with no expiry, and the projected token is a service-account token.",
+      "surface": "the issue workspace at this head, read with grep and the files themselves",
+      "command": "read packages/envoy/internal/dispatch/api/server.go:835-885, packages/envoy-client/src/dispatch-execute.ts around the whoami answer, packages/envoy/internal/broker/oauthstore/exchange.go:172,208 and heldByConfiguration",
+      "observed": "optionalActor (server.go:838) takes a shared agent token as model.Actor{} with no owner, a JWT-shaped bearer through serviceTokenActor, and any other through personalTokenActor, refusing one whose owner is nil -- so 'Dispatch takes any other bearer as a service token or a personal token, and then every role acts as that token's service or owner' is right. dispatch whoami has three branches, 'acts for <owner>', 'runs as service <subject>' and 'runs under the shared token', so 'tells the two apart' holds. BindSession is oauthstore/exchange.go:172 and ReserveSessions :208, and heldByConfiguration's comment says the expires_at an entry's name is written with is 'infinity'::timestamptz and that Sweep never selects it, which is the new sentence's 'with no expiry'. 'Kubernetes service-account token' is the correct narrowing against the launcher Secret the same page describes.",
+      "headSha": "f75187637ec232292670adba200582071562efd7",
+      "negativeControl": "the sweep finds a miss when there is one: at round 1 the same method reported one path and three symbols absent from what the prose then cited, which is what the architect's citation fixes answered."
+    },
+    {
+      "criterion": "The surfaces this change describes still answer as the prose says, and the repository's two other gates named in the plan pass.",
+      "surface": "production Dispatch and the production secrets broker from the tester container, and the repository's own checks",
+      "command": "dispatch whoami; two POSTs to <the broker host>/v1/oauth/token; .github/scripts/check-private-names.sh; cd packages/pi-legion && bun test src/skills-guard.test.ts; go test ./internal/broker/oauth/",
+      "observed": "'Session 01a187bc-f2ec-74d6-a202-a42d37d50c1b runs under the shared token: no owner, …' exit 0; the kubernetes-service-account subject type refused 'not supported as a subject_token_type' and the access-token type refused 'Token is not valid or has expired' at 14:46:42Z; check-private-names exit 0 over 6225 files; skills guard 13 pass, 0 fail; the fence PASS.",
+      "headSha": "f75187637ec232292670adba200582071562efd7",
+      "negativeControl": "the access-token refusal is the control for the other: it proves the endpoint serves the exchange, so 'not supported' names the issuer the deployment has not configured rather than a dead route. The private-names check's refusal was measured at round 2 and the fix at round 3."
+    }
+  ],
   "ciRead": {
-    "codeHead": "c718788b0868996730f1ce83feb88b5416d0e4ef",
-    "prHead": "fe5b55fb90e34b5b4a0338d35da86a7857d50654",
-    "readAt": "2026-10-29T13:58Z",
-    "state": "Running, not green yet. At the code head the CI router workflow is queued overall: 'changes' and 'pr-title' completed success, the skipped lanes (contracts, dispatch, envoy-client, envoy-plugin, pi-envoy, pi-shared, worker-image and the rest) completed skipped, 'docs' and 'dispatch-browser-multiprocess' in progress, and 'lint', 'typecheck', 'test', 'ci-filters', 'pi-legion', 'envoy-go', 'envoy-go-race', 'envoy-smoke', 'envoy-session-stall' and 'broker-multiprocess' queued. The two handoff heads 47e95e51 and fe5b55fb carry skip-checks: true and have no runs, as intended.",
-    "howThisWasHandled": "A queued or in-progress lane is read as such and never waited for: a required check that settles red sends the work back from testing on its own, and the reviewer reads the head's checks before it approves. The private-names component of lint is the one this round's failure lived in, and it was run here against the real tree rather than inferred from CI, because the code head CI runs on predates the corrected file.",
-    "rerunsByTheTester": "none"
+    "codeHead": "bcb045fa137cdb9a5a2c0f6d72e10b1b3d1e1391",
+    "codeHeadNote": "the implementer's code commit of this round; the pull request head f7518763 is its handoff and carries skip-checks: true",
+    "readAt": "2026-10-29T14:47Z",
+    "state": "The live run is the CI router workflow at the code head, queued since 14:36:32Z with its changes job queued, and PR Title queued beside it. The branch has had no settled CI run yet: the run at c718788b was cancelled when the reviewer pushed at 14:17 and the one at 48a5f229 was cancelled when the implementer pushed at 14:36, though lint, typecheck and ci-filters had completed success at c718788b before that cancel.",
+    "trailers": "Both code pushes of this round (95adec64 under the reviewer's handoff head 48a5f229, and bcb045fa) carry no skip-checks line, and the handoff head f7518763 carries one in the right shape, each as the rule asks.",
+    "rerunsByTheTester": "none; a queued or in-progress lane is read as such and never waited for."
   },
   "redTests": {
     "written": 0,
-    "why": "Round 2's failure was pinned by a test the repository already owns and the base requires, .github/scripts/check-private-names.sh, which refused the head and now passes it. Nothing is left unpinned."
-  },
-  "correction": {
-    "what": "Round 2's failures entry called the finding 'the same shape as the incident at dispatch://INFRA-416'. The architect corrected that on 2026-10-29T13:51Z: the host was a made-up tailnet, not this deployment's, so nothing private was ever in the branch history and the comparison does not hold. The clause is withdrawn; the failure itself stood on the required check alone and is now closed. Posted on the pull request at https://github.com/sjawhar/legion/pull/2503#issuecomment-6498521573, since testing was complete and the workspace read-only when the correction arrived."
+    "why": "No failure this round. The one observation cannot be pinned red: the sentence it concerns is present at this head, so a test of that invariant would pass today; the mutation recorded under observations is the evidence instead. Both review findings are pinned by checks the repository already owns and the base requires -- check-ci-filters.sh for the selection, and the fence itself for the claim list, now derived from decide."
   }
 }
