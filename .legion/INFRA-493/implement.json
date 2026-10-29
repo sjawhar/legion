@@ -1,0 +1,26 @@
+{
+  "schemaVersion": 1,
+  "phase": "implement",
+  "issue": "INFRA-493",
+  "completed": "2026-10-29T13:45:00Z",
+  "pullRequest": "https://github.com/sjawhar/legion/pull/2478",
+  "proof": [
+    {
+      "criterion": "Round 6: main merged forward at the route-count conflict with #2397; this branch's Dispatch route kept and main's added, and the package's tests pass",
+      "surface": "Dispatch's real API server (internal/dispatch/api) on a real Postgres, its route table and the app-installation route",
+      "command": "cd packages/envoy && go test -count=1 -timeout 30m ./internal/dispatch/api/ -skip TestIssueRanksStayOrderedPastLowercaseDigitsAndProductionShapedMoves",
+      "observed": "ok github.com/sjawhar/envoy/internal/dispatch/api 867.283s; the route-table test's pin is 144 (main's 143 plus GET /api/v1/github/app-installation/{owner}/{repo}) and passes; the AppInstallation tests pass",
+      "headSha": "6e7e399aad07e9b74c01689aa4838e84e9937953",
+      "negativeControl": "the pin at main's 143 or the branch's old 141 fails the route-table test (`routes() has 144 rows, want \u2026`); the skipped rank test needs a non-C collation this pod's Postgres lacks"
+    }
+  ],
+  "filesChanged": [
+    "packages/envoy/internal/dispatch/api/routes_table_test.go: registeredRoutes 144 (the merge's only conflict)"
+  ],
+  "deviations": [
+    "The earlier rounds' handoff was removed by retro (9526e9e9); this file records round 6 only, and the earlier proofs stand in git history at 7f8ec966 and in the PR body. Retro's docs/solutions files are unchanged."
+  ],
+  "openQuestions": [
+    "After main's #2316 the required check is ci-ok; it had not run at 6e7e399a when this was written."
+  ]
+}
