@@ -15,9 +15,10 @@ same step before and after its change, and compares the two rows.
 
 | File | What it is |
 | --- | --- |
-| `main.go` | The `loadgen` binary: subcommands `proxy`, `seed`, `run`, `tables`, `series-sessions`, `trigger-sql`, `box-busy` |
+| `main.go` | The `loadgen` binary: subcommands `proxy`, `seed`, `seed-refs`, `refs-shape`, `refs-fetch`, `run`, `tables`, `series-sessions`, `trigger-sql`, `box-busy` |
 | `api.go` | The Dispatch HTTP client, with the request trace that gives the arrival time |
 | `seed.go` | The seed: 4 projects, 1,000 issues and 8,000 comments through Dispatch's API, and `seed.json` |
+| `refs.go` | The reference seed: the plan of 1,000 cited documents and their citations, the writes, the shape check (`refs-shape`) and the answer fetch (`refs-fetch`) |
 | `run.go` | One step: its phases (the window, the dashboard live sockets, the event and request generators on one open-loop schedule, the probes) and `summary.json` |
 | `sessions.go` | The simulated sessions: their NATS subscriptions and receipts, their listener registrations and heartbeats |
 | `events.go` | The five write kinds, the event mix and each write's plan |
@@ -34,6 +35,7 @@ same step before and after its change, and compares the two rows.
 | `guard.go` | `stack.json`, the endpoint flags and the check that every endpoint is the stack's own |
 | `util.go` | Helpers that several files share: the sleep, the profile fetch, the JSON file write and the collector of a step's records |
 | `commit-trigger.sql` | The commit-time trigger for the delivery latency from commit |
+| `refs-sample-2026-10-27.json` | The reference seed's input: for each of 160 production issues sampled on 2026-10-27, the version count of every member of its references answer. 160 arrays of numbers, no issue key and no name. |
 | `routes-2026-10-26-1719Z.txt` | The default route mix |
 | `stack.sh` | The local stack: `setup`, `start`, `seed`, `reset`, `stop`, `status`, `build-info`, `loadgen` |
 | `run-step.sh` | The one command for a named step |
@@ -137,7 +139,7 @@ from the RNG seed, so two runs of one step with one seed offer the same arrivals
    the checkout's current code.
 2. `stack.sh start`, then `stack.sh seed`. Each one does nothing when its work is already done. So
    `run-step.sh` is the one command from a fresh checkout. On the first run, the seed alone takes
-   18 to 27 minutes.
+   53 to 62 minutes.
 3. The migration check (Before and after across commits, below).
 4. `stack.sh reset`, with Dispatch's log in the step directory (The reset, below).
 5. `loadgen run`. It writes the step's files.
@@ -293,8 +295,9 @@ every pid. It is mode 600. `loadgen` reads every endpoint and token from it.
 
 ## The seed
 
-`stack.sh seed` makes the database that every step starts from. It takes 18 to 27 minutes on a
-2-vCPU pod: 1,086 s and 1,600 s in two seeds on 2026-10-27, with the wait for the block index. It
+`stack.sh seed` makes the database that every step starts from. It takes 53 to 62 minutes on a
+2-vCPU pod: 18 to 27 minutes for the issues and comments (1,086 s and 1,600 s in two seeds on
+2026-10-27, with the wait for the block index), and about 35 minutes more for the references. It
 does these steps:
 
 1. It creates database `dispatch` and starts Dispatch (log: `$LOADTEST_ROOT/logs/dispatch-seed.log`).
@@ -308,25 +311,67 @@ does these steps:
      has 4 anchored and 4 plain root comments.
    - The route of each issue, in key order: issue i goes to session `ses-lg-<i>` (4 digits). Thus
      no step spends its warm-up on route changes.
-3. It waits until the outbox publishes every seed event (at most 900 s). Then it waits until
+3. `loadgen seed-refs` adds the `dispatch://` references, with 8 writers (log:
+   `$LOADTEST_ROOT/logs/seed-refs.log`), so `GET /api/v1/issues/{key}/references` does the work it
+   does in production:
+   - 1,000 target documents, `ref-target-<n>.md`, on the 600 issues of `LGB`, `LGC` and `LGD`:
+     target n on the n mod 600-th of them, in key order. No step writes to those three projects.
+   - 19,471 versions in all. Each target's version count is drawn from
+     `refs-sample-2026-10-27.json`, the per-member version counts of 160 production issues'
+     references answers on 2026-10-27. Each target has 1 to 3 writers from a pool of 600, and the
+     first of them creates it.
+   - Each writer is a session actor whose origin is padded, so its one-actor author list encodes
+     to 231 bytes, production's mean per version row.
+   - One `references.md` per `LGA` issue i, in key order. It cites as many targets as the sampled
+     issue at position i mod 160 had members, each as
+     `dispatch://<KEY>/artifact/ref-target-<n>-md`. 310 of the 400 issues get one; the other 90
+     cite nothing and get none.
+   - The whole plan comes from one generator seeded 650, so every seed writes the same documents
+     with the same writers. `refs_test.go` pins it.
+4. It waits until the outbox publishes every seed event (at most 900 s). Then it waits until
    Dispatch's block-index backfill owes nothing (`document_block_versions` with a null version and
    `block_grammar_owed` both empty, at most 900 s; a build older than migration 0121 has neither
    table and skips this wait). Then it stops Dispatch. A seed that still owed the backfill would
    give every step about 100 s of it in its window: Dispatch indexes 20 documents every 2 s.
-4. It runs `vacuum analyze`, then installs the commit-time trigger (`loadgen trigger-sql`).
-5. It writes `seed.meta.json` and renames the database to `dispatch_seed`, the template.
+5. It runs `vacuum analyze`, then installs the commit-time trigger (`loadgen trigger-sql`).
+6. It writes `seed.meta.json` and renames the database to `dispatch_seed`, the template.
 
 The seed content does not depend on the clock. Each issue's text comes from a generator seeded by
 its project and number.
 
 `$LOADTEST_ROOT/seed.json` is what `loadgen run` reads: the project keys and, per issue, its key,
 project, `artifact_id` (the spec), `spec_name`, `spec_bytes`, `quotes` (the requirement cells),
-`anchored_comment_ids`, `plain_comment_ids` and `route`.
+`anchored_comment_ids`, `plain_comment_ids` and `route`. `loadgen seed-refs` reads the same file
+for the issue keys.
 
 `$LOADTEST_ROOT/seed.meta.json` records `migration` (the highest Dispatch migration applied),
-`build_commit`, `build_dirty`, `created_at`, `seed_seconds`, `postgres_version` and `counts`
-(projects, issues, comments, artifacts, artifact versions, events). One seed counted 4 projects,
-1,000 issues, 8,000 comments, 1,000 artifacts, 1,000 artifact versions and 10,004 events.
+`build_commit`, `build_dirty`, `created_at`, `seed_seconds`, `postgres_version` and `counts`:
+projects, issues, comments, artifacts, artifact versions, `ref_targets` (the artifacts named like
+`ref-target-%`), `ref_target_versions` (their versions), `ref_sources` (the artifacts named
+`references.md`), `artifact_refs` (the rows of `refs` that point at an artifact) and events. The
+reference plan writes 1,000 targets, 19,471 target versions and 310 source documents. Before the
+references, one seed counted 4 projects, 1,000 issues, 8,000 comments, 1,000 artifacts, 1,000
+artifact versions and 10,004 events.
+
+### Read the references back
+
+Two commands read what the reference seed wrote. Each needs Dispatch running, so each follows a
+reset:
+
+```bash
+packages/envoy/loadtest/stack.sh reset
+packages/envoy/loadtest/stack.sh loadgen refs-shape
+packages/envoy/loadtest/stack.sh loadgen refs-fetch -out $LOADTEST_ROOT/references.tsv
+```
+
+`refs-shape` reads every `LGA` issue's references answer, with no query, and prints the members,
+version rows and response bytes per issue (p50, p90, max, mean), the share of author lists that
+differ and the author bytes per row. It passes when the mean version rows are within 25% of
+production's 3,187, the distinct author-list share is in [0.03, 0.12], and the author bytes per
+row are within 25% of 231. It prints `PASS` or `FAIL` and exits 1 on a failure.
+
+`refs-fetch` writes one TSV row per seeded issue, in key order: key, status, ETag, body sha256 and
+bytes. Two builds' answers compare row by row.
 
 ## The reset
 
@@ -796,10 +841,10 @@ There is one row per route and one column per step.
 
 ## The guard
 
-`loadgen run` and `loadgen seed` read every endpoint and token from `stack.json`. Never point them
-at the pod's live listener (`127.0.0.1:9020`) or at production. A step writes comments and
-document versions at the rate it is given. The guard stops a mistaken target before the first
-write:
+`loadgen run`, `loadgen seed` and the reference commands (`seed-refs`, `refs-shape`, `refs-fetch`)
+read every endpoint and token from `stack.json`. Never point them at the pod's live listener
+(`127.0.0.1:9020`) or at production. A step writes comments and document versions at the rate it
+is given. The guard stops a mistaken target before the first write:
 
 1. An endpoint flag (`-url`, `-listener`, `-nats`, `-nats-mon`, `-pprof`, `-pg`, `-token`,
    `-listener-token`) that differs from `stack.json` is refused before any connection, unless

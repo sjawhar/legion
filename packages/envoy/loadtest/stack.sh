@@ -8,9 +8,10 @@
 #                           initdb, write stack.json. Idempotent: a rerun rebuilds incrementally.
 #   stack.sh start          start Postgres, the proxy, NATS and the listener (one already running is
 #                           kept); refuses a port another process holds, naming it.
-#   stack.sh seed [--force] seed through Dispatch (18 to 27 min on 2 vCPU), drain the outbox, vacuum,
-#                           install the commit-time trigger, write seed.meta.json and keep the result as
-#                           the template database dispatch_seed. --force drops an existing seed first.
+#   stack.sh seed [--force] seed through Dispatch, then its production-shaped references (53 to 62 min
+#                           on 2 vCPU in all), drain the outbox, vacuum, install the commit-time trigger,
+#                           write seed.meta.json and keep the result as the template database
+#                           dispatch_seed. --force drops an existing seed first.
 #   stack.sh reset [LOG]    what run-step.sh does before each step: stop Dispatch and the listener,
 #                           recreate database dispatch from dispatch_seed, restart NATS on a fresh store
 #                           and the listener, start Dispatch (its log to LOG) and wait for /healthz.
@@ -518,6 +519,9 @@ cmd_seed() {
   note "seeding through Dispatch (18 to 27 min on 2 vCPU); log $LOGS/seed.log"
   loadgen seed -out "$ROOT/seed.json" 2>&1 | tee "$LOGS/seed.log" >&2
 
+  note "writing production-shaped references (about 35 min on 2 vCPU); log $LOGS/seed-refs.log"
+  loadgen seed-refs 2>&1 | tee "$LOGS/seed-refs.log" >&2
+
   note "waiting for the outbox to publish every seed event"
   local deadline=$((SECONDS + 900)) pending
   while :; do
@@ -557,6 +561,10 @@ cmd_seed() {
       'comments', (select count(*) from comments),
       'artifacts', (select count(*) from artifacts),
       'artifact_versions', (select count(*) from artifact_versions),
+      'ref_targets', (select count(*) from artifacts where name like 'ref-target-%'),
+      'ref_target_versions', (select count(*) from artifact_versions v join artifacts a on a.id = v.artifact_id where a.name like 'ref-target-%'),
+      'ref_sources', (select count(*) from artifacts where name = 'references.md'),
+      'artifact_refs', (select count(*) from refs where to_kind = 'artifact'),
       'events', (select count(*) from events))")
   jq -n --argjson migration "$migration" --arg commit "$(build_commit)" --argjson dirty "$(build_dirty)" \
     --argjson counts "$counts" --arg at "$(date -u +%FT%TZ)" --arg pg "$("$PGBIN/postgres" --version)" \
