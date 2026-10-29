@@ -111,9 +111,15 @@ type StoredOrderReport struct {
 	Mismatches []StoredOrderMismatch
 }
 
-// Clean reports a document whose stored history replays: checked, and no row disagreeing.
+// Clean reports a document whose stored history replays: something checked, and no row
+// disagreeing. A check that compared no update and no version proves nothing about the document.
 func (r StoredOrderReport) Clean() bool {
-	return r.Refused == "" && len(r.Mismatches) == 0
+	return r.Checked() && r.Refused == "" && len(r.Mismatches) == 0
+}
+
+// Checked reports whether the check compared at least one update or version with the fold.
+func (r StoredOrderReport) Checked() bool {
+	return r.UpdatesChecked > 0 || r.VersionsChecked > 0
 }
 
 // storedVersion is one artifact_versions row as the check reads it: its markdown by md5 and length.

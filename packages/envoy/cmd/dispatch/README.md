@@ -1524,13 +1524,17 @@ updates_checked=… updates_skipped=… versions_checked=… versions_skipped=�
 `refused="<reason>"` for a refused document), one line per mismatch (`class update=… stored=…
 expected=…`, `pending update=… parked_items=… parked_delete_ranges=…`, or `version number=…
 doc_update_version=… stored_md5=… stored_length=… fold_md5=… fold_length=…`), and last a summary
-(`documents=… clean=… mismatched=… refused=… failed=…`). It prints no document text. Exit 0 when
-every document is clean, 1 on any mismatch, refusal, read failure or missing `DATABASE_URL`, 2 on a
-usage error.
+(`documents=… clean=… mismatched=… refused=… failed=… unchecked=…`). It prints no document text. A
+document whose check compared no update and no version is `unchecked`, never clean. Exit 0 when
+every document checked is clean, 1 on any mismatch, refusal, read failure, missing `DATABASE_URL`,
+unchecked document `--artifact` names, or a run that checked no document at all (an empty database
+included), 2 on a usage error. So exit 0 always means the check compared something.
 
 `packages/envoy/loadtest/browsertype` is the browser side of a load test this check judges: it
 connects peers to documents' rooms with an agent bearer and an `X-Dispatch-Actor` session and types
-inside existing paragraphs at a set rate (`browsertype -h` lists its flags).
+inside existing paragraphs at a set rate (`browsertype -h` lists its flags). A paragraph whose text
+holds a `-protect` value (repeatable) is never edited, so the text a load generator's own writes
+quote stays as it wrote it.
 
 ## Reference graph
 

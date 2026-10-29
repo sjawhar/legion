@@ -33,8 +33,11 @@ func (a *artifactFlags) Set(value string) error {
 // checks the documents --artifact names, or every document, and with --since only the updates and
 // versions created at or after that time, folding the older ones unchecked. It reads in read-only
 // transactions, migrates nothing and writes nothing, and prints one line per document and one per
-// mismatch: counts, classes, versions, md5s and lengths, never document text. Exit 0 when every
-// document replays, 1 on any mismatch, refused document or failure to check, 2 on a usage error.
+// mismatch: counts, classes, versions, md5s and lengths, never document text. A document whose
+// check compared no update and no version is unchecked, never clean: one --artifact names fails
+// the run, and a run over every document fails when it checked none, so exit 0 always means the
+// check looked. Exit 0 when every document replays, 1 on any mismatch, refused document, failure to
+// check or unchecked named document, 2 on a usage error.
 func storedOrder(ctx context.Context, args []string, databaseURL string, out io.Writer) int {
 	flags := flag.NewFlagSet("stored-order", flag.ContinueOnError)
 	flags.SetOutput(out)
@@ -75,7 +78,7 @@ func storedOrder(ctx context.Context, args []string, databaseURL string, out io.
 		}
 	}
 	exitCode := 0
-	var clean, mismatched, refused, failed int
+	var clean, mismatched, refused, failed, unchecked int
 	for _, id := range ids {
 		report, err := docs.CheckStoredOrder(ctx, database.Pool, id, from)
 		if err != nil {
@@ -90,14 +93,21 @@ func storedOrder(ctx context.Context, args []string, databaseURL string, out io.
 			refused++
 		case len(report.Mismatches) > 0:
 			mismatched++
+		case !report.Checked():
+			unchecked++
 		default:
 			clean++
 		}
-		if !report.Clean() {
+		if !report.Clean() && (report.Checked() || report.Refused != "" || len(artifacts) > 0) {
 			exitCode = 1
 		}
 	}
-	fmt.Fprintf(out, "stored-order: documents=%d clean=%d mismatched=%d refused=%d failed=%d\n", len(ids), clean, mismatched, refused, failed)
+	if clean+mismatched == 0 {
+		// No document had an update or version to compare: the run proves nothing, an empty
+		// database included.
+		exitCode = 1
+	}
+	fmt.Fprintf(out, "stored-order: documents=%d clean=%d mismatched=%d refused=%d failed=%d unchecked=%d\n", len(ids), clean, mismatched, refused, failed, unchecked)
 	return exitCode
 }
 

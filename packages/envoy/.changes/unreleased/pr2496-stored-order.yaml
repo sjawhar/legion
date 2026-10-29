@@ -1,0 +1,13 @@
+kind: Fixed
+body: |-
+    A document's stored updates replay to every version: a browser edit the room committed before an
+    agent's write is stored before the write's own update, the write's version is its own state
+    (no browser edit made after its read), a settlement, snapshot or named version stores the room's
+    unstored updates before it versions them, two browsers' updates are stored in the room's order,
+    and a browser update stored after a write is classed against the write's state. The new
+    `envoy-dispatch stored-order` command checks a database's stored histories and fails a run that
+    compared nothing, and `loadtest/browsertype` types into documents as browser peers for a load
+    test, leaving alone every paragraph whose text holds a `-protect` marker.
+time: 2026-10-29T22:10:00Z
+custom:
+    Issue: pr2496

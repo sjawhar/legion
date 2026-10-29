@@ -8,6 +8,7 @@ import (
 
 	"github.com/reearth/ygo/crdt"
 
+	"github.com/sjawhar/envoy/internal/dispatch/pmdoc"
 	"github.com/sjawhar/envoy/internal/dispatch/store/storetest"
 )
 
@@ -29,8 +30,8 @@ func TestStoredOrderSubcommandExitCodes(t *testing.T) {
 
 	database := storetest.Open(t)
 	env := map[string]string{"DATABASE_URL": database.Pool.Config().ConnString()}
-	if code, out := run(env); code != 0 || !strings.Contains(out, "documents=0") {
-		t.Fatalf("stored-order on an empty database: exit %d, want 0:\n%s", code, out)
+	if code, out := run(env); code != 1 || !strings.Contains(out, "documents=0") {
+		t.Fatalf("stored-order on an empty database: exit %d, want 1, since it checked nothing:\n%s", code, out)
 	}
 	var artifactID string
 	for _, statement := range []string{
@@ -47,10 +48,26 @@ func TestStoredOrderSubcommandExitCodes(t *testing.T) {
 	`).Scan(&artifactID); err != nil {
 		t.Fatalf("seed the document: %v", err)
 	}
-	// The document's one stored update is its base; its first version predates it and is skipped.
+	// The document's one stored update is its base, a paragraph; its first version predates it and
+	// is skipped.
+	tree, err := pmdoc.Parse("Before.\n")
+	if err != nil {
+		t.Fatalf("parse the document: %v", err)
+	}
+	markdown, err := pmdoc.Render(tree)
+	if err != nil {
+		t.Fatalf("render the document: %v", err)
+	}
+	base := crdt.New()
+	fragment := base.GetXmlFragment("prosemirror")
+	var written error
+	base.Transact(func(txn *crdt.Transaction) { written = pmdoc.Update(txn, fragment, tree) })
+	if written != nil {
+		t.Fatalf("write the document: %v", written)
+	}
 	if _, err := database.Pool.Exec(ctx, `
 		insert into doc_updates (artifact_id, version, update, content_changed) values ($1, 1, $2, true)
-	`, artifactID, crdt.EncodeStateAsUpdateV1(crdt.New(), nil)); err != nil {
+	`, artifactID, crdt.EncodeStateAsUpdateV1(base, nil)); err != nil {
 		t.Fatalf("seed the document's update: %v", err)
 	}
 	if _, err := database.Pool.Exec(ctx, `
@@ -58,17 +75,25 @@ func TestStoredOrderSubcommandExitCodes(t *testing.T) {
 	`, artifactID); err != nil {
 		t.Fatalf("seed the document's first version: %v", err)
 	}
-	if code, out := run(env, "--artifact", artifactID); code != 0 || !strings.Contains(out, "mismatches=0") {
+	if code, out := run(env, "--artifact", artifactID); code != 1 || !strings.Contains(out, "updates_checked=0") || !strings.Contains(out, "unchecked=1") {
+		t.Fatalf("stored-order on a named document it compared nothing of: exit %d, want 1 and the document unchecked:\n%s", code, out)
+	}
+	if _, err := database.Pool.Exec(ctx, `
+		insert into artifact_versions (artifact_id, number, markdown, doc_update_version) values ($1, 2, $2, 1)
+	`, artifactID, markdown); err != nil {
+		t.Fatalf("seed a version the fold renders: %v", err)
+	}
+	if code, out := run(env, "--artifact", artifactID); code != 0 || !strings.Contains(out, "versions_checked=1") || !strings.Contains(out, "clean=1") {
 		t.Fatalf("stored-order on a document that replays: exit %d, want 0:\n%s", code, out)
 	}
 	const text = "Words the document never held."
 	if _, err := database.Pool.Exec(ctx, `
-		insert into artifact_versions (artifact_id, number, markdown, doc_update_version) values ($1, 2, $2, 1)
+		insert into artifact_versions (artifact_id, number, markdown, doc_update_version) values ($1, 3, $2, 1)
 	`, artifactID, text); err != nil {
 		t.Fatalf("seed a version the fold does not render: %v", err)
 	}
 	code, out := run(env, "--since", "2000-01-01T00:00:00Z")
-	if code != 1 || !strings.Contains(out, "version number=2 doc_update_version=1") || strings.Contains(out, text) {
-		t.Fatalf("stored-order on a document that does not replay: exit %d, want 1 naming version 2 without its text:\n%s", code, out)
+	if code != 1 || !strings.Contains(out, "version number=3 doc_update_version=1") || strings.Contains(out, text) {
+		t.Fatalf("stored-order on a document that does not replay: exit %d, want 1 naming version 3 without its text:\n%s", code, out)
 	}
 }

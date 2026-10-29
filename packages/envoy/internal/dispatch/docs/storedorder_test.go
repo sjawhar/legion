@@ -174,6 +174,17 @@ func TestStoredOrderChecker(t *testing.T) {
 		}
 	})
 
+	t.Run("a check that compares nothing is not clean", func(t *testing.T) {
+		history := newCraftedHistory(t, seed)
+		if report := history.check(time.Time{}); report.Checked() || report.Clean() || len(report.Mismatches) != 0 {
+			t.Fatalf("report of a history holding only its base = %+v, want unchecked and not clean", report)
+		}
+		history.version(history.markdown(), history.store(history.edit(replaceRun("Second.", "Second, edited.")), true))
+		if report := history.check(time.Now().Add(time.Hour)); report.Checked() || report.Clean() || report.UpdatesSkipped != 1 {
+			t.Fatalf("report with every row before since = %+v, want one update skipped, unchecked and not clean", report)
+		}
+	})
+
 	t.Run("a wrong class", func(t *testing.T) {
 		history := newCraftedHistory(t, seed)
 		edited := history.store(history.edit(replaceRun("Second.", "Second, edited.")), false)
