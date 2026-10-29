@@ -912,3 +912,29 @@ func TestRenderWritesAnEmptyTaskItemAsAnEmptyItem(t *testing.T) {
 		t.Fatalf("%q reads back with the first item holding %q", markdown, first.Children[0].Children[0].Text)
 	}
 }
+
+// An email link is one the writer can write as its address (isBareEmailLink) only where the
+// transform's email matcher (findEmails) links its text whole, so the two cannot disagree: an
+// address with no local part (`@b.test`), whose `@` the matcher never starts at, is not one, nor is
+// one ending in a digit or one whose href or title differs.
+func TestABareEmailLinkIsWhatTheTransformLinksWhole(t *testing.T) {
+	for _, test := range []struct {
+		text, href, title string
+		bare              bool
+	}{
+		{text: "a@b.test", href: emailHref("a@b.test"), bare: true},
+		{text: "a.b+c@d-e.f_g.test", href: emailHref("a.b+c@d-e.f_g.test"), bare: true},
+		{text: "@b.test", href: emailHref("@b.test")},
+		{text: "a@b.test1", href: emailHref("a@b.test1")},
+		{text: "a@b", href: emailHref("a@b")},
+		{text: "a@b.test x", href: emailHref("a@b.test x")},
+		{text: "a@b.test", href: "mailto:c@b.test"},
+		{text: "a@b.test", href: emailHref("a@b.test"), title: "t"},
+	} {
+		node := &Node{Type: "text", Text: test.text}
+		marks := []Mark{{Type: "link", Attrs: Attrs{"href": test.href, "title": test.title}}}
+		if got := isBareEmailLink(node, marks); got != test.bare {
+			t.Errorf("isBareEmailLink(%q, href %q, title %q) = %v, want %v", test.text, test.href, test.title, got, test.bare)
+		}
+	}
+}

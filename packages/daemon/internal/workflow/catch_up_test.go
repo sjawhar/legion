@@ -109,39 +109,6 @@ func TestACatchUpMarksAHandedOverRootInEveryPhase(t *testing.T) {
 	}
 }
 
-// A decision kept while nobody in a running tree could hear it (its architect's claim had ended)
-// reaches the architect's next launch, a `legion claims retry` relaunch among them, in that
-// launch's catch-up: once taken, it is named again by a relaunch whose ready drops that catch-up
-// undelivered, and a delivered catch-up leaves nothing for the launch after.
-func TestARelaunchedArchitectsCatchUpNamesTheDecisionsKeptForIt(t *testing.T) {
-	ctx := context.Background()
-	pool := migratedPool(t)
-	seedAdmittedTree(t, pool, 1)
-	engine := testEngine(config.DesignGateRootIssues, nil)
-	if err := pgx.BeginFunc(ctx, pool, func(tx pgx.Tx) error {
-		return record.NewStore().AddParkedDecision(ctx, tx, record.ParkedDecision{Root: "LEGION-1", Ref: "dispatch://LEGION-1/spec",
-			Decision: record.DecisionDesignApproved, Actor: "user:alice", At: time.Date(2026, 10, 24, 9, 0, 0, 0, time.UTC)})
-	}); err != nil {
-		t.Fatalf("keep a decision: %v", err)
-	}
-	want := "While nobody in LEGION-1's tree could hear it, a person decided on the tree: dispatch://LEGION-1/spec (design-approved by user:alice). Read each before you continue."
-	claimReady(t, pool, engine, "LEGION-1", claim.RoleArchitect, 1)
-	if got := lastCatchUp(t, pool).Decided; got != want {
-		t.Fatalf("the relaunch's catch-up names %q, want %q", got, want)
-	}
-	claimReady(t, pool, engine, "LEGION-1", claim.RoleArchitect, 2)
-	if got := lastCatchUp(t, pool).Decided; got != want || len(catchUps(t, pool)) != 1 {
-		t.Fatalf("after a relaunch dropped that catch-up undelivered, catch-ups %v naming %q; want one naming %q", catchUps(t, pool), got, want)
-	}
-	if _, err := pool.Exec(t.Context(), "delete from outbox"); err != nil {
-		t.Fatalf("deliver the queued notices: %v", err)
-	}
-	claimReady(t, pool, engine, "LEGION-1", claim.RoleArchitect, 3)
-	if got := lastCatchUp(t, pool).Decided; got != "" {
-		t.Fatalf("the launch after a delivered catch-up is told %q, want nothing", got)
-	}
-}
-
 func lastCatchUp(t *testing.T, pool *pgxpool.Pool) record.CatchUp {
 	t.Helper()
 	var got *record.CatchUp
@@ -154,6 +121,48 @@ func lastCatchUp(t *testing.T, pool *pgxpool.Pool) record.CatchUp {
 		t.Fatal("no catch-up queued")
 	}
 	return *got
+}
+
+// An issue in accepting waits for its tree architect alone: no worker runs there, and the one
+// phase-finished notice that moved it there is ended undelivered when the architect's claim has
+// failed (the outbox's notice), so a retried architect was never told. Its catch-up is its only
+// wake, and it names every issue of the tree in accepting, a root whose children still run among
+// them: nothing beneath an issue holds its acceptance (signOff).
+func TestACatchUpNamesEveryIssueWaitingForTheArchitectsAcceptance(t *testing.T) {
+	const base = "the tree of LEGION-1 at generation 1 as the daemon records it now; start or resume it as your role says"
+	awaiting := func(keys string) string {
+		return base + "; in accepting, waiting for your acceptance, which no worker gives: " + keys + " (read the evidence, then sign_off or request_backward_move)"
+	}
+	for _, tc := range []struct {
+		name                    string
+		root, child             phase.Phase
+		rootStatus, childStatus string
+		want                    string
+	}{
+		{"the root accepting, its child done", phase.Accepting, phase.Done, "needs_review", "done", awaiting("LEGION-1")},
+		{"the root accepting, its child parked in backlog", phase.Accepting, phase.Done, "needs_review", "backlog", awaiting("LEGION-1")},
+		{"the root accepting, its child still implementing", phase.Accepting, phase.Implementing, "needs_review", "in_progress", awaiting("LEGION-1")},
+		{"a child accepting while the root implements", phase.Implementing, phase.Accepting, "in_progress", "needs_review", awaiting("LEGION-2")},
+		{"the root and its child both accepting", phase.Accepting, phase.Accepting, "needs_review", "needs_review", awaiting("LEGION-1, LEGION-2")},
+		{"the root awaiting its merge", phase.AwaitingMerge, phase.Done, "retro", "done", base},
+		{"nothing accepting", phase.Reviewing, phase.Testing, "needs_review", "testing", base},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			pool := migratedPool(t)
+			root := seedAdmittedTree(t, pool, 1)
+			root.Phase, root.Status = tc.root, tc.rootStatus
+			seedIssue(t, pool, root)
+			parent := root.Key
+			seedIssue(t, pool, record.Issue{Key: "LEGION-2", Repo: "acme/widgets", DefaultBranch: "main", GitHubRepo: "acme/widgets", Tree: "LEGION-1", Project: "LEGION", Title: "Child", Parent: &parent,
+				Phase: tc.child, Generation: 1, Status: tc.childStatus, Rank: "V"})
+			claimReady(t, pool, testEngine(config.DesignGateRootIssues, nil), root.Key, claim.RoleArchitect, 1)
+			got := catchUps(t, pool)
+			want := fmt.Sprintf("gen=1 launch=1 policy=root-issues issues=LEGION-1,LEGION-2 reason=%s", tc.want)
+			if len(got) != 1 || got[0] != want {
+				t.Fatalf("catch-ups %v; want [%s]", got, want)
+			}
+		})
+	}
 }
 
 // Only a live tree's root architect is told its tree. A tree that lingers or has left the

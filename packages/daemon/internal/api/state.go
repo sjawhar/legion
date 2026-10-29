@@ -18,6 +18,7 @@ import (
 	"github.com/sjawhar/legion/daemon/internal/claim"
 	"github.com/sjawhar/legion/daemon/internal/controller"
 	"github.com/sjawhar/legion/daemon/internal/phase"
+	"github.com/sjawhar/legion/daemon/internal/record"
 	"github.com/sjawhar/legion/daemon/internal/runtime"
 	"github.com/sjawhar/legion/daemon/internal/supervise"
 )
@@ -231,9 +232,21 @@ type Admission struct {
 	Cap     int      `json:"cap"`
 	Active  []string `json:"active"`
 	Waiting []string `json:"waiting"`
+	// Blocked is every issue Legion is waiting to start that waits on a Dispatch issue nobody has
+	// finished (INFRA-225), by issue key: a waiting root admission skips and a child the workflow
+	// holds at `admitted`, together in one list, each with what it still waits on. Waiting is the
+	// waiting line and stays roots alone, so a blocked root is in both. Never null; empty when
+	// nothing waits on a link.
+	Blocked []BlockedIssue `json:"blocked"`
 }
 
-// MarshalJSON keeps `active` and `waiting` arrays on the wire, empty rather than `null`.
+// BlockedIssue is one issue of Blocked and the issues it waits on that are not done. It is
+// record.BlockedIssue: the state's `blocked` and a tick controller notice's are the same list
+// read two ways, and the row is declared once, under both.
+type BlockedIssue = record.BlockedIssue
+
+// MarshalJSON keeps `active`, `waiting` and `blocked` arrays on the wire, empty rather than
+// `null`.
 func (a Admission) MarshalJSON() ([]byte, error) {
 	type wire Admission
 	out := wire(a)
@@ -242,6 +255,9 @@ func (a Admission) MarshalJSON() ([]byte, error) {
 	}
 	if out.Waiting == nil {
 		out.Waiting = []string{}
+	}
+	if out.Blocked == nil {
+		out.Blocked = []BlockedIssue{}
 	}
 	return json.Marshal(out)
 }
@@ -269,21 +285,28 @@ type Issue struct {
 	PullRequest *PullRequestView         `json:"pullRequest,omitempty"`
 	DesignGate  *GateView                `json:"designGate,omitempty"`
 	Slot        *SlotView                `json:"slot,omitempty"`
-	// WaitingOn is present only while the root is in awaiting_person. It names the gate version or
-	// question that released its slot, and AnsweredAt once the root has rejoined admission's line.
+	// WaitingOn is present only while the root is in awaiting_person: what it waits on from a
+	// person, when the wait began and, once a person answered, when and by what act.
 	WaitingOn *WaitingOnView `json:"waitingOn,omitempty"`
 	// Check is the issue's open production check, the work after its close (record.ProductionCheck):
 	// present only while the check is open, and absent once it closed or while none was opened.
 	Check *CheckView `json:"check,omitempty"`
 }
 
-// WaitingOnView explains what a root in awaiting_person needs from a person. Kind is `gate` with
-// GateVersion, or `ask` with Ask. AnsweredAt is omitted until the person answers.
+// WaitingOnView is what a root in awaiting_person waits on from a person (record.Awaiting). Kind
+// is `ask` with Ask, the id of the oldest question of its tree still with the person, or `gate`
+// with GateVersion and ArtifactID, the spec version of its registered document a person has not
+// reviewed. Since is Dispatch's time of the hand-back the wait began at,
+// absent when unknown. AnsweredAt and AnsweredBy are absent until a person's act answers the wait;
+// the root then waits at the front of admission's waiting line for its slot.
 type WaitingOnView struct {
-	Kind        string     `json:"kind"`
-	GateVersion int        `json:"gateVersion,omitempty"`
-	Ask         string     `json:"ask,omitempty"`
-	AnsweredAt  *time.Time `json:"answeredAt,omitempty"`
+	Kind        string        `json:"kind"`
+	Ask         string        `json:"ask,omitempty"`
+	GateVersion int           `json:"gateVersion,omitempty"`
+	ArtifactID  string        `json:"artifactId,omitempty"`
+	Since       *time.Time    `json:"since,omitempty"`
+	AnsweredAt  *time.Time    `json:"answeredAt,omitempty"`
+	AnsweredBy  record.Answer `json:"answeredBy,omitempty"`
 }
 
 // MarshalJSON keeps `workers` an object on the wire for an issue that has no worker yet.
@@ -488,9 +511,9 @@ func StrandedMoves() []StrandedMove {
 //     task or its phase start waits, otherwise the operator's delivery of its phase's resume task.
 //   - StrandedRetry, a failed architect: the operator's retry (`legion claims retry`), which
 //     relaunches its session with fresh budgets, and a catch-up follows.
-//   - StrandedWorkflowStart, a failed phase worker: its architect's retry of the held phase, since
-//     a failed claim ignores resume and deliver and the operator's retry relaunches only an
-//     architect.
+//   - StrandedWorkflowStart, a failed phase worker: the retry of its held phase — its architect's
+//     retry_or_escalate, or the operator's retry (`legion claims retry`, which applies the same
+//     retry) — since a failed claim ignores resume and deliver.
 func (c StrandedClaim) Move() StrandedMove {
 	failed := c.State == string(supervise.StateFailed)
 	switch {

@@ -12,8 +12,6 @@ import (
 	"github.com/sjawhar/envoy/internal/dispatch/api"
 	"github.com/sjawhar/envoy/internal/dispatch/config"
 	"github.com/sjawhar/envoy/internal/dispatch/docs"
-	"github.com/sjawhar/envoy/internal/dispatch/embed"
-	"github.com/sjawhar/envoy/internal/dispatch/embedqueue"
 	"github.com/sjawhar/envoy/internal/dispatch/events"
 	"github.com/sjawhar/envoy/internal/dispatch/files"
 	"github.com/sjawhar/envoy/internal/dispatch/refs"
@@ -41,9 +39,6 @@ var subcommands = []subcommand{
 	}},
 	{"redeliver-webhooks", func(ctx context.Context, args []string, env settingValues, stdout, _ io.Writer) int {
 		return redeliverWebhooks(ctx, args, env, stdout)
-	}},
-	{"backfill-embeddings", func(ctx context.Context, _ []string, env settingValues, stdout, _ io.Writer) int {
-		return backfillEmbeddings(ctx, env.get("DATABASE_URL"), stdout)
 	}},
 	{"census", func(ctx context.Context, _ []string, env settingValues, stdout, stderr io.Writer) int {
 		return census(ctx, env.get("DATABASE_URL"), stdout, stderr)
@@ -257,49 +252,9 @@ func rebuildRefs(ctx context.Context, databaseURL, serverURL string, out io.Writ
 	return 0
 }
 
-// backfillEmbeddings enqueues and embeds meaning-search vectors for content this Dispatch was
-// already carrying before LEGION-549 (embedqueue.Backfill); a fresh write is covered by its own
-// table's trigger (0072-0076) the moment Bedrock credentials reach the process, so this is a
-// one-time catch-up, not something the server runs itself. Resumable: rerunning it (after an
-// interrupt, or to pick up a kind this Dispatch grew after an earlier run finished) continues
-// from each kind's own checkpoint rather than rescanning rows it already enqueued.
-func backfillEmbeddings(ctx context.Context, databaseURL string, out io.Writer) int {
-	database, ok := openMigrated(ctx, "backfill-embeddings", databaseURL, out)
-	if !ok {
-		return 1
-	}
-	defer database.Pool.Close()
-	embedder, err := embed.New(ctx)
-	if err != nil {
-		fmt.Fprintf(out, "backfill-embeddings: %v\n", err)
-		return 1
-	}
-	// Rate-limited exactly as the server's own embedqueue poller is: this
-	// command is background catch-up work, and a standalone run of it must leave the account's
-	// Bedrock quota the same headroom for a concurrently running server's live search as the
-	// poller itself does, not saturate it as a raw, unpaced client would.
-	report, err := embedqueue.Backfill(ctx, embedqueue.Deps{Store: database, Embedder: embed.NewRateLimitedEmbedder(embedder)}, out)
-	if err != nil {
-		fmt.Fprintf(out, "backfill-embeddings: %v\n", err)
-		return 1
-	}
-	fmt.Fprintf(out, "backfill-embeddings: done - enqueued=%v embedded=%d failed=%d dead=%d pending=%d\n",
-		report.Enqueued, report.Embedded, report.Failed, report.Dead, report.Pending)
-	if report.Dead > 0 {
-		fmt.Fprintf(out, "backfill-embeddings: %d row(s) dead-lettered after repeated permanent failures; a future write to the same content revives it, or reset manually: update embeddings set dead = false, confirmed_failures = 0 where dead\n", report.Dead)
-	}
-	if report.Pending > 0 {
-		fmt.Fprintf(out, "backfill-embeddings: %d row(s) still pending (interrupted before finishing); rerun to continue\n", report.Pending)
-	}
-	if report.Dead > 0 || report.Pending > 0 {
-		return 1
-	}
-	return 0
-}
-
 func writeRebuildRefsReport(out io.Writer, report refs.Rebuild) {
-	fmt.Fprintf(out, "rebuild-refs: documents=%d asks=%d comments=%d messages=%d orphans=%d edges=%d\n",
-		report.Documents, report.Asks, report.Comments, report.Messages, report.Orphans, report.Edges)
+	fmt.Fprintf(out, "rebuild-refs: documents=%d asks=%d comments=%d messages=%d orphans=%d edges=%d blocks_owed=%d\n",
+		report.Documents, report.Asks, report.Comments, report.Messages, report.Orphans, report.Edges, report.BlocksOwed)
 }
 
 func writeAnchorBlockBackfillReport(out io.Writer, result docs.AnchorBlockBackfill) {

@@ -7,23 +7,47 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+
+	"github.com/sjawhar/envoy/internal/bus"
+	"github.com/sjawhar/envoy/listenfd"
 )
 
 type Service struct {
-	MachineID    string
-	NATSURLs     []string
+	MachineID string
+	NATSURLs  []string
+	// NATSReplicas is ENVOY_NATS_REPLICAS (bus.ParseNATSReplicas): the deployment's replica count
+	// for the stream and every bucket the listener opens, which the listener raises them to at
+	// start and every keeper period after (bus.ConnectOwningStream).
 	NATSReplicas int
-	ListenHost   string
-	Port         int
+	// StreamMaxBytes is ENVOY_STREAM_MAX_BYTES (bus.ParseStreamMaxBytes): the stream's byte limit,
+	// or 0 when unset, which sets none and keeps a deployed one.
+	StreamMaxBytes int64
+	// ListenHost and Port are the address the listener serves on: the inherited socket's own
+	// address with ENVOY_LISTEN_FD, else the one main binds, from ENVOY_LISTEN_HOST (127.0.0.1 when
+	// unset) and PORT (Load's default when unset). The API auth fence judges ListenHost, so what it
+	// judges is what serves.
+	ListenHost string
+	Port       int
+	// ListenSocket is the listening socket ENVOY_LISTEN_FD names, inspected but not yet adopted:
+	// main serves on it in place of binding ListenAddress. Nil when the variable is unset.
+	ListenSocket *listenfd.Socket
 	// AllowedHosts are the ENVOY_ALLOWED_HOSTS names, each as HostName writes it, that an
 	// unauthenticated listener serves /v1 to beside loopback.
 	AllowedHosts []string
+	// SubscribeAllTopics is ENVOY_SUBSCRIBE_ALL_TOPICS: whether the listener also subscribes every
+	// notifications topic over core NATS, which only a grant that allows `notifications.>` permits.
+	SubscribeAllTopics bool
 }
 
 func (s Service) ListenAddress() string {
 	return net.JoinHostPort(s.ListenHost, strconv.Itoa(s.Port))
 }
 
+// Load reads the listener's configuration from its environment, with defaultPort the port when
+// PORT is unset. With ENVOY_LISTEN_FD it inspects the inherited socket that names, and
+// ENVOY_LISTEN_HOST and PORT, each only when set, must name the socket's address: no default stands
+// in for one that is unset, and PORT=0 names no socket. It only inspects the socket; main adopts
+// it.
 func Load(defaultPort int) (Service, error) {
 	machine := strings.TrimSpace(os.Getenv("ENVOY_MACHINE_ID"))
 	if machine == "" {
@@ -38,37 +62,75 @@ func Load(defaultPort int) (Service, error) {
 		urls[i] = strings.TrimSpace(item)
 	}
 	port := defaultPort
-	if value := strings.TrimSpace(os.Getenv("PORT")); value != "" {
-		next, err := strconv.Atoi(value)
+	portValue := strings.TrimSpace(os.Getenv("PORT"))
+	if portValue != "" {
+		next, err := strconv.Atoi(portValue)
 		if err != nil {
 			return Service{}, fmt.Errorf("invalid PORT: %w", err)
 		}
 		port = next
 	}
-	listenHost := strings.TrimSpace(os.Getenv("ENVOY_LISTEN_HOST"))
+	hostValue := strings.TrimSpace(os.Getenv("ENVOY_LISTEN_HOST"))
+	listenHost := hostValue
 	if listenHost == "" {
 		listenHost = "127.0.0.1"
 	}
-	replicas := 1
-	if value := strings.TrimSpace(os.Getenv("ENVOY_NATS_REPLICAS")); value != "" {
-		next, err := strconv.Atoi(value)
+	var listenSocket *listenfd.Socket
+	if descriptor, set := os.LookupEnv("ENVOY_LISTEN_FD"); set {
+		socket, err := listenfd.Inspect("ENVOY_LISTEN_FD", descriptor)
 		if err != nil {
-			return Service{}, fmt.Errorf("invalid ENVOY_NATS_REPLICAS: %w", err)
+			return Service{}, err
 		}
-		replicas = next
+		// An empty value is unset here, as above: an empty ENVOY_LISTEN_HOST means 127.0.0.1, not
+		// every interface.
+		if err := socket.CheckAgainst(
+			listenfd.Setting{Name: "ENVOY_LISTEN_HOST", Value: hostValue, Set: hostValue != ""},
+			listenfd.Setting{Name: "PORT", Value: portValue, Set: portValue != ""},
+		); err != nil {
+			return Service{}, err
+		}
+		listenHost, port, listenSocket = socket.Addr().IP.String(), socket.Addr().Port, &socket
+	}
+	replicas, err := bus.ParseNATSReplicas(os.Getenv(bus.ReplicasEnvVar))
+	if err != nil {
+		return Service{}, err
+	}
+	streamMaxBytes, err := bus.ParseStreamMaxBytes(os.Getenv(bus.StreamMaxBytesEnvVar))
+	if err != nil {
+		return Service{}, err
 	}
 	allowedHosts, err := parseAllowedHosts(os.Getenv("ENVOY_ALLOWED_HOSTS"))
 	if err != nil {
 		return Service{}, err
 	}
+	subscribeAllTopics, err := parseSubscribeAllTopics(os.Getenv("ENVOY_SUBSCRIBE_ALL_TOPICS"))
+	if err != nil {
+		return Service{}, err
+	}
 	return Service{
-		AllowedHosts: allowedHosts,
-		MachineID:    machine,
-		NATSURLs:     urls,
-		NATSReplicas: replicas,
-		ListenHost:   listenHost,
-		Port:         port,
+		AllowedHosts:       allowedHosts,
+		MachineID:          machine,
+		NATSURLs:           urls,
+		NATSReplicas:       replicas,
+		StreamMaxBytes:     streamMaxBytes,
+		ListenHost:         listenHost,
+		Port:               port,
+		ListenSocket:       listenSocket,
+		SubscribeAllTopics: subscribeAllTopics,
 	}, nil
+}
+
+// parseSubscribeAllTopics reads ENVOY_SUBSCRIBE_ALL_TOPICS: unset, empty or "0" off, "1" on. Any
+// other value, a padded "1" among them, is refused rather than read as off, so a typo such as
+// "true" never leaves the opt-in silently off.
+func parseSubscribeAllTopics(raw string) (bool, error) {
+	switch raw {
+	case "", "0":
+		return false, nil
+	case "1":
+		return true, nil
+	}
+	return false, fmt.Errorf("invalid ENVOY_SUBSCRIBE_ALL_TOPICS %q: want 1 to subscribe every notifications topic, or 0 or unset not to", raw)
 }
 
 // hostEntry is an ENVOY_ALLOWED_HOSTS entry's shape: a name or an IPv4 address, or an IPv6

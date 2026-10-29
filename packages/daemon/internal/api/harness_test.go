@@ -31,8 +31,16 @@ import (
 )
 
 const (
-	testProject       = "legion"
-	testOperatorToken = "operator-bearer-for-tests"
+	// testProject is the claim project token (Options.Project): claim tokens, tree lifecycles and
+	// the controller record are keyed by it.
+	testProject = "legion"
+	// testDispatchProject is the Dispatch project key (Options.DispatchProject) the same project's
+	// issues and mirror rows are filed under. It deliberately differs from testProject, as a
+	// deployment's two always do — Dispatch keys are uppercase and the claim token is their
+	// lowercase — so a route that reads a Dispatch-keyed row with the claim token finds nothing
+	// and its test fails instead of passing on one string that happens to serve as both.
+	testDispatchProject = "LEGION"
+	testOperatorToken   = "operator-bearer-for-tests"
 )
 
 // testPromptAgents is what the harness's server answers as the task agents a role's prompts
@@ -46,7 +54,7 @@ func testStore(t *testing.T) *store.Store {
 	dsn := os.Getenv("LEGION_TEST_PG_DSN")
 	if dsn == "" {
 		t.Skip("LEGION_TEST_PG_DSN is unset, so there is no Postgres to test the claim routes against. Start one and set it:\n" +
-			"  docker run -d --name legion-pg -e POSTGRES_USER=legion -e POSTGRES_PASSWORD=legion -e POSTGRES_DB=legion -p 127.0.0.1::5432 postgres:16\n" +
+			"  docker run -d --name legion-pg --cpus 2 --memory 2g -e POSTGRES_USER=legion -e POSTGRES_PASSWORD=legion -e POSTGRES_DB=legion -p 127.0.0.1::5432 postgres:16\n" +
 			"  port=$(docker port legion-pg 5432/tcp | head -1 | sed 's/.*://')\n" +
 			"  LEGION_TEST_PG_DSN=postgres://legion:legion@127.0.0.1:$port/legion go test ./internal/api/")
 	}

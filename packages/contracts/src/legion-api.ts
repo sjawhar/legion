@@ -21,10 +21,11 @@ const issueKey = z.string().regex(DISPATCH_KEY_PATTERN);
 const timestamp = z.iso.datetime({ offset: true });
 
 /** `api.Phase` — the state an admitted issue sits in, in the transition table's own order. Not
- * the role working it: `workers` is keyed by role (`LEGION_ROLES`). `awaiting_person` holds no
- * slot while its architect waits for a human answer. `accepting` is the architect's acceptance
- * between the reviewer's approval and retro: no worker runs it. The merge closes the issue
- * (`done`); the production check after it is no phase (`check` on the issue record). */
+ * the role working it: `workers` is keyed by role (`LEGION_ROLES`). `awaiting_person` is a root
+ * that gave its admission slot up while its architect waits on a person's answer (`waitingOn` on
+ * the issue record). `accepting` is the architect's acceptance between the reviewer's approval and
+ * retro: no worker runs it. The merge closes the issue (`done`); the production check after it is
+ * no phase (`check` on the issue record). */
 export const LEGION_WORKFLOW_PHASES = [
   "admitted",
   "awaiting_person",
@@ -86,7 +87,7 @@ export type LegionClaimState = (typeof LEGION_CLAIM_STATES)[number];
  * incarnation, and exactly one backend member, the one the runtime word names. Nested, marshalled
  * by the standard library: `tmux` (the pane on the daemon's private server; the incarnation is
  * `<pane pid>:<start ticks>`) or `sandbox` (one role process in its issue's shared Agent Sandbox
- * pod: the Sandbox's name, the pod's uid, the role container and the process generation; the
+ * pod: the Sandbox's name, the pod's uid, the container (`roles` for an issue pod) and the process generation; the
  * incarnation is `<pod uid>/<generation>`).
  */
 const legionLocator = z.discriminatedUnion("runtime", [
@@ -209,20 +210,48 @@ const legionCheckView = z.strictObject({
   last: z.boolean(),
 });
 
-/** `api.WaitingOnView` — why an `awaiting_person` root returned its admission slot. `answeredAt`
- * appears when the person answered and the root is at the front of admission's waiting line. */
-const legionWaitingOn = z.discriminatedUnion("kind", [
-  z.strictObject({
-    kind: z.literal("gate"),
-    gateVersion: z.number().int().positive(),
-    answeredAt: timestamp.optional(),
-  }),
-  z.strictObject({
-    kind: z.literal("ask"),
-    ask: nonEmptyString,
-    answeredAt: timestamp.optional(),
-  }),
-]);
+/** `record.Answer` — the act that ended a root's wait on a person: a person's answer on the awaited
+ * ask (`ask`), its retraction by Dispatch's settlement (`retracted`) or its close by someone who is
+ * not a person (`closed`), a person's act on another ask (`reply`), a session handing the last
+ * question back to the agent's turn (`turn`), a person's review of the spec (`approved`,
+ * `changes_requested`), or a spec version newer than the one waited on (`version`). */
+export const LEGION_WAIT_ANSWERS = [
+  "ask",
+  "retracted",
+  "closed",
+  "reply",
+  "turn",
+  "approved",
+  "changes_requested",
+  "version",
+] as const;
+
+/** The fields every `waitingOn` shape shares: `since`, Dispatch's time of the hand-back the wait
+ * began at (absent when unknown), and `answeredAt` with `answeredBy` once the wait was answered
+ * (`answeredBy` names how, not always by a person), when the root waits at the front of
+ * admission's waiting line for its slot. */
+const legionWaitTimes = {
+  since: timestamp.optional(),
+  answeredAt: timestamp.optional(),
+  answeredBy: z.enum(LEGION_WAIT_ANSWERS).optional(),
+};
+
+/** `api.WaitingOnView` — what an `awaiting_person` root waits on from a person: `ask`, the oldest
+ * question of its tree still with the person, or `gate`, a spec version (`gateVersion` of document
+ * `artifactId`) a person has not reviewed. Contract 40 carries both shapes, and a daemon writes either. */
+const legionWaitingOn = z
+  .discriminatedUnion("kind", [
+    z.strictObject({ kind: z.literal("ask"), ask: nonEmptyString, ...legionWaitTimes }),
+    z.strictObject({
+      kind: z.literal("gate"),
+      gateVersion: z.number().int().positive(),
+      artifactId: nonEmptyString,
+      ...legionWaitTimes,
+    }),
+  ])
+  .refine((wait) => (wait.answeredAt === undefined) === (wait.answeredBy === undefined), {
+    message: "answeredAt and answeredBy appear together",
+  });
 
 /** `api.PendingStatusWrite` — one `dispatch_status` effect the outbox has not finished, due now or
  * backing off after a failed attempt: `nextAt` is the earliest it can run, and `attempts` and
@@ -297,12 +326,25 @@ const daemonInfo = z.strictObject({
   startedAt: timestamp,
 });
 
+/** `api.BlockedIssue` (`record.BlockedIssue`, and `api.HeldChild` on a wave release) — one issue
+ * Legion is waiting to start and the issues it waits on that are not done, in the order Dispatch
+ * lists them. A blocker the daemon has not yet observed as an issue of its own counts as
+ * unfinished, so `blockedBy` can name a key the state's `issues` does not. */
+const legionBlockedIssue = z.strictObject({
+  issue: issueKey,
+  blockedBy: z.array(issueKey),
+});
+
 /** `api.Admission` — the issue cap and the issues under it, in Dispatch rank order. Concurrency
- * is capped on issues, never on workers: there is no worker queue on this wire. */
+ * is capped on issues, never on workers: there is no worker queue on this wire. `blocked` is
+ * every root and every child Legion is waiting to start behind a Dispatch issue nobody has
+ * finished, by issue key; `waiting` stays the roots' waiting line, so a blocked root is in both.
+ * The controller names them in the day's report and takes nothing for them. */
 const legionAdmission = z.strictObject({
   cap: z.number().int().nonnegative(),
   active: z.array(nonEmptyString),
   waiting: z.array(nonEmptyString),
+  blocked: z.array(legionBlockedIssue),
   free: z.number().int().nonnegative().optional(),
 });
 
@@ -583,8 +625,15 @@ export const LegionEmptyResponse = z.strictObject({});
 export const LegionHandoffCompleteResponse = z.strictObject({
   note: nonEmptyString.optional(),
 });
+/** `api.WaveReleaseResponse`. A release is accepted whatever the children's links say, so
+ * `released` is every issue the request named, each once, in the order the request first named it,
+ * and the architect is never asked to send the request again; `started` and `held` then say what
+ * the release did with each of them. A child neither started nor held — one the daemon does not
+ * record, or one still admitted that waits on nothing — is in neither list. */
 export const LegionWaveReleaseResponse = z.strictObject({
   released: z.array(nonEmptyString),
+  started: z.array(issueKey),
+  held: z.array(legionBlockedIssue),
 });
 
 /** `api.GrantRequest`, the session form that mints one short-lived credential grant: it serves every
@@ -669,9 +718,8 @@ export const LegionEscalateRequest = z.strictObject({
 });
 
 /** `api.SignOffRequest`, the owning architect's acceptance of an issue in `accepting`, which moves
- * it to `retro`; the daemon refuses it in every other phase (`SIGNOFF_OUTSIDE_ACCEPTING`), and
- * refuses it 409 `SIGNOFF_CHILD_IN_WORKFLOW` while any issue beneath this one — its children,
- * their children — is still in the workflow, naming each of them. */
+ * it to `retro`; the daemon refuses it in every other phase (`SIGNOFF_OUTSIDE_ACCEPTING`). Issues
+ * still in the workflow beneath it do not hold it: a root's close waits for them instead. */
 export const LegionSignOffRequest = z.strictObject({
   grantId: nonEmptyString,
   issue: nonEmptyString,

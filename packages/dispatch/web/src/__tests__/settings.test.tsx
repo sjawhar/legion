@@ -5,13 +5,9 @@ import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testi
 import { MemoryRouter } from "react-router-dom";
 
 import { ApiError, api } from "../api/client";
-import type {
-  ArchitectureSource,
-  Project,
-  ProjectDefaultAssignee,
-  RepoProject,
-} from "../api/types";
+import type { Project, ProjectDefaultAssignee, RepoProject } from "../api/types";
 import { App } from "../app";
+import { keyedAttempt } from "./keyed-attempt";
 
 /** The mapping routes' server state as the Settings page reaches it: a read answers what the writes
  *  have left, and a write follows the server's default rules (the body's default, else the
@@ -75,7 +71,11 @@ test("human users manage repository project mappings from the settings route", a
   };
   const other: RepoProject = { ...mapping, default: true, repo: "owner/other" };
   const server = mappingServer([mapping, other]);
-  const whoAmI = spyOn(api, "whoAmI").mockResolvedValue({ kind: "user", login: "alice" });
+  const whoAmI = spyOn(api, "whoAmI").mockResolvedValue({
+    event_head: "0",
+    kind: "user",
+    login: "alice",
+  });
   const listIssues = spyOn(api, "listIssues").mockResolvedValue([]);
   const getMyState = spyOn(api, "getMyState").mockResolvedValue({});
   const getInbox = spyOn(api, "getInbox").mockResolvedValue([]);
@@ -115,10 +115,14 @@ test("human users manage repository project mappings from the settings route", a
     expect(radio("owner/repo").checked).toBe(false);
     fireEvent.click(radio("owner/repo"));
     await waitFor(() =>
-      expect(putRepoProject).toHaveBeenLastCalledWith("owner/repo", {
-        project: "CORE",
-        default: true,
-      })
+      expect(putRepoProject).toHaveBeenLastCalledWith(
+        "owner/repo",
+        {
+          project: "CORE",
+          default: true,
+        },
+        keyedAttempt
+      )
     );
     // The pick moves the project's default at once: one default per project.
     expect(radio("owner/repo").checked).toBe(true);
@@ -128,7 +132,11 @@ test("human users manage repository project mappings from the settings route", a
     fireEvent.change(screen.getByLabelText("Project"), { target: { value: "CORE" } });
     fireEvent.click(screen.getByRole("button", { name: "Add mapping" }));
     await waitFor(() =>
-      expect(putRepoProject).toHaveBeenLastCalledWith("owner/repo", { project: "CORE" })
+      expect(putRepoProject).toHaveBeenLastCalledWith(
+        "owner/repo",
+        { project: "CORE" },
+        keyedAttempt
+      )
     );
     expect(screen.getAllByRole("cell", { name: "owner/repo" })).toHaveLength(1);
     expect(screen.queryByRole("cell", { name: "Owner/Repo.git" })).toBeNull();
@@ -150,7 +158,9 @@ test("human users manage repository project mappings from the settings route", a
     expect(screen.getByRole("cell", { name: "owner/repo" })).toBeDefined();
 
     fireEvent.click(screen.getByRole("button", { name: "Delete mapping for owner/repo" }));
-    await waitFor(() => expect(deleteRepoProject).toHaveBeenLastCalledWith("owner/repo"));
+    await waitFor(() =>
+      expect(deleteRepoProject).toHaveBeenLastCalledWith("owner/repo", keyedAttempt)
+    );
     await waitFor(() => expect(screen.queryByRole("cell", { name: "owner/repo" })).toBeNull());
   } finally {
     cleanup();
@@ -185,7 +195,11 @@ test("a delayed mapping response does not undo a newer default the page has read
     repo,
   });
   const server = mappingServer([row("owner/repo", false), row("owner/other", true)]);
-  const whoAmI = spyOn(api, "whoAmI").mockResolvedValue({ kind: "user", login: "alice" });
+  const whoAmI = spyOn(api, "whoAmI").mockResolvedValue({
+    event_head: "0",
+    kind: "user",
+    login: "alice",
+  });
   const listIssues = spyOn(api, "listIssues").mockResolvedValue([]);
   const getMyState = spyOn(api, "getMyState").mockResolvedValue({});
   const getInbox = spyOn(api, "getInbox").mockResolvedValue([]);
@@ -251,7 +265,11 @@ test("a delayed mapping response does not undo a newer default the page has read
 });
 
 test("repository settings retries a failed mapping query", async () => {
-  const whoAmI = spyOn(api, "whoAmI").mockResolvedValue({ kind: "user", login: "alice" });
+  const whoAmI = spyOn(api, "whoAmI").mockResolvedValue({
+    event_head: "0",
+    kind: "user",
+    login: "alice",
+  });
   const listIssues = spyOn(api, "listIssues").mockResolvedValue([]);
   const getMyState = spyOn(api, "getMyState").mockResolvedValue({});
   const getInbox = spyOn(api, "getInbox").mockResolvedValue([]);
@@ -302,7 +320,11 @@ test("repository settings retries a failed mapping query", async () => {
 test("a human creates a project from Settings and it appears in the mappings selector", async () => {
   const core: Project = { created_at: "2026-09-01T00:00:00Z", key: "CORE", name: "Core" };
   const created: Project = { created_at: "2026-09-10T00:00:00Z", key: "QA", name: "Quality" };
-  const whoAmI = spyOn(api, "whoAmI").mockResolvedValue({ kind: "user", login: "alice" });
+  const whoAmI = spyOn(api, "whoAmI").mockResolvedValue({
+    event_head: "0",
+    kind: "user",
+    login: "alice",
+  });
   const listIssues = spyOn(api, "listIssues").mockResolvedValue([]);
   const getMyState = spyOn(api, "getMyState").mockResolvedValue({});
   const getInbox = spyOn(api, "getInbox").mockResolvedValue([]);
@@ -334,7 +356,7 @@ test("a human creates a project from Settings and it appears in the mappings sel
     fireEvent.click(screen.getByRole("button", { name: "New project" }));
 
     await waitFor(() =>
-      expect(createProject).toHaveBeenLastCalledWith({ key: "QA", name: "Quality" })
+      expect(createProject).toHaveBeenLastCalledWith({ key: "QA", name: "Quality" }, keyedAttempt)
     );
     await waitFor(() => expect(listProjects).toHaveBeenCalledTimes(2));
     expect(await screen.findByRole("cell", { name: "QA" })).toBeDefined();
@@ -364,7 +386,11 @@ test("a human creates a project from Settings and it appears in the mappings sel
 
 test("creating a project with a taken key shows the server's error inline", async () => {
   const core: Project = { created_at: "2026-09-01T00:00:00Z", key: "CORE", name: "Core" };
-  const whoAmI = spyOn(api, "whoAmI").mockResolvedValue({ kind: "user", login: "alice" });
+  const whoAmI = spyOn(api, "whoAmI").mockResolvedValue({
+    event_head: "0",
+    kind: "user",
+    login: "alice",
+  });
   const listIssues = spyOn(api, "listIssues").mockResolvedValue([]);
   const getMyState = spyOn(api, "getMyState").mockResolvedValue({});
   const getInbox = spyOn(api, "getInbox").mockResolvedValue([]);
@@ -415,143 +441,6 @@ test("creating a project with a taken key shows the server's error inline", asyn
   }
 });
 
-const architectureSource: ArchitectureSource = {
-  branch: "main",
-  created_at: "2026-09-10T00:00:00Z",
-  created_by: { id: "alice", kind: "user" },
-  enabled: true,
-  last_commit: null,
-  last_error: null,
-  last_sync_at: null,
-  project: "CORE",
-  repo: "legion/arch",
-};
-
-test("a human adds an architecture source and the verified row appears", async () => {
-  const whoAmI = spyOn(api, "whoAmI").mockResolvedValue({ kind: "user", login: "alice" });
-  const listIssues = spyOn(api, "listIssues").mockResolvedValue([]);
-  const getMyState = spyOn(api, "getMyState").mockResolvedValue({});
-  const getInbox = spyOn(api, "getInbox").mockResolvedValue([]);
-  const listRepoProjects = spyOn(api, "listRepoProjects").mockResolvedValue([]);
-  const listAgentTokens = spyOn(api, "listAgentTokens").mockResolvedValue([]);
-  const getCredentialPending = spyOn(api, "getCredentialPending").mockResolvedValue(null);
-  const listArchitectureSources = spyOn(api, "listArchitectureSources")
-    .mockResolvedValueOnce([])
-    .mockResolvedValue([architectureSource]);
-  const listDefaults = spyOn(api, "listProjectDefaultAssignees").mockResolvedValue([]);
-  const getDeliverySettings = spyOn(api, "getDeliverySettings").mockResolvedValue(null);
-  const listProjects = spyOn(api, "listProjects").mockResolvedValue([
-    { created_at: "2026-09-01T00:00:00Z", key: "CORE", name: "Core" },
-  ]);
-  const putArchitectureSource = spyOn(api, "putArchitectureSource").mockResolvedValue(
-    architectureSource
-  );
-  const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
-
-  try {
-    render(
-      <MemoryRouter initialEntries={["/settings"]}>
-        <QueryClientProvider client={queryClient}>
-          <App />
-        </QueryClientProvider>
-      </MemoryRouter>
-    );
-
-    const section = within(await screen.findByRole("region", { name: "Architecture sources" }));
-    expect(section.getByText("No architecture sources yet.")).toBeDefined();
-
-    fireEvent.change(section.getByLabelText("Source project"), { target: { value: "CORE" } });
-    fireEvent.change(section.getByLabelText("Source repository"), {
-      target: { value: "legion/arch" },
-    });
-    fireEvent.click(section.getByRole("button", { name: "Add source" }));
-    await waitFor(() =>
-      expect(putArchitectureSource).toHaveBeenLastCalledWith("CORE", {
-        branch: "main",
-        repo: "legion/arch",
-      })
-    );
-    await waitFor(() => expect(section.getByRole("cell", { name: "legion/arch" })).toBeDefined());
-    expect(section.getByRole("cell", { name: "Access verified" })).toBeDefined();
-  } finally {
-    cleanup();
-    queryClient.clear();
-    whoAmI.mockRestore();
-    listIssues.mockRestore();
-    getMyState.mockRestore();
-    getInbox.mockRestore();
-    listRepoProjects.mockRestore();
-    listAgentTokens.mockRestore();
-    getCredentialPending.mockRestore();
-    listArchitectureSources.mockRestore();
-    listDefaults.mockRestore();
-    getDeliverySettings.mockRestore();
-    listProjects.mockRestore();
-    putArchitectureSource.mockRestore();
-  }
-});
-
-test("a failed architecture source access check shows the server's reason inline", async () => {
-  const whoAmI = spyOn(api, "whoAmI").mockResolvedValue({ kind: "user", login: "alice" });
-  const listIssues = spyOn(api, "listIssues").mockResolvedValue([]);
-  const getMyState = spyOn(api, "getMyState").mockResolvedValue({});
-  const getInbox = spyOn(api, "getInbox").mockResolvedValue([]);
-  const listRepoProjects = spyOn(api, "listRepoProjects").mockResolvedValue([]);
-  const listAgentTokens = spyOn(api, "listAgentTokens").mockResolvedValue([]);
-  const getCredentialPending = spyOn(api, "getCredentialPending").mockResolvedValue(null);
-  const listArchitectureSources = spyOn(api, "listArchitectureSources").mockResolvedValue([]);
-  const listDefaults = spyOn(api, "listProjectDefaultAssignees").mockResolvedValue([]);
-  const getDeliverySettings = spyOn(api, "getDeliverySettings").mockResolvedValue(null);
-  const listProjects = spyOn(api, "listProjects").mockResolvedValue([
-    { created_at: "2026-09-01T00:00:00Z", key: "CORE", name: "Core" },
-  ]);
-  const putArchitectureSource = spyOn(api, "putArchitectureSource").mockRejectedValue(
-    new ApiError(409, {
-      code: "SOURCE_ACCESS",
-      error: "the GitHub App is not installed on legion/arch",
-    })
-  );
-  const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
-
-  try {
-    render(
-      <MemoryRouter initialEntries={["/settings"]}>
-        <QueryClientProvider client={queryClient}>
-          <App />
-        </QueryClientProvider>
-      </MemoryRouter>
-    );
-
-    const section = within(await screen.findByRole("region", { name: "Architecture sources" }));
-    fireEvent.change(section.getByLabelText("Source project"), { target: { value: "CORE" } });
-    fireEvent.change(section.getByLabelText("Source repository"), {
-      target: { value: "legion/arch" },
-    });
-    fireEvent.click(section.getByRole("button", { name: "Add source" }));
-
-    await waitFor(() =>
-      expect(section.getByRole("alert").textContent).toContain(
-        "the GitHub App is not installed on legion/arch"
-      )
-    );
-  } finally {
-    cleanup();
-    queryClient.clear();
-    whoAmI.mockRestore();
-    listIssues.mockRestore();
-    getMyState.mockRestore();
-    getInbox.mockRestore();
-    listRepoProjects.mockRestore();
-    listAgentTokens.mockRestore();
-    getCredentialPending.mockRestore();
-    listArchitectureSources.mockRestore();
-    listDefaults.mockRestore();
-    getDeliverySettings.mockRestore();
-    listProjects.mockRestore();
-    putArchitectureSource.mockRestore();
-  }
-});
-
 /** The default-assignee routes' server state as the Settings page reaches it: a read answers
  *  what the writes have left, and `sent` records each write's assignee as it arrives. While
  *  `hold()`'s release has not been called, a write that arrives waits before it lands. */
@@ -596,7 +485,7 @@ function renderSettings(projects: string[]): {
   reopen: () => void;
 } {
   const stubs = [
-    spyOn(api, "whoAmI").mockResolvedValue({ kind: "user", login: "alice" }),
+    spyOn(api, "whoAmI").mockResolvedValue({ event_head: "0", kind: "user", login: "alice" }),
     spyOn(api, "listIssues").mockResolvedValue([]),
     spyOn(api, "getMyState").mockResolvedValue({}),
     spyOn(api, "getInbox").mockResolvedValue([]),
@@ -696,7 +585,9 @@ test("default assignee picks made while one is saving show, and only the newest 
     // Clearing it leaves the project with no default, and the control at Unassigned.
     fireEvent.change(control, { target: { value: "" } });
     await waitFor(() => expect(server.rows()).toEqual([]));
-    await waitFor(() => expect(putDefault).toHaveBeenLastCalledWith("CORE", { assignee: null }));
+    await waitFor(() =>
+      expect(putDefault).toHaveBeenLastCalledWith("CORE", { assignee: null }, keyedAttempt)
+    );
     expect(control.value).toBe("");
   } finally {
     done();
@@ -791,9 +682,13 @@ test("a default assignee save refused while Settings is unmounted shows its reas
     await waitFor(() => expect(putDefault).toHaveBeenCalledTimes(1));
 
     leave();
+    // Dispatch's verdict, a 4xx: a 5xx is tried again under the write's key, not refused.
     await act(async () =>
       refusal.reject(
-        new ApiError(500, { code: "INTERNAL", error: "the default assignee save was refused" })
+        new ApiError(400, {
+          code: "ASSIGNEE_NOT_ALLOWED",
+          error: "the default assignee save was refused",
+        })
       )
     );
     reopen();
@@ -813,8 +708,8 @@ test("a default assignee save refused while Settings is unmounted shows its reas
       expect(server.rows()).toEqual([{ assignee: "bob@example.com", project: "CORE" }])
     );
     expect(putDefault.mock.calls).toEqual([
-      ["CORE", { assignee: "bob@example.com" }],
-      ["CORE", { assignee: "bob@example.com" }],
+      ["CORE", { assignee: "bob@example.com" }, keyedAttempt],
+      ["CORE", { assignee: "bob@example.com" }, keyedAttempt],
     ]);
     await waitFor(() => expect(core.value).toBe("bob@example.com"));
   } finally {
@@ -873,9 +768,9 @@ test("a refused default assignee puts the row back, shows the server's reason in
     fireEvent.click(coreCell.getByRole("button", { name: "Retry" }));
     await waitFor(() => expect(coreCell.queryByRole("alert")).toBeNull());
     expect(putDefault.mock.calls).toEqual([
-      ["CORE", { assignee: "bob@example.com" }],
-      ["OPS", { assignee: "bob@example.com" }],
-      ["CORE", { assignee: "bob@example.com" }],
+      ["CORE", { assignee: "bob@example.com" }, keyedAttempt],
+      ["OPS", { assignee: "bob@example.com" }, keyedAttempt],
+      ["CORE", { assignee: "bob@example.com" }, keyedAttempt],
     ]);
     await waitFor(() => expect(core.value).toBe("bob@example.com"));
     expect(server.rows()).toContainEqual({ assignee: "bob@example.com", project: "CORE" });

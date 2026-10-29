@@ -5,14 +5,18 @@ import {
   AGENT_STREAM_TRUNCATION_SUFFIX,
   type AgentStreamCommand,
   type AgentStreamFrame,
+  type AgentStreamSettings,
+  type AgentStreamSettingsReported,
 } from "@legion/contracts";
 
 import {
+  applyFrame,
   applyFrames,
   currentModel,
   dispatchTurns,
   EMPTY_CONVERSATION,
   sessionCommands,
+  sessionSettingsView,
   toThreadMessages,
 } from "./conversation";
 
@@ -412,5 +416,208 @@ describe("the session's slash commands", () => {
     expect(sessionCommands(applyFrames(EMPTY_CONVERSATION, [commandsFrame(1, maximum)]))).toEqual(
       maximum
     );
+  });
+});
+
+/** A reported `settings` frame: model-a, thinking `auto`, unless `fields` says otherwise, which
+ *  may break the contract on purpose. */
+function settingsFrame(
+  seq: number,
+  fields: Record<string, unknown> = {}
+): AgentStreamSettingsReported {
+  return {
+    kind: "settings",
+    model: "anthropic/model-a",
+    models: ["anthropic/model-a", "anthropic/model-b", "openai/model-c"],
+    reported: true,
+    seq,
+    thinking: { level: "auto", levels: ["auto", "low", "high"] },
+    v: 1,
+    ...fields,
+  } as AgentStreamSettingsReported;
+}
+
+/** The built-ins a pick runs, as a session that runs them from Dispatch lists them. */
+const SWITCHES: readonly AgentStreamCommand[] = [
+  { name: "model", source: "builtin" },
+  { name: "effort", source: "builtin" },
+];
+
+// The model and thinking level the session runs now (INFRA-195) arrive as one `settings` frame
+// holding the whole state. The header shows the newest, never a turn of the transcript.
+describe("the session's settings", () => {
+  test("are the newest frame by seq, kept through later messages and command lists", () => {
+    const state = applyFrames(EMPTY_CONVERSATION, [
+      settingsFrame(5),
+      settingsFrame(7, { model: "anthropic/model-b" }),
+      settingsFrame(6, { model: "openai/model-c" }),
+      message(8, "a50", 50, "Hello", false, "anthropic/model-a"),
+      commandsFrame(9, SWITCHES),
+    ]);
+    expect(state.settings).toEqual(settingsFrame(7, { model: "anthropic/model-b" }));
+    expect(toThreadMessages(state).map((entry) => entry.id)).toEqual(["a50"]);
+  });
+
+  test("a frame with any field of the wrong type is dropped, and the one before it stays", () => {
+    const bad = [
+      settingsFrame(2, { reported: "yes" }),
+      settingsFrame(3, { reported: undefined }),
+      settingsFrame(4, { model: 7 }),
+      settingsFrame(5, { model: null }),
+      settingsFrame(6, { models: "anthropic/model-a" }),
+      settingsFrame(7, { models: undefined }),
+      settingsFrame(8, { models: ["anthropic/model-a", 7] }),
+      settingsFrame(9, { thinking: undefined }),
+      settingsFrame(10, { thinking: "auto" }),
+      settingsFrame(11, { thinking: { levels: ["auto"] } }),
+      settingsFrame(12, { thinking: { level: 3, levels: ["auto"] } }),
+      settingsFrame(13, { thinking: { level: "auto" } }),
+      settingsFrame(14, { thinking: { level: "auto", levels: ["auto", null] } }),
+      settingsFrame(15, { thinking: ["auto"] }),
+      settingsFrame(16, { seq: "16" }),
+      settingsFrame(17, { v: 2 }),
+    ];
+    const before = settingsFrame(1);
+    let state = applyFrame(EMPTY_CONVERSATION, before);
+    for (const frame of bad) {
+      state = applyFrame(state, frame);
+      expect(state.settings).toEqual(before);
+    }
+  });
+
+  test("every shape the contract allows is taken", () => {
+    const allowed: AgentStreamSettings[] = [
+      settingsFrame(1, { model: undefined }),
+      settingsFrame(2, { thinking: null }),
+      settingsFrame(3, { thinking: { level: null, levels: ["low", "high"] } }),
+      settingsFrame(4, { models: [] }),
+      { kind: "settings", reported: false, seq: 5, v: 1 },
+    ];
+    let state = EMPTY_CONVERSATION;
+    for (const frame of allowed) {
+      state = applyFrame(state, frame);
+      expect(state.settings).toEqual(frame);
+    }
+  });
+
+  test("a replay rebuilds them from its own frames alone", () => {
+    // A session restarted counts its seq from the start again, and a plugin older than the frame
+    // sends none: the rebuild holds exactly what the replay says, whatever was shown before.
+    const before = applyFrames(EMPTY_CONVERSATION, [
+      settingsFrame(40, { model: "openai/model-c" }),
+    ]);
+    expect(before.settings).toEqual(settingsFrame(40, { model: "openai/model-c" }));
+
+    const restarted = applyFrames(EMPTY_CONVERSATION, [
+      settingsFrame(2),
+      commandsFrame(3, SWITCHES),
+    ]);
+    expect(restarted.settings).toEqual(settingsFrame(2));
+
+    const older = applyFrames(EMPTY_CONVERSATION, [message(1, "a50", 50, "Hello", false)]);
+    expect(older.settings).toBeUndefined();
+  });
+});
+
+// Each row of what the header shows of the session's model and thinking level, and the notice
+// that says why a session shows less (INFRA-195, decision 7).
+describe("what the header shows of the session's settings", () => {
+  const lastTurn = message(1, "a10", 10, "Done.", false, "anthropic/old-model");
+
+  test("a session not answering the live view shows the last turn's model and no notice", () => {
+    const state = applyFrames(EMPTY_CONVERSATION, [lastTurn, settingsFrame(2)]);
+    expect(sessionSettingsView(state, false, 1)).toEqual({
+      model: "anthropic/old-model",
+      notice: undefined,
+      reported: false,
+    });
+  });
+
+  test("a session whose replay has not arrived shows the last turn's model and no notice", () => {
+    const state = applyFrames(EMPTY_CONVERSATION, [lastTurn]);
+    expect(sessionSettingsView(state, true, 0)).toEqual({
+      model: "anthropic/old-model",
+      notice: undefined,
+      reported: false,
+    });
+    expect(sessionSettingsView(state, undefined, 0)).toEqual({
+      model: "anthropic/old-model",
+      notice: undefined,
+      reported: false,
+    });
+  });
+
+  test("a replay with no settings frame asks for a restart on a newer pi-envoy", () => {
+    const state = applyFrames(EMPTY_CONVERSATION, [lastTurn, commandsFrame(2, SWITCHES)]);
+    expect(sessionSettingsView(state, true, 1)).toEqual({
+      model: "anthropic/old-model",
+      notice:
+        "This session does not report its model and thinking level. Restart it on a newer pi-envoy to show and switch them here.",
+      reported: false,
+    });
+  });
+
+  test("an unreported frame shows the last turn's model and says Oh My Pi does not tell", () => {
+    const state = applyFrames(EMPTY_CONVERSATION, [
+      lastTurn,
+      { kind: "settings", reported: false, seq: 2, v: 1 },
+      commandsFrame(3, SWITCHES),
+    ]);
+    expect(sessionSettingsView(state, true, 1)).toEqual({
+      model: "anthropic/old-model",
+      notice: "This session's Oh My Pi does not tell Dispatch its model and thinking level.",
+      reported: false,
+    });
+  });
+
+  test("reported settings without the built-ins listed offer no picker and say so", () => {
+    const terminalOnly = applyFrames(EMPTY_CONVERSATION, [
+      lastTurn,
+      settingsFrame(2),
+      commandsFrame(3, [
+        { name: "model", source: "builtin", terminalOnly: true },
+        { name: "effort", source: "builtin" },
+      ]),
+    ]);
+    expect(sessionSettingsView(terminalOnly, true, 1)).toEqual({
+      modelPicker: false,
+      notice: "This session switches its model and thinking level only at its own terminal.",
+      reported: true,
+      settings: settingsFrame(2),
+      thinkingPicker: true,
+    });
+
+    // No command list at all is a host that cannot run typed input; a `model` that is not the
+    // built-in is not what a pick runs.
+    for (const commands of [[], [{ name: "model", source: "extension" }]] as const) {
+      const state = applyFrames(EMPTY_CONVERSATION, [
+        settingsFrame(2),
+        ...(commands.length === 0 ? [] : [commandsFrame(3, commands)]),
+      ]);
+      expect(sessionSettingsView(state, true, 1)).toEqual({
+        modelPicker: false,
+        notice: "This session switches its model and thinking level only at its own terminal.",
+        reported: true,
+        settings: settingsFrame(2),
+        thinkingPicker: false,
+      });
+    }
+  });
+
+  test("reported settings with both built-ins listed offer both pickers and no notice", () => {
+    const state = applyFrames(EMPTY_CONVERSATION, [
+      lastTurn,
+      settingsFrame(2, { model: "anthropic/model-b" }),
+      commandsFrame(3, SWITCHES),
+    ]);
+    // The reported model wins over the last turn's: the turn ran before the switch.
+    expect(sessionSettingsView(state, true, 1)).toEqual({
+      modelPicker: true,
+      notice: undefined,
+      reported: true,
+      settings: settingsFrame(2, { model: "anthropic/model-b" }),
+      thinkingPicker: true,
+    });
+    expect(currentModel(state)).toBe("anthropic/old-model");
   });
 });

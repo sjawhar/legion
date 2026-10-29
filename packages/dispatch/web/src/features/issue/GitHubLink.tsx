@@ -22,6 +22,80 @@ interface GitHubReference {
   title: string;
 }
 
+interface CheckRun {
+  app?: { id: number } | null;
+  check_suite?: { id: number } | null;
+  conclusion: string | null;
+  id: number;
+  name: string;
+  status: string;
+}
+
+interface WorkflowRun {
+  check_suite_id: number;
+  event: string;
+  name: string;
+}
+
+const pageSize = 100;
+
+/** Every item of a paged GitHub list, read a page of `pageSize` at a time until a short page. */
+async function readEveryPage<T>(path: string, field: string): Promise<T[]> {
+  const items: T[] = [];
+  for (let page = 1; ; page += 1) {
+    const separator = path.includes("?") ? "&" : "?";
+    const response = await api.githubRest(`${path}${separator}per_page=${pageSize}&page=${page}`);
+    const pageItems = ((await response.json()) as Record<string, unknown>)[field];
+    if (!Array.isArray(pageItems)) {
+      throw new Error(`GitHub answered ${path} with no ${field} list`);
+    }
+    items.push(...(pageItems as T[]));
+    if (pageItems.length < pageSize) return items;
+  }
+}
+
+/**
+ * The events whose workflow runs' checks GitHub evaluates for a pull request ("Checks from some
+ * workflow jobs are not evaluated" in GitHub's troubleshooting-required-status-checks): a check
+ * from a run any other event started (an inline review comment's, a `workflow_dispatch`) is left
+ * out of the pull request's checks, so it neither blocks nor waits.
+ */
+const evaluatedEvents: Record<string, true> = {
+  deployment: true,
+  deployment_status: true,
+  pull_request: true,
+  pull_request_review: true,
+  pull_request_target: true,
+  push: true,
+};
+
+/**
+ * The check runs GitHub's merge reads: for each check, only its newest run (the highest id). A
+ * check is its name, workflow name and triggering event when its check suite is a workflow run's,
+ * as `gh pr checks` keys it, so a run a newer run of the same event replaced no longer counts
+ * while a failed run of one event still blocks beside a passing run of another; a workflow run's
+ * check of an event GitHub does not evaluate is dropped; any other check run (an external App's)
+ * is its name and App.
+ */
+function newestCheckRuns(checkRuns: CheckRun[], workflowRuns: WorkflowRun[]): CheckRun[] {
+  const workflowBySuite = new Map(workflowRuns.map((run) => [run.check_suite_id, run]));
+  const newest = new Map<string, CheckRun>();
+  for (const checkRun of checkRuns) {
+    const workflow = checkRun.check_suite
+      ? workflowBySuite.get(checkRun.check_suite.id)
+      : undefined;
+    if (workflow !== undefined && evaluatedEvents[workflow.event] !== true) continue;
+    const key = JSON.stringify(
+      workflow === undefined
+        ? ["app", checkRun.name, checkRun.app?.id ?? null]
+        : ["workflow", checkRun.name, workflow.name, workflow.event]
+    );
+    const kept = newest.get(key);
+    if (kept === undefined || checkRun.id > kept.id) newest.set(key, checkRun);
+  }
+  return [...newest.values()];
+}
+
 /**
  * One external link on the issue header's details line. A GitHub issue or pull request is
  * shown as its number and title (the repository while the title is unknown — loading, or no
@@ -49,12 +123,18 @@ export function GitHubLink({ link }: { link: ExternalLink }): ReactNode {
     enabled: headSHA !== undefined,
     queryKey: ["github-link-checks", link.url, headSHA],
     queryFn: async () => {
-      const response = await api.githubRest(
-        `repos/${match?.[1]}/${match?.[2]}/commits/${headSHA}/check-runs`
+      const repositoryPath = `repos/${match?.[1]}/${match?.[2]}`;
+      // Check runs first: a workflow run exists before its check runs, so every suite in the
+      // check-run list is in the workflow-run list read after it.
+      const allCheckRuns = await readEveryPage<CheckRun>(
+        `${repositoryPath}/commits/${headSHA}/check-runs`,
+        "check_runs"
       );
-      const { check_runs: checkRuns } = (await response.json()) as {
-        check_runs: { conclusion: string | null; status: string }[];
-      };
+      const workflowRuns = await readEveryPage<WorkflowRun>(
+        `${repositoryPath}/actions/runs?head_sha=${headSHA}`,
+        "workflow_runs"
+      );
+      const checkRuns = newestCheckRuns(allCheckRuns, workflowRuns);
       if (
         checkRuns.some(({ conclusion }) =>
           ["action_required", "cancelled", "failure", "timed_out"].includes(conclusion ?? "")
@@ -95,8 +175,8 @@ export function GitHubLink({ link }: { link: ExternalLink }): ReactNode {
   }
   const repository = `${match[1]}/${match[2]}`;
   const number = `#${match[4]}`;
-  // The reference (title, state) and the check-runs are separate lookups: a failed check-runs
-  // read only drops the checks pill and never the title and state already loaded.
+  // The reference (title, state) and the checks are separate lookups: a failed check-runs or
+  // workflow-runs read only drops the checks pill and never the title and state already loaded.
   const reference = githubReference.isError ? undefined : githubReference.data;
   const unavailable =
     reference === undefined &&

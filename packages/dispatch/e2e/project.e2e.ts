@@ -27,7 +27,7 @@ test.beforeEach(async () => {
   await resetDatabase();
 });
 
-test("project page groups issues by status in board order; filters narrow issues; documents stay scoped to the project", async ({
+test("project page groups issues by status in board order; filters narrow issues; documents stay scoped to the project @phone", async ({
   browser,
 }, testInfo) => {
   await createProject({ key: "CORE", name: "Core" });
@@ -190,7 +190,7 @@ test("project page groups issues by status in board order; filters narrow issues
 
 // The search filter holds up to 1,000 characters, and its chip stays inside its row: that text
 // on one line makes the page 7,535 px wide at 1280, and a phone zooms out until it is 1,560 px.
-test("a 1,000-character search filter's chip ends in an ellipsis inside its row", async ({
+test("a 1,000-character search filter's chip ends in an ellipsis inside its row @phone", async ({
   browser,
 }, testInfo) => {
   await createProject({ key: "CORE", name: "Core" });
@@ -316,7 +316,7 @@ test("an issue's Artifacts tab lists its reference closure and a document page l
 // The status bands are collapsible and the header is one strip. Both regressed once while this
 // surface was being polished: a `flex` summary loses the native disclosure marker, and a title
 // allowed to grow pushed the project key hundreds of pixels from a short name.
-test("status bands stay expandable and the project key sits beside its name", async ({
+test("status bands stay expandable and the project key sits beside its name @phone", async ({
   browser,
 }, testInfo) => {
   await createProject({ key: "CORE", name: "Core" });
@@ -381,7 +381,7 @@ test("status bands stay expandable and the project key sits beside its name", as
 // would make the key and the title two flex columns: the key would break mid-key (`CORE-` over
 // `1`) and a long title would wrap in whatever the key and the timestamp left, about 130 px on a
 // phone.
-test("a list row keeps its key whole and gives the title the row's width", async ({
+test("a list row keeps its key whole and gives the title the row's width @phone", async ({
   browser,
 }, testInfo) => {
   await createProject({ key: "CORE", name: "Core" });

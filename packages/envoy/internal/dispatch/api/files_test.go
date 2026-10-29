@@ -176,7 +176,7 @@ func TestARowStillHoldingItsBytesIsServedFromTheRow(t *testing.T) {
 		t.Fatalf("new deps with a store: %v", err)
 	}
 	withStore := http.NewServeMux()
-	Register(withStore, deps)
+	t.Cleanup(Register(withStore, t.Context(), deps).Wait)
 	served := dispatchRequest(t, withStore, http.MethodGet, "/api/v1/artifacts/"+version.Artifact.ID+"/versions/1", nil, "alice")
 	if served.Code != http.StatusOK || served.Body.String() != "legacy bytes" {
 		t.Fatalf("serve a row-held version with a store configured: status=%d body=%q", served.Code, served.Body.String())
@@ -229,7 +229,7 @@ func TestAClearedRowIsAnsweredByWhatTheStoreSays(t *testing.T) {
 		t.Fatalf("new deps without a store: %v", err)
 	}
 	withoutStore := http.NewServeMux()
-	Register(withoutStore, noStore)
+	t.Cleanup(Register(withoutStore, t.Context(), noStore).Wait)
 	unconfigured := dispatchRequest(t, withoutStore, http.MethodGet, "/api/v1/artifacts/"+version.Artifact.ID+"/versions/1", nil, "alice")
 	if unconfigured.Code != http.StatusServiceUnavailable || responseCode(t, unconfigured) != "FILE_STORE_UNAVAILABLE" {
 		t.Fatalf("serve a cleared row with no store: status=%d body=%s, want 503 FILE_STORE_UNAVAILABLE", unconfigured.Code, unconfigured.Body.String())

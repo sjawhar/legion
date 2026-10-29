@@ -7,6 +7,7 @@ import (
 	"crypto/rand"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"os"
@@ -44,6 +45,17 @@ type testRunner struct {
 	tokens  []string
 	held    chan struct{}
 	release chan struct{}
+	// on, when set, runs in place of the next command whose argv holds its word (onWord).
+	onWord string
+	on     func(ctx context.Context, command workspace.Command) (workspace.Result, error)
+}
+
+// instead arms the next command whose argv holds word to run do in place of git; do may run the
+// command itself (real).
+func (r *testRunner) instead(word string, do func(ctx context.Context, command workspace.Command) (workspace.Result, error)) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.onWord, r.on = word, do
 }
 
 func newTestRunner(t *testing.T, remote string) *testRunner {
@@ -89,6 +101,12 @@ func (r *testRunner) Run(ctx context.Context, command workspace.Command) (worksp
 	r.mu.Unlock()
 	r.mu.Lock()
 	r.argv = append(r.argv, command.Argv)
+	if r.on != nil && slices.Contains(command.Argv, r.onWord) {
+		do := r.on
+		r.on, r.onWord = nil, ""
+		r.mu.Unlock()
+		return do(ctx, actual)
+	}
 	var held, release chan struct{}
 	if transfer {
 		token := ""
@@ -432,10 +450,10 @@ func TestHealthzIsUnavailableUntilTheFirstCloneFinishes(t *testing.T) {
 	}
 }
 
-// /tar streams the bare clone's refs and packs alone — HEAD, packed-refs, refs/ and
-// objects/pack/pack-<id>.pack — and nothing the feed builds itself (a pack's index), no loose
-// object, and nothing of the clone's own configuration, hooks or descriptions: indexed, it is a
-// repository whose connectivity git checks and whose default branch is the remote's, holding
+// /tar streams the bare clone's refs and packs alone — HEAD, packed-refs, refs/,
+// objects/pack/pack-<id>.pack and the index git reads each pack through — and no reverse index,
+// loose object, or anything of the clone's own configuration, hooks or descriptions: unpacked, it
+// is a repository whose connectivity git checks and whose default branch is the remote's, holding
 // regular files and directories alone and no temporary pack or lock file git was writing.
 func TestTarStreamsTheBareRepositorysRefsAndPacks(t *testing.T) {
 	remote := newRemote(t)
@@ -457,18 +475,20 @@ func TestTarStreamsTheBareRepositorysRefsAndPacks(t *testing.T) {
 		t.Fatalf("/tar answers %d", status)
 	}
 	unpacked, names := unpack(t, bytes.NewReader(body))
-	packs := 0
+	packs, indexes := 0, 0
 	for _, name := range names {
 		switch {
 		case name == "HEAD" || name == "packed-refs" || strings.HasPrefix(name, "refs/") || name == "objects/" || name == "objects/pack/":
 		case regexp.MustCompile(`^objects/pack/pack-[0-9a-f]{40}\.pack$`).MatchString(name):
 			packs++
+		case regexp.MustCompile(`^objects/pack/pack-[0-9a-f]{40}\.idx$`).MatchString(name):
+			indexes++
 		default:
 			t.Errorf("the tar holds %s, which is neither a ref nor a pack", name)
 		}
 	}
-	if packs == 0 {
-		t.Fatalf("the tar holds no pack: %q", names)
+	if packs == 0 || indexes != packs {
+		t.Fatalf("the tar holds %d packs and %d indexes: %q; want every pack with the index git reads it through", packs, indexes, names)
 	}
 	indexed(t, unpacked)
 	if got, want := git(t, unpacked, "--git-dir="+unpacked, "rev-parse", "refs/heads/main"), git(t, remote, "--git-dir="+remote, "rev-parse", "main"); got != want {
@@ -476,8 +496,9 @@ func TestTarStreamsTheBareRepositorysRefsAndPacks(t *testing.T) {
 	}
 }
 
-// indexed indexes each pack of the unpacked bare repository dir, as an issue pod's fetch does, and
-// checks its connectivity.
+// indexed checks the unpacked bare repository dir as an issue pod's fetch does: each pack the
+// cache streamed came with the index git reads it through, so none is indexed again, and the
+// history is whole.
 func indexed(t *testing.T, dir string) {
 	t.Helper()
 	packs, err := filepath.Glob(filepath.Join(dir, "objects", "pack", "pack-*.pack"))
@@ -485,7 +506,10 @@ func indexed(t *testing.T, dir string) {
 		t.Fatal(err)
 	}
 	for _, pack := range packs {
-		git(t, dir, "--git-dir="+dir, "index-pack", pack)
+		index := strings.TrimSuffix(pack, ".pack") + ".idx"
+		if _, err := os.Stat(index); err != nil {
+			t.Fatalf("the cache streamed %s without its index: %v", filepath.Base(pack), err)
+		}
 	}
 	git(t, dir, "--git-dir="+dir, "fsck", "--connectivity-only")
 }
@@ -596,6 +620,93 @@ func TestAStalledTarReaderDoesNotHoldTheNextFetch(t *testing.T) {
 	indexed(t, unpacked)
 	if got := git(t, unpacked, "--git-dir="+unpacked, "rev-parse", "refs/heads/main"); got != began {
 		t.Errorf("the stalled tar's main is %s, want the head it began at, %s", got, began)
+	}
+}
+
+// Past maxStreams streams a tar waits for one to end: it gets nothing while the stream ahead of it
+// is sent, a waiter whose request ends first gives up having sent nothing and holding no turn, and
+// the next waiter gets the whole tar once the stream ahead ends.
+func TestATarPastTheStreamBoundWaitsForAStreamToEnd(t *testing.T) {
+	defer func(was int) { maxStreams = was }(maxStreams)
+	maxStreams = 1
+	remote := newRemote(t)
+	large := make([]byte, 24<<20)
+	if _, err := rand.Read(large); err != nil {
+		t.Fatal(err)
+	}
+	work := filepath.Join(t.TempDir(), "work")
+	git(t, filepath.Dir(work), "clone", "--quiet", remote, work)
+	if err := os.WriteFile(filepath.Join(work, "large.bin"), large, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	git(t, work, "add", ".")
+	git(t, work, "commit", "--quiet", "-m", "large")
+	git(t, work, "push", "--quiet", "origin", "HEAD:main")
+	head := git(t, work, "rev-parse", "HEAD")
+	c := start(t, testOptions(t, newTestRunner(t, remote)))
+	c.waitFor(t, "at the large commit", func(_ int, h Health) bool { return h.Head == head })
+
+	ahead := c.get(t, "/tar", c.bearer(t))
+	defer ahead.Body.Close()
+	first := make([]byte, 4096)
+	if _, err := io.ReadFull(ahead.Body, first); err != nil {
+		t.Fatalf("read the first tar's first bytes: %v", err)
+	}
+
+	ask := func(ctx context.Context) (*http.Response, error) {
+		request, err := http.NewRequestWithContext(ctx, http.MethodGet, c.url+"/tar", nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		request.Header.Set("Authorization", "Bearer "+c.bearer(t))
+		return http.DefaultClient.Do(request)
+	}
+	impatient, cancel := context.WithTimeout(context.Background(), 300*time.Millisecond)
+	defer cancel()
+	if response, err := ask(impatient); err == nil {
+		response.Body.Close()
+		t.Fatalf("a tar past the bound was answered %s while the stream ahead of it was sent", response.Status)
+	}
+
+	answered := make(chan *http.Response, 1)
+	go func() {
+		response, err := ask(context.Background())
+		if err != nil {
+			t.Errorf("the waiting tar: %v", err)
+			close(answered)
+			return
+		}
+		answered <- response
+	}()
+	select {
+	case response := <-answered:
+		if response != nil {
+			response.Body.Close()
+		}
+		t.Fatal("a tar past the bound was answered while the stream ahead of it was sent")
+	case <-time.After(300 * time.Millisecond):
+	}
+	if _, health := c.health(t); health.Streams == nil || *health.Streams != 2 {
+		t.Errorf("/healthz counts streams %v, want 2: one sent and one waiting", health.Streams)
+	}
+	unpacked, _ := unpack(t, io.MultiReader(bytes.NewReader(first), ahead.Body))
+	indexed(t, unpacked)
+	ahead.Body.Close()
+	select {
+	case response := <-answered:
+		if response == nil {
+			t.FailNow()
+		}
+		defer response.Body.Close()
+		if response.StatusCode != http.StatusOK {
+			t.Fatalf("the waiting tar was answered %s, want 200 once the stream ahead ended", response.Status)
+		}
+		next, _ := unpack(t, response.Body)
+		if got := git(t, next, "--git-dir="+next, "rev-parse", "refs/heads/main"); got != head {
+			t.Errorf("the waiting tar's main is %s, want %s", got, head)
+		}
+	case <-time.After(30 * time.Second):
+		t.Fatal("the waiting tar was not answered within 30s of the stream ahead ending")
 	}
 }
 
@@ -785,7 +896,7 @@ func TestServeEndsWhenTheFirstCloneFails(t *testing.T) {
 	}
 }
 
-// Once a repack is due, the fetch that finds it so repacks the clone under the write lock into one
+// Once a repack is due, the fetch that finds it so is followed by a repack of the clone into one
 // pack with no loose object; until then a fetch leaves what it brought as git stored it.
 func TestAFetchRepacksTheCloneOnceARepackIsDue(t *testing.T) {
 	for _, tc := range []struct {
@@ -807,15 +918,24 @@ func TestAFetchRepacksTheCloneOnceARepackIsDue(t *testing.T) {
 			c.ready(t)
 			moved := advance(t, remote, "moved")
 			c.waitFor(t, "at the moved head", func(_ int, h Health) bool { return h.Head == moved })
-
-			counts := map[string]string{}
-			for _, line := range strings.Split(git(t, c.dir(), "--git-dir="+c.dir(), "count-objects", "-v"), "\n") {
-				if key, value, ok := strings.Cut(line, ": "); ok {
-					counts[key] = value
+			packed := func() (bool, string) {
+				counts := map[string]string{}
+				for _, line := range strings.Split(git(t, c.dir(), "--git-dir="+c.dir(), "count-objects", "-v"), "\n") {
+					if key, value, ok := strings.Cut(line, ": "); ok {
+						counts[key] = value
+					}
 				}
+				return counts["count"] == "0" && counts["packs"] == "1", "count=" + counts["count"] + " packs=" + counts["packs"]
 			}
-			if packed := counts["count"] == "0" && counts["packs"] == "1"; packed != tc.repack {
-				t.Errorf("the clone holds count=%s packs=%s, want repacked %t", counts["count"], counts["packs"], tc.repack)
+			// The repack follows the fetch that brought the moved head, so a due one is waited for.
+			deadline := time.Now().Add(testTimeout)
+			got, held := packed()
+			for tc.repack && !got && time.Now().Before(deadline) {
+				time.Sleep(20 * time.Millisecond)
+				got, held = packed()
+			}
+			if got != tc.repack {
+				t.Errorf("the clone holds %s, want repacked %t", held, tc.repack)
 			}
 		})
 	}
@@ -885,8 +1005,10 @@ func TestAnIssuePodsFetchFillsItsFeedFromTheCache(t *testing.T) {
 		t.Errorf("the feed's main is %s, want the remote's %s", got, moved)
 	}
 	git(t, report.Feed, "--git-dir="+report.Feed, "fsck", "--connectivity-only")
-	if transfers := run.transfers(); transfers[len(transfers)-1] != "--git-dir="+report.Feed+" fetch" && !strings.HasPrefix(transfers[len(transfers)-1], "--git-dir="+report.Feed+".clone-") {
-		t.Errorf("the pod's last transfer was %q, want a fetch of the delta", transfers[len(transfers)-1])
+	if transfers := run.transfers(); !slices.ContainsFunc(transfers, func(transfer string) bool {
+		return strings.HasPrefix(transfer, "--git-dir="+report.Feed+".clone-") && strings.HasSuffix(transfer, " fetch")
+	}) {
+		t.Errorf("the pod's transfers were %q, wanted a fetch of the delta into the feed it filled", transfers)
 	}
 	for _, transfer := range run.transfers()[1:] {
 		if strings.HasPrefix(transfer, "clone ") {
@@ -989,4 +1111,405 @@ func TestAnIssuePodTakesNothingFromAnotherRepositorysCache(t *testing.T) {
 	if err := exec.Command("git", "--git-dir="+report.Feed, "cat-file", "-e", tagged).Run(); err == nil {
 		t.Errorf("the feed holds acme/gadgets's commit %s", tagged)
 	}
+}
+
+// A due repack runs outside the lock a tar takes: a tar asked for while the repack runs is served
+// at once, and the repack then completes.
+func TestATarIsServedWhileARepackRuns(t *testing.T) {
+	saved := repackEvery
+	repackEvery = 0
+	t.Cleanup(func() { repackEvery = saved })
+	remote := newRemote(t)
+	run := newTestRunner(t, remote)
+	opts := testOptions(t, run)
+	opts.Refresh = 50 * time.Millisecond
+	c := start(t, opts)
+	c.ready(t)
+	started, release := make(chan struct{}), make(chan struct{})
+	var bound time.Duration
+	var argv []string
+	run.instead("repack", func(ctx context.Context, command workspace.Command) (workspace.Result, error) {
+		bound, argv = command.Timeout, command.Argv
+		close(started)
+		select {
+		case <-release:
+		case <-ctx.Done():
+			return workspace.Result{}, ctx.Err()
+		}
+		return run.runner.Run(ctx, command)
+	})
+	advance(t, remote, "moved")
+	select {
+	case <-started:
+	case <-time.After(testTimeout):
+		t.Fatal("no repack started")
+	}
+	request, err := http.NewRequest(http.MethodGet, c.url+"/tar", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	request.Header.Set("Authorization", "Bearer "+c.bearer(t))
+	served := make(chan int, 1)
+	go func() {
+		response, err := http.DefaultClient.Do(request)
+		if err != nil {
+			served <- 0
+			return
+		}
+		_, _ = io.Copy(io.Discard, response.Body)
+		_ = response.Body.Close()
+		served <- response.StatusCode
+	}()
+	select {
+	case status := <-served:
+		if status != http.StatusOK {
+			t.Errorf("the tar asked for during the repack answered %d, want 200", status)
+		}
+	case <-time.After(5 * time.Second):
+		t.Error("the tar waited on the repack")
+	}
+	if bound != repackTimeout {
+		t.Errorf("the repack ran within %s, want repackTimeout %s, not the runner's own budget", bound, repackTimeout)
+	}
+	for _, setting := range []string{"pack.windowMemory=256m", "core.packedGitLimit=512m", "pack.threads=1"} {
+		if !slices.Contains(argv, setting) {
+			t.Errorf("the repack ran %q, want its memory bounded by %s", argv, setting)
+		}
+	}
+	close(release)
+	deadline := time.Now().Add(testTimeout)
+	for !logged(c.log.all(), "repacked ") {
+		if time.Now().After(deadline) {
+			t.Fatalf("the repack never completed: %q", c.log.all())
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+}
+
+// A repack that fails is logged, and the partial packs it left are removed at once, each logged,
+// so a repack that keeps failing never fills the cache's volume; the cache stays ready.
+func TestAFailedRepackLeavesNoPartialPack(t *testing.T) {
+	saved := repackEvery
+	repackEvery = 0
+	t.Cleanup(func() { repackEvery = saved })
+	remote := newRemote(t)
+	run := newTestRunner(t, remote)
+	opts := testOptions(t, run)
+	opts.Refresh = 50 * time.Millisecond
+	c := start(t, opts)
+	c.ready(t)
+	pack := filepath.Join(c.dir(), "objects", "pack")
+	partial := filepath.Join(pack, "tmp_pack_Ab12Cd")
+	others := []string{filepath.Join(pack, "tmp_rev_Ef34Gh"), filepath.Join(pack, ".tmp-123-pack-0a1b.pack")}
+	kept, err := filepath.Glob(filepath.Join(pack, "pack-*"))
+	if err != nil || len(kept) == 0 {
+		t.Fatalf("the clone holds no pack to keep: %v", err)
+	}
+	keep := strings.TrimSuffix(kept[0], filepath.Ext(kept[0])) + ".keep"
+	if err := os.WriteFile(keep, nil, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	kept = append(kept, keep)
+	run.instead("repack", func(context.Context, workspace.Command) (workspace.Result, error) {
+		for _, path := range append([]string{partial}, others...) {
+			if err := os.WriteFile(path, []byte("PACK half a pack\n"), 0o444); err != nil {
+				return workspace.Result{}, err
+			}
+		}
+		return workspace.Result{ExitCode: 128, Stderr: "fatal: killed\n"}, nil
+	})
+	advance(t, remote, "moved")
+	deadline := time.Now().Add(testTimeout)
+	for !logged(c.log.all(), "removed the partial pack tmp_pack_Ab12Cd, which a killed git left") {
+		if time.Now().After(deadline) {
+			t.Fatalf("the partial pack's removal was never logged: %q", c.log.all())
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	if !logged(c.log.all(), "repack failed; tried again in ") {
+		t.Errorf("the failed repack was not logged: %q", c.log.all())
+	}
+	for _, path := range append([]string{partial}, others...) {
+		if _, err := os.Stat(path); !errors.Is(err, os.ErrNotExist) {
+			t.Errorf("the partial file %s is still there (%v)", filepath.Base(path), err)
+		}
+	}
+	for _, path := range kept {
+		if _, err := os.Stat(path); err != nil {
+			t.Errorf("the removal took %s, which is no partial file: %v", filepath.Base(path), err)
+		}
+	}
+	c.ready(t)
+}
+
+// A cache restarted on a volume where a killed repack left partial packs removes them before its
+// first fetch, each logged.
+func TestARestartedCacheRemovesThePartialPacksAKilledRepackLeft(t *testing.T) {
+	remote := newRemote(t)
+	opts := testOptions(t, newTestRunner(t, remote))
+	first := start(t, opts)
+	first.ready(t)
+	first.cancel()
+	if err := <-first.done; err != nil {
+		t.Fatalf("the first Serve ended with %v", err)
+	}
+	first.done <- nil
+	partial := filepath.Join(first.dir(), "objects", "pack", "tmp_pack_Zz99Yy")
+	if err := os.WriteFile(partial, []byte("PACK half a pack\n"), 0o444); err != nil {
+		t.Fatal(err)
+	}
+	again := start(t, opts)
+	again.ready(t)
+	if _, err := os.Stat(partial); !errors.Is(err, os.ErrNotExist) {
+		t.Errorf("the partial pack outlived the restart (%v)", err)
+	}
+	if !logged(again.log.all(), "removed the partial pack tmp_pack_Zz99Yy, which a killed git left") {
+		t.Errorf("the removal was not logged: %q", again.log.all())
+	}
+}
+
+// The cache's own first clone gets the repository-sized bound, workspace.CacheFetchTimeout, not an
+// issue pod's FetchTimeout, and a fetch into the clone keeps FetchTimeout.
+func TestTheCachesCloneTakesTheRepositorysBound(t *testing.T) {
+	remote := newRemote(t)
+	run := newTestRunner(t, remote)
+	bound := make(chan time.Duration, 1)
+	run.instead("clone", func(ctx context.Context, command workspace.Command) (workspace.Result, error) {
+		bound <- command.Timeout
+		return run.runner.Run(ctx, command)
+	})
+	opts := testOptions(t, run)
+	opts.Refresh = 50 * time.Millisecond
+	c := start(t, opts)
+	c.ready(t)
+	select {
+	case got := <-bound:
+		if got <= workspace.FetchTimeout || got > workspace.CacheFetchTimeout {
+			t.Errorf("the cache's clone ran within %s, want past FetchTimeout %s and within CacheFetchTimeout %s", got, workspace.FetchTimeout, workspace.CacheFetchTimeout)
+		}
+	default:
+		t.Fatal("the cache cloned with no command the runner saw")
+	}
+	refreshed := make(chan time.Duration, 1)
+	run.instead("fetch", func(ctx context.Context, command workspace.Command) (workspace.Result, error) {
+		refreshed <- command.Timeout
+		return run.runner.Run(ctx, command)
+	})
+	advance(t, remote, "moved")
+	select {
+	case got := <-refreshed:
+		if got > workspace.FetchTimeout {
+			t.Errorf("a fetch into the clone ran within %s, want FetchTimeout %s at most: it holds the lock every tar waits on", got, workspace.FetchTimeout)
+		}
+	case <-time.After(testTimeout):
+		t.Fatal("the cache never fetched into its clone")
+	}
+}
+
+// A snapshot taken while a repack swaps the clone's packs is taken again, and the tar it gives
+// holds exactly the packs the clone holds then.
+func TestASnapshotTakesThePacksARepackLeft(t *testing.T) {
+	remote := newRemote(t)
+	clone := filepath.Join(t.TempDir(), "widgets.git")
+	git(t, filepath.Dir(clone), "clone", "--bare", "--quiet", remote, clone)
+	git(t, clone, "--git-dir="+clone, "config", "fetch.unpackLimit", "1")
+	advance(t, remote, "second pack")
+	git(t, clone, "--git-dir="+clone, "fetch", "--quiet", remote, "+refs/heads/*:refs/heads/*")
+	c := newCache(Options{Log: func(string) {}}, clone)
+	calls := 0
+	snapshotWalked = func() {
+		calls++
+		if calls == 1 {
+			git(t, clone, "--git-dir="+clone, "repack", "-a", "-d", "--quiet")
+		}
+	}
+	t.Cleanup(func() { snapshotWalked = nil })
+	entries, err := c.snapshot()
+	if err != nil {
+		t.Fatalf("snapshot: %v", err)
+	}
+	defer closeEntries(entries)
+	if calls != 2 {
+		t.Errorf("the snapshot was taken %d times, want twice", calls)
+	}
+	var taken []string
+	for _, entry := range entries {
+		if strings.HasPrefix(entry.header.Name, "objects/pack/pack-") {
+			taken = append(taken, filepath.Base(entry.header.Name))
+		}
+	}
+	var held []string
+	for _, entry := range mustReadDir(t, filepath.Join(clone, "objects", "pack")) {
+		if workspace.FeedEntry("objects/pack/"+entry, false) {
+			held = append(held, entry)
+		}
+	}
+	slices.Sort(taken)
+	slices.Sort(held)
+	if len(taken) == 0 || !slices.Equal(taken, held) {
+		t.Errorf("the snapshot took %q, want the clone's %q", taken, held)
+	}
+}
+
+// mustReadDir is the names in dir.
+func mustReadDir(t *testing.T, dir string) []string {
+	t.Helper()
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	names := make([]string, 0, len(entries))
+	for _, entry := range entries {
+		names = append(names, entry.Name())
+	}
+	return names
+}
+
+// cacheOn is a cache of opts that Serve has not started, for a test that drives refresh itself.
+func cacheOn(t *testing.T, opts Options) *cache {
+	t.Helper()
+	dir, err := workspace.FeedRepository(opts.Root, opts.Repo)
+	if err != nil {
+		t.Fatal(err)
+	}
+	c := newCache(opts, dir)
+	c.health.Store(&Health{Repo: opts.Repo.String()})
+	return c
+}
+
+// repacks is how many repacks the runner was asked to run.
+func (r *testRunner) repacks() int {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	n := 0
+	for _, argv := range r.argv {
+		if slices.Contains(argv, "repack") {
+			n++
+		}
+	}
+	return n
+}
+
+// A repack that fails is not tried at the next fetch, only a repackEvery after it: one that cannot
+// fit never holds the cache from fetch to fetch.
+func TestAFailedRepackIsTriedAgainOnlyARepackEveryLater(t *testing.T) {
+	remote := newRemote(t)
+	run := newTestRunner(t, remote)
+	opts := testOptions(t, run)
+	log := &syncLog{}
+	opts.Log = log.log
+	c := cacheOn(t, opts)
+	ctx := context.Background()
+	if err := c.refresh(ctx); err != nil {
+		t.Fatalf("the first refresh: %v", err)
+	}
+	c.lastRepack = time.Now().Add(-repackEvery - time.Hour)
+	old := c.lastRepack.UTC().Format(time.RFC3339)
+	if err := os.WriteFile(filepath.Join(opts.Root, lastRepackFile), []byte(old+"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	var held time.Time
+	run.instead("repack", func(context.Context, workspace.Command) (workspace.Result, error) {
+		held = recorded(t, opts.Root)
+		return workspace.Result{ExitCode: 128, Stderr: "fatal: killed\n"}, nil
+	})
+	for i := range 2 {
+		advance(t, remote, fmt.Sprintf("moved-%d", i))
+		if err := c.refresh(ctx); err != nil {
+			t.Fatalf("a refresh: %v", err)
+		}
+	}
+	if got := run.repacks(); got != 1 {
+		t.Errorf("the runner was asked for %d repacks, want the one that failed and none at the next fetch", got)
+	}
+	if held.Before(time.Now().Add(-time.Hour)) {
+		t.Errorf("the record held %s while the repack ran, want the attempt's own time written before it: a repack that kills its pod must not run again at the next start", held)
+	}
+	if err := cacheOn(t, opts).refresh(ctx); err != nil {
+		t.Fatalf("a new process's refresh: %v", err)
+	}
+	if got := run.repacks(); got != 1 {
+		t.Errorf("a new process after the failed repack asked for %d repacks in all, want none of its own", got)
+	}
+	if !logged(log.all(), "repack failed; tried again in "+repackEvery.String()+": ") {
+		t.Errorf("the failed repack was not logged: %q", log.all())
+	}
+}
+
+// A fetch that fails has the partial files its git left in objects/pack removed, each logged.
+func TestAFailedFetchLeavesNoPartialPack(t *testing.T) {
+	remote := newRemote(t)
+	run := newTestRunner(t, remote)
+	opts := testOptions(t, run)
+	log := &syncLog{}
+	opts.Log = log.log
+	c := cacheOn(t, opts)
+	ctx := context.Background()
+	if err := c.refresh(ctx); err != nil {
+		t.Fatalf("the first refresh: %v", err)
+	}
+	partial := filepath.Join(c.dir, "objects", "pack", "tmp_pack_Fe7ch0")
+	run.instead("fetch", func(context.Context, workspace.Command) (workspace.Result, error) {
+		if err := os.WriteFile(partial, []byte("PACK half a pack\n"), 0o444); err != nil {
+			return workspace.Result{}, err
+		}
+		return workspace.Result{ExitCode: 128, Stderr: "fatal: write error: No space left on device\n"}, nil
+	})
+	advance(t, remote, "moved")
+	if err := c.refresh(ctx); err == nil {
+		t.Fatal("a refresh whose fetch failed answered nil")
+	}
+	if _, err := os.Stat(partial); !errors.Is(err, os.ErrNotExist) {
+		t.Errorf("the failed fetch's partial pack is still there (%v)", err)
+	}
+	if !logged(log.all(), "removed the partial pack tmp_pack_Fe7ch0, which a killed git left") {
+		t.Errorf("the removal was not logged: %q", log.all())
+	}
+}
+
+// The time of the last repack outlives the process: a cache restarted after a repack is not due
+// again until a repackEvery after it, and one restarted a repackEvery after it repacks at once.
+func TestTheLastRepackOutlivesTheProcess(t *testing.T) {
+	remote := newRemote(t)
+	run := newTestRunner(t, remote)
+	opts := testOptions(t, run)
+	opts.Log = func(string) {}
+	ctx := context.Background()
+	before := time.Now().Add(-time.Second)
+	if err := cacheOn(t, opts).refresh(ctx); err != nil {
+		t.Fatalf("the first process's refresh: %v", err)
+	}
+	if at := recorded(t, opts.Root); at.Before(before.Truncate(time.Second)) || at.After(time.Now()) {
+		t.Fatalf("the first process recorded %s, want its first fetch's time, after %s", at, before)
+	}
+	if err := cacheOn(t, opts).refresh(ctx); err != nil {
+		t.Fatalf("the second process's refresh: %v", err)
+	}
+	if got := run.repacks(); got != 0 {
+		t.Fatalf("a process restarted inside repackEvery repacked %d times", got)
+	}
+	old := time.Now().Add(-repackEvery - time.Hour).UTC().Format(time.RFC3339)
+	if err := os.WriteFile(filepath.Join(opts.Root, lastRepackFile), []byte(old+"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := cacheOn(t, opts).refresh(ctx); err != nil {
+		t.Fatalf("the third process's refresh: %v", err)
+	}
+	if got := run.repacks(); got != 1 {
+		t.Errorf("a process restarted a repackEvery after the last repack repacked %d times, want 1", got)
+	}
+}
+
+// recorded is the time the cache's last-repack record under root holds.
+func recorded(t *testing.T, root string) time.Time {
+	t.Helper()
+	body, err := os.ReadFile(filepath.Join(root, lastRepackFile))
+	if err != nil {
+		t.Fatalf("read the last-repack record: %v", err)
+	}
+	at, err := time.Parse(time.RFC3339, strings.TrimSpace(string(body)))
+	if err != nil {
+		t.Fatalf("the last-repack record holds %q: %v", body, err)
+	}
+	return at
 }

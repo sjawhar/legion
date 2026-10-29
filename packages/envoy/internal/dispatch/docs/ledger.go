@@ -345,7 +345,8 @@ func (l *Ledger) addLiveWrite(write *liveWrite) {
 // latest change (liveWrite.creditedBy), and each write's and seed's latest edit source on the
 // document's pending-settlement row. Deleting first means the write's own authors are recorded
 // after the delete that would otherwise take them out. Both commit or roll back with the content,
-// before the request context can be canceled after commit.
+// before the request context can be canceled after commit. A transaction whose every write was a
+// server lifecycle write (withLifecycleWrite) credited no one, so it records nothing here.
 func (l *Ledger) recordSettlementCredit(ctx context.Context) error {
 	for _, written := range l.versions {
 		if err := deleteCapturedPendingAuthors(ctx, l.tx, written.artifactID, written.capture); err != nil {
@@ -438,8 +439,9 @@ func (l *Ledger) seeded(artifactID string, rendered renderedTree, actor model.Ac
 	l.seeds[artifactID] = ledgerSeed{actor: actor, rendered: rendered}
 }
 
-// writtenRendering is the rendering of the tree this transaction last wrote to artifactID: its
-// live write's (applyLive), else the tree it seeded (SeedText); none when it holds neither.
+// writtenRendering is the rendering of the tree this transaction last wrote to artifactID: the one
+// its live write's latest operation recorded (recordLiveOperation, for applyLive and applyMargin
+// alike), else the tree it seeded (SeedText); none when it holds neither.
 func (l *Ledger) writtenRendering(artifactID string) renderedTree {
 	if l == nil {
 		return renderedTree{}

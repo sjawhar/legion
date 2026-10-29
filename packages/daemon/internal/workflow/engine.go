@@ -11,6 +11,7 @@ import (
 
 	"github.com/jackc/pgx/v5"
 
+	"github.com/sjawhar/legion/daemon/internal/blockers"
 	"github.com/sjawhar/legion/daemon/internal/claim"
 	"github.com/sjawhar/legion/daemon/internal/classify"
 	"github.com/sjawhar/legion/daemon/internal/config"
@@ -35,9 +36,9 @@ type Config struct {
 	// check's bound_at is its open plus this. Zero takes the shipped 14 days.
 	ProductionCheckBound time.Duration
 	// BuiltFrom is the repository the daemon's binary is built from (`sjawhar/legion` in a release
-	// build): a build the daemon boots on, or Dispatch starts on, is compared only against the
-	// open production checks of that repository, since no other repository's merge can be in it.
-	// Empty, no build is compared.
+	// build): a build the daemon boots on, or Dispatch announces every server process serves
+	// (server.started), is compared only against the open production checks of that repository,
+	// since no other repository's merge can be in it. Empty, no build is compared.
 	BuiltFrom string
 	// Deploys are the project's deploy workflows (config.Project.Deploys, `projects.<KEY>.deploys`):
 	// a completed run of one on the default branch of its repository is read from GitHub for each
@@ -54,6 +55,11 @@ type Config struct {
 	// Repositories is the daemon's in-memory view of the project's repositories, which the workflow
 	// records an issue's repository and default branch from when it first records the issue.
 	Repositories Repositories
+	// NoteUnread is told, inside the fact's transaction, of each issue the workflow did not record
+	// because its repository resolved Unread (left out for now, GitHub not answering its
+	// installation read): the daemon takes it into that repository's recovery whatever it resolves
+	// to by then. It keeps no state of the issue's own. Nil notes none.
+	NoteUnread func(key, resolved string)
 }
 
 // Engine interprets Table and writes only records and outbox rows through the supplied Store.
@@ -106,14 +112,22 @@ func (e *Engine) Apply(ctx context.Context, tx pgx.Tx, fact intake.Fact) (intake
 		return e.gateRegistered(ctx, tx, fact)
 	case intake.DispatchArtifact:
 		return e.dispatchArtifact(ctx, tx, fact)
+	case intake.GateAboveDispatch:
+		return e.gateAboveDispatch(ctx, tx, fact)
+	case intake.GateRequestFound:
+		return e.gateRequestFound(ctx, tx, fact)
+	case intake.CatchUpApplied:
+		return e.catchUpApplied(ctx, tx, fact)
 	case intake.DispatchAskOpened:
 		return e.dispatchAskOpened(ctx, tx, fact)
 	case intake.DispatchAskClosed:
 		return e.dispatchAskClosed(ctx, tx, fact)
 	case intake.DispatchAskReply:
 		return e.dispatchAskReply(ctx, tx, fact)
-	case intake.DispatchClaim:
-		return e.dispatchClaim(ctx, tx, fact)
+	case intake.DispatchApprovalMoved:
+		return e.dispatchApprovalMoved(ctx, tx, fact)
+	case intake.DispatchAskRestored:
+		return e.dispatchAskRestored(ctx, tx, fact)
 	case intake.HandoffComplete:
 		return e.handoff(ctx, tx, fact)
 	case intake.PullRequestOpened:
@@ -202,7 +216,10 @@ func (e *Engine) dispatchIssue(ctx context.Context, tx pgx.Tx, fact intake.Dispa
 	// An event carries the whole issue, so it writes a status only when its status differs from the
 	// one Dispatch showed at the event before it. One that does not is an edit — a rank, title or
 	// label change — made while a status the daemon queued has not reached Dispatch, whoever made it.
-	if fact.Status == issue.DispatchStatus {
+	// A route's own write (intake.DispatchIssue.StatusMove) is a status Dispatch confirmed the daemon
+	// wrote, applied ahead of events the consumer has not delivered, so it is a move whatever the
+	// record last saw Dispatch show.
+	if fact.Status == issue.DispatchStatus && !fact.StatusMove {
 		return intake.Result{}, e.keepStatus(ctx, tx, *issue, fact)
 	}
 	if reasserted, err := e.sessionStatusWrite(ctx, tx, *issue, fact); err != nil || reasserted {
@@ -226,9 +243,11 @@ func (e *Engine) dispatchIssue(ctx context.Context, tx pgx.Tx, fact intake.Dispa
 // sessionStatusWrite takes a lifecycle status change written by a session whose write the workflow
 // does not act on. A session holding a claim in the issue's tree is an agent, never a human move,
 // since a phase ends only by its completion (the `legion` tool's `handoff_complete`) and a tree only by the
-// architect's sign-off. Any other session on the root of an admitted tree — another tree's agent, or
-// one outside Legion that took the issue for its own — has no part in the running tree it would end
-// or park, so the tree's architect is told who wrote what. Either way the workflow does not react:
+// architect's sign-off. Any other session on the root of a running tree — one holding its admission
+// slot, or one waiting on a person, whose tree stays live while it gave its slot back — another
+// tree's agent, or one outside Legion that took the issue for its own, has no part in the tree it
+// would end or park, so the tree's architect is told who wrote what (held until a waiting root's
+// architect resumes). Either way the workflow does not react:
 // the observation is recorded with the status kept (keepStatus), and the daemon re-asserts its own
 // status through the outbox. A person's move and the daemon's own write carry no session
 // (intake.DispatchIssue.ActorSession): they are the workflow's to act on.
@@ -241,7 +260,8 @@ func (e *Engine) sessionStatusWrite(ctx context.Context, tx pgx.Tx, issue record
 		return false, err
 	}
 	if !agent {
-		if admitted, err := e.admittedRoot(ctx, tx, issue); err != nil || !admitted {
+		waiting := claim.IsTreeRoot(issue.Key, issue.Tree) && issue.AwaitingPerson() && !issue.Lingers()
+		if admitted, err := e.admittedRoot(ctx, tx, issue); err != nil || !admitted && !waiting {
 			return false, err
 		}
 	}
@@ -261,14 +281,18 @@ func (e *Engine) sessionStatusWrite(ctx context.Context, tx pgx.Tx, issue record
 }
 
 // keepStatus records an observation of the issue whose status the workflow does not take: its title,
-// rank, parent, label, sequence, claim and the status Dispatch showed, with the recorded status kept.
-// Admission, running after this handler, then records none of that status: a live event stops at its
-// sequence fence, and a boot listing the engine applied this way keeps the recorded status (admit's
-// applySummary), so neither frees the slot nor re-admits on it.
+// rank, parent, label, sequence, the status Dispatch showed and the Dispatch chain its preparation
+// read (Ancestry), with the recorded status kept. Admission, running after this handler, then
+// records none of that status: a live event stops at its sequence fence, and a boot listing the
+// engine applied this way keeps the recorded status (admit's applySummary), so neither frees the
+// slot nor re-admits on it.
 func (e *Engine) keepStatus(ctx context.Context, tx pgx.Tx, issue record.Issue, fact intake.DispatchIssue) error {
+	ancestry, err := e.Ancestry(ctx, tx, issue, fact.Ancestry)
+	if err != nil {
+		return err
+	}
 	issue.Title, issue.Rank, issue.Parent, issue.LastDispatchSeq = fact.Title, fact.Rank, record.ParentOf(fact.Parent), fact.Seq
-	issue.HandedOver, issue.DispatchStatus = fact.HandedOver, fact.Status
-	issue.ObserveClaim(fact.ClaimedBy, fact.Seq)
+	issue.HandedOver, issue.DispatchStatus, issue.Ancestry = fact.HandedOver, fact.Status, ancestry
 	return e.store.PutIssue(ctx, tx, issue)
 }
 
@@ -320,87 +344,6 @@ func (e *Engine) admittedRoot(ctx context.Context, tx pgx.Tx, issue record.Issue
 	return slices.ContainsFunc(slots, func(slot record.Slot) bool { return slot.Issue == issue.Key }), nil
 }
 
-// awaitPerson moves a quiet admitted root into awaiting_person. Admission releases its slot in the
-// same intake transaction and fills it from Waiting before the fact commits. The architect's daemon
-// suspension waits for its current turn to end, keeping the session for the answer's resume. A root
-// Unresumable answers no for keeps its slot at admitted: released, nothing could ever resume it,
-// and admission's sweep would end its tree. That is the architect whose claim a person refused,
-// asking that person whether to release it.
-func (e *Engine) awaitPerson(ctx context.Context, tx pgx.Tx, root record.Issue, waiting record.Awaiting, reason string) error {
-	if root.Phase != phase.Admitted || !claim.IsTreeRoot(root.Key, root.Tree) || root.Lingers() || !InWorkflow(root) {
-		return nil
-	}
-	admitted, err := e.admittedRoot(ctx, tx, root)
-	if err != nil || !admitted {
-		return err
-	}
-	members, err := e.treeMembers(ctx, tx, root)
-	if err != nil {
-		return err
-	}
-	for _, member := range members {
-		if member.Key != root.Key && InWorkflow(member) && member.Phase != phase.Admitted {
-			return nil
-		}
-	}
-	unresumable, err := Unresumable(ctx, e.store, tx, root)
-	if err != nil {
-		return err
-	}
-	if unresumable != "" {
-		e.logOnCommit(ctx, "workflow: root keeps its admission slot while it waits on a person, since it could not resume", "issue", root.Key, "why", unresumable)
-		return nil
-	}
-	root.Phase, root.Awaiting = phase.AwaitingPerson, &waiting
-	if err := e.store.PutIssue(ctx, tx, root); err != nil {
-		return err
-	}
-	suspendReason := fmt.Sprintf("%s waits on a person (%s): its slot is released until they answer", root.Key, reason)
-	if err := e.suspend(ctx, tx, root, claim.RoleArchitect, suspendReason); err != nil {
-		return err
-	}
-	if err := e.enqueue(ctx, tx, root.Key, record.ControllerNotice{Kind: record.AwaitingPersonNotice, Reason: suspendReason}); err != nil {
-		return err
-	}
-	e.logOnCommit(ctx, "workflow: root waits on a person and returns its admission slot", "issue", root.Key, "tree", root.Tree, "reason", reason)
-	return nil
-}
-
-// ResumeAwaitedRoot starts an architect in the session its daemon suspension kept, told what the
-// person answered. When that answer opened the design gate, it advances the now-admitted tree only
-// after the root has its slot again. A gate still closed — changes requested, a person's reply on
-// the approval request, or a newer version that handed the request back — tells the architect to
-// hand the request back to the person, since that hand-back is what starts the root's next wait.
-func (e *Engine) ResumeAwaitedRoot(ctx context.Context, tx pgx.Tx, root record.Issue, waiting record.Awaiting) error {
-	task := ""
-	if waiting.Ask != "" {
-		task = fmt.Sprintf("A person answered your ask %s on %s, or replied in its thread; read it and continue.", waiting.Ask, root.Key)
-	}
-	gate, err := e.store.Gate(ctx, tx, root.Key)
-	if err != nil {
-		return err
-	}
-	if waiting.GateVersion != 0 {
-		if gate != nil && classify.DesignGateOpen(*gate) {
-			task = fmt.Sprintf("Your spec version %d on %s was approved; continue.", gate.LatestVersion, root.Key)
-		} else {
-			task = fmt.Sprintf("Your spec on %s is not approved at version %d: a person requested changes or replied in the approval request's thread, "+
-				"or a newer version handed the request back to you. Read the review and the thread, and revise the spec as they ask. "+
-				"Then hand the request back to the person: request approval again and register that version with register_gate, or answer in the request's thread. "+
-				"Handing it back starts your next wait and returns the slot; then end your turn.", root.Key, waiting.GateVersion)
-		}
-	}
-	if err := e.enqueue(ctx, tx, root.Key, record.SuperviseRequest{
-		Op: "start", Tree: root.Tree, Role: claim.RoleArchitect, Generation: root.Generation, Task: task,
-	}); err != nil {
-		return err
-	}
-	if gate != nil {
-		return e.advanceAdmittedTree(ctx, tx, root, *gate)
-	}
-	return nil
-}
-
 // recordChildUnderLiveTree owns the otherwise unrecorded-child edge from decision 13. Admission
 // records only roots and orphans because this runs first in intake.ApplyFact.
 func (e *Engine) recordChildUnderLiveTree(ctx context.Context, tx pgx.Tx, fact intake.DispatchIssue) (intake.Result, error) {
@@ -433,7 +376,27 @@ func (e *Engine) recordChild(ctx context.Context, tx pgx.Tx, root record.Issue, 
 	if resolution.Refusal != "" {
 		return e.refuseChild(ctx, tx, root, fact.Key, fact.ResolvedRepo, resolution)
 	}
-	return e.enterChild(ctx, tx, root, fact, root.Generation, resolution, nil)
+	return e.enterChild(ctx, tx, root, fact, root.Generation, resolution)
+}
+
+// RecordedFact is the todo fact an issue's own record already says, for a run no live event
+// brought: admission's promotion of a stranded child (ReenterChild) and Adopt's entry of a queued
+// root's todo members.
+func RecordedFact(issue record.Issue) intake.DispatchIssue {
+	fact := intake.DispatchIssue{
+		Key: issue.Key, Seq: issue.LastDispatchSeq, Status: issue.Status, Title: issue.Title,
+		Rank: issue.Rank, HandedOver: issue.HandedOver, ResolvedRepo: issue.Repo,
+	}
+	if issue.Parent != nil {
+		fact.Parent = *issue.Parent
+	}
+	return fact
+}
+
+// recordedResolution is the repository an issue was first recorded on, which a re-entered or
+// adopted record keeps.
+func recordedResolution(issue record.Issue) Resolution {
+	return Resolution{Repo: issue.Repo, DefaultBranch: issue.DefaultBranch, GitHubRepo: issue.GitHubRepo}
 }
 
 // ReenterChild takes a recorded child set back to todo into a new run under its live tree, the way
@@ -497,7 +460,7 @@ func (e *Engine) ReenterChild(ctx context.Context, tx pgx.Tx, child record.Issue
 	if err := e.store.ClearGeneration(ctx, tx, child.Key); err != nil {
 		return err
 	}
-	if err := e.enterChild(ctx, tx, *root, fact, next, Resolution{Repo: child.Repo, DefaultBranch: child.DefaultBranch, GitHubRepo: child.GitHubRepo}, &child); err != nil {
+	if err := e.enterChild(ctx, tx, *root, fact, next, recordedResolution(child)); err != nil {
 		return err
 	}
 	return e.notice(ctx, tx, child.Key, ChildReenteredNotice(child.Key, root.Key))
@@ -505,20 +468,33 @@ func (e *Engine) ReenterChild(ctx context.Context, tx pgx.Tx, child record.Issue
 
 // enterChild records a todo child under root's live tree, admitted at generation on the repository
 // at names, at its default branch and with GitHub's spelling of it, and starts its planning when the
-// tree's gate is open. A re-entered child (prior, its record) keeps the repository it was first
-// recorded with, and its Dispatch claim unless fact shows a newer one (ObserveClaim): admission's
-// synthetic fact for a stranded child names no claim at all.
-func (e *Engine) enterChild(ctx context.Context, tx pgx.Tx, root record.Issue, fact intake.DispatchIssue, generation uint64, at Resolution, prior *record.Issue) error {
+// tree's gate is open. A re-entered child keeps the repository it was first recorded with, but not
+// the mark of a run it had before (record.Issue.TakenBack): the run this opens is a new one, which
+// has stood in no phase yet, and a blocker it now waits on holds it like any other child's.
+//
+// It is the one door every child start funnels through — the architect's release_children, a
+// person's move of a child to todo, and a rerun or reopen through ReenterChild — so it is where a
+// child that waits on an unfinished Dispatch issue is withheld. Such a child is recorded and left
+// at phase.Admitted, exactly as a child whose tree's design gate is still closed is, and
+// StartUnblockedChildren starts it once the last issue it waits on is done. What it waits on is
+// read from the mirror, which the blockers.Mirror handler wrote this very event's row into, in
+// this same transaction, before the engine was asked anything.
+func (e *Engine) enterChild(ctx context.Context, tx pgx.Tx, root record.Issue, fact intake.DispatchIssue, generation uint64, at Resolution) error {
 	parentKey := fact.Parent
 	child := record.Issue{Key: fact.Key, Tree: root.Tree, Project: root.Project, Title: fact.Title, Parent: &parentKey, Phase: phase.Admitted,
 		Generation: generation, Status: fact.Status, Rank: fact.Rank, HandedOver: fact.HandedOver, LastDispatchSeq: fact.Seq, DispatchStatus: fact.Status,
 		Repo: at.Repo, DefaultBranch: at.DefaultBranch, GitHubRepo: at.GitHubRepo}
-	if prior != nil {
-		child.ClaimedBy, child.ClaimSeq = prior.ClaimedBy, prior.ClaimSeq
-	}
-	child.ObserveClaim(fact.ClaimedBy, fact.Seq)
 	if err := e.store.PutIssue(ctx, tx, child); err != nil {
 		return err
+	}
+	rows, err := blockers.Load(ctx, tx, e.store, e.cfg.Project)
+	if err != nil {
+		return err
+	}
+	if waits := blockers.Holds(rows, child); len(waits) > 0 {
+		e.logOnCommit(ctx, "workflow: the child waits on unfinished work, so it is recorded admitted and not started",
+			"issue", child.Key, "tree", child.Tree, "blockers", waits)
+		return nil
 	}
 	gate, err := e.store.Gate(ctx, tx, root.Key)
 	if err != nil {
@@ -820,6 +796,11 @@ func (e *Engine) backward(ctx context.Context, tx pgx.Tx, fact intake.BackwardMo
 // signOff is the architect's acceptance of a reviewed head: it moves the issue from accepting to
 // retro and starts the implementer there, told the review's handoff and the pull request as the
 // approval told it before acceptance existed. Outside accepting it changes nothing and says so.
+// Nothing beneath the issue holds it: the acceptance is of the issue's own reviewed head, and the
+// tree's order is kept at the close instead, where a root whose pull request merged while any
+// other issue of its tree is still in the workflow waits in awaiting_merge until the last of them
+// is done or parked (closeMerged). Holding the acceptance as well kept an approved pull request out
+// of retro, READY and the merge queue for as long as any issue beneath it ran.
 func (e *Engine) signOff(ctx context.Context, tx pgx.Tx, fact intake.SignOff) (intake.Result, error) {
 	issue, err := e.store.Issue(ctx, tx, fact.Issue)
 	if err != nil || issue == nil {
@@ -827,13 +808,6 @@ func (e *Engine) signOff(ctx context.Context, tx pgx.Tx, fact intake.SignOff) (i
 	}
 	if issue.Phase != phase.Accepting {
 		return refused("SIGNOFF_OUTSIDE_ACCEPTING", fmt.Sprintf("%s is in phase %s, not accepting; this sign-off changed nothing", issue.Key, issue.Phase)), nil
-	}
-	running, err := e.openBeneath(ctx, tx, *issue)
-	if err != nil {
-		return intake.Result{}, err
-	}
-	if len(running) > 0 {
-		return refused("SIGNOFF_CHILD_IN_WORKFLOW", fmt.Sprintf("%s still has %s beneath it in the workflow; this sign-off changed nothing. Accept %s once the last of them closes, or take one out of the workflow with park_child", issue.Key, strings.Join(running, ", "), issue.Key)), nil
 	}
 	review, err := e.phaseRow(ctx, tx, issue.Key, claim.RoleReviewer)
 	if err != nil {
@@ -870,6 +844,18 @@ func (e *Engine) transition(ctx context.Context, tx pgx.Tx, issue record.Issue, 
 	}
 	from := issue.Phase
 	issue.Phase, issue.Hold = row.To, nil
+	// This is the one write that moves an issue into a phase of its own, so it is where the issue's
+	// run earns record.Issue.TakenBack: it has stood in a phase. The mark is a fact about that run,
+	// not about the issue's history. It lasts as long as the run's record does — through the phase's
+	// end and its root's leave into a linger, and into the generation re-admission opens when Legion
+	// takes that same tree back, which is the work the mark was earned by and so starts again whatever
+	// its links say. Every other path that opens a run starts it clean: a child's re-entry into its
+	// tree (enterChild) and a child handed over as a root of its own without its run
+	// (admit.Admission.readmit). The invariant: no issue is exempt from the blocker check unless the
+	// run it is exempt for is the run it arrived with.
+	if issue.CarriesRun() {
+		issue.TakenBack = true
+	}
 	if row.Status != "" {
 		issue.Status = row.Status
 	}
@@ -983,6 +969,16 @@ func (e *Engine) row(from phase.Phase, trigger TriggerKind, target phase.Phase, 
 	return Row{}, false
 }
 
+// advanceAdmittedTree starts every member of root's tree the opening of its design gate releases.
+// A child that waits on an unfinished Dispatch issue is not one of them (blockers.Holds): the
+// gate it was held by is its tree's, the issues it waits on are its own, and only
+// StartUnblockedChildren, when the last of them closes, starts it.
+//
+// The tree's root is started whatever its links say. Its links are read once, when promotion
+// admits it into a slot, and a root at admitted here has passed that moment: it holds its slot and
+// its tree runs, and a blocker added to a tree already running never re-checks it. Held here, it
+// would hold its slot with nothing left to start it — StartUnblockedChildren starts children, and
+// the state's `blocked` names no slotted root — so it would be neither started nor reported.
 func (e *Engine) advanceAdmittedTree(ctx context.Context, tx pgx.Tx, root record.Issue, gate record.DesignGate) error {
 	if root.AwaitingPerson() || !classify.DesignGateOpen(gate) {
 		return nil
@@ -991,14 +987,99 @@ func (e *Engine) advanceAdmittedTree(ctx context.Context, tx pgx.Tx, root record
 	if err != nil {
 		return err
 	}
+	rows, err := blockers.Load(ctx, tx, e.store, e.cfg.Project)
+	if err != nil {
+		return err
+	}
 	for _, issue := range members {
-		if issue.Phase == phase.Admitted {
-			if err := e.gateOpened(ctx, tx, issue); err != nil {
-				return err
-			}
+		if issue.Phase != phase.Admitted {
+			continue
+		}
+		if waits := blockers.Holds(rows, issue); len(waits) > 0 {
+			e.logOnCommit(ctx, "workflow: the tree's gate opened, but this member waits on unfinished work",
+				"issue", issue.Key, "tree", root.Tree, "blockers", waits)
+			continue
+		}
+		if err := e.gateOpened(ctx, tx, issue); err != nil {
+			return err
 		}
 	}
 	return nil
+}
+
+// StartUnblockedChildren starts every child among issues that nothing holds any longer: one that is
+// no tree root of its own, stands where enterChild or the gate's opening left it (phase.Admitted),
+// has no unfinished blocker in the mirror rows, and whose tree would start it now — live
+// (record.TreeLive) with its design gate open. One whose tree is still closed is the gate's, whose
+// own opening starts it.
+//
+// Such a child either waited until the last issue it named closed, or had its links taken off while
+// it waited: an edit that changes no status, which the engine's own handling of the event does not
+// act on, and after which the state's `blocked` no longer names it. Left here, that child would
+// stand unstarted and unreported for good; it starts as a child whose tree's gate opened onto it
+// does. Either way its tree's architect is told it starts (ChildUnblockedNotice), with a reason
+// saying which of the two cleared its hold: a start nobody hears of is the very silence the hold's
+// report exists to remove.
+//
+// Its caller is admission's promoteHolds, which holds both the issues and the mirror rows already,
+// so every fact, tick, hold release and boot reconcile is a look at every held child. Each tree's
+// gate is read once, not once per child: a wide tree of held children is one read, not one each.
+func (e *Engine) StartUnblockedChildren(ctx context.Context, tx pgx.Tx, issues []record.Issue, rows map[string]blockers.Row) error {
+	starts := make(map[string]bool)
+	for _, issue := range issues {
+		// Startable: holdable, with nothing it waits on unfinished. blockers.Holds cannot gate
+		// this, since it is nil for an issue that is not holdable too.
+		if !blockers.Holdable(issue) || len(blockers.Unfinished(rows, issue.Key)) > 0 {
+			continue
+		}
+		open, read := starts[issue.Tree]
+		if !read {
+			var err error
+			if open, err = e.treeStartsChildren(ctx, tx, issue.Tree); err != nil {
+				return err
+			}
+			starts[issue.Tree] = open
+		}
+		if !open {
+			continue
+		}
+		if err := e.gateOpened(ctx, tx, issue); err != nil {
+			return err
+		}
+		waited := rows[issue.Key].Blockers
+		if len(waited) == 0 {
+			e.logOnCommit(ctx, "workflow: this child names no issue it waits on any longer, so it starts",
+				"issue", issue.Key, "tree", issue.Tree)
+		} else {
+			e.logOnCommit(ctx, "workflow: every issue this child waited on is done, so it starts",
+				"issue", issue.Key, "tree", issue.Tree, "blockers", waited)
+		}
+		if err := e.notice(ctx, tx, issue.Key, ChildUnblockedNotice(issue.Key, issue.Tree, waited)); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// treeStartsChildren says whether tree starts a child of its own now: its root is recorded, not
+// waiting on a person (a root whose wait a person's approval answered, opening its gate, starts its
+// children with its resume, advanceAdmittedTree, once it has its slot again), the tree is live, and
+// its design gate is open — the conditions enterChild and advanceAdmittedTree between them stand
+// for.
+func (e *Engine) treeStartsChildren(ctx context.Context, tx pgx.Tx, tree string) (bool, error) {
+	root, err := e.store.Issue(ctx, tx, tree)
+	if err != nil || root == nil || root.AwaitingPerson() {
+		return false, err
+	}
+	live, err := record.TreeLive(ctx, e.store, tx, *root)
+	if err != nil || !live {
+		return false, err
+	}
+	gate, err := e.store.Gate(ctx, tx, tree)
+	if err != nil || gate == nil {
+		return false, err
+	}
+	return classify.DesignGateOpen(*gate), nil
 }
 
 // gateOpened moves an admitted member of a tree whose gate is open into planning, behind a row
@@ -1044,14 +1125,16 @@ func (e *Engine) phaseRow(ctx context.Context, tx pgx.Tx, issue string, role cla
 	return record.PhaseRow{Issue: issue, Role: role}, nil
 }
 
-// issueForBranch is the issue whose branch legion/<KEY> is, when it is recorded on repo, as its
-// record keeps GitHub's spelling (record.Issue.GitHubRepo), compared case-insensitively as GitHub
-// compares names: a pull request on legion/<KEY> in another repository is never <KEY>'s.
+// issueForBranch is the issue whose branch (claim.IssueBranch) branch is, when it is recorded on
+// repo, as its record keeps GitHub's spelling (record.Issue.GitHubRepo), compared
+// case-insensitively as GitHub compares names: a pull request on legion/<KEY> in another repository
+// is never <KEY>'s.
 func (e *Engine) issueForBranch(ctx context.Context, tx pgx.Tx, repo, branch string) (*record.Issue, error) {
-	if !strings.HasPrefix(branch, "legion/") {
+	key, ok := claim.BranchIssue(branch)
+	if !ok {
 		return nil, nil
 	}
-	issue, err := e.store.Issue(ctx, tx, strings.TrimPrefix(branch, "legion/"))
+	issue, err := e.store.Issue(ctx, tx, key)
 	if err != nil || issue == nil || !strings.EqualFold(issue.GitHubRepo, repo) {
 		return nil, err
 	}
@@ -1100,52 +1183,6 @@ func (e *Engine) treeMembers(ctx context.Context, tx pgx.Tx, root record.Issue) 
 		}
 	}
 	return members, nil
-}
-
-// openBeneath is the sorted keys of the issues under issue — its children, their children, and so
-// on — that are still in the workflow (InWorkflow). It reads the tree's members once and walks
-// down the recorded parent column from issue, which is the right candidate set because every issue
-// of a tree keeps the root's key in its tree field and its own parent's key in parent. The walk
-// must be downward and never over the flat tree: every member names the root in its tree field, so
-// an issue held for any member of its tree would wait for the root, which is waiting for it. Its
-// three termination rules are the ones the daemon's upward walk already carries (api/architect.go,
-// owns): a visited set, since parent is plain nullable text with no foreign key, rewritten from
-// every Dispatch observation, so a cycle is possible and would otherwise spin inside the fact's
-// transaction; only issues the tree lists are followed, so a parent recorded in another tree is
-// never reached; and an issue whose parent is empty, or names a key the tree does not hold, is
-// beneath nothing.
-func (e *Engine) openBeneath(ctx context.Context, tx pgx.Tx, issue record.Issue) ([]string, error) {
-	members, err := e.treeMembers(ctx, tx, issue)
-	if err != nil {
-		return nil, err
-	}
-	// The index holds each child's place in members rather than its record: an Issue is a wide
-	// struct, and the walk reads only its key and whether it is in the workflow.
-	children := map[string][]int{}
-	for index, member := range members {
-		if member.Parent != nil && *member.Parent != "" {
-			children[*member.Parent] = append(children[*member.Parent], index)
-		}
-	}
-	running := []string{}
-	seen := map[string]bool{issue.Key: true}
-	for frontier := []string{issue.Key}; len(frontier) > 0; {
-		current := frontier[len(frontier)-1]
-		frontier = frontier[:len(frontier)-1]
-		for _, index := range children[current] {
-			child := members[index]
-			if seen[child.Key] {
-				continue
-			}
-			seen[child.Key] = true
-			frontier = append(frontier, child.Key)
-			if InWorkflow(child) {
-				running = append(running, child.Key)
-			}
-		}
-	}
-	slices.Sort(running)
-	return running, nil
 }
 
 func (e *Engine) gateForIssue(ctx context.Context, tx pgx.Tx, issue record.Issue) (*record.DesignGate, error) {

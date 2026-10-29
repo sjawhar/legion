@@ -42,7 +42,7 @@ func TestLoggedNATSURLsCarryNoUserinfo(t *testing.T) {
 	}
 	secrets := []string{"user-marker-0", "pw-marker-1", "tok-marker-2", "u-marker-5", "pw-marker-3"}
 
-	options("log-url-test", urls, nil, nil, nil).ReconnectErrCB(nil, errors.New("dial refused"))
+	options("log-url-test", urls, nil, nil, nil, nil).ReconnectErrCB(nil, errors.New("dial refused"))
 
 	// Only this client's records: a client an earlier test left reconnecting logs through the same
 	// default.
@@ -104,7 +104,7 @@ func TestTheReconnectedLineCarriesNoUserinfo(t *testing.T) {
 	t.Cleanup(nc.Close)
 	logs := captureLogs(t)
 
-	options("reconnected-url-test", nil, nil, nil, nil).ReconnectedCB(nc)
+	options("reconnected-url-test", nil, nil, nil, nil, nil).ReconnectedCB(nc)
 
 	var logged string
 	for _, record := range logs.records(t) {

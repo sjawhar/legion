@@ -117,6 +117,7 @@ type Option func(*rigConfig)
 type rigConfig struct {
 	lease    time.Duration
 	maxConns int
+	minters  map[string]requests.Minter
 }
 
 // WithLease sets the enrollment lease the broker grants, an hour by default, for a test whose
@@ -129,6 +130,13 @@ func WithLease(lease time.Duration) Option {
 // test that starves it; pgx's default otherwise.
 func WithPoolMaxConns(n int) Option {
 	return func(c *rigConfig) { c.maxConns = n }
+}
+
+// WithMinters gives the broker a minter for each kind minters names, as cmd/broker/main.go's
+// kindMinters does, so a test releases a kind secret through a minter aimed at its own stub
+// upstream; none by default.
+func WithMinters(minters map[string]requests.Minter) Option {
+	return func(c *rigConfig) { c.minters = minters }
 }
 
 // NewRig holds two secrets the person ada@example.com owns: TEST_SECRET, human-tier, which a
@@ -173,7 +181,7 @@ func NewRig(t *testing.T, options ...Option) *Rig {
 
 	reqMachine := &requests.Machine{
 		Store: st, Policy: cur, Secrets: policytest.Store(local), PendingTTL: 12 * time.Hour,
-		Audience: srv.URL, Skew: time.Minute, Replay: enr.Replay,
+		Audience: srv.URL, Skew: time.Minute, Replay: enr.Replay, Minters: config.minters,
 	}
 	reqMachine.Chain = requests.NewChainVerifier(st, srv.URL, time.Minute)
 	provider := NewOAuthProvider(t, st, issuer)

@@ -208,14 +208,19 @@ func TestListMyAnswersCollapsesRestoredAnswerEvents(t *testing.T) {
 	}
 	settleDocument(t, handler, issue.PrimaryArtifactID, issue.Key, "after-restore")
 
-	answeredEvents := 0
+	var answeredEvents []askEvent
 	for _, event := range issueAskEvents(t, handler, issue.Key) {
 		if event.Type == "ask.answered" && event.Payload.ID == askID {
-			answeredEvents++
+			answeredEvents = append(answeredEvents, event)
 		}
 	}
-	if answeredEvents != 2 {
-		t.Fatalf("ask.answered events = %d, want initial answer and restoration", answeredEvents)
+	if len(answeredEvents) != 2 {
+		t.Fatalf("ask.answered events = %d, want initial answer and restoration", len(answeredEvents))
+	}
+	// The restoration records no new answer: it says so (restored), so a reader of the event that
+	// takes an ask.answered for a person's answer — the Legion daemon waking a root — does not.
+	if answeredEvents[0].Payload.Restored || !answeredEvents[1].Payload.Restored {
+		t.Fatalf("restored flags = %t, %t; want the answer unmarked and the restoration marked", answeredEvents[0].Payload.Restored, answeredEvents[1].Payload.Restored)
 	}
 	if bob := getMyAnswers(t, handler, "bob", ""); len(bob.Rows) != 0 {
 		t.Fatalf("restorer got an answer row: %#v", bob.Rows)

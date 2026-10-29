@@ -71,7 +71,7 @@ const startedAt = new Date().toISOString();
  * types at the daemon's defaults. */
 const STATE = LegionStateResponse.parse({
   daemon: { project, schemaVersion: 1, boots: 1, firstBootAt: startedAt, startedAt },
-  admission: { cap: 1, active: [issue], waiting: [] },
+  admission: { cap: 1, active: [issue], waiting: [], blocked: [] },
   issues: {
     [issue]: {
       key: issue,

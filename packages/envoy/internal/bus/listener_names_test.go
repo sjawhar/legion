@@ -22,6 +22,23 @@ func TestListenerDurableAndQueueKeepTheListenersNames(t *testing.T) {
 	}
 }
 
+// The live lane's queue group spells the machine id as the role lanes' does, and is a group of its
+// own: in the role lanes' group the live lane would be a member NATS could hand a role message to.
+func TestListenerLiveQueueIsItsOwnGroupForTheMachine(t *testing.T) {
+	for _, tc := range []struct{ machineID, queue string }{
+		{"example-host-a", "envoy-listener-live-example-host-a"},
+		{"example host", "envoy-listener-live-example-host"},
+	} {
+		got := bus.ListenerLiveQueue(tc.machineID)
+		if got != tc.queue {
+			t.Errorf("ListenerLiveQueue(%q) = %q, want %q", tc.machineID, got, tc.queue)
+		}
+		if got == bus.ListenerQueue(tc.machineID) {
+			t.Errorf("ListenerLiveQueue(%q) = ListenerQueue's %q", tc.machineID, got)
+		}
+	}
+}
+
 func TestDispatchNamesKeepDispatchsExistingNames(t *testing.T) {
 	if got := bus.DispatchDeliveryDurable; got != "delivery-events" {
 		t.Errorf("DispatchDeliveryDurable = %q, want %q", got, "delivery-events")

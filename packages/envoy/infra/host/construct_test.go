@@ -76,6 +76,21 @@ func TestConstructTakesUnknownNatsUrlsAndSeedUnderPreview(t *testing.T) {
 	require.True(t, envs.IsComputed(), "envs from unknown inputs are unknown, not %s", envs.TypeString())
 }
 
+// subscribeAllTopics, sent as a consumer's program sends it through the plugin's schema, reaches
+// the container's environment as its last variable.
+func TestConstructTakesSubscribeAllTopics(t *testing.T) {
+	inputs := plainInputs()
+	inputs["natsUrls"] = property.New(property.NewArray([]property.Value{
+		property.New("nats://hub.internal.example:4222"),
+	}))
+	inputs["subscribeAllTopics"] = property.New(true)
+	m, err := construct(t, inputs, false)
+	require.NoError(t, err)
+
+	envs, _ := envsOf(t, m.One(t, containerType))
+	require.Equal(t, append(slices.Clone(exampleEnvs), "ENVOY_SUBSCRIBE_ALL_TOPICS=1"), envs)
+}
+
 // A plain field is for a literal: Construct refuses one whose input carries a dependency, before
 // the listener registers anything. This is the path the two tests above prove natsUrls and seed
 // stay clear of.

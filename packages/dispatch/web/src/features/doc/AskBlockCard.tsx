@@ -13,19 +13,24 @@ import {
   textPrimaryOnSurface,
 } from "../../theme/classes";
 import { AskCard } from "../inbox/AskCard";
+import { AskCompletionCard } from "../inbox/AskCompletionCard";
 import { AskOptionList } from "../inbox/AskOptionList";
 import { URGENCY_LABELS } from "../inbox/ask-urgency";
-import { actorLabel } from "../refs/actor";
+import { AgentName } from "../refs/AgentName";
+import { blockFragment } from "../refs/block-reference";
 import { CopyRefButton } from "../refs/CopyRefButton";
-import { buildReferencePath, itemRoute, parseDispatchReference, shortForm } from "../refs/routes";
+import { buildReferencePath, itemRoute, parseNodeReference, shortForm } from "../refs/routes";
 import { Timestamp } from "../refs/Timestamp";
-import { type AskBlockFacts, type AskBlockHost, askBlockFacts } from "./ask-block";
+import { type AskBlockFacts, type AskBlockHost, askBlockFacts } from "./typed-block-drawing";
 
 const PILL_CLASS = "rounded-full px-2 py-0.5 text-[10px] font-semibold tracking-wide uppercase";
 
 export interface AskBlockCardProps {
   /** The indexed ask row for this block, once the server has created it. */
   ask: Ask | undefined;
+  /** The block stands in text no server reads - a comment, ask or message body - so nothing
+   *  ever activates it: a malformed one is not told to fix its text to re-activate. */
+  detached?: boolean;
   host: AskBlockHost;
   /** Called once the server has recorded the reader's answer from this block. */
   onAnswered?: (id: string) => void;
@@ -33,6 +38,10 @@ export interface AskBlockCardProps {
    *  under; an issue document's asks carry their `issue_key`. */
   owner: { project: string; slug: string } | undefined;
   readOnly: boolean;
+  /** Whether a resolved block whose indexed ask row is resolved too shows the row's resolution
+   *  record: the current document of a closed issue, whose close withdrew the ask. A saved
+   *  version reads its own attributes only, so a later withdrawal never appears on it. */
+  rowResolution: boolean;
 }
 
 /** The decision block's host for the one ask card every surface shares. It portals into the
@@ -41,25 +50,35 @@ export interface AskBlockCardProps {
  * recorded outcome — once the server has indexed the block into an ask row and the surface is
  * live. Until then, and on a read-only surface (closed issue, version view), the block reads its
  * own attributes: the options with the chosen ones ticked and the note, and the header names who
- * answered. A block copied from another document's ask has no ask of its own: it shows its
+ * answered. The one exception is `rowResolution`: there a block whose attribute and ask row are
+ * both resolved shows the row's resolution record (its badge and who resolved it), with no
+ * composer. A block copied from another document's ask has no ask of its own: it shows its
  * source's state, and the header links to the document where that ask is answered. The question
  * itself is the editor's content, so no part of this card repeats it. */
 export function AskBlockCard({
   ask,
+  detached = false,
   host,
   onAnswered,
   owner,
   readOnly,
+  rowResolution,
 }: AskBlockCardProps): ReactNode {
   const facts = askBlockFacts(host.node);
   const malformed = facts.malformedReason !== undefined;
   const open = facts.state === "open";
   const answered = facts.state === "answered";
   const hosted = !malformed && !readOnly && ask !== undefined;
+  const resolvedRow =
+    !malformed && rowResolution && facts.state === "resolved" && ask?.state === "resolved"
+      ? ask
+      : undefined;
+  // Whether the footer shows a card naming who asked and how it ended, so the header does not.
+  const carded = hosted || resolvedRow !== undefined;
   const pill = askBlockPill[facts.urgency];
-  // A block ask indexed without an actor (the server settled it with no pending author) still
-  // shows when it was asked; "asked by" waits for a name.
-  const asker = ask === undefined ? undefined : actorLabel(ask.author);
+  // A block ask indexed without an actor (the server settled it with no pending author, an
+  // empty login) still shows when it was asked; "asked by" waits for a name.
+  const named = ask !== undefined && (ask.author.kind === "session" || ask.author.id !== "");
   const reference = ask === undefined ? undefined : itemRoute("ask", ask, owner);
   return (
     <>
@@ -81,11 +100,19 @@ export function AskBlockCard({
               </span>
             )}
             <strong className={textPrimaryOnSurface}>Decision</strong>
-            {hosted || ask === undefined ? null : (
+            {carded || ask === undefined ? null : (
               <span className="inline-flex items-center gap-x-2" data-dispatch-ask-asked="">
                 <span aria-hidden="true">·</span>
-                <span>{asker === "" ? "asked" : `asked by ${asker}`}</span>
-                {asker === "" ? null : <span aria-hidden="true">·</span>}
+                <span>
+                  {named ? (
+                    <>
+                      asked by <AgentName actor={ask.author} inline />
+                    </>
+                  ) : (
+                    "asked"
+                  )}
+                </span>
+                {named ? <span aria-hidden="true">·</span> : null}
                 <Timestamp at={ask.created_at} />
               </span>
             )}
@@ -94,7 +121,7 @@ export function AskBlockCard({
             {(hosted && ask.state === "open") || reference === undefined ? null : (
               <CopyRefButton route={reference} />
             )}
-            {!hosted && answered ? (
+            {!carded && answered ? (
               <span className="inline-flex items-center gap-x-2" data-dispatch-ask-answered="">
                 <span aria-hidden="true">·</span>
                 <span>Answered by {facts.answeredBy}</span>
@@ -106,7 +133,7 @@ export function AskBlockCard({
                 )}
               </span>
             ) : null}
-            {!hosted && !malformed && !open && !answered ? (
+            {!carded && !malformed && !open && !answered ? (
               <span className={`${PILL_CLASS} ${badgeLow.bg} ${badgeLow.text}`}>
                 {facts.state === "resolved" ? "Resolved" : "Closed"}
               </span>
@@ -127,9 +154,11 @@ export function AskBlockCard({
       )}
       {createPortal(
         malformed ? (
-          <p className={`mt-3 text-sm ${textMutedOnSurfaceMuted}`}>
-            Fix the block text; the decision re-activates once it parses.
-          </p>
+          detached ? null : (
+            <p className={`mt-3 text-sm ${textMutedOnSurfaceMuted}`}>
+              Fix the block text; the decision re-activates once it parses.
+            </p>
+          )
         ) : hosted ? (
           <AskCard
             ask={ask}
@@ -140,12 +169,36 @@ export function AskBlockCard({
             thread="collapsed"
             variant="compact"
           />
+        ) : resolvedRow !== undefined ? (
+          <AskCompletionCard
+            artifactSlug={undefined}
+            ask={resolvedRow}
+            documentLink={false}
+            edits={[]}
+            frame="block"
+          />
         ) : (
           <AttributeRecord facts={facts} />
         ),
         host.footer
       )}
     </>
+  );
+}
+
+/** The read-only card a past version shows, for a decision block in a text body (a comment, ask
+ *  or message): what the app provides as `TextAskCard`, so `useRenderedMarkdown` mounts it into
+ *  each `ask` shell the body draws. The block reads its own attributes, never an ask row. */
+export function TextAskBlockCard({ host }: { host: AskBlockHost }): ReactNode {
+  return (
+    <AskBlockCard
+      ask={undefined}
+      detached
+      host={host}
+      owner={undefined}
+      readOnly
+      rowResolution={false}
+    />
   );
 }
 
@@ -158,7 +211,8 @@ const COPY_STATE_LABELS: Record<string, string> = {
 
 /** Where a copied block is answered: the document settlement names in the block's
  * `copied_from_document`, linked at the block, and the source's state there, which settlement
- * wrote into the block. Both come from the block, so the card reads no ask to show them. */
+ * wrote into the block. Both come from the block, so the card reads no ask to show them; the
+ * document's reference is the server's, read whatever the length of its name. */
 function CopiedFromLink({
   blockId,
   copied,
@@ -168,7 +222,7 @@ function CopiedFromLink({
   copied: NonNullable<AskBlockFacts["copiedFrom"]>;
   state: string;
 }): ReactNode {
-  const route = parseDispatchReference(copied.document);
+  const route = parseNodeReference(copied.document);
   const there = COPY_STATE_LABELS[state] ?? "closed there";
   return (
     <span className="inline-flex items-center gap-x-2" data-dispatch-ask-copied-from={copied.ask}>
@@ -178,7 +232,7 @@ function CopiedFromLink({
         {route === undefined ? (
           "another document"
         ) : (
-          <Link to={`${buildReferencePath(route)}#b-${encodeURIComponent(blockId)}`}>
+          <Link to={`${buildReferencePath(route)}${blockFragment(blockId)}`}>
             {route.kind === "spec" ? "the spec" : shortForm(route)}
           </Link>
         )}

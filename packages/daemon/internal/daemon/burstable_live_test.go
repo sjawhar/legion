@@ -1,9 +1,9 @@
 //go:build e2e
 
-// The Burstable roles live proof's driver (scripts/e2e/burstable-kind.sh, which builds it with
+// The Burstable issue pod live proof's driver (scripts/e2e/burstable-kind.sh, which builds it with
 // `-tags e2e`, owns the throwaway kind cluster it runs on, runs `legion start --check-config` on
 // the files this writes, and reads the pods' QoS class back with kubectl). Two legion.yaml files,
-// one giving the implementer a memory request below its limit and one with no `resources` block,
+// one giving the issue pod a memory request below its limit and one with no `resources` block,
 // are each read by the daemon's own loader and translated by the daemon's own sandboxOptions, and
 // the Agent Sandbox runtime they configure launches one issue's root on the cluster, through Agent
 // Sandbox's controller and the gvisor runtime class (burstable_kind_test.go builds both). What the
@@ -29,14 +29,15 @@ import (
 
 	"github.com/sjawhar/legion/daemon/internal/claim"
 	"github.com/sjawhar/legion/daemon/internal/config"
+	"github.com/sjawhar/legion/daemon/internal/runtime"
 	"github.com/sjawhar/legion/daemon/internal/runtime/sandbox"
 	"github.com/sjawhar/legion/daemon/internal/stream"
 )
 
-// TestBurstableRoleRendersABurstablePodLive launches an issue pod from each case's configuration
+// TestABurstableIssuePodRendersLive launches an issue pod from each case's configuration
 // and holds it to the case's reservation and QoS class, as the API server recorded them. It writes
 // `<case> <namespace>/<pod> <legion.yaml>` per case to LEGION_E2E_RESULT for the script.
-func TestBurstableRoleRendersABurstablePodLive(t *testing.T) {
+func TestABurstableIssuePodRendersLive(t *testing.T) {
 	env := map[string]string{}
 	for _, name := range []string{"LEGION_E2E_KUBECONFIG", "LEGION_E2E_KUBE_CONTEXT", "LEGION_E2E_IMAGE", "LEGION_E2E_STREAM_HOST", "LEGION_E2E_WORK", "LEGION_E2E_RESULT"} {
 		if env[name] = os.Getenv(name); env[name] == "" {
@@ -65,20 +66,20 @@ func TestBurstableRoleRendersABurstablePodLive(t *testing.T) {
 		fmt.Printf("== %s: %s\n", tc.name, path)
 		fmt.Printf("   resource-limits row: %s\n", states(deployment.Report())["resource-limits"].Detail)
 		pod := launchBurstableLiveRoot(ctx, t, cfg, log)
-		implementer := liveContainer(t, pod, string(claim.RoleImplementer))
+		roles := liveContainer(t, pod, runtime.IssuePodContainer)
 		fmt.Printf("   pod %s/%s: qosClass %s, runtimeClassName %s, node %s, PodScheduled %s\n", pod.Namespace, pod.Name,
 			pod.Status.QOSClass, liveString(pod.Spec.RuntimeClassName), pod.Spec.NodeName, liveCondition(pod, corev1.PodScheduled))
-		fmt.Printf("   implementer container: requests cpu %s memory %s; limits cpu %s memory %s\n",
-			implementer.Resources.Requests.Cpu(), implementer.Resources.Requests.Memory(), implementer.Resources.Limits.Cpu(), implementer.Resources.Limits.Memory())
+		fmt.Printf("   roles container: requests cpu %s memory %s; limits cpu %s memory %s\n",
+			roles.Resources.Requests.Cpu(), roles.Resources.Requests.Memory(), roles.Resources.Limits.Cpu(), roles.Resources.Limits.Memory())
 		if pod.Status.QOSClass != tc.qos {
 			t.Errorf("%s: pod %s is %q, want %s", tc.name, pod.Name, pod.Status.QOSClass, tc.qos)
 		}
 		for _, kind := range []corev1.ResourceName{corev1.ResourceCPU, corev1.ResourceMemory, corev1.ResourceEphemeralStorage} {
-			if got, want := implementer.Resources.Requests[kind], tc.implementer.Requests[kind]; got.Cmp(want) != 0 {
-				t.Errorf("%s: the implementer requests %s %s, want %s", tc.name, kind, got.String(), want.String())
+			if got, want := roles.Resources.Requests[kind], tc.issue.Requests[kind]; got.Cmp(want) != 0 {
+				t.Errorf("%s: the roles container requests %s %s, want %s", tc.name, kind, got.String(), want.String())
 			}
-			if got, want := implementer.Resources.Limits[kind], tc.implementer.Limits[kind]; got.Cmp(want) != 0 {
-				t.Errorf("%s: the implementer is limited to %s %s, want %s", tc.name, kind, got.String(), want.String())
+			if got, want := roles.Resources.Limits[kind], tc.issue.Limits[kind]; got.Cmp(want) != 0 {
+				t.Errorf("%s: the roles container is limited to %s %s, want %s", tc.name, kind, got.String(), want.String())
 			}
 		}
 		if scheduled := liveCondition(pod, corev1.PodScheduled); scheduled != corev1.ConditionTrue {

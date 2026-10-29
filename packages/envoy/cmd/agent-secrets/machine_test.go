@@ -60,8 +60,8 @@ func TestMachineAndGrantCommandsNeedTheHelper(t *testing.T) {
 			t.Fatalf("%v with no helper: exit %d, stderr %q; want %d, %q", args, exit, stderr, exitUsageError, want)
 		}
 		_, stderr, exit = runAgentSecrets(t, binary, "", t.TempDir(), []string{"AGENT_SECRETS_HELPER_SOCK=" + sock}, args...)
-		if want := prefix + "AGENT_SECRETS_URL is required\n"; exit != exitUsageError || stderr != want {
-			t.Fatalf("%v with no AGENT_SECRETS_URL: exit %d, stderr %q; want %d, %q", args, exit, stderr, exitUsageError, want)
+		if !strings.HasPrefix(stderr, prefix+"AGENT_SECRETS_URL is required") || !strings.Contains(stderr, "secrets broker") || exit != exitUsageError {
+			t.Fatalf("%v with no AGENT_SECRETS_URL: exit %d, stderr %q; want %d and a refusal naming the variable and the broker it names", args, exit, stderr, exitUsageError)
 		}
 	}
 }

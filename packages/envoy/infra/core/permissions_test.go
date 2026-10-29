@@ -13,19 +13,22 @@ import (
 
 // listenerPublish is the listener's publish grant for example-host-a, written out by hand from
 // Envoy's names as they stand: every notification topic (the stream's subjects, the role lanes,
-// every exception lane and any ad-hoc topic), the stream and its durable, then each bucket in turn,
-// then the interest bucket's purge.
+// every exception lane and any ad-hoc topic), the stream (its stored-message get the read
+// /v1/replay makes) and its durable, then each bucket in turn, then the interest bucket's purge.
+// TestSessionPermissions's exact list holds none of it: no session gets the replay read.
 var listenerPublish = []string{
 	"notifications.>",
 	"$JS.API.STREAM.INFO.ENVOY_NOTIFICATIONS",
 	"$JS.API.STREAM.CREATE.ENVOY_NOTIFICATIONS",
 	"$JS.API.STREAM.UPDATE.ENVOY_NOTIFICATIONS",
+	"$JS.API.STREAM.MSG.GET.ENVOY_NOTIFICATIONS",
 	"$JS.API.CONSUMER.INFO.ENVOY_NOTIFICATIONS.listener-example-host-a",
 	"$JS.API.CONSUMER.CREATE.ENVOY_NOTIFICATIONS.listener-example-host-a",
 	"$JS.ACK.ENVOY_NOTIFICATIONS.listener-example-host-a.>",
 	"$JS.API.INFO",
 	"$JS.API.STREAM.INFO.KV_envoy_interests",
 	"$JS.API.STREAM.CREATE.KV_envoy_interests",
+	"$JS.API.STREAM.UPDATE.KV_envoy_interests",
 	"$JS.API.DIRECT.GET.KV_envoy_interests.>",
 	"$JS.API.STREAM.MSG.GET.KV_envoy_interests",
 	"$KV.envoy_interests.>",
@@ -34,6 +37,7 @@ var listenerPublish = []string{
 	"$JS.FC.KV_envoy_interests.>",
 	"$JS.API.STREAM.INFO.KV_envoy_roles",
 	"$JS.API.STREAM.CREATE.KV_envoy_roles",
+	"$JS.API.STREAM.UPDATE.KV_envoy_roles",
 	"$JS.API.DIRECT.GET.KV_envoy_roles.>",
 	"$JS.API.STREAM.MSG.GET.KV_envoy_roles",
 	"$KV.envoy_roles.>",
@@ -42,6 +46,7 @@ var listenerPublish = []string{
 	"$JS.FC.KV_envoy_roles.>",
 	"$JS.API.STREAM.INFO.KV_envoy_sessions",
 	"$JS.API.STREAM.CREATE.KV_envoy_sessions",
+	"$JS.API.STREAM.UPDATE.KV_envoy_sessions",
 	"$JS.API.DIRECT.GET.KV_envoy_sessions.>",
 	"$JS.API.STREAM.MSG.GET.KV_envoy_sessions",
 	"$KV.envoy_sessions.>",
@@ -50,6 +55,7 @@ var listenerPublish = []string{
 	"$JS.FC.KV_envoy_sessions.>",
 	"$JS.API.STREAM.INFO.KV_envoy_ci_state",
 	"$JS.API.STREAM.CREATE.KV_envoy_ci_state",
+	"$JS.API.STREAM.UPDATE.KV_envoy_ci_state",
 	"$JS.API.DIRECT.GET.KV_envoy_ci_state.>",
 	"$JS.API.STREAM.MSG.GET.KV_envoy_ci_state",
 	"$KV.envoy_ci_state.>",
@@ -149,6 +155,7 @@ func TestDispatchPermissions(t *testing.T) {
 		"$JS.ACK.ENVOY_NOTIFICATIONS.delivery-jobs.>",
 		"$JS.API.STREAM.INFO.KV_envoy_webhook_redelivery",
 		"$JS.API.STREAM.CREATE.KV_envoy_webhook_redelivery",
+		"$JS.API.STREAM.UPDATE.KV_envoy_webhook_redelivery",
 		"$JS.API.DIRECT.GET.KV_envoy_webhook_redelivery.>",
 		"$JS.API.STREAM.MSG.GET.KV_envoy_webhook_redelivery",
 		"$KV.envoy_webhook_redelivery.>",

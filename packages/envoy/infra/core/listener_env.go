@@ -37,6 +37,13 @@ type ListenerConfig struct {
 	// (cmd/listener/apiauth.go, servesHost); an entry is rendered as written, since the listener
 	// normalizes what it reads.
 	AllowedHosts []string
+	// SubscribeAllTopics renders ENVOY_SUBSCRIBE_ALL_TOPICS=1, which has the listener also hold a
+	// core subscription on every notification topic, so a session served on its machine receives a
+	// topic the stream does not store. Only a NATS user whose grant allows `notifications.>`
+	// (HostPermissions) may set it: the listener's start ends when NATS refuses that subscription,
+	// as it does for ListenerPermissions and DispatchPermissions. The component cannot read the
+	// user's grant, so the operator who knows it opts in; false renders nothing.
+	SubscribeAllTopics bool
 }
 
 // TailnetHostName is the address a client reaches the listener of the tailnet machine hostname by,
@@ -167,7 +174,9 @@ func (c ListenerConfig) Check() error {
 // the URL. ENVOY_ALLOW_REMOTE_NATS=1 is set exactly when a URL names a server bus.LocalNATSURL
 // does not vouch for, since the listener refuses such a server without it. ENVOY_ALLOWED_HOSTS
 // follows the ENVOY_LISTEN_HOST block, and only when the config lists a host, so a listener
-// without one renders what it always rendered.
+// without one renders what it always rendered. ENVOY_SUBSCRIBE_ALL_TOPICS=1 comes last, and only
+// when SubscribeAllTopics is set, for the same reason: every rendering made before the opt-in
+// existed, the hub's cloud-config and Dispatch's container among them, stays byte for byte.
 func (c ListenerConfig) Env(natsURLs []string) ([]string, error) {
 	if err := c.Check(); err != nil {
 		return nil, err
@@ -215,6 +224,9 @@ func (c ListenerConfig) Env(natsURLs []string) ([]string, error) {
 	}
 	if c.HostBridge != "" {
 		env = append(env, "ENVOY_HOST_BRIDGE="+c.HostBridge)
+	}
+	if c.SubscribeAllTopics {
+		env = append(env, "ENVOY_SUBSCRIBE_ALL_TOPICS=1")
 	}
 	return env, nil
 }

@@ -5,6 +5,7 @@ import { MemoryRouter } from "react-router-dom";
 
 import { api } from "../../api/client";
 import type { Artifact, Event, IssueDetails } from "../../api/types";
+import type { AgentPart } from "../refs/AgentName";
 import { ActivityLine } from "./ActivityLine";
 
 const uploaded: Artifact = {
@@ -74,8 +75,9 @@ const base = {
   notify: false,
 } as const;
 
-function renderLine(event: Event, description: string) {
+function renderLine(event: Event, description: readonly AgentPart[]) {
   const getIssue = spyOn(api, "getIssue").mockResolvedValue(issue);
+  const listAgents = spyOn(api, "listAgents").mockResolvedValue([]);
   const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
   const view = render(
     <MemoryRouter initialEntries={["/issues/OPS-52/conversation"]}>
@@ -89,6 +91,7 @@ function renderLine(event: Event, description: string) {
     cleanup: () => {
       view.unmount();
       getIssue.mockRestore();
+      listAgents.mockRestore();
     },
   };
 }
@@ -101,7 +104,7 @@ test("an added artifact's name links to the artifact", () => {
     seq: 4,
     type: "artifact.created",
   };
-  const { cleanup } = renderLine(event, "added cu-update-2026-09-15.md");
+  const { cleanup } = renderLine(event, ["added cu-update-2026-09-15.md"]);
 
   try {
     const link = screen.getByRole("link", { name: "cu-update-2026-09-15.md" });
@@ -130,7 +133,7 @@ test("a saved version's name links to that version once the issue's artifacts ar
     seq: 5,
     type: "artifact.version",
   };
-  const { cleanup } = renderLine(event, "saved cu-update-2026-09-15.md v2");
+  const { cleanup } = renderLine(event, ["saved cu-update-2026-09-15.md v2"]);
 
   try {
     const link = await screen.findByRole("link", { name: "cu-update-2026-09-15.md" });
@@ -164,12 +167,45 @@ test("a comment activity keeps its view link", () => {
     seq: 6,
     type: "comment.created",
   } as Event;
-  const { cleanup } = renderLine(event, "commented on spec.md");
+  const { cleanup } = renderLine(event, ["commented on spec.md"]);
 
   try {
     expect(screen.getByText("commented on spec.md")).not.toBeNull();
     expect(screen.getByRole("link", { name: "view" }).getAttribute("href")).toBe(
       "/issues/OPS-52/comments/comment-1"
+    );
+  } finally {
+    cleanup();
+  }
+});
+
+// An agent the line names stays an agent until it is drawn: the claim it took names the
+// earlier holder through `AgentName`, a link to that session's live conversation.
+test("an agent the line names links to its live conversation", () => {
+  const holder = {
+    id: "session-one",
+    kind: "session" as const,
+    origin: { session_title: "Implementer" },
+  };
+  const event = {
+    ...base,
+    id: 7,
+    payload: {
+      claim: { actor: base.actor, at: "2026-09-15T00:00:00Z" },
+      key: "OPS-52",
+      previous_claim: { actor: holder, at: "2026-09-14T00:00:00Z" },
+      reason: "takeover",
+      status: "in_progress",
+    },
+    seq: 7,
+    type: "issue.claimed",
+  } as Event;
+  const { cleanup, view } = renderLine(event, ["took the claim from ", { actor: holder }]);
+
+  try {
+    expect(view.container.textContent).toBe("took the claim from Implementer");
+    expect(screen.getByRole("link", { name: "Implementer" }).getAttribute("href")).toBe(
+      "/agents/session-one/live"
     );
   } finally {
     cleanup();

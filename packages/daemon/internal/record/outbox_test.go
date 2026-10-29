@@ -34,7 +34,7 @@ func TestOutboxPayloadsRoundTripThroughPostgres(t *testing.T) {
 		MergeQueuePublish{Role: "merge-queue", Packet: "READY #42 at head (approved at head) for LEGION-208 (https://github.com/sjawhar/legion/pull/42)"},
 		IssueBranch{Generation: 2},
 		SuperviseRequest{Op: "issue_close", Tree: "LEGION-208", Role: claim.RoleTester, Generation: 3, Reason: "LEGION-209 is done"},
-		IssueSuspend{Tree: "LEGION-208", Generation: 3, TreeGeneration: 7, Release: true},
+		IssueSuspend{Tree: "LEGION-208", Generation: 3, TreeGeneration: 7},
 		AutoMergeDisable{Number: 42},
 		ReadyMerge{Number: 42, Head: "c0de"},
 		SuperviseRequest{Op: "start", Tree: "LEGION-208", Role: claim.RoleImplementer, Generation: 3, Task: "Production check of LEGION-208", CheckLook: 2, CheckOpenedAt: now},
@@ -126,20 +126,6 @@ func TestNewOutboxRowRefusesInvalidPayloads(t *testing.T) {
 		{name: "a slot-free notice for an architect", payload: Notice{Kind: SlotFreeNotice}, reason: "unknown notice kind"},
 		{name: "a todo notice for an architect", payload: Notice{Kind: TodoNotice}, reason: "unknown notice kind"},
 		{name: "a tick notice for an architect", payload: Notice{Kind: TickNotice}, reason: "unknown notice kind"},
-		{name: "a parked-decision notice for an architect", payload: Notice{Kind: ParkedDecisionNotice}, reason: "unknown notice kind"},
-		{name: "an actor on a phase-finished notice", payload: Notice{Kind: "phase-finished", Actor: "user:a"}, reason: "only a spec decision's does"},
-		{name: "a ref on a child-status notice", payload: Notice{Kind: "child-status", Ref: "dispatch://LEGION-1/spec"}, reason: "only a spec decision's does"},
-		{name: "a decision on an architect's notice", payload: Notice{Kind: "design-approved", Decision: DecisionDesignApproved}, reason: "only a parked-decision controller notice does"},
-		{name: "a root on an architect's notice", payload: Notice{Kind: "design-approved", Root: "LEGION-1"}, reason: "only a parked-decision controller notice does"},
-		{name: "a parked decision with no root", payload: ControllerNotice{Kind: ParkedDecisionNotice, Decision: DecisionAskAnswered, Ref: "dispatch://LEGION-1/ask/a", Actor: "user:a"}, reason: "a parked-decision notice needs"},
-		{name: "a parked decision with no ref", payload: ControllerNotice{Kind: ParkedDecisionNotice, Decision: DecisionAskAnswered, Root: "LEGION-1", Actor: "user:a"}, reason: "a parked-decision notice needs"},
-		{name: "a parked decision by no person", payload: ControllerNotice{Kind: ParkedDecisionNotice, Decision: DecisionAskAnswered, Root: "LEGION-1", Ref: "dispatch://LEGION-1/ask/a", Actor: "session:s"}, reason: "a parked-decision notice needs"},
-		{name: "a parked decision by an empty user", payload: ControllerNotice{Kind: ParkedDecisionNotice, Decision: DecisionAskAnswered, Root: "LEGION-1", Ref: "dispatch://LEGION-1/ask/a", Actor: "user:"}, reason: "a parked-decision notice needs"},
-		{name: "an unknown decision", payload: ControllerNotice{Kind: ParkedDecisionNotice, Decision: "ask-ignored", Root: "LEGION-1", Ref: "dispatch://LEGION-1", Actor: "user:a"}, reason: "a parked-decision notice needs"},
-		{name: "a parked decision with no decision", payload: ControllerNotice{Kind: ParkedDecisionNotice, Root: "LEGION-1", Ref: "dispatch://LEGION-1/ask/a", Actor: "user:a"}, reason: "carries a decision only when"},
-		{name: "a decision on a slot-free wake", payload: ControllerNotice{Kind: SlotFreeNotice, Decision: DecisionAskAnswered}, reason: "carries a decision only when"},
-		{name: "an actor on a tick", payload: ControllerNotice{Kind: TickNotice, Actor: "user:a"}, reason: "only a parked-decision does"},
-		{name: "a root on a held notice to the controller", payload: ControllerNotice{Kind: "held", Root: "LEGION-1"}, reason: "only a parked-decision does"},
 		{name: "unknown supervise operation", payload: SuperviseRequest{Op: "unknown"}, reason: "unknown supervise operation"},
 		{name: "a stop that is not a tree close", payload: SuperviseRequest{Op: "stop", Tree: "LEGION-208", Role: claim.RoleArchitect}, reason: "unknown supervise operation"},
 		{name: "an issue close naming a linger", payload: SuperviseRequest{Op: "issue_close", Tree: "LEGION-208", Role: claim.RoleTester, Generation: 3, Linger: 7}, reason: "only a tree close"},
@@ -244,9 +230,12 @@ func TestABuildCheckCompareRowReadsAsItDidBeforeDeployRuns(t *testing.T) {
 	}
 }
 
-// A releasing suspension is the field's own: an issue_suspend row written before the field existed
-// reads as the close that keeps, so no migration rewrites it.
-func TestAnIssueSuspensionWithoutTheReleaseFieldKeepsTheSandbox(t *testing.T) {
+// The release field is gone: an issue's close deletes its Sandbox in every case, so a suspension
+// carries nothing to say which. A row the previous release queued with the field is stripped of
+// it at the upgrade (migration 0051), since the payload decodes strictly and the key would stall
+// its issue's lane; one written without it has always read as this row does, and nothing encodes
+// the key again.
+func TestAnIssueSuspensionCarriesNoReleaseField(t *testing.T) {
 	row := OutboxRow{ID: 40, Kind: OutboxKindIssueSuspend, Payload: json.RawMessage(`{"tree":"LEGION-208","generation":3,"treeGeneration":7}`)}
 	got, err := DecodeOutboxPayload(row)
 	if err != nil {
@@ -254,14 +243,18 @@ func TestAnIssueSuspensionWithoutTheReleaseFieldKeepsTheSandbox(t *testing.T) {
 	}
 	want := IssueSuspend{Tree: "LEGION-208", Generation: 3, TreeGeneration: 7}
 	if got != want {
-		t.Fatalf("payload = %#v, want %#v with Release false", got, want)
+		t.Fatalf("payload = %#v, want %#v", got, want)
 	}
 	encoded, err := json.Marshal(want)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if strings.Contains(string(encoded), "release") {
-		t.Fatalf("a keeping suspension encodes %s, want no release field", encoded)
+		t.Fatalf("a suspension encodes %s, want no release field", encoded)
+	}
+	stale := OutboxRow{ID: 41, Kind: OutboxKindIssueSuspend, Payload: json.RawMessage(`{"tree":"LEGION-208","generation":3,"treeGeneration":7,"release":true}`)}
+	if _, err := DecodeOutboxPayload(stale); err == nil || !strings.Contains(err.Error(), `unknown field "release"`) {
+		t.Fatalf("decoding a row the previous release wrote = %v, want the strict refusal migration 0051 clears", err)
 	}
 }
 
@@ -295,48 +288,5 @@ func TestATickNoticeCarriesItsOpenCapabilitiesThroughTheRow(t *testing.T) {
 				t.Fatalf("payload = %#v, want %#v", got, tc.payload)
 			}
 		})
-	}
-}
-
-// A parked-decision notice keeps every field through its outbox row, and a spec decision's
-// architect notice keeps who made it and where.
-func TestAParkedDecisionKeepsItsDecisionThroughTheRow(t *testing.T) {
-	now := time.Date(2026, 10, 24, 9, 0, 0, 0, time.UTC)
-	for _, payload := range []OutboxPayload{
-		ControllerNotice{Kind: ParkedDecisionNotice, Decision: DecisionDesignChangesRequested, Root: "LEGION-1", Ref: "dispatch://LEGION-1/spec",
-			Actor: "user:alice", Version: 3, Reason: "name the rollback path"},
-		ControllerNotice{Kind: ParkedDecisionNotice, Decision: DecisionAskReply, Root: "LEGION-1", Ref: "dispatch://LEGION-2/comment/c-1", Actor: "user:alice"},
-		Notice{Kind: "design-approved", Version: 3, Actor: "user:alice", Ref: "dispatch://LEGION-1/spec"},
-	} {
-		row, err := NewOutboxRow("LEGION-1", payload, now)
-		if err != nil {
-			t.Fatalf("NewOutboxRow(%#v): %v", payload, err)
-		}
-		got, err := DecodeOutboxPayload(row)
-		if err != nil || !reflect.DeepEqual(got, payload) {
-			t.Fatalf("decoded %#v, %v; want %#v", got, err, payload)
-		}
-	}
-}
-
-// SpecDecision names the three notice kinds a person's spec decision writes, and no other.
-func TestSpecDecisionNamesTheThreeKindsAPersonsSpecDecisionWrites(t *testing.T) {
-	for kind, want := range map[NoticeKind]DecisionKind{
-		"design-approved":          DecisionDesignApproved,
-		"design-changes-requested": DecisionDesignChangesRequested,
-		"carried-gate-opened":      DecisionCarriedGateOpened,
-		"child-status":             "",
-		"worker-died":              "",
-		ParkedDecisionNotice:       "",
-	} {
-		got, ok := SpecDecision(kind)
-		if got != want || ok != (want != "") {
-			t.Errorf("SpecDecision(%q) = %q, %t; want %q, %t", kind, got, ok, want, want != "")
-		}
-	}
-	for actor, want := range map[string]bool{"user:alice": true, "user:": false, "session:s": false, "": false, "agent:user:alice": false} {
-		if got := PersonActor(actor); got != want {
-			t.Errorf("PersonActor(%q) = %t, want %t", actor, got, want)
-		}
 	}
 }

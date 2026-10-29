@@ -3,6 +3,7 @@ package dispatch
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"net/http"
 	"strings"
@@ -22,17 +23,19 @@ func MessageBodyLength(body string) int {
 
 // Client is the Dispatch surface the workflow needs. It deliberately exposes only the reads and
 // writes the daemon owns; callers preserve the order ListIssues returns when deciding admission.
-// BuildCommit is the one read of Dispatch itself rather than of its issues: the build commit it
-// reports on /healthz, which the boot compares against the open production checks of the
-// repository the daemon is built from.
+// BuildCommit is the one read of Dispatch itself rather than of its issues: the build its server
+// fleet serves, as its /healthz reports it, which the boot compares against the open production
+// checks of the repository the daemon is built from.
 type Client interface {
 	ListIssues(ctx context.Context, project string, statuses []string) ([]IssueSummary, error)
 	GetIssue(ctx context.Context, key string) (Issue, error)
-	Ask(ctx context.Context, id string) (Ask, error)
-	SetStatus(ctx context.Context, key, status string) error
+	SetStatus(ctx context.Context, key, status string) (Issue, error)
 	HandOver(ctx context.Context, issue Issue, status string) error
 	PostMessage(ctx context.Context, key, body string) error
 	MessageBodiesSince(ctx context.Context, key string, since time.Time) ([]string, error)
+	// EventsAfter is the issue's event log after a sequence, oldest first, each event as Dispatch
+	// serves it: the boot catch-up's read of what a root's durable stream may not have delivered.
+	EventsAfter(ctx context.Context, key string, after int64) ([]json.RawMessage, error)
 	Approval(ctx context.Context, artifactID string) (Approval, error)
 	BuildCommit(ctx context.Context) (string, error)
 	ListRepoProjects(ctx context.Context) ([]RepoProject, error)
@@ -82,8 +85,27 @@ type IssueSummary struct {
 	// ResolvedRepo is the repository (owner/name) Dispatch resolves the issue to: its own, else its
 	// nearest ancestor's, else its project's default; empty when it resolves to none.
 	ResolvedRepo string
-	// ClaimedBy is the issue's current claim holder as Claim.Holder writes it, or empty.
-	ClaimedBy string
+	// BlockedBy is the keys of the issues, in this issue's own project, that this issue waits on,
+	// in the order Dispatch lists them; none when it waits on nothing.
+	BlockedBy []string
+	// ClaimedBy is who Dispatch shows holding the issue's claim, as Claim.Holder writes it, or
+	// empty for nobody. ClaimUnread says Dispatch showed a claim naming no actor: neither nobody
+	// nor anyone the daemon can name, so the read says nothing of the claim.
+	ClaimedBy   string
+	ClaimUnread bool
+}
+
+// Issue is the summary as an Issue, for a reader that has only Dispatch's listing of the issue:
+// every field the listing carries, the claim from its holder (Claim.Holder's `<kind>:<id>`). A
+// summary carries no project, no labels beyond the hand-over and no primary document, so those are
+// empty.
+func (s IssueSummary) Issue() Issue {
+	var claim *Claim
+	if kind, id, ok := strings.Cut(s.ClaimedBy, ":"); ok {
+		claim = &Claim{Kind: kind, ID: id}
+	}
+	return Issue{Key: s.Key, Title: s.Title, Status: s.Status, Parent: s.Parent, Rank: s.Rank, HandedOver: s.HandedOver,
+		LastSeq: s.LastSeq, ResolvedRepo: s.ResolvedRepo, BlockedBy: s.BlockedBy, Claim: claim, ClaimUnread: s.ClaimUnread}
 }
 
 // Issue is the workflow data from Dispatch's issue-detail route. HandedOver is resolved here, at
@@ -100,19 +122,22 @@ type Issue struct {
 	HandedOver        bool
 	PrimaryArtifactID string
 	LastSeq           int64
-	// Claim is Dispatch's current issue claim, nil when no actor has it.
-	Claim *Claim
 	// ResolvedRepo is IssueSummary.ResolvedRepo.
 	ResolvedRepo string
+	// BlockedBy is IssueSummary.BlockedBy.
+	BlockedBy []string
+	// Claim is the issue's claim Dispatch shows, nil for none; ClaimUnread is IssueSummary's.
+	Claim       *Claim
+	ClaimUnread bool
 }
 
-// Claim is the actor Dispatch currently records as the issue's holder.
+// Claim is the actor Dispatch records as an issue's holder: a session or a person.
 type Claim struct {
 	Kind string
 	ID   string
 }
 
-// Holder is the claim as the issue record keeps it, `<kind>:<id>`, or empty for no claim.
+// Holder is the claim as the daemon keeps it, `<kind>:<id>`, or empty for no claim.
 func (c *Claim) Holder() string {
 	if c == nil {
 		return ""
@@ -122,46 +147,27 @@ func (c *Claim) Holder() string {
 
 // Actor is who Dispatch names as having made a change: Kind `user` is a person, `session` an agent
 // session, and `system` Dispatch itself (its document settlement among them). Every Dispatch event
-// carries one, and so does an ask's answer, resolution and reply.
+// carries one.
 type Actor struct {
 	Kind string
 	ID   string
 }
 
-// Person says whether the actor is a person: only a person's act answers a root waiting on one.
+// Person says whether the actor is a person.
 func (a Actor) Person() bool { return a.Kind == "user" }
 
-// Name is the actor as `<kind>:<id>`, the form a claim's holder takes and Legion's notices name a
-// decision's author in (record.Notice.Actor), or empty for no actor.
-func (a Actor) Name() string {
-	if a == (Actor{}) {
-		return ""
-	}
-	return a.Kind + ":" + a.ID
-}
-
-// Ask is the bounded portion of a Dispatch ask detail the daemon needs to catch up a suspended
-// architect after boot. WaitingOn is whose reply an open ask needs next, `human` or `agent`; Dispatch
-// leaves it empty on an answered or resolved ask. ClosedBy is who closed a closed ask: the person
-// whose answer it carries (Dispatch takes an answer from a person alone), or the actor its
-// resolution names; zero on an open ask. LastReplyID and LastReplyBy are the newest reply in its
-// thread and its author, both zero when it has none.
-type Ask struct {
-	ID          string
-	IssueKey    string
-	Kind        string
-	State       string
-	WaitingOn   string
-	ClosedBy    Actor
-	LastReplyID string
-	LastReplyBy Actor
-}
+// SettlementActor is Dispatch's document settlement, which closes an ask whose decision block left
+// its document in its own name (Dispatch's docs.SettlementActor).
+var SettlementActor = Actor{Kind: "system", ID: "document-settlement"}
 
 // Approval is the current approval state Dispatch derives for a document, and the issue carrying
 // the document (empty for a project document). While an approval request is open (State
-// `awaiting`), AskID names it and WaitingOn is whose reply it needs next, `human` or `agent`. By is
-// who gave the review State shows (an approval or a changes request), zero when Dispatch names
-// nobody.
+// `awaiting`), AskID names it and WaitingOn is whose reply it needs next, `human` or `agent`; both
+// are empty in every other state. At and Seq identify the document's latest review,
+// whatever State shows: At is Dispatch's time of it (its `created_at`, which its artifact.* event
+// shares, since one transaction writes both), and Seq that event's sequence on the issue. Each is
+// zero when Dispatch gave none: At when the document has no review, Seq also for a review Dispatch
+// recorded before it kept the sequence, and from a Dispatch that predates it.
 type Approval struct {
 	IssueKey      string
 	State         string
@@ -170,7 +176,8 @@ type Approval struct {
 	Reason        *string
 	AskID         string
 	WaitingOn     string
-	By            Actor
+	At            time.Time
+	Seq           int64
 }
 
 // ApprovedLatest is the version Dispatch shows approved when that approval is of its latest
@@ -194,16 +201,6 @@ func (a Approval) ChangesRequestedLatest() (int, string) {
 		reason = *a.Reason
 	}
 	return *a.Version, reason
-}
-
-// LatestReviewer is who gave the review Dispatch shows on its latest version, an approval
-// (ApprovedLatest) or a changes request (ChangesRequestedLatest), and zero when the latest version
-// has neither.
-func (a Approval) LatestReviewer() Actor {
-	if changes, _ := a.ChangesRequestedLatest(); a.ApprovedLatest() == 0 && changes == 0 {
-		return Actor{}
-	}
-	return a.By
 }
 
 // Error is a non-success response from Dispatch. Code is empty only when the response did not

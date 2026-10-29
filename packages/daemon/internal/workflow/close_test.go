@@ -21,23 +21,24 @@ import (
 // of the workflow. The child leaves the table: its phase is parked in done, so no transition or status
 // write follows. The root keeps its phase, its linger stays unarmed, none of its claims is stopped,
 // and the architect is told which child left and how. What the child's claims get is the
-// status's: a child closed as done by a human has every claim closed (issue_close) and its Sandbox
-// released with its volume (a releasing IssueSuspend); one closed at its merge has five claims
-// closed and its implementer kept for the production check the merge opens, whose close writes the
-// release (merge_close_test.go); and one parked in backlog, icebox or triage has every claim
-// suspended and its Sandbox kept (a keeping IssueSuspend).
+// status's: a child closed as done by a human has every claim closed (issue_close); one closed at
+// its merge has five claims closed and its implementer kept for the production check the merge
+// opens, whose close writes the suspension (merge_close_test.go); and one parked in backlog,
+// icebox or triage has every claim suspended, and its pod goes with the Sandbox the one
+// IssueSuspend its leave writes deletes. The merged child writes none at its close: its
+// implementer and pod stay for the production check's first look, and the suspension comes with
+// the check's pause or close (merge_close_test.go, which asserts zero here).
 func TestAChildLeavingTheWorkflowNeverClosesItsTree(t *testing.T) {
 	for _, tc := range []struct {
-		name    string
-		fact    intake.Fact
-		notice  record.NoticeKind
-		op      string
-		release bool
+		name   string
+		fact   intake.Fact
+		notice record.NoticeKind
+		op     string
 		// check is the merge's: the implementer is left out of the stops and owes the check.
 		check bool
 	}{
 		{name: "merged", fact: intake.PullRequestMerged{Repo: "sjawhar/legion", Number: 43, MergeSHA: "merge-43"}, notice: "child-closed", op: "issue_close", check: true},
-		{name: "closed by a human", fact: intake.DispatchIssue{Key: "LEGION-209", ResolvedRepo: "sjawhar/legion", Seq: 2, Type: "issue.closed", Status: "done", Title: "child", Parent: "LEGION-208", Rank: "V"}, notice: "child-closed", op: "issue_close", release: true},
+		{name: "closed by a human", fact: intake.DispatchIssue{Key: "LEGION-209", ResolvedRepo: "sjawhar/legion", Seq: 2, Type: "issue.closed", Status: "done", Title: "child", Parent: "LEGION-208", Rank: "V"}, notice: "child-closed", op: "issue_close"},
 		{name: "moved to backlog", fact: intake.DispatchIssue{Key: "LEGION-209", ResolvedRepo: "sjawhar/legion", Seq: 2, Type: "issue.updated", Status: "backlog", Title: "child", Parent: "LEGION-208", Rank: "V"}, notice: "child-status", op: "suspend"},
 		{name: "moved to icebox", fact: intake.DispatchIssue{Key: "LEGION-209", ResolvedRepo: "sjawhar/legion", Seq: 2, Type: "issue.updated", Status: "icebox", Title: "child", Parent: "LEGION-208", Rank: "V"}, notice: "child-status", op: "suspend"},
 		{name: "moved to triage", fact: intake.DispatchIssue{Key: "LEGION-209", ResolvedRepo: "sjawhar/legion", Seq: 2, Type: "issue.updated", Status: "triage", Title: "child", Parent: "LEGION-208", Rank: "V"}, notice: "child-status", op: "suspend"},
@@ -99,8 +100,8 @@ func TestAChildLeavingTheWorkflowNeverClosesItsTree(t *testing.T) {
 			if tc.check && len(got) != 0 {
 				t.Fatalf("issue suspensions of the merged child = %+v, want none until its check closes", got)
 			}
-			if !tc.check && (len(got) != 1 || got[0].Release != tc.release || got[0].Tree != "LEGION-208" || got[0].Generation != 7 || got[0].TreeGeneration != 7) {
-				t.Fatalf("issue suspensions of the child = %+v, want one of its tree at both generations 7 with release %t", got, tc.release)
+			if !tc.check && (len(got) != 1 || got[0].Tree != "LEGION-208" || got[0].Generation != 7 || got[0].TreeGeneration != 7) {
+				t.Fatalf("issue suspensions of the child = %+v, want one of its tree at both generations 7", got)
 			}
 			if got := issueSuspensions(t, pool, "LEGION-208"); len(got) != 0 {
 				t.Fatalf("the child's leave suspended the root's issue: %+v", got)

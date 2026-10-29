@@ -16,8 +16,9 @@ the issue header. Triage it as `skill://legion-controller/references/triage.md` 
 
 ## `slot-free on <KEY>` (`{kind: "slot-free"}`)
 
-The daemon released `<KEY>`'s slot, because its tree finished or left the workflow, and no waiting
-root took it. Name the free slots; take nothing.
+The daemon released `<KEY>`'s slot and no waiting root took it: its tree finished or left the
+workflow, or the root returned the slot to wait on a person (`awaiting_person`, which also sends
+its own `awaiting-person` wake). Name the free slots; take nothing.
 
 ## `todo on <KEY>` (`{kind: "todo"}`)
 
@@ -25,11 +26,11 @@ root took it. Name the free slots; take nothing.
 daemon waits half a minute and folds that window's events into one wake. Take nothing: it is not
 Legion's.
 
-## `tick on <PROJECT>` (`{kind: "tick", openCapabilities?}`)
+## `tick on <PROJECT>` (`{kind: "tick", openCapabilities?, blocked?}`)
 
 The daemon's periodic wake, a minute after it starts and then every
 `controller_wake_interval_seconds` (an hour by default), whatever the slots. Run the skill's every-turn
-steps, then the parked-root walk (`skill://legion-controller/references/parked-decisions.md#the-walk`).
+steps.
 
 `openCapabilities`, when present, names the open capability rows; `read_state`'s `capabilities`
 gives each one's `detail`. A deployment row (the secrets broker, model fallback, a role's CPU and
@@ -41,38 +42,34 @@ has no `configLine`. The next daily report names each row still open; take no ot
 because the operator closes or decides a deployment row, and the operator or the issue's architect
 fixes a live row's session.
 
+`blocked`, when present, is `[{issue, blockedBy}, …]`: every root and child Legion is waiting to
+start behind an unfinished Dispatch issue, each with the issues it waits on. `read_state` shows the
+same list under `admission.blocked`, and `legion state` prints it as `blocked on Dispatch links:`.
+The wait ends when each blocker reaches `done` (a person's close, or the blocker's own merge) or its
+link is taken off (by a person or the tree's architect): name the waits in the day's report and
+take nothing for them.
+
 ## `unslotted on <KEY>` (`{kind: "unslotted", reason}`)
 
-A root that waited for a slot was moved from `todo` to the status `reason` names, by a person or by
-another session, so the daemon took it out of the workflow (`phase: done`) and starts nothing for
-it. Re-admit nothing, because the move was someone else's; `dispatch read` shows who claims it now.
-Tell the person in your summary: "<KEY> left Legion's waiting line: it was set to <status> while it
-waited for a slot, so Legion let it go; `todo` with the `legion` label queues it again". Other
-admission states: `skill://legion-controller/references/admission.md`.
+Either a root that waited for a slot was moved from `todo` to the status `reason` names, by a
+person or by another session, or a root waiting on a person (`awaiting_person`) could not be
+resumed — its `legion` label is gone, or a person or a session outside its tree took its Dispatch
+claim. Either way the daemon took it out of the workflow (`phase: done`) and starts nothing for it;
+`reason` says which. Re-admit nothing, because the move was someone else's; `dispatch read` shows
+who claims it now. Tell the person in your summary: "<KEY> left Legion's workflow: <reason as the
+wake gives it>; `todo` with the `legion` label queues it again". Other admission states:
+`skill://legion-controller/references/admission.md`.
 
 ## `awaiting-person on <KEY>` (`{kind: "awaiting-person", reason}`)
 
-A root whose architect waits only on a person (a closed design gate, or its question on the root),
-so the daemon returned its slot and suspended the architect's session after its turn. Read
-`issues.<KEY>.waitingOn`: the gate version or the ask it waits on. Do not park it or start
-anything, and take nothing for the slot it returned: it is no reason to label or admit an issue
-(the skill's free slots). `answeredAt` means a person answered: the root is already ahead of
-never-run roots, and admission resumes it at the next free slot. A missing label or a foreign
-Dispatch claim causes the separate `unslotted` wake. Admission states:
-`skill://legion-controller/references/admission.md`.
-
-## `parked-decision on <KEY>` (`{kind: "parked-decision", decision, root, ref, actor, version?, reason?}`)
-
-A person's spec decision, or answer, resolution or reply on an ask, on a tree Legion is not
-running, which nobody inside the tree heard. Decide whether `root` runs again as
-`skill://legion-controller/references/parked-decisions.md#deciding` says. When the decision gives
-its work a next step, `set_status` the root to `todo` only when the park is your own hold (its step
-2: by `session legion-daemon:<PROJECT>`, with your `Parked by Legion while it waits on:` mark beside
-it), never for any other park, an operator's `legion status` included (then leave it parked).
-Either way, post the `Parked decision read:` comment its step 4 gives (when the root's phase is not
-`done`: `backlog`, then `todo`, only if its `architect.state` is `failed` or `retired`, and nothing
-while its architect lives). When it only questions the work, leave the root as it is and answer on
-the question's ask (a request for changes: on the issue whose spec it reviews).
+A root whose architect asked a person a question, or handed its spec to a person for approval, and
+now waits only on them: the daemon returned
+its slot and suspends the architect after its turn, keeping its session. Read
+`issues.<KEY>.waitingOn`. Do not park it or start anything, and take nothing for the slot it
+returned: it is no reason to label or admit an issue ([Free
+slots](skill://legion-controller/SKILL.md#free-slots)). The person's answer puts it at the front of
+`admission.waiting` by itself, and the next free slot resumes its architect. A lost label or a
+foreign Dispatch claim sends the separate `unslotted` wake.
 
 ## `held on <KEY>` (`{kind: "held", phase, role?, reason?}`)
 
@@ -83,15 +80,10 @@ handle it as an escalation (`skill://legion-controller/references/escalation.md`
 with no `holdReason` while its tree lingers (the time after its root closes when a reopen resumes
 it) or is closed waits for the tree's re-admission and needs nothing from you.
 
-When an escalated hold's cause is not gone, park the tree: `set_status` the root to `backlog`,
-then, in the same turn, post one comment on the root (`dispatch comment --issue <root>
---body-file -`) whose first line is `Parked by Legion while it waits on: <the hold's cause>`, the
-cause being what you found the held phase waits on (the payload's `phase` and `role`, and the held
-issue's `dispatch read`). That mark is what makes the park Legion's own hold
-(`skill://legion-controller/references/parked-decisions.md#deciding`, step 2). Set the root back to
-`todo` only when you checked that the hold's cause is gone, a person asks, or a person's decision
-after the park gives its work a next step (that reference's step 4), because `todo` re-admits it
-as a new generation: a new run of the tree that starts again from its architect.
+When an escalated hold's cause is not gone, park the tree: `set_status` the root to `backlog`. Set
+the root back to `todo` only when you checked that the hold's cause is gone, or a person asks,
+because `todo` re-admits it as a new generation: a new run of the tree that starts again from its
+architect.
 
 ## `worker-died on <KEY>` (`role: "architect"`)
 

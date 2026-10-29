@@ -4,12 +4,13 @@ import { useLayoutEffect, useState } from "react";
 
 import type { BlockSchema } from "../../api/types";
 import { loadBlockSchema } from "../doc/schema";
+import { renderAskBlockShell, renderTypedBlock } from "../doc/typed-block-drawing";
+import { referenceSpans } from "./reference-spans";
 import {
   buildDispatchReference,
   buildReferencePath,
   parseDispatchReference,
   pictureReference,
-  referenceSpans,
   shortForm,
 } from "./routes";
 
@@ -29,18 +30,30 @@ export interface MarkdownEngine {
   readonly serializer: DOMSerializer;
   /**
    * The parsed document, or `undefined` for a source the parser refuses, which the caller shows
-   * as one plain-text node. Proof's schema has no node for CommonMark's raw-HTML spans (a bare
-   * tag-shaped substring outside a code span or fence, e.g. `<img src=x>`) or a mark span of a
-   * kind this schema does not carry, so the parser throws for them. HTML-like text inside a code
-   * span or fence parses safely as literal text, so nothing is escaped beforehand: escaping the
-   * whole source regardless of context would print literal backslashes around any code span or
-   * fence containing something tag-shaped. Reference-style links and images (`[text][id]` with
-   * their `[id]: url` definition) resolve to the link or image they name, so they do not throw.
+   * as one plain-text node. The engine parses read-only: a container directive the block schema
+   * refuses (`:::note` … `:::`), or a typed block whose content breaks its content rule (an ask
+   * holding a heading), is drawn as its literal fence lines around its formatted content rather
+   * than refused or silently dropped, a Pandoc `::: warning` fence or a `::leaf` / `:text{` line
+   * reads as paragraph text, and so does a `:::` opener inside 32 open container directives, the
+   * deepest the parser nests them (INFRA-581), so none of them throws. Proof's schema has no node
+   * for CommonMark's raw-HTML spans (a bare tag-shaped substring outside a code span or fence,
+   * e.g. `<img src=x>`) or a mark span of a kind this schema does not carry, so the parser still
+   * throws for them. HTML-like text inside a code span or fence parses safely as literal text,
+   * so nothing is escaped beforehand:
+   * escaping the whole source regardless of context would print literal backslashes around any
+   * code span or fence containing something tag-shaped. Reference-style links and images
+   * (`[text][id]` with their `[id]: url` definition) resolve to the link or image they name, so
+   * they do not throw.
    *
    * A throw leaves the parser's own stack mid-document, so the headless editor drops that
    * parser and the next parse builds a fresh one (about 0.03 ms): one refused body answers
    * `undefined` here and falls back to literal text, and the next turn or card someone else is
    * reading still formats.
+   *
+   * The read-only parse (`remarkReadOnlyDirectives` in @legion/proof-editor) drops every
+   * attribute the block schema marks `server` on a typed block, so it reads at its schema
+   * default: outside a document no server wrote it, so a body's `:::ask{state="answered" …}`
+   * reads as the open decision its author wrote, never as an answer nobody recorded.
    */
   parse(markdown: string, softBreaks?: SoftBreaks): ProseMirrorNode | undefined;
 }
@@ -117,7 +130,14 @@ function loadEngine(blockSchema: BlockSchema): Promise<MarkdownEngine> {
   }
   headlessModule ??= import("@legion/proof-editor/headless");
   const created = headlessModule
-    .then(({ createHeadlessProof }) => createHeadlessProof({ blockSchema }))
+    .then(({ createHeadlessProof }) =>
+      createHeadlessProof({
+        blockSchema,
+        readOnly: true,
+        renderBlock: (node, type) =>
+          type.name === "ask" ? renderAskBlockShell(node) : renderTypedBlock(node, type),
+      })
+    )
     .then((proof) => {
       const engine = buildEngine(proof);
       readyEngine = engine;

@@ -8,7 +8,7 @@ import type {
 import {
   componentPath,
   componentTone,
-  modelDistrusted,
+  distrustedSources,
   placeChild,
   predictTree,
   sourceState,
@@ -28,6 +28,7 @@ function component(
     parent: null,
     paths: [],
     prose: "",
+    source: "legion/legion",
     title: overrides.id,
     total: 0,
     ...overrides,
@@ -52,13 +53,15 @@ function tree(components: ArchitectureTreeComponent[]): ArchitectureTree {
     components,
     not_architectural: [],
     retired_links: [],
-    source: {
-      branch: "main",
-      last_commit: "abc123",
-      last_error: null,
-      last_sync_at: "2026-09-17T00:00:00Z",
-      repo: "legion/legion",
-    },
+    sources: [
+      {
+        branch: "main",
+        last_commit: "abc123",
+        last_error: null,
+        last_sync_at: "2026-09-17T00:00:00Z",
+        repo: "legion/legion",
+      },
+    ],
     totals: {
       components_without_work: components.filter((c) => !c.external && c.total === 0).length,
       issues_done: 0,
@@ -123,24 +126,22 @@ describe("source state (spec item 6)", () => {
       repo: "r",
     };
     expect(sourceState(fresh, now)).toBe("fresh");
-    expect(modelDistrusted(fresh, now)).toBe(false);
+    expect(distrustedSources([fresh], now).has("r")).toBe(false);
     const stale = { ...fresh, last_sync_at: "2026-09-17T11:49:59Z" };
     expect(sourceState(stale, now)).toBe("stale");
-    expect(modelDistrusted(stale, now)).toBe(true);
+    expect(distrustedSources([stale], now).has("r")).toBe(true);
   });
-  test("a failed import distrusts the model even when fresh", () => {
-    expect(
-      modelDistrusted(
-        {
-          branch: "main",
-          last_commit: "abc",
-          last_error: "duplicate component id",
-          last_sync_at: "2026-09-17T11:59:00Z",
-          repo: "r",
-        },
-        now
-      )
-    ).toBe(true);
+  test("a failed import distrusts that source's model even when fresh, and no other source's", () => {
+    const healthy = {
+      branch: "main",
+      last_commit: "abc",
+      last_error: null,
+      last_sync_at: "2026-09-17T11:59:00Z",
+      repo: "legion/legion",
+    };
+    const failed = { ...healthy, last_error: "duplicate component id", repo: "acme/infra" };
+    const neverSynced = { ...healthy, last_commit: null, last_sync_at: null, repo: "acme/new" };
+    expect([...distrustedSources([healthy, failed, neverSynced], now)]).toEqual(["acme/infra"]);
   });
 });
 

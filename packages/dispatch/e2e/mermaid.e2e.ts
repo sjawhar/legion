@@ -1,0 +1,1226 @@
+// A fenced `mermaid` block in a body Dispatch renders in full - an issue comment, an ask's
+// question on the Inbox, an issue message, a reply under its comment - draws as the diagram the
+// document editor draws (an image named "Rendered Mermaid diagram"), with its source closed behind
+// a `Mermaid source` disclosure. A source the renderer refuses shows the reason and the source; a
+// diagram the worker cannot draw within the time limit is refused the same way while the page
+// keeps responding; a label holding markup draws as text, never as an element; a block in another
+// language stays code. Every drawing row checks both halves: the image with its labels, and the
+// source hidden until the disclosure opens. At the commit before the change each body shows its
+// source as code, so every drawing row and the renderer-refusal row fail on their diagram or
+// status assertion, and the time-limit row fails at its hold assertion (no worker chunk loads).
+//
+// A mermaid block in a document (the issue's spec, open in the editor, or a past version) draws
+// too, and the document rows check what it must not do: its own sheet styles no other `svg` or
+// `text` on the page, no reader's browser fetches Google Fonts or any address hostile markup
+// names, and the diagram is drawn by Dispatch's Mermaid worker, never on the page's thread. So an
+// edit redraws once typing pauses, a diagram the worker does not draw in time is refused with its
+// source shown while the page keeps responding, a block link, a comment link or a highlighted
+// mark below a diagram still lands on its block once the diagram draws (but never pulls back a
+// reader who scrolled on), and with no worker, or a worker that fails after drawing, the block
+// shows its source. The editor's source disclosure stays open, so these rows never use the
+// closed-source check. Before the change the editor draws with upstream's view, synchronously on
+// the page's thread, its sheet and Google Fonts `@import` in the page, so the style,
+// hostile-document, worker, time-limit, focus and no-worker rows fail.
+import {
+  type BrowserContext,
+  expect,
+  type Locator,
+  type Page,
+  type TestInfo,
+  test,
+} from "@playwright/test";
+
+import type { ArtifactBlock } from "../web/src/api/types";
+import {
+  baseUrl,
+  createAsk,
+  createComment,
+  createIssue,
+  createMessage,
+  createProject,
+  getArtifactText,
+  userHeaders,
+} from "./api";
+import { documentEditor, markSpan, openSpec, placeCaret } from "./editor";
+import { resetDatabase } from "./seed";
+import { asUser } from "./users";
+
+// What this file's init scripts keep on the page's window.
+declare global {
+  interface Window {
+    /** Makes the page's workers fail from now on, as `failMermaidWorkersOnCall` describes. */
+    __failMermaidWorkers?: () => void;
+    /** Each script or handler of `HOSTILE_SVG` that ran. */
+    __hostile?: string[];
+    /** The `source` of each request posted to a worker. */
+    __mermaidSent?: string[];
+    /** How many workers the page constructed. */
+    __mermaidWorkers?: number;
+    /** The page's scroll offset at every frame since it loaded (`recordScrollEachFrame`). */
+    __scrollEachFrame?: number[];
+    /** Delivers what a held worker posted, and lets later posts through. */
+    __releaseMermaid?: () => void;
+  }
+}
+
+const session = {
+  actor: { id: "e2e-mermaid-agent", kind: "session" as const },
+  as: "agent" as const,
+};
+
+const diagramName = "Rendered Mermaid diagram";
+
+/** A body of `lead` and then one flowchart from `from` to `to`, whose source's first line is
+ *  `graph TD`. */
+function flowchart(lead: string, from: string, to: string): string {
+  return `${lead}\n\n\`\`\`mermaid\ngraph TD\n  ${from} --> ${to}\n\`\`\`\n`;
+}
+
+/** A document of `lead`, a vertical flowchart of 21 nodes in a chain (drawn taller than any
+ *  project's viewport), 30 filler paragraphs and then the paragraph `target`, so `target` sits
+ *  below the viewport when the page opens and the drawn diagram pushes it further down. */
+function tallDocument(lead: string, target: string): string {
+  const chain = Array.from({ length: 20 }, (_, node) => `  n${node} --> n${node + 1}`);
+  const filler = Array.from({ length: 30 }, (_, index) => `Filler paragraph ${index + 1}.`);
+  return `${lead}\n\n\`\`\`mermaid\ngraph TD\n${chain.join("\n")}\n\`\`\`\n\n${filler.join("\n\n")}\n\n${target}\n`;
+}
+
+function diagramIn(card: Locator): Locator {
+  return card.getByRole("img", { exact: true, name: diagramName });
+}
+
+function conversationTurns(page: Page): Locator {
+  return page.getByRole("list", { name: "Conversation turns" });
+}
+
+/** The comment thread `rootId` opened in the Conversation, where its bodies render in full rather
+ *  than as the collapsed card's preview: the turn itself on a desktop, the full-screen Thread
+ *  view on a phone. The turn shows `lead`, the root comment's first text, before it is expanded,
+ *  so the click lands on a turn that has rendered. */
+async function openCommentThread(
+  page: Page,
+  testInfo: TestInfo,
+  rootId: string,
+  lead: string
+): Promise<Locator> {
+  const turn = conversationTurns(page).locator(`:scope > li[data-turn="comment:${rootId}"]`);
+  await expect(turn).toContainText(lead);
+  await turn.getByRole("button", { exact: true, name: "Expand thread" }).click();
+  if (testInfo.project.name === "iphone") {
+    const thread = page.getByRole("dialog", { name: "Thread" });
+    await expect(thread).toBeVisible();
+    return thread.locator(`li[data-turn="comment:${rootId}"]`);
+  }
+  await expect(turn.getByRole("button", { exact: true, name: "Collapse thread" })).toBeVisible();
+  return turn;
+}
+
+/** Both halves of the control: `card` shows the drawn diagram holding `labels`, and its source
+ *  (whose first line is `graph TD`) stays out of sight until `Mermaid source` is opened. */
+async function expectDrawnDiagram(card: Locator, labels: readonly string[]): Promise<void> {
+  const diagram = diagramIn(card);
+  await expect(diagram).toBeVisible();
+  for (const label of labels) {
+    await expect(diagram).toContainText(label);
+  }
+  const source = card.getByText("graph TD");
+  // Mounted, closed inside the disclosure: toBeHidden alone also passes on no match at all.
+  await expect(source).toHaveCount(1);
+  await expect(source).toBeHidden();
+  await card.getByText("Mermaid source", { exact: true }).click();
+  await expect(source).toBeVisible();
+}
+
+/** The id of the block of `artifactId` whose markdown is exactly `text`. A paragraph's id is a
+ *  minted UUID, which `encodeBlockId` writes unchanged, so the id is also its `#b-` fragment.
+ *  Copied from `block-references.e2e.ts`, whose helpers each live in their own file. */
+async function blockId(artifactId: string, text: string): Promise<string> {
+  const { markdown } = await getArtifactText(artifactId);
+  const response = await fetch(
+    new URL(`/api/v1/artifacts/${encodeURIComponent(artifactId)}/blocks`, baseUrl),
+    { headers: await userHeaders() }
+  );
+  if (!response.ok) {
+    throw new Error(
+      `GET blocks of ${artifactId} failed: ${response.status} ${await response.text()}`
+    );
+  }
+  const blocks = (await response.json()) as ArtifactBlock[];
+  const block = blocks.find((candidate) => markdown.slice(candidate.from, candidate.to) === text);
+  if (block === undefined) {
+    throw new Error(`no block of ${artifactId} reads ${JSON.stringify(text)}: ${markdown}`);
+  }
+  expect(block.id).toMatch(/^[A-Za-z0-9-]+$/);
+  return block.id;
+}
+
+/** A request that never happens can only be shown by waiting: this long after the diagram shows
+ *  is far longer than an inserted element or sheet takes to start its fetch, so a request list
+ *  read after it holds every fetch the drawing caused. */
+const REQUEST_SETTLE_MS = 1_000;
+
+/** Wraps the page's `Worker` so the page counts each worker it constructs
+ *  (`window.__mermaidWorkers`) and records the `source` of each request posted to one
+ *  (`window.__mermaidSent`), passing everything through to the real worker. Mermaid's worker is
+ *  the app's only `new Worker` (`features/refs/mermaid-diagrams.ts`). */
+async function recordMermaidWorkers(page: Page): Promise<void> {
+  await page.addInitScript(() => {
+    window.__mermaidWorkers = 0;
+    window.__mermaidSent = [];
+    const RealWorker = window.Worker;
+    window.Worker = class extends RealWorker {
+      constructor(url: string | URL, options?: WorkerOptions) {
+        super(url, options);
+        window.__mermaidWorkers = (window.__mermaidWorkers ?? 0) + 1;
+      }
+
+      postMessage(message: unknown, options?: StructuredSerializeOptions | Transferable[]): void {
+        if (typeof message === "object" && message !== null && "source" in message) {
+          window.__mermaidSent?.push(String(message.source));
+        }
+        super.postMessage(message, options as StructuredSerializeOptions);
+      }
+    };
+  });
+}
+
+/** Wraps the page's `Worker` so nothing its workers post reaches the page until
+ *  `window.__releaseMermaid()` runs: each `message` event a listener added with
+ *  `addEventListener("message", …)` (as `mermaid-diagrams.ts` listens) or `onmessage` would get
+ *  is held, then delivered in arrival order on release, and later ones flow straight through.
+ *  The worker's `ready` is held too, and the time limit starts only at `ready`, so a held diagram
+ *  is never refused; it stays undrawn until the release. */
+async function holdMermaidWorkers(page: Page): Promise<void> {
+  await page.addInitScript(() => {
+    let released = false;
+    const held: (() => void)[] = [];
+    window.__releaseMermaid = () => {
+      released = true;
+      for (const deliver of held.splice(0)) deliver();
+    };
+    const RealWorker = window.Worker;
+    const HeldWorker = class extends RealWorker {
+      addEventListener(
+        type: string,
+        listener: EventListenerOrEventListenerObject,
+        options?: boolean | AddEventListenerOptions
+      ): void {
+        if (type !== "message") {
+          super.addEventListener(type, listener, options);
+          return;
+        }
+        super.addEventListener(
+          type,
+          (event) => {
+            const deliver = () => {
+              if (typeof listener === "function") listener.call(this, event);
+              else listener.handleEvent(event);
+            };
+            if (released) deliver();
+            else held.push(deliver);
+          },
+          options
+        );
+      }
+    };
+    const handlers = new WeakMap<Worker, ((event: MessageEvent) => unknown) | null>();
+    Object.defineProperty(HeldWorker.prototype, "onmessage", {
+      configurable: true,
+      get(this: Worker) {
+        return handlers.get(this) ?? null;
+      },
+      set(this: Worker, handler: ((event: MessageEvent) => unknown) | null) {
+        if (!handlers.has(this)) {
+          this.addEventListener("message", (event) => handlers.get(this)?.call(this, event));
+        }
+        handlers.set(this, handler);
+      },
+    });
+    window.Worker = HeldWorker;
+  });
+}
+
+/** Turns the browser's scroll anchoring off on `page`, as in Safari before 27, which has none.
+ *  Every engine Playwright runs anchors the scroll on the target when a diagram above it grows,
+ *  so with anchoring on a row would pass without the page's own focus re-run; with it off, only
+ *  that re-run brings the target back into view. */
+async function withoutScrollAnchoring(page: Page): Promise<void> {
+  await page.addStyleTag({ content: "* { overflow-anchor: none !important; }" });
+}
+
+/** Records the page's scroll offset (`window.__scrollEachFrame`) at every animation frame from
+ *  the moment it loads, so a row can see a jump back to the top that no single read would. */
+async function recordScrollEachFrame(page: Page): Promise<void> {
+  await page.addInitScript(() => {
+    const offsets: number[] = [];
+    window.__scrollEachFrame = offsets;
+    const sample = () => {
+      offsets.push(Math.round(window.scrollY));
+      requestAnimationFrame(sample);
+    };
+    requestAnimationFrame(sample);
+  });
+}
+
+/** The document's scroll offset once it has stopped moving: unchanged over 10 frames in a row, so
+ *  a smooth scroll a link or a wheel started has ended before the offset is read. */
+function settledScrollTop(page: Page): Promise<number> {
+  return page.evaluate(
+    () =>
+      new Promise<number>((resolve) => {
+        let last = -1;
+        let still = 0;
+        const sample = () => {
+          const top = document.scrollingElement?.scrollTop ?? 0;
+          still = top === last ? still + 1 : 0;
+          last = top;
+          if (still >= 10) resolve(top);
+          else requestAnimationFrame(sample);
+        };
+        sample();
+      })
+  );
+}
+
+/** Makes the page's `new Worker(...)` throw, as a browser with no worker to give does. */
+async function refuseWorkers(page: Page): Promise<void> {
+  await page.addInitScript(() => {
+    window.Worker = class {
+      constructor() {
+        throw new Error("This test's page has no Worker");
+      }
+    } as unknown as typeof Worker;
+  });
+}
+
+/** Wraps the page's `Worker` so its workers pass everything through until
+ *  `window.__failMermaidWorkers()` runs, and from then on fail as a worker whose chunk can no
+ *  longer load does, as across a redeploy: each worker's next `postMessage` posts nothing and
+ *  instead fires `error` on that worker (on a later task, as the browser reports a load failure),
+ *  and every `new Worker(...)` throws. */
+async function failMermaidWorkersOnCall(page: Page): Promise<void> {
+  await page.addInitScript(() => {
+    let failing = false;
+    window.__failMermaidWorkers = () => {
+      failing = true;
+    };
+    const RealWorker = window.Worker;
+    window.Worker = class extends RealWorker {
+      constructor(url: string | URL, options?: WorkerOptions) {
+        if (failing) throw new Error("This test's worker chunk no longer loads");
+        super(url, options);
+      }
+
+      postMessage(message: unknown, options?: StructuredSerializeOptions | Transferable[]): void {
+        if (failing) {
+          setTimeout(() => this.dispatchEvent(new Event("error")), 0);
+          return;
+        }
+        super.postMessage(message, options as StructuredSerializeOptions);
+      }
+    };
+  });
+}
+
+/** Records every request `context` makes to Google Fonts' two hosts and answers it with an empty
+ *  stylesheet, so a run needs no outbound network. */
+async function recordGoogleFonts(context: BrowserContext): Promise<string[]> {
+  const requested: string[] = [];
+  for (const host of ["https://fonts.googleapis.com/**", "https://fonts.gstatic.com/**"]) {
+    await context.route(host, (route) => {
+      requested.push(route.request().url());
+      return route.fulfill({ body: "", contentType: "text/css" });
+    });
+  }
+  return requested;
+}
+
+/** The text in a diagram's source that makes the page's parser read `HOSTILE_SVG` instead of
+ *  the markup the worker drew. */
+const HOSTILE_MARKER = "HOSTILE-MARKER";
+
+/** The source of a flowchart whose drawn markup holds `HOSTILE_MARKER`. */
+const hostileSource = `graph TD\n  A[${HOSTILE_MARKER}] --> B`;
+
+/** An SVG document that draws a visible box labelled `Hostile label`, and carries each thing a
+ *  sanitizer must take out: script, event handlers, external `href`s and `xlink:href`s, a
+ *  `<foreignObject>` holding HTML, a `javascript:` link, fetching `url(…)` paint and an
+ *  `@import`. Each handler or script that runs pushes to `window.__hostile`; each fetch goes to
+ *  `hostile.example`. */
+const HOSTILE_SVG = [
+  '<svg xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink"',
+  ' width="240" height="120" viewBox="0 0 240 120" onload="window.__hostile.push(\'svg onload\')">',
+  '<style>@import url("https://hostile.example/import.css"); text { fill: #333333; }</style>',
+  "<script>window.__hostile.push('script')</script>",
+  '<rect x="0" y="0" width="240" height="120" fill="#ffffff" stroke="#333333"',
+  " onload=\"window.__hostile.push('rect onload')\"/>",
+  '<text x="20" y="40">Hostile label</text>',
+  '<image href="https://hostile.example/image.png" width="10" height="10"',
+  " onerror=\"window.__hostile.push('image onerror')\"/>",
+  '<image xlink:href="https://hostile.example/xlink-image.png" width="10" height="10"',
+  " onerror=\"window.__hostile.push('xlink image onerror')\"/>",
+  '<use href="https://hostile.example/use.svg#u"/>',
+  '<foreignObject x="0" y="0" width="10" height="10">',
+  '<img xmlns="http://www.w3.org/1999/xhtml" src="https://hostile.example/fo.png"',
+  " onerror=\"window.__hostile.push('foreignObject img onerror')\"/>",
+  "</foreignObject>",
+  '<a href="javascript:window.__hostile.push(\'a href\')"><text x="20" y="80">Hostile link</text></a>',
+  '<rect x="200" y="90" width="10" height="10" fill="url(https://hostile.example/paint.svg#p)"',
+  ' style="fill:url(https://hostile.example/style.png)"/>',
+  "</svg>",
+].join("");
+
+/** Feeds `HOSTILE_SVG` through the real drawing path: the worker still renders the diagram, and
+ *  the page's `DOMParser`, which both the editor's and the bodies' sanitizers parse with, reads
+ *  `HOSTILE_SVG` in place of any SVG markup holding `HOSTILE_MARKER`. Every other parse is
+ *  untouched. Starts `window.__hostile` empty. */
+async function feedHostileSvg(page: Page): Promise<void> {
+  await page.addInitScript(
+    ({ marker, svg }) => {
+      window.__hostile = [];
+      const parse = DOMParser.prototype.parseFromString;
+      DOMParser.prototype.parseFromString = function (
+        this: DOMParser,
+        markup: string,
+        type: DOMParserSupportedType
+      ) {
+        const fed = type === "image/svg+xml" && markup.includes(marker) ? svg : markup;
+        return parse.call(this, fed, type);
+      };
+    },
+    { marker: HOSTILE_MARKER, svg: HOSTILE_SVG }
+  );
+}
+
+/** Records every request `context` makes to `hostile.example` and aborts it. */
+async function recordHostileRequests(context: BrowserContext): Promise<string[]> {
+  const requested: string[] = [];
+  await context.route("https://hostile.example/**", (route) => {
+    requested.push(route.request().url());
+    return route.abort();
+  });
+  return requested;
+}
+
+/** What of `HOSTILE_SVG` survived into `preview`'s shadow root: each element a sanitizer must
+ *  drop, and each attribute that runs script or fetches. `null` when `preview` holds no shadow
+ *  root. */
+function hostileLeftovers(preview: Locator): Promise<string[] | null> {
+  return preview.evaluate((element) => {
+    const root = element.shadowRoot;
+    if (root === null) return null;
+    const dropped = ["script", "foreignObject", "image", "use", "a"];
+    const found: string[] = [];
+    for (const node of Array.from(root.querySelectorAll("*"))) {
+      if (dropped.includes(node.localName)) found.push(`<${node.localName}>`);
+      for (const attribute of Array.from(node.attributes)) {
+        if (attribute.name.toLowerCase().startsWith("on") || attribute.value.includes("url(http")) {
+          found.push(`${node.localName} ${attribute.name}="${attribute.value}"`);
+        }
+      }
+    }
+    return found;
+  });
+}
+
+/** `HOSTILE_SVG` drew as a diagram in `scope`, whose preview is `preview`, and ran nothing,
+ *  fetched nothing and left nothing hostile in the preview's shadow root. */
+async function expectNothingHostile(
+  page: Page,
+  scope: Locator,
+  preview: Locator,
+  requested: readonly string[]
+): Promise<void> {
+  const diagram = diagramIn(scope);
+  await expect(diagram).toBeVisible();
+  await expect(diagram).toContainText("Hostile label");
+  await page.waitForTimeout(REQUEST_SETTLE_MS);
+  expect(await page.evaluate(() => window.__hostile)).toEqual([]);
+  expect(requested).toEqual([]);
+  expect(await hostileLeftovers(preview)).toEqual([]);
+}
+
+test.beforeEach(async () => {
+  await resetDatabase();
+});
+
+test("a comment holding a mermaid block draws a diagram, its source behind Mermaid source @phone", async ({
+  browser,
+}, testInfo) => {
+  await createProject({ key: "CORE", name: "Core" });
+  const issue = await createIssue({ project: "CORE", title: "Comment diagram" });
+  const comment = await createComment(issue.key, { body: flowchart("Flow:", "Start", "Finish") });
+
+  const alice = await asUser(browser, "alice");
+  try {
+    const page = await alice.newPage();
+    await page.goto(`/issues/${issue.key}/conversation`);
+    const card = await openCommentThread(page, testInfo, comment.id, "Flow:");
+    await expect(card).toContainText("Flow:");
+    await expectDrawnDiagram(card, ["Start", "Finish"]);
+  } finally {
+    await alice.close();
+  }
+});
+
+test("an ask's question holding a mermaid block draws a diagram on the Inbox card @phone", async ({
+  browser,
+}) => {
+  await createProject({ key: "CORE", name: "Core" });
+  const issue = await createIssue({ project: "CORE", title: "Ask diagram" });
+  const ask = await createAsk(
+    issue.key,
+    { question: flowchart("Does this order hold?", "Asked", "Answered") },
+    session
+  );
+
+  const alice = await asUser(browser, "alice");
+  try {
+    const page = await alice.newPage();
+    await page.goto("/");
+    const card = page.getByTestId(`ask-${ask.id}`);
+    await expect(card).toContainText("Does this order hold?");
+    await expectDrawnDiagram(card, ["Asked", "Answered"]);
+  } finally {
+    await alice.close();
+  }
+});
+
+test("an issue message holding a mermaid block draws a diagram in the Conversation @phone", async ({
+  browser,
+}) => {
+  await createProject({ key: "CORE", name: "Core" });
+  const issue = await createIssue({ project: "CORE", title: "Message diagram" });
+  const message = await createMessage(
+    issue.key,
+    { body: flowchart("The pipeline:", "Sent", "Delivered") },
+    session
+  );
+
+  const alice = await asUser(browser, "alice");
+  try {
+    const page = await alice.newPage();
+    await page.goto(`/issues/${issue.key}/conversation`);
+    const card = conversationTurns(page).locator(`:scope > li[data-turn="message:${message.id}"]`);
+    await expect(card).toContainText("The pipeline:");
+    await expectDrawnDiagram(card, ["Sent", "Delivered"]);
+  } finally {
+    await alice.close();
+  }
+});
+
+test("a reply to a comment holding a mermaid block draws a diagram under its comment @phone", async ({
+  browser,
+}, testInfo) => {
+  await createProject({ key: "CORE", name: "Core" });
+  const issue = await createIssue({ project: "CORE", title: "Reply diagram" });
+  const root = await createComment(issue.key, { body: "How does a reply travel?" });
+  await createComment(
+    issue.key,
+    { body: flowchart("Like this:", "Replied", "Read"), reply_to: root.id },
+    session
+  );
+
+  const alice = await asUser(browser, "alice");
+  try {
+    const page = await alice.newPage();
+    await page.goto(`/issues/${issue.key}/conversation`);
+    const thread = await openCommentThread(page, testInfo, root.id, "How does a reply travel?");
+    const reply = thread.getByRole("list", { name: "Replies" }).locator("li[data-reply]");
+    await expect(reply).toHaveCount(1);
+    await expect(reply).toContainText("Like this:");
+    await expectDrawnDiagram(reply, ["Replied", "Read"]);
+  } finally {
+    await alice.close();
+  }
+});
+
+test("a mermaid source the renderer refuses shows the reason and its source, and no diagram @phone", async ({
+  browser,
+}, testInfo) => {
+  await createProject({ key: "CORE", name: "Core" });
+  const issue = await createIssue({ project: "CORE", title: "Refused diagram" });
+  const comment = await createComment(issue.key, {
+    body: "Broken:\n\n```mermaid\ngraph TD\n  A -->\n```\n",
+  });
+
+  const alice = await asUser(browser, "alice");
+  try {
+    const page = await alice.newPage();
+    await page.goto(`/issues/${issue.key}/conversation`);
+    const card = await openCommentThread(page, testInfo, comment.id, "Broken:");
+    await expect(card).toContainText("Broken:");
+    const refusal = card
+      .getByRole("status")
+      .filter({ hasText: "Unable to render Mermaid diagram" });
+    await expect(refusal).toHaveText(/^Unable to render Mermaid diagram: Dangling Mermaid edge/);
+    // The disclosure opens on a refusal, so the source is readable without a click. The status
+    // quotes the dangling line too, so the source is read from its code block.
+    await expect(card.locator("pre code").filter({ hasText: "A -->" })).toBeVisible();
+    await expect(diagramIn(card)).toHaveCount(0);
+  } finally {
+    await alice.close();
+  }
+});
+
+/** The built Mermaid render worker's chunk, as Vite emits it under `/assets`. */
+const workerChunk = /\/assets\/mermaid-render\.worker-[^/]+\.js$/;
+
+/** The same-origin path the held worker requests once it has taken a diagram's source. */
+const workerHeldPath = "/e2e/mermaid-worker-held";
+
+/** Prepended to the worker chunk, so it registers before the worker's own listener: it stops that
+ *  listener, reports through `workerHeldPath` that it holds the source, and never returns. */
+const holdingListener = [
+  'self.addEventListener("message", async (event) => {',
+  "  event.stopImmediatePropagation();",
+  `  await fetch("${workerHeldPath}");`,
+  "  for (;;) {}",
+  "});",
+].join("\n");
+
+/** Serves the real worker chunk to `page` with `holdingListener` in front of the worker's own, so
+ *  the worker takes a diagram's source and never answers, and the page's shipped time limit
+ *  refuses it whatever the machine's speed. Returns how many times a worker reported that hold. */
+async function holdWorkerSource(page: Page): Promise<() => number> {
+  let holds = 0;
+  await page.route(workerChunk, async (route) => {
+    const response = await route.fetch();
+    await route.fulfill({ response, body: `${holdingListener}\n${await response.text()}` });
+  });
+  await page.route(
+    (url) => url.pathname === workerHeldPath,
+    async (route) => {
+      holds += 1;
+      await route.fulfill({ status: 204 });
+    }
+  );
+  return () => holds;
+}
+
+/** Waits for a worker to report that it holds the source, then shows that five 100 ms timers on
+ *  the page's thread each fire on time, give or take a scheduling hiccup, while the worker is
+ *  busy: a page that drew on its own thread would never hand the source over. */
+async function expectHeldAndResponsive(page: Page, holds: () => number): Promise<void> {
+  await expect
+    .poll(holds, { message: "the Mermaid worker took the diagram's source and holds it" })
+    .toBeGreaterThanOrEqual(1);
+  for (let sample = 0; sample < 5; sample += 1) {
+    const elapsed = await page.evaluate(
+      () =>
+        new Promise<number>((resolve) => {
+          const start = performance.now();
+          setTimeout(() => resolve(performance.now() - start), 100);
+        })
+    );
+    expect(elapsed).toBeLessThan(1_000);
+  }
+}
+
+// The worker holds the source (`holdWorkerSource`), so the shipped 5 s limit refuses even this
+// two-node flowchart on every runner, and the row proves what the limit does, not how fast a
+// machine draws: the page hands the source to the worker chunk, the page's thread keeps answering
+// while the worker is busy, and the limit refuses it with the reason and the source shown. A page
+// drawing on its own thread never loads the chunk and fails at the hold assertion.
+test("a diagram too large to draw in time shows the reason, and the page keeps responding @phone", async ({
+  browser,
+}, testInfo) => {
+  await createProject({ key: "CORE", name: "Core" });
+  const issue = await createIssue({ project: "CORE", title: "Large diagram" });
+  const comment = await createComment(issue.key, { body: flowchart("Large:", "Start", "Finish") });
+
+  const alice = await asUser(browser, "alice");
+  try {
+    const page = await alice.newPage();
+    const holds = await holdWorkerSource(page);
+    await page.goto(`/issues/${issue.key}/conversation`);
+    const card = await openCommentThread(page, testInfo, comment.id, "Large:");
+    await expect(card).toContainText("Large:");
+    const refusal = card
+      .getByRole("status")
+      .filter({ hasText: "Unable to render Mermaid diagram" });
+    await expectHeldAndResponsive(page, holds);
+    // The samples ran while the worker still held the source, before the time limit refused it.
+    await expect(refusal).toHaveCount(0);
+    await expect(refusal).toHaveText(
+      "Unable to render Mermaid diagram: it did not finish within 5 seconds"
+    );
+    await expect(card.locator("pre code").filter({ hasText: "Start --> Finish" })).toBeVisible();
+    await expect(diagramIn(card)).toHaveCount(0);
+  } finally {
+    await alice.close();
+  }
+});
+
+test("a mermaid label holding markup draws as text, never as an element @phone", async ({
+  browser,
+}, testInfo) => {
+  await createProject({ key: "CORE", name: "Core" });
+  const issue = await createIssue({ project: "CORE", title: "Markup label" });
+  const comment = await createComment(issue.key, {
+    body: 'Label:\n\n```mermaid\ngraph TD\n  A["<img src=x onerror=window.__mermaidHit=1>"] --> B\n```\n',
+  });
+
+  const alice = await asUser(browser, "alice");
+  try {
+    const page = await alice.newPage();
+    await page.goto(`/issues/${issue.key}/conversation`);
+    const card = await openCommentThread(page, testInfo, comment.id, "Label:");
+    await expect(card).toContainText("Label:");
+    // The label's characters are the node's text. Only its head is asserted, since a long label
+    // may wrap across text lines whose content joins without the space between them.
+    await expectDrawnDiagram(card, ["img src=x"]);
+    await expect(diagramIn(card).locator("img")).toHaveCount(0);
+    expect(await page.evaluate(() => "__mermaidHit" in window)).toBe(false);
+  } finally {
+    await alice.close();
+  }
+});
+
+test("a code block in another language stays code @phone", async ({ browser }, testInfo) => {
+  await createProject({ key: "CORE", name: "Core" });
+  const issue = await createIssue({ project: "CORE", title: "TypeScript block" });
+  const comment = await createComment(issue.key, {
+    body: "Code:\n\n```ts\nconst answer = 42;\n```\n",
+  });
+
+  const alice = await asUser(browser, "alice");
+  try {
+    const page = await alice.newPage();
+    await page.goto(`/issues/${issue.key}/conversation`);
+    const card = await openCommentThread(page, testInfo, comment.id, "Code:");
+    await expect(card.getByText("const answer = 42;")).toBeVisible();
+    await expect(diagramIn(card)).toHaveCount(0);
+    await expect(card.getByText("Mermaid source", { exact: true })).toHaveCount(0);
+  } finally {
+    await alice.close();
+  }
+});
+
+// beautiful-mermaid's sheet sets `text { font-family: 'Inter', system-ui, sans-serif }` and
+// `svg { --_text: var(--fg) … }` after an `@import` of Google Fonts. In the page it restyles
+// every `svg` and `text` there and fetches the font; in the diagram's own shadow root it styles
+// that diagram alone.
+test("a document's mermaid diagram draws, styles nothing outside it, and fetches no Google font @phone", async ({
+  browser,
+}) => {
+  await createProject({ key: "CORE", name: "Core" });
+  const issue = await createIssue({
+    project: "CORE",
+    spec: flowchart("Doc diagram:", "Start", "Finish"),
+    title: "Document diagram",
+  });
+
+  const alice = await asUser(browser, "alice");
+  try {
+    const googleFonts = await recordGoogleFonts(alice);
+    const page = await alice.newPage();
+    await openSpec(page, issue.key, "Doc diagram:");
+    const diagram = diagramIn(documentEditor(page));
+    await expect(diagram).toBeVisible();
+    await expect(diagram).toContainText("Start");
+    await expect(diagram).toContainText("Finish");
+
+    // Sentinels of the page's own: an `svg` bringing its own `--fg` (only the diagram's `svg`
+    // defines one), and a `text` inside it beside a `span`, which inherits the page's font.
+    const sentinels = await page.evaluate(() => {
+      const namespace = "http://www.w3.org/2000/svg";
+      const svg = document.createElementNS(namespace, "svg");
+      svg.setAttribute("style", "--fg: rgb(1, 2, 3)");
+      const text = document.createElementNS(namespace, "text");
+      text.textContent = "Sentinel";
+      svg.append(text);
+      const span = document.createElement("span");
+      span.textContent = "Sentinel";
+      document.body.append(svg, span);
+      const read = {
+        spanFont: getComputedStyle(span).fontFamily,
+        svgText: getComputedStyle(svg).getPropertyValue("--_text"),
+        textFont: getComputedStyle(text).fontFamily,
+      };
+      svg.remove();
+      span.remove();
+      return read;
+    });
+    expect(sentinels.svgText).toBe("");
+    expect(sentinels.textFont).toBe(sentinels.spanFont);
+
+    // No sheet of the page's own holds the diagram's rules. A cross-origin sheet's rules cannot be
+    // read, and an `@import` rule's own sheet is never descended into.
+    const pageRules = await page.evaluate(() => {
+      const found: string[] = [];
+      for (const sheet of Array.from(document.styleSheets)) {
+        let rules: CSSRuleList;
+        try {
+          rules = sheet.cssRules;
+        } catch {
+          continue;
+        }
+        for (const rule of Array.from(rules)) {
+          if (rule.cssText.includes("--_text") || rule.cssText.includes("fonts.googleapis.com")) {
+            found.push(rule.cssText);
+          }
+        }
+      }
+      return found;
+    });
+    expect(pageRules).toEqual([]);
+
+    await page.waitForTimeout(REQUEST_SETTLE_MS);
+    expect(googleFonts).toEqual([]);
+
+    // The diagram's own sheet survives, inside its shadow root, without its `@import`.
+    const ownStyles = await documentEditor(page)
+      .locator(".proof-mermaid-preview")
+      .evaluate((preview) =>
+        preview.shadowRoot === null
+          ? null
+          : Array.from(preview.shadowRoot.querySelectorAll("style"), (style) => style.textContent)
+      );
+    expect(ownStyles, "the preview holds a shadow root").not.toBeNull();
+    expect(ownStyles).toContainEqual(expect.stringContaining("--_text"));
+    expect(ownStyles?.filter((style) => style?.includes("@import"))).toEqual([]);
+  } finally {
+    await alice.close();
+  }
+});
+
+test("hostile diagram markup in a comment runs nothing and fetches nothing @phone", async ({
+  browser,
+}, testInfo) => {
+  await createProject({ key: "CORE", name: "Core" });
+  const issue = await createIssue({ project: "CORE", title: "Hostile comment diagram" });
+  const comment = await createComment(issue.key, {
+    body: `Hostile:\n\n\`\`\`mermaid\n${hostileSource}\n\`\`\`\n`,
+  });
+
+  const alice = await asUser(browser, "alice");
+  try {
+    const requested = await recordHostileRequests(alice);
+    const page = await alice.newPage();
+    await feedHostileSvg(page);
+    await page.goto(`/issues/${issue.key}/conversation`);
+    const card = await openCommentThread(page, testInfo, comment.id, "Hostile:");
+    await expectNothingHostile(page, card, card.locator(".dispatch-mermaid-preview"), requested);
+  } finally {
+    await alice.close();
+  }
+});
+
+test("hostile diagram markup in a document runs nothing and fetches nothing @phone", async ({
+  browser,
+}) => {
+  await createProject({ key: "CORE", name: "Core" });
+  const issue = await createIssue({
+    project: "CORE",
+    spec: `Hostile document:\n\n\`\`\`mermaid\n${hostileSource}\n\`\`\`\n`,
+    title: "Hostile document diagram",
+  });
+
+  const alice = await asUser(browser, "alice");
+  try {
+    const requested = await recordHostileRequests(alice);
+    const page = await alice.newPage();
+    await feedHostileSvg(page);
+    await openSpec(page, issue.key, "Hostile document:");
+    const editor = documentEditor(page);
+    await expectNothingHostile(page, editor, editor.locator(".proof-mermaid-preview"), requested);
+  } finally {
+    await alice.close();
+  }
+});
+
+test("a document's mermaid diagram redraws as it is edited, and a click on it changes nothing @phone", async ({
+  browser,
+}) => {
+  await createProject({ key: "CORE", name: "Core" });
+  const issue = await createIssue({
+    project: "CORE",
+    spec: flowchart("Edited diagram:", "Start", "Finish"),
+    title: "Edited document diagram",
+  });
+
+  const alice = await asUser(browser, "alice");
+  try {
+    const page = await alice.newPage();
+    const errors: Error[] = [];
+    page.on("pageerror", (error) => errors.push(error));
+    await openSpec(page, issue.key, "Edited diagram:");
+    const diagram = diagramIn(documentEditor(page));
+    await expect(diagram).toContainText("Finish");
+    const before = (await getArtifactText(issue.primary_artifact_id)).markdown;
+
+    await diagram.click();
+    expect((await getArtifactText(issue.primary_artifact_id)).markdown).toBe(before);
+
+    // "Start --> Finish" is only in the source: the diagram's labels are separate texts.
+    await placeCaret(page, "after", "Start --> Finish");
+    await page.keyboard.type("Line");
+    await expect(diagram).toContainText("FinishLine");
+    // The edit is the only change the document took, the click's included.
+    await expect
+      .poll(async () => (await getArtifactText(issue.primary_artifact_id)).markdown)
+      .toBe(before.replace("Start --> Finish", "Start --> FinishLine"));
+    expect(errors).toEqual([]);
+  } finally {
+    await alice.close();
+  }
+});
+
+test("an edited document diagram redraws once typing pauses, and its last drawing stays until then @phone", async ({
+  browser,
+}) => {
+  await createProject({ key: "CORE", name: "Core" });
+  const issue = await createIssue({
+    project: "CORE",
+    spec: flowchart("Typed diagram:", "Start", "Finish"),
+    title: "Typed document diagram",
+  });
+
+  const alice = await asUser(browser, "alice");
+  try {
+    const page = await alice.newPage();
+    await recordMermaidWorkers(page);
+    await openSpec(page, issue.key, "Typed diagram:");
+    const diagram = diagramIn(documentEditor(page));
+    await expect(diagram).toContainText("Finish");
+    await page.evaluate(() => window.__mermaidSent?.splice(0));
+
+    await placeCaret(page, "after", "Start --> Finish");
+    // Every frame from now until the redrawn diagram shows, whether a diagram is shown: the last
+    // drawing must stay through the typing and the pause, never leaving the block without one.
+    const shownEachFrame = page.evaluate(
+      () =>
+        new Promise<boolean[]>((resolve) => {
+          const samples: boolean[] = [];
+          const sample = () => {
+            const preview = document.querySelector<HTMLElement>(
+              '[aria-label="Document editor"] .proof-mermaid-preview'
+            );
+            const svg = preview?.shadowRoot?.querySelector("svg");
+            samples.push(preview?.hidden === false && svg !== null && svg !== undefined);
+            if (svg?.textContent?.includes("FinishLine")) resolve(samples);
+            else requestAnimationFrame(sample);
+          };
+          sample();
+        })
+    );
+    // One call types the word with no delay, so every key falls well inside the pause the redraw
+    // waits for.
+    await page.keyboard.type("Line");
+    await expect(diagram).toContainText("FinishLine");
+    expect(await page.evaluate(() => window.__mermaidSent)).toEqual([
+      expect.stringMatching(/Start --> FinishLine$/),
+    ]);
+    expect(await page.evaluate(() => window.__mermaidWorkers)).toBe(1);
+    expect((await shownEachFrame).every(Boolean)).toBe(true);
+  } finally {
+    await alice.close();
+  }
+});
+
+// The document twin of the comment row above, on the same hold (`holdWorkerSource`): the editor
+// hands the source to the worker chunk, the page keeps answering, and the shipped limit refuses it
+// with the reason above its source. An editor drawing on the page's thread fails at the hold.
+test("a document diagram too large to draw in time shows the reason and its source, and the page keeps responding @phone", async ({
+  browser,
+}) => {
+  await createProject({ key: "CORE", name: "Core" });
+  const issue = await createIssue({
+    project: "CORE",
+    spec: flowchart("Large document:", "Start", "Finish"),
+    title: "Large document diagram",
+  });
+
+  const alice = await asUser(browser, "alice");
+  try {
+    const page = await alice.newPage();
+    const holds = await holdWorkerSource(page);
+    await page.goto(`/issues/${issue.key}/spec`);
+    await expect(documentEditor(page)).toContainText("Large document:");
+    const status = documentEditor(page).locator(".proof-mermaid-status");
+    await expectHeldAndResponsive(page, holds);
+    // The samples ran while the worker still held the source, before the time limit refused it.
+    await expect(status).toBeHidden();
+    await expect(status).toHaveText(
+      "Unable to render Mermaid diagram: it did not finish within 5 seconds"
+    );
+    await expect(status).toBeVisible();
+    await expect(
+      documentEditor(page).locator("pre code").filter({ hasText: "Start --> Finish" })
+    ).toBeVisible();
+    await expect(diagramIn(documentEditor(page))).toHaveCount(0);
+  } finally {
+    await alice.close();
+  }
+});
+
+test("a block link below a diagram lands on its block once the diagram draws @phone", async ({
+  browser,
+}) => {
+  await createProject({ key: "CORE", name: "Core" });
+  const issue = await createIssue({
+    project: "CORE",
+    spec: tallDocument("Linked document:", "Target paragraph"),
+    title: "Block link below a diagram",
+  });
+  const target = await blockId(issue.primary_artifact_id, "Target paragraph");
+
+  const alice = await asUser(browser, "alice");
+  try {
+    const page = await alice.newPage();
+    await holdMermaidWorkers(page);
+    await page.goto(`/issues/${issue.key}/spec#b-${target}`);
+    const editor = documentEditor(page);
+    const paragraph = editor.getByText("Target paragraph", { exact: true });
+    const diagram = diagramIn(editor);
+    await expect(paragraph).toBeInViewport();
+    await expect(diagram).toHaveCount(0);
+    await withoutScrollAnchoring(page);
+    await page.evaluate(() => window.__releaseMermaid?.());
+    await expect(diagram).toBeVisible();
+    await expect(paragraph).toBeInViewport();
+  } finally {
+    await alice.close();
+  }
+});
+
+test("a reader who scrolls after a block link lands is not pulled back once the diagram draws @phone", async ({
+  browser,
+}) => {
+  await createProject({ key: "CORE", name: "Core" });
+  const issue = await createIssue({
+    project: "CORE",
+    spec: tallDocument("Scrolled document:", "Target paragraph"),
+    title: "Reader scrolls after a block link",
+  });
+  const target = await blockId(issue.primary_artifact_id, "Target paragraph");
+
+  const alice = await asUser(browser, "alice");
+  try {
+    const page = await alice.newPage();
+    await holdMermaidWorkers(page);
+    await page.goto(`/issues/${issue.key}/spec#b-${target}`);
+    const editor = documentEditor(page);
+    const paragraph = editor.getByText("Target paragraph", { exact: true });
+    const diagram = diagramIn(editor);
+    await expect(paragraph).toBeInViewport();
+    await expect(diagram).toHaveCount(0);
+    await withoutScrollAnchoring(page);
+    await settledScrollTop(page);
+    // The reader moves on: a wheel over the document, up past the target.
+    const box = await paragraph.boundingBox();
+    if (box === null) throw new Error("the target paragraph has no box");
+    await page.mouse.move(box.x + 10, box.y + box.height / 2);
+    await page.mouse.wheel(0, -600);
+    await expect(paragraph).not.toBeInViewport();
+    const scrolled = await settledScrollTop(page);
+    // The document is what scrolls: the link took it far down to the target, and 600 px up from
+    // there is still below its top, so the offset read here can show a pull back.
+    expect(scrolled).toBeGreaterThan(0);
+    await page.evaluate(() => window.__releaseMermaid?.());
+    await expect(diagram).toBeVisible();
+    // A pull back that never happens can only be shown by waiting: the focus re-run follows the
+    // drawn diagram within a frame or two, and 1500 ms also covers its smooth scroll.
+    await page.waitForTimeout(1_500);
+    expect(await page.evaluate(() => document.scrollingElement?.scrollTop)).toBe(scrolled);
+    await expect(paragraph).not.toBeInViewport();
+  } finally {
+    await alice.close();
+  }
+});
+
+test("a past version's highlighted mark lands on its block once a diagram above it draws @phone", async ({
+  browser,
+}) => {
+  await createProject({ key: "CORE", name: "Core" });
+  const issue = await createIssue({
+    project: "CORE",
+    spec: tallDocument("Versioned document:", "Target paragraph holds the quoted words."),
+    title: "Highlighted mark below a diagram",
+  });
+  const comment = await createComment(
+    issue.key,
+    { anchor: { artifact: "spec", quote: "quoted words" }, body: "Read this." },
+    session
+  );
+
+  const alice = await asUser(browser, "alice");
+  try {
+    const page = await alice.newPage();
+    await holdMermaidWorkers(page);
+    await page.goto(
+      `/issues/${issue.key}/artifact/spec?v=1&comment=${encodeURIComponent(comment.id)}`
+    );
+    const versionView = page.getByRole("region", { name: "Document version 1" });
+    const highlight = versionView.locator(`[data-id="${comment.id}"]`);
+    const diagram = diagramIn(versionView);
+    await expect(highlight).toHaveText("quoted words");
+    // The first landing holds before any diagram draws: the version's editor mounts once, so its
+    // one scroll runs after its content has laid out.
+    await expect(highlight).toBeInViewport();
+    await expect(diagram).toHaveCount(0);
+    await withoutScrollAnchoring(page);
+    await page.evaluate(() => window.__releaseMermaid?.());
+    await expect(diagram).toBeVisible();
+    await expect(highlight).toBeInViewport();
+  } finally {
+    await alice.close();
+  }
+});
+
+// The past version's first landing with no diagram at all, so nothing runs it again: when every
+// render of the page rebuilt the version's editor, the last scroll could run before the last
+// editor had laid out and leave the reader at the top of the page.
+test("a past version's comment link lands on its quote in a document with no diagram @phone", async ({
+  browser,
+}) => {
+  const filler = Array.from({ length: 50 }, (_, index) => `Filler paragraph ${index + 1}.`);
+  await createProject({ key: "CORE", name: "Core" });
+  const issue = await createIssue({
+    project: "CORE",
+    spec: `Plain document:\n\n${filler.join("\n\n")}\n\nTarget paragraph holds the quoted words.\n`,
+    title: "Highlighted mark in a plain document",
+  });
+  const comment = await createComment(
+    issue.key,
+    { anchor: { artifact: "spec", quote: "quoted words" }, body: "Read this." },
+    session
+  );
+
+  const alice = await asUser(browser, "alice");
+  try {
+    const page = await alice.newPage();
+    await recordScrollEachFrame(page);
+    await page.goto(
+      `/issues/${issue.key}/artifact/spec?v=1&comment=${encodeURIComponent(comment.id)}`
+    );
+    const versionView = page.getByRole("region", { name: "Document version 1" });
+    const highlight = versionView.locator(`[data-id="${comment.id}"]`);
+    await expect(highlight).toHaveText("quoted words");
+    await expect(highlight).toBeInViewport();
+    // A page that rebuilt the version's editor collapsed to the viewport's height between builds,
+    // throwing the reader back to the top after the scroll to the quote began. Waiting is the
+    // only way to show a jump that does not come.
+    await page.waitForTimeout(1_500);
+    const offsets = (await page.evaluate(() => window.__scrollEachFrame)) ?? [];
+    const started = offsets.findIndex((offset) => offset > 0);
+    expect(started).toBeGreaterThanOrEqual(0);
+    expect(offsets.slice(started).filter((offset) => offset === 0)).toEqual([]);
+    await expect(highlight).toBeInViewport();
+  } finally {
+    await alice.close();
+  }
+});
+
+test("a comment link below a diagram lands on its quote once the diagram draws @phone", async ({
+  browser,
+}) => {
+  await createProject({ key: "CORE", name: "Core" });
+  const issue = await createIssue({
+    project: "CORE",
+    spec: tallDocument("Commented document:", "Target paragraph holds the quoted words."),
+    title: "Comment link below a diagram",
+  });
+  const comment = await createComment(
+    issue.key,
+    { anchor: { artifact: "spec", quote: "quoted words" }, body: "Read this." },
+    session
+  );
+
+  const alice = await asUser(browser, "alice");
+  try {
+    const page = await alice.newPage();
+    await holdMermaidWorkers(page);
+    await page.goto(`/issues/${issue.key}/spec?comment=${encodeURIComponent(comment.id)}`);
+    const quote = markSpan(page, comment.id);
+    const diagram = diagramIn(documentEditor(page));
+    await expect(quote).toHaveText("quoted words");
+    await expect(quote).toBeInViewport();
+    await expect(diagram).toHaveCount(0);
+    await withoutScrollAnchoring(page);
+    await page.evaluate(() => window.__releaseMermaid?.());
+    await expect(diagram).toBeVisible();
+    await expect(quote).toBeInViewport();
+  } finally {
+    await alice.close();
+  }
+});
+
+test("with no worker a document's diagram shows its source @phone", async ({ browser }) => {
+  await createProject({ key: "CORE", name: "Core" });
+  const issue = await createIssue({
+    project: "CORE",
+    spec: flowchart("Workerless diagram:", "Start", "Finish"),
+    title: "Workerless document diagram",
+  });
+
+  const alice = await asUser(browser, "alice");
+  try {
+    const page = await alice.newPage();
+    const consoleErrors: string[] = [];
+    page.on("console", (message) => {
+      if (message.type() === "error") consoleErrors.push(message.text());
+    });
+    await refuseWorkers(page);
+    await openSpec(page, issue.key, "Workerless diagram:");
+    const editor = documentEditor(page);
+    await expect(editor.locator("pre code").filter({ hasText: "Start --> Finish" })).toBeVisible();
+    await expect(diagramIn(editor)).toHaveCount(0);
+    await expect(editor.locator(".proof-mermaid-status")).toBeHidden();
+    await expect
+      .poll(() =>
+        consoleErrors.filter((text) =>
+          text.includes("Showing Mermaid source as code, the diagram renderer is unavailable")
+        )
+      )
+      .toHaveLength(1);
+  } finally {
+    await alice.close();
+  }
+});
+
+// A worker that drew once can fail later, as when a redeploy removes its chunk: the block then
+// shows its edited source as code, never the last drawing above a source it no longer matches.
+test("a document diagram whose worker fails after its first drawing shows its source @phone", async ({
+  browser,
+}) => {
+  await createProject({ key: "CORE", name: "Core" });
+  const issue = await createIssue({
+    project: "CORE",
+    spec: flowchart("Failing diagram:", "Start", "Finish"),
+    title: "Failing document diagram",
+  });
+
+  const alice = await asUser(browser, "alice");
+  try {
+    const page = await alice.newPage();
+    const consoleErrors: string[] = [];
+    page.on("console", (message) => {
+      if (message.type() === "error") consoleErrors.push(message.text());
+    });
+    await failMermaidWorkersOnCall(page);
+    await openSpec(page, issue.key, "Failing diagram:");
+    const editor = documentEditor(page);
+    const diagram = diagramIn(editor);
+    await expect(diagram).toContainText("Finish");
+    await page.evaluate(() => window.__failMermaidWorkers?.());
+
+    await placeCaret(page, "after", "Start --> Finish");
+    await page.keyboard.type("Line");
+    await expect(diagram).toHaveCount(0);
+    await expect(
+      editor.locator("pre code").filter({ hasText: "Start --> FinishLine" })
+    ).toBeVisible();
+    await expect(editor.locator(".proof-mermaid-status")).toBeHidden();
+    await expect
+      .poll(() =>
+        consoleErrors.filter((text) =>
+          text.includes("Showing Mermaid source as code, the diagram renderer is unavailable")
+        )
+      )
+      .toHaveLength(1);
+  } finally {
+    await alice.close();
+  }
+});

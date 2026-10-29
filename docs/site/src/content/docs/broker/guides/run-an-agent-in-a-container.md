@@ -62,7 +62,9 @@ enrollment_id: edd9a18c-41ff-46f9-8a15-bddb30f0abc3
 kind: session
 operator: ada@example.com
 lease_expires_at: 2026-10-03T03:39:03Z
+source: the broker AGENT_SECRETS_URL names (AWS Secrets Manager)
 $ agent-secrets DEMO_READ_TOKEN -- printenv DEMO_READ_TOKEN
+agent-secrets: DEMO_READ_TOKEN from the broker AGENT_SECRETS_URL names (AWS Secrets Manager)
 demo-read-token-value
 ```
 
@@ -80,7 +82,7 @@ A box nobody unenrolls ends anyway once `agent-secrets renew` stops. Its lease l
 
 ```console
 $ agent-secrets self
-agent-secrets self: proof invalid: not live (PROOF_INVALID)
+agent-secrets self: proof invalid: not live (PROOF_INVALID); asked the broker AGENT_SECRETS_URL names (AWS Secrets Manager)
 ```
 
 On its next run, within `BROKER_SWEEP_SECONDS`, the broker's sweep ends the
@@ -92,3 +94,9 @@ INFO broker sweeper: ended an enrollment whose lease lapsed enrollment_id=edd9a1
 ```
 
 A lapsed lease cannot be renewed: to use the box again, start over from step 1 with a new key.
+
+An outage of the broker itself is different. If the box's lease runs out while no broker is
+serving (every broker process down, or the database out of reach), the lease stays live and the
+sweep does not end it. Once a broker serves again, the box's running `agent-secrets renew` renews
+as before ([when no broker is serving](/legion/broker/concepts/#when-no-broker-is-serving)). A
+broker that runs but that the box cannot reach still ends the lease.

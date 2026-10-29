@@ -243,6 +243,8 @@ type Server struct {
 	log        *logCapture
 	relay      *relay
 	url        string
+	// name is the server_name StartCluster gives a member, "" for a lone server.
+	name string
 
 	mu        sync.Mutex
 	srv       *natsserver.Server
@@ -253,6 +255,10 @@ type Server struct {
 // URL is the server's client URL, which stays the same across every Stop and Start: it names the
 // relay's port, not the server's own.
 func (s *Server) URL() string { return s.url }
+
+// Name is the server_name of a cluster member (StartCluster), the name JetStream reports it by in
+// a stream's or a consumer's cluster information. A lone server has none and answers "".
+func (s *Server) Name() string { return s.name }
 
 // MonitorURL is the server's monitoring endpoint, where /varz and /connz are. The monitoring
 // listener is the server's own rather than the relay's, so a Stop and a Start give it a new port
@@ -357,6 +363,19 @@ func (s *Server) Reload(t testing.TB, config string) error {
 	return nil
 }
 
+// Restart stops the server, makes config its whole configuration and starts it again on the same
+// store and URL, as an operator restarts a server after changing a grant, and returns once it
+// accepts connections. Unlike Reload, every connection drops: each client reconnects to the server
+// config governs and sends its subscriptions again, which that server accepts or refuses afresh.
+func (s *Server) Restart(t testing.TB, config string) {
+	t.Helper()
+	s.stop()
+	if err := os.WriteFile(s.configPath, []byte(config), 0o600); err != nil {
+		t.Fatalf("write the new configuration: %v", err)
+	}
+	s.launch(t)
+}
+
 // Log is everything the server has logged so far, the debug and protocol trace among it when the
 // server was started with -DV.
 func (s *Server) Log() string { return s.log.String() }
@@ -375,6 +394,31 @@ func (s *Server) address() (string, error) {
 	}
 	return addr.String(), nil
 }
+
+// clusterAddress is where the server listens for routes at this moment, which its route relay
+// dials (StartCluster). A stopped server has none, as address says.
+func (s *Server) clusterAddress() (string, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.srv == nil {
+		return "", errors.New("the NATS server is stopped")
+	}
+	addr := s.srv.ClusterAddr()
+	if addr == nil {
+		return "", errors.New("the NATS server has no route address")
+	}
+	return addr.String(), nil
+}
+
+// natsServer is the running nats-server, or nil while the server is stopped.
+func (s *Server) natsServer() *natsserver.Server {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.srv
+}
+
+// running reports whether the server is running: started and not stopped since.
+func (s *Server) running() bool { return s.natsServer() != nil }
 
 // hostOnlyConfig is the configuration of a server a test starts with none of its own:
 // nats-server warns on an empty configuration file ("config has no values or is empty"), and the
@@ -826,12 +870,26 @@ func (g *NkeyGrant) Grant(t testing.TB, allow ...string) {
 }
 
 func publishGrantConfig(user string, allow []string) string {
+	return grantConfig(user, "publish", allow)
+}
+
+// SubscribeGrantConfig is the configuration of a server with JetStream whose one user, the nkey user
+// whose public key is user, may subscribe only to the subjects allow names, in any queue group, and
+// publish to anything: a subscription to any other subject is the server's permissions violation,
+// as a per-client grant makes it. StartConfig takes it, and Restart or Reload a changed one.
+func SubscribeGrantConfig(user string, allow ...string) string {
+	return grantConfig(user, "subscribe", allow)
+}
+
+// grantConfig is the configuration of a server with JetStream whose one nkey user may use direction
+// (publish or subscribe) only on the subjects allow names.
+func grantConfig(user, direction string, allow []string) string {
 	quoted := make([]string, len(allow))
 	for index, subject := range allow {
 		quoted[index] = fmt.Sprintf("%q", subject)
 	}
-	return nkeyConfig(fmt.Sprintf("{ nkey: %q, permissions: { publish: { allow: [%s] } } }",
-		user, strings.Join(quoted, ", ")))
+	return nkeyConfig(fmt.Sprintf("{ nkey: %q, permissions: { %s: { allow: [%s] } } }",
+		user, direction, strings.Join(quoted, ", ")))
 }
 
 func nkeyConfig(entry string) string {

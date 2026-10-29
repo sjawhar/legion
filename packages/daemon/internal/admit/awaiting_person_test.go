@@ -4,589 +4,419 @@ import (
 	"context"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 
+	"github.com/sjawhar/legion/daemon/internal/claim"
+	"github.com/sjawhar/legion/daemon/internal/dispatch"
 	"github.com/sjawhar/legion/daemon/internal/intake"
 	"github.com/sjawhar/legion/daemon/internal/phase"
 	"github.com/sjawhar/legion/daemon/internal/record"
 )
 
-func TestAClosedRegisteredGateReleasesItsRootSlotForAnotherWaitingRoot(t *testing.T) {
-	pool := migratedPool(t)
-	admission := newAdmission(t, 1, nil)
-	seedSlotted(t, pool, "LEGION-ROOT", "A")
-	seedWaiting(t, pool, "LEGION-NEXT", "B")
-
-	if _, err := intake.ApplyFact(context.Background(), pool, "api", "registered-closed-gate",
-		intake.GateRegistered{Issue: "LEGION-ROOT", ArtifactID: "artifact-root", Version: 3}, admission.engine, admission); err != nil {
-		t.Fatalf("register closed gate: %v", err)
-	}
-
-	root := issue(t, pool, "LEGION-ROOT")
-	if root.Phase != phase.AwaitingPerson || root.Awaiting == nil || root.Awaiting.GateVersion != 3 || root.Awaiting.AnsweredAt != nil {
-		t.Fatalf("root after closed gate = %#v, want unanswered awaiting_person on gate version 3", root)
-	}
-	assertSlots(t, pool, []record.Slot{{Issue: "LEGION-NEXT", Index: 0, AdmittedAt: fixedNow}})
-	var suspended, noticed bool
-	for _, effect := range effects(t, pool) {
-		switch payload := effect.payload.(type) {
-		case record.SuperviseRequest:
-			suspended = suspended || effect.issue == "LEGION-ROOT" && payload.Op == "suspend" && payload.Role == "architect" && strings.Contains(payload.Reason, "spec version 3")
-		case record.ControllerNotice:
-			noticed = noticed || effect.issue == "LEGION-ROOT" && payload.Kind == record.AwaitingPersonNotice && strings.Contains(payload.Reason, "slot is released")
-		}
-	}
-	if !suspended || !noticed {
-		t.Fatalf("outbox effects = %#v, want architect suspend and awaiting-person controller notice", effects(t, pool))
-	}
-}
-
-// A person who approved the spec before the architect registered it has the gate open at
-// registration: the root starts planning in its own slot, and nothing suspends or releases it.
-func TestARegistrationDispatchAlreadyApprovedKeepsTheRootsSlotAndStartsPlanning(t *testing.T) {
-	pool := migratedPool(t)
-	admission := newAdmission(t, 1, nil)
-	seedSlotted(t, pool, "LEGION-ROOT", "A")
-	seedWaiting(t, pool, "LEGION-NEXT", "B")
-
-	if _, err := intake.ApplyFact(context.Background(), pool, "api", "registered-approved-gate",
-		intake.GateRegistered{Issue: "LEGION-ROOT", ArtifactID: "artifact-root", Version: 3, ApprovedVersion: 3}, admission.engine, admission); err != nil {
-		t.Fatalf("register approved gate: %v", err)
-	}
-
-	root := issue(t, pool, "LEGION-ROOT")
-	if root.Phase != phase.Planning || root.Awaiting != nil {
-		t.Fatalf("root after approved registration = %#v, want planning with no awaiting state", root)
-	}
-	assertSlots(t, pool, []record.Slot{{Issue: "LEGION-ROOT", Index: 0, AdmittedAt: fixedNow}})
-	assertNoAwaitingEffects(t, pool, "LEGION-ROOT")
-}
-
-// assertNoAwaitingEffects fails when key's architect was suspended or the controller was told the
-// root returned its slot to wait on a person.
-func assertNoAwaitingEffects(t *testing.T, pool *pgxpool.Pool, key string) {
+// awaitingArchitect is the architect claim token of a root of the test project.
+func awaitingArchitect(t *testing.T, issue string) claim.Token {
 	t.Helper()
-	for _, effect := range effects(t, pool) {
-		if effect.issue != key {
-			continue
-		}
-		switch payload := effect.payload.(type) {
-		case record.SuperviseRequest:
-			if payload.Op == "suspend" {
-				t.Fatalf("outbox effects = %#v, want no suspend of %s", effects(t, pool), key)
-			}
-		case record.ControllerNotice:
-			if payload.Kind == record.AwaitingPersonNotice {
-				t.Fatalf("outbox effects = %#v, want no awaiting-person notice for %s", effects(t, pool), key)
-			}
-		}
+	project, err := claim.ProjectToken(testProject)
+	if err != nil {
+		t.Fatalf("project token: %v", err)
+	}
+	token, err := claim.NewToken(project, issue, claim.RoleArchitect)
+	if err != nil {
+		t.Fatalf("architect token of %s: %v", issue, err)
+	}
+	return token
+}
+
+// seedArchitectClaim records the root's architect working a task it has taken, which is the one
+// state in which a root may give its slot back: nothing it was given is still owed to it.
+func seedArchitectClaim(t *testing.T, pool *pgxpool.Pool, issue string, confirmed bool) {
+	t.Helper()
+	token := awaitingArchitect(t, issue)
+	if _, err := pool.Exec(context.Background(), `insert into claims (token, project, tree, issue, role, generation, session, session_file,
+		state, launch_failures, prompt_failures, prompt_retires, uncertain_streak)
+		values ($1, $2, $3, $3, 'architect', 1, 'ses_architect', '', 'working', 0, 0, 0, 0)`,
+		string(token), testProject, issue); err != nil {
+		t.Fatalf("record the architect claim of %s: %v", issue, err)
+	}
+	var confirmedAt *time.Time
+	if confirmed {
+		at := fixedNow
+		confirmedAt = &at
+	}
+	if _, err := pool.Exec(context.Background(), `insert into pending_task_deliveries (claim_token, delivery_id, task, queued_at, generation, phase, confirmed_at)
+		values ($1, 'outbox:7', 'Decompose it.', now(), 1, 'admitted', $2)`, string(token), confirmedAt); err != nil {
+		t.Fatalf("record the architect's task of %s: %v", issue, err)
 	}
 }
 
-func TestAnApprovedGateAnswersAnAwaitingRootAndReturnsItBeforeANeverRunRoot(t *testing.T) {
-	pool := migratedPool(t)
-	admission := newAdmission(t, 1, nil)
-	seedSlotted(t, pool, "LEGION-RUN", "A")
-	root := record.Issue{
-		Key: "LEGION-ROOT", Tree: "LEGION-ROOT", Project: testProject, Title: "root", Phase: phase.AwaitingPerson,
-		Generation: 1, Status: "in_progress", Rank: "Z", HandedOver: true, Repo: "acme/widgets", DefaultBranch: "main", GitHubRepo: "acme/widgets",
-		Awaiting: &record.Awaiting{GateVersion: 3},
-	}
-	putIssue(t, pool, root)
-	seedWaiting(t, pool, "LEGION-NEXT", "A")
-	inTx(t, pool, func(tx pgx.Tx) {
-		if err := record.NewStore().PutGate(context.Background(), tx, record.DesignGate{Issue: root.Key, ArtifactID: "artifact-root", LatestVersion: 3}); err != nil {
-			t.Fatalf("seed closed gate: %v", err)
-		}
-	})
-
-	if _, err := intake.ApplyFact(context.Background(), pool, "dispatch", "approved-gate",
-		intake.DispatchArtifact{Key: root.Key, ArtifactID: "artifact-root", Kind: intake.DispatchArtifactApproved, Version: 3}, admission.engine, admission); err != nil {
-		t.Fatalf("approve gate: %v", err)
-	}
-	answered := issue(t, pool, root.Key)
-	if !answered.Answered() {
-		t.Fatalf("root after approval = %#v, want answered awaiting_person root", answered)
-	}
-	assertWaiting(t, pool, []string{root.Key, "LEGION-NEXT"})
-
-	apply(t, pool, admission, "run-finished", intake.DispatchIssue{
-		Key: "LEGION-RUN", ResolvedRepo: "acme/widgets", Seq: 1, Type: "issue.closed", Status: "done",
-		Title: "LEGION-RUN", Rank: "A", HandedOver: true,
-	}, admission.engine)
-	resumed := issue(t, pool, root.Key)
-	if resumed.Phase != phase.Planning || resumed.Awaiting != nil {
-		t.Fatalf("root after its slot freed = %#v, want planning with no awaiting state", resumed)
-	}
-	assertSlots(t, pool, []record.Slot{{Issue: root.Key, Index: 0, AdmittedAt: fixedNow}})
-	var statusWrites, architectStarts int
-	for _, effect := range effects(t, pool) {
-		if effect.issue != root.Key {
-			continue
-		}
-		switch payload := effect.payload.(type) {
-		case record.StatusWrite:
-			statusWrites++
-		case record.SuperviseRequest:
-			if payload.Op == "start" && payload.Role == "architect" && strings.Contains(payload.Task, "spec version 3") {
-				architectStarts++
-			}
-		}
-	}
-	if statusWrites != 0 || architectStarts != 1 {
-		t.Fatalf("root resume emitted %d status writes and %d answered architect starts, want 0 and 1; effects=%#v", statusWrites, architectStarts, effects(t, pool))
-	}
-}
-
-func TestAnArchitectQuestionReleasesItsRootSlot(t *testing.T) {
-	pool := migratedPool(t)
-	admission := newAdmission(t, 1, nil)
-	seedSlotted(t, pool, "LEGION-ROOT", "A")
-	seedWaiting(t, pool, "LEGION-NEXT", "B")
-	seedArchitectClaim(t, pool, "LEGION-ROOT", "session-architect")
-
-	if _, err := intake.ApplyFact(context.Background(), pool, "dispatch", "architect-question",
-		intake.DispatchAskOpened{Key: "LEGION-ROOT", Ask: "ask-root", Kind: "question", AuthorSession: "session-architect"}, admission.engine, admission); err != nil {
-		t.Fatalf("open architect question: %v", err)
-	}
-	root := issue(t, pool, "LEGION-ROOT")
-	if root.Phase != phase.AwaitingPerson || root.Awaiting == nil || root.Awaiting.Ask != "ask-root" {
-		t.Fatalf("root after question = %#v, want awaiting_person on ask-root", root)
-	}
-	assertSlots(t, pool, []record.Slot{{Issue: "LEGION-NEXT", Index: 0, AdmittedAt: fixedNow}})
-}
-
-// seedArchitectClaim records session as the architect claim of the tree rooted at root, the
-// session SessionClaimsTree finds within that tree.
-func seedArchitectClaim(t *testing.T, pool *pgxpool.Pool, root, session string) {
+// seedHandBack records that the root's architect handed a question back at seq, and the mirror row
+// of that question, still with the person.
+func seedHandBack(t *testing.T, pool *pgxpool.Pool, issue, ask string, seq int64) {
 	t.Helper()
 	inTx(t, pool, func(tx pgx.Tx) {
-		if _, err := tx.Exec(context.Background(), `insert into claims (token, project, tree, issue, role, generation, session, session_file,
-			state, launch_failures, prompt_failures, prompt_retires, uncertain_streak)
-			values ($1, 'LEGION', $2, $2, 'architect', 1, $3, '', 'working', 0, 0, 0, 0)`, strings.ToLower(root)+"-architect", root, session); err != nil {
-			t.Fatalf("seed architect claim: %v", err)
+		records := record.NewStore()
+		if err := records.PutRootAsk(context.Background(), tx, record.RootAsk{Issue: issue, Ask: ask, Kind: record.AskQuestion,
+			Open: true, Seq: seq, WaitingOn: "human", WaitingOnSeq: seq, ByTree: true}); err != nil {
+			t.Fatalf("record the question of %s: %v", issue, err)
+		}
+		if err := records.Declare(context.Background(), tx, issue, record.EventMark{Seq: seq}); err != nil {
+			t.Fatalf("declare the hand-back of %s: %v", issue, err)
 		}
 	})
 }
 
-// The architect whose claim a person refused asks that person, on the issue, whether to release
-// it, and waits (prompts/go/architect-root.md). That root could never be resumed while the person
-// holds the claim, so it keeps its slot at admitted rather than returning it, which the sweep
-// would then end.
-func TestAnArchitectQuestionWhileAPersonHoldsTheClaimKeepsTheSlot(t *testing.T) {
-	pool := migratedPool(t)
-	admission := newAdmission(t, 1, nil)
-	seedSlotted(t, pool, "LEGION-ROOT", "A")
-	seedWaiting(t, pool, "LEGION-NEXT", "B")
-	seedArchitectClaim(t, pool, "LEGION-ROOT", "session-architect")
-	if _, err := intake.ApplyFact(context.Background(), pool, "dispatch", "person-claims",
-		intake.DispatchClaim{Key: "LEGION-ROOT", Seq: 2, ClaimedBy: "user:alice"}, admission.engine, admission); err != nil {
-		t.Fatalf("apply the person's claim: %v", err)
-	}
-
-	if _, err := intake.ApplyFact(context.Background(), pool, "dispatch", "architect-asks-the-holder",
-		intake.DispatchAskOpened{Key: "LEGION-ROOT", Ask: "ask-release", Kind: "question", AuthorSession: "session-architect"}, admission.engine, admission); err != nil {
-		t.Fatalf("open the architect's question: %v", err)
-	}
-	root := issue(t, pool, "LEGION-ROOT")
-	if root.Phase != phase.Admitted || root.Awaiting != nil || root.Lingers() {
-		t.Fatalf("root after asking the claim holder = %#v, want it still admitted, not waiting and not lingering", root)
-	}
-	assertSlots(t, pool, []record.Slot{{Issue: "LEGION-ROOT", Index: 0, AdmittedAt: fixedNow}})
-	assertNoAwaitingEffects(t, pool, "LEGION-ROOT")
-}
-
-// A person who claimed the issue before it was handed to Legion: Dispatch's issue.claimed event
-// found no record to apply to, and the hand-over event that records the root carries that claim.
-// The root takes the holder with it, so the architect's question to that person keeps the slot on
-// the live path exactly as a boot's claim read would.
-func TestAClaimAPersonTookBeforeHandoverFencesTheRootsRelease(t *testing.T) {
-	pool := migratedPool(t)
-	admission := newAdmission(t, 1, nil)
-	apply(t, pool, admission, "handed-over-claimed", intake.DispatchIssue{
-		Key: "LEGION-ROOT", ResolvedRepo: "acme/widgets", Seq: 6, Type: "issue.updated", Status: "todo",
-		Title: "root", Rank: "A", HandedOver: handed, ClaimedBy: "user:alice",
-	}, admission.engine)
-	root := issue(t, pool, "LEGION-ROOT")
-	if root.ClaimedBy != "user:alice" || root.ClaimSeq != 6 {
-		t.Fatalf("recorded root = %#v, want the person's claim at sequence 6", root)
-	}
-	assertSlots(t, pool, []record.Slot{{Issue: "LEGION-ROOT", Index: 0, AdmittedAt: fixedNow}})
-	seedArchitectClaim(t, pool, "LEGION-ROOT", "session-architect")
-
-	if _, err := intake.ApplyFact(context.Background(), pool, "dispatch", "architect-asks-the-holder",
-		intake.DispatchAskOpened{Key: "LEGION-ROOT", Ask: "ask-release", Kind: "question", AuthorSession: "session-architect"}, admission.engine, admission); err != nil {
-		t.Fatalf("open the architect's question: %v", err)
-	}
-	if got := issue(t, pool, "LEGION-ROOT"); got.Phase != phase.Admitted || got.Awaiting != nil || got.Lingers() {
-		t.Fatalf("root after asking the claim holder = %#v, want it still admitted in its slot", got)
-	}
-	assertSlots(t, pool, []record.Slot{{Issue: "LEGION-ROOT", Index: 0, AdmittedAt: fixedNow}})
-}
-
-// A person who claims a root already recorded, seen on a later issue event rather than an
-// issue.claimed one: the observation records the holder at its sequence, so the architect's
-// question to that person keeps the slot. An older observation never takes the claim back.
-func TestAClaimOnALaterIssueEventFencesTheRootsRelease(t *testing.T) {
-	pool := migratedPool(t)
-	admission := newAdmission(t, 1, nil)
-	putIssue(t, pool, record.Issue{
-		Key: "LEGION-ROOT", Tree: "LEGION-ROOT", Project: testProject, Title: "root", Phase: phase.Admitted,
-		Generation: 1, Status: "in_progress", DispatchStatus: "in_progress", Rank: "A", HandedOver: true, LastDispatchSeq: 4,
-		Repo: "acme/widgets", DefaultBranch: "main", GitHubRepo: "acme/widgets",
-	})
+// seedDispatchClaim records who the mirror of Dispatch's issues shows holding the issue's claim.
+func seedDispatchClaim(t *testing.T, pool *pgxpool.Pool, issue, holder string) {
+	t.Helper()
 	inTx(t, pool, func(tx pgx.Tx) {
-		if err := record.NewStore().PutSlot(context.Background(), tx, record.Slot{Issue: "LEGION-ROOT", Index: 0, AdmittedAt: fixedNow}); err != nil {
-			t.Fatalf("seed slot: %v", err)
+		records := record.NewStore()
+		if err := records.PutDispatchIssue(context.Background(), tx, record.DispatchIssueRow{
+			Key: issue, Project: testProject, Status: "in_progress", Seq: 8}); err != nil {
+			t.Fatalf("record the Dispatch mirror of %s: %v", issue, err)
+		}
+		if err := records.PutDispatchClaim(context.Background(), tx, issue, holder, 9); err != nil {
+			t.Fatalf("record the Dispatch claim of %s: %v", issue, err)
 		}
 	})
-	seedArchitectClaim(t, pool, "LEGION-ROOT", "session-architect")
-
-	apply(t, pool, admission, "claimed-and-renamed", intake.DispatchIssue{
-		Key: "LEGION-ROOT", ResolvedRepo: "acme/widgets", Seq: 6, Type: "issue.updated", Status: "in_progress",
-		Title: "root, renamed", Rank: "A", HandedOver: handed, ClaimedBy: "user:alice",
-	}, admission.engine)
-	if got := issue(t, pool, "LEGION-ROOT"); got.ClaimedBy != "user:alice" || got.ClaimSeq != 6 {
-		t.Fatalf("root after a claimed issue event = %#v, want user:alice at sequence 6", got)
-	}
-	if _, err := intake.ApplyFact(context.Background(), pool, "dispatch", "older-unclaimed",
-		intake.DispatchClaim{Key: "LEGION-ROOT", Seq: 5}, admission.engine, admission); err != nil {
-		t.Fatalf("apply an older release: %v", err)
-	}
-	if got := issue(t, pool, "LEGION-ROOT"); got.ClaimedBy != "user:alice" {
-		t.Fatalf("root after an older release = %#v, want user:alice still", got)
-	}
-
-	if _, err := intake.ApplyFact(context.Background(), pool, "dispatch", "architect-asks-the-holder",
-		intake.DispatchAskOpened{Key: "LEGION-ROOT", Ask: "ask-release", Kind: "question", AuthorSession: "session-architect"}, admission.engine, admission); err != nil {
-		t.Fatalf("open the architect's question: %v", err)
-	}
-	if got := issue(t, pool, "LEGION-ROOT"); got.Phase != phase.Admitted || got.Awaiting != nil || got.Lingers() {
-		t.Fatalf("root after asking the claim holder = %#v, want it still admitted in its slot", got)
-	}
-	assertSlots(t, pool, []record.Slot{{Issue: "LEGION-ROOT", Index: 0, AdmittedAt: fixedNow}})
 }
 
-func TestAnAwaitingRootThatLosesItsHandoverOrClaimLeavesTheWorkflow(t *testing.T) {
-	for _, tc := range []struct {
-		name   string
-		fact   intake.Fact
-		reason string
-	}{
-		{
-			name: "loses the legion label",
-			fact: intake.DispatchIssue{
-				Key: "LEGION-ROOT", ResolvedRepo: "acme/widgets", Seq: 1, Type: "issue.updated", Status: "in_progress",
-				Title: "root", Rank: "A",
-			},
-			reason: "label",
-		},
-		{
-			name:   "is claimed by a person",
-			fact:   intake.DispatchClaim{Key: "LEGION-ROOT", Seq: 1, ClaimedBy: "user:alice"},
-			reason: "claim",
-		},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			pool := migratedPool(t)
-			admission := newAdmission(t, 1, nil)
-			root := record.Issue{
-				Key: "LEGION-ROOT", Tree: "LEGION-ROOT", Project: testProject, Title: "root", Phase: phase.AwaitingPerson,
-				Generation: 1, Status: "in_progress", Rank: "A", HandedOver: true, Repo: "acme/widgets", DefaultBranch: "main", GitHubRepo: "acme/widgets",
-				Awaiting: &record.Awaiting{Ask: "ask-root"},
-			}
-			putIssue(t, pool, root)
-
-			if _, err := intake.ApplyFact(context.Background(), pool, "dispatch", tc.name, tc.fact, admission.engine, admission); err != nil {
-				t.Fatalf("apply unsafe awaiting state: %v", err)
-			}
-			got := issue(t, pool, root.Key)
-			if got.Phase != phase.Done || got.Awaiting != nil || got.LingerUntil == nil {
-				t.Fatalf("awaiting root after %s = %#v, want done, cleared awaiting state, and lingering", tc.name, got)
-			}
-			notices := controllerNotices(t, pool)
-			if len(notices) != 1 || notices[0].payload.(record.ControllerNotice).Kind != record.UnslottedNotice || !strings.Contains(notices[0].payload.(record.ControllerNotice).Reason, tc.reason) {
-				t.Fatalf("controller notices = %#v, want one unslotted notice naming %s", notices, tc.reason)
-			}
-		})
-	}
+// awaitingRig is a slotted root whose architect handed question ask-q back, with a second root
+// waiting in line behind it, and the admission that decides them on every fact.
+func awaitingRig(t *testing.T, pool *pgxpool.Pool) *Admission {
+	t.Helper()
+	seedSlotted(t, pool, "LEGION-208", "U")
+	seedWaiting(t, pool, "LEGION-300", "V")
+	seedArchitectClaim(t, pool, "LEGION-208", true)
+	seedHandBack(t, pool, "LEGION-208", "ask-q", 5)
+	return newAdmission(t, 1, nil)
 }
 
-func TestANewerSpecVersionWakesARootAwaitingAGate(t *testing.T) {
-	pool := migratedPool(t)
-	admission := newAdmission(t, 1, nil)
-	seedSlotted(t, pool, "LEGION-RUN", "A")
-	root := record.Issue{
-		Key: "LEGION-ROOT", Tree: "LEGION-ROOT", Project: testProject, Title: "root", Phase: phase.AwaitingPerson,
-		Generation: 1, Status: "in_progress", Rank: "B", HandedOver: true, Repo: "acme/widgets", DefaultBranch: "main", GitHubRepo: "acme/widgets",
-		Awaiting: &record.Awaiting{GateVersion: 3},
-	}
-	putIssue(t, pool, root)
-	inTx(t, pool, func(tx pgx.Tx) {
-		if err := record.NewStore().PutGate(context.Background(), tx, record.DesignGate{Issue: root.Key, ArtifactID: "artifact-root", LatestVersion: 3}); err != nil {
-			t.Fatalf("seed gate: %v", err)
+// supervise returns every supervise request queued for issue, in order.
+func superviseRequests(t *testing.T, pool *pgxpool.Pool, issue string) []record.SuperviseRequest {
+	t.Helper()
+	var got []record.SuperviseRequest
+	for _, e := range effects(t, pool) {
+		if e.issue != issue {
+			continue
 		}
-	})
-
-	if _, err := intake.ApplyFact(context.Background(), pool, "dispatch", "spec-version-moved",
-		intake.DispatchArtifact{Key: root.Key, ArtifactID: "artifact-root", Kind: intake.DispatchArtifactVersion, Version: 4}, admission.engine, admission); err != nil {
-		t.Fatalf("apply new spec version: %v", err)
+		if request, ok := e.payload.(record.SuperviseRequest); ok {
+			got = append(got, request)
+		}
 	}
-	got := issue(t, pool, root.Key)
-	if !got.Answered() || got.Awaiting.GateVersion != 4 {
-		t.Fatalf("root after newer version = %#v, want answered waiting on gate version 4", got)
+	return got
+}
+
+// A root whose architect handed a question to a person, and whose tree is otherwise idle, moves to
+// awaiting_person: its architect is suspended with its session kept, the controller is told, and
+// the slot it gave back goes to the root waiting behind it.
+func TestARootWaitingOnAPersonReturnsItsSlot(t *testing.T) {
+	pool := migratedPool(t)
+	admission := awaitingRig(t, pool)
+	tick(t, pool, admission, "tick-1")
+
+	root := issue(t, pool, "LEGION-208")
+	if root.Phase != phase.AwaitingPerson || root.Awaiting == nil || root.Awaiting.Ask != "ask-q" || root.Awaiting.Since.Seq != 5 {
+		t.Fatalf("root = %+v (awaiting %+v), want it waiting on ask-q from 5", root, root.Awaiting)
+	}
+	if root.Awaiting.AnsweredAt != nil {
+		t.Fatalf("awaiting = %+v, want it unanswered", root.Awaiting)
+	}
+	assertSlots(t, pool, []record.Slot{{Issue: "LEGION-300", Index: 0, AdmittedAt: fixedNow}})
+	requests := superviseRequests(t, pool, "LEGION-208")
+	if len(requests) != 1 || requests[0].Op != "suspend" || requests[0].Role != claim.RoleArchitect {
+		t.Fatalf("supervise requests = %+v, want one architect suspend", requests)
+	}
+	var notices int
+	for _, e := range effects(t, pool) {
+		if notice, ok := e.payload.(record.ControllerNotice); ok && notice.Kind == record.AwaitingPersonNotice {
+			notices++
+			if !strings.Contains(notice.Reason, "LEGION-208") {
+				t.Fatalf("awaiting-person notice %q, want it to name the root", notice.Reason)
+			}
+		}
+	}
+	if notices != 1 {
+		t.Fatalf("awaiting-person notices = %d, want one", notices)
 	}
 }
 
-// A session's reply that leaves the turn with the person answers nothing; a person's reply, which
-// hands the turn to the agent, answers the root.
-func TestOnlyAnAskReplyThatHandsTheTurnToTheAgentWakesTheRoot(t *testing.T) {
+// A person's answer puts the waiting root at the front of the line, ahead of every root that never
+// ran, and the next free slot resumes its architect in its own session, told what answered it. The
+// resume is a handout: what it handed back before is cleared, so only its next hand-back starts
+// the next wait.
+func TestAnAnsweredRootTakesTheNextSlotAndResumesItsArchitect(t *testing.T) {
 	pool := migratedPool(t)
-	admission := newAdmission(t, 1, nil)
-	seedSlotted(t, pool, "LEGION-RUN", "A")
-	root := record.Issue{
-		Key: "LEGION-ROOT", Tree: "LEGION-ROOT", Project: testProject, Title: "root", Phase: phase.AwaitingPerson,
-		Generation: 1, Status: "in_progress", Rank: "B", HandedOver: true, Repo: "acme/widgets", DefaultBranch: "main", GitHubRepo: "acme/widgets",
-		Awaiting: &record.Awaiting{Ask: "ask-root"},
+	admission := awaitingRig(t, pool)
+	tick(t, pool, admission, "tick-1")
+	if got := issue(t, pool, "LEGION-208").Phase; got != phase.AwaitingPerson {
+		t.Fatalf("phase = %s, want the root waiting", got)
 	}
-	putIssue(t, pool, root)
+	// The root waiting behind it finishes, freeing the slot the answered root takes.
+	done := issue(t, pool, "LEGION-300")
+	done.Phase = phase.Done
+	putIssue(t, pool, done)
+	answerWait(t, pool, "LEGION-208", record.AnsweredByAsk, "ask-q")
+	assertWaiting(t, pool, []string{"LEGION-208"})
 
-	if _, err := intake.ApplyFact(context.Background(), pool, "dispatch", "reply-waits-human",
-		intake.DispatchAskReply{Key: root.Key, Ask: "ask-root", WaitingOn: "human", Actor: architect}, admission.engine, admission); err != nil {
-		t.Fatalf("apply human-turn reply: %v", err)
-	}
-	if got := issue(t, pool, root.Key); got.Answered() {
-		t.Fatalf("root after human-turn reply = %#v, want it still unanswered", got)
-	}
-
-	if _, err := intake.ApplyFact(context.Background(), pool, "dispatch", "reply-waits-agent",
-		intake.DispatchAskReply{Key: root.Key, Ask: "ask-root", WaitingOn: "agent", Actor: alice}, admission.engine, admission); err != nil {
-		t.Fatalf("apply agent-turn reply: %v", err)
-	}
-	if got := issue(t, pool, root.Key); !got.Answered() {
-		t.Fatalf("root after agent-turn reply = %#v, want it answered", got)
-	}
-}
-
-func TestAClosedGateDoesNotReleaseASlotWhileATreeMemberIsMidPhase(t *testing.T) {
-	pool := migratedPool(t)
-	admission := newAdmission(t, 1, nil)
-	seedSlotted(t, pool, "LEGION-ROOT", "A")
-	parent := "LEGION-ROOT"
-	putIssue(t, pool, record.Issue{
-		Key: "LEGION-CHILD", Tree: "LEGION-ROOT", Parent: &parent, Project: testProject, Title: "child", Phase: phase.Implementing,
-		Generation: 1, Status: "in_progress", Rank: "B", HandedOver: true, Repo: "acme/widgets", DefaultBranch: "main", GitHubRepo: "acme/widgets",
-	})
-
-	if _, err := intake.ApplyFact(context.Background(), pool, "api", "closed-gate-with-child",
-		intake.GateRegistered{Issue: "LEGION-ROOT", ArtifactID: "artifact-root", Version: 3}, admission.engine, admission); err != nil {
-		t.Fatalf("register closed gate: %v", err)
-	}
-	root := issue(t, pool, "LEGION-ROOT")
+	tick(t, pool, admission, "tick-2")
+	root := issue(t, pool, "LEGION-208")
 	if root.Phase != phase.Admitted || root.Awaiting != nil {
-		t.Fatalf("root with active child = %#v, want its slot retained at admitted", root)
+		t.Fatalf("root = %+v (awaiting %+v), want it admitted again with no wait", root, root.Awaiting)
 	}
-	assertSlots(t, pool, []record.Slot{{Issue: root.Key, Index: 0, AdmittedAt: fixedNow}})
-}
-
-// A changes request resumes the root; its architect revises the spec, asks again, and registers the
-// new version. That registration, closed like the first, starts a new wait and returns the slot again.
-func TestAResumedRootThatRegistersANewClosedVersionReleasesItsSlotAgain(t *testing.T) {
-	pool := migratedPool(t)
-	admission := newAdmission(t, 1, nil)
-	seedSlotted(t, pool, "LEGION-ROOT", "A")
-	register := func(id string, version int) {
-		t.Helper()
-		if _, err := intake.ApplyFact(context.Background(), pool, "api", id,
-			intake.GateRegistered{Issue: "LEGION-ROOT", ArtifactID: "artifact-root", Version: version}, admission.engine, admission); err != nil {
-			t.Fatalf("register gate version %d: %v", version, err)
+	if root.Status != "in_progress" {
+		t.Fatalf("status = %s, want the status it ran with kept", root.Status)
+	}
+	if root.DeclaredSeq != 0 || root.HandoutSeq < 5 {
+		t.Fatalf("handout_seq = %d, declared_seq = %d, want the resume recorded as a handout", root.HandoutSeq, root.DeclaredSeq)
+	}
+	assertSlots(t, pool, []record.Slot{{Issue: "LEGION-208", Index: 0, AdmittedAt: fixedNow}})
+	requests := superviseRequests(t, pool, "LEGION-208")
+	if len(requests) != 2 || requests[1].Op != "start" || requests[1].Role != claim.RoleArchitect {
+		t.Fatalf("supervise requests = %+v, want the suspend then the architect's resume", requests)
+	}
+	if !strings.Contains(requests[1].Task, "ask-q") {
+		t.Fatalf("resume task %q, want it to name the ask that was answered", requests[1].Task)
+	}
+	// The resume writes no Dispatch status: the root kept the one it ran with.
+	for _, e := range effects(t, pool) {
+		if write, ok := e.payload.(record.StatusWrite); ok && e.issue == "LEGION-208" {
+			t.Fatalf("status write %+v, want none for a root that kept its status", write)
 		}
-	}
-
-	register("register-v3", 3)
-	if got := issue(t, pool, "LEGION-ROOT"); got.Phase != phase.AwaitingPerson || got.Awaiting.GateVersion != 3 {
-		t.Fatalf("root after closed v3 = %#v, want awaiting_person on version 3", got)
-	}
-	assertSlots(t, pool, nil)
-
-	if _, err := intake.ApplyFact(context.Background(), pool, "dispatch", "changes-v3",
-		intake.DispatchArtifact{Key: "LEGION-ROOT", ArtifactID: "artifact-root", Kind: intake.DispatchArtifactChangesRequested, Version: 3, Reason: "name the rollback path"},
-		admission.engine, admission); err != nil {
-		t.Fatalf("request changes on v3: %v", err)
-	}
-	resumed := issue(t, pool, "LEGION-ROOT")
-	if resumed.Phase != phase.Admitted || resumed.Awaiting != nil {
-		t.Fatalf("root after changes requested = %#v, want it resumed at admitted", resumed)
-	}
-	assertSlots(t, pool, []record.Slot{{Issue: "LEGION-ROOT", Index: 0, AdmittedAt: fixedNow}})
-	var told string
-	for _, effect := range effects(t, pool) {
-		if start, ok := effect.payload.(record.SuperviseRequest); ok && effect.issue == "LEGION-ROOT" && start.Op == "start" && start.Role == "architect" {
-			told = start.Task
-		}
-	}
-	if !strings.Contains(told, "requested changes") || !strings.Contains(told, "register_gate") {
-		t.Fatalf("resumed architect's task = %q, want it told of the changes and to register the revised version", told)
-	}
-
-	register("register-v4", 4)
-	again := issue(t, pool, "LEGION-ROOT")
-	if again.Phase != phase.AwaitingPerson || again.Awaiting == nil || again.Awaiting.GateVersion != 4 || again.Awaiting.AnsweredAt != nil {
-		t.Fatalf("root after closed v4 = %#v, want a new unanswered wait on version 4", again)
-	}
-	assertSlots(t, pool, nil)
-	var suspends int
-	for _, effect := range effects(t, pool) {
-		if request, ok := effect.payload.(record.SuperviseRequest); ok && effect.issue == "LEGION-ROOT" && request.Op == "suspend" && request.Role == "architect" {
-			suspends++
-		}
-	}
-	if suspends != 2 {
-		t.Fatalf("architect suspends = %d, want one per wait", suspends)
 	}
 }
 
-// Only the root architect's own ordinary question returns the slot. An approval ask belongs to the
-// design gate, which register_gate handles, and a question a session outside the tree opened on
-// the root does not stop a tree that session has no part in.
-func TestOnlyTheTreesOwnQuestionReleasesTheSlot(t *testing.T) {
+// A hand-back the daemon made after a person's earlier answer begins the wait at that newest
+// hand-back, so the answer before it does not end the new wait: the root waits on the person
+// again rather than resuming at once. (Round 22's declared_seq finding.)
+func TestAnAnsweredHandBackDoesNotStartTheNextWait(t *testing.T) {
 	for _, tc := range []struct {
 		name string
-		ask  intake.DispatchAskOpened
+		// guarded holds the root's tree busy while the second question is opened, so the decision
+		// comes a pass later, when the guard clears.
+		guarded bool
 	}{
-		{name: "an approval ask", ask: intake.DispatchAskOpened{Key: "LEGION-ROOT", Ask: "ask-approval", Kind: "approval", AuthorSession: "session-architect"}},
-		{name: "a question from outside the tree", ask: intake.DispatchAskOpened{Key: "LEGION-ROOT", Ask: "ask-foreign", Kind: "question", AuthorSession: "session-elsewhere"}},
-		{name: "a question a person opened", ask: intake.DispatchAskOpened{Key: "LEGION-ROOT", Ask: "ask-person", Kind: "question"}},
+		{name: "decided on the pass that opens the second question"},
+		{name: "decided once the guard clears", guarded: true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			pool := migratedPool(t)
+			seedSlotted(t, pool, "LEGION-208", "U")
+			seedArchitectClaim(t, pool, "LEGION-208", true)
 			admission := newAdmission(t, 1, nil)
-			seedSlotted(t, pool, "LEGION-ROOT", "A")
-			seedWaiting(t, pool, "LEGION-NEXT", "B")
-			seedArchitectClaim(t, pool, "LEGION-ROOT", "session-architect")
-
-			if _, err := intake.ApplyFact(context.Background(), pool, "dispatch", tc.name, tc.ask, admission.engine, admission); err != nil {
-				t.Fatalf("open %s: %v", tc.name, err)
+			if tc.guarded {
+				putIssue(t, pool, record.Issue{Key: "LEGION-209", Repo: "acme/widgets", DefaultBranch: "main", GitHubRepo: "acme/widgets",
+					Project: testProject, Title: "child", Tree: "LEGION-208", Parent: new("LEGION-208"), Phase: phase.Implementing,
+					Generation: 1, Status: "in_progress", Rank: "V", HandedOver: true})
 			}
-			if got := issue(t, pool, "LEGION-ROOT"); got.Phase != phase.Admitted || got.Awaiting != nil {
-				t.Fatalf("root after %s = %#v, want it still admitted", tc.name, got)
+			// The first question is handed back, answered by the person, and the second is handed
+			// back after that answer.
+			seedHandBack(t, pool, "LEGION-208", "ask-q1", 5)
+			inTx(t, pool, func(tx pgx.Tx) {
+				records := record.NewStore()
+				if err := records.PutRootAsk(context.Background(), tx, record.RootAsk{Issue: "LEGION-208", Ask: "ask-q1",
+					Kind: record.AskQuestion, Open: false, Seq: 7, WaitingOn: "human", WaitingOnSeq: 5, ClosedBy: record.ClosedByPerson, ClosedSeq: 7,
+					ByTree: true, PersonAnswerSeq: 7}); err != nil {
+					t.Fatalf("record the answered question: %v", err)
+				}
+			})
+			seedHandBack(t, pool, "LEGION-208", "ask-q2", 9)
+			if tc.guarded {
+				tick(t, pool, admission, "tick-guarded")
+				if got := issue(t, pool, "LEGION-208").Phase; got != phase.Admitted {
+					t.Fatalf("phase = %s, want the root held by its tree's member", got)
+				}
+				member := issue(t, pool, "LEGION-209")
+				member.Phase, member.Status = phase.Done, "done"
+				putIssue(t, pool, member)
 			}
-			assertSlots(t, pool, []record.Slot{{Issue: "LEGION-ROOT", Index: 0, AdmittedAt: fixedNow}})
-			assertNoAwaitingEffects(t, pool, "LEGION-ROOT")
+			tick(t, pool, admission, "tick-1")
+			root := issue(t, pool, "LEGION-208")
+			if root.Phase != phase.AwaitingPerson || root.Awaiting == nil || root.Awaiting.Ask != "ask-q2" {
+				t.Fatalf("root = %+v (awaiting %+v), want it waiting on the second question", root, root.Awaiting)
+			}
+			if root.Awaiting.AnsweredAt != nil {
+				t.Fatalf("awaiting = %+v, want the earlier answer to end no wait", root.Awaiting)
+			}
+			if root.Awaiting.Since.Seq != 9 {
+				t.Fatalf("the wait begins at %d, want the newest hand-back 9", root.Awaiting.Since.Seq)
+			}
 		})
 	}
 }
 
-// An approved gate that answers a root's wait advances the root and its admitted children together
-// once the root has a slot again, and not before: a child never starts planning ahead of its root.
-func TestAResumeWithTheGateOpenAdvancesTheAdmittedChildren(t *testing.T) {
+// A hand-back nothing of which is still with the person is taken in on the pass that sees it: the
+// running architect already has the person's answer, so when the question later returns to the
+// person by no hand-back of the architect's (Dispatch's settlement restoring it), no wait starts
+// from the old hand-back and the architect is not resumed with an answer it already read.
+func TestAHandBackNoLongerWithThePersonIsTakenIn(t *testing.T) {
 	pool := migratedPool(t)
+	seedSlotted(t, pool, "LEGION-208", "U")
+	seedArchitectClaim(t, pool, "LEGION-208", true)
+	seedHandBack(t, pool, "LEGION-208", "ask-q", 5)
+	answered := record.RootAsk{Issue: "LEGION-208", Ask: "ask-q", Kind: record.AskQuestion, Open: false, Seq: 7, WaitingOn: "human",
+		WaitingOnSeq: 5, ClosedBy: record.ClosedByPerson, ClosedSeq: 7, ByTree: true, PersonAnswerSeq: 7}
+	putAsk := func(ask record.RootAsk) {
+		t.Helper()
+		inTx(t, pool, func(tx pgx.Tx) {
+			if err := record.NewStore().PutRootAsk(context.Background(), tx, ask); err != nil {
+				t.Fatalf("record ask-q: %v", err)
+			}
+		})
+	}
+	putAsk(answered)
 	admission := newAdmission(t, 1, nil)
-	seedSlotted(t, pool, "LEGION-RUN", "A")
-	putIssue(t, pool, record.Issue{
-		Key: "LEGION-ROOT", Tree: "LEGION-ROOT", Project: testProject, Title: "root", Phase: phase.AwaitingPerson,
-		Generation: 1, Status: "in_progress", Rank: "B", HandedOver: true, Repo: "acme/widgets", DefaultBranch: "main", GitHubRepo: "acme/widgets",
-		Awaiting: &record.Awaiting{GateVersion: 3},
-	})
-	parent := "LEGION-ROOT"
-	putIssue(t, pool, record.Issue{
-		Key: "LEGION-CHILD", Tree: "LEGION-ROOT", Parent: &parent, Project: testProject, Title: "child", Phase: phase.Admitted,
-		Generation: 1, Status: "todo", Rank: "C", Repo: "acme/widgets", DefaultBranch: "main", GitHubRepo: "acme/widgets", LastDispatchSeq: 1,
-	})
-	inTx(t, pool, func(tx pgx.Tx) {
-		if err := record.NewStore().PutGate(context.Background(), tx, record.DesignGate{Issue: "LEGION-ROOT", ArtifactID: "artifact-root", LatestVersion: 3}); err != nil {
-			t.Fatalf("seed closed gate: %v", err)
-		}
-	})
-
-	if _, err := intake.ApplyFact(context.Background(), pool, "dispatch", "approved-gate",
-		intake.DispatchArtifact{Key: "LEGION-ROOT", ArtifactID: "artifact-root", Kind: intake.DispatchArtifactApproved, Version: 3}, admission.engine, admission); err != nil {
-		t.Fatalf("approve gate: %v", err)
-	}
-	if got := issue(t, pool, "LEGION-CHILD"); got.Phase != phase.Admitted {
-		t.Fatalf("child before its root has a slot = %#v, want it still admitted", got)
+	tick(t, pool, admission, "tick-answered")
+	if root := issue(t, pool, "LEGION-208"); root.Phase != phase.Admitted || root.DeclaredSeq != 0 {
+		t.Fatalf("root = %+v, want it admitted with its answered hand-back taken in", root)
 	}
 
-	apply(t, pool, admission, "run-finished", intake.DispatchIssue{
-		Key: "LEGION-RUN", ResolvedRepo: "acme/widgets", Seq: 1, Type: "issue.closed", Status: "done",
-		Title: "LEGION-RUN", Rank: "A", HandedOver: true,
-	}, admission.engine)
-	if got := issue(t, pool, "LEGION-ROOT"); got.Phase != phase.Planning {
-		t.Fatalf("root after its resume = %#v, want planning", got)
+	restored := answered
+	restored.Open, restored.Seq = true, 9
+	putAsk(restored)
+	tick(t, pool, admission, "tick-restored")
+	if root := issue(t, pool, "LEGION-208"); root.Phase != phase.Admitted || root.Awaiting != nil {
+		t.Fatalf("root = %+v (awaiting %+v), want it admitted, waiting on nothing", root, root.Awaiting)
 	}
-	if got := issue(t, pool, "LEGION-CHILD"); got.Phase != phase.Planning {
-		t.Fatalf("child after its root's resume = %#v, want planning", got)
+	if requests := superviseRequests(t, pool, "LEGION-208"); len(requests) != 0 {
+		t.Fatalf("supervise requests = %+v, want the architect neither suspended nor resumed", requests)
 	}
 }
 
-// A person who moves a waiting root out of the workflow ends its tree through the engine's leave,
-// as for any root: it lingers with its awaiting state cleared, and nothing resumes it.
-func TestAnAwaitingRootMovedOutOfTheWorkflowLeavesThroughTheEngine(t *testing.T) {
+// A root the Dispatch consumer has not caught up to decides nothing: its listing is ahead of the
+// record, so a question it shows may already be answered. The hold's release decides it.
+func TestAHeldRootIsNotDecidedBeforeTheConsumerCatchesUp(t *testing.T) {
 	pool := migratedPool(t)
-	admission := newAdmission(t, 1, nil)
-	putIssue(t, pool, record.Issue{
-		Key: "LEGION-ROOT", Tree: "LEGION-ROOT", Project: testProject, Title: "root", Phase: phase.AwaitingPerson,
-		Generation: 1, Status: "in_progress", DispatchStatus: "in_progress", Rank: "A", HandedOver: true,
-		Repo: "acme/widgets", DefaultBranch: "main", GitHubRepo: "acme/widgets", Awaiting: &record.Awaiting{Ask: "ask-root"},
-	})
-
-	apply(t, pool, admission, "moved-to-backlog", intake.DispatchIssue{
-		Key: "LEGION-ROOT", ResolvedRepo: "acme/widgets", Seq: 2, Type: "issue.updated", Status: "backlog",
-		Title: "root", Rank: "A", HandedOver: handed,
-	}, admission.engine)
-	got := issue(t, pool, "LEGION-ROOT")
-	if got.Phase != phase.Done || got.Awaiting != nil || got.LingerUntil == nil || got.Status != "backlog" {
-		t.Fatalf("root moved to backlog = %#v, want done, lingering, its awaiting state cleared, at backlog", got)
+	admission := awaitingRig(t, pool)
+	admission.pending = map[string]intake.DispatchIssue{"LEGION-208": {Key: "LEGION-208", Status: "todo", Seq: 20}}
+	admission.target = 100
+	tick(t, pool, admission, "tick-held")
+	if got := issue(t, pool, "LEGION-208").Phase; got != phase.Admitted {
+		t.Fatalf("phase = %s, want the held root left where it stands", got)
 	}
-	for _, effect := range effects(t, pool) {
-		if notice, ok := effect.payload.(record.ControllerNotice); ok && notice.Kind == record.UnslottedNotice {
-			t.Fatalf("outbox effects = %#v, want the engine's leave, not admission's unslotted sweep", effects(t, pool))
-		}
+
+	position := intake.DispatchConsumerPosition{AckFloorStream: 100, Idle: true}
+	if _, err := intake.ApplyFact(context.Background(), pool, "dispatch", "position-1", position, admission); err != nil {
+		t.Fatalf("apply the consumer position: %v", err)
+	}
+	if got := issue(t, pool, "LEGION-208").Phase; got != phase.AwaitingPerson {
+		t.Fatalf("phase = %s, want the released root decided", got)
 	}
 }
 
-// A person who sets a waiting root back to todo has Dispatch showing todo while the record waits.
-// Once answered and promoted, it is a running tree again, so its status is written in_progress,
-// over the todo Dispatch shows, as a fresh root's promotion writes it.
-func TestAnAnsweredRootAPersonSetToTodoIsWrittenInProgressAtItsResume(t *testing.T) {
+// A root whose architect has not taken the work it was given keeps its slot: suspending it then
+// would cancel that work. The confirmation of the task is itself a fact, so the wait starts there
+// rather than at the next tick.
+func TestAWaitHeldByUntakenWorkStartsAtTheTaskConfirmation(t *testing.T) {
 	pool := migratedPool(t)
+	seedSlotted(t, pool, "LEGION-208", "U")
+	seedArchitectClaim(t, pool, "LEGION-208", false)
+	seedHandBack(t, pool, "LEGION-208", "ask-q", 5)
 	admission := newAdmission(t, 1, nil)
-	seedSlotted(t, pool, "LEGION-RUN", "A")
-	putIssue(t, pool, record.Issue{
-		Key: "LEGION-ROOT", Tree: "LEGION-ROOT", Project: testProject, Title: "root", Phase: phase.AwaitingPerson,
-		Generation: 1, Status: "in_progress", DispatchStatus: "in_progress", Rank: "B", HandedOver: true, LastDispatchSeq: 1,
-		Repo: "acme/widgets", DefaultBranch: "main", GitHubRepo: "acme/widgets", Awaiting: &record.Awaiting{Ask: "ask-root"},
-	})
+	tick(t, pool, admission, "tick-1")
+	if got := issue(t, pool, "LEGION-208").Phase; got != phase.Admitted {
+		t.Fatalf("phase = %s, want the root to keep its slot while its task is untaken", got)
+	}
 
-	apply(t, pool, admission, "person-sets-todo", intake.DispatchIssue{
-		Key: "LEGION-ROOT", ResolvedRepo: "acme/widgets", Seq: 2, Type: "issue.updated", Status: "todo",
-		Title: "root", Rank: "B", HandedOver: handed,
-	}, admission.engine)
-	if got := issue(t, pool, "LEGION-ROOT"); !got.AwaitingPerson() || got.Status != "todo" {
-		t.Fatalf("root after a person set todo = %#v, want it still waiting, at todo", got)
+	confirmed := fixedNow
+	if _, err := pool.Exec(context.Background(), `update pending_task_deliveries set confirmed_at = $1`, confirmed); err != nil {
+		t.Fatalf("confirm the architect's task: %v", err)
 	}
-	if _, err := intake.ApplyFact(context.Background(), pool, "dispatch", "answered",
-		intake.DispatchAskClosed{Key: "LEGION-ROOT", Ask: "ask-root", Kind: "question", State: "answered", Actor: alice}, admission.engine, admission); err != nil {
-		t.Fatalf("answer the question: %v", err)
+	fact := intake.TaskConfirmed{Issue: "LEGION-208", Role: claim.RoleArchitect, Generation: 1}
+	if _, err := intake.ApplyFact(context.Background(), pool, "supervise", "task-confirmed-1", fact, admission); err != nil {
+		t.Fatalf("apply the task's confirmation: %v", err)
 	}
-	apply(t, pool, admission, "run-finished", intake.DispatchIssue{
-		Key: "LEGION-RUN", ResolvedRepo: "acme/widgets", Seq: 1, Type: "issue.closed", Status: "done",
-		Title: "LEGION-RUN", Rank: "A", HandedOver: true,
-	}, admission.engine)
+	if got := issue(t, pool, "LEGION-208").Phase; got != phase.AwaitingPerson {
+		t.Fatalf("phase = %s, want the wait to start once the task was taken", got)
+	}
+}
 
-	resumed := issue(t, pool, "LEGION-ROOT")
-	if resumed.Phase != phase.Admitted || resumed.Status != "in_progress" {
-		t.Fatalf("resumed root = %#v, want admitted at in_progress", resumed)
+// An awaiting root whose Dispatch claim a person or an outside session took cannot resume in its
+// own session, so the daemon takes it out of the workflow and tells the controller; one the
+// daemon's own session or a session of its tree holds resumes as it is.
+func TestAnAwaitingRootAnOutsiderClaimedLeavesTheWorkflow(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		holder string
+		leaves bool
+	}{
+		{"a person", "user:alice", true},
+		{"a session outside the tree", "session:ses_elsewhere", true},
+		{"the daemon's own session", "session:" + dispatch.DaemonSession("LEGION-208"), false},
+		{"nobody", "", false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			pool := migratedPool(t)
+			admission := awaitingRig(t, pool)
+			tick(t, pool, admission, "tick-1")
+			if got := issue(t, pool, "LEGION-208").Phase; got != phase.AwaitingPerson {
+				t.Fatalf("phase = %s, want the root waiting", got)
+			}
+			seedDispatchClaim(t, pool, "LEGION-208", tc.holder)
+			tick(t, pool, admission, "tick-2")
+			root := issue(t, pool, "LEGION-208")
+			if !tc.leaves {
+				if root.Phase != phase.AwaitingPerson {
+					t.Fatalf("phase = %s, want the root still waiting", root.Phase)
+				}
+				return
+			}
+			if root.Phase != phase.Done || root.Awaiting != nil {
+				t.Fatalf("root = %+v (awaiting %+v), want it out of the workflow", root, root.Awaiting)
+			}
+			var unslotted int
+			for _, e := range effects(t, pool) {
+				if notice, ok := e.payload.(record.ControllerNotice); ok && notice.Kind == record.UnslottedNotice {
+					unslotted++
+					if !strings.Contains(notice.Reason, "awaits a person") {
+						t.Fatalf("unslotted notice %q, want it to say the root was waiting on a person", notice.Reason)
+					}
+				}
+			}
+			if unslotted != 1 {
+				t.Fatalf("unslotted notices = %d, want one", unslotted)
+			}
+		})
 	}
-	var writes []record.StatusWrite
-	for _, effect := range effects(t, pool) {
-		if write, ok := effect.payload.(record.StatusWrite); ok && effect.issue == "LEGION-ROOT" {
-			writes = append(writes, write)
+}
+
+// A root waiting on a person is a running tree: a session's lifecycle write on it is set back and
+// its architect told, as on a root that holds its slot.
+func TestASessionsStatusWriteOnARootWaitingOnAPersonIsSetBack(t *testing.T) {
+	pool := migratedPool(t)
+	admission := awaitingRig(t, pool)
+	engine := admission.engine
+	tick(t, pool, admission, "tick-1")
+	if got := issue(t, pool, "LEGION-208").Phase; got != phase.AwaitingPerson {
+		t.Fatalf("phase = %s, want the root waiting", got)
+	}
+	apply(t, pool, admission, "session-write", intake.DispatchIssue{Key: "LEGION-208", Seq: 30, Type: "issue.updated", Status: "done",
+		Title: "root", Rank: "U", HandedOver: handed, ActorSession: "ses_elsewhere", ResolvedRepo: "acme/widgets"}, engine)
+	root := issue(t, pool, "LEGION-208")
+	if root.Phase != phase.AwaitingPerson || root.Status != "in_progress" {
+		t.Fatalf("root = %+v, want the session's write set back and the wait kept", root)
+	}
+	var reasserted int
+	for _, e := range effects(t, pool) {
+		if write, ok := e.payload.(record.StatusWrite); ok && e.issue == "LEGION-208" && write.Status == "in_progress" {
+			reasserted++
 		}
 	}
-	if len(writes) != 1 || writes[0] != (record.StatusWrite{Status: "in_progress", ObservedStatus: "todo"}) {
-		t.Fatalf("status writes for the resumed root = %#v, want one in_progress over todo", writes)
+	if reasserted != 1 {
+		t.Fatalf("status writes setting the root back = %d, want one", reasserted)
 	}
+}
+
+// answerWait records a person's answer of the root's wait, as the workflow's answer handlers do.
+func answerWait(t *testing.T, pool *pgxpool.Pool, key string, by record.Answer, detail string) {
+	t.Helper()
+	root := issue(t, pool, key)
+	if root.Awaiting == nil {
+		t.Fatalf("issue %s holds no wait to answer", key)
+	}
+	at := fixedNow
+	root.Awaiting.AnsweredAt, root.Awaiting.AnsweredBy, root.Awaiting.AnsweredDetail = &at, by, detail
+	putIssue(t, pool, root)
 }

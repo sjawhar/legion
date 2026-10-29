@@ -459,6 +459,43 @@ func TestARefusedReloadAnswersWithTheServersReasonAndKeepsTheOldConfiguration(t 
 	}
 }
 
+// A Restart serves its new configuration under the same URL: the user the first configuration lets
+// subscribe to a subject is refused it once the server restarts on one that does not, and has it
+// again once the server restarts on the first.
+func TestARestartServesItsNewConfiguration(t *testing.T) {
+	seed, public := User(t)
+	granted := SubscribeGrantConfig(public, "granted.>")
+	server, uri := StartConfig(t, granted, []string{"-js"}, false)
+	subscribe := func() error {
+		t.Helper()
+		conn, err := ConnectSeed(t, uri, seed)
+		if err != nil {
+			t.Fatalf("connect as the user: %v", err)
+		}
+		defer conn.Close()
+		if _, err := conn.SubscribeSync("granted.subject"); err != nil {
+			t.Fatalf("subscribe: %v", err)
+		}
+		if err := conn.Flush(); err != nil {
+			t.Fatalf("flush the subscription: %v", err)
+		}
+		return conn.LastError()
+	}
+	if err := subscribe(); err != nil {
+		t.Fatalf("the first configuration refused the subscription it grants: %v", err)
+	}
+
+	server.Restart(t, SubscribeGrantConfig(public, "other.>"))
+	if err := subscribe(); !errors.Is(err, natsgo.ErrPermissionViolation) {
+		t.Fatalf("after a restart on a configuration that does not grant it, the subscription got %v, want the server's permissions violation", err)
+	}
+
+	server.Restart(t, granted)
+	if err := subscribe(); err != nil {
+		t.Fatalf("after a restart back on the configuration that grants it, the subscription got %v", err)
+	}
+}
+
 // StartConfig gives the server the arguments it was given and no others, as nats-server's own
 // command line does: -DV puts the protocol trace in its log, and without -js among them the server
 // has no JetStream, whatever a server started by another helper has.

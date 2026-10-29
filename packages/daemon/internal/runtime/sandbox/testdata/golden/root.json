@@ -33,14 +33,22 @@
               "launcher",
               "--connect",
               "tcp://192.0.2.250:13371",
-              "--token-file",
-              "/var/run/legion/launcher/LAUNCHER_TOKEN",
               "--sandbox",
               "legion-legion-legion-208",
+              "--roles-dir",
+              "/var/run/legion/roles",
               "--role",
               "architect",
-              "--private-dir",
-              "/var/run/legion/private",
+              "--role",
+              "planner",
+              "--role",
+              "implementer",
+              "--role",
+              "tester",
+              "--role",
+              "reviewer",
+              "--role",
+              "merger",
               "--stop-grace",
               "30s"
             ],
@@ -55,17 +63,17 @@
               }
             ],
             "image": "ghcr.io/sjawhar/legion-worker@sha256:1d10089a0000000000000000000000000000000000000000000000000000beef",
-            "name": "architect",
+            "name": "roles",
             "resources": {
               "limits": {
-                "cpu": "250m",
-                "ephemeral-storage": "10Gi",
-                "memory": "1Gi"
+                "cpu": "3",
+                "ephemeral-storage": "80Gi",
+                "memory": "19Gi"
               },
               "requests": {
-                "cpu": "250m",
-                "ephemeral-storage": "1Gi",
-                "memory": "1Gi"
+                "cpu": "3",
+                "ephemeral-storage": "6Gi",
+                "memory": "19Gi"
               }
             },
             "securityContext": {
@@ -85,502 +93,131 @@
                 "name": "issue"
               },
               {
-                "mountPath": "/home/legion/.omp/profiles/legion/agent/sessions",
-                "name": "issue",
-                "subPath": "sessions"
+                "mountPath": "/var/run/legion/home/.config",
+                "name": "config"
               },
               {
-                "mountPath": "/var/run/legion/launcher",
+                "mountPath": "/legion/feed",
+                "name": "issue",
+                "readOnly": true,
+                "subPath": "feed"
+              },
+              {
+                "mountPath": "/var/run/legion/roles/architect/launcher",
                 "name": "launcher-architect",
                 "readOnly": true
               },
               {
-                "mountPath": "/var/run/legion/private",
-                "name": "private-architect"
-              },
-              {
-                "mountPath": "/var/run/legion/state",
-                "name": "state-architect"
-              },
-              {
-                "mountPath": "/home/legion/.config",
-                "name": "config"
-              },
-              {
-                "mountPath": "/var/run/legion/gh",
+                "mountPath": "/var/run/legion/roles/architect/gh",
                 "name": "gh-architect",
                 "readOnly": true
               },
               {
-                "mountPath": "/legion/feed",
-                "name": "issue",
-                "readOnly": true,
-                "subPath": "feed"
-              }
-            ],
-            "workingDir": "/legion/workspaces/sjawhar/legion-smoke/legion-208"
-          },
-          {
-            "command": [
-              "/opt/legion/bin/legion",
-              "launcher",
-              "--connect",
-              "tcp://192.0.2.250:13371",
-              "--token-file",
-              "/var/run/legion/launcher/LAUNCHER_TOKEN",
-              "--sandbox",
-              "legion-legion-legion-208",
-              "--role",
-              "planner",
-              "--private-dir",
-              "/var/run/legion/private",
-              "--stop-grace",
-              "30s"
-            ],
-            "env": [
-              {
-                "name": "POD_UID",
-                "valueFrom": {
-                  "fieldRef": {
-                    "fieldPath": "metadata.uid"
-                  }
-                }
-              }
-            ],
-            "image": "ghcr.io/sjawhar/legion-worker@sha256:1d10089a0000000000000000000000000000000000000000000000000000beef",
-            "name": "planner",
-            "resources": {
-              "limits": {
-                "cpu": "250m",
-                "ephemeral-storage": "10Gi",
-                "memory": "1Gi"
-              },
-              "requests": {
-                "cpu": "250m",
-                "ephemeral-storage": "1Gi",
-                "memory": "1Gi"
-              }
-            },
-            "securityContext": {
-              "allowPrivilegeEscalation": false,
-              "capabilities": {
-                "drop": [
-                  "ALL"
-                ]
-              },
-              "seccompProfile": {
-                "type": "RuntimeDefault"
-              }
-            },
-            "volumeMounts": [
-              {
-                "mountPath": "/legion",
-                "name": "issue"
+                "mountPath": "/var/run/legion/roles/architect/private",
+                "name": "private-architect"
               },
               {
-                "mountPath": "/home/legion/.omp/profiles/legion/agent/sessions",
-                "name": "issue",
-                "subPath": "sessions"
+                "mountPath": "/var/run/legion/roles/architect/state",
+                "name": "state-architect"
               },
               {
-                "mountPath": "/var/run/legion/launcher",
+                "mountPath": "/var/run/legion/roles/planner/launcher",
                 "name": "launcher-planner",
                 "readOnly": true
               },
               {
-                "mountPath": "/var/run/legion/private",
-                "name": "private-planner"
-              },
-              {
-                "mountPath": "/var/run/legion/state",
-                "name": "state-planner"
-              },
-              {
-                "mountPath": "/home/legion/.config",
-                "name": "config"
-              },
-              {
-                "mountPath": "/var/run/legion/gh",
+                "mountPath": "/var/run/legion/roles/planner/gh",
                 "name": "gh-planner",
                 "readOnly": true
               },
               {
-                "mountPath": "/legion/feed",
-                "name": "issue",
-                "readOnly": true,
-                "subPath": "feed"
-              }
-            ],
-            "workingDir": "/legion/workspaces/sjawhar/legion-smoke/legion-208"
-          },
-          {
-            "command": [
-              "/opt/legion/bin/legion",
-              "launcher",
-              "--connect",
-              "tcp://192.0.2.250:13371",
-              "--token-file",
-              "/var/run/legion/launcher/LAUNCHER_TOKEN",
-              "--sandbox",
-              "legion-legion-legion-208",
-              "--role",
-              "implementer",
-              "--private-dir",
-              "/var/run/legion/private",
-              "--stop-grace",
-              "30s"
-            ],
-            "env": [
-              {
-                "name": "POD_UID",
-                "valueFrom": {
-                  "fieldRef": {
-                    "fieldPath": "metadata.uid"
-                  }
-                }
-              }
-            ],
-            "image": "ghcr.io/sjawhar/legion-worker@sha256:1d10089a0000000000000000000000000000000000000000000000000000beef",
-            "name": "implementer",
-            "resources": {
-              "limits": {
-                "cpu": "750m",
-                "ephemeral-storage": "20Gi",
-                "memory": "6Gi"
-              },
-              "requests": {
-                "cpu": "750m",
-                "ephemeral-storage": "1Gi",
-                "memory": "6Gi"
-              }
-            },
-            "securityContext": {
-              "allowPrivilegeEscalation": false,
-              "capabilities": {
-                "drop": [
-                  "ALL"
-                ]
-              },
-              "seccompProfile": {
-                "type": "RuntimeDefault"
-              }
-            },
-            "volumeMounts": [
-              {
-                "mountPath": "/legion",
-                "name": "issue"
+                "mountPath": "/var/run/legion/roles/planner/private",
+                "name": "private-planner"
               },
               {
-                "mountPath": "/home/legion/.omp/profiles/legion/agent/sessions",
-                "name": "issue",
-                "subPath": "sessions"
+                "mountPath": "/var/run/legion/roles/planner/state",
+                "name": "state-planner"
               },
               {
-                "mountPath": "/var/run/legion/launcher",
+                "mountPath": "/var/run/legion/roles/implementer/launcher",
                 "name": "launcher-implementer",
                 "readOnly": true
               },
               {
-                "mountPath": "/var/run/legion/private",
-                "name": "private-implementer"
-              },
-              {
-                "mountPath": "/var/run/legion/state",
-                "name": "state-implementer"
-              },
-              {
-                "mountPath": "/home/legion/.config",
-                "name": "config"
-              },
-              {
-                "mountPath": "/var/run/legion/gh",
+                "mountPath": "/var/run/legion/roles/implementer/gh",
                 "name": "gh-implementer",
                 "readOnly": true
               },
               {
-                "mountPath": "/legion/feed",
-                "name": "issue",
-                "readOnly": true,
-                "subPath": "feed"
-              }
-            ],
-            "workingDir": "/legion/workspaces/sjawhar/legion-smoke/legion-208"
-          },
-          {
-            "command": [
-              "/opt/legion/bin/legion",
-              "launcher",
-              "--connect",
-              "tcp://192.0.2.250:13371",
-              "--token-file",
-              "/var/run/legion/launcher/LAUNCHER_TOKEN",
-              "--sandbox",
-              "legion-legion-legion-208",
-              "--role",
-              "tester",
-              "--private-dir",
-              "/var/run/legion/private",
-              "--stop-grace",
-              "30s"
-            ],
-            "env": [
-              {
-                "name": "POD_UID",
-                "valueFrom": {
-                  "fieldRef": {
-                    "fieldPath": "metadata.uid"
-                  }
-                }
-              }
-            ],
-            "image": "ghcr.io/sjawhar/legion-worker@sha256:1d10089a0000000000000000000000000000000000000000000000000000beef",
-            "name": "tester",
-            "resources": {
-              "limits": {
-                "cpu": "750m",
-                "ephemeral-storage": "20Gi",
-                "memory": "6Gi"
-              },
-              "requests": {
-                "cpu": "750m",
-                "ephemeral-storage": "1Gi",
-                "memory": "6Gi"
-              }
-            },
-            "securityContext": {
-              "allowPrivilegeEscalation": false,
-              "capabilities": {
-                "drop": [
-                  "ALL"
-                ]
-              },
-              "seccompProfile": {
-                "type": "RuntimeDefault"
-              }
-            },
-            "volumeMounts": [
-              {
-                "mountPath": "/legion",
-                "name": "issue"
+                "mountPath": "/var/run/legion/roles/implementer/private",
+                "name": "private-implementer"
               },
               {
-                "mountPath": "/home/legion/.omp/profiles/legion/agent/sessions",
-                "name": "issue",
-                "subPath": "sessions"
+                "mountPath": "/var/run/legion/roles/implementer/state",
+                "name": "state-implementer"
               },
               {
-                "mountPath": "/var/run/legion/launcher",
+                "mountPath": "/var/run/legion/roles/tester/launcher",
                 "name": "launcher-tester",
                 "readOnly": true
               },
               {
-                "mountPath": "/var/run/legion/private",
-                "name": "private-tester"
-              },
-              {
-                "mountPath": "/var/run/legion/state",
-                "name": "state-tester"
-              },
-              {
-                "mountPath": "/home/legion/.config",
-                "name": "config"
-              },
-              {
-                "mountPath": "/var/run/legion/gh",
+                "mountPath": "/var/run/legion/roles/tester/gh",
                 "name": "gh-tester",
                 "readOnly": true
               },
               {
-                "mountPath": "/legion/feed",
-                "name": "issue",
-                "readOnly": true,
-                "subPath": "feed"
-              }
-            ],
-            "workingDir": "/legion/workspaces/sjawhar/legion-smoke/legion-208"
-          },
-          {
-            "command": [
-              "/opt/legion/bin/legion",
-              "launcher",
-              "--connect",
-              "tcp://192.0.2.250:13371",
-              "--token-file",
-              "/var/run/legion/launcher/LAUNCHER_TOKEN",
-              "--sandbox",
-              "legion-legion-legion-208",
-              "--role",
-              "reviewer",
-              "--private-dir",
-              "/var/run/legion/private",
-              "--stop-grace",
-              "30s"
-            ],
-            "env": [
-              {
-                "name": "POD_UID",
-                "valueFrom": {
-                  "fieldRef": {
-                    "fieldPath": "metadata.uid"
-                  }
-                }
-              }
-            ],
-            "image": "ghcr.io/sjawhar/legion-worker@sha256:1d10089a0000000000000000000000000000000000000000000000000000beef",
-            "name": "reviewer",
-            "resources": {
-              "limits": {
-                "cpu": "750m",
-                "ephemeral-storage": "10Gi",
-                "memory": "4Gi"
-              },
-              "requests": {
-                "cpu": "750m",
-                "ephemeral-storage": "1Gi",
-                "memory": "4Gi"
-              }
-            },
-            "securityContext": {
-              "allowPrivilegeEscalation": false,
-              "capabilities": {
-                "drop": [
-                  "ALL"
-                ]
-              },
-              "seccompProfile": {
-                "type": "RuntimeDefault"
-              }
-            },
-            "volumeMounts": [
-              {
-                "mountPath": "/legion",
-                "name": "issue"
+                "mountPath": "/var/run/legion/roles/tester/private",
+                "name": "private-tester"
               },
               {
-                "mountPath": "/home/legion/.omp/profiles/legion/agent/sessions",
-                "name": "issue",
-                "subPath": "sessions"
+                "mountPath": "/var/run/legion/roles/tester/state",
+                "name": "state-tester"
               },
               {
-                "mountPath": "/var/run/legion/launcher",
+                "mountPath": "/var/run/legion/roles/reviewer/launcher",
                 "name": "launcher-reviewer",
                 "readOnly": true
               },
               {
-                "mountPath": "/var/run/legion/private",
-                "name": "private-reviewer"
-              },
-              {
-                "mountPath": "/var/run/legion/state",
-                "name": "state-reviewer"
-              },
-              {
-                "mountPath": "/home/legion/.config",
-                "name": "config"
-              },
-              {
-                "mountPath": "/var/run/legion/gh",
+                "mountPath": "/var/run/legion/roles/reviewer/gh",
                 "name": "gh-reviewer",
                 "readOnly": true
               },
               {
-                "mountPath": "/legion/feed",
-                "name": "issue",
-                "readOnly": true,
-                "subPath": "feed"
-              }
-            ],
-            "workingDir": "/legion/workspaces/sjawhar/legion-smoke/legion-208"
-          },
-          {
-            "command": [
-              "/opt/legion/bin/legion",
-              "launcher",
-              "--connect",
-              "tcp://192.0.2.250:13371",
-              "--token-file",
-              "/var/run/legion/launcher/LAUNCHER_TOKEN",
-              "--sandbox",
-              "legion-legion-legion-208",
-              "--role",
-              "merger",
-              "--private-dir",
-              "/var/run/legion/private",
-              "--stop-grace",
-              "30s"
-            ],
-            "env": [
-              {
-                "name": "POD_UID",
-                "valueFrom": {
-                  "fieldRef": {
-                    "fieldPath": "metadata.uid"
-                  }
-                }
-              }
-            ],
-            "image": "ghcr.io/sjawhar/legion-worker@sha256:1d10089a0000000000000000000000000000000000000000000000000000beef",
-            "name": "merger",
-            "resources": {
-              "limits": {
-                "cpu": "250m",
-                "ephemeral-storage": "10Gi",
-                "memory": "1Gi"
-              },
-              "requests": {
-                "cpu": "250m",
-                "ephemeral-storage": "1Gi",
-                "memory": "1Gi"
-              }
-            },
-            "securityContext": {
-              "allowPrivilegeEscalation": false,
-              "capabilities": {
-                "drop": [
-                  "ALL"
-                ]
-              },
-              "seccompProfile": {
-                "type": "RuntimeDefault"
-              }
-            },
-            "volumeMounts": [
-              {
-                "mountPath": "/legion",
-                "name": "issue"
+                "mountPath": "/var/run/legion/roles/reviewer/private",
+                "name": "private-reviewer"
               },
               {
-                "mountPath": "/home/legion/.omp/profiles/legion/agent/sessions",
-                "name": "issue",
-                "subPath": "sessions"
+                "mountPath": "/var/run/legion/roles/reviewer/state",
+                "name": "state-reviewer"
               },
               {
-                "mountPath": "/var/run/legion/launcher",
+                "mountPath": "/var/run/legion/roles/merger/launcher",
                 "name": "launcher-merger",
                 "readOnly": true
               },
               {
-                "mountPath": "/var/run/legion/private",
-                "name": "private-merger"
-              },
-              {
-                "mountPath": "/var/run/legion/state",
-                "name": "state-merger"
-              },
-              {
-                "mountPath": "/home/legion/.config",
-                "name": "config"
-              },
-              {
-                "mountPath": "/var/run/legion/gh",
+                "mountPath": "/var/run/legion/roles/merger/gh",
                 "name": "gh-merger",
                 "readOnly": true
               },
               {
-                "mountPath": "/legion/feed",
-                "name": "issue",
-                "readOnly": true,
-                "subPath": "feed"
+                "mountPath": "/var/run/legion/roles/merger/private",
+                "name": "private-merger"
+              },
+              {
+                "mountPath": "/var/run/legion/roles/merger/state",
+                "name": "state-merger"
+              },
+              {
+                "mountPath": "/var/run/legion/roles/.homes",
+                "name": "role-homes"
+              },
+              {
+                "mountPath": "/var/run/legion/providers",
+                "name": "providers",
+                "readOnly": true
               }
             ],
             "workingDir": "/legion/workspaces/sjawhar/legion-smoke/legion-208"
@@ -618,20 +255,24 @@
               {
                 "name": "LEGION_REPOSITORY_CACHE_TOKEN_FILE",
                 "value": "/var/run/legion/provision/LEGION_REPOSITORY_CACHE_TOKEN"
+              },
+              {
+                "name": "LEGION_DEFAULT_BRANCH",
+                "value": "main"
               }
             ],
             "image": "ghcr.io/sjawhar/legion-worker@sha256:1d10089a0000000000000000000000000000000000000000000000000000beef",
             "name": "workspace-fetch",
             "resources": {
               "limits": {
-                "cpu": "250m",
-                "ephemeral-storage": "10Gi",
-                "memory": "1Gi"
+                "cpu": "3",
+                "ephemeral-storage": "80Gi",
+                "memory": "19Gi"
               },
               "requests": {
-                "cpu": "250m",
-                "ephemeral-storage": "1Gi",
-                "memory": "1Gi"
+                "cpu": "3",
+                "ephemeral-storage": "6Gi",
+                "memory": "19Gi"
               }
             },
             "securityContext": {
@@ -707,14 +348,14 @@
             "name": "workspace-init",
             "resources": {
               "limits": {
-                "cpu": "250m",
-                "ephemeral-storage": "10Gi",
-                "memory": "1Gi"
+                "cpu": "3",
+                "ephemeral-storage": "80Gi",
+                "memory": "19Gi"
               },
               "requests": {
-                "cpu": "250m",
-                "ephemeral-storage": "1Gi",
-                "memory": "1Gi"
+                "cpu": "3",
+                "ephemeral-storage": "6Gi",
+                "memory": "19Gi"
               }
             },
             "securityContext": {
@@ -755,6 +396,7 @@
         "runtimeClassName": "gvisor",
         "securityContext": {
           "fsGroup": 1000,
+          "fsGroupChangePolicy": "OnRootMismatch",
           "runAsGroup": 1000,
           "runAsNonRoot": true,
           "runAsUser": 1000
@@ -770,10 +412,23 @@
         ],
         "volumes": [
           {
-            "name": "issue",
-            "persistentVolumeClaim": {
-              "claimName": "issue-legion-legion-legion-208"
-            }
+            "ephemeral": {
+              "volumeClaimTemplate": {
+                "metadata": {},
+                "spec": {
+                  "accessModes": [
+                    "ReadWriteOnce"
+                  ],
+                  "resources": {
+                    "requests": {
+                      "storage": "20Gi"
+                    }
+                  },
+                  "storageClassName": "gp2"
+                }
+              }
+            },
+            "name": "issue"
           },
           {
             "name": "provision",
@@ -1103,31 +758,26 @@
               ],
               "secretName": "legion-legion-legion-208-merger-boot"
             }
+          },
+          {
+            "emptyDir": {},
+            "name": "role-homes"
+          },
+          {
+            "name": "providers",
+            "secret": {
+              "defaultMode": 288,
+              "items": [
+                {
+                  "key": "SESSION_DSN",
+                  "path": "OMP_SESSION_SQL_DSN"
+                }
+              ],
+              "secretName": "legion-legion-providers"
+            }
           }
         ]
       }
-    },
-    "volumeClaimTemplates": [
-      {
-        "metadata": {
-          "labels": {
-            "legion.dev/issue": "LEGION-208",
-            "legion.dev/project": "legion"
-          },
-          "name": "issue"
-        },
-        "spec": {
-          "accessModes": [
-            "ReadWriteOnce"
-          ],
-          "resources": {
-            "requests": {
-              "storage": "20Gi"
-            }
-          },
-          "storageClassName": "gp2"
-        }
-      }
-    ]
+    }
   }
 }

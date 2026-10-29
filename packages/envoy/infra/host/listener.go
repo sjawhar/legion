@@ -37,9 +37,13 @@ type ListenerArgs struct {
 	ContainerName *string                 `pulumi:"containerName,optional"` // default "envoy-listener"
 	Port          *int                    `pulumi:"port,optional"`          // default core.DefaultListenerPort, 9020
 	HostBridge    *string                 `pulumi:"hostBridge,optional"`
-	Seed          pulumi.StringInput      `pulumi:"seed,optional" provider:"secret"`
-	Watchdog      *WatchdogArgs           `pulumi:"watchdog,optional"`
-	Adopt         *AdoptArgs              `pulumi:"adopt,optional"`
+	// default false; true renders ENVOY_SUBSCRIBE_ALL_TOPICS=1, for a listener whose NATS user holds
+	// HostPermissions (a plain notifications.> subscribe): the listener's start ends on any other
+	// grant, which refuses the subscription
+	SubscribeAllTopics *bool              `pulumi:"subscribeAllTopics,optional"`
+	Seed               pulumi.StringInput `pulumi:"seed,optional" provider:"secret"`
+	Watchdog           *WatchdogArgs      `pulumi:"watchdog,optional"`
+	Adopt              *AdoptArgs         `pulumi:"adopt,optional"`
 	// default true; false for a listener whose NATS is not reachable from where the stack is
 	// applied (the container is created and Docker restarts it until it connects)
 	WaitForHealthy *bool `pulumi:"waitForHealthy,optional"`
@@ -114,6 +118,9 @@ func resolveListener(name string, args *ListenerArgs) (listenerPlan, error) {
 	}
 	if args.HostBridge != nil {
 		plan.plain.HostBridge = *args.HostBridge
+	}
+	if args.SubscribeAllTopics != nil {
+		plan.plain.SubscribeAllTopics = *args.SubscribeAllTopics
 	}
 	if args.Adopt != nil {
 		plan.adopt = *args.Adopt

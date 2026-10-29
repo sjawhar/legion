@@ -9,7 +9,7 @@ import {
   createQueryClient,
   renderProofDocument,
 } from "../../__tests__/proof-document";
-import { api } from "../../api/client";
+import { ApiError, api } from "../../api/client";
 import type { IssueDetails } from "../../api/types";
 import { heldSends } from "../conversation/held-sends";
 import { marginComposeSendKey } from "../margin/margin-context";
@@ -56,12 +56,63 @@ test("ProofDocument focuses a block named by the document hash after the editor 
   }
 });
 
+test("ProofDocument copies a block link whose fragment names the block as encodeBlockId writes it", async () => {
+  const originalClipboard = navigator.clipboard;
+  const copied: string[] = [];
+  Object.defineProperty(navigator, "clipboard", {
+    configurable: true,
+    value: { writeText: async (text: string) => void copied.push(text) },
+  });
+  const { editors, sync, toolbar, view } = renderProofDocument();
+
+  try {
+    await sync();
+    await waitFor(() => expect(editors).toHaveLength(1));
+    const editor = editors[0];
+    if (editor === undefined) throw new Error("editor missing");
+    editor.selectedBlock = "ship_it";
+    expect(await toolbar.current?.copyBlockLink()).toBe(true);
+    expect(copied).toEqual([`${window.location.origin}${window.location.pathname}#b-ship%5Fit`]);
+  } finally {
+    Object.defineProperty(navigator, "clipboard", { configurable: true, value: originalClipboard });
+    view.unmount();
+  }
+});
+
 test("ProofDocument clears the parent's toolbar bag on unmount", () => {
   const { toolbar, view } = renderProofDocument();
 
   expect(toolbar.current).not.toBeUndefined();
   view.unmount();
   expect(toolbar.current).toBeUndefined();
+});
+
+// Dispatch named the version and lost its answer (`409 KEY_COMMITTED`): a landing, not a refusal.
+// The dialog closes with no refusal, so a second press names nothing twice, and the document says
+// what was made.
+test("a version named with its answer lost closes the dialog and says it was made", async () => {
+  const createArtifactVersion = spyOn(api, "createArtifactVersion").mockRejectedValue(
+    new ApiError(409, { code: "KEY_COMMITTED", error: "made; the answer was lost" })
+  );
+  const { toolbar, view } = renderProofDocument();
+  try {
+    act(() => toolbar.current?.requestNamedVersion());
+    const dialog = await screen.findByRole("dialog", { name: "Name this version" });
+    fireEvent.change(within(dialog).getByLabelText("What changed?"), {
+      target: { value: "Settled the rollout" },
+    });
+    fireEvent.click(within(dialog).getByRole("button", { name: "Save" }));
+    const made = await screen.findByTestId("landed-without-answer");
+    expect(made.textContent).toBe(
+      "The version “Settled the rollout” was made, but Dispatch lost its answer, so it may take a moment to appear."
+    );
+    expect(screen.queryByRole("dialog", { name: "Name this version" })).toBeNull();
+    expect(screen.queryByText("Could not name this version. Try again.")).toBeNull();
+    expect(createArtifactVersion).toHaveBeenCalledTimes(1);
+  } finally {
+    createArtifactVersion.mockRestore();
+    view.unmount();
+  }
 });
 
 test("ProofDocument highlights a routed search term again after route and document changes", async () => {
@@ -195,6 +246,35 @@ test("ProofDocument opens a hover card for a dispatch:// link in the live editor
     expect(within(view.container).getByTestId("current-route").textContent).toBe("/issues/CORE-1");
   } finally {
     getIssue.mockRestore();
+    view.unmount();
+  }
+});
+
+// A link's target is a node its author named, so a click on a link to a document whose name is
+// past the bound text is held to (2683 characters, which a new upload's reference key still
+// holds) opens that document in-app, rather than leaving the browser to follow the sanitized
+// mark's empty href.
+test("ProofDocument opens an explicit link to a long-named document in-app", async () => {
+  const slug = "a".repeat(2683);
+  const { editors, sync, view } = renderProofDocument();
+
+  try {
+    await sync();
+    await waitFor(() => expect(editors).toHaveLength(1));
+    const root = editors[0]?.root;
+    if (root === undefined) throw new Error("editor root missing");
+    // What the proof-editor serializer emits for a dispatch:// link mark (the test above says why).
+    act(() => {
+      root.innerHTML = `<p><a href="" data-dispatch-href="dispatch://CORE-1/artifact/${slug}">design</a></p>`;
+    });
+    const anchor = root.querySelector("a");
+    if (anchor === null) throw new Error("anchor missing");
+
+    fireEvent.click(anchor);
+    expect(within(view.container).getByTestId("current-route").textContent).toBe(
+      `/issues/CORE-1/artifacts/${slug}`
+    );
+  } finally {
     view.unmount();
   }
 });
@@ -430,6 +510,7 @@ test("a selection-bar action opens the margin composer for the mark and settles 
       owner: { issueKey: "CORE-1", kind: "issue" },
       plainDelivery: "steer",
       replyTo: null,
+      sendKey: "send-1",
     });
   };
 

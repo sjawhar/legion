@@ -668,11 +668,12 @@ func endRoomLockHolders(t *testing.T, service *Service) {
 
 // closeWaitsForRepair reports whether a close the service makes of a room is waiting for a repair
 // to finish committing into that room: the repair holds the room's close gate while it commits
-// (roomServer.holdOpen), and a close waits for that gate. Both of the service's closes are named
-// here, since either can be the one waiting: CloseRoom, and closeOwned, which the stale-room
-// evictor and a failed room's eviction take.
+// (roomServer.holdOpen), and a close waits for that gate. Every gated close of the service is named
+// here, since any can be the one waiting: CloseRoom; closeInstance, which the close of a room
+// behind the head takes; and closeOwned, which a failed room's eviction takes.
 func closeWaitsForRepair() bool {
 	return goroutinesIn("(*roomServer).CloseRoom", "sync.(*RWMutex).Lock")+
+		goroutinesIn("(*roomServer).closeInstance", "sync.(*RWMutex).Lock")+
 		goroutinesIn("(*roomServer).closeOwned", "sync.(*RWMutex).Lock") > 0
 }
 

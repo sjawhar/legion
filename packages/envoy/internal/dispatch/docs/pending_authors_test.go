@@ -69,6 +69,9 @@ func commitNamedVersion(t *testing.T, service *Service, artifactID string, actor
 
 // editAsConnectedPeer makes edit as actor's browser: actor is the room's one connected peer while
 // the room applies it, so the room's update observer credits actor alone (creditContentChange).
+// It is for a document one process serves, where no room stands behind the durable head. A test
+// whose document two processes serve uses editAsBrowserPeer: there the room this edit is made in
+// can itself be behind the head, which refuses the append and fails the room.
 func editAsConnectedPeer(t *testing.T, service *Service, artifactID string, connection uint64, actor model.Actor, edit func(*pmdoc.Node) *pmdoc.Node) {
 	t.Helper()
 	if err := service.warmLiveDocument(context.Background(), artifactID); err != nil {
@@ -94,6 +97,15 @@ func editAsBrowserPeer(t *testing.T, service *Service, artifactID string, connec
 	service.addConnection(artifactID, connection, actor)
 	peer := editAsPeer(t, service, artifactID, edit)
 	service.removeConnection(artifactID, connection)
+	resendUntilStored(t, service, artifactID, connection, actor, peer)
+}
+
+// resendUntilStored is what a browser's provider does after its room is closed under it: while the
+// store does not hold what peer, that browser's own document, has written, it waits for the room's
+// recovery and sends peer's state to the room that replaced it, as actor on connection.
+func resendUntilStored(t *testing.T, service *Service, artifactID string, connection uint64, actor model.Actor, peer *crdt.Doc) {
+	t.Helper()
+	ctx := context.Background()
 	state := crdt.EncodeStateAsUpdateV1(peer, nil)
 	for range 5 {
 		quiet, cancel := context.WithTimeout(ctx, roomWait(t))
@@ -297,6 +309,29 @@ func TestTwoProcessesListEveryEditorOnExactlyOneVersion(t *testing.T) {
 		}
 		seed = parsed
 	}
+	playTwoProcesses(t, seed)
+}
+
+// twoProcessRegressionSeeds are seeds TestTwoProcessesListEveryEditorOnExactlyOneVersion drew that
+// failed on every replay, kept so each run plays them again (INFRA-218). In both, one process's
+// room stood behind the durable head after the other process wrote the document, and that room's
+// settlement was refused there three times in a row: the third refusal failed the room, and the
+// process's next named version, made before the failure's eviction had run, was refused with it.
+// The first seed also named a version from that room, which recorded text missing the other
+// process's paragraphs at a cursor saying it held them.
+var twoProcessRegressionSeeds = []int64{1792831380700443036, 1792844341416325912}
+
+// TestTwoProcessesListEveryEditorOnExactlyOneVersion, for each seed of twoProcessRegressionSeeds.
+func TestTwoProcessesListEveryEditorOnExactlyOneVersionForSeedsThatFailed(t *testing.T) {
+	for _, seed := range twoProcessRegressionSeeds {
+		t.Run(strconv.FormatInt(seed, 10), func(t *testing.T) { playTwoProcesses(t, seed) })
+	}
+}
+
+// playTwoProcesses plays the steps seed draws on two processes serving one document, then checks
+// that every editor is listed on exactly one version and that nothing is left owed.
+func playTwoProcesses(t *testing.T, seed int64) {
+	t.Helper()
 	t.Logf("seed %d (replay with %s=%d)", seed, roomSeedEnv, seed)
 	random := rand.New(rand.NewPCG(uint64(seed), 0))
 

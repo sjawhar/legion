@@ -17,6 +17,22 @@ func (c *Client) onClosed() {
 	go c.recover()
 }
 
+// onConnect is the ConnectedCB of a client that connects in the background
+// (WithConnectInBackground): nats.go has connected the connection the constructor returned for the
+// first time, and has sent the core subscriptions made before it. It is a connection event as a
+// reconnect in place is, so onReconnect binds the JetStream subscription made before it and runs
+// the reconnect hooks, an owning client's reconciliation of the stream first (ensureStreamOnce).
+// nats.go runs it once per connection, and the client never installs a second connection before
+// this one has connected (ensureConnWithContext), so it marks the end of the wait only for c.Conn.
+func (c *Client) onConnect(nc *nats.Conn) {
+	c.mu.Lock()
+	if nc == c.Conn {
+		c.awaitingConnection = false
+	}
+	c.mu.Unlock()
+	c.onReconnect(nc)
+}
+
 func (c *Client) onReconnect(nc *nats.Conn) {
 	// A reconnect after the client stopped belongs to a process that is shutting down: closeStopped
 	// closes the connection, or leaves it to the drain when the reconnect came before Drain stopped
@@ -32,6 +48,12 @@ func (c *Client) onReconnect(nc *nats.Conn) {
 	c.mu.Lock()
 	if nc == c.Conn {
 		c.connEvents++
+		// nats.go has re-sent every subscription, so a refusal the server made of the core one
+		// before is past: this server may grant it. A refusal of the re-sent one is reported after
+		// this callback, and marks it again (onAsyncError).
+		c.subscriptionsMu.Lock()
+		c.subscriptions[coreSubscription].refused = false
+		c.subscriptionsMu.Unlock()
 	}
 	c.mu.Unlock()
 	pending, restoreErr := c.restoreSubscriptions()
@@ -346,6 +368,8 @@ func (c *Client) restoreSubscriptions() (pending bool, err error) {
 			continue
 		}
 		subscription.binding = make(chan struct{})
+		// The bind sends the subscription anew, on a connection that may grant it.
+		subscription.refused = false
 		restoring = append(restoring, subscription)
 	}
 	registrations := make([]recoverableSubscription, len(restoring))

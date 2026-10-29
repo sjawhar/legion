@@ -17,11 +17,12 @@ import (
 
 	"github.com/sjawhar/legion/daemon/internal/claim"
 	"github.com/sjawhar/legion/daemon/internal/ompsessions"
+	"github.com/sjawhar/legion/daemon/internal/runtime"
 )
 
 // A role process's addresses are fixed when it is launched, and a daemon restarted with its key
 // changed hands other ones (handedAddresses): the worker stream is fixed for the issue pod's life,
-// in every role container's launcher command, and the other five for one generation's life, in the
+// in the pod's one container's launcher command, and the other five for one generation's life, in the
 // start command the launcher keeps to itself. So the stream is read from the pod spec, and each
 // role's five are recorded on the issue Sandbox when the daemon starts a generation, one annotation
 // per role, which a later daemon reads from its informer cache (evaluate).
@@ -176,10 +177,10 @@ func (r *Runtime) movedEnvironment(s *sandbox, role claim.Role, generation uint6
 	return moved, nil
 }
 
-// movedStream compares the stream the named role container's launcher dials with the one a pod
-// created now is handed; ok is whether it moved. A container that is absent or runs no connectFlag
-// (never one this runtime built) has nothing to compare. The handed value is compared as the pod
-// spec carries it, escaped against the kubelet's expansion (kubeletLiteral).
+// movedStream compares the stream the launcher in pod's container named container dials with the
+// one a pod created now is handed; ok is whether it moved. A container that is absent or runs no
+// connectFlag (never one this runtime built) has nothing to compare. The handed value is compared
+// as the pod spec carries it, escaped against the kubelet's expansion (kubeletLiteral).
 func (r *Runtime) movedStream(pod *corev1.Pod, container string) (movedAddress, bool) {
 	i := slices.IndexFunc(pod.Spec.Containers, func(c corev1.Container) bool { return c.Name == container })
 	if i < 0 {
@@ -194,6 +195,43 @@ func (r *Runtime) movedStream(pod *corev1.Pod, container string) (movedAddress, 
 		return movedAddress{connectFlag, namedURL(held), namedURL(handed)}, true
 	}
 	return movedAddress{}, false
+}
+
+// earlierLayout is whether names, the containers of a pod Legion built, are an issue pod's of the
+// layout before one container: exactly one container per workflow role, each named for its role.
+// No other code reads that layout: the boot census passes such a Sandbox (legacyIssueSandbox) and
+// movedLayout replaces its pod.
+func earlierLayout(names []string) bool {
+	return len(names) == len(claim.Roles) &&
+		!slices.ContainsFunc(claim.Roles, func(role claim.Role) bool { return !slices.Contains(names, string(role)) })
+}
+
+// legionContainers are the names among names Legion gives a container: a launcher role's (the
+// earlier layout's) or the one container of either pod this runtime builds. The rest were added to
+// the running pod by another controller (a mesh's injected sidecar, say), which never writes the
+// Sandbox's template, so only a pod's own containers are read through it.
+func legionContainers(names []string) []string {
+	return slices.DeleteFunc(slices.Clone(names), func(name string) bool {
+		return name != runtime.IssuePodContainer && !slices.Contains(launcherRoles, claim.Role(name))
+	})
+}
+
+// movedLayout is a running issue pod of the layout before one container (earlierLayout, read over
+// the pod's own containers, legionContainers, since an injected sidecar is in the running pod and
+// never in the Sandbox's template the census reads); ok is whether pod is one. Its launchers run
+// one role each and read the per-role paths a pod of that layout mounted, so no role of it can run
+// as one launched now: every role of it is StaleAddress, and the next launch of any of them
+// replaces the pod, an installing launch included.
+func movedLayout(pod *corev1.Pod) (movedAddress, bool) {
+	names := make([]string, len(pod.Spec.Containers))
+	for i, c := range pod.Spec.Containers {
+		names[i] = c.Name
+	}
+	names = legionContainers(names)
+	if !earlierLayout(names) {
+		return movedAddress{}, false
+	}
+	return movedAddress{"the pod's containers", strings.Join(names, ", "), runtime.IssuePodContainer}, true
 }
 
 // flagValue is the value command gives flag, the argument that follows it; ok is whether command
@@ -211,7 +249,7 @@ func flagValue(command []string, flag string) (string, bool) {
 // with the shim's agent-secrets flags (launcherCommand), which name its key directory and the
 // broker's token file, and the shim refuses to start without its token file; a pod's volumes are
 // fixed when it is created. So a pod made before the runtime enrolled, or under another audience or
-// expiry, cannot run a role that enrolls now, and must be replaced, as a pod whose launchers dial a
+// expiry, cannot run a role that enrolls now, and must be replaced, as a pod whose launcher dials a
 // moved stream must. The role's key directory is compared by name, and the token's projection by
 // the three fields the shim's token file depends on: its audience, expiry and path. Nothing else of
 // a stored volume is compared: a field the API server's defaulting or an admission webhook adds, or
@@ -268,20 +306,27 @@ func sameTokenProjection(held, want *corev1.ServiceAccountTokenProjection) bool 
 		held.ExpirationSeconds != nil && *held.ExpirationSeconds == *want.ExpirationSeconds
 }
 
-// movedInPod is what pod holds, for role, that a pod created now is not handed: the stream its
-// launcher dials (movedStream), the secrets broker's enrollment its next generation is started
-// against (movedEnrollment), and the whole session store it was created under
-// (movedSessionStore). All are fixed for the pod's life, so any moved means the pod must be
-// replaced before role can run as one launched now. It is the one rule for all: evaluate reads a
-// role whose pod holds a move as StaleAddress, and relaunch replaces a pod that holds one for any
-// of its roles.
+// movedInPod is what pod holds, for role, that a pod created now is not handed: the layout before
+// one container (movedLayout), the stream its launcher dials (movedStream), the secrets broker's
+// enrollment its next generation is started against (movedEnrollment), the operator's volume and
+// mount holding every named role's overlays in role's container (movedRoleOverlays), and the whole session store it was
+// created under (movedSessionStore). All are fixed for the pod's life, so any moved means the pod
+// must be replaced before role can run as one launched now. It is the one rule for all: evaluate
+// reads a role whose pod holds a move as StaleAddress, and relaunch replaces a pod that holds one
+// for any of its roles.
 func (r *Runtime) movedInPod(pod *corev1.Pod, role claim.Role) []movedAddress {
 	var moved []movedAddress
-	if stream, ok := r.movedStream(pod, string(role)); ok {
+	if layout, ok := movedLayout(pod); ok {
+		moved = append(moved, layout)
+	}
+	if stream, ok := r.movedStream(pod, podContainer(role)); ok {
 		moved = append(moved, stream)
 	}
 	if enrollment, ok := r.movedEnrollment(pod, role); ok {
 		moved = append(moved, enrollment)
+	}
+	if overlays, ok := r.movedRoleOverlays(pod, role); ok {
+		moved = append(moved, overlays)
 	}
 	if store, ok := r.movedSessionStore(pod); ok {
 		moved = append(moved, store)
@@ -289,12 +334,130 @@ func (r *Runtime) movedInPod(pod *corev1.Pod, role claim.Role) []movedAddress {
 	return moved
 }
 
+// movedRoleOverlays is the first overlay of any role role_config_files names (Options.RoleConfigFiles)
+// that runs in role's container of pod — every issue role shares an issue pod's one container, the
+// controller has its own pod — whose holder in a pod created now, the deepest operator mount at or
+// above the file (runtime.kubernetes.pod volume_mounts) with its volume, is not the deepest mount
+// at or above the file in pod's container as a role sees it (an issue pod's HomeMountsDir view
+// mapped back to the image's home): another volume, sub_path or mount path, a mount that hides it
+// there or none at all, or a volume of that name filled from another ConfigMap or Secret, or
+// projecting other items. Every role of the pod reports the same move, as for the secrets broker's
+// enrollment, so the whole pod is replaced at the boot's re-adoption of any role running in it, or,
+// with none running, at the first launch into it; a named role's next generation is started with
+// the file in its PI_CONFIG_FILES (roleOperatorEnv), on which its Oh My Pi would refuse to start
+// in the old pod. Only what decides whether the file is there is compared, so the fields the API
+// server defaults on a stored volume never read as a move.
+func (r *Runtime) movedRoleOverlays(pod *corev1.Pod, role claim.Role) (movedAddress, bool) {
+	if len(r.roleConfigFiles) == 0 {
+		return movedAddress{}, false
+	}
+	container := slices.IndexFunc(pod.Spec.Containers, func(c corev1.Container) bool { return c.Name == podContainer(role) })
+	if container < 0 {
+		return movedAddress{}, false
+	}
+	seen := make([]corev1.VolumeMount, len(pod.Spec.Containers[container].VolumeMounts))
+	for i, m := range pod.Spec.Containers[container].VolumeMounts {
+		m.MountPath = roleViewPath(m.MountPath)
+		seen[i] = m
+	}
+	for _, named := range roleConfigRoles {
+		if podContainer(named) != podContainer(role) {
+			continue
+		}
+		for _, file := range r.roleConfigFiles[named] {
+			holder := holderMount(r.pod.VolumeMounts, file)
+			if holder == nil {
+				continue
+			}
+			want := volumeFillName(r.pod.Volumes, holder.Name)
+			held := "(unset)"
+			if in := holderMount(seen, file); in != nil && in.Name == holder.Name && in.SubPath == holder.SubPath && in.MountPath == holder.MountPath {
+				held = volumeFillName(pod.Spec.Volumes, holder.Name)
+			}
+			if held != want {
+				return movedAddress{where: "role_config_files." + string(named) + " " + file, held: held, handed: want}, true
+			}
+		}
+	}
+	return movedAddress{}, false
+}
+
+// roleViewPath is path, a mount path of a pod's container, as a role sees it: an issue pod's
+// HomeMountsDir view of the image's home (containerHomePath) mapped back to the home, any other
+// path as it is.
+func roleViewPath(path string) string {
+	if path == HomeMountsDir {
+		return podHome
+	}
+	if rest, ok := strings.CutPrefix(path, HomeMountsDir+"/"); ok {
+		return podHome + "/" + rest
+	}
+	return path
+}
+
+// holderMount is the deepest of mounts at or above file, as the kernel resolves the path, nil for
+// none (config's checkRoleConfigMount refuses a role overlay no mount holds).
+func holderMount(mounts []corev1.VolumeMount, file string) *corev1.VolumeMount {
+	var holder *corev1.VolumeMount
+	for i, mount := range mounts {
+		if file != mount.MountPath && !strings.HasPrefix(file, mount.MountPath+"/") {
+			continue
+		}
+		if holder == nil || len(mount.MountPath) > len(holder.MountPath) {
+			holder = &mounts[i]
+		}
+	}
+	return holder
+}
+
+// volumeFillName names what the volume called name among volumes is filled from, by the fields
+// that decide which files it holds: its ConfigMap or Secret and their items, a projected volume's
+// sources, its claim or NFS export; "(unset)" for no such volume. None of them is a credential.
+func volumeFillName(volumes []corev1.Volume, name string) string {
+	at := slices.IndexFunc(volumes, func(v corev1.Volume) bool { return v.Name == name })
+	if at < 0 {
+		return "(unset)"
+	}
+	items := func(list []corev1.KeyToPath) string {
+		var kept []string
+		for _, item := range list {
+			kept = append(kept, item.Key+"="+item.Path)
+		}
+		return "[" + strings.Join(kept, ",") + "]"
+	}
+	v := volumes[at]
+	switch {
+	case v.ConfigMap != nil:
+		return "volume " + name + " from ConfigMap " + v.ConfigMap.Name + " items " + items(v.ConfigMap.Items)
+	case v.Secret != nil:
+		return "volume " + name + " from Secret " + v.Secret.SecretName + " items " + items(v.Secret.Items)
+	case v.Projected != nil:
+		var sources []string
+		for _, source := range v.Projected.Sources {
+			switch {
+			case source.ConfigMap != nil:
+				sources = append(sources, "ConfigMap "+source.ConfigMap.Name+" items "+items(source.ConfigMap.Items))
+			case source.Secret != nil:
+				sources = append(sources, "Secret "+source.Secret.Name+" items "+items(source.Secret.Items))
+			}
+		}
+		return "volume " + name + " projecting " + strings.Join(sources, " and ")
+	case v.PersistentVolumeClaim != nil:
+		return "volume " + name + " from claim " + v.PersistentVolumeClaim.ClaimName
+	case v.NFS != nil:
+		return "volume " + name + " from NFS " + v.NFS.Server + ":" + v.NFS.Path
+	}
+	return "volume " + name
+}
+
 // movedSessionStore compares the whole session store pod carries with the one a pod created now
 // would carry, so no pod outlives a change of store; ok is whether they differ. A generation
 // started under a database store names a URL file no pod created under another store has: the
-// providers volume's projection of the Secret key under postgres, the proxy a role container's
-// launcher serves under cloudsql-iam. Each side is named from what a pod spec holds, the kubelet
-// escaping included (kubeletLiteral), as movedStream names the stream.
+// providers volume's projection of the Secret key under postgres, the proxy the pod's launcher
+// serves under cloudsql-iam. A pod created under another store or key is replaced by its relaunch
+// rather than start a generation whose Oh My Pi would refuse the URL file it cannot read. Each side
+// is named from what a pod spec holds, the kubelet escaping included (kubeletLiteral), as
+// movedStream names the stream.
 func (r *Runtime) movedSessionStore(pod *corev1.Pod) (movedAddress, bool) {
 	proxy := r.sessionProxyFlags()
 	for i, value := range proxy {
@@ -309,8 +472,9 @@ func (r *Runtime) movedSessionStore(pod *corev1.Pod) (movedAddress, bool) {
 }
 
 // sessionStoreInPod names the session store pod was created under, read back from the pod itself:
-// the providers volume's session item under postgres (providers), the session proxy's flags a role
-// container carries under cloudsql-iam (sessionProxyFlags), and neither under the volume store.
+// the providers volume's session item under postgres (providers), the session proxy's flags a
+// launcher container carries under cloudsql-iam (sessionProxyFlags), and neither under the volume
+// store.
 func sessionStoreInPod(pod *corev1.Pod) string {
 	for _, volume := range pod.Spec.Volumes {
 		if volume.Name != providersVolume || volume.Secret == nil {

@@ -6,77 +6,76 @@ import (
 	"testing"
 )
 
-// 0052 adds parked_decisions and readmitted_approvals: a root keeps one decision row per Dispatch
-// reference and one approval below its spec's latest version, and both go with the issue they name.
-func TestParkedDecisionsArriveWith0052AndGoWithTheirRoot(t *testing.T) {
+// The daemon mirrors what Dispatch says about every issue of its project, because the transaction
+// that decides whether to admit a root or start a child performs no I/O. 0052 gives that mirror
+// its table: a row per key, the keys it is blocked by as an array, the Dispatch sequence it was
+// observed at, and an index on the project each consumer reads whole, in the key order it reads
+// it in.
+func TestTheDispatchMirrorArrivesWith0052(t *testing.T) {
 	store := emptyStore(t)
 	ctx := context.Background()
 	migrateThrough(t, store, 51)
-	var exists bool
-	if err := store.Pool().QueryRow(ctx, `select to_regclass('parked_decisions') is not null`).Scan(&exists); err != nil {
-		t.Fatalf("look for parked_decisions at 0051: %v", err)
+	var before int
+	if err := store.Pool().QueryRow(ctx, `select count(*) from information_schema.tables
+		where table_name = 'dispatch_issues'`).Scan(&before); err != nil {
+		t.Fatalf("look for dispatch_issues before 0052: %v", err)
 	}
-	if exists {
-		t.Fatal("parked_decisions exists at 0051, want it added by 0052")
+	if before != 0 {
+		t.Fatalf("dispatch_issues exists at 51, want it to arrive with 0052")
 	}
+
 	if _, err := store.Migrate(ctx); err != nil {
 		t.Fatalf("migrate: %v", err)
 	}
-	var key []string
-	if err := store.Pool().QueryRow(ctx, `select array_agg(a.attname::text order by k.ord)
-		from pg_index i
-		cross join lateral unnest(i.indkey) with ordinality as k(attnum, ord)
-		join pg_attribute a on a.attrelid = i.indrelid and a.attnum = k.attnum
-		where i.indrelid = 'parked_decisions'::regclass and i.indisprimary`).Scan(&key); err != nil {
-		t.Fatalf("read the primary key of parked_decisions: %v", err)
+
+	// The index carries the key as well as the project, because every read of the mirror is
+	// `where project = $1 order by key`: the ordering comes off the index rather than a sort of
+	// the project's rows.
+	var indexdef string
+	if err := store.Pool().QueryRow(ctx, `select indexdef from pg_indexes
+		where tablename = 'dispatch_issues' and indexname = 'dispatch_issues_project'`).Scan(&indexdef); err != nil {
+		t.Fatalf("look for the project index: %v", err)
 	}
-	if strings.Join(key, ",") != "root,ref" {
-		t.Fatalf("parked_decisions primary key = %v, want (root, ref)", key)
+	if !strings.Contains(indexdef, "(project, key)") {
+		t.Fatalf("dispatch_issues_project = %q, want it on (project, key)", indexdef)
 	}
 
-	if _, err := store.Pool().Exec(ctx, `insert into issues
-		(key, tree, project, title, phase, generation, status, rank, last_dispatch_seq)
-		values ('LEGION-210', 'LEGION-210', 'LEGION', 'parked root', 'done', 1, 'backlog', 'A', 1)`); err != nil {
-		t.Fatal(err)
+	if _, err := store.Pool().Exec(ctx, `insert into dispatch_issues (key, project, status, blockers, dispatch_seq)
+		values ('LEGION-900', 'LEGION', 'todo', array['LEGION-901', 'LEGION-902'], 7)`); err != nil {
+		t.Fatalf("insert a mirrored issue: %v", err)
 	}
-	if _, err := store.Pool().Exec(ctx, `insert into parked_decisions (root, ref, decision, actor, at)
-		values ('LEGION-210', 'dispatch://LEGION-210/spec', 'design-approved', 'user:alice', now())`); err != nil {
-		t.Fatalf("keep a decision: %v", err)
+	// An issue waiting on nothing takes the default, so a row written without blockers reads back
+	// as an empty list rather than null.
+	if _, err := store.Pool().Exec(ctx, `insert into dispatch_issues (key, project, status, dispatch_seq)
+		values ('LEGION-901', 'LEGION', 'done', 3)`); err != nil {
+		t.Fatalf("insert a mirrored issue with no blockers: %v", err)
 	}
-	if _, err := store.Pool().Exec(ctx, `insert into parked_decisions (root, ref, decision, actor, at)
-		values ('LEGION-210', 'dispatch://LEGION-210/spec', 'design-changes-requested', 'user:bob', now())`); err == nil ||
-		!strings.Contains(err.Error(), "duplicate key") {
-		t.Fatalf("a second row for one ref = %v, want the primary key to refuse it", err)
-	}
-	if _, err := store.Pool().Exec(ctx, `insert into parked_decisions (root, ref, decision, actor, at)
-		values ('LEGION-404', 'dispatch://LEGION-404/spec', 'design-approved', 'user:alice', now())`); err == nil ||
-		!strings.Contains(err.Error(), "foreign key") {
-		t.Fatalf("a decision on an unrecorded root = %v, want the foreign key to refuse it", err)
-	}
-	for _, refused := range []struct{ why, statement, error string }{
-		{"an approval at the latest version", `insert into readmitted_approvals (root, approved_version, latest_version) values ('LEGION-210', 3, 3)`, "check constraint"},
-		{"an approval of version 0", `insert into readmitted_approvals (root, approved_version, latest_version) values ('LEGION-210', 0, 3)`, "check constraint"},
-		{"an approval on an unrecorded root", `insert into readmitted_approvals (root, approved_version, latest_version) values ('LEGION-404', 2, 3)`, "foreign key"},
+	for _, want := range []struct {
+		key      string
+		status   string
+		blockers []string
+		seq      int64
+	}{
+		{key: "LEGION-900", status: "todo", blockers: []string{"LEGION-901", "LEGION-902"}, seq: 7},
+		{key: "LEGION-901", status: "done", blockers: []string{}, seq: 3},
 	} {
-		if _, err := store.Pool().Exec(ctx, refused.statement); err == nil || !strings.Contains(err.Error(), refused.error) {
-			t.Fatalf("%s = %v, want %s to refuse it", refused.why, err, refused.error)
+		var status string
+		var blockers []string
+		var seq int64
+		if err := store.Pool().QueryRow(ctx, `select status, blockers, dispatch_seq from dispatch_issues where key = $1`,
+			want.key).Scan(&status, &blockers, &seq); err != nil {
+			t.Fatalf("read %s: %v", want.key, err)
 		}
-	}
-	if _, err := store.Pool().Exec(ctx, `insert into readmitted_approvals (root, approved_version, latest_version) values ('LEGION-210', 3, 4)`); err != nil {
-		t.Fatalf("keep an older approval: %v", err)
-	}
-	if _, err := store.Pool().Exec(ctx, `insert into readmitted_approvals (root, approved_version, latest_version) values ('LEGION-210', 2, 4)`); err == nil ||
-		!strings.Contains(err.Error(), "duplicate key") {
-		t.Fatalf("a second approval for one root = %v, want the primary key to refuse it", err)
-	}
-	if _, err := store.Pool().Exec(ctx, `delete from issues where key = 'LEGION-210'`); err != nil {
-		t.Fatalf("delete the root: %v", err)
-	}
-	var kept, approvals int
-	if err := store.Pool().QueryRow(ctx, `select (select count(*) from parked_decisions), (select count(*) from readmitted_approvals)`).Scan(&kept, &approvals); err != nil {
-		t.Fatalf("count the kept rows: %v", err)
-	}
-	if kept != 0 || approvals != 0 {
-		t.Fatalf("%d decisions and %d approvals kept after their root was deleted, want none", kept, approvals)
+		if status != want.status || seq != want.seq {
+			t.Errorf("%s = status %q at %d, want %q at %d", want.key, status, seq, want.status, want.seq)
+		}
+		if len(blockers) != len(want.blockers) {
+			t.Fatalf("%s blockers = %#v, want %#v", want.key, blockers, want.blockers)
+		}
+		for i, blocker := range want.blockers {
+			if blockers[i] != blocker {
+				t.Errorf("%s blocker %d = %q, want %q", want.key, i, blockers[i], blocker)
+			}
+		}
 	}
 }
