@@ -1,0 +1,66 @@
+build: listener and bridge this checkout (37cdf6dde plus the working copy); plugins fe31539233c0dd1cfa4474ff84be9f9ce3575034 (git archive into /legion/scratch/tmp/infra594/live/mixed/plugins-tree-fe31539233c0); listener grant current
+disruption             kind   event             marker           pi   cc
+a session-restart      issue  comment-1         LDT0add-001Z      1    1
+a session-restart      issue  comment-2         LDT0add-002Z      1    1
+a session-restart      agent  dispatch-message  LDT0add-003Z      1    -
+a session-restart      agent  dispatch-message  LDT0add-004Z      -    1
+a session-restart      agent  listener-send     LDT0add-005Z      1    -
+a session-restart      agent  listener-send     LDT0add-006Z      -    1
+a session-restart      role   listener-publish  LDT0add-007Z     0!    -
+a session-restart      role   listener-publish  LDT0add-008Z      -   0!
+a session-restart      role   core-publish      LDT0add-009Z     0!    -
+a session-restart      role   core-publish      LDT0add-010Z      -   0!
+b nats-cut             issue  comment-1         LDT0add-011Z      1    1
+b nats-cut             issue  comment-2         LDT0add-012Z      1    1
+b nats-cut             agent  dispatch-message  LDT0add-013Z      1    -
+b nats-cut             agent  dispatch-message  LDT0add-014Z      -    1
+b nats-cut             agent  listener-send     LDT0add-015Z      1    -
+b nats-cut             agent  listener-send     LDT0add-016Z      -    1
+b nats-cut             role   listener-publish  LDT0add-017Z     0!    -
+b nats-cut             role   listener-publish  LDT0add-018Z      -   0!
+b nats-cut             role   core-publish      LDT0add-019Z     0!    -
+b nats-cut             role   core-publish      LDT0add-020Z      -   0!
+c listener-shared      issue  comment-1         LDT0add-021Z      1    1
+c listener-shared      issue  comment-2         LDT0add-022Z      1    1
+c listener-shared      agent  dispatch-message  LDT0add-023Z      1    -
+c listener-shared      agent  dispatch-message  LDT0add-024Z      -    1
+c listener-shared      agent  listener-send     LDT0add-025Z      1    -
+c listener-shared      agent  listener-send     LDT0add-026Z      -    1
+c listener-shared      role   listener-publish  LDT0add-027Z      1    -
+c listener-shared      role   listener-publish  LDT0add-028Z      -    1
+c listener-shared      role   core-publish      LDT0add-029Z      1    -
+c listener-shared      role   core-publish      LDT0add-030Z      -    1
+d listener-dispatch    issue  comment-1         LDT0add-031Z      1    1
+d listener-dispatch    issue  comment-2         LDT0add-032Z      1   2!
+d listener-dispatch    agent  dispatch-message  LDT0add-033Z    0/0    -
+d listener-dispatch    agent  dispatch-message  LDT0add-034Z      -  0/0
+d listener-dispatch    agent  listener-send     LDT0add-035Z      1    -
+d listener-dispatch    agent  listener-send     LDT0add-036Z      -    1
+d listener-dispatch    role   listener-publish  LDT0add-037Z      1    -
+d listener-dispatch    role   listener-publish  LDT0add-038Z      -    1
+d listener-dispatch    role   core-publish      LDT0add-039Z      1    -
+d listener-dispatch    role   core-publish      LDT0add-040Z      -    1
+e dispatch-kill        issue  comment-1         LDT0add-041Z      1    1
+e dispatch-kill        issue  comment-2         LDT0add-042Z      1    1
+e dispatch-kill        agent  dispatch-message  LDT0add-043Z      1    -
+e dispatch-kill        agent  dispatch-message  LDT0add-044Z      -    1
+e dispatch-kill        agent  listener-send     LDT0add-045Z      1    -
+e dispatch-kill        agent  listener-send     LDT0add-046Z      -   2!
+e dispatch-kill        role   listener-publish  LDT0add-047Z      1    -
+e dispatch-kill        role   listener-publish  LDT0add-048Z      -    1
+e dispatch-kill        role   core-publish      LDT0add-049Z      1    -
+e dispatch-kill        role   core-publish      LDT0add-050Z      -    1
+f none                 issue  comment-1         LDT0add-051Z      1    1
+f none                 issue  comment-2         LDT0add-052Z      1   2!
+f none                 agent  dispatch-message  LDT0add-053Z      1    -
+f none                 agent  dispatch-message  LDT0add-054Z      -    1
+f none                 agent  listener-send     LDT0add-055Z      1    -
+f none                 agent  listener-send     LDT0add-056Z      -    1
+f none                 role   listener-publish  LDT0add-057Z      1    -
+f none                 role   listener-publish  LDT0add-058Z      -    1
+f none                 role   core-publish      LDT0add-059Z      1    -
+f none                 role   core-publish      LDT0add-060Z      -    1
+(a cell is the count of entries carrying the marker in that session's transcript; "!" marks a count other than expected; "/0" marks an event its publisher refused, expected 0 times; "-" an event not meant for that session)
+note: Dispatch published LIVE-1's comments in another order than they were written: written LDT0add-001Z LDT0add-002Z LDT0add-011Z LDT0add-012Z LDT0add-021Z LDT0add-022Z LDT0add-031Z LDT0add-032Z LDT0add-041Z LDT0add-042Z LDT0add-051Z LDT0add-052Z ; stored LDT0add-001Z LDT0add-002Z LDT0add-011Z LDT0add-012Z LDT0add-021Z LDT0add-022Z LDT0add-031Z LDT0add-032Z LDT0add-042Z LDT0add-041Z LDT0add-051Z LDT0add-052Z
+issue order: every comment of LIVE-1 appears in its stream order in both transcripts
+transcripts: pi /legion/scratch/tmp/infra594/live/mixed/sessions/pi/sessions/2026-10-29T14-59-23-444Z_01a1882c-3eb4-7713-a102-ba2398718b91.jsonl; cc /legion/scratch/tmp/infra594/live/mixed/sessions/cc/config/projects/-legion-scratch-tmp-infra594-live-mixed-sessions-cc-cwd/87cde2d3-8a49-4acd-a77c-8b1500b34c83.jsonl

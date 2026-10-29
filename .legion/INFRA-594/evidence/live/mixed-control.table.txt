@@ -1,0 +1,66 @@
+build: listener and bridge fe31539233c0dd1cfa4474ff84be9f9ce3575034 (git archive into /legion/scratch/tmp/infra594/live/mixed-control/tree-fe31539233c0); plugins fe31539233c0dd1cfa4474ff84be9f9ce3575034 (git archive into /legion/scratch/tmp/infra594/live/mixed-control/tree-fe31539233c0); listener grant current
+disruption             kind   event             marker           pi   cc
+a session-restart      issue  comment-1         LDT8715-001Z      1    1
+a session-restart      issue  comment-2         LDT8715-002Z      1    1
+a session-restart      agent  dispatch-message  LDT8715-003Z      1    -
+a session-restart      agent  dispatch-message  LDT8715-004Z      -    1
+a session-restart      agent  listener-send     LDT8715-005Z      1    -
+a session-restart      agent  listener-send     LDT8715-006Z      -    1
+a session-restart      role   listener-publish  LDT8715-007Z     0!    -
+a session-restart      role   listener-publish  LDT8715-008Z      -   0!
+a session-restart      role   core-publish      LDT8715-009Z     0!    -
+a session-restart      role   core-publish      LDT8715-010Z      -   0!
+b nats-cut             issue  comment-1         LDT8715-011Z      1    1
+b nats-cut             issue  comment-2         LDT8715-012Z      1    1
+b nats-cut             agent  dispatch-message  LDT8715-013Z      1    -
+b nats-cut             agent  dispatch-message  LDT8715-014Z      -    1
+b nats-cut             agent  listener-send     LDT8715-015Z      1    -
+b nats-cut             agent  listener-send     LDT8715-016Z      -    1
+b nats-cut             role   listener-publish  LDT8715-017Z     0!    -
+b nats-cut             role   listener-publish  LDT8715-018Z      -   0!
+b nats-cut             role   core-publish      LDT8715-019Z      1    -
+b nats-cut             role   core-publish      LDT8715-020Z      -    1
+c listener-shared      issue  comment-1         LDT8715-021Z      1    1
+c listener-shared      issue  comment-2         LDT8715-022Z      1    1
+c listener-shared      agent  dispatch-message  LDT8715-023Z      1    -
+c listener-shared      agent  dispatch-message  LDT8715-024Z      -    1
+c listener-shared      agent  listener-send     LDT8715-025Z      1    -
+c listener-shared      agent  listener-send     LDT8715-026Z      -    1
+c listener-shared      role   listener-publish  LDT8715-027Z      1    -
+c listener-shared      role   listener-publish  LDT8715-028Z      -    1
+c listener-shared      role   core-publish      LDT8715-029Z      1    -
+c listener-shared      role   core-publish      LDT8715-030Z      -    1
+d listener-dispatch    issue  comment-1         LDT8715-031Z      1    1
+d listener-dispatch    issue  comment-2         LDT8715-032Z      1    1
+d listener-dispatch    agent  dispatch-message  LDT8715-033Z    0/0    -
+d listener-dispatch    agent  dispatch-message  LDT8715-034Z      -  0/0
+d listener-dispatch    agent  listener-send     LDT8715-035Z      1    -
+d listener-dispatch    agent  listener-send     LDT8715-036Z      -    1
+d listener-dispatch    role   listener-publish  LDT8715-037Z      1    -
+d listener-dispatch    role   listener-publish  LDT8715-038Z      -    1
+d listener-dispatch    role   core-publish      LDT8715-039Z      1    -
+d listener-dispatch    role   core-publish      LDT8715-040Z      -    1
+e dispatch-kill        issue  comment-1         LDT8715-041Z      1    1
+e dispatch-kill        issue  comment-2         LDT8715-042Z      1    1
+e dispatch-kill        agent  dispatch-message  LDT8715-043Z      1    -
+e dispatch-kill        agent  dispatch-message  LDT8715-044Z      -    1
+e dispatch-kill        agent  listener-send     LDT8715-045Z      1    -
+e dispatch-kill        agent  listener-send     LDT8715-046Z      -    1
+e dispatch-kill        role   listener-publish  LDT8715-047Z      1    -
+e dispatch-kill        role   listener-publish  LDT8715-048Z      -    1
+e dispatch-kill        role   core-publish      LDT8715-049Z      1    -
+e dispatch-kill        role   core-publish      LDT8715-050Z      -    1
+f none                 issue  comment-1         LDT8715-051Z      1    1
+f none                 issue  comment-2         LDT8715-052Z      1    1
+f none                 agent  dispatch-message  LDT8715-053Z      1    -
+f none                 agent  dispatch-message  LDT8715-054Z      -    1
+f none                 agent  listener-send     LDT8715-055Z      1    -
+f none                 agent  listener-send     LDT8715-056Z      -    1
+f none                 role   listener-publish  LDT8715-057Z      1    -
+f none                 role   listener-publish  LDT8715-058Z      -    1
+f none                 role   core-publish      LDT8715-059Z      1    -
+f none                 role   core-publish      LDT8715-060Z      -    1
+(a cell is the count of entries carrying the marker in that session's transcript; "!" marks a count other than expected; "/0" marks an event its publisher refused, expected 0 times; "-" an event not meant for that session)
+note: Dispatch published LIVE-1's comments in another order than they were written: written LDT8715-001Z LDT8715-002Z LDT8715-011Z LDT8715-012Z LDT8715-021Z LDT8715-022Z LDT8715-031Z LDT8715-032Z LDT8715-041Z LDT8715-042Z LDT8715-051Z LDT8715-052Z ; stored LDT8715-001Z LDT8715-002Z LDT8715-011Z LDT8715-012Z LDT8715-021Z LDT8715-022Z LDT8715-031Z LDT8715-032Z LDT8715-042Z LDT8715-041Z LDT8715-051Z LDT8715-052Z
+issue order: every comment of LIVE-1 appears in its stream order in both transcripts
+transcripts: pi /legion/scratch/tmp/infra594/live/mixed-control/sessions/pi/sessions/2026-10-29T17-32-19-753Z_01a188b8-43a9-710b-addd-b8b356b3ac91.jsonl; cc /legion/scratch/tmp/infra594/live/mixed-control/sessions/cc/config/projects/-legion-scratch-tmp-infra594-live-mixed-control-sessions-cc-cwd/463e3e00-0c22-49fb-9e67-34e2bf42fc88.jsonl

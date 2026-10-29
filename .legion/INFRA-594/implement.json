@@ -2,7 +2,7 @@
   "schemaVersion": 1,
   "phase": "implement",
   "issue": "INFRA-594",
-  "completed": "2026-10-29T13:32:35Z",
+  "completed": "2026-10-29T17:46:50Z",
   "proof": [
     {
       "criterion": "Sessions take every event (agent, issue, role) once through restarts of the session, its NATS connection, either listener and a Dispatch pod; the plugin acks after the transcript write; an unacked message is redelivered",
@@ -30,11 +30,27 @@
     },
     {
       "criterion": "Load at 40 events/s, 1,000 sessions: delivery p99, nothing lost, listener and nats-server CPU and memory; and a listener restart gives every session its backlog within 10 s",
-      "surface": "packages/envoy/loadtest (INFRA-589's committed harness, sjawhar/legion#2369) on one issue pod, step-10x, before (main c24ea568, core path) and after (legion/INFRA-594 ae635cba and a93f1181, LOADTEST_SESSION_DELIVERY=consumer)",
-      "command": "packages/envoy/loadtest/run-step.sh step-10x --duration 600s, 5 runs per side alternating; restart: SIGKILL the listener at +120 s, publish 3,000 envelopes to the 1,000 sessions while it is down, restart (5 runs with resume points, 5 without)",
-      "observed": "Steady (a93f1181... ae635cba): from-publish p99 33 ms median of runs (worst 91 ms), 0 lost, 1,000 of 1,000 sessions on consumer delivery, listener and nats CPU flat; nats-server RSS grows 1-2 MiB/min on both sides (before 1.16, after 1.97 MiB/min whole window; last third 1.49 vs 1.39). Restart: every session had its backlog in median 3.9 s (worst 6.1 s) with resume points, 4.4 s (worst 8.4 s) without, 0 lost, 0 duplicates. Labelled direct-NATS 40/s supplement at a93f1181: 114,085 of 114,085 frames, 0 duplicates, p99 668 ms. Evidence: .legion/INFRA-594/evidence/load2-results.md, load3-backoff-results.md",
-      "headSha": "a93f11815d557c01e1e0b155a3130224c6182060",
-      "negativeControl": "Before the restart fixes the same restart procedure gave every session its backlog only after 96 s, and sessions without a resume point lost 2,820 of 3,000 backlog messages; before the pause backoff the direct-NATS supplement had p99 2,146 ms, max 84.8 s, 82 duplicates."
+      "surface": "packages/envoy/loadtest (#2369's harness with this PR's consumer-delivery mode and its committed restart tooling: restart-step.sh, loadgen backlog, loadgen restart-report) on one issue pod",
+      "command": "Steady: packages/envoy/loadtest/run-step.sh step-10x --duration 600s, 5 runs per side (before main c24ea568, after ae635cba, LOADTEST_SESSION_DELIVERY=consumer). Restart: packages/envoy/loadtest/restart-step.sh restart-resume-{1..5} and LOADTEST_NO_RESUME=1 restart-step.sh restart-noresume-{1..5}; any run re-derives with `cd packages/envoy && go run ./loadtest restart-report -run .legion/INFRA-594/evidence/restart/<run>`",
+      "observed": "Steady: from-publish p99 33.3 ms median of runs (worst 90.8 ms), 0 lost, 1,000 of 1,000 on consumer delivery, listener and nats CPU flat; nats-server RSS grows 1-2 MiB/min on both sides (evidence/load2-results.md; committed runs evidence/load/runs/after-r*). Restart (10 runs at 37cdf6dd plus the round's loadtest change, 3 vCPU): every session had its backlog in median 3.98 s, worst 4.78 s with resume points; median 3.60 s, worst 4.57 s without; 3,000 of 3,000 envelopes received once in each run, 0 missing, 0 duplicate frames (evidence/restart/RESULTS.md and run directories).",
+      "headSha": "37cdf6dde92a88bcf78490240f706c18f60ac417",
+      "negativeControl": "Before the restart fixes the same procedure gave every session its backlog only after 96 s, and sessions without a resume point lost 2,820 of 3,000; the earlier measurement before the pause backoff (evidence/load/runs/final-*.analysis.json) had worst 9.88 s and 174 and 5 duplicate frames in two no-resume runs."
+    },
+    {
+      "criterion": "The core path, which every hub runs until its grant is replaced, delivers as before, including INFRA-548's frozen NATS path",
+      "surface": "envoy-session-delivery.sh with both listeners on the pre-change NATS grant (--listener-grant before-session-consumers), real Oh My Pi and Claude Code; INFRA-548's stall scenario on a real natsd and listener on the pre-change grant",
+      "command": "bash scripts/e2e/envoy-session-delivery.sh --listener-grant before-session-consumers; LEGION_E2E_ENVOY_STACK=1 bun test packages/pi-envoy packages/claude-envoy -t 'NATS path freezes'",
+      "observed": "Every registration answered core/no_grant, no s-* consumer; every event 1 except the eight role events of windows a and b, the core path's existing limit (role forwards are live only there) (evidence/live/core-path-fixed.table.txt). Stall: 4 pass, the core mode showing the frozen-window message once as a replay (evidence/live/stall-tests.out). The first core-path run showed one event twice in Claude Code (replay copy then live copy): fixed in 3d55c803; the run after it shows none.",
+      "headSha": "7c39c1c18257",
+      "negativeControl": "With the replay sweep disabled (sweepOnce returning at once) the core-mode stall test fails: 'timed out waiting for the message sent while the path was frozen' (evidence/live/stall-negative-control.out); with the claude-envoy fix reverted its new regression test shows 2 cards for one event."
+    },
+    {
+      "criterion": "Mixed rollout: this listener with the previous release's plugins is no worse than main's listener with them",
+      "surface": "envoy-session-delivery.sh --plugins-from fe315392 (this checkout's listeners, natsd, Dispatch and bridge; main's plugins) against the control --build-from fe315392",
+      "command": "bash scripts/e2e/envoy-session-delivery.sh --plugins-from fe31539233c0dd1cfa4474ff84be9f9ce3575034; bash scripts/e2e/envoy-session-delivery.sh --build-from fe31539233c0dd1cfa4474ff84be9f9ce3575034",
+      "observed": "Both every event 1 except the role events of windows a and b (the old plugin sends no delivery and cannot recover a role forward). The control's window-b core role publishes counted 1 because they reached NATS at 17:33:58.51, the second the proxies came back; at the head they arrived during the cut. The head's window f comment-2 counted 2 in Claude Code: the old plugin's replay/live race, fixed for the new plugin in 3d55c803. Tables: evidence/live/mixed-head.table.txt, mixed-control.table.txt.",
+      "headSha": "7c39c1c18257",
+      "negativeControl": "The control run is main's listener with the same plugins; it shows the same role zeros in window a, so they are today's behaviour, not this change's."
     }
   ],
   "filesChanged": [
@@ -49,7 +65,8 @@
     "packages/daemon/internal/claudebridge (ack on Claude Code's replayed user message), internal/claudelaunch (--replay-user-messages), sandbox manifest test",
     "scripts/e2e/envoy-session-delivery.sh (new), scripts/e2e/README.md, scripts/e2e/lib/port-file.sh",
     "docs: packages/envoy/AGENTS.md, docs/architecture.md, pi-envoy and claude-envoy AGENTS/README, .dispatch/architecture, docs/site dispatch pages, skills/envoy, docs/solutions (two pages), docs/deployment.md, .github/workflows/ci.yaml comment",
-    "changelog fragments: packages/{envoy,envoy-client,pi-envoy,claude-envoy}/.changes/unreleased/INFRA-594-*.yaml"
+    "changelog fragments: packages/{envoy,envoy-client,pi-envoy,claude-envoy}/.changes/unreleased/INFRA-594-*.yaml",
+    "Round 2: packages/envoy/loadtest/{backlog.go,restartreport.go,restartreport_test.go,restart-step.sh,relay.go,guard.go,main.go,README.md}; packages/envoy-client/test/{listener-grant.ts,envoy-stack.ts,stall-scenario.ts}; pi-envoy and claude-envoy stall tests; scripts/e2e/envoy-session-delivery.sh (--listener-grant, --plugins-from) and README; packages/claude-envoy/src/envoy-channel-server.ts (replay claim) with its test; changelog fragments"
   ],
   "trickyParts": [
     "nats-server 2.10.29 reports ack floor 0 for a fresh consumer, so every session consumer is created at a start sequence (stream last+1) and the floor is read never below it",
@@ -61,8 +78,8 @@
     "Plan's replay-without-polling is proven on the consumer path; the core path keeps #2228's /v1/replay catch-up as the fallback (planned departure 1)",
     "Load: Dispatch commits only about 0.5-0.6 events/s of the 40/s offered on the 2-core pod, so delivery latency rests on about 1,900-2,300 receipts per run plus a labelled supplement that publishes Dispatch-shaped events straight to NATS at 40/s",
     "nats-server RSS grows over a 10-minute window on both sides (before and after); not caused by this change, and a 10-minute window cannot show whether it levels off",
-    "No real-stack test covers the core path's recovery after a frozen NATS path any more: the shared stall scenario (INFRA-548) now checks consumer delivery, since the stack's listener answers consumer; mocked unit tests in both plugins still cover the core path",
-    "The listener grant change (session-consumer entries, CONSUMER.LIST, envoy-roles) reaches a hub only at its next replacement or reload; until then the listener answers core and the old path runs"
+    "The listener grant change (session-consumer entries, CONSUMER.LIST, envoy-roles) reaches a hub only at its next replacement or reload; until then the listener answers core and the old path runs",
+    "Mixed rollout and core path keep today's loss of role events a session misses while killed or cut off; closed only when sessions run the new plugin on a hub with the grant"
   ],
   "openQuestions": []
 }
