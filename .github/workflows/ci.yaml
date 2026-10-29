@@ -667,7 +667,7 @@ jobs:
               - 'packages/contracts/src/**'
               # web/src/features/delivery/lib/applyDelta.test.ts:2-4 and
               # web/src/features/doc/decision-blocks.test.ts:10.
-              - 'packages/contracts/fixtures/delivery-live/**'
+              - 'packages/contracts/fixtures/live/**'
               - 'packages/contracts/fixtures/decision-blocks/**'
               # e2e/cli-body-cap.e2e.ts:27 runs envoy-client's dispatch CLI.
               - 'packages/envoy-client/src/**'
@@ -720,12 +720,12 @@ jobs:
               - 'packages/proof-editor/**'
               # Fixtures its Go tests read: cmd/listener/api_test.go:191,
               # internal/contracts/dedupe_test.go:14, golden_test.go:72,
-              # internal/dispatch/api/delivery_live_diff_test.go:965,
+              # internal/dispatch/api/delivery_live_diff_test.go:982,1011,
               # internal/dispatch/docs/approval_carry_test.go:26.
               - 'packages/contracts/fixtures/dispatch-targeted-delivery.json'
               - 'packages/contracts/fixtures/dedupe-keys.json'
               - 'packages/contracts/fixtures/github-envelopes/**'
-              - 'packages/contracts/fixtures/delivery-live/**'
+              - 'packages/contracts/fixtures/live/**'
               - 'packages/contracts/fixtures/decision-blocks/**'
               # The claim list its fence reads: internal/broker/oauth/claims_doc_test.go:161.
               - 'docs/kubernetes.md'
@@ -786,8 +786,8 @@ jobs:
               - '.github/workflows/ci.yaml'
               - *go_workspace
               - 'packages/envoy/**'
-              # internal/dispatch/api/delivery_live_diff_test.go:965.
-              - 'packages/contracts/fixtures/delivery-live/**'
+              # internal/dispatch/api/delivery_live_diff_test.go:982,1011.
+              - 'packages/contracts/fixtures/live/**'
             # `go test -tags memory ./cmd/dispatch`. memory_profile_test.go reads four guides only
             # when DISPATCH_EDIT_PROFILE_OUT is set (its line 126), which CI never sets, so they are
             # not here. cmd/dispatch/nats_unreachable_test.go, which carries no tag, starts the
