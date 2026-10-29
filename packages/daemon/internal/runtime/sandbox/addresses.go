@@ -306,14 +306,18 @@ func sameTokenProjection(held, want *corev1.ServiceAccountTokenProjection) bool 
 		held.ExpirationSeconds != nil && *held.ExpirationSeconds == *want.ExpirationSeconds
 }
 
-// movedInPod is what pod holds, for role, that a pod created now is not handed: the layout before
-// one container (movedLayout), the stream its launcher dials (movedStream), the secrets broker's
-// enrollment its next generation is started against (movedEnrollment), the operator's volume and
-// mount holding every named role's overlays in role's container (movedRoleOverlays), and the whole session store it was
-// created under (movedSessionStore). All are fixed for the pod's life, so any moved means the pod
-// must be replaced before role can run as one launched now. It is the one rule for all: evaluate
-// reads a role whose pod holds a move as StaleAddress, and relaunch replaces a pod that holds one
-// for any of its roles.
+// movedInPod is what pod holds, for role, that a pod created now is not handed and that no worker
+// of the pod can be asked about first: the layout before one container (movedLayout), whose pod's
+// workers predate the update round's contract and have no op to signal with, and the stream its
+// launcher dials (movedStream), which such a launcher never redials, so it never reaches this
+// daemon to be tasked at all. Both are fixed for the pod's life, so any moved means the pod must
+// be replaced where it stands before role can run as one launched now: evaluate reads a role whose
+// pod holds one as StaleAddress, and relaunch replaces a pod that holds one for any of its roles,
+// ending every process in it.
+//
+// Everything else a running pod cannot be changed to carry is drift, not a moved address
+// (driftedInPod, podShapeDrift): its worker can be asked to push its work first, and an update
+// round asks it before the pod is replaced.
 func (r *Runtime) movedInPod(pod *corev1.Pod, role claim.Role) []movedAddress {
 	var moved []movedAddress
 	if layout, ok := movedLayout(pod); ok {
@@ -322,11 +326,26 @@ func (r *Runtime) movedInPod(pod *corev1.Pod, role claim.Role) []movedAddress {
 	if stream, ok := r.movedStream(pod, podContainer(role)); ok {
 		moved = append(moved, stream)
 	}
-	if enrollment, ok := r.movedEnrollment(pod, role); ok {
-		moved = append(moved, enrollment)
-	}
+	return moved
+}
+
+// driftedInPod is what pod holds, for role, that a pod created now is not handed and whose
+// replacement is an update round's business rather than a launch's: the operator's volume and
+// mount holding every named role's overlays in role's container (movedRoleOverlays), the secrets
+// broker's enrollment its next generation is started against (movedEnrollment), and the whole
+// session store it was created under (movedSessionStore). Each is fixed for the pod's life, so the
+// pod must be replaced for the role to run as one launched now — but each leaves the workers
+// already in the pod running and able to reach this daemon, so each is a reason to open a round
+// (PodDrift) and ask them to push, where replacing the pod under them would end every turn in it
+// and take the issue's disk with it. The two facets whose worker cannot be reached at all are
+// movedInPod's and are never a round's.
+func (r *Runtime) driftedInPod(pod *corev1.Pod, role claim.Role) []movedAddress {
+	var moved []movedAddress
 	if overlays, ok := r.movedRoleOverlays(pod, role); ok {
 		moved = append(moved, overlays)
+	}
+	if enrollment, ok := r.movedEnrollment(pod, role); ok {
+		moved = append(moved, enrollment)
 	}
 	if store, ok := r.movedSessionStore(pod); ok {
 		moved = append(moved, store)

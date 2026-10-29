@@ -261,8 +261,9 @@ func (l launch) runsClaude() bool { return runtime.Of(l.spec.Backend) == runtime
 // shared refusal (runtime.ValidateSpawnSpec), then the sandbox's own. A secret named for the
 // provisioning token is refused, the one key the runtime writes whose pointer the worker container
 // is never told (the boot token's and the Dispatch bearer's pointers are runtime-owned, so the
-// shared refusal already covers them). prepare decides the pod's kind here, and only here: the
-// project controller's claim (`controller: daemon`) runs the controller's pod, every workflow claim
+// shared refusal already covers them). prepare decides the pod's kind from the claim's role
+// (podKindFor, which an update round reads a recorded process's kind by too): the project
+// controller's claim (`controller: daemon`) runs the controller's pod, every workflow claim
 // its issue's pod, which refuses a spec with no repository (issuePod.prepare). The labels the kind
 // gives the pod must name that kind back (podKindOf), so a launch and the Sandbox it leaves cannot
 // disagree on the pod's roles.
@@ -276,10 +277,8 @@ func (r *Runtime) prepare(spec runtime.SpawnSpec) (launch, error) {
 	if _, ok := spec.Secrets[provisionTokenKey]; ok {
 		return launch{}, refuse("secret %s is a key the runtime writes itself", provisionTokenKey)
 	}
-	l := launch{spec: spec, name: SandboxName(spec.Claim), kind: issuePod{}, gh: r.tools.GH}
-	if spec.Role == claim.RoleController {
-		l.kind = controllerPod{}
-	} else {
+	l := launch{spec: spec, name: SandboxName(spec.Claim), kind: podKindFor(spec.Role), gh: r.tools.GH}
+	if spec.Role != claim.RoleController {
 		l.cacheURL = r.cacheURL(CacheSandboxName(r.project, spec.Repository))
 	}
 	if l.runsClaude() {
@@ -482,7 +481,10 @@ func (r *Runtime) sandboxManifest(l launch) sandbox {
 // (podKind). Beyond the Legion pool's selector and tolerations it asks nothing of its placement:
 // every pod owns a disk of its own and shares nothing with another pod, so the scheduler puts it
 // wherever the pool has room. The controller applies a template only to the next pod it creates,
-// so the template is rebuilt for every relaunch.
+// so the template is rebuilt for every relaunch. Its metadata carries, beside the two
+// stop-eviction annotations, the configuration the pod is built from (podShapeAnnotation,
+// podShape): the one write of it, so that a later sweep can read what a pod was built from
+// without rebuilding the launch that built it (drift.go).
 func (r *Runtime) podTemplate(l launch) podTemplate {
 	_, providersMounts := r.providers()
 	spec := corev1.PodSpec{
@@ -513,8 +515,11 @@ func (r *Runtime) podTemplate(l launch) podTemplate {
 	}
 	return podTemplate{
 		Metadata: podMetadata{
-			Labels:      r.labels(l),
-			Annotations: map[string]string{doNotDisruptAnnotation: "true", safeToEvictAnnotation: "false"},
+			Labels: r.labels(l),
+			Annotations: map[string]string{
+				doNotDisruptAnnotation: "true", safeToEvictAnnotation: "false",
+				podShapeAnnotation: podShape(r, l.kind),
+			},
 		},
 		Spec: spec,
 	}

@@ -54,17 +54,25 @@ func (r *Runtime) Resume(ctx context.Context, prev *runtime.Locator, spec runtim
 // authenticated launcher. An existing healthy pod is never suspended or reinitialized when another
 // role starts or one role recovers. A pod is not healthy when it cannot run the role as a pod
 // created now would: it holds, for one of its roles, something fixed for its life that a pod created
-// now is not handed (movedInPod, the rule evaluate reads such a role StaleAddress by): it
-// runs the layout before one container, one launcher container per role (movedLayout), its
-// launchers dial a stream other than the one a pod created now is handed, and they never redial, or
-// it lacks the agent-secrets volumes a role that enrolls now is started against; or a container of
-// it runs an image other than the one this runtime launches every container with (imageDrift) —
-// unless the launch is installing a stale-plugin pair into this pod (spec.Plugins set,
-// LEGION-164): then drift alone is not a reason to replace it, since the install, not a fresh pod on the
-// configured image, is what brings this launch's agent onto the current plugin, and a pod replaced
-// for some other reason in the same sweep still is. The first role relaunched after any of these
-// replaces it, and its siblings resume into the new pod. Replacing a live pod — its Sandbox
-// Running, the pod its own, not ended, its init containers passed — ends the process of every role
+// now is not handed and whose worker this daemon cannot ask to push its work first (movedInPod,
+// the rule evaluate reads such a role StaleAddress by): it runs the layout before one container,
+// one launcher container per role (movedLayout), whose workers predate the update round's
+// contract, or its launchers dial a stream other than the one a pod created now is handed, and
+// they never redial, so they never reach this daemon at all. The first role relaunched after one
+// of these replaces it, and its siblings resume into the new pod.
+//
+// A live pod that has merely drifted from the configuration — a container on another image, the
+// kind's reservation, an operator volume or mount, the disk size, the role's overlays, the secrets
+// broker's enrollment or the session store (PodDrift) — is kept, and this role is started in it.
+// Such a pod is replaced by an update round, which first tasks every worker in it to push its work
+// and answer, and then ends the pod (ReplacePod): replacing it at a launch would end every role's
+// turn in it and delete the issue's disk with everything unpushed on it (INFRA-484). A launch into
+// a drifted pod is therefore an ordinary launch, the install of a stale-plugin pair (spec.Plugins,
+// LEGION-164) included, which brings this launch's agent onto the current plugin without a fresh
+// pod.
+//
+// Replacing a live pod — its Sandbox Running, the pod its own, not ended, its init containers
+// passed — ends the process of every role
 // still running in it, wherever its turn stood, so the Suspended patch that replaces it names it
 // on the Sandbox in the same write (suspendDisplacing): evaluate then reports each of those roles
 // ended by the daemon's replacement (Displaced), which the supervisor resumes uncharged
@@ -122,10 +130,9 @@ func (r *Runtime) relaunch(ctx context.Context, prev *runtime.Locator, spec runt
 	pod := r.storedPod(s.Name)
 	_, initExit := failedInit(pod)
 	live := s.mode() != modeSuspended && ownedBy(pod, s.UID) && !terminal(pod) && initExit == nil
-	_, drifted := imageDrift(pod, r.image)
 	installing := l.spec.Plugins != nil
 	migrate := supersededDisk(s, l)
-	replace := !live || (drifted && !installing) || migrate ||
+	replace := !live || migrate ||
 		slices.ContainsFunc(l.roles, func(role claim.Role) bool { return len(r.movedInPod(pod, role)) > 0 })
 	if !replace {
 		bound, err := r.launcherBound(bounded, s, pod, &l)

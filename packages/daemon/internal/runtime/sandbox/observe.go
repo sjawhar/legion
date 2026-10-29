@@ -201,13 +201,17 @@ func displaced(v view, loc runtime.Locator, obs observation) bool {
 // alone.
 //
 // A live pod that holds, for the recorded role, something fixed for its life that a pod created now
-// is not handed (movedInPod: the layout before one container, the stream its launcher dials, or the
-// secrets broker's enrollment the role's next generation runs against) is StaleAddress, before its
+// is not handed and whose worker this daemon cannot ask to push its work first (movedInPod: the
+// layout before one container, or the stream its launcher dials) is StaleAddress, before its
 // launcher's state is read: a launcher on a stale stream never reaches this daemon, so its state
-// would only ever read disconnected, and a pod lacking the enrollment cannot run the role's next
-// generation at all. Every role of such a pod reads so, so each is relaunched uncharged and they
-// move into one new pod together, rather than the first relaunch for some other reason replacing
-// the pod under the rest. A role running its recorded generation whose Sandbox records it was
+// would only ever read disconnected, and a pod of the layout before one container runs workers
+// that predate the update round's contract and have no way to signal. Every role of such a pod
+// reads so, so each is relaunched uncharged and they move into one new pod together, rather than
+// the first relaunch for some other reason replacing the pod under the rest. A pod that has merely
+// drifted from the configuration is never StaleAddress (PodDrift): its roles keep running until
+// every worker of the pod has answered its update round, which is the whole point of the round —
+// repointing one of them would end the pod's turns mid-flight, which this verdict must never do.
+// A role running its recorded generation whose Sandbox records it was
 // started with other addresses than a generation started now is handed (movedEnvironment) is
 // StaleAddress too. Either names each moved address, never its credentials.
 func (r *Runtime) verdict(ctx context.Context, loc runtime.Locator, v view) observation {
