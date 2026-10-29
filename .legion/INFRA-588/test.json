@@ -2,18 +2,34 @@
   "schemaVersion": 1,
   "phase": "test",
   "issue": "INFRA-588",
-  "completed": "2026-10-28T10:15:00Z",
-  "round": 4,
-  "head": "b808af2f7f88ad2ee9396dd9d12f58598a419a2b",
-  "codeHead": "b5484b414155aebeb936fd32a64db319b151ccbe",
-  "roundNote": "Round 4 answers the architect's send-back for the controller's ruling (dispatch://INFRA-472, 'Stop new leaks only'): the Dispatch key comes out of the README and the pull request title. b5484b414155 changes only scripts/conflicts/README.md since 5cfd10800698, so the round-2 code proofs below still apply. Round 3's title proofs still apply too, for the new, key-free title.",
+  "completed": "2026-10-29T17:52:00Z",
+  "round": 5,
+  "head": "0dac5afce6be4b170138d238c0cb78a7eace05e5",
+  "codeHead": "ddd6873c284d518d8e05eeb16e7ecc7ee04b20e8",
+  "roundNote": "Round 5, narrowed by the architect (Envoy 9e837cd5, 2026-10-29 17:38Z). It covers two things: the forward merge of main, which deleted pr-and-main.yaml in #2316, and the move of the three scripts/conflicts steps into ci.yaml's router behind the conflicts_script filter. scripts/conflicts/ is byte-identical to b5484b414155, so the round-2 code proofs and round 4's key proof below still apply.",
   "implementerProof": {
     "verdict": "verified",
-    "how": "Round 4: grepped every line the pull request adds outside .legion/ (16 files) for Dispatch keys, for dispatch:// refs and for the project key: no hit. The same grep finds 4 keys in README.md at 5cfd10800698. The live title is conventional and names no key, and check-private-names.sh is clean. I ran the README's reproduce example with <KEY> filled in: 126/80/253, the same as before. Earlier rounds: see each proof entry's headSha."
+    "how": "I re-ran the implementer's commands at ddd6873c284d. check-ci-filters.sh exits 0 with 'conflicts-script: 37 files, 0 uncovered'. check-ci-filters.test.sh and ci-ok.test.sh pass. scripts/conflicts/ shows 0 files changed. bun test gives 40 pass. P1 gives 126/80/253. I checked the routing another way: the conflicts_script filter, read from ci.yaml with the repository's PathsFilter model under the workflow's quantifier, over the real file lists of this pull request and 12 other open pull requests. My own negative control: a scratch copy without 'scripts/conflicts/**' in the filter fails check-ci-filters.sh."
   },
   "failures": [],
   "failed": 0,
   "proof": [
+    {
+      "criterion": "The router selects the conflicts-script job for a change under scripts/conflicts and skips it otherwise, and check-ci-filters.sh passes (round 5)",
+      "surface": ".github/workflows/ci.yaml's changes job filter conflicts_script, the conflicts-script job and the ci-ok gate, as check-ci-filters.sh and the repository's dorny/paths-filter model read them",
+      "command": "uv run --no-project --with pyyaml==6.0.2 -- bash .github/scripts/check-ci-filters.sh (and check-ci-filters.test.sh, ci-ok.test.sh); a Python script that loads ci.yaml's filter step, flattens conflicts_script's patterns and applies workflow_paths.PathsFilter under the step's predicate-quantifier to gh pr list's file lists of 12 other open pull requests and to this one's diff against main",
+      "observed": "check-ci-filters.sh exit 0: 'conflicts-script: 37 files, 0 uncovered (filter conflicts_script)', 25 gates; both test scripts PASS. Quantifier some-with-excludes. #2411 SELECT (ci.yaml, scripts/conflicts/README.md, __fixtures__/*). 9 of the 12 other PRs skip. #2516 and #2503 select through ci.yaml, #2507 through bun.lock and a package.json; the filter names those on purpose. Single paths: scripts/conflicts/measure.ts and __fixtures__/after.json select; scripts/dispatch/ask-census.ts, scripts/conflictsx/a.ts and packages/envoy/CHANGELOG.md skip. ci.yaml wires the job into ci-ok's needs and its job-to-filter map ('conflicts-script': 'conflicts_script'), and its if: reads needs.changes.outputs.conflicts_script",
+      "headSha": "0dac5afce6be4b170138d238c0cb78a7eace05e5",
+      "negativeControl": "a git scratch copy of the tree with 'scripts/conflicts/**' removed from the conflicts_script filter -> check-ci-filters.sh exit 1, 'conflicts-script: 37 files, 15 uncovered', one ::error per file (README.md, both fixtures, each test...); the same copy with ci.yaml restored -> exit 0"
+    },
+    {
+      "criterion": "The forward merge takes main's deletion of pr-and-main.yaml, and the script and its tests are unchanged (round 5)",
+      "surface": "the merge commit ddd6873c284d against main 2b427f930eac and against the last code head b5484b414155",
+      "command": "jj diff --from 2b427f930eac --to ddd6873c284d --stat; jj diff --from b5484b414155 --to ddd6873c284d --stat -- scripts/conflicts; ls .github/workflows/pr-and-main.yaml; bun test scripts/conflicts; bun scripts/conflicts/measure.ts --from-json before.json --branch-prefix legion/",
+      "observed": "against main: 21 files, all additions. Outside the PR's own scripts/conflicts/ and .legion/ files there are only .github/workflows/ci.yaml (+29) and .github/scripts/ci_job_reads.py (+5). scripts/conflicts against b5484b414155: 0 files changed. pr-and-main.yaml: no such file. 40 pass, 0 fail. P1: 126 PRs read, 80 carrying, 253 conflicting, tiers 89 and 108. GitHub: MERGEABLE at 0dac5afce6be",
+      "headSha": "0dac5afce6be4b170138d238c0cb78a7eace05e5",
+      "negativeControl": "--since 2026-10-28 --until 2026-10-27 -> exit 2 (unchanged code path; round 3)"
+    },
     {
       "criterion": "No public file the pull request adds names a Dispatch key, and the squash subject (the PR title) does not either (round 4, the controller's ruling under dispatch://INFRA-472)",
       "surface": "the files the pull request adds or changes outside .legion/, and its title on GitHub",
@@ -80,7 +96,7 @@
     }
   ],
   "observations": [
-    "CI at code head b5484b414155: lint, typecheck, test and pr-title were queued when I read them. At 5cfd10800698, whose code is the same, lint, typecheck and test are success. b808af2f is handoff-only with skip-checks and has no runs; retro's push runs them again.",
+    "CI at the merge head ddd6873c284d: the changes job was queued when I read it (17:50Z), and no conflicts-script, lint, typecheck or test result exists yet. 0dac5afce6be is handoff-only and has no runs. The pod's python3 has no PyYAML, so I ran check-ci-filters.sh with uv run --with pyyaml==6.0.2. CI's ci-filters job runs it on the runner's Python. The real GitHub skip for a pull request that does not touch scripts/conflicts cannot be seen before the merge: only a branch with this ci.yaml has the job. So the skip proof is the repository's filter model over real file lists.",
     "Squash commit body: the repository's squash_merge_commit_message is COMMIT_MESSAGES. The 10 code commit subjects end in '(INFRA-588)', so main's commit body will name the key. I reported this to the architect over Envoy. The architect chose to keep the subjects, the same as the branch name and the 'Dispatch:' line, and is raising commit messages with the controller under INFRA-472 (Envoy d02df0df, 10:13Z). The PR body still names the key in the implementer's Before and E2E lines and on the required 'Dispatch:' line; my own E2E line no longer does.",
     "The round-1 note still applies: no test pins a PR merged exactly at `since`, and the CLI keeps it."
   ]
