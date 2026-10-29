@@ -1708,6 +1708,35 @@ describe("envoy OMP extension", () => {
     expect(session.fixture.deliveries).toEqual([]);
   });
 
+  test("a rebutted dispatch command, recorded with its override as a trailing comment, does not re-arm the check", async () => {
+    const { default: envoyExtension } = await import("./envoy.ts?ask-nudge-rearm-rebutted");
+    const session = await bootAskNudge(envoyExtension, "ses_nudge_rearm_rebutted", () => ({}), {
+      selfCheck: async () => ({ replyText: "PROCEEDING" }),
+    });
+
+    await session.userTurn();
+    await session.stop();
+    expect(session.asked).toHaveLength(1);
+
+    // AskGate hands a rebutted command back with its override moved into a shell comment at the end
+    // of its first line, and Oh My Pi records the call as handed back: it is still one `dispatch`
+    // command, the agent talking to the humans, so it owes nothing.
+    await session.dispatch(
+      "dispatch comment --issue DSP-1 --body hi # --advisor-rebuttal 'the person asked for it'",
+      "dispatch_comment",
+      { issue: "DSP-1", comment: "c-1" }
+    );
+    await session.stop();
+    await session.dispatch(
+      "dispatch comment --issue DSP-1 --body-file - <<'EOF' # --advisor-rebuttal 'r'\nLooks right.\nEOF",
+      "dispatch_comment",
+      { issue: "DSP-1", comment: "c-2" }
+    );
+    await session.stop();
+    expect(session.asked).toHaveLength(1);
+    expect(session.fixture.deliveries).toEqual([]);
+  });
+
   test("a bash command that is not a dispatch command owes a check, ledger or not", async () => {
     const { default: envoyExtension } = await import("./envoy.ts?ask-nudge-rearm-ls");
     const session = await bootAskNudge(envoyExtension, "ses_nudge_rearm_ls", () => ({}), {
@@ -4067,6 +4096,80 @@ console.log(JSON.stringify(args));
       ]);
       expect(notifications).toEqual([]);
     }, 30_000);
+    // A session whose envoy.json is not there still has Dispatch when its variables name one, and
+    // the gate binds there: the file is only the switch, and no file leaves it on.
+    test("with no envoy.json at ENVOY_CONFIG_FILE and only DISPATCH_URL and its token set, the gate binds and reviews a dispatch ask", async () => {
+      const file = process.env.ENVOY_CONFIG_FILE ?? "";
+      rmSync(file);
+      process.env.DISPATCH_URL = "http://dispatch.test";
+      process.env.DISPATCH_TOKEN = "dispatch-token";
+      standInHost();
+      const { default: envoyExtension } = await import("./envoy.ts?askgate-no-envoy-json");
+      const fixture = createPi();
+      envoyExtension(fixture.pi);
+      const notifications: string[] = [];
+      const context = gateContext(notifications);
+      await fixture.handlers.get("session_start")?.({}, context);
+      standInDispatch();
+
+      const result = (await fixture.handlers.get("tool_call")?.(
+        { toolName: "bash", toolCallId: "call-ask", input: { command: ASK } },
+        context
+      )) as { block?: boolean; reason?: string } | undefined;
+
+      expect(existsSync(file)).toBe(false);
+      // The charter call, and the rules call the `dispatch ask` opens beside it.
+      expect(completions).toEqual([MODEL, MODEL]);
+      expect(result?.block).toBe(true);
+      expect(fixture.entries.filter((entry) => entry.customType === "advisor-gate")).toMatchObject([
+        {
+          customType: "advisor-gate",
+          data: { tool: "dispatch_ask", outcome: "verdict", decision: "revise" },
+        },
+      ]);
+    }, 30_000);
+    // The rules notice is about one session's calls: it goes to the plain log and to that session's
+    // UI, never into the notices every later session start shows again.
+    test("three rules-check failures in a row raise the rules notice, and a new session start does not show it again", async () => {
+      writeFileSync(process.env.ENVOY_CONFIG_FILE ?? "", "{}\n");
+      process.env.DISPATCH_URL = "http://dispatch.test";
+      process.env.DISPATCH_TOKEN = "dispatch-token";
+      standInHost();
+      const { default: envoyExtension } = await import("./envoy.ts?askgate-rules-notice");
+      const fixture = createPi();
+      envoyExtension(fixture.pi);
+      const notifications: string[] = [];
+      const context = gateContext(notifications);
+      await fixture.handlers.get("session_start")?.({}, context);
+      expect(notifications).toEqual([]);
+
+      // The stand-in model answers the rules call with the charter's JSON, which is no rules
+      // verdict; each ask is on its own issue, so no breaker sends one out unasked.
+      for (const issue of ["DSP-1", "DSP-2", "DSP-3"]) {
+        const result = (await fixture.handlers.get("tool_call")?.(
+          {
+            toolName: "dispatch_ask",
+            toolCallId: `call-${issue}`,
+            input: { issue, question: "Ready?" },
+          },
+          context
+        )) as { block?: boolean } | undefined;
+        expect(result?.block).toBe(true);
+      }
+      expect(completions).toHaveLength(6);
+      const gated = fixture.entries.filter((entry) => entry.customType === "advisor-gate");
+      expect(gated).toMatchObject(
+        Array(3).fill({ customType: "advisor-gate", data: { ruleOutcome: "no-verdict" } })
+      );
+      expect(gated).toHaveLength(3);
+      const rulesNotice =
+        "AskGate's rule check failed 3 times in a row, so the new asks of those 3 calls were not checked against the two rules. The check still runs on each new ask, and refuses a match again as soon as it answers.";
+      expect(notifications).toEqual([rulesNotice]);
+
+      const next: string[] = [];
+      await fixture.handlers.get("session_start")?.({}, gateContext(next, "ses_askgate_next"));
+      expect(next).toEqual([]);
+    }, 30_000);
     /**
      * The owner files of `sessionID`'s AskGate record in this test's CLI state directory, each
      * with its path, or null when it names no owner.
@@ -4584,8 +4687,9 @@ console.log(JSON.stringify(args));
       ]);
     }, 30_000);
     // The second re-gate of #2159, non-blocking: at the host's default handler limit of 30 s the
-    // review deadline is 25 s, which measured reviews often pass, and the warning that says so
-    // went only to the log. A profile that sets nothing is the case this gate is for.
+    // review deadline is 20 s (the 10 s margin covers the aborted call's usage, the entry and the
+    // decision record), which measured reviews often pass, and the warning that says so went only
+    // to the log. A profile that sets nothing is the case this gate is for.
     test("a review deadline under 30 s is said at session start, not only logged", async () => {
       writeFileSync(process.env.ENVOY_CONFIG_FILE ?? "", "{}\n");
       process.env.DISPATCH_URL = "http://dispatch.test";
