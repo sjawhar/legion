@@ -24,8 +24,8 @@ const target = new URL(baseUrl);
 
 const listener = Bun.serve<RelaySocket>({
   hostname: "127.0.0.1",
-  // The workspace event stream is silent between the server's 15 s heartbeats, and Bun's default
-  // 10 s idle timeout would cut it before the first one.
+  // A request the server under test is slow to answer sends nothing while it waits, and Bun's
+  // default 10 s idle timeout would cut it; the browser and the server keep their own deadlines.
   idleTimeout: 0,
   port: harnessPorts().plainHttp.port,
   async fetch(request, server) {

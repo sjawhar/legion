@@ -664,9 +664,10 @@ test("a default assignee save refused while Settings is left says so when Settin
       if (route.request().method() !== "PUT") return route.fallback();
       await held.promise;
       answered = true;
+      // Dispatch's verdict, a 4xx: a 5xx is tried again under the save's key, not refused.
       return route.fulfill({
-        json: { code: "INTERNAL", error: "the default assignee save was refused" },
-        status: 500,
+        json: { code: "ASSIGNEE_NOT_ALLOWED", error: "the default assignee save was refused" },
+        status: 400,
       });
     });
     await page.goto("/settings");
