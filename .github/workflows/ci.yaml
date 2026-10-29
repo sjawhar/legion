@@ -1355,6 +1355,11 @@ jobs:
         run: bun run verify-build "$RUNNER_TEMP/claude-envoy-built.tar"
         working-directory: packages/claude-envoy
 
+      # Main's push job decides from scripts/build-inputs.txt whether a moved main changed the build.
+      - name: Check the Claude Code plugin's build input list covers what the build reads
+        run: bun test tests/build-inputs.test.ts
+        working-directory: packages/claude-envoy
+
       - name: Test release scripts
         run: .github/scripts/release-push.test.sh
 
