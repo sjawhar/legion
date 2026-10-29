@@ -2030,18 +2030,33 @@ export function specWork(runDir: string, reach: string[], fixture: SpecFixture):
       for (const name of taskNames(step, results.get(step.id))) named.add(name);
       const assignment = strings(step.args).join("\n\n");
       if (!specOnly(assignment, reach)) continue;
-      // A call of several named tasks is judged task by task: a task that reviews only the run's
-      // own spec is the check, with its report alone; one that pastes a sibling's spec too, or only
-      // a sibling's, is left out of the findings. The call counts for `checked` when any task
+      // A call of several named tasks is judged task by task, each on its own assignment (the
+      // call's shared context and the task's own text): a task that is not itself a spec-only check
+      // (specOnly), as a fact check given no spec is, is no part of the check, even when the call's
+      // other tasks carry the outline. Of the rest, a task that reviews only the run's own spec is
+      // the check, with its report alone; one that pastes a sibling's spec too, or only a
+      // sibling's, is left out of the findings. The call counts for `checked` when any task
       // reviews the run's own spec.
-      const parts = (namedTasks(step) ?? [{ name: "", assignment }]).map((part) => ({
-        ...part,
-        ...kindOf(part.assignment),
-      }));
+      const tasks = namedTasks(step);
+      const parts = (tasks ?? [{ name: "", assignment }])
+        .filter((part) => specOnly(part.assignment, reach))
+        .map((part) => ({ ...part, ...kindOf(part.assignment) }));
+      if (parts.length === 0) continue;
       const own = parts.filter((part) => part.kind === "own");
       const left = parts.filter((part) => part.kind !== "own");
       const first = left[0];
-      if (first === undefined) pending.push({ step, assignment, judged: true });
+      const whole = tasks === undefined || own.length === tasks.length;
+      if (first === undefined)
+        pending.push(
+          whole
+            ? { step, assignment, judged: true }
+            : {
+                step,
+                assignment: own.map((part) => part.assignment).join("\n\n"),
+                only: own.map((part) => part.name),
+                judged: true,
+              }
+        );
       else if (!parts.some((part) => part.kind === "mixed") && own.length === 0)
         pending.push({ step, assignment, judged: false, reject: notOwn(first.note) });
       else

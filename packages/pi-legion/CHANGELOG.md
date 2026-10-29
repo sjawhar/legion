@@ -53,8 +53,9 @@ before the split, and the Envoy plugin's releases after it, are in `packages/pi-
   review of only a sibling's spec checks no write. One that pastes both, in one assignment or one
   task of a call, still checks the write, but its findings are not judged: the row prints why and
   is flagged `unjudged=N`, since no finding can be told to be about this spec. A call's tasks are
-  taken one by one, so a task that reviews only the run's own spec stays a judged check with its
-  own report.
+  taken one by one, each on its own assignment: a task that reviews only the run's own spec stays
+  a judged check with its own report, and a task that is no spec-only check by itself (a fact
+  check given no spec) is no part of the check, though the call's other tasks carry the outline.
 - The skill-scenario scorer takes the report of a subagent that ends with an empty `yield`
   (`{"type":"result"}`) from the text it wrote before the yield, not the word `result`.
 - The findings judge lists each check whose report finds nothing in `clean`, and the scorer needs

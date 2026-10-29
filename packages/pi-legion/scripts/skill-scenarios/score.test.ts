@@ -1731,6 +1731,41 @@ specRun("spec-writing-head-127", {
     finish
   ),
 });
+// A `task` call of two named tasks, one reviewing the run's own spec and one a fact check given no
+// spec: the fact check is no spec-only check of its own, so the check is the review's report alone.
+specRun("spec-writing-head-129", {
+  transcript: conversation(
+    routedRead,
+    [
+      toolCall("c1", "task", {
+        context: "Read only what your task gives you.",
+        tasks: [
+          { name: "OwnReview", task: `List each gap in this spec.\n\n${outlined()}` },
+          { name: "FactCheck", task: "Check each fact the brief names against the repository." },
+        ],
+      }),
+      {
+        type: "message",
+        message: {
+          role: "toolResult",
+          toolCallId: "c1",
+          content: [{ type: "text", text: "Two tasks completed." }],
+          details: {
+            results: [
+              { id: "OwnReview", exitCode: 0, output: "No gaps." },
+              { id: "FactCheck", exitCode: 0, output: "The sibling's broker claim is false." },
+            ],
+          },
+        },
+      },
+    ],
+    specEdit("w1"),
+    askStep,
+    checkOf("c2"),
+    specEdit("w2"),
+    finish
+  ),
+});
 // The run's own spec with the person's messages, three times, and the source's answered asks
 // pasted straight after its Acceptance section, with no heading to end the spec's slice.
 specRun("spec-writing-head-128", {
@@ -3184,6 +3219,15 @@ test("checked: a check started from an eval cell counts from its own transcript,
   });
   expect(own.checks.map((check) => check.report)).toEqual(["No gaps.", "No gaps."]);
   expect(own.checks[0]?.assignment).not.toContain("watchdog");
+  // A task of the call given no spec is no part of the check, though the call's other task carries
+  // the outline.
+  const factCheck = specWork(path.join(runs, "spec-writing-head-129"), checkouts(work), {
+    issue: "LWEVAL-7",
+    spec_artifact: "art-spec",
+  });
+  expect(factCheck.checks.map((check) => check.report)).toEqual(["No gaps.", "No gaps."]);
+  expect(factCheck.checks[0]?.assignment).not.toContain("Check each fact");
+  expect(scoresOf("spec-writing-head-129")).toEqual(allPass);
   expect(scoresOf("spec-writing-head-126")).toEqual(allPass);
   // An empty `yield` hands back the text before it, which is the report.
   const fixtureJson = { issue: "LWEVAL-7", spec_artifact: "art-spec" };
