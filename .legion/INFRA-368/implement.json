@@ -2,7 +2,7 @@
   "schemaVersion": 1,
   "phase": "implement",
   "issue": "INFRA-368",
-  "completed": "2026-10-28T23:29:23Z",
+  "completed": "2026-10-29T00:08:47Z",
   "pullRequest": "https://github.com/sjawhar/legion/pull/2463",
   "proof": [
     {
@@ -125,7 +125,8 @@
     "Round 2: the block-graph driver ran again at the round's working copy: exit 0, 133 PASS.",
     "Review round: GitHub reported CONFLICTING again; main added 0135_server_processes, so the forward merge 1a19ad77 renumbers this branch's migrations to 0136_item_blocks, 0137_comments_item_blocks_trigger and 0138_messages_item_blocks_trigger (files, comments, item_blocks_migrations_test.go constants 135/136, docs). Fingerprint changed; Go suites, Bun suites and the harness proof re-ran at 1a19ad77.",
     "Round 5: main's TestEditsThatKeepAnEdgeNameItsTargetWhenItsExcerptMoves and TestReferenceWritesNameTheDocumentsTheyCite placed their 'names nothing' edit past rune 240; with item blocks a comment's link shows its block's 480-rune excerpt, so those steps now edit past rune 480 and IndexItem names the targets of a kept block whose excerpt changed. A reply naming a block also refreshes that block's read (event-refresh).",
-    "Conflict return: forward merge c4006b81 with main 0a1f1f90 (conflicts in routes_table_test.go, packages/dispatch/AGENTS.md, cmd/dispatch/README.md); migrations renumbered 0137-0139 after main's 0136_dashboard_assets with every reference updated; pmdoc/reanchor_test.go gets #2481's docstest→crafted import since main lacks it; claude-envoy dist/legion unchanged against the merge base. Fingerprint changed; Go (api package whole), Bun suites and the harness proof re-ran at c4006b81."
+    "Conflict return: forward merge c4006b81 with main 0a1f1f90 (conflicts in routes_table_test.go, packages/dispatch/AGENTS.md, cmd/dispatch/README.md); migrations renumbered 0137-0139 after main's 0136_dashboard_assets with every reference updated; pmdoc/reanchor_test.go gets #2481's docstest→crafted import since main lacks it; claude-envoy dist/legion unchanged against the merge base. Fingerprint changed; Go (api package whole), Bun suites and the harness proof re-ran at c4006b81.",
+    "Review round 6: forward merge 59e5e2b9 over main d4cbcfe6 (#2396) resolves the block_index.go doc comment (this branch's sentence plus main's RunLeasedAfterEachPass paragraph); main's highest migration still 0136, #2481's import kept; fingerprint unchanged (dbc2c851), so the proof at c4006b81 stands (rebase re-check, bare gates only). Main's pmdoc tests do not compile at d4cbcfe6 (typed_nesting_test.go:23 vs #2396's cpuTimeOf); not this PR's files."
   ],
   "openQuestions": [
     "#2394 (block[] attribute) also restates graph_edges as its own 0135: the PR that merges second carries both sets of arms, renumbers, and adds the block[] refusal of an item block reference (agreed with #2394's implementer)."
