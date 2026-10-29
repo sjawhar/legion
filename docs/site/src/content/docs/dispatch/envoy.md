@@ -330,7 +330,13 @@ install it, what each component deploys and which settings it sets.
 | `200` `starting` | The listener is still binding its durable consumer. |
 | `200` `healthy` | Everything answers. The body includes the consumer's lag, and `live_topics`: `subscribed` when the listener subscribes to every topic (`ENVOY_SUBSCRIBE_ALL_TOPICS=1`), `not_applicable` when it does not. |
 | `200` `degraded` | A passing key-value failure the listener is retrying. |
-| `503` `unhealthy` | NATS is unreachable, the subscription or a cache watcher stopped, the durable consumer is gone, or the durable consumer is `not bound to this listener's subscription`, which a durable deleted and created again under the listener leaves. With `ENVOY_SUBSCRIBE_ALL_TOPICS=1`, also `live subscription inactive` when the subscription to every topic is gone or the server refuses it, as one restarted without that grant does. |
+| `503` `unhealthy` | NATS is unreachable, the subscription or a cache watcher stopped, the durable consumer is gone, or the durable consumer is `not bound to this listener's subscription`, which a durable deleted and created again under the listener leaves. Also `KV watch rebuild unavailable` when the listener has not rebuilt its key-value watches for a minute after a NATS reconnect. With `ENVOY_SUBSCRIBE_ALL_TOPICS=1`, also `live subscription inactive` when the subscription to every topic is gone or the server refuses it, as one restarted without that grant does. |
+
+After a NATS reconnect the listener rebuilds the key-value watches its caches read through. A
+rebuild that fails is tried again within seconds, so one that fails and then succeeds inside that
+minute leaves the listener `healthy` and logs a warning rather than an error; only a rebuild that
+has not succeeded for a minute is logged as an error and makes `/healthz` answer `503`, naming the
+rebuild and how long it has gone without succeeding.
 
 `/v1` opens before `/healthz` leaves `starting`: as soon as NATS is connected and the session and
 subscription caches are loaded. Until then `/v1` answers `503` `service starting`. During a rolling

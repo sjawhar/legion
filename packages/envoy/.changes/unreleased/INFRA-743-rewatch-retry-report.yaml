@@ -1,0 +1,7 @@
+kind: Fixed
+body: |-
+  The Envoy listener no longer logs an error for a key-value watch rebuild it repairs by itself: a
+  rebuild that fails after a NATS reconnect is run again within seconds, and is a warning until it
+  succeeds. One that has not succeeded within a minute is still an error, and `/healthz` now
+  answers 503 for it, naming the KV watch rebuild and how long it has gone without succeeding;
+  before, a listener answered 200 while its caches followed key-value buckets it no longer watched.
