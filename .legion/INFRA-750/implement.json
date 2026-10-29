@@ -2,9 +2,18 @@
   "schemaVersion": 1,
   "phase": "implement",
   "issue": "INFRA-750",
-  "completed": "2026-10-29T16:45:00Z",
+  "completed": "2026-10-29T19:25:00Z",
   "pullRequest": "sjawhar/legion#2506",
-  "head": "4ff726ac6d5287f8ef199822289930474dc459ba",
+  "head": "ccc25a83e319aebe7fdc0adc88037254c4a98474",
+  "round": 2,
+  "reviewRound": {
+    "threads": [
+      "PRRT_kwDORFy7ds6xs3n4 (drain_kv_watcher_test.go): fixed in ccc25a83 — warnOrErrorRecords fails when no captured record names t.Name(), so a drain test whose client is not named for it no longer passes while checking nothing; the comment states the requirement.",
+      "PRRT_kwDORFy7ds6xs3oB (stream_update_overlap_test.go): fixed in ccc25a83 — every row asserts the stream reads beside the sends, a row covers a refusal that is not the overlap one while the stream holds the update, the fourth row is written from overlapSends, and the fake applies the update it was sent rather than a literal Replicas = 3.",
+      "PRRT_kwDORFy7ds6xs3oI (stream.go): fixed in ccc25a83 — updateStream is the shape the review wrote, a settled closure and a bounded loop, with no overlap flag and no send counter; the sends and reads of every case are unchanged and the table now pins them."
+    ],
+    "allAnsweredAndResolved": true
+  },
   "proof": [
     {
       "criterion": "Acceptance 3: the cause is named with evidence, and for a product race the code handles it.",
@@ -45,6 +54,14 @@
       "observed": "ok github.com/sjawhar/envoy/internal/bus 308.350s; ok … 310.000s under -race; ok github.com/sjawhar/envoy/infra/core 3.157s; gofmt printed nothing. On the pull request at this head, lint, typecheck, test, pr-title, envoy-go-race, envoy-infra-go, envoy-smoke, envoy-e2e-local and the rest were green when read once (envoy-go and dispatch still pending; the daemon reads CI, this phase does not wait for it).",
       "headSha": "4ff726ac6d5287f8ef199822289930474dc459ba",
       "negativeControl": "infra/core's bucket_raise_test.go pins the refused-raise error text `raise KV_envoy_interests: ENVOY_NATS_REPLICAS=3: `; it passes, so the change did not alter the message an operator acts on."
+    },
+    {
+      "criterion": "Round 2: the review's three findings are fixed, and the fix's behaviour is unchanged at the new head.",
+      "surface": "The internal/bus test binary at head ccc25a83, on real in-process three-server nats-server v2.10.29 clusters, and copies of that tree carrying one deliberate regression each.",
+      "command": "CGO_ENABLED=1 go test -race -count=10 -timeout 20m -run 'TestAnUpdateRefusedAsOverlappingItsOwnStreamIsSettledFromTheStream$|TestConcurrentUpdatesOfOneStreamEndWithTheStreamHoldingThem$' ./internal/bus/; the 21-name acceptance-5 set at -race -count=20; go test -timeout 20m ./internal/bus/; CGO_ENABLED=1 go test -race -timeout 30m ./internal/bus/; gofmt -l .",
+      "observed": "ok 115.412s, 0 of 10 failed, the table's 8 rows included; the acceptance-5 set ok 1254.829s, 0 of 20 failed, so the helper's new refusal does not fire for the three tests that name their client; the package ok 301.989s and ok 310.002s under -race; gofmt printed nothing.",
+      "headSha": "ccc25a83e319aebe7fdc0adc88037254c4a98474",
+      "negativeControl": "Two, one per finding. With bus.WithName(t.Name()) removed from TestADrainEndsTheKVWatchersBeforeTheConnection in a copy of the head tree, both subtests fail with `no captured record names \"...\", so this test's own client cannot be told from another test's`, where before this round they passed while checking nothing. With updateStream changed in another copy to settle every refusal from the stream, the table's `refused otherwise` row fails on the read count (`sent 1 updates and read the stream 1 times, want 1 and 0`) and the new `refused otherwise while the stream holds the update` row fails on the verdict (`updateStream = <nil>, want nats: insufficient resources`); round 1's table passed that regression."
     }
   ],
   "filesChanged": [
