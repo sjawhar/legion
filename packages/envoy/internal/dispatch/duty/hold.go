@@ -185,17 +185,24 @@ func (h *Hold) SetToken(ctx context.Context, token string) error {
 	return nil
 }
 
+// end is the shared part of Release and Lapse: it stops the renewal, waits for it to return,
+// closes Lost, and sends statement for this hold's name and holder, so a row another holder has
+// taken is left alone and wakes nobody. doing names the call in the error it wraps.
+func (h *Hold) end(ctx context.Context, doing, statement string) error {
+	h.stop()
+	<-h.done
+	h.lose()
+	if _, err := h.db.Exec(ctx, statement, h.name, h.holder); err != nil {
+		return fmt.Errorf("%s hold %q: %w", doing, h.name, err)
+	}
+	return nil
+}
+
 // Release stops the renewal, closes Lost, and deletes the row while it still names this holder,
 // notifying HoldReleasedChannel with the name in the same transaction. A row another holder has
 // taken is left alone and wakes nobody. Calling it again repeats only the delete.
 func (h *Hold) Release(ctx context.Context) error {
-	h.stop()
-	<-h.done
-	h.lose()
-	if _, err := h.db.Exec(ctx, releaseHold, h.name, h.holder); err != nil {
-		return fmt.Errorf("release hold %q: %w", h.name, err)
-	}
-	return nil
+	return h.end(ctx, "release", releaseHold)
 }
 
 // Lapse is Release for a holder whose token the next holder must read: it stops the renewal and
@@ -204,13 +211,7 @@ func (h *Hold) Release(ctx context.Context) error {
 // is free at once, and HoldToken still answers the token, not held. A row another holder has taken
 // is left alone and wakes nobody.
 func (h *Hold) Lapse(ctx context.Context) error {
-	h.stop()
-	<-h.done
-	h.lose()
-	if _, err := h.db.Exec(ctx, lapseHold, h.name, h.holder); err != nil {
-		return fmt.Errorf("lapse hold %q: %w", h.name, err)
-	}
-	return nil
+	return h.end(ctx, "lapse", lapseHold)
 }
 
 // Expiry reads how long name's hold has left, as expires_at - now() on the database's clock, so a

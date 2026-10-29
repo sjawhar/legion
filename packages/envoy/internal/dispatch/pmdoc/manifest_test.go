@@ -106,29 +106,6 @@ func TestTheManifestNamesEveryNodeAndMarkThisPackageKnows(t *testing.T) {
 	}
 }
 
-// useFutureBlock installs, until the test ends, the embedded manifest with one more typed block,
-// "future", which builds read from schema version 2 and create from schema version creatableSince.
-func useFutureBlock(t *testing.T, creatableSince int) {
-	t.Helper()
-	var manifest map[string]any
-	if err := json.Unmarshal(SchemaJSON(), &manifest); err != nil {
-		t.Fatalf("decode the manifest: %v", err)
-	}
-	manifest["types"] = append(manifest["types"].([]any), map[string]any{
-		"name": "future", "content": "block+", "render": "host", "attributes": map[string]any{},
-		"since": 2, "creatable_since": creatableSince,
-	})
-	encoded, err := json.Marshal(manifest)
-	if err != nil {
-		t.Fatalf("encode the manifest: %v", err)
-	}
-	restore, err := UseManifestForTest(encoded)
-	if err != nil {
-		t.Fatalf("install the manifest: %v", err)
-	}
-	t.Cleanup(restore)
-}
-
 // A newer build creates an element this build reads but may not create yet. This build reads a
 // document holding it, from the live tree or from stored markdown, and edits around it. No write
 // of this build creates one: markdown written in whole or in part, a retype, or a tree written
@@ -145,7 +122,11 @@ func TestAnElementThisBuildReadsButCannotCreateIsReadAndNeverCreated(t *testing.
 		}
 	}
 
-	useFutureBlock(t, 2)
+	restoreCreatable, err := UseStagedBlockForTest("future", 2)
+	if err != nil {
+		t.Fatalf("stage the future block as creatable: %v", err)
+	}
+	t.Cleanup(restoreCreatable)
 	if got := SchemaCreatable(); got != 2 {
 		t.Fatalf("SchemaCreatable() where future is creatable = %d, want 2", got)
 	}
@@ -161,7 +142,11 @@ func TestAnElementThisBuildReadsButCannotCreateIsReadAndNeverCreated(t *testing.
 		t.Fatalf("a build that creates future stores it: %v", err)
 	}
 
-	useFutureBlock(t, 3)
+	restoreUncreatable, err := UseStagedBlockForTest("future", 3)
+	if err != nil {
+		t.Fatalf("stage the future block as not creatable: %v", err)
+	}
+	t.Cleanup(restoreUncreatable)
 	if got, want := SchemaVersion(), 2; got != want {
 		t.Fatalf("SchemaVersion() = %d, want %d", got, want)
 	}
@@ -221,7 +206,11 @@ func TestAnElementThisBuildReadsButCannotCreateIsReadAndNeverCreated(t *testing.
 // also holds an element read from version 2 is 2, and no document is 0. An element the manifest
 // does not declare has no since, and counts for nothing.
 func TestDocumentSinceIsTheHighestSinceTheDocumentHolds(t *testing.T) {
-	useFutureBlock(t, 2)
+	restore, err := UseStagedBlockForTest("future", 2)
+	if err != nil {
+		t.Fatalf("stage the future block as creatable: %v", err)
+	}
+	t.Cleanup(restore)
 	plain, err := Parse("Question?\n")
 	if err != nil {
 		t.Fatalf("parse a paragraph: %v", err)

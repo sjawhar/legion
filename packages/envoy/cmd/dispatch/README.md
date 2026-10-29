@@ -505,7 +505,7 @@ What the two processes share, and what each keeps to itself:
   try. A take-over recreates the durable at its ack floor on a fresh deliver subject, which fences
   the old holder off: a subscription its client sends again after a reconnect gets nothing. A
   durable bound by a build before holds, which binds by lookup and holds nothing, is left to that
-  build until it lets go (`delivery/intake.go`, `heldDurable`).
+  build until it lets go (`delivery/held_durable.go`, `heldDurable`).
 - Ten periodic maintenance loops run once per period across the processes, not once per process.
   Each pass takes a named session-level advisory lease for its length (`duty.Exclusive`), so a
   process whose tick lands inside another's pass logs a skip; and, under that lease, each pass is
@@ -717,7 +717,7 @@ each surface the two builds share, this is what build N+1 may change while build
   first one that carries the rule, and only after every process of the earlier release is gone.
 - **SQL.** Expand-then-contract across two releases (Database migrations, below), unchanged.
 
-The two-build test checks this rule (`cmd/dispatch/twobuild_test.go`, `go test -tags twobuild
+The two-build test checks this rule (`cmd/dispatch/twobuild_*_test.go`, `go test -tags twobuild
 ./cmd/dispatch`, CI job `dispatch-two-builds`). `packages/envoy/scripts/build-dispatch-build.sh`
 builds the previous release from its commit, and the test runs it beside this tree on one
 Postgres, cloned at this tree's schema, and one NATS. It drives each build's `dispatch` command
@@ -730,7 +730,7 @@ before them compares stream and consumer settings with no generation, binds its 
 by lookup with no hold, and refuses a request member it does not declare. So the release that
 introduces them changes no request member, document element, stream or consumer setting, or loop
 interval, and each protection binds from the release after it. In that first overlap, a take-over
-(`delivery/intake.go`, `heldDurable.takeOver`) deletes a durable and creates it again at its ack
+(`delivery/held_durable.go`, `heldDurable.takeOver`) deletes a durable and creates it again at its ack
 floor, all under the durable's consumer lease, and tries a failed create again for up to 10
 seconds while it holds its hold. The build before holds reconciles the durable under that same
 lease every 30 seconds and does not read the start the take-over recorded. So one case is left: a

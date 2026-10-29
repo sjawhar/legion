@@ -1578,7 +1578,7 @@ jobs:
         run: go test -tags multiprocess -count=1 -timeout 20m -v ./cmd/dispatch
         working-directory: packages/envoy
 
-  # The two-build tests (packages/envoy/cmd/dispatch/twobuild_test.go, INFRA-558): each row starts
+  # The two-build tests (packages/envoy/cmd/dispatch/twobuild_*_test.go): each row starts
   # an envoy-dispatch of the previous build and one of this tree against one Postgres and one NATS,
   # which is what a rolling release runs, and drives each build's CLI, stored documents, document
   # socket and bus traffic against the other (cmd/dispatch/README.md, "Two builds at once"). They

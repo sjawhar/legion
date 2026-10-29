@@ -2,7 +2,6 @@ package docs
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"net/http"
 	"net/http/httptest"
@@ -19,30 +18,6 @@ import (
 
 	"github.com/sjawhar/envoy/internal/dispatch/pmdoc"
 )
-
-// useFutureBlock installs, until the test ends, the embedded manifest with one more typed block,
-// "future", which builds read from schema version 2 and create from schema version
-// creatableSince.
-func useFutureBlock(t *testing.T, creatableSince int) {
-	t.Helper()
-	var manifest map[string]any
-	if err := json.Unmarshal(pmdoc.SchemaJSON(), &manifest); err != nil {
-		t.Fatalf("decode the manifest: %v", err)
-	}
-	manifest["types"] = append(manifest["types"].([]any), map[string]any{
-		"name": "future", "content": "block+", "render": "host", "attributes": map[string]any{},
-		"since": 2, "creatable_since": creatableSince,
-	})
-	encoded, err := json.Marshal(manifest)
-	if err != nil {
-		t.Fatalf("encode the manifest: %v", err)
-	}
-	restore, err := pmdoc.UseManifestForTest(encoded)
-	if err != nil {
-		t.Fatalf("install the manifest: %v", err)
-	}
-	t.Cleanup(restore)
-}
 
 // fleetProcess writes the server_processes row of another server process straight into the
 // registry: one that reads schema version and creates up to creatable, whose last heartbeat is
@@ -190,13 +165,21 @@ func newAdmissionServer(t *testing.T, future bool) (*Service, string, *httptest.
 	t.Helper()
 	markdown := "# First\n"
 	if future {
-		useFutureBlock(t, 2)
+		restore, err := pmdoc.UseStagedBlockForTest("future", 2)
+		if err != nil {
+			t.Fatalf("stage the future block as creatable: %v", err)
+		}
+		t.Cleanup(restore)
 		markdown += "\n:::future{#future-1}\nBody.\n:::\n"
 	}
 	service, artifactID := newTestService(t)
 	seedServiceText(t, service, artifactID, markdown)
 	if future {
-		useFutureBlock(t, 3)
+		restore, err := pmdoc.UseStagedBlockForTest("future", 3)
+		if err != nil {
+			t.Fatalf("stage the future block as not creatable: %v", err)
+		}
+		t.Cleanup(restore)
 	}
 	server := httptest.NewServer(http.HandlerFunc(service.ServeHTTP))
 	t.Cleanup(server.Close)

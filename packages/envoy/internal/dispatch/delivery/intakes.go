@@ -26,7 +26,7 @@ const (
 // server's event broker, through which Intake appends issue.deployed (RecordDeployedEvents).
 //
 // The returned stop waits for both intakes' Runs, which return once ctx is cancelled, then closes
-// both clients. Each Run returns only once it has stopped delivering (StopDelivering): the message
+// both clients. Each Run returns only once it has stopped delivering (stopDelivering): the message
 // in its handler finishes, under a deadline of its own (intakeMessageTimeout for Intake), and is
 // acknowledged before stop closes the client; the messages behind it are handed back to NATS; and
 // the intake's hold is released, so the next process takes the durable over at once.

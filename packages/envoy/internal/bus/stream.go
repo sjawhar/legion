@@ -193,12 +193,12 @@ func StreamCaptures(topic string) bool {
 	return false
 }
 
-// SubjectsCapture reports whether a stream carrying subjects retains a publish to topic: some
+// subjectsCapture reports whether a stream carrying subjects retains a publish to topic: some
 // subject matches it, token by token, a `*` matching one token and a trailing `>` one or more. It
 // takes any subject shape, since the subjects it is given are the deployed stream's, which a newer
 // build may have shaped otherwise than StreamCaptures assumes. A topic is read literally, as
 // StreamCaptures reads it.
-func SubjectsCapture(subjects []string, topic string) bool {
+func subjectsCapture(subjects []string, topic string) bool {
 	topicTokens := strings.Split(topic, ".")
 	return slices.ContainsFunc(subjects, func(subject string) bool {
 		subjectTokens := strings.Split(subject, ".")
@@ -214,9 +214,9 @@ func SubjectsCapture(subjects []string, topic string) bool {
 	})
 }
 
-// ReadStreamSubjects reads the subjects the deployed stream carries, which may hold subjects this
+// readStreamSubjects reads the subjects the deployed stream carries, which may hold subjects this
 // build does not compile: a newer build adds its own, and reconciliation keeps them.
-func ReadStreamSubjects(js nats.JetStreamContext) ([]string, error) {
+func readStreamSubjects(js nats.JetStreamContext) ([]string, error) {
 	info, err := js.StreamInfo(Stream)
 	if err != nil {
 		return nil, err

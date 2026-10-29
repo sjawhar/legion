@@ -2,7 +2,6 @@ package api
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 	"net/http"
 	"strings"
@@ -226,38 +225,17 @@ func TestRebuildArtifactVersionsSuppliedMarkdownButNotTheLatestVersionSource(t *
 	}
 }
 
-// useStagedBlock makes this process read and write by the embedded manifest with one more typed
-// block, "staged", which this build reads (since 2) and may not create yet (creatable_since 3), as
-// a build that stages an element does, until the test ends. The manifest is package-global, so no
-// other test may run pmdoc while it is installed or restored.
-func useStagedBlock(t *testing.T) {
-	t.Helper()
-	var manifest map[string]any
-	if err := json.Unmarshal(pmdoc.SchemaJSON(), &manifest); err != nil {
-		t.Fatalf("decode the manifest: %v", err)
-	}
-	manifest["types"] = append(manifest["types"].([]any), map[string]any{
-		"name": "staged", "content": "block+", "render": "host", "attributes": map[string]any{},
-		"since": 2, "creatable_since": 3,
-	})
-	encoded, err := json.Marshal(manifest)
-	if err != nil {
-		t.Fatalf("encode the manifest: %v", err)
-	}
-	restore, err := pmdoc.UseManifestForTest(encoded)
-	if err != nil {
-		t.Fatalf("install the manifest: %v", err)
-	}
-	t.Cleanup(restore)
-}
-
 // A rebuild from the latest saved version reads markdown the request did not send, so the route
 // answers for what that version holds. A version holding an element this build does not know is
 // 409 DOC_NEWER_CONTENT, as every other route over the document answers, and not 400
 // INVALID_MARKDOWN. A version holding an element this build reads but may not create yet rebuilds:
 // the seed only puts back content the document stored.
 func TestARebuildFromTheLatestVersionAnswersForWhatThatVersionHolds(t *testing.T) {
-	useStagedBlock(t)
+	restore, err := pmdoc.UseStagedBlockForTest("staged", 3)
+	if err != nil {
+		t.Fatalf("stage a typed block this build reads and may not create: %v", err)
+	}
+	t.Cleanup(restore)
 	handler, database, broken := newBrokenTestServer(t)
 	issue := createArtifactIssue(t, handler)
 	for _, c := range []struct {

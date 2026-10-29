@@ -708,7 +708,8 @@ The `dispatch-multiprocess` job runs only when a file its `dispatch_multiprocess
 `.github/workflows/envoy-and-contracts.yaml` names changes; `packages/envoy/AGENTS.md` (Critical
 conventions) says what keeps it current.
 
-The two-build tests (`twobuild_test.go`, INFRA-558) start one Dispatch server of an earlier build
+The two-build tests (`twobuild_*_test.go`: a harness file and one file each for the CLI, documents
+and messages tests) start one Dispatch server of an earlier build
 and one of this tree on one Postgres and one NATS, as a rolling release runs them: each build's CLI
 against the other's server, each build's corpus documents read, edited, approved and opened on the
 other's document socket, and outbox events, GitHub messages and the stream and consumer settings

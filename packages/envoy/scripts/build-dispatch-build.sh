@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Builds one Dispatch build from a commit of this repository into a directory: the server, its web
-# app, its `dispatch` command, and the test data the two-build test (cmd/dispatch/twobuild_test.go,
+# app, its `dispatch` command, and the test data the two-build test (cmd/dispatch/twobuild_*_test.go,
 # `go test -tags twobuild`) reads from it. It builds from `git archive` of the commit, so it makes
 # no worktree, branch or checkout. The server and its web app take the steps the commit's image
 # build takes (packages/envoy/docker/Dockerfile): `bun install --frozen-lockfile`, the contracts'

@@ -479,7 +479,7 @@ func (c *Client) readDeployedSubjects(conn *nats.Conn, timeout time.Duration) bo
 	js, err := conn.JetStream(nats.MaxWait(timeout))
 	if err == nil {
 		var subjects []string
-		if subjects, err = ReadStreamSubjects(js); err == nil {
+		if subjects, err = readStreamSubjects(js); err == nil {
 			c.deployedSubjects.Store(&subjects)
 			return true
 		}
@@ -1114,11 +1114,11 @@ func (c *Client) usesCoreTransport(topic string) bool {
 	if !strings.HasPrefix(topic, NotificationTopicPrefix) {
 		return false
 	}
-	if SubjectsCapture(roleLaneSubjects, topic) {
+	if subjectsCapture(roleLaneSubjects, topic) {
 		return true
 	}
 	if subjects := c.deployedSubjects.Load(); subjects != nil {
-		return !SubjectsCapture(*subjects, topic)
+		return !subjectsCapture(*subjects, topic)
 	}
 	return !StreamCaptures(topic)
 }

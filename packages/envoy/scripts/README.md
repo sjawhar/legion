@@ -245,7 +245,7 @@ DISPATCH_BENCH_DATABASE_URL=<copy> packages/envoy/scripts/search-latency-compare
 ## build-dispatch-build.sh
 
 Builds one Dispatch build from a commit of this repository into a directory, for the two-build
-test (`cmd/dispatch/twobuild_test.go`, `go test -tags twobuild`), which runs it beside this tree
+test (`cmd/dispatch/twobuild_*_test.go`, `go test -tags twobuild`), which runs it beside this tree
 on one Postgres and one NATS. It extracts `git archive <commit>` into `<dir>/src`, so it makes no
 worktree or branch, and builds each part as that commit's own image build does:
 `bun install --frozen-lockfile`, the contracts' `gen:go` and `build`, `bun run build:web`, the
