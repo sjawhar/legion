@@ -2,35 +2,29 @@
   "schemaVersion": 1,
   "phase": "review",
   "issue": "INFRA-549",
-  "completed": "2026-10-29T17:05:30Z",
-  "round": 8,
-  "reviewedCodeHead": "85af7fcb193b",
-  "decision": "changes_requested",
+  "completed": "2026-10-29T17:26:00Z",
+  "round": 9,
+  "reviewedCodeHead": "ba83edd7d606",
+  "decision": "approved",
   "critical": 0,
   "important": 0,
-  "minor": 2,
-  "scope": "Narrowed by the INFRA-14 architect (2026-10-29 16:44Z) to round 7's three findings, ci-filters/ci-ok and no other change; then (17:04Z) the Fast-follow item brought into this pull request, with the Fast-follow line to read none.",
-  "roundSevenFindings": {
-    "ci_job_reads.py natslive Run": "fixed in 85af7fcb193b; check-ci-filters.sh exits 0 locally (24 gates, 0 uncovered)",
-    "bus.MaxReplicas in place of MaxNATSReplicas": "fixed in 85af7fcb193b; no MaxNATSReplicas left outside .legion/; core and aws tests pass",
-    "nats_auth_live_test.go comment": "fixed in 85af7fcb193b"
+  "minor": 1,
+  "scope": "Narrowed by the INFRA-14 architect to round 8's Fast-follow work (podPriorityClass shared by gcp:Dispatch, loopbackPorts.mu removed), ci-filters/ci-ok, and no other change.",
+  "roundEightFindings": {
+    "podPriorityClass": "fixed in ba83edd7d606: newDispatchDisruption calls podPriorityClass(\"priorityClassName\", ...), the helper sits beside dnsSubdomain in gcp/dispatch.go, refusal texts byte-identical (dispatch tests unchanged and passing), AGENTS.md row updated",
+    "loopbackPorts.mu": "fixed in ba83edd7d606: the field and its Lock/Unlock are gone; sync stays for WaitGroup and renderMu"
   },
   "keyFindings": [
     {
       "severity": "minor",
-      "file": "packages/envoy/infra/gcp/clusteredhub_autopilot.go",
-      "description": "Brought in from Fast-follow by the architect: podPriorityClass repeats newDispatchDisruption's inline priority-class rule (gcp/dispatch.go:749-758). Dispatch calls podPriorityClass(\"priorityClassName\", args.PriorityClassName) with its error text unchanged, and the helper moves beside dnsSubdomain (gcp/dispatch.go:686); the AGENTS.md gcp/ row stops naming the priority-class rule in clusteredhub_autopilot.go."
-    },
-    {
-      "severity": "minor",
-      "file": "packages/envoy/infra/gcp/clusteredhub_live_test.go",
-      "description": "The other Fast-follow item, brought in so the line reads none: loopbackPorts.mu (:486, locked at :495-496) guards a draw only the test goroutine makes; delete it."
+      "file": "packages/envoy/infra/AGENTS.md",
+      "description": "Prose, fixed by the reviewer in its own commit: the gcp/ row's parenthetical read as if dispatch_cloud.go and dispatch_kube.go were things gcp:ClusteredNatsHub shares; it now lists gcp:Dispatch's files, then says dispatch.go also holds podPriorityClass."
     }
   ],
   "thermonuclear": {
-    "deepReview": "Verdict: APPROVE at 85af7fcb (no finding; the three fixes correct and complete; check-ci-filters.sh exit 0).",
-    "codeQuality": "Verdict: APPROVE at 85af7fcb (no blocking finding)."
+    "deepReview": "Verdict: APPROVE at ba83edd7 (no finding; refusal texts byte-identical; the InputError type reaches no consumer of gcp:Dispatch; no dangling reference).",
+    "codeQuality": "Verdict: APPROVE at ba83edd7 (one wording nit in AGENTS.md:44, fixed here)."
   },
-  "ci": "Base main (required lint, typecheck, test, pr-title; ci-ok). At 85af7fcb the CI run is queued (changes queued); not read as a pass. Compare 85af7fcb...32caca1c handoffsOnly true, 2 files.",
-  "verifiedLocally": "At 85af7fcb: uv run --with pyyaml==6.0.2 bash .github/scripts/check-ci-filters.sh exit 0; go vet ./core/ ok; go test ./core/ ./aws/... ok; go test ./gcp/ ok but for the two mkfs.ext4 data-disk tests (no mkfs.ext4 on this pod)."
+  "ci": "Base main (required lint, typecheck, test, pr-title; ci-ok aggregates). The approval waits for those checks to be green at the head carrying the reviewer's prose commit; read there before the review is submitted.",
+  "verifiedLocally": "At ba83edd7: gofmt clean, go vet -tags pulumilive,natslive ./... ok, go test ./gcp/ ./provider/ ./core/ ok (two mkfs.ext4 data-disk tests skipped), check-ci-filters.sh exit 0 (24 gates)."
 }
