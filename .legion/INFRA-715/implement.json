@@ -2,9 +2,9 @@
   "schemaVersion": 1,
   "phase": "implement",
   "issue": "INFRA-715",
-  "completed": "2026-10-29T13:30:00Z",
+  "completed": "2026-10-29T14:35:00Z",
   "pullRequest": "https://github.com/sjawhar/legion/pull/2480",
-  "codeHead": "125abf850ee5833c25c7220e7c6be8ef154d39e6",
+  "codeHead": "44036ea5ca4c4c9b7621cba5892d87a0c2b7edff",
   "proof": [
     {
       "criterion": "A2: on the cluster copy, an hour at ten times grows Dispatch's memory by no more than the documents' stored growth plus a stated constant (1 GiB); the curve is quoted against the 2026-10-28 baseline",
@@ -37,6 +37,14 @@
       "observed": "At the head: 1 passed (7.0s); the whole block-references.e2e.ts file: 5 passed (17.4s). The comment's reference to the paragraph still reads its text and links to /issues/CORE-1/spec#b-<id> after an upload that changed another paragraph, the blocks call gives the same id, and the link opens the document at it. Both runs quoted on #2480 (comment 6497530646).",
       "headSha": "125abf850ee5833c25c7220e7c6be8ef154d39e6",
       "negativeControl": "The same test file at main bb9fe49c (the commit before the change): 1 failed at block-references.e2e.ts:275, expect(locator).toHaveAttribute ... Error: element(s) not found, after the upload and its version both landed: the upload re-minted the paragraph's id, so the reference pointed at nothing."
+    },
+    {
+      "criterion": "Review round 1 change request: an upload that moves an open ask's quote into a code block is a caller-input refusal (4xx naming the anchor), not 500 DOC_SCHEMA with an ERROR log",
+      "surface": "the real Dispatch API handler (POST /api/v1/issues/{key}/artifacts under the spec's own name) over the real docs.Service on Postgres 16, with an open ask anchored through POST /api/v1/issues/{key}/asks",
+      "command": "cd packages/envoy && DISPATCH_TEST_DATABASE_URL=postgres://postgres@127.0.0.1:55432/postgres go test ./internal/dispatch/api/ -run TestAnUploadMovingAnOpenAsksQuoteIntoACodeBlockIs400 -count=1 -v",
+      "observed": "--- PASS: the upload answers 400 {\"code\":\"INVALID_MARKDOWN\"} naming the open ask anchored on \"run the tests\", the mark refused in code_block and the two ways out, with no ERROR log; the spec text is unchanged. The docs suite (895 s) and api Anchor|Upload|Artifact|Suggestion|Ask tests (282 s) pass at the head.",
+      "headSha": "44036ea5ca4c4c9b7621cba5892d87a0c2b7edff",
+      "negativeControl": "The same test with the previous mutation.go (0164ae30): status=500 body={\"code\":\"DOC_SCHEMA\",\"error\":\"replace live document: document is outside the Proof schema: the write left it outside: ...\"} and ERROR dispatch: API document outside Proof schema; --- FAIL."
     }
   ],
   "filesChanged": [
@@ -48,7 +56,11 @@
     "packages/envoy/internal/dispatch/docs/marks_test.go: one expectation that pinned an upload re-minting every id",
     "packages/envoy/AGENTS.md, packages/envoy/.changes/unreleased/INFRA-715-upload-keeps-block-ids.yaml",
     "packages/dispatch/e2e/block-references.e2e.ts: the browser test of a block reference surviving an upload",
-    "packages/envoy/.changes/unreleased/INFRA-715-upload-keeps-block-ids.yaml: names that a block reference survives an upload"
+    "packages/envoy/.changes/unreleased/INFRA-715-upload-keeps-block-ids.yaml: names that a block reference survives an upload",
+    "packages/envoy/internal/dispatch/docs/mutation.go: refusedReanchor makes a refused scratch re-anchor ErrInvalidMarkdown",
+    "packages/envoy/internal/dispatch/api/anchors_test.go: the route-level 400 test",
+    "packages/envoy/internal/dispatch/docs/upload_anchors_test.go: requires ErrInvalidMarkdown, neither ErrDocSchema nor ErrDocOutsideSchema",
+    "packages/envoy/AGENTS.md and packages/envoy/.changes/unreleased/INFRA-715-upload-ask-into-code-block.yaml"
   ],
   "trickyParts": [
     "Identity rule: an id is carried only to an unchanged untyped block at its paired position; moved, swapped, retyped, edited blocks, their ancestors, and typed blocks naming no id get fresh ids.",
@@ -58,10 +70,11 @@
     "F-B was implemented after measurement: with F-A alone an upload over 100 open anchors retained 63,839 B vs 6,946 B over none (9.2x, trigger 1.1x).",
     "The cluster hour ran on the INFRA-598 harness at 4fa0bee2 (the commit of the 2026-10-28 run), because the branch tip's cluster.sh needs a stored-order source this head does not carry.",
     "Full suites at the head: pmdoc's three linearity timing tests fail in this pod's 10 ms clock identically at base; other failures in internal/dispatch are environmental (no Docker, C-locale Postgres, census URL, NATS timing) and do not import the changed packages.",
-    "Round 2 answers the tester's two failures: the PR body's Outcome and Change now say block references survive an upload (readers: GET /api/v1/artifacts/{id}/blocks, dispatch read --ref, the page's block links), and the browser test above. Also per INFRA-514's architect: the body quotes the 2026-10-28 record (12.1 GiB at minute 5, 10.1 GiB/h, 95% interval 9.0-11.2) and its collapse, splits k into 19 (working set), 8.0 (live heap) and about 527 MB of heap not returned to the OS, and both cluster tarballs were uploaded again without the copy's dead secrets (version 2)."
+    "Round 2 answers the tester's two failures: the PR body's Outcome and Change now say block references survive an upload (readers: GET /api/v1/artifacts/{id}/blocks, dispatch read --ref, the page's block links), and the browser test above. Also per INFRA-514's architect: the body quotes the 2026-10-28 record (12.1 GiB at minute 5, 10.1 GiB/h, 95% interval 9.0-11.2) and its collapse, splits k into 19 (working set), 8.0 (live heap) and about 527 MB of heap not returned to the OS, and both cluster tarballs were uploaded again without the copy's dead secrets (version 2).",
+    "Round 3 answers the reviewer's two threads (PRRT_kwDORFy7ds6xk5xU, PRRT_kwDORFy7ds6xk5xa), both replied to and resolved at 44036ea5; the PR body adds a Contract change census (500 DOC_SCHEMA -> 400 INVALID_MARKDOWN on the three upload routes; block ids kept)."
   ],
   "openQuestions": [
     "The literal bound holds for an hour because the 1 GiB constant absorbs comment growth; the measured proportional factor is k ~ 19 (working-set growth per stored byte). INFRA-179's room byte budget caps the unbounded case."
   ],
-  "round": 2
+  "round": 3
 }
