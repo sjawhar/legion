@@ -7,6 +7,8 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"testing"
+
+	"github.com/sjawhar/envoy/internal/logtest"
 )
 
 // capturingHandler records every slog record it is asked to handle, so a test can assert that
@@ -81,9 +83,7 @@ func TestNotifySwallowsServerErrorAndLogsIt(t *testing.T) {
 	defer srv.Close()
 
 	var records []slog.Record
-	previous := slog.Default()
-	slog.SetDefault(slog.New(capturingHandler{records: &records}))
-	defer slog.SetDefault(previous)
+	logtest.SetDefault(t, capturingHandler{records: &records})
 
 	e := Envoy{URL: srv.URL, Token: "tok", HTTP: srv.Client()}
 	e.Notify(context.Background(), "sess-123", "req-456", "approved")
@@ -103,9 +103,7 @@ func TestNotifySwallowsNotFoundAndLogsIt(t *testing.T) {
 	defer srv.Close()
 
 	var records []slog.Record
-	previous := slog.Default()
-	slog.SetDefault(slog.New(capturingHandler{records: &records}))
-	defer slog.SetDefault(previous)
+	logtest.SetDefault(t, capturingHandler{records: &records})
 
 	e := Envoy{URL: srv.URL, Token: "tok", HTTP: srv.Client()}
 	e.Notify(context.Background(), "sess-123", "req-456", "approved")
@@ -122,9 +120,7 @@ func TestNotifySwallowsUnreachableServerAndLogsIt(t *testing.T) {
 	srv.Close() // guarantees connection failure below
 
 	var records []slog.Record
-	previous := slog.Default()
-	slog.SetDefault(slog.New(capturingHandler{records: &records}))
-	defer slog.SetDefault(previous)
+	logtest.SetDefault(t, capturingHandler{records: &records})
 
 	e := Envoy{URL: srv.URL, Token: "tok", HTTP: srv.Client()}
 	e.Notify(context.Background(), "sess-123", "req-456", "approved")
