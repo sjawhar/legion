@@ -8,7 +8,7 @@
 #                           initdb, write stack.json. Idempotent: a rerun rebuilds incrementally.
 #   stack.sh start          start Postgres, the proxy, NATS and the listener (one already running is
 #                           kept); refuses a port another process holds, naming it.
-#   stack.sh seed [--force] seed through Dispatch, then its production-shaped references (53 to 62 min
+#   stack.sh seed [--force] seed through Dispatch, then its production-shaped references (37 to 50 min
 #                           on 2 vCPU in all), drain the outbox, vacuum, install the commit-time trigger,
 #                           write seed.meta.json and keep the result as the template database
 #                           dispatch_seed. --force drops an existing seed first.
@@ -519,7 +519,7 @@ cmd_seed() {
   note "seeding through Dispatch (18 to 27 min on 2 vCPU); log $LOGS/seed.log"
   loadgen seed -out "$ROOT/seed.json" 2>&1 | tee "$LOGS/seed.log" >&2
 
-  note "writing production-shaped references (about 35 min on 2 vCPU); log $LOGS/seed-refs.log"
+  note "writing production-shaped references (about 23 min on 2 vCPU); log $LOGS/seed-refs.log"
   loadgen seed-refs 2>&1 | tee "$LOGS/seed-refs.log" >&2
 
   note "waiting for the outbox to publish every seed event"

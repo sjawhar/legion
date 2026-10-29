@@ -139,7 +139,7 @@ from the RNG seed, so two runs of one step with one seed offer the same arrivals
    the checkout's current code.
 2. `stack.sh start`, then `stack.sh seed`. Each one does nothing when its work is already done. So
    `run-step.sh` is the one command from a fresh checkout. On the first run, the seed alone takes
-   53 to 62 minutes.
+   37 to 50 minutes.
 3. The migration check (Before and after across commits, below).
 4. `stack.sh reset`, with Dispatch's log in the step directory (The reset, below).
 5. `loadgen run`. It writes the step's files.
@@ -295,10 +295,10 @@ every pid. It is mode 600. `loadgen` reads every endpoint and token from it.
 
 ## The seed
 
-`stack.sh seed` makes the database that every step starts from. It takes 53 to 62 minutes on a
-2-vCPU pod: 18 to 27 minutes for the issues and comments (1,086 s and 1,600 s in two seeds on
-2026-10-27, with the wait for the block index), and about 35 minutes more for the references. It
-does these steps:
+`stack.sh seed` makes the database that every step starts from. It takes 37 to 50 minutes on a
+2-vCPU pod: 14 to 27 minutes for the issues and comments with the wait for the block index
+(1,086 s and 1,600 s in two seeds on 2026-10-27, 14 minutes on 2026-10-29), and about 23 minutes
+more for the references (2,232 s for the whole seed on 2026-10-29). It does these steps:
 
 1. It creates database `dispatch` and starts Dispatch (log: `$LOADTEST_ROOT/logs/dispatch-seed.log`).
 2. `loadgen seed` writes through Dispatch's API with 8 writers (log: `$LOADTEST_ROOT/logs/seed.log`):
