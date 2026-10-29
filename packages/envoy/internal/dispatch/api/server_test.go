@@ -3073,6 +3073,57 @@ func TestSSEFirstColdConnectionOfAFreshProcessIsSentAnEventCommittedWhileTheRela
 	awaitSSELine(t, sseLines(t, opened.response.Body), committed, hold+sseFrameWait, "event committed while the relay started, with no horizon proven before the request")
 }
 
+// TestTheRelaysFirstStartDoesNotReadTheWholeEventLog: the relay's first start runs on every
+// process at boot (nothing proves a horizon before the first connection) and holds that first
+// connection, and every live event, until it ends. Its cost must not grow with the log: on
+// production's millions of events a read of every id from 0 keeps the first stream and every
+// resuming stream's events waiting for seconds after each restart (5,000,000 ids: 3.8 s on a
+// 2-vCPU pod, against 0.015 s before this change). The start may read the newest events and the
+// ones still open, not the log's whole history: here it may read at most a tenth of a log of
+// 200,000 committed, published events, measured by the index tuples Postgres counts on the
+// events primary key while the first cold stream opens.
+func TestTheRelaysFirstStartDoesNotReadTheWholeEventLog(t *testing.T) {
+	const logSize = 200_000
+	handler, database, _ := newTestServer(t, testServerOptions{streamHeartbeat: 100 * time.Millisecond})
+	createInteractionIssue(t, handler, "TEST", "Issue", "A spec")
+	if _, err := database.Pool.Exec(t.Context(), `
+		insert into events (seq, type, actor, payload, notify, published_at)
+		select 0, 'test.filler', '{"kind":"system","id":"test"}', '{}', false, now()
+		from generate_series(1, $1)
+	`, logSize); err != nil {
+		t.Fatalf("fill the event log: %v", err)
+	}
+	if _, err := database.Pool.Exec(t.Context(), `analyze events`); err != nil {
+		t.Fatalf("analyze events: %v", err)
+	}
+	// Postgres flushes a backend's statistics within about a second of its transaction ending,
+	// and each read below runs in a transaction of its own, so it sees the latest flush.
+	tuplesRead := func() int64 {
+		t.Helper()
+		var read int64
+		if err := database.Pool.QueryRow(t.Context(), `
+			select coalesce((select idx_tup_read from pg_stat_user_indexes where indexrelname = 'events_pkey'), 0)
+		`).Scan(&read); err != nil {
+			t.Fatalf("read events_pkey statistics: %v", err)
+		}
+		return read
+	}
+	time.Sleep(1500 * time.Millisecond)
+	before := tuplesRead()
+	httpServer := httptest.NewServer(handler)
+	t.Cleanup(httpServer.Close)
+	response, err := http.DefaultClient.Do(sseRequest(t, httpServer.URL+"/api/v1/events", func(*http.Request) {}))
+	if err != nil {
+		t.Fatalf("open SSE stream: %v", err)
+	}
+	t.Cleanup(func() { response.Body.Close() })
+	awaitSSELine(t, sseLines(t, response.Body), ": open", sseFrameWait, "open line of the first cold stream")
+	time.Sleep(1500 * time.Millisecond)
+	if read := tuplesRead() - before; read > logSize/10 {
+		t.Fatalf("the relay's first start read %d index tuples of events_pkey on a log of %d events, want at most %d: its cost grows with the whole log", read, logSize, logSize/10)
+	}
+}
+
 // TestSSEFirstColdConnectionIsSentAnEventThatDrewItsIdBeforeTheRequest: an event can draw its id
 // before the first connection's request and commit after it, below an id that had already
 // committed. The relay's first start must not start above it: it reads the log's gaps when it
