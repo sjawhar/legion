@@ -2,32 +2,18 @@
   "schemaVersion": 1,
   "phase": "review",
   "issue": "INFRA-368",
-  "completed": "2026-10-29T14:09:40Z",
-  "round": 9,
-  "decision": "changes_requested",
-  "reviewedHead": "the handoff commit this file is pushed in (child of 957a8d10f087f7bf53d1953d3866c5de5b00edc1)",
-  "codeHead": "881b03e5834e",
+  "completed": "2026-10-29T14:37:08Z",
+  "round": 10,
+  "decision": "approved",
+  "reviewedHead": "the handoff commit this file is pushed in (child of 0365dd3cbc22da410cc75b03546c575830bce6c2)",
+  "codeHead": "30157984d4b2",
   "critical": 0,
-  "important": 2,
-  "minor": 1,
-  "round8Finding": "Fixed. SentRequest.edit.carried is data: keep writes it (held-sends.ts:277), restoredEdit reads it back, and sendAttempt passes it (send-request.ts:329), so Writes.#update's re-keeps no longer lose it. The new test (two reloads, then a reload that interrupts a Retry) fails at round 8's code and passes at the head (deep-review ran it both ways). restoredEdit's closure and the `followed ?? carried` fallback are gone. The two older-build comments are reworded, and recoveredMessage is in the body's loadMessage table.",
-  "keyFindings": [
-    {
-      "severity": "important",
-      "file": ".github/workflows/ci.yaml (filters)",
-      "description": "The ci-filters check is red at the CI head 0fbea003 with 30 problems. The jobs test, docs, dispatch, dispatch-browser-multiprocess and envoy-infra-go all read the new packages/envoy/internal/dispatch/itemblocks/*.go files (through go build ./cmd/dispatch and the docs binaries), but none of their path filters matches that directory. So a later change to itemblocks alone would skip those jobs. main does not share this red: main has no itemblocks. Fix: add 'packages/envoy/internal/dispatch/itemblocks/*' to each of those five filters in ci.yaml, beside the other internal/dispatch packages, and run .github/scripts/check-ci-filters.sh."
-    },
-    {
-      "severity": "important",
-      "file": "packages/dispatch/web/src/features/conversation/MentionComposer.tsx:900",
-      "description": "The ids are worked out from a different body than the one Save sends. composedRequest computes carriedIdsOf(followedBlocks.current, body) from the React state, and sentRequest then sends textarea.current?.value ?? body. Before round 9 the ids were checked against the sent body. Reachable path: open an edit of a comment whose stored body has CR LF, then save without typing. body keeps the CR LF (replaceDraft(editBody)), while the textarea and followed.value hold LF, so carriedBlocks returns undefined and the save carries no ids. deep-review reproduced this with a CR LF-normalizing textarea: round 8's code sent base_revision 3 and b1/b2, the head sent {body} alone. Fix: in sentRequest, read the textarea value once and use it for both draft.body and edit.carried. Add a test with a CR LF comment and a CR LF-normalizing textarea, which fails at the head."
-    },
-    {
-      "severity": "minor",
-      "file": "packages/dispatch/web/src/features/conversation/send-request.ts:302",
-      "description": "carriedIdsOf's doc comment still says \"The block ids `sent`'s save carries ... None for a send that is no edit\", but it no longer takes `sent`. The finding above touches the same code, so fix this wording with it."
-    }
-  ],
-  "ci": "GitHub reports the PR CONFLICTING, so no pull_request workflow has run at 1327aa0d or 881b03e5. The newest CI head is still 0fbea003 (round 8's code). There: lint, test, pr-title, contracts, claude-envoy, envoy-client, dispatch-memory, the multiprocess jobs, pi-*, envoy-* and the worker image all passed, and typecheck was skipped. dispatch, envoy-go and envoy-go-race were still running. ci-filters failed (finding 1). docs failed in docs:media on one screenshot, legion/handover: getByRole('heading', {level: 1}) resolved to 2 elements. This PR changes no Legion docs page, and docs passed on INFRA-723, INFRA-715 and INFRA-743 at the same time, so I am not counting that red as this PR's until a run after the fix shows it again.",
-  "thermonuclear": "deep-review: `Verdict: CHANGES at 957a8d10`, finding 2, reproduced. code-quality: `Verdict: CHANGES at 957a8d10`, findings 2 and 3."
+  "important": 0,
+  "minor": 0,
+  "scope": "The architect scoped round 10 to round 9's items 2 and 3 (14:12Z). Item 1, the ci.yaml itemblocks filters, moves to the forward merge: this branch has no .github/workflows/ci.yaml or check-ci-filters.sh (main added both in #2316), and the red ci-filters check ran on GitHub's merge ref.",
+  "round9Findings": "Item 2 is fixed. sentRequest reads the textarea values once and passes them to composedRequest(sentBody, sentReplacement), which works out edit.carried from sentBody (MentionComposer.tsx:892-927). The no-argument call unedited(held, composedRequest()) at :949 keeps the state body, as before, and unedited never reads carried. The new test (a CR LF comment, a CR LF-normalizing textarea getter, Save without typing) expects base_revision 3 with b1@0 and b2@7. It passes at the head, and at 881b03e5 carriedBlocks returns undefined on value.trim() !== trimmed. The tester drove the same case in Chromium at 881b03e5 (no ids) and at the head (ids b1/b2/b3, reply still cites b2). Item 3 is fixed: the carriedIdsOf doc comment describes its own parameters.",
+  "keyFindings": [],
+  "checksRun": "In packages/dispatch: `bun test web/src/features/conversation` gives 204 pass and 0 fail, and `bunx tsc --noEmit` is clean.",
+  "ci": "GitHub reports the PR CONFLICTING, so no pull_request workflow has run at round 10's code (30157984/39ef16aa). The newest CI head is still 0fbea003. The required checks gate the merge after the merge lane's forward merge. At that merged head the reviewer checks the ci.yaml itemblocks filters with check-ci-filters.sh clean, and the docs job's legion/handover screenshot.",
+  "thermonuclear": "At 0365dd3c: deep-review `Verdict: APPROVE at 0365dd3c`, with one wording Minor: carriedIdsOf's 'never answered' also covers an answer marked not indexed. code-quality `Verdict: APPROVE at 0365dd3c`."
 }
