@@ -10,8 +10,6 @@ tags:
 date: 2026-10-29
 status: active
 module: scripts/e2e
-related_issues:
-  - "sjawhar/legion#2498"
 ---
 
 # A docker run line is proven from a pod with no container runtime as a two-container Job whose client ships in the image

@@ -10,8 +10,6 @@ date: 2026-10-29
 status: active
 module: scripts/e2e
 supersedes: docs/solutions/infra/the-postgres-18-image-mounts-its-data-one-level-up-so-move-the-mount-with-the-image-pr2364.md
-related_issues:
-  - "sjawhar/legion#2498"
 ---
 
 # The Postgres 18 entrypoint refuses only a fresh data directory under a mounted data path
