@@ -1,0 +1,35 @@
+{
+  "schemaVersion": 1,
+  "phase": "test",
+  "issue": "INFRA-368",
+  "completed": "2026-10-29T12:15:00Z",
+  "headTested": "c89fcafdcd77648d3a9f2009b0cfc5080f7329de",
+  "codeHead": "21ec46b965d6",
+  "round": "10: the controller's one forward merge of main. b82265fc merges main 88840d35, which brings in #2449 (one live socket per tab in place of the events stream), main's 0137_request_keys and 0138_pending_delivery_indexes, and the #2482/#2484 pmdoc fixes. It renumbers this branch's migrations to 0139-0141. 21ec46b9 changes only how the three block-card browser rows wait, from the GET /api/v1/events response (which #2449 removed) to the /ws/live websocket; every assertion is unchanged, my round-6 red row included. Fingerprint dbc2c851 at 59e5e2b9 → a132daa7 at 21ec46b9, so this was a full round, with the upgrade and rollback check run again. This pod is new: my old scratch scripts were lost and I rewrote seed-old.sh; the image now carries Bun 1.4.4.",
+  "implementerProof": {
+    "verdict": "verified",
+    "how": "On a harness built from 21ec46b9 (fresh dispatch_tester, 127.0.0.1:8877, bun run dispatch:local): `env -u DISPATCH_TOKEN_FILE DISPATCH_URL=http://127.0.0.1:8877 DISPATCH_TOKEN=e2e-token PROJECT=CORE COMPONENT_SOURCE=fixture FAKE_GITHUB_PORT=9122 DEV_SIGNIN_LOGIN=alice bash packages/dispatch/e2e/acceptance/block-graph.sh` exit 0 with 133 PASS. `bunx playwright test --config e2e/playwright.config.ts --project=chromium e2e/block-references.e2e.ts e2e/hover-preview.e2e.ts e2e/references.e2e.ts e2e/conversation.e2e.ts e2e/deep-links.e2e.ts` gave 55 passed and 4 skipped, more than the implementer's 6-row subset. The passes include the three passage rows and the three block-card rows (new text after an edit; a deleted comment block; a deleted spec block), now over the live socket."
+  },
+  "failures": [],
+  "failed": 0,
+  "proof": [
+    {
+      "criterion": "Rollout at 0139-0141: a database main migrated takes this head's migrations; the head indexes what main wrote; main runs on the migrated schema and its writes are left owed; rolling forward again indexes them",
+      "surface": "Two real Go servers on one Postgres 17 database (dispatch_upgrade, port 8977): main 88840d35 (the merge's main parent, from git archive, GOWORK=off) and this head, both through run-server.sh",
+      "command": "1. main on a fresh database (migrations to 0138_pending_delivery_indexes), then /legion/scratch/tmp/infra368/seed-old.sh: a two-paragraph comment C citing UPG-2, a reply, an edited comment, an ask reply, an issue message with a reply, and a direct message. 2. The head on the same database. 3. main again: a new comment N and a PATCH that moves C's paragraphs. 4. The head again. After steps 2 and 4: GET /api/v1/comments/{id}/blocks, ?to=UPG-2, the thread, a new reply_to_block, and psql of the owed state",
+      "observed": "Step 2: schema_migrations 141, 140, 139, 138. The first tick logs item_blocks=7, with 0 left owed. C reads b1 'Old first.' and b2 'Old second cites dispatch://UPG-2 here.'. ?to=UPG-2 lists comment/C#b2. The old reply's reply_block is null, and a new reply naming b2 gets b2 with its text. The direct message's block on ?to= answers 404. Step 3: main lists the mention from the comment node with no block row, and accepts the write and the PATCH, which leave 2 comments owed. Step 4: the first tick logs item_blocks=2, with 0 left owed. C reads revision 2 with b2 kept and b3 'Old first, moved.'. The earlier reply still names b2, and N gets b1 and b2",
+      "headSha": "21ec46b965d6",
+      "negativeControl": "At step 1, main answered GET /api/v1/comments/<C>/blocks with 404 and listed the mention from the comment node"
+    },
+    {
+      "criterion": "A7, A10 comment half, A11, A13, A15 comment half, R14, the round-1 and round-6 fixes, and 2a/2b/2c, at this head, with #2449's live socket in place of the events stream",
+      "surface": "Local Dispatch harness: real Go server built from the head, migrations 0001-0141 on a fresh database, the real dispatch CLI, Chromium",
+      "command": "The driver and the five Playwright files above; go test ./internal/dispatch/api/ -run TestADirectMessagesBlockHasNoAddress; over HTTP, ten concurrent carried PATCHes of one comment with a CR LF body and an emoji",
+      "observed": "Driver: exit 0, 133 PASS, no FAIL or SKIP line. Playwright: 55 passed, 4 skipped. Go: ok. The blocks route gives b1 0-7, b2 11-15 and b3 19-25 in UTF-16 units over the CR LF body. All ten concurrent PATCHes answered 200, leaving revision 11 with b1, b2 and b3 kept",
+      "headSha": "21ec46b965d6",
+      "negativeControl": "A PATCH whose blocks names b9 answers 400 INVALID_COMMENT 'blocks[0].id: \"b9\" is not a block of the item at base_revision' and leaves the body unchanged. Driver lines: a reply_to_block of b9, and a pinned message block on ?to=, are each refused"
+    }
+  ],
+  "ci": "At head c89fcafd GitHub shows success for lint, typecheck, contracts, envoy-client, claude-envoy, pi-envoy (the skills word guard), pi-legion, pi-shared, dispatch-multiprocess, dispatch-browser-multiprocess, envoy-e2e-local, envoy-smoke, envoy-infra-go, envoy-plugin, envoy-session-stall, build and pr-title. dispatch, dispatch-memory, envoy-go, envoy-go-race and test were in progress when I read them; I did not wait. 21ec46b9 has no runs of its own.",
+  "migrations": "The merge parent main 88840d35 ends at 0138_pending_delivery_indexes, and this head adds 0139-0141. main@origin (8a911ecc) also ends at 0138. Per the controller's ruling there is no further merge of main."
+}
