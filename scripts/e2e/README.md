@@ -127,7 +127,7 @@ plugins (`lib/install-plugin-profile.sh`); this one proves the skeleton.
 
 | input | default | meaning |
 | :--- | :--- | :--- |
-| `LEGION_E2E_PG_DSN` | unset | the Postgres to run against. Unset, the script starts its own `postgres:16` container (`legion-e2e-pg-<pid>`) on an ephemeral loopback port and removes it on the way out — the devbox path. Set, it starts no container: that is how CI hands it the job's service. |
+| `LEGION_E2E_PG_DSN` | unset | the Postgres to run against. Unset, the script starts its own PostgreSQL 18 container (`legion-e2e-pg-<pid>`) on an ephemeral loopback port and removes it on the way out — the devbox path. Set, it starts no container: that is how CI hands it the job's service. |
 
 Everything the run takes is its own, so two runs on one box — a CI job and a devbox session, or
 two sessions — neither collide nor report each other as a leftover:
@@ -242,7 +242,7 @@ route, and the Envoy role claim.
 
 What it stands up, all of it the run's own:
 
-- **Postgres**: `LEGION_E2E_PG_DSN` when set; otherwise a `postgres:16` container on tmpfs
+- **Postgres**: `LEGION_E2E_PG_DSN` when set; otherwise a PostgreSQL 18 container on tmpfs
   (`legion-e2e2-pg-<pid>`) on an ephemeral loopback port — tmpfs rather than the image's anonymous
   volume, which a box whose docker volume subsystem stalls would hang on.
 - **NATS and the Envoy listener** on the host: a `nats:2.10 -js` container
