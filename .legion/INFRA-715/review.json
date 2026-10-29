@@ -2,36 +2,32 @@
   "schemaVersion": 1,
   "phase": "review",
   "issue": "INFRA-715",
-  "completed": "2026-10-29T14:05:00Z",
+  "completed": "2026-10-29T14:50:00Z",
+  "round": 2,
   "decision": "changes_requested",
-  "reviewedCodeHead": "125abf850ee5833c25c7220e7c6be8ef154d39e6",
+  "reviewedCodeHead": "44036ea5ca4c4c9b7621cba5892d87a0c2b7edff",
   "critical": 0,
   "important": 1,
-  "minor": 3,
+  "minor": 2,
   "keyFindings": [
     {
       "severity": "important",
       "file": "packages/envoy/internal/dispatch/docs/mutation.go",
-      "description": "An upload whose open ask's quote now lands in a code block is refused by the scratch document's MarkWriter.Mark (pmdoc/find.go:1065), wrapped as documentSchemaError (mutation.go:474), turned into a plain ErrDocSchema by joinedSchemaError/producedSchemaError (mutation.go:300-310, tree.go:69) since the start tree was readable, and answered by writeHandlerError as 500 DOC_SCHEMA with slog.Error (api/server.go:624-632): the server's fault for the caller's markdown. The scratch is private, so the old justification (a peer can have left the room outside the schema) no longer holds. Fix: a caller-input refusal (4xx) naming the open ask's quote and the code block; the test (upload_anchors_test.go:207-221) must assert that class and that it is not ErrDocSchema/OutsideSchemaError, at the route if practical."
+      "description": "mutation.go:484-485 answers every re-anchor error but ErrTargetNotFound as refusedReanchor (400 INVALID_MARKDOWN, cause kept only as text). Only pmdoc/find.go:1066 (mark not allowed in this block) is the caller's markdown; the other MarkWriter.Mark guards (find.go:1042-1049: empty range, unknown mark type, attrNestingError over the stored mark's attrs), yTextRanges/yFragmentLocations errors over the scratch, and any non-NotFound finder error are server faults that would be told to the uploader as its markdown, with no ERROR log. Fix: a pmdoc sentinel (e.g. ErrMarkNotAllowed) wrapped with ErrSchema at find.go:1066; refusedReanchor only for it; every other error through documentSchemaError as before (500); a test that the sentinel marks the not-allowed refusal and no other guard (pmdoc level); narrow mutation.go:468-472 and AGENTS.md:71-73. The tree's architect asked for this mapping."
     },
     {
       "severity": "minor",
-      "file": "packages/envoy/.changes/unreleased/INFRA-715-upload-keeps-block-ids.yaml",
-      "description": "Changelog, AGENTS.md, carryBlockIDs' doc and the PR body promised a reference survives any upload that leaves its block alone; a move re-mints the ids of the moved block and every block it passes (probe: moving the first of four paragraphs to the end kept none of the four ids). Fixed by the reviewer in aa2ab4e4 (prose only)."
+      "file": "packages/envoy/internal/dispatch/docs/mutation.go",
+      "description": "A quote moved into YAML front matter is refused for every anchor kind (yFragmentLocations sets no textblock for front matter, find.go:1206-1209; markAllowedInTextblock(_, \"\") is false), and the 400 reads 'not allowed in )' with an empty block name (deep review reproduced it with a comment). Name front matter in the refusal, cover front matter and every anchor kind in the changelog fragment, AGENTS.md and the INVALID_MARKDOWN row of cmd/dispatch/README.md, and add a test. The PR body's claim that comments are unaffected holds only for code blocks."
     },
     {
       "severity": "minor",
-      "file": "packages/envoy/internal/dispatch/docs/docstest/spec.go",
-      "description": "LoadSpec cited loadtest/seed.go:270 by line; now names specMarkdown (not table heavy). Fixed by the reviewer in aa2ab4e4."
-    },
-    {
-      "severity": "minor",
-      "file": "packages/envoy/internal/dispatch/pmdoc/carry_block_ids.go",
-      "description": "carryChildren copies updateChildren's alignment (code-quality pass, rated important there). Declined as a change request: an id is carried only onto content equal to its live holder (carryUnchanged after unchangedNode, equalNode checks child counts), so a drift costs tombstones, never identity, and the room memory-bound tests catch a drift on the load harness's shapes. Recorded under Not proven / risk."
+      "file": "packages/envoy/internal/dispatch/docs/mutation.go",
+      "description": "refusedReanchor's `if kind == \"\" { kind = mark.markType }` fallback (mutation.go:526-528) is dead: openAnchoredMarks yields only the three mapped types (marks.go:494-498)."
     }
   ],
-  "ci": "Required set lint, typecheck, test, pr-title (rulesets; no branch protection). CI head 125abf85: lint success, typecheck skipped, test in_progress, envoy-go in_progress, dispatch-memory in_progress, dispatch/dispatch-multiprocess/envoy-go-race queued at review time; compare 125abf85...a460ace3 handoffsOnly true. No red read; a change request does not wait on CI.",
-  "coordination": "Trial merges (git merge-tree): 125abf85 with #2444 head 9502de11 clean; with #2496 head 1febe317 conflicts only in applyLive, livewrite.go, service.go, tree.go, websocket.go, the same set #2496 conflicts on with main bb9fe49c alone; #2496's edit of ReplaceText's start and this PR's scratch section merge without conflict.",
-  "threads": "0 review threads on the pull request.",
-  "thermonuclear": "Run once at 125abf85: deep review no critical/important (4,000-seed property test of the carry clean); code quality 1 important (declined, above), 4 minor (2 fixed by reviewer, error label folded into the change request, uploadOver size unasserted judged not a defect)."
+  "threads": "PRRT_kwDORFy7ds6xk5xU (mutation.go 500 finding): the caller case is fixed in 44036ea5, accepted; the over-broad classification is this round's new inline finding. PRRT_kwDORFy7ds6xk5xa (test class): fixed in 44036ea5, accepted. Both already resolved by the implementer.",
+  "ci": "Required set lint, typecheck, test, pr-title. CI head 44036ea5 (compare to 6082a10f handoffsOnly true): run created 14:10Z, every lane but changes still queued at 14:24Z. The runs at 125abf85 and 0164ae30 were cancelled by later pushes before the document suites finished, so no code head of this PR has a finished envoy-go, envoy-go-race, dispatch, dispatch-memory or dispatch-multiprocess yet. A change request does not wait on CI.",
+  "notProvenAdded": "The 200-upload room test's noise (tester risk 2) is on the PR body's Not proven line.",
+  "thermonuclear": "Run once at 44036ea5: deep review (approve, rated the classification Minor as unreachable today, found the front-matter case, reproduced it via go test -overlay); code quality (classification High/blocking, dead fallback Low). Reviewer rates the classification important per the No-deferrals rule: it hides a server error."
 }
