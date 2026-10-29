@@ -2,14 +2,14 @@
   "schemaVersion": 1,
   "phase": "test",
   "issue": "INFRA-520",
-  "completed": "2026-10-29T09:20:00Z",
-  "round": 15,
-  "headTested": "9863a5a3d346fb2685120f00ab817e47ae43f031 (code head 5e6cac9ba234, merge of main 88840d35)",
-  "previousRound": "Review round 6 (review.json at 4fcff042) found #2316 CONFLICTING with main 88840d35 (#2449). 5e6cac9b merges main through 88840d35. The only main change to a deleted workflow is #2449's envoy-go unit-test step: `-timeout 20m` on both go commands. ci.yaml:2127-2131 carries it word for word, and ci_job_reads.py:315-317 pins the new script exactly. #2487's change is to .github/scripts/changelog-fold.test.sh, a kept file, and equals main. packages/envoy/cmd/dispatch/AGENTS.md differs from main only in naming ci.yaml where main names envoy-and-contracts.yaml (4 lines). Neither main nor ci.yaml sets a job timeout on envoy-go. Main has no commit after 88840d35.",
-  "ci": "CI run 40845855821 at 5e6cac9b (created 08:57:07Z) was queued at 09:15Z. Read as queued; I did not wait for it. The previous head's run 40805326445 (f78f383e): 23 success, 3 failure, 1 skipped. ci-ok's annotations name envoy-go and dispatch, which the reviewer recorded as not this pull request's (review.json ci).",
+  "completed": "2026-10-29T09:55:00Z",
+  "round": 16,
+  "headTested": "625fe2b80de1064c446867d61c60833b4cb88bab (code head 0dc57a01ebfa, merge of main 5443d99b)",
+  "previousRound": "Review round 7 (review.json at 029b5024) found #2316 CONFLICTING with main a7c762f6 (#2186). 0dc57a01 merges main through 5443d99b (#2186, #2362). Against main, worker-image.yaml differs only by this pull request's design: no pull_request trigger (ci.yaml calls it), concurrency on the build job, the gha cache with mode=min and ignore-error. release.yaml differs only in this pull request's Go cache restore, so #2186's release.yaml lines are present. packages/daemon/internal/claudebridge/bridge_test.go equals main.",
+  "ci": "No CI run at 0dc57a01 was read: the worker-image re-pin drain suspends this claim at 10:08Z.",
   "implementerProof": {
     "verdict": "verified",
-    "how": "At 9863a5a3: GitHub reports #2316 MERGEABLE (BLOCKED on checks and review). check-ci-filters.test.sh 127 passed, 0 failed. ci-ok.test.sh 40 passed. check-ci-filters.sh on the tree exits 0: 23 gates (envoy-go 2055 files, 0 uncovered), and docs-pages' paths equal the docs filter."
+    "how": "At 625fe2b8. ci.yaml's worker_image filter matches packages/claude-envoy/** and .bun-version, the two inputs #2186 added. I ran workflow_paths over every file at 0dc57a01: main's worker-image.yaml pull_request paths match 3813 files, and the worker_image filter misses 772. Every miss is a file the .dockerignore drops (**/dist, packages/envoy/**/*_test.go \u2026), which the filter's `!` patterns leave out by design (round 1). check-image-trigger-paths.sh passes ('every image trigger covers every input its build reads (5 image build(s))'). check-ci-filters.sh passes 23 gates, docs-pages' paths included (they gain daemon/internal/claudelaunch). GitHub reports #2316 MERGEABLE."
   },
   "failures": [],
   "failed": 0,
@@ -88,7 +88,7 @@
     }
   ],
   "notProven": [
-    "No CI run of 5e6cac9b has completed: run 40845855821 is queued. ci-ok has not yet been green at a #2316 head: main's reds (close-withdraws-asks.e2e.ts:126 in dispatch, and the envoy-go listener test the reviewer recorded) failed it at f78f383e.",
+    "No CI run of 0dc57a01 has been read, and ci-ok has not yet been green at a #2316 head (main's reds at earlier heads).",
     "docs-pages.yaml runs only on a push to main. Its first run, queue order and deploy are the production check's.",
     "By the architect's decision (comment bafbc258), the check does not read environment writes made inside local actions or repository scripts (check-ci-filters.sh:84-88)."
   ]
