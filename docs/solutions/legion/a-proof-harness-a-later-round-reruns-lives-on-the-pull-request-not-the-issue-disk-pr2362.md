@@ -10,7 +10,6 @@ date: 2026-10-29
 status: active
 module: packages/daemon/internal/runtime/sandbox
 related_issues:
-  - "INFRA-546"
   - "sjawhar/legion#2362"
 ---
 
@@ -38,7 +37,7 @@ keeps the container's root filesystem small; it does not keep anything past the 
 
 ## Evidence
 
-INFRA-546's implementer kept `proof.sh` (real listener and Dispatch binaries against a
+This pull request's implementer kept `proof.sh` (real listener and Dispatch binaries against a
 three-server nats-server v2.15.1 cluster, a standalone server and Postgres 17) under
 `/legion/scratch/tmp/p546b`, and posted only its output on sjawhar/legion#2362. The pod was
 replaced between retro and the next forward merge. The workspace came back from the pushed branch,
