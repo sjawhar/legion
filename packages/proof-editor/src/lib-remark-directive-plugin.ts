@@ -5,7 +5,6 @@ import type { Root } from '@milkdown/kit/transformer';
 import type { Extension } from 'micromark-util-types';
 import type { Processor, Transformer } from 'unified';
 
-import { remarkTypedBlocks, type BlockSchema } from './block-schema.js';
 import { directiveContainerSyntax } from './directive-container.js';
 import { htmlFlowStrict } from './html-flow.js';
 import type { MdastNode } from './typed-block-drawing.js';
@@ -123,7 +122,3 @@ export const libraryRemarkHtmlBlockPlugin = $remark(
   'remarkHtmlBlockParagraphs',
   () => () => remarkHtmlBlockParagraphs() as unknown as Transformer<Root, Root>
 );
-
-export function typedBlockRemarkPlugin(schema: BlockSchema) {
-  return $remark('remarkTypedBlocks', () => () => remarkTypedBlocks(schema) as unknown as Transformer<Root, Root>);
-}

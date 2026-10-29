@@ -9,9 +9,11 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"slices"
 	"strconv"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -452,7 +454,8 @@ func (l smallSendBuffers) Accept() (net.Conn, error) {
 }
 
 // smallReadDialer dials with a small receive buffer, so a page that stops reading holds back the
-// socket's writer after kilobytes; beside smallSendBuffers it is how a test stalls the writer.
+// socket's writer after kilobytes; beside smallSendBuffers it is how a test plays a slow page. A
+// test that must know the writer stays held holds it with heldWrites instead.
 func smallReadDialer() *gws.Dialer {
 	return &gws.Dialer{HandshakeTimeout: 5 * time.Second, NetDial: func(network, address string) (net.Conn, error) {
 		conn, err := net.Dial(network, address)
@@ -461,6 +464,124 @@ func smallReadDialer() *gws.Dialer {
 		}
 		return conn, err
 	}}
+}
+
+// heldWrites wraps the server's listener so a test can hold a socket's writer inside a write, as a
+// page that reads nothing holds it, and know that it stays held until the test lets it go. Holding
+// it with TCP backpressure instead (smallSendBuffers, smallReadDialer) leaves the transport to
+// decide when the write resumes, and a frame the page sends can resume it: under gVisor a write
+// blocked for a third of a second completed the moment the page sent its next subscribe, in 8 of
+// 300 runs of TestARepeatedSubReplacesAnotherKind.
+type heldWrites struct {
+	mu sync.Mutex
+	// gate is open (nil) or, while the test holds writes, the channel release closes.
+	gate chan struct{}
+	// waiting counts the writes waiting at the gate.
+	waiting atomic.Int32
+}
+
+// listen is newLiveSocketRig's listen: every connection the server accepts writes through the gate.
+func (held *heldWrites) listen(listener net.Listener) net.Listener {
+	return heldListener{Listener: listener, held: held}
+}
+
+// hold makes every write the server starts from now on wait at the gate until release, or until
+// its connection's write deadline passes, as a write a page holds back would. The test's cleanup
+// releases it, ahead of the rig's, so no socket's handler is left waiting on its writer.
+func (held *heldWrites) hold(t *testing.T) {
+	t.Helper()
+	held.mu.Lock()
+	defer held.mu.Unlock()
+	if held.gate == nil {
+		held.gate = make(chan struct{})
+	}
+	t.Cleanup(held.release)
+}
+
+// release lets every waiting write through and opens the gate.
+func (held *heldWrites) release() {
+	held.mu.Lock()
+	defer held.mu.Unlock()
+	if held.gate != nil {
+		close(held.gate)
+		held.gate = nil
+	}
+}
+
+// waitHeld waits until socket's writer waits at the gate with its stream queue full: from then on
+// the writer writes nothing and takes nothing from either queue until release.
+func (held *heldWrites) waitHeld(t *testing.T, socket *liveSocket) {
+	t.Helper()
+	pollUntil(t, 10*time.Second, "the writer held with the stream queue full", func() bool {
+		return held.waiting.Load() > 0 && streamFull(socket)
+	})
+}
+
+func (held *heldWrites) current() chan struct{} {
+	held.mu.Lock()
+	defer held.mu.Unlock()
+	return held.gate
+}
+
+type heldListener struct {
+	net.Listener
+	held *heldWrites
+}
+
+func (l heldListener) Accept() (net.Conn, error) {
+	conn, err := l.Listener.Accept()
+	if err != nil {
+		return conn, err
+	}
+	return &heldConn{Conn: conn, held: l.held}, nil
+}
+
+// heldConn is one accepted connection whose writes wait at the gate. It keeps the write deadline
+// the writer sets, so a write the test never releases fails as a stalled one would.
+type heldConn struct {
+	net.Conn
+	held     *heldWrites
+	mu       sync.Mutex
+	deadline time.Time
+}
+
+func (c *heldConn) SetDeadline(at time.Time) error {
+	c.setWriteDeadline(at)
+	return c.Conn.SetDeadline(at)
+}
+
+func (c *heldConn) SetWriteDeadline(at time.Time) error {
+	c.setWriteDeadline(at)
+	return c.Conn.SetWriteDeadline(at)
+}
+
+func (c *heldConn) setWriteDeadline(at time.Time) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.deadline = at
+}
+
+func (c *heldConn) Write(p []byte) (int, error) {
+	if gate := c.held.current(); gate != nil {
+		c.mu.Lock()
+		deadline := c.deadline
+		c.mu.Unlock()
+		var expired <-chan time.Time
+		if !deadline.IsZero() {
+			timer := time.NewTimer(time.Until(deadline))
+			defer timer.Stop()
+			expired = timer.C
+		}
+		c.held.waiting.Add(1)
+		select {
+		case <-gate:
+			c.held.waiting.Add(-1)
+		case <-expired:
+			c.held.waiting.Add(-1)
+			return 0, os.ErrDeadlineExceeded
+		}
+	}
+	return c.Conn.Write(p)
 }
 
 // pollUntil polls condition every 10 ms for up to within, failing the test with what when it
@@ -837,18 +958,19 @@ func TestTheLiveTestHooksAreMountedOnlyUnderTestHooks(t *testing.T) {
 	})
 }
 
-// An events subscription that keeps the stream queue full while the page reads nothing neither
-// holds back the hub's frames nor overflows the hub's queue: the hub's queue fills beside it, and
-// once the page reads again every hub frame is written ahead of the stream frames still queued.
+// An events subscription that keeps the stream queue full while its writer is held neither holds
+// back the hub's frames nor overflows the hub's queue: the hub's queue fills beside it, and once
+// the writer writes again every hub frame is written ahead of the stream frames still queued.
 func TestHubFramesAreWrittenAheadOfAFullStreamQueue(t *testing.T) {
 	busy := newFakeLiveKind(-1, 512)
-	rig := newLiveSocketRig(t, testServerOptions{liveKinds: map[string]liveKind{liveEventsView: busy.kind(true)}},
-		func(listener net.Listener) net.Listener { return smallSendBuffers{listener} })
-	client := rig.open(t, smallReadDialer(), asUser("alice"))
+	held := &heldWrites{}
+	rig := newLiveSocketRig(t, testServerOptions{liveKinds: map[string]liveKind{liveEventsView: busy.kind(true)}}, held.listen)
+	client := rig.open(t, gws.DefaultDialer, asUser("alice"))
+	held.hold(t)
 	client.send(t, liveSubscribe("busy", eventsView(), ""))
-	running := busy.next(t, 5*time.Second, "the busy events subscription")
+	busy.next(t, 5*time.Second, "the busy events subscription")
 	socket := rig.sockets(t, 1)[0]
-	waitStalled(t, socket, running)
+	held.waitHeld(t, socket)
 
 	// Eight delivery views, each told delivery is not configured: the hub's answers queue beside
 	// the full stream queue, and the socket stays open.
@@ -863,8 +985,9 @@ func TestHubFramesAreWrittenAheadOfAFullStreamQueue(t *testing.T) {
 		t.Fatal("the hub's queue overflowed beside a full stream queue")
 	}
 
-	// The page reads again: the stream frames the connection already carried come first, then all
-	// eight hub frames together, then the stream again.
+	// The writer writes again: the frame it held comes first, then all eight hub frames together,
+	// then the stream again.
+	held.release()
 	client.read()
 	deadline := time.Now().Add(10 * time.Second)
 	var first LiveError
