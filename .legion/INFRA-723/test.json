@@ -1,0 +1,60 @@
+{
+  "schemaVersion": 1,
+  "phase": "test",
+  "issue": "INFRA-723",
+  "completed": "2026-10-29T09:02:00Z",
+  "codeHead": "d7b3cc91756db18b0ec722e4f69ffa9f71c6c35b",
+  "implementerProof": {
+    "verdict": "verified",
+    "how": "Re-ran the implementer's own commands at the code head d7b3cc91 and drove the same surface independently. (1) `bash .github/scripts/release-push.test.sh` in $LEGION_WORKSPACE: 'Results: 615 passed, 0 failed', the number its proof 1 claims. (2) `cd packages/claude-envoy && bun test tests/build-inputs.test.ts` (Bun 1.4.4): '1 pass, 0 fail, 4 expect() calls', as its proof 3 claims; my own negative control (dropping `packages/pi-legion/agents` rather than its `packages/pi-shared`) failed the test naming the six agent files, and the list was restored (cmp clean, `jj status` clean). (3) `cd packages/claude-envoy && bun run verify-build $TMPDIR/t723/built.tar` produced a tar 'main's rebuild accepts' with the private-name check over 60 files, and left the workspace clean. (4) Its proof 2's real-history claim I did not re-run as written ($TMPDIR/infra723/proof.sh is gone with the pod's scratch); instead I built my own real-history drive over different commit windows, below, which reaches the same verdict. (5) Its proof 4's static commands (check-release-credentials and its test, biome, tsc, private-names) are CI's lanes: read green on GitHub at d7b3cc91, not re-run."
+  },
+  "failures": [],
+  "failed": 0,
+  "proof": [
+    {
+      "criterion": "Acceptance 1: `.github/scripts/release-push.test.sh` proves push-built against a local bare origin — main moved by a commit touching no build input lands the build on the new tip changing only dist/ and legion/; main moved by a commit touching a build input lands the build when it is newer and starts a fresh run; main already holding a newer build lands nothing; a tar that fails a check is refused in both cases",
+      "surface": "the shell test the spec names, run from the issue workspace against a local bare origin through the deploy-key path, the insteadOf rewrite and a stub gh, as the push job reaches GitHub",
+      "command": "cd -- \"$LEGION_WORKSPACE\" && bash .github/scripts/release-push.test.sh",
+      "observed": "exit 0, 'Results: 615 passed, 0 failed', final line 'PASS: release-push.sh version, push-main, tagged, tag, release, push-tag, check-built, extract-built, push-built, handed, no-credential, fold-plan and push-fold'. Wall time 106 s.",
+      "headSha": "d7b3cc91756db18b0ec722e4f69ffa9f71c6c35b",
+      "negativeControl": "Case C of my own drive (below) is the refusal control for this criterion on the real surface: a tar carrying the symlink member dist/leak.js -> /etc/passwd, with main moved by four real commits, exits 1 with an ::error:: naming dist/leak.js, origin main untouched and no gh call."
+    },
+    {
+      "criterion": "Acceptance 1 on real sjawhar/legion history: push-built lands on a moved main and never moves main's build backward (plan row 1'), and main's own script does not",
+      "surface": "the checkout's own `.github/scripts/release-push.sh push-built <base> <tar>` — the exact command claude-envoy-rebuild.yaml's push job runs — in a push-job checkout standing at a base built from real main commits, against a scratch bare origin, the deploy-key path with GIT_CONFIG insteadOf, a stub gh on PATH, and a real `bun run verify-build` tar. Each case's base is a real main commit plus this branch's four changed build files; its tip is the real tree of a later real main commit, so the window's diff is main's own. The base's release-push.sh is byte-identical to the branch's committed one (cmp, asserted at the start of every run).",
+      "command": "bash /legion/scratch/tmp/t723/drive.sh  (script written for this phase; windows 6d60a27fcc5b..4e91eaa85984 and 12c9baf52c6c..d317f2181ba7)",
+      "observed": "'Results: 41 passed, 0 failed'. A (main moved by four real commits touching no build input): exit 0, '::notice title=Landing on main's tip', one github-actions[bot] commit on main whose parent is the tip it checked, subject 'chore(claude-envoy): rebuild dist/ and legion/ from <base12> [skip ci]', 0 paths changed outside the two directories, those two changed, 0 gh calls, no missing-list warning, and the landed dist/ and legion/ equal the checked tar's bytes file for file (sha256 of all 60 files) — what landed is the checked build, not the tip's files. B (main moved by one real commit touching 26 build inputs): lands the same way and exactly one `gh workflow run claude-envoy-rebuild.yaml --repo example/repo --ref main`, its notice naming the first three really changed inputs 'and 23 more'. D (a racer pushes another commit to origin main between push-built's fetch and the push, through a git wrapper): nothing landed, main's tip is the racer's commit over the tip push-built checked, exactly one fresh run, '::notice title=Nothing pushed; a fresh run started'. E (a newer github-actions[bot] rebuild of the tip lands first): nothing pushed, no run, '::notice title=Nothing pushed; main holds a newer build'. F (a bot rebuild subject naming a commit that is not its ancestor): read as a build of its own commit, so nothing pushed and no run — main never moves backward on a forged subject. H (the base's build-inputs.txt holds ':(bogusmagic)packages/claude-envoy'): exit 1, '::error::' naming the failed comparison, origin untouched, no run — it fails closed rather than calling the inputs unchanged. G (the same window A with main's own release-push.sh at the merge base 1767c9af): lands nothing and starts one fresh run — the before state the issue reports.",
+      "headSha": "d7b3cc91756db18b0ec722e4f69ffa9f71c6c35b",
+      "negativeControl": "Case C: the same window A with a doctored tar — the real verify-build tar re-packed with an added symlink member dist/leak.js -> /etc/passwd. push-built exits 1 with an ::error:: naming dist/leak.js, origin main is untouched at the tip, and gh was never called, so a tar that fails a check is refused however main stands."
+    },
+    {
+      "criterion": "The build-input list is held to what the build reads, in a job every pull request runs (plan acceptance 2', the gate behind Acceptance 1's 'no build input changed' decision)",
+      "surface": "packages/claude-envoy/tests/build-inputs.test.ts, run as pr-and-main.yaml's `test` job runs it ('Check the Claude Code plugin's build input list covers what the build reads', working-directory packages/claude-envoy). That job carries no path filter — its only condition is `if: ${{ !github.event.pull_request.draft }}` — so every non-draft pull request runs it.",
+      "command": "cd -- \"$LEGION_WORKSPACE/packages/claude-envoy\" && bun test tests/build-inputs.test.ts",
+      "observed": "bun test v1.4.4: '1 pass, 0 fail, 4 expect() calls', 1025 ms. The same step is green inside the required `test` check at this head (read on GitHub).",
+      "headSha": "d7b3cc91756db18b0ec722e4f69ffa9f71c6c35b",
+      "negativeControl": "Removed the line `packages/pi-legion/agents` from packages/claude-envoy/scripts/build-inputs.txt: the test failed, the diff listing packages/pi-legion/agents/deep-worker.md, oracle.md, plan-gap-analyst.md, plan-reviewer.md, thermonuclear-code-quality.md and thermonuclear-deep-review.md ('0 pass, 1 fail'). File restored from a copy and `cmp` clean; `jj status` reports no change."
+    },
+    {
+      "criterion": "Acceptance 2: check-release-credentials.sh and its test pass, and so do the lint, typecheck and test jobs",
+      "surface": "GitHub's checks on sjawhar/legion#2493 at the code head, read and not re-run; plus the rebuild workflow's own build job on the pull request, which is the real workflow surface for verify-build, extract-built and the no-credential tripwire",
+      "command": "gh api repos/sjawhar/legion/commits/d7b3cc91756db18b0ec722e4f69ffa9f71c6c35b/check-runs --paginate --jq '.check_runs[] | \"\\(.name)\\t\\(.status)\\t\\(.conclusion)\"' ; gh run list -R sjawhar/legion --workflow claude-envoy-rebuild.yaml --branch legion/INFRA-723",
+      "observed": "Every lane completed, none failed: lint success, typecheck success, test success (it runs check-release-credentials.test.sh, check-release-credentials.sh, release-push.test.sh and the new build-inputs step), build success, changes success, claude-envoy success, envoy-session-stall success, fold_build success, pr-title success; the rest skipped by their path filters, and `push` skipped because a pull_request run's github.ref is never refs/heads/main. Rebuild workflow run 40840840023 (pull_request, d7b3cc91) completed success. The branch head above the code head, 2115372857, carries only .legion/ handoffs and the `skip-checks: true` trailer, so GitHub reports no check on it.",
+      "headSha": "d7b3cc91756db18b0ec722e4f69ffa9f71c6c35b",
+      "negativeControl": "None run against CI: re-running a CI lane is not this phase's evidence. The refusal controls for the behaviour those lanes gate are cases C and H of the drive and the list control above."
+    }
+  ],
+  "notTested": [
+    {
+      "criterion": "Acceptance 3: the next run on main lands a rebuild commit even though main moved; that commit's built files equal a build of the base its subject names; a later run lands a newer build when inputs changed",
+      "why": "The spec assigns it to the production check after the merge ('Production check after the merge: ... The implementer names the runs and the commits'). No pre-merge surface reaches it: the push job runs only on refs/heads/main, and driving it would push to main. The nearest reachable surface is proof 2's drive, which runs the same command on real history against a scratch origin.",
+      "stateOfMainNow": "main currently carries 6d60a27fcc5b 'chore(claude-envoy): rebuild dist/ and legion/ from d317f2181ba7 [skip ci]' by github-actions[bot], and the last three runs (40844033559, 40842684567, 40841941064) each skipped `push` with changed=false, so main's build is current and the implementer's first look must wait for a run whose build differs."
+    }
+  ],
+  "reviewerNotes": [
+    "Prose only, for the reviewer to fix in its own commit: the reflow in packages/claude-envoy/AGENTS.md leaves 'once the rebuild commit is on' and 'main.' on separate short lines (around line 176), and packages/claude-envoy/README.md leaves '`scripts/build.ts` takes exactly one mode' on a short line of its own. Both render identically; neither is a behaviour finding.",
+    "Spec drift is closed, not open: the plan and the implement handoff both record a departure from Acceptance 1's second sentence, but spec.md v4 (2026-10-29T02:23Z) now reads 'When main moved by a commit that touches a build input, it lands the build if it is newer than the one main holds, and it starts a fresh run.' The implementation matches the spec as it stands.",
+    "Why I judged the list safe beyond the test: every file build.ts reaches is under a listed path (.bun-version, scripts/pi-plugin-prepack.sh and its whole skills/ tree, packages/pi-legion/agents, scripts/third-party-notices.ts, and the four whole package directories), and a build that reached a new package would need a change inside a listed one to import it, so a chain to a new input cannot start outside the list."
+  ],
+  "environmentEvidence": "Not called for by this issue's acceptance criteria; no secret-scrub check run. The drive's DEPLOY_KEY is the literal string 'local-origin-no-ssh' against a local bare origin reached through a GIT_CONFIG insteadOf rewrite, so no credential was read, printed or needed."
+}
