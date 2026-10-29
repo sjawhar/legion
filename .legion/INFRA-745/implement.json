@@ -2,7 +2,7 @@
   "schemaVersion": 1,
   "phase": "implement",
   "issue": "INFRA-745",
-  "completed": "2026-10-29T14:55:00Z",
+  "completed": "2026-10-29T15:15:00Z",
   "proof": [
     {
       "criterion": "2 - a session following an issue's topic is shown an agent's comment on it, with the fix's two halves joined on one real wire frame",
@@ -27,11 +27,21 @@
       "observed": "HTTP/1.1 200 with Content-Type: text/plain; version=0.0.4; charset=utf-8, and the counter's HELP and TYPE lines, where before this change that path fell through to the router and answered the dashboard's HTML shell.",
       "headSha": "59c038efe73e0956113b77f99a2c8c085f9a1c87",
       "negativeControl": "on the granted stack no series is printed under that name (nothing failed), while the denied stack prints reason=\"denied\" 1: the endpoint reports the process it is served by rather than a constant."
+    },
+    {
+      "criterion": "D5, the architect's decision on 2026-10-29: the synchronous publish path names a denial too, not an outage",
+      "surface": "a real nats-server, started in process by internal/testnats with a real per-client nkey grant, and the real bus client (bus.ConnectOwningStream) publishing a real envelope on a stream subject through Client.Publish - the entry every caller outside the outbox takes, the Envoy listener's HTTP publishes among them",
+      "command": "cd packages/envoy && go test ./internal/bus/ -run TestPublishReportsAJetStreamPublishNATSDenies -count=1 -v",
+      "observed": "PASS in 5.1 s: the publish under a grant that withholds notifications.dispatch.> answers an error that is bus.ErrPublishDenied, wraps nats.ErrPermissionViolation, carries the server's 'Permissions Violation for Publish to \"notifications.dispatch.issue.ACME-1.message.created\"' and is not bus.ErrUnavailable; the same publish under a grant that allows the subject is accepted and the stream retains it (JS().GetLastMsg).",
+      "headSha": "71128319b1d2ab2b31f4c7127f271a42f8164e41",
+      "negativeControl": "internal/bus/nats.go restored to its content before this commit, everything else at this head: the same test fails in 5.05 s with 'denied JetStream publish returned context deadline exceeded, want ErrPublishDenied wrapping the permissions violation' - the publish window running out, which is what a caller met before. The granted leg in the same test is the other control: it must still publish and be retained."
     }
   ],
   "filesChanged": [
     "packages/envoy/internal/bus/confirm.go - publishDenial, the violation predicate extracted from confirmPublished",
-    "packages/envoy/internal/bus/async.go - window.acknowledged takes the publish's topic and names a denial on the JetStream path",
+    "packages/envoy/internal/bus/async.go - window.acknowledged takes the publish's topic and names a denial on the windowed JetStream path",
+    "packages/envoy/internal/bus/nats.go - Client.lastError, and publishJetStream names a denial on the synchronous path every other caller takes (the architect's D5 decision)",
+    "packages/envoy/internal/bus/core_permission_test.go - TestPublishReportsAJetStreamPublishNATSDenies on a real nats-server with a real per-client grant",
     "packages/envoy/internal/dispatch/outbox/publisher.go - Deps.PublishFailures and countPublishFailure, counted in attempt.answer and in publishDestination's fast-fail path; the adopted envelope's quiet field",
     "packages/envoy/internal/dispatch/events/broker.go - events.Quiet (adopted), reading a targeted message and a quiet ask edit from either payload shape",
     "packages/envoy/cmd/dispatch/main.go - the metrics registry, the counter, and GET /metrics on the probe mux",
@@ -64,8 +74,8 @@
     "packages/envoy/internal/dispatch/api cannot run in this pod at all (it refuses a Postgres whose only collation is byte order, which is what an issue pod's initdb --locale=C gives); the suites this change needs - events, outbox, cmd/dispatch, bus - all run here."
   ],
   "openQuestions": [
-    "D2 (the plan's): nothing scrapes Dispatch, so the counter answers the criterion but pages nobody. A scrape or alert policy belongs in the deployment repository, which this tree's gh and git cannot write. The architect owns placing it; the PR body says so plainly.",
+    "D2 is decided, not open: the architect placed the alert in dispatch://INFRA-749 (theorem-labs/agent-infra, blocked by this issue), on the ERROR line rather than on a scrape, since nothing scrapes Dispatch. The line that issue builds on is `dispatch outbox: publish event` at ERROR, whose error names the route, the subject and the server's violation; the pull request body states it as the contract.",
     "D3 (the plan's): criterion 4 cannot pass on a server deploy alone. The client half ships in @sjawhar/pi-envoy and @sjawhar/claude-envoy through the worker image, whose pin lives in the deployment repository, and Legion's production wake never fires on a worker-image pin. The production check reports pending until both halves are live, naming the plugin version it read.",
-    "D5 (the plan's, adjacent): the synchronous publishJetStream path (internal/bus/nats.go:1276), which the listener's HTTP publishes take, is blind to a permissions violation in exactly the way this change fixes for the asynchronous path. No evidence of this issue touches it and it is the listener's path, not Dispatch's."
+    "D5 is decided and done, not open: the architect ruled on 2026-10-29 that the synchronous publishJetStream path is fixed in this pull request. It is, in 7112831, with the real-server test above."
   ]
 }
