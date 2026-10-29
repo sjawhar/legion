@@ -213,7 +213,7 @@ func renderTables(steps []stepData) string {
 	kindsTable(&md, steps)
 	resourcesTable(&md, steps)
 	commitOrderLockTable(&md, steps)
-	sseTable(&md, steps)
+	liveTable(&md, steps)
 	ungrantedTable(&md, steps)
 	xidTable(&md, steps)
 	reconnectsTable(&md, steps)
@@ -397,19 +397,19 @@ func commitOrderLockTable(md *markdown, steps []stepData) {
 	failedReadsNote(md, marked, "the probe's connect or read of pg_locks", "`commit_order_lock.errors`")
 }
 
-func sseTable(md *markdown, steps []stepData) {
-	md.line("\n## Delivery from sending, and SSE frames\n")
-	md.line("NATS: every issue-topic receipt of a primary event. SSE: the dashboard stream frames that arrived in the window; from write response counts only the frames that carry the primary event of a committed in-window write with a 2xx status.\n")
-	md.header("step", "NATS delivery ms from sent p50 / p99", "SSE frame ms from created_at p50 / p99",
-		"SSE frame ms from write response p50 / p99", "SSE frames", "SSE order violations")
+func liveTable(md *markdown, steps []stepData) {
+	md.line("\n## Delivery from sending, and live socket frames\n")
+	md.line("NATS: every issue-topic receipt of a primary event. Live: the event frames of the dashboard live sockets that arrived in the window; from write response counts only the frames that carry the primary event of a committed in-window write with a 2xx status.\n")
+	md.header("step", "NATS delivery ms from sent p50 / p99", "live frame ms from created_at p50 / p99",
+		"live frame ms from write response p50 / p99", "live frames", "live order violations")
 	unread := false
 	for _, s := range steps {
-		sse, e := s.sum.SSE, s.sum.Events
+		live, e := s.sum.Live, s.sum.Events
 		unread = unread || e.commitsUnread()
-		md.row(s.commitsLabel(), pair(e.DeliveryMsFromSent, p50, p99, 0), pair(sse.FrameMsFromCreatedAt, p50, p99, 0),
-			pair(sse.FrameMsFromWriteResponse, p50, p99, 0), num(float64(sse.Frames), 0), num(float64(sse.OrderViolations), 0))
+		md.row(s.commitsLabel(), pair(e.DeliveryMsFromSent, p50, p99, 0), pair(live.FrameMsFromCreatedAt, p50, p99, 0),
+			pair(live.FrameMsFromWriteResponse, p50, p99, 0), num(float64(live.Frames), 0), num(float64(live.OrderViolations), 0))
 	}
-	commitsUnreadNote(md, unread, "the NATS delivery latencies from sent and the SSE frame latencies from write response (both take only committed writes' primary events)", "show")
+	commitsUnreadNote(md, unread, "the NATS delivery latencies from sent and the live frame latencies from write response (both take only committed writes' primary events)", "show")
 }
 
 func ungrantedTable(md *markdown, steps []stepData) {
@@ -506,16 +506,16 @@ func scaled(st stat, d float64) stat {
 	return stat{N: st.N, P50: st.P50 / d, P90: st.P90 / d, P99: st.P99 / d, Max: st.Max / d}
 }
 
-// reconnectsTable is the SSE reconnects table: one row per step and reconnect kind.
+// reconnectsTable is the live reconnects table: one row per step and reconnect kind.
 func reconnectsTable(md *markdown, steps []stepData) {
-	md.line("\n## SSE reconnects\n")
-	md.line("The reconnects of the resuming SSE streams (-sse-resume) whose request started in the window, by the since they sent: all, last_id (the last event id received), stale (max(id) - %d, at the restart), no_id (none). Replayed: the frames at or below the event log's max(id) read just before the reconnect. A reconnect whose response lacks `%s: %s` refetches the dashboard's routes once.\n", staleBacklog, replayHeader, replayComplete)
+	md.line("\n## Live reconnects\n")
+	md.line("The reconnects of the resuming dashboard live sockets (-live-resume) whose dial started in the window, by the resume they subscribed with: all, last_id (the last event id received), stale (max(id) - %d, at the restart), no_id (none). Replayed: the frames at or below the event log's max(id) read just before the dial. A reconnect whose events_start says `replay_complete: false` refetches the dashboard's routes once.\n", staleBacklog)
 	cells := []string{"step", "kind", "reconnects (complete)", "after restart", "failed attempts", "gap s p50 / max",
-		"first byte ms p50 / max", "replayed frames per reconnect p50 / max", "replayed KiB per reconnect p50 / max",
+		"events_start ms p50 / max", "replayed frames per reconnect p50 / max", "replayed KiB per reconnect p50 / max",
 		"replayed KiB total", "replay ms p50 / max", "refetches", "refetch requests (failures)", "refetch KiB", "refetch ms p50 / p99"}
 	md.header(cells...)
 	for _, s := range steps {
-		r := s.sum.SSEReconnects
+		r := s.sum.LiveReconnects
 		if r == nil {
 			md.emptyRow(s.label(), len(cells))
 			continue
@@ -527,7 +527,7 @@ func reconnectsTable(md *markdown, steps []stepData) {
 			}
 			md.row(s.label(), kind, fmt.Sprintf("%s (%s)", num(float64(g.Reconnects), 0), num(float64(g.Complete), 0)),
 				num(float64(g.AfterRestart), 0), num(float64(g.FailedAttempts), 0), pair(scaled(g.GapMs, 1000), p50, smax, 1),
-				pair(g.TTFBMs, p50, smax, 0), pair(g.ReplayFrames, p50, smax, 0), pair(scaled(g.ReplayBytes, 1024), p50, smax, 0),
+				pair(g.StartMs, p50, smax, 0), pair(g.ReplayFrames, p50, smax, 0), pair(scaled(g.ReplayBytes, 1024), p50, smax, 0),
 				kib(float64(g.ReplayBytesTotal)), pair(g.ReplayMs, p50, smax, 0), num(float64(g.Refetches), 0),
 				fmt.Sprintf("%s (%s)", num(float64(g.RefetchRequests), 0), num(float64(g.RefetchFailures), 0)),
 				kib(float64(g.RefetchBytes)), pair(g.RefetchMs, p50, p99, 0))

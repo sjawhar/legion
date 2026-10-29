@@ -3,8 +3,8 @@
 #
 #   run-step.sh <name> --events <per s> --sessions <n> --requests <per s>
 #     [--duration 180s] [--warmup 30s] [--grace 20s] [--event-mix <preset or kind=w,...>]
-#     [--route-mix <file>] [--human 0.1] [--sse <n>] [--rng-seed <n>] [--out <dir>]
-#     [--sse-resume 0|1] [--sse-stale <n>] [--restart-at <duration>]
+#     [--route-mix <file>] [--human 0.1] [--live <n>] [--rng-seed <n>] [--out <dir>]
+#     [--live-resume 0|1] [--live-stale <n>] [--restart-at <duration>]
 #     [--mention-frac <0..1>] [--mentions <n>] [--envoy-rtt <duration>]
 #
 # From a fresh checkout it sets up, starts and seeds the stack (stack.sh). Then, every step that is
@@ -59,12 +59,12 @@ while [ $# -gt 0 ]; do
     --events) have_events=true ;;
     --sessions) have_sessions=true ;;
     --requests) have_requests=true ;;
-    --duration | --warmup | --grace | --event-mix | --human | --sse | --rng-seed | --sse-stale | --restart-at | --mention-frac | --mentions) ;;
-    --sse-resume)
+    --duration | --warmup | --grace | --event-mix | --human | --live | --rng-seed | --live-stale | --restart-at | --mention-frac | --mentions) ;;
+    --live-resume)
       case $value in
-        1) args+=(-sse-resume) ;;
+        1) args+=(-live-resume) ;;
         0) ;;
-        *) die "--sse-resume takes 1 or 0, not '$value'" ;;
+        *) die "--live-resume takes 1 or 0, not '$value'" ;;
       esac
       continue
       ;;

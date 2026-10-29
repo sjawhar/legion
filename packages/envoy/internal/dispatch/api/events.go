@@ -4,30 +4,15 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"io"
 	"net/http"
 	"strconv"
 	"strings"
-	"time"
 
 	"github.com/sjawhar/envoy/internal/dispatch/model"
+	"github.com/sjawhar/envoy/internal/dispatch/store"
 )
 
 const (
-	// maxSSEReplay and maxSSEReplayBytes bound what a resuming SSE connection is replayed: at most
-	// 256 events, whose frames total at most 1 MiB. A connection further behind is replayed
-	// nothing and its client refetches what it shows, which costs less than streaming that
-	// backlog (resolveEventReplay).
-	maxSSEReplay      = 256
-	maxSSEReplayBytes = 1 << 20
-	// eventStreamBuffer is how many relayed events one SSE connection may fall behind before the
-	// relay's stream drops its subscription: 64, more than any one request commits. A dropped
-	// connection subscribes again and catches up what it missed from the event log, within the
-	// replay's bounds (streamEvents).
-	eventStreamBuffer = 64
-	// eventReplayHeader is set to "complete" on an SSE response whose replay is everything its
-	// client lacks; a client that reconnects without it refetches what it shows.
-	eventReplayHeader = "X-Dispatch-Event-Replay"
 	// maxEventPage is the most events one page of an issue's or a document's event log holds,
 	// and its default.
 	maxEventPage = 200
@@ -59,8 +44,8 @@ func (s *server) listIssueEvents(w http.ResponseWriter, r *http.Request) {
 
 // listEventLog pages the whole event log by id, whatever owns each event: an issue, a document,
 // a project or nothing. It answers the events after ?after= (default 0) in ascending id order,
-// at most ?limit= of them. Any authenticated caller may read it, as GET /api/v1/events streams
-// every event to them.
+// at most ?limit= of them. Any authenticated caller may read it, as the events view on a page's
+// live socket carries every event to them.
 func (s *server) listEventLog(w http.ResponseWriter, r *http.Request) {
 	if !s.requireAuthenticated(w, r) {
 		return
@@ -123,263 +108,6 @@ func parseEventListOptions(r *http.Request) (eventListOptions, error) {
 	}, nil
 }
 
-func (s *server) streamEvents(w http.ResponseWriter, r *http.Request) {
-	if !s.requireAuthenticated(w, r) {
-		return
-	}
-	lastEventID := strings.TrimSpace(r.Header.Get("Last-Event-ID"))
-	sinceProvided := lastEventID != "" || r.URL.Query().Has("since")
-	sinceRaw := lastEventID
-	if sinceRaw == "" {
-		sinceRaw = r.URL.Query().Get("since")
-	}
-	var since int64
-	if sinceProvided {
-		var err error
-		since, err = parseNonNegativeInt(sinceRaw, "since")
-		if err != nil {
-			s.writeHandlerError(w, err)
-			return
-		}
-	}
-	flusher, ok := w.(http.Flusher)
-	if !ok {
-		writeError(w, "STREAM_UNSUPPORTED", http.StatusInternalServerError, "streaming unsupported")
-		return
-	}
-	// The live feed is the process's event stream relay (event_stream_relay.go), which publishes
-	// every committed event it reads back out of Postgres — this process's and the other
-	// envoy-dispatch process's alike — each with its frame encoded once for every connection. The
-	// subscription answers head, the id the relay had published through when it was made: every
-	// event above head arrives on the subscription, and every event at or below it has committed,
-	// so the replay reads those from the log. Nothing falls between the two.
-	//
-	// That is also why a cold client (no since= and no Last-Event-ID) resolves its position here
-	// and not through a request of its own: a client that fetched its own head first and then
-	// opened this connection with since=<that head> would lose an event committing between the
-	// two, excluded from the replay (id <= since) and missed by a subscription made only afterwards.
-	subscription, err := s.eventRelay.subscribe(r.Context(), eventStreamBuffer)
-	if err != nil {
-		s.writeHandlerError(w, err)
-		return
-	}
-	defer func() { subscription.cancel() }()
-	replay, err := s.resolveEventReplay(r.Context(), sinceProvided, since, subscription.head)
-	if err != nil {
-		s.writeHandlerError(w, err)
-		return
-	}
-	w.Header().Set("Content-Type", "text/event-stream")
-	w.Header().Set("Cache-Control", "no-cache")
-	w.Header().Set("Connection", "keep-alive")
-	if replay.complete {
-		w.Header().Set(eventReplayHeader, "complete")
-	}
-	w.WriteHeader(http.StatusOK)
-	// One comment line with the headers, so the stream opens in every browser now. Firefox (the
-	// browser suite's, e2e/keyboard-session-pickers.e2e.ts) resolved its fetch of this stream only
-	// once a body byte arrived, and a connection with no backlog and no new event sends none until
-	// the first heartbeat: until then the page held its "Reconnecting…" state and skipped the
-	// refresh a reconnect owes every query, so what committed while it was away stayed unshown.
-	if _, err := fmt.Fprint(w, ": open\n\n"); err != nil {
-		return
-	}
-	if writeSSEFrames(w, replay.frames) != nil {
-		return
-	}
-	flusher.Flush()
-	// The live loop skips an event at or below after, the highest id this connection holds: it
-	// starts at replay.after (the replay, or what the client held through since when the relay
-	// stands behind it) and moves to each id the loop writes. The relay publishes in id order, and
-	// the commit-order lock events.Broker.Append holds until commit means no id at or below a
-	// committed max(id) is still uncommitted, so nothing above after can hide below it later.
-	//
-	// A connection that falls eventStreamBuffer events behind is dropped by the relay's stream,
-	// which closes its channel while the generation runs on (Stream.Publish). The loop writes what
-	// the channel still holds, subscribes again and catches up from the log what it missed after
-	// after (resumeAfterOverflow), then goes on live on the new subscription. A backlog past the
-	// replay's bounds ends the response instead: the client reconnects with its last id, which
-	// resolves its position as any resume does.
-	//
-	// A reset reuses ids, and the comparison cannot tell this reader apart from the events of the
-	// log it was reading; the relay ends the generation at a reset instead, which ends the
-	// response, and the reader comes back on a new connection, which resolves its position against
-	// the new log here. The test hook disconnectAllStreams ends the generation the same way.
-	after := replay.after
-	heartbeat := time.NewTicker(s.deps.StreamHeartbeat)
-	defer heartbeat.Stop()
-	shutdown := s.lifetime.Done()
-	for {
-		select {
-		case <-r.Context().Done():
-			return
-		case <-shutdown:
-			// The server is shutting down, and a stream never goes idle on its own, so
-			// http.Server.Shutdown would wait its whole budget for it. Ending it sends the client
-			// to its reconnect, which resumes from the last id it saw on whichever server is up.
-			return
-		case event, open := <-subscription.events:
-			if open {
-				if event.Event.ID <= after {
-					continue
-				}
-				if hook := s.beforeLiveWrite; hook != nil {
-					hook()
-				}
-				if _, err := w.Write(event.Frame); err != nil {
-					return
-				}
-				flusher.Flush()
-				after = event.Event.ID
-				continue
-			}
-			select {
-			case <-subscription.ended:
-				// The generation ended (a reset, disconnectAllStreams, the lifetime): the
-				// response ends and the client reconnects.
-				return
-			default:
-			}
-			next, caughtUp, ok := s.resumeAfterOverflow(r.Context(), after)
-			if !ok {
-				return
-			}
-			subscription.cancel()
-			subscription = next
-			if writeSSEFrames(w, caughtUp.frames) != nil {
-				return
-			}
-			flusher.Flush()
-			after = caughtUp.after
-		case <-heartbeat.C:
-			// The caller is resolved again on every heartbeat, so a stream outlives its session
-			// (a logout, a membership the sign-in issuer no longer confirms) by one beat at most.
-			if _, _, err := s.optionalActor(heartbeatRequest(r)); err != nil {
-				return
-			}
-			if _, err := fmt.Fprint(w, ": heartbeat\n\n"); err != nil {
-				return
-			}
-			flusher.Flush()
-		}
-	}
-}
-
-// writeSSEFrames writes each encoded frame to w in order, stopping at the first write that fails.
-func writeSSEFrames(w io.Writer, frames [][]byte) error {
-	for _, frame := range frames {
-		if _, err := w.Write(frame); err != nil {
-			return err
-		}
-	}
-	return nil
-}
-
-// resumeAfterOverflow answers a connection whose subscription overflowed, holding every event
-// through after, a new subscription and what it missed: (after, head] of the new subscription,
-// resolved as a resume from after (resolveEventReplay). The new subscription is made before the
-// caller cancels the old one, so the generation runs on between them. false is a catch-up that is
-// not complete (past the replay's bounds, or from a log replaced meanwhile) or that failed; the
-// caller then ends its response, and its client reconnects with its last id.
-func (s *server) resumeAfterOverflow(ctx context.Context, after int64) (relaySubscription, eventReplay, bool) {
-	next, err := s.eventRelay.subscribe(ctx, eventStreamBuffer)
-	if err != nil {
-		return relaySubscription{}, eventReplay{}, false
-	}
-	caughtUp, err := s.resolveEventReplay(ctx, true, after, next.head)
-	if err != nil || !caughtUp.complete {
-		next.cancel()
-		return relaySubscription{}, eventReplay{}, false
-	}
-	return next, caughtUp, true
-}
-
-// eventReplay is what one connection is replayed before its live loop, or after an overflow
-// (resumeAfterOverflow): the frames, whether they are everything its client lacks (complete), and
-// the id at or below which the live loop skips an event (after).
-type eventReplay struct {
-	frames   [][]byte
-	complete bool
-	after    int64
-}
-
-// resolveEventReplay answers a connection that subscribed at head (eventStreamRelay.subscribe).
-//
-// A cold connection asked for no backlog: it is replayed nothing, starts at head and is not
-// complete. A resume at or below head is replayed (since, head] when that is at most
-// maxSSEReplay events of at most maxSSEReplayBytes of frames, and is then complete; past either
-// bound it is replayed nothing and its client refetches what it shows (the absent
-// eventReplayHeader is its signal). Rows are counted, not ids subtracted: ids have gaps.
-//
-// A resume above head is either ahead of this process's relay or from a replaced log. When since
-// is at or below the log's max(id), the relay has not yet published what the client already holds
-// (another process served it, or the newest commit is not yet read): nothing is replayed, the
-// replay is complete, and the live loop skips what the relay publishes through since. When since
-// is above max(id), the log was replaced under the client (`truncate events restart identity`,
-// the browser suite's e2e/seed.ts) and the browser, which only ever raises its lastEventId
-// (web/src/api/sse.ts), resumes from an id of the old log: it is replayed nothing, is not
-// complete and starts at head, so the new log's events reach it rather than sitting below a since
-// that will never be passed.
-func (s *server) resolveEventReplay(ctx context.Context, sinceProvided bool, since, head int64) (eventReplay, error) {
-	if !sinceProvided {
-		return eventReplay{after: head}, nil
-	}
-	if since > head {
-		var newest int64
-		if err := s.deps.Store.Pool.QueryRow(ctx, `select coalesce(max(id), 0) from events`).Scan(&newest); err != nil {
-			return eventReplay{}, err
-		}
-		if since <= newest {
-			return eventReplay{complete: true, after: since}, nil
-		}
-		return eventReplay{after: head}, nil
-	}
-	var behind int
-	if err := s.deps.Store.Pool.QueryRow(ctx, `
-		select count(*) from (select 1 from events where id > $1 and id <= $2 order by id limit $3) as behind
-	`, since, head, maxSSEReplay+1).Scan(&behind); err != nil {
-		return eventReplay{}, err
-	}
-	if behind > maxSSEReplay {
-		return eventReplay{after: head}, nil
-	}
-	missed, err := s.readEventRows(ctx, eventSelect+`
-		where e.id > $1 and e.id <= $2
-		order by e.id asc limit $3
-	`, since, head, maxSSEReplay)
-	if err != nil {
-		return eventReplay{}, err
-	}
-	frames := make([][]byte, 0, len(missed))
-	size := 0
-	for _, event := range missed {
-		frame, err := encodeSSEFrame(event)
-		if err != nil {
-			return eventReplay{}, err
-		}
-		size += len(frame)
-		if size > maxSSEReplayBytes {
-			return eventReplay{after: head}, nil
-		}
-		frames = append(frames, frame)
-	}
-	return eventReplay{frames: frames, complete: true, after: head}, nil
-}
-
-// disconnectAllStreams closes every currently open SSE connection, forcing each client through
-// its reconnect-from-lastId path. Test-only: mounted by Register only when Deps.TestHooksEnabled
-// is set, so e2e suites can prove reconnect behavior on demand. It ends the relay's running
-// generation, whose subscriptions are what an open connection and the delivery hub hold; the hub
-// subscribes again and recomputes every view. The broker's one subscriber is the outbox, which no
-// reconnect test is about.
-func (s *server) disconnectAllStreams(w http.ResponseWriter, r *http.Request) {
-	if !s.requireAuthenticated(w, r) {
-		return
-	}
-	s.eventRelay.disconnect()
-	WriteJSON(w, http.StatusOK, map[string]bool{"ok": true})
-}
-
 type eventListOptions struct {
 	after      int64
 	before     int64
@@ -421,6 +149,19 @@ func (s *server) readEvents(ctx context.Context, owner owner, options eventListO
 		where `+predicate+` and e.seq > $2
 		order by e.seq asc limit $3
 	`, ownerValue, options.after, options.limit)
+}
+
+// EventHead is the id of the newest committed event, 0 while the log is empty, read through
+// database's shared pool, the one readEventsAfterID reads the log through (the relay's page and
+// GET /api/v1/events/log): the head an events subscription resolves, and the event_head GET
+// /auth/whoami answers. Every row at or below it has committed (events.Broker.Append's
+// commit-order lock), so a reader that starts after it misses nothing that commits later.
+func EventHead(ctx context.Context, database *store.Store) (int64, error) {
+	var head int64
+	if err := database.Pool.QueryRow(ctx, `select coalesce(max(id), 0) from events`).Scan(&head); err != nil {
+		return 0, err
+	}
+	return head, nil
 }
 
 func (s *server) readEventRows(ctx context.Context, query string, arguments ...any) ([]model.Event, error) {
@@ -630,25 +371,6 @@ func (s *server) attachAskDocumentArtifacts(ctx context.Context, eventPayloads [
 		}
 	}
 	return nil
-}
-
-// encodeSSEFrame is the whole SSE frame of one event: its id, event and data lines and the blank
-// line that ends it. The relay encodes each live event once with it and a replay encodes each
-// missed event with it, so a frame sent live and the same frame replayed are the same bytes.
-func encodeSSEFrame(event model.Event) ([]byte, error) {
-	data, err := json.Marshal(event)
-	if err != nil {
-		return nil, err
-	}
-	frame := make([]byte, 0, len("id: \nevent: \ndata: \n\n")+20+len(event.Type)+len(data))
-	frame = append(frame, "id: "...)
-	frame = strconv.AppendInt(frame, event.ID, 10)
-	frame = append(frame, "\nevent: "...)
-	frame = append(frame, event.Type...)
-	frame = append(frame, "\ndata: "...)
-	frame = append(frame, data...)
-	frame = append(frame, "\n\n"...)
-	return frame, nil
 }
 
 func parseNonNegativeInt(raw, field string) (int64, error) {

@@ -76,7 +76,7 @@ func newCredentialTestHandlerReading(t *testing.T, brokerURL, tokenFile string) 
 		t.Fatalf("new API dependencies: %v", err)
 	}
 	mux := http.NewServeMux()
-	t.Cleanup(Register(mux, t.Context(), deps))
+	t.Cleanup(Register(mux, t.Context(), deps).Wait)
 	return mux
 }
 

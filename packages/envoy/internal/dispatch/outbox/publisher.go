@@ -598,7 +598,7 @@ func releaseClaim(ctx context.Context, deps Deps, ids []int64) {
 // session's copy of a new comment held back for a mention still being sent
 // (attempt.leftToMention) holds back none of the others either: the attempt is marked deferred and
 // reports errMentionPending once every answer is in (attempt.err). A copy held back for a mention
-// the stranded pass resends is left to its fallback row (publishFallbackCopies) and holds back
+// the delivery sweep resends is left to its fallback row (publishFallbackCopies) and holds back
 // nothing. The destinations the attempt reached are recorded with the batch (recordBatch), so a
 // retry publishes only the rest.
 func send(ctx context.Context, deps Deps, sender bus.Sender, pending pendingEvent, delivered map[string]struct{}) *attempt {

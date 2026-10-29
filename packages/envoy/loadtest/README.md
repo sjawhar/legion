@@ -18,7 +18,7 @@ same step before and after its change, and compares the two rows.
 | `main.go` | The `loadgen` binary: subcommands `proxy`, `seed`, `run`, `tables`, `series-sessions`, `trigger-sql`, `box-busy` |
 | `api.go` | The Dispatch HTTP client, with the request trace that gives the arrival time |
 | `seed.go` | The seed: 4 projects, 1,000 issues and 8,000 comments through Dispatch's API, and `seed.json` |
-| `run.go` | One step: its phases (the window, SSE streams, the event and request generators on one open-loop schedule, the probes) and `summary.json` |
+| `run.go` | One step: its phases (the window, the dashboard live sockets, the event and request generators on one open-loop schedule, the probes) and `summary.json` |
 | `sessions.go` | The simulated sessions: their NATS subscriptions and receipts, their listener registrations and heartbeats |
 | `events.go` | The five write kinds, the event mix and each write's plan |
 | `marker.go` | The write marker `lgm<nonce><counter>x`: its format, the run's nonce and the parse that keeps one run's markers |
@@ -28,8 +28,8 @@ same step before and after its change, and compares the two rows.
 | `lockprobe.go` | The 20 ms sampler of the commit-order lock |
 | `locksampler.go` | The 1 s sampler of every ungranted lock in `pg_locks` |
 | `pgpoll.go` | The poll loop of the lock probes (`pollPG`), and the error policy of the probes' reads, which the 5 s sampler shares: failed reads are counted, the first three are logged, and so is their total past three |
-| `sse.go` | The parser of the dashboard SSE frames, and the SSE frame latencies |
-| `reconnect.go` | The SSE streams, with `-sse-resume` the dashboard's reconnect, the stale streams and the refetch, and the reconnect table's numbers |
+| `live.go` | The dashboard live sockets' reader of `GET /ws/live` event frames, and the live frame latencies |
+| `reconnect.go` | The live sockets' loop, with `-live-resume` the dashboard's reconnect, the stale sockets and the refetch, and the reconnect table's numbers |
 | `restart.go` | `-restart-at`: `stack.sh restart-dispatch` inside the window, and the CPU in the minute after it |
 | `mentions.go` | `-mention-frac`: the mentions of the comment writes, and their write latencies |
 | `proxy.go` | The TCP latency proxy toward Postgres, and toward the listener for `--envoy-rtt` |
@@ -107,8 +107,8 @@ the key stays the same across steps. `stack.sh` stops each process by the pid in
 ```bash
 packages/envoy/loadtest/run-step.sh <name> --events <per s> --sessions <n> --requests <per s> \
   [--duration 180s] [--warmup 30s] [--grace 20s] [--event-mix <preset or kind=w,...>] \
-  [--route-mix <file>] [--human 0.1] [--sse <n>] [--rng-seed 1] [--out <dir>] \
-  [--sse-resume 0|1] [--sse-stale <n>] [--restart-at <duration>] \
+  [--route-mix <file>] [--human 0.1] [--live <n>] [--rng-seed 1] [--out <dir>] \
+  [--live-resume 0|1] [--live-stale <n>] [--restart-at <duration>] \
   [--mention-frac <0..1>] [--mentions <n>] [--envoy-rtt <duration>]
 ```
 
@@ -132,11 +132,11 @@ value.
 | `--event-mix` | `production-2026-10-26` | A preset name or `kind=weight,...` (Event mix, below). |
 | `--route-mix` | the committed `routes-2026-10-26-1719Z.txt` | A route-mix file (Route mix, below). It must be a file. |
 | `--human` | `0.1` | The share of writes that a person makes, 0 to 1. |
-| `--sse` | `max(1, round(requests/30))` | Dashboard SSE streams (`GET /api/v1/events`): 2 at 60 req/s, 20 at 600 req/s. |
+| `--live` | `max(1, round(requests/30))` | Dashboard live sockets (`GET /ws/live`, each subscribed to the event feed as a dashboard tab is): 2 at 60 req/s, 20 at 600 req/s. |
 | `--rng-seed` | `1` | The seed of the event and request schedules. |
 | `--out` | `$LOADTEST_ROOT/runs/<name>` | The step directory. It must not exist, or it must be empty. |
-| `--sse-resume` | `0` | `1`: each SSE stream reconnects as the dashboard does, with `?since=<last id>`, and its reconnects are measured (The restart scenario, below). |
-| `--sse-stale` | `0` | Of the `--sse` streams, how many reconnect once at the restart with `since = max(id) - 12600`. Needs `--sse-resume 1`, `--restart-at` and an event log of at least 12,600 rows (`stack.sh seed --min-events 13000`). |
+| `--live-resume` | `0` | `1`: each live socket reconnects as the dashboard does, subscribing with `resume: {since: <last id>}`, and its reconnects are measured (The restart scenario, below). |
+| `--live-stale` | `0` | Of the `--live` sockets, how many reconnect once at the restart with `since = max(id) - 12600`. Needs `--live-resume 1`, `--restart-at` and an event log of at least 12,600 rows (`stack.sh seed --min-events 13000`). |
 | `--restart-at` | none | A Go duration into the window, less than `--duration`: `stack.sh restart-dispatch` runs then. |
 | `--mention-frac` | `0` | The share of comment writes (`comment`, `anchored`, `reply`) that mention `--mentions` live sessions, 0 to 1. |
 | `--mentions` | `3` | The sessions each such comment mentions: 1 to 10, and fewer than `--sessions`. |
@@ -244,7 +244,7 @@ The series runs six steps with `run-step.sh`, in order, each from a fresh reset.
 into `$LOADTEST_ROOT/runs/series-<UTC time>/step-<f>x/`, and one `TABLES.md` across them in the
 series directory.
 
-| step | events/s | sessions | requests/s | SSE |
+| step | events/s | sessions | requests/s | live sockets |
 | --- | --- | --- | --- | --- |
 | step-0.25x | 1 | 100 | 15 | 1 |
 | step-0.5x | 2 | 200 | 30 | 1 |
@@ -254,13 +254,13 @@ series directory.
 | step-10x | 40 | 1,000 | 600 | 20 |
 
 - Events are 4/s and requests 60/s at 1x, multiplied by the load factor f.
-- SSE streams are `max(1, round(2f))`.
+- Live sockets are `max(1, round(2f))`.
 - Sessions are piecewise linear through the spec's three points: 100 at 0.25x, 400 at 1x and
   1,000 at 10x. That is 400·f up to 1x, and 400 + 600·(f − 1)/9 above it.
   `loadgen series-sessions <f>` prints the value.
 - The series passes every other step flag to each step: `--duration`, `--warmup`, `--grace`,
   `--event-mix`, `--route-mix`, `--human`, `--rng-seed`, and the restart scenario's flags. It
-  refuses `--events`, `--sessions`, `--requests`, `--sse` and `--out`, because it sets them.
+  refuses `--events`, `--sessions`, `--requests`, `--live` and `--out`, because it sets them.
 - With the default window, a step takes about 5 minutes and a series about 30 minutes.
 - `run-series.sh` runs the setup (one build of the checkout), the start, the seed and the migration
   check once, before the series directory exists, and reads the build's commit and dirty flag once
@@ -346,7 +346,7 @@ does these steps:
 The seed content does not depend on the clock. Each issue's text comes from a generator seeded by
 its project and number.
 
-**The event-log extension.** A stale stream of the restart scenario resumes 12,600 events behind
+**The event-log extension.** A stale socket of the restart scenario resumes 12,600 events behind
 the head, and the seed holds about 10,000. `--min-events N` clones `comment.created` events, as
 test data, until the log holds N rows: the seed's comment events in id order, from the first one
 again when more are needed, each clone a new row on its source's issue with that issue's next
@@ -448,7 +448,7 @@ The event generator sends five kinds of write, each on its real route. Each writ
 marker, `lgm<nonce><counter>x`: the run's nonce, 9 random decimal digits drawn when `loadgen run`
 starts, then the write's counter in the run (1, 2, ...). `summary.json` (`config.marker_nonce`),
 `meta.json` (`marker_nonce`) and the first line of `run.log` record the nonce. The run counts only
-the commit rows and SSE frames whose marker carries its own nonce, so a run on a database that
+the commit rows and live frames whose marker carries its own nonce, so a run on a database that
 earlier runs wrote to without a reset (`stack.sh loadgen run` resets nothing) still counts only its
 own writes.
 
@@ -532,68 +532,68 @@ counted. 25,000 is more than 600 req/s × the 30 s client timeout.
 ## The restart scenario
 
 The restart work measures a Dispatch build before and after with these flags: a Dispatch restart
-under load, dashboard streams that reconnect as a browser does (some of them an hour behind), the
-refetch a browser makes, and comments that mention live sessions through a slow listener. The same
-`loadgen` runs against both Dispatch builds (Before and after across commits, above):
+under load, dashboard live sockets that reconnect as a browser does (some of them an hour behind),
+the refetch a browser makes, and comments that mention live sessions through a slow listener. The
+same `loadgen` runs against both Dispatch builds (Before and after across commits, above):
 
 ```bash
 packages/envoy/loadtest/stack.sh seed --min-events 13000
 packages/envoy/loadtest/run-step.sh restart-1x --events 4 --sessions 400 --requests 60 \
-  --sse 50 --sse-resume 1 --sse-stale 10 --restart-at 90s \
+  --live 50 --live-resume 1 --live-stale 10 --restart-at 90s \
   --mention-frac 0.2 --mentions 3 --envoy-rtt 200ms
 ```
 
-### Resuming streams (`--sse-resume`)
+### Resuming sockets (`--live-resume`)
 
-Without `--sse-resume`, each stream opens `GET /api/v1/events` with no `since`, and opens it again
-1 s after its connection ends. With it, each stream reconnects as the dashboard does
-(`packages/dispatch/web/src/api/sse.ts`):
+Without `--live-resume`, each socket subscribes to the events view with no resume, and is dialed
+again 1 s after the socket ends. With it, each socket reconnects as the dashboard does
+(`packages/dispatch/web/src/api/live-socket.ts`, `api/event-feed.ts`):
 
-- It keeps the highest event id it has received, and reconnects with `?since=<that id>`, or with
-  no `since` when it has received none.
-- It waits the dashboard's backoff before each attempt (`packages/dispatch/web/src/api/live.ts`
-  `reconnectDelayMs`): 1 s, doubled for each attempt since the stream last opened, at most 30 s.
-  An attempt that is refused (Dispatch is down) or answered with a status other than 200 is a
-  failed attempt, and the stream backs off again.
-- Every end of a connection counts the same way: a Dispatch restart, a close by the server (a
-  build that ends a stream when it falls behind, or when the event log is reset), a transport
-  error.
+- It keeps the highest event id it has received, and subscribes with
+  `resume: {"since": "<that id>"}`, or with no resume when it has received none.
+- It waits the dashboard's backoff before each attempt (`live-socket.ts` `reconnectDelayMs`): the
+  first attempt after a dropped socket is spread uniformly over 2 s, and each later attempt waits
+  half of `min(1 s × 2^attempt, 30 s)` plus a random share of the other half. An attempt whose
+  dial is refused (Dispatch is down), or whose subscription Dispatch will not start, is a failed
+  attempt, and the socket backs off again.
+- Every end of a socket counts the same way: a Dispatch restart (close 1012), the close at a
+  socket's 30-60 min age (4001), a transport error.
 - Just before each attempt it reads the event log's head, `select max(id) from events`, over a
-  direct Postgres connection. The frames of the new connection whose event id is at or below that
+  direct Postgres connection. The frames of the new socket whose event id is at or below that
   head are the **replay**: they committed before the reconnect.
-- Each reconnect is one entry of `reconnects.json`: the stream, the kind (`last_id`, `stale`,
-  `no_id`), when its request started and whether that was after the restart began, the `since`, the
-  head, the failed attempts before it, the gap from the previous connection's end to the response
-  headers, the time to the first byte of the response, whether the response carries
-  `X-Dispatch-Event-Replay: complete`, the replayed frames, their bytes (each frame's `id`,
-  `event` and `data` lines and its blank line), the time from the request's start to the last
-  replayed frame, and the refetch.
-- Replayed frames count in `SSE frames`, but the SSE latency columns do not time them: their delay
-  is the stream's absence.
+- Each reconnect is one entry of `reconnects.json`: the socket, the kind (`last_id`, `stale`,
+  `no_id`), when its dial started and whether that was after the restart began, the `since`, the
+  head, the failed attempts before it, the gap from the previous socket's end to the
+  `events_start` frame, the time from the dial's start to that frame, the frame's
+  `replay_complete`, the replayed frames, their bytes (each frame's whole message), the time from
+  the dial's start to the last replayed frame, and the refetch.
+- Replayed frames count in `live frames`, but the live latency columns do not time them: their
+  delay is the socket's absence.
 
-A Dispatch build without a bounded replay replays every event above `since`, in pages of 1,000,
-and never sets `X-Dispatch-Event-Replay`. A build with one (`internal/dispatch/api/events.go`
-`maxSSEReplay`, `maxSSEReplayBytes`) replays at most 256 events and 1 MiB of frames, and sets
-`X-Dispatch-Event-Replay: complete` only when it sent the whole replay.
+A subscription's `events_start` says `replay_complete` true only when Dispatch replayed every
+event after the resume it was sent. `internal/dispatch/api/live_events.go` (`maxLiveReplay`,
+`maxLiveReplayBytes`) replays at most 256 events and 1 MiB of frames; past either bound it
+replays nothing and says false, as it does for a subscription that named no resume and for a
+resume above the head of a log this one replaced.
 
-### Stale streams (`--sse-stale`)
+### Stale sockets (`--live-stale`)
 
-The first K streams (0 to K − 1) reconnect once with `since = max(id) − 12600`, the head read just
-before the reconnect less 12,600: a tab that comes back after an hour at the outage night's 3.5
+The first K sockets (0 to K − 1) subscribe once with `since = max(id) − 12600`, the head read just
+before the dial less 12,600: a tab that comes back after an hour at the outage night's 3.5
 events per second. They do it at their first reconnect that starts after `stack.sh
 restart-dispatch` has begun, and resume from their last id at every other reconnect.
 Event ids have gaps, so that `since` can cover fewer than 12,600 rows. `loadgen run` refuses
-`-sse-stale` when the event log holds fewer than 12,600 rows; `stack.sh seed --min-events 13000`
+`-live-stale` when the event log holds fewer than 12,600 rows; `stack.sh seed --min-events 13000`
 gives it more (The seed, above).
 
 ### The refetch
 
-On a reconnect whose response lacks `X-Dispatch-Event-Replay: complete`, the dashboard refreshes
-every query it holds (`sse.ts` `onOpen`). The stream does the same with the route mix: it issues
-every route whose caller is `browser`, once each, all at once, as the stream's viewer
-(`X-Dispatch-User: viewer-<i>`), with `{key}` the stream's issue (issue i of the issues in use) and
-`{project}` that issue's project. In the default route mix these are the six routes of the
-dashboard tab:
+On a reconnect whose `events_start` says `replay_complete: false`, the dashboard refreshes every
+query it holds (`api/event-feed.ts` `refreshEverything`). The socket does the same with the route
+mix: it issues every route whose caller is `browser`, once each, all at once, as the socket's
+viewer (`X-Dispatch-User: viewer-<i>`), with `{key}` the socket's issue (issue i of the issues in
+use) and `{project}` that issue's project. In the default route mix these are the six routes of
+the dashboard tab:
 
 - `browser GET /api/v1/issues/{key}` (issue read)
 - `browser GET /api/v1/issues?project={project}` (issue list)
@@ -602,8 +602,8 @@ dashboard tab:
 - `browser GET /api/v1/me/state` (state)
 - `browser GET /api/v1/issues/{key}/events?after=0&limit=200` (issue events)
 
-The refetch counts in the SSE reconnects table, not in the request columns. `run.log` lists the
-routes; `summary.json` keeps them in `sse_reconnects.refetch_routes`. A route mix with no
+The refetch counts in the Live reconnects table, not in the request columns. `run.log` lists the
+routes; `summary.json` keeps them in `live_reconnects.refetch_routes`. A route mix with no
 `browser` route makes no refetch.
 
 ### The restart (`--restart-at`)
@@ -698,7 +698,7 @@ When `loadgen` cannot read the run's rows of `loadtest.event_commits`, `events.c
 why. Then every count and latency that comes from the commit rows is 0 because nothing was read, not measured:
 committed (also per kind), the issue-topic and agent-topic receipts, the expected receipts,
 `missing`, `other_events`, `other_receipts`, `commit_times_missing`, `clock_anomalies` and every
-delivery latency. So is `sse.sse_frame_ms_from_write_response`, and
+delivery latency. So is `live.live_frame_ms_from_write_response`, and
 `resources.dispatch_cpu_s_per_op` is null. The tables show those cells as `-` with the mark
 `(commit rows not read)`, and the step fails (Run one step, above). A step with no write in the
 window reads no rows: nothing depends on them.
@@ -710,12 +710,12 @@ Every percentile in the harness is the lower nearest rank: the value at index
 
 | File | What it holds |
 | --- | --- |
-| `summary.json` | The step's results. Every table cell comes from it (The tables, below). `config.marker_nonce` is the run's marker nonce (Event kinds, above). `stack_exits` is there only when a stack process exited during the step: each entry's `name`, `pid` and `first_seen_gone`. Such a step failed. `events.commits_error` is there only when the run's commit rows could not be read (Delivery latency, above). Such a step failed too. `sse_reconnects`, `restart` and `comment_mentions` are `null` without `--sse-resume`, `--restart-at` and `--mention-frac`. |
+| `summary.json` | The step's results. Every table cell comes from it (The tables, below). `config.marker_nonce` is the run's marker nonce (Event kinds, above). `stack_exits` is there only when a stack process exited during the step: each entry's `name`, `pid` and `first_seen_gone`. Such a step failed. `events.commits_error` is there only when the run's commit rows could not be read (Delivery latency, above). Such a step failed too. `live_reconnects`, `restart` and `comment_mentions` are `null` without `--live-resume`, `--restart-at` and `--mention-frac`. |
 | `TABLES.md` | The tables of this step. `loadgen tables` writes it. |
 | `meta.json` | Mode 600 (owner only). The step name and arguments (`args`: the normalized flag list, each flag given to `loadgen run` once as `-name=value` in name order, with the values of `-token` and `-listener-token` replaced by `<redacted>`, the URL of each of `-url`, `-listener`, `-nats-mon` and `-pprof` read whole by Go's `net/url` and written without its userinfo and its `password` parameter, and `-nats` split at commas as nats.go splits it, each server without its own userinfo; the user name goes too, since nats.go takes a user name with no password as the NATS token. `-pg` is written from pgx's own parse of it (`pgconn.ParseConfig`, the parser `pgx.Connect` uses), never from the text given: `postgres://`, each host and port pgx would try, comma-separated (a port the URL leaves out as pgx fills it in, such as 5432), then `/` and the database, such as `postgres://127.0.0.1:15432/dispatch`; never its user, password, `sslpassword` or any other parameter, and `<redacted>` when pgx does not read it as a URL. No file of the step, and no line that `loadgen run` prints, holds a token, a URL password or a NATS token), `start`, `window_start`, `window_end`, `end`, `nproc`, CPU model, kernel, `box_busy_before` and `box_busy_before_window_s` (5), `GOMAXPROCS` of Dispatch (`unset` by default), the Postgres version (`postgres_version`: empty when it could not be read, and then `postgres_version_error` says why), the build commit and `build_dirty`, the seed meta, the `stack.json` path, `pg_direct` (always `false` under `-allow-foreign`, which takes nothing about the target from `stack.json`), `envoy_rtt` (`--envoy-rtt`; `""` without it, and always under `-allow-foreign`), `allow_foreign`, the pids at the start and `marker_nonce`. `box_busy_before` is the share of the box's CPU time, all CPUs, that was not idle or I/O wait over 5 s just before the step, from two `/proc/stat` reads: `run-step.sh` reads it with `loadgen box-busy` before its reset and passes it as `-box-busy-before`; a `loadgen run` without that flag reads it itself (Requirements, above). `null` when `/proc/stat` gave no ticks. |
-| `run.log` | `loadgen run`'s log: the configuration with the marker nonce, the guard, a warning when `box_busy_before` is above 10%, the sampler's pids, the NATS subscriptions, the registrations, the window, the refetch routes under `--sse-resume`, the restart's `restart:` lines, failed writes, the first three failed reads of each Postgres probe and of the 5 s sampler's Postgres, pprof and NATS reads (and each one's total, past three), a failed read of the commit rows, of the transaction ids or of the Postgres version, the result line, and the failure line when a stack process exited or the commit rows were not read. An endpoint that a line names is written without its URL password. |
+| `run.log` | `loadgen run`'s log: the configuration with the marker nonce, the guard, a warning when `box_busy_before` is above 10%, the sampler's pids, the NATS subscriptions, the registrations, the window, the refetch routes under `--live-resume`, the restart's `restart:` lines, failed writes, the first three failed reads of each Postgres probe and of the 5 s sampler's Postgres, pprof and NATS reads (and each one's total, past three), a failed read of the commit rows, of the transaction ids or of the Postgres version, the result line, and the failure line when a stack process exited or the commit rows were not read. An endpoint that a line names is written without its URL password. |
 | `samples.json` | The 5 s samples: CPU ticks (each process's ticks across its pids) and RSS per process, `/proc/stat` ticks, Postgres connections by state, goroutines, pool waiters, heap (every 15 s), NATS `/varz`. With `--restart-at`, one more sample at the restart's start. `failed_reads` names a sample's reads that failed (`postgres`, `goroutines`, `heap`, `nats`); their values in that sample are 0 (`nats` empty) and enter no statistic. A read that failed once the run had ended is neither named nor counted. Dispatch's pprof reads fail while `--restart-at` restarts it. |
-| `reconnects.json` | Under `--sse-resume`: every reconnect of every stream, in and out of the window (The restart scenario, above). |
+| `reconnects.json` | Under `--live-resume`: every reconnect of every live socket, in and out of the window (The restart scenario, above). |
 | `cpu.pprof` | Dispatch's CPU profile over the whole window; with `--restart-at`, from the restarted Dispatch's `/healthz` to the window's end. |
 | `heap.pprof` | Dispatch's heap profile at the end of the window. |
 | `heap.txt` | The same heap profile as text (`/debug/pprof/heap?debug=1`), with the runtime's memory statistics. |
@@ -741,7 +741,7 @@ series `TABLES.md`, because `run-step.sh` already wrote them for each step.
 
 ## The tables
 
-`TABLES.md` has eleven tables, with one row per step (two tables, SSE reconnects and Requests by
+`TABLES.md` has eleven tables, with one row per step (two tables, Live reconnects and Requests by
 route, have more rows). The window is the measured window (`--duration`). "Cores" means
 CPU-seconds per second. A cell is `-` when it has no value, and also when the read that it comes
 from failed; a failed read also marks the step name with `(commit rows not read)`, `(1 failed
@@ -781,7 +781,7 @@ write-latency-by-kind table, the resources table and the delivery-from-sending t
 `commit-trigger.sql`, or Postgres did not answer. `events.commits_error` says why. Every cell that
 depends on those rows shows `-`, not a measured 0: here the committed rate, both delivery
 latencies and the receipts; per kind the committed count; in the resources table the Dispatch
-CPU-s per operation; and the delivery from sent and the SSE frame latency from write response. The
+CPU-s per operation; and the delivery from sent and the live frame latency from write response. The
 step failed (Run one step, above). `TABLES.md` repeats this under each table where a row has the
 mark.
 
@@ -884,21 +884,29 @@ When the event-lock change removes the commit-order lock, this table reads 0 by 
 backend can hold or wait for a lock that Dispatch does not take. The ungranted-locks table
 (Ungranted locks, below) is then the measure of lock waits.
 
-### Delivery from sending, and SSE frames
+### Delivery from sending, and live socket frames
 
-The dashboard SSE streams (`--sse`) parse each frame. A frame is one event: an `id` line, an
-`event` line and a `data` line, then a blank line. Comment lines (`: open`, `: heartbeat`) are not
-frames. The frame time is when its blank line arrives. Only the frames that arrive in the window
-count. A frame's event id is the `id` in its `data`, or the `id` line when the data has none.
+Each dashboard live socket (`--live`) opens `GET /ws/live` as `viewer-<i>` and sends the frame a
+dashboard tab sends for the event feed, `{"type":"subscribe","sub":"events","view":{"kind":"events"}}`,
+with no resume, so it follows the feed from its head. Dispatch answers `events_start`, then one
+`event` frame per event: `{"type":"event","sub":"events","id":"<n>","event":<the event's JSON>}`. Only
+`event` frames count as frames; `events_start`, `heartbeat` and every other frame type are read and
+not counted. The frame time is when its message arrives. Only the frames that arrive in the window
+count. A frame's event id is its `id`. An `ended` frame (the subscription fell behind) is answered
+with the same subscribe frame on the same socket, as a tab does. When the socket ends (Dispatch
+closes each at a random 30-60 min age with 4001, and at shutdown with 1012), or its subscription is
+refused or ends before its `events_start`, the socket is dialed again a second later. Each socket
+offers permessage-deflate, as a browser does. `live_bytes` is the bytes of every message the
+sockets read, after decompression.
 
 | Column | Unit | What it shows | Source |
 | --- | --- | --- | --- |
 | `step` | name | The step name, with the mark `(commit rows not read)` when the run's commit rows could not be read (Events, delivery and requests, above). | `config.step`, `events.commits_error` |
 | `NATS delivery ms from sent p50 / p99` | ms | Delivery latency from sent (Delivery latency, above), over every issue-topic receipt of a primary event. `-` when the commit rows were not read. | `events.delivery_ms_from_sent` |
-| `SSE frame ms from created_at p50 / p99` | ms | The frame time minus the `created_at` of the frame's event, over every frame with a `created_at` that a reconnect did not replay (The restart scenario, above). | `sse.sse_frame_ms_from_created_at` |
-| `SSE frame ms from write response p50 / p99` | ms | The frame time minus the time when the client read the write's response. Only the frame of a primary event counts, and not a replayed one. Its write must be in the window, have a 2xx status and be committed. A write with no complete response has no response time, so its frames do not count. `-` when the commit rows were not read. | `sse.sse_frame_ms_from_write_response` |
-| `SSE frames` | count | The frames of all SSE streams that arrived in the window, replayed ones included. | `sse.sse_frames` |
-| `SSE order violations` | count | The frames whose event id is not more than the event id of the previous frame on the same connection. The check starts again on each new connection. A value above 0 means that a stream sent events out of id order. | `sse.sse_order_violations` |
+| `live frame ms from created_at p50 / p99` | ms | The frame time minus the `created_at` of the frame's event, over every frame with a `created_at` that a reconnect did not replay (The restart scenario, above). | `live.live_frame_ms_from_created_at` |
+| `live frame ms from write response p50 / p99` | ms | The frame time minus the time when the client read the write's response. Only the frame of a primary event counts, and not a replayed one. Its write must be in the window, have a 2xx status and be committed. A write with no complete response has no response time, so its frames do not count. `-` when the commit rows were not read. | `live.live_frame_ms_from_write_response` |
+| `live frames` | count | The event frames of all live sockets that arrived in the window, replayed ones included. | `live.live_frames` |
+| `live order violations` | count | The frames whose event id is not more than the event id of the previous frame on the same connection. The check starts again on each new connection. A value above 0 means that a socket sent events out of id order. | `live.live_order_violations` |
 
 ### Ungranted locks
 
@@ -948,33 +956,33 @@ step whose sampler took no sample has `-` in every cell.
 | `step` | name | The step name, with the mark `(1 failed read)` when the transaction-id probe's connect or one of its two reads failed (Commit-order lock, above). | `config.step`, `resources.xid_read_error` |
 | `transaction ids per s` | transaction ids per second | The transaction ids that Postgres assigned per second in the window, in all databases of the server. The transaction-id probe reads the next transaction id (`pg_snapshot_xmax(pg_current_snapshot())`) at the window start and at the window end. It divides the difference by the seconds between the two reads. The probe assigns no transaction id itself. `-` with the mark when a read failed (`resources.xid_read_error` holds the error, and `run.log` shows it); `-` alone when `resources` is null. | `resources.xids_per_s` |
 
-### SSE reconnects
+### Live reconnects
 
-The reconnects of the resuming streams (`--sse-resume`, The restart scenario, above) whose request
-started in the window. There is one row per step for `all` reconnects, then one per kind that
+The reconnects of the resuming live sockets (`--live-resume`, The restart scenario, above) whose
+dial started in the window. There is one row per step for `all` reconnects, then one per kind that
 occurred: `last_id` (`since` the last event id received), `stale` (`since = max(id) − 12600`, at the
-restart) and `no_id` (no `since`). A step without `--sse-resume` has one row of `-`. "Per
+restart) and `no_id` (no resume). A step without `--live-resume` has one row of `-`. "Per
 reconnect" columns hold one value for each reconnect, a reconnect that replayed nothing as 0.
 
 | Column | Unit | What it shows | Source |
 | --- | --- | --- | --- |
 | `step` | name | The step name. | `config.step` |
-| `kind` | name | `all`, or the kind of reconnect. | the keys of `sse_reconnects.groups` |
-| `reconnects (complete)` | count | The reconnects, then those whose response carried `X-Dispatch-Event-Replay: complete`. | `.reconnects`, `.complete` |
-| `after restart` | count | The reconnects whose request started after `stack.sh restart-dispatch` began. | `.after_restart` |
-| `failed attempts` | count | The attempts before these reconnects that were refused or answered other than 200 (Dispatch down or starting). | `.failed_attempts` |
-| `gap s p50 / max` | s | From the end of the previous connection to the reconnect's response headers: how long the stream had no connection. | `.gap_ms` |
-| `first byte ms p50 / max` | ms | From the reconnect's request start to the first byte of the response. | `.ttfb_ms` |
-| `replayed frames per reconnect p50 / max` | count | The frames whose event id is at or below the event log's `max(id)` read just before the reconnect. | `.replay_frames` |
-| `replayed KiB per reconnect p50 / max` | KiB | The bytes of those frames. | `.replay_bytes` |
+| `kind` | name | `all`, or the kind of reconnect. | the keys of `live_reconnects.groups` |
+| `reconnects (complete)` | count | The reconnects, then those whose `events_start` said `replay_complete: true`. | `.reconnects`, `.complete` |
+| `after restart` | count | The reconnects whose dial started after `stack.sh restart-dispatch` began. | `.after_restart` |
+| `failed attempts` | count | The attempts before these reconnects whose dial was refused, or whose subscription Dispatch would not start (Dispatch down or starting). | `.failed_attempts` |
+| `gap s p50 / max` | s | From the end of the previous socket to the reconnect's `events_start` frame: how long the socket had no feed. | `.gap_ms` |
+| `events_start ms p50 / max` | ms | From the reconnect's dial start to its `events_start` frame. | `.start_ms` |
+| `replayed frames per reconnect p50 / max` | count | The frames whose event id is at or below the event log's `max(id)` read just before the dial. | `.replay_frames` |
+| `replayed KiB per reconnect p50 / max` | KiB | The bytes of those frames' messages. | `.replay_bytes` |
 | `replayed KiB total` | KiB | The bytes of every replayed frame. | `.replay_bytes_total` |
-| `replay ms p50 / max` | ms | From the request start to the last replayed frame, over the reconnects that replayed a frame. | `.replay_ms` |
-| `refetches` | count | The reconnects without `complete` that made the refetch. | `.refetches` |
+| `replay ms p50 / max` | ms | From the dial start to the last replayed frame, over the reconnects that replayed a frame. | `.replay_ms` |
+| `refetches` | count | The reconnects whose subscription did not replay in full and that made the refetch. | `.refetches` |
 | `refetch requests (failures)` | count | The refetch's GETs, each dashboard route once per refetch, then those with a status outside 2xx or a transport error. | `.refetch_requests`, `.refetch_failures` |
 | `refetch KiB` | KiB | The response bodies of the refetch's GETs. | `.refetch_bytes` |
 | `refetch ms p50 / p99` | ms | Each refetch GET from arrival to the end of its response body. | `.refetch_ms` |
 
-`sse_reconnects` also holds `stale_streams` and `refetch_routes`, and each group holds
+`live_reconnects` also holds `stale_sockets` and `refetch_routes`, and each group holds
 `replay_frames_total`. Every value of each reconnect is in `reconnects.json`.
 
 ### Restart
@@ -1077,9 +1085,10 @@ Give `-nats-server-name` to keep the NATS check. The sampler gets no pids. `meta
 - **A smaller dataset.** 1,000 issues and about 10,000 events at the start of each step (13,000
   with `stack.sh seed --min-events 13000`, the extra ones cloned comment events).
 - **No browser documents.** No document websockets. The browser share of the route mix is plain
-  GETs. The SSE streams read `/api/v1/events` and time each frame; with `--sse-resume` they also
-  reconnect and refetch as the dashboard does (The restart scenario, above), but hold no query
-  cache: the refetch is the route mix's dashboard routes, not the queries a real tab holds.
+  GETs. The live sockets subscribe to the event feed alone (no delivery or agent views) and time
+  each event frame; with `--live-resume` they also reconnect and refetch as the dashboard does
+  (The restart scenario, above), but hold no query cache: the refetch is the route mix's dashboard
+  routes, not the queries a real tab holds.
 - **One listener, sessions on NATS.** The sessions receive from NATS directly, as the pi plugin's
   self-subscription does. They register with port 0, so the listener pushes nothing to them; a
   mention's send reaches them on their agent topic.

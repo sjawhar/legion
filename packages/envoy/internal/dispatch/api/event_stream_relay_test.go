@@ -1,7 +1,7 @@
 package api
 
 import (
-	"bufio"
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -13,6 +13,7 @@ import (
 	"testing"
 	"time"
 
+	gws "github.com/gorilla/websocket"
 	"github.com/jackc/pgx/v5"
 
 	"github.com/sjawhar/envoy/internal/dispatch/docs"
@@ -48,33 +49,30 @@ func secondProcessHandler(t *testing.T, database *store.Store) http.Handler {
 		t.Fatalf("new API dependencies for the second process: %v", err)
 	}
 	mux := http.NewServeMux()
-	t.Cleanup(Register(mux, t.Context(), deps))
+	t.Cleanup(Register(mux, t.Context(), deps).Wait)
 	return mux
 }
 
-// TestEventCommittedOnAnotherProcessReachesAnOpenStream is what the live stream is for with two
-// envoy-dispatch processes on one Postgres: a reader whose connection landed on process B sees an
-// event process A committed, on the connection it already has. Nothing of A's reaches B but the
-// row itself -- B's relay hears the commit on `listen dispatch_events` (migration 0107) and reads
-// it back out of the log. The broker fan-out this stream used to read would have ended at A.
-func TestEventCommittedOnAnotherProcessReachesAnOpenStream(t *testing.T) {
+// TestEventCommittedOnAnotherProcessReachesAnOpenEventFeed is what the live feed is for with two
+// envoy-dispatch processes on one Postgres: a page whose socket landed on process B sees an event
+// process A committed, on the subscription it already has. Nothing of A's reaches B but the row
+// itself -- B's relay hears the commit on `listen dispatch_events` (migration 0107) and reads it
+// back out of the log. The broker fan-out the feed used to read would have ended at A.
+func TestEventCommittedOnAnotherProcessReachesAnOpenEventFeed(t *testing.T) {
 	first, database := newTestHandlerWithStore(t)
 	issue := createInteractionIssue(t, first, "TEST", "Issue", "A spec")
 	second := httptest.NewServer(secondProcessHandler(t, database))
 	t.Cleanup(second.Close)
-	scanner := openSSEStream(t, second.URL+"/api/v1/events")
+	client := openLiveSocketAt(t, gws.DefaultDialer, "ws"+strings.TrimPrefix(second.URL, "http")+"/ws/live", withBearer("agent-token")).read()
+	subscribeEvents(t, client, "events", nil)
 
-	if response := dispatchRequest(t, first, http.MethodPatch, "/api/v1/issues/"+issue.Key, map[string]string{
-		"title": "Renamed on the other process",
-	}, "alice"); response.Code != http.StatusOK {
-		t.Fatalf("rename issue on the first process: status=%d body=%s", response.Code, response.Body.String())
-	}
+	renameIssue(t, first, issue.Key, "Renamed on the other process")
 	committed := eventHead(t, database)
 
 	for id := int64(0); id != committed; {
-		id = sseFrameID(t, readSSEFrame(t, scanner))
+		id = nextEventID(t, client, "events")
 		if id > committed {
-			t.Fatalf("stream on the second process sent id %d before the event %d committed on the first", id, committed)
+			t.Fatalf("the feed on the second process sent id %d before the event %d committed on the first", id, committed)
 		}
 	}
 }
@@ -102,7 +100,7 @@ func newCountedRelay(t *testing.T, deps Deps) (*eventStreamRelay, chan int64) {
 // subscribeRelay subscribes to the relay, cancelled when the test ends if not before.
 func subscribeRelay(t *testing.T, relay *eventStreamRelay) (<-chan relayedEvent, func(), int64) {
 	t.Helper()
-	subscription, err := relay.subscribe(context.Background(), eventStreamBuffer)
+	subscription, err := relay.subscribe(context.Background(), liveEventsBuffer)
 	if err != nil {
 		t.Fatalf("subscribe to the relay: %v", err)
 	}
@@ -153,18 +151,39 @@ func waitRelayRead(t *testing.T, reads <-chan int64) {
 // is not selected.
 const relayListenBackend = `datname = current_database() and query = 'listen ` + dispatchEventsChannel + `'`
 
+// endRelayGeneration ends the relay's running generation, which closes every subscription it
+// holds, as a reset of the event log does (resetCursor).
+func endRelayGeneration(relay *eventStreamRelay) {
+	relay.mu.Lock()
+	defer relay.mu.Unlock()
+	if relay.generation != nil {
+		relay.endLocked(relay.generation)
+	}
+}
+
+// relaySubscribers is how many subscriptions the relay's running generation holds, and none while
+// no generation runs.
+func relaySubscribers(relay *eventStreamRelay) int {
+	relay.mu.Lock()
+	defer relay.mu.Unlock()
+	if relay.generation == nil {
+		return 0
+	}
+	return relay.generation.stream.SubscriberCount()
+}
+
 // TestEventStreamRelayReadsNothingWithoutASubscriber: a process nobody streams from holds no
 // LISTEN connection for the event log and reads none of it, before its first stream and after its
 // last one closes. A relay that kept running after its last subscriber left would read the log
 // after every commit until the process exited.
 func TestEventStreamRelayReadsNothingWithoutASubscriber(t *testing.T) {
 	handler, database, deps := newTestServer(t, testServerOptions{})
-	key := createStreamIssue(t, handler)
+	issue := createPlainIssue(t, handler, "TEST")
 	relay, reads := newCountedRelay(t, deps)
 	commit := func() {
 		t.Helper()
 		for range 3 {
-			seedStreamEvents(t, database, key, 1, 0)
+			seedEvents(t, database, issue, 1, 0)
 		}
 	}
 	idle := func(when string) {
@@ -185,7 +204,7 @@ func TestEventStreamRelayReadsNothingWithoutASubscriber(t *testing.T) {
 	if count := countBackends(t, database, relayListenBackend); count != 1 {
 		t.Fatalf("%d relay LISTEN backends with one subscriber, want 1", count)
 	}
-	last := seedStreamEvents(t, database, key, 1, 0)
+	last := seedEvents(t, database, issue, 1, 0)
 	receiveRelayedThrough(t, subscription, head, last)
 	cancel()
 	waitForBackends(t, database, 0, relayListenBackend)
@@ -202,7 +221,7 @@ func TestEventStreamRelayReadsNothingWithoutASubscriber(t *testing.T) {
 func TestEventStreamRelayReadsEachCommitOnceForEverySubscriber(t *testing.T) {
 	const subscribers = 3
 	handler, database, deps := newTestServer(t, testServerOptions{})
-	key := createStreamIssue(t, handler)
+	issue := createPlainIssue(t, handler, "TEST")
 	relay, reads := newCountedRelay(t, deps)
 	subscriptions := make([]<-chan relayedEvent, subscribers)
 	for index := range subscriptions {
@@ -211,14 +230,14 @@ func TestEventStreamRelayReadsEachCommitOnceForEverySubscriber(t *testing.T) {
 	// The generation's catch-up after its LISTEN, which finds nothing new.
 	waitRelayRead(t, reads)
 
-	committed := seedStreamEvents(t, database, key, 1, 0)
+	committed := seedEvents(t, database, issue, 1, 0)
 	frames := make([][]byte, subscribers)
 	for index, subscription := range subscriptions {
 		event := receiveRelayed(t, subscription)
 		if event.Event.ID != committed {
 			t.Fatalf("subscriber %d received event %d, want the committed %d", index, event.Event.ID, committed)
 		}
-		frames[index] = event.Frame
+		frames[index] = event.Encoded
 	}
 	if count := len(reads); count != 1 {
 		t.Fatalf("the relay read the event log %d times for one commit with %d subscribers, want once", count, subscribers)
@@ -235,7 +254,7 @@ func TestEventStreamRelayReadsEachCommitOnceForEverySubscriber(t *testing.T) {
 // new one; either way it receives the next commit.
 func TestEventStreamRelaySubscribeRacingTheLastCancelReceivesTheNextEvent(t *testing.T) {
 	handler, database, deps := newTestServer(t, testServerOptions{})
-	key := createStreamIssue(t, handler)
+	issue := createPlainIssue(t, handler, "TEST")
 	relay, _ := newCountedRelay(t, deps)
 	for range 20 {
 		_, cancelFirst, _ := subscribeRelay(t, relay)
@@ -246,7 +265,7 @@ func TestEventStreamRelaySubscribeRacingTheLastCancelReceivesTheNextEvent(t *tes
 		}()
 		subscription, cancelSecond, head := subscribeRelay(t, relay)
 		<-cancelled
-		committed := seedStreamEvents(t, database, key, 1, 0)
+		committed := seedEvents(t, database, issue, 1, 0)
 		receiveRelayedThrough(t, subscription, head, committed)
 		cancelSecond()
 	}
@@ -256,10 +275,10 @@ func TestEventStreamRelaySubscribeRacingTheLastCancelReceivesTheNextEvent(t *tes
 // notification sent while the relay has no connection reaches nobody, and nothing sends it again.
 // What covers it is the catch-up the listener's onConnected runs after every LISTEN, from the
 // cursor the relay has published through rather than from the log's head -- a cursor reset there
-// would silently swallow exactly the events the window dropped.
+// would silently swallow exactly the events the window dropped from every open page's feed.
 func TestEventStreamRelayCatchesUpWhenItsListenerReconnects(t *testing.T) {
 	handler, database, deps := newTestServer(t, testServerOptions{})
-	key := createStreamIssue(t, handler)
+	issue := createPlainIssue(t, handler, "TEST")
 	relay, _ := newCountedRelay(t, deps)
 	var down atomic.Bool
 	down.Store(true)
@@ -278,7 +297,7 @@ func TestEventStreamRelayCatchesUpWhenItsListenerReconnects(t *testing.T) {
 	subscription, _, opened := subscribeRelay(t, relay)
 
 	// Committed while the relay has no connection: its notification reaches nobody.
-	committed := seedStreamEvents(t, database, key, 1, 0)
+	committed := seedEvents(t, database, issue, 1, 0)
 	select {
 	case event := <-subscription:
 		t.Fatalf("the relay published event %d with no listening connection", event.Event.ID)
@@ -304,7 +323,7 @@ func TestEventStreamRelayCatchesUpWhenItsListenerReconnects(t *testing.T) {
 		}
 		time.Sleep(5 * time.Millisecond)
 	}
-	next := seedStreamEvents(t, database, key, 1, 0)
+	next := seedEvents(t, database, issue, 1, 0)
 	receiveRelayedThrough(t, subscription, committed, next)
 }
 
@@ -313,17 +332,19 @@ func TestEventStreamRelayCatchesUpWhenItsListenerReconnects(t *testing.T) {
 // ids restart at 1, below the cursor the relay has published through, and `id > cursor` matches
 // nothing. A relay that only ever published forward would fall silent there for good: every live
 // update of every later scenario would be lost, with no error anywhere. The relay reads the reset
-// through eventCursorCheck and ends its generation with every subscription
-// it holds -- the stream's answer to a reader it can no longer serve in order, which sends a
-// browser through its reconnect -- and the next subscription starts a generation on the new log.
+// through eventCursorCheck and ends its generation with every subscription it holds -- the
+// stream's answer to a reader it can no longer serve in order, which ends each open events
+// subscription with an ended frame (behind) and sends its page through a resubscribe
+// (TestTheEventFeedResumesAfterTheEventLogIsResetBeneathTheReader) -- and the next subscription
+// starts a generation on the new log.
 func TestEventStreamRelayRecoversWhenTheEventLogIsReset(t *testing.T) {
 	handler, database, deps := newTestServer(t, testServerOptions{})
-	key := createStreamIssue(t, handler)
+	issue := createPlainIssue(t, handler, "TEST")
 	relay, _ := newCountedRelay(t, deps)
 	subscription, _, opened := subscribeRelay(t, relay)
 
 	// A cursor well above the ids the reset log will hand out.
-	committed := seedStreamEvents(t, database, key, 1, 0)
+	committed := seedEvents(t, database, issue, 1, 0)
 	receiveRelayedThrough(t, subscription, opened, committed)
 
 	if _, err := database.Pool.Exec(t.Context(), `truncate events restart identity cascade`); err != nil {
@@ -331,7 +352,7 @@ func TestEventStreamRelayRecoversWhenTheEventLogIsReset(t *testing.T) {
 	}
 	// TRUNCATE notifies nobody: it is the refill's own insert that fires migration 0107's trigger
 	// and wakes the relay onto a log that restarts at id 1.
-	refilled := seedStreamEvents(t, database, key, 1, 0)
+	refilled := seedEvents(t, database, issue, 1, 0)
 	if refilled >= committed {
 		t.Fatalf("event %d committed after the reset is not below the pre-reset %d: the reset reused no id, so this test proves nothing", refilled, committed)
 	}
@@ -359,65 +380,62 @@ func TestEventStreamRelayRecoversWhenTheEventLogIsReset(t *testing.T) {
 	if head != refilled {
 		t.Fatalf("a subscription after the reset has head %d, want the new log's %d", head, refilled)
 	}
-	next := seedStreamEvents(t, database, key, 1, 0)
+	next := seedEvents(t, database, issue, 1, 0)
 	receiveRelayedThrough(t, reopened, head, next)
+}
+
+// mustEventFrameID is the decimal id an event frame names.
+func mustEventFrameID(t *testing.T, frame LiveEventFrame) int64 {
+	t.Helper()
+	var event feedEvent
+	if err := json.Unmarshal(frame.Event, &event); err != nil {
+		t.Fatalf("decode the event of frame %+v: %v", frame, err)
+	}
+	return event.ID
 }
 
 // TestLiveAskEventFrameCarriesTheReadTimeFields: an ask payload cannot carry opened_event_id or
 // referenced_by_count from the write that appended it, so both are attached at read time
-// (attachAskEventFields). Sourcing the live stream through the same row read as the replay
-// (readEventRows) and the same encoding (encodeSSEFrame) is what makes the frame a client
-// receives live and the frame it receives when it reconnects the same bytes; a hand-rolled live
-// read would hand a page an ask without them, and only a reconnect would repair it.
+// (attachAskEventFields). Sourcing the live feed through the same row read as the replay
+// (readEventRows) and the same encoding (encodeLiveEvent) is what makes the frame a page receives
+// live and the frame it receives when it resumes the same bytes; a hand-rolled live read would
+// hand a page an ask without them, and only a resubscribe would repair it.
 func TestLiveAskEventFrameCarriesTheReadTimeFields(t *testing.T) {
-	handler, database := newTestHandlerWithStore(t)
-	issue := createInteractionIssue(t, handler, "TEST", "Ask fields", "A spec")
-	httpServer := httptest.NewServer(handler)
-	t.Cleanup(httpServer.Close)
-	since := eventHead(t, database)
-	live := openSSEStream(t, fmt.Sprintf("%s/api/v1/events?since=%d", httpServer.URL, since))
+	rig := newLiveSocketRig(t, testServerOptions{}, nil)
+	issue := createInteractionIssue(t, rig.handler, "TEST", "Ask fields", "A spec")
+	since := eventHead(t, rig.database)
+	live := rig.dial(t, withBearer("agent-token"))
+	subscribeEvents(t, live, "events", new(since))
 
-	created := sessionRequest(t, handler, http.MethodPost, "/api/v1/issues/"+issue.Key+"/asks", map[string]any{
+	created := sessionRequest(t, rig.handler, http.MethodPost, "/api/v1/issues/"+issue.Key+"/asks", map[string]any{
 		"question": "Which path?",
 		"actor":    sessionActor(),
 	})
 	if created.Code != http.StatusCreated {
 		t.Fatalf("create ask: status=%d body=%s", created.Code, created.Body.String())
 	}
-	liveFrame := readSSEFrameOfType(t, live, "ask.opened")
+	liveFrame, _ := eventOfType(t, live, "events", "ask.opened")
 
-	// The same event, replayed by a connection resuming from before it.
-	replay := openSSEStream(t, fmt.Sprintf("%s/api/v1/events?since=%d", httpServer.URL, since))
-	replayedFrame := readSSEFrameOfType(t, replay, "ask.opened")
+	// The same event, replayed by a subscription resuming from before it.
+	replay := rig.dial(t, withBearer("agent-token"))
+	subscribeEvents(t, replay, "events", new(since))
+	replayedFrame, _ := eventOfType(t, replay, "events", "ask.opened")
 
-	if strings.Join(liveFrame, "\n") != strings.Join(replayedFrame, "\n") {
-		t.Fatalf("live ask.opened frame\n\t%#v\ndiffers from the replayed one\n\t%#v", liveFrame, replayedFrame)
+	if liveFrame.ID != replayedFrame.ID || !bytes.Equal(liveFrame.Event, replayedFrame.Event) {
+		t.Fatalf("live ask.opened frame\n\t%s %s\ndiffers from the replayed one\n\t%s %s", liveFrame.ID, liveFrame.Event, replayedFrame.ID, replayedFrame.Event)
 	}
 	var event struct {
 		Payload map[string]json.RawMessage `json:"payload"`
 	}
-	if err := json.Unmarshal([]byte(strings.TrimPrefix(liveFrame[2], "data: ")), &event); err != nil {
-		t.Fatalf("decode the live ask.opened event %q: %v", liveFrame[2], err)
+	if err := json.Unmarshal(liveFrame.Event, &event); err != nil {
+		t.Fatalf("decode the live ask.opened event %s: %v", liveFrame.Event, err)
 	}
 	for _, field := range []string{"opened_event_id", "referenced_by_count"} {
 		value, ok := event.Payload[field]
 		if !ok || string(value) == "null" {
-			t.Fatalf("live ask.opened payload = %s, want a read-time %s", liveFrame[2], field)
+			t.Fatalf("live ask.opened payload = %s, want a read-time %s", liveFrame.Event, field)
 		}
 	}
-}
-
-// readSSEFrameOfType reads frames until one carries the named event type.
-func readSSEFrameOfType(t *testing.T, scanner *bufio.Scanner, eventType string) []string {
-	t.Helper()
-	for range maxSSEReplay {
-		frame := readSSEFrame(t, scanner)
-		if len(frame) == 3 && frame[1] == "event: "+eventType {
-			return frame
-		}
-	}
-	t.Fatalf("no %s frame arrived", eventType)
-	return nil
 }
 
 // liveEventSeed is one event a test writes directly, oldest first.

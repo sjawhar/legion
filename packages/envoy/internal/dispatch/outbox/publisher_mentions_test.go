@@ -47,9 +47,10 @@ func seedMentionDelivery(t *testing.T, database *store.Store, commentID, session
 // session the attempt names, "" for none: an unanswered mention's attempt names none until its
 // sender resolves it. outcome is the attempt's state - "sent", "failed", or "pending" for a send
 // its sender claimed just now - or "resumed" for a pending attempt whose sender's claim lapsed
-// two minutes ago (its sender died with the send in flight; the API's stranded pass resends it),
+// two minutes ago (its sender died with the send in flight; the API's delivery sweep resends it),
 // "queued" for a pending attempt created just now that no sender has claimed yet, and
-// "backlogged" or "abandoned" for one created two minutes ago that no sender ever claimed. ""
+// "backlogged" or "abandoned" for one created past model.MentionSweepWindow ago that no sender
+// ever claimed, which the delivery sweep will never send. ""
 // records no attempt.
 func seedDelivery(t *testing.T, database *store.Store, commentID, target, sessionID, outcome string) {
 	t.Helper()
@@ -63,7 +64,7 @@ func seedDelivery(t *testing.T, database *store.Store, commentID, target, sessio
 	case "queued":
 		state, claimed = "pending", false
 	case "backlogged", "abandoned":
-		state, age, claimed = "pending", 2*time.Minute, false
+		state, age, claimed = "pending", model.MentionSweepWindow+time.Minute, false
 	}
 	ctx := context.Background()
 	if _, err := database.Pool.Exec(ctx, `
@@ -620,7 +621,7 @@ func TestARetryReachesTheClaimantTheScanReads(t *testing.T) {
 // afterwards finds it settled. When a sender's claim commits while the outbox waits to settle it,
 // the attempt is that sender's: it stays pending under the fresh claim, no receipt is written, and
 // the event defers on the send. An attempt a sender claimed whose claim lapsed (its sender died
-// with the send in flight) is the stranded pass's to resend: the outbox leaves it pending, writes
+// with the send in flight) is the delivery sweep's to resend: the outbox leaves it pending, writes
 // no receipt and publishes no copy, without waiting on it.
 func TestAnAbandonedMentionIsSettledByTheOutboxOrLeftToTheClaimThatTookItFirst(t *testing.T) {
 	const (
@@ -766,7 +767,7 @@ func TestAnAbandonedMentionIsSettledByTheOutboxOrLeftToTheClaimThatTookItFirst(t
 	}
 }
 
-// TestAResumedMentionsHeldCopyFollowsItsResend: a comment.created whose mention the stranded pass
+// TestAResumedMentionsHeldCopyFollowsItsResend: a comment.created whose mention the delivery sweep
 // resends is published without that session's copy and marked published like any other event.
 // When the resend fails, the event's own publish still never sends the copy, and the fallback
 // pass publishes it once, to the session's own topic only, under the mention's dedupe key,
@@ -916,7 +917,7 @@ func (p *failingPublisher) all() []contracts.Envelope {
 }
 
 // seedHeldFallbackCopy writes a comment on issue T-1, routed to session:s1, that mentions s1, whose
-// attempt the stranded pass resends; scans its comment.created event through deps, which holds
+// attempt the delivery sweep resends; scans its comment.created event through deps, which holds
 // s1's copy as a fallback row on s1's own topic; and fails the resend, so the next fallback pass
 // publishes that copy. It returns the comment's id.
 func seedHeldFallbackCopy(ctx context.Context, t *testing.T, deps Deps) string {

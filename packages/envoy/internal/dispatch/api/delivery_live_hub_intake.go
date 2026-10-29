@@ -48,7 +48,7 @@ func (h *deliveryHub) intake(g *hubGeneration) {
 		case relayed, open := <-feed.events:
 			if !open {
 				// The feed fell its buffer behind, or the relay's generation ended (a reset of the event
-				// log, the test hook): events may have gone by unapplied. Subscribe again first, as at
+				// log): events may have gone by unapplied. Subscribe again first, as at
 				// the start, then read the open P0 issues afresh and recompute every view, which reads
 				// what the missed events changed. The overflowed subscription is cancelled only once the
 				// new one stands, so the relay's generation runs on between the two.

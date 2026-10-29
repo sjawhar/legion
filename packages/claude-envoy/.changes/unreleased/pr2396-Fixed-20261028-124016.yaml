@@ -1,5 +1,0 @@
-kind: Fixed
-body: A channel session whose handoff file is missing at startup runs one heartbeat, not two, so during a listener outage it makes no more registry attempts than its bounded retry allows.
-time: 2026-10-28T12:40:16.839394288Z
-custom:
-    Issue: pr2396

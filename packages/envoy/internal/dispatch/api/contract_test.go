@@ -144,7 +144,7 @@ func newContractRig(t *testing.T) *contractRig {
 		t.Fatalf("new dispatch API dependencies: %v", err)
 	}
 	dispatchMux := http.NewServeMux()
-	t.Cleanup(Register(dispatchMux, t.Context(), deps))
+	t.Cleanup(Register(dispatchMux, t.Context(), deps).Wait)
 
 	return &contractRig{Dispatch: dispatchMux, BrokerURL: brokerServer.URL, brokerStore: brokerStore, issuer: issuer, issuerKey: issuerKey}
 }

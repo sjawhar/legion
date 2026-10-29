@@ -84,32 +84,41 @@ production_baseline() {
 # by id until a short page, and the production projects, into the caller's
 # $evidence/production-dispatch-audit.json. It fails on any event a session in the JSON array
 # SESSIONS authored or that names the caller's $project, and on a production project naming it. A
-# Dispatch that answers the log route 404 is a build from before that route, whose event stream
-# still replays every event after a since: the audit says so and reads GET /api/v1/events
-# ?since=<baseline - 1> for 25 s instead, which also carries every event whatever owns it. Any other
-# read that fails, or a first event that is not the baseline event itself (the control that the read
-# started at the run's window), fails it too: the audit cannot vouch for production. Its summary line
-# names ENVOY, the rig sessions the caller found on the production Envoy listener.
+# Dispatch that answers the log route 404 is a build without it: the audit says so and reads the
+# replay of that Dispatch's live socket instead (lib/dispatch-live-events.ts, resuming after
+# baseline - 1 for 25 s), which also carries every event whatever owns it. Any other read that
+# fails, or a read that does not carry the baseline event itself (the control that it covers the
+# run's window), fails it too: the audit cannot vouch for production. Its summary line names the
+# source it read and ENVOY, the rig sessions the caller found on the production Envoy listener.
 production_dispatch_audit() {
   local sessions=$1 envoy=$2 out=$work/production-events.jsonl page=$work/production-events-page.json
-  local header status projects events after=$((prod_baseline - 1)) complete=1 found=0
+  local header bearer status projects events read_from control
+  local after=$((prod_baseline - 1)) complete=1 found=0
   header=$(prod_header_file)
   : >"$out"
+  # The log route pages from the baseline on, so the baseline is its first event.
+  read_from='GET /api/v1/events/log'
+  control='.[0].id == $baseline'
   while :; do
     status=$(curl -sS --max-time 20 -o "$page" -w '%{http_code}' -H "@$header" \
       "$prod_dispatch_url/api/v1/events/log?after=$after&limit=1000") || status=
     if [ "$status" = 404 ] && [ "$after" -eq $((prod_baseline - 1)) ]; then
-      printf 'production Dispatch has no GET /api/v1/events/log (a build from before it); reading its event stream since %s instead\n' \
-        "$((prod_baseline - 1))"
-      # The stream stays open after its replay, so curl ends at its time bound (exit 28).
-      status=0
-      curl -sS -N --max-time 25 -H "@$header" "$prod_dispatch_url/api/v1/events?since=$((prod_baseline - 1))" \
-        >"$work/production-events.sse" 2>/dev/null || status=$?
-      if [ "$status" != 0 ] && [ "$status" != 28 ]; then
-        complete=
-      elif ! sed -n 's/^data: //p' "$work/production-events.sse" | jq -c . >>"$out"; then
-        complete=
-      fi
+      printf 'production Dispatch has no GET /api/v1/events/log (a build without it); reading its /ws/live replay since %s instead\n' \
+        "$after"
+      read_from='the /ws/live replay'
+      # A subscription starts at the resume it was sent or below it, never above, and Dispatch
+      # replays nothing to a resume further back than its bound, so the baseline event need only
+      # be among the events read.
+      control='any(.[]; .id == $baseline)'
+      bearer=$work/production-dispatch-bearer
+      (umask 077 && printf '%s\n' "$prod_token" >"$bearer")
+      # A refusal of the feed is printed on stderr; the replay's close, resubscribe and duplicate
+      # lines carry no event, so an event a redial repeats is read once.
+      bun "$operator_dispatch_lib/dispatch-live-events.ts" \
+        --url "$prod_dispatch_url" --bearer-file "$bearer" --since "$after" --timeout 25 \
+        >"$work/production-events.live.jsonl" || true
+      rm -f "$bearer"
+      jq -c '.event | select(. != null)' "$work/production-events.live.jsonl" >>"$out" || complete=
       break
     fi
     if [ "$status" != 200 ] || ! jq -c '.[]' "$page" >>"$out"; then
@@ -126,13 +135,13 @@ production_dispatch_audit() {
   fi
   rm -f "$header"
   events=$(jq -s -c --argjson ids "$sessions" --arg project "$project" --argjson baseline "$prod_baseline" --argjson projects "$projects" '
-    {control: (.[0].id == $baseline), count: length,
+    {control: ('"$control"'), count: length,
      rig: [.[] | select((.actor.id as $a | $ids | index($a)) or (tostring | contains($project)))
        | {id, issue_key, artifact_id, project, type, actor: .actor.id, created_at}],
      projects: [$projects[] | select(tostring | contains($project))]}' "$out")
   printf '%s\n' "$events" >"$evidence/production-dispatch-audit.json"
   if ! jq -e '.control' >/dev/null <<<"$events"; then
-    printf 'production Dispatch event log did not start at its baseline event %s\n' "$prod_baseline"
+    printf 'production Dispatch read through %s did not carry its baseline event %s\n' "$read_from" "$prod_baseline"
     return 1
   fi
   if ! jq -e '.rig == []' >/dev/null <<<"$events"; then
@@ -143,8 +152,8 @@ production_dispatch_audit() {
     printf 'production Dispatch holds the rig project: %s\n' "$(jq -c .projects <<<"$events")"
     found=1
   fi
-  printf 'production audit: %s events from %s, rig events %s, rig projects %s, rig Envoy sessions %s\n' \
-    "$(jq -r .count <<<"$events")" "$prod_baseline" "$(jq -c .rig <<<"$events")" \
+  printf 'production audit: %s events from %s through %s, rig events %s, rig projects %s, rig Envoy sessions %s\n' \
+    "$(jq -r .count <<<"$events")" "$prod_baseline" "$read_from" "$(jq -c .rig <<<"$events")" \
     "$(jq -c .projects <<<"$events")" "$envoy"
   return "$found"
 }

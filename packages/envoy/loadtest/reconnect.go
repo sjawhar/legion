@@ -3,58 +3,63 @@ package main
 import (
 	"context"
 	"fmt"
+	"math/rand/v2"
 	"net/http"
-	"net/http/httptrace"
 	"strconv"
 	"sync"
 	"sync/atomic"
 	"time"
 
+	"github.com/gorilla/websocket"
 	"github.com/jackc/pgx/v5"
 )
 
-// staleBacklog is how far below the event log's max(id) a stale stream (-sse-stale) resumes: an
+// staleBacklog is how far below the event log's max(id) a stale socket (-live-stale) resumes: an
 // hour of the outage night's 3.5 events per second, a browser tab that comes back after an hour.
 const staleBacklog = 12600
 
-// replayHeader is the response header with which Dispatch says that a resume's catch-up was sent
-// in full, so the client need not refetch (internal/dispatch/api/events.go eventReplayHeader). A
-// build that never sets it makes every reconnect refetch.
-const (
-	replayHeader   = "X-Dispatch-Event-Replay"
-	replayComplete = "complete"
-)
-
 // dashboardCaller is the route-mix caller whose routes are the dashboard tab's reads; a reconnect
-// without a complete replay issues each of them once (refetchRoutes).
+// whose subscription did not replay in full issues each of them once (refetchRoutes).
 const dashboardCaller = "browser"
 
-// The kinds of reconnect, by the since it sends.
+// The kinds of reconnect, by the resume they subscribe with.
 const (
-	reconnectLastID = "last_id" // since = the last event id the stream received
+	reconnectLastID = "last_id" // since = the last event id the socket received
 	reconnectStale  = "stale"   // since = max(id) - staleBacklog, once, at the restart
-	reconnectNoID   = "no_id"   // no since: the stream had received no event yet
+	reconnectNoID   = "no_id"   // no resume: the socket had received no event yet
 )
 
 // reconnectKinds is every kind in the order the tables list them.
 var reconnectKinds = []string{reconnectLastID, reconnectStale, reconnectNoID}
 
-// reconnectDelay is the dashboard's wait before its next stream attempt
-// (packages/dispatch/web/src/api/live.ts reconnectDelayMs): 1 s, doubled for each attempt since
-// the stream last opened, at most 30 s.
-func reconnectDelay(attempt int) time.Duration {
-	d := time.Second
-	for range attempt {
-		d *= 2
-		if d >= 30*time.Second {
-			return 30 * time.Second
-		}
+// The dashboard's waits before its next socket attempt
+// (packages/dispatch/web/src/api/live-socket.ts reconnectDelayMs).
+const (
+	// reconnectSpread is the window the first attempt after a dropped socket is spread over.
+	reconnectSpread = 2 * time.Second
+	// baseReconnectDelay doubles with each later attempt, up to maxReconnectDelay.
+	baseReconnectDelay = time.Second
+	maxReconnectDelay  = 30 * time.Second
+)
+
+// reconnectDelay is the dashboard's wait before attempt `attempt` (0 for the first after a socket
+// was lost), with r for its jitter: attempt 0 is spread uniformly over reconnectSpread, and each
+// later attempt waits half of d = min(1 s x 2^attempt, 30 s) plus a random share of the other
+// half, so tabs a restart dropped together stay spread.
+func reconnectDelay(attempt int, r *rand.Rand) time.Duration {
+	if attempt <= 0 {
+		return time.Duration(r.Float64() * float64(reconnectSpread))
 	}
-	return d
+	ceiling := maxReconnectDelay
+	// 1 s doubled five times is already past the ceiling, and shifting further overflows.
+	if attempt < 5 {
+		ceiling = baseReconnectDelay << attempt
+	}
+	return ceiling/2 + time.Duration(r.Float64()*float64(ceiling/2))
 }
 
-// refetchRoutes are the routes a dashboard tab refetches when a reconnect carries no complete
-// replay: every route of the mix whose caller is the dashboard's.
+// refetchRoutes are the routes a dashboard tab refetches when a reconnect's subscription did not
+// replay in full: every route of the mix whose caller is the dashboard's.
 func refetchRoutes(m routeMix) []route {
 	var out []route
 	for _, r := range m.Routes {
@@ -65,34 +70,36 @@ func refetchRoutes(m routeMix) []route {
 	return out
 }
 
-// reconnectRec is one reconnect of a resuming SSE stream (-sse-resume): a connection that opened
-// after an earlier one of the same stream ended. Times are wall-clock.
+// reconnectRec is one reconnect of a resuming live socket (-live-resume): a socket that opened
+// after an earlier one of the same viewer ended. Times are wall-clock.
 type reconnectRec struct {
-	Stream int    `json:"stream"`
+	Socket int    `json:"socket"`
 	Kind   string `json:"kind"`
-	// At is when the request that opened the connection started; AfterRestart is set when it
-	// started after stack.sh restart-dispatch did.
+	// At is when the dial that opened the socket started; AfterRestart is set when it started
+	// after stack.sh restart-dispatch did.
 	At           time.Time `json:"at"`
 	AfterRestart bool      `json:"after_restart"`
-	// Since is the since the request sent (0 for no_id); Head is the event log's max(id), read
-	// from Postgres just before the request.
+	// Since is the resume the subscribe frame sent (0 for no_id); Head is the event log's
+	// max(id), read from Postgres just before the dial.
 	Since int64 `json:"since"`
 	Head  int64 `json:"head"`
-	// FailedAttempts are the attempts since the previous connection ended that got no 200 (a
-	// refused connection while Dispatch was down, or an error status).
+	// FailedAttempts are the attempts since the previous socket ended that started no
+	// subscription (a refused dial while Dispatch was down, or a subscription it would not open).
 	FailedAttempts int `json:"failed_attempts"`
-	// GapMs is from the end of the previous connection to this one's response headers.
+	// GapMs is from the end of the previous socket to this subscription's events_start frame.
 	GapMs float64 `json:"gap_ms"`
-	// TTFBMs is from the request's start to the response's first byte.
-	TTFBMs   float64 `json:"ttfb_ms"`
-	Complete bool    `json:"complete"`
+	// StartMs is from the dial's start to the subscription's events_start frame.
+	StartMs float64 `json:"start_ms"`
+	// Complete is the events_start frame's replay_complete: the subscription replayed every event
+	// after the resume it was sent, so the page owes no refetch.
+	Complete bool `json:"complete"`
 	// ReplayFrames and ReplayBytes count the frames whose event id is at or below Head;
-	// ReplayMs is from the request's start to the last of them.
+	// ReplayMs is from the dial's start to the last of them.
 	ReplayFrames int     `json:"replay_frames"`
 	ReplayBytes  int64   `json:"replay_bytes"`
 	ReplayMs     float64 `json:"replay_ms"`
-	// Refetch is the refetch the reconnect made, nil when it carried a complete replay or the
-	// route mix has no dashboard route.
+	// Refetch is the refetch the reconnect made, nil when its subscription replayed in full or
+	// the route mix has no dashboard route.
 	Refetch *refetchRec `json:"refetch,omitempty"`
 }
 
@@ -104,8 +111,8 @@ type refetchRec struct {
 	LatencyMs []float64 `json:"latency_ms"`
 }
 
-// replayTally counts one connection's replayed frames: those whose event id is at or below the
-// head read just before the connection opened.
+// replayTally counts one socket's replayed frames: those whose event id is at or below the head
+// read just before the socket opened.
 type replayTally struct {
 	head   int64
 	frames int
@@ -114,7 +121,7 @@ type replayTally struct {
 }
 
 // add counts f when it is replayed and reports whether it is.
-func (t *replayTally) add(f sseFrame) bool {
+func (t *replayTally) add(f liveFrame) bool {
 	if f.id > t.head {
 		return false
 	}
@@ -160,41 +167,41 @@ func (h *eventHead) close() {
 	}
 }
 
-// checkStaleBacklog refuses -sse-stale on an event log that does not hold the staleBacklog rows a
-// stale stream goes back over.
+// checkStaleBacklog refuses -live-stale on an event log that does not hold the staleBacklog rows a
+// stale socket goes back over.
 func checkStaleBacklog(ctx context.Context, pgURL string) error {
 	conn, err := pgx.Connect(ctx, pgURL)
 	if err != nil {
-		return fmt.Errorf("-sse-stale: count the event log: %w", err)
+		return fmt.Errorf("-live-stale: count the event log: %w", err)
 	}
 	defer conn.Close(context.Background())
 	var rows int64
 	if err := conn.QueryRow(ctx, `select count(*) from events`).Scan(&rows); err != nil {
-		return fmt.Errorf("-sse-stale: count the event log: %w", err)
+		return fmt.Errorf("-live-stale: count the event log: %w", err)
 	}
 	if rows < staleBacklog {
-		return fmt.Errorf("-sse-stale: the event log holds %d rows, fewer than the %d a stale stream goes back over; extend the seed with stack.sh seed --min-events 13000", rows, staleBacklog)
+		return fmt.Errorf("-live-stale: the event log holds %d rows, fewer than the %d a stale socket goes back over; extend the seed with stack.sh seed --min-events 13000", rows, staleBacklog)
 	}
 	return nil
 }
 
-// refetcher makes the refetch a dashboard tab makes on a reconnect without a complete replay
-// (packages/dispatch/web/src/api/sse.ts onOpen refreshes every query the app holds): every
-// dashboard route of the mix once, all at once, as the stream's viewer, on the stream's issue.
+// refetcher makes the refetch a dashboard tab makes when a reconnect's subscription did not replay
+// in full (packages/dispatch/web/src/api/event-feed.ts refreshes every query the app holds): every
+// dashboard route of the mix once, all at once, as the socket's viewer, on the socket's issue.
 type refetcher struct {
 	a      *api
 	routes []route
 	issues []seedIssue // the issues in use
 }
 
-func (r refetcher) do(ctx context.Context, stream int) *refetchRec {
-	is := r.issues[stream%len(r.issues)]
+func (r refetcher) do(ctx context.Context, socket int) *refetchRec {
+	is := r.issues[socket%len(r.issues)]
 	out := &refetchRec{Requests: len(r.routes)}
 	var mu sync.Mutex
 	var wg sync.WaitGroup
 	for _, rt := range r.routes {
 		wg.Go(func() {
-			res := r.a.call(ctx, "GET", rt.render(is, is.Project), who{person: viewerName(stream)}, nil)
+			res := r.a.call(ctx, "GET", rt.render(is, is.Project), who{person: viewerName(socket)}, nil)
 			mu.Lock()
 			defer mu.Unlock()
 			out.Bytes += int64(len(res.body))
@@ -208,54 +215,61 @@ func (r refetcher) do(ctx context.Context, stream int) *refetchRec {
 	return out
 }
 
-// viewerName is the person a dashboard stream and its refetches are made as.
-func viewerName(stream int) string { return "viewer-" + strconv.Itoa(stream) }
+// viewerName is the person a dashboard socket and its refetches are made as.
+func viewerName(socket int) string { return "viewer-" + strconv.Itoa(socket) }
 
-// sseStreams are the dashboard SSE streams (-sse). Without resume, each connection opens with no
-// since, and a stream whose connection ended opens again after 1 s. With resume, a stream reopens
-// as the dashboard does: with since its last event id, after the dashboard's backoff
-// (reconnectDelay), and each reconnect is recorded. The first stale streams send
-// since = max(id) - staleBacklog on their first reconnect after the restart began.
-type sseStreams struct {
-	base   string
-	client *http.Client
-	// nonce is the run's marker nonce, whose markers readSSE finds in the frames.
-	nonce   int64
-	resume  bool
-	stale   int
-	head    func(context.Context) (int64, error)
-	refetch func(ctx context.Context, stream int) *refetchRec // nil: no refetch
+// liveSockets are the dashboard live sockets (-live). Without resume, each socket subscribes to
+// the events view from the feed's head, and one whose socket ended dials again after retry. With
+// resume, a socket reopens as a dashboard tab does: subscribing with since its last event id,
+// after the dashboard's backoff (reconnectDelay), and each reconnect is recorded. The first stale
+// sockets subscribe with since = max(id) - staleBacklog on their first reconnect after the
+// restart began.
+type liveSockets struct {
+	url    string
+	dialer *websocket.Dialer
+	// nonce is the run's marker nonce, whose markers readLive finds in the frames.
+	nonce int64
+	// retry is the wait before the next dial without resume; with it, reconnectDelay says.
+	retry time.Duration
+	// seed seeds each socket's reconnect jitter.
+	seed   uint64
+	resume bool
+	stale  int
+	head   func(context.Context) (int64, error)
+	// refetch is the refetch a reconnect that did not replay in full makes; nil: no refetch.
+	refetch func(ctx context.Context, socket int) *refetchRec
 	// restartBegun reports whether stack.sh restart-dispatch has started.
 	restartBegun func() bool
-	// frame receives every frame of every connection, replayed ones marked.
-	frame func(sseFrame)
+	// frame receives every frame of every socket, replayed ones marked.
+	frame func(liveFrame)
 	bytes atomic.Int64
 	mu    sync.Mutex
 	recs  []reconnectRec
 }
 
-// reconnects are the reconnects recorded so far, in the order their connections ended.
-func (s *sseStreams) reconnects() []reconnectRec {
+// reconnects are the reconnects recorded so far, in the order their sockets started.
+func (s *liveSockets) reconnects() []reconnectRec {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return append([]reconnectRec(nil), s.recs...)
 }
 
-// run drives stream i until ctx ends.
-func (s *sseStreams) run(ctx context.Context, i int) {
+// run drives socket i until ctx ends.
+func (s *liveSockets) run(ctx context.Context, i int) {
 	var lastID int64
-	var connEnd time.Time
+	var sockEnd time.Time
 	opened, staleDue := false, i < s.stale
 	attempt, failed := 0, 0
+	jitter := rand.New(rand.NewPCG(s.seed, uint64(i)))
+	header := http.Header{"X-Dispatch-User": {viewerName(i)}}
 	for ctx.Err() == nil {
 		reconnect := opened && s.resume
-		rec := reconnectRec{Stream: i}
-		url := s.base + "/api/v1/events"
+		rec := reconnectRec{Socket: i}
 		if reconnect {
 			head, err := s.head(ctx)
 			if err != nil {
 				failed++
-				sleepUntil(ctx, time.Now().Add(s.nextDelay(&attempt)))
+				sleepUntil(ctx, time.Now().Add(s.nextDelay(&attempt, jitter)))
 				continue
 			}
 			rec.Head = head
@@ -267,53 +281,58 @@ func (s *sseStreams) run(ctx context.Context, i int) {
 			default:
 				rec.Kind = reconnectNoID
 			}
-			if rec.Kind != reconnectNoID {
-				url += "?since=" + strconv.FormatInt(rec.Since, 10)
-			}
 		}
-		var firstByte atomic.Int64
-		trace := &httptrace.ClientTrace{GotFirstResponseByte: func() { firstByte.Store(time.Now().UnixNano()) }}
-		req, _ := http.NewRequestWithContext(httptrace.WithClientTrace(ctx, trace), "GET", url, nil)
-		req.Header.Set("X-Dispatch-User", viewerName(i))
-		req.Header.Set("Accept", "text/event-stream")
 		start := time.Now()
-		resp, err := s.client.Do(req)
-		opens := err == nil && resp.StatusCode == http.StatusOK
-		if err == nil && !opens {
-			_ = resp.Body.Close()
-		}
-		if !opens {
+		conn, resp, err := s.dialer.DialContext(ctx, s.url, header)
+		if err != nil {
+			if resp != nil {
+				_ = resp.Body.Close()
+			}
 			failed++
-			sleepUntil(ctx, time.Now().Add(s.nextDelay(&attempt)))
+			sleepUntil(ctx, time.Now().Add(s.nextDelay(&attempt, jitter)))
+			continue
+		}
+		var refetched chan *refetchRec
+		started := false
+		tally := replayTally{head: rec.Head}
+		stop := context.AfterFunc(ctx, func() { _ = conn.Close() })
+		n, _ := readLive(conn, s.nonce, rec.Since, time.Now,
+			func(at int64, replayComplete bool) {
+				if started { // a resubscribe within the socket, after Dispatch ended the feed
+					return
+				}
+				started = true
+				if !reconnect {
+					return
+				}
+				if rec.Kind == reconnectStale {
+					staleDue = false
+				}
+				rec.At, rec.AfterRestart = start, s.restartBegun()
+				rec.FailedAttempts, failed = failed, 0
+				rec.GapMs = float64(at-sockEnd.UnixNano()) / 1e6
+				rec.StartMs = float64(at-start.UnixNano()) / 1e6
+				rec.Complete = replayComplete
+				if !rec.Complete && s.refetch != nil {
+					refetched = make(chan *refetchRec, 1)
+					go func() { refetched <- s.refetch(ctx, i) }()
+				}
+			},
+			func(f liveFrame) {
+				lastID = max(lastID, f.id)
+				f.replay = tally.add(f)
+				s.frame(f)
+			})
+		stop()
+		_ = conn.Close()
+		s.bytes.Add(n)
+		sockEnd = time.Now()
+		if !started {
+			failed++
+			sleepUntil(ctx, time.Now().Add(s.nextDelay(&attempt, jitter)))
 			continue
 		}
 		attempt = 0
-		var refetched chan *refetchRec
-		if reconnect {
-			if rec.Kind == reconnectStale {
-				staleDue = false
-			}
-			rec.At, rec.AfterRestart = start, s.restartBegun()
-			rec.FailedAttempts, failed = failed, 0
-			rec.GapMs = float64(time.Since(connEnd)) / 1e6
-			if fb := firstByte.Load(); fb != 0 {
-				rec.TTFBMs = float64(fb-start.UnixNano()) / 1e6
-			}
-			rec.Complete = resp.Header.Get(replayHeader) == replayComplete
-			if !rec.Complete && s.refetch != nil {
-				refetched = make(chan *refetchRec, 1)
-				go func() { refetched <- s.refetch(ctx, i) }()
-			}
-		}
-		tally := replayTally{head: rec.Head}
-		n, _ := readSSE(resp.Body, s.nonce, time.Now, func(f sseFrame) {
-			lastID = max(lastID, f.id)
-			f.replay = tally.add(f)
-			s.frame(f)
-		})
-		s.bytes.Add(n)
-		_ = resp.Body.Close()
-		connEnd = time.Now()
 		if reconnect {
 			rec.ReplayFrames, rec.ReplayBytes = tally.frames, tally.bytes
 			if tally.frames > 0 {
@@ -327,17 +346,17 @@ func (s *sseStreams) run(ctx context.Context, i int) {
 			s.mu.Unlock()
 		}
 		opened = true
-		sleepUntil(ctx, time.Now().Add(s.nextDelay(&attempt)))
+		sleepUntil(ctx, time.Now().Add(s.nextDelay(&attempt, jitter)))
 	}
 }
 
-// nextDelay is the wait before a stream's next attempt: 1 s without resume, the dashboard's
+// nextDelay is the wait before a socket's next attempt: retry without resume, the dashboard's
 // backoff with it, counting the attempt.
-func (s *sseStreams) nextDelay(attempt *int) time.Duration {
+func (s *liveSockets) nextDelay(attempt *int, jitter *rand.Rand) time.Duration {
 	if !s.resume {
-		return time.Second
+		return s.retry
 	}
-	d := reconnectDelay(*attempt)
+	d := reconnectDelay(*attempt, jitter)
 	*attempt++
 	return d
 }
@@ -348,10 +367,10 @@ type reconnectGroup struct {
 	Complete       int `json:"complete"`
 	AfterRestart   int `json:"after_restart"`
 	FailedAttempts int `json:"failed_attempts"`
-	// GapMs, TTFBMs, ReplayFrames, ReplayBytes and ReplayMs hold one value per reconnect;
+	// GapMs, StartMs, ReplayFrames, ReplayBytes and ReplayMs hold one value per reconnect;
 	// ReplayMs only those that replayed a frame.
 	GapMs             stat  `json:"gap_ms"`
-	TTFBMs            stat  `json:"ttfb_ms"`
+	StartMs           stat  `json:"start_ms"`
 	ReplayFrames      stat  `json:"replay_frames"`
 	ReplayBytes       stat  `json:"replay_bytes"`
 	ReplayMs          stat  `json:"replay_ms"`
@@ -366,22 +385,22 @@ type reconnectGroup struct {
 	RefetchMs       stat  `json:"refetch_ms"`
 }
 
-// reconnectSummary is the window's reconnects of the resuming SSE streams.
+// reconnectSummary is the window's reconnects of the resuming live sockets.
 type reconnectSummary struct {
-	Stale int `json:"stale_streams"`
+	Stale int `json:"stale_sockets"`
 	// RefetchRoutes are the routes each refetch issues.
 	RefetchRoutes []string `json:"refetch_routes"`
 	// Groups are by kind (last_id, stale, no_id), and "all".
 	Groups map[string]reconnectGroup `json:"groups"`
 }
 
-// summarizeReconnects reduces the reconnects whose request started in the window.
+// summarizeReconnects reduces the reconnects whose dial started in the window.
 func summarizeReconnects(recs []reconnectRec, stale int, routes []route, inWindow func(time.Time) bool) *reconnectSummary {
 	out := &reconnectSummary{Stale: stale, RefetchRoutes: []string{}, Groups: map[string]reconnectGroup{}}
 	for _, r := range routes {
 		out.RefetchRoutes = append(out.RefetchRoutes, r.Name)
 	}
-	type values struct{ gap, ttfb, frames, bytes, replayMs, refetchMs []float64 }
+	type values struct{ gap, start, frames, bytes, replayMs, refetchMs []float64 }
 	vals := map[string]*values{}
 	for _, r := range recs {
 		if !inWindow(r.At) {
@@ -404,7 +423,7 @@ func summarizeReconnects(recs []reconnectRec, stale int, routes []route, inWindo
 			g.ReplayFramesTotal += r.ReplayFrames
 			g.ReplayBytesTotal += r.ReplayBytes
 			v.gap = append(v.gap, r.GapMs)
-			v.ttfb = append(v.ttfb, r.TTFBMs)
+			v.start = append(v.start, r.StartMs)
 			v.frames = append(v.frames, float64(r.ReplayFrames))
 			v.bytes = append(v.bytes, float64(r.ReplayBytes))
 			if r.ReplayFrames > 0 {
@@ -422,7 +441,7 @@ func summarizeReconnects(recs []reconnectRec, stale int, routes []route, inWindo
 	}
 	for key, g := range out.Groups {
 		v := vals[key]
-		g.GapMs, g.TTFBMs, g.ReplayFrames, g.ReplayBytes = mkStat(v.gap), mkStat(v.ttfb), mkStat(v.frames), mkStat(v.bytes)
+		g.GapMs, g.StartMs, g.ReplayFrames, g.ReplayBytes = mkStat(v.gap), mkStat(v.start), mkStat(v.frames), mkStat(v.bytes)
 		g.ReplayMs, g.RefetchMs = mkStat(v.replayMs), mkStat(v.refetchMs)
 		out.Groups[key] = g
 	}

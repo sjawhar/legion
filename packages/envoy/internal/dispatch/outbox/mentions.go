@@ -128,7 +128,7 @@ type mentionState int
 const (
 	// mentionSent: an attempt reached the session, so the mention delivered the comment.
 	mentionSent mentionState = iota
-	// mentionResending: an attempt the API's stranded pass resends (model.MentionResumedSQL).
+	// mentionResending: an attempt the delivery sweep resends (model.MentionResumedSQL).
 	mentionResending
 	// mentionSending: an attempt whose send is live (model.MentionLiveSQL).
 	mentionSending
@@ -189,7 +189,7 @@ func (a *attempt) leftToMention(sessionID string) bool {
 // left to the mention. A destination a fallback row owns is the fallback pass's, so the copy is
 // skipped. A mention that reached the session delivered the comment, so the copy is skipped. A
 // mention still being sent may yet, so the copy is held back and the attempt marked deferred, to
-// be decided again on the next scan. A mention the stranded pass resends is that resend's: the
+// be decided again on the next scan. A mention the delivery sweep resends is that resend's: the
 // copy is skipped and held as a fallback row (mentionComment.holdFallbackCopy), which the fallback
 // pass publishes should the resend fail (publishFallbackCopies); an insert that fails holds the
 // copy back and fails the attempt, so the event is retried. A destination this event already
@@ -325,18 +325,18 @@ func payloadMentionedSessions(payload any) map[string]struct{} {
 
 // mentionDeliveryQuery groups a comment's mention attempts by the session each counts under
 // (model.MentionSessionSQL) and by its target, and reports of each group whether an attempt was
-// sent, is resent by the stranded pass (model.MentionResumedSQL), is live (model.MentionLiveSQL),
+// sent, is owed to the delivery sweep (model.MentionResumedSQL), is live (model.MentionLiveSQL),
 // and is abandoned (model.MentionAbandonedSQL), and the mode of its latest attempt that failed or
 // is abandoned, null when none did (mentionDeliveries.fallbackKeys).
 var mentionDeliveryQuery = `
 	select ` + model.MentionSessionSQL + `,
 	       target,
 	       bool_or(state = 'sent'),
-	       bool_or(state = 'pending' and ` + model.MentionResumedSQL + `),
-	       bool_or(state = 'pending' and ` + model.MentionLiveSQL + `),
-	       bool_or(state = 'pending' and ` + model.MentionAbandonedSQL + `),
+	       bool_or(state = 'pending' and ` + model.MentionResumedSQL("comment_deliveries") + `),
+	       bool_or(state = 'pending' and ` + model.MentionLiveSQL("comment_deliveries") + `),
+	       bool_or(state = 'pending' and ` + model.MentionAbandonedSQL("comment_deliveries") + `),
 	       (array_agg(delivery order by attempt desc)
-	           filter (where state = 'failed' or (state = 'pending' and ` + model.MentionAbandonedSQL + `)))[1]
+	           filter (where state = 'failed' or (state = 'pending' and ` + model.MentionAbandonedSQL("comment_deliveries") + `)))[1]
 	from comment_deliveries
 	where comment_id = $1
 	group by 1, 2
@@ -442,7 +442,7 @@ func (c mentionComment) holdFallbackCopy(kind mentionKind, key, destination stri
 // settleAbandoned settles failed, with mentionAbandonedError, every attempt of the comment whose
 // key of kind is key and whose send was abandoned (model.MentionAbandonedSQL), appends each one's
 // comment.delivery receipt as the API's sender would (the comment's author its actor), and reports
-// the state key's attempts are in then: sent, resent by the stranded pass, being sent, or failed.
+// the state key's attempts are in then: sent, owed to the delivery sweep, being sent, or failed.
 // It is one transaction, and it takes the comment's owner lock before any attempt row, the order
 // the API's claim and settle transactions take them in (claimCommentDeliveryAttempt,
 // settleDeliveryAttempt in internal/dispatch/api), so it and a sender's claim of the same attempt
@@ -469,7 +469,7 @@ func (c mentionComment) settleAbandoned(kind mentionKind, key string) (state men
 	}
 	rows, err := tx.Query(ctx, `
 		update comment_deliveries set state = 'failed', error = $3
-		where comment_id = $1 and `+kind.attemptKey()+` = $2 and state = 'pending' and `+model.MentionAbandonedSQL+`
+		where comment_id = $1 and `+kind.attemptKey()+` = $2 and state = 'pending' and `+model.MentionAbandonedSQL("comment_deliveries")+`
 		returning target, attempt, delivery, session_id, reply_id::text
 	`, commentID, key, mentionAbandonedError)
 	if err != nil {
@@ -502,7 +502,7 @@ func (c mentionComment) settleAbandoned(kind mentionKind, key string) (state men
 	var sent, resending, pending bool
 	if err := tx.QueryRow(ctx, `
 		select coalesce(bool_or(state = 'sent'), false),
-		       coalesce(bool_or(state = 'pending' and `+model.MentionResumedSQL+`), false),
+		       coalesce(bool_or(state = 'pending' and `+model.MentionResumedSQL("comment_deliveries")+`), false),
 		       coalesce(bool_or(state = 'pending'), false)
 		from comment_deliveries
 		where comment_id = $1 and `+kind.attemptKey()+` = $2
@@ -580,11 +580,11 @@ func failedFallbackCopy(held fallbackCopy) fallbackRecord {
 // before or after that settle under the comment's owner lock, so whichever commits first acts on
 // the attempt and the other finds it taken.
 //
-// A mention attempt a sender claimed and never settled, whose claim lapsed within
-// model.StrandedMentionWindow (model.MentionResumedSQL), is resent by the API's stranded pass
-// (model.MentionStrandedSQL) under the attempt's own idempotency key: its sender died with the send
-// in flight, perhaps after the listener took it, and the listener drops the resend as a repeat
-// when it did. The outbox cannot tell which, so it neither publishes that copy nor waits on the
+// A mention attempt no sender holds that the delivery sweep owes (model.MentionResumedSQL) is
+// resent by that sweep (resumeOwedDeliveries in internal/dispatch/api) under the attempt's own
+// idempotency key: the process that queued it died with the send in flight, or never started it,
+// perhaps after the listener took it, and the listener drops the resend as a repeat when it did.
+// The outbox cannot tell which, so it neither publishes that copy nor waits on the
 // resend. It records the copy it held back as a comment_fallback_copies row instead, keyed by the
 // comment and the exact destination topic the copy would have gone to and naming the key whose
 // attempts decide it (the session, or the target of a route suppressed by that string alone),

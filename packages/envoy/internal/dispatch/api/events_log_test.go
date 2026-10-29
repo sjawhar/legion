@@ -143,14 +143,14 @@ func TestEventLogRefusesAnInvalidQuery(t *testing.T) {
 	}
 }
 
-// The log admits exactly whom the event stream admits: any signed-in human or agent, and no
+// The log admits exactly whom the live socket admits: any signed-in human or agent, and no
 // anonymous caller.
-func TestEventLogRefusesAnUnauthenticatedCallerAsTheStreamDoes(t *testing.T) {
+func TestEventLogRefusesAnUnauthenticatedCallerAsTheLiveSocketDoes(t *testing.T) {
 	handler, _ := newTestHandlerWithStore(t)
-	stream := dispatchRequest(t, handler, http.MethodGet, "/api/v1/events", nil, "")
+	socket := dispatchRequest(t, handler, http.MethodGet, "/ws/live", nil, "")
 	log := dispatchRequest(t, handler, http.MethodGet, "/api/v1/events/log", nil, "")
-	if stream.Code != http.StatusUnauthorized || log.Code != stream.Code || log.Body.String() != stream.Body.String() {
-		t.Fatalf("anonymous event log: %d %s; the stream answers %d %s", log.Code, log.Body.String(), stream.Code, stream.Body.String())
+	if socket.Code != http.StatusUnauthorized || log.Code != socket.Code || log.Body.String() != socket.Body.String() {
+		t.Fatalf("anonymous event log: %d %s; the live socket answers %d %s", log.Code, log.Body.String(), socket.Code, socket.Body.String())
 	}
 	if response := sessionRequest(t, handler, http.MethodGet, "/api/v1/events/log", nil); response.Code != http.StatusOK {
 		t.Fatalf("bearer event log: status=%d body=%s", response.Code, response.Body.String())

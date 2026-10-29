@@ -1,8 +1,0 @@
-kind: Added
-body: |-
-    Every registration names the plugin: `plugin` `@sjawhar/opencode-legion-envoy` and
-    `plugin_version` this package's version, which the listener's `GET /v1/sessions` and
-    `GET /v1/registry/<id>` show.
-time: 2026-10-28T10:33:13.307995721Z
-custom:
-    Issue: pr2331

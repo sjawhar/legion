@@ -1,11 +1,11 @@
-/** `bun e2e/delivery-live-probe.ts`: an agent's client for `GET /ws/delivery`, the websocket the
- *  Delivery and Pipeline pages keep themselves current over. It subscribes one view under a bearer
- *  token and writes one JSON line per frame Dispatch sends, applying each to the body it holds with
- *  the page's own `applyDelta` and `applyRevs`. It reconnects as the page does: within the first
- *  attempt's spread (up to 2 s) after Dispatch's restart close (1012), with backoff after any
- *  other close, and in place of a socket that has carried no frame for two heartbeats; each new
- *  connection resumes from the last change it applied. The watch ends after `--minutes`, on
- *  Ctrl-C, or when Dispatch refuses the view.
+/** `bun e2e/delivery-live-probe.ts`: an agent's client for `GET /ws/live`, the websocket the
+ * Delivery and Pipeline pages keep themselves current over. It subscribes one view under a bearer
+ * token and writes one JSON line per frame Dispatch sends, applying each to the body it holds with
+ * the page's own `applyDelta` and `applyRevs`. It reconnects as the page does: at once after
+ * Dispatch's rotation (4001), within the first attempt's spread (up to 2 s) after Dispatch's
+ * restart close (1012), with backoff after any other close, and by replacing a socket that has
+ * carried no frame for three heartbeats; each new connection resumes from the last change it
+ * applied. The watch ends after `--minutes`, on Ctrl-C, or when Dispatch refuses the view.
  *  Then `--body-file` writes the body it holds, and `--compare` reads the matching GET routes for
  *  the last window it applied and writes, for each, whether the pull request ids, run ids and every
  *  measure are equal.
@@ -18,23 +18,30 @@
  *  contract; 2 on a usage error. */
 import { writeFileSync } from "node:fs";
 import { parseArgs } from "node:util";
+import { LIVE_SOCKET_MAX_AGE_CLOSE } from "@legion/contracts";
 
-import { DELIVERY_LIVE_SILENT_MS } from "../web/src/api/delivery-live";
-import { reconnectDelayMs } from "../web/src/api/live";
+import { LIVE_SOCKET_SILENT_MS, reconnectDelayMs } from "../web/src/api/live-socket";
 import type {
   DeliveryLiveBody,
   DeliveryLiveCounts,
   DeliveryLiveDelta,
   DeliveryLiveMap,
   DeliveryLiveRevs,
-  DeliveryLiveServerFrame,
-  DeliveryLiveSubscribe,
   DeliveryLiveView,
   DeliveryMeasuresResponse,
   DeliveryPipelineResponse,
   DeliveryTimelineResponse,
+  LiveServerFrame,
+  LiveSubscribe,
 } from "../web/src/api/types";
 import { applyDelta, applyRevs } from "../web/src/features/delivery/lib/applyDelta";
+
+/** The frames `GET /ws/live` sends: a delivery view's own, the freshness verdict, a refusal and
+ * the heartbeat. */
+type DeliveryServerFrame = Extract<
+  LiveServerFrame,
+  { readonly type: "snapshot" | "delta" | "freshness" | "error" | "heartbeat" }
+>;
 
 /** A delta's changes to one list: the ids of the items it upserts, whole, and of those that left. */
 export interface ProbeListChanges {
@@ -49,7 +56,7 @@ export interface ProbeListChanges {
  *  carry is null; an error frame adds its code and message, a freshness frame the verdict. */
 export interface ProbeFrameLine {
   readonly at: string;
-  readonly type: DeliveryLiveServerFrame["type"];
+  readonly type: DeliveryServerFrame["type"];
   readonly bytes: number;
   readonly seq: string | null;
   readonly changed_at: string | null;
@@ -122,7 +129,7 @@ const SUB = "probe";
 /** Dispatch closes every socket with this code when it shuts down; the page reconnects within the
  *  first attempt's spread (`reconnectDelayMs(0)`). */
 const SERVICE_RESTART = 1012;
-/** The code the page closes a silent socket with before it opens another (api/delivery-live.ts). */
+/** The code the page closes a silent socket with before it opens another (api/live-socket.ts). */
 const REPLACED = 4000;
 /** The error codes that refuse what the probe sent: its view or its frame. Waiting cannot change
  *  either answer, so the watch ends; any other code (DELIVERY_NOT_CONFIGURED) is answered again
@@ -162,7 +169,7 @@ const PIPELINE_FIELDS: Readonly<Record<PipelineField, true>> = {
   targets: true,
 };
 
-const SERVER_FRAME_TYPES: Readonly<Record<DeliveryLiveServerFrame["type"], true>> = {
+const SERVER_FRAME_TYPES: Readonly<Record<DeliveryServerFrame["type"], true>> = {
   delta: true,
   error: true,
   freshness: true,
@@ -193,7 +200,7 @@ const now = () => new Date().toISOString();
 const write = (line: ProbeLine) => console.log(JSON.stringify(line));
 const message = (error: unknown) => (error instanceof Error ? error.message : String(error));
 
-function isServerFrame(value: unknown): value is DeliveryLiveServerFrame {
+function isServerFrame(value: unknown): value is DeliveryServerFrame {
   return (
     typeof value === "object" &&
     value !== null &&
@@ -359,7 +366,7 @@ function changes(delta: DeliveryLiveDelta): Sections {
   };
 }
 
-function frameLine(frame: DeliveryLiveServerFrame, bytes: number): ProbeFrameLine {
+function frameLine(frame: DeliveryServerFrame, bytes: number): ProbeFrameLine {
   const line: ProbeFrameLine = {
     at: now(),
     bytes,
@@ -391,7 +398,7 @@ function frameLine(frame: DeliveryLiveServerFrame, bytes: number): ProbeFrameLin
  *  resolves with the body the probe holds then, or null when no snapshot arrived. Rejects when the
  *  first connection is refused, the view is refused, or a frame breaks the contract. */
 async function watch(options: Options, token: string): Promise<ProbeHeld | null> {
-  const liveUrl = new URL("/ws/delivery", options.url);
+  const liveUrl = new URL("/ws/live", options.url);
   liveUrl.protocol = options.url.protocol === "https:" ? "wss:" : "ws:";
   let held: ProbeHeld | null = null;
   let socket: WebSocket | null = null;
@@ -403,7 +410,7 @@ async function watch(options: Options, token: string): Promise<ProbeHeld | null>
   const ended = Promise.withResolvers<Error | undefined>();
   const fail = (reason: string) => ended.resolve(new Error(reason));
 
-  const subscribeFrame = (): DeliveryLiveSubscribe =>
+  const subscribeFrame = (): LiveSubscribe =>
     held === null
       ? { sub: SUB, type: "subscribe", view: options.view }
       : {
@@ -413,7 +420,7 @@ async function watch(options: Options, token: string): Promise<ProbeHeld | null>
           view: options.view,
         };
 
-  const apply = (frame: DeliveryLiveServerFrame) => {
+  const apply = (frame: DeliveryServerFrame) => {
     if (frame.type === "error") {
       if (frame.sub === SUB && Object.hasOwn(REFUSALS, frame.code)) {
         fail(`Dispatch refused the view: ${frame.code}: ${frame.message}`);
@@ -491,6 +498,10 @@ async function watch(options: Options, token: string): Promise<ProbeHeld | null>
       fail(`Dispatch refused the connection to ${liveUrl.href}: ${reason || `close ${code}`}`);
       return;
     }
+    if (code === LIVE_SOCKET_MAX_AGE_CLOSE) {
+      open();
+      return;
+    }
     // As the page does: Dispatch's restart close starts the backoff over, so the next attempt
     // waits within the first attempt's spread.
     if (code === SERVICE_RESTART) attempt = 0;
@@ -499,12 +510,12 @@ async function watch(options: Options, token: string): Promise<ProbeHeld | null>
     cancelReconnect = () => clearTimeout(handle);
   };
 
-  // A socket that carried no frame for two heartbeats is dead without knowing it: replace it.
+  // A socket that carried no frame for three heartbeats is dead without knowing it: replace it.
   const silence = setInterval(() => {
-    if (socket === null || Date.now() - lastFrameAt <= DELIVERY_LIVE_SILENT_MS) return;
+    if (socket === null || Date.now() - lastFrameAt <= LIVE_SOCKET_SILENT_MS) return;
     const silent = socket;
     socket = null;
-    const reason = `no frame for ${DELIVERY_LIVE_SILENT_MS / 1000} s`;
+    const reason = `no frame for ${LIVE_SOCKET_SILENT_MS / 1000} s`;
     write({ at: now(), code: REPLACED, reason, type: "close" });
     silent.close(REPLACED, reason);
     open();

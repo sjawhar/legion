@@ -2,37 +2,38 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
+	"math/rand/v2"
 	"net/http"
 	"net/http/httptest"
 	"slices"
-	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
+
+	"github.com/gorilla/websocket"
 )
 
-func frameText(id int64) string {
-	return fmt.Sprintf("id: %d\nevent: comment.created\ndata: {\"id\":%d,\"type\":\"comment.created\"}\n\n", id, id)
+// liveFrameText is one event frame of the events view, as Dispatch sends it.
+func liveFrameText(id int64) string {
+	return fmt.Sprintf(`{"type":"event","sub":"events","id":"%d","event":{"id":%d,"type":"comment.created"}}`, id, id)
 }
 
 func TestReplayTallyCountsTheFramesAtOrBelowTheHeadWithTheirBytes(t *testing.T) {
-	stream := ": open\n\n" + frameText(5) + ": heartbeat\n\n" + frameText(6) + frameText(7)
 	tally := replayTally{head: 6}
 	var replayed []int64
-	if _, err := readSSE(strings.NewReader(stream), 0, time.Now, func(f sseFrame) {
+	for _, f := range []liveFrame{{id: 5, bytes: 120, at: 10}, {id: 6, bytes: 80, at: 20}, {id: 7, bytes: 90, at: 30}} {
 		if tally.add(f) {
 			replayed = append(replayed, f.id)
 		}
-	}); err == nil {
-		t.Fatal("readSSE ended without the body's end")
 	}
 	if !slices.Equal(replayed, []int64{5, 6}) {
 		t.Fatalf("replayed %v, want 5 and 6 (at or below head 6)", replayed)
 	}
-	if want := int64(len(frameText(5)) + len(frameText(6))); tally.frames != 2 || tally.bytes != want {
-		t.Fatalf("tally %d frames %d bytes, want 2 frames %d bytes (comment lines are not frame bytes)", tally.frames, tally.bytes, want)
+	if tally.frames != 2 || tally.bytes != 200 || tally.last != 20 {
+		t.Fatalf("tally %d frames %d bytes last %d, want 2 frames, 200 bytes and the last replayed frame's arrival 20", tally.frames, tally.bytes, tally.last)
 	}
 }
 
@@ -59,13 +60,21 @@ func TestRefetchRoutesAreTheDefaultMixsDashboardRoutes(t *testing.T) {
 }
 
 func TestReconnectDelayIsTheDashboardsBackoff(t *testing.T) {
-	var got []time.Duration
-	for attempt := range 7 {
-		got = append(got, reconnectDelay(attempt))
+	r := rand.New(rand.NewPCG(7, 11))
+	for range 200 {
+		if d := reconnectDelay(0, r); d < 0 || d >= reconnectSpread {
+			t.Fatalf("the first attempt waited %s, want the spread [0, %s)", d, reconnectSpread)
+		}
 	}
-	want := []time.Duration{time.Second, 2 * time.Second, 4 * time.Second, 8 * time.Second, 16 * time.Second, 30 * time.Second, 30 * time.Second}
-	if !slices.Equal(got, want) {
-		t.Fatalf("delays %v, want %v", got, want)
+	ceilings := map[int]time.Duration{1: 2 * time.Second, 2: 4 * time.Second, 3: 8 * time.Second,
+		4: 16 * time.Second, 5: 30 * time.Second, 6: 30 * time.Second, 40: 30 * time.Second}
+	for attempt, ceiling := range ceilings {
+		for range 200 {
+			d := reconnectDelay(attempt, r)
+			if d < ceiling/2 || d >= ceiling {
+				t.Fatalf("attempt %d waited %s, want half of %s to the whole of it", attempt, d, ceiling)
+			}
+		}
 	}
 }
 
@@ -73,10 +82,10 @@ func TestSummarizeReconnectsGroupsTheWindowsReconnectsByKind(t *testing.T) {
 	winStart := time.Unix(1000, 0)
 	inWindow := func(at time.Time) bool { return !at.Before(winStart) }
 	recs := []reconnectRec{
-		{Kind: reconnectLastID, At: winStart.Add(time.Second), Complete: true, ReplayFrames: 3, ReplayBytes: 300, ReplayMs: 20, TTFBMs: 4, GapMs: 1500},
-		{Kind: reconnectLastID, At: winStart.Add(2 * time.Second), AfterRestart: true, FailedAttempts: 2, ReplayFrames: 1, ReplayBytes: 100, ReplayMs: 10, TTFBMs: 6, GapMs: 7000,
+		{Kind: reconnectLastID, At: winStart.Add(time.Second), Complete: true, ReplayFrames: 3, ReplayBytes: 300, ReplayMs: 20, StartMs: 4, GapMs: 1500},
+		{Kind: reconnectLastID, At: winStart.Add(2 * time.Second), AfterRestart: true, FailedAttempts: 2, ReplayFrames: 1, ReplayBytes: 100, ReplayMs: 10, StartMs: 6, GapMs: 7000,
 			Refetch: &refetchRec{Requests: 6, Failures: 1, Bytes: 5000, LatencyMs: []float64{10, 20, 30, 40, 50, 60}}},
-		{Kind: reconnectStale, At: winStart.Add(3 * time.Second), AfterRestart: true, TTFBMs: 9, GapMs: 7000,
+		{Kind: reconnectStale, At: winStart.Add(3 * time.Second), AfterRestart: true, StartMs: 9, GapMs: 7000,
 			Refetch: &refetchRec{Requests: 6, Bytes: 6000, LatencyMs: []float64{15, 25, 35, 45, 55, 65}}},
 		{Kind: reconnectLastID, At: winStart.Add(-time.Second), ReplayFrames: 99}, // before the window
 	}
@@ -92,6 +101,9 @@ func TestSummarizeReconnectsGroupsTheWindowsReconnectsByKind(t *testing.T) {
 	if want := (stat{N: 2, P50: 10, P90: 10, P99: 10, Max: 20}); all.ReplayMs != want {
 		t.Fatalf("replay ms %+v, want %+v: only the reconnects that replayed a frame", all.ReplayMs, want)
 	}
+	if all.StartMs.Max != 9 {
+		t.Fatalf("events_start ms %+v, want one value per reconnect", all.StartMs)
+	}
 	stale := got.Groups[reconnectStale]
 	if stale.Reconnects != 1 || stale.ReplayFrames.Max != 0 || stale.Refetches != 1 || stale.RefetchBytes != 6000 {
 		t.Fatalf("stale %+v", stale)
@@ -104,58 +116,80 @@ func TestSummarizeReconnectsGroupsTheWindowsReconnectsByKind(t *testing.T) {
 	}
 }
 
-// sseServer serves /api/v1/events: each request gets the frames its handler picks, then the
-// connection ends.
-type sseServer struct {
-	mu       sync.Mutex
-	requests []string // the raw query of each request
-	respond  func(n int, query string) (complete bool, ids []int64)
+// liveServer serves /ws/live: each socket's events subscription gets the events_start its handler
+// picks and the frames after it, then the socket ends.
+type liveServer struct {
+	mu      sync.Mutex
+	resumes []string // the resume each subscribe frame sent, "" for none
+	respond func(n int, since string) (replayComplete bool, ids []int64)
 }
 
-func (s *sseServer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+func (s *liveServer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	conn, err := (&websocket.Upgrader{}).Upgrade(w, r, nil)
+	if err != nil {
+		return
+	}
+	defer conn.Close()
+	_, data, err := conn.ReadMessage()
+	if err != nil {
+		return
+	}
+	var sub struct {
+		Resume struct {
+			Since string `json:"since"`
+		} `json:"resume"`
+	}
+	if err := json.Unmarshal(data, &sub); err != nil {
+		return
+	}
 	s.mu.Lock()
-	n := len(s.requests)
-	s.requests = append(s.requests, r.URL.RawQuery)
+	n := len(s.resumes)
+	s.resumes = append(s.resumes, sub.Resume.Since)
 	s.mu.Unlock()
-	complete, ids := s.respond(n, r.URL.RawQuery)
-	if complete {
-		w.Header().Set(replayHeader, replayComplete)
+	complete, ids := s.respond(n, sub.Resume.Since)
+	start := fmt.Sprintf(`{"type":"events_start","sub":"events","since":"%s","replay_complete":%t}`, sub.Resume.Since, complete)
+	if err := conn.WriteMessage(websocket.TextMessage, []byte(start)); err != nil {
+		return
 	}
-	w.Header().Set("Content-Type", "text/event-stream")
-	fmt.Fprint(w, ": open\n\n")
 	for _, id := range ids {
-		fmt.Fprint(w, frameText(id))
+		if err := conn.WriteMessage(websocket.TextMessage, []byte(liveFrameText(id))); err != nil {
+			return
+		}
 	}
 }
 
-func TestResumingStreamsResumeFromTheLastIDAndGoStaleAtTheRestart(t *testing.T) {
-	srv := &sseServer{respond: func(n int, query string) (bool, []int64) {
+func TestResumingSocketsResumeFromTheLastIDAndGoStaleAtTheRestart(t *testing.T) {
+	srv := &liveServer{respond: func(n int, since string) (bool, []int64) {
 		switch n {
 		case 0:
-			return false, []int64{41, 42} // first connection: live frames, then the server ends it
+			return false, []int64{41, 42} // the first socket: live frames, then Dispatch ends it
 		case 1:
 			return true, []int64{42, 43} // resumes since 42; the head was 43; a complete replay
 		default:
-			return false, nil // stale reconnect: nothing replayed, no complete header
+			return false, nil // the stale reconnect: nothing replayed, no complete replay
 		}
 	}}
 	ts := httptest.NewServer(srv)
 	defer ts.Close()
+	url, err := liveSocketURL(ts.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
 	var restarted atomic.Bool
 	var heads atomic.Int64
 	heads.Store(43)
 	var refetched atomic.Int64
-	var frames []sseFrame
+	var frames []liveFrame
 	var framesMu sync.Mutex
-	streams := &sseStreams{
-		base: ts.URL, client: ts.Client(), resume: true, stale: 1,
+	sockets := &liveSockets{
+		url: url, dialer: &websocket.Dialer{}, retry: 10 * time.Millisecond, resume: true, stale: 1,
 		head:         func(context.Context) (int64, error) { return heads.Load(), nil },
 		restartBegun: restarted.Load,
 		refetch: func(context.Context, int) *refetchRec {
 			refetched.Add(1)
 			return &refetchRec{Requests: 6, Bytes: 600}
 		},
-		frame: func(f sseFrame) {
+		frame: func(f liveFrame) {
 			framesMu.Lock()
 			frames = append(frames, f)
 			framesMu.Unlock()
@@ -165,10 +199,10 @@ func TestResumingStreamsResumeFromTheLastIDAndGoStaleAtTheRestart(t *testing.T) 
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
-		streams.run(ctx, 0)
+		sockets.run(ctx, 0)
 	}()
 	deadline := time.Now().Add(20 * time.Second)
-	for len(streams.reconnects()) < 1 {
+	for len(sockets.reconnects()) < 1 {
 		if time.Now().After(deadline) {
 			t.Fatal("no reconnect recorded")
 		}
@@ -176,7 +210,7 @@ func TestResumingStreamsResumeFromTheLastIDAndGoStaleAtTheRestart(t *testing.T) 
 	}
 	heads.Store(20000)
 	restarted.Store(true)
-	for len(streams.reconnects()) < 2 {
+	for len(sockets.reconnects()) < 2 {
 		if time.Now().After(deadline) {
 			t.Fatal("no stale reconnect recorded")
 		}
@@ -186,22 +220,22 @@ func TestResumingStreamsResumeFromTheLastIDAndGoStaleAtTheRestart(t *testing.T) 
 	<-done
 
 	srv.mu.Lock()
-	queries := slices.Clone(srv.requests[:3])
+	resumes := slices.Clone(srv.resumes[:3])
 	srv.mu.Unlock()
-	if want := []string{"", "since=42", fmt.Sprintf("since=%d", 20000-staleBacklog)}; !slices.Equal(queries, want) {
-		t.Fatalf("queries %q, want %q", queries, want)
+	if want := []string{"", "42", fmt.Sprint(20000 - staleBacklog)}; !slices.Equal(resumes, want) {
+		t.Fatalf("resumes %q, want %q", resumes, want)
 	}
-	recs := streams.reconnects()
+	recs := sockets.reconnects()
 	resumed, stale := recs[0], recs[1]
 	if resumed.Kind != reconnectLastID || resumed.Since != 42 || resumed.Head != 43 || !resumed.Complete || resumed.Refetch != nil ||
-		resumed.ReplayFrames != 2 || resumed.ReplayBytes != int64(len(frameText(42))+len(frameText(43))) || resumed.AfterRestart {
+		resumed.ReplayFrames != 2 || resumed.ReplayBytes != int64(len(liveFrameText(42))+len(liveFrameText(43))) || resumed.AfterRestart {
 		t.Fatalf("resumed reconnect %+v", resumed)
 	}
 	if stale.Kind != reconnectStale || stale.Since != 20000-staleBacklog || stale.Complete || stale.Refetch == nil || stale.Refetch.Requests != 6 || !stale.AfterRestart {
 		t.Fatalf("stale reconnect %+v", stale)
 	}
 	if refetched.Load() != 1 {
-		t.Fatalf("refetches %d, want 1: only the reconnect without a complete replay refetches", refetched.Load())
+		t.Fatalf("refetches %d, want 1: only the reconnect whose subscription did not replay in full refetches", refetched.Load())
 	}
 	framesMu.Lock()
 	defer framesMu.Unlock()
@@ -212,6 +246,6 @@ func TestResumingStreamsResumeFromTheLastIDAndGoStaleAtTheRestart(t *testing.T) 
 		}
 	}
 	if !slices.Equal(replayed, []int64{42, 43}) {
-		t.Fatalf("replayed frames %v, want the resume's 42 and 43, not the first connection's", replayed)
+		t.Fatalf("replayed frames %v, want the resume's 42 and 43, not the first socket's", replayed)
 	}
 }

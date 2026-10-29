@@ -10,7 +10,6 @@ import (
 	"log"
 	"math"
 	"math/rand/v2"
-	"net/http"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -21,6 +20,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/gorilla/websocket"
 	"github.com/jackc/pgx/v5"
 )
 
@@ -42,12 +42,12 @@ type runConfig struct {
 	mix          eventMix
 	routes       routeMix
 	human        float64
-	sse          int
-	// sseResume makes each SSE stream reopen as the dashboard does, with since its last event id,
-	// and records each reconnect; sseStale streams resume once, at the restart, from staleBacklog
-	// below the event log's max(id).
-	sseResume bool
-	sseStale  int
+	live         int
+	// liveResume makes each dashboard live socket reopen as the dashboard does, subscribing with
+	// since its last event id, and records each reconnect; liveStale sockets resume once, at the
+	// restart, from staleBacklog below the event log's max(id).
+	liveResume bool
+	liveStale  int
 	// restartAt is when, into the window, stackSh restarts Dispatch; 0 for no restart.
 	restartAt time.Duration
 	stackSh   string
@@ -79,9 +79,9 @@ func runLoad(args []string) error {
 	mixFlag := fs.String("event-mix", defaultEventMix, "event mix: a preset ("+eventMixPresetNames()+") or kind=weight,...")
 	routeFlag := fs.String("route-mix", "", "route-mix file (default: the committed "+defaultRouteMixName+")")
 	human := fs.Float64("human", 0.1, "share of writes made by a person")
-	sse := fs.Int("sse", -1, "dashboard SSE streams (default max(1, round(requests/30)))")
-	sseResume := fs.Bool("sse-resume", false, "each SSE stream reopens with since its last event id, after the dashboard's backoff, and its reconnects are recorded")
-	sseStale := fs.Int("sse-stale", 0, fmt.Sprintf("SSE streams that reopen once, at the restart, with since %d below the event log's max(id) (needs -sse-resume and -restart-at)", staleBacklog))
+	live := fs.Int("live", -1, "dashboard live sockets (default max(1, round(requests/30)))")
+	liveResume := fs.Bool("live-resume", false, "each dashboard live socket reopens subscribing with since its last event id, after the dashboard's backoff, and its reconnects are recorded")
+	liveStale := fs.Int("live-stale", 0, fmt.Sprintf("live sockets that reopen once, at the restart, with since %d below the event log's max(id) (needs -live-resume and -restart-at)", staleBacklog))
 	restartAt := fs.Duration("restart-at", 0, "restart Dispatch (stack.sh restart-dispatch) this long into the window; 0 restarts nothing")
 	mentionFrac := fs.Float64("mention-frac", 0, "share of comment writes that mention -mentions live sessions")
 	mentions := fs.Int("mentions", 3, "sessions each mentioning comment mentions")
@@ -125,8 +125,8 @@ func runLoad(args []string) error {
 		return fmt.Errorf("-warmup and -grace must be 0 or more, -duration more than 0")
 	case *natsConns < 1:
 		return fmt.Errorf("-nats-conns must be at least 1")
-	case *sse < -1:
-		return fmt.Errorf("-sse must be 0 or more")
+	case *live < -1:
+		return fmt.Errorf("-live must be 0 or more")
 	case *boxBusyBefore > 1 || !finite(*boxBusyBefore):
 		return fmt.Errorf("-box-busy-before must be a fraction between 0 and 1")
 	case *restartAt < 0 || *restartAt >= *duration:
@@ -158,11 +158,11 @@ func runLoad(args []string) error {
 			return fmt.Errorf("seed %s: issue %s has no quotes for anchored comments", *seedPath, is.Key)
 		}
 	}
-	if *sse < 0 {
-		*sse = max(1, int(math.Round(*requests/30)))
+	if *live < 0 {
+		*live = max(1, int(math.Round(*requests/30)))
 	}
-	if *sseStale < 0 || *sseStale > *sse || (*sseStale > 0 && (!*sseResume || *restartAt == 0)) {
-		return fmt.Errorf("-sse-stale must be 0 to -sse (%d), and needs -sse-resume and -restart-at", *sse)
+	if *liveStale < 0 || *liveStale > *live || (*liveStale > 0 && (!*liveResume || *restartAt == 0)) {
+		return fmt.Errorf("-live-stale must be 0 to -live (%d), and needs -live-resume and -restart-at", *live)
 	}
 	if *name == "" {
 		*name = filepath.Base(filepath.Clean(*out))
@@ -174,7 +174,7 @@ func runLoad(args []string) error {
 		ep: ep, allowForeign: ef.allowForeign, name: *name, out: *out, seedPath: *seedPath,
 		sessions: *sessions, events: *events, requests: *requests,
 		warmup: *warmup, duration: *duration, grace: *grace, mix: mix, routes: routes,
-		human: *human, sse: *sse, sseResume: *sseResume, sseStale: *sseStale,
+		human: *human, live: *live, liveResume: *liveResume, liveStale: *liveStale,
 		restartAt: *restartAt, stackSh: stackSh, mentionFrac: *mentionFrac, mentions: *mentions,
 		rngSeed: *rngSeed, natsConns: *natsConns,
 		buildCommit: *buildCommit, buildDirty: *buildDirty, boxBusyBefore: *boxBusyBefore, args: recordedArgs(fs),
@@ -244,7 +244,7 @@ type summaryConfig struct {
 	EventsPerS   float64  `json:"events_per_s"`
 	Sessions     int      `json:"sessions"`
 	RequestsPerS float64  `json:"requests_per_s"`
-	SSE          int      `json:"sse"`
+	Live         int      `json:"live"`
 	EventMix     eventMix `json:"event_mix"`
 	RouteMix     string   `json:"route_mix"`
 	Human        float64  `json:"human"`
@@ -253,8 +253,8 @@ type summaryConfig struct {
 	GraceS       float64  `json:"grace_s"`
 	RNGSeed      uint64   `json:"rng_seed"`
 	NATSConns    int      `json:"nats_conns"`
-	SSEResume    bool     `json:"sse_resume"`
-	SSEStale     int      `json:"sse_stale"`
+	LiveResume   bool     `json:"live_resume"`
+	LiveStale    int      `json:"live_stale"`
 	// RestartAtS is -restart-at in seconds; 0 for no restart.
 	RestartAtS  float64 `json:"restart_at_s"`
 	MentionFrac float64 `json:"mention_frac"`
@@ -280,11 +280,11 @@ type summary struct {
 	CommitOrderLock lockSummary       `json:"commit_order_lock"`
 	UngrantedLocks  ungrantedSummary  `json:"ungranted_locks"`
 	Sessions        sessionsSummary   `json:"sessions"`
-	SSE             sseSummary        `json:"sse"`
-	SSEBytes        int64             `json:"sse_bytes"`
-	// SSEReconnects is nil without -sse-resume, Restart without -restart-at and CommentMentions
-	// without -mention-frac, and each is nil in a summary.json from before it.
-	SSEReconnects   *reconnectSummary `json:"sse_reconnects"`
+	Live            liveSummary       `json:"live"`
+	LiveBytes       int64             `json:"live_bytes"`
+	// LiveReconnects is nil without -live-resume, Restart without -restart-at and
+	// CommentMentions without -mention-frac, and each is nil in a summary.json from before it.
+	LiveReconnects  *reconnectSummary `json:"live_reconnects"`
 	Restart         *restartSummary   `json:"restart"`
 	CommentMentions *mentionSummary   `json:"comment_mentions"`
 	// StackExits are the stack processes that exited during the step; such a step fails and its
@@ -335,15 +335,20 @@ func execute(cfg runConfig, sf seedFile) error {
 	defer logf.Close()
 	lg := log.New(io.MultiWriter(os.Stderr, logf), "", log.LstdFlags|log.Lmicroseconds)
 	nonce := newMarkerNonce()
-	lg.Printf("config: step=%s sessions=%d events=%g/s requests=%g/s event-mix=%s route-mix=%s warmup=%s duration=%s grace=%s human=%.2f sse=%d sse-resume=%t sse-stale=%d restart-at=%s mention-frac=%.2f mentions=%d rng-seed=%d marker-nonce=%s",
+	lg.Printf("config: step=%s sessions=%d events=%g/s requests=%g/s event-mix=%s route-mix=%s warmup=%s duration=%s grace=%s human=%.2f live=%d live-resume=%t live-stale=%d restart-at=%s mention-frac=%.2f mentions=%d rng-seed=%d marker-nonce=%s",
 		cfg.name, cfg.sessions, cfg.events, cfg.requests, cfg.mix.Name, cfg.routes.Source, cfg.warmup, cfg.duration, cfg.grace, cfg.human,
-		cfg.sse, cfg.sseResume, cfg.sseStale, cfg.restartAt, cfg.mentionFrac, cfg.mentions, cfg.rngSeed, formatNonce(nonce))
+		cfg.live, cfg.liveResume, cfg.liveStale, cfg.restartAt, cfg.mentionFrac, cfg.mentions, cfg.rngSeed, formatNonce(nonce))
+
+	liveURL, err := liveSocketURL(cfg.ep.dispatch)
+	if err != nil {
+		return err
+	}
 
 	if err := checkStack(ctx, cfg.ep); err != nil {
 		return err
 	}
 	lg.Printf("guard: NATS, Dispatch and the listener are the stack's own (%s)", cfg.ep.stack)
-	if cfg.sseStale > 0 {
+	if cfg.liveStale > 0 {
 		if err := checkStaleBacklog(ctx, cfg.ep.pg); err != nil {
 			return err
 		}
@@ -368,7 +373,7 @@ func execute(cfg runConfig, sf seedFile) error {
 	lg.Printf("window %s to %s", st.winStart.UTC().Format(time.RFC3339), st.winEnd.UTC().Format(time.RFC3339))
 
 	a := newAPI(cfg.ep.dispatch, cfg.ep.token, 2048)
-	sse := st.startSSE(ctx, a)
+	live := st.startLive(ctx, liveURL, a)
 	writes, eventsDone := st.runEvents(ctx, newWriter(a, sf, nonce, lg))
 	reqs, requestsDone := st.runRequests(ctx, a)
 	pr := st.startProbes(ctx)
@@ -383,14 +388,14 @@ func execute(cfg runConfig, sf seedFile) error {
 	pr.wait()
 	cancel()
 	pr.waitSampler()
-	sse.wait()
+	live.wait()
 	if st.restart != nil {
 		<-st.restart.done
 	}
 	ns.close()
 	ns.envelopes.write(cfg.out, lg)
 
-	sum := st.buildSummary(ns, reg, writes, reqs, sse, pr)
+	sum := st.buildSummary(ns, reg, writes, reqs, live, pr)
 	writeJSONFile(filepath.Join(cfg.out, "summary.json"), sum, 0o644, lg)
 	meta.End = time.Now()
 	writeJSONFile(filepath.Join(cfg.out, "meta.json"), meta, metaMode, lg)
@@ -462,49 +467,54 @@ func (st *step) inWindow(t time.Time) bool { return inWindow(t, st.winStart, st.
 
 func inWindow(t, winStart, winEnd time.Time) bool { return !t.Before(winStart) && t.Before(winEnd) }
 
-// dashboard is the step's dashboard SSE streams, the frames of theirs that arrived in the window,
-// and the routes a reconnect's refetch issues.
+// dashboard is the step's dashboard live sockets, the event frames of theirs that arrived in the
+// window, and the routes a reconnect's refetch issues.
 type dashboard struct {
-	streams *sseStreams
-	frames  *collector[sseFrame]
+	sockets *liveSockets
+	frames  *collector[liveFrame]
 	refetch []route
 	head    *eventHead
 	done    sync.WaitGroup
 }
 
-// startSSE opens the dashboard SSE streams (sseStreams.run) until ctx ends. Every data frame is
-// timed on arrival (readSSE), and those that arrive in the window are kept. With -sse-resume each
-// stream reopens as the dashboard does, and each reconnect without a complete replay refetches the
-// dashboard's routes through a.
-func (st *step) startSSE(ctx context.Context, a *api) *dashboard {
-	d := &dashboard{frames: newCollector[sseFrame](1 << 14), refetch: refetchRoutes(st.cfg.routes), head: &eventHead{url: st.cfg.ep.pg}}
-	d.streams = &sseStreams{
-		base: st.cfg.ep.dispatch, client: &http.Client{}, nonce: st.nonce, resume: st.cfg.sseResume, stale: st.cfg.sseStale,
+// startLive opens the dashboard live sockets on url (liveSockets.run), each subscribed to the
+// event feed as a dashboard tab is, until ctx ends. Every event frame is timed on arrival
+// (readLive), and those that arrive in the window are kept. With -live-resume each socket reopens
+// as the dashboard does, and each reconnect whose subscription did not replay in full refetches
+// the dashboard's routes through a.
+func (st *step) startLive(ctx context.Context, url string, a *api) *dashboard {
+	d := &dashboard{frames: newCollector[liveFrame](1 << 14), refetch: refetchRoutes(st.cfg.routes), head: &eventHead{url: st.cfg.ep.pg}}
+	d.sockets = &liveSockets{
+		url: url,
+		// A browser offers permessage-deflate, and Dispatch accepts it.
+		dialer: &websocket.Dialer{HandshakeTimeout: 10 * time.Second, EnableCompression: true},
+		nonce:  st.nonce, retry: time.Second, seed: st.cfg.rngSeed,
+		resume: st.cfg.liveResume, stale: st.cfg.liveStale,
 		head:         d.head.read,
 		restartBegun: func() bool { return st.restart != nil && st.restart.begun.Load() },
-		frame: func(f sseFrame) {
+		frame: func(f liveFrame) {
 			if st.inWindow(time.Unix(0, f.at)) {
 				d.frames.add(f)
 			}
 		},
 	}
-	if st.cfg.sseResume {
+	if st.cfg.liveResume {
 		names := make([]string, len(d.refetch))
 		for i, r := range d.refetch {
 			names[i] = r.Name
 		}
-		st.lg.Printf("sse: streams resume; a reconnect without a complete replay refetches %d dashboard routes: %s", len(d.refetch), strings.Join(names, ", "))
+		st.lg.Printf("live: sockets resume; a reconnect whose subscription does not replay in full refetches %d dashboard routes: %s", len(d.refetch), strings.Join(names, ", "))
 		if len(d.refetch) > 0 {
-			d.streams.refetch = refetcher{a: a, routes: d.refetch, issues: st.sf.Issues[:st.active]}.do
+			d.sockets.refetch = refetcher{a: a, routes: d.refetch, issues: st.sf.Issues[:st.active]}.do
 		}
 	}
-	for i := range st.cfg.sse {
-		d.done.Go(func() { d.streams.run(ctx, i) })
+	for i := range st.cfg.live {
+		d.done.Go(func() { d.sockets.run(ctx, i) })
 	}
 	return d
 }
 
-// wait waits, once ctx has ended, for every stream to return, then closes the event-head
+// wait waits, once ctx has ended, for every socket to return, then closes the event-head
 // connection.
 func (d *dashboard) wait() {
 	d.done.Wait()
@@ -669,10 +679,10 @@ func (st *step) profile(ctx context.Context) {
 
 // buildSummary joins what the phases recorded into summary.json, and writes samples.json. It
 // reads the run's commit rows and names the ungranted locks' relations, so it runs after the load.
-func (st *step) buildSummary(ns *natsSessions, reg *registrar, writes *collector[writeRec], reqs *requestLoad, sse *dashboard, pr *probes) summary {
+func (st *step) buildSummary(ns *natsSessions, reg *registrar, writes *collector[writeRec], reqs *requestLoad, live *dashboard, pr *probes) summary {
 	cfg := st.cfg
 	ws := writes.snapshot()
-	frames := sse.frames.snapshot()
+	frames := live.frames.snapshot()
 	pr.ls.resolveRelations(cfg.ep.pg)
 
 	var markers []int64
@@ -691,10 +701,10 @@ func (st *step) buildSummary(ns *natsSessions, reg *registrar, writes *collector
 	durS := cfg.duration.Seconds()
 	sum := summary{
 		Config: summaryConfig{
-			Step: cfg.name, EventsPerS: cfg.events, Sessions: cfg.sessions, RequestsPerS: cfg.requests, SSE: cfg.sse,
+			Step: cfg.name, EventsPerS: cfg.events, Sessions: cfg.sessions, RequestsPerS: cfg.requests, Live: cfg.live,
 			EventMix: cfg.mix, RouteMix: cfg.routes.Source, Human: cfg.human, WarmupS: cfg.warmup.Seconds(),
 			DurationS: durS, GraceS: cfg.grace.Seconds(), RNGSeed: cfg.rngSeed, NATSConns: cfg.natsConns,
-			SSEResume: cfg.sseResume, SSEStale: cfg.sseStale, RestartAtS: cfg.restartAt.Seconds(),
+			LiveResume: cfg.liveResume, LiveStale: cfg.liveStale, RestartAtS: cfg.restartAt.Seconds(),
 			MentionFrac: cfg.mentionFrac, Mentions: cfg.mentions, MarkerNonce: formatNonce(st.nonce),
 		},
 		Events:   joinDelivery(ws, commits, ns.receipts.snapshot(), watcherCount, durS),
@@ -705,13 +715,13 @@ func (st *step) buildSummary(ns *natsSessions, reg *registrar, writes *collector
 		},
 		CommitOrderLock: summarizeLock(pr.lp.samples, pr.lp.errors),
 		UngrantedLocks:  summarizeUngranted(pr.ls.samples, pr.ls.errors),
-		SSE:             summarizeSSE(frames, ws, commits),
-		SSEBytes:        sse.streams.bytes.Load(),
+		Live:            summarizeLive(frames, ws, commits),
+		LiveBytes:       live.sockets.bytes.Load(),
 	}
-	if cfg.sseResume {
-		recs := sse.streams.reconnects()
+	if cfg.liveResume {
+		recs := live.sockets.reconnects()
 		writeJSONFile(filepath.Join(cfg.out, "reconnects.json"), recs, 0o644, st.lg)
-		sum.SSEReconnects = summarizeReconnects(recs, cfg.sseStale, sse.refetch, st.inWindow)
+		sum.LiveReconnects = summarizeReconnects(recs, cfg.liveStale, live.refetch, st.inWindow)
 	}
 	var restartAt time.Time
 	if st.restart != nil {

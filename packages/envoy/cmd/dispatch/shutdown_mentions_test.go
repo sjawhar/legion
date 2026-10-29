@@ -14,22 +14,24 @@ import (
 	"testing"
 	"time"
 
+	"github.com/sjawhar/envoy/internal/dispatch/api"
 	"github.com/sjawhar/envoy/internal/dispatch/model"
 	"github.com/sjawhar/envoy/internal/dispatch/store"
 	"github.com/sjawhar/envoy/internal/dispatch/store/storetest"
 )
 
-// strandedPassInterval is how often every Dispatch process runs the mention sender's stranded
-// pass after the one at start (api.strandedPassInterval).
-const strandedPassInterval = 30 * time.Second
+// deliverySweepInterval is how often the maintenance loop runs the delivery sweep
+// (api.SuggestionSweepInterval), in whichever process holds its lease for that interval.
+const deliverySweepInterval = api.SuggestionSweepInterval
 
-// strandedMargin is how long past the bound a test states the last send may land: the boot of the
-// process that sends it, its sends and the poll that sees them settled.
-const strandedMargin = 15 * time.Second
+// sweepMargin is how long past the bound a test states the last send may land: one pass the
+// leased loop may skip, because another process held the lease for that interval, plus the boot
+// of the process that sends it, its sends and the poll that sees them settled.
+const sweepMargin = deliverySweepInterval + 15*time.Second
 
 // A deploy can find a mention's send in flight - its session's listener still answering - and a
 // second comment's send to that same session queued behind it. SIGTERM starts no queued send, so
-// the second attempt is left pending with no claim, for another process's stranded pass; and
+// the second attempt is left pending with no claim, for the delivery sweep; and
 // Dispatch waits for the send in flight to settle before it closes its pool, so the outcome the
 // listener answered is recorded rather than lost with the process.
 func TestSIGTERMSettlesTheMentionSendInFlightAndLeavesTheQueuedOnePending(t *testing.T) {
@@ -282,13 +284,13 @@ func waitForSent(
 
 // A process killed with mention sends in flight - SIGKILL, an out-of-memory kill, a lost node -
 // leaves their attempts pending under its claim. The next process on the database sends the
-// comment queued behind them at once, and each of them by its first stranded pass after the killed
-// process's claim has lapsed, within a minute and a pass interval of that process taking it. Each
-// resend repeats an idempotency key the listener has seen, so it is answered as a duplicate and not
-// handed over again: every recipient is handed each comment exactly once. Both processes take one
-// DISPATCH_SIGNING_KEY, as every process of a deployment does: the killed process's registry row
-// is still live when the next starts, and a key the next minted in its own data dir would hold its
-// start up to a live window, until that row lapsed (processes.Register).
+// comment queued behind them at once, and each of them on the first delivery sweep after the
+// killed process's claim has lapsed, within a minute and a sweep interval of that process taking
+// it. Each resend repeats an idempotency key the listener has seen, so it is answered as a
+// duplicate and not handed over again: every recipient is handed each comment exactly once. Both
+// processes take one DISPATCH_SIGNING_KEY, as every process of a deployment does: the killed
+// process's registry row is still live when the next starts, and a key the next minted in its own
+// data dir would hold its start up to a live window, until that row lapsed (processes.Register).
 //
 // The claim is the real minute. The test marks itself parallel once the second process runs, so
 // that minute passes beside the tests that run after it rather than after them; the bound is read
@@ -315,10 +317,10 @@ func TestSIGKILLWithMentionSendsInFlightHandsEachRecipientTheCommentOnceTheClaim
 	t.Parallel()
 
 	waitForSent(t, database, next, []string{inFlight, queued}, 4,
-		killedAt.Add(model.DeliveryClaimLapse+strandedPassInterval+strandedMargin))
+		killedAt.Add(model.DeliveryClaimLapse+deliverySweepInterval+sweepMargin))
 	lastResend := listener.lastSend().Sub(killedAt)
 	t.Logf("the last resend reached the listener %v after the kill", lastResend)
-	if bound := model.DeliveryClaimLapse + strandedPassInterval + strandedMargin; lastResend > bound {
+	if bound := model.DeliveryClaimLapse + deliverySweepInterval + sweepMargin; lastResend > bound {
 		t.Errorf("the last resend reached the listener %v after the kill, want within %v", lastResend, bound)
 	}
 
@@ -337,18 +339,17 @@ func TestSIGKILLWithMentionSendsInFlightHandsEachRecipientTheCommentOnceTheClaim
 
 // A rolling update (gcp:Dispatch with more than one replica rolls with maxSurge 1 and
 // maxUnavailable 0) starts the successor and waits for it to be ready before it stops the old
-// process, so the successor's pass at start runs before the old process leaves anything. The old
-// process gets SIGTERM with a mention's send in flight - its session's listener still answering -
-// a second comment's send to that session queued behind it, and a third comment waiting on another
-// writer's lock on the issue. SIGTERM starts no queued send, and the old process's sender refuses
-// the third comment's send when the lock is released and the comment commits during the HTTP
-// drain: both attempts stay pending with no claim. The successor's periodic stranded pass sends
-// them once they have waited a claim lease, within a lease and one pass interval of the old
-// process's exit, and every recipient is handed each comment exactly once. Both processes take one
-// DISPATCH_SIGNING_KEY, as every process of a deployment does: a live server process refuses a
-// successor whose signing keys it does not hold (processes.Register).
+// process. The old process gets SIGTERM with a mention's send in flight - its session's listener
+// still answering - a second comment's send to that session queued behind it, and a third comment
+// waiting on another writer's lock on the issue. SIGTERM starts no queued send, and the old
+// process's sender refuses the third comment's send when the lock is released and the comment
+// commits during the HTTP drain: both attempts stay pending with no claim. The delivery sweep
+// sends them once they have waited a claim lease, within a lease and one sweep interval of the
+// old process's exit, and every recipient is handed each comment exactly once. Both processes
+// take one DISPATCH_SIGNING_KEY, as every process of a deployment does: a live server process
+// refuses a successor whose signing keys it does not hold (processes.Register).
 //
-// The test marks itself parallel once the old process has exited, so the pass interval passes
+// The test marks itself parallel once the old process has exited, so the sweep interval passes
 // beside the tests that run after it rather than after them; the bound is read off when the
 // listener took the last send, which a pause does not move.
 func TestARollingUpdatesSuccessorHandsEachMentionTheOldProcessLeftOnce(t *testing.T) {
@@ -402,10 +403,10 @@ func TestARollingUpdatesSuccessorHandsEachMentionTheOldProcessLeftOnce(t *testin
 	t.Parallel()
 
 	waitForSent(t, database, successor, []string{inFlight, queued, drained}, 3,
-		exited.Add(model.DeliveryClaimLapse+strandedPassInterval+strandedMargin))
+		exited.Add(model.DeliveryClaimLapse+deliverySweepInterval+sweepMargin))
 	lastSend := listener.lastSend().Sub(exited)
 	t.Logf("the last send reached the listener %v after the old process exited", lastSend)
-	if bound := model.DeliveryClaimLapse + strandedPassInterval + strandedMargin; lastSend > bound {
+	if bound := model.DeliveryClaimLapse + deliverySweepInterval + sweepMargin; lastSend > bound {
 		t.Errorf("the last send reached the listener %v after the old process exited, want within %v", lastSend, bound)
 	}
 

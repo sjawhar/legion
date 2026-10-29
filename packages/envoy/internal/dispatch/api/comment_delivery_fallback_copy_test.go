@@ -125,8 +125,8 @@ func commentCreatedRow(t *testing.T, database *store.Store, commentID string) co
 
 // The claimant route holds its copy back for a mention of the claimant as the issue route does,
 // here on a reply in a thread no session wrote in. A process killed after it claimed that
-// mention's attempt, before its send reached the listener, leaves the attempt to the stranded
-// pass; when that resend fails too, the claimant still hears the comment, from the claimant copy
+// mention's attempt, before its send reached the listener, leaves the attempt to the delivery
+// sweep; when that resend fails too, the claimant still hears the comment, from the claimant copy
 // the outbox held for it.
 func TestAClaimantWhoseResentMentionFailsStillHearsTheComment(t *testing.T) {
 	listener, state := newMentionListener(t)
@@ -161,15 +161,12 @@ func TestAClaimantWhoseResentMentionFailsStillHearsTheComment(t *testing.T) {
 		t.Fatalf("comment.created deliveries = %#v, want the one event's, its claimant copy left to the resend", published)
 	}
 
-	passes := make(chan struct{}, 1)
-	lifetime, end := context.WithCancel(t.Context())
-	next := newMentionSender(lifetime, 20*time.Millisecond, served.sendCommentMention, countedStranded(served, passes))
-	next.start()
+	if err := served.resumeOwedDeliveries(context.Background()); err != nil {
+		t.Fatalf("resume the owed deliveries: %v", err)
+	}
 	settled := waitForCommentDeliveries(t, database, claimed.ID, "the resend settled", func(attempts []model.CommentDelivery) bool {
 		return len(attempts) == 1 && attempts[0].State != "pending"
 	})
-	end()
-	next.wait()
 	if settled[0].State != "failed" {
 		t.Fatalf("the resend to a listener that answers nothing = %#v, want it failed", settled)
 	}

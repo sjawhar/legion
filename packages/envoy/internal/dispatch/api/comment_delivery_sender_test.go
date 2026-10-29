@@ -3,13 +3,11 @@ package api
 import (
 	"context"
 	"encoding/json"
-	"maps"
 	"net/http"
 	"net/http/httptest"
 	"slices"
 	"strings"
 	"sync"
-	"sync/atomic"
 	"testing"
 	"time"
 
@@ -550,7 +548,7 @@ func TestAListenerThatAnswersNoLookupDelaysARoutedCommentByOneTimeoutAtMost(t *t
 }
 
 // ageAttempts moves the creation of the comments' attempts a claim lease and a second into the
-// past: a stranded pass takes an attempt only once it has waited that long.
+// past: the delivery sweep takes an attempt only once it has waited that long.
 func ageAttempts(t *testing.T, database *store.Store, commentIDs ...string) {
 	t.Helper()
 	if _, err := database.Pool.Exec(context.Background(), `
@@ -562,9 +560,9 @@ func ageAttempts(t *testing.T, database *store.Store, commentIDs ...string) {
 }
 
 // A process that stops with mention sends still queued leaves their attempts pending with no
-// claim. The next process's stranded pass sends such an attempt once it has waited a claim lease,
-// and leaves alone one whose claim is live, which another process's sender holds.
-func TestMentionRecoverySendsAStrandedAttemptOnceAndLeavesALiveClaimAlone(t *testing.T) {
+// claim. The next process's delivery sweep sends such an attempt once it has waited a claim
+// lease, and leaves alone one whose claim is live, which another process's sender holds.
+func TestTheSweepSendsAMentionAStoppedProcessLeftAndLeavesALiveClaimAlone(t *testing.T) {
 	listener, state := newMentionListener(t)
 	stopping, stop := context.WithCancel(t.Context())
 	handler, database, deps, _ := newRegisteredTestServer(t, testServerOptions{envoyURL: listener.URL, lifetime: stopping})
@@ -587,10 +585,12 @@ func TestMentionRecoverySendsAStrandedAttemptOnceAndLeavesALiveClaimAlone(t *tes
 		t.Fatalf("claim the held attempt as another live sender: %v", err)
 	}
 	ageAttempts(t, database, stranded.ID, held.ID)
-
 	next, stopNext := context.WithCancel(t.Context())
 	restarted := register(http.NewServeMux(), next, deps)
-	settled := waitForCommentDeliveries(t, database, stranded.ID, "the stranded attempt sent", allSent)
+	if err := restarted.resumeOwedDeliveries(context.Background()); err != nil {
+		t.Fatalf("resume the owed deliveries: %v", err)
+	}
+	settled := waitForCommentDeliveries(t, database, stranded.ID, "the owed attempt sent", allSent)
 	stopNext()
 	restarted.waitBackground()
 
@@ -603,84 +603,27 @@ func TestMentionRecoverySendsAStrandedAttemptOnceAndLeavesALiveClaimAlone(t *tes
 		t.Fatalf("the attempt another sender holds = %#v, want it left pending", attempts)
 	}
 	if sent := state.sent(); len(sent) != 1 || sent[0].session != "s1" {
-		t.Fatalf("sends = %#v, want the stranded attempt's one send to s1", sent)
+		t.Fatalf("sends = %#v, want the owed attempt's one send to s1", sent)
 	}
 }
 
-// awaitPasses waits for n stranded passes to finish their read after the call, as passes reports
-// each, and fails the test when they have not within 10 s.
-func awaitPasses(t *testing.T, passes chan struct{}, n int) {
-	t.Helper()
-	for drained := false; !drained; {
-		select {
-		case <-passes:
-		default:
-			drained = true
-		}
-	}
-	for range n {
-		select {
-		case <-passes:
-		case <-time.After(10 * time.Second):
-			t.Fatal("the stranded pass stopped running")
-		}
-	}
-}
-
-// countedStranded is served's strandedCommentMentions, reporting each read on passes once it is
-// done; a report no one waits for is dropped.
-func countedStranded(
-	served *server, passes chan struct{},
-) func(context.Context, int, []mentionKey) ([]mentionSend, error) {
-	return func(ctx context.Context, limit int, held []mentionKey) ([]mentionSend, error) {
-		defer func() {
-			select {
-			case passes <- struct{}{}:
-			default:
-			}
-		}()
-		return served.strandedCommentMentions(ctx, limit, held)
-	}
-}
-
-// A rolling update starts the successor before the old process is stopped, so the successor's
-// pass at start runs before the old process leaves anything. SIGTERM ends the old process's
-// lifetime before its HTTP drain, so a comment that commits during that drain is refused by the
-// old process's sender and its attempt stays pending with no claim. The successor's next periodic
-// pass sends it, once.
+// A rolling update starts the successor before the old process is stopped. SIGTERM ends the old
+// process's lifetime before its HTTP drain, so a comment that commits during that drain is
+// refused by the old process's sender and its attempt stays pending with no claim. The
+// successor's delivery sweep sends it, once.
 func TestARollingUpdatesSuccessorSendsTheMentionTheOldProcessAcceptedWhileDraining(t *testing.T) {
 	listener, state := newMentionListener(t)
 	stopping, stop := context.WithCancel(t.Context())
 	handler, database, deps, _ := newRegisteredTestServer(t, testServerOptions{envoyURL: listener.URL, lifetime: stopping})
 	issue := createInteractionIssue(t, handler, "TEST", "A rolling update", "before")
 
-	// The successor is up first. Its passes after the one at start wait until the test lets them.
+	// The successor is up first, on a lifetime of its own.
 	successorLifetime, stopSuccessor := context.WithCancel(t.Context())
-	successor := directServer(deps)
-	successor.lifetime = successorLifetime
-	passes := make(chan struct{}, 1)
-	gate := make(chan struct{})
-	letPassesRun := sync.OnceFunc(func() { close(gate) })
-	var startedPass atomic.Bool
-	read := countedStranded(successor, passes)
-	successor.mentions = newMentionSender(successorLifetime, 20*time.Millisecond, successor.sendCommentMention,
-		func(ctx context.Context, limit int, held []mentionKey) ([]mentionSend, error) {
-			if startedPass.Swap(true) {
-				<-gate
-			}
-			return read(ctx, limit, held)
-		})
-	successor.mentions.start()
+	successor := register(http.NewServeMux(), successorLifetime, deps)
 	defer func() {
-		letPassesRun()
 		stopSuccessor()
-		successor.mentions.wait()
+		successor.waitBackground()
 	}()
-	select {
-	case <-passes:
-	case <-time.After(10 * time.Second):
-		t.Fatal("the successor's pass at start never read")
-	}
 
 	// SIGTERM: the old process's lifetime ends, and then its HTTP drain answers a comment.
 	stop()
@@ -688,20 +631,16 @@ func TestARollingUpdatesSuccessorSendsTheMentionTheOldProcessAcceptedWhileDraini
 		"body": "Accepted during the HTTP drain.", "mentions": []map[string]any{{"target": "session:s1"}},
 	}))
 	if !unclaimedPending(t, database, drained.ID, "session:s1") {
-		t.Fatal("a comment the old process accepted after its lifetime ended had its attempt taken before the successor's pass")
+		t.Fatal("a comment the old process accepted after its lifetime ended had its attempt taken before the successor's sweep")
 	}
-	// A pass leaves an attempt younger than a claim lease to the process that accepted it; this
+	// The sweep leaves an attempt younger than a claim lease to the process that accepted it; this
 	// one has waited that long once the test moves its creation back a lease.
-	if _, err := database.Pool.Exec(t.Context(), `
-		update comment_deliveries set created_at = created_at - `+model.DeliveryClaimLapseInterval+` - interval '1 second'
-		where comment_id = $1
-	`, drained.ID); err != nil {
-		t.Fatalf("age the drained attempt: %v", err)
-	}
+	ageAttempts(t, database, drained.ID)
 
-	letPassesRun()
+	if err := successor.resumeOwedDeliveries(context.Background()); err != nil {
+		t.Fatalf("resume the owed deliveries: %v", err)
+	}
 	settled := waitForCommentDeliveries(t, database, drained.ID, "the attempt sent by the successor", allSent)
-	awaitPasses(t, passes, 3)
 	if settled[0].SessionID == nil || *settled[0].SessionID != "s1" {
 		t.Fatalf("the successor's send = %#v, want it sent to s1", settled)
 	}
@@ -710,91 +649,14 @@ func TestARollingUpdatesSuccessorSendsTheMentionTheOldProcessAcceptedWhileDraini
 	}
 }
 
-// A process killed with mention sends in flight leaves their attempts pending under a claim that
-// is still live when the next process's passes first read them. The passes leave such an attempt
-// alone while its claim is live, and the first pass after the claim lapses sends it, once. An
-// attempt whose claim a live sender has taken again is that sender's, and no pass sends it: here
-// it is the older comment to the same recipient, so a pass would have sent it first, ahead of the
-// one it does send. The test moves the killed process's claim a lease into the past rather than
-// waiting the lease out.
-func TestMentionRecoverySendsAnAttemptAKilledProcessHeldOnceItsClaimLapses(t *testing.T) {
+// A busy sender's queued sends have not started, so their attempts are pending with no claim, as
+// an attempt a dead process left is. A sweep pass running meanwhile leaves them to the sender
+// that holds them, because each was opened inside the claim lease, so each reaches its recipient
+// once and in the order its comment was accepted.
+func TestTheSweepLeavesABusySendersUnstartedSendsToIt(t *testing.T) {
 	listener, state := newMentionListener(t)
-	stopping, stop := context.WithCancel(t.Context())
-	handler, database, _, served := newRegisteredTestServer(t, testServerOptions{envoyURL: listener.URL, lifetime: stopping})
-	issue := createInteractionIssue(t, handler, "TEST", "Mentions a killed process held", "before")
-	stop()
-	retaken := decodeMentionedComment(t, postMentionedComment(t, handler, issue.Key, map[string]any{
-		"body": "Taken again by a live sender.", "mentions": []map[string]any{{"target": "session:s1"}},
-	}))
-	stranded := decodeMentionedComment(t, postMentionedComment(t, handler, issue.Key, map[string]any{
-		"body": "In flight when the process was killed.", "mentions": []map[string]any{{"target": "session:s1"}},
-	}))
-	// The killed process claimed the stranded attempt; a live sender holds the older one.
-	if _, err := database.Pool.Exec(context.Background(), `
-		update comment_deliveries set claimed_at = now() where comment_id = any($1)
-	`, []string{retaken.ID, stranded.ID}); err != nil {
-		t.Fatalf("claim both attempts: %v", err)
-	}
-	ageAttempts(t, database, retaken.ID, stranded.ID)
-
-	passes := make(chan struct{}, 1)
-	lifetime, end := context.WithCancel(t.Context())
-	next := newMentionSender(lifetime, 20*time.Millisecond, served.sendCommentMention, countedStranded(served, passes))
-	next.start()
-	defer func() {
-		end()
-		next.wait()
-	}()
-	awaitPasses(t, passes, 3)
-	if sent := state.sent(); len(sent) != 0 {
-		t.Fatalf("sends = %#v while every claim was live, want none", sent)
-	}
-
-	// The killed process's claim lapses: it was taken a lease and a second ago.
-	if _, err := database.Pool.Exec(context.Background(), `
-		update comment_deliveries set claimed_at = now() - `+model.DeliveryClaimLapseInterval+` - interval '1 second'
-		where comment_id = $1
-	`, stranded.ID); err != nil {
-		t.Fatalf("lapse the killed process's claim: %v", err)
-	}
-	waitForCommentDeliveries(t, database, stranded.ID, "the stranded attempt sent", allSent)
-	awaitPasses(t, passes, 3)
-	if sent := state.sent(); len(sent) != 1 || sent[0] != (mentionListenerSend{"s1", "In flight when the process was killed."}) {
-		t.Fatalf("sends = %#v, want the stranded attempt's one send to s1 and none of the attempt a live sender holds", sent)
-	}
-	if attempts := waitForCommentDeliveries(t, database, retaken.ID, "the retaken attempt", func([]model.CommentDelivery) bool {
-		return true
-	}); len(attempts) != 1 || attempts[0].State != "pending" {
-		t.Fatalf("the attempt a live sender holds = %#v, want it left pending for that sender", attempts)
-	}
-}
-
-// A busy sender's queued sends have not started, so their attempts are pending with no claim, as a
-// stranded attempt's is. The passes it runs meanwhile do not queue them a second time: each
-// attempt reaches the sender's send once.
-func TestABusySendersPassesDoNotQueueItsOwnUnstartedSendsAgain(t *testing.T) {
-	listener, state := newMentionListener(t)
-	stopping, stop := context.WithCancel(t.Context())
-	handler, database, _, served := newRegisteredTestServer(t, testServerOptions{envoyURL: listener.URL, lifetime: stopping})
+	handler, database, _, served := newRegisteredTestServer(t, testServerOptions{envoyURL: listener.URL})
 	issue := createInteractionIssue(t, handler, "TEST", "A busy sender", "before")
-	// The registered sender stops, and one with a short pass interval takes its place.
-	stop()
-	var mu sync.Mutex
-	sends := map[mentionKey]int{}
-	passes := make(chan struct{}, 1)
-	lifetime, end := context.WithCancel(t.Context())
-	busy := newMentionSender(lifetime, 20*time.Millisecond, func(ctx context.Context, item mentionSend) {
-		mu.Lock()
-		sends[item.key()]++
-		mu.Unlock()
-		served.sendCommentMention(ctx, item)
-	}, countedStranded(served, passes))
-	served.mentions = busy
-	busy.start()
-	defer func() {
-		end()
-		busy.wait()
-	}()
 	release := state.hold("s1")
 	defer release()
 	post := func(body string) string {
@@ -811,22 +673,15 @@ func TestABusySendersPassesDoNotQueueItsOwnUnstartedSendsAgain(t *testing.T) {
 			t.Fatalf("the attempt of %s behind the held send was taken", comment)
 		}
 	}
-	awaitPasses(t, passes, 3)
+	if err := served.resumeOwedDeliveries(context.Background()); err != nil {
+		t.Fatalf("resume the owed deliveries: %v", err)
+	}
 
 	release()
 	for _, comment := range append([]string{sending}, queued...) {
 		if settled := settledCommentDeliveries(t, database, comment); !allSent(settled) {
 			t.Fatalf("comment %s attempts = %#v, want it sent", comment, settled)
 		}
-	}
-	mu.Lock()
-	defer mu.Unlock()
-	want := map[mentionKey]int{}
-	for _, comment := range append([]string{sending}, queued...) {
-		want[mentionKey{comment: comment, target: "session:s1", attempt: 1}] = 1
-	}
-	if !maps.Equal(sends, want) {
-		t.Fatalf("sends by attempt = %v, want each attempt sent once: %v", sends, want)
 	}
 	if sent := state.sent(); len(sent) != 3 || sent[0].body != "in flight" || sent[1].body != "queued first" ||
 		sent[2].body != "queued second" {
@@ -835,8 +690,8 @@ func TestABusySendersPassesDoNotQueueItsOwnUnstartedSendsAgain(t *testing.T) {
 }
 
 // A mention past the sender's queue bound is not queued: its attempt stays pending and
-// unclaimed, and a stranded pass once the queue has room and the attempt has waited a claim lease
-// sends it, once.
+// unclaimed, and the delivery sweep, once the queue has room and the attempt has waited a claim
+// lease, sends it, once.
 func TestAMentionPastTheQueueBoundIsSentOnceTheQueueDrains(t *testing.T) {
 	listener, state := newMentionListener(t)
 	handler, database, _, served := newRegisteredTestServer(t, testServerOptions{envoyURL: listener.URL})
@@ -870,9 +725,11 @@ func TestAMentionPastTheQueueBoundIsSentOnceTheQueueDrains(t *testing.T) {
 		t.Fatal("the attempt past the bound was taken before it waited a claim lease")
 	}
 	ageAttempts(t, database, refused)
-	served.mentions.recoverStranded()
+	if err := served.resumeOwedDeliveries(context.Background()); err != nil {
+		t.Fatalf("resume the owed deliveries: %v", err)
+	}
 	if settled := settledCommentDeliveries(t, database, refused); !allSent(settled) {
-		t.Fatalf("comment %s attempts = %#v, want it sent by the stranded pass", refused, settled)
+		t.Fatalf("comment %s attempts = %#v, want it sent by the delivery sweep", refused, settled)
 	}
 	if sent := state.sent(); len(sent) != 3 || sent[0].body != "in flight" || sent[1].body != "queued" ||
 		sent[2].body != "past the bound" {

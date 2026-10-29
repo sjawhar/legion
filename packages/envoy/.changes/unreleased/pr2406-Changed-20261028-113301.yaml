@@ -1,12 +1,12 @@
 kind: Changed
 body: |-
-    **Breaking for a client that relied on a full replay:** a `GET /api/v1/events` resume (`since=`
-    or `Last-Event-ID`) is replayed at most 256 events whose frames total at most 1 MiB; past either
-    bound it is replayed nothing and its response lacks `X-Dispatch-Event-Replay: complete`, so the
-    client refetches. A cold connect is replayed nothing, as before. A connection that falls 64
-    events behind now catches up from the event log within the same bounds and stays open, where it
-    was closed; past the bounds, or when the event log is reset or the server stops, its response
-    ends as before.
+    **Breaking for a page that relied on a full replay:** an events subscription on `GET /ws/live`
+    that resumes (`since`) is replayed at most 256 events whose frames total at most 1 MiB; past
+    either bound it is replayed nothing and its `events_start` says `replay_complete: false`, so the
+    page refreshes what it shows once. A cold subscription is replayed nothing, as before. A
+    subscription that falls 64 events behind the relay now catches up from the event log within the
+    same bounds and stays open, where it ended; past the bounds, or when the event log is reset or
+    the server stops, it ends as `behind` and the page subscribes again.
 time: 2026-10-28T11:33:01.639853263Z
 custom:
     Issue: pr2406

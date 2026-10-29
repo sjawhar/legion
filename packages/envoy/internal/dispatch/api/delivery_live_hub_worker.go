@@ -168,7 +168,7 @@ func (h *deliveryHub) recompute(g *hubGeneration, view *deliveryView, cause stri
 		view.body, view.expiry, view.seq = nil, time.Time{}, read.seq
 		for sub := range view.subs {
 			if !sub.told {
-				sub.conn.Send(deliveryLiveRefusal(sub.id, "DELIVERY_NOT_CONFIGURED",
+				sub.conn.Send(liveRefusal(sub.id, "DELIVERY_NOT_CONFIGURED",
 					"delivery is not configured; set delivery_settings through PUT /api/v1/settings/delivery"))
 				sub.told = true
 				sent++
@@ -191,7 +191,7 @@ func (h *deliveryHub) recompute(g *hubGeneration, view *deliveryView, cause stri
 		view.body, view.seq, view.changedAt = &read.body, read.seq, read.changedAt
 		view.from, view.at, view.expiry = read.from, read.at, read.expiry
 		view.issues, view.ancestors, view.sessions = read.issues, read.ancestors, read.sessions
-		sent = h.sendLocked(view)
+		sent = h.sendLocked(g, view)
 		if !g.known {
 			// The first verdict is set silently, from the first settings read.
 			g.fresh = deliveryFreshnessHeard{
@@ -330,7 +330,7 @@ func (h *deliveryHub) expire(g *hubGeneration, view *deliveryView) {
 		view.expiry = time.Time{}
 	default:
 		view.body, view.from, view.at, view.expiry = &encoded, from, at, expiry
-		sent = h.sendLocked(view)
+		sent = h.sendLocked(g, view)
 	}
 	subscribers := len(view.subs)
 	h.mu.Unlock()
@@ -353,19 +353,33 @@ func deliveryLiveCompute(kind string, settings delivery.DeliverySettings, pop de
 }
 
 // sendLocked answers every sub of view from its body, and counts the frames it sent.
-func (h *deliveryHub) sendLocked(view *deliveryView) int {
+func (h *deliveryHub) sendLocked(g *hubGeneration, view *deliveryView) int {
 	sent := 0
 	for sub := range view.subs {
-		if h.answerLocked(sub) {
+		if h.answerLocked(g, sub) {
 			sent++
 		}
 	}
 	return sent
 }
 
-// answerLocked sends sub what it needs to hold its view's body: the snapshot, when it holds none,
-// or the delta against its revisions, when anything differs.
-func (h *deliveryHub) answerLocked(sub *deliverySub) bool {
+// answerLocked sends sub what it needs to hold its view's body (answerBodyLocked) and, after its
+// first answer, the verdict the generation knows, when it knows one (Subscribe). It reports
+// whether it sent sub a snapshot or a delta.
+func (h *deliveryHub) answerLocked(g *hubGeneration, sub *deliverySub) bool {
+	sent := h.answerBodyLocked(sub)
+	if sub.needsVerdict {
+		sub.needsVerdict = false
+		if g.known {
+			sub.conn.Send(g.freshnessFrameLocked(g.sent))
+		}
+	}
+	return sent
+}
+
+// answerBodyLocked sends sub the snapshot, when it holds none, or the delta against its
+// revisions, when anything differs.
+func (h *deliveryHub) answerBodyLocked(sub *deliverySub) bool {
 	view := sub.view
 	sub.told = false
 	if sub.needsSnapshot {

@@ -119,10 +119,10 @@ func publishedToSession(t *testing.T, deps Deps, issueKey, commentID, sessionID 
 
 // A process stopped (or killed) with a comment's mention send queued leaves its attempt pending
 // with no claim. Once it has waited a lease, the outbox counts it abandoned and publishes the route
-// copy it had held back, and the next process's stranded pass may also send it. The two must be
+// copy it had held back, and the next process's delivery sweep may also send it. The two must be
 // exclusive for one (comment, session): here the outbox acts first, and the session still ends up
 // with exactly one copy, whichever of the two delivers it.
-func TestAnAbandonedMentionIsDeliveredOnceByTheOutboxOrTheStrandedPassNotBoth(t *testing.T) {
+func TestAnAbandonedMentionIsDeliveredOnceByTheOutboxOrTheSweepNotBoth(t *testing.T) {
 	listener, state := newMentionListener(t)
 	stopping, stop := context.WithCancel(t.Context())
 	handler, database, deps, served := newRegisteredTestServer(t, testServerOptions{envoyURL: listener.URL, lifetime: stopping})
@@ -146,12 +146,10 @@ func TestAnAbandonedMentionIsDeliveredOnceByTheOutboxOrTheStrandedPassNotBoth(t 
 	// The outbox reaches the comment first.
 	routeCopy := publishedToSession(t, deps, issue.Key, stranded.ID, "s1")
 
-	// Then the next process's stranded pass runs.
-	passes := make(chan struct{}, 1)
-	lifetime, end := context.WithCancel(t.Context())
-	next := newMentionSender(lifetime, 20*time.Millisecond, served.sendCommentMention, countedStranded(served, passes))
-	next.start()
-	awaitPasses(t, passes, 3)
+	// Then the next process's delivery sweep runs.
+	if err := served.resumeOwedDeliveries(context.Background()); err != nil {
+		t.Fatalf("resume the owed deliveries: %v", err)
+	}
 	waitForCommentDeliveries(t, database, stranded.ID, "no attempt pending", func(attempts []model.CommentDelivery) bool {
 		for _, attempt := range attempts {
 			if attempt.State == "pending" {
@@ -160,8 +158,6 @@ func TestAnAbandonedMentionIsDeliveredOnceByTheOutboxOrTheStrandedPassNotBoth(t 
 		}
 		return true
 	})
-	end()
-	next.wait()
 
 	copies := 0
 	if routeCopy {
@@ -181,7 +177,7 @@ func TestAnAbandonedMentionIsDeliveredOnceByTheOutboxOrTheStrandedPassNotBoth(t 
 // A process killed while its mention send was in flight leaves the attempt pending with a claim
 // that lapses a lease later, though the send may already have reached the listener: here it did,
 // so s1 already holds the comment. Whatever then settles the attempt - the outbox's copy or the
-// stranded pass's resend, which the listener drops as a repeat of the same message - s1 must end
+// delivery sweep's resend, which the listener drops as a repeat of the same message - s1 must end
 // up with exactly one copy of the comment, not the mention and the route copy both.
 func TestAMentionInFlightAtAKillReachesItsSessionOnceAfterTheClaimLapses(t *testing.T) {
 	listener, state := newMentionListener(t)
@@ -215,11 +211,9 @@ func TestAMentionInFlightAtAKillReachesItsSessionOnceAfterTheClaimLapses(t *test
 	landed.Body.Close()
 
 	routeCopy := publishedToSession(t, deps, issue.Key, inFlight.ID, "s1")
-	passes := make(chan struct{}, 1)
-	lifetime, end := context.WithCancel(t.Context())
-	next := newMentionSender(lifetime, 20*time.Millisecond, served.sendCommentMention, countedStranded(served, passes))
-	next.start()
-	awaitPasses(t, passes, 3)
+	if err := served.resumeOwedDeliveries(context.Background()); err != nil {
+		t.Fatalf("resume the owed deliveries: %v", err)
+	}
 	waitForCommentDeliveries(t, database, inFlight.ID, "no attempt pending", func(attempts []model.CommentDelivery) bool {
 		for _, attempt := range attempts {
 			if attempt.State == "pending" {
@@ -228,8 +222,6 @@ func TestAMentionInFlightAtAKillReachesItsSessionOnceAfterTheClaimLapses(t *test
 		}
 		return true
 	})
-	end()
-	next.wait()
 
 	// The listener stores one message per (session, text): a resend of what already landed is a
 	// repeat it drops, so distinct texts count copies.
@@ -251,7 +243,7 @@ func TestAMentionInFlightAtAKillReachesItsSessionOnceAfterTheClaimLapses(t *test
 
 // A process killed after it claimed a mention attempt, before its send reached the listener,
 // leaves the attempt pending with a claim that lapses a lease later; the session holds no copy.
-// If the listener is silent from then on, the stranded pass's resend fails too, and the route copy
+// If the listener is silent from then on, the sweep's resend fails too, and the route copy
 // is the only way the session can still hear the comment: it must get exactly one copy, as it does
 // when the listener is silent and no process was killed.
 func TestAMentionClaimedByAKilledProcessStillReachesItsSessionWhenTheResendFails(t *testing.T) {
@@ -305,11 +297,9 @@ func TestAMentionClaimedByAKilledProcessStillReachesItsSessionWhenTheResendFails
 		time.Sleep(20 * time.Millisecond)
 	}
 
-	passes := make(chan struct{}, 1)
-	lifetime, end := context.WithCancel(t.Context())
-	next := newMentionSender(lifetime, 20*time.Millisecond, served.sendCommentMention, countedStranded(served, passes))
-	next.start()
-	awaitPasses(t, passes, 3)
+	if err := served.resumeOwedDeliveries(context.Background()); err != nil {
+		t.Fatalf("resume the owed deliveries: %v", err)
+	}
 	waitForCommentDeliveries(t, database, claimed.ID, "no attempt pending", func(attempts []model.CommentDelivery) bool {
 		for _, attempt := range attempts {
 			if attempt.State == "pending" {
@@ -318,8 +308,6 @@ func TestAMentionClaimedByAKilledProcessStillReachesItsSessionWhenTheResendFails
 		}
 		return true
 	})
-	end()
-	next.wait()
 
 	copies := 0
 	deadline = time.Now().Add(10 * time.Second)

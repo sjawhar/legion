@@ -348,7 +348,7 @@ func oneConnectionHandler(t *testing.T, deps Deps) (http.Handler, uint32) {
 	callDeps := deps
 	callDeps.Store = callStore
 	mux := http.NewServeMux()
-	t.Cleanup(Register(mux, t.Context(), callDeps))
+	t.Cleanup(Register(mux, t.Context(), callDeps).Wait)
 	return mux, pid
 }
 
