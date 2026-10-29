@@ -2639,14 +2639,18 @@ the synchronous listener call records the sent or failed attempt instead of blin
   redelivery sweep asks for again like any failed delivery, until GitHub records it `OK` or 72
   hours after its first failed attempt, and logged `<source> publish refused` (or
   `github ci record refused`); any other failure stays a 503 logged `<source> publish failed`. A
-  commit's CI record is bounded at 384 KiB (`maxRecordBytes`, about 1,300 checks) and its settlement
-  at 960 KiB (`maxSettlementBytes`; a failing check's `"` costs three times as much there), since
-  GitHub allows 50,000 check runs in a suite: a check past either is refused the same way, and the
-  record is marked `overflowed` and never settles again. A commit that had already settled keeps its
-  last settlement, which nothing supersedes, so a consumer holding it learns about the refused
-  checks only from GitHub's own read. A settlement NATS refuses anyway (a server whose max payload
-  is set lower) marks the record overflowed too, logged once as `checks settlement refused`, rather
-  than being published again at every attempt.
+  GitHub delivery logs that line at its first failure in a listener process only: a redelivery
+  carries the same `X-GitHub-Delivery`, and each later failure of it the same way logs
+  `redelivery <delivery>: <action> refused` (or `failed`), which the `webhook-refused` and
+  `publish-failure` alarms do not count (`failedDeliveries`: the newest 4,096 deliveries, each for
+  72 hours). A commit's CI record is bounded at 384 KiB (`maxRecordBytes`, about 1,300 checks) and
+  its settlement at 960 KiB (`maxSettlementBytes`; a failing check's `"` costs three times as much
+  there), since GitHub allows 50,000 check runs in a suite: a check past either is refused the same
+  way, and the record is marked `overflowed` and never settles again. A commit that had already
+  settled keeps its last settlement, which nothing supersedes, so a consumer holding it learns
+  about the refused checks only from GitHub's own read. A settlement NATS refuses anyway (a server
+  whose max payload is set lower) marks the record overflowed too, logged once as
+  `checks settlement refused`, rather than being published again at every attempt.
 - The listener's HTTP server gives every route 10 s from the request's start to read its header
   and body, and 10 s from the end of its header to write its answer (`newHTTPServer`,
   `cmd/listener/main.go`). The GitHub webhook route alone moves its own connection's deadlines

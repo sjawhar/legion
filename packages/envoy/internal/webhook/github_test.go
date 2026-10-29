@@ -396,6 +396,105 @@ func TestAPublishRefusedAsTooLargeIsNotLoggedAsAFailure(t *testing.T) {
 	}
 }
 
+// Dispatch's redelivery sweep asks for a failed delivery again for 72 hours, under the same
+// X-GitHub-Delivery. The listener's alarms count `<action> refused` and `github publish failed`,
+// so each delivery logs that line at its first failure only and every redelivery's failure as
+// `redelivery <delivery>: …`, which no alarm counts, while the answer stays the same. Another
+// delivery that fails the same way logs the counted line again.
+func TestARedeliveredGitHubFailureLogsTheCountedLineOnce(t *testing.T) {
+	var logged bytes.Buffer
+	previous, flags := log.Writer(), log.Flags()
+	log.SetOutput(&logged)
+	log.SetFlags(log.LstdFlags)
+	t.Cleanup(func() { log.SetOutput(previous); log.SetFlags(flags) })
+	push := `{"ref":"refs/heads/main","repository":{"name":"legion","owner":{"login":"sjawhar"},"full_name":"sjawhar/legion"}}`
+	checkRun := `{"action":"completed","check_run":{"id":600,"name":"build","status":"completed","conclusion":"failure",` +
+		`"head_sha":"abcdef1234567890abcdef1234567890abcdef12","pull_requests":[{"number":42}]},` +
+		`"repository":{"name":"example-repo","owner":{"login":"example-org"}}}`
+	checkSuite := `{"action":"completed","check_suite":{"id":900,"status":"completed","conclusion":"success",` +
+		`"updated_at":"2026-09-07T03:01:00Z","head_sha":"abcdef1234567890abcdef1234567890abcdef12","app":{"id":77},` +
+		`"pull_requests":[{"number":42}]},"repository":{"name":"example-repo","owner":{"login":"example-org"}}}`
+	tooLarge := fmt.Errorf("publish: %w", bus.ErrTooLarge)
+	unavailable := errors.New("nats: no response from stream")
+	for _, tc := range []struct {
+		name, event, body string
+		publisher         *mockPublisher
+		recorder          *mockRecorder
+		line              string
+		status            int
+	}{
+		{"a refused publish", "push", push, &mockPublisher{err: tooLarge}, &mockRecorder{}, "github publish refused", http.StatusUnprocessableEntity},
+		{"a failed publish", "push", push, &mockPublisher{err: unavailable}, &mockRecorder{}, "github publish failed", http.StatusServiceUnavailable},
+		{"a refused CI record", "check_run", checkRun, &mockPublisher{}, &mockRecorder{err: tooLarge}, "github ci record refused", http.StatusUnprocessableEntity},
+		{"a refused CI suite record", "check_suite", checkSuite, &mockPublisher{}, &mockRecorder{suiteErr: tooLarge}, "github ci suite record refused", http.StatusUnprocessableEntity},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			logged.Reset()
+			handler := GitHubHandler("s", "@legion", "", tc.publisher, tc.recorder)
+			for _, delivery := range []string{"d-again", "d-again", "d-other"} {
+				req := httptest.NewRequest(http.MethodPost, "/webhook/github", strings.NewReader(tc.body))
+				req.Header.Set("X-GitHub-Delivery", delivery)
+				req.Header.Set("X-GitHub-Event", tc.event)
+				req.Header.Set("X-Hub-Signature-256", githubSign("s", []byte(tc.body)))
+				rr := httptest.NewRecorder()
+				handler.ServeHTTP(rr, req)
+				if rr.Code != tc.status {
+					t.Fatalf("delivery %s answered %d, want %d; body = %s", delivery, rr.Code, tc.status, rr.Body.String())
+				}
+			}
+			// The alarms' filters read the words after the line's date and time.
+			var counted, repeated []string
+			for _, line := range strings.Split(strings.TrimSpace(logged.String()), "\n") {
+				words := strings.SplitN(line, " ", 3)
+				if len(words) < 3 {
+					t.Fatalf("log line %q has no date and time", line)
+				}
+				switch rest := words[2]; {
+				case strings.HasPrefix(rest, tc.line+": "):
+					counted = append(counted, rest)
+				case strings.HasPrefix(rest, "redelivery d-again: "+tc.line+": "):
+					repeated = append(repeated, rest)
+				default:
+					t.Fatalf("unexpected log line %q", line)
+				}
+			}
+			if len(counted) != 2 || len(repeated) != 1 {
+				t.Fatalf("log = %q, want %q logged for d-again's first failure and d-other's, and its redelivery's logged once as `redelivery d-again: …`",
+					logged.String(), tc.line)
+			}
+		})
+	}
+}
+
+// The memory of logged failures is bounded: past its size the oldest delivery is forgotten, and a
+// delivery is forgotten once Dispatch's sweep has stopped asking for it, so its next failure is
+// counted again.
+func TestFailedDeliveriesForgetTheOldestAndTheExpired(t *testing.T) {
+	now := time.Date(2026, 10, 28, 12, 0, 0, 0, time.UTC)
+	f := newFailedDeliveries(2, githubFailureAge)
+	f.now = func() time.Time { return now }
+	first := func(delivery string) bool { return f.first(failedDelivery{delivery, "github publish refused"}) }
+	for _, step := range []struct {
+		delivery string
+		advance  time.Duration
+		want     bool
+	}{
+		{"d-1", 0, true},
+		{"d-1", 0, false},
+		{"d-2", time.Hour, true},
+		{"d-3", time.Hour, true}, // forgets d-1, the oldest of two
+		{"d-2", 0, false},
+		{"d-1", time.Hour, true},                    // forgets d-2
+		{"d-3", githubFailureAge - time.Hour, true}, // d-3, logged 72 h ago, is forgotten; d-1, 71 h ago, is not
+		{"d-1", 0, false},
+	} {
+		now = now.Add(step.advance)
+		if got := first(step.delivery); got != step.want {
+			t.Fatalf("at %s, first(%s) = %t, want %t", now.Format(time.RFC3339), step.delivery, got, step.want)
+		}
+	}
+}
+
 // githubSign computes HMAC SHA256 signature matching GitHub's format.
 func githubSign(secret string, body []byte) string {
 	mac := hmac.New(sha256.New, []byte(secret))
