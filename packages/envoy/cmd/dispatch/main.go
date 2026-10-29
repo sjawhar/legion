@@ -396,9 +396,9 @@ func main() {
 	//     purpose), the event stream relay, the document rooms' timers, the document compaction
 	//     queue (docs.New starts it; it compacts the documents this process's own appends and
 	//     loads noted, and the hourly compaction sweep below is the leased pass over the
-	//     documents doc_compaction_owed names, those with rows to fold), and the stale-room evictor (it closes the rooms resident in this process
-	//     that the other process's writes left behind the durable head, so it has to run
-	//     wherever a room is resident).
+	//     documents doc_compaction_owed names, those with rows to fold), and the stale-room
+	//     evictor (it closes the rooms resident in this process that the other process's writes
+	//     left behind the durable head, so it has to run wherever a room is resident).
 	//   - a boot one-shot already serialised by an advisory lock or idempotent: the migrations,
 	//     retirePlainRefreshTokens, restoreDecidedWordings, repairIssueAsks and SeedRepoProjects
 	//     above.

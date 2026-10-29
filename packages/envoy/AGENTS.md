@@ -306,10 +306,9 @@ most 32 MiB (`foldBufferBytes`) reads them into memory, ends the transaction and
 no connection held; a larger log it folds one row at a time as it streams it inside the
 transaction (`foldRead`). At most `bufferedFolds` buffered folds - loads and compactions together,
 `store.RoomsPoolSize` (four), the pool whose connections bounded folds when they ran inside its
-transactions - hold their rows at once in a process, so at most four times 32 MiB of buffered rows
-(`PgVersioned.foldSlots`); a fifth waits within its context. Either
-way it notes the room for compaction once its transaction ends
-(`noteStoredUpdates`). Nothing reads deleted content back from the store: every document built from
+transactions - hold their rows at once in a process (`PgVersioned.foldSlots`), so a process holds
+at most four times 32 MiB of buffered rows; a fifth waits within its context. Either way it notes
+the room for compaction once its transaction ends (`noteStoredUpdates`). Nothing reads deleted content back from the store: every document built from
 it is a `crdt.New`, which drops an item's content in the transaction that deletes it, the one that
 applies a load included; a version stores its own markdown in `artifact_versions`; and no route
 reads an update or a state before the head. What a load's document parks - an update whose

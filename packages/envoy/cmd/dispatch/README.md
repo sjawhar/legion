@@ -1213,7 +1213,6 @@ reads every minute (Keyed writes, below). It reads, refuses and rewrites no row,
 before it neither reads nor depends on them; its census answers `0`. Each build holds its table's
 writes (a `SHARE` lock) for as long as it reads the table once.
 
-
 Migration `0139_doc_compaction_owed` creates `doc_compaction_owed`, the documents with rows a
 compaction could fold, which the hourly compaction sweep reads in place of a scan of
 `doc_updates`: every append names its document there in the statement that inserts its row once

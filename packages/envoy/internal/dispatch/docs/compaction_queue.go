@@ -299,19 +299,22 @@ func (q *compactionQueue) note(room string) {
 	}
 	at := time.Now().Add(q.timing.firstCheck)
 	if held := q.rooms[room]; held != nil {
-		if held == q.current {
+		// A held room is either in flight or in the heap: take pops it and makes it current under
+		// one lock, settle pushes it back or deletes it, and dropQueuedLocked deletes every room
+		// but the current one before it empties the heap.
+		moved := false
+		switch {
+		case held == q.current:
 			held.renoted = true
-			q.mu.Unlock()
-			return
+		case at.Before(held.at):
+			held.at = at
+			heap.Fix(&q.due, held.index)
+			moved = true
 		}
-		if held.index < 0 || !at.Before(held.at) {
-			q.mu.Unlock()
-			return
-		}
-		held.at = at
-		heap.Fix(&q.due, held.index)
 		q.mu.Unlock()
-		q.signal()
+		if moved {
+			q.signal()
+		}
 		return
 	}
 	entry := &compactionEntry{room: room, at: at}
