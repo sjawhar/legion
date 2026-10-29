@@ -559,9 +559,12 @@ earlier release brings the same hazard back, the other way: a tab still open, an
 client that saw this release keep keys within the last five minutes (`KEYED_LAYER_MEMORY_MS`),
 retry a write whose answer was lost against the earlier server, which runs it again. Fix forward
 instead; if you must roll back, stop this release first, knowing a write in flight at that moment
-may land twice. A tab opened before the deploy needs a reload: `GET /api/v1/events` is gone,
-so it shows `Live updates unavailable`, and its broadcast body still carries `idempotency_key`,
-which this release refuses as an unknown field (`400 INVALID_JSON`).
+may land twice. Once `0141_drop_broadcast_idempotency_keys` has applied, a rollback past this
+release also loses broadcasts: the earlier build's broadcast send reads and writes the table `0141`
+drops, so every broadcast send fails while the rest of that build keeps working. A tab opened
+before the deploy needs a reload: `GET /api/v1/events` is gone, so it shows
+`Live updates unavailable`, and its broadcast body still carries `idempotency_key`, which this
+release refuses as an unknown field (`400 INVALID_JSON`).
 
 What the two processes share, and what each keeps to itself:
 
@@ -1220,10 +1223,9 @@ release before it neither reads nor writes; its census answers `0`. It follows
 `0131_asks_written_version`, `0132_component_facts`,
 `0133_comments_written_version_backfill`, `0134_asks_written_version_backfill`,
 `0135_server_processes` and `0136_dashboard_assets`, which already use the preceding migration
-numbers. From its release on,
-nothing reads or writes `broadcast_idempotency_keys` (`0055`), the broadcast's own key table before
-it, and the table is kept: dropping it is a contracting migration, so it ships no earlier than the
-release after this one.
+numbers. From its release on, nothing reads or writes `broadcast_idempotency_keys` (`0055`), the
+broadcast's own key table before it; it was kept through that release so a deploy of it could roll
+back, and `0141_drop_broadcast_idempotency_keys` drops it in a later release.
 
 Migration `0138_pending_delivery_indexes` adds two partial indexes, `message_deliveries_pending`
 and `comment_deliveries_pending`, on the delivery attempts still pending, which the delivery sweep
@@ -1264,7 +1266,15 @@ While the release before it still serves, its coverage pass points those rows ba
 alone, and each pass of either release queues them again, so a roll that spans passes embeds some
 issues more than once; a deployment with no embedder runs no pass and sees none of this.
 
-Migration `0141_asks_anchor_artifact_id` creates `asks_anchor_artifact_id`, an index over the asks
+Migration `0141_drop_broadcast_idempotency_keys` drops `broadcast_idempotency_keys`, the
+contracting half of `0137`: a deploy that carries it can no longer roll back to a build from before
+`0137`, whose broadcast send writes that table. It reads no row; dropping the table takes `ACCESS
+EXCLUSIVE` on `broadcasts` too, because the table's foreign key puts triggers there, so a broadcast
+read or send waits for the instant the migration's transaction lasts. Its census answers `0`. It
+follows `0139_related_checks` and `0140_issue_embedding_spec`, which already use the preceding
+migration numbers.
+
+Migration `0142_asks_anchor_artifact_id` creates `asks_anchor_artifact_id`, an index over the asks
 whose `anchor` is set of `case when anchor->>'artifact_id' ~ '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$' then (anchor->>'artifact_id')::uuid end`:
 the uuid cast `comments_anchor_artifact` (`0032`) indexes, guarded by the form every
 server-written anchor carries, since an unguarded cast would fail the boot over an anchor an
@@ -1277,7 +1287,7 @@ which costs the read nothing — its text comparison never matched such a spelli
 each boot logs the count of those asks with a warning when there are any. The release before it
 never reads the index and serves beside it unchanged, except that its sweep still drops the mark
 of an ask holding both columns (no such row is written today), and rolling Dispatch back past
-`0141` is an image rollback alone: the index is left for the next release that reads it.
+`0142` is an image rollback alone: the index is left for the next release that reads it.
 
 Migration `0009_project_artifacts` deletes malformed derived artifact references, reports their
 count, and re-derives them from source text on the next write. It aborts server boot before a
@@ -1970,7 +1980,7 @@ Dispatch uses cookie identity through the sign-in pool.
 | `/api/v1/search/coverage` | GET | cookie, trusted header, or bearer | Meaning search's coverage, counted in one statement ([Search](#search)): `{identity, place, model, total, kinds}`, the configured embedder's identity, its place (`bedrock` or `azure`) and its model, all three null with no embedder; then, in `total` and for each kind in `kinds` (`issue`, `document`, `comment`, `ask`, `message`), `items` (the searchable ones, a text with nothing to embed left out), `current` (embedded at the item's current text by that identity), `failed` (dead and not current), `lacking` (the rest) and `oldest_lacking_seconds`, how long the longest-waiting lacking item has waited (null when none lacks). With no embedder nothing is current. |
 | `/api/v1/projects/{key}/related?title=&text=&exclude_issue=&keywords_only=` | GET, POST | cookie, trusted header, or bearer | Run the related-item check an issue create runs ([Search](#search)) on a title and a text, checked as the title, a newline and the text (either alone is enough), and write nothing: no issue, ask, suggestion or `related_checks` row. `exclude_issue` leaves that issue of the project, and everything it holds, out of the results and out of the word statistics (`400 EXCLUDE_ISSUE_INPUT` when it is not an issue of the project); `keywords_only=true` skips meaning search. GET takes the fields in the query, title and text together at most 1,000 UTF-16 units (`400 CAP_EXCEEDED` past it); POST takes them as a JSON body `{title, text, exclude_issue, keywords_only}`, a title of at most 1,000 and a text as long as the body's 1 MiB bound. It waits at most 5 seconds and answers `200` with the create's `advice.suggestions` shape (`outcome`, `search`, `search_note`, `search_query`, `related`, `decision`, `missing`), a blank title and text included (`not_made`). `400 INVALID_PROJECT` for a key that is not a project key, `404 PROJECT_NOT_FOUND` for an unknown one. |
 | `/api/v1/related-checks?project=&source_kind=&from=&to=` | GET | cookie, trusted header, or bearer | Count the related-item checks recorded when an issue, an ask or a new decision block was written, within `[from, to)` (RFC3339, each optional) and of `project` and `source_kind` (`issue`, `ask` or `decision_block`; another is `400 INVALID_QUERY`) when given: `{project, source_kind, from, to}` echo the filters (null when absent), then `total`, `by_source_kind`, `by_outcome`, `by_search` (a check not made counted under `not_made`), `by_reason`, `completed` (found or none), `skipped_for_time` (reason `timeout`), and `keyword_ms` and `total_ms`, each `{count, p50, p95, max, over_300ms}` over the checks holding that time (`model.RelatedChecksReport`). |
-| `/api/v1/issues/{key}/references` | GET | cookie, trusted header, or bearer | Read the issue's eight-hop artifact reference closure; a reference to a block reaches the block's document while a current version holds the block. An `If-None-Match` value equal to the response ETag returns `304`. |
+| `/api/v1/issues/{key}/references?versions=` | GET | cookie, trusted header, or bearer | Read the issue's eight-hop artifact reference closure; a reference to a block reaches the block's document while a current version holds the block. An `If-None-Match` value equal to the response ETag returns `304`. `versions=latest` leaves each member's `artifact.versions` holding only its latest version and carries its own ETag; absent, empty or `all` is the full answer; any other value, or `versions` given more than once, is `400 INVALID_QUERY`. |
 | `/api/v1/references?to=\|from=&kind=&since=` | GET | cookie, trusted header, or bearer | Edges of one node in the reference graph, newest first and cross-project: exactly one of `to` (backlinks) or `from` (links), each a `dispatch://` reference, read whatever its length (`text.ParseRef`); `kind` filters a csv of edge kinds; `since=<events.id>` keeps mentions introduced after it (structural edges excluded). The answer is `{node, edges}`, the node read and its edges. Each edge carries the other `node`, an `excerpt` (the containing block for a document mention), `created_at`, and `source_seq`. The node read, each edge's `node` and each edge's `block` carry the six facts of every node, `made_by`, `made_at`, `changed_by`, `changed_at`, `parent` and `parent_version` ([Reference graph](#reference-graph)). A mention a block of a document holds is listed from that block (`node.kind` `block`, `node.document` its document); a document's own read also lists the edges at its blocks, each naming the block as `block`, and leaves out their `part_of` edges unless `kind` names `part_of`. A block reference (`#b-<id>`) names a `block` node carrying its whole current `text`; pinned to a version (`#b-<id>@v<N>`) it also carries `pin` (`version`, `ref`, the block's `text` at that version, `state` `unchanged`, `changed` or `removed`, and `removed_version`), and a removed block answers no edges. `400 INVALID_REFERENCE` / `INVALID_KIND` / `INVALID_SINCE`; `404` for a node that does not exist, a block no current version holds (unpinned) or whose id is past 256 bytes (no node), or a pinned version the document lacks, has no record of the blocks of, or did not hold the block at. |
 | `/api/v1/block-links?from=&to=` | GET | cookie, trusted header, or bearer | The links from blocks of the document `from` names to blocks of the document `to` names (an issue's spec or document, or a project's document; one document may be both), each reference read whatever its length: `{from, to, links}`, each link with its `kind`, both block nodes, and the `created_at` and `created_version` at which the source block first held it, newest first; `from`, `to` and every link's two blocks carry the six facts of every node ([Reference graph](#reference-graph)). A link is listed only while both blocks are current blocks of their documents. `400 INVALID_REFERENCE` when either is not a document reference; `404 NOT_FOUND` for a document that does not exist. |
 | `/api/v1/issues` | POST | cookie, trusted header, or bearer | Create an issue and its primary document. Omitting or leaving `spec` blank gives an empty primary document at version 1. `repo` (`owner/name`) is the issue's own repository and must be mapped to its project: `400 INVALID_ISSUE` when it is not `owner/name`, `400 REPO_NOT_MAPPED` when it is not mapped. A title over 1,000 characters (`contracts.IssueTitleMax`, UTF-16 units after trimming) is `400 CAP_EXCEEDED` before the duplicate check. Refuses a title that near-duplicates an issue in the project with `409 POSSIBLE_DUPLICATE` and candidates unless `force` is true; external references skip the check. A spec whose ask block breaks its content rule (`paragraph+ bullet_list?`: one or more paragraphs, then at most one bullet list, last) is `400 INVALID_ASK_BLOCK`, and a spec whose markdown makes more than 65,536 elements (weighed as Element weights below lists) is `413 CAP_EXCEEDED`, naming the line that passes the limit; so is one whose markdown as stored (what `.../text` answers) would be longer than 1 MiB or make more than 65,536 elements. |

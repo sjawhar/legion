@@ -1,4 +1,4 @@
--- 0141_asks_anchor_artifact_id.up.sql
+-- 0142_asks_anchor_artifact_id.up.sql
 --
 -- Settlement's sweep reads the marks a document's asks record by the anchor's artifact alone,
 -- whatever block_artifact_id holds (docs/marks.go recordedMarkRefs), and no existing index reaches
