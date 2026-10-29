@@ -371,7 +371,7 @@ func costInputs() []struct{ name, text string } {
 // detector, four times as long per doubling). The slowest input here, the windows that every
 // decoding rescans, took at most 280 ms, and 1.35 s under the race detector, over three runs on a
 // 24-core workstation: 35 and 7 times under the bound. CI runs it without the race detector
-// (envoy-and-contracts.yaml's envoy-go job), so a runner slower and busier than that workstation
+// (the envoy-go job in ci.yaml), so a runner slower and busier than that workstation
 // still passes it, while a quadratic regression cannot.
 func TestHoldsSeedCostIsLinear(t *testing.T) {
 	const costBound = 10 * time.Second
