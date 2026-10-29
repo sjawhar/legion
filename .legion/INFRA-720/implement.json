@@ -2,8 +2,24 @@
   "schemaVersion": 1,
   "phase": "implement",
   "issue": "INFRA-720",
-  "completed": "2026-10-29T14:50:00Z",
+  "completed": "2026-10-29T15:45:00Z",
   "proof": [
+    {
+      "criterion": "Round 4 item 1: every ask reader (askRowFrom: ask list and single-ask read; events hydration; both search arms; refs ask node; loadAnchorRefreshedAsk) resolves every anchor spelling that casts as base does, and only an uncastable value to no document",
+      "surface": "a real local Dispatch server built from head, booted over the LINUX replay seed migrated to 0138 by base 8a911ecc, holding nine asks opened through base's API on LINUX-344's spec and rewritten by SQL (block_artifact_id set) to anchor artifact_id: canonical, upper case, braces, trailing newline, '', '5', leading space, not-a-uuid, JSON number 5",
+      "command": "BASE_TEMPLATE=dispatch_replay_8008d85477e69539 shapes-proof.sh bin/dispatch-413818e2 head (dispatch://INFRA-720/artifact/infra720-r5-shapes-tgz)",
+      "observed": "GET /api/v1/issues/LINUX-344/asks 200, /events 200; every GET /api/v1/asks/{id} 200; canonical, upper case and braces resolve anchor_artifact spec in the single read and the list; the six that do not cast resolve none; healthz 200",
+      "headSha": "413818e22bdde3e830335add68d53a89879be3a9",
+      "negativeControl": "base 8a911ecc on the same data: ask list 500 and single read 500 for the six uncastable shapes (22P02); round-3 head 1f4f79e7: upper case and braces resolve none, JSON number 5 answers 500"
+    },
+    {
+      "criterion": "Round 4 item 2: an anchor whose artifact_id is stored as a JSON number decodes as no document instead of failing",
+      "surface": "model and api packages on real Postgres 17.11; the real server above",
+      "command": "cd packages/envoy && DISPATCH_TEST_DATABASE_URL=... go test ./internal/dispatch/model/ -count=1; go test ./internal/dispatch/api/ -run 'AnchorArtifactID|AnUpperCaseOrBraced' -count=1 -v; go test ./internal/dispatch/refs/ -run TestAskNodeKeepsTheDocumentAnUpperCaseOrBracedAnchorNames -count=1",
+      "observed": "model ok; api PASS for TestAskRoutesAnswerOverAnAnchorArtifactIDStoredAsANumber, the tester's TestAskReadersResolveAnUpperCaseOrBracedAnchorToItsDocument (unmodified) and the four ...AnchorArtifactIDThatDoesNotCast tests; refs PASS for the tester's TestAskNodeKeepsTheDocumentAnUpperCaseOrBracedAnchorNames (unmodified); the server answers 200 for the number ask",
+      "headSha": "413818e22bdde3e830335add68d53a89879be3a9",
+      "negativeControl": "with Anchor.UnmarshalJSON removed the number test answers 500; on the round-3 head the server logs 'decode ask anchor: json: cannot unmarshal number into Go struct field Anchor.artifact_id of type string' and answers 500"
+    },
     {
       "criterion": "The INFRA-512 architect's requirement: migration 0139 (renumbered from 0137 at the forward merge) boots on any data production could hold and the server keeps serving; the boot logs the count of asks the index leaves out; the census refuses nothing",
       "surface": "a real local Dispatch server built from the head tree, booted over the LINUX replay seed migrated to 0138 by base 8a911ecc, holding asks opened through the base server's API on LINUX-344's spec and rewritten by SQL into the shape only an earlier release could store (block_artifact_id set; anchor artifact_id 'not-a-uuid' and an upper-case uuid, beside a canonical one); NATS and the fake listener from INFRA-639's harness",
@@ -11,14 +27,6 @@
       "observed": "schema 138 -> 139, healthz ok in 2 s, WARN 'anchored asks left out of asks_anchor_artifact_id ...' count=2; edit of the spec 200 with no sweep error; GET /api/v1/issues/LINUX-344/asks 200 (canonical ask anchor_artifact spec, the other two none); events, search, references 200; healthz 200",
       "headSha": "1f4f79e7fb4795755864c31b77c30e6f20274624",
       "negativeControl": "base 8a911ecc over the same data: GET /api/v1/issues/LINUX-344/asks 500 'invalid input syntax for type uuid: \"not-a-uuid\" (SQLSTATE 22P02)'; previous head ff4d51c8 (unguarded index): boot exits 1 'apply migration 137: ... 22P02'"
-    },
-    {
-      "criterion": "A1 and the per-reader tests: a both-column ask keeps its mark; each guarded reader answers over a non-canonical anchor with canonical rows unchanged",
-      "surface": "docs, api, refs and store packages on real Postgres 17.11",
-      "command": "cd packages/envoy && DISPATCH_TEST_DATABASE_URL=... go test ./internal/dispatch/store/ ./internal/dispatch/refs/ ./internal/pgmigrate/... -count=1; go test ./internal/dispatch/docs/ -run 'TestSettleKeeps|TestRecordedMarkRefs|TestSettleSweeps|TestMarkOnlyUpdateSweeps|TestLoadAnchorRefreshedAsk' -count=1; go test ./internal/dispatch/api/ -run 'AnchorArtifactIDThatDoesNotCast|DeliverySweep' -count=1",
-      "observed": "all ok at the merge head (store 271.8 s, refs, pgmigrate, docs, api); at 61a60b42 the full docs, refs, outbox and cmd/dispatch suites passed, and api failed only TestIssueRanksStay... (byte-order collation of this local Postgres) and TestEventStreamRelayRecoversWhenTheEventLogIsReset (passed 3x alone)",
-      "headSha": "1f4f79e7fb4795755864c31b77c30e6f20274624",
-      "negativeControl": "each reader's guard reverted one at a time: its own test fails with 22P02 (asks list 500, events 500, refs and loadAnchorRefreshedAsk errors); unguarded index expression: TestMigration0139... fails 'apply migration 137/139: ... 22P02'; base marks.go: 'anchored mark of an ask that also names a block on another document was swept'"
     },
     {
       "criterion": "A2: rows identical to INFRA-648's for every ask whose anchor casts; index scans for asks and comments",
@@ -43,6 +51,7 @@
     "packages/envoy/cmd/dispatch/README.md",
     "packages/envoy/cmd/dispatch/main.go",
     "packages/envoy/internal/dispatch/api/ask_anchor_artifact_test.go",
+    "packages/envoy/internal/dispatch/api/ask_anchor_number_test.go",
     "packages/envoy/internal/dispatch/api/ask_rows.go",
     "packages/envoy/internal/dispatch/api/asks.go",
     "packages/envoy/internal/dispatch/api/events.go",
@@ -51,6 +60,8 @@
     "packages/envoy/internal/dispatch/docs/marks.go",
     "packages/envoy/internal/dispatch/docs/marks_test.go",
     "packages/envoy/internal/dispatch/docs/recorded_mark_refs_test.go",
+    "packages/envoy/internal/dispatch/model/anchor_test.go",
+    "packages/envoy/internal/dispatch/model/model.go",
     "packages/envoy/internal/dispatch/refs/ask_anchor_artifact_test.go",
     "packages/envoy/internal/dispatch/refs/graph.go",
     "packages/envoy/internal/dispatch/store/asks_anchor_artifact_id_migration_test.go",
@@ -70,8 +81,9 @@
     "Hardening ledger: the tester's red test 92cbecc9 (census refuses 0137) was replaced, not made to pass, by TestMigration0139BootsOverAnAskWhoseAnchorArtifactIDDoesNotCast, on the architect's requirement that the migration boot over any data.",
     "Forward merge with main 8a911ecc (GitHub reported CONFLICTING: main took 0137_request_keys and 0138); migration renumbered 0139_asks_anchor_artifact_id with identical SQL; fingerprint 787ec9f0... -> 0ad6c541..., changed only by the renumbering.",
     "The search guard is consistency only: both search arms read coalesce(artifact_id, block_artifact_id, <anchor>), which never reaches the anchor for any row an index allows; their tests pin the route answering over the real row shape, not the unreachable cast.",
-    "An upper-case or braced spelling of a real document id now resolves to no document in the guarded readers (it cast before); the server writes none, and the sweep's text comparison never matched one.",
-    "Task 5(b) ran on INFRA-639's replay (b1367e2c) at F=0.15, minutes 19-35, on the INFRA-512 architect's instruction; base is 8a911ecc, the main commit the head was merged with; all six runs on one pod."
+    "Task 5(b) ran on INFRA-639's replay (b1367e2c) at F=0.15, minutes 19-35, on the INFRA-512 architect's instruction; base is 8a911ecc, the main commit the head was merged with; all six runs on one pod.",
+    "Round 4 (narrowed by the INFRA-512 architect, Envoy 28bf3ef6, 15:13Z): only the reader guard switch to store.CastableUUID (pg_input_is_valid) and the non-string artifact_id decode; boot, index, census and sweep rows are settled, so the replay runs were not repeated. The A2/A3 entries above are round 3's at 1f4f79e7.",
+    "On head, a single-ask read of an uncastable anchor answers 200 and logs WARN 'answer a comment or ask read without its anchor's block position' (DOC_SERVICE_UNAVAILABLE from the document stamp read of that id): the read degrades as it does for any document it cannot open."
   ],
   "openQuestions": [
     "Comment-anchor casts (api/search.go comment arms, refs/graph.go:587, outbox/recipients.go:62) stay unguarded: comments_anchor_artifact (0032) casts every comment row, so no stored comment anchor fails. Approval casts are held by asks_approval_kind_check (0053), which requires a canonical uuid."
