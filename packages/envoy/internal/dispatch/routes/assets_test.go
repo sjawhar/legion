@@ -19,6 +19,8 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
+
+	"github.com/sjawhar/envoy/internal/logtest"
 )
 
 // fakeAssetStore answers from assets, or with err, and records every key it is asked for.
@@ -149,9 +151,7 @@ func TestStaticHandlerRetainedAssets(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			var logs bytes.Buffer
-			previous := slog.Default()
-			slog.SetDefault(slog.New(slog.NewJSONHandler(&logs, nil)))
-			t.Cleanup(func() { slog.SetDefault(previous) })
+			logtest.SetDefault(t, slog.NewJSONHandler(&logs, nil))
 
 			webDist := t.TempDir()
 			if err := os.MkdirAll(filepath.Join(webDist, "assets"), 0o700); err != nil {
@@ -313,9 +313,7 @@ func TestStaticHandlerAnswers503ForARetainedAssetThatStallsPastTheFetchBound(t *
 // would a 404. Each failure leaves one ERROR record naming the key and the store's error.
 func TestStaticHandlerLogsARetainedAssetStoreFailure(t *testing.T) {
 	var logs bytes.Buffer
-	previous := slog.Default()
-	slog.SetDefault(slog.New(slog.NewJSONHandler(&logs, nil)))
-	t.Cleanup(func() { slog.SetDefault(previous) })
+	logtest.SetDefault(t, slog.NewJSONHandler(&logs, nil))
 
 	handler, context := newTestRouter(t)
 	context.WebDistDir = t.TempDir()
@@ -409,9 +407,7 @@ func stallRetainedReaders(t *testing.T, handler http.Handler, n int) []*stalledC
 // fetch bound runs out is refused without asking the store: 503, not kept, retried after a second.
 func TestStaticHandlerCapsRetainedBytesHeldAtOnce(t *testing.T) {
 	var logs bytes.Buffer
-	previous := slog.Default()
-	slog.SetDefault(slog.New(slog.NewJSONHandler(&logs, nil)))
-	t.Cleanup(func() { slog.SetDefault(previous) })
+	logtest.SetDefault(t, slog.NewJSONHandler(&logs, nil))
 
 	handler, context := newTestRouter(t)
 	context.WebDistDir = t.TempDir()
@@ -574,9 +570,7 @@ func TestStaticHandlerAnswers503WhenTheFetchRunsOutOfTheSharedBound(t *testing.T
 	defer cancel()
 
 	var logs bytes.Buffer
-	previous := slog.Default()
-	slog.SetDefault(slog.New(slog.NewJSONHandler(&logs, nil)))
-	t.Cleanup(func() { slog.SetDefault(previous) })
+	logtest.SetDefault(t, slog.NewJSONHandler(&logs, nil))
 
 	handler, appContext := newTestRouter(t)
 	appContext.WebDistDir = t.TempDir()
@@ -646,9 +640,7 @@ func TestStaticHandlerWritesNoResponseWhenTheClientCancelsWhileQueuedForTheMemor
 	cancel()
 
 	var logs bytes.Buffer
-	previous := slog.Default()
-	slog.SetDefault(slog.New(slog.NewJSONHandler(&logs, &slog.HandlerOptions{Level: slog.LevelDebug})))
-	t.Cleanup(func() { slog.SetDefault(previous) })
+	logtest.SetDefault(t, slog.NewJSONHandler(&logs, &slog.HandlerOptions{Level: slog.LevelDebug}))
 
 	handler, appContext := newTestRouter(t)
 	appContext.WebDistDir = t.TempDir()
@@ -676,9 +668,7 @@ func TestStaticHandlerWritesNoResponseWhenTheClientCancelsWhileQueuedForTheMemor
 // finishes, for the next request of the same chunk.
 func TestStaticHandlerWritesNoResponseWhenTheClientCancelsWhileTheStoreReads(t *testing.T) {
 	var logs bytes.Buffer
-	previous := slog.Default()
-	slog.SetDefault(slog.New(slog.NewJSONHandler(&logs, nil)))
-	t.Cleanup(func() { slog.SetDefault(previous) })
+	logtest.SetDefault(t, slog.NewJSONHandler(&logs, nil))
 
 	handler, appContext := newTestRouter(t)
 	appContext.WebDistDir = t.TempDir()

@@ -50,13 +50,13 @@ func TestTheEventFeedClosesOnceItsPersonNoLongerResolves(t *testing.T) {
 	person := &endableIdentity{}
 	deps, err := NewDeps(DepsInput{
 		Store: database, Identity: person, AgentTokens: sharedAgentTokens(t, "agent-token"), Docs: documents, Events: broker,
-		StreamHeartbeat: time.Second, Lifetime: t.Context(),
+		StreamHeartbeat: time.Second,
 	})
 	if err != nil {
 		t.Fatalf("new API dependencies: %v", err)
 	}
 	mux := http.NewServeMux()
-	t.Cleanup(Register(mux, deps).Wait)
+	t.Cleanup(Register(mux, t.Context(), deps).Wait)
 	server := httptest.NewServer(mux)
 	t.Cleanup(server.Close)
 
@@ -82,13 +82,13 @@ func TestAgentStreamClosesOnceItsViewerNoLongerResolves(t *testing.T) {
 	source.SetResponder(plannerSessionID, true)
 	deps, err := NewDeps(DepsInput{
 		Store: database, Identity: person, AgentTokens: sharedAgentTokens(t, "agent-token"), Docs: documents, Events: broker,
-		AgentStream: source, StreamHeartbeat: time.Second, Lifetime: t.Context(),
+		AgentStream: source, StreamHeartbeat: time.Second,
 	})
 	if err != nil {
 		t.Fatalf("new API dependencies: %v", err)
 	}
 	mux := http.NewServeMux()
-	t.Cleanup(Register(mux, deps).Wait)
+	t.Cleanup(Register(mux, t.Context(), deps).Wait)
 	server := httptest.NewServer(mux)
 	t.Cleanup(server.Close)
 
@@ -250,7 +250,7 @@ func newDocumentSocketRig(t *testing.T, heartbeat time.Duration) *documentSocket
 		t.Fatalf("new API dependencies: %v", err)
 	}
 	mux := http.NewServeMux()
-	Register(mux, deps)
+	t.Cleanup(Register(mux, t.Context(), deps).Wait)
 	rig.sockets = &servedSockets{finished: make(map[string]chan struct{})}
 	rig.server = httptest.NewServer(rig.sockets.serve(mux.ServeHTTP))
 	t.Cleanup(rig.server.Close)

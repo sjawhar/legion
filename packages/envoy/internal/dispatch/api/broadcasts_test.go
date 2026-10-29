@@ -515,7 +515,7 @@ func TestBroadcastWhoseBudgetEndsBeforeEverySessionIsReadWritesNothingAndLeavesI
 	// between this send and a selection it never read. A budget of a millisecond would race the
 	// stub's answers, and a read cut off in flight is refused on its own error, whether or not
 	// the count is checked.
-	expired := &server{deps: deps, broadcastResolveBudget: time.Nanosecond}
+	expired := &server{deps: deps, lifetime: t.Context(), broadcastResolveBudget: time.Nanosecond}
 	send := func(handler http.Handler) *httptest.ResponseRecorder {
 		t.Helper()
 		return postBroadcastKeyed(t, handler, map[string]any{
@@ -565,6 +565,9 @@ func TestBroadcastRoutesRefuseBearerCallers(t *testing.T) {
 	created := decodeBody[broadcastResponse](t, postBroadcast(t, handler, map[string]any{
 		"body": "Status?", "delivery": "btw", "session_ids": []string{"planner"},
 	}, "alice"))
+	// The send delivers behind its 201: settled before the test ends, it is never cut off
+	// mid-send by the listener closing.
+	awaitBroadcastDeliveries(t, handler, created.ID)
 
 	for name, request := range map[string]struct {
 		method string
@@ -627,11 +630,13 @@ func TestBroadcastRejectsMalformedInput(t *testing.T) {
 		}
 	})
 	// A send without a key is sent, as any write without one is: it is only not replayed.
-	if keyless := dispatchRequest(t, handler, http.MethodPost, "/api/v1/broadcasts", map[string]any{
+	keyless := dispatchRequest(t, handler, http.MethodPost, "/api/v1/broadcasts", map[string]any{
 		"body": "hi", "delivery": "btw", "session_ids": []string{"planner"},
-	}, "alice"); keyless.Code != http.StatusCreated {
+	}, "alice")
+	if keyless.Code != http.StatusCreated {
 		t.Fatalf("a keyless send: status=%d body=%s, want 201", keyless.Code, keyless.Body.String())
 	}
+	awaitBroadcastDeliveries(t, handler, decodeBody[broadcastResponse](t, keyless).ID)
 
 	missing := dispatchRequest(t, handler, http.MethodGet, "/api/v1/broadcasts/5a660655-04ad-4ce0-8a9b-93dd03c412b7", nil, "alice")
 	if missing.Code != http.StatusNotFound || !strings.Contains(missing.Body.String(), `"code":"BROADCAST_NOT_FOUND"`) {

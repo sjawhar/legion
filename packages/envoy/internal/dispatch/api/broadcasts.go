@@ -208,7 +208,7 @@ func (s *server) createBroadcast(w http.ResponseWriter, r *http.Request) {
 	// broadcast view over the live event feed, so nothing is lost by answering first.
 	//
 	// The delivery runs on a context detached from the request, and the server's background
-	// wait holds shutdown for it (waitBackground): SIGTERM cancels Deps.Lifetime before
+	// wait holds shutdown for it (waitBackground): SIGTERM cancels the server's lifetime before
 	// http.Server.Shutdown drains, so a delivery bound to the lifetime was cut off by a deploy
 	// with recipients it had not reached. A deploy that kills the process before they all settle
 	// leaves owed recipients the delivery sweep resumes (resumeOwedDeliveries), and a repeat under

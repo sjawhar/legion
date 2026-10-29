@@ -530,7 +530,9 @@ func TestTargetedMessagePrefixesUnavailableListenerErrors(t *testing.T) {
 			close(cancelled)
 		}))
 		defer listener.Close()
-		handler, _ := newTargetedMessageHandler(t, listener.URL)
+		// A listener that never answers fails the delivery once the client's window ends; a window
+		// of its own keeps the test from waiting out the five-second default.
+		handler, _ := newTargetedMessageHandler(t, listener.URL, 150*time.Millisecond)
 		issue := createInteractionIssue(t, handler, "TEST", "Timeout listener", "before")
 		message := createIssueMessage(t, handler, issue.Key, map[string]any{
 			"body": "Can you receive?", "target": "session:s1", "delivery": "steer",

@@ -30,7 +30,7 @@ func agentsHandlerWithStore(t *testing.T, envoyURL string, database *store.Store
 		Envoy:       envoy.New(envoyURL),
 	}
 	mux := http.NewServeMux()
-	Register(mux, deps)
+	t.Cleanup(Register(mux, t.Context(), deps).Wait)
 	return mux
 }
 
@@ -407,11 +407,10 @@ func TestAnAgentsListDuringAShutdownDrainListsAHealthyListenersSessions(t *testi
 	listenerURL, _ := sessionsListener(t, `[{"session_id":"ses-live","title":"worker","last_seen":100}]`)
 	database := storetest.Open(t)
 	mux := http.NewServeMux()
-	served := register(mux, Deps{Store: database, Identity: headerIdentity(database), Envoy: envoy.New(listenerURL)})
+	// The process's lifetime has already ended: the server is draining after a shutdown.
 	lifetime, shutdown := context.WithCancel(context.Background())
 	shutdown()
-	// Set after register, which with a Lifetime would also start the delivery hub.
-	served.deps.Lifetime = lifetime
+	register(mux, lifetime, Deps{Store: database, Identity: headerIdentity(database), Envoy: envoy.New(listenerURL)})
 
 	for read := 1; read <= 2; read++ {
 		if got := agentIDs(t, mux); !reflect.DeepEqual(got, []string{"ses-live"}) {

@@ -87,11 +87,11 @@ type testServerOptions struct {
 	// files is the uploaded-file store; nil keeps every upload's bytes in Postgres, as a
 	// deployment with no bucket does.
 	files files.Store
-	// lifetime is the server's Deps.Lifetime, on which Register builds the delivery hub GET
+	// lifetime is the lifetime Register runs the server on, building on it the delivery hub GET
 	// /ws/live serves and the event stream relay every events subscription reads. Nil is the
-	// test's own context (t.Context()), which ends before the cleanups that wait those goroutines
-	// out; a test that stops the server before it ends (the socket's) passes one it can cancel
-	// itself. It must end by the test's end, so derive it from t.Context().
+	// test's own context (t.Context()), which ends before the cleanups that wait those
+	// goroutines out; a test that stops the server before it ends (the socket's) passes one it
+	// can cancel itself. It must end by the test's end, so derive it from t.Context().
 	lifetime context.Context
 	// streamHeartbeat replaces the sockets' fifteen-second heartbeat.
 	streamHeartbeat time.Duration
@@ -192,7 +192,6 @@ func newRegisteredTestServer(t testing.TB, options testServerOptions) (http.Hand
 		App:              options.app,
 		GitHubAPIBase:    options.githubAPIBase,
 		TestHooksEnabled: options.testHooks,
-		Lifetime:         lifetime,
 		StreamHeartbeat:  options.streamHeartbeat,
 		EnvoyURL:         options.envoyURL,
 		EnvoyTimeout:     options.envoyTimeout,
@@ -207,7 +206,7 @@ func newRegisteredTestServer(t testing.TB, options testServerOptions) (http.Hand
 	}
 	deps.LiveSocketAge = options.liveSocketAge
 	mux := http.NewServeMux()
-	served := register(mux, deps)
+	served := register(mux, lifetime, deps)
 	maps.Copy(served.liveKinds, options.liveKinds)
 	if options.agentWatchInterval != 0 {
 		served.agentWatchInterval = options.agentWatchInterval
@@ -565,7 +564,7 @@ func TestDocumentTextReportsUnavailableService(t *testing.T) {
 		t.Fatalf("new API dependencies: %v", err)
 	}
 	mux := http.NewServeMux()
-	Register(mux, deps)
+	t.Cleanup(Register(mux, t.Context(), deps).Wait)
 
 	if response := dispatchRequest(t, mux, http.MethodPost, "/api/v1/projects", map[string]string{
 		"key": "TEST", "name": "Test project",
@@ -1800,14 +1799,14 @@ func newCookieServer(t *testing.T) (http.Handler, *store.PgSessionStore, *http.C
 	deps, err := NewDeps(DepsInput{
 		Store: database, Identity: cookieIdentity, AgentTokens: sharedAgentTokens(t, "agent-token"),
 		Docs: documentService, Events: broker,
-		// Mounts GET /ws/live, the event feed's socket, which a revoked cookie is refused too.
-		Lifetime: t.Context(),
 	})
 	if err != nil {
 		t.Fatalf("new API dependencies: %v", err)
 	}
 	handler := http.NewServeMux()
-	t.Cleanup(Register(handler, deps).Wait)
+	// Every server mounts GET /ws/live, the event feed's socket, which a revoked cookie is refused
+	// too.
+	t.Cleanup(Register(handler, t.Context(), deps).Wait)
 	generation, err := sessions.EnsureSession(context.Background(), "alice@d.example")
 	if err != nil {
 		t.Fatalf("establish alice's session: %v", err)

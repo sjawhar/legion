@@ -34,7 +34,7 @@ import (
 //   - 4001 (max age, contracts.LiveSocketMaxAgeClose) once it reaches its age, drawn as it opens
 //     (liveSocketAge), or when the rotate test hook asks, so no socket holds one of the browser's
 //     connections indefinitely: the page reopens at once and resumes every subscription;
-//   - 1012 (service restart) when Dispatch shuts down (Deps.Lifetime) or the disconnect test hook
+//   - 1012 (service restart) when Dispatch shuts down (server.lifetime) or the disconnect test hook
 //     asks;
 //   - 1008 (policy violation) once its caller no longer resolves (whileCallerResolves);
 //   - 1013 (try again later) when the page falls liveSocketQueue of the hub's frames behind;
@@ -306,7 +306,7 @@ func (s *server) serveLiveSocket(w http.ResponseWriter, r *http.Request) {
 	go func() {
 		defer close(writerDone)
 		defer socket.ended()
-		socket.write(r.Context(), s.deps.Lifetime.Done(), s.deps.StreamHeartbeat, age, readerDone)
+		socket.write(r.Context(), s.lifetime.Done(), s.deps.StreamHeartbeat, age, readerDone)
 	}()
 
 	var readErr error

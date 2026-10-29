@@ -104,16 +104,7 @@ type Deps struct {
 	// Files holds uploaded files' bytes outside Postgres (cmd/dispatch: DISPATCH_FILE_STORE_BUCKET);
 	// nil keeps them in each version's row, and a row that still holds bytes is served from the
 	// row either way (files.BackfillRows moves them).
-	Files files.Store
-	// Lifetime bounds every live socket and the loops that serve them: it is the process's own
-	// context, cancelled when the server is shutting down, so a deploy closes each live socket
-	// with 1012, ending every subscription it carries, and http.Server.Shutdown is not held for
-	// its whole budget by a connection that never goes idle. The delivery hub and the event
-	// stream relay run on it, and GET /ws/live is mounted only with one. It bounds no delivery: a
-	// send a request leaves running (a broadcast's recipients) finishes across the signal, and
-	// the wait Register returns holds shutdown for it. Nil means unbounded, which is what a test
-	// gets.
-	Lifetime         context.Context
+	Files            files.Store
 	TestHooksEnabled bool
 	// StreamHeartbeat is how often a document socket and a live socket resolve their caller again
 	// (whileCallerResolves), each closing once the caller no longer resolves, and a live socket
@@ -155,8 +146,7 @@ type DepsInput struct {
 	// Embedder embeds a search request's query for meaning search (LEGION-549); nil turns it off.
 	Embedder embed.Embedder
 	Events   *events.Broker
-	// Lifetime is the process context the live sockets and their loops run on; see Deps.Lifetime.
-	Lifetime context.Context
+
 	// App is the loaded GitHub App credentials (nil when unconfigured);
 	// GitHubAPIBase overrides the GitHub API origin (DISPATCH_GITHUB_API_BASE).
 	App           *auth.AppConfig
@@ -237,7 +227,6 @@ func NewDeps(input DepsInput) (Deps, error) {
 		AgentStream:            input.AgentStream,
 		AgentSecrets:           agentSecretsClient,
 		Files:                  input.Files,
-		Lifetime:               input.Lifetime,
 		TestHooksEnabled:       input.TestHooksEnabled,
 		StreamHeartbeat:        heartbeat,
 		ListenerRosterUncached: input.ListenerRosterUncached,
@@ -271,7 +260,17 @@ func ParseRepoProjects(raw string) (map[string]string, error) {
 }
 
 type server struct {
-	deps            Deps
+	deps Deps
+	// lifetime bounds every live socket and the loops that serve them: it is the process's own
+	// context, cancelled when the server is shutting down, so a deploy closes each live socket
+	// with 1012, ending every subscription it carries, and http.Server.Shutdown is not held for
+	// its whole budget by a connection that never goes idle. The delivery hub and the event
+	// stream relay run on it. It bounds no delivery: a send a request leaves running (a
+	// broadcast's recipients) finishes across the signal, and the wait Register returns holds
+	// shutdown for it (detached). Register sets it from its lifetime parameter and refuses a nil one, since nothing would
+	// ever end the work it bounds; a test passes its own t.Context(). A server a test builds
+	// directly (directServer) has none unless the test sets it.
+	lifetime        context.Context
 	routeIndex      []routeIndexEntry
 	adviceQueryHook func(context.Context, pgx.Tx, string) error
 	// suggestionTimeout overrides the allowance the suggestion step runs under; zero, which every
@@ -288,8 +287,8 @@ type server struct {
 	// routes against and the agents list lists (issue_route_status.go). Only register gives it
 	// non-zero TTLs.
 	rosters rosterCache
-	// deliveryHub keeps the open Delivery and Pipeline pages current (LEGION-690); nil on a server
-	// with no Lifetime (register), which mounts no GET /ws/live.
+	// deliveryHub keeps the open Delivery and Pipeline pages current (LEGION-690); every server
+	// register mounts has one, and only a server a test builds directly (directServer) has none.
 	deliveryHub *deliveryHub
 	// liveSockets is every open GET /ws/live socket, which the test hooks close.
 	liveSockets liveSocketSet
@@ -307,7 +306,7 @@ type server struct {
 	// every delivery a handler started and did not wait for (a broadcast's recipients, a sweep's
 	// resumed attempts). Each runs on a context the request's end does not cancel, and shutdown
 	// waits for them (waitBackground) before the database pool closes, so a deploy finishes them as
-	// http.Server.Shutdown finishes the requests in flight. A send bound to Deps.Lifetime instead
+	// http.Server.Shutdown finishes the requests in flight. A send bound to lifetime instead
 	// was cut off by SIGTERM, which cancels that context before the HTTP drain even begins.
 	detached backgroundWork
 	// requestKeyLease, requestKeyRenewal and requestKeyRunLimit replace a keyed request's lease
@@ -371,22 +370,22 @@ type queryer interface {
 // or DELETE - that names its presser in Dispatch-Login runs only as that person
 // (refuseChangedLogin).
 //
-// With a Lifetime, the server holds the delivery hub (LEGION-690), which starts its goroutines on
-// the first subscription and runs them until Lifetime ends, and mounts GET /ws/live beside the
-// document websocket, under the same wrappers; a server without one (a test's) has neither, so
-// nothing outlives the test. Every server holds the event stream relay (INFRA-66), which every
+// The server holds the delivery hub (LEGION-690), which starts its goroutines on the first
+// subscription and runs them until lifetime ends, and mounts GET /ws/live beside the document
+// websocket, under the same wrappers. It also holds the event stream relay (INFRA-66), which every
 // events subscription reads and which starts its own listening connection on the first of them,
-// also on Lifetime. The returned Background's Wait blocks until every keyed write's handler and
-// every delivery a handler detached from its request (a broadcast's recipients) has settled, and
-// until the hub, every live socket (and every subscription it ran) and the relay have ended. Call
-// it only after Lifetime has been cancelled and before the database pool closes.
+// also on lifetime. lifetime is the process's own context, cancelled when the server is shutting
+// down (server.lifetime says what else it ends). The returned Background's Wait blocks until every
+// keyed write's handler and every delivery a handler detached from its request (a broadcast's
+// recipients) has settled, and until the hub, every live socket (and every subscription it ran)
+// and the relay have ended. Call it only after lifetime has been cancelled and before the database
+// pool closes.
 //
-// That wait is for a server given a Deps.Lifetime: it returns once that context is cancelled,
-// which is what ends the relay's goroutines and the hub's. A server built without a Deps.Lifetime
-// mounts no GET /ws/live, so no events subscription ever starts its relay, and the wait returns at
-// once.
-func Register(mux *http.ServeMux, deps Deps) Background {
-	s := register(mux, deps)
+// Register panics when lifetime is nil: the hub and the relay would run on no context that ever
+// ends, so they would outlive the process's shutdown, or the test that built the server, and the
+// returned wait would block for ever once an events subscription had started the relay.
+func Register(mux *http.ServeMux, lifetime context.Context, deps Deps) Background {
+	s := register(mux, lifetime, deps)
 	return Background{Wait: s.waitBackground, ResumeDeliveries: s.resumeOwedDeliveries}
 }
 
@@ -403,16 +402,14 @@ type Background struct {
 
 // waitBackground waits for every keyed handler and every delivery a request left running past
 // its client, then for every live socket and the subscriptions it ran, then for the hub's
-// goroutines and the relay's. The detached work comes first because it is the only work Lifetime
+// goroutines and the relay's. The detached work comes first because it is the only work lifetime
 // does not stop: a keyed handler is bounded by keyedHandlerLimit, a delivery by the listener
 // client's receipt timeout per recipient, and each reads and writes through the database pool this
 // wait is holding open for it.
 func (s *server) waitBackground() {
 	s.detached.wait()
-	if s.deliveryHub != nil {
-		s.liveSockets.wait()
-		s.deliveryHub.wait()
-	}
+	s.liveSockets.wait()
+	s.deliveryHub.wait()
 	s.eventRelay.wait()
 }
 
@@ -466,30 +463,22 @@ func (b *backgroundWork) wait() {
 	}
 }
 
-// lifetime is Deps.Lifetime, the context the event stream relay runs on, or an unbounded one for a
-// server a test built without one.
-func (s *server) lifetime() context.Context {
-	if s.deps.Lifetime == nil {
-		return context.Background()
-	}
-	return s.deps.Lifetime
-}
-
 // register is Register, answering the server it mounted, whose delivery hub and event stream
-// relay a test waits out before its database closes. It is also called with a zero Deps, as
-// TestTheDeploymentsSuggestionAllowanceIsTheDocumentedBound does, so it must stay cheap and
-// must not dial or read the nil Store: whatever reaches the database or the network starts
-// later, from a handler or the relay's first subscriber.
-func register(mux *http.ServeMux, deps Deps) *server {
-	s := &server{deps: deps, agentWatchInterval: agentStreamWatchInterval, rosters: rosterCache{ttl: routeRosterTTL, silenceTTL: routeRosterSilenceTTL}}
+// relay a test waits out before its database closes. It is also called with an empty Deps, as
+// TestTheDeploymentsSuggestionAllowanceIsTheDocumentedBound does, so it must stay cheap and must
+// not dial or read the nil Store: whatever reaches the database or the network starts later, from
+// a handler, the relay's first subscriber or the hub's.
+func register(mux *http.ServeMux, lifetime context.Context, deps Deps) *server {
+	if lifetime == nil {
+		panic("api.Register: the lifetime parameter is required: it is the context that ends the delivery hub, the event stream relay and every live socket (a test passes t.Context())")
+	}
+	s := &server{deps: deps, lifetime: lifetime, agentWatchInterval: agentStreamWatchInterval, rosters: rosterCache{ttl: routeRosterTTL, silenceTTL: routeRosterSilenceTTL}}
 	s.liveKinds = map[string]liveKind{
 		liveEventsView: {resumes: true, start: s.startEventsView},
 		liveAgentView:  {start: s.startAgentView},
 	}
-	s.eventRelay = newEventStreamRelay(s, s.lifetime())
-	if deps.Lifetime != nil {
-		s.deliveryHub = newDeliveryHub(s, deps.Lifetime, deliveryHubClock{})
-	}
+	s.eventRelay = newEventStreamRelay(s, lifetime)
+	s.deliveryHub = newDeliveryHub(s, lifetime, deliveryHubClock{})
 	routes := s.routes()
 	s.routeIndex = routeIndexEntries(routes)
 	replays := s.keyedReplays()
@@ -532,10 +521,8 @@ func register(mux *http.ServeMux, deps Deps) *server {
 		const pattern = "/ws/doc/{room}"
 		mux.Handle("GET "+pattern, accesslog.Handler(pattern, s.whileCallerResolves(trackTransactions(s.refuseUnstorableParameters(pattern, s.refuseUnstorableActor(websocket.ServeHTTP))))))
 	}
-	if s.deliveryHub != nil {
-		const pattern = "/ws/live"
-		mux.Handle("GET "+pattern, accesslog.Handler(pattern, s.whileCallerResolves(trackTransactions(s.refuseUnstorableParameters(pattern, s.serveLiveSocket)))))
-	}
+	const livePattern = "/ws/live"
+	mux.Handle("GET "+livePattern, accesslog.Handler(livePattern, s.whileCallerResolves(trackTransactions(s.refuseUnstorableParameters(livePattern, s.serveLiveSocket)))))
 	return s
 }
 

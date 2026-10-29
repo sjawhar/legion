@@ -166,32 +166,26 @@ func sweepSuggestionOutcomes(ctx context.Context, pool *store.Pool) error {
 // first's rather than on it, finds that interval swept; leases is required, as it is of every
 // leased loop (cmd/dispatch exits at boot if the lease pool cannot be opened). The period is
 // interval itself and not SuggestionSweepInterval: this loop ticks on what its caller asked for.
-// The sweeps fail apart: one's failure is logged and the others still run.
+// The sweeps fail apart: one's failure is logged and the others still run. The ticks are
+// duty.RunLeased's, a ticker's: the first one interval after the call, then one each interval; the
+// first tick a pass overran comes at once with the moment it was due, and only the ones after it
+// are dropped.
 func RunSuggestionOutcomeSweep(
 	ctx context.Context, pool *store.Pool, interval time.Duration, leases duty.Leases,
 	resumeDeliveries func(context.Context) error,
 ) {
-	ticker := time.NewTicker(interval)
-	defer ticker.Stop()
-	for {
-		select {
-		case <-ctx.Done():
-			return
-		case <-ticker.C:
-			duty.Exclusive(ctx, leases, suggestionOutcomeLease, interval, func(ctx context.Context) {
-				if err := sweepSuggestionOutcomes(ctx, pool); err != nil {
-					slog.Warn("dispatch: suggestion outcome sweep failed", "error", err)
-				}
-				if err := sweepRequestKeys(ctx, pool); err != nil {
-					slog.Warn("dispatch: idempotency key sweep failed", "error", err)
-				}
-				if resumeDeliveries == nil {
-					return
-				}
-				if err := resumeDeliveries(ctx); err != nil {
-					slog.Warn("dispatch: delivery sweep failed", "error", err)
-				}
-			})
+	duty.RunLeased(ctx, leases, suggestionOutcomeLease, interval, duty.TickAfterInterval, func(ctx context.Context) {
+		if err := sweepSuggestionOutcomes(ctx, pool); err != nil {
+			slog.Warn("dispatch: suggestion outcome sweep failed", "error", err)
 		}
-	}
+		if err := sweepRequestKeys(ctx, pool); err != nil {
+			slog.Warn("dispatch: idempotency key sweep failed", "error", err)
+		}
+		if resumeDeliveries == nil {
+			return
+		}
+		if err := resumeDeliveries(ctx); err != nil {
+			slog.Warn("dispatch: delivery sweep failed", "error", err)
+		}
+	})
 }

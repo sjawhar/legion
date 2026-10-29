@@ -1,0 +1,9 @@
+kind: Fixed
+body: |-
+    A document write now reads an unclosed code fence inside a typed block in a list item, a quote
+    or a footnote definition as the browser does, without the trailing newline it kept from the
+    blank line its container ends at; one in a quote that a last `>` line with no line feed ends
+    keeps that blank line, as the browser keeps it.
+time: 2026-10-28T13:35:03.976265921Z
+custom:
+    Issue: pr2403

@@ -36,8 +36,8 @@ const documentShutdownTimeout = docs.ShutdownDrainBudget + 5*time.Second
 // httpDrainBeforeDocuments is how long the document service waits for the requests in flight to
 // finish before it settles the documents owed with requests still running, so that its budget ends
 // 5 s inside stopGrace. An open live socket holds none of it: HTTP shutdown never waits for a
-// hijacked connection, and every live socket closes with the process context (api.Deps.Lifetime),
-// which is cancelled before shutdown starts.
+// hijacked connection, and every live socket closes with the process context (the lifetime
+// api.Register takes), which is cancelled before shutdown starts.
 const httpDrainBeforeDocuments = stopGrace - 5*time.Second - documentShutdownTimeout
 
 // silentProbes is how many health probes (store.Pool.Healthy, two seconds each) in a row must fail,

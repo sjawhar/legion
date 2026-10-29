@@ -23,6 +23,7 @@ import (
 
 	"github.com/sjawhar/envoy/internal/dispatch/auth"
 	"github.com/sjawhar/envoy/internal/dispatch/identity"
+	"github.com/sjawhar/envoy/internal/logtest"
 	"github.com/sjawhar/envoy/internal/oidc"
 	"github.com/sjawhar/envoy/internal/oidc/oidctest"
 )
@@ -254,6 +255,7 @@ func newSignInRigFor(t *testing.T, serverURL string, rule identity.SignInRule, h
 		SignIn:     flow,
 		SignInRule: rule,
 		ServerURL:  serverURL,
+		Lifetime:   t.Context(),
 	}
 	var err error
 	rig.ctx, err = BuildAppContext(rig.options)
@@ -410,9 +412,7 @@ func TestSignInNamesThePersonByTheirUsernameNotTheEmailClaim(t *testing.T) {
 // the log; they get neither a session nor a recorded sign-in.
 func TestSignInRefusesSomeoneOutsideTheGroupWithPageAndLog(t *testing.T) {
 	var logs bytes.Buffer
-	previous := slog.Default()
-	slog.SetDefault(slog.New(slog.NewTextHandler(&logs, nil)))
-	t.Cleanup(func() { slog.SetDefault(previous) })
+	logtest.SetDefault(t, slog.NewTextHandler(&logs, nil))
 
 	rig := newSignInRig(t, "")
 	response := rig.signIn(t, personClaims("other-group"))
@@ -535,9 +535,7 @@ func googleClaims(subject string) map[string]any {
 func captureRouterLogs(t *testing.T) *bytes.Buffer {
 	t.Helper()
 	var logs bytes.Buffer
-	previous := slog.Default()
-	slog.SetDefault(slog.New(slog.NewTextHandler(&logs, nil)))
-	t.Cleanup(func() { slog.SetDefault(previous) })
+	logtest.SetDefault(t, slog.NewTextHandler(&logs, nil))
 	return &logs
 }
 
@@ -806,6 +804,7 @@ func newTestRouter(t *testing.T) (http.Handler, *AppContext) {
 		SigningKey: testSigningKey,
 		People:     people,
 		Identity:   identity.HeaderIdentity{Header: "X-Dispatch-User", People: people},
+		Lifetime:   t.Context(),
 	})
 	if err != nil {
 		t.Fatalf("build context: %v", err)
@@ -1628,6 +1627,7 @@ func cookieRouter(t *testing.T, serverURL string) (http.Handler, *http.Cookie, *
 		Identity:    identity.CookieIdentity{SigningKey: testSigningKey, Sessions: sessions},
 		AgentTokens: sharedAgentTokens(t, "agent-token"),
 		ServerURL:   serverURL,
+		Lifetime:    t.Context(),
 	})
 	if err != nil {
 		t.Fatalf("build context: %v", err)

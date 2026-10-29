@@ -204,16 +204,15 @@ func dispatchMux(t *testing.T, database *dispatchstore.Store, envoyURL string) h
 		EnvoyURL:    envoyURL,
 		Docs:        documents,
 		Events:      broker,
-		Lifetime:    t.Context(),
 	})
 	if err != nil {
 		t.Fatalf("new Dispatch API dependencies: %v", err)
 	}
 	mux := http.NewServeMux()
-	// The wait returns once Lifetime is cancelled, which t.Context() is just before the
-	// cleanups run, and it must finish before the database pool closes — the cleanup registered
-	// first, so the one registered here runs first.
-	t.Cleanup(dispatchapi.Register(mux, deps).Wait)
+	// The wait returns once the server's lifetime, t.Context(), is cancelled, which it is just
+	// before the cleanups run, and it must finish before the database pool closes — the cleanup
+	// registered first, so the one registered here runs first.
+	t.Cleanup(dispatchapi.Register(mux, t.Context(), deps).Wait)
 	return mux
 }
 

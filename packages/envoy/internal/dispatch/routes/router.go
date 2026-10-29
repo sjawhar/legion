@@ -72,6 +72,8 @@ type AppContext struct {
 	// reaching Dispatch over plain http (cmd/dispatch: DISPATCH_INSECURE_COOKIE).
 	InsecureCookie bool
 	apiDeps        api.Deps
+	// lifetime is AppContextOptions.Lifetime, which New passes to api.Register.
+	lifetime context.Context
 	// devSignInHost is the dashboard origin's host:port when the dev sign-in route is mounted,
 	// and empty otherwise. Only BuildAppContext sets it, from DevSignInOrigin, so no caller can
 	// turn the route on without the origin check.
@@ -115,7 +117,9 @@ type AppContextOptions struct {
 	GitHubAPIBase string
 	OIDC          api.ServiceTokenVerifier
 	AgentStream   agentstream.Source
-	Lifetime      context.Context
+	// Lifetime is the process context the API's background work runs on, which New passes to
+	// api.Register as its lifetime; required, since api.Register refuses a nil one.
+	Lifetime context.Context
 	// AgentSecretsURL/AgentSecretsTokenFile configure the credential-request UI's secrets broker
 	// client; empty URL means the feature is off. See api.DepsInput.
 	AgentSecretsURL       string
@@ -174,7 +178,6 @@ func BuildAppContext(opts AppContextOptions) (*AppContext, error) {
 		GitHubAPIBase:          opts.GitHubAPIBase,
 		OIDC:                   opts.OIDC,
 		AgentStream:            opts.AgentStream,
-		Lifetime:               opts.Lifetime,
 		AgentSecretsURL:        opts.AgentSecretsURL,
 		AgentSecretsTokenFile:  opts.AgentSecretsTokenFile,
 		Files:                  opts.Files,
@@ -205,6 +208,7 @@ func BuildAppContext(opts AppContextOptions) (*AppContext, error) {
 		devSignInHost:  devSignInHost,
 		apiDeps:        apiDeps,
 		eventHead:      eventHead,
+		lifetime:       opts.Lifetime,
 	}, nil
 }
 
@@ -257,7 +261,7 @@ func New(ctx *AppContext) (http.Handler, api.Background) {
 	mux.HandleFunc("POST /auth/logout", accesslog.HandlerFunc("/auth/logout", r.authLogout))
 	mux.HandleFunc("GET /auth/whoami", accesslog.HandlerFunc("/auth/whoami", r.authWhoami))
 	mux.HandleFunc(githubapi.Prefix, accesslog.HandlerFunc(githubapi.Prefix, r.apiGithubRest))
-	background := api.Register(mux, r.ctx.apiDeps)
+	background := api.Register(mux, r.ctx.lifetime, r.ctx.apiDeps)
 	mux.HandleFunc("/", r.staticHandler)
 	if ctx.devSignInHost == "" {
 		return r.enforceCookieOrigin(mux), background

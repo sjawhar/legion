@@ -588,7 +588,7 @@ func (unrecordedPeople) Record(context.Context, string) error { return nil }
 
 func TestArtifactIDRoutesValidateBeforeDatabaseUse(t *testing.T) {
 	mux := http.NewServeMux()
-	Register(mux, Deps{
+	Register(mux, t.Context(), Deps{
 		Store:    &store.Store{},
 		Identity: identity.HeaderIdentity{Header: "X-Dispatch-User", People: unrecordedPeople{}},
 	})
