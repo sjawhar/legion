@@ -32,6 +32,9 @@ var browserSpreadAttr = []byte("pmdoc-browser-spread")
 //   - in a quote and a footnote definition, as footnotedQuoteListSpread reads;
 //   - and blank lines after an item that ends in a quote or a list are that block's.
 //
+// The blank lines indented code keeps past where goldmark ends it are that code's, and space
+// nothing (heldCodeLines, markBlocksAfterHeldCode).
+//
 // The lines alone do not decide a typed block holding a blank line in a list item, a blank line at
 // the end of a quote after a list, at or after a list in a typed block in a footnote definition, or
 // in a quote at or after a list that quotes and typed blocks nest around more than once, and this
@@ -41,9 +44,13 @@ var browserSpreadAttr = []byte("pmdoc-browser-spread")
 // otherwise: an empty list item before a blank line and a block its outer item holds, where
 // goldmark ends the outer item (emptyItemEndsOuterItem).
 func browserListSpacing(root ast.Node, source []byte) error {
+	lines := newSourceLines(source)
+	_, lines.keptLast = root.Attribute(lastLineKeptAttr)
+	lines.held = heldCodeLines(root, lines)
+	markBlocksAfterHeldCode(root, lines)
 	shape := browserOnlyShape(root)
 	if shape == "" {
-		if reason := readExactListSpacing(root, newSourceLines(source)); reason != "" {
+		if reason := readExactListSpacing(root, lines); reason != "" {
 			return fmt.Errorf("%w: %s", ErrSchema, reason)
 		}
 		return nil
@@ -51,7 +58,6 @@ func browserListSpacing(root ast.Node, source []byte) error {
 	refuse := func(reason string) error {
 		return fmt.Errorf("%w: %s, in a document holding %s, which is read as the browser editor reads it", ErrSchema, reason, shape)
 	}
-	lines := newSourceLines(source)
 	return ast.Walk(root, func(node ast.Node, entering bool) (ast.WalkStatus, error) {
 		if !entering {
 			return ast.WalkContinue, nil
@@ -241,7 +247,7 @@ func readListSpacing(list *ast.List, lines sourceLines) string {
 		// typed block once around the list that count is quotedListSpread's; where quotes and typed
 		// blocks alternate around it more than once, a blank line in its quote at or after it, outside
 		// the code it holds, is refused.
-		if quoteTypedAlternations(list) > 1 && len(lines.blanksOutsideCode(list, lines.blankLines(list, nextBlock(list), quoteBlankLine))) > 0 {
+		if before := lines.asHeldBefore(); quoteTypedAlternations(list) > 1 && len(before.blanksOutsideCode(list, before.blankLines(list, nextBlock(list), quoteBlankLine))) > 0 {
 			return nestedQuotedListBlank
 		}
 		// The browser editor spaces a list in a typed block inside its quote by one blank line.
@@ -641,10 +647,12 @@ func blankBetweenBlocksBut(item ast.Node, listHolds, definitionHolds func(ast.No
 }
 
 // blankAfterAttr marks a block goldmark made from a paragraph that followed a blank line, which
-// its HasBlankPreviousLines does not carry over (lazyTableRows.transform).
+// its HasBlankPreviousLines does not carry over (lazyTableRows.transform), and the block right
+// after indented code's held lines, which follows no blank line (markBlocksAfterHeldCode).
 var blankAfterAttr = []byte("pmdoc-blank-after")
 
-// blankBefore reports whether a blank line comes right before block.
+// blankBefore reports whether a blank line comes right before block. A line indented code holds
+// past where goldmark ends it is the code's, so the block right after one follows none.
 func blankBefore(block ast.Node) bool {
 	if blank, ok := block.Attribute(blankAfterAttr); ok {
 		return blank.(bool)
@@ -653,6 +661,56 @@ func blankBefore(block ast.Node) bool {
 		return false
 	}
 	return block.HasBlankPreviousLines()
+}
+
+// heldCodeLines is the lines each indented code block holds past where goldmark ends it
+// (codeHeldAttr): the code's text, which spaces nothing, so no counter of blank lines counts them
+// (sourceLines.held).
+func heldCodeLines(root ast.Node, lines sourceLines) map[int]bool {
+	var held map[int]bool
+	eachHeldCode(root, func(code *ast.CodeBlock, from int) {
+		if held == nil {
+			held = map[int]bool{}
+		}
+		segments := code.Lines()
+		for index := from; index < segments.Len(); index++ {
+			held[lines.lineOf(segments.At(index).Start)] = true
+		}
+	})
+	return held
+}
+
+// markBlocksAfterHeldCode records on the block on the line right after an indented code block's
+// last held line that it follows no blank line (blankAfterAttr), whatever goldmark records on it,
+// even where that line holds only its quotes' markers (blankBefore). It runs after the parse, so it
+// decides over what lazyTableRows.transform records there.
+func markBlocksAfterHeldCode(root ast.Node, lines sourceLines) {
+	eachHeldCode(root, func(code *ast.CodeBlock, _ int) {
+		segments := code.Lines()
+		last := lines.lineOf(segments.At(segments.Len() - 1).Start)
+		if next := nextBlock(code); next != nil && lines.lineOf(startOf(next)) == last+1 {
+			next.SetAttribute(blankAfterAttr, false)
+		}
+	})
+}
+
+// eachHeldCode calls visit with each indented code block that holds lines past where goldmark
+// ends it, and the index of the first of them (codeHeldAttr).
+func eachHeldCode(root ast.Node, visit func(code *ast.CodeBlock, from int)) {
+	_ = ast.Walk(root, func(node ast.Node, entering bool) (ast.WalkStatus, error) {
+		if !entering {
+			return ast.WalkContinue, nil
+		}
+		switch node := node.(type) {
+		case *ast.Paragraph, *ast.TextBlock, *ast.Heading:
+			return ast.WalkSkipChildren, nil
+		case *ast.CodeBlock:
+			if from, ok := node.Attribute(codeHeldAttr); ok {
+				visit(node, from.(int))
+			}
+		}
+		return ast.WalkContinue, nil
+	})
 }
 
 // keepsBlankLinesAfter reports whether node ends in a fenced code block no fence closed that takes

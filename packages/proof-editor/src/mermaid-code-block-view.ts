@@ -154,11 +154,17 @@ class MermaidCodeBlockView implements NodeView {
   private showPlainLayout(): void {
     this.stopDrawing();
     this.dom.classList.remove("proof-mermaid-block");
+    this.clearPreview();
+    this.dom.replaceChildren(this.pre);
+  }
+
+  /** Empties the preview and the status line and hides both: what a block that has nothing to
+   *  show above its source looks like, whether it left mermaid or no renderer could draw it. */
+  private clearPreview(): void {
     this.preview.shadowRoot?.replaceChildren();
     this.preview.hidden = true;
     this.status.hidden = true;
     this.status.textContent = "";
-    this.dom.replaceChildren(this.pre);
   }
 
   /** Cancels the earlier request and asks for the current source; the drawer may answer inside
@@ -195,10 +201,7 @@ class MermaidCodeBlockView implements NodeView {
       this.status.textContent = drawing.error;
       this.status.hidden = false;
     } else {
-      this.preview.shadowRoot?.replaceChildren();
-      this.preview.hidden = true;
-      this.status.hidden = true;
-      this.status.textContent = "";
+      this.clearPreview();
     }
   }
 }

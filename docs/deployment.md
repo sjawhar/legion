@@ -210,6 +210,46 @@ trusted`. Put a real tmux binary first on the daemon's `PATH`
 (`mise which tmux` prints its install path), as the live proofs do with `real_bin_path`
 (`scripts/e2e/README.md`).
 
+## What a pane's Dispatch credential is
+
+A pane's Dispatch bearer is the daemon's own. The daemon reads `dispatch_token_file` once at boot
+(`readBoot`, `packages/daemon/internal/daemon/bootreads.go`) and writes the value to
+`<state_dir>/secrets/dispatch-token`, a 0600 file in a 0700 directory, with
+`WriteDispatchTokenFile` (`packages/daemon/internal/runtime/secretfiles.go`, called from
+`prepareTmux` in `packages/daemon/internal/daemon/daemon.go`). It then tells every pane
+`DISPATCH_TOKEN_FILE` naming that file (`panePairs`,
+`packages/daemon/internal/runtime/tmux/spawn.go`). The value never enters tmux's argv or a pane's
+environment. So a pane holds the daemon's own credential, not one of its own.
+
+The Envoy listener bearer reaches a pane the same way. It is a launch secret, `ENVOY_TOKEN`
+(`launchSecrets`, `packages/daemon/internal/daemon/launchsecrets.go`), and the tmux runtime writes
+every launch secret to a 0600 file of its own under `<state_dir>/secrets` and tells the pane the
+matching `<NAME>_FILE` pointer, here `ENVOY_TOKEN_FILE` (`secretFiles`, `WriteSecretFiles` and
+`panePairs`, `packages/daemon/internal/runtime/tmux/spawn.go`).
+
+When `dispatch_token_file` holds one of the deployment's shared agent tokens
+(`DISPATCH_AGENT_TOKEN`), Dispatch matches the bearer against them (`MatchesSharedAgentToken`,
+`packages/envoy/internal/dispatch/auth/agent_token.go`) and reads no person, no service and no
+project from it. Whatever the bearer, the acting session is the one the request body names
+(`bearerSessionActor`, `packages/envoy/internal/dispatch/api/server.go`). Dispatch takes any other
+bearer as a service token or a personal token (`optionalActor`, the same file), and every pane's
+session then carries that token's service or owner as well. `dispatch whoami` in a pane tells the
+two apart: for a shared agent token it answers
+`Session <id> runs under the shared token: no owner, …`
+(`packages/envoy-client/src/dispatch-execute.ts`). A pod's side of this is in `docs/kubernetes.md`,
+"Anatomy of a Sandbox pod". A person's own session on the same box uses a personal token instead,
+minted from Dispatch's Settings → Agent tokens
+(`docs/site/src/content/docs/dispatch/for-agents.md`).
+
+The agent-secrets helper holds a credential of its own: the machine login a person approves for
+`agent-secrets machine login`. The helper spends that credential on the broker's own routes
+(`packages/envoy/internal/broker/helper/broker.go`) and asks the broker for no Dispatch token. The
+broker can exchange such a login's access token for one (`docs/kubernetes.md`, "The Dispatch
+identity the broker can issue"), and nothing on this box does that at this release.
+`dispatch://INFRA-267` is where the daemon and its workers get Dispatch tokens of their own, a dev
+box session writing under an approved machine login included, and `dispatch://INFRA-264` is where
+Dispatch accepts a broker token.
+
 ## Phase workers on Claude Code
 
 `worker_backends` in `legion.yaml` runs a role on another agent harness than Oh My Pi:
@@ -255,12 +295,12 @@ makes the same refusals:
   `dist/envoy-channel.js` and the generated Legion plugin's `legion/.claude-plugin/plugin.json`.
   A checkout of a commit on `main`, never of a branch, already holds both (`AGENTS.md`, "Deploys
   come only from main"): main's Rebuild Claude Envoy plugin workflow commits them after each merge.
-  `bun run check-dist` in that package confirms them. A checkout taken after a merge and before its
-  rebuild commit (one run of that workflow, its runner queues included) holds the previous build:
-  build the plugin from it with `bun scripts/build.ts --out <dir>` in that package, into a
-  directory outside the checkout, and point `LEGION_CLAUDE_PLUGIN_DIR` at `<dir>` until the rebuild
-  commit lands. That leaves the checkout's tracked files as they are, so its next `git pull`
-  fast-forwards.
+  `bun run check-dist` in that package confirms them. A checkout taken after a merge and before a
+  rebuild of it lands (at most one run of that workflow behind its inputs, its runner queues
+  included) holds an earlier build: build the plugin from it with `bun scripts/build.ts --out
+  <dir>` in that package, into a directory outside the checkout, and point
+  `LEGION_CLAUDE_PLUGIN_DIR` at `<dir>` until the rebuild commit lands. That leaves the checkout's
+  tracked files as they are, so its next `git pull` fast-forwards.
 
 A missing one refuses the boot, naming every gap in one line. The three are tmux's alone: a pod
 resolves nothing. Its bun and its claude-envoy root are the worker image's, at fixed paths

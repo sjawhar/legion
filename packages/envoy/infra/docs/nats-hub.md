@@ -4,6 +4,10 @@ NATS with JetStream on one Google Cloud VM that joins a tailnet, where its clien
 the NATS server `envoy-infra:host:Listener` connects to. How to install the plugin, give a
 component its providers, and write a host's NATS seed is in [the module's README](../README.md).
 
+`envoy-infra:gcp:ClusteredNatsHub` serves the same users from three NATS servers on a GKE cluster
+instead of one VM: [The clustered hub](#the-clustered-hub-gcpclusterednatshub), at the end of this
+document, says how it differs in running, updating and watching it.
+
 ## What `gcp:NatsHub` deploys
 
 A hub whose `hostname` is `<h>` registers these resources, each a child of the hub and named after
@@ -729,4 +733,174 @@ outputs are `natsUrl: "nats://example-hub:4222"` and `instanceGroup`, `example-h
 suffix. The template's `user-data` is `gcp/testdata/cloud-config.golden` byte for byte. `pulumi up`
 then applies it. The listener of the module's first example reaches this hub with `natsUrls` set
 to `nats://example-hub:4222` and the seed of `example-host-a`.
+
+## The clustered hub, `gcp:ClusteredNatsHub`
+
+`envoy-infra:gcp:ClusteredNatsHub` serves this hub's users from three nats-server pods of a GKE
+cluster, one per zone, rather than from one VM. [Its section of the module's
+README](../README.md#gcpclusterednatshub) lists what it deploys, its inputs and refusals, its
+sizing and what the consumer prepares, with an example. This section is what differs from
+`gcp:NatsHub` in running it.
+
+### The same users
+
+Both hubs render their users through one function, `authorization` in `gcp/natshub.go`, and
+`core`'s `Render` under the same header, so the same `users`, listener and `sessionUser` give the
+same authorization byte for byte (`TestClusteredNatsHubRendersTheVMHubsAuthorization`). Everything
+[The hub's users](#the-hubs-users) says holds for the clustered hub, with one difference: the
+listener's user is named after `tailnet.listener.machineId`, which defaults to
+`tailnet.serviceName`, where the VM names it after its `hostname`. A deployment that moves from a
+`gcp:NatsHub` whose `hostname` is `envoy-hub` keeps the machine id `envoy-hub`, by naming its
+Tailscale Service `envoy-hub` or by setting `machineId`: the listener's user is then the one the
+VM rendered, with `ListenerPermissions(envoy-hub)`, and its durable is the VM listener's
+`listener-envoy-hub`, so a durable restored with the streams is the one the new listener binds.
+Every tailnet host's listener runs as that one machine id.
+
+The rendered `auth.conf` is a key of the chart's ConfigMap `<n>-config`, beside `nats.conf`, which
+includes it; like the VM's metadata, the ConfigMap holds it in the clear, public keys only.
+
+### A reload, not a replacement
+
+A users change replaces the VM of a `gcp:NatsHub` (see [Updating a hub](#updating-a-hub)). On the
+clustered hub it rewrites `auth.conf` in place, since the hub's own provider updates ConfigMaps
+rather than replacing them, and the chart's config reloader beside each server, which watches
+`nats.conf` and `auth.conf`, signals nats-server to reload once the kubelet has updated the mounted
+file. No server restarts and no client reconnects: on three local nats-server 2.15.1 processes with
+the real reloader 0.24.0, a client kept its connection id with zero reconnects while a user was
+added (it could then connect) and removed (it was then refused), and every server's PID stayed the
+same. The chart's own checksum annotation, which would restart the pods on any change to the
+ConfigMap, is off.
+
+The session user is the exception. nats-server 2.15.1 refuses a whole reload that changes
+`no_auth_user`, logging `config reload not supported for NoAuthUser`, and keeps the users it had,
+so a new session user takes effect only when a server restarts. The hub therefore writes the
+session user's public key into the hub pods' annotation `envoy-infra.sjawhar.dev/no-auth-user`
+(absent without a session user): adding, removing or changing the session user changes the pod
+template, and the StatefulSet replaces its pods one at a time, each server restarting on its own
+claim while the other two serve. Any other users change leaves the pod template as it was. A users
+change made in the same update as a session-user change applies, with it, as each pod restarts.
+The roll must start from the new `auth.conf`: a pod restarted on the old file keeps the old session
+user, and the reload that later brings the new file is refused. The same holds for the store's roll
+below, from the new `nats.conf`. So the StatefulSet's annotation
+`config.kubernetes.io/depends-on: /namespaces/<namespace>/ConfigMap/<n>-config` makes pulumi-kubernetes
+apply the StatefulSet only after the ConfigMap, with or without a session user, and a ConfigMap
+update that fails stops the update before any pod rolls.
+
+The file store's limit is the other exception. nats-server 2.15.1 refuses a reload that lowers
+`max_file_store`, logging `config reload not supported for decreasing jetstream max memory and
+store`, and a reload is all or nothing against the options the server runs with: once `nats.conf`
+holds a lower limit, every later reload is refused too, a users change in `auth.conf` among them,
+until the server restarts. The local cluster test shows it: with a lower `max_file_store` written
+beside a new user, the reload was refused and the user was refused too, and the restarted server
+admitted it. The hub therefore also writes the limit into the hub pods' annotation
+`envoy-infra.sjawhar.dev/max-file-store`, so any change of `maxFileStoreGb`, given or derived from
+`streamMaxBytes` and `diskSizeGb`, rolls the pods onto the new `nats.conf`; a raise, which
+nats-server could reload, rolls them as well. Each pod the roll restarts starts on the new
+`nats.conf`, by the same depends-on order as the session user's roll: a pod restarted on the old
+file would keep the old limit, and the reload that later lowers it would be refused, with every
+reload after it. A disk growth whose limit follows `diskSizeGb` therefore rolls the pods too,
+unless `maxFileStoreGb` holds the limit the hub runs with (the README's disk-growth steps).
+
+### Routes, guarded by the NetworkPolicy alone
+
+The servers' routes carry no credential: any process that reaches a hub pod's port 6222 can join
+the cluster as a server. The NetworkPolicy `<n>` admits 6222 from the hub pods alone, and that is
+the routes' only guard, so the hub needs a cluster that enforces NetworkPolicy, as GKE Autopilot
+does with GKE Dataplane V2. The policy's rules are pinned by the unit tests
+(`TestClusteredNatsHubNetworkPolicy`); the local cluster test runs its three servers on loopback
+with no policy at all, so it proves the routes and the rendered configuration, never the policy's
+enforcement, which is the cluster's.
+
+### The tailnet hosts
+
+With `tailnet`, each of `tailnet.replicas` host pods is a tailnet node of its own, named after its
+pod, and a host of the Tailscale Service `svc:<tailnet.serviceName>`. A Tailscale Service sends a
+client to a host, not to a host per port, so every host serves both of the Service's ports: 4222,
+forwarded as TCP to the hub's client Service, and 9020, forwarded to the session listener the same
+pod runs on its loopback. Clients reach them as the hub's `tailnetNatsUrl`,
+`nats://<tailnet.serviceName>.<tailnetDnsName>:4222`, and `tailnetEnvoyUrl`, the same name on
+9020. The listener's `/v1` takes no bearer there, as on the VM, so
+[The hub's listener](#the-hubs-listener) holds for port 9020 of the Service as written.
+
+A host advertises the Service only while its own listener answers `/healthz` with HTTP 200: it
+asks every 5 seconds, advertises after two answers of 200 in a row and drains after three failures
+in a row. So the two ports are coupled: a host whose listener is unhealthy drains both, 4222
+included, though NATS behind it is healthy, and a listener failure on every host takes the hub's
+4222 off the tailnet too. In-cluster clients, which reach the client Service directly, are
+unaffected. No metric of the hub shows it, since every server stays healthy: the alert on the
+session listener being down covers it.
+
+A host pod is ready only while its node hosts the Service, approved, so the Deployment's rollout
+(`maxUnavailable: 0`, `maxSurge: 1`) and its budget (`maxUnavailable: 1`) count only hosts that
+serve: a new host serves before an old one stops. A stopping host drains the Service, waits 20
+seconds for its clients to move to another host and logs its node out, while its listener keeps
+answering for 25 seconds before it stops; the advertiser exits on its SIGTERM at once.
+
+Every host runs the listener as the same machine id, `tailnet.listener.machineId`, so all of them
+bind the one durable `listener-<machine id>`. The hosts are therefore safe only with a listener
+build that has dispatch://INFRA-557's single-deliverer take-over: one pod delivers from the
+durable, every other pod waits as a standby and takes over within seconds when the active pod
+goes, and `/healthz` answers 200 only on a pod that can serve `/v1`, which is what the advertiser
+judges. No such build exists until INFRA-557 lands. With an earlier build, a second host's listener
+waits 135 seconds to bind the durable the first one holds, then exits and is restarted, again and
+again (`cmd/listener/durable.go`, `durableBindDeadline`). Through each wait its `/healthz` answers
+200 (`"starting"`) and its `/v1` serves (`cmd/listener/main.go`, `healthzHandler`), so its
+advertiser advertises it after two answers, its node joins the Service and its pod counts as ready,
+in the rollout and the budget too, until its listener exits and it leaves the Service. And after a
+NATS reconnect in place two hosts can both deliver from the durable, so a session can be given one
+message twice. The component cannot tell which build `tailnet.listener.image` is, so this is the
+operator's to keep.
+
+### Metrics and alerts
+
+Each hub pod's `prom-exporter` container runs prometheus-nats-exporter 0.20.2 with the chart's
+arguments (`-connz -routez -subz -varz -prefix=nats -use_internal_server_id -jsz=all` and the
+server's monitoring URL), and Google Managed Prometheus scrapes it through the PodMonitoring `<n>`
+every 30 seconds. Its stream metrics, as the local cluster test logged them, are:
+
+- `nats_stream_consumer_count`
+- `nats_stream_first_seq`
+- `nats_stream_last_seq`
+- `nats_stream_limit_bytes`
+- `nats_stream_limit_messages`
+- `nats_stream_subject_count`
+- `nats_stream_total_bytes`
+- `nats_stream_total_messages`
+
+Each series is one server's copy of one stream: every server holding a copy serves one series of
+each metric for it, so a stream of three copies has three `nats_stream_last_seq` series at rest,
+two while one of its servers is down, and a stream of one copy has one. Every series carries the
+exporter's stream labels (prometheus-nats-exporter 0.20.2, `collector/jsz.go`): `server_id`,
+`server_name`, `cluster`, `domain`, `meta_leader`, `is_meta_leader`, `account`, `account_name`,
+`account_id`, `stream_name`, `stream_leader`, `is_stream_leader` and `stream_raft_group`.
+`server_name` is the pod's name, `<n>-0` to `<n>-2`, and `stream_name` the stream's: the
+listener's notification stream is `ENVOY_NOTIFICATIONS`, and a KV bucket is the stream
+`KV_<bucket>`. Google Managed Prometheus adds its own target labels beside these.
+
+No metric says whether a copy is current, so a copy counts as current when its `last_seq` equals
+the highest any copy of that stream reports. The streams with fewer than three current copies are:
+
+```promql
+count by (stream_name) (
+  nats_stream_last_seq
+    == on (stream_name) group_left ()
+  max by (stream_name) (nats_stream_last_seq)
+) < 3
+```
+
+A stream matches when a server holding a copy is down, when a copy is behind, or when the stream
+keeps fewer than three copies. With `natsReplicas: 3` every stream and bucket the listener creates
+keeps three; a stream another client creates with fewer always matches, so scope the query with a
+`stream_name` matcher, such as `{stream_name=~"ENVOY_NOTIFICATIONS|KV_.+"}` on both selectors,
+when the hub holds any. Each exporter scrapes its own server at its own moment, so under steady
+writes one copy can trail another by a few messages in a single scrape: give the alert a `for`
+duration longer than a few scrapes. A stream whose every server is down has no series at all,
+which the pod-down alert covers.
+
+A pod that is down, a hub pod (`<n>-0` to `<n>-2`, container `nats`) or a tailnet host
+(`<n>-tailnet-…`, containers `tailscale` and `listener`), is read from Cloud Monitoring's GKE
+system metrics for containers, `kubernetes.io/container/*` on the `k8s_container` resource, by
+`namespace_name`, `pod_name` and `container_name`: for example `kubernetes.io/container/uptime`
+absent, or `kubernetes.io/container/restart_count` rising. GKE reports them itself, so they hold
+for a pod whose exporter is gone with it.
 
