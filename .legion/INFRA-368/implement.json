@@ -2,23 +2,23 @@
   "schemaVersion": 1,
   "phase": "implement",
   "issue": "INFRA-368",
-  "completed": "2026-10-29T14:05:00Z",
+  "completed": "2026-10-29T14:40:00Z",
   "pullRequest": "https://github.com/sjawhar/legion/pull/2463",
-  "round": "review round 8 (architect's round 9)",
+  "round": "review round 9 (architect's round 10)",
   "proof": [
     {
-      "criterion": "A kept comment edit keeps its block ids through any number of reloads: after two reloads, and after a reload that interrupts a Retry already out, the next Retry sends the same {body, base_revision, blocks} under the send's key",
-      "surface": "The dashboard's held-send store (held-sends.ts, kept in sessionStorage across reloads) under Bun's DOM tests; the editor and held-send browser rows in Chromium on the local harness built from 881b03e5",
-      "command": "cd packages/dispatch && bun test web/src/features/conversation web/src/features/margin; bunx playwright test --config e2e/playwright.config.ts --project=chromium e2e/held-sends.e2e.ts e2e/offline-edits.e2e.ts e2e/conversation.e2e.ts -g 'passage|kept|reload|edit'; block-graph.sh with DEV_SIGNIN_LOGIN=alice",
-      "observed": "317 pass, 0 fail, including 'a comment edit keeps its ids through two reloads and through a reload that interrupts its Retry': all three PATCHes are ['comment-1', {body, base_revision 3, blocks b1/b2}] under key send-edit. Playwright 10 passed; driver exit 0, 133 PASS.",
-      "headSha": "881b03e5834e",
-      "negativeControl": "With held-sends.ts, send-request.ts and MentionComposer.tsx at 8c404ede, the new test fails: the retry after the second reload calls editComment without base_revision and blocks. A kept record from the older build (the edit as a bare comment id) still restores and saves with no ids."
+      "criterion": "An unchanged edit of a comment stored with CR LF carries its block ids: the save works out the ids from the body it sends, the field's text",
+      "surface": "The Conversation tab's comment editor in Chromium on the local harness built from 30157984 (a comment posted with CR LF by the signed-in person, edited and saved without typing)",
+      "command": "a throwaway Playwright row (removed after the run): POST /api/v1/issues/CORE-1/comments {body: 'Alpha first.\\r\\n\\r\\nBeta second.'} as alice, reload, Expand thread, Edit, Save; plus `bun test web/src/features/conversation/MentionComposer.test.tsx` ('an unchanged edit of a comment stored with CR LF carries each block's id')",
+      "observed": "The blocks route answered b1 0-12 and b2 16-28 (UTF-16 into the CR LF body). The PATCH sent {body: 'Alpha first.\\n\\nBeta second.', base_revision: 1, blocks: [{from: 0, id: b1}, {from: 14, id: b2}]}. The unit test passes; conversation and margin tests 318 pass; the driver exits 0 with 133 PASS; the passage, held-send and editor rows 4 passed.",
+      "headSha": "30157984d4b2",
+      "negativeControl": "With MentionComposer.tsx at 881b03e5 (dashboard rebuilt), the same browser drive PATCHed {body: 'Alpha first.\\n\\nBeta second.'} alone, with no base_revision or blocks, and the unit test fails the same way."
     }
   ],
   "filesChanged": [
-    "881b03e5: send-request.ts (SentRequest.edit.carried replaces .blocks; carriedIdsOf works the ids out at the press; sendAttempt passes edit.carried), MentionComposer.tsx (composedRequest sets carried), held-sends.ts (keep writes edit.carried; restore reads it back; restoredEdit's closure and the followed ?? carried fallback removed; the older-build comments reworded), held-sends.test.ts (two-reload / interrupted-Retry case; fixture derives carried from spans)"
+    "30157984: MentionComposer.tsx (sentRequest reads the field once and composedRequest takes that text for both draft.body and edit.carried), send-request.ts (carriedIdsOf doc comment), MentionComposer.test.tsx (CR LF unchanged-save case with a textarea that normalizes CR LF)"
   ],
   "deviations": [
-    "The PR body's loadMessage call-site table now lists recoveredMessage (it hydrates reply_block since 8c404ede)."
+    "Round 10 item 1 (the itemblocks lines in ci.yaml's five filters) is not in this push: ci.yaml and check-ci-filters.sh are main's (#2316) and not on this branch, whose merge base is 88840d35. The architect agreed (message 69c51de1): the lines go in the same push as the forward merge when the merge lane calls #2463's turn, and check-ci-filters.sh runs there."
   ]
 }
