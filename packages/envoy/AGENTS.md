@@ -1855,7 +1855,11 @@ writer pads a span whose text starts and ends with one. The columns left of a ta
 marker took part of are text to that parser, not spaces, so they stand between, and a span ending
 in them sheds nothing. The writer writes a span's later line as it is, without the containers'
 prefix, except where a list item or footnote definition would take columns off the whitespace it
-opens with, and there behind the prefix (`takesCodeLineIndent`). The spaces and tabs a line of text
+opens with, and there behind the prefix (`takesCodeLineIndent`), and except a line holding one
+complete HTML tag and nothing else, which is written behind the prefix too
+(`codeLineOpensHTML`): without it that line is a lazy continuation line opening a block of HTML
+of kind 7, which ends the paragraph, the containers around it and the code with them in every
+CommonMark reader. The spaces and tabs a line of text
 ends with are dropped, as that parser drops them, and are a hard break only where they are two
 spaces or more and no tab (`trimLineSuffixes`); goldmark kept all but the last and broke at any two
 spaces. A backslash ending the line keeps what stands before it. A lazy continuation line - one that
@@ -1929,6 +1933,25 @@ A fenced code block whose language - the info string's first word - holds a back
 character reference is refused: that parser decodes both, and goldmark keeps them as written. What
 it leaves as written (`\q`, `&bogus;`) is read as before, as is the rest of the info string, which
 both drop.
+A fenced code block's own indentation is taken off every line it holds, and a line holding fewer
+columns of spaces and tabs than that is an empty line of code, as the browser editor's parser
+reads it (`fenceClosure`, `emptyCodeLine`, which keeps the line ending as written, CR included).
+Goldmark fell back there to the line's first non-space position, which a line of whitespace has
+none of, less the padding left of a tab a container's marker took part of, so it started the line
+that many bytes before its text, inside the markers: `>    ``` ` over `>` and a tab read `>\t` as
+the code.
+A line the browser editor's parser opens a block of HTML on is refused, since the Proof schema
+holds no block of HTML and that parser drops the one it reads with the container around it
+(`ErrBlockHTML`). Goldmark opens a block of HTML on most such lines itself and refuses it there;
+the rest are the ones its patterns (`parser/html_block.go`) miss, which are recorded per
+paragraph line as the lines are taken (`htmlFlowKind`, a port of micromark's own html-flow
+tokenizer, with `recordHTMLFlowLine`) and refuse the paragraph, text block or setext heading
+holding one (`htmlFlowRefusal`): that parser takes a tab where those patterns take only a space,
+in the line's indentation, inside the tag and after it, so `> </a\t>` and `> a` over `> \t<div>`
+are refused, and it reads a declaration opening with a lower-case letter (`<!x>`) and a closing
+tag of a raw text name (`</script>`) as a block as well. A block of kind 7, one complete tag and
+nothing else, interrupts a paragraph in neither parser, so a lone tag continuing one, lazily or
+not, is read as inline HTML and refused nowhere.
 A task list item's marker (`[ ]`, `[x]` or `[X]` opening a list item's first paragraph) is read as
 the browser editor's parser reads it (`taskList`): followed by a space or a tab and then more text on
 the line, or by a line ending the paragraph continues past, and it takes only the one character

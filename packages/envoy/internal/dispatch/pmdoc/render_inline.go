@@ -668,6 +668,21 @@ func (r *renderer) takesCodeLineIndent(rest string) bool {
 	return taken > 0
 }
 
+// codeLineOpensHTML reports whether a code span's later line, the first of rest, holds one
+// complete HTML tag and nothing else, which written without its containers' prefix would be a
+// lazy continuation line opening a block of HTML of kind 7 (htmlFlowKind) in every CommonMark
+// reader, ending the paragraph, the containers around it and the code with it. Behind the prefix
+// the line continues the paragraph, which a block of that kind interrupts nowhere, and the
+// containers take the prefix off the code's text again. A line the span's closing backticks end
+// holds them after the tag, which opens no block.
+func codeLineOpensHTML(rest string) bool {
+	line, _, whole := strings.Cut(rest, "\n")
+	if !whole || !strings.HasPrefix(strings.TrimLeft(line, " \t"), "<") {
+		return false
+	}
+	return htmlFlowKind([]byte(line), 0) == 7
+}
+
 func (r *renderer) writeSyntax(value string) {
 	r.b.WriteString(value)
 }
@@ -699,7 +714,7 @@ func (r *renderer) writeInlineText(node *Node, position *inlinePosition, prefix 
 			r.endLine(true)
 			r.writeText(value[lineEnd : lineEnd+1])
 			value = value[lineEnd+1:]
-			if r.takesCodeLineIndent(value) {
+			if r.takesCodeLineIndent(value) || codeLineOpensHTML(value) {
 				r.writeSyntax(prefix)
 			}
 			endsLine, position.afterLine = value == "", true

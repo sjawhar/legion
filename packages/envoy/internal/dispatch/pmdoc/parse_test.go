@@ -565,6 +565,70 @@ func TestParseOpensAnItemAfterIndentedCodeWhereTheContainerOpenedEarlier(t *test
 	}
 }
 
+// The browser editor's parser takes a fenced code block's own indentation off every line it
+// holds, and takes a line holding fewer columns of whitespace than that whole, so such a line is
+// an empty line of code. Goldmark fell back there to the line's first non-space position, which a
+// line of whitespace has none of, less the padding left of a tab a container's marker took part
+// of, so it started the line that many bytes before its text, inside the markers: `>    ```` over
+// `>` and a tab read `>\t` as the code.
+func TestParseReadsAWhitespaceLineUnderAWiderFenceAsEmptyCode(t *testing.T) {
+	code := func(value string) *Node {
+		node := &Node{Type: "code_block", Attrs: Attrs{"language": nil}}
+		if value != "" {
+			node.Children = []*Node{{Type: "text", Text: value}}
+		}
+		return node
+	}
+	quote := func(children ...*Node) *Node { return &Node{Type: "blockquote", Children: children} }
+	for _, test := range []struct {
+		name, markdown string
+		want           *Node
+	}{
+		{
+			name:     "a quote's tab line under a fence indented four columns",
+			markdown: ">    ```\n>\t\n",
+			want:     &Node{Type: "doc", Children: []*Node{quote(code(""))}},
+		},
+		{
+			name:     "the same with code and a closing fence after it",
+			markdown: ">    ```\n>\t\n>    x\n>    ```\n",
+			want:     &Node{Type: "doc", Children: []*Node{quote(code("\nx"))}},
+		},
+		{
+			name:     "a tilde fence over the same line",
+			markdown: ">    ~~~\n>\t\n>    ~~~\n",
+			want:     &Node{Type: "doc", Children: []*Node{quote(code(""))}},
+		},
+		{
+			name:     "spaces narrower than the quote's fence",
+			markdown: ">    ```\n>  \n",
+			want:     &Node{Type: "doc", Children: []*Node{quote(code(""))}},
+		},
+		{
+			name:     "whitespace reaching the fence keeps what stands past it",
+			markdown: ">    ```\n>     \n",
+			want:     &Node{Type: "doc", Children: []*Node{quote(code(" "))}},
+		},
+		{
+			name:     "a document-level fence over a narrower line",
+			markdown: "   ```\n  \n```\n",
+			want:     &Node{Type: "doc", Children: []*Node{code("")}},
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			got, err := ParseForWrite(test.markdown, nil)
+			if err != nil {
+				t.Fatalf("ParseForWrite(%q): %v", test.markdown, err)
+			}
+			if !got.Equal(test.want) {
+				g, _ := got.JSON()
+				w, _ := test.want.JSON()
+				t.Fatalf("ParseForWrite(%q)\n got: %s\nwant: %s", test.markdown, g, w)
+			}
+		})
+	}
+}
+
 func tablePaddingBomb(width int) string {
 	return strings.Repeat("| header ", width) + "|\n" +
 		strings.Repeat("| --- ", width) + "|\n" +

@@ -365,17 +365,67 @@ func (p listItemColumns) Continue(node ast.Node, reader gmtext.Reader, pc parser
 
 // fenceClosure is goldmark's fenced code parser recording on a block whether a closing fence closed
 // it (fenceClosedAttr), which the browser editor's parser reads its trailing blank line by
-// (fencedCodeText).
+// (fencedCodeText), and reading a line of spaces and tabs narrower than the opening fence's
+// indentation as an empty line of code, as that parser does (emptyCodeLine).
 type fenceClosure struct{ parser.BlockParser }
 
-var fenceClosedAttr = []byte("pmdoc-fence-closed")
+var (
+	fenceClosedAttr = []byte("pmdoc-fence-closed")
+	// fenceIndentAttr holds the columns the opening fence stands indented past its containers,
+	// which goldmark takes off each of the block's lines (parser/fcode_block.go, fenceData.indent).
+	fenceIndentAttr = []byte("pmdoc-fence-indent")
+)
+
+// Open records the fence's indentation, the block offset goldmark opens the block at, which
+// tabIndented has already measured with a tab in the indentation taken as the columns it spans.
+func (p fenceClosure) Open(parent ast.Node, reader gmtext.Reader, pc parser.Context) (ast.Node, parser.State) {
+	indent := pc.BlockOffset()
+	node, state := p.BlockParser.Open(parent, reader, pc)
+	if node != nil {
+		node.SetAttribute(fenceIndentAttr, indent)
+	}
+	return node, state
+}
 
 func (p fenceClosure) Continue(node ast.Node, reader gmtext.Reader, pc parser.Context) parser.State {
+	if emptyCodeLine(node, reader) {
+		return parser.Continue | parser.NoChildren
+	}
 	state := p.BlockParser.Continue(node, reader, pc)
 	if state == parser.Close {
 		node.SetAttribute(fenceClosedAttr, true)
 	}
 	return state
+}
+
+// emptyCodeLine takes the line reader stands at as an empty line of node, a fenced code block,
+// where the line holds spaces and tabs alone and fewer columns of them than the fence's own
+// indentation (fenceIndentAttr), and reports whether it did. The browser editor's parser takes
+// that indentation off every line of the block and takes a line holding less whole, so such a
+// line is empty. Goldmark's own Continue falls back there to the line's first non-space position,
+// which a line of whitespace has none of, less the segment's padding, so it started the line that
+// many bytes before its text, inside the markers of the container whose marker took part of the
+// tab the padding is left of: `>    ```\n>\t` read `>\t` as the code. The line keeps its line
+// ending as written, CR included, as every other line of code does.
+func emptyCodeLine(node ast.Node, reader gmtext.Reader) bool {
+	attribute, ok := node.Attribute(fenceIndentAttr)
+	if !ok {
+		return false
+	}
+	line, segment := reader.PeekLine()
+	value := reader.Source()[segment.Start:segment.Stop]
+	written := bytes.TrimRight(value, "\r\n")
+	if len(bytes.TrimLeft(written, " \t")) > 0 {
+		return false
+	}
+	if position, _ := util.IndentPositionPadding(line, reader.LineOffset(), segment.Padding, attribute.(int)); position >= 0 {
+		return false
+	}
+	empty := gmtext.NewSegment(segment.Start+len(written), segment.Stop)
+	empty.ForceNewline = true
+	node.Lines().Append(empty)
+	reader.AdvanceToEOL()
+	return true
 }
 
 // codeColumns is goldmark's indented code parser measuring a blank line's indentation from the
@@ -600,9 +650,11 @@ func (taskMarkerParser) Parse(parent ast.Node, block gmtext.Reader, _ parser.Con
 // lineRecordingParagraph is goldmark's paragraph parser, recording each line it takes as the
 // containers left it, before the paragraph trims its leading whitespace, keyed by where the
 // trimmed line starts. The browser editor's parser keeps that whitespace in a code span
-// (multilineCodeSpanText). Recording as the lines are taken keeps them whatever the paragraph
-// becomes: a tight list item's text block, or a setext heading, whose paragraph is trimmed before
-// any paragraph transformer sees it.
+// (multilineCodeSpanText). It also records, of each of those lines, whether that parser opens a
+// block of HTML on it where goldmark's own patterns open none (recordHTMLFlowLine). Recording as
+// the lines are taken keeps both whatever the paragraph becomes: a tight list item's text block,
+// or a setext heading, whose paragraph is trimmed before any paragraph transformer sees it, and
+// neither of which carries a paragraph's attributes over.
 type lineRecordingParagraph struct{ parser.BlockParser }
 
 // untrimmedLinesKey holds the recorded lines while a document parses, and untrimmedLinesAttr on
@@ -613,26 +665,31 @@ var (
 )
 
 func (p lineRecordingParagraph) Open(parent ast.Node, reader gmtext.Reader, pc parser.Context) (ast.Node, parser.State) {
-	_, segment := reader.PeekLine()
+	line, segment := reader.PeekLine()
+	kind := htmlFlowKind(line, reader.LineOffset())
 	node, state := p.BlockParser.Open(parent, reader, pc)
 	if node != nil {
 		recordLine(segment, reader.Source(), pc)
+		recordHTMLFlowLine(kind, false, lineStart(reader.Source(), segment.Start), pc)
 	}
 	return node, state
 }
 
 func (p lineRecordingParagraph) Continue(node ast.Node, reader gmtext.Reader, pc parser.Context) parser.State {
-	_, segment := reader.PeekLine()
+	line, segment := reader.PeekLine()
+	kind := htmlFlowKind(line, reader.LineOffset())
 	ended := lazilyEnded(node, reader, pc)
 	lazyTypedParagraph(node, ended)
 	state := p.BlockParser.Continue(node, reader, pc)
 	if state != parser.Close {
 		recordLine(segment, reader.Source(), pc)
+		start := lineStart(reader.Source(), segment.Start)
 		if ended != nil {
 			lazy, _ := node.Attribute(lazyLinesAttr)
 			starts, _ := lazy.([]int)
-			node.SetAttribute(lazyLinesAttr, append(starts, lineStart(reader.Source(), segment.Start)))
+			node.SetAttribute(lazyLinesAttr, append(starts, start))
 		}
+		recordHTMLFlowLine(kind, true, start, pc)
 	}
 	return state
 }
@@ -659,6 +716,9 @@ func parseSource(p parser.Parser, source []byte, context parser.Context) (ast.No
 	definitionsInPlace(root, context)
 	if recorded := context.Get(untrimmedLinesKey); recorded != nil {
 		root.SetAttribute(untrimmedLinesAttr, recorded)
+	}
+	if recorded := context.Get(htmlFlowLinesKey); recorded != nil {
+		root.SetAttribute(htmlFlowLinesAttr, recorded)
 	}
 	if err := nestingRefusal(root, source, context); err != nil {
 		return nil, err

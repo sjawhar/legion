@@ -2,6 +2,7 @@ package pmdoc
 
 import (
 	"errors"
+	"strings"
 	"testing"
 )
 
@@ -83,5 +84,70 @@ func TestParseRefusesACodeLanguageTheBrowserDecodes(t *testing.T) {
 		if got := doc.Children[0].Attrs["language"]; got != language {
 			t.Errorf("Parse(%q) language = %v, want %q", markdown, got, language)
 		}
+	}
+}
+
+// A paragraph line the browser editor's parser opens a block of HTML on, where goldmark's own
+// patterns open none and read the line as text, is refused: the Proof schema holds no block of
+// HTML, and that parser drops the one it reads with the container around it, so nothing the
+// document could be stored as reads back as written. The two grammars part where micromark takes
+// a tab for the whitespace goldmark's patterns spell as a space - in the line's indentation,
+// inside the tag and after it - and over a declaration opening with a lower-case letter and a
+// closing tag of a raw text name, which goldmark's patterns match nowhere.
+func TestParseRefusesALineTheBrowserReadsAsBlockHTML(t *testing.T) {
+	for _, test := range []struct{ name, markdown, line string }{
+		{"a closing tag a tab ends, opening a quoted paragraph", "> </a\t>\n> text\n", `"> </a\t>"`},
+		{"a tab indenting a block-level tag under a paragraph", "> A quote\n> \t<div>\n", `"> \t<div>"`},
+		{"a tab indenting a comment under a paragraph", "> A quote\n> \t<!-- c -->\n", `"> \t<!-- c -->"`},
+		{"a tab before a tag's own closing slash", "> <br\t/>\n> text\n", `"> <br\t/>"`},
+		{"a tab after a tag opening a quoted paragraph", "> <b>\t\n> text\n", `"> <b>\t"`},
+		{"a declaration opening with a lower-case letter", "> <!x>\n> text\n", `"> <!x>"`},
+		{"a closing tag of a raw text name", "> </script>\n> text\n", `"> </script>"`},
+		{"such a line in a tight item's text block", "- </a\t>\n  text\n", `"- </a\t>"`},
+		{"such a line in the paragraph a setext underline ends", "> </a\t>\n> text\n> ===\n", `"> </a\t>"`},
+	} {
+		for _, reader := range []struct {
+			name string
+			read func(string) (*Node, error)
+		}{
+			{name: "Parse", read: Parse},
+			{name: "ParseForWrite", read: func(markdown string) (*Node, error) { return ParseForWrite(markdown, nil) }},
+		} {
+			t.Run(test.name+"/"+reader.name, func(t *testing.T) {
+				_, err := reader.read(test.markdown)
+				if !errors.Is(err, ErrBlockHTML) {
+					t.Fatalf("read(%q) = %v, want it refused as block HTML", test.markdown, err)
+				}
+				if !strings.Contains(err.Error(), test.line) {
+					t.Errorf("read(%q) = %v, want the refusal to name the line %s", test.markdown, err, test.line)
+				}
+			})
+		}
+	}
+}
+
+// A line both parsers read on the same terms is read, not refused. A lone tag continuing a
+// paragraph opens a block of HTML in neither - CommonMark forbids a block of kind 7 from
+// interrupting a paragraph, and the browser editor's copy of the construct obeys that on a lazy
+// line as on any other (packages/proof-editor/src/html-flow.ts) - so the tab inside such a line
+// is no reason to refuse it either.
+func TestParseReadsALineBothParsersReadAsText(t *testing.T) {
+	for _, test := range []struct{ name, markdown string }{
+		{"a lone tag on a lazy line", "> A quote\n<b>\n"},
+		{"a lone tag carrying the quote's prefix", "> A quote\n> <b>\n"},
+		{"a closing tag a tab ends, continuing the paragraph", "> A quote\n> </a\t>\n"},
+		{"a tag a tab ends on a lazy line", "> A quote\n</a\t>\n"},
+		{"a lone closing tag on an item's lazy line", "- An item\n</b>\n"},
+		{"a tag beside text", "a <b>x</b>\n"},
+		{"four columns of indentation before the tag", "> A quote\n>     <div>\n"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			if _, err := Parse(test.markdown); err != nil {
+				t.Errorf("Parse(%q) = %v, want it read", test.markdown, err)
+			}
+			if _, err := ParseForWrite(test.markdown, nil); err != nil {
+				t.Errorf("ParseForWrite(%q) = %v, want it read", test.markdown, err)
+			}
+		})
 	}
 }
