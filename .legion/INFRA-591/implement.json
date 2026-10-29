@@ -2,7 +2,7 @@
   "schemaVersion": 1,
   "phase": "implement",
   "issue": "INFRA-591",
-  "completed": "2026-10-29T15:40:00Z",
+  "completed": "2026-10-29T19:30:00Z",
   "proof": [
     {
       "criterion": "The global serialization is gone: a write holds no lock shared with writes to other issues.",
@@ -67,10 +67,19 @@
       "observed": "At ff684ac1066f: browser suite 880 passed, 0 failed, 25 skipped. go vet clean; routes, events, store ok; api fails only TestIssueRanksStayOrderedPastLowercaseDigitsAndProductionShapedMoves (this machine's byte-order collation); the per-pod budget test passes at 89. The tester's red tests pass unmodified in their /ws/live ports (TestTheRelaysFirstStartDoesNotReadTheWholeEventLog, TestTheFirstColdSubscriptionOfAFreshProcessIsSentAnEventCommittedWhileTheRelayStarts). On 5,000,000 events (round 7, SSE route then) the first cold stream opened 40-45 ms after its request with no write open and about 350 ms with a 300 ms write open; next event 50-60 ms after its write.",
       "headSha": "ff684ac1066f",
       "negativeControl": "Each with one production line reverted and restored: filled-gap step skipped -> TestTheFirstColdSubscriptionIsSentAnEventThatDrewItsIdBeforeIt fails; cursor taken under the horizon proven after the start's wait -> the fresh-process test fails; every gap taken as late -> TestTheFirstColdSubscriptionSkipsAnIdThatRolledBack fails; replaced-log wait removed -> both cases of TestAnEventsSubscriptionOnARelayStillOnAReplacedLogWaitsForItsReset fail; eventFeedHead answering the mark's newest id at once -> TestWhoamiEventHeadStaysBelowAnEventStillOpen fails; WriterFloor counting other databases' transactions -> TestWriterFloorIgnoresATransactionInAnotherDatabase fails; WriterFloor taking the newest mark regardless -> TestWriterFloorTakesTheNewestMarkOlderThanEveryWriterInThisDatabase fails. hover-preview.e2e.ts:87 failed 2 of 5 on main ef7ef530 and at ea9ecdec alike (main's)."
+    },
+    {
+      "criterion": "The relay's first start reads only recent ids even while a writer from before boot is open (red test c6e56665), and whoami's event_head is final and answered without waiting.",
+      "surface": "A 1x step of packages/envoy/loadtest (local stack built from each checkout) with a whoami poller; Dispatch's browser suite (chromium) through its harness; Go tests against a real Postgres; a 5,000,000-event first-start measurement",
+      "command": "packages/envoy/loadtest/run-step.sh <name> --events 4 --sessions 400 --requests 60 with curl -H 'X-Dispatch-User: alice@loadtest.example' /auth/whoami twice a second through the window (head 28d06c20 and main dec4b71); cd packages/dispatch && bun e2e/run.ts -- bunx playwright test --config e2e/playwright.config.ts --project=chromium; cd packages/envoy && go vet ./... && go test ./internal/dispatch/... -count=1",
+      "observed": "whoami at 1x: head 252/252 answered, p50 52 ms, p99 241 ms, none over 1 s; main 25 answered, p50 4.69 s, p99 13.35 s. First start on 5M events: no writer 42-48 ms after subscribe, 14-19 rows read; writer from before boot 124-225 ms after it committed, 30-39 rows read. Browser suite 880 passed, 0 failed, 25 skipped; vet clean; Go suite passes but for the collation test and the S3 test (no Docker). The red test passes unmodified.",
+      "headSha": "28d06c208d98",
+      "negativeControl": "First start taking the proven horizon instead of marking again: the red test fails (200,021 rows read). whoami checking only its fresh mark: TestWhoamiAnswersAtOnceWhileAWriteOfThisDatabaseIsOpen fails (2.10 s). WriterFloor not checking a mark's log: TestWriterFloorPassesOverAMarkFromBeforeAReset fails (a pre-reset mark accepted)."
     }
   ],
   "filesChanged": [
     ".dispatch/architecture/dispatch-events.md",
+    ".github/workflows/ci.yaml",
     "docs/site/src/content/docs/dispatch/running-dispatch.md",
     "packages/envoy/.changes/unreleased/pr2392-Changed-20261028-124735.yaml",
     "packages/envoy/AGENTS.md",
@@ -84,11 +93,16 @@
     "packages/envoy/internal/dispatch/api/delivery_live_hub.go",
     "packages/envoy/internal/dispatch/api/delivery_live_hub_intake.go",
     "packages/envoy/internal/dispatch/api/delivery_live_hub_test.go",
+    "packages/envoy/internal/dispatch/api/event_horizon_helpers_test.go",
     "packages/envoy/internal/dispatch/api/event_insert_guard_test.go",
+    "packages/envoy/internal/dispatch/api/event_marks.go",
     "packages/envoy/internal/dispatch/api/event_stream_relay.go",
     "packages/envoy/internal/dispatch/api/event_stream_relay_test.go",
     "packages/envoy/internal/dispatch/api/events.go",
     "packages/envoy/internal/dispatch/api/events_test.go",
+    "packages/envoy/internal/dispatch/api/live_events.go",
+    "packages/envoy/internal/dispatch/api/live_events_horizon_test.go",
+    "packages/envoy/internal/dispatch/api/live_events_test.go",
     "packages/envoy/internal/dispatch/api/references.go",
     "packages/envoy/internal/dispatch/api/references_test.go",
     "packages/envoy/internal/dispatch/api/replies.go",
@@ -112,15 +126,10 @@
     "packages/envoy/internal/dispatch/outbox/THROUGHPUT.md",
     "packages/envoy/internal/dispatch/outbox/window_test.go",
     "packages/envoy/internal/dispatch/refs/graph.go",
-    "packages/envoy/internal/dispatch/store/pool.go",
-    "packages/envoy/internal/dispatch/store/pool_test.go",
-    "packages/envoy/internal/dispatch/api/live_events.go",
-    "packages/envoy/internal/dispatch/api/live_events_horizon_test.go",
-    "packages/envoy/internal/dispatch/api/live_events_test.go",
-    "packages/envoy/internal/dispatch/api/event_horizon_helpers_test.go",
     "packages/envoy/internal/dispatch/routes/router.go",
     "packages/envoy/internal/dispatch/routes/whoami_test.go",
-    ".github/workflows/ci.yaml"
+    "packages/envoy/internal/dispatch/store/pool.go",
+    "packages/envoy/internal/dispatch/store/pool_test.go"
   ],
   "trickyParts": [
     "events.Horizon: an observation is safe only once a LATER snapshot's xmin is above the observer's own xid; one snapshot cannot prove its own max(id) (xmax hole). Await waits for an observation that started after the call.",
@@ -146,7 +155,8 @@
     "Review round 4: docs/site/src/content/docs/dispatch/running-dispatch.md now lists the event horizon's up to 2 connections and gives one server's ceiling as 88 (64+12+4+1+1+2 plus 4 held open), matching store.ConnectionsPerProcess. Main changed none of store/, infra/gcp/dispatch.go or that page since 25ef8cd2, so the number stands and no forward merge was needed (GitHub reports the PR mergeable). check-private-names.sh passes; no other page states the 86 count.",
     "Review round 5 (architect's cap: the forward merge of main e82b013b only, plus the two fixes the architect approved on 2026-10-28): merge da99c4f8 resolves events.go (replay header via openEventStream on the early path), references.go and AGENTS.md; 76d0396e starts the relay's first cursor at Horizon.Proven when one is proven and has a cold stream wait out a relay still on a reset log, replayed from the new log's unbroken prefix; 26ae7d16 has a resuming stream wait for that reset too instead of ending; 8f4a1d32 makes the delivery hub tests' settle wait for the change cursor, the event cursor and a quiet window, since the hub takes changes independently of the horizon. Browser and suite runs before 20:25Z ran with a stray contention loop of this session's holding a transaction id on the test Postgres; the runs this proof cites were repeated after moving to a clean instance, except the merge-alone and main comparison, which both ran under it.",
     "Review round 6 (architect's cap: the first-cursor fix on a fresh process only): round 5's claim that the delivery hub proves a horizon at boot was wrong (it runs nothing before its first subscriber), so 38ee6962 replaces the Proven-based first cursor. The relay's first start reads, in one statement, the log's newest id and its gaps above the horizon already proven (0 on a fresh process, so the whole log once), waits for a horizon proven after that read, and starts below the lowest gap that filled, else at the newest id. No boot step was added, so the server's boot does not block; the cost is the gap read at the relay's first start (0.6 s per million ids here) and the existing wait for every transaction open on the instance before the first cold stream opens. The changelog fragment, the architecture page and the PR body's Change, Not proven and census lines were corrected to match.",
-    "Review round 8 (tester at 144ee198: conflicting head, and the first start read the whole log on 5M ids): cce412e3 bounds the first start's gap read by Horizon.Mark/WriterFloor (the newest mark, the server's boot mark or the start's own, older than every transaction holding a transaction id in Dispatch's database; else the proven horizon, logged). Merge 9290fdc7 of main 88840d35 (#2449 removed GET /api/v1/events; the feed is an events subscription on /ws/live): feedEvents rewritten with the horizon handover, and GET /auth/whoami's event_head made final (eventFeedHead: waits at most 2 s for writes in Dispatch's database, never for other databases, then the boot mark's floor) because main's raw max(id) head would let a page miss an event still open below it. ea9ecdec ports the SSE horizon tests to /ws/live (a deep-worker wrote them; reviewed). Merge ff684ac1 of main 1f5b0828: per-pod budget 89 (main's 13th lease connection plus the horizon's 2); envoy-and-contracts.yaml deleted as main did, its one comment carried into ci.yaml. 86fdc500 guards the boot mark against a Store with no pool. Two pod moves this round; the work was pushed before each."
+    "Review round 8 (tester at 144ee198: conflicting head, and the first start read the whole log on 5M ids): cce412e3 bounds the first start's gap read by Horizon.Mark/WriterFloor (the newest mark, the server's boot mark or the start's own, older than every transaction holding a transaction id in Dispatch's database; else the proven horizon, logged). Merge 9290fdc7 of main 88840d35 (#2449 removed GET /api/v1/events; the feed is an events subscription on /ws/live): feedEvents rewritten with the horizon handover, and GET /auth/whoami's event_head made final (eventFeedHead: waits at most 2 s for writes in Dispatch's database, never for other databases, then the boot mark's floor) because main's raw max(id) head would let a page miss an event still open below it. ea9ecdec ports the SSE horizon tests to /ws/live (a deep-worker wrote them; reviewed). Merge ff684ac1 of main 1f5b0828: per-pod budget 89 (main's 13th lease connection plus the horizon's 2); envoy-and-contracts.yaml deleted as main did, its one comment carried into ci.yaml. 86fdc500 guards the boot mark against a Store with no pool. Two pod moves this round; the work was pushed before each.",
+    "Review round 9 (architect: retry a fresh mark rather than read from 0; whoami must not wait). 28d06c20: the server keeps its marks (eventMarks: the boot mark and up to 32 recent ones, thinned like the horizon's pending list); the first start and whoami take the newest kept mark older than every writer in Dispatch's database. The first start marks again (10 ms doubling to 250 ms) until one counts, a wait its horizon has anyway, and never reads the whole log. whoami answers at once from the same marks or the proven horizon; only a process with no proven horizon and no mark counting waits (2 s at most) rather than answer 0. Marks now carry their newest row's created_at, and WriterFloor passes over a mark from before a reset of the log (and over a horizon above the newest mark), which an e2e reset would otherwise let vouch for open ids. The code commit was pushed first; this handoff is a second push."
   ],
   "openQuestions": [
     "D2 (from the plan): ship before multi-replica Dispatch (INFRA-63) or roll this release with Recreate; old pods' readers would skip events new pods commit out of id order during a rolling update."
