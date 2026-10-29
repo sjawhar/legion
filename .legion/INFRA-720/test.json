@@ -1,0 +1,48 @@
+{
+  "schemaVersion": 1,
+  "phase": "test",
+  "issue": "INFRA-720",
+  "completed": "2026-10-29T02:52:00Z",
+  "implementerProof": {
+    "verdict": "verified",
+    "how": "Re-ran A1 (TestSettleKeepsTheAnchoredMarkOfAnAskThatAlsoNamesABlock, TestRecordedMarkRefs*) on Postgres 17.11 at ff4d51c8: PASS. Its controls also fail as claimed: base predicate, coalesce-only, text-only, and 0137 removed. Drove A2 independently through the real recordedMarkRefs (base and head builds) over every replay document, plus extra ask shapes. Re-ran A3(a) with my own builds (benchstat ~ p=0.684). Recomputed A3(b) from the six runs' raw cpu.pprof and TABLES.md, which match the handoff's numbers and commits."
+  },
+  "failures": [
+    {
+      "criterion": "Migration 0137's census answers the rows 0137 refuses (README 'Pre-deploy census': a census is the pre-deploy gate and refuses a migration whose census counts rows); plan task 2 / gap finding 'Migration obligations: ... census'",
+      "evidence": "0137_asks_anchor_artifact_id.census.sql is `select 0`. The 0136 schema casts anchor->>'artifact_id' only where block_artifact_id is null (asks_anchor_artifact, 0032). So an ask with block_artifact_id set and anchor {\"artifact_id\":\"not-a-uuid\"} is accepted at 0136 and refused by 0137. Real boot (local PG 17.11, replay seed migrated to 0136 by base bb9fe49c, one such row inserted), head ff4d51c8: `dispatch: migrate database error=\"apply migration 137: ... invalid input syntax for type uuid: \\\"not-a-uuid\\\" (SQLSTATE 22P02)\"`, exit 1, schema stays 136. The census would answer 0, and the deploy would go on to that boot. Red test commit 92cbecc9: packages/envoy/internal/dispatch/store/asks_anchor_artifact_id_migration_test.go TestCensusCountsAnAskWhoseBlockColumnHidesAnAnchorArtifactIDThatDoesNotCast. `cd packages/envoy && DISPATCH_TEST_DATABASE_URL=postgres://postgres@127.0.0.1:55432/postgres?sslmode=disable go test ./internal/dispatch/store/ -run TestCensusCountsAnAskWhoseBlockColumnHidesAnAnchorArtifactIDThatDoesNotCast -count=1` -> `census = 0, want 1: the ask whose anchor names not-a-uuid is a row 0137's index refuses`. The test can pass: with a census of `select count(*) from asks where anchor is not null and anchor->>'artifact_id' is not null and not pg_input_is_valid(anchor->>'artifact_id', 'uuid')` (PG16+), the test and every TestCensus*/TestEveryShippedCensus* passed in a scratch copy (52 s). The census text is the implementer's choice. Evidence: https://github.com/sjawhar/legion/pull/2483#issuecomment-6486472313"
+    }
+  ],
+  "failed": 1,
+  "proof": [
+    {
+      "criterion": "A1: a both-column ask keeps its mark on the anchor's document past the TTL; fails on INFRA-648's query",
+      "surface": "a live local Dispatch server (binary built from each tree) on the INFRA-512 replay seed with real boot migrations, header identity, NATS; Postgres 17.11",
+      "command": "/legion/scratch/tmp/t720/probe.sh <side>: POST issue, two documents, an ask anchored on A ('brown fox') and a control ask on A ('lazy dog'); SQL `update asks set block_artifact_id = B`; edit A; sleep 75 s (TTL is 1 min); three more edits; GET /api/v1/issues/{key}/asks",
+      "observed": "head ff4d51c8 (LINUX-1160): both-column orphaned:false, control orphaned:false",
+      "headSha": "ff4d51c859449feb3c1087681c4c88ef052bb3c9",
+      "negativeControl": "the same probe on base bb9fe49c (LINUX-1161) -> both-column orphaned:true (mark swept, then refreshAnchors orphaned it), control orphaned:false"
+    },
+    {
+      "criterion": "A2: one-column asks give the same rows as INFRA-648's query over every replay artifact; index scans for asks and comments",
+      "surface": "the real recordedMarkRefs, built from the base and head trees, over a copy (t720a) of the synthetic replay database: 1,157 documents, the implementer's shapes plus both-same, both-blockid, anchor-noid, anchor-jsonnull and both-emptymark asks",
+      "command": "throwaway TestZZDumpRecordedMarkRefs (T720_DB=t720a) in each tree, then diff dump-base.txt dump-head.txt; psql -f sql/explain.sql",
+      "observed": "base 6,820 marks, head 6,840: 0 removed, 20 added. All 20 are 'syn both' (10) and 'syn both-blockid' (10), each under its anchor's document and 0 under its block's. Generic plan with seqscan on: Bitmap Index Scan on asks_anchor_artifact_id (Index Cond uuid = $1::uuid) and on comments_anchor_artifact",
+      "headSha": "ff4d51c859449feb3c1087681c4c88ef052bb3c9",
+      "negativeControl": "base build over the same rows lists none of the 20 both-column asks; the plan test fails with the text-only predicate (asks and comments) and with 0137 removed (asks)"
+    },
+    {
+      "criterion": "A3: the sweep's cost does not measurably rise",
+      "surface": "recordedMarkRefs over every document of t720a, benchmark binaries built from each tree",
+      "command": "docs-<side>.test -test.bench RecordedMarkRefsEveryDocument -test.benchmem, 10 alternating rounds; benchstat golang.org/x/perf@v0.0.0-20261009192801-be2c69fb417e",
+      "observed": "663.8m ± 6% -> 657.2m ± 6% sec/op, ~ (p=0.684 n=10); B/op -1.04%, allocs -2.63%. The implementer's replay runs, recomputed from raw cpu.pprof: median head CPU 229.8 s <= max base 235.5 s; sweep share median head 0.089% <= max base 0.12%",
+      "headSha": "ff4d51c859449feb3c1087681c4c88ef052bb3c9",
+      "negativeControl": "base build bb9fe49c on the same database and machine is the control: the rule fails only when head's median exceeds base's max"
+    }
+  ],
+  "ci": "At ff4d51c8 (merge ref with main d4cbcfe6) red: envoy-go, envoy-go-race, Dispatch Go suite PG16, dispatch. None is in this diff: pmdoc test compile break on that main; PG16 docs deadline-margin failures under go test's 10 m default (INFRA-532 run 40790412039 has the same); cmd/listener NATS watcher 503; browser close-withdraws-asks.e2e.ts:126 (also red in INFRA-590 and INFRA-692). docs and store passed in envoy-go and envoy-go-race.",
+  "notes": [
+    "Migration through the real boot: head booted on the replay seed at 0114 and applied 0115-0137. The base binary boots and serves on the 0137 database, so the rolling deploy and the image-only rollback work.",
+    "Local Postgres 17.11 and the scratch trees are under /legion/scratch/tmp/t720 (throwaway; no repo file left changed)."
+  ]
+}
