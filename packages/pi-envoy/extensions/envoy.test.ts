@@ -17405,83 +17405,99 @@ describe("consumer delivery", () => {
   });
 });
 
-describe.skipIf(!envoyStackEnabled)("against a real natsd and Envoy listener", () => {
-  let stack: EnvoyStack | undefined;
-  beforeAll(async () => {
-    stack = await startEnvoyStack();
-  }, 120_000);
-  afterAll(async () => {
-    await stack?.stop();
-  }, 60_000);
+// Both rollout states: the listener grant of this checkout, where the session registers for a
+// consumer and the listener relays it, and the grant every hub carries until its NATS user is
+// replaced, where the registration is answered core and the session runs on the core path.
+for (const listenerGrant of ["current", "before-session-consumers"] as const) {
+  const onCorePath = listenerGrant === "before-session-consumers";
+  describe.skipIf(!envoyStackEnabled)(
+    onCorePath
+      ? "against a real natsd and an Envoy listener whose grant predates session consumers"
+      : "against a real natsd and Envoy listener",
+    () => {
+      let stack: EnvoyStack | undefined;
+      beforeAll(async () => {
+        stack = await startEnvoyStack({ listenerGrant });
+      }, 120_000);
+      afterAll(async () => {
+        await stack?.stop();
+      }, 60_000);
 
-  // The session runs on nats.js's real ping and dial timers and a real listener, so each wait polls
-  // the real clock until its condition holds or its deadline passes.
-  async function waitFor(
-    condition: () => boolean | Promise<boolean>,
-    deadline: number,
-    what: string
-  ): Promise<void> {
-    while (!(await condition())) {
-      if (Date.now() > deadline) throw new Error(`timed out waiting for ${what}`);
-      await Bun.sleep(100);
-    }
-  }
+      // The session runs on nats.js's real ping and dial timers and a real listener, so each wait
+      // polls the real clock until its condition holds or its deadline passes.
+      async function waitFor(
+        condition: () => boolean | Promise<boolean>,
+        deadline: number,
+        what: string
+      ): Promise<void> {
+        while (!(await condition())) {
+          if (Date.now() > deadline) throw new Error(`timed out waiting for ${what}`);
+          await Bun.sleep(100);
+        }
+      }
 
-  test("a session whose NATS path freezes subscribes its relay subject again on the new connection within 60 s, registers a new epoch, and shows each message once", async () => {
-    if (stack === undefined) throw new Error("the Envoy stack did not start");
-    const { envoyUrl } = stack;
-    const proxy = await startStallProxy(stack.natsHostPort);
-    const originalHeartbeat = process.env.ENVOY_HEARTBEAT_MS;
-    // No heartbeat registration runs in the test's window: the reconnect's registration, on a new
-    // epoch, is the only one that restarts the relay.
-    process.env.ENVOY_HEARTBEAT_MS = "240000";
-    process.env.ENVOY_URL = envoyUrl;
-    process.env.ENVOY_NATS_URL = proxy.url;
-    globalThis.fetch = originalFetch;
-    natsState.realConnect = true;
-    const sessionID = `ses_stall_${crypto.randomUUID().replaceAll("-", "")}`;
-    const { default: envoyExtension } = await import("./envoy.ts?nats-stall");
-    const fixture = createPi();
-    envoyExtension(fixture.pi);
-    const context = sessionContext(sessionID);
-    try {
-      await fixture.handlers.get("session_start")?.({}, context);
-      const started = Date.now();
-      await waitFor(
-        async () => (await fetch(`${envoyUrl}/v1/registry/${sessionID}`)).ok,
-        started + 30_000,
-        "the session's registration"
-      );
-      const registration = {
-        session_id: sessionID,
-        plugin: "@sjawhar/pi-envoy",
-        plugin_version: packageVersion,
-      };
-      expect(await (await fetch(`${envoyUrl}/v1/registry/${sessionID}`)).json()).toMatchObject(
-        registration
-      );
-      expect(await (await fetch(`${envoyUrl}/v1/sessions`)).json()).toContainEqual(
-        expect.objectContaining(registration)
-      );
-      await runFreezeScenario({
-        label: "pi-envoy stall",
-        stack,
-        sessionID,
-        proxy,
-        shown: (marker) =>
-          fixture.deliveries
-            .filter(
-              (delivery) =>
-                delivery.customType === "envoy-message" && delivery.content.includes(marker)
-            )
-            .map((delivery) => delivery.content),
-        waitFor,
-      });
-    } finally {
-      await fixture.handlers.get("session_shutdown")?.({}, context);
-      await proxy.close();
-      if (originalHeartbeat === undefined) delete process.env.ENVOY_HEARTBEAT_MS;
-      else process.env.ENVOY_HEARTBEAT_MS = originalHeartbeat;
+      test(onCorePath
+        ? "a session whose NATS path freezes on the core path is shown the message sent during the freeze once, as a replay, within 60 s"
+        : "a session whose NATS path freezes subscribes its relay subject again on the new connection within 60 s, registers a new epoch, and shows each message once", async () => {
+        if (stack === undefined) throw new Error("the Envoy stack did not start");
+        const { envoyUrl } = stack;
+        const proxy = await startStallProxy(stack.natsHostPort);
+        const originalHeartbeat = process.env.ENVOY_HEARTBEAT_MS;
+        // No heartbeat registration runs in the test's window: the reconnect's registration, on
+        // a new epoch, is the only one that restarts the relay.
+        process.env.ENVOY_HEARTBEAT_MS = "240000";
+        process.env.ENVOY_URL = envoyUrl;
+        process.env.ENVOY_NATS_URL = proxy.url;
+        globalThis.fetch = originalFetch;
+        natsState.realConnect = true;
+        const sessionID = `ses_stall_${crypto.randomUUID().replaceAll("-", "")}`;
+        // A module instance of its own per mode: the extension keeps its session's state.
+        const { default: envoyExtension } = onCorePath
+          ? await import("./envoy.ts?nats-stall-core")
+          : await import("./envoy.ts?nats-stall");
+        const fixture = createPi();
+        envoyExtension(fixture.pi);
+        const context = sessionContext(sessionID);
+        try {
+          await fixture.handlers.get("session_start")?.({}, context);
+          const started = Date.now();
+          await waitFor(
+            async () => (await fetch(`${envoyUrl}/v1/registry/${sessionID}`)).ok,
+            started + 30_000,
+            "the session's registration"
+          );
+          const registration = {
+            session_id: sessionID,
+            plugin: "@sjawhar/pi-envoy",
+            plugin_version: packageVersion,
+          };
+          expect(await (await fetch(`${envoyUrl}/v1/registry/${sessionID}`)).json()).toMatchObject(
+            registration
+          );
+          expect(await (await fetch(`${envoyUrl}/v1/sessions`)).json()).toContainEqual(
+            expect.objectContaining(registration)
+          );
+          await runFreezeScenario({
+            label: onCorePath ? "pi-envoy stall (core path)" : "pi-envoy stall",
+            stack,
+            sessionID,
+            proxy,
+            shown: (marker) =>
+              fixture.deliveries
+                .filter(
+                  (delivery) =>
+                    delivery.customType === "envoy-message" && delivery.content.includes(marker)
+                )
+                .map((delivery) => delivery.content),
+            waitFor,
+          });
+        } finally {
+          await fixture.handlers.get("session_shutdown")?.({}, context);
+          await proxy.close();
+          if (originalHeartbeat === undefined) delete process.env.ENVOY_HEARTBEAT_MS;
+          else process.env.ENVOY_HEARTBEAT_MS = originalHeartbeat;
+        }
+      }, 120_000);
     }
-  }, 120_000);
-});
+  );
+}

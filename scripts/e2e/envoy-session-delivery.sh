@@ -59,7 +59,8 @@
 # published.
 #
 #   bash scripts/e2e/envoy-session-delivery.sh [--disruptions a,b,c,d,e,f]
-#       [--build-from <rev> [--expect-lost <agent,issue,role>]]
+#       [--build-from <rev> [--expect-lost <agent,issue,role>]] [--plugins-from <rev>]
+#       [--listener-grant current|before-session-consumers]
 #
 # --build-from <rev> builds the listener, pi-envoy, claude-envoy and the `legion` bridge from <rev>
 # instead, extracted with `git archive <rev> | tar -x` into the run's directory; natsd and Dispatch
@@ -70,6 +71,26 @@
 # is expected to lose under disruption a: the run then exits 0 only when every event of those kinds
 # in window a counted 0 in both sessions (the negative control), and the rest of the table is
 # printed and not judged.
+#
+# --plugins-from <rev> is the mixed rollout: pi-envoy and claude-envoy are built from <rev>, as
+# --build-from builds them, and everything else — the listeners, natsd, Dispatch, the bridge —
+# stays this checkout's. It is the pair a release meets first, a hub already updated and a session
+# still running the plugins of the release before it. The two flags name one tree each and are not
+# given together.
+#
+# --listener-grant before-session-consumers runs both listeners as a NATS user whose grant is the
+# listener grant from before session consumers (packages/envoy-client/test/listener-grant.ts
+# renders it: infra/core ListenerPermissions without the session-consumer entries and without the
+# shared role-lane queue), so every registration that asks for a consumer is answered
+# `core`/`no_grant` and every session runs on the core path — the path a hub runs until its NATS
+# user is replaced. natsd then reads a configuration of the run's own: an nkey user per listener,
+# each with that grant, and `no_auth_user` for everyone else (the sessions, Dispatch, this
+# script's own NATS clients), which may publish and subscribe to anything. The run prints, after
+# the sessions have registered and again with the table, each listener's answer to a registration
+# asking for a consumer (one of the run's own, under a session id nothing else uses, removed
+# again: `core`/`no_grant`), each listener's "sessions stay on core delivery" line, the session
+# entries (none recording consumer delivery) and the stream's consumers (the two listener
+# durables, no `s-<session>`), and fails when any of that is untrue.
 #
 # Inputs (required ones refuse to start without them):
 #   LEGION_TEST_PG_DSN            required: a loopback Postgres with pgvector, as
@@ -123,16 +144,20 @@ fail() {
 }
 
 usage() {
-  sed -n '/^#   bash scripts/,/^#       \[--build-from/p' "$0" | sed 's/^# \{0,3\}//'
+  sed -n '/^#   bash scripts/,/^#       \[--listener-grant/p' "$0" | sed 's/^# \{0,3\}//'
 }
 
 # ---- arguments and inputs ---------------------------------------------------------------------
 build_from=""
+plugins_from=""
+listener_grant=current
 expect_lost=""
 disruptions="a,b,c,d,e,f"
 while (($#)); do
   case $1 in
   --build-from) [ $# -ge 2 ] || refuse "--build-from needs a revision"; build_from=$2; shift 2 ;;
+  --plugins-from) [ $# -ge 2 ] || refuse "--plugins-from needs a revision"; plugins_from=$2; shift 2 ;;
+  --listener-grant) [ $# -ge 2 ] || refuse "--listener-grant needs current or before-session-consumers"; listener_grant=$2; shift 2 ;;
   --expect-lost) [ $# -ge 2 ] || refuse "--expect-lost needs a list of kinds"; expect_lost=$2; shift 2 ;;
   --disruptions) [ $# -ge 2 ] || refuse "--disruptions needs a list"; disruptions=$2; shift 2 ;;
   -h | --help) usage; exit 0 ;;
@@ -144,6 +169,10 @@ done
   refuse "--expect-lost takes agent, issue and role separated by commas, not '$expect_lost'"
 [[ -z "$expect_lost" || -n "$build_from" ]] || refuse "--expect-lost applies only with --build-from"
 [[ -z "$expect_lost" || ",$disruptions," == *",a,"* ]] || refuse "--expect-lost judges disruption a, which --disruptions leaves out"
+[[ -z "$plugins_from" || -z "$build_from" ]] ||
+  refuse "--plugins-from and --build-from each name the tree the plugins are built from; give one"
+[[ "$listener_grant" == current || "$listener_grant" == before-session-consumers ]] ||
+  refuse "--listener-grant takes current or before-session-consumers, not '$listener_grant'"
 
 [ -n "${LEGION_TEST_PG_DSN:-}" ] ||
   refuse "LEGION_TEST_PG_DSN is required: a loopback Postgres with pgvector (postgres://<user>@127.0.0.1:<port>/<db>?sslmode=disable). The run starts no database; docs/solutions/testing/the-real-dispatch-stack-runs-inside-a-legion-pod-with-no-postgres-no-docker-and-no-root-INFRA-42.md starts one without root."
@@ -349,7 +378,21 @@ if [[ -n "$build_from" ]]; then
   tree_label="$rev (git archive into $tree)"
 fi
 readonly tree
-note "listener, pi-envoy, claude-envoy and the bridge from ${tree_label}; natsd and Dispatch from this checkout"
+# The plugins come from the same tree, unless --plugins-from names another: the mixed rollout,
+# this checkout's listeners with the plugins of an earlier release.
+plugins_tree=$tree
+plugins_label=$tree_label
+if [[ -n "$plugins_from" ]]; then
+  rev=$(git -C "$repo_root" rev-parse --verify --quiet "${plugins_from}^{commit}") ||
+    refuse "--plugins-from $plugins_from names no commit git can read"
+  plugins_tree="$work/plugins-tree-${rev:0:12}"
+  mkdir -p "$plugins_tree"
+  git -C "$repo_root" archive "$rev" | tar -x -C "$plugins_tree" ||
+    fail "git archive $rev | tar -x failed"
+  plugins_label="$rev (git archive into $plugins_tree)"
+fi
+readonly plugins_tree
+note "listener and the bridge from ${tree_label}; pi-envoy and claude-envoy from ${plugins_label}; natsd and Dispatch from this checkout"
 (cd "$repo_root/packages/envoy" &&
   go build -o "$work/bin/natsd" ./internal/testnats/cmd/natsd &&
   go build -o "$work/bin/envoy-dispatch" ./cmd/dispatch) >"$work/logs/build-head.log" 2>&1 ||
@@ -359,23 +402,27 @@ note "listener, pi-envoy, claude-envoy and the bridge from ${tree_label}; natsd 
   fail "the listener or legion did not build from $tree; see $work/logs/build-tree.log"
 (cd "$tree" && bun install --frozen-lockfile) >"$work/logs/bun-install.log" 2>&1 ||
   fail "bun install in $tree failed; see $work/logs/bun-install.log"
+if [[ "$plugins_tree" != "$tree" ]]; then
+  (cd "$plugins_tree" && bun install --frozen-lockfile) >"$work/logs/bun-install-plugins.log" 2>&1 ||
+    fail "bun install in $plugins_tree failed; see $work/logs/bun-install-plugins.log"
+fi
 # pi-envoy packed as the release packs it (that tree's lib/pack-plugin.sh) and unpacked as the
 # worker image unpacks it, so `-e` loads what a Legion pane loads.
-tarball=$(bash "$tree/scripts/e2e/lib/pack-plugin.sh" pi-envoy "$work/pack" 2>"$work/logs/pack-pi-envoy.log") ||
+tarball=$(bash "$plugins_tree/scripts/e2e/lib/pack-plugin.sh" pi-envoy "$work/pack" 2>"$work/logs/pack-pi-envoy.log") ||
   fail "pi-envoy did not pack; see $work/logs/pack-pi-envoy.log"
 mkdir -p "$work/pi-envoy"
 tar xzf "$tarball" -C "$work/pi-envoy" --strip-components=1
 pi_plugin="$work/pi-envoy/dist/envoy.js"
 [ -r "$pi_plugin" ] || fail "the packed pi-envoy holds no dist/envoy.js"
-# claude-envoy built from the tree (`scripts/build.ts --out`), since a pull request's tree carries
-# no fresh dist/ or legion/; a revision whose build.ts takes no --out predates that and committed
-# both, so its own package directory is the plugin.
-if grep -q -- '--out <dir>' "$tree/packages/claude-envoy/scripts/build.ts"; then
+# claude-envoy built from the plugins tree (`scripts/build.ts --out`), since a pull request's tree
+# carries no fresh dist/ or legion/; a revision whose build.ts takes no --out predates that and
+# committed both, so its own package directory is the plugin.
+if grep -q -- '--out <dir>' "$plugins_tree/packages/claude-envoy/scripts/build.ts"; then
   claude_plugin="$work/claude-envoy"
-  (cd "$tree" && bun packages/claude-envoy/scripts/build.ts --out "$claude_plugin") >"$work/logs/build-claude-envoy.log" 2>&1 ||
-    fail "claude-envoy did not build from $tree; see $work/logs/build-claude-envoy.log"
+  (cd "$plugins_tree" && bun packages/claude-envoy/scripts/build.ts --out "$claude_plugin") >"$work/logs/build-claude-envoy.log" 2>&1 ||
+    fail "claude-envoy did not build from $plugins_tree; see $work/logs/build-claude-envoy.log"
 else
-  claude_plugin="$tree/packages/claude-envoy"
+  claude_plugin="$plugins_tree/packages/claude-envoy"
 fi
 [ -r "$claude_plugin/dist/envoy-channel.js" ] || fail "$claude_plugin has no dist/envoy-channel.js"
 # The bridge argv Legion builds: claudelaunch.Argv since main moved it there, tmux/claude.go before.
@@ -402,8 +449,26 @@ note "pi-envoy $(jq -r .version "$work/pi-envoy/package.json"); claude-envoy $(j
 
 # ---- services ---------------------------------------------------------------------------------
 begin services
-# natsd binds the ports the kernel chooses (-p -1, -m -1) and reports both in its log.
-(isolated_exec "" HOME="$work/nats-home" -- "$work/bin/natsd" -p -1 -m -1 -js -store_dir "$work/nats-store") \
+# natsd binds the ports the kernel chooses (-p -1, -m -1) and reports both in its log. With the
+# grant from before session consumers it also reads a configuration of the run's own: an nkey user
+# per listener holding that grant, and `no_auth_user` for every other client
+# (packages/envoy-client/test/listener-grant.ts renders both, and each listener's seed, which only
+# it reads; the seed is never an argument or a printed value).
+nats_config=()
+declare -A listener_seed=()
+if [[ "$listener_grant" == before-session-consumers ]]; then
+  (cd -- "$repo_root" && isolated_exec "" HOME="$work/bun-home" TMPDIR="$work" -- \
+    bun packages/envoy-client/test/listener-grant.ts --config "$work/nats.conf" \
+    --seed-dir "$work/seeds" --machine shared --machine dispatch) >"$work/logs/listener-grant.log" 2>&1 ||
+    fail "the pre-session-consumer grant did not render; see $work/logs/listener-grant.log"
+  nats_config=(-c "$work/nats.conf")
+  for name in shared dispatch; do
+    listener_seed[$name]="$work/seeds/$name.seed"
+    [ -s "${listener_seed[$name]}" ] || fail "no seed for listener $name in $work/seeds"
+  done
+  note "the listeners hold the grant from before session consumers ($work/nats.conf); every other client presents no credential"
+fi
+(isolated_exec "" HOME="$work/nats-home" -- "$work/bin/natsd" -p -1 -m -1 -js -store_dir "$work/nats-store" "${nats_config[@]}") \
   >"$work/logs/natsd.log" 2>&1 &
 pid[natsd]=$!
 nats_port="" monitor_port=""
@@ -433,12 +498,13 @@ dispatch_url="http://127.0.0.1:${dispatch_port}"
 listener_ready() { curl -fsS --max-time 2 "$(listener_url "$1")/healthz" | jq -e '.status == "healthy"'; }
 start_listener() {
   local name=$1
-  local -a serve=("$work/bin/envoy-listener")
+  local -a serve=("$work/bin/envoy-listener") seed=()
   if ((listener_held == 1)); then
     serve=(python3 "$held_port" exec --from "$work/ports/keep-listener-$name.sock" --fd-env ENVOY_LISTEN_FD -- "${serve[@]}")
   fi
+  [[ -z "${listener_seed[$name]:-}" ]] || seed=(NATS_NKEY_SEED_FILE="${listener_seed[$name]}")
   (isolated_exec "" HOME="$work/listener-$name-home" PORT="${listener_port[$name]}" ENVOY_LISTEN_HOST=127.0.0.1 \
-    ENVOY_MACHINE_ID="$name" NATS_URLS="$nats_url" -- "${serve[@]}") \
+    ENVOY_MACHINE_ID="$name" NATS_URLS="$nats_url" "${seed[@]}" -- "${serve[@]}") \
     >>"$work/logs/listener-$name.log" 2>&1 &
   pid[listener-$name]=$!
   await "listener-$name" "$work/logs/listener-$name.log" 90 listener_ready "$name"
@@ -623,6 +689,44 @@ session_view() {
     "$(curl -fsS --max-time 5 "$(listener_url shared)/v1/roles/${role[$1]}" | jq -c . 2>/dev/null)"
 }
 
+# core_path_shown WHEN: with --listener-grant before-session-consumers, the four readings that
+# say every session runs the core path, printed under WHEN and each a failure when it is untrue:
+# each listener answers a registration asking for a session consumer `core`/`no_grant` (a
+# registration of the run's own, under a session id nothing else uses, removed again), and logged
+# once that its user may not manage session consumers; no session entry records consumer delivery;
+# and the stream carries the two listener durables and no session consumer (`s-<session>`). It is
+# a no-op on the current grant.
+core_path_shown() {
+  [[ "$listener_grant" == before-session-consumers ]] || return 0
+  local when=$1 name probe answer lines consumers entries answers=""
+  for name in shared dispatch; do
+    probe="ses_grantprobe$(od -An -N8 -tx1 /dev/urandom | tr -d ' \n')"
+    answer=$(curl -sS --max-time 10 -X POST -H 'Content-Type: application/json' \
+      -d "$(jq -nc --arg s "$probe" '{session_id: $s, self_subscribed: true, topics: [],
+        delivery: {consumer: true, epoch: "probe"}}')" \
+      "$(listener_url "$name")/v1/interests/subscribe" | jq -c '.delivery' 2>/dev/null) ||
+      fail "listener $name refused the grant probe ($when)"
+    curl -sS --max-time 10 -X DELETE "$(listener_url "$name")/v1/sessions/$probe" >/dev/null || true
+    [[ "$answer" == '{"mode":"core","reason":"no_grant"}' ]] ||
+      fail "listener $name answered a registration asking for a consumer $answer, want core/no_grant ($when)"
+    answers+="$name $answer; "
+    lines=$(grep -c 'sessions stay on core delivery until the grant carries them' "$work/logs/listener-$name.log" || true)
+    ((lines >= 1)) || fail "listener $name never logged that its user may not manage session consumers ($when)"
+  done
+  consumers=$(curl -fsS --max-time 5 "${nats_monitor}/jsz?consumers=true" |
+    jq -r '[.account_details[]?.stream_detail[]? | select(.name == "ENVOY_NOTIFICATIONS") | .consumer_detail[]?.name] | sort | join(" ")') ||
+    fail "could not read the stream's consumers from natsd's monitor ($when)"
+  entries=$(curl -fsS --max-time 5 "$(listener_url shared)/v1/sessions" |
+    jq -c '[.[] | {session_id, delivery: (.delivery // "core")}]') ||
+    fail "could not read the session entries ($when)"
+  note "core path ($when): registrations answered ${answers}stream consumers [${consumers}]; session entries ${entries}"
+  [[ "$consumers" == *"listener-shared"* && "$consumers" == *"listener-dispatch"* ]] ||
+    fail "the stream does not carry both listener durables ($when): [${consumers}]"
+  [[ " $consumers " != *" s-"* ]] || fail "a session consumer exists on the core path ($when): [${consumers}]"
+  jq -e 'all(.[]; .delivery == "core")' >/dev/null <<<"$entries" ||
+    fail "a session entry records consumer delivery on the core path ($when): ${entries}"
+}
+
 begin sessions
 start_pi
 start_cc fresh
@@ -639,6 +743,7 @@ note "pi: $(session_view pi)"
 await cc "$(err_log cc)" 300 follows_and_holds cc
 transcript[cc]=$(cc_transcript) || fail "Claude Code wrote no transcript for ${sid[cc]} under ${home[cc]}/config/projects"
 note "cc: $(session_view cc); transcript ${transcript[cc]}"
+core_path_shown "both sessions registered"
 
 # ---- publishing -------------------------------------------------------------------------------
 seq=0
@@ -898,12 +1003,14 @@ transcript[cc]=$(cc_transcript) || true
 
 # ---- the table --------------------------------------------------------------------------------
 begin table
+core_path_shown "the windows are over"
 tally
 bad=0
 lost_ok=1
 table="$work/table.txt"
 {
-  printf 'build: %s\n' "$tree_label"
+  printf 'build: listener and bridge %s; plugins %s; listener grant %s\n' \
+    "$tree_label" "$plugins_label" "$listener_grant"
   printf '%-22s %-6s %-17s %-14s %4s %4s\n' disruption kind event marker pi cc
   while IFS=$'\t' read -r m d kind source sessions expected; do
     row=""

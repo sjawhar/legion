@@ -2942,6 +2942,11 @@ LEGION_TEST_PG_DSN='postgres://postgres@127.0.0.1:<port>/postgres?sslmode=disabl
 # Negative controls: the listener and both plugins of an earlier revision.
 … bash scripts/e2e/envoy-session-delivery.sh --build-from c3d09eec --expect-lost agent,issue,role
 … bash scripts/e2e/envoy-session-delivery.sh --build-from 926040d9048572765639e56d516226b822288b46 --expect-lost role
+
+# The two rollout states production meets first: this checkout on the listener grant a hub still
+# carries, and this checkout's hub with the plugins of the release before it.
+… bash scripts/e2e/envoy-session-delivery.sh --listener-grant before-session-consumers
+… bash scripts/e2e/envoy-session-delivery.sh --plugins-from origin/main
 ```
 
 It runs in an issue pod: no Docker, tmux or root. It needs `go`, `bun`, `jq`, `curl`, `socat`
@@ -3044,7 +3049,34 @@ the run into a negative control: it exits 0 only when every event of those kinds
 counted 0 in both sessions. It prints the rest of the table and does not judge it. Main before
 sjawhar/legion#2228 (`c3d09eec`) loses agent, issue and role events under a session restart. The
 merge-forward head of #2228 (`926040d9`) recovers agent and issue events through
-`POST /v1/replay` and still loses role forwards. `--disruptions a,c` runs only the windows named.
+`POST /v1/replay` and still loses role forwards.
+
+`--plugins-from <rev>` builds pi-envoy and claude-envoy from `<rev>`, as `--build-from` builds
+them, and leaves the listeners, natsd, Dispatch and the bridge this checkout's: the mixed rollout,
+a hub already updated serving a session that still runs the plugins of the release before it.
+`--build-from` and `--plugins-from` each name the tree the plugins come from, so the run takes one
+or the other. A plugin that asks for no session consumer is answered `core` with reason
+`not_requested` and runs the core path, which recovers an agent or issue event of a window through
+`POST /v1/replay` and a role forward not at all, as `--build-from 926040d9` shows.
+
+`--listener-grant before-session-consumers` runs both listeners as a NATS user whose grant is the
+one a hub carries before session consumers, rendered by
+[`packages/envoy-client/test/listener-grant.ts`](../../packages/envoy-client/test/listener-grant.ts)
+(`infra/core.ListenerPermissions` without the session-consumer entries and without the shared
+`envoy-roles` queue), so every registration asking for a consumer is answered `core`/`no_grant`
+and every session runs the core path this release meets first. natsd then reads a configuration of
+the run's own, `nats.conf` in the evidence directory: one nkey user per listener, each with that
+grant and its seed in `seeds/<machine>.seed` (`NATS_NKEY_SEED_FILE`, never an argument and never
+printed), and `no_auth_user` for every other client — the sessions, Dispatch and the script's own
+NATS clients — which may publish and subscribe to anything. After the sessions have registered,
+and again with the table, the run prints and checks the four readings that say the core path is
+what ran: each listener's answer to a registration asking for a consumer (one the run makes
+itself, under a session id nothing else uses, removed again), which must be `core`/`no_grant`;
+each listener's `sessions stay on core delivery` line; the session entries, none recording
+consumer delivery; and the stream's consumers, the two listener durables and no `s-<session>`.
+The role lane falls back to the machine groups, since that grant carries no shared queue.
+
+`--disruptions a,c` runs only the windows named.
 
 | input | default | meaning |
 | :--- | :--- | :--- |
