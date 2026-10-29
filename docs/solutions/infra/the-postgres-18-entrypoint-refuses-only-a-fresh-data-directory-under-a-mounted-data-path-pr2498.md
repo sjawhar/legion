@@ -32,11 +32,13 @@ whole condition, and a negative control written from it can pass while proving n
 
 ## Evidence
 
-- The image's own `docker-entrypoint.sh` (docker-library/postgres, `18/bookworm`): `_main` runs
-  the check only while `DATABASE_ALREADY_EXISTS` is empty, which `docker_setup_env` sets from
-  `[ -s "$PGDATA/PG_VERSION" ]`; the `/var/lib/postgresql/data (unused mount/volume)` entry is
-  added only when `PGDATA` equals `/var/lib/postgresql/$PG_MAJOR/docker`, no older data directory
-  was found, `PG_MAJOR` is at least 18, and the path answers its mount-point test.
+- The image's own `docker-entrypoint.sh` (docker-library/postgres, `18/trixie`, the directory this
+  image's `org.opencontainers.image.source` names; the `18/bookworm` copy of the same revision is
+  byte-identical): `_main` runs the check only while `DATABASE_ALREADY_EXISTS` is empty, which
+  `docker_setup_env` sets from `[ -s "$PGDATA/PG_VERSION" ]`; the
+  `/var/lib/postgresql/data (unused mount/volume)` entry is added only when `PGDATA` equals
+  `/var/lib/postgresql/$PG_MAJOR/docker`, no older data directory was found, `PG_MAJOR` is at
+  least 18, and the path answers its mount-point test.
 - sjawhar/legion#2498 left the `docker run` line printed by the daemon's
   four test skip messages mountless, from the image config's
   `Volumes {"/var/lib/postgresql":{}}`, and that line served `select 1` with
