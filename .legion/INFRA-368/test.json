@@ -2,17 +2,33 @@
   "schemaVersion": 1,
   "phase": "test",
   "issue": "INFRA-368",
-  "completed": "2026-10-29T13:35:00Z",
-  "headTested": "0fbea0038ea25ea343db1f761db2852e98da923f",
-  "codeHead": "8c404ede30a6",
-  "round": "11: the architect narrowed review round 7 to two fixes, with no merge of main. a21c72bb keeps a comment edit's press-time ids (carriedIds) with the kept send and sends them on a Retry after a reload. 8c404ede makes recoveredMessage hydrate reply_block, so a repeated keyed message reply answers its block. I drove both at 21ec46b9, a temporary checkout of the workspace that I put back afterwards, and at the head. The upgrade check from round 10 still holds: this round touches no migration or store code.",
+  "completed": "2026-10-29T14:00:00Z",
+  "headTested": "1327aa0d6be8c608126f172bd8168aa80cb6c9ed",
+  "codeHead": "881b03e5834e",
+  "round": "12: review round 8's data fix, with no merge of main. 881b03e5 works out the carried ids once, at the press, and stores them as a field on the edit, which keep writes and restore reads back. Restore's closure and the `followed ?? carried` fallback are gone, and the change carries the two wording fixes. I drove both reload cases in Chromium at 8c404ede, a temporary checkout of the workspace that I put back afterwards, and at the head. This round touches only the web app's held-sends and send-request code, so the server proofs from rounds 10 and 11 still hold.",
   "implementerProof": {
     "verdict": "verified",
-    "how": "At the head (fresh dispatch_tester, 127.0.0.1:8877): block-graph.sh exit 0, 133 PASS. `bunx playwright test --config e2e/playwright.config.ts --project=chromium e2e/block-references.e2e.ts e2e/hover-preview.e2e.ts e2e/references.e2e.ts e2e/conversation.e2e.ts e2e/deep-links.e2e.ts e2e/keyed-writes.e2e.ts` gave 69 passed and 4 skipped. `go test ./internal/dispatch/api/ -run 'TestARepeatOfAKeyedMessageReplyAnswersItsBlockAgain|TestADirectMessagesBlockHasNoAddress'` passed, with both subtests of the repeat test."
+    "how": "At the head (fresh dispatch_tester, 127.0.0.1:8877): block-graph.sh exit 0, 133 PASS. `bunx playwright test --config e2e/playwright.config.ts --project=chromium e2e/conversation.e2e.ts e2e/block-references.e2e.ts e2e/keyed-writes.e2e.ts` gave 38 passed and 1 skipped. My two reload cases pass at the head and fail at 8c404ede, as the implementer's new held-sends.test.ts cases are meant to."
   },
   "failures": [],
   "failed": 0,
   "proof": [
+    {
+      "criterion": "Review round 8: a comment edit's carried block ids survive every reload. Kept through two reloads and then retried, or with a reload interrupting a Retry, each attempt sends the same {body, base_revision, blocks} under the send's own key",
+      "surface": "The Conversation tab's comment editor in Chromium, as the author, over the local harness",
+      "command": "A throwaway spec (/legion/scratch/tmp/infra368/retry2-probe.e2e.ts, copied in and removed). The PATCH route fails at the connection, as an outage does. In the editor, cut the cited paragraph b2, paste it at the end, reword it, and Save. R2: set the kept write's pressedAt back past KEPT_SEND_RESUME_MS and reload, twice, then lift the outage and press Retry. RI: age the write and reload, press Retry while the outage holds (the attempt fails at the connection), age it again and reload, lift the outage and press Retry. The route records every PATCH attempt's Idempotency-Key and body. I ran it on a harness built from 8c404ede and on one built from the head",
+      "observed": "At the head, in both cases the kept write still holds edit.carried {base_revision 1, blocks b1@0, b3@14, b2@28} after the second reload. Every attempt (2 in R2, 3 in RI) went under one key with one identical body that carries base_revision and the blocks. The last answered 200, the blocks read b1, b3, b2 'Beta second. Reworded too.', and the reply still cites b2 (removed: false). At 8c404ede, after the second reload the kept write held edit {id} alone. The final attempt went under the same key with {body} only, the paragraph got b4, and the reply read b2 removed: true, in both R2 and RI",
+      "headSha": "881b03e5834e",
+      "negativeControl": "At 8c404ede the same two cases sent two different bodies under one key, and lost b2"
+    },
+    {
+      "criterion": "A7, A10 comment half, A11, A13, A15 comment half, R14, and the earlier rounds' fixes, at this head",
+      "surface": "Local Dispatch harness: real Go server built from the head, migrations 0001-0141 on a fresh database, the real dispatch CLI, Chromium",
+      "command": "env -u DISPATCH_TOKEN_FILE DISPATCH_URL=http://127.0.0.1:8877 DISPATCH_TOKEN=e2e-token PROJECT=CORE COMPONENT_SOURCE=fixture FAKE_GITHUB_PORT=9122 DEV_SIGNIN_LOGIN=alice bash packages/dispatch/e2e/acceptance/block-graph.sh; the three Playwright files above",
+      "observed": "Driver: exit 0, 133 PASS, no FAIL or SKIP line. Playwright: 38 passed, 1 skipped, including the passage rows, the block-card rows and keyed-writes.e2e.ts in full",
+      "headSha": "881b03e5834e",
+      "negativeControl": "Driver lines: a reply_to_block of b9 answers 400 INVALID_COMMENT, a carried blocks id b9 answers 400 and leaves the body unchanged, and a pinned message block on ?to= answers 400 INVALID_REFERENCE"
+    },
     {
       "criterion": "Round 8 item 2: a repeated keyed POST of a message reply that names a block answers its reply_block, on the issue message route and the agent message route",
       "surface": "Local Dispatch harness over HTTP, as the signed-in person, with the Idempotency-Key header the dashboard sends",
@@ -20,22 +36,6 @@
       "observed": "At the head: on the issue message route the first press is 201 with reply_block b2 'Root two.', and the repeat is 201, Idempotency-Replayed ?1, with reply_block b2 'Root two.'. On the agent message route the first is 201 with b2 'Direct two.', and the repeat is 201, replayed, with b2 'Direct two.'. At 21ec46b9 both repeats answered 201, replayed, with reply_block null",
       "headSha": "8c404ede30a6",
       "negativeControl": "The same key with another body answers 422 KEY_REUSED 'was already used … with different content; this request was not run'"
-    },
-    {
-      "criterion": "Round 8 item 1: a comment edit kept through a reload and then retried sends the block ids its press carried, under its own key, so the cited paragraph keeps its id",
-      "surface": "The Conversation tab's comment editor in Chromium, as the author, over the local harness",
-      "command": "A throwaway spec (removed): the PATCH route fails at the connection (internetdisconnected), as an outage does. In the editor, cut the cited paragraph b2, paste it at the end, reword it, and Save. Then move the kept write's pressedAt in sessionStorage back past KEPT_SEND_RESUME_MS, reload (accepting beforeunload), lift the outage, and press Retry on the refused edit. I ran it on a harness built from 21ec46b9 and on one built from the head",
-      "observed": "At the head the kept write holds edit {carried: {base_revision 1, blocks b1@0, b3@14, b2@28}, id}. After the reload the editor shows the edit refused, with Retry. The Retry PATCH goes under the outage attempt's own key (298cb40f…) and sends base_revision 1 with those blocks. It answers 200, and the blocks read b1, b3, b2 'Beta second. Reworded too.', with the reply still citing b2 (removed: false). At 21ec46b9 the kept write held edit as the bare comment id, and the Retry sent {body} alone. The moved and reworded paragraph got the new id b4, and the reply read b2 removed: true",
-      "headSha": "8c404ede30a6",
-      "negativeControl": "At 21ec46b9 the same steps lose b2, as described above"
-    },
-    {
-      "criterion": "A7, A10 comment half, A11, A13, A15 comment half, R14, and the earlier rounds' fixes, at this head",
-      "surface": "Local Dispatch harness: real Go server built from the head, migrations 0001-0141 on a fresh database, the real dispatch CLI, Chromium",
-      "command": "env -u DISPATCH_TOKEN_FILE DISPATCH_URL=http://127.0.0.1:8877 DISPATCH_TOKEN=e2e-token PROJECT=CORE COMPONENT_SOURCE=fixture FAKE_GITHUB_PORT=9122 DEV_SIGNIN_LOGIN=alice bash packages/dispatch/e2e/acceptance/block-graph.sh; the six Playwright files above",
-      "observed": "Driver: exit 0, 133 PASS, no FAIL or SKIP line. Playwright: 69 passed, 4 skipped. The passes include the three passage rows, the three block-card rows over the live socket, and keyed-writes.e2e.ts in full",
-      "headSha": "8c404ede30a6",
-      "negativeControl": "Driver lines: a reply_to_block of b9 answers 400 INVALID_COMMENT, a carried blocks id b9 answers 400 and leaves the body unchanged, and a pinned message block on ?to= answers 400 INVALID_REFERENCE"
     },
     {
       "criterion": "Rollout at 0139-0141: a database main migrated takes this head's migrations; the head indexes what main wrote; main runs on the migrated schema and its writes are left owed; rolling forward again indexes them",
@@ -46,9 +46,6 @@
       "negativeControl": "At step 1, main answered GET /api/v1/comments/<C>/blocks with 404 and listed the mention from the comment node"
     }
   ],
-  "notes": [
-    "The case the architect described, where the first PATCH reached Dispatch and only its answer was lost, did not show a Retry in the browser at 21ec46b9. After the reload the editor showed the saved body with no refusal, and the kept write left sessionStorage within 15 s. So I drove the outage case, where the page shows the refusal and Retry. There the bug is the same missing ids under the same key, and it shows as a lost block id rather than KEY_REUSED. The implementer's held-sends.test.ts case covers the key itself"
-  ],
-  "ci": "At head 0fbea003 GitHub shows changes, pi-legion and pr-title green. typecheck was skipped. test and the worker-image build were in progress, and lint, contracts, envoy-client, pi-envoy, dispatch, envoy-go and the rest were queued. 8c404ede has no runs of its own. I did not wait for CI.",
-  "migrations": "This head adds 0139-0141 after main's 0138; main@origin 8a911ecc also ends at 0138. Per the controller's ruling there is no further merge of main."
+  "ci": "GitHub reports #2463 CONFLICTING with main, so it runs no checks: neither 881b03e5 nor 1327aa0d has any check run. This is expected under the controller's ruling: the pull request is held at its approved head with no merge of main, and the implementer merges main forward only when the merge lane calls its turn. CI is read at that merged head.",
+  "migrations": "This head adds 0139-0141 after the merge parent's 0138."
 }
