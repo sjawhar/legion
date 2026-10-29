@@ -27,3 +27,6 @@ Phase: implementing, not complete. PR sjawhar/legion#2462 (draft). Branch head p
 - Regenerated code-path tables of lt-20261028t223135-7f42 (HeapReleased fix): dispatch://INFRA-514/artifact/codepaths-heapreleased-lt-20261028t223135-7f42-tar-gz. r16: 10.69 cores / 7.53 GiB, residual 0.41-3.11 cores, 6.27 GiB; non-Go 1.28 GiB.
 - Final run: same command as above with --stored-order-source and --browsertype-commit = a6b64ddb21782dc5e5680433a9934fbd707925c2 (legion/INFRA-707; checker built from 9b92ac14 + INFRA-707's files, renderer_matches true). Starts when INFRA-715 messages that its lock is gone.
 - INFRA-707 acceptance (architect, 09:30Z): after my baseline, unless its tester is ready first (next free slot, never interrupting a run): r16 and 10x-typing with Dispatch and checker from the head the tester names (architect dispatches the branch image: run 40850134172 for a6b64ddb), plus the same on the newest main ancestor of that head that has an image, named in the result.
+
+## Update 2026-10-29 12:00Z
+- Final run lt-20261029t115927-655c started 11:59Z (stored-order source and browsertype from legion/INFRA-707 1febe317, checker renderer_matches true). Script: the command list above. Each phase's raw tar uploads to INFRA-514 as cluster-load-test-lt-20261029t115927-655c-raw-<phase>.tar.zst.partNN.
