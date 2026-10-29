@@ -14,7 +14,10 @@ import (
 // the block parsers it wraps: its emphasis parser replaced by emphasisParser, and its link parser
 // measuring the images it makes and pairing their labels' runs (imageNesting), with tildeParser
 // added at the priority goldmark's strikethrough extension gives its own (500), every delimiter
-// run read by rules.
+// run read by rules, and declarationParser at 350, between goldmark's autolink parser (300) and
+// its raw HTML parser (400), so every inline HTML declaration is read by the one rule
+// (opensDeclaration) before goldmark's own parser, which opens one only after an uppercase
+// letter, is asked.
 func inlineParsers(rules delimiterRules) []util.PrioritizedValue {
 	parsers := parser.DefaultInlineParsers()
 	emphasisType := reflect.TypeOf(parser.NewEmphasisParser())
@@ -27,6 +30,7 @@ func inlineParsers(rules delimiterRules) []util.PrioritizedValue {
 			parsers[index].Value = imageNesting{prioritized.Value.(goldmarkLinkParser)}
 		}
 	}
+	parsers = append(parsers, util.Prioritized(declarationParser{}, 350))
 	return append(parsers, util.Prioritized(tildeParser{rules: rules}, 500))
 }
 

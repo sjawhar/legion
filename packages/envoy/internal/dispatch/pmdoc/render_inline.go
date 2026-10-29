@@ -760,15 +760,16 @@ func (s *rawHTMLScan) opensAt(at int) bool {
 }
 
 // declarationEnd is where the declaration opened at at, on the line the scan is at, ends: after
-// the first `>` on the run's lines from there, -1 where none follows.
+// the first `>` on the run's lines from there (declarationClose, the reader's own closer), -1
+// where none follows.
 func (s *rawHTMLScan) declarationEnd(at int) int {
 	for line := s.line; line < s.lines.Len(); line++ {
 		segment := s.lines.At(line)
 		if line == s.line {
 			segment = segment.WithStart(at)
 		}
-		if index := bytes.IndexByte(segment.Value(s.written), '>'); index >= 0 {
-			return segment.Start + index + 1
+		if end := declarationClose(segment.Value(s.written)); end >= 0 {
+			return segment.Start + end
 		}
 	}
 	return -1
@@ -793,15 +794,16 @@ func (s *rawHTMLScan) readLines() {
 }
 
 // rawHTMLCloser is which kind of construct ending at the first of its closer a line opens: 0 a
-// comment, 1 a processing instruction, 2 a declaration (`<!` and an ASCII letter, as CommonMark
-// and the engine read one), 3 a CDATA section, and -1 a tag or nothing.
+// comment, 1 a processing instruction, 2 a declaration (opensDeclaration, the rule the reader
+// opens one by: `<!` and an ASCII letter, as CommonMark and the engine read one), 3 a CDATA
+// section, and -1 a tag or nothing.
 func rawHTMLCloser(line []byte) int {
 	switch {
 	case bytes.HasPrefix(line, []byte("<!--")):
 		return 0
 	case bytes.HasPrefix(line, []byte("<?")):
 		return 1
-	case len(line) > 2 && line[1] == '!' && isASCIILetter(line[2]):
+	case opensDeclaration(line):
 		return 2
 	case bytes.HasPrefix(line, []byte("<![CDATA[")):
 		return 3
