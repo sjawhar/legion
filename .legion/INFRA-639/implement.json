@@ -1,0 +1,85 @@
+{
+  "schemaVersion": 1,
+  "phase": "implement",
+  "issue": "INFRA-639",
+  "completed": "2026-10-29T17:07:00Z",
+  "proof": [
+    {
+      "criterion": "1 CLI-shaped writes at log offsets scaled by F, reads at a configurable assumption",
+      "surface": "packages/envoy/loadtest/run-step.sh --replay on the harness's local stack (Postgres 16.2, NATS, listener, Dispatch) on a 2-core Legion issue pod",
+      "command": "run-step.sh head-35b --replay --dispatch-commit 35efd326 --rate 0.05 --from 0 --to 10m",
+      "observed": "36 of 36 planned writes sent, 0 failed; every route's sent count equals replay-plan's; replay.inputs records rate_factor 0.05, reads_per_write 1, read_mix, upload_share 0.25, rng_seed 1, gomaxprocs 2; 762 roster sessions, 0 registration errors; not saturated",
+      "headSha": "4b756a26f419e6a01b85e52a59685e37f5999a57",
+      "negativeControl": "run-step.sh neg-sat --replay --rate 0.5 --from 15m --to 20m -> summary.json saturated true, reasons timeouts and inflight_at_end (475 timeouts, 129 in flight)"
+    },
+    {
+      "criterion": "2 real-size specs with each document's own counts at 22:55, roster of production's size, identical restore",
+      "surface": "stack.sh replay-seed / loadgen replay-check-seed on the full seed; stack.sh reset --replay before each run",
+      "command": "stack.sh loadgen replay-check-seed -bundle <bundle> -db dispatch_replay_build (full seed, 1,760 documents); meta.json replay.last_reset across runs base-1..3, u0, u05, head-35, head-35b",
+      "observed": "documents 1760, differences 0, version size mismatches 0 (21 sign flips), anchors outside their block 0, passed true; open anchored roots on 401 written primary documents median 22 at the seed, median 26 / write-weighted mean 47.25 with the window's roots; every run's seed dump sha256 9b0349e4... and logical checksum md5 8678c90a... equal; roster 762",
+      "headSha": "4b756a26f419e6a01b85e52a59685e37f5999a57",
+      "negativeControl": "a bundle part with one changed byte -> stack.sh replay-get refused it naming the part and both sha256 values and deleted it; an artifact_versions.size row and an anchor quote tampered in a database copy -> replay-check-seed passed false naming each"
+    },
+    {
+      "criterion": "3, 9 inputs recorded with the Dispatch CPU-seconds; cores at full rate = dispatch_cpu_s / window_s / F",
+      "surface": "summary.json replay block of any replay step",
+      "command": "jq '.replay | (.dispatch_cpu_s/.window_s/.inputs.rate_factor) - .cores_full_rate' $LOADTEST_ROOT/runs/head-35b/summary.json",
+      "observed": "0 (280.06 CPU-s over 600.4 s at F 0.05 = 9.33 cores); inputs, cpu_source proc, idle_cores_before, gomaxprocs 2 equal to nproc 2",
+      "headSha": "4b756a26f419e6a01b85e52a59685e37f5999a57",
+      "negativeControl": "LOADTEST_GOMAXPROCS=0 and x2 -> stack.sh refused them as not a positive integer before Dispatch started"
+    },
+    {
+      "criterion": "4 cores at the full rate at 35efd326 beside 10.9-14.0, and what is not reproduced",
+      "surface": "task-9 runs, report dispatch://INFRA-639/artifact/replay-baseline-2026-10-27-md",
+      "command": "run-step.sh base-{1,2,3} --replay --dispatch-commit 35efd326 --rate 0.05 (full 39-minute window), plus u0 / u05 (--uploads 0 / 0.5) and main (--dispatch-commit 8a911ecc)",
+      "observed": "9.94, 9.98, 9.60 cores at the full rate (mean 9.84, spread 0.37), not saturated, 174/174 writes, 0 failed; U bracket 13.1 (U 0) and 15.9 (U 0.5, saturated); main 3.56; the report lists the README's not-reproduced items",
+      "headSha": "5ff16983ffd3b7888635356a3400d3176a9492ae",
+      "negativeControl": "F 0.1 and 0.15 calibration runs -> flagged saturated (64 and 132 timeouts), so not taken as the default F"
+    },
+    {
+      "criterion": "6 heap profiles at the window's start and end",
+      "surface": "heap-start.pprof and heap-end.pprof of a replay step",
+      "command": "go tool pprof -sample_index=alloc_space -diff_base=heap-start.pprof -top $LOADTEST_ROOT/bin/envoy-dispatch heap-end.pprof (run head-35b)",
+      "observed": "exit 0, nodes accounting for 36,317.72 MB allocated in the 10-minute window",
+      "headSha": "4b756a26f419e6a01b85e52a59685e37f5999a57",
+      "negativeControl": "the same command with heap-end.pprof as its own base -> a zero-total diff, showing the profiles differ only by the window"
+    },
+    {
+      "criterion": "7, 8 Dispatch alone from another commit; the seed at 0114 migrates forward; build-relative migration check",
+      "surface": "run-step.sh --dispatch-commit; stack.sh replay-prepare; common.sh prepare_stack",
+      "command": "run-step.sh main-fix --replay --dispatch-commit 8a911ecca3a5b502a49368268969fb73784395ff --rate 0.05",
+      "observed": "meta.json dispatch_commit 8a911ecc..., build_commit the checkout; replay-prepare migrated 114 -> 138 in 450 s (backfill 316 s), backfill_empty true at the window; 174/174 writes, 0 failed; the client read the build's own text for 17 documents (2 differed, replanned)",
+      "headSha": "4b756a26f419e6a01b85e52a59685e37f5999a57",
+      "negativeControl": "--dispatch-commit deadbeef -> refused before any build (run-step.test.sh case); a build at migration 113 -> replay-prepare refused it as older than the seed's 114"
+    }
+  ],
+  "filesChanged": [
+    "packages/envoy/loadtest/replay_*.go and tests (bundle, fetch, pack, seed, seed plan, anchor, check, get, source, edit, record, determinism, bundle-wide body and edit guards)",
+    "packages/envoy/loadtest/dashboard.go, sse.go and tests (dashboard client follows the build: /ws/live or SSE)",
+    "packages/envoy/loadtest/run.go, sessions.go, tables.go, api.go, main.go, guard.go",
+    "packages/envoy/loadtest/stack.sh (setup with LOADTEST_DISPATCH_COMMIT, replay-seed, replay-seed-patch-check, replay-get, replay-prepare, reset --replay, replay-manifest)",
+    "packages/envoy/loadtest/run-step.sh, run-step.test.sh, common.sh, common.test.sh",
+    "packages/envoy/loadtest/replay-2026-10-26.json (manifest), replay-seed-len16.patch, zz_loadtest_pprof.go.txt",
+    "packages/envoy/loadtest/README.md, packages/envoy/AGENTS.md, packages/envoy/.changes/unreleased/INFRA-639-replay.yaml, packages/envoy/go.mod"
+  ],
+  "trickyParts": [
+    "The seed's history versions change exactly the real sizes: padding is a stream of unique words grown or cut by the size change; typed ask answers and resolves land at their real version numbers; 21 versions on 10 typed-ask documents keep |delta| with the sign flipped.",
+    "Dispatch 35efd326 matches an edit's find against rendered text inside one block; replay_edit.go builds only plain one-line runs; TestReplayEditsBundle checks all 1,003 window edits and 1,490 anchor quotes offline.",
+    "Dispatch mints a new id for each block an edit creates, so the end-state digest names a block by its position.",
+    "A newer build renders some markdown differently (a pipe in a table cell's code span): the client reads each modelled document's text from the build before the window and replans only documents that differ.",
+    "Dispatch caps a JSON body at 1 MiB: padding edits send only their change; TestRequestBodiesBundle holds every planned body under the cap.",
+    "To restart from the evidence: source an env file with LOADTEST_ROOT and the 7 port variables per command; never export them into a persistent shell (a stale export once rebuilt the wrong root)."
+  ],
+  "deviations": [
+    "Seed dump compression is gzip 9: pgserver's Postgres 16.2 pg_dump has no zstd.",
+    "Default F is 0.05, not chosen among 0.05/0.1/0.15 by a run at 0.05 alone: 0.1 and 0.15 saturated, so 0.05 is the largest unsaturated; the three baselines are the F 0.05 runs.",
+    "The acceptance-4 baselines ran at head 5ff16983; later commits changed the end-state digest, the dashboard client (main removed SSE) and the client's start text, not the CPU measurement; head-35b at 4b756a26 repeats a 10-minute window at 9.33 cores with the same end state as earlier runs.",
+    "Main's #2449 removed GET /api/v1/events; the replay opens SSE streams for builds without /ws/live (35efd326) and live sockets otherwise, recorded as config.dashboard."
+  ],
+  "openQuestions": [
+    "The upload share U moves the result non-monotonically (U 0: 13.1, U 0.25: 9.8, U 0.5: 15.9 cores), because uploads orphan anchors; whether production's named versions were uploads or edits is unknown and decides the absolute figure. Sent to the INFRA-512 architect with the report."
+  ],
+  "discoveredComplexity": [
+    "At 35efd326 a 500 KB upload can take 47-60 s on 2 cores; one 10-minute run (head-35) had one upload pass its 60 s deadline and was flagged saturated; the rerun (head-35b) had none."
+  ]
+}
