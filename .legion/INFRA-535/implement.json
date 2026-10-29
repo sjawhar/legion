@@ -2,8 +2,16 @@
   "schemaVersion": 1,
   "phase": "implement",
   "issue": "INFRA-535",
-  "completed": "2026-10-29T18:01:26Z",
+  "completed": "2026-10-29T19:10:27Z",
   "proof": [
+    {
+      "criterion": "Review round 3: orderMarks computes the next text's marks itself and its comment describes each order, with no output change",
+      "surface": "pmdoc differential (Go Parse/ParseForWrite/Render against the headless browser engine), 435,640 documents",
+      "command": "differential.sh --base 2e357b5b --head 601c6971 --corpus $TMPDIR/infra-535/corpora, then cmp base.jsonl head.jsonl && cmp base-engine.jsonl head-engine.jsonl; go test ./internal/dispatch/pmdoc ./internal/dispatch/docs -count=1 -p 1 -skip Linear",
+      "observed": "cmp exits 0 and every GATE reads 0, with refused by the writer 0. The go tests pass. Against 7511136b the dumps differ only at main's corpus file fenced-code-whitespace-lines-short-of-the-fence-indent, which sjawhar/legion#2481's reader reads differently; that is the merge of main, not this round",
+      "headSha": "601c6971174fa4824b0229ebd3c888c67be40d18",
+      "negativeControl": "The same cmp against 7511136b, a base before the merge of main, exits 1 at that corpus document. That shows the check sees a change in what is read and written"
+    },
     {
       "criterion": "Review round 2: one longestRun, one orderMarks and the 'main' comments renamed, with no output change; then main merged and the writer's guarantees still hold",
       "surface": "pmdoc differential (Go Parse/ParseForWrite/Render against the headless browser engine) and the Dispatch browser suite (Playwright, chromium, real Go server and Postgres)",
