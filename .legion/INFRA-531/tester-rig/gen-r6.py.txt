@@ -1,9 +1,0 @@
-# Round-6 block-start shapes (14,982): python3 gen-r6.py > r6gen.txt, then probe2.sh r6gen <side>.
-import itertools
-fixed=[r'\<span title=a=b;a@b.cc>', r'\<a href=x?a=1&b=me@x.cc>', r'\<a b=x=*y*>', r'> \<span title=a=b;a@b.cc>', r'- \<span title=a=b;a@b.cc>', r'| \<span title=a=b;a@b.cc> | c |⏎| --- | --- |']
-openers=['script','pre','style','textarea','SCRIPT','!--','?','!a','!A','!doctype ','![CDATA[','div','DIV','table','p','address','span','a','x-y','custom','/div','/span','/a','div ','span ','a ']
-mids=['', ' b=c', ' b=c=d', ' b="c"', " b='c'", ' b=c=d e', ' b', ' b=', ' b=c/', ' b=<', ' b=`', '/']
-bodies=['x;a@b.cc', 'x;https://y.test/', 'a@b.cc', 'www.y.test']
-closers=['>', '/>', '-->', '?>', ']]>', '']
-tails=['', ' tail']
-print('\n'.join(fixed+['\\<'+o+m+(';' if m else ' ')+b+c+t for o,m,b,c,t in itertools.product(openers,mids,bodies,closers,tails)]))
