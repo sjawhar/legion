@@ -2,7 +2,7 @@
   "schemaVersion": 1,
   "phase": "implement",
   "issue": "INFRA-568",
-  "completed": "2026-10-29T08:27:04Z",
+  "completed": "2026-10-29T09:02:03Z",
   "pullRequest": "https://github.com/sjawhar/legion/pull/2397",
   "proof": [
     {
@@ -36,6 +36,22 @@
       "observed": "all pass (api 980 s, TestMigrationSetIsNumberedOneToN with 0139/0140, registeredRoutes 143, ConnectionsPerProcess 87 = dispatchConnectionsPerPod); 0 files with conflict markers; claude-envoy dist/legion and CHANGELOG.md equal main; 0 added lines with a Dispatch key; related_terms.go:170 still duty.TickAtStart. Fingerprint 7cced850... -> 4ed3a0af... (https://github.com/sjawhar/legion/pull/2397#issuecomment-6491744700)",
       "headSha": "f63160dae641fdc782149420c60a685410894e37",
       "negativeControl": "the first whole-api run before the guard fix failed TestEveryKeyedWriteCommitsInsideATransactionTheMarkHooks on the related-check batch, showing main's new guard reaches this branch's code"
+    },
+    {
+      "criterion": "Round-14 failure 2: the client package type-checks and main's census proves DispatchClient's related method goes through the keyed request function",
+      "surface": "packages/envoy-client with the pinned Bun 1.4.4 in the pod",
+      "command": "cd packages/envoy-client && bunx tsc --noEmit && bun test src && bun run lint",
+      "observed": "tsc clean; 1083 pass, 0 fail (census test passes with the related row, a keyed POST); biome clean",
+      "headSha": "dc9071e65c3b44ec4a18bdca6f230ab5aadc016a",
+      "negativeControl": "CI envoy-client job at f63160da without the row: TS2741 Property 'related' is missing (https://github.com/sjawhar/legion/actions/runs/40842070182/job/123341241313)"
+    },
+    {
+      "criterion": "Round-14 failure 1 under the architect's changed spec: the bar before the merge is the 28 October set (9 pairs: old 4, new 5); the 29 October set is quoted per pair with no ranking change",
+      "surface": "PR #2397 body, section 'The set copied again on 29 October'",
+      "command": "the tester's run at 985555c0: DISPATCH_RECALL_CORPUS=<29 October corpus> go test ./internal/dispatch/api -run TestRelatedRecallOnDuplicates -v (no ranking code changed since)",
+      "observed": "15 pairs: old 7, new 6, per pair and per wording in the body; pairs 1-9 equal the 28 October set's shipped column (new 5 vs old 4). DISPATCH_RECALL_REQUIRE_NO_LOSS is opt-in and no CI workflow sets it or the corpus",
+      "headSha": "dc9071e65c3b44ec4a18bdca6f230ab5aadc016a",
+      "negativeControl": "with DISPATCH_RECALL_REQUIRE_NO_LOSS=1 on the 29 October set the test fails at related_recall_test.go:422 (tester round 14), which is why the gate stays opt-in"
     }
   ],
   "filesChanged": [
@@ -47,6 +63,7 @@
   ],
   "deviations": [
     "Merge b12e0766: the term-statistics refresh now runs through main's duty.RunLeased with TickAtStart (passes on a ticker, not interval after each pass end), forced by main's duty.Exclusive signature change.",
-    "Merge of main 166bc0c4 at f63160da: main's keyed-write guard refused the related-check record batch; it became (*server).insertRelatedChecks with unchanged behaviour and is listed in keyedWriteGuardAllowed beside persistSuggestions."
+    "Merge of main 166bc0c4 at f63160da: main's keyed-write guard refused the related-check record batch; it became (*server).insertRelatedChecks with unchanged behaviour and is listed in keyedWriteGuardAllowed beside persistSuggestions.",
+    "Round 14: no ranking change for the 29 October recall set, per the architect's spec change; main had moved to 88840d35 but GitHub reports the PR mergeable, so no forward merge (merge only on a conflict)."
   ]
 }
