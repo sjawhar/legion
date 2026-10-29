@@ -17,7 +17,7 @@ import (
 
 // TestABrokerThatDiesBeforeServingRecordsNoServingBeat runs the REAL broker binary configured so
 // that its boot fails after the bind but before srv.Serve: its GitHub exchange issuer answers its
-// discovery read only after a delay of several sweeps, and then answers 404, so exchangeKeys fails
+// discovery read only after a delay of several sweeps, and then answers 404, so issuerKeys fails
 // and the broker exits non-zero having served nothing. A beat is a record that a broker is serving,
 // so this broker must leave broker_serving as it found it: a fleet crash-looping at such a step
 // must read as no broker serving, or the leases that run out meanwhile are swept. The delay is the
