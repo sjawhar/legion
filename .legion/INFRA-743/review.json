@@ -2,54 +2,51 @@
   "schemaVersion": 1,
   "phase": "review",
   "issue": "INFRA-743",
-  "completed": "2026-10-29T16:30:00Z",
+  "completed": "2026-10-29T23:00:00Z",
+  "round": 2,
   "decision": "changes_requested",
-  "reviewedCodeHead": "b7cccdc95ba8d589e551c43507b5df0b0ea65b3f",
-  "ci": "Code head b7cccdc9: every required check (lint, typecheck, test, pr-title) completed success, ci-ok success; compare b7cccdc9...8d3660c4 touches only .legion/INFRA-743/ (2 files).",
-  "thermonuclear": "deep-review: Verdict CHANGES at b7cccdc9 (1 High, 2 Minor); code-quality: Verdict CHANGES at b7cccdc9 (3 Medium, 4 Low). Findings below are the ones the reviewer verified in the code.",
+  "reviewedCodeHead": "806dbdaf2a1b3ee44a433fb5d24c7838dcb29e03",
+  "ci": "Code head 806dbdaf (compare 806dbdaf...e7c57db4 changes only .legion/INFRA-743/, 2 files): lint, typecheck, pr-title and most lanes success; envoy-go, envoy-go-race and dispatch still in_progress at 22:57Z, so this request for changes does not rest on CI.",
+  "thermonuclear": "deep-review: Verdict CHANGES at 806dbdaf (1 Medium, 3 Minor; the Medium shown by a probe test); code-quality: Verdict CHANGES at 806dbdaf (2 Medium, 3 Low). Both name the same Medium. Every finding below the reviewer checked in the code.",
+  "roundOneItems": "All addressed and each thread answered: the stall answers 200 degraded (da1cdf28) and pages through the reconnect-hooks-stalled filter (7c2ceb90); the zero-stall lock is in healthz_hook_stall_test.go; the census exists; settings.go:83,85 and AGENTS.md name the new lines; the kvwatch comments, the dead timer.Stop, HookStall's zero branch and the single slog.Log call are fixed. Declining HookStallErr() is accepted.",
   "critical": 0,
-  "important": 3,
-  "minor": 5,
+  "important": 1,
+  "minor": 6,
   "keyFindings": [
     {
       "severity": "important",
       "file": "packages/envoy/cmd/listener/main.go",
-      "description": "The new /healthz 503 (main.go:435-447) is the ECS listener's container health check (infra/aws/rendering/listener.go:202-203, curl -sf /healthz, 30 s x 3 retries; webhooklistener.go:227 DesiredCount 1), so in the band this PR targets ECS replaces the only task. The replacement's first KV watch needs the same consumer creation, its warm-up times out and it serves with an empty registry (main.go:795-800, 820-825) while the existing durable binds without a create (durable.go:141-158), so fanoutDelivery ACKs every general-topic message as 'no matching interests' (delivery.go:667-675): messages lost, against acceptance 4 (no change to delivery semantics). On GKE every replica reaches the grace in the same minute and readiness (dispatch_kube.go:516) empties the Service. The plan's basis ('Liveness and startup read /livez, never /healthz, so no pod is restarted') is false for ECS, and neither the PR body nor the docs name or bound it. Design decision (503 vs 200 degraded plus a paging log signal) sent to the architect."
-    },
-    {
-      "severity": "important",
-      "file": "packages/envoy/cmd/listener/healthz_hook_stall_test.go",
-      "description": "No test pins that a listener that never reconnected reports no stall however long it runs: marking the hooks due at the first connection would answer 503 on every listener a minute after start with every test green. Advance the clock by bus.RepairGrace before the ForceReconnect and assert 200 healthy (the architect's request, dispatch://INFRA-743/comment/3313691b-6e3d-4f9a-a977-54e2ce89c421)."
-    },
-    {
-      "severity": "important",
-      "file": "PR body",
-      "description": "The PR adds a refusal at a process boundary (/healthz 503 read by the ECS health check and GKE readiness) and renames a log line operators read; it carries no '## Contract change census' naming those consumers and a rollout line."
-    },
-    {
-      "severity": "minor",
-      "file": "packages/envoy/cmd/dispatch/settings.go",
-      "description": "settings.go:83 and :85 (ENVOY_NATS_REPLICAS, ENVOY_STREAM_MAX_BYTES), packages/envoy/AGENTS.md:2500 and the unreleased fragments pr-2362-replica-count.yaml:18 and pr-2362-stream-byte-limit.yaml:27 still name the old line 'envoy nats reconnect hook failed' at each retry; it is now a WARN '...; it is retried' under a minute and the ERROR 'envoy nats reconnect hooks have not succeeded' past it."
+      "description": "The stall branch (main.go:459-475) returns 200 degraded before the durable-consumer checks (main.go:487-499), so while a stall is past bus.RepairGrace a durable that is gone (ErrConsumerNotFound), unanswered within healthzBudget, or not bound to this listener's subscription answers 200 degraded naming the wrong fault, where it answered 503 before. Such a listener receives nothing, so the reason for 200 (stale caches still place fanout messages) does not hold. The deep review's probe test shows it: recreated durable plus a failing hook gives 503 under the grace and 200 degraded after clock.Advance(bus.RepairGrace). Move the stall check after the durable checks, just before the healthy answer, and add that case to healthz_hook_stall_test.go."
     },
     {
       "severity": "minor",
       "file": "packages/envoy/internal/kvwatch/kvwatch.go",
-      "description": "kvwatch.go:105-108 says 'one outage reports once at one bound'; past the grace recoverUntilHealthy logs the bus ERROR on every failed attempt (recovery.go:355-357, up to 30 s apart) and a stopped watcher adds its own 'watcher was not repaired'. Same claim in the PR body's Change list. kvwatch.go:191-197 and :594-601 say the bus arms another repair within seconds; for a watcher that stopped on its own, with the hooks current, the next Rewatch is the self-health rebuild on the monitor's tick (main.go:123, 177)."
+      "description": "kvwatch.go:223, :744-745 and packages/envoy/AGENTS.md:2538 cite cmd/listener/main.go:123 and main.go:177; at this head those are envDuration and a doc-comment line (the numbers were the reviewer's own in round 1 and moved with the merges). Name rewatchListenerKVWatchers, called from rebuildListenerDependencies."
     },
     {
       "severity": "minor",
-      "file": "packages/envoy/internal/kvwatch/kvwatch.go",
-      "description": "reportUnrepaired (kvwatch.go:657-666) is now called only from the timer's own callback (kvwatch.go:601), so timer.Stop() and the timer local are dead since reportFailedRepair went."
+      "file": "packages/envoy/internal/bus/hook_stall_test.go",
+      "description": "hook_stall_test.go:68 says the stall is exposed 'so cmd/listener can answer 503 on /healthz', and :96 says the error is 'no reason for /healthz to refuse'; the answer is 200 degraded."
     },
     {
       "severity": "minor",
       "file": "packages/envoy/internal/bus/nats.go",
-      "description": "HookStall's doc comment says the error is 'nil while none has [failed]', but a run that succeeds clears it (recovery.go:217), and the IsZero branch's 'return 0, c.lastHookErr' always returns nil. The grace comparison is repeated in two packages (recovery.go:249, main.go:435)."
+      "description": "HookStall's doc (nats.go:570-572) says a run that succeeds clears the error 'in the same locked section that zeroes the stall'; a successful run during which another event landed clears the error but restarts the stall (recovery.go, rewatch's else branch), which is the case main.go:467-472 handles."
     },
     {
       "severity": "minor",
       "file": "packages/envoy/internal/bus/recovery.go",
-      "description": "reportHookFailure (recovery.go:247-260) repeats the same three attributes in its Warn and Error calls; pick level and message, then one slog.Log call."
+      "description": "recovery.go:250-251 says the two messages and the three attributes are matched by the AWS log-metric filter; the filter (metricfilters.go:103) matches only the ERROR message's words and the level."
+    },
+    {
+      "severity": "minor",
+      "file": "PR body",
+      "description": "The census's own healthz search hits four listener health checks it does not list: packages/envoy/deploy/compose/listener.compose.yml:15 and single-node.compose.yml:43 (curl -f), packages/envoy/infra/host/listener.go:248 (Docker health check) and infra/host/watchdog.go:38 (curl -sf). All pass on 200, so each is 'unchanged', but each needs its row."
+    },
+    {
+      "severity": "minor",
+      "file": "packages/envoy/.changes/unreleased/INFRA-743-rewatch-retry-report.yaml",
+      "description": "The fragment does not name the log contract change an operator's filter reads: the ERROR 'envoy nats reconnect hook failed' is now the WARN 'envoy nats reconnect hook failed; it is retried' under a minute and the ERROR 'envoy nats reconnect hooks have not succeeded' past it, with a new stall_ms attribute, and kvwatch's reason 'repair failed' is gone."
     }
   ]
 }
