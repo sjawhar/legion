@@ -165,13 +165,6 @@ func (h *memoryHarness) start(t *testing.T) *memoryServer {
 		// takes away with it.
 		"DISPATCH_MEMORY_TRACE=" + trace,
 	}
-	// A GOGC in this process's environment reaches every server, so a drive can be measured
-	// against a collector ratio pinned at the runtime's own instead of the one the room budget's
-	// charge sets (collectorRatioSetter), which is how the ratio's worth is read: the drives'
-	// comments name the runs that were made so. It is never set in CI.
-	if gogc, set := os.LookupEnv("GOGC"); set {
-		command.Env = append(command.Env, "GOGC="+gogc)
-	}
 	command.Env = append(command.Env, h.env...)
 	server := &memoryServer{command: command, base: "http://127.0.0.1:" + port, output: &lockedBuffer{}, exited: make(chan struct{}), trace: trace}
 	command.Stdout, command.Stderr = server.output, server.output
@@ -300,12 +293,12 @@ const residentSampleInterval = 5 * time.Millisecond
 // what the runtime has mapped less what it has released, which is what the Go memory limit
 // bounds, so on gVisor the peak is taken from the server's own trace (memory_trace.go) as
 // vmrss - heap_released, and the VmRSS peak is logged beside it. At the heaviest step of
-// TestTheHeaviestApplyBesideAFullCopyBoundStaysUnderThePodsMemory the two were 3,691 and 3,942
-// MiB following the room budget's charge, and 3,680 and 4,346 at the collector's own ratio.
+// TestTheHeaviestApplyBesideAFullCopyBoundStaysUnderThePodsMemory the two were 3,665 and 4,171
+// MiB on 2026-10-29, a difference of 506 MiB the pod's kernel would not charge.
 //
-// That drive's comment is the one whose recorded peaks were measured this way. Every other
-// drive's were read as VmRSS on a sandbox before this correction, so each is the higher of the
-// two by whatever its server had released.
+// Each memory drive's comment records the peaks it was last measured at this way. Figures older
+// than this correction, which those comments name as VmRSS, were read as VmRSS on a sandbox, so
+// each is the higher of the two by whatever its server had released.
 func (p *memoryServer) peakResident(t *testing.T, during func()) int64 {
 	t.Helper()
 	if _, kept, err := p.readResident("VmHWM"); err != nil {

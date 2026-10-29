@@ -1419,7 +1419,7 @@ func structTotalOf(tally updateTally, err error, pending crdt.PendingStats) uint
 var errApplyTooHeavy = errors.New("the update is heavier to apply than the pod can hold")
 
 // goMemoryLimitBytes is the Go runtime's soft memory limit on the production pod: 90 per cent of
-// the container's 4 GiB, which the server sets at boot (setGoMemoryLimit, cmd/dispatch/main.go:122-157).
+// the container's 4 GiB, which the server sets at boot (setGoMemoryLimit, cmd/dispatch/main.go:121-156).
 const goMemoryLimitBytes = 4 << 30 * 9 / 10
 
 // heapAboveTheReserve is what the Go memory limit leaves above the room budget, the cold reads'
@@ -1469,93 +1469,35 @@ const applyHeapBound = heapAboveTheReserve / 3
 // applies of browsers' updates under unweighedApplyHeapBytes, one for each browser's read loop at
 // most, the measurer's parse of a rendering, up to about 130 MiB for a mebibyte of the heaviest
 // shape (pmdoc/elements.go:31-37), and the collector, which needs headroom under the Go memory
-// limit to free garbage before it reaches it and, once the budget is full, is held to this much of
-// it by the ratio the budget's charge gives it (CollectorRatio). An apply estimated past
-// applyHeapBound, which runs alone, may reach into it too, up to applyTooHeavyBytes.
-const heapSlackBytes = heapAboveTheReserve / 3
-
-// CollectorRatioFloor is the least garbage the collector is given, as a percentage of the live
-// heap: what a full room budget leaves it, 100 x heapSlackBytes 393,705,335 / (roomBudgetBytes
-// 2,147,483,648 + documentReadBudget 268,435,456 + pressureReserveBytes 268,435,456) = 14 per
-// cent. It is CollectorRatio at roomBudgetBytes, and the least CollectorRatio answers.
-const CollectorRatioFloor = 100 * heapSlackBytes / (roomBudgetBytes + documentReadBudget + pressureReserveBytes)
-
-// CollectorRatio is the garbage the collector may hold, as a percentage of the live heap, at a
-// room budget whose rooms and admissions are charged charged bytes: the headroom this file's own
-// arithmetic leaves for garbage at that charge, over what the pod holds live at rest at it. The
-// budget hands it to the runtime whenever the integer changes (roomBudget.followChargeLocked,
-// room_budget.go:1083-1104), so a server with room to spare collects at the runtime's own ratio
-// and one whose budget is full at the floor.
+// limit to free garbage before it reaches it. An apply estimated past applyHeapBound, which runs
+// alone, may reach into it too, up to applyTooHeavyBytes.
 //
-// Every term of it is one the lines above name. The Go memory limit holds the budget's charges,
-// the cold reads' cache, the pressure reserve, and what heapAboveTheReserve splits three ways -
-// the two transient bounds and this slack: goMemoryLimitBytes = roomBudgetBytes +
-// documentReadBudget + pressureReserveBytes + applyHeapBound + copyHeapBound + heapSlackBytes,
-// since copyHeapBound is what the other two leave of heapAboveTheReserve (copy_heap.go:59). At a
-// charge of c the pod holds c + documentReadBudget + pressureReserveBytes live at rest, and what
-// the limit leaves for garbage with both bounds held whole is
+// Nothing in Dispatch reads or sets GOGC: the collector runs at the runtime's own ratio, and what
+// holds the pod inside its memory is the Go memory limit (goMemoryLimitBytes). At that default the
+// heap goal is twice the live heap, which past half the limit is the limit itself, so a server
+// whose budget is full keeps every byte of garbage the limit allows - the budget's unused room,
+// both heap bounds and this slack together - and the memory it holds parks under the limit. That
+// memory is what a pod's kernel charges it: what the runtime holds less what it has released,
+// which is the figure the limit bounds. Measured on 2026-10-29 with the real-process drive of the
+// worst case the bounds allow (cmd/dispatch,
+// TestTheHeaviestApplyBesideAFullCopyBoundStaysUnderThePodsMemory, three steps: the budget filled,
+// the cold reads' cache filled, the heaviest handoffs applying beside full copy bounds), it peaked
+// by step at 2,563, 3,605 and 3,665 MiB of the pod's 4,096, 431 MiB under it, the drive taking
+// 402 s and the keystrokes a person typed through both heavy steps answered in a 99th percentile
+// of 185 ms.
 //
-//	goMemoryLimitBytes - applyHeapBound - copyHeapBound - (c + documentReadBudget + pressureReserveBytes)
-//	  = heapSlackBytes + roomBudgetBytes - c
-//
-// every byte the budget has not charged being a byte of garbage the limit can hold besides. So
-// the ratio is 100 x (heapSlackBytes + roomBudgetBytes - c) / (c + documentReadBudget +
-// pressureReserveBytes), and the collector's garbage, the live heap it is a ratio of and both
-// bounds together never pass the limit at any charge. An empty budget makes that 473 per cent,
-// clamped to the runtime's own 100, which it stays at while the charges leave room for a whole
-// GOGC=100 cycle - up to (heapSlackBytes + roomBudgetBytes - documentReadBudget -
-// pressureReserveBytes) / 2 = 1,002,159,035 bytes, 956 MiB of the 2 GiB budget - and falls from
-// there to CollectorRatioFloor, 14, at a full budget (91 at 1 GiB charged, 43 at 1.5 GiB). Past
-// the limit it stays at the floor: what the charges pass the limit by comes out of the pressure
-// reserve, which this counts as live already.
-//
-// It is what makes that slack real, and only where nothing else leaves the collector room. The
-// collector's default of 100 per cent lets the heap grow to twice what is live before a
-// collection; past half the Go memory limit the limit is the smaller of the two, so with a full
-// budget the heap goal is the limit itself and the collector keeps every byte of garbage the
-// limit allows - the budget's unused room, both heap bounds and this slack together. The pod's
-// resident memory then parks just under the limit whatever the design's sum is. What the pod is
-// charged stays under the limit even so, because that is what the limit bounds: measured on
-// 2026-10-29 with the real-process drive of the worst case the bounds allow (cmd/dispatch,
-// TestTheHeaviestApplyBesideAFullCopyBoundStaysUnderThePodsMemory, three steps: the budget
-// filled, the cold reads' cache filled, the heaviest handoffs applying beside full copy bounds),
-// a traced run at either ratio held what it had mapped less what it had released within 106,786
-// bytes of the 3,865,470,566-byte limit at its heaviest sample, the collector's CPU limiter
-// engaging on one of the 25 cycles the default took and on four of the 34 that following the
-// charge took. By step, the memory the pod's kernel charges: at the
-// default 100 per cent 2,653, 3,586 and 3,680 MiB, 416 MiB under the pod's 4,096; following the
-// charge, which set 91, 57, 32 and 15 per cent as that drive's rooms filled the budget, 2,414 to
-// 2,439, 3,241 to 3,272 and 3,691 to 3,695 MiB over two runs. The two are the same bound reached
-// two ways, and the drive took 395 s at the default against 539 and 547 s following the charge.
-// The keystrokes a person typed through both
-// heavy steps were answered in a 99th percentile of 161 ms at the default and 183 ms following
-// the charge.
-//
-// The VmRSS those runs read was 4,346 and 3,942 MiB, past the pod, and is not what the pod is
-// charged: this repository's sandboxes run under gVisor, whose VmRSS keeps every page the
+// The VmRSS that run read was 2,601, 3,615 and 4,171 MiB, the last past the pod, and is not what a
+// pod is charged: this repository's sandboxes run under gVisor, whose VmRSS keeps every page the
 // runtime has handed back unless the madvise(MADV_DONTNEED) that released it covered 2 MiB or
-// more, and the scavenger releases in smaller pieces (cmd/dispatch, peakResident, which reads
-// the pod's figure from the server's own memory trace). Dispatch's own pods are not sandboxed -
-// the GKE Autopilot deployment names no runtimeClassName and no GKE Sandbox node pool
-// (infra/gcp/dispatch_kube.go:492-501) - so what is charged there is what the limit bounds.
-//
-// So the ratio does not hold resident memory under the pod that the Go memory limit would not:
-// what it holds is the garbage inside the slack this file's arithmetic leaves, rather than
-// inside whatever the limit happens to allow once the charges fill it.
-//
-// Paying a tighter ratio only where the charge asks for it is what keeps its cost off the
-// servers whose rooms are light. Held at the floor set at boot whatever the charge, the
-// over-charge typing drive (TestTheRoomBudgetDoesNotOverchargeTypingAndPasting), whose eight
-// rooms charge 436,576,256 bytes and whose slack is therefore free, went from 503 s to 2,072 s,
-// after which its sweep closed seven of its eight rooms inside the wait an admission gives those
-// closes rather than all eight. At that charge this answers 100, the collector's own, which the
-// drive measured 485, 503 and 717 s at, the last of the three beside five other containers on
-// the sandbox.
-func CollectorRatio(charged int64) int {
-	garbage := heapSlackBytes + roomBudgetBytes - charged
-	live := charged + documentReadBudget + pressureReserveBytes
-	return int(min(max(100*garbage/live, CollectorRatioFloor), 100))
-}
+// more, and the scavenger releases in smaller pieces (cmd/dispatch, peakResident, which reads the
+// charged figure from the server's own memory trace). Dispatch's own pods are not sandboxed - the
+// GKE Autopilot deployment names no runtimeClassName and no GKE Sandbox node pool
+// (infra/gcp/dispatch_kube.go:492-501) - so what is charged there is what the limit bounds. The
+// 4,302 and 4,424 MiB earlier runs of that drive recorded were VmRSS read on this sandbox, not
+// memory any pod was charged, and holding the collector to a tighter ratio than the runtime's own
+// bought nothing: following the room budget's charge the same drive peaked at 3,691 to 3,695 MiB
+// charged in 539 and 547 s.
+const heapSlackBytes = heapAboveTheReserve / 3
 
 // applyTooHeavyBytes is the estimate (peerWeighing.applyHeap) past which the hook refuses an
 // update as too heavy to apply (errApplyTooHeavy): all of heapAboveTheReserve, 1,181,116,006

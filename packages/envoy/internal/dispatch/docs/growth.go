@@ -472,7 +472,7 @@ func clockSum(doc *crdt.Doc) uint64 {
 // encoded state holds at most the clock sum and two structs for each parked one, and the splits
 // are splitsAStructCanCause for each parked struct and each parked delete range
 // (crdt.Doc.PendingStats, crdt/doc.go:1140-1159). A room may park up to maxUpdateItems structs
-// (Server.MaxPendingItems, service.go:626), none of which the clock sum sees.
+// (Server.MaxPendingItems, service.go:629), none of which the clock sum sees.
 func structCeiling(doc *crdt.Doc) uint64 {
 	parked := doc.PendingStats()
 	items, ranges := uint64(parked.Items), uint64(parked.DeleteRanges)

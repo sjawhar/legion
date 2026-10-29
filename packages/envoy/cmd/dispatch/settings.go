@@ -16,12 +16,11 @@ import (
 // `HOME` (os.UserHomeDir), libpq's `PG*` (pgx), `HTTP_PROXY`, `HTTPS_PROXY` and `NO_PROXY`
 // (net/http), `SSL_CERT_FILE` and `SSL_CERT_DIR` (crypto/x509), the AWS SDK's `AWS_*` and its
 // shared config files (the file store's region and credentials), automemlimit's `AUTOMEMLIMIT` and
-// `GOMEMLIMIT` (setGoMemoryLimit), and the Go runtime's `GO*` and `TZ`. `GOGC` is a row even so,
-// because Dispatch's own boot reads whether it is set to know whether the room budget's charge
-// may move the collector's ratio (collectorRatioSetter). `envoy-dispatch settings`
-// prints the table, and the docs site's configuration reference is generated from that output. A
-// new setting is a new row here, never an os.Getenv; TestNoReaderBypassesTheSettingsTable holds
-// cmd/dispatch and internal/dispatch to that.
+// `GOMEMLIMIT` (setGoMemoryLimit), and the Go runtime's `GO*` and `TZ`, `GOGC` among them, which
+// Dispatch neither reads nor sets. `envoy-dispatch settings` prints the table, and the docs site's
+// configuration reference is generated from that output. A new setting is a new row here, never
+// an os.Getenv; TestNoReaderBypassesTheSettingsTable holds cmd/dispatch and internal/dispatch to
+// that.
 type setting struct {
 	// Name is the environment variable.
 	Name string
@@ -40,7 +39,7 @@ type setting struct {
 // settings is every Dispatch setting, in the order an operator meets them: storage, identity,
 // where the server listens, NATS, the Envoy listener, projects, the GitHub App, cookies,
 // service-account tokens, the secrets broker, meaning search's model service, the dashboard, the
-// collector's ratio and the memory trace, and local and test runs.
+// memory trace, and local and test runs.
 var settings = []setting{
 	{Name: "DATABASE_URL", Required: "yes",
 		Description: "Postgres connection string. The server migrates the database before serving; `census`, `backfill-block-ids`, `backfill-anchor-blocks`, `backfill-files` and `rebuild-refs` read it too. A `pool_max_conns` parameter is refused."},
@@ -132,8 +131,6 @@ var settings = []setting{
 		Description: "Directory of the built dashboard the server serves."},
 	{Name: "DISPATCH_ASSET_STORE_BUCKET", Required: "no",
 		Description: "Bucket holding immutable assets from prior dashboard builds. Unset, Dispatch serves only its local dashboard files."},
-	{Name: "GOGC", Default: "the collector's ratio follows what the room budget charges, from 100 per cent with room to spare down to 14 at a full budget", Required: "no",
-		Description: "The Go collector's ratio of garbage to live heap, which the runtime reads for itself at start. Set, Dispatch leaves it alone; unset, the room budget's charge sets it (`collectorRatioSetter`)."},
 	{Name: "DISPATCH_MEMORY_TRACE", Required: "no",
 		Description: "Path of a file to write one line of the Go runtime's memory classes, the process's resident memory and the container's `memory.current` to every 50 ms, for telling a pod near its memory limit from one the runtime is holding inside it; unset writes none."},
 	{Name: "DISPATCH_DEV_SIGNIN", Required: "no",

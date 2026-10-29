@@ -828,25 +828,21 @@ admitted while the charges stay within the 256 MiB pressure reserve past the lim
 
 Two more bounds hold what is transient rather than resident, each a third of what the Go memory
 limit leaves above the room budget, that cache and the pressure reserve (1,181,116,006 bytes), with
-the last third left as slack for what neither weighs. That slack is also what the collector is
-given, and only as much of it as the charges ask for: the room budget gives the collector the ratio
-of garbage to live heap its own charge leaves - what the limit leaves above that charge, the cache,
-the reserve and both bounds, over what they hold live at rest - whenever that ratio changes
-(`CollectorRatio`, `roomBudget.followChargeLocked`; the boot hands the budget the runtime's setter,
-`collectorRatioSetter` in `cmd/dispatch/main.go`, and a `GOGC` in the environment is left as it is,
-with nothing set). An empty budget leaves the runtime's own 100 per cent, which holds while the
-charges stay within 1,002,159,035 bytes; past that the ratio falls to the 14 per cent a full budget
-leaves (`CollectorRatioFloor`). At the collector's own default throughout, the heap goal of a
-server whose budget is full is the memory limit itself, so the garbage waiting to be freed fills
-every byte the limit leaves and the pod's resident memory parks under it; the limit bounds that
-memory either way, and the worst case the two bounds allow charged the pod 3,680 MiB of its
-4,096 at the default and 3,691 to 3,695 MiB following the charge, the drive taking 395 s at the
-default against 539 and 547 s (`TestTheHeaviestApplyBesideAFullCopyBoundStaysUnderThePodsMemory`).
-The VmRSS a sandboxed run reads is higher - 4,346 MiB against 3,942 and 3,907 - because gVisor
-keeps the pages the runtime released resident; Dispatch's own pods are not sandboxed, and the
-drive reads what the pod's kernel charges (`peakResident`). A fixed ratio cost every server all
-the time: the drive whose eight rooms charge 437 MB took 2,072 s under the floor set at boot
-against the 503 s the ratio their charge asks for, the runtime's own, leaves it at
+the last third left as slack for what neither weighs, the collector's headroom among it. The
+collector runs at the runtime's own ratio of garbage to live heap: Dispatch reads and sets no
+`GOGC`, and the memory limit is what holds the pod. At that ratio the heap goal of a server whose
+budget is full is the limit itself, so the garbage waiting to be freed fills every byte the limit
+leaves and the memory the pod's kernel charges parks under it - that memory being what the runtime
+holds less what it has released, which is what the limit bounds. The worst case the two bounds
+allow charged the pod 3,665 MiB of its 4,096 over 402 s
+(`TestTheHeaviestApplyBesideAFullCopyBoundStaysUnderThePodsMemory`, 2026-10-29). The VmRSS a
+sandboxed run reads is higher - 4,171 MiB over the same run - because gVisor keeps the pages the
+runtime released resident; Dispatch's own pods are not sandboxed, and the drive reads what the
+pod's kernel charges (`peakResident`). The 4,302 and 4,424 MiB earlier runs recorded were that
+same VmRSS, not a pod's charge, and a collector held to a tighter ratio bought nothing against
+them: following the room budget's charge the drive charged 3,691 to 3,695 MiB in 539 and 547 s,
+and a ratio pinned at a seventh of the live heap at boot cost every server all the time - the
+drive whose eight rooms charge 437 MB took 2,072 s under it against 503 s at the runtime's own
 (`TestTheRoomBudgetDoesNotOverchargeTypingAndPasting`). The apply-heap bound
 (`applyHeapBound`, 393,705,335 bytes) holds the estimated heap of the browsers' applies the hook
 weighs: an update whose own share of the estimate passes 2 MiB

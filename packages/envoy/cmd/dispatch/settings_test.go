@@ -22,7 +22,6 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
-	"runtime/debug"
 	"slices"
 	"strconv"
 	"strings"
@@ -1331,19 +1330,6 @@ func TestEverySettingReachesItsReader(t *testing.T) {
 			}
 			if boot := resolveWith(t, nil); boot.AssetStoreBucket != "" {
 				t.Errorf("unset AssetStoreBucket = %q, want disabled", boot.AssetStoreBucket)
-			}
-		},
-		"GOGC": func(t *testing.T) {
-			// The row's reader is the boot's choice of who sets the collector's ratio, which
-			// TestTheCollectorsRatioIsTheRoomBudgetsToSet drives whole; here it is the table that
-			// carries the value to it.
-			previous := debug.SetGCPercent(100)
-			t.Cleanup(func() { debug.SetGCPercent(previous) })
-			if setter := collectorRatioSetter(envGetter(map[string]string{"GOGC": "50"})); setter != nil {
-				t.Error("with GOGC set the boot handed the room budget a setter, want the runtime's own ratio left alone")
-			}
-			if setter := collectorRatioSetter(envGetter(nil)); setter == nil {
-				t.Error("with GOGC unset the boot handed the room budget no setter, want the budget's charge to set the ratio")
 			}
 		},
 		"DISPATCH_MEMORY_TRACE": func(t *testing.T) {

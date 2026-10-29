@@ -62,12 +62,6 @@ type Deps struct {
 	Settle            time.Duration
 	MarkWait          time.Duration
 	UnrecordedMarkTTL time.Duration
-	// SetGCPercent gives the collector a ratio of garbage to live heap, the runtime's
-	// debug.SetGCPercent where the boot injects it (cmd/dispatch/main.go, collectorRatioSetter):
-	// the room budget calls it with the ratio its charge leaves the collector (CollectorRatio)
-	// whenever that ratio changes. Nil - every caller's but the server's boot, and the boot's own
-	// where GOGC is in the environment - leaves the runtime's ratio alone.
-	SetGCPercent func(percent int) (previous int)
 }
 
 // VersionedStore is Dispatch's transactional extension of ygo's durable room
@@ -612,7 +606,7 @@ func New(deps Deps) *Service {
 		timers:            make(map[uint64]*time.Timer),
 		unrecordedMarkTTL: unrecordedMarkTTL,
 		reads:             newDocumentReads(documentReadBudget),
-		budget:            roomBudget{limit: roomBudgetBytes, setGCPercent: deps.SetGCPercent, gcPercent: CollectorRatio(0)},
+		budget:            roomBudget{limit: roomBudgetBytes},
 		admissionWait:     settle + admissionFlushAllowance,
 	}
 	service.budget.sweep = service.sweepRooms

@@ -15,7 +15,6 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
-	"runtime/debug"
 	"strings"
 	"syscall"
 	"time"
@@ -128,7 +127,7 @@ type bootConfig struct {
 // v2 and memory.limit_in_bytes under v1, takes the smallest in the hierarchy and reports `max` as
 // no limit; a test passes its own rather than depending on the runner's control group. Where no
 // limit is readable the runtime keeps having none. GOMEMLIMIT and AUTOMEMLIMIT stay automemlimit's
-// own variables, read inside memlimit.Set and not settings rows (settings.go:11-22): a GOMEMLIMIT,
+// own variables, read inside memlimit.Set and not settings rows (settings.go:11-23): a GOMEMLIMIT,
 // or AUTOMEMLIMIT=off, skips the provider, and any other AUTOMEMLIMIT replaces the ratio. It logs
 // one line naming the limit it read and the limit it set.
 func setGoMemoryLimit(provider memlimit.Provider) {
@@ -156,34 +155,6 @@ func setGoMemoryLimit(provider memlimit.Provider) {
 	}
 }
 
-// collectorRatioSetter is how the collector's ratio is set from here on: the runtime's own
-// debug.SetGCPercent, for the room budget to call with the ratio its charge leaves the collector
-// (docs.CollectorRatio, internal/dispatch/docs/peer_update.go:1483-1557, which the budget follows
-// in roomBudget.followChargeLocked), or nil where a GOGC in the environment, which the runtime
-// has already read, is to be left as it is, as GOMEMLIMIT is (setGoMemoryLimit). GOGC is a row of
-// the settings table, so the one read of it is processSettings' and `envoy-dispatch settings`
-// names it; GOMEMLIMIT is not, since automemlimit reads it inside memlimit.Set. Nothing is set
-// here: an empty budget's ratio is the runtime's own default, which a server with no GOGC boots
-// at, and the budget sets the first ratio its charges lower it to.
-//
-// The memory limit alone does not hold the collector to the slack the budget's arithmetic leaves
-// above the charges: at the runtime's default of 100 per cent the heap goal is twice the live
-// heap, which past half the limit is the limit itself, so a server whose budget is full keeps
-// every byte of garbage the limit allows and the pod's resident memory parks under the limit,
-// where the burst the heap bounds do allow takes it past the container's own limit and Kubernetes
-// kills it. It logs one line naming the ratios the budget will hold the collector between, or the
-// GOGC it left.
-func collectorRatioSetter(env settingValues) func(percent int) (previous int) {
-	if gogc, set := env.lookup("GOGC"); set {
-		slog.Info("dispatch: collector ratio taken from GOGC; the room budget's charge does not set it",
-			"gogc", gogc, "gc_percent_at_a_full_room_budget", docs.CollectorRatioFloor)
-		return nil
-	}
-	slog.Info("dispatch: collector ratio follows the room budget's charge",
-		"gc_percent", docs.CollectorRatio(0), "gc_percent_at_a_full_room_budget", docs.CollectorRatioFloor)
-	return debug.SetGCPercent
-}
-
 func main() {
 	slog.SetDefault(slog.New(slog.NewTextHandler(os.Stderr, nil)))
 	// First, before the server allocates anything the collector would have to catch up on.
@@ -192,9 +163,6 @@ func main() {
 	if len(os.Args) > 1 {
 		os.Exit(runSubcommand(context.Background(), os.Args[1:], env, os.Stdout, os.Stderr))
 	}
-	// The collector's own ratio is the room budget's from here on, through the setter this hands
-	// the document service below.
-	collectorRatio := collectorRatioSetter(env)
 	// Before the server serves, so an operator's trace holds the whole of what it then maps; a
 	// subcommand, which has exited by here, writes none. Its context never ends, so the trace
 	// runs to the end of the process.
@@ -339,12 +307,11 @@ func main() {
 
 	broker := events.NewBroker()
 	documentService := newDocumentService(boot, docs.Deps{
-		Store:        database,
-		Events:       broker,
-		Identity:     requestIdentity,
-		ServerURL:    serverURL,
-		Settle:       boot.SettleDelay,
-		SetGCPercent: collectorRatio,
+		Store:     database,
+		Events:    broker,
+		Identity:  requestIdentity,
+		ServerURL: serverURL,
+		Settle:    boot.SettleDelay,
 	})
 	restoreDecidedWordings(ctx, documentService, decidedWordingRestoreTimeout)
 	// The seed appends events, so it runs after restoreDecidedWordings, which takes the copy lock:

@@ -862,10 +862,10 @@ func TestTheHeaviestHandoffTheBoundsAllowIsNotClosedForSize(t *testing.T) {
 // the edit made it.
 //
 // What the fifty wait for is that bound. Measured on 2026-10-29 over four runs on a
-// three-processor sandbox, the server at the pod's Go memory limit and the collector at its own
-// default ratio: 39 admitted and 11 refused every time, the last refusal 16.1 to 20.5 s after the
-// burst began and the last admission 1m12s to 1m23s, none answered 503, peak resident memory 3,717
-// to 3,802 MiB. In the run read line by line, the counts, 93,811,288 bytes each, asked for 7.1 s
+// three-processor sandbox, the server at the pod's Go memory limit and the collector at the
+// runtime's own ratio, the only one Dispatch runs at: 39 admitted and 11 refused every time, the
+// last refusal 16.1 to 20.5 s after the burst began and the last admission 1m12s to 1m23s, none
+// answered 503. In the run read line by line, the counts, 93,811,288 bytes each, asked for 7.1 s
 // of a wholly full bound between them; the decodes of the rooms' loads, 144,268,320 each, asked
 // for 42.8 s, two at a time in the 393,705,336-byte bound, which was 76.9% full over the burst and
 // never empty, and whose longest waiter waited 35.8 s. That work is the processor's: with the
@@ -873,14 +873,12 @@ func TestTheHeaviestHandoffTheBoundsAllowIsNotClosedForSize(t *testing.T) {
 // hold grew from 4.5 s to 8.1 s and the last admission came at 2m3.5s. A browser of this burst is
 // answered no sooner than the loads before it can decode, whatever the counts do.
 //
-// With the collector since following what the room budget charges (docs.CollectorRatio,
-// collectorRatioSetter), which collects the same work's garbage oftener as the rooms fill the
-// budget - 96 per cent as the burst began, 16 with the budget full, twenty-one ratios in all
-// (logCollectorRatios) - that burst admitted 39 and refused 11 again, none answered 503, with the
-// last refusal at 25.1 and 26.7 s, the last admission at 1m55s and 2m16s, and peak resident
-// memory 3,319 and 3,369 MiB over two runs (2026-10-29). Held at the floor that charge only
-// reaches when the budget is full, a fixed 14 per cent set at boot, the same burst refused its
-// eleven at 37.7 s and admitted the last at 2m48s, with a peak of 3,378 MiB.
+// Those runs' peaks, 3,717 to 3,802 MiB, were read as VmRSS, which on this sandbox counts the
+// pages the runtime has released as well (peakResident). Measured as the pod's kernel charges it,
+// what the runtime holds less what it has released, the run of 2026-10-29 peaked at 3,629 MiB
+// with the browsers coming one after another and 3,673 MiB over the burst, against VmRSS of 3,633
+// and 3,745 MiB, refusing the eleven by 23.2 s and admitting the last of the thirty-nine at
+// 1m27.7s, the whole drive in 378 s.
 func TestTheRoomBudgetRefusesWhereItsOwnArithmeticSays(t *testing.T) {
 	const burst, gone = 50, 5
 	memory := newMemoryHarness(t)
@@ -1139,7 +1137,6 @@ func TestTheRoomBudgetRefusesWhereItsOwnArithmeticSays(t *testing.T) {
 		}
 		t.Logf("%d browsers at once: %d handed their state back and edited their rooms, the slowest answered after %s; %d refused at admission, the slowest after %s; %d answered 503; %d refused their handoff, %d their edit; peak resident memory %d MiB",
 			burst, applied, slowestAdmitted.Round(time.Millisecond), atAdmission, slowestRefused.Round(time.Millisecond), unavailable, atHandoff, atEdit, peak>>20)
-		logCollectorRatios(t, "the burst", server.output.String())
 		requireBudgetRefusals(t, server, fleet.reserved)
 		if applied+atAdmission != burst {
 			t.Errorf("%d browsers were admitted and %d refused by the budget, want every one of the %d one or the other", applied, atAdmission, burst)
@@ -1191,11 +1188,13 @@ func TestTheRoomBudgetRefusesWhereItsOwnArithmeticSays(t *testing.T) {
 // 54,572,032, so the window runs from 435,720,192 bytes - what the eighth admission is weighed
 // against, three pairs charged whole beside the seventh room's reservation and the eighth's - to
 // one byte under 490,720,256, what the ninth is weighed against and is refused at; 448 MiB is
-// 469,762,048. Run so on 2026-10-29 the drive passed in 485, 503 and 717 s, the slowest of the
-// three beside five other containers on this sandbox: the first refusal came at room 9, the
-// arithmetic's, the largest structure part the budget read as it closed the eight rooms was the
-// 428,032 bytes their updates are priced at, and the server's resident memory peaked at 1,490 to
-// 1,509 MiB. The same drive against the real 2 GiB budget is 39 rooms: it passed in 2,511 s on
+// 469,762,048. Run so on 2026-10-29 the drive passed in 485, 503, 717 and 561 s, the 717 beside
+// five other containers on this sandbox: the first refusal came at room 9, the arithmetic's, the
+// largest structure part the budget read as it closed the eight rooms was the 428,032 bytes their
+// updates are priced at, and in the 561-second run the server's memory peaked at 1,518 MiB as the
+// pod's kernel charges it, of 1,521 MiB of VmRSS; the 1,490 to 1,509 MiB the earlier runs recorded
+// were VmRSS alone, which on this sandbox counts the pages the runtime has released as well
+// (peakResident). The same drive against the real 2 GiB budget is 39 rooms: it passed in 2,511 s on
 // this sandbox on 2026-10-29, 41 m 2 s of that from its first admission
 // to the refusal, where CI runs the whole memory suite under one 60-minute deadline
 // (.github/workflows/envoy-and-contracts.yaml:1017). What the full budget costs in memory is not
@@ -1214,16 +1213,15 @@ func TestTheRoomBudgetRefusesWhereItsOwnArithmeticSays(t *testing.T) {
 //
 // What the drive costs in time is what the collector does with the garbage each update leaves -
 // each costs the server a render of the whole document (renderedReplica.observe,
-// internal/dispatch/docs/tree.go:545) - and that is the ratio the room budget's charge gives it
-// (docs.CollectorRatio, logCollectorRatios): its eight rooms charge 436,576,256 bytes, well under
-// the 1,002,159,035 past which a whole cycle of the runtime's own 100 per cent no longer fits
-// what the Go memory limit leaves, so the collector stays at the 100 per cent an empty budget
-// leaves it throughout (logCollectorRatios logs no change) and a pair takes 1 m 33 s to 1 m 49 s
-// for its 201 updates alone on this sandbox, 0.47 s an update, and 1 m 59 s to 2 m 53 s beside
-// five other containers. Held at the floor that charge does not ask for, as a fixed ratio of 14
-// set at boot held it, the same pair took 4 m 52 s, 1.45 s an update, the drive 2,072 s rather
-// than 503, and its sweep then closed seven of its eight rooms inside the wait closesOf gives
-// them rather than all eight.
+// internal/dispatch/docs/tree.go:545) - at the runtime's own ratio of garbage to live heap, the
+// only one the server runs at: a pair of rooms takes 1 m 33 s to 1 m 49 s for its 201 updates
+// alone on this sandbox, 0.47 s an update, 1 m 42 s to 2 m 9 s in the run of 2026-10-29 that took
+// 561 s, and 1 m 59 s to 2 m 53 s beside five other containers. A collector held to a tighter
+// ratio costs this drive dearly and buys its eight rooms nothing, since what they charge,
+// 436,576,256 bytes, leaves the Go memory limit room for a whole cycle of the runtime's own:
+// pinned at a seventh of the live heap at boot, the same pair took 4 m 52 s, 1.45 s an update,
+// the drive 2,072 s rather than 503, and its sweep then closed seven of its eight rooms inside
+// the wait closesOf gives them rather than all eight.
 func TestTheRoomBudgetDoesNotOverchargeTypingAndPasting(t *testing.T) {
 	const keystrokes, runs, pasteBytes, together, budget = 200, 10, 4 << 10, 2, 448 << 20
 	building := time.Now()
@@ -1365,7 +1363,6 @@ func TestTheRoomBudgetDoesNotOverchargeTypingAndPasting(t *testing.T) {
 		}
 	}
 	t.Logf("the budget closed %d rooms; the largest structure part was %d bytes, against the %d a typed room's updates are priced at", len(closes), most, bound)
-	logCollectorRatios(t, "the whole run", server.output.String())
 }
 
 // encodedTextBytes is what the walk reads of a string of bytes bytes: the bytes, after a varuint of
@@ -2386,7 +2383,7 @@ const (
 	// granted the whole copy bound and decodes alone among the copies.
 	copyHeapPerByteForTest = 48
 	// heaviestHandoffEstimate is the hook's estimate of the heaviest honest handoff at F, measured
-	// into the room holding it (peerWeighing.applyHeap, internal/dispatch/docs/peer_update.go:1659):
+	// into the room holding it (peerWeighing.applyHeap, internal/dispatch/docs/peer_update.go:1602):
 	// the long-edited document typed on until 4,096 structs short of the decode cap and padded to
 	// F, the shape the heaviest-apply drive hands back. The server logs no estimate, only that
 	// each handoff held the whole apply bound (heapGrantLine), which an estimate past
@@ -2399,11 +2396,11 @@ const (
 const longEditFixturePath = "../../internal/dispatch/docs/testdata/long_edited_document.update.gz"
 
 // A burst of browsers opening struct-dense documents that render little, all at once, under the
-// Go limit a 4 GiB pod gives the server and the collector ratio the room budget's charge leaves
-// it (docs.CollectorRatio, 74 per cent as the first rooms loaded and 16 with the budget full),
-// keeps the server's peak resident memory (peakResident) under the pod's 4 GiB: 2,660 and
-// 2,715 MiB over two runs on 2026-10-29, where the collector's own default ratio left that peak
-// at 3,727 MiB and a fixed 14 per cent set at boot at 2,814 MiB. The burst is eight copies each
+// Go limit a 4 GiB pod gives the server and at the runtime's own collector ratio, which the
+// server leaves alone, keeps the memory the pod's kernel charges it (peakResident) under the
+// pod's 4 GiB: 3,570 MiB on 2026-10-29, of 3,573 MiB of VmRSS, in a drive of 294 s. The 2,660 to
+// 3,727 MiB earlier runs recorded were VmRSS alone, which on this sandbox counts the pages the
+// runtime has released as well. The burst is eight copies each
 // of the two struct-dense shapes a room keeps - the long-edited 5 KiB document typed on until
 // its state stands at the decode cap
 // (longEditedTypedTo), and the document an agent rewrote whole through the API until the decode
@@ -2518,7 +2515,6 @@ func TestABurstOfStructDenseDocumentsStaysUnderThePodsMemory(t *testing.T) {
 	t.Logf("%d browsers at once: %d admitted to struct-dense rooms and %d to rooms of prose, %d bytes reserved at admission against the %d-byte budget, in %s; peak resident memory %d MiB, against the pod's %d MiB",
 		len(burst), dense, admitted[ordinary], admittedReserved, roomBudgetBytesForTest, took.Round(time.Second), peak>>20, podMemory>>20)
 	logHeapGrants(t, "the burst", heapGrants(t, server.output.String()))
-	logCollectorRatios(t, "the burst", server.output.String())
 	if most := roomBudgetBytesForTest / min(longEdited.reserved, agent.reserved); dense == 0 || int64(dense) > most {
 		t.Errorf("%d struct-dense rooms were admitted, want at least one and no more than the %d their structs' price fits in the budget", dense, most)
 	}
@@ -2538,22 +2534,21 @@ func TestABurstOfStructDenseDocumentsStaysUnderThePodsMemory(t *testing.T) {
 // pod's kernel charges the server (peakResident) stays under the pod's 4 GiB through every step,
 // and every honest handoff, load and fold completes.
 //
-// What the garbage of all that work does to that memory is the collector's ratio, which follows
-// what the room budget charges (docs.CollectorRatio, roomBudget.followChargeLocked) from the
-// setter the boot hands the document service (collectorRatioSetter, main.go:159-185), whose line
-// this drive reads at the start (requirePodGoMemoryLimit) and whose every ratio it logs at the
-// end (logCollectorRatios): at the collector's own default the heap goal of a server whose
-// budget is full is the Go limit itself, so it keeps every byte of garbage the limit allows,
-// where following the charge it keeps what the budget's arithmetic leaves. Measured on
-// 2026-10-29, the three steps below charged 2,653, 3,586 and 3,680 MiB at the default, 416 MiB
-// under the pod, and 2,414 to 2,439, 3,241 to 3,272 and 3,691 to 3,695 MiB over two runs
-// following the charge, which took the ratio to 91 per cent as the first rooms loaded and 15
-// with the budget full: the Go memory limit holds the charge under the pod either way, and the
-// drive took 395 s at the default against 539 and 547 s following the charge. What the two
-// differ in is VmRSS on this sandbox - 4,346 MiB against 3,942 and 3,907 - which counts the
-// pages the runtime released and gVisor keeps resident, and which no
-// unsandboxed pod is charged (peakResident; the GKE Autopilot deployment names no
-// runtimeClassName or GKE Sandbox node pool, infra/gcp/dispatch_kube.go:492-501).
+// What the garbage of all that work does to that memory is the collector's, at the runtime's own
+// ratio: the server reads and sets no GOGC, and the boot line this drive reads at the start is
+// the Go memory limit it took from its container (requirePodGoMemoryLimit). At that default the
+// heap goal of a server whose budget is full is the limit itself, so the collector keeps every
+// byte of garbage the limit allows - and the limit bounds exactly what a pod's kernel charges,
+// what the runtime holds less what it has released. Measured on 2026-10-29, the three steps below
+// charged 2,563, 3,605 and 3,665 MiB of the pod's 4,096, 431 MiB under it, in a drive of 402 s,
+// and the keystrokes a person typed through the two heavy steps were answered in a 99th
+// percentile of 185 ms. VmRSS over the same run read 2,601, 3,615 and 4,171 MiB: the difference
+// is the pages the runtime released and gVisor keeps resident, which no unsandboxed pod is
+// charged (peakResident; the GKE Autopilot deployment names no runtimeClassName or GKE Sandbox
+// node pool, infra/gcp/dispatch_kube.go:492-501). The 4,302 and 4,424 MiB this drive once
+// recorded were that same VmRSS, and holding the collector to the ratio the room budget's charge
+// left it, which a change since removed, moved the charged peak no lower: 3,691 to 3,695 MiB in
+// 539 and 547 s.
 //
 // On one server: first the budget is filled by browsers that stay - a browser of an ordinary small
 // document, two rooms of the long-edited document typed on until 4,096 structs short of the decode
@@ -2820,7 +2815,6 @@ func TestTheHeaviestApplyBesideAFullCopyBoundStaysUnderThePodsMemory(t *testing.
 		t.Error("no handoff held the whole apply bound while a decode held the whole copy bound: the worst case did not happen")
 	}
 	t.Logf("peak resident memory by step: the budget filled %d MiB, the cache filled %d MiB, the heaviest applies beside full copy bounds %d MiB", filledPeak>>20, cachePeak>>20, worstPeak>>20)
-	logCollectorRatios(t, "the whole run", server.output.String())
 	for _, peak := range []int64{filledPeak, cachePeak, worstPeak} {
 		if peak >= podMemory {
 			t.Errorf("the server's resident memory peaked at %d MiB, want under the pod's %d MiB", peak>>20, podMemory>>20)
@@ -3310,7 +3304,7 @@ func (h *memoryHarness) settled(t *testing.T, artifactID string) bool {
 }
 
 // serverOpenedCloseLine is the line the server logs as it closes a room its own work opened over the
-// budget, once nothing holds it (closeIfOpenedOverBudget, internal/dispatch/docs/room_budget.go:1621-1646).
+// budget, once nothing holds it (closeIfOpenedOverBudget, internal/dispatch/docs/room_budget.go:1637-1672).
 var serverOpenedCloseLine = regexp.MustCompile(`msg="dispatch: the room budget closed a document the server opened over it" room=(\S+) charged_before=\d+ charged=\d+ limit=\d+`)
 
 // requireClosedOnceSettled fails the test unless the room of artifactID, which the server's own work
@@ -3490,49 +3484,16 @@ func requireInsertsNothing(t *testing.T, update []byte) {
 	}
 }
 
-// requirePodGoMemoryLimit fails the test unless the server took the Go limit a 4 GiB pod gives it
-// and left the collector's ratio to the room budget's charge (collectorRatioSetter,
-// main.go:159-185), which is what holds the garbage waiting to be freed inside the slack the
-// budget's arithmetic leaves rather than inside the whole limit once the charges fill it. Where
-// the run pins GOGC, which the harness passes to every server (memory_harness_test.go), it fails
-// unless the server took that ratio instead: a run so pinned is measuring the drive against a
-// fixed ratio.
+// requirePodGoMemoryLimit fails the test unless the server took the Go limit a 4 GiB pod gives
+// it, which is what bounds the memory the drives weigh against the pod: what the runtime holds
+// less what it has released (peakResident). The server sets no collector ratio and the runtime's
+// default stands.
 func requirePodGoMemoryLimit(t *testing.T, server *memoryServer) {
 	t.Helper()
-	ratio := "msg=\"dispatch: collector ratio follows the room budget's charge\""
-	if gogc, set := os.LookupEnv("GOGC"); set {
-		ratio = "gogc=" + gogc
+	want := "go_memory_limit_bytes=" + strconv.Itoa(podGoMemoryLimit)
+	if !strings.Contains(server.output.String(), want) {
+		t.Fatalf("the server's boot did not log %s:\n%s", want, server.output.tail())
 	}
-	for _, want := range []string{
-		"go_memory_limit_bytes=" + strconv.Itoa(podGoMemoryLimit),
-		ratio,
-		"gc_percent_at_a_full_room_budget=" + strconv.Itoa(docs.CollectorRatioFloor),
-	} {
-		if !strings.Contains(server.output.String(), want) {
-			t.Fatalf("the server's boot did not log %s:\n%s", want, server.output.tail())
-		}
-	}
-}
-
-// collectorRatioLine is the line the server logs each time what the room budget charges moved the
-// collector's ratio (roomBudget.followChargeLocked, internal/dispatch/docs/room_budget.go:1083-1104):
-// the ratio it set, the one it replaced and what the budget was charged when it did.
-var collectorRatioLine = regexp.MustCompile(`msg="dispatch: the collector's ratio followed the room budget's charge" gc_percent=(\d+) previous_gc_percent=(\d+) charged=(\d+)`)
-
-// logCollectorRatios logs every ratio the budget's charge gave the collector in output, in order,
-// under what: what the drive measured its peaks at, and the evidence that the ratio followed the
-// charges rather than standing where the boot left it.
-func logCollectorRatios(t *testing.T, what, output string) {
-	t.Helper()
-	var ratios []string
-	for _, match := range collectorRatioLine.FindAllStringSubmatch(output, -1) {
-		ratios = append(ratios, fmt.Sprintf("%s%% at %s bytes charged", match[1], match[3]))
-	}
-	if len(ratios) == 0 {
-		t.Logf("%s: the collector kept the %d per cent an empty budget leaves it throughout", what, docs.CollectorRatio(0))
-		return
-	}
-	t.Logf("%s: the collector's ratio followed the charges %d times: %s", what, len(ratios), strings.Join(ratios, "; "))
 }
 
 // budgetRefusalLine is the reason the room budget gives a refused browser, as the server logs it
@@ -3578,7 +3539,7 @@ func requireBudgetRefusals(t *testing.T, server *memoryServer, reserved int64) [
 }
 
 // budgetCloseLine is the line the room budget's sweep logs for each unused room it closes, in the
-// budget's own figures (sweepRooms, internal/dispatch/docs/room_budget.go:1576-1609).
+// budget's own figures (sweepRooms, internal/dispatch/docs/room_budget.go:1578-1635).
 var budgetCloseLine = regexp.MustCompile(`msg="dispatch: the room budget closed an unused document" room=(\S+) charged_before=(\d+) charged=(\d+) limit=(\d+) making_room_for=(\d+)`)
 
 // budgetClose is one close the server logged: the room, what the budget charged before and after
@@ -3628,7 +3589,7 @@ func closesOf(t *testing.T, server *memoryServer, rooms []string, want int) []bu
 
 // storedShape is a stored document a struct-dense drive copies (cloneDocuments), and what an
 // admission to a copy of it reserves, computed here as the server computes it
-// (storedRoomReservation, internal/dispatch/docs/room_budget.go:1255-1331): the structs of its
+// (storedRoomReservation, internal/dispatch/docs/room_budget.go:1229-1277): the structs of its
 // stored history, each stored update walked as a room's own state is (docs.StateStructsForTest),
 // and its latest version's markdown, counted and measured in bytes, priced at the heaviest of a
 // struct's, an element's and a rendered byte's price (copyHeap, :615-625), at both copies.
