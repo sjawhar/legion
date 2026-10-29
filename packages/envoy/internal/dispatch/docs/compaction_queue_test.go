@@ -407,7 +407,7 @@ func TestABurstAfterAQuietCheckBringsTheDocumentsCheckForward(t *testing.T) {
 	// The burst comes of age, as it does compactTail after it was written.
 	ageUpdatesThrough(t, database, artifactID, everyVersion, 5*time.Minute)
 	appendUpdates(t, persist, artifactID, writer.write("Young.\n"))
-	steps.await(t, artifactID, from, "the check the burst's last note brought forward to compact it", func(step compactionStepRecord) bool {
+	steps.await(t, artifactID, from, "a check the burst's notes brought forward to compact it", func(step compactionStepRecord) bool {
 		return step.next.kind == compactionAgain
 	})
 	if after := storedRows(t, database, artifactID); len(after) != 2 {

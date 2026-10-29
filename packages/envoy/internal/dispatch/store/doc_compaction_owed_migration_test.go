@@ -14,7 +14,7 @@ const beforeDocCompactionOwed = 140
 // 0141 names in doc_compaction_owed every document stored before it with more than one
 // doc_updates row, and no other: a document of one row, or of none, has nothing a compaction could
 // fold.
-func TestMigrate0139NamesEveryDocumentOfMoreThanOneRow(t *testing.T) {
+func TestMigrate0141NamesEveryDocumentOfMoreThanOneRow(t *testing.T) {
 	ctx := context.Background()
 	store := openEmptyTestStore(t)
 	migrateThrough(t, store, beforeDocCompactionOwed)
@@ -25,7 +25,7 @@ func TestMigrate0139NamesEveryDocumentOfMoreThanOneRow(t *testing.T) {
 		insert into issues (key, project_key, number, title, created_by, rank)
 			values ('CORE-1', 'CORE', 1, 'Spec', '{"kind":"user","id":"alice"}', 'U');
 	`); err != nil {
-		t.Fatalf("seed the issue at 0135: %v", err)
+		t.Fatalf("seed the issue at 0140: %v", err)
 	}
 	for slug, rows := range documents {
 		var id string
@@ -40,7 +40,7 @@ func TestMigrate0139NamesEveryDocumentOfMoreThanOneRow(t *testing.T) {
 			)
 			select id::text from a
 		`, slug, rows).Scan(&id); err != nil {
-			t.Fatalf("seed the document of %d rows at 0135: %v", rows, err)
+			t.Fatalf("seed the document of %d rows at 0140: %v", rows, err)
 		}
 		ids[slug] = id
 	}
