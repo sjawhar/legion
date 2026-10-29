@@ -1,9 +1,9 @@
 // AskGate's breaker: what one gated call is to the loop of refusals on its target, and what the
-// gate has already said there. A leaf module beside `new-asks.ts`: it reads a call's own arguments
-// and the rules check's result, and imports nothing of the core, so `askgate-core.ts` holds the
-// decision and this holds the counting.
+// gate has already said there. A leaf module beside `rules-check.ts`: it reads a call's own
+// arguments and the rules check's result, and imports nothing of the core, so `askgate-core.ts`
+// holds the decision and this holds the counting.
 import { createHash } from "node:crypto";
-import { type NewAsk, newAsks } from "./new-asks";
+import { type NewAsk, newAsks } from "@legion/envoy-client/askgate-new-asks";
 import type { RulesCheck } from "./rules-check";
 
 /** A call's arguments, as the dry run printed them or the device validated them. */

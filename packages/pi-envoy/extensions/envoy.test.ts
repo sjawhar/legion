@@ -4338,6 +4338,175 @@ console.log(JSON.stringify(args));
         },
       ]);
     }, 30_000);
+    /** Every AskGate decision record the session published, read off the Dispatch write itself. */
+    const published: Array<Record<string, unknown>> = [];
+    /**
+     * Answers the two Dispatch writes a decision record makes — the document's upload, then an
+     * append to it — and keeps each JSON record they carried, so a test reads what reached
+     * Dispatch and nothing else. Every other request goes on to the suite's own stand-in.
+     */
+    const standInRecordProject = () => {
+      published.length = 0;
+      process.env.OMP_ASKGATE_RECORD_PROJECT = "INFRA";
+      const other = globalThis.fetch;
+      const keep = (markdown: string) => {
+        for (const [, line] of markdown.matchAll(/```json\n(.*)\n```/g))
+          published.push(JSON.parse(line ?? "{}") as Record<string, unknown>);
+      };
+      globalThis.fetch = async (input, init) => {
+        const url = String(input instanceof Request ? input.url : input);
+        if (url.endsWith("/api/v1/projects/INFRA/artifacts")) {
+          const body = JSON.parse(String(init?.body ?? "{}")) as { content?: string };
+          keep(body.content ?? "");
+          return Response.json({ artifact: { id: "doc-decisions" } });
+        }
+        if (url.endsWith("/edits")) {
+          const body = JSON.parse(String(init?.body ?? "{}")) as {
+            ops?: Array<{ markdown?: string }>;
+          };
+          for (const op of body.ops ?? []) keep(op.markdown ?? "");
+          return Response.json({ applied: body.ops?.length ?? 0 });
+        }
+        return other(input, init);
+      };
+    };
+    /**
+     * One unmarked write, end to end: the session's gate is bound, the `dispatch` CLI runs the
+     * write with no marker for it — what a pipe, a script or a subagent's call leaves — and the
+     * session's next tool result reads the line the CLI wrote in the ledger. Answers what reached
+     * Dispatch and the `advisor-gate` entries the entry appended.
+     */
+    const unmarkedRun = async (envoyExtension: (pi: TestPi) => void, argv: readonly string[]) => {
+      const fixture = allHandlers();
+      envoyExtension(fixture.pi);
+      const context = gateContext([]);
+      await fixture.handlers.get("session_start")?.({}, context);
+      standInRecordProject();
+      await runDispatchCli(
+        argv,
+        { ...process.env, DISPATCH_HOST: "omp" },
+        {
+          stdout: () => {},
+          stderr: () => {},
+          readText: (path) => readFileSync(path, "utf8"),
+          cwd: configDirectory,
+          fetchImpl: (async () => Response.json({})) as typeof fetch,
+        }
+      );
+      await fixture.handlers.get("tool_result")?.(
+        {
+          toolName: "bash",
+          toolCallId: "call-py",
+          input: { command: "python3 post.py" },
+          content: [],
+          isError: false,
+        },
+        context
+      );
+      return {
+        records: [...published],
+        gateEntries: fixture.entries.flatMap((entry) =>
+          entry.customType === "advisor-gate" ? [entry.data as Record<string, unknown>] : []
+        ),
+        shutdown: async () => {
+          await fixture.handlers.get("session_shutdown")?.({}, context);
+        },
+      };
+    };
+    const UNMARKED_ASK = [
+      "ask",
+      "--issue",
+      "DSP-1",
+      "--question",
+      "Which deployment window should the rollout take?",
+    ];
+    // A write the gate never saw reaches only this machine's disk as an entry. One that would
+    // have opened an ask for a person also goes to Dispatch, so a session holding a Dispatch
+    // token and nothing else counts the asks that went out, or were refused, unreviewed.
+    test("an unmarked dispatch ask in warn mode publishes one record of it, with its ask count and no ask text", async () => {
+      gateOn();
+      const { default: envoyExtension } = await import("./envoy.ts?unmarked-record-warn");
+      const run = await unmarkedRun(envoyExtension, UNMARKED_ASK);
+      expect(run.records).toMatchObject([
+        {
+          session: "ses_askgate",
+          project: "INFRA",
+          tool: "dispatch_ask",
+          outcome: "unmarked",
+          decision: "allow",
+          verdictMode: "warn",
+          asksCarried: 1,
+          ruleOutcome: null,
+          target: null,
+        },
+      ]);
+      expect(JSON.stringify(run.records)).not.toContain("deployment window");
+      expect(run.gateEntries).toMatchObject([{ tool: "dispatch_ask", outcome: "unmarked" }]);
+      expect(run.gateEntries[0]).not.toHaveProperty("recordError");
+      await run.shutdown();
+    }, 30_000);
+
+    test("an unmarked dispatch ask in block mode publishes one record of it too: the ask was refused, not sent", async () => {
+      process.env.OMP_ASKGATE = "block";
+      try {
+        gateOn();
+        const { default: envoyExtension } = await import("./envoy.ts?unmarked-record-block");
+        const run = await unmarkedRun(envoyExtension, UNMARKED_ASK);
+        expect(run.records).toMatchObject([
+          {
+            tool: "dispatch_ask",
+            outcome: "unmarked",
+            decision: "revise",
+            verdictMode: "block",
+            asksCarried: 1,
+          },
+        ]);
+        expect(JSON.stringify(run.records)).not.toContain("deployment window");
+        await run.shutdown();
+      } finally {
+        delete process.env.OMP_ASKGATE;
+      }
+    }, 30_000);
+
+    test("an unmarked dispatch comment publishes no record: no person waits on it", async () => {
+      gateOn();
+      const { default: envoyExtension } = await import("./envoy.ts?unmarked-record-comment");
+      const run = await unmarkedRun(envoyExtension, [
+        "comment",
+        "--issue",
+        "DSP-1",
+        "--body",
+        "The rollout landed.",
+      ]);
+      expect(run.records).toEqual([]);
+      // The entry is still appended: the report counts every unmarked write, asks or none.
+      expect(run.gateEntries).toMatchObject([{ tool: "dispatch_comment", outcome: "unmarked" }]);
+      await run.shutdown();
+    }, 30_000);
+
+    test("an unmarked markdown upload publishes the count of the ask blocks its file carries", async () => {
+      gateOn();
+      const asks = join(configDirectory, "asks.md");
+      writeFileSync(
+        asks,
+        ":::ask{#window}\nWhich deployment window?\n:::\n\n:::ask{#owner}\nWho owns the rollout?\n:::\n"
+      );
+      const { default: envoyExtension } = await import("./envoy.ts?unmarked-record-upload");
+      const run = await unmarkedRun(envoyExtension, [
+        "artifact",
+        "--issue",
+        "DSP-1",
+        "--name",
+        "asks.md",
+        "--path",
+        asks,
+      ]);
+      expect(run.records).toMatchObject([
+        { tool: "dispatch_artifact", outcome: "unmarked", verdictMode: "warn", asksCarried: 2 },
+      ]);
+      expect(JSON.stringify(run.records)).not.toContain("deployment window");
+      await run.shutdown();
+    }, 30_000);
     /** Appends to the session's ledger a gated write the CLI logged as unmarked. */
     const appendUnmarked = () =>
       appendResult(sessionDirectory(process.env, "ses_askgate"), {

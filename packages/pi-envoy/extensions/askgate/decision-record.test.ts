@@ -6,6 +6,7 @@ import {
   RECORD_TIMEOUT_MS,
   type RecordClient,
   type RecordDeps,
+  type RecordedDecision,
 } from "./decision-record";
 
 /** The clock every record below is stamped by. */
@@ -60,6 +61,19 @@ const OVERRIDE: GateEntry = {
   argsDigest: "a9f1c0",
   target: "dispatch_ask issue=X-1",
   rebuttal: "the cache path moves with this change, so the ask stands",
+};
+
+/**
+ * An unmarked write's entry, as envoy.ts builds one from the `dispatch` CLI's ledger line: the
+ * write reached the CLI outside the form the gate reads, so no model call judged it, and the
+ * CLI's own count of the asks it carries is all the record holds of what it said.
+ */
+const UNMARKED: RecordedDecision = {
+  tool: "dispatch_ask",
+  decision: "revise",
+  outcome: "unmarked",
+  verdictMode: "block",
+  asksCarried: 1,
 };
 
 /** The Dispatch a record is written to: what each call was given, and what it answers. */
@@ -123,8 +137,11 @@ function harness(
   const record = createDecisionRecorder(deps);
   return {
     asked,
-    write: (entry: GateEntry, signal = new AbortController().signal, sessionId = SESSION) =>
-      record({ entry, sessionId, directory: "/work", signal }),
+    write: (
+      entry: GateEntry | RecordedDecision,
+      signal = new AbortController().signal,
+      sessionId = SESSION
+    ) => record({ entry, sessionId, directory: "/work", signal }),
   };
 }
 
@@ -151,6 +168,7 @@ const RECORD_KEYS = [
   "decision",
   "outcome",
   "verdictMode",
+  "asksCarried",
   "ruleLatencyMs",
   "charterLatencyMs",
   "plugin",
@@ -221,6 +239,7 @@ describe("the AskGate decision record", () => {
       decision: "revise",
       outcome: "verdict",
       verdictMode: "block",
+      asksCarried: 0,
       ruleLatencyMs: 4100,
       charterLatencyMs: 5200,
       plugin: `@sjawhar/pi-envoy@${pkg.version}`,
@@ -395,6 +414,40 @@ describe("the AskGate decision record", () => {
           ruleOutcome: undefined,
         })
       ).toBeUndefined();
+    expect(g.asked).toEqual([]);
+    expect(dispatch.uploads).toEqual([]);
+    expect(dispatch.edits).toEqual([]);
+  });
+
+  // A write that reached the CLI outside the form the gate reads is the one decision no model
+  // call stands behind, and the asks it carries are the ones a person is left waiting on.
+  test("an unmarked write carrying an ask is recorded, with its count and no rules outcome", async () => {
+    const dispatch = fakeDispatch();
+    const g = harness({ client: dispatch.client });
+    expect(
+      await g.write({ ...UNMARKED, asksCarried: 2, verdictMode: "warn", decision: "allow" })
+    ).toBeUndefined();
+    const record = recordsIn(dispatch.uploads[0]?.content ?? "")[0] as Record<string, unknown>;
+    expect(Object.keys(record)).toEqual(RECORD_KEYS);
+    expect(record).toMatchObject({
+      tool: "dispatch_ask",
+      target: null,
+      rule: null,
+      ruleOutcome: null,
+      decision: "allow",
+      outcome: "unmarked",
+      verdictMode: "warn",
+      asksCarried: 2,
+      ruleLatencyMs: null,
+      charterLatencyMs: null,
+    });
+  });
+
+  test("an unmarked write carrying no ask writes nothing: no person waits on it", async () => {
+    const dispatch = fakeDispatch();
+    const g = harness({ client: dispatch.client });
+    expect(await g.write({ ...UNMARKED, asksCarried: 0 })).toBeUndefined();
+    expect(await g.write({ ...UNMARKED, asksCarried: undefined })).toBeUndefined();
     expect(g.asked).toEqual([]);
     expect(dispatch.uploads).toEqual([]);
     expect(dispatch.edits).toEqual([]);

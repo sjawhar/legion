@@ -3941,7 +3941,7 @@ describe("askgate.ts, the entry", () => {
         logger: { warn: (message: string) => warnings.push(message) },
         runtimeLogger: { warn: () => {} },
       }
-    );
+    ).loaded;
     const roles = opts.roles ?? { askgate: MODEL };
     const ctx = {
       agent: { kind: "main" },
@@ -4012,7 +4012,7 @@ describe("askgate.ts, the entry", () => {
     const { registerAskGate } = await import("./askgate");
     const handlers = new Map<string, Handler>();
     const entries: GateEntry[] = [];
-    const loaded = registerAskGate(
+    const { loaded } = registerAskGate(
       {
         on: (event: string, handler: Handler) => handlers.set(event, handler),
         appendEntry: (_: string, data: GateEntry) => entries.push(data),

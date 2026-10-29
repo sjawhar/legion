@@ -3,18 +3,19 @@
 // nothing, and an ask for the person's hands where the agent did not try the access it has — and a
 // match refuses the call before it posts, in warn mode and in block mode.
 //
-// The check reads the new asks from the call's arguments (`new-asks.ts`), reads the document when
-// it needs one (a retype's block text, and the ids an upload's current version already holds),
-// lists the asks in its own request, and asks the model `createAskGate` resolved for the charter
+// The check reads the new asks from the call's arguments
+// (`@legion/envoy-client/askgate-new-asks`), reads the document when it needs one (a retype's
+// block text, and the ids an upload's current version already holds), lists the asks in its own
+// request, and asks the model `createAskGate` resolved for the charter
 // call, on the same chain, deadline, transcript and stop. It never imports `askgate-core.ts`: the
 // walk, the dump and the stop are passed in, so the core owns them once for both calls.
+import { type NewAsk, newAsks, openingOf } from "@legion/envoy-client/askgate-new-asks";
 import {
   type DocumentBlocks,
   type DocumentTarget,
   readDocumentBlocks,
 } from "@legion/envoy-client/dispatch-execute";
 import type { DispatchClient } from "@legion/envoy-client/dispatch-http";
-import { type NewAsk, newAsks, openingOf } from "./new-asks";
 import requestTemplate from "./rule-check-request.md" with { type: "text" };
 import {
   byteLength,

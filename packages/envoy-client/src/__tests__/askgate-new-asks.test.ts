@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test";
 
-import { askBlocks, type NewAsk, newAsks } from "./new-asks";
+import { askBlocks, type NewAsk, newAsks } from "../askgate-new-asks";
 
 /** A row of the Dispatch server's own table of inserted markdown and the ask blocks it adds. */
 interface DecisionBlockInsert {

@@ -2,9 +2,9 @@
 // against AskGate's charter (rules.md) and answers `allow` or `revise`, and a call that opens a
 // new ask for a person also gets the rules check (`rules-check.ts`, below). `askgate.ts` is the
 // entry that binds Oh My Pi's completion call and buildSessionContext; the new asks a call opens
-// are read in `new-asks.ts`, the breaker's counting in `breaker.ts` and the text both checks
-// share in `text.ts`; everything else lives here so the tests drive it through a fake `pi`, a
-// fake `ctx` and stubs.
+// are read in `@legion/envoy-client/askgate-new-asks`, which the `dispatch` CLI reads too, the
+// breaker's counting in `breaker.ts` and the text both checks share in `text.ts`; everything
+// else lives here so the tests drive it through a fake `pi`, a fake `ctx` and stubs.
 //
 // What this is not: AskGate reviews the writes of a cooperating agent, and it is no sandbox. A
 // process running as the same user defeats it. It can remove the record or a marker, turn the
@@ -173,23 +173,24 @@
 //     call, on the same chain, deadline, transcript and stop, which judges only those asks and
 //     only against two rules (rule-check.md): an ask whose own recommendation is to change
 //     nothing, and an ask for the person's hands where the agent did not try the access it has.
-//     A new ask (`new-asks.ts`) is a `dispatch ask`, each `:::ask{` opener a `dispatch doc-edit`
-//     insert, a `dispatch issue` spec or a markdown `dispatch artifact` upload writes, and each
-//     block a doc-edit retypes into an ask. For a retype the gate reads the block's own text from
-//     Dispatch, and for an upload the ids the version it replaces already holds, so a re-upload
-//     judges only the asks it adds; each read goes through the Dispatch the call's own directory
-//     configures (`Deps.dispatchClient`, the directory `readArgs` names lazily). When the answer
-//     names an ask that matches `no_change` or `untried_access`, AskGate refuses the call in
-//     every mode, naming each matching ask and putting the charter's revise reason after the
-//     rules reason; no marker is minted for it. A rules call that fails, times out or gives no
-//     verdict changes nothing; three of those in a row write one line to the host's plain log
-//     (`runtimeLogger`), show one UI notice where there is a UI, and add the same note to that
-//     call's own result. A rules verdict, a session_switch or a session_branch resets that count.
-//     The rules reason never feeds the charter request, and only the charter call moves the halt
-//     count. The entry adds `rule`, `ruleAsk`, `ruleQuote`, `ruleOutcome`, `ruleError`,
-//     `ruleModel`, `ruleLatencyMs`, `ruleTextMissing`, `ruleAsksCut` and `ruleAsksPartial`, and
-//     its `usage` and `promptBytes` sum both calls. The two calls run side by side, so
-//     `charterLatencyMs` and `ruleLatencyMs` say what each cost of the gate's whole `latencyMs`.
+//     A new ask (`@legion/envoy-client/askgate-new-asks`) is a `dispatch ask`, each `:::ask{`
+//     opener a `dispatch doc-edit` insert, a `dispatch issue` spec or a markdown `dispatch
+//     artifact` upload writes, and each block a doc-edit retypes into an ask. For a retype the
+//     gate reads the block's own text from Dispatch, and for an upload the ids the version it
+//     replaces already holds, so a re-upload judges only the asks it adds; each read goes
+//     through the Dispatch the call's own directory configures (`Deps.dispatchClient`, the
+//     directory `readArgs` names lazily). When the answer names an ask that matches `no_change`
+//     or `untried_access`, AskGate refuses the call in every mode, naming each matching ask and
+//     putting the charter's revise reason after the rules reason; no marker is minted for it. A
+//     rules call that fails, times out or gives no verdict changes nothing; three of those in a
+//     row write one line to the host's plain log (`runtimeLogger`), show one UI notice where
+//     there is a UI, and add the same note to that call's own result. A rules verdict, a
+//     session_switch or a session_branch resets that count. The rules reason never feeds the
+//     charter request, and only the charter call moves the halt count. The entry adds `rule`,
+//     `ruleAsk`, `ruleQuote`, `ruleOutcome`, `ruleError`, `ruleModel`, `ruleLatencyMs`,
+//     `ruleTextMissing`, `ruleAsksCut` and `ruleAsksPartial`, and its `usage` and `promptBytes`
+//     sum both calls. The two calls run side by side, so `charterLatencyMs` and `ruleLatencyMs`
+//     say what each cost of the gate's whole `latencyMs`.
 // Every outcome other than an unscoped or subagent call appends one `advisor-gate` entry
 // (pi.appendEntry, never sent to the model) with the deadline it raced and every attempt's
 // usage, the aborted one included. That record is what lets a write out unreviewed: when the
@@ -233,7 +234,7 @@ import requestTemplate from "./askgate-request.md" with { type: "text" };
 import systemTemplate from "./askgate-system.md" with { type: "text" };
 import uploadRule from "./askgate-upload.md" with { type: "text" };
 import { Breaker, breakerKey, callKeys, refusalThings, targetLabel } from "./breaker";
-import { createDecisionRecorder, RECORD_TIMEOUT_MS } from "./decision-record";
+import { createDecisionRecorder, RECORD_SHUT_DOWN, RECORD_TIMEOUT_MS } from "./decision-record";
 import ruleCheckRules from "./rule-check.md" with { type: "text" };
 import ruleCheckSystem from "./rule-check-system.md" with { type: "text" };
 import rules from "./rules.md" with { type: "text" };
@@ -318,8 +319,6 @@ const RECOMMENDED_CEILING_MS = 120_000;
 const SHUTDOWN_GRACE_MS = 1_000;
 const SHUTDOWN_WAIT_MS = 1_500;
 const SHUTDOWN_RECORD_MARGIN_MS = 250;
-/** The entry's `recordError` when the session's shutdown cut its decision record short. */
-const RECORD_SHUT_DOWN = "the session shut down before Dispatch answered the record";
 /**
  * The outcomes of a call the gate let through without a verdict, the gate's own failure or a stop
  * it took: no review stands behind the bytes, so the command the agent wrote runs as written.

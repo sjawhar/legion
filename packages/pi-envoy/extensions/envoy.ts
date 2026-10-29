@@ -168,7 +168,7 @@ import { opensAsk } from "../src/opens-ask";
 import { sideTurn } from "../src/side-turn";
 import { TypedPictures } from "../src/typed-pictures";
 import { type CardDelivery, UnwrittenFrames, unwrittenCardKeys } from "../src/unwritten-frames";
-import { registerAskGate } from "./askgate/askgate";
+import { type AskGateRegistration, registerAskGate } from "./askgate/askgate";
 import { ADVISOR_GATE_ENTRY_TYPE, type GateEntry } from "./askgate/askgate-core";
 import { registerEnvoyMessageRenderer } from "./envoy-message-renderer";
 import { registerEnvoyWhoamiCommand } from "./envoy-whoami-command";
@@ -651,6 +651,10 @@ export default function envoyExtension(pi: PiApi): void {
   // session start; a gate that did not load refuses each write it would review.
   const askgateNotices: string[] = [];
   let askgateLoad: Promise<void> = Promise.resolve();
+  // The gate's registration, while it is bound: what publishes the Dispatch record of a write
+  // that reached the CLI outside the form the gate reads, and what cuts a record still in flight
+  // at shutdown.
+  let askgateRecorder: AskGateRegistration | undefined;
   let askgateFile: string | null = null;
   const configPath = CONFIG_FILE.path;
   const ownDispatch = (file: string): boolean => {
@@ -3314,6 +3318,9 @@ export default function envoyExtension(pi: PiApi): void {
       askgateRecords.clear();
       closeStore(askgateOwner.store);
     }
+    // A Dispatch record of an unmarked write still in flight would hold a tool result open while
+    // the session is sealing, and the record it would write belongs to a session that is gone.
+    askgateRecorder?.cutRecords();
     const deadline = Promise.withResolvers<void>();
     const timer = setTimeout(deadline.resolve, 1_000);
     try {
@@ -3689,11 +3696,13 @@ export default function envoyExtension(pi: PiApi): void {
         askgateNotices.push(message);
       },
     };
-    askgateLoad = registerAskGate(pi, {
+    const registration = registerAskGate(pi, {
       configFile: { path: configFile, error: null },
       logger: gateLogger,
       runtimeLogger: logger,
-    }).catch((error: unknown) => {
+    });
+    askgateRecorder = registration;
+    askgateLoad = registration.loaded.catch((error: unknown) => {
       const notice = `AskGate did not load, so it refuses each Dispatch write it would review: ${messageFor(error)}. To turn AskGate off for this session, set askgate.enabled to false in ${configFile}.`;
       logger.warn(notice);
       askgateNotices.push(notice);
@@ -3715,7 +3724,7 @@ export default function envoyExtension(pi: PiApi): void {
     ) {
       for (const { tool, askgate } of entries) {
         if (askgate === undefined) continue;
-        pi.appendEntry(ADVISOR_GATE_ENTRY_TYPE, {
+        const entry: GateEntry = {
           advisor: "AskGate",
           tool,
           path: `dispatch ${commandName(tool)}`,
@@ -3727,6 +3736,31 @@ export default function envoyExtension(pi: PiApi): void {
           latencyMs: 0,
           revisesForKey: 0,
           argsDigest: "",
+        };
+        // The entry above reaches only this machine's disk. A write that would have opened an
+        // ask for a person also goes to Dispatch, where a session with no access to this machine
+        // counts the asks that went out, or were refused, unreviewed: the record carries the
+        // tool, the mode and how many asks the write carried, and no ask text. It is published
+        // under a stop of its own, so an unreachable Dispatch delays this one tool result by at
+        // most that stop, and a failure costs the result nothing: the log says why, and so does
+        // the entry.
+        const asksCarried = askgate.asksCarried ?? 0;
+        let recordError: string | undefined;
+        if (askgateRecorder !== undefined && asksCarried > 0) {
+          recordError = await askgateRecorder.recordUnmarked({
+            entry: { ...entry, asksCarried },
+            sessionId: context.sessionManager.getSessionId(),
+            directory: context.cwd,
+          });
+          if (recordError !== undefined) {
+            logger.warn(
+              `envoy: AskGate did not record the unmarked ${entry.path} on Dispatch: ${recordError}`
+            );
+          }
+        }
+        pi.appendEntry(ADVISOR_GATE_ENTRY_TYPE, {
+          ...entry,
+          ...(recordError === undefined ? {} : { recordError }),
         } satisfies GateEntry);
       }
     }

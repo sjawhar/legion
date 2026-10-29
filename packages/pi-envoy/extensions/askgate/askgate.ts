@@ -44,6 +44,12 @@ import {
   type ToolCallResult,
   type Usage,
 } from "./askgate-core";
+import {
+  createDecisionRecorder,
+  RECORD_SHUT_DOWN,
+  RECORD_TIMEOUT_MS,
+  type RecordRequest,
+} from "./decision-record";
 import type { DispatchSession } from "./rules-check";
 
 /** What the entry hands the gate from its own extension: where the switch lives, and where notices go. */
@@ -88,16 +94,59 @@ function appendDump(p: string, text: string): void {
   }
 }
 
+/**
+ * The session's Dispatch as the directory the gated command runs in configures it (a checkout's
+ * own `.envoy/envoy.json` names its own server), with the caller's stop as the signal of every
+ * request, so a stopped run ends the read. `timedDispatchClient` in envoy.ts builds the
+ * session's own client the same way, with a timeout in place of the stop.
+ */
+function sessionDispatchClient(
+  host: AskGateHost,
+  directory: string,
+  signal: AbortSignal
+): DispatchSession | undefined {
+  const config = activeDispatchSettings(
+    sessionDispatchSettings(host.configFile, process.env, { cwd: directory }).dispatch
+  );
+  return config === null
+    ? undefined
+    : {
+        client: new DispatchClient(config.url, config.token, fetch, signal),
+        serverUrls: dispatchServerUrls(config),
+      };
+}
+
 type ToolCallHandler = (event: ToolCallEvent, ctx: GateCtx) => Promise<ToolCallResult>;
+
+/**
+ * What the entry gets back from `registerAskGate`: the load, and the recorder for a write the
+ * gate never saw, which the `dispatch` CLI logged in the session's ledger.
+ */
+export interface AskGateRegistration {
+  /** Settles with the gate's load and rejects with its error, for the caller's notice. */
+  readonly loaded: Promise<void>;
+  /**
+   * Publishes one Dispatch decision record for a write that reached the CLI outside the form the
+   * gate reads (`decision-record.ts`), under a stop of its own at `RECORD_TIMEOUT_MS`. Answers
+   * the text for the entry's `recordError` when the write failed or was given up, and undefined
+   * when it recorded or when the entry is nothing to record.
+   */
+  readonly recordUnmarked: (request: Omit<RecordRequest, "signal">) => Promise<string | undefined>;
+  /**
+   * Cuts every record still in flight: the entry calls it at `session_shutdown`, so no record
+   * holds the session open past its own teardown. A record cut this way is lost, and its caller
+   * is told why.
+   */
+  readonly cutRecords: () => void;
+}
 
 /**
  * Registers AskGate's one `tool_call` handler on `pi` now, synchronously, so no call can pass
  * between the load of Oh My Pi's modules and the gate's binding, and starts that load. Each call
  * waits for the load. Loaded, the handler runs the core's own; not loaded, it refuses each write
  * the gate would review (`loadFailureGate`), since only `askgate.enabled: false` turns AskGate off.
- * The returned promise settles with the load and rejects with its error, for the caller's notice.
  */
-export function registerAskGate(pi: PiApi, host: AskGateHost): Promise<void> {
+export function registerAskGate(pi: PiApi, host: AskGateHost): AskGateRegistration {
   const loading = loadAskGate(pi, host);
   // A rejection is handled here and by the caller's notice; never an unhandled one.
   const gate: Promise<ToolCallHandler> = loading.then(
@@ -114,7 +163,33 @@ export function registerAskGate(pi: PiApi, host: AskGateHost): Promise<void> {
   // The host's context carries every member GateCtx reads; PiApi types only those the Envoy entry
   // reads, so the handler takes it as the core's type.
   pi.on("tool_call", async (event, ctx) => (await gate)(event, ctx as unknown as GateCtx));
-  return loading.then(() => undefined);
+  // The record of an unmarked write is the gate's, not the core's: the gate never saw that call,
+  // and the entry reads it from the session's ledger after the CLI ran. It is built here, from
+  // the same Dispatch the core's records go through, and it needs none of Oh My Pi's modules, so
+  // it works whether or not the load above settles.
+  const record = createDecisionRecorder({
+    env: process.env,
+    now: Date.now,
+    dispatchClient: (directory, signal) => sessionDispatchClient(host, directory, signal),
+  });
+  const stops = new Set<AbortController>();
+  return {
+    loaded: loading.then(() => undefined),
+    recordUnmarked: async (request) => {
+      const stop = new AbortController();
+      const timer = setTimeout(() => stop.abort(), RECORD_TIMEOUT_MS);
+      stops.add(stop);
+      try {
+        return await record({ ...request, signal: stop.signal });
+      } finally {
+        clearTimeout(timer);
+        stops.delete(stop);
+      }
+    },
+    cutRecords: () => {
+      for (const stop of stops) stop.abort(RECORD_SHUT_DOWN);
+    },
+  };
 }
 
 /**
@@ -254,23 +329,6 @@ async function loadAskGate(pi: PiApi, host: AskGateHost): Promise<ToolCallHandle
       return { text: "", error: error instanceof Error ? error.message : String(error), usage };
     }
   };
-  /**
-   * The session's Dispatch as the directory the gated command runs in configures it (a checkout's
-   * own `.envoy/envoy.json` names its own server), with the gated call's stop as the signal of
-   * every request, so a stopped run ends the read. `timedDispatchClient` in envoy.ts builds the
-   * session's own client the same way, with a timeout in place of the stop.
-   */
-  const dispatchClient = (directory: string, signal: AbortSignal): DispatchSession | undefined => {
-    const config = activeDispatchSettings(
-      sessionDispatchSettings(host.configFile, process.env, { cwd: directory }).dispatch
-    );
-    return config === null
-      ? undefined
-      : {
-          client: new DispatchClient(config.url, config.token, fetch, signal),
-          serverUrls: dispatchServerUrls(config),
-        };
-  };
 
   // The core binds to a `pi` that keeps its tool_call handler, which the one registered above
   // runs, and passes every other event, and appendEntry, to the real `pi`. The core names its
@@ -293,7 +351,7 @@ async function loadAskGate(pi: PiApi, host: AskGateHost): Promise<ToolCallHandle
     logger: host.logger,
     runtimeLogger: host.runtimeLogger,
     configFile: host.configFile.path,
-    dispatchClient,
+    dispatchClient: (directory, signal) => sessionDispatchClient(host, directory, signal),
     // The dump holds the primary system prompt and transcript: owner-only, like the session files.
     appendFile: appendDump,
     complete,

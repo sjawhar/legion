@@ -6,10 +6,12 @@
 //
 // What it records: every gated call whose rules check ran, which is every entry carrying a
 // `ruleOutcome` — the refusals, the denominator of the error rate, and an upload that went out
-// with none of its asks judged (`unjudged`) — and every call the agent
+// with none of its asks judged (`unjudged`) — every call the agent
 // sent anyway, whose `outcome` is `rebuttal` or `breaker`: the gate answers those before any model
 // call, so no rules check judged them and their `ruleOutcome` is null, and the record's `target`
-// is what pairs each with the refusal it overrode. A call that is neither (no new ask, an
+// is what pairs each with the refusal it overrode — and every write that reached the `dispatch`
+// CLI outside the form the gate reads, whose `outcome` is `unmarked`, where the write carries at
+// least one ask for a person (`asksCarried`). A call that is none of those (no new ask, an
 // unreadable command, a session with no model role) records nothing.
 //
 // What it never carries: no ask text, no quote, no reason, no reviewed arguments. `DecisionRecord`
@@ -32,6 +34,9 @@ import pkg from "../../package.json";
 
 /** The record's own stop: a write that has not answered by then is given up, and never retried. */
 export const RECORD_TIMEOUT_MS = 5_000;
+
+/** The `recordError` of a record the session's shutdown cut short, before its own stop fell. */
+export const RECORD_SHUT_DOWN = "the session shut down before Dispatch answered the record";
 
 /**
  * What every decision document's name starts with, the session's own id after it: the one name the
@@ -90,6 +95,11 @@ export interface RecordedDecision {
   ruleAsksPartial?: true;
   ruleLatencyMs?: number;
   charterLatencyMs?: number;
+  /**
+   * How many asks for a person an unmarked write carries, counted by the `dispatch` CLI from the
+   * write's own text; 0 or unset on every call the gate itself judged.
+   */
+  asksCarried?: number;
 }
 
 /** One record of a decision document: its wire shape, in the key order the line is written in. */
@@ -115,6 +125,11 @@ export interface DecisionRecord {
   decision: string;
   outcome: string;
   verdictMode: string;
+  /**
+   * How many asks for a person the write carries, on an `unmarked` record; 0 on every other,
+   * whose asks the gate itself read.
+   */
+  asksCarried: number;
   ruleLatencyMs: number | null;
   charterLatencyMs: number | null;
   plugin: string;
@@ -150,12 +165,16 @@ export function createDecisionRecorder(deps: RecordDeps): DecisionRecorder {
   const documents = new Map<string, Promise<string>>();
 
   return async ({ entry, sessionId, directory, signal }) => {
-    // The calls whose rules check ran, and the calls the agent sent anyway — a rebuttal or the
-    // breaker, which the gate answers with no check of its own — are the decisions to count; a
-    // call that is neither is none.
+    // The calls whose rules check ran, the calls the agent sent anyway — a rebuttal or the
+    // breaker, which the gate answers with no check of its own — and the writes that reached the
+    // CLI outside the form the gate reads and carry an ask for a person, are the decisions to
+    // count; a call that is none of them is none. An unmarked write carrying no ask is a write
+    // no person waits on, and the count of those is the session's own business.
     const ruleOutcome = entry.ruleOutcome ?? null;
     const override = entry.outcome === "rebuttal" || entry.outcome === "breaker";
-    if (ruleOutcome === null && !override) return undefined;
+    const asksCarried = entry.asksCarried ?? 0;
+    const unmarked = entry.outcome === "unmarked" && asksCarried > 0;
+    if (ruleOutcome === null && !override && !unmarked) return undefined;
     // The session's own setting, else the Legion pod's project — a pod has no envoy.json, so its
     // environment is the only setting it can carry — else no record at all. Upper-cased, because a
     // Dispatch project key is `^[A-Z][A-Z0-9]{1,9}$` and every other spelling is a 404, while a
@@ -183,6 +202,7 @@ export function createDecisionRecorder(deps: RecordDeps): DecisionRecorder {
       decision: entry.decision,
       outcome: entry.outcome,
       verdictMode: entry.verdictMode,
+      asksCarried,
       ruleLatencyMs: entry.ruleLatencyMs ?? null,
       charterLatencyMs: entry.charterLatencyMs ?? null,
       plugin: PLUGIN,
