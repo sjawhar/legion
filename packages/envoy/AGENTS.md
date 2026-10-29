@@ -2791,9 +2791,9 @@ slow to finish with it.
 A key is kept 24 hours (`IDEMPOTENCY_KEY_TTL_MS`): the suggestion-outcome sweep's pass deletes
 every older row (`sweepRequestKeys`), a row a dead process left in flight with it, and a repeat
 that finds an older row not yet swept treats the key as unused. The hand-written key path before
-it is gone: `broadcast_idempotency_keys` (migration `0055`), which this release neither reads nor
-writes and a later release drops. Neither send route takes a body `idempotency_key` any more; the
-header carries the key.
+it is gone, and so is its table: `broadcast_idempotency_keys` (migration `0055`), dropped by
+`0139_drop_broadcast_idempotency_keys` a release after `0137` stopped reading and writing it.
+Neither send route takes a body `idempotency_key` any more; the header carries the key.
 
 ## Targeted Dispatch messages
 
@@ -2936,9 +2936,10 @@ order the send named them; all three routes are human-only, like the one-session
 built from.
 
 A broadcast is keyed by its `Idempotency-Key` header like every write ("Keyed Dispatch writes"
-above); the body's `idempotency_key` of LEGION-446 and its `broadcast_idempotency_keys` table
-are gone from the route. The send commits the broadcast and its exclusions, with their reasons,
-as the key's recovery point (`broadcastRecovery`) in the broadcast's own transaction, so a repeat
+above); the body's `idempotency_key` of LEGION-446 is gone from the route and its
+`broadcast_idempotency_keys` table from the schema. The send commits the broadcast and its
+exclusions, with their reasons, as the key's recovery point (`broadcastRecovery`) in the
+broadcast's own transaction, so a repeat
 under the key is answered by `replayBroadcast` however the first request ended, even while the
 listener is down: the broadcast is read as `GET /api/v1/broadcasts/{id}` reads it, every
 recipient's attempts as they stand, with the send's own `excluded`, under the send's own `201` and

@@ -1,0 +1,10 @@
+kind: Removed
+body: |-
+    Dispatch: migration `0139_drop_broadcast_idempotency_keys` drops `broadcast_idempotency_keys`,
+    the broadcast send's key table before every write took an `Idempotency-Key` header. No build
+    since `0137_request_keys` reads or writes it. A deployment that applies `0139` can no longer roll
+    back to a build from before `0137`, whose broadcast send writes that table. The drop takes
+    `ACCESS EXCLUSIVE` on `broadcasts` for the instant its transaction lasts.
+time: 2026-10-29T10:30:00.000000000Z
+custom:
+    Issue: INFRA-258

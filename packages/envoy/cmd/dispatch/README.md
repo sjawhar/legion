@@ -1208,16 +1208,21 @@ release before it neither reads nor writes; its census answers `0`. It follows
 `0131_asks_written_version`, `0132_component_facts`,
 `0133_comments_written_version_backfill`, `0134_asks_written_version_backfill`,
 `0135_server_processes` and `0136_dashboard_assets`, which already use the preceding migration
-numbers. From its release on,
-nothing reads or writes `broadcast_idempotency_keys` (`0055`), the broadcast's own key table before
-it, and the table is kept: dropping it is a contracting migration, so it ships no earlier than the
-release after this one.
+numbers. From its release on, nothing reads or writes `broadcast_idempotency_keys` (`0055`), the
+broadcast's own key table before it; it was kept through that release so a deploy of it could roll
+back, and `0139_drop_broadcast_idempotency_keys` drops it a release later.
 
 Migration `0138_pending_delivery_indexes` adds two partial indexes, `message_deliveries_pending`
 and `comment_deliveries_pending`, on the delivery attempts still pending, which the delivery sweep
 reads every minute (Keyed writes, below). It reads, refuses and rewrites no row, and the release
 before it neither reads nor depends on them; its census answers `0`. Each build holds its table's
 writes (a `SHARE` lock) for as long as it reads the table once.
+
+Migration `0139_drop_broadcast_idempotency_keys` drops `broadcast_idempotency_keys`, the
+contracting half of `0137`: a deploy that carries it can no longer roll back to a build from before
+`0137`, whose broadcast send writes that table. It reads no row; dropping the table takes `ACCESS
+EXCLUSIVE` on `broadcasts` too, because the table's foreign key puts triggers there, so a broadcast
+read or send waits for the instant the migration's transaction lasts. Its census answers `0`.
 
 Migration `0009_project_artifacts` deletes malformed derived artifact references, reports their
 count, and re-derives them from source text on the next write. It aborts server boot before a
