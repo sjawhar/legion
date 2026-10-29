@@ -38,9 +38,10 @@ router guide for its own workflows; this page covers this repository only.
 4. **The job in `ci-ok`'s `needs:`.** A job that is not there can fail and still let `ci-ok`
    pass.
 5. **The job in `ci-ok`'s `SELECTED_BY`**, mapped to the output its `if:` tests
-   (`"<job>": "<filter>"`), in `PULL_REQUEST_ONLY` too when its `if:` also admits only
-   `github.event_name == 'pull_request'`, and in `NOT_ON_PUSH` when it holds
-   `github.event_name != 'push'`. `ci-ok` fails a needed job `SELECTED_BY` does not name, and
+   (`"<job>": "<filter>"`), and in `PULL_REQUEST_ONLY` too when its `if:` also admits only
+   `github.event_name == 'pull_request'`. A job that runs on no push gets its `changes` output
+   set false on a push instead (`github.event_name != 'push' && steps.filter.outputs.<filter> ||
+   'false'`), so `ci-ok` reads its skip there as unselected. `ci-ok` fails a needed job `SELECTED_BY` does not name, and
    `check-ci-filters.sh` fails when the map or a list is not exactly what the `if:`s test (the
    section on `ci-ok` below says why).
 6. **A gate in `.github/scripts/ci_job_reads.py`** that says what the job reads, which
@@ -60,22 +61,21 @@ job its filters gate is skipped. GitHub's "Re-run failed jobs" then re-runs `cha
 `ci-ok`, and `changes` can succeed while the jobs it now selects stay skipped: a `ci-ok` that
 accepted those skips would pass with nothing tested. So `ci-ok.sh` decides what `changes`
 selected from its outputs, through `SELECTED_BY`: a job is selected when the output it maps to is
-`'true'`; for a job in `PULL_REQUEST_ONLY` the run must also be a pull request's, and for a job in
-`NOT_ON_PUSH` (docs, whose main build is docs-pages.yaml's) it must not be a push. A re-run that
+`'true'`, and for a job in `PULL_REQUEST_ONLY` the run must also be a pull request's (docs,
+whose main build is docs-pages.yaml's, has its output set false on a push). A re-run that
 leaves a selected job skipped fails naming the job; re-run the whole workflow instead.
 
 `check-ci-filters.sh` fails when `SELECTED_BY` is not exactly {job: the output its `if:` tests}
 for every job in `ci-ok`'s `needs:` but `changes` and lint, when `PULL_REQUEST_ONLY` is not
-exactly the jobs whose `if:` restricts to `github.event_name == 'pull_request'`, or when
-`NOT_ON_PUSH` is not exactly the jobs whose `if:` holds `github.event_name != 'push'`. A wrong
+exactly the jobs whose `if:` restricts to `github.event_name == 'pull_request'`. A wrong
 entry would fail a job its `if:` rightly skipped, or pass one a re-run left skipped.
 
 A job whose main half must run in push order, as the docs site's Pages deploy must, cannot be a
 job of the router: each push to main is a router run of its own, and a job-level concurrency group
 takes jobs as their needs end, not in push order. Its main half is a push-only workflow of its own
 with a workflow-level group (`queue: max`, `cancel-in-progress: false`), whose `on.push.paths`
-equals the job's filter; the router job admits no push (`github.event_name != 'push'`, so it is in
-`NOT_ON_PUSH`), and `ci_job_reads.py`'s `PUSH_WORKFLOWS` pairs the filter with that workflow, so
+equals the job's filter; the router job admits no push (its `changes` output is false on a push),
+and `ci_job_reads.py`'s `PUSH_WORKFLOWS` pairs the filter with that workflow, so
 `check-ci-filters.sh` fails naming each pattern one list has and the other lacks.
 docs-pages.yaml is the one such workflow.
 
@@ -243,7 +243,7 @@ anything lands. A new job needs nothing extra for it. But a job whose `if:` name
 it, and `ci-ok` fails there. What skips a group does so on purpose: the cache saves (push only),
 lint's pull-request text check (pr-title.yaml checks the text on the group), and worker-image
 (pull request only, so it is in `PULL_REQUEST_ONLY`; main's image builds are release.yaml's). The
-docs job runs on a group and on a pull request but on no push (`NOT_ON_PUSH`): docs-pages.yaml
+docs job runs on a group and on a pull request but on no push (its output is false there): docs-pages.yaml
 builds and publishes main's site.
 
 ## Drafts run no test job

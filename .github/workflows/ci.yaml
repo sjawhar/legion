@@ -12,8 +12,9 @@ name: CI
 # A new job joins the router in six places: a filter in `changes` that names every file the job
 # reads, an output of `changes` for that filter, the job's `needs: changes` and an `if:` on that
 # output, an entry in `ci-ok`'s `needs:`, an entry in `ci-ok`'s SELECTED_BY mapping the job to
-# that output (and in PULL_REQUEST_ONLY when its `if:` admits only pull_request, or in NOT_ON_PUSH
-# when it admits no push), and a gate in .github/scripts/ci_job_reads.py. The ci-filters job's
+# that output (and in PULL_REQUEST_ONLY when its `if:` admits only pull_request), and a gate in
+# .github/scripts/ci_job_reads.py. A job that runs on no push gets its output set false there,
+# in `changes`' outputs, as docs does. The ci-filters job's
 # .github/scripts/check-ci-filters.sh holds the filter to that gate and SELECTED_BY to the `if:`s.
 # docs/solutions/github/join-a-job-to-the-ci-router.md walks through it.
 #
@@ -77,7 +78,9 @@ jobs:
     outputs:
       typecheck: ${{ steps.filter.outputs.typecheck }}
       test: ${{ steps.filter.outputs.test }}
-      docs: ${{ steps.filter.outputs.docs }}
+      # docs-pages.yaml builds main's site, so on a push docs is not selected: ci-ok then reads
+      # its skip as one changes chose.
+      docs: ${{ github.event_name != 'push' && steps.filter.outputs.docs || 'false' }}
       worker_image: ${{ steps.filter.outputs.worker_image }}
       contracts: ${{ steps.filter.outputs.contracts }}
       envoy_plugin: ${{ steps.filter.outputs.envoy_plugin }}
@@ -1466,7 +1469,7 @@ jobs:
   # and the built site is checked with the private-name guard; the docs filter names all of them.
   docs:
     needs: changes
-    if: github.event_name != 'push' && needs.changes.outputs.docs == 'true'
+    if: needs.changes.outputs.docs == 'true'
     runs-on: ubuntu-24.04
     # The screenshots step boots Dispatch on the e2e harness, which needs a database it may
     # truncate.
@@ -2718,9 +2721,8 @@ jobs:
   # job it did not select succeeded or was skipped. A selected job's skip fails: a skipped job
   # reports success, and a failed-only re-run of a run whose `changes` failed can make `changes`
   # succeed and leave the jobs it selects skipped. SELECTED_BY maps every needed job but `changes`
-  # and lint to the output its `if:` tests, PULL_REQUEST_ONLY lists the jobs whose `if:` also
-  # admits only pull_request, and NOT_ON_PUSH those whose `if:` admits no push; check-ci-filters.sh
-  # holds all three to those `if:`s.
+  # and lint to the output its `if:` tests, and PULL_REQUEST_ONLY lists the jobs whose `if:` also
+  # admits only pull_request; check-ci-filters.sh holds both to those `if:`s.
   ci-ok:
     needs:
       - changes
@@ -2786,5 +2788,4 @@ jobs:
               "worker-image": "worker_image"
             }
           PULL_REQUEST_ONLY: '["worker-image"]'
-          NOT_ON_PUSH: '["docs"]'
         run: .github/scripts/ci-ok.sh

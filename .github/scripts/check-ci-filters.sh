@@ -40,9 +40,8 @@
 #   6. a go command that fails or a first-party package go list cannot load, since its closure
 #      is then unknown, and a `!` pattern under `some` or a brace in a gate's filter,
 #   7. a SELECTED_BY in ci-ok's step that is not exactly {job: the output its if: tests} for every
-#      job ci-ok needs but changes and lint, a PULL_REQUEST_ONLY that is not exactly the jobs
-#      whose if: restricts to github.event_name == 'pull_request', or a NOT_ON_PUSH that is not
-#      exactly the jobs whose if: holds github.event_name != 'push': ci-ok.sh fails a job that map
+#      job ci-ok needs but changes and lint, or a PULL_REQUEST_ONLY that is not exactly the jobs
+#      whose if: restricts to github.event_name == 'pull_request': ci-ok.sh fails a job that map
 #      says changes selected unless it succeeded, so a wrong entry fails a job that was rightly
 #      skipped or passes one a failed-only re-run left skipped,
 #   8. a workflow ci_job_reads.py's PUSH_WORKFLOWS pairs with a filter whose on.push.paths do not

@@ -711,8 +711,6 @@ ALWAYS_RUN = ("changes", "lint")
 EVENT_LISTS = {
     "PULL_REQUEST_ONLY": (re.compile(r"github\.event_name\s*==\s*'pull_request'"),
                           "admits only pull_request", "github.event_name == 'pull_request'", "every other event"),
-    "NOT_ON_PUSH": (re.compile(r"github\.event_name\s*!=\s*'push'"),
-                    "admits no push", "github.event_name != 'push'", "a push"),
 }
 
 

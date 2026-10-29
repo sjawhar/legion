@@ -4,7 +4,7 @@
 # must say what ci.yaml says, a claimed go command the check does not reduce (another form, a
 # step that is more than the go line, a shell, a container, a BASH_ENV) and a step off its exact
 # entry's pinned script count as reading every Go file of the repository and every file under a
-# Go module's directory, ci-ok's SELECTED_BY, PULL_REQUEST_ONLY and NOT_ON_PUSH must say what each
+# Go module's directory, ci-ok's SELECTED_BY and PULL_REQUEST_ONLY must say what each
 # needed job's if: tests, and a PUSH_WORKFLOWS workflow's on.push.paths must equal its filter.
 #
 # Each case builds a miniature repository under a temporary directory - a go.work binding one
@@ -128,7 +128,6 @@ jobs:
         env:
           SELECTED_BY: '{"app": "app", "image": "image"}'
           PULL_REQUEST_ONLY: '["image"]'
-          NOT_ON_PUSH: '[]'
         run: .github/scripts/ci-ok.sh
 YAML
   cat > "$root/.github/workflows/site.yaml" <<'YAML'
@@ -295,22 +294,6 @@ replace "$root/.github/workflows/ci.yaml" "PULL_REQUEST_ONLY: '[\"image\"]'" "PU
 run_check "$root"
 check "fails" "$(is "$status" 1)"
 check "names the job" "$(contains "$out" "ci-ok's PULL_REQUEST_ONLY lacks image, whose if: admits only pull_request")"
-
-echo "case: ci-ok's NOT_ON_PUSH lists a job whose if: admits a push"
-root=$(fixture ci-ok-not-on-push-wrong)
-replace "$root/.github/workflows/ci.yaml" "NOT_ON_PUSH: '[]'" "NOT_ON_PUSH: '[\"app\"]'"
-run_check "$root"
-check "fails" "$(is "$status" 1)"
-check "names the job and the term its if: lacks" \
-  "$(contains "$out" "ci-ok's NOT_ON_PUSH lists app, whose if: has no github.event_name != 'push' term")"
-
-echo "case: ci-ok's NOT_ON_PUSH misses a job whose if: admits no push"
-root=$(fixture ci-ok-not-on-push-missing)
-replace "$root/.github/workflows/ci.yaml" "if: needs.changes.outputs.app == 'true'" \
-  "if: github.event_name != 'push' && needs.changes.outputs.app == 'true'"
-run_check "$root"
-check "fails" "$(is "$status" 1)"
-check "names the job" "$(contains "$out" "ci-ok's NOT_ON_PUSH lacks app, whose if: admits no push, so ci-ok.sh fails its skip on a push")"
 
 echo "case: a push workflow's paths miss a pattern of its filter"
 root=$(fixture push-paths-missing)
