@@ -2,42 +2,44 @@
   "schemaVersion": 1,
   "phase": "test",
   "issue": "INFRA-624",
-  "completed": "2026-10-29T07:46:23Z",
-  "round": 12,
-  "headSha": "2b0cac11dbe47c20a68725605f552079a6534ec7",
-  "codeHead": "608e4e9f82fa",
+  "completed": "2026-10-29T10:15:22Z",
+  "round": 13,
+  "headSha": "164b3e2248dee878b6ce16136206856e6615eb87",
+  "codeHead": "d3e0a98a5e3e",
   "implementerProof": {
     "verdict": "verified",
-    "how": "Full round at the head, since I had not tested the round-12 code (c7b6cb35, 43e5a4c7) and the merge brings main's #2449 into the editor path. Re-ran its 9 refusal tests (pass, the 1,364-body shape test included) and the browser specs (17 passed, chromium and iphone). Followed the refusal's named deletes with the real dispatch CLI on decisions real editors broke."
+    "how": "Re-ran its 11 refusal tests at the head (pass, including the nested-decision shape test and the test that names only what breaks the rule) and the browser specs (17 passed, chromium and iphone). Followed the refusal with the real dispatch CLI in five break shapes. Tried to drive a nested-decision break on the real surface; it is not reachable (see proof 3)."
   },
   "failures": [],
   "failed": 0,
   "proof": [
     {
-      "criterion": "Every ask edit of a broken decision is refused naming, as one document edit, the deletes that leave it valid; following them, then edit-ask, ends valid with every word the agent did not delete",
+      "criterion": "Every ask edit of a broken decision is refused naming, as one document edit, the deletes that leave it and every decision nested in what it keeps valid; following them, then edit-ask, ends valid with every word the agent did not delete",
       "surface": "Dispatch ask-edit route and document edits through the real dispatch CLI against the real Go server and Postgres 17; decisions broken by two or three real editors in headless Chromium",
-      "command": "Throwaway Playwright probes W1-W5 (the corpus in https://github.com/sjawhar/legion/pull/2433#issuecomment-6485995991): edit-ask --urgency high; one doc-edit holding a delete per id from the refusal's 'the blocks to delete are …'; edit-ask with every option. Record https://github.com/sjawhar/legion/pull/2433#issuecomment-6491006889",
-      "observed": "Two lists, three lists ('Applied 2 ops'), repeated label with Option C in the duplicate's list, paragraph after the list, and nested sub-item: each named doc-edit applied, then edit-ask applied. Each final decision is valid, both pages are unmarked, the row equals the options sent and every word is kept. The reason reads 'keeps the question's paragraphs and the first list after them'.",
-      "headSha": "2b0cac11dbe47c20a68725605f552079a6534ec7",
+      "command": "Throwaway Playwright probes W1-W5 (the corpus in https://github.com/sjawhar/legion/pull/2433#issuecomment-6485995991): edit-ask --urgency high; one doc-edit holding a delete per id the refusal names; edit-ask with every option. Record https://github.com/sjawhar/legion/pull/2433#issuecomment-6493951371",
+      "observed": "Two lists, three lists ('Applied 2 ops'), repeated label with Option C, paragraph after the list, nested sub-item: each named doc-edit applied, then edit-ask applied. Each decision ended valid, with pages unmarked, the row equal to the options sent and every word kept.",
+      "headSha": "164b3e2248dee878b6ce16136206856e6615eb87",
       "negativeControl": "edit-ask --urgency high on each broken decision → exit 1; document and row unchanged"
     },
     {
-      "criterion": "A1 regression lock after main's #2449 merge: two editors' crossed edits keep every word; the input guards and read-back filter hold",
-      "surface": "Dispatch document editor in headless Chromium (chromium and iphone projects), real Go server and Postgres 17",
+      "criterion": "A1 regression lock after main's merge: crossed edits keep every word; the input guards and read-back filter hold",
+      "surface": "Dispatch document editor in headless Chromium (chromium and iphone), real Go server and Postgres 17",
       "command": "cd packages/dispatch && source /legion/scratch/harness/env.sh && bun run e2e -- ask-concurrent-edit.e2e.ts typed-block-content-rule.e2e.ts --project chromium --project iphone",
-      "observed": "17 passed (2.9m)",
-      "headSha": "2b0cac11dbe47c20a68725605f552079a6534ec7",
+      "observed": "17 passed (2.9m), after restarting the harness Postgres, which had been stopped at 10:09:14Z ('terminating connection due to administrator command'). That stop failed a first run of 15 rows with 'connection refused'.",
+      "headSha": "164b3e2248dee878b6ce16136206856e6615eb87",
       "negativeControl": "Round 1 base tree b295a3fb: the ask-concurrent-edit rows fail with element(s) not found (the decision deleted)"
-    }
-  ],
-  "findings": [
+    },
     {
-      "severity": "for the architect (no step a refusal names fails; a person can repair it)",
-      "description": "Two real editors: alice selects the question and deletes it while each editor adds a list. Stored '(empty paragraph) / - Option B / * Option A'; malformed on both pages; ask open with its pre-break row; no unselected word lost. With the real CLI, edit-ask (urgency; question; question and options) exits 1 with 'block: ask block \"a1\" has an empty question', which names no step. doc-edit deleting the second list by id is refused with the same text. One doc-edit inserting a question paragraph and deleting the second list is refused with the same text; adding a delete of the empty paragraph is refused with 'holds a bullet list before its question'. The message is main's (parseAskBlock, docs/ask_blocks.go:668 on main) and runs before this PR's refusal; main gives an agent the same dead end for any decision whose question a person empties. The implementer's shape test accepts it on purpose (noDeleteExplanation). Before this PR the decision was deleted; now it is kept, so an agent meets this state. Sent to the architect."
+      "criterion": "Review round 9 items 1-2: refusals for decisions nested in an option do not loop and name only what breaks the rule",
+      "surface": "Go document service against Postgres (the only surface that reaches the path; see observed)",
+      "command": "cd packages/envoy && DISPATCH_TEST_DATABASE_URL=postgres://postgres@127.0.0.1:55432/postgres go test ./internal/dispatch/docs/ -count=1 -run TestSetAskBlockTextRefus -v",
+      "observed": "11 pass, including TestSetAskBlockTextRefusalOfEveryBrokenBodyHoldingADecisionLeadsToAValidDecision and TestSetAskBlockTextRefusalOfNestedDecisionsNamesOnlyWhatBreaksTheRule. Real-surface attempt: with a nested decision a2 seeded in an option of a1, a2's question paragraph is not visible in the editor (isVisible false). A DOM caret placed on it types into a1's question; this is identical on a main tree, so it is not this change. Writes that leave a decision broken are refused. So a nested decision breaks only through a raw Yjs write.",
+      "headSha": "164b3e2248dee878b6ce16136206856e6615eb87",
+      "negativeControl": "The reviewer's probes TestProbeR9NestedAndOuterBothBroken and TestProbeR9NestedMisattributed, at 6c80533d: the refusal looped, or named the wrong nested decision"
     }
   ],
-  "ci": "Read on GitHub at code head 608e4e9f (the head 2b0cac11 is handoff-only, skip-checks): lint, typecheck, build x2, changes, envoy-e2e-local, envoy-infra-go, envoy-smoke, envoy-session-stall and dispatch-browser-multiprocess succeeded. dispatch-multiprocess failed; its log was not readable while the run was in progress, so whether the failure is this change's or main's is unknown. dispatch, dispatch-memory, envoy-go, envoy-go-race and test were in progress. Not re-run.",
+  "ci": "Read on GitHub at code head d3e0a98a: lint, typecheck, pr-title, changes, envoy-infra-go and one build succeeded; the other lanes were queued or in progress. Not re-run.",
   "notes": [
-    "The workspace was recreated after the 02:30Z roll. I restored the e2e harness (chromium install, contracts build) and the probe corpus from the PR comment. The throwaway spec was moved out of the workspace, which holds only this handoff."
+    "The workspace was recreated again. The implementer had restored the harness; I restarted its Postgres and restored my probe corpus from the PR. The throwaway spec and the main tree used for the nested-caret comparison were removed. The working copy holds only this handoff."
   ]
 }
