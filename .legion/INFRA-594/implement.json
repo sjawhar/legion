@@ -2,7 +2,7 @@
   "schemaVersion": 1,
   "phase": "implement",
   "issue": "INFRA-594",
-  "completed": "2026-10-29T19:06:37Z",
+  "completed": "2026-10-29T22:09:17Z",
   "proof": [
     {
       "criterion": "Sessions take every event (agent, issue, role) once through restarts of the session, its NATS connection, either listener and a Dispatch pod; the plugin acks after the transcript write; an unacked message is redelivered",
@@ -67,6 +67,14 @@
       "observed": "1742 pass, 39 skip, 0 fail; each package alone 0 fail.",
       "headSha": "588a864057b9",
       "negativeControl": "At 0cc7a492 the same command failed two pi-envoy tests ('the drift heal names the live id\u2026', 'AskGate > the session's processes are told DISPATCH_STATE_DIR\u2026'): claude-envoy tests replaced process.env, leaving Bun.env, which child shells read, stale."
+    },
+    {
+      "criterion": "Forward merges of main (INFRA-547 #2370, #2505, #2377, #2371) keep both sides' behaviour; a listener's own user kind carries the session-consumer calls",
+      "surface": "Go listener, bus, store, session, kvwatch and envoy-infra suites on the merged head; the publish route's serverchange soak; the three plugin suites in one bun process",
+      "command": "cd packages/envoy && DISPATCH_TEST_DATABASE_URL=... go test -count=1 -timeout 30m ./cmd/listener; go test -count=1 -timeout 30m -tags serverchange -run TestServerChange ./cmd/listener; go test -count=1 ./internal/bus ./internal/session ./internal/store ./internal/kvwatch ./loadtest/; cd infra && go test -count=1 ./...; bun test packages/envoy-client packages/pi-envoy packages/claude-envoy",
+      "observed": "ok cmd/listener 606.3s; ok serverchange soak 153.0s; ok bus/session/store/kvwatch/loadtest; envoy-infra all ok except the two gcp data-disk tests that need mkfs.ext4 (absent in the pod); bun 2,858 pass 0 fail; TestListenerHostPermissionsHoldTheConsumerCallsAndEveryTopic: the listenerMachineId kind carries the consumer calls and notifications.>, a plain host kind no consumer call. Resolutions named per file in the PR's diff-check comment.",
+      "headSha": "a0629b4057dab26dee3f0fcb4df2071c0731131e",
+      "negativeControl": "Before the merge GitHub answered the PR CONFLICTING/DIRTY and started no workflow; after it, MERGEABLE. The natslive listener-host test's body, run in-process on nats-server 2.10.29, registered with consumer mode on the new kind, while a host user is refused CONSUMER.INFO and CONSUMER.LIST."
     }
   ],
   "filesChanged": [
@@ -83,7 +91,8 @@
     "docs: packages/envoy/AGENTS.md, docs/architecture.md, pi-envoy and claude-envoy AGENTS/README, .dispatch/architecture, docs/site dispatch pages, skills/envoy, docs/solutions (two pages), docs/deployment.md, .github/workflows/ci.yaml comment",
     "changelog fragments: packages/{envoy,envoy-client,pi-envoy,claude-envoy}/.changes/unreleased/INFRA-594-*.yaml",
     "Round 2: packages/envoy/loadtest/{backlog.go,restartreport.go,restartreport_test.go,restart-step.sh,relay.go,guard.go,main.go,README.md}; packages/envoy-client/test/{listener-grant.ts,envoy-stack.ts,stall-scenario.ts}; pi-envoy and claude-envoy stall tests; scripts/e2e/envoy-session-delivery.sh (--listener-grant, --plugins-from) and README; packages/claude-envoy/src/envoy-channel-server.ts (replay claim) with its test; changelog fragments",
-    "Round 3: packages/envoy/infra/core/{permissions.go,permissions_test.go,permissions_live_test.go}, gcp goldens, infra README/AGENTS/docs/nats-hub.md, packages/envoy/AGENTS.md, the listener-permissions fragment; packages/claude-envoy/tests/{envoy-channel-server.test.ts,envoy-channel-tools.test.ts,pane-environment.ts}"
+    "Round 3: packages/envoy/infra/core/{permissions.go,permissions_test.go,permissions_live_test.go}, gcp goldens, infra README/AGENTS/docs/nats-hub.md, packages/envoy/AGENTS.md, the listener-permissions fragment; packages/claude-envoy/tests/{envoy-channel-server.test.ts,envoy-channel-tools.test.ts,pane-environment.ts}",
+    "Round 4: forward merges of main (api.go, delivery.go, bus/nats.go, store/kv.go, session/registry.go, session/expiry.go, envoy-client tool-contract.ts, gcp/natshub.go and tests); envoy-infra listenerMachineId kind (core/permissions.go ListenerHostPermissions, gcp/natshub.go, goldens, tests, README, docs/nats-hub.md); the doc census files listed in the PR body"
   ],
   "trickyParts": [
     "nats-server 2.10.29 reports ack floor 0 for a fresh consumer, so every session consumer is created at a start sequence (stream last+1) and the floor is read never below it",
@@ -97,7 +106,7 @@
     "nats-server RSS grows over a 10-minute window on both sides (before and after); not caused by this change, and a 10-minute window cannot show whether it levels off",
     "The listener grant change (session-consumer entries, CONSUMER.LIST, envoy-roles) reaches a hub only at its next replacement or reload; until then the listener answers core and the old path runs",
     "Mixed rollout and core path keep today's loss of role events a session misses while killed or cut off; closed only when sessions run the new plugin on a hub with the grant",
-    "Host users' listeners (and Dispatch's) get no session-consumer grant, so their sessions stay on the core path; only the hub's listener user carries it (architect's option a)"
+    "Who keeps consumer delivery: the hub's own listener (machine id envoy-hub, ListenerPermissions, only example-hub in the golden) and any listener on a listenerMachineId user (the in-cluster gke listener once INFRA-7 sets listenerMachineId: gke after the envoy-infra release); sessions on a plain host-user (machineId) or Dispatch listener stay on the core path"
   ],
   "openQuestions": []
 }
