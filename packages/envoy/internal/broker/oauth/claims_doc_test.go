@@ -1,11 +1,20 @@
 package oauth
 
 import (
+	"context"
+	"maps"
+	"net/url"
 	"os"
 	"path/filepath"
 	"slices"
 	"strings"
 	"testing"
+
+	"authelia.com/provider/oauth2"
+
+	"github.com/sjawhar/envoy/internal/broker/exchange"
+	"github.com/sjawhar/envoy/internal/broker/oauthstore"
+	"github.com/sjawhar/envoy/internal/broker/oauthwire"
 )
 
 // The claim list under "The Dispatch identity the broker can issue" in docs/kubernetes.md is what a
@@ -14,55 +23,136 @@ import (
 // list omits is a permission nobody downstream knows to check; a claim the list carries and the
 // code never issues is a check written against a key that is always absent, which reads as a denial
 // the author did not mean. Neither shows up in a test of the exchange itself, because the exchange
-// is right in both cases — only the document is wrong, and only a reader would notice.
+// is right in both cases — only the document is wrong.
 //
-// The list is read as a list, in the one way the precedent in
-// packages/daemon/internal/runtime/sandbox/reclaim_doc_test.go had to learn: a claim is the
-// backticked name a bullet opens with, and a backticked word anywhere later in a bullet's prose is
-// not a claim. The `project_scope` bullet is exactly why. It reads "`named` or `person`, which says
-// what `project` means", so a check that asked whether the paragraph mentions a claim anywhere
-// between its bounds would find `project` in that sentence and pass with the `project` bullet
-// deleted — the miss wearing a pass. The em dash the shape puts after the name is required for the
-// same reason: it is what makes "the name this bullet is about" a thing the parse can see, rather
-// than the first of however many code spans the line happens to carry.
+// What is compared: the names the document's bullets open with, against the keys decide writes into
+// an exchange session's extra claims, which is where this provider's opaque tokens carry them. The
+// code's side is collected by calling decide twice — once for a pod's subject token, whose entry
+// gives the named project scope, and once for a machine access token, whose scope is the person's —
+// and taking the union, since `project` is written under one scope and deleted under the other. So
+// a claim a new scope or a new decision adds is a claim this fails until the list names it.
+//
+// A claim is the backticked name a bullet opens with, followed by the em dash the list's shape puts
+// after it, and a backticked word later in a bullet's prose is not a claim. The `project_scope`
+// bullet is why: it reads "`named` or `person`, which says what `project` means", so a check that
+// asked whether the section mentions a name anywhere between its bounds would find `project` there
+// and pass with the `project` bullet deleted — the miss wearing a pass.
 //
 // What this cannot do: it compares two sets of names, and nothing more. It does not read a bullet's
 // meaning, so a claim whose description is stale, wrong, or swapped with its neighbour's passes
-// here; it does not know the order the list is written in; and it says nothing about the claims an
-// introspection answer adds around them (`exp`, `client_id`, `jkt`) or about whether the exchange
-// actually populates each claim it names. A reader still owns all of that. What it does own is the
-// two sets drifting apart while each side looks right on its own.
+// here; it does not know the order the list is written in; it says nothing about the claims an
+// introspection answer adds around them (`exp`, `client_id`, `jkt`); and the union is over the two
+// subject kinds it calls decide with, so a claim only a workflow run's token could carry would be
+// missed. A reader still owns all of that. What it does own is the two sets drifting apart while
+// each side looks right on its own.
 const (
-	// claimsDocMarker is the sentence the list hangs off. It is prose in a hard-wrapped document,
-	// so it is found in a whitespace-flattened copy and carried back to the line it starts on; the
-	// bullets themselves are read from the lines, since a bullet is a shape of a line and
-	// flattening erases it.
-	claimsDocMarker = "An issued token carries these claims and no others:"
+	// claimsDocHeading is the section's heading, matched as a whole line: a heading is a line of
+	// its own, so the list is reached without parsing the hard-wrapped prose above it.
+	claimsDocHeading = "#### The Dispatch identity the broker can issue"
 	// claimsDocSeparator follows the name a bullet opens with. See the comment above: it is the
 	// shape that distinguishes the claim a bullet documents from the code spans its prose uses.
 	claimsDocSeparator = " — "
 )
 
-// The claims docs/kubernetes.md lists are exactly the claims this package puts on an exchanged
-// token. The code's side is the four Claim constants, written out here rather than collected from
-// the document, so that adding a claim to one side and not the other is what fails.
+// The listed identity and the two subject tokens decide is asked to decide on here. The account
+// entry fixes no session, so the request names one, and the pod token carries the audience the
+// configured issuer accepts and the pod binding Set.Pod requires.
+const (
+	claimsPodAccount   = "system:serviceaccount:example-ns:example-worker"
+	claimsPodUID       = "11111111-2222-3333-4444-555555555555"
+	claimsPerson       = "ada@example.com"
+	claimsProject      = "ACME"
+	claimsSessionName  = "claims-doc-check"
+	claimsIssuer       = "https://kubernetes.example/cluster"
+	claimsAudience     = "https://broker.example"
+	claimsCredentialID = "machine-credential-1"
+)
+
+// The claims docs/kubernetes.md lists are exactly the claims an exchanged token carries. Both sides
+// are read: the document's bullets, and the keys decide writes for the two project scopes a token
+// can be issued under.
 func TestTheDocumentedClaimsAreTheClaimsAnExchangedTokenCarries(t *testing.T) {
 	documented := documentedClaims(t)
-	issued := []string{ClaimSession, ClaimPerson, ClaimProjectScope, ClaimProject}
-
-	undocumented := missingFrom(issued, documented)
-	unissued := missingFrom(documented, issued)
-	if len(undocumented) > 0 || len(unissued) > 0 {
-		t.Fatalf("docs/kubernetes.md's claim list and this package's Claim constants disagree:\n"+
-			"  issued but not documented: %s\n"+
-			"  documented but not issued: %s\n"+
-			"the list reads %q, and a resource server believes it",
-			claimList(undocumented), claimList(unissued), claimsDocMarker)
+	issued := issuedClaims(t)
+	slices.Sort(documented)
+	if !slices.Equal(documented, issued) {
+		t.Fatalf("docs/kubernetes.md's claim list and the claims the exchange decides on disagree:\n"+
+			"  documented: %s\n"+
+			"  issued:     %s\n"+
+			"the list reads \"An issued token carries these claims and no others\", and a resource "+
+			"server believes it", strings.Join(documented, ", "), strings.Join(issued, ", "))
 	}
 }
 
-// documentedClaims reads the claim names from the bullet list under claimsDocMarker: the backticked
-// name each bullet opens with, and only that one.
+// issuedClaims are the claim names decide writes onto an exchange session, sorted, over both of the
+// project scopes it can decide: a pod's projected token, which its entry gives a named project, and
+// a machine login's access token, which names none. A scope that wrote a claim nothing documents,
+// or stopped writing one the list still carries, lands in this set.
+func issuedClaims(t *testing.T) []string {
+	t.Helper()
+	policy, err := exchange.NewSet([]exchange.AccountEntry{{
+		Account: claimsPodAccount,
+		Project: claimsProject,
+		Person:  claimsPerson,
+	}}, nil)
+	if err != nil {
+		t.Fatalf("exchange.NewSet: %v", err)
+	}
+	// Keys is left nil: decide verifies no signature. It checks a pod token's audience against the
+	// configured issuer (audience, hasAudience) and the library, which is what resolves a token's
+	// key, is not in this call at all.
+	provider := &Provider{exchange: ExchangeConfig{
+		Policy:     policy,
+		Kubernetes: IssuerConfig{Issuer: claimsIssuer, Audience: claimsAudience},
+	}}
+
+	subjects := []struct {
+		tokenType string
+		token     map[string]any
+	}{{
+		tokenType: oauthwire.SubjectTokenTypeKubernetes,
+		token: map[string]any{
+			"sub":           claimsPodAccount,
+			"aud":           claimsAudience,
+			"kubernetes.io": map[string]any{"pod": map[string]any{"uid": claimsPodUID}},
+		},
+	}, {
+		tokenType: tokenTypeAccessToken,
+		token: map[string]any{
+			"sub":                       claimsPerson,
+			oauthwire.ExtraCredentialID: claimsCredentialID,
+		},
+	}}
+
+	issued := map[string]bool{}
+	for _, subject := range subjects {
+		session := oauthstore.NewExchangeSession()
+		request := &oauth2.Request{
+			Form: url.Values{
+				FormSubjectTokenType: {subject.tokenType},
+				FormSession:          {claimsSessionName},
+			},
+			Session: session,
+		}
+		if _, err := provider.decide(context.Background(), request, subject.token); err != nil {
+			t.Fatalf("the exchange refused the %s subject token this check decides against: %v; "+
+				"the claims are then unknown and nothing is being held to the list", subject.tokenType, err)
+		}
+		// A decision that wrote no claim is this check failing open on the code's side, as an
+		// empty bullet list is on the document's.
+		if len(session.Extra) == 0 {
+			t.Fatalf("the exchange decided the %s subject token and wrote no claim at all", subject.tokenType)
+		}
+		for name := range session.Extra {
+			issued[name] = true
+		}
+	}
+	return slices.Sorted(maps.Keys(issued))
+}
+
+// documentedClaims reads the claim names from the bullet list under claimsDocHeading, sorted: the
+// backticked name each bullet opens with, and only that one. Sorting is what makes a name the list
+// carries twice a failure rather than a duplicate nobody notices.
 func documentedClaims(t *testing.T) []string {
 	t.Helper()
 	// The document is at the repository root, five directories above this package. Read it, and
@@ -73,32 +163,30 @@ func documentedClaims(t *testing.T) []string {
 		t.Fatalf("read docs/kubernetes.md: %v", err)
 	}
 	lines := strings.Split(string(doc), "\n")
-	flat, lineEnds := flattenKeepingLines(lines)
-	offset := strings.Index(flat, claimsDocMarker)
-	if offset < 0 {
-		t.Fatalf("docs/kubernetes.md has no %q: the paragraph introducing the claim list was "+
-			"reworded, and this check stops checking the moment it cannot find it", claimsDocMarker)
+	heading := slices.Index(lines, claimsDocHeading)
+	if heading < 0 {
+		t.Fatalf("docs/kubernetes.md has no line %q: the section holding the claim list was renamed, "+
+			"and this check stops checking the moment it cannot find it", claimsDocHeading)
 	}
-	markerEnd := offset + len(claimsDocMarker) - 1
-	markerLine := slices.IndexFunc(lineEnds, func(end int) bool { return end > markerEnd })
 
 	var claims []string
-	// The list follows the marker's own line, after the blank line Markdown requires between a
-	// paragraph and a list, and runs to the first line that is neither a bullet nor a wrapped
-	// bullet's indented continuation — in the document as written, the blank line under it.
-	for i := markerLine + 1; i < len(lines); i++ {
+	// The list is the section's first one: the prose lines between the heading and it are skipped,
+	// and the list runs to the first line that is neither a bullet nor a wrapped bullet's indented
+	// continuation — in the document as written, the blank line under it.
+	for i := heading + 1; i < len(lines); i++ {
 		line := strings.TrimRight(lines[i], " ")
-		if strings.TrimSpace(line) == "" {
-			if len(claims) > 0 {
-				break
-			}
-			continue
-		}
-		if len(claims) > 0 && strings.HasPrefix(line, " ") {
+		if len(claims) > 0 && line != "" && strings.HasPrefix(line, " ") {
 			continue
 		}
 		if !strings.HasPrefix(line, "- ") {
-			break
+			if len(claims) > 0 {
+				break
+			}
+			if strings.HasPrefix(line, "#") {
+				t.Fatalf("docs/kubernetes.md reaches %q under %q with no bullet list between them: "+
+					"the claims are no longer a list, and nothing is being held to them", line, claimsDocHeading)
+			}
+			continue
 		}
 		bullet := strings.TrimSpace(strings.TrimPrefix(line, "- "))
 		inner, opened := strings.CutPrefix(bullet, "`")
@@ -112,49 +200,11 @@ func documentedClaims(t *testing.T) []string {
 		claims = append(claims, name)
 	}
 
-	// An empty list is this check failing open: the sentence is still there, the parse matched
+	// An empty list is this check failing open: the heading is still there, the parse matched
 	// nothing, and every issued claim would then be reported against a list nobody is reading.
 	if len(claims) == 0 {
-		t.Fatalf("docs/kubernetes.md names no claim after %q: the bullet list the sentence promises "+
-			"is gone or no longer a list, and nothing is being held to it", claimsDocMarker)
+		t.Fatalf("docs/kubernetes.md names no claim under %q: the bullet list the section promises "+
+			"is gone or no longer a list, and nothing is being held to it", claimsDocHeading)
 	}
 	return claims
-}
-
-// missingFrom is the names that carried does not carry, in the order names lists them.
-func missingFrom(names, carried []string) []string {
-	var missing []string
-	for _, name := range names {
-		if !slices.Contains(carried, name) {
-			missing = append(missing, name)
-		}
-	}
-	return missing
-}
-
-// claimList renders one side of the difference for a failure message, naming "none" rather than an
-// empty line so the reader of a one-sided failure sees which direction held.
-func claimList(claims []string) string {
-	if len(claims) == 0 {
-		return "none"
-	}
-	return strings.Join(claims, ", ")
-}
-
-// flattenKeepingLines collapses the document's whitespace so prose that was hard-wrapped reads as
-// one line, and records for every line the length the flattened text had reached at its end, which
-// is what turns a marker found in the flat text back into the line the list starts under.
-func flattenKeepingLines(lines []string) (string, []int) {
-	var flat strings.Builder
-	lineEnds := make([]int, len(lines))
-	for i, line := range lines {
-		for _, field := range strings.Fields(line) {
-			if flat.Len() > 0 {
-				flat.WriteByte(' ')
-			}
-			flat.WriteString(field)
-		}
-		lineEnds[i] = flat.Len()
-	}
-	return flat.String(), lineEnds
 }
