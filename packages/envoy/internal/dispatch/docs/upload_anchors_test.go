@@ -243,6 +243,13 @@ func TestAnUploadMovingAnAnchorsQuoteWhereItsMarkIsNotAllowedIsRefused(t *testin
 			want: `the open ask anchored on "run the tests" would land in two code blocks, where its mark is not allowed, ` +
 				`and the upload leaves its quote nowhere it may stand; move that text out of them, or resolve the ask first`,
 		},
+		{
+			name: "an ask into one code block twice", kind: MarkAsk, quote: "run the tests",
+			seed:   "Intro.\n\nrun the tests\n",
+			upload: "Intro.\n\n```\nrun the tests\nand run the tests\n```\n",
+			want: `the open ask anchored on "run the tests" would land in a code block, where its mark is not allowed, ` +
+				`and the upload leaves its quote nowhere it may stand; move that text out of it, or resolve the ask first`,
+		},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			service, artifactID := newTestService(t)
