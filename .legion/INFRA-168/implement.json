@@ -2,25 +2,68 @@
   "schemaVersion": 1,
   "phase": "implement",
   "issue": "INFRA-168",
-  "completed": "2026-10-26T13:35:00Z",
-  "round": "the round answering the review of 1b36825b (tests only: thread PRRT_kwDORFy7ds6wReUY; the architect accepted the rounds and scoped this one to the reviewer's three tests, no code change)",
+  "completed": "2026-10-29T19:30:00Z",
+  "round": "generation 5: the port onto main's marker gate (plan rev 11, G1-G6), after sjawhar/legion#2159 merged",
   "proof": [
     {
-      "criterion": "Nothing can drop the upload key or its content digest from callKeys with the suite green: each regression that would reopen the review of 0c1e3cf4's findings fails a test.",
-      "surface": "The real AskGate handler on the bash upload path under pi-envoy's suite, with askgate-core.ts mutated in place and restored (the reviewer's two mutants).",
-      "command": "cd packages/pi-envoy && bun test extensions/askgate/askgate.test.ts -t 'after two charter refusals of (an upload with no ask block|a re-upload)' on the unmutated core, then with askgate-core.ts:2538 replaced by M1 `return asks.length === 0 ? [WHOLE_CALL] : asks.map(askIdentity);` and by M2 `return [...asks.map(askIdentity), JSON.stringify([\"upload\", name, null])];`, restoring the file after each (jj diff --stat afterwards: only askgate.test.ts).",
-      "observed": "Unmutated: 3 pass, 0 fail. M1 (upload key dropped): 0 pass, 3 fail. M2 (content digest dropped): 1 pass, 2 fail (the no-ask different-document test passes, as expected, since the names differ). Each failure is the third upload's result carrying `outcome=\"breaker\"`. The tests: 'after two charter refusals of an upload with no ask block, a different document with no ask block on the issue is reviewed'; 'after two charter refusals of an upload with no ask block, the same document name with other text is reviewed'; 'after two charter refusals of a re-upload whose stored version holds every ask, the same document adding a new ask is reviewed'.",
-      "headSha": "2ac8abe5",
-      "negativeControl": "The mutant runs are the negative control: with either regression in askgate-core.ts the suite now goes red, where at 1b36825b the full askgate.test.ts passed 382 of 382 under both (the reviewer's measurement)."
+      "criterion": "A2: a no-change ask is refused in a Legion pod, naming the rule and the fix, and no marker is minted for the refused argv; the same ask with --advisor-rebuttal opens, and its recorded commented form is read back as the same rebuttal.",
+      "surface": "Nested headless Oh My Pi sessions on this branch's build in this Legion pod with the branch's dispatch CLI first on PATH (command -v dispatch printed $LEGION_WORKSPACE/packages/pi-envoy/bin/dispatch), every assistant turn anthropic/claude-opus-5, production Dispatch, scratch issue INFRA-766.",
+      "command": "env -u LEGION_WORKSPACE -u LEGION_ROLE -u LEGION_BOOT_TOKEN_FILE -u LEGION_TREE -u LEGION_GENERATION -u LEGION_DAEMON_URL -u LEGION_STATE_DIR LEGION_ISSUE=INFRA-766 OMP_SESSION_STORAGE=file OMP_ASKGATE=<warn|block> OMP_ASKGATE_RECORD_PROJECT=INFRA /opt/omp/bin/omp --extension \"$LEGION_WORKSPACE/packages/pi-envoy\" --session-dir <dir> -p \"$(cat p1.txt|p2.txt)\" (runs c1-*, c2-* under /legion/scratch/tmp/g6), the case-1 session then running `jq -r .store \"$DISPATCH_STATE_DIR\"/sessions/\"$DISPATCH_SESSION_ID\"/askgate/*.json | xargs -I{} ls -la {}/markers`.",
+      "observed": "Case 1 refused in warn and block, entries decision revise, rule no_change, ruleOutcome match; the marker store's markers directory was empty after the refusal. Case 2 opened in both modes (outcome rebuttal with the rebuttal line), and the recorded command resent character for character was recorded again as outcome rebuttal with the same line; every ask retracted in its run.",
+      "headSha": "ad1baf27810ad169114829f8d28049410f3eeda8",
+      "negativeControl": "Case 2, the rebuttal, is the call the gate must let through and it opened in both modes, so case 1's refusal is the rule's; the empty marker store is the control for 'a refused call mints nothing'."
+    },
+    {
+      "criterion": "A3 and A4: a doc-edit adding a no-change ask block is refused naming it; an ask for a read the agent did not try is refused; with the agent's own error it is not refused by the rules check.",
+      "surface": "The same.",
+      "command": "The same invocation with p3.txt, p4.txt, p5.txt in warn and block; case 5 again with PI_CONFIG_FILES adding extensionHandlers.toolCallTimeoutMs: 120000 (runs c5x-*).",
+      "observed": "Case 3 refused in both modes (no_change, naming #export-time). Case 4 refused in both modes (untried_access). Case 5: rules check answered none in both modes; at the pod's default 30 s ceiling the charter timed out at the 20,000 ms deadline and the ask posted unreviewed; at 120,000 ms the charter answered in 21.1 s / 22.6 s and sent it back under its own Access 7 rule.",
+      "headSha": "ad1baf27810ad169114829f8d28049410f3eeda8",
+      "negativeControl": "Case 0, a dispatch comment, was allowed in both modes with no rules call, so the refusals come from the asks the calls open."
+    },
+    {
+      "criterion": "Design 10: an unmarked write that carries an ask is recorded on Dispatch with outcome unmarked and asksCarried, no ask text, in one document per session with the gate's own records (a defect found by the runs and fixed in 9aed5df8).",
+      "surface": "The same sessions, the CLI's session ledger, and the per-session Dispatch documents read with dispatch doc-read.",
+      "command": "Runs c6-* (`echo x | dispatch ask …`), and c7-block (the pipe form, then the literal form, in one session) at 9aed5df8; `dispatch doc-read --project INFRA --artifact askgate-decisions-<session>-md`.",
+      "observed": "Block: the CLI refused the piped ask; warn: it posted with the CLI's warning and was retracted. Each ledger line carried askgate {mode, why, asksCarried: 1}, and each session's document holds one record outcome unmarked, asksCarried 1, no ask text. At 9aed5df8 the c7 session's document holds both records (unmarked asksCarried 1, then rule no_change).",
+      "headSha": "9aed5df868124734e6579fc42e412bff0a97234e",
+      "negativeControl": "At ad1baf27 the run c3-warn, an eval-cell doc-edit (unmarked, asksCarried 1 in its ledger) followed by a refused literal doc-edit, left a session document holding only the second record: two recorders, the second re-uploading the document under its name. The envoy.test.ts test 'an unmarked ask and a gated call in one session share the decision document: it is uploaded once and the second record appends' fails with uploads 2, appends 0 on that code."
+    },
+    {
+      "criterion": "A5: the runs' refusals, overrides and unmarked writes are counted through Dispatch alone, and the census prints the day's counts.",
+      "surface": "Production Dispatch, read with no access to the sessions' files.",
+      "command": "bun packages/pi-envoy/scripts/askgate-report.ts --dispatch-project INFRA --since 2026-10-29T00:00:00Z --json; bun scripts/dispatch/ask-census.ts --project INFRA --from 2026-10-29T00:00:00Z --to 2026-10-29T19:19:45Z --json",
+      "observed": "14 rules calls, 7 refusals (no_change 5, untried_access 2), 0 overrides, 1 rules error (a provider refusal under load), unmarkedBlock 2, unmarkedWarn 1, unmarkedAsks 3, all pod. Census: 70 asks on 34 issues. Recorded on dispatch://INFRA-168/artifact/askcheck-outcome-md (version 5).",
+      "headSha": "9aed5df868124734e6579fc42e412bff0a97234e",
+      "negativeControl": "The rebuttal runs (case 2) carry no preceding rules refusal on their target in their session, and the report counts 0 overrides for them, so an override is counted only after a refusal."
+    },
+    {
+      "criterion": "A1 and the port's design points: the pin holds unedited, and every design point has a test that fails with its code reverted.",
+      "surface": "pi-envoy's suite and the real Oh My Pi binary.",
+      "command": "cd packages/pi-envoy && bun test (1617 pass, 0 fail) && bun test extensions/askgate/askgate.test.ts -t 'byte for byte' && LEGION_TEST_OMP=/opt/omp/bin/omp bun test extensions/askgate/askgate-omp.test.ts; envoy-client 1177, pi-shared 91, scripts/dispatch 116 pass; inventory /legion/scratch/tmp/i168/inventory.tsv.",
+      "observed": "All green; A1 pin unedited; askgate-omp 10 pass; inventory 196 titles: 195 present, 1 rewritten (a scorer fixture now carries the CLI's unmarked refusal).",
+      "headSha": "9aed5df868124734e6579fc42e412bff0a97234e",
+      "negativeControl": "The reviewer's callKeys mutants (upload key dropped: 3 fail; content digest dropped: 2 fail) and one revert per design point (listed in the test commit's report) each turn tests red."
     }
   ],
   "filesChanged": [
-    "packages/pi-envoy/extensions/askgate/askgate.test.ts — three tests; no other file."
+    "184fd899 merge of main a1a134a3: main's text for every #2159-owned file and every file the port rewrites; envoy-and-contracts.yaml and skills/dispatch/references/examples.md stay deleted.",
+    "6966910a core port: askgate-core.ts, new breaker.ts, askgate.ts, envoy.ts host shape, rules-check.ts/decision-record.ts/text.ts shared exports, M's tests adapted where a design point changed them.",
+    "d6a155fa unmarked record: new-asks moved to packages/envoy-client/src/askgate-new-asks.ts with its test, dispatch-cli.ts asksCarried, dispatch-session-state.ts, package.json export, decision-record.ts predicate and field, askgate.ts recorder, envoy.ts ledger handler, ci.yaml and ci_job_reads.py testdata filter.",
+    "cc5b5700 tests: #2161's tests on the marker gate, rules-check.test.ts, one test per design point.",
+    "ad1baf27 report, rig, scorer, README/AGENTS, docs/kubernetes.md, the deploy overlay, changelog fragments under packages/{pi-envoy,envoy-client,pi-legion}/.changes/unreleased/.",
+    "9aed5df8 one shared decision recorder (askgate.ts, askgate-core.ts) and its envoy.test.ts test."
+  ],
+  "trickyParts": [
+    "The marker's argv is taken from the command the handler finally returns, after keepOverrideVisible; the override comment is never an argv word, so the digest equals what bash hands the CLI.",
+    "Two decision recorders in one process each held their own per-session document id; Dispatch replaces a document uploaded again under its name, so the second recorder's first upload dropped the first's records."
   ],
   "deviations": [
-    "One push carries the test and this handoff, with one PR body edit and the one required thread reply, as the architect asked during the CI backlog."
+    "Changelog entries are fragment files (root AGENTS.md, since #2419), so no CHANGELOG.md is edited, where plan rev 11 said to set CHANGELOG.md text by hand.",
+    "main moved 3 commits past the plan's M (64d2ad0b) before the merge; the merge took current main a1a134a3, which adds two CHANGELOG conflicts (claude-envoy, envoy-plugin) resolved as main's text.",
+    "ce-simplify-code was not run this turn: the plan puts it after the last review round, and the pr-body rule allows one pass per pull request."
   ],
   "openQuestions": [
-    "sjawhar/legion#2159 is still open at 0aa47421c; sign-off waits on its merge per plan rev 10."
+    "This pod runs the default 30 s tool-call ceiling, so AskGate's deadline here is 20,000 ms (main's alone was 25,000 ms); the charter review of A4's control ask took 21-23 s and timed out there. The PR's risk line says so; the operator overlay sets 120000 for the gate."
   ]
 }
