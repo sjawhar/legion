@@ -37,7 +37,8 @@ func TestADrainEndsTheKVWatchersBeforeTheConnection(t *testing.T) {
 			_, uri := testnats.Start(t)
 			logs := captureBusLogs(t)
 
-			client, err := bus.ConnectOwningStream([]string{uri}, bus.WithReplicas(1), bus.WithName(t.Name()))
+			name := t.Name()
+			client, err := bus.ConnectOwningStream([]string{uri}, bus.WithReplicas(1), bus.WithName(name))
 			if err != nil {
 				t.Fatalf("connect: %v", err)
 			}
@@ -80,7 +81,7 @@ func TestADrainEndsTheKVWatchersBeforeTheConnection(t *testing.T) {
 			// nats.go runs an async error report after the drain's close only if it queued it before
 			// closing its callback queue; the wait gives one queued in time the moment to log.
 			time.Sleep(200 * time.Millisecond)
-			if got := strings.Join(warnOrErrorRecords(t, logs), ", "); got != test.want {
+			if got := strings.Join(warnOrErrorRecords(t, logs, name), ", "); got != test.want {
 				t.Fatalf("the drain logged %q, want %q", got, test.want)
 			}
 			if consumers := consumerNames(adminJS, "KV_drain_kv_watcher"); len(consumers) != 0 {
@@ -166,7 +167,7 @@ func TestWarnOrErrorRecordsTakesAClientThatHasLoggedNothing(t *testing.T) {
 	}
 	t.Cleanup(client.Close)
 
-	if got := warnOrErrorRecords(t, logs); len(got) != 0 {
+	if got := warnOrErrorRecords(t, logs, t.Name()); len(got) != 0 {
 		t.Fatalf("the records of a client that has logged nothing = %q, want none", got)
 	}
 }
@@ -180,21 +181,24 @@ func consumerNames(js natsgo.JetStreamContext, stream string) []string {
 	return names
 }
 
-// warnOrErrorRecords is every WARN or ERROR record the client under test logged so far, each as
-// its level and message, with the error for an async error report. The capture (captureBusLogs)
-// is the process's default logger, so every client of every test running in this binary writes
-// into it, and a record naming another client is dropped: without that, a client an earlier test
-// left connected to a cluster it has stopped fails this test with its reconnect warning. The
-// client under test must therefore be connected with bus.WithName(t.Name()), and this refuses the
-// test that does not do it rather than silently dropping that client's own records too: every
-// client carries a name, "envoy" when the test sets none, and a connected client logs at least
-// its own `envoy nats connected`. A record naming no client is kept, since the records these
-// tests require are a watcher's and a reconcile's, which name none.
-func warnOrErrorRecords(t *testing.T, logs *busLogs) []string {
+// warnOrErrorRecords is every WARN or ERROR record the client named name logged so far, each as
+// its level and message, with the error for an async error report. name is the name that client
+// was connected with (bus.WithName), and the caller passes it rather than the helper deriving it:
+// nothing a connected client logs carries its name until its close, so a helper that waited for a
+// record of the client under test would make its caller race nats.go's callbacks
+// (TestWarnOrErrorRecordsTakesAClientThatHasLoggedNothing). The capture (captureBusLogs) is the
+// process's default logger, so every client of every test running in this binary writes into it,
+// and a record naming another client is dropped: without that, a client an earlier test left
+// connected to a cluster it has stopped fails this test with its reconnect warning. A caller that
+// names no client is refused, since this assertion would otherwise read every client of the
+// binary or drop the records it is for. A record naming no client is kept, since the records
+// these tests require are a watcher's and a reconcile's, which name none.
+func warnOrErrorRecords(t *testing.T, logs *busLogs, name string) []string {
 	t.Helper()
-	name := t.Name()
+	if name == "" {
+		t.Fatal("warnOrErrorRecords needs the name the client under test was connected with (bus.WithName)")
+	}
 	var records []string
-	named := false
 	for _, line := range logs.lines() {
 		if line == "" {
 			continue
@@ -208,9 +212,6 @@ func warnOrErrorRecords(t *testing.T, logs *busLogs) []string {
 		if err := json.Unmarshal([]byte(line), &record); err != nil {
 			t.Fatalf("decode the log record %q: %v", line, err)
 		}
-		if record.Name == name {
-			named = true
-		}
 		if record.Level != "WARN" && record.Level != "ERROR" {
 			continue
 		}
@@ -222,9 +223,6 @@ func warnOrErrorRecords(t *testing.T, logs *busLogs) []string {
 			continue
 		}
 		records = append(records, record.Level+" "+record.Msg)
-	}
-	if !named {
-		t.Fatalf("no captured record names %q, so this test's own client cannot be told from another test's: connect it with bus.WithName(t.Name())", name)
 	}
 	return records
 }
