@@ -296,6 +296,16 @@ type Client struct {
 	reconnectWaitTick func()
 	mu                sync.Mutex
 
+	// deniedPublishes holds, under mu, the server's refusal of a publish per subject it refused a
+	// publish to, as the connection reported it (recordPublishDenial), for the publish of that
+	// subject to read once (deniedPublish). nats.go keeps one last error per connection, so a
+	// publish window that sent several denied subjects at once could name only the violation that
+	// landed last and left every other denied send to its acknowledgement timeout; a record per
+	// subject names each of them. It belongs to the connection in Conn: a reconnect and a
+	// replacement connection each clear it (clearPublishDenials), a record retention has spent is
+	// dropped when the next one is recorded, and a read takes its record out.
+	deniedPublishes map[string]publishViolation
+
 	// subscriptionsMu guards subscriptions and stopMode. It is held to read and write them, never
 	// across a bind's request to the server, so a reconnect's restore, the health reads and Drain
 	// never wait out a request the reconnect lost.
@@ -484,6 +494,9 @@ func (c *Client) install(nc *nats.Conn, stream *nats.StreamConfig) error {
 	}
 	c.mu.Lock()
 	c.Conn, c.js = nc, js
+	// The violations the replaced connection was told of answered its publishes, and this
+	// connection's grant is its own.
+	c.clearPublishDenials()
 	c.mu.Unlock()
 	return nil
 }
@@ -717,9 +730,16 @@ func (c *Client) subscriptionOK(transport subscriptionTransport) bool {
 var subscriptionRefusal = regexp.MustCompile(`Subscription to ("(?:[^"\\]|\\.)*")(?: using queue ("(?:[^"\\]|\\.)*"))?(?: \(sid ("(?:[^"\\]|\\.)*")\))?`)
 
 // onAsyncError is wired as the connection's async error callback, after the error is logged. A
-// server's refusal of the client's core subscription marks it refused for CoreSubOK. Any other
-// error, a refusal of a publish or of another subscription among them, changes nothing, and so
-// does one a connection the client has since replaced reports late.
+// server's refusal of a publish is recorded under the subject it refused, for that publish to read
+// (recordPublishDenial); its refusal of the client's core subscription marks it refused for
+// CoreSubOK. Any other error, a refusal of another subscription among them, changes nothing, and
+// so does one a connection the client has since replaced reports late.
+//
+// The publish case is here because the connection is where the server reports it: a denied publish
+// is acknowledged by nothing, and nats.go keeps one last error per connection, so a publish window
+// that sent several denied subjects at once leaves only the last of their violations in that slot.
+// The record keeps each under its own subject instead, so every denied send of such a window is
+// answered its own denial (window.acknowledged).
 //
 // A refusal of a subscription the client sent names its subject and, when it has one, its queue
 // group, and both must be the core registration's. A reload's revocation names the subject and the
@@ -734,6 +754,9 @@ var subscriptionRefusal = regexp.MustCompile(`Subscription to ("(?:[^"\\]|\\.)*"
 // mark so a replacement connection cannot be installed between the check and the mark.
 func (c *Client) onAsyncError(nc *nats.Conn, err error) {
 	if !errors.Is(err, nats.ErrPermissionViolation) {
+		return
+	}
+	if c.recordPublishDenial(nc, err) {
 		return
 	}
 	match := subscriptionRefusal.FindStringSubmatch(err.Error())
@@ -1189,17 +1212,6 @@ func (c *Client) refused(err error, size int) error {
 	return err
 }
 
-// lastError is the last error the client's connection recorded, nats.go's one slot per connection,
-// and ErrInvalidConnection on a client that has yet to hold one. It is the only evidence a denied
-// JetStream publish leaves its publisher (publishJetStream), since the server reports a
-// permissions violation on the connection and never in the publish's own answer.
-func (c *Client) lastError() error {
-	c.mu.Lock()
-	conn := c.Conn
-	c.mu.Unlock()
-	return conn.LastError()
-}
-
 // publishBound bounds Publish, PublishCoreTo and PublishReportingDuplicate, and the publishJetStream
 // and publishCoreTo of a caller that passed no deadline of its own: their wait for a reconnect and
 // their flush or JetStream acknowledgement together. A publish window's sends take
@@ -1274,10 +1286,11 @@ func (c *Client) PublishReportingDuplicateWithin(ctx context.Context, item contr
 // A publish the server refuses under the connection's own publish permissions is answered
 // ErrPublishDenied, as a publish window's sends are (window.acknowledged): a denied JetStream
 // publish is acknowledged by nothing, so its caller would otherwise meet the acknowledgement
-// wait's timeout, or a no-responders error, and never the denial. The connection's last error is
-// what names it, with confirmPublished's documented ambiguity: nats.go keeps one last error per
-// connection, so a violation of another subject recorded in between leaves this publish named as
-// it was before.
+// wait's timeout, or a no-responders error, and never the denial. What names it is the violation
+// the connection recorded under this very subject (deniedPublish), from the time this publish put
+// the message on the wire on: a violation of another subject no longer stands in for this
+// publish's, as it did while the connection's one last error was what the denial was read off, and
+// one recorded before this send belongs to an earlier publish of the subject.
 //
 // A ctx that has already ended never puts the message on the wire here, and that protection is
 // the dependency's rather than this repository's: js.Publish under nats.Context is a request, and
@@ -1308,15 +1321,17 @@ func (c *Client) publishJetStream(ctx context.Context, item contracts.Envelope) 
 	// publish sends data under options, once more if the connection had closed, and names a
 	// refusal as the ErrPublishDenied, ErrTooLarge or ErrStreamFull it is.
 	publish := func(options ...nats.PubOpt) (*nats.PubAck, error) {
+		sentAt := time.Now()
 		ack, err := c.JS().Publish(item.Topic, data, options...)
 		if err != nil && errors.Is(err, nats.ErrConnectionClosed) {
 			if err := c.ensureConnWithContext(ctx); err != nil {
 				return nil, err
 			}
+			sentAt = time.Now()
 			ack, err = c.JS().Publish(item.Topic, data, options...)
 		}
 		if err != nil {
-			if denied := publishDenial(c.lastError(), item.Topic); denied != nil {
+			if denied := c.deniedPublish(item.Topic, sentAt); denied != nil {
 				return nil, denied
 			}
 			return nil, streamFull(c.refused(err, len(data)))

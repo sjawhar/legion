@@ -3,6 +3,7 @@ package outbox
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
@@ -309,20 +310,34 @@ func TestRunRetriesAnIssueTopicNATSDenies(t *testing.T) {
 		t.Fatalf("the issue subscriber received %q through a denied publish", message.Data)
 	default:
 	}
+	// The deployment's alert on a denied publish (dispatch://INFRA-749) matches this line and
+	// nothing else, so each part of it is asserted as the literal text that alert greps for: the
+	// level, the message, the event the line names, the subject that was refused, and
+	// bus.ErrPublishDenied's own words. A reword or a lowered level is a change INFRA-749 depends
+	// on, and fails here rather than silently stopping the alert.
 	lines := 0
 	for _, line := range strings.Split(logged.String(), "\n") {
 		if strings.Contains(line, bus.ErrUnavailable.Error()) {
 			t.Fatalf("line %q reports the denied publish as an outage", line)
 		}
-		if strings.Contains(line, "dispatch outbox: publish event") {
-			lines++
-			if !strings.Contains(line, issueTopic) || !strings.Contains(line, "Permissions Violation for Publish") {
-				t.Fatalf("retry line %q does not name the issue subject and the violation", line)
+		if !strings.Contains(line, `msg="dispatch outbox: publish event"`) {
+			continue
+		}
+		lines++
+		for _, want := range []string{
+			"level=ERROR",
+			fmt.Sprintf("event_id=%d", event.ID),
+			issueTopic,
+			"NATS denied the publish",
+			"Permissions Violation for Publish",
+		} {
+			if !strings.Contains(line, want) {
+				t.Fatalf("the denial line %q does not carry %q, which the deployment's alert matches on", line, want)
 			}
 		}
 	}
 	if lines != 1 {
-		t.Fatalf("logged %d retry lines, want one:\n%s", lines, logged.String())
+		t.Fatalf("logged %d denial lines, want one:\n%s", lines, logged.String())
 	}
 	response := httptest.NewRecorder()
 	registry.Handler().ServeHTTP(response, httptest.NewRequest(http.MethodGet, "/metrics", nil))
