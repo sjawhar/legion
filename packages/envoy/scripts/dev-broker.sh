@@ -13,11 +13,13 @@
 # Kubernetes ServiceAccount token (BROKER_API_ACCOUNTS, verified against BROKER_K8S_OIDC_ISSUER),
 # and so does the RFC 8693 token exchange's subject token. With no cluster to mint one, this
 # script starts cmd/dev-oidc-issuer, the Go tests' local issuer (internal/oidc/oidctest) served on
-# a loopback port, which keeps two tokens in WORK_DIR and rewrites each before it lapses, as a
+# a loopback port, which keeps three tokens in WORK_DIR and rewrites each before it lapses, as a
 # kubelet does a pod's projected token: account-token, for API_ACCOUNT, the caller "dispatch" the
-# broker lists, which agent-secrets-devrelay presents in Dispatch's place; and exchange-token, for
-# EXCHANGE_ACCOUNT's pod, which the broker's exchange takes for a Dispatch access token. The
-# broker trusts that issuer for both.
+# broker lists, which agent-secrets-devrelay presents in Dispatch's place; listener-token, for
+# LISTENER_ACCOUNT, the caller "listener", which the broker lists for introspection alone, so a
+# person can see a listed caller refused a route its name does not carry (403
+# ACCOUNT_LACKS_POWER); and exchange-token, for EXCHANGE_ACCOUNT's pod, which the broker's
+# exchange takes for a Dispatch access token. The broker trusts that issuer for all three.
 #
 # Each invocation creates and drops its own isolated Postgres database (named from this run's own
 # WORK_DIR, below) and binds an OS-assigned ephemeral port (BROKER_LISTEN_ADDR=127.0.0.1:0), so two
@@ -74,16 +76,18 @@ SECRETS_KMS_KEY_ARN="arn:aws:kms:us-east-1:111122223333:key/1234abcd-12ab-34cd-5
 BROKER_LOG="$WORK_DIR/broker.log"
 OPERATOR_FILE="$WORK_DIR/operator"
 # The local issuer and what it mints for (above): the audience every enrolment and listed caller's
-# token carries, the exchange's own audience, and the two accounts, as internal/broker/brokertest's
+# token carries, the exchange's own audience, and the three accounts, as internal/broker/brokertest's
 # rig names them. The exchange entry fixes no session, so a pod names its own.
 ISSUER_BIN="$BIN_DIR/dev-oidc-issuer"
 ISSUER_LOG="$WORK_DIR/issuer.log"
 BROKER_AUDIENCE="legion-broker-pod"
 EXCHANGE_AUDIENCE="legion-broker-exchange"
 API_ACCOUNT="system:serviceaccount:example-ns:example-dispatch"
+LISTENER_ACCOUNT="system:serviceaccount:example-ns:example-listener"
 EXCHANGE_ACCOUNT="system:serviceaccount:example-ns:example-worker"
 EXCHANGE_PROJECT="EXAMPLE"
 ACCOUNT_TOKEN_FILE="$WORK_DIR/account-token"
+LISTENER_TOKEN_FILE="$WORK_DIR/listener-token"
 EXCHANGE_TOKEN_FILE="$WORK_DIR/exchange-token"
 # This instance's own database, named from WORK_DIR's mktemp-generated random suffix (already
 # unique per invocation). Postgres unquoted identifiers fold to lowercase anyway, but lowercase
@@ -179,13 +183,14 @@ EOF
 chmod 600 "$FAKE_SECRETS_FILE"
 echo "$APPROVER_LOGIN" >"$OPERATOR_FILE"
 
-# --- Start the local issuer, teed like the broker below. It writes both token files before it
+# --- Start the local issuer, teed like the broker below. It writes every token file before it
 # logs its URL, so once that line is in ISSUER_LOG the files are there for devrelay and a pod to
 # read, and the URL is the issuer the broker discovers at boot. ---
 echo "dev-broker: starting dev-oidc-issuer..." >&2
 : >"$ISSUER_LOG"
 "$ISSUER_BIN" \
   --token "$BROKER_AUDIENCE=$API_ACCOUNT=$ACCOUNT_TOKEN_FILE" \
+  --token "$BROKER_AUDIENCE=$LISTENER_ACCOUNT=$LISTENER_TOKEN_FILE" \
   --token "$EXCHANGE_AUDIENCE=$EXCHANGE_ACCOUNT=$EXCHANGE_TOKEN_FILE" \
   > >(trap '' TERM INT; exec tee -a "$ISSUER_LOG" >&2) 2>&1 &
 ISSUER_PID=$!
@@ -230,7 +235,7 @@ BROKER_DRAIN_SECONDS=0 \
 BROKER_LISTEN_ADDR="$LISTEN_ADDR" \
 BROKER_K8S_OIDC_ISSUER="$ISSUER_URL" \
 BROKER_K8S_OIDC_AUDIENCE="$BROKER_AUDIENCE" \
-BROKER_API_ACCOUNTS="dispatch=$API_ACCOUNT" \
+BROKER_API_ACCOUNTS="dispatch=$API_ACCOUNT listener=$LISTENER_ACCOUNT" \
 BROKER_EXCHANGE_K8S_AUDIENCE="$EXCHANGE_AUDIENCE" \
 BROKER_EXCHANGE_ACCOUNTS="$EXCHANGE_ACCOUNT=$EXCHANGE_PROJECT=$APPROVER_LOGIN" \
 "$BROKER_BIN" > >(trap '' TERM INT; exec tee -a "$BROKER_LOG" >&2) 2>&1 &
@@ -302,6 +307,7 @@ dev-broker: ready.
   database:            $DISPLAY_URL  (this instance's own; created and dropped by this script)
   token issuer:        $ISSUER_URL  (dev-oidc-issuer, logging to $ISSUER_LOG)
   caller token:        $ACCOUNT_TOKEN_FILE  ($API_ACCOUNT, the caller "dispatch")
+  listener token:      $LISTENER_TOKEN_FILE  ($LISTENER_ACCOUNT, the caller "listener")
   exchange token:      $EXCHANGE_TOKEN_FILE  ($EXCHANGE_ACCOUNT's pod, audience $EXCHANGE_AUDIENCE)
 
   One agent-tier secret (DEMO_READ_TOKEN, granted without asking) and one human-tier secret
@@ -310,11 +316,14 @@ dev-broker: ready.
   Drive it with agent-secrets and agent-secrets-helper in another shell;
   press Ctrl-C here to stop the broker and its issuer.
 
-  The broker lists the caller token's account as its caller "dispatch" (BROKER_API_ACCOUNTS) and
-  trusts dev-oidc-issuer's ServiceAccount tokens (BROKER_K8S_OIDC_ISSUER); the issuer rewrites
-  each token file before its token lapses. agent-secrets-devrelay presents the caller token
-  (AGENT_SECRETS_ACCOUNT_TOKEN_FILE) to approve or deny a record or a machine login as Dispatch's
-  server does. The RFC 8693 token exchange (POST /v1/oauth/token) takes the exchange token as a
+  The broker lists two callers (BROKER_API_ACCOUNTS) and trusts dev-oidc-issuer's ServiceAccount
+  tokens (BROKER_K8S_OIDC_ISSUER); the issuer rewrites each token file before its token lapses.
+  The caller "dispatch" reaches every named-caller route; the caller "listener" reaches
+  POST /v1/oauth/introspect alone, so the listener token on an approval or revocation route is
+  403 ACCOUNT_LACKS_POWER naming that caller and that route. agent-secrets-devrelay presents the
+  caller token (AGENT_SECRETS_ACCOUNT_TOKEN_FILE) to approve or deny a record or a machine login
+  as Dispatch's server does. The RFC 8693 token exchange (POST /v1/oauth/token) takes the
+  exchange token as a
   pod's subject token, with a DPoP proof of the caller's own key and a session name of its
   choosing, and mints an access token that writes $EXCHANGE_PROJECT for $APPROVER_LOGIN.
 EOF

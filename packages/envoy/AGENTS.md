@@ -4027,9 +4027,15 @@ person's behalf, and the introspection route a resource server reads an access t
 through. Each caller presents its own projected token for `BROKER_K8S_OIDC_AUDIENCE`, verified
 against `BROKER_K8S_OIDC_ISSUER` as every other ServiceAccount token is, so this needs that pair;
 a token living longer than an hour from its issue is refused, as a service login's is. The
-caller's name (lowercase letters, digits and hyphens, at most 64) is only what the log calls it
-when it acts. A namespace's `default` account is refused, as is an account given twice, since
-each account names one caller. Keyed by account. Unset, no caller reaches those routes, which is
+caller's name (lowercase letters, digits and hyphens, at most 64) decides what that account may
+do: the broker's own table (`api.AccountFor`, `internal/broker/api/routes_table.go`) knows
+`dispatch`, which reaches every one of those routes, and `listener`, which reaches
+`POST /v1/oauth/introspect` alone, since the Envoy listener reads a token back and relays no
+person's decision. A name that table does not know refuses the boot, naming it and the names it
+knows, so a typo never becomes a listed caller that reaches nothing and a new caller is a
+deliberate edit to that table. A namespace's `default` account is refused, as is an account given
+twice, since each account names one caller. Keyed by account, each answering its caller and that
+caller's powers. Unset, no caller reaches those routes, which is
 how a local run without a cluster leaves them),
 `BROKER_SECRETS_STORE` (optional; `aws-secrets-manager`, the default, or `gcp-secret-manager`:
 which store the secrets live in, deciding the prefix's form and which key variable is read),
@@ -4215,9 +4221,16 @@ so a handler cannot be wired to the wrong kind of caller. A bad credential is a 
 (`LAUNCHER_INVALID`, `PROOF_INVALID`, or, for `accountAuth`, `ACCOUNT_TOKENS_OFF` on a broker
 that trusts no Kubernetes issuer, `ACCOUNT_TOKEN_EXPIRED`, `ACCOUNT_TOKEN_INVALID` and
 `ACCOUNT_TOKEN_TOO_LONG_LIVED` for a token that names no `iat` or whose `exp` lies more than
-`machine.MaxTokenLoginLifetime` plus the proof skew past it, with the one 403,
-`ACCOUNT_NOT_LISTED`, for a sound token of an account `BROKER_API_ACCOUNTS` does not name: the
-credential is good and it is the broker's list that refuses, and no refusal repeats the token.
+`machine.MaxTokenLoginLifetime` plus the proof skew past it, with two 403s:
+`ACCOUNT_NOT_LISTED`, for a sound token of an account `BROKER_API_ACCOUNTS` does not name — the
+credential is good and it is the broker's list that refuses — and `ACCOUNT_LACKS_POWER`, for a
+listed caller reaching a route its name does not carry, naming that caller and that route. No
+refusal repeats the token. Each `accountAuth` row declares the power it needs, `readsTokensBack`
+(`POST /v1/oauth/introspect`) or `relaysDecisions` (the nine routes Dispatch's server relays a
+person's decisions and reads through), `accountPowers` says which powers each caller name
+carries, and `authenticate` checks the two before the handler runs, so listing an account for
+introspection alone never gives it approval or revocation authority
+(`TestEveryAccountRouteDeclaresItsPower` fails on a row that declares none).
 `accountCaller` is the check a service's token login makes
 (`machine.Service.VerifyServiceToken`), against the same verifier and with the same taxonomy);
 `renewAuth` alone adds

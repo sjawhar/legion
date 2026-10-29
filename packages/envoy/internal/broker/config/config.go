@@ -22,6 +22,7 @@ import (
 
 	"github.com/jackc/pgx/v5/pgconn"
 
+	"github.com/sjawhar/envoy/internal/broker/api"
 	"github.com/sjawhar/envoy/internal/broker/exchange"
 	"github.com/sjawhar/envoy/internal/broker/policy"
 	"github.com/sjawhar/envoy/internal/broker/record"
@@ -68,12 +69,18 @@ type Config struct {
 	// projected token, for BROKER_K8S_OIDC_AUDIENCE, on those routes, verified against
 	// BROKER_K8S_OIDC_ISSUER as every other ServiceAccount token the broker takes is, so this
 	// needs that pair. A token that lives longer than an hour from its issue is refused, as a
-	// service's login token is. The caller's name
-	// (lowercase letters, digits and hyphens, at most 64) is what the broker's log names it when
-	// it acts; nothing else reads it. A namespace's default account is refused, as is an account
-	// given twice, since each account names one caller. Keyed by account, each answering its
-	// caller. Unset, no caller reaches those routes.
-	APIAccounts map[string]string
+	// service's login token is. The caller's name decides what the account may do, and the broker
+	// knows two: dispatch reaches every one of those routes, the nine Dispatch's server relays a
+	// person's decisions and reads through as well as introspection, and listener reaches
+	// introspection alone, since the Envoy listener reads a token back and relays no decision. A
+	// name the broker does not know refuses the boot naming it and the names it knows, so a typo
+	// never quietly produces a caller that reaches nothing, and a new caller is a deliberate
+	// edit to the broker's own table (api.AccountFor). A listed caller reaching a route its name
+	// does not carry is 403 ACCOUNT_LACKS_POWER, which is a different fact from an account that
+	// is not listed at all (403 ACCOUNT_NOT_LISTED). A namespace's default account is refused, as
+	// is an account given twice, since each account names one caller. Keyed by account, each
+	// answering its caller and that caller's powers. Unset, no caller reaches those routes.
+	APIAccounts map[string]api.Account
 	// BROKER_SECRETS_STORE: which secret store the agent secrets live in: aws-secrets-manager (the
 	// default when unset, AWS Secrets Manager with the agent-secrets key in AWS KMS) or
 	// gcp-secret-manager (Google Cloud Secret Manager with the agent-secrets key in Cloud KMS, read
@@ -586,10 +593,17 @@ func Load(getenv func(string) string) (Config, error) {
 		return Config{}, err
 	}
 	for _, entry := range callers {
-		if cfg.APIAccounts == nil {
-			cfg.APIAccounts = map[string]string{}
+		// A caller's name is an authority and not a label — it decides which of the broker's
+		// named-caller routes that account reaches — so a name the broker's own table does not
+		// know is refused here, rather than listed as a caller that reaches nothing.
+		account, known := api.AccountFor(entry.service)
+		if !known {
+			return Config{}, fmt.Errorf("BROKER_API_ACCOUNTS names the caller %q, which this broker does not know, got %q: its callers are %s", entry.service, entry.text, strings.Join(api.KnownCallers(), ", "))
 		}
-		cfg.APIAccounts[entry.subject] = entry.service
+		if cfg.APIAccounts == nil {
+			cfg.APIAccounts = map[string]api.Account{}
+		}
+		cfg.APIAccounts[entry.subject] = account
 	}
 	if len(cfg.APIAccounts) > 0 && cfg.K8sOIDCIssuer == "" {
 		return Config{}, fmt.Errorf("BROKER_API_ACCOUNTS needs BROKER_K8S_OIDC_ISSUER and BROKER_K8S_OIDC_AUDIENCE, whose tokens its callers present")

@@ -16,8 +16,8 @@ import (
 
 	"github.com/sjawhar/envoy/internal/broker/api"
 	"github.com/sjawhar/envoy/internal/broker/enroll"
-	"github.com/sjawhar/envoy/internal/ratelimit"
 	"github.com/sjawhar/envoy/internal/oidc/oidctest"
+	"github.com/sjawhar/envoy/internal/ratelimit"
 )
 
 // countingAccountTokens is the test server's own account verifier, counting every token it is

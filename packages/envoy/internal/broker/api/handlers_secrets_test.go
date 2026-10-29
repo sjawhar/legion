@@ -18,8 +18,8 @@ import (
 	"github.com/sjawhar/envoy/internal/broker/api"
 	"github.com/sjawhar/envoy/internal/broker/policy"
 	"github.com/sjawhar/envoy/internal/broker/policy/policytest"
-	"github.com/sjawhar/envoy/internal/ratelimit"
 	"github.com/sjawhar/envoy/internal/broker/secrets"
+	"github.com/sjawhar/envoy/internal/ratelimit"
 )
 
 // wireSettings is GET /v1/settings's answer as the CLI reads it.
