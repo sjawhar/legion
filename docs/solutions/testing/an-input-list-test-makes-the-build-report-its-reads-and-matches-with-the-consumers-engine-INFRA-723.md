@@ -39,7 +39,7 @@ Extends docs/solutions/testing/a-test-over-a-contract-derives-the-enumeration-an
 - sjawhar/legion#2493: `buildBundles` and `buildLegionPlugin` in
   `packages/claude-envoy/scripts/build.ts` return `Promise<string[]>` of absolute reads.
   `packages/claude-envoy/tests/build-inputs.test.ts` merges both results and matches them with git
-  (`ls-files` at line 113). It runs in pr-and-main.yaml's required `test` job.
+  (`ls-files` at line 113). It runs in ci.yaml's `test` job, which `ci-ok` sums up.
 - Review thread PRRT_kwDORFy7ds6xe-nV: round 1's test copied `buildLegionPlugin`'s reads by hand.
   Fixed in b36421220f41. Removing `packages/pi-legion/agents` from the list then fails the test,
   naming the six agent files from the build's own report.

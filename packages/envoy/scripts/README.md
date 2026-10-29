@@ -116,8 +116,7 @@ process of this checkout's own build, stopped on exit with the listener and the
 two fake clients. Unlike
 `probe-webhook-e2e.sh`, it has no deployment URL or secret prerequisite: it
 validates local branch behavior only. CI runs it as the `envoy-e2e-local` job of
-`.github/workflows/envoy-and-contracts.yaml` on every change to
-`packages/envoy`, `packages/envoy-client` or `packages/contracts`.
+`.github/workflows/ci.yaml` on every change its `envoy_e2e_local` filter matches.
 
 ## listener-deploy-probe.sh
 
@@ -198,7 +197,7 @@ listener that opens `/v1` once its caches are warm passes.
 `listener-deploy-probe.test.sh` proves the verdict over two fake tasks, one
 Python process per case serving `127.0.0.1` and `127.0.0.2` on one port the
 kernel chose, behind a fake `getent`; CI runs it in the `envoy-go` job of
-`.github/workflows/envoy-and-contracts.yaml`.
+`.github/workflows/ci.yaml`.
 
 ## Measuring search on a copy of the corpus
 

@@ -710,7 +710,7 @@ go vet ./...
 
 The real-process memory tests (`memory_test.go`, LEGION-481) start a Dispatch server per row and
 read its resident memory from `/proc`, so they build only under the `memory` tag and run in their
-own CI job (`dispatch-memory` in `.github/workflows/envoy-and-contracts.yaml`), past `go test`'s
+own CI job (`dispatch-memory` in `.github/workflows/ci.yaml`), past `go test`'s
 default ten-minute deadline:
 
 ```sh
@@ -718,7 +718,7 @@ env DISPATCH_TEST_DATABASE_URL=… go test -tags memory -count=1 -timeout 60m ./
 ```
 
 The `dispatch-memory` job runs only when a file its `dispatch_memory` filter in
-`.github/workflows/envoy-and-contracts.yaml` names changes. `cmdtest.Build` builds `./cmd/dispatch`
+`.github/workflows/ci.yaml` names changes. `cmdtest.Build` builds `./cmd/dispatch`
 itself, so every package the server imports is in that filter; `packages/envoy/AGENTS.md` (Critical
 conventions) says what keeps it current.
 
@@ -731,7 +731,7 @@ people kept signed in across a key rotation, a process whose key set a live peer
 refused at boot, `server.started` published once per fleet-wide build, every dashboard asset of
 either of two builds served by both processes, and the builds `GET /api/v1/dashboard/builds` names
 as live. They build only under the `multiprocess` tag and run in their own CI job
-(`dispatch-multiprocess` in `.github/workflows/envoy-and-contracts.yaml`), because two servers and
+(`dispatch-multiprocess` in `.github/workflows/ci.yaml`), because two servers and
 their NATS take minutes rather than seconds:
 
 ```sh
@@ -739,7 +739,7 @@ env DISPATCH_TEST_DATABASE_URL=… go test -tags multiprocess -count=1 -timeout 
 ```
 
 The `dispatch-multiprocess` job runs only when a file its `dispatch_multiprocess` filter in
-`.github/workflows/envoy-and-contracts.yaml` names changes; `packages/envoy/AGENTS.md` (Critical
+`.github/workflows/ci.yaml` names changes; `packages/envoy/AGENTS.md` (Critical
 conventions) says what keeps it current.
 
 A developer who runs only the block above runs neither tagged suite, which is why both are named
