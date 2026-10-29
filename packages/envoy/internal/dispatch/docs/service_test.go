@@ -657,7 +657,7 @@ func TestSetAskBlockTextRefusalOfATwoListAskQuotesEveryBlock(t *testing.T) {
 		ids = append(ids, strconv.Quote(id))
 	}
 	want := `block: ask block "ask-lists", asking "Should we ship?", holds a second bullet list where its content rule, paragraph+ bullet_list?, allows one or more paragraphs and then at most one bullet list, last; ` +
-		`the ask-edit route does not rebuild a decision that breaks its content rule, so delete the blocks to drop, all in one document edit (dispatch doc-edit, deleting a block by its id; one edit holding one delete per block), which keeps its question and its first list; ` +
+		`the ask-edit route does not rebuild a decision that breaks its content rule, so delete the blocks to drop, all in one document edit (dispatch doc-edit, deleting a block by its id; one edit holding one delete per block), which keeps the question's paragraphs and the first list after them; ` +
 		`the blocks to delete are ` + ids[2] + `; then edit the ask; its blocks are: ` +
 		`block ` + ids[0] + ` (paragraph) reads "Should we ship?"; ` +
 		`block ` + ids[1] + ` (bullet_list) reads "- Ship: Release it\n- Hold: Wait for review"; ` +
@@ -716,10 +716,11 @@ func refusalDeletes(t *testing.T, err error) (deletes []string, quoted map[strin
 	return deletes, quoted
 }
 
-// followRefusal sends edit, reads the refusal's delete list, deletes every block on it in ONE
-// document edit, and sends every option back with the ask edit. The decision ends valid, and no
-// word is lost: every word outside the deleted blocks is kept, every word of them the refusal quoted.
-func followRefusal(t *testing.T, service *Service, artifactID string, edit AskBlockEdit, wantDeleted int, every []model.AskOption) {
+// followRefusal sends edit, reads the refusal's delete list, checks it names exactly the ask's
+// children at the indexes deleted, deletes every block on it in ONE document edit, and sends the
+// question and every option back with the ask edit. The decision ends valid, and no word is lost:
+// every word outside the deleted blocks is kept, every word of them the refusal quoted.
+func followRefusal(t *testing.T, service *Service, artifactID string, edit AskBlockEdit, deleted []int, question string, every []model.AskOption) {
 	t.Helper()
 	ask := firstAsk(liveTree(t, service, artifactID))
 	err := sendAskOptions(service, artifactID, edit)
@@ -727,8 +728,13 @@ func followRefusal(t *testing.T, service *Service, artifactID string, edit AskBl
 	if len(quoted) != len(ask.Children) {
 		t.Fatalf("the refusal quotes %d blocks, want the ask's %d: %v", len(quoted), len(ask.Children), err)
 	}
-	if len(deletes) != wantDeleted {
-		t.Fatalf("the refusal names %d blocks to delete, want %d: %v", len(deletes), wantDeleted, err)
+	want := make([]string, 0, len(deleted))
+	for _, index := range deleted {
+		id, _ := ask.Children[index].Attrs[pmdoc.BlockIDAttr].(string)
+		want = append(want, id)
+	}
+	if !slices.Equal(deletes, want) {
+		t.Fatalf("the refusal names %q to delete, want %q: %v", deletes, want, err)
 	}
 	kept, deletedWords := []string{}, []string{}
 	ops := make([]model.EditOp, 0, len(deletes))
@@ -746,17 +752,14 @@ func followRefusal(t *testing.T, service *Service, artifactID string, edit AskBl
 			deletedWords = append(deletedWords, word)
 		}
 	}
-	if len(ops) != len(deletes) {
-		t.Fatalf("the refusal names %q to delete, not all blocks of the ask", deletes)
-	}
 	if _, err := joinedApplyOps(service, artifactID, ops, model.Actor{Kind: "user", ID: "alice"}, nil); err != nil {
 		t.Fatalf("one document edit deleting %q, as the refusal names: %v", deletes, err)
 	}
-	if err := sendAskOptions(service, artifactID, AskBlockEdit{Options: &every}); err != nil {
+	if err := sendAskOptions(service, artifactID, AskBlockEdit{Question: &question, Options: &every}); err != nil {
 		t.Fatalf("ask edit after the document edit: %v", err)
 	}
 	settleCurrentGeneration(t, service, artifactID)
-	assertAskRepaired(t, service, artifactID, "ask-lists", "Should we ship?", every)
+	assertAskRepaired(t, service, artifactID, "ask-lists", question, every)
 	after := textWords(firstAsk(liveTree(t, service, artifactID)))
 	for _, word := range append(kept, deletedWords...) {
 		if !slices.Contains(after, word) {
@@ -774,7 +777,7 @@ func TestSetAskBlockTextRefusalOfABrokenAskNamesAPathThatApplies(t *testing.T) {
 	service, artifactID := seedIndexedShipAsk(t, "ask-lists")
 	editLiveTree(t, service, artifactID, appendToAsk(parsedBlock(t, "- Defer: Wait a week\n  - only if finance agrees\n")))
 	settleCurrentGeneration(t, service, artifactID)
-	followRefusal(t, service, artifactID, AskBlockEdit{Options: &[]model.AskOption{ship, hold}}, 1,
+	followRefusal(t, service, artifactID, AskBlockEdit{Options: &[]model.AskOption{ship, hold}}, []int{2}, "Should we ship?",
 		[]model.AskOption{ship, hold, {Label: "Defer", Description: "Wait a week, only if finance agrees"}})
 }
 
@@ -787,14 +790,105 @@ func TestSetAskBlockTextRefusalOfAThreeListAskNamesEveryDeleteInOneEdit(t *testi
 	editLiveTree(t, service, artifactID, appendToAsk(parsedBlock(t, "- Defer: Wait a week\n")))
 	editLiveTree(t, service, artifactID, appendToAsk(parsedBlock(t, "- Drop: Abandon it\n")))
 	settleCurrentGeneration(t, service, artifactID)
-	followRefusal(t, service, artifactID, AskBlockEdit{Options: &[]model.AskOption{ship, hold}}, 2,
+	followRefusal(t, service, artifactID, AskBlockEdit{Options: &[]model.AskOption{ship, hold}}, []int{2, 3}, "Should we ship?",
 		[]model.AskOption{ship, hold, {Label: "Defer", Description: "Wait a week"}, {Label: "Drop", Description: "Abandon it"}})
+}
+
+// Whatever shape breaks the rule - a list before the question, a paragraph after the list, a
+// paragraph holding no text before the one holding the question - the refusal names the blocks
+// whose deletion leaves the question's paragraphs and the first list after them, and a document
+// edit deleting exactly those applies.
+func TestSetAskBlockTextRefusalNamesADeleteThatAppliesWhateverTheShape(t *testing.T) {
+	ship := model.AskOption{Label: "Ship", Description: "Release it"}
+	hold := model.AskOption{Label: "Hold", Description: "Wait for review"}
+	emptyParagraph := func(id string) *pmdoc.Node {
+		return &pmdoc.Node{Type: "paragraph", Attrs: pmdoc.Attrs{pmdoc.BlockIDAttr: id}}
+	}
+	for name, test := range map[string]struct {
+		// children is the ask's blocks, given its question paragraph and its Ship/Hold list.
+		children func(t *testing.T, question, list *pmdoc.Node) []*pmdoc.Node
+		deleted  []int
+		question string
+		every    []model.AskOption
+	}{
+		"list before the question": {
+			children: func(t *testing.T, question, list *pmdoc.Node) []*pmdoc.Node {
+				return []*pmdoc.Node{parsedBlock(t, "- Early: First words\n"), question, list}
+			},
+			deleted: []int{0}, question: "Should we ship?",
+			every: []model.AskOption{{Label: "Early", Description: "First words"}, ship, hold},
+		},
+		"paragraph after the list": {
+			children: func(t *testing.T, question, list *pmdoc.Node) []*pmdoc.Node {
+				return []*pmdoc.Node{question, list, parsedBlock(t, "Decide by Friday.\n")}
+			},
+			deleted: []int{2}, question: "Should we ship?\n\nDecide by Friday.", every: []model.AskOption{ship, hold},
+		},
+		"empty first paragraph": {
+			children: func(t *testing.T, question, list *pmdoc.Node) []*pmdoc.Node {
+				return []*pmdoc.Node{emptyParagraph("empty-para"), list, question}
+			},
+			deleted: []int{0, 1}, question: "Should we ship?", every: []model.AskOption{ship, hold},
+		},
+		"empty first paragraph, two lists": {
+			children: func(t *testing.T, question, list *pmdoc.Node) []*pmdoc.Node {
+				return []*pmdoc.Node{emptyParagraph("empty-para"), list, parsedBlock(t, "- Defer: Wait a week\n"), question}
+			},
+			deleted: []int{0, 1, 2}, question: "Should we ship?",
+			every: []model.AskOption{ship, hold, {Label: "Defer", Description: "Wait a week"}},
+		},
+		"list, empty paragraph, list": {
+			children: func(t *testing.T, question, list *pmdoc.Node) []*pmdoc.Node {
+				return []*pmdoc.Node{parsedBlock(t, "- Defer: Wait a week\n"), emptyParagraph("empty-para"), list, question}
+			},
+			deleted: []int{0, 1, 2}, question: "Should we ship?",
+			every: []model.AskOption{ship, hold, {Label: "Defer", Description: "Wait a week"}},
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			service, artifactID := seedIndexedShipAsk(t, "ask-lists")
+			editLiveTree(t, service, artifactID, func(tree *pmdoc.Node) *pmdoc.Node {
+				ask := firstAsk(tree)
+				ask.Children = test.children(t, ask.Children[0], ask.Children[1])
+				return tree
+			})
+			settleCurrentGeneration(t, service, artifactID)
+			followRefusal(t, service, artifactID, AskBlockEdit{Urgency: new("high")}, test.deleted, test.question, test.every)
+		})
+	}
+}
+
+// AskContentError reads the decisions nested in an ask too, so an ask whose own blocks keep the
+// rule breaks it when an option holds a decision with two lists. No delete of the ask's own blocks
+// leaves it valid, and the refusal says so, naming the nested decision and no delete list.
+func TestSetAskBlockTextRefusalOfAnAskHoldingABrokenDecisionNamesNoDelete(t *testing.T) {
+	service, artifactID := seedIndexedShipAsk(t, "ask-lists")
+	nested := parsedBlock(t, ":::ask{#ask-nested urgency=\"med\" multiple=\"false\" state=\"open\"}\nWhich day?\n\n- Monday\n:::\n")
+	nested.Children = append(nested.Children, parsedBlock(t, "- Tuesday\n"))
+	editLiveTree(t, service, artifactID, func(tree *pmdoc.Node) *pmdoc.Node {
+		item := firstAsk(tree).Children[1].Children[0]
+		item.Children = append(item.Children, nested)
+		return tree
+	})
+	settleCurrentGeneration(t, service, artifactID)
+	before := liveTree(t, service, artifactID)
+	err := sendAskOptions(service, artifactID, AskBlockEdit{Urgency: new("high")})
+	assertBrokenAskEditRefused(t, service, artifactID, before, err)
+	reason := err.Error()
+	if strings.Contains(reason, "the blocks to delete are") || strings.Contains(reason, "delete the blocks") {
+		t.Fatalf("err = %v, want it to name no block to delete", err)
+	}
+	if !strings.Contains(reason, "no document edit deleting this ask's own blocks") ||
+		!strings.Contains(reason, `ask block "ask-nested"`) {
+		t.Fatalf("err = %v, want it to say no delete of its own blocks leaves it valid, naming the nested decision", err)
+	}
 }
 
 // Before settlement stamps block ids, a block of the ask may have no id, or an id may repeat in the
 // tree, which a document edit restamps first (keeping the id on the first block in document
 // order). The refusal then names no block to delete and asks for a retry once the document
-// settles, still quoting every block.
+// settles, still quoting every block. Once it settles, the retried edit names the delete, which
+// applies.
 func TestSetAskBlockTextRefusalBeforeBlockIDsSettleNamesNoDelete(t *testing.T) {
 	for name, edit := range map[string]func(t *testing.T) func(*pmdoc.Node) *pmdoc.Node{
 		"list with no id": func(t *testing.T) func(*pmdoc.Node) *pmdoc.Node {
@@ -830,6 +924,12 @@ func TestSetAskBlockTextRefusalBeforeBlockIDsSettleNamesNoDelete(t *testing.T) {
 			if !strings.Contains(reason, `reads "- Defer: Wait a week"`) || !strings.Contains(reason, `reads "Should we ship?"`) {
 				t.Fatalf("err = %v, want every block quoted", err)
 			}
+			settleCurrentGeneration(t, service, artifactID)
+			followRefusal(t, service, artifactID, AskBlockEdit{Urgency: new("high")}, []int{2}, "Should we ship?", []model.AskOption{
+				{Label: "Ship", Description: "Release it"},
+				{Label: "Hold", Description: "Wait for review"},
+				{Label: "Defer", Description: "Wait a week"},
+			})
 		})
 	}
 }
