@@ -361,9 +361,6 @@ func execute(cfg runConfig, sf seedFile) error {
 	defer logf.Close()
 	lg := log.New(io.MultiWriter(os.Stderr, logf), "", log.LstdFlags|log.Lmicroseconds)
 	nonce := newMarkerNonce()
-	lg.Printf("config: step=%s source=%s sessions=%d events=%g/s requests=%g/s event-mix=%s route-mix=%s warmup=%s duration=%s grace=%s human=%.2f live=%d rng-seed=%d marker-nonce=%s",
-		cfg.name, cfg.source, cfg.sessions, cfg.events, cfg.requests, cfg.mix.Name, cfg.routes.Source, cfg.warmup, cfg.duration, cfg.grace, cfg.human, cfg.live, cfg.rngSeed, formatNonce(nonce))
-
 	liveURL, err := liveSocketURL(cfg.ep.dispatch)
 	if err != nil {
 		return err
@@ -372,6 +369,14 @@ func execute(cfg runConfig, sf seedFile) error {
 	if err := checkStack(ctx, cfg.ep); err != nil {
 		return err
 	}
+	// The dashboard transport is decided here, before any load: a step whose dashboard streams
+	// could open on neither endpoint is refused, never run with a lighter load than its name.
+	transport, err := decideLiveTransport(ctx, cfg.live, cfg.ep.dispatch, liveURL)
+	if err != nil {
+		return err
+	}
+	lg.Printf("config: step=%s source=%s sessions=%d events=%g/s requests=%g/s event-mix=%s route-mix=%s warmup=%s duration=%s grace=%s human=%.2f live=%d (%s) rng-seed=%d marker-nonce=%s",
+		cfg.name, cfg.source, cfg.sessions, cfg.events, cfg.requests, cfg.mix.Name, cfg.routes.Source, cfg.warmup, cfg.duration, cfg.grace, cfg.human, cfg.live, transport, cfg.rngSeed, formatNonce(nonce))
 	lg.Printf("guard: NATS, Dispatch and the listener are the stack's own (%s)", cfg.ep.stack)
 	meta := collectMeta(ctx, cfg, lg)
 	meta.MarkerNonce = formatNonce(nonce)
@@ -399,7 +404,7 @@ func execute(cfg runConfig, sf seedFile) error {
 	lg.Printf("window %s to %s", st.winStart.UTC().Format(time.RFC3339), st.winEnd.UTC().Format(time.RFC3339))
 
 	a := newAPI(cfg.ep.dispatch, cfg.ep.token, 2048)
-	live := st.startLive(ctx, liveURL)
+	live := st.startLive(ctx, transport, liveURL)
 	writes, eventsDone := st.runEvents(ctx, newWriter(a, sf, nonce, lg))
 	var reqs *requestLoad
 	var requestsDone <-chan struct{}
@@ -493,27 +498,40 @@ func (st *step) inWindow(t time.Time) bool { return inWindow(t, st.winStart, st.
 
 func inWindow(t, winStart, winEnd time.Time) bool { return !t.Before(winStart) && t.Before(winEnd) }
 
-// liveSockets is what the dashboard live sockets read: their bytes and the event frames that
-// arrived in the window.
+// liveSockets is what the dashboard streams read: their transport, their bytes and the event
+// frames that arrived in the window.
 type liveSockets struct {
 	bytes  atomic.Int64
 	frames *collector[liveFrame]
+	// transport is how the streams followed the event feed (decideLiveTransport).
+	transport string
 }
 
-// startLive opens the dashboard live sockets on url, each subscribed to the event feed as a
-// dashboard tab is and reconnecting a second after its socket ends, until ctx ends. Every event
-// frame is timed on arrival (readLive).
-func (st *step) startLive(ctx context.Context, url string) *liveSockets {
-	ls := &liveSockets{frames: newCollector[liveFrame](1 << 14)}
+// startLive opens the dashboard streams, each following the event feed as a dashboard tab does
+// and reconnecting a second after its stream ends, until ctx ends. On liveTransportWS each is a
+// live socket on url, subscribed to the event feed (readLive); on liveTransportSSE, where
+// Dispatch serves no such socket, each is a stream of the SSE endpoint instead (readSSE). Every
+// event frame is timed on arrival, the same way on either transport. liveTransportNone opens
+// none: the step's -live is 0.
+func (st *step) startLive(ctx context.Context, transport, url string) *liveSockets {
+	ls := &liveSockets{frames: newCollector[liveFrame](1 << 14), transport: transport}
 	// A browser offers permessage-deflate, and Dispatch accepts it.
-	dialer := &websocket.Dialer{HandshakeTimeout: 10 * time.Second, EnableCompression: true}
+	dialer := &websocket.Dialer{HandshakeTimeout: liveDialTimeout, EnableCompression: true}
+	client := &http.Client{}
+	eventsURL := sseEventsURL(st.cfg.ep.dispatch)
 	for i := range st.cfg.live {
 		header := http.Header{"X-Dispatch-User": {fmt.Sprintf("viewer-%d", i)}}
-		go followLive(ctx, dialer, url, header, st.nonce, time.Second, func(f liveFrame) {
+		onFrame := func(f liveFrame) {
 			if st.inWindow(time.Unix(0, f.at)) {
 				ls.frames.add(f)
 			}
-		}, func(n int64) { ls.bytes.Add(n) })
+		}
+		onBytes := func(n int64) { ls.bytes.Add(n) }
+		if transport == liveTransportSSE {
+			go followSSE(ctx, client, eventsURL, header, st.nonce, time.Second, onFrame, onBytes)
+		} else {
+			go followLive(ctx, dialer, url, header, st.nonce, time.Second, onFrame, onBytes)
+		}
 	}
 	return ls
 }
@@ -736,6 +754,7 @@ func (st *step) buildSummary(ns *natsSessions, reg *registrar, writes *collector
 		Live:            summarizeLive(frames, ws, commits),
 		LiveBytes:       live.bytes.Load(),
 	}
+	sum.Live.Transport = live.transport
 	if commitsErr != nil {
 		sum.Events.CommitsError = commitsErr.Error()
 		st.lg.Printf("commits: %v", commitsErr)

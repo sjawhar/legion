@@ -129,9 +129,69 @@ func liveSocketURL(dispatch string) (string, error) {
 	return "", fmt.Errorf("the Dispatch URL %s is neither http:// nor https://", redactURL(dispatch))
 }
 
-// liveSummary times the dashboard live socket frames that arrived in the window.
+// The dashboard transport a step's streams follow the event feed on.
+const (
+	// liveTransportWS is Dispatch's dashboard live socket, GET /ws/live (followLive).
+	liveTransportWS = "ws"
+	// liveTransportSSE is the SSE endpoint, GET /api/v1/events, that a Dispatch from before the
+	// live socket serves in its place (followSSE).
+	liveTransportSSE = "sse"
+	// liveTransportNone is a step with -live 0: it opens no dashboard stream, and probes neither
+	// endpoint.
+	liveTransportNone = "none"
+)
+
+// liveDialTimeout bounds a dashboard stream's handshake, and each of the transport probe's two
+// requests.
+const liveDialTimeout = 10 * time.Second
+
+// liveProbeUser is the user the probe asks as, the first dashboard viewer of the step.
+const liveProbeUser = "viewer-0"
+
+// decideLiveTransport picks the dashboard transport once per step, before any load: it dials the
+// live socket, and takes it when the handshake opens. A handshake answered 404 is a Dispatch from
+// before that socket, so the probe asks the SSE endpoint instead, and takes it when that answers
+// 200 with an event-stream body. Any other answer refuses the step, naming both endpoints and
+// what each answered, so a step never runs with no dashboard load and nothing to mark it. A step
+// with -live 0 opens no stream, so it probes nothing.
+func decideLiveTransport(ctx context.Context, live int, dispatch, liveURL string) (string, error) {
+	if live == 0 {
+		return liveTransportNone, nil
+	}
+	header := http.Header{"X-Dispatch-User": {liveProbeUser}}
+	dialer := &websocket.Dialer{HandshakeTimeout: liveDialTimeout, EnableCompression: true}
+	conn, resp, err := dialer.DialContext(ctx, liveURL, header)
+	if err == nil {
+		_ = conn.Close()
+		return liveTransportWS, nil
+	}
+	wsAnswer, notFound := "could not be reached: "+err.Error(), false
+	if resp != nil {
+		wsAnswer = "answered HTTP " + resp.Status
+		notFound = resp.StatusCode == http.StatusNotFound
+		_ = resp.Body.Close()
+	}
+	eventsURL := sseEventsURL(dispatch)
+	if !notFound {
+		return "", fmt.Errorf("the dashboard transport could not be decided: the live socket %s %s, and the SSE endpoint %s was not asked, because only a handshake answered HTTP 404 is a Dispatch that serves the SSE endpoint in its place",
+			redactURL(liveURL), wsAnswer, redactURL(eventsURL))
+	}
+	ok, answer := probeSSE(ctx, eventsURL, header)
+	if ok {
+		return liveTransportSSE, nil
+	}
+	return "", fmt.Errorf("the dashboard transport could not be decided: the live socket %s %s, and the SSE endpoint %s %s",
+		redactURL(liveURL), wsAnswer, redactURL(eventsURL), answer)
+}
+
+// liveSummary times the dashboard streams' event frames that arrived in the window, on either
+// transport.
 type liveSummary struct {
-	Frames int `json:"live_frames"`
+	// Transport is how the step's streams followed the event feed: liveTransportWS,
+	// liveTransportSSE or liveTransportNone. A summary.json of a run from before the SSE
+	// transport has no such field; every one of those followed the live socket.
+	Transport string `json:"transport"`
+	Frames    int    `json:"live_frames"`
 	// OrderViolations counts frames whose event id is not above the previous frame's on the same
 	// connection.
 	OrderViolations int `json:"live_order_violations"`

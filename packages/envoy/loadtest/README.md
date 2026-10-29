@@ -19,7 +19,7 @@ same step before and after its change, and compares the two rows.
 | `api.go` | The Dispatch HTTP client, with the request trace that gives the arrival time; `callRaw` sends a body of any type (a multipart upload) |
 | `seed.go` | The seed: 4 projects, 1,000 issues and 8,000 comments through Dispatch's API, and `seed.json` |
 | `seedfinish.go` | `loadgen seed-finish`: the steps after the seed (the wait for the outbox, the wait for the block-index backfill, `vacuum analyze`, the commit-time trigger), which `stack.sh seed` and `cluster.sh seed` both run |
-| `run.go` | One step: its phases (the window, the dashboard live sockets, the event and request generators on one open-loop schedule, the probes) and `summary.json` |
+| `run.go` | One step: its phases (the dashboard transport probe, the window, the dashboard streams, the event and request generators on one open-loop schedule, the probes) and `summary.json` |
 | `plandocs.go` | `loadgen plan-docs`: the documents a step's in-window edits and uploads plan the most versions for, from `seed.json` and the step's own flags, without a stack (The load, below) |
 | `pgclock.go` | `meta.json`'s `pg_clock`: Postgres's clock against `loadgen`'s, from 10 timed reads at the step's start and after its window |
 | `copymeta.go` | `loadgen run -copy-meta`: the cluster copy's description, which `meta.json` records under `copy` |
@@ -32,7 +32,8 @@ same step before and after its change, and compares the two rows.
 | `lockprobe.go` | The 20 ms sampler of the commit-order lock |
 | `locksampler.go` | The 1 s sampler of every ungranted lock in `pg_locks` |
 | `pgpoll.go` | The poll loop of the lock probes (`pollPG`), and the error policy of the probes' reads, which the 5 s sampler shares: failed reads are counted, the first three are logged, and so is their total past three |
-| `live.go` | The dashboard live sockets' reader of `GET /ws/live` event frames, and the live frame latencies |
+| `live.go` | The dashboard live sockets' reader of `GET /ws/live` event frames, the probe that decides a step's dashboard transport, and the live frame latencies |
+| `sse.go` | The dashboard streams' reader of the `GET /api/v1/events` event stream, which a Dispatch without the live socket is followed on, into the very frames `live.go` gives |
 | `proxy.go` | The TCP latency proxy toward Postgres |
 | `tables.go` | `TABLES.md` from one or more `summary.json` files, the pprof tops and the goroutine summary |
 | `cgroup.go` | `loadgen cgroup-merge`: a step's `cgroup.json` from the cluster sampler's `cgroup.jsonl` (cores, working set and per-minute figures per container, and the sampler-gap failure) |
@@ -158,7 +159,7 @@ value.
 | `--event-mix` | `production-2026-10-26` | A preset name or `kind=weight,...` (Event mix, below). |
 | `--route-mix` | the committed `routes-2026-10-26-1719Z.txt` | A route-mix file (Route mix, below). It must be a file. |
 | `--human` | `0.1` | The share of writes that a person makes, 0 to 1. |
-| `--live` | `max(1, round(requests/30))` | Dashboard live sockets (`GET /ws/live`, each subscribed to the event feed as a dashboard tab is): 2 at 60 req/s, 20 at 600 req/s. |
+| `--live` | `max(1, round(requests/30))` | Dashboard streams, each following the event feed as a dashboard tab does (`GET /ws/live`, or `GET /api/v1/events` against a Dispatch that serves no such socket; Run one step, below): 2 at 60 req/s, 20 at 600 req/s. |
 | `--rng-seed` | `1` | The seed of the event and request schedules. |
 | `--out` | `$LOADTEST_ROOT/runs/<name>` | The step directory. It must not exist, or it must be empty. |
 
@@ -206,6 +207,19 @@ tables, below), and exits with status 1; `run-series.sh` stops there. The other 
 database (the lock probe, the ungranted-lock sampler, the 5 s sampler's `pg_stat_activity`, the
 transaction-id probe and the Postgres version in `meta.json`) feed none of those columns. A failure
 of one of them marks its own table, or `meta.json`, and the step does not fail.
+
+**A step that can open no dashboard stream is refused.** `loadgen run` decides the dashboard
+transport once, before any load: it dials `GET /ws/live`, and takes that socket when the handshake
+opens (`ws`). A handshake answered 404 is a Dispatch from before the dashboard live socket, so it
+asks `GET /api/v1/events` with `Accept: text/event-stream` instead, and takes that endpoint when
+it answers 200 with an event-stream body (`sse`); the stream is closed again at once, and the
+step's own streams open with the load. Any other answer refuses the step before it starts, naming
+both endpoints and what each one answered: `the dashboard transport could not be decided: the live
+socket ws://<host>/ws/live answered HTTP 404 Not Found, and the SSE endpoint
+http://<host>/api/v1/events answered HTTP 404 Not Found with content type "text/plain"`. So a step
+never runs with no dashboard load and nothing to mark it. A step with `--live 0` opens no stream
+and probes neither endpoint (`none`). `run.log`'s configuration line gives the transport after the
+socket count, `live=<n> (<transport>)`, and `summary.json` records it as `live.transport`.
 
 To run a step name again, remove its step directory first.
 
@@ -680,7 +694,7 @@ cmp "$TMPDIR/stock.dump" "$TMPDIR/patched.dump"
 | Flag | Default | What it sets |
 | --- | --- | --- |
 | `--rng-seed N` | `1` | `loadgen run -rng-seed`: the issue sampling, the reads, the upload split and every substitute (Planning, below). |
-| `--warmup D` | `30s` | The warm-up before the window: the roster registers, the SSE streams open, no replay request. |
+| `--warmup D` | `30s` | The warm-up before the window: the roster registers, the dashboard streams open, no replay request. |
 | `--gomaxprocs N` | nproc | `LOADTEST_GOMAXPROCS`, Dispatch's `GOMAXPROCS`. |
 | `--dispatch-commit REV` | the checkout | `LOADTEST_DISPATCH_COMMIT`: `envoy-dispatch` alone is built from REV; `loadgen`, the listener and the manifest's seed stay the same. `meta.json` records the commit. |
 | `--manifest FILE` | `replay-2026-10-26.json` | The manifest `replay-get` reads. |
@@ -899,7 +913,7 @@ Dispatch binary (`$LOADTEST_ROOT/bin/envoy-dispatch` until the next `stack.sh se
 | `cpu_source` | `proc`, or `none` with no Dispatch pid (`-allow-foreign`); the CPU fields are null then. On a cluster copy, `loadgen cgroup-merge` fills them from the cgroup and sets `cgroup` (Running on a cluster copy, The replay on the copy). |
 | `dispatch_cpu_s` | Dispatch's CPU-seconds over the window. |
 | `cores_full_rate` | `dispatch_cpu_s / window_s / rate_factor`. |
-| `idle_cores_before` | Dispatch's cores over the 30 s before the window (the warm-up: the roster's heartbeats and the SSE streams, no replay request). |
+| `idle_cores_before` | Dispatch's cores over the 30 s before the window (the warm-up: the roster's heartbeats and the dashboard streams, no replay request). |
 | `cores_full_rate_idle_corrected` | `(dispatch_cpu_s - idle_cores_before × window_s) / window_s / rate_factor`. |
 | `drain_cpu_s` | Dispatch's CPU from the window's end until every action returned (at most 300 s). |
 | `writes` | By kind: `planned`, `sent`, `failed`. |
@@ -956,7 +970,7 @@ the spread, the command and the inputs (`replay.inputs`).
   window. The replay starts on a quiet, prepared template after a 30 s warm-up.
 - **Other projects' writes and events with no issue key.** The bundle holds LINUX's issues' event
   logs only: other projects' writes (2.6% of the window's) and events with no issue key are absent.
-- **Browser tabs.** Beyond the 2 SSE streams, no browser: no document websockets, no browser
+- **Browser tabs.** Beyond the 2 dashboard streams, no browser: no document websockets, no browser
   document edits or settlements (not sent), no dashboard refetches.
 - **Embeddings.** Dispatch gets no AWS credentials locally, so it computes none.
 - **Cloud SQL and its proxy.** Dispatch reaches the stack's local Postgres directly.
@@ -1213,7 +1227,12 @@ backend can hold or wait for a lock that Dispatch does not take. The ungranted-l
 
 ### Delivery from sending, and live socket frames
 
-Each dashboard live socket (`--live`) opens `GET /ws/live` as `viewer-<i>` and sends the frame a
+Each dashboard stream (`--live`) follows the event feed on the transport the step probed before it
+started (Run one step, above): the dashboard live socket, or the SSE endpoint of a
+Dispatch that serves no such socket. The frames, the bytes and every column here are the same on
+either one.
+
+On the live socket, each stream opens `GET /ws/live` as `viewer-<i>` and sends the frame a
 dashboard tab sends for the event feed, `{"type":"subscribe","sub":"events","view":{"kind":"events"}}`,
 with no resume, so it follows the feed from its head. Dispatch answers `events_start`, then one
 `event` frame per event: `{"type":"event","sub":"events","id":"<n>","event":<the event's JSON>}`. Only
@@ -1226,14 +1245,23 @@ refused or ends before its `events_start`, the socket is dialed again a second l
 offers permessage-deflate, as a browser does. `live_bytes` is the bytes of every message the
 sockets read, after decompression.
 
+On the SSE endpoint, each stream opens `GET /api/v1/events` as `viewer-<i>` with
+`Accept: text/event-stream`, and Dispatch writes each event as `id: <n>`, `event: <type>`,
+`data: <the event's JSON>` and a blank line; lines that start with `:` are comments (`: open`,
+`: heartbeat`) and are not frames. A frame counts on its closing blank line, and its frame time is
+then; its event id is the `id` of its data, or the frame's `id:` field when the data has none. A
+partial frame at a stream's end is dropped. When the stream ends, it is asked for again a second
+later. `live_bytes` is the bytes of every stream read.
+
 | Column | Unit | What it shows | Source |
 | --- | --- | --- | --- |
 | `step` | name | The step name, with the mark `(commit rows not read)` when the run's commit rows could not be read (Events, delivery and requests, above). | `config.step`, `events.commits_error` |
 | `NATS delivery ms from sent p50 / p99` | ms | Delivery latency from sent (Delivery latency, above), over every issue-topic receipt of a primary event. `-` when the commit rows were not read. | `events.delivery_ms_from_sent` |
 | `live frame ms from created_at p50 / p99` | ms | The frame time minus the `created_at` of the frame's event, over every frame with a `created_at`. | `live.live_frame_ms_from_created_at` |
 | `live frame ms from write response p50 / p99` | ms | The frame time minus the time when the client read the write's response. Only the frame of a primary event counts. Its write must be in the window, have a 2xx status and be committed. A write with no complete response has no response time, so its frames do not count. `-` when the commit rows were not read. | `live.live_frame_ms_from_write_response` |
-| `live frames` | count | The event frames of all live sockets that arrived in the window. | `live.live_frames` |
-| `live order violations` | count | The frames whose event id is not more than the event id of the previous frame on the same connection. The check starts again on each new connection. A value above 0 means that a socket sent events out of id order. | `live.live_order_violations` |
+| `live frames` | count | The event frames of all dashboard streams that arrived in the window. | `live.live_frames` |
+| `live order violations` | count | The frames whose event id is not more than the event id of the previous frame on the same connection. The check starts again on each new connection. A value above 0 means that a stream sent events out of id order. | `live.live_order_violations` |
+| `transport` | name | How the step's dashboard streams followed the event feed: `ws` (`GET /ws/live`), `sse` (`GET /api/v1/events`) or `none` (`--live 0`). The column is there only when a step used something other than `ws`. A step of a run from before the SSE transport, whose `summary.json` has no `live.transport`, reads `ws`. | `live.transport` |
 
 ### Ungranted locks
 

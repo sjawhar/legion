@@ -467,17 +467,42 @@ func commitOrderLockTable(md *markdown, steps []stepData) {
 	failedReadsNote(md, marked, "the probe's connect or read of pg_locks", "`commit_order_lock.errors`")
 }
 
+// liveTransport is the step's dashboard transport, ws for a step of a run from before the SSE
+// transport, whose summary.json has no live.transport: every one of those followed the live
+// socket.
+func (s stepData) liveTransport() string {
+	if s.sum.Live.Transport == "" {
+		return liveTransportWS
+	}
+	return s.sum.Live.Transport
+}
+
 func liveTable(md *markdown, steps []stepData) {
 	md.line("\n## Delivery from sending, and live socket frames\n")
-	md.line("NATS: every issue-topic receipt of a primary event. Live: the event frames of the dashboard live sockets that arrived in the window; from write response counts only the frames that carry the primary event of a committed in-window write with a 2xx status.\n")
-	md.header("step", "NATS delivery ms from sent p50 / p99", "live frame ms from created_at p50 / p99",
-		"live frame ms from write response p50 / p99", "live frames", "live order violations")
+	md.line("NATS: every issue-topic receipt of a primary event. Live: the event frames of the dashboard streams that arrived in the window; from write response counts only the frames that carry the primary event of a committed in-window write with a 2xx status.\n")
+	columns := []string{"step", "NATS delivery ms from sent p50 / p99", "live frame ms from created_at p50 / p99",
+		"live frame ms from write response p50 / p99", "live frames", "live order violations"}
+	// The transport is a column only where it is worth one: every step on the dashboard live
+	// socket is the table as it was.
+	named := slices.ContainsFunc(steps, func(s stepData) bool { return s.liveTransport() != liveTransportWS })
+	if named {
+		columns = append(columns, "transport")
+	}
+	md.header(columns...)
 	unread := false
 	for _, s := range steps {
 		live, e := s.sum.Live, s.sum.Events
 		unread = unread || e.commitsUnread()
-		md.row(s.commitsLabel(), pair(e.DeliveryMsFromSent, p50, p99, 0), pair(live.FrameMsFromCreatedAt, p50, p99, 0),
-			pair(live.FrameMsFromWriteResponse, p50, p99, 0), num(float64(live.Frames), 0), num(float64(live.OrderViolations), 0))
+		cells := []string{s.commitsLabel(), pair(e.DeliveryMsFromSent, p50, p99, 0), pair(live.FrameMsFromCreatedAt, p50, p99, 0),
+			pair(live.FrameMsFromWriteResponse, p50, p99, 0), num(float64(live.Frames), 0), num(float64(live.OrderViolations), 0)}
+		if named {
+			cells = append(cells, s.liveTransport())
+		}
+		md.row(cells...)
+	}
+	if named {
+		md.line("\ntransport: how the step's dashboard streams followed the event feed. `%s`: the dashboard live socket, `GET /ws/live`. `%s`: the SSE endpoint `GET /api/v1/events`, which a Dispatch that serves no such socket is followed on instead. `%s`: the step opened no stream (`-live 0`). A step of a run from before the SSE transport, whose summary.json has no `live.transport`, reads `%s`.",
+			liveTransportWS, liveTransportSSE, liveTransportNone, liveTransportWS)
 	}
 	commitsUnreadNote(md, unread, "the NATS delivery latencies from sent and the live frame latencies from write response (both take only committed writes' primary events)", "show")
 }
