@@ -310,7 +310,8 @@ def go_notices_runs():
     return out
 
 
-# envoy-go's and envoy-smoke's steps whose go commands are not in the simple form, pinned whole.
+# The steps of envoy-go, envoy-smoke and listener-server-change whose go commands are not in the
+# simple form, pinned whole.
 UNIT_TEST_STEP = "Unit test envoy Go package"
 UNIT_TEST_SCRIPT = """\
 go test -timeout 20m ./internal/dispatch/api
@@ -328,6 +329,10 @@ done"""
 SCHEMA_STEP = "The envoy-infra plugin's schema carries the version it was built with"
 SCHEMA_SCRIPT = ('go build -ldflags "-X main.version=1.2.3" -o /tmp/pr ./cmd/pulumi-resource-envoy-infra && '
                  """pulumi package get-schema /tmp/pr | jq -e '.version == "1.2.3"'""")
+# The soak's `-run` is not a flag the simple form reduces, and it moves no closure: the whole
+# cmd/listener package compiles under the serverchange tag, whichever test the run selects.
+SOAK_STEP = "Server-change soak of the listener"
+SOAK_SCRIPT = "go test -tags serverchange -count=1 -timeout 15m -v -run TestServerChange ./cmd/listener"
 
 
 RUN_SERVER = "packages/dispatch/e2e/run-server.sh"
@@ -646,6 +651,12 @@ GATES = [
         step_run("dispatch-multiprocess", "Two-process tests of the Dispatch server",
                  "go test -tags multiprocess -count=1 -timeout 20m -v ./cmd/dispatch", ENVOY, ["./cmd/dispatch"], tags="multiprocess"),
     ], reads=setup_go("dispatch-multiprocess", f"{ENVOY}/go.mod") + CI_SELF),
+
+    gate("listener_server_change", "listener-server-change", exact=[
+        pinned_step("listener-server-change", SOAK_STEP, ENVOY, SOAK_SCRIPT, [
+            (ENVOY, ["./cmd/listener"], "go test -tags serverchange ./cmd/listener", {"tags": "serverchange"}),
+        ]),
+    ], reads=setup_go("listener-server-change", f"{ENVOY}/go.mod") + CI_SELF),
 
     gate("broker_multiprocess", "broker-multiprocess", runs=[
         step_run("broker-multiprocess", "Two-process tests of the secrets broker",
