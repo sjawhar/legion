@@ -601,21 +601,32 @@ CLI outside the form the gate reads and carried an ask for a person (`outcome: "
   envoy.json, so its environment is the only setting it can carry), else no record at all and no
   Dispatch call.
 - **When.** Once the call has been answered: the gate appends the call's `advisor-gate` entry,
-  returns, and then starts the record with a 5 second stop of its own, so no review is ever cut
-  short to pay for it. It never changes the decision. A record that fails, that hits its stop or
-  that the shutdown cuts writes one line to the host's log and appends one `advisor-gate-record`
-  entry, carrying `toolCallId`, `tool` and `recordError`; the decision's own entry stands as
-  written, and the report passes over the follow-up. Once the session is shutting down, the gate
-  waits for the records still pending and cuts each 1.25 s after shutdown began, inside the 1.5 s
-  it holds shutdown for, so a record still lands, and the entry of one that could not, before the
-  session is sealed. An unmarked write's record is published from the `tool_result` the
-  CLI's line reached, under its own 5 s stop, so an unreachable Dispatch delays that one result by
-  at most that much. The session's first decision uploads the document; every later one appends a
-  fenced JSON line to it. Two records of one session keep their order: the second appends to the
-  document the first uploaded, however slowly Dispatch answers.
-- **What is lost.** A session killed between a decision and its upload loses that one record, and
-  a session that never reached a gated call writes no document. Both show in the reader's counts
-  rather than silently.
+  returns, and then hands the record to the session's recorder, which gives it a 5 second stop of
+  its own, so no review is ever cut short to pay for it. It never changes the decision. A record
+  that fails, that hits its stop or that the shutdown cuts writes one line to the host's log and
+  appends one `advisor-gate-record` entry, carrying `toolCallId`, `tool` and `recordError`; the
+  decision's own entry stands as written, and the report passes over the follow-up. Once the
+  session is shutting down, the gate cuts the recorder 1.25 s after shutdown began and waits for
+  what is still pending, inside the 1.5 s it holds shutdown for, so a record still lands, and the
+  entry of one that could not, before the session is sealed; a record cut that way says the
+  shutdown cut it, not that Dispatch took too long. An unmarked write's record is published from
+  the `tool_result` the CLI's line reached, under that same 5 s stop, so an unreachable Dispatch
+  delays that one result by at most that much, and it goes through the one recorder the gate's
+  own records use.
+- **One document per session.** The session's first decision uploads it; every later one appends a
+  fenced JSON line through `docEdit`, because an upload of a name Dispatch already holds stores a
+  new version of that document, and the reader reads the latest version alone. A process holding
+  no id for the session — a fresh process serving it, or one whose upload was cut — finds the
+  document among the project's by name and appends to that, and uploads only where the project
+  holds none. The records of one session are written one at a time, so they land in the order the
+  gate made them, however slowly Dispatch answers.
+- **What is lost.** A session killed between a decision and its write loses that one record, and a
+  session that never reached a gated call writes no document. A record that fails, that outlives
+  its stop or that the shutdown cuts is lost too — and one given up that way may have landed all
+  the same, so a record the entry calls lost can still be in the document. Two processes writing
+  one session's first record at the same moment each find no document and upload one, and the
+  later upload's version replaces the record the earlier one carried. All of it shows in the
+  reader's counts or the session's entries rather than silently.
 
 `scripts/askgate-report.ts --dispatch-project <KEY> --since <RFC 3339> [--json]` reads those
 documents and prints the day's refusals by rule, the refusals the agent overrode, the calls

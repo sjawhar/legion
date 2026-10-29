@@ -1,8 +1,9 @@
-import { describe, expect, test } from "bun:test";
+import { describe, expect, jest, test } from "bun:test";
 import pkg from "../../package.json";
 import type { GateEntry } from "./askgate-core";
 import {
   createDecisionRecorder,
+  RECORD_SHUT_DOWN,
   RECORD_TIMEOUT_MS,
   type RecordClient,
   type RecordDeps,
@@ -76,7 +77,11 @@ const UNMARKED: RecordedDecision = {
   asksCarried: 1,
 };
 
-/** The Dispatch a record is written to: what each call was given, and what it answers. */
+/**
+ * The Dispatch a record is written to: what each call was given, and what it answers. The
+ * documents it holds are the uploads it answered, by name, since an upload of a name it already
+ * holds stores a new version of that document rather than a second one.
+ */
 function fakeDispatch(answers: Partial<RecordClient> = {}, id = "doc-1") {
   const uploads: Array<{ project: string; name: string; content: string; actor?: unknown }> = [];
   const edits: Array<{
@@ -86,7 +91,15 @@ function fakeDispatch(answers: Partial<RecordClient> = {}, id = "doc-1") {
     after?: string;
     actor?: unknown;
   }> = [];
+  /** Every read of the project's documents: the project it asked for. */
+  const lists: string[] = [];
+  const stored = new Map<string, string>();
   const client: RecordClient = {
+    listProjectArtifacts: async (project) => {
+      lists.push(project);
+      if (answers.listProjectArtifacts) return await answers.listProjectArtifacts(project);
+      return [...stored].map(([name, document]) => ({ id: document, name }));
+    },
     projectArtifact: async (project, input) => {
       uploads.push({
         project,
@@ -94,9 +107,12 @@ function fakeDispatch(answers: Partial<RecordClient> = {}, id = "doc-1") {
         content: "content" in input ? input.content : "",
         actor: input.actor,
       });
-      return answers.projectArtifact
+      const answer = answers.projectArtifact
         ? await answers.projectArtifact(project, input)
         : { artifact: { id } };
+      // Held only once the upload answered: an upload that rejects leaves Dispatch as it was.
+      stored.set(input.name, answer.artifact.id);
+      return answer;
     },
     docEdit: async (document, input) => {
       for (const op of input.ops)
@@ -112,7 +128,7 @@ function fakeDispatch(answers: Partial<RecordClient> = {}, id = "doc-1") {
         : { applied: input.ops.length };
     },
   };
-  return { uploads, edits, client };
+  return { uploads, edits, lists, stored, client };
 }
 
 /** One recorder, over one fake Dispatch, with the directory and signal of every client it asked for. */
@@ -134,14 +150,12 @@ function harness(
       return { client: opts.client ?? fakeDispatch().client };
     },
   };
-  const record = createDecisionRecorder(deps);
+  const recorder = createDecisionRecorder(deps);
   return {
     asked,
-    write: (
-      entry: GateEntry | RecordedDecision,
-      signal = new AbortController().signal,
-      sessionId = SESSION
-    ) => record({ entry, sessionId, directory: "/work", signal }),
+    recorder,
+    write: (entry: GateEntry | RecordedDecision, sessionId = SESSION) =>
+      recorder.record({ entry, sessionId, directory: "/work" }),
   };
 }
 
@@ -209,7 +223,7 @@ describe("the AskGate decision record", () => {
     const dispatch = fakeDispatch();
     const g = harness({ client: dispatch.client });
     await g.write(REFUSAL);
-    await g.write(REFUSAL, new AbortController().signal, "sess-other");
+    await g.write(REFUSAL, "sess-other");
     expect(dispatch.uploads.map((upload) => upload.name)).toEqual([
       DOCUMENT,
       "askgate-decisions-sess-other.md",
@@ -481,27 +495,139 @@ describe("the AskGate decision record", () => {
     expect(dispatch.edits).toHaveLength(2);
   });
 
-  test("a write that never answers is given up at the record's stop", async () => {
+  test("a write that never answers is given up at the record's own stop", async () => {
+    // The recorder arms that stop itself, so the test runs the clock to it rather than waiting.
+    jest.useFakeTimers();
+    try {
+      const hangs = Promise.withResolvers<{ artifact: { id: string } }>();
+      const dispatch = fakeDispatch({ projectArtifact: () => hangs.promise });
+      const answered = harness({ client: dispatch.client }).write(REFUSAL);
+      for (let i = 0; i < 20; i++) await Promise.resolve();
+      jest.advanceTimersByTime(RECORD_TIMEOUT_MS);
+      expect(await answered).toBe(
+        `Dispatch did not answer the record within ${RECORD_TIMEOUT_MS} ms`
+      );
+      expect(dispatch.uploads).toHaveLength(1);
+      hangs.resolve({ artifact: { id: "doc-1" } });
+    } finally {
+      jest.useRealTimers();
+    }
+  });
+
+  // #2161, reviewer round 15: the core's shutdown and the host's each cut the records in flight,
+  // and only the core's said so; an unmarked write's record cut 52 ms in answered that Dispatch
+  // had not answered within 5,000 ms. The recorder owns the cut now, and reports it itself.
+  test("a record the session's shutdown cuts says so, not that it ran to its own stop", async () => {
     const hangs = Promise.withResolvers<{ artifact: { id: string } }>();
     const dispatch = fakeDispatch({ projectArtifact: () => hangs.promise });
-    const stop = new AbortController();
-    const answered = harness({ client: dispatch.client }).write(REFUSAL, stop.signal);
-    stop.abort();
-    expect(await answered).toBe(
-      `Dispatch did not answer the record within ${RECORD_TIMEOUT_MS} ms`
-    );
+    const g = harness({ client: dispatch.client });
+    const answered = g.write({ ...UNMARKED, asksCarried: 2 });
+    for (let i = 0; i < 20; i++) await Promise.resolve();
+    g.recorder.cut();
+    expect(await answered).toBe(RECORD_SHUT_DOWN);
+    // The request behind it is ended with the record, and the write is never retried.
+    expect(g.asked[0]?.signal.aborted).toBe(true);
     expect(dispatch.uploads).toHaveLength(1);
     hangs.resolve({ artifact: { id: "doc-1" } });
   });
 
-  test("a stop already closed gives the write up without waiting for it", async () => {
+  test("after the cut a record is given up before it asks Dispatch for anything, and settled answers", async () => {
+    const dispatch = fakeDispatch();
+    const g = harness({ client: dispatch.client });
+    g.recorder.cut();
+    expect(await g.write(REFUSAL)).toBe(RECORD_SHUT_DOWN);
+    expect(g.asked).toEqual([]);
+    expect(dispatch.uploads).toEqual([]);
+    // Nothing is pending, so the shutdown's wait for the records ends at once.
+    await g.recorder.settled();
+  });
+
+  test("settled waits for the record in flight, and answers once the cut has given it up", async () => {
     const hangs = Promise.withResolvers<{ artifact: { id: string } }>();
     const dispatch = fakeDispatch({ projectArtifact: () => hangs.promise });
-    const stop = new AbortController();
-    stop.abort();
-    expect(await harness({ client: dispatch.client }).write(REFUSAL, stop.signal)).toBe(
-      `Dispatch did not answer the record within ${RECORD_TIMEOUT_MS} ms`
-    );
+    const g = harness({ client: dispatch.client });
+    const answered = g.write(REFUSAL);
+    for (let i = 0; i < 20; i++) await Promise.resolve();
+    let settled = false;
+    const waiting = g.recorder.settled().then(() => {
+      settled = true;
+    });
+    for (let i = 0; i < 20; i++) await Promise.resolve();
+    expect(settled).toBe(false);
+    g.recorder.cut();
+    await waiting;
+    expect(settled).toBe(true);
+    expect(await answered).toBe(RECORD_SHUT_DOWN);
     hangs.resolve({ artifact: { id: "doc-1" } });
+  });
+
+  // #2161, reviewer round 15: a second upload of a session's document replaces the records the
+  // first one holds (Dispatch versions a project artifact by name), and a fresh process serving
+  // the session held no id for it, so it uploaded again.
+  test("a recorder holding no id for the session appends to the document the project already holds", async () => {
+    const dispatch = fakeDispatch({}, "doc-held");
+    expect(await harness({ client: dispatch.client }).write(REFUSAL)).toBeUndefined();
+    expect(dispatch.uploads).toHaveLength(1);
+
+    // A second process serving the same session: it holds no document id of its own.
+    const next = harness({ client: dispatch.client });
+    expect(await next.write({ ...REFUSAL, toolCallId: "t2" })).toBeUndefined();
+    expect(dispatch.uploads).toHaveLength(1);
+    expect(dispatch.edits).toMatchObject([{ id: "doc-held", op: "insert", after: "end" }]);
+    // The document it found, held from here on: its next record reads the project no second time.
+    expect(await next.write({ ...REFUSAL, toolCallId: "t3" })).toBeUndefined();
+    expect(dispatch.lists).toEqual(["INFRA", "INFRA"]);
+    expect(dispatch.edits).toHaveLength(2);
+  });
+
+  test("a document of another session's own is no match: the name is the session's", async () => {
+    const dispatch = fakeDispatch({
+      listProjectArtifacts: async () => [
+        { id: "doc-other", name: "askgate-decisions-sess-other.md" },
+      ],
+    });
+    expect(await harness({ client: dispatch.client }).write(REFUSAL)).toBeUndefined();
+    expect(dispatch.uploads).toMatchObject([{ name: DOCUMENT }]);
+    expect(dispatch.edits).toEqual([]);
+  });
+
+  // #2161, reviewer round 15: the appends of one session ran concurrently, and landed in the
+  // order Dispatch answered them: "third" reached the document before "second".
+  test("the records of one session land in the order they were made, however slowly Dispatch answers", async () => {
+    /** Each append as Dispatch finished it, in the order it finished them. */
+    const landed: string[] = [];
+    /** One Dispatch answer per append, which this test gives in the reverse of the call order. */
+    const answering = [
+      Promise.withResolvers<void>(),
+      Promise.withResolvers<void>(),
+      Promise.withResolvers<void>(),
+    ];
+    let edits = 0;
+    const dispatch = fakeDispatch({
+      docEdit: async (_id, input) => {
+        await answering[edits++]?.promise;
+        for (const op of input.ops) landed.push(op.markdown ?? "");
+        return { applied: input.ops.length };
+      },
+    });
+    const g = harness({ client: dispatch.client });
+    await g.write(REFUSAL);
+    // Started back to back, as the gate starts them: each as its own handler returns.
+    const answers = Promise.all([
+      g.write({ ...REFUSAL, target: "first" }),
+      g.write({ ...REFUSAL, target: "second" }),
+      g.write({ ...REFUSAL, target: "third" }),
+    ]);
+    // Answered last first: the three are in flight together unless the recorder holds them back.
+    for (const answer of [...answering].reverse()) {
+      answer.resolve();
+      for (let i = 0; i < 20; i++) await Promise.resolve();
+    }
+    expect(await answers).toEqual([undefined, undefined, undefined]);
+    expect(landed.map((markdown) => recordsIn(markdown)[0]?.target)).toEqual([
+      "first",
+      "second",
+      "third",
+    ]);
   });
 });

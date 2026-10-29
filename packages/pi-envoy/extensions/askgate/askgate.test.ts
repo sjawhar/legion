@@ -40,7 +40,7 @@ import {
   sessionMode,
 } from "./askgate-core";
 import * as fx from "./askgate-fixtures";
-import { RECORD_TIMEOUT_MS, type RecordClient } from "./decision-record";
+import { createDecisionRecorder, RECORD_TIMEOUT_MS, type RecordClient } from "./decision-record";
 import type { DispatchSession, RuleMatch } from "./rules-check";
 
 /** Runs a `dispatch` command's --dry-run as the entry's binding does. */
@@ -249,6 +249,19 @@ function bind(opts: BindOptions = {}): BoundGate {
     },
   };
   const complete = opts.complete ?? (async () => ({ text: ALLOW, usage: USAGE }));
+  // The session's Dispatch, which a test that drives a document read or a decision record binds;
+  // with none, a document read gives nothing and no decision record is written.
+  const dispatchClient = (directory: string, signal: AbortSignal) => {
+    dispatchReads.push({ directory, signal });
+    return opts.dispatch?.(directory, signal);
+  };
+  // The host's own recorder, which the entry builds once per process and hands the core
+  // (`registerAskGate`): the gate builds none of its own.
+  const recordDecision = createDecisionRecorder({
+    env: opts.env ?? {},
+    now: opts.now ?? Date.now,
+    dispatchClient,
+  });
   createAskGate({
     env: opts.env ?? {},
     home: HOME,
@@ -267,12 +280,8 @@ function bind(opts: BindOptions = {}): BoundGate {
     configFile: CONFIG_FILE,
     contextMessages: () => (opts.context ?? (() => [fx.user("Post the comment.")]))(),
     handlerCeilingMs: () => opts.ceiling ?? 120_000,
-    // The session's Dispatch, which a test that drives a document read or a decision record binds;
-    // with none, a document read gives nothing and no decision record is written.
-    dispatchClient: (directory, signal) => {
-      dispatchReads.push({ directory, signal });
-      return opts.dispatch?.(directory, signal);
-    },
+    dispatchClient,
+    recordDecision,
     dryRun: (script, runOpts) => {
       dryRuns.push({ script, cwd: runOpts.cwd, timeoutMs: runOpts.timeoutMs });
       return (opts.dryRun ?? core.spawnDryRun)(script, runOpts);
@@ -3381,6 +3390,7 @@ console.log(JSON.stringify({ argv: process.argv.slice(2), stdin }));
       fs.writeFileSync(store, "a file where the store goes");
       const uploads: string[] = [];
       const client = {
+        listProjectArtifacts: async () => [],
         projectArtifact: async (_project, input) => {
           uploads.push("content" in input ? input.content : "");
           return { artifact: { id: "doc-1" } };
@@ -3449,6 +3459,7 @@ console.log(JSON.stringify({ argv: process.argv.slice(2), stdin }));
         return { text, usage: USAGE };
       };
       const client = {
+        listProjectArtifacts: async () => [],
         projectArtifact: async () => {
           atRecord = { markers: markersIn(g.store).length, answered: atAnswer.length };
           return { artifact: { id: "doc-1" } };
@@ -3624,6 +3635,39 @@ console.log(JSON.stringify({ argv, consumed: consumeMarker([process.env.ASKGATE_
       expect((await g.bash("ends-in-review", ASK))?.block).toBeUndefined();
       expect(markersIn(g.store)).toMatchObject([{ toolCallId: "ends-in-review" }]);
       expect(g.entries[1]?.mintSkipped).toBeUndefined();
+    }, 30_000);
+
+    // Design 9 names `tool_result` beside `tool_execution_end`: a result carrying the call's own
+    // id ends that call just the same, and a write made from an eval cell reports only this one.
+    // The gate is not abandoned by it — the review runs on — but nothing of the call runs after
+    // its result, so the verdict mints it no marker.
+    test("a call whose tool_result arrived during its review mints nothing either", async () => {
+      const asked = Promise.withResolvers<void>();
+      const answering = Promise.withResolvers<void>();
+      const answers = bySystem(ALLOW, RULES_NONE);
+      const g = bind({
+        env: STUB,
+        cwd: work,
+        complete: async (req) => {
+          asked.resolve();
+          await answering.promise;
+          return answers(req);
+        },
+      });
+      const gated = g.bash("result-in-review", ASK);
+      await asked.promise;
+      // The call's own result reaches the gate while it still holds the call.
+      await g.event("tool_result", {
+        toolCallId: "result-in-review",
+        toolName: "bash",
+        content: [],
+      });
+      answering.resolve();
+      expect((await gated)?.block).toBeUndefined();
+      expect(markersIn(g.store)).toEqual([]);
+      expect(g.entries).toMatchObject([
+        { toolCallId: "result-in-review", outcome: "verdict", mintSkipped: "call-ended" },
+      ]);
     }, 30_000);
   });
 
@@ -4976,7 +5020,7 @@ describe("askgate.ts, the entry", () => {
     const { registerAskGate } = await import("./askgate");
     const handlers = new Map<string, Handler>();
     const entries: GateEntry[] = [];
-    const { loaded } = registerAskGate(
+    const registration = registerAskGate(
       {
         on: (event: string, handler: Handler) => handlers.set(event, handler),
         appendEntry: (_: string, data: GateEntry) => entries.push(data),
@@ -4987,9 +5031,10 @@ describe("askgate.ts, the entry", () => {
         runtimeLogger: { warn: () => {} },
       }
     );
+    const { loaded } = registration;
     // Registered before the load settles, so no call can pass between the load and the binding.
     const atOnce = [...handlers.keys()];
-    return { loaded, handlers, entries, atOnce };
+    return { loaded, handlers, entries, atOnce, registration };
   }
   const mainCtx = (kind = "main") => ({
     agent: { kind },
@@ -5072,6 +5117,48 @@ describe("askgate.ts, the entry", () => {
         ["dispatch_comment", "load-failed", "revise", mode],
       ]);
       expect(entries[0].reason).toContain("OMP_ASKGATE_TIMEOUT_MS");
+    }
+  });
+  // #2161, reviewer round 15: the core cuts the shared recorder at its own record deadline, and a
+  // gate that did not load binds no core. The records of the writes the CLI logged go out all the
+  // same, so the registration takes the cut itself, and only where the load failed.
+  test("a gate that does not load cuts its own records when the session shuts down", async () => {
+    const hangs = Promise.withResolvers<Response>();
+    const otherFetch = globalThis.fetch;
+    // A `fetch` that never answers: the whole of it, since Bun's carries `preconnect` too.
+    globalThis.fetch = Object.assign(async () => await hangs.promise, {
+      preconnect: globalThis.fetch.preconnect,
+    });
+    try {
+      const { loaded, handlers, registration } = await registerOnly({
+        OMP_ASKGATE_TIMEOUT_MS: "soon",
+        OMP_ASKGATE_RECORD_PROJECT: "INFRA",
+        DISPATCH_URL: "http://dispatch.test",
+        DISPATCH_TOKEN: "dispatch-token",
+      });
+      await loaded.then(
+        () => expect.unreachable("the gate loaded"),
+        () => undefined
+      );
+      // The core binds none of its handlers, so this one is the registration's own.
+      expect([...handlers.keys()]).toEqual(["tool_call", "session_shutdown"]);
+      const recorded = registration.recordUnmarked({
+        entry: {
+          tool: "dispatch_ask",
+          decision: "allow",
+          outcome: "unmarked",
+          verdictMode: "warn",
+          asksCarried: 1,
+        },
+        sessionId: "sess-e",
+        directory: "/work",
+      });
+      for (let i = 0; i < 50; i++) await Promise.resolve();
+      await handlers.get("session_shutdown")?.({ type: "session_shutdown" }, mainCtx());
+      expect(await recorded).toBe("the session shut down before Dispatch answered the record");
+      hangs.resolve(Response.json({}));
+    } finally {
+      globalThis.fetch = otherFetch;
     }
   });
   test("a handler ceiling too short for a verdict is a load failure too: the write is refused, naming why", async () => {
@@ -6146,6 +6233,7 @@ describe("rules check", () => {
       // end of the shutdown grace (1 s) would land past the handler's 1.5 s wait.
       const recordSignals: AbortSignal[] = [];
       const client = {
+        listProjectArtifacts: async () => [],
         projectArtifact: () =>
           new Promise<{ artifact: { id: string } }>((resolve) =>
             setTimeout(() => resolve({ artifact: { id: "doc-1" } }), 800)
@@ -6229,6 +6317,7 @@ describe("rules check", () => {
       const recording = Promise.withResolvers<void>();
       let recordSignal: AbortSignal | undefined;
       const client = {
+        listProjectArtifacts: async () => [],
         projectArtifact: () =>
           new Promise<{ artifact: { id: string } }>((_resolve, reject) => {
             recording.resolve();
@@ -6448,27 +6537,34 @@ describe("rules check", () => {
     expect(g.calls.find(isRules)?.user).toContain('<ask n="1" kind="retype" id="gone">');
     expect(g.entries).toMatchObject([{ ruleTextMissing: true }]);
   });
-  test("three rules failures in a row give one notice; a rules verdict and a session switch reset the count (rules test 20)", async () => {
+  test("three rules failures in a row give one notice; a rules verdict and a session switch each reset the count (rules test 20)", async () => {
     let rules = "not json";
     const g = bind({ complete: bySystem(ALLOW, async () => ({ text: rules })) });
     for (const id of ["a", "b", "c", "d"]) await g.device(id, "dispatch_ask", KEEP_INPUT);
     expect(g.notices).toEqual([RULES_NOTICE]);
+    // A rules verdict resets the count, so the three failures after it are three in a row again
+    // and raise the notice a second time; the count is at four when the verdict lands, and
+    // without that reset no later call in this session would ever stand at exactly three.
     rules = RULES_NONE;
     await g.device("e", "dispatch_ask", KEEP_INPUT);
     rules = "not json";
     for (const id of ["f", "g"]) await g.device(id, "dispatch_ask", KEEP_INPUT);
     expect(g.notices).toHaveLength(1);
-    g.event("session_switch", { reason: "new" });
     await g.device("h", "dispatch_ask", KEEP_INPUT);
-    expect(g.notices).toHaveLength(1);
-    for (const id of ["i", "j"]) await g.device(id, "dispatch_ask", KEEP_INPUT);
     expect(g.notices).toEqual([RULES_NOTICE, RULES_NOTICE]);
+    // A session switch resets it too: the three failures after the switch raise a third.
+    g.event("session_switch", { reason: "new" });
+    for (const id of ["i", "j"]) await g.device(id, "dispatch_ask", KEEP_INPUT);
+    expect(g.notices).toHaveLength(2);
+    await g.device("k", "dispatch_ask", KEEP_INPUT);
+    expect(g.notices).toEqual([RULES_NOTICE, RULES_NOTICE, RULES_NOTICE]);
     expect(g.entries.map((e) => e.ruleOutcome)).toEqual([
       "no-verdict",
       "no-verdict",
       "no-verdict",
       "no-verdict",
       "none",
+      "no-verdict",
       "no-verdict",
       "no-verdict",
       "no-verdict",
@@ -6892,27 +6988,38 @@ describe("the Dispatch decision record (A5)", () => {
     options: [],
   };
   const MATCHED = rulesAnswer([{ ask: 1, rule: "no_change" as const, quote: "keep it as it is" }]);
-  /** A Dispatch that answers the record's two calls; the gate reads no document in these tests. */
+  /**
+   * A Dispatch that answers the record's three calls; the gate reads no document in these tests.
+   * The documents it holds are the uploads it answered, by name, as Dispatch holds one artifact
+   * per name and stores a second upload of that name as a new version of it.
+   */
   function recordingDispatch(answers: Partial<RecordClient> = {}) {
     const uploads: Array<{ project: string; name: string; content: string }> = [];
     const edits: Array<{ id: string; markdown: string }> = [];
+    const stored = new Map<string, string>();
     const client = {
+      listProjectArtifacts: async (project) =>
+        answers.listProjectArtifacts
+          ? await answers.listProjectArtifacts(project)
+          : [...stored].map(([name, document]) => ({ id: document, name })),
       projectArtifact: async (project, input) => {
         uploads.push({
           project,
           name: input.name,
           content: "content" in input ? input.content : "",
         });
-        return answers.projectArtifact
+        const answer = answers.projectArtifact
           ? await answers.projectArtifact(project, input)
           : { artifact: { id: "doc-1" } };
+        stored.set(input.name, answer.artifact.id);
+        return answer;
       },
       docEdit: async (id, input) => {
         for (const op of input.ops) edits.push({ id, markdown: op.markdown ?? "" });
         return { applied: input.ops.length };
       },
     } satisfies RecordClient;
-    // The gate's dependency hands back the host's own client; the record calls these two of it.
+    // The gate's dependency hands back the host's own client; the record calls these three of it.
     const session = () => ({
       client: client as unknown as DispatchClient,
       serverUrls: ["https://dispatch.example"],

@@ -47,8 +47,6 @@ import {
 import {
   createDecisionRecorder,
   type DecisionRecorder,
-  RECORD_SHUT_DOWN,
-  RECORD_TIMEOUT_MS,
   type RecordRequest,
 } from "./decision-record";
 import type { DispatchSession } from "./rules-check";
@@ -128,17 +126,11 @@ export interface AskGateRegistration {
   readonly loaded: Promise<void>;
   /**
    * Publishes one Dispatch decision record for a write that reached the CLI outside the form the
-   * gate reads (`decision-record.ts`), under a stop of its own at `RECORD_TIMEOUT_MS`. Answers
-   * the text for the entry's `recordError` when the write failed or was given up, and undefined
-   * when it recorded or when the entry is nothing to record.
+   * gate reads (`decision-record.ts`), under the recorder's own stop at `RECORD_TIMEOUT_MS`.
+   * Answers the text for the entry's `recordError` when the write failed or was given up, and
+   * undefined when it recorded or when the entry is nothing to record.
    */
-  readonly recordUnmarked: (request: Omit<RecordRequest, "signal">) => Promise<string | undefined>;
-  /**
-   * Cuts every record still in flight: the entry calls it at `session_shutdown`, so no record
-   * holds the session open past its own teardown. A record cut this way is lost, and its caller
-   * is told why.
-   */
-  readonly cutRecords: () => void;
+  readonly recordUnmarked: (request: RecordRequest) => Promise<string | undefined>;
 }
 
 /**
@@ -173,23 +165,16 @@ export function registerAskGate(pi: PiApi, host: AskGateHost): AskGateRegistrati
   // The host's context carries every member GateCtx reads; PiApi types only those the Envoy entry
   // reads, so the handler takes it as the core's type.
   pi.on("tool_call", async (event, ctx) => (await gate)(event, ctx as unknown as GateCtx));
-  const stops = new Set<AbortController>();
+  // The recorder is cut at `session_shutdown`, so no record holds a sealing session open: the
+  // core does that at its own record deadline, inside the wait it holds the shutdown for. A load
+  // that failed leaves no core to do it, while the unmarked writes' records are written all the
+  // same, so the cut is registered here, and only then.
+  void loading.catch(() => {
+    pi.on("session_shutdown", async () => record.cut());
+  });
   return {
     loaded: loading.then(() => undefined),
-    recordUnmarked: async (request) => {
-      const stop = new AbortController();
-      const timer = setTimeout(() => stop.abort(), RECORD_TIMEOUT_MS);
-      stops.add(stop);
-      try {
-        return await record({ ...request, signal: stop.signal });
-      } finally {
-        clearTimeout(timer);
-        stops.delete(stop);
-      }
-    },
-    cutRecords: () => {
-      for (const stop of stops) stop.abort(RECORD_SHUT_DOWN);
-    },
+    recordUnmarked: (request) => record.record(request),
   };
 }
 

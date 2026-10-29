@@ -4449,15 +4449,19 @@ console.log(JSON.stringify(args));
      * second recorder's, and Dispatch answers it by replacing what the first one wrote.
      */
     const recordWrites = { uploads: 0, appends: 0 };
+    /** The documents this Dispatch holds, which its list of the project's answers. */
+    const recordDocuments: Array<{ id: string; name: string; slug: string }> = [];
     /**
-     * Answers the two Dispatch writes a decision record makes — the document's upload, then an
-     * append to it — and keeps each JSON record they carried, so a test reads what reached
-     * Dispatch and nothing else. Every other request goes on to the suite's own stand-in.
+     * Answers the three Dispatch calls a decision record makes — the read of the project's
+     * documents, the document's upload, then an append to it — and keeps each JSON record the
+     * writes carried, so a test reads what reached Dispatch and nothing else. Every other request
+     * goes on to the suite's own stand-in.
      */
     const standInRecordProject = () => {
       published.length = 0;
       recordWrites.uploads = 0;
       recordWrites.appends = 0;
+      recordDocuments.length = 0;
       process.env.OMP_ASKGATE_RECORD_PROJECT = "INFRA";
       const other = globalThis.fetch;
       const keep = (markdown: string) => {
@@ -4467,9 +4471,19 @@ console.log(JSON.stringify(args));
       globalThis.fetch = async (input, init) => {
         const url = String(input instanceof Request ? input.url : input);
         if (url.endsWith("/api/v1/projects/INFRA/artifacts")) {
-          const body = JSON.parse(String(init?.body ?? "{}")) as { content?: string };
+          // The read the recorder makes before it uploads: one document per name, as Dispatch
+          // holds them, so a second upload of a name would store a new version of that document.
+          if ((init?.method ?? "GET").toUpperCase() === "GET")
+            return Response.json(recordDocuments);
+          const body = JSON.parse(String(init?.body ?? "{}")) as {
+            content?: string;
+            name?: string;
+          };
           recordWrites.uploads += 1;
           keep(body.content ?? "");
+          const name = body.name ?? "";
+          if (!recordDocuments.some((document) => document.name === name))
+            recordDocuments.push({ id: "doc-decisions", name, slug: name.replace(/\./g, "-") });
           return Response.json({ artifact: { id: "doc-decisions" } });
         }
         if (url.endsWith("/edits")) {

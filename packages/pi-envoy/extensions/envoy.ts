@@ -3318,9 +3318,6 @@ export default function envoyExtension(pi: PiApi): void {
       askgateRecords.clear();
       closeStore(askgateOwner.store);
     }
-    // A Dispatch record of an unmarked write still in flight would hold a tool result open while
-    // the session is sealing, and the record it would write belongs to a session that is gone.
-    askgateRecorder?.cutRecords();
     const deadline = Promise.withResolvers<void>();
     const timer = setTimeout(deadline.resolve, 1_000);
     try {

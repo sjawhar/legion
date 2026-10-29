@@ -214,15 +214,15 @@
 // (`decision-record.ts`): the entry above reaches only this machine's disk, and the session that
 // counts the rule decisions over a fortnight holds a Dispatch token and nothing else. That write
 // carries no ask text and no quote, and never changes the decision. It runs after the handler has
-// returned, so no review is ever cut short to pay for it: the handler starts it, under a 5 s stop
-// of its own (RECORD_TIMEOUT_MS), and keeps it in a pending set. A record that cannot be written —
-// an error, its own stop, or the shutdown's cut — writes one line to the host's plain log
-// (`runtimeLogger`) and appends one `advisor-gate-record` entry carrying `toolCallId`, `tool` and
-// `recordError`; the `advisor-gate` entry it belongs to is written already, and `askgate-report.ts`
-// reads `advisor-gate` entries alone, so it passes over these. At shutdown the handler waits for
-// the records still pending and cuts each at the record deadline, before the markers are released,
-// so a record still lands before the session is sealed. The records of one session keep their
-// order: the recorder serialises them per session through its `documents` map.
+// returned, so no review is ever cut short to pay for it: the handler hands it to the session's
+// recorder, which arms the 5 s stop of its own (RECORD_TIMEOUT_MS), and keeps the wait for it in a
+// pending set. A record that cannot be written — an error, its own stop, or the shutdown's cut —
+// writes one line to the host's plain log (`runtimeLogger`) and appends one `advisor-gate-record`
+// entry carrying `toolCallId`, `tool` and `recordError`; the `advisor-gate` entry it belongs to is
+// written already, and `askgate-report.ts` reads `advisor-gate` entries alone, so it passes over
+// these. At shutdown the handler cuts the recorder at the record deadline and waits for what is
+// still pending, before the markers are released, so a record still lands before the session is
+// sealed. The records of one session keep their order: the recorder writes them one at a time.
 // The order after the decision settles, per call: the halt count, the rules count, the block reset,
 // the entry, that record started, the override put back as a comment, the marker, the notes. The
 // mint comes last and only where the decision does not block, so no refused call ever leaves a
@@ -246,12 +246,7 @@ import requestTemplate from "./askgate-request.md" with { type: "text" };
 import systemTemplate from "./askgate-system.md" with { type: "text" };
 import uploadRule from "./askgate-upload.md" with { type: "text" };
 import { Breaker, breakerKey, callKeys, refusalThings, targetLabel } from "./breaker";
-import {
-  createDecisionRecorder,
-  type DecisionRecorder,
-  RECORD_SHUT_DOWN,
-  RECORD_TIMEOUT_MS,
-} from "./decision-record";
+import type { DecisionRecorder } from "./decision-record";
 import ruleCheckRules from "./rule-check.md" with { type: "text" };
 import ruleCheckSystem from "./rule-check-system.md" with { type: "text" };
 import rules from "./rules.md" with { type: "text" };
@@ -589,11 +584,12 @@ interface Deps {
    */
   dispatchClient: (directory: string, signal: AbortSignal) => DispatchSession | undefined;
   /**
-   * The session's decision recorder, shared with the host's record of unmarked writes. Two
-   * recorders would each upload the session's document under its name, and Dispatch replaces a
-   * document uploaded again under its name, so the later upload would drop the other's records.
+   * The session's decision recorder, shared with the host's record of unmarked writes: the gate
+   * builds none of its own. Two recorders would each upload the session's document under its name,
+   * and an upload of a name Dispatch knows stores a new version of that document, so the later
+   * upload would drop the records the other one wrote.
    */
-  recordDecision?: DecisionRecorder;
+  recordDecision: DecisionRecorder;
 }
 // Handlers of any event shape register here (`never` parameters accept every typed handler), so the
 // fork's ExtensionAPI is assignable to it.
@@ -2295,22 +2291,18 @@ export function createAskGate(deps: Deps): (pi: Pi) => void {
     // session_branch: a halt, a count, revise reasons or a rebuttal never outlive their session.
     const rebuttals = new Map<string, Rebuttal>();
     const breaker = new Breaker();
-    // Keyed by session id and not reset with the state below: a session the process returns to
-    // appends to the decision document it already uploaded. The host's recorder when it gives one,
-    // so the gate's records and the unmarked writes' go into one document per session.
-    const recordDecision = deps.recordDecision ?? createDecisionRecorder(deps);
+    // The host's own recorder, one per process: the gate's records and the records of the writes
+    // the gate never saw go into one document per session, and the recorder holds each session's
+    // document across the switches the state below resets on.
+    const recordDecision = deps.recordDecision;
     let failures = 0;
     /** Rules calls in a row that ended without a rules verdict. */
     let ruleFailures = 0;
     let halted = false;
-    /** Once the session is shutting down, when (`deps.now()`) every decision record must have ended. */
-    let recordDeadline: number | undefined;
-    /** The stop of each decision record in flight, which shutdown cuts at `recordDeadline`. */
-    const recordStops = new Set<AbortController>();
     /**
-     * Every decision record still running, each started by a handler that has returned: shutdown
-     * waits for these after the handlers, so a record that fails still appends its entry while the
-     * session takes entries. Each drops itself when it settles.
+     * The wait for every decision record still running, each started by a handler that has
+     * returned: shutdown waits for these after the handlers, so a record that fails still appends
+     * its entry while the session takes entries. Each drops itself when it settles.
      */
     const records = new Set<Promise<void>>();
     // Set once the session starts shutting down (only dispose emits session_shutdown): a scoped call
@@ -2511,43 +2503,24 @@ export function createAskGate(deps: Deps): (pi: Pi) => void {
     };
     /**
      * Publishes one decision to Dispatch, started as the handler returns and awaited by nothing of
-     * the call: the review's deadline pays none of it. The write takes a stop of its own at
-     * RECORD_TIMEOUT_MS, or, once the session is shutting down, by `recordDeadline`. The recorder
-     * serialises the records of one session through its own `documents` map, so they land in the
-     * order they were started.
+     * the call: the review's deadline pays none of it. The recorder arms the write's own stop at
+     * RECORD_TIMEOUT_MS and gives it up at the shutdown's cut, and writes a session's records one
+     * at a time, so they land in the order they were started.
      */
     const startRecord = (entry: GateEntry, ctx: GateCtx) => {
-      const stop = new AbortController();
-      const recordMs =
-        recordDeadline === undefined
-          ? RECORD_TIMEOUT_MS
-          : Math.max(0, Math.min(RECORD_TIMEOUT_MS, recordDeadline - deps.now()));
-      const timer = setTimeout(
-        () => stop.abort(recordMs < RECORD_TIMEOUT_MS ? RECORD_SHUT_DOWN : undefined),
-        recordMs
-      );
-      recordStops.add(stop);
       const done = (async () => {
         let recordError: string | undefined;
         try {
-          recordError = await recordDecision({
+          recordError = await recordDecision.record({
             entry,
             sessionId: ctx.sessionManager.getSessionId(),
             directory: ctx.cwd,
-            signal: stop.signal,
           });
         } catch (error) {
           recordError = messageOf(error);
-        } finally {
-          clearTimeout(timer);
-          recordStops.delete(stop);
         }
-        if (recordError === undefined) return;
-        // A record the shutdown cut short says so, not that it ran to its own stop.
-        noteRecordFailure(
-          entry,
-          stop.signal.reason === RECORD_SHUT_DOWN ? RECORD_SHUT_DOWN : recordError
-        );
+        // The recorder answers why, the shutdown's cut included.
+        if (recordError !== undefined) noteRecordFailure(entry, recordError);
       })();
       records.add(done);
       void done.finally(() => records.delete(done));
@@ -2557,21 +2530,20 @@ export function createAskGate(deps: Deps): (pi: Pi) => void {
     // call that starts after this point asks no model (`closing`). Either way the entry reads
     // `shutdown`, and block mode refuses the call as it refuses any call given up without a verdict.
     // The handlers are waited for first, since each starts its decision record as it returns, then
-    // those records, which the cut ends SHUTDOWN_RECORD_MARGIN_MS before the wait runs out: a record
-    // that fails appends its own entry while the handler still holds the session.
+    // the records themselves — this session's and the host's of the writes the gate never saw,
+    // which share the one recorder — which the cut ends SHUTDOWN_RECORD_MARGIN_MS before the wait
+    // runs out: a record that fails appends its own entry while the handler still holds the session.
     pi.on("session_shutdown", async () => {
       closing = true;
       const recordMs = SHUTDOWN_WAIT_MS - SHUTDOWN_RECORD_MARGIN_MS;
-      recordDeadline = deps.now() + recordMs;
-      const cut = setTimeout(() => {
-        for (const stop of recordStops) stop.abort(RECORD_SHUT_DOWN);
-      }, recordMs);
+      const cut = setTimeout(() => recordDecision.cut(), recordMs);
       for (const abandon of inflight.values()) abandon("shutdown", SHUTDOWN_GRACE_MS);
       const { promise: waited, resolve: stopWaiting } = Promise.withResolvers<void>();
       const timer = setTimeout(stopWaiting, SHUTDOWN_WAIT_MS);
       const settled = (async () => {
         await Promise.allSettled([...handling.values()]);
         await Promise.allSettled([...records]);
+        await recordDecision.settled();
       })();
       await Promise.race([settled, waited]);
       clearTimeout(timer);
@@ -3057,7 +3029,7 @@ export function createAskGate(deps: Deps): (pi: Pi) => void {
         }
       | { failure: string }
       | { unreadable: UnreadableCommand }
-      | { cause: Cause }
+      | { cause: Exclude<Cause, "timeout"> }
       | { unscoped: true };
     const readArgs = async (
       scoped: ScopedCommand,
@@ -3077,10 +3049,16 @@ export function createAskGate(deps: Deps): (pi: Pi) => void {
       // CDPATH search. So the dry run runs without it, and its `cd` reaches the directory the
       // command reaches.
       const { CDPATH: _cdpath, ...env } = deps.env;
+      /**
+       * Why this call was given up, as a read here can see it: its tool's end or the session's
+       * shutdown. Never its own deadline, which `decide` arms once every read below has returned.
+       */
+      const abandoned = (): Exclude<Cause, "timeout"> | undefined =>
+        stop.cause === undefined || stop.cause === "timeout" ? undefined : stop.cause;
       /** Runs one script as the dry run runs: in `cwd`, under the limit, stopped with the call. */
       const runScript = async (
         script: string
-      ): Promise<{ run: DryRunResult } | { cause: Cause }> => {
+      ): Promise<{ run: DryRunResult } | { cause: Exclude<Cause, "timeout"> }> => {
         // Stopped like a waiting model call: the run's stop or the session's shutdown kills it.
         const run = await deps.dryRun(script, {
           cwd,
@@ -3088,10 +3066,14 @@ export function createAskGate(deps: Deps): (pi: Pi) => void {
           timeoutMs: DRY_RUN_TIMEOUT_MS,
           signal: stop.signal,
         });
-        return stop.cause === undefined ? { run } : { cause: stop.cause };
+        const cause = abandoned();
+        return cause === undefined ? { run } : { cause };
       };
       /** The script's stdout, or why it gave none: a stop, the limit, or an exit other than 0. */
-      type Ran = { stdout: string; stderr: string } | { failure: string } | { cause: Cause };
+      type Ran =
+        | { stdout: string; stderr: string }
+        | { failure: string }
+        | { cause: Exclude<Cause, "timeout"> };
       const stdoutOf = async (script: string, what: string): Promise<Ran> => {
         const ran = await runScript(script);
         if ("cause" in ran) return ran;
@@ -3398,11 +3380,9 @@ export function createAskGate(deps: Deps): (pi: Pi) => void {
               // override flag on it is still removed, since the CLI would refuse it, and put
               // back as a comment, so the agent's record of the call still shows it.
               if ("unscoped" in run) return revised === undefined ? undefined : { input: revised };
-              if ("cause" in run)
-                decision =
-                  run.cause === "timeout"
-                    ? pass("timeout", {}, "failure")
-                    : givenUp(mode, run.cause);
+              // A read given up: its tool ended, or the session is shutting down. Never this
+              // call's own deadline, which is armed only once the model calls go out.
+              if ("cause" in run) decision = givenUp(mode, run.cause);
               else if ("unreadable" in run) {
                 if (halted) decision = pass("halted");
                 else if (ctx.model?.provider !== resolveRole(ctx)?.model.provider)

@@ -21,19 +21,31 @@
 // OMP_ASKGATE_RECORD_PROJECT names, else the one LEGION_PROJECT names, else nowhere — with
 // neither set the gate makes no Dispatch call at all and the call costs nothing. The session's
 // first decision uploads the document with its header paragraph and that first record; every
-// later one appends a fenced block through `docEdit`, because posting the same name twice gives
-// Dispatch a second document rather than a new version of the first. The document's id is held in
-// memory for the session, so the name is never posted twice.
+// later one appends a fenced block through `docEdit`, because Dispatch stores a second upload of
+// one name as a new version of that same document (`findArtifactByName`,
+// `packages/envoy/internal/dispatch/api/artifacts.go`), which the reader reads in place of
+// everything the first upload held. The document's id is held in memory for the session; holding
+// none — a process that never uploaded this session's document, or one whose upload was cut —
+// the recorder finds the document among the project's by its name and appends to it, and uploads
+// only when the project holds none. One session's records are written one at a time, each after
+// the one before it has settled, so they land in the order the gate made them.
 //
 // What is lost, and is left visible in the reader's output rather than hidden: a session killed
-// between a decision and its upload loses that one record; a session that never reached a gated
-// call writes no document at all; and a write that fails or outlives its stop loses its record
-// too. The caller says where that goes: the core appends an `advisor-gate-record` entry for the
-// gated call it belongs to, and the host leaves `recordError` on the `unmarked` entry it writes.
+// between a decision and its write loses that one record; a session that never reached a gated
+// call writes no document at all; a write that fails, that outlives its stop or that the
+// session's shutdown cuts loses its record, and one given up that way may have landed all the
+// same, so a record its caller calls lost can still be in the document; and two processes that
+// write one session's first record at the same moment each find no document and upload one,
+// where the later upload's version replaces the record the earlier one carried. The caller says
+// where a loss goes: the core appends an `advisor-gate-record` entry for the gated call it
+// belongs to, and the host leaves `recordError` on the `unmarked` entry it writes.
 import type { CreateArtifactInput, EditArtifactInput } from "@legion/contracts";
 import pkg from "../../package.json";
 
-/** The record's own stop: a write that has not answered by then is given up, and never retried. */
+/**
+ * The record's own stop, armed when the recorder takes a decision it records: a write that has not
+ * answered by then is given up, and never retried.
+ */
 export const RECORD_TIMEOUT_MS = 5_000;
 
 /** The `recordError` of a record the session's shutdown cut short, before its own stop fell. */
@@ -52,11 +64,18 @@ const PLUGIN = `${pkg.name}@${pkg.version}`;
 export type RecordSource = "pod" | "machine";
 
 /**
- * What the record needs of a Dispatch client, which is the two calls it makes. Declared
+ * What the record needs of a Dispatch client, which is the three calls it makes. Declared
  * structurally, over the real input types, so the host's own `DispatchClient` satisfies it and a
  * test drives it with a plain object.
  */
 export interface RecordClient {
+  /**
+   * The project's documents, which the recorder reads to find the session's own by name: the one
+   * read that tells it whether an upload would make the document or replace it.
+   */
+  listProjectArtifacts(
+    project: string
+  ): Promise<readonly { readonly id: string; readonly name: string }[]>;
   projectArtifact(
     project: string,
     input: CreateArtifactInput
@@ -142,15 +161,29 @@ export interface RecordRequest {
   sessionId: string;
   /** The directory whose Dispatch configuration the write uses: the session's own. */
   directory: string;
-  /** The record's stop, armed by the caller at `RECORD_TIMEOUT_MS`. */
-  signal: AbortSignal;
 }
 
 /**
- * Records one decision. Answers the text for the entry's `recordError` when the write failed or
- * was given up, and undefined when it recorded or when there was nothing to record.
+ * Writes a session's decisions to its Dispatch document, one write of a session at a time, each
+ * under a stop of its own. The gate's own records and the host's records of unmarked writes go
+ * through one of these, so a session's decisions reach one document.
  */
-export type DecisionRecorder = (request: RecordRequest) => Promise<string | undefined>;
+export interface DecisionRecorder {
+  /**
+   * Records one decision, under a stop of its own at `RECORD_TIMEOUT_MS`, armed only for a
+   * decision there is something to record of. Answers the text for the entry's `recordError` when
+   * the write failed, outlived its stop or was cut, and undefined when it recorded or when there
+   * was nothing to record.
+   */
+  record(request: RecordRequest): Promise<string | undefined>;
+  /**
+   * Gives up every record in flight with `RECORD_SHUT_DOWN`, and gives up every later one as it
+   * starts: the session is shutting down, and no record may hold it open past that.
+   */
+  cut(): void;
+  /** Settles once every record in flight has answered its caller: what a shutdown waits for. */
+  settled(): Promise<void>;
+}
 
 /** A variable that is set and holds something, or nothing; the three settings below read alike. */
 function nonEmpty(value: string | undefined): string | undefined {
@@ -160,12 +193,28 @@ function nonEmpty(value: string | undefined): string | undefined {
 
 export function createDecisionRecorder(deps: RecordDeps): DecisionRecorder {
   /**
-   * Each session's document: the upload in flight, or the id it answered. One entry per session
-   * this process serves, so a session the host returns to appends to the document it already made.
+   * Each session's document, once this process knows its id: a session it serves again appends to
+   * the document it already holds, and reads nothing of the project to find it.
    */
-  const documents = new Map<string, Promise<string>>();
+  const documents = new Map<string, string>();
+  /**
+   * The write each session's next record waits for: one write of a session at a time, so the
+   * document's upload has answered before anything appends to it and the appends reach Dispatch
+   * in the order the gate made them. This promise never rejects.
+   */
+  const writing = new Map<string, Promise<void>>();
+  /** Every record whose caller is still waiting: what `settled` waits for. */
+  const pending = new Set<Promise<void>>();
+  /** The one call that ends each record in flight, with the reason its caller is told. */
+  const stops = new Set<(why: string) => void>();
+  /** Set by `cut`: the session is shutting down, so a record that starts after it is given up at once. */
+  let cutShort = false;
 
-  return async ({ entry, sessionId, directory, signal }) => {
+  const record = async ({
+    entry,
+    sessionId,
+    directory,
+  }: RecordRequest): Promise<string | undefined> => {
     // The calls whose rules check ran, the calls the agent sent anyway — a rebuttal or the
     // breaker, which the gate answers with no check of its own — and the writes that reached the
     // CLI outside the form the gate reads and carry an ask for a person, are the decisions to
@@ -209,55 +258,109 @@ export function createDecisionRecorder(deps: RecordDeps): DecisionRecorder {
       plugin: PLUGIN,
     };
     const block = `\`\`\`json\n${JSON.stringify(record)}\n\`\`\``;
-    const held = documents.get(sessionId);
+    const name = `${DECISION_DOCUMENT_PREFIX}${sessionId}.md`;
+    // Past the cut the session is sealing: this record is given up before it asks Dispatch for
+    // anything, and arms no stop of its own, since what it would hold the session open for is
+    // already past.
+    if (cutShort) return RECORD_SHUT_DOWN;
+    // The record's own stop, armed here and nowhere earlier: an entry the lines above record
+    // nothing of leaves no timer behind. The abort ends the request behind it, and the first
+    // reason given — this stop, or the session's shutdown — is the one the caller is told.
+    const stop = new AbortController();
+    const { promise: stopped, resolve: giveUp } = Promise.withResolvers<string>();
+    const end = (why: string) => {
+      if (stop.signal.aborted) return;
+      // The caller's answer is given before the abort, so the reason it reads is this one and
+      // never whatever the aborted request rejects with.
+      giveUp(why);
+      stop.abort(why);
+    };
+    stops.add(end);
+    const timer = setTimeout(
+      () => end(`Dispatch did not answer the record within ${RECORD_TIMEOUT_MS} ms`),
+      RECORD_TIMEOUT_MS
+    );
     // Inside the write, so a Dispatch configuration that refuses to resolve fails as any other
     // write does: the record is lost and the entry says why.
     const write = async (): Promise<string | undefined> => {
-      const dispatch = deps.dispatchClient(directory, signal);
+      const dispatch = deps.dispatchClient(directory, stop.signal);
       if (dispatch === undefined) return "the session has no Dispatch configuration";
+      const client = dispatch.client;
       // A bearer caller names its own session or Dispatch refuses the write (ACTOR_KIND, "bearer
       // callers require actor.kind session"); the `dispatch` command names it the same way.
       const actor = { kind: "session", id: sessionId } as const;
+      // The id this process holds for the session, else the document the project already holds
+      // under that name. An upload of a name Dispatch knows stores a new version of that same
+      // document, and the reader reads the latest version alone, so a process holding no id reads
+      // the project's documents before it writes: a document a cut upload left behind, or one the
+      // process that served this session before wrote, takes this record rather than losing its
+      // own. A read that fails is this record's failure, as a failed write is.
+      const held =
+        documents.get(sessionId) ??
+        (await client.listProjectArtifacts(project)).find((artifact) => artifact.name === name)?.id;
       if (held !== undefined) {
-        await dispatch.client.docEdit(await held, {
+        documents.set(sessionId, held);
+        await client.docEdit(held, {
           ops: [{ op: "insert", markdown: block, after: "end" }],
           actor,
         });
         return undefined;
       }
       const where = source === "pod" ? "a Legion role's pod" : "a person's machine";
-      const created = dispatch.client
-        .projectArtifact(project, {
-          name: `${DECISION_DOCUMENT_PREFIX}${sessionId}.md`,
-          content:
-            `AskGate rule decisions of session ${sessionId}, made on ${where} (source ` +
-            `\`${source}\`). One fenced block per decision follows, each holding one JSON ` +
-            `record.\n\n${block}\n`,
-          actor,
-        })
-        .then((answer) => answer.artifact.id);
-      // Held before it answers, so a second decision of the same session appends to this document
-      // rather than posting its name again, which Dispatch answers with a second document.
-      documents.set(sessionId, created);
-      // An upload that fails holds nothing, and one given up fails too, since the stop aborts the
-      // request behind it: that record is lost, and the session's next decision uploads again.
-      created.catch(() => {
-        if (documents.get(sessionId) === created) documents.delete(sessionId);
+      const created = await client.projectArtifact(project, {
+        name,
+        content:
+          `AskGate rule decisions of session ${sessionId}, made on ${where} (source ` +
+          `\`${source}\`). One fenced block per decision follows, each holding one JSON ` +
+          `record.\n\n${block}\n`,
+        actor,
       });
-      await created;
+      // Held once Dispatch has answered it, so the session's next record appends to this document
+      // and reads nothing to find it. An upload that fails or is given up holds nothing: the next
+      // record looks the document up by name, and uploads again only where none landed.
+      documents.set(sessionId, created.artifact.id);
       return undefined;
     };
-    // The write is never waited on past the stop the caller armed, and never retried.
-    const { promise: stopped, resolve: giveUp } = Promise.withResolvers<string>();
-    const given = `Dispatch did not answer the record within ${RECORD_TIMEOUT_MS} ms`;
-    if (signal.aborted) giveUp(given);
-    else signal.addEventListener("abort", () => giveUp(given), { once: true });
+    // This session's records, one at a time: the next starts once this write has settled, however
+    // it settled, so neither a failure nor a stop leaves the session's later records unwritten.
+    const queued = writing.get(sessionId);
+    const mine = queued === undefined ? write() : queued.then(write, write);
+    writing.set(
+      sessionId,
+      mine.then(
+        () => undefined,
+        () => undefined
+      )
+    );
+    // The caller's own wait, which `settled` holds the shutdown for: it ends at the write, at this
+    // record's stop or at the cut, whichever comes first, and never after.
+    const { promise: answered, resolve: answer } = Promise.withResolvers<void>();
+    pending.add(answered);
     try {
-      return await Promise.race([write(), stopped]);
+      // The write is never waited on past the stop, and never retried.
+      return await Promise.race([mine, stopped]);
     } catch (error) {
       // A write that fails costs the gated call nothing: the entry carries why, and that is all.
       const message = error instanceof Error ? error.message : String(error);
       return message === "" ? "the Dispatch write failed without a message" : message;
+    } finally {
+      clearTimeout(timer);
+      stops.delete(end);
+      pending.delete(answered);
+      answer();
     }
+  };
+
+  return {
+    record,
+    cut: () => {
+      cutShort = true;
+      for (const end of [...stops]) end(RECORD_SHUT_DOWN);
+    },
+    settled: async () => {
+      // A record that starts while this waits is waited for as well; past the cut each of those is
+      // given up as it starts, so the wait ends with the records the session had.
+      while (pending.size > 0) await Promise.allSettled([...pending]);
+    },
   };
 }

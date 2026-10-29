@@ -13,13 +13,18 @@ body: |-
   stored version already holds counts them as carried. `OMP_ASKGATE_RECORD_PROJECT` names the
   project, else `LEGION_PROJECT` does, and with neither set nothing is written. The record runs
   once the gate has answered the call, never inside its `tool_call` handler, under a 5 second stop
-  of its own, and never changes the decision. A record that fails, that hits that stop or that the
-  session's shutdown cuts writes one line to the host's log and appends one `advisor-gate-record`
-  entry carrying `toolCallId`, `tool` and `recordError`; the call's own `advisor-gate` entry
-  stands as written, and the report reads `advisor-gate` entries alone. At shutdown the gate waits
-  for the records still pending and cuts each 1.25 s after shutdown began, so a record still
-  lands, and the entry of one that could not, before the session is sealed. Two records of one
-  session keep their order: the second appends to the document the first uploaded.
+  the recorder arms, and never changes the decision. A record that fails, that hits that stop or
+  that the session's shutdown cuts writes one line to the host's log and appends one
+  `advisor-gate-record` entry carrying `toolCallId`, `tool` and `recordError`; the call's own
+  `advisor-gate` entry stands as written, and the report reads `advisor-gate` entries alone. At
+  shutdown the gate cuts the recorder 1.25 s after shutdown began and waits for what is still
+  pending, so a record still lands, and the entry of one that could not, before the session is
+  sealed; a record cut there says the shutdown cut it. The session's first decision uploads the
+  document and every later one appends to it, and a process holding no id for the session finds
+  the document by name among the project's rather than uploading that name again, which Dispatch
+  stores as a new version of the document and the reader reads in place of everything it held.
+  The records of one session are written one at a time, so they land in the order the gate made
+  them.
   `scripts/askgate-report.ts
   --dispatch-project <KEY> --since <RFC 3339> [--json]` reads those documents back and counts
   them, split by `source`, with the unmarked writes on a line of their own, by mode and with the
