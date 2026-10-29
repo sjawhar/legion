@@ -2,30 +2,36 @@
   "schemaVersion": 1,
   "phase": "review",
   "issue": "INFRA-624",
-  "completed": "2026-10-29T13:16:57Z",
-  "round": 11,
-  "reviewedHead": "21bde3dde71b506f2f4e9ceaca3f902b3b8f66a3",
-  "codeHead": "ea3cfcb04e83",
-  "decision": "changes_requested",
+  "completed": "2026-10-29T15:05:00Z",
+  "round": 12,
+  "reviewedHead": "da7e77c3a18eb3bf6439f7170a2d117d56be0c96",
+  "codeHead": "df85ed05c26d",
+  "decision": "approved",
   "critical": 0,
   "important": 0,
-  "minor": 2,
-  "scope": "The architect's design cut (recorded on INFRA-624): a refusal whose repair would need its holder changed names no delete and no ask edit. Judged: that refusal, that no named step loops or is refused, the exhaustive tests' counts, and the twenty-three kinds count.",
-  "ci": "CI head d78e7cbb (newest pull_request run; compare to 21bde3dd handoffsOnly true, 1 file under .legion/INFRA-624/): required lint, typecheck, test, pr-title success at 13:16Z; other lanes were still running.",
-  "roundTenItems": "Gone by the design cut in 9712a697 and accepted (PRRT_kwDORFy7ds6xioNx, PRRT_kwDORFy7ds6xioN2, PRRT_kwDORFy7ds6xioN-). The deep review followed every shape against Postgres (a holder with no question, O > M (no question) > I, an answered holder, a holder another session wrote, a holder with an unlabelled option, broken siblings): no named delete was refused and no reason sends the caller to another decision's ask edit. Counts verified: 1364 flat bodies (1242 broken, 892 followed, 350 empty question) and 780 nested bodies (715 broken; 1113 refusals = 348 followed + 765 naming no delete: 541 unreadable, 186 held back by the holder, 38 editor). proof-editor AGENTS.md says twenty-three, matching its list.",
+  "minor": 3,
+  "scope": "The INFRA-138 architect's scope: round 11's two minors and the merge of main; approve if they hold; anything that is not a correctness defect on the Fast-follow line.",
+  "roundElevenItems": "Both fixed in e58298ed. The clause 'once the decision holding it reads as one' is gone from the code, the comment, packages/envoy/AGENTS.md, the Changed fragment and the test constant (repository-wide grep: no hit outside this file's history). The held-back claim is now checked independently (assertHeldBackByItsHolder reads only the content rule, pmdoc.DeleteBlock and readAskBlockStrictly), on all 186 held-back refusals of the 780-body test; two rows repair the holder's own problem and follow the held decision's refusal to a valid end for both. The round 11 mutation (holder: true for every nested decision) now fails TestSetAskBlockTextRefusalOfEveryBrokenBodyHoldingADecisionLeadsToAValidDecision and TestSetAskBlockTextRefusalOfNestedDecisionsNamesOnlyWhatBreaksTheRule (reviewer's go test -overlay run against Postgres at the head).",
+  "merge": "df85ed05 merges main fe315392: every PR file's diff against main is byte-identical before and after, except service_test.go, where both sides added the slices import and the merge keeps one.",
+  "proseFix": "The reviewer's own commit corrects three comments the delta left untrue: two held-pair row comments in service_test.go still described the removed 'other way out', and the askRepairPlan.holder comment said 'while the holder's own problem stands', which is false for a three-level shape (below). Comments only; no code changes.",
   "keyFindings": [
     {
       "severity": "minor",
       "file": "packages/envoy/internal/dispatch/docs/ask_block_text.go",
-      "description": "The holder branch (:548) says the decision is repaired 'by an ask edit once the decision holding it reads as one', but the holder can never read as one while this decision breaks (pmdoc.AskContentError walks nested decisions). Reviewer's re-run of the code-quality probe TestR11HeldBackWayOut: after the holder's own repair, 'holder reads as one: false (… ask-nested … holds a second bullet list)', yet the held decision's ask edit then names deletes and following them ends valid. The same wording is at :497, packages/envoy/AGENTS.md:2316, the Changed fragment :13 and service_test.go:1587."
+      "description": "Three-level shape (deep-review probe TestR12HolderShapeV): a valid holder holding B, which holds X = [empty paragraph, list, list]. Editing B returns the holder branch, saying no document edit deleting blocks of this decision leaves every decision readable, while deleting X passes validateEditedAskBlocks and leaves both decisions strict. The editor remedy it names works and nothing is written; no test nests three levels. On the Fast-follow line at the architect's direction."
     },
     {
       "severity": "minor",
       "file": "packages/envoy/internal/dispatch/docs/service_test.go",
-      "description": "No test checks that a held-back refusal is true: a mutation returning holder:true for every nested decision (ask_block_text.go:600) passed every Ask test (code-quality probe). Add a row that repairs the holder's own problem, then follows the held decision's refusal to a valid end for both."
+      "description": "Three named held-back sites (:1331, :1422, :1456) assert the reason but do not call assertHeldBackByItsHolder; the same trees are checked by the new rows, so no shape goes unchecked today. blocksTheAskRuleLeavesNoRoomFor drops for an empty question, so in the three-level shape it would fail a correct refusal (deep-review probe TestR12HelperFalseFailure). Fast-follow."
+    },
+    {
+      "severity": "minor",
+      "file": "packages/envoy/internal/dispatch/docs/service_test.go",
+      "description": "The decided-holder row's lost-word exemption lists 'Wait', which also exempts Hold's 'Wait for review', and its refused doc-edit asserts only that it failed (the probe showed the right reason, the content rule of ask-nested). Fast-follow."
     }
   ],
-  "fastFollow": "none",
-  "thermonuclear": "Both run at 21bde3dd (code ea3cfcb0): deep review APPROVE with one minor (item 1), code quality CHANGES (items 1 and 2).",
-  "security": "untrusted-input: every block id in the reason stays %q or strconv.Quote data and no branch holds command text (ask_block_text.go:519-555). authz: no new route; the refusal runs inside SetAskBlockText behind the unchanged ask-edit handler, and no branch names another decision's ask edit any more."
+  "fastFollow": "In files this pull request touches, at the architect's direction: (1) ask_block_text.go: a three-level held-back refusal says no document edit works where deleting the innermost decision does; classify an emptied nested decision as blocked, or word the reason as 'the deletes it names'. (2) service_test.go: call assertHeldBackByItsHolder at :1331, :1422 and :1456, fold the two held-pair rows into the rows whose trees they copy, and make blocksTheAskRuleLeavesNoRoomFor drop a decision's own blocks only when its own block types break the rule. (3) service_test.go:1527-1539: assert the refused doc-edit names ask-nested, and exempt only Tuesday's and Defer's words.",
+  "thermonuclear": "Both run at da7e77c3 (code df85ed05): deep review APPROVE (M1 minor, F1-F4 fast-follow), code quality CHANGES on two test-file minors (the stale comments, fixed by the reviewer's own commit; the uncalled helper sites, fast-follow).",
+  "security": "agent-def: packages/envoy/AGENTS.md only drops one clause of a reference description; it gives reviewers no instruction. untrusted-input: the refusal's quoted block ids are unchanged (%q / strconv.Quote data, ask_block_text.go:519-555). authz: no new route."
 }
