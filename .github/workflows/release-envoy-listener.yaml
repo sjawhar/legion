@@ -259,12 +259,13 @@ jobs:
           DOCKER_BUILD_SUMMARY: "false"
         # No BuildKit layer cache is kept across runs. The Dockerfile passes LEGION_COMMIT (this
         # run's github.sha) into the build stage's `go build -ldflags` step, so every new commit
-        # runs the build stage, and the web stage it copies from, again: an exported cache would
-        # serve only a re-run at the same commit, while each main run would add about 137 MB of
-        # Actions-cache entries (`mode=min`; `mode=max` added about 1.6 GB) to a cache already past
-        # GitHub's 10 GB limit. Not a registry cache either: any run holding `packages: write` can
-        # write a tag main's attested build would read (GHSA-f2v9-hprr-32q3). Uncached, each leg
-        # takes about 4.2-6.9 minutes.
+        # runs the build stage, and the web stage it copies from, again: a `mode=min` cache, which
+        # exports the final stage's layers alone, would serve only a re-run at the same commit,
+        # while each main run would add about 137 MB of Actions-cache entries (`mode=max` added
+        # about 1.6 GB) to a cache already past GitHub's 10 GB limit. Not a registry cache either:
+        # any run holding `packages: write` can write a tag main's attested build would read
+        # (GHSA-f2v9-hprr-32q3). Uncached, each leg takes 4.2-5.3 minutes
+        # (docs/solutions/github/measure-a-build-cache-by-what-a-new-commit-invalidates-and-a-hit-by-same-run-job-reruns-pr2297.md).
         with:
           context: .
           file: packages/envoy/docker/Dockerfile
