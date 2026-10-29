@@ -42,7 +42,7 @@ type Sender interface {
 // them reached NATS is always a prefix of what was sent: once one is lost to the connection, none
 // sent after it can land after it on a connection that came back.
 //
-// Each send goes on the transport Publish would use (usesCoreTransport), under the same MsgId. An
+// Each send goes on the transport Publish would use (UsesCoreTransport), under the same MsgId. An
 // outcome decided before anything was sent is in the channel when PublishAsync returns: a refusal
 // (ErrRefused), or ErrUnavailable. Otherwise the answer comes within publishAcknowledgementTimeout:
 // a JetStream acknowledgement (the JetStream context's PublishAsyncTimeout), or a core publish's
@@ -97,7 +97,7 @@ func (w *window) send(item contracts.Envelope) (func() error, error) {
 	if err := w.pin(); err != nil {
 		return nil, err
 	}
-	if usesCoreTransport(item.Topic) {
+	if UsesCoreTransport(item.Topic) {
 		return w.sendCore(item, data)
 	}
 	return w.sendJetStream(item, data)
@@ -205,7 +205,7 @@ func (w *window) flushed() {
 func (w *window) sendJetStream(item contracts.Envelope, data []byte) (func() error, error) {
 	var options []nats.PubOpt
 	if contracts.DedupeKeyNamesTheUpstreamEvent(item) {
-		options = append(options, nats.MsgId(item.DedupeKey+":"+item.Topic))
+		options = append(options, nats.MsgId(ForwardMsgID(item.DedupeKey, item.Topic)))
 	}
 	sentAt := time.Now()
 	future, err := w.js.PublishMsgAsync(&nats.Msg{Subject: item.Topic, Data: data}, options...)

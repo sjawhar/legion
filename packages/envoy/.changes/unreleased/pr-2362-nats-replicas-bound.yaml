@@ -1,8 +1,0 @@
-kind: Changed
-body: |-
-    envoy-infra: `aws:WebhookListener` refuses a `natsReplicas` above 5, and
-    `envoy-infra render webhook-listener-env` a `--nats-replicas` above 5, since the listener
-    refuses more at load.
-time: 2026-10-28T10:11:20.30623608Z
-custom:
-    Issue: pr2362

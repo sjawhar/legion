@@ -9,7 +9,7 @@
 # the fixture root.
 #
 # Run from anywhere: .github/scripts/check-bun-version.test.sh
-# CI runs it in the Tests workflow (pr-and-main.yaml, job test).
+# CI runs it in ci.yaml's test job.
 set -euo pipefail
 # Every fixture is built inside `root=$(fixture …)`, and bash does not carry errexit into a
 # command substitution on its own: without this, a tree that failed to build is used anyway and
@@ -165,12 +165,21 @@ run_check "$root"
 check "any other input on the wrapper fails, since setup-bun prefers them" "$(is "$status" 1)"
 check "names the input" "$(contains "$out" 'bun-download-url')"
 
-root=$(fixture wrapper-no-cache-off-main)
+root=$(fixture wrapper-no-cache)
 cat >> "$root/.github/actions/setup-bun/action.yml" <<'YAML'
         no-cache: ${{ github.ref != 'refs/heads/main' }}
 YAML
 run_check "$root"
-check "a wrapper passing no-cache passes" "$(is "$status" 0)"
+check "no-cache on the wrapper passes, since it selects no Bun version" "$(is "$status" 0)"
+
+root=$(fixture wrapper-no-cache-and-literal)
+cat >> "$root/.github/actions/setup-bun/action.yml" <<'YAML'
+        no-cache: true
+        bun-version: latest
+YAML
+run_check "$root"
+check "a version beside no-cache still fails" "$(is "$status" 1)"
+check "names only the version input" "$(contains "$out" 'passes bun-version beside the version file')"
 
 echo "case: rule 4 — a step or a RUN that installs Bun itself"
 installers=(
