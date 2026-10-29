@@ -2,9 +2,25 @@
   "schemaVersion": 1,
   "phase": "implement",
   "issue": "INFRA-593",
-  "completed": "2026-10-28T22:30:00Z",
+  "completed": "2026-10-29T01:00:00Z",
   "pullRequest": "https://github.com/sjawhar/legion/pull/2444",
   "proof": [
+    {
+      "criterion": "Review round 1, findings 1-4 and 6: the compaction pool counted, buffered folds bounded and interruptible, re-noted and retried rooms kept queued, every append noting its room, one load path and one outcome mapping.",
+      "surface": "internal/dispatch/docs, store and infra/gcp against a real Postgres 16.2",
+      "command": "go vet ./... (plain, -tags memory, -tags multiprocess); (cd infra && go test ./gcp/ -run TestDispatchConnectionsPerPodIsTheServers); go test -count=1 ./internal/dispatch/docs ./internal/dispatch/store/... ./internal/pgmigrate/... ./internal/dispatch/outbox ./internal/dispatch/deliveryaudit ./internal/dispatch/duty ./cmd/dispatch; go test -tags multiprocess ./cmd/dispatch -run TestEachLeasedMaintenanceLoopRunsOnceAcrossBothProcesses",
+      "observed": "All pass at d741863c; TestABufferedFoldWaitsForASlotWithinItsContext, TestABufferedFoldEndsWithItsContext, TestTheCompactionQueueKeepsANoteThatComesWhileItsDocumentsStepRuns and TestTheCompactionQueueComesBackToARetriedDocumentWhenItsYoungRowsComeDue pass; ConnectionsPerProcess = dispatchConnectionsPerPod = 88; document-compaction: A ran 1 skipped 0, B ran 0 skipped 1.",
+      "headSha": "d741863c765161e472f2145d53c5c231d674ff28",
+      "negativeControl": "TestTheCompactionQueueKeepsANoteThatComesWhileItsDocumentsStepRuns fails with renoting disabled (timed out waiting for the check the note in flight queued); a third buffered load whose ctx is cancelled while it waits for a fold slot returns context.Canceled."
+    },
+    {
+      "criterion": "Acceptance 1, 2 and 5 at the review-round head: compaction survives a restart, runs without NATS, folds only rows older than 2 minutes, through doc_compaction_owed, with the sweep's first tick at start.",
+      "surface": "envoy-dispatch built from the head, real process on Postgres 16.2, DISPATCH_NATS_DISABLED=1, HTTP API",
+      "command": "bash $TMPDIR/infra593/e2e.sh (dispatch://INFRA-593/artifact/infra-593-e2e-proof-txt version 5)",
+      "observed": "41 rows; 38 backdated; hour record cleared; the restarted process's first sweep tick logged candidates=1 compacted=1 rows_deleted=37; 4 rows left, the 3 young rows unchanged (version, xmin, md5); text sha256 identical; a 31st upload reads back.",
+      "headSha": "d741863c765161e472f2145d53c5c231d674ff28",
+      "negativeControl": "Main c3d09eec folded all 41 rows at shutdown, the row written seconds earlier included; the head keeps rows younger than 2 minutes as written."
+    },
     {
       "criterion": "Tester round 1 failure and the INFRA-514 architect's decision (2026-10-28T19:47Z): the hourly sweep reads only documents that have rows to fold.",
       "surface": "internal/dispatch/docs against a real Postgres 16.2, and EXPLAIN on a database migrated by envoy-dispatch built from the head",
@@ -107,7 +123,10 @@
     "packages/envoy/internal/dispatch/store/doc_compaction_owed_migration_test.go",
     "packages/envoy/internal/dispatch/docs/compaction_sweep.go",
     "packages/envoy/cmd/dispatch/README.md",
-    "packages/envoy/internal/dispatch/pmdoc/reanchor_test.go"
+    "packages/envoy/internal/dispatch/pmdoc/reanchor_test.go",
+    "packages/envoy/infra/gcp/dispatch.go",
+    "packages/envoy/.changes/unreleased/INFRA-593-document-load-and-compaction.yaml",
+    "packages/envoy/internal/dispatch/pmdoc/typed_nesting_test.go"
   ],
   "trickyParts": [
     "The compaction write re-reads (version, xmin) of every folded row inside its transaction and drops the fold on any difference; an append above the fold point changes nothing folded, so a write during the fold no longer drops it (the plan's acceptance 3a expected a drop; it is correct to commit).",
@@ -125,11 +144,14 @@
     "Upload and harness numbers were taken at ee5938e6; the head 9eb0b4e2 adds only the forward merge of main and two test fixes in deliveryaudit_test.go. The harness history seed ran 28 versions and 25 comments on all 1,000 specs through main's API; main's shutdown then compacted every spec to one row, which both sides start from.",
     "Merged main twice (GitHub reported the pull request conflicting each time); deliveryaudit_test.go, new on main, needed outbox.Deps.Docs removed and auth.SingleSigningKey for store.NewPgPeopleStore (main 20ba65a6 fails go vet there on its own).",
     "Round 2: the sweep lists doc_compaction_owed (migration 0137, numbered after main's 0136) instead of grouping doc_updates, by the INFRA-514 architect's decision; plan.md version 3 revises D3. The append names its document in a third CTE of its existing statement, with the head it read under the lock deciding (a first row records nothing); compaction removes the entry in its write transaction when no row stays above the fold point; Delete and RebuildTx remove it; the sweep removes, under the document's transaction lock, an entry whose document has no row after its first. No foreign key reaches artifacts. During a rolling update the old release does not write the table; its documents are caught by the new release's queue on their next append or load.",
-    "Third forward merge of main (GitHub reported conflicting): renamed this branch's test type storedRow to updateRow (main's margin_equivalence_fixtures_test.go adds one), and changed pmdoc/reanchor_test.go to crafted.NestedValue (main's own compile failure since #2448, the same change as #2481)."
+    "Third forward merge of main (GitHub reported conflicting): renamed this branch's test type storedRow to updateRow (main's margin_equivalence_fixtures_test.go adds one), and changed pmdoc/reanchor_test.go to crafted.NestedValue (main's own compile failure since #2448, the same change as #2481).",
+    "Review round 1 (12 threads) fixed in 61cc109a; the PR body carries the contract change census (CompactAll, outbox.Deps, VersionedStore, writers of doc_updates and doc_compaction_owed's rollout).",
+    "Fourth forward merge of main (conflicting): duty.Exclusive now takes the tick's due time, so the sweep runs on duty.RunLeased, a one-hour ticker whose first tick is at start (it was a 30 s jittered first tick, then every 10 minutes); the CHANGELOG entry moved into the changelog fragment .changes/unreleased/INFRA-593-document-load-and-compaction.yaml under main's new fragment rule; pmdoc/typed_nesting_test.go wraps cpuTimeOf's argument in again(...), main's own compile error that #2481 also fixes."
   ],
   "openQuestions": [
     "The memory-tag suite (cmd/dispatch history_memory_test.go, memory_test.go) cannot run on this gVisor pod (/proc/<pid>/clear_refs permission denied); history_memory_test.go now backdates rows before the deploy-style stop so the stop's tail-rule compaction folds them. CI's memory lane passed at 4bbe8232 (Legion Envoy and Contracts: success)."
   ],
-  "round": 2,
-  "answersTest": "dispatch://INFRA-593/artifact/infra-593-tester-round-1-txt (failure: the hourly sweep read one entry per document)"
+  "round": 3,
+  "answersTest": "dispatch://INFRA-593/artifact/infra-593-tester-round-1-txt (failure: the hourly sweep read one entry per document)",
+  "answersReview": "Review round 1 at d1939c86 (REQUEST_CHANGES, 12 threads, all answered and resolved at d741863c)"
 }
