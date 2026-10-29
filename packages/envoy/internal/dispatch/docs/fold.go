@@ -42,15 +42,15 @@ import (
 // re-encoding that keeps every clock and moves text, such as a lost right origin:
 // TestACompactedDocumentKeepsItsOrderThroughLaterUpdates guards that on each ygo bump. A state that
 // reads back otherwise, or a log the fold's document cannot apply (one parking more than its
-// pending queue, maxUpdateItems, holds), is not used: stateThrough returns the same stored updates
+// pending queue, maxPending, holds), is not used: stateThrough returns the same stored updates
 // merged whole, as they were stored (mergedThrough), and a compaction, which calls fold itself,
 // leaves them as stored. The merge of a log the fold cannot apply is what a load of it decodes and
 // refuses (ErrDocumentUnloadable), which offers its rebuild.
 //
 // A log of one update is returned as stored: a compaction leaves the rows it folds as one update
 // holding their state, and a document's first update deletes nothing an earlier one inserted.
-func stateThrough(room string, version persistence.Version, updates updateSource) ([]byte, error) {
-	state, _, misread, err := fold(updates)
+func stateThrough(room string, version persistence.Version, updates updateSource, maxPending int) ([]byte, error) {
+	state, _, misread, err := fold(updates, maxPending)
 	if err != nil {
 		return nil, err
 	}
@@ -65,10 +65,11 @@ func stateThrough(room string, version persistence.Version, updates updateSource
 // documentThrough is the document stateThrough's state decodes into, decoded once: the document
 // the fold's read-back check decoded when the state reads back, and otherwise - a log of one
 // update, which the fold returns as stored, or a log that does not fold, which is served merged -
-// the state decoded into a document with the server's pending queue, as a room decodes it. A state
-// that does not decode is ErrDocumentUnloadable; a log holding no update is no document.
-func documentThrough(room string, version persistence.Version, updates updateSource) (*crdt.Doc, error) {
-	state, readBack, misread, err := fold(updates)
+// the state decoded into a document with the store's pending queue, maxPending, as a room decodes
+// it. A state that does not decode is ErrDocumentUnloadable; a log holding no update is no
+// document.
+func documentThrough(room string, version persistence.Version, updates updateSource, maxPending int) (*crdt.Doc, error) {
+	state, readBack, misread, err := fold(updates, maxPending)
 	switch {
 	case err != nil:
 		return nil, err
@@ -84,7 +85,7 @@ func documentThrough(room string, version persistence.Version, updates updateSou
 	if len(state) == 0 {
 		return nil, nil
 	}
-	doc := newDocumentCopy()
+	doc := newCappedDocumentCopy(maxPending)
 	if err := crdt.ApplyUpdateV1(doc, state, nil); err != nil {
 		return nil, fmt.Errorf("%w: decode live document: %w", ErrDocumentUnloadable, err)
 	}
@@ -245,14 +246,15 @@ func memoryUpdates(ctx context.Context, updates [][]byte) updateSource {
 
 // fold is the state the updates make, the document its read-back check decoded that state into,
 // readBack, nil unless the state reads back, or misread naming why the updates do not fold into a
-// state that reads back as them - an update the fold's document could not apply, or a state that
-// reads back otherwise. A log of one update is returned as stored, with no document. The fold
-// holds one document at once: its own, until it has encoded the state, then the read-back's.
-func fold(updates updateSource) (state []byte, readBack *crdt.Doc, misread error, err error) {
+// state that reads back as them - an update the fold's document could not apply within its pending
+// queue of maxPending items, or a state that reads back otherwise. A log of one update is returned
+// as stored, with no document. The fold holds one document at once: its own, until it has encoded
+// the state, then the read-back's.
+func fold(updates updateSource, maxPending int) (state []byte, readBack *crdt.Doc, misread error, err error) {
 	var doc *crdt.Doc
 	apply := func(update []byte) error {
 		if doc == nil {
-			doc = newDocumentCopy()
+			doc = newCappedDocumentCopy(maxPending)
 		}
 		if err := crdt.ApplyUpdateV1(doc, update, nil); err != nil {
 			return fmt.Errorf("%w: %w", errUnfoldable, err)
@@ -302,15 +304,16 @@ func fold(updates updateSource) (state []byte, readBack *crdt.Doc, misread error
 		}
 	}
 	doc = nil
-	readBack, misread = readsBackOtherwise(state, made)
+	readBack, misread = readsBackOtherwise(state, made, maxPending)
 	return state, readBack, misread, nil
 }
 
-// readsBackOtherwise decodes state into a fresh document and names how that document's state
-// vector differs from made, the state vector of the document that encoded it. When it does not
-// differ it returns the document, the state decoded as a room decodes it, and a nil error.
-func readsBackOtherwise(state []byte, made crdt.StateVector) (*crdt.Doc, error) {
-	doc := newDocumentCopy()
+// readsBackOtherwise decodes state into a fresh document of maxPending pending items and names how
+// that document's state vector differs from made, the state vector of the document that encoded
+// it. When it does not differ it returns the document, the state decoded as a room decodes it, and
+// a nil error.
+func readsBackOtherwise(state []byte, made crdt.StateVector, maxPending int) (*crdt.Doc, error) {
+	doc := newCappedDocumentCopy(maxPending)
 	if err := crdt.ApplyUpdateV1(doc, state, nil); err != nil {
 		return nil, fmt.Errorf("decode the folded state: %w", err)
 	}
@@ -375,7 +378,7 @@ type LoadedDocument struct {
 func (p *PgVersioned) LoadDocument(ctx context.Context, room string) (LoadedDocument, error) {
 	var doc *crdt.Doc
 	stamp, err := p.loadStored(ctx, room, func(head persistence.Version, updates updateSource) (err error) {
-		doc, err = documentThrough(room, head, updates)
+		doc, err = documentThrough(room, head, updates, p.pendingItems())
 		return err
 	})
 	if err != nil {

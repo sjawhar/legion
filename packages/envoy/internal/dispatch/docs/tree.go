@@ -292,12 +292,20 @@ func snapshotDocument(doc *crdt.Doc) (*crdt.Doc, error) {
 }
 
 // newDocumentCopy is a document to decode a document's state into: a snapshot or a write's fork of
-// a room this server holds, the document's stored history (loadTree, validateUpdate, and the
-// fold of its stored updates and its read-back, stateThrough), or one update the store appends
-// (appendUpdate, AppendUpdateTx), decoded alone. Its pending queue is maxUpdateItems, the queue
-// every decode of document bytes takes (see maxUpdateItems).
+// a room this server holds, the document's stored history (loadTree), or one update the store
+// appends (appendUpdate, AppendUpdateTx), decoded alone. Its pending queue is maxUpdateItems, the
+// queue every decode of document bytes takes (see maxUpdateItems).
 func newDocumentCopy(options ...crdt.DocOption) *crdt.Doc {
-	return crdt.New(append(options, crdt.WithMaxPendingItems(maxUpdateItems))...)
+	return newCappedDocumentCopy(maxUpdateItems, options...)
+}
+
+// newCappedDocumentCopy is newDocumentCopy with the pending queue of the instance the decode runs
+// for: a store's fold of its stored updates and that fold's read-back (stateThrough,
+// PgVersioned.pendingItems), or the check of a history against the queue a service's rooms decode
+// under (validateUpdate, Service.maxPendingItems). Both are maxUpdateItems in production, and a
+// test lowers them (shrinkPendingItems) to make a log that does not fold out of a few dozen items.
+func newCappedDocumentCopy(maxPending int, options ...crdt.DocOption) *crdt.Doc {
+	return crdt.New(append(options, crdt.WithMaxPendingItems(maxPending))...)
 }
 
 // renderedReplica is the copy of a room's document its update observer renders and the room's

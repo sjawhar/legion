@@ -361,24 +361,13 @@ func TestACompactionSkipsAnUnfoldableLogUntilItChanges(t *testing.T) {
 	slog.SetDefault(slog.New(slog.NewTextHandler(logs, &slog.HandlerOptions{Level: slog.LevelWarn})))
 	t.Cleanup(func() { slog.SetDefault(previous) })
 
-	writer := crdt.New(crdt.WithClientID(7))
+	// Each later row leans on an insert no row holds ("x"), so the fold parks more than its
+	// pending queue holds; the writer writes the update that changes the log below.
+	rows, writer := unfoldableHistory(testPendingItems)
 	text := writer.GetText("t")
-	writer.Transact(func(txn *crdt.Transaction) { text.Insert(txn, 0, "base", nil) })
-	rows := [][]byte{crdt.EncodeStateAsUpdateV1(writer, nil)}
-	// The "x" is never stored, and each later update leans on it: the fold parks more than its
-	// pending queue holds.
-	writer.Transact(func(txn *crdt.Transaction) { text.Insert(txn, 0, "x", nil) })
-	for range 2 {
-		before := writer.StateVector()
-		writer.Transact(func(txn *crdt.Transaction) {
-			for range maxUpdateItems/2 + 1 {
-				text.Insert(txn, 0, "y", nil)
-			}
-		})
-		rows = append(rows, crdt.EncodeStateAsUpdateV1(writer, before))
-	}
 	database := storetest.Open(t)
 	versioned := NewPgVersioned(database)
+	shrinkPendingItems(t, nil, versioned)
 	artifactID := createDocument(t, database, "unfoldable")
 	for index, row := range rows {
 		if _, err := versioned.AppendUpdate(context.Background(), artifactID, row); err != nil {

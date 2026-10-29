@@ -25,7 +25,7 @@ import (
 func TestALoadReadsOneStateWhetherItFoldsTheLogInMemoryOrStreamed(t *testing.T) {
 	fixtures := readHistoryFixtures(t)
 	parked, lost, gone := parkedHistory(t)
-	unfoldable := unfoldableHistory()
+	unfoldable, _ := unfoldableHistory(testPendingItems)
 	unfoldableMerged, err := crdt.MergeUpdatesV1(unfoldable...)
 	if err != nil {
 		t.Fatalf("merge the unfoldable log: %v", err)
@@ -104,6 +104,9 @@ func TestALoadReadsOneStateWhetherItFoldsTheLogInMemoryOrStreamed(t *testing.T) 
 				requireParkedArrive(t, "the cold read", coldRead(t, artifactID), lost, gone)
 			})
 			t.Run("a log the fold cannot apply", func(t *testing.T) {
+				// The log is built for a small pending queue, which the other fixtures above
+				// park more than: shrink the store only here, and only once they are read.
+				shrinkPendingItems(t, nil, versioned)
 				artifactID := stored(t, unfoldable)
 				if got := load(t, artifactID); !bytes.Equal(got, unfoldableMerged) {
 					t.Fatalf("the load returned %d bytes, want the %d-byte merge of its stored updates", len(got), len(unfoldableMerged))
@@ -288,7 +291,7 @@ func TestABufferedFoldEndsWithItsContext(t *testing.T) {
 				}
 				return use(update)
 			})
-		})
+		}, maxUpdateItems)
 		if !errors.Is(err, context.Canceled) || state != nil || applied != 2 {
 			t.Fatalf("the fold whose context ended after its second update returned %d bytes (%v) after %d updates, want none, %v and two",
 				len(state), err, applied, context.Canceled)
@@ -404,6 +407,9 @@ func TestARoomLoadDecodesItsStoredStateOnceInTheRoom(t *testing.T) {
 // merged.
 func TestARoomWhoseHistoryDoesNotDecodeFailsFromTheRoomsOwnDecode(t *testing.T) {
 	service, versioned, decodes := roomLoadService(t)
+	// Before any room opens: ygo reads the server's cap as each room loads, and the log below is
+	// built to park more than that cap holds.
+	shrinkPendingItems(t, service, versioned)
 	ctx := context.Background()
 	evicting := make(chan string, 1)
 	release := make(chan struct{}, 1)
@@ -416,7 +422,7 @@ func TestARoomWhoseHistoryDoesNotDecodeFailsFromTheRoomsOwnDecode(t *testing.T) 
 		}
 	}
 	t.Cleanup(func() { close(finished) })
-	unfoldable := unfoldableHistory()
+	unfoldable, _ := unfoldableHistory(testPendingItems)
 	merged, err := crdt.MergeUpdatesV1(unfoldable...)
 	if err != nil {
 		t.Fatalf("merge the unfoldable log: %v", err)
@@ -448,7 +454,7 @@ func TestARoomWhoseHistoryDoesNotDecodeFailsFromTheRoomsOwnDecode(t *testing.T) 
 			if !bytes.Equal(stored.Update, merged) {
 				t.Fatalf("the store loaded %d bytes, want the %d-byte merge", len(stored.Update), len(merged))
 			}
-			want := validateUpdate(stored.Update)
+			want := validateUpdate(stored.Update, service.maxPendingItems)
 			if want == nil {
 				t.Fatal("the stored state decodes, so nothing here is tested")
 			}

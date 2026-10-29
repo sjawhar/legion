@@ -151,22 +151,25 @@ func (a *servicePersistenceAdapter) Compact(ctx context.Context, room string) er
 }
 
 // validateUpdate decodes a stored history, or an update about to replace one, as the room will
-// decode it: into a document with the server's pending queue (newDocumentCopy), the cap a room's
+// decode it: into a document with maxPending parked items, the caller's own pending queue
+// (Service.maxPendingItems for a rebuild's check of the history its rooms would load,
+// PgVersioned.pendingItems for the store's check of a rebuilt seed), which is the cap a room's
 // load hook decodes its stored state under (bootstrapLoadedState), so a history a room served is
 // never judged one that cannot load. A rebuild runs it on its seed and on the history it replaces;
 // a room's load does not, as its own decode is the check.
-func validateUpdate(update []byte) error {
+func validateUpdate(update []byte, maxPending int) error {
 	if len(update) == 0 {
 		return nil
 	}
-	return crdt.ApplyUpdateV1(newDocumentCopy(), update, nil)
+	return crdt.ApplyUpdateV1(newCappedDocumentCopy(maxPending), update, nil)
 }
 
 // bootstrapLoadedState decodes state, what room's load read (takeLoadedState), into doc, the
 // room's document. It is the one decode of the stored state a room's load makes: ygo is handed no
 // bytes (servicePersistenceAdapter.LoadDoc), so it decodes under the pending cap ygo set on doc
-// before its load hook ran, the server's MaxPendingItems, maxUpdateItems. An empty state - an
-// empty history - decodes nothing.
+// before its load hook ran, the server's MaxPendingItems, which New sets from the service's own
+// cap (Service.maxPendingItems, maxUpdateItems in production). An empty state - an empty history -
+// decodes nothing.
 func (s *Service) bootstrapLoadedState(room string, doc *crdt.Doc, state []byte) error {
 	if len(state) == 0 {
 		return nil
@@ -466,8 +469,9 @@ func (s *Service) onLoadDocument(ctx context.Context, room string, doc *crdt.Doc
 	if err != nil {
 		return err
 	}
-	// Decoded before anything reads or observes the document. ygo set its pending cap to
-	// maxUpdateItems before this hook, so this refuses what validateUpdate refuses.
+	// Decoded before anything reads or observes the document. ygo set its pending cap to the
+	// service's own (Service.maxPendingItems) before this hook, so this refuses what
+	// validateUpdate refuses at that cap.
 	if err := s.bootstrapLoadedState(room, doc, stored); err != nil {
 		s.failRoom(room, err)
 		return err

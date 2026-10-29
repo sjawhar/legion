@@ -388,9 +388,10 @@ func TestACompactedDocumentKeepsItsOrderThroughLaterUpdates(t *testing.T) {
 // A log whose updates park more items than the fold's pending queue holds is not folded: the load
 // serves the stored updates merged whole, and compaction leaves every row stored.
 func TestALogTheFoldCannotApplyIsLoadedMergedAndKept(t *testing.T) {
-	rows := unfoldableHistory()
+	rows, _ := unfoldableHistory(testPendingItems)
 	database := storetest.Open(t)
 	versioned := NewPgVersioned(database)
+	shrinkPendingItems(t, nil, versioned)
 	ctx := context.Background()
 	artifactID := createDocument(t, database, "unfoldable")
 	for index, row := range rows {
@@ -417,9 +418,15 @@ func TestALogTheFoldCannotApplyIsLoadedMergedAndKept(t *testing.T) {
 	}
 }
 
-// unfoldableHistory is a log whose updates park more items than the fold's pending queue,
-// maxUpdateItems, holds: each of its two later rows depends on an insert no row holds.
-func unfoldableHistory() [][]byte {
+// unfoldableHistory is a log whose updates park more items than a fold's pending queue of
+// maxPending items holds: each of its two later rows holds maxPending/2+1 inserts and depends on
+// an insert no row holds, so the fold parks both rows and refuses the second. It returns the rows
+// and the writer that wrote them, whose later updates a test appends to change the log.
+//
+// maxPending is the cap of whatever folds the log: testPendingItems for a store or a service a
+// test shrank (shrinkPendingItems), which keeps the rows a few dozen items rather than the half
+// million maxUpdateItems takes.
+func unfoldableHistory(maxPending int) ([][]byte, *crdt.Doc) {
 	writer := crdt.New(crdt.WithClientID(7))
 	text := writer.GetText("t")
 	writer.Transact(func(txn *crdt.Transaction) { text.Insert(txn, 0, "base", nil) })
@@ -429,13 +436,38 @@ func unfoldableHistory() [][]byte {
 	for range 2 {
 		before := writer.StateVector()
 		writer.Transact(func(txn *crdt.Transaction) {
-			for range maxUpdateItems/2 + 1 {
+			for range maxPending/2 + 1 {
 				text.Insert(txn, 0, "y", nil)
 			}
 		})
 		rows = append(rows, crdt.EncodeStateAsUpdateV1(writer, before))
 	}
-	return rows
+	return rows, writer
+}
+
+// testPendingItems is the pending queue shrinkPendingItems sets: small enough that a log the fold
+// cannot apply (unfoldableHistory) is a few dozen items, and far above what any other fixture of
+// the tests that shrink parks.
+const testPendingItems = 64
+
+// shrinkPendingItems lowers to testPendingItems the pending queue the decodes of service - its
+// rooms' loads, whose cap ygo reads from the server as each room loads, and the validateUpdate
+// they are compared with - and of versioned - its folds, their read-backs and the documents their
+// states decode into - take, and restores both when the test ends. Either may be nil. Call it
+// before anything decodes under them: before any room of service opens, and before any fixture
+// that parks more than testPendingItems is stored or read.
+func shrinkPendingItems(t *testing.T, service *Service, versioned *PgVersioned) {
+	t.Helper()
+	if service != nil {
+		was := service.maxPendingItems
+		service.maxPendingItems, service.srv.MaxPendingItems = testPendingItems, testPendingItems
+		t.Cleanup(func() { service.maxPendingItems, service.srv.MaxPendingItems = was, was })
+	}
+	if versioned != nil {
+		was := versioned.maxPendingItems
+		versioned.maxPendingItems = testPendingItems
+		t.Cleanup(func() { versioned.maxPendingItems = was })
+	}
 }
 
 // The read-back check passes a state whose clocks are the ones the document that made it held,
@@ -447,7 +479,7 @@ func TestAStateReadsBackOtherwiseWhenItsClocksDiffer(t *testing.T) {
 	text := writer.GetText("t")
 	writer.Transact(func(txn *crdt.Transaction) { text.Insert(txn, 0, "abc", nil) })
 	state := crdt.EncodeStateAsUpdateV1(writer, nil)
-	decoded, err := readsBackOtherwise(state, crdt.StateVector{7: 3})
+	decoded, err := readsBackOtherwise(state, crdt.StateVector{7: 3}, maxUpdateItems)
 	if err != nil {
 		t.Fatalf("a state read back at the clocks that made it: %v", err)
 	}
@@ -455,7 +487,7 @@ func TestAStateReadsBackOtherwiseWhenItsClocksDiffer(t *testing.T) {
 		t.Fatalf("the read-back document reads %q, want %q", got, "abc")
 	}
 	for _, made := range []crdt.StateVector{{7: 4}, {7: 3, 8: 1}, {}} {
-		if _, err := readsBackOtherwise(state, made); err == nil {
+		if _, err := readsBackOtherwise(state, made, maxUpdateItems); err == nil {
 			t.Errorf("a state made at %v that reads back at {7:3}: no error, want the client that differs", made)
 		}
 	}

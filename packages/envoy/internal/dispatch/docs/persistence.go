@@ -55,6 +55,13 @@ type PgVersioned struct {
 	// bufferedFolds, hold their rows in memory at once across every load and compaction of the
 	// process. NewPgVersioned sizes it; tests replace it with a smaller one before any fold.
 	foldSlots chan struct{}
+	// maxPendingItems is the pending queue this store's decodes of a room's stored history take -
+	// its fold, that fold's read-back and the document the state decodes into (fold,
+	// readsBackOtherwise, documentThrough), and its check of a rebuild's seed (validateUpdate) -
+	// zero for maxUpdateItems, which every production decode of document bytes takes (see
+	// maxUpdateItems). Zero outside tests; a test lowers it (shrinkPendingItems) to make a log
+	// that does not fold out of a few dozen items.
+	maxPendingItems int
 	// noteStored is the note of the Service that took this store last (New), which each append
 	// gives the version it committed and each load the head it read (noteStoredUpdates), so the
 	// Service's compaction queue checks the room. Nil for a store no Service took.
@@ -85,6 +92,15 @@ func NewPgVersioned(database *store.Store) *PgVersioned {
 	return &PgVersioned{store: database, foldSlots: make(chan struct{}, bufferedFolds)}
 }
 
+// pendingItems is the pending queue this store's decodes of a room's stored history take:
+// maxUpdateItems, or the lower queue a test set (maxPendingItems).
+func (p *PgVersioned) pendingItems() int {
+	if p.maxPendingItems != 0 {
+		return p.maxPendingItems
+	}
+	return maxUpdateItems
+}
+
 // Load returns the room's state at its head (stateThrough), constrained by a pending prune
 // checkpoint when one exists, read as every document load reads (loadStored): in one
 // repeatable-read transaction on the rooms pool, folded once that transaction has committed when
@@ -95,7 +111,7 @@ func NewPgVersioned(database *store.Store) *PgVersioned {
 func (p *PgVersioned) Load(ctx context.Context, room string) (persistence.LoadResult, error) {
 	var update []byte
 	stamp, err := p.loadStored(ctx, room, func(head persistence.Version, updates updateSource) (err error) {
-		update, err = stateThrough(room, head, updates)
+		update, err = stateThrough(room, head, updates, p.pendingItems())
 		return err
 	})
 	if err != nil {
@@ -450,7 +466,7 @@ func (p *PgVersioned) MaterializeAt(ctx context.Context, room string, version pe
 	if version > head {
 		version = head
 	}
-	update, err := stateThrough(room, version, storedUpdates(ctx, tx, room, version))
+	update, err := stateThrough(room, version, storedUpdates(ctx, tx, room, version), p.pendingItems())
 	if err != nil {
 		return nil, err
 	}
@@ -565,7 +581,7 @@ func (p *PgVersioned) PruneAfter(ctx context.Context, room string, target persis
 // tx, which holds the room's lock until it ends. Its caller has already proved that ygo cannot load
 // the old merged history; this method never makes that destructive decision itself.
 func (p *PgVersioned) RebuildTx(ctx context.Context, tx pgx.Tx, room string, seed []byte) (RebuildReport, error) {
-	if err := validateUpdate(seed); err != nil {
+	if err := validateUpdate(seed, p.pendingItems()); err != nil {
 		return RebuildReport{}, wrapUnlessTooLarge(itemCapError(seed, err), "validate rebuilt document seed")
 	}
 	if err := lockDocumentRoom(ctx, tx, room); err != nil {
@@ -798,14 +814,15 @@ var _ persistence.VersionedPersistence = (*PgVersioned)(nil)
 // both and never reach it (growth.go's own doc comment names the three).
 //
 // It is also the pending queue every decode of document bytes takes, whether the service builds
-// the decoder (newDocumentCopy) or ygo builds it for the service (Server.MaxPendingItems: the
-// rooms). ygo's decoder parks each item whose parent it cannot place yet, and each later item of
-// that client behind it, and refuses the update once its queue is full, 100,000 items at ygo's
-// default. An update decoded alone parks every item that leans on the document it was written
-// against, and no update carries more items than this, so no decode parks past it. ygo's own
-// check of each update the service broadcasts (Server.BroadcastUpdate) takes no pending queue at
-// all: it is the check ygo's bundled stores run, since the room has already applied the update
-// (reearth/ygo#268, in the pinned fork).
+// the decoder (newDocumentCopy, and newCappedDocumentCopy at the store's and the service's own
+// cap: PgVersioned.pendingItems and Service.maxPendingItems, both this in production) or ygo
+// builds it for the service (Server.MaxPendingItems: the rooms). ygo's decoder parks each item
+// whose parent it cannot place yet, and each later item of that client behind it, and refuses the
+// update once its queue is full, 100,000 items at ygo's default. An update decoded alone parks
+// every item that leans on the document it was written against, and no update carries more items
+// than this, so no decode parks past it. ygo's own check of each update the service broadcasts
+// (Server.BroadcastUpdate) takes no pending queue at all: it is the check ygo's bundled stores
+// run, since the room has already applied the update (reearth/ygo#268, in the pinned fork).
 // TestTheStoreTakesOneBrowserUpdateItsRoomTook and TestASettlementStampsMoreBlocksThanYgosDefaultQueue
 // are updates the store's check refuses at ygo's default queue.
 const maxUpdateItems = 1 << 20
