@@ -58,6 +58,10 @@ func (e *ErrAskBlockUnrepresentable) Error() string {
 //
 // It returns *ErrAskBlockUnrepresentable, having written nothing, when the block would not carry
 // the text unchanged.
+//
+// A block whose question a person's edit emptied is read leniently (askBlockToEdit), so that an
+// edit carrying a question repairs it: a block holding no question is one no ask edit could
+// reach, and the refusal of every other edit of it names the step that does (refuseEmptyQuestionEdit).
 func (s *Service) SetAskBlockText(
 	ctx context.Context,
 	artifactID, blockID string,
@@ -70,14 +74,22 @@ func (s *Service) SetAskBlockText(
 		if err != nil {
 			return err
 		}
-		block, err := askBlockOf(tree, blockID)
+		block, emptyQuestion, err := askBlockToEdit(tree, blockID)
 		if err != nil {
 			return err
 		}
 		// The content rule is decided once, before the edit is built: askBlockChildren then
-		// yields the question's paragraphs and at most one list, which keeps the rule.
+		// yields the question's paragraphs and at most one list, which keeps the rule. It is
+		// weighed before the question is, since a question written into a block that breaks the
+		// rule is a rebuild of that block, which this route makes for no edit: such a block is
+		// refused with its rule, and repaired where a person writes it (refuseAskContentEdit).
 		if err := refuseAskContentEdit(tree, block); err != nil {
 			return err
+		}
+		if emptyQuestion {
+			if err := refuseEmptyQuestionEdit(block, edit); err != nil {
+				return err
+			}
 		}
 		want := AskBlockText{
 			Question: block.question,
@@ -343,21 +355,53 @@ func writeDecidedWording(node *pmdoc.Node, ask model.Ask) (bool, error) {
 
 // askBlockOf is the ask block blockID of tree, as settlement's own collector reads it.
 func askBlockOf(tree *pmdoc.Node, blockID string) (askBlock, error) {
+	block, unreadable, err := collectedAskBlock(tree, blockID)
+	switch {
+	case err != nil:
+		return askBlock{}, err
+	case unreadable != nil:
+		return askBlock{}, &ErrAskBlockUnrepresentable{Field: "block", Reason: unreadable.reason.Error()}
+	}
+	return block, nil
+}
+
+// askBlockToEdit is the ask block blockID of tree as the ask-edit route reads it before it writes:
+// askBlockOf's reading, except that a block whose one parse failure is an empty question is read
+// leniently (parseAskBlockLeniently) and comes back with emptyQuestion set. An ask edit carrying
+// a question writes one into such a block, which is the only edit of it that can be applied, so
+// reading it is what gives it a way back; every other refusal the collector gives stands, since
+// no ask edit repairs a block the parse cannot read for another reason.
+func askBlockToEdit(tree *pmdoc.Node, blockID string) (block askBlock, emptyQuestion bool, err error) {
+	block, unreadable, err := collectedAskBlock(tree, blockID)
+	if err != nil || unreadable == nil {
+		return block, false, err
+	}
+	lenient, lenientErr := parseAskBlockLeniently(unreadable.node)
+	if lenientErr != nil || lenient.question != "" {
+		return askBlock{}, false, &ErrAskBlockUnrepresentable{Field: "block", Reason: unreadable.reason.Error()}
+	}
+	return lenient, true, nil
+}
+
+// collectedAskBlock is the ask block blockID of tree as settlement's own collector reads it,
+// either parsed or, in unreadable, with the node and the reason the parse refused it. err is the
+// collector's own refusal of the tree, or that the tree holds no such block.
+func collectedAskBlock(tree *pmdoc.Node, blockID string) (askBlock, *invalidAskBlock, error) {
 	blocks, invalid, err := collectAskBlocksForSettlement(tree)
 	if err != nil {
-		return askBlock{}, err
+		return askBlock{}, nil, err
 	}
-	for _, candidate := range invalid {
+	for index, candidate := range invalid {
 		if candidate.id == blockID {
-			return askBlock{}, &ErrAskBlockUnrepresentable{Field: "block", Reason: candidate.reason.Error()}
+			return askBlock{}, &invalid[index], nil
 		}
 	}
 	for _, candidate := range blocks {
 		if candidate.id == blockID {
-			return candidate, nil
+			return candidate, nil, nil
 		}
 	}
-	return askBlock{}, fmt.Errorf("%w: ask block %q", pmdoc.ErrTargetNotFound, blockID)
+	return askBlock{}, nil, fmt.Errorf("%w: ask block %q", pmdoc.ErrTargetNotFound, blockID)
 }
 
 func compareAskBlockText(block askBlock, want AskBlockText) error {
@@ -687,6 +731,62 @@ func normalizeAskOptions(options []model.AskOption) []model.AskOption {
 	return normalized
 }
 
+// refuseEmptyQuestionEdit refuses edit, an ask edit of block, an ask block whose question a
+// person's edit emptied (parseAskBlockLeniently), where no question of the edit's can be written
+// into it; it returns nil where one can. The block keeps its content rule here, which
+// refuseAskContentEdit weighed first, so the one thing that repairs it is a question: an edit
+// carrying one has it written where the block's paragraphs are, and an edit carrying none is
+// refused with that step, since the block's own sentence names none and an agent reading it has
+// nowhere to go.
+//
+// An ask asking nothing has no text in the paragraphs the write replaces, so replacing them loses
+// no word. It can still lose what is no word - an image, a link whose text is empty - so a
+// paragraph holding anything but text and hard breaks carrying no mark is refused before the
+// write, and the refusal quotes it and names the one place it can be kept. That place is the
+// document editor: no document edit writes a question beside it, since an insert anchored on a
+// block of a decision lands beside the decision rather than in it (pmdoc.BlockBoundary), and a
+// decision left asking nothing is refused every document edit that changes it
+// (validateEditedAskBlocks). The block and the paragraph are quoted as data (quotedAskChild),
+// never written into the reason raw.
+func refuseEmptyQuestionEdit(block askBlock, edit AskBlockEdit) error {
+	for _, child := range block.node.Children {
+		if child.Type == "bullet_list" || plainInline(child) {
+			continue
+		}
+		quoted, err := quotedAskChild(child)
+		if err != nil {
+			return err
+		}
+		return &ErrAskBlockUnrepresentable{Field: "block", Reason: fmt.Sprintf(
+			"ask block %q has an empty question, and writing a question into it would delete what one of its "+
+				"paragraphs holds, which is no text: %s; write the question beside it in the document editor, "+
+				"which keeps it",
+			block.id, quoted)}
+	}
+	if edit.Question != nil && normalizeAskQuestion(*edit.Question) != "" {
+		return nil
+	}
+	return &ErrAskBlockUnrepresentable{Field: "block", Reason: fmt.Sprintf(
+		"ask block %q has an empty question; send this ask edit again with a question, which writes it into "+
+			"the block", block.id)}
+}
+
+// quotedAskChild is how a refusal quotes one block of a decision: its id, its type and its
+// markdown in full, nested content and all, the id and the markdown Go-quoted, so a caller
+// deleting or replacing the block can restore every word of it and no block id is written into a
+// reason raw. A block the document has yet to stamp an id into is named by neither.
+func quotedAskChild(child *pmdoc.Node) (string, error) {
+	markdown, err := pmdoc.Render(&pmdoc.Node{Type: "doc", Children: []*pmdoc.Node{child}})
+	if err != nil {
+		return "", fmt.Errorf("render a block of a broken ask: %w", err)
+	}
+	name := "a block with no id"
+	if id, _ := child.Attrs[pmdoc.BlockIDAttr].(string); id != "" {
+		name = fmt.Sprintf("block %q", id)
+	}
+	return fmt.Sprintf("%s (%s) reads %q", name, child.Type, strings.TrimSpace(markdown)), nil
+}
+
 // refuseAskContentEdit refuses every edit of block, an ask block breaking its content rule
 // (pmdoc.AskContentError), which settlement marks `invalid` (readAskBlockStrictly). askBlockOf
 // reads such an ask leniently, joining every paragraph into its question and every list into its
@@ -694,8 +794,12 @@ func normalizeAskOptions(options []model.AskOption) []model.AskOption {
 // the last, so the row must not take that reading, and rebuilding the body from it would move,
 // merge or flatten what a collaborator wrote. The route rebuilds no broken decision: a document
 // edit deletes, in one edit, the blocks the refusal names (planAskRepair), and the ask edit
-// follows. Until the document settles its block ids (a child with no id, or an id repeated in the
-// tree, which ApplyOps would restamp first) the refusal names no delete and asks for a retry.
+// follows. Where that decision holds no paragraph with text no document edit repairs it: a
+// delete writes no words, and an insert anchored on one of its blocks lands beside the decision
+// rather than in it (pmdoc.BlockBoundary reads the document-level block holding the anchor), so
+// the refusal says what it needs is words written, and names the editor. Until the document
+// settles its block ids (a child with no id, or an id repeated in the tree, which ApplyOps would
+// restamp first) the refusal names no delete and asks for a retry.
 // Where no one edit of deletes leaves every decision it changes readable, the refusal names no
 // delete and no decision to edit: it says the decision is repaired where a person writes it, in
 // the document editor. It sends no caller to an ask
@@ -716,17 +820,14 @@ func refuseAskContentEdit(tree *pmdoc.Node, block askBlock) error {
 	parts := make([]string, 0, len(children))
 	settled := pmdoc.BlockIDRepairCount(tree) == 0
 	for _, child := range children {
-		markdown, err := pmdoc.Render(&pmdoc.Node{Type: "doc", Children: []*pmdoc.Node{child}})
+		quoted, err := quotedAskChild(child)
 		if err != nil {
-			return fmt.Errorf("render a block of a broken ask: %w", err)
+			return err
 		}
-		name := "a block with no id"
-		if id, _ := child.Attrs[pmdoc.BlockIDAttr].(string); id != "" {
-			name = fmt.Sprintf("block %q", id)
-		} else {
+		if id, _ := child.Attrs[pmdoc.BlockIDAttr].(string); id == "" {
 			settled = false
 		}
-		parts = append(parts, fmt.Sprintf("%s (%s) reads %q", name, child.Type, strings.TrimSpace(markdown)))
+		parts = append(parts, quoted)
 	}
 	reason := broken.Error() + "; the ask-edit route does not rebuild a decision that breaks its content rule"
 	quoted := "; its blocks are: " + strings.Join(parts, "; ")
@@ -741,10 +842,7 @@ func refuseAskContentEdit(tree *pmdoc.Node, block askBlock) error {
 			"so a document edit (dispatch doc-edit, deleting a block by its id) cannot name its blocks now; " +
 			"retry the edit once the document settles (a few seconds)"
 	case len(plan.drop) > 0:
-		reason += ", so delete the blocks to drop, all in one document edit (dispatch doc-edit, deleting a block " +
-			"by its id; one edit holding one delete per block), which keeps the question's paragraphs and the " +
-			"first list after them, here and in every decision nested in the blocks it keeps; the blocks to " +
-			"delete are " + strings.Join(plan.drop, ", ") + "; then edit the ask"
+		reason += askRepairStep(plan)
 	case plan.holder:
 		reason += ", and no document edit deleting blocks of this decision leaves every decision it changes " +
 			"readable: a delete inside this one changes the decision holding it, which such an edit may not " +
@@ -760,11 +858,34 @@ func refuseAskContentEdit(tree *pmdoc.Node, block askBlock) error {
 	return &ErrAskBlockUnrepresentable{Field: "block", Reason: reason + quoted}
 }
 
+// askRepairStep is the step a refusal names for plan, the one document edit that repairs the
+// decision, and the ask edit after it.
+//
+// Where the edit deletes a decision, it carries what the client refuses: a document edit may not
+// take a decision block out of the document while its ask is open
+// (refuseRemovingOpenDecisionBlocks), and that ask is answered, resolved, or the decision
+// repaired by hand, before the delete. A decision that never held a question never had a row
+// (addedAskBlocks, readableAskBlockIDs), so the common case passes that guard untouched.
+func askRepairStep(plan askRepairPlan) string {
+	step := ", so delete the blocks to drop, all in one document edit (dispatch doc-edit, deleting a block " +
+		"by its id; one edit holding one delete per block), which keeps the question's paragraphs and the " +
+		"first list after them, here and in every decision nested in the blocks it keeps" +
+		"; the blocks to delete are " + strings.Join(plan.drop, ", ")
+	if plan.decision {
+		step += "; a decision among them whose ask is still open cannot be deleted by a document edit, so " +
+			"answer or resolve that ask, or repair the decision in the document editor, before this delete"
+	}
+	return step + "; then edit the ask"
+}
+
 // askRepairPlan is the one document edit that repairs a decision breaking its content rule.
 type askRepairPlan struct {
 	// drop is the id of each block to delete, Go-quoted, in document order. It is empty when no
 	// one edit of deletes leaves the decision valid.
 	drop []string
+	// decision reports that a block the edit deletes is a decision, or holds one, which the
+	// client refuses while that decision's ask is open (refuseRemovingOpenDecisionBlocks).
+	decision bool
 	// blocked is why the deletes the plan would have named leave the edited decision, or one
 	// nested in it, unreadable, nil when they do not or when a decision holding it is the one
 	// they would leave unreadable (holder).
@@ -779,7 +900,14 @@ type askRepairPlan struct {
 // (askBlocksToDrop) and, in every decision nested in the blocks it keeps that breaks the rule,
 // that decision's own, as deep as they nest: the rule reads the decisions nested in one
 // (pmdoc.AskContentError), so repairing them is part of repairing this one, and a nested
-// decision's block is deleted by its id like any other.
+// decision's block is deleted by its id like any other. A nested decision the rule leaves
+// nothing of is deleted whole (askRepairKeepsNothingOfItsOwn).
+//
+// No document edit writes a decision a question: a delete cannot, and an insert anchored on a
+// block of a decision lands beside that decision, not in it (pmdoc.BlockBoundary reads the
+// document-level block holding its anchor). So a decision holding no paragraph with text keeps
+// nothing its rule leaves room for, the re-read below finds what the deletes leave unreadable,
+// and the refusal says the decision is repaired where a person writes it.
 //
 // A document edit is refused where it leaves a decision it wrote or changed unreadable
 // (validateEditedAskBlocks), and a delete inside a decision changes every decision holding it, so
@@ -814,13 +942,16 @@ func planAskRepair(tree, ask *pmdoc.Node) askRepairPlan {
 			}
 		}
 	}
-	return askRepairPlan{drop: droppedBlockIDs(ask, dropped)}
+	return askRepairPlan{drop: droppedBlockIDs(ask, dropped), decision: dropsADecision(dropped)}
 }
 
 // askRepairDrops is every block to delete inside ask, an ask breaking its content rule, and the
 // block id of each decision losing one - ask first, then the decisions nested in it, as deep as
 // they nest. A decision whose own blocks keep the rule loses none of them: only the decisions
-// nested in it that break it are repaired.
+// nested in it that break it are repaired. One whose own blocks the rule leaves nothing of is
+// deleted whole (askRepairKeepsNothingOfItsOwn), and so is named in place of its children, which
+// leaves no decision for the re-read to find unreadable where deleting it is what repairs the
+// decision holding it.
 func askRepairDrops(ask *pmdoc.Node) (drop []*pmdoc.Node, changed []string) {
 	if pmdoc.AskContentError(ask) == nil {
 		return nil, nil
@@ -833,6 +964,10 @@ func askRepairDrops(ask *pmdoc.Node) (drop []*pmdoc.Node, changed []string) {
 	}
 	var nested []string
 	for _, inner := range nestedAsks(kept) {
+		if askRepairKeepsNothingOfItsOwn(inner) {
+			drop = append(drop, inner)
+			continue
+		}
 		innerDrop, innerChanged := askRepairDrops(inner)
 		drop = append(drop, innerDrop...)
 		nested = append(nested, innerChanged...)
@@ -842,6 +977,38 @@ func askRepairDrops(ask *pmdoc.Node) (drop []*pmdoc.Node, changed []string) {
 	}
 	id, _ := ask.Attrs[pmdoc.BlockIDAttr].(string)
 	return drop, append([]string{id}, nested...)
+}
+
+// askRepairKeepsNothingOfItsOwn reports whether deleting the blocks ask's content rule leaves no
+// room for would keep none of them: its own blocks break the rule and it holds no paragraph with
+// text, so the rule leaves room for nothing it holds. Such a decision is deleted whole by the one
+// edit that repairs the decision holding it, since the deletes alone would leave a block no parse
+// reads as a decision, and no document edit writes another person's decision the question it
+// would need.
+func askRepairKeepsNothingOfItsOwn(ask *pmdoc.Node) bool {
+	if !askBreaksItsOwnRule(ask) {
+		return false
+	}
+	_, kept := askBlocksToDrop(ask.Children)
+	return len(kept) == 0
+}
+
+// dropsADecision reports whether a node of dropped is a decision or holds one, so that the
+// document edit the plan names takes a decision block out of the document. The client refuses
+// such an edit while that decision's ask is open (refuseRemovingOpenDecisionBlocks), so the
+// refusal says what is answered, resolved or repaired first.
+func dropsADecision(dropped map[*pmdoc.Node]struct{}) bool {
+	for node := range dropped {
+		holds := false
+		pmdoc.Walk(node, func(found *pmdoc.Node) bool {
+			holds = holds || found.Type == "ask"
+			return !holds
+		})
+		if holds {
+			return true
+		}
+	}
+	return false
 }
 
 // askBreaksItsOwnRule reports whether ask's own blocks break the content rule, where
@@ -885,6 +1052,12 @@ func nestedAsks(blocks []*pmdoc.Node) []*pmdoc.Node {
 // from those alone is empty. The caller checks what the kept children leave reads strictly: a
 // decision nested in them can still break the rule, and a kept list can hold an option the parse
 // cannot read.
+//
+// A decision no paragraph of which holds text keeps nothing: it asks nothing, and no document
+// edit can give it a question, since a delete writes no words and an insert anchored on a block
+// of a decision lands beside that decision (pmdoc.BlockBoundary). Where it is the decision being
+// edited the caller's re-read finds what that leaves unreadable; where it is nested in one,
+// deleting it whole is what repairs the decision holding it (askRepairKeepsNothingOfItsOwn).
 func askBlocksToDrop(children []*pmdoc.Node) (drop, kept []*pmdoc.Node) {
 	first := slices.IndexFunc(children, func(child *pmdoc.Node) bool {
 		return child.Type == "paragraph" && strings.TrimSpace(pmdoc.TextContent(child)) != ""
