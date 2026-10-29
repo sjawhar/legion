@@ -828,7 +828,15 @@ admitted while the charges stay within the 256 MiB pressure reserve past the lim
 
 Two more bounds hold what is transient rather than resident, each a third of what the Go memory
 limit leaves above the room budget, that cache and the pressure reserve (1,181,116,006 bytes), with
-the last third left as slack for what neither weighs. The apply-heap bound
+the last third left as slack for what neither weighs. That slack is also what the collector is
+given: the server boots with it as the ratio of garbage to live heap, 14 per cent of what a full
+budget, the cache and the reserve hold at rest (`CollectorGCPercent`, `setGCPercent` in
+`cmd/dispatch/main.go`; a `GOGC` in the environment is left as it is). At the collector's own
+default of 100 per cent the heap goal of a server whose budget is full is the memory limit itself,
+so the garbage waiting to be freed fills every byte the limit leaves and the pod's resident memory
+parks under it: the worst case the two bounds allow peaked at 4,302 and 4,424 MiB of the pod's
+4,096 at that default and at 3,606 MiB with the ratio set
+(`TestTheHeaviestApplyBesideAFullCopyBoundStaysUnderThePodsMemory`). The apply-heap bound
 (`applyHeapBound`, 393,705,335 bytes) holds the estimated heap of the browsers' applies the hook
 weighs: an update whose own share of the estimate passes 2 MiB
 (`unweighedApplyHeapBytes`) applies only once it holds its estimate out of the bound, or the whole

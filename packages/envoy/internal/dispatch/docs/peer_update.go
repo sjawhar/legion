@@ -1419,7 +1419,7 @@ func structTotalOf(tally updateTally, err error, pending crdt.PendingStats) uint
 var errApplyTooHeavy = errors.New("the update is heavier to apply than the pod can hold")
 
 // goMemoryLimitBytes is the Go runtime's soft memory limit on the production pod: 90 per cent of
-// the container's 4 GiB, which the server sets at boot (cmd/dispatch/main.go:116-128).
+// the container's 4 GiB, which the server sets at boot (setGoMemoryLimit, cmd/dispatch/main.go:121-156).
 const goMemoryLimitBytes = 4 << 30 * 9 / 10
 
 // heapAboveTheReserve is what the Go memory limit leaves above the room budget, the cold reads'
@@ -1469,9 +1469,35 @@ const applyHeapBound = heapAboveTheReserve / 3
 // applies of browsers' updates under unweighedApplyHeapBytes, one for each browser's read loop at
 // most, the measurer's parse of a rendering, up to about 130 MiB for a mebibyte of the heaviest
 // shape (pmdoc/elements.go:31-37), and the collector, which needs headroom under the Go memory
-// limit to free garbage before it reaches it. An apply estimated past applyHeapBound, which runs
-// alone, may reach into it too, up to applyTooHeavyBytes.
+// limit to free garbage before it reaches it and is held to this much of it by the ratio of
+// garbage to live heap the server boots with (CollectorGCPercent). An apply estimated past
+// applyHeapBound, which runs alone, may reach into it too, up to applyTooHeavyBytes.
 const heapSlackBytes = heapAboveTheReserve / 3
+
+// CollectorGCPercent is the garbage the collector is given, as a percentage of the live heap, which
+// the server sets at boot (debug.SetGCPercent, cmd/dispatch/main.go:159-178): heapSlackBytes of
+// what the pod holds at rest when the budget is full - the budget's charges, the cold reads' cache
+// and the pressure reserve - 100 x 393,705,335 / (2,147,483,648 + 268,435,456 + 268,435,456) = 14
+// per cent, so that the garbage waiting to be freed stays inside the slack this arithmetic names
+// for it instead of filling every byte the Go memory limit leaves.
+//
+// It is what makes that slack real. The collector's default is 100 per cent, which lets the heap
+// grow to twice what is live before a collection; past half the Go memory limit the limit is the
+// smaller of the two, so with a full budget the heap goal is the limit itself and the collector
+// keeps every byte of garbage the limit allows - the budget's unused room, both heap bounds and
+// this slack together. The pod's resident memory then parks just under the limit whatever the
+// design's sum is, and the burst the bounds do allow on top of it is what the container is killed
+// for. Measured on 2026-10-29 with the real-process drive of the worst case the bounds allow
+// (cmd/dispatch, TestTheHeaviestApplyBesideAFullCopyBoundStaysUnderThePodsMemory, three steps:
+// the budget filled, the cold reads' cache filled, the heaviest handoffs applying beside full copy
+// bounds), the server's peak resident memory by step: at the default 100 per cent 2,677, 3,601 and
+// 4,302 MiB in one run and 2,743, 3,581 and 4,424 MiB in another, both past the pod's 4,096 MiB,
+// with the collector's own trace showing a heap goal pinned at the limit (GODEBUG=gctrace=1,
+// 3,398 to 3,413 MiB) and a live heap of 2,344 to 2,859 MiB under it; at this ratio 2,260, 2,715
+// and 3,606 MiB, 490 MiB under the pod, and the keystrokes a person typed through both heavy steps
+// answered in a 99th percentile of 131 ms. The collector's share of that run's CPU was 31 per cent
+// against 14, and the drive took 580 s against 352 s.
+const CollectorGCPercent = 100 * heapSlackBytes / (roomBudgetBytes + documentReadBudget + pressureReserveBytes)
 
 // applyTooHeavyBytes is the estimate (peerWeighing.applyHeap) past which the hook refuses an
 // update as too heavy to apply (errApplyTooHeavy): all of heapAboveTheReserve, 1,181,116,006

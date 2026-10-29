@@ -15,6 +15,7 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"runtime/debug"
 	"strings"
 	"syscall"
 	"time"
@@ -155,10 +156,32 @@ func setGoMemoryLimit(provider memlimit.Provider) {
 	}
 }
 
+// setGCPercent gives the collector the garbage the room budget's arithmetic leaves it, as a ratio
+// of the live heap (docs.CollectorGCPercent, internal/dispatch/docs/peer_update.go:1477-1500): the
+// slack that arithmetic names above the budget, the cold reads' cache and the pressure reserve, of
+// what those hold at rest, 14 per cent. The memory limit alone does not hold the collector to it:
+// at the runtime's default of 100 per cent the heap goal is twice the live heap, which past half
+// the limit is the limit itself, so a server whose budget is full keeps every byte of garbage the
+// limit allows and the pod's resident memory parks under the limit, where the burst the heap
+// bounds do allow takes it past the container's own limit and Kubernetes kills it. GOGC stays the
+// runtime's own variable, as GOMEMLIMIT does (setGoMemoryLimit): a GOGC in the environment, which
+// the runtime has already read, is left as it is. It logs one line naming the ratio it set, or the
+// one it left.
+func setGCPercent() {
+	if gogc, set := os.LookupEnv("GOGC"); set {
+		slog.Info("dispatch: collector ratio taken from GOGC; the room budget's was not set", "gogc", gogc,
+			"room_budget_gc_percent", docs.CollectorGCPercent)
+		return
+	}
+	slog.Info("dispatch: collector ratio set from the room budget's slack",
+		"gc_percent", docs.CollectorGCPercent, "previous_gc_percent", debug.SetGCPercent(docs.CollectorGCPercent))
+}
+
 func main() {
 	slog.SetDefault(slog.New(slog.NewTextHandler(os.Stderr, nil)))
 	// First, before the server allocates anything the collector would have to catch up on.
 	setGoMemoryLimit(memlimit.FromCgroup)
+	setGCPercent()
 	env := processSettings()
 	if len(os.Args) > 1 {
 		os.Exit(runSubcommand(context.Background(), os.Args[1:], env, os.Stdout, os.Stderr))

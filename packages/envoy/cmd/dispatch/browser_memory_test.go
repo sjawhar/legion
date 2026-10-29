@@ -862,16 +862,21 @@ func TestTheHeaviestHandoffTheBoundsAllowIsNotClosedForSize(t *testing.T) {
 // the edit made it.
 //
 // What the fifty wait for is that bound. Measured on 2026-10-29 over four runs on a
-// three-processor sandbox, the server at the pod's Go memory limit: 39 admitted and 11 refused
-// every time, the last refusal 16.1 to 20.5 s after the burst began and the last admission 1m12s
-// to 1m23s, none answered 503, peak resident memory 3,717 to 3,802 MiB. In the run read line by
-// line, the counts, 93,811,288 bytes each, asked for 7.1 s of a wholly full bound between them;
-// the decodes of the rooms' loads, 144,268,320 each, asked for 42.8 s, two at a time in the
-// 393,705,336-byte bound, which was 76.9% full over the burst and never empty, and whose longest
-// waiter waited 35.8 s. That work is the processor's: with the server at GOMAXPROCS=1, the
-// condition the memory spec sets for half a processor, the longest hold grew from 4.5 s to 8.1 s
-// and the last admission came at 2m3.5s. A browser of this burst is answered no sooner than the
-// loads before it can decode, whatever the counts do.
+// three-processor sandbox, the server at the pod's Go memory limit and the collector at its own
+// default ratio: 39 admitted and 11 refused every time, the last refusal 16.1 to 20.5 s after the
+// burst began and the last admission 1m12s to 1m23s, none answered 503, peak resident memory 3,717
+// to 3,802 MiB. In the run read line by line, the counts, 93,811,288 bytes each, asked for 7.1 s
+// of a wholly full bound between them; the decodes of the rooms' loads, 144,268,320 each, asked
+// for 42.8 s, two at a time in the 393,705,336-byte bound, which was 76.9% full over the burst and
+// never empty, and whose longest waiter waited 35.8 s. That work is the processor's: with the
+// server at GOMAXPROCS=1, the condition the memory spec sets for half a processor, the longest
+// hold grew from 4.5 s to 8.1 s and the last admission came at 2m3.5s. A browser of this burst is
+// answered no sooner than the loads before it can decode, whatever the counts do.
+//
+// With the collector since held to the slack the budget's arithmetic leaves it
+// (docs.CollectorGCPercent, setGCPercent), which collects the same work's garbage more often, that
+// burst admitted 39 and refused 11 again, none answered 503, with the last refusal at 37.7 s and
+// the last admission at 2m48s, and peak resident memory 3,378 MiB (2026-10-29).
 func TestTheRoomBudgetRefusesWhereItsOwnArithmeticSays(t *testing.T) {
 	const burst, gone = 50, 5
 	memory := newMemoryHarness(t)
@@ -1153,9 +1158,9 @@ func TestTheRoomBudgetRefusesWhereItsOwnArithmeticSays(t *testing.T) {
 	})
 }
 
-// The room budget does not over-charge typing and pasting: thirty-nine rooms of a mebibyte of prose
-// (mebibyteFleet), each typed into as a person types - 200 one-character keystrokes in ten runs of
-// twenty, each run in the middle of a paragraph of its own across the document, and one paste of 4
+// The room budget does not over-charge typing and pasting: eight rooms of a mebibyte of prose
+// (mebibyteFleet), each typed into as a person types - 40 one-character keystrokes in ten runs of
+// four, each run in the middle of a paragraph of its own across the document, and one paste of 4
 // KiB in another (typedAndPasted) - and left until its count lands, under the Go limit a 4 GiB pod
 // gives the server. The first refusal comes within one room of the budget's arithmetic computed
 // with the structure part included, and each room's structure part, read from the budget's figures
@@ -1167,27 +1172,55 @@ func TestTheRoomBudgetRefusesWhereItsOwnArithmeticSays(t *testing.T) {
 // part (roomCharge, :318-362): each update's struct at bytesOfHeapAStruct with the two splits its
 // integration can cause at bytesOfHeapASplit, and its text as the walk reads it, its length prefix
 // included, at bytesOfHeapAByteOfText, all at both copies (peerWeighing.structureHeap,
-// peer_update.go:677-680): 2,048 bytes a keystroke and 18,432 for the paste, 428,032 a room. An
+// peer_update.go:677-680): 2,048 bytes a keystroke and 18,432 for the paste, 100,352 a room. An
 // admission reserves the stored version's count, which is what the room's load charges until its
 // browser types. Rooms are typed into two at a time, the server's two processors' worth, each pair
 // admitted one after the other before either types, so the second of a pair is admitted beside the
 // first's load alone; the arithmetic follows the drive room by room.
 //
+// The budget is not the server's real one: the drive sets it to 448 MiB through the test-only hook
+// (setRoomBudget) as soon as the server is up, and builds only the copies that budget needs. That
+// figure is a round number of mebibytes inside the window in which the arithmetic below admits
+// exactly eight rooms, four whole pairs, and refuses the ninth. A mebibyte of prose reserves
+// 54,144,000 bytes (57,600 elements at both copies) and a room typed as this one types is charged
+// 54,244,352, so the window runs from 433,754,112 bytes - what the eighth admission is weighed
+// against, three pairs charged whole beside the seventh room's reservation and the eighth's - to
+// one byte under 488,098,816, what the ninth is weighed against and is refused at; 448 MiB is
+// 469,762,048. Run so, alone on this sandbox on 2026-10-29, the drive passed in 666 s: the first
+// refusal came at room 9, the arithmetic's, the largest structure part the budget read as it
+// closed the eight rooms was the 100,352 bytes their updates are priced at, and the server's
+// resident memory peaked at 800 MiB. The same drive against the real 2 GiB budget is 39 rooms of
+// 201 updates each: it passed in 2,511 s on this sandbox on 2026-10-29, 41 m 2 s of that from its
+// first admission to the refusal, where CI runs the whole memory suite under one 60-minute
+// deadline (.github/workflows/envoy-and-contracts.yaml:1017). What the full budget costs in memory
+// is not this drive's to prove: the bursts that fill it,
+// TestTheRoomBudgetRefusesWhereItsOwnArithmeticSays
+// and TestABurstOfStructDenseDocumentsStaysUnderThePodsMemory, hold the server's peak resident
+// memory under the pod's 4 GiB, and this drive holds that same bound over its eight rooms.
+//
 // The structure part charges a struct as one of its own with both the splits its integration can
 // cause, where ygo merges a run of typed characters back into one item and a keystroke splits one
 // item at most, so it charges typing past what typing adds; what bounds that over-charge is
 // TestATypedAndPastedRoomIsChargedAtLeastItsHeapAndWithinTheFactor
-// (internal/dispatch/docs), which weighs a room typed with ten times these keystrokes and ten
+// (internal/dispatch/docs), which weighs a room typed with fifty times these keystrokes and ten
 // pastes against the heap it holds. This drive has the real server charge what those prices say,
-// no more, room by room. Its profile is a tenth of that one because each update costs the server a
-// render of the whole document (renderedReplica.observe): one room of that profile over a real
-// socket took 12 m 30 s, about 0.37 s an update. REDUCED_NUMBERS
+// no more, room by room. Its profile is a fiftieth of that one, and a fifth of the 201 updates a
+// room this drive sent before the server took the collector ratio the budget's slack sets
+// (docs.CollectorGCPercent, 14, setGCPercent in main.go), because each update costs the server a
+// render of the whole document (renderedReplica.observe, internal/dispatch/docs/tree.go:545) and
+// that ratio collects the renders' garbage far oftener: at the collector's default a pair took
+// 1 m 33 s to 1 m 49 s for 201 updates each, 0.47 s an update, and under the ratio 4 m 52 s for
+// the one pair of a run cut short, 1.45 s an update. The 41 updates here take a pair 1 m 49 s to
+// 2 m 37 s, from which an update's own cost works out at about 1.1 s and the rest is the pair's
+// rooms loading and rendering first.
 func TestTheRoomBudgetDoesNotOverchargeTypingAndPasting(t *testing.T) {
-	const rooms, keystrokes, runs, pasteBytes, together = 39, 200, 10, 4 << 10, 2
+	const keystrokes, runs, pasteBytes, together, budget = 40, 10, 4 << 10, 2, 448 << 20
 	building := time.Now()
 	memory := newMemoryHarness(t)
 	memory.env = append(memory.env, "GOMEMLIMIT="+strconv.Itoa(podGoMemoryLimit))
-	fleet := memory.mebibyteFleet(t, func(int64) int { return rooms + 1 })
+	// One copy more than the budget can admit: every admission charges at least what it reserves,
+	// so budget/reserved bounds the admissions and leaves the drive a room for the refusal.
+	fleet := memory.mebibyteFleet(t, func(reserved int64) int { return int(budget/reserved) + 1 })
 	updates := typedAndPasted(t, fleet.state, keystrokes, runs, pasteBytes)
 	struck := int64(bytesOfHeapAStructForTest + splitsAStructCanCauseForTest*bytesOfHeapASplitForTest)
 	keystroke := (struck + encodedTextBytes(1)*bytesOfHeapAByteOfTextForTest) * roomCopiesForTest
@@ -1210,7 +1243,7 @@ func TestTheRoomBudgetDoesNotOverchargeTypingAndPasting(t *testing.T) {
 	// second admission is weighed beside the first's load, and the pair's typing is charged before
 	// the next pair's first.
 	admits, charged := 0, int64(0)
-	for admits < len(fleet.copies) && charged+fleet.reserved <= roomBudgetBytesForTest {
+	for admits < len(fleet.copies) && charged+fleet.reserved <= budget {
 		admits++
 		charged += fleet.reserved
 		if admits%together == 0 {
@@ -1219,13 +1252,14 @@ func TestTheRoomBudgetDoesNotOverchargeTypingAndPasting(t *testing.T) {
 	}
 	t.Logf("%d updates typed into a room (%d keystrokes in %d runs, a paste of %d bytes): its structure part priced at %d bytes, its count %d (%d elements, %d bytes, %d structs) against the %d its admission reserves, %d a room; the %d-byte budget admits %d rooms typed %d at a time and refuses the next; the documents took %s to build",
 		len(updates), keystrokes, runs, pasteBytes, bound, counted, size.Elements, size.Bytes, stateStructs, fleet.reserved, perRoom,
-		roomBudgetBytesForTest, admits, together, time.Since(building).Round(time.Second))
+		budget, admits, together, time.Since(building).Round(time.Second))
 	if admits >= len(fleet.copies) {
 		t.Fatalf("the budget's arithmetic admits all %d copies, want it to refuse one", len(fleet.copies))
 	}
 
 	server := memory.start(t)
 	requirePodGoMemoryLimit(t, server)
+	server.setRoomBudget(t, budget)
 	var held []*browser
 	t.Cleanup(func() {
 		for _, opened := range held {
@@ -1389,7 +1423,9 @@ func typedAndPasted(t *testing.T, state []byte, keystrokes, runs, pasteBytes int
 // waiting for a count. A grower the budget refuses reconnects into its room and sends its paste
 // again on the next pass, as the editor keeps a refused edit and sends it once room frees; the
 // growth ends once a pass after the counts have landed moves no room. Every fourth room's browsers
-// both leave once it renders more than 512 KiB.
+// both leave once it renders more than 256 KiB, a quarter of the document bound: early enough that
+// every room, those that leave included, reaches that point within the budget (the nine tenths
+// below), where a room grown to the last paste is charged about a sixth of the budget.
 //
 // How many rooms grow is computed from the server's own figures: a room of a copy the drive does
 // not grow takes the same pastes on a server of its own, and what the budget charges it once its
@@ -1414,7 +1450,7 @@ func typedAndPasted(t *testing.T, state []byte, keystrokes, runs, pasteBytes int
 // the pod's throughout. The documents hold every paste their rooms took, none they were refused,
 // the delete, and nowhere the text of the probe every held room refused.
 func TestTheRoomBudgetFollowsGrowingRoomsAndClosesTheGoneOnesFirst(t *testing.T) {
-	const pasteBytes, leaveAt, probeText, pasted = 64 << 10, 512 << 10, " Probe.", "## Pasted section 0\n"
+	const pasteBytes, leaveAt, probeText, pasted = 64 << 10, 256 << 10, " Probe.", "## Pasted section 0\n"
 	memory := newMemoryHarness(t)
 	memory.env = append(memory.env, "GOMEMLIMIT="+strconv.Itoa(podGoMemoryLimit))
 	// proseMarkdown writes whole sections of about 1,740 bytes, so three of them are the 5 KiB.
@@ -2337,7 +2373,7 @@ const (
 	// granted the whole copy bound and decodes alone among the copies.
 	copyHeapPerByteForTest = 48
 	// heaviestHandoffEstimate is the hook's estimate of the heaviest honest handoff at F, measured
-	// into the room holding it (internal/dispatch/docs/peer_update.go:1485-1489): the long-edited
+	// into the room holding it (internal/dispatch/docs/peer_update.go:1511-1515): the long-edited
 	// document typed on until 4,096 structs short of the decode cap and padded to F, the shape the
 	// heaviest-apply drive hands back. The server logs no estimate, only that each handoff held the
 	// whole apply bound (heapGrantLine), which an estimate past applyHeapBoundForTest does; the
@@ -2350,13 +2386,15 @@ const (
 const longEditFixturePath = "../../internal/dispatch/docs/testdata/long_edited_document.update.gz"
 
 // A burst of browsers opening struct-dense documents that render little, all at once, under the
-// Go limit a 4 GiB pod gives the server and at the collector's default pace, keeps the server's
-// peak resident memory, read from /proc, under the pod's 4 GiB. The burst is eight copies each of
-// the two struct-dense shapes a room keeps - the long-edited 5 KiB document typed on until its
-// state stands at the decode cap (longEditedTypedTo), and the document an agent rewrote whole
-// through the API until the decode cap refused a write (agentRewrittenDocument), about a million
-// structs each - and eight documents of a mebibyte of prose, the ordinary document A3
-// (TestTheRoomBudgetRefusesWhereItsOwnArithmeticSays) weighs. A struct-dense document is priced at
+// Go limit a 4 GiB pod gives the server and the collector ratio the room budget's slack leaves it
+// (docs.CollectorGCPercent), keeps the server's peak resident memory, read from /proc, under the
+// pod's 4 GiB: 2,814 MiB measured on 2026-10-29, where the collector's own default ratio left that
+// peak at 3,727 MiB. The burst is eight copies each of the two struct-dense shapes a room keeps -
+// the long-edited 5 KiB document typed on until its state stands at the decode cap
+// (longEditedTypedTo), and the document an agent rewrote whole through the API until the decode
+// cap refused a write (agentRewrittenDocument), about a million structs each - and eight documents
+// of a mebibyte of prose, the ordinary document A3 weighs
+// (TestTheRoomBudgetRefusesWhereItsOwnArithmeticSays). A struct-dense document is priced at
 // its structs (bytesOfHeapAStructHeldForTest), about 356 MB at both copies, where its elements
 // would price it at kilobytes, so the budget admits at most six of them, and the ordinary ones
 // the rest of it has room for.
@@ -2474,15 +2512,23 @@ func TestABurstOfStructDenseDocumentsStaysUnderThePodsMemory(t *testing.T) {
 }
 
 // The worst case the room budget and the two heap bounds leave the pod, run at once under the Go
-// limit a 4 GiB pod gives the server and at the collector's default pace: the budget full, the cold
-// reads' cache full, honest handoffs at F applying - each estimated past the apply-heap bound, so
-// each holds the whole bound and applies alone among the applies - and beside them struct-dense
-// documents loading and folding, each decode weighed past the copy-heap bound and holding all of
-// it. An apply past its bound runs alone among applies but not among copies, so this is the sum
-// the bounds allow: 2 GiB of rooms, 256 MiB of cache, a handoff estimated at 904 MB beside a copy
-// at its whole 394 MB bound, 3,714,003,040 bytes by the estimates, inside the 3,865,470,566-byte Go
-// limit. The server's peak resident memory, read from /proc, stays under the pod's 4 GiB through
-// every step, and every honest handoff, load and fold completes.
+// limit a 4 GiB pod gives the server: the budget full, the cold reads' cache full, honest handoffs
+// at F applying - each estimated past the apply-heap bound, so each holds the whole bound and
+// applies alone among the applies - and beside them struct-dense documents loading and folding,
+// each decode weighed past the copy-heap bound and holding all of it. An apply past its bound runs
+// alone among applies but not among copies, so this is the sum the bounds allow: 2 GiB of rooms,
+// 256 MiB of cache, a handoff estimated at 904 MB beside a copy at its whole 394 MB bound,
+// 3,714,003,040 bytes by the estimates, inside the 3,865,470,566-byte Go limit. The server's peak
+// resident memory, read from /proc, stays under the pod's 4 GiB through every step, and every
+// honest handoff, load and fold completes.
+//
+// What the garbage of all that work does to the resident memory is the collector's ratio, which
+// the server sets from the slack the budget's arithmetic leaves above it (docs.CollectorGCPercent,
+// setGCPercent, main.go:159-178) and this drive reads from the boot line
+// (requirePodGoMemoryLimit): at the collector's own default the heap goal of a server whose budget
+// is full is the Go limit itself, and the three steps below peaked at 2,677, 3,601 and 4,302 MiB
+// in one run and 2,743, 3,581 and 4,424 MiB in another, past the pod; at the ratio the slack
+// names, 2,260, 2,715 and 3,606 MiB (2026-10-29).
 //
 // On one server: first the budget is filled by browsers that stay - a browser of an ordinary small
 // document, two rooms of the long-edited document typed on until 4,096 structs short of the decode
@@ -3238,7 +3284,7 @@ func (h *memoryHarness) settled(t *testing.T, artifactID string) bool {
 }
 
 // serverOpenedCloseLine is the line the server logs as it closes a room its own work opened over the
-// budget, once nothing holds it (closeIfOpenedOverBudget, internal/dispatch/docs/room_budget.go:1619-1644).
+// budget, once nothing holds it (closeIfOpenedOverBudget, internal/dispatch/docs/room_budget.go:1621-1646).
 var serverOpenedCloseLine = regexp.MustCompile(`msg="dispatch: the room budget closed a document the server opened over it" room=(\S+) charged_before=\d+ charged=\d+ limit=\d+`)
 
 // requireClosedOnceSettled fails the test unless the room of artifactID, which the server's own work
@@ -3418,11 +3464,18 @@ func requireInsertsNothing(t *testing.T, update []byte) {
 	}
 }
 
-// requirePodGoMemoryLimit fails the test unless the server took the Go limit a 4 GiB pod gives it.
+// requirePodGoMemoryLimit fails the test unless the server took the Go limit a 4 GiB pod gives it
+// and the collector ratio the room budget's slack leaves (setGCPercent, main.go:159-178), which is
+// what holds the garbage waiting to be freed inside that slack rather than inside the whole limit.
 func requirePodGoMemoryLimit(t *testing.T, server *memoryServer) {
 	t.Helper()
-	if want := "go_memory_limit_bytes=" + strconv.Itoa(podGoMemoryLimit); !strings.Contains(server.output.String(), want) {
-		t.Fatalf("the server's boot did not log %s:\n%s", want, server.output.tail())
+	for _, want := range []string{
+		"go_memory_limit_bytes=" + strconv.Itoa(podGoMemoryLimit),
+		"gc_percent=" + strconv.Itoa(docs.CollectorGCPercent),
+	} {
+		if !strings.Contains(server.output.String(), want) {
+			t.Fatalf("the server's boot did not log %s:\n%s", want, server.output.tail())
+		}
 	}
 }
 
@@ -3469,7 +3522,7 @@ func requireBudgetRefusals(t *testing.T, server *memoryServer, reserved int64) [
 }
 
 // budgetCloseLine is the line the room budget's sweep logs for each unused room it closes, in the
-// budget's own figures (sweepRooms, internal/dispatch/docs/room_budget.go:1574-1607).
+// budget's own figures (sweepRooms, internal/dispatch/docs/room_budget.go:1576-1609).
 var budgetCloseLine = regexp.MustCompile(`msg="dispatch: the room budget closed an unused document" room=(\S+) charged_before=(\d+) charged=(\d+) limit=(\d+) making_room_for=(\d+)`)
 
 // budgetClose is one close the server logged: the room, what the budget charged before and after
@@ -3519,7 +3572,7 @@ func closesOf(t *testing.T, server *memoryServer, rooms []string, want int) []bu
 
 // storedShape is a stored document a struct-dense drive copies (cloneDocuments), and what an
 // admission to a copy of it reserves, computed here as the server computes it
-// (storedRoomReservation, internal/dispatch/docs/room_budget.go:1255-1329): the structs of its
+// (storedRoomReservation, internal/dispatch/docs/room_budget.go:1255-1331): the structs of its
 // stored history, each stored update walked as a room's own state is (docs.StateStructsForTest),
 // and its latest version's markdown, counted and measured in bytes, priced at the heaviest of a
 // struct's, an element's and a rendered byte's price (copyHeap, :615-625), at both copies.

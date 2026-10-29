@@ -866,6 +866,64 @@ func TestTheGoMemoryLimitIsNinetyPercentOfTheContainers(t *testing.T) {
 	}
 }
 
+// The boot path gives the collector the garbage the room budget's arithmetic leaves above it, as a
+// ratio of the live heap (docs.CollectorGCPercent), so that the garbage waiting to be freed stays
+// inside that slack rather than inside every byte the memory limit leaves, and the boot line names
+// the ratio it set and the one it replaced. A GOGC in the environment, which the runtime read
+// before main ran, is left as it is, and the line says so.
+func TestTheCollectorsRatioIsTheRoomBudgetsSlack(t *testing.T) {
+	previous := debug.SetGCPercent(100)
+	t.Cleanup(func() { debug.SetGCPercent(previous) })
+	for _, row := range []struct {
+		name    string
+		gogc    string
+		percent int
+		line    map[string]any
+	}{
+		{"no GOGC in the environment", "", docs.CollectorGCPercent, map[string]any{
+			"level": "INFO", "msg": "dispatch: collector ratio set from the room budget's slack",
+			"gc_percent": float64(docs.CollectorGCPercent), "previous_gc_percent": float64(100),
+		}},
+		{"a GOGC in the environment", "50", 100, map[string]any{
+			"level": "INFO", "msg": "dispatch: collector ratio taken from GOGC; the room budget's was not set",
+			"gogc": "50", "room_budget_gc_percent": float64(docs.CollectorGCPercent),
+		}},
+	} {
+		t.Run(row.name, func(t *testing.T) {
+			// The runtime's own default, as a process boots with where its environment names none.
+			debug.SetGCPercent(100)
+			t.Setenv("GOGC", row.gogc)
+			if row.gogc == "" {
+				if err := os.Unsetenv("GOGC"); err != nil {
+					t.Fatal(err)
+				}
+			}
+			var logged bytes.Buffer
+			previousLogger := slog.Default()
+			slog.SetDefault(slog.New(slog.NewJSONHandler(&logged, nil)))
+			t.Cleanup(func() { slog.SetDefault(previousLogger) })
+
+			setGCPercent()
+
+			if got := debug.SetGCPercent(row.percent); got != row.percent {
+				t.Errorf("gc percent %d, want %d", got, row.percent)
+			}
+			lines := strings.Split(strings.TrimSpace(logged.String()), "\n")
+			if len(lines) != 1 {
+				t.Fatalf("logged %q, want one line", logged.String())
+			}
+			var line map[string]any
+			if err := json.Unmarshal([]byte(lines[0]), &line); err != nil {
+				t.Fatalf("decode %q: %v", lines[0], err)
+			}
+			delete(line, "time")
+			if !maps.Equal(line, row.line) {
+				t.Errorf("logged %v, want %v", line, row.line)
+			}
+		})
+	}
+}
+
 func TestWriteBlockIDBackfillReportLabelsSkippedDocuments(t *testing.T) {
 	var output bytes.Buffer
 	writeBlockIDBackfillReport(&output, docs.BlockIDBackfill{

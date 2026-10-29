@@ -22,9 +22,9 @@ import (
 
 // roomBudgetBytes is the most heap the open rooms are charged together (roomCharge): 2 GiB of the
 // task's 4 GiB, under the 3.6 GiB Go memory limit the server takes from its container at boot
-// (cmd/dispatch/main.go:124-133). Open documents are the largest thing the pod holds; the rest is
-// the request path's, the cold reads' cache's (documentReadBudget, 256 MiB, which this does not
-// count) and the slack that limit leaves the collector. At the measured cost of a room
+// (setGoMemoryLimit, cmd/dispatch/main.go:121-156). Open documents are the largest thing the pod
+// holds; the rest is the request path's, the cold reads' cache's (documentReadBudget, 256 MiB,
+// which this does not count) and the collector's slack. At the measured cost of a room
 // (bytesOfHeapAnElement) it holds thirty-nine documents of a mebibyte of prose (57,600 elements,
 // 54 MB each at both copies, roomCopies) as they load, and since an admission reserves its stored
 // version's count at that same price (storedRoomReservation), an empty budget admits thirty-nine
@@ -1290,10 +1290,12 @@ func (s *Service) storedRoomReservation(ctx context.Context, room string) (int64
 // time: fifty browsers opening fifty documents of a mebibyte at once, their rooms loading beside
 // the counts, were refused in two minutes while the counts took one turn at a time, and in 16.1
 // to 20.5 s once each count held a grant instead, the last of the thirty-nine admitted answered
-// at 1m12s to 1m23s against 1m49s before (TestTheRoomBudgetRefusesWhereItsOwnArithmeticSays,
-// which measures what is left: the decodes of those rooms' loads, which ask for six times the
-// bound's time the counts do). The grant is covered inside the transaction the count already
-// holds, so no holder of the bound waits for a pooled connection (copyHeaps).
+// at 1m12s to 1m23s against 1m49s before; with the collector since held to the budget's slack
+// (CollectorGCPercent) that burst refused eleven in 37.7 s and admitted the last at 2m48s, the
+// decodes of those rooms' loads most of it, which ask for six times the bound's time the counts
+// do (TestTheRoomBudgetRefusesWhereItsOwnArithmeticSays). The grant is covered inside the
+// transaction the count already holds, so no holder of the bound waits for a pooled connection
+// (copyHeaps).
 //
 // The wait for that grant lasts as long as wanted holds, which is for as long as any admission
 // still waits for this count. Only once the grant is held does the count's own read bound start,
