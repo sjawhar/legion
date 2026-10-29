@@ -545,8 +545,11 @@ a notice. `askgate-core.ts` holds the gate and takes the host through its depend
 `dispatch` call (`dispatchCommandHead`, the README's "The form the gate reads"), which takes the
 override comment the gate hands a rebutted command back with (`keepOverrideVisible`) as those
 overrides, so a resend of that command is the same rebuttal and `commandArgv` never holds the
-comment; it refuses no call by reading any other form: a call in another form runs, and an `eval`
-cell is not read.
+comment. That comment stands where the command's line ends, after its last word and every `2>&1`,
+here-document opener and `head` or `tail` stage, which is the one place bash reads a comment;
+each of its words is quoted, and the gate reads the commented command back as the same call
+before it hands it over, else it hands it back without the comment. It refuses no call by reading
+any other form: a call in another form runs, and an `eval` cell is not read.
 
 Enforcement is the `dispatch` CLI's (`@legion/envoy-client/askgate-marker`, the README's
 "Everything else runs"). While the gate is bound, `envoy.ts`'s top-level instance writes one

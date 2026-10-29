@@ -2551,8 +2551,10 @@ console.log(JSON.stringify(args, null, 2));
     const command = `dispatch ask --issue X-1 --advisor-rebuttal 'the plan is linked in the question' --question-file - <<'EOF'\n${QUESTION}EOF`;
     const result = await g.bash("b1", command, { cwd: work });
     expect(result?.block).toBeUndefined();
+    // Every word of the comment is quoted, the flag's name included, so its quotes stay paired
+    // and nothing the agent wrote could expand wherever the comment stands.
     expect(result?.input).toEqual({
-      command: ASK.replace("\n", " # --advisor-rebuttal 'the plan is linked in the question'\n"),
+      command: ASK.replace("\n", " # '--advisor-rebuttal' 'the plan is linked in the question'\n"),
       cwd: work,
     });
     expect(result?.additionalContext).toContain('outcome="rebuttal"');
@@ -2575,10 +2577,10 @@ console.log(JSON.stringify(args, null, 2));
       "dispatch comment --issue X-1 --advisor-rebuttal='a link' --body hi"
     );
     expect(inline?.input).toEqual({
-      command: "dispatch comment --issue X-1 --body hi # --advisor-rebuttal='a link'",
+      command: "dispatch comment --issue X-1 --body hi # '--advisor-rebuttal=a link'",
     });
     expect(inline?.additionalContext).toContain(
-      "You sent this call with --advisor-rebuttal='a link'. AskGate recorded your rebuttal \"a link\", and the call was sent without review. dispatch does not take that flag, so it stays a shell comment at the end of the command's first line"
+      "You sent this call with --advisor-rebuttal='a link'. AskGate recorded your rebuttal \"a link\", and the call was sent without review. dispatch does not take that flag, so it stays a shell comment where the command's line ends"
     );
   });
   test("a rebuttal's command, its flag a comment, runs in bash with the flag out of the CLI's arguments and the here-document intact", async () => {
@@ -2589,7 +2591,7 @@ console.log(JSON.stringify(args, null, 2));
     });
     const sent = `dispatch ask --issue X-1 --advisor-rebuttal 'the plan is linked' --question-file - <<'EOF' 2>&1\n${QUESTION}EOF`;
     const ran = (await g.bash("b1", sent))?.input?.command;
-    expect(ran).toContain("# --advisor-rebuttal 'the plan is linked'");
+    expect(ran).toContain("# '--advisor-rebuttal' 'the plan is linked'");
     // A stand-in `dispatch` prints each argument it gets, then its standard input.
     const shell = Bun.spawnSync({
       cmd: ["bash", "-c", `dispatch() { printf 'arg:%s\\n' "$@"; cat; }\n${ran}`],
@@ -2599,6 +2601,186 @@ console.log(JSON.stringify(args, null, 2));
       `arg:ask\narg:--issue\narg:X-1\narg:--question-file\narg:-\n${QUESTION}`
     );
   });
+  // Security, round 15 (INFRA-168): the override comment stands where bash ends the command's
+  // line and nowhere else. Written at the first newline it could land inside a multi-line quoted
+  // value, where its own quote closes that value's — bash then hands the CLI other arguments and
+  // runs what the rebuttal holds — or after a pipe stage, where the grammar took no comment and
+  // the call lost its marker. Every row below is run through real bash with a stand-in
+  // `dispatch` that prints the argv it got and its standard input.
+  describe("the override comment, wherever the command's line ends", () => {
+    const argvBin = fs.mkdtempSync(path.join(SUITE_TMP, "argv-dispatch-"));
+    fs.writeFileSync(
+      path.join(argvBin, "dispatch"),
+      `#!${process.execPath}
+import { readFileSync } from "node:fs";
+let stdin = "";
+try {
+	stdin = readFileSync(0, "utf8");
+} catch {}
+console.log(JSON.stringify({ argv: process.argv.slice(2), stdin }));
+`,
+      { mode: 0o755 }
+    );
+    /** Where a rebuttal that ran would leave its mark; no row may create one. */
+    const sentinels = fs.mkdtempSync(path.join(SUITE_TMP, "sentinel-"));
+    const BODY = "First.\nSecond.\n";
+    /** Each command shape the grammar takes, written with and without the override flag. */
+    const SHAPES: Array<[string, (flag: string) => string, string]> = [
+      [
+        "a multi-line single-quoted body",
+        (flag) => `dispatch comment --issue X-1 ${flag} --body 'See it.\nThanks.'`,
+        "dispatch comment --issue X-1 --body 'See it.\nThanks.'",
+      ],
+      [
+        "a quoted here-document",
+        (flag) => `dispatch comment --issue X-1 ${flag} --body-file - <<'EOF'\n${BODY}EOF`,
+        `dispatch comment --issue X-1 --body-file - <<'EOF'\n${BODY}EOF`,
+      ],
+      [
+        "a | head -n 5 stage",
+        (flag) => `dispatch comment --issue X-1 ${flag} --body hi | head -n 5`,
+        "dispatch comment --issue X-1 --body hi | head -n 5",
+      ],
+      [
+        "a 2>&1",
+        (flag) => `dispatch comment --issue X-1 ${flag} --body hi 2>&1`,
+        "dispatch comment --issue X-1 --body hi 2>&1",
+      ],
+      [
+        "a leading cd",
+        (flag) => `cd ${work} && dispatch comment --issue X-1 ${flag} --body hi`,
+        `cd ${work} && dispatch comment --issue X-1 --body hi`,
+      ],
+    ];
+    /**
+     * Each rebuttal, by what it holds: its flag as the agent writes it (`<sentinel>` standing for
+     * the file a rebuttal that ran would touch), the line the gate records, and whether a comment
+     * can carry it — a value holding both a `'` and a `$`, and one holding a newline, cannot be
+     * written as a word the grammar reads back, so the override is removed instead.
+     */
+    const REBUTTALS: Array<[string, string, string, boolean]> = [
+      [
+        "a command substitution",
+        "--advisor-rebuttal 'as asked: $(touch <sentinel>)'",
+        "as asked: $(touch <sentinel>)",
+        true,
+      ],
+      [
+        "backticks",
+        "--advisor-rebuttal 'as asked: `touch <sentinel>`'",
+        "as asked: `touch <sentinel>`",
+        true,
+      ],
+      [
+        "a single quote",
+        `--advisor-rebuttal "it's the owner's call"`,
+        "it's the owner's call",
+        true,
+      ],
+      [
+        "a double quote",
+        `--advisor-rebuttal 'the owner said "ship it"'`,
+        'the owner said "ship it"',
+        true,
+      ],
+      [
+        "a single quote and an expansion",
+        `--advisor-rebuttal 'it costs $5, the owner'"'"'s call'`,
+        "it costs $5, the owner's call",
+        false,
+      ],
+      [
+        "a newline",
+        "--advisor-rebuttal 'the owner asked.\nIn writing.'",
+        "the owner asked.\nIn writing.",
+        false,
+      ],
+    ];
+    for (const [row, [what, flagTemplate, lineTemplate, kept]] of REBUTTALS.entries())
+      for (const [column, [shape, withFlag, withoutFlag]] of SHAPES.entries())
+        test(`a rebuttal holding ${what}, on ${shape}: dispatch gets the call's own argv and nothing of the rebuttal runs`, async () => {
+          const sentinel = path.join(sentinels, `pwned-${row}-${column}`);
+          const flag = flagTemplate.replaceAll("<sentinel>", sentinel);
+          const line = lineTemplate.replaceAll("<sentinel>", sentinel);
+          // Warn mode, where a rebutted call runs as the gate hands it back: whatever the comment
+          // did to the command is what bash then runs and what the CLI then posts.
+          const g = bind({
+            env: { ...STUB, OMP_ASKGATE: "warn" },
+            cwd: work,
+            complete: async () => ({ text: REVISE }),
+          });
+          const result = await g.bash("rebutted", withFlag(flag));
+          expect({ shape, block: result?.block }).toEqual({ shape, block: undefined });
+          const handed = result?.input?.command as string;
+          // What real bash does with the command the agent reads back and may resend.
+          const run = Bun.spawnSync({
+            cmd: ["bash", "-c", handed],
+            cwd: work,
+            env: { PATH: `${argvBin}:${process.env.PATH}` },
+            stdin: "ignore",
+          });
+          // Nothing of the rebuttal ran: no part of it was ever outside the comment.
+          expect({ shape, ran: fs.existsSync(sentinel) }).toEqual({ shape, ran: false });
+          expect({ shape, stderr: run.stderr.toString(), code: run.exitCode }).toEqual({
+            shape,
+            stderr: "",
+            code: 0,
+          });
+          const got = JSON.parse(run.stdout.toString()) as { argv: string[]; stdin: string };
+          // The CLI gets the call without its override, and the marker's key is that same argv.
+          expect({ shape, argv: got.argv }).toEqual({
+            shape,
+            argv: core.commandArgv(withoutFlag) as string[],
+          });
+          expect({ shape, argv: core.commandArgv(handed) }).toEqual({ shape, argv: got.argv });
+          expect({ shape, stdin: got.stdin }).toEqual({
+            shape,
+            stdin: shape === "a quoted here-document" ? BODY : "",
+          });
+          // The entry records the line the agent sent, whatever became of the flag.
+          expect({ shape, rebuttal: g.entries[0]?.rebuttal }).toEqual({ shape, rebuttal: line });
+          if (kept) {
+            // The gate reads its own output back as the same rebuttal, over the same command.
+            expect({ shape, scoped: core.scopedCommand(handed)?.rebuttal?.line }).toEqual({
+              shape,
+              scoped: line,
+            });
+            expect({ shape, command: core.scopedCommand(handed)?.command }).toEqual({
+              shape,
+              command: withoutFlag,
+            });
+            expect(result?.additionalContext).toContain("it stays a shell comment");
+          } else {
+            // No word of the grammar carries it, so the flag is gone and the acknowledgement says so.
+            expect({ shape, handed }).toEqual({ shape, handed: withoutFlag });
+            expect(result?.additionalContext).toContain(
+              "so AskGate removed it before the call ran"
+            );
+          }
+        }, 30_000);
+
+    test("an override the gate cannot write where the line ends is removed, not written wrong", async () => {
+      // The call's own `cd` is continued over two lines, so the line the tokenizer ends is the
+      // text's second: a comment there is another line's, which the gate does not read as an
+      // override. It reads its own output back before it hands it over, finds the rebuttal gone,
+      // and hands the command over without the comment rather than changed.
+      const g = bind({
+        env: { ...STUB, OMP_ASKGATE: "warn" },
+        cwd: work,
+        complete: async () => ({ text: REVISE }),
+      });
+      const result = await g.bash(
+        "continued",
+        `cd ${work} \\\n  && dispatch comment --issue X-1 --advisor-rebuttal 'the owner asked' --body hi`
+      );
+      expect(result?.input?.command).toBe(
+        `cd ${work} \\\n  && dispatch comment --issue X-1 --body hi`
+      );
+      expect(result?.additionalContext).toContain("so AskGate removed it before the call ran");
+      expect(g.entries).toMatchObject([{ outcome: "rebuttal", rebuttal: "the owner asked" }]);
+    });
+  });
+
   test("after an --advisor-rebuttal pass, what the agent reads back of its call still shows the flag it sent", async () => {
     // Oh My Pi records a call as the tool_call hook returns it, so the agent's own transcript
     // shows the command the gate ran, flag removed. Live, in 2 of 3 sessions told they could
@@ -2652,13 +2834,15 @@ console.log(JSON.stringify(args, null, 2));
         )
       )?.input?.command as string;
       expect(handed).toBe(
-        "dispatch comment --issue X-1 --body hi # --advisor-rebuttal 'first reason' --advisor-rebuttal='second reason'"
+        "dispatch comment --issue X-1 --body hi # '--advisor-rebuttal' 'first reason' '--advisor-rebuttal=second reason'"
       );
       const again = await g.bash("b2", handed);
       expect(again?.block).toBeUndefined();
       expect(again?.input).toEqual({ command: handed });
+      // The resend's own overrides are the comment's words, which the gate wrote: it quotes them
+      // as it found them, so the command it hands back is the one it was sent.
       expect(again?.additionalContext).toContain(
-        "You sent this call with --advisor-rebuttal 'first reason' --advisor-rebuttal='second reason'."
+        "You sent this call with '--advisor-rebuttal' 'first reason' '--advisor-rebuttal=second reason'."
       );
       expect(g.dryRuns[1]?.script).toBe("dispatch comment --issue X-1 --body hi --dry-run");
 
@@ -2670,7 +2854,7 @@ console.log(JSON.stringify(args, null, 2));
         )
       )?.input?.command as string;
       expect(heredoc).toBe(
-        ASK.replace("<<'EOF'", "<<'EOF' # --advisor-rebuttal 'the plan is linked'")
+        ASK.replace("<<'EOF'", "<<'EOF' # '--advisor-rebuttal' 'the plan is linked'")
       );
       const resent = await g.bash("b4", heredoc);
       expect(resent?.block).toBeUndefined();
@@ -2715,6 +2899,34 @@ console.log(JSON.stringify(args, null, 2));
       expect(g.entries).toHaveLength(0);
       expect(markersIn(g.store)).toEqual([]);
     }
+  });
+  test("an override comment anywhere but the end of the command's line is no override", () => {
+    // Design 2: the gate reads back only what it writes, which stands where the tokenizer ends
+    // the line. A comment on a later line of the call is another line's, and a comment before a
+    // stage that still runs is one bash reads as text of the comment, not of the call: neither is
+    // a form the gate hands back, and reading either as an override would take a rebuttal from a
+    // call the agent never rebutted.
+    for (const command of [
+      // After a line continuation: the comment is on the call's second line.
+      "dispatch ask --issue X-1 \\\n  --question 'Ship?' # --advisor-rebuttal 'r'",
+      // Before a pipe stage, where bash takes `| head -n 5` for comment text.
+      "dispatch comment --issue X-1 --body hi # --advisor-rebuttal 'r' | head -n 5",
+      // On the line after the command's own.
+      "dispatch comment --issue X-1 --body hi\n# --advisor-rebuttal 'r'",
+    ])
+      expect({
+        command,
+        scoped: core.scopedCommand(command),
+        argv: core.commandArgv(command),
+      }).toEqual({ command, scoped: undefined, argv: undefined });
+    // A newline inside a quoted value ends no line, so the comment after that value is the
+    // gate's own, and the call is the same rebuttal.
+    const quoted =
+      "dispatch comment --issue X-1 --body 'See it.\nThanks.' # '--advisor-rebuttal' 'the owner asked'";
+    expect(core.scopedCommand(quoted)).toMatchObject({
+      command: "dispatch comment --issue X-1 --body 'See it.\nThanks.'",
+      rebuttal: { line: "the owner asked" },
+    });
   });
   test("a device call and a command on one target share its breaker", async () => {
     const g = bind({
@@ -2874,7 +3086,7 @@ console.log(JSON.stringify(args, null, 2));
       "cd 'sub' && dispatch comment --issue X-1 --advisor-rebuttal 'r' --body hi 2>&1"
     );
     expect(result?.input).toEqual({
-      command: "cd 'sub' && dispatch comment --issue X-1 --body hi 2>&1 # --advisor-rebuttal 'r'",
+      command: "cd 'sub' && dispatch comment --issue X-1 --body hi 2>&1 # '--advisor-rebuttal' 'r'",
     });
     expect(g.dryRuns[0].script).toBe(
       "cd 'sub' >/dev/null && dispatch comment --issue X-1 --body hi --dry-run"
@@ -3141,8 +3353,8 @@ console.log(JSON.stringify(args, null, 2));
       expect(armOn.store).toBe(armOff.store);
     });
 
-    // The mint comes once, after every check and after the record: a write no review stands
-    // behind whose record fails is refused, and leaves no marker the CLI could spend.
+    // The mint comes once, after every check and after the call's own entry: a write no review
+    // stands behind whose entry fails is refused, and leaves no marker the CLI could spend.
     test("a write no review stands behind whose record fails is refused, and mints no marker", async () => {
       const g = bind({ env: { ...STUB, OMP_ASKGATE: "warn" }, cwd: work, recordThrows: true });
       // The stub refuses `--fail` at its dry run: no review stands behind the call.
@@ -3159,6 +3371,47 @@ console.log(JSON.stringify(args, null, 2));
       const result = await g.bash("m", ASK);
       expect(result?.block).toBe(true);
       expect(result?.reason).toContain("could not mint one");
+    });
+
+    // #2161, round 15: the record carries the decision the call finally got, so it starts after
+    // the mint. A mint that fails refuses the call and nothing of it posts; a record that still
+    // said the rebuttal went out would count a write that never happened.
+    test("a mint that refuses makes the record say the call was sent back", async () => {
+      const store = path.join(SUITE_TMP, `unmintable-${Date.now()}`);
+      fs.writeFileSync(store, "a file where the store goes");
+      const uploads: string[] = [];
+      const client = {
+        projectArtifact: async (_project, input) => {
+          uploads.push("content" in input ? input.content : "");
+          return { artifact: { id: "doc-1" } };
+        },
+        docEdit: async (_id, input) => ({ applied: input.ops.length }),
+      } satisfies RecordClient;
+      const g = bind({
+        env: { ...STUB, OMP_ASKGATE: "block", OMP_ASKGATE_RECORD_PROJECT: "INFRA" },
+        cwd: work,
+        store,
+        dispatch: () => ({
+          client: client as unknown as DispatchClient,
+          serverUrls: ["https://dispatch.example"],
+        }),
+        complete: async () => ({ text: REVISE }),
+      });
+      const result = await g.bash(
+        "unmintable",
+        "dispatch comment --issue X-1 --advisor-rebuttal 'the owner asked' --body hi"
+      );
+      expect(result?.block).toBe(true);
+      expect(result?.reason).toContain("could not mint one");
+      // The entry of the call the gate answered says the rebuttal went out, as it did decide.
+      expect(g.entries).toMatchObject([{ decision: "allow", outcome: "rebuttal" }]);
+      await recorded();
+      const records = [...(uploads[0] ?? "").matchAll(/```json\n(.*)\n```/g)].map(
+        ([, line]) => JSON.parse(line as string) as Record<string, unknown>
+      );
+      expect(records).toMatchObject([
+        { tool: "dispatch_comment", outcome: "rebuttal", decision: "revise" },
+      ]);
     });
 
     // Design 1: a rules refusal blocks, and `handleCall` mints nothing for a decision that blocks.
@@ -3183,15 +3436,21 @@ console.log(JSON.stringify(args, null, 2));
       }
     });
 
-    // Design 1: the mint is the last step, after both checks and the decision record. A marker
-    // minted earlier would stand for a call whose record, and so whose refusal, had not settled.
-    test("no marker is minted before both checks and the decision record have settled", async () => {
-      /** What the store held, and how many model calls had answered, when the record was written. */
+    // Design 1: the mint comes after both checks have answered. A marker minted before a check
+    // answered would stand for a call that check can still refuse, for as long as it lives. The
+    // Dispatch record follows the mint, so it carries the decision the call finally got.
+    test("no marker is minted before both checks have answered", async () => {
+      /** The markers the store held as each model call answered. */
+      const atAnswer: number[] = [];
+      /** The same, and how many checks had answered, when the decision record was written. */
       let atRecord: { markers: number; answered: number } | undefined;
-      let answered = 0;
+      const answer = (text: string) => async () => {
+        atAnswer.push(markersIn(g.store).length);
+        return { text, usage: USAGE };
+      };
       const client = {
         projectArtifact: async () => {
-          atRecord = { markers: markersIn(g.store).length, answered };
+          atRecord = { markers: markersIn(g.store).length, answered: atAnswer.length };
           return { artifact: { id: "doc-1" } };
         },
         docEdit: async (_id: string, input: { ops: unknown[] }) => ({ applied: input.ops.length }),
@@ -3203,21 +3462,14 @@ console.log(JSON.stringify(args, null, 2));
           client: client as unknown as DispatchClient,
           serverUrls: ["https://dispatch.example"],
         }),
-        complete: bySystem(
-          async () => {
-            answered += 1;
-            return { text: REVISE, usage: USAGE };
-          },
-          async () => {
-            answered += 1;
-            return { text: RULES_NONE, usage: USAGE };
-          }
-        ),
+        complete: bySystem(answer(REVISE), answer(RULES_NONE)),
       });
       // A warn-mode revise: the call runs, so it is minted, and its revise is recorded.
       expect((await g.bash("ordered", ASK))?.block).toBeUndefined();
-      // Both checks had answered before the record, and the store was still empty then.
-      expect(atRecord).toEqual({ markers: 0, answered: 2 });
+      // Neither check found a marker: the store was still empty when each answered.
+      expect(atAnswer).toEqual([0, 0]);
+      // The record ran after the mint, with both checks answered.
+      expect(atRecord).toEqual({ markers: 1, answered: 2 });
       expect(markersIn(g.store)).toMatchObject([{ toolCallId: "ordered", outcome: "verdict" }]);
     });
 
@@ -3280,7 +3532,7 @@ console.log(JSON.stringify({ argv, consumed: consumeMarker([process.env.ASKGATE_
           complete: async () => ({ text: REVISE }),
         });
         const ran = (await g.bash("rebutted", sent))?.input?.command as string;
-        expect(ran).toContain("# --advisor-rebuttal");
+        expect(ran).toContain("# '--advisor-rebuttal'");
         const [minted] = markersIn(g.store);
         expect(minted?.outcome).toBe("rebuttal");
         // Real bash runs the command the gate handed back, with the consuming stand-in on PATH.
@@ -3325,10 +3577,11 @@ console.log(JSON.stringify({ argv, consumed: consumeMarker([process.env.ASKGATE_
         ],
       ] as const) {
         const handed = (await g.bash(`${name}-first`, sent))?.input?.command as string | undefined;
-        // The override stands at the end of the command's first line, the body untouched.
+        // The override stands where the command's line ends, the body untouched, each of its
+        // words quoted.
         expect({ name, line: handed?.split("\n")[0] }).toMatchObject({
           name,
-          line: expect.stringMatching(/ # --advisor-rebuttal '[^']+'$/),
+          line: expect.stringMatching(/ # '--advisor-rebuttal' '[^']+'$/),
         });
         const again = await g.bash(`${name}-resent`, handed ?? "");
         expect({ name, block: again?.block }).toEqual({ name, block: undefined });
@@ -4185,7 +4438,7 @@ describe("the literal grammar, widened to forms with no expansion", () => {
         await g.event("tool_result", { toolCallId: "c1", content: [refusal] })
       );
       expect(note).toContain(
-        "AskGate reads a `#` comment only at the end of the command's first line, and only when its words are override flags alone (`# --advisor-rebuttal '<line>'`, the form AskGate hands a rebutted command back in). Remove the comment, or keep only such an override in it."
+        "AskGate reads a `#` comment only where the command's line ends, after everything that runs (its words, any `2>&1`, a here-document opener and a `| head` or `| tail` stage), and only when its words are override flags alone (`# --advisor-rebuttal '<line>'`, the form AskGate hands a rebutted command back in). Remove the comment, or keep only such an override in it."
       );
     }
     // The override comment the gate itself writes is read, so such a call has no cause at all.
@@ -5209,11 +5462,11 @@ describe("rules check", () => {
     const FIELD =
       "An override is always sent and recorded, and the field is removed before the call runs.";
     const FLAG =
-      "An override is always sent and recorded, and the flag is kept as a shell comment at the end of the command's first line, so dispatch never sees it.";
+      "An override is always sent and recorded, and the flag is kept as a shell comment where the command's line ends, so dispatch never sees it.";
     const charterField =
       "an override is always sent and recorded, and the field is removed before the call runs.";
     const charterFlag =
-      "an override is always sent and recorded, and the flag is kept as a shell comment at the end of the command's first line, so dispatch never sees it.";
+      "an override is always sent and recorded, and the flag is kept as a shell comment where the command's line ends, so dispatch never sees it.";
     const dryRun = async () => ({
       exitCode: 0,
       stdout: JSON.stringify(KEEP_INPUT),

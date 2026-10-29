@@ -97,12 +97,14 @@ function hereDocumentCorpus(): string[] {
 }
 
 /** Commands whose head line carries a `#`: the trailing comment AskGate puts an override flag in,
- * with and without a here-document after it, a comment holding what would be a second command, an
+ * as the agent wrote it and as AskGate writes it back (every word quoted), with and without a
+ * here-document after it, a comment holding what would be a second command, an
  * expansion or a here-document opener, a `#` inside quotes and inside a word, a `#` after a
  * backslash or a Unicode blank, and a comment before a second command. */
 function commentCorpus(): string[] {
   return [
     "dispatch comment --issue X-1 --body hi # --advisor-rebuttal 'r'",
+    "dispatch comment --issue X-1 --body hi # '--advisor-rebuttal' 'r'",
     "dispatch x #c",
     "dispatch x\t# c",
     "dispatch x # c; echo SECOND",
@@ -118,6 +120,11 @@ function commentCorpus(): string[] {
     lines("dispatch x # <<'EOF'", "echo SECOND", "EOF"),
     lines(
       "dispatch ask --issue X-1 --question-file - <<'EOF' # --advisor-rebuttal 'r'",
+      "a",
+      "EOF"
+    ),
+    lines(
+      "dispatch ask --issue X-1 --question-file - <<'EOF' # '--advisor-rebuttal' 'r'",
       "a",
       "EOF"
     ),
@@ -257,6 +264,10 @@ describe("a dispatch command's head", () => {
         )
       );
       expect(accepted).toContain("dispatch comment --issue X-1 --body hi # --advisor-rebuttal 'r'");
+      // The form AskGate writes back: each word of the override quoted.
+      expect(accepted).toContain(
+        "dispatch comment --issue X-1 --body hi # '--advisor-rebuttal' 'r'"
+      );
       expect(accepted.length).toBeGreaterThan(20);
     },
     60_000

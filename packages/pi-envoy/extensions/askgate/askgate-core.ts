@@ -40,11 +40,12 @@
 //     backslash at the end of a line continues the command, as bash reads it. The one
 //     here-document has a quoted delimiter (`'EOF'` or `"EOF"`), before or after the one `2>&1`.
 //     The one pipe stage is `head` or `tail`, alone or with `-n N`, `-nN` or `-N`, which reads the
-//     output after the CLI has its words. One shell comment may end the command's first line, and
-//     only when its words are override flags alone (`# --advisor-rebuttal '<line>'`, the form a
-//     rebutted command is handed back in), read as those overrides and no part of what runs
-//     (`overrideComment`). Nothing else: no assignment, other statement, other pipe, `;`, `||`,
-//     `&`, other redirect or other comment.
+//     output after the CLI has its words. One shell comment may stand where the command's line
+//     ends — after its last word and after every `2>&1`, here-document opener and `head` or
+//     `tail` stage, which is where bash reads one — and only when its words are override flags
+//     alone (`# --advisor-rebuttal '<line>'`, the form a rebutted command is handed back in),
+//     read as those overrides and no part of what runs (`overrideComment`). Nothing else: no
+//     assignment, other statement, other pipe, `;`, `||`, `&`, other redirect or other comment.
 //     The subcommand is `ask`, `message`, `edit-ask`, `comment`, `doc-edit`, `request-approval` (its
 //     `summary` is what the person approves), `issue` with `--spec` or `--spec-file`, or
 //     `artifact` unless its literal `--name` and literal `--path` both show it is no markdown
@@ -134,11 +135,14 @@
 //     `--advisor-rebuttal '<one line>'` among a `dispatch` command's flags. The key is stripped
 //     on the outer `write` event (before the device validates its arguments), the flag from the
 //     `bash` command whatever the gate decides (the CLI would refuse it) and put back as a shell
-//     comment at the end of the command's first line (`keepOverrideVisible`), so the agent's
-//     record of its call still shows it; that command sent again reads the comment as the same
-//     override and comes back the same. The call runs unasked, and the agent is told the override
-//     as it sent it and that its rebuttal was recorded. A device's record lacks the field, and its
-//     note says AskGate removed it. At most 64 unspent device rebuttals are remembered.
+//     comment where the command's line ends (`keepOverrideVisible`), so the agent's record of its
+//     call still shows it; that command sent again reads the comment as the same override and
+//     comes back the same. Each override is written as quoted words the shell expands nothing in,
+//     and the gate reads the commented command back as the same call before it hands it over: an
+//     override it cannot write that way is removed instead, and the acknowledgement says so. The
+//     call runs unasked, and the agent is told the override as it sent it and that its rebuttal
+//     was recorded. A device's record lacks the field, and its note says AskGate removed it. At
+//     most 64 unspent device rebuttals are remembered.
 //   - halted: three consecutive failures to reach a verdict (no model, timeout, every model of the
 //     chain erroring, no parsable answer) stop the gate for the session, with one UI notice. The
 //     halt, the count, the breaker and the rebuttals reset on session_switch and session_branch.
@@ -1041,13 +1045,19 @@ function scanWord(text: string, from: number): { end: number; value: string; unr
  * a `2>&1` and a `| head` or `| tail` stage, each with the blanks before it, since the dry-run's
  * stdout must be the CLI's JSON alone. `leadingCd` is that `cd`'s path when the `cd` opens the
  * whole call, which is where Oh My Pi's bash tool looks for one to take as the call's directory
- * (`extractLeadingCdTarget` at the pin). `comment` is the one override comment that may end the
- * command's first line (`overrideComment`): where it starts, with the blanks before it, where it
- * ends, and its words, which `scopedCommand` reads as overrides and no part of the command runs. */
+ * (`extractLeadingCdTarget` at the pin). `lineEnd` is where the command's own line ends as the
+ * tokenizer reads it: after its last word and after any `2>&1`, here-document opener and
+ * `| head` or `| tail` stage, never inside a quoted value (a quoted newline is no line end to
+ * bash) and never in a here-document's body. That is the one place bash reads a comment as a
+ * comment, so it is where the grammar takes one and where `keepOverrideVisible` writes one.
+ * `comment` is that one override comment (`overrideComment`): where it starts, with the blanks
+ * before it, where it ends, and its words, which `scopedCommand` reads as overrides and no part
+ * of the command runs. */
 interface DispatchHead {
   words: Word[];
   at: number;
   end: number;
+  lineEnd: number;
   cdEnd?: number;
   leadingCd?: string;
   drop: Array<[number, number]>;
@@ -1055,19 +1065,37 @@ interface DispatchHead {
   comment?: { span: [number, number]; words: Word[] };
 }
 
+/** Whether a newline bash reads as one stands between `from` and `at`: a newline inside quotes is
+ * part of a word and ends no line, and a line continuation's newline, which bash removes before it
+ * reads words, is one all the same — the gate writes its comment where the tokenizer's line ends
+ * and never past a continuation, so a comment after one is another line's and is not the gate's. */
+function newlineOutsideQuotes(text: string, from: number, at: number): boolean {
+  let quote: '"' | "'" | undefined;
+  for (let index = from; index < at; index++) {
+    const char = text[index];
+    if (quote !== undefined) {
+      if (char === quote) quote = undefined;
+    } else if (char === "'" || char === '"') quote = char;
+    else if (char === "\n") return true;
+  }
+  return false;
+}
+
 /**
- * The comment that ends a command's first line when it holds override flags alone, the form
+ * The comment that ends a command's own line when it holds override flags alone, the form
  * `keepOverrideVisible` hands a rebutted command back in (`# --advisor-rebuttal '<line>'`), so the
  * gate reads its own output again as the rebuttal it carries. Its words must be literal, and each
  * one part of an override `splitRebuttal` takes. Returns where the comment starts, with the blanks
  * before it, where it ends, and its words; undefined for any other comment, and for one on a later
- * line, which is a here-document's body or another command's: neither is a form the gate reads.
+ * line of the call (`from` is where the call's own text starts), which is a here-document's body
+ * or another line's: neither is a form the gate writes or reads.
  */
 function overrideComment(
   command: string,
-  token: { start: number; end: number }
+  token: { start: number; end: number },
+  from: number
 ): DispatchHead["comment"] | undefined {
-  if (command.lastIndexOf("\n", token.start) !== -1) return undefined;
+  if (newlineOutsideQuotes(command, from, token.start)) return undefined;
   const words: Word[] = [];
   for (const inner of shellTokens(command.slice(token.start + 1, token.end))) {
     if (!isWord(inner) || inner.unread.length > 0) return undefined;
@@ -1088,6 +1116,9 @@ function dispatchCommandHead(command: string): DispatchHead | undefined {
   const tokens = shellTokens(command);
   let index = 0;
   while (isOp(tokens[index], "\n")) index++;
+  // Where the call's own text starts, after the blank lines bash runs as no command: a comment
+  // before this is on another line, and none of those lines is the command's.
+  const headAt = tokens[index]?.start ?? 0;
   let cdEnd: number | undefined;
   let leadingCd: string | undefined;
   const cd = tokens[index];
@@ -1117,11 +1148,13 @@ function dispatchCommandHead(command: string): DispatchHead | undefined {
   )
     return undefined;
   // After its words: at most one `2>&1` and one here-document with a quoted delimiter, in either
-  // order, then at most one override comment, then at most one `| head` or `| tail` stage, then
+  // order, then at most one `| head` or `| tail` stage, then at most one override comment, then
   // the end of the line.
   const drop: Array<[number, number]> = [];
   let stderr = false;
   let heredoc: HeredocToken | undefined;
+  const last = words[words.length - 1];
+  let lineEnd = last.end;
   for (let token = tokens[index]; token !== undefined; token = tokens[++index]) {
     const before = tokens[index - 1]?.end ?? 0;
     if (
@@ -1137,35 +1170,37 @@ function dispatchCommandHead(command: string): DispatchHead | undefined {
       if (heredoc !== undefined || !token.literal) return undefined;
       heredoc = token;
     } else break;
-  }
-  // One shell comment may end the command's first line, and only when its words are override
-  // flags alone (`overrideComment`), the form a rebutted command is handed back in. It stands
-  // after the command's last word and after any `2>&1` or here-document opener on that line, and
-  // never after a pipe stage, where the check below leaves it as any other comment: outside the
-  // grammar. It is no word of the command, so `commandArgv` and the dry run leave it out, as bash
-  // does.
-  let comment: DispatchHead["comment"] | undefined;
-  const commented = tokens[index];
-  if (commented?.kind === "comment") {
-    comment = overrideComment(command, commented);
-    if (comment === undefined) return undefined;
-    index++;
+    lineEnd = token.end;
   }
   if (isOp(tokens[index], "|")) {
     const before = tokens[index - 1]?.end ?? 0;
     const stage: WordToken[] = [];
     for (let token = tokens[++index]; isWord(token); token = tokens[++index]) stage.push(token);
     if (!headOrTail(stage)) return undefined;
-    drop.push([before, stage[stage.length - 1].end]);
+    lineEnd = stage[stage.length - 1].end;
+    drop.push([before, lineEnd]);
+  }
+  // One shell comment may stand where the command's line ends (`lineEnd`), and only when its
+  // words are override flags alone (`overrideComment`), the form a rebutted command is handed
+  // back in. That is where bash reads one as a comment: after the command's last word and after
+  // every `2>&1`, here-document opener and `| head` or `| tail` stage on that line. A `#`
+  // anywhere else is no override comment, and the call is then outside the grammar. The comment
+  // is no word of the command, so `commandArgv` and the dry run leave it out, as bash does.
+  let comment: DispatchHead["comment"] | undefined;
+  const commented = tokens[index];
+  if (commented?.kind === "comment") {
+    comment = overrideComment(command, commented, headAt);
+    if (comment === undefined) return undefined;
+    index++;
   }
   // Nothing else runs: only newlines (blank lines) are left, the here-document's body included.
   if (tokens.slice(index).some((token) => !isOp(token, "\n"))) return undefined;
   if (heredoc !== undefined && !heredoc.closed) return undefined;
-  const last = words[words.length - 1];
   return {
     words: words.map(({ raw, value, start, end }) => ({ raw, value, start, end })),
     at: words[0].start,
     end: last.end,
+    lineEnd,
     ...(cdEnd === undefined ? {} : { cdEnd }),
     ...(leadingCd === undefined ? {} : { leadingCd }),
     drop,
@@ -1269,7 +1304,7 @@ export interface ScopedCommand {
 /**
  * An override the agent sent: the line the entry records, and the override as the agent wrote it.
  * The gate keeps the override out of what the call hands its program, and the surface decides what
- * the agent reads back: a command's flags go back as one shell comment at the end of its first line
+ * the agent reads back: a command's flags go back as one shell comment where its line ends
  * (`keepOverrideVisible`), so dispatch never sees them and the agent's record of the call still
  * shows them; a device's field is removed before the call runs, so the record lacks it. The
  * acknowledgement quotes `sent` either way, so the agent sees what it sent and where it went.
@@ -1348,7 +1383,7 @@ function fileInputs(
  * The `bash` command as a scoped `dispatch` call, or undefined for any other command. Only the
  * literal grammar of one call is read (`dispatchCommandHead`). A call in any other form is no
  * scoped call: it runs, and the CLI refuses a gated write in it, which carries no marker. The
- * override comment that may end the call's first line is read as overrides after the call's own
+ * override comment that may stand where the call's line ends is read as overrides after the call's own
  * flags, and is left out of `command` and of the dry run, as an override flag is: the gate puts
  * every override back as one comment (`keepOverrideVisible`), so a rebutted command it handed
  * back, sent again, carries the same rebuttal and comes back the same.
@@ -1620,7 +1655,7 @@ export function causeNote({ cause, detail }: { cause: NonLiteralCause; detail: s
     redirect: `The call has the redirect \`${detail}\`. Remove it. To send text from a file, use \`--<field>-file <path>\`.`,
     other:
       detail === "#"
-        ? "AskGate reads a `#` comment only at the end of the command's first line, and only when its words are override flags alone (`# --advisor-rebuttal '<line>'`, the form AskGate hands a rebutted command back in). Remove the comment, or keep only such an override in it."
+        ? "AskGate reads a `#` comment only where the command's line ends, after everything that runs (its words, any `2>&1`, a here-document opener and a `| head` or `| tail` stage), and only when its words are override flags alone (`# --advisor-rebuttal '<line>'`, the form AskGate hands a rebutted command back in). Remove the comment, or keep only such an override in it."
         : `AskGate does not read \`${detail}\`. Write each word as plain text or in quotes.`,
   };
   return `AskGate note: the dispatch CLI found no AskGate marker for this write, because the call is not in the literal form that AskGate reads. ${fix[cause]} Then send it as \`dispatch <command> <words…>\`, in a bash call of its own; the CLI's message above gives the full literal form.`;
@@ -1936,20 +1971,31 @@ const SECOND_REVISE =
  * How the agent overrides a revise on each surface: a key in the device JSON, or a flag on the
  * command. `how` completes a charter revise; `again` completes the rules refusal's "send the call
  * again with"; `fate` completes both refusals' "an override is always sent and recorded, and",
- * saying what becomes of the override on that surface; `note` follows either refusal.
+ * saying what becomes of the override on that surface; `note` follows either refusal. `removed`
+ * is set where the override does not survive the call the agent reads back: a device's field
+ * always, and a command's flag when the gate could not write it as a comment it reads back
+ * (`keepOverrideVisible`), which the acknowledgement then says.
  */
-type Override = { how: string; what: string; again: string; fate: string; note?: string };
+type Override = {
+  how: string;
+  what: string;
+  again: string;
+  fate: string;
+  note?: string;
+  removed?: true;
+};
 const DEVICE_OVERRIDE: Override = {
   how: `"${REBUTTAL_KEY}": "<one line>" added to the JSON`,
   what: "field",
   again: `\`"${REBUTTAL_KEY}": "<one line>"\` in its JSON`,
   fate: "the field is removed before the call runs",
+  removed: true,
 };
 const COMMAND_OVERRIDE: Override = {
   how: `${REBUTTAL_FLAG} '<one line>' added to its flags`,
   what: "flag",
   again: `\`${REBUTTAL_FLAG} '<one line>'\``,
-  fate: "the flag is kept as a shell comment at the end of the command's first line, so dispatch never sees it",
+  fate: "the flag is kept as a shell comment where the command's line ends, so dispatch never sees it",
 };
 /** Oh My Pi runs the tool_call hooks of a whole batch before any call of it, so the dry run reads a
  * named file before a sibling call of the same batch changes it. */
@@ -2003,25 +2049,86 @@ const renderWarn = (reason: string) =>
 // agents read their call back, found no override and reported a rebuttal they never wrote, and a
 // note naming the removal did not stop it (tester round 6 and the round after, 6 of 9 sessions).
 // So a command keeps its flag as a shell comment (`keepOverrideVisible`), and the acknowledgement
-// says where; a device's JSON cannot carry the field, so its note says AskGate removed it.
+// says where; a device's JSON cannot carry the field, and neither can a command whose override
+// the gate could not write as a comment it reads back, so those say AskGate removed it.
 const renderRebuttalAck = ({ line, sent }: Rebuttal, override: Override) =>
   `<advisor-gate advisor="AskGate" outcome="rebuttal">\nYou sent this call with ${agentFacing(sent)}. AskGate recorded your rebuttal "${agentFacing(line)}", and the call was sent without review. ${
-    override.what === "flag"
-      ? "dispatch does not take that flag, so it stays a shell comment at the end of the command's first line: it is in your record of the call, and dispatch never saw it."
-      : `The device does not take that ${override.what}, so AskGate removed it before the call ran: your record of the call lacks it because AskGate removed it, not because you left it out.`
+    override.removed === true
+      ? `${override.what === "flag" ? "dispatch" : "The device"} does not take that ${override.what}, so AskGate removed it before the call ran: your record of the call lacks it because AskGate removed it, not because you left it out.`
+      : "dispatch does not take that flag, so it stays a shell comment where the command's line ends, after everything that runs: it is in your record of the call, and dispatch never saw it."
   }\n</advisor-gate>`;
 /**
- * The command with the override the gate took out put back as a shell comment at the end of its
- * first line, so the agent's record of the call still shows the flag it sent. A here-document's
- * body starts on the next line, so the comment never reaches it; an override that spans lines is
- * not put back.
+ * A value written as one quoted word of the literal grammar: single-quoted, in which bash takes
+ * every character as text, or — the value holds a `'` — double-quoted, which is as literal while
+ * the value holds no `$`, backtick or `\`. Undefined when no such word exists: a value holding
+ * both a `'` and one of those (`'\''` is a backslash, which the grammar refuses to read), or a
+ * newline, which would end the comment and leave what follows to run.
+ *
+ * Every word is quoted, the flag's own name included, so that the quotes stay paired through the
+ * comment: were it ever written where a single-quoted value is still open, the first quote of the
+ * first word would close that value and the next would open one around the agent's line, which
+ * is the only part of the comment the agent writes. Nothing it holds can expand or run.
  */
-function keepOverrideVisible(input: Input, sent: string | undefined): Input {
+function literalWord(value: string): string | undefined {
+  if (value.includes("\n")) return undefined;
+  if (!value.includes("'")) return `'${value}'`;
+  return /["$`\\]/.test(value) ? undefined : `"${value}"`;
+}
+/**
+ * The override the agent sent, as the words of the comment that carries it: each word quoted so
+ * that bash takes every character of it as text, whatever the comment's own place turns out to be,
+ * and in a form the gate's own grammar reads back as the same override. Only the quoting changes;
+ * the words the CLI would have seen are the agent's own. Undefined when one of them cannot be
+ * written that way, and the override is then removed instead of kept.
+ */
+function overrideWords(sent: string): string | undefined {
+  const words: string[] = [];
+  for (const token of shellTokens(sent)) {
+    if (!isWord(token) || token.unread.length > 0) return undefined;
+    const word = literalWord(token.value);
+    if (word === undefined) return undefined;
+    words.push(word);
+  }
+  return words.length === 0 ? undefined : words.join(" ");
+}
+const sameArgv = (one: string[] | undefined, two: string[] | undefined): boolean =>
+  one !== undefined &&
+  two !== undefined &&
+  one.length === two.length &&
+  one.every((word, index) => word === two[index]);
+/**
+ * The command with the override the gate took out put back as a shell comment, and whether it went
+ * in, which the acknowledgement says. The comment stands where the command's line ends as the
+ * tokenizer reads it (`lineEnd`): after the last word, any `2>&1`, any here-document opener and
+ * any `| head` or `| tail` stage. Only there does bash read it as a comment, and nowhere else is
+ * it safe — inside a multi-line quoted value its own first quote would close that value's, handing
+ * the CLI other arguments and leaving what the rebuttal holds to the shell.
+ *
+ * So the gate reads its own output back before it hands it over: the commented command must be the
+ * same command, word for word (`commandArgv`) and text for text, carrying the same rebuttal and
+ * nothing the shell expands (every word of the grammar is literal). Where it is not, the command
+ * goes back without the comment rather than changed, and the acknowledgement says the flag was
+ * removed.
+ */
+function keepOverrideVisible(
+  input: Input,
+  rebuttal: Rebuttal | undefined
+): { input: Input; kept: boolean } {
   const { command } = input;
-  if (sent === undefined || sent.includes("\n") || typeof command !== "string") return input;
-  const end = command.indexOf("\n");
-  const first = end === -1 ? command : command.slice(0, end);
-  return { ...input, command: `${first} # ${sent}${end === -1 ? "" : command.slice(end)}` };
+  if (rebuttal === undefined || typeof command !== "string") return { input, kept: false };
+  const head = dispatchCommandHead(command);
+  const words = overrideWords(rebuttal.sent);
+  if (head === undefined || head.comment !== undefined || words === undefined)
+    return { input, kept: false };
+  const commented = `${command.slice(0, head.lineEnd)} # ${words}${command.slice(head.lineEnd)}`;
+  const read = scopedCommand(commented);
+  if (
+    read?.command !== command ||
+    read.rebuttal?.line !== rebuttal.line ||
+    !sameArgv(commandArgv(commented), commandArgv(command))
+  )
+    return { input, kept: false };
+  return { input: { ...input, command: commented }, kept: true };
 }
 const renderBreakerAck = () =>
   `<advisor-gate advisor="AskGate" outcome="breaker">\nThird attempt after two refusals of this call on its target: sent without review and recorded.\n</advisor-gate>`;
@@ -2759,7 +2866,7 @@ export function createAskGate(deps: Deps): (pi: Pi) => void {
       // later read of the review has the text the model judged, not the command or a mutable file.
       const args = renderArgs(event.input);
       const call = { toolCallId: event.toolCallId, stop };
-      // The charter call starts first (its request is rendered and sent before this returns); a call
+      // The charter call starts first (its request is rendered and started before this returns); a call
       // that opens a new ask also gets the rules call, beside it on the same chain, deadline and stop.
       const charterRun = walk(
         ctx,
@@ -3223,10 +3330,12 @@ export function createAskGate(deps: Deps): (pi: Pi) => void {
       const started = deps.now();
       let base: Base | undefined;
       let decision: Decision;
-      // A `dispatch` command with its override flag removed, which runs whatever the gate decides.
+      // A `dispatch` command with its override flag removed and put back as a shell comment,
+      // which runs whatever the gate decides.
       let revised: Input | undefined;
-      // The override as the agent wrote it, put back as a comment on the command that runs.
-      let rebuttalSent: string | undefined;
+      // The override the call carried, and the surface it went back on: the acknowledgement says
+      // the flag stayed as a comment, or that AskGate removed it where it could not.
+      let override: Override | undefined;
       // What the call's dry run printed and the digests of the files the gate read, which a
       // marker for the command it ran binds.
       let dryRun: { args: Input; files: readonly FileDigest[] } | undefined;
@@ -3264,8 +3373,15 @@ export function createAskGate(deps: Deps): (pi: Pi) => void {
           const scoped = scopedCommand(event.input.command);
           if (scoped === undefined) return undefined;
           if (scoped.rebuttal !== undefined) {
-            revised = { ...event.input, command: scoped.command };
-            rebuttalSent = scoped.rebuttal.sent;
+            // The comment goes on before the review, so the acknowledgement the review renders
+            // says where the override went, and the mint reads the command that finally runs.
+            const back = keepOverrideVisible(
+              { ...event.input, command: scoped.command },
+              scoped.rebuttal
+            );
+            revised = back.input;
+            const surface = scoped.readsFile ? FILE_OVERRIDE : COMMAND_OVERRIDE;
+            override = back.kept ? surface : { ...surface, removed: true as const };
           }
           base = { ...identity(event, mode), tool: scoped.tool, path: scoped.label };
           // Before the dry run and before any path that lets the write out: with no model role
@@ -3281,10 +3397,7 @@ export function createAskGate(deps: Deps): (pi: Pi) => void {
               // does, with no entry and no marker, which the CLI needs for no such upload; an
               // override flag on it is still removed, since the CLI would refuse it, and put
               // back as a comment, so the agent's record of the call still shows it.
-              if ("unscoped" in run)
-                return revised === undefined
-                  ? undefined
-                  : { input: keepOverrideVisible(revised, rebuttalSent) };
+              if ("unscoped" in run) return revised === undefined ? undefined : { input: revised };
               if ("cause" in run)
                 decision =
                   run.cause === "timeout"
@@ -3317,7 +3430,7 @@ export function createAskGate(deps: Deps): (pi: Pi) => void {
                   base,
                   key,
                   scoped.rebuttal,
-                  scoped.readsFile ? FILE_OVERRIDE : COMMAND_OVERRIDE,
+                  override ?? (scoped.readsFile ? FILE_OVERRIDE : COMMAND_OVERRIDE),
                   stop,
                   run.directory,
                   scoped.upload === true
@@ -3419,44 +3532,45 @@ export function createAskGate(deps: Deps): (pi: Pi) => void {
           };
         }
       }
-      // The entry above reaches only this machine's disk, so a rules decision also goes to
-      // Dispatch, where a session with no access to this machine counts it (`decision-record.ts`).
-      // Started here and awaited by nothing of the call: the review's deadline pays none of it, and
-      // whatever that write costs or loses, the decision above and the call's result stand. It is
-      // started for a call this entry failed too, as it is for one whose own refusal stands: what
-      // the write did is the record's own account, which the session's disk no longer holds.
-      startRecord(entry, ctx);
-      if (refusal !== undefined) return refusal;
-      // The override the gate took out goes back as a shell comment on the command that runs, so
-      // the agent's record of the call still shows it; the mint then reads that command, whose
-      // argv is what bash hands the CLI, the comment left out.
-      if (revised !== undefined) revised = keepOverrideVisible(revised, rebuttalSent);
       // A review, or a pass the gate took over the dry run's arguments (a rebuttal, a breaker
       // trip, a halt, another provider), binds those arguments and the files' digests; a call no
-      // verdict stands behind is argv-only.
-      if (mints && mintSkipped === undefined) {
+      // verdict stands behind is argv-only. The mint reads the command the handler finally
+      // returns, the override comment put back, whose argv is what bash hands the CLI. A call
+      // this entry already refused mints nothing: no command of it runs.
+      let minted: ToolCallResult;
+      if (refusal === undefined && mints && mintSkipped === undefined) {
         const { outcome } = decision.fields;
         const bound =
           dryRun !== undefined && !UNREVIEWED_OUTCOMES.includes(outcome) ? dryRun : null;
-        const minted = mintFor(
+        minted = mintFor(
           event.toolCallId,
           (revised ?? event.input).command,
           bound,
           outcome,
           checks
         );
-        if (minted?.block) {
-          notices.delete(event.toolCallId);
-          return minted;
-        }
-        if (minted?.additionalContext !== undefined)
-          decision.result = {
-            ...decision.result,
-            additionalContext: [decision.result?.additionalContext, minted.additionalContext]
-              .filter((note) => note !== undefined)
-              .join("\n"),
-          };
       }
+      // The entry above reaches only this machine's disk, so a rules decision also goes to
+      // Dispatch, where a session with no access to this machine counts it (`decision-record.ts`).
+      // Started here and awaited by nothing of the call: the review's deadline pays none of it, and
+      // whatever that write costs or loses, the decision above and the call's result stand. It is
+      // started for a call this entry failed too, as it is for one whose own refusal stands: what
+      // the write did is the record's own account, which the session's disk no longer holds. It
+      // starts after the mint, since a mint that refuses is the decision the call finally got: the
+      // write never posted, and the record says the call was sent back, not that it went out.
+      startRecord(minted?.block === true ? { ...entry, decision: "revise" } : entry, ctx);
+      if (refusal !== undefined) return refusal;
+      if (minted?.block) {
+        notices.delete(event.toolCallId);
+        return minted;
+      }
+      if (minted?.additionalContext !== undefined)
+        decision.result = {
+          ...decision.result,
+          additionalContext: [decision.result?.additionalContext, minted.additionalContext]
+            .filter((note) => note !== undefined)
+            .join("\n"),
+        };
       // The same note goes on the call's own result (`deliverNotice`), which every caller reads:
       // a call an eval cell made has no loop sink for `additionalContext`, and a note the agent
       // never sees reads like a gate that is working. The rules notice rides there too, on this

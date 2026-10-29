@@ -287,10 +287,11 @@ in the next.
   after the `2>&1`. Its body is on the lines after the line that opens it.
 - One trailing pipe stage may read its output: `head` or `tail`, alone or with `-n N`, `-nN` or
   `-N`. The dry run leaves it out.
-- One shell comment may end the command's first line, and only when its words are override flags
-  alone (`# --advisor-rebuttal '<line>'`, the form the gate hands a rebutted command back in). It
-  is read as those overrides, and no part of what runs: `commandArgv` never holds it, so the
-  marker binds the words bash hands the CLI.
+- One shell comment may stand where the command's line ends — after its last word and after every
+  `2>&1`, here-document opener and `head` or `tail` stage, which is where bash reads one — and
+  only when its words are override flags alone (`# --advisor-rebuttal '<line>'`, the form the gate
+  hands a rebutted command back in). It is read as those overrides, and no part of what runs:
+  `commandArgv` never holds it, so the marker binds the words bash hands the CLI.
 - Nothing else is in the call: no second command, no other pipe, no `;`, `&&`, `||` or `&`, no
   assignment, no other redirect and no other comment.
 
@@ -339,8 +340,8 @@ gated write only when it consumes one, so a write sent any other way is refused 
   in the call, with the call's own text (an expansion in a value, a double-quoted value over lines
   with an expansion in it, a program that runs the write such as `xargs` or `timeout`, a pipe, a
   second command, an assignment, a redirect, a comment that is no override), and the change that
-  puts the write in the literal form. For a comment it says that AskGate reads a `#` only at the
-  end of the command's first line and only when its words are override flags alone. The note is
+  puts the write in the literal form. For a comment it says that AskGate reads a `#` only where
+  the command's line ends and only when its words are override flags alone. The note is
   help only: the gate refuses nothing for it.
 - **The unmarked write that carries an ask.** The `unmarked` entry reaches only this machine's
   disk. Where such a write carries at least one ask for a person, the CLI counts those asks from
@@ -453,10 +454,14 @@ anyway in one of three ways:
   again.
 
 A rebuttal sends the call with no review by either check, and the entry records the line. The
-CLI takes no such flag, so the gate moves it into a shell comment at the end of the command's
-first line, where the agent's record of its call still shows it and dispatch never sees it; that
-command sent again is read as the same rebuttal and comes back unchanged. A device takes no such
-field, so the gate removes it before the call runs and says so. Either way the acknowledgement
+CLI takes no such flag, so the gate moves it into a shell comment where the command's line ends,
+after everything that runs, where the agent's record of its call still shows it and dispatch never
+sees it; that command sent again is read as the same rebuttal and comes back unchanged. Every word
+of that comment is quoted, so nothing the rebuttal holds can expand or run wherever it stands, and
+the gate reads the commented command back as the same call before it hands it over: an override no
+word of the grammar can carry — a line holding both a `'` and a `$`, or a newline — is removed
+instead, and the acknowledgement says so. A device takes no such field, so the gate removes it
+before the call runs and says so. Either way the acknowledgement
 quotes the override exactly as the agent sent it. A rules call that ends in an error, a timeout or
 an answer that does not parse refuses nothing: the charter check decides. The third such rules
 call in a row writes one warning, saying that the new asks of those three calls went unchecked and

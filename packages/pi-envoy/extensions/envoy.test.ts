@@ -1718,8 +1718,8 @@ describe("envoy OMP extension", () => {
     await session.stop();
     expect(session.asked).toHaveLength(1);
 
-    // AskGate hands a rebutted command back with its override moved into a shell comment at the end
-    // of its first line, and Oh My Pi records the call as handed back: it is still one `dispatch`
+    // AskGate hands a rebutted command back with its override moved into a shell comment where the
+    // command's line ends, and Oh My Pi records the call as handed back: it is still one `dispatch`
     // command, the agent talking to the humans, so it owes nothing.
     await session.dispatch(
       "dispatch comment --issue DSP-1 --body hi # --advisor-rebuttal 'the person asked for it'",

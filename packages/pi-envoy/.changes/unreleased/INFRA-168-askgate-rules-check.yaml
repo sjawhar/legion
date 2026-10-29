@@ -11,10 +11,14 @@ body: |-
   `block` mode and posts it with a warning in `warn` mode, and the check never sees it.
   `--advisor-rebuttal '<line>'` on a command, `"advisor_rebuttal": "<line>"` in a device's JSON,
   or the third attempt at the same thing on the same target sends the call anyway. Each such flag
-  is kept as a shell comment at the end of the command's first line, so dispatch never sees it and
-  the agent's record of its call still shows it, and the acknowledgement quotes every override as
-  the agent sent it and records every line: told only that the flag was removed, agents read their
-  own call back without it and reported a rebuttal they never wrote. That command sent again is
+  is kept as a shell comment where the command's line ends, after everything that runs, so
+  dispatch never sees it and the agent's record of its call still shows it, and the acknowledgement
+  quotes every override as the agent sent it and records every line: told only that the flag was
+  removed, agents read their own call back without it and reported a rebuttal they never wrote.
+  Every word of that comment is quoted, so nothing a rebuttal holds can expand or run wherever the
+  comment stands, and AskGate reads the commented command back as the same call before it hands it
+  over: an override no word of the form it reads can carry is removed instead, and the
+  acknowledgement says so. That command sent again is
   read as the same rebuttal and comes back unchanged, any other comment leaves the command outside
   the form AskGate reads, and the run-end self-check counts it as the one `dispatch` command it is,
   so it owes no check. A device's field is removed before the call runs, and both refusals say
