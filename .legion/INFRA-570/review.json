@@ -2,44 +2,24 @@
   "schemaVersion": 1,
   "phase": "review",
   "issue": "INFRA-570",
-  "completed": "2026-10-29T16:24:40Z",
-  "round": 1,
-  "reviewedHead": "824c3db0f2432c47d5d6d82eafdc83fb696ec701 (code head cd5fae7d2fdd)",
-  "decision": "changes_requested",
+  "completed": "2026-10-29T17:30:58Z",
+  "round": 2,
+  "reviewedCodeHead": "d2295d5882c7 (implementer's code), plus the reviewer's own prose commit a938ffbeb6bf (envoy-client changelog fragment only)",
+  "decision": "approved",
   "critical": 0,
-  "important": 2,
-  "minor": 3,
-  "thermonuclear": "deep-review: no critical/important, two minors (stale cache, AGENTS.md e2e overstatement), both taken; code-quality: four findings, the CLI-copy and the withAsk/<li> one taken, the debounce-helper and the boolean-state ones judged not defects (see review body).",
-  "ci": "CI run 40907507175 at cd5fae7d queued at the read; not waited for, since a request for changes stands whatever CI says.",
+  "important": 0,
+  "minor": 1,
+  "roundOneFindings": "All five fixed and verified in the diff 3785f0d28013..c39e45a371fb: relatedCheckFormOf/relatedCheckModeWords/relatedCheckSearchWords in packages/contracts/src/related-forms.ts read by both related-check.ts and RelatedItems.tsx; staleTime 0 and gcTime 0 with a browser row and its negative control; one RELATED_TITLE_MIN; the decision's details inside its <li> via children; AGENTS.md says which file proves what.",
+  "thermonuclear": "deep-review at c39e45a3: approve; an 84,000-input sweep of old vs new CLI relatedCheckLines/decisionBlockLines found 0 differences wherever `related` is an array, differences only for a null/absent `related` that no server sends (model.go:423, suggestions.go:177,376, and fe31539233c0's suggestions.go). code-quality: three findings; the changelog one fixed by the reviewer, the other two judged not defects.",
   "keyFindings": [
     {
-      "severity": "important",
-      "file": "packages/dispatch/web/src/features/issue/RelatedItems.tsx:98-142,207-235",
-      "description": "RelatedForm's branch order, searchModeWords and longWords are hand copies of envoy-client related-check.ts relatedCheckForm/searchModeWords/searchWords; the plan's reason (the web cannot import envoy-client) misses that both already import @legion/contracts, which holds shared judging logic (claimHolds, itemFromSearch, actorAttribution). Move the form classifier and the two helpers into @legion/contracts and have both surfaces render its result, so the 'same three forms' cannot drift; drop the `?? []` over the required `related`."
-    },
-    {
-      "severity": "important",
-      "file": "packages/dispatch/web/src/features/issue/RelatedItems.tsx:40-44",
-      "description": "The related query inherits staleTime 30 s and gcTime 5 min (main.tsx:30) and nothing invalidates ['related', ...]: a title checked in the last 30 s is answered from cache with no request (an issue filed since, the person's own included, is missing from the list), and up to 5 min later the old answer is shown at once with aria-busy false while it refetches. Ask fresh for every settled title (staleTime 0, gcTime 0, or equivalent)."
-    },
-    {
       "severity": "minor",
-      "file": "packages/dispatch/web/src/features/issue/RelatedItems.tsx:21",
-      "description": "RELATED_TITLE_MIN is defined here and exported, unused, from related-timing.ts:8; keep one."
-    },
-    {
-      "severity": "minor",
-      "file": "packages/dispatch/web/src/features/issue/RelatedItems.tsx:150-166,177",
-      "description": "withAsk exists only so the past decision's 'Answered by' line and ask state can be rendered outside its <li>; a list item that names the decision without who answered it. Render them inside the row (a children slot) and drop the flag."
-    },
-    {
-      "severity": "minor",
-      "file": "packages/dispatch/AGENTS.md:444",
-      "description": "Says e2e/create-issue-related.e2e.ts drives all of it in a real browser; the spec drives the found form, the found-nothing control, the debounce, the display gate and the scroll, while the not-made form, the past decision, Retry and the floors are unit rows. Name which proves what (rewritten with the paragraph the code changes above touch)."
+      "file": "packages/envoy-client/.changes/unreleased/pr2511-Changed-20261029-170000.yaml:4-5",
+      "description": "Said no line a reader sees changes; true for every answer a server sends, not for a `related` that is not an array, which the old `?? []` read as empty. Fixed by the reviewer in a938ffbeb6bf (prose only)."
     }
   ],
   "notDefects": [
-    "code-quality #2 (a third setTimeout debounce beside DeliveryPage's local useSettled): four lines, and the extraction would change DeliveryPage, which this pull request does not touch; not a defect.",
-    "code-quality #3 (three booleans rather than one state value): the four states are exclusive and the tester drove each; a style preference, not a defect."
+    "The `searchQuery?.trim() || relatedCheckSearchWords(text)` expression in both callers: one expression, and the contract documents that each caller chooses what to prefer over the text's words (the CLI's other notMadeLine calls pass no query); the classifier and both helpers round 1 named are shared.",
+    "relatedCheckModeWords exported though only relatedCheckFormOf calls it: a pure helper in a contracts module beside the others that export theirs; no behaviour, and the form already carries `mode`."
   ]
 }
