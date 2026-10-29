@@ -2,7 +2,8 @@
 
 Part of `skill://legion-worker`. Read it the moment your phase needs a tool the worker image may
 not carry — a database client, a linter, a one-off CLI — before you install, download, or vendor
-anything. Every path it cites is in sjawhar/legion.
+anything; before you measure Oh My Pi's binary; and when a test fails in your pod. Every path it
+cites is in sjawhar/legion.
 
 ## The five clients the image already carries
 
@@ -14,8 +15,9 @@ which you have; those need no runner.
 - `psql` — the Dispatch browser suite (`bun run e2e`) resets its database for every spec through
   `packages/dispatch/e2e/psql.ts`, which `seed.ts` calls, and the local stack (`bun run
   dispatch:local`, `packages/dispatch/e2e/local-instance.ts`) refuses to start without `go`,
-  `psql`, `flock` and `openssl` on `PATH`, and without `docker` too unless a `DATABASE_URL` is
-  given. The image carries `go`, `flock` and `openssl`, a `DATABASE_URL` stands in for `docker`,
+  `psql`, `flock`, `openssl` and `python3` on `PATH`, and without `docker` too unless a
+  `DATABASE_URL` is given. The image carries `go`, `flock`, `openssl` and `python3`, a
+  `DATABASE_URL` stands in for `docker`,
   and `psql` was the one a role had no way to supply — so a role whose change owes that suite can
   run it.
 - `redis-cli` — no repository of the project speaks Redis today; it is carried anyway, at about a
@@ -31,7 +33,7 @@ which you have; those need no runner.
 
 ## Why a sixth is an image change, not an install
 
-Your container is an unprivileged user with no writable system prefix: `/usr/local/bin` and `/opt`
+Your role runs as an unprivileged user with no writable system prefix: `/usr/local/bin` and `/opt`
 are read-only, `/home` is read-only too, and `apt-get` cannot take dpkg's lock even to download.
 `$HOME` — `/home/legion`, the one writable directory under that read-only `/home` — is yours to
 write.
@@ -48,7 +50,7 @@ extraction prefix under `$HOME` with `LD_LIBRARY_PATH` set, and `psql` did not �
 extraction prefix is on. What rules such an attempt out is not the unpacking: it is the next
 section's test ("The test: where it lands, and what it leaves resolving"), and an extraction under
 `$HOME` fails that test's first condition whatever you scope it to, because `/home/legion` is the
-container's own filesystem rather than the issue's volume — the placement `roleEnvironment`
+pod's disk rather than the issue's volume — the placement `roleEnvironment`
 (`packages/daemon/internal/runtime/sandbox/manifest.go`) exists to move writes off. The sanctioned
 extraction is the harness's: onto the issue's volume, and exported around its own commands and no
 further (the Dispatch e2e stack, below, is the worked case). For everything the five do not cover,
@@ -68,7 +70,7 @@ three artefacts in this repository are what draw the line — not a claim about 
   `uv` and `uvx`, `bun` with its `bunx` link, and the Go toolchain, and the `toolchain` capability
   row (`packages/daemon/internal/capabilities/capabilities.go`) grants them by name. A runner put
   in the image deliberately and granted by a capability row is not a route around a withheld one.
-- **What the pod configures for those runners to write.** A role container's environment relocates
+- **What the pod configures for those runners to write.** A role's environment relocates
   `UV_CACHE_DIR` and `UV_PYTHON_INSTALL_DIR` (`podkind.go`) and `BUN_INSTALL_CACHE_DIR`, `GOCACHE`
   and `GOMODCACHE` (`roleEnvironment`, `packages/daemon/internal/runtime/sandbox/manifest.go`)
   onto the issue's volume, shared by the issue's roles. Legion provisions the caches a pinned run
@@ -91,8 +93,8 @@ whether through a variable the runtime sets for you there or under a path on tha
 harness names itself — but outside the issue's workspace (`$LEGION_WORKSPACE`, under
 `/legion/workspaces`) and the runtime's own directories (`/legion/repos`, `/legion/feed`); and
 after the command exits nothing else resolves differently. The workspace is excluded because its jj
-working copy tracks every new file under jj's `snapshot.max-new-file-size` (1 MiB in a role
-container), so a root written there is added to the change every role shares, and a larger new
+working copy tracks every new file under jj's `snapshot.max-new-file-size` (1 MiB for a role), so
+a root written there is added to the change every role shares, and a larger new
 file is left untracked, every jj command in the workspace then warning `Refused to snapshot some
 files`. The one write into it that is sanctioned is a repository's own dependency install into
 its ignored directories, below. The variables the runtime sets on the volume, where a tool's own
@@ -100,8 +102,9 @@ cache already goes, are
 `XDG_CACHE_HOME` (`/legion/scratch/cache`), `XDG_DATA_HOME`, `XDG_STATE_HOME`, `TMPDIR`, `GOCACHE`,
 `GOMODCACHE`, `BUN_INSTALL_CACHE_DIR`, `UV_CACHE_DIR` (`/legion/uv/cache`) and
 `UV_PYTHON_INSTALL_DIR` (`/legion/uv/python/<issue>`). (`XDG_CONFIG_HOME` is set too and is not
-one of them: it is the pod's shared in-memory volume.) `$HOME` and `/tmp` are not on the volume:
-both are the container's own filesystem.
+one of them: it is your role's own config home, a copy of the pod's made for your role on the
+pod's disk, which no other role reads.) `$HOME` and `/tmp` are not on the volume:
+both are your role's own, on the pod's disk.
 
 It is the withheld capability when either condition fails — anything that writes into a
 system prefix, and anything that leaves a toolchain, shim or binary which a later launch or
@@ -158,22 +161,25 @@ home — worth reading before an install, for the two things that follow from sh
 `PLAYWRIGHT_BROWSERS_PATH` elsewhere is what costs you: that shared registry, and the lock that
 makes a second role installing at the same time wait rather than race. The condition is for a tool
 whose cache the runtime does not already place — Puppeteer is one, resolving its browser cache to
-`join(homedir(), '.cache', 'puppeteer')` and so to the container's own filesystem whatever
+`join(homedir(), '.cache', 'puppeteer')` and so to your role's own home on the pod's disk whatever
 `XDG_CACHE_HOME` says. For that one, point the tool's own cache variable (`PUPPETEER_CACHE_DIR`
 here) at a directory under one of the paths above yourself, since an unset one leaves the download
 wherever the tool defaults, which is nowhere this runtime chose.
 
 Where it lands is what you pay. Under one of those variables it is on the issue's volume: it
-outlives a role's relaunch in its pod, and every role of the issue shares it — under every one of
-those variables but `XDG_STATE_HOME`, which is `/legion/scratch/state/<role>`, "the one directory
-of the issue's scratch that is the role's own rather than the issue's" (`roleEnvironment`),
-because Oh My Pi names its browser broker's lock from the state root and an abstract socket name
-is one name across every container of the pod — though not the pod itself: the issue's disk is
-the pod's own and is deleted with it, so a later pod of the issue starts without it. Under
-`$HOME` —
-`/home/legion`, which no volume is mounted on — it is the container's own filesystem: one copy per
-role, per pod, gone when the role relaunches, and charged to the container's ephemeral-storage
-limit, which is per role and smaller than the volume. Moving exactly these writes off that
+outlives a role's relaunch in its pod, and every role of the issue is told the same path — under
+every one of those variables but
+`XDG_STATE_HOME`, which is `/legion/scratch/state/<role>`, a directory named for your role
+(`roleEnvironment`) because Oh My Pi names its browser broker's lock from the state root and an
+abstract socket name is one name across every role of the pod, which share its network. It is not
+private: every role of the issue can write it, as it can every path above — though it does not
+outlive the pod: the issue's disk is the pod's own and is deleted with it, so a later pod of the
+issue starts without it. Under
+`$HOME` — `/home/legion`, which no volume is mounted on — it is your role's own home, an overlay
+over the image's whose writes land on the pod's disk (an `emptyDir` every role's home and `/tmp`
+share): one copy per role, per pod, kept across the role's relaunches in that pod and gone when
+the pod is replaced, and charged to the pod's ephemeral-storage limit, which every role of the pod
+shares and which is smaller than the volume. Moving exactly these writes off that
 filesystem is what `roleEnvironment` (`packages/daemon/internal/runtime/sandbox/manifest.go`)
 exists for, after GKE Autopilot evicted issue pods that charged their caches to it — so an install
 under `$HOME` fails the first condition and is outside the sanctioned form, however little else it
@@ -408,3 +414,51 @@ on "The test: where it lands, and what it leaves resolving", which the convenien
 The operator's side of this — why the image carries those five clients rather than anything else,
 the five priced options with their measurements, and what the clients cost the image — is in
 `docs/kubernetes.md`, the subsection "The tools a role's own work needs".
+
+## Before you measure Oh My Pi's binary
+
+Read Oh My Pi's source first, from the fork (`sjawhar/oh-my-pi`) at the tag `.omp-pin` names, not
+from upstream's version tag: the fork's release carries code upstream's does not. `.omp-pin` reads
+`github:sjawhar/oh-my-pi@<version>`, and the git tag adds a `v` in front of that text, so find it
+rather than type it:
+
+```text
+$ git ls-remote --tags https://github.com/sjawhar/oh-my-pi.git 'v<version>'
+```
+
+Search that source by the name of a construct or a setting, never by its value: one value is
+spelled in many places, and the code that sets it may spell it in none. If the module the binary
+names is absent at that tag, the binary is the ground truth: measure it, and say the source did not
+carry it. In a pod the binary (`$LEGION_OMP_PATH`) is the build the worker image was made from,
+and your workspace's `.omp-pin` can name another, so the tag you read may not be the build you
+measure: compare `"$LEGION_OMP_PATH" --version` with the pin first, and say which build each
+figure came from
+(`docs/solutions/testing/a-worker-pods-oh-my-pi-is-the-fleets-pin-not-the-branchs-fetch-the-branchs-build-and-say-which-pin-each-figure-came-from-LEGION-247.md`).
+
+## The tests your pod cannot run
+
+Some tests fail in a Kubernetes issue pod whatever your change, because of the pod, not the branch.
+A tmux pane runs on its host, and none of this holds there. Their proof is CI's run at the head:
+cite that run, and name in your handoff each package the pod could not run. The cases below are
+the known ones, not every one: a failure they do not name is yours to explain.
+
+- **gVisor.** Every pod runs under gVisor, which does not give a test every interface the Linux
+  kernel does. In `packages/envoy` the tests of `cmd/agent-secrets`, `cmd/agent-secrets-helper`
+  and `internal/broker/helper` fail: the helper identifies its peer with `SO_PEERPIDFD`, which
+  gVisor answers `protocol not available` (`PEER_UNIDENTIFIED` in the test output). The
+  terminal-prompt tests of `cmd/agent-secrets` also need terminal job-control ioctls
+  (`inappropriate ioctl for device`), and the `SigCgt` line of `/proc/<pid>/status`, which the
+  pods' gVisor lacked on 2026-10-28; upstream gVisor added that line on 2026-09-24, so a node on a
+  later release may have it. A timing test can fail too: `internal/dispatch/pmdoc`'s linearity
+  tests time a call by the process's CPU time, which gVisor counts in 10 ms ticks, so a call under
+  10 ms can measure 0 s and the test reports `+Inf times`.
+- **No Docker.** The image carries no container runtime, so a test that starts one through
+  testcontainers panics `rootless Docker not found`: in `packages/envoy`, the tests that use
+  `internal/tests3` (`internal/dispatch/files`, which `DISPATCH_TEST_NO_CONTAINERS=1` skips) and
+  `internal/testpg` (unless `DISPATCH_TEST_DATABASE_URL` names a Postgres).
+- **The rest, by package.** For the Dispatch server's suites (a Postgres whose only collation is
+  byte order, which `internal/dispatch/api` refuses, and `@legion/proof-editor` missing until
+  `bun install` has run):
+  `docs/solutions/testing/the-dispatch-servers-go-suites-in-an-issue-pod-run-api-and-docs-alone-with-a-timeout-and-read-the-c-collation-docker-and-bun-failures-as-the-environment-LEGION-752.md`.
+  For the daemon's:
+  `docs/solutions/testing/go-test-in-a-worker-pod-leaves-gowork-to-go-work-and-names-the-packages-the-pod-cannot-run-LEGION-630.md`.

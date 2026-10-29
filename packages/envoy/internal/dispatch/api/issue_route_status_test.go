@@ -39,8 +39,19 @@ func (r *fakeRoster) end(sessionID string) {
 }
 
 // routeStatusServer is a Dispatch server whose listener answers GET /v1/sessions from roster,
-// counting every call, and answers 503 while roster.down is set.
+// counting every call, and answers 503 while roster.down is set. Its roster cache keeps no
+// answer (both TTLs zero), so every read asks the listener and a test that edits roster between
+// two reads sees the edit at the second; cachedRouteStatusServer is the server a deployment runs.
 func routeStatusServer(t *testing.T, roster *fakeRoster) (http.Handler, *store.Store) {
+	t.Helper()
+	handler, database, served := cachedRouteStatusServer(t, roster)
+	served.rosters.ttl, served.rosters.silenceTTL = 0, 0
+	return handler, database
+}
+
+// cachedRouteStatusServer is routeStatusServer keeping the TTLs register sets, and also returns
+// the server, so a test can shorten them before its first read.
+func cachedRouteStatusServer(t *testing.T, roster *fakeRoster) (http.Handler, *store.Store, *server) {
 	t.Helper()
 	listener := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/v1/sessions" {
@@ -61,8 +72,8 @@ func routeStatusServer(t *testing.T, roster *fakeRoster) (http.Handler, *store.S
 		_ = json.NewEncoder(w).Encode(rows)
 	}))
 	t.Cleanup(listener.Close)
-	handler, database, _ := newTestServer(t, testServerOptions{envoyURL: listener.URL})
-	return handler, database
+	handler, database, _, served := newRegisteredTestServer(t, testServerOptions{envoyURL: listener.URL})
+	return handler, database, served
 }
 
 // routedIssue is the part of an issue read (detail or list row) a route-status test asserts on.
@@ -71,6 +82,18 @@ type routedIssue struct {
 	Route       *string `json:"route"`
 	RouteStatus *string `json:"route_status"`
 	RouteHolder *string `json:"route_holder"`
+}
+
+// reachText is a route's reach as the tests compare it, "<route_status> <route_holder>", each
+// "null" when absent.
+func reachText(status, holder *string) string {
+	text := func(value *string) string {
+		if value == nil {
+			return "null"
+		}
+		return *value
+	}
+	return text(status) + " " + text(holder)
 }
 
 func routedIssueKey(t *testing.T, handler http.Handler, route string) string {
@@ -102,27 +125,19 @@ func routedIssueKey(t *testing.T, handler http.Handler, route string) string {
 // the given holder ("" is null).
 func requireReach(t *testing.T, handler http.Handler, key, status, holder string) {
 	t.Helper()
-	text := func(value *string) string {
-		if value == nil {
-			return "null"
-		}
-		return *value
-	}
 	orNull := func(value string) string {
 		if value == "" {
 			return "null"
 		}
 		return value
 	}
-	want := "route_status=" + orNull(status) + " route_holder=" + orNull(holder)
-	reads := func(issue routedIssue) string {
-		return "route_status=" + text(issue.RouteStatus) + " route_holder=" + text(issue.RouteHolder)
-	}
+	want := orNull(status) + " " + orNull(holder)
 	detail := dispatchRequest(t, handler, http.MethodGet, "/api/v1/issues/"+key, nil, "alice")
 	if detail.Code != http.StatusOK {
 		t.Fatalf("read %s: status=%d body=%s", key, detail.Code, detail.Body.String())
 	}
-	if got := reads(decodeBody[routedIssue](t, detail)); got != want {
+	issue := decodeBody[routedIssue](t, detail)
+	if got := reachText(issue.RouteStatus, issue.RouteHolder); got != want {
 		t.Fatalf("GET /issues/%s reads %s, want %s", key, got, want)
 	}
 	list := dispatchRequest(t, handler, http.MethodGet, "/api/v1/issues?project=TEST", nil, "alice")
@@ -133,7 +148,7 @@ func requireReach(t *testing.T, handler http.Handler, key, status, holder string
 		if row.Key != key {
 			continue
 		}
-		if got := reads(row); got != want {
+		if got := reachText(row.RouteStatus, row.RouteHolder); got != want {
 			t.Fatalf("the list row for %s reads %s, want %s", key, got, want)
 		}
 		return
@@ -233,11 +248,7 @@ func TestIssueListResolvesEveryRouteWithOneListenerCall(t *testing.T) {
 		if row.Route == nil {
 			continue
 		}
-		holder := "null"
-		if row.RouteHolder != nil {
-			holder = *row.RouteHolder
-		}
-		counts[*row.Route+" "+*row.RouteStatus+" "+holder]++
+		counts[*row.Route+" "+reachText(row.RouteStatus, row.RouteHolder)]++
 	}
 	want := map[string]int{
 		"role:sre live ses-sre":           66,

@@ -9,11 +9,14 @@
 // Manager) under the person's own cloud sign-in and then ask the broker to reread what they wrote.
 //
 // Every answer and every refusal about a secret names where it came from (source.go): the broker
-// AGENT_SECRETS_URL names, by host, and that broker's store, where its settings give one. This
+// AGENT_SECRETS_URL names, and the kind of that broker's store, where its settings give one. This
 // CLI reads no local secrets file, and another secrets CLI on the same machine can answer the
 // same NAME from a store of its own, so the injection form writes one line to stderr before it
-// execs — the names it injected and their source, never a value — and the status and secret
-// forms print that source beside what they report.
+// execs — the names it injected and their source, never a value — and the status forms print
+// that source beside what they report. None of those lines names the broker's host or the store's
+// account, region or project, since they are quoted wherever an agent's output is; the secret
+// forms, which a person runs under their own cloud sign-in, name the account or project they
+// write to. No form prints a credential AGENT_SECRETS_URL carries (internal/redact).
 //
 //	agent-secrets keygen --out <dir>
 //	agent-secrets enroll --helper --runtime-id <id> --thumbprint <tp> [--session-id <id>]
@@ -31,7 +34,7 @@
 //	agent-secrets whoami [--json]
 //	agent-secrets sign --method M --url U [--enrollment E]
 //	agent-secrets secret list|show|create|set|retag|delete|restore ...
-//	agent-secrets NAME... [--reason TEXT] [--wait DURATION] [--ttl DURATION] -- <command> [args...]
+//	agent-secrets NAME... [--reason TEXT] [--wait DURATION] [--ttl DURATION] [--github-owner LOGIN [--github-repo NAME]... [--github-read-only]] -- <command> [args...]
 //
 // Environment: AGENT_SECRETS_URL (the broker's base URL) and, for every session-authenticated
 // subcommand, either AGENT_SECRETS_KEY_DIR (an agent box or pod's key.pem and enrollment, the
@@ -145,8 +148,8 @@ var commands = []command{
 		"Print this session's enrollment as the broker's JSON, as self --json does."},
 	{"sign", "agent-secrets sign --method M --url U [--enrollment E]",
 		"Print the proof this session would sign for one broker call, without making the call."},
-	{"", "agent-secrets NAME... [--reason TEXT] [--wait DURATION] [--ttl DURATION] -- <command> [args...]",
-		"Request secrets, wait up to --wait (default 30m) for a person to decide, and run <command>\nwith each granted secret in its environment under its NAME; nothing runs unless all are\ngranted. One line on stderr names those secrets and the broker and store they came from,\nnever a value. The grant lasts --ttl, or until this session ends."},
+	{"", "agent-secrets NAME... [--reason TEXT] [--wait DURATION] [--ttl DURATION] [--github-owner LOGIN [--github-repo NAME]... [--github-read-only]] -- <command> [args...]",
+		"Request secrets, wait up to --wait (default 30m) for a person to decide, and run <command>\nwith each granted secret in its environment under its NAME; nothing runs unless all are\ngranted. One line on stderr names those secrets and the broker and store they came from,\nnever a value. The grant lasts --ttl, or until this session ends. --github-owner narrows each\nGitHub App token the grant releases to that account's installation, and --github-repo and\n--github-read-only narrow it further, to those repositories and to read access; a token\nnarrowed to repositories alone keeps every permission the App holds, so a machine that must\nonly read needs --github-read-only too. <command> runs only once the broker answers that it\napplied the narrowing."},
 }
 
 // usageEnvironment closes usage: the variables every form reads, and the exit codes.
@@ -335,6 +338,14 @@ func exitUsage(err error) int {
 	return exitUsageError
 }
 
+// flagGiven reports whether flags' command line gave the flag name, so a flag given an empty or
+// zero value is told apart from one not given.
+func flagGiven(flags *flag.FlagSet, name string) bool {
+	given := false
+	flags.Visit(func(f *flag.Flag) { given = given || f.Name == name })
+	return given
+}
+
 // reportError prints a command's failure as "<prefix>: <err>", except that a helper holding no
 // launcher credential is reported with the one line identity prints for it, whatever the command.
 func reportError(stderr io.Writer, prefix string, err error) {
@@ -363,15 +374,19 @@ func refuse(stderr io.Writer, prefix string, src source, err error) {
 // AGENT_SECRETS_URL named it, and whether the host does not resolve or nothing answered - and
 // takes no source trailer: the broker refused nothing, so a trailer saying it was asked would
 // read as an answer it gave, and the store behind it could not be read either. Likewise, a local
-// helper failure names its socket: no broker request could begin without its signature.
+// helper failure names its socket: no broker request could begin without its signature. A
+// refusal made before any call (refusedBeforeCall) takes no trailer either.
 func refusalText(src source, err error) string {
 	var unreached *unreachableError
 	var helperFailure *helperError
+	var notSent *refusedBeforeCall
 	switch {
 	case errors.As(err, &unreached):
 		return unreached.Error()
 	case errors.As(err, &helperFailure):
 		return helperFailure.Error()
+	case errors.As(err, &notSent):
+		return notSent.Error()
 	default:
 		return err.Error() + src.asked()
 	}
@@ -627,7 +642,7 @@ func renewLoop(ctx context.Context, c *client, signer Signer, enrollmentID strin
 				if code == "" {
 					code = "UNKNOWN"
 				}
-				fmt.Fprintf(stderr, "agent-secrets renew: enrollment %s permanently refused by %s: HTTP %d %s: %s\n", enrollmentID, brokerSource(c.baseURL).brokerAt(), refused.Status, code, refused.Message)
+				fmt.Fprintf(stderr, "agent-secrets renew: enrollment %s permanently refused by %s: HTTP %d %s: %s\n", enrollmentID, brokerSource(c.baseURL), refused.Status, code, refused.Message)
 				return exitRenewRefused
 			}
 			if tokenErr != nil {
@@ -888,15 +903,27 @@ func cmdExec(args []string, stdout, stderr io.Writer) int {
 		return exitUsageError
 	}
 
-	flagArgs, names := splitArgs(before, map[string]bool{"reason": true, "wait": true, "ttl": true})
+	flagArgs, names := splitArgs(before, map[string]bool{"reason": true, "wait": true, "ttl": true, "github-owner": true, "github-repo": true})
 	flags := newFlagSet("", stderr)
 	reason := flags.String("reason", "", "why these secrets are needed")
 	wait := flags.Duration("wait", 30*time.Minute, "how long to wait for a pending request")
 	ttlFlagValue := flags.Duration("ttl", 0, ttlFlag)
+	githubOwner := flags.String("github-owner", "", "narrow each GitHub App token the grant releases to this account's installation")
+	var githubRepos []string
+	flags.Func("github-repo", "narrow the GitHub App token further, to this repository of --github-owner's (repeatable); it keeps the App's permissions unless --github-read-only is given too", func(name string) error {
+		githubRepos = append(githubRepos, name)
+		return nil
+	})
+	githubReadOnly := flags.Bool("github-read-only", false, "narrow the GitHub App token further, to contents: read and metadata: read")
 	if err := flags.Parse(flagArgs); err != nil {
 		return exitUsage(err)
 	}
 	ttl, err := ttlSeconds(flags, *ttlFlagValue)
+	if err != nil {
+		fmt.Fprintf(stderr, "agent-secrets: %v\n", err)
+		return exitUsageError
+	}
+	narrowing, err := githubNarrowing(*githubOwner, flagGiven(flags, "github-owner"), githubRepos, *githubReadOnly)
 	if err != nil {
 		fmt.Fprintf(stderr, "agent-secrets: %v\n", err)
 		return exitUsageError
@@ -967,9 +994,13 @@ func cmdExec(args []string, stdout, stderr io.Writer) int {
 		return 1
 	}
 
-	values, err := c.GrantValues(ctx, signer, *grantID)
+	values, err := c.GrantValues(ctx, signer, *grantID, narrowing)
 	if err != nil {
 		refuse(stderr, "agent-secrets", src(), err)
+		return 1
+	}
+	if err := narrowedAsAsked(narrowing, values.GitHubApp); err != nil {
+		fmt.Fprintf(stderr, "agent-secrets: %v; nothing was run\n", err)
 		return 1
 	}
 	var missing []string
@@ -989,8 +1020,9 @@ func cmdExec(args []string, stdout, stderr io.Writer) int {
 		return 1
 	}
 	// The one line the injected command's own output is preceded by: which names this process
-	// puts in its environment, and the store they came from, never a value. A reader of the
-	// command's log can tell these values from another secrets CLI's for the same names.
+	// puts in its environment, and that this CLI's broker and a store of which kind gave them,
+	// never a value. A reader of the command's log can tell these values from another secrets
+	// CLI's for the same names.
 	fmt.Fprintf(stderr, "agent-secrets: %s from %s\n", strings.Join(names, ", "), src())
 	if err := syscall.Exec(path, command, buildChildEnv(os.Environ(), values.Values)); err != nil {
 		fmt.Fprintf(stderr, "agent-secrets: exec %s: %v\n", command[0], err)

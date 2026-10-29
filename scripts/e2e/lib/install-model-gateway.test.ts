@@ -374,7 +374,11 @@ describe("the model gateway key command", () => {
     mkdirSync(stageBin, { recursive: true });
     writeFileSync(join(stageBin, "docker"), "#!/bin/sh\nexit 0\n", { mode: 0o755 });
     const stages: [string, Record<string, string>][] = [
-      ["stage3-devbox-workflow.sh", { STAGE3_EVIDENCE_DIR: evidence }],
+      // Stage 3 checks its model route before anything else, so the run names one.
+      [
+        "stage3-devbox-workflow.sh",
+        { STAGE3_EVIDENCE_DIR: evidence, LEGION_E2E_MODEL_ROUTE: "gateway" },
+      ],
       [
         "stage3-4b13b-acceptance.sh",
         {
@@ -400,4 +404,12 @@ describe("the model gateway key command", () => {
       expect(`${result.stdout}${stderr}`).not.toContain("may have failed check");
     }
   }, 120_000);
+
+  test("the profile's config.yml raises Oh My Pi's tool_call handler limit to 120 s, so AskGate's review fits inside it", () => {
+    const { run } = install();
+    const config = Bun.YAML.parse(
+      readFileSync(join(run, "omp-home/.omp/profiles/legion-e2e-test/agent/config.yml"), "utf8")
+    ) as { extensionHandlers?: { toolCallTimeoutMs?: unknown } };
+    expect(config.extensionHandlers?.toolCallTimeoutMs).toBe(120_000);
+  });
 });

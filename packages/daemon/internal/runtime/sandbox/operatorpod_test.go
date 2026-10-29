@@ -17,6 +17,26 @@ import (
 	"github.com/sjawhar/legion/daemon/internal/ompsessions"
 )
 
+// operatorRouteFixture is the Go live harnesses' operator pod (deploy/kubernetes/operator-route/
+// pod.yml) with its token audience filled in, as an operator and each live harness run fill in
+// their gateway's: config.ReadPodFile refuses the placeholder itself.
+func operatorRouteFixture(t *testing.T) Pod {
+	t.Helper()
+	raw, err := os.ReadFile(filepath.Join("..", "..", "..", "..", "..", "deploy", "kubernetes", "operator-route", "pod.yml"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	filled := filepath.Join(t.TempDir(), "pod.yml")
+	if err := os.WriteFile(filled, bytes.ReplaceAll(raw, []byte("${MODEL_TOKEN_AUDIENCE}"), []byte("operator-audience")), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	fixture, err := config.ReadPodFile(filled)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return Pod(fixture)
+}
+
 // CheckPod refuses, naming both, an operator variable the runtime, the worker image, or every
 // launch sets, or one that places Oh My Pi's sessions; a volume Legion names; a mount at, under, or
 // above a path Legion mounts, the image owns, a tool runs from, or the state home Legion reserves
@@ -39,6 +59,10 @@ func TestCheckPodRefusesWhatCollidesWithLegionsOwn(t *testing.T) {
 		}
 		return "runtime.kubernetes.pod.volume_mounts[0].mount_path " + path + " overlaps " + owned + ", which Legion mounts in every pod: a mount may be neither at, under, nor above one of Legion's"
 	}
+	throughLinks := func(path, owned, spelled, against string) string {
+		return "runtime.kubernetes.pod.volume_mounts[0].mount_path " + path + " overlaps " + owned + " (spelled " + spelled + " against " + against +
+			", through the worker image's directory links), which Legion mounts in every pod: a mount may be neither at, under, nor above one of Legion's"
+	}
 	overlapsStateHome := func(path string) string {
 		return "runtime.kubernetes.pod.volume_mounts[0].mount_path " + path + " overlaps /home/legion/.local/state, which Legion reserves in the image's home directory: a mount may be neither at, under, nor above Legion's reserved state home"
 	}
@@ -58,21 +82,9 @@ func TestCheckPodRefusesWhatCollidesWithLegionsOwn(t *testing.T) {
 		byBaseline   = "the pod baseline sets (internal/podsafety)"
 		byOperator   = "runtime.kubernetes.pod.env sets"
 		byController = "Legion's runtime sets for the controller it launches, from the project's slack_channels alone"
+		byClaude     = "Legion's runtime sets for a role it launches on Claude Code (worker_backends)"
 	)
-	// The operator route with its token audience filled in, as an operator and each live harness run
-	// fill in their gateway's: config.ReadPodFile refuses the placeholder itself.
-	raw, err := os.ReadFile(filepath.Join("..", "..", "..", "..", "..", "deploy", "kubernetes", "operator-route", "pod.yml"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	filled := filepath.Join(t.TempDir(), "pod.yml")
-	if err := os.WriteFile(filled, bytes.ReplaceAll(raw, []byte("${MODEL_TOKEN_AUDIENCE}"), []byte("operator-audience")), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	fixture, err := config.ReadPodFile(filled)
-	if err != nil {
-		t.Fatal(err)
-	}
+	fixture := operatorRouteFixture(t)
 	for _, tc := range []struct {
 		name string
 		pod  Pod
@@ -81,7 +93,19 @@ func TestCheckPodRefusesWhatCollidesWithLegionsOwn(t *testing.T) {
 	}{
 		{name: "a variable the runtime sets", pod: env("LEGION_TREE", "LEGSMOKE-1"), want: envSets("LEGION_TREE", byRuntime)},
 		{name: "the pod's PATH", pod: env("PATH", "/usr/bin"), want: envSets("PATH", byRuntime)},
+		// Claude Code's three: a worker's configuration directory is placed by the launch, on the
+		// issue's volume, and its background tasks and scheduled prompts are off so nothing of the
+		// harness runs after a turn's last result (mainEnvironment).
+		{name: "a Claude Code worker's configuration directory", pod: env("CLAUDE_CONFIG_DIR", "/etc/operator/claude"),
+			want: envSets("CLAUDE_CONFIG_DIR", byClaude)},
+		{name: "Claude Code's background tasks", pod: env("CLAUDE_CODE_DISABLE_BACKGROUND_TASKS", "0"),
+			want: envSets("CLAUDE_CODE_DISABLE_BACKGROUND_TASKS", byClaude)},
+		{name: "Claude Code's scheduled prompts", pod: env("CLAUDE_CODE_DISABLE_CRON", "0"),
+			want: envSets("CLAUDE_CODE_DISABLE_CRON", byClaude)},
+		// Every other variable of Claude Code's own is the operator's to set, as the model route's are.
+		{name: "an operator's Claude Code setting", pod: env("CLAUDE_CODE_USE_FOUNDRY", "1")},
 		{name: "the image's HOME", pod: env("HOME", "/tmp/elsewhere"), want: envSets("HOME", byImage)},
+		{name: "the AWS CLI CA bundle", pod: env("AWS_CA_BUNDLE", "/tmp/roots.pem"), want: envSets("AWS_CA_BUNDLE", byImage)},
 		{name: "the image's profile", pod: env("OMP_PROFILE", "other"), want: envSets("OMP_PROFILE", byImage)},
 		{name: "the Oh My Pi the probe proves", pod: env("LEGION_OMP_PATH", "/usr/bin/true"), want: envSets("LEGION_OMP_PATH", byImage)},
 		{name: "Oh My Pi's config root", pod: env("PI_CONFIG_DIR", ".elsewhere"), want: envSets("PI_CONFIG_DIR", bySessions)},
@@ -116,10 +140,31 @@ func TestCheckPodRefusesWhatCollidesWithLegionsOwn(t *testing.T) {
 		{name: "a mount under a path Legion mounts", pod: mountAt("/legion/operator"), want: overlaps("/legion/operator", "/legion", false)},
 		{name: "a mount above a path Legion mounts", pod: mountAt("/var/run/legion"), want: overlaps("/var/run/legion", "/var/run/legion/agent-secrets", false)},
 		{name: "a mount at the root", pod: mountAt("/"), want: overlaps("/", "/home/legion/.config", false)},
+		{name: "a mount where an issue pod holds the home's volumes", pod: mountAt("/var/run/legion/home"),
+			want: overlaps("/var/run/legion/home", "/var/run/legion/home", false)},
+		{name: "a mount under where an issue pod holds the home's volumes", pod: mountAt("/var/run/legion/home/operator"),
+			want: overlaps("/var/run/legion/home/operator", "/var/run/legion/home", false)},
+		// The image's /var/run is a link to /run, so the kubelet mounts these where Legion mounts
+		// its own: each is refused, naming Legion's path and the spelling it reached.
+		{name: "a mount at the roles directory spelled through /run", pod: mountAt("/run/legion/roles"),
+			want: throughLinks("/run/legion/roles", "/var/run/legion/roles", "/run/legion/roles", "/run/legion/roles")},
+		{name: "a mount under the home's volumes spelled through /run", pod: mountAt("/run/legion/home/operator"),
+			want: throughLinks("/run/legion/home/operator", "/var/run/legion/home", "/run/legion/home/operator", "/run/legion/home")},
+		{name: "a mount under a role's private directory spelled through /run", pod: mountAt("/run/legion/roles/implementer/private"),
+			want: throughLinks("/run/legion/roles/implementer/private", "/var/run/legion/roles", "/run/legion/roles/implementer/private", "/run/legion/roles")},
+		{name: "a mount above Legion's paths spelled through /run", pod: mountAt("/run/legion"),
+			want: throughLinks("/run/legion", "/var/run/legion/agent-secrets", "/run/legion", "/run/legion/agent-secrets")},
+		{name: "a mount at the image's git spelled through /bin", pod: mountAt("/bin/git"),
+			want: "runtime.kubernetes.pod.volume_mounts[0].mount_path /bin/git overlaps /usr/bin/git (spelled /bin/git against /bin/git, through the worker image's directory links), which the worker image owns: a mount may be neither at, under, nor above one of the image's"},
 		{name: "a mount under a path the image owns", pod: mountAt("/opt/omp/bin"), want: overlaps("/opt/omp/bin", "/opt/omp", true)},
 		{name: "a mount over a database the image owns", pod: mountAt("/home/legion/.omp/profiles/legion/agent/agent.db"),
 			want: overlaps("/home/legion/.omp/profiles/legion/agent/agent.db", "/home/legion/.omp/profiles/legion/agent/agent.db", true)},
-		{name: "a mount above the image's gh and jj", pod: mountAt("/usr/local/bin"), want: overlaps("/usr/local/bin", "/usr/local/bin/gh", true)},
+		// /usr/local/bin holds the bun a Claude role's MCP server runs on (imageOwnedPaths) beside
+		// gh and jj (the Tools), and the refusal names the first of them it finds. Claude Code is
+		// not among them: the image carries none, and a role's install of it sits under /legion.
+		{name: "a mount above the image's bun, gh and jj", pod: mountAt("/usr/local/bin"), want: overlaps("/usr/local/bin", "/usr/local/bin/bun", true)},
+		{name: "a mount at the image's Claude Code pin", pod: mountAt("/opt/legion/claude-code"), want: overlaps("/opt/legion/claude-code", "/opt/legion", true)},
+		{name: "a mount at the image's bun", pod: mountAt("/usr/local/bin/bun"), want: overlaps("/usr/local/bin/bun", "/usr/local/bin/bun", true)},
 		{name: "a mount at the image's jj", pod: mountAt("/usr/local/bin/jj"), want: overlaps("/usr/local/bin/jj", "/usr/local/bin/jj", true)},
 		{name: "a mount at the image's git", pod: mountAt("/usr/bin/git"), want: overlaps("/usr/bin/git", "/usr/bin/git", true)},
 		{name: "a mount at Legion's reserved state home", pod: mountAt("/home/legion/.local/state"), want: overlapsStateHome("/home/legion/.local/state")},
@@ -148,7 +193,7 @@ func TestCheckPodRefusesWhatCollidesWithLegionsOwn(t *testing.T) {
 			want: "provider_keys names FOO from the providers Secret's key NATS_NKEY_SEED, which the pod mounts as the launch secret NATS_NKEY_SEED: the shim would export that secret into Oh My Pi's environment as FOO"},
 		{name: "a provider key reading the session database's URL", keys: map[string]string{"DATABASE_URL": "SESSION_DSN"},
 			want: "provider_keys names DATABASE_URL from the providers Secret's key SESSION_DSN, which holds the session database's URL (runtime.kubernetes.session_dsn_secret): the shim would export that URL into Oh My Pi's environment as DATABASE_URL"},
-		{name: "the live harnesses' operator pod", pod: Pod(fixture), keys: map[string]string{"ANTHROPIC_API_KEY": "anthropic"}},
+		{name: "the live harnesses' operator pod", pod: fixture, keys: map[string]string{"ANTHROPIC_API_KEY": "anthropic"}},
 		{name: "an operator's own overlays, which the baseline composes with",
 			pod: Pod{Env: map[string]string{"PI_CONFIG_FILES": "/etc/operator/overlay.yml"}}},
 		// Dispatch's dashboard as people open it, which the dispatch command links to in place of the

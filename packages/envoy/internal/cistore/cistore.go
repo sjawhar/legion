@@ -3,8 +3,9 @@
 // Each check_run and check_suite webhook folds into a per-commit State record
 // in a JetStream KV bucket via compare-and-swap rather than being published
 // raw; concurrent observations of one commit share one write (see update). A
-// reconcile ticker (see loop.go) emits one checks envelope when a commit is quiet
-// and its recorded CI work is complete. All coordination state lives in
+// summary loop (see loop.go) emits one checks envelope when a commit is quiet
+// and its recorded CI work is complete; it runs a pass only when a cached record
+// changed or one it waits on falls due. All coordination state lives in
 // KV, so aggregation is durable, restart-safe, and correct across listener
 // replicas; the in-memory state is a rebuildable WatchAll read-cache and the
 // queue of observations waiting for their commit's write.
@@ -41,19 +42,25 @@ import (
 // transient errors it outlasts are a NATS reconnect (a request refused while the connection
 // reconnects, since the reconnect buffer is off, and a request that was in flight when the
 // connection went away, given up on at the rewatch that follows the reconnect: kvCall) and a
-// JetStream 503 while a server restarts. It cannot outlast a timeout between rewatches, because
-// every KV call waits up to the JetStream MaxWait (10 s, Open) first, five times this budget, so a
-// call that times out returns after the budget has run out.
+// JetStream 503 while a server restarts.
 // A caller that queues behind a write in progress waits for that write and then its own, so a
-// Record returns within two budgets. The webhook handler records a check_run once for each PR it
-// lists, one after another, so a delivery listing k PRs can take up to 2k budgets, past the
-// listener's 10s HTTP WriteTimeout at three; that needs a write to lose its compare-and-swap for its
-// whole budget, and after combining only the summary loop's transitions and another listener
-// task's batches write the same record. NOTE: this bounds only the retry loop; a KV call can still
-// wait up to the JetStream MaxWait between rewatches (a systemic limit of the legacy nats.go KV
-// API, shared with internal/store).
+// Record can take two budgets, and recordWait holds it to that, every KV call included. The webhook
+// handler records a check_run once for each PR it lists, one after another, under one context for
+// the delivery (webhook.GitHubHandler), so a delivery listing k PRs can take up to 2k budgets
+// unless that context ends first; that needs a write to lose its compare-and-swap for its whole
+// budget, and after combining only the summary loop's transitions and another listener task's
+// batches write the same record. The summary loop's transitions (casState) answer no request and
+// still wait the JetStream MaxWait.
 const recordBudget = 2 * time.Second
 const recordBackoffCap = 50 * time.Millisecond
+
+// recordWait bounds one Record or RecordSuite as a whole: the wait for a write it queues behind and
+// its own write, two budgets (update). nats.go's KV calls take no context and wait up to the
+// JetStream MaxWait (10 s, Open), so each is waited for only until this wait, or the caller's
+// context, ends (kvCall): a silent bus fails the record then rather than holding it, and every
+// caller queued behind it, for the MaxWait. Within that wait a call is still waited for past its
+// write's own budget, so a server that stalls for less and then answers loses nothing.
+const recordWait = 2 * recordBudget
 
 // checkRunID is a GitHub check-run id. Records written before ids were
 // validated at ingress carry it as a decimal string; new records carry a
@@ -167,7 +174,7 @@ func encodeRecord(st *State) ([]byte, error) {
 // figure above the startup floor in the table in
 // docs/solutions/architecture-patterns/envoy-ci-summary.md, the time a stop-then-start compose
 // deploy of a listener with the GitHub webhook route takes from the old listener's SIGTERM to the
-// new one's first tick, so a head that finished during a degraded handover still settles; a wider
+// new one's first pass, so a head that finished during a degraded handover still settles; a wider
 // grace would only make admitted settlements later. That doc holds the derivation, its constants and the dated measurements.
 const handoverGrace = 5 * time.Minute
 
@@ -194,11 +201,6 @@ func due(st State, now int64, debounce time.Duration) bool {
 		settlementReady(st) &&
 		now-st.LastEventAt >= debounce.Milliseconds() &&
 		!legacyBacklog(st, now, debounce)
-}
-
-// heldBack reports whether st would be due but for legacyBacklog.
-func heldBack(st State, now int64, debounce time.Duration) bool {
-	return !st.SettledEmitted && settlementReady(st) && legacyBacklog(st, now, debounce)
 }
 
 // UnmarshalJSON maps the retired resettled marker to the durable fact that
@@ -273,10 +275,20 @@ type Store struct {
 	cache          map[string]State
 	cacheRevisions map[string]uint64
 	// watcher feeds the cache and holds the handle the store writes through. The summary loop
-	// reads only the cache (no KV fallback), so a dead watcher silently stops summaries; Ping
-	// exposes its terminal error to the listener, which re-establishes the watcher or exits for
-	// Docker to restart.
+	// reads only the cache (no KV fallback) and learns of its changes through the change feed, so
+	// a dead watcher silently stops summaries; Ping exposes its terminal error to the listener,
+	// which re-establishes the watcher or exits for Docker to restart.
 	watcher *kvwatch.Watcher
+
+	// The change feed, guarded by mu. feedAttached says a summary loop consumes it
+	// (attachSummary). While it is set, changed holds the keys whose cached record changed since
+	// the loop last took them (takeChanges), and cacheReset says the cache was emptied for a
+	// recreated bucket since then. changedWake carries one wake-up for any number of changes; a
+	// send never blocks.
+	feedAttached bool
+	changed      map[string]struct{}
+	cacheReset   bool
+	changedWake  chan struct{}
 
 	// rewatchMu guards rewatched, which Rewatch closes and replaces. Rewatch runs on every NATS
 	// reconnect and when the listener's self-health rebuilds a watcher, so a write's KV call still
@@ -301,7 +313,10 @@ type openOpts struct {
 // Option configures Open.
 type Option func(*openOpts)
 
-// WithReplicas overrides the KV bucket replica count. Use 1 for single-node test NATS.
+// WithReplicas sets the deployment's replica count (bus.ReplicasEnvVar, default 1) for the CI
+// state bucket: the count a new bucket is created at, and the count an existing bucket with fewer
+// copies is raised to at open (bus.EnsureKeyValue) and by the listener's keeper after it
+// (bus.WithKeptBuckets). It stays there while every program of the deployment carries one count.
 func WithReplicas(n int) Option {
 	return func(o *openOpts) {
 		if n > 0 {
@@ -345,6 +360,7 @@ func Open(nc *nats.Conn, logger *logging.Logger, opts ...Option) (*Store, error)
 		cacheRevisions: map[string]uint64{},
 		combiners:      map[string]*keyCombiner{},
 		rewatched:      make(chan struct{}),
+		changedWake:    make(chan struct{}, 1),
 		logger:         logger,
 	}
 	s.watcher = kvwatch.New("cistore", kv, s.applyWatched, s.resetCache, kvwatch.WithLogger(logger.Slog()))
@@ -374,11 +390,17 @@ func (s *Store) Rewatch(conn *nats.Conn) error {
 	return err
 }
 
-// resetCache empties the cache and its revision fence, for a recreated CI bucket.
+// resetCache empties the cache and its revision fence, for a recreated CI bucket. An attached
+// summary loop drops what it knew of the cache at its next pass (takeChanges).
 func (s *Store) resetCache() {
 	s.mu.Lock()
 	s.cache = map[string]State{}
 	s.cacheRevisions = map[string]uint64{}
+	if s.feedAttached {
+		s.cacheReset = true
+		s.changed = nil
+		s.wakeSummary()
+	}
 	s.mu.Unlock()
 }
 
@@ -421,20 +443,101 @@ func (s *Store) applyWatched(entry nats.KeyValueEntry) {
 	}
 }
 
+// cacheStateLocked caches state for key at revision, unless the cache holds a newer revision. A
+// higher revision, or a key not cached before, is a change for the summary loop; an equal revision
+// (a Rewatch replay, or the watcher delivering a write casState already cached) is not.
 func (s *Store) cacheStateLocked(key string, state State, revision uint64) {
-	if revision < s.cacheRevisions[key] {
+	cachedRevision := s.cacheRevisions[key]
+	if revision < cachedRevision {
 		return
 	}
+	_, wasCached := s.cache[key]
 	s.cache[key] = state
 	s.cacheRevisions[key] = revision
+	if revision > cachedRevision || !wasCached {
+		s.markChangedLocked(key)
+	}
 }
 
+// evictCachedLocked removes key from the cache at revision, unless the cache holds a newer
+// revision. Removing a cached record is a change for the summary loop.
 func (s *Store) evictCachedLocked(key string, revision uint64) {
 	if revision < s.cacheRevisions[key] {
 		return
 	}
+	_, wasCached := s.cache[key]
 	delete(s.cache, key)
 	s.cacheRevisions[key] = revision
+	if wasCached {
+		s.markChangedLocked(key)
+	}
+}
+
+// markChangedLocked adds key to the change feed and wakes the summary loop, when one is attached.
+func (s *Store) markChangedLocked(key string) {
+	if !s.feedAttached {
+		return
+	}
+	if s.changed == nil {
+		s.changed = map[string]struct{}{}
+	}
+	s.changed[key] = struct{}{}
+	s.wakeSummary()
+}
+
+// wakeSummary sends the summary loop one wake-up, unless one is already waiting.
+func (s *Store) wakeSummary() {
+	select {
+	case s.changedWake <- struct{}{}:
+	default:
+	}
+}
+
+// attachSummary starts the change feed for a summary loop and returns the channel that wakes it.
+// Every record the cache holds counts as changed, so the loop's first pass looks at each once. A
+// store feeds one summary loop at a time: a second attach panics, since two loops would split the
+// feed and leave records unsettled.
+func (s *Store) attachSummary() <-chan struct{} {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.feedAttached {
+		panic("cistore: a second summary loop attached to one store")
+	}
+	s.feedAttached = true
+	s.changed = make(map[string]struct{}, len(s.cache))
+	for key := range s.cache {
+		s.changed[key] = struct{}{}
+	}
+	s.wakeSummary()
+	return s.changedWake
+}
+
+// detachSummary stops the change feed; a later attachSummary starts it again from the whole cache.
+func (s *Store) detachSummary() {
+	s.mu.Lock()
+	s.feedAttached = false
+	s.changed = nil
+	s.cacheReset = false
+	s.mu.Unlock()
+}
+
+// takeChanges returns the keys whose cached record changed since the last call, and whether the
+// cache was emptied for a recreated bucket since then, and clears both. The caller owns the map
+// it returns.
+func (s *Store) takeChanges() (keys map[string]struct{}, reset bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	keys, s.changed = s.changed, nil
+	reset, s.cacheReset = s.cacheReset, false
+	return keys, reset
+}
+
+// cachedState returns key's cached record, and whether the cache holds one.
+func (s *Store) cachedState(key string) (State, bool) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	st, ok := s.cache[key]
+	return st, ok
 }
 
 // WatchErr is the cache watcher's terminal error, or nil while it runs.
@@ -459,13 +562,14 @@ func (s *Store) WaitForCacheReady(ctx context.Context) error {
 	return s.watcher.WaitReady(ctx)
 }
 
-// Record folds one check observation into the per-commit state via CAS.
-func (s *Store) Record(observation contracts.CIObservation) error {
-	return s.record(observation)
+// Record folds one check observation into the per-commit state via CAS, waiting for it no longer
+// than ctx allows (update).
+func (s *Store) Record(ctx context.Context, observation contracts.CIObservation) error {
+	return s.record(ctx, observation)
 }
 
-func (s *Store) record(observation contracts.CIObservation) error {
-	return s.update(observation.Owner, observation.Repo, observation.Number, observation.SHA, func(st *State) bool {
+func (s *Store) record(ctx context.Context, observation contracts.CIObservation) error {
+	return s.update(ctx, observation.Owner, observation.Repo, observation.Number, observation.SHA, func(st *State) bool {
 		if st.Checks == nil {
 			st.Checks = map[string]Check{}
 		}
@@ -494,9 +598,10 @@ func (s *Store) record(observation contracts.CIObservation) error {
 	})
 }
 
-// RecordSuite folds a check_suite observation into the per-commit state.
-func (s *Store) RecordSuite(observation contracts.CIObservation) error {
-	return s.update(observation.Owner, observation.Repo, observation.Number, observation.SHA, func(st *State) bool {
+// RecordSuite folds a check_suite observation into the per-commit state, waiting for it no longer
+// than ctx allows (update).
+func (s *Store) RecordSuite(ctx context.Context, observation contracts.CIObservation) error {
+	return s.update(ctx, observation.Owner, observation.Repo, observation.Number, observation.SHA, func(st *State) bool {
 		if st.Suites == nil {
 			st.Suites = map[string]Suite{}
 		}
@@ -629,21 +734,6 @@ func (s *Store) casState(key string, apply func(st *State) (ok bool, err error))
 	}
 }
 
-// List returns a snapshot copy of the current cached states.
-func (s *Store) List() []State {
-	s.mu.RLock()
-	defer s.mu.RUnlock()
-	out := make([]State, 0, len(s.cache))
-	for _, state := range s.cache {
-		out = append(out, state)
-	}
-	sort.Slice(out, func(i, j int) bool {
-		return Key(out[i].Owner, out[i].Repo, out[i].Number, out[i].SHA) <
-			Key(out[j].Owner, out[j].Repo, out[j].Number, out[j].SHA)
-	})
-	return out
-}
-
 // ClaimSettlement atomically acquires the right to publish a ready state
 // generation without changing that generation, after re-reading the durable
 // state. It applies due to the durable record, not the cache snapshot.
@@ -736,7 +826,7 @@ func (s *Store) MarkSettled(key string, generation uint64) (bool, error) {
 }
 
 // markOverflowed marks key's record overflowed, so it never settles: NATS refused its settlement,
-// which it would refuse on every tick.
+// which it would refuse at every attempt.
 func (s *Store) markOverflowed(key string) error {
 	_, _, err := s.casState(key, func(state *State) (bool, error) {
 		if state.Overflowed {

@@ -174,6 +174,101 @@ func TestAVerifiedAccountSpendsItsOwnBucketToo(t *testing.T) {
 	}
 }
 
+// TestATokenLoginTheBrokerCouldNotCompleteSpendsNoAccountBucket: while the broker's database is
+// away, a verified token login fails with a 5xx the broker decided nothing by, and the daemon
+// retries it every few seconds so it logs in again soon after the database is back. Such a login
+// must not spend its account's bucket: if it did, the bucket would be empty a few retries into
+// the outage, and the daemon's first login after the database is back would be refused 429 and
+// wait out its long schedule, up to a minute, instead of being served.
+func TestATokenLoginTheBrokerCouldNotCompleteSpendsNoAccountBucket(t *testing.T) {
+	ts := newTestServerWith(t, func(d *api.Deps) {
+		d.LauncherLimits = &api.LauncherLimits{
+			PerAddress: ratelimit.Limit{Every: time.Hour, Burst: 100},
+			PerLogin:   ratelimit.Limit{Every: time.Hour, Burst: 2},
+		}
+	})
+	ts.Store.Close()
+	for i := range 4 {
+		status, body := ts.tokenLogin(t, ts.accountToken(t, daemonAccount, "", time.Hour), ts.daemonRequest(t, newSigningKey(t)))
+		if status < 500 || status > 599 {
+			t.Fatalf("the daemon's login %d with the database away = %d %s, want a 5xx: a login the broker could not complete spends none of its account's bucket of 2", i, status, body)
+		}
+	}
+}
+
+// TestATokenLoginTheBrokerCouldNotCompleteSpendsNoAddressBucket: a verified token login the
+// broker could not complete, with the database away, gives back its source address's request as
+// well as its account's, so the daemon retrying through an outage does not drain its address's
+// bucket either, and its first login once the database is back is not refused 429 by it.
+func TestATokenLoginTheBrokerCouldNotCompleteSpendsNoAddressBucket(t *testing.T) {
+	ts := newTestServerWith(t, func(d *api.Deps) {
+		d.LauncherLimits = &api.LauncherLimits{
+			PerAddress: ratelimit.Limit{Every: time.Hour, Burst: 2},
+			PerLogin:   ratelimit.Limit{Every: time.Hour, Burst: 100},
+		}
+	})
+	ts.Store.Close()
+	for i := range 4 {
+		status, body := ts.tokenLogin(t, ts.accountToken(t, daemonAccount, "", time.Hour), ts.daemonRequest(t, newSigningKey(t)))
+		if status < 500 || status > 599 {
+			t.Fatalf("the daemon's login %d with the database away = %d %s, want a 5xx: a login the broker could not complete spends none of its address's bucket of 2", i, status, body)
+		}
+	}
+}
+
+// TestATokenThatDoesNotVerifySpendsItsAddressBucketWhileTheDatabaseIsAway: the give-back a login
+// the broker could not complete earns applies only once its token has verified. A token that does
+// not verify keeps its address's request spent whatever it is answered, even while the database
+// is away and verified logins are refunded, since that bucket is what guards the verifier's
+// fetches of the issuer's keys: a key-fetch or other failure answered 5xx after a failed
+// verification must never refund a forged token's attempt, or a flood of forged tokens would
+// cost the broker a fetch each without limit. Here tokens claiming the daemon's account, signed
+// by a key the issuer never published, are refused 401 until the address's bucket of 2 is empty,
+// then 429.
+func TestATokenThatDoesNotVerifySpendsItsAddressBucketWhileTheDatabaseIsAway(t *testing.T) {
+	ts := newTestServerWith(t, func(d *api.Deps) {
+		d.LauncherLimits = &api.LauncherLimits{
+			PerAddress: ratelimit.Limit{Every: time.Hour, Burst: 2},
+			PerLogin:   ratelimit.Limit{Every: time.Hour, Burst: 100},
+		}
+	})
+	ts.Store.Close()
+	forger := oidctest.NewKey(t, "forger")
+	for i, want := range []int{http.StatusUnauthorized, http.StatusUnauthorized, http.StatusTooManyRequests} {
+		claims := ts.podIssuer.Claims(daemonAccount, podAudience)
+		status, body := ts.tokenLogin(t, ts.podIssuer.Mint(t, forger, claims), ts.daemonRequest(t, newSigningKey(t)))
+		if status != want {
+			t.Fatalf("forged token claiming %s with the database away, attempt %d = %d %s, want %d", daemonAccount, i, status, body, want)
+		}
+	}
+}
+
+// TestARefusedTokenLoginStillSpendsItsAccountBucket: a verified token login whose request the
+// broker refuses, here one naming a service the account does not log in as (403
+// ACCOUNT_NOT_LISTED), keeps its account's login spent, since the limit exists to slow guessing:
+// the account's sixth such login inside its bucket of five is refused 429.
+func TestARefusedTokenLoginStillSpendsItsAccountBucket(t *testing.T) {
+	ts := newTestServerWith(t, func(d *api.Deps) {
+		d.LauncherLimits = &api.LauncherLimits{
+			PerAddress: ratelimit.Limit{Every: time.Hour, Burst: 100},
+			PerLogin:   ratelimit.Limit{Every: time.Hour, Burst: 5},
+		}
+	})
+	for i := range 5 {
+		request := signMachineLoginRequest(t, newSigningKey(t), ts.URL, "", "legion-daemon-test-7d9f", "other-service")
+		status, body := ts.tokenLogin(t, ts.accountToken(t, daemonAccount, "", time.Hour), request)
+		if status != http.StatusForbidden || decode[wireError](t, body).Code != "ACCOUNT_NOT_LISTED" {
+			t.Fatalf("the daemon's login %d naming another service = %d %s, want 403 ACCOUNT_NOT_LISTED", i, status, body)
+		}
+	}
+	request := signMachineLoginRequest(t, newSigningKey(t), ts.URL, "", "legion-daemon-test-7d9f", "other-service")
+	status, body := ts.tokenLogin(t, ts.accountToken(t, daemonAccount, "", time.Hour), request)
+	if refusal := decode[wireError](t, body); status != http.StatusTooManyRequests || refusal.Code != "RATE_LIMITED" ||
+		!strings.Contains(refusal.Error, "too many token logins for this ServiceAccount") {
+		t.Fatalf("the daemon's sixth refused login = %d %s, want 429 RATE_LIMITED: too many token logins for this ServiceAccount", status, body)
+	}
+}
+
 // TestARestartLogsInAgainAndKeepsItsOneCredential is a daemon's restart: a second token login for
 // the same account, with a new key and a fresh token, answers the same credential, moved to the new
 // key, so no person is asked and the pods the first boot enrolled stay the daemon's own. The old

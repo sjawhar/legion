@@ -16,7 +16,13 @@ import {
   useState,
 } from "react";
 
-import { ApiError, type ArtifactOwner, api, apiErrorMessage } from "../../api/client";
+import {
+  ApiError,
+  type ArtifactOwner,
+  api,
+  apiErrorMessage,
+  type WriteBounds,
+} from "../../api/client";
 import type { Agent, AskOption, AskUrgency } from "../../api/types";
 import { Chip } from "../../components/Chip";
 import { QueryError } from "../../components/QueryError";
@@ -58,8 +64,11 @@ import {
 } from "../../theme/classes";
 import { appendToDraft, DraftUploadStatus, useDraftUpload } from "../artifacts/ArtifactUpload";
 import { ASK_URGENCIES_ASCENDING, URGENCY_LABELS } from "../inbox/ask-urgency";
+import { AgentName, type AgentText, useAgentText } from "../refs/AgentName";
 import { ReferencePicker } from "../refs/ReferencePicker";
 import { composerReferences } from "../refs/routes";
+import { SendStoppedError } from "../writes/keyed-write";
+import { StopTrying } from "../writes/StopTrying";
 import type {
   AcceptedMention,
   ComposerAnchor,
@@ -68,15 +77,18 @@ import type {
   ReplyTarget,
 } from "./composer-model";
 import { MODE_LABELS, plainDelivery } from "./delivery";
+import type { HeldSend } from "./held-sends";
 import { ReplyQuote } from "./ReplyQuote";
 import {
   DELIVERY_COMMANDS,
   type DeliveryPlan,
   deliveryPlan,
+  KEYED_SEND_LATE_TEXT,
   mentionText,
-  SEND_DEADLINE_MS,
+  requestFor,
   type SentRequest,
   survivingMentions,
+  unedited,
 } from "./send-request";
 import { useAgents } from "./useAgents";
 import { useComposerSend } from "./useComposerSend";
@@ -96,8 +108,18 @@ interface Draft {
 
 interface MentionOption {
   readonly capabilities: readonly string[];
+  /** Where and when: the session's directory and when it was last seen. */
   readonly detail: string;
+  /** The name of the session the option is, or of the one holding its role, as `useAgentText`
+   *  gives it: the filter matches it, and a role option's detail tooltip names it. */
+  readonly holder: string;
+  /** The session the option is, or, for a role, the session holding it: `AgentName` draws it. */
+  readonly sessionId: string;
+  /** That session's title as the agent list gave it: its name when the registry cache has none. */
+  readonly sessionTitle: string;
   readonly target: string;
+  /** The text the mention inserts (`@Title`) and the option's accessible name: a role's name, or
+   *  the session's name as `useAgentText` gives it. */
   readonly title: string;
 }
 
@@ -106,6 +128,11 @@ interface AskOptionDraft {
   id: number;
   label: string;
 }
+
+/** How long after the last keystroke what the reader wrote over a refusal is written back to the
+ *  held send, which is what a reload restores (`write-storage.ts`). Short enough that a reader who
+ *  stops typing and reloads keeps their words, long enough that a burst of typing writes once. */
+const KEEP_DRAFT_MS = 300;
 
 let nextAskOptionId = 0;
 
@@ -126,7 +153,10 @@ function submittedAskOptions(options: readonly AskOptionDraft[]): AskOption[] {
   return submitted;
 }
 
-function roleOptions(agents: readonly Agent[]): MentionOption[] {
+function roleOptions(
+  agents: readonly Agent[],
+  text: Pick<AgentText, "sessionText">
+): MentionOption[] {
   const byRole = new Map<string, Agent>();
   for (const agent of agents) {
     for (const role of agent.roles) byRole.set(role, agent);
@@ -143,15 +173,21 @@ function roleOptions(agents: readonly Agent[]): MentionOption[] {
     })
     .map(([role, agent]) => ({
       capabilities: agent.capabilities,
-      detail: `${agent.title} · ${agent.dir} · ${new Date(agent.last_seen).toLocaleString()}`,
+      detail: `${agent.dir} · ${new Date(agent.last_seen).toLocaleString()}`,
+      holder: text.sessionText(agent.session_id, agent.title),
+      sessionId: agent.session_id,
+      sessionTitle: agent.title,
       target: `role:${role}`,
       title: role,
     }));
 }
 
-export function mentionOptions(agents: readonly Agent[]): MentionOption[] {
+export function mentionOptions(
+  agents: readonly Agent[],
+  text: Pick<AgentText, "sessionText">
+): MentionOption[] {
   return [
-    ...roleOptions(agents),
+    ...roleOptions(agents, text),
     ...[...agents]
       .sort(
         (left, right) => right.last_seen - left.last_seen || left.title.localeCompare(right.title)
@@ -159,8 +195,11 @@ export function mentionOptions(agents: readonly Agent[]): MentionOption[] {
       .map((agent) => ({
         capabilities: agent.capabilities,
         detail: `${agent.dir} · ${new Date(agent.last_seen).toLocaleString()}`,
+        holder: text.sessionText(agent.session_id, agent.title),
+        sessionId: agent.session_id,
+        sessionTitle: agent.title,
         target: `session:${agent.session_id}`,
-        title: agent.title === "" ? agent.session_id : agent.title,
+        title: text.sessionText(agent.session_id, agent.title),
       })),
   ];
 }
@@ -398,7 +437,7 @@ interface MentionComposerProps {
   readonly onSent: () => void;
   readonly owner: ComposerOwner;
   readonly replyTo?: ReplyTarget | null;
-  readonly saveEdit?: (id: string, body: string) => Promise<unknown>;
+  readonly saveEdit?: (id: string, body: string, bounds: WriteBounds) => Promise<unknown>;
   /** Shows the Comment / Suggest / Ask switch and hands each pick to the host, which answers
    *  through `kind` - a selected document mark is the only surface where the kind can change, and
    *  its mark has to change with it (the margin retypes it) - or returns, in the reader's words,
@@ -502,15 +541,18 @@ export function MentionComposer({
     autocompleteOpen
   );
   const agents = suppliedAgents ?? live.agents;
-  const options = useMemo(() => mentionOptions(agents), [agents]);
+  const text = useAgentText();
+  const options = useMemo(() => mentionOptions(agents, text), [agents, text]);
   const filteredOptions = useMemo(() => {
     if (autocomplete === undefined) return [];
     const query = autocomplete.query.toLocaleLowerCase();
+    // A role option matches its holder's name too, which its detail line shows.
     return options.filter(
       (option) =>
         query === "" ||
         option.target.toLocaleLowerCase().includes(query) ||
         option.title.toLocaleLowerCase().includes(query) ||
+        option.holder.toLocaleLowerCase().includes(query) ||
         option.detail.toLocaleLowerCase().includes(query)
     );
   }, [autocomplete, options]);
@@ -614,7 +656,7 @@ export function MentionComposer({
     onSent();
     if (!inline && sentEdit === undefined) onClose();
   };
-  const { late, refusal, sending } = outgoing;
+  const { refusal, sending } = outgoing;
   // Closed or finishing, with no send out and no refusal to show: nothing of this composer is on
   // screen.
   const dormant = (closed || finishing) && !sending && refusal === undefined;
@@ -629,8 +671,11 @@ export function MentionComposer({
   // The Escape listener below reads it as it stands, so it is not re-bound each render for it.
   const cancelReplyNow = useRef(cancelReply);
   cancelReplyNow.current = cancelReply;
-  // What the reader wrote over a refusal goes back to the held send as this composer unmounts
-  // (`keep`, which a send still out ignores), so the composer that mounts next shows it.
+  // What the reader wrote over a refusal goes back to the held send (`keep`, which a send still
+  // out ignores), so the composer that mounts next shows it - and so a reload does: a refusal's
+  // draft is the only copy of that message, and the entry it is kept in is what survives the
+  // page (`write-storage.ts`). It is written as this composer unmounts, a short wait after each
+  // keystroke, and as the page goes, which no unmount follows.
   const keepDraft = useRef(() => {});
   keepDraft.current = () =>
     outgoing.keep({
@@ -638,6 +683,16 @@ export function MentionComposer({
       draft: { body, mentions, replacement },
     });
   useEffect(() => () => keepDraft.current(), []);
+  // biome-ignore lint/correctness/useExhaustiveDependencies: the draft's own fields are the trigger; the write reads them as they stand
+  useEffect(() => {
+    const write = window.setTimeout(() => keepDraft.current(), KEEP_DRAFT_MS);
+    return () => window.clearTimeout(write);
+  }, [askOptions, body, mentions, multiple, replacement, urgency]);
+  useEffect(() => {
+    const keepNow = () => keepDraft.current();
+    window.addEventListener("pagehide", keepNow);
+    return () => window.removeEventListener("pagehide", keepNow);
+  }, []);
   useEffect(() => {
     const form = formRef.current;
     if (form === null || dormant) return;
@@ -776,25 +831,36 @@ export function MentionComposer({
     );
     setConfirmingDiscard(false);
   };
-  /** The send as it stands, for `sendRequest`: the fields' own text, since a keystroke in Send's
-   *  task may not have rendered yet, and every prop and setting that addresses or shapes it. */
-  const sentRequest = (): SentRequest => ({
+  /** The send as the composer's own state addresses and shapes it: what Send puts on the wire,
+   *  and what a held send is compared with to tell an untouched draft from an edited one. */
+  const composedRequest = (): Omit<SentRequest, "sendKey"> => ({
     anchor,
     ask: { multiple, options: submittedAskOptions(askOptions), urgency },
-    draft: {
-      body: textarea.current?.value ?? body,
-      mentions,
-      replacement: replacementTextarea.current?.value ?? replacement,
-    },
+    draft: { body, mentions, replacement },
     edit:
       edit === undefined
         ? undefined
-        : { id: edit.id, save: saveEdit ?? ((id, text) => api.editComment(id, { body: text })) },
+        : {
+            id: edit.id,
+            save: saveEdit ?? ((id, text, bounds) => api.editComment(id, { body: text }, bounds)),
+          },
     kind,
     owner,
     plainDelivery: plainMode,
     replyTo,
   });
+  /** The send as it stands, for `sendRequest`: the fields' own text, since a keystroke in Send's
+   *  task may not have rendered yet, and every prop and setting that addresses or shapes it - or,
+   *  for a Retry, what `requestFor` makes of the refused send it replaces. */
+  const sentRequest = (refused: HeldSend | undefined): SentRequest =>
+    requestFor(refused?.request, refused?.status === "refused" ? refused.refusal : undefined, {
+      ...composedRequest(),
+      draft: {
+        body: textarea.current?.value ?? body,
+        mentions,
+        replacement: replacementTextarea.current?.value ?? replacement,
+      },
+    });
   const activeMentions = useMemo(() => survivingMentions(body, mentions), [body, mentions]);
   const effectiveTargets: readonly string[] =
     owner.kind === "session"
@@ -809,20 +875,37 @@ export function MentionComposer({
   // What a message with no command goes in: Send, or the mode every addressed session takes
   // when one of them refuses Send - an Aside to a Claude Code session.
   const plainMode = plainDelivery(targetOptions.map((option) => option.capabilities));
-  // Whether this draft goes in that plain mode: a reply to a thread keeps the thread's mode.
+  // The mode a send this composer holds - out, or refused - went in, where pressing Send or Retry
+  // now would send that very request again: the live view picks a mode outright, and the message
+  // goes in it, body and all, whichever surface shows it. Every warning below is about what
+  // pressing Send sends, so it reads that mode rather than this composer's own; the first edit
+  // makes the message this composer's, in the mode its own targets advertise.
+  const held = outgoing.held?.request;
+  const heldPicked =
+    held?.pickedDelivery !== undefined && unedited(held, composedRequest())
+      ? held.pickedDelivery
+      : undefined;
+  // Whether this draft goes in that plain mode: a reply to a thread keeps the thread's mode, and
+  // a picked mode is neither.
   const sendsPlain =
-    owner.kind === "session"
+    heldPicked === undefined &&
+    (owner.kind === "session"
       ? replyTo?.thread?.delivery === undefined
-      : replyTo?.parentKind !== "message" && activeMentions.length > 0;
+      : replyTo?.parentKind !== "message" && activeMentions.length > 0);
   const inheritedDelivery =
-    owner.kind === "session"
+    heldPicked ??
+    (owner.kind === "session"
       ? (replyTo?.thread?.delivery ?? plainMode)
       : replyTo?.parentKind === "message"
         ? replyTo.thread?.delivery
         : activeMentions.length > 0
           ? plainMode
-          : undefined;
-  const outbound = deliveryPlan(body, inheritedDelivery);
+          : undefined);
+  // A picked mode sends the body as written: no `/btw` or `/aside` at its start is a command.
+  const outbound =
+    heldPicked === undefined
+      ? deliveryPlan(body, inheritedDelivery)
+      : { body, delivery: heldPicked };
   // A closed owner takes no send: the composer is only still here for a send of its own that is
   // out, or its refusal, and Send says why it cannot go.
   const submitReason = closed
@@ -835,11 +918,11 @@ export function MentionComposer({
    *  control that could change or discard the draft; the held send covers that hold in this task
    *  before React can disable the fieldset. */
   const send = () =>
-    outgoing.send(() => {
+    outgoing.send((refused) => {
       setConfirmingDiscard(false);
       setAutocomplete(undefined);
       setReferencePickerOpen(false);
-      return sentRequest();
+      return sentRequest(refused);
     });
   /** The hold on the draft from Send's own task on, before React can disable the fieldset: the
    *  fieldset's capture stops every key, click, input and change bound for a control in it - so
@@ -931,7 +1014,7 @@ export function MentionComposer({
       {replyTo === null ? null : (
         <div className="flex items-center gap-1">
           <ReplyQuote
-            author={replyTo.author}
+            author={replyTo.actor}
             className="min-w-0 flex-1"
             excerpt={replyTo.excerpt}
             to={replyTo.to}
@@ -1084,30 +1167,52 @@ export function MentionComposer({
           className={`max-h-52 overflow-y-auto rounded-lg border p-1 ${surfaceRecessedBg}`}
           role="listbox"
         >
-          {filteredOptions.map((option) => (
-            // Below `xl` every button is `inline-flex` with centred items (styles.css's touch
-            // rule, unlayered, so it beats `block`): the title and detail stack explicitly and
-            // each stretches to the row's width.
-            <button
-              aria-label={option.title}
-              className={`flex min-h-11 w-full flex-col rounded-lg px-3 py-2 text-left text-sm ${surfaceMutedHoverBg}`}
-              key={option.target}
-              onMouseDown={(event) => event.preventDefault()}
-              onClick={() => addMention(option)}
-              role="option"
-              type="button"
-            >
-              <span className={`self-stretch font-medium ${textPrimaryOnSurface}`}>
-                {option.title}
-              </span>
-              <TruncatedText
-                className={`self-stretch text-xs ${textMutedOnSurface}`}
-                title={option.detail}
+          {filteredOptions.map((option) => {
+            const isRole = option.target.startsWith("role:");
+            // Each suggestion is one option that inserts the mention; a listbox owns only
+            // options, so the agent in it is drawn by `AgentName` without a link (exclusion E2):
+            // a session option's name, and a role option's holder.
+            const agent = (
+              <AgentName
+                kind="static"
+                sessionId={option.sessionId}
+                storedTitle={option.sessionTitle}
+              />
+            );
+            return (
+              // Below `xl` every button is `inline-flex` with centred items (styles.css's touch
+              // rule, unlayered, so it beats `block`): the title and detail stack explicitly and
+              // each stretches to the row's width.
+              // A session option's full id is its tooltip and accessible description: its name
+              // can be the short form `session:<8>…`, which two sessions may share.
+              <button
+                aria-label={option.title}
+                className={`flex min-h-11 w-full flex-col rounded-lg px-3 py-2 text-left text-sm ${surfaceMutedHoverBg}`}
+                key={option.target}
+                onMouseDown={(event) => event.preventDefault()}
+                onClick={() => addMention(option)}
+                role="option"
+                title={isRole ? undefined : option.sessionId}
+                type="button"
               >
-                {option.detail}
-              </TruncatedText>
-            </button>
-          ))}
+                <span className={`self-stretch font-medium ${textPrimaryOnSurface}`}>
+                  {isRole ? option.title : agent}
+                </span>
+                <TruncatedText
+                  className={`self-stretch text-xs ${textMutedOnSurface}`}
+                  title={isRole ? `${option.holder} · ${option.detail}` : option.detail}
+                >
+                  {isRole ? (
+                    <>
+                      {agent} · {option.detail}
+                    </>
+                  ) : (
+                    option.detail
+                  )}
+                </TruncatedText>
+              </button>
+            );
+          })}
           {filteredOptions.length === 0 ? (
             <p className={`px-3 py-2 text-sm ${textMutedOnSurface}`}>No live agents match.</p>
           ) : null}
@@ -1262,20 +1367,14 @@ export function MentionComposer({
         </>
       )}
       {uploadOwner === undefined ? null : <DraftUploadStatus upload={upload} />}
-      {/* Past its deadline a send is still the server's: no Retry, which would post it twice. */}
-      {late ? (
-        <p className={`text-sm ${textMutedOnSurfaceMuted}`} role="status">
-          Still sending — the server has not answered in {SEND_DEADLINE_MS / 1000} seconds. The
-          draft stays here until it does.
-        </p>
-      ) : null}
       {refusal === undefined ? null : (
         <div className="flex flex-wrap items-center gap-3">
           <QueryError
             message={
-              refusal instanceof ApiError &&
-              refusal.status === 409 &&
-              refusal.code === "ANCHOR_MISSING"
+              (refusal instanceof ApiError &&
+                refusal.status === 409 &&
+                refusal.code === "ANCHOR_MISSING") ||
+              refusal instanceof SendStoppedError
                 ? refusal.message
                 : `Couldn't send — ${apiErrorMessage(refusal, "network error")}`
             }
@@ -1284,8 +1383,8 @@ export function MentionComposer({
             retrying={sending}
           />
           {/* A closed owner takes no Retry, so the refusal's own way out is to drop the draft it
-              handed back, once the reader has it. */}
-          {closed ? (
+              handed back, once the reader has it; a send the reader stopped offers both ways. */}
+          {closed || refusal instanceof SendStoppedError ? (
             <button
               className={`text-sm font-medium underline ${dangerText}`}
               onClick={discard}
@@ -1315,20 +1414,34 @@ export function MentionComposer({
   // itself only for a send of its own that is out or that send's refusal; otherwise it renders
   // nothing, its frame with it.
   if (dormant) return null;
+  // Past its deadline a send is still the server's: no Retry, which would post it twice. It is
+  // still being tried under its key, so it says so and offers Stop trying, which sits outside the
+  // held fieldset, the one control a send that is out leaves the reader.
+  const heldLate = outgoing.held?.status === "late" ? outgoing.held : undefined;
+  const lateStatus =
+    heldLate === undefined ? null : (
+      <div className="flex flex-wrap items-center gap-3">
+        <p className={`text-sm ${textMutedOnSurfaceMuted}`} role="status">
+          {KEYED_SEND_LATE_TEXT}
+        </p>
+        <StopTrying onStop={outgoing.stop} stopping={heldLate.stopping} />
+      </div>
+    );
   const form = (
     <form
       aria-label="Comment composer"
       className={
         compact
-          ? ""
+          ? "space-y-2"
           : docked
-            ? `${autocompleteOpen ? "z-20" : "z-[8]"} fixed inset-x-0 bottom-16 border-t px-4 py-2 sm:sticky sm:top-0 sm:z-20 sm:-mx-2 sm:border-b sm:px-2 ${borderDefault} ${surfaceBg}`
-            : `rounded-xl border p-3 ${calloutInfoBorder} ${calloutInfoBg}`
+            ? `${autocompleteOpen ? "z-20" : "z-[8]"} fixed inset-x-0 bottom-16 space-y-2 border-t px-4 py-2 sm:sticky sm:top-0 sm:z-20 sm:-mx-2 sm:border-b sm:px-2 ${borderDefault} ${surfaceBg}`
+            : `space-y-3 rounded-xl border p-3 ${calloutInfoBorder} ${calloutInfoBg}`
       }
       onSubmit={submit}
       ref={formRef}
     >
       {composerControls}
+      {lateStatus}
     </form>
   );
   return frame === undefined ? (

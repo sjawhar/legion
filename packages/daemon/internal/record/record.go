@@ -29,7 +29,9 @@ type AttemptRun struct {
 type ClassifiedPush struct {
 	SHA string `json:"sha"`
 	// Before is the head the push replaced, empty when the push did not say.
-	Before      string `json:"before,omitempty"`
+	Before string `json:"before,omitempty"`
+	// HandoffOnly is a push every one of whose changed paths is the issue's own handoff, under
+	// .legion/<issue>/ (classify.HandoffPath); a .legion/-only push names such a push throughout.
 	HandoffOnly bool   `json:"handoffOnly"`
 	Unknown     string `json:"unknown,omitempty"`
 	// ByReviewApp is whether the push was the review App's (its pusher is the review App's bot login).
@@ -38,10 +40,13 @@ type ClassifiedPush struct {
 	// the commits it added since the merge base, not what it did to the head it replaced, so it
 	// never carries an approval across.
 	Forced bool `json:"forced,omitempty"`
+	// Sender is the login of the account that pushed (the webhook's sender), empty from a listener
+	// that predates the field. A synchronize names its move's push by it (classify.pushOf).
+	Sender string `json:"sender,omitempty"`
 }
 
-// MayChangeCode is whether the push may have changed anything outside .legion/ in the head it
-// replaced.
+// MayChangeCode is whether the push may have changed anything outside the issue's own
+// .legion/<issue>/ in the head it replaced.
 func (p ClassifiedPush) MayChangeCode() bool {
 	return !p.HandoffOnly || p.Forced
 }
@@ -105,6 +110,40 @@ type Issue struct {
 	// event subjects carry, which NATS matches case-sensitively, so GitHub intake hears the issue's
 	// repository by it, read from the record at boot.
 	GitHubRepo string
+	// Ancestry is the keys of a root's Dispatch parent chain, from its parent upward to the top,
+	// stopping only at a repeated key or back at the root, as the newest Dispatch observation
+	// applied to the record was prepared with (intake's DispatchIssue.Ancestry), or as the
+	// preparation of an event of an issue on that chain read it again (intake's
+	// DispatchIssue.Reread): kept for a labelled todo root under a parent unrecorded or recorded as
+	// a root, such as a child of a live tree that tree's architect has not released. Such a root
+	// is held under that unreleased child (the ancestry hold) and waits for no slot while any live
+	// root is on its chain (Waiting), exactly while that root's release would reach it; it is not
+	// the hold on Dispatch blocked-by links (blockers.WaitsOn). Empty for every other record, for a
+	// root that ran as a tree of its own (workflow's RanAsRoot), which no release adopts, and
+	// cleared when adoption takes the record into a tree.
+	Ancestry []string
+	// HandedOverFrom is the key of the tree the issue left when it became a root of its own:
+	// re-admission (admit.Admission.readmit) writes it whenever it moves a member of another tree
+	// into a tree of its own, a child its finished tree handed over (carrying its run or not) or an
+	// orphan a person admitted, and never clears it, a root's re-admission of itself included. Such
+	// a root stays its own tree (workflow's RanAsRoot): no admission sweep or release of children
+	// adopts it, into the tree it left or any other, and no ancestry hold holds it. Empty for every
+	// other record.
+	HandedOverFrom string
+	// Awaiting is what a root in phase awaiting_person waits on, nil in every other phase: the two
+	// change together, as Hold and held do.
+	Awaiting *Awaiting
+	// HandoutSeq is the highest Dispatch sequence of the issue the record held when the daemon last
+	// gave the root's architect work (Store.StartHandout, Store.TakeInThrough), 0 for never. It is
+	// never lowered, and only those two write it: PutIssue keeps the stored value.
+	HandoutSeq int64
+	// DeclaredSeq is the newest Dispatch sequence of a hand-back the architect made to a person
+	// since its last handout (Store.Declare), 0 when it made none or when nothing it handed back is
+	// still with the person (Store.ClearDeclared), and DeclaredAt Dispatch's time of that hand-back
+	// (zero when its event gave none). Only Declare, ClearDeclared, StartHandout and TakeInThrough
+	// write them: PutIssue keeps the stored values.
+	DeclaredSeq int64
+	DeclaredAt  time.Time
 }
 
 // Repository is the repository the record names (Repo) in the spelling the record keeps: what
@@ -135,6 +174,133 @@ type HoldReason string
 
 // HoldEscalated is a hold its architect sent to the controller.
 const HoldEscalated HoldReason = "escalated"
+
+// Awaiting is what a root in awaiting_person waits on: an ask its architect opened on the root
+// (Ask, the ask's id), or the closed design gate at a spec version (GateVersion) on the document
+// it registered (Artifact); when a person answered it (AnsweredAt, nil until then), with what
+// (AnsweredBy) and that act's own detail (AnsweredDetail: the ask acted on, who closed it, or the
+// version and reason of the review); and where on Dispatch the wait began (Since): the newest
+// hand-back the architect made since it was last given work (Issue.DeclaredSeq). It is a snapshot
+// of the wait's subject; what else is still with the person is the root's asks (RootAsk). A
+// person's act Dispatch recorded at or before Since never answers the wait. An answered root waits
+// for a slot ahead of every root that never ran (Waiting).
+type Awaiting struct {
+	Ask            string
+	GateVersion    int
+	Artifact       string
+	AnsweredAt     *time.Time
+	AnsweredBy     Answer
+	AnsweredDetail string
+	Since          EventMark
+}
+
+// Answer is the act that answered a root's wait, which the task resuming its architect names.
+type Answer string
+
+const (
+	// AnsweredByAsk is a person's answer, resolution or reply on the ask the root waits on.
+	AnsweredByAsk Answer = "ask"
+	// AnsweredByRetraction is Dispatch's settlement retracting the last ask of the root's wait still
+	// with the person, whose decision block left the spec: no person can answer it any more.
+	AnsweredByRetraction Answer = "retracted"
+	// AnsweredByClosed is a close, by anyone who is not a person, of the last ask of the root's wait
+	// still with the person: the question is gone, so nobody will answer it.
+	AnsweredByClosed Answer = "closed"
+	// AnsweredByReply is a person's act on another ask of the root.
+	AnsweredByReply Answer = "reply"
+	// AnsweredByTurn is a session handing the last question of the root's wait still with the person
+	// to the agent's turn: a progress note leaves no question with the person, so the architect
+	// looks again.
+	AnsweredByTurn Answer = "turn"
+	// AnsweredByApproval is the root's design gate standing open: a person's approval of the
+	// root's spec, or a registration under gates.design: off, where nobody approved it.
+	AnsweredByApproval Answer = "approved"
+	// AnsweredByChanges is a person's changes request on the root's spec, which the gate records
+	// as told with its reason.
+	AnsweredByChanges Answer = "changes_requested"
+	// AnsweredByVersion is a spec version newer than the one waited on, which hands the approval
+	// request back to the architect.
+	AnsweredByVersion Answer = "version"
+)
+
+// AwaitingPerson says whether the issue is a root waiting on a person (phase awaiting_person).
+func (i Issue) AwaitingPerson() bool { return i.Phase == phase.AwaitingPerson && i.Awaiting != nil }
+
+// Answered says whether the issue is a root a person's answer released from awaiting_person, which
+// waits for its slot.
+func (i Issue) Answered() bool { return i.AwaitingPerson() && i.Awaiting.AnsweredAt != nil }
+
+// EventMark places a Dispatch event in its issue's event log: its sequence on the issue (Seq) and
+// Dispatch's time of it (At), each zero when unknown. Dispatch appends an issue's events under the
+// issue's row lock, so their sequence is the order they commit in. The time is the start of the
+// transaction that wrote the event, so an event can carry a time before that of an event that
+// committed ahead of it: only the sequence orders two events for certain.
+type EventMark struct {
+	Seq int64
+	At  time.Time
+}
+
+// After says whether m comes after start: by sequence when both carry one, otherwise by time when
+// both carry one, strictly, so an event at start's own time is not after it. An m with no sequence
+// against a start with one is ordered by their times when both carry a time: such an m comes from a
+// read of a Dispatch that does not give the sequence (one older than its migration 0118, which a
+// daemon deployed first, a rolling update or a Dispatch rollback can meet), even for a review whose
+// row has one, so the times are what orders the two, as before Dispatch kept the sequence. That
+// fallback is as blind as it was then: to two transactions that began at one instant, and to one
+// that began before the other and committed after it. A start with a sequence and no time is a
+// registration's read (its Since), which has no time of its own to compare with, so an m without a
+// sequence is never after it. When neither is known on both sides, which comes first cannot be
+// told, and m counts as after start, as it did before marks were recorded.
+func (m EventMark) After(start EventMark) bool {
+	switch {
+	case m.Seq > 0 && start.Seq > 0:
+		return m.Seq > start.Seq
+	case !m.At.IsZero() && !start.At.IsZero():
+		return m.At.After(start.At)
+	case start.Seq > 0:
+		return false
+	}
+	return true
+}
+
+// Same says whether m and other can mark the same event: equal sequences when both carry one,
+// otherwise equal times when both carry one, otherwise true. A review that a read of Dispatch shows
+// with no sequence (one Dispatch recorded before it kept the sequence, or a Dispatch that predates
+// it) is still recognised by its time as the one its live event carried.
+func (m EventMark) Same(other EventMark) bool {
+	switch {
+	case m.Seq > 0 && other.Seq > 0:
+		return m.Seq == other.Seq
+	case !m.At.IsZero() && !other.At.IsZero():
+		return m.At.Equal(other.At)
+	}
+	return true
+}
+
+// Merged is m with each part it lacks taken from other. Two reads of one review (Same), one of
+// which gave less of its mark, are kept as the fuller one, so a sequence the daemon once knew of a
+// review is never lost to a read that did not give it.
+func (m EventMark) Merged(other EventMark) EventMark {
+	if m.Seq == 0 {
+		m.Seq = other.Seq
+	}
+	if m.At.IsZero() {
+		m.At = other.At
+	}
+	return m
+}
+
+// ID is the mark as one number for a fact's event id: the sequence, else the time in Unix
+// nanoseconds, else 0.
+func (m EventMark) ID() int64 {
+	switch {
+	case m.Seq > 0:
+		return m.Seq
+	case !m.At.IsZero():
+		return m.At.UnixNano()
+	}
+	return 0
+}
 
 // PhaseRow is the durable part of a role's work on an issue; live claim facts are joined for state.
 type PhaseRow struct {
@@ -250,20 +416,30 @@ type PullRequest struct {
 	Generation      int64
 	Snapshot        string
 	// Pushes are the branch's pushes as they were classified: every push that changed only .legion/
-	// and said which head it replaced, which carry an approval across, and the pushes whose heads
-	// have not arrived yet. A push that may change code is spent once its head arrives.
+	// and said which head it replaced, which carry an approval across, each pair of heads once; and
+	// every other push whose heads have not arrived yet, in the order they were delivered, two
+	// pushes of the same two heads kept apart. A push that may change code is spent once its head
+	// arrives.
 	Pushes []ClassifiedPush
+	// Moves are the moves the record has made, newest last and at most the last 32, each pair of
+	// heads once: each head's arrival from the head before it, and each push on the chain of pushes
+	// it found between them. A push whose own move is among them is spent (classify.unspentPushes),
+	// whenever it arrives: as the move's own push when the move has none recorded yet (Move.Pushed),
+	// and otherwise queued on the move (Move.Repeats). A push for a move not made yet - one that
+	// returns the branch to a commit it held before, say - is not spent.
+	Moves []Move
 	// HeadCounted is the head the fix-attempt count last counted, a push onto a red verdict, kept
 	// across every head pushed on top of it until one is pushed onto a green verdict, or onto a
 	// settled head whose base branch requires no check and no workflow
 	// (classify.AdvancePullRequestHead); empty when no such attempt stands. The fix-attempt cap holds
 	// a red within that attempt (classify.FixAttemptCapHolds).
 	HeadCounted string
-	// HeadCountedBefore is the mark HeadCounted held before the count that set it. A count made
-	// before its head's push arrived is taken back when that push proves handoff-only or the review
-	// App's (classify.ApplyPush), which restores this mark, so the counted attempt does not depend on
-	// which of the push and the head's arrival GitHub delivers first.
-	HeadCountedBefore string
+	// Run is the head run: the pull request's judgement as it stood before the first head still
+	// waiting for a push of its move, and every head, settlement, required read, clearing of the
+	// head the required workflows were read at, and reopen applied since, replayed at each step and
+	// each push (classify.ApplyPush). Nil when no head waits for a push, and once a run is cut to
+	// its bound with none left waiting.
+	Run *HeadRun
 	// PlannedRed is whether the newest head that changed a path outside .legion/ was the review
 	// App's (the tester's red tests): a red on it is planned, so the next head is not a fix attempt.
 	PlannedRed bool
@@ -300,6 +476,111 @@ type PullRequest struct {
 	// looks for it in a build): empty until the merge, and for a pull request merged before the
 	// column existed, whose check's first compare fills it from GitHub.
 	MergeSHA string
+}
+
+// HeadRun is a pull request's head run (PullRequest.Run): Anchor, the judgement before the run's
+// first step; Pushes, the anchor's code pushes and every code push recorded since, in delivery
+// order, less those the record's bound let go; Names, the moves synchronizes that moved no head
+// named while the run was open (classify.NameMove), less those an arrival spent; and Steps, in the
+// order they were applied. Replaying the steps from the anchor with every push and every named
+// move gives the judgement the facts would have given had every push and synchronize arrived
+// before every head (classify.ApplyPush).
+type HeadRun struct {
+	Anchor Judgement        `json:"anchor"`
+	Pushes []ClassifiedPush `json:"pushes"`
+	Names  []Named          `json:"names,omitempty"`
+	// Since is GitHub's clock of the anchor's head (PullRequest.HeadUpdatedAt when the run opened),
+	// zero when unknown: a named move older than it is no arrival's of the run.
+	Since time.Time `json:"since,omitzero"`
+	Steps []RunStep `json:"steps"`
+	// Decided is the head whose held red a lapsed hold let be decided as it stands (workflow's
+	// HoldLapsed), so the required-checks pass decides it once, not on every pass.
+	Decided string `json:"decided,omitempty"`
+}
+
+// Named is a move a synchronize named without moving the head: the move from Before to SHA, made by
+// the push of Sender, at At by GitHub's clock (the pull request's updated_at).
+type Named struct {
+	Before string    `json:"before"`
+	SHA    string    `json:"sha"`
+	Sender string    `json:"sender"`
+	At     time.Time `json:"at,omitzero"`
+}
+
+// Judgement is the part of a pull request a head run replays: its head, its fix-attempt count and
+// marks, its planned mark, its CI settlement, what its base branch requires, and the moves it has
+// made. BlockedAttempts is what was reported, and is not replayed.
+type Judgement struct {
+	HeadSHA       string             `json:"headSha"`
+	FixAttempts   int                `json:"fixAttempts"`
+	HeadCounted   string             `json:"headCounted,omitempty"`
+	PlannedRed    bool               `json:"plannedRed,omitempty"`
+	CheckedHead   string             `json:"checkedHead,omitempty"`
+	Failing       []string           `json:"failing"`
+	Cancelled     []string           `json:"cancelled"`
+	CheckRuns     []AttemptRun       `json:"checkRuns"`
+	Generation    int64              `json:"generation,omitempty"`
+	Snapshot      string             `json:"snapshot,omitempty"`
+	Required      []string           `json:"required"`
+	Workflows     []RequiredWorkflow `json:"workflows"`
+	WorkflowsHead string             `json:"workflowsHead,omitempty"`
+	Moves         []Move             `json:"moves,omitempty"`
+}
+
+// Move is a move from the head Before to the head SHA, which a push with the same two heads makes.
+// Pushed is whether that push is recorded: the move was made by it, it arrived after the move and
+// the move spent it, or a chain of several recorded pushes made the move, for which GitHub sends no
+// push of its own. A move made by a push that carries an approval across is not pushed, since such
+// a push is never spent. Repeats are the code pushes of the same two heads that arrived once the
+// move was pushed, oldest first and at most 16: each is the push delivered again or the branch
+// moving between the two heads again, which only a head's next arrival by that move tells apart.
+// An arrival takes one of them for its push only through the head its synchronize says it moved
+// from: its sender's when the synchronize names its sender, the oldest otherwise
+// (classify.arrivalPushes). A move recorded before these fields existed reads as not
+// pushed, with no repeats, so the next push of its two heads is taken as its own, as every such
+// push was before.
+type Move struct {
+	Before  string           `json:"before"`
+	SHA     string           `json:"sha"`
+	Pushed  bool             `json:"pushed,omitempty"`
+	Repeats []ClassifiedPush `json:"repeats,omitempty"`
+}
+
+// RunStep is one fact a head run replays: exactly one of a head's arrival (Head, with Before the
+// head its synchronize says the branch moved from and Sender the account whose push moved it, each
+// empty when the fact named none, and SyncedAt GitHub's clock of the synchronize), a CI settlement
+// (Settlement), a read of what the base branch requires (Required), the clearing of the head the
+// required workflows' runs were read at (WorkflowsCleared), or a reopen, which starts the CI
+// settlement afresh (Reopened). At is when a head arrived, by the daemon's clock: a red at that
+// head is held for a bounded time from then (workflow's holdsRed). A step stored before Before,
+// Sender or SyncedAt existed reads as naming none.
+type RunStep struct {
+	Head             string        `json:"head,omitempty"`
+	Before           string        `json:"before,omitempty"`
+	Sender           string        `json:"sender,omitempty"`
+	SyncedAt         time.Time     `json:"syncedAt,omitzero"`
+	At               time.Time     `json:"at,omitzero"`
+	Settlement       *Settlement   `json:"settlement,omitempty"`
+	Required         *RequiredRead `json:"required,omitempty"`
+	WorkflowsCleared bool          `json:"workflowsCleared,omitempty"`
+	Reopened         bool          `json:"reopened,omitempty"`
+}
+
+// Settlement is a CI settlement of Head as the listener reported it (classify.SettlementFor).
+type Settlement struct {
+	Head       string       `json:"head"`
+	CheckRuns  []AttemptRun `json:"checkRuns"`
+	Generation int64        `json:"generation"`
+	Snapshot   string       `json:"snapshot"`
+	Failing    []string     `json:"failing"`
+	Cancelled  []string     `json:"cancelled"`
+}
+
+// RequiredRead is a read of what the base branch requires (intake.RequiredChecks).
+type RequiredRead struct {
+	Names         []string           `json:"names"`
+	Workflows     []RequiredWorkflow `json:"workflows"`
+	WorkflowsHead string             `json:"workflowsHead,omitempty"`
 }
 
 // RequiredWorkflow is one workflow the base branch requires, named by its path, and the result of
@@ -415,13 +696,104 @@ const (
 	CheckNotRun CheckOutcome = "not_run"
 )
 
-// DesignGate records the current document version and the version a human approved, if any.
+// DesignGate records the current document version, the version a human approved, if any, with
+// where Dispatch recorded that approval (ApprovedMark, zero when the read that carried it gave
+// none), and the changes request the architect has been told of, if any: its document version, the
+// reviewer's reason and the review's place in the issue's Dispatch event log (ToldChangesMark,
+// zero the same way). A re-read of that same changes request, by a later registration or the gate
+// seed, tells the architect nothing new; another review does, even at that version with that
+// reason. An approval clears the told record and a changes request clears the approval, so the two
+// marks never stand together: the one that is set is the gate's newest applied review
+// (classify.LatestReview).
 type DesignGate struct {
-	Issue           string
-	ArtifactID      string
-	LatestVersion   int
-	ApprovedVersion *int
+	Issue              string
+	ArtifactID         string
+	LatestVersion      int
+	ApprovedVersion    *int
+	ApprovedMark       EventMark
+	ToldChangesVersion *int
+	ToldChangesReason  string
+	ToldChangesMark    EventMark
 }
+
+// RootAsk is the daemon's mirror of Dispatch's state of one ask of a root, written from the ask's
+// own events alone. Each part has a fence of its own, the issue's event sequence of the newest
+// event that gave it, so an older event changes none of that part and the same events in any order
+// leave the same row: Open is fenced by Seq (0 while no event has said whether the ask is open),
+// WaitingOn by WaitingOnSeq, and ClosedBy by ClosedSeq.
+//
+// WaitingOn is the turn Dispatch's own rule gives the ask after its newest event that names one
+// ("" when none has, which on an open ask is the person's: an ask opens on it): a reply's turn, the
+// person's for a reply on a closed ask (Dispatch takes the newest reply's turn, and a reply on a
+// closed ask records none, so the person's), the person's for a hand-back, and the agent's for a
+// version that moved an approval request past the version handed to the person. A close names no
+// turn, so a closed ask keeps it, and an ask Dispatch's settlement restores reopens on it. ClosedBy
+// is who made the ask's newest close, at ClosedSeq, kept when the ask reopens: a reply on a closed
+// ask says it is closed but not who closed it, so a closed row whose close has not arrived yet has
+// no ClosedBy, and one reopened and closed again by such a reply shows the earlier close until the
+// later one arrives. Kind (AskQuestion, AskApproval, "" until an event names a kind this daemon
+// knows), Artifact (the document an approval request asks a person to approve, "" for a question)
+// and ByTree (a session of the root's tree opened it) are facts of the ask, kept whatever order its
+// events arrive in. A design gate's approval request is an approval row whose Artifact is the
+// gate's document: the mirror needs no binding to know it. PersonAnswerSeq is the newest answer of
+// the ask by a person, and PersonSeq the newest other act of a person that would answer a root
+// waiting on that person (workflow's personAct); PersonActSeq is the newest of the two that does.
+type RootAsk struct {
+	Issue           string
+	Ask             string
+	Kind            string
+	Artifact        string
+	Open            bool
+	Seq             int64
+	WaitingOn       string
+	WaitingOnSeq    int64
+	ClosedBy        string
+	ClosedSeq       int64
+	ByTree          bool
+	PersonSeq       int64
+	PersonAnswerSeq int64
+}
+
+// The ask kinds the mirror knows (RootAsk.Kind): an ordinary question, and the approval request
+// of a document (a design gate's request among them).
+const (
+	AskQuestion = "question"
+	AskApproval = "approval"
+)
+
+// Who closed an ask (RootAsk.ClosedBy).
+const (
+	ClosedByPerson     = "person"
+	ClosedByTree       = "tree"
+	ClosedBySettlement = "settlement"
+	ClosedByOther      = "other"
+)
+
+// WithHuman says whether the ask is open and waits on the person.
+func (a RootAsk) WithHuman() bool { return a.Open && a.WaitingOn != "agent" }
+
+// GateRequestOf says whether the ask is an approval request of gateArtifact, the document a design
+// gate of the root is registered on.
+func (a RootAsk) GateRequestOf(gateArtifact string) bool {
+	return a.Kind == AskApproval && a.Artifact != "" && a.Artifact == gateArtifact
+}
+
+// PersonActSeq is the newest act of a person on the ask that would answer a root waiting on that
+// person, 0 for none: every act PersonSeq records, and an answer of the ask unless it is an
+// approval request of gateArtifact, the document the root's design gate is registered on ("" for
+// none), whose answer is a review that answers through its own artifact.* event. It reads the row's
+// own facts and the gate's document as they stand, so it gives the same whatever order the ask's
+// events, the gate's registration and its reviews arrive in.
+func (a RootAsk) PersonActSeq(gateArtifact string) int64 {
+	if a.GateRequestOf(gateArtifact) {
+		return a.PersonSeq
+	}
+	return max(a.PersonSeq, a.PersonAnswerSeq)
+}
+
+// Question says whether the ask is an ordinary question (AskQuestion): an approval request, and
+// an ask no event has named a kind this daemon knows of, are not.
+func (a RootAsk) Question() bool { return a.Kind == AskQuestion }
 
 // Slot is an active admission slot.
 type Slot struct {
@@ -476,13 +848,20 @@ type HandedOverRoot struct {
 // DispatchIssueRow is one row of the daemon's mirror of Dispatch's issues: what Dispatch last
 // said about an issue of the project, whether or not the daemon records the issue itself. Seq is
 // the Dispatch sequence the observation came from, which fences the write (PutDispatchIssue), and
-// Blockers the keys the issue waits on, in Dispatch's own order.
+// Blockers the keys the issue waits on, in Dispatch's own order. ClaimedBy is who Dispatch showed
+// holding the issue's claim, `<kind>:<id>` ("" for nobody), and ClaimSeq the sequence of the
+// observation that showed it, 0 when none has. The claim is kept apart from the row, with a fence
+// of its own, since a claim event says nothing of the status or the blockers and may arrive before
+// the issue's first mirrored observation (PutDispatchClaim). A row written with ClaimSeq 0 leaves
+// the stored claim as it stands.
 type DispatchIssueRow struct {
-	Key      string
-	Project  string
-	Status   string
-	Blockers []string
-	Seq      int64
+	Key       string
+	Project   string
+	Status    string
+	Blockers  []string
+	Seq       int64
+	ClaimedBy string
+	ClaimSeq  int64
 }
 
 // Store contains only transactional operations. The caller owns each transaction so intake can
@@ -491,6 +870,14 @@ type Store interface {
 	MarkProcessed(ctx context.Context, tx pgx.Tx, source, eventID string) (fresh bool, err error)
 	Issue(ctx context.Context, tx pgx.Tx, key string) (*Issue, error)
 	Issues(ctx context.Context, tx pgx.Tx) ([]Issue, error)
+	// QueuedRootsUnder is every labelled todo root whose Ancestry holds key, by key: the roots the
+	// waiting line may hold under a live root on a chain key is on (Waiting), whose Ancestry an
+	// event of key reads again.
+	QueuedRootsUnder(ctx context.Context, tx pgx.Tx, key string) ([]Issue, error)
+	// SlottedIssues is the record of each issue of project that holds an admission slot, in slot
+	// order, in one read: another project's slot in the shared table, and every issue holding no
+	// slot, are left out of the read rather than of the caller's loop.
+	SlottedIssues(ctx context.Context, tx pgx.Tx, project string) ([]Issue, error)
 	// PutIssue writes issue, refusing one without its repository, default branch or GitHub's
 	// spelling of the repository, one whose GitHub spelling names another repository, and one that
 	// would give a recorded issue another of any of them.
@@ -505,18 +892,39 @@ type Store interface {
 	// FillIssueRepository does.
 	UnnamedIssues(ctx context.Context, tx pgx.Tx, project string) ([]Issue, error)
 	NameIssueRepository(ctx context.Context, tx pgx.Tx, key, repo, githubRepo string) error
+	// HandedOffWithoutPullRequest is every record of the Dispatch project key project in
+	// implementing, named on its repository as GitHub spells it, whose implementer has recorded its
+	// handoff and which has no open or merged pull request recorded, by key: an issue whose
+	// completion waits for the pull request record that only its opened webhook writes. A merged
+	// one is left out, as GitHub never reopens it and a new generation removes it.
+	HandedOffWithoutPullRequest(ctx context.Context, tx pgx.Tx, project string) ([]Issue, error)
 	// RepoNote is what the daemon last said on issue about its repository, nil for nothing;
 	// PutRepoNote records a note it posts.
 	RepoNote(ctx context.Context, tx pgx.Tx, issue string) (*RepoNote, error)
 	PutRepoNote(ctx context.Context, tx pgx.Tx, note RepoNote) error
 	// PutDispatchIssue writes row into the mirror of Dispatch's issues, fenced on the Dispatch
 	// sequence: a row already holding an observation at least as fresh keeps what it has, so a
-	// slower observation never overwrites a faster one. A row whose Seq is zero — a fact the
+	// slower observation never overwrites a faster one. The claim is fenced apart, on ClaimSeq: a
+	// row carrying a claim (ClaimSeq above zero) writes it only over an older claim, and one
+	// carrying none leaves the stored claim as it stands. A row whose Seq is zero — a fact the
 	// daemon minted from its own record, which Dispatch never said — writes nothing at all.
 	PutDispatchIssue(ctx context.Context, tx pgx.Tx, row DispatchIssueRow) error
+	// PutDispatchClaim writes holder (`<kind>:<id>`, "" for nobody) as key's claim at seq, over an
+	// older claim only, and touches nothing of the status or the blockers. It is kept whether or not
+	// the mirror has a row of key yet: an event carries the claim as of its own sequence, so a claim
+	// event applied before an older issue event (one nak'd and redelivered) must outlast that
+	// event's older claim. A claim of a key with no row is read by nothing until the key's row
+	// arrives (DispatchIssues lists rows alone), so admission never sees an issue without its
+	// status and blockers. A seq of zero writes nothing.
+	PutDispatchClaim(ctx context.Context, tx pgx.Tx, key, holder string, seq int64) error
 	// DispatchIssues is every mirrored row of the Dispatch project key project, by key: both
 	// consumers read the whole project in one query and judge what is blocked in memory.
 	DispatchIssues(ctx context.Context, tx pgx.Tx, project string) ([]DispatchIssueRow, error)
+	// DispatchClaim is who the claims mirror shows holding key's claim (`<kind>:<id>`, "" for
+	// nobody), "" when it holds no claim of key. It reads the claim alone (PutDispatchClaim), with
+	// or without a mirrored row of the issue: a claim event applied before the issue's first row is
+	// the newest claim Dispatch showed.
+	DispatchClaim(ctx context.Context, tx pgx.Tx, key string) (string, error)
 	Phases(ctx context.Context, tx pgx.Tx, issue string) ([]PhaseRow, error)
 	PutPhase(ctx context.Context, tx pgx.Tx, phase PhaseRow) error
 	PullRequest(ctx context.Context, tx pgx.Tx, issue string) (*PullRequest, error)
@@ -552,6 +960,39 @@ type Store interface {
 	// gate and each copy a hand-over carried to a child of its tree.
 	GatesForArtifact(ctx context.Context, tx pgx.Tx, artifactID string) ([]DesignGate, error)
 	PutGate(ctx context.Context, tx pgx.Tx, gate DesignGate) error
+	// RootAsk is the mirror row of ask on issue, nil when it has none.
+	RootAsk(ctx context.Context, tx pgx.Tx, issue, ask string) (*RootAsk, error)
+	// PutRootAsk writes ask's mirror row, unless any of the stored row's fences (Seq, WaitingOnSeq,
+	// ClosedSeq) or person's acts is newer than ask's: the caller merges an event into the row it
+	// read, and a row it did not read is never rolled back.
+	PutRootAsk(ctx context.Context, tx pgx.Tx, ask RootAsk) error
+	// RootAsks is the mirror rows of each of issues, by issue and then ask, in one read.
+	RootAsks(ctx context.Context, tx pgx.Tx, issues []string) (map[string][]RootAsk, error)
+	// StartHandout records that the daemon gives issue's architect work now: HandoutSeq rises to
+	// the highest Dispatch sequence the record holds of the issue (its last observation, the claim
+	// its Dispatch mirror shows, its wait's start, every fence and person's act of its mirrored
+	// asks, its gate's reviews), DeclaredSeq clears, and an issue with no catch-up cursor (recorded
+	// before it existed) gets one at 0, so its next catch-up reads from this handout.
+	StartHandout(ctx context.Context, tx pgx.Tx, issue string) error
+	// TakeInThrough records work the daemon gives issue's architect about an event at seq (a
+	// design-changes notice): HandoutSeq rises to seq, and DeclaredSeq clears only when it is at or
+	// below seq, so a hand-back newer than that event, applied first, still stands.
+	TakeInThrough(ctx context.Context, tx pgx.Tx, issue string, seq int64) error
+	// Declare records a hand-back to a person at mark: DeclaredSeq becomes the greater of itself and
+	// mark.Seq, and DeclaredAt the newest hand-back's time.
+	Declare(ctx context.Context, tx pgx.Tx, issue string, mark EventMark) error
+	// ClearDeclared clears DeclaredSeq: nothing the architect handed back is still with the person.
+	ClearDeclared(ctx context.Context, tx pgx.Tx, issue string) error
+	// CaughtUpSeq is the Dispatch sequence the boot catch-up last applied issue's event log
+	// through, and whether the issue has a cursor at all: an issue recorded before the cursor
+	// existed and given no work by this release since has none (its first catch-up replays
+	// nothing); one recorded since, or handed work since (StartHandout), starts at 0.
+	CaughtUpSeq(ctx context.Context, tx pgx.Tx, issue string) (int64, bool, error)
+	// SetCaughtUp raises issue's catch-up cursor to seq; it is never lowered.
+	SetCaughtUp(ctx context.Context, tx pgx.Tx, issue string, seq int64) error
+	// RestartCaughtUp sets issue's catch-up cursor back to 0, so its next catch-up reads from its
+	// last handout: a re-admission's new generation, whose old generation's events are not its own.
+	RestartCaughtUp(ctx context.Context, tx pgx.Tx, issue string) error
 	Slots(ctx context.Context, tx pgx.Tx) ([]Slot, error)
 	PutSlot(ctx context.Context, tx pgx.Tx, slot Slot) error
 	ReleaseSlot(ctx context.Context, tx pgx.Tx, issue string) error

@@ -18,8 +18,8 @@ const (
 	// all, one providers Secret key holds.
 	StorePostgres StoreKind = "postgres"
 	// StoreCloudSQLIAM keeps every session in a Cloud SQL database each pod signs in to as itself,
-	// with no password written anywhere: a role container's launcher binds a unix socket of its own
-	// and proxies it to the instance over the pod's cloud identity (internal/sessionproxy).
+	// with no password written anywhere: the pod's launcher binds a unix socket of its own for each
+	// generation and proxies it to the instance over the pod's cloud identity (internal/sessionproxy).
 	StoreCloudSQLIAM StoreKind = "cloudsql-iam"
 )
 

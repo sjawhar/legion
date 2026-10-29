@@ -111,6 +111,9 @@ func Project(ctx context.Context, tx pgx.Tx, s record.Store, project string, cla
 		if slot, ok := slotViews[issue.Key]; ok {
 			view.Slot = &slot
 		}
+		if issue.AwaitingPerson() {
+			view.WaitingOn = waitingOn(*issue.Awaiting)
+		}
 
 		phases, err := s.Phases(ctx, tx, issue.Key)
 		if err != nil {
@@ -251,6 +254,24 @@ func checkView(check record.ProductionCheck) *api.CheckView {
 	}
 	if check.LastWakeAt != nil {
 		view.LastWake = &api.CheckWakeView{Kind: check.LastWakeKind, Detail: check.LastWakeDetail, At: *check.LastWakeAt}
+	}
+	return view
+}
+
+// waitingOn is the view of what a root in awaiting_person waits on: the gate shape when the wait
+// names a spec version, otherwise the question; the answer only once a person gave one.
+func waitingOn(w record.Awaiting) *api.WaitingOnView {
+	view := &api.WaitingOnView{Kind: "ask", Ask: w.Ask}
+	if w.GateVersion != 0 {
+		view = &api.WaitingOnView{Kind: "gate", GateVersion: w.GateVersion, ArtifactID: w.Artifact}
+	}
+	if !w.Since.At.IsZero() {
+		since := w.Since.At
+		view.Since = &since
+	}
+	if w.AnsweredAt != nil {
+		answeredAt := *w.AnsweredAt
+		view.AnsweredAt, view.AnsweredBy = &answeredAt, w.AnsweredBy
 	}
 	return view
 }

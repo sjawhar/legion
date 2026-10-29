@@ -551,7 +551,7 @@ func TestWarmCodegraphIndexHoldsACrossProcessLease(t *testing.T) {
 }
 
 // TestTwoContendersThatJudgedOneLeaseStaleCannotBothHoldIt drives the interleavings a scheduler
-// rarely produces, through the warmLeaseStep seam: two warm-ups (two role containers relaunching
+// rarely produces, through the warmLeaseStep seam: two warm-ups (two roles relaunching
 // into one workspace after a SIGKILLed pod) both read the same stale lease. Whichever order they
 // then act in, exactly one holds the lease afterwards and the other skips, so one build runs:
 // (1) B judges the lease stale, then A takes it over, holds, and starts building before B acts —

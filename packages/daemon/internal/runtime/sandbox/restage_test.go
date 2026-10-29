@@ -89,7 +89,7 @@ func observationOf(t *testing.T, seen []runtime.Observation, loc runtime.Locator
 	return seen[i]
 }
 
-// connectOf is the --connect value the named role container's launcher dials.
+// connectOf is the --connect value the launcher in the pod's container named container dials.
 func connectOf(t *testing.T, pod *corev1.Pod, container string) string {
 	t.Helper()
 	command := containerNamed(t, pod.Spec, container).Command
@@ -123,11 +123,11 @@ func startEnv(start shimwire.LauncherStart) map[string]string {
 	return env
 }
 
-// An issue pod whose launchers dial the stream the daemon moved from is reported StaleAddress for
+// An issue pod whose launcher dials the stream the daemon moved from is reported StaleAddress for
 // each of its roles the moment the runtime at the new address is told of their claims
 // (re-adoption, ReconcileOrphans): a launcher never redials elsewhere, so it would otherwise read as
 // disconnected for ever. The first role the supervisor relaunches — a Resume over its recorded
-// locator — replaces the issue pod, whose launchers dial the corrected stream, and resumes the
+// locator — replaces the issue pod, whose launcher dials the corrected stream, and resumes the
 // role's saved session there; a sibling relaunched after it resumes into that same new pod
 // (LEGION-592).
 func TestAnIssuePodDialingAStaleStreamIsReplacedAndEveryRoleResumesIntoTheNewPod(t *testing.T) {
@@ -163,10 +163,8 @@ func TestAnIssuePodDialingAStaleStreamIsReplacedAndEveryRoleResumesIntoTheNewPod
 		t.Fatalf("Resume kept the pod %s; the pod dialing the stale stream was not replaced", testerLoc.Sandbox.PodUID)
 	}
 	pod := g.pod(testerLoc.Sandbox.Name)
-	for _, role := range claim.Roles {
-		if dialed := connectOf(t, pod, string(role)); dialed != movedStreamURL {
-			t.Errorf("the replaced pod's %s launcher dials %q, want the new stream %q", role, dialed, movedStreamURL)
-		}
+	if dialed := connectOf(t, pod, workerContainer); dialed != movedStreamURL {
+		t.Errorf("the replaced pod's launcher dials %q, want the new stream %q", dialed, movedStreamURL)
 	}
 	if start := lastStart(t, g, workerToken); start.ResumeFile != resumeSession || start.Generation != 2 {
 		t.Errorf("the tester started generation %d resuming %q, want generation 2 resuming its saved session", start.Generation, start.ResumeFile)
@@ -274,13 +272,11 @@ func TestEnrollingWithTheSecretsBrokerReplacesAnIssuePodMadeWithoutIt(t *testing
 	if held := heldInPod(r2, pod, claim.Roles); len(held) > 0 {
 		t.Fatalf("the replaced pod holds %+v, which a pod created now is not handed", held)
 	}
-	for _, role := range claim.Roles {
-		mounted := slices.ContainsFunc(containerNamed(t, pod.Spec, string(role)).VolumeMounts, func(m corev1.VolumeMount) bool {
-			return m.Name == agentSecretsTokenVolume && m.MountPath == AgentSecretsTokenDir
-		})
-		if !mounted {
-			t.Errorf("the replaced pod's %s launcher does not mount the broker's token at %s", role, AgentSecretsTokenDir)
-		}
+	mounted := slices.ContainsFunc(containerNamed(t, pod.Spec, workerContainer).VolumeMounts, func(m corev1.VolumeMount) bool {
+		return m.Name == agentSecretsTokenVolume && m.MountPath == AgentSecretsTokenDir
+	})
+	if !mounted {
+		t.Errorf("the replaced pod's launcher does not mount the broker's token at %s", AgentSecretsTokenDir)
 	}
 	if start := lastStart(t, g, workerToken); start.Generation != 2 || !slices.Contains(start.Argv, AgentSecretsTokenDir+"/"+AgentSecretsTokenFile) {
 		t.Errorf("the tester started generation %d with %q, want generation 2 pointed at the pod's token file", start.Generation, start.Argv)
@@ -475,7 +471,7 @@ func heldInPod(r *Runtime, pod *corev1.Pod, roles []claim.Role) []movedAddress {
 // One rule decides both whether evaluate reads a role's pod as stale and whether relaunch replaces
 // that pod (movedInPod): for each kind of moved address, a role that holds one is reported
 // StaleAddress naming it, and the role's relaunch replaces its pod exactly when what moved is fixed
-// for the pod's life — the stream its launchers dial, or the secrets broker's enrollment (its
+// for the pod's life — the stream its launcher dials, or the secrets broker's enrollment (its
 // projection's audience or expiry, or enrollment configured only now). An address carried in the
 // generation's environment alone (the daemon's API, the broker's URL with its enrollment unchanged)
 // is stale too, but its relaunch starts a new generation in the same pod; a role holding nothing

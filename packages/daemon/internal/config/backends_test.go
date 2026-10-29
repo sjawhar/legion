@@ -87,12 +87,3 @@ func TestWorkerBackendsRefusals(t *testing.T) {
 		})
 	}
 }
-
-func TestWorkerBackendsRefuseClaudeUnderKubernetes(t *testing.T) {
-	body := kubernetesWith("", "") + "worker_backends: {implementer: claude}\n"
-	_, err := LoadForValidation(writeConfigFile(t, body), noEnv)
-	want := "worker_backends.implementer is claude, which runs only under runtime: tmux"
-	if err == nil || err.Error() != want {
-		t.Fatalf("Load error = %v, want %q", err, want)
-	}
-}

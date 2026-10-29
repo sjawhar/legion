@@ -5,7 +5,7 @@
 # untouched. A Legion pane needs both: the daemon's boot gate refuses pi-legion without pi-envoy, so
 # every stage installs each in turn, into a --dest of its own.
 #
-#   scripts/e2e/lib/install-plugin-profile.sh --package <pi-envoy|pi-legion> --profile <name> --home <dir> --dest <dir>
+#   scripts/e2e/lib/install-plugin-profile.sh --package <pi-envoy|pi-legion> --profile <name> --home <dir> --dest <dir> [--omp <mise tool spec>]
 #
 # --home is the HOME Oh My Pi runs under for the profile, made by make_omp_home (lib/omp-home.sh): the
 # profile is <home>/.omp/profiles/<name>, and the caller's own HOME is refused.
@@ -18,7 +18,11 @@
 #   1. unpack the tarball into <dir>           worker.Dockerfile's `tar xzf ./*.tgz -C /out/<package>`
 #   2. OMP_PROFILE=<name> omp plugin install   worker.Dockerfile's `omp plugin install /opt/legion/<package>`
 #   3. verify with OMP_PROFILE=<name> omp plugin list
-# Steps 2 and 3 run the Oh My Pi the daemon pins (.omp-pin) under HOME=<home>.
+# Steps 2 and 3 run the Oh My Pi the daemon pins (.omp-pin) under HOME=<home>, or the build --omp
+# names: a stage proof passes the one build its daemon and panes run, so the profile is never
+# opened by another (under LEGION_E2E_MODEL_ROUTE=box-login the profile's agent.db is the
+# operator's own login database, which only a build with the refresh-race fix may open;
+# lib/install-box-login-route.sh).
 # Each source is cited by what it runs, never by line number: the lines move with every edit
 # above them. The tarball is written under this run's temp directory, so an interrupted run strands
 # no .tgz in the checkout (the release's `rm -f ./*.tgz` guards the same stale-glob case).
@@ -39,6 +43,7 @@ have_package=
 have_profile=
 have_home=
 have_dest=
+omp_spec=
 while [ $# -gt 0 ]; do
   case "$1" in
   --package)
@@ -59,6 +64,11 @@ while [ $# -gt 0 ]; do
   --dest)
     [ $# -ge 2 ] || refuse "--dest needs a value: the directory the plugin is unpacked into"
     dest=$2 have_dest=1
+    shift 2
+    ;;
+  --omp)
+    [ $# -ge 2 ] && [ -n "$2" ] || refuse "--omp needs a value: the mise tool spec of the Oh My Pi to run (github:sjawhar/oh-my-pi@<version>)"
+    omp_spec=$2
     shift 2
     ;;
   *) refuse "unknown argument: $1" ;;
@@ -102,13 +112,20 @@ if [ -e "$dest" ] && { [ ! -d "$dest" ] || [ -n "$(ls -A -- "$dest")" ]; }; then
   refuse "--dest $dest exists and is not an empty directory"
 fi
 
-# The Oh My Pi the daemon runs (.omp-pin), under the run's home and the operator's mise tool
-# store, from the unpacked plugin's directory, where no mise config is: an operator's `omp` wrapper
-# reads its own files from HOME, which is the run's here.
-pin=$(<"$root/.omp-pin")
+# The Oh My Pi the daemon runs (--omp, else .omp-pin), under the run's home and the operator's mise
+# tool store, from the unpacked plugin's directory, where no mise config is. It runs as the daemon
+# runs it (packages/daemon/internal/omplaunch): `mise x <pin> --` for the tool's environment, and
+# the install's own bin/omp by its absolute path, never an `omp` looked up on PATH, where an
+# operator's wrapper could answer instead (and a wrapper's own setup could rewrite the profile,
+# whose agent.db is the operator's login database under the box-login route).
+pin=${omp_spec:-$(<"$root/.omp-pin")}
 mise where "$pin" >/dev/null 2>&1 || mise install "$pin" >&2
+omp=$(realpath -e -- "$(mise where "$pin")/bin/omp" 2>/dev/null) && [ -x "$omp" ] || {
+  echo "$me: mise has no executable bin/omp for $pin" >&2
+  exit 1
+}
 mise_data=${MISE_DATA_DIR:-${XDG_DATA_HOME:-$HOME/.local/share}/mise}
-run_omp() { (cd "$dest" && HOME=$home MISE_DATA_DIR=$mise_data OMP_PROFILE=$profile mise x "$pin" -- omp "$@"); }
+run_omp() { (cd "$dest" && HOME=$home MISE_DATA_DIR=$mise_data OMP_PROFILE=$profile mise x "$pin" -- "$omp" "$@"); }
 
 work=$(mktemp -d "${TMPDIR:-/tmp}/$me.XXXXXXXX")
 trap 'rm -rf "$work"' EXIT

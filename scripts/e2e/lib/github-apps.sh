@@ -9,18 +9,30 @@
 # app_key_command from stdout, so neither of those two writes anything else to stdout, and
 # proveLiveProofApps defines fail and note, writes $work/github-apps.yaml itself from the block the
 # proofs act with, and runs check_github_apps on it. Each App is an id and the
-# name of the secret-store key holding its private key, read by require_app_inputs from two inputs
+# secrets broker name of the key holding its private key, read by require_app_inputs from two inputs
 # that default to the pair below:
 #   LEGION_E2E_<ROLE>_APP_ID        the App's numeric id (ROLE is IMPLEMENT or REVIEW)
-#   LEGION_E2E_<ROLE>_APP_KEY_NAME  the secret-store key the `secrets` CLI resolves to the App's
-#                                   private key, base64-encoded PEM
-# A deployment with its own Apps sets all four; a run here sets none and acts as it always has.
+#   LEGION_E2E_<ROLE>_APP_KEY_NAME  the store's name for the App's private key (the secrets
+#                                   broker's, by default), which the key runner resolves to
+#                                   base64-encoded PEM
+# and one input for both, the key runner:
+#   LEGION_E2E_APP_KEY_RUNNER       the command that runs `<runner> <NAME> -- <command>` with the
+#                                   key NAME holds in that command's environment alone;
+#                                   `agent-secrets`, the secrets broker's client, by default, or
+#                                   any store's runner of that form (`secrets` reads the devbox's
+#                                   local store). Legion names no other store.
+# A deployment with its own Apps sets all four; a run here sets none and takes the default pair.
 # write_github_apps writes the `github_apps` block of legion.yaml from them, each key read by a
-# private_key_command that runs `secrets <name> -- …`, and check_github_apps proves each App's key
+# private_key_command that runs `<runner> <name> -- …` (or reads the file resolve_app_keys wrote,
+# when its caller names that directory), and check_github_apps proves each App's key
 # is its id's, whether the pair came from a default or an input: lib/app-logins.ts signs an App JWT
 # with the key and refuses the run unless GitHub's GET /app answers that id and the write
 # permission the role's work needs. The key never enters
-# this shell, an argv or a file. Each caller that writes a legion.yaml includes
+# this shell or an argv, and a file only through resolve_app_keys, for a daemon that cannot run the
+# key runner itself: it writes each key to an owner-only file of a directory its caller names (the
+# sandbox proof's, on the devbox user's tmpfs under bridge) and removes at teardown, and the caller
+# passes that directory to write_github_apps, whose key commands then read those files. Each caller
+# that writes a legion.yaml includes
 # $work/github-apps.yaml as it is (`$(<"$work/github-apps.yaml")` in its heredoc), never a copy or
 # an edit, so the block the check proved is the block the daemon loads; Stage 4a, which writes no
 # legion.yaml, hands its Go harness the same <role>_app_id and <role>_app_key_name the check read.
@@ -30,13 +42,14 @@
 
 github_apps_lib=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)
 
-# The default pair, which a run that sets no input takes: the App ids and secret-store key names
-# the live proofs here have used since they were written. GitHub shows both Apps owned by an
-# organization, not by this repository's owner, so a deployment with Apps of its own passes them
-# through the inputs; no other deployment's ids or names belong here.
-default_implement_app_id=3202636
+# The default pair, which a run that sets no input takes: the App ids and secrets broker key names
+# of the legion-implementer and legion-reviewer Apps, both owned by the sjawhar account. The
+# implement key is agent tier; the review key is human tier, so its first read waits for a person's
+# grant. A deployment with Apps of its own passes them through the inputs; no other deployment's
+# ids or names belong here.
+default_implement_app_id=5341240
 default_implement_app_key_name=LEGION_IMPLEMENT_APP_PRIVATE_KEY_B64
-default_review_app_id=3202653
+default_review_app_id=5341243
 default_review_app_key_name=GH_REVIEW_APP_PRIVATE_KEY_B64
 
 # require_app_inputs ROLE... sets <role>_app_id and <role>_app_key_name for each ROLE (implement,
@@ -51,6 +64,7 @@ default_review_app_key_name=GH_REVIEW_APP_PRIVATE_KEY_B64
 # the run starts inherits no App key, the proof human's included.
 github_apps_read=()
 app_key_unsets=()
+app_key_runner=
 require_app_inputs() {
   # The checks below use bracket ranges, which bash's =~ reads in the caller's locale: under a
   # UTF-8 locale [0-9] and [A-Za-z] admit fullwidth digits and accented letters. C keeps them ASCII.
@@ -70,11 +84,16 @@ require_app_inputs() {
     # The bounds keep a pasted credential out of the message: a base64 key is letters and digits
     # too, so only its length tells it from a store key's name, and a refusal prints neither.
     [[ "$id" =~ ^[1-9][0-9]*$ && ${#id} -le 12 ]] || fail "$id_var must be the $role App's numeric id (1 to 12 digits, no leading zero); its value is not printed"
-    [[ "$key" =~ ^[A-Za-z_][A-Za-z0-9_]*$ && ${#key} -le 64 ]] || fail "$key_var must be a secret-store key's name (letters, digits and underscores, at most 64), not the key itself; its value is not printed"
+    [[ "$key" =~ ^[A-Za-z_][A-Za-z0-9_]*$ && ${#key} -le 64 ]] || fail "$key_var must be a secrets broker key's name (letters, digits and underscores, at most 64), not the key itself; its value is not printed"
     printf -v "${role}_app_id" %s "$id"
     printf -v "${role}_app_key_name" %s "$key"
     roles_read+=("$role")
   done
+  # The runner is a command word in the key command's shell text, so it is one word of path
+  # characters: a store's runner by name or by path, never a command line.
+  app_key_runner=${LEGION_E2E_APP_KEY_RUNNER-agent-secrets}
+  [[ "$app_key_runner" =~ ^[A-Za-z0-9_./+-]+$ && ${#app_key_runner} -le 256 ]] ||
+    fail "LEGION_E2E_APP_KEY_RUNNER must be one command, by name or path (letters, digits and _ . / + -), that runs '<runner> <NAME> -- <command>'; its value is not printed"
   if [[ " ${roles_read[*]} " == *" implement "* && " ${roles_read[*]} " == *" review "* ]]; then
     [ "$implement_app_id" != "$review_app_id" ] ||
       fail "LEGION_E2E_IMPLEMENT_APP_ID and LEGION_E2E_REVIEW_APP_ID are both $implement_app_id: the workflow needs two Apps"
@@ -95,28 +114,87 @@ require_app_inputs() {
   done < <(compgen -e)
 }
 
-# app_key_command NAME prints the private_key_command that prints the PEM the secret-store key NAME
-# holds: `secrets` puts the value in one `sh` child's environment, which turns the store's
+# app_key_command NAME prints the key runner's command that prints the PEM the store key NAME holds:
+# the key runner (`agent-secrets` unless LEGION_E2E_APP_KEY_RUNNER names another) puts the value in
+# one `sh` child's environment, which turns the store's
 # Node-style base64 (URL-safe alphabet, unpadded, maybe one dangling sextet) into POSIX base64 and
-# decodes it to stdout, the daemon's pipe.
+# decodes it to stdout, the daemon's pipe. It depends on nothing but NAME and the runner
+# require_app_inputs read. An `agent-secrets` runner, by name or by path, is given
+# --reason=legion-live-proof-github-app-key after NAME, the reason the broker records for the read;
+# any other runner is given none.
 app_key_command() {
+  local reason=
+  [ "${app_key_runner##*/}" != agent-secrets ] || reason=' --reason=legion-live-proof-github-app-key'
   # shellcheck disable=SC2016 # the expansions are the key command's own, run by its sh
-  printf 'secrets %s -- sh -c '\''value=$(printf %%s "${%s}" | tr "_-" "/+"); case $((${#value} %% 4)) in 1) value=${value%%?};; 2) value="${value}==";; 3) value="${value}=";; esac; printf %%s "$value" | base64 -d'\''' "$1" "$1"
+  printf '%s %s%s -- sh -c '\''value=$(printf %%s "${%s}" | tr "_-" "/+"); case $((${#value} %% 4)) in 1) value=${value%%?};; 2) value="${value}==";; 3) value="${value}=";; esac; printf %%s "$value" | base64 -d'\''' "$app_key_runner" "$1" "$reason" "$1"
 }
 
-# write_github_apps ROLE... writes $work/github-apps.yaml, the `github_apps` block of legion.yaml
-# for each ROLE the last require_app_inputs read, or fails naming a role it did not read, before
-# the file is opened. The block names commands, never a key.
+# resolve_app_keys DIR ROLE... runs each ROLE's key command (app_key_command's) once,
+# here, for a daemon that cannot run the runner itself, with its stdout going straight to
+# DIR/<key name>.pem, created owner-only (0600): the PEM passes from the runner's `sh` child to the
+# file and never through this shell. A key whose store waits on a person's approval waits here, as
+# long as the runner does. A runner that fails or prints nothing leaves no file of that key and
+# fails, naming the App by its role and id and never the key. Its caller then passes DIR to
+# `write_github_apps --key-dir DIR`, which writes commands that read those files, so
+# check_github_apps proves exactly them. DIR must exist and be a path of letters, digits and
+# `_ . / -` alone, since the key commands carry it in their shell text; the caller owns DIR and
+# removes it, the files with it.
+resolve_app_keys() {
+  # As require_app_inputs: the bracket range below must read ASCII alone, whatever the locale.
+  local LC_ALL=C
+  local dir=$1 role id_var key_var file status
+  shift
+  [[ "$dir" =~ ^[A-Za-z0-9_./-]+$ ]] ||
+    fail "resolve_app_keys: the key directory '$dir' holds a character other than letters, digits and _ . / -, which the key commands could not carry in their shell text"
+  [ -d "$dir" ] || fail "resolve_app_keys: the key directory $dir is not a directory"
+  for role in "$@"; do
+    [[ " ${github_apps_read[*]} " == *" $role "* ]] ||
+      fail "resolve_app_keys: the $role App's inputs are unread: require_app_inputs $role has not run"
+    id_var=${role}_app_id
+    key_var=${role}_app_key_name
+    file=$dir/${!key_var}.pem
+    rm -f -- "$file"
+    status=0
+    (umask 077 && sh -c "$(app_key_command "${!key_var}")" >"$file") || status=$?
+    if [ "$status" != 0 ]; then
+      rm -f -- "$file"
+      fail "the $role App's key (App ${!id_var}, secret-store key ${!key_var}) could not be resolved: its key command through $app_key_runner exited $status; the key is not printed"
+    fi
+    if [ ! -s "$file" ]; then
+      rm -f -- "$file"
+      fail "the $role App's key (App ${!id_var}, secret-store key ${!key_var}) could not be resolved: its key command through $app_key_runner printed nothing"
+    fi
+  done
+}
+
+# write_github_apps [--key-dir DIR] ROLE... writes $work/github-apps.yaml, the `github_apps` block of
+# legion.yaml for each ROLE the last require_app_inputs read, or fails naming a role it did not read,
+# before the file is opened. Each private_key_command is app_key_command's runner command, or, given
+# --key-dir DIR (the directory resolve_app_keys wrote the keys to), `cat -- 'DIR/<key name>.pem'`,
+# which reads the PEM resolve_app_keys wrote there. The block names commands, never a key.
 write_github_apps() {
-  local role id_var key_var block="github_apps:"$'\n'
+  local LC_ALL=C
+  local role id_var key_var key_dir= key_command block="github_apps:"$'\n'
+  if [ "${1-}" = --key-dir ]; then
+    [ "$#" -ge 2 ] || fail "write_github_apps: --key-dir names no directory"
+    key_dir=$2
+    shift 2
+    [[ "$key_dir" =~ ^[A-Za-z0-9_./-]+$ ]] ||
+      fail "write_github_apps: the key directory '$key_dir' holds a character other than letters, digits and _ . / -, which the key commands could not carry in their shell text"
+  fi
   for role in "$@"; do
     [[ " ${github_apps_read[*]} " == *" $role "* ]] ||
       fail "write_github_apps: the $role App's inputs are unread: require_app_inputs $role has not run"
     id_var=${role}_app_id
     key_var=${role}_app_key_name
+    if [ -n "$key_dir" ]; then
+      key_command=$(printf "cat -- '%s/%s.pem'" "$key_dir" "${!key_var}")
+    else
+      key_command=$(app_key_command "${!key_var}")
+    fi
     # jq quotes the command as a JSON string, which YAML reads as a double-quoted scalar.
     block+=$(printf '  %s:\n    app_id: "%s"\n    private_key_command: %s' "$role" "${!id_var}" \
-      "$(app_key_command "${!key_var}" | jq -Rs .)")$'\n'
+      "$(printf '%s' "$key_command" | jq -Rs .)")$'\n'
   done
   printf '%s' "$block" >"$work/github-apps.yaml"
 }

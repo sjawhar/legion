@@ -191,21 +191,28 @@ async function expectPicked(page: Page, model: string, level: string): Promise<v
   await expect(shownThinking).toHaveText(level);
 }
 
-/** The stored id of the switch whose body is `body`, once Dispatch has stored it, with its author. */
+/** The switch whose body is `body` once Dispatch has stored it and sent it: its stored id, its
+ *  author, and the delivery attempt the fake Envoy's frame carries. Dispatch stores the message,
+ *  then records the attempt, and sends the frame only once that attempt is committed, so a reply
+ *  naming the frame's attempt finds it, as a real session's reply to the frame it received does;
+ *  a reply sent as soon as the message is listed can arrive before its attempt exists. */
 async function storedSwitch(
   sessionID: string,
   body: string
-): Promise<{ id: string; author: { kind: string; id: string } }> {
-  let found: { id: string; author: { kind: string; id: string } } | undefined;
+): Promise<{ id: string; attempt: number; author: { kind: string; id: string } }> {
+  let found: { id: string; attempt: number; author: { kind: string; id: string } } | undefined;
   await expect
     .poll(async () => {
+      const frame = (await getSentMessages()).find((sent) => sent.message === body);
       const read = (await listAgentMessages(sessionID)).find((row) => row.message.body === body);
-      found = read === undefined ? undefined : read.message;
-      return found !== undefined;
+      if (frame === undefined || read === undefined) return false;
+      const { delivery } = JSON.parse(String(frame.payload)) as { delivery: { attempt: number } };
+      found = { attempt: delivery.attempt, author: read.message.author, id: read.message.id };
+      return true;
     })
     .toBe(true);
-  if (found === undefined) throw new Error(`no stored ${body}`);
-  return { author: found.author, id: found.id };
+  if (found === undefined) throw new Error(`no sent ${body}`);
+  return found;
 }
 
 /** What the fake Envoy was asked to send, with each delivery frame decoded. */
@@ -231,11 +238,16 @@ async function sentSwitches(): Promise<
   });
 }
 
-/** The session answers a switch the way pi-envoy posts the host's printed answer. */
-function answer(sessionID: string, messageID: string, body: string): Promise<unknown> {
+/** The session answers the delivery it was sent, the way pi-envoy posts the host's printed
+ *  answer. */
+function answer(
+  sessionID: string,
+  delivery: { id: string; attempt: number },
+  body: string
+): Promise<unknown> {
   return replyToMessageDelivery(
-    messageID,
-    { attempt: 1, body },
+    delivery.id,
+    { attempt: delivery.attempt, body },
     { id: sessionID, kind: "session" }
   );
 }
@@ -246,7 +258,7 @@ test.beforeEach(async () => {
 
 // A1: a session on this change's pi-envoy reports its settings in its replay, before any turn has
 // run, and every later report replaces them, with no turn run.
-test("the header shows the session's reported model and thinking level before any turn, and follows its next settings frame", async ({
+test("the header shows the session's reported model and thinking level before any turn, and follows its next settings frame @phone", async ({
   browser,
 }, testInfo) => {
   const session = liveSession(1);
@@ -282,7 +294,7 @@ test("the header shows the session's reported model and thinking level before an
 // A1: a session on an older pi-envoy replays turns and no settings frame. Its header is the last
 // turn's model, as before, and it says what a restart would bring; a session not answering the
 // live view at all says nothing of the kind, since the empty transcript already says why.
-test("an older session's header shows its last turn's model with no picker and asks for a restart, and a session not answering the live view shows no such notice", async ({
+test("an older session's header shows its last turn's model with no picker and asks for a restart, and a session not answering the live view shows no such notice @phone", async ({
   browser,
 }, testInfo) => {
   const session = liveSession(2);
@@ -319,7 +331,7 @@ test("an older session's header shows its last turn's model with no picker and a
 
 // A1, decision 7's other rows: what the header shows when the session reports less than a model
 // and a level it can switch from Dispatch, and why.
-test("the header says why a session shows less: an Oh My Pi that does not report, no switch from Dispatch, no adjustable thinking, and a model-default level", async ({
+test("the header says why a session shows less: an Oh My Pi that does not report, no switch from Dispatch, no adjustable thinking, and a model-default level @phone", async ({
   browser,
 }, testInfo) => {
   const session = liveSession(3);
@@ -403,7 +415,7 @@ test("the header says why a session shows less: an Oh My Pi that does not report
 // the thread shows as theirs; Send waits for the session's answer, and the header moves only when
 // the session reports the switch. A pick is a steer whatever the composer's mode, since a BTW is a
 // side question the session answers rather than input it runs.
-test("a model picked in the header is the viewer's own Send of /model, holds Send until the session answers, and goes as a steer whatever Send as says", async ({
+test("a model picked in the header is the viewer's own Send of /model, holds Send until the session answers, and goes as a steer whatever Send as says @phone", async ({
   browser,
 }, testInfo) => {
   const session = liveSession(4);
@@ -446,7 +458,7 @@ test("a model picked in the header is the viewer's own Send of /model, holds Sen
       .filter({ hasText: "/model anthropic/model-b" });
     await expect(own).toBeVisible();
 
-    await answer(id, stored.id, "Model set to anthropic/model-b.");
+    await answer(id, stored, "Model set to anthropic/model-b.");
     await publishAgentStreamFrame(id, reported(3, "anthropic/model-b", "auto"));
     await expect(status).toHaveText("The session answered: Model set to anthropic/model-b.");
     await expectPicked(page, "anthropic/model-b", "auto");
@@ -478,7 +490,7 @@ test("a model picked in the header is the viewer's own Send of /model, holds Sen
 });
 
 // A2: a thinking level picked from the levels the session's `/effort` offers.
-test("a thinking level picked in the header sends /effort, and the session's answer and next frame update the header", async ({
+test("a thinking level picked in the header sends /effort, and the session's answer and next frame update the header @phone", async ({
   browser,
 }, testInfo) => {
   const session = liveSession(5);
@@ -504,7 +516,7 @@ test("a thinking level picked in the header sends /effort, and the session's ans
       page.getByTestId("agent-message-user").filter({ hasText: "/effort high" })
     ).toBeVisible();
 
-    await answer(id, stored.id, "Thinking set to high.");
+    await answer(id, stored, "Thinking set to high.");
     await publishAgentStreamFrame(id, reported(3, "anthropic/model-a", "high"));
     await expect(status).toHaveText("The session answered: Thinking set to high.");
     await expectPicked(page, "anthropic/model-a", "high");
@@ -517,7 +529,7 @@ test("a thinking level picked in the header sends /effort, and the session's ans
 
 // A2: a switch the session refuses (here, a model whose key it cannot read) changes nothing, and
 // the page shows the session's own reason, quoted.
-test("a switch the session refuses shows its reason and leaves the header on the values it last reported", async ({
+test("a switch the session refuses shows its reason and leaves the header on the values it last reported @phone", async ({
   browser,
 }, testInfo) => {
   const session = liveSession(6);
@@ -533,7 +545,7 @@ test("a switch the session refuses shows its reason and leaves the header on the
     await model.selectOption("openai/model-c");
     await expect(status).toHaveText("Switching model to openai/model-c…");
     const stored = await storedSwitch(id, "/model openai/model-c");
-    await answer(id, stored.id, "Failed to set model: No API key for openai/model-c");
+    await answer(id, stored, "Failed to set model: No API key for openai/model-c");
     await expect(status).toBeVisible();
     await expect(status).toHaveText(
       "The session answered: Failed to set model: No API key for openai/model-c"
@@ -549,7 +561,7 @@ test("a switch the session refuses shows its reason and leaves the header on the
 
 // A2 and R2: a switch is stored under the person who made it. Bob switches from his own browser;
 // Alice, reading the same session, sees his name on the switch in the thread.
-test("a switch from the header is stored under the person who made it and names them to everyone else", async ({
+test("a switch from the header is stored under the person who made it and names them to everyone else @phone", async ({
   browser,
 }, testInfo) => {
   const session = liveSession(7);
@@ -593,7 +605,7 @@ test("a switch from the header is stored under the person who made it and names 
 // agent token and a person's own agent token alike, so no agent can switch a session from
 // Dispatch. The route refused a bearer before this change, so this row passes at the commit
 // before it too; it is here so that a later change to the route cannot open the switch.
-test("an agent's bearer cannot switch a session: the messages route answers 403 HUMAN_ONLY and nothing is sent", async ({
+test("an agent's bearer cannot switch a session: the messages route answers 403 HUMAN_ONLY and nothing is sent @phone", async ({
   browser,
 }, testInfo) => {
   const session = liveSession(8);
@@ -640,7 +652,7 @@ test("an agent's bearer cannot switch a session: the messages route answers 403 
 // switch the page says no answer came, keeps the values the session last reported, and gives the
 // pickers back; an answer that still comes replaces the line. A switch whose send already failed
 // (no live session took it) says so at once.
-test("a switch the session never answers says so after 30 seconds and keeps the header, a late answer replaces that, and a send that failed says so at once", async ({
+test("a switch the session never answers says so after 30 seconds and keeps the header, a late answer replaces that, and a send that failed says so at once @phone", async ({
   browser,
 }, testInfo) => {
   const session = liveSession(9);
@@ -676,7 +688,7 @@ test("a switch the session never answers says so after 30 seconds and keeps the 
     await expect(send).toBeEnabled();
     await expectNoSidewaysScroll(page, testInfo);
 
-    await answer(id, stored.id, "Model set to anthropic/model-b.");
+    await answer(id, stored, "Model set to anthropic/model-b.");
     await expect(status).toHaveText("The session answered: Model set to anthropic/model-b.");
 
     // The send itself fails: Dispatch answers with a failed attempt, and the page says so with no
@@ -697,7 +709,7 @@ test("a switch the session never answers says so after 30 seconds and keeps the 
 // Decision 8: the header's values come from the session's reports alone and the line from the
 // latest switch's answer alone, so neither depends on which arrives first, and an earlier switch's
 // late answer never speaks for a newer switch.
-test("a switch's answer and the session's frame land in either order, and an earlier switch's late answer never changes a newer one's status", async ({
+test("a switch's answer and the session's frame land in either order, and an earlier switch's late answer never changes a newer one's status @phone", async ({
   browser,
 }, testInfo) => {
   const session = liveSession(10);
@@ -715,7 +727,7 @@ test("a switch's answer and the session's frame land in either order, and an ear
     await model.selectOption("anthropic/model-b");
     await expect(status).toHaveText("Switching model to anthropic/model-b…");
     const toModelB = await storedSwitch(id, "/model anthropic/model-b");
-    await answer(id, toModelB.id, "Model set to anthropic/model-b.");
+    await answer(id, toModelB, "Model set to anthropic/model-b.");
     await expect(status).toHaveText("The session answered: Model set to anthropic/model-b.");
     await expect(model).toBeEnabled();
     await expectPicked(page, "anthropic/model-a", "auto");
@@ -731,7 +743,7 @@ test("a switch's answer and the session's frame land in either order, and an ear
     await expectPicked(page, "anthropic/model-b", "high");
     await expect(status).toHaveText("Switching thinking level to high…");
     await expect(thinking).toBeDisabled();
-    await answer(id, toHigh.id, "Thinking set to high.");
+    await answer(id, toHigh, "Thinking set to high.");
     await expect(status).toHaveText("The session answered: Thinking set to high.");
     await expect(thinking).toBeEnabled();
 
@@ -748,7 +760,7 @@ test("a switch's answer and the session's frame land in either order, and an ear
     await thinking.selectOption("low");
     await expect(status).toHaveText("Switching thinking level to low…");
     const toLow = await storedSwitch(id, "/effort low");
-    await answer(id, toModelA.id, "Model set to anthropic/model-a.");
+    await answer(id, toModelA, "Model set to anthropic/model-a.");
     await expect(
       page
         .getByTestId("agent-dispatch-reply")
@@ -758,7 +770,7 @@ test("a switch's answer and the session's frame land in either order, and an ear
     await expect(thinking).toBeDisabled();
 
     await publishAgentStreamFrame(id, reported(5, "anthropic/model-a", "low"));
-    await answer(id, toLow.id, "Thinking set to low.");
+    await answer(id, toLow, "Thinking set to low.");
     await expect(status).toHaveText("The session answered: Thinking set to low.");
     await expectPicked(page, "anthropic/model-a", "low");
     await expect(model).toBeEnabled();

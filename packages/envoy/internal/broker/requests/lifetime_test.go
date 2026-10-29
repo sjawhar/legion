@@ -68,7 +68,7 @@ func TestATTLGrantEndsAfterItsLifetime(t *testing.T) {
 	}
 
 	for name, grantID := range map[string]string{"automatic": *auto.GrantID, "approved": approved.GrantID} {
-		values, expires, err := m.Values(ctx, grantID, enr)
+		values, expires, err := m.Values(ctx, grantID, enr, nil)
 		if err != nil || len(values) != 1 {
 			t.Fatalf("Values(%s grant) at once = %v, %v; want its value", name, values, err)
 		}
@@ -76,11 +76,11 @@ func TestATTLGrantEndsAfterItsLifetime(t *testing.T) {
 			t.Fatalf("Values(%s grant) expires %v, want two minutes from now", name, expires)
 		}
 		age(t, m, grantID, 119*time.Second)
-		if _, _, err := m.Values(ctx, grantID, enr); err != nil {
+		if _, _, err := m.Values(ctx, grantID, enr, nil); err != nil {
 			t.Fatalf("Values(%s grant) at 1m59s = %v, want its value", name, err)
 		}
 		age(t, m, grantID, 2*time.Second)
-		if _, _, err := m.Values(ctx, grantID, enr); !errors.Is(err, ErrGrantNotLive) {
+		if _, _, err := m.Values(ctx, grantID, enr, nil); !errors.Is(err, ErrGrantNotLive) {
 			t.Fatalf("Values(%s grant) at 2m01s = %v, want ErrGrantNotLive", name, err)
 		}
 	}
@@ -278,7 +278,7 @@ func TestAGrantWithNoTTLLastsUntilItsSessionEnds(t *testing.T) {
 		if _, err := m.Store.Pool.Exec(ctx, `update grants set created_at = created_at - interval '7 days' where id=$1`, grantID); err != nil {
 			t.Fatal(err)
 		}
-		values, expires, err := m.Values(ctx, grantID, enr)
+		values, expires, err := m.Values(ctx, grantID, enr, nil)
 		if err != nil || len(values) != 1 || expires != nil {
 			t.Fatalf("Values(%s grant) a week on = %v, %v, %v; want its value and no expiry", name, values, expires, err)
 		}
@@ -300,7 +300,7 @@ func TestAGrantWithNoTTLLastsUntilItsSessionEnds(t *testing.T) {
 		t.Fatalf("end the session: %v", err)
 	}
 	for name, grantID := range map[string]string{"automatic": *auto.GrantID, "approved": approved.GrantID} {
-		if _, _, err := m.Values(ctx, grantID, enr); !errors.Is(err, ErrGrantNotLive) {
+		if _, _, err := m.Values(ctx, grantID, enr, nil); !errors.Is(err, ErrGrantNotLive) {
 			t.Fatalf("Values(%s grant) after its session ended = %v, want ErrGrantNotLive", name, err)
 		}
 	}

@@ -11,7 +11,14 @@ import {
   setSheet,
 } from "./editor";
 import { resetDatabase } from "./seed";
-import { answeredPost, holdPosts, navigateInApp, refusePosts } from "./sends";
+import {
+  answeredPost,
+  holdPosts,
+  navigateInApp,
+  refusePosts,
+  WRITE_REFUSED,
+  WRITE_REFUSED_TEXT,
+} from "./sends";
 import { asUser } from "./users";
 
 // The composer a selection-bar action opens holds a send's draft until the server answers, like
@@ -46,7 +53,7 @@ function refusal(page: Page, issueKey: string, status: number) {
 // the send's success would close it as saved, and a refusal's Retry would post to the newer mark.
 // It is refused instead, the editor takes back the mark it wrote, and the margin brings the open
 // composer back on screen saying why.
-test("a newer bar Comment while a margin send is out leaves the composer on the send's own mark", async ({
+test("a newer bar Comment while a margin send is out leaves the composer on the send's own mark @phone", async ({
   browser,
 }) => {
   await createProject({ key: "CORE", name: "Core" });
@@ -70,10 +77,10 @@ test("a newer bar Comment while a margin send is out leaves the composer on the 
     await expect(form.locator("blockquote")).toHaveText("quick");
     await expect(form.getByLabel("Comment")).toHaveValue("About quick");
 
-    const refused = refusal(page, issue.key, 503);
+    const refused = refusal(page, issue.key, WRITE_REFUSED.status);
     refuse();
     await refused;
-    await expect(form.getByText("Couldn't send — the server is down")).toBeVisible();
+    await expect(form.getByText(WRITE_REFUSED_TEXT)).toBeVisible();
     await expect(page.getByText(stillSending)).toHaveCount(0);
     await expect(form.getByLabel("Comment")).toHaveValue("About quick");
     await expect(form.locator("blockquote")).toHaveText("quick");
@@ -85,7 +92,7 @@ test("a newer bar Comment while a margin send is out leaves the composer on the 
 // Each compose names its own send: the reader leaving a document with its send out takes that
 // compose's composer off screen with them, so a bar Comment on the next document opens a composer
 // of its own, which the earlier send's answer neither closes nor settles.
-test("a bar Comment on another document while a margin send is out opens its own composer", async ({
+test("a bar Comment on another document while a margin send is out opens its own composer @phone", async ({
   browser,
 }) => {
   await createProject({ key: "CORE", name: "Core" });
@@ -128,7 +135,7 @@ test("a bar Comment on another document while a margin send is out opens its own
 // Leaving a document while a margin send is out takes the composer off screen and keeps it, with
 // the send: a refusal while the reader is away hands the draft back there, and coming back to the
 // document finds the draft, the refusal and a Retry that still sends to the send's own mark.
-test("leaving a document while a margin send is out keeps its draft and refusal for the return", async ({
+test("leaving a document while a margin send is out keeps its draft and refusal for the return @phone", async ({
   browser,
 }) => {
   await createProject({ key: "CORE", name: "Core" });
@@ -147,7 +154,7 @@ test("leaving a document while a margin send is out keeps its draft and refusal 
     await navigateInApp(page, "/");
     await expect(page.locator("main").getByRole("heading", { name: "Inbox" })).toBeVisible();
     await expect(composer(page)).toHaveCount(0);
-    const refused = refusal(page, issue.key, 503);
+    const refused = refusal(page, issue.key, WRITE_REFUSED.status);
     refuse();
     await refused;
 
@@ -158,7 +165,7 @@ test("leaving a document while a margin send is out keeps its draft and refusal 
     await expect(connectedDot(page)).toHaveText("connected");
     await setSheet(page, project, true);
     const form = composer(page);
-    await expect(form.getByText("Couldn't send — the server is down")).toBeVisible();
+    await expect(form.getByText(WRITE_REFUSED_TEXT)).toBeVisible();
     await expect(form.getByLabel("Comment")).toHaveValue("Kept for the return");
     await expect(form.locator("blockquote")).toHaveText("quick");
 
@@ -190,13 +197,13 @@ test("the Pinned tab while a margin send is out keeps the composer, its draft an
     const margin = page.getByTestId("margin-sheet");
     await margin.getByRole("tab", { name: "Pinned" }).click();
     await expect(composer(page)).toHaveCount(0);
-    const refused = refusal(page, issue.key, 503);
+    const refused = refusal(page, issue.key, WRITE_REFUSED.status);
     refuse();
     await refused;
     await margin.getByRole("tab", { name: "Comments" }).click();
 
     const form = composer(page);
-    await expect(form.getByText("Couldn't send — the server is down")).toBeVisible();
+    await expect(form.getByText(WRITE_REFUSED_TEXT)).toBeVisible();
     await expect(form.getByLabel("Comment")).toHaveValue("About brown");
     await expect(form.locator("blockquote")).toHaveText("brown");
   } finally {
@@ -207,8 +214,7 @@ test("the Pinned tab while a margin send is out keeps the composer, its draft an
 // Collapsing the desktop margin to its rail keeps the margin mounted under it, the composer in it.
 test("collapsing the margin while its send is out keeps the composer, its draft and its refusal", async ({
   browser,
-}, testInfo) => {
-  test.skip(testInfo.project.name === "iphone", "below xl the margin is a sheet, with no rail");
+}) => {
   await createProject({ key: "CORE", name: "Core" });
   const issue = await createIssue({ project: "CORE", spec, title: "Collapsed mid-send" });
   const alice = await asUser(browser, "alice");
@@ -222,13 +228,13 @@ test("collapsing the margin while its send is out keeps the composer, its draft 
 
     await page.getByRole("button", { name: "Hide margin" }).click();
     await expect(page.getByTestId("margin-rail")).toBeVisible();
-    const refused = refusal(page, issue.key, 503);
+    const refused = refusal(page, issue.key, WRITE_REFUSED.status);
     refuse();
     await refused;
     await page.getByRole("button", { name: "Show margin" }).click();
 
     const form = composer(page);
-    await expect(form.getByText("Couldn't send — the server is down")).toBeVisible();
+    await expect(form.getByText(WRITE_REFUSED_TEXT)).toBeVisible();
     await expect(form.getByLabel("Comment")).toHaveValue("Through the rail");
   } finally {
     await alice.close();
@@ -239,8 +245,7 @@ test("collapsing the margin while its send is out keeps the composer, its draft 
 // the open composer saying why the new selection waits.
 test("a bar Comment while the collapsed margin's send is out shows the margin and why", async ({
   browser,
-}, testInfo) => {
-  test.skip(testInfo.project.name === "iphone", "below xl the margin is a sheet, with no rail");
+}) => {
   await createProject({ key: "CORE", name: "Core" });
   const issue = await createIssue({ project: "CORE", spec, title: "Rail mid-send" });
   const alice = await asUser(browser, "alice");
@@ -269,7 +274,7 @@ test("a bar Comment while the collapsed margin's send is out shows the margin an
 
 // On a phone a margin thread opens over the margin's own tabs, which stay mounted under it with
 // the composer; Back finds the composer where it was.
-test("on a phone, a margin thread opened while the margin's send is out keeps the composer and its refusal", async ({
+test("on a phone, a margin thread opened while the margin's send is out keeps the composer and its refusal @phone", async ({
   browser,
 }) => {
   await createProject({ key: "CORE", name: "Core" });
@@ -295,14 +300,14 @@ test("on a phone, a margin thread opened while the margin's send is out keeps th
       .click();
     const thread = page.getByRole("dialog", { name: "Thread" });
     await expect(thread).toBeVisible();
-    const refused = refusal(page, issue.key, 503);
+    const refused = refusal(page, issue.key, WRITE_REFUSED.status);
     refuse();
     await refused;
     await thread.getByRole("button", { name: "Back" }).click();
     await expect(thread).toHaveCount(0);
 
     const form = composer(page);
-    await expect(form.getByText("Couldn't send — the server is down")).toBeVisible();
+    await expect(form.getByText(WRITE_REFUSED_TEXT)).toBeVisible();
     await expect(form.getByLabel("Comment")).toHaveValue("About quick");
     await expect(form.locator("blockquote")).toHaveText("quick");
   } finally {
