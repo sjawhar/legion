@@ -1,0 +1,8 @@
+kind: Changed
+body: |-
+    The related-item check's lines take which form an answer holds from `@legion/contracts`'
+    `relatedCheckFormOf` rather than judging it here, and word that form exactly as before. No
+    line a reader sees changes.
+time: 2026-10-29T17:00:00.000000000Z
+custom:
+    Issue: pr2511
