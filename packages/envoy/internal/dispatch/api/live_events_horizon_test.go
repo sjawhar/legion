@@ -9,6 +9,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/sjawhar/envoy/internal/dispatch/docs"
 	"github.com/sjawhar/envoy/internal/dispatch/store"
 )
 
@@ -292,6 +293,31 @@ func TestTheFirstColdSubscriptionOfAFreshProcessIsSentAnEventCommittedWhileTheRe
 	expectEventsInOrder(t, client, "events", committed)
 }
 
+// eventsTuplesRead is how many rows of events every statement so far has read, by a sequential
+// scan of the table or through its primary key: the cost of a read of the event log, whichever
+// plan Postgres chose for it. A backend keeps its statistics until it has been idle for up to ten
+// seconds or exits, so the read first ends every other connection to this database but one that
+// holds a transaction id (a test's open writer): each flushes its statistics as it exits, and the
+// pools dial again on their next use.
+func eventsTuplesRead(t *testing.T, database *store.Store) int64 {
+	t.Helper()
+	if _, err := database.Pool.Exec(t.Context(), `
+		select pg_terminate_backend(pid, 5000) from pg_stat_activity
+		where datname = current_database() and backend_type = 'client backend' and pid <> pg_backend_pid()
+			and pid not in (select pid from pg_locks where locktype = 'transactionid' and mode = 'ExclusiveLock')
+	`); err != nil {
+		t.Fatalf("end the other connections so they flush their statistics: %v", err)
+	}
+	var read int64
+	if err := database.Pool.QueryRow(t.Context(), `
+		select coalesce((select seq_tup_read from pg_stat_user_tables where relname = 'events'), 0)
+			+ coalesce((select idx_tup_read from pg_stat_user_indexes where indexrelname = 'events_pkey'), 0)
+	`).Scan(&read); err != nil {
+		t.Fatalf("read the events table's statistics: %v", err)
+	}
+	return read
+}
+
 // TestTheRelaysFirstStartDoesNotReadTheWholeEventLog: the relay's first start runs on every process
 // at boot (nothing proves a horizon before the first subscription) and holds that subscription's
 // events_start, and every live event, until it ends. Its cost must not grow with the log: on
@@ -299,8 +325,8 @@ func TestTheFirstColdSubscriptionOfAFreshProcessIsSentAnEventCommittedWhileTheRe
 // resuming one's events waiting for seconds after each restart (5,000,000 ids: 3.8 s on a 2-vCPU
 // pod, against 0.015 s before this change). The start may read the newest events and the ones still
 // open, not the log's whole history: here it may read at most a tenth of a log of 200,000
-// committed, published events, measured by the index tuples Postgres counts on the events primary
-// key while the first cold subscription starts.
+// committed, published events, measured by the rows of events Postgres counts as read, by a
+// sequential scan or through the primary key, while the first cold subscription starts.
 func TestTheRelaysFirstStartDoesNotReadTheWholeEventLog(t *testing.T) {
 	const logSize = 200_000
 	rig := newLiveSocketRig(t, testServerOptions{streamHeartbeat: 100 * time.Millisecond}, nil)
@@ -315,24 +341,64 @@ func TestTheRelaysFirstStartDoesNotReadTheWholeEventLog(t *testing.T) {
 	if _, err := rig.database.Pool.Exec(t.Context(), `analyze events`); err != nil {
 		t.Fatalf("analyze events: %v", err)
 	}
-	// Postgres flushes a backend's statistics within about a second of its transaction ending, and
-	// each read below runs in a transaction of its own, so it sees the latest flush.
-	tuplesRead := func() int64 {
-		t.Helper()
-		var read int64
-		if err := rig.database.Pool.QueryRow(t.Context(), `
-			select coalesce((select idx_tup_read from pg_stat_user_indexes where indexrelname = 'events_pkey'), 0)
-		`).Scan(&read); err != nil {
-			t.Fatalf("read events_pkey statistics: %v", err)
-		}
-		return read
-	}
 	time.Sleep(1500 * time.Millisecond)
-	before := tuplesRead()
+	before := eventsTuplesRead(t, rig.database)
 	subscribeEvents(t, rig.dial(t, withBearer("agent-token")), "events", nil)
 	time.Sleep(1500 * time.Millisecond)
-	if read := tuplesRead() - before; read > logSize/10 {
-		t.Fatalf("the relay's first start read %d index tuples of events_pkey on a log of %d events, want at most %d: its cost grows with the whole log", read, logSize, logSize/10)
+	if read := eventsTuplesRead(t, rig.database) - before; read > logSize/10 {
+		t.Fatalf("the relay's first start read %d rows of events on a log of %d events, want at most %d: its cost grows with the whole log", read, logSize, logSize/10)
+	}
+}
+
+// TestTheRelaysFirstStartDoesNotReadTheWholeEventLogWhileAWriterFromBeforeBootIsOpen: the same
+// bound when a write transaction in Dispatch's database took its transaction id before the
+// server's boot mark and is still open when the first subscription starts. That is a restart
+// under load: write transactions hold their ids for seconds, and pages resubscribe within a
+// second of the new process coming up. The start has to wait for that writer anyway, since the
+// safe horizon cannot pass it (Horizon.Await), and a mark taken once it has ended bounds the read
+// as well as the boot mark would have, so the writer is no reason to read every id from 0. On
+// 5,000,000 ids with writers holding their ids for 3 s, that read made the first subscription wait
+// 6.0 s after a restart, against 3.1 s when the boot mark held.
+func TestTheRelaysFirstStartDoesNotReadTheWholeEventLogWhileAWriterFromBeforeBootIsOpen(t *testing.T) {
+	const logSize = 200_000
+	var release func()
+	// persistence runs on the test's database before register takes the boot mark: the writer's
+	// transaction id is older than the mark, as a write open across a restart's boot is.
+	rig := newLiveSocketRig(t, testServerOptions{streamHeartbeat: 100 * time.Millisecond, persistence: func(database *store.Store) docs.VersionedStore {
+		release = holdEventWriterTransactionID(t, database)
+		return nil
+	}}, nil)
+	pollUntil(t, eventFeedWait, "the server's boot mark is taken", func() bool {
+		select {
+		case <-rig.served.bootMark:
+			return true
+		default:
+			return false
+		}
+	})
+	createInteractionIssue(t, rig.handler, "TEST", "Issue", "A spec")
+	if _, err := rig.database.Pool.Exec(t.Context(), `
+		insert into events (seq, type, actor, payload, notify, published_at)
+		select 0, 'test.filler', '{"kind":"system","id":"test"}', '{}', false, now()
+		from generate_series(1, $1)
+	`, logSize); err != nil {
+		t.Fatalf("fill the event log: %v", err)
+	}
+	if _, err := rig.database.Pool.Exec(t.Context(), `analyze events`); err != nil {
+		t.Fatalf("analyze events: %v", err)
+	}
+	time.Sleep(1500 * time.Millisecond)
+	before := eventsTuplesRead(t, rig.database)
+	client := rig.dial(t, withBearer("agent-token"))
+	sendEventsSubscribe(t, client, "events", nil)
+	awaitRelayStart(t, rig.served.eventRelay)
+	// The writer ends a second into the start, as a write holding its id for seconds does.
+	time.Sleep(time.Second)
+	release()
+	eventsStartID(t, client, "events")
+	time.Sleep(1500 * time.Millisecond)
+	if read := eventsTuplesRead(t, rig.database) - before; read > logSize/10 {
+		t.Fatalf("the relay's first start read %d rows of events on a log of %d events while a writer from before the boot mark was open, want at most %d: it read the whole log", read, logSize, logSize/10)
 	}
 }
 
