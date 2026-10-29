@@ -2,7 +2,7 @@
   "schemaVersion": 1,
   "phase": "implement",
   "issue": "INFRA-568",
-  "completed": "2026-10-28T22:14:27Z",
+  "completed": "2026-10-29T02:01:30Z",
   "pullRequest": "https://github.com/sjawhar/legion/pull/2397",
   "proof": [
     {
@@ -20,6 +20,14 @@
       "observed": "prints nothing; packages/envoy/cmd/dispatch/README.md reads main's 0136 paragraph, a blank line, then this branch's 0137 paragraph",
       "headSha": "1d89163d5f616f3a593ee5fa566302dea37ca474",
       "negativeControl": "at ec152514 the same check printed README.md:1108 `+++++++ uxwtkurr 8e58845b …`"
+    },
+    {
+      "criterion": "Conflict round: forward merge of main 56a39157 onto main's lifetime plumbing, with migrations, connection count, fragments, key rule, no dist and no markers kept",
+      "surface": "the pull request on GitHub and the merged head's Go suites on Postgres (ICU)",
+      "command": "go test ./internal/dispatch/store/... ./internal/dispatch/embedqueue/ ./internal/dispatch/api ./cmd/dispatch; go test -tags multiprocess -run TestEachLeasedMaintenanceLoopRunsOnceAcrossBothProcesses ./cmd/dispatch; cd infra && go test ./gcp/ -run TestDispatchConnectionsPerPodIsTheServers; the marker grep over every changed file",
+      "observed": "all pass, the whole api package included; dispatchConnectionsPerPod 87; marker grep prints nothing; GitHub MERGEABLE; fingerprint 1b7f7441… -> 7cced850… (https://github.com/sjawhar/legion/pull/2397#issuecomment-6485806846)",
+      "headSha": "b12e0766218ac8156d485a69dab9fba80c50e84e",
+      "negativeControl": "before the adaptation the merged tree did not compile (duty.Exclusive's new due parameter, s.lifetime() replaced by a field), and directServer's nil lifetime panicked in ensureSearchTermStats"
     }
   ],
   "filesChanged": [
@@ -28,5 +36,8 @@
   ],
   "trickyParts": [
     "The retro learnings (docs/solutions/*/*-pr2397.md) stay; the next retro removes this .legion/INFRA-568/ directory again."
+  ],
+  "deviations": [
+    "Merge b12e0766: the term-statistics refresh now runs through main's duty.RunLeased with TickAtStart (passes on a ticker, not interval after each pass end), forced by main's duty.Exclusive signature change."
   ]
 }
