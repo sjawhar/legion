@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/sjawhar/envoy/internal/dispatch/store"
@@ -23,18 +24,26 @@ import (
 // doing document work or advice between two statements - is time the whole database waits on that
 // Go code.
 //
-// Two sources are joined, both stamped with this process's monotonic clock:
+// Three sources are joined, all stamped with this process's monotonic clock:
 //   - XidTracer, a pgx tracer on the pool under test, records each statement every backend runs:
 //     its start, its end and its SQL. pgx sends BEGIN and COMMIT as ordinary statements, so the
 //     trace splits each backend's statements into its transactions.
 //   - A poller on a connection of its own reads pg_stat_activity every xidPollInterval and records
 //     which backends hold an xid. Classifying SQL text cannot say which statement assigned the xid
 //     (an insert does, a `for no key update` read does, a trigger's write does); Postgres can.
+//   - The command tag the server answers each statement with, which the tracer reads from the
+//     statement's own result (xidWroteRows): an INSERT, UPDATE, DELETE or MERGE that changed rows
+//     had been given the transaction's xid by the time that result was read, whatever the poller
+//     saw. A tag the rig cannot classify - a SELECT, a lock, BEGIN - says nothing either way.
 //
-// A transaction's xid window runs from the start of the last statement that began before the
-// first poll that saw the backend hold an xid, to the end of its COMMIT. Inside it the rig checks
-// D6 of the INFRA-636 plan: every statement-free gap is at most XidMaxGap, and the gaps together
-// take no longer than the statements do.
+// A transaction's xid window runs from the start of the last statement that began before the first
+// poll that saw the backend hold an xid, or from the start of its first statement with such a
+// write tag, whichever is earlier, to the end of its COMMIT. A transaction no poll saw hold an xid
+// is judged from its tags alone when they show a write - the write phase is one pipelined batch,
+// and on a busy box it can be over before the next poll is sent - and is judged to have held no
+// xid when they show none, as the polls say. Inside the window the rig checks D6 of the INFRA-636
+// plan: every statement-free gap is at most XidMaxGap, and the gaps together take no longer than
+// the statements do.
 //
 // Which transactions are judged is decided by context, not guessed from timing: the caller marks
 // the context its operation runs under (MarkXid) and the tracer marks every statement whose
@@ -78,11 +87,20 @@ type XidStatement struct {
 	End    time.Time
 	SQL    string
 	Marked bool
+	// Wrote is set when the statement's own command tag says it changed rows (xidWroteRows), a
+	// batch's when any of its queries' tags does: such a statement had been given the
+	// transaction's xid by the time its result was read. False says nothing either way.
+	Wrote bool
 }
 
 // XidTracer is a pgx QueryTracer, BatchTracer and CopyFromTracer that records the statements each
 // backend runs while Measure runs. Install it on a pool with Traced.
 type XidTracer struct {
+	// PollInterval is how often Measure reads pg_stat_activity; zero is xidPollInterval. Set it
+	// before Measure runs. A test of the rig itself sets it past its operation's whole span, so
+	// the poller sees nothing and the verdict can only come from the statements' command tags.
+	PollInterval time.Duration
+
 	mu         sync.Mutex
 	recording  bool
 	statements []XidStatement
@@ -109,12 +127,15 @@ func (x *XidTracer) begin(ctx context.Context, conn *pgx.Conn, sql string) conte
 	return context.WithValue(ctx, xidSpanKey{}, span)
 }
 
-func (x *XidTracer) end(ctx context.Context) {
+func (x *XidTracer) end(ctx context.Context, tag pgconn.CommandTag) {
 	span, ok := ctx.Value(xidSpanKey{}).(*xidSpan)
 	if !ok {
 		return
 	}
 	span.statement.End = time.Now()
+	if xidWroteRows(tag) {
+		span.statement.Wrote = true
+	}
 	if len(span.sql) > 0 {
 		span.statement.SQL = strings.Join(span.sql, "; ")
 	}
@@ -125,14 +146,29 @@ func (x *XidTracer) end(ctx context.Context) {
 	}
 }
 
+// xidWroteRows reads a command tag: Postgres answers an INSERT, UPDATE, DELETE or MERGE with the
+// rows it changed, and a statement that changed a row has a transaction id. Every other tag - a
+// SELECT, a lock, BEGIN, COMMIT, a write that changed nothing - leaves the statement to the
+// poller, which is the only source that sees the xid a row lock or a trigger assigns.
+func xidWroteRows(tag pgconn.CommandTag) bool {
+	if tag.RowsAffected() == 0 {
+		return false
+	}
+	switch verb, _, _ := strings.Cut(tag.String(), " "); verb {
+	case "INSERT", "UPDATE", "DELETE", "MERGE":
+		return true
+	}
+	return false
+}
+
 // TraceQueryStart implements pgx.QueryTracer.
 func (x *XidTracer) TraceQueryStart(ctx context.Context, conn *pgx.Conn, data pgx.TraceQueryStartData) context.Context {
 	return x.begin(ctx, conn, data.SQL)
 }
 
 // TraceQueryEnd implements pgx.QueryTracer.
-func (x *XidTracer) TraceQueryEnd(ctx context.Context, _ *pgx.Conn, _ pgx.TraceQueryEndData) {
-	x.end(ctx)
+func (x *XidTracer) TraceQueryEnd(ctx context.Context, _ *pgx.Conn, data pgx.TraceQueryEndData) {
+	x.end(ctx, data.CommandTag)
 }
 
 // TraceBatchStart implements pgx.BatchTracer.
@@ -146,12 +182,18 @@ func (x *XidTracer) TraceBatchStart(ctx context.Context, conn *pgx.Conn, data pg
 	return ctx
 }
 
-// TraceBatchQuery implements pgx.BatchTracer.
-func (x *XidTracer) TraceBatchQuery(context.Context, *pgx.Conn, pgx.TraceBatchQueryData) {}
+// TraceBatchQuery implements pgx.BatchTracer. A batch is one statement of the trace, so one
+// query's write tag makes the whole batch a write: its first statement is where the batch's xid
+// window starts.
+func (x *XidTracer) TraceBatchQuery(ctx context.Context, _ *pgx.Conn, data pgx.TraceBatchQueryData) {
+	if span, ok := ctx.Value(xidSpanKey{}).(*xidSpan); ok && xidWroteRows(data.CommandTag) {
+		span.statement.Wrote = true
+	}
+}
 
 // TraceBatchEnd implements pgx.BatchTracer.
 func (x *XidTracer) TraceBatchEnd(ctx context.Context, _ *pgx.Conn, _ pgx.TraceBatchEndData) {
-	x.end(ctx)
+	x.end(ctx, pgconn.CommandTag{})
 }
 
 // TraceCopyFromStart implements pgx.CopyFromTracer.
@@ -160,8 +202,8 @@ func (x *XidTracer) TraceCopyFromStart(ctx context.Context, conn *pgx.Conn, data
 }
 
 // TraceCopyFromEnd implements pgx.CopyFromTracer.
-func (x *XidTracer) TraceCopyFromEnd(ctx context.Context, _ *pgx.Conn, _ pgx.TraceCopyFromEndData) {
-	x.end(ctx)
+func (x *XidTracer) TraceCopyFromEnd(ctx context.Context, _ *pgx.Conn, data pgx.TraceCopyFromEndData) {
+	x.end(ctx, data.CommandTag)
 }
 
 // Traced returns a store on database's database whose every connection, the separate pools it
@@ -225,6 +267,10 @@ func (x *XidTracer) Measure(t testing.TB, pool *store.Pool, operation func()) *X
 	x.recording = true
 	x.mu.Unlock()
 
+	interval := x.PollInterval
+	if interval <= 0 {
+		interval = xidPollInterval
+	}
 	stop := make(chan struct{})
 	var polls []xidPoll
 	var pollErr error
@@ -243,8 +289,14 @@ func (x *XidTracer) Measure(t testing.TB, pool *store.Pool, operation func()) *X
 				return
 			default:
 			}
-			if wait := xidPollInterval - time.Since(sample.sent); wait > 0 {
-				time.Sleep(wait)
+			if wait := interval - time.Since(sample.sent); wait > 0 {
+				timer := time.NewTimer(wait)
+				select {
+				case <-stop:
+					timer.Stop()
+					return
+				case <-timer.C:
+				}
 			}
 		}
 	}()
@@ -324,12 +376,15 @@ func (w XidWindow) Summary() string {
 func (w XidWindow) Detail() string {
 	var b strings.Builder
 	begin := w.Transaction.Statements[0].Start
-	unseen := "none"
+	unseen, sighted := "none", "none"
 	if !w.Transaction.Unseen.IsZero() {
 		unseen = XidMillis(w.Transaction.Unseen.Sub(begin))
 	}
+	if !w.Transaction.Sighted.IsZero() {
+		sighted = XidMillis(w.Transaction.Sighted.Sub(begin))
+	}
 	fmt.Fprintf(&b, "  transaction began at 0.000 ms; last poll without its xid sent at %s; xid first seen at %s; window %s -> %s\n",
-		unseen, XidMillis(w.Transaction.Sighted.Sub(begin)), XidMillis(w.Start.Sub(begin)), XidMillis(w.End.Sub(begin)))
+		unseen, sighted, XidMillis(w.Start.Sub(begin)), XidMillis(w.End.Sub(begin)))
 	for i, statement := range w.Statements {
 		if i > 0 {
 			gap := statement.Start.Sub(w.Statements[i-1].End)
@@ -349,7 +404,8 @@ func (w XidWindow) Detail() string {
 type XidReport struct {
 	// Windows are the operation's committed transactions that held an xid, in commit order.
 	Windows []XidWindow
-	// Unsighted are the operation's committed transactions no poll saw hold an xid.
+	// Unsighted are the operation's committed transactions no poll saw hold an xid and whose
+	// command tags show no write either: the rig judges them to have held none.
 	Unsighted []XidTransaction
 	// Unjudged are the operation's transactions that rolled back or were still open when the
 	// operation returned.
@@ -437,12 +493,14 @@ func analyzeXidWindows(statements []XidStatement, polls []xidPoll, duration time
 			transaction.Unseen = sample.sent
 		}
 		if transaction.Sighted.IsZero() {
-			report.Unsighted = append(report.Unsighted, transaction)
-			if span, writes := xidWriteSpan(transaction); writes && span > max(XidMaxGap, 3*report.LongestPoll) {
-				report.Problems = append(report.Problems, fmt.Sprintf(
-					"backend %d committed a transaction that may write (%s) %s before its COMMIT ended, yet no poll saw it hold an xid; the longest poll interval was %s",
-					transaction.PID, xidSQL(xidFirstWrite(transaction).SQL), XidMillis(span), XidMillis(report.LongestPoll)))
+			// A write phase is one pipelined batch, and on a busy box it can be over before the
+			// next poll is sent: a transaction whose command tags show a write is judged from the
+			// first of them, and one whose tags show none held no xid, as the polls say.
+			if wrote := xidFirstTaggedWrite(transaction); wrote >= 0 {
+				report.Windows = append(report.Windows, xidWindowFrom(transaction, wrote))
+				continue
 			}
+			report.Unsighted = append(report.Unsighted, transaction)
 			continue
 		}
 		report.Windows = append(report.Windows, xidWindowOf(transaction))
@@ -457,7 +515,9 @@ func analyzeXidWindows(statements []XidStatement, polls []xidPoll, duration time
 // after the last poll that saw none was sent. When a statement in that blind spot may assign an
 // xid (xidWriteSQL), the window starts at the first such one instead, so a fast statement after
 // the assigning one cannot hide the time between them. The polls bound the choice either way:
-// text only picks among the statements they leave possible.
+// text only picks among the statements they leave possible. A statement whose command tag says it
+// wrote rows had the xid by its end whatever the polls saw, so a write tag earlier than the poll's
+// own choice starts the window instead.
 func xidWindowOf(transaction XidTransaction) XidWindow {
 	first := 0
 	for i, statement := range transaction.Statements {
@@ -475,6 +535,14 @@ func xidWindowOf(transaction XidTransaction) XidWindow {
 			break
 		}
 	}
+	if wrote := xidFirstTaggedWrite(transaction); wrote >= 0 && wrote < first {
+		first = wrote
+	}
+	return xidWindowFrom(transaction, first)
+}
+
+// xidWindowFrom measures transaction's window from the statement at first through its COMMIT.
+func xidWindowFrom(transaction XidTransaction, first int) XidWindow {
 	window := XidWindow{Transaction: transaction, Statements: transaction.Statements[first:]}
 	window.Start = window.Statements[0].Start
 	window.End = window.Statements[len(window.Statements)-1].End
@@ -493,23 +561,10 @@ func xidWindowOf(transaction XidTransaction) XidWindow {
 	return window
 }
 
-func xidFirstWrite(transaction XidTransaction) XidStatement {
-	for _, statement := range transaction.Statements {
-		if xidWriteSQL.MatchString(statement.SQL) {
-			return statement
-		}
-	}
-	return XidStatement{}
-}
-
-// xidWriteSpan is the time from the first statement that may assign an xid to the end of COMMIT,
-// and whether there is one.
-func xidWriteSpan(transaction XidTransaction) (time.Duration, bool) {
-	write := xidFirstWrite(transaction)
-	if write.Start.IsZero() {
-		return 0, false
-	}
-	return transaction.Statements[len(transaction.Statements)-1].End.Sub(write.Start), true
+// xidFirstTaggedWrite indexes transaction's first statement whose command tag says it wrote rows
+// (XidStatement.Wrote), or -1 when none does.
+func xidFirstTaggedWrite(transaction XidTransaction) int {
+	return slices.IndexFunc(transaction.Statements, func(s XidStatement) bool { return s.Wrote })
 }
 
 // xidVerb classifies a statement as one that opens or ends a transaction. A savepoint's "rollback

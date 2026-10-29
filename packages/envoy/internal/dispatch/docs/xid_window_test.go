@@ -82,6 +82,55 @@ func TestXidWindowRigCatchesAGapAfterTheFirstWrite(t *testing.T) {
 	t.Logf("the rig's verdict on a 20 ms gap after the write:\n%v", err)
 }
 
+// A write phase too quick for a poll is judged all the same: the rig reads the command tag of
+// every statement, and a tag that says rows were written says the transaction held an xid from
+// that statement on. With the poller blind for the whole operation (one poll before the
+// transaction began and none after it), the same two transactions are judged as the polls judge
+// them - the back-to-back one passes with its window at the insert, and the one that spends 20 ms
+// in Go after that insert breaks D6 - and neither is a rig problem.
+func TestXidWindowRigJudgesAWritePhaseNoPollSawByItsCommandTags(t *testing.T) {
+	for _, judged := range []struct {
+		name string
+		gap  time.Duration
+	}{{name: "back to back"}, {name: "a 20 ms gap after the write", gap: 20 * time.Millisecond}} {
+		t.Run(judged.name, func(t *testing.T) {
+			_, database, tracer := xidService(t)
+			// Past any span this operation can take, so every poll but the one before the
+			// transaction began is left unsent.
+			tracer.PollInterval = time.Hour
+			report := tracer.Measure(t, database.Pool, func() {
+				runRigTransaction(t, database, judged.gap)
+			})
+			if len(report.Problems) > 0 {
+				t.Fatalf("the rig reported %v, want a verdict from the command tags", report.Problems)
+			}
+			if len(report.Windows) != 1 {
+				t.Fatalf("windows = %d, want the one transaction judged by its tags", len(report.Windows))
+			}
+			window := report.Windows[0]
+			if !window.Transaction.Sighted.IsZero() {
+				t.Fatalf("a poll saw the xid at %v, so the test proves nothing about the tags", window.Transaction.Sighted)
+			}
+			if !strings.Contains(window.Statements[0].SQL, "insert into projects") {
+				t.Fatalf("the window starts at %q, want the insert whose tag says it wrote:\n%s", window.Statements[0].SQL, window.Detail())
+			}
+			err := report.Err()
+			if judged.gap == 0 {
+				if err != nil {
+					t.Fatalf("a back-to-back transaction judged by its tags broke D6: %v", err)
+				}
+				t.Logf("%s\n%s", window.Summary(), window.Detail())
+				return
+			}
+			if err == nil || !strings.Contains(err.Error(), "XID WINDOW VIOLATION") ||
+				!strings.Contains(err.Error(), "follows statement 0: insert into projects") {
+				t.Fatalf("a 20 ms gap after the write: verdict %v, want a D6 violation after the insert", err)
+			}
+			t.Logf("the rig's verdict on a 20 ms gap no poll saw:\n%v", err)
+		})
+	}
+}
+
 // runRigTransaction runs, under a marked context, a transaction that reads, spends 20 ms in Go
 // before its first write, writes, waits gap, reads twice more and commits.
 func runRigTransaction(t *testing.T, database *store.Store, gap time.Duration) {

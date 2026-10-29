@@ -70,7 +70,7 @@ func TestTablesRenderTheSamplersAndTheirFailedReads(t *testing.T) {
 		Config:    summaryConfig{Step: "new"},
 		Events:    eventsSummary{DeliveryMsFromSent: stat{N: 3, P50: 120, P99: 900}},
 		Resources: &resourcesSummary{XIDsPerS: &xids},
-		SSE:       sseSummary{Frames: 1200, OrderViolations: 2, FrameMsFromCreatedAt: stat{N: 1200, P50: 40, P99: 300}, FrameMsFromWriteResponse: stat{N: 400, P50: 5, P99: 60}},
+		Live:      liveSummary{Frames: 1200, OrderViolations: 2, FrameMsFromCreatedAt: stat{N: 1200, P50: 40, P99: 300}, FrameMsFromWriteResponse: stat{N: 400, P50: 5, P99: 60}},
 		UngrantedLocks: ungrantedSummary{Samples: 100, ShareWithAny: 0.97, Groups: []ungrantedGroup{{
 			LockType: "advisory", Target: "commit_order_lock", Mode: "ExclusiveLock", WaitersP50: 12, WaitersMax: 40, ShareWithWaiter: 0.96,
 			TopPairs: []waitPair{{WaiterQuery: "select a | b", BlockerQuery: "", Count: 800}},
@@ -94,7 +94,7 @@ func TestTablesRenderTheSamplersAndTheirFailedReads(t *testing.T) {
 	md := renderTables([]stepData{{name: "failed", sum: failed}, {name: "new", sum: cur}, {name: "off", sum: off}})
 
 	for _, c := range []struct{ title, failed, cur string }{
-		{"Delivery from sending, and SSE frames", "| failed | - | - | - | 0 | 0 |", "| new | 120 / 900 | 40 / 300 | 5 / 60 | 1,200 | 2 |"},
+		{"Delivery from sending, and live socket frames", "| failed | - | - | - | 0 | 0 |", "| new | 120 / 900 | 40 / 300 | 5 / 60 | 1,200 | 2 |"},
 		{"Commit-order lock", "| failed (1 failed read) | - | - | - | - | - |", "| new | - | - | - | - | - |"},
 		{"Ungranted locks", "| failed (160 failed reads) | - | - | - |", `| new | 97% | advisory commit_order_lock ExclusiveLock 96%, 12 / 40 | select a \| b → (none) (800) |`},
 		{"Transaction ids", "| failed | - |", "| new | 412.3 |"},
@@ -205,10 +205,10 @@ func TestTablesDoNotShowUnreadCommitsAsZero(t *testing.T) {
 		Config:    summaryConfig{Step: "read", EventsPerS: 1},
 		Events:    eventsSummary{Committed: 30, CommittedPerS: 1, DeliveryMsFromSent: stat{N: 60, P50: 120, P99: 900}},
 		Resources: &resourcesSummary{DispatchCPUSPerOp: &perOp},
-		SSE:       sseSummary{Frames: 40, FrameMsFromWriteResponse: stat{N: 30, P50: 5, P99: 60}},
+		Live:      liveSummary{Frames: 40, FrameMsFromWriteResponse: stat{N: 30, P50: 5, P99: 60}},
 	}}
 	// What run.go writes for a step whose commit rows were not read: no delivery latency, no CPU
-	// per operation, and its SSE frames from created_at, which need no commit row.
+	// per operation, and its live frames from created_at, which need no commit row.
 	unread := stepData{name: "foreign-notrigger", sum: summary{
 		Config: summaryConfig{Step: "foreign-notrigger", EventsPerS: 1, Sessions: 10},
 		Events: eventsSummary{
@@ -221,7 +221,7 @@ func TestTablesDoNotShowUnreadCommitsAsZero(t *testing.T) {
 			CommitsError: `read loadtest.event_commits (is commit-trigger.sql installed?): ERROR: relation "loadtest.event_commits" does not exist (SQLSTATE 42P01)`,
 		},
 		Resources: &resourcesSummary{},
-		SSE:       sseSummary{Frames: 40, FrameMsFromCreatedAt: stat{N: 40, P50: 30, P99: 80}},
+		Live:      liveSummary{Frames: 40, FrameMsFromCreatedAt: stat{N: 40, P50: 30, P99: 80}},
 	}}
 	md := renderTables([]stepData{read, unread})
 
@@ -252,7 +252,7 @@ func TestTablesDoNotShowUnreadCommitsAsZero(t *testing.T) {
 		{"Events, delivery and requests", []int{5, 6, 7}},
 		{"Write latency by kind", nil},
 		{"Resources", []int{15}},
-		{"Delivery from sending, and SSE frames", []int{1, 3}},
+		{"Delivery from sending, and live socket frames", []int{1, 3}},
 	} {
 		text := section(md, c.title)
 		cells := rowCells(text, "foreign-notrigger")
@@ -273,8 +273,8 @@ func TestTablesDoNotShowUnreadCommitsAsZero(t *testing.T) {
 		}
 	}
 	// The cells that do not depend on the commit rows keep their values.
-	if cells := rowCells(section(md, "Delivery from sending, and SSE frames"), "foreign-notrigger"); cells[2] != "30 / 80" || cells[4] != "40" {
-		t.Errorf("the unread step's SSE frames and their latency from created_at: %q", cells)
+	if cells := rowCells(section(md, "Delivery from sending, and live socket frames"), "foreign-notrigger"); cells[2] != "30 / 80" || cells[4] != "40" {
+		t.Errorf("the unread step's live frames and their latency from created_at: %q", cells)
 	}
 	if cells := rowCells(section(md, "Events, delivery and requests"), "foreign-notrigger"); cells[3] != "1.00 / 1.03 / -" {
 		t.Errorf("the unread step's events/s: %q, want the target and offered rates and - committed", cells[3])

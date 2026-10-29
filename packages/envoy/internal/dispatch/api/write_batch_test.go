@@ -10,9 +10,9 @@ import (
 	"github.com/sjawhar/envoy/internal/dispatch/store/storetest"
 )
 
-// writeStatement is a statement that writes, or locks a row, and so may give its transaction a
-// transaction id: the first one a transaction runs opens its write phase.
-var writeStatement = regexp.MustCompile(`(?is)\b(insert\s+into|update\s+\S+\s+set|delete\s+from)\b|\bfor\s+(no\s+key\s+)?update\b`)
+// batchWriteStatement is a statement that writes, or locks a row, and so may give its transaction
+// a transaction id: the first one a transaction runs opens its write phase.
+var batchWriteStatement = regexp.MustCompile(`(?is)\b(insert\s+into|update\s+\S+\s+set|delete\s+from)\b|\bfor\s+(no\s+key\s+)?update\b`)
 
 // requireOneWriteBatch finds, among the committed transactions report saw the request run, the one
 // whose statements append an event, and requires that everything it ran from its first write on
@@ -42,7 +42,7 @@ func requireOneWriteBatch(t *testing.T, report *storetest.XidReport, writes ...s
 	statements := appending[0].Statements
 	first := -1
 	for index, statement := range statements {
-		if writeStatement.MatchString(statement.SQL) {
+		if batchWriteStatement.MatchString(statement.SQL) {
 			first = index
 			break
 		}

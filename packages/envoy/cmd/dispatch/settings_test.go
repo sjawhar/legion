@@ -44,6 +44,7 @@ import (
 	"github.com/sjawhar/envoy/internal/dispatch/store"
 	"github.com/sjawhar/envoy/internal/dispatch/store/storetest"
 	"github.com/sjawhar/envoy/internal/githubappjwt"
+	"github.com/sjawhar/envoy/internal/logtest"
 	"github.com/sjawhar/envoy/internal/oidc/oidctest"
 	"github.com/sjawhar/envoy/internal/testsocks5"
 )
@@ -297,11 +298,13 @@ func envoyJSONHome(t *testing.T) string {
 // (the GitHub App, the store, the dashboard origin) and nil elsewhere.
 func routerFor(t *testing.T, boot bootConfig, built routes.AppContextOptions) http.Handler {
 	t.Helper()
+	built.Lifetime = t.Context()
 	appCtx, err := appContextFor(boot, built)
 	if err != nil {
 		t.Fatalf("build the router: %v", err)
 	}
-	handler, _ := routes.New(appCtx)
+	handler, background := routes.New(appCtx)
+	t.Cleanup(background.Wait)
 	return handler
 }
 
@@ -382,14 +385,15 @@ func signInPool(t *testing.T, clientID, clientSecret string) *oidctest.Issuer {
 }
 
 // signInRouter is the router main serves for boot over people, with the sign-in pool's code flow
-// main builds from boot's DISPATCH_SIGNIN_* settings (signInFlow).
+// main builds from boot's DISPATCH_SIGNIN_* settings (signInFlow), and a store of its own, whose
+// event log's head GET /auth/whoami answers.
 func signInRouter(t *testing.T, boot bootConfig, people auth.PeopleStore) http.Handler {
 	t.Helper()
 	flow := signInFlow(boot)
 	if flow == nil {
 		t.Fatalf("boot configures no sign-in pool: %+v", boot)
 	}
-	return routerFor(t, boot, routes.AppContextOptions{SignIn: flow, People: people})
+	return routerFor(t, boot, routes.AppContextOptions{SignIn: flow, People: people, Store: storetest.Open(t)})
 }
 
 // startSignIn answers GET /auth/start from handler: the redirect to the pool's authorization
@@ -601,7 +605,7 @@ func TestEverySettingReachesItsReader(t *testing.T) {
 				request := httptest.NewRequest(http.MethodGet, "/auth/whoami", nil)
 				request.Header.Set("X-Dispatch-User", "Alice@Example.com")
 				response := httptest.NewRecorder()
-				routerFor(t, header, routes.AppContextOptions{People: peopleStore(t)}).ServeHTTP(response, request)
+				routerFor(t, header, routes.AppContextOptions{People: peopleStore(t), Store: storetest.Open(t)}).ServeHTTP(response, request)
 				if response.Code != http.StatusOK || !strings.Contains(response.Body.String(), `"login":"alice@example.com"`) {
 					t.Errorf("DISPATCH_IDENTITY=header:X-Dispatch-User: GET /auth/whoami answered %d %s, want alice@example.com", response.Code, response.Body.String())
 				}
@@ -1531,15 +1535,18 @@ func TestEverySettingReachesItsReader(t *testing.T) {
 			if boot := resolveWith(t, map[string]string{"DISPATCH_TEST_HOOKS": "true"}); boot.TestHooksEnabled {
 				t.Error("DISPATCH_TEST_HOOKS=true: hooks on, want only 1 to mount them")
 			}
-			// The routes the flag mounts: the e2e harness's hook that drops every open event stream.
+			// The routes the flag mounts: the e2e harness's hooks that close every open live socket, as
+			// a restart (1012) or the socket's age (4001) does.
 			t.Run("router", func(t *testing.T) {
-				for value, want := range map[string]int{"1": http.StatusOK, "": http.StatusNotFound} {
-					request := signedIn(t, httptest.NewRequest(http.MethodPost, "/api/v1/events/_test/disconnect", nil), "alice")
-					request.Header.Set("Sec-Fetch-Site", "same-origin")
-					response := httptest.NewRecorder()
-					routerFor(t, resolveWith(t, map[string]string{"DISPATCH_TEST_HOOKS": value}), routes.AppContextOptions{}).ServeHTTP(response, request)
-					if response.Code != want {
-						t.Errorf("DISPATCH_TEST_HOOKS=%q: POST /api/v1/events/_test/disconnect answered %d %s, want %d", value, response.Code, response.Body.String(), want)
+				for _, hook := range []string{"/api/v1/live/_test/disconnect", "/api/v1/live/_test/rotate"} {
+					for value, want := range map[string]int{"1": http.StatusOK, "": http.StatusNotFound} {
+						request := signedIn(t, httptest.NewRequest(http.MethodPost, hook, nil), "alice")
+						request.Header.Set("Sec-Fetch-Site", "same-origin")
+						response := httptest.NewRecorder()
+						routerFor(t, resolveWith(t, map[string]string{"DISPATCH_TEST_HOOKS": value}), routes.AppContextOptions{}).ServeHTTP(response, request)
+						if response.Code != want {
+							t.Errorf("DISPATCH_TEST_HOOKS=%q: POST %s answered %d %s, want %d", value, hook, response.Code, response.Body.String(), want)
+						}
 					}
 				}
 			})
@@ -1656,9 +1663,7 @@ func answersSharedToken(response *httptest.ResponseRecorder) bool {
 func sharedAgentTokenListReachesTheAPIAndTheDocumentWebsocket(t *testing.T) {
 	// The server's request goroutines write the log while the test reads it.
 	var logged cmdtest.LockedBuffer
-	previous := slog.Default()
-	slog.SetDefault(slog.New(slog.NewJSONHandler(&logged, nil)))
-	t.Cleanup(func() { slog.SetDefault(previous) })
+	logtest.SetDefault(t, slog.NewJSONHandler(&logged, nil))
 	previousTokenLines := func() []map[string]any {
 		t.Helper()
 		var lines []map[string]any
