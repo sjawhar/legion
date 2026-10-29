@@ -2,28 +2,21 @@
   "schemaVersion": 1,
   "phase": "review",
   "issue": "INFRA-520",
-  "completed": "2026-10-28T23:15:40Z",
-  "round": 5,
-  "reviewedHead": "8d2720de4203ee00bc15545c94731d4f229e3fc7 (code head bb1a700af2f3, the merge of main c24ea568)",
-  "decision": "approved",
+  "completed": "2026-10-29T01:57:10Z",
+  "round": 6,
+  "reviewedHead": "1eb5d1a1f479c94d84fed0366be83c7e45653973 (code head bb1a700af2f3; unchanged since my approval 5690941387 at a39e93dc)",
+  "decision": "changes_requested",
   "critical": 0,
-  "important": 0,
-  "minor": 2,
+  "important": 1,
+  "minor": 0,
   "keyFindings": [
     {
-      "severity": "minor",
-      "file": ".github/scripts/ci_job_reads.py:422,438,537",
-      "description": "Three citations still say harness-listeners.ts:74; main's #2323 moved the run-server.sh argv to line 50 (the new gate at :557 cites :50). Text in the check's explanations only; no behaviour."
-    },
-    {
-      "severity": "minor",
-      "file": ".github/workflows/ci.yaml:2075 (dispatch-browser-multiprocess service)",
-      "description": "Not a defect: the port runs the job on the pgvector-on-18 digest 2358fcba where main's copy uses the pg16 digest 7b822b0a. Main's #2364 (merged 13:59Z, before #2323 at 19:56Z) moved every job but the postgres-16 ones to 18 ('CI, tests and dev databases run pgvector on 18'), so main's digest is a leftover of #2323's older branch; the port aligns with #2364."
+      "severity": "important",
+      "file": ".github/workflows/ci.yaml (conflict with main be4567e3)",
+      "description": "GitHub reports #2316 CONFLICTING/DIRTY at 1eb5d1a1. `git merge-tree` against main be4567e3: modify/delete on pr-and-main.yaml and envoy-and-contracts.yaml, and a content conflict in .dispatch/architecture/release-engineering.md. Main's #2476 removes the three Postgres 16 jobs (Daemon, Dispatch and Broker Go suites on production's Postgres 16) now that production runs Postgres 18; #2278 gives pi-envoy a NATS service and LEGION_TEST_NATS_URL for extensions/card-delivery-omp.test.ts. Merge main; in ci.yaml remove the three Postgres 16 jobs with their filters, outputs, ci-ok needs and SELECTED_BY entries, their gates in ci_job_reads.py and the header's go-daemon mention, and add #2278's service, env and comment to pi-envoy (adding LEGION_TEST_NATS_URL is already in ENV_ALLOWED); keep both replaced workflows deleted; required checks green at the new head."
     }
   ],
-  "port": "Merge bb1a700a carries every edit main made to the deleted envoy-and-contracts.yaml into ci.yaml: #2323 asset-size step, dispatch-browser-multiprocess job (own filter = *dispatch + the dev-oidc-issuer closure, which the default dispatch job never builds), dispatch/dashboard in dispatch_server and docs-pages.yaml; #2331 envoy-session-stall job and filter, patches/** through *bun_install; #2369 loadtest steps in envoy-go. Both new jobs are in ci-ok needs and SELECTED_BY with gates in ci_job_reads.py; neither writes a cache on pull_request. AGENTS.md keeps both sides; release.yaml takes main's hunk. Boundary sentence for a \\r in a pinned repository script added (architect's narrowing).",
-  "ci": "Required set (rulesets): lint, typecheck, test, pr-title. Newest pull_request CI head bb1a700a: lint success 22:56Z, test success 23:06Z, typecheck success 23:13Z, pr-title success 22:00Z. Compare bb1a700a...8d2720de: handoffsOnly true, 2 files. Other router jobs still queued at 23:14Z (not required until the ruleset flip).",
-  "checks": "check-ci-filters.sh on a copy of 8d2720de: 26 gates, 0 uncovered (both review agents); removing internal/broker/enroll/* from dispatch_browser_multiprocess fails it with 7 files (deep reviewer); check-ci-filters.test.sh 131/131, ci-ok.test.sh 42/42, check-image-trigger-paths.sh and check-action-pins.sh pass.",
-  "threads": "12 threads, all answered by me and resolved by the implementer; none opened by a bot.",
-  "thermonuclear": "deep review APPROVE at 8d2720de; code quality APPROVE at 8d2720de (one Low: the stale :74 citations)."
+  "fullRouterRun": "Run 40768558349 at bb1a700a completed 01:06:29Z: changes success, every filter selected; 29 of 30 selected jobs succeeded; dispatch failed on 5 Playwright tests, close-withdraws-asks.e2e.ts:126 (chromium) and mermaid.e2e.ts:194 (chromium, firefox, iphone, webkit), both recorded by the INFRA controller as main's reds (comments b496016d, 0fa89be5); ci-ok failed naming dispatch alone, as its rule requires.",
+  "ci": "Required set: lint, typecheck, test, pr-title, all success at bb1a700a; but the head now conflicts with main, so it cannot merge and GitHub runs no new checks until the merge.",
+  "thermonuclear": "Not run this round: no code changed since round 5's pair (both APPROVE at 8d2720de, same code head bb1a700a)."
 }
