@@ -139,15 +139,19 @@ program's keeper every 30 seconds after, raises a bucket with fewer copies than
 above 1, so the programs that use it run with `ENVOY_NATS_REPLICAS` unset or 1 (the hub's own
 listener sets none), and at 1 neither sends a raise.
 
-`ListenerPermissions` also holds the session consumers' calls on every consumer of the stream
+`ListenerPermissions` alone holds the session consumers' calls on every consumer of the stream
 (`$JS.API.CONSUMER.CREATE`, `INFO`, `DELETE` and `MSG.NEXT` on `ENVOY_NOTIFICATIONS.*`, the create
 with a filter subject on `ENVOY_NOTIFICATIONS.*.>`, `$JS.ACK.ENVOY_NOTIFICATIONS.*.>`, and the
 stream's consumer list `$JS.API.CONSUMER.LIST.ENVOY_NOTIFICATIONS`, which a listener that starts
-relaying every session at once reads instead of one info each), with
-which a listener keeps one pull consumer per session, and subscribes to the role lanes in the queue
-group every listener shares, `envoy-roles`, beside its machine's own. A NATS wildcard is a whole
-token, so those entries reach every consumer of the stream, other listeners' and Dispatch's
-included; that risk is accepted, since the listener, Dispatch and host users are the trusted users.
+relaying every session at once reads instead of one info each), with which a listener keeps one
+pull consumer per session. A NATS wildcard is a whole token, so those entries reach every consumer
+of the stream, other listeners' and Dispatch's included, which is why only a hub's own `listener`
+holds them: `HostPermissions` and `DispatchPermissions` keep their per-durable scope and hold
+none. A listener connecting as a `machineId` or a `dispatchMachineId` user therefore keeps its own
+durable alone and answers every registration that asks for consumer delivery `core` with the
+reason `no_grant`, and those sessions receive on their own NATS subscriptions and catch up through
+the listener's `POST /v1/replay`. All three sets subscribe to the role lanes in the queue group
+every listener shares, `envoy-roles`, beside the machine's own, since each user runs a listener.
 
 `nkey` is the public key `envoy-infra seed generate` prints, and the seed stays in the secret
 store it wrote (see [NATS seeds](../README.md#nats-seeds)): a host's listener reads it from there
@@ -528,14 +532,16 @@ new template. So does a plugin release that changes the rendering itself: the re
 so upgrading to it replaces every existing hub's VM once, with the outage below, even a hub that
 sets neither input. The release that rendered `ENVOY_ALLOWED_HOSTS` into the listener's unit
 replaced, once and with that same outage, the VM of every hub that runs a listener, and no hub
-without one. This release adds `$JS.API.STREAM.MSG.GET.ENVOY_NOTIFICATIONS`, the session
-consumers' entries, the `envoy-roles` role-lane subscription and, for each key-value bucket the
-set opens, `$JS.API.STREAM.UPDATE.KV_<bucket>` to `ListenerPermissions`, and so to
-`HostPermissions` and `DispatchPermissions` (which also gains the update for the webhook
-redelivery bucket); that changes the rendered users of every hub with a `listener`, a `machineId`
-user or a `dispatchMachineId` user: moving such a hub to it replaces its VM once, with the outage
-below, and a hub with none of them keeps its VM. The cloud-config is the instance template's
-`user-data`, and a template cannot
+without one. This release adds `$JS.API.STREAM.MSG.GET.ENVOY_NOTIFICATIONS`, the `envoy-roles`
+role-lane subscription and, for each key-value bucket the set opens,
+`$JS.API.STREAM.UPDATE.KV_<bucket>` to `ListenerPermissions`, and so to `HostPermissions` and
+`DispatchPermissions` (which also gains the update for the webhook redelivery bucket), and the
+session consumers' entries to `ListenerPermissions` alone, so a hub's own `listener` user gains
+them while its `machineId` and `dispatchMachineId` users keep their per-durable scope; that
+changes the rendered users of every hub with a `listener`, a `machineId` user or a
+`dispatchMachineId` user: moving such a hub to it replaces its VM once, with the outage below, and
+a hub with none of them keeps its VM. The cloud-config is the instance template's `user-data`, and
+a template cannot
 change. The group then replaces its VM at once (`PROACTIVE`, minimal action `REPLACE`), deleting
 it before it creates the next (`RECREATE`, no surge, at most one unavailable). NATS is down from
 the old VM's stop until the new one's `nats` unit starts, and its clients reconnect then. The new

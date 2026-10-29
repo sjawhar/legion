@@ -16,9 +16,11 @@ Envoy owns transport, routing, delivery, and the native Dispatch event path:
   session that asks for it at registration, and every serve-port session, gets a durable consumer
   of its own, which the listener that owns the session relays in stream order and acknowledges
   only once the session took each message ("Session consumers" below). A self-subscribed session
-  without one (an older plugin, or a hub whose grant lacks the session consumers) stays on the
-  core path: the listener skips its push to it (`internal/session/session.go`), and it reads back
-  what it missed while its subscriptions were down from the stream through `POST /v1/replay`
+  without one (an older plugin, or a listener whose NATS user lacks the session consumers' grant:
+  `envoy-infra` renders it for a hub's own `listener` user alone, never for a `machineId` or
+  `dispatchMachineId` user) stays on the core path: the listener skips its push to it
+  (`internal/session/session.go`), and it reads back what it missed while its subscriptions were
+  down from the stream through `POST /v1/replay`
   ("Listener API")
 - publishes retained `notifications.dispatch.issue.<KEY>.<type>`,
   `notifications.dispatch.document.<PROJECT>.<slug>.<type>`, and

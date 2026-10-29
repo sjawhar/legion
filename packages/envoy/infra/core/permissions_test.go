@@ -11,14 +11,14 @@ import (
 	"github.com/sjawhar/envoy/infra/core"
 )
 
-// listenerPublish is the listener's publish grant for example-host-a, written out by hand from
-// Envoy's names as they stand: every notification topic (the stream's subjects, the role lanes,
-// every exception lane and any ad-hoc topic), the stream (its stored-message get the read
-// /v1/replay makes) and its durable, every consumer of the stream (the session consumers' create,
-// info, delete, pull and acknowledgements), then each bucket in turn, then the interest bucket's
-// purge. TestSessionPermissions's exact list holds none of it: no session gets the replay read or a
-// consumer.
-var listenerPublish = []string{
+// listenerBasePublish is the publish grant every user that runs a listener holds for
+// example-host-a, written out by hand from Envoy's names as they stand: every notification topic
+// (the stream's subjects, the role lanes, every exception lane and any ad-hoc topic), the stream
+// (its stored-message get the read /v1/replay makes) and its own durable, then each bucket in
+// turn, then the interest bucket's purge. HostPermissions and DispatchPermissions are built on it,
+// so neither holds a session consumer's call. TestSessionPermissions's exact list holds none of
+// it: no session gets the replay read or a consumer.
+var listenerBasePublish = []string{
 	"notifications.>",
 	"$JS.API.STREAM.INFO.ENVOY_NOTIFICATIONS",
 	"$JS.API.STREAM.CREATE.ENVOY_NOTIFICATIONS",
@@ -27,13 +27,6 @@ var listenerPublish = []string{
 	"$JS.API.CONSUMER.INFO.ENVOY_NOTIFICATIONS.listener-example-host-a",
 	"$JS.API.CONSUMER.CREATE.ENVOY_NOTIFICATIONS.listener-example-host-a",
 	"$JS.ACK.ENVOY_NOTIFICATIONS.listener-example-host-a.>",
-	"$JS.API.CONSUMER.CREATE.ENVOY_NOTIFICATIONS.*",
-	"$JS.API.CONSUMER.CREATE.ENVOY_NOTIFICATIONS.*.>",
-	"$JS.API.CONSUMER.INFO.ENVOY_NOTIFICATIONS.*",
-	"$JS.API.CONSUMER.DELETE.ENVOY_NOTIFICATIONS.*",
-	"$JS.API.CONSUMER.MSG.NEXT.ENVOY_NOTIFICATIONS.*",
-	"$JS.API.CONSUMER.LIST.ENVOY_NOTIFICATIONS",
-	"$JS.ACK.ENVOY_NOTIFICATIONS.*.>",
 	"$JS.API.INFO",
 	"$JS.API.STREAM.INFO.KV_envoy_interests",
 	"$JS.API.STREAM.CREATE.KV_envoy_interests",
@@ -73,6 +66,23 @@ var listenerPublish = []string{
 	"$JS.FC.KV_envoy_ci_state.>",
 	"$JS.API.STREAM.PURGE.KV_envoy_interests",
 }
+
+// sessionConsumerPublish are the session consumers' calls (create with and without a filter
+// subject, info, delete, pull and acknowledgements on any consumer of the stream, and the stream's
+// consumer list), which ListenerPermissions alone adds to the base grant.
+var sessionConsumerPublish = []string{
+	"$JS.API.CONSUMER.CREATE.ENVOY_NOTIFICATIONS.*",
+	"$JS.API.CONSUMER.CREATE.ENVOY_NOTIFICATIONS.*.>",
+	"$JS.API.CONSUMER.INFO.ENVOY_NOTIFICATIONS.*",
+	"$JS.API.CONSUMER.DELETE.ENVOY_NOTIFICATIONS.*",
+	"$JS.API.CONSUMER.MSG.NEXT.ENVOY_NOTIFICATIONS.*",
+	"$JS.API.CONSUMER.LIST.ENVOY_NOTIFICATIONS",
+	"$JS.ACK.ENVOY_NOTIFICATIONS.*.>",
+}
+
+// listenerPublish is the listener's own publish grant: the base grant, then the session consumers'
+// calls.
+var listenerPublish = append(append([]string{}, listenerBasePublish...), sessionConsumerPublish...)
 
 // listenerSubscribe is the listener's subscribe grant for example-host-a: reply inboxes, then the
 // role lanes in the machine's queue group and in the one every listener shares.
@@ -146,17 +156,21 @@ func admitsInbox(entry string) bool {
 	return first == "_INBOX" || first == "*" || first == ">"
 }
 
+// The host's user runs a listener and holds every session's entries, and no session consumer's
+// call: a listener connecting as it keeps its own durable alone.
 func TestHostPermissionsAreTheListenersThenTheSessions(t *testing.T) {
 	require.Equal(t, core.Permissions{
-		Publish: core.Rules{Allow: append(append([]string{}, listenerPublish...), "_INBOX.>", "agentstream.*.frames")},
+		Publish: core.Rules{Allow: append(append([]string{}, listenerBasePublish...), "_INBOX.>", "agentstream.*.frames")},
 		Subscribe: core.Rules{Allow: append(append([]string{}, listenerSubscribe...),
 			"notifications.>", "agentstream.*.control",
 		)},
 	}, core.HostPermissions("example-host-a"))
 }
 
+// Dispatch's user is built on the same base grant, so it holds its own durables' per-durable
+// entries and no session consumer's call.
 func TestDispatchPermissions(t *testing.T) {
-	dispatchPublish := append(append([]string{}, listenerPublish...),
+	dispatchPublish := append(append([]string{}, listenerBasePublish...),
 		"$JS.API.CONSUMER.INFO.ENVOY_NOTIFICATIONS.delivery-events",
 		"$JS.API.CONSUMER.CREATE.ENVOY_NOTIFICATIONS.delivery-events.>",
 		"$JS.API.CONSUMER.DELETE.ENVOY_NOTIFICATIONS.delivery-events",
@@ -184,6 +198,23 @@ func TestDispatchPermissions(t *testing.T) {
 	}
 	got := core.DispatchPermissions("example-host-a")
 	require.Equal(t, want, got)
+}
+
+// The session consumers' calls belong to the listener's set alone: a user built on the same base
+// grant, Dispatch's or a host's, holds none of them, nor does a session's, so a listener
+// connecting as one of those users keeps its own durable alone and serves its sessions over core
+// NATS.
+func TestOnlyTheListenerSetHoldsTheSessionConsumersCalls(t *testing.T) {
+	require.Subset(t, core.ListenerPermissions("example-host-a").Publish.Allow, sessionConsumerPublish)
+	for name, p := range map[string]core.Permissions{
+		"host":     core.HostPermissions("example-host-a"),
+		"dispatch": core.DispatchPermissions("example-host-a"),
+		"session":  core.SessionPermissions(),
+	} {
+		for _, entry := range sessionConsumerPublish {
+			require.NotContains(t, p.Publish.Allow, entry, "the %s set publishes %q", name, entry)
+		}
+	}
 }
 
 // nats-server takes a repeated entry, so a duplicate would be noise in every rendered block; none of

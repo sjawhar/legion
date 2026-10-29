@@ -109,10 +109,15 @@ func TestHostPermissionsOnRealServers(t *testing.T) {
 
 				// The same topic, published by a session over its own connection, which the listener's
 				// /v1 never sees, reaches a session served on this machine through the listener's
-				// subscription to every notification topic.
+				// subscription to every notification topic. The host's set holds no session
+				// consumer's call, so the registration is answered core, reason no_grant, and the
+				// serving session is pushed from the listener's own durable, as before consumer
+				// delivery.
 				serving := startServingPort(t, liveServingSession)
-				postListener(t, process, port, "/v1/interests/subscribe", `{"session_id":"`+liveServingSession+
+				answer := postListener(t, process, port, "/v1/interests/subscribe", `{"session_id":"`+liveServingSession+
 					`","topics":["notifications.team.deploy-squad"],"port":`+strconv.Itoa(serving.port)+`,"host":"127.0.0.1"}`)
+				require.Contains(t, answer, `"mode":"core"`, "the registration's answer: %s", answer)
+				require.Contains(t, answer, `"reason":"no_grant"`, "the registration's answer: %s", answer)
 				item := contracts.Envelope{
 					EventID:        "evt-live-topics",
 					Source:         "agent",
@@ -134,22 +139,26 @@ func TestHostPermissionsOnRealServers(t *testing.T) {
 				// Every allowed operation came first, so a violation for one would be the first error.
 				require.NoError(t, conn.Publish("outside.example", nil))
 				requireViolation(t, conn, errs, `Publish to "outside.example"`)
-				// The server refused nothing else either, the listener's own operations included. Its
-				// log names the refusal just made before that reading counts: one that found no
-				// violation at all would pass for the wrong reason.
+				// The server refused nothing else either, the listener's own operations included,
+				// beside the session consumers' calls this set does not hold, which the listener
+				// probes once an episode (its consumer list when it gains the durable, and the
+				// registration's consumer info). Its log names the refusal just made before that
+				// reading counts: one that found no violation at all would pass for the wrong
+				// reason.
 				for _, v := range violationsOnceLogged(t, server, "outside.example") {
-					require.Equal(t, "outside.example", v[2], "the server refused what the grant should allow: %s", v[0])
+					require.True(t, v[2] == "outside.example" || sessionConsumerCall(v[2]),
+						"the server refused what the grant should allow: %s", v[0])
 				}
 			})
 			t.Run("without its durable's consumer create the listener never reaches healthy", func(t *testing.T) {
 				t.Parallel()
-				// The durable's own entry and the session consumers' wildcard both grant its create.
+				// The host's set holds the durable's own create and no session consumer's
+				// wildcard, so removing that one entry leaves the durable uncreatable.
 				const removed = "$JS.API.CONSUMER.CREATE.ENVOY_NOTIFICATIONS.listener-example-host-a"
-				const wildcard = "$JS.API.CONSUMER.CREATE.ENVOY_NOTIFICATIONS.*"
 				grant := core.HostPermissions(liveMachineID)
 				held := len(grant.Publish.Allow)
-				grant.Publish.Allow = slices.DeleteFunc(grant.Publish.Allow, func(entry string) bool { return entry == removed || entry == wildcard })
-				require.Len(t, grant.Publish.Allow, held-2, "the grant does not hold both %s and %s", removed, wildcard)
+				grant.Publish.Allow = slices.DeleteFunc(grant.Publish.Allow, func(entry string) bool { return entry == removed })
+				require.Len(t, grant.Publish.Allow, held-1, "the grant does not hold %s", removed)
 
 				seed, server, uri := startGrantServer(t, image.Ref, grant)
 				process, port := startListener(t, listener, uri, seed)
@@ -602,6 +611,25 @@ func violationsOnceLogged(t *testing.T, server natsServer, subject string) [][]s
 		}
 		time.Sleep(100 * time.Millisecond)
 	}
+}
+
+// sessionConsumerCall reports whether a refused subject is one of the session consumers' calls
+// (core.ListenerPermissions holds them; the host and Dispatch sets do not): a consumer API call on
+// the stream naming a consumer other than this machine's durable, the stream's consumer list, or
+// an acknowledgement on such a consumer. A listener under a set without them probes once an
+// episode and serves its sessions over core NATS.
+func sessionConsumerCall(subject string) bool {
+	durable := bus.ListenerDurable(liveMachineID)
+	for _, call := range []string{"CREATE", "INFO", "DELETE", "MSG.NEXT"} {
+		if rest, ok := strings.CutPrefix(subject, "$JS.API.CONSUMER."+call+"."+bus.Stream+"."); ok {
+			return rest != durable && !strings.HasPrefix(rest, durable+".")
+		}
+	}
+	if subject == "$JS.API.CONSUMER.LIST."+bus.Stream {
+		return true
+	}
+	rest, ok := strings.CutPrefix(subject, "$JS.ACK."+bus.Stream+".")
+	return ok && !strings.HasPrefix(rest, durable+".")
 }
 
 // The hub's grants for session consumers, as the listener's bus client manages them: the listener's

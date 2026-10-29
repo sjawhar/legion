@@ -1,13 +1,17 @@
 kind: Added
 body: |-
-  `envoy-infra`'s `ListenerPermissions`, and through it `HostPermissions` and
-  `DispatchPermissions`, grant the session consumers' calls on any consumer of
+  `envoy-infra`'s `ListenerPermissions` grants the session consumers' calls on any consumer of
   `ENVOY_NOTIFICATIONS` (`$JS.API.CONSUMER.CREATE`, with and without a filter subject, `INFO`,
   `DELETE` and `MSG.NEXT` on `ENVOY_NOTIFICATIONS.*`, `$JS.ACK.ENVOY_NOTIFICATIONS.*.>`, and the
   stream's consumer list `$JS.API.CONSUMER.LIST.ENVOY_NOTIFICATIONS`, which a listener that starts
   relaying every session at once reads instead of one info each, a listener without it reading one
-  info per session) and subscribe on `notifications.role.> envoy-roles`, beside the machine's own
-  role-lane group.
+  info per session). A hub renders them for its own `listener` user alone: `HostPermissions` and
+  `DispatchPermissions` are built from the same base grant without them and keep their per-durable
+  scope, so a listener connecting as a `machineId` or a `dispatchMachineId` user keeps its own
+  durable alone, answers every registration that asks for consumer delivery `core` with
+  `no_grant`, and leaves those sessions on their own NATS subscriptions and `POST /v1/replay`. All
+  three sets also subscribe on `notifications.role.> envoy-roles`, beside the machine's own
+  role-lane group, since each user runs a listener.
   `SessionPermissions` does not change. The rendered users change, so moving a hub with a
   `listener`, a `machineId` user or a `dispatchMachineId` user to this release replaces its VM
   once, with NATS down until the new VM starts. A hub carries the grant only after that

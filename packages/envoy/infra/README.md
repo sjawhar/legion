@@ -2107,7 +2107,9 @@ its refusals is a `core.InputError` naming the input it refuses: `authorization`
 Envoy's subjects. Each is a `core.Permissions`, a publish and a subscribe `Rules` that a user takes
 as its `Publish` and `Subscribe`. Below, `<m>` is the machine id with each space as `-`.
 
-`ListenerPermissions(machineID)` is what `envoy-listener` needs as that machine. It publishes to:
+`ListenerPermissions(machineID)` is what `envoy-listener` needs as that machine. Every entry below
+but the session consumers' is the base `HostPermissions` and `DispatchPermissions` are built from.
+It publishes to:
 
 - every notification topic, `notifications.>`: the subjects of the `ENVOY_NOTIFICATIONS` stream,
   the role lanes, every exception lane, and the ad-hoc topics `/v1/messages/publish` sends over
@@ -2118,21 +2120,9 @@ as its `Publish` and `Subscribe`. Below, `<m>` is the machine id with each space
   `$JS.ACK.ENVOY_NOTIFICATIONS.listener-<m>.>`, and `$JS.API.INFO`. The stored-message get is the
   read `POST /v1/replay` makes to return the retained notifications a session missed while its
   NATS subscription was down; it reads one stored message at a time and can create, change or
-  delete nothing. `HostPermissions` and `DispatchPermissions` hold it through
-  `ListenerPermissions`; `SessionPermissions` does not, so a session holding that set alone reads
-  what it missed only through the listener;
-- the calls of the session consumers, one durable pull consumer per session named
-  `s-<session id>` (`bus.SessionConsumers`), on any consumer of the stream:
-  `$JS.API.CONSUMER.CREATE` (with and without a filter subject in its subject), `INFO`, `DELETE`
-  and `MSG.NEXT` on `ENVOY_NOTIFICATIONS.*`, the acknowledgements
-  `$JS.ACK.ENVOY_NOTIFICATIONS.*.>`, and the stream's consumer list
-  `$JS.API.CONSUMER.LIST.ENVOY_NOTIFICATIONS`, which a listener that starts relaying every session
-  at once reads instead of one info per session (a grant without it costs that listener one info
-  per session). A NATS wildcard is a whole token, so these entries reach every
-  consumer of the stream, other listeners' durables and Dispatch's included, and let the listener
-  create a push consumer that delivers the stream's messages to any subject; that risk is accepted,
-  since the listener, Dispatch and host users are the trusted users. The durable's own entries stay
-  beside them, so a grant without these entries still serves the listener's durable;
+  delete nothing. `HostPermissions` and `DispatchPermissions` hold it through those same base
+  entries; `SessionPermissions` does not, so a session holding that set alone reads what it missed
+  only through the listener;
 - for each key-value bucket, `envoy_interests`, `envoy_roles`, `envoy_sessions` and
   `envoy_ci_state`, the calls nats.go's key-value store makes: the info, create and update of the
   bucket's stream `KV_<bucket>`, its direct and stream message gets, `$KV.<bucket>.>`, and its
@@ -2150,6 +2140,22 @@ listener takes it, and in the machine's own group, `notifications.role.> envoy-l
 a listener of an earlier release subscribes in and a listener refused the shared group falls back
 to.
 
+After those entries, and in `ListenerPermissions` alone, come the calls of the session consumers,
+one durable pull consumer per session named `s-<session id>` (`bus.SessionConsumers`), on any
+consumer of the stream: `$JS.API.CONSUMER.CREATE` (with and without a filter subject in its
+subject), `INFO`, `DELETE` and `MSG.NEXT` on `ENVOY_NOTIFICATIONS.*`, the acknowledgements
+`$JS.ACK.ENVOY_NOTIFICATIONS.*.>`, and the stream's consumer list
+`$JS.API.CONSUMER.LIST.ENVOY_NOTIFICATIONS`, which a listener that starts relaying every session at
+once reads instead of one info per session (a grant without it costs that listener one info per
+session). A NATS wildcard is a whole token, so these entries reach every consumer of the stream,
+other listeners' durables and Dispatch's included, and let the listener create a push consumer that
+delivers the stream's messages to any subject. That reach is why no other set holds them:
+`HostPermissions` and `DispatchPermissions` keep the per-durable scope of the base entries above. A
+listener connecting as one of those users keeps its own durable alone; the server refuses its
+consumer calls, so it answers every registration that asks for consumer delivery `core` with reason
+`no_grant` (one probe and one refusal per ten-minute episode), and those sessions read on their own
+NATS subscriptions and catch up through `POST /v1/replay`.
+
 `SessionPermissions()` is what any agent session needs, with `*` for the session id. It publishes
 to `_INBOX.>`, for the receipt a role delivery waits for and the replies to a session consumer's
 relay frames, and `agentstream.*.frames`, and subscribes to `notifications.>`, which holds its relay
@@ -2160,11 +2166,12 @@ each receive every other session's replies, so request/reply from such a session
 design. A host's user, holding `HostPermissions`, subscribes to `_INBOX.>` for its listener.
 
 `HostPermissions(machineID)` is the grant of a host's one NATS user, which its listener and every
-session on the host share: in each direction the listener's entries, then each of the session's
-the listener's lack. A `gcp:NatsHub` user with `machineId` holds it, and a hub's own `listener`
-holds `ListenerPermissions` for the hub's hostname. Sharing one user makes the host one trust
-domain: any process that reaches the server as it, a listener's own process or any session on the
-host, holds the whole grant above, host sessions included, since sessions run as the Unix user
+session on the host share: in each direction the listener's base entries, the session consumers'
+left out, then each of the session's the base lacks, so a listener connecting as this user serves
+its sessions over core NATS. A `gcp:NatsHub` user with `machineId` holds it, and a hub's own
+`listener` holds `ListenerPermissions` for the hub's hostname. Sharing one user makes the host one
+trust domain: any process that reaches the server as it, a listener's own process or any session on
+the host, holds the whole grant above, host sessions included, since sessions run as the Unix user
 that already reads the host's seed. This repository's listener and a session, connected as one
 user holding `HostPermissions`, and connected as a user holding `ListenerPermissions` beside a
 credential-free session user holding `SessionPermissions`, are checked against real nats-server
@@ -2200,8 +2207,9 @@ on the server gets, key-value reads and watch updates included, such as the list
 this set; its seed belongs to the daemon, not to a host or session.
 
 `DispatchPermissions(machineID)` is the grant of Dispatch's one NATS user, shared by
-`envoy-dispatch` and the listener beside it. It adds to `ListenerPermissions(machineID)` the info,
-filtered create, delete and acknowledgements of Dispatch's `delivery-events` and `delivery-jobs`
+`envoy-dispatch` and the listener beside it. It adds to the base entries of
+`ListenerPermissions(machineID)`, the session consumers' left out, the info, filtered create,
+delete and acknowledgements of Dispatch's `delivery-events` and `delivery-jobs`
 durables; the key-value calls for `envoy_webhook_redelivery`; publication of every session's
 agent-stream control subject; and subscription to every session's agent-stream frames. A
 `gcp:NatsHub` user with `dispatchMachineId` holds it. No session shares the user, so it holds none
@@ -2210,7 +2218,7 @@ Whatever holds its seed, `envoy-dispatch` or the listener beside it, can still r
 frames and send control to any session; its filtered create on `delivery-events` lets it create
 that durable on any filter, so it can read any retained notification; and, since NATS checks no
 push consumer's deliver subject against a grant, a consumer it creates can deliver any payload onto
-a session's frames. Its `_INBOX.>` subscription, `ListenerPermissions`'s, receives every reply any
+a session's frames. Its `_INBOX.>` subscription, the base grant's, receives every reply any
 client on the server gets, other listeners' durable push deliveries included. The real
 `envoy-dispatch` runs under that grant against nats-server 2.10 and 2.15.1 in
 `core/dispatch_permissions_live_test.go`, which also checks Dispatch's own user is refused a

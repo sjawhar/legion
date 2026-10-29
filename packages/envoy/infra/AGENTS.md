@@ -320,11 +320,12 @@ on a real server: its users connect, a client with no credential is refused, the
 `core/permissions_live_test.go` (the listener, built from `packages/envoy/cmd/listener` under the
 root `go.work`, reaches `"status":"healthy"` as one user holding `HostPermissions` with
 `SubscribeAllTopics` on, a session as the same user receives a send, a role message and a publish
-to an ad-hoc topic, a session on a serving port at `127.0.0.1` receives that topic, published over
-NATS by another session, through the listener's subscription to every notification topic, and the
-server refuses nothing the set allows; without the durable's consumer create, its own entry and the
-session consumers' `CREATE.ENVOY_NOTIFICATIONS.*` both removed, the listener never
-reaches `"status":"healthy"`; as a hub with a listener renders its users, the listener reaches
+to an ad-hoc topic, a session on a serving port at `127.0.0.1` is answered `core` with the reason
+`no_grant`, since that set holds no session consumer's call, and receives that topic, published
+over NATS by another session, through the listener's subscription to every notification topic, and
+the server refuses nothing the set allows, the session consumers' calls the listener probes once
+aside; without the durable's consumer create the listener never reaches `"status":"healthy"`; as a
+hub with a listener renders its users, the listener reaches
 `"status":"healthy"` as a user holding `ListenerPermissions` while a session with no credential,
 the server's `no_auth_user` holding `SessionPermissions`, registers, receives a send, a role
 message and a publish to an ad-hoc topic, and is refused a publish to another session's subject;
