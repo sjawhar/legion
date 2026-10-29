@@ -2,32 +2,14 @@
   "schemaVersion": 1,
   "phase": "review",
   "issue": "INFRA-607",
-  "completed": "2026-10-28T23:31:55Z",
+  "completed": "2026-10-29T00:57:25Z",
   "decision": "approved",
   "reviewedCodeHead": "a56be7397f910bc0ec90d4b16fa1d73a9131bc77",
-  "round": 3,
+  "round": 4,
   "critical": 0,
   "important": 0,
-  "minor": 2,
-  "roundTwoFindings": [
-    {"thread": "PRRT_kwDORFy7ds6xVRpw", "status": "fixed in a56be739: main defers stopIntakesOnExit(cancel, waitIntakes) (cmd/dispatch/main.go:568, 637-640), which cancels before it waits; TestAPanicAfterTheIntakesStartEndsTheProcess"},
-    {"thread": "PRRT_kwDORFy7ds6xVRrU", "status": "fixed in a56be739: delivery.stopContext is armed at the start of Intake.Run and JobIntake.Run (intake.go:100, jobs.go:125) and ends intakeStopBudget after ctx ends; the reconcile's JetStream calls run under natsgo.Context(stopping) (intake.go:560-626), no subscribe starts once ctx has ended (intake.go:514-516), and StopDelivering takes the same deadline (intake.go:127); TestABindThatReturnsAfterTheSignalStopsByTheBudgetFromTheSignal; the tester froze NATS with SIGSTOP and every process exited and deregistered well inside the grace"}
-  ],
-  "thermonuclear": {
-    "deepReview": "Verdict: APPROVE at a56be739 (two Minor residuals, below)",
-    "codeQuality": "Verdict: CHANGES at a56be739, every finding cleanup-only (intake.go at 1005 lines with the durable-binding code movable to its own file; StopDelivering's multi-caller generality and the intakeDrainWait branch no production path reaches; the boundHook and panic tests guard less than their names), not raised per the architect's round decision (correctness or a red required check only)"
-  },
-  "ci": "CI head a56be739 (newest pull_request run); compare a56be739...d06d7e47 is .legion/ only (2 files). Required lint, typecheck, test and pr-title completed success at 23:31Z. The non-required Go suites (envoy-go, envoy-go-race, dispatch, the Postgres 16 Dispatch and Broker suites, the multiprocess jobs) were still queued; the Daemon Go suite passed.",
-  "keyFindings": [
-    {
-      "severity": "minor",
-      "file": "packages/envoy/internal/bus/nats.go:542",
-      "description": "DrainSubscription's awaitBindLocked has no deadline, so a restore's bind (up to 10 s) in flight when the stop begins can push the stop to about signal + 20 s in a double fault (late subscribe and a connection replacement together); handlers are still given up at signal + 15 s and the shutdown stays inside the 25 s document budget. The same wait existed in round 2's Release."
-    },
-    {
-      "severity": "minor",
-      "file": "packages/envoy/internal/dispatch/delivery/intake.go:602-609",
-      "description": "The legacy multi-subject durable replacement runs DeleteConsumer then AddConsumer under the stop deadline; a deadline between them leaves no durable, and the next holder recreates it with DeliverAll (a stream replay of idempotent upserts, not lost messages). Needs a legacy durable still present and a reconcile straddling signal + 15 s; an AddConsumer timeout already produced the same state."
-    }
-  ]
+  "minor": 0,
+  "scope": "No code changed since round 3's approval of 7c1bf2cb (code a56be739): the only commit above it is the tester's round-8 handoff (c011a67c, .legion/ only), which waited for the non-required suites at a56be739. The thermonuclear pair at a56be739 (round 3) stands; no new runtime diff to audit.",
+  "ci": "CI head a56be739 (newest pull_request run; merge ref = a56be739 + main 1767c9af); compare a56be739...c011a67c is .legion/ only. Required lint, typecheck, test, pr-title: success. Non-required: every suite green except envoy-go, envoy-go-race and the Postgres 16 Dispatch suite, each failing only internal/dispatch/pmdoc [build failed] (main's #2448 break, merge parent 1767c9af; fixed on main by #2482/#2484), with every package this PR touches passing (internal/dispatch/api 471.7 s envoy-go, 567.4 s Postgres 16, 902.6 s race under its 30 m timeout); and the dispatch browser job, red on close-withdraws-asks.e2e.ts:126 (main's, the controller's known-red list at 00:56Z) and mermaid.e2e.ts:194 (main's before #2470, which 1767c9af does not contain).",
+  "keyFindings": []
 }
