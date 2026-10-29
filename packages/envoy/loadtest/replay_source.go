@@ -169,6 +169,11 @@ type replayOptions struct {
 	from, to time.Duration
 	roster   int
 	keys     map[string]bool // nil: every issue
+	// docTexts is the current markdown of logged documents, read from the build under test
+	// before the window (readBaseTexts). The client models a document this map names from that
+	// text, not from the bundle's: a build renders a stored document its own way, and an upload
+	// sends the client's whole text. nil (loadgen replay-plan) keeps the bundle's text.
+	docTexts map[string]string
 	rngSeed  uint64
 }
 
@@ -362,6 +367,10 @@ type replayPlan struct {
 	Counts  replayPlanCounts
 	// IssueKeys are the kept issues that existed at the bundle's instant, in key order.
 	IssueKeys []string
+	// BaseDocs is the text each document the plan modelled started from, by logged id: the
+	// bundle's, or the build's own when the run read it (readBaseTexts). Documents the window
+	// creates are not in it, since no stored text precedes them.
+	BaseDocs map[string]string
 }
 
 // replayPlanCounts is what loadgen replay-plan prints: counts only.
@@ -434,7 +443,7 @@ type replayPlanner struct {
 func planReplay(b *replayBundle, o replayOptions) (*replayPlan, error) {
 	pl := &replayPlanner{
 		b: b, o: o, at: b.State.At,
-		p: &replayPlan{Project: b.State.Project, Counts: replayPlanCounts{
+		p: &replayPlan{Project: b.State.Project, BaseDocs: map[string]string{}, Counts: replayPlanCounts{
 			WritesByKind: map[string]int{}, ReadsByKind: map[string]int{}, RequestsByRoute: map[string]int{},
 			NotSent: map[string]int{}, SpecSizes: map[string]int{},
 		}},
@@ -686,8 +695,8 @@ func splitmix64(x uint64) uint64 {
 	return x
 }
 
-// doc is the client's copy of a logged document, read from the bundle on first use; nil when the
-// bundle has none.
+// doc is the client's copy of a logged document, read on first use from the build's own text when
+// the run read it (o.docTexts), else from the bundle; nil when the bundle has none.
 func (pl *replayPlanner) doc(id string) (*rpDoc, error) {
 	if d, ok := pl.docs[id]; ok {
 		return d, nil
@@ -707,14 +716,19 @@ func (pl *replayPlanner) doc(id string) (*rpDoc, error) {
 		if a.TextPath == "" {
 			return nil, nil
 		}
-		raw, err := pl.b.readFile(a.TextPath)
-		if err != nil {
-			return nil, fmt.Errorf("bundle document %s: %w", a.ID, err)
+		if text, ok := pl.o.docTexts[a.ID]; ok {
+			d.text = text
+		} else {
+			raw, err := pl.b.readFile(a.TextPath)
+			if err != nil {
+				return nil, fmt.Errorf("bundle document %s: %w", a.ID, err)
+			}
+			d.text = string(raw)
 		}
-		d.text = string(raw)
 		if a.Size == nil && len(a.VersionSizes) == 0 {
 			d.size = len(d.text)
 		}
+		pl.p.BaseDocs[a.ID] = d.text
 	}
 	pl.docs[id] = d
 	return d, nil
@@ -1407,6 +1421,9 @@ type replaySetup struct {
 	opt    replayOptions
 	plan   *replayPlan
 	inputs replayInputs
+	// bundle is the plan's bundle, kept so the run can replan it against the build's own
+	// document texts (readBaseTexts).
+	bundle *replayBundle
 	// roster is the session ids registered with the listener: the bundle's roster ids the listener
 	// accepts as keys (natsKey), then synthetic ones; rosterSkipped counts the roster ids it would
 	// refuse (an actor id such as legion-daemon:LINUX is no session id); homes maps a roster session
@@ -1431,7 +1448,7 @@ func newReplaySetup(o replayOptions) (*replaySetup, error) {
 	if err != nil {
 		return nil, err
 	}
-	s := &replaySetup{opt: o, plan: p, inputs: o.inputsRecord(b), homes: map[string]string{}}
+	s := &replaySetup{opt: o, plan: p, inputs: o.inputsRecord(b), bundle: b, homes: map[string]string{}}
 	for _, r := range b.Roster {
 		if len(s.roster) == o.roster {
 			break
@@ -1564,6 +1581,9 @@ type replayRun struct {
 	docWaits []float64
 	wrote    map[string]bool
 	endState *replayEndState
+	// baseDocs records how the client's copy of the documents was matched to the build under
+	// test (readBaseTexts); nil when the plan modelled no document.
+	baseDocs *replayBaseDocs
 
 	inflight      atomic.Int64
 	timeouts      atomic.Int64
@@ -1573,13 +1593,15 @@ type replayRun struct {
 	endRead       chan struct{}
 }
 
-// prepareReplay reads loadtest.replay_ids over the stack's Postgres URL and records the run's
-// inputs: the seed dump, Dispatch's GOMAXPROCS and build.
-func (st *step) prepareReplay(ctx context.Context) error {
+// prepareReplay reads loadtest.replay_ids over the stack's Postgres URL, matches the client's copy
+// of each document to the build under test (readBaseTexts) and records the run's inputs: the seed
+// dump, Dispatch's GOMAXPROCS and build. It runs before the window opens, so its reads and any
+// replan cost the measurement nothing.
+func (st *step) prepareReplay(ctx context.Context, a *api) error {
 	rs := st.cfg.replay
 	rr := &replayRun{setup: rs, futures: map[replayRef]*replayFuture{}, pid: st.cfg.ep.pids["dispatch"], pprof: st.cfg.ep.pprof, pg: st.cfg.ep.pg,
 		out: st.cfg.out, lg: st.lg, writes: map[string]*replayWriteCount{}, skipped: map[string]int{}, endRead: make(chan struct{}),
-		turns: replayTurns(rs.plan.Actions), wrote: map[string]bool{}}
+		wrote: map[string]bool{}}
 	conn, err := pgx.Connect(ctx, st.cfg.ep.pg)
 	if err != nil {
 		return fmt.Errorf("replay: postgres: %w", err)
@@ -1589,16 +1611,20 @@ func (st *step) prepareReplay(ctx context.Context) error {
 	if err != nil {
 		return fmt.Errorf("replay: read loadtest.replay_ids (is the replay seed restored?): %w", err)
 	}
-	for _, a := range rs.plan.Actions {
-		if a.Write {
-			wc := rr.writes[a.Kind]
+	if err := rr.readBaseTexts(ctx, a); err != nil {
+		return err
+	}
+	rr.turns = replayTurns(rs.plan.Actions)
+	for _, act := range rs.plan.Actions {
+		if act.Write {
+			wc := rr.writes[act.Kind]
 			if wc == nil {
 				wc = &replayWriteCount{}
-				rr.writes[a.Kind] = wc
+				rr.writes[act.Kind] = wc
 			}
 			wc.Planned++
 		}
-		for _, stg := range a.Stages {
+		for _, stg := range act.Stages {
 			for _, r := range stg {
 				for _, p := range r.Produces {
 					rr.futures[p.Ref] = &replayFuture{done: make(chan struct{})}
@@ -1611,6 +1637,63 @@ func (st *step) prepareReplay(ctx context.Context) error {
 		rs.plan.Counts.Actions, rs.plan.Counts.WriteActions, rs.plan.Counts.ReadActions, rs.plan.Counts.Requests, rs.plan.Counts.IssuesKept,
 		len(rr.ids), rr.meta.Inputs.GOMAXPROCS)
 	st.replay = rr
+	return nil
+}
+
+// readBaseTexts matches the client's copy of each document the plan modelled to the build under
+// test: it reads the document's current markdown (GET /api/v1/artifacts/{id}/text, the agent
+// bearer) and replans against the texts that differ from the bundle's. A build renders a stored
+// document its own way, so the markdown an older build served can hold a construct this one
+// refuses (a table row whose cells past the table's width come from an unescaped pipe, say), and
+// an upload sends the client's whole text; planning against the build's own text keeps the replay
+// measuring the build instead of that difference. Where the build serves the bundle's text, every
+// document included, nothing is replanned and the plan stays byte for byte the bundle's.
+func (rr *replayRun) readBaseTexts(ctx context.Context, a *api) error {
+	rs := rr.setup
+	if len(rs.plan.BaseDocs) == 0 {
+		return nil
+	}
+	rec := &replayBaseDocs{Documents: []string{}}
+	texts := map[string]string{}
+	for _, logged := range slices.Sorted(maps.Keys(rs.plan.BaseDocs)) {
+		local, ok := rr.ids[[2]string{idArtifact, logged}]
+		if !ok {
+			rec.Unread++
+			continue
+		}
+		res := a.callRetry(ctx, "GET", "/api/v1/artifacts/"+url.PathEscape(local)+"/text", who{}, nil)
+		var got struct {
+			Markdown string `json:"markdown"`
+		}
+		if !res.ok() || json.Unmarshal(res.body, &got) != nil {
+			rec.Unread++
+			rr.lg.Printf("replay: base text of document %s not read: status %d %s %v", logged, res.status, res.errorCode(), res.err)
+			continue
+		}
+		rec.Read++
+		if got.Markdown != rs.plan.BaseDocs[logged] {
+			rec.Differed++
+			rec.Documents = append(rec.Documents, logged)
+			texts[logged] = got.Markdown
+		}
+	}
+	if rec.Read == 0 {
+		return fmt.Errorf("replay: no document of the plan's %d could be read from Dispatch (base texts)", len(rs.plan.BaseDocs))
+	}
+	if len(texts) > 0 {
+		rs.opt.docTexts = texts
+		p, err := planReplay(rs.bundle, rs.opt)
+		if err != nil {
+			return fmt.Errorf("replay: replan against the build's document texts: %w", err)
+		}
+		// The sample of issues does not depend on a document's text, and the roster already
+		// subscribes the setup's keys (newReplaySetup's fallback included), so they are kept.
+		p.IssueKeys = rs.plan.IssueKeys
+		rs.plan, rec.Replanned = p, true
+	}
+	rr.baseDocs = rec
+	rr.lg.Printf("replay: base texts of %d documents read (%d unread), %d differ from the bundle, replanned %v",
+		rec.Read, rec.Unread, rec.Differed, rec.Replanned)
 	return nil
 }
 

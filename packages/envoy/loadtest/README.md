@@ -762,7 +762,8 @@ the sessions), `-duration` is ignored and set to to - from, the warm-up stays, a
 to 2. Every bad input is refused by name before any connection; a `-replay-*` flag without
 `-source replay` is refused too.
 
-**Planning** is pure: one bundle, one set of flags and one `-rng-seed` give one plan, which
+**Planning** is pure: one bundle, one set of flags, one `-rng-seed` and the document texts the
+build under test serves (The client's text is the build's, below) give one plan, which
 `loadgen replay-plan` prints as JSON counts (actions, requests per route, writes and reads per kind,
 events not sent by reason, substitutes). Every random choice is a hash of the rng seed and the
 choice's own key (an issue key, an event id, a document or item id), never a generator shared
@@ -772,8 +773,9 @@ edits, synthetic specs and documents, file bytes and their multipart boundary. T
 in log order before the window, and so is the client's copy of each document, so every edit,
 upload and quote is fixed before anything is sent. At send time only the ids of the objects the
 run creates, the events cursor (`last_seq`) and an ask's `edited_at` come from responses, and the
-roster is the bundle's session ids then `ses-replay-<n>`. Two runs of one bundle, flags and rng seed send
-the same requests, action by action, whatever the timing (`TestReplayDeterministic`); another rng
+roster is the bundle's session ids then `ses-replay-<n>`. Two runs of one bundle, flags and rng seed
+against one build send the same requests, action by action, whatever the timing
+(`TestReplayDeterministic`); another rng
 seed sends other content. They end with the same anchors and versions when Dispatch takes the
 writes to each document in log order and none fails, so each document's writes are sent in plan
 order (Sending, below): `TestReplayDeterministic` starts each document's writes in reverse, against
@@ -804,8 +806,8 @@ one action of one kind:
 | ask opened, answered, resolved; issue claimed | `ask-open`, `ask-answer`, `ask-resolve`, `claim` | `POST /issues/{key}/asks`; `GET /asks/{id}` -> `POST /asks/{id}/answer` as the answering person (`X-Dispatch-User`, with the ask's `edited_at`); `POST /asks/{id}/resolve`; `POST /issues/{key}/claim` |
 | `child.status`, `comment.anchor_refreshed`, `comment.reopened`, `issue.closed` beside its `issue.updated`, `message.delivery`/`accepted`, `user_state.*` | not sent | derived by the server |
 
-All paths are under `/api/v1`. The client keeps each document's text (the bundle's `docs/`, its
-own edits, the created documents), so an upload sends the current text with no read. Every edit
+All paths are under `/api/v1`. The client keeps each document's text (the build's own text, below;
+its own edits; the created documents), so an upload sends the current text with no read. Every edit
 holds to what `POST /artifacts/{id}/edits` accepts at Dispatch 35efd326 (`replay_edit.go` names
 the code): a `find` or an insert's anchor is matched once against the document's rendered text,
 inside one textblock, so it holds no list marker, escape, table pipe or line break (else `404
@@ -822,6 +824,25 @@ synthetic words that change the length by the logged size change, as many senten
 takes (`edits.substitute`). A version with no usable sentence is not sent (`no_edit`). Dispatch then
 holds the client's text byte for byte, but for an answered ask block's `answered_at`, which the
 seed set when it answered.
+
+**The client's text is the build's** (`readBaseTexts`, `replay.base_docs`). The bundle holds the
+markdown the Dispatch it was fetched from served, and a build renders a stored document its own
+way, so a newer build can serve another text for the same document, and can refuse the older one:
+markdown it stores round-trips, markdown an older build rendered need not. At Dispatch 8a911ecc one
+of the LINUX bundle's documents is such a text. Its stored table row holds a code span with an
+unescaped `|`; 35efd326 served that row as it was and read it back with the cells past the table's
+width dropped, while 8a911ecc renders the same row with the pipe escaped outside the code span and
+refuses the older form (`400 INVALID_MARKDOWN`, "a table row holding 7 cells where its table has
+5"). Planned against the bundle's text, every upload of that document is refused by that build and
+by no other, which measures the two renderings instead of the build. So, after
+`loadtest.replay_ids` is read and before the window opens, the run reads each document the plan
+modelled (`GET /artifacts/{id}/text`, the agent bearer) and, for every text the build serves
+otherwise than the bundle holds it, plans again from the build's text. Where the build serves the
+bundle's text, every document included, nothing is replanned and the plan is byte for byte the one
+`loadgen replay-plan` prints. Both the reads and the replan happen before the window starts
+(`prepareReplay`), so they cost the measurement nothing, and a document the build will not serve
+keeps the bundle's text and is counted `unread`; a plan no document of which can be read is
+refused.
 
 **Reads** (the stated assumption): before each write, rho read actions on its issue (on the parent
 for a created issue), read j of n sent (n - j) s before the write, never before the sub-window:
@@ -895,6 +916,7 @@ Dispatch binary (`$LOADTEST_ROOT/bin/envoy-dispatch` until the next `stack.sh se
 | `roster_skipped` | Bundle roster ids the listener refuses as a session key, replaced by synthetic ids. |
 | `doc_order_waits` | Writes that found the previous write on their document still running and waited for it (Sending, above). |
 | `doc_order_wait_s` | Those waits in seconds: `n`, `p50`, `p90`, `p99`, `max`. |
+| `base_docs` | {`read`, `unread`, `differed`, `replanned`, `documents`}: the documents the plan modelled whose current markdown the build served and those it did not, how many it serves otherwise than the bundle holds them (their logged ids in `documents`, sorted), and whether the plan was built again from those texts (The client's text is the build's, above); null when the plan modelled no document. |
 | `end_state` | {`documents`, `sha256`}: the documents the run wrote and the sha256 over one sorted line per document (its logged artifact id, its highest version number, that version's size, and, sorted, the sha256 of the quote and the block index of each unresolved anchored root comment on it). A block index is where the anchor's block stands in the document: `<i>` for the i-th top-level block, `<i>.<r>` for its r-th table row, `<i>.<r>.<c>` for that row's c-th cell, `-1` for a block id the document no longer holds. The digest covers the block index, not the block id, because Dispatch mints a fresh uuid for every block a write creates, so two runs that did the same work differ in their block ids. `end_state.json` in the step directory holds the lines' fields (ids, numbers and hashes, no quote text), keeps each anchor's `block_id` for debugging, and names the digested fields in its `digest` field. Null when a read failed (`-allow-foreign` with no Postgres or no API reachable). |
 
 `meta.json` `replay` holds the same `inputs`, `cgroup_cpu_max` (`/sys/fs/cgroup/cpu.max`, `""`
@@ -905,7 +927,9 @@ when absent), `heap_start_at`, `heap_end_at`, `dispatch_build` (the build JSON:
 
 **The merge rule.** A change to Dispatch's write path is measured with six runs of one bundle,
 one set of flags and one `--rng-seed`: three with `--dispatch-commit` at the commit before the
-change and three at its head. The plans are equal, so the runs differ only in Dispatch:
+change and three at its head. The plans are equal unless the two builds serve different markdown
+for a document the window writes, which `replay.base_docs.documents` names on each side, so the
+runs differ only in Dispatch:
 
 ```bash
 for i in 1 2 3; do
@@ -917,7 +941,9 @@ done
 ```
 
 The spread is the highest base run's `replay.dispatch_cpu_s` less the lowest. The runs'
-`replay.end_state.sha256` are compared: equal hashes show that every run did the same work. The
+`replay.end_state.sha256` are compared: equal hashes show that every run did the same work, within
+each build always, and across the two builds when neither replanned (`base_docs.replanned` false
+on both) and the build's answers are the same. The
 change merges when every head run uses less CPU than every base run, or, where its expected gain
 is smaller than the spread, when the changed function's share of CPU in a profile at its head is
 lower than in one at its base by at least half the expected gain. The pull request quotes the runs,

@@ -376,8 +376,9 @@ func execute(cfg runConfig, sf seedFile) error {
 	writeJSONFile(filepath.Join(cfg.out, "meta.json"), meta, metaMode, lg)
 	logSamplerStart(lg, cfg.ep)
 	st := newStep(cfg, sf, lg, nonce)
+	a := newAPI(cfg.ep.dispatch, cfg.ep.token, 2048)
 	if cfg.replay != nil {
-		if err := st.prepareReplay(ctx); err != nil {
+		if err := st.prepareReplay(ctx, a); err != nil {
 			return err
 		}
 		meta.Replay = &st.replay.meta
@@ -396,7 +397,6 @@ func execute(cfg runConfig, sf seedFile) error {
 	writeJSONFile(filepath.Join(cfg.out, "meta.json"), meta, metaMode, lg)
 	lg.Printf("window %s to %s", st.winStart.UTC().Format(time.RFC3339), st.winEnd.UTC().Format(time.RFC3339))
 
-	a := newAPI(cfg.ep.dispatch, cfg.ep.token, 2048)
 	live := st.startDashboard(ctx, dashURL)
 	writes, eventsDone := st.runEvents(ctx, newWriter(a, sf, nonce, lg))
 	var reqs *requestLoad

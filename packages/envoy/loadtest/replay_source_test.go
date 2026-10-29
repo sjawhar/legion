@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"flag"
 	"io"
+	"log"
 	"maps"
 	"math"
 	"net/http"
@@ -218,6 +219,97 @@ func TestReplayNamedVersionUploadOrEdit(t *testing.T) {
 	}
 	if a.Stages[1][0].Params["id"].Ref == nil || *a.Stages[1][0].Params["id"].Ref != (replayRef{idArtifact, "D1"}) {
 		t.Fatal("the edit does not name D1")
+	}
+}
+
+// rpBaseTextRun is a run whose plan came from bundle b, against a fake Dispatch serving served as
+// document D1's current markdown.
+func rpBaseTextRun(t *testing.T, o replayOptions, b *replayBundle, p *replayPlan, served string) (*replayRun, string) {
+	t.Helper()
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/api/v1/artifacts/local-D1/text" {
+			w.WriteHeader(http.StatusNotFound)
+			return
+		}
+		body, _ := json.Marshal(map[string]any{"markdown": served, "version": 1})
+		_, _ = w.Write(body)
+	}))
+	t.Cleanup(srv.Close)
+	rr := &replayRun{setup: &replaySetup{plan: p, opt: o, bundle: b}, lg: log.New(io.Discard, "", 0),
+		ids: map[[2]string]string{{idArtifact, "D1"}: "local-D1"}}
+	return rr, srv.URL
+}
+
+// TestReplayBaseTextsMatchTheBuild: before the window the run reads each modelled document's
+// current markdown from the build under test. Where the build serves the bundle's text the plan
+// is untouched; where it serves another text the plan is built again from it, so an upload sends
+// the build's own text with the edit applied, not the bundle's.
+func TestReplayBaseTextsMatchTheBuild(t *testing.T) {
+	diff, summary := rpDiff, "s"
+	lines := []string{rpVersionEvent(1, rpSession, true, &diff, &summary, len(rpDocText))}
+	o := rpOptions()
+	o.uploads = 1
+	b := rpBundle(t, rpState(), lines, nil)
+	p, err := planReplay(b, o)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := p.BaseDocs["D1"]; got != rpDocText {
+		t.Fatalf("the plan modelled D1 from %d bytes, not the bundle's %d", len(got), len(rpDocText))
+	}
+	want := actionDigests(t, p, nil)
+
+	rr, base := rpBaseTextRun(t, o, b, p, rpDocText)
+	if err := rr.readBaseTexts(context.Background(), newAPI(base, "tok", 2)); err != nil {
+		t.Fatal(err)
+	}
+	if rec := rr.baseDocs; rec == nil || rec.Read != 1 || rec.Unread != 0 || rec.Differed != 0 || rec.Replanned {
+		t.Fatalf("base docs %+v", rr.baseDocs)
+	}
+	if got := actionDigests(t, rr.setup.plan, nil); !slices.Equal(got, want) {
+		t.Fatal("the plan changed though the build serves the bundle's text")
+	}
+
+	served := strings.Replace(rpDocText, "# Plan", "# Plan of record", 1)
+	rr, base = rpBaseTextRun(t, o, b, p, served)
+	if err := rr.readBaseTexts(context.Background(), newAPI(base, "tok", 2)); err != nil {
+		t.Fatal(err)
+	}
+	rec := rr.baseDocs
+	if rec == nil || rec.Read != 1 || rec.Differed != 1 || !rec.Replanned || !slices.Equal(rec.Documents, []string{"D1"}) {
+		t.Fatalf("base docs %+v", rec)
+	}
+	if got := rr.setup.plan.BaseDocs["D1"]; got != served {
+		t.Fatalf("the replan modelled D1 from %d bytes, not the build's %d", len(got), len(served))
+	}
+	if got := lastBody(onlyWrite(t, rr.setup.plan))["content"]; got != strings.Replace(served, "lazy dog", "lazy cat", 1) {
+		t.Fatalf("the upload does not send the build's text with the edit applied (%d bytes)", len(got.(string)))
+	}
+	if slices.Equal(actionDigests(t, rr.setup.plan, nil), want) {
+		t.Fatal("the replanned upload sends the bundle's text")
+	}
+}
+
+// TestReplayBaseTextsUnreadable: a document the build will not serve keeps the bundle's text and
+// is counted unread; a plan whose documents are all unreadable is refused.
+func TestReplayBaseTextsUnreadable(t *testing.T) {
+	diff, summary := rpDiff, "s"
+	lines := []string{rpVersionEvent(1, rpSession, true, &diff, &summary, len(rpDocText))}
+	o := rpOptions()
+	o.uploads = 1
+	b := rpBundle(t, rpState(), lines, nil)
+	p, err := planReplay(b, o)
+	if err != nil {
+		t.Fatal(err)
+	}
+	rr, base := rpBaseTextRun(t, o, b, p, rpDocText)
+	rr.ids = map[[2]string]string{}
+	err = rr.readBaseTexts(context.Background(), newAPI(base, "tok", 2))
+	if err == nil || !strings.Contains(err.Error(), "base texts") {
+		t.Fatalf("an unmapped document: %v", err)
+	}
+	if got := actionDigests(t, rr.setup.plan, nil); !slices.Equal(got, actionDigests(t, p, nil)) {
+		t.Fatal("the plan changed though no text was read")
 	}
 }
 

@@ -62,6 +62,22 @@ type replayEdits struct {
 	Substitute int `json:"substitute"`
 }
 
+// replayBaseDocs is summary.json's replay.base_docs: how the client's copy of each document the
+// plan modelled was matched to the build under test before the window (readBaseTexts).
+type replayBaseDocs struct {
+	// Read and Unread count the plan's documents whose current markdown the build served and
+	// those it did not (no local id, or no 2xx answer).
+	Read   int `json:"read"`
+	Unread int `json:"unread"`
+	// Differed counts the documents the build serves otherwise than the bundle holds them, which
+	// the client models from the build's text instead; Replanned says the plan was built again
+	// from those texts.
+	Differed  int  `json:"differed"`
+	Replanned bool `json:"replanned"`
+	// Documents are those documents' logged ids, sorted.
+	Documents []string `json:"documents"`
+}
+
 // replayRecord is summary.json's replay block.
 type replayRecord struct {
 	Inputs  replayInputs `json:"inputs"`
@@ -92,6 +108,9 @@ type replayRecord struct {
 	// and waited for it; DocOrderWaitS their waits in seconds.
 	DocOrderWaits int  `json:"doc_order_waits"`
 	DocOrderWaitS stat `json:"doc_order_wait_s"`
+	// BaseDocs says how the client's copy of each document was matched to the build under test
+	// before the window; null when the plan modelled no document.
+	BaseDocs *replayBaseDocs `json:"base_docs"`
 	// EndState digests the documents the run wrote, read after the drain; null when that read
 	// failed (no Postgres reachable).
 	EndState *replayEndState `json:"end_state"`
@@ -256,7 +275,7 @@ func (rr *replayRun) record(ss []sample, windowS float64) *replayRecord {
 		Inputs: rr.meta.Inputs, WindowS: windowS, CPUSource: "none", Writes: map[string]replayWriteCount{}, SkippedMissingDep: map[string]int{},
 		Substitutes: rr.subs, Edits: rr.edits, InflightAtEnd: rr.inflightAtEnd, Timeouts: int(rr.timeouts.Load()), Roster: len(rr.setup.roster),
 		RosterSkipped: rr.setup.rosterSkipped,
-		DocOrderWaits: len(rr.docWaits), DocOrderWaitS: mkStat(rr.docWaits), EndState: rr.endState,
+		DocOrderWaits: len(rr.docWaits), DocOrderWaitS: mkStat(rr.docWaits), BaseDocs: rr.baseDocs, EndState: rr.endState,
 	}
 	for k, w := range rr.writes {
 		rec.Writes[k] = *w
