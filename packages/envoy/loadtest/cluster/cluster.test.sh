@@ -94,7 +94,10 @@
 # bundle fixture, mapped through replay_ids, and a load step's are loadgen plan-docs' documents,
 # with their planned versions and a warning when the Kth has fewer than 10; (n) a read-only
 # kubectl exec is retried once 5 s after a dial timeout or a refused
-# or reset API server connection, never after another error, and a write is never retried.
+# or reset API server connection, never after another error, and a write is never retried; (o) the
+# heartbeat renews the lock only while a command of its run is alive, so an abandoned run's lock
+# goes stale; (p) stored_order_summary reads a summary line that ends with `unchecked=N` and one
+# without it.
 set -euo pipefail
 
 here=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
@@ -1939,3 +1942,52 @@ pass "a replay types into the documents with the most agent writes in its sub-wi
   { ((RC != 0)) && ((CALLS == 1)) && [ -z "$SLEEPS" ]; } || fail "a nats-box removal was retried after a dial timeout"
 )
 pass "a read-only kubectl exec is retried once 5 s after a dial timeout or a refused or reset API server connection, and never after another error; a write is never retried"
+
+# (o) The heartbeat renews the lock only while a command of its run is alive. The daemons run in a
+# session of their own, so a run whose command dies without its EXIT trap (a killed process, a
+# worker turn the daemon interrupts, an OOM) leaves the heartbeat patching the lock every 60 s for
+# ever: the lock never ages, up never calls it stale and never names the down command, and the
+# full-size copy runs on with nothing driving it.
+reset_fake
+export LOADTEST_CLUSTER_ROOT=$tmp/root-orphan FAKE_FAST_SLEEP=60
+run_cluster up "${up_args[@]}" --dispatch-commit "$commit_ok"
+((RC == 0)) || fail "up exited $RC"
+orphan_dir=$(find "$LOADTEST_CLUSTER_ROOT" -mindepth 1 -maxdepth 1 -type d)
+orphan_hb=$(<"$orphan_dir/heartbeat.pid")
+# up has returned, so no cluster.sh command of this run is alive any more.
+for ((i = 0; i < 50; i++)); do
+  kill -0 "$orphan_hb" 2>/dev/null || break
+  sleep 0.1
+done
+orphan_alive=no
+kill -0 "$orphan_hb" 2>/dev/null && orphan_alive=yes
+orphan_patches=$(grep -c "patch configmap dispatch-loadtest-lock" "$fake/kubectl.log" || true)
+sleep 1
+orphan_patches_after=$(grep -c "patch configmap dispatch-loadtest-lock" "$fake/kubectl.log" || true)
+run_cluster down --namespace "$ns"
+[ "$orphan_alive" = no ] ||
+  fail "the heartbeat daemon (pid $orphan_hb) still runs 5 s after the last command of its run ended: it renews the lock for ever, so the lock never goes stale and the copy is never reclaimed"
+[ "$orphan_patches_after" = "$orphan_patches" ] ||
+  fail "the lock was patched $((orphan_patches_after - orphan_patches)) more times after the last command of the run ended: an abandoned run keeps its lock fresh"
+unset FAKE_FAST_SLEEP
+pass "the heartbeat stops once no command of its run is alive, so an abandoned run's lock goes stale"
+
+# (p) stored_order_summary reads the summary line of INFRA-707's checker at eb0fe0be and later,
+# which ends it with ` unchecked=N` (a document the run compared nothing of) and exits 1. The
+# regex anchored at `failed=N$` matches no such line, so every count of stored-order.json and of
+# STORED-ORDER.md reads null, as if the checker had never printed a summary.
+(
+  so_checker=$(jq -nc --arg c "$commit_ok" '{dispatch_commit: $c, built_from: $c, overlay_source: null,
+    overlay_files: [], registration: null, renderer_matches: true, sha256: "f00d"}')
+  source "$cluster"
+  printf 'stored-order: documents=5 clean=2 mismatched=1 refused=0 failed=0 unchecked=2\n' >"$tmp/so-unchecked.txt"
+  stored_order_summary "$tmp/so-unchecked.txt" "$so_checker" 1 2026-10-29T00:00:00Z >"$tmp/so-unchecked.json"
+  jq -e '.documents == 5 and .clean == 2 and .mismatched == 1 and .refused == 0 and .failed == 0 and .unchecked == 2' \
+    "$tmp/so-unchecked.json" >/dev/null ||
+    fail "stored-order.json of a summary line ending ' unchecked=2' is $(jq -c '{documents, clean, mismatched, refused, failed, unchecked}' "$tmp/so-unchecked.json"): the checker's counts are lost"
+  printf 'stored-order: documents=3 clean=3 mismatched=0 refused=0 failed=0\n' >"$tmp/so-plain.txt"
+  stored_order_summary "$tmp/so-plain.txt" "$so_checker" 0 2026-10-29T00:00:00Z >"$tmp/so-plain.json"
+  jq -e '.documents == 3 and .clean == 3 and (.unchecked == null)' "$tmp/so-plain.json" >/dev/null ||
+    fail "stored-order.json of a summary line without unchecked is $(jq -c '{documents, clean, unchecked}' "$tmp/so-plain.json")"
+)
+pass "stored_order_summary reads a summary line that ends with unchecked=N, and one without it"
