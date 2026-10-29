@@ -184,17 +184,16 @@ func consumerNames(js natsgo.JetStreamContext, stream string) []string {
 
 // warnOrErrorRecords is every WARN or ERROR record the client named name logged so far, each as
 // its level and message, with the error for an async error report. name is the name that client
-// was connected with (bus.WithName), and the caller passes it rather than the helper deriving it:
-// a healthy client of these tests may have logged nothing under its name when the assertion reads,
-// its first such records being its close's, so a helper that waited for a record of the client
-// under test would make its caller race nats.go's callbacks
-// (TestWarnOrErrorRecordsTakesAClientThatHasLoggedNothing). The capture (captureBusLogs) is the
-// process's default logger, so every client of every test running in this binary writes into it,
-// and a record naming another client is dropped: without that, a client an earlier test left
-// connected to a cluster it has stopped fails this test with its reconnect warning. A caller that
-// names no client is refused, since the filter would then drop every record that names a client,
-// the client under test's among them. A record naming no client is kept, since the records
-// these tests require are a watcher's and a reconcile's, which name none.
+// was connected with (bus.WithName). The caller passes it, rather than the helper waiting for a
+// record that names the client under test, which a healthy client of these tests may not have
+// logged yet when the assertion reads (TestWarnOrErrorRecordsTakesAClientThatHasLoggedNothing).
+// The capture (captureBusLogs) is the process's default logger, so every client of every test
+// running in this binary writes into it, and a record naming another client is dropped: without
+// that, a client an earlier test left connected to a cluster it has stopped fails this test with
+// its reconnect warning. A caller that names no client is refused, since the filter would then
+// drop every record that names a client, the client under test's among them. A record naming no
+// client is kept, since the records these tests require are a watcher's and a reconcile's, which
+// name none.
 func warnOrErrorRecords(t *testing.T, logs *busLogs, name string) []string {
 	t.Helper()
 	if name == "" {
