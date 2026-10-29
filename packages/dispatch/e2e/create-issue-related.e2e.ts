@@ -246,6 +246,9 @@ test("an answer that arrives after the title changed is not shown for the new ti
     // shows no link to the issue that answer named.
     await expect(related.getByText("Checking for related items…")).toBeVisible();
     await expect(related.getByRole("link", { name: new RegExp(seeded.astrolabe) })).toHaveCount(0);
+    // While a check is out the section is busy, so a screen reader is not read "Checking for
+    // related items…" at every pause in someone's typing; it hears the answer alone.
+    await expect(related).toHaveAttribute("aria-busy", "true");
 
     // The second title's own pause then brings its own answer, and the dropped one never appears.
     const second = checkFor(page, "Zeppelin");
@@ -256,6 +259,7 @@ test("an answer that arrives after the title changed is not shown for the new ti
       related.getByRole("link", { name: `${seeded.zeppelin} ${zeppelinTitle}` })
     ).toBeVisible();
     await expect(related.getByRole("link", { name: new RegExp(seeded.astrolabe) })).toHaveCount(0);
+    await expect(related).toHaveAttribute("aria-busy", "false");
   } finally {
     await context.close();
   }

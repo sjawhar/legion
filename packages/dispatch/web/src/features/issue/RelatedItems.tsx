@@ -52,14 +52,21 @@ function useRelatedItems(project: string, title: string) {
  * seen before it is filed. The check's three forms are worded as the CLI words them
  * (`packages/envoy-client/src/related-check.ts`), so a check that never ran cannot be read as
  * one that found nothing. The section is always in the tree and polite, so each new answer is
- * announced rather than silently replacing the one a screen reader just read.
+ * announced rather than silently replacing the one a screen reader just read; while a check is
+ * out it is `aria-busy`, so a reader hears the answer alone and not "Checking for related
+ * items…" at every pause in their typing.
  */
 export function RelatedItems({ project, title }: { project: string; title: string }): ReactNode {
   const { query, shown, trimmed, waiting } = useRelatedItems(project, title);
+  const failed = shown && !waiting && query.isError;
+  // The answer to the title in the box, once there is one: while a check is out, or while the
+  // box has moved past the title the query answers, there is none to show.
+  const answer = failed || waiting ? undefined : query.data;
+  const checking = shown && !failed && answer === undefined;
   let body: ReactNode;
   if (!shown) {
     body = null;
-  } else if (!waiting && query.isError) {
+  } else if (failed) {
     body = (
       <QueryError
         message="Could not check for related items."
@@ -67,13 +74,18 @@ export function RelatedItems({ project, title }: { project: string; title: strin
         retrying={query.isFetching}
       />
     );
-  } else if (waiting || query.data === undefined) {
+  } else if (answer === undefined) {
     body = <p className={textMutedOnSurface}>Checking for related items…</p>;
   } else {
-    body = <RelatedForm suggestions={query.data} title={trimmed} />;
+    body = <RelatedForm suggestions={answer} title={trimmed} />;
   }
   return (
-    <section aria-label="Related items" aria-live="polite" className="space-y-2 text-sm">
+    <section
+      aria-busy={checking}
+      aria-label="Related items"
+      aria-live="polite"
+      className="space-y-2 text-sm"
+    >
       {body}
     </section>
   );
