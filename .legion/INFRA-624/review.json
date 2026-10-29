@@ -2,41 +2,40 @@
   "schemaVersion": 1,
   "phase": "review",
   "issue": "INFRA-624",
-  "completed": "2026-10-28T23:54:19Z",
-  "round": 7,
-  "reviewedHead": "11e3ba574263c2e70c7fe09c0e147fbf4d02b2af",
-  "codeHead": "39014e297cb7",
+  "completed": "2026-10-29T00:49:32Z",
+  "round": 8,
+  "reviewedHead": "6b8bda987131bf6562463e9c6d40edf662b0eb91",
+  "codeHead": "b0fea9fc9ab2",
   "decision": "changes_requested",
   "critical": 0,
   "important": 1,
   "minor": 3,
-  "scope": "The architect's design change (recorded on INFRA-624): the ask-edit route refuses every edit of a broken decision, quotes every block with ids as data and no shell text, and names doc-edit delete of whole blocks then edit-ask. Judged: the new refusal, no shell text, the end-to-end Go test, no regression; plus the architect's request on the one-document-edit wording.",
-  "ci": "CI head 73d363c5 (newest pull_request run; compare to 11e3ba57 handoffsOnly true, 1 file): required lint, typecheck, pr-title success; test in_progress at 23:54Z. GitHub reports MERGEABLE.",
-  "roundSixItems": "Items 1-3 (repeated-label path, kept-list option, shell-quoted ops) and 4-5 (stale comment, steps test) are gone with the rebuild code by the design change (ddf1bc5b); the implementer resolved those threads with that reason, which holds: no removed name is referenced, and the new end-to-end test reads ids from the refusal.",
-  "verified": "Both reviewers: every block quoted in full (nested lists, bold, links), ids Go-quoted only, no ops or command text; following the refusal through ApplyOps (one call) then SetAskBlockText reaches a valid decision with 0 words lost on two lists, three lists, a paragraph after the list, a list before the question, a repeated label, an extra option in the first list, and an id holding ' \" \\ newline $( ) and a backtick. The four new tests fail against 57f8b421. The merge 635805f8 keeps both parents and fixes main's pmdoc import (crafted.NestedValue); go vet and go build pass.",
+  "scope": "Narrowed by the INFRA-138 architect to round 7's list (review 5691214763): the one-edit wording, the settlement id, the two comments, the AGENTS.md count; correctness defects anywhere still fixed here; other points on Fast-follow.",
+  "ci": "CI head 0a1716e7 (newest pull_request run; compare to 6b8bda98 handoffsOnly true, 1 file): required lint, typecheck, test, pr-title queued at 00:49Z. GitHub reports MERGEABLE.",
+  "roundSevenItems": "All fixed in e194c750/b0fea9fc and accepted: one document edit listing every delete (PRRT_kwDORFy7ds6xXanP; deep review followed it on two lists, three lists, a paragraph after the list, [list, P, list], [P, list, P, list], [P, P, list, list], each valid with every unquoted word kept); no id named before settlement, retry asked, delete list after settlement (PRRT_kwDORFy7ds6xXanT; no id, a number id, a duplicate outside the ask, a duplicate on a list item); the two comments (PRRT_kwDORFy7ds6xXanW, PRRT_kwDORFy7ds6xXanY); proof-editor AGENTS.md now says Fifteen.",
   "keyFindings": [
     {
       "severity": "important",
       "file": "packages/envoy/internal/dispatch/docs/ask_block_text.go",
-      "description": "The reason (:514-516) says to delete 'the block or blocks to drop … until it holds its question and at most one list', which lets an agent delete one list per doc-edit; with three lists the first delete is refused because it leaves the decision broken, while both extra lists in one doc-edit apply (tester, https://github.com/sjawhar/legion/pull/2433#issuecomment-6483048479). Say to delete the blocks in one document edit and list every delete it needs. Requested by the architect."
+      "description": "askBlocksToDrop (:545-566) keeps the paragraph run starting at the first paragraph even when it holds no text, so for [empty P, list, P \"Should we ship?\"] the refusal names the question paragraph for deletion and doc-edit refuses the one edit ('ask block \"ask-lists\" has an empty question'); [empty P, list, list, P] and [list, empty P, list, P] fail the same way (deep-review probe TestProbeR8Shapes against Postgres). The one path the refusal names does not apply."
     },
     {
       "severity": "minor",
       "file": "packages/envoy/internal/dispatch/docs/ask_block_text.go",
-      "description": "Before settlement the refusal can name 'a block with no id' (:506), which doc-edit cannot delete, or an id another block earlier in the document also holds, so the delete removes that earlier block (deep-review probes TestProbeR7NoID, TestProbeR7DuplicateID: 'Unrelated words outside the decision.' deleted, ask still broken). Say to retry once the document settles instead of naming such an id."
+      "description": "case drop == nil (:527) cannot run, since askBlockOf refuses an ask with no paragraph first, while an empty non-nil drop list falls into the default branch: an option item holding a nested ask with two lists makes AskContentError report the outer ask and the reason reads 'the blocks to delete are ; then edit the ask' (code-quality probe). packages/envoy/AGENTS.md:2234 documents the dead case."
     },
     {
       "severity": "minor",
-      "file": "packages/envoy/internal/dispatch/docs/ask_blocks.go",
-      "description": "The comment at :256-257 still says the collector reads a broken ask leniently so the ask-edit route can rebuild its options as one list; the rebuild is gone."
+      "file": "packages/envoy/internal/dispatch/docs/ask_block_text.go",
+      "description": "The reason (:536) and the Changed fragment say the deletes keep 'its question and its first list', which is false when a list comes before the question: [list 'Early', P, list] gets the Early list on the delete list. AGENTS.md:2231's wording, 'the first list after them', is the true one."
     },
     {
       "severity": "minor",
       "file": "packages/envoy/internal/dispatch/docs/service_test.go",
-      "description": "The comment at :755-757 says a caller pasting from the refusal runs nothing; %q leaves $, backtick and ' as they are, so a pasted id can run in a shell. Correct the comment (the design prints no command, so this is wording). Also packages/proof-editor/AGENTS.md:35 says Fourteen legion-owned files where the table lists fifteen after the merge."
+      "description": "followRefusal (:722) runs only on two and three lists: a mutated askBlocksToDrop that drops children[2:] passes every TestSetAskBlockText* test, and TestSetAskBlockTextRefusalBeforeBlockIDsSettleNamesNoDelete (:798) never settles and retries (code-quality probes)."
     }
   ],
   "fastFollow": "none",
-  "thermonuclear": "Both run at 11e3ba57 (code 39014e29): deep review APPROVE with minors (items 2 and 4), code quality CHANGES (item 3); item 1 is the architect's request from the tester's record.",
-  "security": "untrusted-input: the refusal gives block ids only as Go-quoted data and prints no command (ask_block_text.go:495-519); %q escapes quotes, backslash and newline but not $, backtick or ', so a caller that pastes an id into a shell command line can still run it: no server-side hole, item 4 corrects the test's claim. authz: no new route; the refusal runs inside SetAskBlockText behind the unchanged ask-edit handler (api/asks.go:393-413)."
+  "thermonuclear": "Both run at 6b8bda98 (code b0fea9fc): deep review CHANGES (item 1), code quality CHANGES (items 2-4).",
+  "security": "untrusted-input: delete ids appear only as strconv.Quote data and the reason names `dispatch doc-edit` with no command line or ops (ask_block_text.go:531-537); TestSetAskBlockTextRefusalGivesABlockIDOnlyAsQuotedData still bans command text. authz: no new route; the refusal runs inside SetAskBlockText behind the unchanged ask-edit handler."
 }
