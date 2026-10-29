@@ -719,15 +719,11 @@ func parseAskBlockLeniently(node *pmdoc.Node) (askBlock, error) {
 				if len(item.Children) == 0 {
 					return askBlock{}, fmt.Errorf("ask block %q has an empty option", blockID)
 				}
-				label, description, found := strings.Cut(strings.TrimSpace(pmdoc.TextContent(item.Children[0])), ": ")
-				if !found {
-					description = ""
-				}
-				label = strings.TrimSpace(label)
-				if label == "" {
+				option := optionOfItem(item)
+				if option.Label == "" {
 					return askBlock{}, fmt.Errorf("ask block %q has an option without a label", blockID)
 				}
-				options = append(options, model.AskOption{Label: label, Description: strings.TrimSpace(description)})
+				options = append(options, option)
 			}
 		default:
 			return askBlock{}, fmt.Errorf("ask block %q has unsupported body node %q", blockID, child.Type)

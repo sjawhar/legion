@@ -2736,6 +2736,34 @@ func TestAskOptionsEditRestoringADecidedWordingKeepsASubList(t *testing.T) {
 	}
 }
 
+// Settlement writes a decided ask's recorded wording back into its block, and no caller can
+// answer a refusal there: an option a person added under the decision, with words under it, is
+// dropped as it was before an options edit kept an option's content, so the block and its row
+// agree again rather than disagreeing for good.
+func TestRestoringADecidedWordingDropsAnOptionTheDecisionNeverHeld(t *testing.T) {
+	service, artifactID := seedIndexedRichAsk(t)
+	answerIndexedAsk(t, service, artifactID, "ask-lists")
+	settleCurrentGeneration(t, service, artifactID)
+
+	// A person adds an option of their own, holding a sub-list, after the ask was decided.
+	editLiveTree(t, service, artifactID, func(tree *pmdoc.Node) *pmdoc.Node {
+		list := firstAsk(tree).Children[1]
+		added := parsedBlock(t, "- Defer: Wait a week\n  - only if finance agrees\n")
+		list.Children = append(list.Children, added.Children[0])
+		return tree
+	})
+	settleCurrentGeneration(t, service, artifactID)
+
+	block, err := parseAskBlock(firstAsk(liveTree(t, service, artifactID)))
+	if err != nil {
+		t.Fatalf("parse the restored ask: %v", err)
+	}
+	want := []model.AskOption{{Label: "Ship", Description: "Release it"}, {Label: "Hold", Description: "Wait for review"}}
+	if !slices.Equal(block.options, want) {
+		t.Fatalf("the restored block asks %#v, want the wording the ask was decided on", block.options)
+	}
+}
+
 // sendAskOptions sends edit to the ask-lists block as alice.
 func sendAskOptions(service *Service, artifactID string, edit AskBlockEdit) error {
 	return joinedWrite(service, func(ctx context.Context) error {

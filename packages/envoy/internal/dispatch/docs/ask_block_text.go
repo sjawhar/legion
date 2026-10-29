@@ -90,7 +90,7 @@ func (s *Service) SetAskBlockText(
 		// since no document edit writes a paragraph inside a decision (pmdoc.BlockBoundary).
 		writesTheQuestion := emptyQuestion && edit.Question != nil && normalizeAskQuestion(*edit.Question) != ""
 		if emptyQuestion {
-			if err := refuseEmptyQuestionEdit(block, edit); err != nil {
+			if err := refuseEmptyQuestionEdit(block, writesTheQuestion); err != nil {
 				return err
 			}
 		}
@@ -134,7 +134,7 @@ func (s *Service) SetAskBlockText(
 			if writesTheQuestion {
 				children, err = repairedAskBlockChildren(block, edit, pmdoc.NewWriteBudget())
 			} else {
-				children, err = askBlockChildren(block, edit, pmdoc.NewWriteBudget())
+				children, err = askBlockChildren(block, edit, pmdoc.NewWriteBudget(), false)
 			}
 			if err != nil {
 				return err
@@ -206,10 +206,15 @@ func withoutUnchanged(current askBlock, edit AskBlockEdit) AskBlockEdit {
 // produces, not hand-built nodes, so a bullet list carries the list attributes every other
 // document write gives it. An options edit writes only the lines it sends: each option is paired
 // with the list item already holding it (editedOptionList), since an ask row shows nothing of
-// what a person wrote under an option and rebuilding the list would delete it unseen. The text
-// the edit writes is caller text, so it is weighed on budget, the write's, before it is rendered
-// and as it is parsed back (parsedBlockBody).
-func askBlockChildren(current askBlock, edit AskBlockEdit, budget *pmdoc.WriteBudget) ([]*pmdoc.Node, error) {
+// what a person wrote under an option and rebuilding the list would delete it unseen. A
+// question's text is caller text, so it is weighed on budget, the write's, and parsed back on it
+// (parsedBlockBody); the merged option list carries what the document already holds under an
+// option, so the caller's labels and descriptions alone are weighed on that budget and the
+// merged rendering is parsed on one of its own (editedOptionList). dropUnmatched is for
+// settlement's restore of a decided ask's recorded wording, the one caller no refusal can
+// reach: it drops a list item no sent option matches rather than refusing the write, as the
+// route did before it kept an option's content.
+func askBlockChildren(current askBlock, edit AskBlockEdit, budget *pmdoc.WriteBudget, dropUnmatched bool) ([]*pmdoc.Node, error) {
 	paragraphs := []*pmdoc.Node{}
 	var list *pmdoc.Node
 	for _, child := range current.node.Children {
@@ -231,7 +236,7 @@ func askBlockChildren(current askBlock, edit AskBlockEdit, budget *pmdoc.WriteBu
 	}
 
 	if edit.Options != nil {
-		rebuilt, err := editedOptionList(list, normalizeAskOptions(*edit.Options), budget)
+		rebuilt, err := editedOptionList(list, normalizeAskOptions(*edit.Options), budget, dropUnmatched)
 		if err != nil {
 			return nil, err
 		}
@@ -270,7 +275,7 @@ func repairedAskBlockChildren(current askBlock, edit AskBlockEdit, budget *pmdoc
 		}
 	}
 	if len(lists) < 2 {
-		return askBlockChildren(current, edit, budget)
+		return askBlockChildren(current, edit, budget, false)
 	}
 	if withoutUnchanged(current, edit).Options != nil {
 		return nil, &ErrAskBlockUnrepresentable{Field: "options", Reason: "this decision holds more than one " +
@@ -405,7 +410,7 @@ func writeDecidedWording(node *pmdoc.Node, ask model.Ask) (bool, error) {
 	if current.asks(decided) {
 		return false, nil
 	}
-	children, err := askBlockChildren(current, AskBlockEdit{Question: &decided.Question, Options: &decided.Options}, pmdoc.NewWriteBudget())
+	children, err := askBlockChildren(current, AskBlockEdit{Question: &decided.Question, Options: &decided.Options}, pmdoc.NewWriteBudget(), true)
 	if err != nil {
 		return false, err
 	}
@@ -530,9 +535,10 @@ func questionParagraphs(question string) []*pmdoc.Node {
 // write is (parsedBlockBody), so the list and its items carry the attributes that parse gives,
 // spread included, and the identity the markdown cannot carry is put back afterwards
 // (restoreOptionItems). list is the block's own list, nil where it holds none and every option
-// is new.
-func editedOptionList(list *pmdoc.Node, options []model.AskOption, budget *pmdoc.WriteBudget) (*pmdoc.Node, error) {
-	merged, err := mergeAskOptions(list, options)
+// is new. dropUnmatched drops an item no sent option matches rather than refusing the write
+// (askBlockChildren).
+func editedOptionList(list *pmdoc.Node, options []model.AskOption, budget *pmdoc.WriteBudget, dropUnmatched bool) (*pmdoc.Node, error) {
+	merged, err := mergeAskOptions(list, options, dropUnmatched)
 	if err != nil {
 		return nil, err
 	}
@@ -593,8 +599,9 @@ type mergedOption struct {
 // changed has the item's line rewritten above everything else the item holds, and an option no
 // item holds is a new item. An item no option took is dropped only where it holds nothing but
 // its plain line; otherwise the whole edit is refused (refuseDroppedOptionItem), which is what a
-// removal, a rename and an edit sending no option at all come to.
-func mergeAskOptions(list *pmdoc.Node, options []model.AskOption) ([]mergedOption, error) {
+// removal, a rename and an edit sending no option at all come to. dropUnmatched drops it
+// whatever it holds, for the one caller no refusal can reach (askBlockChildren).
+func mergeAskOptions(list *pmdoc.Node, options []model.AskOption, dropUnmatched bool) ([]mergedOption, error) {
 	var items []*pmdoc.Node
 	if list != nil {
 		items = list.Children
@@ -629,7 +636,7 @@ func mergeAskOptions(list *pmdoc.Node, options []model.AskOption) ([]mergedOptio
 		})
 	}
 	for index, item := range items {
-		if taken[index] || holdsOnlyItsOptionLine(item, held[index]) {
+		if taken[index] || dropUnmatched || holdsOnlyItsOptionLine(item, held[index]) {
 			continue
 		}
 		return nil, refuseDroppedOptionItem(list, item, held[index])
@@ -818,7 +825,7 @@ func normalizeAskOptions(options []model.AskOption) []model.AskOption {
 // decision left asking nothing is refused every document edit that changes it
 // (validateEditedAskBlocks). The block and the paragraph are quoted as data (quotedAskChild),
 // never written into the reason raw.
-func refuseEmptyQuestionEdit(block askBlock, edit AskBlockEdit) error {
+func refuseEmptyQuestionEdit(block askBlock, writesTheQuestion bool) error {
 	for _, child := range block.node.Children {
 		if child.Type == "bullet_list" || plainInline(child) {
 			continue
@@ -833,7 +840,7 @@ func refuseEmptyQuestionEdit(block askBlock, edit AskBlockEdit) error {
 				"which keeps it",
 			block.id, quoted)}
 	}
-	if edit.Question != nil && normalizeAskQuestion(*edit.Question) != "" {
+	if writesTheQuestion {
 		return nil
 	}
 	return &ErrAskBlockUnrepresentable{Field: "block", Reason: fmt.Sprintf(
@@ -1071,12 +1078,7 @@ func askRepairKeepsNothingOfItsOwn(ask *pmdoc.Node) bool {
 // refusal says what is answered, resolved or repaired first.
 func dropsADecision(dropped map[*pmdoc.Node]struct{}) bool {
 	for node := range dropped {
-		holds := false
-		pmdoc.Walk(node, func(found *pmdoc.Node) bool {
-			holds = holds || found.Type == "ask"
-			return !holds
-		})
-		if holds {
+		if len(nestedAsks([]*pmdoc.Node{node})) > 0 {
 			return true
 		}
 	}
