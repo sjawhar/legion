@@ -368,7 +368,7 @@ func TestTheBootReconciliationWarnsOfEachPodRunningAnotherImage(t *testing.T) {
 	}
 	for _, loc := range []runtime.Locator{issue, controller} {
 		want := "sandbox runtime: " + loc.Sandbox.Name + " runs image " + testImage + ", the configured image is " + nextImage +
-			"; its agents call this daemon as the older release until the pod is relaunched"
+			"; its agents call this daemon as the older release until its update round replaces the pod"
 		if !strings.Contains(logs.String(), want) || warnings(loc.Sandbox.Name) != 1 {
 			t.Errorf("the boot reconciliation logged %q, want one warning %q", logs.String(), want)
 		}

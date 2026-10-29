@@ -938,7 +938,7 @@ func (r *Runtime) warnImageDrift(u *unstructured.Unstructured) {
 		return
 	}
 	if other, drifted := imageDrift(pod, r.image); drifted {
-		r.log.Warn(fmt.Sprintf("sandbox runtime: %s runs image %s, the configured image is %s; its agents call this daemon as the older release until the pod is relaunched", u.GetName(), other, r.image),
+		r.log.Warn(fmt.Sprintf("sandbox runtime: %s runs image %s, the configured image is %s; its agents call this daemon as the older release until its update round replaces the pod", u.GetName(), other, r.image),
 			"sandbox", u.GetName(), "pod", pod.UID)
 	}
 }
