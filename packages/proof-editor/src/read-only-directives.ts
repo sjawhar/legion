@@ -1,4 +1,8 @@
+import { schemaCtx } from "@milkdown/core";
+import type { Root } from "@milkdown/kit/transformer";
+import { $remark } from "@milkdown/kit/utils";
 import type { Schema } from "@milkdown/prose/model";
+import type { Transformer } from "unified";
 import { type BlockSchema, typedBlockRefusal, validateBlockSchema } from "./block-schema.js";
 import { type MdastNode, remarkDecideTypedBlocks } from "./typed-block-drawing.js";
 
@@ -37,6 +41,16 @@ function dropServerAttributes(nodes: MdastNode[], blockSchema: BlockSchema): voi
 }
 
 /**
+ * Whether `remarkDecideTypedBlocks` may keep `node`, a container directive, as a typed block: the
+ * block schema accepts its name and attributes (`typedBlockRefusal`). Without a block schema no
+ * directive is a typed block. Both the read-only parse and the live editor's step decide by it.
+ */
+function acceptedTypedBlock(blockSchema: BlockSchema | undefined) {
+  return (node: MdastNode): boolean =>
+    blockSchema !== undefined && typedBlockRefusal(blockSchema, node) === undefined;
+}
+
+/**
  * The read-only counterpart of `remarkTypedBlocks`, for bodies that are only displayed. A body
  * the document service would refuse still has to be shown, and refusing it whole sends the
  * reader its raw source; so a container directive the block schema refuses (or any, without a
@@ -56,14 +70,37 @@ function dropServerAttributes(nodes: MdastNode[], blockSchema: BlockSchema): voi
  */
 export function remarkReadOnlyDirectives(blockSchema: BlockSchema | undefined, schema: Schema) {
   if (blockSchema !== undefined) validateBlockSchema(blockSchema);
-  const decide = remarkDecideTypedBlocks(
-    schema,
-    (node) => blockSchema !== undefined && typedBlockRefusal(blockSchema, node) === undefined
-  );
+  const decide = remarkDecideTypedBlocks(schema, acceptedTypedBlock(blockSchema));
   return (tree: MdastNode, file: { toString(): string }): void => {
     decide(tree, file);
     if (blockSchema !== undefined && tree.children !== undefined) {
       dropServerAttributes(tree.children, blockSchema);
     }
   };
+}
+
+/**
+ * The live editor's typed-block step (sjawhar/legion#2433): the read-only parse's drawing decision, made
+ * against the editor's schema, read the first time it parses (the remark processor is built
+ * before the schema is). A refusal thrown from a paste let the browser insert the plain text
+ * itself, its lines joined, so a directive the block schema refuses is drawn as its lines and a
+ * paragraph line that opens like a directive stays text, as in the read-only parse.
+ *
+ * Unlike the read-only parse it keeps every `server` attribute. The live editor parses a document
+ * the server wrote, a past version's text through `setMarkdown` among them, and that text carries
+ * an answered decision's `state`, `answered_by` and `selected`, which the version must show. A
+ * paste keeps them too, as the live editor always did: settlement owns them and writes each
+ * block's from its ask's row (`setAskServerAttributes`), so a pasted `state="answered"` is put
+ * back to the row's state once the paste settles. It must be registered after the mark plugins,
+ * so a block-level mark span is a mark node when the fit check reads it.
+ */
+export function liveTypedBlocksRemarkPlugin(blockSchema: BlockSchema) {
+  validateBlockSchema(blockSchema);
+  return $remark("remarkLiveTypedBlocks", (ctx) => () => {
+    let decide: ReturnType<typeof remarkDecideTypedBlocks> | undefined;
+    return ((tree: MdastNode, file: { toString(): string }) => {
+      decide ??= remarkDecideTypedBlocks(ctx.get(schemaCtx), acceptedTypedBlock(blockSchema));
+      decide(tree, file);
+    }) as unknown as Transformer<Root, Root>;
+  });
 }

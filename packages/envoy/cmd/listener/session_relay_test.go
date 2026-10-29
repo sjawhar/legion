@@ -47,7 +47,7 @@ func newRelayRigPausing(t *testing.T, first, max time.Duration) *relayRig {
 	}
 	t.Cleanup(client.Close)
 	rig := newSessionConsumerRigOn(t, client, url)
-	relays, err := startSessionRelays(rig.deps.delivery, rig.harness.sessions, rig.harness.registry, rig.harness.config.deliverer, client, "test-machine", rig.harness.config.logger)
+	relays, err := startSessionRelays(rig.deps.consumers, rig.harness.sessions, rig.harness.registry, rig.harness.config.deliverer, client, "test-machine", rig.harness.config.logger)
 	if err != nil {
 		t.Fatalf("start the session relays: %v", err)
 	}
@@ -873,7 +873,7 @@ func TestSessionConsumerWithoutTheGrantProbesItOncePerTenMinutes(t *testing.T) {
 	rig := newSessionConsumerRigOn(t, client, uri)
 	var clock atomic.Int64
 	clock.Store(time.Now().UnixNano())
-	rig.deps.delivery.now = func() time.Time { return time.Unix(0, clock.Load()) }
+	rig.deps.consumers.now = func() time.Time { return time.Unix(0, clock.Load()) }
 	refusedCalls := func() int {
 		calls := 0
 		for line := range strings.SplitSeq(server.Log(), "\n") {

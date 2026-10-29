@@ -55,7 +55,7 @@ func newSessionConsumerRigOn(t *testing.T, client *bus.Client, url string) *sess
 		t.Fatalf("connect the test's view of the session consumers: %v", err)
 	}
 	t.Cleanup(observer.Close)
-	deps := &listenerDeps{client: client, registry: harness.registry, sessions: harness.sessions, delivery: delivery}
+	deps := &listenerDeps{client: client, registry: harness.registry, sessions: harness.sessions, consumers: delivery}
 	mux := http.NewServeMux()
 	registerV1Routes(mux, deps, "test-machine", harness.config.logger)
 	return &sessionConsumerRig{harness: harness, deps: deps, mux: mux, consumers: observer}
@@ -337,7 +337,7 @@ func (r *recordingRelay) registered(sessionID string, epochChanged bool) {
 func TestSessionConsumerRegistrationTellsTheRelayWhenTheEpochChanges(t *testing.T) {
 	rig := newSessionConsumerRig(t)
 	relay := &recordingRelay{}
-	rig.deps.delivery.relay = relay
+	rig.deps.consumers.relay = relay
 	body := func(epoch string) string {
 		return `{"session_id":"ses_epoch","self_subscribed":true,"topics":[],"delivery":{"consumer":true,"epoch":"` + epoch + `"}}`
 	}

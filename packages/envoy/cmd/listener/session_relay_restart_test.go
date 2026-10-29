@@ -33,7 +33,7 @@ func failCreates(t *testing.T, rig *relayRig, sessionID string, n int) <-chan st
 	failed := make(chan struct{}, n)
 	var mu sync.Mutex
 	left := n
-	consumers := rig.deps.delivery.consumers
+	consumers := rig.deps.consumers.consumers
 	consumers.SetCreateFault(func(consumer string) error {
 		mu.Lock()
 		defer mu.Unlock()

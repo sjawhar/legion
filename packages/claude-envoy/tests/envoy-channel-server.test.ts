@@ -76,6 +76,37 @@ test("emits each Envoy envelope as the exact Claude channel notification", async
   ])
 })
 
+test("presents an ad-hoc topic's forward on the agent subject with the topic it was published to", async () => {
+  const notifier = new FakeNotifier()
+  const delivery = createChannelDelivery({
+    identity: new SessionIdentity("ses_claude", "/tmp"),
+    notifier,
+    configFile: sessionConfigFile("claude", process.env),
+  })
+  // The publish route forwards an ad-hoc topic's envelope, unchanged, to each self-subscribed
+  // session's agent subject, and that copy can arrive before the one on the topic itself.
+  const adHocForward = JSON.stringify({
+    event_id: "evt-team-3",
+    dedupe_key: "publish.0123456789abcdef0123456789abcdef",
+    source: "agent",
+    source_session: "ses_sender",
+    topic: "notifications.team.deploy-squad",
+    issued_at: 1_760_000_000_000,
+    payload_summary: "Deploy done",
+  })
+
+  await delivery.enqueue({ subject: directSubject, raw: adHocForward })
+
+  expect(notifier.notifications).toHaveLength(1)
+  expect(notifier.notifications[0]?.params.meta).toEqual({
+    producer: "agent",
+    topic: "notifications.team.deploy-squad",
+    event_id: "evt-team-3",
+    dedupe_key: "publish.0123456789abcdef0123456789abcdef",
+    from_session: "ses_sender",
+  })
+})
+
 test("strips unsafe channel meta keys before notifying Claude Code", () => {
   expect(
     sanitizeChannelMetadata({

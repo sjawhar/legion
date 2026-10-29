@@ -1022,9 +1022,11 @@ func (r *Registry) RoleClaim(ctx context.Context, role string) (RoleClaim, error
 	return claim, err
 }
 
-// RoleHolder returns the authoritative session ID for role, read from the bucket with no deadline of
-// its own, for a caller that answers no request; a route reads RoleClaim within its own. An
-// unclaimed role returns an empty holder without an error.
+// RoleHolder returns the authoritative session ID for role, read from the bucket with no deadline
+// of its own, for a caller that answers no request: CachedRoleHolder on a miss, and tests reading
+// what a claim left behind. Every route and the role lane read RoleClaim within a deadline
+// (resolveRoleHolder, cmd/listener/role_holder.go). An unclaimed role returns an empty holder
+// without an error.
 func (r *Registry) RoleHolder(role string) (string, error) {
 	claim, err := r.RoleClaim(context.Background(), role)
 	if err != nil {
@@ -1101,16 +1103,36 @@ func (r *Registry) CachedInterest(sessionID string) (Interest, bool) {
 }
 
 // Match returns, once each, the cached interests of machineID with a topic pattern that matches
-// topic (routing.Match's rules), looked up in the subject index.
+// topic (routing.Match's rules), looked up in the subject index: a listener delivers live only to
+// the sessions of its own machine.
 func (r *Registry) Match(machineID string, topic string) []Interest {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
+	return r.matchLocked(func(visit func(string)) { r.index.match(machineID, topic, visit) })
+}
+
+// MatchAll returns every cached interest whose topics match topic, on any machine, sorted by
+// SessionID for deterministic output: a sender that must confirm delivery to each subscribed
+// session needs them all, wherever each session registered.
+func (r *Registry) MatchAll(topic string) []Interest {
+	r.mu.RLock()
+	out := r.matchLocked(func(visit func(string)) { r.index.matchAll(topic, visit) })
+	r.mu.RUnlock()
+	sort.Slice(out, func(i, j int) bool {
+		return out[i].SessionID < out[j].SessionID
+	})
+	return out
+}
+
+// matchLocked returns, once each, the cached interests of the keys walk visits over the subject
+// index; the index visits a key once per matching pattern. The caller holds r.mu.
+func (r *Registry) matchLocked(walk func(visit func(key string))) []Interest {
 	out := []Interest{}
 	if r.index == nil {
 		return out
 	}
 	var seen map[string]struct{}
-	r.index.match(machineID, topic, func(key string) {
+	walk(func(key string) {
 		if _, dup := seen[key]; dup {
 			return
 		}

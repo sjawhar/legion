@@ -105,7 +105,11 @@ const CONTAINER_LEAD = /^(?:[ \t]*(?:>|(?:[-+*]|\d{1,9}[.)])(?=[ \t]|$)))*[ \t]*
 /** The one rule the diagram needs beside its own sheet: its natural width, up to the body's. */
 const PREVIEW_STYLE = "svg{max-width:100%;height:auto;display:block}";
 
-const drawings = new Map<string, MermaidDrawing>();
+/** What the cache holds: `fail()` answers a waiting draw with `{ unavailable: true }` and caches
+ *  nothing, so no source is ever remembered as unavailable and the next body asks again. */
+type CachedDrawing = Exclude<MermaidDrawing, { unavailable: true }>;
+
+const drawings = new Map<string, CachedDrawing>();
 /** Each source asked for and not answered yet, oldest first, with the draws its answer feeds in
  *  the order they asked. The first is the one the worker is drawing or starts on next. A source
  *  whose draws were all cancelled stays, with none, until the cancel's microtask drops it. */
@@ -181,7 +185,7 @@ function endsInOpenMermaidFence(
   );
 }
 
-function refusal(reason: string | null): MermaidDrawing {
+function refusal(reason: string | null): CachedDrawing {
   return {
     error:
       reason === null
@@ -202,7 +206,7 @@ function noteSettled(): void {
 }
 
 /** Caches `drawn` for `source` and runs the draws that waited on it. */
-function settle(source: string, drawn: MermaidDrawing): void {
+function settle(source: string, drawn: CachedDrawing): void {
   if (drawings.size >= CACHE_LIMIT) {
     const oldest = drawings.keys().next();
     if (oldest.done !== true) drawings.delete(oldest.value);
@@ -251,7 +255,7 @@ function answer(from: Renderer, reply: MermaidReply): void {
   if (current?.id !== reply.id) return;
   window.clearTimeout(current.timer);
   from.current = undefined;
-  let drawn: MermaidDrawing;
+  let drawn: CachedDrawing;
   if ("markup" in reply) {
     try {
       drawn = { svg: mermaidSvgElement(reply.markup, document) };

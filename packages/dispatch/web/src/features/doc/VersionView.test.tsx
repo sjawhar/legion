@@ -155,18 +155,18 @@ test("VersionView shows the parser's error instead of an empty document when a v
     createEditor: (inner) => async (root, options) => {
       const handle = await inner(root, options);
       handle.setMarkdown = () => {
-        throw new Error("text directives (:name{...}) are not supported");
+        throw new Error("this version cannot be parsed");
       };
       return handle;
     },
     highlight: undefined,
-    markdown: "held since 16:25Z",
+    markdown: "Some version text.",
   });
 
   try {
     await waitFor(() =>
       expect(within(view.container).getByRole("alert").textContent).toBe(
-        "This version could not be rendered: text directives (:name{...}) are not supported"
+        "This version could not be rendered: this version cannot be parsed"
       )
     );
     expect(editors[0]?.destroyed).toBe(true);

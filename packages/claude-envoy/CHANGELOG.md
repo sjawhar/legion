@@ -1,5 +1,15 @@
 # Changelog
 
+## [main@1f5b08286a6d] - 2026-10-29
+
+### Added
+
+- The `dispatch` command (`dist/dispatch.js`) prints the related-item check an issue, an ask or a
+  new decision block got right under the line naming the write, as what it found and how it
+  searched, that it found nothing, or that no check was made, why, and the `dispatch search` to
+  run instead, and `dispatch related --project <KEY> --title … --text …` runs that check on a
+  draft and writes nothing.
+
 ## [main@d157fc86811c] - 2026-10-29
 
 ### Added
