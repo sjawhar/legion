@@ -6,6 +6,7 @@ import type {
   ArchitectureSource,
   ArchitectureTree,
   Artifact,
+  ArtifactBlock,
   ArtifactText,
   ArtifactUploadResponse,
   ArtifactVersionText,
@@ -560,6 +561,16 @@ export function followAsk(id: string, sessionID: string, actor: Actor): Promise<
 export function getArtifactText(id: string, options: ApiOptions = {}): Promise<ArtifactText> {
   return request<ArtifactText>(
     `/api/v1/artifacts/${encodeURIComponent(id)}/text`,
+    "GET",
+    undefined,
+    options
+  );
+}
+
+/** The blocks of the document's current version, each with the span of markdown it covers. */
+export function getArtifactBlocks(id: string, options: ApiOptions = {}): Promise<ArtifactBlock[]> {
+  return request<ArtifactBlock[]>(
+    `/api/v1/artifacts/${encodeURIComponent(id)}/blocks`,
     "GET",
     undefined,
     options

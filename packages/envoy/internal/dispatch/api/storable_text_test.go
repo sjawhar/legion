@@ -142,11 +142,12 @@ func nulListener(t *testing.T) *httptest.Server {
 // member name, a multipart upload's every field and its markdown file, and every path and query
 // parameter, so each row below is a route and one of its text fields.
 func TestEveryStoringRouteRefusesANulInItsText(t *testing.T) {
-	handler, database, _ := newTestServer(t, testServerOptions{envoyURL: nulListener(t).URL, settle: time.Hour})
+	handler, database, _, served := newRegisteredTestServer(t, testServerOptions{envoyURL: nulListener(t).URL, settle: time.Hour})
 	f := newNulFixture(t, handler)
 	// The mention's send runs after its response (mentionSender) and writes its comment.delivery
 	// event then; it must land before the rows below compare the tables around each refusal.
 	settledCommentDeliveries(t, database, f.mention)
+	awaitBackgroundWrites(t, served)
 	session := func(id string) map[string]any { return map[string]any{"kind": "session", "id": id} }
 	issue := "/api/v1/issues/" + f.issue
 	spec := "/api/v1/artifacts/" + f.spec
@@ -273,8 +274,9 @@ func TestAReadRefusesANulInItsParameters(t *testing.T) {
 // type. Each failed with a 500 or, for the markdown file, panicked the document writer and dropped
 // the connection. A markdown file stores no part header, so its Content-Type is not checked.
 func TestCallerTextThatIsNotUTF8IsRefused(t *testing.T) {
-	handler, database, _ := newTestServer(t, testServerOptions{settle: time.Hour})
+	handler, database, _, served := newRegisteredTestServer(t, testServerOptions{settle: time.Hour})
 	issue := createInteractionIssue(t, handler, "TEST", "Not UTF-8", "before\n")
+	awaitBackgroundWrites(t, served)
 	artifacts := "/api/v1/issues/" + issue.Key + "/artifacts"
 	for _, row := range []struct {
 		name    string

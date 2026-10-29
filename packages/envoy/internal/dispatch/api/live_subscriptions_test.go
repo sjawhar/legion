@@ -126,36 +126,18 @@ func agentView(session string) LiveView {
 	return LiveView{DeliveryLiveView: DeliveryLiveView{Kind: liveAgentView}, SessionID: &session}
 }
 
-// hubSubs is how many subscriptions the hub's running generation holds, of every socket, and none
-// while no generation runs.
+// hubSubs is how many subscriptions the hub holds, of every socket.
 func hubSubs(hub *deliveryHub) int {
 	hub.mu.Lock()
 	defer hub.mu.Unlock()
+	held := 0
 	if hub.generation == nil {
 		return 0
 	}
-	held := 0
 	for _, subs := range hub.generation.conns {
 		held += len(subs)
 	}
 	return held
-}
-
-// waitStalled waits until running has queued nothing for 300 ms with socket's stream queue full:
-// the page that reads nothing has stopped the socket's writer, which is no longer writing.
-func waitStalled(t *testing.T, socket *liveSocket, running *fakeLiveSubscription) {
-	t.Helper()
-	deadline := time.Now().Add(10 * time.Second)
-	last, since := running.sent.Load(), time.Now()
-	for time.Since(since) < 300*time.Millisecond {
-		if time.Now().After(deadline) {
-			t.Fatalf("the writer still took frames of %q after 10s with the page reading nothing", running.sub)
-		}
-		time.Sleep(20 * time.Millisecond)
-		if sent := running.sent.Load(); sent != last || !streamFull(socket) {
-			last, since = sent, time.Now()
-		}
-	}
 }
 
 func TestASubscriptionPastTheCapIsRefused(t *testing.T) {
@@ -208,19 +190,20 @@ func TestASubscriptionPastTheCapIsRefused(t *testing.T) {
 
 func TestARepeatedSubReplacesAnotherKind(t *testing.T) {
 	events := newFakeLiveKind(-1, 512)
-	rig := newLiveSocketRig(t, testServerOptions{liveKinds: map[string]liveKind{liveEventsView: events.kind(true)}},
-		func(listener net.Listener) net.Listener { return smallSendBuffers{listener} })
-	client := rig.open(t, smallReadDialer(), asUser("alice"))
+	held := &heldWrites{}
+	rig := newLiveSocketRig(t, testServerOptions{liveKinds: map[string]liveKind{liveEventsView: events.kind(true)}}, held.listen)
+	client := rig.open(t, gws.DefaultDialer, asUser("alice"))
 
-	// The page reads nothing while x's events subscription fills the stream queue, until the writer
-	// is held back.
+	// The writer is held inside its first write of x's events, as a page that reads nothing holds
+	// it, while x's events subscription fills the stream queue.
+	held.hold(t)
 	client.send(t, liveSubscribe("x", eventsView(), ""))
 	first := events.next(t, 5*time.Second, "x's events subscription")
 	socket := rig.sockets(t, 1)[0]
-	waitStalled(t, socket, first)
+	held.waitHeld(t, socket)
 
-	// A delivery view in its place stops it, and the hub's answer waits behind the stalled writer
-	// with x's last frames still on the stream queue. None of them follows the answer.
+	// A delivery view in its place stops it, and the hub's answer waits behind the held writer with
+	// x's last frames still on the stream queue. None of them follows the answer.
 	client.send(t, deliverySubscribe("x", livePipelineView(nil)))
 	if err := first.ended(t, 5*time.Second); !errors.Is(err, context.Canceled) {
 		t.Fatalf("the replaced events subscription's SendWait answered %v, want its context's end", err)
@@ -229,6 +212,7 @@ func TestARepeatedSubReplacesAnotherKind(t *testing.T) {
 	if len(socket.stream) == 0 {
 		t.Fatal("no frame of x's was left on the stream queue for the answer to overtake")
 	}
+	held.release()
 	client.read()
 	deadline := time.Now().Add(10 * time.Second)
 	for {
@@ -264,51 +248,123 @@ func TestARepeatedSubReplacesAnotherKind(t *testing.T) {
 	}
 }
 
-// A delivery view that takes an events subscription's place is answered whenever the hub answers,
-// the moment after the socket's writer dropped every frame that subscription left on the stream
-// queue among them: the page is sent the answer, none of those frames, and nothing after it.
-func TestAReplacedSubscriptionsQueuedFramesAreDroppedNotWritten(t *testing.T) {
-	events := newFakeLiveKind(-1, 512)
-	rig := newLiveSocketRig(t, testServerOptions{liveKinds: map[string]liveKind{liveEventsView: events.kind(true)}},
-		func(listener net.Listener) net.Listener { return smallSendBuffers{listener} })
-	client := rig.open(t, smallReadDialer(), asUser("alice"))
-	client.send(t, liveSubscribe("x", eventsView(), ""))
-	running := events.next(t, 5*time.Second, "x's events subscription")
+// The hub's answer to a delivery view goes out before the first frame of an events subscription
+// that takes the view's sub, however the writer's pick falls. The hub queued the answer before the
+// replacement began. Each round holds the writer between a look at the hub's queue that finds
+// nothing waiting and its pick of the next frame, until the answer is on the hub's queue and the
+// replacing subscription's first event is on the stream. Both are then ready at once, and Go's
+// select picks among ready cases at random, so a writer that trusts its earlier look writes the
+// event first in about half of the rounds and passes all of them one time in 2^rounds.
+func TestAReplacedDeliveryViewsAnswerGoesOutBeforeItsReplacementsFrames(t *testing.T) {
+	const rounds = 40
+	events := newFakeLiveKind(1, 0)
+	rig := newLiveSocketRig(t, testServerOptions{
+		liveKinds: map[string]liveKind{liveEventsView: events.kind(true)},
+		// No heartbeat takes one of the writer's turns while the test holds it.
+		streamHeartbeat: time.Hour,
+	}, nil)
+	writer := newIdleWriterHold(t)
+	rig.served.liveWriterBeforePick = writer.beforePick
+	writer.holdNext()
+	client := rig.dial(t, asUser("alice"))
 	socket := rig.sockets(t, 1)[0]
-	waitStalled(t, socket, running)
+	writer.waitHeld(t)
 
-	// A delivery view takes its place, and the page reads again before the hub has answered: the
-	// writer drops every frame x left queued, so the answer finds it with nothing to write.
-	client.send(t, deliverySubscribe("x", livePipelineView(nil)))
-	if err := running.ended(t, 5*time.Second); !errors.Is(err, context.Canceled) {
-		t.Fatalf("the replaced events subscription's SendWait answered %v, want its context's end", err)
-	}
-	queued := running.sent.Load()
-	client.read()
-	pollUntil(t, 10*time.Second, "the writer drops what x queued", func() bool { return len(socket.stream) == 0 })
-
-	// The hub's answer still reaches the page, behind only the frames the connection carried before
-	// x was replaced, and nothing follows it.
-	written := int64(0)
-	deadline := time.Now().Add(10 * time.Second)
-	for {
-		frame := decodeSocketFrame(t, client.takeBy(t, deadline, 10*time.Second, "the hub's answer for x"))
-		if refusal, ok := frame.(LiveError); ok {
-			if refusal.Sub != "x" || refusal.Code != "DELIVERY_NOT_CONFIGURED" {
-				t.Fatalf("refusal = %+v, want DELIVERY_NOT_CONFIGURED for x", refusal)
-			}
-			break
+	for round := range rounds {
+		sub := "x" + strconv.Itoa(round)
+		// The writer is held after a look that found nothing waiting. The hub answers a delivery
+		// view under sub (delivery is not configured), and then an events subscription takes sub
+		// and queues its first event.
+		client.send(t, deliverySubscribe(sub, livePipelineView(nil)))
+		pollUntil(t, 10*time.Second, "the hub answers "+sub, func() bool { return len(socket.queue) == 1 })
+		client.send(t, liveSubscribe(sub, eventsView(), ""))
+		running := events.next(t, 5*time.Second, sub+"'s events subscription")
+		pollUntil(t, 5*time.Second, sub+"'s first event on the stream", func() bool { return len(socket.stream) == 1 })
+		if queued := len(socket.queue); queued != 1 {
+			t.Fatalf("round %d: the hub's queue holds %d frames when the writer picks, want its answer to %s", round, queued, sub)
 		}
-		written++
+
+		// The writer picks with both ready, writes both, and is held at its next look that finds
+		// nothing waiting.
+		writer.holdNext()
+		writer.release()
+		writer.waitHeld(t)
+		first := client.next(t, 5*time.Second, "the first frame for "+sub)
+		if event, ok := first.(LiveEventFrame); ok {
+			t.Fatalf("round %d: the first event of the events subscription that took %s (%+v) went out before the hub's answer to the delivery view it replaced", round, sub, event)
+		}
+		if refusal, ok := first.(LiveError); !ok || refusal.Sub != sub || refusal.Code != "DELIVERY_NOT_CONFIGURED" {
+			t.Fatalf("round %d: the first frame for %s = %+v, want DELIVERY_NOT_CONFIGURED", round, sub, first)
+		}
+		client.event(t, 5*time.Second, sub)
+		client.send(t, LiveUnsubscribe{Type: "unsubscribe", Sub: sub})
+		running.ended(t, 5*time.Second)
 	}
-	if written >= queued {
-		t.Fatalf("the page was sent %d of the %d frames x queued: they were written, not dropped", written, queued)
-	}
-	client.quiet(t, 500*time.Millisecond, "after the delivery view took x's place")
-	if held := hubSubs(rig.served.deliveryHub); held != 1 {
-		t.Fatalf("the hub holds %d subscriptions, want x's", held)
+	// A writer that holds back a stream frame its pick took while the hub's answer waited looks
+	// once with that answer waiting and the stream empty. None in every round would mean the pick
+	// never took the event first, so no round tested the order.
+	if took := writer.streamFirst.Load(); took == 0 {
+		t.Fatalf("in none of %d rounds did the writer's pick take the replacement's event ahead of the hub's answer", rounds)
+	} else {
+		t.Logf("the writer's pick took the replacement's event ahead of the hub's answer in %d of %d rounds", took, rounds)
 	}
 }
+
+// idleWriterHold holds a live socket's writer at its beforePick, between its look at the hub's
+// queue and its pick of the next frame, on a turn whose look found nothing waiting: the hub's
+// queue and the stream empty, and no frame the writer took out of the stream waiting to be
+// written. holdNext arms one hold, waitHeld waits until the writer is held, and release lets it
+// pick.
+type idleWriterHold struct {
+	armed  atomic.Bool
+	held   chan struct{}
+	resume chan struct{}
+	// done ends every hold when the test ends, ahead of the rig's cleanups, which wait for the
+	// socket's writer.
+	done chan struct{}
+	// streamFirst counts the looks that found a frame on the hub's queue and none on the stream
+	// while the stream was shut: a writer holding a stream frame its pick took first.
+	streamFirst atomic.Int32
+}
+
+func newIdleWriterHold(t *testing.T) *idleWriterHold {
+	writer := &idleWriterHold{held: make(chan struct{}), resume: make(chan struct{}), done: make(chan struct{})}
+	t.Cleanup(func() { close(writer.done) })
+	return writer
+}
+
+// beforePick is the socket's. takesStream false is a look that found a frame of the hub's queue
+// waiting, or one taken out of the stream; the stream's own length says whether one waits there.
+func (writer *idleWriterHold) beforePick(socket *liveSocket, takesStream bool) {
+	if !takesStream && len(socket.stream) == 0 && len(socket.queue) > 0 {
+		writer.streamFirst.Add(1)
+	}
+	if !takesStream || len(socket.stream) > 0 || !writer.armed.CompareAndSwap(true, false) {
+		return
+	}
+	select {
+	case writer.held <- struct{}{}:
+	case <-writer.done:
+		return
+	}
+	select {
+	case <-writer.resume:
+	case <-writer.done:
+	}
+}
+
+func (writer *idleWriterHold) holdNext() { writer.armed.Store(true) }
+
+func (writer *idleWriterHold) waitHeld(t *testing.T) {
+	t.Helper()
+	select {
+	case <-writer.held:
+	case <-time.After(5 * time.Second):
+		t.Fatal("the writer was not held at a look that found nothing waiting within 5s")
+	}
+}
+
+func (writer *idleWriterHold) release() { writer.resume <- struct{}{} }
 
 func TestAResumeOfTheWrongShapeIsAnInvalidFrame(t *testing.T) {
 	events := newFakeLiveKind(0, 0)
@@ -415,13 +471,14 @@ func TestASlowStreamWaitsAndNeverClosesTheSocket(t *testing.T) {
 func TestSendWaitReturnsWhenItsSubscriptionStops(t *testing.T) {
 	t.Run("the page unsubscribes", func(t *testing.T) {
 		events := newFakeLiveKind(-1, 512)
-		rig := newLiveSocketRig(t, testServerOptions{liveKinds: map[string]liveKind{liveEventsView: events.kind(true)}},
-			func(listener net.Listener) net.Listener { return smallSendBuffers{listener} })
-		client := rig.open(t, smallReadDialer(), asUser("alice"))
+		held := &heldWrites{}
+		rig := newLiveSocketRig(t, testServerOptions{liveKinds: map[string]liveKind{liveEventsView: events.kind(true)}}, held.listen)
+		client := rig.open(t, gws.DefaultDialer, asUser("alice"))
+		held.hold(t)
 		client.send(t, liveSubscribe("x", eventsView(), ""))
 		running := events.next(t, 5*time.Second, "x's events subscription")
 		socket := rig.sockets(t, 1)[0]
-		waitStalled(t, socket, running)
+		held.waitHeld(t, socket)
 
 		// The queue never drains, and the page's unsubscribe still ends the wait.
 		client.send(t, LiveUnsubscribe{Type: "unsubscribe", Sub: "x"})
