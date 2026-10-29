@@ -415,25 +415,7 @@ func (r *renderer) writeInlineNodes(nodes []*Node, prefix string, context inline
 				if index+1 < len(nodes) {
 					following = spelledMarks(nodes[index+1], escapePipes, wwwBare, spelling)
 				}
-				switch spelling.order {
-				case marksKeptOpen:
-					next = keepingOpen(active, next, following)
-					if index+1 < len(nodes) {
-						var after []Mark
-						if index+2 < len(nodes) {
-							after = spelledMarks(nodes[index+2], escapePipes, wwwBare, spelling)
-						}
-						following = keepingOpen(next, following, after)
-					}
-				case marksByReach:
-					next = byReach(active, next, nodes, index, escapePipes, wwwBare, spelling)
-					if index+1 < len(nodes) {
-						following = byReach(next, following, nodes, index+1, escapePipes, wwwBare, spelling)
-					}
-				case marksReopened:
-					next = reopening(active, next)
-					following = reopening(next, following)
-				}
+				next, following = orderMarks(active, next, following, nodes, index, escapePipes, wwwBare, spelling)
 				common = sharedMarks(active, next)
 				for i := len(active) - 1; i >= common; i-- {
 					r.closeInlineMark(active[i], escapePipes)
@@ -641,18 +623,7 @@ func inlineCodeFence(nodes []*Node, index int) (string, bool) {
 		content.WriteString(node.Text)
 	}
 	value := content.String()
-	longest, run := 0, 0
-	for _, char := range value {
-		if char == '`' {
-			run++
-			if run > longest {
-				longest = run
-			}
-		} else {
-			run = 0
-		}
-	}
-	return strings.Repeat("`", longest+1), inlineCodePadding(value)
+	return strings.Repeat("`", longestRun(value, '`')+1), inlineCodePadding(value)
 }
 
 // inlineCodePadding reports whether a code span's text is written with a space inside each

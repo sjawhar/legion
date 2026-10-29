@@ -2044,11 +2044,11 @@ written in one order - link, strong, emphasis - so where a text still carries a 
 before it opened, and the order puts that mark after the text's other marks, the mark is closed and
 opened again; where that puts two runs of one delimiter character side by side (bold inside italic:
 `*`, `**` and `*`), the parser reads one run. Such a run is kept where it reads back, as the parser
-then splits it as written, and one that does not is written again in the plain respellings, as main
-writes it again. Only where none of those reads back, and a text is under more than one mark
-(`nestsMarks`), is it written with the marks still open kept
-open, then the marks the next text still carries, and the text's others opened inside them
-(`keepingOpen`), kept only where that reads back with nothing fused, so `_**a** b_` is written
+then splits it as written, and one that does not is written again in the plain respellings, as the
+writer before sjawhar/legion#1464 writes it again. Only where none of those reads back, and a text
+is under more than one mark (`nestsMarks`), is it written with the marks still open kept open, then
+the marks the next text still carries, and the text's others opened inside them (`keepingOpen`),
+kept only where that reads back with nothing fused, so `_**a** b_` is written
 `***a** b*`; a run that fuses nothing is written as before, so italic closed around a link keeps
 its bytes. A spelling that writes a delimiter run's neighbouring letter as a reference (`flanking`)
 is made only where such a letter stands beside one (`letterBesideDelimiter`). The respellings are

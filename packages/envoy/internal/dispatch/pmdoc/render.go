@@ -136,9 +136,9 @@ func render(doc *Node, spanCells int) (r *renderer, err error) {
 	labels := definedFootnoteLabels(doc)
 	r = renderBlocks(doc, labels, false, spanCells)
 	// An empty code block in a typed block in a spread list item is written with a line between its
-	// fences, as main wrote it, except in a document holding a shape this parser reads only as the
-	// browser editor does, where that line is refused (emptyCodeWrittenBare): there the document is
-	// written again with the fences alone.
+	// fences, as the writer before sjawhar/legion#1464 wrote it, except in a document holding a
+	// shape this parser reads only as the browser editor does, where that line is refused
+	// (emptyCodeWrittenBare): there the document is written again with the fences alone.
 	if r.err == nil && r.wroteBlankEmptyCode && holdsBrowserOnlyShape(r.b.Bytes()) {
 		r = renderBlocks(doc, labels, true, spanCells)
 	}
@@ -678,26 +678,23 @@ func codeBlockFence(node *Node) string {
 	}
 	longest := 0
 	for _, child := range node.Children {
-		for run, char := 0, 0; ; {
-			if char < len(child.Text) && child.Text[char] == fence {
-				run++
-				if run > longest {
-					longest = run
-				}
-				char++
-				continue
-			}
-			if char == len(child.Text) {
-				break
-			}
+		longest = max(longest, longestRun(child.Text, fence))
+	}
+	return strings.Repeat(string(fence), max(longest, 2)+1)
+}
+
+// longestRun is the length of the longest run of char in text, zero where text holds none.
+func longestRun(text string, char byte) int {
+	longest, run := 0, 0
+	for index := range len(text) {
+		if text[index] != char {
 			run = 0
-			char++
+			continue
 		}
+		run++
+		longest = max(longest, run)
 	}
-	if longest < 2 {
-		longest = 2
-	}
-	return strings.Repeat(string(fence), longest+1)
+	return longest
 }
 
 func isBareURLLink(node *Node, marks []Mark, escapePipes bool) bool {

@@ -325,12 +325,42 @@ func lastResorts(needs runNeeds, spellings []runSpelling) []runSpelling {
 	return resorts
 }
 
+// orderMarks orders next, the marks the text nodes[index] is written under, and following, the
+// marks of the text after it, as spelling.order orders a run's marks (markOrder): marksAsWritten
+// leaves both in the order they are written in, and every other order holds the marks written open
+// before a text open around it where it can. following is ordered under next, the marks this text
+// leaves open behind it, so next is ordered first, and each order moves a code span's mark
+// innermost itself (codeInnermost), since the ordering after it reads its result that way.
+func orderMarks(active, next, following []Mark, nodes []*Node, index int, escapePipes, wwwBare bool, spelling runSpelling) ([]Mark, []Mark) {
+	switch spelling.order {
+	case marksKeptOpen:
+		next = keepingOpen(active, next, following)
+		if index+1 < len(nodes) {
+			var after []Mark
+			if index+2 < len(nodes) {
+				after = spelledMarks(nodes[index+2], escapePipes, wwwBare, spelling)
+			}
+			following = keepingOpen(next, following, after)
+		}
+	case marksByReach:
+		next = byReach(active, next, nodes, index, escapePipes, wwwBare, spelling)
+		if index+1 < len(nodes) {
+			following = byReach(next, following, nodes, index+1, escapePipes, wwwBare, spelling)
+		}
+	case marksReopened:
+		next = reopening(active, next)
+		following = reopening(next, following)
+	}
+	return next, following
+}
+
 // keepingOpen orders marks, the marks a text is written under, so that no mark it or the text
 // after it still carries is closed and opened again between them: the longest run of active, the
 // marks written open before it, from the outermost, whose every mark it carries comes first, as
 // active holds them; then its other marks that following, the next text's marks, carries; then
 // the rest, each group in its written order, opened inside the one before; and a code span's
-// mark, whose span holds no syntax, innermost (codeInnermost).
+// mark, whose span holds no syntax, innermost (codeInnermost). orderMarks orders each text this
+// way under the marksKeptOpen spelling.
 func keepingOpen(active, marks, following []Mark) []Mark {
 	kept := sharedOpenMarks(active, marks)
 	ordered := append(make([]Mark, 0, len(marks)), active[:kept]...)
@@ -360,6 +390,7 @@ func sharedOpenMarks(active, marks []Mark) int {
 // active, the marks written open before it, from the outermost, whose every mark it carries comes
 // first, as active holds them; then its other marks, the one carried over the most texts in a row
 // outermost, ties in their written order; and a code span's mark innermost (codeInnermost).
+// orderMarks orders each text this way under the marksByReach spelling.
 func byReach(active, marks []Mark, nodes []*Node, index int, escapePipes, wwwBare bool, spelling runSpelling) []Mark {
 	kept := sharedOpenMarks(active, marks)
 	ordered := append(make([]Mark, 0, len(marks)), active[:kept]...)
@@ -399,7 +430,7 @@ func byReach(active, marks []Mark, nodes []*Node, index int, escapePipes, wwwBar
 // come first, then those it holds, each group in its written order, and a code span's mark
 // innermost (codeInnermost). A mark both texts carry is then closed and opened again inside the
 // new ones (`*a*~~*b*~~`), so that its delimiter run stands beside the new one's rather than a
-// letter.
+// letter. orderMarks orders each text this way under the marksReopened spelling.
 func reopening(active, marks []Mark) []Mark {
 	ordered := make([]Mark, 0, len(marks))
 	for _, held := range []bool{false, true} {
