@@ -1369,9 +1369,8 @@ func TestDispatchInClusterNatsDropsTheProxyAndCarriesTheNumbers(t *testing.T) {
 	}
 }
 
-// natsInCluster alone renders neither number: unset, each binary keeps one copy and its own byte
-// limit (bus.ParseNATSReplicas, bus.ParseStreamMaxBytes), which it does only when the variable is
-// not there at all.
+// natsInCluster alone renders neither number: unset, each binary keeps one copy and sets no byte
+// limit (bus.ParseNATSReplicas, bus.ParseStreamMaxBytes), which the variable's absence gives.
 func TestDispatchInClusterNatsRendersNoNumbersWhenUnset(t *testing.T) {
 	args := dispatchArgs()
 	setInClusterNats(args)
@@ -1380,7 +1379,7 @@ func TestDispatchInClusterNatsRendersNoNumbersWhenUnset(t *testing.T) {
 
 	for container, env := range dispatchNatsEnvs(t, m) {
 		require.NotContains(t, env, "ENVOY_NATS_REPLICAS", "%s keeps one copy", container)
-		require.NotContains(t, env, "ENVOY_STREAM_MAX_BYTES", "%s keeps its own byte limit", container)
+		require.NotContains(t, env, "ENVOY_STREAM_MAX_BYTES", "%s sets no byte limit", container)
 	}
 }
 

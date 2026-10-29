@@ -24,9 +24,9 @@ type dispatchKubernetes struct {
 	kubeconfig pulumi.StringOutput
 }
 
-// dispatchSOCKS5Port is the port the front door's tailscaled binds its userspace SOCKS5 proxy on,
-// which its Service publishes, its NetworkPolicy admits, and the two workloads that dial the NATS
-// hub through it name.
+// dispatchSOCKS5Port is the port the front door's tailscaled binds its userspace SOCKS5 proxy on
+// without natsInCluster, which its Service publishes, its NetworkPolicy admits, and the two
+// workloads that dial the NATS hub through it name. With natsInCluster none of the four renders.
 const dispatchSOCKS5Port = 1055
 
 // agentSecretsTokenSeconds is the lifetime of the projected ServiceAccount token envoy-dispatch
@@ -490,10 +490,10 @@ func newDispatchKubernetes(ctx *pulumi.Context, comp *Dispatch, name string, arg
 	seedVolume := corev1.VolumeArray{corev1.VolumeArgs{Name: pulumi.String("nats-seed"), Csi: &corev1.CSIVolumeSourceArgs{Driver: pulumi.String("secrets-store-gke.csi.k8s.io"), ReadOnly: pulumi.Bool(true), VolumeAttributes: pulumi.StringMap{"secretProviderClass": pulumi.String(seedName)}}}}
 
 	// The front door: frontDoorReplicas pods hosting the Tailscale Service svc:<hostname>, the name
-	// every reader reaches Dispatch at, each also running the SOCKS5 proxy the app and the listener
-	// reach the NATS hub through (newDispatchFrontDoor). Recreated at one pod and rolled above it, so
-	// by default a roll never leaves the name to a single pod. Only the auth key's checksum is on its
-	// template: a renewed certificate in its TLS Secret rolls no pod.
+	// every reader reaches Dispatch at, each also running, without natsInCluster, the SOCKS5 proxy
+	// the app and the listener reach the NATS hub through (newDispatchFrontDoor). Recreated at one
+	// pod and rolled above it, so by default a roll never leaves the name to a single pod. Only the
+	// auth key's checksum is on its template: a renewed certificate in its TLS Secret rolls no pod.
 	tailnet, err := deployment(tailnetName, s.frontDoorReplicas, s.disruption.frontDoorPDBMinAvailable, map[string]*corev1.Secret{authKeyName: authKeySecret}, frontDoorPod, frontDoorOpts...)
 	if err != nil {
 		return nil, err

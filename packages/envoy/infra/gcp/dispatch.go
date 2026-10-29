@@ -213,8 +213,8 @@ type DispatchArgs struct {
 	NatsReplicas *int `pulumi:"natsReplicas,optional"`
 	// StreamMaxBytes is the stream's byte limit, at least 1: ENVOY_STREAM_MAX_BYTES on the same two
 	// containers. A deployed limit is never lowered, so programs carrying different limits leave
-	// the largest. Unset renders nothing and each binary keeps its own default
-	// (bus.ParseStreamMaxBytes).
+	// the largest. Unset renders nothing and both binaries set no limit, so a deployed stream keeps
+	// the one it has (bus.ParseStreamMaxBytes).
 	StreamMaxBytes *int `pulumi:"streamMaxBytes,optional"`
 
 	// AppCpu and appMemory size the app Deployment's envoy-dispatch container, as Kubernetes
@@ -686,7 +686,7 @@ func newDispatchSettings(args *DispatchArgs) (dispatchSettings, error) {
 	}
 	s.natsInCluster = args.NatsInCluster != nil && *args.NatsInCluster
 	// The two deployment settings both NATS clients carry, each unset (0) rendering nothing: the
-	// binaries then keep one copy and their own byte limit (bus.ParseNATSReplicas,
+	// binaries then keep one copy and set no byte limit (bus.ParseNATSReplicas,
 	// bus.ParseStreamMaxBytes).
 	if args.NatsReplicas != nil {
 		replicas := *args.NatsReplicas

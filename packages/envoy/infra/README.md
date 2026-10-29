@@ -663,8 +663,13 @@ the proxy was the only reason either did. Both containers still carry `NATS_URLS
 `ENVOY_ALLOW_REMOTE_NATS=1`. A `natsUrl` that names a local server is refused once it resolves,
 naming `natsUrl`: the pods dial the URL themselves, so a loopback address would have them dial
 themselves. Point it at the hub's own Service, such as
-`nats://envoy-hub.envoy.svc.cluster.local:4222`. Unset, the SOCKS5 path renders exactly as it
-always did, for a deployment whose NATS hub is outside this cluster.
+`nats://envoy-hub.envoy.svc.cluster.local:4222`, and change `natsUrl` in the same apply that sets
+`natsInCluster`: with no proxy the pods resolve the URL with their cluster's own DNS, which answers
+no tailnet name unless the cluster forwards it to Tailscale's. The hub must also admit the
+namespace the pods run in to its client port before that apply (for `gcp:ClusteredNatsHub`, list
+it in `clientNamespaces`): otherwise `envoy-listener` exits on its failed first connect and its
+rollout stalls, while `envoy-dispatch` goes ready and serves without the bus. Unset, the SOCKS5
+path renders exactly as it always did, for a deployment whose NATS hub is outside this cluster.
 
 `natsReplicas` and `streamMaxBytes` are the two JetStream settings both NATS clients carry:
 `ENVOY_NATS_REPLICAS` and `ENVOY_STREAM_MAX_BYTES` on the app's `envoy-dispatch` and the
@@ -674,8 +679,10 @@ listener's `envoy-listener` alike, since every Envoy program of one deployment r
 which no number of app pods gives. `streamMaxBytes` is the stream's byte limit, and a deployed
 limit is never lowered, so programs carrying different limits leave the largest. Each is refused
 by name before the component registers a resource: `natsReplicas` below 1 or above 5, the most
-copies NATS keeps, and `streamMaxBytes` below 1. Each unset renders nothing, and the binaries then
-keep one copy and their own byte limit. Both are independent of `natsInCluster`: a hub outside
+copies NATS keeps, and `streamMaxBytes` below 1. Set no more copies than the hub has servers
+(`gcp:ClusteredNatsHub` runs three), since JetStream keeps no more copies of a stream than that.
+Each unset renders nothing, and the binaries then keep one copy and set no byte limit, a deployed
+stream keeping the one it has. Both are independent of `natsInCluster`: a hub outside
 this cluster can be clustered too.
 
 `appCpu` and `appMemory` size the app Deployment's `envoy-dispatch` container, and `proxyCpu` and

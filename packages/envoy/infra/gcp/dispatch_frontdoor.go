@@ -16,9 +16,10 @@ import (
 // Dispatch's front door is a Tailscale Service host (tailnet_service.go): frontDoorReplicas pods
 // of Deployment <hostname>-tailnet, each its own tailnet node registered under its pod's name, all
 // hosting the Tailscale Service svc:<hostname>. Each terminates TLS for <hostname>.<tailnetDnsName>
-// on 443 and proxies to the app's Service, and each runs tailscaled's SOCKS5 proxy on 1055, which
-// the app and the listener reach the NATS hub through at Service <hostname>-tailnet. So the name
-// every reader reaches Dispatch at, and the hub, answer while any one front-door pod serves.
+// on 443 and proxies to the app's Service. Without natsInCluster each also runs tailscaled's SOCKS5
+// proxy on 1055, which the app and the listener reach the NATS hub through at Service
+// <hostname>-tailnet. So the name every reader reaches Dispatch at, and in that mode the hub, answer
+// while any one front-door pod serves.
 //
 // Every pod holds the Service name's certificate, and Let's Encrypt issues at most 5 certificates
 // for one exact set of names in 7 days, from every account together
