@@ -45,7 +45,7 @@ type ListenerConfig struct {
 	// user's grant, so the operator who knows it opts in; false renders nothing.
 	SubscribeAllTopics bool
 	// NATSReplicas is the copies JetStream keeps of every stream and bucket the listener creates,
-	// ENVOY_NATS_REPLICAS, at most MaxNATSReplicas. 0 leaves the variable unset, and the listener
+	// ENVOY_NATS_REPLICAS, at most bus.MaxReplicas. 0 leaves the variable unset, and the listener
 	// then keeps one copy (internal/config/config.go).
 	NATSReplicas int
 	// StreamMaxBytes is the byte limit of the notification stream the listener owns
@@ -53,10 +53,6 @@ type ListenerConfig struct {
 	// listener keeps its own default.
 	StreamMaxBytes int
 }
-
-// MaxNATSReplicas is the most copies NATS keeps of a stream, and so the highest NATSReplicas Check
-// accepts.
-const MaxNATSReplicas = 5
 
 // TailnetHostName is the address a client reaches the listener of the tailnet machine hostname by,
 // a tailnet's MagicDNS giving every machine a name under its tailnet's DNS name, and so the entry
@@ -138,7 +134,7 @@ func CheckAllowedHosts(input string, hosts []string) error {
 // Nor may one hold an nkey seed (bus.HoldsSeed), which the environment would carry, in the
 // container's inputs and the watchdog's env file; that refusal names the field and never quotes
 // the value, and comes before any other refusal of that field. NATSReplicas and StreamMaxBytes
-// are refused below 0, which is no count, and NATSReplicas above MaxNATSReplicas, which NATS
+// are refused below 0, which is no count, and NATSReplicas above bus.MaxReplicas, which NATS
 // refuses when the listener creates its stream.
 func (c ListenerConfig) Check() error {
 	if bus.HoldsSeed(c.MachineID) {
@@ -173,8 +169,8 @@ func (c ListenerConfig) Check() error {
 			return InputErrorf("socks5Proxy", "%s %w", bus.SOCKS5ProxyEnvVar, err)
 		}
 	}
-	if c.NATSReplicas < 0 || c.NATSReplicas > MaxNATSReplicas {
-		return InputErrorf("natsReplicas", "natsReplicas %d is outside 0-%d", c.NATSReplicas, MaxNATSReplicas)
+	if c.NATSReplicas < 0 || c.NATSReplicas > bus.MaxReplicas {
+		return InputErrorf("natsReplicas", "natsReplicas %d is outside 0-%d", c.NATSReplicas, bus.MaxReplicas)
 	}
 	if c.StreamMaxBytes < 0 {
 		return InputErrorf("streamMaxBytes", "streamMaxBytes %d is below 0", c.StreamMaxBytes)
