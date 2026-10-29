@@ -133,6 +133,13 @@ type Options struct {
 	// took the role back. A ready the claim refuses tells no one. Nil tells no one. It is called
 	// before the route answers the agent, so it returns at once.
 	ClaimReady func(c supervise.Claim)
+	// HandoffCompleted is told of the issue of each phase completion the workflow recorded, once
+	// the fact has committed: the daemon reads that issue's pull request from GitHub then, as the
+	// backstop for a webhook that never arrived (the daemon's readIssuePullRequest). A completion
+	// the route or the workflow refused, and a production check report, tell no one. Nil tells no
+	// one. It is called before the route answers the agent, so it returns at once, and this
+	// package reads no GitHub for it.
+	HandoffCompleted func(issue string)
 	// PromptAgents is the sorted names of every task agent the role prompts dispatch
 	// (prompts.RoleReferences), which the registration answers so a session's capability report
 	// measures the agents its role is told to run (LEGION-663). Nil or empty answers an empty list.
@@ -190,6 +197,8 @@ type server struct {
 	records      record.Store
 	dispatch     dispatch.Client
 	claimReady   func(c supervise.Claim)
+	// handoffCompleted is Options.HandoffCompleted.
+	handoffCompleted func(issue string)
 	// promptAgents and capabilityReported are Options.PromptAgents and Options.CapabilityReported.
 	promptAgents       []string
 	capabilityReported func(ctx context.Context, c supervise.Claim, report capabilities.Report)
@@ -236,6 +245,7 @@ func NewServer(bind string, port int, opts Options) *http.Server {
 		records:            opts.Record,
 		dispatch:           opts.Dispatch,
 		claimReady:         opts.ClaimReady,
+		handoffCompleted:   opts.HandoffCompleted,
 		promptAgents:       opts.PromptAgents,
 		capabilityReported: opts.CapabilityReported,
 		log:                opts.Log,

@@ -4,7 +4,6 @@ package record
 import (
 	"context"
 	"encoding/json"
-	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -463,11 +462,12 @@ type PullRequest struct {
 	// App's (the tester's red tests): a red on it is planned, so the next head is not a fix attempt.
 	PlannedRed bool
 	// Required is the checks the pull request's base branch requires (its rulesets' required status
-	// checks and its branch protection's), as the daemon last read them from GitHub
-	// (intake.RequiredChecks). Only a required check or workflow decides the checks verdict
-	// (classify.HeadVerdict), so nil, a set never read, decides none; an empty set, with no
-	// required workflow, is a base that requires nothing, which gives the head no verdict and where
-	// nothing is red.
+	// checks and its branch protection's), as the daemon last read them from GitHub before it
+	// stopped reading rulesets (dispatch://INFRA-714's R1: GitHub applies the repository's own
+	// required checks, so the daemon reads none). Only a required check or workflow decides the
+	// checks verdict (classify.HeadVerdict), so nil, a set never read, decides none; an empty set,
+	// with no required workflow, is a base that requires nothing, which gives the head no verdict
+	// and where nothing is red.
 	Required []string
 	// Workflows is each workflow the base branch's rulesets require to succeed, read with Required,
 	// and the result of its latest run on WorkflowsHead, the head the daemon read the runs of; empty
@@ -484,15 +484,15 @@ type PullRequest struct {
 	ReviewSeen ReviewOrder
 	State      PullRequestState
 	// Mergeability is GitHub's lazily computed verdict for whether this head can be merged into
-	// its base branch without a conflict, as the daemon's periodic required-checks read of
-	// GitHub's /pulls/{number} last found it (daemon.readRequiredChecks), decoding GitHub's
+	// its base branch without a conflict, as the daemon's own read of
+	// GitHub's /pulls/{number} last found it (daemon.readIssuePullRequest), decoding GitHub's
 	// nullable `mergeable` field: MergeabilityUnknown while GitHub is still computing it (never a
 	// transient conflict - GitHub reports no checks run on a mergeability GitHub has not computed
 	// yet, either), MergeabilityMergeable once GitHub can merge the head automatically, and
 	// MergeabilityConflicting once it cannot. "" means the read has never run.
 	Mergeability Mergeability
 	// MergeState is GitHub's own merge state for this head, read from `mergeable_state` on the
-	// same /pulls/{number} answer Mergeability is decoded from (daemon.readRequiredChecks), in
+	// same /pulls/{number} answer Mergeability is decoded from (daemon.readIssuePullRequest), in
 	// GitHub's lowercase spelling; "" means the read has never run. It is kept beside
 	// Mergeability because the tri-state cannot tell a head GitHub holds on the repository's own
 	// required checks or reviews (MergeStateBlocked) from one GitHub would merge now
@@ -520,7 +520,7 @@ type HeadRun struct {
 	Since time.Time `json:"since,omitzero"`
 	Steps []RunStep `json:"steps"`
 	// Decided is the head whose held red a lapsed hold let be decided as it stands (workflow's
-	// HoldLapsed), so the required-checks pass decides it once, not on every pass.
+	// holdLapsed), so one lapse is said once however many facts decide the head after it.
 	Decided string `json:"decided,omitempty"`
 }
 
@@ -602,7 +602,8 @@ type Settlement struct {
 	Cancelled  []string     `json:"cancelled"`
 }
 
-// RequiredRead is a read of what the base branch requires (intake.RequiredChecks).
+// RequiredRead is a read of what the base branch requires, as the daemon made one while it read
+// rulesets: a step a stored head run can still carry.
 type RequiredRead struct {
 	Names         []string           `json:"names"`
 	Workflows     []RequiredWorkflow `json:"workflows"`
@@ -610,7 +611,7 @@ type RequiredRead struct {
 }
 
 // RequiredWorkflow is one workflow the base branch requires, named by its path, and the result of
-// its latest run on a head as the daemon read it (requiredchecks.Workflows): success, pending,
+// its latest run on a head as the daemon read it: success, pending,
 // missing (the head has no run of it), or the conclusion it failed with. Run and Attempt are that
 // run's id and attempt, both zero when the head has no run of it: a re-run keeps its run's id and
 // raises its attempt, so a re-run that ends as the run did before is still a new read.
@@ -619,13 +620,6 @@ type RequiredWorkflow struct {
 	Result  string `json:"result"`
 	Run     int64  `json:"run,omitempty"`
 	Attempt int    `json:"attempt,omitempty"`
-}
-
-// RequiredReadUnchanged says whether a read of what the base branch requires is what pr records:
-// names is its required check set, and workflows its required workflows' runs and their results,
-// read at head. Nil Required is a set never read, never the same as a read one, even an empty one.
-func (pr PullRequest) RequiredReadUnchanged(names []string, workflows []RequiredWorkflow, head string) bool {
-	return pr.Required != nil && slices.Equal(pr.Required, names) && slices.Equal(pr.Workflows, workflows) && pr.WorkflowsHead == head
 }
 
 // PullRequestState is whether a pull request is open, merged, or closed unmerged.
@@ -639,7 +633,7 @@ const (
 
 // Mergeability is GitHub's lazily computed verdict for whether a pull request's head can be
 // merged into its base without a conflict, decoded from GitHub's nullable `mergeable` field
-// (daemon.readRequiredChecks). "" (the zero value) means the daemon has never read it.
+// (daemon.readIssuePullRequest). "" (the zero value) means the daemon has never read it.
 type Mergeability string
 
 const (
@@ -649,7 +643,7 @@ const (
 )
 
 // MergeState is GitHub's merge state for a pull request's head, read from `mergeable_state` on
-// GitHub's /pulls/{number} answer (daemon.readRequiredChecks). It is kept in GitHub's own
+// GitHub's /pulls/{number} answer (daemon.readIssuePullRequest). It is kept in GitHub's own
 // lowercase spelling rather than one of the daemon's: the state is GitHub's judgement, weighing
 // the repository's required checks and reviews, and the daemon only records what it read.
 // "" (the zero value) means the daemon has never read it, which no GitHub answer ever spells.

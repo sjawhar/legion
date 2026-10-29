@@ -11,7 +11,6 @@ import (
 
 	"github.com/jackc/pgx/v5"
 
-	"github.com/sjawhar/legion/daemon/internal/claim"
 	"github.com/sjawhar/legion/daemon/internal/classify"
 	"github.com/sjawhar/legion/daemon/internal/ghrepo"
 	"github.com/sjawhar/legion/daemon/internal/githubrest"
@@ -19,22 +18,22 @@ import (
 	"github.com/sjawhar/legion/daemon/internal/record"
 )
 
-// followHead is the required-checks pass's check of pr's head against pull, GitHub's own read of
-// it. The daemon otherwise moves a recorded head only on the pull_request synchronize webhook
+// followHead is the per-issue read's check of pr's head against pull, GitHub's own read of it.
+// The daemon otherwise moves a recorded head only on the pull_request synchronize webhook
 // (and a READY the merger reports), and a webhook lost, or waiting behind hours of the GitHub
 // consumer's backlog, leaves reviews, READY and the CI verdict judged against an old head. When
-// GitHub shows the pull request open at another head than the record holds now (the pass listed
-// its records when it started, and a webhook may have moved this one since), it applies the
+// GitHub shows the pull request open at another head than the record holds now (the read looked
+// its record up before it asked GitHub, and a webhook may have moved it since), it applies the
 // intake.PullRequestSynchronized that webhook would have carried, with GitHub's updated_at as its
 // clock, so the workflow decides it as it decides the webhook's (workflow's
 // pullRequestSynchronized), behind the same fence: a read older than the record's clock moves
 // nothing, and a webhook arriving later that is older than this read moves nothing either. The
 // fence orders by GitHub's whole seconds, so a clock equal to the record's is not late. A record a
-// webhook moved after the pass listed it is kept when this read is no newer than its clock: the
+// webhook moved since the read looked it up is kept when this read is no newer than its clock: the
 // read may predate that push within the same second, and following it would move the head back. A
 // webhook of the same second arriving later runs as a redelivery does, and one applied between this
 // function's read of the record and its apply is still undone by it - the record moves back to the
-// head read here, judging it again, until the next pass moves it forward.
+// head read here, judging it again, until the next read of the issue moves it forward.
 //
 // Before the synchronize it applies the push that reached the new head when GitHub shows it
 // changed only the issue's own .legion/<issue>/ (handoffPush): the push webhook waits in the same
@@ -44,10 +43,11 @@ import (
 // is judged as such, and the push's own handler settles what only the push says, replaying the
 // head run the head opened (classify.ApplyPush).
 //
-// It returns the record as the pass goes on with it: as it stands when the head did not move, and
-// otherwise as the synchronize left it, so the mergeability, review and required-check reads after
-// it judge the head GitHub shows. On an error, or a record no longer open, it returns the record as
-// it last read it, and the pass reads the pull request at that head; the next pass follows it.
+// It returns the record as the read goes on with it: as it stands when the head did not move, and
+// otherwise as the synchronize left it, so the mergeability and review reads after it judge the
+// head GitHub shows. On an error, or a record no longer open, it returns the record as it last
+// read it, and the reads after it judge the pull request at that head; the next read of the issue
+// follows it.
 func (w *workflowRuntime) followHead(ctx context.Context, github githubrest.Client, pr record.PullRequest, pull githubPullRequest) (record.PullRequest, error) {
 	if pull.State != "open" || pull.Head.SHA == "" || pull.Head.SHA == pr.HeadSHA {
 		return pr, nil
@@ -60,7 +60,7 @@ func (w *workflowRuntime) followHead(ctx context.Context, github githubrest.Clie
 		return current, nil
 	}
 	pr = current
-	read, cancel := context.WithTimeout(ctx, requiredChecksRead)
+	read, cancel := context.WithTimeout(ctx, issueRead)
 	push, notHandoff, err := handoffPush(read, github, pr, pr.HeadSHA, pull.Head.SHA)
 	handoff := notHandoff == ""
 	cancel()
@@ -100,11 +100,38 @@ func (w *workflowRuntime) openRecord(ctx context.Context, pr record.PullRequest)
 	return *current, nil
 }
 
+// applyMergeability applies what GitHub's read of a pull request (pull, one GET /pulls/{number})
+// says about merging its head into its base, for the per-issue read (readIssuePullRequest). It
+// applies an intake.PullRequestMergeability fact
+// whenever GitHub's lazily computed mergeability is CONFLICTING, or when either it or GitHub's
+// merge state differs from the one recorded, or when the base GitHub names is not the recorded
+// one, or when a push onto that base is recorded with no read of it yet
+// (record.PullRequest.BaseMoved): workflow's mergeability decides a CONFLICTING read every time,
+// even one that only confirms the stored value, so a conflict recorded before the issue reached
+// awaiting_merge is still acted on once it gets there; a merge state that moved while the
+// mergeability stood still is recorded as the read found it; and this read is the one that records
+// the base, both for a pull request whose record has none and as the answer to a push onto its
+// base, which GitHub recomputed the mergeability for and sent no event about. A read that says
+// what is recorded applies nothing, so a second read of an unchanged pull request changes nothing.
+// An apply that fails is logged, and the next read of the pull request applies it again.
+func (w *workflowRuntime) applyMergeability(ctx context.Context, pr record.PullRequest, pull githubPullRequest) {
+	base, mergeable, state := pull.Base.Ref, pull.mergeability(), pull.mergeState()
+	if pr.Mergeability == mergeable && pr.MergeState == state && pr.Base == base && pr.BaseMoved == "" && mergeable != record.MergeabilityConflicting {
+		return
+	}
+	eventID := fmt.Sprintf("mergeability:%s:%s:%s#%d:%d", w.dispatchProject, w.bootID, pr.Repo, pr.Number, time.Now().UnixNano())
+	fact := intake.PullRequestMergeability{Repo: pr.Repo, Number: pr.Number, Base: base, Mergeable: mergeable, MergeState: state}
+	if _, err := intake.ApplyFact(ctx, w.pool, "github", eventID, fact, w.handlers...); err != nil {
+		w.log.Warn("apply whether a pull request's head can be merged into its base", "repo", pr.Repo, "pullRequest", pr.Number, "error", err)
+	}
+}
+
 // handoffPush is the intake.Push that took pr's branch from from to to, as the push webhook would
 // have carried it, when GitHub's compare of the two (githubrest.Client.Compare, the compare READY
 // reads) shows to is from with commits on top that change only the issue's own handoffs,
-// .legion/<issue>/ (classify.HandoffPath): followHead's recorded head and GitHub's, or
-// readApprovalCarry's approved head and the recorded one. Every other comparison says why it is not
+// .legion/<issue>/ (classify.HandoffPath): followHead's recorded head and GitHub's, or the
+// approved head and the recorded one the approval carry compares (readApprovalCarry, the outbox's
+// approvalCarry row). Every other comparison says why it is not
 // one, and the push is left to its webhook: a path outside the issue's handoffs (code, or another
 // issue's handoffs, which READY refuses as code too), a rewritten history or a head behind from, no
 // file list or a list GitHub may have cut (githubrest.CompareFilesLimit), and a from GitHub does not
@@ -141,131 +168,6 @@ func handoffPush(ctx context.Context, github githubrest.Client, pr record.PullRe
 	// above are what those commits did to from (classify.sparesAttempt, carriesApproval).
 	changed, whole, unforced := strings.Join(paths, "\n"), "false", "false"
 	return intake.Push{Repo: pr.Repo, Branch: pr.Branch, Before: from, After: to, ChangedPaths: &changed, Truncated: &whole, Forced: &unforced}, "", nil
-}
-
-// readUnrecordedPullRequests is the required-checks pass's look for a pull request the daemon has
-// no record of. An implementer's completion moves its issue to testing only once the issue's pull
-// request is recorded (workflow's implementationReady), and only the opened or reopened webhook
-// records it, so one lost, or waiting behind the GitHub consumer's backlog, holds the issue in
-// implementing with its pull request open on GitHub. For each issue in implementing whose
-// implementer recorded its handoff and that has no open or merged pull request recorded
-// (record.Store.HandedOffWithoutPullRequest) it lists the open pull requests on the issue's branch
-// (claim.IssueBranch) and applies the intake.PullRequestOpened that webhook would have carried,
-// naming the repository as the webhook's fact would (heardSpelling) - a reopen when the record
-// holds the same pull request closed - which the workflow decides as it decides the webhook's
-// (workflow's pullRequestOpened): it records the pull request and moves the issue on. An issue
-// whose implementer has not completed costs no read. ctx bounds the pass; a failed read is logged
-// and the next pass asks again, and a rate-limit answer ends the look there.
-//
-// The workflow can decline the opened (one older than a closed record's clock), and the issue is
-// then found again every pass. What it decides by is the pull request as GitHub shows it, the
-// issue's generation and its record, so while none of them changes the pass applies it, and warns,
-// once (unrecordedOpened), rather than writing a processed_events row and a warning every two
-// minutes; a change to any of them applies it again.
-func (w *workflowRuntime) readUnrecordedPullRequests(ctx context.Context) {
-	var waiting []record.Issue
-	recorded := map[string]*record.PullRequest{}
-	if err := pgx.BeginFunc(ctx, w.pool, func(tx pgx.Tx) error {
-		var err error
-		if waiting, err = w.records.HandedOffWithoutPullRequest(ctx, tx, w.dispatchProject); err != nil {
-			return err
-		}
-		for _, issue := range waiting {
-			if recorded[issue.Key], err = w.records.PullRequest(ctx, tx, issue.Key); err != nil {
-				return err
-			}
-		}
-		return nil
-	}); err != nil {
-		if ctx.Err() == nil {
-			w.log.Warn("list the issues whose implementer completed with no pull request recorded", "error", err)
-		}
-		return
-	}
-	// The set keeps, by issue, the opened this pass found declined again, so it holds no pull
-	// request that has gone. An issue this pass did not read - its list failed, or GitHub's rate
-	// limit or the end of ctx cut the pass short before it - keeps what the last pass learned.
-	declined, complete := map[string]string{}, false
-	keep := func(issue string) {
-		if seen, ok := w.unrecordedOpened[issue]; ok {
-			declined[issue] = seen
-		}
-	}
-	defer func() {
-		if !complete {
-			for issue := range w.unrecordedOpened {
-				if _, read := declined[issue]; !read {
-					keep(issue)
-				}
-			}
-		}
-		w.unrecordedOpened = declined
-	}()
-	for _, issue := range waiting {
-		branch := claim.IssueBranch(issue.Key)
-		read, cancel := context.WithTimeout(ctx, requiredChecksRead)
-		pull, found, err := w.openPullRequestOn(read, issue.GitHubRepo, branch)
-		cancel()
-		if err != nil {
-			if ctx.Err() != nil {
-				return
-			}
-			attributes := []any{"repo", issue.GitHubRepo, "issue", issue.Key, "branch", branch, "error", err}
-			var answer *githubrest.Answer
-			if errors.As(err, &answer) {
-				attributes = append(attributes, "status", answer.Status)
-			}
-			if answer != nil && answer.RateLimited {
-				w.log.Error("list the open pull requests on an issue's branch: GitHub's rate limit; this pass looks up no more", attributes...)
-				return
-			}
-			w.log.Error("list the open pull requests on an issue's branch; a later pass looks again", attributes...)
-			keep(issue.Key)
-			continue
-		}
-		if !found {
-			continue
-		}
-		prior, repo := recorded[issue.Key], w.heardSpelling(issue.GitHubRepo)
-		seen := fmt.Sprintf("%s#%d@%s:%s:%d:%s", repo, pull.Number, pull.Head.SHA, pull.UpdatedAt.Format(time.RFC3339Nano), issue.Generation, recordState(prior))
-		if w.unrecordedOpened[issue.Key] == seen {
-			declined[issue.Key] = seen
-			continue
-		}
-		fact := intake.PullRequestOpened{Repo: repo, Number: pull.Number, Branch: branch, HeadSHA: pull.Head.SHA, Body: pull.Body,
-			URL: pull.HTMLURL, UpdatedAt: pull.UpdatedAt, Reopened: prior != nil && prior.Number == pull.Number}
-		w.log.Warn("workflow: GitHub holds an open pull request for an issue whose implementer completed, and the daemon has none recorded; applying the opened its webhook would",
-			"repo", repo, "pullRequest", pull.Number, "issue", issue.Key, "head", pull.Head.SHA, "reopened", fact.Reopened, "updated_at", pull.UpdatedAt)
-		eventID := fmt.Sprintf("opened-read:%s:%s:%s#%d:%d", w.dispatchProject, w.bootID, repo, pull.Number, time.Now().UnixNano())
-		if _, err := intake.ApplyFact(ctx, w.pool, "github", eventID, fact, w.handlers...); err != nil {
-			w.log.Warn("apply an open pull request read from GitHub", "repo", repo, "pullRequest", pull.Number, "issue", issue.Key, "error", err)
-			continue
-		}
-		var after *record.PullRequest
-		if err := pgx.BeginFunc(ctx, w.pool, func(tx pgx.Tx) error {
-			var err error
-			after, err = w.records.PullRequest(ctx, tx, issue.Key)
-			return err
-		}); err != nil {
-			w.log.Warn("read whether the workflow recorded an open pull request read from GitHub", "repo", repo, "pullRequest", pull.Number, "issue", issue.Key, "error", err)
-			continue
-		}
-		if after == nil || after.State != record.PullRequestOpen || after.Number != pull.Number {
-			w.log.Info("workflow: the workflow did not record the open pull request; it is applied again once GitHub's pull request, the issue's generation or its record changes",
-				"repo", repo, "pullRequest", pull.Number, "issue", issue.Key)
-			declined[issue.Key] = seen
-		}
-	}
-	complete = true
-}
-
-// recordState is what of an issue's pull request record the workflow decides an opened by: none,
-// or its number, state and clock.
-func recordState(pr *record.PullRequest) string {
-	if pr == nil {
-		return "none"
-	}
-	return fmt.Sprintf("%d/%s/%s", pr.Number, pr.State, pr.HeadUpdatedAt.Format(time.RFC3339Nano))
 }
 
 // heardSpelling is repo as GitHub intake hears it, the spelling a webhook's fact names it by and a

@@ -513,29 +513,13 @@ type PullRequestChecks struct {
 
 func (PullRequestChecks) isFact() {}
 
-// RequiredChecks is what a pull request's base branch requires, as the daemon read it from GitHub
-// with its implement App's installation token (requiredchecks.Required): never decoded from an
-// event, applied as a synthetic fact by the daemon's own read of each open pull request
-// (workflowRuntime.watchRequiredChecks). Names is the required checks, an empty Names a base that
-// requires none. Workflows is each workflow its rulesets require, with its latest run's result on
-// WorkflowsHead (requiredchecks.Workflows); both are empty when the base requires no workflow.
-type RequiredChecks struct {
-	Repo          string
-	Number        int
-	Names         []string
-	Workflows     []record.RequiredWorkflow
-	WorkflowsHead string
-}
-
-func (RequiredChecks) isFact() {}
-
 // PullRequestMergeability is GitHub's lazily computed verdict for whether a pull request's head
 // can be merged into Base without a conflict, decoded from GitHub's nullable `mergeable` field on
 // readPullRequest's own /pulls/{number} read, which also names the base branch: never
-// decoded from an event, applied as a synthetic fact by the daemon's own read of each open pull
-// request (workflowRuntime.readRequiredChecks), before requiredFor's own rulesets and workflow
-// reads run. Mergeable is record.MergeabilityUnknown while GitHub is still computing it,
-// record.MergeabilityMergeable or record.MergeabilityConflicting once it has. MergeState is
+// decoded from an event, applied as a synthetic fact by the daemon's own read of one issue's pull
+// request (workflowRuntime.readIssuePullRequest). Mergeable is record.MergeabilityUnknown while
+// GitHub is still computing it, record.MergeabilityMergeable or record.MergeabilityConflicting
+// once it has. MergeState is
 // GitHub's own merge state for the head from the same answer's `mergeable_state`, which the
 // engine records beside Mergeable and decides nothing on: it tells a head GitHub holds on a check
 // or a review the repository requires from one GitHub would merge now, which Mergeable cannot.

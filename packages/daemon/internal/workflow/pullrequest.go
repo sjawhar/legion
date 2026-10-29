@@ -133,8 +133,8 @@ func (e *Engine) pullRequestOpened(ctx context.Context, tx pgx.Tx, fact intake.P
 // synchronize said it moved from a head the record never held waits for it. Late, it records that
 // alone, and moves and sets nothing else; when the replay it starts closes the run or changes the
 // judgement, the checks are decided as the push that did so would decide them (decideChecks): a
-// red held while the arrival waited is judged now, since the required-checks pass re-decides an
-// unchanged read only while a run's hold lapses (HoldLapsed), and the run is closed. In
+// red held while the arrival waited is judged now, the run being closed and its hold lapsed
+// (holdLapsed). In
 // implementing a head that arrives once the implementer has completed is the pull request its
 // completion waited for.
 func (e *Engine) pullRequestSynchronized(ctx context.Context, tx pgx.Tx, fact intake.PullRequestSynchronized) (intake.Result, error) {
@@ -219,7 +219,7 @@ func (e *Engine) decideReplayed(ctx context.Context, tx pgx.Tx, prior record.Pul
 	if !classify.JudgementChanged(prior, *pr) && (prior.Run == nil || pr.Run != nil) {
 		return nil
 	}
-	return e.decideChecks(ctx, tx, pr, false)
+	return e.decideChecks(ctx, tx, pr)
 }
 
 func (e *Engine) push(ctx context.Context, tx pgx.Tx, fact intake.Push) (intake.Result, error) {
@@ -281,7 +281,7 @@ func (e *Engine) push(ctx context.Context, tx pgx.Tx, fact intake.Push) (intake.
 		return intake.Result{}, err
 	}
 	if classify.JudgementChanged(prior, *pr) || (prior.Run != nil && pr.Run == nil) {
-		if err := e.decideChecks(ctx, tx, pr, false); err != nil {
+		if err := e.decideChecks(ctx, tx, pr); err != nil {
 			return intake.Result{}, err
 		}
 		if issue, err = e.store.Issue(ctx, tx, pr.Issue); err != nil || issue == nil {
@@ -294,6 +294,12 @@ func (e *Engine) push(ctx context.Context, tx pgx.Tx, fact intake.Push) (intake.
 	}
 	if issue.Phase != phase.Reviewing {
 		return intake.Result{}, nil
+	}
+	// The carry is queued before the round is re-asked: a round the push leaves stuck below the
+	// approved head is told so, as it was while the two-minute pass made this compare, and the
+	// row's fact ends it once GitHub answers that nothing outside the issue's handoffs changed.
+	if err := e.carryApproval(ctx, tx, *issue, pr); err != nil {
+		return intake.Result{}, err
 	}
 	return intake.Result{}, e.reaskRound(ctx, tx, *issue, pr, prior)
 }

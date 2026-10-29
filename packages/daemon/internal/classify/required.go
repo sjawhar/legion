@@ -44,7 +44,7 @@ func RunResult(status, conclusion string) string {
 }
 
 // Judge is Legion's one rule for whether CI is red at a head: each name in required - the checks
-// the base branch requires (requiredchecks.Required) - in order, with its result in results (a
+// the base branch requires, as the daemon last read them - in order, with its result in results (a
 // check's name to Success, Pending, or what it failed with), and a required check results does not
 // name Missing. A check results names that required does not is no part of the answer. The
 // workflow judges the settlement that stands for the head by it (HeadChecks); the merger's READY
@@ -131,8 +131,8 @@ func WorkflowStanding(pr record.PullRequest, workflow record.RequiredWorkflow) S
 
 // WorkflowHead is the head whose workflow runs stand for the pull request's head: the head the
 // settlement standing for it is of (settled), which a .legion/-only push that started no CI of its
-// own can have left, else the head itself, whose settlement is still to come. The daemon reads the
-// required workflows' runs there (intake.RequiredChecks), and HeadChecks judges by them only while
+// own can have left, else the head itself, whose settlement is still to come. The daemon read the
+// required workflows' runs there, and HeadChecks judges by them only while
 // that is still the settlement's head.
 func WorkflowHead(pr record.PullRequest) string {
 	if settled(pr) {

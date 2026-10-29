@@ -97,8 +97,8 @@ type workflowRuntime struct {
 	// it logs while NATS has not reconnected: zero means the production defaults. A test
 	// shortens both to bound how long the warning takes to observe.
 	reconnectPollInterval, reconnectWarnEvery time.Duration
-	// githubAPI is the GitHub REST root the workflow calls: watchRequiredChecks reads under it, and
-	// the outbox's issue_branch rows create branches under it. Empty, in production, is
+	// githubAPI is the GitHub REST root the workflow calls: the per-issue read reads under it, and
+	// the outbox's issue_branch and approval_carry rows call under it. Empty, in production, is
 	// https://api.github.com, and a test points it at a stand-in.
 	githubAPI string
 	// defaultBranches is each repository as GitHub names it and its default branch, read under
@@ -153,25 +153,24 @@ type workflowRuntime struct {
 	permissions   map[permissionKey]time.Time
 	permissionTTL time.Duration
 	limitedUntil  time.Time
-	// refusedReviews is every review, by GitHub's review id, whose author the pass's read of a pull
+	// refusedReviews is every review, by GitHub's review id, whose author a read of a pull
 	// request's reviews found the workflow does not let decide (reviewToApply), so this process
 	// judges each such review once, as a webhook's review is judged once when it is delivered: an
 	// account given write access later never turns a review the read refused into a decision. It is
-	// held in memory only, so a restart's first pass judges again with the permission GitHub gives
-	// then. Only the pass touches it.
-	refusedReviews map[int64]bool
+	// held in memory only, so a restart's first read judges again with the permission GitHub gives
+	// then.
+	//
 	// uncarried is every comparison of an approved head with a recorded head, by repository, pull
 	// request and the two heads, that GitHub answered and that does not carry the approval
-	// (readApprovalCarry), so the pass does not ask again: the compare of two fixed commits never
-	// changes its answer. It is held in memory only; a restart's first pass asks again. Only the
-	// pass touches it.
-	uncarried map[string]bool
-	// unrecordedOpened is, by issue, the open pull request the pass found for an issue with none
-	// recorded and applied, keyed by what the workflow decides it by (readUnrecordedPullRequests),
-	// that the workflow did not record: the pass applies it again only once one of those changes.
-	// It is held in memory only; a restart's first pass applies each again. Only the pass touches
-	// it.
-	unrecordedOpened map[string]string
+	// (readApprovalCarry), so no read asks again: the compare of two fixed commits never
+	// changes its answer. It is held in memory only; a restart's first read asks again.
+	//
+	// readMemoMu guards both: the per-issue read (readIssuePullRequest) and the outbox's approval
+	// carry judge reviews and compare heads on goroutines of their own (reviewRefused,
+	// carryRefused).
+	readMemoMu     sync.Mutex
+	refusedReviews map[int64]bool
+	uncarried      map[string]bool
 	// failed carries the first supervision terminal fact that could not be applied. serve stops
 	// the daemon with it: the claim's terminal state is durable, so the next boot's replay applies
 	// the fact the failed callback lost.
@@ -181,6 +180,13 @@ type workflowRuntime struct {
 	readyMu   sync.Mutex
 	readied   map[claim.Token]bool
 	readyWake chan struct{}
+	// handedOff is each issue whose agent's handoff the API recorded (handoffCompleted) that
+	// readHandedOff has not read the pull request of yet; handoffWake, holding at most one wake,
+	// tells it there are some. The set is what makes a second completion of the same issue, while
+	// the first is still queued, one read rather than two.
+	handoffMu   sync.Mutex
+	handedOff   map[string]bool
+	handoffWake chan struct{}
 }
 
 // readyReleaseTimeout bounds one release of ready architects' waiting notices
@@ -280,6 +286,7 @@ func openWorkflow(ctx context.Context, cfg config.Config, st *store.Store, proje
 		tokens: tokens, forget: forget, installs: installs, dispatch: dispatch.New(cfg.DispatchURL, dispatchToken), repositories: repos, build: build,
 		grants: credential.New(nil), projectID: projectID, dispatchProject: cfg.Project, stateDir: cfg.StateDir, log: log,
 		failed: make(chan error, 1), readied: map[claim.Token]bool{}, readyWake: make(chan struct{}, 1), mappingChanged: make(chan struct{}, 1),
+		handedOff: map[string]bool{}, handoffWake: make(chan struct{}, 1),
 		controllerWake: cfg.ControllerWakeInterval, githubAPI: githubAPI,
 		defaultBranches: newDefaultBranches(tokens, githubAPI, defaultBranchTTL, time.Now),
 	}
@@ -782,7 +789,13 @@ func (w *workflowRuntime) run(ctx context.Context) error {
 		return nil
 	})
 	group.Go(func() error {
-		w.watchRequiredChecks(running)
+		// The start read is the daemon's one read of every issue in the workflow: it covers the
+		// deliveries GitHub made while the daemon was down, which nothing redelivers.
+		w.readIssuesAtStart(running)
+		return nil
+	})
+	group.Go(func() error {
+		w.readHandedOff(running)
 		return nil
 	})
 	group.Go(func() error {

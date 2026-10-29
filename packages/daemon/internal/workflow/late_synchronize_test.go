@@ -134,7 +134,7 @@ func TestALateSynchronizeOnlyNamesTheMoveAWaitingArrivalTook(t *testing.T) {
 // the push that closed a run would decide it (decideChecks): the issue in reviewing goes back to
 // implementing with checks-red, whichever of the late synchronize and the red comes first, as it
 // does with no move named. A synchronize never delivered leaves the red held until the hold lapses,
-// when the required-checks pass decides it.
+// when the head's next settlement decides it.
 func TestARedHeldForALateSynchronizeIsDecidedWhenItArrives(t *testing.T) {
 	const dev = "legion-implementer[bot]"
 	skipped, arrived := time.Date(2026, 9, 22, 23, 50, 0, 0, time.UTC), time.Date(2026, 9, 22, 23, 51, 0, 0, time.UTC)
@@ -142,9 +142,9 @@ func TestARedHeldForALateSynchronizeIsDecidedWhenItArrives(t *testing.T) {
 	red := settledAt("h2", "ci", 2, "ci")
 	late := namedSync("head", "h1", dev, skipped)
 	for _, tc := range []struct {
-		name  string
-		facts []intake.Fact
-		pass  bool
+		name   string
+		facts  []intake.Fact
+		lapses bool
 	}{
 		{"the late synchronize after the red", []intake.Fact{red, late}, false},
 		{"the late synchronize before the red", []intake.Fact{late, red}, false},
@@ -156,12 +156,12 @@ func TestARedHeldForALateSynchronizeIsDecidedWhenItArrives(t *testing.T) {
 			engine := testEngine(config.DesignGateRootIssues, nil)
 			applyRefusingNothing(t, pool, engine, pushes...)
 			applyRefusingNothing(t, pool, engine, tc.facts...)
-			if tc.pass {
+			if tc.lapses {
 				if got := issuePhase(t, pool); got != phase.Reviewing {
 					t.Fatalf("the red held while its arrival waits: phase %s, want reviewing", got)
 				}
 				later := readyEngineAt("", time.Date(2026, 9, 23, 0, 0, 0, 0, time.UTC).Add(redHold+time.Minute))
-				applyRefusingNothing(t, pool, later, intake.RequiredChecks{Repo: "sjawhar/legion", Number: 42, Names: []string{"ci"}})
+				applyRefusingNothing(t, pool, later, settledAt("h2", "ci", 3, "ci"))
 			}
 			if got := issuePhase(t, pool); got != phase.Implementing {
 				t.Fatalf("phase %s, want implementing", got)

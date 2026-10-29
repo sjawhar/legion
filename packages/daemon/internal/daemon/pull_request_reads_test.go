@@ -25,7 +25,7 @@ import (
 // compareFails, as pullRequestStandIn's changed, has every comparison answer 502.
 const compareFails = "<502>"
 
-// pullRequestStandIn is GitHub's REST API for acme/widgets as the required-checks pass reads it:
+// pullRequestStandIn is GitHub's REST API for acme/widgets as the per-issue read reads it:
 // pull request 86 on base main, open on legion/CAPTURE-1 at head, last updated at updated, with
 // no reviews, whose base requires pr-checks-result and is unprotected. Compared with any earlier
 // head, head is that head with commits on top changing the files changed names, comma-separated;
@@ -80,24 +80,24 @@ func pullRequestStandIn(t *testing.T, head string, updated time.Time, changed st
 	return server
 }
 
-// headReads is how many facts the pass applied from its own read of a pull request's head.
+// headReads is how many facts the read applied from its own read of a pull request's head.
 func headReads(t *testing.T, pool *pgxpool.Pool, kind string) int {
 	t.Helper()
 	var n int
 	if err := pool.QueryRow(context.Background(),
 		`select count(*) from processed_events where source = 'github' and event_id like $1`, kind+":CAPTURE:test-boot:%").Scan(&n); err != nil {
-		t.Fatalf("read the %s facts the pass applied: %v", kind, err)
+		t.Fatalf("read the %s facts the read applied: %v", kind, err)
 	}
 	return n
 }
 
 // The daemon moves a pull request's recorded head only on a webhook, and an event queue hours
 // behind left more than half of one project's records at an old head, so reviews and READY were
-// judged against it. The required-checks pass already reads each open pull request every two
+// judged against it. The per-issue read already reads each open pull request every two
 // minutes: when GitHub's head is not the recorded one, it applies the synchronize the webhook would
 // have carried, with GitHub's updated_at, so the handler's own clock fence decides it. A head that
 // did not move applies nothing, and a read older than the record's clock moves nothing.
-func TestThePassFollowsAHeadWhoseSynchronizeHasNotArrived(t *testing.T) {
+func TestTheReadFollowsAHeadWhoseSynchronizeHasNotArrived(t *testing.T) {
 	read := time.Date(2026, 10, 26, 20, 0, 0, 0, time.UTC)
 	for _, tc := range []struct {
 		name     string
@@ -119,14 +119,14 @@ func TestThePassFollowsAHeadWhoseSynchronizeHasNotArrived(t *testing.T) {
 					t.Fatalf("seed the record's clock: %v", err)
 				}
 			}
-			w := requiredRuntime(pool, pullRequestStandIn(t, tc.github, read, "src/widget.go", &atomic.Int32{}).URL, quietLogger())
-			w.readRequiredChecks(context.Background())
+			w := readRuntime(pool, pullRequestStandIn(t, tc.github, read, "src/widget.go", &atomic.Int32{}).URL, quietLogger())
+			readCapture(t, w)
 			_, pr := capturePhase(t, pool)
 			if pr.HeadSHA != tc.head || !pr.HeadUpdatedAt.Equal(tc.clock) {
-				t.Fatalf("after the pass the record is at %q (clock %v), want %q (clock %v)", pr.HeadSHA, pr.HeadUpdatedAt, tc.head, tc.clock)
+				t.Fatalf("after the read the record is at %q (clock %v), want %q (clock %v)", pr.HeadSHA, pr.HeadUpdatedAt, tc.head, tc.clock)
 			}
 			if got := headReads(t, pool, "head-read"); got != tc.facts {
-				t.Fatalf("the pass applied %d head facts, want %d", got, tc.facts)
+				t.Fatalf("the read applied %d head facts, want %d", got, tc.facts)
 			}
 		})
 	}
@@ -135,11 +135,11 @@ func TestThePassFollowsAHeadWhoseSynchronizeHasNotArrived(t *testing.T) {
 // A reviewer approves the head it read, then pushes its handoff (.legion/<issue>/ only) and
 // completes. With the push webhook still in the backlog, a head followed alone would leave the
 // approval judged against a head no known push reaches from it, and the round stuck for nothing. So
-// the pass also applies the push, when GitHub's comparison shows it changed only the issue's own
+// the read also applies the push, when GitHub's comparison shows it changed only the issue's own
 // .legion/<issue>/, and the approval stands for the new head; a push that changed code, or another
 // issue's handoffs, is left to its webhook, and an approval of the head before it does not stand
 // for what is above it.
-func TestThePassFollowsAHandoffPushSoAnApprovalBeneathItStands(t *testing.T) {
+func TestTheReadFollowsAHandoffPushSoAnApprovalBeneathItStands(t *testing.T) {
 	read := time.Date(2026, 10, 26, 20, 0, 0, 0, time.UTC)
 	for _, tc := range []struct {
 		name    string
@@ -155,23 +155,23 @@ func TestThePassFollowsAHandoffPushSoAnApprovalBeneathItStands(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			pool := isolatedOutboxPool(t)
 			seedCapture(t, pool, phase.Reviewing, "needs_review", record.PhaseRow{Issue: "CAPTURE-1", Role: claim.RoleReviewer, Claim: "review-claim"})
-			w := requiredRuntime(pool, pullRequestStandIn(t, "handoff", read, tc.changed, &atomic.Int32{}).URL, quietLogger())
-			w.readRequiredChecks(context.Background())
+			w := readRuntime(pool, pullRequestStandIn(t, "handoff", read, tc.changed, &atomic.Int32{}).URL, quietLogger())
+			readCapture(t, w)
 			_, pr := capturePhase(t, pool)
 			if pr.HeadSHA != "handoff" {
-				t.Fatalf("after the pass the record is at %q, want handoff", pr.HeadSHA)
+				t.Fatalf("after the read the record is at %q, want handoff", pr.HeadSHA)
 			}
 			if got := classify.ApprovalStands(*pr, "code"); got != tc.stands {
 				t.Fatalf("an approval of code stands for the followed head: %t, want %t (pushes %+v)", got, tc.stands, pr.Pushes)
 			}
 			if got := headReads(t, pool, "push-read"); got != tc.pushes {
-				t.Fatalf("the pass applied %d push facts, want %d", got, tc.pushes)
+				t.Fatalf("the read applied %d push facts, want %d", got, tc.pushes)
 			}
 		})
 	}
 }
 
-// The pass lists its records once, when it starts, and a webhook can move one before the pass
+// The read lists its records once, when it starts, and a webhook can move one before the read
 // reaches it. followHead compares GitHub's head with the record as it stands then, so a head the
 // webhook already recorded applies nothing again.
 func TestFollowHeadComparesWithTheRecordAsItStandsNow(t *testing.T) {
@@ -182,7 +182,7 @@ func TestFollowHeadComparesWithTheRecordAsItStandsNow(t *testing.T) {
 	if _, err := pool.Exec(context.Background(), "update pull_requests set head_sha = 'pushed' where issue = 'CAPTURE-1'"); err != nil {
 		t.Fatalf("move the record as the webhook would: %v", err)
 	}
-	w := requiredRuntime(pool, pullRequestStandIn(t, "pushed", read, "src/widget.go", &atomic.Int32{}).URL, quietLogger())
+	w := readRuntime(pool, pullRequestStandIn(t, "pushed", read, "src/widget.go", &atomic.Int32{}).URL, quietLogger())
 	github, pull, err := w.readPullRequest(context.Background(), *listed)
 	if err != nil {
 		t.Fatalf("read the pull request: %v", err)
@@ -251,44 +251,43 @@ func TestHandoffPushTakesOnlyAComparisonThatProvesTheCodeUnchanged(t *testing.T)
 	}
 }
 
-// A comparison GitHub fails to answer leaves the head where the record holds it, for a later pass
-// to follow, and the pass still reads the pull request's mergeability, reviews and required checks
+// A comparison GitHub fails to answer leaves the head where the record holds it, for a later read
+// to follow, and the read still reads the pull request's mergeability, reviews and required checks
 // against that record, as it did before it followed heads at all.
 func TestAFailedComparisonStillReadsThePullRequest(t *testing.T) {
 	read := time.Date(2026, 10, 26, 20, 0, 0, 0, time.UTC)
 	pool := isolatedOutboxPool(t)
 	seedCapture(t, pool, phase.Testing, "testing", record.PhaseRow{Issue: "CAPTURE-1", Role: claim.RoleTester, Claim: "test-claim"})
-	w := requiredRuntime(pool, pullRequestStandIn(t, "handoff", read, compareFails, &atomic.Int32{}).URL, quietLogger())
-	w.readRequiredChecks(context.Background())
+	w := readRuntime(pool, pullRequestStandIn(t, "handoff", read, compareFails, &atomic.Int32{}).URL, quietLogger())
+	readCapture(t, w)
 	_, pr := capturePhase(t, pool)
 	if pr.HeadSHA != "code" {
-		t.Fatalf("after the pass the record is at %q, want code: the comparison failed", pr.HeadSHA)
+		t.Fatalf("after the read the record is at %q, want code: the comparison failed", pr.HeadSHA)
 	}
 	if pr.Mergeability != record.MergeabilityMergeable {
-		t.Fatalf("after the pass the recorded mergeability is %q, want %q: the pass skipped the pull request's reads", pr.Mergeability, record.MergeabilityMergeable)
+		t.Fatalf("after the read the recorded mergeability is %q, want %q: the read skipped the pull request's reads", pr.Mergeability, record.MergeabilityMergeable)
 	}
 }
 
 // A pull request GitHub shows open on an issue's branch that the workflow does not record - here an
-// opened older than the closed record's clock - is found again every pass. The pass applies it, and
-// warns, once while nothing it decides by changes, so it writes no processed_events row every two
-// minutes; once the record changes (a new generation removes the closed pull request), it applies
-// it again, and the workflow records it.
-func TestAnOpenedTheWorkflowDoesNotRecordIsAppliedOnceWhileNothingChanges(t *testing.T) {
+// opened older than the closed record's clock - is found again by every read of the issue, applied
+// and declined again, and the issue stays where it is. Once the record changes (a new generation
+// removes the closed pull request), the same read records it and the issue moves on.
+func TestAnOpenedTheWorkflowDoesNotRecordIsAppliedAgainByEveryRead(t *testing.T) {
 	opened := time.Date(2026, 10, 26, 19, 30, 0, 0, time.UTC)
 	pool := isolatedOutboxPool(t)
 	seedDeclinedOpened(t, pool, opened)
 	var logs syncBuffer
 	var listed atomic.Int32
-	w := requiredRuntime(pool, pullRequestStandIn(t, "handoff", opened, "", &listed).URL, slog.New(slog.NewTextHandler(&logs, nil)))
+	w := readRuntime(pool, pullRequestStandIn(t, "handoff", opened, "", &listed).URL, slog.New(slog.NewTextHandler(&logs, nil)))
 	warnings := func() int {
-		return strings.Count(logs.String(), "GitHub holds an open pull request for an issue whose implementer completed")
+		return strings.Count(logs.String(), "GitHub holds an open pull request for an issue")
 	}
 	for range 3 {
-		w.readRequiredChecks(context.Background())
+		readCapture(t, w)
 	}
-	if listed.Load() != 3 || warnings() != 1 || headReads(t, pool, "opened-read") != 1 {
-		t.Fatalf("three passes listed the branch %d times, warned %d times and applied %d opened facts, want 3, 1 and 1",
+	if listed.Load() != 3 || warnings() != 3 || headReads(t, pool, "opened-read") != 3 {
+		t.Fatalf("three reads listed the branch %d times, warned %d times and applied %d opened facts, want 3, 3 and 3",
 			listed.Load(), warnings(), headReads(t, pool, "opened-read"))
 	}
 	if got, _ := capturePhase(t, pool); got != phase.Implementing {
@@ -297,12 +296,12 @@ func TestAnOpenedTheWorkflowDoesNotRecordIsAppliedOnceWhileNothingChanges(t *tes
 	if _, err := pool.Exec(context.Background(), "delete from pull_requests where issue = 'CAPTURE-1'"); err != nil {
 		t.Fatalf("remove the closed pull request as a new generation would: %v", err)
 	}
-	w.readRequiredChecks(context.Background())
+	readCapture(t, w)
 	if got, pr := capturePhase(t, pool); got != phase.Testing || pr == nil || pr.Number != 86 {
 		t.Fatalf("after the record changed the issue is in %s with %+v, want testing on #86", got, pr)
 	}
-	if got := headReads(t, pool, "opened-read"); got != 2 {
-		t.Fatalf("the pass applied %d opened facts in all, want 2", got)
+	if got := headReads(t, pool, "opened-read"); got != 4 {
+		t.Fatalf("the read applied %d opened facts in all, want 4", got)
 	}
 }
 
@@ -320,47 +319,10 @@ func seedDeclinedOpened(t *testing.T, pool *pgxpool.Pool, opened time.Time) {
 	}
 }
 
-// A pass that does not read an issue's branch learns nothing about its declined opened, so it keeps
-// what the pass before it learned: a list GitHub fails for that issue, and a pass GitHub's rate
-// limit cuts short before it reaches the issue, leave the next pass skipping the same opened.
-func TestAPassThatDoesNotReadTheBranchKeepsTheDeclinedOpened(t *testing.T) {
-	opened := time.Date(2026, 10, 26, 19, 30, 0, 0, time.UTC)
-	for _, tc := range []struct {
-		name   string
-		status int
-	}{
-		{"a list GitHub fails", http.StatusBadGateway},
-		{"a pass the rate limit cuts short", http.StatusTooManyRequests},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			pool := isolatedOutboxPool(t)
-			seedDeclinedOpened(t, pool, opened)
-			var listed, lists atomic.Int32
-			github := pullRequestStandIn(t, "handoff", opened, "", &listed)
-			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-				if r.URL.Path == "/repos/acme/widgets/pulls" && lists.Add(1) == 2 {
-					http.Error(w, `{"message":"failed"}`, tc.status)
-					return
-				}
-				github.Config.Handler.ServeHTTP(w, r)
-			}))
-			t.Cleanup(server.Close)
-			w := requiredRuntime(pool, server.URL, quietLogger())
-			for range 3 {
-				w.readRequiredChecks(context.Background())
-			}
-			if lists.Load() != 3 || headReads(t, pool, "opened-read") != 1 {
-				t.Fatalf("three passes, the second's list failed, listed %d times and applied %d opened facts, want 3 and 1",
-					lists.Load(), headReads(t, pool, "opened-read"))
-			}
-		})
-	}
-}
-
-// The pass does not take the list's head filter on trust: a filter GitHub did not apply as meant
+// The read does not take the list's head filter on trust: a filter GitHub did not apply as meant
 // would list other pull requests, so it takes one only when its head is the issue's branch, and one
 // on another branch records nothing.
-func TestThePassTakesOnlyAPullRequestOnTheIssuesBranch(t *testing.T) {
+func TestTheReadTakesOnlyAPullRequestOnTheIssuesBranch(t *testing.T) {
 	pool := isolatedOutboxPool(t)
 	seedUnrecorded(t, pool, "handoff")
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -371,17 +333,17 @@ func TestThePassTakesOnlyAPullRequestOnTheIssuesBranch(t *testing.T) {
 		w.Write([]byte(`[{"number":91,"state":"open","base":{"ref":"main"},"head":{"ref":"it/IT-1","sha":"other"},"updated_at":"2026-10-26T19:30:00Z"}]`))
 	}))
 	t.Cleanup(server.Close)
-	requiredRuntime(pool, server.URL, quietLogger()).readRequiredChecks(context.Background())
+	readCapture(t, readRuntime(pool, server.URL, quietLogger()))
 	if got, pr := capturePhase(t, pool); got != phase.Implementing || pr != nil {
-		t.Fatalf("after the pass the issue is in %s with %+v, want implementing with no pull request", got, pr)
+		t.Fatalf("after the read the issue is in %s with %+v, want implementing with no pull request", got, pr)
 	}
 	if got := headReads(t, pool, "opened-read"); got != 0 {
-		t.Fatalf("the pass applied %d opened facts, want none", got)
+		t.Fatalf("the read applied %d opened facts, want none", got)
 	}
 }
 
 // LateLifecycle lets a clock equal to the record's through, so a read can be no newer than a
-// webhook that moved the record after the pass listed it. followHead then keeps the record: the
+// webhook that moved the record after the read listed it. followHead then keeps the record: the
 // read is no newer than what moved it, and following it could move the head back. A read newer
 // than the record's clock is followed.
 func TestFollowHeadKeepsARecordMovedSinceTheListByWhatItReadNoLater(t *testing.T) {
@@ -401,7 +363,7 @@ func TestFollowHeadKeepsARecordMovedSinceTheListByWhatItReadNoLater(t *testing.T
 			if _, err := pool.Exec(context.Background(), "update pull_requests set head_sha = 'pushed', head_updated_at = $1 where issue = 'CAPTURE-1'", at); err != nil {
 				t.Fatalf("move the record as the webhook would: %v", err)
 			}
-			w := requiredRuntime(pool, pullRequestStandIn(t, "older", tc.read, "src/widget.go", &atomic.Int32{}).URL, quietLogger())
+			w := readRuntime(pool, pullRequestStandIn(t, "older", tc.read, "src/widget.go", &atomic.Int32{}).URL, quietLogger())
 			github, pull, err := w.readPullRequest(context.Background(), *listed)
 			if err != nil {
 				t.Fatalf("read the pull request: %v", err)
@@ -436,14 +398,14 @@ func seedUnrecorded(t *testing.T, pool *pgxpool.Pool, handoff string) {
 
 // An implementer's completion moves its issue to testing only once the pull request is recorded,
 // and the record comes only from the opened webhook: one lost, or hours back in the queue, held
-// the issue in implementing with its pull request open on GitHub. The pass looks up the open pull
+// the issue in implementing with its pull request open on GitHub. The read looks up the open pull
 // request on the branch of each implementing issue with a recorded handoff and no open record, and
 // applies the opened the webhook would have carried, which records it and moves the issue on; a
 // pull request the record holds closed is applied as its reopen. It names the repository as a
 // webhook's fact does, the mapping's spelling when the mapping serves it, so the webhooks that
 // follow find the record. An issue whose implementer has not completed, or whose pull request is
 // recorded open or merged, costs no read.
-func TestThePassRecordsAnOpenPullRequestWhoseOpenedHasNotArrived(t *testing.T) {
+func TestTheReadRecordsAnOpenPullRequestWhoseOpenedHasNotArrived(t *testing.T) {
 	opened := time.Date(2026, 10, 26, 19, 30, 0, 0, time.UTC)
 	for _, tc := range []struct {
 		name     string
@@ -473,30 +435,30 @@ func TestThePassRecordsAnOpenPullRequestWhoseOpenedHasNotArrived(t *testing.T) {
 				}
 			}
 			var listed atomic.Int32
-			w := requiredRuntime(pool, pullRequestStandIn(t, "handoff", opened, "", &listed).URL, quietLogger())
+			w := readRuntime(pool, pullRequestStandIn(t, "handoff", opened, "", &listed).URL, quietLogger())
 			if tc.served != "" {
 				w.repositories = newRepositories("CAPTURE")
 				w.repositories.set([]mappedRepository{{Repo: ghrepo.MustParse(tc.served), Default: true}}, nil)
 			}
-			w.readRequiredChecks(context.Background())
+			w.readIssuesAtStart(context.Background())
 			got, pr := capturePhase(t, pool)
 			if got != tc.want {
-				t.Fatalf("after the pass the issue is in %s, want %s", got, tc.want)
+				t.Fatalf("after the read the issue is in %s, want %s", got, tc.want)
 			}
 			if listed.Load() != tc.listed {
-				t.Fatalf("the pass listed the branch's pull requests %d times, want %d", listed.Load(), tc.listed)
+				t.Fatalf("the read listed the branch's pull requests %d times, want %d", listed.Load(), tc.listed)
 			}
 			if tc.listed == 0 {
 				if (pr != nil) != (tc.recorded != "") {
-					t.Fatalf("the pass left the record %+v, want it as seeded", pr)
+					t.Fatalf("the read left the record %+v, want it as seeded", pr)
 				}
 				return
 			}
 			if pr == nil || pr.State != record.PullRequestOpen || pr.Repo != tc.repo || pr.Number != 86 || pr.HeadSHA != "handoff" || pr.Branch != "legion/CAPTURE-1" || !pr.HeadUpdatedAt.Equal(opened) {
-				t.Fatalf("after the pass the record is %+v, want #86 of %s open on legion/CAPTURE-1 at handoff, clock %v", pr, tc.repo, opened)
+				t.Fatalf("after the read the record is %+v, want #86 of %s open on legion/CAPTURE-1 at handoff, clock %v", pr, tc.repo, opened)
 			}
 			if got := headReads(t, pool, "opened-read"); got != 1 {
-				t.Fatalf("the pass applied %d opened facts, want 1", got)
+				t.Fatalf("the read applied %d opened facts, want 1", got)
 			}
 		})
 	}

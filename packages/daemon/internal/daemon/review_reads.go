@@ -156,7 +156,7 @@ func (w *workflowRuntime) reviewToApply(ctx context.Context, pr record.PullReque
 	var reviewerSession string
 	sessionRead := false
 	for _, review := range candidates {
-		if w.refusedReviews[review.ID] {
+		if w.reviewRefused(review.ID) {
 			continue
 		}
 		if !sessionRead {
@@ -176,10 +176,26 @@ func (w *workflowRuntime) reviewToApply(ctx context.Context, pr record.PullReque
 		if w.engine.DecidesRound(resolved, reviewerSession) {
 			return resolved, true, nil
 		}
-		if w.refusedReviews == nil {
-			w.refusedReviews = map[int64]bool{}
-		}
-		w.refusedReviews[review.ID] = true
+		w.refuseReview(review.ID)
 	}
 	return intake.PullRequestReview{}, false, nil
+}
+
+// reviewRefused is whether this process has already judged the review GitHub lists under id and
+// found the workflow does not let it decide, and refuseReview records one it has. The two-minute
+// pass and the per-issue read (readIssuePullRequest) both judge reviews, each on a goroutine of
+// its own, so the set is kept under readMemoMu rather than by whichever read touched it last.
+func (w *workflowRuntime) reviewRefused(id int64) bool {
+	w.readMemoMu.Lock()
+	defer w.readMemoMu.Unlock()
+	return w.refusedReviews[id]
+}
+
+func (w *workflowRuntime) refuseReview(id int64) {
+	w.readMemoMu.Lock()
+	defer w.readMemoMu.Unlock()
+	if w.refusedReviews == nil {
+		w.refusedReviews = map[int64]bool{}
+	}
+	w.refusedReviews[id] = true
 }

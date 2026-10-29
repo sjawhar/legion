@@ -36,32 +36,41 @@ func (e *Engine) checks(ctx context.Context, tx pgx.Tx, fact intake.PullRequestC
 		return intake.Result{}, e.store.PutPullRequest(ctx, tx, settled)
 	}
 	*pr = settled
-	return intake.Result{}, e.decideChecks(ctx, tx, pr, false)
+	return intake.Result{}, e.decideChecks(ctx, tx, pr)
 }
 
-// requiredChecks records what the pull request's base branch requires, as the daemon read it
-// (intake.RequiredChecks): its required checks, and its required workflows with their runs'
-// results at the head read. It then decides what the head's verdict now comes to (decideChecks):
-// only a required check or workflow makes a head red (classify.HeadVerdict), so a new read can
-// send work back for a newly required check or a required workflow that failed, leave standing a
-// head red only on checks the base branch never required, and give a head its first verdict when
-// its set was never read. A read that says what is recorded changes nothing, unless a red held
-// while its head waited for a push has lapsed and is not decided yet (HoldLapsed): the pass sends
-// that read for it (daemon's readRequiredChecks), and it decides the red as it stands, once a push
-// webhook lost for good has had its time.
-func (e *Engine) requiredChecks(ctx context.Context, tx pgx.Tx, fact intake.RequiredChecks) (intake.Result, error) {
-	pr, err := e.pullRequest(ctx, tx, fact.Repo, fact.Number)
-	if err != nil || pr == nil {
-		return intake.Result{}, err
+// carryApproval queues GitHub's compare of the head the reviewer approved with the pull request's
+// head (record.ApprovalCarry, the outbox's approvalCarry) when the push just recorded leaves that
+// approval set aside below the head: the reviewer approved another head than the current one, no
+// recorded push carries the approval up to it (classify.ApprovalStands), and no push that may
+// change code is on its way (classify.CodeOnItsWay). A push carries an approval across only when
+// its own file list shows it changed nothing outside the issue's handoffs, so an approval is set
+// aside by a push whose list was truncated or forced, or that came from a listener that says
+// nothing about paths; GitHub's compare of the two heads is what settles it, and R1 reads "the
+// file list comes from GitHub's compare, read once per push event"
+// (dispatch://INFRA-714/spec).
+//
+// The compare is a durable row rather than a call made here: the compare is a GitHub read, which
+// the fact's transaction must not wait on, and one rate-limited answer must not silently drop an
+// approval - the row retries on the outbox's backoff and under its rate-limit budget until GitHub
+// answers. The row names the head it was queued at and does nothing once the record has moved past
+// it, so each push's row answers for its own head.
+func (e *Engine) carryApproval(ctx context.Context, tx pgx.Tx, issue record.Issue, pr *record.PullRequest) error {
+	if pr == nil || pr.State != record.PullRequestOpen || classify.CodeOnItsWay(*pr) {
+		return nil
 	}
-	if pr.RequiredReadUnchanged(fact.Names, fact.Workflows, fact.WorkflowsHead) {
-		if !e.HoldLapsed(*pr) {
-			return intake.Result{}, nil
-		}
-		return intake.Result{}, e.decideChecks(ctx, tx, pr, false)
+	reviewer, err := e.phaseRow(ctx, tx, issue.Key, claim.RoleReviewer)
+	if err != nil {
+		return err
 	}
-	*pr = classify.ApplyRequiredRead(*pr, fact.Names, fact.Workflows, fact.WorkflowsHead)
-	return intake.Result{}, e.decideChecks(ctx, tx, pr, true)
+	if reviewer.Decision == nil || reviewer.Decision.State != "approved" || reviewer.Decision.Head == "" {
+		return nil
+	}
+	if reviewer.Decision.Head == pr.HeadSHA || classify.ApprovalStands(*pr, reviewer.Decision.Head) {
+		return nil
+	}
+	return e.enqueue(ctx, tx, issue.Key, record.ApprovalCarry{Repo: pr.Repo, Number: pr.Number,
+		Approved: reviewer.Decision.Head, Head: pr.HeadSHA})
 }
 
 // mergeability records what GitHub's last read found for whether the pull request's head can be
@@ -107,8 +116,8 @@ func (e *Engine) mergeability(ctx context.Context, tx pgx.Tx, fact intake.PullRe
 	return intake.Result{}, e.transition(ctx, tx, *issue, TriggerChecksRed, "", record.PhaseRow{}, pr, reason)
 }
 
-// decideChecks records pr, its checks verdict changed by a CI settlement or a new read of what the
-// base branch requires (requiredRead), and decides, with the issue's phase in hand, what it moves.
+// decideChecks records pr, its checks verdict changed by a CI settlement, and decides, with the
+// issue's phase in hand, what it moves.
 // CI is the daemon's own rule, read beside the review round and never by it (standingRed): in
 // testing, reviewing, retro and merging a red that stands for the head sends the work back to
 // implementing, whatever the tester has found, the round holds or the merger is doing, and takes
@@ -132,7 +141,7 @@ func (e *Engine) mergeability(ctx context.Context, tx pgx.Tx, fact intake.PullRe
 // architect once (classify.BlockFixAttempt), by the first red at that count that sent nothing back:
 // a red that sent the work back is told by its checks-red, and the next push onto it raises the
 // count.
-func (e *Engine) decideChecks(ctx context.Context, tx pgx.Tx, pr *record.PullRequest, requiredRead bool) error {
+func (e *Engine) decideChecks(ctx context.Context, tx pgx.Tx, pr *record.PullRequest) error {
 	e.noteLapse(ctx, pr)
 	if err := e.store.PutPullRequest(ctx, tx, *pr); err != nil {
 		return err
@@ -148,13 +157,13 @@ func (e *Engine) decideChecks(ctx context.Context, tx pgx.Tx, pr *record.PullReq
 		if !classify.RedWithdrawsReady(*pr) {
 			break
 		}
-		// A required workflow's result is as old as the pass's last read of the runs, up to two
-		// minutes: a run re-run green since still reads red until the next read. So a settlement,
-		// which reads no run, withdraws only a red a required check makes. A red only the workflows
-		// make is left to the pass's next read, which the cleared head the runs were read at makes a
-		// change (record.RequiredReadUnchanged), so it withdraws the READY if the run is still red,
-		// and leaves it if the run passed; that read decides the count's report too.
-		if !requiredRead && classify.RedOnlyByWorkflows(*pr) {
+		// A required workflow's result is only as old as the last read of its runs, and no read
+		// refreshes it: the daemon reads no rulesets and no workflow runs (dispatch://INFRA-714's
+		// R1). A settlement reads no run either, so a red a required check makes is the one that
+		// withdraws a READY, and a red that only a workflow's last-read run makes clears the head
+		// those runs were read at instead, which leaves them standing for no head
+		// (classify.WorkflowStanding) and the READY where it is.
+		if classify.RedOnlyByWorkflows(*pr) {
 			*pr = classify.ClearWorkflowsHead(*pr)
 			return e.store.PutPullRequest(ctx, tx, *pr)
 		}
@@ -529,9 +538,9 @@ func (e *Engine) standingRed(ctx context.Context, tx pgx.Tx, issue record.Issue,
 }
 
 // redHold bounds how long a red is held while its head waits for a push of its move: GitHub
-// delivers a push webhook and its synchronize seconds apart, and the required-checks pass, which
-// ends a lapsed hold (HoldLapsed), reads every two minutes. A push webhook lost for good, which
-// nothing replays, then leaves the red to be judged as it stands, as before the head run.
+// delivers a push webhook and its synchronize seconds apart. A push webhook lost for good, which
+// nothing replays, then leaves the red to be judged as it stands, as before the head run, by the
+// next fact that decides the head's checks.
 const redHold = 10 * time.Minute
 
 // heldSince is when pr's head arrived while a head run was open - the arrival time on the run's
@@ -554,26 +563,26 @@ func heldSince(pr record.PullRequest) time.Time {
 // arrived before every push of its move - and the head arrived less than redHold ago. While it
 // holds, whether the red is planned, and the count it stands at, are not yet what every push
 // arriving first would make them, and a send-back cannot be taken back; the push that closes the
-// run, or whose replay changes the judgement, decides the checks (push), and so does the pass once
-// the hold lapses (HoldLapsed).
+// run, or whose replay changes the judgement, decides the checks (push), and so does the next
+// settlement of the head once the hold has lapsed (holdLapsed).
 func (e *Engine) holdsRed(pr record.PullRequest) bool {
 	since := heldSince(pr)
 	return !since.IsZero() && e.now().Before(since.Add(redHold))
 }
 
-// HoldLapsed says whether the hold on pr's red has lapsed by the engine's clock and nothing has
-// decided the red since: the required-checks pass then sends its read even when it says what is
-// recorded (daemon's readRequiredChecks), and the engine decides the red (requiredChecks).
-func (e *Engine) HoldLapsed(pr record.PullRequest) bool {
+// holdLapsed says whether the hold on pr's red has lapsed by the engine's clock and nothing has
+// decided the red since: the fact that decides the checks then decides the red as it stands
+// (noteLapse), and says so once.
+func (e *Engine) holdLapsed(pr record.PullRequest) bool {
 	since := heldSince(pr)
 	return !since.IsZero() && !e.now().Before(since.Add(redHold)) && pr.Run.Decided != pr.HeadSHA
 }
 
 // noteLapse marks pr's lapsed hold decided (record.HeadRun.Decided) and says so, naming the
-// verdict decided, when the checks are about to be decided with the hold lapsed, so the pass does
-// not send the read again.
+// verdict decided, when the checks are about to be decided with the hold lapsed, so one lapse is
+// said once.
 func (e *Engine) noteLapse(ctx context.Context, pr *record.PullRequest) {
-	if !e.HoldLapsed(*pr) {
+	if !e.holdLapsed(*pr) {
 		return
 	}
 	run := *pr.Run
@@ -626,10 +635,9 @@ func (e *Engine) stampRun(pr *record.PullRequest) {
 // webhook, so the record can still hold the head before the round's push, whose red the round may
 // have fixed; that head's arrival applies the rule to it (pullRequestSynchronized), and the round's
 // push does not judge the old head it has not yet replaced (push). A red only a required workflow
-// makes is left to the pass's next read of the runs: its result is as old as the last read, up to
-// two minutes, so a re-run gone green since would still read red. Clearing the head the runs were
-// read at makes that next read a change (record.RequiredReadUnchanged), which then sends the work
-// back if the run is still red, as decideChecks does for a READY.
+// makes is left behind: its result is only as old as the last read of the runs, which the daemon
+// no longer makes (dispatch://INFRA-714's R1), so the head those runs were read at is cleared and
+// their result stands for no head (classify.WorkflowStanding).
 func (e *Engine) implementationReady(ctx context.Context, tx pgx.Tx, issue record.Issue, row record.PhaseRow, pr *record.PullRequest) error {
 	if err := e.transition(ctx, tx, issue, TriggerImplementationReady, "", row, pr, ""); err != nil {
 		return err

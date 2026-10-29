@@ -209,17 +209,16 @@ func sameSettlement(a, b record.Settlement) bool {
 		sameItems(a.Failing, b.Failing) && sameItems(a.Cancelled, b.Cancelled)
 }
 
-// ApplyRequiredRead records a read of what the base branch requires (intake.RequiredChecks): its
-// required checks, and its required workflows with their runs' results at head. While a head run
-// is open the read is a step of it.
+// ApplyRequiredRead records a read of what the base branch requires, as the daemon made one while
+// it read rulesets: its required checks, and its required workflows with their runs' results at
+// head. While a head run is open the read is a step of it, which a stored run can still carry.
 func ApplyRequiredRead(pr record.PullRequest, names []string, workflows []record.RequiredWorkflow, head string) record.PullRequest {
 	read := record.RequiredRead{Names: append([]string{}, names...), Workflows: append([]record.RequiredWorkflow{}, workflows...), WorkflowsHead: head}
 	return withStep(pr, record.RunStep{Required: &read})
 }
 
-// ClearWorkflowsHead clears the head the required workflows' runs were read at, so the next read
-// of the runs is a change (record.RequiredReadUnchanged). While a head run is open it is a step of
-// it.
+// ClearWorkflowsHead clears the head the required workflows' runs were read at, so their result
+// stands for no head (WorkflowStanding). While a head run is open it is a step of it.
 func ClearWorkflowsHead(pr record.PullRequest) record.PullRequest {
 	return withStep(pr, record.RunStep{WorkflowsCleared: true})
 }

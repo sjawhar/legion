@@ -48,7 +48,7 @@ func (w *workflowRuntime) readApprovalCarry(ctx, read context.Context, github gi
 		return false
 	}
 	compared := fmt.Sprintf("%s#%d:%s...%s", pr.Repo, pr.Number, approved, pr.HeadSHA)
-	if w.uncarried[compared] {
+	if w.carryRefused(compared) {
 		return false
 	}
 	push, aside, err := handoffPush(read, github, *pr, approved, pr.HeadSHA)
@@ -71,10 +71,7 @@ func (w *workflowRuntime) readApprovalCarry(ctx, read context.Context, github gi
 	if aside != "" {
 		w.log.Info("workflow: the reviewer's approval stays set aside below the head; only an APPROVE of the head or a REQUEST_CHANGES ends the round", "reason", aside,
 			"repo", pr.Repo, "pullRequest", pr.Number, "issue", pr.Issue, "approved", approved, "head", pr.HeadSHA)
-		if w.uncarried == nil {
-			w.uncarried = map[string]bool{}
-		}
-		w.uncarried[compared] = true
+		w.refuseCarry(compared)
 		return false
 	}
 	w.log.Warn("workflow: only the issue's handoffs changed above the approved head, and no recorded push says so; applying the push GitHub's compare shows",
@@ -84,6 +81,26 @@ func (w *workflowRuntime) readApprovalCarry(ctx, read context.Context, github gi
 		w.log.Warn("apply a handoff-only push read from GitHub's compare", "repo", pr.Repo, "pullRequest", pr.Number, "error", err)
 	}
 	return false
+}
+
+// carryRefused is whether GitHub has already answered the comparison compared - a repository, a
+// pull request and the two heads - with something that does not carry the approval, and
+// refuseCarry records one it has: the compare of two fixed commits never changes its answer, so it
+// is asked for once. The two-minute pass and the per-issue read (readIssuePullRequest) both ask,
+// each on a goroutine of its own, so the set is kept under readMemoMu.
+func (w *workflowRuntime) carryRefused(compared string) bool {
+	w.readMemoMu.Lock()
+	defer w.readMemoMu.Unlock()
+	return w.uncarried[compared]
+}
+
+func (w *workflowRuntime) refuseCarry(compared string) {
+	w.readMemoMu.Lock()
+	defer w.readMemoMu.Unlock()
+	if w.uncarried == nil {
+		w.uncarried = map[string]bool{}
+	}
+	w.uncarried[compared] = true
 }
 
 // approvalSetAside is the head the reviewer of listed's issue approved, and the pull request as

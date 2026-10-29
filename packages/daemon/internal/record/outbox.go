@@ -35,6 +35,7 @@ const (
 	OutboxKindCheckCompare      OutboxKind = "check_compare"
 	OutboxKindCheckLook         OutboxKind = "check_look"
 	OutboxKindCheckBound        OutboxKind = "check_bound"
+	OutboxKindApprovalCarry     OutboxKind = "approval_carry"
 )
 
 // OutboxLane is which executor of an issue runs a kind. An issue's rows run on two lanes side by
@@ -44,9 +45,11 @@ const (
 // stopped the roles). It also carries the issue's pull-request mutations, the disarm
 // (auto_merge_disable) and the READY merge's submission (ready_merge), which must never run beside
 // each other: a disarm and a submit of one pull request at once would race on GitHub, and the lane
-// (with outboxLaneFree across daemons) is what keeps them apart; and the production check's rows
+// (with outboxLaneFree across daemons) is what keeps them apart; the production check's rows
 // (check_compare, check_look, check_bound), which start and end the implementer's looks in order
-// with the starts and suspends they queue. The board lane runs the issue's Dispatch writes and
+// with the starts and suspends they queue; and the approval carry (approval_carry), whose fact can
+// move the issue out of reviewing, so it runs before the start that move queues. The board lane
+// runs the issue's Dispatch writes and
 // notice publishes beside them, so a status write or a notice never waits behind a start pulling
 // an image, and a slow publish never holds a stop back.
 type OutboxLane string
@@ -59,7 +62,7 @@ const (
 // laneKinds is each lane's kinds in the order LaneKinds lists them. Every OutboxKind is in exactly
 // one lane (TestEveryOutboxKindIsInExactlyOneLane).
 var laneKinds = map[OutboxLane][]OutboxKind{
-	LaneLifecycle: {OutboxKindSupervise, OutboxKindIssueSuspend, OutboxKindLingerClose, OutboxKindWorkspaceRemove, OutboxKindGateSeed, OutboxKindIssueBranch, OutboxKindAutoMergeDisable, OutboxKindReadyMerge, OutboxKindCheckCompare, OutboxKindCheckLook, OutboxKindCheckBound},
+	LaneLifecycle: {OutboxKindSupervise, OutboxKindIssueSuspend, OutboxKindLingerClose, OutboxKindWorkspaceRemove, OutboxKindGateSeed, OutboxKindIssueBranch, OutboxKindAutoMergeDisable, OutboxKindReadyMerge, OutboxKindCheckCompare, OutboxKindCheckLook, OutboxKindCheckBound, OutboxKindApprovalCarry},
 	LaneBoard:     {OutboxKindDispatchStatus, OutboxKindDispatchMessage, OutboxKindNotice, OutboxKindControllerNotice, OutboxKindMergeQueuePublish},
 }
 
@@ -518,6 +521,23 @@ type CheckBound struct{}
 
 func (CheckBound) OutboxKind() OutboxKind { return OutboxKindCheckBound }
 
+// ApprovalCarry is GitHub's compare of the head a reviewer approved with the head the pull
+// request stands at, queued by the push that left the approval set aside below that head
+// (workflow's carryApproval). The executor compares Approved with Head as the implement App and,
+// when every path that changed between them is under the issue's own .legion/<issue>/, applies the
+// intake.Push that says so, which carries the approval up to Head (daemon's approvalCarry). Number
+// is the pull request the two heads belong to, and Repo its repository as the record spells it.
+// Head fences the row: the record's head has moved past the one the row names by the time it runs,
+// so another push's row compares the heads that stand then, and this one compares nothing.
+type ApprovalCarry struct {
+	Repo     string `json:"repo"`
+	Number   int    `json:"number"`
+	Approved string `json:"approved"`
+	Head     string `json:"head"`
+}
+
+func (ApprovalCarry) OutboxKind() OutboxKind { return OutboxKindApprovalCarry }
+
 // NewOutboxRow encodes one validated payload for durable delivery at nextAt.
 func NewOutboxRow(issue string, payload OutboxPayload, nextAt time.Time) (OutboxRow, error) {
 	if err := validateOutboxPayload(payload); err != nil {
@@ -646,6 +666,12 @@ func decodeOutboxJSON(row OutboxRow) (OutboxPayload, error) {
 			return nil, fmt.Errorf("decode outbox row %d: %w", row.ID, err)
 		}
 		payload = value
+	case OutboxKindApprovalCarry:
+		value := ApprovalCarry{}
+		if err := decoder.Decode(&value); err != nil {
+			return nil, fmt.Errorf("decode outbox row %d: %w", row.ID, err)
+		}
+		payload = value
 	default:
 		return nil, fmt.Errorf("decode outbox row %d: unknown kind %q", row.ID, row.Kind)
 	}
@@ -735,6 +761,16 @@ func validateOutboxPayload(payload OutboxPayload) error {
 	case ReadyMerge:
 		if value.Number <= 0 || value.Head == "" {
 			return fmt.Errorf("READY merge requires its pull request number and head")
+		}
+	case ApprovalCarry:
+		if value.Repo == "" || value.Number <= 0 {
+			return fmt.Errorf("an approval carry requires its repository and pull request number")
+		}
+		if value.Approved == "" || value.Head == "" {
+			return fmt.Errorf("an approval carry requires the approved head and the head it is carried to")
+		}
+		if value.Approved == value.Head {
+			return fmt.Errorf("an approval carry compares %s with itself; an approval of the head needs no carry", value.Head)
 		}
 	case CheckCompare:
 		if value.Look <= 0 {

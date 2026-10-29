@@ -187,6 +187,12 @@ func (s *server) handoffComplete(w http.ResponseWriter, r *http.Request) {
 		writeFailure(w, result.Refusal.Status, result.Refusal.Code, message)
 		return
 	}
+	// The completion is recorded and its transaction committed, so the daemon's read of the issue's
+	// pull request judges what this phase left; the hook only queues that read, which runs on the
+	// daemon's own goroutine, so this answer waits for no GitHub call.
+	if s.handoffCompleted != nil {
+		s.handoffCompleted(grant.Issue)
+	}
 	writeJSON(w, http.StatusOK, HandoffCompleteResponse{Note: answer.note})
 }
 
