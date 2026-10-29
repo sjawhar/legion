@@ -241,8 +241,8 @@ func (s *Postgres) HandedOffWithoutOpenOrMergedPullRequest(ctx context.Context, 
 		" join (select issue, handoff_commit from phases where role = '"+string(claim.RoleImplementer)+"' and handoff_commit <> '')"+
 		" implementer (implementer_issue, handoff_commit) on implementer.implementer_issue = issues.key"+
 		" where project = $1 and github_repo <> '' and phase = '"+string(phase.Implementing)+"'"+
-		" and key not in (select issue from pull_requests where state in ('"+string(PullRequestOpen)+"', '"+string(PullRequestMerged)+"'))"+
-		" order by key", project)
+		" and key not in (select issue from pull_requests where state = any($2))"+
+		" order by key", project, implementationMoveSQLStates)
 	if err != nil {
 		return nil, fmt.Errorf("list the issues of %s %s: %w", project, what, err)
 	}

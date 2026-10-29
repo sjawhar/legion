@@ -282,7 +282,11 @@ func (s *server) implementationPullRequest(w http.ResponseWriter, r *http.Reques
 		return true
 	}
 	if !found {
-		if recorded != nil && recorded.State == record.PullRequestMerged {
+		// This read is GitHub's own answer on an open pull request, so of the states that let the
+		// implementation move on (record.LetsImplementationMove) only merged still does here: a
+		// record holding the pull request open is one GitHub closed or merged since the daemon last
+		// heard, and the completion waits for whichever of the two the daemon records next.
+		if record.LetsImplementationMove(recorded) && recorded.State != record.PullRequestOpen {
 			return true
 		}
 		message := fmt.Sprintf("no open pull request on %s %s; nothing was recorded. Open the pull request and complete again.", issue.GitHubRepo, branch)

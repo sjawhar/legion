@@ -9,8 +9,11 @@ body: |-
     by an earlier release is asked for again while inside the 72 hours. Dispatch answers
     `GET /api/v1/github/app-installation/{owner}/{repo}` with whether its GitHub App is installed on
     the repository. The listener publishes a push with a very long ref on a cut subject instead of
-    answering 422. The daemon's NATS grant adds `$JS.API.STREAM.MSG.GET.ENVOY_NOTIFICATIONS`, which
-    the daemon uses to read the age of each consumer's oldest waiting event.
+    answering 422, and logs a GitHub delivery that fails again as
+    `redelivery <delivery>: <action> refused` (or `failed`), which the `webhook-refused` and
+    `publish-failure` alarms do not count: they count a delivery's first failure in each listener
+    task. The daemon's NATS grant adds `$JS.API.STREAM.MSG.GET.ENVOY_NOTIFICATIONS`, which the
+    daemon uses to read the age of each consumer's oldest waiting event.
 time: 2026-10-28T20:00:00Z
 custom:
     Issue: pr2478

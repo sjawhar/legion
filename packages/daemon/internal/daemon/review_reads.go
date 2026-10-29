@@ -2,7 +2,6 @@ package daemon
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"slices"
 	"strconv"
@@ -69,17 +68,10 @@ func (w *workflowRuntime) readReviews(ctx, read context.Context, github githubre
 		if ctx.Err() != nil {
 			return true
 		}
-		attributes := []any{"repo", pr.Repo, "pullRequest", pr.Number, "error", err}
-		var answer *githubrest.Answer
-		if errors.As(err, &answer) {
-			attributes = append(attributes, "status", answer.Status)
-		}
-		if answer != nil && answer.RateLimited {
-			w.log.Error("read a pull request's reviews: GitHub's rate limit; this pass reads no more pull requests", attributes...)
-			return true
-		}
-		w.log.Error("read a pull request's reviews; a decision its webhook never delivered stays unread until a later pass reads it", attributes...)
-		return false
+		return w.logReadFailure(err,
+			"read a pull request's reviews: GitHub's rate limit; this pass reads no more pull requests",
+			"read a pull request's reviews; a decision its webhook never delivered stays unread until a later pass reads it",
+			"repo", pr.Repo, "pullRequest", pr.Number)
 	}
 	review, ok, err := w.reviewToApply(read, pr, reviews)
 	if err != nil {

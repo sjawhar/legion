@@ -618,6 +618,32 @@ const (
 	PullRequestClosed PullRequestState = "closed"
 )
 
+// implementationMoveStates are the pull request states that let an issue's implementation move on:
+// one open, whose work is still on its way, and one merged, whose work landed. Every place that
+// asks the question reads it from here — LetsImplementationMove for the workflow's
+// TriggerImplementationReady snapshot (workflow's transition), the notice that tells an architect
+// no pull request is there (workflow's pullRequestMissing), the implementer's completion of
+// implementing (api's implementationPullRequest) — and the one place that cannot call Go,
+// HandedOffWithoutOpenOrMergedPullRequest's SQL, reads the same list as the parameter of its
+// `state = any(...)` (implementationMoveSQLStates), so the query and the predicate cannot drift.
+var implementationMoveStates = []PullRequestState{PullRequestOpen, PullRequestMerged}
+
+// implementationMoveSQLStates is implementationMoveStates as the text array
+// HandedOffWithoutOpenOrMergedPullRequest passes its query, built once from that same list.
+var implementationMoveSQLStates = func() []string {
+	states := make([]string, len(implementationMoveStates))
+	for i, state := range implementationMoveStates {
+		states[i] = string(state)
+	}
+	return states
+}()
+
+// LetsImplementationMove reports whether pr lets an issue's implementation move on
+// (implementationMoveStates). It is nil-safe: no pull request recorded lets nothing move.
+func LetsImplementationMove(pr *PullRequest) bool {
+	return pr != nil && slices.Contains(implementationMoveStates, pr.State)
+}
+
 // Mergeability is GitHub's lazily computed verdict for whether a pull request's head can be
 // merged into its base without a conflict, decoded from GitHub's nullable `mergeable` field
 // (daemon.readRequiredChecks). "" (the zero value) means the daemon has never read it.

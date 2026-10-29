@@ -2,7 +2,6 @@ package daemon
 
 import (
 	"context"
-	"errors"
 	"fmt"
 
 	"github.com/jackc/pgx/v5"
@@ -56,17 +55,10 @@ func (w *workflowRuntime) readApprovalCarry(ctx, read context.Context, github gi
 		if ctx.Err() != nil {
 			return true
 		}
-		attributes := []any{"repo", pr.Repo, "pullRequest", pr.Number, "issue", pr.Issue, "approved", approved, "head", pr.HeadSHA, "error", err}
-		var answer *githubrest.Answer
-		if errors.As(err, &answer) {
-			attributes = append(attributes, "status", answer.Status)
-		}
-		if answer != nil && answer.RateLimited {
-			w.log.Error("compare a pull request's approved head with its head: GitHub's rate limit; this pass reads no more pull requests", attributes...)
-			return true
-		}
-		w.log.Error("compare a pull request's approved head with its head; the approval stays set aside until a later pass or the push's webhook carries it", attributes...)
-		return false
+		return w.logReadFailure(err,
+			"compare a pull request's approved head with its head: GitHub's rate limit; this pass reads no more pull requests",
+			"compare a pull request's approved head with its head; the approval stays set aside until a later pass or the push's webhook carries it",
+			"repo", pr.Repo, "pullRequest", pr.Number, "issue", pr.Issue, "approved", approved, "head", pr.HeadSHA)
 	}
 	if aside != "" {
 		w.log.Info("workflow: the reviewer's approval stays set aside below the head; only an APPROVE of the head or a REQUEST_CHANGES ends the round", "reason", aside,

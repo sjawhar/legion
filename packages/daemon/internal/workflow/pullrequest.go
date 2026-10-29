@@ -493,7 +493,7 @@ func (e *Engine) pullRequestMissing(ctx context.Context, tx pgx.Tx, fact intake.
 		return intake.Result{}, err
 	}
 	pr, err := e.store.PullRequest(ctx, tx, issue.Key)
-	if err != nil || (pr != nil && (pr.State == record.PullRequestOpen || pr.State == record.PullRequestMerged)) {
+	if err != nil || record.LetsImplementationMove(pr) {
 		return intake.Result{}, err
 	}
 	return intake.Result{}, e.notice(ctx, tx, issue.Key, record.Notice{Kind: "pull-request-missing", Role: claim.RoleArchitect,

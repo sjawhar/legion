@@ -495,6 +495,69 @@ func TestFailedDeliveriesForgetTheOldestAndTheExpired(t *testing.T) {
 	}
 }
 
+// An X-GitHub-Delivery longer than GitHub's 36-character delivery GUID is no delivery GitHub sent,
+// and it never becomes a key in the failure memory: the key is what tells a redelivery from a first
+// delivery, so a key cut down to githubDeliveryKeyMax bytes would be shared by every header that
+// begins the same way, and the second delivery's first failure would be logged
+// `redelivery <delivery>: …`, which no alarm counts. Such a delivery is answered as any other, and
+// the memory holds nothing of it, so every one of its failures logs the counted line.
+func TestAnOverLongGitHubDeliveryIsNeverRememberedAsAFailure(t *testing.T) {
+	t.Run("the memory keeps no key for it", func(t *testing.T) {
+		f := newFailedDeliveries(githubFailuresKept, githubFailureAge)
+		for _, delivery := range []string{strings.Repeat("d", githubDeliveryKeyMax+1), ""} {
+			for attempt := 1; attempt <= 2; attempt++ {
+				if !f.first(failedDelivery{delivery, "github publish refused"}) {
+					t.Fatalf("failure %d of a %d-byte delivery was taken for a redelivery, want every failure of it counted", attempt, len(delivery))
+				}
+			}
+		}
+		if len(f.logged) != 0 || len(f.order) != 0 {
+			t.Fatalf("the memory holds %d keys and %d entries, want none: an over-long or empty delivery must never become a key", len(f.logged), len(f.order))
+		}
+		kept := failedDelivery{strings.Repeat("d", githubDeliveryKeyMax), "github publish refused"}
+		if !f.first(kept) || f.first(kept) {
+			t.Fatalf("a delivery of exactly %d bytes is not remembered, want its first failure counted and its next not", githubDeliveryKeyMax)
+		}
+	})
+
+	t.Run("the handler answers it as today and counts both failures", func(t *testing.T) {
+		var logged bytes.Buffer
+		previous, flags := log.Writer(), log.Flags()
+		log.SetOutput(&logged)
+		log.SetFlags(log.LstdFlags)
+		t.Cleanup(func() { log.SetOutput(previous); log.SetFlags(flags) })
+		body := `{"ref":"refs/heads/main","repository":{"name":"legion","owner":{"login":"sjawhar"},"full_name":"sjawhar/legion"}}`
+		handler := GitHubHandler("s", "@legion", "", &mockPublisher{err: fmt.Errorf("publish: %w", bus.ErrTooLarge)}, &mockRecorder{})
+		delivery := strings.Repeat("d", githubDeliveryKeyMax+1)
+		for attempt := 1; attempt <= 2; attempt++ {
+			req := httptest.NewRequest(http.MethodPost, "/webhook/github", strings.NewReader(body))
+			req.Header.Set("X-GitHub-Delivery", delivery)
+			req.Header.Set("X-GitHub-Event", "push")
+			req.Header.Set("X-Hub-Signature-256", githubSign("s", []byte(body)))
+			rr := httptest.NewRecorder()
+			handler.ServeHTTP(rr, req)
+			if rr.Code != http.StatusUnprocessableEntity {
+				t.Fatalf("attempt %d answered %d, want %d; body = %s", attempt, rr.Code, http.StatusUnprocessableEntity, rr.Body.String())
+			}
+		}
+		// The alarms' filters read the words after the line's date and time.
+		var counted int
+		for _, line := range strings.Split(strings.TrimSpace(logged.String()), "\n") {
+			words := strings.SplitN(line, " ", 3)
+			if len(words) < 3 {
+				t.Fatalf("log line %q has no date and time", line)
+			}
+			if !strings.HasPrefix(words[2], "github publish refused: ") {
+				t.Fatalf("log line %q is not the counted line: nothing of an over-long delivery is remembered, so each of its failures logs that line", line)
+			}
+			counted++
+		}
+		if counted != 2 {
+			t.Fatalf("log = %q, want both failures logged `github publish refused: …`", logged.String())
+		}
+	})
+}
+
 // githubSign computes HMAC SHA256 signature matching GitHub's format.
 func githubSign(secret string, body []byte) string {
 	mac := hmac.New(sha256.New, []byte(secret))
