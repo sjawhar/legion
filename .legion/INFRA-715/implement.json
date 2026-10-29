@@ -2,9 +2,9 @@
   "schemaVersion": 1,
   "phase": "implement",
   "issue": "INFRA-715",
-  "completed": "2026-10-29T16:55:00Z",
+  "completed": "2026-10-29T17:40:00Z",
   "pullRequest": "https://github.com/sjawhar/legion/pull/2480",
-  "codeHead": "090ae14dd22505e552f772379dcc91955c7bceba",
+  "codeHead": "e0629eed524fcb685e2a45fd3994403f544e09ec",
   "proof": [
     {
       "criterion": "A2: on the cluster copy, an hour at ten times grows Dispatch's memory by no more than the documents' stored growth plus a stated constant (1 GiB); the curve is quoted against the 2026-10-28 baseline",
@@ -61,6 +61,14 @@
       "observed": "PASS. A heading's comment copied into front matter, and an ask's quote copied into a code block above it, are both taken, and the anchor stays on the original heading or paragraph. An ask moved into a code block, and a comment moved into front matter with no other copy, are refused as ErrInvalidMarkdown naming the place. A mark refused as a mark, an unreadable fragment and an unmapped mark type are each a plain ErrDocSchema. Also passing at the head: the docs suite (1034 s), the pmdoc suite without its timing tests (137 s) and the api upload and anchor tests (305 s). GitHub reports #2480 MERGEABLE, and Tests is queued at 090ae14d.",
       "headSha": "090ae14dd22505e552f772379dcc91955c7bceba",
       "negativeControl": "With only the nearest occurrence tried (occurrences[:1]), both copy cases fail. One answers 400: the open comment anchored on \"Rollout plan\" would land in the front matter ...; the other: the open ask anchored on \"run the tests\" would land in a code block ...."
+    },
+    {
+      "criterion": "Review round 4: when every occurrence refuses the mark, the 400 names each place nearest first; FindDiscardingMiss and describeMiss deleted; one nearest-first comparator; the tie assertion runs",
+      "surface": "the real docs.Service on Postgres 16 (ReplaceText over an open ask) and the pmdoc quote finder",
+      "command": "cd packages/envoy && DISPATCH_TEST_DATABASE_URL=postgres://postgres@127.0.0.1:55432/postgres go test ./internal/dispatch/docs/ -run 'TestAnUploadMovingAnAnchorsQuoteWhereItsMarkIsNotAllowedIsRefused|TestAReanchorErrorIsTheCallersOnlyWhenTheMarkIsNotAllowed' -count=1 -v; go test ./internal/dispatch/pmdoc/ -run 'TestNearestFirstListsEveryMatchInFindsOrderOfChoice|TestQuoteFinderAnswersLikeFindQuote' -count=1 -v",
+      "observed": "PASS. An ask whose quote the upload leaves only in the front matter and a code block is refused with: the open ask anchored on \"run the tests\" would land in the front matter and a code block, where its mark is not allowed, and the upload leaves its quote nowhere it may stand; move that text out of them, or resolve the ask first. The tie halfway between two matches lists the earlier first, and FindQuote agrees. No FindDiscardingMiss is left. Also passing: the docs suite (1069 s), the pmdoc suite without its timing tests (135 s) and the api anchor tests.",
+      "headSha": "e0629eed524fcb685e2a45fd3994403f544e09ec",
+      "negativeControl": "With the loop reporting only the farthest refusal, the front-matter-and-code-block case fails: its message names only a code block."
     }
   ],
   "filesChanged": [
@@ -95,10 +103,11 @@
     "Round 3 answers the reviewer's two threads (PRRT_kwDORFy7ds6xk5xU, PRRT_kwDORFy7ds6xk5xa), both replied to and resolved at 44036ea5; the PR body adds a Contract change census (500 DOC_SCHEMA -> 400 INVALID_MARKDOWN on the three upload routes; block ids kept).",
     "Round 4 answers review round 2's three threads (PRRT_kwDORFy7ds6xmcRe, PRRT_kwDORFy7ds6xmcRu, PRRT_kwDORFy7ds6xmcR3), each replied to and resolved at bf2118ca. Front matter is named through MarkNotAllowedError.Place, and the location walk is unchanged: naming front matter there broke the frozen-walk equivalence test TestYTextRangesMatchesFrozenOnDocuments.",
     "GitHub created no Tests run for the code push bf2118ca (pushed 15:10:01Z), probably because the handoff push came 71 s later. This handoff commit carries no skip-checks trailer, so the pull request's Tests run starts at this head, whose code is bf2118ca's.",
-    "Round 5 answers review round 3: a forward merge of main 30ecdcd4 at 84001a00, the only conflict being the README row (fingerprint comment 6502316391), and threads PRRT_kwDORFy7ds6xofnK, PRRT_kwDORFy7ds6xofnP and PRRT_kwDORFy7ds6xofnW, each replied to and resolved at 090ae14d."
+    "Round 5 answers review round 3: a forward merge of main 30ecdcd4 at 84001a00, the only conflict being the README row (fingerprint comment 6502316391), and threads PRRT_kwDORFy7ds6xofnK, PRRT_kwDORFy7ds6xofnP and PRRT_kwDORFy7ds6xofnW, each replied to and resolved at 090ae14d.",
+    "Round 6 answers review round 4: threads PRRT_kwDORFy7ds6xqDFj, PRRT_kwDORFy7ds6xqDFu and PRRT_kwDORFy7ds6xqDF1, each replied to and resolved at e0629eed. The reviewer's prose commit 4cd42dff stays."
   ],
   "openQuestions": [
     "The literal bound holds for an hour because the 1 GiB constant absorbs comment growth; the measured proportional factor is k ~ 19 (working-set growth per stored byte). INFRA-179's room byte budget caps the unbounded case."
   ],
-  "round": 5
+  "round": 6
 }
