@@ -26,11 +26,11 @@ import (
 // launch generation), so the boot's replay of a ready already applied tells nothing more, and one
 // never applied tells it once. A catch-up an earlier launch never had delivered is dropped first,
 // so the agent is given one catch-up, computed now, which names again the decisions the dropped one
-// named (CatchUp.Decided) with any kept since; it names the launch it was written for, so a failed
-// forward of an older one is not queued again behind it (the outbox's rehold). The notice goes
-// through the outbox like any other, so it is routed, held and re-held as they are. A tree that
-// lingers or has left the workflow is told nothing, nor is a sub-architect (no workflow path starts
-// one) or a phase worker.
+// named (the rows stay until a delivered catch-up or start forgets them) with any kept since; it
+// names the launch it was written for, so a failed forward of an older one is not queued again
+// behind it (the outbox's rehold). The notice goes through the outbox like any other, so it is
+// routed, held and re-held as they are. A tree that lingers or has left the workflow is told
+// nothing, nor is a sub-architect (no workflow path starts one) or a phase worker.
 func (e *Engine) claimReady(ctx context.Context, tx pgx.Tx, fact intake.ClaimReady) (intake.Result, error) {
 	if fact.Role != claim.RoleArchitect {
 		return intake.Result{}, nil
@@ -47,21 +47,17 @@ func (e *Engine) claimReady(ctx context.Context, tx pgx.Tx, fact intake.ClaimRea
 		return intake.Result{}, err
 	}
 	catchUp.Launch = fact.Launch
+	if err := e.store.DropCatchUps(ctx, tx, root.Key); err != nil {
+		return intake.Result{}, err
+	}
 	// A decision kept since the start's task was written (one a person made while the tree's
-	// architect claim had ended, before this relaunch) is told here, once, with what a catch-up this
-	// ready drops undelivered had taken for its launch.
-	decided, err := e.store.DropCatchUps(ctx, tx, root.Key)
+	// architect claim had ended, before this relaunch) is told here; the rows stay until this
+	// catch-up reaches the architect, which forgets exactly what it named (the outbox's notice).
+	decided, kept, err := e.ParkedDecisionTask(ctx, tx, *root)
 	if err != nil {
 		return intake.Result{}, err
 	}
-	kept, err := e.ParkedDecisionTask(ctx, tx, *root)
-	if err != nil {
-		return intake.Result{}, err
-	}
-	if kept != "" {
-		decided = append(decided, kept)
-	}
-	catchUp.Decided = strings.Join(decided, " ")
+	catchUp.Decided, catchUp.Kept = decided, kept
 	reason := fmt.Sprintf("the tree of %s at generation %d as the daemon records it now; start or resume it as your role says", root.Key, root.Generation)
 	if len(awaiting) > 0 {
 		reason += fmt.Sprintf("; in accepting, waiting for your acceptance, which no worker gives: %s (read the evidence, then sign_off or request_backward_move)", strings.Join(awaiting, ", "))

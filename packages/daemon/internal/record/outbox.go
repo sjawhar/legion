@@ -253,8 +253,9 @@ func (b BlockedIssue) MarshalJSON() ([]byte, error) {
 // architect decomposes nothing anew; one that carried no gate registers its own spec. Decided names
 // what a person decided on the tree while nobody in it could hear it and the start did not name (a
 // decision made while the architect's claim had ended, before this relaunch), in the words of
-// workflow.Engine.ParkedDecisionTask, with what an earlier catch-up this ready drops undelivered
-// named; empty when there is none.
+// workflow.Engine.ParkedDecisionTask; empty when there is none. Kept is what Decided named, which
+// the delivery of this catch-up forgets (Store.ForgetKeptDecisions): a catch-up that finishes
+// undelivered leaves it all for the next one to name again.
 type CatchUp struct {
 	Generation uint64         `json:"generation"`
 	Launch     uint64         `json:"launch"`
@@ -263,6 +264,7 @@ type CatchUp struct {
 	Gate       CatchUpGate    `json:"gate"`
 	Issues     []CatchUpIssue `json:"issues"`
 	Decided    string         `json:"decided,omitempty"`
+	Kept       *KeptDecisions `json:"kept,omitempty"`
 }
 
 // CatchUpGate is the design gate as a catch-up states it: the project's policy (gates.design,
@@ -346,13 +348,19 @@ const (
 )
 
 // SpecDecision is the decision a notice of kind reports when kind is one of the three a person's
-// spec decision writes (workflow's gate.go), and whether it is. The notice executor relays those
-// three to the controller when nobody in the tree will hear them; every other kind is the
-// machinery's, which a stopped tree needs nobody to hear.
+// spec decision writes (workflow's gate.go), and whether it is. Each of the three names its own
+// DecisionKind: the notice kinds and the decisions are two vocabularies, and nothing but this
+// mapping ties them. The notice executor relays those three to the controller when nobody in the
+// tree will hear them; every other kind is the machinery's, which a stopped tree needs nobody to
+// hear.
 func SpecDecision(kind NoticeKind) (DecisionKind, bool) {
-	switch decision := DecisionKind(kind); decision {
-	case DecisionDesignApproved, DecisionDesignChangesRequested, DecisionCarriedGateOpened:
-		return decision, true
+	switch kind {
+	case "design-approved":
+		return DecisionDesignApproved, true
+	case "design-changes-requested":
+		return DecisionDesignChangesRequested, true
+	case "carried-gate-opened":
+		return DecisionCarriedGateOpened, true
 	default:
 		return "", false
 	}
@@ -387,6 +395,11 @@ type SuperviseRequest struct {
 	Tree string      `json:"tree"`
 	Role claim.Role  `json:"role"`
 	Task string      `json:"task,omitempty"`
+	// Kept is what an architect start's Task named of the decisions its root keeps
+	// (workflow.Engine.ParkedDecisionTask), which the delivery of that task forgets
+	// (Store.ForgetKeptDecisions): a start that finishes without delivering leaves them for the
+	// next start or catch-up to name again. Every other request carries none.
+	Kept *KeptDecisions `json:"kept,omitempty"`
 	// Generation is the issue generation the request serves. A request of an earlier generation
 	// finishes without acting: it must never suspend, stop, or start the next generation's worker.
 	Generation uint64 `json:"generation"`
@@ -773,6 +786,11 @@ func validateOutboxPayload(payload OutboxPayload) error {
 		if value.Decision != "" || value.Root != "" {
 			return fmt.Errorf("a %s notice carries a decision or a root; only a parked-decision controller notice does", value.Kind)
 		}
+		if catchUp := value.CatchUp; catchUp != nil && catchUp.Kept != nil {
+			if err := catchUp.Kept.validate(); err != nil {
+				return err
+			}
+		}
 	case ControllerNotice:
 		if !controllerOnlyNoticeKind(value.Kind) && !validNoticeKind(value.Kind) {
 			return fmt.Errorf("unknown controller notice kind %q", value.Kind)
@@ -805,6 +823,14 @@ func validateOutboxPayload(payload OutboxPayload) error {
 		}
 		if value.CheckLook != 0 && (value.CheckLook < 0 || value.Op != "start" || value.Role != claim.RoleImplementer || value.Phase != "") {
 			return fmt.Errorf("a supervise check look names a start of the implementer with no phase, and only a start carries one")
+		}
+		if value.Kept != nil {
+			if value.Op != "start" || value.Task == "" {
+				return fmt.Errorf("only a supervise start with a task names the decisions it kept")
+			}
+			if err := value.Kept.validate(); err != nil {
+				return err
+			}
 		}
 	case MergeQueuePublish:
 		if value.Role == "" {

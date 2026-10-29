@@ -223,9 +223,11 @@ const (
 	AnsweredByVersion Answer = "version"
 )
 
-// ParkedDecision is a person's decision on a tree nobody in it could hear, which the daemon relayed
-// to the controller (a parked-decision notice), kept until the root's next admission names it in
-// its architect's start task (workflow.Engine.ParkedDecisionTask).
+// ParkedDecision is a person's decision on a tree nobody in it could hear, which the daemon
+// relayed to the controller (a parked-decision notice) or kept for a root that waits for its slot
+// (RelayParkedDecision). It is kept until the architect's start task or catch-up that named it
+// (workflow.Engine.ParkedDecisionTask) reached that architect, and forgotten then
+// (Store.ForgetKeptDecisions).
 type ParkedDecision struct {
 	Root     string
 	Ref      string
@@ -958,14 +960,22 @@ type Store interface {
 	// already keeps keeps its newest decision: a later one, by At, replaces it, so a changes request
 	// the person has since followed with an approval of the same spec is not what the start names.
 	AddParkedDecision(ctx context.Context, tx pgx.Tx, decision ParkedDecision) error
-	// TakeParkedDecisions deletes and returns every decision root keeps, newest first, ties by ref.
-	TakeParkedDecisions(ctx context.Context, tx pgx.Tx, root string) ([]ParkedDecision, error)
+	// ParkedDecisions is every decision root keeps, newest first, ties by ref. The rows stay until
+	// the start task or catch-up that named them reached its architect (ForgetKeptDecisions), so a
+	// start that finishes without acting leaves them for the next one to name.
+	ParkedDecisions(ctx context.Context, tx pgx.Tx, root string) ([]ParkedDecision, error)
 	// KeepReadmittedApproval keeps, for root's next architect start, the spec version a person
 	// approved and the spec's latest version, which its re-admission found above the approved one
 	// before it cleared the old generation's gate; a later keep replaces it.
 	KeepReadmittedApproval(ctx context.Context, tx pgx.Tx, root string, approved, latest int) error
-	// TakeReadmittedApproval deletes and returns the pair root keeps, zeros when it keeps none.
-	TakeReadmittedApproval(ctx context.Context, tx pgx.Tx, root string) (approved, latest int, err error)
+	// ReadmittedApproval is the pair root keeps, zeros when it keeps none. It stays until the start
+	// task that named it reached its architect (ForgetKeptDecisions).
+	ReadmittedApproval(ctx context.Context, tx pgx.Tx, root string) (approved, latest int, err error)
+	// ForgetKeptDecisions deletes exactly what a delivered start task or catch-up named of what
+	// root keeps (KeptDecisions): every parked decision still standing at the reference and time it
+	// named — a newer decision on the same reference, kept since, survives — and the readmitted
+	// approval still standing at the pair of versions it named.
+	ForgetKeptDecisions(ctx context.Context, tx pgx.Tx, root string, kept KeptDecisions) error
 	// ClaimSession is the session claims records for token, "" and no error when the token holds
 	// no row. The workflow reads it for the reviewer's claim (PhaseRow.Claim) to tell the
 	// reviewer's own review from another review-App session's by the Legion footer each carries
@@ -1097,12 +1107,12 @@ type Store interface {
 	// caller that then wakes the row's lane has its issue and kind.
 	ExpediteOutbox(ctx context.Context, tx pgx.Tx, row OutboxRow, now time.Time) error
 	// DropCatchUps deletes every catch-up notice row of issue the outbox still holds, a re-held copy
-	// and a row the runner has leased included, and returns each dropped row's non-empty
-	// CatchUp.Decided, oldest first, so the fresh catch-up names it again. A leased row may be
-	// mid-publish: the runner executes it from memory, and the notice executor publishes it only
-	// while OutboxLeased still finds it, so a dropped row is delivered only when the drop lands during
-	// its publish, a duplicate the fresh catch-up follows.
-	DropCatchUps(ctx context.Context, tx pgx.Tx, issue string) ([]string, error)
+	// and a row the runner has leased included. A leased row may be mid-publish: the runner executes
+	// it from memory, and the notice executor publishes it only while OutboxLeased still finds it,
+	// so a dropped row is delivered only when the drop lands during its publish, a duplicate the
+	// fresh catch-up follows. A dropped catch-up's decisions stay kept for the fresh one to name
+	// again: only a delivered catch-up forgets them (ForgetKeptDecisions).
+	DropCatchUps(ctx context.Context, tx pgx.Tx, issue string) error
 	// DropStatusWrites deletes every Dispatch status write of issue the outbox still holds, a row
 	// the runner has leased included; one mid-attempt can still reach Dispatch, and its finish then
 	// finds nothing to delete.

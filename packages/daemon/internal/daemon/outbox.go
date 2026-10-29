@@ -652,7 +652,9 @@ func (r *outbox) message(ctx context.Context, row record.OutboxRow, payload reco
 // publish, and so does a catch-up a newer one superseded (catchUpSuperseded, read against the
 // snapshot's root and the claim as it runs now): the re-hold reads the claim from memory and
 // writes its copy outside ApplyFact's lock, so it can lose the race to a ready and commit an older
-// copy after the fresh catch-up.
+// copy after the fresh catch-up. A catch-up that publishes forgets the decisions it named
+// (forgetKept); one that finishes any other way leaves them kept, so the next catch-up names them
+// again.
 func (r *outbox) notice(ctx context.Context, row record.OutboxRow, payload record.Notice) error {
 	if r.notices == nil {
 		return errors.New("notice executor has no Envoy publisher")
@@ -705,6 +707,11 @@ func (r *outbox) notice(ctx context.Context, row record.OutboxRow, payload recor
 	var denied notify.ErrPublishDenied
 	switch {
 	case published == nil:
+		// The architect has the catch-up, so the decisions it named are told; a row that finishes
+		// any other way leaves them kept for the next catch-up or start to name again.
+		if payload.CatchUp != nil {
+			return r.forgetKept(ctx, tree.root.Key, payload.CatchUp.Kept)
+		}
 		return nil
 	case errors.As(published, &notDelivered) && notDelivered.Reason == notify.ReasonReceiptTimeout:
 		// The notice went out under the key of the row it copies, or of this row (Notice.Published).
@@ -983,6 +990,11 @@ func (r *outbox) supervise(ctx context.Context, row record.OutboxRow, payload re
 			if err := machine.Handle(ctx, supervise.RequestDeliver{Claim: token, Task: payload.Task, Phase: payload.Phase, Generation: payload.Generation,
 				ID: fmt.Sprintf("%s%d", outboxDeliveryPrefix, row.ID)}); err != nil {
 				return fmt.Errorf("deliver to claim %s: %w", token, err)
+			}
+			// The claim has the task, so the decisions it named are told. Every branch above that
+			// finishes without delivering leaves them kept for the next start or catch-up.
+			if err := r.forgetKept(ctx, issue.Tree, payload.Kept); err != nil {
+				return err
 			}
 		}
 		return nil

@@ -22,7 +22,16 @@ interface Verdict {
     issue: string;
     root: string;
   }[];
-  unrelayed: { time: string; row: number; key: string; kind: string; issue: string; ref: string }[];
+  kept: { time: string; row: number; key: string; kind: string; issue: string; root: string }[];
+  unrelayed: {
+    time: string;
+    msg: string;
+    row: number;
+    key: string;
+    kind: string;
+    issue: string;
+    ref: string | null;
+  }[];
   unmatched: { time: string; row: number; kind: string; issue: string }[];
 }
 
@@ -31,7 +40,9 @@ const ended = "outbox notice finished undelivered: its architect will not hold i
 const noArchitect = "outbox notice finished undelivered: it has no architect";
 const sentText = "outbox parked decision sent to the controller";
 const alreadySent = "outbox parked decision already sent to the controller";
+const keptText = "outbox parked decision kept for its root's start, which waits for its slot";
 const notRelayed = "outbox parked decision not relayed: it names no person";
+const notParked = "outbox parked decision not relayed: its root is not parked";
 
 type Line = Record<string, unknown>;
 const at = (seconds: number) =>
@@ -81,6 +92,7 @@ describe("parked-decision-verdict.jq", () => {
         root: "ACME-110",
       },
     ]);
+    expect(got.kept).toEqual([]);
     expect(got.unrelayed).toEqual([]);
     expect(got.unmatched).toEqual([]);
   });
@@ -92,7 +104,7 @@ describe("parked-decision-verdict.jq", () => {
     ]);
   });
 
-  test("an already-sent line pairs, and a not-relayed line pairs and is listed with its key and ref", () => {
+  test("an already-sent line pairs, and each not-relayed line pairs and is listed with its key, reason and ref", () => {
     const got = verdict([
       undelivered(1, 7, "design-approved"),
       relay(2, alreadySent, 7),
@@ -100,12 +112,15 @@ describe("parked-decision-verdict.jq", () => {
       relay(4, notRelayed, 8, { kind: "design-changes-requested", ref: "" }),
       undelivered(5, 9, "carried-gate-opened", ended),
       relay(6, notRelayed, 9, { kind: "carried-gate-opened", ref: "dispatch://ACME-110/spec" }),
+      undelivered(7, 10, "design-approved", ended),
+      relay(8, notParked, 10),
     ]);
     expect(got.unmatched).toEqual([]);
     expect(got.sent.map((line) => [line.msg, line.row])).toEqual([[alreadySent, 7]]);
     expect(got.unrelayed).toEqual([
       {
         time: at(4),
+        msg: notRelayed,
         row: 8,
         key: "outbox:8",
         kind: "design-changes-requested",
@@ -114,13 +129,40 @@ describe("parked-decision-verdict.jq", () => {
       },
       {
         time: at(6),
+        msg: notRelayed,
         row: 9,
         key: "outbox:9",
         kind: "carried-gate-opened",
         issue: "ACME-110",
         ref: "dispatch://ACME-110/spec",
       },
+      {
+        time: at(8),
+        msg: notParked,
+        row: 10,
+        key: "outbox:10",
+        kind: "design-approved",
+        issue: "ACME-110",
+        ref: null,
+      },
     ]);
+  });
+
+  test("a decision kept for a root that waits for its slot pairs with its undelivered row", () => {
+    const got = verdict([undelivered(1, 7, "design-approved", ended), relay(2, keptText, 7)]);
+    expect(got.kept).toEqual([
+      {
+        time: at(2),
+        row: 7,
+        key: "outbox:7",
+        kind: "design-approved",
+        issue: "ACME-110",
+        root: "ACME-110",
+      },
+    ]);
+    expect(got.sent).toEqual([]);
+    expect(got.unrelayed).toEqual([]);
+    expect(got.unmatched).toEqual([]);
   });
 
   test("a notice that is no spec decision, and a row with no architect, are not counted", () => {
@@ -155,9 +197,17 @@ describe("the texts the verdict counts are the daemon's own", () => {
     expect(outbox).toContain(`"${prefix}`);
     expect(jq).toContain(JSON.stringify(prefix));
     const parked = readFileSync(join(daemon, "parked_decision.go"), "utf8");
-    for (const text of [sentText, alreadySent, notRelayed]) {
+    for (const text of [sentText, alreadySent, keptText, notRelayed, notParked]) {
       expect(parked).toContain(JSON.stringify(text));
+    }
+    for (const text of [sentText, alreadySent, keptText]) {
       expect(jq).toContain(JSON.stringify(text));
+    }
+    // Both not-relayed lines are counted by the one prefix they share.
+    const unrelayedPrefix = "outbox parked decision not relayed:";
+    expect(jq).toContain(JSON.stringify(unrelayedPrefix));
+    for (const text of [notRelayed, notParked]) {
+      expect(text.startsWith(unrelayedPrefix)).toBe(true);
     }
   });
 });
