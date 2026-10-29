@@ -2,9 +2,9 @@
   "schemaVersion": 1,
   "phase": "implement",
   "issue": "INFRA-715",
-  "completed": "2026-10-29T14:35:00Z",
+  "completed": "2026-10-29T15:20:00Z",
   "pullRequest": "https://github.com/sjawhar/legion/pull/2480",
-  "codeHead": "44036ea5ca4c4c9b7621cba5892d87a0c2b7edff",
+  "codeHead": "bf2118caebaa3f7b034d74dda00d5273d6c601f7",
   "proof": [
     {
       "criterion": "A2: on the cluster copy, an hour at ten times grows Dispatch's memory by no more than the documents' stored growth plus a stated constant (1 GiB); the curve is quoted against the 2026-10-28 baseline",
@@ -45,6 +45,14 @@
       "observed": "--- PASS: the upload answers 400 {\"code\":\"INVALID_MARKDOWN\"} naming the open ask anchored on \"run the tests\", the mark refused in code_block and the two ways out, with no ERROR log; the spec text is unchanged. The docs suite (895 s) and api Anchor|Upload|Artifact|Suggestion|Ask tests (282 s) pass at the head.",
       "headSha": "44036ea5ca4c4c9b7621cba5892d87a0c2b7edff",
       "negativeControl": "The same test with the previous mutation.go (0164ae30): status=500 body={\"code\":\"DOC_SCHEMA\",\"error\":\"replace live document: document is outside the Proof schema: the write left it outside: ...\"} and ERROR dispatch: API document outside Proof schema; --- FAIL."
+    },
+    {
+      "criterion": "Review round 2: only the mark-not-allowed refusal is answered 400, through a pmdoc sentinel, and every other re-anchor error stays a 500; a quote moved into front matter names front matter; no dead kind fallback",
+      "surface": "the real docs.Service on Postgres 16 (ReplaceText over open anchors) and the pmdoc mark writer over a document written by pmdoc.Update",
+      "command": "cd packages/envoy && DISPATCH_TEST_DATABASE_URL=postgres://postgres@127.0.0.1:55432/postgres go test ./internal/dispatch/docs/ -run 'TestAnUploadMovingAnAnchorsQuoteWhereItsMarkIsNotAllowedIsRefused|TestARefusedReanchorIsTheCallersOnlyWhenTheMarkIsNotAllowed' -count=1 -v; go test ./internal/dispatch/pmdoc/ -run TestAMarkNotAllowedWhereItsTextStandsIsTheOnlyErrMarkNotAllowed -count=1 -v",
+      "observed": "PASS. An ask moved into a code block and a comment moved into front matter are both ErrInvalidMarkdown, neither ErrDocSchema nor ErrDocOutsideSchema. The comment case reads ... would land in the front matter, where its mark is not allowed ... and the room keeps its tree. An unknown mark type, an empty range, a fragment read error and a mark type no anchor carries are not ErrMarkNotAllowed and give refusedReanchor nil, so they stay a 500. The docs suite (882 s), the pmdoc suite without its timing tests (131 s) and the api upload and anchor tests (289 s) pass.",
+      "headSha": "bf2118caebaa3f7b034d74dda00d5273d6c601f7",
+      "negativeControl": "At 44036ea5 (the reviewer's deep-review reproduction): the same front-matter upload answered 400 with ... mark \"proofComment\" is not allowed in ); move that text out of that block ..., naming no block. Every other re-anchor error was also answered 400 as the caller's markdown, without an ERROR log."
     }
   ],
   "filesChanged": [
@@ -60,7 +68,10 @@
     "packages/envoy/internal/dispatch/docs/mutation.go: refusedReanchor makes a refused scratch re-anchor ErrInvalidMarkdown",
     "packages/envoy/internal/dispatch/api/anchors_test.go: the route-level 400 test",
     "packages/envoy/internal/dispatch/docs/upload_anchors_test.go: requires ErrInvalidMarkdown, neither ErrDocSchema nor ErrDocOutsideSchema",
-    "packages/envoy/AGENTS.md and packages/envoy/.changes/unreleased/INFRA-715-upload-ask-into-code-block.yaml"
+    "packages/envoy/AGENTS.md and packages/envoy/.changes/unreleased/INFRA-715-upload-ask-into-code-block.yaml",
+    "packages/envoy/internal/dispatch/pmdoc/find.go: ErrMarkNotAllowed and MarkNotAllowedError",
+    "packages/envoy/internal/dispatch/pmdoc/find_test.go: the class test",
+    "packages/envoy/cmd/dispatch/README.md: the 400 INVALID_MARKDOWN row"
   ],
   "trickyParts": [
     "Identity rule: an id is carried only to an unchanged untyped block at its paired position; moved, swapped, retyped, edited blocks, their ancestors, and typed blocks naming no id get fresh ids.",
@@ -71,10 +82,11 @@
     "The cluster hour ran on the INFRA-598 harness at 4fa0bee2 (the commit of the 2026-10-28 run), because the branch tip's cluster.sh needs a stored-order source this head does not carry.",
     "Full suites at the head: pmdoc's three linearity timing tests fail in this pod's 10 ms clock identically at base; other failures in internal/dispatch are environmental (no Docker, C-locale Postgres, census URL, NATS timing) and do not import the changed packages.",
     "Round 2 answers the tester's two failures: the PR body's Outcome and Change now say block references survive an upload (readers: GET /api/v1/artifacts/{id}/blocks, dispatch read --ref, the page's block links), and the browser test above. Also per INFRA-514's architect: the body quotes the 2026-10-28 record (12.1 GiB at minute 5, 10.1 GiB/h, 95% interval 9.0-11.2) and its collapse, splits k into 19 (working set), 8.0 (live heap) and about 527 MB of heap not returned to the OS, and both cluster tarballs were uploaded again without the copy's dead secrets (version 2).",
-    "Round 3 answers the reviewer's two threads (PRRT_kwDORFy7ds6xk5xU, PRRT_kwDORFy7ds6xk5xa), both replied to and resolved at 44036ea5; the PR body adds a Contract change census (500 DOC_SCHEMA -> 400 INVALID_MARKDOWN on the three upload routes; block ids kept)."
+    "Round 3 answers the reviewer's two threads (PRRT_kwDORFy7ds6xk5xU, PRRT_kwDORFy7ds6xk5xa), both replied to and resolved at 44036ea5; the PR body adds a Contract change census (500 DOC_SCHEMA -> 400 INVALID_MARKDOWN on the three upload routes; block ids kept).",
+    "Round 4 answers review round 2's three threads (PRRT_kwDORFy7ds6xmcRe, PRRT_kwDORFy7ds6xmcRu, PRRT_kwDORFy7ds6xmcR3), each replied to and resolved at bf2118ca. Front matter is named through MarkNotAllowedError.Place, and the location walk is unchanged: naming front matter there broke the frozen-walk equivalence test TestYTextRangesMatchesFrozenOnDocuments."
   ],
   "openQuestions": [
     "The literal bound holds for an hour because the 1 GiB constant absorbs comment growth; the measured proportional factor is k ~ 19 (working-set growth per stored byte). INFRA-179's room byte budget caps the unbounded case."
   ],
-  "round": 3
+  "round": 4
 }
