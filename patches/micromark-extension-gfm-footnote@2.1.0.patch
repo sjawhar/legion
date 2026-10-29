@@ -1,0 +1,165 @@
+diff --git a/dev/lib/syntax.js b/dev/lib/syntax.js
+index caf14864b88a30af515a578a9536444d54c8a9f8..a1b89aed10b028e273dac2ddb0620c92590b0c24 100644
+--- a/dev/lib/syntax.js
++++ b/dev/lib/syntax.js
+@@ -57,29 +57,62 @@ export function gfmFootnote() {
+  */
+ function tokenizePotentialGfmFootnoteCall(effects, ok, nok) {
+   const self = this
+-  let index = self.events.length
++  const entryLength = self.events.length
++  let index = entryLength
+   const defined = self.parser.gfmFootnotes || (self.parser.gfmFootnotes = [])
+   /** @type {Token} */
+   let labelStart
+ 
+-  // Find an opening.
+-  while (index--) {
+-    const token = self.events[index][1]
++  // No footnote is defined, so `start` finds no call whatever the opening is. Every `]` in a
++  // document would otherwise walk back over every `]` before it.
++  //
++  // A footnote definition is a flow construct, so they are all known by the time text is
++  // tokenized.
++  if (defined.length > 0) {
++    // Find an opening.
++    //
++    // The scan stops where the scan of the `]` before this one stopped: it looked at the events
++    // from there up, found no opening there, and an event is not changed afterwards. It is used
++    // again only while the event it stopped on is the one it was, as resolvers rewrite events.
++    const stop = self._gfmFootnoteCallStop
++    const floor =
++      stop !== undefined &&
++      stop.seen <= index &&
++      self.events[stop.index] === stop.event
++        ? stop.seen
++        : 0
++
++    while (index-- > floor) {
++      const token = self.events[index][1]
++
++      if (token.type === types.labelImage) {
++        labelStart = token
++        break
++      }
+ 
+-    if (token.type === types.labelImage) {
+-      labelStart = token
+-      break
++      // Exit if we’ve walked far enough.
++      if (
++        token.type === 'gfmFootnoteCall' ||
++        token.type === types.labelLink ||
++        token.type === types.label ||
++        token.type === types.image ||
++        token.type === types.link
++      ) {
++        break
++      }
+     }
+ 
+-    // Exit if we’ve walked far enough.
+-    if (
+-      token.type === 'gfmFootnoteCall' ||
+-      token.type === types.labelLink ||
+-      token.type === types.label ||
+-      token.type === types.image ||
+-      token.type === types.link
+-    ) {
+-      break
++    if (floor > 0 && index < floor) {
++      // Nothing here: whatever the earlier scan stopped on holds for this `]` too.
++      index = stop.index
++      labelStart = stop.labelStart
++    }
++
++    self._gfmFootnoteCallStop = {
++      seen: entryLength,
++      index,
++      event: self.events[index],
++      labelStart
+     }
+   }
+ 
+@@ -113,6 +146,8 @@ function tokenizePotentialGfmFootnoteCall(effects, ok, nok) {
+ // To do: remove after micromark update.
+ /** @type {Resolver} */
+ function resolveToPotentialGfmFootnoteCall(events, context) {
++  // The events from the opening up are rewritten: where a scan stopped no longer holds.
++  context._gfmFootnoteCallStop = undefined
+   let index = events.length
+   /** @type {Token | undefined} */
+   let labelStart
+diff --git a/lib/syntax.js b/lib/syntax.js
+index 5a8b1af5ea41c63aa4185d5b0afe143a894c938b..b028549805512207c1204a645260179c165d672c 100644
+--- a/lib/syntax.js
++++ b/lib/syntax.js
+@@ -59,23 +59,48 @@ export function gfmFootnote() {
+  */
+ function tokenizePotentialGfmFootnoteCall(effects, ok, nok) {
+   const self = this;
+-  let index = self.events.length;
++  const entryLength = self.events.length;
++  let index = entryLength;
+   const defined = self.parser.gfmFootnotes || (self.parser.gfmFootnotes = []);
+   /** @type {Token} */
+   let labelStart;
+ 
+-  // Find an opening.
+-  while (index--) {
+-    const token = self.events[index][1];
+-    if (token.type === "labelImage") {
+-      labelStart = token;
+-      break;
+-    }
++  // No footnote is defined, so `start` finds no call whatever the opening is. Every `]` in a
++  // document would otherwise walk back over every `]` before it.
++  //
++  // A footnote definition is a flow construct, so they are all known by the time text is
++  // tokenized.
++  if (defined.length > 0) {
++    // Find an opening.
++    //
++    // The scan stops where the scan of the `]` before this one stopped: it looked at the events
++    // from there up, found no opening there, and an event is not changed afterwards. It is used
++    // again only while the event it stopped on is the one it was, as resolvers rewrite events.
++    const stop = self._gfmFootnoteCallStop;
++    const floor = stop !== undefined && stop.seen <= index && self.events[stop.index] === stop.event ? stop.seen : 0;
++    while (index-- > floor) {
++      const token = self.events[index][1];
++      if (token.type === "labelImage") {
++        labelStart = token;
++        break;
++      }
+ 
+-    // Exit if we’ve walked far enough.
+-    if (token.type === 'gfmFootnoteCall' || token.type === "labelLink" || token.type === "label" || token.type === "image" || token.type === "link") {
+-      break;
++      // Exit if we’ve walked far enough.
++      if (token.type === 'gfmFootnoteCall' || token.type === "labelLink" || token.type === "label" || token.type === "image" || token.type === "link") {
++        break;
++      }
++    }
++    if (floor > 0 && index < floor) {
++      // Nothing here: whatever the earlier scan stopped on holds for this `]` too.
++      index = stop.index;
++      labelStart = stop.labelStart;
+     }
++    self._gfmFootnoteCallStop = {
++      seen: entryLength,
++      index,
++      event: self.events[index],
++      labelStart
++    };
+   }
+   return start;
+ 
+@@ -103,6 +128,8 @@ function tokenizePotentialGfmFootnoteCall(effects, ok, nok) {
+ // To do: remove after micromark update.
+ /** @type {Resolver} */
+ function resolveToPotentialGfmFootnoteCall(events, context) {
++  // The events from the opening up are rewritten: where a scan stopped no longer holds.
++  context._gfmFootnoteCallStop = undefined;
+   let index = events.length;
+   /** @type {Token | undefined} */
+   let labelStart;
