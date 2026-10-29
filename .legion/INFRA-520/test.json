@@ -2,18 +2,26 @@
   "schemaVersion": 1,
   "phase": "test",
   "issue": "INFRA-520",
-  "completed": "2026-10-28T21:30:00Z",
-  "round": 12,
-  "headTested": "f527b883e2aa41ed0b45425431ba1e239fb9f43f (code head bb1a700af2f3, merge of main c24ea568)",
-  "previousRound": "Review round 4 (review.json at 48b844e1) asked for one thing: #2316 was CONFLICTING with main af1ff09c. bb1a700a merges main through c24ea568 and carries #2331, #2323 and #2369 into ci.yaml. The fingerprint changed (two new jobs), so this was a full round over what the merge changed. The code since round 11 is otherwise the same: the merge touches ci.yaml, ci_job_reads.py, a 3-line change to ci_filter_coverage.py, docs-pages.yaml (one line) and two docs.",
-  "ci": "CI run 40768558349 at bb1a700a (created 21:02:31Z) was queued at 21:20Z. No CI run of a #2316 head has completed. Read as queued; I did not wait for it.",
+  "completed": "2026-10-29T01:20:00Z",
+  "round": 13,
+  "headTested": "a39e93dc852f61d7cc8472333d232b499d280dd4 (code head bb1a700af2f3; no code changed since round 12)",
+  "previousRound": "Round 13 is the acceptance task: watch #2316's own ci.yaml run at code head bb1a700a to completion. Pass only if ci-ok is green with every selected job succeeded, a failure that is main's known red being recorded as main's. Record ci-filters' result. No code changed.",
+  "ci": "CI run 40768558349 (pull_request, bb1a700a, created 2026-10-28T21:02:31Z) completed at 2026-10-29T01:06:29Z with conclusion failure. changes succeeded and selected every job. 29 of the 30 selected jobs succeeded: lint, typecheck, test, docs, contracts, envoy-plugin, envoy-client, pi-shared, pi-envoy, pi-legion, claude-envoy, envoy-go, envoy-go-race, envoy-infra-go, dispatch-memory, dispatch-multiprocess, broker-multiprocess, envoy-smoke, envoy-e2e-local, envoy-session-stall, dispatch-browser-multiprocess, ci-filters, worker-image / build, and the Daemon, Dispatch and Broker Go suites on Postgres 16. worker-image / attest was skipped, as on every pull request. The one failure is dispatch. ci-ok (check run 123182985083) failed with the single error 'dispatch ended failure, but changes selected it (needs.changes.outputs.dispatch is true) \u2026'.",
   "implementerProof": {
     "verdict": "verified",
-    "how": "GitHub reports #2316 MERGEABLE (BLOCKED on checks and review), and main has no commit after c24ea568. A subagent compared each hunk of main's c24ea568 (#2369), af1ff09c (#2331, with its release.yaml change) and 8b6ea377 (#2323) on envoy-and-contracts.yaml with ci.yaml at bb1a700a. Every hunk is ported or moot, and nothing is missing. The ported items: the two loadtest steps in envoy-go; patches/** through bun_install and the other filters; the envoy_session_stall output, filter and job (in ci-ok needs and SELECTED_BY); release.yaml's --patch-path patches/; dispatch_server's dashboard and processes; the check:asset-sizes step; the dispatch-browser-multiprocess job with a filter of its own, in ci-ok needs and SELECTED_BY. PathsFilter finds no file main's new filters match that the branch's filter of the same job misses, except where main matched it only through its broad envoy filter for a job that does not read it. At f527b883: check-ci-filters.test.sh 131 passed, 0 failed; check-ci-filters.sh exit 0 with 26 gates (dispatch-browser-multiprocess 1915 files, envoy-session-stall 1173, 0 uncovered) and docs-pages' paths equal to the docs filter; check-image-trigger-paths.sh passes (5 image builds); check-release-credentials.sh passes (7 credentialed and 10 build jobs across 5 workflows); ci-ok.test.sh 42 passed; actionlint v1.7.7 on ci.yaml exit 0."
+    "how": "Round 12's verification stands at the same code head (bb1a700a): every checker test, the drift check's 26 gates, and the port of main's #2369, #2331 and #2323. This round adds the router's own run at that head, read through the jobs, check-run and job-log APIs."
   },
   "failures": [],
   "failed": 0,
   "proof": [
+    {
+      "criterion": "The router's own verdict on a real head: ci-ok reports, and every selected job but main's known reds succeeds",
+      "surface": "GitHub Actions on sjawhar/legion#2316, CI run 40768558349 at code head bb1a700a",
+      "command": "https://github.com/sjawhar/legion/actions/runs/40768558349, watched to completion; jobs API; ci-ok check run 123182985083's annotations and log; ci-filters job 123128575345's log; dispatch job 123128575617's log",
+      "observed": "Completed at 01:06:29Z. changes success, every filter true. 29 of 30 selected jobs succeeded, ci-filters among them (26 gates, 0 uncovered). ci-ok's log prints each job's result and why it was selected. It ends with the one error naming dispatch, which failed on 5 Playwright tests: close-withdraws-asks.e2e.ts:126 (chromium) and mermaid.e2e.ts:194 (chromium, iphone, webkit, firefox), 1210 passed. Both are main's reds (see mainReds).",
+      "headSha": "bb1a700af2f3",
+      "negativeControl": "ci-ok's own verdict is the control: it failed this run because a selected job failed, with 'dispatch ended failure, but changes selected it'. A green ci-ok here would have meant the condense step missed a failure"
+    },
     {
       "criterion": "Filter drift, conservative rule (round-3 review): a step script bash would read differently, and an env name go can reach, fall to everything; allowed test configuration does not",
       "surface": ".github/scripts/check-ci-filters.sh on the repository tree, the command ci.yaml's ci-filters job runs",
@@ -64,13 +72,14 @@
     }
   ],
   "notProven": [
-    "No CI run of a #2316 head has completed: run 40768558349 at bb1a700a is queued.",
+    "ci-ok has not yet reported green at any #2316 head, because main's two browser reds fail the dispatch job. A green ci-ok needs main's fixes for close-withdraws-asks.e2e.ts:126 and mermaid.e2e.ts:194 to merge, then a run at a head that carries them.",
     "docs-pages.yaml runs only on a push to main. Its first run, queue order and deploy are the production check's.",
-    "By the architect's decision (comment bafbc258), the check does not read environment writes made inside local actions or repository scripts (check-ci-filters.sh:84-88).",
-    "The Runs of an exact script entry are kept by hand. I read the three against their scripts and found them complete."
+    "By the architect's decision (comment bafbc258), the check does not read environment writes made inside local actions or repository scripts (check-ci-filters.sh:84-88)."
   ],
-  "notes": [
-    "Unstated departure from main, for the reviewer and architect, not counted as a failure: main's dispatch-browser-multiprocess job (8b6ea377) runs Postgres pgvector@sha256:7b822b0a\u2026 (the Postgres 16 image, otherwise used only on the *-postgres-16 jobs). ci.yaml:2081 runs it on 2358fcba\u2026 (Postgres 18). #2323 merged at 19:56Z, after #2364 moved CI to Postgres 18 at 13:59Z, with no comment on the image. So main's 16 there reads as a stale digest, and 18 matches #2364's stated intent, but neither the merge commit nor the implement handoff states the change.",
-    "Both new jobs follow the branch's cache policy (setup-go cache: false, go-envoy restore, save only on push), as ci.yaml:20-30 states."
+  "ciFilters": "ci-filters (job 123128575345) succeeded in 29 s: 'every ci.yaml filter matches every file its job reads (26 gates), and every PUSH_WORKFLOWS workflow's on.push.paths equals its filter (1)'.",
+  "mainReds": [
+    "dispatch job (123128575617), step 'Browser-test dispatch dashboard': [chromium] e2e/close-withdraws-asks.e2e.ts:126 'a person's Close withdraws the issue's asks, an earlier version keeps its open block, and Reopen brings the asks back': expect(locator).toHaveCount: Expected 2, Received 0 at close-withdraws-asks.e2e.ts:161. This is on the controller's list of main's known reds, relayed by the architect at 00:56Z.",
+    "dispatch job, same step: e2e/mermaid.e2e.ts:194 'a diagram too large to draw in time shows the reason, and the page keeps responding @phone' in chromium, iphone, webkit and firefox: expected text 'Unable to render Mermaid diagram: it did not finish within 5 seconds', element(s) not found, at mermaid.e2e.ts:232. This test is NOT on the architect's list, but it is main's red. It fails in every main run of the dispatch job I read: envoy-and-contracts.yaml runs 40741493684 (300ff910, job 123098590202, chromium/iphone/webkit/firefox), 40738509801 (20ba65a6), 40731052796 (53f39ba0), 40730984263 (25eba0b1), 40726315452 (e82b013b), 40721990951 (8b4a862b) and 40712556666 (690c0136). Every one of those has 'mermaid.e2e.ts:194' among its failures (2 or 4 projects). This pull request changes no packages/dispatch code (its packages/envoy/cmd/dispatch change is AGENTS.md only).",
+    "pmdoc: neither compile error shows. envoy-go and envoy-go-race, which compile pmdoc's tests, succeeded at this head, which predates #2448 and #2403."
   ]
 }
