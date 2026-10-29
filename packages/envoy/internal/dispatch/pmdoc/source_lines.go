@@ -223,15 +223,32 @@ func (l sourceLines) blanksEnding(next ast.Node, past, blank func([]byte) bool) 
 
 // blanksEndingBefore is blanksEnding for a container ending before line.
 func (l sourceLines) blanksEndingBefore(line int, past, blank func([]byte) bool) int {
+	count := 0
+	for line = l.lastBefore(line, past); line >= 0 && blank(l.text(line)); line-- {
+		count++
+	}
+	return count
+}
+
+// lastBefore is the last line before line that past(line) does not hold, past the lines it holds
+// right before line, or -1.
+func (l sourceLines) lastBefore(line int, past func([]byte) bool) int {
 	line--
 	for line >= 0 && past(l.text(line)) {
 		line--
 	}
-	count := 0
-	for ; line >= 0 && blank(l.text(line)); line-- {
-		count++
+	return line
+}
+
+// holdsOnlyQuoteMarkers reports whether line opens with depth quote markers, each with the space
+// after it, and holds nothing past them, not even a space or a tab: what is left of the line for
+// the blocks inside those quotes is its line ending alone.
+func (l sourceLines) holdsOnlyQuoteMarkers(line, depth int) bool {
+	if line < 0 {
+		return false
 	}
-	return count
+	past := l.pastQuoteMarkers(l.starts[line], depth)
+	return leadingQuoteMarkers(l.text(line)) == depth && (past == len(l.source) || l.source[past] == '\n')
 }
 
 // blanksThroughOuterQuotes is how many blank lines come right before position's line in depth

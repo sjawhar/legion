@@ -318,7 +318,7 @@ func (r *renderer) block(n *Node, prefix string) {
 		r.writeSyntax("> ")
 		r.enter(n, prefix+"> ")
 		r.blocksNoTrailing(n.Children, prefix+"> ")
-		r.blanksEndingQuotedList(n.Children, prefix+"> ", false)
+		r.blanksEndingQuotedList(n.Children, prefix+"> ", r.quoteEndsAtFence())
 		r.leave()
 	case "bullet_list", "ordered_list":
 		r.list(n, prefix)

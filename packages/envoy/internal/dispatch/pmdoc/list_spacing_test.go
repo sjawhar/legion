@@ -129,24 +129,6 @@ func TestBrowserListSpacingRefusesWhatItCannotRead(t *testing.T) {
 			name:    "a blank line at the end of a quote holding a footnote definition, after a list",
 			refused: "x[^1]\n\n> [^1]: t\n>\n>     - a\n>\n\nAfter.\n",
 		},
-		{
-			// The typed block's content is a document of its own to the browser editor's parser,
-			// and the quote inside it ends where that content does.
-			name:     "a blank line after a list in a quote in a typed block in a quote",
-			refused:  "- > q\n\n> :::callout{#c1 kind=\"note\" title=\"T\"}\n> > - a\n> >\n>\n> :::\n",
-			readable: "> :::callout{#c1 kind=\"note\" title=\"T\"}\n> > - a\n> >\n>\n> :::\n",
-		},
-		{
-			name:     "a blank line after a list in a typed block in a quote in a typed block",
-			refused:  "- > q\n\n:::callout{#c1 kind=\"note\" title=\"T\"}\n> :::callout{#c2 kind=\"note\" title=\"T\"}\n> - a\n>\n>\n> :::\n:::\n",
-			readable: ":::callout{#c1 kind=\"note\" title=\"T\"}\n> :::callout{#c2 kind=\"note\" title=\"T\"}\n> - a\n>\n>\n> :::\n:::\n",
-		},
-		{
-			// The list's quote stands in an item of a list in the typed block, which stands in a
-			// quote; that item opening with a quote is itself a shape the browser editor alone reads.
-			name:    "a blank line after a list in a quote in a list item in a typed block in a quote",
-			refused: "> :::callout{#c1 kind=\"note\" title=\"T\"}\n> 1. > 1.\n>    >\n>\n> :::\n",
-		},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			if _, err := Parse(test.refused); !errors.Is(err, ErrSchema) {
@@ -157,6 +139,113 @@ func TestBrowserListSpacingRefusesWhatItCannotRead(t *testing.T) {
 			}
 			if _, err := Parse(test.readable); err != nil {
 				t.Fatalf("Parse(%q): %v", test.readable, err)
+			}
+		})
+	}
+}
+
+// A list in a quote is spread by where the browser editor's parser puts the list's exit event and
+// how many line endings it crosses walking back from there: an exit after a quote marker leaves
+// the blank line's ending and the item's last line ending behind it, so one blank line spreads the
+// list, and an exit at the start of a line needs two. Each document below carries the spread that
+// parser was measured reading for it (PR #2507), and the list under test is each document's first.
+func TestQuotedListsAreSpreadWhereTheBrowserEditorsExitLands(t *testing.T) {
+	for _, test := range []struct {
+		name     string
+		markdown string
+		spread   bool
+	}{
+		{
+			// The list's quote ends where the typed block's content starts on the line "> a", past
+			// the marker of the quote around the typed block, so one blank line spreads the list.
+			name:     "a list in a quote in a typed block in a quote, then a blank line and a line of the typed block",
+			markdown: "> :::callout{}\n> > - x\n> >\n> a\n",
+			spread:   true,
+		},
+		{
+			name:     "the same, the list's quote three deep and no space after the markers",
+			markdown: ">:::callout{}\n>>>- x\n>>>\n>a\n",
+			spread:   true,
+		},
+		{
+			// The typed block's fence is no line of its content, so the list ends before it and
+			// one blank line only ends the list's quote.
+			name:     "the same, one blank line before the typed block's fence",
+			markdown: "> :::callout{}\n> > - x\n> >\n> :::\n",
+			spread:   false,
+		},
+		{
+			name:     "the same, two blank lines before the typed block's fence",
+			markdown: "> :::callout{}\n> > - x\n> >\n> >\n> :::\n",
+			spread:   true,
+		},
+		{
+			// The quote the item ends in holds the first blank line's ending, so the list needs
+			// one more.
+			name:     "the same, one blank line after an item ending in a quote",
+			markdown: "> :::callout{}\n> > - x\n> >   > q\n> >\n> a\n",
+			spread:   false,
+		},
+		{
+			name:     "the same, two blank lines after an item ending in a quote",
+			markdown: "> :::callout{}\n> > - x\n> >   > q\n> >\n> >\n> a\n",
+			spread:   true,
+		},
+		{
+			// A footnote definition opening in the quote around the list's ends the list past that
+			// quote's marker on its own line, so one blank line spreads it.
+			name:     "a blank line, then a footnote definition opening in the quote around the list's",
+			markdown: "> > - a\n> >\n> [^f]: b\n",
+			spread:   true,
+		},
+		{
+			name:     "a blank line, then a list opening in the quote around the list's",
+			markdown: "> > - a\n> >\n> - b\n",
+			spread:   true,
+		},
+		{
+			// Text opens no container, so the list ends at the start of its line and two blank
+			// lines are needed.
+			name:     "a blank line, then text in the quote around the list's",
+			markdown: "> > - a\n> >\n> a\n",
+			spread:   false,
+		},
+		{
+			name:     "a blank line of the quote around the list's, then a list opening there",
+			markdown: "> > - a\n> >\n>\n> - b\n",
+			spread:   false,
+		},
+		{
+			// A line holding a space past the quote's marker is a line of the typed block no fence
+			// closes, and ends the list on it, so two blank lines spread the list.
+			name:     "a typed block in a quote no fence closes, ending in a line of spaces past the quote's marker",
+			markdown: "> :::callout{}\n> - a\n>\n>   \n",
+			spread:   true,
+		},
+		{
+			// A line holding nothing past the marker is no line of the typed block, which ends
+			// before it, so a third blank line is needed.
+			name:     "the same, ending in a line holding nothing past the quote's marker",
+			markdown: "> :::callout{}\n> - a\n>\n> \n",
+			spread:   false,
+		},
+		{
+			name:     "the same, with a third blank line",
+			markdown: "> :::callout{}\n> - a\n>\n>\n> \n",
+			spread:   true,
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			doc, err := ParseForWrite(test.markdown, nil)
+			if err != nil {
+				t.Fatalf("ParseForWrite(%q): %v", test.markdown, err)
+			}
+			list := firstNodeOfType(doc, "bullet_list")
+			if list == nil {
+				t.Fatalf("ParseForWrite(%q) read no list", test.markdown)
+			}
+			if spread, _ := list.Attrs["spread"].(bool); spread != test.spread {
+				t.Errorf("ParseForWrite(%q) reads its list spread = %v, want %v, as the browser editor's parser reads it", test.markdown, spread, test.spread)
 			}
 		})
 	}
