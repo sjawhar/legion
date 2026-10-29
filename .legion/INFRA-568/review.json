@@ -1,0 +1,24 @@
+{
+  "schemaVersion": 1,
+  "phase": "review",
+  "issue": "INFRA-568",
+  "completed": "2026-10-29T00:22:48Z",
+  "decision": "approved",
+  "round": 10,
+  "reviewedCodeHead": "1d89163d5f616f3a593ee5fa566302dea37ca474",
+  "critical": 0,
+  "important": 0,
+  "minor": 0,
+  "keyFindings": [],
+  "verified": {
+    "fingerprint": "Last review commit_id 7f6965f6: a0b437d3...; code head 1d89163d: 1b7f7441..., changed. Narrowed round; thermonuclear pair run.",
+    "scope": "Since 7f6965f6: retro's five docs/solutions/*-pr2397.md and its removal of .legion/INFRA-568/ (ac606b0d, 8e58845b); merge of main bb9fe49c (e64224e5); removal of a leftover jj conflict-marker line from cmd/dispatch/README.md (1d89163d).",
+    "merge": "This branch's migrations are now 0137_related_checks and 0138_issue_embedding_spec, after main's 0136_dashboard_assets, with no gap, collision or stale reference. registeredRoutes is 145 (main's 142 plus the branch's 3). envoy-client.md keeps both sides. No conflict marker is left in the tree. dispatchConnectionsPerPod 87 still equals store.ConnectionsPerProcess, since main added no lease.",
+    "tests": "In a scratch copy, go vet ./internal/dispatch/... and ./cmd/dispatch/ passed, and so did TestMigrationSetIsNumberedOneToN, TestEveryMigrationFileIsEmbedded, TestRoutesTablePinsEveryRegisteredRoute and TestDispatchConnectionsPerPodIsTheServers. envoy-client bun test passed 1049 and contracts 302, both tsc-clean.",
+    "retroDocs": "The five docs/solutions files name symbols, lines, tests and commits that exist; no false claim.",
+    "ci": "At the CI head cb22a5bc, the first Tests run was cancelled at 22:44Z. Its rerun (run 40778443890, attempt 2) ended success: lint, typecheck and test. pr-title success (run 40778467499). The compare from cb22a5bc to 3883c082 changes only .legion/. GitHub reported CONFLICTING at 00:22Z, after main moved again.",
+    "thermonuclear": "deep-review APPROVE and code-quality APPROVE at 3883c082.",
+    "threads": "All ten threads resolved; no new thread this round.",
+    "knownMainFailures": "pmdoc's build on main (docstest.NestedValue and cpuTimeOf, fixed by #2481) is main's and not in this branch's base."
+  }
+}
