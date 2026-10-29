@@ -2,9 +2,9 @@
   "schemaVersion": 1,
   "phase": "implement",
   "issue": "INFRA-651",
-  "completed": "2026-10-28T17:32:00Z",
+  "completed": "2026-10-29T09:20:00Z",
   "pullRequest": "https://github.com/sjawhar/legion/pull/2469",
-  "evidence": "dispatch://INFRA-651/artifact/infra651-measurements-tgz version 3 (sha256 fd2b4e80a30e10aaff2de14c8d32d4e8b14ccd353b653687796b29da74a0f758); round2/ holds this round's runs",
+  "evidence": "dispatch://INFRA-651/artifact/infra651-measurements-tgz version 4 (sha256 235a9c6b3a85bdf11887976099ed126a5f014d347a8c0e8eada08872fe689ecb); round3/ holds this round's seed, identity and runs",
   "proof": [
     {
       "criterion": "A1: without the parameter (or with versions=all) the answer is byte-identical (status, headers but Date, ETag, body) at real size and on hard data",
@@ -85,6 +85,22 @@
       "observed": "full answers diff exit 0 on plain, adversarial and errors data; versions=all == none; trimmed tsvs byte-identical to round 1's; compare 1,000 of 1,000 equal, 0 shared ETags; explain: Index Scan Backward using artifact_versions_artifact_id_number_key, one row per document, 996 buffer hits as before; Dispatch cores base 0.3498/0.3453/0.3644, head 0.3069/0.3188/0.3176: every head run below every base run; getIssueReferences 11.66 s of 185.15 s (6.30%) -> 2.08 s of 164.62 s (1.26%); allocation under the route base 1,119-1,184 MB, head 116-118 MB; 2,758/2,758 2xx, 210/210 references 2xx every run",
       "headSha": "a3cd6ffc58f617b2577fb5bb7ae27dc2d9e12feb",
       "negativeControl": "the round-1 negative controls stand for this SQL shape: order by v.number asc fails the trimmed compare on 305 of 310 issues; cal at 0.5x is refused by the calibration test"
+    },
+    {
+      "criterion": "A6: the references seed is committed into packages/envoy/loadtest as part of stack.sh seed, keyless, reproducing INFRA-650's counts",
+      "surface": "the load test's local stack (Postgres 16.2 with pgvector, real migrations up to 138), base build = main 4e91eaa85984 with this branch's packages/envoy/loadtest",
+      "command": "stack.sh setup && stack.sh start && stack.sh seed (runs loadgen seed-refs after loadgen seed); then stack.sh reset && stack.sh loadgen refs-shape; check-private-names.sh packages/envoy/loadtest; go test ./loadtest/",
+      "observed": "seed-refs wrote 1000 targets, 19471 versions in 22m20s and references.md on 310 of 400 LGA issues citing 51071 targets; seed.meta.json counts ref_targets 1000, ref_target_versions 19471, ref_sources 310, artifact_refs 51071, artifacts 2310, artifact_versions 20781, events 29785 (each equal to INFRA-650's refseed.meta.json); whole seed 2232 s; refs-shape: members p50 9 / p90 332 / max 992 / mean 127.7, version rows mean 2508.3, distinct share 0.0539, 231.0 author bytes/row: PASS; the sample file holds only 160 lists of integers (no letters); check-private-names clean; go test ./loadtest ok",
+      "headSha": "4b1d777a140adde138613f2b25d3d95278f9a3bd",
+      "negativeControl": "refs plan RNG seed 650 changed to 651 in a scratch copy: TestMakeRefPlan fails 'the plan writes 20941 target versions, want 19,471'"
+    },
+    {
+      "criterion": "A1, A2, A7 again at the forward-merged head with the committed seed",
+      "surface": "same stack and seed; base = main 4e91eaa85984 (+ the branch's loadtest), head = 4b1d777a140a",
+      "command": "identity2.sh base/head (i651tool fetch of all 1,000 references answers, plus ?versions=latest and ?versions=all at head, plus loadgen refs-fetch); i651tool compare; runs3.sh (cal-5, then base-1, head-1, base-2, head-2, base-3, head-3 with --events 1 --sessions 100 --requests 15 --rng-seed 1 --route-mix routes-versions-latest.txt sha256 73804994...); verdict.sh",
+      "observed": "full answers base vs head diff exit 0 (sha256 d75ea667..., 1,000 x 200, 310 with members, 370,203,810 bytes), refs-fetch files equal (f358366e...), versions=all == none, trimmed 1,000 of 1,000 equal after the cut with no shared ETag (48,602,860 bytes); Dispatch cores base 0.2218/0.2116/0.2206, head 0.1942/0.1911/0.1990: every head run below every base run -> merge; getIssueReferences 8.75% -> 1.70%; alloc under the route 1,131-1,217 MB -> 109-127 MB; 2,758/2,758 2xx and 210/210 references 2xx every run",
+      "headSha": "4b1d777a140adde138613f2b25d3d95278f9a3bd",
+      "negativeControl": "the round-1 controls hold for this unchanged server code (first-version lateral fails the trimmed compare on 305 of 310 issues); before d55525c5 the seed wrote no reference, so every closure was empty and the route did no member work"
     }
   ],
   "filesChanged": [
@@ -100,11 +116,15 @@
     "packages/envoy/.changes/unreleased/pr2469-Added-20261028-155815.yaml",
     "packages/envoy-client/.changes/unreleased/pr2469-Changed-20261028-155816.yaml",
     "packages/pi-envoy/.changes/unreleased/pr2469-Changed-20261028-155817.yaml",
-    "packages/claude-envoy/dist/dispatch.js",
-    "packages/claude-envoy/dist/envoy-channel.js",
-    "packages/claude-envoy/dist/session-hook.js",
     "packages/claude-envoy/.changes/unreleased/pr2469-Changed-20261028-161424.yaml",
-    "packages/envoy/internal/dispatch/api/references_real_size_test.go"
+    "packages/envoy/internal/dispatch/api/references_real_size_test.go",
+    "packages/envoy/loadtest/refs.go",
+    "packages/envoy/loadtest/refs_test.go",
+    "packages/envoy/loadtest/refs-sample-2026-10-27.json",
+    "packages/envoy/loadtest/main.go",
+    "packages/envoy/loadtest/stack.sh",
+    "packages/envoy/loadtest/README.md",
+    "packages/envoy/.changes/unreleased/pr2469-Added-20261029-074050.yaml"
   ],
   "trickyParts": [
     "The full answer's SQL text is byte for byte main's: the loader varies only the version join string, so its plan, row order and which decode error a request hits are unchanged (errors.sql check).",
@@ -112,16 +132,16 @@
     "The trimmed statement keeps 'order by a.ref_key, v.number'; with one row per document the second key is redundant but keeps one statement text."
   ],
   "deviations": [
-    "Task 8 (commit refseed into packages/envoy/loadtest) is not done: the package exists only on sjawhar/legion#2369 (open, CHANGES_REQUESTED at 3d988c68 at 15:58Z). Per the architect's 12:38Z decision it lands by a forward merge once #2369 is on main, and the issue does not go to READY before it.",
     "The calibration at the plan's 0.5x failed its acceptance test, so the six runs used 0.25x (--events 1 --sessions 100 --requests 15), as the plan's halving rule says.",
     "The identity and CLI checks ran on #2369 at 5edd1f88; #2369 moved to 3d988c68 (sampler, guard and doc changes) before the merge-rule runs, so the six runs were repeated at 3d988c68 (both sets pass; the 5edd1f88 set is in runs-5edd1f88/).",
     "The simplify pass ran before the proofs (on 1cc83c8b), so every proof ran at its applied head 5ec22814.",
     "The CLI's 'unavailable' line for a references request that fails names the URL it requested, which now ends in ?versions=latest (dispatch-execute.test.ts updated); every successful read prints the same.",
     "Full go test ./internal/dispatch/... on this 2-vCPU pod: api package ok but for TestIssueRanksStayOrderedPastLowercaseDigitsAndProductionShapedMoves, which refuses a database already in byte-order collation (the load test's pgserver Postgres); other packages timed out or need Docker (files) under the concurrent seed. CI's envoy Go job is the record.",
     "Round 2 (tester failure): the first round missed that packages/claude-envoy commits its own bundles of the dispatch CLI; rebuilt on Bun 1.4.4 and added its changelog fragment.",
-    "Review round 1: the merge-rule runs were repeated at the fixed head on #2369's newest head 99a733790beb (base rebuilt from the same loadtest); round 1's runs are in runs-r1-3d988c68/."
+    "Review round 1: the merge-rule runs were repeated at the fixed head on #2369's newest head 99a733790beb (base rebuilt from the same loadtest); round 1's runs are in runs-r1-3d988c68/.",
+    "Task 8 done at d55525c5 after the forward merge b96ae4be (main 4e91eaa85984): refseed is loadgen seed-refs / refs-shape / refs-fetch, run by stack.sh seed right after loadgen seed.",
+    "The forward merge drops packages/claude-envoy/dist from the diff: main now builds those bundles itself after each merge and a pull request never commits them (packages/claude-envoy/AGENTS.md:165); the merge's fingerprint changed only by those three files (PR comment 6492562896).",
+    "Measured seed time 2232 s (references 23 min), so the README and stack.sh estimates say 37 to 50 min and about 23 min, not the 53 to 62 / 35 min first written."
   ],
-  "openQuestions": [
-    "Who restarts implementing for Task 8 once #2369 merges: the architect's send-back, or a task to this session?"
-  ]
+  "openQuestions": []
 }
