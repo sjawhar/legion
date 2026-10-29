@@ -519,13 +519,19 @@ func newDispatchFrontDoor(ctx *pulumi.Context, dispatch string, s dispatchSettin
 		return corev1.PodSpecArgs{}, nil, err
 	}
 
+	// Every front-door pod runs the SOCKS5 proxy the app and the listener reach the NATS hub
+	// through, on every address, since its callers are pods of their own. With natsInCluster those
+	// two dial the hub themselves, so no pod runs a proxy: an empty socks5Server renders no
+	// TS_SOCKS5_SERVER (tailnet_service.go).
+	socks5Server := ""
+	if !s.natsInCluster {
+		socks5Server = "0.0.0.0:" + strconv.Itoa(dispatchSOCKS5Port)
+	}
 	host := tailnetServiceHost{
 		paths: paths.service, name: s.hostname,
 		authKeySecret: authKeySecret, authKeyKey: "TS_AUTHKEY",
 		tags: s.tags, serveConfig: dispatchServeConfig,
-		// Every front-door pod runs the SOCKS5 proxy the app and the listener reach the NATS hub
-		// through, on every address, since its callers are pods of their own.
-		socks5Server: "0.0.0.0:" + strconv.Itoa(dispatchSOCKS5Port),
+		socks5Server: socks5Server,
 		graceSeconds: dispatchFrontDoorGraceSeconds,
 		certificate:  fqdn,
 	}

@@ -91,6 +91,6 @@ func DispatchKubeconfig(endpoint, ca, name string) string {
 // renders an environment.
 func DispatchListenerEnvError(hostname, url string) error {
 	proxy := clusterLocal(hostname+"-tailnet", defaultDispatchNamespace) + ":" + strconv.Itoa(dispatchSOCKS5Port)
-	_, err := dispatchListenerEnv(hostname, proxy, hostname+"-listener", url)
+	_, err := dispatchListenerEnv(dispatchSettings{hostname: hostname}, proxy, hostname+"-listener", url)
 	return err
 }
