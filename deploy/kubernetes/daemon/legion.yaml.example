@@ -8,8 +8,8 @@
 # LEGION_POSTGRES_DSN (or postgres_dsn below) names a Postgres.
 # Every example.com host is a documentation domain (RFC 2606) and legion-daemon-widgets.legion.svc
 # the Service name this example's convention gives (below); the App ids are made up; the image
-# digest is all zeros, where yours is the one a Worker Image workflow run or a legion-v<version>
-# release publishes.
+# digest is all zeros, where yours is the one a worker-image.yaml build on main (its run summary)
+# or a legion-v<version> release publishes.
 
 project: WIDGETS                       # the Dispatch project key this daemon runs; also a key of projects
 state_dir: ./state                     # the daemon's local state
@@ -27,7 +27,8 @@ advertise_host: legion-daemon-widgets.legion.svc
 daemon_url: http://legion-daemon-widgets.legion.svc:13370
 admission_cap: 4                       # trees running at once
 controller: operator                   # who runs the controller: operator (legion controller start,
-                                       # the default) or daemon (a pod this daemon launches and keeps)
+                                       # the default) or daemon (a pod this daemon launches and keeps;
+                                       # under runtime: tmux, a pane in a window of its own)
 
 operator_token_file: ./operator-token  # the operator's bearer, in a file only you can read
 dispatch_url: https://dispatch.example.com
@@ -58,12 +59,47 @@ github_apps:
   review:
     app_id: "100002"
     private_key_command: cat ./review-app.pem
-# worker_backends:                     # runtime: tmux only: a phase worker's role (planner, implementer,
-#   implementer: claude                # tester, reviewer, merger) on omp, the default, or claude: Claude Code
-#                                      # in its pane under `legion claude-bridge`, which needs LEGION_CLAUDE_PLUGIN_DIR
-#                                      # (and LEGION_CLAUDE_PATH, LEGION_BUN_PATH, else PATH) in the daemon's
-#                                      # environment. Under runtime: kubernetes, as in this file, the loader
-#                                      # refuses claude: the worker image carries no Claude Code.
+# worker_backends:                     # a phase worker's role (planner, implementer, tester, reviewer,
+#   implementer: claude                # merger) on omp, the default, or claude: Claude Code under
+#                                      # `legion claude-bridge`, which runs under either runtime. In a pod,
+#                                      # as in this file, it runs out of the worker image, which carries
+#                                      # Claude Code and the claude-envoy plugin; under runtime: tmux it
+#                                      # needs LEGION_CLAUDE_PLUGIN_DIR (and LEGION_CLAUDE_PATH,
+#                                      # LEGION_BUN_PATH, else PATH) in the daemon's environment. Legion
+#                                      # holds no model route for it either: put ANTHROPIC_API_KEY in
+#                                      # provider_keys (pod.env refuses a credential-shaped name) and
+#                                      # ANTHROPIC_BASE_URL and ANTHROPIC_MODEL in runtime.kubernetes.pod.env.
+# role_config_files:                   # Oh My Pi overlays one role names and no other: here a model
+#   implementer: [/etc/legion-operator-roles/fallback.yml] # fallback chain (retry.modelFallback and
+#   tester: [/etc/legion-operator-roles/fallback.yml]      # retry.fallbackChains) for the roles whose
+#   merger: [/etc/legion-operator-roles/fallback.yml]      # output a machine checks. Keys: an issue
+#                                      # role, or controller under controller: daemon; values: absolute
+#                                      # paths, named in that role's PI_CONFIG_FILES after pod.env's (or
+#                                      # runtime.tmux.pi_config_files). Under runtime: kubernetes each file
+#                                      # must be in a pod.volume_mounts mount below: uncomment the
+#                                      # operator-roles volume and mount there too, a ConfigMap
+#                                      # legion-operator-roles mounted at /etc/legion-operator-roles. The
+#                                      # image probe reads every named role's files at boot. The roles
+#                                      # without fallback keep the capability report's model-fallback row
+#                                      # open; record that with capabilities.decided.model-fallback
+#                                      # (docs/kubernetes.md, Operator configuration).
+# Under runtime: tmux — the daemon and every pane on one host, as one Unix user — the runtime block
+# is instead (docs/deployment.md, "The runtime.tmux block"):
+# runtime:
+#   tmux:
+#     pane_env: { ELAN_HOME: /opt/elan } # plain variables added to every pane; refused: PATH, a name the
+#                                      # runtime sets, the git identity, a launch secret's _FILE
+#                                      # pointer, a variable that places Oh My Pi's sessions, a provider
+#                                      # key or its _FILE pointer, a credential-shaped name, and a URL
+#                                      # value with a password (a secret reaches a pane as a file,
+#                                      # never as a value on tmux's command line)
+#     pi_config_files: [./overlay.yml] # Oh My Pi overlays every pane names in PI_CONFIG_FILES, in order,
+#                                      # before the runtime's own turn-scope overlay, which stays last
+#     take_over: kubernetes            # only while moving a project from runtime kubernetes onto this
+#                                      # host: take over the claims its pods held (docs/deployment.md,
+#                                      # "Moving a project onto tmux")
+# and a provider key may be a file the daemon reads once at boot (readable by its owner alone):
+# provider_keys: { ANTHROPIC_API_KEY: file:/etc/legion/providers/ANTHROPIC_API_KEY }
 
 runtime:
   kubernetes:
@@ -140,12 +176,15 @@ runtime:
         #   persistent_volume_claim: {name: team-share}
         # - name: nas
         #   nfs: {server: nas.internal.example, path: /exports/builds}
+        # - name: operator-roles       # role_config_files' overlays (above)
+        #   config_map: {name: legion-operator-roles}
       volume_mounts:
         - {volume: operator-route, mount_path: /home/legion/.omp/profiles/legion/agent/models.yml, sub_path: models.yml}
         - {volume: operator-route, mount_path: /etc/legion-operator/overlay.yml, sub_path: overlay.yml}
         - {volume: operator-token, mount_path: /var/run/operator}
         # - {volume: team-share, mount_path: /mnt/team}                    # read-only by default
         # - {volume: nas, mount_path: /mnt/nas, read_only: false}          # writable
+        # - {volume: operator-roles, mount_path: /etc/legion-operator-roles} # role_config_files' overlays
 
 # The daemon reports, at boot, in `legion state` and to the controller on every tick, each worker
 # capability the deployment's own configuration closes or leaves open (LEGION-578): the secrets

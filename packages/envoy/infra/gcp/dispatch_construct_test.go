@@ -1,6 +1,7 @@
 package gcp_test
 
 import (
+	"math"
 	"strings"
 	"testing"
 
@@ -18,15 +19,17 @@ const dispatchConstructURN = "urn:pulumi:stack::project::envoy-infra:gcp:Dispatc
 
 func dispatchConstructInputs() map[string]property.Value {
 	return map[string]property.Value{
-		"region":             property.New("us-central1"),
-		"hostname":           property.New("example-dispatch"),
-		"tailnetDnsName":     property.New("example-tailnet.ts.net"),
-		"tags":               property.New(property.NewArray([]property.Value{property.New("tag:example-dispatch")})),
-		"envoyImage":         property.New(dispatchEnvoyImage),
-		"tailscaleImage":     property.New(dispatchTailscaleImage),
-		"cloudSqlProxyImage": property.New(dispatchProxyImage),
-		"signInClientId":     property.New("example-client-id"),
-		"signInDomain":       property.New("example.com"),
+		"region":              property.New("us-central1"),
+		"hostname":            property.New("example-dispatch"),
+		"tailnetDnsName":      property.New("example-tailnet.ts.net"),
+		"tags":                property.New(property.NewArray([]property.Value{property.New("tag:example-dispatch")})),
+		"envoyImage":          property.New(dispatchEnvoyImage),
+		"tailscaleImage":      property.New(dispatchTailscaleImage),
+		"cloudSqlProxyImage":  property.New(dispatchProxyImage),
+		"frontDoorToolsImage": property.New(dispatchToolsImage),
+		"tailnetService":      property.New("svc:example-dispatch"),
+		"signInClientId":      property.New("example-client-id"),
+		"signInDomain":        property.New("example.com"),
 	}
 }
 
@@ -48,6 +51,10 @@ func constructDispatch(t *testing.T, inputs map[string]property.Value, dryRun bo
 	return m, response, err
 }
 
+// Every Input may come from another resource. tailnetService typically is the consumer's
+// Tailscale Service's name output: the serve ConfigMap built from it, and the front door's
+// Deployment, then carry that resource among their dependencies, so on a fresh stack no front-door
+// pod exists before the Service does.
 func TestConstructTakesDispatchInputsFromAnotherResource(t *testing.T) {
 	inputs := dispatchConstructInputs()
 	inputs["agentSecretsUrl"] = property.New("https://example-broker.internal.example")
@@ -55,6 +62,7 @@ func TestConstructTakesDispatchInputsFromAnotherResource(t *testing.T) {
 	setConstructApp(inputs)
 	for key, value := range map[string]property.Value{
 		"tailnetAuthKey":     property.New("tskey-auth-example-0123456789").WithSecret(true),
+		"tailnetService":     property.New("svc:example-dispatch"),
 		"natsUrl":            property.New("nats://example-hub.example-tailnet.ts.net:4222"),
 		"natsSeedSecret":     property.New("projects/example-project/secrets/example-nats-seed"),
 		"signInClientSecret": property.New("example-client-secret").WithSecret(true),
@@ -67,6 +75,20 @@ func TestConstructTakesDispatchInputsFromAnotherResource(t *testing.T) {
 	url, ok := response.State.GetOk("url")
 	require.True(t, ok)
 	require.Equal(t, "https://example-dispatch.example-tailnet.ts.net", url.AsString())
+
+	serve := m.Named(t, "kubernetes:core/v1:ConfigMap", "example-dispatch-serve").RPC
+	require.Contains(t, serve.GetDependencies(), string(upstream), "the serve ConfigMap waits for the Tailscale Service")
+	require.Contains(t, serve.GetPropertyDependencies()["data"].GetUrns(), string(upstream), "serve.json is built from the resolved tailnetService")
+	frontDoor := m.Named(t, "kubernetes:apps/v1:Deployment", "example-dispatch-tailnet").RPC.GetDependencies()
+	require.Contains(t, frontDoor, string(upstream), "the front door's Deployment waits for the Tailscale Service")
+	require.Contains(t, frontDoor, dispatchConstructChildURN("kubernetes:core/v1:ConfigMap", "example-dispatch-serve"), "and for the ConfigMap its pods mount")
+	data := normalizedProperty(m.Named(t, "kubernetes:core/v1:ConfigMap", "example-dispatch-serve").Inputs["data"]).(map[string]any)
+	require.Equal(t, readGolden(t, "dispatch-serve.golden"), data["serve.json"])
+}
+
+// dispatchConstructChildURN is the URN of the constructed component's child of type typ and name.
+func dispatchConstructChildURN(typ, name string) string {
+	return "urn:pulumi:stack::project::" + dispatchType + "$" + typ + "::" + name
 }
 
 func TestConstructAcceptsUnknownDispatchInputsUnderPreview(t *testing.T) {
@@ -74,7 +96,7 @@ func TestConstructAcceptsUnknownDispatchInputsUnderPreview(t *testing.T) {
 	inputs["agentSecretsUrl"] = property.New("https://example-broker.internal.example")
 	inputs["agentSecretsAudience"] = property.New("example-broker-audience")
 	setConstructApp(inputs)
-	for _, key := range []string{"tailnetAuthKey", "natsUrl", "natsSeedSecret", "signInClientSecret"} {
+	for _, key := range []string{"tailnetAuthKey", "tailnetService", "natsUrl", "natsSeedSecret", "signInClientSecret"} {
 		inputs[key] = property.New(property.Computed).WithDependencies([]resource.URN{upstream})
 	}
 	_, _, err := constructDispatch(t, inputs, true)
@@ -117,12 +139,39 @@ func TestConstructRefusesDispatchPprofPortFromAnotherResource(t *testing.T) {
 	require.Empty(t, m.Types())
 }
 
-// appCpu and appMemory are plain strings, refused from another resource's output as replicas is.
+// appCpu, appMemory, proxyCpu, proxyMemory, appEphemeralStorage and proxyEphemeralStorage are
+// plain strings, refused from another resource's output as replicas is.
 func TestConstructRefusesDispatchAppResourcesFromAnotherResource(t *testing.T) {
-	for _, input := range []string{"appCpu", "appMemory"} {
+	for _, input := range []string{"appCpu", "appMemory", "proxyCpu", "proxyMemory", "appEphemeralStorage", "proxyEphemeralStorage"} {
 		t.Run(input, func(t *testing.T) {
 			inputs := dispatchConstructInputs()
 			inputs[input] = property.New("2").WithDependencies([]resource.URN{upstream})
+			for _, key := range []string{"tailnetAuthKey", "natsUrl", "natsSeedSecret", "signInClientSecret"} {
+				inputs[key] = property.New("example").WithDependencies([]resource.URN{upstream})
+			}
+			m, _, err := constructDispatch(t, inputs, false)
+			require.ErrorContains(t, err, input)
+			require.Empty(t, m.Types())
+		})
+	}
+}
+
+// priorityClassName and databaseAvailabilityType are plain strings, and the front door's and the
+// listener's replica counts and the three budgets plain *ints, each refused from another
+// resource's output as replicas is.
+func TestConstructRefusesDispatchDisruptionInputsFromAnotherResource(t *testing.T) {
+	for input, value := range map[string]property.Value{
+		"priorityClassName":        property.New("example-priority"),
+		"databaseAvailabilityType": property.New("REGIONAL"),
+		"frontDoorReplicas":        property.New(3.0),
+		"listenerReplicas":         property.New(2.0),
+		"appPdbMinAvailable":       property.New(1.0),
+		"frontDoorPdbMinAvailable": property.New(1.0),
+		"listenerPdbMinAvailable":  property.New(1.0),
+	} {
+		t.Run(input, func(t *testing.T) {
+			inputs := dispatchConstructInputs()
+			inputs[input] = value.WithDependencies([]resource.URN{upstream})
 			for _, key := range []string{"tailnetAuthKey", "natsUrl", "natsSeedSecret", "signInClientSecret"} {
 				inputs[key] = property.New("example").WithDependencies([]resource.URN{upstream})
 			}
@@ -329,6 +378,48 @@ func TestConstructOutputsTheServiceAccountIssuerAndSubject(t *testing.T) {
 
 			pod := deploymentPodTemplate(t, m, "example-dispatch")["spec"].(map[string]any)
 			require.Equal(t, "example-dispatch", pod["serviceAccountName"], "the subject names the pods' own ServiceAccount")
+			listener := deploymentPodTemplate(t, m, "example-dispatch-listener")["spec"].(map[string]any)
+			require.Equal(t, "example-dispatch", listener["serviceAccountName"], "the listener runs as the account the subject names")
+			frontDoor := deploymentPodTemplate(t, m, "example-dispatch-tailnet")["spec"].(map[string]any)
+			require.Equal(t, "example-dispatch-tailnet", frontDoor["serviceAccountName"], "the front door runs as an account the subject does not name")
 		})
 	}
+}
+
+// Pulumi decodes an integer input into a Go int by conversion, so a typed SDK or YAML program
+// sending 2.5 replicas would get 2 with no error. Each integer input of a gcp:Dispatch whose other
+// inputs are all valid refuses a number that is not a whole number within int64's range, naming
+// the component and the input, before anything registers, and never quotes a secret one
+// (provider's TestConstructRefusesAFractionInEveryIntegerInput covers every component's).
+func TestConstructRefusesAFractionalDispatchInteger(t *testing.T) {
+	for _, input := range []string{"replicas", "pprofPort", "azureEmbedTokensPerMinute"} {
+		for _, row := range []struct {
+			value property.Value
+			want  string
+		}{
+			{property.New(2.5), input + " 2.5 must be a whole number"},
+			{property.New(-0.5), input + " -0.5 must be a whole number"},
+			{property.New(1e19), input + " 1e+19 is outside the 64-bit integer range"},
+			{property.New(math.Inf(1)), input + " +Inf is outside the 64-bit integer range"},
+			{property.New(2.5).WithSecret(true), input + " must be a whole number within the 64-bit integer range (not echoed, as it is secret)"},
+		} {
+			t.Run(row.want, func(t *testing.T) {
+				inputs := dispatchConstructBaseInputs()
+				inputs[input] = row.value
+				m, _, err := constructDispatch(t, inputs, false)
+				require.EqualError(t, err, "envoy-infra:gcp:Dispatch example-dispatch: "+row.want)
+				require.Empty(t, m.Types())
+			})
+		}
+	}
+}
+
+// A whole number sent as a float, as every JSON number is, still decodes: 3.0 replicas is 3.
+func TestConstructTakesAWholeDispatchIntegerSentAsAFloat(t *testing.T) {
+	inputs := dispatchConstructBaseInputs()
+	inputs["replicas"] = property.New(3.0)
+	m, _, err := constructDispatch(t, inputs, false)
+	require.NoError(t, err)
+	spec := m.Named(t, "kubernetes:apps/v1:Deployment", "example-dispatch").Inputs.Mappable()["spec"].(map[string]any)
+	require.EqualValues(t, 3, spec["replicas"])
 }

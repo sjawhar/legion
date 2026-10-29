@@ -310,7 +310,7 @@ func (s *server) readDeliveryRows(ctx context.Context, settings delivery.Deliver
 	// (store.ForConcurrentRead): on the request's shared mark one read's open cursor would refuse
 	// the rest. The run jobs depend on the runs, so they follow the runs in the same goroutine.
 	//
-	// A timeline request therefore holds up to seven of the pool's 16 connections
+	// A timeline request therefore holds up to seven of the shared pool's connections
 	// (store.sharedPoolSize) for the length of its longest read, where it held one at a time. That
 	// is fine because none of them holds a lock or opens a transaction, so none waits on
 	// another caller or makes another caller wait on it: the deadlock the pool's guard exists to

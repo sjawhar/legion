@@ -31,13 +31,14 @@
 # comment-edit and message bodies `DISPATCH_BODY_MAX` caps.
 #
 # The body limit is also committed into generated files (packages/envoy/internal/contracts/
-# generated.go, packages/daemon/internal/dispatch/generated.go, packages/claude-envoy/dist/*.js).
-# This check reads the two defining sources only and keeps no copy of either number;
-# packages/contracts/scripts/gen-go.test.ts and claude-envoy's check-dist own the copies'
-# freshness.
+# generated.go, packages/daemon/internal/dispatch/generated.go, and on main
+# packages/claude-envoy/dist/*.js). This check reads the two defining sources only and keeps no
+# copy of either number; packages/contracts/scripts/gen-go.test.ts owns the Go copies' freshness,
+# and main's Rebuild Claude Envoy plugin workflow (.github/workflows/claude-envoy-rebuild.yaml)
+# keeps main's bundle copies fresh.
 #
 # Run from anywhere: .github/scripts/check-body-embed-limit.sh
-# CI runs it in the lint job of pr-and-main.yaml, and its tests in that workflow's test job.
+# CI runs it in ci.yaml's lint job, and its tests in ci.yaml's test job.
 set -euo pipefail
 
 cd "$(dirname "$0")/../.."

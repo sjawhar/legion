@@ -112,9 +112,13 @@ func TestInboxHydratesTheSameThreadsAsAskReads(t *testing.T) {
 		t.Fatalf("read inbox: status=%d body=%s", inbox.Code, inbox.Body.String())
 	}
 	type thread struct {
-		Replies   []model.Comment     `json:"replies"`
-		Edits     []model.AskEdit     `json:"edits"`
-		Followers []model.AskFollower `json:"followers"`
+		Replies     []model.Comment     `json:"replies"`
+		Edits       []model.AskEdit     `json:"edits"`
+		Followers   []model.AskFollower `json:"followers"`
+		Claimant    *string             `json:"claimant"`
+		Route       *string             `json:"route"`
+		RouteStatus *string             `json:"route_status"`
+		RouteHolder *string             `json:"route_holder"`
 	}
 	rows := decodeBody[[]struct {
 		ID     string `json:"id"`

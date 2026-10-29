@@ -1,13 +1,11 @@
 package pmdoc
 
 import (
-	"bytes"
+	_ "embed"
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
 	"reflect"
-	"regexp"
 	"sort"
 	"strings"
 )
@@ -46,8 +44,6 @@ var markTypes = map[string]bool{
 	"proofSuggestion": true, "proofComment": true, "proofFlagged": true, "proofApproved": true,
 	"proofAuthored": true, "dispatchAsk": true,
 }
-
-var yattrMarkSuffix = regexp.MustCompile(`^(.*)--[a-zA-Z0-9+/=]{8}$`)
 
 // sortMarks puts marks in one order whatever order they arrive in: by type, then, for two marks of
 // one type (the record marks, which may overlap: anchorMarkTypes), by id, and by their attributes
@@ -90,8 +86,31 @@ func sortNodeMarks(n *Node) {
 	}
 }
 
+// yattrToMarkName is the mark type stored under the Y.Text attribute key name: a record mark's key
+// carries a `--` and an 8-character digest after its type (markAttributeKey), which it drops, and
+// any other key is the type itself. It runs for every attribute key of every Y.Text run read, so
+// it checks the key's bytes rather than matching the pattern it stands for, `^(.*)--[a-zA-Z0-9+/=]{8}$`,
+// whose `.` matches no newline.
 func yattrToMarkName(name string) string {
-	return yattrMarkSuffix.ReplaceAllString(name, "$1")
+	const suffix = len("--") + 8
+	if len(name) < suffix || name[len(name)-suffix:len(name)-8] != "--" {
+		return name
+	}
+	for index := len(name) - 8; index < len(name); index++ {
+		if !isMarkKeyDigestByte(name[index]) {
+			return name
+		}
+	}
+	if prefix := name[:len(name)-suffix]; !strings.Contains(prefix, "\n") {
+		return prefix
+	}
+	return name
+}
+
+// isMarkKeyDigestByte reports whether b may stand in a record mark key's digest: a standard base64
+// character.
+func isMarkKeyDigestByte(b byte) bool {
+	return isASCIIAlphaNumeric(b) || b == '+' || b == '/' || b == '='
 }
 
 func (n *Node) Validate() error {
@@ -223,10 +242,10 @@ func validateTypedBlock(n *Node, typ BlockTypeSchema) error {
 			return fmt.Errorf("%w: typed block %q content %q requires one or more blocks", ErrSchema, n.Type, typ.Content)
 		}
 	case BlockContentParagraphsOptionalBulletList:
-		// Browser edits can transiently put another block in an ask. Retain that
-		// structurally valid body so Dispatch can stamp its semantic parse error;
-		// uploads and edits refuse an ask they write that breaks the rule
-		// (AskContentError).
+		// Concurrent browser edits can leave an ask holding blocks off its content rule (two
+		// bullet lists, a paragraph after its list), and the browser keeps it. Retain that
+		// structurally valid body so settlement can mark it `invalid`; uploads and edits refuse
+		// an ask they write that breaks the rule (AskContentError).
 		if n.Type == "ask" {
 			if len(n.Children) == 0 || !childrenAreBlocks(n.Children) {
 				return fmt.Errorf("%w: typed block %q requires block children", ErrSchema, n.Type)
@@ -270,8 +289,9 @@ func validateTypedBlock(n *Node, typ BlockTypeSchema) error {
 
 // AskContentError reports the first ask block in node that breaks its content rule, paragraph+
 // bullet_list? - one or more paragraphs, then at most one bullet list, last - or nil. Validate
-// lets an ask hold other blocks, since a browser edit can briefly leave one there and settlement
-// flags it; markdown written in whole is held to the rule, as the browser editor's parser holds it.
+// lets an ask hold other blocks, since concurrent browser edits can leave one there, the browser
+// keeps it, and settlement marks the ask `invalid`; markdown written in whole is held to the rule,
+// as the browser editor's parser holds it.
 func AskContentError(node *Node) error {
 	var found error
 	walk(node, func(ask *Node, _ []int, _, _ int) bool {
@@ -413,14 +433,33 @@ func childrenAreInline(children []*Node) bool {
 	return true
 }
 
-func isBlockNodeType(typeName string) bool {
-	switch typeName {
-	case "paragraph", "heading", "blockquote", "bullet_list", "ordered_list", "code_block", "hr", "table", "footnote_definition", "frontmatter":
-		return true
-	default:
-		_, typed := typedBlock(typeName)
-		return typed
+// blockNodeTypesJSON lists the block node types besides the typed blocks. The proof editor's
+// schema drift test reads the same file, so the editor's `block` group and this set stay equal.
+//
+//go:embed schema/block-node-types.json
+var blockNodeTypesJSON []byte
+
+var blockNodeTypes = func() map[string]struct{} {
+	var names []string
+	if err := json.Unmarshal(blockNodeTypesJSON, &names); err != nil {
+		panic(fmt.Sprintf("pmdoc: decode embedded block node types: %v", err))
 	}
+	if len(names) == 0 {
+		panic("pmdoc: embedded block node types are empty")
+	}
+	set := make(map[string]struct{}, len(names))
+	for _, name := range names {
+		set[name] = struct{}{}
+	}
+	return set
+}()
+
+func isBlockNodeType(typeName string) bool {
+	if _, ok := blockNodeTypes[typeName]; ok {
+		return true
+	}
+	_, typed := typedBlock(typeName)
+	return typed
 }
 
 func isInlineNodeType(typeName string) bool {
@@ -585,172 +624,4 @@ func (n *Node) JSON() ([]byte, error) {
 		return nil, err
 	}
 	return json.Marshal(n.toJSON())
-}
-
-// TokenJSON returns a deterministic semantic representation for optimistic
-// concurrency. Block identity and typed-block server state are excluded, while
-// inline marks remain part of the state a document edit can destroy.
-func (n *Node) TokenJSON() ([]byte, error) {
-	var encoded bytes.Buffer
-	if err := n.WriteTokenJSON(&encoded); err != nil {
-		return nil, err
-	}
-	return encoded.Bytes(), nil
-}
-
-// WriteTokenJSON writes TokenJSON's representation to w as it encodes it, so a caller that only
-// hashes it - every document and block token - never holds it whole: built as a tree of its own
-// and then encoded in one piece, a heavy document's representation took two more copies of the
-// document for each token (LEGION-504). It is what encoding/json makes of a node with the fields
-// type, attrs, content, text and marks, in that order and each but type left out when empty: each
-// value is encoded by encoding/json, and only the punctuation between them is written here.
-func (n *Node) WriteTokenJSON(w io.Writer) error {
-	if err := n.Validate(); err != nil {
-		return err
-	}
-	out := tokenWriter{w: w}
-	n.writeTokenJSON(&out)
-	return out.err
-}
-
-// writeTokenJSON writes n's token representation through out, which keeps the first error.
-func (n *Node) writeTokenJSON(out *tokenWriter) {
-	out.raw(`{"type":`)
-	out.value(n.Type)
-	if attrs := tokenAttrs(n.Type, n.Attrs); len(attrs) > 0 {
-		out.raw(`,"attrs":`)
-		out.value(attrs)
-	}
-	if len(n.Children) > 0 {
-		out.raw(`,"content":[`)
-		for index, child := range n.Children {
-			if index > 0 {
-				out.raw(",")
-			}
-			if out.err == nil {
-				child.writeTokenJSON(out)
-			}
-		}
-		out.raw("]")
-	}
-	if n.Text != "" {
-		out.raw(`,"text":`)
-		out.value(n.Text)
-	}
-	if len(n.Marks) > 0 {
-		// Marks are written in the order of their encodings, so a node's marks in any order are
-		// one token.
-		marks := make([][]byte, 0, len(n.Marks))
-		for _, mark := range n.Marks {
-			encoded, err := json.Marshal(tokenMark{Type: mark.Type, Attrs: canonicalAttrs(mark.Attrs)})
-			if err != nil {
-				if out.err == nil {
-					out.err = err
-				}
-				return
-			}
-			marks = append(marks, encoded)
-		}
-		sort.Slice(marks, func(left, right int) bool { return string(marks[left]) < string(marks[right]) })
-		out.raw(`,"marks":[`)
-		for index, mark := range marks {
-			if index > 0 {
-				out.raw(",")
-			}
-			out.bytes(mark)
-		}
-		out.raw("]")
-	}
-	out.raw("}")
-}
-
-type tokenMark struct {
-	Type  string `json:"type"`
-	Attrs Attrs  `json:"attrs,omitempty"`
-}
-
-// tokenWriter writes a token's encoding to w, keeping the first error and writing nothing after it.
-type tokenWriter struct {
-	w   io.Writer
-	err error
-}
-
-func (t *tokenWriter) raw(text string) {
-	if t.err == nil {
-		_, t.err = io.WriteString(t.w, text)
-	}
-}
-
-func (t *tokenWriter) bytes(encoded []byte) {
-	if t.err == nil {
-		_, t.err = t.w.Write(encoded)
-	}
-}
-
-func (t *tokenWriter) value(value any) {
-	if t.err != nil {
-		return
-	}
-	encoded, err := json.Marshal(value)
-	if err != nil {
-		t.err = err
-		return
-	}
-	t.bytes(encoded)
-}
-
-func tokenAttrs(nodeType string, attrs Attrs) Attrs {
-	var server map[string]BlockAttributeSchema
-	if typ, typed := typedBlock(nodeType); typed {
-		server = typ.Attributes
-	}
-	out := make(Attrs)
-	for name, value := range attrs {
-		if name == BlockIDAttr || (server != nil && server[name].Server) {
-			continue
-		}
-		if value != nil {
-			out[name] = canonicalTokenValue(value)
-		}
-	}
-	return out
-}
-
-func canonicalAttrs(attrs Attrs) Attrs {
-	out := make(Attrs)
-	for name, value := range attrs {
-		if value != nil {
-			out[name] = canonicalTokenValue(value)
-		}
-	}
-	return out
-}
-
-func canonicalTokenValue(value any) any {
-	switch v := value.(type) {
-	case int:
-		return float64(v)
-	case int64:
-		return float64(v)
-	case float32:
-		return float64(v)
-	case []string:
-		out := make([]any, len(v))
-		for index := range v {
-			out[index] = v[index]
-		}
-		return out
-	case []any:
-		out := make([]any, len(v))
-		for index := range v {
-			out[index] = canonicalTokenValue(v[index])
-		}
-		return out
-	case Attrs:
-		return canonicalAttrs(v)
-	case map[string]any:
-		return canonicalAttrs(Attrs(v))
-	default:
-		return v
-	}
 }

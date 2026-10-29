@@ -121,6 +121,7 @@ function retype(context: TypedBlockCommandContext, schema: BlockSchema, blockId:
   const type = findType(schema, typeName);
   const typedNode = nodeType(state, type);
   const body = source.node.type.create({ ...source.node.attrs, [BLOCK_ID_ATTR]: null }, source.node.content, source.node.marks);
+  if (!typedNode.contentMatch.matchType(body.type)?.validEnd) return false;
   const replacement = typedNode.createChecked({
     ...clientAttributes(type, attrs),
     [BLOCK_ID_ATTR]: blockId,
@@ -144,6 +145,7 @@ function canRetype(state: EditorState, schema: BlockSchema, source: LocatedBlock
   try {
     const typedNode = nodeType(state, type);
     const body = source.node.type.create({ ...source.node.attrs, [BLOCK_ID_ATTR]: null }, source.node.content, source.node.marks);
+    if (!typedNode.contentMatch.matchType(body.type)?.validEnd) return false;
     typedNode.createChecked({ [BLOCK_ID_ATTR]: blockIdOf(source.node) }, body);
     return true;
   } catch {

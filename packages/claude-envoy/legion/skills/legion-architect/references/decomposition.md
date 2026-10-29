@@ -27,15 +27,24 @@ child waits in your tree until Legion starts it.
 
 ```bash
 dispatch issue --project <project> --parent <root issue> --title '<child outcome>' --spec-file - <<'EOF'
-<acceptance criteria, scope, and context>
+<the child's spec, written as skill://dispatch-writing-specs says, scaled to the child>
 EOF
 ```
 
+- Write each child's spec as `skill://dispatch-writing-specs` says, scaled to the child: its
+  outline (`Summary` through `Acceptance`, a few sentences a part for a small child), a proposed
+  answer to each point, each term a new reader may not know explained, no item number from another
+  document (name a requirement of the root by what it says), and no text copied from the root that
+  does not apply to this child. The child's workers read only this spec.
+- Before `dispatch issue` creates each child, paste its whole spec into a fresh
+  `task(agent="plan-gap-analyst")` to check it against `skill://dispatch-writing-specs`, and fix
+  what it flags: your own reread misses the terms and item numbers you already know.
 - `--project` is the issue key's prefix before `-<n>` (`LEGSMOKE-3` → `LEGSMOKE`).
 - In a root session `$LEGION_ISSUE` is the root (it equals `$LEGION_TREE`): pass it as `--parent`.
   The daemon makes the sub-issue link from `--parent`.
-- Group the returned keys into ordered waves: you release each wave by key with
-  `release_children`, and a child is inert until then.
+- Order the returned keys into waves with `--blocked-by` links (a later wave's child blocked by the
+  children it builds on), then release every child at once with `release_children`: Legion holds a
+  released child until its last blocker closes, and a child is inert only until it is released.
 - Do not pass `--assignee`, because the default keeps the tree's questions in one Inbox: under the
   shared token a child inherits its parent's assignee (the human who answers the tree's asks), else
   the project's default assignee, which a person sets on the Settings page; under a personal token

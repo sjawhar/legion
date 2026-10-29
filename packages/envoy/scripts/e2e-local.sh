@@ -8,7 +8,10 @@
 # delivers to the host-local fake session. ENVOY_CI_DEBOUNCE=250ms keeps this
 # bounded acceptance run responsive while retaining the production settle logic.
 #
-# Optional ports: E2E_NATS_PORT (14222), E2E_PORT (19020), E2E_SESSION_PORT (19021).
+# Ports: the OS chooses each one, and each URL is built from the port its own process reports
+# (natsd's "Listening for client connections on" line, the listener's "envoy-listener listening"
+# addr, the fake session's "ready <port>"). E2E_NATS_PORT, E2E_PORT and E2E_SESSION_PORT set a port
+# explicitly; it is used as given, and one already in use fails with "address already in use".
 set -euo pipefail
 # This rig's NATS is a throwaway server with no users. nats.go refuses an nkey when the server sends
 # no nonce ("nats: nkeys not supported by the server"), so no process here inherits an operator's
@@ -20,8 +23,10 @@ usage() {
 Usage: e2e-local.sh [--help]
 
 Boot a throwaway NATS and the local Envoy listener, submit signed public GitHub
-fixtures plus one direct message, and write raw and rendered acceptance evidence
-to packages/envoy/out/e2e/.
+fixtures plus one direct message, prove how a send to an unknown session and a
+send whose bus is gone are refused, and write raw and rendered acceptance
+evidence to packages/envoy/out/e2e/. NATS is a server of this checkout's own
+build (internal/testnats/cmd/natsd), so no container runtime is needed.
 EOF
 }
 
@@ -49,18 +54,14 @@ readonly fixture_dir
 out_dir="${envoy_dir}/out/e2e"
 readonly out_dir
 
-nats_port="${E2E_NATS_PORT:-14222}"
-listener_port="${E2E_PORT:-19020}"
-session_port="${E2E_SESSION_PORT:-19021}"
-readonly nats_port listener_port session_port
-listener_url="http://127.0.0.1:${listener_port}"
-readonly listener_url
-nats_url="nats://127.0.0.1:${nats_port}"
-readonly nats_url
 webhook_secret="e2e-local"
 readonly webhook_secret
 session_id="ses_e2e_local"
 readonly session_id
+# The destination of the refused send: an id nothing registers in this run, so the store cannot
+# hold it however late the assertion runs.
+absent_session_id="ses_e2e_local_absent"
+readonly absent_session_id
 
 readonly envelopes_file="${out_dir}/envelopes.jsonl"
 readonly session_prompts_file="${out_dir}/session-prompts.jsonl"
@@ -83,6 +84,11 @@ readonly nats_store_dir="${out_dir}/nats-store"
 readonly lock_file="${out_dir}/run.lock"
 readonly session_ready_fifo="${out_dir}/session-ready.fifo"
 readonly subscriber_ready_fifo="${out_dir}/subscriber-ready.fifo"
+readonly absent_session_response_file="${out_dir}/absent-session-response.json"
+readonly bus_down_response_file="${out_dir}/bus-down-send-response.json"
+readonly bus_down_headers_file="${out_dir}/bus-down-send-headers.txt"
+readonly bus_down_result_file="${out_dir}/bus-down-send-result.txt"
+readonly bus_down_client_file="${out_dir}/bus-down-client-error.json"
 
 listener_pid=""
 session_pid=""
@@ -120,8 +126,8 @@ done
 # The lock is held by this shell, and the servers it starts, for as long as they live, and needs no
 # cleanup of its own; a directory left by a run that is gone holds no lock and is cleaned as usual.
 # After a SIGKILL of this script, which runs no cleanup, the natsd and listener it started inherit
-# the lock's descriptor and outlive it, so a later run is refused until they are gone, as it would
-# be anyway: they still hold the NATS port.
+# the lock's descriptor and outlive it, so a later run is refused until they are gone.
+
 mkdir -p "$out_dir"
 exec {lock_fd}>"$lock_file"
 flock -n "$lock_fd" || {
@@ -134,6 +140,7 @@ trap 'cleanup 143' TERM
 
 rm -f "$envelopes_file" "$session_prompts_file" "$rendered_ts_file" "$rendered_go_file" \
   "$direct_response_file" "$unwired_response_file" "$unheld_role_response_file" "$role_claim_response_file" "$held_role_response_file" \
+  "$absent_session_response_file" "$bus_down_response_file" "$bus_down_headers_file" "$bus_down_result_file" "$bus_down_client_file" \
   "$registry_session_response_file" "$registry_missing_response_file" \
   "$listener_log_file" "$session_log_file" "$subscriber_log_file" "$nats_log_file" \
   "$listener_binary" "$nats_binary" "$session_ready_fifo" "$subscriber_ready_fifo"
@@ -149,18 +156,30 @@ printf 'building listener and NATS server\n'
   go build -o "$nats_binary" ./internal/testnats/cmd/natsd
 )
 
-printf 'starting NATS: 127.0.0.1:%s\n' "$nats_port"
-"$nats_binary" -p "$nats_port" -store_dir "$nats_store_dir" >"$nats_log_file" 2>&1 &
+printf 'starting NATS\n'
+"$nats_binary" -p "${E2E_NATS_PORT:--1}" -store_dir "$nats_store_dir" >"$nats_log_file" 2>&1 &
 nats_pid=$!
 
-# wait_for_nats returns once the server this script started is answering, and fails otherwise. It
-# must never pass on another server: something already holding the port — a run left behind, or a
-# second run of this script — greets a connection exactly as ours would, while ours exits with
-# "address already in use". So the greeting is read only after our own server's log says it is
-# ready, and the wait ends the moment our own process is gone.
+# stop_nats ends this run's NATS, and is the one way it is ended: the bus-down step below calls it,
+# and the cleanup trap kills the same pid, which is a no-op once this has run. The in-process
+# server (internal/testnats/cmd/natsd) is this script's own child, so a signal is the whole of it.
+stop_nats() {
+  if [[ -n "$nats_pid" ]] && kill -0 "$nats_pid" 2>/dev/null; then
+    kill "$nats_pid" 2>/dev/null || true
+    wait "$nats_pid" 2>/dev/null || true
+  fi
+  nats_pid=""
+}
+
+# wait_for_nats returns once the server this script started is answering, and sets nats_port to the
+# port that server reports; it fails otherwise. It must never pass on another server: something
+# already holding an E2E_NATS_PORT — a run left behind, or another program — greets a connection
+# exactly as ours would, while ours exits with "address already in use". So the port is read from
+# our own server's log once it says it is ready, and the wait ends the moment our own process is
+# gone.
 wait_for_nats() {
   local deadline=$((SECONDS + 30))
-  local banner
+  local banner port
   while ((SECONDS < deadline)); do
     if ! kill -0 "$nats_pid" 2>/dev/null; then
       printf 'ERR: the NATS server this script started ended before it was ready.\n' >&2
@@ -168,26 +187,37 @@ wait_for_nats() {
       return 1
     fi
     if grep -q 'Server is ready' "$nats_log_file"; then
+      port="$(sed -n 's/.*Listening for client connections on 127\.0\.0\.1:\([0-9][0-9]*\)$/\1/p' "$nats_log_file")"
+      if [[ ! "$port" =~ ^[0-9]+$ ]]; then
+        printf 'ERR: the NATS server this script started is ready but named no client port.\n' >&2
+        cat "$nats_log_file" >&2
+        return 1
+      fi
       # A NATS server greets every connection it accepts with its INFO line; curl's telnet
       # scheme reads that greeting, then waits out its own --max-time, so only the text proves
       # the port answers.
-      banner="$(curl -s --max-time 1 "telnet://127.0.0.1:${nats_port}" </dev/null 2>/dev/null || true)"
+      banner="$(curl -s --max-time 1 "telnet://127.0.0.1:${port}" </dev/null 2>/dev/null || true)"
       if [[ "$banner" == 'INFO '* ]]; then
+        nats_port="$port"
         return 0
       fi
     fi
     sleep 0.25
   done
-  printf 'ERR: NATS did not accept connections on 127.0.0.1:%s within 30 seconds.\n' "$nats_port" >&2
+  printf 'ERR: the NATS server this script started did not accept connections within 30 seconds.\n' >&2
   cat "$nats_log_file" >&2
   return 1
 }
 
 printf 'waiting for NATS\n'
 wait_for_nats
+readonly nats_port
+nats_url="nats://127.0.0.1:${nats_port}"
+readonly nats_url
+printf 'NATS: %s\n' "$nats_url"
 
-printf 'starting listener: %s\n' "$listener_url"
-PORT="$listener_port" \
+printf 'starting listener\n'
+PORT="${E2E_PORT:-0}" \
   ENVOY_MACHINE_ID=e2e-local \
   NATS_URLS="$nats_url" \
   ENVOY_WEBHOOKS=github \
@@ -197,6 +227,35 @@ PORT="$listener_port" \
   ENVOY_CI_DEBOUNCE=250ms \
   "$listener_binary" >"$listener_log_file" 2>&1 &
 listener_pid=$!
+
+# wait_for_listener returns once the listener this script started logs the address it is bound to,
+# and sets listener_url from it; it fails the moment that process is gone, as it is when E2E_PORT
+# is already in use.
+wait_for_listener() {
+  local deadline=$((SECONDS + 30))
+  local addr
+  while ((SECONDS < deadline)); do
+    addr="$(jq -Rnr '[inputs | fromjson? | select(.msg == "envoy-listener listening") | .addr][0] // empty' "$listener_log_file")"
+    if [[ -n "$addr" ]]; then
+      listener_url="http://${addr}"
+      return 0
+    fi
+    if ! kill -0 "$listener_pid" 2>/dev/null; then
+      printf 'ERR: the listener this script started ended before it was listening.\n' >&2
+      cat "$listener_log_file" >&2
+      return 1
+    fi
+    sleep 0.25
+  done
+  printf 'ERR: the listener did not report its address within 30 seconds.\n' >&2
+  cat "$listener_log_file" >&2
+  return 1
+}
+
+printf 'waiting for the listener address\n'
+wait_for_listener
+readonly listener_url
+printf 'listener: %s\n' "$listener_url"
 
 wait_for_health() {
   local deadline=$((SECONDS + 30))
@@ -215,36 +274,46 @@ wait_for_health() {
 printf 'waiting for listener health\n'
 wait_for_health
 
-E2E_SESSION_PROMPTS_FILE="$session_prompts_file" E2E_SESSION_PORT="$session_port" \
+E2E_SESSION_PROMPTS_FILE="$session_prompts_file" E2E_SESSION_PORT="${E2E_SESSION_PORT:-0}" \
   bun -e '
     import { appendFileSync } from "node:fs";
 
     const output = process.env.E2E_SESSION_PROMPTS_FILE;
     const port = Number(process.env.E2E_SESSION_PORT);
-    if (output === undefined || !Number.isInteger(port) || port <= 0) {
+    if (output === undefined || !Number.isInteger(port) || port < 0) {
       throw new Error("fake-session configuration is invalid");
     }
-    const server = Bun.serve({
-      hostname: "127.0.0.1",
-      port,
-      async fetch(request) {
-        const url = new URL(request.url);
-        if (request.method !== "POST" || !url.pathname.endsWith("/prompt_async")) {
-          return new Response("not found", { status: 404 });
-        }
-        appendFileSync(output, `${await request.text()}\n`);
-        return new Response(null, { status: 204 });
-      },
-    });
+    let server;
+    try {
+      server = Bun.serve({
+        hostname: "127.0.0.1",
+        port,
+        async fetch(request) {
+          const url = new URL(request.url);
+          if (request.method !== "POST" || !url.pathname.endsWith("/prompt_async")) {
+            return new Response("not found", { status: 404 });
+          }
+          appendFileSync(output, `${await request.text()}\n`);
+          return new Response(null, { status: 204 });
+        },
+      });
+    } catch (error) {
+      // Bun says "Is port N in use?"; this names the failure as the other servers here do.
+      if (error?.code !== "EADDRINUSE") throw error;
+      process.stderr.write(`fake session: listen 127.0.0.1:${port}: address already in use\n`);
+      process.exit(1);
+    }
     process.stdout.write(`ready ${server.port}\n`);
   ' >"$session_ready_fifo" 2>"$session_log_file" &
 session_pid=$!
 
-if ! IFS= read -r -t 5 session_ready <"$session_ready_fifo" || [[ "$session_ready" != "ready ${session_port}" ]]; then
-  printf 'ERR: fake session did not bind to port %s.\n' "$session_port" >&2
+if ! IFS= read -r -t 5 session_ready <"$session_ready_fifo" || [[ ! "$session_ready" =~ ^ready\ ([0-9]+)$ ]]; then
+  printf 'ERR: the fake session did not report its port.\n' >&2
   cat "$session_log_file" >&2
   exit 3
 fi
+session_port="${BASH_REMATCH[1]}"
+readonly session_port
 
 (
   cd "$repo_root"
@@ -259,7 +328,20 @@ fi
     const connection = await connect({ servers: url, name: "envoy-e2e-capture" });
     const subscription = connection.subscribe("notifications.>");
     process.stdout.write("ready\n");
-    for await (const message of subscription) appendFileSync(output, `${codec.decode(message.data)}\n`);
+    for await (const message of subscription) {
+      const raw = codec.decode(message.data);
+      appendFileSync(output, `${raw}\n`);
+      // The fake session holds the role below, and the publish route answers a role message only
+      // once its holder confirms the forward to its agent subject with an empty receipt, as the
+      // plugins do for a frame whose envelope names another topic (envoy-client expectsLaneReceipt).
+      if (message.reply && message.subject.startsWith("notifications.agent.")) {
+        let topic;
+        try {
+          topic = JSON.parse(raw).topic;
+        } catch {}
+        if (topic !== undefined && topic !== message.subject) message.respond();
+      }
+    }
   ' >"$subscriber_ready_fifo" 2>"$subscriber_log_file"
 ) &
 subscriber_pid=$!
@@ -361,6 +443,74 @@ jq -e --arg recipient "$session_id" --arg message "$direct_message" \
   printf 'ERR: direct send response did not retain the three-paragraph message contract.\n' >&2
   exit 1
 }
+
+# A send to a session id nothing registered. The store holds no key for it, so the listener refuses
+# the send by name instead of publishing into a topic no one reads: the sender is told which
+# session is gone, and can route around that pane. `curl -fsS` cannot assert a refusal (it prints
+# no body and exits non-zero), so this takes the status from -w as the unheld-role publish above does.
+printf 'posting a direct message to an unregistered session\n'
+absent_summary="Absent session acceptance summary."
+absent_body="$(jq -nc \
+  --arg session_id "$absent_session_id" \
+  --arg message "$absent_summary" \
+  '{source:"agent",source_session:"octocat",target_session:$session_id,message:$message}')"
+absent_status="$(curl -sS -o "$absent_session_response_file" -w '%{http_code}' \
+  -X POST -H 'Content-Type: application/json' \
+  "${listener_url}/v1/messages/send" -d "$absent_body")"
+if [[ "$absent_status" != 404 ]] || ! jq -e --arg session_id "$absent_session_id" \
+  '.error == ("no live session " + $session_id)' "$absent_session_response_file" >/dev/null; then
+  printf 'ERR: a send to the unregistered session %s answered HTTP %s, not a 404 naming it.\n' \
+    "$absent_session_id" "$absent_status" >&2
+  cat "$absent_session_response_file" >&2
+  exit 1
+fi
+
+# Why this step reads the listener's own log, which nothing in this script read before: a refused
+# send publishes nothing at all, so no envelope, no stream entry and no "listener received" line
+# will ever name it, and this record is the only server-side trace it leaves. The issue exists
+# because that trace did not: a send never attempted, one lost on the way and one refused by name
+# all left the same silence in the log.
+count_listener_records() {
+  local selector=$1
+  # The records are JSON lines, but the log also carries the Go standard logger's plain lines
+  # ("2026/10/25 03:19:15 github sender login=..."), and jq's fromjson reads the leading 2026 of
+  # one of those as a number rather than refusing it. Keeping only the objects drops both shapes
+  # of non-record line instead of failing the whole read over them.
+  jq -R 'fromjson? // empty | select(type == "object")' "$listener_log_file" \
+    | jq -s --arg session_id "$session_id" --arg absent_session_id "$absent_session_id" \
+      "[.[] | select(${selector})] | length"
+}
+
+# Each record is written after its response is sent, so the assertion can reach the log a moment
+# before the line lands: wait for the first match rather than racing it, and fail on anything but
+# exactly one, a second line being as wrong as none.
+wait_for_listener_record() {
+  local description=$1
+  local selector=$2
+  local deadline=$((SECONDS + 10))
+  local count=0
+  while ((SECONDS < deadline)); do
+    count="$(count_listener_records "$selector")"
+    if ((count != 0)); then
+      break
+    fi
+    sleep 0.25
+  done
+  if ((count != 1)); then
+    printf 'ERR: expected exactly one %s record in the listener log; found %s.\n' "$description" "$count" >&2
+    return 1
+  fi
+}
+
+printf 'asserting the listener request records\n'
+wait_for_listener_record 'accepted send' \
+  '.msg == "listener send" and .level == "INFO" and .outcome == "accepted" and .status == 200
+   and .target_session == $session_id and .source == "agent" and .source_session == "octocat"
+   and .payload_summary == "Direct acceptance summary." and (.event_id | length) > 0'
+wait_for_listener_record 'refused send' \
+  '.msg == "listener send" and .level == "WARN" and .outcome == "no_live_session" and .status == 404
+   and .target_session == $absent_session_id and .source == "agent" and .source_session == "octocat"
+   and .payload_summary == "Absent session acceptance summary." and (.event_id | length) > 0'
 
 # The one question a caller holding a session id asks before it addresses that session: is this
 # session live? The per-session registry read answers with the row GET /v1/sessions would carry,
@@ -601,3 +751,88 @@ E2E_ENVELOPES_FILE="$envelopes_file" E2E_RENDERED_TS_FILE="$rendered_ts_file" \
 
     console.log("PASS: topic set, structured payloads, checks settlement, and both renderers match the local acceptance contract");
   '
+
+# Last of all, because it ends this rig's NATS and every step above needs the bus. A send the bus
+# cannot serve has to be refused by name inside the sender's own attempt, rather than left to the
+# sender's timeout: a timeout says nothing about whether the message was taken.
+printf 'stopping NATS for the bus-down answers\n'
+stop_nats
+
+# --max-time 5 is the sending client's own per-attempt deadline (DEFAULT_TIMEOUT_MS in
+# packages/envoy-client/src/transport.ts): an answer that arrives after it is, to that caller, no
+# answer at all. The listener's own budget (sendRequestBudget, 3.5 s) is what keeps it inside.
+printf 'posting a direct message with the bus down\n'
+curl --max-time 5 -sS -o "$bus_down_response_file" -D "$bus_down_headers_file" \
+  -w '%{http_code}\n%{time_total}\n' \
+  -X POST -H 'Content-Type: application/json' \
+  "${listener_url}/v1/messages/send" -d "$direct_body" >"$bus_down_result_file"
+{ IFS= read -r bus_down_status; IFS= read -r bus_down_seconds; } <"$bus_down_result_file"
+if [[ "$bus_down_status" != 503 ]]; then
+  printf 'ERR: a send with the bus down answered HTTP %s, not 503.\n' "$bus_down_status" >&2
+  cat "$bus_down_response_file" >&2
+  exit 1
+fi
+jq -e '.error | startswith("envoy: the message bus did not answer")' "$bus_down_response_file" >/dev/null || {
+  printf 'ERR: the bus-down body does not name the bus as the reason.\n' >&2
+  cat "$bus_down_response_file" >&2
+  exit 1
+}
+# Retry-After is what separates a bus that did not answer from bytes or a subject NATS refuses
+# however often they are sent: only the first is worth sending down this same route again.
+grep -qiE '^retry-after:[[:space:]]*1[[:space:]]*$' "$bus_down_headers_file" || {
+  printf 'ERR: the bus-down answer carries no Retry-After: 1 header.\n' >&2
+  cat "$bus_down_headers_file" >&2
+  exit 1
+}
+# Whole seconds only: curl prints time_total with a fraction (behind whichever separator the
+# locale asks for), and all that is asserted is that the answer beat the client deadline.
+if ((${bus_down_seconds%%[.,]*} >= 5)); then
+  printf 'ERR: the bus-down answer took %s seconds, past the sending client deadline.\n' "$bus_down_seconds" >&2
+  exit 1
+fi
+printf 'bus-down send: HTTP %s in %s seconds\n' "$bus_down_status" "$bus_down_seconds"
+
+# The same refusal through the client a session actually sends with. It retries a >= 500 answer
+# once, after 250 ms (packages/envoy-client/src/transport.ts), so two refusals and one wait are
+# expected here; what has to hold is that the send ends in a named EnvoyApiError rather than in a
+# timeout, which is why this asserts what was thrown and never how long it took.
+printf 'sending through the real client with the bus down\n'
+(
+  cd "$repo_root/packages/envoy-client"
+  E2E_LISTENER_URL="$listener_url" E2E_SESSION_ID="$session_id" \
+    E2E_BUS_DOWN_CLIENT_FILE="$bus_down_client_file" bun -e '
+      import { writeFileSync } from "node:fs";
+      import { createEnvoyClient, EnvoyApiError } from "@legion/envoy-client/transport";
+
+      const baseUrl = process.env.E2E_LISTENER_URL;
+      const sessionID = process.env.E2E_SESSION_ID;
+      const output = process.env.E2E_BUS_DOWN_CLIENT_FILE;
+      if ([baseUrl, sessionID, output].some((value) => value === undefined)) {
+        throw new Error("bus-down client configuration is invalid");
+      }
+      const client = createEnvoyClient({ baseUrl, fetch });
+      let thrown;
+      try {
+        await client.send({
+          sourceSessionID: "octocat",
+          targetSessionID: sessionID,
+          message: "Direct send while the message bus is down.",
+        });
+      } catch (error) {
+        thrown = error;
+      }
+      if (!(thrown instanceof EnvoyApiError)) {
+        const what = thrown === undefined ? "nothing: the send was accepted" : String(thrown);
+        throw new Error(`the client threw ${what}, want an EnvoyApiError`);
+      }
+      const prefix = "envoy: the message bus did not answer";
+      if (thrown.details.status !== 503 || !thrown.message.startsWith(prefix)) {
+        throw new Error(`the client threw ${thrown.details.status}: ${thrown.message}, want 503 opening with ${JSON.stringify(prefix)}`);
+      }
+      const record = { name: thrown.name, status: thrown.details.status, message: thrown.message };
+      writeFileSync(output, `${JSON.stringify(record, null, 2)}\n`);
+      console.log(`client refusal: ${record.name} ${record.status} ${record.message}`);
+    '
+)
+
+printf 'PASS: an absent destination, the listener request records and a bus that did not answer are each refused by name\n'

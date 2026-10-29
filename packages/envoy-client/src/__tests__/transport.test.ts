@@ -23,6 +23,8 @@ function recordFetch(responses: readonly Response[]): RecordedFetch {
   };
 }
 
+const PLUGIN = { name: "@sjawhar/pi-envoy", version: "11.0.0" };
+
 function jsonResponse(body: unknown): Response {
   return Response.json(body);
 }
@@ -46,6 +48,7 @@ describe("EnvoyClient", () => {
       port: 13381,
       title: "Envoy QA",
       driving: true,
+      plugin: PLUGIN,
     });
 
     expect(interest).toEqual({
@@ -66,6 +69,8 @@ describe("EnvoyClient", () => {
       title: "Envoy QA",
       driving: true,
       host: machineID(),
+      plugin: "@sjawhar/pi-envoy",
+      plugin_version: "11.0.0",
     });
   });
 
@@ -90,6 +95,7 @@ describe("EnvoyClient", () => {
       port: 0,
       title: "",
       driving: true,
+      plugin: PLUGIN,
     });
     await client.unsubscribe({ sessionID: "ses_sender", topics: [wildcard] });
 
@@ -119,6 +125,7 @@ describe("EnvoyClient", () => {
       port: 0,
       title: "",
       driving: true,
+      plugin: PLUGIN,
     });
 
     expect(await recorded.requests[0]?.json()).toMatchObject({ topics: [wildcard] });
@@ -136,6 +143,7 @@ describe("EnvoyClient", () => {
           port: 0,
           title: "",
           driving: true,
+          plugin: PLUGIN,
         })
       ).rejects.toThrow("concrete base");
     }
@@ -451,35 +459,29 @@ describe("EnvoyClient", () => {
     ).rejects.toBeInstanceOf(EnvoyApiError);
   });
 
-  test("lists listener sessions and retains their registration metadata", async () => {
-    const recorded = recordFetch([
-      jsonResponse([
-        {
-          session_id: "ses_sender",
-          machine_id: "host-a",
-          dir: "/work",
-          port: 13381,
-          title: "Envoy QA",
-          topics: ["notifications.agent.ses_sender"],
-          self_subscribed: false,
-        },
-      ]),
-    ]);
+  test("lists listener sessions and retains their registration metadata, plugin or none", async () => {
+    const unversioned = {
+      session_id: "ses_sender",
+      machine_id: "host-a",
+      dir: "/work",
+      port: 13381,
+      title: "Envoy QA",
+      topics: ["notifications.agent.ses_sender"],
+      self_subscribed: false,
+    };
+    const versioned = {
+      ...unversioned,
+      session_id: "ses_versioned",
+      topics: ["notifications.agent.ses_versioned"],
+      plugin: "@sjawhar/claude-envoy",
+      plugin_version: "afe10b2f3e1b",
+    };
+    const recorded = recordFetch([jsonResponse([unversioned, versioned])]);
     const client = createEnvoyClient({ baseUrl: "http://listener", fetch: recorded.fetch });
 
     const sessions = await client.listSessions();
 
-    expect(sessions).toEqual([
-      {
-        session_id: "ses_sender",
-        machine_id: "host-a",
-        dir: "/work",
-        port: 13381,
-        title: "Envoy QA",
-        topics: ["notifications.agent.ses_sender"],
-        self_subscribed: false,
-      },
-    ]);
+    expect(sessions).toEqual([unversioned, versioned]);
     expect(recorded.requests[0]?.url).toBe("http://listener/v1/sessions");
   });
 
@@ -736,5 +738,79 @@ describe("EnvoyClient", () => {
       if (previous === undefined) delete process.env.ENVOY_TOKEN;
       else process.env.ENVOY_TOKEN = previous;
     }
+  });
+
+  test("asks for a replay in the listener's request shape and parses its answer", async () => {
+    const answer = {
+      stream: { created: "2026-10-01T00:00:00Z", first_seq: 3, last_seq: 9 },
+      subjects: [
+        {
+          subject: "notifications.agent.ses_a",
+          messages: [
+            {
+              seq: 7,
+              subject: "notifications.agent.ses_a",
+              time: "2026-10-26T12:00:00.5Z",
+              data: "{}",
+            },
+          ],
+          next_after: 9,
+          more: false,
+        },
+        {
+          subject: "notifications.team.deploy",
+          messages: [],
+          next_after: 0,
+          more: false,
+          refused: "not_retained",
+        },
+      ],
+    };
+    const recorded = recordFetch([jsonResponse(answer)]);
+    const client = createEnvoyClient({ baseUrl: "http://listener", fetch: recorded.fetch });
+
+    const result = await client.replay({
+      sessionID: "ses_a",
+      subjects: [
+        { subject: "notifications.agent.ses_a", after: 4 },
+        { subject: "notifications.team.deploy" },
+      ],
+      maxMessages: 50,
+    });
+
+    expect(result).toEqual(answer);
+    expect(recorded.requests[0]?.method).toBe("POST");
+    expect(recorded.requests[0]?.url).toBe("http://listener/v1/replay");
+    expect(await recorded.requests[0]?.json()).toEqual({
+      session_id: "ses_a",
+      subjects: [
+        { subject: "notifications.agent.ses_a", after: 4 },
+        { subject: "notifications.team.deploy" },
+      ],
+      max_messages: 50,
+    });
+  });
+
+  // A replay runs again on the session's next trigger, and a listener that cannot replay must be
+  // reported at once, so a 503 is not sent a second time.
+  test("gives up a replay at its first 503, with the listener's status and code", async () => {
+    const recorded = recordFetch([
+      Response.json(
+        { code: "REPLAY_UNAVAILABLE", error: "nats: permissions violation" },
+        { status: 503 }
+      ),
+      Response.json({ error: "unexpected second request" }, { status: 500 }),
+    ]);
+    const client = createEnvoyClient({ baseUrl: "http://listener", fetch: recorded.fetch });
+
+    const failure = await client
+      .replay({ sessionID: "ses_a", subjects: [{ subject: "notifications.agent.ses_a" }] })
+      .catch((error: unknown) => error);
+
+    expect(failure).toBeInstanceOf(EnvoyApiError);
+    expect((failure as EnvoyApiError).details.status).toBe(503);
+    expect((failure as EnvoyApiError).code).toBe("REPLAY_UNAVAILABLE");
+    expect((failure as EnvoyApiError).message).toBe("nats: permissions violation");
+    expect(recorded.requests).toHaveLength(1);
   });
 });

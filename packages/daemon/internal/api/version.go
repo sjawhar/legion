@@ -361,4 +361,50 @@ package api
 // merges after another takes the next free contract number and renumbers its store migration past
 // main's, every site that names either included, among them the rollback's
 // `delete from schema_version where version = 54` in docs/kubernetes.md.)
-const DaemonAPIVersion = 39
+//
+// 40: a root whose architect asked a person a question and handed the turn back gives its
+// admission slot up in the new phase `awaiting_person`, and its strict state issue view gains
+// `waitingOn`: `kind` `ask` with the question's `ask`, or `gate` with `gateVersion` and
+// `artifactId` (in the contract now, so the next release's gate waits need no plugin bump; no
+// daemon of this contract writes one), `since`, the hand-back the wait began at, and, once the
+// wait was answered, `answeredAt` and `answeredBy` (`answeredBy` names how, not always by a
+// person). A 39 plugin's strict reader refuses the phase
+// and the field, so the boot gate and `legion probe-image` refuse the mixed pair. (39 is INFRA-208,
+// on main before this change, so this change takes the number above it, as the collision note
+// says.)
+//
+// 41: `legion controller start` passes `/legion-controller-start`
+// (daemon.ControllerStartCommand) on the operator's Oh My Pi command line, and pi-legion sends the
+// controller's start message from that extension command rather than from session_start: Oh My Pi
+// drains every session_start send at the end of its startup, so the start turn ran inside the
+// startup wait, with no TUI and no input, while a command-line word runs as a prompt after startup
+// and once the TUI listens. Under this CLI a pi-legion before 41 sends from session_start and then
+// gets the word as a prompt, and a pi-legion at 41 under an older CLI never sends the start, so the
+// controller probe refuses either pair before the mint. The daemon-launched controller is unchanged
+// on the wire. (This branch took 40; main then landed the awaiting_person change at 40 and released
+// pi-legion v11.1.0 declaring it, without these shapes, so this branch takes the number above it,
+// as the collision note says. Other open branches may declare 41 too: whichever merges after
+// another takes the next free number, as the collision note says.)
+//
+// 42: a worker's environment gains the four LEGION_STALL_* numbers under both
+// runtimes (`internal/daemon/specs.go` merges each one the daemon holds into `spec.Env`, which a
+// pane's `-e` pairs and a pod launcher's start command carry verbatim), and a Claude Code role
+// gains CLAUDE_CONFIG_DIR, CLAUDE_CODE_DISABLE_BACKGROUND_TASKS and CLAUDE_CODE_DISABLE_CRON in
+// its start command's environment. Both plugins read the four numbers through
+// `packages/pi-shared/src/stall-limits.ts`, and `@sjawhar/claude-envoy` reads the Claude
+// directory, so the daemon and the image that carries them ship together. With 37's disk dying
+// with its pod, a Claude Code role's session is kept in Oh My Pi's session table by the pod's
+// own launcher: each Claude launch's start command carries LEGION_CLAUDE_SESSION_ID, the session
+// it starts or resumes (`claudelaunch.SessionVariable`), and the image's `legion launcher` reads
+// it, in the manager of that role in the one `roles` container, to keep the transcript and the
+// phase-reminder record as rows of `omp_session_files` keyed by their paths, restoring both before
+// a resume's child starts, and writes `<transcript>.legion-saved` once its first save of a fresh
+// transcript has committed, which the image's `@sjawhar/claude-envoy` waits for before it
+// registers the transcript. A launcher before 42 ignores the variable and keeps nothing, so the
+// next pod's resume of that transcript is refused, and a claude-envoy before 42 registers a
+// transcript the table may not hold yet; an image at 42 under a daemon before 42 is told no
+// session, so its claude-envoy waits for no marker and its launcher keeps nothing. The image probe
+// refuses either pair. This change adds no store migration. (This branch took 36 through 41 in
+// turn; main landed each of those numbers first, the controller start command last at 41, so this
+// branch takes the number above them, as the collision note says.)
+const DaemonAPIVersion = 42

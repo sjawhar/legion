@@ -647,12 +647,6 @@
       overflow-x: auto;
       padding: 24px;
     }
-    .proof-mermaid-svg {
-      display: block;
-      width: 100%;
-      min-width: 640px;
-      height: auto;
-    }
     .proof-mermaid-status {
       padding: 14px 16px 0;
       color: #b91c1c;
@@ -693,9 +687,6 @@
     @media (max-width: 720px) {
       .proof-mermaid-preview {
         padding: 16px;
-      }
-      .proof-mermaid-svg {
-        min-width: 520px;
       }
     }
     .milkdown blockquote {

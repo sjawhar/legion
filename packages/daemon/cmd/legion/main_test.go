@@ -206,6 +206,140 @@ func TestStartRefusesTheStateDirectoryAnotherTeamIsRunningOn(t *testing.T) {
 	}
 }
 
+// A harness hands `legion start` the socket it holds as LEGION_LISTEN_FD, and legion.yaml's bind
+// and port must name that socket: the registry entry, the default daemon_url and `legion state`
+// dial them. A socket they do not name, or a descriptor that is no listening socket, is refused
+// naming the variable and the setting, before the team is claimed and so before the daemon opens
+// its store or binds anything.
+func TestStartRefusesAnInheritedSocketLegionYAMLDoesNotName(t *testing.T) {
+	for _, probe := range []struct {
+		name string
+		// bind is legion.yaml's bind; empty leaves its 127.0.0.1 default.
+		bind string
+		// otherPort gives legion.yaml a port next to the held socket's.
+		otherPort bool
+		// notSocket hands a regular file in place of the held socket.
+		notSocket bool
+		want      func(held, configured int) []string
+	}{
+		{
+			name: "another port", otherPort: true,
+			want: func(held, configured int) []string {
+				return []string{fmt.Sprintf("port=%d does not match", configured), "LEGION_LISTEN_FD=3", "127.0.0.1:" + strconv.Itoa(held)}
+			},
+		},
+		{
+			name: "another bind", bind: "0.0.0.0",
+			want: func(held, _ int) []string {
+				return []string{"bind=0.0.0.0 does not match", "LEGION_LISTEN_FD=3", "127.0.0.1:" + strconv.Itoa(held)}
+			},
+		},
+		{
+			name: "no socket", notSocket: true,
+			want: func(int, int) []string { return []string{"LEGION_LISTEN_FD=3 is not a socket"} },
+		},
+	} {
+		t.Run(probe.name, func(t *testing.T) {
+			legions := legionState(t)
+			descriptor, port := heldSocket(t)
+			if probe.notSocket {
+				var err error
+				if descriptor, err = os.CreateTemp(t.TempDir(), "not-a-socket"); err != nil {
+					t.Fatal(err)
+				}
+			}
+			configured := port
+			if probe.otherPort {
+				if configured++; configured > 65535 {
+					configured = port - 1
+				}
+			}
+			config := legionConfig(t, "LEGION", configured)
+			if probe.bind != "" {
+				appendTo(t, config, "bind: "+probe.bind+"\n")
+			}
+
+			code, stderr := startOnDescriptor(t, config, descriptor)
+
+			if code != 1 {
+				t.Fatalf("exit code = %d, want 1; stderr = %q", code, stderr)
+			}
+			for _, want := range probe.want(port, configured) {
+				if !strings.Contains(stderr, want) {
+					t.Errorf("stderr = %q, want it to name %q", stderr, want)
+				}
+			}
+			if _, ok, err := registry.Find(legions, "LEGION"); err != nil || ok {
+				t.Fatalf("Find(LEGION) = %v, %v; want the refused start to have claimed nothing", ok, err)
+			}
+		})
+	}
+}
+
+// heldSocket listens on a loopback port the kernel chooses and returns a descriptor of its own for
+// the socket, which stays listening once the listener is closed, and the port. The descriptor is
+// closed when t ends, if its caller has not closed it first.
+func heldSocket(t *testing.T) (*os.File, int) {
+	t.Helper()
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("hold a loopback port: %v", err)
+	}
+	file, err := listener.(*net.TCPListener).File()
+	_ = listener.Close()
+	if err != nil {
+		t.Fatalf("take the held socket's descriptor: %v", err)
+	}
+	t.Cleanup(func() { _ = file.Close() })
+	return file, listener.Addr().(*net.TCPAddr).Port
+}
+
+// startOnDescriptor runs `legion start --config <config>` as its own process, handed descriptor
+// as its descriptor 3 and LEGION_LISTEN_FD=3, as a harness starts it, and returns its exit code
+// and stderr once it exits. The test's copy of descriptor is closed once the process has started.
+func startOnDescriptor(t *testing.T, config string, descriptor *os.File) (int, string) {
+	t.Helper()
+	command := exec.Command(os.Args[0], "start", "--config", config)
+	command.Env = append(os.Environ(), testMainEnv+"=1", "LEGION_LISTEN_FD=3")
+	command.ExtraFiles = []*os.File{descriptor}
+	var stderr bytes.Buffer
+	command.Stderr = &stderr
+	err := command.Start()
+	_ = descriptor.Close()
+	if err != nil {
+		t.Fatalf("start legion: %v", err)
+	}
+	exited := make(chan struct{})
+	go func() {
+		_ = command.Wait()
+		close(exited)
+	}()
+	select {
+	case <-exited:
+	case <-time.After(30 * time.Second):
+		_ = command.Process.Kill()
+		<-exited
+		t.Fatalf("legion start did not exit within 30s; stderr = %q", stderr.String())
+	}
+	return command.ProcessState.ExitCode(), stderr.String()
+}
+
+// appendTo appends text to the file at path.
+func appendTo(t *testing.T, path, text string) {
+	t.Helper()
+	file, err := os.OpenFile(path, os.O_APPEND|os.O_WRONLY, 0)
+	if err != nil {
+		t.Fatalf("open %s: %v", path, err)
+	}
+	if _, err := file.WriteString(text); err != nil {
+		_ = file.Close()
+		t.Fatalf("write %s: %v", path, err)
+	}
+	if err := file.Close(); err != nil {
+		t.Fatalf("close %s: %v", path, err)
+	}
+}
+
 // A daemon that died without cleaning up leaves an entry naming a pid nothing holds. A stop is
 // then the record's own repair, not an error.
 func TestStopRemovesTheEntryOfADaemonThatIsGone(t *testing.T) {
@@ -1066,18 +1200,26 @@ func TestStartCheckConfigRefusesARequestItCannotRender(t *testing.T) {
 
 // --check-config's plugins line names the pair runtime.kubernetes.plugins sets, "from
 // legion.yaml", or, absent that, this binary's linked pair, "from the binary"; absent both, the
-// gap (TestStartCheckConfigReportsTheConfigurationsCapabilityGaps's pluginsGap).
+// gap (TestStartCheckConfigReportsTheConfigurationsCapabilityGaps's pluginsGap). When
+// worker_backends runs any role on Claude Code, the line gains one sentence naming those roles,
+// whose plugin is the worker image's and never an install.
 func TestStartCheckConfigNamesTheResolvedPluginPair(t *testing.T) {
 	legionState(t)
-	for _, tc := range []struct {
-		name, extra, legion, envoy, want string
-	}{
+	const claudeSentence = ". Claude Code runs implementer, tester, whose plugin is the worker image's: " +
+		"a plugin-contract change for such a role is answered by a new image, not by an install."
+	const claudeRoles = "worker_backends: {implementer: claude, tester: claude}\n"
+	for _, tc := range []struct{ name, extra, legion, envoy, want string }{
 		{"the file's own pair", "    plugins: {pi_legion: 9.7.0, pi_envoy: 9.6.1}\n", "", "",
 			"plugins: @sjawhar/pi-legion 9.7.0 @sjawhar/pi-envoy 9.6.1 (from legion.yaml)\n"},
 		{"the binary's linked pair, the file setting none", "", "9.7.0", "9.6.1",
 			"plugins: @sjawhar/pi-legion 9.7.0 @sjawhar/pi-envoy 9.6.1 (from the binary)\n"},
 		{"the file's pair wins over the binary's", "    plugins: {pi_legion: 9.7.1, pi_envoy: 9.6.2}\n", "9.7.0", "9.6.1",
 			"plugins: @sjawhar/pi-legion 9.7.1 @sjawhar/pi-envoy 9.6.2 (from legion.yaml)\n"},
+		{"the Claude Code roles' plugin is the image's", "    plugins: {pi_legion: 9.7.0, pi_envoy: 9.6.1}\n" + claudeRoles, "", "",
+			"plugins: @sjawhar/pi-legion 9.7.0 @sjawhar/pi-envoy 9.6.1 (from legion.yaml)" + claudeSentence + "\n"},
+		{"the Claude Code roles are named beside the gap too", claudeRoles, "", "",
+			"plugins: none — set runtime.kubernetes.plugins or run a release build; " +
+				"a daemon that knows none relaunches no process on another plugin contract" + claudeSentence + "\n"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			linkedLegion, linkedEnvoy := piLegionVersion, piEnvoyVersion
@@ -1351,6 +1493,54 @@ func TestPlainStateSummarizesTheOpenProductionChecks(t *testing.T) {
 		},
 		{name: "none open", issues: `{` + closed + `}`, want: "open production checks: none\n"},
 		{name: "no issues", issues: `{}`, want: "open production checks: none\n"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			served := "{" + daemon + `,"issues":` + tc.issues + "}"
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				w.Header().Set("Content-Type", "application/json")
+				_, _ = w.Write([]byte(served))
+			}))
+			defer server.Close()
+			t.Chdir(t.TempDir())
+			t.Setenv("LEGION_DAEMON_URL", server.URL)
+			t.Setenv("LEGION_ISSUE", "")
+
+			var out, errb bytes.Buffer
+			if code := run(context.Background(), []string{"legion", "state"}, &out, &errb); code != 0 {
+				t.Fatalf("legion state = %d, stderr %q", code, errb.String())
+			}
+			if !strings.Contains(out.String(), tc.want) {
+				t.Fatalf("legion state printed %q, want the line %q", out.String(), tc.want)
+			}
+		})
+	}
+}
+
+// An operator reading plain `legion state` is told which roots gave their slot up to wait on a
+// person, how many a person answered, and each by key with what it waits on: an unanswered one is
+// in neither admission list, so without this line the capacity it freed looks idle.
+func TestPlainStateNamesTheRootsWaitingOnAPerson(t *testing.T) {
+	daemon := `"daemon":{"project":"LEGION","schemaVersion":6,"boots":1,"firstBootAt":"2026-09-23T00:00:00Z","startedAt":"2026-09-23T00:00:00Z"},` +
+		`"admission":{"cap":2,"active":[],"waiting":["LEGION-211"]},"pendingStatusWrites":[]`
+	gate := `"LEGION-210":{"key":"LEGION-210","generation":1,"phase":"awaiting_person","status":"in_progress",` +
+		`"waitingOn":{"kind":"gate","gateVersion":3,"artifactId":"spec-210","since":"2026-10-25T10:00:00Z"}}`
+	asked := `"LEGION-211":{"key":"LEGION-211","generation":1,"phase":"awaiting_person","status":"in_progress",` +
+		`"waitingOn":{"kind":"ask","ask":"ask-7","since":"2026-10-25T11:00:00Z","answeredAt":"2026-10-25T12:00:00Z","answeredBy":"reply"}}`
+	for _, tc := range []struct {
+		name, issues, want string
+	}{
+		{
+			name:   "two waiting, one answered",
+			issues: `{` + asked + `,` + gate + `}`,
+			want: "roots waiting on a person: 2, 1 answered and waiting for a slot — LEGION-210 waits on spec version 3 of spec-210, unanswered; " +
+				"LEGION-211 waits on ask ask-7, answered at 2026-10-25T12:00:00Z (reply)\n",
+		},
+		{
+			name:   "one unanswered",
+			issues: `{` + gate + `}`,
+			want:   "roots waiting on a person: 1, 0 answered and waiting for a slot — LEGION-210 waits on spec version 3 of spec-210, unanswered\n",
+		},
+		{name: "none", issues: `{}`, want: "roots waiting on a person: none\n"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			served := "{" + daemon + `,"issues":` + tc.issues + "}"

@@ -9,10 +9,11 @@ release, an npm publish and a pin bump.
 
 Two different commits of `sjawhar/proof-sdk` matter here, and they are not the same fact.
 
-The files in the table below were copied byte for byte out of
-**24a5fc94915cda5704897c497af6312c140db40d**, the fork's v0.3.13 — the last commit that still
+The files in the table below, but for `src/directive-factories.ts`, were copied byte for byte out
+of **24a5fc94915cda5704897c497af6312c140db40d**, the fork's v0.3.13 — the last commit that still
 held them. The cut that followed deleted them from the fork, so that commit stays the audit
-source however far the fork line moves.
+source however far the fork line moves. `src/directive-factories.ts` comes from
+micromark-extension-directive 4.0.0 instead.
 
 The upstream modules this package imports at runtime come from the git dependency, pinned at
 **dc6a852b2ab45463dc9d3d17762235450c8ff0d6** on the fork's cleaned `library` line. Moving that
@@ -29,8 +30,9 @@ pin changes nothing in the table; it changes what `node_modules/proof-sdk-upstre
 | `src/editor/schema/block-ids.ts` | Block ids: minting, the DOM attribute, the duplicate-id repair rule |
 | `src/lib.css` | The editor stylesheet |
 | `src/tests/*.test.ts` | The suites that came with those files |
+| `src/directive-factories.ts` | `factoryName`, `factoryLabel` and `factoryAttributes`, copied from micromark-extension-directive 4.0.0 (`lib/factory-name.js`, `lib/factory-label.js` and `lib/factory-attributes.js`), which does not export them: `src/directive-container.ts` tokenizes a `:::` opener's name, label and attributes with them. They are kept whole, the `disallowEol` branches for `false` that neither call takes included (INFRA-581) |
 
-Nine files under `src/` are legion's own rather than copies, so the file-by-file audit below does
+Sixteen files under `src/` are legion's own rather than copies, so the file-by-file audit below does
 not reach them:
 
 | File | What it is |
@@ -43,9 +45,16 @@ not reach them:
 | `src/record-mark-history.ts` | The plugin that keeps the composer's own record-mark writes out of undo history in both undo managers, so neither undo nor redo writes one back: a write of `proofComment`, `proofSuggestion` or `dispatchAsk` steps that takes nothing from another record (it removes no span, as a creation over another record's mark does not since the three declare `excludes: ''`, or puts back what it removes, as upstream's suggestion restamp does), and `removeRecordMark`'s removal; any other removal of a record mark keeps its undo step (LEGION-363, LEGION-458); it is also biome-checked |
 | `src/record-mark-retype.ts` | Retyping a provisional record mark for the margin composer's Comment / Suggest / Ask switch, and the precise span-by-span removal behind the handle's `removeMark`, over text and inline atoms such as an image alike (LEGION-363); it is also biome-checked |
 | `src/record-mark-target.ts` | Which mark a click or a hover in the document names: of the mark spans around the target, the record mark whose range is the smallest, the innermost span's among marks the same size, since which of two overlapping record marks nests inside the other follows the order they were made in (LEGION-458); it is also biome-checked |
+| `src/typed-block-drawing.ts` | The typed-block drawing both parse modes share: `markdownSource`, a file's text without one leading U+FEFF, which micromark drops before it counts the offsets the tree carries; the content-rule fit check, which maps each child to the node its `parseMarkdown.match` accepts (a mark node's children in its place) and calls `NodeType.createAndFill`, since Milkdown drops a node whose content breaks its rule, with all its text, without throwing; `drawDirective`, a directive drawn in place as a paragraph of its opening line, its content formatted (the label paragraph dropped) and a paragraph of its closing fence when the source closes it; and `remarkDecideTypedBlocks`, the transformer whose innermost-first walk keeps a container directive typed only when the caller accepts it and its processed content fits. `remarkUnfitTypedBlocks` (the headless engine's default mode) accepts every directive `remarkTypedBlocks` let through, so an ask holding a heading is drawn as its lines instead of vanishing (INFRA-565); it is also biome-checked |
+| `src/read-only-directives.ts` | `remarkReadOnlyDirectives`, the headless engine's read-only stand-in for `remarkTypedBlocks`, built on `remarkDecideTypedBlocks`: a container directive the block schema refuses (or any, with no schema) is drawn in place, and the paragraph-line directive refusals are not applied, so a body only shown to a reader formats around a block Dispatch does not know instead of falling back whole to its raw source (INFRA-529). An accepted typed block whose content would break its content rule is drawn the same way. A typed block kept typed loses every attribute the block schema marks `server`, after the schema accepts it, so each reads at its schema default and a body's forged `:::ask{state="answered" …}` reads as an open decision (INFRA-612). The live editor makes the same drawing decision, through the shared `acceptedTypedBlock`, as `liveTypedBlocksRemarkPlugin` (reading the editor's schema the first time it parses, registered after the mark plugins): a paste or `setMarkdown` (a past version's view) draws a directive the block schema refuses as its literal lines rather than throwing, where a throw in a paste let the browser insert the plain text with its lines joined; it keeps the `server` attributes, which a past version must show and settlement writes from the ask's row (sjawhar/legion#2433); it is also biome-checked |
+| `src/ask-content.ts` | `relaxAskContentCheck(schema)`, which replaces the `ask` node's `validContent` so a built ask may hold any non-empty run of the children of the schema's `block` group, the blocks the document service accepts in it. The non-typed ones are listed in `packages/envoy/internal/dispatch/pmdoc/schema/block-node-types.json`, which pmdoc's `isBlockNodeType` embeds and this package's drift test reads, so the two sides cannot drift. y-prosemirror builds each node through `createChecked` and deletes from the shared document one it refuses, so an ask two collaborators' concurrent edits left off its `paragraph+ bullet_list?` rule (two lists, a paragraph after its list) lost its text in every editor and on the server (sjawhar/legion#2433). Content matching keeps the rule, so local edits, input rules, pastes and markdown parses still hold to it. `brokenAskInputGuards`, view props `src/lib.ts` installs with `view.setProps(brokenAskInputGuards)`: inside an ask that breaks its rule, an input whose edit throws - a key command (Enter twice to leave a list, Backspace joining a list item into the question or over a selection across blocks), text input over a selection, a drop, a cut, or a `beforeinput` insertion or deletion over a selection across blocks - is declined, with no edit and the default prevented, instead of escaping as a page error while the browser applies its own edit (a `beforeinput` whose own edit does not throw is applied as ProseMirror's edit in place of the browser's); an input method that starts composing over such a selection has the selection collapsed to its start first, so the composed text lands there and nothing is deleted. `keepUnselectedAskBlocks`, a plugin `src/lib.ts` registers with `.use(keepUnselectedAskBlocks)`, refuses a local edit inside such an ask that deletes any character or other leaf (an image, a hard break, a divider that is itself the block) of a child block the selection does not touch - never a pure insertion, and never an undo or redo of the person's own edit (prosemirror-history's transactions pass, as y-prosemirror's do) - which an edit the browser makes itself (`document.execCommand`, as writing extensions use) and ProseMirror reads back from the DOM would otherwise do; the DOM observer then redraws the page from the kept state; it is also biome-checked |
+| `src/mermaid-svg.ts` | `@legion/proof-editor/mermaid`, the DOM half of a Mermaid diagram, for Dispatch's Markdown bodies (INFRA-528) and the editor's mermaid code blocks (INFRA-532): `mermaidSvgElement` turns the markup `src/mermaid-render.ts` returns into an `<svg>` of the page's document with the editor's accessible name; `showMermaidSvg` mounts it with a sheet in the host element's open shadow root, created once and reused, so the diagram's own `<style>` and marker ids reach nothing outside it; `MermaidDrawing` and `MermaidDrawer` are the contract by which the editor asks its host to draw a source. It imports nothing from upstream, so a page imports it without beautiful-mermaid or ELK. `sanitizeMermaidSvg` is stricter than upstream's private `sanitizeSvg`, because a comment or a document is written by any person or agent: markup that is not an SVG document throws `Invalid SVG output`; element names compare exactly, since XML names are case-sensitive, so an `<SVG>` root is refused and a `<RECT>` removed; only the elements beautiful-mermaid emits survive, every `on*` and `href` attribute goes (matched case-insensitively), every attribute but a `data-*` one that holds a CSS escape or a fetching function (`url(…)` other than a local `url(#id)`, `image-set(…)` and the like, which an author's `classDef` or `style` paint reaches) goes, and each `<style>` loses its Google Fonts `@import`; it is also biome-checked |
+| `src/mermaid-render.ts` | `@legion/proof-editor/mermaid-render`, the DOM-free half: `renderMermaidMarkup` calls upstream's `renderProofMermaidSvg`, so the validation, renderer, colours and spacing are upstream's, and returns the unsanitized markup, or throws upstream's reason for a source it refuses. It touches no DOM, so its only caller is Dispatch's Web Worker, for comments and documents alike, off the reader's main thread, where beautiful-mermaid's and ELK's cost grows without bound with the diagram; in a browser worker the caller hides `self` during the call, or ELK's bundled engine takes the worker for its own and refuses every flowchart (Dispatch's `features/refs/mermaid-render.worker.ts`); it is also biome-checked |
+| `src/mermaid-code-block-view.ts` | The editor's view of every code block, in place of upstream's `mermaidDiagramsPlugin` (INFRA-532), whose view drew on the page's thread and put the diagram's `<style>`, with its Google Fonts `@import`, into the page. A plain block keeps upstream's DOM. A mermaid block is drawn by the host's `drawMermaid` (Dispatch's Web Worker) into the preview's shadow root with `showMermaidSvg`; its layout (preview, status line, the open source disclosure holding the `pre`) is set only in ProseMirror's own `update`, never when an answer arrives, so a late drawing cannot move the contentDOM under a caret; an edit asks again `EDIT_REDRAW_DELAY_MS` (300 ms) after the last change, cancelling the earlier request (a drawer never draws after its cancel), the shown drawing staying until the answer; `destroy` cancels. With no drawer, or one that never answers, the block shows its source, and an `unavailable` answer (no renderer can run) clears any earlier drawing and the status, so the block shows its source again. It imports nothing from upstream, so beautiful-mermaid and ELK stay out of the editor's chunk; it is also biome-checked |
+| `src/directive-container.ts` | `directiveContainerSyntax`, the micromark extension `remarkContainerDirectives` registers for the `:::name[label]{attributes}` container: a micromark document construct, held on the document tokenizer's container stack as a block quote or a list item is, in place of micromark-extension-directive's flow construct, which tokenized a block's content once for each block around it, so a body nesting `:::` a few thousand deep froze a reader's tab for about a minute (INFRA-581). It emits that package's token types, so `mdast-util-directive` builds the same `containerDirective` nodes from them; its `resolveAll` (`resolveDirectiveContainers`) and the `lazyContentEnd` construct keep the flow construct's reading of blank lines, lazy lines and the line endings after fences; and an opener standing inside `maxDirectiveNesting` (32) open directive containers does not open, so its line reads as the text it is. It reads an opener's name, label and attributes with the copied factories in `src/directive-factories.ts`; it is also biome-checked |
 | `src/tests/harness.ts` | The `bun test` registration the copied suites call instead of their own `test()` tally |
 
-Fifteen kinds of edit are allowed in the copied files, and no others: the import specifiers of
+Twenty-three kinds of edit are allowed in the copied files, and no others: the import specifiers of
 upstream modules; `bun test` registration in the suites (`src/tests/harness.ts` replaces each
 file's own `test()` tally and its `process.exit` tail); `src/tests/headless-no-dom.test.ts`,
 whose entry named the fork's built `dist/headless.js` and now names `../lib-headless.js` — its
@@ -77,12 +86,50 @@ so a click on text two record marks cover opens the narrower one (LEGION-458);
 `src/dispatch-action-bar.ts`'s Comment / Suggest / Ask buttons and its exported
 `commentOnSelection` taking one path, `ActionBarController.act`, which marks nothing for an empty
 or stale range or a read-only view, with `src/lib.ts` exposing `commentOnSelection` on the handle
-for Dispatch's `Ctrl+Alt+M` (LEGION-680); and annotations, casts and assertions that make a file
-type-check, each of which erases before runtime (below).
+for Dispatch's `Ctrl+Alt+M` (LEGION-680); `src/block-schema.ts` exporting `typedBlockRefusal`,
+the refusal `visit` throws, so the read-only transform decides with the same rule, and
+`src/lib-headless.ts`'s `readOnly` option installing `remarkReadOnlyDirectives` from
+`./read-only-directives` in place of `remarkTypedBlocks` (INFRA-529); `src/lib-headless.ts`
+taking `renderBlock` and passing it to `blockSchemaPlugins`, as `src/lib.ts` does, and
+re-exporting `HostBlockRenderer`, with the case in `src/tests/block-schema.test.ts` that a host
+drawing keeps the block's copy attributes (INFRA-526); `src/block-schema.ts`'s
+`remarkTypedBlocks` reading its source through `markdownSource` from `./typed-block-drawing`, and
+`src/lib-headless.ts`'s default branch installing `remarkUnfitTypedBlocks` after
+`remarkTypedBlocks` (INFRA-565); `src/lib.ts` installing `liveTypedBlocksRemarkPlugin` from
+`./read-only-directives` after the mark plugins in place of `typedBlockRemarkPlugin`, and calling
+`relaxAskContentCheck(schema)` from `./ask-content` before it binds the shared document and
+installing `brokenAskInputGuards` from it with `view.setProps(brokenAskInputGuards)` and
+`keepUnselectedAskBlocks` from it with `.use(keepUnselectedAskBlocks)` among its plugins,
+`src/lib-headless.ts` calling `relaxAskContentCheck` after building its schema, with its
+`parseMarkdown` and `readOnly` comments naming the live editor's step,
+`src/lib-remark-directive-plugin.ts` dropping `typedBlockRemarkPlugin`, and
+`src/typed-block-commands.ts`'s `retype` and `canRetype` requiring the typed node's content match
+of the body, so a block is never retyped into an ask it cannot be (sjawhar/legion#2433);
+`src/lib-remark-directive-plugin.ts` registering `directiveContainerSyntax` from
+`./directive-container` in place of micromark-extension-directive's flow container, with
+`containerDirectiveSyntax`, the package's import and the `micromark-util-types` import it needed
+gone and the plugin's doc comment rewritten to say which construct it registers (INFRA-581);
+`src/block-schema.ts`'s default-mode refusal of a `:::name{...}` paragraph line standing inside
+`maxDirectiveNesting` directives (imported from `./directive-container`), an opener the tokenizer
+left as text — `rejectUnsupportedDirectiveSyntax` counts the `containerDirective` nodes around
+each paragraph and `unsupportedDirectiveReason` takes that count (INFRA-581);
+`src/directive-factories.ts` joining micromark-extension-directive 4.0.0's `lib/factory-name.js`,
+`lib/factory-label.js` and `lib/factory-attributes.js` into one module, in that order, each after
+a comment naming its file, under the package's MIT notice, with the three files' imports one block
+at the top and each JSDoc `@import` an `import type` (INFRA-581); `src/lib.ts` installing
+`mermaidCodeBlockPlugin` from `./mermaid-code-block-view` in place of upstream's
+`mermaidDiagramsPlugin` and taking the host's `drawMermaid` option (typed `MermaidDrawer`,
+imported from `./mermaid-svg`) for it, and `src/lib.css` dropping its `.proof-mermaid-svg` rules,
+which that view's shadow-root sheet carries (INFRA-532); and annotations, casts and assertions
+that make a file type-check, each of which erases before runtime (below).
 
 To audit a copied file, diff it against `jj --ignore-working-copy -R <proof-sdk> file show -r
-24a5fc94 root:src/<file>`; every file in the copied-files table has that counterpart, and the
-only lines that differ should be the fifteen kinds.
+24a5fc94 root:src/<file>`; every file in the copied-files table but `src/directive-factories.ts`
+has that counterpart, and the only lines that differ should be the twenty-three kinds.
+`src/directive-factories.ts`'s counterparts are those three files of micromark-extension-directive
+4.0.0 (`node_modules/.bun/micromark-extension-directive@4.0.0` at the repository root, or the
+package's npm tarball); each function there differs from its source by the join and the type
+annotations and casts alone.
 
 `scripts/`, `tests/` and `upstream/` are legion's own. `scripts/` and `tests/` are linted and
 type-checked like any other package's; `upstream/` is generated, and Biome is off over it the
@@ -94,8 +141,15 @@ boundary is `any` again.
 
 The copied files are proof-sdk's and stay under its MIT license, as does `upstream/`, which tsc
 derives from proof-sdk's pinned sources; `LICENSE` beside this file is that license, taken from the
-fork at 24a5fc94. Legion's own files listed above, `scripts/` and `tests/` are under the
-repository's Apache-2.0 license.
+fork at 24a5fc94. `src/directive-factories.ts` is micromark-extension-directive's instead and
+stays under that package's MIT license, whose notice the file carries at its top. Legion's own
+files listed above, `scripts/` and `tests/` are under the repository's Apache-2.0 license.
+
+`src/directive-container.ts` relies on two parts of micromark's document tokenizer: a container
+state's `_closeFlow`, which a closing fence sets to end the flow inside the block, and a
+construct's `resolveAll`, which runs over the document's events once it is tokenized. micromark,
+which reaches this package through `mdast-util-from-markdown`, stays at 4.0.2 in `bun.lock`: a
+move must keep both working, and 4.0.3 is quadratic for quotes and lists (micromark/micromark#246).
 
 ## The upstream boundary
 
@@ -172,13 +226,15 @@ bun run upstream-declarations  # rewrite upstream/ from the pinned sources (only
 
 ## Conventions
 
-The copied tree keeps proof-sdk's style — single quotes, its own line width — and Biome's
+The copied tree keeps its sources' style — proof-sdk's single quotes and line width, and in
+`src/directive-factories.ts` micromark-extension-directive 4.0.0's published layout — and Biome's
 formatter, linter and `assist` are all turned off over it in the root `biome.json`, so a diff
-against the pinned commit stays readable. `assist` matters as much as the other two: its
+against the source stays readable. `assist` matters as much as the other two: its
 `organizeImports` is a safe fix, so one `biome check --write` or an editor with organize-on-save
 would reorder the copy's imports. `upstream/` is excluded the same way, for the same reason:
 it is tsc's output, not source. Anything legion writes here — `scripts/`, `tests/`,
 `src/collab-cursor-plugin.ts`, `src/editor-highlights.ts`, `src/editor/schema/uuid.ts`, `src/trailing-newline-input.ts`,
-`src/record-mark-history.ts`, `src/record-mark-retype.ts`, `src/record-mark-target.ts`,
+`src/record-mark-history.ts`, `src/record-mark-retype.ts`, `src/record-mark-target.ts`, `src/read-only-directives.ts`, `src/typed-block-drawing.ts`, `src/ask-content.ts`, `src/mermaid-svg.ts`, `src/mermaid-render.ts`, `src/mermaid-code-block-view.ts`,
+`src/directive-container.ts`,
 `src/tests/harness.ts` — follow the
 repo's conventions and are checked.

@@ -68,12 +68,19 @@ validates.
 
 `github.event.pull_request` is absent on a `merge_group` event. The PR-title check
 (`.github/workflows/pr-title.yaml`, moved out of `Tests` by LEGION-90 / #1059 because it alone
-needs the `edited` event) is therefore correctly on `pull_request` and the pull request's comment
-and review events only, never `merge_group`: a merge group has no title, comment or review to
+needs the `edited` event) is therefore correctly on `pull_request` and `pull_request_review` only,
+never `merge_group`: a merge group has no title, comment or review to
 check, and a merge-group payload never carries `edited`. Do not fold it back into `Tests`
 under "one workflow for the queue" pressure — re-derive that constraint first. A required check
 that is pull-request-only must not be in the ruleset's required list, or the queue waits for it
 forever.
+
+**Superseded 2026-10-27 (INFRA-520).** `pr-title` stays a required check beside `ci-ok` when main
+merges through the queue, so it must report on the merge group too, and keeping it off
+`merge_group` no longer holds. `pr-title.yaml` now runs on `merge_group` (`checks_requested`) and
+re-checks the pull request the group adds: it reads the number from the group's `head_ref`
+(`refs/heads/gh-readonly-queue/<base>/pr-<number>-<sha>`), fetches that pull request with
+`gh api`, and runs the same title and text checks on it. The rest of this note stands.
 
 ## 3. The trigger lands on `main` before the rule is switched on — never the other way round
 

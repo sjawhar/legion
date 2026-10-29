@@ -1,6 +1,6 @@
 ---
 name: legion-controller
-description: Use when you are a Legion project's controller session, on any controller wake (triage, slot-free, todo, tick, unslotted, held, worker-died), weekly-plan ranking, backlog stewardship, a clear defect or finding ask a role sends, an issue a person asks you to file, the daily report, an architect's escalation, or a person's message or mention.
+description: Use when you are a Legion project's controller session, on any controller wake (triage, slot-free, todo, tick, unslotted, awaiting-person, held, worker-died), weekly-plan ranking, backlog stewardship, a clear defect or finding ask a role sends, an issue a person asks you to file, the daily report, an architect's escalation, or a person's message or mention.
 ---
 
 # Legion Controller
@@ -12,7 +12,7 @@ except a clear defect a role reports ([Issues handed to Legion](#issues-handed-t
 
 ## Rules
 
-- Handle no wake until the extension's startup claim of `legion-<project>-controller` succeeded, because without it the daemon does not know you as its controller.
+- Handle no wake until the extension has registered this session with the daemon as the project's controller, at session startup or, in a controller an operator started, from its first command once Oh My Pi has started, because without that registration the daemon does not know you as its controller.
 - Answer a person's direct message first, in the conversation. A plain user turn that is neither the start message nor a task sent with `legion claims deliver` is a person writing from Dispatch's Agents page.
 - A direct Dispatch message that decides scope, priority or an owner is a ruling: after you answer it, run the weekly-plan reconciliation (`skill://legion-controller/references/backlog-stewardship.md`), because the plan must record the rule.
 - Handle one wake per turn, then end the turn. Never poll or wait for an event, because the daemon wakes you again (`tick` at least every `controller_wake_interval_seconds`).
@@ -43,7 +43,9 @@ because Envoy keeps no copy of a wake sent while no controller ran.
 1. Read `read_state`. Handle each issue whose `phase` is `held` with `holdReason: escalated`, and
    each root whose `architect.state` is `failed` and whose `phase` is not `done`, as its wake says.
    Name in your summary each root at `phase: done` whose `status` is `in_progress`, `testing`,
-   `needs_review` or `retro`: someone else works it, as the `unslotted` wake reports.
+   `needs_review` or `retro`: Legion runs it no longer, as the `unslotted` wake reports: someone
+   else moved it there while it waited for a slot, or it waited on a person (`awaiting_person`) and
+   lost its label or its Dispatch claim, which leaves the `in_progress` it ran with.
 2. Triage the roots handed to Legion while you were away, as
    `skill://legion-controller/references/triage.md` "At every start" says.
 3. Catch up on the report issue
@@ -59,6 +61,7 @@ Wake details: `skill://legion-controller/references/wakes.md`.
 | `slot-free on <KEY>`, `todo on <KEY>` | Name the free slots; take nothing |
 | `tick on <PROJECT>` | The every-turn steps |
 | `unslotted on <KEY>` | Re-admit nothing; name it in your summary |
+| `awaiting-person on <KEY>` | Nothing: do not park or re-admit it, and take nothing for the slot it returned |
 | `held on <KEY>` | Nothing, unless `reason: "escalated"`: then an escalation |
 | `worker-died on <KEY>` (`role: "architect"`) | Re-admit once its cause is gone, else park it |
 | An architect's escalation | `skill://legion-controller/references/escalation.md` |

@@ -25,17 +25,17 @@ func (e *Engine) checks(ctx context.Context, tx pgx.Tx, fact intake.PullRequestC
 	}
 	// A handoff push can start no CI of its own (GitHub's skip-checks trailer), so the settlement
 	// that stands for the head can be of the code head it replaced, arriving after it. A
-	// settlement is for the commit it names, never the head by default.
+	// settlement is for the commit it names, never the head by default. While a head run is open
+	// the settlement is recorded in it whether it stands or not (classify.ApplyCheckSettlement).
 	candidate := classify.SettlementCandidate{Head: fact.HeadSHA, CheckRuns: fact.CheckRuns, Generation: fact.Generation, Snapshot: fact.Snapshot, Failing: fact.Failing, Cancelled: fact.Cancelled}
-	var stands bool
-	if *pr, stands = classify.SettlementFor(*pr, candidate); !stands {
-		return intake.Result{}, nil
-	}
-	var applied bool
-	*pr, applied = classify.ApplySettlement(*pr, candidate)
+	settled, applied := classify.ApplyCheckSettlement(*pr, candidate)
 	if !applied {
-		return intake.Result{}, nil
+		if pr.Run == nil {
+			return intake.Result{}, nil
+		}
+		return intake.Result{}, e.store.PutPullRequest(ctx, tx, settled)
 	}
+	*pr = settled
 	return intake.Result{}, e.decideChecks(ctx, tx, pr, false)
 }
 
@@ -45,20 +45,27 @@ func (e *Engine) checks(ctx context.Context, tx pgx.Tx, fact intake.PullRequestC
 // only a required check or workflow makes a head red (classify.HeadVerdict), so a new read can
 // send work back for a newly required check or a required workflow that failed, leave standing a
 // head red only on checks the base branch never required, and give a head its first verdict when
-// its set was never read. A read that says what is recorded changes nothing.
+// its set was never read. A read that says what is recorded changes nothing, unless a red held
+// while its head waited for a push has lapsed and is not decided yet (HoldLapsed): the pass sends
+// that read for it (daemon's readRequiredChecks), and it decides the red as it stands, once a push
+// webhook lost for good has had its time.
 func (e *Engine) requiredChecks(ctx context.Context, tx pgx.Tx, fact intake.RequiredChecks) (intake.Result, error) {
 	pr, err := e.pullRequest(ctx, tx, fact.Repo, fact.Number)
-	if err != nil || pr == nil || pr.RequiredReadUnchanged(fact.Names, fact.Workflows, fact.WorkflowsHead) {
+	if err != nil || pr == nil {
 		return intake.Result{}, err
 	}
-	pr.Required = append([]string{}, fact.Names...)
-	pr.Workflows = append([]record.RequiredWorkflow{}, fact.Workflows...)
-	pr.WorkflowsHead = fact.WorkflowsHead
+	if pr.RequiredReadUnchanged(fact.Names, fact.Workflows, fact.WorkflowsHead) {
+		if !e.HoldLapsed(*pr) {
+			return intake.Result{}, nil
+		}
+		return intake.Result{}, e.decideChecks(ctx, tx, pr, false)
+	}
+	*pr = classify.ApplyRequiredRead(*pr, fact.Names, fact.Workflows, fact.WorkflowsHead)
 	return intake.Result{}, e.decideChecks(ctx, tx, pr, true)
 }
 
 // mergeability records what GitHub's last read found for whether the pull request's head can be
-// merged into its base (intake.PullRequestMergeability, pullRequestMergeability's own GitHub
+// merged into its base (intake.PullRequestMergeability, readPullRequest's own GitHub
 // answer). In awaiting_merge it withdraws a conflicting head the way decideChecks's AwaitingMerge
 // case withdraws a red one (classify.ConflictWithdrawsReady, the same TriggerChecksRed
 // transition), since GitHub computes no merge ref for a conflicting head and no CI result will
@@ -115,6 +122,7 @@ func (e *Engine) mergeability(ctx context.Context, tx pgx.Tx, fact intake.PullRe
 // a red that sent the work back is told by its checks-red, and the next push onto it raises the
 // count.
 func (e *Engine) decideChecks(ctx context.Context, tx pgx.Tx, pr *record.PullRequest, requiredRead bool) error {
+	e.noteLapse(ctx, pr)
 	if err := e.store.PutPullRequest(ctx, tx, *pr); err != nil {
 		return err
 	}
@@ -136,7 +144,7 @@ func (e *Engine) decideChecks(ctx context.Context, tx pgx.Tx, pr *record.PullReq
 		// change (record.RequiredReadUnchanged), so it withdraws the READY if the run is still red,
 		// and leaves it if the run passed; that read decides the count's report too.
 		if !requiredRead && classify.RedOnlyByWorkflows(*pr) {
-			pr.WorkflowsHead = ""
+			*pr = classify.ClearWorkflowsHead(*pr)
 			return e.store.PutPullRequest(ctx, tx, *pr)
 		}
 		if moved, err = e.sendBack(ctx, tx, *issue, pr); err != nil {
@@ -169,8 +177,12 @@ func (e *Engine) sendBack(ctx context.Context, tx pgx.Tx, issue record.Issue, pr
 // reportExhaustedCount posts an exhausted fix-attempt count on the issue and tells the architect,
 // once per count (classify.BlockFixAttempt). Linger holds a member of a closed tree where it stood
 // (record.TreeLingers): the count is recorded on the pull request, and nothing is posted on the
-// issue or told to its architect.
+// issue or told to its architect. While a red is held (holdsRed) the count is not yet the one every
+// push arriving first would give, so it is reported once the hold ends (push, requiredChecks).
 func (e *Engine) reportExhaustedCount(ctx context.Context, tx pgx.Tx, issue *record.Issue, pr *record.PullRequest) error {
+	if e.holdsRed(*pr) {
+		return nil
+	}
 	var blocked bool
 	if *pr, blocked = classify.BlockFixAttempt(*pr, e.cfg.MaxFixAttempts); !blocked {
 		return nil
@@ -428,10 +440,11 @@ func (r round) stuckAs(other round) bool {
 // reads no CI verdict: CI is the daemon's separate rule, which sends a red head back to implementing
 // from reviewing as from any phase before READY, on the fact that makes the red stand (decideChecks,
 // standingRed), and the reviewer reads the code commit's checks on GitHub before it approves. A
-// round whose reviewer never completes is not ended by the decision alone: the reviewer's pane gets
-// a follow-up turn when a turn ends with its phase open (pi-legion's phase-stall check, at most two
-// a stall), and past that the issue stays in reviewing, as a tester's that never completes stays
-// in testing. A completed round that nothing on its way would end is stuck, its reason naming the
+// round whose reviewer never completes is not ended by the decision alone: the reviewer's worker
+// gets a reminder at the end of every turn that ends with its phase open (the phase reminder in
+// @legion/pi-shared, driven by each harness's own hooks), and past that the issue stays in
+// reviewing, as a tester's that never completes stays in testing. A completed round that nothing
+// on its way would end is stuck, its reason naming the
 // head, since the decision it needs is of the head: no review decided it (stuckUndecided), or its
 // approval is of other code than the head's (stuckApprovedOtherCode). An approval of the head a
 // push that may change code is still on its way from (classify.CodeOnItsWay) keeps the round open:
@@ -486,12 +499,105 @@ func (e *Engine) reviewRound(issue record.Issue, row record.PhaseRow, pr *record
 // issue was held, where nothing moves (retryOrEscalate); and by the implementer's completion, which
 // hands on a head a red may have come to stand for while it was implementing, where nothing moves
 // (implementationReady). A fact that finds no red standing applies nothing, so each applies the rule
-// before whatever else it does.
+// before whatever else it does. A red is held while its head waits for a push of its move
+// (holdsRed). In awaiting_merge a red withdraws the READY whatever it is (decideChecks), so nothing
+// is held there.
 func (e *Engine) standingRed(ctx context.Context, tx pgx.Tx, issue record.Issue, pr *record.PullRequest) (bool, error) {
-	if issue.Phase == phase.AwaitingMerge || pr == nil || !classify.RedSendsBack(*pr) || classify.FixAttemptCapHolds(*pr, e.cfg.MaxFixAttempts) {
+	if issue.Phase == phase.AwaitingMerge || pr == nil || !classify.RedSendsBack(*pr) {
+		return false, nil
+	}
+	if e.holdsRed(*pr) {
+		e.logOnCommit(ctx, "workflow: a red is held while its head waits for the push that reached it; the push, or the pass once the hold lapses, decides it",
+			"issue", pr.Issue, "pullRequest", pr.Number, "head", pr.HeadSHA, "heldSince", heldSince(*pr), "lapses", heldSince(*pr).Add(redHold))
+		return false, nil
+	}
+	if classify.FixAttemptCapHolds(*pr, e.cfg.MaxFixAttempts) {
 		return false, nil
 	}
 	return e.sendBack(ctx, tx, issue, pr)
+}
+
+// redHold bounds how long a red is held while its head waits for a push of its move: GitHub
+// delivers a push webhook and its synchronize seconds apart, and the required-checks pass, which
+// ends a lapsed hold (HoldLapsed), reads every two minutes. A push webhook lost for good, which
+// nothing replays, then leaves the red to be judged as it stands, as before the head run.
+const redHold = 10 * time.Minute
+
+// heldSince is when pr's head arrived while a head run was open - the arrival time on the run's
+// last head step, which is the head's own (stampRun) - or zero when no run is open or the step
+// carries no time. Each head is held from its own arrival: a head that joins an open run gets its
+// full hold whenever the run opened.
+func heldSince(pr record.PullRequest) time.Time {
+	if pr.Run == nil {
+		return time.Time{}
+	}
+	for i := len(pr.Run.Steps) - 1; i >= 0; i-- {
+		if step := pr.Run.Steps[i]; step.Head != "" {
+			return step.At
+		}
+	}
+	return time.Time{}
+}
+
+// holdsRed says whether pr's red is held: a head run is open (record.PullRequest.Run) - a head
+// arrived before every push of its move - and the head arrived less than redHold ago. While it
+// holds, whether the red is planned, and the count it stands at, are not yet what every push
+// arriving first would make them, and a send-back cannot be taken back; the push that closes the
+// run, or whose replay changes the judgement, decides the checks (push), and so does the pass once
+// the hold lapses (HoldLapsed).
+func (e *Engine) holdsRed(pr record.PullRequest) bool {
+	since := heldSince(pr)
+	return !since.IsZero() && e.now().Before(since.Add(redHold))
+}
+
+// HoldLapsed says whether the hold on pr's red has lapsed by the engine's clock and nothing has
+// decided the red since: the required-checks pass then sends its read even when it says what is
+// recorded (daemon's readRequiredChecks), and the engine decides the red (requiredChecks).
+func (e *Engine) HoldLapsed(pr record.PullRequest) bool {
+	since := heldSince(pr)
+	return !since.IsZero() && !e.now().Before(since.Add(redHold)) && pr.Run.Decided != pr.HeadSHA
+}
+
+// noteLapse marks pr's lapsed hold decided (record.HeadRun.Decided) and says so, naming the
+// verdict decided, when the checks are about to be decided with the hold lapsed, so the pass does
+// not send the read again.
+func (e *Engine) noteLapse(ctx context.Context, pr *record.PullRequest) {
+	if !e.HoldLapsed(*pr) {
+		return
+	}
+	run := *pr.Run
+	run.Decided = pr.HeadSHA
+	pr.Run = &run
+	verdict := classify.HeadVerdict(*pr)
+	decided := "the checks are decided as they stand"
+	if verdict != "" {
+		decided = "the " + verdict + " is decided as it stands"
+	}
+	e.logOnCommit(ctx, "workflow: the hold on the checks of a head that waited for its push lapsed; "+decided,
+		"issue", pr.Issue, "pullRequest", pr.Number, "head", pr.HeadSHA, "verdict", verdict, "heldSince", heldSince(*pr), "held", e.now().Sub(heldSince(*pr)))
+}
+
+// stampRun records when pr's head arrived on the run's last head step, the step that arrival
+// added (record.RunStep.At), when a head run is open. The arrival starts the head's hold afresh,
+// so it clears the mark of a lapse decided before it (record.HeadRun.Decided): a branch that
+// returns to a head whose lapse was decided earlier in the run is held, and its lapse decided,
+// again.
+func (e *Engine) stampRun(pr *record.PullRequest) {
+	if pr.Run == nil {
+		return
+	}
+	for i := len(pr.Run.Steps) - 1; i >= 0; i-- {
+		if pr.Run.Steps[i].Head == "" {
+			continue
+		}
+		if pr.Run.Steps[i].At.IsZero() {
+			run := *pr.Run
+			run.Steps = append([]record.RunStep{}, run.Steps...)
+			run.Steps[i].At, run.Decided = e.now(), ""
+			pr.Run = &run
+		}
+		return
+	}
 }
 
 // implementationReady moves issue from implementing to testing on the implementer's completion of
@@ -521,7 +627,7 @@ func (e *Engine) implementationReady(ctx context.Context, tx pgx.Tx, issue recor
 		return nil
 	}
 	if classify.RedOnlyByWorkflows(*pr) {
-		pr.WorkflowsHead = ""
+		*pr = classify.ClearWorkflowsHead(*pr)
 		return e.store.PutPullRequest(ctx, tx, *pr)
 	}
 	handed, err := e.store.Issue(ctx, tx, issue.Key)

@@ -3,35 +3,37 @@ import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { fireEvent, render, waitFor, within } from "@testing-library/react";
 import type { Window as HappyDOMWindow } from "happy-dom";
 import type { ReactNode } from "react";
+import { MemoryRouter } from "react-router-dom";
 
 import { api } from "../../api/client";
-import type { Artifact, AskRead } from "../../api/types";
+import type {
+  AskRead,
+  IssueReferenceSummary,
+  IssueReferenceSummaryDocument,
+} from "../../api/types";
+import { TextAskBlockCard } from "../doc/AskBlockCard";
 import { MarkdownBody } from "./MarkdownBody";
+import { TextAskCard } from "./markdown-cards";
 
 function withQueries(children: ReactNode): ReactNode {
   const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
   return <QueryClientProvider client={queryClient}>{children}</QueryClientProvider>;
 }
 
-/** An image artifact of CORE-1 with two versions, as the issue read lists it. */
-const picture: Artifact = {
-  created_at: "2026-10-04T00:00:00Z",
-  created_by: { id: "alice", kind: "user" },
+/** An image document of CORE-1 whose latest version is 2, as the issue summary lists it. */
+const picture: IssueReferenceSummaryDocument = {
   id: "artifact-shot",
-  issue_key: "CORE-1",
   kind: "image",
+  latest_version: 2,
   name: "shot.png",
   primary: false,
-  project: "CORE",
   slug: "shot-png",
-  versions: [1, 2].map((number) => ({
-    authors: [{ id: "alice", kind: "user" as const }],
-    created_at: "2026-10-04T00:00:00Z",
-    named: false,
-    number,
-    summary: null,
-  })),
 };
+
+/** CORE-1's summary read, the one read behind a reference to it or to its documents. */
+function issueSummary(documents: IssueReferenceSummaryDocument[]): IssueReferenceSummary {
+  return { documents, key: "CORE-1", project: "CORE", status: "in_progress", title: "Core one" };
+}
 
 // The dashboard is served from an origin, where a picture's same-origin bytes route resolves.
 // happy-dom's page starts at `about:blank`, where no relative `src` resolves and every picture
@@ -133,11 +135,9 @@ describe("Dispatch pictures", () => {
   });
 
   test("a Dispatch picture that pins no version reads as its reference, with the image's thumbnail", async () => {
-    const getIssue = spyOn(api, "getIssue").mockResolvedValue({
-      artifacts: [picture],
-      key: "CORE-1",
-      title: "Core one",
-    } as never);
+    const getIssueSummary = spyOn(api, "getIssueSummary").mockResolvedValue(
+      issueSummary([picture])
+    );
     const view = render(
       withQueries(<MarkdownBody markdown="![shot.png](dispatch://CORE-1/artifact/shot-png)" />)
     );
@@ -154,17 +154,15 @@ describe("Dispatch pictures", () => {
       );
       expect(link.querySelector("img")?.className.split(" ")).toContain("h-10");
     } finally {
-      getIssue.mockRestore();
+      getIssueSummary.mockRestore();
       view.unmount();
     }
   });
 
   test("a plain reference whose thumbnail cannot load drops it and keeps the title", async () => {
-    const getIssue = spyOn(api, "getIssue").mockResolvedValue({
-      artifacts: [picture],
-      key: "CORE-1",
-      title: "Core one",
-    } as never);
+    const getIssueSummary = spyOn(api, "getIssueSummary").mockResolvedValue(
+      issueSummary([picture])
+    );
     // A hand-written or stale reference can pin a version the server does not serve; the
     // thumbnail's load then fails, and the reference reads as its title with no broken glyph.
     const view = render(
@@ -185,17 +183,15 @@ describe("Dispatch pictures", () => {
       expect(link.textContent).toBe("shot.png");
       expect(link.getAttribute("href")).toBe("/issues/CORE-1/artifacts/shot-png?v=99");
     } finally {
-      getIssue.mockRestore();
+      getIssueSummary.mockRestore();
       view.unmount();
     }
   });
 
   test("a plain reference to a non-image artifact shows no thumbnail", async () => {
-    const getIssue = spyOn(api, "getIssue").mockResolvedValue({
-      artifacts: [{ ...picture, kind: "file", name: "notes.pdf", slug: "notes-pdf" }],
-      key: "CORE-1",
-      title: "Core one",
-    } as never);
+    const getIssueSummary = spyOn(api, "getIssueSummary").mockResolvedValue(
+      issueSummary([{ ...picture, kind: "file", name: "notes.pdf", slug: "notes-pdf" }])
+    );
     const view = render(
       withQueries(<MarkdownBody markdown="See dispatch://CORE-1/artifact/notes-pdf" />)
     );
@@ -204,17 +200,15 @@ describe("Dispatch pictures", () => {
       const link = await within(view.container).findByRole("link", { name: "notes.pdf" });
       expect(link.querySelector("img")).toBeNull();
     } finally {
-      getIssue.mockRestore();
+      getIssueSummary.mockRestore();
       view.unmount();
     }
   });
 
   test("a version that is no picture falls back to the reference's title", async () => {
-    const getIssue = spyOn(api, "getIssue").mockResolvedValue({
-      artifacts: [{ ...picture, kind: "file", name: "notes.pdf", slug: "notes-pdf" }],
-      key: "CORE-1",
-      title: "Core one",
-    } as never);
+    const getIssueSummary = spyOn(api, "getIssueSummary").mockResolvedValue(
+      issueSummary([{ ...picture, kind: "file", name: "notes.pdf", slug: "notes-pdf" }])
+    );
     const view = render(
       withQueries(<MarkdownBody markdown="![notes](dispatch://CORE-1/artifact/notes-pdf@v1)" />)
     );
@@ -226,7 +220,151 @@ describe("Dispatch pictures", () => {
       expect(link.getAttribute("href")).toBe("/issues/CORE-1/artifacts/notes-pdf?v=1");
       expect(within(view.container).queryByRole("img")).toBeNull();
     } finally {
-      getIssue.mockRestore();
+      getIssueSummary.mockRestore();
+      view.unmount();
+    }
+  });
+
+  // A picture's source and a link's target are nodes an author named explicitly, so a document
+  // whose name is past the bound text is held to (2683 characters, which a new upload's reference
+  // key still holds) is drawn from its version's bytes and opened by its page, not left a
+  // `dispatch://` source the browser cannot fetch or a dead link.
+  test("a long-named picture is drawn and an explicit link to a long-named document opens it", async () => {
+    const slug = "a".repeat(2683);
+    const getIssueSummary = spyOn(api, "getIssueSummary").mockResolvedValue(
+      issueSummary([{ ...picture, kind: "doc", name: "design.md", slug }])
+    );
+    const getArtifactText = spyOn(api, "getArtifactText").mockResolvedValue({
+      markdown: "The design.",
+      token: "sha256:design",
+      version: 1,
+    });
+    const view = render(
+      withQueries(
+        <MarkdownBody
+          markdown={`![shot](dispatch://CORE-1/artifact/${slug}@v1)\n\nSee [design](dispatch://CORE-1/artifact/${slug}).`}
+        />
+      )
+    );
+
+    try {
+      const shot = await within(view.container).findByRole("img", { name: "shot" });
+      expect(shot.getAttribute("src")).toBe(`/api/v1/issues/CORE-1/artifacts/${slug}/versions/1`);
+      expect(shot.closest("a")?.getAttribute("href")).toBe(`/issues/CORE-1/artifacts/${slug}?v=1`);
+      const link = await within(view.container).findByRole("link", { name: "design.md" });
+      expect(link.getAttribute("href")).toBe(`/issues/CORE-1/artifacts/${slug}`);
+      expect(link.getAttribute("data-dispatch-ref")).toBe(`dispatch://CORE-1/artifact/${slug}`);
+    } finally {
+      getArtifactText.mockRestore();
+      getIssueSummary.mockRestore();
+      view.unmount();
+    }
+  });
+
+  // A URL left as text is text to the server's `text.Extract`, which cites a dashboard page only
+  // within the bounds the graph keys: a document past them stays the URL it is, and a block past
+  // them (257 bytes) is its document. A link its author wrote names its target, so it opens the
+  // same long-named document.
+  test("a bare dashboard URL past the bounds stays a plain link; an author's link to it still opens the document", async () => {
+    const slug = "a".repeat(2683);
+    const getIssueSummary = spyOn(api, "getIssueSummary").mockResolvedValue(
+      issueSummary([
+        { ...picture, kind: "doc", name: "design.md", slug },
+        { ...picture, id: "artifact-plan", kind: "doc", name: "plan.md", slug: "plan-md" },
+      ])
+    );
+    const getArtifactText = spyOn(api, "getArtifactText").mockResolvedValue({
+      markdown: "The design.",
+      token: "sha256:design",
+      version: 1,
+    });
+    const page = `https://dispatch.test/issues/CORE-1/artifacts/${slug}`;
+    const plan = "https://dispatch.test/issues/CORE-1/artifacts/plan-md";
+    const view = render(
+      withQueries(
+        <MarkdownBody
+          markdown={`Bare: ${page}\n\nSee [design](${page}) and [design](dispatch://CORE-1/artifact/${slug}).\n\nPlan: ${plan} and ${plan}#b-${"b".repeat(257)}`}
+        />
+      )
+    );
+
+    try {
+      const designs = await within(view.container).findAllByRole("link", { name: "design.md" });
+      expect(designs).toHaveLength(2);
+      for (const link of designs) {
+        expect(link.getAttribute("href")).toBe(`/issues/CORE-1/artifacts/${slug}`);
+        expect(link.getAttribute("data-dispatch-ref")).toBe(`dispatch://CORE-1/artifact/${slug}`);
+      }
+      const plans = await within(view.container).findAllByRole("link", { name: "plan.md" });
+      expect(plans).toHaveLength(2);
+      for (const link of plans) {
+        expect(link.getAttribute("href")).toBe("/issues/CORE-1/artifacts/plan-md");
+        expect(link.getAttribute("data-dispatch-ref")).toBe("dispatch://CORE-1/artifact/plan-md");
+      }
+      const bare = within(view.container).getByRole("link", { name: page });
+      expect(bare.getAttribute("href")).toBe(page);
+      expect(bare.getAttribute("data-dispatch-ref")).toBeNull();
+    } finally {
+      getArtifactText.mockRestore();
+      getIssueSummary.mockRestore();
+      view.unmount();
+    }
+  });
+
+  // The `dispatch://` forms of a URL left as text: an angle-bracket autolink, and a Markdown link
+  // whose words are its own target, the form a document stores one in. Proof's serializer moves
+  // their target into `data-dispatch-href`; they are text to the server all the same, so past the
+  // bounds they stay plain, and within them they are references. A `dispatch://` link its author
+  // gave words of its own still opens the long-named document.
+  test("a dispatch:// URL left as text past the bounds stays plain; an author's dispatch:// link with its own words still opens", async () => {
+    const slug = "a".repeat(2683);
+    const getIssueSummary = spyOn(api, "getIssueSummary").mockResolvedValue(
+      issueSummary([
+        { ...picture, kind: "doc", name: "design.md", slug },
+        { ...picture, id: "artifact-plan", kind: "doc", name: "plan.md", slug: "plan-md" },
+      ])
+    );
+    const getArtifactText = spyOn(api, "getArtifactText").mockResolvedValue({
+      markdown: "The design.",
+      token: "sha256:design",
+      version: 1,
+    });
+    const long = `dispatch://CORE-1/artifact/${slug}`;
+    const plan = "dispatch://CORE-1/artifact/plan-md";
+    const block = `${plan}#b-${"b".repeat(257)}`;
+    const view = render(
+      withQueries(
+        <MarkdownBody
+          markdown={`Angle: <${long}>\n\nSelf: [${long}](${long})\n\nBlock: <${block}>\n\nSee [design](${long}).\n\nPlan: <${plan}> and [${plan}](${plan})`}
+        />
+      )
+    );
+
+    try {
+      const designs = await within(view.container).findAllByRole("link", { name: "design.md" });
+      expect(designs).toHaveLength(1);
+      expect(designs[0]?.getAttribute("href")).toBe(`/issues/CORE-1/artifacts/${slug}`);
+      expect(designs[0]?.getAttribute("data-dispatch-ref")).toBe(long);
+      const plans = await within(view.container).findAllByRole("link", { name: "plan.md" });
+      expect(plans).toHaveLength(2);
+      for (const link of plans) {
+        expect(link.getAttribute("data-dispatch-ref")).toBe(plan);
+      }
+      // Past the bounds each is its words as plain text: no link to click, and no
+      // `data-dispatch-href` for the hover card (`RefPreview`'s trigger) to find.
+      for (const [label, words] of [
+        ["Angle:", long],
+        ["Self:", long],
+        ["Block:", block],
+      ] as const) {
+        const paragraph = within(view.container).getByText(label, { exact: false });
+        expect(paragraph.textContent).toBe(`${label} ${words}`);
+        expect(paragraph.querySelector("a")).toBeNull();
+        expect(paragraph.querySelector("[data-dispatch-href],[data-dispatch-ref]")).toBeNull();
+      }
+    } finally {
+      getArtifactText.mockRestore();
+      getIssueSummary.mockRestore();
       view.unmount();
     }
   });
@@ -247,16 +385,268 @@ describe("Dispatch pictures", () => {
   });
 });
 
-test("renders a typed callout body through the server schema", async () => {
+test("a typed callout in a body draws its name, kind and title above its content, as a document does", async () => {
   const view = render(
-    <MarkdownBody
-      markdown={':::callout{#callout-1 kind="warning" title="Read this"}\nBody text.\n:::\n'}
-    />
+    <MarkdownBody markdown={':::callout{kind="warning" title="Read this"}\nBody text.\n:::\n'} />
   );
 
   try {
-    expect(await within(view.container).findByText("Body text.")).toBeDefined();
+    const content = await waitFor(() => {
+      const found = view.container.querySelector<HTMLElement>("[data-proof-block-content]");
+      expect(found).not.toBeNull();
+      return found as HTMLElement;
+    });
+    expect(view.container.querySelector("[data-proof-block-name]")?.textContent).toBe("callout");
+    expect(view.container.querySelector("[data-proof-block-badge]")?.textContent).toBe("warning");
+    expect(view.container.querySelector("[data-proof-block-title]")?.textContent).toBe("Read this");
+    expect(within(content).getByText("Body text.")).toBeDefined();
+    const blockId = view.container
+      .querySelector('section[data-proof-block-type="callout"]')
+      ?.getAttribute("data-block-id");
+    expect(blockId).toBeTruthy();
+    expect(view.container.textContent).not.toContain("blockId");
+    expect(view.container.textContent).not.toContain(blockId as string);
     expect(view.container.textContent).not.toContain(":::callout");
+  } finally {
+    view.unmount();
+  }
+});
+
+/** A body as the app shell draws it: under a router, with the read-only decision card the app
+ *  provides for every `ask` block in a comment, ask or message body. */
+function withAskCard(children: ReactNode): ReactNode {
+  return (
+    <MemoryRouter future={{ v7_relativeSplatPath: true, v7_startTransition: true }}>
+      <TextAskCard.Provider value={TextAskBlockCard}>{children}</TextAskCard.Provider>
+    </MemoryRouter>
+  );
+}
+
+const askBody = "Which one?\n\n- A: first\n- B: second\n:::\n";
+
+/** The `ask` shell a body drew, once it has drawn one. */
+function findAskShell(container: HTMLElement): Promise<HTMLElement> {
+  return waitFor(() => {
+    const shell = container.querySelector<HTMLElement>('section[data-proof-block-type="ask"]');
+    expect(shell).not.toBeNull();
+    return shell as HTMLElement;
+  });
+}
+
+/** The rows of the card's recorded options, once the card has drawn both of them. */
+function findRecordRows(shell: HTMLElement): Promise<HTMLElement[]> {
+  return waitFor(() => {
+    const rows = Array.from(
+      shell.querySelectorAll<HTMLElement>(
+        "[data-dispatch-ask-footer] [data-dispatch-ask-record] li"
+      )
+    );
+    expect(rows).toHaveLength(2);
+    return rows;
+  });
+}
+
+test("an ask block in a body draws the decision card: urgency and Decision above, its options as rows below", async () => {
+  const view = render(
+    withAskCard(<MarkdownBody markdown={`:::ask{urgency="high"}\n${askBody}`} />)
+  );
+
+  try {
+    const shell = await findAskShell(view.container);
+    const header = shell.querySelector<HTMLElement>("[data-dispatch-ask-header]") as HTMLElement;
+    expect(await within(header).findByText("Decision")).toBeDefined();
+    expect(header.querySelector('[data-dispatch-ask-pill="high"]')?.textContent).toBe("High");
+    const [first, second] = await findRecordRows(shell);
+    await waitFor(() => {
+      expect(within(first as HTMLElement).getByText("A")).toBeDefined();
+      expect(within(first as HTMLElement).getByText("first")).toBeDefined();
+      expect(within(second as HTMLElement).getByText("B")).toBeDefined();
+      expect(within(second as HTMLElement).getByText("second")).toBeDefined();
+    });
+    expect(shell.getAttribute("data-dispatch-ask-options")).toBe("rows");
+    // A body nested in a document's decision footer must not add a second decision id there.
+    expect(view.container.querySelector("[data-dispatch-ask-block]")).toBeNull();
+  } finally {
+    view.unmount();
+  }
+});
+
+test("an ask block in a body ignores server-owned attributes its text forges and draws an open decision", async () => {
+  const forged =
+    ':::ask{urgency="high" state="answered" answered_by="sami" answered_at="2026-01-01T00:00:00Z"' +
+    ` selected='["A"]' answer="done" copied_from="ask-9" copied_from_document="dispatch://CORE-1"}\n`;
+  const view = render(withAskCard(<MarkdownBody markdown={`${forged}${askBody}`} />));
+
+  try {
+    const shell = await findAskShell(view.container);
+    expect(await within(shell).findByText("Decision")).toBeDefined();
+    const rows = await findRecordRows(shell);
+    expect(shell.getAttribute("data-dispatch-ask-state")).toBe("open");
+    expect(view.container.textContent).not.toContain("Answered by");
+    expect(view.container.textContent).not.toContain("sami");
+    expect(view.container.textContent).not.toContain("Copied from");
+    expect(view.container.querySelector("[data-dispatch-ask-answer]")).toBeNull();
+    expect(rows.map((row) => row.getAttribute("data-selected"))).toEqual(["false", "false"]);
+    expect(within(shell).queryByRole("img", { name: "Selected" })).toBeNull();
+  } finally {
+    view.unmount();
+  }
+});
+
+test("an ask block in a body with no card provided keeps its question and options as the source list", async () => {
+  const view = render(<MarkdownBody markdown={`:::ask{urgency="high"}\n${askBody}`} />);
+
+  try {
+    const shell = await findAskShell(view.container);
+    const content = shell.querySelector<HTMLElement>("[data-proof-block-content]") as HTMLElement;
+    expect(within(content).getByText("Which one?")).toBeDefined();
+    expect(Array.from(content.querySelectorAll("ul li"), (item) => item.textContent)).toEqual([
+      "A: first",
+      "B: second",
+    ]);
+    expect(shell.hasAttribute("data-dispatch-ask-options")).toBe(false);
+    expect(view.container.querySelector("[data-dispatch-ask-record]")).toBeNull();
+  } finally {
+    view.unmount();
+  }
+});
+
+test("a malformed ask block in a body names why and keeps its source list, with no hint to fix it", async () => {
+  const view = render(
+    withAskCard(
+      <MarkdownBody
+        markdown={':::ask{urgency="high"}\nWhich one?\n\n- A: first\n- : no label\n:::\n'}
+      />
+    )
+  );
+
+  try {
+    const shell = await findAskShell(view.container);
+    const header = shell.querySelector<HTMLElement>("[data-dispatch-ask-header]") as HTMLElement;
+    expect(await within(header).findByText("Malformed")).toBeDefined();
+    expect(within(header).getByText("Option 2 has no label")).toBeDefined();
+    expect(view.container.textContent).not.toContain("re-activates");
+    expect(shell.hasAttribute("data-dispatch-ask-options")).toBe(false);
+    expect(shell.querySelectorAll("[data-proof-block-content] ul li")).toHaveLength(2);
+  } finally {
+    view.unmount();
+  }
+});
+
+test("a decision written inside another decision's option keeps each card in its own block", async () => {
+  // The outer fence is longer than the inner one, as a typed block holding another is written:
+  // the inner `:::` would close a three-colon outer block too.
+  const markdown =
+    '::::ask{urgency="high"}\nOuter?\n\n- A: first\n\n  :::ask\n  Inner?\n\n  - X: x\n  :::\n- B: second\n::::\n';
+  const view = render(withAskCard(<MarkdownBody markdown={markdown} />));
+
+  try {
+    const [outer, inner] = await waitFor(() => {
+      const shells = Array.from(
+        view.container.querySelectorAll<HTMLElement>('section[data-proof-block-type="ask"]')
+      );
+      expect(shells).toHaveLength(2);
+      return shells as [HTMLElement, HTMLElement];
+    });
+    // The inner decision sits in the outer decision's first option.
+    const outerContent = outer.querySelector<HTMLElement>(
+      ":scope > [data-proof-block-content]"
+    ) as HTMLElement;
+    expect(outerContent.contains(inner)).toBe(true);
+    expect(inner.closest("li")?.textContent).toContain("A: first");
+
+    const outerFooter = outer.querySelector<HTMLElement>(
+      ":scope > [data-dispatch-ask-footer]"
+    ) as HTMLElement;
+    const innerFooter = inner.querySelector<HTMLElement>(
+      ":scope > [data-dispatch-ask-footer]"
+    ) as HTMLElement;
+    await waitFor(() => {
+      const outerRows = Array.from(
+        outerFooter.querySelectorAll<HTMLElement>("[data-dispatch-ask-record] li")
+      );
+      expect(outerRows).toHaveLength(2);
+      expect(within(outerRows[0] as HTMLElement).getByText("A")).toBeDefined();
+      expect(within(outerRows[1] as HTMLElement).getByText("B")).toBeDefined();
+      const innerRows = Array.from(
+        innerFooter.querySelectorAll<HTMLElement>("[data-dispatch-ask-record] li")
+      );
+      expect(innerRows).toHaveLength(1);
+      expect(within(innerRows[0] as HTMLElement).getByText("X")).toBeDefined();
+    });
+    expect(within(innerFooter).queryByText("B")).toBeNull();
+    expect(within(innerFooter).queryByText("second")).toBeNull();
+  } finally {
+    view.unmount();
+  }
+});
+
+test("a container directive the schema refuses shows its fence lines and the body still formats", async () => {
+  const view = render(
+    <MarkdownBody markdown={"Some **bold** text\n\n:::note\nA note line\n:::\n"} />
+  );
+
+  try {
+    expect(await within(view.container).findByText("bold", { selector: "strong" })).toBeDefined();
+    const paragraphs = Array.from(view.container.querySelectorAll("p"), (p) => p.textContent);
+    expect(paragraphs).toEqual(["Some bold text", ":::note", "A note line", ":::"]);
+    expect(view.container.querySelector("[data-markdown-fallback]")).toBeNull();
+  } finally {
+    view.unmount();
+  }
+});
+
+test("a decision the read-only parse refuses leaves the valid decision beside it its own card", async () => {
+  // A heading breaks an ask's content rule, so the read-only parse draws that block as its fence
+  // lines around its content and makes no `ask` node of it; the card must still find the valid
+  // decision's node, whichever side of the refused block it sits on.
+  const refused = ":::ask\n## Heading\n\nWhich?\n\n- X: x\n:::\n";
+  const valid = `:::ask{urgency="high"}\n${askBody}`;
+  for (const markdown of [`${refused}\n${valid}`, `${valid}\n${refused}`]) {
+    const view = render(withAskCard(<MarkdownBody markdown={markdown} />));
+
+    try {
+      const shell = await findAskShell(view.container);
+      const shells = view.container.querySelectorAll('section[data-proof-block-type="ask"]');
+      expect(shells).toHaveLength(1);
+      // The refused block reads as its source lines, outside the one shell.
+      const fence = within(view.container).getByText(":::ask", { selector: "p" });
+      expect(shell.contains(fence)).toBe(false);
+      const heading = within(view.container).getByText("Heading", { selector: "h2" });
+      expect(heading.closest("section")).toBeNull();
+
+      const header = shell.querySelector<HTMLElement>(
+        ":scope > [data-dispatch-ask-header]"
+      ) as HTMLElement;
+      expect(await within(header).findByText("Decision")).toBeDefined();
+      expect(header.querySelector('[data-dispatch-ask-pill="high"]')?.textContent).toBe("High");
+      const footer = shell.querySelector<HTMLElement>(
+        ":scope > [data-dispatch-ask-footer]"
+      ) as HTMLElement;
+      await waitFor(() => {
+        const rows = Array.from(
+          footer.querySelectorAll<HTMLElement>("[data-dispatch-ask-record] li")
+        );
+        expect(rows).toHaveLength(2);
+        expect(within(rows[0] as HTMLElement).getByText("A")).toBeDefined();
+        expect(within(rows[1] as HTMLElement).getByText("B")).toBeDefined();
+      });
+      expect(shell.getAttribute("data-dispatch-ask-options")).toBe("rows");
+      expect(within(footer).queryByText("X")).toBeNull();
+      expect(view.container.querySelector("[data-markdown-fallback]")).toBeNull();
+    } finally {
+      view.unmount();
+    }
+  }
+});
+
+test("a Pandoc fenced div reads as text and the body still formats", async () => {
+  const view = render(<MarkdownBody markdown={"Some **bold** text\n\n::: warning\nBody\n:::\n"} />);
+
+  try {
+    expect(await within(view.container).findByText("bold", { selector: "strong" })).toBeDefined();
+    expect(view.container.textContent).toContain("::: warning");
+    expect(view.container.querySelector("[data-markdown-fallback]")).toBeNull();
   } finally {
     view.unmount();
   }
@@ -323,7 +713,11 @@ test("a bare dispatch ask reference renders an inline link to the ask route with
     },
     answers: [],
     edits: [],
+    claimant: null,
     followers: [],
+    route: null,
+    route_status: null,
+    route_holder: null,
     replies: [],
   };
   const getAsk = spyOn(api, "getAsk").mockResolvedValue(askRead);
@@ -342,6 +736,62 @@ test("a bare dispatch ask reference renders an inline link to the ask route with
     expect(getAsk).toHaveBeenCalledWith("ask-1");
   } finally {
     getAsk.mockRestore();
+    view.unmount();
+  }
+});
+
+test("a block reference reads as the headline of its text: the pinned version's, opening that version, or the current one, opening the block", async () => {
+  // The pinned link's path names the spec's slug, which the issue's summary carries: no link to
+  // a block reads the full issue.
+  const getIssueSummary = spyOn(api, "getIssueSummary").mockResolvedValue(
+    issueSummary([
+      { ...picture, id: "spec", kind: "doc", name: "Design.md", primary: true, slug: "design-md" },
+    ])
+  );
+  const getIssue = spyOn(api, "getIssue");
+  const node = {
+    block_id: "p1",
+    changed_version: 3,
+    document: "dispatch://CORE-1/spec",
+    id: "CORE-1/spec#p1",
+    issue_key: "CORE-1",
+    kind: "block" as const,
+    project: "CORE",
+    ref: "dispatch://CORE-1/spec#b-p1",
+    text: "Ship it on **Monday**.",
+  };
+  const getReferences = spyOn(api, "getReferences").mockImplementation((reference) =>
+    Promise.resolve(
+      reference.endsWith("@v2")
+        ? {
+            edges: [],
+            node: {
+              ...node,
+              pin: { ref: reference, state: "changed", text: "Ship it on Friday.", version: 2 },
+            },
+          }
+        : { edges: [], node }
+    )
+  );
+  const view = render(
+    withQueries(
+      <MarkdownBody markdown="Now dispatch://CORE-1/spec#b-p1 and then dispatch://CORE-1/spec#b-p1@v2." />
+    )
+  );
+
+  try {
+    const current = await within(view.container).findByRole("link", { name: "Ship it on Monday." });
+    expect(current.getAttribute("href")).toBe("/issues/CORE-1/spec#b-p1");
+    const pinned = await within(view.container).findByRole("link", { name: "Ship it on Friday." });
+    await waitFor(() =>
+      expect(pinned.getAttribute("href")).toBe("/issues/CORE-1/artifacts/design-md?v=2")
+    );
+    expect(pinned.getAttribute("data-dispatch-ref")).toBe("dispatch://CORE-1/spec#b-p1@v2");
+    expect(getIssue).not.toHaveBeenCalled();
+  } finally {
+    getReferences.mockRestore();
+    getIssue.mockRestore();
+    getIssueSummary.mockRestore();
     view.unmount();
   }
 });
@@ -374,7 +824,7 @@ test("an external URL unrelated to the app renders as an ordinary link", async (
   }
 });
 
-test("two references in one body each resolve their own inline link and title", async () => {
+test("two references in one body each resolve their own inline link and title, reading only what each shows", async () => {
   const askRead: AskRead = {
     ask: {
       id: "ask-1",
@@ -394,24 +844,25 @@ test("two references in one body each resolve their own inline link and title", 
     },
     answers: [],
     edits: [],
+    claimant: null,
     followers: [],
+    route: null,
+    route_status: null,
+    route_holder: null,
     replies: [],
   };
-  const projectArtifact: Artifact = {
-    created_at: "2026-09-09T00:00:00Z",
-    created_by: { id: "alice", kind: "user" },
-    id: "artifact-1",
-    issue_key: null,
-    kind: "doc",
-    name: "Runbook.md",
-    primary: false,
-    project: "CORE",
-    ref_key: "CORE/runbook-md",
-    slug: "runbook-md",
-    versions: [],
-  };
   const getAsk = spyOn(api, "getAsk").mockResolvedValue(askRead);
-  const getProjectArtifact = spyOn(api, "getProjectArtifact").mockResolvedValue(projectArtifact);
+  const getProjectDocumentSummary = spyOn(api, "getProjectDocumentSummary").mockResolvedValue({
+    id: "artifact-1",
+    kind: "doc",
+    latest_version: 4,
+    name: "Runbook.md",
+    project: "CORE",
+    slug: "runbook-md",
+  });
+  const getIssue = spyOn(api, "getIssue");
+  const getIssueSummary = spyOn(api, "getIssueSummary");
+  const getArtifactText = spyOn(api, "getArtifactText");
   const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
   const view = render(
     <QueryClientProvider client={queryClient}>
@@ -425,8 +876,16 @@ test("two references in one body each resolve their own inline link and title", 
     expect(askLink.getAttribute("href")).toBe("/issues/CORE-1/asks/ask-1");
     expect(documentLink.getAttribute("href")).toBe("/projects/CORE/documents/runbook-md");
     expect(within(view.container).getAllByRole("link")).toHaveLength(2);
+    expect(getProjectDocumentSummary).toHaveBeenCalledWith("CORE", "runbook-md");
+    // An ask link reads its ask alone, and an inline document link shows no text, so reads none.
+    expect(getIssue).not.toHaveBeenCalled();
+    expect(getIssueSummary).not.toHaveBeenCalled();
+    expect(getArtifactText).not.toHaveBeenCalled();
   } finally {
-    getProjectArtifact.mockRestore();
+    getArtifactText.mockRestore();
+    getIssueSummary.mockRestore();
+    getIssue.mockRestore();
+    getProjectDocumentSummary.mockRestore();
     getAsk.mockRestore();
     view.unmount();
   }
@@ -469,7 +928,11 @@ test("a hand-authored Markdown link to a dispatch:// target resolves through dat
     },
     answers: [],
     edits: [],
+    claimant: null,
     followers: [],
+    route: null,
+    route_status: null,
+    route_holder: null,
     replies: [],
   };
   const getAsk = spyOn(api, "getAsk").mockResolvedValue(askRead);
@@ -513,6 +976,91 @@ test("a body re-renders when its text grows, formatting what has closed since", 
     await waitFor(() =>
       expect(view.container.querySelectorAll("li")[1]?.textContent).toBe("second")
     );
+  } finally {
+    view.unmount();
+  }
+});
+
+// Each list is parted from the next by a plain paragraph, so each parses as its own list.
+test("a task item draws one disabled checkbox, ticked as its source is, in every list shape", async () => {
+  const view = render(
+    <MarkdownBody
+      markdown={[
+        "- [x] done\n- [ ] todo",
+        "Loose:",
+        "- [x] loose\n\n  second para",
+        "Ordered:",
+        "1. [x] one\n2. [ ] two",
+        "Nested:",
+        "- [x] parent\n  - [ ] child",
+        "Mixed:",
+        "- plain\n- [x] mixed",
+      ].join("\n\n")}
+    />
+  );
+
+  try {
+    const tasks = await waitFor(() => {
+      const found = Array.from(
+        view.container.querySelectorAll<HTMLLIElement>('li[data-item-type="task"]')
+      );
+      expect(found).toHaveLength(8);
+      return found;
+    });
+    const taskStartingWith = (text: string): HTMLLIElement => {
+      const item = tasks.find((task) => task.textContent?.startsWith(text));
+      if (item === undefined) {
+        throw new Error(`No task item starts with "${text}".`);
+      }
+      return item;
+    };
+    // A box belongs to the item it sits closest to, so a parent's count leaves out its child's.
+    const ownBoxes = (item: HTMLLIElement): HTMLInputElement[] =>
+      Array.from(item.querySelectorAll<HTMLInputElement>("input")).filter(
+        (box) => box.closest("li") === item
+      );
+
+    for (const item of tasks) {
+      const boxes = ownBoxes(item);
+      expect(boxes).toHaveLength(1);
+      const [box] = boxes;
+      expect(box?.type).toBe("checkbox");
+      expect(box?.disabled).toBe(true);
+      expect(box?.checked).toBe(item.getAttribute("data-checked") === "true");
+    }
+    expect(tasks.map((item) => ownBoxes(item)[0]?.checked)).toEqual([
+      true,
+      false,
+      true,
+      true,
+      false,
+      true,
+      false,
+      true,
+    ]);
+
+    const plain = Array.from(view.container.querySelectorAll("li")).find(
+      (item) => item.textContent === "plain"
+    );
+    expect(plain?.hasAttribute("data-item-type")).toBe(false);
+    expect(plain?.querySelector("input")).toBeNull();
+
+    // A tight item's paragraph is unwrapped with its box in it: box and words sit in the item.
+    for (const text of ["done", "todo", "one", "two", "child", "mixed"]) {
+      const item = taskStartingWith(text);
+      expect(item.querySelector("p")).toBeNull();
+      expect(Array.from(item.childNodes, (node) => node.nodeName)).toEqual(["INPUT", "#text"]);
+      expect(item.lastChild?.textContent).toBe(text);
+    }
+
+    // A loose or nested item keeps its paragraphs; the box leads the first one.
+    for (const text of ["loose", "parent"]) {
+      const item = taskStartingWith(text);
+      const paragraph = item.firstElementChild;
+      expect(paragraph?.tagName).toBe("P");
+      expect(paragraph?.firstChild).toBe(ownBoxes(item)[0] ?? null);
+      expect(paragraph?.textContent).toBe(text);
+    }
   } finally {
     view.unmount();
   }

@@ -123,7 +123,9 @@ func startListenerDelivery(t *testing.T, d *listenerDeps) {
 			MachineID:    rigMachineID,
 			HostBridge:   "127.0.0.1",
 			RequestLimit: 5 * time.Second,
-			Sessions:     d.sessions,
+			// No Sessions lookup: the delivery config above resolves the entry from its own
+			// sessions field and hands it to DeliverWithResultForEntry, so the deliverer holds
+			// no registry of its own (INFRA-141).
 		},
 		dedupeCache:       dedupeCache,
 		attemptCache:      attemptCache,
@@ -132,6 +134,13 @@ func startListenerDelivery(t *testing.T, d *listenerDeps) {
 		messagesDelivered: met.NewCounter("rig_messages_delivered", "test"),
 		messagesNAKed:     met.NewCounter("rig_messages_naked", "test"),
 		deliveryDuration:  met.NewHistogram("rig_delivery_duration", "test", metrics.DefaultBuckets),
+		// The set every handler built from one config shares; main.go builds one for the whole
+		// process and passes it through deliveryConfig, so a durable rebound after a flap draws on
+		// the budget its predecessor held rather than opening a second one. This rig needs one only
+		// because listenerDeliveryHandler refuses a config without it: its unplaceableRetryWindow
+		// is zero, so nothing here is ever deferred, and these tests cover Dispatch resolution and
+		// delivery rather than the retry policy (INFRA-141).
+		deferredUnplaceable: newUnplaceableDeferrals(),
 	}
 	subscription, err := startListenerSubscription(
 		d.client, "listener-dispatch-"+id.New(), jetStreamDeliveryHandler(config))
@@ -154,7 +163,7 @@ func migratedDispatchDatabase(t *testing.T) *dispatchstore.Store {
 	if err := database.Migrate(ctx); err != nil {
 		t.Fatalf("migrate the Dispatch database: %v", err)
 	}
-	people := dispatchstore.NewPgPeopleStore(database.Pool, "signing-key", nil)
+	people := dispatchstore.NewPgPeopleStore(database.Pool, auth.SingleSigningKey("signing-key"), nil)
 	if err := people.Record(ctx, rigHuman); err != nil {
 		t.Fatalf("record %s as having signed in: %v", rigHuman, err)
 	}
@@ -169,7 +178,7 @@ func dispatchMux(t *testing.T, database *dispatchstore.Store, envoyURL string) h
 	if err != nil {
 		t.Fatalf("parse the shared agent token: %v", err)
 	}
-	people := dispatchstore.NewPgPeopleStore(database.Pool, "signing-key", nil)
+	people := dispatchstore.NewPgPeopleStore(database.Pool, auth.SingleSigningKey("signing-key"), nil)
 	broker := events.NewBroker()
 	caller := identity.HeaderIdentity{Header: rigUserHeader, People: people}
 	// The document service is built here rather than left to NewDeps so this test can shut it
@@ -195,16 +204,15 @@ func dispatchMux(t *testing.T, database *dispatchstore.Store, envoyURL string) h
 		EnvoyURL:    envoyURL,
 		Docs:        documents,
 		Events:      broker,
-		Lifetime:    t.Context(),
 	})
 	if err != nil {
 		t.Fatalf("new Dispatch API dependencies: %v", err)
 	}
 	mux := http.NewServeMux()
-	// The wait returns once Lifetime is cancelled, which t.Context() is just before the
-	// cleanups run, and it must finish before the database pool closes — the cleanup registered
-	// first, so the one registered here runs first.
-	t.Cleanup(dispatchapi.Register(mux, deps))
+	// The wait returns once the server's lifetime, t.Context(), is cancelled, which it is just
+	// before the cleanups run, and it must finish before the database pool closes — the cleanup
+	// registered first, so the one registered here runs first.
+	t.Cleanup(dispatchapi.Register(mux, t.Context(), deps).Wait)
 	return mux
 }
 
@@ -269,7 +277,7 @@ func (rig *dispatchRig) registerSession(t *testing.T, sessionID, title string) *
 // is left for any listener to read.
 func (rig *dispatchRig) endSession(t *testing.T, sessionID string) {
 	t.Helper()
-	if err := rig.warm.sessions.Delete(sessionID); err != nil {
+	if err := rig.warm.sessions.Delete(context.Background(), sessionID); err != nil {
 		t.Fatalf("end %s: %v", sessionID, err)
 	}
 }
@@ -503,10 +511,9 @@ func TestDispatchBroadcastResolvesSessionsTheCacheHasNotRefilled(t *testing.T) {
 	tester := rig.registerSession(t, "ses_tester", "Tester")
 
 	response := rig.asHuman(t, http.MethodPost, "/api/v1/broadcasts", map[string]any{
-		"body":            "Stand down and report status.",
-		"delivery":        rigDeliveryMode,
-		"session_ids":     []string{planner.id, tester.id},
-		"idempotency_key": "cross-service-broadcast",
+		"body":        "Stand down and report status.",
+		"delivery":    rigDeliveryMode,
+		"session_ids": []string{planner.id, tester.id},
 	})
 	if response.Code != http.StatusCreated {
 		t.Fatalf("broadcast to two sessions the cache has not refilled: status=%d body=%s",
@@ -546,10 +553,9 @@ func TestDispatchRefusesABroadcastWhenASessionReadDoesNotAnswer(t *testing.T) {
 	stallSessionReads(t, rig.cold.sessions)
 
 	response := rig.asHuman(t, http.MethodPost, "/api/v1/broadcasts", map[string]any{
-		"body":            "Stand down and report status.",
-		"delivery":        rigDeliveryMode,
-		"session_ids":     []string{planner.id, tester.id},
-		"idempotency_key": "cross-service-unanswered",
+		"body":        "Stand down and report status.",
+		"delivery":    rigDeliveryMode,
+		"session_ids": []string{planner.id, tester.id},
 	})
 	if response.Code != http.StatusServiceUnavailable {
 		t.Fatalf("broadcast while the session bucket cannot be read: status=%d body=%s, want 503",

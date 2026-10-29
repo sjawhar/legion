@@ -3,12 +3,18 @@ package api
 import (
 	"bytes"
 	"context"
+	"io"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
+	"time"
 
+	"github.com/sjawhar/envoy/internal/contracts"
+	"github.com/sjawhar/envoy/internal/dispatch/api/apitest"
 	"github.com/sjawhar/envoy/internal/dispatch/auth"
 	"github.com/sjawhar/envoy/internal/dispatch/files"
 	"github.com/sjawhar/envoy/internal/dispatch/files/filestest"
@@ -346,6 +352,61 @@ func TestAnUploadTheServerCannotSpoolIsItsOwnFailure(t *testing.T) {
 	}
 }
 
+// The parser spools a file part past a megabyte to a temporary file, which net/http removes only
+// for the request it handed its handler; the upload parses a copy the access log and the
+// transaction tracking made, so through a real server every such upload left its file behind
+// until the pod's ephemeral storage ran out and the kubelet evicted it. The upload removes the
+// files itself, whether it stores the file or refuses the request after parsing it.
+func TestAnUploadLeavesNoSpooledFileBehind(t *testing.T) {
+	handler := newTestHandler(t)
+	issue := createArtifactIssue(t, handler)
+	spool := t.TempDir()
+	t.Setenv("TMPDIR", spool)
+	server := httptest.NewServer(handler)
+	t.Cleanup(server.Close)
+	for _, row := range []struct {
+		name   string
+		fields map[string]string
+		status int
+	}{
+		{name: "stored", fields: map[string]string{"name": "big.bin"}, status: http.StatusCreated},
+		{name: "refused after parsing", fields: map[string]string{"name": "big.bin", "content": "inline"}, status: http.StatusBadRequest},
+	} {
+		t.Run(row.name, func(t *testing.T) {
+			body, bodyType, err := apitest.MultipartUpload(row.fields, "big.bin", "application/octet-stream", make([]byte, 2<<20))
+			if err != nil {
+				t.Fatal(err)
+			}
+			request, err := http.NewRequest(http.MethodPost, server.URL+"/api/v1/issues/"+issue.Key+"/artifacts", body)
+			if err != nil {
+				t.Fatal(err)
+			}
+			request.Header.Set("Content-Type", bodyType)
+			request.Header.Set("X-Dispatch-User", "alice")
+			response, err := server.Client().Do(request)
+			if err != nil {
+				t.Fatal(err)
+			}
+			answer, _ := io.ReadAll(response.Body)
+			_ = response.Body.Close()
+			if response.StatusCode != row.status {
+				t.Fatalf("status=%d body=%s, want %d", response.StatusCode, answer, row.status)
+			}
+			left, err := os.ReadDir(spool)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(left) != 0 {
+				names := make([]string, 0, len(left))
+				for _, entry := range left {
+					names = append(names, entry.Name())
+				}
+				t.Fatalf("the upload left %v in its temporary directory", names)
+			}
+		})
+	}
+}
+
 func TestArtifactRoutesResolveUUIDsAndIssueScopedSlugs(t *testing.T) {
 	handler := newTestHandler(t)
 	issue := createArtifactIssue(t, handler)
@@ -527,7 +588,7 @@ func (unrecordedPeople) Record(context.Context, string) error { return nil }
 
 func TestArtifactIDRoutesValidateBeforeDatabaseUse(t *testing.T) {
 	mux := http.NewServeMux()
-	Register(mux, Deps{
+	Register(mux, t.Context(), Deps{
 		Store:    &store.Store{},
 		Identity: identity.HeaderIdentity{Header: "X-Dispatch-User", People: unrecordedPeople{}},
 	})
@@ -548,6 +609,250 @@ func TestArtifactIDRoutesValidateBeforeDatabaseUse(t *testing.T) {
 			response := dispatchRequest(t, mux, route.method, "/api/v1/artifacts/not-a-uuid"+route.suffix, route.body, "alice")
 			if response.Code != http.StatusNotFound || !strings.Contains(response.Body.String(), `"code":"ARTIFACT_NOT_FOUND"`) {
 				t.Fatalf("invalid UUID %s: status=%d body=%s", route.name, response.Code, response.Body.String())
+			}
+		})
+	}
+}
+
+// sentUpload is what a test upload's sender reads back: its answer, and whether the server read
+// its body to the end, as drainBeforeAnswer reads one before an early answer.
+type sentUpload struct {
+	*httptest.ResponseRecorder
+	readWhole bool
+}
+
+// sendBigUpload posts a 4 MiB file to the issue as alice, under key when key is not empty, in a
+// multipart body of its own - a boundary of its own, as every attempt of a client's has.
+func sendBigUpload(t *testing.T, handler http.Handler, issueKey, key string) sentUpload {
+	t.Helper()
+	return sendUpload(t, handler, issueKey, key, bytes.Repeat([]byte("a"), 4<<20))
+}
+
+// sendUpload posts file to the issue as big.bin, as sendBigUpload posts its 4 MiB.
+func sendUpload(t *testing.T, handler http.Handler, issueKey, key string, file []byte) sentUpload {
+	t.Helper()
+	body, bodyType, err := apitest.MultipartUpload(map[string]string{"name": "big.bin"}, "big.bin",
+		"application/octet-stream", file)
+	if err != nil {
+		t.Fatal(err)
+	}
+	size := int64(body.Len())
+	sent := &countingBody{Reader: body}
+	request := httptest.NewRequest(http.MethodPost, "/api/v1/issues/"+issueKey+"/artifacts", sent)
+	request.Header.Set("Content-Type", bodyType)
+	request.Header.Set("X-Dispatch-User", "alice")
+	if key != "" {
+		request.Header.Set(contracts.IdempotencyKeyHeader, key)
+	}
+	response := httptest.NewRecorder()
+	handler.ServeHTTP(response, request)
+	return sentUpload{ResponseRecorder: response, readWhole: sent.read.Load() == size}
+}
+
+// unspooled runs send with the temporary directory gone, where a request that spooled a body past
+// a megabyte - the keyed layer's spool, the multipart parser's - is answered 500
+// (TestAnUploadTheServerCannotSpoolIsItsOwnFailure), and puts it back after.
+func unspooled(t *testing.T, send func()) {
+	t.Helper()
+	previous, had := os.LookupEnv("TMPDIR")
+	t.Setenv("TMPDIR", filepath.Join(t.TempDir(), "missing"))
+	send()
+	if had {
+		t.Setenv("TMPDIR", previous)
+	} else {
+		os.Unsetenv("TMPDIR")
+	}
+}
+
+// closeArtifactIssue closes the issue as alice.
+func closeArtifactIssue(t *testing.T, handler http.Handler, issueKey string) {
+	t.Helper()
+	if closing := dispatchRequest(t, handler, http.MethodPatch, "/api/v1/issues/"+issueKey,
+		map[string]string{"status": "done"}, "alice"); closing.Code != http.StatusOK {
+		t.Fatalf("close the issue: status=%d body=%s", closing.Code, closing.Body.String())
+	}
+}
+
+// issueArtifactCount counts the issue's artifacts.
+func issueArtifactCount(t *testing.T, database *store.Store, issueKey string) int {
+	t.Helper()
+	var count int
+	if err := database.Pool.QueryRow(context.Background(),
+		`select count(*) from artifacts where issue_key = $1`, issueKey).Scan(&count); err != nil {
+		t.Fatal(err)
+	}
+	return count
+}
+
+// INFRA-258. An upload to a closed issue is refused 409 ISSUE_CLOSED before any of
+// its body is spooled, keyed or not: the keyed layer spools a body whole before its handler runs,
+// and the multipart parser spools one whole before the handler reaches its issue, so a closed
+// issue's 20 MB upload was written out in full only to be refused. The body is read off the
+// connection and discarded before the refusal (drainBeforeAnswer). Nothing is stored and no key is
+// claimed.
+func TestAnUploadToAClosedIssueIsRefusedBeforeItsBodyIsSpooled(t *testing.T) {
+	handler, database, _ := newTestServer(t, testServerOptions{files: filestest.NewMemory()})
+	issue := createArtifactIssue(t, handler)
+	closeArtifactIssue(t, handler, issue.Key)
+	before := issueArtifactCount(t, database, issue.Key)
+	for name, key := range map[string]string{"an unkeyed upload": "", "a keyed upload": "closed-upload"} {
+		unspooled(t, func() {
+			response := sendBigUpload(t, handler, issue.Key, key)
+			if code, _ := refusalOf(t, response.ResponseRecorder); response.Code != http.StatusConflict || code != "ISSUE_CLOSED" {
+				t.Errorf("%s to a closed issue: status=%d body=%s, want 409 ISSUE_CLOSED, unspooled", name, response.Code, response.Body.String())
+			}
+			if !response.readWhole {
+				t.Errorf("%s to a closed issue was refused before its body was read to the end", name)
+			}
+		})
+	}
+	if after, keys := issueArtifactCount(t, database, issue.Key), countRequestKeys(t, database); after != before || keys != 0 {
+		t.Fatalf("the refused uploads left %d artifacts (was %d) and %d keys, want nothing written", after, before, keys)
+	}
+}
+
+// INFRA-258. A repeat of an upload that landed is answered what that upload was,
+// whatever its issue's state now. Its answer was lost - a dropped connection, a reload that resumed
+// the write - and the issue closed before the repeat, as Legion's merge closes one: the upload is
+// stored, so the closed-issue refusal must not answer it. The key holds the answer, and the keyed
+// layer replays it; the file is stored once.
+func TestARepeatOfAnUploadThatLandedReplaysItsAnswerAfterTheIssueCloses(t *testing.T) {
+	handler, database, _ := newTestServer(t, testServerOptions{files: filestest.NewMemory()})
+	issue := createArtifactIssue(t, handler)
+	before := issueArtifactCount(t, database, issue.Key)
+	landed := sendBigUpload(t, handler, issue.Key, "landed-upload")
+	if landed.Code != http.StatusCreated {
+		t.Fatalf("the first upload: status=%d body=%s", landed.Code, landed.Body.String())
+	}
+	// The test drops nothing but its own reading of the answer: the client never saw it.
+	closeArtifactIssue(t, handler, issue.Key)
+	repeat := sendBigUpload(t, handler, issue.Key, "landed-upload")
+	if repeat.Code != http.StatusCreated || !replayed(repeat.ResponseRecorder) || repeat.Body.String() != landed.Body.String() {
+		t.Fatalf("the repeat once the issue closed: status=%d replayed=%v body=%s, want the first upload's 201 replayed",
+			repeat.Code, replayed(repeat.ResponseRecorder), repeat.Body.String())
+	}
+	if count := issueArtifactCount(t, database, issue.Key); count != before+1 {
+		t.Fatalf("the issue holds %d artifacts (%d before the upload), want the one upload added", count, before)
+	}
+}
+
+// heldFileStore is a file store whose Put says it was reached and then waits for release. An upload
+// held there has claimed its key, and has not yet begun the transaction that locks its issue, so the
+// issue can close while the upload is in flight.
+type heldFileStore struct {
+	*filestest.Memory
+	reached chan struct{}
+	release <-chan struct{}
+	once    sync.Once
+}
+
+func (s *heldFileStore) Put(ctx context.Context, sha, mime string, body []byte) error {
+	s.once.Do(func() { close(s.reached) })
+	<-s.release
+	return s.Memory.Put(ctx, sha, mime, body)
+}
+
+// INFRA-258. A repeat of an upload whose first request is still running when its
+// issue closes is told 409 KEY_IN_FLIGHT, unspooled, and not ISSUE_CLOSED: the first request
+// decides, under the issue's lock, whether the upload lands, and once it has answered the repeat is
+// given that answer. Here the first request reaches the issue after the close, so its answer, and
+// the repeat's, is its own 409 ISSUE_CLOSED.
+func TestARepeatOfAnUploadStillRunningWaitsForItsAnswerAfterTheIssueCloses(t *testing.T) {
+	held := &heldFileStore{Memory: filestest.NewMemory(), reached: make(chan struct{})}
+	handler, database, _ := newTestServer(t, testServerOptions{files: held})
+	release, releaseOnce := heldUntilReleased(t)
+	held.release = release
+	issue := createArtifactIssue(t, handler)
+	before := issueArtifactCount(t, database, issue.Key)
+	answered := make(chan sentUpload, 1)
+	go func() { answered <- sendBigUpload(t, handler, issue.Key, "running-upload") }()
+	select {
+	case <-held.reached:
+	case <-time.After(10 * time.Second):
+		t.Fatal("the first upload never reached the file store")
+	}
+	closeArtifactIssue(t, handler, issue.Key)
+
+	// The first upload has parsed its spooled body already: it reaches nothing more of the
+	// temporary directory.
+	unspooled(t, func() {
+		repeat := sendBigUpload(t, handler, issue.Key, "running-upload")
+		if code, _ := refusalOf(t, repeat.ResponseRecorder); repeat.Code != http.StatusConflict || code != contracts.IdempotencyKeyInFlight ||
+			repeat.Header().Get("Retry-After") != "1" || !repeat.readWhole {
+			t.Fatalf("a repeat while the first upload runs on a closed issue: status=%d body=%s read whole=%v, want 409 %s with Retry-After: 1, unspooled, its body read to the end",
+				repeat.Code, repeat.Body.String(), repeat.readWhole, contracts.IdempotencyKeyInFlight)
+		}
+	})
+
+	releaseOnce()
+	var first sentUpload
+	select {
+	case first = <-answered:
+	case <-time.After(10 * time.Second):
+		t.Fatal("the first upload never answered once released")
+	}
+	if code, _ := refusalOf(t, first.ResponseRecorder); first.Code != http.StatusConflict || code != "ISSUE_CLOSED" {
+		t.Fatalf("the first upload, which reached its issue after the close: status=%d body=%s, want 409 ISSUE_CLOSED",
+			first.Code, first.Body.String())
+	}
+	after := sendBigUpload(t, handler, issue.Key, "running-upload")
+	if after.Code != first.Code || !replayed(after.ResponseRecorder) || after.Body.String() != first.Body.String() {
+		t.Fatalf("a repeat once the first upload answered: status=%d replayed=%v body=%s, want its answer %s replayed",
+			after.Code, replayed(after.ResponseRecorder), after.Body.String(), first.Body.String())
+	}
+	if count := issueArtifactCount(t, database, issue.Key); count != before {
+		t.Fatalf("the issue holds %d artifacts (%d before the upload), want none added", count, before)
+	}
+}
+
+// INFRA-258. The closed-issue refusal runs before the body is spooled only where
+// the upload's handler would run: a key no row holds
+// (TestAnUploadToAClosedIssueIsRefusedBeforeItsBodyIsSpooled), one past its window, and one whose
+// holder died with nothing committed, which the next attempt takes over. Every key the keyed layer
+// answers itself is answered by it, whatever the issue's state: a first request that committed its
+// upload and is still running is KEY_IN_FLIGHT, unspooled, and one that committed and died before
+// its answer was kept is KEY_COMMITTED, once the layer has read the repeat's digest. Each case
+// lands an upload, closes the issue, and rewrites the key's row into the state it names; the stored
+// artifact is beside the point, since a repeat reads only the row.
+func TestAClosedIssueRefusesAnUploadOnlyWhereItsHandlerWouldRun(t *testing.T) {
+	unanswered := `status = null, headers = null, response = null`
+	for _, state := range []struct {
+		name      string
+		set       string
+		args      []any
+		code      string
+		unspooled bool
+	}{
+		{name: "in flight, its upload committed", set: unanswered + `, leased_at = now()`, code: contracts.IdempotencyKeyInFlight, unspooled: true},
+		{name: "lapsed after committing its upload", set: unanswered + `, leased_at = null`, code: contracts.IdempotencyKeyCommitted},
+		{name: "abandoned with nothing committed", set: unanswered + `, leased_at = null, committed_at = null`, code: "ISSUE_CLOSED", unspooled: true},
+		{
+			name: "past its window", set: `created_at = now() - make_interval(secs => $1) - interval '1 minute'`,
+			args: []any{contracts.IdempotencyKeyTTL.Seconds()}, code: "ISSUE_CLOSED", unspooled: true,
+		},
+	} {
+		t.Run(state.name, func(t *testing.T) {
+			handler, database, _ := newTestServer(t, testServerOptions{files: filestest.NewMemory()})
+			issue := createArtifactIssue(t, handler)
+			if landed := sendBigUpload(t, handler, issue.Key, "an-upload"); landed.Code != http.StatusCreated {
+				t.Fatalf("the first upload: status=%d body=%s", landed.Code, landed.Body.String())
+			}
+			closeArtifactIssue(t, handler, issue.Key)
+			// The test's only key is the upload's.
+			if tag, err := database.Pool.Exec(context.Background(), `update request_keys set `+state.set, state.args...); err != nil || tag.RowsAffected() != 1 {
+				t.Fatalf("rewrite the key's row: rows=%d err=%v", tag.RowsAffected(), err)
+			}
+			send := func() {
+				repeat := sendBigUpload(t, handler, issue.Key, "an-upload")
+				if code, _ := refusalOf(t, repeat.ResponseRecorder); repeat.Code != http.StatusConflict || code != state.code || !repeat.readWhole {
+					t.Fatalf("the repeat: status=%d body=%s read whole=%v, want 409 %s, its body read to the end",
+						repeat.Code, repeat.Body.String(), repeat.readWhole, state.code)
+				}
+			}
+			if state.unspooled {
+				unspooled(t, send)
+			} else {
+				send()
 			}
 		})
 	}
