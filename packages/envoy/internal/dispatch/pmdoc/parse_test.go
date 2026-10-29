@@ -68,6 +68,54 @@ func TestParsePreservesTaskListCheckboxState(t *testing.T) {
 	}
 }
 
+// An image's alt text keeps the characters of the raw HTML in its label, as the browser editor's
+// reader keeps them: `mdast-util-to-string`, which that reader builds an image's `alt` with,
+// writes a literal node's own value, and an mdast `html` node is a literal node. parseImage takes
+// text and nested images alone, so every kind of raw HTML in a label is dropped from the alt.
+//
+// Measured in the INFRA-752 pod on 2026-10-29 (gen/differential.ts, the engine of this head):
+// `![p <!a> q](i.png)` reads with alt `p <!a> q`, `![r <b> s](i.png)` with alt `r <b> s`, and the
+// same for a comment (`<!-- c -->`), a processing instruction and a CDATA section. The server
+// stores neither, so a comment drawing the markdown and the document editor drawing the stored
+// document show different alt text, which is the divergence this package exists to close.
+func TestParseKeepsRawHTMLInAnImageAltText(t *testing.T) {
+	for _, row := range []struct{ markdown, alt string }{
+		// A declaration at a lowercase letter: inline raw HTML to both readers since this
+		// package's own declarationParser, text to the reader before it, so its characters were
+		// stored until then and are dropped now.
+		{"![p <!a> q](i.png)\n", "p <!a> q"},
+		{"![<!a>](i.png)\n", "<!a>"},
+		{"![p <!a> q](i.png \"t\")\n", "p <!a> q"},
+		// Every other kind of raw HTML in a label, which both readers have always read as raw
+		// HTML and this one has always dropped.
+		{"![r <b> s](i.png)\n", "r <b> s"},
+		{"![r <!A> s](i.png)\n", "r <!A> s"},
+		{"![r <!-- c --> s](i.png)\n", "r <!-- c --> s"},
+		{"![r <?x?> s](i.png)\n", "r <?x?> s"},
+		{"![r <![CDATA[x]]> s](i.png)\n", "r <![CDATA[x]]> s"},
+	} {
+		t.Run(row.markdown, func(t *testing.T) {
+			doc, err := Parse(row.markdown)
+			if err != nil {
+				t.Fatalf("parse %q: %v", row.markdown, err)
+			}
+			var images []*Node
+			Walk(doc, func(node *Node) bool {
+				if node.Type == "image" {
+					images = append(images, node)
+				}
+				return true
+			})
+			if len(images) != 1 {
+				t.Fatalf("parse %q: %d images, want 1", row.markdown, len(images))
+			}
+			if alt, _ := images[0].Attrs["alt"].(string); alt != row.alt {
+				t.Fatalf("alt of %q = %q, want %q", row.markdown, alt, row.alt)
+			}
+		})
+	}
+}
+
 func TestParseRejectsBlockHTML(t *testing.T) {
 	_, err := Parse("<div>\nblock HTML\n</div>\n")
 	if err == nil || !errors.Is(err, ErrSchema) {
