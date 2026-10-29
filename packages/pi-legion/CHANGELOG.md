@@ -136,6 +136,80 @@ before the split, and the Envoy plugin's releases after it, are in `packages/pi-
 
 ### Added
 
+- The skill-scenario rig takes a third model route, `LEGION_E2E_MODEL_ROUTE=provider`: the
+  anthropic-messages provider block `LEGION_E2E_MODEL_PROVIDER` names in the operator's own
+  `LEGION_E2E_MODEL_PROVIDER_FILE`, copied with its `apiKey: "!cat <absolute file>"` as written, so
+  agents and judges read the key where the operator keeps it and no key is copied into a profile.
+  `LEGION_E2E_MODEL_PROVIDER_MODEL` picks the agents' model; the judge keeps its own. A judge's
+  container mounts that file's directory read-only, and extracts its own native addon instead of
+  mounting the operator's shared cache, which other sessions prune. Every transcript names the
+  block as the provider that served each turn. The rig's Postgres, NATS and judge containers now
+  run under CPU and memory limits, and every run and profile probe names its label's pinned omp
+  binary by path, so an `omp` wrapper earlier on the caller's PATH never stands in for the pin.
+- The skill-scenario scorer (`score.ts`) reads a `dispatch` call an eval cell makes from Python as a
+  list literal (`subprocess.run(["dispatch", "doc-edit", ...])`) as the command it runs, and the
+  CLI's answer printed after the call's exit code. Such a spec write was invisible to `checked`:
+  a run whose every write came from Python failed with "no spec write", and other runs had writes
+  left out, which made `checked` easier to pass. A refusal printed after the exit code
+  (`1 dispatch ask was not called: …`, `2 dispatch: DISPATCH_HOST is not set…`) is read too: it was
+  invisible to `refusals`, so a refused call never fixed could pass.
+- The skill-scenario scorer flags a run whose tool calls (its own or a subagent's) name an absolute
+  path outside its work directory, its label's checkout and the system locations, such as the
+  operator's home or another repository: nothing isolates an agent from the operator's files. The
+  run is still scored. Its row counts the hits by where they sit (`outside=ran:N,wrote:N,assigned:N`:
+  a command or path it ran, text it wrote into a file, a subagent's assignment) and prints up to
+  three of each with the call's text around them. A flag shows the run named the path, not that it
+  read it nor that its result is wrong; prose and reaches share the same arguments. A path a call
+  reaches without naming it, as a glob from `/` does, is not caught.
+- The skill-scenario scorer voids a run for another label's skills only when the run read one: a
+  `read` call of a skill file outside its label's own or of a file under another label's checkout,
+  a `cat`, `sed`, `head` or other reading command in a `bash` call or eval cell that names one, or
+  a file an eval cell opens. A run that only names one (a spec about the Dispatch skills pasted into
+  the check the skill requires, a heredoc plan naming `skills/dispatch/SKILL.md`, a relative
+  mention) was voided, and is now scored and flagged `skills=ran:N,wrote:N,assigned:N`, with up to
+  three hits of each kind printed as the `outside` flag prints them. Subagents' calls count too.
+- The skill-scenario scorer's summary tables end with a `flagged` column: per scenario and label,
+  and per source and label beside the median fault counts, how many counted runs carry a flag
+  (`outside=`, `skills=` or `writes_seen=`). A flagged run stays in the pass counts and the
+  medians; the column says how many of them to read before trusting the numbers.
+- The skill-scenario scorer takes a run's own directory, work directory and profile from the cwd
+  its session's header records (`<run dir>/cwd`), not from where the run is scored. Scoring a copy
+  of the runs flagged nearly every run `outside=` and voided runs that read their own skills.
+- The skill-scenario scorer tells a review of the run's own spec from one of a sibling issue's:
+  each spec an assignment pastes (`## Summary` to the end of its `## Acceptance` section) is the
+  run's own when it holds at least a tenth of the 5-word runs of a version the run's session
+  wrote. The share is of the written version, so text pasted after the spec cannot lower it. A
+  review of only a sibling's spec checks no write. One that pastes both, in one assignment or one
+  task of a call, still checks the write, but its findings are not judged: the row prints why and
+  is flagged `unjudged=N`, since no finding can be told to be about this spec. A call's tasks are
+  taken one by one, each on its own assignment: a task that reviews only the run's own spec stays
+  a judged check with its own report, and a task that is no spec-only check by itself (a fact
+  check given no spec) is no part of the check, though the call's other tasks carry the outline.
+- The skill-scenario scorer takes the report of a subagent that ends with an empty `yield`
+  (`{"type":"result"}`) from the text it wrote before the yield, not the word `result`.
+- The findings judge lists each check whose report finds nothing in `clean`, and the scorer needs
+  each check to have a row or a `clean` entry. A findings file that covered only some checks
+  passed, and a run whose every check found nothing could never be scored.
+- The skill-scenario scorer reads a spec-only check from the subagent's own transcript
+  (`sessions/<session>/<name>.jsonl`), not only from a `task` tool call. A check the agent started
+  from an eval cell (`tool.task(…)` with the spec pasted in, or the `agent(…)` helper) leaves no
+  `task` call, so `checked` missed it and the findings judge never saw its report. Such a check
+  counts for the first spec write after its report (its last assistant message, or the `yield`
+  it ends with) when it started after the write before that one. A subagent a `task` call names is
+  that call's check alone, so a call rejected for a path or a failed task stays rejected, and
+  nothing counts twice. `specWork` is the one list of checks that `checked` and the findings
+  judge both read.
+- The skill-scenario scorer compares the spec writes it reads in the transcript with the versions
+  Dispatch recorded for the run's session (`spec-versions.json`). A write through a helper function
+  of the agent's own, a list built in a variable or an answer hidden by `>/dev/null` made a version
+  no command showed, so `checked` could pass on the writes it saw alone. Each such version is now a
+  spec write at its recorded time, unchecked unless a check counts for it, and `routed` needs the
+  skill read before it too. A row whose two counts disagree is flagged `writes_seen=N versions=M`,
+  with each unseen version and each shown write no version matches under it.
+- The skill-scenario scorer takes a `findings.json` with no row for a run that has one or more
+  spec-only checks as a rig error that asks to run `rig.sh judge` again, as it takes any other judge
+  file that does not cover its inputs. judge.ts writes no row only when a run has no check, so
+  such a file was judged before its checks were known, and it read as "no finding left".
 - Daemon API contract 40: a root whose architect asked a person a question and handed the turn
   back gives its admission slot up in the new phase `awaiting_person`, its architect suspended with
   its session kept, and the person's answer, or the spec's design gate standing open, puts it at
@@ -152,7 +226,6 @@ before the split, and the Envoy plugin's releases after it, are in `packages/pi-
   `design-approved` notice, and its `design-changes-requested` row says a waiting root's resume
   task, not a notice, names the changes request. The `legion-controller` skill reads the
   `awaiting-person` wake and a waiting root as no reason to label or admit anything.
-
 - A ninth Legion skill, `leading-a-work-stream`, rebuilt from dotfiles
   `feb1271d4f5021f2e0b9b22b7496a300e6f46790`: a `SKILL.md` and seven references (daily plan,
   decision rights, direction and coaching, Dispatch upkeep, sources, the speed tick, the record of
