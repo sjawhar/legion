@@ -2,60 +2,39 @@
   "schemaVersion": 1,
   "phase": "test",
   "issue": "INFRA-606",
-  "completed": "2026-10-29T19:45:00Z",
-  "round": 10,
-  "headTested": "fd8e79810484",
-  "handoffHead": "6504addc02ccd30b4807e6875bcad6357f23c018",
-  "evidence": "dispatch://INFRA-606/artifact/infra606-tester-round10-tar-gz (RESULTS.md, the /ws/live client livep, scripts, restart summaries, keyed-head.log and keyed-main.log); earlier rounds: infra606-tester-evidence-tar-gz, infra606-tester-round2..9-tar-gz",
-  "ci": "On fd8e7981: lint, typecheck, test, pr-title, docs, build green; red: dispatch (keyed-send.e2e.ts:363 in all four browsers - the failure below; also iphone delivery.e2e.ts:289 brush layout), envoy-go (cmd/listener TestListenerFollowsTheInterestRegistryAcrossNATSRestarts: a session-registry KV reconnect hook error, code this branch does not change), envoy-go-race (docs, api TestCallerTextThatIsNotUTF8IsRefused on search_term_stats, pmdoc linear timing: package deadlines on the race runner, in code this branch does not change), pi-legion (a card-ordering test; the branch does not change pi-legion). Main 7c2effba passed envoy-go, envoy-go-race and pi-legion; its dispatch job was skipped.",
+  "completed": "2026-10-29T20:50:00Z",
+  "round": 11,
+  "headTested": "dc3ad918de21",
+  "handoffHead": "3eccb582fc625b6252abfb699bb52c0c48969873",
+  "evidence": "dispatch://INFRA-606/artifact/infra606-tester-round11-tar-gz (keyed-r11-head.log, keyed-r11-main.log, the per-file fingerprint diffs); round 10's runtime evidence: infra606-tester-round10-tar-gz",
+  "ci": "No check run was reported on dc3ad918 or 3eccb582 when read; not waited for.",
+  "scope": "The forward merge at ab986cd2 changes the pull request's own diff (fork_point(main@origin | head)..head, '~(.legion | docs/solutions)') only in packages/envoy/internal/dispatch/api/live_socket_test.go and live_subscriptions_test.go; every runtime file's lines are as at fd8e7981, so round 10's real-surface results (bounded events-view resume, overflow catch-up, reconnects, event-log reads, kill cases through a 12-minute NATS outage, restart step) stand. dc3ad918 changes packages/dispatch/e2e/keyed-send.e2e.ts, docs and a changelog fragment.",
   "implementerProof": {
     "verdict": "verified",
-    "how": "Rebuilt the load-test stack on the committed harness after the pod move and built Dispatch from the workspace (fd8e7981) and main (7c2effba). Drove round 10's surfaces on GET /ws/live with my own client (livep): the bounded events-view resume, an overflowed view's catch-up, reconnects, event-log reads, the delivery timeline; the fallback copy across kills and a 12-minute NATS outage (review round 3 finding 1); criterion 5 on --live, one run per side. Every red test passes; the implementer's edits to them replace the removed stranded pass with one resumeOwedDeliveries call and rename one test, with the assertions unchanged, which I accept."
+    "how": "Ran the browser suite myself at this head: both keyed-send mention tests pass twice each in chromium; the new slow-send test fails against main's server (negative control), so it pins this PR's contract. Read the new docs sentence against live_socket.go: liveSocketWriteWait 10 s, liveSocketQueue 16, liveSocketStream 64, as stated."
   },
-  "failures": [
-    {
-      "criterion": "The pull request breaks no repository test or live proof; every reader of the moved mention send (census entry 3) still holds.",
-      "evidence": "packages/dispatch/e2e/keyed-send.e2e.ts:363 'a comment whose @-mention is cut off mid-delivery by the page is delivered once @phone' (main's #2449) fails at fd8e7981 in CI job dispatch on chromium, iphone, webkit and firefox: 'Test timeout of 120000ms exceeded', page.waitForResponse for the Idempotency-Replayed answer (keyed-writes.ts:64, called at keyed-send.e2e.ts:375) never resolves. Reproduced locally: `cd packages/dispatch && DATABASE_URL=<scratch postgres> bun run e2e -- e2e/keyed-send.e2e.ts -g 'cut off mid-delivery' --project chromium` -> 1 failed. The same command in a copy of the workspace whose packages/envoy is main's 7c2effba (same web app) -> 1 passed in 22.7 s. The test's premise is that the mention's send runs inside the comment request (12 s slow write + 4 s listener send passes the page's 15 s cut-off, so the page repeats under its key and gets the replayed answer); this PR answers once the comment commits and sends after the response, so the page never repeats. The failing test is the red test; the census's reader search does not name it."
-    }
-  ],
-  "failed": 1,
+  "failures": [],
+  "failed": 0,
   "proof": [
     {
-      "criterion": "A reconnecting stream receives a bounded catch-up (or a signal to refetch once), never the whole backlog; an overflowed subscriber is caught up from the database instead of being closed.",
-      "surface": "GET /ws/live events view on the load-test stack, Dispatch built from the workspace",
-      "command": "livep events -since <H-256|H-257|H-10|H|H+5> and with no resume; 36 comments of 31 KB then -since H-34/H-33; resume.since -1/abc/1.5; ovf.sh 360 5000 15 (view paused 15 s, 4 KiB receive buffer); rflap.sh 60",
-      "observed": "H-256: 256 events, replay_complete true; H-257: none, false; 33 big events replayed, 34 none; H+5 and no resume: false. Bad resumes: INVALID_FRAME. Overflow: 360/360, no ended frame. 60 reconnects: 205/205 events, none duplicate or out of order, all complete.",
-      "headSha": "fd8e79810484",
-      "negativeControl": "Main 7c2effba: H-300 replays all 300 with replay_complete true; the paused view ends 'behind' after 316 with 44 missing."
+      "criterion": "The pull request breaks no repository test; main's keyed-send test of a cut-off comment with a mention holds under the moved mention send (round 10's failure).",
+      "surface": "Dispatch's browser suite (packages/dispatch/e2e) against the real envoy-dispatch built from this checkout, chromium",
+      "command": "cd packages/dispatch && DATABASE_URL=<scratch postgres> bun run e2e -- e2e/keyed-send.e2e.ts -g '@-mention' --project chromium --repeat-each 2",
+      "observed": "4 passed (1.1 m): 'a comment the page gives up on while Dispatch still writes it is answered from its key, its @-mention delivered once' (23.6-24.1 s) and 'a comment whose @-mention's send is slow is answered before the send, with no repeat, and delivered once' (7.9 s), twice each.",
+      "headSha": "dc3ad918de21",
+      "negativeControl": "The same command in a copy of the workspace whose packages/envoy is main's 7c2effba: the slow-send test fails ('expect(received).toEqual(expected)': the answer's attempt is not pending, because main sends the mention inside the request); round 10's head failed the old cut-off test in every browser."
     },
     {
-      "criterion": "The relay and the delivery hub do no event-log reads while nobody subscribes, and one read serves every subscriber of a commit.",
-      "surface": "The stack's Postgres with log_statement='all'; /ws/live events and timeline views",
-      "command": "hubflap.sh head and hubflap.sh base (idle; 30 s of flapping views; idle; 20 events views + a timeline view; idle)",
-      "observed": "Head event-log reads 0 / 21 (22 commits) / 0 / 16 (16 commits) / 0; goroutines back to 38. A shown issue's rename reaches the timeline view as a delta; an unshown one sends nothing.",
+      "criterion": "A reconnecting stream receives a bounded catch-up or a signal to refetch once; mention delivery reaches each session once through a kill; before and after on the restart step.",
+      "surface": "GET /ws/live and the load-test stack (round 10, runtime unchanged since)",
+      "command": "livep events resumes, ovf.sh, rflap.sh, hubflap.sh, crash.sh r10person/r10down/r10landed/r10nats, measure10.sh and basemeasure.sh (round 10)",
+      "observed": "256 events replayed with replay_complete true, 257 none; overflow caught up 360/360; 0 event-log reads idle; one copy per session in every kill case including a 12-minute NATS outage; 3.3 MB replayed vs 125 MB on main.",
       "headSha": "fd8e79810484",
-      "negativeControl": "Main: 0 / 636 / 6 / 33 / 9 - it reads during flapping and keeps reading after the last view."
-    },
-    {
-      "criterion": "Mention delivery is not lost and reaches each session once through a Dispatch kill, also through a NATS outage longer than the dead-letter threshold (review round 3 finding 1).",
-      "surface": "The stack, a person's 8 comments on LGA-10 (routed to session:ses-a) mentioning ses-a/b/c; SIGKILL 0.3 s into stack.sh restart-dispatch's drain; ENVOY_NOTIFICATIONS read with $JS.API.STREAM.MSG.GET; comment_fallback_copies",
-      "command": "AS_PERSON=1 crash.sh r10person (listener up); STOP_LISTENER=1 crash.sh r10down (4 s) and r10landed (2 s); STOP_LISTENER=1 STOP_NATS=1 crash.sh r10nats with 720 s of NATS down, then NATS started",
-      "observed": "Every case: each session stores each comment exactly once. r10down: 8 fallback rows published and settled. r10nats: 8 rows unsettled with attempt_count 0 through 12 minutes, then all 8 published once within 50 s of NATS returning.",
-      "headSha": "fd8e79810484",
-      "negativeControl": "Round 6's head ab61c138 (round 6): with the listener down after a kill, the claimed comment never reached the route session."
-    },
-    {
-      "criterion": "Before and after on the committed load reproduction: a Dispatch restart at tonight's step with 50 open live sockets.",
-      "surface": "packages/envoy/loadtest run-step.sh with --live 50 --live-resume 1 --live-stale 10 --restart-at 90s --mention-frac 0.2 --mentions 3 --envoy-rtt 200ms --rng-seed 1",
-      "command": "measure10.sh (head), basemeasure.sh (main 7c2effba, reseeded with its own build)",
-      "observed": "Replayed bytes 3,259,170 vs 125,170,034; stale sockets 953 B total with one refetch each vs 12.1 MB each and no refetch; Dispatch CPU-s in the minute after the restart 15.29 vs 17.10; mentioned comments answered after the restart 5/37 vs 0/37 (one run per side).",
-      "headSha": "fd8e79810484",
-      "negativeControl": "Main is the control: every stale socket replays about 12,600 events."
+      "negativeControl": "Main 7c2effba: replays all 300, ends an overflowed view with 44 missing, keeps reading the log after the last view, replays 12.1 MB per stale socket."
     }
   ],
   "observations": [
-    "Agent view on /ws/live: a viewer paused 5 s receives 15 or 41 frames of 1 MiB in order, and one paused 20 s is closed by the socket (1006), on head and main alike. On /ws/live the bound a stalled page meets is #2449's socket queue (16 frames) and write timeout, not this PR's 8 MiB agent queue; the PR body and dispatch-agent-conversations.md should say so.",
-    "Browser (headless Chromium on the issue page, offline, then 300 or 5 comments, online): the new comment shows in both cases; going online refetches in both, so the browser does not show the difference the wire does.",
-    "The PR body is 52 KB; later rounds should link evidence."
+    "Criterion 5's CPU expectation: one run per side on /ws/live gave 15.3 vs 17.1 CPU-s (head lower); the implementer's five per side gave 18.59 vs 21.50. The earlier SSE-era runs did not show it lower.",
+    "The PR body is 55 KB of GitHub's 65,536-character limit."
   ]
 }
