@@ -308,10 +308,11 @@ transaction (`foldRead`). At most `bufferedFolds` buffered folds - loads and com
 `store.RoomsPoolSize` (four), the pool whose connections bounded folds when they ran inside its
 transactions - hold their rows at once in a process (`PgVersioned.foldSlots`), so a process holds
 at most four times 32 MiB of buffered rows; a fifth waits within its context. Either way it notes
-the room for compaction once its transaction ends (`noteStoredUpdates`). Nothing reads deleted content back from the store: every document built from
-it is a `crdt.New`, which drops an item's content in the transaction that deletes it, the one that
-applies a load included; a version stores its own markdown in `artifact_versions`; and no route
-reads an update or a state before the head. What a load's document parks - an update whose
+the room for compaction once its transaction ends (`noteStoredUpdates`). Nothing reads deleted
+content back from the store: every document built from it is a `crdt.New`, which drops an item's
+content in the transaction that deletes it, the one that applies a load included; a version stores
+its own markdown in `artifact_versions`; and no route reads an update or a state before the head.
+What a load's document parks - an update whose
 dependency no stored update supplies, a delete of an item none holds - is merged back into the
 state, so the room that loads it parks it again until a peer sends what it waits on. A state is
 kept only when it reads back as the document that made it: decoded into a fresh document, it must
