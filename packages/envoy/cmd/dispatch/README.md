@@ -648,13 +648,15 @@ each surface the two builds share, this is what build N+1 may change while build
   registers V, the schema version it reads, and R, the highest `since` among the elements it may
   create, in `server_processes` (migration `0138_server_processes_schema`). A page presents its own
   V and R as `schema_version` and `schema_creatable`, and is writable on an open issue when its R
-  is at most every live process's V, and its V is at least every live process's R and the highest
-  `since` among the elements the document holds; otherwise it is read-only. A page that sends no
-  `schema_creatable` counts its V as its R, and a process of a build that predates the fleet
-  columns, whose row holds no schema numbers, is left out. Every 15 seconds (the registry's live
-  window) each process checks its open document sockets again and closes with `1012` each writable
-  one the fleet no longer admits; the provider reconnects on that code, and the new socket is
-  admitted again.
+  is at most every live process's V and at most the highest R among the live processes, and its V
+  is at least every live process's R and the highest `since` among the elements the document
+  holds; otherwise it is read-only. The bound on the highest R makes a page of a newer build
+  read-only after a rollback: no live process creates what that page creates. A page that sends no
+  `schema_creatable` predates the manifest, so its R is 1, and a process of a build that predates
+  the fleet columns, whose row holds no schema numbers, is left out. Every 15 seconds (the
+  registry's live window) each process checks its open document sockets again and closes with
+  `1012` each writable one the fleet no longer admits; the provider reconnects on that code, and
+  the new socket is admitted again.
 - **NATS.** The settings of the stream `ENVOY_NOTIFICATIONS` and of the delivery durables carry a
   generation in their metadata (`dispatch.stream-generation`, `dispatch.consumer-generation`). A
   change to the stream's `MaxAge`, `Duplicates` or subjects, or to a durable's config, takes a new
@@ -727,8 +729,19 @@ Generations and holds protect from the release after the first one that carries 
 before them compares stream and consumer settings with no generation, binds its delivery durable
 by lookup with no hold, and refuses a request member it does not declare. So the release that
 introduces them changes no request member, document element, stream or consumer setting, or loop
-interval, and each protection binds from the release after it. The file store and the embedder
-work the same way: a build before the rule writes no embedder identity and no `file_store`, or no
+interval, and each protection binds from the release after it. In that first overlap, a take-over
+(`delivery/intake.go`, `heldDurable.takeOver`) deletes a durable and creates it again at its ack
+floor, all under the durable's consumer lease, and tries a failed create again for up to 10
+seconds while it holds its hold. The build before holds reconciles the durable under that same
+lease every 30 seconds and does not read the start the take-over recorded. So one case is left: a
+process of the new build killed between the delete and the create (or one that loses its hold, or
+fails every try, first) gives up the lease with the durable absent. A process of the build before
+holds that takes the lease next creates the durable with its own config: the events durable then
+delivers from the stream's first message, which replays up to 72 hours of GitHub events, and the
+jobs durable from the next new message, which skips every job the old durable had not
+acknowledged. A take-over of the new build that takes the lease first creates the durable at the
+recorded start instead. The file store and the embedder also bind only from the release after
+their rule: a build before the rule writes no embedder identity and no `file_store`, or no
 `server_processes` row at all, and drops the vectors of every identity but its own. So turn on the
 file store, or change the embedder, no sooner than the release after the first one that carries
 the rule, and only after every process of the earlier release is gone.
@@ -1265,7 +1278,10 @@ the next release that carries them, whose boot prunes what no build still needs.
 
 Migration `0137_duty_holds` creates `duty_holds (name, holder, token, expires_at)`, the holds a
 process keeps by renewing them (`duty.Hold`): each delivery intake holds one name per durable
-(Running more than one process, above), and the holder records its deliver subject as `token`.
+(Running more than one process, above). The holder records its deliver subject as `token`, or
+`<subject> start=<seq>` while a take-over is pending: from just before the take-over deletes the
+durable until it has created it again at stream sequence `<seq>` (`delivery/intake.go`,
+`intakeHoldToken`).
 `expires_at` is always written from the database's `now()`, so a lapse is judged by one clock. It
 is a new table: nothing existing is read, locked or rewritten, the release before it neither reads
 nor writes it, and its census answers `0`.

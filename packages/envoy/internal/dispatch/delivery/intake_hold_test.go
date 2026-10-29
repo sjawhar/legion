@@ -498,6 +498,10 @@ const generationKey = "dispatch.consumer-generation"
 // out for the same reason.
 const intakeHold = "delivery-intake-" + bus.DispatchDeliveryDurable
 
+// intakeConsumerLease is the name of the lease every change to the delivery durable runs under, of
+// this build and of the build before holds, written out for the same reason.
+const intakeConsumerLease = "delivery-consumer-" + bus.DispatchDeliveryDurable
+
 // A consumer a newer build stamped with a higher generation keeps that build's settings: a standby
 // of this build changes nothing about it across two settings polls while the newer build holds it,
 // and once that build lets go, the standby's take-over recreates the durable with the newer build's
@@ -669,9 +673,9 @@ func fetchesOf(process *intakeProcess, numbers []int) map[int]int {
 }
 
 // failCreatesWhile makes the take-over's create of the durable fail while failing reports true,
-// as a JetStream API timeout, a stop cancelling the create's context, or a crash between the delete
-// and the create leaves the durable deleted and not created. It counts every create attempt, and
-// restores the real create when the test ends, after every intake the test starts has stopped.
+// as a JetStream API that times out, or a crash between the delete and the create, leaves the
+// durable deleted and not created. It counts every create attempt, and restores the real create
+// when the test ends, after every intake the test starts has stopped.
 func failCreatesWhile(t *testing.T, failing func() bool) *atomic.Int32 {
 	t.Helper()
 	attempts := &atomic.Int32{}
@@ -766,9 +770,10 @@ func requireDeliveredFromTheFloor(t *testing.T, publisher *bus.Client, process *
 	}
 }
 
-// A take-over deletes the durable and creates it again at its ack floor. When the create fails
-// after the delete, the next take-over of the same intake finds no durable and creates it at that
-// same floor: none of the acknowledged messages come back, and none of the others are skipped.
+// A take-over deletes the durable and creates it again at its ack floor. When every try of the
+// create fails after the delete, the take-over gives the consumer lease up with the durable absent,
+// and the next take-over of the same intake finds no durable and creates it at that same floor:
+// none of the acknowledged messages come back, and none of the others are skipped.
 func TestATakeOverWhoseCreateFailsCreatesTheDurableAtItsFloorOnTheNextAttempt(t *testing.T) {
 	shrinkIntakeFlowControl(t)
 	pool, ctx := deliveryTestPool(t)
@@ -778,12 +783,26 @@ func TestATakeOverWhoseCreateFailsCreatesTheDurableAtItsFloorOnTheNextAttempt(t 
 	const acknowledged, unacknowledged = 5, 4
 	durablePartWayThrough(t, ctx, publisher, acknowledged, unacknowledged)
 
-	var failed atomic.Bool
-	attempts := failCreatesWhile(t, func() bool { return !failed.Swap(true) })
+	// Every try of the first take-over's create starts within takeOverFinishWithin of its first
+	// try, so failing each create until then fails every try of that take-over, and the create
+	// that succeeds is a later take-over's.
+	var first atomic.Int64
+	var failed atomic.Int32
+	attempts := failCreatesWhile(t, func() bool {
+		first.CompareAndSwap(0, time.Now().UnixNano())
+		if time.Since(time.Unix(0, first.Load())) < takeOverFinishWithin {
+			failed.Add(1)
+			return true
+		}
+		return false
+	})
 	process := startIntakeProcess(t, pool, natsURL, nil)
 	requireDeliveredFromTheFloor(t, publisher, process, acknowledged, unacknowledged)
-	if got := attempts.Load(); got < 2 {
-		t.Fatalf("the intake tried the create %d times, want the failed one and one after it", got)
+	if got := failed.Load(); got < 2 {
+		t.Fatalf("the take-over tried the create %d times before it gave up, want it tried again", got)
+	}
+	if got, failedTries := attempts.Load(), failed.Load(); got <= failedTries {
+		t.Fatalf("the intake tried the create %d times, want the %d failed ones and one after them", got, failedTries)
 	}
 }
 
@@ -815,4 +834,109 @@ func TestATakeOverWhoseCreateFailsLeavesTheFloorToTheNextHolder(t *testing.T) {
 
 	next := startIntakeProcess(t, pool, natsURL, nil)
 	requireDeliveredFromTheFloor(t, publisher, next, acknowledged, unacknowledged)
+}
+
+// previousBuildReconciler runs the configuration reconciliation of the build before holds
+// (legion-envoy-v19.0.0's reconcileDurableConsumer, cut to its first case) against the delivery
+// durable every interval until the test ends, as a process of that build does on its own pool:
+// under the durable's consumer lease, it looks the durable up, and when there is none it creates
+// the durable with that build's config, which names no start and so delivers from the stream's
+// first message. It reads no hold. created counts the durables it created, and present the passes
+// that found the durable there.
+func previousBuildReconciler(t *testing.T, pool *store.Pool, natsURL string, interval time.Duration) (created, present *atomic.Int32) {
+	t.Helper()
+	leases, err := storetest.SecondProcess(t, &store.Store{Pool: pool}).Pool.Leases()
+	if err != nil {
+		t.Fatalf("open the previous build's lease pool: %v", err)
+	}
+	client, err := bus.Connect([]string{natsURL})
+	if err != nil {
+		t.Fatalf("connect the previous build's process: %v", err)
+	}
+	t.Cleanup(client.Close)
+	created, present = &atomic.Int32{}, &atomic.Int32{}
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		ticker := time.NewTicker(interval)
+		defer ticker.Stop()
+		for {
+			duty.Exclusive(ctx, leases, intakeConsumerLease, 0, func(context.Context) {
+				_, err := client.JS().ConsumerInfo(bus.Stream, bus.DispatchDeliveryDurable)
+				switch {
+				case errors.Is(err, natsgo.ErrConsumerNotFound):
+					previous := natsgo.ConsumerConfig{
+						Durable:        bus.DispatchDeliveryDurable,
+						DeliverSubject: natsgo.NewInbox(),
+						FilterSubject:  githubIntakeSubject,
+						AckPolicy:      natsgo.AckExplicitPolicy,
+						AckWait:        intakeAckWait(),
+						MaxAckPending:  intakeMaxAckPending,
+					}
+					if _, err := client.JS().AddConsumer(bus.Stream, &previous); err == nil {
+						created.Add(1)
+					}
+				case err == nil:
+					present.Add(1)
+				}
+			})
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+			}
+		}
+	}()
+	t.Cleanup(func() {
+		cancel()
+		<-done
+	})
+	return created, present
+}
+
+// A take-over whose create fails once after the delete creates the durable itself, at its ack
+// floor, while a process of the build before holds reconciles the same durable under the same
+// consumer lease: that process never finds the durable missing, so it never creates its own,
+// which would replay every message the durable had acknowledged. None of the acknowledged
+// messages come back, none of the others are skipped, and that process finds the durable there.
+func TestATakeOverWhoseCreateFailsCreatesTheDurableBeforeAPreviousBuildReconciles(t *testing.T) {
+	shrinkIntakeFlowControl(t)
+	pool, ctx := deliveryTestPool(t)
+	seedDeliverySettings(t, ctx, pool)
+	natsURL := testnats.URL(t)
+	publisher := intakeTestClient(t)
+	const acknowledged, unacknowledged = 5, 4
+	durablePartWayThrough(t, ctx, publisher, acknowledged, unacknowledged)
+	floor, err := publisher.JS().ConsumerInfo(bus.Stream, bus.DispatchDeliveryDurable)
+	if err != nil {
+		t.Fatalf("read the durable: %v", err)
+	}
+	start := floor.AckFloor.Stream + 1
+
+	created, present := previousBuildReconciler(t, pool, natsURL, 100*time.Millisecond)
+	var failed atomic.Bool
+	attempts := failCreatesWhile(t, func() bool { return !failed.Swap(true) })
+	process := startIntakeProcess(t, pool, natsURL, nil)
+	requireDeliveredFromTheFloor(t, publisher, process, acknowledged, unacknowledged)
+	if got := attempts.Load(); got < 2 {
+		t.Fatalf("the intake tried the create %d times, want the failed one and one after it", got)
+	}
+	if got := created.Load(); got != 0 {
+		t.Fatalf("the previous build's process found the durable missing and created it %d times", got)
+	}
+	taken, err := publisher.JS().ConsumerInfo(bus.Stream, bus.DispatchDeliveryDurable)
+	if err != nil {
+		t.Fatalf("read the durable: %v", err)
+	}
+	if taken.Config.DeliverPolicy != natsgo.DeliverByStartSequencePolicy || taken.Config.OptStartSeq != start ||
+		taken.Config.Metadata[generationKey] != strconv.Itoa(consumerConfigGeneration) {
+		t.Fatalf("the durable has deliver policy %d, start %d, generation %q; want this build's durable by start sequence (%d) at %d, generation %d",
+			taken.Config.DeliverPolicy, taken.Config.OptStartSeq, taken.Config.Metadata[generationKey],
+			natsgo.DeliverByStartSequencePolicy, start, consumerConfigGeneration)
+	}
+	before := present.Load()
+	waitFor(t, 10*time.Second, func() bool { return present.Load() > before }, func() string {
+		return "the previous build's process did not find the durable present after the take-over: " + consumerState(publisher)
+	})
 }
