@@ -2,9 +2,28 @@ package supervise
 
 import (
 	"context"
+	"fmt"
 
 	"github.com/sjawhar/legion/daemon/internal/claim"
 )
+
+// PodUpdateContract is the daemon contract that introduced ready_for_update (api/version.go's
+// 43). A claim whose registration declared a contract below it cannot answer an update task: the
+// op list is a closed enum compiled into the plugin, and a Claude Code role's plugin is its
+// image's own, never installed. Such a claim is never asked — an update round records itself on
+// it and sends it nothing (openPodUpdate) — and the stale-plugin lane keeps today's immediate
+// relaunch for it (refreshPlugin), which keeps the pod and the disk and so loses nothing. It
+// covers every worker alive at the release that carries this change, which is why that release is
+// the last roll an operator drains by hand.
+//
+// It lives here rather than beside DaemonAPIVersion because internal/api imports this package.
+// internal/api's own test holds it to that version, so a later contract bump can never leave this
+// constant above the daemon's own.
+const PodUpdateContract = 43
+
+// registrationTrigger is refreshPlugin's trigger for a stale registration (staleRegistration), as
+// against the boot's and the orphan sweep's posts of StalePlugin.
+const registrationTrigger = "registration"
 
 // refreshPlugin is the claim's process found to speak a plugin contract this daemon does not: at
 // boot, re-adopting a claim whose recorded contract is an earlier daemon's, or none at all (the
@@ -15,6 +34,15 @@ import (
 // before doing anything, because the boot's own decision runs later than the post that queued it:
 // a registration may have landed, recording the daemon's contract, in between, and such a claim is
 // left alone rather than relaunched for a fact already fixed.
+//
+// A claim that can answer ready_for_update is asked before it is replaced. The relaunch below ends
+// the turn in flight, and a worker that never pushed loses that turn's work with it, so a claim
+// whose recorded contract is PodUpdateContract or above gets an update round of its own instead
+// (openPluginUpdate) and keeps running until it answers. Two cases keep the immediate relaunch:
+// a claim below that contract, which cannot answer at all, and a stale registration, whose own
+// agent is refused (staleRegistration) and whose process exits on that refusal — a round there
+// would wait for a signal no running turn could send. The relaunch keeps the pod and the disk
+// under every runtime, so what either case costs is one interrupted turn, exactly as before.
 //
 // What it does once it decides the claim is still stale is exactly repoint: the turn in flight is
 // interrupted and its task kept waiting for the relaunch to send again, a held suspension ends in a
@@ -42,6 +70,9 @@ func (m *Machine) refreshPlugin(ctx context.Context, trigger string) error {
 	if m.claim.PluginContract == m.deps.PluginContract {
 		return nil
 	}
+	if trigger != registrationTrigger && m.claim.PluginContract >= PodUpdateContract {
+		return m.openPluginUpdate(ctx)
+	}
 	if m.held == nil {
 		if err := m.checkLaunch(ctx); err != nil {
 			return err
@@ -52,6 +83,33 @@ func (m *Machine) refreshPlugin(ctx context.Context, trigger string) error {
 		"daemonApiVersion", m.deps.PluginContract, "trigger", trigger)
 	m.claim.PluginRelaunchFor = m.deps.PluginContract
 	return m.replaceProcess(ctx, "the process on another plugin contract is replaced mid-turn")
+}
+
+// openPluginUpdate opens this claim's own update round for the plugin contract it is behind: the
+// worker is asked to push its work and answer ready_for_update, and the process is replaced only
+// once it has (PodUpdateEnded with Relaunch true, which the daemon's sweep posts). It returns
+// having relaunched nothing.
+//
+// The round is this claim's alone, never its pod's: the stale-plugin relaunch keeps the pod and
+// the disk, so it costs one interrupted turn rather than a workspace, and holding a contract bump
+// behind every worker of a pod would buy nothing. A round already open on the claim — this one,
+// or the pod's — is left exactly as it is: the sweep that opened it is what carries it on, and
+// re-opening it here would start its clock again at every post of StalePlugin.
+func (m *Machine) openPluginUpdate(ctx context.Context) error {
+	if m.claim.UpdateRound != "" {
+		return nil
+	}
+	reasons := fmt.Sprintf("the process speaks plugin contract %d, and this daemon speaks %d",
+		m.claim.PluginContract, m.deps.PluginContract)
+	m.log.Warn("supervise: the process speaks another plugin contract; its worker is asked to push its work before the process is replaced",
+		"incarnation", m.claim.Locator.Incarnation, "pluginContract", m.claim.PluginContract,
+		"daemonApiVersion", m.deps.PluginContract)
+	return openPodUpdate(m, ctx, PodUpdateOpen{
+		Claim:   m.claim.Token,
+		Round:   fmt.Sprintf("plugin:%d", m.deps.PluginContract),
+		Reasons: reasons,
+		Task:    PodUpdateTask(reasons),
+	})
 }
 
 // refreshStalePlugin is the StalePlugin event's row, for the four states a claim's relaunched
@@ -90,7 +148,7 @@ func (m *Machine) staleRegistration(ctx context.Context, got int) error {
 	if m.claim.PluginRelaunchFor == m.deps.PluginContract {
 		err = m.relaunchAfterFailure(ctx)
 	} else {
-		err = m.refreshPlugin(ctx, "registration")
+		err = m.refreshPlugin(ctx, registrationTrigger)
 	}
 	if err != nil {
 		return err

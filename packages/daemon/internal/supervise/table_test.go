@@ -148,6 +148,8 @@ func samples(t *testing.T) map[string][]Event {
 		"StreamLateRefusal":    {StreamLateRefusal{}},
 		"PromptAcked":          {PromptAcked{}},
 		"PromptRefused":        {PromptRefused{}},
+		"PodUpdateOpen":        {PodUpdateOpen{}},
+		"PodUpdateEnded":       {PodUpdateEnded{}},
 		"StalePlugin":          {StalePlugin{}},
 		"PodUpdateSignalled":   {PodUpdateSignalled{}},
 		"RequestSpawn":         {RequestSpawn{}},
@@ -291,6 +293,10 @@ func fenced(ev Event, c Claim) Event {
 		return StalePlugin{Claim: c.Token}
 	case PodUpdateSignalled:
 		return PodUpdateSignalled{Claim: c.Token, Generation: c.Generation, Session: session, Head: "deadbeef"}
+	case PodUpdateOpen:
+		return PodUpdateOpen{Claim: c.Token, Round: "pod:a-pod-uid", Reasons: "image", Task: PodUpdateTask("image")}
+	case PodUpdateEnded:
+		return PodUpdateEnded{Claim: c.Token}
 	case RequestSpawn:
 		return RequestSpawn{Claim: c.Token}
 	case RequestRegister:

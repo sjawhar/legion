@@ -217,8 +217,9 @@ func (c Claim) treeRoot() bool { return claim.IsTreeArchitect(c.Role, c.Issue, c
 
 // Event is everything that reaches a machine. The set is sealed: RuntimeObservation,
 // StreamHello, StreamTurnStart, StreamTurnEnd, StreamClosed, StreamLateRefusal, PromptAcked,
-// PromptRefused, Timer, StalePlugin, PodUpdateSignalled, and the nine requests. The transition
-// table has a row or a named ignore for every one of them in every state.
+// PromptRefused, Timer, StalePlugin, PodUpdateOpen, PodUpdateEnded, PodUpdateSignalled, and the
+// nine requests. The transition table has a row or a named ignore for every one of them in every
+// state.
 type Event interface{ isEvent() }
 
 // Store is the persistence a machine writes through. A claim and its pending delivery are
@@ -342,6 +343,11 @@ type Deps struct {
 	// held by an untaken task would wait for the next tick. Nil tells no one. It is called inside
 	// the machine's decision, so it returns at once.
 	TaskConfirmed func(c Claim)
+	// PodUpdateRetask is how long after an update task was sent an update round asks a claim that
+	// has not answered again (openPodUpdate), from the daemon's pod_update_retask_hours. The
+	// re-task clock runs from each send (Claim.UpdateTaskedAt), so asking again never postpones
+	// the round's own clock. Zero takes defaultPodUpdateRetask.
+	PodUpdateRetask time.Duration
 }
 
 func (d Deps) check() error {
@@ -374,6 +380,19 @@ func (d Deps) check() error {
 		}
 	}
 	return nil
+}
+
+// defaultPodUpdateRetask is the re-task bound a daemon that names none takes: an update round asks
+// a claim that has not answered again an hour after it last asked. It is a fallback rather than a
+// check, so a Deps built without the key still opens rounds that make progress.
+const defaultPodUpdateRetask = time.Hour
+
+// podUpdateRetask is Deps.PodUpdateRetask, or defaultPodUpdateRetask when it names none.
+func (d Deps) podUpdateRetask() time.Duration {
+	if d.PodUpdateRetask <= 0 {
+		return defaultPodUpdateRetask
+	}
+	return d.PodUpdateRetask
 }
 
 // RefusedError is a request the claim does not allow — the answer an API route gives its caller
@@ -1336,6 +1355,10 @@ func claimOf(ev Event) claim.Token {
 	case Timer:
 		return ev.Claim
 	case StalePlugin:
+		return ev.Claim
+	case PodUpdateOpen:
+		return ev.Claim
+	case PodUpdateEnded:
 		return ev.Claim
 	case PodUpdateSignalled:
 		return ev.Claim
