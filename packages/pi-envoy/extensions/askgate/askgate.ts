@@ -46,6 +46,7 @@ import {
 } from "./askgate-core";
 import {
   createDecisionRecorder,
+  type DecisionRecorder,
   RECORD_SHUT_DOWN,
   RECORD_TIMEOUT_MS,
   type RecordRequest,
@@ -147,7 +148,16 @@ export interface AskGateRegistration {
  * the gate would review (`loadFailureGate`), since only `askgate.enabled: false` turns AskGate off.
  */
 export function registerAskGate(pi: PiApi, host: AskGateHost): AskGateRegistration {
-  const loading = loadAskGate(pi, host);
+  // One recorder per process for the core's records and the unmarked writes' alike: each session
+  // has one decision document, and a second recorder would upload it again under its name, which
+  // replaces it. The unmarked writes' record needs none of Oh My Pi's modules, so it works whether
+  // or not the load below settles.
+  const record = createDecisionRecorder({
+    env: process.env,
+    now: Date.now,
+    dispatchClient: (directory, signal) => sessionDispatchClient(host, directory, signal),
+  });
+  const loading = loadAskGate(pi, host, record);
   // A rejection is handled here and by the caller's notice; never an unhandled one.
   const gate: Promise<ToolCallHandler> = loading.then(
     (handler) => handler,
@@ -163,15 +173,6 @@ export function registerAskGate(pi: PiApi, host: AskGateHost): AskGateRegistrati
   // The host's context carries every member GateCtx reads; PiApi types only those the Envoy entry
   // reads, so the handler takes it as the core's type.
   pi.on("tool_call", async (event, ctx) => (await gate)(event, ctx as unknown as GateCtx));
-  // The record of an unmarked write is the gate's, not the core's: the gate never saw that call,
-  // and the entry reads it from the session's ledger after the CLI ran. It is built here, from
-  // the same Dispatch the core's records go through, and it needs none of Oh My Pi's modules, so
-  // it works whether or not the load above settles.
-  const record = createDecisionRecorder({
-    env: process.env,
-    now: Date.now,
-    dispatchClient: (directory, signal) => sessionDispatchClient(host, directory, signal),
-  });
   const stops = new Set<AbortController>();
   return {
     loaded: loading.then(() => undefined),
@@ -197,7 +198,11 @@ export function registerAskGate(pi: PiApi, host: AskGateHost): AskGateRegistrati
  * handler kept back, which it returns: every other event, and `appendEntry`, reach the real `pi`.
  * Rejects when a module does not load or the core refuses to bind.
  */
-async function loadAskGate(pi: PiApi, host: AskGateHost): Promise<ToolCallHandler> {
+async function loadAskGate(
+  pi: PiApi,
+  host: AskGateHost,
+  record: DecisionRecorder
+): Promise<ToolCallHandler> {
   // String-literal imports: the host's loader resolves only these (see the head of this file).
   const [
     { completeSimple, retryTransientCompletion },
@@ -352,6 +357,7 @@ async function loadAskGate(pi: PiApi, host: AskGateHost): Promise<ToolCallHandle
     runtimeLogger: host.runtimeLogger,
     configFile: host.configFile.path,
     dispatchClient: (directory, signal) => sessionDispatchClient(host, directory, signal),
+    recordDecision: record,
     // The dump holds the primary system prompt and transcript: owner-only, like the session files.
     appendFile: appendDump,
     complete,

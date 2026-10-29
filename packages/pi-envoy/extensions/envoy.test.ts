@@ -4444,12 +4444,20 @@ console.log(JSON.stringify(args));
     /** Every AskGate decision record the session published, read off the Dispatch write itself. */
     const published: Array<Record<string, unknown>> = [];
     /**
+     * The Dispatch writes those records made: the session's one document, uploaded under its name,
+     * and each append to it. A session's records belong in one document, so a second upload is a
+     * second recorder's, and Dispatch answers it by replacing what the first one wrote.
+     */
+    const recordWrites = { uploads: 0, appends: 0 };
+    /**
      * Answers the two Dispatch writes a decision record makes — the document's upload, then an
      * append to it — and keeps each JSON record they carried, so a test reads what reached
      * Dispatch and nothing else. Every other request goes on to the suite's own stand-in.
      */
     const standInRecordProject = () => {
       published.length = 0;
+      recordWrites.uploads = 0;
+      recordWrites.appends = 0;
       process.env.OMP_ASKGATE_RECORD_PROJECT = "INFRA";
       const other = globalThis.fetch;
       const keep = (markdown: string) => {
@@ -4460,6 +4468,7 @@ console.log(JSON.stringify(args));
         const url = String(input instanceof Request ? input.url : input);
         if (url.endsWith("/api/v1/projects/INFRA/artifacts")) {
           const body = JSON.parse(String(init?.body ?? "{}")) as { content?: string };
+          recordWrites.uploads += 1;
           keep(body.content ?? "");
           return Response.json({ artifact: { id: "doc-decisions" } });
         }
@@ -4467,6 +4476,7 @@ console.log(JSON.stringify(args));
           const body = JSON.parse(String(init?.body ?? "{}")) as {
             ops?: Array<{ markdown?: string }>;
           };
+          recordWrites.appends += 1;
           for (const op of body.ops ?? []) keep(op.markdown ?? "");
           return Response.json({ applied: body.ops?.length ?? 0 });
         }
@@ -4511,6 +4521,17 @@ console.log(JSON.stringify(args));
         gateEntries: fixture.entries.flatMap((entry) =>
           entry.customType === "advisor-gate" ? [entry.data as Record<string, unknown>] : []
         ),
+        /**
+         * A literal `dispatch ask` the gate itself reviews, in the session the unmarked write ran
+         * in: what the gate answered the call with, and every record Dispatch has by then.
+         */
+        gatedAsk: async (toolCallId: string) => {
+          const result = (await fixture.handlers.get("tool_call")?.(
+            { toolName: "bash", toolCallId, input: { command: ASK } },
+            context
+          )) as { block?: boolean } | undefined;
+          return { result, records: [...published] };
+        },
         shutdown: async () => {
           await fixture.handlers.get("session_shutdown")?.({}, context);
         },
@@ -4610,6 +4631,40 @@ console.log(JSON.stringify(args));
       expect(JSON.stringify(run.records)).not.toContain("deployment window");
       await run.shutdown();
     }, 30_000);
+    // #2161: the record of an unmarked write is the host's, the record of a gated call the core's,
+    // and a session makes both. Each recorder holds its own map of the documents it uploaded, so
+    // two of them upload the session's document twice under its one name, which Dispatch answers
+    // by replacing it: the first recorder's records are dropped. One recorder serves both.
+    test("an unmarked ask and a gated call in one session share the decision document: it is uploaded once and the second record appends", async () => {
+      gateOn();
+      const { default: envoyExtension } = await import("./envoy.ts?record-one-document");
+      standInDispatch();
+      const run = await unmarkedRun(envoyExtension, UNMARKED_ASK);
+      expect(run.records).toMatchObject([{ outcome: "unmarked", asksCarried: 1 }]);
+      expect(recordWrites).toEqual({ uploads: 1, appends: 0 });
+
+      const gated = await run.gatedAsk("call-ask");
+
+      expect(gated.result?.block).toBe(true);
+      // The charter call and the rules check: this call's rules check ran, so it is recorded too.
+      expect(completions).toEqual([MODEL, MODEL]);
+      expect(gated.records).toMatchObject([
+        { session: "ses_askgate", tool: "dispatch_ask", outcome: "unmarked", ruleOutcome: null },
+        {
+          session: "ses_askgate",
+          tool: "dispatch_ask",
+          outcome: "verdict",
+          decision: "revise",
+          ruleOutcome: "no-verdict",
+          target: "dispatch_ask issue=DSP-1",
+        },
+      ]);
+      // One document holds both: the gated call's record appended to the upload the unmarked
+      // write made, rather than uploading that name again.
+      expect(recordWrites).toEqual({ uploads: 1, appends: 1 });
+      await run.shutdown();
+    }, 30_000);
+
     /** Appends to the session's ledger a gated write the CLI logged as unmarked. */
     const appendUnmarked = () =>
       appendResult(sessionDirectory(process.env, "ses_askgate"), {

@@ -234,7 +234,12 @@ import requestTemplate from "./askgate-request.md" with { type: "text" };
 import systemTemplate from "./askgate-system.md" with { type: "text" };
 import uploadRule from "./askgate-upload.md" with { type: "text" };
 import { Breaker, breakerKey, callKeys, refusalThings, targetLabel } from "./breaker";
-import { createDecisionRecorder, RECORD_SHUT_DOWN, RECORD_TIMEOUT_MS } from "./decision-record";
+import {
+  createDecisionRecorder,
+  type DecisionRecorder,
+  RECORD_SHUT_DOWN,
+  RECORD_TIMEOUT_MS,
+} from "./decision-record";
 import ruleCheckRules from "./rule-check.md" with { type: "text" };
 import ruleCheckSystem from "./rule-check-system.md" with { type: "text" };
 import rules from "./rules.md" with { type: "text" };
@@ -549,6 +554,12 @@ interface Deps {
    * record writes through it.
    */
   dispatchClient: (directory: string, signal: AbortSignal) => DispatchSession | undefined;
+  /**
+   * The session's decision recorder, shared with the host's record of unmarked writes. Two
+   * recorders would each upload the session's document under its name, and Dispatch replaces a
+   * document uploaded again under its name, so the later upload would drop the other's records.
+   */
+  recordDecision?: DecisionRecorder;
 }
 // Handlers of any event shape register here (`never` parameters accept every typed handler), so the
 // fork's ExtensionAPI is assignable to it.
@@ -2148,8 +2159,9 @@ export function createAskGate(deps: Deps): (pi: Pi) => void {
     const rebuttals = new Map<string, Rebuttal>();
     const breaker = new Breaker();
     // Keyed by session id and not reset with the state below: a session the process returns to
-    // appends to the decision document it already uploaded.
-    const recordDecision = createDecisionRecorder(deps);
+    // appends to the decision document it already uploaded. The host's recorder when it gives one,
+    // so the gate's records and the unmarked writes' go into one document per session.
+    const recordDecision = deps.recordDecision ?? createDecisionRecorder(deps);
     let failures = 0;
     /** Rules calls in a row that ended without a rules verdict. */
     let ruleFailures = 0;
