@@ -2,17 +2,33 @@
   "schemaVersion": 1,
   "phase": "test",
   "issue": "INFRA-368",
-  "completed": "2026-10-29T14:00:00Z",
-  "headTested": "1327aa0d6be8c608126f172bd8168aa80cb6c9ed",
-  "codeHead": "881b03e5834e",
-  "round": "12: review round 8's data fix, with no merge of main. 881b03e5 works out the carried ids once, at the press, and stores them as a field on the edit, which keep writes and restore reads back. Restore's closure and the `followed ?? carried` fallback are gone, and the change carries the two wording fixes. I drove both reload cases in Chromium at 8c404ede, a temporary checkout of the workspace that I put back afterwards, and at the head. This round touches only the web app's held-sends and send-request code, so the server proofs from rounds 10 and 11 still hold.",
+  "completed": "2026-10-29T14:45:00Z",
+  "headTested": "39ef16aa5d7f85357e76d4c3acc469c064feda2b",
+  "codeHead": "30157984d4b2",
+  "round": "13: review round 9, narrowed to items 2 and 3 (the ci.yaml filters move to the forward merge, since this branch has no ci.yaml or check-ci-filters.sh). 30157984 makes sentRequest read the textarea value once and use it for both draft.body and edit.carried, and corrects the carriedIdsOf doc comment. I drove the CR LF unchanged save in Chromium at 881b03e5, a temporary checkout of the workspace that I put back afterwards, and at the head.",
   "implementerProof": {
     "verdict": "verified",
-    "how": "At the head (fresh dispatch_tester, 127.0.0.1:8877): block-graph.sh exit 0, 133 PASS. `bunx playwright test --config e2e/playwright.config.ts --project=chromium e2e/conversation.e2e.ts e2e/block-references.e2e.ts e2e/keyed-writes.e2e.ts` gave 38 passed and 1 skipped. My two reload cases pass at the head and fail at 8c404ede, as the implementer's new held-sends.test.ts cases are meant to."
+    "how": "At the head (fresh dispatch_tester, 127.0.0.1:8877): block-graph.sh exit 0, 133 PASS. `bunx playwright test --config e2e/playwright.config.ts --project=chromium e2e/conversation.e2e.ts e2e/block-references.e2e.ts e2e/keyed-writes.e2e.ts e2e/mention-composer.e2e.ts` gave 54 passed and 1 skipped. The CR LF case passes at the head and fails at 881b03e5, as the implementer's new MentionComposer.test.tsx case is meant to."
   },
   "failures": [],
   "failed": 0,
   "proof": [
+    {
+      "criterion": "Review round 9 item 2: a comment stored with CR LF, opened in the editor (whose textarea holds LF) and saved without typing, carries its block ids at the stored revision",
+      "surface": "The Conversation tab's comment editor in Chromium, as the author, over the local harness",
+      "command": "A throwaway spec (/legion/scratch/tmp/infra368/crlf-probe.e2e.ts, copied in and removed): createComment with 'Alpha first.\\r\\n\\r\\nBeta second.\\r\\n\\r\\nGamma third.', and an agent reply citing b2. Open the Conversation tab, expand the thread, press Edit, wait for the blocks read, check the field holds the LF text, press Save with no typing, and read the PATCH body, the blocks and the reply. I ran it on a harness built from 881b03e5 and on one built from the head",
+      "observed": "At the head the PATCH sent {body (LF), base_revision: 1, blocks: [b1@0, b2@14, b3@28]} and answered 200. The comment reads revision 2 with b1, b2 and b3 all at changed_revision 1, and the reply cites b2 (removed: false). At 881b03e5 the PATCH sent {body} alone, with no base_revision and no blocks. The server matched by text, so the ids happened to survive, but the editor carried none",
+      "headSha": "30157984d4b2",
+      "negativeControl": "At 881b03e5 the same save sent no base_revision and no blocks (the probe's 'base_revision is 1' check failed: received undefined)"
+    },
+    {
+      "criterion": "No regression of round 8's reload fix, and A7, A10 comment half, A11, A13, A15 comment half, R14 at this head",
+      "surface": "Local Dispatch harness: real Go server built from the head, migrations 0001-0141 on a fresh database, the real dispatch CLI, Chromium",
+      "command": "The round-12 reload probe (retry2-probe.e2e.ts: two reloads, then Retry; a reload interrupting a Retry); block-graph.sh; the four Playwright files above",
+      "observed": "Both reload cases pass at the head: every attempt goes under one key with one identical body, base_revision and blocks, and the reply keeps b2. Driver: exit 0, 133 PASS. Playwright: 54 passed, 1 skipped",
+      "headSha": "30157984d4b2",
+      "negativeControl": "Driver lines: a reply_to_block of b9 answers 400 INVALID_COMMENT, a carried blocks id b9 answers 400 and leaves the body unchanged, and a pinned message block on ?to= answers 400 INVALID_REFERENCE"
+    },
     {
       "criterion": "Review round 8: a comment edit's carried block ids survive every reload. Kept through two reloads and then retried, or with a reload interrupting a Retry, each attempt sends the same {body, base_revision, blocks} under the send's own key",
       "surface": "The Conversation tab's comment editor in Chromium, as the author, over the local harness",
@@ -20,14 +36,6 @@
       "observed": "At the head, in both cases the kept write still holds edit.carried {base_revision 1, blocks b1@0, b3@14, b2@28} after the second reload. Every attempt (2 in R2, 3 in RI) went under one key with one identical body that carries base_revision and the blocks. The last answered 200, the blocks read b1, b3, b2 'Beta second. Reworded too.', and the reply still cites b2 (removed: false). At 8c404ede, after the second reload the kept write held edit {id} alone. The final attempt went under the same key with {body} only, the paragraph got b4, and the reply read b2 removed: true, in both R2 and RI",
       "headSha": "881b03e5834e",
       "negativeControl": "At 8c404ede the same two cases sent two different bodies under one key, and lost b2"
-    },
-    {
-      "criterion": "A7, A10 comment half, A11, A13, A15 comment half, R14, and the earlier rounds' fixes, at this head",
-      "surface": "Local Dispatch harness: real Go server built from the head, migrations 0001-0141 on a fresh database, the real dispatch CLI, Chromium",
-      "command": "env -u DISPATCH_TOKEN_FILE DISPATCH_URL=http://127.0.0.1:8877 DISPATCH_TOKEN=e2e-token PROJECT=CORE COMPONENT_SOURCE=fixture FAKE_GITHUB_PORT=9122 DEV_SIGNIN_LOGIN=alice bash packages/dispatch/e2e/acceptance/block-graph.sh; the three Playwright files above",
-      "observed": "Driver: exit 0, 133 PASS, no FAIL or SKIP line. Playwright: 38 passed, 1 skipped, including the passage rows, the block-card rows and keyed-writes.e2e.ts in full",
-      "headSha": "881b03e5834e",
-      "negativeControl": "Driver lines: a reply_to_block of b9 answers 400 INVALID_COMMENT, a carried blocks id b9 answers 400 and leaves the body unchanged, and a pinned message block on ?to= answers 400 INVALID_REFERENCE"
     },
     {
       "criterion": "Round 8 item 2: a repeated keyed POST of a message reply that names a block answers its reply_block, on the issue message route and the agent message route",
@@ -46,6 +54,9 @@
       "negativeControl": "At step 1, main answered GET /api/v1/comments/<C>/blocks with 404 and listed the mention from the comment node"
     }
   ],
-  "ci": "GitHub reports #2463 CONFLICTING with main, so it runs no checks: neither 881b03e5 nor 1327aa0d has any check run. This is expected under the controller's ruling: the pull request is held at its approved head with no merge of main, and the implementer merges main forward only when the merge lane calls its turn. CI is read at that merged head.",
+  "notes": [
+    "I did not run check-ci-filters.sh, by the architect's correction of 14:12:58Z: this branch has no .github/workflows/ci.yaml and no check-ci-filters.sh, because main added both after the branch's merge base. The itemblocks filters are checked at the head the forward merge produces."
+  ],
+  "ci": "GitHub reports #2463 CONFLICTING with main, so no check runs at 30157984 or 39ef16aa. This is expected under the controller's ruling: the pull request is held at its approved head, and CI is read at the forward merge's head.",
   "migrations": "This head adds 0139-0141 after the merge parent's 0138."
 }
