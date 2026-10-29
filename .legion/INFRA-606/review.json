@@ -2,53 +2,45 @@
   "schemaVersion": 1,
   "phase": "review",
   "issue": "INFRA-606",
-  "completed": "2026-10-28T20:14:41Z",
-  "round": 2,
-  "headReviewed": "51f60586e5a1def8fc38000a85ec7e1fff52d093",
-  "codeHead": "3e96e81cc3f753cae956957d9a29e32d51cc1aea",
+  "completed": "2026-10-29T02:04:19Z",
+  "round": 3,
+  "headReviewed": "0d428941235dbb52866eb40cc2f496668f68864f",
+  "codeHead": "2eda91938cc2",
   "decision": "changes_requested",
   "critical": 0,
-  "important": 2,
+  "important": 1,
   "minor": 3,
-  "ci": "Required set lint, typecheck, test, pr-title (rulesets; no branch protection). CI head 3e96e81c: every run queued at review time (148 runs queued repository-wide). The request for changes does not wait on it. The controller relayed three reds that are main's, not this PR's: recipients-claim.e2e.ts route-close (#2324), TestDispatchConnectionsPerPodIsTheServers (#2464), mermaid.e2e.ts:194 (INFRA-138); none counts against this PR.",
-  "tests": "Against a local pgserver Postgres 16 at code head 3e96e81c: go test ./internal/dispatch/outbox/ ok (157.8 s); -run 'Mention|Stranded|Comment|Rolling|SIGKILL|SIGTERM|EventLog|SSE|Relay|Hub|AgentStream' ./internal/dispatch/api/ ok (153.5 s); ./cmd/dispatch the same filter: only TestSIGTERMWithTheDatabaseUnansweringExitsWithinTheShutdownBudget failed, environmental (it dials a TCP port while the test URL is a unix socket; shutdown_test.go is unchanged by this PR). A throwaway outbox test (not committed) reproduces finding 1: a reopened, already-published comment.created reaches notifications.role.implementer after the route moved from role:planner.",
-  "architectQuestions": {
-    "payloadRewrite": "Not rewritten. reopenCommentCreated (api/comment_delivery.go:568-591) clears only published_at and next_attempt_at; payload and published_destinations are untouched; events_notify fires after insert only (0107). The relay replay, GET /api/v1/events/log and the Stage 3 audit read rows by id, so each sees one unchanged comment.created.",
-    "claimGuard": "Holds. recordBatch (outbox/publisher.go:468-471) writes published_at, attempt_count and next_attempt_at only while e.next_attempt_at equals the batch's claim token; a reopen nulls it and a re-claim writes a later now()+claimWindow, so a late batch only appends the destinations it reached. TestABatchNeverMarksPublishedAnEventReopenedWhileItPublishedIt and TestTwoProcessesPublishEveryEventExactlyOnce pass here. A base-build outbox beside this API has no guard: finding 2."
+  "ci": "Required set lint, typecheck, test, pr-title. At code head 2eda9193: lint, typecheck, test and PR Title success. The non-required suites the architect named (envoy-go, envoy-go-race, dispatch, dispatch-multiprocess, dispatch-memory, the Dispatch Go suite on Postgres 16) were all still queued at review time; approval waits on them, this request does not. Known red on main: packages/dispatch/e2e/close-withdraws-asks.e2e.ts:126 (INFRA-138). pmdoc's build is fixed on main by #2484 (a09a2f25), after this branch's merge base d4cbcfe6, so pmdoc stays red on this branch until the next merge of main; record it as main's.",
+  "tests": "Local Postgres 16 at code head 2eda9193: go vet api, outbox, model, events, loadtest clean; go test outbox, model, events, store, loadtest ok; go test ./internal/dispatch/api/ ok except TestIssueRanksStayOrderedPastLowercaseDigitsAndProductionShapedMoves, environmental (this pgserver build has byte-order collation only; the implementer's handoff names the same).",
+  "architectChecks": {
+    "criterion5Unanswered": "Not a finding. The 9 of 37 mentioned comment writes in the 60 s after the restart that got no 2xx are client-side transport failures while the process restarted (restart 01:23:53.9 to /healthz 01:24:04.5): run.log in /legion/scratch/tmp/t606/lt/runs/t606r9-head has 36 'connect: connection refused', 1 dial 'i/o timeout' at 01:24:01, and 1 client timeout, for all comment writes after the restart, with and without mentions (9 of 37 with, 29 of 140 without). No comment was created for them, so no mention is owed; the load generator does not retry. Main answered 0 of 37.",
+    "nonRequiredSuites": "Queued at review time; approval waits for them."
   },
   "threadsAnswered": [
-    "PRRT_kwDORFy7ds6w0WvW",
-    "PRRT_kwDORFy7ds6w0Wve",
-    "PRRT_kwDORFy7ds6w0Wvq",
-    "PRRT_kwDORFy7ds6w0Wvv",
-    "PRRT_kwDORFy7ds6w0Wv4"
+    "PRRT_kwDORFy7ds6xTdRC",
+    "PRRT_kwDORFy7ds6xTdRK",
+    "PRRT_kwDORFy7ds6xTdRO"
   ],
   "keyFindings": [
     {
       "severity": "important",
-      "file": "packages/envoy/internal/dispatch/api/comment_delivery.go",
-      "description": "Every failed settle (a first send, the stranded resend, a person's Retry at any age) reopens comment.created whenever the comment mentions the session and its own topic is not in published_destinations. The re-scan publishes to every destination not yet recorded, read from the issue as it is now: a moved route, a new claimant, new followers or document authors get the old comment. published_at moves (and is null between), which deliveryaudit reads as when the comment was published. Reproduced with a throwaway outbox test. Reopen only where the outbox left the copy to this attempt (a resumed attempt it published past), and publish only the owed session's copy."
-    },
-    {
-      "severity": "important",
-      "file": "packages/envoy/internal/dispatch/outbox/publisher.go",
-      "description": "A rolling update from a build before this one runs the old outbox beside the new API: the old outbox publishes a copy for an attempt pending over a minute without settling it (the new sender then sends the mention too), and marks a reopened event published with no claim token. Name it and bound it in the body's risk lines (who is affected, and Recreate as the alternative), or make the new API safe against it."
+      "file": "packages/envoy/internal/dispatch/outbox/mentions.go",
+      "description": "failedFallbackCopy settles a comment_fallback_copies row unpublished when its count reaches retry.DeadLetterAttempts (10). A failed row keeps its claim of now()+claimWindow (1 minute), so the copy is given up after about 10 minutes, and any decision error (Postgres) or non-ErrUnavailable publish error counts. An event never stops (backOff logs at the threshold and retries on retry.Delay; retry.go:13-16 says the events outbox does not stop because nothing about a publish failure is permanent). A transient outage of about 10 minutes therefore drops the only copy a mentioned session was owed. The PR body says 'as an event does'. Fix: back off on retry.Delay and keep retrying as an event does, logging once at the threshold."
     },
     {
       "severity": "minor",
-      "file": "packages/envoy/internal/dispatch/api/comment_mention_sender.go",
-      "description": "The partial index is migration 0136_comment_deliveries_pending; comment_mention_sender.go:358, packages/envoy/AGENTS.md:1384 and the body say 0135 (main's server_processes). cmd/dispatch/README.md has no paragraph for 0136 (its lock and census) as every other migration does."
+      "file": "packages/envoy/cmd/dispatch/README.md",
+      "description": "A rollback to the previous build strands unsettled comment_fallback_copies rows: the previous build has neither the fallback pass nor the stranded pass, and the event is already published. The 0138 paragraph says the earlier release runs over the schema unchanged; name this and the drain check (select count(*) from comment_fallback_copies where settled_at is null)."
     },
     {
       "severity": "minor",
-      "file": "PR body",
-      "description": "Contract change census: entry 2 says nothing else reads X-Dispatch-Event-Replay, but main's web/src/api/live.ts:120 now does (INFRA-492), and entry 1's sse.ts disposition says the browser refreshes on every reconnect, which it no longer does when the header is complete. Both need their disposition rewritten."
+      "file": "packages/envoy/internal/dispatch/outbox/mentions.go",
+      "description": "recordFallbackCopies matches rows by (comment_id, destination, settled_at is null) and not by the claim it took, so a pass that outlasts claimWindow can release or fail a row another process has claimed since. The repeat publish carries the same dedupe key, so hosts drop it; guard on the claimed next_attempt_at."
     },
     {
       "severity": "minor",
-      "file": "PR body",
-      "description": "Body line 124 says the stranded pass reads migration 0135; it is 0136."
+      "file": "packages/envoy/internal/dispatch/api/comment_create.go",
+      "description": "Lines 480-487 restate the copy protocol and are now wrong (a resent mention's copy is not held back; it becomes a fallback row), naming mentionDeliveryQuery as the decider; point to publishFallbackCopies. Also: comment_delivery_sender_test.go:22-25 keeps a test copy of claimLease, and BroadcastPage.tsx:43,91 name the deleted claimLapsed."
     }
-  ],
-  "fastFollow": "Mention-delivery ownership cleanup, no behaviour change: an exported outbox reopen in place of the API's raw update and the test's copy; one model rule for the session a mention attempt counts under (five copies today) and one for live/resumed/abandoned predicates (two packages), dropping api's claimLease for model.DeliveryClaimLapseInterval; leftTo's settle as an explicit attempt method rather than a closure with a raw keyColumn; outbox mention logic into outbox/mentions.go and server.go back under 1,000 lines; one canonical description of the reopen protocol."
+  ]
 }
