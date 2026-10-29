@@ -2,8 +2,16 @@
   "schemaVersion": 1,
   "phase": "implement",
   "issue": "INFRA-607",
-  "completed": "2026-10-29T17:25:00Z",
+  "completed": "2026-10-29T18:40:00Z",
   "proof": [
+    {
+      "criterion": "Review round 5: TestTheMaintenanceLoopSweepsOncePerPeriodAcrossTwoRunners no longer races between the key-sweep count (recorded as the delete starts) and the resume count (after it returns)",
+      "surface": "go test on the real Postgres 16 test database (two store pools, storetest.SecondProcess), race detector on",
+      "command": "cd packages/envoy && CGO_ENABLED=1 go test -race ./internal/dispatch/api/ -run '^TestTheMaintenanceLoopSweepsOncePerPeriodAcrossTwoRunners$' -count=200",
+      "observed": "ok in 450.8 s (200 of 200). Each pass's resume, which runs after the delete returned and under the lease, checks the deletes so far equal its pass number; the wait counts completed passes.",
+      "headSha": "84d139a3081a42151483832938b3c77355f9aa68",
+      "negativeControl": "a temporary second sweepRequestKeys call in each pass made the test fail at once: 'pass 1 resumed deliveries after 2 key sweeps; every pass runs both'; reverted before the commit"
+    },
     {
       "criterion": "Each changed loop is silent at idle at the merged head, and main's once-a-minute key and delivery sweep keeps main's cadence across processes",
       "surface": "Two head and two fork-point (88840d35) processes side by side, config B (fake Azure embedder, fake GitHub App), statements by source from the Postgres statement log over 10 minutes",
@@ -22,6 +30,7 @@
     }
   ],
   "filesChanged": [
+    "84d139a3: api/maintenance_test.go (check inside the pass); prose: .dispatch/architecture/dispatch-api.md and dispatch-server.md (maintenance sweep's lease and timer), cmd/dispatch/main.go (four timers), cmd/dispatch/README.md and api/suggestion_outcomes.go (the embedding queue takes no lease either), cmd/dispatch/multiprocess_test.go (why suggestion-outcomes is unobserved)",
     "Forward merge of main 7c2effba (a01bc655): migrations renumbered to 0141-0147; leasePoolSize 13 on main, so ConnectionsPerProcess and dispatchConnectionsPerPod 88; #2397's issue-spec embedding trigger kept (it calls embeddings_enqueue, so it notifies)",
     "Forward merges of main be4567e3 (03f27579, keeping #2396's due-time race fixes) and 88840d35 (5660b5be, keeping #2449's shutdown and keyed-write sweep); then renumbered at the next merge",
     "packages/envoy/internal/dispatch/architecture/ticker_test.go: transaction framing counted apart from writes (main's importer now writes in a transaction)",
