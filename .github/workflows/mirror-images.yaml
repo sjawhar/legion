@@ -54,7 +54,7 @@ jobs:
         run: |
           set -euo pipefail
           PYTHONDONTWRITEBYTECODE=1 python3 - <<'PY' > rows.tsv
-          import sys, yaml
+          import yaml
           doc = yaml.safe_load(open(".github/ci-images.yaml"))
           registry = doc["registry"]
           for row in doc["images"]:

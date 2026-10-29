@@ -30,12 +30,12 @@
 #      .github/workflows/mirror-images.yaml publishes a row when that file changes, so the usual
 #      remedy is to merge the row and let the mirror run.
 #
-# CI'S REACH is the explicit list in REACH below: every .github/workflows/*.yaml, every
-# .github/actions/*/action.yml, and each other file a CI job runs that names an image. Each entry
-# is a file, never a directory, and a file the list names that is gone fails this check rather
-# than silently checking nothing. A .github/workflows/*.yml, or a .github/actions/*/action.yaml,
-# fails too: this check reads the two spellings the repository uses, and a third would be in no
-# list.
+# CI'S REACH is every .github/workflows/*.yaml, every .github/actions/*/action.yml, and each
+# other file a CI job runs that names an image. The first two kinds come from those two globs;
+# REACH below is the explicit list of the other files, each entry a file and never a directory.
+# A REACH entry that is gone fails this check rather than silently checking nothing. A
+# .github/workflows/*.yml, or a .github/actions/*/action.yaml, fails too: this check reads the
+# two spellings the repository uses, and a third would be in no list.
 #
 # A REFERENCE in those files is one of:
 #   * a job's `services:` or `container:` image, read from the parsed YAML, never grepped;
@@ -376,34 +376,29 @@ by_digest: dict[str, tuple[int, str, str, str]] = {}
 by_tag: dict[str, tuple[int, str, str, str]] = {}
 for row in readable:
     line, upstream, tag, digest = row
-    held = by_digest.get(digest)
-    if held is not None:
+    earlier = by_digest.get(digest)
+    if earlier is not None:
         problems.append(
             f"{CI_IMAGES}:{line}: {digest} is also the digest of the row for "
-            f"{one_line(held[1])} on line {held[0]}. The row is what says which image a digest "
-            f"is, so one digest names one row: delete one of them."
+            f"{one_line(earlier[1])} on line {earlier[0]}. The row is what says which image a "
+            f"digest is, so one digest names one row: delete one of them."
         )
     else:
         by_digest[digest] = row
-    held = by_tag.get(tag)
-    if held is not None:
+    earlier = by_tag.get(tag)
+    if earlier is not None:
         problems.append(
-            f"{CI_IMAGES}:{line}: tag {tag} is also the tag of the row for {one_line(held[1])} "
-            f"on line {held[0]}, and the second copy would move the tag off the first row's "
+            f"{CI_IMAGES}:{line}: tag {tag} is also the tag of the row for {one_line(earlier[1])} "
+            f"on line {earlier[0]}, and the second copy would move the tag off the first row's "
             f"digest. Give one of them another tag."
         )
     else:
         by_tag[tag] = row
 
 
-def upstream_path(upstream: str) -> str:
-    parts = split_reference(upstream)
-    return parts[1] if parts else ""
-
-
-def upstream_tag(upstream: str) -> str:
-    parts = split_reference(upstream)
-    return parts[2] if parts else ""
+def upstream_parts(upstream: str) -> tuple[str, str, str, str]:
+    """(host, path, tag, digest) of a row's upstream, each "" where the reference carries none."""
+    return split_reference(upstream) or ("", "", "", "")
 
 
 # Rule 3: a row whose upstream carries a version this repository pins elsewhere.
@@ -424,26 +419,31 @@ for text in worker_text.splitlines():
 if not go_pin:
     fatal(f"{WORKER_DOCKERFILE} declares no ARG GO_VERSION=<version>, which a golang row copies")
 
-bun_rows = [row for row in readable if upstream_path(row[1]) == "oven/bun"]
-wanted = {bun_pin: "", f"{bun_pin}-slim": "-slim"}
-for line, upstream, _, _ in bun_rows:
-    if upstream_tag(upstream) not in wanted:
+bun_rows: list[tuple[int, str, str]] = []  # line, upstream, the tag that upstream carries
+for line, upstream, _, _ in readable:
+    _, repository, carried, _ = upstream_parts(upstream)
+    if repository == "oven/bun":
+        bun_rows.append((line, upstream, carried))
+wanted = {bun_pin, f"{bun_pin}-slim"}
+for line, upstream, carried in bun_rows:
+    if carried not in wanted:
         problems.append(
             f"{CI_IMAGES}:{line}: this row copies {one_line(upstream)}, and {BUN_PIN} locks "
             f"{bun_pin}. Raise both together: edit this row to oven/bun:{bun_pin} (or "
             f"oven/bun:{bun_pin}-slim), name its new digest, and repoint every FROM on it."
         )
 for tag in sorted(wanted):
-    if not any(upstream_tag(row[1]) == tag for row in bun_rows):
+    if not any(carried == tag for _, _, carried in bun_rows):
         problems.append(
             f"{CI_IMAGES}:{key_line(document, 'images')}: no row copies oven/bun:{tag}, and this "
             f"repository builds FROM it ({BUN_PIN} locks {bun_pin}). Add the row, and "
             f"{MIRROR_WORKFLOW} publishes it."
         )
 for line, upstream, _, _ in readable:
-    if upstream_path(upstream) != "library/golang":
+    _, repository, carried, _ = upstream_parts(upstream)
+    if repository != "library/golang":
         continue
-    if upstream_tag(upstream).partition("-")[0] != go_pin:
+    if carried.partition("-")[0] != go_pin:
         problems.append(
             f"{CI_IMAGES}:{line}: this row copies {one_line(upstream)}, and "
             f"{WORKER_DOCKERFILE} pins ARG GO_VERSION={go_pin}. Raise both together: edit this "
@@ -563,7 +563,9 @@ def fetches(words: list[str]) -> bool:
         for following in words[index + 1 :]:
             if following.startswith("-"):
                 continue
-            return following in FETCH_VERBS or fetches(words[index + 1 :])
+            if following in FETCH_VERBS:
+                return True
+            break
     return False
 
 
@@ -591,12 +593,12 @@ def scan_shell(path: Path, text: str, first: int, lines: list[str]) -> None:
             note(path, locate(lines, line, value), value, "the image this docker command fetches")
         if literals:
             continue
-        names = {name for name in VARIABLE.findall(command)}
-        followed = [name for name in sorted(names) if reads_as_reference(assigned.get(name, ""))]
+        names = set(VARIABLE.findall(command))
+        followed = any(reads_as_reference(assigned.get(name, "")) for name in names)
         for name in sorted(names):
             if (str(path), name) in IMAGE_FROM:
                 used_image_from.add((str(path), name))
-                followed.append(name)
+                followed = True
         if not followed:
             problems.append(
                 f"{path}:{line}: this docker command fetches an image this check cannot read "
@@ -621,7 +623,10 @@ def scan_dockerfile(path: Path, lines: list[str]) -> None:
             continue
         rest = [word for word in words[1:] if not word.startswith("--")]
         if not rest:
-            problems.append(f"{path}:{line}: this FROM names no image")
+            problems.append(
+                f"{path}:{line}: this FROM names no image. Write {REGISTRY}@<digest>, naming a "
+                f"digest {CI_IMAGES} holds."
+            )
             continue
         image = rest[0]
         if len(rest) > 2 and rest[1].upper() == "AS":
@@ -672,24 +677,19 @@ def scan_workflow(path: Path, lines: list[str]) -> None:
     for holder in holders:
         images: list[tuple[int, object, str]] = []
         container = holder.get("container")
-        if container is not None:
-            images.append(
-                (
-                    key_line(container, "image") if isinstance(container, dict) else key_line(holder, "container"),
-                    container.get("image") if isinstance(container, dict) else container,
-                    "this job's container image",
-                )
-            )
+        how = "this job's container image"
+        if isinstance(container, dict):
+            images.append((key_line(container, "image"), container.get("image"), how))
+        elif container is not None:
+            images.append((key_line(holder, "container"), container, how))
         services = holder.get("services")
         if isinstance(services, dict):
             for name, service in services.items():
-                images.append(
-                    (
-                        key_line(service, "image") if isinstance(service, dict) else key_line(services, name),
-                        service.get("image") if isinstance(service, dict) else service,
-                        f"the {name} service's image",
-                    )
-                )
+                how = f"the {name} service's image"
+                if isinstance(service, dict):
+                    images.append((key_line(service, "image"), service.get("image"), how))
+                else:
+                    images.append((key_line(services, name), service, how))
         for line, image, how in images:
             if not isinstance(image, str) or "${{" in image:
                 problems.append(
@@ -876,7 +876,7 @@ if problems:
 print(
     f"{CI_IMAGES} holds {len(readable)} row(s), {held} of them in the package; "
     f"{len(references)} reference(s) in {len(reach)} file(s) of CI's reach name one of those "
-    f"rows; {swept} text file(s) name {MIRROR} only in the {len(EXCEPTIONS)} the exception list "
-    f"admits"
+    f"rows; of {swept} text file(s) swept, the {len(naming_mirror)} that name {MIRROR} are all "
+    f"in the exception list"
 )
 PY

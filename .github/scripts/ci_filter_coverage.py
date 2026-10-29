@@ -775,7 +775,7 @@ def check_ci_ok(document: dict, problems: list) -> None:
     for job_id in gated:
         if job_id in needed:
             continue
-        absent = [name for name, holder in (("needs", needed), ("SELECTED_BY", selected_by)) if job_id not in holder]
+        absent = ["needs"] if job_id in selected_by else ["needs", "SELECTED_BY"]
         names = " and ".join(absent)
         problems.append(f"::error file={WORKFLOW}::job {job_id} tests an output of changes in its if:, and ci-ok's "
                         f"{names} {'do' if len(absent) > 1 else 'does'} not name it, so ci-ok passes while {job_id} "
