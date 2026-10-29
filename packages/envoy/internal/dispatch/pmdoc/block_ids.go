@@ -1,6 +1,7 @@
 package pmdoc
 
 import (
+	"crypto/rand"
 	"fmt"
 	"strings"
 	"sync"
@@ -13,15 +14,15 @@ const BlockIDAttr = "blockId"
 var blockIDGenerator = struct {
 	sync.RWMutex
 	mint func() string
-}{mint: uuid.NewString}
+}{mint: newBlockID}
 
-// SetBlockIDGenerator replaces the block ID generator. Passing nil restores UUID v4 IDs.
-// Fixture generators and tests use this to make generated documents deterministic.
+// SetBlockIDGenerator replaces the block ID generator. Passing nil restores UUID v4 IDs
+// (newBlockID). Fixture generators and tests use this to make generated documents deterministic.
 func SetBlockIDGenerator(mint func() string) {
 	blockIDGenerator.Lock()
 	defer blockIDGenerator.Unlock()
 	if mint == nil {
-		blockIDGenerator.mint = uuid.NewString
+		blockIDGenerator.mint = newBlockID
 		return
 	}
 	blockIDGenerator.mint = mint
@@ -32,6 +33,42 @@ func mintBlockID() string {
 	mint := blockIDGenerator.mint
 	blockIDGenerator.RUnlock()
 	return mint()
+}
+
+// blockIDEntropy is the random bytes ids are minted from, read from crypto/rand a block at a time.
+// The kernel is asked once per read, and a write mints an id for every block that names none: a
+// document of 8,000 list items spent about half its parse inside sixteen-byte reads, one per item
+// (the plain list of heavy_bodies_test.go). Every id still comes from those bytes alone, 122 of
+// them as a version 4 UUID holds.
+var blockIDEntropy struct {
+	sync.Mutex
+	bytes [blockIDEntropyIDs * len(uuid.UUID{})]byte
+	// minted is how many ids the buffer has given out; it is refilled on the first and then on
+	// every blockIDEntropyIDs-th.
+	minted int
+}
+
+// blockIDEntropyIDs is how many ids one read of crypto/rand fills. Each costs sixteen bytes, so
+// the buffer is four kibibytes.
+const blockIDEntropyIDs = 256
+
+// newBlockID is a version 4 UUID, as uuid.NewString writes one, minted from blockIDEntropy.
+func newBlockID() string {
+	var id uuid.UUID
+	blockIDEntropy.Lock()
+	at := blockIDEntropy.minted % blockIDEntropyIDs
+	if at == 0 {
+		if _, err := rand.Read(blockIDEntropy.bytes[:]); err != nil {
+			blockIDEntropy.Unlock()
+			panic(fmt.Sprintf("pmdoc: reading randomness for a block id: %v", err))
+		}
+	}
+	copy(id[:], blockIDEntropy.bytes[at*len(id):])
+	blockIDEntropy.minted++
+	blockIDEntropy.Unlock()
+	id[6] = (id[6] & 0x0f) | 0x40
+	id[8] = (id[8] & 0x3f) | 0x80
+	return id.String()
 }
 
 // EnsureBlockIDs gives every block in tree a unique blockId. Existing unique IDs stay

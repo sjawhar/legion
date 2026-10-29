@@ -280,25 +280,11 @@ function resolveFenceLineEndings(events: Event[]): void {
  * flow construct's content was a document of its own, made of the rest of each line after the
  * prefixes of the containers around the block and its own indentation, and `subtokenize` put what
  * that document emitted between one line's content and the next after the next line's prefixes.
- * Here every container is on one stack, so:
- *
- * - A container inside a directive container that goes on, ended by a line (lazily, or by a
- *   `_closeFlow` such as a new list item's), ends where the directive's content starts on that
- *   line, after the prefixes of the containers around the directive; micromark puts it before
- *   them, right after the line before.
- * - An unclosed directive container ends, with the containers inside it, right after its last
- *   content, before any prefixes of the containers around it that follow: its content document
- *   ended there. When the line after was lazy for it (no container of the line reached it), the
- *   flow construct left that last line ending out of its content, so a last line that held nothing
- *   else was no line of it at all, and its own exit goes before that last line ending.
- * - A closed directive container ends right after its closing fence, where micromark only exits it
- *   on the next line.
- * - The directive container's own exit is the flow construct's, which `subtokenize` never moved,
- *   so it is no longer marked `_container` once placed, except where it goes before a last line
- *   ending: `subtokenize` puts it there.
- * - A line that opens a directive container first, where some container did not go on, was lazy
- *   for the flow construct, which opened no container there, and micromark puts a lazy line's
- *   exits right after the line before; so do the lines `lazyContentEnd` ends a block at.
+ * Here every container is on one stack, so this walks the events once, and at each run of exits
+ * one rule below says where each of them goes: `exitsOfAClosedDirectiveContainer`,
+ * `exitsOfAnUnclosedDirectiveContainer`, `exitsOfAContainerEndedByALine` or `exitsOfALazyLine`,
+ * each carrying the end it reads as its own doc comment. `placeExits` then moves them, and
+ * `settleExits` leaves a directive container's own exit where it is put.
  *
  * An exit moves over prefixes and content only, within a line or two, and never past another
  * container's event, so this stays linear in the events.
@@ -333,25 +319,21 @@ function resolveContentExits(events: Event[], context: TokenizeContext): void {
     }
     const remaining = open.length - (end - index);
     const chunk = lastChunk === -1 ? undefined : events[lastChunk][1];
-    // The line after the last content, when that content ends in a line ending.
-    const nextLine =
-      chunk !== undefined && chunk.end.line !== chunk.start.line ? chunk.end.line : -1;
-    // Whether that line was lazy: micromark found no container there, or it opens a directive
-    // container first, which the flow construct, opening no container, read as a lazy line.
-    let after = end;
-    while (after < events.length && events[after][1].type === "linePrefix") after++;
-    const lazyLine =
-      nextLine !== -1 &&
-      (context.parser.lazy[nextLine] === true ||
-        (after < events.length &&
-          events[after][0] === "enter" &&
-          events[after][1]._directive !== undefined &&
-          events[after][1].start.line === nextLine));
-    // Whether the last content is only a line ending.
-    const bareChunk =
-      chunk !== undefined &&
-      chunk.end.offset - chunk.start.offset <= 2 &&
-      context.sliceStream(chunk).length === 1;
+    const run: ExitRun = {
+      events,
+      context,
+      index,
+      end,
+      lastChunk,
+      chunk,
+      // The line after the last content, when that content ends in a line ending.
+      nextLine: chunk !== undefined && chunk.end.line !== chunk.start.line ? chunk.end.line : -1,
+      lazyLine: false,
+    };
+    // Where a lazy line's exits go, and whether the line after the last content is one: the rules
+    // below all read that.
+    const lazyLine = exitsOfALazyLine(run);
+    run.lazyLine = lazyLine.lazy;
     const gaps: number[] = new Array(end - index);
     // The directive containers whose exit goes exactly where it is put: `subtokenize` must not move
     // it back over line endings, as nothing moved the flow construct's own exit.
@@ -366,100 +348,216 @@ function resolveContentExits(events: Event[], context: TokenizeContext): void {
       // Whether the exit is a directive container's own, or one inside a directive container that
       // exits in this run too.
       const blockEnds = block !== undefined && (own !== undefined || owner >= remaining);
-      let gap = end;
+      let placement: ExitPlacement = { gap: end, settled: false };
       if (blockEnds && block.closed) {
-        // A closed directive container ends right after its closing fence, a line or less back.
-        gap = index - 1;
-        while (
-          gap > 0 &&
-          !(events[gap][0] === "exit" && events[gap][1].type === "directiveContainerFence")
-        ) {
-          gap--;
-        }
-        gap++;
-        settled.push(exiting);
+        placement = exitsOfAClosedDirectiveContainer(run);
       } else if (blockEnds) {
-        // An unclosed one ends with the containers inside it right after its last content. When the
-        // line after was lazy for it, the flow construct left the last line ending out of its
-        // content, so a last line that held nothing else (past the prefixes of the containers
-        // around it) was no line of it at all; else its own exit goes before that line ending, where
-        // `subtokenize` moves it. That line was no line of it either when a flow token, such as a
-        // fenced code block that took the line ending before it, ends in it, but an exit before it
-        // would fall inside that token, so the exits go where they go after a line of content.
-        gap = contentEnd(events, block, index);
-        const lazy = lazyLine && block.contentStarts[nextLine - block.line] === undefined;
-        const bare =
-          lazy &&
-          bareChunk &&
-          gap === lastChunk + 1 &&
-          block.contentStarts[chunk.start.line - block.line] === chunk.start.offset &&
-          !flowTokenEndsIn(chunk);
-        if (bare)
-          gap = own !== undefined ? lastChunk - 1 : contentEnd(events, block, lastChunk - 1);
-        if (own !== undefined && (bare || !lazy)) settled.push(exiting);
-      } else if (block !== undefined && nextLine !== -1 && (lastChunk === index - 1 || lazyLine)) {
-        // A container inside a directive container that goes on ends where the directive's content
-        // starts on the next line. micromark puts a lazy line's exits right after the line before.
-        const start = block.contentStarts[nextLine - block.line];
-        if (start !== undefined) {
-          gap = lastChunk + 1;
-          while (gap < events.length) {
-            if (gap === index) gap = end;
-            if (gap === events.length) break;
-            const token = events[gap][1];
-            if (
-              token.start.offset >= start ||
-              token._container === true ||
-              token._directive !== undefined
-            )
-              break;
-            gap++;
-          }
-        }
-      } else if (block === undefined && lazyLine) {
-        // A container in no directive container that a lazy line ends ends right after the line
-        // before, where micromark puts a lazy line's exits.
-        gap = lastChunk + 1;
+        placement = exitsOfAnUnclosedDirectiveContainer(run, block, own);
+      } else if (
+        block !== undefined &&
+        run.nextLine !== -1 &&
+        (lastChunk === index - 1 || run.lazyLine)
+      ) {
+        placement = exitsOfAContainerEndedByALine(run, block);
+      } else if (block === undefined && run.lazyLine) {
+        placement = lazyLine;
       }
+      if (placement.settled) settled.push(exiting);
+      let gap = placement.gap;
       if (gap >= index && gap <= end) gap = end;
       if (at < end - 1) gap = Math.min(gap, gaps[at + 1 - index]);
       gaps[at - index] = gap;
     }
 
-    // An exit moves back over prefixes and content only, never over another container's event.
-    let valid = true;
-    for (let at = Math.min(gaps[0], index); at < index && valid; at++) {
-      valid = events[at][1]._container !== true && events[at][1]._directive === undefined;
-    }
-    let windowEnd = end;
-    if (valid) {
-      for (const token of settled) token._container = false;
-    }
-    if (valid && (gaps[0] !== end || gaps[gaps.length - 1] !== end)) {
-      const windowStart = Math.min(index, gaps[0]);
-      windowEnd = Math.max(end, gaps[gaps.length - 1]);
-      const placed: Event[] = [];
-      let next = 0;
-      for (let at = windowStart; at <= windowEnd; at++) {
-        while (next < gaps.length && gaps[next] === at) {
-          const exit = events[index + next];
-          if (at < index) exit[1].end = { ...events[at - 1][1].end };
-          placed.push(exit);
-          next++;
-        }
-        if (at < windowEnd && (at < index || at >= end)) placed.push(events[at]);
-      }
-      for (let at = 0; at < placed.length; at++) events[windowStart + at] = placed[at];
-      if (lastChunk >= windowStart) {
-        lastChunk = windowEnd - 1;
-        while (!(events[lastChunk][0] === "exit" && events[lastChunk][1].type === "chunkFlow"))
-          lastChunk--;
-      }
-    }
+    const moved = placeExits(run, gaps, settled);
+    lastChunk = moved.lastChunk;
     open.length = remaining;
     owners.length = remaining;
-    index = windowEnd;
+    index = moved.windowEnd;
   }
+}
+
+/** One run of container exits, innermost first, and the line after the content before it. */
+interface ExitRun {
+  events: Event[];
+  context: TokenizeContext;
+  /** The first exit of the run. */
+  index: number;
+  /** The gap after its last exit. */
+  end: number;
+  /** The index of the last `chunkFlow` exit: the end of the last line's content. */
+  lastChunk: number;
+  /** That content, or undefined where no line has ended yet. */
+  chunk: Token | undefined;
+  /** The line after it, when it ends in a line ending, or -1. */
+  nextLine: number;
+  /** Whether that line was lazy for the flow construct (`exitsOfALazyLine`). */
+  lazyLine: boolean;
+}
+
+/** Where one exit of a run goes. */
+interface ExitPlacement {
+  /** The gap it goes in: before the event at this index. */
+  gap: number;
+  /** Whether it settles where it is put (`settleExits`). */
+  settled: boolean;
+}
+
+/**
+ * - A closed directive container ends right after its closing fence, where micromark only exits it
+ *   on the next line.
+ */
+function exitsOfAClosedDirectiveContainer({ events, index }: ExitRun): ExitPlacement {
+  // The fence is a line or less back.
+  let gap = index - 1;
+  while (
+    gap > 0 &&
+    !(events[gap][0] === "exit" && events[gap][1].type === "directiveContainerFence")
+  ) {
+    gap--;
+  }
+  return { gap: gap + 1, settled: true };
+}
+
+/**
+ * - An unclosed directive container ends, with the containers inside it, right after its last
+ *   content, before any prefixes of the containers around it that follow: its content document
+ *   ended there. When the line after was lazy for it (no container of the line reached it), the
+ *   flow construct left that last line ending out of its content, so a last line that held nothing
+ *   else was no line of it at all, and its own exit goes before that last line ending.
+ *
+ * A last line held nothing else when it held nothing past the prefixes of the containers around
+ * the block. It was no line of the block either when a flow token, such as a fenced code block
+ * that took the line ending before it, ends in it, but an exit before it would fall inside that
+ * token, so the exits go where they go after a line of content.
+ */
+function exitsOfAnUnclosedDirectiveContainer(
+  run: ExitRun,
+  block: DirectiveBlock,
+  own: DirectiveBlock | undefined
+): ExitPlacement {
+  const { events, context, index, lastChunk, chunk, nextLine } = run;
+  let gap = contentEnd(events, block, index);
+  const lazy = run.lazyLine && block.contentStarts[nextLine - block.line] === undefined;
+  // Whether the last content is only a line ending.
+  const bareChunk =
+    chunk !== undefined &&
+    chunk.end.offset - chunk.start.offset <= 2 &&
+    context.sliceStream(chunk).length === 1;
+  const bare =
+    lazy &&
+    bareChunk &&
+    gap === lastChunk + 1 &&
+    block.contentStarts[chunk.start.line - block.line] === chunk.start.offset &&
+    !flowTokenEndsIn(chunk);
+  if (bare) gap = own !== undefined ? lastChunk - 1 : contentEnd(events, block, lastChunk - 1);
+  return { gap, settled: own !== undefined && (bare || !lazy) };
+}
+
+/**
+ * - A container inside a directive container that goes on, ended by a line (lazily, or by a
+ *   `_closeFlow` such as a new list item's), ends where the directive's content starts on that
+ *   line, after the prefixes of the containers around the directive; micromark puts it before
+ *   them, right after the line before.
+ */
+function exitsOfAContainerEndedByALine(
+  { events, index, end, lastChunk, nextLine }: ExitRun,
+  block: DirectiveBlock
+): ExitPlacement {
+  const start = block.contentStarts[nextLine - block.line];
+  if (start === undefined) return { gap: end, settled: false };
+  let gap = lastChunk + 1;
+  while (gap < events.length) {
+    if (gap === index) gap = end;
+    if (gap === events.length) break;
+    const token = events[gap][1];
+    if (token.start.offset >= start || token._container === true || token._directive !== undefined)
+      break;
+    gap++;
+  }
+  return { gap, settled: false };
+}
+
+/**
+ * - A line that opens a directive container first, where some container did not go on, was lazy
+ *   for the flow construct, which opened no container there, and micromark puts a lazy line's
+ *   exits right after the line before; so do the lines `lazyContentEnd` ends a block at.
+ *
+ * `lazy` is whether the line after the run's last content is such a line, which the rules above
+ * read as well; the gap is where the exits of a container in no directive container go.
+ */
+function exitsOfALazyLine({
+  events,
+  context,
+  end,
+  lastChunk,
+  nextLine,
+}: ExitRun): ExitPlacement & { lazy: boolean } {
+  let after = end;
+  while (after < events.length && events[after][1].type === "linePrefix") after++;
+  const lazy =
+    nextLine !== -1 &&
+    (context.parser.lazy[nextLine] === true ||
+      (after < events.length &&
+        events[after][0] === "enter" &&
+        events[after][1]._directive !== undefined &&
+        events[after][1].start.line === nextLine));
+  return { lazy, gap: lastChunk + 1, settled: false };
+}
+
+/**
+ * - The directive container's own exit is the flow construct's, which `subtokenize` never moved,
+ *   so it is no longer marked `_container` once placed, except where it goes before a last line
+ *   ending: `subtokenize` puts it there.
+ */
+function settleExits(settled: Token[]): void {
+  for (const token of settled) token._container = false;
+}
+
+/**
+ * Moves each exit of the run to the gap its rule chose, and settles the exits that go exactly
+ * where they are put (`settleExits`), unless an exit would move over another container's event.
+ * It answers where the driver goes on: the last `chunkFlow` exit, which a move can have shifted,
+ * and the end of the window it rebuilt.
+ */
+function placeExits(
+  run: ExitRun,
+  gaps: number[],
+  settled: Token[]
+): { lastChunk: number; windowEnd: number } {
+  const { events, index, end } = run;
+  let lastChunk = run.lastChunk;
+  // An exit moves back over prefixes and content only, never over another container's event.
+  let valid = true;
+  for (let at = Math.min(gaps[0], index); at < index && valid; at++) {
+    valid = events[at][1]._container !== true && events[at][1]._directive === undefined;
+  }
+  let windowEnd = end;
+  if (valid) {
+    settleExits(settled);
+  }
+  if (valid && (gaps[0] !== end || gaps[gaps.length - 1] !== end)) {
+    const windowStart = Math.min(index, gaps[0]);
+    windowEnd = Math.max(end, gaps[gaps.length - 1]);
+    const placed: Event[] = [];
+    let next = 0;
+    for (let at = windowStart; at <= windowEnd; at++) {
+      while (next < gaps.length && gaps[next] === at) {
+        const exit = events[index + next];
+        if (at < index) exit[1].end = { ...events[at - 1][1].end };
+        placed.push(exit);
+        next++;
+      }
+      if (at < windowEnd && (at < index || at >= end)) placed.push(events[at]);
+    }
+    for (let at = 0; at < placed.length; at++) events[windowStart + at] = placed[at];
+    if (lastChunk >= windowStart) {
+      lastChunk = windowEnd - 1;
+      while (!(events[lastChunk][0] === "exit" && events[lastChunk][1].type === "chunkFlow"))
+        lastChunk--;
+    }
+  }
+  return { lastChunk, windowEnd };
 }
 
 /**

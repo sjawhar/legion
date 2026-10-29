@@ -217,7 +217,7 @@ type tabIndented struct {
 // so a block after a tab stood a character or two past its text, or on the next line.
 func (p tabIndented) Open(parent ast.Node, reader gmtext.Reader, pc parser.Context) (ast.Node, parser.State) {
 	_, start := reader.PeekLine()
-	if p.opens != nil {
+	if p.opens != nil && !tabFree(pc) {
 		expandTabIndentation(reader, p.opens)
 	}
 	line, segment := reader.PeekLine()
@@ -233,10 +233,24 @@ func (p tabIndented) Open(parent ast.Node, reader gmtext.Reader, pc parser.Conte
 }
 
 func (p tabIndented) Continue(node ast.Node, reader gmtext.Reader, pc parser.Context) parser.State {
-	if p.opens != nil {
+	if p.opens != nil && !tabFree(pc) {
 		expandTabIndentation(reader, p.opens)
 	}
 	return p.BlockParser.Continue(node, reader, pc)
+}
+
+// tabFreeKey marks a parse whose source holds no tab at all, which no line's indentation can hold
+// either, so tabIndented has nothing to expand (expandTabIndentation returns at its own tab
+// check). It is read once per open block per line - a list nested dozens deep over thousands of
+// lines asks millions of times - and set once per parse, from one scan of the source
+// (parseSource).
+var tabFreeKey = parser.NewContextKey()
+
+// tabFree reports whether the parse's source holds no tab (tabFreeKey). A parse that never set it
+// reads as false, and its lines are expanded as before.
+func tabFree(pc parser.Context) bool {
+	free, _ := pc.Get(tabFreeKey).(bool)
+	return free
 }
 
 // endsContainers is a container's block parser - a list's, a list item's, a quote's or a footnote
@@ -742,6 +756,7 @@ func recordLine(line gmtext.Segment, source []byte, pc parser.Context) {
 // its parse, so pmdoc registers none, and takes the backslash out of a cell's escaped pipes itself
 // once the bounds hold (unescapeTablePipes).
 func parseSource(p parser.Parser, source []byte, context parser.Context) (ast.Node, error) {
+	context.Set(tabFreeKey, bytes.IndexByte(source, '\t') < 0)
 	reader := &lastLineColumns{Reader: gmtext.NewReader(source)}
 	root := p.Parse(reader, parser.WithContext(context))
 	if reader.kept {
