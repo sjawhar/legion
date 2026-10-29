@@ -31,8 +31,8 @@ The lease is the key `lease.<durable>` (`lease.listener-<machine id>`) in the KV
 `envoy_listener` (`bus.ListenerStateBucket`), which the listener creates at `ENVOY_NATS_REPLICAS`
 replicas, file storage, one value per key and a 10 minute `MaxAge`. Its value is JSON: `holder`
 (the holding pod's instance), `boot` (random per process start), `deliver_subject`,
-`service_since`, `acquired_at`, `released`, and `stale_binding`, `unsettled` and `receiving`
-("Take-over" below); a field this build does not know is kept across every rewrite.
+`service_since`, `acquired_at`, `released`, and `stale_binding`, `unsettled`, `ack_wait_owed` and
+`receiving` ("Take-over" below); a field this build does not know is kept across every rewrite.
 
 | Constant (`lease.go`) | Value | What it does |
 | --- | --- | --- |
@@ -90,20 +90,23 @@ wait only once the pod holding it has died or lost the lease.
   a message waits out a retry's delay (a failed prompt's 30 s, an unplaceable delivery's 5 s): that
   message stays outstanding until its delay ends and arrives after the hold, as it would have on
   the dead pod. The tests bound it at 15 s.
-- **Graceful stop after a hard one.** The lease record carries two flags for the next holder.
+- **Graceful stop after a hard one.** The lease record carries three flags for the next holder.
   `stale_binding` is set by a holder that subscribed beside a push binding it did not wait out (a
   lost node's lingering connection, or a stopping pod's subscription it keeps until this one
-  receives), and by a holder stopped gracefully before the end of a hold that waits out an ack
-  wait, carried by every renewal, release and take-over, and cleared by a holder that finds
-  the durable not push-bound. `unsettled` is written from the acquiring write of a term that must
-  settle until its hold ends, and a release keeps it, so a pod stopped mid-hold hands the hold on;
-  a graceful stop that hands messages back always releases it set. A pod that takes a released
-  record carrying either flag settles too, subscribing at once beside any binding rather than
-  waiting it out as a pre-lease build's. Its cap is the hand-back delay and a second when the
-  record carries `unsettled` alone, and one ack wait and a second when it carries `stale_binding`:
-  the messages the stopping pod handed back come back after the hand-back delay to the next pod
-  and to a lingering binding alike, but one that went to such a binding alone, or that a dead pod
-  before the stopping one still held, comes back one ack wait later, and the next pod's hold waits
+  receives, unless this one took the record from that pod's graceful hand-back), carried by every
+  renewal, release and take-over, and cleared by a holder that finds the durable not push-bound.
+  `unsettled` is written from the acquiring write of a term that must settle until its hold ends,
+  and a release keeps it, so a pod stopped mid-hold hands the hold on; a graceful stop that hands
+  messages back always releases it set. `ack_wait_owed` is written by a release, set when the
+  releasing pod stopped before the end of a hold that waits out an ack wait, false otherwise, and
+  written false by every take-over. A pod that takes a released record carrying `stale_binding`
+  or `unsettled` settles too, subscribing at once beside any binding rather than waiting it out as
+  a pre-lease build's. Its cap is the hand-back delay and a second when the record carries
+  `unsettled` without `ack_wait_owed` (a graceful hand-back, `stale_binding` or not), and one ack
+  wait and a second otherwise: the messages the stopping pod handed back come back after the
+  hand-back delay to the next pod and to a lingering binding alike, but one that went to such a
+  binding alone, or that a dead pod before the stopping one still held, comes back one ack wait
+  later, and only a pod whose own hold for those had not ended leaves the next pod's hold to wait
   for it.
 - **A holder that cannot use the durable.** A holder whose reads, creations, policy corrections or
   subscribes of the durable fail retries every second (`durableBindPoll`) and times the failures
@@ -111,7 +114,7 @@ wait only once the pod holding it has died or lost the lease.
   lasted 135 s (`durableTakeoverAlarmAfter`) it logs `lease holder cannot deliver from the durable`
   at ERROR, with the failure as `reason` and `waited_ms`, which the AWS `subscribe-exhausted` alarm
   matches, and gives the lease up: it releases the record, keeping `unsettled` as its term left it
-  and setting `stale_binding` when its term would have settled for an ack wait, so the next holder
+  and setting `ack_wait_owed` when its term would have settled for an ack wait, so the next holder
   settles as this one would have, and a standby takes the record at its next poll. The pod goes
   back to standby and does not take back the record it released for two standby polls (1 s), so
   every other standby has its chance first; a pod that runs alone takes it back after that and

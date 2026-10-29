@@ -446,6 +446,63 @@ func TestLeaseUnsettledIsHandedOnByAReleaseBeforeTheHoldEnds(t *testing.T) {
 	}
 }
 
+// ack_wait_owed is written by the release alone: set when its term's holder stopped before its
+// hold of an ack wait ended (OweAckWait), false otherwise, and written false by every acquiring
+// write. A released record carrying unsettled is a graceful hand-back (leaseStatus.HandedBack)
+// unless it carries ack_wait_owed, with stale_binding or without. A call for a term that is no
+// longer current changes nothing.
+func TestLeaseAckWaitOwedIsWrittenByTheReleaseAndDecidesTheHandBack(t *testing.T) {
+	kv := leaseBucket(t)
+	clock := newFakeLeaseClock()
+	putLease(t, kv, `{"holder":"pod-dead","boot":"0011223344556677","released":false}`)
+	a := testLease(kv, "pod-a", productionLeaseConfig(), clock.now)
+	b := testLease(kv, "pod-b", productionLeaseConfig(), clock.now)
+	c := testLease(kv, "pod-c", productionLeaseConfig(), clock.now)
+	a.step()
+	clock.advance(leaseTTL)
+	a.step()
+	status := a.Status()
+	if !status.Holding || status.How != leaseTakenExpired || !status.Settle || status.HandedBack {
+		t.Fatalf("pod-a status = %+v, want held over an expired record, settling, no hand-back", status)
+	}
+	a.SetStaleBinding(status.Term, true)
+	a.OweAckWait(status.Term)
+	clock.advance(leaseRenewEvery)
+	a.step()
+	if record, _ := readLease(t, kv); record.AckWaitOwed {
+		t.Fatalf("record after pod-a's renewal = %+v, want ack_wait_owed left to the release", record.leaseFields)
+	}
+	if err := a.Release(context.Background()); err != nil {
+		t.Fatalf("release pod-a: %v", err)
+	}
+	if record, _ := readLease(t, kv); !record.Released || !record.Unsettled || !record.AckWaitOwed || !record.StaleBinding {
+		t.Fatalf("record released mid-hold = %+v, want released, unsettled, owing an ack wait, with a stale binding", record.leaseFields)
+	}
+
+	b.step()
+	next := b.Status()
+	if !next.Holding || next.How != leaseTakenReleased || !next.Settle || next.HandedBack {
+		t.Fatalf("pod-b status = %+v, want held from a released record, settling, no hand-back: an ack wait is owed", next)
+	}
+	if record, _ := readLease(t, kv); record.Holder != "pod-b" || record.AckWaitOwed || !record.StaleBinding || !record.Unsettled {
+		t.Fatalf("record = %+v, want pod-b's, unsettled, with a stale binding, owing nothing", record.leaseFields)
+	}
+	b.Settled(next.Term)
+	b.Unsettle(next.Term)
+	b.OweAckWait(next.Term - 1)
+	if err := b.Release(context.Background()); err != nil {
+		t.Fatalf("release pod-b: %v", err)
+	}
+	if record, _ := readLease(t, kv); !record.Released || !record.Unsettled || record.AckWaitOwed || !record.StaleBinding {
+		t.Fatalf("record handed back after the hold ended = %+v, want released, unsettled, with a stale binding, owing nothing", record.leaseFields)
+	}
+
+	c.step()
+	if status := c.Status(); !status.Holding || status.How != leaseTakenReleased || !status.Settle || !status.HandedBack {
+		t.Fatalf("pod-c status = %+v, want held from a released record, settling for a graceful hand-back", status)
+	}
+}
+
 // receiving is written false by every acquiring write, set by SetReceiving once the holder's
 // subscription is up and kept by every renewal, and written false by the release. A graceful stop
 // that hands messages back marks its term unsettled (Unsettle), so its release carries unsettled

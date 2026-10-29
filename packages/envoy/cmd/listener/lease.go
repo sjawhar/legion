@@ -152,13 +152,19 @@ func sameLastError(a, b error) (same bool) {
 // messages or a push binding, so that a binding it finds is not a pre-lease build's and its term
 // must settle (leaseAcquisition). stale_binding is set by a holder that subscribed while the
 // durable was push-bound by a binding it did not wait out (an expired holder's lingering
-// connection), and by a holder stopped gracefully before the end of a settle hold that waited for
-// messages coming back at their ack wait, and cleared by one that finds the durable not push-bound
-// before it subscribes; every other write carries it on. Either way the next holder's hold waits
-// as long as an ack wait (durableReceiver.serve). unsettled is set from the acquiring write of a
-// term that must settle until that term's settle hold ends, and a release keeps it as it stands,
-// so a holder stopped mid-hold hands the duty on; a graceful stop that hands messages back sets it
-// before its release (Unsettle), so a release after one always carries it.
+// connection), but for one that took the record from a graceful hand-back
+// (leaseStatus.HandedBack), beside the stopping holder's linger, and cleared by one that finds the
+// durable not push-bound before it subscribes; every other write carries it on. unsettled is set
+// from the acquiring write of a term that must settle until that term's settle hold ends, and a
+// release keeps it as it stands, so a holder stopped mid-hold hands the duty on; a graceful stop
+// that hands messages back sets it before its release (Unsettle), so a release after one always
+// carries it.
+//
+// ack_wait_owed tells the next holder that its settle hold must wait as long as an ack wait: the
+// releasing holder stopped, or gave the lease up, before its own hold of that length ended
+// (OweAckWait), so a message a dead holder or a lost node's connection had may still come back
+// only at its ack wait. Every other release, and every acquiring write, writes it false. A
+// released record carrying unsettled without it is a graceful hand-back (leaseStatus.HandedBack).
 //
 // receiving says the holder's subscription to the durable's deliver subject is up: every
 // acquiring write and every release writes it false, the holder sets it once it has subscribed
@@ -175,6 +181,7 @@ type leaseFields struct {
 	Released       bool         `json:"released"`
 	StaleBinding   bool         `json:"stale_binding"`
 	Unsettled      bool         `json:"unsettled"`
+	AckWaitOwed    bool         `json:"ack_wait_owed"`
 	Receiving      bool         `json:"receiving"`
 	FormerBoots    []formerBoot `json:"former_boots,omitempty"`
 }
@@ -281,9 +288,9 @@ type leaseStatus struct {
 	// unsettled.
 	Settle bool
 	// HandedBack is whether Term was taken from a released record carrying unsettled and not
-	// stale_binding: its holder stopped gracefully and NAKed what it held with the hand-back delay,
-	// so nothing outstanding waits out an ack wait (durableReceiver.serve picks the settle hold's
-	// cap by it).
+	// ack_wait_owed: its holder stopped gracefully and NAKed what it held with the hand-back delay,
+	// and no hold of an ack wait was left unfinished, so nothing outstanding waits out an ack wait
+	// (durableReceiver.serve picks the settle hold's cap by it).
 	HandedBack bool
 }
 
@@ -326,10 +333,12 @@ type lease struct {
 	deliverSubject string
 	// staleBinding, unsettled and receiving are the holder's stale_binding, unsettled and
 	// receiving, written into the record from the next renewal or release on (SetStaleBinding,
-	// Settled, Unsettle, SetReceiving).
+	// Settled, Unsettle, SetReceiving); ackWaitOwed is its ack_wait_owed, written by its release
+	// (OweAckWait).
 	staleBinding bool
 	unsettled    bool
 	receiving    bool
+	ackWaitOwed  bool
 	// giveUpTerm is the term GiveUp asked the loop to give up.
 	giveUpTerm uint64
 	stop       context.CancelFunc
@@ -426,9 +435,8 @@ func (l *lease) SetDeliverSubject(subject string) {
 }
 
 // SetStaleBinding records stale_binding for term (leaseFields): whether its holder subscribed
-// while the durable was push-bound by a binding it did not wait out, or stops before a settle hold
-// that waits out an ack wait ended, written into the record from the next renewal or release on.
-// A term that is no longer current changes nothing.
+// while the durable was push-bound by a binding it did not wait out, written into the record from
+// the next renewal or release on. A term that is no longer current changes nothing.
 func (l *lease) SetStaleBinding(term uint64, stale bool) {
 	l.mu.Lock()
 	if l.term == term {
@@ -454,6 +462,17 @@ func (l *lease) Unsettle(term uint64) {
 	l.mu.Lock()
 	if l.term == term {
 		l.unsettled = true
+	}
+	l.mu.Unlock()
+}
+
+// OweAckWait records that term's holder stops, or gives the lease up, before its settle hold of an
+// ack wait ended (or began), setting ack_wait_owed in its release, so the next holder's hold waits
+// as long. A term that is no longer current changes nothing.
+func (l *lease) OweAckWait(term uint64) {
+	l.mu.Lock()
+	if l.term == term {
+		l.ackWaitOwed = true
 	}
 	l.mu.Unlock()
 }
@@ -534,11 +553,12 @@ func (l *lease) FormerHolder(boot string) bool {
 
 // Release stops the lease and, when this process holds the record, marks it released at its
 // revision, no longer receiving, keeping service_since, stale_binding, unsettled and former_boots
-// as they stand, so a standby takes it at its next poll with no TTL wait, and settles in its turn
-// when this term had not settled or handed messages back. A record another pod has already taken
-// is left as it is, and that is no error. It returns ctx.Err() when ctx ends before the loop has
-// stopped, and the write's error when the record could not be marked; either way this process no
-// longer holds the lease, and a record left unreleased is taken as an expired one.
+// as they stand and writing ack_wait_owed as the term left it (OweAckWait), so a standby takes it
+// at its next poll with no TTL wait, and settles in its turn when this term had not settled or
+// handed messages back. A record another pod has already taken is left as it is, and that is no
+// error. It returns ctx.Err() when ctx ends before the loop has stopped, and the write's error
+// when the record could not be marked; either way this process no longer holds the lease, and a
+// record left unreleased is taken as an expired one.
 func (l *lease) Release(ctx context.Context) error {
 	l.mu.Lock()
 	stop, done := l.stop, l.done
@@ -557,13 +577,13 @@ func (l *lease) Release(ctx context.Context) error {
 
 // letGo ends this process's hold and, when it held the record, marks the record released at its
 // revision, no longer receiving, keeping service_since, stale_binding, unsettled and former_boots
-// as they stand. It returns the released record's revision, or zero when it wrote none: it did
-// not hold the record, another pod had already taken it (no error), or the write failed (its
-// error).
+// as they stand and writing ack_wait_owed as the term left it. It returns the released record's
+// revision, or zero when it wrote none: it did not hold the record, another pod had already taken
+// it (no error), or the write failed (its error).
 func (l *lease) letGo() (uint64, error) {
 	l.mu.Lock()
 	held, rev, record := l.held, l.rev, l.record
-	record.StaleBinding, record.Unsettled, record.Receiving = l.staleBinding, l.unsettled, false
+	record.StaleBinding, record.Unsettled, record.AckWaitOwed, record.Receiving = l.staleBinding, l.unsettled, l.ackWaitOwed, false
 	l.held, l.validUntil = false, time.Time{}
 	l.mu.Unlock()
 	if !held {
@@ -689,7 +709,7 @@ func (l *lease) renew() time.Duration {
 	if lapsed {
 		l.term++
 		l.how = leaseTakenExpired
-		l.settle, l.handedBack, l.unsettled, l.receiving = true, false, true, false
+		l.settle, l.handedBack, l.unsettled, l.receiving, l.ackWaitOwed = true, false, true, false, false
 	}
 	term := l.term
 	l.mu.Unlock()
@@ -781,17 +801,18 @@ func (l *lease) poll() time.Duration {
 // write's server timestamp, holds the lease from the write's start. service_since starts again
 // at that timestamp when no record was there, when it carried none, or when its last write is
 // more than two ttl older than this one, since then no pod of the machine was serving; otherwise
-// it is kept. stale_binding is carried over, unsettled is written when the term must settle
-// (leaseAcquisition), and receiving is written false until the term subscribes. former_boots adds
-// previous's boot to previous's own (formerBoots): the acquiring write stamps it with previous's
-// timestamp, the latest server time known before it, and once the write's own timestamp is read
-// back it is stamped with that. The record is renewed at once to store service_since, acquired_at
-// and that stamp. The write is read back by key, a direct get on the key's own subject, which the
-// listener's grant allows; a get by revision is a direct get on the stream's bare subject, which
-// it does not. A read back that finds another revision, or no record, means another write landed
-// first: the lease is not held and the record is polled again at once. A write whose timestamp
-// cannot be read back is not counted as held: the record then expires as any unreleased one does,
-// and a standby, this one included, takes it after the ttl.
+// it is kept. stale_binding is carried over, ack_wait_owed is read and written false, unsettled is
+// written when the term must settle (leaseAcquisition), and receiving is written false until the
+// term subscribes. former_boots adds previous's boot to previous's own (formerBoots): the
+// acquiring write stamps it with previous's timestamp, the latest server time known before it, and
+// once the write's own timestamp is read back it is stamped with that. The record is renewed at
+// once to store service_since, acquired_at and that stamp. The write is read back by key, a direct
+// get on the key's own subject, which the listener's grant allows; a get by revision is a direct
+// get on the stream's bare subject, which it does not. A read back that finds another revision, or
+// no record, means another write landed first: the lease is not held and the record is polled
+// again at once. A write whose timestamp cannot be read back is not counted as held: the record
+// then expires as any unreleased one does, and a standby, this one included, takes it after the
+// ttl.
 func (l *lease) acquire(previous nats.KeyValueEntry, record leaseRecord, how leaseAcquisition) time.Duration {
 	start := l.now()
 	l.mu.Lock()
@@ -803,8 +824,8 @@ func (l *lease) acquire(previous nats.KeyValueEntry, record leaseRecord, how lea
 	}
 	record.Holder, record.Boot, record.Released, record.AcquiredAt = l.instance, l.boot, false, time.Time{}
 	settle := how == leaseTakenExpired || record.StaleBinding || record.Unsettled
-	handedBack := how == leaseTakenReleased && record.Unsettled && !record.StaleBinding
-	record.Unsettled, record.Receiving = settle, false
+	handedBack := how == leaseTakenReleased && record.Unsettled && !record.AckWaitOwed
+	record.Unsettled, record.AckWaitOwed, record.Receiving = settle, false, false
 	value, err := record.encode()
 	if err != nil {
 		l.noteFailure("encode", err)
@@ -845,7 +866,7 @@ func (l *lease) acquire(previous nats.KeyValueEntry, record leaseRecord, how lea
 	l.validUntil = start.Add(l.cfg.ttl - l.cfg.margin)
 	l.term++
 	l.how = how
-	l.settle, l.handedBack, l.staleBinding, l.unsettled, l.receiving = settle, handedBack, record.StaleBinding, settle, false
+	l.settle, l.handedBack, l.staleBinding, l.unsettled, l.receiving, l.ackWaitOwed = settle, handedBack, record.StaleBinding, settle, false, false
 	term := l.term
 	l.mu.Unlock()
 	l.seenRev, l.lapseSignalled = 0, false

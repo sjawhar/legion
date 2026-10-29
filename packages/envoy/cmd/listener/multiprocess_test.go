@@ -2129,6 +2129,112 @@ func TestTwoPodsGracefulStopWithARetryOutstandingDeliversWithin10s(t *testing.T)
 	mpWaitActive(t, b, time.Second)
 }
 
+// Graceful stops one after another, A to B to C to D, each with a prompt in hand that the serving
+// port never answers and a message to a session whose prompts fail waiting out its 30 s retry
+// delay, with a message published every 100 ms to two healthy sessions. Each stop comes a second
+// into the prompt, with the healthy sessions' messages queued behind it; the stopping pod cancels
+// the prompt after the 3 s grace and NAKs it for a retry, so with the failing session's retry it
+// holds every next pod's settle hold to its cap: every hand-over must be a graceful hand-back's,
+// whose cap is 3 s, and every message to a healthy session reaches it within 10 s of its publish,
+// each session's in order. At 1fe15e1b (INFRA-557 review finding) the pod that took a hand-back
+// marked the record stale_binding for subscribing beside the stopping pod's linger, so from the
+// second hand-over on the hold ran to the 7 s cap of a hard take-over, and the messages queued at
+// the SIGTERM arrived about 11 s after their publish.
+func TestTwoPodsEveryGracefulStopWithAPromptInHandAndARetryOutstandingDeliversWithin10s(t *testing.T) {
+	uri := mpNATS(t)
+	binary := cmdtest.Build(t, "envoy-listener")
+	a, b := mpStartPair(t, binary, uri)
+	serving, publisher, healthy := mpRetryOutstanding(t, uri, a, "everystop")
+
+	stop := publisher.every(100*time.Millisecond, healthy...)
+	mpEventually(t, 10*time.Second, "the first healthy messages to arrive", func() bool {
+		sent := mpTo(publisher.all(), healthy...)
+		return len(sent) >= 10 && serving.tookAll(sent[:10])
+	})
+	mpGracefulStopsInTurn(t, binary, uri, serving, publisher, healthy, "everystop", a, b, "pod-c", "pod-d")
+	time.Sleep(4 * time.Second) // publish on past the last hand-over
+	stop()
+
+	messages := mpTo(publisher.all(), healthy...)
+	serving.awaitAll(t, messages, mpGracefulBound+10*time.Second)
+	serving.requireWithin(t, messages, mpGracefulBound, time.Time{})
+	serving.requireOrder(t, messages)
+	serving.requireKnown(t, publisher.all())
+}
+
+// A lost node, then graceful stops one after another of the pod that took its expired lease and of
+// each pod after it, B to C to D, each with a prompt in hand and a retry outstanding as in
+// TestTwoPodsEveryGracefulStopWithAPromptInHandAndARetryOutstandingDeliversWithin10s. The server
+// keeps the lost pod's connection, and with it the durable's push binding, until its ping timeout,
+// minutes in production, so B subscribes beside it and marks the record stale_binding, which every
+// later holder carries on. B's hold ends before its stop, so nothing is left with the lost pod's
+// binding alone: each hand-over is a graceful hand-back's, whose cap is 3 s, and every message to a
+// healthy session reaches it within 10 s of its publish, each session's in order. At 1fe15e1b
+// (INFRA-557 review finding) stale_binding also stood for an ack wait owed, so after the node loss
+// every hand-over's hold ran to the 7 s cap of a hard take-over, and the messages queued at each
+// SIGTERM arrived about 11 s after their publish.
+func TestTwoPodsEveryGracefulStopAfterANodeLossWithAPromptInHandAndARetryOutstandingDeliversWithin10s(t *testing.T) {
+	uri := mpNATS(t)
+	binary := cmdtest.Build(t, "envoy-listener")
+	a, b := mpStartPair(t, binary, uri)
+	c := mpStartPod(t, binary, uri, "pod-c")
+	mpWaitStandby(t, c, 30*time.Second)
+	t.Cleanup(a.relay.freeze()) // the node is lost: its connection stays open, silent
+	holder, other := mpTakeoverHolder(t, mpHardBound, b, c)
+	mpWaitActive(t, holder, mpHardBound)
+	serving, publisher, healthy := mpRetryOutstanding(t, uri, holder, "lossstops")
+
+	stop := publisher.every(100*time.Millisecond, healthy...)
+	mpEventually(t, 10*time.Second, "the first healthy messages to arrive", func() bool {
+		sent := mpTo(publisher.all(), healthy...)
+		return len(sent) >= 10 && serving.tookAll(sent[:10])
+	})
+	mpGracefulStopsInTurn(t, binary, uri, serving, publisher, healthy, "lossstops", holder, other, "pod-d")
+	time.Sleep(4 * time.Second) // publish on past the last hand-over
+	stop()
+
+	messages := mpTo(publisher.all(), healthy...)
+	serving.awaitAll(t, messages, mpGracefulBound+10*time.Second)
+	serving.requireWithin(t, messages, mpGracefulBound, time.Time{})
+	serving.requireOrder(t, messages)
+	serving.requireKnown(t, publisher.all())
+}
+
+// mpGracefulStopsInTurn stops stopping gracefully, then each pod that takes its place in turn, with
+// next the first stop's standby and each later standby a pod started then, named after standbys,
+// one per stop but the first. Each stop comes once the active pod has delivered every message to
+// healthy published so far, past its own settle hold, and a second into a prompt that the serving
+// port never answers, to a session of row's registered for it, with healthy's messages queued
+// behind it. It returns once the last stop's standby is active.
+func mpGracefulStopsInTurn(t *testing.T, binary, uri string, serving *mpServingPort, publisher *mpPublisher, healthy []string, row string, stopping, next *mpPod, standbys ...string) {
+	t.Helper()
+	for handOver := range len(standbys) + 1 {
+		sessionID := fmt.Sprintf("ses_mp_%s_slow_%d", row, handOver+1)
+		stopping.registerPort(t, serving, sessionID)
+		sent := mpTo(publisher.all(), healthy...)
+		mpEventually(t, mpGracefulBound, stopping.instance+" to deliver what was published before its prompt in hand", func() bool {
+			return serving.tookAll(sent)
+		})
+		inHand := serving.hold(sessionID)
+		publisher.mustPublish(t, sessionID)
+		select {
+		case <-inHand:
+		case <-time.After(10 * time.Second):
+			t.Fatalf("%s never prompted %s", stopping.instance, sessionID)
+		}
+		time.Sleep(time.Second) // healthy's messages queue behind the prompt in hand
+		stopping.Terminate(t)
+		stopping.WaitExit(t, "SIGTERM")
+		mpWaitActive(t, next, mpGracefulBound)
+		if handOver == len(standbys) {
+			return
+		}
+		standby := mpStartPod(t, binary, uri, standbys[handOver])
+		mpWaitStandby(t, standby, 30*time.Second)
+		stopping, next = next, standby
+	}
+}
+
 // SIGKILL of the active pod while a message to a session whose prompts fail waits out its 30 s
 // retry delay, with a message published every 100 ms to two healthy sessions. The standby takes the
 // expired lease and its settle hold never finds every outstanding message in hand: it ends at what
