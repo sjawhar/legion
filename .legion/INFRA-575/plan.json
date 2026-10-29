@@ -1,0 +1,239 @@
+{
+  "schemaVersion": 1,
+  "phase": "plan",
+  "issue": "INFRA-575",
+  "completed": "2026-10-29T23:28:00Z",
+  "planDocument": "dispatch://INFRA-575/artifact/plan-md",
+  "requiredSkills": {
+    "implement": [
+      "legion-worker: the implementer works the shared workspace, pushes the issue branch and ends its phase with handoff_complete; this issue's whole change is one pull request in sjawhar/legion.",
+      "legion-worker/references/pr-body.md: every acceptance line of this plan names a surface and a command, and the implementer must record a proof (criterion, surface, command, observed, headSha, negativeControl) for each at the head that merges.",
+      "legion-worker/references/conflicts-and-rewrites.md: pull request #2394 (INFRA-156) touches features/doc/ProofDocument.tsx and #2463 (INFRA-368) the margin files, so a forward merge is likely before READY.",
+      "ce-simplify-code: the change view and the reading pane are new code of real size; the simplify pass runs once the behaviour is proven.",
+      "asd-ste100: the pull-request body and any Dispatch comment a person reads.",
+      "packages/dispatch/AGENTS.md (not a skill, binding all the same): editor decorations never classes written into editor DOM, a layout assertion names a rendered box, the @phone tag and its --project=iphone --list check, no raw colour utilities in any .ts or .tsx including e2e/."
+    ],
+    "test": [
+      "legion-worker: the tester reads the implementer's handoff, re-runs the commands this plan names and records its own proofs before the reviewer sees the head.",
+      "legion-worker/references/pr-body.md: the evidence shape, and the rule that a proof is re-runnable by the reader.",
+      "packages/dispatch/AGENTS.md 'Phone acceptance': the 390 px and drawer test carries @phone, and the tester confirms it is listed by `bunx playwright test --config e2e/playwright.config.ts --project=iphone --list`; a layout change is proven by the whole chromium project, never by -g on one row (docs/solutions/testing/...-INFRA-92.md), and a shared-CPU failure is re-run alone before it counts (...-INFRA-521.md)."
+    ],
+    "review": [
+      "legion-worker: the reviewer approves a head by SHA and fixes a prose-only finding in its own commit.",
+      "legion-worker/references/merge-gate.md: the order of the gate and what READY refuses above an approved head.",
+      "legion-worker/references/review-threads.md: replying on and resolving review threads, and judging a bot's finding.",
+      "ce-simplify-code: the reviewer judges whether the one change view really serves all four call sites rather than growing a second convention."
+    ]
+  },
+  "gapAnalysis": {
+    "findings": [
+      {
+        "finding": "1.1 The approval column's word marks have no mechanism: packages/dispatch/AGENTS.md forbids writing classes into editor DOM, and ProofEditorHandle offers no decoration over character ranges (setActiveBlocks takes block ids), while a removed block has no node in the live document at all.",
+        "answer": "Plan decision D1: the approval column renders the R5 change view with folding off, not a second document editor. One renderer for all four surfaces; no new decoration API in packages/proof-editor. Recorded as a spec departure and named to the architect."
+      },
+      {
+        "finding": "1.2 There is no client-side markdown-to-block splitter, so R5's 'block', 'section heading' and 'fold' are new infrastructure.",
+        "answer": "Task T1 makes features/doc/document-blocks.ts its own unit with its own tests, factoring the fence rules out of features/doc/decision-blocks.ts so one scanner serves both; the word marks come from diffWordsWithSpace of diff@^9, already a dependency."
+      },
+      {
+        "finding": "1.3 The Inbox has no selected-row state: focusedRow() reads document.activeElement and every binding searches inside that row.",
+        "answer": "Plan decision D3 and task T3: React-owned selection, written to ?item=, with the keys re-expressed against the selected row; focus stays in the left column and selection is no longer focus."
+      },
+      {
+        "finding": "1.4 Keys die when focus enters the right column, because the live editor is a contenteditable target, and the keystrokes would be typed into the spec.",
+        "answer": "Plan decision D2: the pane's editor is read-only, so isEditableTarget does not count it and j, k, x, h and 1-9 keep firing; D3 keeps focus in the left column, with Enter and 'Skip to the answer' the deliberate hand-offs and Escape the way back."
+      },
+      {
+        "finding": "1.5 ?item= cannot be carried by today's route helpers, and the Inbox's own path writers would drop it.",
+        "answer": "Task T2: InboxRoute gains item, parseInboxSearch and buildInboxPath carry it, both Inbox writers pass it through, routes.test.ts gains the round trips, and the write is replace, not push (D3)."
+      },
+      {
+        "finding": "1.6 The drawer mounts the same Inbox at every width, so a width-only gate would give it two columns at 1440 px.",
+        "answer": "Plan decision D10 and task T3: an explicit pane prop, default true, with InboxDrawer the one call site passing false."
+      },
+      {
+        "finding": "1.7 Two columns break the page's single scroller and with it ViewportAnchor, which reads window.scrollY and calls window.scrollBy.",
+        "answer": "Plan decision D9 and task T2: the Inbox page fills the viewport while the pane is on, and ViewportAnchor gains an optional scroller element with its own test case; below 1280 px and in the drawer the window scroller is untouched."
+      },
+      {
+        "finding": "1.8 Mounting ProofDocument in the Inbox registers the app-wide margin document, pushes the document keymap scope and writes the global search highlight.",
+        "answer": "Task T5: surface=\"pane\" skips the margin registration, the keymap scope, the search-highlight write, the Open-decisions nav and the toolbar."
+      },
+      {
+        "finding": "1.9 Each selection opens a websocket, a Y.Doc and an editor, and the 2-tap answer needs that live path rather than VersionView.",
+        "answer": "Plan decision D5: the document is keyed by artifact id and mounted 200 ms after the last selection change, with a skeleton meanwhile; the risk list names measuring that number on the local instance."
+      },
+      {
+        "finding": "1.10 Awareness is read once from documentElement.clientWidth, so the pane would publish the reader's presence into every document skimmed.",
+        "answer": "Plan decision D2: the pane passes awareness null."
+      },
+      {
+        "finding": "1.11 The pane's spec would be editable by accident.",
+        "answer": "Plan decision D2: the pane's editor is read-only while blocksReadOnly stays isClosed || schemaReadOnly, so the decision block still hosts its answer form. The implementer verifies in a browser that the portal controls still take a click before T4 and T5 build on it; the fallback (a writable editor with inEditable guards) goes to the architect."
+      },
+      {
+        "finding": "1.12 'Scrolled so that the heading is at the top of the column' is not what focusBlock does (it centres and pulses), and the hash it uses would collide with ?item=.",
+        "answer": "Plan decision D4 and task T5: a new scrollBlockToTop(blockId, container) that scrolls the pane's own container, re-run after diagrams draw, leaving focusBlock alone for the document page."
+      },
+      {
+        "finding": "1.13 Priority, Assign to me and Snooze move to the pane head, which makes the h, o and y bindings' when() false.",
+        "answer": "Plan decision D6: the head carries those controls plus Copy ref, and the three bindings act on the head while the pane is on."
+      },
+      {
+        "finding": "1.14 ProofDocument and ApprovalChip need an Artifact, isClosed, owner and user that an inbox row does not carry.",
+        "answer": "Task T4 names the reads and their keys: api.getArtifact(artifactId) under the document page's own [\"artifact\", id] key, whoAmIQuery() and the issue read for isClosed."
+      },
+      {
+        "finding": "1.15 The left column keeps heldRow, withHeld and useMotionHold, which assume the reader's hand is on the row while they answer.",
+        "answer": "Plan decision D3: the hold follows selection, not pointer or focus, so a row the server drops while it is selected and untouched stays until the reader moves."
+      },
+      {
+        "finding": "2.1 Which component draws the approval's 'whole latest version'.",
+        "answer": "D1: the change view with folding off. Named to the architect as the fidelity trade, since the alternative is a new decoration API in packages/proof-editor."
+      },
+      {
+        "finding": "2.2 Whether R5's word marks are over source text or rendered text.",
+        "answer": "D1: source text, one renderer for all four call sites. Rendered marks cannot hold a removed word in place, and a version is served as markdown only."
+      },
+      {
+        "finding": "2.3 'The heading of the question's section' for a block under no heading or a nested heading.",
+        "answer": "D4: the nearest preceding heading of any level; a block before any heading scrolls to the top of the document and draws no bar."
+      },
+      {
+        "finding": "2.4 'A bar marks the section down to the decision block' names an affordance that does not exist.",
+        "answer": "D4: an overlay positioned from the block offsets features/doc/marks.ts already computes, spanning the heading block to the decision block, drawn outside the editor DOM."
+      },
+      {
+        "finding": "2.5 Which version the approval column renders and against what baseline; approval.version can be below the latest and approval.approved is the approval as it stood when the request opened.",
+        "answer": "D8: the body is the artifact's latest version, which is what createArtifactReview pins; the baseline is ask.approval.approved?.version, the same source today's card uses and the one the spec's decision names."
+      },
+      {
+        "finding": "2.6 The selected row disappears or is answered elsewhere.",
+        "answer": "D3: held in place until the reader moves; the next row is selected only after the reader's own answer, as the spec says."
+      },
+      {
+        "finding": "2.7 What the right column shows while the document loads, fails or is schema-refused.",
+        "answer": "D5: a skeleton while it connects, and today's card plus 'Open page' on any admission or load failure; the rebuild and repair prompts never reach the Inbox."
+      },
+      {
+        "finding": "2.8 ?item= naming an ask the list does not hold.",
+        "answer": "D3: select the first visible row and rewrite the URL with replace, except when the id sits in the folded Later band, which is opened instead."
+      },
+      {
+        "finding": "2.9 What Escape does from the pane.",
+        "answer": "D3: Escape returns focus to the selected row; clearing the selection stays the list's own Escape, as today."
+      },
+      {
+        "finding": "2.10 The kind word for an anchored ask in the left row.",
+        "answer": "T3: Decision when block_id and block_artifact are set, Approval when kind is approval, else Question, so an anchored ask reads Question."
+      },
+      {
+        "finding": "2.11 Whether decision blocks inside the approval column are live or records.",
+        "answer": "D1 settles it: the approval column is the change view, so its decision blocks are text, not a second live editor."
+      },
+      {
+        "finding": "2.12 What head a project document shows, where priority and Assign to me do not apply.",
+        "answer": "D6: project key and document name, no priority and no Assign to me, and 'Open page' opens the document at the section."
+      },
+      {
+        "finding": "3.1 A1's 'an answer with 2 taps' is not observable.",
+        "answer": "T6 restates it: exactly two click() calls between the selection and the row leaving, the note disclosure not opened, and getInbox() no longer listing the ask."
+      },
+      {
+        "finding": "3.2 A1's 'its section heading at the top of the right column' has no tolerance.",
+        "answer": "T6 restates it: 0 <= heading.y - column.y <= 8 with the decision block below it, measured on rendered boxes."
+      },
+      {
+        "finding": "3.3 A1's 'two columns' names no box.",
+        "answer": "T6 restates it: inbox-list and inbox-pane both visible with pane.x >= list.x + list.width, and inbox-pane absent at 1279 px."
+      },
+      {
+        "finding": "3.4 A1's '22 blocks changed' and 'the changed blocks marked' are unquantified.",
+        "answer": "T6 restates it: the seed differs in exactly 22 blocks, [data-change=\"changed\"] count is 22, each holds at least one ins or del, and a named unchanged paragraph holds none."
+      },
+      {
+        "finding": "3.5 A1's 'for the first approval request, no marks' needs a locator.",
+        "answer": "T6 restates it: pane.locator(\"ins, del\") count 0 for that selection."
+      },
+      {
+        "finding": "3.6 A3's 'the reading pane's approval shows word marks and a removed block struck through' names no surface and no command.",
+        "answer": "T6 test 2 and the A3 row of the acceptance table: the del is the removed words and the ins the added words inside one paragraph, and a [data-change=\"removed\"] element sits at the index it held in the baseline."
+      },
+      {
+        "finding": "3.7 R2's tap budgets are a table, not a check.",
+        "answer": "The budgets are asserted as three numbers (decision desktop 2, approval desktop 1, below 1280 px 2); the spec's 'C as built' row was read this session and states exactly those, so no architect question is open."
+      },
+      {
+        "finding": "3.8 and 4.5 A1 as one test cannot carry the @phone tag and its own desktop widths coherently.",
+        "answer": "T6 splits the checks across one new spec file (five tests, the 1279/390/drawer one tagged @phone) plus one test in e2e/artifacts.e2e.ts. Recorded as a spec departure in shape, not in substance: every check A1 lists is asserted."
+      },
+      {
+        "finding": "3.9 A2 is true only against a build carrying the commit.",
+        "answer": "The acceptance table's A2 row says so: nothing deploys Dispatch automatically (dispatch://INFRA-64), the first run normally reports that the running build does not carry the commit, and that output is the production record, quoted in a code fence on the pull request and the issue."
+      },
+      {
+        "finding": "4.1 'Drawn by the document page's own component' brings a live collaborative editor with four page-level singletons.",
+        "answer": "D2 and T5 name each one the pane suppresses: margin registration, keymap scope, search highlights, awareness, editability, the toolbar and the Open-decisions nav."
+      },
+      {
+        "finding": "4.2 ApprovalChip renders no Approve while the document is already approved, so '1 tap to approve' has no control in that case.",
+        "answer": "D8: the head shows today's card in place of the actions when the chip renders none, and the body still shows the version."
+      },
+      {
+        "finding": "4.3 Enter has no answer box to focus: a block hosts AskCard variant=\"compact\", which folds the textarea behind a disclosure.",
+        "answer": "D7: Enter opens the disclosure and focuses the textarea; the two-tap budget is unaffected because option and Answer never open it."
+      },
+      {
+        "finding": "4.4 ?item= is dropped by today's route helpers.",
+        "answer": "T2, with routes.test.ts cases."
+      },
+      {
+        "finding": "4.6 The red-before, green-after proof costs a full suite run twice.",
+        "answer": "The acceptance table runs the named spec files for the before and after quotes and the whole chromium project once at the head, as INFRA-92 requires for a layout change."
+      },
+      {
+        "finding": "4.7 Tests that pin today's behaviour and must change.",
+        "answer": "T1 and T6 name each: VersionDiff.test.tsx (becomes ChangeView.test.tsx), AskCard.test.tsx's three Show diff tests, ArtifactDetails.test.tsx, ProofDocument.test.tsx, e2e/doc.e2e.ts, and the Inbox suites Inbox.test.tsx, InboxDrawer.test.tsx, e2e/inbox*.e2e.ts, keyboard-inbox.e2e.ts and keyboard.e2e.ts. Each is rewritten against the new behaviour, never narrowed to a width that hides the change."
+      },
+      {
+        "finding": "4.8 Seeding an approval of version 3 has no helper; a person's approval is written by answering the approval ask.",
+        "answer": "T6's seed: editArtifact and createNamedVersion to version 3, requestApproval, answerAsk(Approve) as alice, edit to version 4, requestApproval again."
+      },
+      {
+        "finding": "5.1 Only the architect can decide whether the pane's document is editable.",
+        "answer": "The plan decides read-only (D2) with the reason and the fallback, and the completion report names it to the architect, which may overturn it."
+      },
+      {
+        "finding": "5.2 Only the architect can decide whether collab presence belongs in the Inbox.",
+        "answer": "The plan decides awareness off (D2), consistent with a read-only pane, and names it to the architect."
+      },
+      {
+        "finding": "5.3 Splitting A1's one test changes approved acceptance wording.",
+        "answer": "Recorded as a spec departure of shape; every check A1 lists is asserted, and the architect is told."
+      },
+      {
+        "finding": "5.4 The approval column will not look like the document page if D1 is taken.",
+        "answer": "Recorded as the spec departure, with its cost and the alternative (a new decoration API and a way to place a removed block), for the architect to accept or overturn."
+      },
+      {
+        "finding": "5.5 Confirm R2's tap table before the plan writes it as assertions.",
+        "answer": "Confirmed from the spec's own table this session: C as built is desktop 2 for a decision block, desktop 1 for an approval, and 2 below 1280 px."
+      }
+    ]
+  },
+  "planReview": { "verdict": "approved", "rounds": 2 },
+  "specDepartures": [
+    {
+      "spec": "The chosen design, approval request: 'Below, the whole latest version of the document, which is the version Approve approves. Each block changed since the last approval carries the word marks of R5, a removed block shows struck through where it was, and nothing folds.' A reader may expect that version drawn as the document page draws a document.",
+      "plan": "The approval column renders the R5 change view with folding off: the version's markdown source, block by block, with word marks inside each changed block and a removed block struck through where it was. The decision-block column is the real rendered document, as the spec requires.",
+      "evidence": "packages/dispatch/AGENTS.md forbids classes written into editor DOM ('ProseMirror reads such a write back as a document edit'); ProofEditorHandle (packages/proof-editor/src/lib.ts) offers no decoration over character ranges, only setActiveBlocks by block id; and a block removed since the baseline has no node in the rendered version at all, so no decoration can place it. Drawing the version as the document page draws it would need a new decoration API in packages/proof-editor and a way to insert a removed block, a larger change than this issue's acceptance asks for.",
+      "outcome": { "kind": "unchanged" }
+    },
+    {
+      "spec": "A1: 'A test in packages/dispatch/e2e seeds made-up documents ... It checks: [eleven checks across 1440, 1280, 1279 and 390 px and the drawer]'.",
+      "plan": "The checks are asserted by five tests in one new spec file, packages/dispatch/e2e/inbox-reading-pane.e2e.ts, plus one test added to e2e/artifacts.e2e.ts for the version history that A3 names. Every check A1 lists is asserted; none is dropped.",
+      "evidence": "packages/dispatch/e2e/playwright.config.ts runs the iphone project only over titles tagged @phone, and packages/dispatch/AGENTS.md's 'Phone acceptance' R3 and R6 require that tag for a test that covers 390 px or the drawer, while the same test also sets 1440 and 1280 px for every project. One test title cannot be both tagged and untagged, so the widths are split across tests of one file.",
+      "outcome": { "kind": "unchanged" }
+    }
+  ]
+}
