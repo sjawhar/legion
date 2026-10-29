@@ -268,7 +268,18 @@ export interface ReplayHost {
   writeSessionID?(): string | undefined;
   /** The subjects the session follows and wants replayed: its agent subject and its topics. */
   followedSubjects(): readonly string[];
-  /** Shows a stored frame; a throw is `failed`. It must run nothing a live frame would run. */
+  /**
+   * Shows a stored frame; a throw is `failed`. It must run nothing a live frame would run.
+   *
+   * A host that keeps a `DeliveryDedupe` claims the frame in it before it hands the frame over,
+   * as its live path does, and holds the claim until the frame is recorded (`shown`, settled once
+   * this resolves and the engine records it; `queued`, settled when the host records it) or the
+   * hand-off came to nothing (`suppressed`, `failed`, a throw: released). The engine's own
+   * `dedupe.pending` check runs before this call only, so without the claim a live copy that
+   * arrives while the host's write is open finds the frame neither pending nor in the ledger and
+   * is shown beside it. A frame the live path already holds is that path's to show and record:
+   * the host answers `queued` and the sweep leaves the stream's copy for a later one.
+   */
   deliver(frame: ReplayFrame): Promise<ReplayDeliveryOutcome>;
   /**
    * Shows a failure notice; a throw means it was not shown. A host that resolves `queued` records

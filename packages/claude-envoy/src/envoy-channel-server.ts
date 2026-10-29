@@ -589,16 +589,40 @@ export async function startChannelSession(options: ChannelSessionOptions): Promi
   /**
    * A stored frame is shown as a live one is, and runs nothing. A removal closes a topic only when
    * it was stored after the session started following that topic (`closeReplayedRemoval`).
+   *
+   * The frame is claimed in the live path's dedupe before it is handed to the write queue, as a
+   * live frame is (`createChannelForwarder`, `deliverRelayed`): a live copy that arrives while the
+   * channel write is still open finds the claim and is a repeat, rather than being shown beside
+   * it. The claim is released when the frame was not shown after all (the renderer suppressed it,
+   * the write failed), so a later copy still reaches the session, and settled once it was shown:
+   * the dedupe's record outlives the claim, so a copy that arrives before the engine records the
+   * frame in its ledger is a repeat too. A frame the live path is delivering now is that path's to
+   * show and record, so the sweep leaves the stream's copy for a later one (`queued`); a frame the
+   * dedupe recorded and let go of that the ledger does not hold (one shown before a `/clear` moved
+   * the engine, say) is handed over with no claim.
    */
   const showReplayed = async (frame: ReplayFrame): Promise<ReplayDeliveryOutcome> => {
-    await closeReplayedRemoval(frame, {
-      sessionID: identity.id,
-      engine: replay,
-      close: (topic) => userTopics.delete(topic),
-      unregister: unfollowRemovedTopics,
-      followedChanged: () => replay.followedChanged(),
-    })
-    return delivery.replay(frame)
+    const identityOf = deliveryIdentity(frame.data)
+    const claim = dedupe.claim(identityOf)
+    if (claim === undefined && identityOf !== undefined && dedupe.pending(identityOf)) {
+      return "queued"
+    }
+    try {
+      await closeReplayedRemoval(frame, {
+        sessionID: identity.id,
+        engine: replay,
+        close: (topic) => userTopics.delete(topic),
+        unregister: unfollowRemovedTopics,
+        followedChanged: () => replay.followedChanged(),
+      })
+      const outcome = await delivery.replay(frame)
+      if (outcome === "shown") claim?.settle()
+      else claim?.release()
+      return outcome
+    } catch (error) {
+      claim?.release()
+      throw error
+    }
   }
 
   /**

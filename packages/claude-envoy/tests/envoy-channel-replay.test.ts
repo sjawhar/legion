@@ -16,7 +16,7 @@ import {
 import { createInboxNotifier, INBOX_CAPABILITIES } from "../src/legion-inbox"
 import { replayStateFile } from "../src/replay-state"
 import { SessionIdentity, sessionHandoffFile, writeSessionHandoff } from "../src/session-identity"
-import { FakeNats, scratchState, sessionOptions, waitFor } from "./channel-session-harness"
+import { FakeNats, scratchState, sessionOptions, settled, waitFor } from "./channel-session-harness"
 import { isolatePaneEnvironment } from "./pane-environment"
 
 isolatePaneEnvironment()
@@ -183,6 +183,39 @@ function channelSink(refuse: (shown: Shown) => boolean = () => false): Sink {
           content: notification.params.content,
         }
         if (refuse(entry)) throw new Error("the MCP transport refused the write")
+        shown.push(entry)
+      },
+    },
+    close: () => undefined,
+  }
+}
+
+/** A channel whose write of `eventId` stays open until `release`, as a slow transport's does. */
+interface HoldingSink extends Sink {
+  /** Resolves once a write of the held event is open. */
+  readonly holding: Promise<void>
+  release(): void
+}
+
+function holdingSink(eventId: string): HoldingSink {
+  const shown: Shown[] = []
+  const open = Promise.withResolvers<void>()
+  const gate = Promise.withResolvers<void>()
+  return {
+    shown,
+    capabilities: CHANNEL_CAPABILITIES,
+    holding: open.promise,
+    release: () => gate.resolve(),
+    notifier: {
+      notification: async (notification) => {
+        const entry = {
+          eventId: notification.params.meta["event_id"],
+          content: notification.params.content,
+        }
+        if (entry.eventId === eventId) {
+          open.resolve()
+          await gate.promise
+        }
         shown.push(entry)
       },
     },
@@ -776,6 +809,72 @@ test("a live frame that arrived behind a slow delivery before a stream recreatio
     expect(cards(sink, slow.eventId)).toHaveLength(1)
   } finally {
     setSystemTime()
+    await running.session.shutdown()
+    await rm(directory, { recursive: true, force: true })
+  }
+})
+
+// A replayed frame and its live copy race at the channel's write queue: the replayed one is
+// claimed in the same dedupe a live frame is, so whichever arrives second is a repeat, however
+// long the first one's write stays open. Without the claim the second copy finds the frame
+// neither pending nor in the ledger (which the engine writes only once the first write resolved)
+// and Claude Code shows the event twice, a second apart.
+test("a stored frame whose write is held is shown once when its live copy arrives meanwhile", async () => {
+  const directory = await scratchState()
+  const model = new StreamModel()
+  const frame = peerMessage(SESSION, "replay-then-live")
+  const next = peerMessage(SESSION, "after-the-replay-race")
+  const sink = holdingSink(frame.eventId)
+  const running = await boot(model, sink, directory)
+  try {
+    model.store(agentSubject(SESSION), frame.raw)
+    await running.reconnect()
+    await sink.holding
+    // The live copy turns up while the replayed one waits on Claude Code's transport; the frame
+    // behind it on the same subscription says when the copy was handled.
+    running.nats.emit(agentSubject(SESSION), frame.raw)
+    running.nats.emit(agentSubject(SESSION), next.raw)
+    // Every queued callback runs, so the subscription's reader takes both frames now.
+    for (let turn = 0; turn < 10; turn += 1) await settled()
+    sink.release()
+    await waitFor(async () => cards(sink, next.eventId).length === 1, "the frame behind the copy")
+    expect(cards(sink, frame.eventId)).toHaveLength(1)
+    expect(cards(sink, frame.eventId)[0]?.content).toContain(
+      "while this session's connection was down",
+    )
+    await running.reconnect()
+    expect(cards(sink, frame.eventId)).toHaveLength(1)
+  } finally {
+    sink.release()
+    await running.session.shutdown()
+    await rm(directory, { recursive: true, force: true })
+  }
+})
+
+test("a live frame whose write is held is shown once when a sweep reads the stream's copy meanwhile", async () => {
+  const directory = await scratchState()
+  const model = new StreamModel()
+  const frame = peerMessage(SESSION, "live-then-replay")
+  const sink = holdingSink(frame.eventId)
+  const running = await boot(model, sink, directory)
+  try {
+    // The stream keeps what is published live on the agent subject.
+    model.store(agentSubject(SESSION), frame.raw)
+    running.nats.emit(agentSubject(SESSION), frame.raw)
+    await sink.holding
+    // The sweep reads the stream's copy while the live write waits on the transport.
+    await running.reconnect()
+    for (let turn = 0; turn < 10; turn += 1) await settled()
+    sink.release()
+    await waitFor(async () => cards(sink, frame.eventId).length === 1, "the live frame")
+    await running.reconnect()
+    await running.reconnect()
+    expect(cards(sink, frame.eventId)).toHaveLength(1)
+    expect(cards(sink, frame.eventId)[0]?.content).not.toContain(
+      "while this session's connection was down",
+    )
+  } finally {
+    sink.release()
     await running.session.shutdown()
     await rm(directory, { recursive: true, force: true })
   }
