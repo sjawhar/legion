@@ -131,6 +131,7 @@ jobs:
                   "go_version_file": row["go_version_file"],
                   "apt": " ".join(row["apt"]),
                   "bun": row["bun"],
+                  "jj": row["jj"],
                   "evidence_variable": row["evidence_variable"],
                   "timeout_minutes": row["timeout_minutes"],
               }
@@ -206,6 +207,12 @@ jobs:
         uses: ./.github/actions/setup-bun
       - if: matrix.bun
         run: bun install --frozen-lockfile
+
+      # The three proofs that start the Go daemon: it refuses to boot without jj, and names it
+      # (`missing required daemon tools: jj`), as run 40957651922 showed. This installs the jj the
+      # worker image ships, which is the one the daemon is written for.
+      - if: matrix.jj
+        uses: ./.github/actions/install-jj
 
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:

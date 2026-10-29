@@ -19,7 +19,8 @@
       "bun": false,
       "evidence_variable": "CHILD_ADOPTION_EVIDENCE_DIR",
       "timeout_minutes": 25,
-      "why_hosted": "Run it from a checkout on a Linux host with go and awk, as LEGION_TEST_PG_DSN=... bash scripts/e2e/child-adoption.sh; CI's service satisfies it, and this script starts none"
+      "why_hosted": "Run it from a checkout on a Linux host with go and awk, as LEGION_TEST_PG_DSN=... bash scripts/e2e/child-adoption.sh; CI's service satisfies it, and this script starts none",
+      "jj": true
     },
     {
       "script": "dispatch-claimant-delivery.sh",
@@ -30,7 +31,8 @@
       "bun": true,
       "evidence_variable": "",
       "timeout_minutes": 25,
-      "why_hosted": "DATABASE_URL is required and must name a loopback host; its prerequisite loop takes go, bun, curl, psql and openssl, and it starts no container"
+      "why_hosted": "DATABASE_URL is required and must name a loopback host; its prerequisite loop takes go, bun, curl, psql and openssl, and it starts no container",
+      "jj": false
     },
     {
       "script": "merged-root-waits.sh",
@@ -39,7 +41,8 @@
       "bun": false,
       "evidence_variable": "MERGED_ROOT_WAITS_EVIDENCE_DIR",
       "timeout_minutes": 25,
-      "why_hosted": "Run it from a checkout on a Linux host with go and awk, as LEGION_TEST_PG_DSN=... bash scripts/e2e/merged-root-waits.sh; CI's service satisfies it, and this script starts none"
+      "why_hosted": "Run it from a checkout on a Linux host with go and awk, as LEGION_TEST_PG_DSN=... bash scripts/e2e/merged-root-waits.sh; CI's service satisfies it, and this script starts none",
+      "jj": true
     },
     {
       "script": "no-required-checks.sh",
@@ -48,7 +51,8 @@
       "bun": false,
       "evidence_variable": "NO_REQUIRED_CHECKS_EVIDENCE_DIR",
       "timeout_minutes": 30,
-      "why_hosted": "Run it from a checkout on a Linux host with go and awk, as LEGION_TEST_PG_DSN=... bash scripts/e2e/no-required-checks.sh; the proof waits for three reads of what each base requires, so a run takes about seven minutes"
+      "why_hosted": "Run it from a checkout on a Linux host with go and awk, as LEGION_TEST_PG_DSN=... bash scripts/e2e/no-required-checks.sh; the proof waits for three reads of what each base requires, so a run takes about seven minutes",
+      "jj": true
     },
     {
       "script": "stage1-skeleton.sh",
@@ -59,7 +63,8 @@
       "bun": false,
       "evidence_variable": "",
       "timeout_minutes": 20,
-      "why_hosted": "The daemon refuses to start without tmux on PATH, and CI's tmux is the runner's apt binary; with LEGION_E2E_PG_DSN set the script starts no container of its own, which is how ci.yaml's test job already runs it"
+      "why_hosted": "The daemon refuses to start without tmux on PATH, and CI's tmux is the runner's apt binary; with LEGION_E2E_PG_DSN set the script starts no container of its own, which is how ci.yaml's test job already runs it",
+      "jj": false
     }
   ],
   "elsewhere": [
