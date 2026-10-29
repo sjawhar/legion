@@ -1,0 +1,32 @@
+{
+  "schemaVersion": 1,
+  "phase": "review",
+  "issue": "INFRA-745",
+  "completed": "2026-10-29T19:25:00Z",
+  "round": 1,
+  "decision": "changes_requested",
+  "reviewedCodeHead": "2efb1c87921b2bd2e3688e439ef1b74683b66b14",
+  "critical": 0,
+  "important": 1,
+  "minor": 0,
+  "keyFindings": [
+    {
+      "severity": "important",
+      "file": "packages/envoy/docs/architecture.md, packages/envoy/AGENTS.md (on main)",
+      "description": "This change makes main's listener documentation false. internal/bus/nats.go:1337 now names a denied JetStream publish ErrPublishDenied, so cmd/listener writeBusUnavailable answers a denied /v1/messages/send, and a denied /v1/messages/publish to a topic the stream captures, with 403 publish_denied (no Retry-After) where it answered a retried 503. Main still says the opposite: architecture.md:99-102 ('Only a topic the stream does not capture ... can be denied this way ... a send ... goes through JetStream and never meets it') and AGENTS.md:2589 (send row: 'The publish row's 403 for a denied publish never reaches this route ... bus.ErrPublishDenied is made only where a core publish is confirmed') and :2590 (publish row: 'which only a core publish's confirmation produces, so only a role send's forward or an ad-hoc topic's own publish can be denied this way'). Main (#2370) rewrote those paragraphs after this branch's base, so they cannot be corrected without the base: the reviewer's correction in 76c7b80 made the pull request CONFLICTING and GitHub ran no check, and f5ea044 put the three files back. Fix: merge main (a sentence only the base holds), correct those sentences on main's text, re-run the proof at the merge head, and say the 403 in the docs."
+    }
+  ],
+  "proseFixes": [
+    "76c7b80 + f5ea044 (reviewer): internal/bus/confirm.go ErrPublishDenied's doc names the JetStream source; cmd/listener/api.go writeBusUnavailable's citation names deniedPublish beside confirmPublished; envoy-client/src/replay.ts says `suppressed` is a quiet frame, not `notify: false`; the envoy changelog fragment says the listener's 403. The edits to AGENTS.md, architecture.md and request_record.go were reverted because main rewrote those paragraphs; request_record.go on main is already correct."
+  ],
+  "adjudicated": [
+    "deep-review minor 2 / code-quality important 2 (PublishedDispatchEvent has no importer): not a defect. It declares the published wire shape in the contracts package for any reader of the NATS frame; renderInbound reads quiet off the untrusted raw value as unknown and compares it === true, which a `quiet?: boolean` type would assert falsely.",
+    "deep-review minor 3 (a shutdown mid-batch counts reason=failed): not a defect. attempt.wait's own rule (publisher.go:756-758) is that an answer not in before ctx ends is a failure and the destination is published again; the counter counts the destinations the outbox will republish.",
+    "code-quality important 1 (Quiet read from two payload shapes; persist a column instead): not a defect in this change. Quiet is a pure function of type and payload; a column needs a migration and still needs the map reading for every event appended before it; both map arms are pinned on the wire by TestEnvelopePayloadStatesWhetherTheEventIsQuiet (scanned case) and broker_test's map rows. Named as a risk in the PR body.",
+    "code-quality minor 3 (nil PublishFailures counts nothing) and minor 4 (attempt carries Deps beside publishDestination's deps): style, not defects; the production wiring is proven by the implementer's real-binary run reading reason=\"denied\" on /metrics."
+  ],
+  "contractCensus": "Not required. quiet is an added optional field; nothing is made required, removed or renamed; no input that succeeds today is refused: the listener's 403 answers a publish that already failed as a 503, so only the status of a failing request changes. The changelog now says it.",
+  "ci": "Not read green. The code head 2efb1c8's CI run 40925705028 stayed queued behind the repository's Actions backlog; 76c7b80 got no run because it conflicted with main. A request for changes does not wait on CI.",
+  "threads": "none open on the pull request",
+  "e2eLines": "E2E (implementer) rounds 1-3 and E2E (tester) round 3 PASS at 57a5fdb are present"
+}
