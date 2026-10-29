@@ -2,31 +2,41 @@
   "schemaVersion": 1,
   "phase": "review",
   "issue": "INFRA-624",
-  "completed": "2026-10-29T08:09:34Z",
-  "round": 9,
-  "reviewedHead": "6c80533dd9f621c114289512f4cf4cd057286598",
-  "codeHead": "608e4e9f82fa",
+  "completed": "2026-10-29T12:04:05Z",
+  "round": 10,
+  "reviewedHead": "9d737655a865141a1f25b6bbc76a5cf7561405f8",
+  "codeHead": "d3e0a98a5e3e",
   "decision": "changes_requested",
   "critical": 0,
   "important": 2,
-  "minor": 0,
-  "scope": "Narrowed by the INFRA-138 architect to round 8's four items (review 5691562116) and the exhaustive Go test; correctness defects outside the exhaustive test's shapes still fixed here; other points on Fast-follow.",
-  "ci": "CI head 608e4e9f (newest pull_request run; compare to 6c80533d handoffsOnly true, 2 files under .legion/INFRA-624/): required lint, typecheck, test, pr-title success; envoy-go, envoy-go-race success; dispatch in progress. dispatch-multiprocess (not required) failed in TestSIGTERMWithOpenStreamsExitsPromptlyAndSettlesTheOwedDocument with only 'did not settle the owed document before exiting' (no unconfirmed settlement, nothing left owed); it passes on main and on this branch's earlier heads, and passed 3 of 3 locally at the head (go test -tags multiprocess -count=3): a timing flake, not this change's.",
-  "merge": "608e4e9f merges main 166bc0c4: every PR file's diff against main is byte-identical before and after the merge, except pmdoc/reanchor_test.go, whose local NestedValue import fix is dropped because main now carries it (#2482, #2484).",
-  "roundEightItems": "All fixed and accepted (PRRT_kwDORFy7ds6xYGI2, PRRT_kwDORFy7ds6xYGI4, PRRT_kwDORFy7ds6xYGI6, PRRT_kwDORFy7ds6xYGI9). The exhaustive test enumerates all 1364 bodies of up to five children from {P, empty P, list, nested list}, reads the delete ids from the reason text, applies them in one ApplyOps, re-runs the edit and asserts a valid end with every unquoted word kept; it fails on 152 bodies against 9a5c72e3's ask_block_text.go (code-quality review).",
+  "minor": 2,
+  "scope": "Narrowed by the INFRA-138 architect to round 9's two nested-decision items (review 5694589559) and the extended exhaustive test; correctness defects outside the test's shapes still fixed here; other points on Fast-follow.",
+  "ci": "CI head d3e0a98a (newest pull_request run; compare to 9d737655 handoffsOnly true, 2 files under .legion/INFRA-624/): every check success, required lint, typecheck, test, pr-title and dispatch-multiprocess included.",
+  "merge": "d3e0a98a merges main 5443d99b: every PR file's diff against main is byte-identical before and after, except packages/proof-editor/AGENTS.md, merged with main's mermaid kind; its legion-owned count (Sixteen) is right, but the copied-file kinds count stays twenty-two where both kinds make twenty-three.",
+  "roundNineItems": "Item 2 (misattributed nested decision) fixed in c5d2f236 and accepted (PRRT_kwDORFy7ds6xdslc). Item 1 (loop) fixed when the holder breaks the content rule (three and four levels, sibling nested decisions all name one edit that applies, code-quality probes), but not when the holder fails only to parse; PRRT_kwDORFy7ds6xdslS unresolved. Postgres in the pod was down this round, so both reviewers used in-package probes of refuseAskContentEdit and validateEditedAskBlocks; I re-ran the empty-holder probe.",
   "keyFindings": [
     {
       "severity": "important",
       "file": "packages/envoy/internal/dispatch/docs/ask_block_text.go",
-      "description": "When the outer ask O breaks its own rule and an ask X nested in its kept list also breaks (O [P, L(item holding X), L3], X [P, L, L2]), the path loops: O's refusal says 'edit that decision first' (:537); X's refusal names X's L2; doc-edit deleting exactly that is refused because O, whose subtree it changes, still breaks; both refusals repeat. One edit deleting X's L2 and O's L3 together applies, but no refusal names it. Reviewer re-ran the deep-review probe TestProbeR9NestedAndOuterBothBroken against Postgres."
+      "description": "planAskRepair's holder check (:597) sends the caller outward whenever readAskBlockStrictly fails on the holder after the deletes, parse failures included. Holder O = [empty paragraph, list item holding I], I = [P, L, L2]: I's refusal says 'ask block \"O\" has an empty question; edit ask block \"O\" first' (:544); editing O is refused by askBlockOf ('has an empty question', no path); a doc-edit writing O's question alone is refused because I breaks; a doc-edit deleting I-L2 alone is refused because O has an empty question; only one edit doing both applies, and no refusal names it (reviewer's re-run of TestProbeR10QEmptyHolder). The 'needs words written' branch (:547) has the same gap for O > M (empty question) > I (broken). Both reviewers count 97 such shapes inside the 780-body test, which its oracle accepts."
     },
     {
       "severity": "important",
       "file": "packages/envoy/internal/dispatch/docs/ask_block_text.go",
-      "description": "brokenNestedAsk (:585) names the first nested ask failing readAskBlockStrictly, parse failures included, not the one breaking the content rule: with a nested ask-y holding an empty question before the broken ask-nested, O's refusal says to edit ask-y, whose edit is refused 'has an empty question' with no path, and fixing it would not fix O (TestProbeR9NestedMisattributed, re-run by the reviewer)."
+      "description": "The holder branch's only next step is an ask edit of the holder, which the handler refuses when the holder is decided (409 ASK_NOT_OPEN, api/asks.go:402-413) or another actor wrote it (403 NOT_AUTHOR): an open follow-up decision inside an answered decision's option, both broken, gets 'edit ask block \"o\" first' and never sees the one doc-edit the holder's plan would name."
+    },
+    {
+      "severity": "minor",
+      "file": "packages/envoy/internal/dispatch/docs/service_test.go",
+      "description": "followAskRefusal (:1398) never follows 'edit ask block X first' and checks a named decision breaks the rule before the deletes, so the shapes above pass; it should follow X and assert X's refusal names deletes doc-edit accepts, or a terminal outcome whose advice applies."
+    },
+    {
+      "severity": "minor",
+      "file": "packages/proof-editor/AGENTS.md",
+      "description": "After the merge the copied-file list holds main's mermaid kind (INFRA-532) and this PR's kind, but :57 and :128 still say twenty-two; twenty-three."
     }
   ],
   "fastFollow": "none",
-  "thermonuclear": "Both run at 6c80533d (code 608e4e9f): deep review CHANGES (both findings), code quality APPROVE (round 8 items and the exhaustive test sound).",
-  "security": "untrusted-input: ids in the reason stay strconv.Quote data and the nested-ask branch names an id with %q and no command (ask_block_text.go:530-546). authz: no new route; every refusal runs inside SetAskBlockText behind the unchanged ask-edit handler."
+  "thermonuclear": "Both run at 9d737655 (code d3e0a98a): deep review CHANGES (items 1, 2 and 3), code quality CHANGES (items 1 and 3).",
+  "security": "untrusted-input: delete ids and holder ids stay strconv.Quote data, and no reason holds command text (ask_block_text.go:525-552). authz: no new route; every refusal runs inside SetAskBlockText behind the unchanged ask-edit handler, whose open-state and author checks are what item 2 meets."
 }
