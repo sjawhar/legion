@@ -70,7 +70,7 @@ func secondDocument(t *testing.T, handler http.Handler, issueKey string) (string
 
 // The issue's ask list reads every ask of the issue through askRowFrom, whose anchor join casts
 // anchor->>'artifact_id'. Over a stored anchor that is not a uuid an unguarded cast answers 500
-// for the whole route; store.CanonicalUUID's guard resolves that one ask to no anchor document and
+// for the whole route; store.CastableUUID's guard resolves that one ask to no anchor document and
 // leaves the canonically anchored ask beside it with the document it had.
 func TestIssueAskListAnswersOverAnAnchorArtifactIDThatDoesNotCast(t *testing.T) {
 	handler, database := newTestHandlerWithStore(t)
@@ -158,7 +158,7 @@ func askHits(response model.SearchResponse) map[string]model.SearchResult {
 // block_artifact_id, <anchor>). Every stored ask whose anchor does not cast names an ask block
 // (asks_anchor_artifact, 0032, casts the anchor wherever block_artifact_id is null), so coalesce
 // stops before the anchor expression on every row a schema allows; the arm's guard keeps it on
-// store.CanonicalUUID's one definition. The search answers over that row shape, links the
+// store.CastableUUID's one definition. The search answers over that row shape, links the
 // canonically anchored hit to its anchor's document and the other to its ask block's document.
 func TestSearchKeywordAnswersOverAnAnchorArtifactIDThatDoesNotCast(t *testing.T) {
 	handler, database := newTestHandlerWithStore(t)

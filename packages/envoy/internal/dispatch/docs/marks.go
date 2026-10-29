@@ -589,7 +589,7 @@ func loadAnchorRefreshedAsk(ctx context.Context, tx pgx.Tx, id string) (model.As
 			aa.project_key, aa.slug, aa.name, aa.is_primary
 		from asks a
 		left join artifacts ba on ba.id = a.block_artifact_id
-		left join artifacts aa on aa.id = `+store.CanonicalUUID(`a.anchor->>'artifact_id'`)+`
+		left join artifacts aa on aa.id = `+store.CastableUUID(`a.anchor->>'artifact_id'`)+`
 		where a.id = $1
 	`, id), &blockArtifactID, &blockArtifactSlug, &blockArtifactPrimary, &anchorProject, &anchorSlug, &anchorName, &anchorPrimary)
 	if err != nil {

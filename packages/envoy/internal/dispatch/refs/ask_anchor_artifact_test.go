@@ -32,7 +32,7 @@ func insertAnchoredReferenceAsk(t *testing.T, tx pgx.Tx, id, issueKey, anchorArt
 // An ask an earlier release could store holds an anchor artifact_id that is not a uuid beside a
 // block_artifact_id: asks_anchor_artifact (migration 0032) casts the anchor only where
 // block_artifact_id is null, so an ask carrying both columns holds an artifact_id no index has
-// ever cast. loadAskNodes guards its cast with store.CanonicalUUID, so that row reads as an ask
+// ever cast. loadAskNodes guards its cast with store.CastableUUID, so that row reads as an ask
 // belonging to its issue rather than answering SQLSTATE 22P02 for the whole read, and the ask
 // anchored canonically beside it keeps the document parent and version it had.
 func TestAskNodeAnswersOverAnAnchorArtifactIDThatDoesNotCast(t *testing.T) {

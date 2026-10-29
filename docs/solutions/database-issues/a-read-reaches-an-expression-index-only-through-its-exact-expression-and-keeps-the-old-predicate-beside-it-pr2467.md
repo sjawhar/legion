@@ -34,10 +34,13 @@ related_issues:
   prepared with a text parameter under `plan_cache_mode = force_generic_plan`, since the server
   sends `$1` as a bind parameter; and an old-predicate-versus-new-predicate `except` in both
   directions over every key, which must return no rows.
-- One guarded expression, one definition. Every reader that casts the same stored value - the
-  index, the census counting what it leaves out, and each read - builds it from one exported
-  helper, so the copies cannot drift; only the migration keeps a literal, because a migration's
-  text is immutable.
+- One guarded expression, one definition - but a read and an index can need two of them. An index
+  expression must be immutable, while the guard that accepts exactly what the cast accepts
+  (`pg_input_is_valid`, the cast's own input function) is only stable. So the index, the sweep read
+  comparing its expression and the count of the rows it leaves out share one helper
+  (`store.CanonicalUUID`), and every read that resolves the value shares the other
+  (`store.CastableUUID`), which answers on every row what the unguarded cast answered. Neither set
+  of copies can drift; only the migration keeps a literal, because a migration's text is immutable.
 - A `coalesce` whose cast sits behind another column hides which rows a cast ever reached:
   `coalesce(block_artifact_id, (anchor->>'artifact_id')::uuid)` evaluates the cast only where
   `block_artifact_id` is null, so that index proves nothing about an ask that sets both. Read the
@@ -68,10 +71,16 @@ related_issues:
   text comparison excludes it on both sides.
 - That same unguarded cast was in every other reader of an ask's anchor, and `GET
   /api/v1/issues/{key}/asks` answered 500 (`SQLSTATE 22P02`) over such a row on a real server.
-  `store.CanonicalUUID` (`internal/dispatch/store/canonical_uuid.go`) is now the single definition
-  of the guard, used by `api/ask_rows.go`, `api/events.go`, both ask arms of `api/search.go`,
-  `refs/graph.go`'s ask node, `docs/marks.go` (the sweep read and `loadAnchorRefreshedAsk`) and
-  `store.AsksOutsideAnchorArtifactIndex`. The comment readers stay unguarded: 0032's
+  `internal/dispatch/store/canonical_uuid.go` now holds both guards. A reader resolves the anchor
+  through `store.CastableUUID` (`case when pg_input_is_valid(x, 'uuid') then x::uuid end`), which
+  answers the document every spelling the cast accepts names - upper case, braces, no hyphens, as
+  the unguarded cast did - and null only where the cast would raise: `api/ask_rows.go`,
+  `api/events.go`, both ask arms of `api/search.go`, `refs/graph.go`'s ask node and
+  `docs/marks.go`'s `loadAnchorRefreshedAsk`. `pg_input_is_valid` is only stable, so no index can
+  carry it: `store.CanonicalUUID`'s immutable regex stays the expression of
+  `asks_anchor_artifact_id` (migration `0139`), the sweep read (`docs/marks.go`'s
+  `recordedMarksQuery`) and the boot count (`store.AsksOutsideAnchorArtifactIndex`), so those three
+  describe one set of rows. The comment readers stay unguarded: 0032's
   `comments_anchor_artifact` casts every comment row, so no stored comment anchor fails a cast.
 - The two search arms read `coalesce(artifact_id, block_artifact_id, <anchor>)`, which never
   reaches the anchor for the rows that do not cast, since they all set `block_artifact_id`; they

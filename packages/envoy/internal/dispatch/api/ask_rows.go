@@ -21,12 +21,13 @@ const askRowColumns = docs.AskColumns + `, ba.id::text, ba.slug, ba.is_primary,
 	aa.project_key, aa.slug, aa.name, aa.is_primary,
 	pa.project_key, pa.slug, pa.name, pa.is_primary`
 
-// askRowFrom is a var, not a const, because its anchor join is built from store.CanonicalUUID: the
-// guard every ask anchor cast shares, so a stored anchor whose artifact_id is not a canonical id
-// resolves to no document instead of failing the read with SQLSTATE 22P02.
+// askRowFrom is a var, not a const, because its anchor join is built from store.CastableUUID: a
+// stored anchor resolves to the document its artifact_id casts to, whatever the spelling, and one
+// whose artifact_id casts to no uuid resolves to no document instead of failing the read with
+// SQLSTATE 22P02.
 var askRowFrom = `from asks a
 	left join artifacts ba on ba.id = a.block_artifact_id
-	left join artifacts aa on aa.id = ` + store.CanonicalUUID(`a.anchor->>'artifact_id'`) + `
+	left join artifacts aa on aa.id = ` + store.CastableUUID(`a.anchor->>'artifact_id'`) + `
 	left join artifacts pa on pa.id = (a.approval->>'artifact_id')::uuid`
 
 // newestReply selects the newest comment in the thread of the ask aliased a: the one that

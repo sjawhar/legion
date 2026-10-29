@@ -59,8 +59,9 @@ const (
 // Column shape after kind, list: issue_key, owner_artifact_id, artifact_id, id, block_id,
 // issue_title, issue_status, owner_project, owner_slug, owner_name, updated_at, own, r.
 // block_id is an ask's typed block only while it is a node of the reference graph
-// (askBlockNodeSQL). The ask arm's anchor cast is store.CanonicalUUID's, the guard every ask
-// anchor cast shares, which is why this is a var rather than a const.
+// (askBlockNodeSQL). The ask arm's anchor cast is store.CastableUUID's, which answers the document
+// every spelling of an artifact_id Postgres casts names, which is why this is a var rather than a
+// const.
 var searchKeywordLegsSQL = `
   select 'issue' as kind, 'keyword' as list, i.key as issue_key, null::uuid as owner_artifact_id, null::uuid as artifact_id, i.key as id, null::text as block_id,
          i.title as issue_title, i.status as issue_status,
@@ -90,7 +91,7 @@ var searchKeywordLegsSQL = `
    where c.search @@ q.tsq and ($2 = '' or coalesce(i.project_key, p.key) = $2)
   union all
   select 'ask' as kind, 'keyword', k.issue_key, case when k.issue_key is null then coalesce(k.artifact_id, k.block_artifact_id) else null::uuid end,
-         coalesce(k.artifact_id, k.block_artifact_id, ` + store.CanonicalUUID(`k.anchor->>'artifact_id'`) + `), k.id::text, ` + askBlockNodeSQL + `,
+         coalesce(k.artifact_id, k.block_artifact_id, ` + store.CastableUUID(`k.anchor->>'artifact_id'`) + `), k.id::text, ` + askBlockNodeSQL + `,
          i.title, i.status, p.key, a.slug, a.name, coalesce(i.updated_at, k.created_at),
          false, ts_rank_cd(k.search, q.tsq)
     from asks k
@@ -303,7 +304,7 @@ meaning_ask_candidates as (
 ),
 meaning_ask as (
   select 'ask' as kind, 'meaning' as list, issue_key, case when issue_key is null then coalesce(artifact_id, block_artifact_id) else null::uuid end,
-         coalesce(artifact_id, block_artifact_id, ` + store.CanonicalUUID(`anchor->>'artifact_id'`) + `), id::text, block_id,
+         coalesce(artifact_id, block_artifact_id, ` + store.CastableUUID(`anchor->>'artifact_id'`) + `), id::text, block_id,
          issue_title, issue_status, owner_project, owner_slug, owner_name, updated_at,
          false, r
     from meaning_ask_candidates where r >= $10

@@ -527,7 +527,7 @@ func loadAskNodes(ctx context.Context, q Queryer, _ string, _ bool, ids []string
 		left join issues i on i.key = k.issue_key
 		left join artifacts a on a.id = k.artifact_id
 		left join artifacts doc on doc.id = case
-		  when k.anchor->>'artifact_id' is not null then `+store.CanonicalUUID(`k.anchor->>'artifact_id'`)+`
+		  when k.anchor->>'artifact_id' is not null then `+store.CastableUUID(`k.anchor->>'artifact_id'`)+`
 		  when k.block_artifact_id is not null then k.block_artifact_id
 		  when k.kind = 'approval' then (k.approval->>'artifact_id')::uuid
 		  else k.artifact_id

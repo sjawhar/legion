@@ -65,6 +65,36 @@ type Anchor struct {
 	Orphaned   bool    `json:"orphaned"`
 }
 
+// UnmarshalJSON decodes an anchor, reading artifact_id only where the stored value is a JSON
+// string. No release writes a non-string artifact_id - the server writes a document's id, which is
+// text - but a row an earlier release wrote could hold one, and a read of such a row must answer
+// the ask or comment it belongs to rather than 500 for the whole route, which decoding a number
+// into ArtifactID's string field would. Any other JSON value - a number, null, an object, a bool -
+// leaves ArtifactID empty, which names no document, the same answer the SQL read gives for a value
+// that casts to no uuid. Every other field decodes as its struct tag says, errors included, and
+// encoding is unchanged.
+func (a *Anchor) UnmarshalJSON(data []byte) error {
+	// anchorFields drops the methods of Anchor, so decoding into it does not call this one again.
+	type anchorFields Anchor
+	decoded := struct {
+		*anchorFields
+		ArtifactID json.RawMessage `json:"artifact_id"`
+	}{anchorFields: (*anchorFields)(a)}
+	if err := json.Unmarshal(data, &decoded); err != nil {
+		return err
+	}
+	if len(decoded.ArtifactID) == 0 {
+		return nil
+	}
+	var artifactID string
+	if err := json.Unmarshal(decoded.ArtifactID, &artifactID); err != nil {
+		a.ArtifactID = ""
+		return nil
+	}
+	a.ArtifactID = artifactID
+	return nil
+}
+
 // AnchorInput selects document text by quote or identifies a browser-owned mark.
 type AnchorInput struct {
 	Artifact   string  `json:"artifact"`
