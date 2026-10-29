@@ -309,12 +309,15 @@ func requireIssueEventPublished(t *testing.T, process *cmdtest.Process, conn *na
 // person, so such a reader shows a session its peers' silence on the issue it watches. The
 // payload is read as raw JSON so a frame carrying no quiet at all fails here; decoded into a
 // bool, a missing field would read as false and the check would pass on the frames that keep the
-// stored 72 hours quiet.
+// stored 72 hours quiet. The create is forced because it is this project's second issue and so
+// meets the related-item check, which would otherwise refuse it as a possible duplicate of the
+// issue requireIssueEventPublished created, and what is under test here is the published frame,
+// not duplicate detection.
 func requireCommentQuietPublished(t *testing.T, process *cmdtest.Process, conn *natsgo.Conn, port int) {
 	t.Helper()
 	client := &http.Client{Timeout: 10 * time.Second}
 	actor := `"actor":{"kind":"session","id":"` + dispatchSessionID + `"}`
-	answer := postDispatchJSON(t, client, port, "/api/v1/issues", `{"project":"ACME","title":"quiet example",`+actor+`}`)
+	answer := postDispatchJSON(t, client, port, "/api/v1/issues", `{"project":"ACME","title":"quiet example","force":true,`+actor+`}`)
 	var created struct {
 		Key string `json:"key"`
 	}
