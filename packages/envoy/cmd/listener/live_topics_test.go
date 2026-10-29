@@ -322,10 +322,13 @@ func TestAStoredTopicStillReachesAServingPortOnce(t *testing.T) {
 	requirePromptCarries(t, serving.awaitPrompt(t, 10*time.Second), inbox)
 	serving.noPrompt(t, 2*time.Second)
 
+	// Straight onto the role lane, which the live lane also takes: the publish route would forward
+	// the message to its holder itself.
 	role := "stored-once-" + id.New()
 	_, received := holdRole(t, listener, uri, role)
-	postListener(t, listener.port, "/v1/messages/publish", `{"topic":"`+contracts.RoleTopicPrefix+role+`","message":"a message for whoever holds the role"}`)
-	requireOneRoleMessage(t, received, contracts.RoleTopicPrefix+role, "a message for whoever holds the role", 2*time.Second)
+	roleMessage := newEnvelope("agent", contracts.RoleTopicPrefix+role, "a message for whoever holds the role")
+	publish(t, publisher, roleMessage)
+	requireOneRoleMessage(t, received, roleMessage.Topic, roleMessage.PayloadSummary, 2*time.Second)
 }
 
 // Two listeners of one machine, as a rolling deploy runs them, both with the live lane on: NATS
@@ -379,10 +382,12 @@ func TestTwoListenersOnOneMachineDeliverALiveTopicOnce(t *testing.T) {
 
 // A delivery the listener refuses on a live topic is reported as every refusal is, on the topic's
 // exceptions lane over core NATS, and the live lane reads that report back like any topic: a
-// session subscribed to the exceptions lane is prompted with it. A report is never itself
+// session subscribed to that topic's exceptions lane is prompted with it. A report is never itself
 // reported, so the failed delivery of that prompt (the watcher's port answers 500) publishes no
 // second one. The refusal is a btw-mode message (frameDeliveryMode) to a subscriber that
-// advertises no capability.
+// advertises no capability. The watcher registers the live topic's own lane: the wildcard over
+// every lane also reaches the agent subjects' lanes, a private stream subject the listener does
+// not store (bus.ReachesPrivateStreamSubject).
 func TestALiveTopicExceptionIsReadBackOnce(t *testing.T) {
 	uri := testnats.URL(t)
 	listener := startListenerProcess(t, cmdtest.Build(t, "envoy-listener"), uri, "exception-read-back", liveLaneEnv...)
@@ -392,7 +397,7 @@ func TestALiveTopicExceptionIsReadBackOnce(t *testing.T) {
 	refusing := startServingPort(t, "ses_refusing_"+id.New(), http.StatusNoContent)
 	registerServingSession(t, listener, refusing, "127.0.0.1", topic)
 	watcher := startServingPort(t, "ses_watcher_"+id.New(), http.StatusInternalServerError)
-	registerServingSession(t, listener, watcher, "127.0.0.1", bus.ExceptionTopicPrefix+">")
+	registerServingSession(t, listener, watcher, "127.0.0.1", bus.ExceptionTopicPrefix+topic)
 	conn := testnats.Connect(t, uri)
 	t.Cleanup(conn.Close)
 	exceptions, err := conn.SubscribeSync(bus.ExceptionTopicPrefix + ">")

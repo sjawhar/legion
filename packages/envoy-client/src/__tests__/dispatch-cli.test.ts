@@ -1171,6 +1171,10 @@ describe("the dispatch CLI's envoy.json", () => {
         ...child,
       });
       expect(stdout).toStartWith("dispatch: DISPATCH_HOST is not set.");
+      // An agent in a Python cell reads this first. With a made-up session id, the CLI finds no
+      // AskGate record, so the write posts with no review.
+      expect(stdout).toContain("From an agent's session, send the command as a bash call.");
+      expect(stdout).toContain("set DISPATCH_SESSION_ID to the id of your own session");
       expect(code).toBe(2);
     }
     expect(requests).toEqual([]);
@@ -1391,6 +1395,41 @@ describe("the dispatch CLI's subscription note", () => {
     expect(stdout).toStartWith("Posted message message-1");
     expect(stdout).not.toContain("not subscribed");
     expect(requests.some((request) => request.path === "/api/v1/issues/DSP-1/messages")).toBe(true);
+  });
+
+  // A write that landed before its answer was lost (409 KEY_COMMITTED) is done: the call succeeds,
+  // and its one line says the write was made and to read it back, since there is nothing to print.
+  test("a write answered KEY_COMMITTED exits 0 with one line saying to read it back", async () => {
+    const fetchImpl = (async (input: RequestInfo | URL, init?: RequestInit) => {
+      if (String(input).endsWith("/api/v1/issues/DSP-1/messages")) {
+        return Response.json(
+          { code: "KEY_COMMITTED", error: "the write landed and its answer was lost" },
+          { status: 409 }
+        );
+      }
+      return fetch(input, init);
+    }) as typeof fetch;
+    let stdout = "";
+    const code = await runDispatchCli(
+      ["message", "--issue", "DSP-1", "--body", "hello"],
+      environment(withListener),
+      {
+        stdout: (text) => {
+          stdout += text;
+        },
+        stderr: () => {},
+        readText: () => "",
+        cwd: stateDir,
+        fetchImpl,
+      }
+    );
+
+    expect(code).toBe(0);
+    expect(stdout.trim().split("\n")).toEqual([
+      expect.stringMatching(
+        /^POST http:\/\/127\.0\.0\.1:\d+\/api\/v1\/issues\/DSP-1\/messages was made, but its answer was lost on the way back \(KEY_COMMITTED\), so this command cannot print what it made: read it back with `dispatch read`, or with the matching list for something it created\.$/
+      ),
+    ]);
   });
 
   test("a read asks no listener", async () => {

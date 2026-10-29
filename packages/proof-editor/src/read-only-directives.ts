@@ -1,167 +1,53 @@
-import {
-  MarkType,
-  NodeType,
-  type Node as ProseMirrorNode,
-  type Schema,
-} from "@milkdown/prose/model";
+import { schemaCtx } from "@milkdown/core";
+import type { Root } from "@milkdown/kit/transformer";
+import { $remark } from "@milkdown/kit/utils";
+import type { Schema } from "@milkdown/prose/model";
+import type { Transformer } from "unified";
 import { type BlockSchema, typedBlockRefusal, validateBlockSchema } from "./block-schema.js";
+import { type MdastNode, remarkDecideTypedBlocks } from "./typed-block-drawing.js";
 
-type MdastNode = {
-  type: string;
-  name?: string;
-  value?: string;
-  attributes?: Record<string, string>;
-  data?: { directiveLabel?: boolean };
-  children?: MdastNode[];
-  position?: {
-    start?: { offset?: number };
-    end?: { offset?: number };
-  };
-};
-
-type Context = { blockSchema: BlockSchema | undefined; schema: Schema; source: string };
-
-/** The part of a Milkdown node or mark spec that names the markdown nodes it parses. */
-type ParseRule = { parseMarkdown?: { match(node: MdastNode): boolean } };
-
-/** A closing fence line: container prefixes, a run of three or more colons, trailing blanks. */
-const CLOSING_FENCE = /^[ \t>]*(:{3,})[ \t]*$/;
-
-/** The paragraph remark makes of a directive's `[label]`, which its opening line already shows. */
-function isLabel(node: MdastNode): boolean {
-  return node.type === "paragraph" && node.data?.directiveLabel === true;
-}
-
-/** Every attribute of `type` at its default, null where it has none. */
-function defaultAttrs(type: NodeType): Record<string, unknown> {
+/**
+ * `node`'s attributes without those its block type marks `server` in `blockSchema`, so the parse
+ * fills each with its schema default. The block id and the client-owned attributes are kept.
+ * Throws when `blockSchema` has no type of `node`'s name, which `typedBlockRefusal` refuses first.
+ */
+function clientAttributes(
+  blockSchema: BlockSchema,
+  node: MdastNode
+): Record<string, string> | undefined {
+  const type = blockSchema.types.find((candidate) => candidate.name === node.name);
+  if (type === undefined) {
+    throw new Error(`no block type for the accepted directive ":::${node.name ?? ""}"`);
+  }
+  if (node.attributes === undefined) return undefined;
   return Object.fromEntries(
-    Object.entries(type.spec.attrs ?? {}).map(([key, attr]) => [key, attr.default ?? null])
+    Object.entries(node.attributes).filter(([name]) => type.attributes[name]?.server !== true)
   );
 }
 
 /**
- * The block's children as Milkdown's ParserState would add them: each an empty node of the type
- * it matches, and a mark node's children in its place, since the mark's runner opens the mark,
- * runs its children into the same parent and closes it. Undefined when a child matches no node,
- * or matches text, which this check does not model.
+ * Drops, at any depth, every attribute the block schema marks `server` from each container
+ * directive `remarkDecideTypedBlocks` kept a typed block (it draws every other one as
+ * paragraphs), so each reads at its schema default: outside a document no server wrote them, so
+ * a body's `:::ask{state="answered" …}` reads as the open decision its author wrote, never as an
+ * answer nobody recorded. It runs after the decision, so a forged server attribute with a value
+ * the schema refuses (`:::ask{state="bogus"}`) still has the block drawn as its fence lines.
  */
-function placeholders(schema: Schema, children: MdastNode[]): ProseMirrorNode[] | undefined {
-  const targets = [...Object.values(schema.nodes), ...Object.values(schema.marks)];
-  const nodes: ProseMirrorNode[] = [];
-  for (const child of children) {
-    const target = targets.find((candidate) =>
-      (candidate.spec as ParseRule).parseMarkdown?.match(child)
-    );
-    if (target instanceof MarkType) {
-      const inner = placeholders(schema, child.children ?? []);
-      if (inner === undefined) return undefined;
-      nodes.push(...inner);
-      continue;
-    }
-    if (!(target instanceof NodeType) || target.isText) return undefined;
-    nodes.push(target.create(defaultAttrs(target)));
+function dropServerAttributes(nodes: MdastNode[], blockSchema: BlockSchema): void {
+  for (const node of nodes) {
+    if (node.type === "containerDirective") node.attributes = clientAttributes(blockSchema, node);
+    if (node.children !== undefined) dropServerAttributes(node.children, blockSchema);
   }
-  return nodes;
 }
 
 /**
- * Whether Milkdown can build the typed block `name` around `children`. Milkdown builds a node
- * with `NodeType.createAndFill`, and a null there is the `createNodeInParserFail` it logs while
- * it drops the block with all its text. Children that cannot stand in leave the block as it was.
+ * Whether `remarkDecideTypedBlocks` may keep `node`, a container directive, as a typed block: the
+ * block schema accepts its name and attributes (`typedBlockRefusal`). Without a block schema no
+ * directive is a typed block. Both the read-only parse and the live editor's step decide by it.
  */
-function fitsContentRule(schema: Schema, name: string, children: MdastNode[]): boolean {
-  const type = schema.nodes[name];
-  if (type === undefined) return true;
-  const content = placeholders(schema, children);
-  return content === undefined || type.createAndFill(defaultAttrs(type), content) !== null;
-}
-
-/**
- * Where `node` ends in the source. A node a remark plugin made without a position, such as a
- * block-level mark span, ends where its last child does.
- */
-function sourceEnd(node: MdastNode): number | undefined {
-  const end = node.position?.end?.offset;
-  if (end !== undefined) return end;
-  const last = node.children?.at(-1);
-  return last === undefined ? undefined : sourceEnd(last);
-}
-
-/**
- * A directive drawn as its source: the opening fence line, its content (label paragraph dropped,
- * since the opening line already shows the label) and, when the source closes it, the closing
- * fence. Lines end at a "\r" or a "\n", as micromark ends them. The closing fence is the
- * directive's last source line when that line holds only container prefixes and a colon run at
- * least as long as the opening one, and only counts when it lies past the end of the last kept
- * child: an unclosed directive ends where its content ends, and that content may itself end in
- * a nested directive's own closing fence.
- */
-function drawDirective(node: MdastNode, children: MdastNode[], source: string): MdastNode[] {
-  const start = node.position?.start?.offset;
-  const end = node.position?.end?.offset;
-  if (start === undefined || end === undefined) {
-    throw new Error(
-      `container directive ${JSON.stringify(node.name ?? "")} has no source position`
-    );
-  }
-  let openingEnd = start;
-  while (openingEnd < source.length && source[openingEnd] !== "\n" && source[openingEnd] !== "\r") {
-    openingEnd++;
-  }
-  let lastLineStart = end;
-  while (
-    lastLineStart > 0 &&
-    source[lastLineStart - 1] !== "\n" &&
-    source[lastLineStart - 1] !== "\r"
-  ) {
-    lastLineStart--;
-  }
-  const opening = source.slice(start, openingEnd);
-  let openingRun = 0;
-  while (opening[openingRun] === ":") openingRun++;
-  const kept = node.children?.filter((child) => !isLabel(child)).at(-1);
-  const floor = (kept === undefined ? undefined : sourceEnd(kept)) ?? openingEnd;
-  const lastLine = source.slice(lastLineStart, end);
-  const fence = CLOSING_FENCE.exec(lastLine);
-  const drawn: MdastNode[] = [
-    { type: "paragraph", children: [{ type: "text", value: opening }] },
-    ...children.filter((child) => !isLabel(child)),
-  ];
-  if (
-    fence !== null &&
-    fence[1].length >= openingRun &&
-    lastLineStart + lastLine.indexOf(":") >= floor
-  ) {
-    drawn.push({ type: "paragraph", children: [{ type: "text", value: fence[1] }] });
-  }
-  return drawn;
-}
-
-/**
- * A container directive, its content first: a nested directive drawn as text may leave content
- * this block's rule refuses, so the block is kept typed only when the schema accepts it and its
- * processed content fits, and drawn otherwise.
- */
-function readOnlyDirective(node: MdastNode, context: Context): MdastNode[] {
-  const { blockSchema, schema } = context;
-  const refused = blockSchema === undefined || typedBlockRefusal(blockSchema, node) !== undefined;
-  const children = readOnlyChildren(node.children ?? [], context);
-  if (!refused && fitsContentRule(schema, node.name ?? "", children)) {
-    return [{ ...node, children }];
-  }
-  return drawDirective(node, children, context.source);
-}
-
-/**
- * `nodes` with each container directive decided. The parse's nodes are left as they are, so a
- * directive drawn later reads its own children rather than the paragraphs drawn in their place.
- */
-function readOnlyChildren(nodes: MdastNode[], context: Context): MdastNode[] {
-  return nodes.flatMap((node) => {
-    if (node.type === "containerDirective") return readOnlyDirective(node, context);
-    if (node.children === undefined) return [node];
-    return [{ ...node, children: readOnlyChildren(node.children, context) }];
-  });
+function acceptedTypedBlock(blockSchema: BlockSchema | undefined) {
+  return (node: MdastNode): boolean =>
+    blockSchema !== undefined && typedBlockRefusal(blockSchema, node) === undefined;
 }
 
 /**
@@ -170,24 +56,51 @@ function readOnlyChildren(nodes: MdastNode[], context: Context): MdastNode[] {
  * reader its raw source; so a container directive the block schema refuses (or any, without a
  * block schema) is drawn in place as its literal fence lines around its formatted content, and
  * the paragraph-line directive refusals are not applied, so those lines read as the text they
- * are. Accepted typed blocks stay typed, at any depth, as long as their content fits their
- * content rule: Milkdown drops a node whose content breaks its rule, silently and with all its
- * text, so checked against the ProseMirror `schema` the parse builds with, a typed block whose
- * content would not fit (a heading in a `paragraph+` block, or a drawn directive's paragraphs
- * after its list) is drawn as text too. Blocks are decided innermost first, so a drawn block's
- * lines are checked against its parent's rule in turn. The lines are cut from the file without
+ * are. Accepted typed blocks stay typed, at any depth the tokenizer opens, as long as their
+ * content fits their content rule: Milkdown drops a node whose content breaks its rule, silently
+ * and with all its text, so checked against the ProseMirror `schema` the parse builds with, a
+ * typed block whose content would not fit (a heading in a `paragraph+` block, or a drawn
+ * directive's paragraphs after its list) is drawn as text too. Blocks are decided innermost first,
+ * so a drawn block's lines are checked against its parent's rule in turn. Directives nest at most
+ * `maxDirectiveNesting` (32) deep: an opener inside that many open directive containers is
+ * already text from the tokenizer (./directive-container), so it reaches this transform as a line
+ * of the paragraph it stands in and is drawn as that line. A typed block kept typed loses its
+ * server attributes (`dropServerAttributes` says why). The lines are cut from the file without
  * one leading U+FEFF, which micromark drops before it counts the offsets the tree carries.
  */
 export function remarkReadOnlyDirectives(blockSchema: BlockSchema | undefined, schema: Schema) {
   if (blockSchema !== undefined) validateBlockSchema(blockSchema);
+  const decide = remarkDecideTypedBlocks(schema, acceptedTypedBlock(blockSchema));
   return (tree: MdastNode, file: { toString(): string }): void => {
-    if (tree.children !== undefined) {
-      const text = file.toString();
-      tree.children = readOnlyChildren(tree.children, {
-        blockSchema,
-        schema,
-        source: text.startsWith("\ufeff") ? text.slice(1) : text,
-      });
+    decide(tree, file);
+    if (blockSchema !== undefined && tree.children !== undefined) {
+      dropServerAttributes(tree.children, blockSchema);
     }
   };
+}
+
+/**
+ * The live editor's typed-block step (sjawhar/legion#2433): the read-only parse's drawing decision, made
+ * against the editor's schema, read the first time it parses (the remark processor is built
+ * before the schema is). A refusal thrown from a paste let the browser insert the plain text
+ * itself, its lines joined, so a directive the block schema refuses is drawn as its lines and a
+ * paragraph line that opens like a directive stays text, as in the read-only parse.
+ *
+ * Unlike the read-only parse it keeps every `server` attribute. The live editor parses a document
+ * the server wrote, a past version's text through `setMarkdown` among them, and that text carries
+ * an answered decision's `state`, `answered_by` and `selected`, which the version must show. A
+ * paste keeps them too, as the live editor always did: settlement owns them and writes each
+ * block's from its ask's row (`setAskServerAttributes`), so a pasted `state="answered"` is put
+ * back to the row's state once the paste settles. It must be registered after the mark plugins,
+ * so a block-level mark span is a mark node when the fit check reads it.
+ */
+export function liveTypedBlocksRemarkPlugin(blockSchema: BlockSchema) {
+  validateBlockSchema(blockSchema);
+  return $remark("remarkLiveTypedBlocks", (ctx) => () => {
+    let decide: ReturnType<typeof remarkDecideTypedBlocks> | undefined;
+    return ((tree: MdastNode, file: { toString(): string }) => {
+      decide ??= remarkDecideTypedBlocks(ctx.get(schemaCtx), acceptedTypedBlock(blockSchema));
+      decide(tree, file);
+    }) as unknown as Transformer<Root, Root>;
+  });
 }

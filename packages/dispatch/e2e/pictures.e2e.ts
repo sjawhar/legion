@@ -17,6 +17,7 @@ import {
 import { documentEditor, openSpec, typeAtEnd } from "./editor";
 import { resetDatabase } from "./seed";
 import { ONE_PIXEL_PNG, pastePicture } from "./sends";
+import { sessionIds } from "./session-ids";
 import { asUser } from "./users";
 
 // A picture pasted into a message, an ask's answer or a direct message is uploaded and written as
@@ -115,7 +116,7 @@ test("a picture pasted into an ask's answer shows inline in the answer", async (
   const ask = await createAsk(
     issue.key,
     { question: "Which screen is wrong?" },
-    { actor: { id: "planner-session", kind: "session" }, as: "agent" }
+    { actor: { id: sessionIds.planner, kind: "session" }, as: "agent" }
   );
   const alice = await asUser(browser, "alice");
   try {
@@ -155,7 +156,7 @@ test("a picture pasted into a direct message on the Agents page shows inline and
     dir: "/workspaces/planner",
     machine_id: "planner-host",
     roles: ["planner"],
-    session_id: "planner-session",
+    session_id: sessionIds.planner,
     title: "Planner",
   };
   await setLiveSessions([planner]);
@@ -330,7 +331,7 @@ test("a picture line the browser cannot draw, or that pins no version, shows a l
     // is brought into view first, with the link still in it: `dragTo` scrolls its target into
     // view only as it moves there, after the press, and Chromium begins no drag when the page
     // scrolled between the press and the move (the desktop viewport puts the paragraph below the
-    // fold; the phone's does not).
+    // fold).
     const below = editor.getByText("Below the pictures.");
     await below.evaluate((paragraph) => paragraph.scrollIntoView({ block: "nearest" }));
     await expect(versionedLink).toBeInViewport();
@@ -364,7 +365,7 @@ test("a picture line the browser cannot draw, or that pins no version, shows a l
 // version's bytes and opens its document's dashboard page. The same document's page URL or
 // `dispatch://` reference left as text (bare, in angle brackets, or a link whose words are its
 // target) is text, which the server cites only within those bytes, so it stays the plain link it is.
-test("a long-named picture in a comment draws, its link to a long-named document opens it, and the bare page URL stays a plain link", async ({
+test("a long-named picture in a comment draws, its link to a long-named document opens it, and the bare page URL stays a plain link @phone", async ({
   browser,
 }, testInfo) => {
   await createProject({ key: "CORE", name: "Core" });

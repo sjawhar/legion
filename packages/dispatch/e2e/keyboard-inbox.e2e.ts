@@ -54,7 +54,7 @@ test.beforeEach(async () => {
 
 // Both describes run in `chromium` and `iphone`: marking asks and snoozing them in one step is
 // exactly what a reader does on a phone, and the bar and the picker have to fit 390 px.
-test.describe("inbox selection", () => {
+test.describe("inbox selection @phone", () => {
   test("x marks rows, h snoozes every marked ask into Later, and Escape clears the selection", async ({
     browser,
   }, testInfo) => {

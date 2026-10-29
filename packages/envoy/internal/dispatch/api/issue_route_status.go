@@ -3,11 +3,13 @@ package api
 import (
 	"cmp"
 	"context"
+	"fmt"
 	"net/http"
 	"strings"
 	"sync"
 	"time"
 
+	"github.com/sjawhar/envoy/internal/dispatch/envoy"
 	"github.com/sjawhar/envoy/internal/dispatch/model"
 )
 
@@ -16,52 +18,65 @@ import (
 // issue read carries route_status beside the route, judged against the listener's live-session
 // list (GET /v1/sessions, each row carrying the roles its session holds), never one lookup per
 // issue, and stored in no table. The process keeps one copy of that list (rosterCache): every
-// issue read in the process judges against it, so a route_status can be up to routeRosterTTL
-// (5 s) old, and one fetch serves every read that asks while it runs. Like fetchHolderLiveness,
-// the listener call runs with no transaction open and no pooled connection held
-// (envoy_resolve.go carries the reason). A read that waits for the fetch waits on the listener
-// too, so the rule binds every caller of readRouteRoster: listIssues and getIssue call it only
-// once their pooled reads have finished, and a new caller must do the same.
+// issue read in the process judges against it, and GET /api/v1/agents (listAgents) lists the
+// sessions of that same copy, so a route_status or an agents list can be up to routeRosterTTL
+// (5 s) old, and one fetch serves every read that asks while it runs, issue read or agents list.
+// Like fetchHolderLiveness, the listener call runs with no transaction open and no pooled
+// connection held (envoy_resolve.go carries the reason). A read that waits for the fetch waits on
+// the listener too, so the rule binds every caller of readRouteRoster: listIssues and getIssue
+// call it only once their pooled reads have finished, listAgents before its two aggregates run,
+// and a new caller must do the same.
 //
 // no_holder is one read and says only "nobody right now": a session that restarts or moves
 // between agent boxes keeps its id but is absent from the listener for minutes. The read does not
 // try to tell that gap from a vacancy with a last-seen time, because the listener offers none
 // that a read may take: GET /v1/roles/{role} reports a lapsed holder's last_seen only by
-// releasing the expired claim as it answers (cmd/listener resolveLiveRoleHolder), so a read
+// releasing the expired claim as it answers (cmd/listener resolveRoleHolder), so a read
 // would mutate role state and the next read would see "unclaimed" with no last_seen, and the
 // last-seen memory behind it is the answering listener's own process cache, not the shared
 // registry. The owner audit (skills/legion-controller/references/backlog-stewardship.md) and
 // `dispatch issues --help` (route_status) ask for two reads ten minutes apart instead.
 
 // routeRoster is one listener answer about who is running. answered is false when the listener
-// is unconfigured or did not answer; every route then reads unknown. Its maps are read-only once
-// built, since every read the cache serves shares them.
+// is unconfigured or did not answer; every route then reads unknown. Its maps and its session
+// slice are read-only once built, since every read the cache serves shares them: a reader that
+// sorts or edits the sessions copies them first, and never writes a session's Roles or
+// Capabilities, which every copy shares too.
 type routeRoster struct {
 	answered bool
+	// sessions is the listener's answer, in the listener's order.
+	sessions []envoy.Session
 	live     map[string]struct{}
 	// holders maps a role to the live session holding it. The listener gives a role one holder
 	// (last claim wins); should two live rows ever name one role, the most recently seen session
 	// is named, and the id breaks a tie, so a read never flips between them.
 	holders map[string]string
+	// err is why the roster did not answer: the listener client's own error, or, for a read whose
+	// request ended while it waited on the shared fetch, envoy.ErrUnavailable wrapping the
+	// request's context error, so it always matches envoy.ErrUnavailable. It is nil when the
+	// roster answered or the listener is unconfigured.
+	err error
 }
 
 // routeRosterTimeout bounds the one listener read a roster fetch makes. The listener answers in
 // milliseconds; a listener that has stopped answering would otherwise hold every issue list and
-// detail waiting on that fetch for the client's whole five-second window, when the read's answer
-// is only "unknown".
+// detail, and every agents list, waiting on that fetch for the client's whole five-second window,
+// when the read's answer is only "unknown" (an issue read) or a 503 (the agents list).
 const routeRosterTimeout = 2 * time.Second
 
-// routeRosterTTL is how long one listener answer serves the process's issue reads. A route that
-// reads no_holder already means only "nobody right now" (above), and the owner audit reads ten
-// minutes apart, so five seconds of age changes no decision; it takes the listener call and the
-// decode of the whole fleet's list off every read but one in five seconds.
+// routeRosterTTL is how long one listener answer serves the process's issue reads and agents
+// lists. A route that reads no_holder already means only "nobody right now" (above), and the
+// owner audit reads ten minutes apart, so five seconds of age changes no decision, nor does it
+// for an agents list a human or a session reads to pick a target; it takes the listener call and
+// the decode of the whole fleet's list off every read but one in five seconds.
 // routeRosterSilenceTTL is how long a listener that failed or did not answer is left alone: every
-// read in that window reads unknown at once rather than waiting out routeRosterTimeout of its own.
-// A failed fetch serves unknown, never an older answer, so this window changes no answer's age; it
-// is as long as routeRosterTTL so that a listener that hangs costs fewer routeRosterTimeout waits:
-// one shared wait per routeRosterTimeout+routeRosterSilenceTTL (7 s) rather than per 3 s. A
-// route_status, unknown included, then lags the listener by at most routeRosterTTL, plus
-// routeRosterTimeout while the listener hangs.
+// read in that window answers at once rather than waiting out routeRosterTimeout of its own, an
+// issue read with every route unknown and an agents list with the failed fetch's 503
+// ENVOY_UNAVAILABLE. A failed fetch serves that failure, never an older answer, so this window
+// changes no answer's age; it is as long as routeRosterTTL so that a listener that hangs costs
+// fewer routeRosterTimeout waits: one shared wait per routeRosterTimeout+routeRosterSilenceTTL
+// (7 s) rather than per 3 s. A route_status, unknown included, then lags the listener by at most
+// routeRosterTTL, plus routeRosterTimeout while the listener hangs.
 const (
 	routeRosterTTL        = 5 * time.Second
 	routeRosterSilenceTTL = 5 * time.Second
@@ -96,13 +111,22 @@ type rosterFetch struct {
 }
 
 // readRouteRoster answers who is running: the cached roster while it is fresh, else the answer of
-// the one fetch in flight, starting it when none is. A read never fails on the listener's
-// account: a listener that is unconfigured, does not answer, or answers late leaves every route
-// unknown, and so does a read whose own request ends while it waits; the fetch runs on for the
-// other reads, and its answer fills the cache.
+// the one fetch in flight, starting it when none is. A listener that is unconfigured, does not
+// answer, or answers late leaves the roster unanswered, and so does a read whose own request ends
+// while it waits (its err then wraps the request's context error); the fetch runs on for the
+// other reads, and its answer fills the cache. The fetch runs on the process's lifetime, so once
+// a shutdown begins it ends or fails at once, and that failure is kept for the silence window.
+// What an unanswered roster means is the caller's: an issue read reads every route unknown and
+// still succeeds, while listAgents, which has nothing to list without the listener, answers 503
+// with the roster's err, or, during a shutdown drain, asks the listener on its own request.
 func (s *server) readRouteRoster(ctx context.Context) routeRoster {
 	if s.deps.Envoy == nil {
 		return routeRoster{}
+	}
+	if s.deps.ListenerRosterUncached {
+		// An end-to-end test process: every read asks the listener itself, with no TTL, no shared
+		// fetch and nothing kept.
+		return s.listRouteRoster(ctx)
 	}
 	cache := &s.rosters
 	cache.mu.Lock()
@@ -119,14 +143,14 @@ func (s *server) readRouteRoster(ctx context.Context) routeRoster {
 		// the request that started it, whose end must not end it and whose values (its
 		// transaction-tracking mark among them) belong to that request alone; the fetch bound
 		// still limits it, and a shutdown ends it.
-		go s.fetchRouteRoster(s.lifetime(), fetch)
+		go s.fetchRouteRoster(s.lifetime, fetch)
 	}
 	cache.mu.Unlock()
 	select {
 	case <-fetch.done:
 		return fetch.roster
 	case <-ctx.Done():
-		return routeRoster{}
+		return routeRoster{err: fmt.Errorf("%w: %v", envoy.ErrUnavailable, ctx.Err())}
 	}
 }
 
@@ -154,10 +178,11 @@ func (s *server) listRouteRoster(ctx context.Context) routeRoster {
 	defer cancel()
 	sessions, err := s.deps.Envoy.Sessions(ctx)
 	if err != nil {
-		return routeRoster{}
+		return routeRoster{err: err}
 	}
 	roster := routeRoster{
 		answered: true,
+		sessions: sessions,
 		live:     make(map[string]struct{}, len(sessions)),
 		holders:  map[string]string{},
 	}

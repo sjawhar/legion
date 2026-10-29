@@ -204,6 +204,11 @@ func TestARestartedDaemonReadoptsItsControllerAndLaunchesNoSecond(t *testing.T) 
 	}
 	token := claim.ControllerToken(project)
 	controllerLaunched(t, rt, token)
+	// Spawn returns before the machine saves the launched process: a stop in between leaves the
+	// claim stored with no locator, which the restart rightly relaunches.
+	testwait.Eventually(t, "the store to record the controller's launched process", func() bool {
+		return storedClaim(t, cfg, token).Locator != nil
+	})
 	d.stop()
 
 	rebindHeldPorts(t, &cfg)

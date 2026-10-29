@@ -94,7 +94,10 @@ func WithLogger(log *slog.Logger) OpenOption {
 	return func(o *openOpts) { o.log = log }
 }
 
-// WithReplicas overrides the KV bucket replica count. Use 1 for single-node test NATS.
+// WithReplicas sets the deployment's replica count (bus.ReplicasEnvVar, default 1) for the interest
+// and role buckets: the count a new bucket is created at, and the count an existing bucket with
+// fewer copies is raised to at open (bus.EnsureKeyValue) and by the listener's keeper after it
+// (bus.WithKeptBuckets). It stays there while every program of the deployment carries one count.
 func WithReplicas(n int) OpenOption {
 	return func(o *openOpts) { o.replicas = n }
 }
@@ -583,10 +586,15 @@ func (r *Registry) UpsertWithin(ctx context.Context, item Interest, topics []str
 // item and topics. ErrMalformedInterest is merged the same way: the record answered, so this is
 // not the transient case, its topics are ones this build never routed (the cache holds no record
 // it cannot decode), and the session's own subscribe is the authority on its record.
+//
+// The merged row keeps no topic reaching a private stream subject other than the
+// session's own agent subject (dropPrivateStreamTopics): a row stored before the
+// listener refused such a topic is cleaned at the session's next registration.
 func mergeForUpsert(cur Interest, getErr error, item Interest, topics []string, now int64) (Interest, error) {
 	if getErr != nil && !errors.Is(getErr, nats.ErrKeyNotFound) && !errors.Is(getErr, ErrMalformedInterest) {
 		return Interest{}, getErr
 	}
+	sessionID := item.SessionID
 	if getErr == nil {
 		item = cur
 	}
@@ -594,6 +602,7 @@ func mergeForUpsert(cur Interest, getErr error, item Interest, topics []string, 
 	item.Dir = first(item.Dir, curValue(cur.Dir))
 	item.UpdatedAt = now
 	item = Merge(item, topics)
+	item.Topics = dropPrivateStreamTopics(sessionID, item.Topics)
 	sort.Strings(item.Topics)
 	return item, nil
 }
@@ -831,6 +840,7 @@ func (r *Registry) removeInterestTopics(ctx context.Context, sessionID string, t
 		return err
 	}
 	item = Remove(item, topics)
+	item.Topics = dropPrivateStreamTopics(sessionID, item.Topics)
 	if len(item.Topics) == 0 {
 		return r.deleteInterest(ctx, sessionID)
 	}
@@ -987,9 +997,10 @@ func (r *Registry) RoleClaim(ctx context.Context, role string) (RoleClaim, error
 	return claim, err
 }
 
-// RoleHolder returns the authoritative session ID for role, read with no deadline of its own, for a
-// caller that answers no request; a route reads RoleClaim within its own. An unclaimed role returns
-// an empty holder without an error.
+// RoleHolder returns the authoritative session ID for role, read with no deadline of its own. Only
+// tests call it, to read what a claim left behind; every route and the role lane read RoleClaim
+// within a deadline (resolveRoleHolder, cmd/listener/role_holder.go). An unclaimed role returns an
+// empty holder without an error.
 func (r *Registry) RoleHolder(role string) (string, error) {
 	claim, err := r.RoleClaim(context.Background(), role)
 	if err != nil {
@@ -1039,12 +1050,30 @@ func (r *Registry) Get(ctx context.Context, sessionID string) (Interest, error) 
 	return fresh, nil
 }
 
+// Match returns the cached interests registered on machineID whose topics match topic: a
+// listener delivers live only to the sessions of its own machine.
 func (r *Registry) Match(machineID string, topic string) []Interest {
+	return r.match(topic, func(item Interest) bool { return item.MachineID == machineID })
+}
+
+// MatchAll returns every cached interest whose topics match topic, on any machine, sorted by
+// SessionID for deterministic output: a sender that must confirm delivery to each subscribed
+// session needs them all, wherever each session registered.
+func (r *Registry) MatchAll(topic string) []Interest {
+	out := r.match(topic, func(Interest) bool { return true })
+	sort.Slice(out, func(i, j int) bool {
+		return out[i].SessionID < out[j].SessionID
+	})
+	return out
+}
+
+// match returns the cached interests keep accepts that have a topic pattern matching topic.
+func (r *Registry) match(topic string, keep func(Interest) bool) []Interest {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
 	out := []Interest{}
 	for _, item := range r.cache {
-		if item.MachineID != machineID {
+		if !keep(item) {
 			continue
 		}
 		for _, pattern := range item.Topics {
@@ -1082,14 +1111,28 @@ func curValue(value string) string {
 	return value
 }
 
+const (
+	// InterestReapGrace is the grace window the listener passes to StartReaper: a dead
+	// session's interest stays at least this long after its row's last write, plus
+	// InterestRefreshAge.
+	InterestReapGrace = 10 * time.Minute
+	// InterestRefreshAge is the most an interest row's UpdatedAt may lag its session's last
+	// heartbeat: a writer may skip rewriting an unchanged row younger than this, and must
+	// rewrite it once it reaches this age. Reap adds it to the grace window, so a skipped
+	// rewrite never shortens the grace a paused session gets after its last heartbeat.
+	InterestRefreshAge = 5 * time.Minute
+)
+
 // Reap cross-references the interest cache with a session liveness check and
-// deletes interests whose sessions are dead AND whose UpdatedAt exceeds the
-// grace window. A role claim is intentionally not an interest: it remains
-// available for its holder to re-register after a listener restart, and the
-// role delivery path drops it if that holder never becomes live again.
+// deletes an interest only when its session is dead AND more than the grace
+// window plus InterestRefreshAge has passed since the row's last write
+// (UpdatedAt); a row exactly that old is kept. A role claim is intentionally
+// not an interest: it remains available for its holder to re-register after a
+// listener restart, and the role delivery path drops it if that holder never
+// becomes live again.
 func (r *Registry) Reap(isAlive func(string) bool, graceWindow time.Duration) (int, error) {
 	now := r.now().UnixMilli()
-	graceMs := graceWindow.Milliseconds()
+	allowanceMs := graceWindow.Milliseconds() + InterestRefreshAge.Milliseconds()
 
 	r.mu.RLock()
 	var stale []string
@@ -1097,8 +1140,8 @@ func (r *Registry) Reap(isAlive func(string) bool, graceWindow time.Duration) (i
 		if isAlive(sid) {
 			continue // session still alive
 		}
-		if now-item.UpdatedAt <= graceMs {
-			continue // within grace window
+		if now-item.UpdatedAt <= allowanceMs {
+			continue // within grace window plus refresh age
 		}
 		stale = append(stale, sid)
 	}

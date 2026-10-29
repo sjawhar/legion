@@ -43,8 +43,41 @@ The daemon reads the mapping at boot and again whenever it changes in Dispatch. 
 mapped repository both the implement and the review App are installed on, and leaves out one either
 App is missing from: the boot logs it, `legion state --json` lists it under `repositories.refused`
 with the App it lacks, and an issue on it is not admitted until the App is installed, when moving
-the issue to `todo` again admits it. A project with no repository mapped does not boot; one whose
-every repository lacks an App boots serving none and admits nothing until an App is installed. A
+the issue to `todo` again admits it. A repository whose installation GitHub does not answer for
+(any failure but a 404, a read longer than 15 seconds included) is left out for now the same way,
+its refusal naming the App, the repository and GitHub's failure, and the daemon reads the mapping
+again, 30 seconds doubling to 10 minutes between reads, until GitHub answers, then serves it with no
+restart. While it is left out, an event of an issue on it is applied and acknowledged with
+nothing said on it and nothing kept, so it holds up no other issue's admission. Once GitHub answers
+for the repository, the daemon recovers it: it reads Dispatch's project listing once and applies
+it as its boot does, to the issues it does not record that are on that repository, under a parent
+on it, or whose event it applied silently for that repository during the outage (one that took its
+repository from a parent or the project's default, which changed meanwhile). Each ends where its
+events would have ended had the repository been served: a labelled root is admitted, a child of a
+live tree is recorded under it, parents before children, and a person's issue is left as it is,
+with no one moving anything. A recovery whose listing fails is tried again, 30 seconds doubling to
+10 minutes; a restart's boot listing is that recovery. While the repository is unread,
+`release_children` never stops a wave on a child it cannot record for it: it answers the child
+released and goes on with the rest of the wave. When every unrecorded issue up to the recorded one
+is `todo`, on any repository, no notice is sent then: the recovery records the child, or, when a
+`todo` parent never gets recorded, names the child in its one notice. Otherwise (a parent on that
+chain is not `todo`) the architect gets a
+`child-release-stalled` notice at once naming the parent to release first; a child the wave would
+write `todo` under such a child is not written, and its notice says to release it again once that
+child is recorded. When the repository is recovered, each tree's architect gets one more
+`child-release-stalled` notice, listing every child the release left to the recovery that is
+still not recorded, with what to release. That notice waits while the recovery's listing is held
+for the Dispatch consumer, but for five minutes at most from the first held read (the daemon times
+its next read of the mapping for it), however often the hold is released and made again
+meanwhile: a hold that lasts or keeps coming back (an event that fails at every delivery, say) gets
+the notice then, once, and the recovery still runs in full when the hold releases. If that read
+fails, the daemon tries again on its usual backoff.
+A served repository whose read fails stays served on its last answer and is read again the same
+way. A project with no repository mapped does not boot; one whose every repository lacks an App
+boots serving none and admits nothing until an App is installed, and one whose every repository's
+installation read fails boots serving none, logs one ERROR line with the first failure, and heals
+once GitHub answers. The boot's own reads of the Apps (their logins and tokens) still refuse the
+boot when they fail. A
 Dispatch that does not answer the boot's read of the mapping delays the boot rather than ending it:
 the daemon reads it again, one second doubling to one minute between reads, for as long as Dispatch
 stays unreachable, logs each wait, and serves nothing until the read passes.
@@ -210,14 +243,15 @@ prefix in an unprivileged container, unpacking
 one by hand works for some tools and not others, and what rules out a client a role unpacks onto
 its own `PATH` is the withheld `operator-setup` capability, not the unpacking itself.
 `legion.yaml` accepts the image only by digest (`ghcr.io/sjawhar/legion-worker@sha256:…`). A digest
-is published in each Worker Image workflow run's summary and in the body of each `legion-v<version>`
+is published in the summary of each run that builds the worker image and in the body of each `legion-v<version>`
 GitHub release; for a `sha-` or release-version worker-image tag,
 `docker buildx imagetools inspect ghcr.io/sjawhar/legion-worker:<tag>` prints its digest. Worker-image
 tags are `sha-<the commit's first 12 hex digits>` for every build and `<legion version>` for a
 release. The package also currently holds `sha256-<image digest hex>` OCI referrer indexes from
 earlier proof runs; they hold attestations, not worker images, so inspecting one does not print a
 worker-image digest. A tag does not say which build published it, and a pull request's build publishes
-a `sha-` tag too. Every build except a pull request's carries a GitHub artifact attestation, and
+a `sha-` tag too. Every build except a pull request's, and a release build on `main` that links a
+plugin version which did not reach npm, carries a GitHub artifact attestation, and
 `docs/kubernetes.md` in the repository ("Pin by digest, never by tag") gives the `gh attestation
 verify` command that accepts an image only when `main` built it from the commit its tag names.
 
@@ -327,13 +361,50 @@ What each part is for:
 - **`worker_backends`** (optional) runs a role on Claude Code instead of Oh My Pi:
   `worker_backends: {implementer: claude}`. Each key is an issue role, each value `omp` (the
   default) or `claude`. Claude Code runs the phase workers (`planner`, `implementer`, `tester`,
-  `reviewer`, `merger`) and only under `runtime: tmux`, since the worker image carries no Claude
-  Code; the loader refuses `claude` for the architect and under Kubernetes, naming why, and refuses
-  any other value. The controller always runs on Oh My Pi. A tmux daemon running a Claude Code role
-  resolves `claude` from `LEGION_CLAUDE_PATH` (else `PATH`), the `bun` its MCP server runs on from
-  `LEGION_BUN_PATH` (else `PATH`), and a built `packages/claude-envoy` from
-  `LEGION_CLAUDE_PLUGIN_DIR`, and refuses to boot without any of them. The repository's
-  `docs/deployment.md` ("Phase workers on Claude Code") covers the rest.
+  `reviewer`, `merger`) under either runtime; the loader refuses `claude` for the architect, naming
+  why, and refuses any other value. The controller always runs on Oh My Pi. A tmux daemon running a
+  Claude Code role resolves `claude` from `LEGION_CLAUDE_PATH` (else `PATH`), the `bun` its MCP
+  server runs on from `LEGION_BUN_PATH` (else `PATH`), and a built `packages/claude-envoy` from
+  `LEGION_CLAUDE_PLUGIN_DIR`, and refuses to boot without any of them. A Kubernetes daemon
+  resolves none of the three: the worker image carries the plugin and the `bun` it runs on at
+  fixed paths, and Claude Code's pin but no Claude Code, whose licence grants no redistribution.
+  Such a role's pod installs the pinned Claude Code at every launch, verifies it against the pin,
+  and runs `legion claude-bridge -- claude -p …` with it in place of Oh My Pi; a fetch that fails
+  or does not verify fails that launch, and the pod needs to reach the npm registry. Give that
+  role its model route yourself, as you do Oh My Pi's: `ANTHROPIC_API_KEY` through `provider_keys`,
+  and `ANTHROPIC_BASE_URL` and `ANTHROPIC_MODEL` in `runtime.kubernetes.pod.env`. The repository's
+  `docs/deployment.md` ("Phase workers on Claude Code") and `docs/kubernetes.md` cover the rest.
+- **`role_config_files`** (optional) gives one role Oh My Pi settings overlays no other role gets,
+  for example a model fallback chain for the roles whose output a machine checks:
+
+  ```yaml
+  role_config_files:
+    implementer: [/etc/legion-operator-roles/fallback.yml]
+    tester: [/etc/legion-operator-roles/fallback.yml]
+    merger: [/etc/legion-operator-roles/fallback.yml]
+  ```
+
+  Each key is a role (`architect`, `planner`, `implementer`, `tester`, `reviewer`, `merger`, or
+  `controller` under `controller: daemon`), each value a list of absolute paths. The role's
+  `PI_CONFIG_FILES` names them after the overlays every role names (`PI_CONFIG_FILES` in
+  `runtime.kubernetes.pod.env`, or `runtime.tmux.pi_config_files`), so each outranks those; a role
+  you leave out is told exactly what it is told without the key. The loader refuses an unknown
+  role, an empty list, a relative path, a path named twice or one every role already names, and a
+  role `worker_backends` puts on `claude`. Under Kubernetes each file must be in a mount of
+  `runtime.kubernetes.pod.volume_mounts` (`legion start --check-config` refuses one that is not),
+  and the image probe reads each named role's overlays in the pod's mounts at boot, so a file the
+  ConfigMap lacks, or one Oh My Pi cannot parse, stops the boot naming the role and the file, never
+  that role's start. Under tmux boot and `--check-config` refuse a file the host does not have, and
+  boot refuses one Oh My Pi cannot parse. The capability report's `model-fallback` row reads only
+  the overlays every role names, so a deployment that turns fallback on for some roles alone
+  records `capabilities.decided.model-fallback`. Only loading is per role: every role of a pod, and every pane
+  under tmux, can read every role's overlay file, so never put a secret in one. Adding the mount
+  to a running deployment replaces every affected issue pod at the restart: each of its running
+  roles, named or not, loses its turn and resumes its session uncharged in a new pod, and the old
+  pod's disk goes with it, unpushed work included (a pod with no role running is replaced at the
+  first launch into it). Add it when no role of an affected issue is mid-turn and every role has
+  pushed. The repository's `docs/kubernetes.md` ("Operator
+  configuration") shows the overlay and its mount.
 
 The loader refuses any key it does not know, naming it, and refuses `omp_invocation` and
 `omp_launch_prefix` under Kubernetes, since every pod runs the image's Oh My Pi.
@@ -655,8 +726,9 @@ Closing the terminal leaves the project without one, and the daemon logs
 
   The `open production checks` line counts the closed issues whose production check is still
   open and names the oldest: its pull request, merge commit, which look it is on, what woke that
-  look (`merge`, `issue.deployed`, `deploy run`, `daemon boot`, `dispatch start`, `dispatch build`
-  or `bound`) and when, and when the check's bound comes due (`none` when no check is open).
+  look (`merge`, `issue.deployed`, `deploy run`, `daemon boot`, `dispatch start` (Dispatch's
+  announcement that every server process serves a build), `dispatch build` or `bound`) and when,
+  and when the check's bound comes due (`none` when no check is open).
 
   `--json` prints everything the daemon records: `admission` (`cap`, `active`, `waiting`), each
   issue under `issues` with its `phase`, `status`, `repo` and `defaultBranch`, `holdReason`,

@@ -28,6 +28,7 @@ import (
 	"github.com/sjawhar/envoy/internal/session"
 	"github.com/sjawhar/envoy/internal/store"
 	"github.com/sjawhar/envoy/internal/webhook"
+	"github.com/sjawhar/envoy/listenfd"
 )
 
 // listenerDeps holds the NATS-dependent resources, all open. main builds the /v1 handlers over it
@@ -48,6 +49,19 @@ type listenerDeps struct {
 	consumer   string
 	streamName string
 	streamInfo streamInfoLookup
+	// delivery is the config main hands the delivery handlers (the role lane, the live lane and the
+	// durable), wired once, so the publish route forwards through its forwardRole, records each
+	// session it confirms in its dedupeCache (so the handlers do not push that key to it again), and
+	// writes each send's delivery line and delivery_status count through its logger and
+	// messagesDelivered, reading as the role lane's do, beside the route's own request record
+	// (request_record.go). The route never reads that dedupeCache, since the handlers also
+	// record a self-subscribed session whose push they skipped without hearing from it.
+	delivery *listenerDeliveryHandlerConfig
+	// confirmed is the publish route's own record of each (dedupe key, session) whose receipt arrived
+	// through the route, which only the route writes. A send skips a holder or recipient recorded
+	// there, so envoy-client's retry of a send does not forward again to one the first attempt
+	// confirmed, and no one is counted as confirming a message without having sent its receipt.
+	confirmed *dedupe.Cache
 }
 
 // kvCache is what the listener asks of each KV-backed cache it keeps.
@@ -578,8 +592,26 @@ func openV1Routes(gate *startingGate, ready *listenerDeps, machineID string, log
 	logger.Info("envoy-listener /v1 open", slog.Int64("since_listening_ms", time.Since(listeningAt).Milliseconds()))
 }
 
+// listenerStreamOptions are the options envoy-listener starts the stream with
+// (bus.ConnectOwningStream): the deployment's replica count and byte limit, from cfg, and the
+// buckets the listener opens at that count (bus.ListenerBuckets: store.Open's interest and role
+// buckets, session.OpenSessionRegistry's and cistore.Open's, the list its NATS grant is built
+// from), which the client's keeper raises back to it when a concurrent start or an operator
+// lowered one (bus.WithKeptBuckets). The CI bucket is named even on a listener with no GitHub
+// route, which opens none: the keeper skips a bucket that does not exist. main and the tests that
+// start the listener's stream both take them from here.
+func listenerStreamOptions(cfg config.Service) []bus.ConnectOption {
+	return []bus.ConnectOption{
+		bus.WithReplicas(cfg.NATSReplicas),
+		bus.WithStreamMaxBytes(cfg.StreamMaxBytes),
+		bus.WithKeptBuckets(bus.ListenerBuckets()...),
+	}
+}
+
 func main() {
-	// Phase 1: Load config (synchronous, fast).
+	// Phase 1: Load config (synchronous, fast). With ENVOY_LISTEN_FD, Load inspects the inherited
+	// socket and takes its address as cfg's, so the API auth fence below judges the address that
+	// serves; Phase 2 adopts it.
 	cfg, err := config.Load(9020)
 	if err != nil {
 		log.Fatal(err)
@@ -594,7 +626,7 @@ func main() {
 	if err != nil {
 		log.Fatal(err)
 	}
-	if err := validateListenerAPIAuth(cfg.ListenHost, apiToken, os.Getenv("ENVOY_API_ALLOW_UNAUTHENTICATED"), apiVerifier); err != nil {
+	if err := validateListenerAPIAuth(cfg, apiToken, os.Getenv("ENVOY_API_ALLOW_UNAUTHENTICATED"), apiVerifier); err != nil {
 		log.Fatal(err)
 	}
 	logger.Info("listener API auth: " + describeListenerAPIAuth(apiToken, oidcIssuer))
@@ -606,11 +638,15 @@ func main() {
 		log.Fatal(err)
 	}
 
-	// Phase 2: Bind HTTP port deterministically in main goroutine before
-	// any NATS work begins. This guarantees /healthz is reachable as soon
-	// as Serve starts, regardless of NATS connection latency.
-	addr := cfg.ListenAddress()
-	ln, err := net.Listen("tcp", addr)
+	// Phase 2: Serve on the socket the listener inherited (ENVOY_LISTEN_FD) or bind its address,
+	// in the main goroutine before any NATS work begins, so /healthz is reachable as soon as Serve
+	// starts, whatever the NATS connection's latency.
+	var ln net.Listener
+	if cfg.ListenSocket != nil {
+		ln, err = listenfd.Adopt(*cfg.ListenSocket)
+	} else {
+		ln, err = net.Listen("tcp", cfg.ListenAddress())
+	}
 	if err != nil {
 		log.Fatal(err)
 	}
@@ -628,7 +664,7 @@ func main() {
 	// that mounts it carries the gauge the loop sets.
 	var ciLegacyHeld *metrics.Gauge
 	if webhookCfg.GitHub != nil {
-		ciLegacyHeld = met.NewGauge("envoy_ci_legacy_records_held", "CI records a head-gated listener left unsettled that the last summary tick held back")
+		ciLegacyHeld = met.NewGauge("envoy_ci_legacy_records_held", "CI records a head-gated listener left unsettled that the summary loop's last pass held back")
 	}
 	met.NewGaugeFunc("envoy_active_sessions", "Number of active sessions", func() int64 {
 		d := deps.Load()
@@ -675,7 +711,7 @@ func main() {
 	mux.Handle("/v1", v1Handler)
 	mux.Handle("/v1/", v1Handler)
 
-	// Phase 4: Start HTTP server (port already bound via net.Listen).
+	// Phase 4: Start HTTP server on the listener Phase 2 holds.
 	server := newHTTPServer(mux)
 	fatal := make(chan error, 1)
 	go func() {
@@ -684,11 +720,14 @@ func main() {
 		}
 	}()
 	listeningAt := time.Now()
-	logger.Info("envoy-listener listening", slog.String("addr", addr))
+	// The address ln is bound to, whether inherited or bound here, so the line names the port a
+	// kernel chose (PORT=0 or a socket a harness opened on port 0).
+	logger.Info("envoy-listener listening", slog.String("addr", ln.Addr().String()))
 
 	// Phase 5: Connect to NATS (main goroutine — log.Fatal is safe here). The listener owns
-	// ENVOY_NOTIFICATIONS: this start reconciles the stream (bus.ConnectOwningStream).
-	client, err := bus.ConnectOwningStream(cfg.NATSURLs, bus.WithReplicas(cfg.NATSReplicas))
+	// ENVOY_NOTIFICATIONS: this start reconciles the stream (bus.ConnectOwningStream) at the
+	// deployment's replica count and byte limit (listenerStreamOptions).
+	client, err := bus.ConnectOwningStream(cfg.NATSURLs, listenerStreamOptions(cfg)...)
 	if err != nil {
 		log.Fatal(err)
 	}
@@ -891,6 +930,8 @@ func main() {
 		caches:     caches,
 		consumer:   consumer,
 		streamName: bus.Stream,
+		delivery:   &deliveryConfig,
+		confirmed:  dedupe.New(10 * time.Minute),
 	}
 	openV1Routes(v1Gate, ready, cfg.MachineID, logger, listeningAt)
 
@@ -935,7 +976,7 @@ func main() {
 	// a pass in flight before it drains NATS (kvLoopsDone).
 	kvLoopsCtx, kvLoopsCancel := context.WithCancel(context.Background())
 	kvLoopsDone := []<-chan struct{}{
-		registry.StartReaper(kvLoopsCtx, func(sessionID string) bool { return isSessionLive(sessions, sessionID) }, 5*time.Minute, 10*time.Minute),
+		registry.StartReaper(kvLoopsCtx, func(sessionID string) bool { return isSessionLive(sessions, sessionID) }, 5*time.Minute, store.InterestReapGrace),
 		registry.StartRoleClaimReaper(kvLoopsCtx, func(sessionID string) bool { return roleHolderMayBeLive(logger, sessions, sessionID) }, 5*time.Minute, sessions.TTL()),
 	}
 
@@ -950,7 +991,8 @@ func main() {
 	// Phase 6b2: Start the CI summary loop, on a listener that opened the CI store. It emits one
 	// pr.<n>.checks event once a commit's checks settle, for every commit of a pull request, its
 	// head or not; new runs re-arm settlement. The debounce window is ENVOY_CI_DEBOUNCE (default
-	// 5s).
+	// 5s). The loop runs a pass only on a one-second tick by which a cached record changed or fell
+	// due.
 	summaryCtx, summaryCancel := context.WithCancel(context.Background())
 	if ciStore != nil {
 		ciDebounce := envDuration(logger, "ENVOY_CI_DEBOUNCE", 5*time.Second)

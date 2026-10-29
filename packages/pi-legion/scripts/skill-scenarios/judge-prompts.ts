@@ -172,6 +172,8 @@ export const decisionsPrompt: JudgePrompt<z.infer<typeof DecisionsOutput>> = {
     ].join("\n"),
 };
 
+/** `clean`: each check whose report finds nothing, so it gives no row. Every check is in `rows` or
+ * in `clean`, never both (score.ts coverage). A file written before `clean` existed reads as `[]`. */
 export const FindingsOutput = z.object({
   rows: z.array(
     z.object({
@@ -180,6 +182,7 @@ export const FindingsOutput = z.object({
       verdict: z.enum(["fixed", "recorded", "neither"]),
     })
   ),
+  clean: z.array(z.number().int().min(1)).default([]),
 });
 export const findingsPrompt: JudgePrompt<z.infer<typeof FindingsOutput>> = {
   name: "findings",
@@ -195,7 +198,7 @@ export const findingsPrompt: JudgePrompt<z.infer<typeof FindingsOutput>> = {
       "- `report.md`: the checking agent's report.",
       "- `spec-after.md`: the version of the spec that the agent wrote after the check.",
       "",
-      "For each check, list each finding of `report.md`. A finding is a gap, a conflict, a duplicate, a requirement that the checker cannot check, a term that the spec does not explain, a sentence that the checker cannot follow, a question that the spec does not ask, or a question that is not needed. A report that finds nothing gives no rows.",
+      "For each check, list each finding of `report.md`. A finding is a gap, a conflict, a duplicate, a requirement that the checker cannot check, a term that the spec does not explain, a sentence that the checker cannot follow, a question that the spec does not ask, or a question that is not needed. A report that finds nothing gives no rows: put the number `<n>` of its check in `clean`. Each check has rows or is in `clean`, not both.",
       "",
       "For each finding, give one verdict from `spec-after.md`:",
       "- `fixed`: `spec-after.md` no longer has the fault that the finding names.",
@@ -207,7 +210,7 @@ export const findingsPrompt: JudgePrompt<z.infer<typeof FindingsOutput>> = {
       ending(
         dir,
         "findings.json",
-        '{"rows":[{"check":<n>,"finding":"<the finding, in a few words>","verdict":"fixed"|"recorded"|"neither"}]}'
+        '{"rows":[{"check":<n>,"finding":"<the finding, in a few words>","verdict":"fixed"|"recorded"|"neither"}],"clean":[<n of each check whose report finds nothing>]}'
       ),
     ].join("\n"),
 };

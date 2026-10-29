@@ -15,7 +15,7 @@
 # work directory survives a failure, because its logs are the evidence, and goes when the run passed.
 #
 # Inputs: LEGION_E2E_PG_DSN, the Postgres to run against; unset, the run starts its own
-# postgres:16 on tmpfs. LEGION_E2E_MODEL_ROUTE (required, `gateway`, `key-file` or `box-login`)
+# PostgreSQL 18 on tmpfs. LEGION_E2E_MODEL_ROUTE (required, `gateway`, `key-file` or `box-login`)
 # picks how the agents reach Anthropic, independently of which devbox this runs on:
 #   - `gateway`: the operator's own hawk login, through the Hawk model gateway at
 #     LEGION_E2E_MODEL_GATEWAY_URL (required in this mode; lib/install-model-gateway.sh); the
@@ -83,6 +83,8 @@ ok=
 daemon_pid=
 deadline_pid=
 listener_pid=
+daemon_keeper_pid=
+deadline_keeper_pid=
 profile=legion-e2e2-$$-$(date +%s)
 project="S2E$$$(date +%s)"            # a retired claim is never spawned again: a fresh key per run
 deadline_project="S2D$$$(date +%s)"
@@ -171,6 +173,8 @@ cleanup() {
   rm -rf "$work/model-gateway-key" || true
   stop_pid "$daemon_pid"
   stop_pid "$deadline_pid"
+  stop_pid "$daemon_keeper_pid"
+  stop_pid "$deadline_keeper_pid"
   # Under box-login the panes share the operator's login database: each gets SIGTERM and up to
   # box_login_stop_grace seconds to finish a token refresh before anything is killed, and the
   # profile's link to that database goes (the link alone) once they are gone, so a kept workspace
@@ -264,14 +268,16 @@ omp_of() {
   return 1
 }
 env_of() { tr '\0' '\n' <"/proc/$1/environ" | sed -n "s/^$2=//p"; }
-# start_daemon: the main daemon, in the background, its log appended to daemon.log. HOME and
-# OMP_PROFILE select the run's isolated profile for the plugin gate and — through the pane allow-list
-# — every pane.
+# start_daemon: the main daemon, in the background, its log appended to daemon.log, on a copy of the
+# socket its keeper holds (below). HOME and OMP_PROFILE select the run's isolated profile for the
+# plugin gate and — through the pane allow-list — every pane. Each poll has a timeout: until the
+# daemon serves, the kept port queues a request unanswered instead of refusing it.
 start_daemon() {
   echo "=== boot at $(date -u +%FT%TZ)" >>"$daemon_log"
-  env -u LEGION_OMP_PATH HOME="$omp_home" OMP_PROFILE="$profile" PATH="$work/realbin:$PATH" "$work/legion" start --config "$work/legion.yaml" >>"$daemon_log" 2>&1 &
+  python3 "$held_port" exec --from "$work/daemon.sock" --fd-env LEGION_LISTEN_FD -- \
+    env -u LEGION_OMP_PATH HOME="$omp_home" OMP_PROFILE="$profile" PATH="$work/realbin:$PATH" "$work/legion" start --config "$work/legion.yaml" >>"$daemon_log" 2>&1 &
   daemon_pid=$!
-  until_true 180 "the daemon to answer /healthz" curl -fs "http://127.0.0.1:$port/healthz"
+  until_true 180 "the daemon to answer /healthz" curl -fs --max-time 5 "http://127.0.0.1:$port/healthz"
 }
 # stop_daemon PID HOW: bounded, and the exit status judged — daemon.Run returns 0 on a cancelled
 # context, so anything else is a defect, not a stop.
@@ -300,7 +306,7 @@ expect_refusal() {
 
 # ---- setup -----------------------------------------------------------------------------------------
 
-for tool in go docker jq curl ss tmux bun mise socat secrets; do
+for tool in go docker jq curl python3 tmux bun mise socat secrets; do
   command -v "$tool" >/dev/null || fail "$tool is required"
 done
 [ "$model_route" != gateway ] || command -v hawk-token >/dev/null || fail "hawk-token is required under LEGION_E2E_MODEL_ROUTE=gateway"
@@ -359,11 +365,31 @@ echo "configured OMP pin: $pin ($("$omp_bin/omp" --version 2>&1 | head -1)) at $
 # profile_omp ARGS…: the pinned Oh My Pi on the run's own profile, as the daemon runs it.
 profile_omp() { HOME="$omp_home" OMP_PROFILE="$profile" "$omp_bin/omp" "$@"; }
 
-# Below the kernel's ephemeral range and distinct from one another (scripts/e2e/lib/free-port.sh):
-# none is bound until its process starts, so no socket opened in between can take one.
-port=$(bash "$root/scripts/e2e/lib/free-port.sh") || fail "no free port for the daemon"
-deadline_port=$(bash "$root/scripts/e2e/lib/free-port.sh" "$port") || fail "no free port for the second daemon"
-envoy_port=$(bash "$root/scripts/e2e/lib/free-port.sh" "$port" "$deadline_port") || fail "no free port for the Envoy listener"
+# Every port is one the kernel chose, held from that choice until its process serves on it
+# (lib/held-port.py), so nothing else can take it in between. A keeper holds each daemon's for the
+# whole run, so its legion.yaml can name the port before the daemon starts and the main daemon's
+# restart below serves the same port; the listener's helper holds its own and becomes the listener.
+held_port=$root/scripts/e2e/lib/held-port.py
+# shellcheck source-path=SCRIPTDIR source=lib/port-file.sh
+. "$root/scripts/e2e/lib/port-file.sh"
+# port_of WHAT FILE PID VAR LOG reads the port held-port.py wrote to FILE into VAR, failing the
+# check naming WHAT, and LOG, the moment PID exits first (read_port_file, lib/port-file.sh).
+port_of() {
+  local rc=0
+  read_port_file "$2" "$3" "$4" || rc=$?
+  case $rc in
+    0) ;;
+    1) fail "$1 exited before it held a port; see $5" ;;
+    *) fail "$1 held no port within ${port_file_seconds}s; see $5" ;;
+  esac
+}
+python3 "$held_port" keep --port-file "$work/daemon.port" --socket "$work/daemon.sock" >>"$work/keepers.log" 2>&1 &
+daemon_keeper_pid=$!
+python3 "$held_port" keep --port-file "$work/deadline.port" --socket "$work/deadline.sock" >>"$work/keepers.log" 2>&1 &
+deadline_keeper_pid=$!
+port='' deadline_port='' envoy_port=''
+port_of "the daemon's keeper" "$work/daemon.port" "$daemon_keeper_pid" port "$work/keepers.log"
+port_of "the second daemon's keeper" "$work/deadline.port" "$deadline_keeper_pid" deadline_port "$work/keepers.log"
 (cd "$root/packages/daemon" && go build -o "$work/legion" ./cmd/legion)
 (cd "$root/packages/envoy" && go build -o "$work/envoy-listener" ./cmd/listener)
 # The binary under proof, checkable after the run: the source it was built from, what a changed
@@ -379,9 +405,9 @@ if [ -z "${LEGION_E2E_PG_DSN:-}" ]; then
   docker ps >/dev/null # a broken docker is a failure of this run, not of the daemon
   # tmpfs, not the image's anonymous volume: creating a volume is one more moving part the proof
   # does not need, and on a box whose volume subsystem stalls it hangs the run.
-  docker run -d --name "$pg_container" --cpus 2 --memory 2g --mount type=tmpfs,destination=/var/lib/postgresql/data \
+  docker run -d --name "$pg_container" --cpus 2 --memory 2g --mount type=tmpfs,destination=/var/lib/postgresql \
     -e POSTGRES_USER=legion -e POSTGRES_PASSWORD=legion -e POSTGRES_DB=legion \
-    -p 127.0.0.1::5432 postgres:16 >/dev/null
+    -p 127.0.0.1::5432 mirror.gcr.io/library/postgres@sha256:979bccfde35445db618c65107d27d08c6c21339d8dc3ad4c830c6633947be0e4 >/dev/null
   until_true 60 "postgres to accept connections over TCP" \
     docker exec "$pg_container" pg_isready -h 127.0.0.1 -p 5432 -U legion -d legion
   LEGION_E2E_PG_DSN="postgres://legion:legion@127.0.0.1:$(docker port "$pg_container" 5432/tcp | head -1 | sed 's/.*://')/legion"
@@ -394,9 +420,11 @@ until_true 60 "NATS to be ready" sh -c "docker logs '$nats_container' 2>&1 | gre
 nats_url="nats://127.0.0.1:$(docker port "$nats_container" 4222/tcp | head -1 | sed 's/.*://')"
 (umask 077 && head -c 24 /dev/urandom | od -An -tx1 | tr -d ' \n' >"$work/envoy-token" &&
   printf 'Authorization: Bearer %s\n' "$(cat "$work/envoy-token")" >"$work/envoy-auth-header")
-ENVOY_API_TOKEN="$(cat "$work/envoy-token")" PORT=$envoy_port ENVOY_LISTEN_HOST=127.0.0.1 \
-  ENVOY_MACHINE_ID="legion-e2e2-$$" NATS_URLS=$nats_url "$work/envoy-listener" >"$work/listener.log" 2>&1 &
+ENVOY_API_TOKEN="$(cat "$work/envoy-token")" ENVOY_LISTEN_HOST=127.0.0.1 ENVOY_MACHINE_ID="legion-e2e2-$$" NATS_URLS=$nats_url \
+  python3 "$held_port" exec --port-file "$work/listener.port" --fd-env ENVOY_LISTEN_FD --env 'PORT={port}' -- \
+  "$work/envoy-listener" >"$work/listener.log" 2>&1 &
 listener_pid=$!
+port_of "the Envoy listener" "$work/listener.port" "$listener_pid" envoy_port "$work/listener.log"
 until_true 60 "the Envoy listener to answer /v1/sessions" \
   curl -fsS -H "@$work/envoy-auth-header" "http://127.0.0.1:$envoy_port/v1/sessions"
 envoy_role() { curl -fsS -H "@$work/envoy-auth-header" "http://127.0.0.1:$envoy_port/v1/roles/$1"; }
@@ -473,20 +501,21 @@ pass
 
 begin gate-refuses-a-missing-skill
 # The gate's load probe resolves every skill Legion's prompts load through the pane's own Oh My Pi.
-# The installed plugin without the rubric that its thermonuclear-deep-review agent and the
-# reviewer's role prompt load is refused, naming the skill and both files that load it.
+# The installed plugin without the rubric that thermonuclear-code-quality, the
+# thermonuclear-deep-review agent and the reviewer's role prompt load is refused, naming the skill
+# and every file that loads it.
 mv "$work/pi-legion/dist/skills/thermonuclear-deep-review" "$work/rubric.aside"
-expect_refusal missing-skill "finds no skill thermonuclear-deep-review (loaded by agents/thermonuclear-deep-review.md, roles/core/reviewer.md)"
+expect_refusal missing-skill "finds no skill thermonuclear-deep-review (loaded by dist/skills/thermonuclear-code-quality/SKILL.md, agents/thermonuclear-deep-review.md, roles/core/reviewer.md)"
 mv "$work/rubric.aside" "$work/pi-legion/dist/skills/thermonuclear-deep-review"
 [ -f "$work/pi-legion/dist/skills/thermonuclear-deep-review/SKILL.md" ] || fail "the rubric was not restored"
 pass
 
 begin gate-refuses-a-skill-only-a-role-prompt-loads
-# The gate also resolves the skills the daemon's role prompts load, beside the plugin's own:
-# legion-controller is loaded by roles/controller-root.md alone, so only a gate that reads the
-# daemon's own role prompts can refuse the plugin without it.
+# The gate also resolves the skills the daemon's role prompts load, beside the plugin's own: the
+# refusal of the plugin without legion-controller names roles/controller-root.md, which only a gate
+# that reads the daemon's own role prompts can name.
 mv "$work/pi-legion/dist/skills/legion-controller" "$work/controller-skill.aside"
-expect_refusal prompt-only-skill "finds no skill legion-controller (loaded by roles/controller-root.md)"
+expect_refusal prompt-only-skill "finds no skill legion-controller (loaded by dist/skills/legion-worker/references/findings.md, roles/controller-root.md)"
 mv "$work/controller-skill.aside" "$work/pi-legion/dist/skills/legion-controller"
 [ -f "$work/pi-legion/dist/skills/legion-controller/SKILL.md" ] || fail "the legion-controller skill was not restored"
 pass
@@ -710,9 +739,11 @@ operator_token_file: $work/operator-token
 worker_boot_timeout_seconds: 5
 worker_boot_registration_deadline_intervals: 2
 EOF
-LEGION_OMP_PATH=$work/stub/omp HOME=$omp_home OMP_PROFILE=$profile PATH="$work/realbin:$PATH" "$work/legion" start --config "$work/deadline.yaml" >"$work/deadline.log" 2>&1 &
+python3 "$held_port" exec --from "$work/deadline.sock" --fd-env LEGION_LISTEN_FD -- \
+  env LEGION_OMP_PATH="$work/stub/omp" HOME="$omp_home" OMP_PROFILE="$profile" PATH="$work/realbin:$PATH" \
+  "$work/legion" start --config "$work/deadline.yaml" >"$work/deadline.log" 2>&1 &
 deadline_pid=$!
-until_true 120 "the second daemon to answer /healthz" curl -fs "http://127.0.0.1:$deadline_port/healthz"
+until_true 120 "the second daemon to answer /healthz" curl -fs --max-time 5 "http://127.0.0.1:$deadline_port/healthz"
 dclaims() {
   local sub=$1
   shift
