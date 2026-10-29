@@ -303,13 +303,15 @@ type Client struct {
 	// only the violation that landed last and left every other denied send to its acknowledgement
 	// timeout; and nats-server reports one violation per refused message, so a record of one
 	// violation per subject would leave every send but one of a subject a window sent twice to
-	// that same timeout. It belongs to the connection in Conn: a reconnect (onReconnect) and the
-	// connection install puts in place each clear it (clearPublishDenials). A connection
-	// ensureConnWithContext dials after a close does not, and need not: a send reads only a
-	// violation recorded at or after its own send time (deniedPublish), which no violation of the
-	// closed connection can be. A record retention has spent and anything past publishDenialDepth
-	// are dropped when the next one is recorded, and a read takes the violation it answers with
-	// out.
+	// that same timeout. It belongs to the connection in Conn: a reconnect (onReconnect) clears it
+	// (clearPublishDenials), and install, which runs only from the constructor before any
+	// connection is the client's, finds it empty. A connection ensureConnWithContext dials after a
+	// close does not clear it, and need not: a send takes only a violation of its own subject
+	// recorded at or after its own send time (deniedPublish), so a violation the closed connection
+	// left can answer a send on the new one only when that send's clock was read before the
+	// replacement, and then it is a refusal of the same subject under the same credentials. A
+	// record retention has spent and anything past publishDenialDepth are dropped when the next
+	// one is recorded, and a read takes the violation it answers with out.
 	deniedPublishes map[string][]publishViolation
 
 	// subscriptionsMu guards subscriptions and stopMode. It is held to read and write them, never
@@ -515,8 +517,8 @@ func (c *Client) install(nc *nats.Conn, stream *nats.StreamConfig) error {
 	}
 	c.mu.Lock()
 	c.Conn, c.js = nc, js
-	// The violations the replaced connection was told of answered its publishes, and this
-	// connection's grant is its own.
+	// install runs only from the constructor, before any connection is c.Conn, so nothing has
+	// been recorded (recordPublishDenial records only for c.Conn) and this clear finds it empty.
 	c.clearPublishDenials()
 	c.mu.Unlock()
 	return nil

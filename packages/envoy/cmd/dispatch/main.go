@@ -1226,7 +1226,7 @@ func serverClient(extra ...bus.ConnectOption) []bus.ConnectOption {
 // the SPA shell the router answers an unknown path with. /livez answers 204 and touches nothing:
 // it says only that the process answers, for a liveness or startup probe, which must not wait on
 // or fail with Postgres, NATS or the file store. /metrics is unauthenticated like the other two,
-// scraped inside the cluster, and registry serves it.
+// so whoever reaches Dispatch's HTTP port can read it, and registry serves it.
 func dispatchHandler(handler http.Handler, registry *metrics.Registry, database *store.Store, natsClient *bus.Client, fileStore files.Store, commit string, announcer *startup.Announcer, issuers issuers) http.Handler {
 	mux := http.NewServeMux()
 	mux.Handle("GET /healthz", healthzHandler(database, natsClient, fileStore, commit, announcer, issuers))

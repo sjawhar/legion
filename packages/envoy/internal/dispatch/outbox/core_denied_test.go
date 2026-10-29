@@ -258,10 +258,10 @@ func TestRunPublishesAGrantedRoleRoute(t *testing.T) {
 // A JetStream publish NATS denies is named a denial, counted and backed off, not reported as an
 // outage. An issue topic is always a JetStream subject (bus's streamSubjects holds
 // notifications.dispatch.>), and the server acknowledges a denied JetStream publish with nothing,
-// so the denial is read off the connection's last error (bus.ErrPublishDenied) rather than left to
-// the publish window to report as an unreachable NATS: the outbox records no destination, does not
-// mark the event published, counts the attempt and the denied destination, and logs the subject
-// and the violation.
+// so the denial is read from the violation the connection recorded under its own subject
+// (bus.ErrPublishDenied) rather than left to the publish window to report as an unreachable NATS:
+// the outbox records no destination, does not mark the event published, counts the attempt and
+// the denied destination, and logs the subject and the violation.
 func TestRunRetriesAnIssueTopicNATSDenies(t *testing.T) {
 	var logged lockedBuffer
 	logtest.SetDefault(t, slog.NewTextHandler(&logged, nil))
@@ -354,14 +354,14 @@ func TestRunRetriesAnIssueTopicNATSDenies(t *testing.T) {
 // alert is on the line that names the denial.
 //
 // What makes this its own test is that nats.go keeps one last error per connection, so the
-// violations of the destinations one publish window sent together overwrite one another, and
-// window.acknowledged can match only the subject the connection kept. Every other denied
-// destination answers the window's acknowledgement timeout instead, which settle reads as
-// bus.ErrUnavailable and so as an outage of the bus rather than a refusal of the event: the event
-// is released with no attempt counted, the counter records `failed` where the denial belongs, no
-// line names the subject, and publishBatch abandons the rest of that scan's backlog. That is the
-// whole pathology this change exists to remove, and it survives for the shape a notifying event
-// has in production.
+// violations of the destinations one publish window sent together overwrite one another there.
+// While window.acknowledged read that last error, it could match only the subject the connection
+// kept, and every other denied destination answered the window's acknowledgement timeout, which
+// settle reads as bus.ErrUnavailable and so as an outage of the bus rather than a refusal of the
+// event: the event was released with no attempt counted, the counter recorded `failed` where the
+// denial belongs, no line named the subject, and publishBatch abandoned the rest of that scan's
+// backlog. The per-subject record (deniedPublish) answers each send its own denial, and this test
+// holds that for the shape a notifying event has in production.
 func TestRunCountsEveryDeniedJetStreamDestinationOfOneEvent(t *testing.T) {
 	var logged lockedBuffer
 	logtest.SetDefault(t, slog.NewTextHandler(&logged, nil))

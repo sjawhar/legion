@@ -131,10 +131,10 @@ func (c *Client) deniedPublish(subject string, sentAt time.Time) error {
 	return nil
 }
 
-// clearPublishDenials drops every recorded violation, because they were the previous connection's:
-// the grant the server applies to the connection that replaced it, or to the session a reconnect
-// opened, is its own, and a publish on it is answered by it. Its caller holds c.mu, where it
-// learns of the reconnect (onReconnect) or installs the connection (install).
+// clearPublishDenials drops every recorded violation, because they were the previous session's:
+// the grant the server applies to the session a reconnect opened is its own, and a publish on it
+// is answered by it. Its caller holds c.mu, where it learns of the reconnect (onReconnect) or
+// installs the constructor's connection (install), where the record is still empty.
 func (c *Client) clearPublishDenials() {
 	clear(c.deniedPublishes)
 }
