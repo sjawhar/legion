@@ -182,6 +182,43 @@ trusted`. Put a real tmux binary first on the daemon's `PATH`
 (`mise which tmux` prints its install path), as the live proofs do with `real_bin_path`
 (`scripts/e2e/README.md`).
 
+## What a pane's Dispatch credential is
+
+A pane's Dispatch bearer is the daemon's own. The daemon reads `dispatch_token_file` once at boot
+(`readBoot`, `packages/daemon/internal/daemon/bootreads.go`) and writes the value to
+`<state_dir>/secrets/dispatch-token`, a 0600 file in a 0700 directory, with
+`WriteDispatchTokenFile` (`packages/daemon/internal/runtime/secretfiles.go`, called from
+`prepareTmux` in `packages/daemon/internal/daemon/daemon.go`). It then tells every pane
+`DISPATCH_TOKEN_FILE` naming that file (`panePairs`,
+`packages/daemon/internal/runtime/tmux/spawn.go`). The value never enters tmux's argv or a pane's
+environment. So a pane holds the daemon's own credential, not one of its own.
+
+The Envoy listener bearer reaches a pane the same way. It is a launch secret, `ENVOY_TOKEN`
+(`launchSecrets`, `packages/daemon/internal/daemon/launchsecrets.go`), and the tmux runtime writes
+every launch secret to a 0600 file of its own under `<state_dir>/secrets` and tells the pane the
+matching `<NAME>_FILE` pointer, here `ENVOY_TOKEN_FILE` (`secretFiles`, `WriteSecretFiles` and
+`panePairs`, `packages/daemon/internal/runtime/tmux/spawn.go`).
+
+Dispatch takes that bearer for nobody. It matches it against the deployment's shared agent tokens
+(`DISPATCH_AGENT_TOKEN`, `MatchesSharedAgentToken`,
+`packages/envoy/internal/dispatch/auth/agent_token.go`) and reads no person, no service and no
+project from it. The acting session is the one the request body names (`bearerSessionActor`,
+`packages/envoy/internal/dispatch/api/server.go`). `dispatch whoami` in a pane answers
+`Session <id> runs under the shared token: no owner, …`
+(`packages/envoy-client/src/dispatch-execute.ts`). A pod's side of this is in `docs/kubernetes.md`,
+"Anatomy of a Sandbox pod". A person's own session on the same box uses a personal token instead,
+minted from Dispatch's Settings → Agent tokens
+(`docs/site/src/content/docs/dispatch/for-agents.md`).
+
+The agent-secrets helper holds a credential of its own: the machine login a person approves for
+`agent-secrets machine login`. The helper spends that credential on the broker's own routes
+(`packages/envoy/internal/broker/helper/broker.go`) and asks the broker for no Dispatch token. The
+broker can exchange such a login's access token for one (`docs/kubernetes.md`, "The Dispatch
+identity the broker can issue"), and nothing on this box does that at this release.
+`dispatch://INFRA-267` is where the daemon and its workers get Dispatch tokens of their own, a dev
+box session writing under an approved machine login included, and `dispatch://INFRA-264` is where
+Dispatch accepts a broker token.
+
 ## Phase workers on Claude Code
 
 `worker_backends` in `legion.yaml` runs a role on another agent harness than Oh My Pi:
