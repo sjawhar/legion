@@ -461,6 +461,11 @@ func newClient(urls []string, ownsStream bool, opts connectOpts) (*Client, error
 		owned = &stream
 	}
 	if err := c.install(nc, owned); err != nil {
+		// The constructor returns no client, so no caller can Close it: the client is stopped
+		// before nc closes, so the recovery nc's close begins (onClosed) finds it stopped and dials
+		// nothing. Running, that recovery would dial and install a connection held by no one, which
+		// with MaxReconnect -1 reconnects for the rest of the process once its server is gone.
+		c.stop()
 		nc.Close()
 		return nil, err
 	}
