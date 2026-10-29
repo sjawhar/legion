@@ -337,6 +337,12 @@ the root on each of these lines:
   tree goes to the controller`: the controller received the decision.
 - `outbox parked decision not relayed: it names no person`: the gate opened under
   `gates.design: off`, so no person made the decision.
+- `outbox parked decision not relayed: its root is not parked`: someone moved the lingering root
+  back to a status of the workflow (`in_progress` and the like), so it is nobody's parked tree.
+- `outbox parked decision kept for its root's start, which waits for its slot` or `workflow: a
+  person's decision on a tree waiting for its slot is kept for its architect's start`: the root was
+  set to `todo` already, so no controller is told, and its architect's start names the decision.
+  The daemon keeps the decision until that start, or a later catch-up, is delivered.
 - `workflow: a session's reply on a parked tree is not relayed`: an agent wrote the reply. It
   stays on the ask for the person who asked.
 

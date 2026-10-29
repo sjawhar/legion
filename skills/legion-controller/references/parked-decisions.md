@@ -50,7 +50,9 @@ ask for the person who asked, and the walk below skips it.
      Otherwise the tree already heard the decision: do nothing.
    - Its `phase` is `done`: read the root's Dispatch status (`dispatch read --issue <root>`).
      `backlog` or `icebox`: go on. `done`: the tree finished; set nothing and name `ref` in your
-     summary. `triage`: a person pulled it back; set nothing and name it.
+     summary. `triage`: a person pulled it back; set nothing and name it. Any other status: someone
+     else moved the root back into the workflow after the notice was sent; set nothing and name
+     `ref` in your summary.
 2. **After the park.** Under the root's `Events:`, each `issue.created`, `issue.updated` and
    `issue.closed` line ends `status <status>`: every change to the issue writes one, a rank,
    priority, label or assignee change too, and each shows the status the issue had then. The park

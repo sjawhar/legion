@@ -74,15 +74,10 @@ foreign Dispatch claim sends the separate `unslotted` wake.
 ## `parked-decision on <KEY>` (`{kind: "parked-decision", decision, root, ref, actor, version?, reason?}`)
 
 A person's spec decision, or answer, resolution or reply on an ask, on a tree Legion is not
-running, which nobody inside the tree heard. Decide whether `root` runs again as
-`skill://legion-controller/references/parked-decisions.md#deciding` says. When the decision gives
-its work a next step, `set_status` the root to `todo` only when the park is your own hold (its step
-2: by `session legion-daemon:<PROJECT>`, with your `Parked by Legion while it waits on:` mark beside
-it), never for any other park, an operator's `legion status` included (then leave it parked).
-Either way, post the `Parked decision read:` comment its step 4 gives (when the root's phase is not
-`done`: `backlog`, then `todo`, only if its `architect.state` is `failed` or `retired`, and nothing
-while its architect lives). When it only questions the work, leave the root as it is and answer on
-the question's ask (a request for changes: on the issue whose spec it reviews).
+running, which nobody inside the tree heard. The payload names the decision, the tree's `root`,
+the decision's Dispatch `ref`, the person (`actor`), and a spec decision's `version` and a changes
+request's `reason`. Decide it as `skill://legion-controller/references/parked-decisions.md#deciding`
+says.
 
 ## `held on <KEY>` (`{kind: "held", phase, role?, reason?}`)
 
