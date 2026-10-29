@@ -136,6 +136,8 @@ const answerAsk = spyOn(api, "answerAsk");
 const getAsk = spyOn(api, "getAsk");
 const createComment = spyOn(api, "createComment");
 const createArtifactComment = spyOn(api, "createArtifactComment");
+/** The bounds every write the card makes carries: its press's key, which a retry reuses. */
+const keyedAttempt = expect.objectContaining({ key: expect.any(String) });
 
 afterEach(() => {
   answerAsk.mockReset();
@@ -158,6 +160,7 @@ function renderCard({
   onAnswered = () => {},
   owner,
   readOnly = false,
+  rowResolution = false,
   thread = threadRead(indexed),
 }: {
   ask?: Ask;
@@ -167,6 +170,8 @@ function renderCard({
   onAnswered?: (id: string) => void;
   owner?: { project: string; slug: string };
   readOnly?: boolean;
+  /** Render as a closed issue's current document does. */
+  rowResolution?: boolean;
   /** What `GET /asks/{id}` answers for the block's ask. */
   thread?: AskRead;
 }) {
@@ -189,6 +194,7 @@ function renderCard({
           onAnswered={onAnswered}
           owner={owner}
           readOnly={readOnly}
+          rowResolution={rowResolution}
         />
       </QueryClientProvider>
     </MemoryRouter>
@@ -450,6 +456,7 @@ test("the hosted card offers the options as the shared choice rows, plus Other, 
     expect(answerAsk.mock.calls[0]).toEqual([
       "ask-1",
       { expected_edited_at: null, selected: ["Ship"] },
+      keyedAttempt,
     ]);
     await waitFor(() => expect(answered).toEqual(["ask-1"]));
     // The recorded choice shows at once, before the document round-trips the answer.
@@ -481,6 +488,7 @@ test("Other opens the composer; the words are the answer and no option is record
     expect(answerAsk.mock.calls[0]).toEqual([
       "ask-1",
       { expected_edited_at: null, selected: [], text: "Neither, actually." },
+      keyedAttempt,
     ]);
   } finally {
     card.unmount();
@@ -512,6 +520,7 @@ test("with multiple choice, Other sits beside the options and both are sent", as
     expect(answerAsk.mock.calls[0]).toEqual([
       "ask-1",
       { expected_edited_at: null, selected: ["Ship"], text: "And a canary first." },
+      keyedAttempt,
     ]);
   } finally {
     card.unmount();
@@ -536,6 +545,7 @@ test("a decision with no options answers in words alone", async () => {
     expect(answerAsk.mock.calls[0]).toEqual([
       "ask-1",
       { expected_edited_at: null, selected: [], text: "Go." },
+      keyedAttempt,
     ]);
   } finally {
     card.unmount();
@@ -576,6 +586,7 @@ test("Ask back on an issue document's decision posts a clarification on the issu
     expect(createComment.mock.calls[0]).toEqual([
       "CORE-1",
       { ask_id: "ask-1", body: "Ship to which environment?" },
+      keyedAttempt,
     ]);
     expect(answerAsk).not.toHaveBeenCalled();
     // The composer clears for the next turn and the exchange stays visible under the block.
@@ -613,6 +624,7 @@ test("Ask back on a project document's decision posts the clarification on the d
     expect(createArtifactComment.mock.calls[0]).toEqual([
       "doc-1",
       { ask_id: "ask-1", body: "Before or after the freeze?" },
+      keyedAttempt,
     ]);
     expect(createComment).not.toHaveBeenCalled();
   } finally {
@@ -637,6 +649,7 @@ test("a question-shaped answer with no option chosen offers Ask back instead, as
     expect(createComment.mock.calls[0]).toEqual([
       "CORE-1",
       { ask_id: "ask-1", body: "Which release train?" },
+      keyedAttempt,
     ]);
     expect(answerAsk).not.toHaveBeenCalled();
   } finally {
@@ -825,6 +838,75 @@ test("a read-only resolved decision shows its state and no form", () => {
   try {
     expect(card.section.querySelector("form")).toBeNull();
     expect(card.header.getByText("Resolved")).toBeDefined();
+  } finally {
+    card.unmount();
+  }
+});
+
+// A closed issue's current document: a block whose own state and ask row are both resolved shows
+// the row's record, as the close that withdrew it wrote it. A version view never does.
+
+const withdrawnAsk: Ask = {
+  ...ask,
+  resolution: {
+    actor: { id: "legion-daemon:CORE", kind: "session" },
+    at: new Date().toISOString(),
+    kind: "withdrawn",
+    reason: "Withdrawn by the close of CORE-1.",
+  },
+  state: "resolved",
+};
+
+test("a closed issue's resolved block shows its withdrawn row's record and no composer", () => {
+  const card = renderCard({
+    ask: withdrawnAsk,
+    node: askNode({ state: "resolved" }),
+    readOnly: true,
+    rowResolution: true,
+  });
+  try {
+    expect(card.section.querySelector("form")).toBeNull();
+    expect(card.footer.queryByRole("radio")).toBeNull();
+    expect(card.footer.getByTestId("ask-resolution-badge").textContent).toBe("Withdrawn");
+    // The daemon is an `AgentName`, its whole id in a link inside the sentence.
+    expect(card.section.textContent).toContain(
+      "Withdrawn when legion-daemon:CORE closed the issue"
+    );
+    expect(card.section.textContent).not.toContain("Withdrawn by the close");
+    // The record names who asked and how it ended, so the header does not repeat either.
+    expect(card.header.queryByText("Resolved")).toBeNull();
+    expect(card.section.querySelector("[data-dispatch-ask-asked]")).toBeNull();
+    expect(getAsk).not.toHaveBeenCalled();
+  } finally {
+    card.unmount();
+  }
+});
+
+test("a closed issue's block still reading open keeps its own attributes over a withdrawn row", () => {
+  const card = renderCard({
+    ask: withdrawnAsk,
+    node: askNode({ state: "open" }),
+    readOnly: true,
+    rowResolution: true,
+  });
+  try {
+    expect(card.footer.queryByTestId("ask-resolution-badge")).toBeNull();
+    expect(card.recordRows().map(([selected]) => selected)).toEqual(["false", "false"]);
+  } finally {
+    card.unmount();
+  }
+});
+
+test("a version view's resolved block reads its own attributes, not its row's withdrawal", () => {
+  const card = renderCard({
+    ask: withdrawnAsk,
+    node: askNode({ state: "resolved" }),
+    readOnly: true,
+  });
+  try {
+    expect(card.header.getByText("Resolved")).toBeDefined();
+    expect(card.footer.queryByTestId("ask-resolution-badge")).toBeNull();
+    expect(card.section.textContent).not.toContain("Withdrawn");
   } finally {
     card.unmount();
   }

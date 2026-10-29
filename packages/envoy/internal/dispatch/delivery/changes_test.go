@@ -12,6 +12,7 @@ import (
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
+	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/sjawhar/envoy/internal/dispatch/model"
 	"github.com/sjawhar/envoy/internal/dispatch/store"
@@ -54,6 +55,50 @@ func changeTestRun(id int64, kind DeliveryRunKind, headAt, startedAt time.Time) 
 }
 
 func sameTime(a *time.Time, b time.Time) bool { return a != nil && a.Equal(b) }
+
+// laggingDatabaseClock opens a pool on pool's database whose now() runs lag behind this process's
+// clock, as a database server's clock may run behind a server process's: a schema of the test's
+// own, dropped after it, holds a now() answering pg_catalog.now() - lag, and the pool's search_path
+// names that schema ahead of pg_catalog, so every unqualified now() a statement on the pool runs
+// reads the lagging clock.
+func laggingDatabaseClock(t *testing.T, ctx context.Context, pool *store.Pool, lag time.Duration) *store.Pool {
+	t.Helper()
+	schema := fmt.Sprintf("lagging_clock_%d", time.Now().UnixNano())
+	if _, err := pool.Exec(ctx, fmt.Sprintf(`
+		create schema %[1]s;
+		create function %[1]s.now() returns timestamptz language sql stable as $$ select pg_catalog.now() - interval '%[2]d microseconds' $$;
+	`, schema, lag.Microseconds())); err != nil {
+		t.Fatalf("make the database's clock lag: %v", err)
+	}
+	t.Cleanup(func() {
+		if _, err := pool.Exec(context.Background(), "drop schema "+schema+" cascade"); err != nil {
+			t.Errorf("drop the lagging clock's schema %s: %v", schema, err)
+		}
+	})
+	config := pool.Config()
+	config.ConnConfig.RuntimeParams["search_path"] = schema + ", public, pg_catalog"
+	opened, err := pgxpool.NewWithConfig(ctx, config)
+	if err != nil {
+		t.Fatalf("open a pool on the lagging clock: %v", err)
+	}
+	lagging := store.NewPool(opened)
+	t.Cleanup(lagging.Close)
+	return lagging
+}
+
+// databaseAge is how long before the database's now() the timestamp query reads was, as the
+// database measures it; nil when the timestamp is null.
+func databaseAge(t *testing.T, ctx context.Context, pool *store.Pool, query string, args ...any) *time.Duration {
+	t.Helper()
+	var age *time.Duration
+	if err := pool.QueryRow(ctx, `select now() - (`+query+`)`, args...).Scan(&age); err != nil {
+		t.Fatalf("read the age of %s: %v", query, err)
+	}
+	return age
+}
+
+// justNow reports whether age is a moment the database's clock reached within the last minute.
+func justNow(age *time.Duration) bool { return age != nil && *age >= 0 && *age < time.Minute }
 
 // listenConn opens a connection of its own, outside the pool, listening on channel.
 func listenConn(t *testing.T, ctx context.Context, channel string) *pgx.Conn {
@@ -217,16 +262,21 @@ func TestFreshnessOnlySettingsWritesLogNoChangeButNotify(t *testing.T) {
 	seedDeliverySettings(t, ctx, pool)
 	conn := listenConn(t, ctx, "delivery_freshness")
 	before := latestChange(t, ctx, pool)
-	eventAt := time.Date(2026, 9, 3, 12, 0, 0, 0, time.UTC)
-	reconciledAt := eventAt.Add(time.Minute)
+	reconciledAt := time.Date(2026, 9, 3, 12, 1, 0, 0, time.UTC)
+	// eventAt is the database's time RecordEventAt stamps, read from its notification.
+	var eventAt time.Time
 
 	writes := []struct {
 		name  string
 		write func() error
 		want  func(freshnessPayload) bool
 	}{
-		{"RecordEventAt", func() error { return RecordEventAt(ctx, pool, eventAt) }, func(p freshnessPayload) bool {
-			return sameTime(p.LastEventAt, eventAt) && p.LastReconcileAt == nil && p.LastError == nil
+		{"RecordEventAt", func() error { return RecordEventAt(ctx, pool) }, func(p freshnessPayload) bool {
+			if p.LastEventAt == nil || p.LastReconcileAt != nil || p.LastError != nil {
+				return false
+			}
+			eventAt = *p.LastEventAt
+			return true
 		}},
 		{"RecordReconcileSuccess", func() error { return RecordReconcileSuccess(ctx, pool, reconciledAt) }, func(p freshnessPayload) bool {
 			return sameTime(p.LastEventAt, eventAt) && sameTime(p.LastReconcileAt, reconciledAt) && p.LastError == nil
@@ -256,6 +306,71 @@ func TestFreshnessOnlySettingsWritesLogNoChangeButNotify(t *testing.T) {
 	}
 	if changes := changesAfter(t, ctx, pool, before); len(changes) != 0 {
 		t.Fatalf("freshness writes logged %+v, want nothing", changes)
+	}
+}
+
+// TestRecordEventAtStampsTheDatabasesClock: last_event_at is the database's now(), not the calling
+// process's clock: with this process's clock two hours ahead of the database's, the stamp is a
+// moment the database's clock reached just now. It never moves backward: a later stamp already
+// in the row stays.
+func TestRecordEventAtStampsTheDatabasesClock(t *testing.T) {
+	pool, ctx := deliveryTestPool(t)
+	pool = laggingDatabaseClock(t, ctx, pool, 2*time.Hour)
+	seedDeliverySettings(t, ctx, pool)
+	if err := RecordEventAt(ctx, pool); err != nil {
+		t.Fatalf("RecordEventAt: %v", err)
+	}
+	if age := databaseAge(t, ctx, pool, `select last_event_at from delivery_settings where singleton`); !justNow(age) {
+		t.Fatalf("last_event_at is %v before the database's now(), want a moment within its last minute", age)
+	}
+	if _, err := pool.Exec(ctx, `update delivery_settings set last_event_at = now() + interval '1 hour' where singleton`); err != nil {
+		t.Fatalf("stamp last_event_at an hour ahead: %v", err)
+	}
+	if err := RecordEventAt(ctx, pool); err != nil {
+		t.Fatalf("RecordEventAt: %v", err)
+	}
+	if age := databaseAge(t, ctx, pool, `select last_event_at from delivery_settings where singleton`); age == nil || *age > -59*time.Minute {
+		t.Fatalf("last_event_at is %v before the database's now() after a stamp behind the row's, want the row's an hour ahead kept", age)
+	}
+}
+
+// TestPruneChangesCutsAtTheDatabasesClock: the prune's cutoff is ChangeRetention before the
+// database's now(), the clock each change's at is written by: with this process's clock two hours
+// ahead of the database's, a change the database dates 25 hours old goes and one it dates 23 hours
+// old stays.
+func TestPruneChangesCutsAtTheDatabasesClock(t *testing.T) {
+	pool, ctx := deliveryTestPool(t)
+	pool = laggingDatabaseClock(t, ctx, pool, 2*time.Hour)
+	if _, err := pool.Exec(ctx, `delete from delivery_changes`); err != nil {
+		t.Fatalf("clear the change log: %v", err)
+	}
+	if _, err := pool.Exec(ctx, `
+		insert into delivery_changes (at, kind, ref) values (now() - interval '25 hours', 'settings', '25h'), (now() - interval '23 hours', 'settings', '23h')
+	`); err != nil {
+		t.Fatalf("seed changes: %v", err)
+	}
+	pruned, err := PruneChanges(ctx, pool)
+	if err != nil {
+		t.Fatalf("PruneChanges: %v", err)
+	}
+	var kept []string
+	rows, err := pool.Query(ctx, `select ref from delivery_changes order by seq`)
+	if err != nil {
+		t.Fatalf("read the change log: %v", err)
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var ref string
+		if err := rows.Scan(&ref); err != nil {
+			t.Fatalf("scan a change: %v", err)
+		}
+		kept = append(kept, ref)
+	}
+	if err := rows.Err(); err != nil {
+		t.Fatalf("read the change log: %v", err)
+	}
+	if pruned != 1 || len(kept) != 1 || kept[0] != "23h" {
+		t.Fatalf("PruneChanges deleted %d and kept %v, want 1 deleted and the change 23 hours old kept", pruned, kept)
 	}
 }
 

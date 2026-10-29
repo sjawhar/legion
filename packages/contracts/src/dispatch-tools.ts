@@ -430,7 +430,9 @@ export const dispatchToolSpecs = [
       "replaces the issue's own attachment. Closing an issue " +
       "(status done) requires reason, the note that says why: it is posted on the issue as a " +
       "message, then the issue closes, because a closed issue refuses messages, comments, and " +
-      "artifacts; reason goes only with status done. A closed issue takes only a board move " +
+      "artifacts; reason goes only with status done. Closing an issue withdraws every open ask " +
+      "it holds (resolution kind withdrawn, naming the closer), and reopening it brings exactly " +
+      "those asks back. A closed issue takes only a board move " +
       "(before, after), components, " +
       "a reopening status (any status but done), and an external_links write that adds no new " +
       "link (so a link can move to the issue that replaced it); everything else, priority " +
@@ -732,7 +734,9 @@ export const dispatchToolSpecs = [
       'closed in the document too. A reason beginning "removed from the document in version" is ' +
       "refused: that marks a retraction the document's own settlement wrote. Use retracted for an ask " +
       "a newer one replaces or the design made moot, resolved for one whose answer you found; an " +
-      "answered ask cannot be resolved, and resolving records no decision by a person.",
+      "answered ask cannot be resolved, and resolving records no decision by a person. An issue's " +
+      "close withdrew its open asks (kind withdrawn, which only Dispatch writes, never this tool); " +
+      "an ask on a closed issue is refused (409 ISSUE_CLOSED): reopen the issue first.",
     arguments: (z) => ({
       ask: z
         .string()
@@ -1055,6 +1059,7 @@ export const dispatchToolSpecs = [
       "Do not use it for issue status, asks, or events; " +
       "use dispatch read instead. Supply ref, issue, or project plus artifact; issue plus an omitted artifact reads the primary document. " +
       "A live read returns its document token for an optional dispatch doc-edit precondition. With blocks it lists the live document's blocks instead of its markdown, in document order: each block's id, type, token, anchored comments and asks, and opening words, and under a table each row by the index delete_row takes and each cell by its row and the column delete_column takes; block ids, block tokens and those indexes are what dispatch doc-edit takes. " +
+      "After the markdown it prints every open thread anchored on the document in full: an open ask with its id and question and each reply's author, time and text, and a comment thread with its root's id, author, quote and text and each reply's author, time and text, in order; a resolved thread, and an ask that is answered or resolved, is not printed. " +
       "A picture (an uploaded PNG, JPEG, GIF or WebP of at most 3,750,000 bytes, 5 MB once base64-encoded) comes back as an image you see, with its name, type, size and version, every time you ask, including one a read already showed this session; " +
       "any other file that is not UTF-8 text is described, with the route that serves its bytes. " +
       OWNER_REFERENCE,

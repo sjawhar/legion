@@ -34,7 +34,7 @@ the kernel kill pod processes below their own limits, and the kubelet does not s
 | `dispatch-user-turns.sh` | a person's direct Send or Aside from Dispatch's conversation page reaches a real Oh My Pi session — the pinned build with this checkout's Envoy plugin in an isolated profile — as that person's own user turn, the body alone, carrying its Dispatch id as the host's tag, while a BTW stays a side question; the composer completes the session's slash commands, and a skill, a prompt template, a file command, an extension command, `/session`, `/compact`, `/new` and an unknown `/foo` each run from the page as they would at the session's terminal; a frame a session forged claiming a person wrote it, a broadcast, an issue message, a Legion role notice and a session's re-send of the person's BTW through the retry route each arrive as a card; a Send the session got as a card stays one when a frame is forged for it inside the accept's minute, while the person's retry of it is their turn; the page shows each message once; after the session restarts, a replay of the Send's own envelope and a frame forged naming a Send made while it was down, over a minute old, each inject nothing, and neither does a frame a bare bus client forges for a failed Send inside its minute; and Dispatch records only the Send, the Aside and the carded Send's retry as accepted. Devbox only |
 | `dispatch-session-settings.sh` | Dispatch's live view shows a real Oh My Pi session's current model and thinking level and switches them (INFRA-195), run in an issue pod: Oh My Pi in `--mode rpc` with this checkout's Envoy plugin, a real listener, `nats-server`, Postgres and Dispatch, and one held-open Chromium page. Each value the header shows matches the session's own RPC answers, its `/effort` output and its session file: before any turn; within 20 s of a change at the terminal, by a message or by a fallback; after a pick from either picker, including `auto` kept across a model pick, the level a model pick leaves (compared with a twin session), a pick during a turn, a refusal, and a pick to a stopped session that ends in the no-answer line and is refused `ACCEPT_STALE` once it resumes. A forged switch, an Envoy message and an agent's bearer change nothing. Another session, a resumed session and a new session each keep their own values. A session on the released pi-envoy shows the restart notice. A switch is stored under the person who sent it |
 | `claude-backend-tmux.sh` | `worker_backends` on tmux: an implementer the daemon runs on Claude Code (`legion claude-bridge -- claude -p`) registers its Claude Code transcript as its session, takes its phase, completes it through the `legion` MCP tool's `handoff_complete` with a pushed `.legion/<issue>/` handoff commit, and, its pane killed, relaunches with `claude --resume` into the same session id, its earlier turns unchanged on disk and in its context. Devbox only |
-| `verifiers-staging-token.sh` | `dispatch` and the Envoy listener authenticate a projected service-account token the staging EKS cluster actually minted — the right audience is accepted, the other binary's audience and a missing bearer are refused, each shared token still works, half an OIDC pair and an issuer that does not answer refuse the boot, and a refused token leaves its failure class in the log and nowhere else |
+| `verifiers-staging-token.sh` | `dispatch` and the Envoy listener authenticate a projected service-account token the staging EKS cluster actually minted — the right audience is accepted, the other binary's audience and a missing bearer are refused, each shared token still works, half an OIDC pair refuses either boot, an issuer that does not answer refuses the listener's boot, Dispatch starts and serves against such an issuer (`/healthz` `service_tokens` false, a JWT-shaped bearer `503 OIDC_ISSUER_UNAVAILABLE` until it discovers it in the background), and a refused token leaves its failure class in the log and nowhere else |
 | `burstable-kind.sh` | on a throwaway kind cluster with Agent Sandbox v1.0.3 and gVisor, an issue pod Legion's own loader, `sandboxOptions` and Sandbox runtime build from a `legion.yaml` giving the issue pod `issue: {memory: 32Gi, memory_request: 8Gi}` is admitted, scheduled and recorded `Burstable`, its `roles` container carrying exactly that request and limit, while one from a file with no `resources` block stays `Guaranteed`; `legion start --check-config` names the Burstable issue pod and refuses a request past its limit or that is no quantity, naming the key |
 | `controller-sweep-kind.sh` | on a throwaway kind cluster with Agent Sandbox v1.0.3 and gVisor, the project controller Legion's own loader, `sandboxOptions` and boot's Sandbox runtime factory launch from a `controller: daemon` `legion.yaml` over a real Postgres store keeps its Sandbox and volume through five orphan sweeps at grace 0 told claims read before its launch, because the store holds its claim unretired, and loses both to the first sweep once the claim is retired; the same launch and sweep on a driver whose sweep reads no claim (the sweep before the fix) deletes the launched controller's Sandbox |
 | `share-volumes-kind.sh` | on a throwaway kind cluster with Agent Sandbox v1.0.3 and gVisor, an issue pod Legion's own loader, `sandboxOptions` and Sandbox runtime build from a `legion.yaml` whose `runtime.kubernetes.pod` mounts an existing NFS share twice — through a PersistentVolumeClaim (read-only by default) and as an `nfs` export with `read_only: false` — reads the server's seed file through the claim, is refused a write there, and writes a file through the export that the server then holds; `legion start --check-config` refuses a volume naming two sources, and `legion probe-boot` mounts both shares and refuses a missing claim, a missing export and a server that never answers, each naming the volume and its share, and an image digest the registry does not have, naming the image |
@@ -835,8 +835,9 @@ real `gh`, `jj`, `tmux` and `bun` that `mise which` names first on its `PATH`, w
 inherits ([`real_bin_path`](#librigsh): the run's own `HOME` hides mise's global config from the
 box's shims, where a pane's `jj` shim hands the call back to itself, exit 127), so all four must be
 pinned in mise. `LEGION_CLAUDE_PATH` is set to the `claude` on the operator's `PATH`,
-`LEGION_BUN_PATH` to that real `bun`, and `LEGION_CLAUDE_PLUGIN_DIR` to this checkout's
-`packages/claude-envoy`, whose `dist/envoy-channel.js` and generated `legion/` must be built.
+`LEGION_BUN_PATH` to that real `bun`, and `LEGION_CLAUDE_PLUGIN_DIR` to the run's own copy of the
+claude-envoy plugin, which it builds from this checkout into its work directory
+(`packages/claude-envoy/scripts/build.ts --out`), with `dist/envoy-channel.js` and `legion/` fresh.
 Legion's role Apps resolve as Stage 3's do: the daemon runs `agent-secrets <implement App key> -- …`
 and `agent-secrets <review App key> -- …` (the key names `LEGION_E2E_IMPLEMENT_APP_KEY_NAME` and
 `LEGION_E2E_REVIEW_APP_KEY_NAME` give) as each App's `private_key_command`, so each key comes from
@@ -1679,7 +1680,7 @@ event is dated by Dispatch's `created_at`; one without it stops the audit, never
 | `restart-mid-tree` | a daemon restart at the same addresses re-adopts the merger's pod and session, and relaunches no role: 75 s after the merger is re-adopted (past the probe interval in which every role, once its launcher has redialled, is judged on its Sandbox's address record), every claim that ran a process and still runs one has its generation and incarnation unchanged, its issue pod's uid as the operator reads it is the one `legion claims` records, tree 1's claims all still run, and the daemon logged no stale-address replacement. It is the two address-moved checkpoints' negative control |
 | `address-moved-env-same-pod` | the daemon restarts handing `envoy_url` with its host upper-cased, the same Envoy listener, and nothing else moved. Each of tree 1's claims that ran a process runs exactly its next generation (one launch, none refused), registered and ready again, **in the same issue pod** (its uid unchanged), whose launcher still dials the unmoved worker stream for each of its roles; the generation's Oh My Pi is told the new `ENVOY_URL` spelling and the run's other services, and runs `--resume=` the claim's unchanged session file; `budgets.launchFailures` is 0 and its deaths unchanged; and the daemon logged one stale-address replacement of it, whose detail names `ENVOY_URL` alone (compared, never printed, since it names a production host), and no failed launch. Every other claim leaves the generation it ran, no claim leaves its issue pod, and from one read of `legion claims` every claim that runs a process is on the addresses the daemon hands now. The respelling stays for the rest of the run, and `scrub` hides the Envoy host in either case |
 | `address-moved-stream-new-pod` | the daemon restarts with its API and worker-stream ports swapped (13373 and 13372, the rigs' pair), so the pod's launcher dials, for every role, a worker stream, and every role generation was told a `LEGION_DAEMON_URL`, the daemon no longer serves. Each of tree 1's claims that ran a process runs exactly its next generation, registered and ready again, **in a new issue pod**, one per issue shared by all its roles, whose launcher dials the new stream for each of them; the generation is told the new API and the run's services and resumes the claim's unchanged session file; `budgets.launchFailures` is 0 and its deaths unchanged; and the daemon logged one stale-address replacement of it, whose detail names `--connect` alone, from the old stream to the new, and no failed launch. Every other claim leaves the incarnation it ran, and from one read of `legion claims` every claim that runs a process is on the new addresses. `record_stream`'s last two records are the old stream then the new, the shape watcher has checked every pod the claims run in since the move, and every pod the watch has seen ready dials the stream served when it was created. The ports stay swapped for the rest of the run |
-| `controller` | `legion controller start` registers with the Sandbox daemon, and the controller's first turn starts itself: its session's first user message is the start message the pi-legion extension sends once its claim succeeds (LEGION_CONTROLLER_START_MESSAGE, cmd/legion/controller.go), before it opens the live wake subscription a tick could race it on, and the model answers it, with nothing typed into its pane. Tree 3's planner is told to plan, and each launch of its implementer is killed once its agent is ready or in a turn with its task outstanding, so every death is charged whatever a relaunch's boot takes; the proof's instructions have an implementer run `sleep 300` on its task line (and on a new task after a missed end) before it replies WAITING, so the end lands inside the turn even when the kill takes a minute on a loaded host, where a resumed session's short turn would otherwise end first and the daemon would rightly charge nothing. A kill that lands after the task's turn has ended is charged nothing, since the turn's end retired the task: the driver reads each death's charge from the daemon log, gives such a relaunch a new task with `legion claims deliver` (a Dispatch message sets no delivery of the daemon's), and kills again, at most twice per hold loop (`hold_rearm_limit`), failing on a third miss; a miss counts toward no hold ([`lib/stage4b-hold.test.ts`](lib/stage4b-hold.test.ts)). Tree 3 is held by one of its implementer claim's budgets, `launch failures ran out` or `deaths with work outstanding ran out`, and any other hold fails. The reason must be the budget the daemon's own counters show at the bound (its `supervise: claim failed` line) and the one its implementer's last relaunch death leads to: charged as a death with work outstanding, or not. A death charged for a relaunch that never registered fails, since it could have had no work. The transcript names each relaunch's end, registration, death and charge. The notice reaching the controller is the checkpoint's point; the budgets' own rules are held by `packages/daemon/internal/supervise/budgets_test.go`: tree 3's held notice reaches the controller's session, which is under the run's own home, and `~/.omp/profiles` holds none of the controller's profile ([`lib/omp-home.sh`](#libomp-homesh)). The daemon's tick (`controller_wake_interval_seconds: 60`) reaches that session too, and every tick delivery in it so far — this window is before `full-agent-negative`, the first checkpoint that opens a live row — carries the daemon's capability report as its payload's `openCapabilities`, rendered by pi-envoy into the card's `message` block (`openCapabilities[1]: secrets`; [`lib/controller-ticks.jq`](lib/controller-ticks.jq)), and each tick's list is judged on its own: as a set it must be `["secrets"]` or `["secrets","pool-capacity"]`, the two lists the proof's deployment can leave open. Each tick alone, since every `legion start` between `boot` and here re-probes the image and `pool-capacity` is that probe's own verdict, so one session's ticks can carry either; any other name, a live row included, fails with the tick quoted. The ticks are kept as `controller-ticks.json`, and `boot`'s set is in the note for context; the daemon that reported the gap keeps running, which every later checkpoint shows. Tree 3 stays held, its planner live, for `full-agent-negative`; `controller-walk` takes it out. The operator-launched controller, started with `LEGION_GH_PATH` at mise's `gh` (the devbox's `gh` wrapper replaces `GH_CONFIG_DIR` in an agent session), holds its gh bundle under `$work/controller-state/gh`; read from the repository owner's directory there with mise's `gh`, it answers tree 1's pull request's state (`OPEN`, `MERGED` or `CLOSED`) and the review App's bot as viewer, with `GH_CONFIG_DIR=/nonexistent` failing, and its stderr names the review App and the bundle's owners, and `github-credential.log` exists |
+| `controller` | `legion controller start` registers with the Sandbox daemon, and the controller's first turn starts itself: its session's first user message is the start message (LEGION_CONTROLLER_START_MESSAGE, cmd/legion/controller.go) that pi-legion's `/legion-controller-start`, the word `legion controller start` puts on Oh My Pi's command line, sends once Oh My Pi's startup is over, that command claiming the controller and sending it once registered, right before the role claim and the live wake subscription a tick could race it on, and the model answers it, with nothing typed into its pane. Tree 3's planner is told to plan, and each launch of its implementer is killed once its agent is ready or in a turn with its task outstanding, so every death is charged whatever a relaunch's boot takes; the proof's instructions have an implementer run `sleep 300` on its task line (and on a new task after a missed end) before it replies WAITING, so the end lands inside the turn even when the kill takes a minute on a loaded host, where a resumed session's short turn would otherwise end first and the daemon would rightly charge nothing. A kill that lands after the task's turn has ended is charged nothing, since the turn's end retired the task: the driver reads each death's charge from the daemon log, gives such a relaunch a new task with `legion claims deliver` (a Dispatch message sets no delivery of the daemon's), and kills again, at most twice per hold loop (`hold_rearm_limit`), failing on a third miss; a miss counts toward no hold ([`lib/stage4b-hold.test.ts`](lib/stage4b-hold.test.ts)). Tree 3 is held by one of its implementer claim's budgets, `launch failures ran out` or `deaths with work outstanding ran out`, and any other hold fails. The reason must be the budget the daemon's own counters show at the bound (its `supervise: claim failed` line) and the one its implementer's last relaunch death leads to: charged as a death with work outstanding, or not. A death charged for a relaunch that never registered fails, since it could have had no work. The transcript names each relaunch's end, registration, death and charge. The notice reaching the controller is the checkpoint's point; the budgets' own rules are held by `packages/daemon/internal/supervise/budgets_test.go`: tree 3's held notice reaches the controller's session, which is under the run's own home, and `~/.omp/profiles` holds none of the controller's profile ([`lib/omp-home.sh`](#libomp-homesh)). The daemon's tick (`controller_wake_interval_seconds: 60`) reaches that session too, and every tick delivery in it so far — this window is before `full-agent-negative`, the first checkpoint that opens a live row — carries the daemon's capability report as its payload's `openCapabilities`, rendered by pi-envoy into the card's `message` block (`openCapabilities[1]: secrets`; [`lib/controller-ticks.jq`](lib/controller-ticks.jq)), and each tick's list is judged on its own: as a set it must be `["secrets"]` or `["secrets","pool-capacity"]`, the two lists the proof's deployment can leave open. Each tick alone, since every `legion start` between `boot` and here re-probes the image and `pool-capacity` is that probe's own verdict, so one session's ticks can carry either; any other name, a live row included, fails with the tick quoted. The ticks are kept as `controller-ticks.json`, and `boot`'s set is in the note for context; the daemon that reported the gap keeps running, which every later checkpoint shows. Tree 3 stays held, its planner live, for `full-agent-negative`; `controller-walk` takes it out. The operator-launched controller, started with `LEGION_GH_PATH` at mise's `gh` (the devbox's `gh` wrapper replaces `GH_CONFIG_DIR` in an agent session), holds its gh bundle under `$work/controller-state/gh`; read from the repository owner's directory there with mise's `gh`, it answers tree 1's pull request's state (`OPEN`, `MERGED` or `CLOSED`) and the review App's bot as viewer, with `GH_CONFIG_DIR=/nonexistent` failing, and its stderr names the review App and the bundle's owners, and `github-credential.log` exists |
 | `full-agent-negative` | a live row a session's check fails reads `open`, named by the session's pod, until that process is gone, and the daemon runs the session all the same (dispatch://LEGION-663: run, and report). Tree 3, held, is the one live tree without a pull request while a controller runs: the driver writes `.omp/config.yml` (`web_search: enabled: false`) in tree 3's workspace in the planner's namespaces, ends the planner's generation once (`end_claim_process kill`, as `finished-idle-planner-death` does), and waits for the relaunch to be ready or idle at a new incarnation with its claim view's `capabilities.incarnation` equal to its locator's. Then the `web-search` row of `legion state --json` is `open` with one entry of its detail (the daemon joins failing sessions with `; `) reading `pod <sandbox>/roles (planner, <tree 3>): web_search is not a registered tool` (an issue pod's roles all run in its one `roles` container) (`web_search_open_for`, run on the row the daemon's renderer writes in `lib/stage4b-capabilities.test.ts`); the view lists `web-search` under `capabilities.open`; the daemon log holds a `capability web-search is open` warning carrying the new incarnation; the controller's session receives a tick whose `openCapabilities` names `web-search`; and the planner, so reported, answers a nonce. The file removed and the planner's generation ended once more, the relaunch's report reads `web-search` `present` again, and the view lists it under `capabilities.ok`. The open and healed rows and views are kept as `full-agent-negative.json`; the teardown removes the file, best effort, should the run end while it is in place |
 | `controller-walk` | `legion status … backlog` from the operator shell moves tree 3, Dispatch shows it, and tree 3's pods are gone. With tree 3 out and a slot free, the controller's slot wakes reach it: its Oh My Pi was launched with the daemon's ``Design gate policy: `gates.design: off`.`` line; an unlabelled issue set to `todo` puts `todo on <KEY>` in its session, and the daemon's tick (`controller_wake_interval_seconds: 60`) `tick on LEGSMOKE`; a minute later that issue is still unlabelled and unrecorded, since the controller starts no work a person did not hand over (the proof's scope says so too), and it is set `done`; tree 3's root issue is claimed by its architect's session, and its events carry the `issue.claimed` |
 | `daily-report` | the controller's daily report, which the proof's instructions exempt from their wait for a targeted message and fit to the run: an issue titled `Legion daily report (<run directory>)` appears in LEGSMOKE, parked in icebox and without the `legion` label, holding the controller session's message, which names tree 1 and the free slots within 2,000 characters; in the controller's session, the call that posted it comes on a turn a `tick on LEGSMOKE` delivery started once the start turn had ended, never in its start turn. That call is the controller's first `dispatch message --issue <report>` run through bash, made any way Oh My Pi offers: the `bash` tool, a write to its `xd://bash` device, or `eval` code calling `tool.bash(...)` ([`lib/omp-tool-calls.jq`](lib/omp-tool-calls.jq), which `stage3-4b13b-acceptance.sh`'s merger check reads too; `lib/report-after-tick.test.ts`). `production-audit` then holds that the issue, like every write, is in LEGSMOKE |
@@ -1703,11 +1704,12 @@ event is dated by Dispatch's `created_at`; one without it stops the audit, never
 Task 4b.5's acceptance for `legion controller start`, on tmux. The Go daemon runs on a real Postgres
 with this checkout's two plugins in an isolated OMP profile, against a real Envoy listener and NATS, and
 the command runs in real tmux panes, as an operator would. The pinned Oh My Pi is launched through
-mise. The run needs no model route: the controller's one model turn, which the pi-legion
-extension starts from LEGION_CONTROLLER_START_MESSAGE once its claim succeeds, fails against the
-profile's default, a static-key provider that listens nowhere, and no check reads its answer. The
-profile names the roles the task agents use and that default, which is all the boot gate's
-agent-model check resolves.
+mise. The run needs no model route: the controller's one model turn, the start message
+(LEGION_CONTROLLER_START_MESSAGE) that pi-legion's `/legion-controller-start`, the word the command
+puts on Oh My Pi's command line, sends once Oh My Pi's startup is over, fails against the profile's
+default, a static-key provider that listens nowhere, and no check reads its answer. The profile
+names the roles the task agents use and that default, which is all the boot gate's agent-model
+check resolves.
 
 ```bash
 bash scripts/e2e/controller-start-tmux.sh
@@ -1968,8 +1970,9 @@ What the run touches, and nothing else:
 - `/tmp/verifiers-e2e` — the two built binaries, the boot logs, the refusal logs, the last response
   body, and the scratch `HOME` the binaries run under, so Dispatch's signing key never lands in the
   box's `~/.local/share/dispatch`. Recreated from empty each run.
-- the containers `verifiers-e2e-pg` (`postgres:16`) and `verifiers-e2e-nats` (`nats:2.10 -js`), both
-  on ephemeral loopback ports.
+- the containers `verifiers-e2e-pg` (pgvector on PostgreSQL 18, the image CI's Dispatch service
+  runs, pinned by digest) and `verifiers-e2e-nats` (`nats:2.10 -js`), both on ephemeral loopback
+  ports.
 - two ports the kernel chose, one for `dispatch` and one for the listener, each held by
   [`lib/held-port.py`](#libheld-portpy) from that choice until its binary serves on it
   (`DISPATCH_LISTEN_FD`, `ENVOY_LISTEN_FD`). The boot refusals exit before any bind and get none.
@@ -1990,8 +1993,11 @@ and `exp`. The last step asserts that neither binary's log contains `eyJ`.
 Every step is fatal and names its reason: a cluster that will not mint, a discovery document with
 no `https` issuer, a token whose `iss`, `aud` or `sub` is not the one asked for, a container that
 never becomes ready, a binary that exits during boot (reported at once from its dead pid, with its
-log, rather than after the whole wait), a boot log that does not name the issuer, any of the eight
-calls answering the wrong status, a body that is not the actor the verifier should have produced, a
+log, rather than after the whole wait), a Dispatch booted against an issuer that does not answer
+that exits, never answers `/healthz`, reports `service_tokens` as anything but `false`, or does not
+stop with status 0 within 30 s of its SIGTERM, a boot log that does not name the issuer, any of the
+nine calls answering the wrong status, a body that is not the actor the verifier should have
+produced (or, for the bearer sent before the issuer is discovered, not `OIDC_ISSUER_UNAVAILABLE`), a
 refusal whose class is missing from the log — or present in the 401 body, which would tell an
 unauthenticated caller which credential the listener is configured for.
 
@@ -3647,6 +3653,91 @@ resourceVersion; a watch that delivered nothing is resumed after a pause, and a 
 parse ends that watch. On 410 Gone it lists the Secrets again, so a value a Secret held only between
 the last version seen and that list is not seen; every value a list or a watch event shows is. It
 exits 2 when it cannot start.
+
+## lib/h2-settings.ts
+
+Whether a front proxy in front of Dispatch advertises HTTP/2 extended CONNECT
+(`SETTINGS_ENABLE_CONNECT_PROTOCOL`, RFC 8441). Dispatch's live updates ride one WebSocket per tab
+on a connection of its own; a proxy that advertises it lets a browser open that socket as a stream
+of the page's shared HTTP/2 connection instead, where the never-ending request
+dispatch://INFRA-258 fixed can come back. Run it against a deployment's front proxy:
+
+```sh
+bun scripts/e2e/lib/h2-settings.ts https://<dispatch host>/     # exit 0: not advertised
+```
+
+It offers `h2` and `http/1.1` over TLS as a browser does and prints one JSON line: `url`, `alpn`
+(the protocol the server chose, `false` for none) and `settings` (the server's SETTINGS as Node's
+HTTP/2 client reads them, `null` without HTTP/2). It exits 1 when `settings.enableConnectProtocol`
+is true, naming the origin on stderr; 0 when it is false or the server speaks no HTTP/2; 2 on a
+usage error, or when it has no answer: a TLS or certificate failure, or no SETTINGS within 10 s.
+Certificates are verified, so a proxy behind a private CA needs `NODE_EXTRA_CA_CERTS`.
+`h2-settings.test.ts` (`bun test scripts/e2e/lib`) runs it against a TLS server that writes a
+SETTINGS frame advertising extended CONNECT by hand (the pinned Bun's `http2.createSecureServer`
+sends none), against a local `http2.createSecureServer` that does not advertise it, against an https
+server with no HTTP/2, against a certificate it cannot verify, and against two servers that answer
+nothing — one that chooses h2 and sends no SETTINGS, one that never finishes the handshake — which
+it leaves after the 10 s deadline with exit 2.
+
+## lib/dispatch-live-events.ts
+
+A Dispatch deployment's event feed as a page reads it, for a stage proof's audit of what a run
+wrote and for the production check after a deploy. It opens `/ws/live`, subscribes the event feed
+and writes one JSON line per frame until an event matches `--until` (exit 0) or `--timeout`
+seconds pass (exit 1); Dispatch's refusal of the feed is printed on stderr (exit 1), a usage error
+exits 2:
+
+```sh
+bun scripts/e2e/lib/dispatch-live-events.ts --url https://<dispatch host> \
+  --bearer-file <token file> --since <event id> --until '"state":"answered"' --timeout 70
+```
+
+`--user <email>` takes the place of `--bearer-file` against a server in header identity (the e2e
+harness), and `--cookie-file <file>` against one in cookie identity: the file holds the `Cookie`
+request header a browser signed in to the deployment sends it, copied from the developer tools'
+Network panel. `--from-whoami` starts the feed where a page starts its first one (INFRA-292): it
+reads `GET /auth/whoami` as that person, prints `{"whoami": {"event_head": <id>, "login": …}}`,
+waits `--subscribe-after <s>` seconds (`{"subscribing_in": <s>}`) and subscribes from that
+`event_head`, so a write committed in the wait - after whoami answered, before the socket opened -
+is replayed to it; whoami names a person, so it takes `--cookie-file` or `--user` and no `--since`.
+The lines are `{"event": …}` for each event, `{"close": <code>, "reason": …}` and
+`{"resubscribed": <cursor>}` around each reopen - a socket closed at its age (`4001`) or a restart
+(`1012`) reopens at once, anything else after a backoff - `{"ended": <reason>, "resubscribed":
+<cursor>}` where Dispatch drops the feed and leaves the socket open, and `{"duplicate": <id>}` for
+an event at or below the cursor, which is written once as an event and never again. The cursor is
+Dispatch's own `events_start.since` at every subscribe, since Dispatch starts a feed at what it
+was asked or below it, never above: a `--since` past its head, and a resume across a reset of its
+event log, both start lower, and the events after that start are new rather than duplicates. So an
+audit that counts the `event` lines counts each event once, however often the feed reopened.
+`dispatch-live-events.test.ts` (`bun test scripts/e2e/lib`) runs it against a Bun websocket server
+that rotates, ends the feed, repeats events, clamps a start and answers whoami a head under a
+cookie.
+
+## lib/dispatch-keyed-comment.ts
+
+The production check of Dispatch's keyed writes: a comment whose first answer is lost lands once.
+
+```sh
+bun scripts/e2e/lib/dispatch-keyed-comment.ts --url https://<dispatch host> \
+  --bearer-file <token file> --issue <scratch issue key> [--cli]
+```
+
+It reads `/healthz` and fails unless the body says `idempotency_keys: true` (a 503's body
+included: the field is a fact of the build), then posts one comment on the issue it names as the
+bearer's session (`--session <id>`, `deploy-check-<uuid>` by default). Without `--cli` it posts
+the comment twice under one `Idempotency-Key`, as a page whose first answer was lost asks again,
+and requires the repeat to be Dispatch's stored `201` with `Idempotency-Replayed: ?1`, the same
+comment id and the key echoed on both. With `--cli` this checkout's `dispatch comment`
+(`packages/envoy-client/bin/dispatch.ts`, under `DISPATCH_HOST=omp` and a scratch `HOME`) posts
+it through a proxy on `127.0.0.1` that forwards everything and hands the command a gateway's
+`502` page in place of Dispatch's answer to its first comment POST; the command must ask again
+under that POST's key, be answered the replay and exit 0. Either way the issue must then hold
+exactly one comment with the check's body. Each step prints one JSON line (`healthz`, `post` or
+`proxy` and `cli`, `comments_with_body`), then `{"ok":true}` and exit 0; a failed check prints
+`{"failed": "<why>"}` and exits 1, a usage error exits 2. The comment stays on the issue, so name
+a scratch one. `dispatch-keyed-comment.test.ts` (`bun test scripts/e2e/lib`) runs it against a
+stand-in Dispatch that keys comments, one that makes every POST, a `/healthz` without the field
+and a `503` with it, and with `--cli`.
 
 ## lib/stage4b-tools.jq
 

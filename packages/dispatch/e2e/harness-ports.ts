@@ -1,4 +1,4 @@
-/** The five harness ports, resolved and validated for every reader in `e2e/`.
+/** The harness ports, resolved and validated for every reader in `e2e/`.
  *
  * An unset or empty variable is port `0`: the listener binds port 0, so the OS chooses its port,
  * and the process reports the port it got on its listening line. `e2e/harness-start.ts` reads
@@ -6,7 +6,12 @@
  * the command, so every reader below that runs under it sees the real ports. A set value is used
  * as given: its listener binds exactly that port, and an occupied one fails with "address already
  * in use" rather than being replaced. `PLAIN_HTTP_PORT` is the plain-HTTP project's browser-facing
- * proxy, which only the TypeScript harness reads.
+ * proxy, which only the TypeScript harness reads. `DISPATCH_E2E_PORT_A` and `DISPATCH_E2E_PORT_B`
+ * are Dispatch A's and B's in two-process mode (`e2e/harness-processes.ts`), where
+ * `DISPATCH_E2E_PORT` is the round-robin proxy's; unset, each is held before the proxy starts, so
+ * the proxy can name it (`e2e/harness-start.ts`). `DISPATCH_E2E_SIGNIN_ISSUER_PORT` is the dev
+ * OIDC issuer's under `DISPATCH_E2E_SIGNIN=oidc` (`e2e/harness-signin.ts`), which always serves
+ * on a port the OS chooses: `e2e/run-signin-issuer.sh` refuses it set.
  *
  * A set value that is not a port in canonical decimal is refused naming its variable, because
  * every later consumer turns it into something that names nothing: `net.connect` raises
@@ -22,13 +27,19 @@
  * must see the ports those set. It opens no socket, so importing it is safe from any process.
  */
 
+import { harnessProcessCount } from "./harness-processes";
+import { harnessSignIn } from "./harness-signin";
+
 /** Each harness listener's port variable. */
 export const harnessVariables = {
   dispatch: "DISPATCH_E2E_PORT",
+  dispatchA: "DISPATCH_E2E_PORT_A",
+  dispatchB: "DISPATCH_E2E_PORT_B",
   fakeBroker: "FAKE_BROKER_PORT",
   fakeEnvoy: "FAKE_ENVOY_PORT",
   fakeGithub: "FAKE_GITHUB_PORT",
   plainHttp: "PLAIN_HTTP_PORT",
+  signinIssuer: "DISPATCH_E2E_SIGNIN_ISSUER_PORT",
 } as const;
 
 export type HarnessListenerKey = keyof typeof harnessVariables;
@@ -53,22 +64,31 @@ function harnessPort(env: NodeJS.ProcessEnv, variable: string): HarnessPort {
   return { port, variable };
 }
 
-/** The five ports by listener, the one place a port is paired with its variable, as `env` names
- *  them now. Two set variables naming one port are refused: each would pass a per-port check, and
+/** The ports by listener, the one place a port is paired with its variable, as `env` names them
+ *  now. Two set variables naming one port are refused: each would pass a per-port check, and
  *  every consumer would then fail in its own words — the second listener dying on `EADDRINUSE`
  *  without naming a variable. Refused here, where the ports resolve, so every caller refuses it
- *  the same way, including the four Bun listeners. */
+ *  the same way, including the Bun listeners. A's and B's ports take part only in two-process
+ *  mode, the one mode that listens on them, and the issuer's only under `DISPATCH_E2E_SIGNIN=oidc`. */
 export function harnessPorts(
   env: NodeJS.ProcessEnv = process.env
 ): Record<HarnessListenerKey, HarnessPort> {
   const ports = {
     dispatch: harnessPort(env, harnessVariables.dispatch),
+    dispatchA: harnessPort(env, harnessVariables.dispatchA),
+    dispatchB: harnessPort(env, harnessVariables.dispatchB),
     fakeBroker: harnessPort(env, harnessVariables.fakeBroker),
     fakeEnvoy: harnessPort(env, harnessVariables.fakeEnvoy),
     fakeGithub: harnessPort(env, harnessVariables.fakeGithub),
     plainHttp: harnessPort(env, harnessVariables.plainHttp),
+    signinIssuer: harnessPort(env, harnessVariables.signinIssuer),
   };
-  const given = Object.values(ports).filter((entry) => entry.port !== 0);
+  const given = Object.values(ports).filter(
+    (entry) =>
+      entry.port !== 0 &&
+      (harnessProcessCount === 2 || (entry !== ports.dispatchA && entry !== ports.dispatchB)) &&
+      (harnessSignIn === "oidc" || entry !== ports.signinIssuer)
+  );
   const collisions = [...new Set(given.map((entry) => entry.port))]
     .map((port) => ({
       port,

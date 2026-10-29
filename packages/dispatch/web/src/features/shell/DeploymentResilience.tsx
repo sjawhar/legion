@@ -1,5 +1,6 @@
 import { type ReactNode, useEffect, useRef, useState } from "react";
 
+import { REQUEST_DEADLINE_MS } from "../../api/client";
 import {
   borderStrong,
   card,
@@ -11,12 +12,22 @@ import {
 } from "../../theme/classes";
 import * as markdownEngine from "../refs/markdown-engine";
 
-// The session's one reload for a chunk that failed to download. `web/index.html`'s inline script
-// spends the same key for an entry chunk that failed before any of this bundle ran, so a page
-// reloads once per session whichever of the two failed first.
-const CHUNK_RELOAD_STORAGE_KEY = "dispatch.reloaded-for-chunk";
+// The tab's recovery reloads, as a JSON array of the epoch-millisecond times they started: a chunk
+// that failed to download reloads the page while fewer than CHUNK_RELOAD_BUDGET of them fall in the
+// last CHUNK_RELOAD_WINDOW_MS. `web/index.html`'s inline script keeps the same rule on the same key
+// for a script or stylesheet that failed before any of this bundle ran, so the two share one
+// budget whichever failed first. The budget renews, so a tab open across many deployments recovers
+// from each, and a page whose assets fail on every load still stops after three reloads rather than
+// reloading for ever. The earlier once-only key, `dispatch.reloaded-for-chunk`, is neither read nor
+// written: a page of an older build in the same tab keeps spending it on its own.
+const CHUNK_RELOADS_STORAGE_KEY = "dispatch.chunk-reloads";
+const CHUNK_RELOAD_BUDGET = 3;
+const CHUNK_RELOAD_WINDOW_MS = 5 * 60_000;
 const VERSION_CHECK_INTERVAL_MS = 60_000;
 const INDEX_ASSET_PATH = /^\/assets\/index-[^/]+\.js$/;
+// GET /api/v1/dashboard/builds answers `{serving, live}`: the entry chunk of the build the
+// answering process serves, and the entry chunks of the builds every live server process serves.
+const DASHBOARD_BUILDS_PATH = "/api/v1/dashboard/builds";
 
 declare const __DISPATCH_BUILD__: string;
 
@@ -51,35 +62,40 @@ function runningIndexAsset(): string {
       return asset;
     }
   }
-  // The build ID keeps Vite's entry chunk distinct for every deployment. The production index
-  // script above is the normal comparison value; this fallback only applies outside that document.
+  // The build ID keeps Vite's entry chunk distinct for every deployment, including a rebuild with
+  // no source change: vite.config.ts defines it, and this is the reference that writes it into the
+  // entry chunk, so it stays. It is not an entry path, and deploymentChanged compares nothing with
+  // it: a page that names no entry chunk (Vite's dev server loads /src/main.tsx) offers no reload.
   return __DISPATCH_BUILD__;
 }
 
-function newestIndexAsset(html: string): string | undefined {
-  const scripts = html.matchAll(/<script\b[^>]*\bsrc=["']([^"']+)["'][^>]*>/gi);
-  for (const script of scripts) {
-    const asset = indexAssetPath(script[1]);
-    if (asset !== undefined) {
-      return asset;
-    }
-  }
-  return undefined;
-}
-
+// Whether to offer the reload notice: only when every live server process serves one build, and it
+// is not this tab's. One request answers it, from whichever process the load balancer picks, since
+// every process reads the same registry; asking `/` instead named the build of that one process,
+// so during a rolling update or a rollback, while two builds are live, a tab was told to reload
+// into a page the next request could replace with its own build again. Anything but a 200 offers
+// nothing: a 404 from a process older than the route (one of the two during a roll), a 401, a 5xx,
+// and a network failure, which rejects and which the caller swallows. A page that names no entry
+// chunk offers nothing either: the build ID it falls back to is never a live entry path, so under
+// `bun run dev` every focus would offer a reload.
+//
+// The request is held to the read deadline, its body included, so a check Dispatch never answers
+// gives up rather than holding one of the browser's few connections to it for good (INFRA-258).
 async function deploymentChanged(): Promise<boolean> {
-  const health = await fetch("/healthz", { cache: "no-store" });
-  if (!health.ok) {
+  const response = await fetch(DASHBOARD_BUILDS_PATH, {
+    cache: "no-store",
+    signal: AbortSignal.timeout(REQUEST_DEADLINE_MS),
+  });
+  if (response.status !== 200) {
     return false;
   }
-
-  const index = await fetch("/", { cache: "no-store" });
-  if (!index.ok) {
+  const { live } = (await response.json()) as { live?: unknown };
+  if (!Array.isArray(live) || live.length !== 1) {
     return false;
   }
-
-  const latest = newestIndexAsset(await index.text());
-  return latest !== undefined && latest !== runningIndexAsset();
+  const [newest] = live;
+  const running = runningIndexAsset();
+  return typeof newest === "string" && INDEX_ASSET_PATH.test(running) && newest !== running;
 }
 
 // Set from the start of a navigation away from this page (`beforeunload`, or the Navigation API's
@@ -127,6 +143,9 @@ function markPageLeavingForAnotherDocument(event: NavigateEvent): void {
 function markPageStaying(): void {
   leavingPage = false;
   lastDownloadUrl = undefined;
+  // A reload the reader turned down at a leave prompt - one an unconfirmed keyed send raises -
+  // leaves the tab's budget as it was: the page is plainly still theirs, so nothing is spent.
+  chunkReloadAskedAt = undefined;
 }
 
 function markPageStayingWhenVisible(): void {
@@ -135,7 +154,59 @@ function markPageStayingWhenVisible(): void {
   }
 }
 
-// Reloads the page once per session for a chunk that failed to download while online.
+// The recovery reloads of this tab that started within the window before `now`. A value that does
+// not parse as an array of times reads as none, and the next reload overwrites it.
+function recentChunkReloads(now: number): number[] {
+  let stored: unknown;
+  try {
+    stored = JSON.parse(window.sessionStorage.getItem(CHUNK_RELOADS_STORAGE_KEY) ?? "[]");
+  } catch {
+    return [];
+  }
+  if (!Array.isArray(stored)) {
+    return [];
+  }
+  return stored.filter(
+    (time): time is number => typeof time === "number" && now - time < CHUNK_RELOAD_WINDOW_MS
+  );
+}
+
+/**
+ * Spends one of the tab's recovery reloads at `now` and says whether one was left: true records
+ * `now` (dropping the times that have left the window) and the caller reloads; false records
+ * nothing. The same rule as `web/index.html`'s inline script, which shares the key.
+ */
+export function spendChunkReload(now: number): boolean {
+  const recent = recentChunkReloads(now);
+  if (recent.length >= CHUNK_RELOAD_BUDGET) {
+    return false;
+  }
+  recent.push(now);
+  window.sessionStorage.setItem(CHUNK_RELOADS_STORAGE_KEY, JSON.stringify(recent));
+  return true;
+}
+
+// When a chunk failure asked for one of the tab's recovery reloads and the page has not gone yet;
+// undefined otherwise. The reload is spent as the page goes (`pagehide`), at that time, rather than
+// when it is asked for: the browser may never leave - a leave prompt the reader cancels, a reload
+// something else stops - and a reload asked for and never taken would leave the budget one short
+// with the failed chunk still on the page.
+let chunkReloadAskedAt: number | undefined;
+
+function spendAskedChunkReload(): void {
+  const askedAt = chunkReloadAskedAt;
+  if (askedAt === undefined) {
+    return;
+  }
+  chunkReloadAskedAt = undefined;
+  try {
+    spendChunkReload(askedAt);
+  } catch {
+    // A storage the browser refuses the page keeps no record; the reload still happens.
+  }
+}
+
+// Reloads the page for a chunk that failed to download while online, from the tab's budget.
 function reloadForChunkFailure(): void {
   if (leavingPage) {
     return;
@@ -145,10 +216,13 @@ function reloadForChunkFailure(): void {
   if (!navigator.onLine) {
     return;
   }
-  if (window.sessionStorage.getItem(CHUNK_RELOAD_STORAGE_KEY) === "true") {
+  if (chunkReloadAskedAt !== undefined) {
     return;
   }
-  window.sessionStorage.setItem(CHUNK_RELOAD_STORAGE_KEY, "true");
+  if (recentChunkReloads(Date.now()).length >= CHUNK_RELOAD_BUDGET) {
+    return;
+  }
+  chunkReloadAskedAt = Date.now();
   window.location.reload();
 }
 
@@ -157,12 +231,16 @@ function reloadForChunkFailure(): void {
 // prevented failure of the chunk itself resolves the import with `undefined`, which the importer
 // reads as a module and fails on with a TypeError that says nothing about the download; a
 // prevented stylesheet failure loads the module without its styles. So the handler never
-// prevents it: the importer always sees the failure itself, and the page also reloads at most
-// once per session, never while it is being left.
+// prevents it: the importer always sees the failure itself, and the page also reloads from the
+// tab's budget, never while it is being left. A failed chunk or stylesheet Vite preloaded through a
+// `<link>` is seen first by `web/index.html`'s inline script, which reloads; a reload fires
+// `beforeunload` before it returns, so this event for the same failure finds the page being left
+// and spends nothing more.
 export function installChunkFailureRecovery(): () => void {
   const navigation = window.navigation;
   window.addEventListener("beforeunload", markPageLeaving);
   navigation?.addEventListener("navigate", markPageLeavingForAnotherDocument);
+  window.addEventListener("pagehide", spendAskedChunkReload);
   window.addEventListener("pageshow", markPageStaying);
   // Captured on the window, so a handler that stops a press from propagating cannot hide it.
   window.addEventListener("pointerdown", markPageStaying, { capture: true });
@@ -173,6 +251,7 @@ export function installChunkFailureRecovery(): () => void {
   return () => {
     window.removeEventListener("beforeunload", markPageLeaving);
     navigation?.removeEventListener("navigate", markPageLeavingForAnotherDocument);
+    window.removeEventListener("pagehide", spendAskedChunkReload);
     window.removeEventListener("pageshow", markPageStaying);
     window.removeEventListener("pointerdown", markPageStaying, { capture: true });
     window.removeEventListener("keydown", markPageStaying, { capture: true });
@@ -186,8 +265,8 @@ export function installChunkFailureRecovery(): () => void {
 // code-split so the issue route does not pay for them until a document mounts. A chunk that
 // fails to download while the browser is offline is retried once the network returns; Chromium
 // caches a failed module fetch in its module map, so that retry can reject again, in which case
-// the failure propagates like an online one and `reloadForChunkFailure` has already reloaded
-// once per session.
+// the failure propagates like an online one and reaches `reloadForChunkFailure`, which reloads
+// while the tab's budget lasts.
 export async function importWhenOnline<T>(load: () => Promise<T>): Promise<T> {
   for (;;) {
     try {
@@ -205,7 +284,7 @@ export async function importWhenOnline<T>(load: () => Promise<T>): Promise<T> {
 
 /**
  * Keeps long-lived Dispatch tabs able to render Markdown after a SPA deployment, and offers a
- * deliberate reload when the page's entry chunk has been replaced.
+ * deliberate reload once every live server process serves one build other than the page's.
  */
 export function DeploymentResilience(): ReactNode {
   const [updateAvailable, setUpdateAvailable] = useState(false);

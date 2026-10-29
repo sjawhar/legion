@@ -25,7 +25,12 @@ import {
   positionText,
   resolveIssueDocumentId,
 } from "../dispatch-execute";
-import { DispatchClient } from "../dispatch-http";
+import {
+  DISPATCH_WRITE_RETRY,
+  DispatchClient,
+  DispatchWriteLandedError,
+  type DispatchWriteRetry,
+} from "../dispatch-http";
 import { followedAsk } from "../dispatch-subscribe";
 import { ToolInputError } from "../tool-input-errors";
 import { fakeSearchResponse } from "./fake-search-response";
@@ -36,6 +41,9 @@ function response(body: unknown, status = 200): Response {
     headers: { "Content-Type": "application/json" },
   });
 }
+
+/** The production attempts at each write, without waiting out the pauses between them. */
+const writeRetry: DispatchWriteRetry = { ...DISPATCH_WRITE_RETRY, pause: async () => undefined };
 
 function deferred<T>() {
   let resolve!: (value: T | PromiseLike<T>) => void;
@@ -80,6 +88,7 @@ function executeAsk(args: Record<string, unknown>, fetchImpl: typeof fetch) {
     env: {},
     exec: repoExec("owner/repo"),
     fetchImpl,
+    writeRetry,
   });
 }
 
@@ -325,6 +334,7 @@ describe("executeDispatchTool", () => {
         env: {},
         exec: repoExec("owner/repo"),
         fetchImpl: fetchImpl as typeof fetch,
+        writeRetry,
       }).then(
         () => "",
         (error: Error) => error.message
@@ -339,7 +349,10 @@ describe("executeDispatchTool", () => {
       "so the write may or may not have reached Dispatch: check whether it took effect before retrying it."
     );
     expect(write).not.toContain("a retry may succeed");
-    expect(requests).toEqual(["POST /api/v1/issues/DSP-1/messages"]);
+    // Nothing here says this Dispatch runs the keyed layer: the gateway answers its /healthz too,
+    // so the write is asked once and reported, and the read goes once.
+    expect(requests).toEqual(["POST /api/v1/issues/DSP-1/messages", "GET /healthz"]);
+    requests.length = 0;
 
     const read = await run("dispatch_read", { issue: "DSP-1" });
     expect(read).toStartWith(
@@ -347,12 +360,16 @@ describe("executeDispatchTool", () => {
     );
     expect(read).not.toContain("<");
     expect(read).toEndWith("so a retry may succeed.");
+    // A read is never asked again: each route the read touched went once.
+    expect(requests.every((request) => request.startsWith("GET "))).toBe(true);
+    expect(new Set(requests).size).toBe(requests.length);
   });
 
   // Whether a write a gateway answered may have reached Dispatch decides what the agent does next.
   // A 5xx can come back after Dispatch applied it, so the agent checks before posting again; a 408
   // or 429 is the gateway's own timeout or rate limit, sent before it forwards the request, so the
-  // message was not posted and a retry may succeed.
+  // message was not posted and a retry may succeed. The gateway answers every attempt the same, so
+  // the last attempt's answer is the one the agent reads.
   test("tells dispatch_message whether a gateway's answer may have reached Dispatch", async () => {
     const gateway = ", which looks like a proxy or gateway page rather than Dispatch's own answer";
     for (const [status, statusText, advice] of [
@@ -381,6 +398,7 @@ describe("executeDispatchTool", () => {
         env: {},
         exec: repoExec("owner/repo"),
         fetchImpl: fetchImpl as unknown as typeof fetch,
+        writeRetry,
       }).then(
         () => "",
         (error: Error) => error.message
@@ -3638,6 +3656,7 @@ describe("executeDispatchTool", () => {
         env: {},
         exec: repoExec("owner/repo"),
         fetchImpl: fetchImpl as typeof fetch,
+        writeRetry,
       })
     ).rejects.toThrow(
       `INTERNAL: internal server error; one of ${pullRequest} may already be linked from another issue (a URL links exactly one issue)`
@@ -3674,6 +3693,7 @@ describe("executeDispatchTool", () => {
       env: {},
       exec: repoExec("owner/repo"),
       fetchImpl: fetchImpl as typeof fetch,
+      writeRetry,
     }).then(
       () => "",
       (error: Error) => error.message
@@ -3758,18 +3778,31 @@ describe("executeDispatchTool", () => {
     ).rejects.toThrow(/title is 1 characters over the 1000-character limit \(1001\/1000\)/);
   });
 
-  /** Records every request; the messages route and the PATCH answer with the given responses. */
+  /**
+   * Records every request; the messages route and the PATCH answer with the given responses. This
+   * Dispatch runs the keyed layer: its own answers (JSON) echo the request's key and its /healthz
+   * says `idempotency_keys`, so a write that fails without an answer of Dispatch's own is resent.
+   */
   function closingServer(answers: { message: () => Response; patch: () => Response }) {
     const requests: Array<{ method: string; pathname: string; body?: unknown }> = [];
     const fetchImpl = async (url: RequestInfo | URL, init?: RequestInit): Promise<Response> => {
       const pathname = new URL(String(url)).pathname;
       const method = init?.method ?? "GET";
+      if (pathname === "/healthz") return response({ status: "ok", idempotency_keys: true });
       requests.push({
         method,
         pathname,
         ...(init?.body === undefined ? {} : { body: JSON.parse(String(init.body)) }),
       });
-      if (pathname === "/api/v1/issues/ACME-175/messages") return answers.message();
+      const key = new Headers(init?.headers).get("Idempotency-Key");
+      const echoed = (given: Response): Response => {
+        if (key === null || !(given.headers.get("Content-Type") ?? "").includes("application/json"))
+          return given;
+        const copy = new Response(given.body, given);
+        copy.headers.set("Idempotency-Key", key);
+        return copy;
+      };
+      if (pathname === "/api/v1/issues/ACME-175/messages") return echoed(answers.message());
       if (pathname !== "/api/v1/issues/ACME-175") {
         throw new Error(`unexpected request: ${method} ${pathname}`);
       }
@@ -3783,7 +3816,7 @@ describe("executeDispatchTool", () => {
           external_links: [],
         });
       }
-      return answers.patch();
+      return echoed(answers.patch());
     };
     return { requests, fetchImpl: fetchImpl as typeof fetch };
   }
@@ -3805,6 +3838,7 @@ describe("executeDispatchTool", () => {
       env: {},
       exec: repoExec("owner/repo"),
       fetchImpl,
+      writeRetry,
     });
 
   test("dispatch_issue_update posts the reason as a message, then closes the issue", async () => {
@@ -3866,21 +3900,30 @@ describe("executeDispatchTool", () => {
     });
 
   // A request that got no answer, the client's timeout and a transport error, each with the
-  // message the client reports for it. The reason's post and the close's PATCH each add their own
-  // account after it, as a sentence of its own, since both messages end one.
+  // message the client reports for it (given the request it names) and the attempts the write
+  // made: a timeout is the call's deadline and ends it, saying the write may or may not have taken
+  // effect, while a transport failure is asked again under the write's key until its five attempts
+  // run out. The reason's post and the close's PATCH each add their own account after it, as a
+  // sentence of its own, since both messages end one.
   const unanswered = [
     [
       (): Response => {
         throw new DOMException("The operation timed out.", "TimeoutError");
       },
-      "The operation timed out.",
+      (request: string) =>
+        `${request} had no definitive answer when its deadline ended it (its only attempt), and ` +
+        "an attempt of the write may have reached Dispatch, so it may or may not have taken " +
+        "effect: check whether it did before retrying it.",
+      1,
     ],
     [
       (): Response => {
         throw new TypeError("fetch failed");
       },
-      "Dispatch at http://dispatch.test is unreachable: fetch failed. If the Dispatch URL " +
+      (_request: string) =>
+        "Dispatch at http://dispatch.test is unreachable: fetch failed. If the Dispatch URL " +
         "changed, restart this agent process so it picks up the new configuration.",
+      5,
     ],
   ] as const;
 
@@ -3890,7 +3933,9 @@ describe("executeDispatchTool", () => {
   // where the client's advice that a retry may succeed stands) or a status that cannot clear. A
   // 5xx, Dispatch's own included (it can fail after it committed), a timeout or a transport error
   // leaves the reason possibly posted, and that account replaces the client's advice. After an
-  // error's own message it joins a clause, or starts a sentence where the message ended one.
+  // error's own message it joins a clause, or starts a sentence where the message ended one. Every
+  // failure but a timeout and a refusal that cannot clear is asked again until the write's five
+  // attempts run out, each failing the same way, so the last attempt's account is the agent's.
   test("dispatch_issue_update says whether a failed post of the reason leaves it posted", async () => {
     const answered = (status: string, page: string) =>
       `HTTP_${status.slice(0, 3)}: POST http://dispatch.test/api/v1/issues/ACME-175/messages ` +
@@ -3909,40 +3954,54 @@ describe("executeDispatchTool", () => {
     const reset =
       "The socket connection was closed unexpectedly. For more information, pass `verbose: true` " +
       "in the second argument to fetch()";
-    for (const [message, expected] of [
+    for (const [message, expected, attempts] of [
       [
         () => gatewayPage(502, "Bad Gateway"),
         `${answered("502 Bad Gateway", "502 Bad Gateway")}${unknown}`,
+        5,
       ],
       [
         () => refusal(500, "INTERNAL", "internal server error"),
         `INTERNAL: internal server error${unknown}`,
+        5,
       ],
-      ...unanswered.map(([fail, told]) => [fail, `${told}${unknownSentence}`] as const),
+      ...unanswered.map(
+        ([fail, told, tries]) =>
+          [
+            fail,
+            `${told("POST http://dispatch.test/api/v1/issues/ACME-175/messages")}${unknownSentence}`,
+            tries,
+          ] as const
+      ),
       [
         (): Response => {
           throw new Error(refused);
         },
         `${refused}${unknownSentence}`,
+        5,
       ],
       [
         (): Response => {
           throw new Error(reset);
         },
         `${reset}${unknown}`,
+        5,
       ],
       [
         () => gatewayPage(408, "Request Timeout"),
         `${answered("408 Request Timeout", "408 Request Timeout")}${retry}${notPosted}`,
+        5,
       ],
       [
         () => gatewayPage(429, "Too Many Requests"),
         `${answered("429 Too Many Requests", "429 Too Many Requests")}${retry}${notPosted}`,
+        5,
       ],
       [
         () => gatewayPage(404, "Not Found"),
         `${answered("404 Not Found", "404 Not Found")}, so a retry gets the same answer until the ` +
           `Dispatch URL, or whatever answers in its place, is fixed${notPosted}`,
+        1,
       ],
     ] as const) {
       const server = closingServer({
@@ -3958,7 +4017,10 @@ describe("executeDispatchTool", () => {
       );
 
       expect(failure).toBe(expected);
-      expect(server.requests.map(({ method }) => method)).toEqual(["GET", "POST"]);
+      expect(server.requests.map(({ method }) => method)).toEqual([
+        "GET",
+        ...Array<string>(attempts).fill("POST"),
+      ]);
     }
   });
 
@@ -4019,7 +4081,11 @@ describe("executeDispatchTool", () => {
           "Retrying this call posts its reason again, so retry with a reason that points at " +
           "message message-7"
       );
-      expect(server.requests.map(({ method }) => method)).toEqual(["GET", "POST", "PATCH"]);
+      expect(server.requests.map(({ method }) => method)).toEqual([
+        "GET",
+        "POST",
+        ...Array<string>(5).fill("PATCH"),
+      ]);
     }
   });
 
@@ -4039,14 +4105,22 @@ describe("executeDispatchTool", () => {
       "and the close may or may not have taken effect. Read the issue's status before retrying: " +
       "done means it closed; otherwise retry with a reason that points at message message-7, " +
       "since retrying this call posts its reason again";
-    for (const [patch, expected] of [
-      ...unanswered.map(([fail, told]) => [fail, `${told}${unknownSentence}`] as const),
-      [() => refusal(502, "HTTP_502", "Bad Gateway"), `HTTP_502: Bad Gateway${unknown}`],
+    for (const [patch, expected, attempts] of [
+      ...unanswered.map(
+        ([fail, told, tries]) =>
+          [
+            fail,
+            `${told("PATCH http://dispatch.test/api/v1/issues/ACME-175")}${unknownSentence}`,
+            tries,
+          ] as const
+      ),
+      [() => refusal(502, "HTTP_502", "Bad Gateway"), `HTTP_502: Bad Gateway${unknown}`, 5],
       [
         () => gatewayPage(502, "Bad Gateway"),
         "HTTP_502: PATCH http://dispatch.test/api/v1/issues/ACME-175 answered 502 Bad Gateway " +
           'with a body that is not Dispatch\'s error JSON ("502 Bad Gateway"), which looks like a ' +
           `proxy or gateway page rather than Dispatch's own answer${unknown}`,
+        5,
       ],
     ] as const) {
       const server = closingServer({
@@ -4060,7 +4134,92 @@ describe("executeDispatchTool", () => {
       expect(failure.message).toBe(expected);
       expect(failure.message).not.toContain("did not close");
       expect(failure.message).not.toContain("a retry may succeed");
-      expect(server.requests.map(({ method }) => method)).toEqual(["GET", "POST", "PATCH"]);
+      expect(server.requests.map(({ method }) => method)).toEqual([
+        "GET",
+        "POST",
+        ...Array<string>(attempts).fill("PATCH"),
+      ]);
+    }
+  });
+
+  // KEY_COMMITTED says a write landed and its answer was lost. On the close's own PATCH, the call's
+  // last write, that is the call's landing, which the CLI reports as done; on the closing reason,
+  // a step before it, the close was never sent, so the call fails and says the reason is there.
+  test("dispatch_issue_update reads KEY_COMMITTED as a landing on the close, and a failure on the reason", async () => {
+    const committed = () =>
+      refusal(409, "KEY_COMMITTED", "the write landed and its answer was lost");
+    const closed = closingServer({
+      message: () => response({ id: "message-7", issue_key: "ACME-175" }),
+      patch: committed,
+    });
+    const landing = await closeCall(closed.fetchImpl).catch((error: unknown) => error);
+    expect(landing).toBeInstanceOf(DispatchWriteLandedError);
+    expect(closed.requests.map(({ method }) => method)).toEqual(["GET", "POST", "PATCH"]);
+
+    const reasoned = closingServer({
+      message: committed,
+      patch: () => {
+        throw new Error("the close must not be sent");
+      },
+    });
+    const failure = await closeCall(reasoned.fetchImpl).catch((error: unknown) => error);
+    expect(failure).not.toBeInstanceOf(DispatchWriteLandedError);
+    expect((failure as Error).message).toBe(
+      "POST http://dispatch.test/api/v1/issues/ACME-175/messages was made, but its answer was " +
+        "lost on the way back (KEY_COMMITTED), so this command cannot print what it made: read it " +
+        "back with `dispatch read`, or with the matching list for something it created. That was " +
+        "the closing reason, so the close was not sent: read the issue's messages for it, then " +
+        "close with a reason that points at it, since retrying this call posts its reason again."
+    );
+    expect(reasoned.requests.map(({ method }) => method)).toEqual(["GET", "POST"]);
+  });
+
+  // A close whose last attempt alone says it never reached Dispatch (a gateway's 429), or that
+  // Dispatch still runs an earlier attempt (409 KEY_IN_FLIGHT), after an attempt that may have
+  // reached it (a 502, a transport failure), may have closed the issue: the agent is told to read
+  // the status before retrying, never that the issue did not close.
+  test("dispatch_issue_update says the close is unknown when an earlier attempt may have reached Dispatch", async () => {
+    const unknownSentence =
+      " The reason already landed as message message-7 (dispatch://ACME-175/message/message-7), " +
+      "and the close may or may not have taken effect. Read the issue's status before retrying: " +
+      "done means it closed; otherwise retry with a reason that points at message message-7, " +
+      "since retrying this call posts its reason again";
+    const inFlight = () =>
+      refusal(409, "KEY_IN_FLIGHT", "an earlier request with this key is still running");
+    for (const [first, then, expected] of [
+      [
+        () => gatewayPage(502, "Bad Gateway"),
+        () => gatewayPage(429, "Too Many Requests"),
+        "PATCH http://dispatch.test/api/v1/issues/ACME-175 answered 429 Too Many Requests with " +
+          'a body that is not Dispatch\'s error JSON ("429 Too Many Requests"), which looks like ' +
+          "a proxy or gateway page rather than Dispatch's own answer (the last of 5 attempts), " +
+          "and an earlier attempt of the write may have reached Dispatch, so it may or may not " +
+          `have taken effect: check whether it did before retrying it.${unknownSentence}`,
+      ],
+      [
+        (): Response => {
+          throw new TypeError("fetch failed");
+        },
+        inFlight,
+        "KEY_IN_FLIGHT: an earlier request with this key is still running (the last of 5 " +
+          "attempts), and Dispatch was still running an earlier attempt of the write, so it may " +
+          `or may not have taken effect: check whether it did before retrying it.${unknownSentence}`,
+      ],
+    ] as const) {
+      let patches = 0;
+      const server = closingServer({
+        message: () => response({ id: "message-7", issue_key: "ACME-175" }),
+        patch: () => (++patches === 1 ? first() : then()),
+      });
+
+      const failure = await closeCall(server.fetchImpl).then(
+        () => "",
+        (error: Error) => error.message
+      );
+
+      expect(failure).toBe(expected);
+      expect(failure).not.toContain("did not close");
+      expect(patches).toBe(5);
     }
   });
 
@@ -5175,8 +5334,10 @@ describe("executeDispatchTool", () => {
             {
               id: "ask-1",
               state: "open",
+              author: { kind: "session", id: "session-1" },
               question: "Which API?",
-              anchor: { artifact_id: "artifact-42" },
+              anchor: { artifact_id: "artifact-42", quote: "the API" },
+              created_at: "2026-10-20T09:00:00Z",
             },
           ],
         });
@@ -5200,14 +5361,323 @@ describe("executeDispatchTool", () => {
     });
 
     expect(result).toEqual({
-      text: "Version three\n\nOpen anchored asks/comments: ask ask-1",
+      text: [
+        "Version three",
+        "",
+        "Open anchored threads:",
+        "",
+        "ask ask-1 · session session-1 · 2026-10-20T09:00:00Z",
+        "> the API",
+        "Question: Which API?",
+      ].join("\n"),
       details: { issue: "DSP-42" },
     });
     expect(followedAsk(result.details)).toBeNull();
     expect(requests).toEqual([
       "/api/v1/issues/DSP-42",
       "/api/v1/artifacts/artifact-42/versions/3",
-      "/api/v1/issues/DSP-42/comments?artifact=artifact-42",
+      "/api/v1/issues/DSP-42/comments",
+    ]);
+  });
+
+  // A reply carries no anchor, so a read of the comments anchored on the document misses every
+  // reply: a thread a person reopened by replying read as its root's id alone, and the reply's text
+  // never reached the agent (sjawhar/legion#2366). A person's reply under an open ask is the same:
+  // the ask printed its question alone.
+  test("dispatch_doc_read prints each open anchored thread with its root and every reply", async () => {
+    const requests: string[] = [];
+    const agent = { kind: "session", id: "session-1" };
+    const sami = { kind: "user", id: "sami" };
+    const comment = (fields: Record<string, unknown>) => ({
+      issue_key: "DSP-42",
+      author: agent,
+      anchor: null,
+      reply_to: null,
+      ask_id: null,
+      turn: null,
+      resolved: false,
+      resolved_by: null,
+      resolved_at: null,
+      edited_at: null,
+      suggestion: null,
+      mentions: [],
+      deliveries: [],
+      ...fields,
+    });
+    const fetchImpl = async (url: RequestInfo | URL): Promise<Response> => {
+      const target = new URL(String(url));
+      requests.push(target.pathname + target.search);
+      if (target.pathname === "/api/v1/issues/DSP-42") {
+        return response({
+          key: "DSP-42",
+          primary_artifact_id: "artifact-42",
+          artifacts: [{ id: "artifact-42", slug: "spec", name: "spec.md", primary: true }],
+          open_asks: [
+            {
+              id: "ask-open",
+              state: "open",
+              author: agent,
+              question: "Which release carries it?",
+              anchor: { artifact_id: "artifact-42", quote: "the release" },
+              created_at: "2026-10-20T09:00:00Z",
+            },
+            {
+              id: "ask-elsewhere",
+              state: "open",
+              author: agent,
+              question: "Asked on another document?",
+              anchor: { artifact_id: "artifact-99", quote: "other" },
+              created_at: "2026-10-20T09:30:00Z",
+            },
+          ],
+        });
+      }
+      if (target.pathname === "/api/v1/artifacts/artifact-42/text") {
+        return response({ markdown: "# Spec", version: 4, token: "sha256:spec" });
+      }
+      if (target.pathname === "/api/v1/issues/DSP-42/comments") {
+        return response([
+          comment({
+            id: "c-root",
+            body: "Can this ship Friday?",
+            anchor: { artifact_id: "artifact-42", mark_id: "m-1", quote: "ship Friday" },
+            created_at: "2026-10-20T10:00:00Z",
+          }),
+          comment({
+            id: "c-resolved",
+            body: "Old nit.",
+            anchor: { artifact_id: "artifact-42", mark_id: "m-2", quote: "nit" },
+            resolved: true,
+            resolved_by: agent,
+            resolved_at: "2026-10-20T12:00:00Z",
+            created_at: "2026-10-20T10:30:00Z",
+          }),
+          comment({
+            id: "c-other-document",
+            body: "On another document.",
+            anchor: { artifact_id: "artifact-99", mark_id: "m-3", quote: "other" },
+            created_at: "2026-10-20T10:40:00Z",
+          }),
+          comment({ id: "c-issue", body: "An issue comment.", created_at: "2026-10-20T10:50:00Z" }),
+          comment({
+            id: "c-ask-reply",
+            body: "The 4.2 release, if QA passes.",
+            ask_id: "ask-open",
+            author: sami,
+            created_at: "2026-10-20T10:55:00Z",
+          }),
+          comment({
+            id: "c-ask-elsewhere-reply",
+            body: "Reply under the ask on another document.",
+            ask_id: "ask-elsewhere",
+            author: sami,
+            created_at: "2026-10-20T10:56:00Z",
+          }),
+          comment({
+            id: "c-resolved-ask-reply",
+            body: "Reply under a resolved ask.",
+            ask_id: "ask-resolved",
+            author: sami,
+            created_at: "2026-10-20T10:57:00Z",
+          }),
+          comment({
+            id: "c-reply-agent",
+            body: "Closing: shipped.",
+            reply_to: "c-root",
+            created_at: "2026-10-21T10:00:00Z",
+          }),
+          comment({
+            id: "c-resolved-reply",
+            body: "Fixed.",
+            reply_to: "c-resolved",
+            created_at: "2026-10-21T11:00:00Z",
+          }),
+          // Sami's reply reopened the root, which reads resolved: false again.
+          comment({
+            id: "c-reply-sami",
+            body: "Not yet: QA found a crash on resume.",
+            reply_to: "c-root",
+            author: sami,
+            created_at: "2026-10-22T10:00:00Z",
+          }),
+        ]);
+      }
+      throw new Error(`unexpected request: ${target.pathname}`);
+    };
+
+    const result = await executeDispatchTool({
+      tool: "dispatch_doc_read",
+      args: { issue: "DSP-42" },
+      cwd: "/workspace",
+      host: "omp",
+      config,
+      env: {},
+      exec: repoExec("owner/repo"),
+      fetchImpl: fetchImpl as typeof fetch,
+    });
+
+    expect(result).toEqual({
+      text: [
+        "# Spec",
+        "",
+        "Document token: sha256:spec",
+        "",
+        "Open anchored threads:",
+        "",
+        "ask ask-open · session session-1 · 2026-10-20T09:00:00Z",
+        "> the release",
+        "Question: Which release carries it?",
+        "reply c-ask-reply · user sami · 2026-10-20T10:55:00Z",
+        "Body: The 4.2 release, if QA passes.",
+        "",
+        "comment c-root · session session-1 · 2026-10-20T10:00:00Z",
+        "> ship Friday",
+        "Body: Can this ship Friday?",
+        "reply c-reply-agent · session session-1 · 2026-10-21T10:00:00Z",
+        "Body: Closing: shipped.",
+        "reply c-reply-sami · user sami · 2026-10-22T10:00:00Z",
+        "Body: Not yet: QA found a crash on resume.",
+      ].join("\n"),
+      details: { issue: "DSP-42" },
+    });
+    // One read of the issue's comments, unfiltered, so the replies come back with their roots.
+    expect(requests).toEqual([
+      "/api/v1/issues/DSP-42",
+      "/api/v1/artifacts/artifact-42/text",
+      "/api/v1/issues/DSP-42/comments",
+    ]);
+  });
+
+  test("dispatch_doc_read prints a project document's open anchored threads with their replies", async () => {
+    const requests: string[] = [];
+    const agent = { kind: "session", id: "session-1" };
+    const sami = { kind: "user", id: "sami" };
+    const notes = {
+      id: "artifact-42",
+      issue_key: null,
+      project: "CORE",
+      ref_key: "CORE/notes",
+      slug: "notes",
+      name: "notes.md",
+      kind: "doc",
+      primary: false,
+      created_by: agent,
+      created_at: "2026-09-18T00:00:00Z",
+      versions: [],
+    };
+    const comment = (fields: Record<string, unknown>) => ({
+      issue_key: null,
+      artifact_id: "artifact-42",
+      author: agent,
+      anchor: null,
+      reply_to: null,
+      ask_id: null,
+      turn: null,
+      resolved: false,
+      resolved_by: null,
+      resolved_at: null,
+      edited_at: null,
+      suggestion: null,
+      mentions: [],
+      deliveries: [],
+      ...fields,
+    });
+    const fetchImpl = async (url: RequestInfo | URL): Promise<Response> => {
+      const target = new URL(String(url));
+      requests.push(target.pathname + target.search);
+      if (target.pathname === "/api/v1/projects/CORE/artifacts/notes") return response(notes);
+      if (target.pathname === "/api/v1/projects/CORE/artifacts") return response([notes]);
+      if (target.pathname === "/api/v1/artifacts/artifact-42/text") {
+        return response({ markdown: "# Notes", version: 1 });
+      }
+      if (target.pathname === "/api/v1/artifacts/artifact-42/asks") {
+        return response([
+          {
+            id: "ask-answered",
+            state: "answered",
+            author: agent,
+            question: "Already settled?",
+            anchor: { artifact_id: "artifact-42", quote: "settled" },
+            created_at: "2026-10-19T09:00:00Z",
+          },
+          {
+            id: "ask-open",
+            state: "open",
+            author: agent,
+            question: "Keep the runbook?",
+            anchor: { artifact_id: "artifact-42", quote: "runbook" },
+            created_at: "2026-10-20T09:00:00Z",
+          },
+        ]);
+      }
+      if (target.pathname === "/api/v1/artifacts/artifact-42/comments") {
+        return response([
+          comment({
+            id: "c-root",
+            body: "Is step 3 still right?",
+            anchor: { artifact_id: "artifact-42", mark_id: "m-1", quote: "step 3" },
+            created_at: "2026-10-20T10:00:00Z",
+          }),
+          comment({
+            id: "c-reply",
+            body: "No: it now runs before step 2.",
+            reply_to: "c-root",
+            author: sami,
+            created_at: "2026-10-21T10:00:00Z",
+          }),
+          comment({
+            id: "c-answered-ask-reply",
+            body: "Settled: keep it.",
+            ask_id: "ask-answered",
+            anchor: { artifact_id: "artifact-42", quote: "settled" },
+            author: sami,
+            created_at: "2026-10-21T11:00:00Z",
+          }),
+          comment({
+            id: "c-ask-reply",
+            body: "Keep it, but trim the rollback section.",
+            ask_id: "ask-open",
+            author: sami,
+            created_at: "2026-10-21T12:00:00Z",
+          }),
+        ]);
+      }
+      throw new Error(`unexpected request: ${target.pathname}`);
+    };
+
+    const result = await executeDispatchTool({
+      tool: "dispatch_doc_read",
+      args: { project: "CORE", artifact: "notes" },
+      cwd: "/workspace",
+      host: "omp",
+      config,
+      env: {},
+      exec: repoExec("owner/repo"),
+      fetchImpl: fetchImpl as typeof fetch,
+    });
+
+    expect(result).toEqual({
+      text: [
+        "# Notes",
+        "",
+        "Open anchored threads:",
+        "",
+        "ask ask-open · session session-1 · 2026-10-20T09:00:00Z",
+        "> runbook",
+        "Question: Keep the runbook?",
+        "reply c-ask-reply · user sami · 2026-10-21T12:00:00Z",
+        "Body: Keep it, but trim the rollback section.",
+        "",
+        "comment c-root · session session-1 · 2026-10-20T10:00:00Z",
+        "> step 3",
+        "Body: Is step 3 still right?",
+        "reply c-reply · user sami · 2026-10-21T10:00:00Z",
+        "Body: No: it now runs before step 2.",
+      ].join("\n"),
+      details: { project: "CORE", document: "CORE/notes" },
+    });
+    expect(requests.filter((request) => request.endsWith("/comments"))).toEqual([
+      "/api/v1/artifacts/artifact-42/comments",
     ]);
   });
 
@@ -7369,7 +7839,10 @@ describe("executeDispatchTool", () => {
 
       expect(result.details).toMatchObject({ issue: "DSP-42", artifact: "artifact-42" });
       expect(requests).toHaveLength(1);
-      const form = requests[0]?.init.body as FormData;
+      const sent = requests[0]?.init ?? {};
+      const form = await new Response(sent.body, {
+        headers: sent.headers as Record<string, string>,
+      }).formData();
       const file = form.get("file");
       expect(file).toBeInstanceOf(Blob);
       expect(await (file as Blob).text()).toBe("artifact from Dispatch cwd");
