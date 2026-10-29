@@ -2,18 +2,18 @@
   "schemaVersion": 1,
   "phase": "review",
   "issue": "INFRA-715",
-  "completed": "2026-10-29T19:55:00Z",
-  "round": 6,
+  "completed": "2026-10-29T21:45:00Z",
+  "round": 7,
   "decision": "changes_requested",
-  "reviewedCodeHead": "4be0d238b669",
+  "reviewedCodeHead": "37f334f05032",
   "critical": 0,
-  "important": 0,
-  "minor": 2,
+  "important": 2,
+  "minor": 0,
   "keyFindings": [
-    {"severity": "minor", "file": "packages/envoy/internal/dispatch/docs/upload_anchors_test.go", "description": "No committed test pins that two matches of a quote inside one code block count as one place. Both review agents changed MarkNotAllowedError.At to the refused range's start (find.go:1138) and every docs and pmdoc test still passed, while the 400 then read 'two code blocks … out of them' for one block. The unit case 'one place its quote stands in twice' passes one error value twice and never runs the mark writer. Add an upload row with the quote twice in one code block, expecting 'a code block … out of it'."},
-    {"severity": "minor", "file": "packages/envoy/internal/dispatch/pmdoc/find.go", "description": "The At doc read as where the refused text (range) begins. Fixed by the reviewer in 8ca80716 (comment only): the start of the block's text run."}
+    {"severity": "important", "file": "packages/dispatch/e2e/block-references.e2e.ts", "description": "CI run 40942207302 (the pull_request merge ref with main a0f351e9) fails the dispatch lane at `bunx tsc --noEmit`: e2e/block-references.e2e.ts(235,30) Cannot find name 'getArtifactText'. Main's #2502 (8e0cb8c41) rewrote this file's import block and dropped getArtifactText, which this PR's new test uses at its lines 32 and 259; git merge-tree of 8d4fbcf3 with main a0f351e9 merges cleanly and reproduces the missing import. Merging would break main's dispatch lane. Forward-merge main (never rebase) and restore the import, or adapt the test to #2502's helpers."},
+    {"severity": "important", "file": "packages/envoy/internal/dispatch/docs/upload_memory_test.go", "description": "envoy-go-race fails: the docs package hits go test's 30m timeout (FAIL docs 1801.2s; the failing settlement_credit tests report their deadline budget left, then panic: test timed out). The budget is tight on other branches too (INFRA-592 and INFRA-607 also timed out; INFRA-757 passed in 1336s), but this PR adds about 220 s of race time to the package: its three memory-bound tests take 69.7 s, 85.1 s and 65.5 s under -race locally (2 vCPU; non-race they take a few seconds). They measure heap growth, which race instrumentation distorts, and they test no concurrency. Skip them under the race detector (a race build-tagged constant, as the package's *_race_test.go files do for theirs) so the PR does not push the race lane past its budget, and say why in the skip."}
   ],
-  "accepted": "Round-5 findings fixed in 4be0d238 and confirmed: places are counted per kind (At is sound: each code block and the front matter hold one Yjs text run), the order test pins nearest first, err == ErrTargetNotFound, Find inlines find, and the loop decides each outcome where it happens with identical behaviour. Threads PRRT_kwDORFy7ds6xsYkA, …YkH, …YkM, …YkV, …YkY accepted. Not a defect: refusedPlace's structure (grouping by display text, a separate count loop), since it is correct and tested; counting is quadratic only in the error path (about 1 s at 65,536 refused code blocks), recorded under Not proven.",
-  "ci": "No code head has finished CI. Run 40936050067 at 4be0d238 was still all queued at 19:13Z when my comment-only push 8ca80716 replaced it. A change request does not wait.",
-  "thermonuclear": "Run once at 4be0d238: deep review approve (two minors: the one-code-block test gap, quadratic dedupe), with a real-server check of the one-block case; code quality: refusedPlace structure, the same test gap and the At doc."
+  "accepted": "Round-6 finding fixed in 37f334f0: the row 'an ask into one code block twice' pins one place per block; thread PRRT_kwDORFy7ds6xuR36 accepted. Runtime code is unchanged since 4be0d238, where the thermonuclear pair ran; this round's delta is that one test row.",
+  "ci": "Run 40942207302 at 37f334f0 completed 21:14Z: green lint, test, envoy-go, dispatch-memory, dispatch-multiprocess, dispatch-browser-multiprocess, docs, envoy-infra-go, envoy-smoke, envoy-session-stall, listener-server-change, worker-image; red dispatch (typecheck of the merge ref, finding 1) and envoy-go-race (docs package timeout, finding 2); ci-ok red as their aggregate. Required set (lint, typecheck, test, pr-title): lint and test success, typecheck skipped (counts as passing), pr-title success at 37f334f0.",
+  "thermonuclear": "Not re-run: this round's delta is one test row; the pair ran at 4be0d238 with identical runtime code."
 }
