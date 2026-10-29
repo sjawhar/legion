@@ -2,9 +2,9 @@
   "schemaVersion": 1,
   "phase": "implement",
   "issue": "INFRA-715",
-  "completed": "2026-10-29T15:20:00Z",
+  "completed": "2026-10-29T16:55:00Z",
   "pullRequest": "https://github.com/sjawhar/legion/pull/2480",
-  "codeHead": "bf2118caebaa3f7b034d74dda00d5273d6c601f7",
+  "codeHead": "090ae14dd22505e552f772379dcc91955c7bceba",
   "proof": [
     {
       "criterion": "A2: on the cluster copy, an hour at ten times grows Dispatch's memory by no more than the documents' stored growth plus a stated constant (1 GiB); the curve is quoted against the 2026-10-28 baseline",
@@ -53,6 +53,14 @@
       "observed": "PASS. An ask moved into a code block and a comment moved into front matter are both ErrInvalidMarkdown, neither ErrDocSchema nor ErrDocOutsideSchema. The comment case reads ... would land in the front matter, where its mark is not allowed ... and the room keeps its tree. An unknown mark type, an empty range, a fragment read error and a mark type no anchor carries are not ErrMarkNotAllowed and give refusedReanchor nil, so they stay a 500. The docs suite (882 s), the pmdoc suite without its timing tests (131 s) and the api upload and anchor tests (289 s) pass.",
       "headSha": "bf2118caebaa3f7b034d74dda00d5273d6c601f7",
       "negativeControl": "At 44036ea5 (the reviewer's deep-review reproduction): the same front-matter upload answered 400 with ... mark \"proofComment\" is not allowed in ); move that text out of that block ..., naming no block. Every other re-anchor error was also answered 400 as the caller's markdown, without an ERROR log."
+    },
+    {
+      "criterion": "Review round 3: an upload that copies anchored text where its mark is not allowed and keeps the original is taken with the anchor on the original; a move with no allowed copy is still refused; one decision function with a tested 500 fallback; Place() owns the wording; the branch is merged forward so CI runs",
+      "surface": "the real docs.Service on Postgres 16 (ReplaceText over open anchors) and the pmdoc quote finder and mark writer, at a forward merge of main 30ecdcd4",
+      "command": "cd packages/envoy && DISPATCH_TEST_DATABASE_URL=postgres://postgres@127.0.0.1:55432/postgres go test ./internal/dispatch/docs/ -run 'TestAnUploadCopyingAnAnchorsQuoteWhereItsMarkIsNotAllowedKeepsTheAnchorOnTheOriginal|TestAnUploadMovingAnAnchorsQuoteWhereItsMarkIsNotAllowedIsRefused|TestAReanchorErrorIsTheCallersOnlyWhenTheMarkIsNotAllowed' -count=1 -v; go test ./internal/dispatch/pmdoc/ -run 'TestNearestFirstListsEveryMatchInFindsOrderOfChoice|TestAMarkNotAllowedWhereItsTextStandsIsTheOnlyErrMarkNotAllowed' -count=1 -v",
+      "observed": "PASS. A heading's comment copied into front matter, and an ask's quote copied into a code block above it, are both taken, and the anchor stays on the original heading or paragraph. An ask moved into a code block, and a comment moved into front matter with no other copy, are refused as ErrInvalidMarkdown naming the place. A mark refused as a mark, an unreadable fragment and an unmapped mark type are each a plain ErrDocSchema. Also passing at the head: the docs suite (1034 s), the pmdoc suite without its timing tests (137 s) and the api upload and anchor tests (305 s). GitHub reports #2480 MERGEABLE, and Tests is queued at 090ae14d.",
+      "headSha": "090ae14dd22505e552f772379dcc91955c7bceba",
+      "negativeControl": "With only the nearest occurrence tried (occurrences[:1]), both copy cases fail. One answers 400: the open comment anchored on \"Rollout plan\" would land in the front matter ...; the other: the open ask anchored on \"run the tests\" would land in a code block ...."
     }
   ],
   "filesChanged": [
@@ -71,7 +79,9 @@
     "packages/envoy/AGENTS.md and packages/envoy/.changes/unreleased/INFRA-715-upload-ask-into-code-block.yaml",
     "packages/envoy/internal/dispatch/pmdoc/find.go: ErrMarkNotAllowed and MarkNotAllowedError",
     "packages/envoy/internal/dispatch/pmdoc/find_test.go: the class test",
-    "packages/envoy/cmd/dispatch/README.md: the 400 INVALID_MARKDOWN row"
+    "packages/envoy/cmd/dispatch/README.md: the 400 INVALID_MARKDOWN row",
+    "packages/envoy/internal/dispatch/pmdoc/find.go: QuoteFinder.NearestFirst; Place owns the wording",
+    "packages/envoy/internal/dispatch/pmdoc/reanchor_test.go: expects \"not allowed in a code block\""
   ],
   "trickyParts": [
     "Identity rule: an id is carried only to an unchanged untyped block at its paired position; moved, swapped, retyped, edited blocks, their ancestors, and typed blocks naming no id get fresh ids.",
@@ -84,10 +94,11 @@
     "Round 2 answers the tester's two failures: the PR body's Outcome and Change now say block references survive an upload (readers: GET /api/v1/artifacts/{id}/blocks, dispatch read --ref, the page's block links), and the browser test above. Also per INFRA-514's architect: the body quotes the 2026-10-28 record (12.1 GiB at minute 5, 10.1 GiB/h, 95% interval 9.0-11.2) and its collapse, splits k into 19 (working set), 8.0 (live heap) and about 527 MB of heap not returned to the OS, and both cluster tarballs were uploaded again without the copy's dead secrets (version 2).",
     "Round 3 answers the reviewer's two threads (PRRT_kwDORFy7ds6xk5xU, PRRT_kwDORFy7ds6xk5xa), both replied to and resolved at 44036ea5; the PR body adds a Contract change census (500 DOC_SCHEMA -> 400 INVALID_MARKDOWN on the three upload routes; block ids kept).",
     "Round 4 answers review round 2's three threads (PRRT_kwDORFy7ds6xmcRe, PRRT_kwDORFy7ds6xmcRu, PRRT_kwDORFy7ds6xmcR3), each replied to and resolved at bf2118ca. Front matter is named through MarkNotAllowedError.Place, and the location walk is unchanged: naming front matter there broke the frozen-walk equivalence test TestYTextRangesMatchesFrozenOnDocuments.",
-    "GitHub created no Tests run for the code push bf2118ca (pushed 15:10:01Z), probably because the handoff push came 71 s later. This handoff commit carries no skip-checks trailer, so the pull request's Tests run starts at this head, whose code is bf2118ca's."
+    "GitHub created no Tests run for the code push bf2118ca (pushed 15:10:01Z), probably because the handoff push came 71 s later. This handoff commit carries no skip-checks trailer, so the pull request's Tests run starts at this head, whose code is bf2118ca's.",
+    "Round 5 answers review round 3: a forward merge of main 30ecdcd4 at 84001a00, the only conflict being the README row (fingerprint comment 6502316391), and threads PRRT_kwDORFy7ds6xofnK, PRRT_kwDORFy7ds6xofnP and PRRT_kwDORFy7ds6xofnW, each replied to and resolved at 090ae14d."
   ],
   "openQuestions": [
     "The literal bound holds for an hour because the 1 GiB constant absorbs comment growth; the measured proportional factor is k ~ 19 (working-set growth per stored byte). INFRA-179's room byte budget caps the unbounded case."
   ],
-  "round": 4
+  "round": 5
 }
