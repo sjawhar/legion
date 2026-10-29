@@ -271,13 +271,15 @@ test("a repeat while the first is still running is answered 409 KEY_IN_FLIGHT, a
     await holding;
     expect(await firstAnswer.promise).toBe(201);
     expect((await landed).status()).toBe(201);
-    expect(answers).toContainEqual({
-      code: "KEY_IN_FLIGHT",
-      key: posts[0]?.key,
-      replayed: undefined,
-      retryAfter: "1",
-      status: 409,
-    });
+    await expect
+      .poll(() => answers)
+      .toContainEqual({
+        code: "KEY_IN_FLIGHT",
+        key: posts[0]?.key,
+        replayed: undefined,
+        retryAfter: "1",
+        status: 409,
+      });
     const key = posts[0]?.key;
     expect(key).toEqual(expect.any(String));
     expect(posts.every((post) => post.key === key)).toBe(true);
@@ -317,13 +319,15 @@ test("a comment Dispatch takes 20 s to make lands once from the page, every repe
     const answer = await landed;
     expect(answer.status()).toBe(201);
     expect(Date.now() - pressed).toBeGreaterThanOrEqual(19_000);
-    expect(answers).toContainEqual({
-      code: "KEY_IN_FLIGHT",
-      key: posts[0]?.key,
-      replayed: undefined,
-      retryAfter: "1",
-      status: 409,
-    });
+    await expect
+      .poll(() => answers)
+      .toContainEqual({
+        code: "KEY_IN_FLIGHT",
+        key: posts[0]?.key,
+        replayed: undefined,
+        retryAfter: "1",
+        status: 409,
+      });
     // Every answer is the first run's verdict or a wait on it: nothing else ran.
     expect(answers.every(({ code, status }) => status === 201 || code === "KEY_IN_FLIGHT")).toBe(
       true
@@ -405,7 +409,7 @@ test("an upload throttled to take 30 s is one attempt and lands once @phone", as
     });
 
     expect(keys).toEqual([expect.any(String)]);
-    expect(answers).toEqual([expect.objectContaining({ status: 201 })]);
+    await expect.poll(() => answers).toEqual([expect.objectContaining({ status: 201 })]);
     await expect(page.getByTestId("artifact-slow-link-bin")).toContainText("1 version");
   } finally {
     await alice.close();

@@ -103,7 +103,10 @@ export interface KeyedAnswer {
 }
 
 /** Every answer the page gets from here on to a `method` request to `path`, in order. An attempt
- *  the page cut off itself has none, so this lists only what reached the page. */
+ *  the page cut off itself has none, so this lists only what reached the page. An answer is listed
+ *  once its body has been read, after the response event, so a row that has just awaited the
+ *  response (`waitForResponse`, `replayed`) polls the list (`expect.poll`) rather than reading it
+ *  once. */
 export function watchAnswers(page: Page, method: string, path: string): KeyedAnswer[] {
   const answers: KeyedAnswer[] = [];
   page.on("response", async (response) => {
