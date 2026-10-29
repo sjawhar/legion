@@ -3,6 +3,7 @@ package api
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"net/http"
@@ -159,26 +160,30 @@ func (s *server) readEventsAfterID(ctx context.Context, after, through int64) ([
 }
 
 // eventFeedHeadWait bounds how long eventFeedHead waits on a process that has proven no horizon
-// yet, while no mark it keeps counts (a write in Dispatch's database open since before its boot
+// yet, while no mark it keeps counts (an event insert of this database open since before every
 // mark). It waits nowhere else.
 const eventFeedHeadWait = 2 * time.Second
+
+// errEventHeadUnproven is eventFeedHead's answer when it has no id it can vouch for: GET
+// /auth/whoami answers it 503 EVENT_HEAD_UNAVAILABLE, and the page asks again.
+var errEventHeadUnproven = errors.New("no event id is proven final yet: an event insert has been open since before every mark")
 
 // eventFeedHead is the event_head GET /auth/whoami answers, which a page resumes its first events
 // subscription from: an id at or below which every event is final, so a page that starts its reads
 // after it and is replayed every event above it misses nothing that commits later.
 //
 // It answers at once (server.writerFloor): the newest of the server's marks that counts, a mark
-// older than every transaction holding a transaction id in Dispatch's own database, or the horizon
-// already proven when it stands higher or none counts. A mark taken a moment ago counts as soon as
-// the writes open then have ended, which for this service's own writes is milliseconds, so the
-// head trails the log's newest id by about that. It waits on no transaction elsewhere on the
-// instance, which the safe horizon itself waits on: another database's transaction writes no event.
+// older than every transaction that holds a write lock on events, or the horizon already proven
+// when it stands higher or none counts. A mark taken a moment ago counts as soon as the event
+// writes open then have ended, which for this service's own writes is milliseconds, so the head
+// trails the log's newest id by about that. A transaction that holds a transaction id and has
+// inserted no event, here or in another database, keeps nothing waiting.
 //
-// Only a process that has proven no horizon yet, with no mark counting, would answer 0 and have
-// its page replayed the whole log; that one waits, eventFeedHeadWait at most, marking again as the
-// relay's first start does, and past it answers what it has, which is logged.
+// It never answers 0 for a log it cannot vouch for: a process that has proven no horizon yet, with
+// no mark counting, would send its page to replay the whole log. That one waits, eventFeedHeadWait
+// at most, marking again, and past it answers errEventHeadUnproven, which is logged.
 func (s *server) eventFeedHead(ctx context.Context) (int64, error) {
-	floor, ok, newest, err := s.writerFloor(ctx)
+	floor, ok, _, err := s.writerFloor(ctx)
 	if err != nil || ok || floor > 0 {
 		return floor, err
 	}
@@ -187,13 +192,12 @@ func (s *server) eventFeedHead(ctx context.Context) (int64, error) {
 		if !waitFor(ctx, wait) {
 			return 0, ctx.Err()
 		}
-		if floor, ok, newest, err = s.writerFloor(ctx); err != nil || ok || floor > 0 {
+		if floor, ok, _, err = s.writerFloor(ctx); err != nil || ok || floor > 0 {
 			return floor, err
 		}
 	}
-	slog.Warn("dispatch: whoami's event_head is 0, so the page's event feed replays the whole log: no horizon is proven yet and a transaction in this database has held a transaction id since before every mark",
-		"wait", eventFeedHeadWait, "newest", newest)
-	return floor, nil
+	slog.Warn("dispatch: whoami has no event_head to answer: no horizon is proven yet and an event insert of this database has been open since before every mark", "wait", eventFeedHeadWait)
+	return 0, errEventHeadUnproven
 }
 
 func (s *server) readEventRows(ctx context.Context, query string, arguments ...any) ([]model.Event, error) {

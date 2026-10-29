@@ -742,11 +742,11 @@ func (r *gatedResults) Close() error {
 }
 
 // WriterFloor bounds the ids a writer can still hold open by the newest mark older than every
-// transaction id held in this database: a writer that took its id after a mark drew its event ids
-// after it, so above the mark's Newest. A write open since before the newer mark leaves only the
-// older one, and once it ends the newer one counts again; with no mark older than it, the floor
-// is H alone.
-func TestWriterFloorTakesTheNewestMarkOlderThanEveryWriterInThisDatabase(t *testing.T) {
+// transaction that holds a write lock on events: an event insert open since before a mark may hold
+// an id below its Newest, drawn before the mark's snapshot. An insert open since before the newer
+// mark leaves only the older one, and once it ends the newer one counts again; with no mark older
+// than it, the floor is H alone.
+func TestWriterFloorTakesTheNewestMarkOlderThanEveryEventInsert(t *testing.T) {
 	database := storetest.Open(t)
 	ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
 	defer cancel()
@@ -758,6 +758,7 @@ func TestWriterFloorTakesTheNewestMarkOlderThanEveryWriterInThisDatabase(t *test
 		t.Fatalf("older mark = %+v, %v; want newest %d", older, err, first)
 	}
 	writer, _ := openEventWriter(ctx, t, database)
+	open := insertHorizonEvent(ctx, t, writer)
 	second := commitHorizonEvent(ctx, t, database)
 	newer, err := horizon.Mark(ctx)
 	if err != nil || newer.Newest != second {
@@ -765,7 +766,7 @@ func TestWriterFloorTakesTheNewestMarkOlderThanEveryWriterInThisDatabase(t *test
 	}
 
 	if floor, ok, err := horizon.WriterFloor(ctx, newer, older); err != nil || !ok || floor != first {
-		t.Fatalf("WriterFloor with a write open since before the newer mark = %d, %t, %v; want the older mark's %d", floor, ok, err, first)
+		t.Fatalf("WriterFloor with an insert of event %d open since before the newer mark = %d, %t, %v; want the older mark's %d", open, floor, ok, err, first)
 	}
 	if floor, ok, err := horizon.WriterFloor(ctx, newer); err != nil || ok || floor != 0 {
 		t.Fatalf("WriterFloor with only a mark newer than an open write = %d, %t, %v; want H (0), not ok", floor, ok, err)
@@ -842,5 +843,30 @@ func TestWriterFloorPassesOverAMarkFromBeforeAReset(t *testing.T) {
 	}
 	if floor, ok, err := horizon.WriterFloor(ctx, before); err != nil || ok || floor != 0 {
 		t.Fatalf("WriterFloor with only a mark from before the reset = %d, %t, %v; want H (0), not ok", floor, ok, err)
+	}
+}
+
+// A transaction that holds a transaction id but has inserted no event holds no event id: any it
+// draws later it draws after every mark taken meanwhile, above their Newest. So it keeps no mark
+// from counting, in Dispatch's own database as in another (a read in a transaction, a write to
+// another table, an operator's open session).
+func TestWriterFloorIgnoresATransactionThatHasInsertedNoEvent(t *testing.T) {
+	database := storetest.Open(t)
+	ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
+	defer cancel()
+	horizon := NewHorizon(database.Pool)
+
+	holder, _ := openEventWriter(ctx, t, database)
+	newest := commitHorizonEvent(ctx, t, database)
+	mark, err := horizon.Mark(ctx)
+	if err != nil {
+		t.Fatalf("mark: %v", err)
+	}
+	if floor, ok, err := horizon.WriterFloor(ctx, mark); err != nil || !ok || floor != newest {
+		t.Fatalf("WriterFloor with a transaction id held and no event inserted = %d, %t, %v; want the mark's %d", floor, ok, err, newest)
+	}
+	// Once it inserts, its event id stands above the mark.
+	if id := insertHorizonEvent(ctx, t, holder); id <= mark.Newest {
+		t.Fatalf("the holder's insert drew id %d, not above the mark's newest %d", id, mark.Newest)
 	}
 }

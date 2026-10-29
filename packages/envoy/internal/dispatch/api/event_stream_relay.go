@@ -300,18 +300,18 @@ func (s *server) firstRelayCursor(ctx context.Context) (int64, time.Time, error)
 
 // firstRelayFloor is the id the first start reads the log's gaps above (firstRelayCursor): one at
 // or below which no event can still be open, so no gap there can fill (Horizon.WriterFloor over the
-// server's marks, eventMarks). A mark counts once every transaction holding a transaction id in
-// Dispatch's own database took it after the mark, so the floor is the newest mark that counts, and
-// the read covers only the ids written since it, whatever the size of the log. A transaction open
-// elsewhere on the instance (another database's, which holds the safe horizon back) is no writer of
-// this log and keeps no mark from counting.
+// server's marks, eventMarks). A mark counts once every transaction that holds a write lock on
+// events took its transaction id after the mark, so the floor is the newest mark that counts, and
+// the read covers only the ids written since it, whatever the size of the log. A transaction that
+// holds a transaction id but has inserted no event (a read in a transaction, a write to another
+// table, another database's job) holds no event id and keeps no mark from counting.
 //
-// While none counts, a write in this database has been open since before every mark kept, the
-// boot mark included: it marks again, 10 ms doubling to 250 ms, and the marks of the writes open
-// when the oldest was taken end first. It never reads the whole log in place of that wait. The
-// start waits for that same write in any case: the horizon it awaits next is proven only once every
-// transaction open when its observation began has ended (Horizon.Await), so the wait here is the
-// one the start already had, taken before the read rather than after it.
+// The floor is read once, when the start begins, with the newest id and the gaps above it, so
+// everything that commits after the start began stands above the newest id or in one of those
+// gaps. When no mark counts, an event insert of this database has been open since before every
+// mark kept, the boot mark included, and may hold an id below all of them; no later mark could
+// bound it without skipping what commits meanwhile, so the floor is the horizon already proven, 0
+// on a process where none is, and the read covers the log above it. That is logged.
 func (s *server) firstRelayFloor(ctx context.Context) (int64, error) {
 	if s.bootMark != nil {
 		select {
@@ -320,18 +320,15 @@ func (s *server) firstRelayFloor(ctx context.Context) (int64, error) {
 			return 0, ctx.Err()
 		}
 	}
-	for wait := 10 * time.Millisecond; ; wait = min(2*wait, 250*time.Millisecond) {
-		floor, ok, _, err := s.writerFloor(ctx)
-		if err != nil {
-			return 0, err
-		}
-		if ok {
-			return floor, nil
-		}
-		if !waitFor(ctx, wait) {
-			return 0, ctx.Err()
-		}
+	floor, ok, _, err := s.writerFloor(ctx)
+	if err != nil {
+		return 0, err
 	}
+	if !ok {
+		slog.Warn("dispatch: the event stream relay's first start reads every event id above the proven horizon: an event insert of this database has been open since before every mark it keeps",
+			"above", floor)
+	}
+	return floor, nil
 }
 
 // takeBootMark takes the server's boot mark (eventMarks' boot) on a goroutine of its own, so

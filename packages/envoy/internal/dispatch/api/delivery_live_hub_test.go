@@ -1364,13 +1364,21 @@ func TestADroppedBrokerSubscriptionIsRestoredWithoutMissingAnEvent(t *testing.T)
 	conn := newFakeLiveConn()
 	rig.hub.Subscribe(conn, subscribeFrame("t", presetView(deliveryLiveTimeline, 7, "")))
 	snapshot := conn.snapshot(t, 5*time.Second, "t")
+	// The setup's events reach the hub only once the safe horizon passes them, which a transaction
+	// open anywhere on the shared test Postgres holds back; one that lands after the snapshot would
+	// be the delta read below. So the hub acts on all of them first. (Its listener never connects
+	// here, so it waits on the event cursor alone, which the broker moves, not on settle's change
+	// cursor, which only a notification would.)
+	rig.waitForEventCursor(t, eventHead(t, rig.database), "the setup's events")
 
 	start := rig.mark()
 	rig.deps.Events.CloseAll()
 	rig.waitFor(t, start, 3*time.Second, "the hub losing its subscription", func(note deliveryHubNote) bool { return note.what == "broker dropped" })
 	patchHubIssue(t, rig.handler, key, map[string]any{"title": "Ship the widgets"})
 	releaseOnce()
-	delta := conn.delta(t, 3*time.Second, "t")
+	// The store catch-up that finds the retitle reads up to the horizon too, so its wait allows for
+	// a transaction held elsewhere on the shared test Postgres (eventFeedWait).
+	delta := conn.delta(t, eventFeedWait, "t")
 	if got := liveMapValues(t, delta, "issue_titles"); got[key] != "Ship the widgets" {
 		t.Fatalf("the delta's issue_titles = %v, want %s retitled", got, key)
 	}

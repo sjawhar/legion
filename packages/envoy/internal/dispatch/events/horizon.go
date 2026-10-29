@@ -357,22 +357,32 @@ func (h *Horizon) Mark(ctx context.Context) (Mark, error) {
 	return mark, nil
 }
 
-// oldestEventWriterSQL answers the oldest transaction id held in this database, by a backend
-// (its granted ExclusiveLock on its own id) or by a prepared transaction, widened to the 64-bit
-// id that marks carry, or null when none is held. Only a transaction in this database can write
-// the event log, so a transaction elsewhere on the instance, which holds the safe horizon back,
-// is not one: that is what lets WriterFloor answer at once where the horizon waits. pg_locks
-// shows every backend's locks to every role, which pg_stat_activity's backend_xid does not.
-// pg_locks gives the 32-bit id; it is widened against the snapshot's xmax, which no running id
-// is more than 2^31 from.
+// oldestEventWriterSQL answers the oldest transaction id held in this database by a transaction
+// that can hold an event id not yet final: a backend that holds a lock on events of a mode an
+// insert takes (RowExclusiveLock or stronger), whose own transaction id it reads from that
+// backend's granted ExclusiveLock on its id, or a prepared transaction of this database; null when
+// there is none. It is widened to the 64-bit id marks carry.
+//
+// An insert into events locks the table, RowExclusiveLock, before it draws the row's id from
+// events_id_seq, and keeps that lock until its transaction ends, and Broker.Append takes its
+// transaction id before the insert (the writer invariant). So a transaction holding an event id
+// that is not yet final holds both now, and one that holds a transaction id alone (a read in a
+// transaction, a write to another table, an operator's open session) holds no event id: any it
+// draws later is drawn after this read's marks. That is what lets WriterFloor answer at once
+// where the horizon, which waits on every transaction id on the instance, waits. pg_locks shows
+// every backend's locks to every role, which pg_stat_activity's backend_xid does not. pg_locks
+// gives the 32-bit id; it is widened against the snapshot's xmax, which no running id is more
+// than 2^31 from.
 const oldestEventWriterSQL = `
 	with next as (
 		select pg_snapshot_xmax(pg_current_snapshot())::text::numeric as nx
 	), held as (
-		select l.transactionid::text::numeric as x
-		from pg_locks l join pg_stat_activity a on a.pid = l.pid
-		where l.locktype = 'transactionid' and l.granted and l.mode = 'ExclusiveLock'
-			and a.datname = current_database() and l.pid <> pg_backend_pid()
+		select x.transactionid::text::numeric as x
+		from pg_locks t
+		join pg_locks x on x.pid = t.pid and x.locktype = 'transactionid' and x.mode = 'ExclusiveLock' and x.granted
+		where t.locktype = 'relation' and t.database = (select oid from pg_database where datname = current_database())
+			and t.relation = 'events'::regclass and t.granted and t.pid <> pg_backend_pid()
+			and t.mode in ('RowExclusiveLock', 'ShareUpdateExclusiveLock', 'ShareLock', 'ShareRowExclusiveLock', 'ExclusiveLock', 'AccessExclusiveLock')
 		union all
 		select transaction::text::numeric from pg_prepared_xacts where database = current_database()
 	)
@@ -387,10 +397,12 @@ const oldestEventWriterSQL = `
 
 // WriterFloor answers the highest id at or below which no event can still be open, read from the
 // marks given, the newest first, and from H: the Newest of the first mark older than every
-// transaction id held in this database now, or H when no mark is, so H is the floor too when no
-// mark is given. A transaction holding an event id that is not yet final holds its own
-// transaction id in this database, either now, and so above that mark's Xid, or from after this
-// read, and so above it too: either way every event id it holds stands above that mark's Newest.
+// transaction that holds a write lock on events in this database now (oldestEventWriterSQL), or H
+// when no mark is, so H is the floor too when no mark is given. A transaction holding an event id
+// that is not yet final drew it after it took its transaction id and holds its lock on events
+// until it ends. If it drew that id before a mark's snapshot, at or below the mark's Newest, it
+// took its transaction id before the mark, below the mark's Xid, and holds its lock now; so once
+// no such transaction is older than the mark, every id at or below the mark's Newest is final.
 // ok is false when no mark qualified, so the floor is H alone.
 //
 // A mark counts only while the log it saw stands: the row at its Newest still carries its

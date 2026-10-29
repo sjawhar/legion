@@ -14,10 +14,10 @@ const eventMarksKept = 32
 // still hold open (events.Horizon.WriterFloor): the boot mark register takes (takeBootMark), and the
 // recent marks the relay's first start and GET /auth/whoami take, oldest first.
 //
-// One mark taken now counts only once every transaction holding a transaction id in Dispatch's own
-// database took it after the mark. Under writes that overlap without a break a mark taken now
-// never does, but an older one does as soon as the writes open when it was taken have ended, and
-// those are this service's own writes, which take milliseconds. Keeping the recent marks is what
+// One mark taken now counts only once every transaction that holds a write lock on events took its
+// transaction id after the mark (events.Horizon.WriterFloor). Under event writes that overlap
+// without a break a mark taken now never does, but an older one does as soon as the writes open
+// when it was taken have ended, and those are this service's own writes, which take milliseconds. Keeping the recent marks is what
 // lets a reader answer at once from the newest one that counts rather than wait for the writes open
 // at its own mark. Past eventMarksKept the older half is thinned to every other mark, as the
 // horizon's pending list is, so the oldest mark, the first to count during a long write, stays,
