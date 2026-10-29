@@ -6,6 +6,7 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/pulumi/pulumi-gcp/sdk/v10/go/gcp/container"
 	kubernetes "github.com/pulumi/pulumi-kubernetes/sdk/v4/go/kubernetes"
 	apiextensions "github.com/pulumi/pulumi-kubernetes/sdk/v4/go/kubernetes/apiextensions"
 	appsv1 "github.com/pulumi/pulumi-kubernetes/sdk/v4/go/kubernetes/apps/v1"
@@ -20,8 +21,21 @@ import (
 	"github.com/sjawhar/envoy/internal/bus"
 )
 
-type dispatchKubernetes struct {
-	kubeconfig pulumi.StringOutput
+// dispatchKubeconfig renders the cluster's exec-plugin kubeconfig, which the component exports and
+// its Kubernetes provider takes. The cluster half computes it, so a cluster-only component, which
+// registers no Kubernetes provider and no Kubernetes object, still exports it.
+func dispatchKubeconfig(dispatch string, cluster *container.Cluster) pulumi.StringOutput {
+	return pulumi.All(cluster.Endpoint, cluster.MasterAuth.ClusterCaCertificate(), cluster.Name).ApplyT(func(values []interface{}) (string, error) {
+		parts := make([]string, len(values))
+		for i, what := range []string{"the cluster's endpoint", "the cluster's CA certificate", "the cluster's name"} {
+			value, err := outputString(values[i])
+			if err != nil {
+				return "", fmt.Errorf("%s: %s: %w", dispatch, what, err)
+			}
+			parts[i] = value
+		}
+		return renderKubeconfig(parts[0], parts[1], parts[2]), nil
+	}).(pulumi.StringOutput)
 }
 
 // dispatchSOCKS5Port is the port the front door's tailscaled binds its userspace SOCKS5 proxy on,
@@ -282,24 +296,13 @@ func dispatchListenerEnv(hostname, socks5Proxy, listenerSecret, url string) (cor
 	return values, nil
 }
 
-func newDispatchKubernetes(ctx *pulumi.Context, comp *Dispatch, name string, args *DispatchArgs, s dispatchSettings, cloud *dispatchCloud) (*dispatchKubernetes, error) {
+func newDispatchKubernetes(ctx *pulumi.Context, comp *Dispatch, name string, args *DispatchArgs, s dispatchSettings, cloud *dispatchCloud) error {
 	dispatch := dispatchType + " " + name
-	kubeconfig := pulumi.All(cloud.cluster.Endpoint, cloud.cluster.MasterAuth.ClusterCaCertificate(), cloud.cluster.Name).ApplyT(func(values []interface{}) (string, error) {
-		parts := make([]string, len(values))
-		for i, what := range []string{"the cluster's endpoint", "the cluster's CA certificate", "the cluster's name"} {
-			value, err := outputString(values[i])
-			if err != nil {
-				return "", fmt.Errorf("%s: %s: %w", dispatch, what, err)
-			}
-			parts[i] = value
-		}
-		return renderKubeconfig(parts[0], parts[1], parts[2]), nil
-	}).(pulumi.StringOutput)
 	provider, err := kubernetes.NewProvider(ctx, s.hostname+"-kubernetes", &kubernetes.ProviderArgs{
-		Kubeconfig: kubeconfig, EnableServerSideApply: pulumi.Bool(true),
+		Kubeconfig: cloud.kubeconfig, EnableServerSideApply: pulumi.Bool(true),
 	}, pulumi.Parent(comp))
 	if err != nil {
-		return nil, err
+		return err
 	}
 	child := []pulumi.ResourceOption{pulumi.Parent(comp), pulumi.Provider(provider), pulumi.DependsOn([]pulumi.Resource{cloud.cluster})}
 	metadata := func(name string) *metav1.ObjectMetaArgs {
@@ -307,19 +310,19 @@ func newDispatchKubernetes(ctx *pulumi.Context, comp *Dispatch, name string, arg
 	}
 	if !s.existingNamespace {
 		if _, err := corev1.NewNamespace(ctx, s.namespace, &corev1.NamespaceArgs{Metadata: &metav1.ObjectMetaArgs{Name: pulumi.String(s.namespace)}}, child...); err != nil {
-			return nil, err
+			return err
 		}
 	}
 	// The app and the listener run as ServiceAccount <hostname>, which Workload Identity lets mount
 	// the NATS seed and whose token the app presents (serviceAccountSubject); the front door's pods
 	// run as an account of their own (newDispatchFrontDoor).
 	if _, err := corev1.NewServiceAccount(ctx, s.hostname, &corev1.ServiceAccountArgs{Metadata: metadata(s.hostname)}, child...); err != nil {
-		return nil, err
+		return err
 	}
 	authKeyName := s.hostname + "-tailnet-auth-key"
 	authKeySecret, err := corev1.NewSecret(ctx, authKeyName, &corev1.SecretArgs{Metadata: metadata(authKeyName), StringData: pulumi.StringMap{"TS_AUTHKEY": refuseDispatchSeedInSecret(args.TailnetAuthKey, dispatch, "tailnetAuthKey")}}, child...)
 	if err != nil {
-		return nil, err
+		return err
 	}
 	dispatchSecretName := s.hostname + "-dispatch"
 	databaseURL := pulumi.Sprintf("postgres://dispatch:%s@127.0.0.1:5432/dispatch?sslmode=disable", cloud.password.Result)
@@ -327,7 +330,7 @@ func newDispatchKubernetes(ctx *pulumi.Context, comp *Dispatch, name string, arg
 		"DATABASE_URL": databaseURL, "DISPATCH_AGENT_TOKEN": cloud.agentToken.Result, "DISPATCH_SIGNING_KEY": cloud.signing.Result, "DISPATCH_SIGNIN_CLIENT_SECRET": refuseDispatchSeedInSecret(args.SignInClientSecret, dispatch, "signInClientSecret"),
 	}}, child...)
 	if err != nil {
-		return nil, err
+		return err
 	}
 	// The listener's Deployment, Service and bearer share one name. The bearer is a Secret of its
 	// own: the listener's pod names this one and never the component's dispatch Secret, which
@@ -337,11 +340,11 @@ func newDispatchKubernetes(ctx *pulumi.Context, comp *Dispatch, name string, arg
 		Metadata: metadata(listenerName), StringData: pulumi.StringMap{"ENVOY_API_TOKEN": cloud.listenerToken.Result},
 	}, child...)
 	if err != nil {
-		return nil, err
+		return err
 	}
 	frontDoorPod, frontDoorOpts, err := newDispatchFrontDoor(ctx, dispatch, s, args.TailnetService, authKeyName, metadata, child)
 	if err != nil {
-		return nil, err
+		return err
 	}
 	seedName := s.hostname + "-nats-seed"
 	seedPath := refuseDispatchSeed(args.NatsSeedSecret, dispatch, "natsSeedSecret").ApplyT(func(secret string) string {
@@ -351,7 +354,7 @@ func newDispatchKubernetes(ctx *pulumi.Context, comp *Dispatch, name string, arg
 		ApiVersion: pulumi.String("secrets-store.csi.x-k8s.io/v1"), Kind: pulumi.String("SecretProviderClass"), Metadata: metadata(seedName),
 		OtherFields: kubernetes.UntypedArgs{"spec": pulumi.Map{"provider": pulumi.String("gke"), "parameters": pulumi.Map{"secrets": seedPath.ApplyT(func(path string) string { return "- resourceName: " + path + "\n  path: nats-seed\n" }).(pulumi.StringOutput)}}},
 	}, child...); err != nil {
-		return nil, err
+		return err
 	}
 
 	azureKeyClassName := s.hostname + "-azure-embed-key"
@@ -363,7 +366,7 @@ func newDispatchKubernetes(ctx *pulumi.Context, comp *Dispatch, name string, arg
 			ApiVersion: pulumi.String("secrets-store.csi.x-k8s.io/v1"), Kind: pulumi.String("SecretProviderClass"), Metadata: metadata(azureKeyClassName),
 			OtherFields: kubernetes.UntypedArgs{"spec": pulumi.Map{"provider": pulumi.String("gke"), "parameters": pulumi.Map{"secrets": keyPath.ApplyT(func(path string) string { return "- resourceName: " + path + "\n  path: key\n" }).(pulumi.StringOutput)}}},
 		}, child...); err != nil {
-			return nil, err
+			return err
 		}
 	}
 
@@ -401,7 +404,7 @@ func newDispatchKubernetes(ctx *pulumi.Context, comp *Dispatch, name string, arg
 	if s.disruption.priorityClass != "" {
 		class, err := schedulingv1.GetPriorityClass(ctx, s.hostname+"-priority-class", pulumi.ID(s.disruption.priorityClass), nil, child...)
 		if err != nil {
-			return nil, err
+			return err
 		}
 		priorityClass = class
 	}
@@ -478,11 +481,11 @@ func newDispatchKubernetes(ctx *pulumi.Context, comp *Dispatch, name string, arg
 	// template: a renewed certificate in its TLS Secret rolls no pod.
 	tailnet, err := deployment(tailnetName, s.frontDoorReplicas, s.disruption.frontDoorPDBMinAvailable, map[string]*corev1.Secret{authKeyName: authKeySecret}, frontDoorPod, frontDoorOpts...)
 	if err != nil {
-		return nil, err
+		return err
 	}
 	tailnetService, err := service(tailnetName, dispatchSOCKS5Port)
 	if err != nil {
-		return nil, err
+		return err
 	}
 
 	// Both other workloads dial the NATS hub through the front door's proxy, so each waits for its
@@ -518,10 +521,10 @@ func newDispatchKubernetes(ctx *pulumi.Context, comp *Dispatch, name string, arg
 		},
 		Volumes: seedVolume,
 	}, frontDoor, seedGrant); err != nil {
-		return nil, err
+		return err
 	}
 	if _, err := service(listenerName, core.DefaultListenerPort); err != nil {
-		return nil, err
+		return err
 	}
 
 	// A pod leaves routing asynchronously, and it does so alongside its own shutdown rather than
@@ -644,10 +647,10 @@ func newDispatchKubernetes(ctx *pulumi.Context, comp *Dispatch, name string, arg
 	// either rolls the app.
 	appChecksums := map[string]*corev1.Secret{dispatchSecretName: dispatchSecret, listenerName: listenerSecret}
 	if _, err := deployment(s.hostname, s.replicas, s.disruption.appPDBMinAvailable, appChecksums, appPod, frontDoor, pulumi.DependsOn(appGrants)); err != nil {
-		return nil, err
+		return err
 	}
 	if _, err := service(s.hostname, 8766); err != nil {
-		return nil, err
+		return err
 	}
 
 	podPeer := func(app string) networkingv1.NetworkPolicyPeerArgs {
@@ -688,19 +691,19 @@ func newDispatchKubernetes(ctx *pulumi.Context, comp *Dispatch, name string, arg
 	// this rule Serve reaches the app at no port at all.
 	appIngress = append(appIngress, ingressFrom(8766, networkingv1.NetworkPolicyPeerArray{podPeer(tailnetName)}))
 	if err := policy(s.hostname, appIngress); err != nil {
-		return nil, err
+		return err
 	}
 	// Whatever reaches the proxy gets tailnet egress as a front-door node, on every front-door pod,
 	// so only the two workloads that dial the hub through it may.
 	if err := policy(tailnetName, networkingv1.NetworkPolicyIngressRuleArray{
 		ingressFrom(dispatchSOCKS5Port, networkingv1.NetworkPolicyPeerArray{podPeer(s.hostname), podPeer(listenerName)}),
 	}); err != nil {
-		return nil, err
+		return err
 	}
 	if err := policy(listenerName, networkingv1.NetworkPolicyIngressRuleArray{
 		ingressFrom(core.DefaultListenerPort, networkingv1.NetworkPolicyPeerArray{podPeer(s.hostname)}),
 	}); err != nil {
-		return nil, err
+		return err
 	}
-	return &dispatchKubernetes{kubeconfig: kubeconfig}, nil
+	return nil
 }

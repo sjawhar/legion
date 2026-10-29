@@ -17,8 +17,21 @@ import (
 	"github.com/pulumi/pulumi/sdk/v3/go/pulumi/internals"
 )
 
+// dispatchCloud is what the component's cloud resources give the rest of it. cluster, issuer,
+// kubeconfig, network and project are newDispatchCluster's, so they are set in either mode; every
+// field below them is newDispatchDatabase's, so each is nil with clusterOnly on, where no Cloud
+// SQL instance, generated password, grant or principal is registered.
 type dispatchCloud struct {
-	cluster       *container.Cluster
+	cluster *container.Cluster
+	// issuer is the cluster's service-account token issuer, and kubeconfig the cluster's
+	// exec-plugin kubeconfig, which the component exports and its Kubernetes provider takes.
+	issuer     pulumi.StringOutput
+	kubeconfig pulumi.StringOutput
+	// network is the VPC the database takes a private IP on, and project the project whose number
+	// and id name the principal and the issuer.
+	network *compute.Network
+	project organizations.LookupProjectResultOutput
+
 	instance      *sql.DatabaseInstance
 	password      *random.RandomPassword
 	signing       *random.RandomPassword
@@ -28,8 +41,6 @@ type dispatchCloud struct {
 	seedAccessor  *secretmanager.SecretIamMember
 	// azureKeyAccessor is set only with azureEmbedKeySecret.
 	azureKeyAccessor *secretmanager.SecretIamMember
-	// issuer is the cluster's service-account token issuer.
-	issuer pulumi.StringOutput
 }
 
 func providerFor(ctx context.Context, pkg string, opts ...pulumi.ResourceOption) (pulumi.ProviderResource, error) {
@@ -49,7 +60,11 @@ func providerFor(ctx context.Context, pkg string, opts ...pulumi.ResourceOption)
 	return nil, fmt.Errorf("missing %s provider", pkg)
 }
 
-func newDispatchCloud(ctx *pulumi.Context, comp *Dispatch, name string, args *DispatchArgs, s dispatchSettings, opts ...pulumi.ResourceOption) (*dispatchCloud, error) {
+// newDispatchCluster registers the cluster and what the cluster is made of: the VPC, its
+// subnetwork, the router and Cloud NAT its private nodes reach the internet through, and the
+// Autopilot cluster itself. It is all clusterOnly builds, and it computes the two values derived
+// from the cluster alone, the service-account token issuer and the kubeconfig.
+func newDispatchCluster(ctx *pulumi.Context, comp *Dispatch, name string, s dispatchSettings, opts ...pulumi.ResourceOption) (*dispatchCloud, error) {
 	dispatch := dispatchType + " " + name
 	gcpProvider, err := providerFor(ctx.Context(), "gcp", opts...)
 	if err != nil {
@@ -80,18 +95,6 @@ func newDispatchCloud(ctx *pulumi.Context, comp *Dispatch, name string, args *Di
 	if err != nil {
 		return nil, err
 	}
-	address, err := compute.NewGlobalAddress(ctx, s.hostname+"-services", &compute.GlobalAddressArgs{
-		Purpose: pulumi.String("VPC_PEERING"), AddressType: pulumi.String("INTERNAL"), PrefixLength: pulumi.Int(16), Network: network.ID(),
-	}, child)
-	if err != nil {
-		return nil, err
-	}
-	connection, err := servicenetworking.NewConnection(ctx, s.hostname+"-services", &servicenetworking.ConnectionArgs{
-		Network: network.ID(), Service: pulumi.String("servicenetworking.googleapis.com"), ReservedPeeringRanges: pulumi.StringArray{address.Name},
-	}, child)
-	if err != nil {
-		return nil, err
-	}
 	cluster, err := container.NewCluster(ctx, s.hostname, &container.ClusterArgs{
 		Name: pulumi.String(s.hostname), Location: pulumi.String(s.region), EnableAutopilot: pulumi.Bool(true), Network: network.ID(), Subnetwork: subnetwork.ID(),
 		IpAllocationPolicy:   &container.ClusterIpAllocationPolicyArgs{},
@@ -107,6 +110,46 @@ func newDispatchCloud(ctx *pulumi.Context, comp *Dispatch, name string, args *Di
 	}, child)
 	if err != nil {
 		return nil, err
+	}
+	// GKE signs a cluster's service-account tokens as the issuer
+	// https://container.googleapis.com/v1/projects/<project id>/locations/<location>/clusters/<name>,
+	// the URL Google's Workload Identity documentation names the cluster by (its kubernetes.cluster
+	// principal set). It is built from the project, the location and the name rather than taken from
+	// the cluster's selfLink, which the provider documents only as "the server-defined URL for the
+	// resource", a form it does not promise.
+	issuer := pulumi.All(project.ProjectId(), cluster.Location, cluster.Name).ApplyT(func(values []interface{}) (string, error) {
+		parts := make([]string, len(values))
+		for i, what := range []string{"the project's id", "the cluster's location", "the cluster's name"} {
+			value, err := outputString(values[i])
+			if err != nil {
+				return "", fmt.Errorf("%s: %s: %w", dispatch, what, err)
+			}
+			parts[i] = value
+		}
+		return fmt.Sprintf("https://container.googleapis.com/v1/projects/%s/locations/%s/clusters/%s", parts[0], parts[1], parts[2]), nil
+	}).(pulumi.StringOutput)
+	return &dispatchCloud{cluster: cluster, issuer: issuer, kubeconfig: dispatchKubeconfig(dispatch, cluster), network: network, project: project}, nil
+}
+
+// newDispatchDatabase registers what Dispatch itself runs on, which clusterOnly builds none of:
+// the private services range and its peering, the Cloud SQL instance with its database and user,
+// the generated passwords, and the Secret Manager grants the pods' principal needs. It fills in
+// the fields of cloud the cluster half leaves nil.
+func newDispatchDatabase(ctx *pulumi.Context, comp *Dispatch, name string, args *DispatchArgs, s dispatchSettings, cloud *dispatchCloud) error {
+	dispatch := dispatchType + " " + name
+	child := pulumi.Parent(comp)
+	network, project, cluster := cloud.network, cloud.project, cloud.cluster
+	address, err := compute.NewGlobalAddress(ctx, s.hostname+"-services", &compute.GlobalAddressArgs{
+		Purpose: pulumi.String("VPC_PEERING"), AddressType: pulumi.String("INTERNAL"), PrefixLength: pulumi.Int(16), Network: network.ID(),
+	}, child)
+	if err != nil {
+		return err
+	}
+	connection, err := servicenetworking.NewConnection(ctx, s.hostname+"-services", &servicenetworking.ConnectionArgs{
+		Network: network.ID(), Service: pulumi.String("servicenetworking.googleapis.com"), ReservedPeeringRanges: pulumi.StringArray{address.Name},
+	}, child)
+	if err != nil {
+		return err
 	}
 	// AvailabilityType is databaseAvailabilityType. The bridged Terraform provider declares
 	// settings.availability_type without ForceNew (terraform-provider-google-beta v8.6.0, commit
@@ -124,26 +167,26 @@ func newDispatchCloud(ctx *pulumi.Context, comp *Dispatch, name string, args *Di
 		},
 	}, child, pulumi.DependsOn([]pulumi.Resource{connection}))
 	if err != nil {
-		return nil, err
+		return err
 	}
 	password, err := random.NewRandomPassword(ctx, s.hostname+"-password", &random.RandomPasswordArgs{Length: pulumi.Int(32), Special: pulumi.Bool(false)}, child)
 	if err != nil {
-		return nil, err
+		return err
 	}
 	signing, err := random.NewRandomPassword(ctx, s.hostname+"-signing-key", &random.RandomPasswordArgs{Length: pulumi.Int(64), Special: pulumi.Bool(false)}, child)
 	if err != nil {
-		return nil, err
+		return err
 	}
 	agentToken, err := random.NewRandomPassword(ctx, s.hostname+"-agent-token", &random.RandomPasswordArgs{Length: pulumi.Int(48), Special: pulumi.Bool(false)}, child)
 	if err != nil {
-		return nil, err
+		return err
 	}
 	// The listener binds 0.0.0.0 in a pod of its own, where its API refuses to start without a
 	// bearer, and its credential is its own, never a key of the Secret holding the database URL
 	// and the signing key.
 	listenerToken, err := random.NewRandomPassword(ctx, s.hostname+"-listener-token", &random.RandomPasswordArgs{Length: pulumi.Int(48), Special: pulumi.Bool(false)}, child)
 	if err != nil {
-		return nil, err
+		return err
 	}
 	// deletionProtection also keeps the database itself: PREVENT refuses its delete, which an
 	// instance replacement would otherwise make first.
@@ -153,11 +196,11 @@ func newDispatchCloud(ctx *pulumi.Context, comp *Dispatch, name string, args *Di
 	}
 	_, err = sql.NewDatabase(ctx, s.hostname, &sql.DatabaseArgs{Instance: instance.Name, Name: pulumi.String("dispatch"), DeletionPolicy: pulumi.String(databasePolicy)}, child)
 	if err != nil {
-		return nil, err
+		return err
 	}
 	_, err = sql.NewUser(ctx, s.hostname, &sql.UserArgs{Instance: instance.Name, Name: pulumi.String("dispatch"), Password: password.Result}, child)
 	if err != nil {
-		return nil, err
+		return err
 	}
 	// The principal lives in the cluster's Workload Identity pool, which Google creates with the
 	// cluster. It is built from the cluster's own WorkloadIdentityConfig, so it resolves only once
@@ -181,7 +224,7 @@ func newDispatchCloud(ctx *pulumi.Context, comp *Dispatch, name string, args *Di
 	}).(pulumi.StringOutput)
 	seedAccessor, err := secretmanager.NewSecretIamMember(ctx, s.hostname+"-nats-seed-accessor", &secretmanager.SecretIamMemberArgs{SecretId: refuseDispatchSeed(args.NatsSeedSecret, dispatch, "natsSeedSecret"), Role: pulumi.String("roles/secretmanager.secretAccessor"), Member: principal}, child, pulumi.DependsOn([]pulumi.Resource{cluster}))
 	if err != nil {
-		return nil, err
+		return err
 	}
 	var azureKeyAccessor *secretmanager.SecretIamMember
 	if s.azure.key {
@@ -189,25 +232,11 @@ func newDispatchCloud(ctx *pulumi.Context, comp *Dispatch, name string, args *Di
 		// principal needs the same per-secret accessor grant the NATS seed has.
 		azureKeyAccessor, err = secretmanager.NewSecretIamMember(ctx, s.hostname+"-azure-embed-key-accessor", &secretmanager.SecretIamMemberArgs{SecretId: refuseDispatchSeed(args.AzureEmbedKeySecret, dispatch, "azureEmbedKeySecret"), Role: pulumi.String("roles/secretmanager.secretAccessor"), Member: principal}, child, pulumi.DependsOn([]pulumi.Resource{cluster}))
 		if err != nil {
-			return nil, err
+			return err
 		}
 	}
-	// GKE signs a cluster's service-account tokens as the issuer
-	// https://container.googleapis.com/v1/projects/<project id>/locations/<location>/clusters/<name>,
-	// the URL Google's Workload Identity documentation names the cluster by (its kubernetes.cluster
-	// principal set). It is built from the project, the location and the name rather than taken from
-	// the cluster's selfLink, which the provider documents only as "the server-defined URL for the
-	// resource", a form it does not promise.
-	issuer := pulumi.All(project.ProjectId(), cluster.Location, cluster.Name).ApplyT(func(values []interface{}) (string, error) {
-		parts := make([]string, len(values))
-		for i, what := range []string{"the project's id", "the cluster's location", "the cluster's name"} {
-			value, err := outputString(values[i])
-			if err != nil {
-				return "", fmt.Errorf("%s: %s: %w", dispatch, what, err)
-			}
-			parts[i] = value
-		}
-		return fmt.Sprintf("https://container.googleapis.com/v1/projects/%s/locations/%s/clusters/%s", parts[0], parts[1], parts[2]), nil
-	}).(pulumi.StringOutput)
-	return &dispatchCloud{cluster: cluster, instance: instance, password: password, signing: signing, agentToken: agentToken, listenerToken: listenerToken, principal: principal, seedAccessor: seedAccessor, azureKeyAccessor: azureKeyAccessor, issuer: issuer}, nil
+	cloud.instance, cloud.password, cloud.signing = instance, password, signing
+	cloud.agentToken, cloud.listenerToken = agentToken, listenerToken
+	cloud.principal, cloud.seedAccessor, cloud.azureKeyAccessor = principal, seedAccessor, azureKeyAccessor
+	return nil
 }
