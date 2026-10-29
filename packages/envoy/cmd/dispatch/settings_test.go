@@ -45,6 +45,7 @@ import (
 	"github.com/sjawhar/envoy/internal/dispatch/store"
 	"github.com/sjawhar/envoy/internal/dispatch/store/storetest"
 	"github.com/sjawhar/envoy/internal/githubappjwt"
+	"github.com/sjawhar/envoy/internal/logtest"
 	"github.com/sjawhar/envoy/internal/oidc/oidctest"
 	"github.com/sjawhar/envoy/internal/testnats"
 	"github.com/sjawhar/envoy/internal/testsocks5"
@@ -299,11 +300,13 @@ func envoyJSONHome(t *testing.T) string {
 // (the GitHub App, the store, the dashboard origin) and nil elsewhere.
 func routerFor(t *testing.T, boot bootConfig, built routes.AppContextOptions) http.Handler {
 	t.Helper()
+	built.Lifetime = t.Context()
 	appCtx, err := appContextFor(boot, built)
 	if err != nil {
 		t.Fatalf("build the router: %v", err)
 	}
-	handler, _ := routes.New(appCtx)
+	handler, background := routes.New(appCtx)
+	t.Cleanup(background.Wait)
 	return handler
 }
 
@@ -384,14 +387,15 @@ func signInPool(t *testing.T, clientID, clientSecret string) *oidctest.Issuer {
 }
 
 // signInRouter is the router main serves for boot over people, with the sign-in pool's code flow
-// main builds from boot's DISPATCH_SIGNIN_* settings (signInFlow).
+// main builds from boot's DISPATCH_SIGNIN_* settings (signInFlow), and a store of its own, whose
+// event log's head GET /auth/whoami answers.
 func signInRouter(t *testing.T, boot bootConfig, people auth.PeopleStore) http.Handler {
 	t.Helper()
 	flow := signInFlow(boot)
 	if flow == nil {
 		t.Fatalf("boot configures no sign-in pool: %+v", boot)
 	}
-	return routerFor(t, boot, routes.AppContextOptions{SignIn: flow, People: people})
+	return routerFor(t, boot, routes.AppContextOptions{SignIn: flow, People: people, Store: storetest.Open(t)})
 }
 
 // startSignIn answers GET /auth/start from handler: the redirect to the pool's authorization
@@ -603,7 +607,7 @@ func TestEverySettingReachesItsReader(t *testing.T) {
 				request := httptest.NewRequest(http.MethodGet, "/auth/whoami", nil)
 				request.Header.Set("X-Dispatch-User", "Alice@Example.com")
 				response := httptest.NewRecorder()
-				routerFor(t, header, routes.AppContextOptions{People: peopleStore(t)}).ServeHTTP(response, request)
+				routerFor(t, header, routes.AppContextOptions{People: peopleStore(t), Store: storetest.Open(t)}).ServeHTTP(response, request)
 				if response.Code != http.StatusOK || !strings.Contains(response.Body.String(), `"login":"alice@example.com"`) {
 					t.Errorf("DISPATCH_IDENTITY=header:X-Dispatch-User: GET /auth/whoami answered %d %s, want alice@example.com", response.Code, response.Body.String())
 				}
@@ -1516,14 +1520,6 @@ func TestEverySettingReachesItsReader(t *testing.T) {
 			refusedWith(t, azureEmbedEnvironment(withOverrides(azureKeyless, map[string]string{"DISPATCH_AZURE_FEDERATED_TOKEN_FILE": ""})), "DISPATCH_AZURE_FEDERATED_TOKEN_FILE missing")
 			refusedWith(t, map[string]string{"DISPATCH_AZURE_FEDERATED_TOKEN_FILE": missing}, "DISPATCH_AZURE_FEDERATED_TOKEN_FILE set, but DISPATCH_EMBEDDER is unset")
 		},
-		"DISPATCH_ASSET_STORE_BUCKET": func(t *testing.T) {
-			if boot := resolveWith(t, map[string]string{"DISPATCH_ASSET_STORE_BUCKET": " retained-assets "}); boot.AssetStoreBucket != "retained-assets" {
-				t.Errorf("AssetStoreBucket = %q", boot.AssetStoreBucket)
-			}
-			if boot := resolveWith(t, nil); boot.AssetStoreBucket != "" {
-				t.Errorf("unset AssetStoreBucket = %q, want disabled", boot.AssetStoreBucket)
-			}
-		},
 		"DISPATCH_WEB_DIST": func(t *testing.T) {
 			if dir, err := defaultWebDistDir(resolveWith(t, map[string]string{"DISPATCH_WEB_DIST": "/srv/dispatch/dist"}).WebDist); err != nil || dir != "/srv/dispatch/dist" {
 				t.Errorf("web dist = %q, %v", dir, err)
@@ -1565,6 +1561,56 @@ func TestEverySettingReachesItsReader(t *testing.T) {
 				}
 			})
 		},
+		"DISPATCH_DEV_SIGNIN_SHARED_KEY": func(t *testing.T) {
+			// Without dev sign-in nothing would sign with it, so a boot that sets it is refused.
+			refusedWith(t, map[string]string{"DISPATCH_DEV_SIGNIN_SHARED_KEY": "harness-secret"}, "DISPATCH_DEV_SIGNIN_SHARED_KEY")
+			// The key set one dev-sign-in process signs cookies with, each in a data dir of its own:
+			// always one key, so the registry of live server processes compares one fingerprint.
+			devKey := func(t *testing.T, shared string) auth.SigningKeys {
+				t.Helper()
+				boot, err := resolveBootConfig(devSignInEnvironment(map[string]string{"DISPATCH_DEV_SIGNIN_SHARED_KEY": shared}))
+				if err != nil {
+					t.Fatalf("dev sign-in with DISPATCH_DEV_SIGNIN_SHARED_KEY=%q: %v", shared, err)
+				}
+				keys, err := sessionSigningKey(boot, t.TempDir())
+				if err != nil || len(keys.Fingerprints()) != 1 {
+					t.Fatalf("DISPATCH_DEV_SIGNIN_SHARED_KEY=%q: %d keys, %v; want one", shared, len(keys.Fingerprints()), err)
+				}
+				return keys
+			}
+			cookieOf := func(t *testing.T, login string, keys auth.SigningKeys) string {
+				t.Helper()
+				cookie, err := http.ParseSetCookie(auth.IssueSessionCookie(login, 0, keys, false))
+				if err != nil {
+					t.Fatal(err)
+				}
+				return cookie.Value
+			}
+			// Two processes of one harness: a session minted on A authenticates on B.
+			a, b := devKey(t, "harness-secret"), devKey(t, "harness-secret")
+			if session, ok := auth.VerifySession(cookieOf(t, "alice@example.com", a), b); !ok || session.Login != "alice@example.com" {
+				t.Errorf("a cookie process A minted verified on process B as %#v, %t; want alice@example.com", session, ok)
+			}
+			// The value is never the key itself: a production DISPATCH_SIGNING_KEY pasted here mints
+			// nothing its own server accepts, and that server's cookies sign no one in here.
+			production := auth.SingleSigningKey("harness-secret")
+			if slices.Equal(a.Fingerprints(), production.Fingerprints()) {
+				t.Error("dev sign-in signs with DISPATCH_DEV_SIGNIN_SHARED_KEY's own value")
+			}
+			if _, ok := auth.VerifySession(cookieOf(t, "alice@example.com", a), production); ok {
+				t.Error("a production server keyed with the shared value accepted a dev sign-in cookie")
+			}
+			if _, ok := auth.VerifySession(cookieOf(t, "alice@example.com", production), a); ok {
+				t.Error("a dev-sign-in process accepted a cookie signed with the shared value itself")
+			}
+			// Another harness's value is another key, and with none each process keeps its own.
+			if slices.Equal(devKey(t, "another-harness").Fingerprints(), a.Fingerprints()) {
+				t.Error("two shared values derived one key")
+			}
+			if slices.Equal(devKey(t, "").Fingerprints(), devKey(t, "").Fingerprints()) {
+				t.Error("two dev-sign-in processes with no shared value signed with one key")
+			}
+		},
 		"DISPATCH_TEST_HOOKS": func(t *testing.T) {
 			if boot := resolveWith(t, map[string]string{"DISPATCH_TEST_HOOKS": "1"}); !boot.TestHooksEnabled {
 				t.Error("DISPATCH_TEST_HOOKS=1: hooks off")
@@ -1572,15 +1618,18 @@ func TestEverySettingReachesItsReader(t *testing.T) {
 			if boot := resolveWith(t, map[string]string{"DISPATCH_TEST_HOOKS": "true"}); boot.TestHooksEnabled {
 				t.Error("DISPATCH_TEST_HOOKS=true: hooks on, want only 1 to mount them")
 			}
-			// The routes the flag mounts: the e2e harness's hook that drops every open event stream.
+			// The routes the flag mounts: the e2e harness's hooks that close every open live socket, as
+			// a restart (1012) or the socket's age (4001) does.
 			t.Run("router", func(t *testing.T) {
-				for value, want := range map[string]int{"1": http.StatusOK, "": http.StatusNotFound} {
-					request := signedIn(t, httptest.NewRequest(http.MethodPost, "/api/v1/events/_test/disconnect", nil), "alice")
-					request.Header.Set("Sec-Fetch-Site", "same-origin")
-					response := httptest.NewRecorder()
-					routerFor(t, resolveWith(t, map[string]string{"DISPATCH_TEST_HOOKS": value}), routes.AppContextOptions{}).ServeHTTP(response, request)
-					if response.Code != want {
-						t.Errorf("DISPATCH_TEST_HOOKS=%q: POST /api/v1/events/_test/disconnect answered %d %s, want %d", value, response.Code, response.Body.String(), want)
+				for _, hook := range []string{"/api/v1/live/_test/disconnect", "/api/v1/live/_test/rotate"} {
+					for value, want := range map[string]int{"1": http.StatusOK, "": http.StatusNotFound} {
+						request := signedIn(t, httptest.NewRequest(http.MethodPost, hook, nil), "alice")
+						request.Header.Set("Sec-Fetch-Site", "same-origin")
+						response := httptest.NewRecorder()
+						routerFor(t, resolveWith(t, map[string]string{"DISPATCH_TEST_HOOKS": value}), routes.AppContextOptions{}).ServeHTTP(response, request)
+						if response.Code != want {
+							t.Errorf("DISPATCH_TEST_HOOKS=%q: POST %s answered %d %s, want %d", value, hook, response.Code, response.Body.String(), want)
+						}
 					}
 				}
 			})
@@ -1697,9 +1746,7 @@ func answersSharedToken(response *httptest.ResponseRecorder) bool {
 func sharedAgentTokenListReachesTheAPIAndTheDocumentWebsocket(t *testing.T) {
 	// The server's request goroutines write the log while the test reads it.
 	var logged cmdtest.LockedBuffer
-	previous := slog.Default()
-	slog.SetDefault(slog.New(slog.NewJSONHandler(&logged, nil)))
-	t.Cleanup(func() { slog.SetDefault(previous) })
+	logtest.SetDefault(t, slog.NewJSONHandler(&logged, nil))
 	previousTokenLines := func() []map[string]any {
 		t.Helper()
 		var lines []map[string]any

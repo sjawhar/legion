@@ -8,6 +8,7 @@ import (
 	"github.com/jackc/pgx/v5"
 
 	"github.com/sjawhar/envoy/internal/dispatch/docs"
+	"github.com/sjawhar/envoy/internal/dispatch/events"
 	"github.com/sjawhar/envoy/internal/dispatch/model"
 )
 
@@ -35,10 +36,11 @@ func withdrawnReason(issueKey string) string {
 // are not asks yet, and the close's sweep marks them resolved (sweepClosedIssueAsks). An issue
 // already closed, or none, settles nothing: its close is refused.
 //
-// ctx must not be cancelled by the client (context.WithoutCancel): a settlement runs to its end
-// whether or not the client waits for the close, as the settlement it stands in for would.
-// issueSettleBudget (docs.SettleIssueDocuments) bounds only the waits for the rooms' durable
-// appends and whether a retry starts, not a settlement already running.
+// ctx must not end when the client goes away (outlivingTheClient): a settlement runs to its end
+// whether or not the client waits for the close, as the settlement it stands in for would. On a
+// keyed request it still ends at the keyed run's bound (keyedRunLimit). issueSettleBudget
+// (docs.SettleIssueDocuments) bounds only the waits for the rooms' durable appends and whether a
+// retry starts, not a settlement already running.
 func (s *server) settleIssueBeforeClose(ctx context.Context, issueKey string) {
 	if s.deps.Store == nil || s.deps.Store.Pool == nil {
 		return
@@ -101,22 +103,25 @@ func (s *server) readOpenIssueAsks(ctx context.Context, tx pgx.Tx, issueKey stri
 func (s *server) recordWithdrawnAsksTx(ctx context.Context, tx pgx.Tx, issueKey string, open []model.Ask, actor model.Actor) ([]model.Ask, []model.Event, error) {
 	reason := withdrawnReason(issueKey)
 	withdrawn := make([]model.Ask, 0, len(open))
-	events := make([]model.Event, 0, len(open))
+	appended := make([]model.Event, 0, len(open))
 	for _, ask := range open {
 		ask, err := docs.WriteAskResolution(ctx, tx, ask, withdrawnResolution, reason, actor)
 		if err != nil {
 			return nil, nil, err
 		}
-		event, err := s.appendEvent(ctx, tx, issueOwner(issueKey).event(
-			"ask.resolved", actor, model.NewAskEventPayload(ask, model.ReferenceChanges{}),
-		))
+		// Read once the resolution is in, as every ask event's thread_logins is.
+		payload, err := events.AskEventPayload(ctx, tx, ask, model.ReferenceChanges{})
+		if err != nil {
+			return nil, nil, err
+		}
+		event, err := s.appendEvent(ctx, tx, issueOwner(issueKey).event("ask.resolved", actor, payload))
 		if err != nil {
 			return nil, nil, err
 		}
 		withdrawn = append(withdrawn, ask)
-		events = append(events, event)
+		appended = append(appended, event)
 	}
-	return withdrawn, events, nil
+	return withdrawn, appended, nil
 }
 
 // restoreIssueAsksTx opens again every ask of issueKey a close withdrew, as the issue's reopen
@@ -159,17 +164,19 @@ func (s *server) restoreIssueAsksTx(ctx context.Context, tx pgx.Tx, issueKey str
 	if _, err := s.deps.Docs.WriteIssueAskStates(ctx, issueKey, restored, actor, false); err != nil {
 		return nil, nil, err
 	}
-	events := make([]model.Event, 0, len(restored))
+	appended := make([]model.Event, 0, len(restored))
 	for _, ask := range restored {
-		event, err := s.appendEvent(ctx, tx, issueOwner(issueKey).event(
-			"ask.opened", actor, model.NewAskEventPayload(ask, model.ReferenceChanges{}),
-		))
+		payload, err := events.AskEventPayload(ctx, tx, ask, model.ReferenceChanges{})
 		if err != nil {
 			return nil, nil, err
 		}
-		events = append(events, event)
+		event, err := s.appendEvent(ctx, tx, issueOwner(issueKey).event("ask.opened", actor, payload))
+		if err != nil {
+			return nil, nil, err
+		}
+		appended = append(appended, event)
 	}
-	return restored, events, nil
+	return restored, appended, nil
 }
 
 // sweepClosedIssueAsks is the close's last pass over its issue's documents, run once the close
@@ -183,7 +190,7 @@ func (s *server) restoreIssueAsksTx(ctx context.Context, tx pgx.Tx, issueKey str
 // block is logged. An issue reopened in the meantime is left alone. The sweep never fails the
 // close: an error is logged.
 //
-// ctx must not be cancelled by the client (context.WithoutCancel), and no transaction is open.
+// ctx must not end when the client goes away (outlivingTheClient), and no transaction is open.
 func (s *server) sweepClosedIssueAsks(ctx context.Context, issueKey string, withdrawn []model.Ask, actor model.Actor) {
 	if err := s.sweepClosedIssueAsksTx(ctx, issueKey, withdrawn, actor); err != nil {
 		slog.Error("dispatch: sweep the ask blocks of a closed issue", "issue", issueKey, "error", err)

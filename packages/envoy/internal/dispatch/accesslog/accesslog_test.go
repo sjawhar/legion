@@ -10,6 +10,8 @@ import (
 	"strings"
 	"sync"
 	"testing"
+
+	"github.com/sjawhar/envoy/internal/logtest"
 )
 
 // lockedBuffer is a log sink a handler's goroutines may write while the test reads it.
@@ -34,9 +36,7 @@ func (l *lockedBuffer) String() string {
 func capture(t *testing.T) *lockedBuffer {
 	t.Helper()
 	logged := &lockedBuffer{}
-	previous := slog.Default()
-	slog.SetDefault(slog.New(slog.NewTextHandler(logged, nil)))
-	t.Cleanup(func() { slog.SetDefault(previous) })
+	logtest.SetDefault(t, slog.NewTextHandler(logged, nil))
 	return logged
 }
 

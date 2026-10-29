@@ -5,20 +5,20 @@ import { MemoryRouter, useLocation } from "react-router-dom";
 
 import {
   errorFrame,
-  type FakeDeliverySocket,
-  type FakeDeliverySockets,
-  installFakeDeliverySockets,
+  type FakeLiveSocket,
+  type FakeLiveSockets,
+  installFakeLiveSockets,
   snapshotFrame,
-} from "../../__tests__/delivery-live-harness";
+} from "../../__tests__/live-socket-harness";
 import { api } from "../../api/client";
 import type {
-  DeliveryLiveServerFrame,
-  DeliveryLiveSubscribe,
   DeliveryLiveView,
   DeliveryMeasuresResponse,
   DeliveryPR,
   DeliverySettings,
   DeliveryTimelineResponse,
+  LiveServerFrame,
+  LiveSubscribe,
 } from "../../api/types";
 import { KeymapProvider } from "../shell/KeymapProvider";
 import { DeliveryPage } from "./DeliveryPage";
@@ -151,17 +151,17 @@ function currentSearch(): URLSearchParams {
   return new URLSearchParams(screen.getByTestId("location").textContent ?? "");
 }
 
-let sockets: FakeDeliverySockets;
+let sockets: FakeLiveSockets;
 beforeEach(() => {
-  sockets = installFakeDeliverySockets();
+  sockets = installFakeLiveSockets();
 });
 afterEach(() => {
   cleanup();
   sockets.restore();
 });
 
-/** The page's delivery socket, once the page has opened one, as Dispatch accepts it. */
-async function openSocket(): Promise<FakeDeliverySocket> {
+/** The page's live socket, once the page has opened one, as Dispatch accepts it. */
+async function openSocket(): Promise<FakeLiveSocket> {
   await waitFor(() => expect(sockets.sockets.length).toBeGreaterThan(0));
   const socket = sockets.latest();
   act(() => socket.open());
@@ -170,17 +170,14 @@ async function openSocket(): Promise<FakeDeliverySocket> {
 
 /** The newest subscribe frame of `kind` the page has sent on `socket`, once it has sent one. */
 function subscription(
-  socket: FakeDeliverySocket,
+  socket: FakeLiveSocket,
   kind: DeliveryLiveView["kind"]
-): Promise<DeliveryLiveSubscribe> {
+): Promise<LiveSubscribe> {
   return waitFor(() => socket.subscribed(kind));
 }
 
 /** The newest subscribe frame of `view`'s kind, once it subscribes `view`. */
-function subscriptionTo(
-  socket: FakeDeliverySocket,
-  view: DeliveryLiveView
-): Promise<DeliveryLiveSubscribe> {
+function subscriptionTo(socket: FakeLiveSocket, view: DeliveryLiveView): Promise<LiveSubscribe> {
   return waitFor(() => {
     const frame = socket.subscribed(view.kind);
     expect(frame.view).toEqual(view);
@@ -189,12 +186,12 @@ function subscriptionTo(
 }
 
 /** Dispatch sends `frame` to the page. */
-function serve(socket: FakeDeliverySocket, frame: DeliveryLiveServerFrame): void {
+function serve(socket: FakeLiveSocket, frame: LiveServerFrame): void {
   act(() => socket.receive(frame));
 }
 
 /** The page subscribed its timeline, and Dispatch answered with `body`. */
-async function answered(body: DeliveryTimelineResponse): Promise<FakeDeliverySocket> {
+async function answered(body: DeliveryTimelineResponse): Promise<FakeLiveSocket> {
   const socket = await openSocket();
   const { sub } = await subscription(socket, "timeline");
   serve(socket, snapshotFrame(sub, body));
@@ -289,11 +286,13 @@ test("a reconnect while the timeline is unconfigured keeps the setup form and it
   });
   expect(socket.subscribes()).toHaveLength(1);
 
-  // Dispatch restarts: the page opens a new socket at once and subscribes again. Any render of
-  // the timeline's body while that waits would unmount the form, so the draft surviving says none
-  // happened.
+  // Dispatch restarts: the page opens a new socket within the first attempt's spread (its draw
+  // pinned to the start of the window here) and subscribes again. Any render of the timeline's
+  // body while that waits would unmount the form, so the draft surviving says none happened.
+  const random = spyOn(Math, "random").mockReturnValue(0);
   act(() => socket.drop(1012));
-  expect(sockets.sockets).toHaveLength(2);
+  random.mockRestore();
+  await waitFor(() => expect(sockets.sockets).toHaveLength(2));
   const again = sockets.latest();
   act(() => again.open());
   expect(again.subscribed("timeline").sub).toBe(sub);
@@ -314,7 +313,10 @@ test("an unconfigured timeline that Dispatch then refuses otherwise shows that f
   serve(socket, errorFrame(sub, NOT_CONFIGURED, notConfiguredMessage));
   await screen.findByRole("heading", { name: "Set up the delivery timeline" });
 
+  const random = spyOn(Math, "random").mockReturnValue(0);
   act(() => socket.drop(1012));
+  random.mockRestore();
+  await waitFor(() => expect(sockets.sockets).toHaveLength(2));
   const again = sockets.latest();
   act(() => again.open());
   serve(again, errorFrame(sub, "INTERNAL", "database unavailable"));

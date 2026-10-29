@@ -11,6 +11,7 @@ import (
 
 	"github.com/sjawhar/envoy/internal/dispatch/store"
 	"github.com/sjawhar/envoy/internal/dispatch/store/storetest"
+	"github.com/sjawhar/envoy/internal/logtest"
 )
 
 // sweepLeaseTick is the interval both runners tick on: short, so each reaches its first pass at
@@ -50,9 +51,7 @@ func TestTwoSweepRunnersRunThePassOnceAndSkipOnce(t *testing.T) {
 	second := storetest.SecondProcess(t, database)
 	firstLeases, secondLeases := sweepLeases(t, database), sweepLeases(t, second)
 	logs := &storetest.LockedLog{}
-	previous := slog.Default()
-	slog.SetDefault(slog.New(slog.NewTextHandler(logs, nil)))
-	t.Cleanup(func() { slog.SetDefault(previous) })
+	logtest.SetDefault(t, slog.NewTextHandler(logs, nil))
 
 	gate, err := database.Pool.Begin(ctx)
 	if err != nil {
@@ -68,7 +67,7 @@ func TestTwoSweepRunnersRunThePassOnceAndSkipOnce(t *testing.T) {
 	firstDone := make(chan struct{})
 	go func() {
 		defer close(firstDone)
-		RunSuggestionOutcomeSweep(firstCtx, database.Pool, sweepLeaseTick, firstLeases)
+		RunSuggestionOutcomeSweep(firstCtx, database.Pool, sweepLeaseTick, firstLeases, nil)
 	}()
 	if waiting := storetest.WaitForLockWaiters(t, gate, 1, 30*time.Second); waiting < 1 {
 		t.Fatal("the first runner's pass never reached the write_suggestions lock: it never took the lease")
@@ -79,7 +78,7 @@ func TestTwoSweepRunnersRunThePassOnceAndSkipOnce(t *testing.T) {
 	secondDone := make(chan struct{})
 	go func() {
 		defer close(secondDone)
-		RunSuggestionOutcomeSweep(secondCtx, second.Pool, sweepLeaseTick, secondLeases)
+		RunSuggestionOutcomeSweep(secondCtx, second.Pool, sweepLeaseTick, secondLeases, nil)
 	}()
 	for deadline := time.Now().Add(30 * time.Second); countLeaseLines(logs, "dispatch duty: leased pass skipped", suggestionOutcomeLease) == 0; {
 		if time.Now().After(deadline) {
@@ -117,26 +116,28 @@ func TestTwoSweepRunnersRunThePassOnceAndSkipOnce(t *testing.T) {
 // loop's work that no pass of any process did - the loop running slower than it is configured to,
 // with one process, which is what this deployment runs today.
 //
-// It is the loop's own shape that is at stake. Every leased loop ticks on the interval it passes
-// as its period (RunSuggestionOutcomeSweep, redeliver.Sweeper.Run, duty.RunJittered's callers),
-// so the period and the gap between two ticks are the same span, and the record of a pass is
-// stamped a moment after the tick that made it - the time it takes to take the lease. A tick
-// whose own moment is shorter than the previous one's then falls inside the period that pass
-// recorded and is dropped. Ten ticks are driven because one skip is what this is about and a
-// shorter window could miss it.
+// It is the loop's own shape that is at stake. Two ticks' due times are as little as one period
+// apart: a loop of a fixed cadence (duty.RunLeased) passes its interval as its period and its
+// ticker's ticks as its due times, one interval apart while each pass takes less than the
+// interval (a pass that overruns gets the first tick it overran at once, with the moment it was
+// due, and only the ticks after it are dropped), and a loop paced by its passes
+// (duty.RunLeasedAfterEachPass, duty.RunJittered) passes the wait before its tick, its due times
+// that wait plus the time the earlier tick took apart. The record of a pass is stamped a moment
+// after the tick that made it - the time it takes to take the lease. Judged by that moment, a tick
+// whose own delay is shorter than the previous one's falls inside the period that pass recorded
+// and is dropped. Ten ticks are driven because one skip is what this is about and a shorter window
+// could miss it.
 func TestALoneRunnerMakesAPassOnEveryTick(t *testing.T) {
 	ctx, stop := context.WithCancel(context.Background())
 	database := storetest.Open(t)
 	leases := sweepLeases(t, database)
 	logs := &storetest.LockedLog{}
-	previous := slog.Default()
-	slog.SetDefault(slog.New(slog.NewTextHandler(logs, nil)))
-	t.Cleanup(func() { slog.SetDefault(previous) })
+	logtest.SetDefault(t, slog.NewTextHandler(logs, nil))
 
 	const tick = time.Second
 	const ticks = 10
 	done := make(chan struct{})
-	go func() { defer close(done); RunSuggestionOutcomeSweep(ctx, database.Pool, tick, leases) }()
+	go func() { defer close(done); RunSuggestionOutcomeSweep(ctx, database.Pool, tick, leases, nil) }()
 	time.Sleep(tick*ticks + tick/2)
 	stop()
 	<-done
