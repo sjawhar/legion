@@ -1,12 +1,14 @@
 package bus
 
 import (
-	"cmp"
+	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"errors"
+	"fmt"
 	"log/slog"
 	"maps"
+	"reflect"
 	"slices"
 	"strconv"
 	"strings"
@@ -45,6 +47,17 @@ const (
 	// webhook's failed deliveries (internal/dispatch/redeliver).
 	WebhookRedeliveryBucket = "envoy_webhook_redelivery"
 )
+
+// ListenerBuckets reports the KV buckets envoy-listener opens, in the order its NATS grant lists
+// them: the interest and role-claim buckets (internal/store), the session registry
+// (internal/session), and the CI state bucket, which only a listener with the GitHub webhook route
+// opens (internal/cistore). The listener's keeper raises each of them (WithKeptBuckets), and
+// envoy-infra grants the listener and the host each one's calls
+// (packages/envoy/infra/core/permissions.go), so a bucket named here is both kept and granted.
+// Each call returns a fresh slice, so no caller changes another's list.
+func ListenerBuckets() []string {
+	return []string{InterestBucket, RoleClaimBucket, SessionBucket, CIStateBucket}
+}
 
 // NotificationTopicPrefix begins every notification topic: the subjects the stream carries, the
 // role lanes and the exception lanes.
@@ -225,28 +238,34 @@ func readStreamSubjects(js nats.JetStreamContext) ([]string, error) {
 }
 
 // streamConfigGeneration is the generation of streamCfg's settings, stamped on the stream as its
-// streamGenerationKey metadata. Every change to streamCfg's MaxAge, Duplicates or Subjects takes a
-// new generation and a new row in TestTheStreamConfigEqualsItsGenerationsPinnedRow. A build that
-// finds a higher generation deployed leaves the stream as it is (ensureStreamWithConfig), so while
-// two builds run, the older one never reverts what the newer one set.
+// streamGenerationKey metadata. Every change to streamCfg's MaxAge, Duplicates, Discard or
+// Subjects takes a new generation and a new row in
+// TestTheStreamConfigEqualsItsGenerationsPinnedRow. A build that finds a higher generation
+// deployed leaves the stream as it is, at the start (ensureStreamWithConfig) and in the keeper
+// (keepStream), so while two builds run, the older one never reverts what the newer one set.
 const streamConfigGeneration = 1
 
 // streamGenerationKey is the stream metadata key that holds the generation of its settings. A
 // stream without it was last set by a build before generations: generation 0.
 const streamGenerationKey = "dispatch.stream-generation"
 
-// streamCfg is this build's stream. Its Replicas is 0: an ensure then keeps the deployed replica
-// count on update and creates the stream with one replica (ensureStreamWithConfig), unless the
-// client names a count (WithReplicas).
+// streamCfg is the stream this binary creates, before ConnectOwningStream sets its replicas
+// (WithReplicas) and byte limit (WithStreamMaxBytes). Its age equals the duplicate window by
+// construction: the dashboard promises a same-mode retry cannot deliver twice for exactly as long
+// as the stream can still recognise the repeat, and a deployment where the two differed would break
+// that promise. A full stream refuses a new message (DiscardNew) rather than drop a stored one, so a
+// stored message leaves only by age: the stream holds every message it took for the whole window,
+// byte limit or not, and the promise holds. The refused publish's sender gets ErrStreamFull, which
+// is not an ErrRefused: the same publish is taken once age has made room, on a clustered stream
+// too, where a retry under the refused message's MsgId is acknowledged a duplicate with no sequence
+// and the bus sends it once more without the id (ErrNotStored).
 var streamCfg = &nats.StreamConfig{
-	Name:      Stream,
-	Subjects:  streamSubjects,
-	Retention: nats.LimitsPolicy,
-	// Retention equals the duplicate window by construction: the dashboard promises a
-	// same-mode retry cannot deliver twice for exactly as long as the stream can still
-	// recognise the repeat, and a deployment where the two differ would break that promise.
+	Name:       Stream,
+	Subjects:   streamSubjects,
+	Retention:  nats.LimitsPolicy,
 	MaxAge:     streamDuplicateWindow,
 	Duplicates: streamDuplicateWindow,
+	Discard:    nats.DiscardNew,
 	Storage:    nats.FileStorage,
 }
 
@@ -391,38 +410,66 @@ func (r streamReconciliation) log() {
 	}
 }
 
-// ensureStreamWithConfig creates the stream as cfg describes it, under a fresh StreamIDMetadataKey,
-// or reconciles the deployed stream with cfg, and returns the subjects the stream carries
-// afterwards.
+// ensureStreamWithConfig creates the stream with cfg, under a fresh StreamIDMetadataKey, or
+// reconciles the deployed one towards cfg, and returns the subjects the stream carries afterwards.
+// cfg's Replicas is the deployment's replica count and its MaxBytes the deployment's byte limit, 0
+// when it sets none.
 //
-// A deployed stream stamped with a generation higher than streamConfigGeneration was set by a newer
-// build, which owns its settings: it is left exactly as it is. Any other is reconciled: its subjects
-// as reconcileSubjects says, its MaxAge and Duplicates to cfg's, and stamped with this build's
-// generation; it is updated only when one of those differs or it has no StreamIDMetadataKey. A cfg
-// with Replicas 0 keeps the deployed replica count on update and creates the stream with one
-// replica; any other count is set on create and on update. The deployed stream's metadata is kept,
-// its StreamIDMetadataKey included; a stream without that key gets one (deployedStreamID). A stream
-// whose subjects, retention and duplicate window already match cfg but that lacks the key or this
-// build's generation gets only those: the update writes the stream's own configuration back with
-// them added, so its replicas, storage, limits and every other setting stay as they are.
+// A deployed stream stamped with a generation higher than streamConfigGeneration was set by a
+// newer build, which owns its settings: it is left exactly as it is, so while two builds run the
+// older one never reverts what the newer one set.
+//
+// Any other is reconciled. The update starts from the deployed configuration and sets only what
+// this binary owns:
+//   - the subjects (reconcileSubjects);
+//   - the age and the duplicate window, cfg's, and discard, cfg's DiscardNew, so a full stream
+//     refuses a new message and keeps every stored one (a deployed DiscardOld stream is switched);
+//   - the replicas, the deployed count or cfg's when that is more: a start never writes fewer
+//     copies than it read, so a program whose setting is lower (an older setting, or one restarted
+//     before the others) leaves a raised stream it reads as it is, though not one raised after its
+//     read (below); lowering is an operator step that needs every program's setting lowered first;
+//   - the byte limit, the deployed limit or cfg's when that is more, cfg's on a stream with none
+//     and the deployed one when cfg sets none: a start never writes a lower limit than it read, so
+//     an operator's raise stands, and lowering or removing one is an operator step that needs
+//     every program's setting lowered or removed first;
+//   - the metadata, the deployed metadata kept as it is, its StreamIDMetadataKey included; a stream
+//     without that key gets one (identifiedMetadata), and this build's generation is stamped on it
+//     (stampGeneration).
+//
+// Every other deployed setting (storage, placement, compression, the message count and size
+// limits, direct get and the rest) stays as it is. A stream that already holds all of that gets no
+// update, and one that lacks only the key or the generation gets its own configuration back with
+// them added. A refused create or update names the settings it carried (refusedSettings).
 //
 // Every bus.ConnectOwningStream caller runs this on the one stream, and JetStream's stream update
-// has no compare-and-swap, so two starts can each read the stream before either writes. A stream
-// one of them creates first is reconciled by the other, keeping the id it was created with
+// has no compare-and-swap, so two starts can each read the stream before either writes, and the
+// later write wins. A start can therefore lose to a concurrent start with other settings: one that
+// read the stream before this start's write and writes after it puts back the subjects, the
+// copies, the byte limit and the metadata it read. The client this start returns keeps the stream
+// (keepStream): within one keeper period it raises the copies and the byte limit to what its
+// settings ask for where the stream holds less, puts back StreamIDMetadataKey, the age, the
+// duplicate window and discard, and adds back each of its own subjects the stream lost that
+// overlaps none the stream carries, so the race ends at the most copies and the largest byte limit
+// any program asks for. Programs of a deployment with different ENVOY_NATS_REPLICAS or
+// ENVOY_STREAM_MAX_BYTES therefore do not fight over the stream: neither is ever lowered, and the
+// largest stands. One race shows even with the same settings: nats-server can leave one of two
+// replica changes proposed at once unanswered (seen with v2.10.29,
+// TestTwoStartsRaisingOneStreamAtOnceBothSucceed), so an update whose answer never came succeeds
+// when the stream, read again, needs nothing more from this start (updateStream). A
+// stream one start creates first is reconciled by the other, keeping the id it was created with
 // (AddStream answers ErrStreamNameAlreadyInUse, as its config's id differs). Two that both find no
 // id write the same one, derived from what both read.
 func ensureStreamWithConfig(js nats.JetStreamContext, cfg *nats.StreamConfig) ([]string, error) {
 	info, err := js.StreamInfo(Stream)
 	if errors.Is(err, nats.ErrStreamNotFound) {
 		created := *cfg
-		created.Replicas = cmp.Or(created.Replicas, 1)
 		created.Metadata = stampGeneration(cfg.Metadata)
 		created.Metadata[StreamIDMetadataKey] = id.New()
 		if _, err = js.AddStream(&created); err == nil {
 			return created.Subjects, nil
 		}
 		if !errors.Is(err, nats.ErrStreamNameAlreadyInUse) {
-			return nil, err
+			return nil, refusedSettings(err, nil, &created)
 		}
 		info, err = js.StreamInfo(Stream)
 	}
@@ -435,31 +482,20 @@ func ensureStreamWithConfig(js nats.JetStreamContext, cfg *nats.StreamConfig) ([
 			slog.Int("deployed_generation", deployedGeneration), slog.Int("own_generation", streamConfigGeneration))
 		return info.Config.Subjects, nil
 	}
-	reconciliation := reconcileSubjects(info.Config.Subjects, cfg.Subjects)
-	metadata := stampGeneration(identifiedMetadata(info))
-	if info.Config.MaxAge == cfg.MaxAge &&
-		info.Config.Duplicates == cfg.Duplicates &&
-		slices.Equal(info.Config.Subjects, reconciliation.subjects) {
-		if deployedGeneration != streamConfigGeneration || info.Config.Metadata[StreamIDMetadataKey] == "" {
-			identified := info.Config
-			identified.Metadata = metadata
-			if _, err = js.UpdateStream(&identified); err != nil {
-				return nil, err
-			}
-		}
+	desired, reconciliation := reconciledStream(info, cfg)
+	if reflect.DeepEqual(desired, info.Config) {
 		reconciliation.log()
 		return info.Config.Subjects, nil
 	}
-	desired := *cfg
-	desired.Subjects = reconciliation.subjects
-	desired.Replicas = cmp.Or(desired.Replicas, info.Config.Replicas)
-	desired.Metadata = metadata
 	migratingRoleLanes := streamCapturesRoleLanes(info.Config.Subjects) && !streamCapturesRoleLanes(desired.Subjects)
 	if err := migrateRoleLanesOffStream(js, &info.Config, &desired); err != nil {
 		return nil, err
 	}
-	if _, err = js.UpdateStream(&desired); err != nil {
-		return nil, err
+	if err := updateStream(js, &desired, func(again *nats.StreamInfo) bool {
+		reconciled, _ := reconciledStream(again, cfg)
+		return reflect.DeepEqual(reconciled, again.Config)
+	}); err != nil {
+		return nil, refusedSettings(err, &info.Config, &desired)
 	}
 	reconciliation.log()
 	if migratingRoleLanes {
@@ -494,12 +530,122 @@ func OwnMetadata(deployed map[string]string, extra int) map[string]string {
 	return metadata
 }
 
-// stampGeneration is the metadata an ensure sends: the deployed stream's own keys (OwnMetadata),
-// then this build's generation.
-func stampGeneration(deployed map[string]string) map[string]string {
-	metadata := OwnMetadata(deployed, 2)
-	metadata[streamGenerationKey] = strconv.Itoa(streamConfigGeneration)
-	return metadata
+// stampGeneration is metadata with this build's generation stamped on it. The copy keeps every
+// other key, the ones nats-server sets itself included, so a configuration it goes into equals the
+// deployed one when nothing else changed. It is never nil, so a caller can add keys to it.
+func stampGeneration(metadata map[string]string) map[string]string {
+	stamped := maps.Clone(metadata)
+	if stamped == nil {
+		stamped = map[string]string{}
+	}
+	stamped[streamGenerationKey] = strconv.Itoa(streamConfigGeneration)
+	return stamped
+}
+
+// reconciledStream is the configuration ensureStreamWithConfig writes over the deployed stream info
+// describes, and the subject reconciliation in it: the deployed configuration with what this binary
+// owns set from cfg (ownedStream) and the subjects reconciled (reconcileSubjects).
+func reconciledStream(info *nats.StreamInfo, cfg *nats.StreamConfig) (nats.StreamConfig, streamReconciliation) {
+	reconciliation := reconcileSubjects(info.Config.Subjects, cfg.Subjects)
+	desired := ownedStream(info, cfg)
+	desired.Subjects = reconciliation.subjects
+	return desired, reconciliation
+}
+
+// keptStream is the configuration the keeper (keepStream) writes over the deployed stream info
+// describes: the deployed configuration with what this binary owns set from cfg (ownedStream) and
+// the deployed subjects with this binary's own added where the keeper may (keptSubjects).
+func keptStream(info *nats.StreamInfo, cfg *nats.StreamConfig) nats.StreamConfig {
+	kept := ownedStream(info, cfg)
+	kept.Subjects = keptSubjects(info.Config.Subjects, cfg.Subjects)
+	return kept
+}
+
+// ownedStream is the deployed configuration info describes with every setting this binary owns
+// but the subjects set from cfg, as both a start (reconciledStream) and the keeper (keptStream)
+// write it: the replicas, the deployed count or cfg's when that is more; the byte limit, the
+// deployed limit or cfg's when that is more, cfg's on a stream with none and the deployed one when
+// cfg sets none; the age, the duplicate window and discard, cfg's; and the metadata with a
+// StreamIDMetadataKey (identifiedMetadata) and this build's generation (stampGeneration). Neither
+// the copies nor the byte limit is ever lowered, so an operator's raise of either stands; lowering
+// one is an operator step once every program's setting is lowered. The age, the window and discard
+// are compiled into the binary, not deployment settings (streamCfg), and a release that changed
+// one of them takes a new streamConfigGeneration, which an older release's keeper leaves alone
+// (keepStream), so the two never put their own value back in turn while both run.
+func ownedStream(info *nats.StreamInfo, cfg *nats.StreamConfig) nats.StreamConfig {
+	owned := info.Config
+	owned.Replicas = max(info.Config.Replicas, cfg.Replicas)
+	if cfg.MaxBytes > 0 {
+		owned.MaxBytes = max(info.Config.MaxBytes, cfg.MaxBytes)
+	}
+	owned.MaxAge = cfg.MaxAge
+	owned.Duplicates = cfg.Duplicates
+	owned.Discard = cfg.Discard
+	owned.Metadata = stampGeneration(identifiedMetadata(info))
+	return owned
+}
+
+// keptSubjects is the subject list the keeper writes: the deployed list, then each of own, this
+// binary's subjects, that the list lacks, that captures no role lane (subjectCapturesRoleLanes) and
+// that overlaps no deployed subject. It only adds: unlike a start (reconcileSubjects) it removes and
+// replaces nothing, so two releases with different subject lists never switch the stream back and
+// forth, and a subject of this binary's that another release's overlapping one replaced stays
+// replaced until this binary's next start.
+func keptSubjects(deployed, own []string) []string {
+	kept := slices.Clone(deployed)
+	for _, subject := range own {
+		if subjectCapturesRoleLanes(subject) || slices.ContainsFunc(kept, func(other string) bool { return subjectsOverlap(subject, other) }) {
+			continue
+		}
+		kept = append(kept, subject)
+	}
+	return kept
+}
+
+// updateStream sends update, a whole stream configuration, and succeeds when the server accepts it
+// or when its answer never came (unanswered) and the stream update names, read again, holds what
+// the caller asked for (holds). Any other refusal, and an unanswered update the stream read again
+// does not hold, is the update's own error.
+func updateStream(js nats.JetStreamContext, update *nats.StreamConfig, holds func(*nats.StreamInfo) bool) error {
+	_, err := js.UpdateStream(update)
+	if !unanswered(err) {
+		return err
+	}
+	if again, infoErr := js.StreamInfo(update.Name); infoErr == nil && holds(again) {
+		return nil
+	}
+	return err
+}
+
+// unanswered reports whether err is a JetStream request's wait running out with no answer, rather
+// than the server's refusal.
+func unanswered(err error) bool {
+	return errors.Is(err, nats.ErrTimeout) || errors.Is(err, context.DeadlineExceeded)
+}
+
+// refusedSettings is err, the server's answer to request, a create (deployed nil) or an update of
+// the stream deployed, named with each deployment setting whose value request changes:
+// ReplicasEnvVar when it sets more than one copy the stream does not have (a create, or a raise),
+// StreamMaxBytesEnvVar when it sets a byte limit the stream does not have. The bus is handed the
+// numbers and not where they came from, so the names are those of the settings every deployed
+// program reads them from (WithReplicas, WithStreamMaxBytes). One copy is never named: a server
+// refuses no stream for having one. nil, and a refusal of a request that changes neither, are
+// returned as they are.
+func refusedSettings(err error, deployed, request *nats.StreamConfig) error {
+	if err == nil {
+		return nil
+	}
+	var settings []string
+	if request.Replicas > 1 && (deployed == nil || request.Replicas != deployed.Replicas) {
+		settings = append(settings, fmt.Sprintf("%s=%d", ReplicasEnvVar, request.Replicas))
+	}
+	if request.MaxBytes > 0 && (deployed == nil || request.MaxBytes != deployed.MaxBytes) {
+		settings = append(settings, fmt.Sprintf("%s=%d", StreamMaxBytesEnvVar, request.MaxBytes))
+	}
+	if len(settings) == 0 {
+		return err
+	}
+	return fmt.Errorf("%s: %w", strings.Join(settings, ", "), err)
 }
 
 // identifiedMetadata is a copy of the deployed stream's metadata that holds a StreamIDMetadataKey:

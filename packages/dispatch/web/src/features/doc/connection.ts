@@ -3,7 +3,7 @@ import { DOCUMENT_SCHEMA_CLOSE_CODE } from "@legion/contracts";
 import type { Awareness } from "y-protocols/awareness";
 import type { Doc } from "yjs";
 
-import { reconnectDelayMs } from "../../api/live";
+import { reconnectDelayMs } from "../../api/live-socket";
 import { importWhenOnline } from "../shell/DeploymentResilience";
 import type { PendingState, PendingSync } from "./pending-sync";
 

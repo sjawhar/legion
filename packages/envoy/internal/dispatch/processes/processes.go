@@ -14,7 +14,7 @@
 // the refusing process to stop heartbeating, so a process restarted after a kill, whose dead row
 // still counts as live for up to LiveWindow, starts once that row lapses.
 //
-// Each row also records what the decisions over the fleet read (migration 0138): the
+// Each row also records what the decisions over the fleet read (migration 0143): the
 // document schema numbers the process reads and creates, which the document socket's admission
 // takes (docs.Service.authorize), its embedder's identity, and whether it stores files in a bucket.
 package processes
@@ -80,7 +80,7 @@ const pruneLease = "server-processes"
 var ErrKeySetMismatch = errors.New("this process's signing key set does not match a live server process's")
 
 // Instance is what a process registers: the build it serves, the keys it signs and verifies with,
-// and what the decisions over the fleet read (migration 0138).
+// and what the decisions over the fleet read (migration 0143).
 type Instance struct {
 	// Commit is the legion commit the binary was stamped with, "" for an unstamped build.
 	Commit string
@@ -478,29 +478,19 @@ func (r *Registration) Deregister(ctx context.Context) error {
 
 // RunPrune deletes, every PruneInterval until ctx ends, the rows whose heartbeat is older than
 // PruneAge by the database's clock: what processes that died without deregistering left behind.
-// Each pass runs under pruneLease (duty.Exclusive), so one process prunes per period however many
-// serve the database.
+// Each pass runs under pruneLease, so one process prunes per period however many serve the
+// database. The ticks are duty.RunLeased's, a ticker's: the first one interval after the call,
+// then one each interval; the first tick a pass overran comes at once with the moment it was due,
+// and only the ones after it are dropped.
 func RunPrune(ctx context.Context, pool *store.Pool, leases duty.Leases) {
-	interval := PruneInterval
-	ticker := time.NewTicker(interval)
-	defer ticker.Stop()
-	for {
-		select {
-		case <-ctx.Done():
-			return
-		case <-ticker.C:
-			duty.Exclusive(ctx, leases, pruneLease, interval, func(ctx context.Context) {
-				pruned, err := prune(ctx, pool)
-				if err != nil {
-					slog.Warn("dispatch: prune the server process registry", "error", err)
-					return
-				}
-				if pruned > 0 {
-					slog.Info("dispatch: pruned server processes gone without deregistering", "rows", pruned)
-				}
-			})
+	duty.RunLeased(ctx, leases, pruneLease, PruneInterval, duty.TickAfterInterval, func(ctx context.Context) {
+		pruned, err := prune(ctx, pool)
+		if err != nil {
+			slog.Warn("dispatch: prune the server process registry", "error", err)
+		} else if pruned > 0 {
+			slog.Info("dispatch: pruned server processes gone without deregistering", "rows", pruned)
 		}
-	}
+	})
 }
 
 // prune is one pass of RunPrune.

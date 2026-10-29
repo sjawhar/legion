@@ -268,30 +268,30 @@ func (p *Pool) Listener(ctx context.Context) (*pgx.Conn, error) {
 // one at the same moment, and it is a caller and not a lease or a hold that needs one.
 //
 // Exclusive takes its connection before it learns whether the lease is held, so a pass that skips
-// because the other process holds the lease holds a connection for that round trip too. Twelve
+// because the other process holds the lease holds a connection for that round trip too. Thirteen
 // names are leased - the document compaction, the suggestion-outcome sweep, the reference-excerpt
-// reconciliation, the block-index reconciliation, the GitHub webhook redelivery sweep, the
-// architecture import, the delivery reconcile, the edit-notice sweep, the repair of closed and
-// reopened issues' asks (api.RunIssueAskRepair), one per delivery durable for the intake's
-// take-over (delivery.consumerLease, a name each for delivery-events and delivery-jobs) and the
-// server process registry's prune (processes.RunPrune) - by twelve callers, since each intake
-// takes its own durable's name from its own goroutine, so twelve callers can be inside Exclusive
-// at once.
+// reconciliation, the block-index reconciliation, the term-statistics refresh, the GitHub webhook
+// redelivery sweep, the architecture import, the delivery reconcile, the edit-notice sweep, the
+// repair of closed and reopened issues' asks (api.RunIssueAskRepair), one per delivery durable
+// for the intake's take-over (delivery.consumerLease, a name each for delivery-events and
+// delivery-jobs) and the server process registry's prune (processes.RunPrune) - by thirteen
+// callers, since each intake takes its own durable's name from its own goroutine, so thirteen
+// callers can be inside Exclusive at once.
 //
 // Each of the two intakes also holds its durable's hold, whose every statement is one statement
 // on a connection of this pool for that statement alone. Two can be in flight per intake at once:
 // the hold's renewal goroutine (duty.Hold's renew, every 5 s, each bounded by the renew interval),
 // and the intake's own goroutine (duty.HoldToken, duty.TryHold, SetToken, Release, one at a time),
 // whose SetToken runs inside the take-over and so needs a connection beside the one its lease is
-// held on. That is four more callers, sixteen in all.
+// held on. That is four more callers, seventeen in all.
 //
-// Sixteen connections are exactly those sixteen: the headroom is zero. A renewal that waited for
-// a connection behind a compaction pass, which holds its lease for minutes, would see its hold
+// Seventeen connections are exactly those seventeen: the headroom is zero. A renewal that waited
+// for a connection behind a compaction pass, which holds its lease for minutes, would see its hold
 // reported lost at the loss deadline and the durable's delivery stop, so the next caller added
 // here - a leased loop, or another hold - takes a connection of its own in this count. They
 // cannot come from the shared pool: a lease is held for the whole pass, and the shared pool's
 // sharedPoolSize connections are what every request reads through.
-const leasePoolSize = 16
+const leasePoolSize = 17
 
 // Leases is where a periodic maintenance loop takes the connection it holds its lease on, so that
 // only one process runs each pass (duty.Exclusive). The lease is a session-level advisory lock, so
@@ -567,27 +567,60 @@ func (p *Pool) begin(ctx context.Context, options pgx.TxOptions) (pgx.Tx, error)
 		return nil, err
 	}
 	release := hold(ctx)
-	if release == nil {
+	beforeCommit, _ := ctx.Value(beforeCommitKey{}).(BeforeCommit)
+	if release == nil && beforeCommit == nil {
 		return tx, nil
 	}
-	return &trackedTx{Tx: tx, release: release}, nil
+	return &trackedTx{Tx: tx, release: release, beforeCommit: beforeCommit}, nil
 }
 
-// trackedTx clears the caller's mark however the transaction ends. Callers commit and then run
-// a deferred rollback; the release absorbs that second call.
+// BeforeCommit is a step every transaction a request opens takes just before its COMMIT, inside
+// that transaction, so what it writes commits with the request's own write or not at all. An
+// error from it rolls the transaction back, and Commit returns that error.
+type BeforeCommit func(ctx context.Context, tx pgx.Tx) error
+
+type beforeCommitKey struct{}
+
+// WithBeforeCommit returns ctx carrying step, which every transaction this pool opens under ctx,
+// or a context derived from it, takes before it commits (BeforeCommit). A keyed write marks its
+// Idempotency-Key committed this way, in the transaction of the write itself (api/request_keys.go).
+// A transaction already failed when its caller commits it skips the step: pgx answers that commit
+// with its own rollback error, as it would without one.
+func WithBeforeCommit(ctx context.Context, step BeforeCommit) context.Context {
+	return context.WithValue(ctx, beforeCommitKey{}, step)
+}
+
+// trackedTx clears the caller's mark however the transaction ends, and takes the caller's
+// BeforeCommit step before it commits. Callers commit and then run a deferred rollback; the
+// release absorbs that second call. Either part may be absent: a context the pool does not track
+// has no mark, and one with no step commits as it is.
 type trackedTx struct {
 	pgx.Tx
-	release func()
+	release      func()
+	beforeCommit BeforeCommit
 }
 
 func (t *trackedTx) Commit(ctx context.Context) error {
-	defer t.release()
+	defer t.end()
+	if t.beforeCommit != nil && t.Tx.Conn().PgConn().TxStatus() == 'T' {
+		if err := t.beforeCommit(ctx, t.Tx); err != nil {
+			_ = t.Tx.Rollback(ctx)
+			return err
+		}
+	}
 	return t.Tx.Commit(ctx)
 }
 
 func (t *trackedTx) Rollback(ctx context.Context) error {
-	defer t.release()
+	defer t.end()
 	return t.Tx.Rollback(ctx)
+}
+
+// end clears the caller's mark, when the pool tracks one.
+func (t *trackedTx) end() {
+	if t.release != nil {
+		t.release()
+	}
 }
 
 type errRow struct {

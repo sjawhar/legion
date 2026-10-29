@@ -10,6 +10,7 @@ import (
 
 	"github.com/reearth/ygo/crdt"
 
+	"github.com/sjawhar/envoy/internal/dispatch/docs/crafted"
 	"github.com/sjawhar/envoy/internal/dispatch/docs/docstest"
 	"github.com/sjawhar/envoy/internal/stacktest"
 )
@@ -20,12 +21,17 @@ const (
 	expectedMaxTreeDepth       = 1_000
 	expectedMaxNodeAttrNesting = 100
 	expectedMaxMarkAttrNesting = 99
+
+	// expectedMaxTypedNesting is how many typed blocks a document may open inside one another, the
+	// same bound the browser's read-only engine draws a deeper `:::` opener as text past (INFRA-581).
+	expectedMaxTypedNesting = 32
 )
 
 // A markdown document opens at most 100 blocks inside one another, however the nesting is written:
 // all on one line, or one level more on each line, where the line before still holds an open
-// paragraph the next level interrupts. The same parser handles a whole upload and the fragments
-// written by edits and accepted suggestions.
+// paragraph the next level interrupts. Typed blocks count among them, at most 32 of them nested
+// (TestParseForWriteRefusesA33rdNestedTypedBlock), so they nest here inside quotes. The same parser
+// handles a whole upload and the fragments written by edits and accepted suggestions.
 func TestParseRefusesMarkdownNestedPastTheBound(t *testing.T) {
 	parsers := blockMarkdownReaders()
 	onOneLine := func(open string) func(int) string {
@@ -53,7 +59,10 @@ func TestParseRefusesMarkdownNestedPastTheBound(t *testing.T) {
 		{name: "quotes", markdown: onOneLine("> "), blocks: 1, line: firstLine},
 		{name: "bare quotes", markdown: onOneLine(">"), blocks: 1, line: firstLine},
 		{name: "lists", markdown: onOneLine("- "), blocks: 2, line: firstLine},
-		{name: "callouts", markdown: nestedCallouts, blocks: 1, line: lastLine},
+		{name: "callouts inside quotes", markdown: func(levels int) string {
+			quotes := strings.Repeat("> ", levels-expectedMaxTypedNesting)
+			return quotes + strings.ReplaceAll(nestedCallouts(expectedMaxTypedNesting), "\n", "\n"+quotes)
+		}, blocks: 1, line: func(int) int { return expectedMaxTypedNesting }},
 		{name: "quotes one per line", markdown: onePerLine(func(depth int) string {
 			return strings.Repeat("> ", depth) + "a"
 		}), blocks: 1, line: lastLine},
@@ -330,7 +339,7 @@ func TestTreesDeeperThanTheBoundAreOutsideTheSchema(t *testing.T) {
 	// textLevel-2, and the paragraph level textLevel-1.
 	chain := func(textLevel int) *Node {
 		text := &Node{Type: "text", Text: "a", Marks: []Mark{{
-			Type: "proofComment", Attrs: Attrs{"id": "c1", "nested": docstest.NestedValue(expectedMaxMarkAttrNesting)},
+			Type: "proofComment", Attrs: Attrs{"id": "c1", "nested": crafted.NestedValue(expectedMaxMarkAttrNesting)},
 		}}}
 		node := &Node{Type: "paragraph", Children: []*Node{text}}
 		for range textLevel - 2 {
@@ -396,10 +405,10 @@ func TestReadRefusesAMillionLevelCRDTTreeWithoutOverflow(t *testing.T) {
 }
 
 // The walks over a live tree that do not read it through Read first - the text a mark covers
-// (MarkRange, Unmark) and the text a client wrote (AuthoredTextRuns) - meet the depth bound where
-// Read does: a tree at the bound is walked, one whose text alone stands one level past it is
-// refused, and under a stack far below the default, a tree a peer wrote far past it is refused
-// rather than recursed through.
+// (MarkRange, Unmark), the text a client wrote (AuthoredTextRuns) and the fold's read of a
+// document it holds alone (ReadUnshared) - meet the depth bound where Read does: a tree at the
+// bound is walked, one whose text alone stands one level past it is refused, and under a stack far
+// below the default, a tree a peer wrote far past it is refused rather than recursed through.
 func TestLiveTreeWalksStopAtTheDepthBoundUnderASmallStack(t *testing.T) {
 	stacktest.Under(t, 16<<20, func(t *testing.T) {
 		for _, test := range []struct {
@@ -427,11 +436,12 @@ func TestLiveTreeWalksStopAtTheDepthBoundUnderASmallStack(t *testing.T) {
 				})
 				_, authored := AuthoredTextRuns(fragment, ydoc.ClientID(), 0, nil)
 				_, read := Read(fragment)
+				_, unshared := ReadUnshared(fragment)
 				past := fmt.Sprintf("a node %d levels deep", expectedMaxTreeDepth+1)
 				for _, walk := range []struct {
 					name string
 					err  error
-				}{{"Read", read}, {"MarkRange", marked}, {"Unmark", unmarked}, {"AuthoredTextRuns", authored}} {
+				}{{"Read", read}, {"ReadUnshared", unshared}, {"MarkRange", marked}, {"Unmark", unmarked}, {"AuthoredTextRuns", authored}} {
 					if test.refused && (!errors.Is(walk.err, ErrSchema) || !strings.Contains(walk.err.Error(), past)) {
 						t.Errorf("%s of a chain %d deep: %v, want ErrSchema saying %q", walk.name, test.textLevel, walk.err, past)
 					}
@@ -462,14 +472,14 @@ func TestAttributesNestedPastTheBoundAreOutsideTheSchema(t *testing.T) {
 	}
 	for _, nesting := range []int{expectedMaxNodeAttrNesting, expectedMaxNodeAttrNesting + 1} {
 		t.Run(fmt.Sprintf("a node attribute nesting %d", nesting), func(t *testing.T) {
-			node := &Node{Type: "doc", Children: []*Node{{Type: "heading", Attrs: Attrs{"level": float64(1), "nested": docstest.NestedValue(nesting)}, Children: []*Node{{Type: "text", Text: "a"}}}}}
+			node := &Node{Type: "doc", Children: []*Node{{Type: "heading", Attrs: Attrs{"level": float64(1), "nested": crafted.NestedValue(nesting)}, Children: []*Node{{Type: "text", Text: "a"}}}}}
 			check(t, "a node attribute", nesting, expectedMaxNodeAttrNesting, node.Validate())
 		})
 	}
 	for _, nesting := range []int{expectedMaxMarkAttrNesting, expectedMaxMarkAttrNesting + 1} {
 		t.Run(fmt.Sprintf("a mark attribute nesting %d", nesting), func(t *testing.T) {
-			check(t, "a mark attribute", nesting, expectedMaxMarkAttrNesting, linkedText(docstest.NestedValue(nesting)).Validate())
-			_, err := Read(liveLinkedText(t, docstest.NestedValue(nesting)).GetXmlFragment("prosemirror"))
+			check(t, "a mark attribute", nesting, expectedMaxMarkAttrNesting, linkedText(crafted.NestedValue(nesting)).Validate())
+			_, err := Read(liveLinkedText(t, crafted.NestedValue(nesting)).GetXmlFragment("prosemirror"))
 			check(t, "a live mark attribute", nesting, expectedMaxMarkAttrNesting, err)
 		})
 	}
@@ -522,7 +532,7 @@ func TestEveryWriterKeepsAttributeValuesWithinYgosDepth(t *testing.T) {
 	}
 	plainText := func() *Node { return &Node{Type: "text", Text: "a"} }
 	linked := func(nesting int) *Node {
-		return &Node{Type: "text", Text: "a", Marks: []Mark{{Type: "link", Attrs: linkAttrs(docstest.NestedValue(nesting))}}}
+		return &Node{Type: "text", Text: "a", Marks: []Mark{{Type: "link", Attrs: linkAttrs(crafted.NestedValue(nesting))}}}
 	}
 	level := func(nested any) Attrs { return Attrs{"level": float64(1), "nested": nested} }
 	for _, test := range []struct {
@@ -541,19 +551,19 @@ func TestEveryWriterKeepsAttributeValuesWithinYgosDepth(t *testing.T) {
 			return Update(txn, fragment, heading(linked(nesting), level(nil)))
 		}},
 		{"Update writing a node attribute", expectedMaxNodeAttrNesting, func(t *testing.T, txn *crdt.Transaction, fragment *crdt.YXmlFragment, nesting int) error {
-			return Update(txn, fragment, heading(plainText(), level(docstest.NestedValue(nesting))))
+			return Update(txn, fragment, heading(plainText(), level(crafted.NestedValue(nesting))))
 		}},
 		{"Update changing a node attribute", expectedMaxNodeAttrNesting, func(t *testing.T, txn *crdt.Transaction, fragment *crdt.YXmlFragment, nesting int) error {
 			if err := Update(txn, fragment, heading(plainText(), level(nil))); err != nil {
 				t.Fatalf("write the heading: %v", err)
 			}
-			return Update(txn, fragment, heading(plainText(), level(docstest.NestedValue(nesting))))
+			return Update(txn, fragment, heading(plainText(), level(crafted.NestedValue(nesting))))
 		}},
 		{"MarkRange", expectedMaxMarkAttrNesting, func(t *testing.T, txn *crdt.Transaction, fragment *crdt.YXmlFragment, nesting int) error {
 			if err := Update(txn, fragment, heading(plainText(), level(nil))); err != nil {
 				t.Fatalf("write the text: %v", err)
 			}
-			return MarkRange(txn, fragment, Range{From: 1, To: 2}, Mark{Type: "link", Attrs: linkAttrs(docstest.NestedValue(nesting))})
+			return MarkRange(txn, fragment, Range{From: 1, To: 2}, Mark{Type: "link", Attrs: linkAttrs(crafted.NestedValue(nesting))})
 		}},
 	} {
 		for _, nesting := range []int{test.bound, test.bound + 1} {

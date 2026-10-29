@@ -851,7 +851,7 @@ func TestRenderKeepsTextAroundFootnoteReferences(t *testing.T) {
 	}
 	undefined := &Node{Type: "doc", Children: []*Node{paragraph(text("[^2] stays"), reference("1")), definition("1")}}
 	if got := mustRender(t, undefined); !strings.HasPrefix(got, "[^2] stays") {
-		t.Fatalf("Render() = %q, want text naming an undefined label written as main writes it", got)
+		t.Fatalf("Render() = %q, want text naming an undefined label written as the writer before sjawhar/legion#1429 writes it", got)
 	}
 }
 
@@ -886,7 +886,7 @@ func TestRenderKeepsBlankCodeLinesInFootnoteDefinitions(t *testing.T) {
 	}
 	quoted := &Node{Type: "doc", Children: []*Node{{Type: "blockquote", Children: []*Node{code("a\n\nb")}}}}
 	if got, want := mustRender(t, quoted), "> ```\n> a\n> \n> b\n> ```\n"; got != want {
-		t.Fatalf("Render() = %q, want the bytes main writes, %q", got, want)
+		t.Fatalf("Render() = %q, want the bytes the writer before sjawhar/legion#1429 writes, %q", got, want)
 	}
 }
 
@@ -910,5 +910,31 @@ func TestRenderWritesAnEmptyTaskItemAsAnEmptyItem(t *testing.T) {
 	}
 	if first := back.Children[0].Children[0]; len(first.Children[0].Children) != 0 {
 		t.Fatalf("%q reads back with the first item holding %q", markdown, first.Children[0].Children[0].Text)
+	}
+}
+
+// An email link is one the writer can write as its address (isBareEmailLink) only where the
+// transform's email matcher (findEmails) links its text whole, so the two cannot disagree: an
+// address with no local part (`@b.test`), whose `@` the matcher never starts at, is not one, nor is
+// one ending in a digit or one whose href or title differs.
+func TestABareEmailLinkIsWhatTheTransformLinksWhole(t *testing.T) {
+	for _, test := range []struct {
+		text, href, title string
+		bare              bool
+	}{
+		{text: "a@b.test", href: emailHref("a@b.test"), bare: true},
+		{text: "a.b+c@d-e.f_g.test", href: emailHref("a.b+c@d-e.f_g.test"), bare: true},
+		{text: "@b.test", href: emailHref("@b.test")},
+		{text: "a@b.test1", href: emailHref("a@b.test1")},
+		{text: "a@b", href: emailHref("a@b")},
+		{text: "a@b.test x", href: emailHref("a@b.test x")},
+		{text: "a@b.test", href: "mailto:c@b.test"},
+		{text: "a@b.test", href: emailHref("a@b.test"), title: "t"},
+	} {
+		node := &Node{Type: "text", Text: test.text}
+		marks := []Mark{{Type: "link", Attrs: Attrs{"href": test.href, "title": test.title}}}
+		if got := isBareEmailLink(node, marks); got != test.bare {
+			t.Errorf("isBareEmailLink(%q, href %q, title %q) = %v, want %v", test.text, test.href, test.title, got, test.bare)
+		}
 	}
 }

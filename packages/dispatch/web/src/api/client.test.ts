@@ -48,12 +48,12 @@ function recordedSleep(): { sleep: (ms: number) => Promise<void>; waits: number[
 test("a no-route answer is sent again, and the next answer resolves the request", async () => {
   const stub = scriptedFetch([
     () => noRoute("GET", "/auth/whoami"),
-    () => Response.json({ kind: "user", login: "alice" }),
+    () => Response.json({ event_head: "0", kind: "user", login: "alice" }),
   ]);
   const wait = recordedSleep();
-  const api = createApiClient(stub.fetch, wait.sleep);
+  const api = createApiClient(stub.fetch, undefined, wait.sleep);
 
-  expect(await api.whoAmI()).toEqual({ kind: "user", login: "alice" });
+  expect(await api.whoAmI()).toEqual({ event_head: "0", kind: "user", login: "alice" });
   expect(stub.requests.map((request) => request.path)).toEqual(["/auth/whoami", "/auth/whoami"]);
   // One wait of a second, jittered by a quarter either way.
   expect(wait.waits).toHaveLength(1);
@@ -64,7 +64,7 @@ test("a no-route answer is sent again, and the next answer resolves the request"
 test("four no-route answers throw the message that a release is in progress", async () => {
   const stub = scriptedFetch(Array.from({ length: 4 }, () => () => noRoute("GET", "/auth/whoami")));
   const wait = recordedSleep();
-  const api = createApiClient(stub.fetch, wait.sleep);
+  const api = createApiClient(stub.fetch, undefined, wait.sleep);
 
   const error = await api.whoAmI().catch((thrown: unknown) => thrown);
   expect(error).toBeInstanceOf(ApiError);
@@ -92,14 +92,16 @@ test("a POST answered with no route is sent again with the same body", async () 
     () => noRoute("POST", "/api/v1/issues"),
     () => Response.json({ key: "CORE-1" }, { status: 201 }),
   ]);
-  const api = createApiClient(stub.fetch, recordedSleep().sleep);
+  const api = createApiClient(stub.fetch, undefined, recordedSleep().sleep);
 
-  await api.createIssue({ project: "CORE", title: "Ship the widgets" });
+  await api.createIssue({ project: "CORE", title: "Ship the widgets" }, { key: "write-1" });
   expect(stub.requests).toHaveLength(2);
   const [first, second] = stub.requests;
   expect(second?.path).toBe("/api/v1/issues");
   expect(second?.init?.method).toBe("POST");
-  expect(second?.init?.headers).toEqual({ "Content-Type": "application/json" });
+  // The same intent, so the same key: no handler ran under the first attempt's no-route answer.
+  expect(second?.init?.headers).toEqual(first?.init?.headers as Record<string, string>);
+  expect(second?.init?.headers).toMatchObject({ "Content-Type": "application/json" });
   expect(JSON.parse(String(second?.init?.body))).toEqual({
     project: "CORE",
     title: "Ship the widgets",
@@ -112,7 +114,7 @@ test("a 404 NOT_FOUND for a resource the server does not know is not sent again"
     () => Response.json({ code: "NOT_FOUND", error: "issue not found" }, { status: 404 }),
   ]);
   const wait = recordedSleep();
-  const api = createApiClient(stub.fetch, wait.sleep);
+  const api = createApiClient(stub.fetch, undefined, wait.sleep);
 
   await expect(api.getIssue("CORE-1")).rejects.toMatchObject({
     code: "NOT_FOUND",
@@ -138,7 +140,7 @@ test("a request aborted during a no-route wait rejects at once with the abort an
   };
   // `githubRest` hands the caller's init to the one request path every method shares, so the
   // caller's signal is the one the wait is given.
-  const api = createApiClient(stub.fetch, wait);
+  const api = createApiClient(stub.fetch, undefined, wait);
 
   await expect(api.githubRest("user", { signal: controller.signal })).rejects.toBe(reason);
   expect(stub.requests).toHaveLength(1);

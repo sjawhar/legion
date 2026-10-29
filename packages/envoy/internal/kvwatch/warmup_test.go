@@ -174,8 +174,9 @@ func TestATimedOutWarmUpSaysSoAndLeavesTheWatcherHealthy(t *testing.T) {
 
 // Complete says whether the current watcher's first scan delivered every key, and unlike Ready it
 // is the current generation's alone: a Rewatch moves the generation, and the new watcher is complete
-// only once its own scan is, and a Stop leaves nothing complete. The new watcher's scan is held at
-// its first key, so the test asks while that scan has not completed.
+// only once its own scan is, and a Stop leaves nothing complete. The first watcher's connection
+// closes and a key is written while no watcher runs, so the Rewatch resumes and its scan is that
+// key; the scan is held at it, so the test asks while that scan has not completed.
 func TestCompleteIsTheCurrentWatchersFirstScanDeliveringEveryKey(t *testing.T) {
 	uri := testnats.URL(t)
 	conn, kv := bucket(t, uri)
@@ -212,8 +213,17 @@ func TestCompleteIsTheCurrentWatchersFirstScanDeliveringEveryKey(t *testing.T) {
 		t.Fatalf("after a complete first scan: Complete %v with the key applied %v, want both", complete, into.has("before-start"))
 	}
 
+	conn.Close()
+	eventually(t, "the first watcher's end", func() bool { return w.Err() != nil })
+	if _, complete := w.Complete(); complete {
+		t.Fatal("Complete answered true after the current watcher ended")
+	}
+	liveConn, live := bucket(t, uri)
+	if _, err := live.Put("while-away", []byte("1")); err != nil {
+		t.Fatalf("put while-away: %v", err)
+	}
 	holding.Store(true)
-	if err := w.Rewatch(conn); err != nil {
+	if err := w.Rewatch(liveConn); err != nil {
 		t.Fatalf("rewatch: %v", err)
 	}
 	again, complete := w.Complete()

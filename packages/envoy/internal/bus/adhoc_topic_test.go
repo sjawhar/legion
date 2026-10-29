@@ -50,8 +50,8 @@ func TestUsesCoreTransportForRoleLanesAndEveryNotificationTheStreamDoesNotCaptur
 		{"team.deploy-squad.all", false},
 		{"$KV.envoy_roles.reviewer", false},
 	} {
-		if got := (&Client{}).usesCoreTransport(tc.topic); got != tc.core {
-			t.Errorf("usesCoreTransport(%q) = %t, want %t", tc.topic, got, tc.core)
+		if got := (&Client{}).UsesCoreTransport(tc.topic); got != tc.core {
+			t.Errorf("UsesCoreTransport(%q) = %t, want %t", tc.topic, got, tc.core)
 		}
 	}
 }
@@ -78,8 +78,8 @@ func TestUsesCoreTransportDecidesByTheDeployedSubjectsOnceItHasReadThem(t *testi
 	} {
 		client := &Client{}
 		client.deployedSubjects.Store(&tc.deployed)
-		if got := client.usesCoreTransport(tc.topic); got != tc.core {
-			t.Errorf("deployed %v: usesCoreTransport(%q) = %t, want %t", tc.deployed, tc.topic, got, tc.core)
+		if got := client.UsesCoreTransport(tc.topic); got != tc.core {
+			t.Errorf("deployed %v: UsesCoreTransport(%q) = %t, want %t", tc.deployed, tc.topic, got, tc.core)
 		}
 	}
 }

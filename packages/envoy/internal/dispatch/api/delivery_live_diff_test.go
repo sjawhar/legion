@@ -20,7 +20,7 @@ import (
 	"github.com/sjawhar/envoy/internal/dispatch/model"
 )
 
-var updateDeliveryLiveFixtures = flag.Bool("update", false, "rewrite packages/contracts/fixtures/delivery-live from the frames the diff writes")
+var updateDeliveryLiveFixtures = flag.Bool("update", false, "rewrite packages/contracts/fixtures/live from the frames the diff writes")
 
 // liveJSONField is one JSON field of a struct as encoding/json writes it: its name and type.
 type liveJSONField struct {
@@ -912,12 +912,14 @@ func TestAListWithARepeatedIDIsRefused(t *testing.T) {
 	}
 }
 
-// TestTheLiveFixturesAreWhatTheDiffWrites holds packages/contracts/fixtures/delivery-live, which the
+// TestTheLiveFixturesAreWhatTheDiffWrites holds packages/contracts/fixtures/live, which the
 // contracts' and the dashboard's Bun tests read, to the frames this package writes: a timeline
 // snapshot, the delta of one deploy, a merge and a pull request leaving the window, the snapshot
 // a page subscribing afterwards gets (applying the delta to the first gives its body, but for the
-// freshness a delta never carries), and an error. `go test ./internal/dispatch/api -run
-// TestTheLiveFixturesAreWhatTheDiffWrites -update` rewrites them.
+// freshness a delta never carries), a freshness verdict, an error, the event feed's start, one of
+// its events and its end, and an agent view's responder verdict, the one agent frame whose data
+// Dispatch writes itself. `go test ./internal/dispatch/api -run TestTheLiveFixturesAreWhatTheDiffWrites -update`
+// rewrites them.
 func TestTheLiveFixturesAreWhatTheDiffWrites(t *testing.T) {
 	heldTo := liveFrom.Add(48 * time.Hour)
 	second := withIssue(livePR(2), "ACME-2", "Second issue")
@@ -946,15 +948,30 @@ func TestTheLiveFixturesAreWhatTheDiffWrites(t *testing.T) {
 	}
 	snapshotAt := heldTo.Add(-time.Minute)
 	delta.Sub, delta.Seq, delta.ChangedAt = "timeline-1", "42", &deployedAt
+	event, err := liveEventFrame("events-1", liveFixtureEvent())
+	if err != nil {
+		t.Fatalf("build the event frame fixture: %v", err)
+	}
 	frames := map[string]any{
 		"snapshot.json":  held.snapshot("timeline-1", 41, &snapshotAt),
 		"delta.json":     delta,
 		"after.json":     next.snapshot("timeline-1", 42, &deployedAt),
-		"heartbeat.json": deliveryLiveHeartbeat,
-		"error.json": DeliveryLiveError{
+		"heartbeat.json": liveHeartbeat,
+		// The reconcile last ran two hours before the snapshot, past deliveryStaleAfter, so the
+		// sources it reconciles are stale.
+		"freshness.json": DeliveryLiveFreshness{
+			Type:      "freshness",
+			Freshness: delivery.DeliveryFreshnessView{LastEventAt: &snapshotAt, LastReconcileAt: new(snapshotAt.Add(-2 * time.Hour))},
+			Stale:     deliveryReconciledSources,
+		},
+		"error.json": LiveError{
 			Type: "error", Sub: "timeline-1", Code: "DELIVERY_NOT_CONFIGURED",
 			Message: "delivery is not configured; set delivery_settings through PUT /api/v1/settings/delivery",
 		},
+		"events_start.json": liveEventsStart("events-1", 41, true),
+		"event.json":        event,
+		"ended.json":        liveEnded("events-1", liveEndedBehind),
+		"agent.json":        liveAgentFrame("agent-1", agentEventResponder, responderEvent(true)),
 	}
 	for name, frame := range frames {
 		got, err := json.MarshalIndent(frame, "", "  ")
@@ -962,7 +979,7 @@ func TestTheLiveFixturesAreWhatTheDiffWrites(t *testing.T) {
 			t.Fatalf("encode %s: %v", name, err)
 		}
 		got = append(got, '\n')
-		path := filepath.Join("..", "..", "..", "..", "contracts", "fixtures", "delivery-live", name)
+		path := filepath.Join("..", "..", "..", "..", "contracts", "fixtures", "live", name)
 		if *updateDeliveryLiveFixtures {
 			if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 				t.Fatal(err)
@@ -979,5 +996,58 @@ func TestTheLiveFixturesAreWhatTheDiffWrites(t *testing.T) {
 		if !bytes.Equal(got, want) {
 			t.Errorf("%s differs from the frame the diff writes (run with -update):\n%s", path, got)
 		}
+	}
+}
+
+// TestTheClientLiveFixturesAreFramesTheSocketReads holds the page's frames in
+// packages/contracts/fixtures/live, which the contracts' Bun tests hold to LiveSubscribe and
+// LiveUnsubscribe key for key, to what the socket reads: each decodes into the struct the socket
+// decodes it into, and each subscribe's resume decodes as its view's kind's. The decode here
+// refuses a member the struct does not declare, where the socket ignores one
+// (decodeSocketClientFrame, so a newer build's page is served): a key the contract gains that the
+// server does not read fails here, rather than reaching every page as a member the server quietly
+// drops.
+func TestTheClientLiveFixturesAreFramesTheSocketReads(t *testing.T) {
+	read := func(name string) []byte {
+		t.Helper()
+		data, err := os.ReadFile(filepath.Join("..", "..", "..", "..", "contracts", "fixtures", "live", name))
+		if err != nil {
+			t.Fatalf("read %s: %v", name, err)
+		}
+		return data
+	}
+	for name, kind := range map[string]string{
+		"subscribe_timeline.json": deliveryLiveTimeline,
+		"subscribe_events.json":   liveEventsView,
+		"subscribe_agent.json":    liveAgentView,
+	} {
+		frame := decodeSocketFrameAs[LiveSubscribe](t, read(name))
+		if frame.Type != "subscribe" || frame.Sub == "" || frame.View.Kind != kind {
+			t.Errorf("%s = %+v, want a subscribe to a %s view", name, frame, kind)
+			continue
+		}
+		// Each fixture carries every member its view's kind takes: a delivery or events view its
+		// resume, an agent view its session_id and no resume.
+		var err error
+		complete := false
+		switch kind {
+		case deliveryLiveTimeline:
+			var resume *DeliveryLiveResume
+			resume, err = decodeLiveResume[DeliveryLiveResume](frame.Resume)
+			complete = resume != nil && frame.View.Window != nil && frame.View.Query != nil
+		case liveEventsView:
+			var resume *EventsLiveResume
+			resume, err = decodeLiveResume[EventsLiveResume](frame.Resume)
+			complete = resume != nil
+		case liveAgentView:
+			complete = !hasLiveResume(frame.Resume) && frame.View.SessionID != nil
+		}
+		if err != nil || !complete {
+			t.Errorf("%s = %+v with resume %s, want every member its view's kind takes, as that kind's (%v)", name, frame, frame.Resume, err)
+		}
+	}
+	unsubscribe := decodeSocketFrameAs[LiveUnsubscribe](t, read("unsubscribe.json"))
+	if unsubscribe.Type != "unsubscribe" || unsubscribe.Sub == "" {
+		t.Errorf("unsubscribe.json = %+v, want an unsubscribe the socket reads", unsubscribe)
 	}
 }

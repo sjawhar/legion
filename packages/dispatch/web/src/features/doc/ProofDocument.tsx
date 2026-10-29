@@ -1,4 +1,4 @@
-import { queryOptions, useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { queryOptions, useQuery, useQueryClient } from "@tanstack/react-query";
 import {
   type ReactNode,
   useCallback,
@@ -33,6 +33,7 @@ import { versionsNewestFirst } from "../artifacts/ArtifactHeader";
 import {
   ArtifactDropZone,
   ArtifactUploadRow,
+  CLOSED_ISSUE_UPLOAD_REFUSAL,
   useArtifactUpload,
 } from "../artifacts/ArtifactUpload";
 import { useMargin } from "../margin/margin-context";
@@ -47,6 +48,8 @@ import {
 } from "../refs/routes";
 import { importWhenOnline } from "../shell/DeploymentResilience";
 import { useKeymap, useKeymapScope } from "../shell/keymap";
+import { LandedWithoutAnswer } from "../writes/LandedWithoutAnswer";
+import { useKeyedWrite } from "../writes/useKeyedWrite";
 import { AskBlockCard } from "./AskBlockCard";
 import { installTypedBlocks } from "./ask-block";
 import type { ConnectionState, DocumentConnection } from "./connection";
@@ -63,6 +66,7 @@ import {
 } from "./marks";
 import { NameVersionDialog } from "./NameVersionDialog";
 import type { PendingState } from "./pending-sync";
+import { refocusAfterDiagrams } from "./refocus-after-diagrams";
 import { FRAGMENT_NAME } from "./roots";
 import { DocumentRuntime } from "./runtime";
 import { compiledBlockSchema, compiledSchemaCreatable } from "./schema";
@@ -196,6 +200,8 @@ export function ProofDocument({
 }: ProofDocumentProps): ReactNode {
   const root = useRef<HTMLDivElement>(null);
   const editorRef = useRef<EditorHandle | undefined>(undefined);
+  // The dispose of the latest focus's re-run after the diagrams draw (`focusInEditor`).
+  const disposeRefocusRef = useRef<(() => void) | undefined>(undefined);
   const isClosedRef = useRef(isClosed);
   const schemaReadOnlyRef = useRef(false);
   const userRef = useRef(user);
@@ -204,6 +210,14 @@ export function ProofDocument({
   const [pending, setPending] = useState<PendingState | undefined>(undefined);
   const [loadError, setLoadError] = useState<string | undefined>(undefined);
   const [schemaReadOnly, setSchemaReadOnly] = useState(false);
+  // Whether the issue was closed when the current admission came. The server admits a socket
+  // read-only for a closed issue as it does for a schema it does not serve, and a reload cannot
+  // make a closed issue's document editable, so the page names a reload only for a read-only
+  // admission that came while the issue was open, while the issue is open and the socket is
+  // connected. The admission and the connection decide the line, not the close or the reopen: each
+  // drops the socket only on the server process that served it, and where it does, the
+  // reconnect's admission decides again.
+  const [closedAdmission, setClosedAdmission] = useState(false);
   const [openDecisionIndex, setOpenDecisionIndex] = useState(0);
   const { createEditor, loadTransport } = useContext(DocumentRuntime);
   const navigate = useNavigate();
@@ -221,10 +235,10 @@ export function ProofDocument({
   });
   const liveTextQuery = useQuery(liveTextQueryOptions(artifact.id));
   // The repair replaces this document, so it uploads under the document's own name whatever the
-  // picked file is called.
+  // picked file is called; a closed issue takes none.
   const repairUpload = useArtifactUpload(
     owner.kind === "issue" ? { issue: owner.key } : { project: owner.project },
-    { name: artifact.name }
+    { name: artifact.name, refusal: isClosed ? CLOSED_ISSUE_UPLOAD_REFUSAL : null }
   );
   const [admission, setAdmission] = useState<AdmissionBlock | undefined>(undefined);
   // Set while an admission is blocked: admits again, once the next read of the text succeeds.
@@ -264,9 +278,18 @@ export function ProofDocument({
   const blocksReadOnly = isClosed || schemaReadOnly;
   const [askBlockHosts, setAskBlockHosts] = useState<readonly AskBlockHost[]>([]);
   const [isNameDialogOpen, setIsNameDialogOpen] = useState(false);
-  const nameVersion = useMutation({
-    mutationFn: (summary: string) => api.createArtifactVersion(artifact.id, { summary }),
+  // Naming a version is the name dialog's form, which shows a refusal itself; a rebuild shows
+  // its own beside its button.
+  const nameVersion = useKeyedWrite({
+    // `write` comes first: `onSuccess` reads its answer.
+    write: (summary: string, bounds) => api.createArtifactVersion(artifact.id, { summary }, bounds),
+    inline: true,
+    label: () => `New version of ${artifact.name}`,
     onSuccess: (created) => {
+      // Made either way, so the dialog closes and a second press names nothing twice; with no
+      // answer to give, the store has read the document again.
+      setIsNameDialogOpen(false);
+      if (created === null) return;
       queryClient.setQueryData<Artifact>(["artifact", artifact.id], (current) => {
         const source = current ?? artifact;
         return {
@@ -275,14 +298,15 @@ export function ProofDocument({
         };
       });
       onVersionChange(created.number);
-      setIsNameDialogOpen(false);
     },
   });
-  const rebuild = useMutation({
-    mutationFn: () => api.rebuildArtifact(artifact.id),
+  const rebuild = useKeyedWrite({
+    inline: true,
+    label: () => `Rebuild of ${artifact.name}`,
     onSuccess: () => {
       void queryClient.invalidateQueries({ queryKey: ["artifact", artifact.id] });
     },
+    write: (_variables, bounds) => api.rebuildArtifact(artifact.id, undefined, bounds),
   });
   const liveMarkdown = liveTextQuery.data?.markdown ?? "";
   const versionMarkdown =
@@ -323,6 +347,16 @@ export function ProofDocument({
     return copyText(
       `${window.location.origin}${window.location.pathname}${blockFragment(blockId)}`
     );
+  }, []);
+  // Every focus in the live editor - a block link, the margin's mark and block focus, a reader's
+  // click to a block - runs `focus` now and `refocus` once more after the page's mermaid diagrams
+  // have drawn (`refocusAfterDiagrams`), since a diagram that draws above the target pushes it
+  // down. One re-run waits at a time: a newer focus drops an older one's, and so does the editor
+  // unbinding.
+  const focusInEditor = useCallback((focus: () => void, refocus: () => void = focus) => {
+    disposeRefocusRef.current?.();
+    focus();
+    disposeRefocusRef.current = refocusAfterDiagrams(refocus);
   }, []);
   // Google Docs' chord for the selection bar's Comment button, on the button's own path. It is
   // offered while this editor has focus, holds a selection and takes edits, which is when the bar
@@ -399,6 +433,7 @@ export function ProofDocument({
     setAdmission(undefined);
     schemaReadOnlyRef.current = false;
     setSchemaReadOnly(false);
+    setClosedAdmission(isClosedRef.current);
     // A transport or editor chunk that fails while online (after `DeploymentResilience` has
     // spent its reload) would otherwise leave the document "connecting" forever. Once failed,
     // the live provider's later status events must not repaint the dot over the alert.
@@ -426,17 +461,29 @@ export function ProofDocument({
     // link - for as long as it is this effect's editor. It returns what undoes it.
     const bindEditor = (handle: EditorHandle, connection: DocumentConnection) => {
       installTypedBlocks(handle.view, compiledBlockSchema, setAskBlockHosts);
+      // False once this editor unbinds, so a focus a frame late never reaches a destroyed editor
+      // or leaves a re-run behind for it.
+      let bound = true;
       const blockLink = window.location.hash;
       if (blockLink.startsWith("#b-")) {
-        handle.focusBlock(decodeURIComponent(blockLink.slice(3)));
+        const linkedBlockId = decodeURIComponent(blockLink.slice(3));
+        // The re-run lands only while the hash still names this block.
+        focusInEditor(
+          () => handle.focusBlock(linkedBlockId),
+          () => {
+            if (window.location.hash === blockLink) handle.focusBlock(linkedBlockId);
+          }
+        );
       }
       setSearchHighlights(handle.view.dom, highlightTermRef.current);
       marginRef.current.registerDocument({
         artifactId: artifact.id,
         focusBlock: (blockId) => {
-          requestAnimationFrame(() => handle.focusBlock(blockId));
+          requestAnimationFrame(() => {
+            if (bound) focusInEditor(() => handle.focusBlock(blockId));
+          });
         },
-        focusMark: (markId) => handle.focusMark(markId),
+        focusMark: (markId) => focusInEditor(() => handle.focusMark(markId)),
         removeMark: (markId) => handle.removeMark(markId),
         retypeMark: (markId, kind) => handle.retypeMark(markId, selectionBarKindFor(kind)),
         setActiveBlocks: (blockIds) => handle.setActiveBlocks(blockIds),
@@ -476,6 +523,9 @@ export function ProofDocument({
       publishPlacements();
       fragment.observeDeep(publishPlacements);
       return () => {
+        bound = false;
+        disposeRefocusRef.current?.();
+        disposeRefocusRef.current = undefined;
         cancelAnimationFrame(frame);
         cancelAnimationFrame(searchFrame);
         resizeObserver.disconnect();
@@ -556,6 +606,7 @@ export function ProofDocument({
             onAdmission: (readOnly) => {
               schemaReadOnlyRef.current = readOnly;
               setSchemaReadOnly(readOnly);
+              setClosedAdmission(isClosedRef.current);
               editor?.setReadOnly(isClosedRef.current || readOnly);
             },
             onOutsideSchema: () => {
@@ -654,7 +705,7 @@ export function ProofDocument({
       readmitRef.current = undefined;
       teardown();
     };
-  }, [artifact.id, createEditor, loadTransport, queryClient]);
+  }, [artifact.id, createEditor, focusInEditor, loadTransport, queryClient]);
 
   // A blocked admission is admitted again by the next successful read of the document's text: the
   // refetch a repair upload's or a rebuild's invalidation makes, or any other. Each successful read
@@ -689,6 +740,9 @@ export function ProofDocument({
         open={isNameDialogOpen}
         saving={nameVersion.isPending}
       />
+      {nameVersion.unanswered === undefined ? null : (
+        <LandedWithoutAnswer what={`The version “${nameVersion.unanswered.variables}”`} />
+      )}
       {isClosed ? <p>This issue is closed. Its document is read-only.</p> : null}
       {newerContent ? (
         <p role="status">
@@ -737,7 +791,9 @@ export function ProofDocument({
           ) : null}
         </div>
       )}
-      {schemaReadOnly ? <p>Reload to edit.</p> : null}
+      {schemaReadOnly && !isClosed && !closedAdmission && connection === "connected" ? (
+        <p>Reload to edit.</p>
+      ) : null}
       {version === undefined && openDecision !== undefined ? (
         <nav
           aria-label="Open decisions"
@@ -760,7 +816,7 @@ export function ProofDocument({
                 return;
               }
               window.location.hash = blockFragment(blockID);
-              editorRef.current?.focusBlock(blockID);
+              focusInEditor(() => editorRef.current?.focusBlock(blockID));
             }}
             title={openDecision.question}
           >
@@ -856,7 +912,7 @@ export function ProofDocument({
                     key={block.id}
                     onClick={() => {
                       marginRef.current.filterToBlock(block.id);
-                      editorRef.current?.focusBlock(block.id);
+                      focusInEditor(() => editorRef.current?.focusBlock(block.id));
                     }}
                     style={{ top: `${blockPlacements.get(block.id)?.top ?? 0}px` }}
                     type="button"

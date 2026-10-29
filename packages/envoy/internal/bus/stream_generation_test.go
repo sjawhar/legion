@@ -1,7 +1,6 @@
 package bus
 
 import (
-	"errors"
 	"slices"
 	"testing"
 	"time"
@@ -94,47 +93,6 @@ func TestAnOwningClientStampsItsGenerationOnAnUnstampedStream(t *testing.T) {
 	t.Cleanup(client.Close)
 	if got := deployedStream(t, js).Config.Metadata[generationKey]; got != "1" {
 		t.Fatalf("stream generation = %q, want 1", got)
-	}
-}
-
-// An update by a client that names no replica count, as Dispatch's server, keeps the replica count
-// the stream was deployed with; a client that names one, as the listener does with
-// ENVOY_NATS_REPLICAS, sets it as before.
-func TestAnOwningClientKeepsTheDeployedReplicasUnlessItNamesSome(t *testing.T) {
-	urls := startJetStreamCluster(t)
-	js := rawJetStream(t, urls[0])
-	for _, tc := range []struct {
-		name     string
-		options  []ConnectOption
-		replicas int
-	}{
-		{"a Dispatch-shaped client keeps the deployed replicas", []ConnectOption{WithName("dispatch")}, clusterSize},
-		{"a listener-shaped client sets its own", []ConnectOption{WithReplicas(1)}, 1},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			// The deployed stream lacks one of this build's subjects, so the start updates it.
-			deployed := *streamCfg
-			deployed.Subjects = slices.DeleteFunc(slices.Clone(streamSubjects), func(subject string) bool { return subject == "notifications.legion.>" })
-			deployed.Replicas = clusterSize
-			if err := js.DeleteStream(Stream); err != nil && !errors.Is(err, nats.ErrStreamNotFound) {
-				t.Fatalf("delete the previous case's stream: %v", err)
-			}
-			if _, err := js.AddStream(&deployed); err != nil {
-				t.Fatalf("create the deployed stream: %v", err)
-			}
-			client, err := ConnectOwningStream(urls, tc.options...)
-			if err != nil {
-				t.Fatalf("connect: %v", err)
-			}
-			t.Cleanup(client.Close)
-			got := deployedStream(t, js).Config
-			if !slices.Contains(got.Subjects, "notifications.legion.>") {
-				t.Fatalf("stream subjects = %v; the start did not update the stream", got.Subjects)
-			}
-			if got.Replicas != tc.replicas {
-				t.Fatalf("stream replicas = %d, want %d", got.Replicas, tc.replicas)
-			}
-		})
 	}
 }
 
@@ -275,7 +233,7 @@ func TestAClientFollowsASubjectANewerBuildAddsWhileItRuns(t *testing.T) {
 				t.Fatalf("connect: %v", err)
 			}
 			t.Cleanup(client.Close)
-			if !client.usesCoreTransport(topic) {
+			if !client.UsesCoreTransport(topic) {
 				t.Fatalf("%s takes JetStream before any stream captures it", topic)
 			}
 
@@ -286,7 +244,7 @@ func TestAClientFollowsASubjectANewerBuildAddsWhileItRuns(t *testing.T) {
 				t.Fatalf("the newer build adds its subject: %v", err)
 			}
 			deadline := time.Now().Add(10 * time.Second)
-			for client.usesCoreTransport(topic) {
+			for client.UsesCoreTransport(topic) {
 				if time.Now().After(deadline) {
 					t.Fatalf("the client still sends %s over core NATS 10 s after the stream captured it", topic)
 				}
@@ -345,13 +303,13 @@ func TestABackgroundClientReadsTheDeployedSubjectsAtItsFirstConnection(t *testin
 				t.Fatalf("connect while the server is down: %v", err)
 			}
 			t.Cleanup(client.Close)
-			if !client.usesCoreTransport(topic) {
+			if !client.UsesCoreTransport(topic) {
 				t.Fatalf("%s takes JetStream before the client has read any stream", topic)
 			}
 
 			srv.Start(t)
 			deadline := time.Now().Add(15 * time.Second)
-			for client.usesCoreTransport(topic) {
+			for client.UsesCoreTransport(topic) {
 				if time.Now().After(deadline) {
 					t.Fatalf("the client still sends %s over core NATS 15 s after the server came up", topic)
 				}

@@ -178,6 +178,35 @@ func TestAcceptSuggestionReplacesMarkedTextAndRemovesTheMark(t *testing.T) {
 	}
 }
 
+// A web address a person types in the browser editor, which has no autolink input rule, is plain
+// text in the document's tree, though a reader of the markdown may take it for a link: here after
+// a letter and `;`, seeded as a tree. A doc-edit replacing other text of its paragraph, and a
+// suggestion accepted elsewhere in it, are not refused for how that address reads (INFRA-531).
+func TestEditsBesideAPlainWebAddressInTheirParagraphAreAccepted(t *testing.T) {
+	service, artifactID := newTestService(t)
+	service.settle = time.Hour
+	seedServiceText(t, service, artifactID, "Placeholder.\n")
+	editLiveTree(t, service, artifactID, func(tree *pmdoc.Node) *pmdoc.Node {
+		tree.Children[0].Children = []*pmdoc.Node{{Type: "text", Text: "The quick fox x;https://x.test jumps over the lazy dog"}}
+		return tree
+	})
+	alice := model.Actor{Kind: "user", ID: "alice"}
+	if _, err := joinedApplyOps(service, artifactID, []model.EditOp{{Op: "replace", Find: "quick", With: "slow"}}, alice, nil); err != nil {
+		t.Fatalf("replace beside the address: %v", err)
+	}
+	spec := MarkSpec{Kind: MarkSuggestion, ID: "s1", By: model.Actor{Kind: "session", ID: "s1"}}
+	if _, err := joinedMarkQuote(service, artifactID, spec, "lazy", nil); err != nil {
+		t.Fatalf("suggest beside the address: %v", err)
+	}
+	if err := joinedAcceptSuggestion(service, artifactID, "s1", "sleepy", alice); err != nil {
+		t.Fatalf("accept beside the address: %v", err)
+	}
+	const want = "The slow fox x;https://x.test jumps over the sleepy dog"
+	if got := pmdoc.TextContent(liveTree(t, service, artifactID).Children[0]); got != want {
+		t.Fatalf("the paragraph holds %q, want %q", got, want)
+	}
+}
+
 // Rejecting a browser insert in code gives back the code the insert started from, in a typed block
 // as anywhere: a reject is not read back.
 func TestRejectSuggestionInCodeGivesBackTheCode(t *testing.T) {
@@ -817,20 +846,28 @@ type storedAnchor struct {
 	Orphaned   bool   `json:"orphaned"`
 }
 
-func insertAnchoredAsk(t *testing.T, service *Service, artifactID, quote string) string {
+// markedAnchor marks quote in artifactID's document with a kind mark of id and returns the stored
+// anchor of a row that records that mark.
+func markedAnchor(t *testing.T, service *Service, artifactID string, kind MarkKind, id, quote string) []byte {
 	t.Helper()
-	const id = "00000000-0000-4000-8000-000000000001"
 	if _, err := joinedMarkQuote(service, artifactID, MarkSpec{
-		Kind: MarkAsk,
+		Kind: kind,
 		ID:   id,
 		By:   model.Actor{Kind: "user", ID: "alice"},
 	}, quote, nil); err != nil {
-		t.Fatalf("mark ask: %v", err)
+		t.Fatalf("mark %q with %s mark %s: %v", quote, kind, id, err)
 	}
 	anchor, err := json.Marshal(storedAnchor{ArtifactID: artifactID, MarkID: id, Version: 1, Quote: quote})
 	if err != nil {
-		t.Fatalf("encode ask anchor: %v", err)
+		t.Fatalf("encode the anchor of %s mark %s: %v", kind, id, err)
 	}
+	return anchor
+}
+
+func insertAnchoredAsk(t *testing.T, service *Service, artifactID, quote string) string {
+	t.Helper()
+	const id = "00000000-0000-4000-8000-000000000001"
+	anchor := markedAnchor(t, service, artifactID, MarkAsk, id, quote)
 	if _, err := service.store.Pool.Exec(context.Background(), `
 		insert into asks (id, issue_key, author, question, anchor)
 		values ($1, 'DOC-1', '{"kind":"user","id":"alice"}', 'Anchored ask', $2)
@@ -860,17 +897,7 @@ func insertAnchoredComment(t *testing.T, service *Service, artifactID, quote str
 
 func insertAnchoredCommentWithID(t *testing.T, service *Service, artifactID, id, quote string) string {
 	t.Helper()
-	if _, err := joinedMarkQuote(service, artifactID, MarkSpec{
-		Kind: MarkComment,
-		ID:   id,
-		By:   model.Actor{Kind: "user", ID: "alice"},
-	}, quote, nil); err != nil {
-		t.Fatalf("mark comment: %v", err)
-	}
-	anchor, err := json.Marshal(storedAnchor{ArtifactID: artifactID, MarkID: id, Version: 1, Quote: quote})
-	if err != nil {
-		t.Fatalf("encode comment anchor: %v", err)
-	}
+	anchor := markedAnchor(t, service, artifactID, MarkComment, id, quote)
 	if _, err := service.store.Pool.Exec(context.Background(), `
 		insert into comments (id, issue_key, author, body, anchor)
 		values ($1, 'DOC-1', '{"kind":"user","id":"alice"}', 'Anchored comment', $2)

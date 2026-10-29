@@ -19,6 +19,7 @@ import (
 
 	"github.com/nats-io/nats.go"
 	"github.com/sjawhar/envoy/internal/contracts"
+	"github.com/sjawhar/envoy/internal/logtest"
 	"github.com/sjawhar/envoy/internal/testnats"
 )
 
@@ -638,9 +639,7 @@ func (l *capturedLogs) recordsWithMsg(t *testing.T, message string) []map[string
 func captureLogs(t *testing.T) *capturedLogs {
 	t.Helper()
 	logs := &capturedLogs{}
-	previous := slog.Default()
-	slog.SetDefault(slog.New(slog.NewJSONHandler(logs, nil)))
-	t.Cleanup(func() { slog.SetDefault(previous) })
+	logtest.SetDefault(t, slog.NewJSONHandler(logs, nil))
 	return logs
 }
 
@@ -782,8 +781,10 @@ func TestEnsureStreamWithConfigCreatesTheStreamWithAFreshID(t *testing.T) {
 
 // A deployed stream without an id gets one on the next start, even when nothing else about it
 // differs from the binary's configuration, and keeps the rest of its configuration and metadata:
-// settings the binary's configuration does not choose (here limits and a description; in a
-// cluster, the stream's replicas) stay as deployed. The start stamps its generation beside the id.
+// settings the binary's configuration does not choose (here the message limits and a description;
+// in a cluster, the stream's placement) stay as deployed, and so do the ones it would only keep (a
+// byte limit, with no limit of its own set) or already matches (DiscardNew, the replicas). The
+// start stamps its generation beside the id.
 func TestEnsureStreamWithConfigGivesADeployedStreamWithoutAnIDOne(t *testing.T) {
 	js := streamTestJetStream(t)
 	deployed := *streamCfg
@@ -791,7 +792,6 @@ func TestEnsureStreamWithConfigGivesADeployedStreamWithoutAnIDOne(t *testing.T) 
 	deployed.MaxMsgs = 100_000
 	deployed.MaxBytes = 64 << 20
 	deployed.MaxMsgsPerSubject = 1_000
-	deployed.Discard = nats.DiscardNew
 	deployed.Metadata = map[string]string{"owner": "operations"}
 	if _, err := js.AddStream(&deployed); err != nil {
 		t.Fatalf("create the stream without an id: %v", err)

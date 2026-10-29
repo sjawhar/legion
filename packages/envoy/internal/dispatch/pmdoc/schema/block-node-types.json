@@ -1,0 +1,12 @@
+[
+  "paragraph",
+  "heading",
+  "blockquote",
+  "bullet_list",
+  "ordered_list",
+  "code_block",
+  "hr",
+  "table",
+  "footnote_definition",
+  "frontmatter"
+]

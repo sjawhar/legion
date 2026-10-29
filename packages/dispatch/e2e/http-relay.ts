@@ -1,7 +1,7 @@
 /** The relay both harness proxies forward through: e2e/plain-http-proxy.ts (the plain-HTTP
  *  project's origin, one upstream) and e2e/round-robin-proxy.ts (two-process mode, two). It
- *  forwards an HTTP request with its response streamed back as it arrives, so an event stream
- *  flows through it, and a websocket both ways. Which upstream a request goes to, and the `Host`
+ *  forwards an HTTP request with its response streamed back as it arrives, so a long download
+ *  flows through it, and a websocket (the page's live socket among them) both ways. Which upstream a request goes to, and the `Host`
  *  and `Origin` it carries there, are each proxy's own. Nothing here runs on import. */
 import type { ServerWebSocket, WebSocketHandler } from "bun";
 
@@ -81,8 +81,8 @@ export function relayHttp(
     headers,
     method: request.method,
     redirect: "manual",
-    // A browser that leaves (a closed page, a reconnecting event stream) ends the upstream
-    // request with it, so the server under test keeps no subscriber for a page that is gone.
+    // A browser that leaves (a closed page, an abandoned request) ends the upstream request with
+    // it, so the server under test does no work for a page that is gone.
     signal: request.signal,
   });
 }

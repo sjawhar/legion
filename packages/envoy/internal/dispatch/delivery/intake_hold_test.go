@@ -862,7 +862,7 @@ func previousBuildReconciler(t *testing.T, pool *store.Pool, natsURL string, int
 		ticker := time.NewTicker(interval)
 		defer ticker.Stop()
 		for {
-			duty.Exclusive(ctx, leases, intakeConsumerLease, 0, func(context.Context) {
+			duty.Exclusive(ctx, leases, intakeConsumerLease, time.Time{}, 0, func(context.Context) {
 				_, err := client.JS().ConsumerInfo(bus.Stream, bus.DispatchDeliveryDurable)
 				switch {
 				case errors.Is(err, natsgo.ErrConsumerNotFound):

@@ -277,7 +277,8 @@ func (d *heldDurable) attempt(ctx context.Context) {
 	if err == nil && d.boundElsewhere(info) {
 		return
 	}
-	duty.Exclusive(ctx, d.leases, consumerLease(d.name), 0, d.takeOver)
+	// The take-over asked for mutual exclusion and nothing else, and no tick is due (the zero time).
+	duty.Exclusive(ctx, d.leases, consumerLease(d.name), time.Time{}, 0, d.takeOver)
 }
 
 // lookupDurable reads the durable's state from the server, bounded by intakeHoldRenew.

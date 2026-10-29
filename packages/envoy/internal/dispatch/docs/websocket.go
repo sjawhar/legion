@@ -276,9 +276,11 @@ func (s *Service) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	// A browser editor normalizes a tree it cannot represent and writes the result back, so no
 	// connection - a first one, or a provider's reconnect - joins a room outside the Proof schema
 	// until it is replaced from markdown, or a room holding an element this build does not know,
-	// which a newer build wrote. The server decides it here, for every client at once, by the same
-	// stored document and rendering `/text` answers with (readDocument), so a socket is refused
-	// exactly when that read is ErrDocOutsideSchema or ErrDocNewerContent.
+	// which a newer build wrote. An ask holding blocks off its content rule is inside the schema:
+	// the editor keeps such an ask rather than normalizing it away, and settlement marks it
+	// `invalid`. The server decides it here, for every client at once, by the same stored document
+	// and rendering `/text` answers with (readDocument), so a socket is refused exactly when that
+	// read is ErrDocOutsideSchema or ErrDocNewerContent.
 	tree, loaded, err := s.loadTree(r.Context(), room)
 	if err == nil && tree != nil {
 		if _, renderErr := documentMarkdown(tree); errors.Is(renderErr, ErrDocOutsideSchema) || errors.Is(renderErr, ErrDocNewerContent) {
@@ -306,7 +308,13 @@ func (s *Service) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	// a re-check that finds the socket no longer admitted can close it (RunSchemaAdmission).
 	connection := &connectionState{documentSince: pmdoc.DocumentSince(tree), conn: &admittedConn{}}
 	ctx := context.WithValue(r.Context(), connectionContextKey{}, connection)
-	s.srv.ServeHTTP(&admittedWriter{ResponseWriter: w, conn: connection.conn}, r.WithContext(ctx))
+	// The socket's peer hears from it at least every s.keepAlive (documentKeepAlive), however idle
+	// the room (keepalive.go), so its provider never takes the socket for dead. The admitted
+	// writer wraps it, so the connection ygo serves on is the one a re-check can close and its
+	// writes still pass through the keep-alive's.
+	keepAlive := newKeepAliveWriter(w, room, s.keepAlive)
+	s.srv.ServeHTTP(&admittedWriter{ResponseWriter: keepAlive, conn: connection.conn}, r.WithContext(ctx))
+	keepAlive.stop()
 	if connection.admission != nil {
 		s.schemaAdmissions.remove(connection.admission)
 	}
