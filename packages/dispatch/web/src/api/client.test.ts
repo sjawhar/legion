@@ -125,8 +125,8 @@ test("a 404 NOT_FOUND for a resource the server does not know is not sent again"
 
 test("a request aborted during a no-route wait rejects at once with the abort and is not sent again", async () => {
   const stub = scriptedFetch([
-    () => noRoute("GET", "/auth/whoami"),
-    () => Response.json({ kind: "user", login: "alice" }),
+    () => noRoute("GET", "/api/github/rest/user"),
+    () => Response.json({ login: "alice" }),
   ]);
   const controller = new AbortController();
   const reason = new Error("a newer read replaced this one");
@@ -136,12 +136,10 @@ test("a request aborted during a no-route wait rejects at once with the abort an
     controller.abort(reason);
     return waiting;
   };
-  // No method of the client takes a signal yet, so the test sends through the one request path
-  // every method shares.
-  const client = createApiClient(stub.fetch, wait) as unknown as {
-    response(path: string, init: RequestInit): Promise<Response>;
-  };
+  // `githubRest` hands the caller's init to the one request path every method shares, so the
+  // caller's signal is the one the wait is given.
+  const api = createApiClient(stub.fetch, wait);
 
-  await expect(client.response("/auth/whoami", { signal: controller.signal })).rejects.toBe(reason);
+  await expect(api.githubRest("user", { signal: controller.signal })).rejects.toBe(reason);
   expect(stub.requests).toHaveLength(1);
 });

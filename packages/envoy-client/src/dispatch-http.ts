@@ -53,10 +53,9 @@ import type {
 } from "@legion/contracts";
 import {
   DEFAULT_ISSUE_READ_EVENTS,
-  jitteredDelay,
   NO_ROUTE_MESSAGE_PREFIX,
-  NO_ROUTE_RETRY_DELAYS_MS,
   NO_ROUTE_ROLLING_RELEASE_MESSAGE,
+  retryNoRoute,
   type Sleep,
   sleep,
 } from "@legion/contracts";
@@ -1048,22 +1047,12 @@ export class DispatchClient {
    * for every method. After the last attempt it throws `DispatchNoRouteError`. An abort of
    * `init.signal` during a wait rejects at once with the abort's reason and sends nothing more.
    */
-  async #send<T>(
-    url: string,
-    init: RequestInit,
-    read: (response: Response) => Promise<T>
-  ): Promise<T> {
-    for (const delay of [...NO_ROUTE_RETRY_DELAYS_MS, undefined]) {
-      const response = await this.fetchImpl(url, init);
-      try {
-        return await read(response);
-      } catch (error) {
-        if (!isNoRoute(error)) throw error;
-        if (delay === undefined) break;
-      }
-      await this.#sleep(jitteredDelay(delay), init.signal);
-    }
-    throw new DispatchNoRouteError();
+  #send<T>(url: string, init: RequestInit, read: (response: Response) => Promise<T>): Promise<T> {
+    return retryNoRoute(async () => read(await this.fetchImpl(url, init)), isNoRoute, {
+      exhausted: () => new DispatchNoRouteError(),
+      signal: init.signal,
+      sleep: this.#sleep,
+    });
   }
 
   /** An upload to an owner's artifact route: inline content as JSON, a file as multipart. */

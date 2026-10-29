@@ -2858,6 +2858,39 @@ export function jitteredDelay(ms: number): number {
 }
 
 /**
+ * Runs `attempt` until a Dispatch process that serves the route answers. An attempt `isNoRoute`
+ * recognises is made again after each of `NO_ROUTE_RETRY_DELAYS_MS`, jittered (`jitteredDelay`)
+ * and waited with `options.sleep` (a timer, `sleep`, when the caller names none): while a release
+ * rolls out, two builds of Dispatch answer, and the next attempt may reach the build that serves
+ * the route. No handler ran, so this is safe for every method, and every attempt is the same
+ * request. After the last attempt it throws what `options.exhausted` builds, which is the
+ * caller's own error for `NO_ROUTE_ROLLING_RELEASE_MESSAGE`. Anything else `attempt` throws is
+ * thrown on at once, and an abort of `options.signal` during a wait rejects with the abort's
+ * reason, so nothing more is sent.
+ */
+export async function retryNoRoute<T>(
+  attempt: () => Promise<T>,
+  isNoRoute: (error: unknown) => boolean,
+  options: {
+    readonly exhausted: () => unknown;
+    readonly sleep?: Sleep;
+    readonly signal?: AbortSignal | null;
+  }
+): Promise<T> {
+  const wait = options.sleep ?? sleep;
+  for (const delay of [...NO_ROUTE_RETRY_DELAYS_MS, undefined]) {
+    try {
+      return await attempt();
+    } catch (error) {
+      if (!isNoRoute(error)) throw error;
+      if (delay === undefined) break;
+    }
+    await wait(jitteredDelay(delay), options.signal);
+  }
+  throw options.exhausted();
+}
+
+/**
  * Tolerantly validates the Dispatch event framing delivered by Envoy. Payload
  * content is parsed per event type so malformed optional display fields do not
  * discard a valid event header.
