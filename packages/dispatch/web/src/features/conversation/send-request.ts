@@ -299,10 +299,11 @@ function attempt(
     : api.createArtifactComment(owner.artifactId, input, bounds);
 }
 
-/** The block ids `sent`'s save carries, for an edit whose editor followed its comment's blocks:
- *  the revision the blocks route answered, and where each carried id starts in the body the save
- *  sends. None for a send that is no edit, one whose blocks route never answered, and one whose
- *  spans are no longer offsets into that body, where the server matches blocks by their text.
+/** The block ids an edit's save carries, given `followed`, the comment's blocks as the editor
+ *  followed them, and `body`, the text the save sends: the revision the blocks route answered,
+ *  and where each carried id starts in `body` once trimmed. None when the blocks route never
+ *  answered, or when the spans are no longer offsets into `body`; the server then matches blocks
+ *  by their text.
  *  The one place they are worked out, so a send kept across a reload carries exactly what its
  *  first attempt did (`held-sends.ts`) and Dispatch reads one body under that send's key. */
 export function carriedIdsOf(

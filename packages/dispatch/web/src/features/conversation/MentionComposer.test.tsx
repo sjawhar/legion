@@ -883,6 +883,60 @@ test("an edit's save carries no block ids while the comment is not indexed or th
   ).toEqual(["comment-1", { body: "Alpha\n\nBeta gamma" }, keyedAttempt]);
 });
 
+// A browser's textarea holds LF where the value it was given had CR LF, as the followed spans do,
+// while the composer's own draft keeps the comment's stored text. A save made without typing
+// works out its ids from the body it sends, the field's text, so it carries them.
+test("an unchanged edit of a comment stored with CR LF carries each block's id", async () => {
+  const descriptor = Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, "value");
+  if (descriptor?.get === undefined || descriptor.set === undefined) {
+    throw new Error("expected HTMLTextAreaElement.prototype.value to be an accessor");
+  }
+  const { get, set } = descriptor;
+  Object.defineProperty(HTMLTextAreaElement.prototype, "value", {
+    ...descriptor,
+    get(this: HTMLTextAreaElement) {
+      return (get.call(this) as string).replaceAll("\r\n", "\n");
+    },
+    set(this: HTMLTextAreaElement, value: string) {
+      set.call(this, value);
+    },
+  });
+  const commentBlocks = spyOn(api, "commentBlocks").mockResolvedValue({
+    blocks: [
+      { from: 0, id: "b1", text: "Alpha", to: 5, type: "paragraph" },
+      { from: 9, id: "b2", text: "Beta", to: 13, type: "paragraph" },
+    ],
+    indexed: true,
+    item: { id: "comment-1", issue_key: "CORE-1", kind: "comment" },
+    revision: 3,
+  });
+  const editComment = spyOn(api, "editComment").mockResolvedValue(createdComment);
+  const { view } = renderComposer({ edit: { body: "Alpha\r\n\r\nBeta", id: "comment-1" } });
+  try {
+    await waitFor(() => expect(commentBlocks).toHaveBeenCalledWith("comment-1"));
+    await act(async () => {});
+    fireEvent.click(screen.getByRole("button", { name: "Save" }));
+    await waitFor(() => expect(editComment).toHaveBeenCalledTimes(1));
+    expect(editComment.mock.calls[0]).toEqual([
+      "comment-1",
+      {
+        base_revision: 3,
+        blocks: [
+          { from: 0, id: "b1" },
+          { from: 7, id: "b2" },
+        ],
+        body: "Alpha\n\nBeta",
+      },
+      keyedAttempt,
+    ]);
+  } finally {
+    view.unmount();
+    Object.defineProperty(HTMLTextAreaElement.prototype, "value", descriptor);
+    commentBlocks.mockRestore();
+    editComment.mockRestore();
+  }
+});
+
 test("an edit's save an older server refuses keeps the draft", async () => {
   const commentBlocks = spyOn(api, "commentBlocks").mockResolvedValue(alphaBetaBlocks(true));
   const editComment = spyOn(api, "editComment").mockRejectedValueOnce(

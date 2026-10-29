@@ -889,15 +889,21 @@ export function MentionComposer({
   };
   /** The send as the composer's own state addresses and shapes it: what Send puts on the wire,
    *  and what a held send is compared with to tell an untouched draft from an edited one. */
-  const composedRequest = (): Omit<SentRequest, "sendKey"> => ({
+  const composedRequest = (
+    sentBody = body,
+    sentReplacement = replacement
+  ): Omit<SentRequest, "sendKey"> => ({
     anchor,
     ask: { multiple, options: submittedAskOptions(askOptions), urgency },
-    draft: { body, mentions, replacement },
+    draft: { body: sentBody, mentions, replacement: sentReplacement },
     edit:
       edit === undefined
         ? undefined
         : {
-            carried: carriedIdsOf(followedBlocks.current, body),
+            // Worked out from the body the send carries, never from another copy of the text:
+            // the field holds LF where a comment stored with CR LF had CR LF, and so do the
+            // followed spans.
+            carried: carriedIdsOf(followedBlocks.current, sentBody),
             id: edit.id,
             save: saveEdit ?? saveCommentEdit,
           },
@@ -906,18 +912,19 @@ export function MentionComposer({
     plainDelivery: plainMode,
     replyTo,
   });
-  /** The send as it stands, for `sendRequest`: the fields' own text, since a keystroke in Send's
-   *  task may not have rendered yet, and every prop and setting that addresses or shapes it - or,
-   *  for a Retry, what `requestFor` makes of the refused send it replaces. */
+  /** The send as it stands, for `sendRequest`: the fields' own text, read once, since a keystroke
+   *  in Send's task may not have rendered yet and the field holds its own line endings, and every
+   *  prop and setting that addresses or shapes it - or, for a Retry, what `requestFor` makes of
+   *  the refused send it replaces. */
   const sentRequest = (refused: HeldSend | undefined): SentRequest =>
-    requestFor(refused?.request, refused?.status === "refused" ? refused.refusal : undefined, {
-      ...composedRequest(),
-      draft: {
-        body: textarea.current?.value ?? body,
-        mentions,
-        replacement: replacementTextarea.current?.value ?? replacement,
-      },
-    });
+    requestFor(
+      refused?.request,
+      refused?.status === "refused" ? refused.refusal : undefined,
+      composedRequest(
+        textarea.current?.value ?? body,
+        replacementTextarea.current?.value ?? replacement
+      )
+    );
   const activeMentions = useMemo(() => survivingMentions(body, mentions), [body, mentions]);
   const effectiveTargets: readonly string[] =
     owner.kind === "session"
