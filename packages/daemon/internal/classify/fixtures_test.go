@@ -311,7 +311,7 @@ func replayGitHubDecision(input json.RawMessage) ([]byte, error) {
 		pr = ApplyPush(pr, push)
 	case "checks":
 		candidate := SettlementCandidate{CheckRuns: attemptRuns(payload), Generation: int64(numberValue(payload, "generation")), Snapshot: stringValue(payload, "snapshot"), Failing: stringSlice(payload, "failing")}
-		if settled, applied := ApplySettlement(pr, candidate); applied {
+		if settled, applied, _ := ApplySettlement(pr, candidate); applied {
 			pr, _ = BlockFixAttempt(settled, 3)
 		}
 	}

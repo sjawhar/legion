@@ -366,7 +366,7 @@ func TestTheCountedMarkStaysUntilAHeadIsPushedOntoGreen(t *testing.T) {
 		t.Fatalf("h4's late handoff-only push after h5 arrived = fixAttempts=%d headCounted=%q, want 3 and \"h5\": the replay spares h4 and counts h5",
 			got.FixAttempts, got.HeadCounted)
 	}
-	unjudged, _ = ApplyCheckSettlement(unjudged, SettlementCandidate{Head: "h5", CheckRuns: []record.AttemptRun{{Name: "ci", ID: 1}}, Generation: 1, Snapshot: "green", Failing: []string{}})
+	unjudged, _, _ = ApplyCheckSettlement(unjudged, SettlementCandidate{Head: "h5", CheckRuns: []record.AttemptRun{{Name: "ci", ID: 1}}, Generation: 1, Snapshot: "green", Failing: []string{}})
 	onGreen := AdvancePullRequestHead(unjudged, Arrival{}, "h6")
 	if onGreen.FixAttempts != 3 || onGreen.HeadCounted != "" {
 		t.Fatalf("a push onto green h5 = %#v, want the count kept and the mark cleared", onGreen)
@@ -443,7 +443,7 @@ func TestAnUncountedPushOntoAMarkedRedKeepsTheMarkInEitherOrder(t *testing.T) {
 
 func TestApplySettlementUsesTheExportedSettlementClassifiers(t *testing.T) {
 	prior := record.PullRequest{HeadSHA: "head", CheckRuns: []record.AttemptRun{{Name: "unit", ID: 1}}}
-	got, applied := ApplySettlement(prior, SettlementCandidate{
+	got, applied, _ := ApplySettlement(prior, SettlementCandidate{
 		CheckRuns: []record.AttemptRun{{Name: "unit", ID: 2}}, Generation: 1, Snapshot: "snapshot", Failing: []string{"unit"}, Cancelled: []string{"e2e"},
 	})
 	if !applied || got.Generation != 1 || got.Snapshot != "snapshot" || len(got.Failing) != 1 || len(got.Cancelled) != 1 {

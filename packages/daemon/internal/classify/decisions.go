@@ -34,7 +34,7 @@ func AdvancePullRequestHead(pr record.PullRequest, arrival Arrival, headSHA stri
 		}
 		pr.Run = &record.HeadRun{Anchor: judgementOf(pr), Pushes: withoutApprovalCarriers(pr.Pushes), Since: pr.HeadUpdatedAt}
 	}
-	pr = runStep(pr, record.RunStep{Head: headSHA, Before: arrival.Before, Sender: arrival.Sender, SyncedAt: arrival.At})
+	pr, _ = runStep(pr, record.RunStep{Head: headSHA, Before: arrival.Before, Sender: arrival.Sender, SyncedAt: arrival.At})
 	pr.Pushes = unspentPushes(pr.Pushes, pr.Moves, true)
 	return pr
 }
@@ -68,7 +68,8 @@ func NameMove(pr record.PullRequest, named record.Named) record.PullRequest {
 		run.Names = run.Names[len(run.Names)-maxMoves:]
 	}
 	pr.Run = &run
-	return replayRun(pr)
+	pr, _ = replayRun(pr)
+	return pr
 }
 
 // namedAlready is whether names holds named (sameName): a synchronize delivered again names
@@ -988,7 +989,8 @@ func ApplyPushDropping(pr record.PullRequest, push record.ClassifiedPush) (recor
 		run.Pushes = withoutCopies(run.Pushes, []record.ClassifiedPush{*dropped.Repeat})
 	}
 	pr.Run = &run
-	return replayRun(pr), dropped
+	pr, _ = replayRun(pr)
+	return pr, dropped
 }
 
 // maxCopies bounds the code pushes of the same two heads a pull request keeps on their way, before
@@ -1133,18 +1135,18 @@ func boundedPushes(pushes []record.ClassifiedPush, head string) ([]record.Classi
 // ApplySettlement applies a CI settlement only when ClassifySettlement says it is newer, merging
 // its attempt set into the fence, or, when either settlement is the pass's (PassGeneration),
 // merging it check by check (mergeWithPass). It returns false for stale, duplicate, and conflicting
-// observations; for the listener's duplicate of the pass's settlement it returns pr with the
-// listener's generation and snapshot as its fence (adoptsFence), and every check's run and outcome
-// as they were.
-func ApplySettlement(pr record.PullRequest, candidate SettlementCandidate) (record.PullRequest, bool) {
+// observations. Its third result says the fence was adopted: for the listener's duplicate of the
+// pass's settlement (adoptsFence) it returns pr with the listener's generation and snapshot as its
+// fence, and every check's run and outcome as they were, applied false.
+func ApplySettlement(pr record.PullRequest, candidate SettlementCandidate) (record.PullRequest, bool, bool) {
 	switch classification := ClassifySettlement(pr, candidate); {
 	case classification == SettlementDuplicate && adoptsFence(pr, candidate):
 		pr.Generation, pr.Snapshot = candidate.Generation, candidate.Snapshot
-		return pr, false
+		return pr, false, true
 	case classification != SettlementNewer:
-		return pr, false
+		return pr, false, false
 	case pr.CheckRuns != nil && (pr.Generation == PassGeneration || candidate.Generation == PassGeneration):
-		return mergeWithPass(pr, candidate), true
+		return mergeWithPass(pr, candidate), true, false
 	}
 	outcome := EffectiveOutcome(pr, candidate)
 	pr.CheckRuns = mergeAttemptSets(pr.CheckRuns, candidate.CheckRuns)
@@ -1152,7 +1154,7 @@ func ApplySettlement(pr record.PullRequest, candidate SettlementCandidate) (reco
 	pr.Snapshot = candidate.Snapshot
 	pr.Failing = append([]string(nil), outcome.Failing...)
 	pr.Cancelled = append([]string(nil), outcome.Cancelled...)
-	return pr, true
+	return pr, true, false
 }
 
 // LateLifecycle reports whether a pull request lifecycle observation (opened, reopened,

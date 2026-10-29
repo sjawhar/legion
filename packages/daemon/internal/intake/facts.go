@@ -13,6 +13,7 @@ import (
 
 	"github.com/sjawhar/legion/daemon/internal/claim"
 	"github.com/sjawhar/legion/daemon/internal/dispatch"
+	"github.com/sjawhar/legion/daemon/internal/githubrest"
 	"github.com/sjawhar/legion/daemon/internal/phase"
 	"github.com/sjawhar/legion/daemon/internal/record"
 )
@@ -385,21 +386,25 @@ type PullRequestOpened struct {
 
 func (PullRequestOpened) isFact() {}
 
-// OpenedReadEventID is the event id, under source "github", of a PullRequestOpened built from a
-// read of GitHub rather than from its webhook: the project, the repository and number, what the
-// read observed, the head and GitHub's updated_at, and what the workflow decides an opened by
-// beside it, the issue's generation and its pull request record as the read found it (nil for
-// none: its number, state and clock). It holds no read time and no boot, so the same observation
-// applied twice against the same record is one fact (ApplyFact answers the second Duplicate, and
-// Applied finds it before), whichever reader applies it - the required-checks pass or the
-// implementer's completion - while a pull request that changed since, or a record that changed
-// since (a new generation removes a closed one the opened was declined against), makes a new one.
-func OpenedReadEventID(project, repo string, number int, head string, updatedAt time.Time, generation uint64, recorded *record.PullRequest) string {
+// OpenedRead is the PullRequestOpened a read of GitHub that found pull open on branch of repo
+// stands for, as its webhook would have carried it - a reopen when recorded is the same pull
+// request - and the event id, under source "github", it is applied under: the project, the
+// repository and number, what the read observed, the head and GitHub's updated_at, and what the
+// workflow decides an opened by beside it, the issue's generation and its pull request record as
+// the read found it (nil for none: its number, state and clock). The id holds no read time and no
+// boot, so the same observation applied twice against the same record is one fact (ApplyFact
+// answers the second Duplicate, and Applied finds it before), whichever reader applies it - the
+// required-checks pass or the implementer's completion - while a pull request that changed since,
+// or a record that changed since (a new generation removes a closed one the opened was declined
+// against), makes a new one.
+func OpenedRead(project, repo, branch string, pull githubrest.PullRequest, generation uint64, recorded *record.PullRequest) (PullRequestOpened, string) {
+	fact := PullRequestOpened{Repo: repo, Number: pull.Number, Branch: branch, HeadSHA: pull.Head.SHA, Body: pull.Body,
+		URL: pull.HTMLURL, UpdatedAt: pull.UpdatedAt, Reopened: recorded != nil && recorded.Number == pull.Number}
 	against := "none"
 	if recorded != nil {
 		against = fmt.Sprintf("%d/%s/%s", recorded.Number, recorded.State, recorded.HeadUpdatedAt.UTC().Format(time.RFC3339Nano))
 	}
-	return fmt.Sprintf("opened-read:%s:%s#%d:%s:%s:%d:%s", project, repo, number, head, updatedAt.UTC().Format(time.RFC3339Nano), generation, against)
+	return fact, fmt.Sprintf("opened-read:%s:%s#%d:%s:%s:%d:%s", project, repo, pull.Number, pull.Head.SHA, pull.UpdatedAt.UTC().Format(time.RFC3339Nano), generation, against)
 }
 
 // PullRequestSynchronized records a new observed head, including the fields the shipped reducer

@@ -30,9 +30,9 @@ func (e *Engine) checks(ctx context.Context, tx pgx.Tx, fact intake.PullRequestC
 	// The listener's duplicate of a settlement the pass built gives the record its fence and
 	// decides nothing: no run and no outcome changed.
 	candidate := classify.SettlementCandidate{Head: fact.HeadSHA, CheckRuns: fact.CheckRuns, Generation: fact.Generation, Snapshot: fact.Snapshot, Failing: fact.Failing, Cancelled: fact.Cancelled}
-	settled, applied := classify.ApplyCheckSettlement(*pr, candidate)
+	settled, applied, adopted := classify.ApplyCheckSettlement(*pr, candidate)
 	if !applied {
-		if pr.Run == nil && !classify.JudgementChanged(*pr, settled) {
+		if pr.Run == nil && !adopted {
 			return intake.Result{}, nil
 		}
 		return intake.Result{}, e.store.PutPullRequest(ctx, tx, settled)

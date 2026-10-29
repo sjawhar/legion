@@ -233,16 +233,28 @@ func (w *workflowRuntime) applyClose(ctx context.Context, pr record.PullRequest,
 // limit: every further read on the same installation meets the same limit, and the panes share it,
 // so the caller must stop the whole pass there rather than skip only this pull request.
 func (w *workflowRuntime) logPassFailure(pr record.PullRequest, action string, err error) bool {
-	attributes := []any{"repo", pr.Repo, "pullRequest", pr.Number, "error", err}
+	return w.logReadFailure(err,
+		"read "+action+": GitHub's rate limit; this pass reads no more pull requests, and every unread one's checks verdict stays as the set last read decides it",
+		"read "+action+"; its checks verdict stays as the set last read decides it, and undecided when none was",
+		"repo", pr.Repo, "pullRequest", pr.Number)
+}
+
+// logReadFailure logs err, a GitHub read of the required-checks pass that failed, at error level
+// with attributes, then err and GitHub's HTTP status when err carries one: as limited when the
+// answer was GitHub's rate limit, and as failed otherwise. It returns true for the rate limit:
+// every further read on the same installation meets the same limit, and the panes share it, so the
+// caller must stop the whole pass there.
+func (w *workflowRuntime) logReadFailure(err error, limited, failed string, attributes ...any) bool {
+	attributes = append(attributes, "error", err)
 	var answer *githubrest.Answer
 	if errors.As(err, &answer) {
 		attributes = append(attributes, "status", answer.Status)
 	}
 	if answer != nil && answer.RateLimited {
-		w.log.Error("read "+action+": GitHub's rate limit; this pass reads no more pull requests, and every unread one's checks verdict stays as the set last read decides it", attributes...)
+		w.log.Error(limited, attributes...)
 		return true
 	}
-	w.log.Error("read "+action+"; its checks verdict stays as the set last read decides it, and undecided when none was", attributes...)
+	w.log.Error(failed, attributes...)
 	return false
 }
 

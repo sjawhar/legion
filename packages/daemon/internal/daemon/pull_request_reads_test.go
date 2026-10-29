@@ -279,7 +279,7 @@ func TestAFailedComparisonStillReadsThePullRequest(t *testing.T) {
 // A pull request GitHub lists open on an issue's branch that the workflow does not record - here
 // an opened older than the closed record's clock - is found again every pass. The pass applies it,
 // and warns, once while nothing the workflow decides it by changes: its event id is GitHub's pull
-// request, the issue's generation and the record it is judged against (intake.OpenedReadEventID),
+// request, the issue's generation and the record it is judged against (intake.OpenedRead),
 // so it writes no processed_events row every two minutes. Once the record changes (a new
 // generation removes the closed pull request), the same pull request against the new record is a
 // new fact, and the workflow records it.

@@ -222,7 +222,7 @@ func staleCompletion(issue string, current, serving uint64, pending *supervise.D
 //
 //   - one open: when the record does not already hold it open, the intake.PullRequestOpened its
 //     webhook would have carried is applied first, a reopen when the record holds the same pull
-//     request closed, under the read's stable id (intake.OpenedReadEventID). The completion then
+//     request closed, under the read's stable id (intake.OpenedRead). The completion then
 //     moves the issue to testing. A failure to apply it is FACT_APPLY_FAILED, with the completion
 //     not applied.
 //   - none, with the record holding the pull request merged: the completion is applied and moves
@@ -295,9 +295,7 @@ func (s *server) implementationPullRequest(w http.ResponseWriter, r *http.Reques
 	if recorded != nil && recorded.State == record.PullRequestOpen && recorded.Number == pull.Number {
 		return true
 	}
-	fact := intake.PullRequestOpened{Repo: issue.GitHubRepo, Number: pull.Number, Branch: branch, HeadSHA: pull.Head.SHA, Body: pull.Body,
-		URL: pull.HTMLURL, UpdatedAt: pull.UpdatedAt, Reopened: recorded != nil && recorded.Number == pull.Number}
-	read := intake.OpenedReadEventID(issue.Project, fact.Repo, pull.Number, pull.Head.SHA, pull.UpdatedAt, issue.Generation, recorded)
+	fact, read := intake.OpenedRead(issue.Project, issue.GitHubRepo, branch, pull, issue.Generation, recorded)
 	if _, err := intake.ApplyFact(ctx, s.pool, "github", read, fact, s.handlers...); err != nil {
 		s.log.Error("api: apply the open pull request a completing implementer's branch shows", "issue", issue.Key, "pullRequest", pull.Number, "error", err)
 		writeFailure(w, http.StatusInternalServerError, "FACT_APPLY_FAILED", "could not apply the open pull request read from GitHub; this completion changed nothing")

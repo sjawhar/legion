@@ -58,7 +58,7 @@ func (f runFact) apply(pr record.PullRequest) record.PullRequest {
 		pr.HeadUpdatedAt = LatestClock(pr.HeadUpdatedAt, f.at)
 		return pr
 	case f.settlement != nil:
-		pr, _ = ApplyCheckSettlement(pr, *f.settlement)
+		pr, _, _ = ApplyCheckSettlement(pr, *f.settlement)
 		return pr
 	case f.required != nil:
 		return ApplyRequiredRead(pr, f.required, nil, "")
@@ -296,12 +296,12 @@ func TestAHeadRunStaysBounded(t *testing.T) {
 				pr = stampHead(AdvancePullRequestHead(pr, Arrival{}, sha(i)), start.Add(time.Duration(i)*time.Minute))
 				settlement := SettlementCandidate{Head: sha(i), CheckRuns: tenChecks(i), Generation: int64(i + 1),
 					Snapshot: fmt.Sprintf("s%d", i), Failing: []string{"check-0"}}
-				pr, _ = ApplyCheckSettlement(pr, settlement)
+				pr, _, _ = ApplyCheckSettlement(pr, settlement)
 				steps := 0
 				if pr.Run != nil {
 					steps = len(pr.Run.Steps)
 				}
-				if pr, _ = ApplyCheckSettlement(pr, settlement); pr.Run != nil && len(pr.Run.Steps) != steps {
+				if pr, _, _ = ApplyCheckSettlement(pr, settlement); pr.Run != nil && len(pr.Run.Steps) != steps {
 					t.Fatalf("after %d heads the redelivered settlement took a step: %d steps, want %d", i, len(pr.Run.Steps), steps)
 				}
 				if late := i - 3; !tc.pushFirst && late >= 1 && late != tc.lost {
@@ -475,7 +475,7 @@ func BenchmarkReplayAtTheBound(b *testing.B) {
 	start := time.Date(2026, 10, 27, 0, 0, 0, 0, time.UTC)
 	for i := 1; pr.Run == nil || len(pr.Run.Steps) < maxRunSteps; i++ {
 		pr = stampHead(AdvancePullRequestHead(pr, Arrival{}, sha(i)), start.Add(time.Duration(i)*time.Minute))
-		pr, _ = ApplyCheckSettlement(pr, SettlementCandidate{Head: sha(i), CheckRuns: tenChecks(i),
+		pr, _, _ = ApplyCheckSettlement(pr, SettlementCandidate{Head: sha(i), CheckRuns: tenChecks(i),
 			Generation: int64(i + 1), Snapshot: fmt.Sprintf("s%d", i), Failing: []string{"check-0"}})
 	}
 	if len(pr.Run.Steps) != maxRunSteps {

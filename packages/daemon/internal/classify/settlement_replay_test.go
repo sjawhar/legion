@@ -205,7 +205,7 @@ func failingVerdict(pr record.PullRequest) string {
 func settleAll(pr record.PullRequest, settlements []namedSettlement) (record.PullRequest, []verdictChange) {
 	var changes []verdictChange
 	for _, settlement := range settlements {
-		settled, applied := ApplySettlement(pr, settlement.candidate)
+		settled, applied, _ := ApplySettlement(pr, settlement.candidate)
 		if !applied {
 			continue
 		}
@@ -327,7 +327,7 @@ func pr1084PassSettlement(t *testing.T) SettlementCandidate {
 // listener's settlements of those runs give it.
 func TestThePassSettlementOfARealHeadGivesTheListenersVerdict(t *testing.T) {
 	listened, _ := settleAll(freshHead("2257aaef"), pr1084Settlements(false))
-	passed, applied := ApplyCheckSettlement(freshHead("2257aaef"), pr1084PassSettlement(t))
+	passed, applied, _ := ApplyCheckSettlement(freshHead("2257aaef"), pr1084PassSettlement(t))
 	if !applied || passed.CheckedHead != "2257aaef" || passed.Generation != PassGeneration {
 		t.Fatalf("the pass's settlement applied %t: %+v, want it recorded for 2257aaef at the pass's generation", applied, passed)
 	}
@@ -348,7 +348,7 @@ func TestThePassSettlementOfARealHeadGivesTheListenersVerdict(t *testing.T) {
 // another check, where two listener settlements would conflict and the newer run be lost.
 func TestTheListenersLateSettlementOfAHeadThePassSettledChangesNothingItLearned(t *testing.T) {
 	published := pr1084Settlements(false)
-	passed, _ := ApplyCheckSettlement(freshHead("2257aaef"), pr1084PassSettlement(t))
+	passed, _, _ := ApplyCheckSettlement(freshHead("2257aaef"), pr1084PassSettlement(t))
 	last := published[len(published)-1].candidate
 	last.Head = "2257aaef"
 
@@ -356,10 +356,10 @@ func TestTheListenersLateSettlementOfAHeadThePassSettledChangesNothingItLearned(
 		if got := ClassifySettlement(passed, last); got != SettlementDuplicate {
 			t.Fatalf("the listener's settlement of the same runs is %s, want duplicate", got)
 		}
-		adopted, applied := ApplyCheckSettlement(passed, last)
-		if applied || adopted.Generation != last.Generation || adopted.Snapshot != last.Snapshot {
-			t.Fatalf("the duplicate applied %t at generation %d snapshot %q, want nothing applied and the fence at the listener's %d %q",
-				applied, adopted.Generation, adopted.Snapshot, last.Generation, last.Snapshot)
+		adopted, applied, fenced := ApplyCheckSettlement(passed, last)
+		if applied || !fenced || adopted.Generation != last.Generation || adopted.Snapshot != last.Snapshot {
+			t.Fatalf("the duplicate applied %t, adopted the fence %t, at generation %d snapshot %q, want nothing applied and the fence adopted at the listener's %d %q",
+				applied, fenced, adopted.Generation, adopted.Snapshot, last.Generation, last.Snapshot)
 		}
 		if !slices.Equal(adopted.CheckRuns, passed.CheckRuns) || !slices.Equal(adopted.Failing, passed.Failing) || !slices.Equal(adopted.Cancelled, passed.Cancelled) {
 			t.Fatalf("the duplicate changed the fence to %v failing %v, want the pass's %v failing %v", adopted.CheckRuns, adopted.Failing, passed.CheckRuns, passed.Failing)
@@ -400,7 +400,7 @@ func TestTheListenersLateSettlementOfAHeadThePassSettledChangesNothingItLearned(
 		if got := ClassifySettlement(passed, rerun); got != SettlementNewer {
 			t.Fatalf("a settlement higher on pr-title and lower on dispatch is %s, want newer", got)
 		}
-		merged, applied := ApplySettlement(passed, rerun)
+		merged, applied, _ := ApplySettlement(passed, rerun)
 		if !applied || !slices.Equal(merged.Failing, []string{"pr-title"}) || merged.Generation != PassGeneration {
 			t.Fatalf("the merge applied %t failing %v at %d, want pr-title failing and the fence still the pass's", applied, merged.Failing, merged.Generation)
 		}
@@ -417,7 +417,7 @@ func TestTheListenersLateSettlementOfAHeadThePassSettledChangesNothingItLearned(
 			}
 		}
 		covering.Failing = []string{"pr-title"}
-		if merged, applied := ApplySettlement(passed, covering); !applied || merged.Generation != last.Generation || merged.Snapshot != last.Snapshot ||
+		if merged, applied, _ := ApplySettlement(passed, covering); !applied || merged.Generation != last.Generation || merged.Snapshot != last.Snapshot ||
 			!slices.Equal(merged.Failing, []string{"pr-title"}) {
 			t.Fatalf("a settlement higher on pr-title and equal on the rest applied %t at %d %q failing %v, want the listener's fence %d %q and pr-title failing",
 				applied, merged.Generation, merged.Snapshot, merged.Failing, last.Generation, last.Snapshot)
@@ -437,14 +437,15 @@ func TestTheListenersDuplicateOfThePassSettlementDecidesNothingInAHeadRun(t *tes
 	}
 	pass := SettlementCandidate{Head: "h3", CheckRuns: []record.AttemptRun{{Name: "ci", ID: 2}}, Generation: PassGeneration, Snapshot: "pass",
 		Failing: []string{}, Cancelled: []string{}}
-	settled, changed := ApplyCheckSettlement(pr, pass)
+	settled, changed, _ := ApplyCheckSettlement(pr, pass)
 	if !changed || HeadVerdict(settled) != "green" || settled.Generation != PassGeneration {
 		t.Fatalf("the pass's settlement changed %t to %s at %d, want h3 green at the pass's generation", changed, HeadVerdict(settled), settled.Generation)
 	}
 	listener := pass
 	listener.Generation, listener.Snapshot = 4, "listener"
-	adopted, changed := ApplyCheckSettlement(stored(t, settled), listener)
-	if changed || adopted.Generation != 4 || adopted.Snapshot != "listener" || HeadVerdict(adopted) != "green" {
-		t.Fatalf("the listener's duplicate changed %t to %s at %d %q, want nothing decided and the fence at 4 listener", changed, HeadVerdict(adopted), adopted.Generation, adopted.Snapshot)
+	adopted, changed, fenced := ApplyCheckSettlement(stored(t, settled), listener)
+	if changed || !fenced || adopted.Generation != 4 || adopted.Snapshot != "listener" || HeadVerdict(adopted) != "green" {
+		t.Fatalf("the listener's duplicate changed %t, adopted the fence %t, to %s at %d %q, want nothing decided and the fence adopted at 4 listener",
+			changed, fenced, HeadVerdict(adopted), adopted.Generation, adopted.Snapshot)
 	}
 }

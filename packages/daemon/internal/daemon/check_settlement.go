@@ -4,7 +4,6 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
-	"errors"
 	"slices"
 	"strconv"
 	"strings"
@@ -46,17 +45,9 @@ func (w *workflowRuntime) readSettlement(ctx, read context.Context, github githu
 		if ctx.Err() != nil {
 			return true
 		}
-		attributes := []any{"repo", pr.Repo, "pullRequest", pr.Number, "head", head, "error", err}
-		var answer *githubrest.Answer
-		if errors.As(err, &answer) {
-			attributes = append(attributes, "status", answer.Status)
-		}
-		if answer != nil && answer.RateLimited {
-			w.log.Error("read the check runs on a pull request's head: GitHub's rate limit; this pass reads no more pull requests", attributes...)
-			return true
-		}
-		w.log.Error("read the check runs on a pull request's head; it stays with no settlement until a later pass reads them or Envoy's listener settles it", attributes...)
-		return false
+		return w.logReadFailure(err, "read the check runs on a pull request's head: GitHub's rate limit; this pass reads no more pull requests",
+			"read the check runs on a pull request's head; it stays with no settlement until a later pass reads them or Envoy's listener settles it",
+			"repo", pr.Repo, "pullRequest", pr.Number, "head", head)
 	}
 	fact, completed, ok := listenerSettlement(pr.Repo, pr.Number, head, runs, w.reviewAppID)
 	if !ok || time.Since(completed) < requiredChecksInterval {

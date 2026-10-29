@@ -186,7 +186,7 @@ func (w *workflowRuntime) headPushes(ctx context.Context, github githubrest.Clie
 	if err != nil || notHandoff != "" {
 		return nil, err
 	}
-	return []passPush{{eventID: w.passEventID("push-read", pr.Repo, pr.Number, pr.HeadSHA+"..."+head), fact: push}}, nil
+	return []passPush{{eventID: w.pushReadEventID(pr, pr.HeadSHA, head), fact: push}}, nil
 }
 
 // lostPushes is the pushes that took pr's branch from the recorded head to head, oldest first, as
@@ -200,11 +200,11 @@ func (w *workflowRuntime) headPushes(ctx context.Context, github githubrest.Clie
 // GitHub may have cut that list (githubrest.CompareFilesLimit) or answered none. Repo and Branch
 // are the record's, the names the webhook's push carries. The workflow judges a move by the chain
 // of its pushes, so one push from the recorded head to head, compared whole, would judge it wrong.
-// Each push's event id names the project, the repository, the branch and the push's two commits,
-// so a later pass skips it before any transaction, and the push webhook arriving later is the same
-// push recorded again, which the record keeps as its move's push or a repeat of it and which
-// changes no judgement (classify.ApplyPush): a webhook whose list GitHub cut short takes the paths
-// the compare listed here, so a handoff-only push stays one.
+// Each push's event id names the project, the pull request and the push's two commits
+// (pushReadEventID), so a later pass skips it before any transaction, and the push webhook arriving
+// later is the same push recorded again, which the record keeps as its move's push or a repeat of
+// it and which changes no judgement (classify.ApplyPush): a webhook whose list GitHub cut short
+// takes the paths the compare listed here, so a handoff-only push stays one.
 //
 // unfollowed says why the pushes cannot be rebuilt, and then there are none: the page does not
 // lead back from head to the recorded head, an entry on the way is no push, or GitHub answered a
@@ -257,7 +257,7 @@ func (w *workflowRuntime) lostPushes(ctx context.Context, github githubrest.Clie
 		}
 		forced := strconv.FormatBool(entry.Type == "force_push")
 		pushes = append(pushes, passPush{
-			eventID: w.passEventID("push-read", pr.Repo, pr.Number, pr.Branch, entry.Before+"..."+entry.After),
+			eventID: w.pushReadEventID(pr, entry.Before, entry.After),
 			fact: intake.Push{Repo: pr.Repo, Branch: pr.Branch, Before: entry.Before, After: entry.After,
 				ChangedPaths: changed, Truncated: &truncated, Forced: &forced, Pusher: entry.Actor.Login},
 		})
@@ -342,16 +342,11 @@ func (w *workflowRuntime) readListings(ctx context.Context) {
 			if ctx.Err() != nil {
 				return
 			}
-			attributes := []any{"repo", repo, "error", err}
-			var answer *githubrest.Answer
-			if errors.As(err, &answer) {
-				attributes = append(attributes, "status", answer.Status)
-			}
-			if answer != nil && answer.RateLimited {
-				w.log.Error("list a repository's open pull requests: GitHub's rate limit; this pass reads no more", attributes...)
+			if w.logReadFailure(err, "list a repository's open pull requests: GitHub's rate limit; this pass reads no more",
+				"list a repository's open pull requests; an open pull request the daemon has not recorded, and an issue whose completion waits for one, stay as they are until a later pass lists it",
+				"repo", repo) {
 				return
 			}
-			w.log.Error("list a repository's open pull requests; an open pull request the daemon has not recorded, and an issue whose completion waits for one, stay as they are until a later pass lists it", attributes...)
 			continue
 		}
 		listed := map[string]bool{}
@@ -388,7 +383,7 @@ func (w *workflowRuntime) openPullRequests(ctx context.Context, repository ghrep
 // an implementing issue whose implementer completed on to testing, and declines a reopen of a
 // merged pull request, one older than the record's clock, and one opened from the branch of an
 // issue that waits to close on its merge. Its event id is what the workflow decides by
-// (intake.OpenedReadEventID), so a declined opened, found again every pass, is applied and warned
+// (intake.OpenedRead), so a declined opened, found again every pass, is applied and warned
 // of once while neither GitHub's pull request, the issue's generation nor its record changes, and
 // the implementer's completion, reading the same pull request, applies the same fact.
 func (w *workflowRuntime) recordListed(ctx context.Context, repo, key string, pull githubrest.PullRequest) {
@@ -410,12 +405,10 @@ func (w *workflowRuntime) recordListed(ctx context.Context, repo, key string, pu
 	if issue == nil || issue.Project != w.dispatchProject || !strings.EqualFold(issue.GitHubRepo, repo) || (prior != nil && prior.State == record.PullRequestOpen) {
 		return
 	}
-	eventID := intake.OpenedReadEventID(w.dispatchProject, repo, pull.Number, pull.Head.SHA, pull.UpdatedAt, issue.Generation, prior)
+	fact, eventID := intake.OpenedRead(w.dispatchProject, repo, pull.Head.Ref, pull, issue.Generation, prior)
 	if !w.unapplied(ctx, eventID) {
 		return
 	}
-	fact := intake.PullRequestOpened{Repo: repo, Number: pull.Number, Branch: pull.Head.Ref, HeadSHA: pull.Head.SHA, Body: pull.Body,
-		URL: pull.HTMLURL, UpdatedAt: pull.UpdatedAt, Reopened: prior != nil && prior.Number == pull.Number}
 	w.log.Warn("workflow: GitHub lists an open pull request on an issue's branch that the daemon does not record open; applying the opened its webhook would",
 		"repo", repo, "pullRequest", pull.Number, "issue", key, "phase", issue.Phase, "head", pull.Head.SHA, "reopened", fact.Reopened, "updated_at", pull.UpdatedAt)
 	if _, err := intake.ApplyFact(ctx, w.pool, "github", eventID, fact, w.handlers...); err != nil {
@@ -452,6 +445,14 @@ func (w *workflowRuntime) tellMissing(ctx context.Context, repo string, waiting 
 // transaction.
 func (w *workflowRuntime) passEventID(kind, repo string, number int, observed ...string) string {
 	return fmt.Sprintf("%s:%s:%s#%d:%s", kind, w.dispatchProject, repo, number, strings.Join(observed, ":"))
+}
+
+// pushReadEventID is the event id of a push from before to after on pr's branch that the pass
+// rebuilt from its reads of GitHub (passEventID): the same whichever read rebuilt it - the compare
+// of the recorded head with the new one (headPushes) or the branch's activity (lostPushes) - so the
+// two commits are one fact.
+func (w *workflowRuntime) pushReadEventID(pr record.PullRequest, before, after string) string {
+	return w.passEventID("push-read", pr.Repo, pr.Number, before+"..."+after)
 }
 
 // clock is GitHub's time t as an event id spells it.
