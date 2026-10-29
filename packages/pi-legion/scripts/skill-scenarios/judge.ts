@@ -46,9 +46,9 @@ import {
   coverage,
   judgeInputs,
   SpecFixture,
-  SpecVersions,
   State,
   seededIds,
+  sessionVersions,
   sharedRuns,
   specWork,
 } from "./score";
@@ -195,18 +195,13 @@ export async function answerTurn(runDir: string, turn: number, options: JudgeOpt
   );
 }
 
-/** The spec version each spec-only check led to: the first version the run's session wrote after
- * the write that followed the check. */
+/** The spec version each spec-only check led to: the first version the run's session wrote at or
+ * after the write that followed the check (an unseen version's write is at its own time, so it
+ * leads to itself). */
 function specAfter(runDir: string, writeAt: string, own: string): string {
-  const versions = read(path.join(runDir, "spec-versions.json"), SpecVersions)
-    .filter((version) =>
-      (version.authors ?? (version.actor ? [version.actor] : [])).some(
-        (author) => author.kind === "session" && author.id === own
-      )
-    )
-    .filter((version) => Date.parse(version.created_at) >= Date.parse(writeAt))
-    .sort((a, b) => a.version - b.version);
-  const version = versions[0];
+  const version = sessionVersions(runDir, own).find(
+    (one) => Date.parse(one.created_at) >= Date.parse(writeAt)
+  );
   if (version === undefined)
     throw new Error(`spec-versions.json holds no version the session wrote at or after ${writeAt}`);
   return readFileSync(path.join(runDir, "spec-versions", `${version.version}.md`), "utf8");
@@ -225,7 +220,7 @@ export async function judgeRun(runDir: string, options: JudgeOptions = {}) {
   const own = sessionId(entries);
   if (own === undefined) throw new Error(`${runDir}: the transcript has no session header`);
   const fixture = read(path.join(runDir, "fixture.json"), SpecFixture);
-  const specWorkDone = specWork(entries, checkouts(work), fixture);
+  const specWorkDone = specWork(runDir, checkouts(work), fixture);
   const given = judgeInputs(runDir, specWorkDone);
   const documentFiles = Object.fromEntries(given.documents.map((name) => [name, file(name)]));
   const { checks, writes } = specWorkDone;
