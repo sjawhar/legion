@@ -1,0 +1,22 @@
+{
+  "schemaVersion": 1,
+  "phase": "review",
+  "issue": "INFRA-723",
+  "completed": "2026-10-29T09:13:02Z",
+  "decision": "changes_requested",
+  "reviewedHead": "359cbd66e0341ef327f9e58178ead6e535deb582",
+  "codeHead": "d7b3cc91756db18b0ec722e4f69ffa9f71c6c35b",
+  "ci": "Required set (rulesets: lint, typecheck, test, pr-title; branch protection: none) all completed success at CI head d7b3cc91; compare d7b3cc91...359cbd66 handoffsOnly true, 2 files.",
+  "thermonuclear": "deep-review: Verdict APPROVE at 359cbd66 (3 Minor: docs overstate the test, pathspecs read before the cd to the root, pre-receive hook noise). code-quality: Verdict CHANGES at 359cbd66 (hand-copied buildLegionPlugin reads in the test, push-built arm structure and onto alias, docs overstate the test).",
+  "critical": 0,
+  "important": 1,
+  "minor": 5,
+  "keyFindings": [
+    {"severity": "important", "file": "packages/claude-envoy/tests/build-inputs.test.ts", "description": "Lines 70-91 rebuild buildLegionPlugin's reads by hand (the staging script and pi-legion/agents), so a new source buildLegionPlugin starts to read passes the test unlisted. buildLegionPlugin should return the repository paths it read, as buildBundles now does, and the test should use that."},
+    {"severity": "minor", "file": ".github/scripts/release-push.sh", "description": "main_build_base and build_inputs_changed (1342, 1349) resolve repo-root pathspecs before extract_built's cd to the root; from a subdirectory main_build_base finds no build and the newer-build refusal is silently off. cd to the root at the start of push-built."},
+    {"severity": "minor", "file": ".github/scripts/release-push.sh", "description": "push-built arm (1357-1380): onto=$tip gives one value two names; move the temporary-index commit into a function next to extract_built, called directly (not in $(...), where on_exit_remove's trap would fire in the subshell)."},
+    {"severity": "minor", "file": "packages/claude-envoy/scripts/verify-build.sh", "description": "verify-build.sh:17-20, AGENTS.md:172, build.ts:18-19, build-inputs.txt:13, the changelog fragment and the workflow header say the test holds the list to every file the build reads; it checks the bundles' module graph and the Legion plugin's sources, while verify-build.sh's, the workflow's and build.ts's direct reads are listed by hand."},
+    {"severity": "minor", "file": ".github/scripts/release-push.test.sh", "description": "1470: record_hook runs before move_main, so the seed push fires the pre-receive hook with PUSH_SEEN unset and prints 'hooks/pre-receive: line 2: : No such file or directory'. Install the hook after move_main."},
+    {"severity": "minor", "file": "packages/claude-envoy/AGENTS.md", "description": "Reflow leaves 'rebuild commit is on' (AGENTS.md:177) and '`scripts/build.ts` takes exactly one mode' (README.md:284) on short lines of their own."}
+  ]
+}
