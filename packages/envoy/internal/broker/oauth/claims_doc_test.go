@@ -79,8 +79,8 @@ func TestTheDocumentedClaimsAreTheClaimsAnExchangedTokenCarries(t *testing.T) {
 		t.Fatalf("docs/kubernetes.md's claim list and the claims the exchange decides on disagree:\n"+
 			"  documented: %s\n"+
 			"  issued:     %s\n"+
-			"the list reads \"An issued token carries these claims and no others\", and a resource "+
-			"server believes it", strings.Join(documented, ", "), strings.Join(issued, ", "))
+			"the list under %q is what a resource server writes its authorization against",
+			strings.Join(documented, ", "), strings.Join(issued, ", "), claimsDocHeading)
 	}
 }
 

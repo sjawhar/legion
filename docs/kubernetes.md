@@ -3250,11 +3250,12 @@ every issue of the project, and that controller, present the same bytes.
 When `dispatch_token_file` holds one of the deployment's shared agent tokens
 (`DISPATCH_AGENT_TOKEN`), Dispatch matches the bytes against them (`MatchesSharedAgentToken`,
 `packages/envoy/internal/dispatch/auth/agent_token.go`) and reads no person, no service and no
-project from them. The acting session is then the one the request body names (`bearerSessionActor`,
-`packages/envoy/internal/dispatch/api/server.go`), which for the daemon's own writes is
-`legion-daemon:<PROJECT>` (`DaemonSession`, `packages/daemon/internal/dispatch/client.go`), so the
-token names nobody. Dispatch takes any other bearer as a service token or a personal token
-(`optionalActor`, `server.go`), and then every role acts as that token's service or owner.
+project from them. Whatever the bearer, the acting session is the one the request body names
+(`bearerSessionActor`, `packages/envoy/internal/dispatch/api/server.go`), which for the daemon's
+own writes is `legion-daemon:<PROJECT>` (`DaemonSession`,
+`packages/daemon/internal/dispatch/client.go`), so a shared agent token names nobody. Dispatch
+takes any other bearer as a service token or a personal token (`optionalActor`, `server.go`), and
+every role's session then carries that token's service or owner as well.
 `dispatch whoami` in a role tells the two apart: for a shared agent token it answers
 `Session <id> runs under the shared token: no owner, …`
 (`packages/envoy-client/src/dispatch-execute.ts`).
@@ -5961,8 +5962,9 @@ the person — and the broker refuses `invalid_grant` to another principal that 
 (`claimSession`, `packages/envoy/internal/broker/oauth/exchange.go`). A claim holds the name for
 `oauthstore.SessionRetention`, 90 days, past the expiry of the token the claim was made for
 (`BindSession`, `packages/envoy/internal/broker/oauthstore/exchange.go`). A name an entry fixes is
-the entry's with no expiry: the broker reserves it for the entry (`ReserveSessions`, the same
-file), and the entry's own exchange takes it from any other holder.
+held for that entry with no expiry: the broker reserves it for the entry unless another principal
+holds it (`ReserveSessions`, the same file), and the entry's own exchange takes it from any other
+holder.
 
 A resource server reads such a token back with `POST /v1/oauth/introspect`
 (`packages/envoy/internal/broker/api/handlers_introspect.go`). It authenticates with its own
