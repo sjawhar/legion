@@ -137,7 +137,11 @@ says **not running**, and the issue counts as unclaimed.
 ## Creating an issue
 
 Press `c` anywhere. Pick the project, type a title of up to 1,000 characters, and optionally the
-first line of the spec. If the title closely matches an existing issue in the project, Dispatch
+first line of the spec. A short moment after you stop typing the title, Dispatch lists the items
+it already holds on the same subject — issues, asks, comments, messages and documents — each a
+link that opens in a new tab, so your draft stays as you left it. When it searched and found
+nothing it says so, and when it could not search at all it says that instead, with the words to
+search for yourself. If the title closely matches an existing issue in the project, Dispatch
 shows that issue and offers **Create anyway**. A new issue opens as soon as it is created.
 
 ## The issue page
