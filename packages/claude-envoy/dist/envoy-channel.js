@@ -38988,13 +38988,7 @@ class DispatchClient {
     return this.#json("GET", ["api", "v1", "issues", await this.#resolveIssue(issue), "comments"]);
   }
   async getIssueReferences(issue) {
-    return this.#json("GET", [
-      "api",
-      "v1",
-      "issues",
-      await this.#resolveIssue(issue),
-      "references"
-    ]);
+    return this.#json("GET", ["api", "v1", "issues", await this.#resolveIssue(issue), "references"], undefined, { versions: "latest" });
   }
   async getReferences(query) {
     return this.#json("GET", ["api", "v1", "references"], undefined, {
