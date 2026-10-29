@@ -1778,28 +1778,57 @@ function subagentRun(
     reported: Date.parse(last?.timestamp ?? ""),
   };
 }
-/** The 8-word runs of a text, lowercased, its words its runs of letters and digits. */
+/** The 5-word runs of a text, lowercased, its words its runs of letters and digits. */
 function wordRuns(text: string): Set<string> {
   const words = text.toLowerCase().match(/[a-z0-9]+/g) ?? [];
   const runs = new Set<string>();
-  for (let start = 0; start + 8 <= words.length; start++)
-    runs.add(words.slice(start, start + 8).join(" "));
+  for (let start = 0; start + 5 <= words.length; start++)
+    runs.add(words.slice(start, start + 5).join(" "));
   return runs;
 }
-/** The least share of a check's pasted spec (from its `## Summary` line on) whose 8-word runs some
- * version the run's session wrote also holds, for the check to be of this run's spec (OWN_SPEC).
- * An agent that splits out a sibling issue can send the sibling's spec for review: that assignment
- * holds the seven headings too, but its report is about another spec. On the 113 checks of the
- * INFRA-140 acceptance runs, each check of a sibling's spec shared none of its runs (0.00), and
- * each check of the run's own spec at least 0.20, an early draft the agent rewrote included. */
+/** Each spec an assignment pastes: from a `## Summary` line to the end of the `## Acceptance`
+ * section after it (the next `#` or `##` heading, or the end), or to the next `## Summary` line.
+ * What the assignment adds after a spec (instructions, the person's messages, the answered asks)
+ * is in no slice, so it neither lowers nor raises a spec's share. */
+function specSlices(assignment: string): string[] {
+  const lines = assignment.split("\n");
+  const summary = /^[ \t]*## Summary[ \t]*$/;
+  const slices: string[] = [];
+  for (let start = 0; start < lines.length; start++) {
+    if (!summary.test(lines[start] ?? "")) continue;
+    let end = start + 1;
+    let acceptance = false;
+    for (; end < lines.length; end++) {
+      const line = lines[end] ?? "";
+      if (summary.test(line)) break;
+      if (/^[ \t]*## Acceptance[ \t]*$/.test(line)) acceptance = true;
+      else if (acceptance && /^[ \t]*#{1,2} /.test(line)) break;
+    }
+    slices.push(lines.slice(start, end).join("\n"));
+    start = end - 1;
+  }
+  return slices;
+}
+/** The least share of each pasted spec's 5-word runs that a version the run's session wrote also
+ * holds, for the check to be of this run's spec. An agent that splits out a sibling issue can send
+ * the sibling's spec for review, alone or after its own spec in one assignment; that spec holds
+ * the seven headings too, but the report's findings on it are about another spec. Each spec of an
+ * assignment must pass on its own, so one that pastes both is no check of either. The share is
+ * taken over the spec alone, so text pasted after it cannot dilute it. On the 67 spec runs of the
+ * dispatch skills' acceptance measurement, each of the 7 sibling specs sent for review shared at
+ * most 0.02 of its runs, and each of the run's own specs at least 0.34, a draft the agent rewrote
+ * in plain words after the check included: a 5-word run survives a rewrite more often than a
+ * longer one. */
 const OWN_SPEC = 0.1;
-/** The share of the pasted spec's 8-word runs that `written` (the runs of every version the
- * session wrote) holds; 1 when the assignment pastes no run of 8 words. */
-function ownSpecShare(assignment: string, written: Set<string>): number {
-  const start = assignment.search(/^[ \t]*## Summary[ \t]*$/m);
-  const pasted = wordRuns(assignment.slice(Math.max(0, start)));
-  if (pasted.size === 0) return 1;
-  return [...pasted].filter((run) => written.has(run)).length / pasted.size;
+/** Each pasted spec's share of 5-word runs that `written` (the runs of every version the session
+ * wrote) holds, in order. */
+function ownSpecShares(assignment: string, written: Set<string>): number[] {
+  return specSlices(assignment).map((slice) => {
+    const pasted = wordRuns(slice);
+    return pasted.size === 0
+      ? 1
+      : [...pasted].filter((run) => written.has(run)).length / pasted.size;
+  });
 }
 /** The spec writes of the run's session (writesSpec, against the run's fixture.json) and the
  * spec-only checks before them: the one list of checks that both specRow's `checked` and the
@@ -1874,18 +1903,19 @@ export function specWork(runDir: string, reach: string[], fixture: SpecFixture):
       );
       return { ...version, index: after < 0 ? entries.length : after };
     });
-  // Every 8-word run of every version the session wrote: a check's pasted spec must share enough of
-  // them to be this run's spec, not a sibling issue's (ownSpecShare, OWN_SPEC).
+  // Every 5-word run of every version the session wrote: each spec a check pastes must share
+  // enough of them to be this run's spec, not a sibling issue's (ownSpecShares, OWN_SPEC).
   const written = new Set<string>();
   for (const { version } of recorded) {
     const file = path.join(runDir, "spec-versions", `${version}.md`);
     if (existsSync(file)) for (const run of wordRuns(readFileSync(file, "utf8"))) written.add(run);
   }
   const foreign = (assignment: string) => {
-    const share = ownSpecShare(assignment, written);
-    return share < OWN_SPEC
-      ? `its spec is not this issue's: ${Math.round(share * 100)}% of its 8-word runs are in a version the session wrote`
-      : undefined;
+    const shares = ownSpecShares(assignment, written);
+    const index = shares.findIndex((share) => share < OWN_SPEC);
+    return index < 0
+      ? undefined
+      : `its spec is not this issue's: spec ${index + 1} of ${shares.length} it pastes has ${Math.round((shares[index] ?? 0) * 100)}% of its 5-word runs in a version the session wrote`;
   };
 
   const writes: SpecWork["writes"] = [];

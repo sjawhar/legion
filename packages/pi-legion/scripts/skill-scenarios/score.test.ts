@@ -1671,6 +1671,30 @@ specRun("spec-writing-head-120", {
     ),
   },
 });
+// One assignment that pastes the run's own spec and then the sibling's: each spec must pass on its
+// own, so the check is of neither.
+specRun("spec-writing-head-125", {
+  transcript: evalFirst(evalCell("e1", evalSpawn, "Spawned BothCheck.")),
+  subagents: {
+    BothCheck: subagentTranscript(
+      `Review both specs.\n\n${outlined()}\n\n# The sibling's spec\n\n${siblingSpec}`,
+      6.2,
+      6.8
+    ),
+  },
+});
+// The run's own spec with far more text pasted after it (the person's messages, three times, and
+// instructions): the share is the spec's alone, so the check counts.
+specRun("spec-writing-head-126", {
+  transcript: evalFirst(evalCell("e1", evalSpawn, "Spawned EvalCheck.")),
+  subagents: {
+    EvalCheck: subagentTranscript(
+      `Read this spec alone and list each gap.\n\n${outlined()}\n\n# The person's words\n\n${personMessages}\n${personMessages}\n${personMessages}\n\n# How to report\n\nList each gap with its place in the spec and the fix you propose for it.`,
+      6.2,
+      6.8
+    ),
+  },
+});
 // A subagent that ends with an empty `yield` ({"type":"result"}) hands back the text it wrote just
 // before: that text is its report, not the word "result".
 specRun("spec-writing-head-121", {
@@ -3089,8 +3113,13 @@ test("checked: a check started from an eval cell counts from its own transcript,
   // A review of a sibling issue's spec, outline and all, checks no write of this run.
   expect(scoresOf("spec-writing-head-120")).toEqual({ ...allPass, checked: "false" });
   expect(rowOf("spec-writing-head-120")).toContain(
-    "check SiblingCheck (transcript SiblingCheck.jsonl) for spec write 1 does not count: its spec is not this issue's: 0% of its 8-word runs are in a version the session wrote"
+    "check SiblingCheck (transcript SiblingCheck.jsonl) for spec write 1 does not count: its spec is not this issue's: spec 1 of 1 it pastes has 1% of its 5-word runs in a version the session wrote"
   );
+  expect(scoresOf("spec-writing-head-125")).toEqual({ ...allPass, checked: "false" });
+  expect(rowOf("spec-writing-head-125")).toContain(
+    "check BothCheck (transcript BothCheck.jsonl) for spec write 1 does not count: its spec is not this issue's: spec 2 of 2 it pastes has 1% of its 5-word runs in a version the session wrote"
+  );
+  expect(scoresOf("spec-writing-head-126")).toEqual(allPass);
   // An empty `yield` hands back the text before it, which is the report.
   const fixtureJson = { issue: "LWEVAL-7", spec_artifact: "art-spec" };
   const reports = specWork(
