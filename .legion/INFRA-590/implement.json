@@ -2,10 +2,10 @@
   "schemaVersion": 1,
   "phase": "implement",
   "issue": "INFRA-590",
-  "completed": "2026-10-29T17:40:00Z",
+  "completed": "2026-10-29T23:10:00Z",
   "pullRequest": "https://github.com/sjawhar/legion/pull/2395",
-  "head": "5ea3ce58dd9aa6838e0ef69863f4b9c97acac7b7",
-  "round": "13 (the round-9 review, changes requested for the conflict with main): forward merge of main 7c2effba4 (5ea3ce58), keeping the reviewer's comment-only 3ccaed9a. Main's #2370 listener resolver with its typed failures runs over the shared roles.ResolveHolder; main's publish route passes bus.ForwardMsgID to RequestCoreTo; the window is the branch's byte for byte; #2505's guards kept. Migrations (0141/0142), connections (89) and ci.yaml filters (0 uncovered) unchanged. Merge pushed first, the handoff second. Fingerprint comment 6503673013.",
+  "head": "bb6c22f975342594a32f777ac87c66b8059aa32d",
+  "round": "14 (acceptance held at 5d0cf73b but GitHub reported CONFLICTING): forward merge of main dfd128f14 (4f2995f2) with migrations renumbered to 0142_duty_holds/0143_outbox_claim above main's 0141_drop_broadcast_idempotency_keys, connections (89) and ci.yaml filters unchanged; then TestCoreRoleDeliverySkipsAHolderThatStoppedHeartbeating (bb6c22f9), the gap the tester found: the role lane delivers nothing to a holder whose session stopped heartbeating. Code pushed first, handoff second. Diff-check comment 6509670093.",
   "proof": [
     {
       "criterion": "Exactly one process publishes at a time through a lease on the outbox's own database connection; /healthz carries boolean outbox_publisher",
@@ -150,6 +150,14 @@
       "observed": "bus ok 326.1 s, roles ok, listener ok 477.7 s, outbox ok 262.3 s, store ok 271.6 s, cmd/dispatch ok 286.8 s, -race bus ok 328.4 s, multiprocess ok 914.9 s; main's CI filter check 0 uncovered; TestDispatchConnectionsPerPodIsTheServers ok at 89.",
       "headSha": "5ea3ce58dd9aa6838e0ef69863f4b9c97acac7b7",
       "negativeControl": "Before the merge GitHub reported the head CONFLICTING and started no pull_request workflow for 3ccaed9a; one listener run under full-package load failed TestListenerFollowsTheInterestRegistryAcrossNATSRestarts with a KV watch deadline, passed alone and in the whole-package re-run."
+    },
+    {
+      "criterion": "The role lane's liveness test (laneHolderFresh) keeps a holder whose session stopped heartbeating from being delivered to, and the head merged forward with main keeps every reviewed behaviour.",
+      "surface": "cmd/listener's real role lane on in-process NATS; outbox, store, bus, listener and cmd/dispatch packages on pod Postgres 17 (fresh UTF8 database) and the repository multiprocess harness",
+      "command": "cd packages/envoy && go test -count=1 -run TestCoreRoleDeliverySkipsAHolderThatStoppedHeartbeating -v ./cmd/listener/ && DISPATCH_TEST_DATABASE_URL=<pod Postgres> go test -count=1 ./cmd/listener/ && go test -count=1 ./internal/dispatch/store/ ./internal/dispatch/outbox/ ./cmd/dispatch/ && go test -count=1 ./internal/bus/ && go test -tags multiprocess -count=1 -timeout 25m ./cmd/dispatch",
+      "observed": "The stale-holder subtest: nothing reaches the holder's subject, the delivery exception is delivery_failed, the claim is released; the fresh-holder subtest is delivered to and keeps its claim. listener ok 491.0 s; store, outbox, cmd/dispatch ok; bus ok 332.2 s; kvwatch, session, roles ok; multiprocess ok 910.8 s at the merge 4f2995f2.",
+      "headSha": "bb6c22f975342594a32f777ac87c66b8059aa32d",
+      "negativeControl": "laneHolderFresh returning true (and roles.Registered(entry)) fails the test: 'the role lane delivered event ... to ses_role_heartbeat on notifications.agent.ses_role_heartbeat, whose session entry last heartbeated 6m0s ago - longer than session.ClaimStaleAfter (5m0s)'; the fresh subtest passes under both mutants."
     }
   ],
   "filesChanged": [
@@ -169,7 +177,8 @@
     "Round 10: outbox/{batch.go,lookups.go}, outbox tests (publisher_comment_recipients_test.go, new lookups_test.go), packages/envoy/AGENTS.md; merge: outbox/publisher.go Deps, docs/edit_notices.go, pmdoc/{reanchor_test.go,typed_nesting_test.go} (main's fixes)",
     "Round 11 merges: cmd/dispatch/{main.go,main_test.go,shutdown.go,shutdown_test.go,README.md}, internal/bus/{async.go,publish_not_stored_test.go,stream_replicas_test.go}, migrations renamed to 0141_duty_holds/0142_outbox_claim and references, infra/gcp/dispatch.go (89), running-dispatch.md, .github/workflows/{ci.yaml,docs-pages.yaml}, the changelog fragment",
     "Round 12: packages/envoy/internal/bus/async.go, new packages/envoy/internal/bus/request_not_stored_test.go",
-    "Round 13 merge: packages/envoy/AGENTS.md, cmd/listener/{api.go,api_test.go,confirmed.go,delivery.go,publish_refusal_answers_test.go,role_holder.go}, internal/bus/{async.go,nats.go,request_core_test.go}"
+    "Round 13 merge: packages/envoy/AGENTS.md, cmd/listener/{api.go,api_test.go,confirmed.go,delivery.go,publish_refusal_answers_test.go,role_holder.go}, internal/bus/{async.go,nats.go,request_core_test.go}",
+    "Round 14: merge (packages/envoy/AGENTS.md, cmd/dispatch/README.md, migrations renamed to 0142_duty_holds/0143_outbox_claim and references); new cmd/listener/delivery_role_stale_holder_test.go"
   ],
   "trickyParts": [
     "Blocked events take their blocker's next_attempt_at (no attempt), so they are not re-read on every wake while the blocker waits out a back-off; an owner whose first 100 events all wait has its later due event deferred to the earliest of them (deferPastWindow).",
