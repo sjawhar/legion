@@ -2,49 +2,17 @@
   "schemaVersion": 1,
   "phase": "review",
   "issue": "INFRA-607",
-  "completed": "2026-10-29T18:00:36Z",
-  "decision": "changes_requested",
-  "reviewedCodeHead": "a01bc6556a4951b1c75522ddfb56b5ca4a47a206",
-  "round": 5,
+  "completed": "2026-10-29T20:25:47Z",
+  "decision": "approved",
+  "reviewedCodeHead": "84d139a3081a42151483832938b3c77355f9aa68",
+  "round": 6,
   "critical": 0,
-  "important": 1,
-  "minor": 4,
-  "scope": "New round over everything above the last approved code a56be739: retro's docs/solutions and .legion removal, forward merges 03f27579, 5660b5be and a01bc655 (migrations 0141-0147, main's #2449 keyed-write sweep, #2396, leasePoolSize 13 so 88 connections), 4444ead7 (ticker_test transaction framing) and 141face2 (api/maintenance.go on main's once-a-minute leased timer; the woken suggestion sweep unleased, serialised on the cursor row).",
-  "thermonuclear": {
-    "deepReview": "Verdict: CHANGES at a01bc655 (one Medium: the maintenance test race; five Minor)",
-    "codeQuality": "Verdict: CHANGES at a01bc655 (the same Medium; stale docs and counts cleanup-only)"
-  },
-  "verified": [
-    "api.RunMaintenanceSweep is main's RunSuggestionOutcomeSweep body (7c2effba suggestion_outcomes.go:173-190) without the suggestion call: duty.RunLeased, lease suggestion-outcomes, one minute, TickAfterInterval, so during a roll main's build and this one bucket the same period and sweep keys and owed deliveries once a minute between them (tester round 9 observed it).",
-    "The unleased woken suggestion sweep is serialised by `select ... for update` on suggestion_outcome_cursor under read committed: the waiter reads the cursor the holder committed, first pass included (row exists from 0144 with event_id null); at most one shared-pool connection per process waits, for one page transaction.",
-    "Merges: migrations 0141-0147 consistent in files, headers, census, Go/doc citations and changelog; #2397's spec trigger calls embeddings_enqueue (notifies); 88 connections matches infra/gcp; nothing of main dropped in main.go, shutdown.go, redeliver/sweep.go, duty, intake.go, queue.go."
+  "important": 0,
+  "minor": 0,
+  "scope": "Since my round-5 review (code a01bc655) one commit, 84d139a3: api/maintenance_test.go checks each pass's key-sweep count inside its resume, after the delete returned and under the lease, and waits on completed passes; the four prose fixes (dispatch-api.md, dispatch-server.md, main.go timer count, README and suggestion_outcomes.go wording) and the multiprocess exemption reason. Test and comments only, no runtime code, so the round-5 thermonuclear pair at a01bc655 stands.",
+  "roundFiveFindings": [
+    {"thread": "PRRT_kwDORFy7ds6xr8P-", "status": "fixed in 84d139a3: the comparison runs in the resume, where no other runner's delete can be in flight (the other runner's tick finds the lease held or the period served and makes no statement), so deletes started equal passes run; the elapsed bound is unchanged"}
   ],
-  "ci": "At 18:00Z at a01bc655 (single CI router workflow): pr-title, changes and worker-image build success; test, dispatch-multiprocess, envoy-smoke, envoy-session-stall in progress; lint, typecheck and the Go suites queued. Compare a01bc655...6f9ea505 is .legion/ only. A change request does not wait.",
-  "keyFindings": [
-    {
-      "severity": "important",
-      "file": "packages/envoy/internal/dispatch/api/maintenance_test.go:66-74",
-      "description": "TestTheMaintenanceLoopSweepsOncePerPeriodAcrossTwoRunners races: swept() counts `delete from request_keys` at TraceQueryStart (storetest/traced.go:83-88), before the delete returns, while resumes increments only after sweepRequestKeys returns (api/maintenance.go:51-58). waitUntil polls every 10 ms, so a poll that lands inside the sixth delete's round trip sees 6 sweeps and 5 resumes and fails line 72 by chance, on every Go suite that runs internal/dispatch/api. Wait until resumes.Load() >= passes (or stop both runners) before comparing."
-    },
-    {
-      "severity": "minor",
-      "file": ".dispatch/architecture/dispatch-api.md:9",
-      "description": "Still says the woken sweep runs under lease suggestion-outcomes; since 141face2 it takes none and RunMaintenanceSweep holds that lease (dispatch-server.md's timer list omits it)."
-    },
-    {
-      "severity": "minor",
-      "file": "packages/envoy/cmd/dispatch/main.go:389, cmd/dispatch/README.md:730, api/suggestion_outcomes.go:397",
-      "description": "Counts: 'the three timers of the last shape' is now four; 'the one woken loop that takes no lease' and 'alone among the leased loops' work' are false (the embedding queue and the settings cache are unleased woken loops too)."
-    },
-    {
-      "severity": "minor",
-      "file": "packages/envoy/cmd/dispatch/multiprocess_test.go",
-      "description": "The suggestion-outcomes exemption reason ('first pass is one minute in') is not the real reason (the maintenance sweep no longer touches write_suggestions); the cursor test returns after the first commit, before the second process's pass finishes."
-    },
-    {
-      "severity": "minor",
-      "file": "packages/envoy/internal/dispatch/api/suggestion_outcomes.go:420-422",
-      "description": "During a roll, main's leased full-table suggestion pass and this release's unleased page pass can overlap on write_suggestions (overwrite or a deadlock Postgres aborts and the loop retries); telemetry only, the roll's window only, and round 9's roll matched main row for row. Recorded on the PR body's risk list."
-    }
-  ]
+  "ci": "CI head 84d139a3 (newest pull_request run); compare 84d139a3...3ecb7d1b is .legion/ only. Required lint, typecheck, test, pr-title: success at 20:24Z. Non-required: everything completed green except envoy-go-race (red: internal/dispatch/docs hit the 30 m -race timeout in TestSetAskBlockText... and pmdoc's linearity tests starved; main's envoy-go-race runs docs at 1352-1791 s and failed the same way at 1cd93f48, and this PR does not touch pmdoc), with envoy-go and dispatch still running. In that race job the PR's packages api, delivery, store and bus passed.",
+  "keyFindings": []
 }
