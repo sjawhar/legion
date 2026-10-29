@@ -2,9 +2,17 @@
   "schemaVersion": 1,
   "phase": "implement",
   "issue": "INFRA-493",
-  "completed": "2026-10-29T13:45:00Z",
+  "completed": "2026-10-29T14:20:00Z",
   "pullRequest": "https://github.com/sjawhar/legion/pull/2478",
   "proof": [
+    {
+      "criterion": "Review round 4 finding: a change to packages/contracts/fixtures/checks-settlement/** selects envoy-go under main's ci.yaml router, and the filter check knows this branch's three reads outside their packages",
+      "surface": "the repository's own CI filter check (.github/scripts/check-ci-filters.sh, the ci-filters job's step) and dorny/paths-filter's evaluation as .github/scripts/workflow_paths.PathsFilter models it, run on ci.yaml",
+      "command": "bash .github/scripts/check-ci-filters.sh (PyYAML on PATH); python3 selects.py on ci.yaml before and after (workflow_paths.PathsFilter over envoy_go with its anchors flattened); bash .github/scripts/check-ci-filters.test.sh",
+      "observed": "with the three RULES entries and the filter line: exit 0, `envoy-go: 2101 files, 0 uncovered`, `test: 3618 files, 0 uncovered`, `every ci.yaml filter matches every file its job reads (23 gates)`; `ci.yaml (38 patterns) packages/contracts/fixtures/checks-settlement/listener-rules.json selects envoy-go`; check-ci-filters.test.sh 127 passed, 0 failed",
+      "headSha": "72675d215998eb967c7d2cc65c7e49a541a47189",
+      "negativeControl": "with the RULES entries and without the filter line: exit 1, `::error file=packages/contracts/fixtures/checks-settlement/listener-rules.json::envoy-go reads \u2026, which its filter envoy_go does not match, so a change to it skips the job: internal/cistore/settlement_fixture_test.go:56`; the pre-change ci.yaml (37 patterns) does NOT select envoy-go for that file"
+    },
     {
       "criterion": "Round 6: main merged forward at the route-count conflict with #2397; this branch's Dispatch route kept and main's added, and the package's tests pass",
       "surface": "Dispatch's real API server (internal/dispatch/api) on a real Postgres, its route table and the app-installation route",
@@ -15,12 +23,14 @@
     }
   ],
   "filesChanged": [
-    "packages/envoy/internal/dispatch/api/routes_table_test.go: registeredRoutes 144 (the merge's only conflict)"
+    "packages/envoy/internal/dispatch/api/routes_table_test.go: registeredRoutes 144 (round 6 merge)",
+    ".github/scripts/ci_job_reads.py: RULES entries for internal/daemon/check_settlement_test.go:56, internal/intake/redelivered_test.go:255 (go build -C ../../../envoy ./cmd/listener ./cmd/dispatch), internal/cistore/settlement_fixture_test.go:56",
+    ".github/workflows/ci.yaml: envoy_go filter takes packages/contracts/fixtures/checks-settlement/**, cited beside the other fixtures"
   ],
   "deviations": [
     "The earlier rounds' handoff was removed by retro (9526e9e9); this file records round 6 only, and the earlier proofs stand in git history at 7f8ec966 and in the PR body. Retro's docs/solutions files are unchanged."
   ],
   "openQuestions": [
-    "After main's #2316 the required check is ci-ok; it had not run at 6e7e399a when this was written."
+    "ci-ok had not run at 72675d21 when this was written."
   ]
 }
