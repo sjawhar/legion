@@ -2,29 +2,51 @@
   "schemaVersion": 1,
   "phase": "test",
   "issue": "INFRA-493",
-  "completed": "2026-10-29T02:10:00Z",
-  "headTested": "e0332ad917c14b73b3a308132c1df53e99f22278",
+  "completed": "2026-10-29T12:55:00Z",
+  "headTested": "7f8ec9667435d76655c6f138e8b07aab6c5b37aa",
   "implementerProof": {
     "verdict": "verified",
-    "how": "Drove its round-3 proofs independently on my own rig (branch `legion start` rebuilt at a8a2c1b1, embedded Postgres 16.4, nats-server 2.10.22): finding 2 with a restricted daemon nkey user denied $JS.API.STREAM.MSG.GET and messages held on the Dispatch and GitHub consumers (all three consumers read, 1.076 s; unrestricted 0.072 s); finding 3 by posting one delivery three times and another once to the real listener rebuilt at a8a2c1b1 with the stream not capturing notifications.github.>; finding 1 through the whole daemon's POST /legion/v1/handoff/complete with a merged pull request recorded."
+    "how": "Its round-4 proof is suites plus TestAnOverLongGitHubDeliveryIsNeverRememberedAsAFailure; I drove the same surfaces independently: the real listener rebuilt at fa20b0e2 on a 3-node nats-server 2.10.22 cluster with ENVOY_NATS_REPLICAS=3 and ENVOY_STREAM_MAX_BYTES=200000 (a 65-byte delivery logged the counted line on both failures, a 36-byte one logged it once then `redelivery <delivery>:`), the merged-record completion through the whole daemon, and the contract-43 gate."
   },
   "failures": [],
   "failed": 0,
   "mainRedsNotThisChange": [
     "packages/dispatch/e2e/close-withdraws-asks.e2e.ts:126 ('Options' expected 2, got 0), dispatch browser job (INFRA-138)",
-    "packages/envoy/internal/dispatch/pmdoc: docstest.NestedValue import (fixed on main by #2482) and typed_nesting_test.go:23 cpuTimeOf (until #2484)",
-    "mermaid.e2e.ts:194, recipients-claim route-close and deliveryaudit reds: fixed on main, may still show on #2478 until it merges main",
-    "packages/envoy/infra/gcp TestDispatchConnectionsPerPodIsTheServers 84 vs 83 (fixed by #2464)"
+    "packages/envoy/internal/dispatch/pmdoc typed_nesting_test.go:23 cpuTimeOf (until #2484)"
   ],
-  "ciAtHead": "Read on GitHub at 02:06Z at code head a8a2c1b1 (e0332ad9 is handoff-only and has no runs): lint, typecheck, test, pr-title, build, changes, envoy-session-stall and the Daemon Go suite on Postgres 16 green; pi-envoy and pi-legion running; envoy-go, contracts, dispatch and the other package lanes queued (read as running, not waited on).",
+  "ciAtHead": "Read on GitHub at 12:47Z at code head fa20b0e2 (7f8ec966 is handoff-only): typecheck, build, changes, pr-title, pi-shared, envoy-plugin green; lint and test running; the other package lanes queued (read as running, not waited on). GitHub reports #2478 MERGEABLE.",
   "proof": [
     {
-      "criterion": "Review finding 1: an implementer's completion with a merged pull request recorded and none open moves the issue to testing; a closed-unmerged record is still refused naming it; HANDOFF_NO_PULL_REQUEST otherwise (census 1)",
+      "criterion": "Merge with #2362: the listener's GitHub failure memory with a byte-limited replicated stream, the clustered duplicate-not-stored republish, and the 64-byte key cap",
+      "surface": "the real Envoy listener binary built at fa20b0e2 on a 3-node nats-server 2.10.22 cluster, ENVOY_NATS_REPLICAS=3 and ENVOY_STREAM_MAX_BYTES=200000 (stream replicas=3, DiscardNew), signed pull_request deliveries posted to /webhook/github",
+      "command": "fill the stream with 4,000-byte messages on notifications.slack.filler until `maximum bytes exceeded`; post delivery cccc…000c twice; purge the filler; post cccc…000c again and a new cccc…000d; post a 65-byte delivery header twice while full; read the listener's log and the stream's github messages",
+      "observed": "cccc…000c: 503 `github publish failed: stream ENVOY_NOTIFICATIONS is full: nats: maximum bytes exceeded`, then 503 `redelivery cccc0000-0000-4000-8000-00000000000c: github publish failed: stream ENVOY_NOTIFICATIONS acknowledged a duplicate of a message it does not hold, and its publish without its id failed: stream … is full`; after the purge 200 and stored at seq 51 with no Nats-Msg-Id (the republish), cccc…000d 200 stored at seq 52 with its MsgId; the 65-byte header logged the counted `github publish failed: …` on both failures",
+      "headSha": "fa20b0e239362ab286f9e9bda8c63dd5eb20c4e4",
+      "negativeControl": "the 65-byte X-GitHub-Delivery, which the memory holds no key for, is never logged as a redelivery, so each of its failures is counted; a delivery that fits (bbbb…000a) is 200 and its repeat deduplicated by MsgId"
+    },
+    {
+      "criterion": "record.LetsImplementationMove: an implementer's completion moves on an open or merged record, never on a closed one or none; HANDOFF_NO_PULL_REQUEST; pull-request-missing",
       "surface": "POST /legion/v1/handoff/complete of the whole daemon booted in-process by a throwaway -tags e2e driver, implementers reached over the real worker stream, /claims/register, /claims/ready and /grants; GitHub a per-branch stand-in",
       "command": "go test -tags e2e -count=1 ./internal/daemon/ -run TestZZTesterHandoffLive -v (driver removed after the run)",
-      "observed": "recorded merged #819788, none open: 200, phase testing, the record stays merged, and the pass sends no pull-request-missing for it; no open PR: 409 HANDOFF_NO_PULL_REQUEST, then 200 and testing once GitHub lists one; recorded closed #819785: 409 naming `pull request #819785 is closed; your architect was told and decides this issue's phase.`; open on GitHub, unrecorded: 200, recorded, testing; GitHub 502: 200 applied unread, stays implementing, and the next pass sends `pull-request-missing on <KEY>`",
-      "headSha": "a8a2c1b1c24800e5d2fa651328a0077ae0828e06",
+      "observed": "merged #46869 recorded, none open: 200, testing, stays merged; no open PR: 409 HANDOFF_NO_PULL_REQUEST, then 200 and testing once GitHub lists one; closed #46866: 409 naming it closed; recorded open #46870 but GitHub's head filter lists none: 409, nothing changed; open on GitHub, unrecorded: 200, recorded, testing; GitHub 502: 200 applied unread, stays implementing, and the next pass sends `pull-request-missing on <KEY>` (none for the merged record)",
+      "headSha": "fa20b0e239362ab286f9e9bda8c63dd5eb20c4e4",
       "negativeControl": "a listed pull request on another ref (legion/<KEY>-other): 409 HANDOFF_NO_PULL_REQUEST, nothing recorded"
+    },
+    {
+      "criterion": "Census 4: daemon API contract 43 — a plugin of contract 42 is refused at registration and at boot; 43 passes",
+      "surface": "POST /legion/v1/claims/register of the whole daemon (in-process driver) and the real `legion start` binary built at fa20b0e2 with the default profile's pi-legion manifest",
+      "command": "register with PluginContract 42; `legion start --config legion.yaml` with the manifest at daemonApiVersion 42, then 43",
+      "observed": "register: 409 `pi-legion speaks daemon API contract 42; this daemon requires 43: the daemon is relaunching this process onto the current plugin`; boot: `legion start: pi-legion at …/package.json (package 14.0.0) speaks daemon API contract 42; this daemon requires 43. Install the @sjawhar/pi-legion release built from this daemon's commit into the default OMP profile.`",
+      "headSha": "fa20b0e239362ab286f9e9bda8c63dd5eb20c4e4",
+      "negativeControl": "with the manifest at 43 the boot passes the plugin gate and goes on to the prompts stage (my omp stub then gives no answer on the task agents, a stub limit, not the gate)"
+    },
+    {
+      "criterion": "1.1 and 1.5 at the merged head: a delivery NATS refused is redelivered by the real sweep and applied once by the daemon; a delivery published twice is applied once by its dedupe_key",
+      "surface": "the real listener and `dispatch redeliver-webhooks` binaries built from packages/envoy at fa20b0e2, a fake GitHub, the daemon's consumer on Postgres 16.4",
+      "command": "cd packages/daemon && go test -count=1 ./internal/intake/ -run Redelivered -v",
+      "observed": "listener 503 `github publish failed: nats: no response from stream`; one redelivery request, answered 200; github.8a4f2c10-… applied once, acme/widgets#7 open on ACME-7; TestARedeliveredGitHubDeliveryIsAppliedOnceByItsDedupeKey PASS",
+      "headSha": "fa20b0e239362ab286f9e9bda8c63dd5eb20c4e4",
+      "negativeControl": "the stream without notifications.github.> stores nothing on the pull request's subject until the sweep's redelivery"
     },
     {
       "criterion": "Review finding 2: before the NATS grant rolls out, each consumer's lag is read within its own bound, so a held consumer early in the list does not hide the waiting count of a later one (census 2)",
@@ -32,15 +54,8 @@
       "command": "touch fail-issue-read fail-permission; natstool publish-issue TPROOF-9 900001 5; natstool publish-review 203 TPROOF-3 review-guid-3 …; time legion state; legion state --json | jq -c '.consumers[]'",
       "observed": "`consumer legion-go-TPROOF-dispatch: 1 waiting, oldest unknown; STALLED: …; unavailable: read the oldest waiting message: context deadline exceeded`, `consumer legion-go-TPROOF-dispatch-server: 0 waiting`, `consumer legion-go-TPROOF-github: 1 waiting, oldest unknown; …; unavailable: read the oldest waiting message: context deadline exceeded`; real 0m1.076s; the daemon logged ERROR `NATS refused the daemon a permission … $JS.API.STREAM.MSG.GET.ENVOY_NOTIFICATIONS`; the plugin's own strict client (pi-shared createLegionDaemonClient().state()) reads that state, `unavailable` included",
       "headSha": "a8a2c1b1c24800e5d2fa651328a0077ae0828e06",
-      "negativeControl": "the same held messages read by the unrestricted user: `1 waiting, oldest 1m6s` on both, no unavailable, real 0m0.072s"
-    },
-    {
-      "criterion": "Review finding 3: a GitHub delivery that fails again is logged with the counted line once per listener task, later failures as `redelivery <delivery>: …`, which the publish-failure filter does not match",
-      "surface": "the real Envoy listener binary rebuilt at a8a2c1b1 on nats-server 2.10.22, the stream's subjects set without notifications.github.>, signed pull_request deliveries posted to /webhook/github",
-      "command": "python3 pr_post.py aaaa…000a aaaa…000a aaaa…000a aaaa…000b; read the listener's log; compare with webhook-publish-failure-filter's positional pattern (date, time, source=github|slack|ghostwispr, verb=publish, result=failed*)",
-      "observed": "four 503s; log lines `github publish failed: nats: no response from stream`, `redelivery aaaa0000-0000-4000-8000-00000000000a: github publish failed: …` twice, then `github publish failed: …` for the second delivery; the filter's third word is `github` on the two counted lines and `redelivery` on the others",
-      "headSha": "a8a2c1b1c24800e5d2fa651328a0077ae0828e06",
-      "negativeControl": "a different delivery (…000b) after three failures of the first is still logged with the counted line"
+      "negativeControl": "the same held messages read by the unrestricted user: `1 waiting, oldest 1m6s` on both, no unavailable, real 0m0.072s",
+      "note": "product code of this path has no change since it ran (intake, cmd/legion, contracts subject cut, the pass's listing)"
     },
     {
       "criterion": "Review finding 5: a missing consumer whose stored position is older than the stream's first message logs a WARN that events may have been missed, and still starts at its position",
@@ -48,15 +63,8 @@
       "command": "proc.sh stop daemon; natstool consumer-delete legion-go-TPROOF-github; purge ENVOY_NOTIFICATIONS; natstool publish-pr opened 210 TPROOF-10 after-purge-1 …; proc.sh start daemon; grep the log; natstool consumer-info",
       "observed": "INFO `a missing durable consumer is created at the last message it applied` start 01:46:57.808226Z, then WARN `… older than the stream's first message; events published between may have been missed: the daemon applied none of them, and the pass heals those it would have acted on` stream_first 01:51:48.99Z; by_start_time, ack_floor 13; github.after-purge-1 applied",
       "headSha": "a8a2c1b1c24800e5d2fa651328a0077ae0828e06",
-      "negativeControl": "the earlier restart with an unpurged stream (round 1) logged the INFO line alone"
-    },
-    {
-      "criterion": "Census 4: daemon API contract 42 — a plugin of contract 41 is refused at boot",
-      "surface": "`legion start` with the default profile's @sjawhar/pi-legion manifest set to daemonApiVersion 41",
-      "command": "jq '.legion.daemonApiVersion = 41' on the profile's pi-legion package.json; legion start --config legion.yaml",
-      "observed": "`legion start: pi-legion at …/@sjawhar/pi-legion/package.json (package 11.6.0) speaks daemon API contract 41; this daemon requires 42. Install the @sjawhar/pi-legion release built from this daemon's commit into the default OMP profile.` and the daemon did not start",
-      "headSha": "a8a2c1b1c24800e5d2fa651328a0077ae0828e06",
-      "negativeControl": "with the manifest back at 42 the same command boots and serves /healthz"
+      "negativeControl": "the earlier restart with an unpurged stream (round 1) logged the INFO line alone",
+      "note": "product code of this path has no change since it ran (intake, cmd/legion, contracts subject cut, the pass's listing)"
     },
     {
       "criterion": "Census 3: repositories.withoutWebhookApp read by the plugin's strict client; 1.3",
@@ -64,7 +72,8 @@
       "command": "bun run client.ts",
       "observed": "[{\"repo\":\"acme/widgets\",\"reason\":\"Dispatch's GitHub App is not installed on acme/widgets: GitHub sends Legion none of its events and nothing redelivers them; the pass heals its pull requests every 2 minutes\"}] with consumers including a waiting oldestAt",
       "headSha": "a8a2c1b1c24800e5d2fa651328a0077ae0828e06",
-      "negativeControl": "with the App installed the same read returns withoutWebhookApp []"
+      "negativeControl": "with the App installed the same read returns withoutWebhookApp []",
+      "note": "product code of this path has no change since it ran (intake, cmd/legion, contracts subject cut, the pass's listing)"
     },
     {
       "criterion": "2.1 the pass heals a lost opened (planning), close (implementing) and merge (awaiting_merge) after the pass refactor",
@@ -72,7 +81,8 @@
       "command": "go test -tags e2e -count=1 ./internal/daemon/ -run TestZZTesterPassLive -v (removed after the run)",
       "observed": "planning issue recorded open #923213 at head-opened; implementing issue's PR closed and `pr-closed-unmerged` to its architect; awaiting_merge issue's PR merged and the issue done",
       "headSha": "a8a2c1b1c24800e5d2fa651328a0077ae0828e06",
-      "negativeControl": "a fork's pull request on legion/<KEY> is not recorded (round 1, pass listing code unchanged in its HeadIn filter)"
+      "negativeControl": "a fork's pull request on legion/<KEY> is not recorded (round 1, pass listing code unchanged in its HeadIn filter)",
+      "note": "product code of this path has no change since it ran (intake, cmd/legion, contracts subject cut, the pass's listing)"
     },
     {
       "criterion": "Architect's requirement: a delivery published twice with no MsgId and two event_ids is applied once (re-checked after facts.go changed)",
@@ -80,7 +90,8 @@
       "command": "natstool publish-pr synchronize 202 TPROOF-2 r3-dup-1 … twice, r3-dup-2 once; psql processed_events",
       "observed": "github.r3-dup-1 1 row, github.r3-dup-2 1 row; consumer ack_floor 18",
       "headSha": "a8a2c1b1c24800e5d2fa651328a0077ae0828e06",
-      "negativeControl": "r3-dup-2, the same pull request under another delivery, is its own fact"
+      "negativeControl": "r3-dup-2, the same pull request under another delivery, is its own fact",
+      "note": "product code of this path has no change since it ran (intake, cmd/legion, contracts subject cut, the pass's listing)"
     },
     {
       "criterion": "Round-1 failure: the drain test passes whatever the database's collation, and still holds every Legion event applied (3.3)",
@@ -89,16 +100,7 @@
       "observed": "shifted: PASS, drained in 17.341s; C: PASS, drained in 17.452s (bound 60 s)",
       "headSha": "ac10118d1eccb0207171017ecf3b708c1f900429",
       "negativeControl": "the same command under the shifted collation at 55eb11c8 failed at drain_test.go:230 with legion-33-checks ordered before legion-3-checks (round 1)",
-      "note": "product code of this path unchanged since it ran (envoy redeliver, contracts subject cut, drain test)"
-    },
-    {
-      "criterion": "1.1 and 1.5 the sweep asks again for any failed delivery and stops only when delivered, expired or GitHub no longer has it",
-      "surface": "the real Envoy listener and `dispatch redeliver-webhooks` binaries built from packages/envoy at 55eb11c8, a fake GitHub delivery log, the daemon's consumer on Postgres",
-      "command": "throwaway intake test (removed): GitHub's first attempt signed with a secret the listener does not hold, then `dispatch redeliver-webhooks --since 1h` four times",
-      "observed": "listener 401; sweep 1 `webhook redelivered … status_code=401`, redelivery answered 200, github.8a4f2c10-… applied once; sweep 2 `webhook delivery recovered … requests=1`, no new request; a second 401 delivery whose redelivery GitHub answers 404: ERROR `webhook delivery expired undelivered … reason=\"GitHub no longer has the delivery\"`, and the next sweep asks for nothing (outcome closed)",
-      "headSha": "55eb11c8e389d0c79f1b29f33ec1aa2ab4445c81",
-      "negativeControl": "the 404-answered delivery is never asked for again: GitHub's request list stays [3844000000000000017 3844000000000000051] across sweeps 6 and 7",
-      "note": "product code of this path unchanged since it ran (envoy redeliver, contracts subject cut, drain test)"
+      "note": "product code of this path has no change since it ran (intake, cmd/legion, contracts subject cut, the pass's listing)"
     },
     {
       "criterion": "1.2 NATS refuses no push the daemon reads: a ref too long for a subject is published on a cut subject, Go and TypeScript cut alike",
@@ -107,7 +109,7 @@
       "observed": "every post 200 ok and stored; subjects of 4,032, 4,032, 4,032, 4,030 (cut between runes) and 4,032 bytes, each ending ~ and 16 hex, the two shared-prefix refs on distinct subjects (~0a5777741862992e, ~5d6b4b585b0b0c10); the TypeScript cut gives the same lengths and suffixes",
       "headSha": "55eb11c8e389d0c79f1b29f33ec1aa2ab4445c81",
       "negativeControl": "a 23-byte ref keeps its uncut 58-byte subject `notifications.github.acme.widgets.push.branch.legion/short`",
-      "note": "product code of this path unchanged since it ran (envoy redeliver, contracts subject cut, drain test)"
+      "note": "product code of this path has no change since it ran (intake, cmd/legion, contracts subject cut, the pass's listing)"
     },
     {
       "criterion": "3.3 5,000 other pull requests' events and 50 Legion events drain in under 60 s at 3 ms per round trip (tester's three runs)",
@@ -116,15 +118,15 @@
       "observed": "drained in 16.902 s, 17.170 s, 17.382 s; PASS each",
       "headSha": "55eb11c8e389d0c79f1b29f33ec1aa2ab4445c81",
       "negativeControl": "the same test on a database whose collation ignores punctuation fails at drain_test.go:230 (the failure recorded above)",
-      "note": "product code of this path unchanged since it ran (envoy redeliver, contracts subject cut, drain test)"
+      "note": "product code of this path has no change since it ran (intake, cmd/legion, contracts subject cut, the pass's listing)"
     }
   ],
   "notes": [
     "scripts/e2e/merged-root-waits.sh cannot run in this pod: the boot's relaunch provisions acme/widgets with `jj git clone https://github.com/acme/widgets`, which the pod's credential helper refuses; the throwaway drivers pre-created the shared clone and workspace instead.",
     "Acceptance 3.4 (three read_state readings an hour apart) is the production check's, after the merge (architect 21:33Z)."
   ],
-  "round": 3,
-  "codeHead": "a8a2c1b1c24800e5d2fa651328a0077ae0828e06",
+  "round": 4,
+  "codeHead": "fa20b0e239362ab286f9e9bda8c63dd5eb20c4e4",
   "rounds": [
     {
       "round": 1,
@@ -141,6 +143,12 @@
       "round": 3,
       "head": "e0332ad9",
       "scope": "review round 1 fixes 9583427d, db9c30ee, b7a9efb5 and the refactor a8a2c1b1 (handoff.go, workflow table, record store, intake consume/facts, the pass, classify, envoy webhook logging, alarm filters, docs)"
+    },
+    {
+      "round": 4,
+      "head": "7f8ec966",
+      "scope": "merge of main fa20b0e2 (#2362 stream byte limit and republish after ErrNotStored, #2186 taking contract 42, so this branch is contract 43) and the approval follow-ups 19a25586 (record.LetsImplementationMove, github_failures.go with a 64-byte key cap, the pass reads' shared failure log)"
     }
-  ]
+  ],
+  "forwardMerge": "Fingerprint (conflicts-and-rewrites.md) at my round-3 code head a8a2c1b1 fd2c3641… vs fa20b0e2: changed (routes_table_test.go, handoff.go, record.go, store.go, engine.go, pullrequest.go, approval_reads.go, review_reads.go, version.go, state.go, github_failures.go, webhook.go, contracts and plugin manifests at 43), so a full round."
 }
