@@ -2,7 +2,7 @@
   "schemaVersion": 1,
   "phase": "implement",
   "issue": "INFRA-606",
-  "completed": "2026-10-28T19:55:00Z",
+  "completed": "2026-10-29T00:53:57Z",
   "pullRequest": "https://github.com/sjawhar/legion/pull/2406",
   "proof": [
     {
@@ -148,6 +148,22 @@
       "observed": "summary: 9 ok, 0 FAIL; the mention cases read their rows sent / failed (no live session) after waiting for them to leave pending, within the 10 s bound. mention-composer: 16 passed.",
       "headSha": "3e96e81cc3f753cae956957d9a29e32d51cc1aea",
       "negativeControl": "The driver from 896d09b4 (reading the row right after the 201) against the same binary: 6 ok, 3 FAIL (mention-delivered-claimant, mention-failed-claimant, mention-failed-follower), each reading pending. Logs: dispatch://INFRA-606/artifact/infra606-round8-claimant-e2e-tar-gz."
+    },
+    {
+      "criterion": "Review round 2 finding 1 (architect's ruling): a failed mention's fallback reaches exactly the session whose mention failed; the comment.created row's published_at, published_destinations and payload are never rewritten, and no other destination is reached.",
+      "surface": "The API handler and the real outbox against Postgres: a routed issue, a mention that fails, the route moved, a person's Retry (POST /api/v1/comments/{id}/deliveries) that fails, then outbox scans; the outbox's fallback pass over comment_fallback_copies",
+      "command": "go test ./internal/dispatch/api/ -run 'TestAFailedRetryOfAMentionSendsTheCommentToNoNewDestination|TestAMentionClaimedByAKilledProcessStillReachesItsSessionWhenTheResendFails|TestAClaimantWhoseResentMentionFailsStillHearsTheComment|TestAMentionInFlightAtAKill|TestAnAbandonedMention|TestASilentListener' -count=1; go test ./internal/dispatch/outbox/ -run 'TestAResumedMentionsHeldCopyFollowsItsResend|TestAFallbackCopyNATSAlwaysDeniesIsSettledUnpublishedAtTheDeadLetterThreshold' -count=1",
+      "observed": "Nothing about the comment reaches notifications.role.implementer after the route moved and the Retry failed; published_at, payload and published_destinations unchanged. A killed sender's claimed mention whose resend fails gets exactly one copy, from its fallback row, with the mention's dedupe key; a resend that is sent settles the row with nothing published; a copy always denied stops at 10 attempts, settled unpublished, logged at Error.",
+      "headSha": "2eda91938cc216e419bd7eb347232fbf0ced49e5",
+      "negativeControl": "The route-move test with 65fa5fb7's publisher, settle and sender in place: 'the outbox published [notifications.role.implementer, notifications.dispatch.issue.TEST-1.comment.delivery] about the comment once its retry failed, want nothing to the new route'."
+    },
+    {
+      "criterion": "Plan criterion 5: before and after on the committed load reproduction (restart scenario, 1x, 50 streams with 10 stale, restart at 90 s, 20% of comments with 3 mentions, listener RTT 200 ms), five runs per side.",
+      "surface": "packages/envoy/loadtest on main's harness with this PR's restart scenario (0b1c7cf9): Postgres 16, NATS, the listener behind a 200 ms proxy, envoy-dispatch built from base main 0a1f1f90 and from head 0b1c7cf9, one base-built seed (migration 136) restored per step, 2-vCPU gVisor pod",
+      "command": "for i in 1..5: LOADTEST_DISPATCH_SRC=<main 0a1f1f90 export> run-step.sh base-1x-$i $FLAGS; run-step.sh head-1x-$i $FLAGS (FLAGS=--events 4 --sessions 400 --requests 60 --sse 50 --sse-resume 1 --sse-stale 10 --restart-at 90s --mention-frac 0.2 --mentions 3 --envoy-rtt 200ms --rng-seed 1); stack.sh loadgen tables",
+      "observed": "Replayed KiB per run 116,579 (base) vs 355 (head); per stale reconnect 11,612.6 vs 0.04; refetch requests 0 vs 60; mentioned-comment p50 in the window 3,850 vs 1,900 ms; after the restart 0 of 37 mentioned comments answered on base in every run vs all on head (p50 16,536 ms); Dispatch CPU-s in the 60 s after the restart 24.84 (23.95-25.56) vs 25.37 (23.75-27.04) - not lower; committed events/s 3.68 vs 3.68. dispatch://INFRA-606/artifact/infra606-criterion5-runs-tar-gz.",
+      "headSha": "2eda91938cc216e419bd7eb347232fbf0ced49e5",
+      "negativeControl": "The base side is the control: the same seed, flags and rng seed on main 0a1f1f90 replay every stale stream's 12,600 events and answer no mentioned comment in the minute after the restart."
     }
   ],
   "filesChanged": [
@@ -203,6 +219,7 @@
     "packages/envoy/internal/dispatch/api/event_stream_relay_test.go",
     "packages/envoy/internal/dispatch/api/events.go",
     "packages/envoy/internal/dispatch/api/events_log_test.go",
+    "packages/envoy/internal/dispatch/api/issue_refs.go",
     "packages/envoy/internal/dispatch/api/message_delivery.go",
     "packages/envoy/internal/dispatch/api/routes_table.go",
     "packages/envoy/internal/dispatch/api/routes_table_test.go",
@@ -213,13 +230,22 @@
     "packages/envoy/internal/dispatch/events/stream.go",
     "packages/envoy/internal/dispatch/events/stream_test.go",
     "packages/envoy/internal/dispatch/model/model.go",
-    "packages/envoy/internal/dispatch/outbox/claim_test.go",
+    "packages/envoy/internal/dispatch/outbox/mentions.go",
     "packages/envoy/internal/dispatch/outbox/publisher.go",
     "packages/envoy/internal/dispatch/outbox/publisher_claimant_test.go",
     "packages/envoy/internal/dispatch/outbox/publisher_mentions_test.go",
-    "packages/envoy/internal/dispatch/store/migrations/0136_comment_deliveries_pending.census.sql",
-    "packages/envoy/internal/dispatch/store/migrations/0136_comment_deliveries_pending.up.sql",
+    "packages/envoy/internal/dispatch/store/migrations/0137_comment_deliveries_pending.census.sql",
+    "packages/envoy/internal/dispatch/store/migrations/0137_comment_deliveries_pending.up.sql",
+    "packages/envoy/internal/dispatch/store/migrations/0138_comment_fallback_copies.census.sql",
+    "packages/envoy/internal/dispatch/store/migrations/0138_comment_fallback_copies.up.sql",
     "packages/envoy/internal/dispatch/store/pool.go",
+    "packages/envoy/loadtest/README.md",
+    "packages/envoy/loadtest/mentions.go",
+    "packages/envoy/loadtest/reconnect.go",
+    "packages/envoy/loadtest/restart.go",
+    "packages/envoy/loadtest/run-step.sh",
+    "packages/envoy/loadtest/run.go",
+    "packages/envoy/loadtest/stack.sh",
     "scripts/e2e/README.md",
     "scripts/e2e/dispatch-claimant-delivery.ts",
     "scripts/e2e/lib/operator-dispatch.sh",
@@ -252,7 +278,11 @@
     "The outbox counts an attempt a sender claimed as abandoned only past model.StrandedMentionWindow (one hour, moved from the API to model so both read one value); within it a lapsed claim leaves the copy to the stranded pass without deferring. A resend that then fails for good leaves the session with whatever the first send delivered.",
     "The outbox's claim guard in recordBatch is back (a batch never marks published a row reopened after it read it), as agreed in writing with INFRA-590's implementer, because a failed mention now reopens comment.created.",
     "The fallback copy carries the failed mention's dedupe key; a same-mode retry after the copy reached the session is then recorded duplicate and dropped (named in the PR body's risk line).",
-    "Forward merge of main at 855a4bcb (GitHub reported CONFLICTING; fingerprint posted): migration renumbered to 0136_comment_deliveries_pending after main's 0135_server_processes; suppressed_authors removed with main's #2366, whose session routes read the comment's mentions; restart tests share one signing key (#2390). `go vet ./...` fails on main's own internal/dispatch/deliveryaudit/deliveryaudit_test.go, fixed by open sjawhar/legion#2473; every other package vets clean."
+    "Forward merge of main at 855a4bcb (GitHub reported CONFLICTING; fingerprint posted): migration renumbered to 0136_comment_deliveries_pending after main's 0135_server_processes; suppressed_authors removed with main's #2366, whose session routes read the comment's mentions; restart tests share one signing key (#2390). `go vet ./...` fails on main's own internal/dispatch/deliveryaudit/deliveryaudit_test.go, fixed by open sjawhar/legion#2473; every other package vets clean.",
+    "Review round 2: the reopen of comment.created and the outbox's claim-token guard are removed (architect's ruling); a copy held for a stranded pass's resend is a comment_fallback_copies row the outbox's fallback pass publishes to that one destination. Two red-test assertions read the copy from that row instead of the event row (comment_delivery_silent_listener_test.go, the copy count; comment_delivery_fallback_copy_test.go, the claimant case).",
+    "Fallback rows stop at the outbox's dead-letter threshold (10 attempts): my finding, not the reviewer's.",
+    "Forward merges of main at 615ea555 (migrations renumbered to 0137/0138, route pin 143) and 2eda9193 (#2396's lifetime model; its eventCursorCheck single-statement fix and lazy hub dial carried into this branch's relay and hub). pmdoc left as on main, broken until #2481.",
+    "Criterion 5's expectation that Dispatch CPU in the minute after a restart is lower than main's is not met at 1x over five runs per side (24.84 vs 25.37 CPU-s); recorded in the PR body's risk line."
   ],
   "openQuestions": [],
   "discoveredComplexity": [
@@ -261,6 +291,7 @@
     "The NUL-refusal test raced the fixture mention's asynchronous send (a comment.delivery event landing between its table snapshots); it now waits for the send to settle.",
     "The pod was replaced mid-round and the unpushed first fix was lost; every verified fix is now pushed as it lands."
   ],
-  "round": 8,
-  "answersTest": "896d09b4b50d9e93f28e4d71afd74b648fee346e"
+  "round": 9,
+  "answersTest": "896d09b4b50d9e93f28e4d71afd74b648fee346e",
+  "answersReview": "65fa5fb7e730508b2e974c103d4715213b759a09"
 }
