@@ -1,0 +1,102 @@
+{
+  "schemaVersion": 1,
+  "phase": "plan",
+  "issue": "INFRA-488",
+  "completed": "2026-10-29T19:30:00Z",
+  "plan": "dispatch://INFRA-488/artifact/plan-md (version 1)",
+  "requiredSkills": {
+    "implement": [
+      "skill://legion-worker: the phase mechanics this change still runs under (commit only this phase's paths, the push, handoff_complete). The implementer of this plan works in an issue recorded on theorem-labs/agent-infra, not this one (plan section 1).",
+      "skill://legion-worker/references/pr-body.md: the pull request body, the six proof fields and the E2E (implementer) line, which plan task T2 and T3 produce.",
+      "skill://asd-ste100: the deliverable is instruction prose an agent reads and follows; the two hunks are written under it.",
+      "skill://dispatch: the plan's record and any note on the issue (the apply record of T6) are Dispatch writes."
+    ],
+    "test": [
+      "skill://legion-worker: the proof object's six fields and the negative control the tester must record (plan task T4).",
+      "skill://legion-worker/references/pr-body.md: the E2E (tester) line and what a proof is.",
+      "skill://dispatch: reading LINUX-401's and the scratch child's events (dispatch read --all-events) is how the plan's time measurement is taken."
+    ],
+    "review": [
+      "skill://legion-worker/references/merge-gate.md: the approval of the tested head and what READY compares.",
+      "skill://legion-worker/references/review-threads.md: replying on and resolving the review threads of the agent-infra pull request.",
+      "skill://asd-ste100: the change is prose; the review is of its wording as much as its content."
+    ]
+  },
+  "gapAnalysis": {
+    "findings": [
+      {
+        "finding": "The LINUX Legion deployment is stopped (legion-host on legion-linux-host held by /etc/legion-host.STOPPED since 2026-10-27 18:31Z, dispatch://INFRA-667/artifact/restart-runbook-md) and the LINUX stream decided on 2026-10-28 to replace Legion with its own Rust scheduler (dispatch://LINUX-1157/artifact/decisions-md item 13). No legion-daemon:LINUX event exists after 2026-10-26. So the instruction has no reader today and acceptance 2 cannot be driven by anyone.",
+        "answer": "Verified each claim myself and wrote it into plan section 2 as a decision for the architect (land the text anyway, as the approved spec says, or park the issue). The plan is written for 'land it' and marks acceptance 2 blocked on the restart of dispatch://INFRA-667 step 3 rather than satisfied; section 5's table names who could run it and when."
+      },
+      {
+        "finding": "The deliverable is in theorem-labs/agent-infra, which this issue's credentials cannot write; Legion will not move a recorded issue's repository.",
+        "answer": "Plan section 1: the 403/201 blob probes and packages/daemon/internal/appauth/credential.go:22-26 as evidence, three options with their costs, and the recommendation (the architect files and releases a child of INFRA-714 whose Dispatch repository is theorem-labs/agent-infra; this plan transfers to it). T0 makes it the blocking first task."
+      },
+      {
+        "finding": "'Deploy it through agent-infra's normal path' is unstated, and an apply does not reach a running host.",
+        "answer": "Plan T6: the merge's own push run of .github/workflows/envoy.yaml applies the legion stack (on: push: branches: [main], .github/scripts/envoy-select sets apply=true and picks the changed top-level directories; legion/README.md 'A merged change to this program reaches the daemons in the push run its merge starts'). The record is that run id and conclusion, plus the two facts that the host takes the file only at its next start of legion-host.service and that agent-infra #824's metadata was still uncarried on 2026-10-29."
+      },
+      {
+        "finding": "Acceptance 2 has no owner, no definitions of 'the tester's report' and 'reaches review', no place of record, and a baseline that is not a number.",
+        "answer": "Plan section 5: the two Dispatch events that bound the interval (status testing -> status needs_review with no status in_progress between), and the baseline computed from dispatch://LINUX-401's own events: 47 min 51 s for the round the rule removes (15:38:22Z -> 16:26:13Z) and 66 min 15 s end to end (15:19:58Z -> 16:26:13Z). Who creates the scratch child and where the number is written stay with the architect, named in section 5."
+      },
+      {
+        "finding": "A tester fix leaves the merging head carrying code the implementer never proved, against the one rule a deployment's instructions may not override.",
+        "answer": "The drafted text adds an implementer bullet: in retro, re-run your own proof at that head and update the E2E (implementer) line to it. Retro is the implementer's own phase (packages/daemon/internal/workflow/effects.go), so no new implementing phase is needed, which acceptance forbids."
+      },
+      {
+        "finding": "There is no CI at the tester's head on this deployment: main-gate does not run on a draft, and the LINUX method keeps the pull request a draft until the reviewer marks it ready as the last action of its review turn.",
+        "answer": "The text makes lean-build the check both roles run (the tester before it passes, the reviewer before it approves) and leaves gh pr ready where legion/instructions/linux.md:11 puts it. The spec's 'or its CI fails' becomes 'or your own build of it fails'; recorded as a spec departure."
+      },
+      {
+        "finding": "The daemon's automatic send-back is switched off by exactly this push: a red on a head the review App pushed is a planned red (record.go PlannedRed), so a broken tester fix is caught by nobody.",
+        "answer": "The text says so in the tester's own bullet and requires the build before the pass; reason 3 of plan section 3 cites record.go:443-445 and classify/decisions.go."
+      },
+      {
+        "finding": "'Only a line whose text the issue's spec quotes' has two readings and no judgement-free test.",
+        "answer": "The plan fixes the verbatim reading and makes it mechanical: every line the commit adds appears in the issue's spec at the version the handoff names (dispatch doc-read --version N, then grep -F); removals are unconstrained. The reviewer applies the same test."
+      },
+      {
+        "finding": "The motivating case (LINUX-401) began with an architect's spec edit, which a tester may not make.",
+        "answer": "The text says a defect whose answer is a change to the spec is a fail: the spec is the architect's. The quote must already stand at the named version, so the architect's edit stays a prerequisite and part of the measured interval; plan section 5 records the interval from the recorded fix."
+      },
+      {
+        "finding": "The commit and push mechanics are unsaid, and a wrong skip-checks trailer stalls the issue.",
+        "answer": "The text gives the jj split command, says the fix is its own commit before the handoff commit, and says the push carries code so its head carries no skip-checks line (classify/push.go classifies by paths)."
+      },
+      {
+        "finding": "linux.md's own precedence sentence covers only the design gate and releasing children, so it does not outrank the built-in tester prompt's 'the resumed implementer makes it pass'.",
+        "answer": "Hunk 1 of plan section 3 widens that sentence to a tester's fix to a line its issue's spec quotes."
+      },
+      {
+        "finding": "dispatch://INFRA-764 (todo, P1, sjawhar/legion) changes the same loop in the generic skills and is cited nowhere in INFRA-488.",
+        "answer": "Plan section 7 names it, keeps the deployment-local rule narrower (one fix, quoted lines only), and leaves to the architect whether the text cites it; the generic skill is not yet changed, so the plan does not depend on it."
+      },
+      {
+        "finding": "The copy repository carries a twin method document (.github/skills/verified-linux-owner/SKILL.md in theorem-labs/machcsl-riscv-experimental) that the owners also read.",
+        "answer": "Named in plan section 3 as out of scope with its reason (a third repository this tree cannot write, and its readers today are the stream's step agents, not Legion phase workers); the architect decides whether the same hunks go there."
+      }
+    ]
+  },
+  "planReview": { "verdict": "approved", "rounds": 2 },
+  "specDepartures": [
+    {
+      "spec": "The issue carries the change itself: 'Surface: the Linux deployment of Legion; repository: theorem-labs/agent-infra', and acceptance 1 is 'The pull request on theorem-labs/agent-infra'.",
+      "plan": "INFRA-488's own roles cannot produce that pull request. The plan makes T0 a blocking prerequisite: the work runs in an issue recorded on theorem-labs/agent-infra (the architect files and releases a child of INFRA-714 with that repository), and this plan transfers to it unchanged.",
+      "evidence": "Legion recorded INFRA-488 on sjawhar/legion and refuses the Dispatch change (dispatch://INFRA-488/message/56e89358; packages/daemon/internal/workflow/repository.go:99-113). A role holds a read-only lease for every owner but its own (packages/daemon/internal/appauth/credential.go:22-26). Probe: POST repos/theorem-labs/agent-infra/git/blobs -> 403; the same on sjawhar/legion -> 201.",
+      "outcome": { "kind": "changed", "scope": "The deliverable moves to an agent-infra-recorded issue; INFRA-488 itself carries no implementable task until that issue exists." }
+    },
+    {
+      "spec": "Acceptance 2: 'After it is applied, on a scratch Linux owner child whose spec quotes a line its code gets wrong, the tester commits the fix and passes, and the issue reaches review at a head carrying the fix with no new implementing or testing phase. The time from the tester's report to review is recorded beside LINUX-401's.'",
+      "plan": "The plan does not have the implementer skip it and does not claim it can be met: it defines the two Dispatch events that measure it and the baseline as a number, and records it as blocked until the LINUX host restarts under dispatch://INFRA-667 step 3. Who creates the scratch child, and whether the criterion is kept at all, is the architect's and Sami's call.",
+      "evidence": "legion-host on legion-linux-host is stopped, held by /etc/legion-host.STOPPED, and its restart is step 3 behind a gateway path that does not exist (dispatch://INFRA-667/artifact/restart-runbook-md). No legion-daemon:LINUX event after 2026-10-26T22:02Z. The stream decided on 2026-10-28 to replace Legion (dispatch://LINUX-1157/artifact/decisions-md item 13).",
+      "outcome": { "kind": "changed", "acceptance": ["Acceptance 2 is not provable while the LINUX deployment is stopped; the plan names its trigger instead of a date."] }
+    },
+    {
+      "spec": "Requirement 1: tell the reviewer 'to request changes when it changes more than that line or its CI fails'.",
+      "plan": "The reviewer's test is its own lean-build of the tester's commit, plus the grep -F check of the added lines against the quoted spec version; main-gate is not what it reads, and gh pr ready stays the last action of the review turn.",
+      "evidence": "legion/instructions/linux.md:11: main-gate 'does not run on a draft pull request'; 'keep the issue's one pull request a draft until it may merge'; 'the reviewer marks it ready (gh pr ready <number>) as the last action of its review turn, after it approves the tested head'; and a ready pull request whose main-gate passed 'goes into the merge queue automatically and merges with no approval'. Reading main-gate before reviewing would merge the fix unreviewed.",
+      "outcome": { "kind": "changed", "scope": "The reviewer's CI test becomes the reviewer's own build, because no CI stands at the head it reviews." }
+    }
+  ]
+}
