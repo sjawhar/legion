@@ -23,6 +23,7 @@ const roomAllowance = 2 << 20
 // adds to the store and no faster: an upload of the 25 KB spec that changes one token retains
 // about what it stores, not a copy of every block's attributes.
 func TestUploadsToARoomInUseKeepMemoryWithinTheBound(t *testing.T) {
+	skipUnderRace(t)
 	const uploads = 200
 	agent, start := newLoadAgent(t)
 	for range 2 {
@@ -41,6 +42,7 @@ func TestUploadsToARoomInUseKeepMemoryWithinTheBound(t *testing.T) {
 // what an upload stores; what the room retains stays within what the store holds, at a hundred
 // open anchors in table cells and prose as at none.
 func TestUploadsOverOpenAnchorsKeepMemoryWithinTheBound(t *testing.T) {
+	skipUnderRace(t)
 	const bare, anchored, anchors = 50, 100, 100
 	agent, start := newLoadAgent(t)
 	for range 2 {
@@ -74,6 +76,7 @@ func TestUploadsOverOpenAnchorsKeepMemoryWithinTheBound(t *testing.T) {
 // replies on anchored threads, token edits and token uploads, the plain comments and the replies
 // on plain roots writing no document. What it retains stays within what those writes store.
 func TestARoomFedOnlyByAgentWritesKeepsMemoryWithinTheBound(t *testing.T) {
+	skipUnderRace(t)
 	const writes = 400
 	agent, start := newLoadAgent(t)
 	for seed := range 4 {
@@ -139,6 +142,17 @@ type loadAgent struct {
 type loadThread struct {
 	id, body, at string
 	replies      []MarkReply
+}
+
+// skipUnderRace skips a room-memory test in a -race build: the race detector distorts the heap
+// growth these tests measure (its shadow memory and instrumented allocations are not the room's),
+// and they exercise no concurrency for it to catch, so under -race they cost minutes of the
+// package's time budget and prove nothing. The normal build runs them.
+func skipUnderRace(t *testing.T) {
+	t.Helper()
+	if raceEnabled {
+		t.Skip("the race detector distorts the heap growth this test measures, and the test checks no concurrency")
+	}
 }
 
 func newLoadAgent(t *testing.T) (*loadAgent, time.Time) {
