@@ -421,3 +421,82 @@ func TestRunCountsEveryDeniedJetStreamDestinationOfOneEvent(t *testing.T) {
 		t.Fatalf("/metrics body = %q counts a denied destination as a failure", body)
 	}
 }
+
+// Two events of one type on one issue - two comments a person writes a moment apart - share an
+// owner topic, and the outbox's scan sends a whole batch through one publish window. Under a
+// grant that denies that subject, the server refuses each message and reports a violation of
+// each, so each send must be answered its own denial, counted and backed off, exactly as the one
+// send above is.
+//
+// What makes this its own test is that a record of one violation per subject answers only one of
+// them: the second send of the same subject finds the record taken or overwritten and falls
+// through to its acknowledgement timeout, which settle reads as bus.ErrUnavailable and so as an
+// outage of the bus. That event is released with no attempt counted, the counter records `failed`
+// where the denial belongs, no line names the subject, and publishBatch abandons the rest of that
+// scan's backlog - the same pathology as the test above, reached by the commonest traffic there
+// is. The contract the bus owes is one violation per refused message, not one per subject.
+func TestRunCountsADeniedSubjectOncePerRefusedMessage(t *testing.T) {
+	var logged lockedBuffer
+	logtest.SetDefault(t, slog.NewTextHandler(&logged, nil))
+
+	client, _, _ := grantedNATS(t, "notifications.role.>", "_INBOX.>", "$JS.API.>")
+	database := storetest.Open(t)
+	broker := events.NewBroker()
+	seedIssue(t, database, "T-1", nil)
+	// Two events of one type on one issue, appended before the scan, so one batch sends both
+	// through one window and both to notifications.dispatch.issue.T-1.comment.created. The actor
+	// is a session, so neither notifies and each has its owner topic alone: the only thing this
+	// test varies from the single-send case above is that the subject is published twice.
+	agent := model.Actor{Kind: "session", ID: "5a660655-04ad-4ce0-8a9b-93dd03c412b7"}
+	first := appendEvent(t, database, broker, model.Event{
+		IssueKey: new("T-1"), Type: "comment.created", Actor: agent,
+		Payload: map[string]any{"id": "comment-1", "body": "The first of two comments."},
+	})
+	second := appendEvent(t, database, broker, model.Event{
+		IssueKey: new("T-1"), Type: "comment.created", Actor: agent,
+		Payload: map[string]any{"id": "comment-2", "body": "The second, a moment later."},
+	})
+	registry := metrics.New()
+	stop := runDeps(t, Deps{
+		Store: database, Publisher: client, Broker: broker,
+		PublishFailures: registry.NewCounter("envoy_dispatch_outbox_publish_failures_total",
+			"Destinations of an outbox publish attempt that did not reach NATS"),
+	})
+	defer stop()
+
+	// An outage line settles the wait as a counted attempt does, so the assertions below name it
+	// rather than this timing out.
+	waitFor(t, 30*time.Second, "the outbox's first attempt at both events settled", func() bool {
+		_, firstAttempts := publishedDestinations(t, database, first.ID)
+		_, secondAttempts := publishedDestinations(t, database, second.ID)
+		return (firstAttempts > 0 && secondAttempts > 0) ||
+			strings.Contains(logged.String(), bus.ErrUnavailable.Error())
+	})
+	for _, line := range strings.Split(logged.String(), "\n") {
+		if strings.Contains(line, bus.ErrUnavailable.Error()) {
+			t.Fatalf("line %q reports a denied publish as an outage of the bus", line)
+		}
+	}
+	for _, event := range []model.Event{first, second} {
+		destinations, attempts := publishedDestinations(t, database, event.ID)
+		if at := publishedAt(t, database, event.ID); at != nil {
+			t.Fatalf("event %d marked published at %s with destinations %v, though NATS denied its topic",
+				event.ID, at, destinations)
+		}
+		if len(destinations) != 0 {
+			t.Fatalf("event %d: published_destinations = %v records the denied topic", event.ID, destinations)
+		}
+		if attempts != 1 {
+			t.Fatalf("event %d: attempt_count = %d, want the one backed-off attempt", event.ID, attempts)
+		}
+	}
+	response := httptest.NewRecorder()
+	registry.Handler().ServeHTTP(response, httptest.NewRequest(http.MethodGet, "/metrics", nil))
+	body := response.Body.String()
+	if !strings.Contains(body, `envoy_dispatch_outbox_publish_failures_total{reason="denied"} 2`) {
+		t.Fatalf("/metrics body = %q, want each refused message counted as a denial", body)
+	}
+	if strings.Contains(body, `reason="failed"`) {
+		t.Fatalf("/metrics body = %q counts a denied publish as a failure", body)
+	}
+}
