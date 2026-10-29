@@ -10,8 +10,8 @@ suggestions, artifacts, and durable event history. The Go server in
 `AuthGate` requests `GET /auth/whoami` and sends unauthenticated visitors to the
 Google sign-in flow. All application requests are same-origin. React Router serves
 the Inbox at `/`, an issue workspace at `/issues/:key/*`, and the human-only
-repository-to-project settings page at `/settings`; TanStack Query and SSE keep
-the issue, Inbox, documents, and sidebar current.
+repository-to-project settings page at `/settings`; TanStack Query and the live socket's events
+feed keep the issue, Inbox, documents, and sidebar current.
 
 The desktop shell has a sidebar, issue content, and review margin. Issue content has Spec,
 Conversation, Children, Artifacts, and Activity tabs; the Conversation lists one card per
@@ -51,7 +51,8 @@ SIGTERM to the pid it hands its caller stops the server. It pins every server
 setting: cookie identity, the production mode, with `alice` and `bob` signed in through the
 server's dev sign-in route (`DISPATCH_DEV_SIGNIN=1`, fenced to a loopback
 origin, listener and database, with a signing key the server generates for its
-process), `DISPATCH_NATS_DISABLED=1`, the fake GitHub origin, a throwaway App
+process, or one key per run in two-process mode, below),
+`DISPATCH_NATS_DISABLED=1`, the fake GitHub origin, a throwaway App
 key, a loopback listen host and the suite's dashboard origin. Address the
 harness as `127.0.0.1:<port>`, never `localhost`: under that flag the router
 refuses any other `Host`. The server process has no caller Home or XDG
@@ -116,6 +117,46 @@ names it in the broker's settings) starts `scripts/e2e/lib/held-port.py keep`
 first and sets `DISPATCH_E2E_LISTEN_FROM` to the keeper's unix socket: the
 server serves on the keeper's port.
 
+Two-process mode runs two Dispatch servers against the one database, behind a round-robin proxy,
+the way a rolling release serves a browser from two builds at once:
+
+```bash
+cd packages/dispatch
+DATABASE_URL='postgres://postgres:dispatch@127.0.0.1:55432/dispatch_<issue>?sslmode=disable' \
+  bun run e2e:multiprocess
+```
+
+It builds the dashboard twice (`web/dist`, and `web/dist-b` under another build id), then runs
+Playwright through `e2e/run.ts` with `DISPATCH_E2E_PROCESSES=2`: Dispatch A on
+`DISPATCH_E2E_PORT_A` serving `web/dist`, Dispatch B on `DISPATCH_E2E_PORT_B` serving
+`DISPATCH_E2E_WEB_DIST_B` (here `web/dist-b`; default A's), and `e2e/round-robin-proxy.ts` on
+`DISPATCH_E2E_PORT`, which alternates requests and websockets between them. As every harness
+port, each is used as given when set and chosen by the OS when unset; the proxy starts before
+the servers, since both serve its origin, so A's and B's ports are held first (a
+`held-port.py keep` each) and each server serves on its keeper's port. Both servers sign
+cookies with one key the run generates, so a person stays signed in whichever answers. It runs
+the `*.multiprocess.e2e.ts` specs but the sign-in spec below, in Chromium, which the default run
+leaves out; arguments after `--` reach Playwright
+(`bun run e2e:multiprocess -- <name>.multiprocess.e2e.ts`). A spec
+pins a request to one process with the `X-Dispatch-E2E-Process: a|b` header or a whole browser
+context with the `dispatch-e2e-process` cookie, and reads which process served what from the
+proxy's `/_proxy/requests` and `/_proxy/sockets`; `AGENTS.md`'s end-to-end section has the whole
+contract. Any `DISPATCH_E2E_PROCESSES` other than `1`, `2` or unset is refused.
+
+`DISPATCH_E2E_SIGNIN=oidc` signs people in as a deployment does instead of through dev sign-in:
+the harness also starts `packages/envoy/cmd/dev-oidc-issuer` (`e2e/run-signin-issuer.sh`), and
+both servers take it as their sign-in issuer, under one `DISPATCH_SIGNING_KEY` per run. Only
+`e2e/signin.multiprocess.e2e.ts` runs then, which starts a sign-in at `/auth/start` on Dispatch A
+and completes it at `/auth/callback` on B:
+
+```bash
+DATABASE_URL='postgres://postgres:dispatch@127.0.0.1:55432/dispatch_<issue>?sslmode=disable' \
+  DISPATCH_E2E_SIGNIN=oidc bun run e2e:multiprocess
+```
+
+It needs `DISPATCH_E2E_PROCESSES=2`, which `e2e:multiprocess` sets; any value other than `oidc`
+or unset is refused.
+
 ## Local instance
 
 `bun run dispatch:local`, from the repository root or from this package, brings up a seeded
@@ -143,21 +184,22 @@ Its inputs are the harness's own. `DATABASE_URL`, when set, is used as given: it
 `127.0.0.1`, `localhost`, `[::1]` or a Unix socket directory, and it is truncated and reseeded on
 every start. Unset, the command runs `packages/envoy/scripts/dev-postgres.sh`, which creates,
 starts or reuses the `dispatch-pg` container, and creates database `dispatch_local` in it once.
-That script refuses a `dispatch-pg` on any image but its pinned pgvector one, since Dispatch's
-migrations need the `vector` extension, and prints the commands that move the container's data
-volume onto that image, quoted so they paste as they read. The harness ports
-(`DISPATCH_E2E_PORT`, `FAKE_ENVOY_PORT`, `PLAIN_HTTP_PORT`, `FAKE_GITHUB_PORT`,
-`FAKE_BROKER_PORT`) are unset unless you need a fixed one: unset, the OS chooses each, so two
-instances never collide; set, the port is used as given, and an occupied one fails with
-`address already in use`. psql runs without `PGHOSTADDR` (`e2e/psql.ts`), and a Ctrl-C ends a
-psql in flight too.
+That script runs the container from its pinned image, pgvector on PostgreSQL 18, the version
+Dispatch's tests and dev databases run; Dispatch's migrations need its `vector` extension. It
+refuses a `dispatch-pg` on any other image or major and prints the commands that dump its
+databases and restore them into a new container on the pinned image, quoted so they paste as they
+read. The harness ports (`DISPATCH_E2E_PORT`, `FAKE_ENVOY_PORT`, `PLAIN_HTTP_PORT`,
+`FAKE_GITHUB_PORT`, `FAKE_BROKER_PORT`) are unset unless you need a fixed one: unset, the OS
+chooses each, so two instances never collide; set, the port is used as given, and an occupied one
+fails with `address already in use`. psql runs without `PGHOSTADDR` (`e2e/psql.ts`), and a Ctrl-C
+ends a psql in flight too.
 
 A spec runs against the instance with the printed command, which sets
 `DISPATCH_E2E_REUSE_SERVERS=1`, the five ports and the same `DATABASE_URL`; each spec empties the
 database and the
 fake Envoy, so restart the command to reseed it. `bun run build:web` while it runs refreshes the
-SPA, which the server reads from `web/dist` on each request. `docker rm -f dispatch-pg` removes the
-container and every database in it.
+SPA, which the server reads from `web/dist` on each request. `docker rm -f -v dispatch-pg` removes
+the container, its anonymous data volume and every database in it.
 
 ## Acceptance drivers
 
@@ -231,7 +273,9 @@ wrong sessions (`e2e/preflight.ts`). `e2e:deployed` runs Playwright through `e2e
 with `PLAYWRIGHT_BASE_URL` set starts only the fake Envoy and the plain-HTTP proxy, the latter on a
 port the OS chooses. The fake Envoy makes subscriber, Agents-page, and fixture-hook rows exercise
 the deployed server instead of a real session. Fake GitHub rows still skip because the acceptance
-service does not configure that listener.
+service does not configure that listener. Its Postgres is PostgreSQL 18 on the volume
+`dispatch-acceptance-pg18`; a volume `dispatch-acceptance-pg` left from before holds PostgreSQL 16
+data no longer used, and `docker volume rm <project>_dispatch-acceptance-pg` removes it.
 
 ```bash
 cd packages/envoy/deploy/compose
@@ -279,7 +323,10 @@ local proxy), a plain-HTTP origin that is not loopback and so not a secure conte
 forwards to the dev sign-in server at its loopback origin. The project proves a document takes a
 new paragraph and a comment renders formatted there, where `crypto.randomUUID` does not exist, and
 that the proxy refuses any other `Host` as the server's own fence does and keeps no request open
-upstream once a page has closed.
+upstream once a page has closed. `chromium-plain-http-sign-out` runs the sign-out rows of
+`e2e/keyed-writes.e2e.ts` on that same origin, where the browser has no `navigator.locks`, so a
+tab holds the person's writes for another tab's sign-out on a renewed lease rather than on that
+tab's lock.
 `bun run e2e:install` installs all three browsers.
 
 ## Phone check

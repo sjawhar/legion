@@ -19,6 +19,7 @@ import (
 	"github.com/reearth/ygo/persistence"
 	ygws "github.com/reearth/ygo/provider/websocket"
 
+	"github.com/sjawhar/envoy/internal/dispatch/auth"
 	"github.com/sjawhar/envoy/internal/dispatch/events"
 	"github.com/sjawhar/envoy/internal/dispatch/identity"
 	"github.com/sjawhar/envoy/internal/dispatch/model"
@@ -27,9 +28,12 @@ import (
 	"github.com/sjawhar/envoy/internal/dispatch/store/storetest"
 )
 
+// testSigningKey is the one-key set the package's people stores seal refresh tokens under.
+var testSigningKey = auth.SingleSigningKey("signing-key")
+
 // headerIdentity is the test header identity that records each named person in the database.
 func headerIdentity(database *store.Store) identity.HeaderIdentity {
-	return identity.HeaderIdentity{Header: "X-Dispatch-User", People: store.NewPgPeopleStore(database.Pool, "signing-key", nil)}
+	return identity.HeaderIdentity{Header: "X-Dispatch-User", People: store.NewPgPeopleStore(database.Pool, testSigningKey, nil)}
 }
 
 func newTestService(t *testing.T) (*Service, string) {
@@ -162,7 +166,7 @@ func TestSettlementIndexesRetractsAndRestoresTypedAskBlocks(t *testing.T) {
 // a version: indexing it afterwards is bookkeeping over the same document. Settlement recording
 // that bookkeeping as a version of its own wrote a byte-identical version credited to nobody,
 // which stales the approval pinned to the version the agent wrote - and Legion's design gate,
-// open exactly while the approved version is the latest, closes with nothing in the event stream
+// open exactly while the approved version is the latest, closes with nothing in the event log
 // to explain it (LEGION-273).
 func TestSettlementIndexingAnAskBlockTheEditVersionedWritesNoVersion(t *testing.T) {
 	service, artifactID := newTestService(t)

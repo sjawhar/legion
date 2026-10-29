@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"io"
 	"io/fs"
+	"log/slog"
 	"mime"
 	"mime/multipart"
 	"net/http"
@@ -20,6 +21,7 @@ import (
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 
+	"github.com/sjawhar/envoy/internal/contracts"
 	"github.com/sjawhar/envoy/internal/dispatch/docs"
 	"github.com/sjawhar/envoy/internal/dispatch/files"
 	"github.com/sjawhar/envoy/internal/dispatch/model"
@@ -104,6 +106,68 @@ func (s *server) uploadArtifact(w http.ResponseWriter, r *http.Request) {
 	s.uploadArtifactFor(w, r, artifactTarget{IssueKey: &issueKey})
 }
 
+// issueUploadRoute is the upload to an issue, which refuseUploadToAClosedIssue guards.
+const issueUploadRoute = http.MethodPost + " /api/v1/issues/{key}/artifacts"
+
+// refuseUploadToAClosedIssue answers an upload to an issue that is closed, or missing, with the
+// refusal its handler would make (requireOpenOwnerStatus) before anything spools or parses the
+// upload's body: the keyed layer spools a keyed body whole to disk before its handler runs
+// (readKeyedBody), and the multipart parser spools an unkeyed one whole before the handler reaches
+// the issue, so an upload to a closed issue would otherwise be written out in full only to be
+// refused. The body is still read off the connection, and discarded, before the refusal is written
+// (drainBeforeAnswer), so a client that sends it whole before it reads the answer gets the
+// answer. register mounts it ahead of the keyed layer, so the refusal claims no key. The handler's
+// locked check still decides an issue that closes meanwhile; this one only spares the spool. A
+// caller that resolves to nobody is left to the route's own 401, and a malformed Idempotency-Key
+// to the keyed layer's 400, which spools no body either and refuses the request's form before
+// anything is looked up.
+//
+// The refusal stands in for the handler, so it answers only a request whose handler would run. A
+// repeat under a key the keyed layer answers itself (requestKeyAnswersItself) - its first upload's
+// stored answer, a first upload still running, one that committed and lost its answer - goes on to
+// that layer whatever the issue's state now: an upload that landed before the issue closed is
+// replayed its 201, and one still running is told KEY_IN_FLIGHT, unspooled, until the first
+// answers.
+func (s *server) refuseUploadToAClosedIssue(handler http.HandlerFunc) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		requestKey, keyed, err := requestKeyHeader(r)
+		if keyed && err != nil {
+			handler(w, r)
+			return
+		}
+		actor, human, err := s.optionalActor(r)
+		if err != nil {
+			handler(w, r)
+			return
+		}
+		// The caller is resolved once a request: the key layer and the handler read this.
+		r = r.WithContext(context.WithValue(r.Context(), resolvedCallerKey{}, resolvedCaller{actor: actor, human: human}))
+		refusal := s.refuseClosedOwnerBeforeResolving(r.Context(), issueOwner(r.PathValue("key")))
+		if refusal == nil {
+			handler(w, r)
+			return
+		}
+		// Only the issue's own refusal (closed, missing) stands aside for the key: a check that
+		// failed is answered as it always was.
+		var ownerRefusal *apiError
+		if keyed && errors.As(refusal, &ownerRefusal) && ownerRefusal.status < http.StatusInternalServerError {
+			answers, err := s.requestKeyAnswersItself(r.Context(), requestKeyLogin(actor, human), requestKey)
+			if err != nil {
+				// As the keyed layer answers its own failed lookup: under the key, which nothing has
+				// claimed, so the client asks again under it.
+				w.Header().Set(contracts.IdempotencyKeyHeader, requestKey)
+				s.writeHandlerError(w, err)
+				return
+			}
+			if answers {
+				handler(w, r)
+				return
+			}
+		}
+		s.writeHandlerError(w, refusal)
+	}
+}
+
 func (s *server) uploadArtifactFor(w http.ResponseWriter, r *http.Request, target artifactTarget) {
 	r.Body = http.MaxBytesReader(w, r.Body, maxArtifactBlobSize+(1<<20))
 	requestType, _, err := mime.ParseMediaType(r.Header.Get("Content-Type"))
@@ -139,7 +203,7 @@ func (s *server) uploadArtifactFor(w http.ResponseWriter, r *http.Request, targe
 		return
 	}
 	if len(input.content) > maxArtifactBlobSize {
-		writeError(w, "CAP_EXCEEDED", http.StatusRequestEntityTooLarge, "artifact blob exceeds 25 MB")
+		s.writeHandlerError(w, errUploadTooLarge)
 		return
 	}
 	mediaType, _, err := mime.ParseMediaType(input.contentType)
@@ -182,7 +246,7 @@ func (s *server) jsonArtifactUpload(w http.ResponseWriter, r *http.Request) (art
 	if err := decoder.Decode(&body); err != nil {
 		var maxBytesError *http.MaxBytesError
 		if errors.As(err, &maxBytesError) {
-			writeError(w, "CAP_EXCEEDED", http.StatusRequestEntityTooLarge, "artifact blob exceeds 25 MB")
+			s.writeHandlerError(w, errUploadTooLarge)
 		} else {
 			writeError(w, "INVALID_JSON", http.StatusBadRequest, "invalid JSON body")
 		}
@@ -226,7 +290,7 @@ func (s *server) multipartArtifactUpload(w http.ResponseWriter, r *http.Request)
 		var spool *fs.PathError
 		switch {
 		case errors.As(err, &tooLarge):
-			writeError(w, "CAP_EXCEEDED", http.StatusRequestEntityTooLarge, "artifact blob exceeds 25 MB")
+			s.writeHandlerError(w, errUploadTooLarge)
 		case errors.Is(err, multipart.ErrMessageTooLarge):
 			writeError(w, "CAP_EXCEEDED", http.StatusRequestEntityTooLarge, "the upload's form fields are too large to read")
 		case errors.As(err, &spool):
@@ -236,6 +300,17 @@ func (s *server) multipartArtifactUpload(w http.ResponseWriter, r *http.Request)
 		}
 		return artifactUploadInput{}, false
 	}
+	// The parser spools a file part past a megabyte to a temporary file. net/http removes the
+	// files of the request it handed its handler, but this is a copy (the access log and the
+	// transaction tracking each wrap it with WithContext), so the server never sees them; left
+	// alone, every such upload kept its file on the pod's disk until the pod's ephemeral storage
+	// ran out. The content is read into memory below, so the files go when this returns, stored
+	// or refused.
+	defer func() {
+		if err := r.MultipartForm.RemoveAll(); err != nil {
+			slog.Error("dispatch: remove a multipart upload's spooled files", "error", err)
+		}
+	}()
 	if refusal := unstorableForm(r.MultipartForm.Value); refusal != nil {
 		s.writeHandlerError(w, refusal)
 		return artifactUploadInput{}, false
@@ -1078,13 +1153,33 @@ const documentHintLimit = 8
 // loadArtifactByDocumentReference reads an issue's or a project's artifact at slug reference, or
 // the one document whose filename it is.
 func (s *server) loadArtifactByDocumentReference(ctx context.Context, q queryer, target artifactTarget, reference string) (model.Artifact, error) {
-	artifact, err := s.loadArtifactByRefKey(ctx, q, target.refPrefix()+"/"+reference)
+	return resolveDocumentReference(ctx, s, q, target, reference,
+		func(refKey string) (model.Artifact, error) { return s.loadArtifactByRefKey(ctx, q, refKey) },
+		func(id string) (model.Artifact, error) { return s.loadArtifact(ctx, q, id) },
+	)
+}
+
+// resolveDocumentReference is the one resolution of an issue's or a project's document reference,
+// shared by the full read and the summary: the artifact at slug reference (byRefKey, given the
+// ref_key), else the one document whose filename it is (byID, given its id). Each reader answers
+// ARTIFACT_NOT_FOUND for no row, and reads only the shape its route serves.
+func resolveDocumentReference[T any](
+	ctx context.Context,
+	s *server,
+	q queryer,
+	target artifactTarget,
+	reference string,
+	byRefKey func(refKey string) (T, error),
+	byID func(id string) (T, error),
+) (T, error) {
+	found, err := byRefKey(target.refPrefix() + "/" + reference)
 	if err == nil || !isArtifactNotFound(err) {
-		return artifact, err
+		return found, err
 	}
+	var none T
 	documents, listErr := s.loadDocumentReferences(ctx, q, target)
 	if listErr != nil {
-		return model.Artifact{}, listErr
+		return none, listErr
 	}
 	matches := make([]model.Artifact, 0, 1)
 	for index := range documents {
@@ -1094,11 +1189,11 @@ func (s *server) loadArtifactByDocumentReference(ctx context.Context, q queryer,
 	}
 	switch len(matches) {
 	case 0:
-		return model.Artifact{}, documentReferenceError(target, reference, documents)
+		return none, documentReferenceError(target, reference, documents)
 	case 1:
-		return s.loadArtifact(ctx, q, matches[0].ID)
+		return byID(matches[0].ID)
 	default:
-		return model.Artifact{}, ambiguousDocumentReferenceError(target, reference, matches)
+		return none, ambiguousDocumentReferenceError(target, reference, matches)
 	}
 }
 

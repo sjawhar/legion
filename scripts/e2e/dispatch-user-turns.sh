@@ -209,9 +209,9 @@ mise where "$omp_tool" >/dev/null 2>&1 || mise install "$omp_tool" >&2
 (cd "$root/packages/dispatch" && bun run build:web >"$evidence/logs/build-web.log" 2>&1) || fail "the SPA did not build; see $evidence/logs/build-web.log"
 note "Oh My Pi $omp_tool; run $run"
 
-docker run -d --name "$pg_container" --cpus 2 --memory 2g --mount type=tmpfs,destination=/var/lib/postgresql/data \
+docker run -d --name "$pg_container" --cpus 2 --memory 2g --mount type=tmpfs,destination=/var/lib/postgresql \
   -e POSTGRES_USER=dispatch -e POSTGRES_PASSWORD=dispatch -e POSTGRES_DB=dispatch \
-  -p "127.0.0.1::5432" pgvector/pgvector@sha256:7b822b0aac60967beb1ea5e576b8602c94c300a157d187f385ae3e0da199b90a >/dev/null
+  -p "127.0.0.1::5432" mirror.gcr.io/pgvector/pgvector@sha256:2358fcba361ed2233a5ed81b5fe4ca779ccb304120ce531a3bf51c0ed7e2bc11 >/dev/null
 pg_port=$(docker port "$pg_container" 5432/tcp | head -1 | sed 's/.*://')
 until_true 60 "Postgres to accept TCP connections" docker exec "$pg_container" pg_isready -h 127.0.0.1 -p 5432 -U dispatch -d dispatch
 docker run -d --name "$nats_container" --cpus 1 --memory 512m -p 127.0.0.1::4222 nats:2.10 -js >/dev/null
@@ -544,8 +544,8 @@ pass
 
 broadcast_body="LEGION-394 $run broadcast: status, please."
 begin a-broadcast-gets-a-card
-human -X POST "http://127.0.0.1:$dispatch_port/api/v1/broadcasts" \
-  -d "$(jq -nc --arg b "$broadcast_body" --arg s "$session_id" --arg k "$run" '{body: $b, delivery: "steer", session_ids: [$s], idempotency_key: ("broadcast-" + $k)}')" >/dev/null
+human -X POST "http://127.0.0.1:$dispatch_port/api/v1/broadcasts" -H "Idempotency-Key: broadcast-$run" \
+  -d "$(jq -nc --arg b "$broadcast_body" --arg s "$session_id" '{body: $b, delivery: "steer", session_ids: [$s]}')" >/dev/null
 until_true 120 "the broadcast's card" has_card "$broadcast_body"
 [ "$(user_mentions "$broadcast_body")" = 0 ] || fail "the broadcast became a user message"
 note "a card, no user message"
@@ -812,7 +812,7 @@ pass
 
 offline_body="LEGION-394 $run Send while the session is down: my label for it is CHARLIE$run. What is my label?"
 begin a-send-while-the-session-is-down-fails
-offline=$(human -X POST "http://127.0.0.1:$dispatch_port/api/v1/agents/$session_id/messages" \
+offline=$(human -X POST "http://127.0.0.1:$dispatch_port/api/v1/agents/$session_id/messages" -H "Idempotency-Key: offline-$run" \
   -d "$(jq -nc --arg b "$offline_body" '{body: $b, delivery: "steer"}')")
 offline_sent=$SECONDS
 offline_id=$(jq -r .id <<<"$offline")
@@ -861,7 +861,7 @@ begin a-frame-forged-for-a-failed-send-inside-the-minute-gets-a-card
 # attempt: Dispatch refuses to accept a failed attempt, so it stays a card.
 listener -X DELETE "http://127.0.0.1:$envoy_port/v1/sessions/$session_id" >/dev/null
 until_true 30 "the listener to drop the session" unlisted
-unlisted_send=$(human -X POST "http://127.0.0.1:$dispatch_port/api/v1/agents/$session_id/messages" \
+unlisted_send=$(human -X POST "http://127.0.0.1:$dispatch_port/api/v1/agents/$session_id/messages" -H "Idempotency-Key: unlisted-$run" \
   -d "$(jq -nc --arg b "$unlisted_body" '{body: $b, delivery: "steer"}')")
 unlisted_sent=$SECONDS
 unlisted_id=$(jq -r .id <<<"$unlisted_send")
