@@ -481,6 +481,111 @@ func TestSpawnSpecPluginsCoversTheDaemonsControllerToo(t *testing.T) {
 	}
 }
 
+// A phase worker's launch carries the stall limits the daemon's own environment holds, merged
+// into the git identity's variables rather than replacing them or being replaced by them, and
+// carries no stall variable the daemon does not hold: a worker told none of a limit runs on the
+// default its plugin holds (packages/pi-shared/src/stall-limits.ts). Both runtimes forward Env
+// verbatim, so this is where the four reach a pane and a pod alike.
+func TestSpawnSpecCarriesTheStallLimitsTheDaemonHolds(t *testing.T) {
+	composer, err := prompts.New(t.TempDir())
+	if err != nil {
+		t.Fatalf("compose the shipped prompts: %v", err)
+	}
+	held := map[string]string{
+		"LEGION_STALL_REMINDER_MS": "45000",
+		"LEGION_STALL_WAITING_MS":  "900000",
+		"LEGION_STALL_RESUME_MS":   "15000",
+	}
+	for name, value := range held {
+		t.Setenv(name, value)
+	}
+	// The fourth is one this daemon does not hold: t.Setenv first, so the shell's own value, if it
+	// had one, is restored after the test.
+	t.Setenv("LEGION_STALL_ARCHITECT_AFTER", "restored-by-cleanup")
+	os.Unsetenv("LEGION_STALL_ARCHITECT_AFTER")
+
+	bot := runtime.GitIdentity{Name: "legion-implement[bot]", Email: "9+legion-implement[bot]@users.noreply.github.com"}
+	s := specs{stateDir: t.TempDir(), project: "s1", prompts: composer, repositories: noRepositoriesView,
+		identity: func(context.Context, claim.Role, string) (runtime.GitIdentity, error) { return bot, nil }}
+	token, err := claim.NewToken("s1", "S1-2", claim.RoleImplementer)
+	if err != nil {
+		t.Fatal(err)
+	}
+	c := supervise.Claim{Token: token, Issue: "S1-2", Tree: "S1-1", Role: claim.RoleImplementer}
+
+	spec, err := s.SpawnSpec(context.Background(), c)
+	if err != nil {
+		t.Fatalf("SpawnSpec: %v", err)
+	}
+	want := maps.Clone(held)
+	maps.Copy(want, bot.Env())
+	if !maps.Equal(spec.Env, want) {
+		t.Errorf("the launch's Env = %v, want the three limits the daemon holds beside the git identity, %v", spec.Env, want)
+	}
+
+	// A daemon with no GitHub Apps builds no identity, and the limits still reach the launch.
+	s.identity = nil
+	if spec, err = s.SpawnSpec(context.Background(), c); err != nil {
+		t.Fatalf("SpawnSpec with no identity: %v", err)
+	}
+	if !maps.Equal(spec.Env, held) {
+		t.Errorf("the launch's Env with no identity = %v, want the three limits the daemon holds, %v", spec.Env, held)
+	}
+}
+
+// A Claude Code claim gets no stale-plugin install, whatever its recorded contract: that install
+// is the two npm plugins, and a Claude worker's plugin is the worker image's, so a plugin-contract
+// change for such a role is answered by a new image. The relaunch itself is unchanged — the
+// image's plugin decides, and the image probe is what refuses a wrong one. An Oh My Pi claim of
+// the same shape is installed for as before, the daemon's own controller among them: it runs on
+// Oh My Pi whatever worker_backends names for a phase worker.
+func TestSpawnSpecPluginsSkipsAClaudeClaimAndNoOther(t *testing.T) {
+	composer, err := prompts.New(t.TempDir())
+	if err != nil {
+		t.Fatalf("compose the shipped prompts: %v", err)
+	}
+	pair := &runtime.PluginInstall{PiLegion: "9.7.0", PiEnvoy: "9.6.1", Contract: api.DaemonAPIVersion}
+	// `worker_backends: {implementer: claude}`: every other role, and the controller, on Oh My Pi.
+	s := specs{stateDir: t.TempDir(), project: "s1", prompts: composer, runtimeName: "kubernetes", plugins: pair,
+		repositories: noRepositoriesView,
+		backend: func(role claim.Role) runtime.Backend {
+			if role == claim.RoleImplementer {
+				return runtime.BackendClaude
+			}
+			return runtime.BackendOmp
+		}}
+	worker := func(role claim.Role) supervise.Claim {
+		token, err := claim.NewToken("s1", "S1-2", role)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return supervise.Claim{Token: token, Issue: "S1-2", Tree: "S1-1", Role: role, Session: "sess-1", PluginContract: 23}
+	}
+	for _, tc := range []struct {
+		name  string
+		claim supervise.Claim
+		want  *runtime.PluginInstall
+	}{
+		{"the Claude Code implementer", worker(claim.RoleImplementer), nil},
+		{"the Oh My Pi tester", worker(claim.RoleTester), pair},
+		{"the daemon's controller", supervise.Claim{Token: claim.ControllerToken("s1"), Project: "s1",
+			Role: claim.RoleController, Session: "sess-1", PluginContract: 23}, pair},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			spec, err := s.SpawnSpec(context.Background(), tc.claim)
+			if err != nil {
+				t.Fatalf("SpawnSpec: %v", err)
+			}
+			switch {
+			case tc.want == nil && spec.Plugins != nil:
+				t.Fatalf("Plugins = %+v, want nil: a Claude Code worker's plugin is the image's", spec.Plugins)
+			case tc.want != nil && (spec.Plugins == nil || *spec.Plugins != *tc.want):
+				t.Fatalf("Plugins = %+v, want %+v", spec.Plugins, tc.want)
+			}
+		})
+	}
+}
+
 func withSession(c supervise.Claim, session string) supervise.Claim {
 	c.Session = session
 	return c

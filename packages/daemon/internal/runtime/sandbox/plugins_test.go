@@ -1,6 +1,7 @@
 package sandbox
 
 import (
+	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
@@ -15,6 +16,7 @@ import (
 	"github.com/sjawhar/legion/daemon/internal/claim"
 	"github.com/sjawhar/legion/daemon/internal/config"
 	"github.com/sjawhar/legion/daemon/internal/runtime"
+	"github.com/sjawhar/legion/daemon/internal/runtime/shellprefix"
 )
 
 // testPlugins is the pair an installing launch's spec carries in these tests.
@@ -128,7 +130,7 @@ func TestInstallScriptQuotesShellUnsafeSources(t *testing.T) {
 		t.Skip("no /bin/sh in this environment")
 	}
 	plugins := &runtime.PluginInstall{PiLegion: "/tmp/odd dir/pi-legion's.tgz", PiEnvoy: "/tmp/another 'one'.tgz", Contract: 24}
-	script := startScript("/home/legion/.local/state/tester", 3, plugins, installLockWait(2*time.Second, 3))
+	script := startScript("/home/legion/.local/state/tester", 3, plugins, "", installLockWait(2*time.Second, 3))
 	// The two sources carry a space and a single quote; verified below (sh -n) rather than as a
 	// literal substring, since the quoting itself breaks one.
 	if !strings.Contains(script, "pi-legion") || !strings.Contains(script, "another") {
@@ -172,7 +174,7 @@ func bunInstallArgs(t *testing.T, plugins *runtime.PluginInstall) []string {
 	if err := os.WriteFile(stub, []byte("#!/bin/sh\nprintf '%s\\n' \"$@\" > "+recorded+"\nexit 1\n"), 0o700); err != nil {
 		t.Fatal(err)
 	}
-	script := startScript(filepath.Join(dir, "state"), 3, plugins, installLockWait(2*time.Second, 3))
+	script := startScript(filepath.Join(dir, "state"), 3, plugins, "", installLockWait(2*time.Second, 3))
 	if !strings.Contains(script, "/usr/local/bin/bun") {
 		t.Fatalf("the install script does not call bun by the image path:\n%s", script)
 	}
@@ -226,15 +228,339 @@ func TestAnUppercaseSchemeReachesBunVerbatim(t *testing.T) {
 	}
 }
 
-// startArgv returns agent unchanged with neither plugins nor a setup command: a plain launch's
-// argv is never wrapped.
+// startArgv returns agent unchanged with no plugins, no Claude Code directory and no setup
+// command: a plain Oh My Pi launch's argv is never wrapped.
 func TestStartArgvIsAgentUnchangedWithoutPluginsOrSetup(t *testing.T) {
 	agent := []string{"/opt/omp/bin/omp", "--mode", "rpc"}
 	for name, setup := range map[string][]string{"nil": nil, "empty": {}} {
-		got := startArgv("/home/legion/.local/state/tester", 1, nil, setup, agent, installLockWait(2*time.Second, 3))
+		got := startArgv("/home/legion/.local/state/tester", 1, nil, "", setup, agent, installLockWait(2*time.Second, 3))
 		if !slices.Equal(got, agent) {
 			t.Fatalf("startArgv(nil plugins, %s setup) = %q, want %q unchanged", name, got, agent)
 		}
+	}
+}
+
+// A Claude Code launch is wrapped in the start script for two things, in this order: its
+// configuration directory is made, and the pinned Claude Code its agent command names is installed
+// into the generation's own directory, before the agent execs. Nothing else makes either — both
+// are on the issue's volume, which the image cannot prepare, and the image carries the pin and no
+// Claude Code — and Claude Code is told the directory as CLAUDE_CONFIG_DIR rather than asked to
+// create it. The install block names the role's install root, clears its earlier generations,
+// copies the image's pin, takes the bounded flock on the issue's npm cache, runs `npm ci` with
+// scripts off from the committed lockfile, has a failure branch that exits, and holds the
+// installed binary to the pin. The agent argv the script wraps names that generation's binary. An
+// Oh My Pi launch of the same deployment is left unwrapped, so it renders no install of Claude
+// Code at all; what the block does when it runs is TestAClaudeLaunchInstallsThePinnedClaudeCode's.
+func TestAClaudeLaunchsStartScriptMakesItsConfigurationDirectory(t *testing.T) {
+	opts := goldenOptions()
+	r, err := configure(opts)
+	if err != nil {
+		t.Fatal(err)
+	}
+	spec := claudeWorkerSpec(t)
+	l := launchOf(t, r, spec)
+	start := launcherCommand(l, r)
+	agent := start.Argv[slices.Index(start.Argv, "--")+1:]
+	if len(agent) < 5 || agent[0] != "/bin/sh" || agent[1] != "-c" || agent[3] != startName || agent[4] != "0" {
+		t.Fatalf("the agent command is %q, want /bin/sh -c <script> %s 0 <agent argv…>", agent, startName)
+	}
+	if got, want := agent[5:], l.agentArgv(r.agent); !slices.Equal(got, want) {
+		t.Errorf("the wrapped agent argv is %q, want the Claude command %q", got, want)
+	}
+	stateHome := roleStateHome(spec.Role)
+	if binary := claudeCodeBinary(stateHome, spec.Generation); !slices.Contains(agent[5:], binary) {
+		t.Errorf("the wrapped agent argv %q does not name the generation's Claude Code %s", agent[5:], binary)
+	}
+	script := agent[2]
+	made := "mkdir -p -- " + shellprefix.Literal(claudeConfigDir(spec.Role))
+	installs := "rm -rf -- " + shellprefix.Literal(claudeCodeRoot(stateHome)) + "/g*"
+	at, install, execs := strings.Index(script, made), strings.Index(script, installs), strings.Index(script, `exec "$@"`)
+	if at < 0 || install < at || execs < install {
+		t.Errorf("the start script does not make %s, then install Claude Code, then exec:\n%s", claudeConfigDir(spec.Role), script)
+	}
+	genDir := claudeCodeGenDir(stateHome, spec.Generation)
+	for _, want := range []string{
+		"mkdir -p -- " + shellprefix.Literal(genDir), "cd -- " + shellprefix.Literal(genDir),
+		"cp -- " + shellprefix.Literal(claudeCodePin+"/package.json") + " " + shellprefix.Literal(claudeCodePin+"/package-lock.json") + " .",
+		`cache="$XDG_CACHE_HOME/legion-claude-code"`, `mkdir -p -- "$cache"`,
+		fmt.Sprintf(`/usr/bin/flock -w %d -- "$cache" /usr/local/bin/npm ci --ignore-scripts --omit=dev --no-audit --no-fund --cache "$cache"`,
+			installLockWait(opts.BootTimeout, opts.RegistrationIntervals)),
+		"|| { echo " + shellprefix.Literal(claudeCodeFailure(genDir)) + "; exit 1; }",
+		"node -e " + shellprefix.Literal(claudeCodeCheckScript) + " " + shellprefix.Literal(claudeCodePin+"/package.json") + " " +
+			shellprefix.Literal(claudeCodeBinary(stateHome, spec.Generation)),
+		") 1>&2",
+	} {
+		if !strings.Contains(script, want) {
+			t.Errorf("the Claude launch's start script does not carry %q:\n%s", want, script)
+		}
+	}
+	omp := launcherCommand(launchOf(t, r, workerSpec(t)), r)
+	if wrapped := omp.Argv[slices.Index(omp.Argv, "--")+1:]; wrapped[0] == "/bin/sh" {
+		t.Errorf("an Oh My Pi launch of the same deployment is wrapped: %q", wrapped)
+	}
+}
+
+// claudeCodeFailure is the line claudeCodeBlock's failure branch prints for an install into
+// genDir, spelled here from the feature rather than read from the renderer.
+func claudeCodeFailure(genDir string) string {
+	return "legion claude-code: installing the Claude Code /opt/legion/claude-code/package-lock.json pins into " + genDir + " failed"
+}
+
+// An Oh My Pi launch never installs Claude Code, whatever else its start script carries: an
+// installing launch's script installs the plugin pair and a setup command's runs it, and neither
+// renders a line of the Claude Code block.
+func TestAnOhMyPiLaunchRendersNoClaudeCodeInstall(t *testing.T) {
+	opts := goldenOptions()
+	opts.Setup = testSetup
+	r, err := configure(opts)
+	if err != nil {
+		t.Fatal(err)
+	}
+	spec := workerSpec(t)
+	spec.Plugins = testPlugins()
+	start := launcherCommand(launchOf(t, r, spec), r)
+	agent := start.Argv[slices.Index(start.Argv, "--")+1:]
+	if agent[0] != "/bin/sh" {
+		t.Fatalf("the installing Oh My Pi launch is not wrapped: %q", agent)
+	}
+	for _, never := range []string{"legion-claude-code", "npm", claudeCodePin, "claude-code-linux-x64"} {
+		if strings.Contains(agent[2], never) {
+			t.Errorf("an Oh My Pi launch's start script names %q:\n%s", never, agent[2])
+		}
+	}
+}
+
+// claudeCodeRun is one run of a Claude launch's start wrapper with a stand-in npm: what it exited
+// and wrote, whether the agent ran, the arguments and working directory npm was run with, and
+// the paths the run used.
+type claudeCodeRun struct {
+	startRun
+	agentRan                 bool
+	npmArgs                  []string
+	npmDir                   string
+	stateHome, cache, genDir string
+	configDir, pin           string
+}
+
+// runClaudeStart renders a Claude launch's start wrapper for generation 3 of a role whose state
+// home is under t.TempDir(), and runs it under /bin/sh with the two image paths a test machine
+// lacks replaced: npm by a stand-in whose body is npmBody (it runs in the generation's
+// directory, and logs its working directory and arguments first), and the image's pin directory
+// by a copy of the committed pin, packages/daemon/docker/claude-code, so the check reads the
+// version the repository actually pins. Everything else — node, /usr/bin/flock, and the script
+// itself — is what a pod runs. An earlier generation's install is left under the role's root
+// first, which the run must remove.
+//
+// seedCache, when given, is handed the shared npm cache's path before the wrapper runs, so a test
+// can put the cache in whatever state another of the pod's Claude roles would have left it in.
+func runClaudeStart(t *testing.T, npmBody string, seedCache ...func(t *testing.T, cache string)) claudeCodeRun {
+	t.Helper()
+	if _, err := exec.LookPath("sh"); err != nil {
+		t.Skip("no /bin/sh in this environment")
+	}
+	if _, err := exec.LookPath("node"); err != nil {
+		t.Skip("no node in this environment: the install's version check runs on it")
+	}
+	requireFlock(t)
+	dir := t.TempDir()
+	pin := filepath.Join(dir, "pin")
+	if err := os.Mkdir(pin, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	for _, file := range []string{"package.json", "package-lock.json"} {
+		body, err := os.ReadFile(filepath.Join("..", "..", "..", "docker", "claude-code", file))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(pin, file), body, 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	run := claudeCodeRun{stateHome: filepath.Join(dir, "state", "tester"), cache: filepath.Join(dir, "cache", "legion-claude-code"), pin: pin}
+	run.genDir = claudeCodeGenDir(run.stateHome, 3)
+	run.configDir = filepath.Join(run.stateHome, "claude")
+	earlier := claudeCodeGenDir(run.stateHome, 2)
+	if err := os.MkdirAll(earlier, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	npmLog, agentLog := filepath.Join(dir, "npm.log"), filepath.Join(dir, "agent.log")
+	npm := filepath.Join(dir, "npm")
+	stub := "#!/bin/sh\n{ pwd; printf '%s\\n' \"$@\"; } >" + shellQuote(npmLog) + "\n" + npmBody
+	if err := os.WriteFile(npm, []byte(stub), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	script := startScript(run.stateHome, 3, nil, run.configDir, installLockWait(2*time.Second, 3))
+	if !strings.Contains(script, "/usr/local/bin/npm ") || !strings.Contains(script, claudeCodePin+"/") {
+		t.Fatalf("the start script does not call npm by the image path or install from the image's pin:\n%s", script)
+	}
+	script = strings.Replace(script, "/usr/local/bin/npm ", npm+" ", 1)
+	script = strings.ReplaceAll(script, claudeCodePin+"/", pin+"/")
+	for _, seed := range seedCache {
+		seed(t, run.cache)
+	}
+	cmd := exec.Command("/bin/sh", "-c", script, startName, "0", "/bin/sh", "-c", `echo ran >"$0"`, agentLog)
+	cmd.Dir = dir
+	cmd.Env = append(os.Environ(), "XDG_CACHE_HOME="+filepath.Join(dir, "cache"))
+	var stdout, stderr strings.Builder
+	cmd.Stdout, cmd.Stderr = &stdout, &stderr
+	err := cmd.Run()
+	var exit *exec.ExitError
+	switch {
+	case err == nil:
+	case errors.As(err, &exit):
+		run.exit = exit.ExitCode()
+	default:
+		t.Fatalf("run the start wrapper: %v", err)
+	}
+	run.stdout, run.stderr = stdout.String(), stderr.String()
+	_, err = os.Stat(agentLog)
+	run.agentRan = err == nil
+	if body, err := os.ReadFile(npmLog); err == nil {
+		lines := strings.Split(strings.TrimRight(string(body), "\n"), "\n")
+		run.npmDir, run.npmArgs = lines[0], lines[1:]
+	}
+	if _, err := os.Stat(earlier); !errors.Is(err, os.ErrNotExist) {
+		t.Errorf("generation 2's install is still under the role's root (%v): an old copy accumulates on the issue's volume", err)
+	}
+	return run
+}
+
+// claudeCodeStub is an npm stand-in's body that leaves, where the real install leaves the
+// per-platform binary, an executable whose --version prints version as Claude Code prints its own.
+func claudeCodeStub(version string) string {
+	return "mkdir -p node_modules/@anthropic-ai/claude-code-linux-x64\n" +
+		"printf '#!/bin/sh\\necho \"%s (Claude Code)\"\\n' " + shellQuote(version) + " >node_modules/@anthropic-ai/claude-code-linux-x64/claude\n" +
+		"chmod +x node_modules/@anthropic-ai/claude-code-linux-x64/claude\n"
+}
+
+// pinnedClaudeCode is the version the committed pin names.
+func pinnedClaudeCode(t *testing.T) string {
+	t.Helper()
+	body, err := os.ReadFile(filepath.Join("..", "..", "..", "docker", "claude-code", "package.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var pin struct {
+		Dependencies map[string]string `json:"dependencies"`
+	}
+	if err := json.Unmarshal(body, &pin); err != nil {
+		t.Fatal(err)
+	}
+	version := pin.Dependencies["@anthropic-ai/claude-code"]
+	if version == "" {
+		t.Fatal("packages/daemon/docker/claude-code/package.json pins no @anthropic-ai/claude-code")
+	}
+	return version
+}
+
+// A Claude launch's start wrapper installs the pinned Claude Code before the agent execs, and an
+// install that fails or does not verify fails the launch, loudly, with the agent never started:
+// the image carries no Claude Code, so there is nothing to fall back to. The success case is the
+// control, in the same test, so the absent agent of the failing ones is not a harness that ran
+// nothing. Each run is the script the daemon renders, with only npm and the pin's directory
+// replaced (runClaudeStart); each also shows the earlier generation's install removed.
+func TestAClaudeLaunchInstallsThePinnedClaudeCode(t *testing.T) {
+	pinned := pinnedClaudeCode(t)
+	for name, tc := range map[string]struct {
+		npm string
+		ok  bool
+		// stderr is what the role's log must carry for a failing case: the line that names it.
+		stderr func(run claudeCodeRun) []string
+	}{
+		"an install of the pinned version": {npm: claudeCodeStub(pinned) + "exit 0\n", ok: true},
+		"an install that fails": {npm: "echo 'npm error code EINTEGRITY' >&2\nexit 1\n",
+			stderr: func(run claudeCodeRun) []string {
+				return []string{"npm error code EINTEGRITY",
+					"legion claude-code: installing the Claude Code " + run.pin + "/package-lock.json pins into " + run.genDir + " failed"}
+			},
+		},
+		"an install of another version": {npm: claudeCodeStub("0.0.1") + "exit 0\n",
+			stderr: func(run claudeCodeRun) []string {
+				return []string{"legion claude-code: " + claudeCodeBinary(run.stateHome, 3) + ` --version printed "0.0.1 (Claude Code)"; ` +
+					run.pin + "/package.json pins " + pinned}
+			},
+		},
+		"an install that leaves no binary": {npm: "exit 0\n",
+			stderr: func(run claudeCodeRun) []string {
+				return []string{"legion claude-code: running " + claudeCodeBinary(run.stateHome, 3) + " --version: "}
+			},
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			run := runClaudeStart(t, tc.npm)
+			if run.npmDir != run.genDir {
+				t.Errorf("npm ran in %q, want the generation's directory %s", run.npmDir, run.genDir)
+			}
+			if want := []string{"ci", "--ignore-scripts", "--omit=dev", "--no-audit", "--no-fund", "--cache", run.cache}; !slices.Equal(run.npmArgs, want) {
+				t.Errorf("npm was run with %q, want %q", run.npmArgs, want)
+			}
+			for _, file := range []string{"package.json", "package-lock.json"} {
+				if _, err := os.Stat(filepath.Join(run.genDir, file)); err != nil {
+					t.Errorf("the generation's directory holds no copy of the pin's %s: %v", file, err)
+				}
+			}
+			if info, err := os.Stat(run.configDir); err != nil || !info.IsDir() {
+				t.Errorf("the start script left %s as %v (%v), want the directory made", run.configDir, info, err)
+			}
+			if run.stdout != "" {
+				t.Errorf("the wrapper wrote %q to stdout, the shim's frame stream", run.stdout)
+			}
+			if tc.ok {
+				if run.exit != 0 || !run.agentRan {
+					t.Fatalf("the wrapper exited %d and the agent ran: %v, want the agent started:\n%s", run.exit, run.agentRan, run.stderr)
+				}
+				if _, err := os.Stat(claudeCodeBinary(run.stateHome, 3)); err != nil {
+					t.Errorf("the generation's Claude Code is not where its agent command names it: %v", err)
+				}
+				return
+			}
+			if run.exit != 1 || run.agentRan {
+				t.Errorf("the wrapper exited %d and the agent ran: %v, want exit 1 with the agent never started", run.exit, run.agentRan)
+			}
+			for _, want := range tc.stderr(run) {
+				if !strings.Contains(run.stderr, want) {
+					t.Errorf("stderr is %q, want the failure named by %q", run.stderr, want)
+				}
+			}
+		})
+	}
+}
+
+// The pod's Claude roles share one npm cache on the issue's volume, and the launch must go on
+// whatever state it finds that path in rather than die before npm and before the block's own
+// failure line: a directory another role made a moment earlier (the ordinary case, and the state
+// the loser of a cold-cache race meets), and the regular file an interrupted flock leaves behind
+// if it ever runs with the directory missing, which the recovery removes. Both run the real
+// wrapper against the committed pin, so what is proven is the script a pod runs.
+func TestAClaudeLaunchMakesItsSharedNpmCacheWhateverItFinds(t *testing.T) {
+	pinned := pinnedClaudeCode(t)
+	for name, seed := range map[string]func(t *testing.T, cache string){
+		"a directory another role made first": func(t *testing.T, cache string) {
+			t.Helper()
+			if err := os.MkdirAll(cache, 0o700); err != nil {
+				t.Fatal(err)
+			}
+		},
+		"the regular file an interrupted flock left": func(t *testing.T, cache string) {
+			t.Helper()
+			if err := os.MkdirAll(filepath.Dir(cache), 0o700); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(cache, nil, 0o600); err != nil {
+				t.Fatal(err)
+			}
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			run := runClaudeStart(t, claudeCodeStub(pinned)+"exit 0\n", seed)
+			if run.exit != 0 || !run.agentRan {
+				t.Fatalf("the wrapper exited %d and the agent ran: %v, want the agent started:\n%s",
+					run.exit, run.agentRan, run.stderr)
+			}
+			if info, err := os.Stat(run.cache); err != nil || !info.IsDir() {
+				t.Errorf("the shared npm cache is %v (%v), want the directory npm was pointed at", info, err)
+			}
+		})
 	}
 }
 
@@ -263,7 +589,7 @@ func installLockProbe(t *testing.T, unlock bool) []string {
 	}
 	var wg sync.WaitGroup
 	for _, id := range []string{"a", "b"} {
-		script := startScript(filepath.Join(dir, "state-"+id), 3, testPlugins(), installLockWait(2*time.Second, 3))
+		script := startScript(filepath.Join(dir, "state-"+id), 3, testPlugins(), "", installLockWait(2*time.Second, 3))
 		script = strings.Replace(script, "/usr/local/bin/bun", stub, 1)
 		if unlock {
 			// Everything from flock's own path through the locked directory goes, so the control
@@ -524,7 +850,7 @@ func runStart(t *testing.T, start, bin, bun, cache string, plugins *runtime.Plug
 	if cache == "" {
 		cache = filepath.Join(dir, "cache")
 	}
-	argv := startArgv(filepath.Join(dir, "state"), 3, plugins, setup, agent, installLockWait(2*time.Second, 3))
+	argv := startArgv(filepath.Join(dir, "state"), 3, plugins, "", setup, agent, installLockWait(2*time.Second, 3))
 	if bun != "" {
 		argv[2] = strings.Replace(argv[2], "/usr/local/bin/bun", bun, 1)
 	}
