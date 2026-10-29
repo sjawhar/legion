@@ -214,7 +214,7 @@ func renderTables(steps []stepData) string {
 	resourcesTable(&md, steps)
 	sessionDeliveryTable(&md, steps)
 	commitOrderLockTable(&md, steps)
-	sseTable(&md, steps)
+	liveTable(&md, steps)
 	ungrantedTable(&md, steps)
 	xidTable(&md, steps)
 	routesTable(&md, steps)
@@ -459,19 +459,19 @@ func commitOrderLockTable(md *markdown, steps []stepData) {
 	failedReadsNote(md, marked, "the probe's connect or read of pg_locks", "`commit_order_lock.errors`")
 }
 
-func sseTable(md *markdown, steps []stepData) {
-	md.line("\n## Delivery from sending, and SSE frames\n")
-	md.line("NATS: every issue-topic receipt of a primary event. SSE: the dashboard stream frames that arrived in the window; from write response counts only the frames that carry the primary event of a committed in-window write with a 2xx status.\n")
-	md.header("step", "NATS delivery ms from sent p50 / p99", "SSE frame ms from created_at p50 / p99",
-		"SSE frame ms from write response p50 / p99", "SSE frames", "SSE order violations")
+func liveTable(md *markdown, steps []stepData) {
+	md.line("\n## Delivery from sending, and live socket frames\n")
+	md.line("NATS: every issue-topic receipt of a primary event. Live: the event frames of the dashboard live sockets that arrived in the window; from write response counts only the frames that carry the primary event of a committed in-window write with a 2xx status.\n")
+	md.header("step", "NATS delivery ms from sent p50 / p99", "live frame ms from created_at p50 / p99",
+		"live frame ms from write response p50 / p99", "live frames", "live order violations")
 	unread := false
 	for _, s := range steps {
-		sse, e := s.sum.SSE, s.sum.Events
+		live, e := s.sum.Live, s.sum.Events
 		unread = unread || e.commitsUnread()
-		md.row(s.commitsLabel(), pair(e.DeliveryMsFromSent, p50, p99, 0), pair(sse.FrameMsFromCreatedAt, p50, p99, 0),
-			pair(sse.FrameMsFromWriteResponse, p50, p99, 0), num(float64(sse.Frames), 0), num(float64(sse.OrderViolations), 0))
+		md.row(s.commitsLabel(), pair(e.DeliveryMsFromSent, p50, p99, 0), pair(live.FrameMsFromCreatedAt, p50, p99, 0),
+			pair(live.FrameMsFromWriteResponse, p50, p99, 0), num(float64(live.Frames), 0), num(float64(live.OrderViolations), 0))
 	}
-	commitsUnreadNote(md, unread, "the NATS delivery latencies from sent and the SSE frame latencies from write response (both take only committed writes' primary events)", "show")
+	commitsUnreadNote(md, unread, "the NATS delivery latencies from sent and the live frame latencies from write response (both take only committed writes' primary events)", "show")
 }
 
 func ungrantedTable(md *markdown, steps []stepData) {

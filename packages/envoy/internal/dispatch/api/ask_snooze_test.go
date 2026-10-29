@@ -163,7 +163,7 @@ func TestAskSnoozeHoldsOnePersonUnderAnyCasing(t *testing.T) {
 // A snooze moves only its writer's Inbox, so only that person's other tabs and devices hear of
 // it: each snooze and un-snooze of an issue's or a project document's ask appends a
 // user_state.updated that carries exactly the writer's login and `changed: ["snoozed"]`. Every
-// signed-in stream replays it, so it names neither the ask nor the writer's issue state, nor
+// signed-in feed replays it, so it names neither the ask nor the writer's issue state, nor
 // anyone else - not even another person holding a snooze on the same row. A write that moves
 // nothing announces nothing.
 func TestAskSnoozeAnnouncesItselfToItsWriterAlone(t *testing.T) {

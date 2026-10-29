@@ -167,7 +167,7 @@ func (h *deliveryHub) recompute(view *deliveryView, cause string) {
 		view.body, view.expiry, view.seq = nil, time.Time{}, read.seq
 		for sub := range view.subs {
 			if !sub.told {
-				sub.conn.Send(deliveryLiveRefusal(sub.id, "DELIVERY_NOT_CONFIGURED",
+				sub.conn.Send(liveRefusal(sub.id, "DELIVERY_NOT_CONFIGURED",
 					"delivery is not configured; set delivery_settings through PUT /api/v1/settings/delivery"))
 				sub.told = true
 				sent++
@@ -359,9 +359,23 @@ func (h *deliveryHub) sendLocked(view *deliveryView) int {
 	return sent
 }
 
-// answerLocked sends sub what it needs to hold its view's body: the snapshot, when it holds none,
-// or the delta against its revisions, when anything differs.
+// answerLocked sends sub what it needs to hold its view's body (answerBodyLocked) and, after its
+// first answer, the verdict the hub knows, when it knows one (Subscribe). It reports whether it
+// sent sub a snapshot or a delta.
 func (h *deliveryHub) answerLocked(sub *deliverySub) bool {
+	sent := h.answerBodyLocked(sub)
+	if sub.needsVerdict {
+		sub.needsVerdict = false
+		if h.known {
+			sub.conn.Send(h.freshnessFrameLocked(h.sent))
+		}
+	}
+	return sent
+}
+
+// answerBodyLocked sends sub the snapshot, when it holds none, or the delta against its
+// revisions, when anything differs.
+func (h *deliveryHub) answerBodyLocked(sub *deliverySub) bool {
 	view := sub.view
 	sub.told = false
 	if sub.needsSnapshot {

@@ -1,9 +1,0 @@
-kind: Changed
-body: |-
-    **Breaking:** `DISPATCH_ASSET_STORE_BUCKET` and its S3 reader of earlier builds' assets are
-    removed: a Dispatch that still sets the variable refuses to start, naming it and saying that
-    every server process now keeps its build's dashboard assets in Dispatch's database. Unset it
-    before deploying this release.
-time: 2026-10-28T14:41:30.52245903Z
-custom:
-    Issue: pr2323

@@ -3,17 +3,17 @@
  *  balancer stands in front of a deployment's two pods.
  *
  *  - Each HTTP request and each websocket upgrade goes to the other process from the last one of
- *    its kind, starting with A, so a page's document, its assets, its API calls, its event stream
- *    and its sockets land on both. Its response streams back as it arrives (an event stream
- *    included), and its `Host` and `Origin` reach the process unchanged: both processes serve the
- *    proxy's origin as their dashboard origin (`DISPATCH_SERVER_URL`), which the dev sign-in host
- *    fence and the CSRF guard compare against.
+ *    its kind, starting with A, so a page's document, its assets, its API calls and its sockets
+ *    (its live socket among them) land on both. Its response streams back as it arrives, and its
+ *    `Host` and `Origin` reach the process unchanged: both processes serve the proxy's origin as
+ *    their dashboard origin (`DISPATCH_SERVER_URL`), which the dev sign-in host fence and the CSRF
+ *    guard compare against.
  *  - A request carrying `X-Dispatch-E2E-Process: a|b` goes to that process; failing that, one
  *    carrying the cookie `dispatch-e2e-process=a|b` does, which pins every request of a browser
  *    context, websocket upgrades included. The header wins. Any other value of either is refused
  *    (400), never read as no pin. A pinned request takes no turn from the alternation.
- *  - An HTTP request whose path contains `/_test/` (a `DISPATCH_TEST_HOOKS` route: drop every
- *    event stream, quiesce every document) goes to both processes whatever its pin, since each
+ *  - An HTTP request whose path contains `/_test/` (a `DISPATCH_TEST_HOOKS` route: close every
+ *    live socket, quiesce every document) goes to both processes whatever its pin, since each
  *    holds its own connections and rooms. The answer is A's, or the first non-2xx of A's and B's.
  *  - A path containing `/_proxy/` is the proxy's own and never forwarded: `GET /_proxy/requests`
  *    lists every HTTP request forwarded (`[{path, method, upstream}]`, path with its query), `GET
@@ -173,8 +173,8 @@ function answerOwn(request: Request, path: string): Response {
 
 const listener = Bun.serve<RoundRobinSocket>({
   hostname: "127.0.0.1",
-  // An event stream is silent between the server's 15 s heartbeats, and Bun's default 10 s idle
-  // timeout would cut it before the first one.
+  // A request the server under test is slow to answer sends nothing while it waits, and Bun's
+  // default 10 s idle timeout would cut it; the browser and the server keep their own deadlines.
   idleTimeout: 0,
   port: ports.dispatch.port,
   async fetch(request, server) {

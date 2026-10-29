@@ -390,7 +390,8 @@ test("editing the parent line moves the issue across Children tabs live", async 
     await moverPage.getByRole("button", { name: "Save parent" }).click();
     await expect(moverPage.getByRole("link", { name: newParent.key })).toBeVisible();
 
-    // The new parent's open page hears child.added over SSE and gains the row without a reload.
+    // The new parent's open page hears child.added on the live event feed and gains the row
+    // without a reload.
     const movedRow = parentPage
       .getByRole("tabpanel")
       .getByRole("link", { name: `${mover.key} · Moving decision` });
@@ -758,6 +759,11 @@ test("issue header keeps every control in a shared row on a phone and the whose-
     await testInfo.attach("issue header (390px)", { contentType: "image/png", path: phoneShot });
 
     await page.setViewportSize({ height: 900, width: 1280 });
+    // The shell swaps its phone bar for the sidebar, and the margin its sheet for the column, in
+    // a React commit after the media query's change event. Until then the phone DOM is laid out
+    // under the desktop CSS, which squeezes <main> to its padding at the right edge.
+    await expect(page.getByRole("navigation", { name: "Navigation" })).toBeVisible();
+    await expect(page.getByRole("complementary", { name: "Review margin" })).toBeVisible();
     await expect(indicator).toHaveText("Waiting on you (1)");
     expect(await inView(indicator, 1280)).toBe(true);
     const desktopHeader = await header.boundingBox();

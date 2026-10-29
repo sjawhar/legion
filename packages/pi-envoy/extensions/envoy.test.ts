@@ -5,6 +5,7 @@ import {
   beforeEach,
   describe,
   expect,
+  jest,
   mock,
   setSystemTime,
   spyOn,
@@ -108,6 +109,8 @@ type SessionContext = {
     readonly ensureOnDisk: () => Promise<void>;
   };
   readonly setInterval: (callback: () => void, intervalMs: number) => void;
+  /** The host's `ctx.isIdle()`: false while a turn runs. */
+  readonly isIdle?: () => boolean;
   readonly ui: {
     readonly notify: (message: string, level: "info" | "warning") => void;
     readonly onTerminalInput: (handler: (input: unknown) => void) => () => void;
@@ -519,20 +522,26 @@ afterEach(async () => {
   hostBuiltins.length = 0;
 });
 
+/** A message the extension sent through `pi.sendMessage`, as `createPi()` records it. */
+type Delivery = {
+  readonly content: string;
+  readonly customType?: string;
+  readonly details?: unknown;
+  readonly display?: boolean;
+  readonly options: unknown;
+};
+
+/** An event handler the extension registered through `pi.on`. */
+type EventHandler = (event: unknown, context: SessionContext) => Promise<unknown>;
+
 function createPi(options: { readonly clipboardError?: Error; readonly zod?: typeof z } = {}) {
   clipboardState.error = options.clipboardError;
   const commands: RegisteredCommand[] = [];
   const tools: RegisteredTool[] = [];
-  const handlers = new Map<string, (event: unknown, context: SessionContext) => Promise<unknown>>();
+  const handlers = new Map<string, EventHandler>();
   const renderers = new Map<string, MessageRenderer>();
   const messages: string[] = [];
-  const deliveries: {
-    readonly content: string;
-    readonly customType?: string;
-    readonly details?: unknown;
-    readonly display?: boolean;
-    readonly options: unknown;
-  }[] = [];
+  const deliveries: Delivery[] = [];
   // User turns the extension started, in the order it sent them.
   const userMessages: { readonly content: string; readonly options: unknown }[] = [];
   // Persisted custom entries, in the shape a later `getBranch()` or `getEntries()` returns them.
@@ -805,16 +814,20 @@ const acceptOnce =
       ? { accepted: true, ...(body !== undefined && { body }) }
       : { code: "ACCEPT_ALREADY_ACCEPTED", status: 409 };
 
-/** The accept route's response for `answer` to an accept of `attempt`. */
+/** The accept route's response for `answer` to an accept of `attempt`, carrying back the request's
+ *  key as Dispatch's keyed layer does (`key`), which is what lets the client ask again under it. */
 function acceptResponse(
   attempt: number,
   answer: AcceptAnswer,
-  messageID = DIRECT_MESSAGE_ID
+  messageID = DIRECT_MESSAGE_ID,
+  key: string | null = null
 ): Response {
   if ("reject" in answer) throw new TypeError(answer.reject);
+  const headers: Record<string, string> = { "content-type": "application/json" };
+  if (key !== null) headers["Idempotency-Key"] = key;
   if (!("accepted" in answer)) {
     return new Response(JSON.stringify({ code: answer.code, error: "refused" }), {
-      headers: { "content-type": "application/json" },
+      headers,
       status: answer.status,
     });
   }
@@ -824,7 +837,7 @@ function acceptResponse(
   };
   const body = answer.body === undefined ? DIRECT_MESSAGE_BODY : answer.body;
   return new Response(JSON.stringify(body === null ? accepted : { ...accepted, body }), {
-    headers: { "content-type": "application/json" },
+    headers,
     status: 200,
   });
 }
@@ -835,8 +848,9 @@ function acceptResponse(
  * message call. `entries` are what the session's file already holds, as a restarted session reads
  * them, and `branch` its active branch (the entries by default); every entry the session appends
  * is read back with them. `delivered(n)` resolves once the session has taken `n` deliveries, cards
- * and user turns together, and `recordedWhenDelivered` says how many handled-attempt entries the
- * session had appended when each went out.
+ * and user turns together, `recordedWhenDelivered` says how many handled-attempt entries the
+ * session had appended when each went out, and `sends` holds each of them, in the order the host
+ * was handed them. `idle` is the host's `ctx.isIdle()`, which a context without it lacks.
  */
 async function bootDirectSession(
   query: string,
@@ -855,6 +869,7 @@ async function bootDirectSession(
     readonly sendUserInput?: (text: string, options: unknown) => Promise<UserInputResult>;
     /** The host's `pi.getCommands`. */
     readonly getCommands?: () => readonly HostSlashCommand[];
+    readonly idle?: () => boolean;
   } = {}
 ) {
   process.env.DISPATCH_URL = "http://dispatch.test";
@@ -862,6 +877,7 @@ async function bootDirectSession(
   const accepts: {
     readonly path: string;
     readonly authorization: string | null;
+    readonly key: string | null;
     readonly body: unknown;
   }[] = [];
   const posts: string[] = [];
@@ -870,18 +886,27 @@ async function bootDirectSession(
   const replyWaiters: { readonly count: number; readonly resolve: () => void }[] = [];
   globalThis.fetch = async (input, init) => {
     const url = new URL(input.toString());
+    // This Dispatch runs the keyed layer: its answers to a keyed write carry the key back and its
+    // /healthz says so, so a failed accept is asked again under its key.
+    if (url.pathname === "/healthz") {
+      return new Response(JSON.stringify({ status: "ok", idempotency_keys: true }), {
+        headers: { "content-type": "application/json" },
+      });
+    }
     if (url.pathname.startsWith("/api/v1/messages/")) {
       const authorization = new Headers(init?.headers).get("Authorization");
       if ((init?.method ?? "GET") === "POST" && url.pathname.endsWith("/accept")) {
         accepts.push({
           authorization,
+          key: new Headers(init?.headers).get("Idempotency-Key"),
           body: JSON.parse(init?.body?.toString() ?? "null"),
           path: url.pathname,
         });
         return acceptResponse(
           Number(url.pathname.split("/").at(-2)),
           await (options.accept ?? acceptOnce())(accepts.length),
-          url.pathname.split("/").at(-4)
+          url.pathname.split("/").at(-4),
+          new Headers(init?.headers).get("Idempotency-Key")
         );
       }
       // The session asks Dispatch nothing else about a direct message but its reply: any other
@@ -912,6 +937,7 @@ async function bootDirectSession(
   const handledRecords = () =>
     fixture.entries.filter((entry) => entry.customType === "envoy-dispatch-handled-attempt").length;
   const inputs: { readonly text: string; readonly options: unknown }[] = [];
+  const sends: { readonly content: unknown; readonly options: unknown }[] = [];
   const taken = () => {
     const count = fixture.deliveries.length + fixture.userMessages.length + inputs.length;
     for (const waiter of waiters.splice(0)) {
@@ -926,11 +952,13 @@ async function bootDirectSession(
       options.beforeSend?.();
       recordedWhenDelivered.push(handledRecords());
       fixture.pi.sendMessage(message, sendOptions);
+      sends.push({ content: fixture.deliveries.at(-1)?.content, options: sendOptions });
       taken();
     },
     sendUserMessage: (content: string, sendOptions?: unknown) => {
       options.beforeSend?.();
       recordedWhenDelivered.push(handledRecords());
+      sends.push({ content, options: sendOptions });
       fixture.pi.sendUserMessage(content, sendOptions);
       taken();
     },
@@ -939,6 +967,7 @@ async function bootDirectSession(
         options.beforeSend?.();
         recordedWhenDelivered.push(handledRecords());
         inputs.push({ options: inputOptions, text });
+        sends.push({ content: text, options: inputOptions });
         taken();
         return run(text, inputOptions);
       },
@@ -949,6 +978,7 @@ async function bootDirectSession(
   const base = sessionContext("ses_delivery");
   const context: SessionContext = {
     ...base,
+    ...(options.idle !== undefined && { isIdle: options.idle }),
     sessionManager: {
       ...base.sessionManager,
       getBranch: () => options.branch ?? [...prior, ...fixture.entries],
@@ -981,7 +1011,30 @@ async function bootDirectSession(
     recordedWhenDelivered,
     replied,
     replies,
+    sends,
   };
+}
+
+/**
+ * Settles `pending` on the test's clock (`jest.useFakeTimers`, on for the call), moving it a
+ * second at a time: a write Dispatch keeps failing is asked again under its key until the
+ * accept's 10 s bound, and those pauses and that bound pass at once rather than in real time.
+ */
+async function onTestClock<T>(pending: () => Promise<T>): Promise<T> {
+  jest.useFakeTimers();
+  try {
+    let settled = false;
+    const watched = pending().finally(() => {
+      settled = true;
+    });
+    for (let second = 0; second < 60 && !settled; second++) {
+      for (let flush = 0; flush < 50 && !settled; flush++) await Promise.resolve();
+      jest.advanceTimersByTime(1_000);
+    }
+    return await watched;
+  } finally {
+    jest.useRealTimers();
+  }
 }
 
 function response(body: unknown): Response {
@@ -10336,30 +10389,173 @@ console.log(JSON.stringify(args));
     ]);
   });
 
-  test("delivers targeted aside and steer frames through their requested primary-turn modes", async () => {
-    globalThis.fetch = async (input, init) => responseWithRegistration(input, init, {});
-    const { default: envoyExtension } = await import("./envoy.ts?targeted-modes");
-    const fixture = createPi();
-    const delivered = Promise.withResolvers<void>();
-    envoyExtension({
-      ...fixture.pi,
-      sendMessage: (message, options) => {
-        fixture.pi.sendMessage(message, options);
-        if (fixture.deliveries.length === 2) delivered.resolve();
-      },
+  test("delivers a targeted Steer card as an aside while a turn runs and an Aside always as one", async () => {
+    let idle = false;
+    const { agent, delivered, fixture } = await bootDirectSession("targeted-modes", {
+      idle: () => idle,
     });
-    await fixture.handlers.get("session_start")?.({}, sessionContext("ses_delivery"));
-    const agent = natsState.controls.get("notifications.agent.ses_delivery");
-    if (agent === undefined) throw new Error("agent subject was not subscribed");
 
-    agent.push(targetedDispatchEnvelope("aside", "targeted-aside"));
-    agent.push(targetedDispatchEnvelope("steer", "targeted-steer"));
-    await delivered.promise;
+    agent.push(targetedDispatchEnvelope("aside", "targeted-aside-running"));
+    agent.push(targetedDispatchEnvelope("steer", "targeted-steer-running"));
+    await delivered(2);
+    idle = true;
+    agent.push(targetedDispatchEnvelope("aside", "targeted-aside-idle"));
+    agent.push(targetedDispatchEnvelope("steer", "targeted-steer-idle"));
+    await delivered(4);
 
     expect(fixture.deliveries.map((delivery) => delivery.options)).toEqual([
       { deliverAs: "aside", triggerTurn: true },
+      { deliverAs: "aside", triggerTurn: true },
+      { deliverAs: "aside", triggerTurn: true },
       { deliverAs: "steer", triggerTurn: true },
     ]);
+  });
+
+  // The wake for a card the host folds with no turn (`../src/card-wake.ts`, where its rules are
+  // tested) hears of runs, interrupts and the session's end only through this extension's own
+  // handlers. Each row starts a run, sends one card while the host is busy, folds it (its
+  // `message_end` with the host idle) and fires the row's host events, the send and the fold each
+  // before or after them; an event the row marks "idle" finds the host idle, and any other finds
+  // it busy until the fold. The check the fold arms waits on the host's timer until all of that is
+  // through, and the row says whether a wake follows.
+  describe("the wake for a folded card, through the extension's handlers", () => {
+    const busyCard = { deliverAs: "aside", triggerTurn: true };
+    const wake = { deliverAs: "nextTurn", triggerTurn: true };
+    type HostEvent = readonly [event: string, payload: unknown, host?: "idle"];
+    type FoldRow = readonly [
+      name: string,
+      events: readonly HostEvent[],
+      sendAt: "before" | "after",
+      foldAt: "before" | "after",
+      wakes: boolean,
+    ];
+    const rows: readonly FoldRow[] = [
+      ["no host event", [], "before", "before", true],
+      [
+        "an interrupted automatic compaction",
+        [["auto_compaction_end", { aborted: true }]],
+        "before",
+        "after",
+        false,
+      ],
+      [
+        "a retry an interrupt cancelled",
+        [["auto_retry_end", { success: false, finalError: "Retry cancelled" }]],
+        "before",
+        "after",
+        false,
+      ],
+      [
+        "an announced session switch",
+        [["session_before_switch", { reason: "resume" }]],
+        "before",
+        "before",
+        false,
+      ],
+      ["a session switch", [["session_switch", { reason: "resume" }]], "before", "before", false],
+      ["shutdown", [["session_shutdown", {}]], "before", "before", false],
+      // The host's dispose flushes the asides it still holds after shutdown.
+      ["shutdown", [["session_shutdown", {}]], "before", "after", false],
+      // The run is over, and a card sent while the host settles or sets the next prompt up gets
+      // none.
+      ["the run's end", [["agent_end", { messages: [] }]], "after", "after", false],
+      // A switch to a new session and a manual compaction abort the run with the agent
+      // disconnected, so no agent_end comes; the abort leaves the host idle at the event.
+      [
+        "a switch to a new session",
+        [["session_switch", { reason: "new" }, "idle"]],
+        "after",
+        "after",
+        false,
+      ],
+      ["a manual compaction", [["session_compact", {}, "idle"]], "after", "after", false],
+      // A prompt sent from idle: whatever run the host dropped unseen is over.
+      [
+        "a typed input on an idle host",
+        [["input", { text: "next", source: "rpc" }, "idle"]],
+        "after",
+        "after",
+        false,
+      ],
+      // These find the host busy with the run, which goes on, in whatever order an automatic
+      // compaction's events arrive.
+      ["a fork", [["session_switch", { reason: "fork" }]], "after", "after", true],
+      [
+        "an automatic compaction",
+        [
+          ["session_compact", {}],
+          ["auto_compaction_end", { aborted: false }],
+        ],
+        "after",
+        "after",
+        true,
+      ],
+      [
+        "an automatic compaction whose end arrives first",
+        [
+          ["auto_compaction_end", { aborted: false }],
+          ["session_compact", {}],
+        ],
+        "after",
+        "after",
+        true,
+      ],
+      [
+        "a typed input on a busy host",
+        [["input", { text: "steer", source: "rpc" }]],
+        "after",
+        "after",
+        true,
+      ],
+    ];
+    for (const [index, [name, events, sendAt, foldAt, wakes]] of rows.entries()) {
+      test(`${wakes ? "wakes" : "sends no wake"} for a card sent ${sendAt} and folded ${foldAt} ${name}`, async () => {
+        let idle = false;
+        const { context, delivered, fixture } = await bootDirectSession(`folded-card-${index}`, {
+          idle: () => idle,
+        });
+        const timers: (() => void | Promise<void>)[] = [];
+        const held: SessionContext = {
+          ...context,
+          setTimeout: (callback) => {
+            timers.push(callback);
+          },
+        };
+        const send = async (): Promise<void> => {
+          natsState.controls
+            .get("notifications.agent.ses_delivery")
+            ?.push(forwardedRoleEnvelope("legion-controller", "a card", `folded-card-${index}`));
+          await delivered(1);
+        };
+        const fold = async (): Promise<void> => {
+          const card = fixture.deliveries[0];
+          if (card === undefined) throw new Error("the card was not sent");
+          idle = true;
+          const { options: _options, ...record } = card;
+          await fixture.handlers.get("message_end")?.(
+            { message: { role: "custom", ...record } },
+            held
+          );
+        };
+
+        await fixture.handlers.get("agent_start")?.({}, context);
+        if (sendAt === "before") await send();
+        if (foldAt === "before") await fold();
+        for (const [event, payload, host] of events) {
+          const was = idle;
+          if (host === "idle") idle = true;
+          await fixture.handlers.get(event)?.(payload, context);
+          idle = was;
+        }
+        if (sendAt === "after") await send();
+        if (foldAt === "after") await fold();
+        for (const timer of timers.splice(0)) await timer();
+
+        expect(fixture.deliveries.map((delivery) => delivery.options)).toEqual(
+          wakes ? [busyCard, wake] : [busyCard]
+        );
+      });
+    }
   });
 
   // A person's Send or Aside from the Agents page is the user's own turn, as if typed at the
@@ -10377,6 +10573,8 @@ console.log(JSON.stringify(args));
       expect(accepts).toEqual([
         {
           authorization: "Bearer dispatch-token",
+          // The accept is a write, so it carries an Idempotency-Key of its own.
+          key: expect.stringMatching(/^[A-Za-z0-9._:-]{1,128}$/),
           body: { actor: { id: "ses_delivery", kind: "session" } },
           path: `/api/v1/messages/${DIRECT_MESSAGE_ID}/deliveries/1/accept`,
         },
@@ -10431,30 +10629,109 @@ console.log(JSON.stringify(args));
       });
     }
 
+    // While a turn runs the host queues a steer, which is what a Send is (`sendUserInput` with no
+    // `deliverAs`), and drains that queue one message per turn, first in, first out; an aside it
+    // folds in at the next step instead. Cards that went as steers held a person's Send back one
+    // turn each, so the cards go as asides and the Send is the head of the steering queue.
+    test("is the head of the host's steering queue when cards arrived before it in a running turn", async () => {
+      const { agent, delivered, sends } = await bootDirectSession("direct-send-ahead-of-cards", {
+        accept: () => ({ accepted: true }),
+        idle: () => false,
+        sendUserInput: async () => ({ handled: "prompt" }),
+      });
+
+      for (const n of [1, 2, 3]) {
+        agent.push(forwardedRoleEnvelope("legion-controller", `notification ${n}`, `card-${n}`));
+      }
+      agent.push(directDispatchEnvelope("steer", "direct-send-ahead-of-cards"));
+      await delivered(4);
+
+      const deliverAs = (options: unknown): unknown =>
+        typeof options === "object" && options !== null && "deliverAs" in options
+          ? options.deliverAs
+          : undefined;
+      const queued = (mode: "aside" | "steer") =>
+        sends
+          .filter(({ options }) => (deliverAs(options) ?? "steer") === mode)
+          .map(({ content }) => String(content));
+      expect(queued("steer")).toEqual([DIRECT_MESSAGE_BODY]);
+      const asides = queued("aside");
+      expect(asides).toHaveLength(3);
+      for (const [index, card] of asides.entries()) {
+        expect(card).toContain(`notification ${index + 1}`);
+      }
+      expect(
+        sends.filter(({ options }) => deliverAs(options) === "aside").map(({ options }) => options)
+      ).toEqual(Array(3).fill({ deliverAs: "aside", triggerTurn: true }));
+    });
+
+    // An idle session has no steering queue to wait in. The host starts a turn for a steer with
+    // `triggerTurn` after an interrupt (an Esc, or the RPC `abort` a Legion daemon sends) and in
+    // plan mode too, where an idle aside folds into the context with no turn.
+    test("leaves a card that reaches an idle session a steer that starts a turn", async () => {
+      const { agent, delivered, sends } = await bootDirectSession("idle-card-starts-a-turn", {
+        idle: () => true,
+        sendUserInput: async () => ({ handled: "prompt" }),
+      });
+
+      agent.push(forwardedRoleEnvelope("legion-controller", "wake up", "idle-card"));
+      await delivered(1);
+
+      expect(sends).toHaveLength(1);
+      expect(String(sends[0]?.content)).toContain("wake up");
+      expect(sends[0]?.options).toEqual({ deliverAs: "steer", triggerTurn: true });
+    });
+
+    // The Legion entry names its controller's session in the start-turn mark from its
+    // `session_start` until the start turn runs (`../src/card-wake`): an idle card there, in any
+    // mode, is a follow-up that starts no turn, so the start message keeps the first turn. A mark
+    // naming another session (a `task` subagent's) changes nothing.
+    test("sends a card that reaches an idle session the start-turn mark names as a follow-up that starts no turn, and leaves it a steer under another session's mark", async () => {
+      const { agent, delivered, sends } = await bootDirectSession("idle-card-start-turn", {
+        idle: () => true,
+      });
+      const iface = envoyPluginInterface();
+
+      iface.startupTurn = { session: "ses_delivery", sentAt: undefined };
+      agent.push(forwardedRoleEnvelope("legion-controller", "early card", "start-turn-card"));
+      await delivered(1);
+      expect(sends[0]?.options).toEqual({ deliverAs: "followUp", triggerTurn: false });
+
+      iface.startupTurn = { session: "ses_task_subagent", sentAt: undefined };
+      agent.push(forwardedRoleEnvelope("legion-controller", "other mark", "other-mark-card"));
+      await delivered(2);
+      expect(sends[1]?.options).toEqual({ deliverAs: "steer", triggerTurn: true });
+    });
+
     // Only Dispatch's 200 makes a turn: whatever it refuses, and whatever keeps it from answering,
-    // keeps the card, and the session posts nothing and injects nothing.
-    for (const [name, answer] of [
-      ["another frame already took it", { code: "ACCEPT_ALREADY_ACCEPTED", status: 409 }],
-      ["a later attempt superseded it", { code: "ACCEPT_SUPERSEDED", status: 409 }],
-      ["it names another session's attempt", { code: "ACCEPT_FORBIDDEN", status: 403 }],
-      ["it is no direct message to this session", { code: "ACCEPT_NOT_DIRECT", status: 409 }],
-      ["a session wrote it", { code: "ACCEPT_NOT_WRITTEN_BY_PERSON", status: 409 }],
-      ["its attempt is a BTW", { code: "ACCEPT_NOT_ASIDE_OR_STEER", status: 409 }],
-      ["Dispatch refuses the session's token", { code: "UNAUTHORIZED", status: 401 }],
-      ["Dispatch predates the accept route", { status: 404 }],
-      ["Dispatch fails", { status: 500 }],
-      ["the accept never reaches Dispatch", { reject: "fetch failed" }],
+    // keeps the card, and the session posts nothing and injects nothing. A failure that can clear
+    // (a 5xx, a transport failure) is asked again under the accept's one key, at 0, 1, 3 and 7 s,
+    // until the accept's 10 s bound cuts the next pause; a refusal is the answer at once.
+    for (const [name, answer, attempts] of [
+      ["another frame already took it", { code: "ACCEPT_ALREADY_ACCEPTED", status: 409 }, 1],
+      ["a later attempt superseded it", { code: "ACCEPT_SUPERSEDED", status: 409 }, 1],
+      ["it names another session's attempt", { code: "ACCEPT_FORBIDDEN", status: 403 }, 1],
+      ["it is no direct message to this session", { code: "ACCEPT_NOT_DIRECT", status: 409 }, 1],
+      ["a session wrote it", { code: "ACCEPT_NOT_WRITTEN_BY_PERSON", status: 409 }, 1],
+      ["its attempt is a BTW", { code: "ACCEPT_NOT_ASIDE_OR_STEER", status: 409 }, 1],
+      ["Dispatch refuses the session's token", { code: "UNAUTHORIZED", status: 401 }, 1],
+      ["Dispatch predates the accept route", { status: 404 }, 1],
+      ["Dispatch fails", { status: 500 }, 4],
+      ["the accept never reaches Dispatch", { reject: "fetch failed" }, 4],
       // A 200 that carries no stored body has nothing to inject.
-      ["Dispatch accepts it without the stored body", { accepted: true, body: null }],
-    ] as const satisfies readonly (readonly [string, AcceptAnswer])[]) {
+      ["Dispatch accepts it without the stored body", { accepted: true, body: null }, 1],
+    ] as const satisfies readonly (readonly [string, AcceptAnswer, number])[]) {
       test(`stays a card when ${name}`, async () => {
         const { accepts, agent, delivered, fixture, posts, recordedWhenDelivered } =
           await bootDirectSession(`direct-accept-refused-${name}`, { accept: () => answer });
 
-        agent.push(directDispatchEnvelope("steer", `direct-accept-refused-${name}`));
-        await delivered(1);
+        await onTestClock(() => {
+          agent.push(directDispatchEnvelope("steer", `direct-accept-refused-${name}`));
+          return delivered(1);
+        });
 
-        expect(accepts).toHaveLength(1);
+        expect(accepts).toHaveLength(attempts);
+        expect(new Set(accepts.map((accept) => accept.key)).size).toBe(1);
         expect(fixture.userMessages).toEqual([]);
         expect(fixture.deliveries.map((delivery) => delivery.customType)).toEqual([
           "envoy-message",
@@ -10464,6 +10741,28 @@ console.log(JSON.stringify(args));
         expect(recordedWhenDelivered).toEqual([1]);
       });
     }
+
+    // A failure that can clear is no answer: the accept asks again under its key, and Dispatch's
+    // answer to the retry decides, so a Send whose first answer was lost is still the person's turn.
+    test("is the user's turn when the accept's first attempt fails in transport and its retry is accepted", async () => {
+      const { accepts, agent, delivered, fixture } = await bootDirectSession(
+        "direct-accept-retried",
+        { accept: (count) => (count === 1 ? { reject: "fetch failed" } : { accepted: true }) }
+      );
+
+      await onTestClock(() => {
+        agent.push(directDispatchEnvelope("steer", "direct-accept-retried"));
+        return delivered(1);
+      });
+
+      expect(accepts.map((accept) => accept.path)).toEqual([
+        `/api/v1/messages/${DIRECT_MESSAGE_ID}/deliveries/1/accept`,
+        `/api/v1/messages/${DIRECT_MESSAGE_ID}/deliveries/1/accept`,
+      ]);
+      expect(accepts[1]?.key).toBe(accepts[0]?.key as string);
+      expect(fixture.deliveries).toEqual([]);
+      expect(fixture.userMessages).toEqual([{ content: DIRECT_MESSAGE_BODY, options: undefined }]);
+    });
 
     // The ways a session could otherwise make a person's message a fresh user turn (Deep's
     // reviews of #1592): Dispatch refuses the first three, and the session itself the rest.
@@ -10544,24 +10843,29 @@ console.log(JSON.stringify(args));
     });
 
     test("a person's retry of a Send that arrived as a card is a user turn", async () => {
+      // Dispatch stays unreachable through the first attempt's four tries, so that Send is a card.
       const { accepts, agent, delivered, fixture } = await bootDirectSession(
         "direct-carded-retry",
         {
           accept: (count) =>
-            count === 1 ? { reject: "fetch failed" } : { accepted: true, delivery: "aside" },
+            count <= 4 ? { reject: "fetch failed" } : { accepted: true, delivery: "aside" },
         }
       );
 
-      agent.push(directDispatchEnvelope("steer", "direct-carded-retry-1"));
-      await delivered(1);
+      await onTestClock(() => {
+        agent.push(directDispatchEnvelope("steer", "direct-carded-retry-1"));
+        return delivered(1);
+      });
       // The person's retry is an attempt of its own, which the session has not delivered.
       agent.push(directDispatchEnvelope("aside", "direct-carded-retry-2", { attempt: 2 }));
       await delivered(2);
 
       expect(accepts.map((accept) => accept.path)).toEqual([
-        `/api/v1/messages/${DIRECT_MESSAGE_ID}/deliveries/1/accept`,
+        ...Array<string>(4).fill(`/api/v1/messages/${DIRECT_MESSAGE_ID}/deliveries/1/accept`),
         `/api/v1/messages/${DIRECT_MESSAGE_ID}/deliveries/2/accept`,
       ]);
+      // The person's retry is a write of its own, under a key of its own.
+      expect(accepts[4]?.key).not.toBe(accepts[0]?.key as string);
       expect(fixture.deliveries).toHaveLength(1);
       expect(fixture.userMessages).toEqual([
         { content: DIRECT_MESSAGE_BODY, options: { deliverAs: "aside" } },
@@ -14251,21 +14555,17 @@ console.log(JSON.stringify(args));
     ).toHaveLength(1);
   });
 
-  test("inbound envoy messages deliver as steering so they interrupt an in-flight turn", async () => {
-    globalThis.fetch = async (input, init) => responseWithRegistration(input, init, []);
-    const { default: envoyExtension } = await import("./envoy.ts?deliver-as-steer");
-    const fixture = createPi();
+  // A context without `isIdle` cannot say no turn runs, and the wake for a folded card needs it, so
+  // its cards stay steers with `triggerTurn`: an aside there could fold into the context with no
+  // turn after an interrupt or in plan mode, where a steer starts one.
+  test("delivers an inbound card as a steer on a host that reports no idle state", async () => {
+    const { agent, delivered, fixture } = await bootDirectSession("deliver-as-steer");
 
-    envoyExtension(fixture.pi);
-    await fixture.handlers.get("session_start")?.({}, sessionContext("ses_steer"));
-    const controls = natsState.controls.get("notifications.agent.ses_steer");
-    expect(controls).toBeDefined();
-
-    controls?.push(forwardedRoleEnvelope("legion-controller", "steer me mid-turn", "steer"));
-    await new Promise((resolve) => setTimeout(resolve, 10));
+    agent.push(forwardedRoleEnvelope("legion-controller", "steer me in", "steer"));
+    await delivered(1);
 
     expect(fixture.deliveries.length).toBe(1);
-    expect(fixture.deliveries[0]?.content).toContain("steer me mid-turn");
+    expect(fixture.deliveries[0]?.content).toContain("steer me in");
     expect(fixture.deliveries[0]?.options).toEqual({ deliverAs: "steer", triggerTurn: true });
   });
 
@@ -14903,10 +15203,12 @@ describe("messages missed while the subscription was down", () => {
     dispatch?: (url: URL) => Promise<Response | undefined>
   ): typeof fetch {
     return (async (input: string | URL | Request, init?: RequestInit) => {
-      const url = new URL(input.toString());
+      const request =
+        input instanceof Request ? new Request(input, init) : new Request(input.toString(), init);
+      const url = new URL(request.url);
       const answered = await dispatch?.(url);
       if (answered !== undefined) return answered;
-      const body = JSON.parse(init?.body?.toString() ?? "{}") as {
+      const body = (request.method === "GET" ? {} : await request.json()) as {
         readonly session_id: string;
         readonly dir?: string;
         readonly topics: readonly string[];
@@ -15210,7 +15512,8 @@ describe("messages missed while the subscription was down", () => {
 
       const [card] = session.cards("evt-own-iterator");
       expect(card?.content).toContain("while this session's connection was down");
-      expect(card?.options).toEqual({ deliverAs: "steer", triggerTurn: true });
+      // The host's turn streams, so the card goes as an aside (`../src/card-wake`).
+      expect(card?.options).toEqual({ deliverAs: "aside", triggerTurn: true });
       await session.stillOnce(session.agentSubject, frame, "evt-own-iterator");
     });
 
@@ -16342,7 +16645,9 @@ describe("messages missed while the subscription was down", () => {
         readonly entries?: readonly unknown[];
       } = {}
     ) {
-      process.env.DISPATCH_URL = "http://dispatch.test";
+      // DispatchClient remembers whether an origin runs keyed writes. A different test's answer
+      // must not turn this reply fixture's unkeyed 503 into a timed retry.
+      process.env.DISPATCH_URL = `http://${query}.dispatch.test`;
       process.env.DISPATCH_TOKEN = "dispatch-token";
       const replies: unknown[] = [];
       const session = await bootReplay(query, model, {

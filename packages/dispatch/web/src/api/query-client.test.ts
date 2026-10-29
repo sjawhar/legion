@@ -166,10 +166,11 @@ test("a read refused without Retry-After is retried at 500 ms", async () => {
 });
 
 test("a read refused with a Retry-After longer than a minute still retries within a minute", () => {
-  // A proxy in front of Dispatch may answer a day, or more than setTimeout can hold; a page read
-  // that waits that long shows its spinner with no error and no Retry for days.
+  // A proxy in front of Dispatch may answer a day, or more than setTimeout can hold, with a 503 that
+  // carries no Dispatch code; a page read that waits that long shows its spinner with no error and
+  // no Retry for days.
   for (const seconds of [86_400, 4_294_968]) {
-    const refusal = new ApiError(503, { code: "OVERLOADED", error: "busy" }, seconds * 1_000);
+    const refusal = new ApiError(503, { error: "service unavailable" }, seconds * 1_000);
     for (const draw of [0, 0.9999]) {
       const wait = queryRetryDelay(0, refusal, () => draw);
       expect(wait).toBeGreaterThan(0);

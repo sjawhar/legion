@@ -223,9 +223,11 @@ Each key is an issue role (`architect`, `planner`, `implementer`, `tester`, `rev
 and each value `omp` or `claude`; a role left out runs on Oh My Pi. What each harness may run is
 one table, `runtime.Backends` (`packages/daemon/internal/runtime/backend.go`): Claude Code runs the
 phase workers alone, since an architect is woken by notices on its Envoy role topic and Claude
-Code's print mode delivers no channel notification, and only under `runtime: tmux`, since the
-worker image carries no Claude Code. The loader refuses a role on a harness that does not run it,
-naming both, a role named twice, any other value, and `claude` under `runtime: kubernetes`. The
+Code's print mode delivers no channel notification, and it runs them under either runtime — a tmux
+pane here, and an issue pod under `runtime: kubernetes`, whose worker image carries the
+claude-envoy plugin and Claude Code's pin, from which the pod installs and verifies the pinned
+Claude Code at every launch (`docs/kubernetes.md`). The loader refuses a role on a harness that does
+not run it, naming both, a role named twice, and any other value. The
 controller always runs on Oh My Pi.
 
 For such a role the pane's shim runs `legion claude-bridge -- claude -p --input-format stream-json
@@ -235,7 +237,8 @@ takes, and the bridge answers an Envoy delivery only then, so claude-envoy count
 taken only once Claude Code has it.
 The claim's own Claude Code directory, `<state_dir>/claude/<claim token>`, is the pane's
 `CLAUDE_CONFIG_DIR`: it holds the transcript, the MCP configuration the daemon writes (one server,
-`legion`, running claude-envoy's `dist/envoy-channel.js` on bun) and the bridge's phase-stall state,
+`legion`, running claude-envoy's `dist/envoy-channel.js` on bun) and that server's phase-reminder
+state file, one per session,
 and it outlives every launch of the claim. A fresh launch passes `--session-id <new id>`; a
 relaunch passes `--resume <id>`, read from the transcript the claim registered, so a killed pane
 comes back as the same Claude Code session. A role moved to Claude Code since its session was
@@ -246,8 +249,8 @@ session header is missing or malformed. The file was not modified.`, and leaves 
 were, so the launch fails loudly rather than starting a fresh agent
 (`packages/daemon/internal/runtime/tmux/resume_omp_test.go` holds the real binary to this).
 
-Boot resolves three things from the daemon's environment, and `legion start --check-config` makes
-the same refusals:
+tmux's boot resolves three things from the daemon's environment, and `legion start --check-config`
+makes the same refusals:
 
 - `LEGION_CLAUDE_PATH`, the `claude` executable, else the first `claude` on `PATH`;
 - `LEGION_BUN_PATH`, the `bun` the MCP server runs on, else the first `bun` on `PATH`;
@@ -262,26 +265,44 @@ the same refusals:
   commit lands. That leaves the checkout's tracked files as they are, so its next `git pull`
   fast-forwards.
 
-A missing one refuses the boot, naming every gap in one line. The daemon names no model for Claude
-Code. Its key reaches it the way an Oh My Pi pane's does: `provider_keys` (for example
+A missing one refuses the boot, naming every gap in one line. The three are tmux's alone: a pod
+resolves nothing. Its bun and its claude-envoy root are the worker image's, at fixed paths
+(`/usr/local/bin/bun`, `/opt/legion/claude-envoy`), which the runtime treats as image-owned so no
+operator mount can hide them. Its `claude` is not the image's: the image carries Claude Code's pin,
+`/opt/legion/claude-code`, and no Claude Code, since its licence grants no redistribution and the
+image is public, so the pod's start script installs the pinned release at every launch into the
+generation's own directory on the issue's volume, holds it to the lockfile's integrity and the
+pinned version, and fails the launch, loudly, when the fetch fails or does not verify. The launch
+shapes both runtimes build from those paths — the agent command, the session id and transcript
+rules, the MCP document and Claude Code's own variables — are one package,
+`packages/daemon/internal/claudelaunch`; the pod's side of it is in `docs/kubernetes.md`.
+
+The daemon names no model for Claude Code under either runtime. In a pane its key reaches it the
+way an Oh My Pi pane's does: `provider_keys` (for example
 `ANTHROPIC_API_KEY: <secretsd key>`) is exported by the shim into `legion claude-bridge`'s
 environment, which Claude Code inherits, and into every Oh My Pi pane's as well. A key meant for the
 Claude Code roles alone goes in the claim's directory instead, before the claim first launches: a
 `settings.json` there whose `apiKeyHelper` prints the key, as `scripts/e2e/claude-backend-tmux.sh`,
-the live proof, writes it.
+the live proof, writes it. In a pod the route is the operator's the same way: `provider_keys`
+carries `ANTHROPIC_API_KEY`, and `ANTHROPIC_BASE_URL` and `ANTHROPIC_MODEL`, which are not
+credentials, go in `runtime.kubernetes.pod.env` (`docs/kubernetes.md`, "Configuration").
 
 ### How a harness plugs in
 
 Every harness runs behind `legion worker-shim`, which speaks Oh My Pi's RPC frames to it
 (`legion claude-bridge` translates them for Claude Code), so the worker stream and supervision do
-not know which harness a pane runs. A harness is three pieces in the daemon:
+not know which harness a process runs. A harness is four pieces in the daemon:
 
 - its row in `runtime.Backends`: the roles it runs, the runtimes that launch it, the daemon prompt
   part its launches are told after their role's parts (Claude Code's is
   `internal/prompts/go/claude-mechanics.md`);
 - a `Launcher` in `internal/runtime/tmux`: the command the shim runs, the extra `-e` pairs of its
   pane, and the marker its pane's command line holds;
-- a boot resolver in `internal/daemon/launchers.go`, which finds what its launch needs on the host.
+- a boot resolver in `internal/daemon/launchers.go`, which finds what its launch needs on the host;
+- the Kubernetes runtime's own branch in `internal/runtime/sandbox`, which builds the same launch
+  from the worker image's paths instead: the pod's agent command, the files its launcher writes,
+  the variables its start command tells the role, and the rule for the session a replacement pod
+  resumes.
 
 Boot resolves a launch for each harness `worker_backends` uses (`legion start --check-config` makes
 the same refusals), and the tmux runtime refuses a launch on a harness it has no launcher for. A

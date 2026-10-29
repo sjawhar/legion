@@ -24,6 +24,7 @@ import (
 	"github.com/sjawhar/envoy/internal/bus"
 	"github.com/sjawhar/envoy/internal/contracts"
 	"github.com/sjawhar/envoy/internal/kvwatch"
+	"github.com/sjawhar/envoy/internal/logtest"
 	"github.com/sjawhar/envoy/internal/testnats"
 )
 
@@ -1968,9 +1969,7 @@ func assertInterestMissing(t *testing.T, reg *Registry, sessionID string) {
 func captureRegistryLogs(t *testing.T) *lockedBuffer {
 	t.Helper()
 	var logs lockedBuffer
-	previous := slog.Default()
-	slog.SetDefault(slog.New(slog.NewTextHandler(&logs, nil)))
-	t.Cleanup(func() { slog.SetDefault(previous) })
+	logtest.SetDefault(t, slog.NewTextHandler(&logs, nil))
 	return &logs
 }
 
