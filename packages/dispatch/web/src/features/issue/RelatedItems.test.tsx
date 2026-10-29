@@ -5,7 +5,8 @@ import { MemoryRouter } from "react-router-dom";
 
 import { api } from "../../api/client";
 import type { Suggestions, WriteSuggestion } from "../../api/types";
-import { RELATED_DEBOUNCE_MS, RelatedItems } from "./RelatedItems";
+import { RelatedItems } from "./RelatedItems";
+import { RELATED_DEBOUNCE_MS } from "./related-timing";
 
 const answer = { at: "2026-10-01T00:00:00Z", selected: [], text: null, user: "alice" };
 

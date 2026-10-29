@@ -15,12 +15,7 @@ import { statusText } from "../project/board-model";
 import { Timestamp } from "../refs/Timestamp";
 import { AskHitStatus } from "../search/AskHitStatus";
 import { kindLabel } from "../search/search-model";
-
-/** How long the title rests before the check is asked: typing sends no request per keystroke. */
-export const RELATED_DEBOUNCE_MS = 400;
-
-/** Shorter than this, every item in the project would match, so nothing is asked. */
-const RELATED_TITLE_MIN = 2;
+import { RELATED_DEBOUNCE_MS, RELATED_TITLE_MIN } from "./related-timing";
 
 /**
  * The check's answer for the title in the box, and whether that answer is still out. The query
