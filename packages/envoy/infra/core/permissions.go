@@ -47,7 +47,12 @@ var listenerBuckets = []string{bus.InterestBucket, bus.RoleClaimBucket, bus.Sess
 //   - for each bucket of listenerBuckets in turn, the calls nats.go's KV makes: the bucket's stream
 //     info and create, direct and stream message gets, writes to its keys, its watchers' consumer
 //     create and delete, and their flow-control replies;
-//   - the purge of the interest bucket, which its delete-marker collection sends.
+//   - the purge of the interest bucket, which its delete-marker collection sends, and the update
+//     of the session bucket's own stream, the one call that raises that bucket's MaxAge: nats.go
+//     creates a KV bucket and never updates one, so the listener changes the session window
+//     (session.SessionTTL) through `$JS.API.STREAM.UPDATE.KV_envoy_sessions` and through nothing
+//     wider. The subject names that one stream: no other stream, and no other bucket, is updatable
+//     under it.
 //
 // Subscribe: reply inboxes, then the role lanes in the machine's queue group (bus.ListenerQueue).
 func ListenerPermissions(machineID string) Permissions {
@@ -66,7 +71,10 @@ func ListenerPermissions(machineID string) Permissions {
 	for _, bucket := range listenerBuckets {
 		publish = append(publish, bucketPermissions(bucket)...)
 	}
-	publish = append(publish, jsAPI+"STREAM.PURGE."+kvStream+bus.InterestBucket)
+	publish = append(publish,
+		jsAPI+"STREAM.PURGE."+kvStream+bus.InterestBucket,
+		jsAPI+"STREAM.UPDATE."+kvStream+bus.SessionBucket,
+	)
 	return Permissions{
 		Publish:   Rules{Allow: publish},
 		Subscribe: Rules{Allow: []string{inboxes, contracts.RoleTopicPrefix + "> " + bus.ListenerQueue(machineID)}},

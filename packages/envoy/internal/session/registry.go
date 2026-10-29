@@ -16,6 +16,18 @@ import (
 	"github.com/sjawhar/envoy/internal/kvwatch"
 )
 
+// SessionTTL is how long the envoy_sessions bucket keeps a session's registration after its last
+// heartbeat, and so how long a session that stops heartbeating still resolves: the bucket's MaxAge,
+// and the window every reader of the registry prunes against. A session whose process stalls past
+// it drops out of the registry and a peer's send to it is refused `no live session` although the
+// session is alive and resumes, so the window is the false-dead window of a stall. Ten minutes
+// halves how often an ordinary stall under load reaches it; it is also how long a session that has
+// really ended goes on resolving, which costs a sender one refused delivery of its own.
+//
+// OpenSessionRegistry creates the bucket with it and raises a deployed bucket that holds less
+// (bus.RaiseKeyValueMaxAge), so this constant is where the window is declared.
+const SessionTTL = 10 * time.Minute
+
 type SessionEntry struct {
 	Port         int      `json:"port"`
 	MachineID    string   `json:"machine_id"`
@@ -126,7 +138,7 @@ type SessionRegistry struct {
 }
 
 func OpenSessionRegistry(conn *nats.Conn, options ...SessionRegistryOption) (*SessionRegistry, error) {
-	opts := sessionRegistryOpts{replicas: 1, ttl: 5 * time.Minute}
+	opts := sessionRegistryOpts{replicas: 1, ttl: SessionTTL}
 	for _, o := range options {
 		o(&opts)
 	}
@@ -143,16 +155,31 @@ func OpenSessionRegistry(conn *nats.Conn, options ...SessionRegistryOption) (*Se
 	if err != nil {
 		return nil, err
 	}
-	// Prune against the bucket's real MaxAge, not the hardcoded default. If the
-	// envoy_sessions bucket was created with a different TTL (an older build, a
-	// config change), pruning against opts.ttl would either hide live sessions
-	// or surface expired ones. Status() is one round-trip; fall back to the
-	// configured ttl if it fails or reports no TTL.
-	ttl := opts.ttl
-	if status, statusErr := kv.Status(); statusErr == nil {
-		if bucketTTL := status.TTL(); bucketTTL > 0 {
-			ttl = bucketTTL
-		}
+	// The bucket's MaxAge is the window every reader prunes against, so a bucket an older build
+	// created with less is raised to the configured ttl before the window is read back
+	// (bus.RaiseKeyValueMaxAge; nats.go creates a bucket and never updates one, so the raise goes
+	// through the bucket's own stream). Prune against what the bucket holds afterwards, not
+	// against opts.ttl: pruning against a window the bucket does not carry would either hide live
+	// sessions or surface expired ones. Fall back to the configured ttl when the read fails or the
+	// bucket reports no MaxAge, as the Status() read this replaced did.
+	//
+	// A listener whose NATS user may not update that stream keeps the deployed window and says so:
+	// the grant on the hub and the build in the image roll out separately, and a listener that
+	// refused to start without the grant would make the two one deploy.
+	log := opts.log
+	if log == nil {
+		log = slog.Default()
+	}
+	ttl, raiseErr := bus.RaiseKeyValueMaxAge(js, bus.SessionBucket, opts.ttl)
+	if raiseErr != nil {
+		log.Warn("session bucket kept the MaxAge it was deployed with",
+			slog.String("bucket", bus.SessionBucket),
+			slog.Duration("want", opts.ttl),
+			slog.Duration("deployed", ttl),
+			slog.String("error", raiseErr.Error()))
+	}
+	if ttl <= 0 {
+		ttl = opts.ttl
 	}
 	r := &SessionRegistry{
 		ttl:            ttl,

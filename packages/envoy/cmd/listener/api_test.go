@@ -1260,7 +1260,13 @@ func TestRoleClaimRestoresWhileHolderIsLiveAndDropsAfterTTL(t *testing.T) {
 	if err != nil {
 		t.Fatalf("restore role registry: %v", err)
 	}
-	restoredSessions, err := session.OpenSessionRegistry(client.Conn, session.WithSessionReplicas(1))
+	// On the same window as the first open, so nothing raises the bucket under the assertion
+	// below that the restored registry prunes against what the bucket holds.
+	restoredSessions, err := session.OpenSessionRegistry(
+		client.Conn,
+		session.WithSessionReplicas(1),
+		session.WithSessionTTL(sessionTTL),
+	)
 	if err != nil {
 		t.Fatalf("restore session registry: %v", err)
 	}

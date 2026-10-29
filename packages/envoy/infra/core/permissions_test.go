@@ -14,7 +14,8 @@ import (
 // listenerPublish is the listener's publish grant for example-host-a, written out by hand from
 // Envoy's names as they stand: every notification topic (the stream's subjects, the role lanes,
 // every exception lane and any ad-hoc topic), the stream (its stored-message get the read
-// /v1/replay makes) and its durable, then each bucket in turn, then the interest bucket's purge.
+// /v1/replay makes) and its durable, then each bucket in turn, then the interest bucket's purge
+// and the session bucket's stream update, the one call that raises the session window.
 // TestSessionPermissions's exact list holds none of it: no session gets the replay read.
 var listenerPublish = []string{
 	"notifications.>",
@@ -59,6 +60,7 @@ var listenerPublish = []string{
 	"$JS.API.CONSUMER.DELETE.KV_envoy_ci_state.>",
 	"$JS.FC.KV_envoy_ci_state.>",
 	"$JS.API.STREAM.PURGE.KV_envoy_interests",
+	"$JS.API.STREAM.UPDATE.KV_envoy_sessions",
 }
 
 func TestListenerPermissions(t *testing.T) {

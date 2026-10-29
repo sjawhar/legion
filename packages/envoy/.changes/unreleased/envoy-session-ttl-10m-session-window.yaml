@@ -1,0 +1,6 @@
+kind: Changed
+body: |-
+    The session registry's window is 10 minutes, where it was 5: a session's registration in the `envoy_sessions` bucket outlives its last heartbeat by it, so a session whose process stalls longer drops out of the registry and a peer's send to it is refused `no live session` although the session is alive and resumes. A listener raises a bucket an earlier build created with less at every start, through that bucket's own stream, since nats.go creates a key-value bucket and never updates one; it only ever raises, and a listener whose NATS user may not update that stream keeps the deployed window and logs it.
+time: 2026-10-29T12:00:00.000000000Z
+custom:
+    Issue: envoy-session-ttl-10m

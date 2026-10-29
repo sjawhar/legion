@@ -8,6 +8,7 @@ import (
 	"time"
 
 	natsgo "github.com/nats-io/nats.go"
+	"github.com/sjawhar/envoy/internal/bus"
 )
 
 // --- Unit tests (no NATS — operate on a pre-populated cache) ---
@@ -357,26 +358,25 @@ func TestSessionList_CacheOnlyAfterNATSShutdown(t *testing.T) {
 	}
 }
 
+// A bucket that already holds more than the window the caller configures keeps it, and the
+// registry prunes against the bucket rather than against its own option: an entry past the
+// option but inside the bucket's window is still live.
 func TestOpenSessionRegistry_PrunesUsingBucketTTL(t *testing.T) {
 	client := setupNATS(t)
-	// Create the bucket with a 2-minute TTL — deliberately different from the
-	// 5-minute hardcoded default in OpenSessionRegistry.
-	if _, err := OpenSessionRegistry(client.Conn, WithSessionReplicas(1), WithSessionTTL(2*time.Minute)); err != nil {
+	// Create the bucket with a 20-minute window, longer than the 2 minutes the second open
+	// configures and longer than SessionTTL, so nothing raises it.
+	if _, err := OpenSessionRegistry(client.Conn, WithSessionReplicas(1), WithSessionTTL(20*time.Minute)); err != nil {
 		t.Fatalf("create bucket: %v", err)
 	}
-	// Open a second registry WITHOUT a TTL option, so opts.ttl is the 5-minute
-	// default. It must adopt the bucket's real 2-minute TTL via Status(), not
-	// the default — otherwise pruning is computed against the wrong window.
-	reg, err := OpenSessionRegistry(client.Conn, WithSessionReplicas(1))
+	reg, err := OpenSessionRegistry(client.Conn, WithSessionReplicas(1), WithSessionTTL(2*time.Minute))
 	if err != nil {
 		t.Fatalf("open: %v", err)
 	}
-	if reg.ttl != 2*time.Minute {
-		t.Fatalf("expected registry to adopt bucket TTL 2m, got %v", reg.ttl)
+	if reg.ttl != 20*time.Minute {
+		t.Fatalf("expected registry to adopt bucket TTL 20m, got %v", reg.ttl)
 	}
-	// An entry created 3 minutes ago is past the real 2-minute TTL but still
-	// within the 5-minute default. Pruning against the bucket TTL drops it;
-	// pruning against the default would wrongly keep it live.
+	// An entry created 3 minutes ago is past the configured 2 minutes and inside the bucket's
+	// 20. Pruning against the bucket keeps it; pruning against the option would drop it.
 	created := time.Now().Add(-3 * time.Minute)
 	reg.mu.Lock()
 	reg.cache["ses_old"] = cachedSession{
@@ -388,8 +388,51 @@ func TestOpenSessionRegistry_PrunesUsingBucketTTL(t *testing.T) {
 	if err != nil {
 		t.Fatalf("List: %v", err)
 	}
-	if len(entries) != 0 {
-		t.Fatalf("expected entry older than real TTL pruned, got %v", entries)
+	if len(entries) != 1 {
+		t.Fatalf("expected the entry inside the bucket's window kept, got %v", entries)
+	}
+}
+
+// A bucket an earlier build created with a shorter window is raised to the window this build
+// declares, since nats.go creates a bucket and never updates one, and the registry then prunes
+// against the raised window.
+func TestOpenSessionRegistry_RaisesABucketBelowTheDeclaredTTL(t *testing.T) {
+	client := setupNATS(t)
+	if _, err := OpenSessionRegistry(client.Conn, WithSessionReplicas(1), WithSessionTTL(2*time.Minute)); err != nil {
+		t.Fatalf("create bucket: %v", err)
+	}
+	reg, err := OpenSessionRegistry(client.Conn, WithSessionReplicas(1))
+	if err != nil {
+		t.Fatalf("open: %v", err)
+	}
+	if reg.ttl != SessionTTL {
+		t.Fatalf("expected the registry to prune against the raised window %v, got %v", SessionTTL, reg.ttl)
+	}
+	js, err := client.Conn.JetStream()
+	if err != nil {
+		t.Fatalf("jetstream: %v", err)
+	}
+	info, err := js.StreamInfo(bus.KeyValueStream(bus.SessionBucket))
+	if err != nil {
+		t.Fatalf("stream info: %v", err)
+	}
+	if info.Config.MaxAge != SessionTTL {
+		t.Fatalf("expected the bucket raised to %v, got %v", SessionTTL, info.Config.MaxAge)
+	}
+	// An entry 3 minutes old is past the window the bucket was created with and inside the one
+	// the registry raised it to, so it is live.
+	reg.mu.Lock()
+	reg.cache["ses_old"] = cachedSession{
+		entry:     SessionEntry{Port: 1},
+		expiresAt: reg.expiryFor(time.Now().Add(-3*time.Minute), 0),
+	}
+	reg.mu.Unlock()
+	entries, err := reg.List()
+	if err != nil {
+		t.Fatalf("List: %v", err)
+	}
+	if len(entries) != 1 {
+		t.Fatalf("expected the entry inside the raised window kept, got %v", entries)
 	}
 }
 
