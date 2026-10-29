@@ -105,7 +105,7 @@ func readsAsHardBreak(text *ast.Text, source []byte) bool {
 
 // textPiece is one node of a run, its decoded text starting at start in the run's; a text's
 // offsets map each offset of value, and its end, to the offset in the text's raw value (rawValue)
-// it begins at (decodeMarkdownTextOffsets).
+// it begins at (decodeMarkdown).
 type textPiece struct {
 	node    ast.Node
 	start   int
@@ -138,7 +138,7 @@ func linkRun(run []ast.Node, source []byte) {
 		piece := textPiece{node: node, start: decoded.Len()}
 		text, isText := node.(*ast.Text)
 		if isText {
-			piece.value, piece.offsets = decodeMarkdownTextOffsets(rawValue(node, source))
+			piece.value, piece.offsets = decodeMarkdown(rawValue(node, source), true)
 		} else {
 			piece.value = decodeMarkdownText(rawValue(node, source))
 		}

@@ -1,4 +1,4 @@
--- 0143: the cap on a document's queued conditional edits holds across envoy-dispatch processes.
+-- 0144: the cap on a document's queued conditional edits holds across envoy-dispatch processes.
 -- Each process queues a document's conditional edits in memory, one at a time, and
 -- refuses one past 32 (429 EDIT_QUEUE_FULL); with that count in memory alone, two processes
 -- together admitted 64.

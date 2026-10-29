@@ -1,4 +1,4 @@
--- 0141: every change of an issue's closed_at, closing it or reopening it, wakes every envoy-dispatch
+-- 0142: every change of an issue's closed_at, closing it or reopening it, wakes every envoy-dispatch
 -- process. Each process holds its own room for each document it serves, and a room's
 -- browsers are read-only exactly while its issue is closed, a scope ygo fixes when a browser
 -- connects; so each process closes its rooms of the issue's documents when it hears this, and

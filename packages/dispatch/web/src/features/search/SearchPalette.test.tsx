@@ -10,8 +10,9 @@ import { api } from "../../api/client";
 import type { SearchResponse, SearchResult, SearchResultsPage } from "../../api/types";
 import { KeymapProvider } from "../shell/KeymapProvider";
 import { appKeymap } from "../shell/keymap";
+import { ANSWER_PREVIEW_CHARS } from "./AskHitStatus";
 import { SearchButton } from "./SearchButton";
-import { ANSWER_PREVIEW_CHARS, type PaletteMode, SearchPalette } from "./SearchPalette";
+import { type PaletteMode, SearchPalette } from "./SearchPalette";
 import { optionId } from "./search-model";
 
 const results: SearchResult[] = [
