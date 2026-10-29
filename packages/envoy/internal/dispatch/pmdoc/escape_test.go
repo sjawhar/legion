@@ -280,7 +280,7 @@ func flatText(node *Node) string {
 // The parser trims whitespace at the start of a textblock's line and at the end of the
 // textblock, so text that begins or ends with it would lose it. The first leading and the last
 // trailing whitespace character are written as references; whitespace inside a mark or a link
-// keeps the bytes the writer before sjawhar/legion#1594 writes, since the parser keeps it there.
+// keeps the bytes the writer before sjawhar/legion#1429 writes, since the parser keeps it there.
 func TestRenderKeepsWhitespaceAtATextblocksEdges(t *testing.T) {
 	text := func(value string, marks ...Mark) *Node { return &Node{Type: "text", Text: value, Marks: marks} }
 	hardBreak := &Node{Type: "hardbreak", Attrs: Attrs{"isInline": false}}

@@ -112,7 +112,7 @@ func TestRenderKeepsAFusedRunThatReadsBack(t *testing.T) {
 // before sjawhar/legion#1464 writes it, before any spelling that keeps marks open: that writer's
 // escaped bytes read back in both parsers, so a keep-open spelling tried first changed a document
 // that writer stores correctly.
-func TestRenderRespellsAFusedRunAsMainDoesBeforeKeepingMarksOpen(t *testing.T) {
+func TestRenderRespellsAFusedRunPlainlyBeforeKeepingMarksOpen(t *testing.T) {
 	assertRenders(t, []struct{ markdown, want string }{
 		{"- ****1**a__1***\n", "- \\*\\*\\**1****a\\_\\_1***\n"},
 		{"****b.**(c)***(c)\n", "\\*\\*\\**b.****(c)***(c)\n"},
