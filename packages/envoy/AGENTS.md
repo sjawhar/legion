@@ -199,7 +199,10 @@ stop timeout, which Dispatch's task definition leaves unset, `stop_grace_period`
 kubelet spends inside the same period - `cmd/dispatch/pod_grace_period_test.go` fails when the
 pod's budget stops covering it). Every open live socket ends at the signal through the lifetime
 `api.Register` takes, closing with 1012 and ending its subscriptions, so HTTP shutdown waits only
-for the requests in flight, and it waits for them first, with no deadline of its own. The document service starts when they are done, or 11 s after
+for the requests in flight and for any connection that has not sent its first request yet, which
+net/http's `Server.Shutdown` counts as busy until it is more than 5 s old (by whole seconds, so up
+to 6 s), in case that request is on its way. It waits for them first, with no deadline of its own.
+The document service starts when they are done, or 11 s after
 the signal with some still running (`httpDrainBeforeDocuments`, `dispatch: settle documents with
 requests still in flight`), and gets `documentShutdownTimeout`, 5 s more than its drain budget
 (14 s total - the reserve outlasting a settlement still committing when the budget ends, not only
