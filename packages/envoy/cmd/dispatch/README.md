@@ -559,9 +559,12 @@ earlier release brings the same hazard back, the other way: a tab still open, an
 client that saw this release keep keys within the last five minutes (`KEYED_LAYER_MEMORY_MS`),
 retry a write whose answer was lost against the earlier server, which runs it again. Fix forward
 instead; if you must roll back, stop this release first, knowing a write in flight at that moment
-may land twice. A tab opened before the deploy needs a reload: `GET /api/v1/events` is gone,
-so it shows `Live updates unavailable`, and its broadcast body still carries `idempotency_key`,
-which this release refuses as an unknown field (`400 INVALID_JSON`).
+may land twice. Once `0139_drop_broadcast_idempotency_keys` has applied, a rollback past this
+release also loses broadcasts: the earlier build's broadcast send reads and writes the table `0139`
+drops, so every broadcast send fails while the rest of that build keeps working. A tab opened
+before the deploy needs a reload: `GET /api/v1/events` is gone, so it shows
+`Live updates unavailable`, and its broadcast body still carries `idempotency_key`, which this
+release refuses as an unknown field (`400 INVALID_JSON`).
 
 What the two processes share, and what each keeps to itself:
 
@@ -1210,7 +1213,7 @@ release before it neither reads nor writes; its census answers `0`. It follows
 `0135_server_processes` and `0136_dashboard_assets`, which already use the preceding migration
 numbers. From its release on, nothing reads or writes `broadcast_idempotency_keys` (`0055`), the
 broadcast's own key table before it; it was kept through that release so a deploy of it could roll
-back, and `0139_drop_broadcast_idempotency_keys` drops it a release later.
+back, and `0139_drop_broadcast_idempotency_keys` drops it in a later release.
 
 Migration `0138_pending_delivery_indexes` adds two partial indexes, `message_deliveries_pending`
 and `comment_deliveries_pending`, on the delivery attempts still pending, which the delivery sweep

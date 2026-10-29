@@ -2792,7 +2792,8 @@ A key is kept 24 hours (`IDEMPOTENCY_KEY_TTL_MS`): the suggestion-outcome sweep'
 every older row (`sweepRequestKeys`), a row a dead process left in flight with it, and a repeat
 that finds an older row not yet swept treats the key as unused. The hand-written key path before
 it is gone, and so is its table: `broadcast_idempotency_keys` (migration `0055`), dropped by
-`0139_drop_broadcast_idempotency_keys` a release after `0137` stopped reading and writing it.
+`0139_drop_broadcast_idempotency_keys`, in a release later than `0137`'s, which stopped reading and
+writing it.
 Neither send route takes a body `idempotency_key` any more; the header carries the key.
 
 ## Targeted Dispatch messages
