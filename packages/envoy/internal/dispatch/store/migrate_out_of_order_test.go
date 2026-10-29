@@ -242,3 +242,54 @@ func TestHealthyAnswersAcrossTheWideningOfTheVersionColumn(t *testing.T) {
 		t.Errorf("Healthy after the widening = %d, want %d", got, want)
 	}
 }
+
+// A Dispatch process of the release before this change keeps serving while the first pod of this
+// change boots, and its health probe reads `select coalesce(max(version), 0) from
+// schema_migrations`, uncast, on a connection that prepared the read while the column was an
+// integer. A boot whose set holds no timestamped migration records no version past an integer, so
+// it must leave the column's type as it is: widening it there fails that probe once on every old
+// process ("cached plan must not change result type"), a 503 from /healthz on each one mid-roll.
+// The column is widened when the first timestamped migration applies, by which time every running
+// process reads it cast.
+func TestMigrateWithNoTimestampedMigrationKeepsThePreviousReleasesHealthProbeAnswering(t *testing.T) {
+	ctx := context.Background()
+	store := openEmptyTestStore(t)
+	if _, err := store.Pool.Exec(ctx, `
+		create table schema_migrations (
+			version integer primary key,
+			applied_at timestamptz not null default now()
+		)
+	`); err != nil {
+		t.Fatalf("create the version table as it was: %v", err)
+	}
+	if _, err := store.Pool.Exec(ctx, "insert into schema_migrations (version) values ($1)", oooVersion(t, oooNumbered)); err != nil {
+		t.Fatalf("record the numbered migration that database already applied: %v", err)
+	}
+	// One connection of a separate pool, as the previous release's health probe holds one, with
+	// that release's read prepared on it.
+	separate, err := store.Pool.Rooms()
+	if err != nil {
+		t.Fatalf("open a separate pool: %v", err)
+	}
+	conn, err := separate.Acquire(ctx)
+	if err != nil {
+		t.Fatalf("hold a connection of the separate pool: %v", err)
+	}
+	defer conn.Release()
+	const previousReleasesProbe = "select coalesce(max(version), 0) from schema_migrations"
+	var before int
+	if err := conn.QueryRow(ctx, previousReleasesProbe).Scan(&before); err != nil {
+		t.Fatalf("the previous release's health probe before the boot: %v", err)
+	}
+
+	if err := store.migrate(ctx, oooSet(oooNumbered)); err != nil {
+		t.Fatalf("migrate with a set that holds no timestamped migration: %v", err)
+	}
+	var after int
+	if err := conn.QueryRow(ctx, previousReleasesProbe).Scan(&after); err != nil {
+		t.Fatalf("the previous release's health probe after a boot that applied no timestamped migration: %v", err)
+	}
+	if after != before {
+		t.Errorf("the previous release's health probe reads %d after the boot, want the %d it read before", after, before)
+	}
+}
