@@ -1,3 +1,4 @@
+import { relatedCheckFormOf, relatedCheckSearchWords } from "@legion/contracts";
 import { useQuery } from "@tanstack/react-query";
 import { type ReactNode, useEffect, useState } from "react";
 
@@ -93,7 +94,9 @@ export function RelatedItems({ project, title }: { project: string; title: strin
 
 /**
  * Exactly one of the check's three forms, then the past decision when the check found one.
- * `title_matches` is not shown: this route writes nothing, so no title overlap was forced past.
+ * Which form the answer holds is the contract's judgement (`relatedCheckFormOf`), the same one
+ * the CLI reads; this only renders it. `title_matches` is not shown: this route writes nothing,
+ * so no title overlap was forced past.
  */
 function RelatedForm({
   suggestions,
@@ -102,43 +105,37 @@ function RelatedForm({
   suggestions: Suggestions;
   title: string;
 }): ReactNode {
-  const { decision, missing, outcome } = suggestions;
-  const related = suggestions.related ?? [];
-  const mode = searchModeWords(suggestions);
-  const notMade = (reason: string): ReactNode => (
-    <p className={textMutedOnSurface}>{notMadeText(reason, title, suggestions.search_query)}</p>
-  );
+  const { decision } = suggestions;
+  const check = relatedCheckFormOf(suggestions);
   let form: ReactNode;
-  if (outcome === "not_made" || (outcome === undefined && missing !== undefined)) {
-    // The CLI tests this first (`relatedCheckForm`), so an answer carrying both items and a
-    // not-made marker reads the same on both surfaces.
-    form = notMade(missing ?? "the server gave no reason");
-  } else if (related.length > 0) {
+  if (check.form === "not_made") {
+    form = (
+      <p className={textMutedOnSurface}>{notMadeText(check.reason, title, check.searchQuery)}</p>
+    );
+  } else if (check.form === "items") {
     form = (
       <>
         <p className={`font-medium ${textSecondaryOnSurface}`}>
           {/* A server predating the forms names no search mode, so the heading names none. */}
-          {mode === undefined ? "Related items:" : `Related items (searched by ${mode}):`}
+          {check.mode === undefined
+            ? "Related items:"
+            : `Related items (searched by ${check.mode}):`}
         </p>
         <ul className="space-y-2">
-          {related.map((item) => (
+          {check.related.map((item) => (
             <RelatedItemRow item={item} key={`${item.kind}:${item.id}`} withAsk={true} />
           ))}
         </ul>
       </>
     );
-  } else if (outcome === undefined) {
-    form = notMade("the server did not say whether it searched");
-  } else if (outcome === "found" || outcome === "none") {
+  } else {
     form = (
       <p className={textMutedOnSurface}>
-        {mode === undefined
+        {check.mode === undefined
           ? "Related-item check searched and found nothing."
-          : `Related-item check searched (${mode}) and found nothing.`}
+          : `Related-item check searched (${check.mode}) and found nothing.`}
       </p>
     );
-  } else {
-    form = notMade(`the server answered an outcome this client does not know (${String(outcome)})`);
   }
   return (
     <>
@@ -203,15 +200,6 @@ function RelatedItemRow({ item, withAsk }: { item: WriteSuggestion; withAsk: boo
   );
 }
 
-/** How the check searched, as the forms word it after "searched" or "searched by". */
-function searchModeWords(suggestions: Suggestions): string | undefined {
-  const { search, search_note: note } = suggestions;
-  if (search === undefined) return undefined;
-  if (search === "meaning_and_keywords") return "meaning and keywords";
-  const words = search === "keywords_only" ? "keywords only" : String(search);
-  return note === undefined || note === "" ? words : `${words}: ${note}`;
-}
-
 /**
  * `No related-item check was made: <reason>.` and the words to search by hand: `searchQuery`
  * when the server chose them, else the first three words of four or more letters in the title.
@@ -219,17 +207,7 @@ function searchModeWords(suggestions: Suggestions): string | undefined {
  * draft; with no such word it says what to search for instead of guessing.
  */
 function notMadeText(reason: string, title: string, searchQuery?: string): string {
-  const found = searchQuery?.trim() || longWords(title);
+  const found = searchQuery?.trim() || relatedCheckSearchWords(title);
   const words = found === "" ? "two or three of its words" : `“${found}”`;
   return `No related-item check was made: ${reason}. Search Dispatch for ${words} before you rely on this being new.`;
-}
-
-/** The first three words of four or more letters: short words are mostly ones every item holds.
- *  Named apart from `features/agents/agent-search.ts`'s exported `searchWords`, which splits a
- *  query into each of its lowercased words. */
-function longWords(text: string): string {
-  return (text.match(/[\p{L}\p{N}_]+/gu) ?? [])
-    .filter((word) => (word.match(/\p{L}/gu) ?? []).length >= 4)
-    .slice(0, 3)
-    .join(" ");
 }
