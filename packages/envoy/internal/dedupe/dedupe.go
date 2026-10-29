@@ -16,6 +16,21 @@ const (
 	AttemptedAge = 5 * time.Minute
 )
 
+// attemptHolds is the hold rule both ledgers settle an unresolved attempt by: an attempt the
+// delivery kept (Keep) holds its pair for AttemptedAge, and one nothing has settled for
+// takeoverAfter, the age past which another delivery takes it over (KVConfig.TakeoverAfter).
+// age is how long ago the attempt was written. The bound is exclusive, the comparison KV has
+// always made: an attempt exactly as old as its limit no longer holds, and the delivery that
+// finds it proceeds. Memory held such an attempt for one more instant (it compared age <=
+// limit); it now answers as KV does.
+func attemptHolds(age time.Duration, kept bool, takeoverAfter time.Duration) bool {
+	limit := takeoverAfter
+	if kept {
+		limit = AttemptedAge
+	}
+	return age < limit
+}
+
 // Key identifies one delivery: an envelope's dedupe key to one session.
 type Key struct {
 	DedupeKey string

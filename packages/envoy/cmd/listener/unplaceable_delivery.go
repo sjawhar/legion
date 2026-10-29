@@ -268,7 +268,7 @@ func unplaceableAgentDelivery(cfg listenerDeliveryHandlerConfig, message deliver
 					slog.Uint64("window_deferrals", windowDeferrals),
 				)
 			},
-			clearAttempt: true,
+			settle: settleClear,
 		})
 		cfg.messagesNAKed.Inc()
 		message.retryAfter(unplaceableRetryDelay)
@@ -310,7 +310,7 @@ func unplaceableAgentDelivery(cfg listenerDeliveryHandlerConfig, message deliver
 			logger.DeliveryLog(slog.LevelWarn, "listener agent delivery given up", sessionID, item.Topic, item.EventID, giveUpStatus, slog.String("reason", reason))
 		},
 		exceptionReason: "no_holder",
-		keepAttempt:     true,
+		settle:          settleKeep,
 	})
 	message.finalize(false)
 }

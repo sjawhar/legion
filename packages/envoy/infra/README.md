@@ -2131,8 +2131,12 @@ as its `Publish` and `Subscribe`. Below, `<m>` is the machine id with each space
   the machine's own keys alone: its lease `$KV.envoy_listener.lease.listener-<m>`, its delivery
   ledger `$KV.envoy_listener.delivery.listener-<m>.>`, and every session's last-seen record
   `$KV.envoy_listener.seen.>`, so one machine's user cannot take or clear another machine's lease
-  or ledger. A listener whose grant lacks `envoy_listener` logs an ERROR naming it and delivers
-  without a lease, as its machine's only deliverer;
+  or ledger. The last-seen keys are not scoped to the writing machine because they are read
+  across machines: a role claim names its holder session and no machine, and
+  `GET /v1/roles/<role>` on any listener answers a lapsed holder's `last_seen` out of that
+  session's record, whichever machine it registered through. A listener whose grant lacks
+  `envoy_listener` logs an ERROR naming it and delivers without a lease, as its machine's only
+  deliverer;
 - `$JS.API.STREAM.PURGE.KV_envoy_interests`, which the interest bucket's delete-marker collection
   sends.
 

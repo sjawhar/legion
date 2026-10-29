@@ -28,14 +28,15 @@ const (
 // inboxes matches every reply inbox nats.go makes.
 const inboxes = nats.InboxPrefix + ">"
 
-// listenerBuckets are the KV buckets a listener opens, in the order its grant lists them: the
-// interest and role-claim buckets, the session registry, the CI state bucket, which only a
-// listener with the GitHub webhook route opens, and the listener state bucket, which holds the
-// machine's delivery lease and the other state every listener pod of the machine shares. A
+// listenerBuckets are the KV buckets a listener opens that its grant writes every key of, in the
+// order the grant lists them: the interest and role-claim buckets, the session registry and the
+// CI state bucket, which only a listener with the GitHub webhook route opens. The listener state
+// bucket, which holds the machine's delivery lease and the other state every listener pod of the
+// machine shares, follows them in the grant with its keys scoped (ListenerPermissions). A
 // listener whose grant lacks the listener state bucket does not exit: it logs an ERROR naming the
 // bucket and delivers without a lease, receiving from its durable only while no other subscriber
 // holds it.
-var listenerBuckets = []string{bus.InterestBucket, bus.RoleClaimBucket, bus.SessionBucket, bus.CIStateBucket, bus.ListenerStateBucket}
+var listenerBuckets = []string{bus.InterestBucket, bus.RoleClaimBucket, bus.SessionBucket, bus.CIStateBucket}
 
 // ListenerPermissions is the grant envoy-listener needs as machine machineID, built from Envoy's own
 // names. Publish, in this order:
@@ -50,11 +51,12 @@ var listenerBuckets = []string{bus.InterestBucket, bus.RoleClaimBucket, bus.Sess
 //     at a time and can create, change or delete nothing;
 //   - for each bucket of listenerBuckets in turn, the calls nats.go's KV makes: the bucket's stream
 //     info and create, direct and stream message gets, writes to its keys, its watchers' consumer
-//     create and delete, and their flow-control replies. The writes to the listener state bucket
-//     are the machine's own keys alone: its delivery lease (bus.ListenerLeaseKey), its delivery
-//     ledger (bus.ListenerLedgerPrefix) and every session's last-seen record
-//     (bus.LastSeenPrefix), so one machine's user cannot take or clear another machine's lease or
-//     ledger;
+//     create and delete, and their flow-control replies;
+//   - the same calls for the listener state bucket, whose writes are the machine's own keys
+//     alone: its delivery lease (bus.ListenerLeaseKey) and its delivery ledger
+//     (bus.ListenerLedgerPrefix), so one machine's user cannot take or clear another machine's
+//     lease or ledger, beside every session's last-seen record (bus.LastSeenPrefix), which is
+//     read across machines and so stays fleet-wide;
 //   - the purge of the interest bucket, which its delete-marker collection sends.
 //
 // Subscribe: reply inboxes, then the role lanes in the machine's queue group (bus.ListenerQueue).
@@ -72,13 +74,20 @@ func ListenerPermissions(machineID string) Permissions {
 		jsAPI + "INFO",
 	}
 	for _, bucket := range listenerBuckets {
-		if bucket == bus.ListenerStateBucket {
-			publish = append(publish, bucketPermissions(bucket,
-				bus.ListenerLeaseKey(machineID), bus.ListenerLedgerPrefix(durable)+">", bus.LastSeenPrefix+">")...)
-			continue
-		}
 		publish = append(publish, bucketPermissions(bucket)...)
 	}
+	publish = append(publish, bucketPermissions(bus.ListenerStateBucket,
+		bus.ListenerLeaseKey(machineID),
+		bus.ListenerLedgerPrefix(durable)+">",
+		// Every session's last-seen record, not only the ones this machine wrote: a session's
+		// record is read across machines. A role claim (bus.RoleClaimBucket, one bucket for the
+		// whole fleet) names its holder session and no machine, and GET /v1/roles/<role> on any
+		// listener answers a lapsed holder's last_seen out of that session's record
+		// (resolveLiveRoleHolder, cmd/listener/role_holder.go), whichever machine the holder
+		// registered through - Dispatch asks the listener beside it about roles the whole fleet
+		// holds. A key scoped to the writing machine would leave every such read with no record
+		// to find, so this one stays fleet-wide.
+		bus.LastSeenPrefix+">")...)
 	publish = append(publish, jsAPI+"STREAM.PURGE."+kvStream+bus.InterestBucket)
 	return Permissions{
 		Publish:   Rules{Allow: publish},

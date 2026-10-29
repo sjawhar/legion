@@ -263,6 +263,37 @@ func publishDeliveryException(client *bus.Client, item contracts.Envelope, reaso
 	return nil
 }
 
+// ledgerSettle is what a delivery outcome does with the pair's delivery-ledger attempt. Every
+// outcome names one, so an outcome that settles nothing says so rather than leaving it to what
+// no field of it set.
+type ledgerSettle uint8
+
+const (
+	// settleNone settles nothing. It is the outcome with no attempt of this process to settle -
+	// a skip taken before the ledger was asked, a recipient this listener does not prompt
+	// (promptsHere), a role whose holder never resolved - and the failure that deliberately
+	// leaves this process's attempt in flight, held for the pair until it reaches the ledger's
+	// takeover age (an agent delivery that failed and is neither retried nor a refused address).
+	settleNone ledgerSettle = iota
+	// settleClear gives the attempt up (dedupe.Ledger.Clear), so a retry prompts the pair again.
+	settleClear
+	// settleRecord records the pair delivered in the ledger (dedupe.Ledger.Record).
+	settleRecord
+	// settleKeep keeps the attempt (dedupe.Ledger.Keep): a prompt whose outcome is unknown, or a
+	// pair this delivery disposed of for good, so a further delivery of the message within
+	// dedupe.AttemptedAge is an attempt-dedupe skip.
+	settleKeep
+)
+
+// settleClearIf is settleClear when clear and settleNone otherwise, for the two outcomes whose
+// settlement the failure they carry decides.
+func settleClearIf(clear bool) ledgerSettle {
+	if clear {
+		return settleClear
+	}
+	return settleNone
+}
+
 // deliveryOutcome bundles one delivery attempt's bookkeeping: the metrics
 // label to record, the log line to emit, whether to publish a delivery
 // exception (and how an exception-publish failure should be treated), and
@@ -273,9 +304,9 @@ type deliveryOutcome struct {
 	// sessionID is the recipient the outcome is about, named in its exception; "" when there is
 	// none (e.g. a role that was never assigned a holder).
 	sessionID string
-	// attempt is the pair's delivery-ledger attempt that clearAttempt, recordDedupe, keepAttempt
-	// and exceptionFailureClearsAttempt settle; the zero Attempt (a pair delivered without the
-	// ledger, or one the listener does not prompt) settles nothing.
+	// attempt is the pair's delivery-ledger attempt that settle and exceptionFailureClearsAttempt
+	// settle; the zero Attempt (a pair delivered without the ledger, or one the listener does not
+	// prompt) settles nothing.
 	attempt dedupe.Attempt
 	// metricStatus is the messagesDelivered "delivery_status" label; ""
 	// skips the increment entirely.
@@ -291,19 +322,12 @@ type deliveryOutcome struct {
 	// core-NATS exception for this terminal fanout outcome.
 	exceptionReason string
 	fanoutRefusal   bool
-	// exceptionFailureClearsAttempt: an exception-publish failure clears the
-	// ledger attempt, independent of (and possibly in addition to)
-	// clearAttempt below.
+	// exceptionFailureClearsAttempt makes an exception-publish failure settle the ledger attempt
+	// settleClear, whatever settle below names.
 	exceptionFailureClearsAttempt bool
 
-	// clearAttempt unconditionally gives the ledger attempt up (dedupe.Ledger.Clear).
-	clearAttempt bool
-	// recordDedupe records the pair delivered in the ledger (dedupe.Ledger.Record).
-	recordDedupe bool
-	// keepAttempt keeps the ledger attempt (dedupe.Ledger.Keep) when nothing above clears or
-	// records it: a prompt whose outcome is unknown, or a pair this delivery disposed of for good,
-	// so a further delivery of the message within dedupe.AttemptedAge is an attempt-dedupe skip.
-	keepAttempt bool
+	// settle is how this outcome settles the pair's ledger attempt; every outcome names one.
+	settle ledgerSettle
 	// retry is whether this outcome asks for the attempt to be retried
 	// (NAKed).
 	retry bool
@@ -323,22 +347,25 @@ func applyDeliveryOutcome(cfg listenerDeliveryHandlerConfig, item contracts.Enve
 	if outcome.log != nil {
 		outcome.log(cfg.logger)
 	}
-	clearAttempt := outcome.clearAttempt
+	settle := outcome.settle
 	if outcome.exceptionReason != "" && !isExceptionsTopic(item.Topic) && (isControlTopic(item.Topic) || outcome.fanoutRefusal) {
 		if err := publishDeliveryException(cfg.client, item, outcome.exceptionReason, outcome.sessionID, outcome.fanoutRefusal); err != nil {
 			cfg.logger.Error(exceptionPublishFailedLine, slog.String("error", err.Error()), slog.String("topic", item.Topic))
-			clearAttempt = clearAttempt || outcome.exceptionFailureClearsAttempt
+			if outcome.exceptionFailureClearsAttempt {
+				settle = settleClear
+			}
 		}
 	}
-	switch {
-	case clearAttempt:
+	switch settle {
+	case settleClear:
 		clearLedgerAttempt(cfg, item, outcome.attempt)
-	case outcome.recordDedupe:
+	case settleRecord:
 		if err := cfg.ledger.Record(outcome.attempt); err != nil {
 			cfg.logger.Warn(ledgerUnavailableLine, slog.String("operation", "record"), slog.String("session_id", outcome.sessionID), slog.String("event_id", item.EventID), slog.String("error", err.Error()))
 		}
-	case outcome.keepAttempt:
+	case settleKeep:
 		cfg.ledger.Keep(outcome.attempt)
+	case settleNone:
 	}
 	return outcome.retry
 }
@@ -411,25 +438,18 @@ func ledgerAttempt(cfg listenerDeliveryHandlerConfig, message deliveryMessage, i
 		log: func(logger *logging.Logger) {
 			logger.DeliveryLog(slog.LevelInfo, line, sessionID, item.Topic, item.EventID, status, slog.String("dedupe_key", item.DedupeKey), slog.String("ledger", attempt.Verdict.String()))
 		},
+		settle: settleNone,
 	})
 	return attempt, false, retryIn
 }
 
 // promptsHere reports whether this listener, machineID, prompts the session over HTTP: it serves
-// a port, and it is this listener's to deliver, as session.Deliverer.DeliverWithResultForEntry
-// decides. Its owner is the listener its stored subscription names, else the one it registered
-// through; a session neither names is every listener's. Only such a pair costs a ledger write: a
-// self-subscribed session takes the message from its own subscription and is only acked, and
-// another listener's session is that listener's to deliver.
+// a port, and it is this listener's to deliver, which session.OwnedBy decides for this delivery
+// and for session.Deliverer.DeliverWithResultForEntry alike. Only such a pair costs a ledger
+// write: a self-subscribed session takes the message from its own subscription and is only
+// acked, and another listener's session is that listener's to deliver.
 func promptsHere(machineID string, interest *store.Interest, entry *session.SessionEntry) bool {
-	if entry == nil || entry.Port <= 0 {
-		return false
-	}
-	owner := entry.MachineID
-	if interest != nil && interest.MachineID != "" {
-		owner = interest.MachineID
-	}
-	return owner == "" || owner == machineID
+	return entry != nil && entry.Port > 0 && session.OwnedBy(machineID, interest, entry)
 }
 
 // listenerDeliveryHandler decodes and validates the envelope, then routes it
@@ -508,6 +528,7 @@ func resolveCoreRoleHolder(cfg listenerDeliveryHandlerConfig, item contracts.Env
 					logger.Error("listener role holder lookup failed", slog.String("role", role), slog.String("error", err.Error()))
 				},
 				exceptionReason: "delivery_failed",
+				settle:          settleNone,
 			})
 			return "", session.SessionEntry{}, false
 		}
@@ -518,6 +539,7 @@ func resolveCoreRoleHolder(cfg listenerDeliveryHandlerConfig, item contracts.Env
 					logger.DeliveryLog(slog.LevelWarn, "listener role has no holder", "", item.Topic, item.EventID, "skipped")
 				},
 				exceptionReason: "no_holder",
+				settle:          settleNone,
 			})
 			return "", session.SessionEntry{}, false
 		}
@@ -536,6 +558,7 @@ func resolveCoreRoleHolder(cfg listenerDeliveryHandlerConfig, item contracts.Env
 					logger.Error("listener role holder session lookup failed", slog.String("role", role), slog.String("session_id", sessionID), slog.String("error", holderErr.Error()))
 				},
 				exceptionReason: "delivery_failed",
+				settle:          settleNone,
 			})
 			return "", session.SessionEntry{}, false
 		}
@@ -548,6 +571,7 @@ func resolveCoreRoleHolder(cfg listenerDeliveryHandlerConfig, item contracts.Env
 					logger.Error("listener expired role claim cleanup failed", slog.String("role", role), slog.String("session_id", sessionID), slog.String("error", err.Error()))
 				},
 				exceptionReason: "delivery_failed",
+				settle:          settleNone,
 			})
 			return "", session.SessionEntry{}, false
 		}
@@ -561,6 +585,7 @@ func resolveCoreRoleHolder(cfg listenerDeliveryHandlerConfig, item contracts.Env
 				logger.DeliveryLog(slog.LevelWarn, "listener role holder is not live", sessionID, item.Topic, item.EventID, "failed")
 			},
 			exceptionReason: "delivery_failed",
+			settle:          settleNone,
 		})
 		return "", session.SessionEntry{}, false
 	}
@@ -570,6 +595,7 @@ func resolveCoreRoleHolder(cfg listenerDeliveryHandlerConfig, item contracts.Env
 			logger.Error("listener role holder churned past resolution bound", slog.String("role", role))
 		},
 		exceptionReason: "delivery_failed",
+		settle:          settleNone,
 	})
 	return "", session.SessionEntry{}, false
 }
@@ -616,6 +642,7 @@ func roleTopicDelivery(cfg listenerDeliveryHandlerConfig, message deliveryMessag
 			log: func(logger *logging.Logger) {
 				logger.DeliveryLog(slog.LevelInfo, "listener skip role echo", sessionID, item.Topic, item.EventID, "skipped")
 			},
+			settle: settleNone,
 		})
 		message.finalize(false)
 		return
@@ -634,7 +661,7 @@ func roleTopicDelivery(cfg listenerDeliveryHandlerConfig, message deliveryMessag
 		applyDeliveryOutcome(cfg, item, deliveryOutcome{
 			sessionID:    sessionID,
 			attempt:      attempt,
-			clearAttempt: true,
+			settle:       settleClear,
 			metricStatus: "failed",
 			log: func(logger *logging.Logger) {
 				logger.DeliveryLog(slog.LevelWarn, "listener role delivery mode cannot be read unambiguously", sessionID, item.Topic, item.EventID, "failed")
@@ -648,7 +675,7 @@ func roleTopicDelivery(cfg listenerDeliveryHandlerConfig, message deliveryMessag
 		applyDeliveryOutcome(cfg, item, deliveryOutcome{
 			sessionID:    sessionID,
 			attempt:      attempt,
-			clearAttempt: true,
+			settle:       settleClear,
 			metricStatus: "failed",
 			log: func(logger *logging.Logger) {
 				logger.DeliveryLog(slog.LevelWarn, "listener role holder does not advertise delivery mode", sessionID, item.Topic, item.EventID, "failed", slog.String("mode", mode))
@@ -670,7 +697,7 @@ func roleTopicDelivery(cfg listenerDeliveryHandlerConfig, message deliveryMessag
 					logger.DeliveryLog(slog.LevelWarn, "listener role receipt timed out", sessionID, item.Topic, item.EventID, "receipt_timeout", slog.String("timeout", roleReceiptTimeout.String()))
 				},
 				exceptionReason: "receipt_timeout",
-				clearAttempt:    true,
+				settle:          settleClear,
 			})
 			message.finalize(false)
 			return
@@ -683,7 +710,7 @@ func roleTopicDelivery(cfg listenerDeliveryHandlerConfig, message deliveryMessag
 				logger.DeliveryLog(slog.LevelError, "listener role forward failed", sessionID, item.Topic, item.EventID, "failed", slog.String("error", err.Error()))
 			},
 			exceptionReason: "delivery_failed",
-			clearAttempt:    true,
+			settle:          settleClear,
 		})
 		message.finalize(false)
 		return
@@ -695,7 +722,7 @@ func roleTopicDelivery(cfg listenerDeliveryHandlerConfig, message deliveryMessag
 		log: func(logger *logging.Logger) {
 			logger.DeliveryLog(slog.LevelInfo, "listener role forwarded", sessionID, item.Topic, item.EventID, "delivered")
 		},
-		recordDedupe: true,
+		settle: settleRecord,
 	})
 	message.finalize(false)
 }
@@ -804,7 +831,7 @@ func agentSubjectDelivery(cfg listenerDeliveryHandlerConfig, message deliveryMes
 				logger.DeliveryLog(slog.LevelError, "listener agent delivery failed", sessionID, item.Topic, item.EventID, "failed", slog.String("error", result.Err.Error()))
 			},
 			exceptionReason: "delivery_failed",
-			clearAttempt:    result.ShouldNAK || refused,
+			settle:          settleClearIf(result.ShouldNAK || refused),
 		})
 	}
 	if result.Delivered {
@@ -822,7 +849,7 @@ func agentSubjectDelivery(cfg listenerDeliveryHandlerConfig, message deliveryMes
 			log: func(logger *logging.Logger) {
 				logger.DeliveryLog(slog.LevelInfo, deliveryLog, sessionID, item.Topic, item.EventID, deliveryStatus)
 			},
-			recordDedupe: true,
+			settle: settleRecord,
 		})
 	} else if result.Err == nil {
 		unplaceableAgentDelivery(cfg, message, item, sessionID, metadata, result, attempt)
@@ -873,6 +900,7 @@ func fanoutDelivery(cfg listenerDeliveryHandlerConfig, message deliveryMessage, 
 				log: func(logger *logging.Logger) {
 					logger.DeliveryLog(slog.LevelInfo, "listener skip echo", interest.SessionID, item.Topic, item.EventID, "skipped")
 				},
+				settle: settleNone,
 			})
 			continue
 		}
@@ -902,7 +930,7 @@ func fanoutDelivery(cfg listenerDeliveryHandlerConfig, message deliveryMessage, 
 				exceptionReason:               "delivery_failed",
 				fanoutRefusal:                 true,
 				exceptionFailureClearsAttempt: true,
-				keepAttempt:                   true,
+				settle:                        settleKeep,
 			})
 			continue
 		}
@@ -917,7 +945,7 @@ func fanoutDelivery(cfg listenerDeliveryHandlerConfig, message deliveryMessage, 
 				exceptionReason:               "delivery_failed",
 				fanoutRefusal:                 true,
 				exceptionFailureClearsAttempt: true,
-				keepAttempt:                   true,
+				settle:                        settleKeep,
 			})
 			continue
 		}
@@ -946,7 +974,7 @@ func fanoutDelivery(cfg listenerDeliveryHandlerConfig, message deliveryMessage, 
 				},
 				exceptionReason: "delivery_failed",
 				fanoutRefusal:   true,
-				clearAttempt:    true,
+				settle:          settleClear,
 			})
 			continue
 		}
@@ -963,8 +991,8 @@ func fanoutDelivery(cfg listenerDeliveryHandlerConfig, message deliveryMessage, 
 				log: func(logger *logging.Logger) {
 					logger.DeliveryLog(slog.LevelError, "listener delivery failed", interest.SessionID, item.Topic, item.EventID, "failed", slog.String("error", err.Error()))
 				},
-				clearAttempt: retryable,
-				retry:        retryable,
+				settle: settleClearIf(retryable),
+				retry:  retryable,
 			}) {
 				retryIn = max(retryIn, durableRetryDelay)
 			}
@@ -978,7 +1006,7 @@ func fanoutDelivery(cfg listenerDeliveryHandlerConfig, message deliveryMessage, 
 				attempt:      attempt,
 				metricStatus: deliveryStatus,
 				duration:     &deliveryTimer,
-				recordDedupe: true,
+				settle:       settleRecord,
 			})
 		}
 	}

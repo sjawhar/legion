@@ -68,20 +68,24 @@ type KV struct {
 	prefix string
 	cfg    KVConfig
 
-	// mu guards own and lastSweep.
+	// mu guards writing, held and lastSweep.
 	mu sync.Mutex
-	// own is what this process knows of its own attempts, by pair: each attempt Attempt answered
+	// writing holds the pairs an Attempt of this process is writing the record of, each entry the
+	// channel that Attempt closes when it returns: the per-pair lock another Attempt for the pair
+	// waits on (claim, release).
+	writing map[Key]chan struct{}
+	// held is what this process knows of its own attempts, by pair: each attempt Attempt answered
 	// Proceed for that nothing has settled yet, and each Keep kept. An attempted record of this
-	// boot holds this process (InFlight) only while own holds the attempt that wrote it; any other
-	// such record, one a clear could not delete or a write whose reply was lost left, is taken
-	// over. A write sweeps out the entries past their age (sweepEvery), so own holds no more
-	// than the attempts of the last AttemptedAge.
-	own       map[Key]ownAttempt
+	// boot holds this process (InFlight) only while held holds the attempt that wrote it; any
+	// other such record, one a clear could not delete or a write whose reply was lost left, is
+	// taken over. A write sweeps out the entries past their age (sweepEvery), so held holds no
+	// more than the attempts of the last AttemptedAge.
+	held      map[Key]heldAttempt
 	lastSweep time.Time
 }
 
-// ownAttempt is one of this process's attempts, as KV.own holds it.
-type ownAttempt struct {
+// heldAttempt is one of this process's attempts, as KV.held holds it.
+type heldAttempt struct {
 	// revision is the revision of the attempted record the attempt wrote; zero for none.
 	revision uint64
 	// at is when the attempt was written, by KVConfig.Now.
@@ -89,9 +93,6 @@ type ownAttempt struct {
 	// kept marks an attempt Keep settled: it holds for AttemptedAge, an unsettled one for
 	// TakeoverAfter.
 	kept bool
-	// writing is non-nil while an Attempt of this process writes the pair's record, and closed
-	// when that Attempt returns; another Attempt for the pair waits for it.
-	writing chan struct{}
 }
 
 // NewKV makes the ledger cfg describes over kv, the listener state bucket.
@@ -105,7 +106,13 @@ func NewKV(kv bus.KeyValue, cfg KVConfig) *KV {
 	if cfg.Now == nil {
 		cfg.Now = time.Now
 	}
-	return &KV{kv: kv, prefix: bus.ListenerLedgerPrefix(cfg.Durable), cfg: cfg, own: make(map[Key]ownAttempt)}
+	return &KV{
+		kv:      kv,
+		prefix:  bus.ListenerLedgerPrefix(cfg.Durable),
+		cfg:     cfg,
+		writing: make(map[Key]chan struct{}),
+		held:    make(map[Key]heldAttempt),
+	}
 }
 
 // plainSessionID is a session id that is a KV key token as it stands, short enough to keep every
@@ -207,54 +214,44 @@ func (l *KV) judge(pair Key, entry nats.KeyValueEntry) (verdict Verdict, retryIn
 	}
 }
 
-// claim marks pair as written by an Attempt of this process, once any other Attempt of this
-// process for the pair has returned, and returns the channel release closes.
+// claim takes the pair's write lock for an Attempt of this process, once any other Attempt of
+// this process for the pair has returned, and returns the channel release closes.
 func (l *KV) claim(pair Key) chan struct{} {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	for {
 		l.sweepLocked(l.cfg.Now())
-		own := l.own[pair]
-		if own.writing == nil {
-			own.writing = make(chan struct{})
-			l.own[pair] = own
-			return own.writing
+		writing, locked := l.writing[pair]
+		if !locked {
+			writing = make(chan struct{})
+			l.writing[pair] = writing
+			return writing
 		}
 		l.mu.Unlock()
-		<-own.writing
+		<-writing
 		l.mu.Lock()
 	}
 }
 
-// release ends the claim writing took on pair: a Proceed attempt is now this process's unsettled
+// release gives the pair's write lock back: a Proceed attempt is now this process's unsettled
 // attempt for the pair; any other answer leaves what this process held of the pair as it was.
 func (l *KV) release(pair Key, attempt Attempt, writing chan struct{}) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
-	own := l.own[pair]
-	switch {
-	case attempt.Verdict == Proceed:
-		l.own[pair] = ownAttempt{revision: attempt.revision, at: l.cfg.Now()}
-	case own.revision != 0:
-		own.writing = nil
-		l.own[pair] = own
-	default:
-		delete(l.own, pair)
+	if attempt.Verdict == Proceed {
+		l.held[pair] = heldAttempt{revision: attempt.revision, at: l.cfg.Now()}
 	}
+	delete(l.writing, pair)
 	close(writing)
 }
 
-// holds reports whether this process holds the attempt that wrote revision of pair's record:
-// unsettled and younger than TakeoverAfter, or kept and younger than AttemptedAge.
+// holds reports whether this process holds the attempt that wrote revision of pair's record, by
+// the ledgers' shared rule (attemptHolds).
 func (l *KV) holds(pair Key, revision uint64) bool {
 	l.mu.Lock()
 	defer l.mu.Unlock()
-	own := l.own[pair]
-	limit := l.cfg.TakeoverAfter
-	if own.kept {
-		limit = l.cfg.AttemptedAge
-	}
-	return own.revision == revision && l.cfg.Now().Sub(own.at) < limit
+	held := l.held[pair]
+	return held.revision == revision && attemptHolds(l.cfg.Now().Sub(held.at), held.kept, l.cfg.TakeoverAfter)
 }
 
 // forget drops attempt from what this process holds, unless a later attempt of this process has
@@ -262,27 +259,23 @@ func (l *KV) holds(pair Key, revision uint64) bool {
 func (l *KV) forget(attempt Attempt) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
-	own, ok := l.own[attempt.pair]
-	switch {
-	case !ok || own.revision != attempt.revision:
-	case own.writing != nil:
-		l.own[attempt.pair] = ownAttempt{writing: own.writing}
-	default:
-		delete(l.own, attempt.pair)
+	if held, ok := l.held[attempt.pair]; ok && held.revision == attempt.revision {
+		delete(l.held, attempt.pair)
 	}
 }
 
 // sweepLocked drops every attempt this process holds that is past the longest age it can hold
-// for, at most once per sweepEvery. The caller holds l.mu.
+// for, at most once per sweepEvery, leaving the pairs an Attempt is writing to its release. The
+// caller holds l.mu.
 func (l *KV) sweepLocked(now time.Time) {
 	if now.Sub(l.lastSweep) < sweepEvery {
 		return
 	}
 	l.lastSweep = now
 	limit := max(l.cfg.AttemptedAge, l.cfg.TakeoverAfter)
-	for pair, own := range l.own {
-		if own.writing == nil && now.Sub(own.at) >= limit {
-			delete(l.own, pair)
+	for pair, held := range l.held {
+		if _, writing := l.writing[pair]; !writing && now.Sub(held.at) >= limit {
+			delete(l.held, pair)
 		}
 	}
 }
@@ -326,8 +319,8 @@ func (l *KV) Keep(attempt Attempt) {
 	}
 	l.mu.Lock()
 	defer l.mu.Unlock()
-	if own, ok := l.own[attempt.pair]; ok && own.revision == attempt.revision {
-		own.kept = true
-		l.own[attempt.pair] = own
+	if held, ok := l.held[attempt.pair]; ok && held.revision == attempt.revision {
+		held.kept = true
+		l.held[attempt.pair] = held
 	}
 }

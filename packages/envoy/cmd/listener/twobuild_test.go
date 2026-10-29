@@ -3,9 +3,9 @@
 // Two listener builds for one machine id, as a roll from one release to the next runs them
 // (INFRA-557): one build that compiles in a stream subject the other does not know, and, when
 // ENVOY_LISTENER_OLD_BINARY names one, a build from before the delivery lease. Each row starts the
-// builds' real binaries through multiprocess_test.go's harness and checks that no message on any
-// subject is skipped, doubled, or dropped by both while the machine's delivery passes from one
-// build to the other. Like multiprocess_test.go it uses nothing a build before INFRA-557
+// builds' real binaries through multiprocess_harness_test.go's harness and checks that no message
+// on any subject is skipped, doubled, or dropped by both while the machine's delivery passes from
+// one build to the other. Like the rows beside it it uses nothing a build before INFRA-557
 // (819dc283) lacks but cmdtest.Build's tags, so it runs there with that harness beside it.
 
 package main

@@ -238,8 +238,8 @@ func TestKV_AWriteSweepsTheAttemptsThisProcessHoldsPastTheirAge(t *testing.T) {
 	mustAttempt(t, a, "publish.fresh", "ses_target", Proceed)
 	a.mu.Lock()
 	defer a.mu.Unlock()
-	if _, ok := a.own[Key{DedupeKey: "publish.fresh", SessionID: "ses_target"}]; !ok || len(a.own) != 1 {
-		t.Fatalf("attempts held after the sweep = %v, want only the fresh one", a.own)
+	if _, ok := a.held[Key{DedupeKey: "publish.fresh", SessionID: "ses_target"}]; !ok || len(a.held) != 1 {
+		t.Fatalf("attempts held after the sweep = %v, want only the fresh one", a.held)
 	}
 }
 

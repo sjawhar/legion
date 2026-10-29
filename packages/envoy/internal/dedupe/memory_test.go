@@ -62,7 +62,9 @@ func TestMemory_AnUnsettledAttemptIsInFlightUntilTheTakeoverAge(t *testing.T) {
 	mustAttempt(t, m, "publish.different", "ses-target", Proceed)
 	mustAttempt(t, m, "publish.abc123", "ses-other", Proceed)
 
-	clock.Advance(testTakeoverAfter)
+	// The hold is exclusive of its age (attemptHolds): held an instant before the takeover age,
+	// taken over at it.
+	clock.Advance(testTakeoverAfter - 1)
 	mustAttempt(t, m, "publish.abc123", "ses-target", InFlight)
 	clock.Advance(1)
 	mustAttempt(t, m, "publish.abc123", "ses-target", Proceed)
@@ -76,7 +78,7 @@ func TestMemory_AKeptAttemptIsInFlightUntilAttemptedAge(t *testing.T) {
 
 	clock.Advance(testTakeoverAfter + time.Second)
 	mustAttempt(t, m, "publish.abc123", "ses-target", InFlight)
-	clock.Advance(AttemptedAge - testTakeoverAfter - time.Second)
+	clock.Advance(AttemptedAge - testTakeoverAfter - time.Second - 1)
 	mustAttempt(t, m, "publish.abc123", "ses-target", InFlight)
 	clock.Advance(1)
 	mustAttempt(t, m, "publish.abc123", "ses-target", Proceed)

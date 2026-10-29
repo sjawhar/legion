@@ -90,16 +90,14 @@ func (m *Memory) Keep(attempt Attempt) {
 	}
 }
 
+// live reports whether record still stops a delivery of its pair: a delivered record for
+// DeliveredAge, and an attempt by the ledgers' shared rule (attemptHolds).
 func (m *Memory) live(record memoryRecord, now time.Time) bool {
 	age := now.Sub(record.at)
-	switch {
-	case record.delivered:
+	if record.delivered {
 		return age <= DeliveredAge
-	case record.kept:
-		return age <= AttemptedAge
-	default:
-		return age <= m.takeoverAfter
 	}
+	return attemptHolds(age, record.kept, m.takeoverAfter)
 }
 
 // sweepLocked drops every record past the longest age it can hold for, at most once per

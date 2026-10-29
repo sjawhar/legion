@@ -333,5 +333,6 @@ ENVOY_LISTENER_OLD_BINARY=<path to that build> \
   go test -tags multiprocess -count=1 -timeout 20m -v -run '^TestTwoBuilds' ./cmd/listener
 ```
 
-The lease, receive and ledger rows that need no second process (`lease_test.go`,
-`receive_test.go`, `ledger_test.go`) run with the package's other tests.
+The lease, receive and ledger rows that need no second process (`lease_test.go` and the
+`lease_*_test.go` files beside it, `receive_test.go` and the `receive_*_test.go` files beside it,
+`ledger_test.go`) run with the package's other tests.
