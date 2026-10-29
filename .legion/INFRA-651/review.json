@@ -2,23 +2,30 @@
   "schemaVersion": 1,
   "phase": "review",
   "issue": "INFRA-651",
-  "completed": "2026-10-29T16:13:25Z",
-  "round": 4,
-  "scope": "Narrowed by the architect (2026-10-29 13:13Z): the round-3 findings in the load-test seed only; the server and CLI change is settled.",
-  "reviewedCodeHead": "e510068fceaa6253513273e48f790374357223a6",
-  "decision": "changes_requested",
+  "completed": "2026-10-29T17:58:00Z",
+  "round": 5,
+  "scope": "Narrowed by the architect (2026-10-29 16:16Z): request_keys deleted before the vacuum with a check, and the three round-4 cleanups; nothing else.",
+  "reviewedCodeHead": "c281bc3c6d8e2af2f3e6741f82690245f63b8eca",
+  "decision": "approved",
   "critical": 0,
-  "important": 1,
-  "minor": 3,
+  "important": 0,
+  "minor": 1,
   "keyFindings": [
-    {"severity": "important", "file": "packages/envoy/loadtest/stack.sh:561", "description": "New with round-3 fix 3: every seed-refs write is keyed, so the seed leaves 19,781 request_keys rows in the dispatch_seed template, which every step copies. RunSuggestionOutcomeSweep (cmd/dispatch/main.go:532, every minute, suggestion_outcomes.go:17,181) deletes keys older than IdempotencyKeyTTL (24 h, request_keys.go:1240-1244), so every step on a seed older than a day deletes ~19.8k rows about 60 s after start, inside the measured window; a younger seed does not. Delete request_keys in cmd_seed before the vacuum."},
-    {"severity": "minor", "file": "packages/envoy/loadtest/refs.go:293", "description": "The written-vs-plan comparisons (:293, :334) can never fail once g.Wait() returns nil, and the doc comments claim they check the plan. Remove them, or compare seed.meta.json's ref_* counts with 19,471 and 310."},
-    {"severity": "minor", "file": "packages/envoy/loadtest/stack.sh:517", "description": "Grepping usage's two-space indent is a hidden contract; `loadgen seed-refs -h` exits 0 at this head and 2 on a pre-PR loadgen."},
-    {"severity": "minor", "file": "packages/envoy/loadtest/refs_test.go:120", "description": "refPlanDigest re-sorts keys and citations makeRefPlan already sorts and leaves p.lga's order out; range p.lga and hash p.sources[key] directly, then update refPlanSHA256."}
+    {
+      "severity": "minor",
+      "file": "packages/envoy/loadtest/stack.sh:561",
+      "description": "Judged not a defect (code-quality pass): the to_regclass guard cannot be false once the seed-refs probe passes, and the count check after an unfiltered delete with Dispatch stopped cannot fail. Both are defensive, change no reachable behaviour, and are outside the architect's narrowed scope; not requested."
+    }
   ],
-  "roundThreeFindings": "All nine fixed in 9511fa836f8a and verified: cmd_seed refuses a loadgen without seed-refs before any drop (tester round 5: dispatch_seed kept); the citation mutation now fails TestMakeRefPlan (re-run by me: 'the plan hashes to b37b4497..., want 7414809c...'); writes carry Idempotency-Keys and need 201 (tester: 507 dropped answers, +19,471 exactly); SetLimit pools; refsShape, mkStat, etag on callResult, one constant; refsFetch counts 200s; wording 'absent, empty or all' in all five places; census prose 86 hits in 32 files (re-run at e510068f).",
-  "merge": "e510068f merges main 30ecdcd4: every one of the PR's 22 files has identical hunks before and after it.",
-  "ci": "CI head e510068fceaa: every required check still queued at 16:12Z (changes, pr-title); a request for changes does not wait on it. go test ./loadtest/ and go vet ./loadtest/ pass locally at the head.",
-  "thermonuclear": "Run once at 7309a96c, scoped to the round-3 fixes: deep review CHANGES (request_keys in the template; dead count checks); code quality CHANGES (dead count checks, usage grep, digest re-sort; it raised the request_keys issue independently).",
-  "threads": "Nine round-3 threads: each has the implementer's reply and is resolved; I reply to each in this round."
+  "verified": [
+    "request_keys: stack.sh deletes them after Dispatch stops and before vacuum analyze, dies if any remain, and skips a build without the table; tester: 0 rows in dispatch_seed and after reset, counts 1,000 / 19,471 / 310 / 51,071, refs-shape PASS",
+    "dead count checks and their comments removed from refs.go",
+    "seed-refs probe is `loadgen seed-refs -h`: head loadgen exits 0, an unknown command exits 2 (built and run by me); main's default branch exits 2; tester saw seed --force refused before any drop",
+    "refPlanDigest ranges over p.lga; unmutated TestMakeRefPlan passes with 7414809c..., the citation mutation fails with b37b4497... (re-run by me); go vet and go test ./loadtest/ pass",
+    "diff since e510068f touches only packages/envoy/loadtest/{README.md,refs.go,refs_test.go,stack.sh}; PR body item 13 quotes the architect's 16:16Z decision"
+  ],
+  "ci": "Required lint, test, pr-title success and typecheck skipped (counts as passing) at CI head c281bc3c (compare to 57a2484a: 2 files, .legion/INFRA-651/ only). Not required and still running when read: dispatch, envoy-go-race; every other job success.",
+  "thermonuclear": "Run once at 57a2484a, scoped to the four fixes: deep review APPROVE, no findings; code quality CHANGES on one deletion-only item (the to_regclass guard and post-delete count check), judged not a defect.",
+  "threads": "Four round-4 threads, each answered by me (accepted) and resolved by the implementer.",
+  "mergeRule": "Both rules applied to the implementer's runs at 4b1d777a (server code unchanged since): old rule (plan) every head run below every base run (head 0.1942/0.1911/0.1990 vs base 0.2218/0.2116/0.2206 Dispatch cores) -> merge; INFRA-512 spec v25 rule (architect, 17:52Z) median head 0.1942 <= highest base 0.2218 over equal windows -> not slower; correct: full answers byte-identical base vs head over 1,000 issues; the one visible change (the CLI's unavailable line names ?versions=latest) was decided by the architect 2026-10-28 16:00Z; no kept memory. Both pass."
 }
