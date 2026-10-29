@@ -468,7 +468,9 @@ func TestURLReadingsAgreeWithTheEngine(t *testing.T) {
 // A link Go reads from a bare address at a position the engine starts one is written back as Go
 // read it and the engine reads that writing alike, so a document holding it is stored rather than
 // refused (INFRA-531 testing): an address holding `>` after a closing parenthesis, one ending in a
-// backslash before an escaped character, and one between a text `<` and a later `>`.
+// backslash before an escaped character, and one between a text `<` and a later `>`. A text `<`
+// a task item's text opens with is escaped only where the engine opens an HTML block at it, and
+// those rows are also written back exactly as they are.
 func TestALinkReadFromABareAddressAfterPunctuationIsWrittenBack(t *testing.T) {
 	markdowns := []string{
 		"x;https://x.test/(a)> b\n",
@@ -509,6 +511,20 @@ func TestALinkReadFromABareAddressAfterPunctuationIsWrittenBack(t *testing.T) {
 		"> \\<span title=a=b;a@b.cc>\n",
 		"- \\<span title=a=b;a@b.cc>\n",
 	}
+	asIs := []string{
+		// A continuation line of a task item, and a later paragraph of one, start a block, where
+		// the engine opens an HTML block as at any other.
+		"- [ ] a\\\n  \\<!-- todo later\n",
+		"- [ ] a\n\n  \\<div class=x\n",
+		// Text written right after a task item's checkbox is read inside the item's paragraph,
+		// where no HTML block opens: its `<` is written as it is.
+		"- [ ] <!-- todo later\n",
+		"- [ ] <div class=x\n",
+		"- [x] <!doctype html\n",
+		"1. [ ] <script x\n",
+		"> - [ ] </div\n",
+	}
+	markdowns = append(markdowns, asIs...)
 	docs := make([]*Node, len(markdowns))
 	rendered := make([]string, len(markdowns))
 	for index, markdown := range markdowns {
@@ -527,6 +543,9 @@ func TestALinkReadFromABareAddressAfterPunctuationIsWrittenBack(t *testing.T) {
 		if err != nil || !back.Equal(docs[index]) || readings[index] == nil || !readings[index].Equal(back) {
 			t.Errorf("%q reads in Go as %s, is written as %q, which reads back in Go as %s (%v) and in the engine as %s",
 				markdown, readingSummary(docs[index]), rendered[index], readingSummary(back), err, readingSummary(readings[index]))
+		}
+		if index >= len(markdowns)-len(asIs) && rendered[index] != markdown {
+			t.Errorf("%q is written back as %q, want it as it is", markdown, rendered[index])
 		}
 	}
 }

@@ -74,8 +74,9 @@ type lineCandidate struct {
 	// with it.
 	afterLine bool
 	// firstOnLine reports whether the character is the first the line writes after its prefix, no
-	// mark's marker or escaped indentation before it, where the engine opens an HTML block at a
-	// `<` it starts (htmlBlockStart).
+	// mark's marker, escaped indentation or task item's checkbox before it, where the engine opens
+	// an HTML block at a `<` it starts (htmlBlockStart). Both parsers read the checkbox inside the
+	// item's paragraph, after its blocks are decided, so no HTML block opens after it on its line.
 	firstOnLine bool
 	// closesTyped reports whether a lone `:::` line of the textblock is escaped as one that could
 	// close the typed block around it: the textblock is written at the typed block's own prefix, or,
@@ -1234,7 +1235,7 @@ func (r *renderer) holdLineStart(before string, char rune, position *inlinePosit
 		at:          r.b.Len(),
 		char:        char,
 		afterLine:   position.afterLine,
-		firstOnLine: first && !position.afterMarker,
+		firstOnLine: first && !position.afterMarker && r.checkboxEnd <= markdownLineStart(r.b.Bytes(), r.b.Len()),
 		closesTyped: typed != nil && (typed.prefix == prefix || typed.colons == 3 && typedFenceReach(typed.prefix, prefix)),
 		prefix:      prefix,
 	}

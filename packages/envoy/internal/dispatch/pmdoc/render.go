@@ -26,6 +26,10 @@ type renderer struct {
 	// and footnoteLabel is its label as written, so that the line is read after a reference to it.
 	footnoteLineAt int
 	footnoteLabel  string
+	// checkboxEnd is where the last task item's checkbox (`[ ] `, `[x] `) ends in the markdown, or 0
+	// before any, so that the text written after it on its line is not read as the line's first
+	// (holdLineStart).
+	checkboxEnd int
 	// scopes is a frame for each container the blocks being written stand in, outermost first
 	// (scope).
 	scopes []scope
@@ -506,6 +510,7 @@ func (r *renderer) list(n *Node, prefix string) {
 			} else {
 				r.writeSyntax("[ ] ")
 			}
+			r.checkboxEnd = r.b.Len()
 		}
 		indent := prefix + strings.Repeat(" ", len(marker))
 		// An empty first paragraph is written as nothing, with the next block on the marker's line:
