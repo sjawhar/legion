@@ -442,7 +442,7 @@ func connectBrowser(t *testing.T, serverURL, artifactID, login string) *docstest
 // update, under the copy's own lock, which the browser's reader applies the room's updates under.
 // ygo applies the update to the room in its own transaction, under the room's lock - the path every
 // browser edit takes. It returns once the room's update observer has run for that update -
-// creditContentChange credited it and recordUpdateClass counted its durable append - whether or not
+// creditContentChange credited it and queueUpdateClass counted its durable append - whether or not
 // the append has reached storage. The signal is an observer this helper registers on the room after
 // the service's own: ygo fires a transaction's update observers in the order they were registered
 // (reearth/ygo crdt/doc.go, the onUpdate snapshot loop), so this one runs after the service's has

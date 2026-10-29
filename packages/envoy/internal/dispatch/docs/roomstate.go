@@ -302,17 +302,12 @@ func (s *Service) unusedLocked(state *roomState) bool {
 		state.pendingUpdates == 0 && state.durableAppends.Load() == 0 && len(state.inflight) == 0
 }
 
-// recordUpdateClass records what the room's update observer read off one update, for the
+// queueUpdateClass records what the room's update observer read off one update, for the
 // persistence that takes it next (consumeUpdateClass). Only a durable class is work the room's
 // state waits on: a repair's update is recorded for the room instance it names alone, and its
-// writer, not the room's persistence, is what makes it durable.
-func (s *Service) recordUpdateClass(room string, update []byte, class documentUpdateClass) {
-	s.queueUpdateClass(room, update, class, false)
-}
-
-// queueUpdateClass is recordUpdateClass for a class whose update a writer other than the room's
-// persistence has already stored, or is storing under the document's advisory lock, when stored is
-// set: a published live write's, or a repair's (classifyDrained).
+// writer, not the room's persistence, is what makes it durable. Stored is set for a class whose
+// update a writer other than the room's persistence has already stored, or is storing under the
+// document's advisory lock: a published live write's, or a repair's (classifyDrained).
 func (s *Service) queueUpdateClass(room string, update []byte, class documentUpdateClass, stored bool) {
 	state := s.lockState(room)
 	defer s.unlockState(room, state)
@@ -363,7 +358,9 @@ func unrecordedClass() *queuedClass {
 
 // finishUpdateClass ends what the room's worker took with class from state, the record
 // consumeUpdateClass answered: the class leaves the queue, stored or dropped, and a durable one
-// ends the append recordUpdateClass counted (finishDurableAppend).
+// ends the append queueUpdateClass counted. A failed room's eviction registers a new record in
+// place of the one that counted the append (handOverFailedRoomLocked), so a late append of the
+// failed room's never takes that new record's count below zero.
 func (s *Service) finishUpdateClass(room string, state *roomState, class *queuedClass) {
 	state.mu.Lock()
 	state.updateClasses = slices.DeleteFunc(state.updateClasses, func(queued *queuedClass) bool { return queued == class })
@@ -380,16 +377,6 @@ func (s *Service) hasPendingUpdates(room string) bool {
 	}
 	defer s.unlockState(room, state)
 	return state.pendingUpdates > 0
-}
-
-// finishDurableAppend ends a durable append recordUpdateClass counted on state, the record that
-// counted it (consumeUpdateClass answers it). A failed room's eviction registers a new record in
-// place of the one that counted the append (handOverFailedRoomLocked), so a late append of the
-// failed room's never takes that new record's count below zero.
-func (s *Service) finishDurableAppend(room string, state *roomState) {
-	state.mu.Lock()
-	state.durableAppends.Add(-1)
-	s.unlockState(room, state)
 }
 
 func (s *Service) hasDurableAppend(room string) bool {

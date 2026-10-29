@@ -19,7 +19,7 @@ import (
 // on, which need not be the order the room applied them in: ygo fires a transaction's update
 // observers after the transaction has released the document's lock, so one peer's update can be
 // handed to the room's worker while another's is still between the room's update observer, which
-// counts it as pending (recordUpdateClass), and ygo's persistence observer, which hands it to the
+// counts it as pending (queueUpdateClass), and ygo's persistence observer, which hands it to the
 // worker. Here the first peer's update is held between those two observers while the second
 // peer's is stored. The second peer's append stores the held update first, in the room's commit
 // order (flushThrough); a settlement meanwhile settles both peers' text without waiting for the

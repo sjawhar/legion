@@ -526,7 +526,7 @@ func (s *Service) onLoadDocument(ctx context.Context, room string, doc *crdt.Doc
 		// document's lock at its commit - so its class is recorded, in the drain and in commit
 		// order, before ygo's persistence observer, which runs after this one on this goroutine,
 		// hands it on.
-		settles, changed := replica.observe(room, replica.classify)
+		settles, changed := replica.observe(room)
 		if changed && s.afterCreditUpdate != nil {
 			s.afterCreditUpdate(room)
 		}

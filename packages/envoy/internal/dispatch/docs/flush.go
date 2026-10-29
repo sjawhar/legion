@@ -60,7 +60,7 @@ func (s *Service) readPointQuietly(room string, live *crdt.Doc) ([]byte, roomPoi
 	if replica == nil {
 		return crdt.EncodeStateAsUpdateV1(live, nil), point, false, nil
 	}
-	state, seq, settles, _ := replica.readPoint(room, live, replica.classify)
+	state, seq, settles := replica.readPoint(room, live)
 	point.seq = seq
 	return state, point, settles, nil
 }
@@ -97,7 +97,7 @@ func (s *Service) committedSince(room string, live *crdt.Doc, point roomPoint) b
 	if replica == nil {
 		return true
 	}
-	seq, settles := replica.drainedSeq(room, replica.classify)
+	seq, settles := replica.drainedSeq(room)
 	if settles {
 		s.scheduleSettle(room)
 	}
@@ -285,16 +285,13 @@ func (l *Ledger) flushThrough(ctx context.Context, tx pgx.Tx, room string, throu
 
 // flushRead stores, in l's transaction, the room's updates through write's read point that no
 // writer has stored yet (flushThrough): what write's fork holds beyond the store, stored ahead of
-// every append of the write (window A), so the write's own updates follow, in the store, the very
+// every append of the write, so the write's own updates follow, in the store, the very
 // state they were made on. The write holds the document's advisory lock from that read on
 // (readFork), so nothing it stores here can have been stored by another writer since. A second
 // call stores nothing more, since the point never moves (forkLive). A cold fork has no read point
 // and stores nothing: it was read from the store.
 func (l *Ledger) flushRead(ctx context.Context, write *liveWrite) error {
-	if write.point.cursor == nil {
-		return nil
-	}
-	return l.flushThrough(ctx, l.tx, write.artifactID, write.point)
+	return l.storeRead(ctx, l.tx, write.artifactID, write.point)
 }
 
 // flushFor is the flush this transaction keeps for room, nil while it has flushed nothing of it
@@ -314,7 +311,7 @@ func (l *Ledger) flushFor(room string) *roomFlush {
 // storeRead stores, in l's transaction, every update of room through point, a read point of it
 // (readPoint), that no writer has stored yet (flushThrough): what a version written without a write
 // of its own - a settlement's, a snapshot's, a named version's - does before it records the room's
-// state at point (window C). The stored updates then fold to that state, so the head after them,
+// state at point. The stored updates then fold to that state, so the head after them,
 // which the version records as its doc_update_version, holds every update its text does. A point
 // of no room instance stores nothing: no update of it was recorded. The caller holds the
 // document's advisory lock in tx from before point was read.

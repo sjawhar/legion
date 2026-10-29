@@ -363,30 +363,30 @@ func (r *renderedReplica) lockForUpdate() {
 // holders of mu that wait for it, and the ones that drain the log: every committed update is
 // classified exactly once, by whichever of them reaches the log first. It reports whether any
 // update it classified is one the room's settlement follows, and whether any changed the content.
-func (r *renderedReplica) observe(room string, classify drainClassifier) (settles, changed bool) {
+func (r *renderedReplica) observe(room string) (settles, changed bool) {
 	r.lockForUpdate()
 	defer r.mu.Unlock()
-	return r.drainLocked(room, classify)
+	return r.drainLocked(room)
 }
 
 // drainLocked drains the room's update log and moves the replica through what it hands over
 // (takeLocked). The caller holds mu.
-func (r *renderedReplica) drainLocked(room string, classify drainClassifier) (settles, changed bool) {
+func (r *renderedReplica) drainLocked(room string) (settles, changed bool) {
 	base, updates := r.log.Drain()
-	return r.takeLocked(room, base, updates, classify)
+	return r.takeLocked(room, base, updates)
 }
 
 // takeLocked moves the replica through what one drain of the room's log handed over - base, when
 // it recorded one, and updates - in commit order, rendering after each update
-// (updateChangesMarkdown) and calling classify, when given, with each update and its commit
-// position. The caller holds mu.
-func (r *renderedReplica) takeLocked(room string, base []byte, updates []crdt.LoggedUpdate, classify drainClassifier) (settles, changed bool) {
+// (updateChangesMarkdown) and calling the replica's classify, when set, with each update and its
+// commit position. The caller holds mu.
+func (r *renderedReplica) takeLocked(room string, base []byte, updates []crdt.LoggedUpdate) (settles, changed bool) {
 	note := func(update crdt.LoggedUpdate, contentChanged bool, tree *pmdoc.Node) {
 		r.seq++
-		if classify == nil {
+		if r.classify == nil {
 			return
 		}
-		settled, credited := classify(update, r.seq, contentChanged, tree)
+		settled, credited := r.classify(update, r.seq, contentChanged, tree)
 		settles = settles || settled
 		changed = changed || credited
 	}
@@ -458,22 +458,22 @@ func (r *renderedReplica) recover(room string, unplaced []crdt.LoggedUpdate, not
 // handed over, and classified, before it (UpdateLog.Reset hands over every update it holds), and
 // the first commit after it records a base before its transaction runs, under the same document
 // lock the copy takes. A base the log hands over after the copy means a commit ran; the replica
-// then starts from it, and the read is taken again. It returns settles and changed for the
-// updates it classified, as observe does. The caller must not hold live's document lock.
-func (r *renderedReplica) readPoint(room string, live *crdt.Doc, classify drainClassifier) (state []byte, seq uint64, settles, changed bool) {
+// then starts from it, and the read is taken again. It returns settles for the updates it
+// classified, as observe does. The caller must not hold live's document lock.
+func (r *renderedReplica) readPoint(room string, live *crdt.Doc) (state []byte, seq uint64, settles bool) {
 	r.lockForUpdate()
 	defer r.mu.Unlock()
-	settles, changed = r.drainLocked(room, classify)
+	settles, _ = r.drainLocked(room)
 	for r.doc == nil {
 		copied := crdt.EncodeStateAsUpdateV1(live, nil)
 		base, updates := r.log.Drain()
 		if base == nil && len(updates) == 0 {
-			return copied, r.seq, settles, changed
+			return copied, r.seq, settles
 		}
-		took, credited := r.takeLocked(room, base, updates, classify)
-		settles, changed = settles || took, changed || credited
+		took, _ := r.takeLocked(room, base, updates)
+		settles = settles || took
 	}
-	return crdt.EncodeStateAsUpdateV1(r.doc, nil), r.seq, settles, changed
+	return crdt.EncodeStateAsUpdateV1(r.doc, nil), r.seq, settles
 }
 
 // drainedSeq is readPoint without the copy: it drains the room's log as the update observer would,
@@ -482,10 +482,10 @@ func (r *renderedReplica) readPoint(room string, live *crdt.Doc, classify drainC
 // one the room's settlement follows. A position equal to an earlier read point's says the room has
 // committed nothing since that read: in the recover state too, since the log hands over, and the
 // replica counts, every commit there is.
-func (r *renderedReplica) drainedSeq(room string, classify drainClassifier) (seq uint64, settles bool) {
+func (r *renderedReplica) drainedSeq(room string) (seq uint64, settles bool) {
 	r.lockForUpdate()
 	defer r.mu.Unlock()
-	settles, _ = r.drainLocked(room, classify)
+	settles, _ = r.drainLocked(room)
 	return r.seq, settles
 }
 
@@ -531,18 +531,14 @@ func (s *Service) readLive(room string, live *crdt.Doc, read func(doc *crdt.Doc)
 }
 
 // holdLive is live as of one moment, as readLive reads it, for the caller to walk until it calls
-// release: the replica, holding its lock, or a copy. A caller that must take the room as of one
-// moment under a lock of its own takes it here under that lock and walks it once it has released
-// that lock (captureLiveTextAndAuthors).
+// release: the replica, holding its lock, or a copy.
 func (s *Service) holdLive(room string, live *crdt.Doc) (doc *crdt.Doc, release func(), err error) {
 	if live == nil {
 		return nil, nil, errDocUnloaded
 	}
-	if listed, ok := s.replicas.Load(weak.Make(live)); ok {
-		if replica := listed.(weak.Pointer[renderedReplica]).Value(); replica != nil {
-			if doc := replica.hold(); doc != nil {
-				return doc, replica.mu.Unlock, nil
-			}
+	if replica := s.liveReplica(live); replica != nil {
+		if doc := replica.hold(); doc != nil {
+			return doc, replica.mu.Unlock, nil
 		}
 	}
 	copied, err := snapshotDocument(live)

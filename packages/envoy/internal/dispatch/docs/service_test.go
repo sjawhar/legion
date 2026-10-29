@@ -1879,11 +1879,7 @@ func settleCurrentGeneration(t *testing.T, service *Service, artifactID string) 
 	if err := service.waitForDurableAppends(ctx, artifactID); err != nil {
 		t.Fatalf("wait for live updates to become durable: %v", err)
 	}
-	state := service.room(artifactID)
-	state.mu.Lock()
-	generation := state.roomGeneration
-	state.mu.Unlock()
-	service.settleRoom(artifactID, generation)
+	settleNow(service, artifactID)
 }
 
 // settleNow runs the room's settlement at its current generation at once, whatever the room has not

@@ -1312,7 +1312,7 @@ func (s *Service) registerStampedAskBlocks(ctx context.Context, room string, sta
 // which every write to the pending authors and every in-flight credit's landing hold, so the
 // authors it reads stay where it read them until the version's transaction ends. It reads the room
 // at an exact commit position (readPoint) and stores every update of the room through it that no
-// writer has stored yet before the version (Ledger.storeRead, window C), so the version's
+// writer has stored yet before the version (Ledger.storeRead), so the version's
 // doc_update_version, the head it reads in this transaction, holds every update its text does.
 // It lists the pending authors it reads after those appends, which wrote the authors of the
 // updates they stored, and the in-flight credits observed before its read: a credit observed
@@ -1346,13 +1346,10 @@ func (s *Service) captureLiveTextAndAuthors(ctx context.Context, room string, ac
 	if s.afterReadWarm != nil {
 		s.afterReadWarm(room)
 	}
-	if err := lockDocumentRoom(ctx, tx, room); err != nil {
-		return renderedTree{}, authorCapture{}, err
-	}
 	// The head under the document's advisory lock, which this transaction holds from here to its
 	// end: every append, this process's own included, waits for it, so no room's cursor moves and
 	// the head stays where it is read until this transaction's own appends move it.
-	head, err := currentUpdateCursor(ctx, tx, room)
+	head, err := lockedHead(ctx, tx, room)
 	if err != nil {
 		return renderedTree{}, authorCapture{}, err
 	}

@@ -5,7 +5,6 @@ import (
 	"slices"
 	"strings"
 	"testing"
-	"weak"
 
 	"github.com/reearth/ygo/crdt"
 
@@ -29,13 +28,9 @@ func renderedState(t *testing.T, state []byte) string {
 // replicaOf is the replica the room's update observer keeps for live.
 func replicaOf(t *testing.T, service *Service, live *crdt.Doc) *renderedReplica {
 	t.Helper()
-	listed, ok := service.replicas.Load(weak.Make(live))
-	if !ok {
-		t.Fatal("the room lists no replica")
-	}
-	replica := listed.(weak.Pointer[renderedReplica]).Value()
+	replica := service.liveReplica(live)
 	if replica == nil {
-		t.Fatal("the room's replica is gone")
+		t.Fatal("the room lists no replica, or its replica is gone")
 	}
 	return replica
 }

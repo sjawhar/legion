@@ -185,7 +185,7 @@ type Service struct {
 	// classified a content change, credited its authors and recorded each update's class, outside
 	// the replica's lock, and before it arms the room's settlement. Nil outside tests; tests use it
 	// to hold that window, in which the observer's own update is credited and pending
-	// (recordUpdateClass) but not handed to persistence, whose observer runs after this one.
+	// (queueUpdateClass) but not handed to persistence, whose observer runs after this one.
 	afterCreditUpdate func(room string)
 	// afterLiveCommit runs once a transaction's writes to a document have committed and the
 	// document's advisory lock is gone with them, before the publish applies them to the room.
@@ -1172,7 +1172,7 @@ type settlementRead struct {
 // readSettlementTree is a read of doc, the room instance a settlement holds, for that settlement:
 // the room at an exact commit position (readPoint), every update of the instance through which the
 // settlement stores before it versions the read (Ledger.storeRead), so the version holds no update
-// the store lacks at the head it records (window C). It bounds first the in-flight credits that
+// the store lacks at the head it records. It bounds first the in-flight credits that
 // version lists: an update observer credits a change only once the room holds it, so each credit
 // observed before the read is for a change the read holds. afterTake runs between that bound and
 // the read. Holding state.mu across the read would block the update observer that credits and

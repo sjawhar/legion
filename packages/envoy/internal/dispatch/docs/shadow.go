@@ -72,9 +72,13 @@ func (w *liveWrite) newShadow() *roomShadow {
 // provisional classes the write stored ahead of its own (Ledger.flushRead): each lies before the
 // earlier write's last published update, which the write's read held. A cold write's shadow names
 // the instance resident now, else the load under way; with neither, the room that loads next reads
-// the write from the store and needs none. The caller holds state.mu.
+// the write from the store and needs none. A shadow it does not install lets go of its document,
+// so a cold write's fork is collected at releaseFork, before the publish loads the room
+// (LEGION-504). The caller holds state.mu.
 func (s *Service) installShadowLocked(room string, state *roomState, shadow *roomShadow) {
 	if state.released || state.failed != nil {
+		// An uninstalled shadow is shared with no one, so its doc needs no sh.mu.
+		shadow.doc = nil
 		return
 	}
 	if shadow.cursor == nil {
@@ -84,6 +88,7 @@ func (s *Service) installShadowLocked(room string, state *roomState, shadow *roo
 			shadow.load = loading.(*roomLoad)
 		}
 		if shadow.cursor == nil && shadow.load == nil {
+			shadow.doc = nil
 			return
 		}
 	}
