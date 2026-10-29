@@ -21,6 +21,7 @@ import { sessionDirectory } from "@legion/envoy-client/dispatch-session-state";
 import * as core from "./askgate-core";
 import {
   ADVISOR_GATE_ENTRY_TYPE,
+  ADVISOR_GATE_RECORD_ENTRY_TYPE,
   type CompleteRequest,
   checkMode,
   createAskGate,
@@ -29,6 +30,7 @@ import {
   GATE_CONTEXT_MAX_BYTES,
   type GateEntry,
   type GateModel,
+  type GateRecordEntry,
   type Message,
   parseMode,
   parseVerdict,
@@ -175,6 +177,11 @@ interface BindOptions {
 interface BoundGate {
   handlers: Map<string, Handler>;
   entries: GateEntry[];
+  /**
+   * The `advisor-gate-record` entries the gate appended for records it could not write: the
+   * decision record runs after the handler has returned, so its failure rides on its own entry.
+   */
+  recordEntries: GateRecordEntry[];
   /** What the host's logger was told at bind: a notice at every session start. */
   warnings: string[];
   /** What the host's plain log was told while the session ran (`runtimeLogger`), which no later session repeats. */
@@ -202,6 +209,8 @@ interface BoundGate {
 function bind(opts: BindOptions = {}): BoundGate {
   const handlers = new Map<string, Handler>();
   const entries: GateEntry[] = [];
+  /** The `advisor-gate-record` follow-ups of records that were never written. */
+  const recordEntries: GateRecordEntry[] = [];
   const warnings: string[] = [];
   const runtimeWarnings: string[] = [];
   const notices: string[] = [];
@@ -231,10 +240,12 @@ function bind(opts: BindOptions = {}): BoundGate {
   }
   const pi = {
     on: (event: string, handler: Handler) => handlers.set(event, handler),
-    appendEntry: (customType: string, data: GateEntry) => {
-      expect(customType).toBe(ADVISOR_GATE_ENTRY_TYPE);
+    appendEntry: (customType: string, data: GateEntry | GateRecordEntry) => {
+      expect([ADVISOR_GATE_ENTRY_TYPE, ADVISOR_GATE_RECORD_ENTRY_TYPE]).toContain(customType);
       if (opts.recordThrows) throw new Error("session file unavailable");
-      entries.push(data);
+      if (customType === ADVISOR_GATE_RECORD_ENTRY_TYPE)
+        recordEntries.push(data as GateRecordEntry);
+      else entries.push(data as GateEntry);
     },
   };
   const complete = opts.complete ?? (async () => ({ text: ALLOW, usage: USAGE }));
@@ -306,6 +317,7 @@ function bind(opts: BindOptions = {}): BoundGate {
   return {
     handlers,
     entries,
+    recordEntries,
     warnings,
     runtimeWarnings,
     notices,
@@ -331,6 +343,15 @@ function bind(opts: BindOptions = {}): BoundGate {
       handlers.get(name)?.({ type: name, ...payload }, ctx),
   };
 }
+
+/**
+ * Lets the decision record the gate starts as its handler returns run to its end: nothing of the
+ * gated call waits on it, so a test that reads what Dispatch was sent drains the microtasks the
+ * stand-in client settles on.
+ */
+const recorded = async () => {
+  for (let i = 0; i < 50; i++) await Promise.resolve();
+};
 
 /** The two checks tell themselves apart by the frame each system prompt opens with. */
 const isCharter = (req: CompleteRequest) => req.system.includes("You are AskGate.");
@@ -1411,7 +1432,7 @@ describe("deadline and abandonment", () => {
   test("the deadline sits under the runner's handler ceiling, and each entry records it", async () => {
     const defaults = bind({ ceiling: 30_000 });
     await defaults.device("t1", "dispatch_comment", COMMENT);
-    expect(defaults.entries[0].deadlineMs).toBe(20_000);
+    expect(defaults.entries[0].deadlineMs).toBe(25_000);
     const raised = bind({ ceiling: 120_000 });
     await raised.device("t1", "dispatch_comment", COMMENT);
     expect(raised.entries[0].deadlineMs).toBe(90_000);
@@ -1434,7 +1455,7 @@ describe("deadline and abandonment", () => {
   });
   test("a deadline under 30 s binds the gate and logs one warning naming the ceiling, the deadline and the key to raise", async () => {
     const defaults = bind({ ceiling: 30_000 });
-    expect(defaults.warnings).toEqual([expect.stringContaining("review deadline is 20000 ms")]);
+    expect(defaults.warnings).toEqual([expect.stringContaining("review deadline is 25000 ms")]);
     expect(defaults.warnings[0]).toContain("extensionHandlers.toolCallTimeoutMs is 30000 ms");
     expect(defaults.warnings[0]).toContain(
       "Set extensionHandlers.toolCallTimeoutMs to 120000 or more"
@@ -1443,8 +1464,8 @@ describe("deadline and abandonment", () => {
     expect(await defaults.device("t1", "dispatch_comment", COMMENT)).toBeUndefined();
     await defaults.device("t2", "dispatch_comment", { issue: "X-2", body: "two" });
     expect(defaults.entries).toMatchObject([
-      { outcome: "verdict", deadlineMs: 20_000 },
-      { outcome: "verdict", deadlineMs: 20_000 },
+      { outcome: "verdict", deadlineMs: 25_000 },
+      { outcome: "verdict", deadlineMs: 25_000 },
     ]);
     expect(defaults.warnings).toHaveLength(1);
     expect(defaults.notices).toEqual([]);
@@ -3321,41 +3342,34 @@ console.log(JSON.stringify({ argv, consumed: consumeMarker([process.env.ASKGATE_
       }
     }, 30_000);
 
-    // Design 9: the record is awaited before the mint, and a marker lives for hours. A call whose
-    // own tool ended in that window runs nothing more, so it is owed no marker.
-    test("a call whose tool ended during the record wait mints nothing and records mintSkipped", async () => {
-      const recording = Promise.withResolvers<void>();
-      const released = Promise.withResolvers<void>();
-      const client = {
-        projectArtifact: async () => {
-          recording.resolve();
-          await released.promise;
-          return { artifact: { id: "doc-1" } };
-        },
-        docEdit: async (_id: string, input: { ops: unknown[] }) => ({ applied: input.ops.length }),
-      } satisfies RecordClient;
+    // Design 9: the review is the one await a call's own end can fall in, and a marker lives for
+    // hours. A call whose own tool ended there runs nothing more, so it is owed no marker.
+    test("a call whose tool ended during its review mints nothing and records mintSkipped", async () => {
+      const asked = Promise.withResolvers<void>();
+      const answers = bySystem(ALLOW, RULES_NONE);
+      let hangs = true;
       const g = bind({
-        env: { ...STUB, OMP_ASKGATE_RECORD_PROJECT: "INFRA" },
+        env: STUB,
         cwd: work,
-        dispatch: () => ({
-          client: client as unknown as DispatchClient,
-          serverUrls: ["https://dispatch.example"],
-        }),
-        complete: bySystem(REVISE, RULES_NONE),
+        complete: (req) => {
+          if (!hangs) return answers(req);
+          asked.resolve();
+          return untilAborted(req);
+        },
       });
-      const gated = g.bash("ends-in-record", ASK);
-      await recording.promise;
-      // The call's own tool ends while the gate still holds it, then the record answers.
-      await g.event("tool_execution_end", { toolCallId: "ends-in-record", toolName: "bash" });
-      released.resolve();
+      const gated = g.bash("ends-in-review", ASK);
+      await asked.promise;
+      // The call's own tool ends while the gate is still waiting for its verdict.
+      await g.event("tool_execution_end", { toolCallId: "ends-in-review", toolName: "bash" });
       expect((await gated)?.block).toBeUndefined();
       expect(markersIn(g.store)).toEqual([]);
       expect(g.entries).toMatchObject([
-        { toolCallId: "ends-in-record", outcome: "verdict", mintSkipped: "call-ended" },
+        { toolCallId: "ends-in-review", outcome: "abandoned", mintSkipped: "call-ended" },
       ]);
       // The handler dropped the id, so the next call of that id is minted as any other is.
-      expect((await g.bash("ends-in-record", ASK))?.block).toBeUndefined();
-      expect(markersIn(g.store)).toMatchObject([{ toolCallId: "ends-in-record" }]);
+      hangs = false;
+      expect((await g.bash("ends-in-review", ASK))?.block).toBeUndefined();
+      expect(markersIn(g.store)).toMatchObject([{ toolCallId: "ends-in-review" }]);
       expect(g.entries[1]?.mintSkipped).toBeUndefined();
     }, 30_000);
   });
@@ -4828,7 +4842,7 @@ describe("askgate.ts, the entry", () => {
     try {
       const { result, entries, warnings } = await gateOnce();
       expect(result).toBeUndefined();
-      expect(entries).toMatchObject([{ outcome: "verdict", deadlineMs: 20_000 }]);
+      expect(entries).toMatchObject([{ outcome: "verdict", deadlineMs: 25_000 }]);
       expect(warnings).toEqual([
         expect.stringContaining("extensionHandlers.toolCallTimeoutMs is 30000 ms"),
       ]);
@@ -5869,7 +5883,7 @@ describe("rules check", () => {
     await shut.gated;
     expect(shut.g.entries).toHaveLength(1);
   });
-  test("at shutdown a slow decision record is cut short, so the gated call's entry is written before the handler returns", async () => {
+  test("at shutdown a decision record started as the handler returned is cut short, and its follow-up entry lands before the handler returns", async () => {
     // Fake timers, and a clock that moves with them: the shutdown grace and wait run their full
     // length without the test waiting for them.
     jest.useFakeTimers();
@@ -5912,9 +5926,11 @@ describe("rules check", () => {
       await both.promise;
       let returnedAt: number | undefined;
       let atReturn: GateEntry[] = [];
+      let recordsAtReturn: GateRecordEntry[] = [];
       const shutdown = g.event("session_shutdown")?.then(() => {
         returnedAt = clock;
         atReturn = [...g.entries];
+        recordsAtReturn = [...g.recordEntries];
       });
       while (returnedAt === undefined && clock < 5_000) {
         for (let i = 0; i < 50; i++) await Promise.resolve();
@@ -5923,15 +5939,20 @@ describe("rules check", () => {
         jest.advanceTimersByTime(50);
       }
       await shutdown;
+      // The call's own entry carries the decision and nothing of the record, which began after it.
       expect(atReturn).toMatchObject([
+        { decision: "allow", outcome: "shutdown", ruleOutcome: "shutdown" },
+      ]);
+      expect(atReturn[0]).not.toHaveProperty("recordError");
+      // The record started at the end of the grace, was cut before the handler's wait ran out, and
+      // said so in its own entry.
+      expect(recordsAtReturn).toEqual([
         {
-          decision: "allow",
-          outcome: "shutdown",
-          ruleOutcome: "shutdown",
+          toolCallId: "js-write-00000000-0000-4000-8000-000000000002",
+          tool: "dispatch_ask",
           recordError: "the session shut down before Dispatch answered the record",
         },
       ]);
-      // The record started at the end of the grace and was cut before the handler's wait ran out.
       expect(returnedAt).toBeGreaterThanOrEqual(1_000);
       expect(returnedAt).toBeLessThan(1_500);
       expect(signals.map((s) => s.aborted)).toEqual([true, true]);
@@ -5943,7 +5964,7 @@ describe("rules check", () => {
       jest.useRealTimers();
     }
   });
-  test("at shutdown a decision record already in flight is cut short, so the gated call's entry is written before the handler returns", async () => {
+  test("at shutdown a record pending from a call that already returned is cut short, and its follow-up entry lands before the handler returns", async () => {
     // Fake timers, and a clock that moves with them: the shutdown's cut and wait run their full
     // length without the test waiting for them.
     jest.useFakeTimers();
@@ -5974,7 +5995,8 @@ describe("rules check", () => {
             serverUrls: ["https://dispatch.example"],
           };
         },
-        // Both checks answer at once, so the call's review is done and its record is written.
+        // Both checks answer at once, so the call's review is done, its entry is written and its
+        // record is in flight before the shutdown.
         complete: bySystem(ALLOW, RULES_NONE),
       });
       const gated = g.device(
@@ -5982,14 +6004,17 @@ describe("rules check", () => {
         "dispatch_ask",
         KEEP_INPUT
       );
-      // The record is in flight before the session starts shutting down.
+      // The call returned, so its own entry is in the session and its record is in flight.
       await recording.promise;
-      expect(g.entries).toEqual([]);
+      expect((await gated)?.block).toBeUndefined();
+      expect(g.entries).toMatchObject([{ outcome: "verdict", ruleOutcome: "none" }]);
+      expect(g.entries[0]).not.toHaveProperty("recordError");
+      expect(g.recordEntries).toEqual([]);
       let returnedAt: number | undefined;
-      let atReturn: GateEntry[] = [];
+      let recordsAtReturn: GateRecordEntry[] = [];
       const shutdown = g.event("session_shutdown")?.then(() => {
         returnedAt = clock;
-        atReturn = [...g.entries];
+        recordsAtReturn = [...g.recordEntries];
       });
       while (returnedAt === undefined && clock < 5_000) {
         for (let i = 0; i < 50; i++) await Promise.resolve();
@@ -5998,18 +6023,16 @@ describe("rules check", () => {
         jest.advanceTimersByTime(50);
       }
       await shutdown;
-      expect(atReturn).toMatchObject([
+      // The cut came 250 ms before the handler's wait ran out, and the record said so.
+      expect(recordsAtReturn).toEqual([
         {
-          decision: "allow",
-          outcome: "verdict",
-          ruleOutcome: "none",
+          toolCallId: "js-write-00000000-0000-4000-8000-000000000002",
+          tool: "dispatch_ask",
           recordError: "the session shut down before Dispatch answered the record",
         },
       ]);
-      // The cut came 250 ms before the handler's wait ran out.
       expect(returnedAt).toBeLessThan(1_500);
       expect(recordSignal?.aborted).toBe(true);
-      expect((await gated)?.block).toBeUndefined();
       expect(g.entries).toHaveLength(1);
     } finally {
       jest.useRealTimers();
@@ -6657,6 +6680,8 @@ describe("the Dispatch decision record (A5)", () => {
       dispatch: dispatch.session,
     });
     expect((await g.device("t1", "dispatch_ask", KEEP))?.block).toBe(true);
+    // The record is started as the handler returns; this drain lets it answer.
+    await recorded();
     expect(dispatch.uploads).toMatchObject([
       { project: "INFRA", name: "askgate-decisions-sess-1.md" },
     ]);
@@ -6675,16 +6700,84 @@ describe("the Dispatch decision record (A5)", () => {
       },
     ]);
     expect(dispatch.uploads[0]?.content).not.toContain("cache path");
-    expect(g.entries[0]?.recordError).toBeUndefined();
+    expect(g.recordEntries).toEqual([]);
 
     expect((await g.device("t2", "dispatch_ask", KEEP))?.block).toBe(true);
+    await recorded();
     expect(dispatch.uploads).toHaveLength(1);
     expect(dispatch.edits).toMatchObject([{ id: "doc-1" }]);
     expect(recordsIn(dispatch.edits[0]?.markdown ?? "")).toMatchObject([{ rule: "no_change" }]);
-    expect(g.entries[1]?.recordError).toBeUndefined();
+    expect(g.recordEntries).toEqual([]);
   });
 
-  test("a record Dispatch refuses leaves the refusal as it was and is recorded as recordError", async () => {
+  // #2161, tester round 13: the record used to run inside the tool_call handler, under a stop the
+  // review's own deadline paid for. It runs after the handler has returned now, so a Dispatch that
+  // answers slowly costs the call nothing.
+  test("the handler answers the call before the record answers, and the record lands after it", async () => {
+    const started = Promise.withResolvers<void>();
+    const released = Promise.withResolvers<void>();
+    let answered = false;
+    const dispatch = recordingDispatch({
+      projectArtifact: async () => {
+        started.resolve();
+        await released.promise;
+        answered = true;
+        return { artifact: { id: "doc-1" } };
+      },
+    });
+    const g = bind({
+      complete: bySystem(ALLOW, MATCHED),
+      env: { OMP_ASKGATE_RECORD_PROJECT: "INFRA" },
+      dispatch: dispatch.session,
+    });
+    const gated = g.device("t1", "dispatch_ask", KEEP);
+    await started.promise;
+    // The call's answer is in hand while Dispatch still holds the record's upload.
+    const result = await Promise.race([gated, recorded().then(() => "pending" as const)]);
+    expect(result).not.toBe("pending");
+    expect(result).toMatchObject({ block: true });
+    expect(answered).toBe(false);
+    expect(g.entries).toMatchObject([{ outcome: "verdict", ruleOutcome: "match" }]);
+    // Released, the record lands as it would have, and nothing says it failed.
+    released.resolve();
+    await recorded();
+    expect(answered).toBe(true);
+    expect(recordsIn(dispatch.uploads[0]?.content ?? "")).toMatchObject([
+      { tool: "dispatch_ask", ruleOutcome: "match" },
+    ]);
+    expect(g.recordEntries).toEqual([]);
+  });
+
+  test("two decisions of one session started back to back give one upload and one append", async () => {
+    // The second record starts while the first upload is still unanswered — which only a record
+    // the handler does not wait for can do. The recorder holds the document's promise, so the
+    // second appends to that document rather than posting its name again, which Dispatch would
+    // answer with a second document.
+    const released = Promise.withResolvers<void>();
+    const dispatch = recordingDispatch({
+      projectArtifact: async () => {
+        await released.promise;
+        return { artifact: { id: "doc-1" } };
+      },
+    });
+    const g = bind({
+      complete: bySystem(ALLOW, MATCHED),
+      env: { OMP_ASKGATE_RECORD_PROJECT: "INFRA" },
+      dispatch: dispatch.session,
+    });
+    expect((await g.device("t1", "dispatch_ask", KEEP))?.block).toBe(true);
+    expect((await g.device("t2", "dispatch_ask", KEEP))?.block).toBe(true);
+    expect(dispatch.uploads).toHaveLength(1);
+    expect(dispatch.edits).toEqual([]);
+    released.resolve();
+    await recorded();
+    expect(dispatch.uploads).toHaveLength(1);
+    expect(dispatch.edits).toMatchObject([{ id: "doc-1" }]);
+    expect(recordsIn(dispatch.edits[0]?.markdown ?? "")).toMatchObject([{ rule: "no_change" }]);
+    expect(g.recordEntries).toEqual([]);
+  });
+
+  test("a record Dispatch refuses leaves the refusal as it was and lands as an advisor-gate-record entry", async () => {
     const dispatch = recordingDispatch({
       projectArtifact: () => Promise.reject(new Error("dispatch: 503 Service Unavailable")),
     });
@@ -6697,13 +6790,20 @@ describe("the Dispatch decision record (A5)", () => {
     expect(result?.block).toBe(true);
     expect(result?.reason).toContain('The ask matches the rule "no change": "keep it as it is".');
     expect(g.entries).toMatchObject([
+      { decision: "revise", outcome: "verdict", rule: "no_change", ruleOutcome: "match" },
+    ]);
+    // The call's own entry says nothing of the record, which began once the call was answered.
+    expect(g.entries[0]).not.toHaveProperty("recordError");
+    await recorded();
+    expect(g.recordEntries).toEqual([
       {
-        decision: "revise",
-        outcome: "verdict",
-        rule: "no_change",
-        ruleOutcome: "match",
+        toolCallId: "t1",
+        tool: "dispatch_ask",
         recordError: "dispatch: 503 Service Unavailable",
       },
+    ]);
+    expect(g.runtimeWarnings).toEqual([
+      "AskGate did not record the decision of dispatch_ask (t1) on Dispatch: dispatch: 503 Service Unavailable",
     ]);
   });
 
@@ -6714,10 +6814,11 @@ describe("the Dispatch decision record (A5)", () => {
     expect(g.dispatchReads).toEqual([]);
     expect(dispatch.uploads).toEqual([]);
     expect(g.entries).toMatchObject([{ rule: "no_change", ruleOutcome: "match" }]);
-    expect(g.entries[0]?.recordError).toBeUndefined();
+    await recorded();
+    expect(g.recordEntries).toEqual([]);
   });
 
-  test("a call whose model calls hang to the deadline and whose record hangs to its own stop still returns inside the handler ceiling", async () => {
+  test("a call whose model calls hang to the deadline returns inside the handler ceiling, and its record's own stop lands as a follow-up entry", async () => {
     // Fake timers, and a clock that moves with them: the deadline, the abort grace and the
     // record's stop all run their full length without the test waiting 30 s.
     jest.useFakeTimers();
@@ -6735,30 +6836,42 @@ describe("the Dispatch decision record (A5)", () => {
         env: { OMP_ASKGATE_RECORD_PROJECT: "INFRA" },
         dispatch: dispatch.session,
       });
+      /** Runs the clock and the timers with it until `until` holds, or `limit` is reached. */
+      const advance = async (until: () => boolean, limit: number) => {
+        while (!until() && clock < limit) {
+          for (let i = 0; i < 50; i++) await Promise.resolve();
+          if (until()) break;
+          clock += 100;
+          jest.advanceTimersByTime(100);
+        }
+      };
       let returnedAt: number | undefined;
       const gated = g.device("t1", "dispatch_ask", KEEP).then((result) => {
         returnedAt = clock;
         return result;
       });
-      while (returnedAt === undefined && clock < 40_000) {
-        for (let i = 0; i < 50; i++) await Promise.resolve();
-        if (returnedAt !== undefined) break;
-        clock += 100;
-        jest.advanceTimersByTime(100);
-      }
-      // The deadline (20 s), the aborted calls' grace (2 s), then the record's own stop (5 s).
-      expect(returnedAt).toBeGreaterThanOrEqual(20_000 + 2_000 + RECORD_TIMEOUT_MS);
+      await advance(() => returnedAt !== undefined, 40_000);
+      // The deadline (25 s) and the aborted calls' grace (2 s). The record is no part of that: it
+      // starts as the handler returns, and nothing of the call waits for it.
+      expect(returnedAt).toBeGreaterThanOrEqual(25_000 + 2_000);
       expect(returnedAt).toBeLessThan(30_000);
       expect((await gated)?.block).toBeUndefined();
       expect(dispatch.uploads).toHaveLength(1);
       expect(g.entries).toMatchObject([
+        { outcome: "timeout", ruleOutcome: "timeout", deadlineMs: 25_000 },
+      ]);
+      expect(g.entries[0]).not.toHaveProperty("recordError");
+      expect(g.recordEntries).toEqual([]);
+      // The record's own stop falls RECORD_TIMEOUT_MS after it began, past the handler's return.
+      await advance(() => g.recordEntries.length > 0, 60_000);
+      expect(g.recordEntries).toEqual([
         {
-          outcome: "timeout",
-          ruleOutcome: "timeout",
-          deadlineMs: 20_000,
+          toolCallId: "t1",
+          tool: "dispatch_ask",
           recordError: `Dispatch did not answer the record within ${RECORD_TIMEOUT_MS} ms`,
         },
       ]);
+      expect(clock).toBeGreaterThanOrEqual((returnedAt ?? 0) + RECORD_TIMEOUT_MS);
     } finally {
       jest.useRealTimers();
     }
@@ -6791,6 +6904,7 @@ describe("the Dispatch decision record (A5)", () => {
       { tool: "dispatch_artifact", rule: "no_change", ruleOutcome: "match", ruleAsksPartial: true },
     ]);
     expect(g.entries[0]?.ruleTextMissing).toBeUndefined();
+    await recorded();
     expect(recordsIn(dispatch.uploads[0]?.content ?? "")).toMatchObject([
       { tool: "dispatch_artifact", ruleAsksPartial: true, ruleTextMissing: false },
     ]);
@@ -6827,7 +6941,8 @@ describe("the Dispatch decision record (A5)", () => {
     expect(g.entries).toMatchObject([
       { tool: "dispatch_artifact", ruleOutcome: "unjudged", ruleAsksPartial: true },
     ]);
-    expect(g.entries[0]?.recordError).toBeUndefined();
+    await recorded();
+    expect(g.recordEntries).toEqual([]);
     expect(recordsIn(dispatch.uploads[0]?.content ?? "")).toMatchObject([
       {
         tool: "dispatch_artifact",
@@ -6861,6 +6976,7 @@ describe("the Dispatch decision record (A5)", () => {
     expect(await g.bash("t1", UPLOAD)).toBeUndefined();
     expect(g.calls.filter(isRules)).toHaveLength(0);
     expect(g.entries.map((entry) => entry.tool)).toEqual(["dispatch_comment", "dispatch_artifact"]);
+    await recorded();
     for (const entry of g.entries) {
       for (const field of [
         "ruleOutcome",
@@ -6872,6 +6988,7 @@ describe("the Dispatch decision record (A5)", () => {
       ] as const)
         expect(entry[field]).toBeUndefined();
     }
+    expect(g.recordEntries).toEqual([]);
     // Only the upload's read of its stored version reached Dispatch: no record was posted.
     expect(served.requests).toEqual([
       "/api/v1/issues/X-1",

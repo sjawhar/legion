@@ -11,15 +11,22 @@ body: |-
   decision, the mode, `asksCarried` and the two latencies, and **no ask text and no quote**. The
   CLI counts an unmarked write's asks from the write's own text, so a re-upload of ask blocks the
   stored version already holds counts them as carried. `OMP_ASKGATE_RECORD_PROJECT` names the
-  project, else `LEGION_PROJECT` does, and with neither set nothing is written. The write takes a
-  5 second stop of its own, never changes the decision, and leaves `recordError` on the
-  `advisor-gate` entry when it fails. Once the session is shutting down, the write is cut 1.25 s
-  after shutdown began, so the entry still lands before the session is sealed. `scripts/askgate-report.ts
+  project, else `LEGION_PROJECT` does, and with neither set nothing is written. The record runs
+  once the gate has answered the call, never inside its `tool_call` handler, under a 5 second stop
+  of its own, and never changes the decision. A record that fails, that hits that stop or that the
+  session's shutdown cuts writes one line to the host's log and appends one `advisor-gate-record`
+  entry carrying `toolCallId`, `tool` and `recordError`; the call's own `advisor-gate` entry
+  stands as written, and the report reads `advisor-gate` entries alone. At shutdown the gate waits
+  for the records still pending and cuts each 1.25 s after shutdown began, so a record still
+  lands, and the entry of one that could not, before the session is sealed. Two records of one
+  session keep their order: the second appends to the document the first uploaded.
+  `scripts/askgate-report.ts
   --dispatch-project <KEY> --since <RFC 3339> [--json]` reads those documents back and counts
   them, split by `source`, with the unmarked writes on a line of their own, by mode and with the
-  asks they carried, counted as neither a rules call nor an override. The review's deadline is held
-  10 s under `extensionHandlers.toolCallTimeoutMs`: 5 s for the aborted call's usage report and the
-  entry, and 5 s for this record. So the 30 s default gives a 20,000 ms deadline, and the key must
-  be at least 20,000 ms: set below that, the gate does not load, and so refuses every Dispatch
-  write it would have reviewed.
+  asks they carried, counted as neither a rules call nor an override. Because no call waits for
+  the record, the review's deadline keeps its 5,000 ms margin under
+  `extensionHandlers.toolCallTimeoutMs` — the room the handler needs for the aborted call's usage
+  report and the entry — so Oh My Pi's 30 s default still gives a 25,000 ms deadline, and the key
+  must be at least 15,000 ms: set below that, the gate does not load, and so refuses every
+  Dispatch write it would have reviewed.
 time: 2026-10-29T00:00:01Z

@@ -28,7 +28,8 @@
 // What is lost, and is left visible in the reader's output rather than hidden: a session killed
 // between a decision and its upload loses that one record; a session that never reached a gated
 // call writes no document at all; and a write that fails or outlives its stop loses its record
-// too, leaving `recordError` on the gate's entry for whoever can read that transcript.
+// too. The caller says where that goes: the core appends an `advisor-gate-record` entry for the
+// gated call it belongs to, and the host leaves `recordError` on the `unmarked` entry it writes.
 import type { CreateArtifactInput, EditArtifactInput } from "@legion/contracts";
 import pkg from "../../package.json";
 

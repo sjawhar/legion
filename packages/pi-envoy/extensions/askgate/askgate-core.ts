@@ -118,16 +118,16 @@
 // an eval cell makes through the tool bridge, would otherwise drop the note. Each entry
 // records the mode it ran under as `verdictMode`.
 //
-// Deadline: OMP_ASKGATE_TIMEOUT_MS, or 90 s, clamped under the runner's own ceiling for a
-// tool_call handler (extensionHandlers.toolCallTimeoutMs, 30 s unless configured) by 10 s, the
-// stops the handler still pays once that deadline passes — the aborted call's usage report and
-// the entry (5 s) and the decision record (5 s, RECORD_TIMEOUT_MS) — and raced from handler
-// entry. A ceiling that leaves under 10 s, and an OMP_ASKGATE_TIMEOUT_MS that is no positive
-// integer, throw when the gate binds: the entry then refuses each write the gate would review
-// (`loadFailureGate`), since only `askgate.enabled: false` turns AskGate off. A deadline under
-// 30 s binds, and logs one warning that names the ceiling, the deadline and the key to raise: at
-// the default ceiling the deadline is 20 s, which a review of a long session often exceeds, and a
-// review that times out lets the write post.
+// Deadline: OMP_ASKGATE_TIMEOUT_MS, or 90 s, clamped 5 s under the runner's own ceiling for a
+// tool_call handler (extensionHandlers.toolCallTimeoutMs, 30 s unless configured) — the room the
+// handler still needs once that deadline passes, for the aborted call's usage report and for the
+// entry — and raced from handler entry. The Dispatch decision record is no part of that room: it
+// runs after the handler has returned. A ceiling that leaves under 10 s, and an
+// OMP_ASKGATE_TIMEOUT_MS that is no positive integer, throw when the gate binds: the entry then
+// refuses each write the gate would review (`loadFailureGate`), since only `askgate.enabled:
+// false` turns AskGate off. A deadline under 30 s binds, and logs one warning that names the
+// ceiling, the deadline and the key to raise: at the default ceiling the deadline is 25 s, which a
+// review of a long session often exceeds, and a review that times out lets the write post.
 //
 // Per gated call, in order:
 //   - rebuttal: the agent put `"advisor_rebuttal": "<one line>"` in the device JSON, or
@@ -209,14 +209,22 @@
 // A gated call whose rules check ran, and one the agent sent anyway, is also published to Dispatch
 // (`decision-record.ts`): the entry above reaches only this machine's disk, and the session that
 // counts the rule decisions over a fortnight holds a Dispatch token and nothing else. That write
-// carries no ask text and no quote, takes its own 5 s stop, never changes the decision, and
-// leaves `recordError` on the entry when it fails; at shutdown it is cut before the handler's
-// wait runs out, so its entry still lands in the session.
+// carries no ask text and no quote, and never changes the decision. It runs after the handler has
+// returned, so no review is ever cut short to pay for it: the handler starts it, under a 5 s stop
+// of its own (RECORD_TIMEOUT_MS), and keeps it in a pending set. A record that cannot be written —
+// an error, its own stop, or the shutdown's cut — writes one line to the host's plain log
+// (`runtimeLogger`) and appends one `advisor-gate-record` entry carrying `toolCallId`, `tool` and
+// `recordError`; the `advisor-gate` entry it belongs to is written already, and `askgate-report.ts`
+// reads `advisor-gate` entries alone, so it passes over these. At shutdown the handler waits for
+// the records still pending and cuts each at the record deadline, before the markers are released,
+// so a record still lands before the session is sealed. The records of one session keep their
+// order: the recorder serialises them per session through its `documents` map.
 // The order after the decision settles, per call: the halt count, the rules count, the block reset,
-// that record, the entry, the override put back as a comment, the marker, the notes. The mint
-// comes last and only where the decision does not block, so no refused call ever leaves a marker;
-// a call whose own tool ended while the gate still held it is minted none either, since nothing of
-// it runs any more, and its entry says `mintSkipped: "call-ended"`.
+// the entry, that record started, the override put back as a comment, the marker, the notes. The
+// mint comes last and only where the decision does not block, so no refused call ever leaves a
+// marker; a call whose own tool ended while the gate still held it — its review is the await such
+// an end falls in — is minted none either, since nothing of it runs any more, and its entry says
+// `mintSkipped: "call-ended"`.
 import { createHash } from "node:crypto";
 import * as fs from "node:fs";
 import * as path from "node:path";
@@ -304,11 +312,11 @@ const REBUTTAL_FLAG = "--advisor-rebuttal";
 export const DRY_RUN_TIMEOUT_MS = 10_000;
 const GATE_TIMEOUT_MS = 90_000;
 // The runner refuses a tool_call handler that outlives extensionHandlers.toolCallTimeoutMs, so the
-// gate's deadline stays this far under it: the stops the handler pays after its deadline, 5 s of
-// room for the aborted call to report its usage (ABORT_GRACE_MS) and for the entry, then the
-// decision record `handleCall` awaits (RECORD_TIMEOUT_MS). Below MIN_DEADLINE_MS a verdict is
-// hopeless and the gate does not bind.
-const CEILING_MARGIN_MS = 5_000 + RECORD_TIMEOUT_MS;
+// gate's deadline stays this far under it: room for the aborted call to report its usage
+// (ABORT_GRACE_MS) and for the entry. The decision record is started as the handler returns and
+// awaited by nothing of the call, so it costs the deadline nothing. Below MIN_DEADLINE_MS a
+// verdict is hopeless and the gate does not bind.
+const CEILING_MARGIN_MS = 5_000;
 const ABORT_GRACE_MS = 2_000;
 const MIN_DEADLINE_MS = 10_000;
 // A deadline under WARN_DEADLINE_MS binds with one warning at bind: a review of a long session often
@@ -318,9 +326,10 @@ const WARN_DEADLINE_MS = 30_000;
 const RECOMMENDED_CEILING_MS = 120_000;
 // The runner gives a session_shutdown handler 2 s (SESSION_SHUTDOWN_HANDLER_TIMEOUT_MS) and then seals
 // the session, dropping any later entry: gates abandoned there get a shorter grace, and the handler
-// waits at most SHUTDOWN_WAIT_MS for their records. A decision record (`decision-record.ts`) still
-// in flight then, or started after, is cut SHUTDOWN_RECORD_MARGIN_MS before that wait runs out, so
-// the entry it precedes is appended while the handler still holds the session.
+// waits at most SHUTDOWN_WAIT_MS for their entries and for the decision records they start. A
+// record still pending then, or started after, is cut SHUTDOWN_RECORD_MARGIN_MS before that wait
+// runs out, so the `advisor-gate-record` entry of a record that fails is appended while the
+// handler still holds the session.
 const SHUTDOWN_GRACE_MS = 1_000;
 const SHUTDOWN_WAIT_MS = 1_500;
 const SHUTDOWN_RECORD_MARGIN_MS = 250;
@@ -343,6 +352,13 @@ const GATE_HALT_AFTER_FAILURES = 3;
 /** Rules calls in a row without a rules verdict that bring the session's one notice and log line. */
 const RULE_NOTICE_AFTER_FAILURES = 3;
 export const ADVISOR_GATE_ENTRY_TYPE = "advisor-gate";
+/**
+ * The follow-up entry of a decision whose Dispatch record was never written: the `advisor-gate`
+ * entry of the call is in the session already, and the record runs after the handler returned, so
+ * what the record lost is recorded under its own type. `askgate-report.ts` reads `advisor-gate`
+ * entries alone and passes over these.
+ */
+export const ADVISOR_GATE_RECORD_ENTRY_TYPE = "advisor-gate-record";
 /**
  * The model roles the gate asks, in order: `askgate` when it is configured, else `default`, so a
  * session with no askgate role runs the gate on its own default model. The role used keys its
@@ -471,13 +487,27 @@ export interface GateEntry {
    * `ruleOutcome` `unjudged`, none of them.
    */
   ruleAsksPartial?: true;
-  /** Why this decision reached no Dispatch decision record (`decision-record.ts`); the call itself was unaffected. */
+  /**
+   * Why the Dispatch decision record of an `unmarked` write was never written (`decision-record.ts`),
+   * which the host writes inside its own handler (envoy.ts). A gated call's own record runs after
+   * the gate's handler returned, so its failure rides on an `advisor-gate-record` entry instead.
+   */
   recordError?: string;
   /**
    * Why this call's marker was not minted, though its decision let the write out: `call-ended`,
    * the call's own tool having ended while the gate still held it, so no command of it can run.
    */
   mintSkipped?: "call-ended";
+}
+/**
+ * The follow-up entry of a gated call whose decision reached no Dispatch record: which call it
+ * belongs to, and what stopped the record. The decision itself stands, in the `advisor-gate` entry
+ * written before the record began.
+ */
+export interface GateRecordEntry {
+  toolCallId: string;
+  tool: string;
+  recordError: string;
 }
 /** A model as the gate passes it around: the fork's full Model, of which the core reads only these. */
 export type GateModel = { provider: string; id: string };
@@ -2170,6 +2200,12 @@ export function createAskGate(deps: Deps): (pi: Pi) => void {
     let recordDeadline: number | undefined;
     /** The stop of each decision record in flight, which shutdown cuts at `recordDeadline`. */
     const recordStops = new Set<AbortController>();
+    /**
+     * Every decision record still running, each started by a handler that has returned: shutdown
+     * waits for these after the handlers, so a record that fails still appends its entry while the
+     * session takes entries. Each drops itself when it settles.
+     */
+    const records = new Set<Promise<void>>();
     // Set once the session starts shutting down (only dispose emits session_shutdown): a scoped call
     // that reaches the gate after that asks no model and takes the shutdown branch at once.
     let closing = false;
@@ -2346,13 +2382,76 @@ export function createAskGate(deps: Deps): (pi: Pi) => void {
       if (event.messages?.findLast((m) => m.role === "assistant")?.stopReason !== "aborted") return;
       for (const abandon of inflight.values()) abandon("abandoned");
     });
+    /**
+     * A decision Dispatch never took: one line to the host's plain log, and one
+     * `advisor-gate-record` entry naming the call and what stopped the record. The call's own
+     * `advisor-gate` entry was written before the record began and stands as it is.
+     */
+    const noteRecordFailure = (entry: GateEntry, recordError: string) => {
+      try {
+        deps.runtimeLogger.warn(
+          `AskGate did not record the decision of ${entry.tool} (${entry.toolCallId}) on Dispatch: ${recordError}`
+        );
+        pi.appendEntry(ADVISOR_GATE_RECORD_ENTRY_TYPE, {
+          toolCallId: entry.toolCallId,
+          tool: entry.tool,
+          recordError,
+        } satisfies GateRecordEntry);
+      } catch {
+        // The session is sealed or its file is gone: there is nothing left to tell, and the call
+        // itself was answered long before this record ran.
+      }
+    };
+    /**
+     * Publishes one decision to Dispatch, started as the handler returns and awaited by nothing of
+     * the call: the review's deadline pays none of it. The write takes a stop of its own at
+     * RECORD_TIMEOUT_MS, or, once the session is shutting down, by `recordDeadline`. The recorder
+     * serialises the records of one session through its own `documents` map, so they land in the
+     * order they were started.
+     */
+    const startRecord = (entry: GateEntry, ctx: GateCtx) => {
+      const stop = new AbortController();
+      const recordMs =
+        recordDeadline === undefined
+          ? RECORD_TIMEOUT_MS
+          : Math.max(0, Math.min(RECORD_TIMEOUT_MS, recordDeadline - deps.now()));
+      const timer = setTimeout(
+        () => stop.abort(recordMs < RECORD_TIMEOUT_MS ? RECORD_SHUT_DOWN : undefined),
+        recordMs
+      );
+      recordStops.add(stop);
+      const done = (async () => {
+        let recordError: string | undefined;
+        try {
+          recordError = await recordDecision({
+            entry,
+            sessionId: ctx.sessionManager.getSessionId(),
+            directory: ctx.cwd,
+            signal: stop.signal,
+          });
+        } catch (error) {
+          recordError = messageOf(error);
+        } finally {
+          clearTimeout(timer);
+          recordStops.delete(stop);
+        }
+        if (recordError === undefined) return;
+        // A record the shutdown cut short says so, not that it ran to its own stop.
+        noteRecordFailure(
+          entry,
+          stop.signal.reason === RECORD_SHUT_DOWN ? RECORD_SHUT_DOWN : recordError
+        );
+      })();
+      records.add(done);
+      void done.finally(() => records.delete(done));
+    };
     // A gate still waiting at shutdown (left running past a normal end) would bill to its deadline and
     // record into a sealed session. Abandon it, and hold shutdown until its entry is written; a gated
     // call that starts after this point asks no model (`closing`). Either way the entry reads
     // `shutdown`, and block mode refuses the call as it refuses any call given up without a verdict.
-    // A decision record in flight then, or started after, is cut SHUTDOWN_RECORD_MARGIN_MS before
-    // the wait runs out, so the entry it precedes is appended while the handler still holds the
-    // session.
+    // The handlers are waited for first, since each starts its decision record as it returns, then
+    // those records, which the cut ends SHUTDOWN_RECORD_MARGIN_MS before the wait runs out: a record
+    // that fails appends its own entry while the handler still holds the session.
     pi.on("session_shutdown", async () => {
       closing = true;
       const recordMs = SHUTDOWN_WAIT_MS - SHUTDOWN_RECORD_MARGIN_MS;
@@ -2363,7 +2462,11 @@ export function createAskGate(deps: Deps): (pi: Pi) => void {
       for (const abandon of inflight.values()) abandon("shutdown", SHUTDOWN_GRACE_MS);
       const { promise: waited, resolve: stopWaiting } = Promise.withResolvers<void>();
       const timer = setTimeout(stopWaiting, SHUTDOWN_WAIT_MS);
-      await Promise.race([Promise.allSettled([...handling.values()]), waited]);
+      const settled = (async () => {
+        await Promise.allSettled([...handling.values()]);
+        await Promise.allSettled([...records]);
+      })();
+      await Promise.race([settled, waited]);
       clearTimeout(timer);
       clearTimeout(cut);
       // After the wait, so a call that settled during it leaves no marker behind.
@@ -3286,57 +3389,23 @@ export function createAskGate(deps: Deps): (pi: Pi) => void {
           // The notice is best effort; the logger has it.
         }
       }
+      // The marker the CLI needs to post a literal write that will run, minted below. A call whose
+      // own tool ended while the gate still held it — its review is the await such an end falls
+      // in, and a marker stands for two hours — gets none: nothing of that call runs any more, so
+      // no marker is owed, and the entry says the mint was skipped. The outcome is unchanged
+      // either way.
+      const mints = event.toolName === "bash" && base !== undefined && !decision.result?.block;
+      const mintSkipped =
+        mints && ended.has(event.toolCallId) ? ("call-ended" as const) : undefined;
       const entry: GateEntry = {
         ...(base ?? identity(event, mode)),
         ...decision.fields,
         latencyMs: deps.now() - started,
+        ...(mintSkipped === undefined ? {} : { mintSkipped }),
       };
-      // The entry below reaches only this machine's disk, so a rules decision also goes to
-      // Dispatch, where a session with no access to this machine counts it (`decision-record.ts`).
-      // The gated call's own stop is closed by now, so the write gets a stop of its own; whatever
-      // it costs or loses, the decision above and the call's result stand. Once the session is
-      // shutting down, that stop comes by `recordDeadline`, so the entry still lands in the session.
-      let recordError: string | undefined;
-      const recordStop = new AbortController();
-      const recordMs =
-        recordDeadline === undefined
-          ? RECORD_TIMEOUT_MS
-          : Math.max(0, Math.min(RECORD_TIMEOUT_MS, recordDeadline - deps.now()));
-      const recordTimer = setTimeout(
-        () => recordStop.abort(recordMs < RECORD_TIMEOUT_MS ? RECORD_SHUT_DOWN : undefined),
-        recordMs
-      );
-      recordStops.add(recordStop);
+      let refusal: ToolCallResult;
       try {
-        recordError = await recordDecision({
-          entry,
-          sessionId: ctx.sessionManager.getSessionId(),
-          directory: ctx.cwd,
-          signal: recordStop.signal,
-        });
-      } catch (error) {
-        recordError = messageOf(error);
-      } finally {
-        clearTimeout(recordTimer);
-        recordStops.delete(recordStop);
-      }
-      // A record the shutdown cut short says so, not that it ran to its own stop.
-      if (recordError !== undefined && recordStop.signal.reason === RECORD_SHUT_DOWN)
-        recordError = RECORD_SHUT_DOWN;
-      // The marker the CLI needs to post a literal write that will run, minted below once this
-      // call's record is written (a write whose record fails is refused). A call whose own tool
-      // ended while the gate still held it — the record is awaited, and a marker stands for two
-      // hours — gets none: nothing of that call runs any more, so no marker is owed, and the
-      // entry says the mint was skipped. The outcome is unchanged either way.
-      const mints = event.toolName === "bash" && base !== undefined && !decision.result?.block;
-      const mintSkipped =
-        mints && ended.has(event.toolCallId) ? ("call-ended" as const) : undefined;
-      try {
-        pi.appendEntry(ADVISOR_GATE_ENTRY_TYPE, {
-          ...entry,
-          ...(recordError === undefined ? {} : { recordError }),
-          ...(mintSkipped === undefined ? {} : { mintSkipped }),
-        } satisfies GateEntry);
+        pi.appendEntry(ADVISOR_GATE_ENTRY_TYPE, entry);
       } catch (error) {
         // A write no review stands behind posts only when the record of that is written: the
         // record is the whole account of what went out unreviewed. So a record that fails
@@ -3344,12 +3413,20 @@ export function createAskGate(deps: Deps): (pi: Pi) => void {
         // posts; a call already refused keeps its own refusal.
         if (decision.fields.decision === "allow" && decision.fields.outcome !== "verdict") {
           notices.delete(event.toolCallId);
-          return {
+          refusal = {
             block: true,
             reason: recordFailureRefusal(messageOf(error), deps.configFile),
           };
         }
       }
+      // The entry above reaches only this machine's disk, so a rules decision also goes to
+      // Dispatch, where a session with no access to this machine counts it (`decision-record.ts`).
+      // Started here and awaited by nothing of the call: the review's deadline pays none of it, and
+      // whatever that write costs or loses, the decision above and the call's result stand. It is
+      // started for a call this entry failed too, as it is for one whose own refusal stands: what
+      // the write did is the record's own account, which the session's disk no longer holds.
+      startRecord(entry, ctx);
+      if (refusal !== undefined) return refusal;
       // The override the gate took out goes back as a shell comment on the command that runs, so
       // the agent's record of the call still shows it; the mint then reads that command, whose
       // argv is what bash hands the CLI, the comment left out.

@@ -495,10 +495,11 @@ for `unreadable` and `unmarked`), those outcomes refuse the call instead. Only
 runs the agent's own command as written: a gate that fails breaks no valid write.
 
 **The time limit.** `OMP_ASKGATE_TIMEOUT_MS` sets the review's time limit. The default is 90 s. The
-gate holds the limit 10,000 ms under `extensionHandlers.toolCallTimeoutMs`, the host's limit for
-one `tool_call` handler: 5 s for the aborted call's usage report and the entry, and 5 s for the
-decision record, the two stops its handler still pays once the limit passes. That key is 30 s by
-default, so the limit is then 20,000 ms. A review of a long session often takes longer than 20 s,
+gate holds the limit 5,000 ms under `extensionHandlers.toolCallTimeoutMs`, the host's limit for
+one `tool_call` handler: the room its handler still needs once the limit passes, for the aborted
+call's usage report and for the entry. The Dispatch record below is no part of it, since it runs
+after the handler has returned. That key is 30 s by
+default, so the limit is then 25,000 ms. A review of a long session can take longer than 25 s,
 and a review that times out lets the write post. Three timeouts in a row stop the gate for the
 rest of the session. Set the key to 120000 or more in the session's settings, for example in
 `~/.omp/agent/config.yml` or an overlay in `PI_CONFIG_FILES`:
@@ -509,9 +510,9 @@ extensionHandlers:
 ```
 
 When the limit is under 30 s, the gate logs one warning at start that names the key, the host's
-limit and the review's limit. It still reviews each write. The key must be at least 20,000 ms,
+limit and the review's limit. It still reviews each write. The key must be at least 15,000 ms,
 since the gate does not bind on a limit that leaves under 10 s for a verdict. A session set under
-20,000 ms gets a gate that does not load, and a gate that did not load refuses every Dispatch
+15,000 ms gets a gate that does not load, and a gate that did not load refuses every Dispatch
 write it would have reviewed.
 
 `OMP_ASKGATE_DUMP` names a file that gets the two prompts of each model call.
@@ -594,14 +595,19 @@ CLI outside the form the gate reads and carried an ask for a person (`outcome: "
 - **Which project.** `OMP_ASKGATE_RECORD_PROJECT`, else `LEGION_PROJECT` (a Legion pod has no
   envoy.json, so its environment is the only setting it can carry), else no record at all and no
   Dispatch call.
-- **When.** After the decision is computed and before the call returns, with a 5 second stop. It
-  never changes the decision and never throws: a write that fails leaves `recordError` on the
-  entry and the call goes on. Once the session is shutting down, the stop comes 1.25 s after
-  shutdown began, inside the 1.5 s the gate holds shutdown for, so the entry is still written
-  before the session is sealed. An unmarked write's record is published from the `tool_result` the
+- **When.** Once the call has been answered: the gate appends the call's `advisor-gate` entry,
+  returns, and then starts the record with a 5 second stop of its own, so no review is ever cut
+  short to pay for it. It never changes the decision. A record that fails, that hits its stop or
+  that the shutdown cuts writes one line to the host's log and appends one `advisor-gate-record`
+  entry, carrying `toolCallId`, `tool` and `recordError`; the decision's own entry stands as
+  written, and the report passes over the follow-up. Once the session is shutting down, the gate
+  waits for the records still pending and cuts each 1.25 s after shutdown began, inside the 1.5 s
+  it holds shutdown for, so a record still lands, and the entry of one that could not, before the
+  session is sealed. An unmarked write's record is published from the `tool_result` the
   CLI's line reached, under its own 5 s stop, so an unreachable Dispatch delays that one result by
   at most that much. The session's first decision uploads the document; every later one appends a
-  fenced JSON line to it.
+  fenced JSON line to it. Two records of one session keep their order: the second appends to the
+  document the first uploaded, however slowly Dispatch answers.
 - **What is lost.** A session killed between a decision and its upload loses that one record, and
   a session that never reached a gated call writes no document. Both show in the reader's counts
   rather than silently.

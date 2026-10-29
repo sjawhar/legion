@@ -4526,10 +4526,15 @@ console.log(JSON.stringify(args));
          * in: what the gate answered the call with, and every record Dispatch has by then.
          */
         gatedAsk: async (toolCallId: string) => {
+          const before = published.length;
           const result = (await fixture.handlers.get("tool_call")?.(
             { toolName: "bash", toolCallId, input: { command: ASK } },
             context
           )) as { block?: boolean } | undefined;
+          // The gate's own decision record runs after its handler has returned (#2161), so the
+          // call's answer comes first and the record lands behind it, on the microtasks the
+          // stand-in Dispatch settles on.
+          for (let i = 0; i < 200 && published.length === before; i++) await Promise.resolve();
           return { result, records: [...published] };
         },
         shutdown: async () => {
@@ -4742,8 +4747,8 @@ console.log(JSON.stringify(args));
       ]);
     }, 30_000);
     // The second re-gate of #2159, non-blocking: at the host's default handler limit of 30 s the
-    // review deadline is 20 s (the 10 s margin covers the aborted call's usage, the entry and the
-    // decision record), which measured reviews often pass, and the warning that says so went only
+    // review deadline is 25 s (the 5 s margin covers the aborted call's usage report and the
+    // entry), which measured reviews often pass, and the warning that says so went only
     // to the log. A profile that sets nothing is the case this gate is for.
     test("a review deadline under 30 s is said at session start, not only logged", async () => {
       writeFileSync(process.env.ENVOY_CONFIG_FILE ?? "", "{}\n");
@@ -4763,7 +4768,7 @@ console.log(JSON.stringify(args));
       await fixture.handlers.get("session_start")?.({}, gateContext(notifications));
 
       expect(notifications).toHaveLength(1);
-      expect(notifications[0]).toContain("the review deadline is 20000 ms");
+      expect(notifications[0]).toContain("the review deadline is 25000 ms");
       expect(notifications[0]).toContain("extensionHandlers.toolCallTimeoutMs");
     }, 30_000);
     // A checkout's file can turn the session's Dispatch off in that checkout, but not the gate: the

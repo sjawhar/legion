@@ -534,7 +534,7 @@ so no call passes between the load and the binding. A load that fails (a module,
 `OMP_ASKGATE_TIMEOUT_MS` that is no positive integer, a handler ceiling too short for a verdict)
 is no off switch: `loadFailureGate` refuses each write the gate would review, in both modes, naming
 the error and `askgate.enabled`, and records a `load-failed` entry. The ceiling is too short under
-20,000 ms (`MIN_DEADLINE_MS` plus `CEILING_MARGIN_MS` in `askgate-core.ts`), so a session's
+15,000 ms (`MIN_DEADLINE_MS` plus `CEILING_MARGIN_MS` in `askgate-core.ts`), so a session's
 `extensionHandlers.toolCallTimeoutMs` set below that loses every Dispatch write the gate would
 have reviewed. A session with no envoy.json
 location has no Dispatch either, since its `dispatch` command works the file out by the same rule,
@@ -590,14 +590,21 @@ check through the model walk and the Dispatch client that the core passes in, so
 each rule decision, each override and each unmarked write that carries an ask to a Dispatch
 project document of the session's own, through the same Dispatch client, under a 5 s stop of its
 own and with no ask text in it; it too is free of the core, reading the entry's fields
-structurally, and a write that fails leaves `recordError` on the entry and changes no decision.
-Once the session is shutting down, the core cuts every record `SHUTDOWN_RECORD_MARGIN_MS` before
-its shutdown wait runs out, so the entry, which the record precedes, is appended before the
-session is sealed. `text.ts` is the leaf that holds the text helpers both checks share. The model
+structurally, and a write that fails changes no decision. The core starts a gated call's record as
+its handler returns, never inside it, and holds it in a pending set: a record that fails, hits its
+own stop or is cut at shutdown writes one line to `runtimeLogger` and appends one
+`advisor-gate-record` entry (`ADVISOR_GATE_RECORD_ENTRY_TYPE`, carrying `toolCallId`, `tool` and
+`recordError`), since the call's `advisor-gate` entry was written before the record began;
+`askgate-report.ts` reads `advisor-gate` entries alone and passes over these. Once the session is
+shutting down, the shutdown handler waits for the handlers and then for those records, cutting each
+`SHUTDOWN_RECORD_MARGIN_MS` before its wait runs out, so a record still lands, and the entry of one
+that could not, before the session is sealed. `text.ts` is the leaf that holds the text helpers
+both checks share. The model
 walk (`walk` in `createAskGate`) is the one path either check takes to the model. The review's
-deadline is held 10,000 ms under `extensionHandlers.toolCallTimeoutMs` (`CEILING_MARGIN_MS`: 5 s
-for the aborted call's usage report and the entry, and `RECORD_TIMEOUT_MS` for the decision
-record), so at that key's 30 s default the deadline is 20,000 ms, a review often times out and the
+deadline is held 5,000 ms under `extensionHandlers.toolCallTimeoutMs` (`CEILING_MARGIN_MS`, the
+room the handler still needs for the aborted call's usage report and for the entry; the decision
+record is no part of it), so at that key's 30 s default the deadline is 25,000 ms, a review of a
+long session can still time out and the
 write posts unreviewed: a session that loads this plugin sets the key to 120000 or more (the
 README's "The time limit"), and a deadline under 30 s logs one warning at bind. `rules.md`,
 `askgate-system.md`, `askgate-request.md` and `askgate-upload.md` (the instruction an upload of a
