@@ -46,6 +46,9 @@ func TestAnUnreadableInterestRecordIsNotAnsweredAsTheBusNotAnswering(t *testing.
 	if err != nil {
 		t.Fatalf("open the interest registry: %v", err)
 	}
+	// Both routes below report each session's roles, so they are refused the bus-unavailable 503
+	// until the role claim view is complete, whatever the records hold.
+	waitForRegistry(t, registry)
 	sessions, err := session.OpenSessionRegistry(client.Conn, session.WithSessionReplicas(1))
 	if err != nil {
 		t.Fatalf("open the session registry: %v", err)

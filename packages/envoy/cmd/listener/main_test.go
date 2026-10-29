@@ -1444,41 +1444,21 @@ func claimRoles(t *testing.T, registry *store.Registry, sessionID string, roles 
 	}
 }
 
-// waitForRegistry waits for the registry's interest and role claim caches to load the buckets, and
-// then for the role claim view to answer (waitForRoleClaimView).
+// waitForRegistry runs over a test's registry the gate the listener's own start runs
+// (store.Registry.WaitForCacheReady): the interest cache is waited for as ready, and the role
+// claim view as complete, not merely ready. After it returns, Match sees every existing
+// subscription in the interest bucket and RolesHeldBy answers, so a route that reports a session's
+// roles - GET /v1/sessions, GET /v1/registry/<session_id>, and the sender a send or a publish
+// stamps - is served rather than refused the bus-unavailable 503 store.ErrRoleViewNotReady earns.
+// A test that drives one of those routes waits here once, after its registry is open and before
+// its first request; a test that puts the view where it cannot answer and asserts the refusal
+// waits before the freeze, never after.
 func waitForRegistry(t *testing.T, registry *store.Registry) {
 	t.Helper()
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 	if err := registry.WaitForCacheReady(ctx); err != nil {
 		t.Fatalf("wait for the registry's caches: %v", err)
-	}
-	waitForRoleClaimView(t, registry)
-}
-
-// waitForRoleClaimView waits until registry.RolesHeldBy answers at all, because every route that
-// reports a session's roles - GET /v1/sessions and GET /v1/registry/<session_id> - answers its
-// refusal as the bus-unavailable 503. waitForRegistry's WaitForCacheReady is not enough on its own:
-// it waits for the role claim watcher's Ready, which a first scan nats.go's idle timer ended
-// satisfies, while RolesHeldBy keeps refusing (store.ErrRoleViewNotReady) until the watcher's
-// rescan leaves the view Complete, as store.Registry.WaitForCacheReady's own doc says. The session
-// asked about is one no claim in this package's tests names, so what the view answers about it says
-// nothing; that it answered is the whole point.
-func waitForRoleClaimView(t *testing.T, registry *store.Registry) {
-	t.Helper()
-	const unclaimed = "ses_role_view_probe"
-	poll := time.NewTicker(5 * time.Millisecond)
-	defer poll.Stop()
-	deadline := time.Now().Add(30 * time.Second)
-	for {
-		_, err := registry.RolesHeldBy(unclaimed)
-		if err == nil {
-			return
-		}
-		if time.Now().After(deadline) {
-			t.Fatalf("RolesHeldBy(%s) still refuses after 30 s: %v; until the view answers, GET /v1/sessions and GET /v1/registry/<session_id> answer the bus-unavailable 503", unclaimed, err)
-		}
-		<-poll.C
 	}
 }
 

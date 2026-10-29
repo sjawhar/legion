@@ -160,6 +160,9 @@ func TestSendAnswersServiceUnavailableWhileTheBusIsUnreachable(t *testing.T) {
 	if err != nil {
 		t.Fatalf("open the interest registry: %v", err)
 	}
+	// The sends below stamp their sender from the role claim view (senderStamp), so the listener's
+	// own startup gate is taken here, with the bus still reachable and before the cut.
+	waitForRegistry(t, registry)
 	sessions, err := session.OpenSessionRegistry(client.Conn, session.WithSessionReplicas(1))
 	if err != nil {
 		t.Fatalf("open the session registry: %v", err)
@@ -270,6 +273,9 @@ func TestASendAndAPublishAnswerABusThatStoppedAnsweringInsideTheBudget(t *testin
 			if err != nil {
 				t.Fatalf("open the interest registry: %v", err)
 			}
+			// The requests below stamp their sender from the role claim view (senderStamp), so the
+			// listener's own startup gate is taken here, before the freeze.
+			waitForRegistry(t, registry)
 			sessions, err := session.OpenSessionRegistry(client.Conn, session.WithSessionReplicas(1))
 			if err != nil {
 				t.Fatalf("open the session registry: %v", err)
