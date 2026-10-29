@@ -1,0 +1,61 @@
+{
+  "schemaVersion": 1,
+  "phase": "review",
+  "issue": "INFRA-719",
+  "round": 1,
+  "completed": "2026-10-29T13:44:30Z",
+  "reviewedHead": "8586a04f16207002e4197c3c9a0c129289e0767c",
+  "codeHead": "c076c8c4623c6ef38936e156bac57961dda7efe5",
+  "decision": "changes_requested",
+  "critical": 0,
+  "important": 3,
+  "minor": 3,
+  "keyFindings": [
+    {
+      "severity": "important",
+      "file": "packages/envoy/internal/dispatch/pmdoc/directive.go:98",
+      "description": "A typed block indented inside a quote or list item, ending the document in a whitespace-only line with no line feed, reads otherwise than the browser engine: the typed block strips no indentation from that line (offset == len(line)), so codeColumns keeps directive.indent extra columns. Reproduced at 8586a04f: '>   :::callout{}\\n>       code\\n>         ' Go code\\n    / engine code\\n   (main code); '- a\\n\\n    :::callout{}\\n          code\\n            ' Go '  code\\n      ' / engine '  code\\n    '; '>   :::callout{}\\n>   ~~~\\n>   x\\n>   ' Go x\\n   / engine x. With a final line feed all agree. Fix: drop '&& offset < len(line)' (the deep reviewer's scratch run: all 9 rows agree, 0 regressions over 7,960 documents); add the rows to TestIndentedCodeKeeps... and TestFencedCode...; a generator kind with a typed block indented in its container."
+    },
+    {
+      "severity": "important",
+      "file": "packages/envoy/internal/dispatch/pmdoc/lines.go:487",
+      "description": "heldOpenBefore restates refusals.go:66-73's predicate; the 'no document stored today is newly refused' guarantee depends on the two staying equal, and nothing ties them. Make refusals.go use the helper (e.g. heldOpenBy returning the List or Blockquote so the two messages stay)."
+    },
+    {
+      "severity": "important",
+      "file": "packages/envoy/internal/dispatch/pmdoc/fenced_code_test.go:81",
+      "description": "The readers table, check closure, reader loop and engine subtest are copied line for line from indented_code_test.go:53-102; one shared helper beside readCodeAndSpread."
+    },
+    {
+      "severity": "minor",
+      "file": "packages/envoy/.changes/unreleased/pr2481-Fixed-20261029-121242.yaml:2",
+      "description": "Changelog fragment and packages/envoy/AGENTS.md do not say that a last line with no line feed keeps the columns its containers leave of a tab (lastLineColumns: '> ```\\n> x\\n>\\t' x -> x\\n  ), nor the fenced no-line-feed drop in the fragment; prose coupled to the directive.go fix, so named rather than fixed by the reviewer."
+    },
+    {
+      "severity": "minor",
+      "file": "packages/envoy/internal/dispatch/pmdoc/lines.go:431",
+      "description": "codeColumns' doc cites interruptsOpenBlock for the held-open rule; Close decides it through heldOpenBefore (or its renamed successor)."
+    },
+    {
+      "severity": "minor",
+      "file": "packages/envoy/internal/dispatch/pmdoc/list_spacing.go:670",
+      "description": "holdCodeLines returns the held set and also writes blankAfterAttr=false on the next block; name or split it so browserListSpacing shows that it changes the tree."
+    }
+  ],
+  "acceptedMinors": [
+    "Deep review Minor 3: a few generated documents main refused under a named rule pass Parse at the head and are refused by ParseForWrite on read-back, the rule's text inside the read-back message plus a slog.Warn (readback.go:158); nothing stored changes. Recorded under Not proven / risk.",
+    "Code quality Minor 6: fenced_code_test.go's g22-g6351-round6 row repeats a corpus fixture, but it asserts ParseRendering and ParseForWrite, which the fixture test does not; not a defect."
+  ],
+  "verified": {
+    "ci": "Required set (rulesets): lint, typecheck, test, pr-title; branch protection lists none. CI head c076c8c4: lint success, typecheck skipped, pr-title success, test in_progress at 13:41Z; compare c076c8c4...8586a04f handoffsOnly true (2 files). Not waited for: changes requested.",
+    "threads": "0 review threads.",
+    "e2e": "E2E (implementer) and E2E (tester) lines present in the PR body.",
+    "planChecks": "heldOpenBefore matches refusals.go:63-73 (List; Blockquote without a blank line before) and Close keeps goldmark's trim there, so the refusal's Lines().Len() is main's; held lines are only lines past goldmark's trimmed end (codeHeldAttr); every blank counter in source_lines.go (blanks, blanksBefore, blanksEndingBefore, blanksThroughOuterQuotes) goes through sourceLines.blank; render.go and refusals.go untouched.",
+    "contractCensus": "Not required: the change adds no refusal and changes no boundary signature."
+  },
+  "thermonuclear": {
+    "head": "8586a04f16207002e4197c3c9a0c129289e0767c",
+    "deepReview": "CHANGES: 1 Medium (typed-block no-final-line-feed misread), 2 Minor; 19,986 generated documents, nothing main accepts newly refused, no panic, linear growth.",
+    "codeQuality": "CHANGES: 3 Important, 3 Minor."
+  }
+}
