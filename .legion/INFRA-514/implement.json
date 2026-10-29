@@ -2,23 +2,23 @@
   "schemaVersion": 1,
   "phase": "implement",
   "issue": "INFRA-514",
-  "completed": "2026-10-29T13:30:00Z",
+  "completed": "2026-10-29T14:45:00Z",
   "proof": [
     {
-      "criterion": "R6 EV-11 and R4 EV-7 at the merge head: an unchanged heartbeat writes the interest row only once it is 5 minutes old, and a rewatch after a nats-server restart resumes instead of reading every key",
-      "surface": "Real processes on the issue pod: nats-server 2.10.29 (fresh store), three envoy-listener processes built at the merge head (one takes the load, two only watch the buckets), 400 sessions heartbeating every 90 s through POST /v1/interests/subscribe; KV LastSeq read from the NATS monitor's /jsz",
-      "command": "python3 heartbeat-proof.py head bin/envoy-listener-head 400 (KV writes per heartbeat over minutes 1-6, then nats-server restarted on the same store and every listener's warm-up lines read)",
-      "observed": "1,333 heartbeats in 300 s: KV_envoy_interests 271 writes (0.203 per heartbeat), KV_envoy_sessions 1,334 (1.001), 1.204 KV writes per heartbeat; after the restart all three listeners logged interest and session warm-ups outcome resumed with 0 entries (role claims: completed, 0 entries, its bucket empty). The window ends at minute 6, before every row's first 5-minute refresh, which is why interest writes are below the 0.30 the 11-minute harness measured",
-      "headSha": "41fa18b19e7159f61f615b0c1d921e812605c83d",
-      "negativeControl": "the same driver on main's listener (8a911ecc): 2.00 KV writes per heartbeat (interest 1.00, session 1.00) and completed warm-ups reading all 400 keys of each bucket on every listener"
+      "criterion": "Round 4 (tester's failure 2, deployment instructions): the change to the issue page's Subscribed agents row is proven by a test in Dispatch's browser suite that fails on a build before the change and passes at the head",
+      "surface": "Dispatch's browser suite (packages/dispatch/e2e, Playwright chromium) against a real Dispatch build and the suite's fake listener, issue page Subscribed agents region",
+      "command": "cd packages/dispatch && bun run e2e -- --grep \"a subscriber no longer live shows its last heartbeat, not its subscription's last write\" (DATABASE_URL to a loopback Postgres 16)",
+      "observed": "at the head: 1 passed (e2e/issue.e2e.ts:372, 2.8 s); with --grep 'subscri' all 4 subscriber tests passed. The row's <time dateTime> equals the seeded last_seen (1 hour ago), not updated_at (3 hours ago)",
+      "headSha": "469224906252b9a0284c776c49eb8c6f54f3f38e",
+      "negativeControl": "the same test (plus only the fake listener's last_seen field) on a build of 765fd065, the commit before the subscribers change: Expected \"2026-10-29T12:57:23.596Z\", Received \"2026-10-29T10:57:23.596Z\" (rendered '3 hours ago'), failed in chromium and iphone"
     },
     {
-      "criterion": "Round 2 at the merge head: Dispatch's subscribers list shows a subscriber that is no longer live with its session's last heartbeat, not the interest row's updated_at",
-      "surface": "Real merge-head builds of envoy-listener and envoy-dispatch, nats-server 2.10.29 and a local Postgres 16; Dispatch's GET /api/v1/issues/PRF-1/subscribers as a person (header identity)",
-      "command": "bash lastseen-proof.sh (subscribe, an identical heartbeat 60 s later, stop, wait 320 s for the session row to expire, read; restart the listener; read again)",
-      "observed": "interest row updated_at 1793279586104 (the first heartbeat; the identical second was not rewritten), listener last_seen 1793279646148; after expiry no live session and Dispatch answered live=false, last_seen=1793279646148",
-      "headSha": "41fa18b19e7159f61f615b0c1d921e812605c83d",
-      "negativeControl": "after a listener restart the row carries no last_seen and Dispatch answers last_seen=1793279586104, the row's updated_at: what the list showed for every dead session before the fix"
+      "criterion": "R6/R4 and the subscribers fix at the new head (after the forward merge onto main's ci.yaml)",
+      "surface": "Real processes on the issue pod: nats-server 2.10.29, three envoy-listener builds of the head, 400 heartbeating sessions; and real envoy-listener plus envoy-dispatch builds with Postgres 16",
+      "command": "python3 heartbeat-proof.py head4 bin/envoy-listener-head 400; bash lastseen-proof.sh",
+      "observed": "1.203 KV writes per heartbeat (interest 0.203, session 1.000; 1,334 heartbeats) and resumed warm-ups with 0 entries on all three listeners after the nats-server restart; Dispatch's subscribers list answered live=false, last_seen=1793283850219 (the last heartbeat) against the row's updated_at 1793283790181",
+      "headSha": "469224906252b9a0284c776c49eb8c6f54f3f38e",
+      "negativeControl": "main's listener (8a911ecc) in the same driver: 2.00 KV writes per heartbeat and completed warm-ups of all 400 keys; after a listener restart the subscribers list falls back to 1793283790181"
     },
     {
       "criterion": "R1/R5 at the merge head: Get at 3,000 sessions within 2x of 400, a reaper pass at 3,000 within 10x of 400, a 25,000-record rewatch costs what an empty one does",
@@ -71,7 +71,6 @@
   ],
   "filesChanged": [
     ".dispatch/architecture/envoy-listener.md",
-    ".github/workflows/envoy-and-contracts.yaml",
     "docs/solutions/envoy/a-cache-miss-must-not-release-what-another-listener-wrote.md",
     "packages/envoy/AGENTS.md",
     "packages/envoy/CHANGELOG.md",
@@ -103,7 +102,12 @@
     "packages/envoy/cmd/listener/interest_record_unreadable_answer_test.go",
     "packages/envoy/internal/dispatch/envoy/client.go",
     "packages/envoy/internal/dispatch/api/subscribers.go",
-    "packages/envoy/internal/dispatch/api/subscribers_test.go"
+    "packages/envoy/internal/dispatch/api/subscribers_test.go",
+    ".github/workflows/ci.yaml",
+    ".github/scripts/ci_job_reads.py",
+    "packages/dispatch/e2e/fake-envoy.ts",
+    "packages/dispatch/e2e/agents.ts",
+    "packages/dispatch/e2e/issue.e2e.ts"
   ],
   "trickyParts": [
     "kvwatch keeps one complete flag (the atomic) that both #2167's Complete() and the resume read; a resumed generation is complete at its own nil marker, and a WithRescan rescan passes no connection so it always reads in full.",
@@ -120,7 +124,8 @@
     "The restart test asserts resumed with 0 entries: the server is down during the restart, so no write lands while the listener is away; the k-writes case is resume_test.go's.",
     "Round 2: Dispatch keys and dispatch:// links removed from the lines this pull request adds (CHANGELOG, the race step's comment) and from its body, per the repository rule relayed on 2026-10-27; the body's 'Dispatch: INFRA-514' template line stays.",
     "Round 3: GitHub reported the pull request conflicting with main (8a911ecc) in packages/envoy/AGENTS.md and CHANGELOG.md, both prose; merged forward as 41fa18b1 with both sides' text on each line, fingerprint e512190a -> d7bf20aa (posted on the pull request). The proof was run again at the merge head on the new pod with a compact real-process driver (the 2-core reproduction stack did not survive the pod's recreation); the tester's full-harness readings at d7ebb1ee stand for the same code.",
-    "Round 3 test notes: go test ./internal/dispatch/api needs CI's -timeout 20m on this pod; with it, one test failed for the local database's collation only (TestIssueRanksStayOrderedPastLowercaseDigitsAndProductionShapedMoves refuses a database that already sorts in byte order, which a fresh initdb with no locale does); no file of that test's code is in this pull request."
+    "Round 3 test notes: go test ./internal/dispatch/api needs CI's -timeout 20m on this pod; with it, one test failed for the local database's collation only (TestIssueRanksStayOrderedPastLowercaseDigitsAndProductionShapedMoves refuses a database that already sorts in byte order, which a fresh initdb with no locale does); no file of that test's code is in this pull request.",
+    "Round 4: main's #2316 deleted .github/workflows/envoy-and-contracts.yaml and moved pull-request CI into ci.yaml; the forward merge (5e318b72, onto ef7ef530) accepts the deletion and adds ./internal/session/ to ci.yaml's listener race step, updating that step's entry in .github/scripts/ci_job_reads.py so check-ci-filters.sh passes (23 gates, 0 uncovered). Fingerprint d7bf20aa -> b71732dc, posted on the pull request."
   ],
   "openQuestions": [
     "The issue-topic delivery defect the controller reported went to its own child issue, by the architect's decision of 2026-10-29 11:59Z; it is not in this pull request.",
