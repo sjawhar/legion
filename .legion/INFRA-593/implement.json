@@ -2,15 +2,31 @@
   "schemaVersion": 1,
   "phase": "implement",
   "issue": "INFRA-593",
-  "completed": "2026-10-29T09:30:00Z",
+  "completed": "2026-10-29T12:58:00Z",
   "pullRequest": "https://github.com/sjawhar/legion/pull/2444",
   "proof": [
+    {
+      "criterion": "Round 3 finding 1: the PR leaves packages/envoy/infra/go.work.sum as main has it",
+      "surface": "GitHub pull request diff and the infra Go module",
+      "command": "jj restore --from main@origin packages/envoy/infra/go.work.sum; gh pr diff 2444 -R sjawhar/legion --name-only | grep -c go.work.sum; (cd packages/envoy/infra && GOFLAGS=-mod=readonly go build ./... && go test ./gcp/ -run TestDispatchConnectionsPerPodIsTheServers -count=1)",
+      "observed": "grep counts 0: go.work.sum is not in the PR's file list at 3e89ac6f; jj diff against main@origin for the file is 0 lines; the infra build and the connection-budget test pass. A go test in infra rewrote the file once during the round (24 lines dropped), so it was restored again after the tests and before the commit.",
+      "headSha": "3e89ac6ff215e6e163e9e206ce40ea74c8ac3cbd",
+      "negativeControl": "At 713982bb the same diff showed go.work.sum -24/+2 against main (the reviewer's finding)."
+    },
+    {
+      "criterion": "Round 3 finding 2: note's held case without the dead index check keeps the queue behaviour",
+      "surface": "docs package tests on Postgres 16.2, under -race, and the real-process proof",
+      "command": "CGO_ENABLED=1 go test ./internal/dispatch/docs -run 'Queue|Sweep|Compaction|BufferedFold' -race -count=1; go test -count=1 ./internal/dispatch/docs ./internal/dispatch/duty ./cmd/dispatch; bash $TMPDIR/infra593/e2e.sh",
+      "observed": "ok docs 119.8s under -race (includes TestABurstAfterAQuietCheckBringsTheDocumentsCheckForward); ok docs 1220s, duty 21s, cmd/dispatch 357s; e2e PASS at 12:50Z: restart sweep candidates=1 compacted=1 rows_deleted=37, 3 young rows unchanged, text sha256 identical (dispatch://INFRA-593/artifact/infra-593-e2e-proof-txt version 7).",
+      "headSha": "3e89ac6ff215e6e163e9e206ce40ea74c8ac3cbd",
+      "negativeControl": "The e2e's first sweep tick at the restart logs candidates=0 compacted=0 because the hour was already swept; only the next tick, after the hour's record is cleared, folds the 37 rows."
+    },
     {
       "criterion": "Review round 2, finding 1: a note for a room waiting in the compaction queue brings its check forward, so a burst after a quiet check keeps the drained-queue bound (fold point, rows younger than 2 minutes, fewer than 16 older rows).",
       "surface": "internal/dispatch/docs compaction queue against a real Postgres 16.2",
       "command": "go test ./internal/dispatch/docs -run 'Queue|Sweep|BufferedFold' -race -count=1; TestABurstAfterAQuietCheckBringsTheDocumentsCheckForward",
       "observed": "The quiet check schedules the next about 10 minutes away; after a burst of 20 rows aged past the tail, the next append's note brings the check forward and it compacts the document to the fold point and the young row (2 rows). All queue and sweep tests pass under -race at 713982bb.",
-      "headSha": "713982bbf92e35eb0d66dda0498b65fa74a6b5b6",
+      "headSha": "3e89ac6ff215e6e163e9e206ce40ea74c8ac3cbd",
       "negativeControl": "At d741863c the same burst's notes changed nothing for a room already waiting, so every aged row waited for the 15-minute check (review round 2, PRRT_kwDORFy7ds6xZA2H)."
     },
     {
@@ -18,7 +34,7 @@
       "surface": "envoy-dispatch built from the head, real process on Postgres 16.2, DISPATCH_NATS_DISABLED=1, HTTP API",
       "command": "bash $TMPDIR/infra593/e2e.sh (dispatch://INFRA-593/artifact/infra-593-e2e-proof-txt version 6)",
       "observed": "41 rows; 38 backdated; hour record cleared; at the restart the sweep's first tick logged candidates=1 compacted=1 rows_deleted=37; 4 rows left, the 3 young rows unchanged (version, xmin, md5); text sha256 identical; a 31st upload reads back.",
-      "headSha": "713982bbf92e35eb0d66dda0498b65fa74a6b5b6",
+      "headSha": "3e89ac6ff215e6e163e9e206ce40ea74c8ac3cbd",
       "negativeControl": "Main c3d09eec folded all 41 rows at shutdown, the row written seconds earlier included."
     },
     {
@@ -26,7 +42,7 @@
       "surface": "internal/dispatch/docs, store and infra/gcp against a real Postgres 16.2",
       "command": "go vet ./... (plain, -tags memory, -tags multiprocess); (cd infra && go test ./gcp/ -run TestDispatchConnectionsPerPodIsTheServers); go test -count=1 ./internal/dispatch/docs ./internal/dispatch/store/... ./internal/pgmigrate/... ./internal/dispatch/outbox ./internal/dispatch/deliveryaudit ./internal/dispatch/duty ./cmd/dispatch; go test -tags multiprocess ./cmd/dispatch -run TestEachLeasedMaintenanceLoopRunsOnceAcrossBothProcesses",
       "observed": "All pass at d741863c; TestABufferedFoldWaitsForASlotWithinItsContext, TestABufferedFoldEndsWithItsContext, TestTheCompactionQueueKeepsANoteThatComesWhileItsDocumentsStepRuns and TestTheCompactionQueueComesBackToARetriedDocumentWhenItsYoungRowsComeDue pass; ConnectionsPerProcess = dispatchConnectionsPerPod = 88; document-compaction: A ran 1 skipped 0, B ran 0 skipped 1.",
-      "headSha": "d741863c765161e472f2145d53c5c231d674ff28",
+      "headSha": "3e89ac6ff215e6e163e9e206ce40ea74c8ac3cbd",
       "negativeControl": "TestTheCompactionQueueKeepsANoteThatComesWhileItsDocumentsStepRuns fails with renoting disabled (timed out waiting for the check the note in flight queued); a third buffered load whose ctx is cancelled while it waits for a fold slot returns context.Canceled."
     },
     {
@@ -34,7 +50,7 @@
       "surface": "envoy-dispatch built from the head, real process on Postgres 16.2, DISPATCH_NATS_DISABLED=1, HTTP API",
       "command": "bash $TMPDIR/infra593/e2e.sh (dispatch://INFRA-593/artifact/infra-593-e2e-proof-txt version 5)",
       "observed": "41 rows; 38 backdated; hour record cleared; the restarted process's first sweep tick logged candidates=1 compacted=1 rows_deleted=37; 4 rows left, the 3 young rows unchanged (version, xmin, md5); text sha256 identical; a 31st upload reads back.",
-      "headSha": "d741863c765161e472f2145d53c5c231d674ff28",
+      "headSha": "3e89ac6ff215e6e163e9e206ce40ea74c8ac3cbd",
       "negativeControl": "Main c3d09eec folded all 41 rows at shutdown, the row written seconds earlier included; the head keeps rows younger than 2 minutes as written."
     },
     {
@@ -42,7 +58,7 @@
       "surface": "internal/dispatch/docs against a real Postgres 16.2, and EXPLAIN on a database migrated by envoy-dispatch built from the head",
       "command": "go test ./internal/dispatch/docs -run TestTheCompactionSweepReadsNoRowOfADocumentThatIsNotDue -count=2 -v; EXPLAIN (ANALYZE, BUFFERS) select artifact_id::text from doc_compaction_owed on 100,000 one-row documents (dispatch://INFRA-593/artifact/infra-593-round-2-sweep-and-append-txt)",
       "observed": "The tester's test (267322ef, unmodified) passes twice; the sweep over 2,000 one-row documents and one due document logged candidates=1. EXPLAIN on 100,000 documents, none due: a scan of the empty doc_compaction_owed, 0 rows, 0.054 ms; 50 owed: 1 buffer, 0.110 ms.",
-      "headSha": "1b0881b971f7e62393a77d0450cfbba606f251b5",
+      "headSha": "3e89ac6ff215e6e163e9e206ce40ea74c8ac3cbd",
       "negativeControl": "The old listing on the same 100,000 documents read every primary-key entry (Index Only Scan, 100,000 rows, Rows Removed by Filter: 100000, 624 buffers, 42 ms); the tester's test failed at 9eb0b4e2 for that reason."
     },
     {
@@ -50,7 +66,7 @@
       "surface": "INFRA-589 load harness (sjawhar/legion#2369 9d37005c) with real envoy-dispatch, listener, NATS and Postgres processes, step 1x",
       "command": "bash $TMPDIR/infra593/run-harness-append.sh (5 interleaved runs per side, one seed made by the before build; dispatch://INFRA-593/artifact/infra-593-round-2-sweep-and-append-txt)",
       "observed": "Median of the runs' write p50, before 9eb0b4e2 -> after 1b0881b9: anchored 605 -> 553 ms, comment 165 -> 149 ms, edit 740 -> 680 ms, reply 420 -> 385 ms, upload 698 -> 649 ms; committed 3.994/s both. The entry is a CTE of the append's existing statement, so no extra statement runs.",
-      "headSha": "1b0881b971f7e62393a77d0450cfbba606f251b5",
+      "headSha": "3e89ac6ff215e6e163e9e206ce40ea74c8ac3cbd",
       "negativeControl": "The before build in the same interleaved rounds is the control; its first run (p50 14 s) shows the noise the medians absorb."
     },
     {
@@ -58,7 +74,7 @@
       "surface": "envoy-dispatch built from the head, real process on Postgres 16.2, DISPATCH_NATS_DISABLED=1, HTTP API",
       "command": "bash $TMPDIR/infra593/e2e.sh (dispatch://INFRA-593/artifact/infra-593-e2e-proof-txt version 4)",
       "observed": "41 rows; 38 backdated; hour record cleared; 6 s after the restart the sweep logged candidates=1 compacted=1 rows_deleted=37; 4 rows left, the 3 young rows unchanged (version, xmin, md5); text sha256 identical; a 31st upload reads back; doc_compaction_owed still names the document while young rows remain.",
-      "headSha": "d1939c8689f53e46ea10804b353f13aa312425aa",
+      "headSha": "3e89ac6ff215e6e163e9e206ce40ea74c8ac3cbd",
       "negativeControl": "Main c3d09eec folded all 41 rows at shutdown, the row written seconds earlier included; without the hour record cleared, the restarted sweep skipped the hour and the queue folded the log only once its rows were older than 2 minutes."
     },
     {
@@ -66,7 +82,7 @@
       "surface": "envoy-dispatch built from the head, run as a process on a real Postgres 16.2 with DISPATCH_NATS_DISABLED=1, driven through its HTTP API",
       "command": "bash $TMPDIR/infra593/e2e.sh (script and output: dispatch://INFRA-593/artifact/infra-593-e2e-proof-txt version 2)",
       "observed": "30 uploads of a 100 KB spec and 5 anchored comments made 41 rows; after a stop every row but the newest 3 was backdated an hour; 22 s after the restart the sweep logged candidates=1 compacted=1 rows_deleted=37 and 4 rows remained; the 3 young rows kept version, xmin and md5; the text sha256 was identical before, on the cold read after the restart, and after the fold; a 31st upload read back.",
-      "headSha": "9eb0b4e29b083ab4e51076ca79e633f164084715",
+      "headSha": "3e89ac6ff215e6e163e9e206ce40ea74c8ac3cbd",
       "negativeControl": "The same script on main c3d09eec: its shutdown compaction folded all 41 rows into one, the row written seconds earlier included (row 41 rewritten, new xmin). At the head, a first run where the first process had already swept the aligned hour showed the restarted process's sweep skipped (leased pass skipped lease=document-compaction), the hourly period working as designed."
     },
     {
@@ -74,7 +90,7 @@
       "surface": "BenchmarkRoomLoad in internal/dispatch/docs against a real Postgres 16.2, documents written through the upload write path, backdated and compacted",
       "command": "docs-main.test and docs-head.test -test.bench BenchmarkRoomLoad -test.benchtime 10x, 10 rounds interleaved ($TMPDIR/infra593/run-bench2.sh); benchstat golang.org/x/perf v0.0.0-20261009192801-be2c69fb417e (dispatch://INFRA-593/artifact/infra-593-benchmarks-single-decode-txt)",
       "observed": "One compacted row: 60 versions 88.5 to 32.2 ms, 120 versions 181.3 to 60.1 ms, 240 versions 545.2 to 106.0 ms (5.1x). Head growth 240/120 = 1.76x, 120/60 = 1.87x. One row plus 15 young rows at 240 versions: 1,238.6 to 433.5 ms.",
-      "headSha": "ee5938e6d1d49a5a58ed0c5675c9fbff49655de7",
+      "headSha": "3e89ac6ff215e6e163e9e206ce40ea74c8ac3cbd",
       "negativeControl": "Main b295a3fb, interleaved in the same rounds, is the control: 545.2 ms at 240 versions. Before the single decode (head 4bbe8232) the same benchmark measured only 2.32x, and its profile showed two decodes of one row, which led to the change."
     },
     {
@@ -82,7 +98,7 @@
       "surface": "internal/dispatch/docs against a real Postgres 16.2",
       "command": "CGO_ENABLED=1 go test -race -count=1 ./internal/dispatch/docs/ ./internal/dispatch/store/... (and the Compaction/Queue/Sweep/Load tests named in the PR body)",
       "observed": "ok docs 1230 s, ok store 173 s under -race; TestARoomWhoseHistoryDoesNotDecodeFailsFromTheRoomsOwnDecode, TestACompactionHoldsNoSharedOrRoomsConnection, TestABrowserAppendLandsWhileACompactionIsInsideItsFold and the prune/rebuild/delete/concurrent/older-build/cursor/misread cases pass.",
-      "headSha": "ee5938e6d1d49a5a58ed0c5675c9fbff49655de7",
+      "headSha": "3e89ac6ff215e6e163e9e206ce40ea74c8ac3cbd",
       "negativeControl": "An undecodable single row and an undecodable merged log: the room load returns the same crdt error validateUpdate returns, state.failed holds it, no room is published, and a second access fails the same way."
     },
     {
@@ -90,7 +106,7 @@
       "surface": "two envoy-dispatch processes on one Postgres (cmd/dispatch multiprocess suite)",
       "command": "go test -tags multiprocess -count=1 ./cmd/dispatch -run TestEachLeasedMaintenanceLoopRunsOnceAcrossBothProcesses -v",
       "observed": "document-compaction: A ran 0 skipped 1, B ran 1 skipped 0; PASS in 69 s.",
-      "headSha": "ee5938e6d1d49a5a58ed0c5675c9fbff49655de7",
+      "headSha": "3e89ac6ff215e6e163e9e206ce40ea74c8ac3cbd",
       "negativeControl": "Process A's tick in the same aligned hour skipped (leased pass skipped), so no second pass ran."
     },
     {
@@ -98,7 +114,7 @@
       "surface": "BenchmarkUploadVersion through the HTTP upload route, and the INFRA-589 load harness (sjawhar/legion#2369 9d37005c) running real envoy-dispatch, listener, NATS and Postgres processes",
       "command": "run-bench2.sh (BenchmarkUploadVersion, 10 interleaved rounds, cpuprofile of round 1); run-harness.sh (step 1x, 5 interleaved runs per side, plain and history-seeded seeds) (dispatch://INFRA-593/artifact/infra-593-harness-1x-txt)",
       "observed": "Upload 1.022 s to 1.005 s (p=0.58); upload CPU 6.68 s to 6.12 s over 10 uploads, room load inside it 0.83 s to 0.59 s. Harness room-load cores, medians: plain 0.0601 to 0.0579; history 0.0599 to 0.0625, per committed write 0.085 to 0.077.",
-      "headSha": "ee5938e6d1d49a5a58ed0c5675c9fbff49655de7",
+      "headSha": "3e89ac6ff215e6e163e9e206ce40ea74c8ac3cbd",
       "negativeControl": "Main b295a3fb from the same seed and in the same interleaving is the control for every number; main's first plain run (committed 1.77/s, p50 28 s) shows the run-to-run variation the medians absorb."
     }
   ],
@@ -166,12 +182,13 @@
     "Review round 1 (12 threads) fixed in 61cc109a; the PR body carries the contract change census (CompactAll, outbox.Deps, VersionedStore, writers of doc_updates and doc_compaction_owed's rollout).",
     "Fourth forward merge of main (conflicting): duty.Exclusive now takes the tick's due time, so the sweep runs on duty.RunLeased, a one-hour ticker whose first tick is at start (it was a 30 s jittered first tick, then every 10 minutes); the CHANGELOG entry moved into the changelog fragment .changes/unreleased/INFRA-593-document-load-and-compaction.yaml under main's new fragment rule; pmdoc/typed_nesting_test.go wraps cpuTimeOf's argument in again(...), main's own compile error that #2481 also fixes.",
     "Review round 2 fixed in 299ac590: a note brings a waiting room's check forward (entries keep their heap index); compactionSweepTick moved into the test file; bufferedFolds = store.RoomsPoolSize (exported); main.go's sweep comment; duty/ticker_test.go no longer cites the removed daily compaction and uses the issue-ask-repair lease.",
-    "Fifth forward merge of main (conflicting) at 713982bb: main took migrations 0137 and 0138, so doc_compaction_owed is now migration 0139; running-dispatch.md, cmd/dispatch/README.md and deliveryaudit_test.go resolved; pmdoc test files are main's."
+    "Fifth forward merge of main (conflicting) at 713982bb: main took migrations 0137 and 0138, so doc_compaction_owed is now migration 0139; running-dispatch.md, cmd/dispatch/README.md and deliveryaudit_test.go resolved; pmdoc test files are main's.",
+    "Round 5: envoy-go's cmd/listener failure at 713982bb (nats: outbound buffer limit exceeded) is main's NATS-restart flake, fixed by INFRA-743; this PR does not touch cmd/listener."
   ],
   "openQuestions": [
     "The memory-tag suite (cmd/dispatch history_memory_test.go, memory_test.go) cannot run on this gVisor pod (/proc/<pid>/clear_refs permission denied); history_memory_test.go now backdates rows before the deploy-style stop so the stop's tail-rule compaction folds them. CI's memory lane passed at 4bbe8232 (Legion Envoy and Contracts: success)."
   ],
-  "round": 4,
+  "round": 5,
   "answersTest": "dispatch://INFRA-593/artifact/infra-593-tester-round-1-txt (failure: the hourly sweep read one entry per document)",
-  "answersReview": "Review round 2 at d741863c (REQUEST_CHANGES, 4 threads plus the ticker_test minor, all answered at 713982bb)"
+  "answersReview": "Round 3 at 713982bb (REQUEST_CHANGES, review head b1cb6470): 6 threads, all answered and resolved at 3e89ac6f; finding 4 (duty/run_leased_period_test.go wording) fixed too."
 }
