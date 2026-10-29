@@ -1,0 +1,46 @@
+{
+  "schemaVersion": 1,
+  "phase": "test",
+  "issue": "INFRA-707",
+  "completed": "2026-10-29T09:56:00Z",
+  "verdict": "fail",
+  "headTested": "78a70370a1603e5e6e069bb0b0285fc42abff04c",
+  "implementerProof": {
+    "verdict": "rejected",
+    "how": "Proof entry 1 (acceptance 1) re-run independently and confirmed: at the head (workspace at 78a70370, code identical to a6b64ddb) `cd packages/envoy && DISPATCH_TEST_DATABASE_URL=postgres://postgres@127.0.0.1:55418/postgres?sslmode=disable go test ./internal/dispatch/docs/ -run TestStoredOrder -count=1 -v` gave 12/12 PASS in 11.468s, and the soak with `-args -stored-order-rounds=300` gave `rounds=300 counted=300 mismatching_rounds=0 mismatching_counted_rounds=0 mismatches=0 writes=600 write_p50=229.418383ms write_p99=1.179104257s elapsed=16m8.217s` (PASS, 973.54s, 2 vCPU). Negative control rebuilt from scratch, not taken from the implementer: `git archive 7f2ba1ffe1cdea3c259b691d79d5439a30501135 | tar -x -C $TMPDIR/neg-7f2ba1ff` (that tree carries storedorder_test.go and no flush.go/shadow.go, i.e. main 75833475's production code plus the head's tests); the same command there gave 10 window tests FAIL and the soak FAIL `rounds=12 counted=12 mismatching_rounds=12 mismatching_counted_rounds=12 mismatches=165`, so main's failure rate is p=1 and n>=max(3/p,200)=200 counted rounds, which the 300-round head soak meets. Rejected all the same, because the proof set does not cover the issue's acceptance: the handoff carries no proof for acceptance 2 (cluster oracle), 3 (latency) or 4 (agreement), and its own openQuestions[0] records 2 and 3 as not run. Proof entry 2 (the local real-server E2E) was not re-run this round: the pod drains at 10:08Z for INFRA's worker-image re-pin, and the head is going to be rewritten by the forward merge below, after which a full test round is owed anyway."
+  },
+  "failed": 4,
+  "failures": [
+    {
+      "criterion": "Every acceptance criterion, and the merge gate: CI green at the tested head.",
+      "evidence": "The pull request conflicts with main, so GitHub computes no merge ref and runs no pull-request CI on the head: `gh pr view 2496 --repo sjawhar/legion --json mergeable,mergeStateStatus,headRefOid` -> `{\"mergeable\":\"CONFLICTING\",\"mergeStateStatus\":\"DIRTY\",\"headRefOid\":\"78a70370a1603e5e6e069bb0b0285fc42abff04c\"}`; `gh pr checks 2496` -> `no checks reported on the 'legion/INFRA-707' branch`; `statusCheckRollup` is empty; `gh api repos/sjawhar/legion/commits/78a70370.../status` -> `{\"state\":\"pending\",\"total\":0}`. The only two check runs on the head (`release_build` skipped, `targets` queued, run 40850134172) belong to a `workflow_dispatch` of Release Envoy Listener on the branch, not to the pull request. So lint, typecheck and the unit and integration suites are unread at this head, and no tester evidence of them exists. Merge base is 7583347570a9f8e22dde79602f9f5a47ad73f807; main is a7c762f6506481f583f138223eb0187e4352e975, 1195 files changed since the base, 16 of them changed on both sides: packages/envoy/cmd/dispatch/README.md, cmd/dispatch/settings.go, internal/dispatch/docs/{cold_edit_test.go,docstest/docstest.go,edit_notices_test.go,ledger.go,livewrite.go,mutation.go,mutation_test.go,pending_authors.go,persistence.go,service.go,service_test.go,stale_room_test.go,tree.go,websocket.go}. Remedy: the implementer merges main forward (never a rebase, skill://legion-worker/references/conflicts-and-rewrites.md) and pushes; the merged head differs from this one, so the unchanged-diff fingerprint will differ and a full test round follows.",
+      "redTest": "none: no code defect is pinned by this failure."
+    },
+    {
+      "criterion": "2. The same oracle check runs inside INFRA-598's load test on the cluster copy and finds no mismatch at the head.",
+      "evidence": "Not run: `.legion/INFRA-707/implement.json` openQuestions[0] records acceptance 2 as not yet run, and its proof array has no entry naming the cluster surface. Nothing in the pull request body or on the issue records a cluster run. The bar the INFRA-514 architect set (09:29Z, Envoy): the replay r16 and 10x-typing with Dispatch and the stored-order checker both built from the head and loadtest/browsertype in the runner pod, with INFRA-598's implementer (notifications.role.legion-infra-infra-598-implementer); 0 mismatches against main's count in the same run shape; every typed document checked at least 100 updates and 10 versions, Dispatch replica count recorded.",
+      "redTest": "none: the criterion has no run to pin."
+    },
+    {
+      "criterion": "3. No added latency at tonight's load: write p50 and p99 on INFRA-589's harness within run-to-run noise, 5 runs per side.",
+      "evidence": "Not run: `.legion/INFRA-707/implement.json` openQuestions[0] records acceptance 3 as not yet run, and no proof entry names INFRA-589's harness. The only latency numbers at the head are the soak's own (head: write_p50=229.418383ms write_p99=1.179104257s over 600 writes on this 2 vCPU pod; the same soak on main's code: write_p50=30.689324ms write_p99=138.856463ms over 24 writes), which are not the criterion's harness, not 5 runs per side, and not comparable across those round counts. INFRA-589's harness is on main now (architect, 09:29Z), so the rule the plan fixed applies: 1x step `run-step.sh <name> --events 4 --sessions 400 --requests 60` with one --rng-seed, 5 base runs then 5 head runs, discard a run whose box_busy_before exceeds 10%, and `jq '.events.by_kind.edit.write_ms|{p50,p99}, .events.by_kind.upload.write_ms|{p50,p99}' runs/<name>/summary.json`.",
+      "redTest": "none: the criterion has no run to pin."
+    },
+    {
+      "criterion": "4. Works with INFRA-605's batched browser appends: whichever merges second keeps acceptance 1 green.",
+      "evidence": "No agreement recorded. The handoff's coordination note says the contract was to be sent, but neither the handoff nor the pull request body states how this change merges with INFRA-605 (#2445 batched appends), INFRA-636 (#2468 pipelined write phase) or INFRA-715 (#2480 ReplaceText), which is what the INFRA-514 architect asked for in its verdict (09:29Z). The forward merge of main this round demands may already carry one of them, in which case acceptance 1 must be re-run on the merged head.",
+      "redTest": "none: no code defect is pinned by this failure."
+    }
+  ],
+  "verifiedThisRound": [
+    "Acceptance 1 at the head: window tests 12/12 PASS (11.468s), soak 300 counted rounds, 0 mismatches.",
+    "Acceptance 1's red-on-main claim, from a tree I built myself at 7f2ba1ff: 10 window tests FAIL, soak 12/12 counted rounds mismatching, 165 mismatches.",
+    "check-private-names.sh passes at the head (5780 files)."
+  ],
+  "notes": [
+    "The INFRA-514 architect's round item (2) — two added lines naming a Dispatch key in docs/flush.go and docs/shadow.go, which 'the no-key rule keeps off main' — does not hold as a blocker, and I did not record it as a failure. `.github/scripts/check-private-names.sh` passes at the head, and main itself carries Dispatch keys in this very package in files this pull request does not touch: `jj file show -r main@origin packages/envoy/internal/dispatch/docs/stale_room.go | sed -n 18p` -> `// changed, to every envoy-dispatch process. Two processes serve one Postgres (INFRA-66) and do`, with 2 such lines in stale_room.go, 2 in service.go and 1 in mutation.go on main, plus main's own file name docs/solutions/best-practices/the-caveat-belongs-in-the-copy-its-failing-audience-renders-INFRA-113.md. AGENTS.md's public-repository rule is about the deployment repository's and the company's names; the project key appears in main's source comments as settled practice. The architect owns the call.",
+    "The negative-control commit 7f2ba1ffe1cdea3c259b691d79d5439a30501135 is unpushed and lives only in this pod's clone, which the 10:08Z drain replaces. After the forward merge it must be rebuilt on the merged base anyway (the merged base's production code plus this branch's storedorder_test.go), so nothing is lost; the next round rebuilds it the same way.",
+    "The local Postgres 18 + pgvector harness is $TMPDIR/pg18/pg.sh (port 55418) and the real-server E2E rig is $TMPDIR/i707/{keep,e2e}/{run.sh,agent.py}; both die with the pod's disk and both are in dispatch://INFRA-707/artifact/infra-707-implementer-evidence-tar-gz version 2.",
+    "Round ended early by the INFRA controller's drain for the worker-image re-pin (architect relay 09:47Z: push by 10:05Z, suspension 10:08Z). The round's verdict does not depend on it: the conflicting head and the three unproven criteria each fail it on their own."
+  ]
+}
