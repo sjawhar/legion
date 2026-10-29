@@ -670,7 +670,10 @@ process holds its own room for a document. Postgres is the only channel between 
   that loads for a reader, and a reader that joins a loaded room, ask the other processes for
   their readers' states, so a reader who opens second sees the first reader's cursor at once. A
   room forgets a client it hears nothing from for 30 seconds (`AwarenessExpiry`), so a cursor
-  relayed from a process that stopped without a word goes away.
+  relayed from a process that stopped without a word goes away. A room tracks at most 256
+  awareness clients (`MaxAwarenessClientsPerRoom`) and about 2 MB of their states
+  (`MaxAwarenessBytesPerRoom`), so one frame that claims thousands of clients cannot become
+  thousands of notifications.
 - **Issue close and reopen.** Migration `0141`'s trigger notifies `dispatch_issue_open_changed`
   when an issue's `closed_at` changes, whichever process or build wrote it. Every process of this
   build then closes its rooms of the issue's documents, and their browsers reconnect read-only or
