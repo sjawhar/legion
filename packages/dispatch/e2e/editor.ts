@@ -9,8 +9,9 @@ import {
 } from "@playwright/test";
 import { createDecoder, readVarUint } from "lib0/decoding";
 
+import type { ArtifactBlock } from "../web/src/api/types";
 import { readField } from "../web/src/features/doc/sync-frame";
-import { createIssue, createProject, getArtifactText, getIssue } from "./api";
+import { baseUrl, createIssue, createProject, getArtifactText, getIssue, userHeaders } from "./api";
 import { asUser } from "./users";
 
 export function documentEditor(page: Page): Locator {
@@ -437,6 +438,28 @@ export async function openIssue(browser: Browser, title: string, spec: string) {
   const page = await alice.newPage();
   await page.goto(`/issues/${issue.key}`);
   return { alice, issue, page };
+}
+
+/** The id of the block of `artifactId` whose markdown is exactly `text`. A paragraph's id is a
+ *  minted UUID, which `encodeBlockId` writes unchanged, so the id is also its `#b-` fragment. */
+export async function blockId(artifactId: string, text: string): Promise<string> {
+  const { markdown } = await getArtifactText(artifactId);
+  const response = await fetch(
+    new URL(`/api/v1/artifacts/${encodeURIComponent(artifactId)}/blocks`, baseUrl),
+    { headers: await userHeaders() }
+  );
+  if (!response.ok) {
+    throw new Error(
+      `GET blocks of ${artifactId} failed: ${response.status} ${await response.text()}`
+    );
+  }
+  const blocks = (await response.json()) as ArtifactBlock[];
+  const block = blocks.find((candidate) => markdown.slice(candidate.from, candidate.to) === text);
+  if (block === undefined) {
+    throw new Error(`no block of ${artifactId} reads ${JSON.stringify(text)}: ${markdown}`);
+  }
+  expect(block.id).toMatch(/^[A-Za-z0-9-]+$/);
+  return block.id;
 }
 
 /** Waits until the issue's spec block has been indexed into an open ask and returns it. */

@@ -1,52 +1,27 @@
 import { expect, type Locator, type Page, test } from "@playwright/test";
 
-import type { ArtifactBlock } from "../web/src/api/types";
 import {
-  baseUrl,
   createComment,
   createIssue,
   createIssueArtifact,
   createProject,
   editArtifact,
   getArtifact,
-  getArtifactText,
   getIssue,
-  userHeaders,
 } from "./api";
+import { blockId } from "./editor";
 import { resetDatabase } from "./seed";
 import { signIn } from "./users";
 
 // Every row seeds through the real API and reads the real server: a block's id comes from
-// `GET /api/v1/artifacts/<id>/blocks`, never from a guess. Each helper lives in this file, so a
-// run at the base, where none of this exists, copies this one file.
+// `GET /api/v1/artifacts/<id>/blocks`, never from a guess. Its helpers live in this file and in
+// `editor.ts`, so a run at the base, where none of this exists, copies those two files.
 
 test.beforeEach(async ({ context }) => {
   await resetDatabase();
   await signIn(context, "alice");
   await createProject({ key: "CORE", name: "Core" });
 });
-
-/** The id of the block of `artifactId` whose markdown is exactly `text`. A paragraph's id is a
- *  minted UUID, which `encodeBlockId` writes unchanged, so the id is also its `#b-` fragment. */
-async function blockId(artifactId: string, text: string): Promise<string> {
-  const { markdown } = await getArtifactText(artifactId);
-  const response = await fetch(
-    new URL(`/api/v1/artifacts/${encodeURIComponent(artifactId)}/blocks`, baseUrl),
-    { headers: await userHeaders() }
-  );
-  if (!response.ok) {
-    throw new Error(
-      `GET blocks of ${artifactId} failed: ${response.status} ${await response.text()}`
-    );
-  }
-  const blocks = (await response.json()) as ArtifactBlock[];
-  const block = blocks.find((candidate) => markdown.slice(candidate.from, candidate.to) === text);
-  if (block === undefined) {
-    throw new Error(`no block of ${artifactId} reads ${JSON.stringify(text)}: ${markdown}`);
-  }
-  expect(block.id).toMatch(/^[A-Za-z0-9-]+$/);
-  return block.id;
-}
 
 async function latestVersion(artifactId: string): Promise<number> {
   const artifact = await getArtifact(artifactId);

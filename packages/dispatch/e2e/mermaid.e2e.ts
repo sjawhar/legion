@@ -30,18 +30,15 @@ import {
   test,
 } from "@playwright/test";
 
-import type { ArtifactBlock } from "../web/src/api/types";
 import {
-  baseUrl,
   createAsk,
   createComment,
   createIssue,
   createMessage,
   createProject,
   getArtifactText,
-  userHeaders,
 } from "./api";
-import { documentEditor, markSpan, openSpec, placeCaret } from "./editor";
+import { blockId, documentEditor, markSpan, openSpec, placeCaret } from "./editor";
 import {
   expectHeldAndResponsive,
   failMermaidWorkersOnCall,
@@ -133,27 +130,29 @@ async function expectDrawnDiagram(card: Locator, labels: readonly string[]): Pro
   await expect(source).toBeVisible();
 }
 
-/** The id of the block of `artifactId` whose markdown is exactly `text`. A paragraph's id is a
- *  minted UUID, which `encodeBlockId` writes unchanged, so the id is also its `#b-` fragment.
- *  Copied from `block-references.e2e.ts`, whose helpers each live in their own file. */
-async function blockId(artifactId: string, text: string): Promise<string> {
-  const { markdown } = await getArtifactText(artifactId);
-  const response = await fetch(
-    new URL(`/api/v1/artifacts/${encodeURIComponent(artifactId)}/blocks`, baseUrl),
-    { headers: await userHeaders() }
-  );
-  if (!response.ok) {
-    throw new Error(
-      `GET blocks of ${artifactId} failed: ${response.status} ${await response.text()}`
-    );
-  }
-  const blocks = (await response.json()) as ArtifactBlock[];
-  const block = blocks.find((candidate) => markdown.slice(candidate.from, candidate.to) === text);
-  if (block === undefined) {
-    throw new Error(`no block of ${artifactId} reads ${JSON.stringify(text)}: ${markdown}`);
-  }
-  expect(block.id).toMatch(/^[A-Za-z0-9-]+$/);
-  return block.id;
+/** Starts recording `page`'s console errors and returns the check both rows whose renderer never
+ *  draws end with: `editor` shows `source` in a `pre code`, holds no diagram, hides the status
+ *  line, and the renderer said once that it is unavailable. Recording starts at this call, before
+ *  the page navigates, so an error logged on the first paint is counted. Both rows end alike
+ *  because a block whose worker cannot draw looks the same whether no worker ever loaded or one
+ *  failed after a drawing: its source as code, with no stale diagram left above it. */
+function watchSourceAsCode(page: Page): (editor: Locator, source: string) => Promise<void> {
+  const consoleErrors: string[] = [];
+  page.on("console", (message) => {
+    if (message.type() === "error") consoleErrors.push(message.text());
+  });
+  return async (editor, source) => {
+    await expect(editor.locator("pre code").filter({ hasText: source })).toBeVisible();
+    await expect(diagramIn(editor)).toHaveCount(0);
+    await expect(editor.locator(".proof-mermaid-status")).toBeHidden();
+    await expect
+      .poll(() =>
+        consoleErrors.filter((text) =>
+          text.includes("Showing Mermaid source as code, the diagram renderer is unavailable")
+        )
+      )
+      .toHaveLength(1);
+  };
 }
 
 /** A request that never happens can only be shown by waiting: this long after the diagram shows
@@ -957,23 +956,10 @@ test("with no worker a document's diagram shows its source @phone", async ({ bro
   const alice = await asUser(browser, "alice");
   try {
     const page = await alice.newPage();
-    const consoleErrors: string[] = [];
-    page.on("console", (message) => {
-      if (message.type() === "error") consoleErrors.push(message.text());
-    });
+    const expectSourceAsCode = watchSourceAsCode(page);
     await refuseWorkers(page);
     await openSpec(page, issue.key, "Workerless diagram:");
-    const editor = documentEditor(page);
-    await expect(editor.locator("pre code").filter({ hasText: "Start --> Finish" })).toBeVisible();
-    await expect(diagramIn(editor)).toHaveCount(0);
-    await expect(editor.locator(".proof-mermaid-status")).toBeHidden();
-    await expect
-      .poll(() =>
-        consoleErrors.filter((text) =>
-          text.includes("Showing Mermaid source as code, the diagram renderer is unavailable")
-        )
-      )
-      .toHaveLength(1);
+    await expectSourceAsCode(documentEditor(page), "Start --> Finish");
   } finally {
     await alice.close();
   }
@@ -994,10 +980,7 @@ test("a document diagram whose worker fails after its first drawing shows its so
   const alice = await asUser(browser, "alice");
   try {
     const page = await alice.newPage();
-    const consoleErrors: string[] = [];
-    page.on("console", (message) => {
-      if (message.type() === "error") consoleErrors.push(message.text());
-    });
+    const expectSourceAsCode = watchSourceAsCode(page);
     await failMermaidWorkersOnCall(page);
     await openSpec(page, issue.key, "Failing diagram:");
     const editor = documentEditor(page);
@@ -1007,18 +990,7 @@ test("a document diagram whose worker fails after its first drawing shows its so
 
     await placeCaret(page, "after", "Start --> Finish");
     await page.keyboard.type("Line");
-    await expect(diagram).toHaveCount(0);
-    await expect(
-      editor.locator("pre code").filter({ hasText: "Start --> FinishLine" })
-    ).toBeVisible();
-    await expect(editor.locator(".proof-mermaid-status")).toBeHidden();
-    await expect
-      .poll(() =>
-        consoleErrors.filter((text) =>
-          text.includes("Showing Mermaid source as code, the diagram renderer is unavailable")
-        )
-      )
-      .toHaveLength(1);
+    await expectSourceAsCode(editor, "Start --> FinishLine");
   } finally {
     await alice.close();
   }
