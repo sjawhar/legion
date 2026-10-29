@@ -2,7 +2,7 @@
   "schemaVersion": 1,
   "phase": "implement",
   "issue": "INFRA-606",
-  "completed": "2026-10-29T17:58:01Z",
+  "completed": "2026-10-29T20:30:35Z",
   "pullRequest": "https://github.com/sjawhar/legion/pull/2406",
   "proof": [
     {
@@ -180,6 +180,14 @@
       "observed": "Replayed KiB per run 122,839 (base) vs 3,647 (head); per stale reconnect 11,791 vs 0.43, each stale head resume replay_complete false then 6 refetch GETs (60 per run); mentioned comments answered in the window 3.4 vs 54.8 of 103, after the restart 0 vs 4-11 of 37; Dispatch CPU-s in the restart minute 21.50 (20.97-21.84) vs 18.59 (15.64-21.47); committed events/s 2.15 vs 2.47. dispatch://INFRA-606/artifact/infra606-criterion5-live-runs-tar-gz.",
       "headSha": "fd8e79810484c1e5391f6bdecc169094ecdd20e6",
       "negativeControl": "The base side: the same seed, flags and rng seed on main 7c2effba replays every stale socket's ~12,600 events and answers no mentioned comment in the minute after the restart."
+    },
+    {
+      "criterion": "The pull request breaks no repository test (tester round 10): main's keyed-send.e2e.ts cut-off guarantee holds with mentions sent after the answer, and a slow send after the answer is delivered once with no repeat.",
+      "surface": "Dispatch's browser suite: the real Go server built from the head on Postgres, the e2e fake Envoy listener, Chromium and the iphone project",
+      "command": "cd packages/dispatch && DATABASE_URL=<scratch postgres> bun run e2e -- e2e/keyed-send.e2e.ts -g comment --project chromium --project iphone --repeat-each 3",
+      "observed": "12 passed. Cut-off from an 18 s slow write: the page repeats under one key, gets the replayed 201, attempt 1 sent once. Slow send (4 s): the 201 carries the attempt pending, one POST, attempt 1 sent once.",
+      "headSha": "dc3ad918de2134557a4fb2542d214295255215d9",
+      "negativeControl": "The same tests against main 15be33d1's server (send inside the request): the slow-send test fails, Expected [\"pending\"], Received [\"sent\"]; the cut-off test passes on both."
     }
   ],
   "filesChanged": [
@@ -189,6 +197,7 @@
     "packages/dispatch/AGENTS.md",
     "packages/dispatch/e2e/activity.e2e.ts",
     "packages/dispatch/e2e/api.ts",
+    "packages/dispatch/e2e/keyed-send.e2e.ts",
     "packages/dispatch/web/src/features/activity/activity-model.test.ts",
     "packages/dispatch/web/src/features/activity/activity-model.ts",
     "packages/envoy/.changes/unreleased/pr2406-Added-20261028-113257.yaml",
@@ -305,7 +314,9 @@
     "Forward merges of main at a9f77e43 (f9c01e92, with #2449), e4bf08ee and fd8e7981 (7c2effba): #2449 removed the SSE stream, the agent SSE stream and /ws/delivery, so the bounded resume, relay generations and agent budget now ride /ws/live; main's delivery sweep replaces this PR's stranded pass, and the outbox's predicates are built from the sweep's owed-attempt rule; this PR's 0137 index is dropped (main's 0138 creates it) and the fallback table is migration 0141.",
     "The tester's red tests in comment_delivery_silent_listener_test.go changed only where they started the removed stranded pass (now one resumeOwedDeliveries pass) and the two claimLease substitutions the reviewer asked for; one test renamed from ...OrTheStrandedPassNotBoth to ...OrTheSweepNotBoth.",
     "Main's TestARepeatedSubReplacesAnotherKind fails 2-4 of 20 on main alone; its rig (live_socket_test.go) now stalls the page's writes itself, the test unchanged.",
-    "Main's tests that pinned the relay and hub running after their last subscriber (TestTheBackgroundWaitHoldsFor...) are rewritten to this PR's stop-at-zero behaviour; the delivery-sweep comment tests wait for the post-response send."
+    "Main's tests that pinned the relay and hub running after their last subscriber (TestTheBackgroundWaitHoldsFor...) are rewritten to this PR's stop-at-zero behaviour; the delivery-sweep comment tests wait for the post-response send.",
+    "Main's keyed-send.e2e.ts cut-off test changed (architect's ruling): its cut-off now comes from a slow write inside the request; a slow-send-after-the-answer case added.",
+    "Forward merge of main at ab986cd2: main's #2513 fixed TestARepeatedSubReplacesAnotherKind in its own rig, so this branch's rig change and pin test are dropped in favour of main's."
   ],
   "openQuestions": [],
   "discoveredComplexity": [
@@ -314,7 +325,7 @@
     "The NUL-refusal test raced the fixture mention's asynchronous send (a comment.delivery event landing between its table snapshots); it now waits for the send to settle.",
     "The pod was replaced mid-round and the unpushed first fix was lost; every verified fix is now pushed as it lands."
   ],
-  "round": 10,
-  "answersTest": "896d09b4b50d9e93f28e4d71afd74b648fee346e",
+  "round": 11,
+  "answersTest": "735b6cde36e432bdc4bd6290e57e7dd4b71f6e0e",
   "answersReview": "443aae3579981f75df76c95cc31294cf76f19468"
 }
