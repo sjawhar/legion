@@ -696,7 +696,7 @@ is fixed in code (`internal/dispatch/store/pool.go`), and a serving process open
 | Registry (`registryPoolSize`) | 1 | Held for the life of the process: the heartbeat that stamps its row in the registry of live server processes every 5 seconds (`processes.Register`). |
 | Listeners | 3 | Held for the life of the process: the delivery hub, the event stream relay and the stale-room evictor each LISTEN on a connection of their own. |
 
-Two processes at their ceiling hold 188, past a default Postgres's `max_connections` of 100, so
+Two processes at their ceiling hold 190, past a default Postgres's `max_connections` of 100, so
 size the database's limit for both, with whatever else uses that database counted in, before the
 second process starts.
 
