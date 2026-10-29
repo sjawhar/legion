@@ -2,7 +2,7 @@
   "schemaVersion": 1,
   "phase": "implement",
   "issue": "INFRA-228",
-  "completed": "2026-10-29T13:31:22Z",
+  "completed": "2026-10-29T13:51:46Z",
   "pullRequest": "https://github.com/sjawhar/legion/pull/2503",
   "proof": [
     {
@@ -49,9 +49,9 @@
       "criterion": "Plan section 4 row 6 / section 7: the tree names no private host, and the skills guard's refused phrases stay out of docs/kubernetes.md.",
       "surface": "the repository's own checks",
       "command": ".github/scripts/check-private-names.sh; cd packages/pi-legion && bun test src/skills-guard.test.ts",
-      "observed": "At c718788b (after the forward merge): check-private-names passed over 6224 files; skills guard 13 pass 0 fail.",
+      "observed": "At the round-3 head: check-private-names passes over the whole tree, this handoff included; skills guard 13 pass 0 fail (c718788b).",
       "headSha": "c718788b0868996730f1ce83feb88b5416d0e4ef",
-      "negativeControl": "A non-placeholder MagicDNS host (secrets.tailzz9999.ts.net) written into docs/solutions/_implementer228-control.md: check-private-names exit 1 with its remediation block ('for a Tailscale MagicDNS host write <tailnet>.ts.net …'). The scratch file was removed; jj diff --stat empty."
+      "negativeControl": "A MagicDNS host under a made-up tailnet name that is not the reserved placeholder, written into a scratch file docs/solutions/_implementer228-control.md: check-private-names exit 1 with its remediation block (for a Tailscale MagicDNS host write <tailnet>.ts.net or a host under example-tailnet.ts.net). The host is not quoted here, since the check refuses it in any tracked file. The scratch file was removed; jj diff --stat empty."
     },
     {
       "criterion": "Tester round 1 failure 1: the pull request merges with main and CI can run; tester citation finding: each cited name at the file that has it.",
@@ -79,8 +79,9 @@
     "Subsection 'The Dispatch identity the broker can issue' sits after the Operator configuration bullet list, before '#### Network shares', rather than directly after the agent_secrets bullet, so the list is not split by a heading.",
     "Plan section 4 row 4's expected statement was corrected as in trickyParts; the measured refusals are the plan's.",
     "The pane statement (a pane reads the daemon's bearer through DISPATCH_TOKEN_FILE) has no tmux run: the architect accepted it on its code citation (dispatch://INFRA-228/comment/f6faadf0, point 3), recorded in the PR body's 'Not proven / risk'.",
-    "Round 2 is the forward merge the tester asked for plus the architect's citation fixes, in one push."
+    "Round 2 is the forward merge the tester asked for plus the architect's citation fixes, in one push.",
+    "Round 3 removes the non-placeholder MagicDNS host that round 2's handoff quoted in proof row 6 (tester round 2 failure). The host was a made-up tailnet, not the deployment's (architect, 2026-10-29T13:51Z), so no history rewrite."
   ],
   "openQuestions": [],
-  "round": 2
+  "round": 3
 }
