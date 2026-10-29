@@ -40,7 +40,7 @@ import { remarkProofMarks, proofMarkHandler } from 'proof-sdk-upstream/src/forma
 import { dispatchMarkPlugins, remarkDispatchMarks, dispatchMarkHandler } from './dispatch-marks.js';
 import remarkInlineLinks from 'remark-inline-links';
 import { remarkSoftBreakAsLine, remarkSoftBreakAsSpace } from './dispatch-soft-breaks.js';
-import { remarkContainerDirectives } from './lib-remark-directive-plugin.js';
+import { remarkContainerDirectives, remarkStrictHtmlFlow } from './lib-remark-directive-plugin.js';
 import { remarkReadOnlyDirectives } from './read-only-directives.js';
 import { remarkUnfitTypedBlocks } from './typed-block-drawing.js';
 
@@ -155,6 +155,7 @@ export async function createHeadlessProof(options: HeadlessProofOptions = {}): P
       .use(remarkFrontmatter, ['yaml'])
       .use(remarkGfm)
       .use(remarkContainerDirectives)
+      .use(remarkStrictHtmlFlow)
       .use(remarkProofMarks)
       .use(remarkDispatchMarks)
       // Reference-style links and images (`[text][id]` with `[id]: url` elsewhere in the body)
@@ -198,6 +199,7 @@ export async function createHeadlessProof(options: HeadlessProofOptions = {}): P
     .use(remarkGfm)
     .use(remarkFrontmatter, ['yaml'])
     .use(remarkContainerDirectives)
+    .use(remarkStrictHtmlFlow)
     .use(remarkStringify, {
       handlers: {
         proofMark: proofMarkHandler,

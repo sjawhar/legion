@@ -56,7 +56,7 @@ import { proofMarkPlugins } from 'proof-sdk-upstream/src/editor/schema/proof-mar
 import { codeBlockExtPlugins } from 'proof-sdk-upstream/src/editor/schema/code-block-ext';
 import { frontmatterSchema } from 'proof-sdk-upstream/src/editor/schema/frontmatter';
 import { libraryRemarkFrontmatterPlugin } from './lib-remark-frontmatter-plugin';
-import { libraryRemarkDirectivePlugin, typedBlockRemarkPlugin } from './lib-remark-directive-plugin';
+import { libraryRemarkDirectivePlugin, libraryRemarkHtmlFlowPlugin, typedBlockRemarkPlugin } from './lib-remark-directive-plugin';
 import { unfitTypedBlocksRemarkPlugin } from './typed-block-drawing';
 import { remarkProofMarksPlugin } from 'proof-sdk-upstream/src/editor/schema/remark-proof-marks-plugin';
 import { proofMarkHandler } from 'proof-sdk-upstream/src/formats/remark-proof-marks';
@@ -298,6 +298,7 @@ export async function createProofEditor(
     // Frontmatter and typed directives register before their node schemas claim their AST nodes.
     .use(libraryRemarkFrontmatterPlugin)
     .use(libraryRemarkDirectivePlugin)
+    .use(libraryRemarkHtmlFlowPlugin)
     .use(opts.blockSchema ? typedBlockRemarkPlugin(opts.blockSchema) : [])
     .use(frontmatterSchema)
     // `use` flattens its argument twice, so an array of composed schemas — each of them a pair

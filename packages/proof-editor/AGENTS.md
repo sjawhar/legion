@@ -9,11 +9,12 @@ release, an npm publish and a pin bump.
 
 Two different commits of `sjawhar/proof-sdk` matter here, and they are not the same fact.
 
-The files in the table below, but for `src/directive-factories.ts`, were copied byte for byte out
-of **24a5fc94915cda5704897c497af6312c140db40d**, the fork's v0.3.13 — the last commit that still
-held them. The cut that followed deleted them from the fork, so that commit stays the audit
-source however far the fork line moves. `src/directive-factories.ts` comes from
-micromark-extension-directive 4.0.0 instead.
+The files in the table below, but for `src/directive-factories.ts` and `src/html-flow.ts`, were
+copied byte for byte out of **24a5fc94915cda5704897c497af6312c140db40d**, the fork's v0.3.13 —
+the last commit that still held them. The cut that followed deleted them from the fork, so that
+commit stays the audit source however far the fork line moves. `src/directive-factories.ts` comes
+from micromark-extension-directive 4.0.0 instead, and `src/html-flow.ts` from
+micromark-core-commonmark 2.0.3.
 
 The upstream modules this package imports at runtime come from the git dependency, pinned at
 **dc6a852b2ab45463dc9d3d17762235450c8ff0d6** on the fork's cleaned `library` line. Moving that
@@ -31,6 +32,7 @@ pin changes nothing in the table; it changes what `node_modules/proof-sdk-upstre
 | `src/lib.css` | The editor stylesheet |
 | `src/tests/*.test.ts` | The suites that came with those files |
 | `src/directive-factories.ts` | `factoryName`, `factoryLabel` and `factoryAttributes`, copied from micromark-extension-directive 4.0.0 (`lib/factory-name.js`, `lib/factory-label.js` and `lib/factory-attributes.js`), which does not export them: `src/directive-container.ts` tokenizes a `:::` opener's name, label and attributes with them. They are kept whole, the `disallowEol` branches for `false` that neither call takes included (INFRA-581) |
+| `src/html-flow.ts` | `htmlFlowStrict`, micromark's HTML (flow) construct, copied from micromark-core-commonmark 2.0.3 (`dev/lib/html-flow.js`), which exports its own but gives no way to change the one reading this package needs: `./lib-remark-directive-plugin` registers it under `<` with micromark's disabled by name. One line differs, and the paragraph below says which |
 
 Fourteen files under `src/` are legion's own rather than copies, so the file-by-file audit below does
 not reach them:
@@ -52,7 +54,7 @@ not reach them:
 | `src/directive-container.ts` | `directiveContainerSyntax`, the micromark extension `remarkContainerDirectives` registers for the `:::name[label]{attributes}` container: a micromark document construct, held on the document tokenizer's container stack as a block quote or a list item is, in place of micromark-extension-directive's flow construct, which tokenized a block's content once for each block around it, so a body nesting `:::` a few thousand deep froze a reader's tab for about a minute (INFRA-581). It emits that package's token types, so `mdast-util-directive` builds the same `containerDirective` nodes from them; its `resolveAll` (`resolveDirectiveContainers`) and the `lazyContentEnd` construct keep the flow construct's reading of blank lines, lazy lines and the line endings after fences; and an opener standing inside `maxDirectiveNesting` (32) open directive containers does not open, so its line reads as the text it is. It reads an opener's name, label and attributes with the copied factories in `src/directive-factories.ts`; it is also biome-checked |
 | `src/tests/harness.ts` | The `bun test` registration the copied suites call instead of their own `test()` tally |
 
-Twenty-one kinds of edit are allowed in the copied files, and no others: the import specifiers of
+Twenty-two kinds of edit are allowed in the copied files, and no others: the import specifiers of
 upstream modules; `bun test` registration in the suites (`src/tests/harness.ts` replaces each
 file's own `test()` tally and its `process.exit` tail); `src/tests/headless-no-dom.test.ts`,
 whose entry named the fork's built `dist/headless.js` and now names `../lib-headless.js` — its
@@ -106,16 +108,24 @@ each paragraph and `unsupportedDirectiveReason` takes that count (INFRA-581);
 `src/directive-factories.ts` joining micromark-extension-directive 4.0.0's `lib/factory-name.js`,
 `lib/factory-label.js` and `lib/factory-attributes.js` into one module, in that order, each after
 a comment naming its file, under the package's MIT notice, with the three files' imports one block
-at the top and each JSDoc `@import` an `import type` (INFRA-581); and annotations, casts and
-assertions that make a file type-check, each of which erases before runtime (below).
+at the top and each JSDoc `@import` an `import type` (INFRA-581);
+`src/lib-remark-directive-plugin.ts`'s `strictHtmlFlowSyntax`, `remarkStrictHtmlFlow` and
+`libraryRemarkHtmlFlowPlugin`, which register `htmlFlowStrict` from `./html-flow` under `<` and
+disable micromark's `htmlFlow` by name, with `src/lib-headless.ts` installing that plugin on its
+parse processor and its serialize processor and `src/lib.ts` on the editor's; and annotations,
+casts and assertions that make a file type-check, each of which erases before runtime (below).
 
 To audit a copied file, diff it against `jj --ignore-working-copy -R <proof-sdk> file show -r
 24a5fc94 root:src/<file>`; every file in the copied-files table but `src/directive-factories.ts`
-has that counterpart, and the only lines that differ should be the twenty-one kinds.
+and `src/html-flow.ts` has that counterpart, and the only lines that differ should be the
+twenty-two kinds.
 `src/directive-factories.ts`'s counterparts are those three files of micromark-extension-directive
 4.0.0 (`node_modules/.bun/micromark-extension-directive@4.0.0` at the repository root, or the
 package's npm tarball); each function there differs from its source by the join and the type
-annotations and casts alone.
+annotations and casts alone. `src/html-flow.ts`'s counterpart is
+`node_modules/.bun/micromark-core-commonmark@2.0.3/node_modules/micromark-core-commonmark/dev/lib/html-flow.js`,
+and it differs from it by the construct's name, the one line its notice quotes, the import of
+`blankLine` from the package rather than a copy of it, and the type annotations alone.
 
 `scripts/`, `tests/` and `upstream/` are legion's own. `scripts/` and `tests/` are linted and
 type-checked like any other package's; `upstream/` is generated, and Biome is off over it the
@@ -128,14 +138,27 @@ boundary is `any` again.
 The copied files are proof-sdk's and stay under its MIT license, as does `upstream/`, which tsc
 derives from proof-sdk's pinned sources; `LICENSE` beside this file is that license, taken from the
 fork at 24a5fc94. `src/directive-factories.ts` is micromark-extension-directive's instead and
-stays under that package's MIT license, whose notice the file carries at its top. Legion's own
-files listed above, `scripts/` and `tests/` are under the repository's Apache-2.0 license.
+`src/html-flow.ts` micromark-core-commonmark's, and each stays under that package's MIT license,
+whose notice the file carries at its top. Legion's own files listed above, `scripts/` and
+`tests/` are under the repository's Apache-2.0 license.
 
 `src/directive-container.ts` relies on two parts of micromark's document tokenizer: a container
 state's `_closeFlow`, which a closing fence sets to end the flow inside the block, and a
 construct's `resolveAll`, which runs over the document's events once it is tokenized. micromark,
 which reaches this package through `mdast-util-from-markdown`, stays at 4.0.2 in `bun.lock`: a
 move must keep both working, and 4.0.3 is quadratic for quotes and lists (micromark/micromark#246).
+
+`src/html-flow.ts` is micromark's HTML (flow) construct with one line changed, in `tagName`,
+where a block of one complete tag (an HTML block of kind 7) is found: upstream returns
+`self.interrupt && !self.parser.lazy[self.now().line]`, the copy returns `self.interrupt`, so
+such a block never opens while interrupting a paragraph, on a lazy line as on any other.
+CommonMark forbids a type-7 block from interrupting a paragraph at all and goldmark, which the
+Dispatch server reads documents with, obeys that: the server reads `> a` then `<b>` as one quoted
+paragraph of `a ` and the inline HTML. Here the block opened, exiting the containers behind the
+lazy line, and milkdown, which has no node for a block of HTML there, dropped the block with its
+container and the container's text, so a reader of that comment saw neither the quote nor the
+word `a`. Every other kind of HTML block reads as micromark reads it, a kind-7 block that opens a
+paragraph of its own included; `tests/html-flow.test.ts` holds both halves.
 
 ## The upstream boundary
 
