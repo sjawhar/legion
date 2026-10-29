@@ -185,26 +185,82 @@
 #            rev-parse --show-toplevel`) are replaced by the tar's content, so
 #            a file the tar lacks is deleted; a failed extraction is an
 #            ::error::. The rebuild's build job runs it to compare the build
-#            with the files main tracks, and envoy-and-contracts.yaml's
-#            claude-envoy job to pack the build, each in its own disposable
-#            checkout; push-built does the same before it commits. Nothing a
-#            person runs locally writes the two directories.
+#            with the files main tracks, and ci.yaml's claude-envoy job to
+#            pack the build, each in its own disposable checkout; push-built
+#            does the same before it commits. Nothing a person runs locally
+#            writes the two directories.
 # push-built: land a build of the Claude Envoy plugin on main, for
 #            claude-envoy-rebuild.yaml's push job. <tar> is what its build
 #            job built from <base-sha>, main's tip when that job started: the
-#            package's dist/ and legion/. HEAD must be <base-sha>, 40
-#            lower-case hex, and the work tree clean. The tar is then put into
-#            the checkout as extract-built puts it, and only the two
-#            directories are staged. A build main's files already match
-#            stages nothing: a ::notice says so and nothing is pushed.
-#            Otherwise github-actions[bot], as `tag`
-#            commits, commits them as `chore(claude-envoy): rebuild dist/ and
-#            legion/ from <the base's first 12 hex> [skip ci]`: GitHub's skip
-#            keyword, so the commit starts no CI or release run (the build job
-#            ran the private-name check over the bundle already). The commit
-#            lands by land_on_main (below, under push-fold), which never
-#            rebases: a build is of main's tip, so when main moved since the
-#            build, a new run builds the new tip, and is the retry.
+#            package's dist/ and legion/. Every repository path push-built
+#            reads is the root's, so it moves to the repository's root (`git
+#            rev-parse --show-toplevel`) first, with <tar> made absolute
+#            before the move, since that path is the caller's: a run from a
+#            subdirectory of the checkout lands the same commit. HEAD must be
+#            <base-sha>, 40 lower-case hex, and the work tree clean, which is
+#            read from the root too. The tar is then checked as check-built
+#            checks it, before anything reaches GitHub, so a tar that fails a
+#            check is refused however main stands. Each of these refusals is
+#            an ::error:: and exit 1 that pushes nothing and starts no run.
+#            push-built then fetches main once with the deploy
+#            key (deploy_key_env, as push-tag does). The push job waits for a
+#            runner after the build job, often longer than main goes between
+#            merges, so main has usually moved past the base by then. The
+#            build lands on main's tip all the same, unless one of two rules
+#            stops it. When main's tip does not descend from the base, main
+#            was rewritten: nothing is pushed, a fresh run of the workflow on
+#            main (`gh workflow run`, with $GH_TOKEN) builds the new tip, and
+#            a ::notice names both commits. When main already holds a newer
+#            build, nothing is pushed, no run is started, and a ::notice says
+#            so. Main's build is the newest commit on the tip's first-parent
+#            line that touches the two directories. When github-actions[bot]
+#            authored it with exactly the subject below, and the 12 hex in that
+#            subject name a commit that is its ancestor, it is a build of that
+#            commit. Otherwise (a pull request's own committed build, or a
+#            subject a person wrote) it is a build of at most the commit
+#            itself. This build is the newer one when that commit is the base
+#            or an ancestor of it, and when main holds no such commit at all.
+#
+#            The build is then put into the checkout as extract-built puts it,
+#            and the two directories are written over the tip's tree in a
+#            temporary index. The tip is never checked out: it may carry
+#            another release-push.sh, and a checkout would rewrite this script
+#            while bash runs it. A build the tip's files already match stages
+#            nothing: a ::notice says so and nothing is pushed. Otherwise
+#            github-actions[bot], as `tag` commits, commits the tree on the tip
+#            as `chore(claude-envoy): rebuild dist/ and legion/ from <the
+#            base's first 12 hex> [skip ci]`. The subject names the base, the
+#            commit the build was made from, which the newer rule above reads;
+#            GitHub's skip keyword means the commit starts no CI or release
+#            run (the build job ran the private-name check over the bundle
+#            already). When main had moved, a ::notice titled "Landing on
+#            main's tip" names the base, the tip and the commit, which changes
+#            only the two directories. The commit lands by land_on_main
+#            (below, under push-fold) on the tip push-built fetched.
+#
+#            A build of the base landed on a newer tip leaves main's build one
+#            run behind its inputs when a build input changed between the two.
+#            The inputs are the git pathspecs in
+#            packages/claude-envoy/scripts/build-inputs.txt, one per line (an
+#            empty line or one starting # is ignored), read from the base with
+#            git and compared between the base and the tip with `git diff
+#            --no-renames`, so a renamed file counts by its old path and its
+#            new one alike. A base without the list, or with no pathspec line
+#            in it, counts as changed, with a ::warning naming the file. When
+#            an input changed, a fresh run of the workflow on main is started
+#            once the build has landed, or when the tip's files already match
+#            the build, and a ::notice names the first changed paths and the
+#            run gh printed. A failed fresh run is an ::error:: and exit 1 that
+#            names the command a person runs; after a landing, it says the
+#            build already landed.
+#
+#            Main can move again between push-built's fetch and the push.
+#            land_on_main fetches main again and pushes only when main's tip is
+#            still the tip push-built built on, never forced, so nothing lands
+#            on a tip push-built did not check. Otherwise land_on_main starts
+#            the one fresh run itself, and push-built starts no second one,
+#            whether or not an input changed. There is no retry loop: the fresh
+#            run is the retry.
 # handed:    check what a build job handed a publish job before the publish job
 #            acts on it, and print the release tag, <tag-prefix><version>. The
 #            version is the build job's output, so it must be X.Y.Z, each field
@@ -318,21 +374,27 @@
 #            moved since the build, a new run folds the new tip, fragments and
 #            all, and is the retry.
 #
-#            push-fold and push-built each end with land_on_main <base-sha>
-#            <workflow-file>, so each exits 0 whenever land_on_main returns.
-#            land_on_main never forces and never rebases. It refuses a HEAD
-#            that is not exactly one commit whose one parent is <base-sha>,
-#            which refuses any <base-sha> but that parent's full sha (each
-#            caller has refused one that is not 40 lower-case hex already),
-#            then fetches main with the deploy key (deploy_key_env, as
-#            push-tag does). When main's tip is <base-sha> it pushes HEAD
-#            there. When main's tip is another commit, before the push or after
-#            a rejected push, it pushes nothing: it starts a fresh run of
-#            <workflow-file> on main (`gh workflow run`, with $GH_TOKEN), which
-#            builds main's tip, and a ::notice names both commits. In both
-#            cases it returns 0. A failed fetch, a push rejected while main's
-#            tip is still <base-sha>, or a failed `gh workflow run` is an
-#            ::error:: and exit 1.
+#            push-fold and push-built each end with land_on_main <onto-sha>
+#            <workflow-file>, so each exits 0 whenever land_on_main returns
+#            (push-built unless the fresh run it then starts for a changed
+#            build input fails). push-fold passes its base, the commit its
+#            build job built; push-built passes main's tip as its own fetch saw
+#            it, which is the base when main has not moved. land_on_main never
+#            forces and never rebases. It refuses a HEAD that is not exactly
+#            one commit whose one parent is <onto-sha>, which refuses any
+#            <onto-sha> but that parent's full sha (each caller has refused a
+#            base that is not 40 lower-case hex already), then fetches main
+#            again with the deploy key (deploy_key_env, as push-tag does). When
+#            main's tip is <onto-sha> it pushes HEAD there. When main's tip is
+#            another commit, before the push or after a rejected push, it
+#            pushes nothing: it starts a fresh run of <workflow-file> on main
+#            (`gh workflow run`, with $GH_TOKEN), which builds main's tip, and
+#            a ::notice names both commits. In both cases it returns 0, and
+#            leaves which it did in $landed (pushed or restarted), so
+#            push-built starts no second run after land_on_main started one. A
+#            failed fetch, a push rejected while main's tip is still
+#            <onto-sha>, or a failed `gh workflow run` is an ::error:: and exit
+#            1.
 set -euo pipefail
 
 command=${1:?usage: release-push.sh version <tag-prefix> [--package-dir <dir>] [--first-npm <npm package>] [--expect <X.Y.Z>] [--patch-path <path>]... -- <paths>... | release-push.sh restart <workflow-file> <lost-races> | release-push.sh tag <package-dir> <commit-message> <tag> | release-push.sh tagged <tag-prefix> [<package-dir>] | release-push.sh release [--notes <text>] [--upload-to-published] <tag> <title> <asset>... | release-push.sh push-main <package-dir> <version> | release-push.sh push-tag <tag> | release-push.sh check-built <tar> | release-push.sh extract-built <tar> | release-push.sh push-built <base-sha> <tar> | release-push.sh handed <tag-prefix> <version> <dir> <file>... | release-push.sh fold-plan <spec>... | release-push.sh fold-notes <notes-dir> <spec>... | release-push.sh push-fold <base-sha> <notes-dir> <spec>... | release-push.sh no-credential}
@@ -341,6 +403,10 @@ command=${1:?usage: release-push.sh version <tag-prefix> [--package-dir <dir>] [
 # push-fold's fold and push-built's rebuild: GitHub Actions' own bot.
 bot_name='github-actions[bot]'
 bot_email='41898282+github-actions[bot]@users.noreply.github.com'
+
+# The git pathspecs of every file that can change the Claude Envoy plugin's
+# build, one per line, which push-built reads from the build's base with git.
+build_inputs=packages/claude-envoy/scripts/build-inputs.txt
 
 # is_plain_version <value>: true when <value> is X.Y.Z, each field a number
 # without leading zeros (release-bump.sh does arithmetic on the fields, where a
@@ -373,6 +439,18 @@ fail_error() {
   exit 1
 }
 
+# on_exit_remove <dir>: remove <dir> when the script exits, together with every
+# other directory given here, under the one EXIT trap they share (push-built
+# makes the key directory and a temporary index's directory).
+exit_removes=()
+on_exit_remove() {
+  exit_removes+=("$1")
+  trap 'rm -rf "${exit_removes[@]}"' EXIT
+}
+
+# deploy_key_env's directory, empty until it made one.
+ssh_dir=''
+
 # deploy_key_env [<fail>]: make this process's git reach GitHub over SSH with
 # the deploy key in $DEPLOY_KEY (the header's push-tag paragraph): the key and
 # GitHub's host keys go into a directory only the runner's user can read,
@@ -380,13 +458,15 @@ fail_error() {
 # else, and $remote is the repository's SSH URL on GitHub. Before anything is
 # made, an unset or empty $DEPLOY_KEY or $GITHUB_REPOSITORY goes to <fail>
 # (fail_error unless given; push-main gives fail_outstanding) as one message
-# naming it.
+# naming it. A second call returns at once: push-built calls it before its own
+# fetch and land_on_main again, and the first call's directory serves both.
 deploy_key_env() {
   local fail=${1:-fail_error} key known_hosts
+  [ -z "$ssh_dir" ] || return 0
   [ -n "${DEPLOY_KEY:-}" ] || "$fail" "DEPLOY_KEY holds the deploy key to reach GitHub with; it is unset or empty."
   [ -n "${GITHUB_REPOSITORY:-}" ] || "$fail" "GITHUB_REPOSITORY names the repository on GitHub; it is unset or empty."
   ssh_dir=$(mktemp -d)
-  trap 'rm -rf "$ssh_dir"' EXIT
+  on_exit_remove "$ssh_dir"
   (
     umask 077
     printf '%s\n' "$DEPLOY_KEY" > "$ssh_dir/key"
@@ -396,6 +476,28 @@ deploy_key_env() {
   printf -v known_hosts '%q' "$ssh_dir/known_hosts"
   export GIT_SSH_COMMAND="ssh -F /dev/null -i $key -o IdentitiesOnly=yes -o BatchMode=yes -o UserKnownHostsFile=$known_hosts -o GlobalKnownHostsFile=/dev/null -o StrictHostKeyChecking=yes"
   remote="git@github.com:$GITHUB_REPOSITORY.git"
+}
+
+# is_ancestor <a> <b>: true when commit <a> is <b> or an ancestor of it. A
+# failure of git itself, not an answer, is an ::error:: and exit 1.
+is_ancestor() {
+  local status=0
+  git merge-base --is-ancestor "$1" "$2" || status=$?
+  [ "$status" -le 1 ] || fail_error "checking whether $1 is an ancestor of $2 failed"
+  return "$status"
+}
+
+# fresh_run <workflow-file> <why> <title> <lead>: start a run of <workflow-file>
+# on main (`gh workflow run`, with $GH_TOKEN), then give a ::notice titled
+# <title>: <lead>, then the run's URL gh printed, or "the newest run of
+# <workflow-file>" on an older gh that prints none (restart's note). A failed
+# start is an ::error:: and exit 1 that says <why> and names the command a
+# person runs instead.
+fresh_run() {
+  local workflow=$1 why=$2 title=$3 lead=$4 started
+  started=$(gh workflow run "$workflow" --repo "$GITHUB_REPOSITORY" --ref main) ||
+    fail_error "$why, and starting a fresh run of $workflow on main failed; start one by hand: gh workflow run $workflow --repo $GITHUB_REPOSITORY --ref main"
+  echo "::notice title=$title::$lead a fresh run of $workflow on main, ${started:-the newest run of $workflow}, builds main's tip" >&2
 }
 
 # pushed_tag <tag-prefix> [<package-dir>]: print the release tag an earlier
@@ -514,6 +616,97 @@ extract_built() {
   # The tar is the whole of both directories: a file it lacks is deleted.
   rm -rf packages/claude-envoy/dist packages/claude-envoy/legion
   tar -xf "$tar_file" -C packages/claude-envoy --no-same-owner || fail_error "extracting $shown_tar into packages/claude-envoy failed"
+}
+
+# commit_build_on <tip> <base>: commit the build extract_built just wrote over
+# <tip>'s tree, as github-actions[bot] with the subject naming <base>, the
+# commit the build was made from, and move HEAD to it, leaving the commit in
+# $commit, or $commit empty when <tip>'s files already match the build, where
+# nothing is committed (the out-parameter build_inputs_changed sets inputs_why
+# by). The commit is not printed, because `commit=$(commit_build_on ...)` would
+# run it in a subshell, whose EXIT trap removes every on_exit_remove directory,
+# the deploy key's among them, before land_on_main pushes. The command runs
+# from the repository's root, where extract_built left it.
+commit_build_on() {
+  local tip=$1 base=$2 index_dir tree tip_tree
+  commit=''
+  # The two directories are written over the tip's tree in an index of its
+  # own, and the tip is never checked out: it may carry another
+  # release-push.sh, and a checkout would rewrite this script while bash runs
+  # it. Only the two directories can change: the index starts as the tip's
+  # tree, and `git add` is limited to them.
+  index_dir=$(mktemp -d) || fail_error "making a directory for a temporary index failed"
+  on_exit_remove "$index_dir"
+  GIT_INDEX_FILE="$index_dir/index" git read-tree "$tip" || fail_error "reading $tip's tree into a temporary index failed"
+  GIT_INDEX_FILE="$index_dir/index" git add -A -- packages/claude-envoy/dist packages/claude-envoy/legion ||
+    fail_error "staging packages/claude-envoy/dist and packages/claude-envoy/legion over $tip's tree failed"
+  tree=$(GIT_INDEX_FILE="$index_dir/index" git write-tree) || fail_error "writing the build's tree failed"
+  rm -rf "$index_dir"
+  tip_tree=$(git rev-parse "$tip^{tree}") || fail_error "reading $tip's tree failed"
+  [ "$tree" != "$tip_tree" ] || return 0
+  # The identity `tag` commits as, set for author and committer alike in the
+  # environment, which wins over any GIT_AUTHOR_* or GIT_COMMITTER_* already
+  # set. The subject names the base, the commit the build was made from, which
+  # main_build_base reads back.
+  commit=$(GIT_AUTHOR_NAME=$bot_name GIT_AUTHOR_EMAIL=$bot_email GIT_COMMITTER_NAME=$bot_name GIT_COMMITTER_EMAIL=$bot_email \
+    git commit-tree --no-gpg-sign -p "$tip" -m "chore(claude-envoy): rebuild dist/ and legion/ from ${base:0:12} [skip ci]" "$tree") ||
+    fail_error "committing the build on $tip failed"
+  git update-ref --no-deref HEAD "$commit" || fail_error "moving HEAD to $commit failed"
+}
+
+# main_build_base <tip>: print the commit main's committed build at <tip> was
+# made from, or nothing when main holds no build (the header's push-built
+# paragraph). Main's build is the newest commit on <tip>'s first-parent line
+# that touches packages/claude-envoy/dist or packages/claude-envoy/legion. When
+# github-actions[bot] authored it with exactly push-built's subject, and the 12
+# hex there name a commit that is its ancestor, that commit is printed;
+# otherwise (a pull request's own committed build, or a subject a person wrote)
+# the commit itself, as a build of at most that commit.
+main_build_base() {
+  local tip=$1 built author subject named
+  local rebuild_re='^chore\(claude-envoy\): rebuild dist/ and legion/ from ([0-9a-f]{12}) \[skip ci\]$'
+  built=$(git log -1 --first-parent --format=%H "$tip" -- packages/claude-envoy/dist packages/claude-envoy/legion) ||
+    fail_error "finding the newest commit on main that touches packages/claude-envoy/dist or packages/claude-envoy/legion failed"
+  [ -n "$built" ] || return 0
+  author=$(git log -1 --format=%ae "$built") || fail_error "reading the author of $built failed"
+  subject=$(git log -1 --format=%s "$built") || fail_error "reading the subject of $built failed"
+  if [ "$author" = "$bot_email" ] && [[ $subject =~ $rebuild_re ]] &&
+    named=$(git rev-parse --verify --quiet "${BASH_REMATCH[1]}^{commit}") &&
+    is_ancestor "$named" "$built"; then
+    echo "$named"
+  else
+    echo "$built"
+  fi
+}
+
+# build_inputs_changed <base> <tip>: set inputs_why to why a build input changed
+# between <base> and <tip>, naming the first changed paths, or to nothing when
+# none did (the header's push-built paragraph). The pathspecs are $build_inputs
+# as <base> holds it, read with git; a <base> without that file, or with no
+# pathspec line in it, counts as changed, with a ::warning naming it.
+build_inputs_changed() {
+  local base=$1 tip=$2 list_text line
+  local -a pathspecs=() changed=()
+  inputs_why=''
+  if git cat-file -e "$base:$build_inputs" 2>/dev/null; then
+    list_text=$(git show "$base:$build_inputs") || fail_error "reading $build_inputs at $base failed"
+    while IFS= read -r line; do
+      [ -z "$line" ] || [[ $line == '#'* ]] || pathspecs+=("$line")
+    done <<<"$list_text"
+  fi
+  if [ ${#pathspecs[@]} -eq 0 ]; then
+    inputs_why="$base holds no pathspec in $build_inputs, the list of the build's inputs, so every change since it counts as a build input"
+    echo "::warning title=No build input list::$inputs_why" >&2
+    return 0
+  fi
+  # --no-renames: a renamed file is listed by its old path and its new one, as
+  # a deletion and an addition, whatever git's rename configuration says.
+  mapfile -d '' -t changed < <(git diff -z --no-renames --name-only "$base" "$tip" -- "${pathspecs[@]}")
+  wait "$!" || fail_error "comparing the build inputs ($build_inputs) between $base and $tip failed"
+  if [ ${#changed[@]} -gt 0 ]; then
+    inputs_why="build inputs changed between $base and $tip: $(quote_all "${changed[@]:0:3}")"
+    [ ${#changed[@]} -le 3 ] || inputs_why+=" and $((${#changed[@]} - 3)) more"
+  fi
 }
 
 # version_gt <a> <b>: true when version <a> is higher than <b> (`sort -V`).
@@ -747,42 +940,43 @@ insert_block() {
   rm "$changelog.fold"
 }
 
-# land_on_main <base-sha> <workflow-file>: land HEAD, exactly one commit whose
-# one parent is <base-sha>, on main with the deploy key when main's tip is still
-# <base-sha>, and otherwise push nothing and start a fresh run of
+# land_on_main <onto-sha> <workflow-file>: land HEAD, exactly one commit whose
+# one parent is <onto-sha>, on main with the deploy key when main's tip is still
+# <onto-sha>, and otherwise push nothing and start a fresh run of
 # <workflow-file> on main (the header's land_on_main paragraph, under
 # push-fold). push-fold and push-built end with it. Never forces, never
-# rebases. Returns 0 when it pushed or started a run; every other outcome is an
-# ::error:: and exit 1.
+# rebases. Returns 0 when it pushed or started a run, leaving which in $landed
+# (pushed or restarted); every other outcome is an ::error:: and exit 1.
 land_on_main() {
-  local base=$1 workflow=$2 shas head parents tip started
-  # HEAD's sha, then its parents, space-separated: exactly one, the base.
+  local onto=$1 workflow=$2 shas head parents tip why
+  landed=''
+  # HEAD's sha, then its parents, space-separated: exactly one, onto.
   shas=$(git rev-list --parents -n 1 HEAD) || fail_error "reading HEAD failed"
   head=${shas%% *}
   parents=${shas#"$head"}
   parents=${parents# }
-  if [ "$parents" != "$base" ]; then
-    fail_error "HEAD $head has the parents '$parents', not exactly the one parent $base; only one commit on the commit it was built from lands on main"
+  if [ "$parents" != "$onto" ]; then
+    fail_error "HEAD $head has the parents '$parents', not exactly the one parent $onto; only one commit made on $onto lands on main"
   fi
   deploy_key_env
   git fetch "$remote" main || fail_error "fetching main failed"
   tip=$(git rev-parse FETCH_HEAD) || fail_error "reading main's fetched tip failed"
-  if [ "$tip" = "$base" ]; then
+  if [ "$tip" = "$onto" ]; then
     if git push "$remote" HEAD:refs/heads/main; then
+      landed=pushed
       return 0
     fi
     git fetch "$remote" main || fail_error "the push to main was rejected, and fetching main again failed"
     tip=$(git rev-parse FETCH_HEAD) || fail_error "reading main's fetched tip failed"
-    if [ "$tip" = "$base" ]; then
-      fail_error "the push of $head to main was rejected while main's tip is still $base, the commit it was built on, so no newer commit beat it; the push itself failed"
+    if [ "$tip" = "$onto" ]; then
+      fail_error "the push of $head to main was rejected while main's tip is still $onto, the commit $head was made on, so no newer commit beat it; the push itself failed"
     fi
   fi
-  # main moved past the base: what HEAD holds was made from an older main, so a
-  # fresh run builds main's tip instead. gh prints the new run's URL (restart's
-  # note), or nothing on an older gh.
-  started=$(gh workflow run "$workflow" --repo "$GITHUB_REPOSITORY" --ref main) ||
-    fail_error "main moved from $base to $tip, and starting a fresh run of $workflow on main failed; start one by hand: gh workflow run $workflow --repo $GITHUB_REPOSITORY --ref main"
-  echo "::notice title=Nothing pushed; a fresh run started::main moved from $base, the commit this run built from, to $tip, so $head was not pushed; a fresh run of $workflow on main, ${started:-the newest run of $workflow}, builds main's tip" >&2
+  # main moved past onto: what HEAD holds was made on an older main, so a fresh
+  # run works from main's tip instead.
+  why="main moved from $onto, the commit $head was made on, to $tip"
+  fresh_run "$workflow" "$why" "Nothing pushed; a fresh run started" "$why, so $head was not pushed;"
+  landed=restarted
 }
 
 case "$command" in
@@ -1166,6 +1360,16 @@ case "$command" in
     if ! is_commit_sha "$base"; then
       fail_error "the base commit $(quote_all "$base") is not 40 lower-case hex; refusing it"
     fi
+    # Everything below is read from the repository's root: the work tree's
+    # status, the build input list, main's build and the two directories. The
+    # job runs this from the checkout's root, but a run from a subdirectory
+    # must land the same commit, where a pathspec read from there would find
+    # nothing. extract_built moves to the root as well, and main_build_base
+    # and build_inputs_changed run before it. <tar> is the caller's path, so
+    # it is made absolute before the move, as extract_built does with its own.
+    case $tar_file in /*) ;; *) tar_file=$PWD/$tar_file ;; esac
+    root=$(git rev-parse --show-toplevel) || fail_error "finding the repository's root failed"
+    cd "$root"
     head=$(git rev-parse HEAD) || fail_error "reading HEAD failed"
     if [ "$head" != "$base" ]; then
       fail_error "HEAD is $head, not $base, the commit the build was made from"
@@ -1174,20 +1378,47 @@ case "$command" in
     if [ -n "$dirty" ]; then
       fail_error "the work tree is not clean (${dirty//$'\n'/; }); the commit holds the build and nothing else"
     fi
-    extract_built "$tar_file"
-    # Only the two directories can be staged: the tree was clean above, and
-    # `git add` is limited to them.
-    git add -A -- packages/claude-envoy/dist packages/claude-envoy/legion
-    staged=$(git diff --cached --name-only) || fail_error "reading the staged paths failed"
-    if [ -z "$staged" ]; then
-      echo "::notice title=Nothing to push::main's packages/claude-envoy/dist and packages/claude-envoy/legion at $base already match this build" >&2
+    # The tar is checked before anything reaches GitHub, so a doctored build is
+    # refused however main stands (extract_built checks it again below).
+    check_built "$tar_file"
+    workflow=claude-envoy-rebuild.yaml
+    deploy_key_env
+    git fetch "$remote" main || fail_error "fetching main failed"
+    tip=$(git rev-parse FETCH_HEAD) || fail_error "reading main's fetched tip failed"
+    if ! is_ancestor "$base" "$tip"; then
+      why="main's tip $tip does not descend from $base, the commit the build was made from, so main was rewritten"
+      fresh_run "$workflow" "$why" "Nothing pushed; a fresh run started" "$why; nothing was pushed, and"
       exit 0
     fi
-    # The identity `tag` commits as, set for author and committer alike in the
-    # environment, which wins over any GIT_AUTHOR_* or GIT_COMMITTER_* already set.
-    GIT_AUTHOR_NAME=$bot_name GIT_AUTHOR_EMAIL=$bot_email GIT_COMMITTER_NAME=$bot_name GIT_COMMITTER_EMAIL=$bot_email \
-      git commit -q -m "chore(claude-envoy): rebuild dist/ and legion/ from ${base:0:12} [skip ci]"
-    land_on_main "$base" claude-envoy-rebuild.yaml
+    built_base=$(main_build_base "$tip") || exit 1
+    if [ -n "$built_base" ] && ! is_ancestor "$built_base" "$base"; then
+      echo "::notice title=Nothing pushed; main holds a newer build::main already holds a build of $built_base, newer than $base, the commit this build was made from, so nothing was pushed and no run was started" >&2
+      exit 0
+    fi
+    inputs_why=''
+    if [ "$tip" != "$base" ]; then
+      build_inputs_changed "$base" "$tip"
+    fi
+    extract_built "$tar_file"
+    commit_build_on "$tip" "$base"
+    if [ -z "$commit" ]; then
+      echo "::notice title=Nothing to push::main's packages/claude-envoy/dist and packages/claude-envoy/legion at $tip already match this build" >&2
+      if [ -n "$inputs_why" ]; then
+        fresh_run "$workflow" "$inputs_why" "A fresh run started" "$inputs_why, so"
+      fi
+      exit 0
+    fi
+    if [ "$tip" != "$base" ]; then
+      echo "::notice title=Landing on main's tip::built from $base, landing on $tip, main's tip, as $commit, which changes only packages/claude-envoy/dist and packages/claude-envoy/legion: main moved since the build started" >&2
+    fi
+    # land_on_main fetches main again and pushes only when main's tip is still
+    # the tip the commit was made on; when main moved again since the fetch
+    # above, it starts the one fresh run itself.
+    land_on_main "$tip" "$workflow"
+    if [ "$landed" = pushed ] && [ -n "$inputs_why" ]; then
+      why="the build already landed on main as $commit, but $inputs_why, so main's build is one run behind its inputs"
+      fresh_run "$workflow" "$why" "A fresh run started" "the build landed on main as $commit, but $inputs_why, so"
+    fi
     ;;
   handed)
     if [ $# -lt 5 ]; then
