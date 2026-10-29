@@ -2,59 +2,59 @@
   "schemaVersion": 1,
   "phase": "test",
   "issue": "INFRA-570",
-  "completed": "2026-10-29T16:16:00Z",
-  "round": 2,
+  "completed": "2026-10-29T17:20:00Z",
+  "round": 3,
   "implementerProof": {
     "verdict": "verified",
-    "how": "Re-ran the implementer's commands and drove the same surface independently, on a bundle I rebuilt myself from a clean working copy at the branch head (`jj status` clean at cd5fae7d, `bun run build:web`), on my own harness lane (role tester, Postgres 18.6 + pgvector on 127.0.0.1:15433). `bun e2e/run.ts -- bunx playwright test --config e2e/playwright.config.ts --project=chromium --repeat-each=3 e2e/create-issue-related.e2e.ts` gave 12 passed (36.9s), my round-1 red row 'the dialog's own actions stay in the window once the section fills' green 3 of 3; the three keyboard suites gave 44 passed (2.0m). The red row is unmodified: `jj diff -r 479726710ce2..cd5fae7d packages/dispatch/e2e/create-issue-related.e2e.ts` adds exactly three lines, the two `aria-busy` assertions and their comment, all inside the display-gate row, and touches no line of mine. I did not take the implementer's claims on the scroll and the busy state from the suite alone: I drove both by hand at three window sizes and against a held and a failing route (below)."
+    "how": "Re-ran the implementer's browser command and drove both changed surfaces independently, on a bundle I rebuilt myself from a clean working copy at the branch head (`jj status` clean at d2295d58, `bun run build:web`) on my own harness lane (role tester, Postgres 18.6 + pgvector on 127.0.0.1:15433). `--repeat-each=2 e2e/create-issue-related.e2e.ts` gave 10 passed (31.5s), the new fresh-check row and round 1's red row among them; the spec plus the three keyboard suites gave 49 passed (2.2m). This round's first finding changes the CLI as well as the dashboard, and the implementer proved that side with unit tests alone, so I drove the CLI itself: the branch's own `bun packages/envoy-client/bin/dispatch.ts` against the e2e harness server with a minted agent token, which printed all three forms correctly. I did not re-run the contracts or envoy-client unit suites; those are CI's lanes."
   },
   "failed": 0,
   "failures": [],
   "proof": [
     {
-      "criterion": "Round 1's failure is cleared: the new-issue dialog keeps offering its own actions - Create, Cancel, and the duplicate refusal's Create anyway - once the related section fills, and a person reaches them by scrolling, not only a test by scrollIntoViewIfNeeded.",
-      "surface": "Dispatch dashboard new-issue dialog in Chromium at 375x667 (phone), 667x375 (landscape phone) and 1280x720 (laptop), real Go Dispatch server, production SPA bundle rebuilt from the clean head, Postgres 18.6 with pgvector",
-      "command": "source /legion/harness/env.sh && cd packages/dispatch && bun run build:web && bun e2e/run.ts -- bunx playwright test --config e2e/playwright.config.ts --project=chromium --repeat-each=3 e2e/create-issue-related.e2e.ts  (then a throwaway probe spec driving the same dialog at the three window sizes with the mouse wheel)",
-      "observed": "12 passed (36.9s), the red row 3 of 3. By hand, with the project seeded so the check returns its three items and the typed title is a possible duplicate of all of them: the form now scrolls at every size (375x667 clientHeight 665 / scrollHeight 711; 667x375 373 / 643; 1280x720 622 / 642, the cap being the window less the wrapper's 6rem). Scrolling with the mouse wheel alone - no programmatic scroll - brings Create whole into the window (375x667: y 605.53-649.53 of 667; 667x375: 313.53-357.53 of 375; 1280x720: 643-687 of 720), pressing it produces the POSSIBLE_DUPLICATE refusal, and wheeling again brings `Create anyway` whole into view at each size, which files the issue (the page lands on /issues/CORE-5 at all three). The 1280x720 case named in round 1's evidence, where `Create anyway` stood 39 px below the fold, is cleared with it. No sideways scroll anywhere: scrollWidth equals clientWidth at all three sizes, and with a 200-character unbroken token in a listed item's title (373 = 373), so `overflow-y-auto` computing overflow-x to `auto` costs nothing.",
-      "headSha": "cd5fae7d2fdd96c3528177c5e1ae069def0a56a1",
-      "negativeControl": "The two overflow classes are what clear it, measured in round 1 on this same surface: without them the dialog stands 712.53 px tall in a 667 px window with Create at 651.53-695.53, `Create anyway` at 723.53-767.53 after the refusal, and `document.scrollingElement.scrollHeight === clientHeight === 667` so nothing scrolls; the red row then reads `Create stands outside the 667px window: top 651.53125, bottom 695.53125`."
+      "criterion": "Review finding 1: the related-item check's three forms are judged in one place, so the CLI's lines and the dashboard's section cannot drift apart.",
+      "surface": "both surfaces at once — the branch's own `dispatch` CLI (packages/envoy-client/bin/dispatch.ts) run against the e2e Dispatch server with a minted agent token, and the dashboard's new-issue dialog in Chromium against the same server and a bundle built from the same tree",
+      "command": "source /legion/harness/env.sh && cd packages/dispatch && bun e2e/run.ts -- bun e2e/zz-cli-probe.ts   (throwaway, removed before this handoff: it seeds CORE, mints an agent token, and runs `dispatch issue` three times with DISPATCH_URL at the harness)  — and  bun e2e/run.ts -- bunx playwright test --config e2e/playwright.config.ts --project=chromium e2e/zz-tester-probe.e2e.ts",
+      "observed": "The CLI printed, for the three answers in turn: `Related items (searched by keywords only: meaning search is off on this server):` with `- CORE-1 [triage] Astrolabe drift spoils the mooring calibration → …/issues/CORE-1/spec?q=drift+Astrolabe+mooring`; `Related-item check searched (keywords only: meaning search is off on this server) and found nothing.`; and `No related-item check was made: the text holds no word to search for. Search before you rely on this being new: dispatch search --project CORE with two or three of its words as --query`. The dashboard, on the same three answers, read `Related items (searched by keywords only: meaning search is off on this server):` with the issue's link, `Related-item check searched (keywords only: meaning search is off on this server) and found nothing.`, and `No related-item check was made: the text holds no word to search for. Search Dispatch for two or three of its words before you rely on this being new.` Same form and same mode words on both, each surface wording its own instruction.",
+      "headSha": "d2295d5882c786f7c69d2f0d46e0d1b1f9af972a",
+      "negativeControl": "One judge, proven by mutation rather than by reading: `relatedCheckModeWords` in packages/contracts/src/related-forms.ts changed to return `MUTATED-MODE-WORDS` for `keywords_only`, the SPA rebuilt, and both surfaces moved together — the CLI printed `Related items (searched by MUTATED-MODE-WORDS: …)` and `searched (MUTATED-MODE-WORDS: …) and found nothing.`, and the dashboard's section read the same two lines with the same words. Reverted and rebuilt, both read `keywords only` again. A hand copy on either side would have left that surface unmoved."
     },
     {
-      "criterion": "A screen reader hears the check's answer, not 'Checking for related items…' at every pause in someone's typing.",
-      "surface": "the same dialog, reading the live region's own aria-busy as the state changes under a held route and a failing route",
+      "criterion": "Review finding 2: a related answer is never served from a cache older than the check it stands for, and asking fresh costs no extra requests.",
+      "surface": "the dashboard's new-issue dialog in Chromium against the real Go server",
+      "command": "source /legion/harness/env.sh && cd packages/dispatch && bun run build:web && bun e2e/run.ts -- bunx playwright test --config e2e/playwright.config.ts --project=chromium --repeat-each=2 e2e/create-issue-related.e2e.ts",
+      "observed": "10 passed (31.5s), the new row 'a title checked before an issue was filed is checked again, not answered from before' 2 of 2: a title answered 'found nothing', the dialog closed, an issue filed with that title by another caller, the dialog reopened and the same title typed, and the new issue is listed. The freshness costs nothing in traffic: with the route counted, one settled title sends exactly one check, still one after 1.5 s of standing and still one after another tab took the focus and gave it back (checks first=1 afterRest=1 afterRefocus=1), so `staleTime: 0` with `gcTime: 0` did not turn into a refetch loop; the debounce row still measures exactly one check per pause.",
+      "headSha": "d2295d5882c786f7c69d2f0d46e0d1b1f9af972a",
+      "negativeControl": "The implementer's recorded control stands and matches the defect the reviewer described: with both options removed and the SPA rebuilt, that row is red 3 of 3 at the new issue's link, 'element(s) not found', because the cached 'found nothing' answered the second check."
+    },
+    {
+      "criterion": "Review finding 4: the past decision's list item names who answered it, so a reader's item for the decision is whole.",
+      "surface": "the dashboard's new-issue dialog in Chromium with an answered ask and a project document seeded in the project",
       "command": "source /legion/harness/env.sh && cd packages/dispatch && bun e2e/run.ts -- bunx playwright test --config e2e/playwright.config.ts --project=chromium e2e/zz-tester-probe.e2e.ts  (throwaway, removed before this handoff)",
-      "observed": "The section carries aria-busy=\"false\" with the box empty, aria-busy=\"true\" from the moment 'Checking for related items…' is on screen while the route is held, and aria-busy=\"false\" again as soon as the answer's links are shown, so a polite region holds its pending announcement and reads the answer alone. Also false after the project is switched and the new project's answer lands.",
-      "headSha": "cd5fae7d2fdd96c3528177c5e1ae069def0a56a1",
-      "negativeControl": "A check the server fails with 500 reads `Could not check for related items.` with Retry and carries aria-busy=\"false\", not \"true\" - a failed check is not reported to a reader as one still running, and the region is never left busy for good; pressing Retry with the route let through brings the real answer and leaves it false."
+      "observed": "The decision's own list item, located by its text and read whole, is 'ask / Triage / CORE-1 Quadrant bezel wobble / Answered by bob · just now / Answered / bob · just now · Chose Shim it' and holds exactly one link — the link, who answered it and the ask's state are in one item, not split across the list. Nothing in the section reads 'undefined'.",
+      "headSha": "d2295d5882c786f7c69d2f0d46e0d1b1f9af972a",
+      "negativeControl": "The same locator filtered on 'Answered by bob' finds one item and one link in it; before this round the 'Answered by' line sat outside the `<li>`, which is the structure the finding objects to and which the implementer's recorded control reproduces (the unit row fails with 'Unable to find an element with the text: /Answered by alice/' inside the item)."
     },
     {
-      "criterion": "The round-1 behaviour the refactor could have broken still holds (RelatedItems' pending, error and answer branches were rewritten into one `answer` value this round).",
-      "surface": "the same dialog, driven by hand against the real server",
-      "command": "source /legion/harness/env.sh && cd packages/dispatch && bun e2e/run.ts -- bunx playwright test --config e2e/playwright.config.ts --project=chromium e2e/zz-tester-probe.e2e.ts  (throwaway, removed before this handoff)",
-      "observed": "A title carrying URL metacharacters ('Astrolabe & drift #1 +100% mooring?=/ calibration') reaches the server verbatim in the query and still lists its issue; clearing the box empties the section to no text; a 1000-character title (the box's own maxLength) is answered 200 and shown, never refused (every related response in that row was 200); switching the project drops the previous project's hit at once and answers for the new one; the dialog reopened after Escape starts with an empty box and an empty section; an issue still files while a check hangs in flight; an ask, a project document and a past decision all render, the decision under 'A past decision may already answer this:' with who answered it, and no 'undefined' anywhere.",
-      "headSha": "cd5fae7d2fdd96c3528177c5e1ae069def0a56a1",
-      "negativeControl": "A title of stopwords alone and a title matching nothing read as different sentences ('No related-item check was made: …' against 'Related-item check searched (…) and found nothing.'), so the check that never ran is still distinguishable from the one that found nothing after the rewrite."
-    },
-    {
-      "criterion": "No regression in the dialog the fix changes or in the palette this change moved AskHitStatus out of.",
-      "surface": "the repository's existing Chromium suites that drive the create dialog and the palette",
-      "command": "source /legion/harness/env.sh && cd packages/dispatch && bun e2e/run.ts -- bunx playwright test --config e2e/playwright.config.ts --project=chromium e2e/keyboard.e2e.ts e2e/keyboard-issue.e2e.ts e2e/keyboard-palette.e2e.ts",
-      "observed": "44 passed (2.0m), 'c opens the create dialog; project and title create an issue the API returns and the SPA opens' among them, and the palette's own rows unaffected by the scroll cap.",
-      "headSha": "cd5fae7d2fdd96c3528177c5e1ae069def0a56a1",
-      "negativeControl": "Those three specs plus this change's own are the only files in packages/dispatch/e2e matching 'Create issue', so the set is the dialog's own callers rather than an arbitrary selection."
+      "criterion": "Nothing round 1 and round 2 proved has regressed under the classifier move, the cache change and the children slot.",
+      "surface": "the dashboard's dialog driven by hand, and the repository's Chromium suites that drive the dialog and the palette",
+      "command": "source /legion/harness/env.sh && cd packages/dispatch && bun e2e/run.ts -- bunx playwright test --config e2e/playwright.config.ts --project=chromium e2e/create-issue-related.e2e.ts e2e/keyboard.e2e.ts e2e/keyboard-issue.e2e.ts e2e/keyboard-palette.e2e.ts",
+      "observed": "49 passed (2.2m), this spec's five rows and every row of the three keyboard suites. By hand: a title carrying URL metacharacters reaches the server verbatim and lists its issue; a 1000-character title is answered 200 (every related response in that row was 200) and shown, never refused; clearing the box empties the section; `aria-busy` is false with the box empty, false once an answer is shown and false on a failed check; a 500 reads 'Could not check for related items.' with Retry, which recovers the real answer; switching the project then drops the old project's hit and answers for the new one.",
+      "headSha": "d2295d5882c786f7c69d2f0d46e0d1b1f9af972a",
+      "negativeControl": "A title of stopwords alone still reads 'No related-item check was made: …', a different sentence from the searched-and-found-nothing form, so the two forms are still distinguishable after the judgement moved into the contract."
     },
     {
       "criterion": ".dispatch/architecture/dispatch-web.md updated in the same PR.",
       "surface": "the pull request diff on GitHub",
       "command": "gh pr diff 2511 --repo sjawhar/legion --name-only",
-      "observed": "Lists .dispatch/architecture/dispatch-web.md, packages/dispatch/AGENTS.md and docs/site/src/content/docs/dispatch/issues-and-projects.md beside the code and the changelog fragment.",
-      "headSha": "cd5fae7d2fdd96c3528177c5e1ae069def0a56a1",
-      "negativeControl": "The same listing holds no packages/daemon/ path (grep -c gives 0), so it is the diff's own file list and not a match-anything read."
+      "observed": "Lists .dispatch/architecture/dispatch-web.md, packages/dispatch/AGENTS.md and docs/site/src/content/docs/dispatch/issues-and-projects.md beside the code and the changelog fragments.",
+      "headSha": "d2295d5882c786f7c69d2f0d46e0d1b1f9af972a",
+      "negativeControl": "The same listing holds no packages/daemon/ path, so it is the diff's own file list and not a match-anything read."
     }
   ],
-  "ciAtHead": "Read on GitHub at cd5fae7d2fdd, not re-run and not waited for: run 40907507175 (CI) and 40907645320 (PR Title) queued/in progress at the read, with `changes` and `pr-title` pending and the selected jobs not yet reported. Lint, types and the unit and integration suites are CI's lanes and were re-run nowhere here.",
+  "ciAtHead": "Read on GitHub at d2295d5882c7, not re-run and not waited for: CI's run for this head was queued at the read (`changes` pending; `pr-title` run 40917633096 completed success on the review event, run 40917795663 queued). Lint, types and the unit and integration suites — the contracts and envoy-client suites this round's move touches among them — are CI's lanes and were re-run nowhere here.",
   "notFailures": [
     "The production criterion is the implementer's production check after the close (skill://legion-worker/references/merge-gate.md); production still runs a build predating INFRA-568's route, as the plan records.",
-    "Layout shift, observed and judged not a defect: a person who scrolls to Create while a check is out sees the button move down when the answer lands and the section grows. The window is the few hundred milliseconds between the answer and the click, and every item link carries target=_blank, so a click that lands on one opens a tab and leaves the draft standing; nothing is filed or lost. Named for the architect rather than recorded as a failure."
+    "Round 2's layout-shift observation stands unchanged and is still not a defect: a person who scrolls to Create while a check is out sees the button move down when the answer lands; every item link is target=_blank, so a click that lands on one opens a tab and leaves the draft standing."
   ]
 }
