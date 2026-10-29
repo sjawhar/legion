@@ -31,6 +31,6 @@ module: packages/envoy/internal/dispatch
 Pull request sjawhar/legion#2391, the suggestion outcome sweep
 (`internal/dispatch/api/suggestion_outcomes.go`, `judgeSuggestionPage`). The plan's cursor on
 `write_suggestions.id` could not work: ids are uuids and suggestions are inserted after their
-write commits, outside the commit-order lock. Migrations `0144_suggestion_outcome_cursor`
-(event cursor) and `0145_write_suggestions_swept` (the per-row flag and its partial index)
+write commits, outside the commit-order lock. Migrations `0145_suggestion_outcome_cursor`
+(event cursor) and `0146_write_suggestions_swept` (the per-row flag and its partial index)
 replaced it.

@@ -99,7 +99,7 @@ func replaceVersionRefs(ctx context.Context, tx pgx.Tx, artifactID string, versi
 }
 
 // ExcerptsOwedChannel is the Postgres notification channel every artifact mention left owed an
-// excerpt announces itself on at commit (refs_excerpts_owed_notify, migration 0143): the channel
+// excerpt announces itself on at commit (refs_excerpts_owed_notify, migration 0144): the channel
 // whose pglisten.Hub wake the server passes to RunReferenceExcerptReconciliation.
 const ExcerptsOwedChannel = "dispatch_excerpts_owed"
 
