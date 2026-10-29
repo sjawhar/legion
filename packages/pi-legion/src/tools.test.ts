@@ -49,6 +49,11 @@ const noHandoffCommit = async (phase: LegionPhase, role: LegionRole): Promise<ne
   throw new Error(`no handoff-commit lookup expected for the ${role} at ${phase}`);
 };
 
+/** The branch-head lookup of a tool that must never read a branch head. */
+const noBranchHead = async (): Promise<string> => {
+  throw new Error("branchHead is not expected in this test");
+};
+
 /** A claim's session on LEGION-208: a root architect's, a sub-architect's (its issue is not its
  * tree), or a phase worker's by role. */
 function claimSession(role: LegionRole, issue = "LEGION-208"): LegionToolSession {
@@ -56,6 +61,8 @@ function claimSession(role: LegionRole, issue = "LEGION-208"): LegionToolSession
     kind: role === "architect" ? "architect" : "phase-worker",
     role,
     sessionID: "ses_208",
+    claimToken: `legion-legion-legion-208-${role}`,
+    generation: 5,
     tree: "LEGION-208",
     issue,
     secret: "claim-secret",
@@ -121,7 +128,11 @@ const OMP_LEGION_TOOL_DESCRIPTION =
   "commit: it carries its verdict and summary alone, and the daemon refuses it when no check is open (CHECK_NOT_OPEN). The daemon refuses " +
   "HANDOFF_NOT_NEW (the commit is the one you reported for your previous phase: write and commit this phase's handoff) and, for READY, each " +
   "refusal the merger's role names; a refused completion changed nothing, so fix what it names and complete again. An accepted READY whose `note` " +
-  "begins MANUAL_MERGE_REQUIRED: is one a person merges: arm nothing. request_backward_move returns an issue to an earlier phase (`to`, `reason`): " +
+  "begins MANUAL_MERGE_REQUIRED: is one a person merges: arm nothing. " +
+  "ready_for_update answers the daemon's update task on this issue's pod. Push every commit you want kept to the issue branch " +
+  "first, because the pod and its disk are replaced after every worker of the pod has answered. The call ends no phase. The " +
+  "daemon holds your next task until your process comes back on the new pod, in this same session. " +
+  "request_backward_move returns an issue to an earlier phase (`to`, `reason`): " +
   "a phase worker moves its own issue; the tree's architect moves an issue in accepting, named by `issue`, back to implementing or testing, which " +
   "counts a review round. sign_off is the architect's acceptance of an issue in accepting, moving it to retro; the daemon refuses it in every " +
   "other phase (SIGNOFF_OUTSIDE_ACCEPTING), and issues still running beneath it do not hold it: a root's close waits " +
@@ -147,6 +158,7 @@ const toolFor = (active: LegionToolSession) =>
     controllerGrant: noControllerGrant,
     onPhaseCompleted: () => undefined,
     handoffCommit: noHandoffCommit,
+    branchHead: noBranchHead,
     resolveDocument: noDocumentLookup,
     session: () => active,
   });
@@ -176,6 +188,7 @@ const OMP_LEGION_TOOL_SCHEMA = JSON.stringify({
         "rerun_child",
         "read_record",
         "handoff_complete",
+        "ready_for_update",
         "read_state",
         "set_status",
       ],
@@ -268,6 +281,7 @@ test("the legion tool exposes only the workflow operations each role owns", asyn
       controllerGrant: noControllerGrant,
       onPhaseCompleted: () => undefined,
       handoffCommit: noHandoffCommit,
+      branchHead: noBranchHead,
       resolveDocument: noDocumentLookup,
       session: () => session,
     }).execute("", parameters, undefined, undefined, context());
@@ -279,6 +293,7 @@ test("the legion tool exposes only the workflow operations each role owns", asyn
     controllerGrant: noControllerGrant,
     onPhaseCompleted: () => undefined,
     handoffCommit: noHandoffCommit,
+    branchHead: noBranchHead,
     resolveDocument: noDocumentLookup,
     session: () => worker,
   });
@@ -443,6 +458,7 @@ test("the legion tool's description gives a verdict to the tester alone", () => 
     controllerGrant: noControllerGrant,
     onPhaseCompleted: () => undefined,
     handoffCommit: noHandoffCommit,
+    branchHead: noBranchHead,
     resolveDocument: noDocumentLookup,
     session: () => claimSession("reviewer"),
   });
@@ -469,6 +485,7 @@ test("a workflow refusal tells the agent both its code and message", async () =>
     controllerGrant: noControllerGrant,
     onPhaseCompleted: () => undefined,
     handoffCommit: noHandoffCommit,
+    branchHead: noBranchHead,
     resolveDocument: noDocumentLookup,
     session: () => claimSession("architect"),
   });
@@ -501,6 +518,7 @@ test("register_gate takes the document reference the Dispatch tools take, and re
       controllerGrant: noControllerGrant,
       onPhaseCompleted: () => undefined,
       handoffCommit: noHandoffCommit,
+      branchHead: noBranchHead,
       resolveDocument: async (issue: string, reference: string) => {
         resolved.push([issue, reference]);
         if (reference === "notes") throw new Error(`No document "notes" on ${issue}`);
@@ -606,6 +624,7 @@ test("handoff_complete finds the pushed commit carrying the handoff, posts it wi
       controllerGrant: noControllerGrant,
       onPhaseCompleted: (ctx) => completed.push(ctx.sessionManager.getSessionId()),
       handoffCommit: (phase, role) => findHandoffCommit({ phase, role, env: paneEnv, jj }),
+      branchHead: noBranchHead,
       resolveDocument: noDocumentLookup,
       session: () => session,
     }).execute("", parameters, undefined, undefined, context());
@@ -778,6 +797,7 @@ test("the implementer's report on its closed issue's production check carries a 
       onPhaseCompleted: (ctx) => completed.push(ctx.sessionManager.getSessionId()),
       // A check report resolves no commit: the lookup is never asked.
       handoffCommit: noHandoffCommit,
+      branchHead: noBranchHead,
       resolveDocument: noDocumentLookup,
       session: () => session,
     }).execute("", parameters, undefined, undefined, context());
@@ -841,6 +861,7 @@ test("the implementer's report on its closed issue's production check carries a 
     controllerGrant: noControllerGrant,
     onPhaseCompleted: () => undefined,
     handoffCommit: noHandoffCommit,
+    branchHead: noBranchHead,
     resolveDocument: noDocumentLookup,
     session: () => claimSession("tester"),
   }).execute(
@@ -867,6 +888,7 @@ test("the implementer's report on its closed issue's production check carries a 
     controllerGrant: noControllerGrant,
     onPhaseCompleted: () => undefined,
     handoffCommit: noHandoffCommit,
+    branchHead: noBranchHead,
     resolveDocument: noDocumentLookup,
     session: () => claimSession("implementer"),
   }).execute("", { op: "handoff_complete", summary: "Looked." }, undefined, undefined, context());
@@ -896,6 +918,7 @@ test("a refused completion surfaces the daemon's code and leaves the phase open"
     onPhaseCompleted: (ctx) => completed.push(ctx.sessionManager.getSessionId()),
     handoffCommit: (phase, role) =>
       findHandoffCommit({ phase, role, env: paneEnv, jj: paneJj({}) }),
+    branchHead: noBranchHead,
     resolveDocument: noDocumentLookup,
     session: () => claimSession("implementer"),
   });
@@ -929,6 +952,7 @@ test("the controller reads the whole state without a grant and sets an issue's s
       throw new Error("a controller completes no phase");
     },
     handoffCommit: noHandoffCommit,
+    branchHead: noBranchHead,
     resolveDocument: noDocumentLookup,
     session: () => ({ kind: "controller", sessionID: "ses_controller" }),
   });

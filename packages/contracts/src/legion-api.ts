@@ -509,6 +509,21 @@ export const LegionReadyRequest = z.strictObject({
 
 export type LegionReadyRequestBody = z.output<typeof LegionReadyRequest>;
 
+/** `claim.ReadyForUpdateRequest`, the body of `POST /legion/v1/claims/ready-for-update`: the
+ * worker's answer to its pod's update task, which says it has pushed everything it wants kept and
+ * its process may be replaced. `head` is the commit the worker reports as the head of
+ * `legion/<issue>@origin`, empty or absent when the branch is not there (a planner before its
+ * first push); the daemon records it and verifies nothing of it. */
+export const LegionReadyForUpdateRequest = z.strictObject({
+  claimToken: nonEmptyString,
+  sessionId: nonEmptyString,
+  secret: nonEmptyString,
+  generation: z.number().int().positive(),
+  head: z.string().optional(),
+});
+
+export type LegionReadyForUpdateRequestBody = z.output<typeof LegionReadyForUpdateRequest>;
+
 /** `api.ControllerRegisterResponse`, for a session that registered as the project's controller
  * (the `bootToken` of `POST /legion/v1/claims/register` is the secret `legion controller start`
  * fetched, or a daemon-launched controller's own boot token): the project's controller role token,

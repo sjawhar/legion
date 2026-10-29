@@ -24,6 +24,8 @@ function daemonFixture(name: string): Record<string, unknown> {
 
 const implementer: ClaimCapability = {
   sessionID: "ses_implementer",
+  claimToken: "legion-legion-legion-208-implementer",
+  generation: 5,
   tree: "LEGION-208",
   issue: "LEGION-208",
   role: "implementer",
@@ -50,6 +52,9 @@ function runtime(claim: ClaimCapability = implementer, commit = "a".repeat(40)) 
     handoffCommit: async (phase, role) => {
       lookups.push(`${phase} ${role}`);
       return commit;
+    },
+    branchHead: async () => {
+      throw new Error("no branch-head lookup expected");
     },
   };
   return { ops, routes, lookups };
@@ -90,8 +95,10 @@ test("the description sets the host's sentences before and after handoff_complet
   expect(placed).toContain(
     "this tool cannot spawn workers. read_record returns the record of `issue` from the daemon's state. handoff_complete (phase workers"
   );
+  // Every host states `ready_for_update`, so its sentences are the template's own, between
+  // handoff_complete's contract and the host's `after`.
   expect(placed).toContain(
-    "arm nothing. request_backward_move returns an issue to an earlier phase (`to`, `reason`): a phase worker moves its own issue; the tree's architect moves an issue in accepting, named by `issue`, back to implementing or testing, which counts a review round. The controller's read_state returns the daemon's whole state. What a later phase needs"
+    "arm nothing. ready_for_update answers the daemon's update task on this issue's pod. Push every commit you want kept to the issue branch first, because the pod and its disk are replaced after every worker of the pod has answered. The call ends no phase. The daemon holds your next task until your process comes back on the new pod, in this same session. request_backward_move returns an issue to an earlier phase (`to`, `reason`): a phase worker moves its own issue; the tree's architect moves an issue in accepting, named by `issue`, back to implementing or testing, which counts a review round. The controller's read_state returns the daemon's whole state. What a later phase needs"
   );
   expect(placed.endsWith("role topic with mcp__legion__envoy_publish.")).toBe(true);
 });
@@ -201,6 +208,9 @@ function closedRuntime(claim: ClaimCapability, record: Record<string, unknown>) 
     handoffCommit: async (phase, role) => {
       throw new Error(`no handoff-commit lookup expected for the ${role} at ${phase}`);
     },
+    branchHead: async () => {
+      throw new Error("no branch-head lookup expected");
+    },
   };
   return { ops, posted };
 }
@@ -288,6 +298,9 @@ test("request_backward_move names the issue an architect returns from accepting,
     daemon: createLegionDaemonClient("http://daemon.test", stub),
     claim,
     handoffCommit: async () => "a".repeat(40),
+    branchHead: async () => {
+      throw new Error("no branch-head lookup expected");
+    },
   });
   // The tree's architect (its grant serves the whole tree) names the child it sends back; a
   // sub-architect's role is architect too.
@@ -363,4 +376,67 @@ test("read_record answers the issue's record, or names an issue the daemon has n
     })
   ).resolves.toEqual({});
   expect(routes.slice(2)).toEqual(["/legion/v1/grants", "/legion/v1/phase/backward"]);
+});
+
+test("ready_for_update answers with the claim and the branch head, and leaves the head out when the branch is not on the remote", async () => {
+  const posted: { route: string; body: unknown }[] = [];
+  const stub = (async (input, init) => {
+    const route = new URL(input.toString()).pathname;
+    posted.push({
+      route,
+      body: typeof init?.body === "string" ? JSON.parse(init.body) : undefined,
+    });
+    return new Response(null, { status: 204 });
+  }) as typeof fetch;
+  const head = "9f1c0a7d4b2e6f8a3c5d1e7b9a0f2c4d6e8b1a35";
+  const runtimeFor = (branchHead: () => Promise<string>): PhaseOpRuntime => ({
+    daemon: createLegionDaemonClient("http://daemon.test", stub),
+    claim: implementer,
+    handoffCommit: async () => {
+      throw new Error("no handoff-commit lookup expected");
+    },
+    branchHead,
+  });
+  // The claim authenticates the signal, so no grant is minted: the one request is the signal.
+  await expect(
+    executePhaseOp(
+      runtimeFor(async () => head),
+      { op: "ready_for_update" }
+    )
+  ).resolves.toEqual({});
+  expect(posted).toEqual([
+    {
+      route: "/legion/v1/claims/ready-for-update",
+      body: {
+        claimToken: "legion-legion-legion-208-implementer",
+        sessionId: "ses_implementer",
+        secret: "U2VjcmV0",
+        generation: 5,
+        head,
+      },
+    },
+  ]);
+
+  // A branch no push has created yet (a planner's) carries no head at all.
+  await expect(
+    executePhaseOp(
+      runtimeFor(async () => ""),
+      { op: "ready_for_update" }
+    )
+  ).resolves.toEqual({});
+  expect(posted.at(-1)?.body).toEqual({
+    claimToken: "legion-legion-legion-208-implementer",
+    sessionId: "ses_implementer",
+    secret: "U2VjcmV0",
+    generation: 5,
+  });
+
+  // The agent passes no field of its own: the head is the plugin's to resolve.
+  await expect(
+    executePhaseOp(
+      runtimeFor(async () => head),
+      { op: "ready_for_update", head }
+    )
+  ).rejects.toThrow(new Error('ready_for_update does not accept field "head"'));
+  expect(posted).toHaveLength(2);
 });

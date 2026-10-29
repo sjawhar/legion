@@ -538,6 +538,19 @@ func TestReadyRequestGolden(t *testing.T) {
 	})
 }
 
+// The ready-for-update request is the worker's answer to its pod's update task: the claim it
+// holds, the generation it answers for, and the head of `legion/<issue>@origin` it reports, which
+// the daemon records and verifies nothing of.
+func TestReadyForUpdateRequestGolden(t *testing.T) {
+	golden(t, "ready-for-update.json", claim.ReadyForUpdateRequest{
+		ClaimToken: "legion-legion-legion-208-implementer",
+		SessionID:  "ses_implementer_208",
+		Secret:     "U3VwZXJ2aXNlZEJ5TGVnaW9u",
+		Generation: 5,
+		Head:       "9f1c0a7d4b2e6f8a3c5d1e7b9a0f2c4d6e8b1a35",
+	})
+}
+
 // A session's report shows on its claim as the names it proved and the gaps it did not, each side
 // in the report's order, and both sides are arrays on the wire even when empty: a session that
 // proved every row has `"open": []`, not `null`, under the plugin's strict reader.

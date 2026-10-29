@@ -23,6 +23,8 @@ const SESSION = "6f1c2d3e-4a5b-4c6d-8e7f-9a0b1c2d3e4f"
  * `implementing`, so the reminder's record check says this role still works this phase. */
 const implementer: ClaimCapability = {
   sessionID: SESSION,
+  claimToken: "legion-legion-legion-208-implementer",
+  generation: 5,
   tree: "LEGION-208",
   issue: "LEGION-208",
   role: "implementer",

@@ -24,6 +24,7 @@ import {
   LegionOperatorClaimsResponse,
   LegionPhaseBackwardRequest,
   LegionPhaseRetryRequest,
+  LegionReadyForUpdateRequest,
   LegionReadyRequest,
   LegionRegisterResponse,
   LegionRootCloseRequest,
@@ -45,9 +46,12 @@ const schemas: Record<string, z.ZodType> = {
   // daemon's own controller (`controller: daemon`) holds its claim on no issue.
   "state-controller-claim.json": LegionStateResponse,
   "register.json": LegionRegisterResponse,
-  // The claim wire's `claim.ReadyRequest` with a capability report, the one request body a Go
-  // golden test writes: what a session posts on `claims/ready` (contract 21).
+  // The claim wire's `claim.ReadyRequest` with a capability report: what a session posts on
+  // `claims/ready` (contract 21).
   "ready.json": LegionReadyRequest,
+  // `claim.ReadyForUpdateRequest`: the worker's answer to its pod's update task, saying it has
+  // pushed everything it wants kept and its process may be replaced.
+  "ready-for-update.json": LegionReadyForUpdateRequest,
   "register-controller.json": LegionControllerRegisterResponse,
   "controller-secret.json": LegionControllerSecretResponse,
   "controller-github-credential.json": LegionControllerCredentialResponse,

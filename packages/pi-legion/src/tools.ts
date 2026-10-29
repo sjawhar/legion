@@ -53,8 +53,9 @@ const OPERATIONS: Readonly<Record<LegionToolRole, readonly string[]>> = {
     "rerun_child",
     "read_record",
     "handoff_complete",
+    "ready_for_update",
   ],
-  "phase-worker": ["request_backward_move", "read_record", "handoff_complete"],
+  "phase-worker": ["request_backward_move", "read_record", "handoff_complete", "ready_for_update"],
   controller: ["read_state", "set_status"],
 };
 
@@ -142,6 +143,9 @@ export function createLegionTool(deps: {
    * (`findHandoffCommit`); otherwise the commit the workspace stands on. Throws naming the remedy
    * when the handoff is uncommitted, missing, not on this branch, another pane's, or unpushed. */
   readonly handoffCommit: (phase: LegionPhase, role: LegionRole) => Promise<string>;
+  /** The head of `legion/<issue>@origin` an update signal reports, read with the pane's jj
+   * (`findPushedBranchHead`), and `""` when the branch is not on the remote. */
+  readonly branchHead: () => Promise<string>;
   /** The id of the document `issue` carries under `reference` (`spec`, a slug, or a filename),
    * looked up in Dispatch as a `dispatch` command's `--artifact` is; throws naming the reference
    * when none matches, or when it names two documents. */
@@ -156,6 +160,7 @@ export function createLegionTool(deps: {
     controllerGrant,
     onPhaseCompleted,
     handoffCommit,
+    branchHead,
     resolveDocument,
     restartClock,
   } = deps;
@@ -199,11 +204,18 @@ export function createLegionTool(deps: {
         }
         if (active.kind !== "controller" && isPhaseOp(operation)) {
           const answer = await executePhaseOp(
-            { daemon: daemon(), claim: active, handoffCommit, restart },
+            {
+              daemon: daemon(),
+              claim: active,
+              handoffCommit,
+              branchHead,
+              restart,
+            },
             parameters
           );
           // A call that returned without throwing: a completion, and a backward move, which hands
           // the issue to another phase. Either way this session's phase is no longer open.
+          // `ready_for_update` is neither: it answers the pod's update task and ends no phase.
           if (operation === "handoff_complete" || operation === "request_backward_move") {
             onPhaseCompleted(context);
           }

@@ -141,6 +141,8 @@ function toolFor(
       kind: role === "architect" ? "architect" : "phase-worker",
       role,
       sessionID: "ses_208",
+      claimToken: `legion-legion-legion-208-${role}`,
+      generation: 5,
       tree,
       issue: "LEGION-208",
       secret: "claim-secret",
@@ -150,6 +152,7 @@ function toolFor(
     },
     onPhaseCompleted: (ctx) => completed.push(ctx.sessionManager.getSessionId()),
     handoffCommit: async () => COMMIT,
+    branchHead: async () => "",
     resolveDocument: async () => {
       throw new Error("no document lookup expected");
     },

@@ -7,6 +7,8 @@ import { DEFAULT_STALL_LIMITS } from "./stall-limits";
 
 const implementer = {
   sessionID: "ses_implementer",
+  claimToken: "legion-legion-legion-208-implementer",
+  generation: 5,
   tree: "LEGION-208",
   issue: "LEGION-208",
   role: "implementer",
