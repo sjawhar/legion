@@ -2,71 +2,48 @@
   "schemaVersion": 1,
   "phase": "implement",
   "issue": "INFRA-570",
-  "completed": "2026-10-29T15:20:00Z",
+  "completed": "2026-10-29T16:05:00Z",
+  "round": 2,
+  "answers": "The tester's round-1 failure (the dialog's own actions leaving the window once the related section fills) and the architect's two decisions on it: fix the overflow, and stop the pending state being announced at every pause.",
   "proof": [
     {
-      "criterion": "A browser-suite test types a title matching an existing issue's meaning or rare words and sees that issue listed with its link; fails at the commit before, passes at head.",
-      "surface": "Dispatch dashboard new-issue dialog in Chromium, real Go Dispatch server, production SPA bundle from packages/dispatch/web/dist, Postgres 18.6 with pgvector; harness started by bun e2e/run.ts",
-      "command": "source /legion/harness/env.sh && cd packages/dispatch && bun run build:web && bun e2e/run.ts -- bunx playwright test --config e2e/playwright.config.ts --project=chromium --repeat-each=3 e2e/create-issue-related.e2e.ts",
-      "observed": "9 passed (29.2s). Row A: with CORE-1 'Astrolabe drift spoils the mooring calibration' seeded, typing 'Astrolabe drift during mooring' shows a link named 'CORE-1 Astrolabe drift spoils the mooring calibration' with href=/issues/CORE-1 and target=_blank, and no link to the unrelated CORE-2; the server answered the check keywords-only (no embedder in the harness), so the match is by rare words.",
-      "headSha": "18b691b0cc5b",
-      "negativeControl": "The same spec run against a clean `git archive fe31539233c0` extract under $TMPDIR, with only e2e/create-issue-related.e2e.ts and web/src/features/issue/related-timing.ts copied in and its own Postgres database (port 15438, dispatch_e2e_basefails): 3 failed, 0 passed; row A failed at `await expect(hit).toBeVisible()` (line 77) with 'element(s) not found' after 15000 ms."
+      "criterion": "The new-issue dialog keeps offering its own actions — Create, Cancel, and the duplicate refusal's Create anyway — once the related section fills. (The tester's red row, run unmodified.)",
+      "surface": "Dispatch dashboard new-issue dialog in Chromium at 375x667, the phone window the dialog's full-bleed sheet layout below xl is for; real Go Dispatch server, production SPA bundle, Postgres 18.6 with pgvector",
+      "command": "source /legion/harness/env.sh && cd packages/dispatch && bun run build:web && bun e2e/run.ts -- bunx playwright test --config e2e/playwright.config.ts --project=chromium --repeat-each=2 e2e/create-issue-related.e2e.ts",
+      "observed": "8 passed (30.6s), the tester's row 'the dialog's own actions stay in the window once the section fills' among them, 2 of 2. The form now caps its height at the window and scrolls (max-h-[100dvh] overflow-y-auto, xl:max-h-[calc(100dvh-6rem)] so the wrapper's own p-4 pt-20 stays outside the cap), so Create and, after the POSSIBLE_DUPLICATE refusal, Create anyway are both brought whole into the window by scrollIntoViewIfNeeded. The tester's row, its helpers and its fixture are unchanged: `jj diff -r 479726710ce2..@` over that file shows only the two aria-busy assertions added to the display-gate row.",
+      "headSha": "7ede43d9d93f",
+      "negativeControl": "The two overflow classes removed from the form and the SPA rebuilt: the tester's row red 2 of 2 with its own message, 'Create stands outside the 667px window: top 651.53125, bottom 695.53125', while the other three rows stayed green — so the row is red on the defect and nothing else, and the classes are what clear it."
     },
     {
-      "criterion": "Typing does not send a request per keystroke.",
-      "surface": "same browser suite, row B, with the page's clock installed and paused (page.clock.pauseAt) and the related route counted through page.route",
-      "command": "source /legion/harness/env.sh && cd packages/dispatch && bun e2e/run.ts -- bunx playwright test --config e2e/playwright.config.ts --project=chromium --repeat-each=3 e2e/create-issue-related.e2e.ts:100",
-      "observed": "3 passed. Fifteen keystrokes ('Astrolabe drift') with the page clock held send 0 checks; clock.runFor(399) still 0; clock.runFor(1) exactly 1; clock.runFor(1200) still 1, so a settled title is not re-asked.",
-      "headSha": "18b691b0cc5b",
-      "negativeControl": "RELATED_DEBOUNCE_MS set to 0 in web/src/features/issue/related-timing.ts and the SPA rebuilt: row B red 3 of 3 at `expect(checks).toBe(0)` (line 117), 'Expected: 0, Received: 1'; rows A and C stayed green, so the red is the debounce and nothing else."
+      "criterion": "A screen reader hears the check's answer, not 'Checking for related items…' at every pause in someone's typing.",
+      "surface": "the same browser suite, the display-gate row, reading the live region's own aria-busy on the real surface",
+      "command": "source /legion/harness/env.sh && cd packages/dispatch && bun e2e/run.ts -- bunx playwright test --config e2e/playwright.config.ts --project=chromium --repeat-each=2 e2e/create-issue-related.e2e.ts:199",
+      "observed": "2 of 2 green. While a check is out the section carries aria-busy=\"true\", so a polite live region holds its announcement; once the answer for the title in the box is shown it carries aria-busy=\"false\" and the answer alone is announced. Both states are asserted in the row that already drives them deterministically under a held clock.",
+      "headSha": "7ede43d9d93f",
+      "negativeControl": "`aria-busy={checking}` removed from the section and the SPA rebuilt: the row red 2 of 2 at `expect(related).toHaveAttribute(\"aria-busy\", \"true\")` with 'Expected: \"true\", Received: \"\"', so the assertion reads the attribute and not a default."
     },
     {
-      "criterion": "An answer that arrives after the title changed is not shown for the new title.",
-      "surface": "same browser suite, row C: the first title's check held in a page.route handler and released while the box already holds the second title, inside its debounce window",
-      "command": "source /legion/harness/env.sh && cd packages/dispatch && bun e2e/run.ts -- bunx playwright test --config e2e/playwright.config.ts --project=chromium --repeat-each=3 e2e/create-issue-related.e2e.ts:137",
-      "observed": "3 passed. After the held answer for 'Astrolabe drift during mooring' reaches the page (page.waitForResponse), one clock.runFor(1) delivers react-query's batched notification and a 250 ms Node-side margin passes, the section still reads 'Checking for related items…' and holds 0 links to CORE-1; clock.runFor(400) then brings the second title's own answer, CORE-2's link, with CORE-1 still absent.",
-      "headSha": "18b691b0cc5b",
-      "negativeControl": "The display gate removed (useRelatedItems returning `waiting: false`) and the SPA rebuilt: row C red 3 of 3 at `expect(related.getByText(\"Checking for related items…\")).toBeVisible()` (line 185), 'element(s) not found'; rows A and B stayed green, so the red is the gate and nothing else."
-    },
-    {
-      "criterion": ".dispatch/architecture/dispatch-web.md updated in the same PR.",
-      "surface": "the pull request diff on GitHub",
-      "command": "gh pr diff 2511 --repo sjawhar/legion --name-only",
-      "observed": "Lists .dispatch/architecture/dispatch-web.md, packages/dispatch/AGENTS.md and docs/site/src/content/docs/dispatch/issues-and-projects.md beside the code.",
-      "headSha": "18b691b0cc5b",
-      "negativeControl": "The same command filtered for a path the pull request does not touch (packages/daemon/) returns nothing, so the listing is the diff's own and not a match-anything read."
+      "criterion": "No regression in the dialog the fix changes, or in the rows round 1 proved.",
+      "surface": "the repository's Chromium suites that drive the create dialog and the palette, plus this change's own spec",
+      "command": "source /legion/harness/env.sh && cd packages/dispatch && bun e2e/run.ts -- bunx playwright test --config e2e/playwright.config.ts --project=chromium e2e/create-issue-related.e2e.ts e2e/keyboard.e2e.ts e2e/keyboard-issue.e2e.ts e2e/keyboard-palette.e2e.ts",
+      "observed": "48 passed (2.1m): the four rows of this spec and every row of the three keyboard suites, 'c opens the create dialog; project and title create an issue the API returns and the SPA opens' among them.",
+      "headSha": "7ede43d9d93f",
+      "negativeControl": "The same four specs are the only ones in packages/dispatch/e2e that drive the create dialog (`grep -l 'Create issue' e2e/*.e2e.ts`), so the set is the dialog's own callers and not an arbitrary selection."
     }
   ],
   "filesChanged": [
-    "packages/dispatch/web/src/api/client.ts — api.relatedItems(project, title, { signal }) beside search",
-    "packages/dispatch/web/src/api/types.ts — Suggestions and WriteSuggestion re-exported",
-    "packages/dispatch/web/src/features/search/AskHitStatus.tsx — new; askStateLabel, ANSWER_PREVIEW_CHARS and AskHitStatus moved out of SearchPalette.tsx unchanged, doc comments reworded for its second caller",
-    "packages/dispatch/web/src/features/search/SearchPalette.tsx — those three declarations removed, AskHitStatus imported, now-unused imports dropped",
-    "packages/dispatch/web/src/features/search/SearchPalette.test.tsx — ANSWER_PREVIEW_CHARS imported from its new module",
-    "packages/dispatch/web/src/features/issue/RelatedItems.tsx — new; useRelatedItems + RelatedItems + RelatedForm + RelatedItemRow",
-    "packages/dispatch/web/src/features/issue/related-timing.ts — new; RELATED_DEBOUNCE_MS, a module importing nothing so the Playwright spec reads it",
-    "packages/dispatch/web/src/features/issue/RelatedItems.test.tsx — new; five unit rows",
-    "packages/dispatch/web/src/features/issue/CreateIssueDialog.tsx — renders <RelatedItems> between Spec and the refusal; doc comment",
-    "packages/dispatch/web/src/features/issue/CreateIssueDialog.test.tsx — renderDialog spies api.relatedItems with a 'none' answer",
-    "packages/dispatch/e2e/create-issue-related.e2e.ts — new; the three browser rows",
-    ".dispatch/architecture/dispatch-web.md, packages/dispatch/AGENTS.md, docs/site/src/content/docs/dispatch/issues-and-projects.md — docs",
-    "packages/envoy/.changes/unreleased/pr2511-Added-20261029-151500.yaml — changelog fragment"
+    "packages/dispatch/web/src/features/issue/CreateIssueDialog.tsx — the form caps its height at the window and scrolls",
+    "packages/dispatch/web/src/features/issue/RelatedItems.tsx — aria-busy while a check is out; the answer narrowed into one `answer` value so the form takes a defined one",
+    "packages/dispatch/e2e/create-issue-related.e2e.ts — two aria-busy assertions in the display-gate row; the tester's row untouched",
+    "packages/dispatch/AGENTS.md — the busy state and the dialog's scroll"
   ],
   "trickyParts": [
-    "Playwright's page.clock.install() alone leaves the page clock running at real speed; page.clock.pauseAt(Date.now() + 1000) is what holds it still (the lead is for Node/page skew, as e2e/hover-preview.e2e.ts records). Without the pause, row C's held answer was overtaken by the second title's own 400 ms debounce and the row measured nothing.",
-    "With the page clock held, react-query delivers nothing: notifyManager batches its notifications on a zero-delay timer, which is one of the faked timers. Row C therefore needs one page.clock.runFor(1) after the response reaches the page before the dialog can have rendered it — without it the row passed whether the display gate was there or not, which is how the first draft's false green was found.",
-    "page.waitForTimeout is the page's clock and never returns under a held clock; row C's margin is Node's own timer (node:timers/promises).",
-    "The e2e harness has no embedder, so the check answers keywords_only with a search_note; the fixtures match on rare words and no row asserts the search mode's wording.",
-    "The web cannot import @legion/envoy-client, so the check's three forms are worded again in RelatedItems.tsx. RelatedForm tests the not-made form before the item list, in the same order as relatedCheckForm, so an answer carrying both reads the same on both surfaces."
+    "aria-busy is the fix the architect chose over moving the pending line out of the live region: a polite region holds its announcements while it is busy, so the reader hears the answer alone, and the line stays visible for everyone else.",
+    "Pulling the pending state into a named `checking` flag loses TypeScript's narrowing of `query.data`, so the component now computes one `answer` value (undefined while a check is out or while the box has moved past the title the query answers) and branches on that; `RelatedForm` still takes a defined `Suggestions`."
   ],
-  "deviations": [
-    "The plan's task 1 named a types.ts re-export of Suggestions and WriteSuggestion only; RelatedCheckOutcome and RelatedCheckSearch were not needed and were not added.",
-    "The plan put RELATED_DEBOUNCE_MS in RelatedItems.tsx. It is in features/issue/related-timing.ts instead, a module importing nothing, because the Playwright spec reads the value the dialog runs on and importing a .tsx into the Node-side spec would pull React (the precedent is features/refs/ref-preview-timing.ts).",
-    "The not-made form names the words to search Dispatch for rather than a dispatch search command line, as plan decision 5 allows for the web."
-  ],
+  "deviations": [],
   "openQuestions": [],
   "discoveredComplexity": [
-    "The pod had no browser harness. /legion/harness/setup.sh and env.sh build one on the issue volume: Postgres 18.6 with pgvector 0.8.7 from the PGDG trixie packages, ICU initdb, Playwright's Chromium, and the contracts bundle Playwright's Node resolution needs. Two packages the existing recipe does not name are required for Postgres 18: libnuma1 and liburing2, which the 18.6 postgres binary links for its io_uring AIO.",
-    "The simplify pass applied seven findings over three reviewers and left three: a shared useSettled hook and a shared pauseClock module would both edit files this pull request does not touch, and debouncing the project alongside the title (efficiency, confidence 0.45) would change row B's arithmetic for a cost that only arises when a keyboard user arrows through the project select mid-draft; the display gate already keeps a previous project's answer off screen."
+    "The defect was not phone-only: the tester measured Create anyway 39 px below the fold at 1280x720 as well. The cap is on the form rather than on the related section, so it holds however the dialog's other parts grow."
   ]
 }
