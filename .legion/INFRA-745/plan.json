@@ -12,18 +12,24 @@
       "dispatch: the implementer records evidence on the issue and may need an ask block or a dispatch ask; its command forms and reference shapes are there.",
       "asd-ste100: the pull-request body, the review replies and every Envoy message to the architect and the tester are written for other readers, and this repository requires that style for them.",
       "envoy: the implementer answers the tester's and reviewer's questions on this issue's role topics while its phase is finished, and this plan expects it to message the architect about D1-D5."
+      ,
+      "docs/solutions/legion/a-red-lane-outside-the-required-set-merges-unread-read-every-lane-that-builds-the-changed-package-INFRA-379.md: the repository's own learning, and its exact condition holds for this change — every test it adds sits in a lane main does not require, so a red lane that builds packages/envoy is read by nothing in the merge path. It tells the implementer to read every check at its push's head, not the required names."
     ],
     "test": [
       "legion-worker: the tester's handoff, its proof entries (criterion, surface, command, observed, headSha, negativeControl) and the CI read are defined there; this change's lanes are not required by main, so references/pr-body.md's rule that evidence names the surface it ran on is what keeps the test honest.",
       "dispatch: the tester records its evidence on the issue, and the plan's criterion table names Dispatch's own HTTP API as criterion 1's surface, which the tester re-runs.",
       "asd-ste100: the tester's E2E line and its messages to the implementer and architect are read by others.",
       "envoy: the tester reaches the implementer and the architect on this issue's role topics without ending a phase."
+      ,
+      "docs/solutions/legion/a-red-lane-outside-the-required-set-merges-unread-read-every-lane-that-builds-the-changed-package-INFRA-379.md: the tester's CI read must list every check run at the code head, because envoy-client, envoy-go and envoy-infra-go hold this change's whole proof and main requires none of them; main is also red on three of them on 9 of its last 12 pushes, so a red there needs the page's judgement, not a re-run by reflex."
     ],
     "review": [
       "legion-worker: the reviewer's round, its single review per round, and the handoff are defined there; references/merge-gate.md gives the required-check read, which for this change returns lint/typecheck/test/pr-title and so will not show the three lanes that actually hold this change's tests — the reviewer must read those lanes on the pull request itself.",
       "legion-worker/references/review-threads.md: this pull request inherits #2490's review history and will carry bot findings; the reference says which to answer and how to judge one.",
       "asd-ste100: the review body and every inline comment are read by the implementer and by anyone reading the pull request.",
       "envoy: the reviewer sends a design or scope question to the architect rather than ending its round blocked."
+      ,
+      "docs/solutions/legion/a-red-lane-outside-the-required-set-merges-unread-read-every-lane-that-builds-the-changed-package-INFRA-379.md: written for exactly this case. The reviewer lists every check at the code head rather than the required set, treats a red lane that builds a changed path as a finding, and never reads a still-running lane as a pass; the merger quotes any lane at the READY head that is not success."
     ]
   },
   "gapAnalysis": {
