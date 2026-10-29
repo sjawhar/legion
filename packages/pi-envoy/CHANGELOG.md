@@ -1,8 +1,101 @@
 # Changelog
 
-## [Unreleased]
+## [12.0.0] - 2026-10-29
 
 ### Added
+
+- Every Dispatch write a session makes carries one `Idempotency-Key` and is asked again under it after a transport failure, a 5xx, a 408, a 429, a `409 KEY_IN_FLIGHT` or an attempt that hears nothing for 20 s (INFRA-258, through `@sjawhar/envoy-client`'s `DispatchClient`). The accept behind a person's direct Send or Aside (`POST /api/v1/messages/{id}/deliveries/{attempt}/accept`) retries inside its own 10 s bound, at 0, 1, 3 and 7 s, so an accept whose `200` was lost becomes the person's turn on the replay where it used to leave the message as a card; every refusal, error and the timeout still keep the card.
+
+## [11.9.0] - 2026-10-29
+
+### Fixed
+
+- A person's Send from Dispatch's live view no longer waits behind Envoy notifications, and an
+  interrupt no longer drops the notifications queued when it lands. Every card (an Envoy
+  notification, an issue message, a comment mention, a Dispatch Steer that was not accepted as the
+  person's own turn) went into the host's steering queue, which the host drains one message per
+  step, so a session that received many cards took a person's Send minutes later, and an Esc
+  emptied that queue. While a turn runs a card now goes as an aside, which the host folds in at the
+  next step, after the Send, without ending the running tool batch; a card still queued at an
+  interrupt is folded into the context with no run and read at the next turn. On an idle session a
+  card is still a steer with `triggerTurn`, so it starts a turn as before; a targeted Aside stays
+  an aside, and a host context without `ctx.isIdle()` keeps every other card a steer. A card the
+  host folds into the context with no turn, as it does for an aside that lands as a run ends in a
+  session interrupted earlier, or in plan mode, now gets one hidden wake that starts a turn to read
+  it, unless an interrupt is still in effect or the card was a targeted Aside; a card sent while
+  the session sets up a prompt is left to that prompt's run, so an interrupt there starts no turn
+  either. The limits are in the package's `AGENTS.md`.
+- The Legion controller's start message is its session's first turn, ahead of any Envoy card that
+  arrived while the session started. A card that reached the operator's controller in a terminal
+  before `/legion-controller-start` ran started its own turn ahead of the start message, and in RPC
+  mode a startup card's wake could fire once the host was idle after its startup, before the
+  daemon's start prompt arrived. While the plugin interface's `startupTurn` names the session (the
+  start sent under 30 s ago, or due and not sent yet for under 30 s), a card that finds it idle goes
+  as a follow-up that starts no turn, in any mode, and the startup wake waits for the start turn:
+  once that turn ends, one wake starts a turn for every card that arrived meanwhile, counted even
+  though the start turn's reply follows them, unless a later reply read them. A start that never
+  comes holds the cards back for 30 s, and a start claim refused before the send releases them
+  within a second. A mark naming another session, or one whose start was sent 30 s ago or more,
+  changes nothing. Plugin interface version 5, which pi-envoy reads; install it with the
+  `@sjawhar/pi-legion` released beside it.
+- A card that reaches an RPC session while Oh My Pi starts no longer holds back every RPC command
+  until the turn it started ends. Oh My Pi settles every extension send of its startup before RPC
+  mode reads its input, and an idle card's send lasted its whole turn, so a Legion worker's
+  `get_state` and task waited for it (once 72 minutes). Such a card now goes into the context with
+  no turn, and the wake starts its turn once the host is idle after its startup. Print, json and
+  terminal sessions keep the idle steer.
+
+## [11.8.0] - 2026-10-28
+
+### Added
+
+- Every registration names the plugin: `plugin` `@sjawhar/pi-envoy` and `plugin_version` this
+  package's version, which the listener's `GET /v1/sessions` and `GET /v1/registry/<id>`, and
+  `envoy_sessions`, show.
+
+### Fixed
+
+- A session whose NATS path freezes (packets stop, neither side closes) reconnects within 30 s,
+  52 s when its first redial also hangs, instead of after up to 6 minutes: it dials with
+  `@legion/envoy-client/nats-connection`'s options, a ping every 10 s and the connection dropped
+  after two unanswered pings, in place of nats.js's default 120 s ping. The reconnect runs the
+  catch-up, so the session shows the messages sent meanwhile once.
+- A NATS redial that hangs (its TCP connect, or a server that never sends `INFO`) is closed once
+  nats.js gives up on it at its 20 s dial timeout, instead of keeping its socket open for the
+  process's life: the bundle carries `patches/nats@2.29.3.patch`, which makes nats.js destroy the
+  socket of a transport that never finished connecting. The patch also makes nats.js close a stale
+  connection without flushing it first, so a session that published agent-stream frames after its
+  path froze still reconnects: the flush never completed behind data the dead path never
+  acknowledged, and the session never redialed.
+
+## [11.7.0] - 2026-10-28
+
+### Changed
+
+- The `dispatch` skill this plugin ships says what a claim delivers, where it said a claim delivers
+  no comments: a person's answers, comments and messages on the claimed issue reach the session,
+  and a new comment that mentions it arrives as the mention alone once that mention was delivered,
+  or twice when the mention's receipt timed out. A `session:` route to the session brings a
+  person's answers, comments and messages as a claim does; a subscription to the issue brings
+  other agents' activity, beyond a reply in an ask the session follows.
+- `dispatch issue-update --help` says closing an issue withdraws its open asks (record kind
+  `withdrawn`, naming the closer, written only by Dispatch) and a reopen brings back exactly those,
+  and `dispatch resolve-ask --help` says an ask on a closed issue is refused (`409 ISSUE_CLOSED`)
+  until the issue reopens.
+- Plugin interface version 4: the interface carries `startupTurn`, the session whose
+  first turn a start that runs after Oh My Pi's startup owns and when that start was sent, which
+  `@sjawhar/pi-legion` sets for its controller's start message and clears at that session's first
+  run or shutdown. Install it with the `@sjawhar/pi-legion` released beside it.
+
+## Before changelog fragments
+
+### Added
+
+- `dispatch search` prints, under each ask hit, where the ask stands: `Answered by …` with the
+  options chosen and `Answer text: …`, `Closed with no answer: …`, `Closed after an answer: …` with
+  `Last answer by …`, or `Open: no answer yet.`; against a Dispatch older than this release, which
+  reports no state, `Answer state not reported by this Dispatch; open the link to read the ask.`
+  Its description says an ask hit says whether it is answered (INFRA-569).
 
 - AskGate's marker checks at the `dispatch` CLI (no matching marker, a file changed after the
   review, a file missing when the gate ran) warn by default: the write posts with its warning and
@@ -328,6 +421,17 @@
   code 0.
 
 ### Changed
+
+- `dispatch-writing-specs`, "Old specs": text kept in a rewrite follows the text rules, and each
+  retelling, quotation or unlinked attribution in the old spec is restated as design or cut; a
+  requirement's linked `From:` source stays. Rewrites kept passages such as "You asked if …" word
+  for word, because the agent carried them over rather than wrote them. To stay under the
+  2,000-word guard, lines another loaded text already says are cut or merged: "Write about the
+  design, never the person" joins "State the current design, never how people reached it" as
+  "Write about the current design, never the person or how people reached it"; the list of
+  reference forms after "Link each source where the person wrote it" (`dispatch`, "References",
+  lists them); "A person's decision is their answered ask block" (`dispatch`: "Decisions are
+  asks"); and "approved spec's" in "The plan" (`dispatch-first`'s table says when to plan).
 
 - `dispatch-writing-specs` adds two rules for the text. A spec cites code by file and symbol, never
   a line number, since a line number is stale at the next edit. A sentence that cites a gate

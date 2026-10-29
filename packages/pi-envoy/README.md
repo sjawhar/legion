@@ -3,9 +3,9 @@
 `@sjawhar/pi-envoy` is the Oh My Pi extension for Envoy messaging and the `dispatch` command,
 the plugin every session loads. It shares the Envoy HTTP client, tool contract, envelope parsing,
 and subject helpers with the other Legion adapters while keeping OMP's direct NATS subscriptions
-and Pi steering delivery local (inbound messages steer an in-flight turn instead of queueing behind
-it). The Legion lifecycle — the entry a Legion pane boots a root architect, a phase worker or the
-controller with — is the separate plugin `@sjawhar/pi-legion` (`packages/pi-legion`), installed
+and Pi delivery local (an inbound message reaches an in-flight turn at its next step instead of
+waiting for it to end). The Legion lifecycle — the entry a Legion pane boots a root architect, a
+phase worker or the controller with — is the separate plugin `@sjawhar/pi-legion` (`packages/pi-legion`), installed
 beside this one in a Legion deployment; it reaches this plugin through the in-process interface
 described in `packages/pi-shared/AGENTS.md`.
 
@@ -38,7 +38,9 @@ A message published while the session's NATS connection or one of its subscripti
 recovered from Envoy's notification stream, which keeps messages for 72 hours: the session asks
 its listener (`POST /v1/replay`) for what the stream stored on its own agent subject and on each
 topic it follows, after the place it last read to, and shows each missed message once, as a card
-saying it was published while the connection was down. It asks after it reconnects, after a
+saying it was published while the connection was down. The session pings NATS every 10 seconds
+and drops a connection that leaves two pings unanswered, so a connection that stops answering
+without closing is left within 30 seconds and redialed. It asks after it reconnects, after a
 subscription is reopened, when it starts or resumes, and on every heartbeat. A targeted Dispatch
 delivery recovered this way (BTW, Aside, Steer, a person's Send) is shown as that card only and
 runs nothing. Role messages and team or other ad-hoc topics are live only and are not recovered,
@@ -66,7 +68,7 @@ set -g set-clipboard on
 ## Development install
 
 This package declares one OMP extension entry in `package.json`, `extensions/envoy.ts`: Envoy
-messaging, subscriptions, steering delivery, and the Dispatch tools. For local development, link
+messaging, subscriptions, inbound delivery, and the Dispatch tools. For local development, link
 the entry into OMP:
 
 ```sh
@@ -89,10 +91,10 @@ omp plugin install @sjawhar/pi-envoy
 ```
 
 A session that had the pre-split package installed (the one package that carried both entries
-until 7.x) uninstalls it and installs this one once; the Unreleased entry of `CHANGELOG.md` gives
-the two commands. A Legion deployment installs `@sjawhar/pi-legion` as well
-(`packages/pi-legion/README.md`); the daemon's boot gate refuses a pane that still loads the
-pre-split package beside the new ones.
+until 7.x) uninstalls it and installs this one once; the `CHANGELOG.md` entry that renames the
+package `@sjawhar/pi-envoy` gives the two commands. A Legion deployment installs
+`@sjawhar/pi-legion` as well (`packages/pi-legion/README.md`); the daemon's boot gate refuses a
+pane that still loads the pre-split package beside the new ones.
 
 The tarball is self-contained: it ships `dist/envoy.js` — bundling every dependency except the OMP
 host packages (`@legion/pi-shared`, `@legion/contracts` and `@legion/envoy-client` are inlined) —
@@ -115,8 +117,8 @@ for `omp.extensions` (only `omp.skills` ships as committed, since `dist/skills` 
 a repo checkout after the prepack and the published tarball), while the committed manifest keeps
 the TypeScript entry for repo checkouts. In `.github/workflows/release.yaml`, the `pi_envoy_build`
 job rewrites the manifest before `bun pm pack` and uploads the tarball (its tree is discarded,
-nothing is restored); the `pi_envoy_publish` job publishes that tarball and commits the version bump
-to the committed manifest, touching `.version` alone.
+nothing is restored); the `publish` job publishes that tarball and commits the version bump to the
+committed manifest, touching `.version` alone.
 Packing with the committed source manifest is refused by the prepack, because such a tarball would
 point OMP at an extension file it does not contain.
 

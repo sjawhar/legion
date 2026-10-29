@@ -37,7 +37,9 @@ merger — runs from one image, `ghcr.io/sjawhar/legion-worker` (public). It car
   probe refuses an image whose Envoy plugin does. A human debugging inside a pod with a bare `omp` has
   the CodeGraph tool and the repository's extensions but no Legion or Envoy tools unless it passes
   `--extension /opt/legion/pi-envoy --extension /opt/legion/pi-legion`;
-- `@bopstack/pi-codegraph` (from npm, pinned), the one plugin linked into the OMP profile `legion`
+- `@bopstack/pi-codegraph`, installed at `/opt/omp-plugins` from the committed lockfile at
+  `packages/daemon/docker/omp-plugins` (its `package.json` is the pin; the build resolves nothing from
+  npm), the one plugin linked into the OMP profile `legion`
   (`OMP_PROFILE=legion`; plugins resolve to `/home/legion/.omp/profiles/legion/plugins/node_modules`),
   backed by the CodeGraph CLI (`@colbymchenry/codegraph`, pinned) at `/opt/codegraph/bin` (`PATH`) — the
   `codegraph` tool a tester queries for `affected` tests and a reviewer for `impact`/`callers` blast
@@ -180,9 +182,9 @@ the OMP fork release has no linux/arm64 build. One commit ⇒ one image, with on
 fresh pod still loads the image's own copies of `@sjawhar/pi-envoy` and `@sjawhar/pi-legion`, from
 the commit, never from an npm release, but a role relaunched onto a newer plugin contract in a
 kept pod loads the release's published pair, installed from npm under the generation directory
-("Contract discipline" below) — what the image does take from npm (the CodeGraph plugin and
-CLI, TypeScript and the two npm language servers) is pinned by the `ARG`s at the top of
-`worker.Dockerfile`.
+("Contract discipline" below) — what the image does take from npm is pinned: the CodeGraph CLI by an
+`ARG` at the top of `worker.Dockerfile`, and the CodeGraph plugin, TypeScript and the two npm language
+servers by the committed lockfiles under `packages/daemon/docker/` (`omp-plugins`, `language-servers`).
 
 ### The tools a role's own work needs
 
@@ -276,8 +278,16 @@ The image probe's own wait is derived from the same key: each attempt's budget i
 `slow_command_timeout_seconds` (300 s by default), or, when `worker_boot_timeout_seconds` plus a
 60 s margin is larger, that instead (`ProbeBudget`, `packages/daemon/internal/daemon/kubernetes.go`)
 — so the capacity stop below (under "The image is probed before it publishes") always has room,
-within one attempt, to see a probe pod's Unschedulable age pass the boot timeout. The boot log
-names the derived bound when it applies, and so does `legion start --check-config`.
+within one attempt, to see a probe pod's Unschedulable age pass the boot timeout. From Sandbox
+creation through the probe container starting, the daemon allows a separate 300 s startup phase:
+the documented 213 s cold start fits that bound. Once it observes the probe container running, it
+starts the command phase for the attempt budget and gives `probe-image` a relative command budget
+60 s shorter, leaving the command's deadline to report before the daemon collects its exit and log.
+Pod scheduling and image pull consume the startup phase, so the worst-case boot wait is the 300 s
+startup bound plus the attempt budget. The TLS clients each have their own 20 s bound except
+Chromium's 90 s cold-start bound. A command stopped by the aggregate budget is unavailable with
+`probe deadline`, so the image probe fails closed naming its client and site. The boot log names a
+derived bound when it applies, and so does `legion start --check-config`.
 Oh My Pi's boot after it fits the registration deadline,
 `worker_boot_timeout_seconds × worker_boot_registration_deadline_intervals` (360 s by default). The
 stage 4a harness's `image-probe` and `root-ready` checks (`scripts/e2e/README.md`) are where a
@@ -451,8 +461,9 @@ Where the digest is published:
   `<legion version>` worker-image tag.
 
 Worker-image tags: `sha-<12 hex of the built commit>` on every run that builds (on a pull request that is the
-PR head, never the ephemeral merge commit); `<legion version>` only on `main` when the `legion_publish`
-job released that version in the same run. Runs from any other ref publish the `sha-` worker-image tag
+PR head, never the ephemeral merge commit); `<legion version>` only on `main` when the `publish`
+job released that version in the same run, added after it by `release.yaml`'s `worker_image_release`
+job on the digest that run's `worker_image` pushed. Runs from any other ref publish the `sha-` worker-image tag
 only and never touch a release. The package also currently holds `sha256-<image digest hex>` OCI
 referrer indexes from earlier proof runs; each holds an attestation, not a worker image, so
 inspecting one does not print a worker-image digest.
@@ -462,7 +473,9 @@ too, when two runs build one commit the tag names whichever pushed last, and a p
 the workflow, whose token can push, to point a `sha-` tag at any digest already in the package. The
 digest's GitHub artifact attestation does say. Every run except a pull request's ends
 with the workflow's `attest` job, which attests the pushed digest with
-`actions/attest-build-provenance` and stores the attestation with GitHub. Its Sigstore certificate
+`actions/attest-build-provenance` and stores the attestation with GitHub; in `release.yaml` that is a
+second call of the workflow after the `publish` job, which on `main` attests only when both plugins the
+image links are on npm. Its Sigstore certificate
 carries what the run's OIDC token says, which no workflow edit can change: its identity is the
 workflow file at the ref it was read from, and its source ref and source digest are the ref and commit
 the run started on. To accept a digest only when a run on `main` built it from commit `<C>`, the
@@ -502,9 +515,10 @@ The attestation is separate from the image's own BuildKit provenance, which the 
 cache under the image's own scope (`cache-from: type=gha,scope=worker-image`, and on `main` only
 `cache-to: type=gha,mode=max,scope=worker-image`), read by every build and written only by a build on
 `main`, pushed with the workflow's own `GITHUB_TOKEN`
-— no third-party builder, no project variable, no extra credential. It runs (1) from `release.yaml` after
-the `legion_build` and `legion_publish` jobs on every `main` push that touches any file the image builds
-from, (2) on a pull request against `main` whose diff touches any of those files — building
+— no third-party builder, no project variable, no extra credential. It runs (1) from `release.yaml` on
+every `main` run (its push paths include every file the image builds from): a build-only call beside the
+`publish` job, linking the plugin pair `legion_build` decided, then an attest-only call after `publish`;
+(2) on a pull request against `main` whose diff touches any of those files — building
 the PR head and publishing `sha-` only — and (3) by `gh workflow run worker-image.yaml --ref <ref>` once the
 workflow exists on `main`. Trigger (2) does not build every head. A draft's head builds no image and
 publishes no `sha-` tag. Marking the pull request ready builds that head. A newer push to the pull
@@ -543,11 +557,14 @@ pushing the PR branch (trigger 2; a draft builds only once it is marked ready, a
 previous head's build) or, once merged, dispatching (trigger 3); check the Dockerfile and workflow
 statically (`hadolint`, `actionlint` where installed) and run `bun test` for the TypeScript. Pulling and
 running the published image locally is fine. A failed build is retried with `gh run rerun <run-id> --failed`
-(`--failed` keeps `legion_build`'s and `legion_publish`'s recorded outputs) or by pushing the branch again. A
-whole-run rerun of a `release.yaml` call, or a `workflow_dispatch` of it while main's tip still carries a
-`legion-v` tag, re-executes `legion_build` and `legion_publish`, which release that tag again: the image is
-rebuilt, the `<legion version>` tag moves to the rebuild's digest, and the release body's "Worker image" names
-that digest. `release-envoy-listener.yaml` needs no re-run when its `release_publish` finds, at "Confirm the
+or by pushing the branch again. In a `release.yaml` run, `--failed` keeps the build jobs' recorded outputs,
+and a failed `publish` reruns whole, each step safe to repeat: npm reuses a published version, the tag step
+accepts its own tag, the push to `main` pushes nothing once `main` holds that version, and the release step
+reuses a published release. A whole-run rerun of `release.yaml`, or a `workflow_dispatch` of it while main's
+tip still carries a `legion-v` tag, re-executes `legion_build`, which decides the same version (it holds no
+credential), and `publish` releases that tag again, each step safe to repeat: the image is rebuilt,
+`worker_image_release` moves the `<legion version>` tag to the rebuild's digest, and the release body's
+"Worker image" names that digest. `release-envoy-listener.yaml` needs no re-run when its `release_publish` finds, at "Confirm the
 version", that another run took the tag first: it publishes nothing and, when its commit still needs a release
 and no later run on main still running holds it, starts a new run on main itself, which decides the version again
 and re-stamps the binaries.
@@ -6295,10 +6312,14 @@ to the same rule, and lets the group read only a root-owned file, as a pod's kub
 `--daemon-url <url>`, which replaces it) is the daemon's API as your machine reaches it. In order, and
 keeping nothing until the daemon has answered, the command:
 
-1. reads the file and refuses as above, and refuses a blank or unreadable Envoy or Dispatch token
-   file, a `nats_nkey_seed_file` that is blank, unreadable, readable by its group or others, or
-   holds no nkey user seed, a missing or blank instructions file, and an Oh My Pi invocation that
-   does not resolve;
+1. reads the file and refuses as above, the operator token file others can read included; then
+   refuses a stdin that is not a terminal (``stdin is not a terminal: Oh My Pi would run headless
+   print mode, …; run `legion controller start` at a terminal``), since given step 6's positional
+   word with no terminal Oh My Pi runs headless print mode, which would run the start command only
+   after step 3's mint had revoked the running controller; then a blank or unreadable Envoy or
+   Dispatch token file, a `nats_nkey_seed_file` that is blank, unreadable, readable by its group or
+   others, or holds no nkey user seed, a missing or blank instructions file, and an Oh My Pi
+   invocation that does not resolve;
 2. reads the project's repositories from the daemon's unauthenticated `GET /legion/v1/state`
    (`repositories`), since the controller's addressing names them, and refuses a daemon that does
    not answer, a body with no `repositories` object, and a mapped entry that is not `owner/name`;
@@ -6345,16 +6366,19 @@ keeping nothing until the daemon has answered, the command:
    script, a `gh` wrapper of the operator's machine that would answer in place of the review App;
 6. runs Oh My Pi interactive in the foreground (`omp_launch_prefix` and `omp_invocation`, one joined
    `--append-system-prompt` holding the controller prompt, the daemon's `Design gate policy:` line,
-   the project's repositories sentence and the deployment instructions, no `--resume`, no
-   `--mode rpc`) with the controller's
+   the project's repositories sentence and the deployment instructions, then the one positional
+   word `/legion-controller-start`, no `--resume`, no `--mode rpc`) with the controller's
    environment (`LEGION_CONTROLLER=1`, `LEGION_ROLE=controller`, `LEGION_DAEMON_URL`,
-   `LEGION_PROJECT`, `LEGION_STATE_DIR`, `LEGION_CONTROLLER_START_MESSAGE` (the pi-legion
-   extension sends it as the session's first turn right after its role claim succeeds and before
-   it opens the live wake subscription, so the controller's first turn runs its start procedure
-   deterministically, with nothing typed, rather than racing a wake for the session's one
-   first-turn slot — LEGION-392), its grant and secret files, `LEGION_GH_OWNERS_DIR` naming
-   `<state_dir>/gh` (the bundle step 5 wrote), `GH_CONFIG_DIR` its default owner's directory (the
-   bundle's root, empty, when the daemon has no GitHub App), `LEGION_GH_PATH` the real gh, with
+   `LEGION_PROJECT`, `LEGION_STATE_DIR`, `LEGION_CONTROLLER_START_MESSAGE` (Oh My Pi runs the
+   positional word once its startup is over and its TUI listens, and pi-legion's command of that
+   name claims the controller and sends the message as the session's first turn, which the
+   operator sees, can type during and can interrupt with Esc; it sends it once the controller is
+   registered, right before the role claim and the live wake subscription, so the controller's
+   first turn runs its start procedure deterministically, with nothing typed, rather than racing a
+   card or a wake for the session's one first-turn slot — LEGION-392), its grant and secret files,
+   `LEGION_GH_OWNERS_DIR` naming `<state_dir>/gh` (the bundle step 5 wrote), `GH_CONFIG_DIR` its
+   default owner's directory (the bundle's root, empty, when the daemon has no GitHub App),
+   `LEGION_GH_PATH` the real gh, with
    `GH_TOKEN`, `GITHUB_TOKEN` and `GH_HOST` emptied, so nothing inherited outranks the files, the
    Envoy and Dispatch
    endpoints, and `NATS_NKEY_SEED_FILE` naming `nats_nkey_seed_file` when the file sets it) on top

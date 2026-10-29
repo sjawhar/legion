@@ -193,7 +193,7 @@ test("agentWrittenAskBlockAppearsAndAnswersInPlace", async ({ browser }, testInf
   }
 });
 
-test("a reader asks back from a decision block: the question threads under the block, the decision stays open, and the Inbox row shows the reply", async ({
+test("a reader asks back from a decision block: the question threads under the block, the decision stays open, and the Inbox row shows the reply @phone", async ({
   browser,
 }, testInfo) => {
   await createProject({ key: "CORE", name: "Core" });
@@ -338,11 +338,12 @@ test("a failed in-document decision answer reports inside the failed block and c
   const alice = await asUser(browser, "alice");
   try {
     const page = await alice.newPage();
+    // Dispatch's verdict: a 5xx would be tried again under the answer's key, not refused.
     await page.route("**/api/v1/asks/*/answer", async (route) => {
       await route.fulfill({
-        body: JSON.stringify({ error: "simulated failure" }),
+        body: JSON.stringify({ code: "ASK_INPUT", error: "Dispatch refused the answer" }),
         contentType: "application/json",
-        status: 500,
+        status: 400,
       });
     });
     await page.goto(`/issues/${issue.key}`);

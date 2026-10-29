@@ -14,6 +14,7 @@ import (
 	"testing"
 
 	"github.com/sjawhar/envoy/internal/dispatch/store/storetest"
+	"github.com/sjawhar/envoy/internal/logtest"
 )
 
 // The WARN lines the singular routes log, one per call, so an operator can find the callers that
@@ -30,10 +31,8 @@ const (
 // read from an offset, never a buffer the test resets.
 func captureSourceWarnings(t *testing.T) func() []string {
 	t.Helper()
-	previous := slog.Default()
 	logs := &storetest.LockedLog{}
-	slog.SetDefault(slog.New(slog.NewJSONHandler(logs, nil)))
-	t.Cleanup(func() { slog.SetDefault(previous) })
+	logtest.SetDefault(t, slog.NewJSONHandler(logs, nil))
 	read := 0
 	return func() []string {
 		t.Helper()
