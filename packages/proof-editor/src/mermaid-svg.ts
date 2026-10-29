@@ -1,3 +1,11 @@
+/**
+ * `@legion/proof-editor/mermaid`: the DOM half of a Mermaid diagram, for Dispatch's Markdown bodies
+ * and for the editor's mermaid code blocks alike. It sanitizes the markup the renderer returns,
+ * mounts the result in a shadow root so its styles stay inside it, and declares the contract by
+ * which the editor asks its host to draw a diagram. It imports nothing from upstream, so a page
+ * imports it without beautiful-mermaid or ELK; the render itself runs in the host's Web Worker.
+ */
+
 const SVG_NAMESPACE = "http://www.w3.org/2000/svg";
 
 /** The elements beautiful-mermaid emits, measured over one diagram of each type it draws
@@ -27,8 +35,7 @@ const ALLOWED_ELEMENTS: ReadonlySet<string> = new Set([
  * Turns the markup `renderMermaidMarkup` (`@legion/proof-editor/mermaid-render`) returns into an
  * `<svg>` of `document`, sanitized by `sanitizeMermaidSvg` rather than by upstream's private
  * `sanitizeSvg`, with the editor's accessible name. Markup that is not an SVG document throws
- * `Error("Invalid SVG output")`. This module imports nothing from upstream, so a page imports it
- * without beautiful-mermaid or ELK; the render runs in a Web Worker.
+ * `Error("Invalid SVG output")`.
  */
 export function mermaidSvgElement(markup: string, document: Document): SVGSVGElement {
   const svg = sanitizeMermaidSvg(markup, document);
@@ -37,17 +44,43 @@ export function mermaidSvgElement(markup: string, document: Document): SVGSVGEle
   return svg;
 }
 
+/** A drawn source: the sanitized diagram (shared; a consumer inserts a clone, as `showMermaidSvg`
+ *  does), the full status text of a refusal, or `unavailable` when no renderer can draw the source
+ *  (the host's worker failed to start or load), so the block shows its source as code, with no
+ *  status line. */
+export type MermaidDrawing = { svg: SVGSVGElement } | { error: string } | { unavailable: true };
+
+/** Draws `source` for the editor: calls `draw` at most once and never after the returned cancel
+ *  runs — synchronously inside the call when the drawing is cached or no renderer can run
+ *  (`unavailable`), later when the renderer answers or fails. Returns the cancel. */
+export type MermaidDrawer = (source: string, draw: (drawing: MermaidDrawing) => void) => () => void;
+
+/**
+ * Mounts `svg` (cloned into `host`'s document) with a `<style>` holding `sheet` in `host`'s open
+ * shadow root, replacing whatever the root held, so neither the diagram's own `<style>` nor
+ * `sheet` reaches the page and the page's rules do not reach the diagram. The root is created
+ * once and reused: `attachShadow` throws on a second call, and a block redraws into the same
+ * element on every edit.
+ */
+export function showMermaidSvg(host: HTMLElement, svg: SVGSVGElement, sheet: string): void {
+  const document = host.ownerDocument;
+  const root = host.shadowRoot ?? host.attachShadow({ mode: "open" });
+  const style = document.createElement("style");
+  style.textContent = sheet;
+  root.replaceChildren(style, document.importNode(svg, true));
+}
+
 /**
  * Parses SVG markup and returns its `<svg>` imported into `document`; markup that is not an SVG
  * document — one that does not parse, or whose root is not the SVG namespace's `svg` by its exact,
  * case-sensitive name — throws `Error("Invalid SVG output")`. Stricter than upstream's private
  * `sanitizeSvg`, which blocks five tags, keeps every `href` but a `javascript:` one and keeps the
- * Google Fonts `@import`: this SVG comes from a comment, which any person or agent writes, and goes
- * into pages that hold no document. So only the elements beautiful-mermaid emits survive, matched
- * by exact local name; every `on*` and `href` attribute goes, matched case-insensitively, which is
- * stricter than XML asks; every attribute but a `data-*` one whose value holds a CSS escape (`\`)
- * or a function that fetches (`url(…)` other than a local `url(#id)`, `image-set(…)`, `image(…)`,
- * `cross-fade(…)`, `src(…)`, `element(…)`) goes, which covers an author's `classDef`/`style` paint
+ * Google Fonts `@import`: this SVG comes from a comment or a document, which any person or agent
+ * writes. So only the elements beautiful-mermaid emits survive, matched by exact local name; every
+ * `on*` and `href` attribute goes, matched case-insensitively, which is stricter than XML asks;
+ * every attribute but a `data-*` one whose value holds a CSS escape (`\`) or a function that
+ * fetches (`url(…)` other than a local `url(#id)`, `image-set(…)`, `image(…)`, `cross-fade(…)`,
+ * `src(…)`, `element(…)`) goes, which covers an author's `classDef`/`style` paint
  * such as `fill:url(https://…)` or its escaped spelling `fill:\75rl(https://…)`; and each
  * `<style>` loses its `@import` rules. The parser and every node come from `document` and its
  * window, never from the global scope.

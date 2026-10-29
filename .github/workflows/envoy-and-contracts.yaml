@@ -155,6 +155,7 @@ jobs:
       dispatch: ${{ steps.filter.outputs.dispatch }}
       dispatch_memory: ${{ steps.filter.outputs.dispatch_memory }}
       dispatch_multiprocess: ${{ steps.filter.outputs.dispatch_multiprocess }}
+      dispatch_browser_multiprocess: ${{ steps.filter.outputs.dispatch_browser_multiprocess }}
       broker_multiprocess: ${{ steps.filter.outputs.broker_multiprocess }}
       envoy_go_race: ${{ steps.filter.outputs.envoy_go_race }}
       envoy_infra_go: ${{ steps.filter.outputs.envoy_infra_go }}
@@ -168,7 +169,7 @@ jobs:
           # Each filter names everything its job's checks read: the package and what its tests
           # and typecheck read outside it, the composite actions the job installs its tools
           # through, and, for a Go build in workspace mode, every module go.work binds, whose
-          # go.mod moves the versions the build compiles. Each of the five per-job filters
+          # go.mod moves the versions the build compiles. Each of the five per-job Go filters
           # (dispatch_memory, dispatch_multiprocess, broker_multiprocess, envoy_go_race,
           # envoy_infra_go) names the packages `go list -deps -test` lists for the job's command,
           # with its build tags, the packages of each binary its tests build, and the files its
@@ -178,7 +179,8 @@ jobs:
           # the import still runs the job and nothing else reports the filter falling behind. The
           # first keys, each defined with an `&anchor`, are no job's gate: each is a group written
           # once and named by the filters that need it through its anchor, which dorny/paths-filter
-          # flattens into the list that names it.
+          # flattens into the list that names it. `dispatch` is the exception: it gates the
+          # dispatch job and carries an anchor so dispatch_browser_multiprocess can name it.
           filters: |
             # The Bun pin and the action that installs it (.github/actions/setup-bun reads
             # .bun-version).
@@ -642,7 +644,7 @@ jobs:
               - 'packages/dispatch/e2e/api.ts'
               - 'packages/dispatch/e2e/harness-ports.ts'
               - 'packages/dispatch/web/src/api/types.ts'
-            dispatch:
+            dispatch: &dispatch
               - 'packages/dispatch/**'
               - 'packages/proof-editor/**'
               - 'packages/contracts/**'
@@ -698,6 +700,11 @@ jobs:
               - 'scripts/third-party-notices.ts'
               # e2e/run-server.sh serves the browser tests' server on the socket this holds.
               - 'scripts/e2e/lib/held-port.py'
+            # The gate of dispatch-browser-multiprocess: the dispatch list, plus this workflow,
+            # which holds the job's Postgres image and steps.
+            dispatch_browser_multiprocess:
+              - '.github/workflows/envoy-and-contracts.yaml'
+              - *dispatch
 
   contracts:
     needs: changes
@@ -1084,14 +1091,16 @@ jobs:
   # envoy-dispatch processes against one Postgres, behind e2e/round-robin-proxy.ts, B serving a
   # second build of the dashboard, which is what a rolling release puts in front of a browser. It
   # runs only the *.multiprocess.e2e.ts specs, in Chromium, in a job of its own so the default
-  # suite's job does not wait on a second Vite build and two more servers.
+  # suite's job does not wait on a second Vite build and two more servers. It runs when a file its
+  # dispatch_browser_multiprocess filter names changes: the dispatch filter's files plus this
+  # workflow, so an edit of this job's own definition runs it.
   dispatch-browser-multiprocess:
     needs: changes
-    if: needs.changes.outputs.dispatch == 'true'
+    if: needs.changes.outputs.dispatch_browser_multiprocess == 'true'
     runs-on: ubuntu-24.04
     services:
       postgres:
-        image: mirror.gcr.io/pgvector/pgvector@sha256:7b822b0aac60967beb1ea5e576b8602c94c300a157d187f385ae3e0da199b90a
+        image: mirror.gcr.io/pgvector/pgvector@sha256:2358fcba361ed2233a5ed81b5fe4ca779ccb304120ce531a3bf51c0ed7e2bc11
         env:
           POSTGRES_PASSWORD: ci
         ports: ["5432:5432"]

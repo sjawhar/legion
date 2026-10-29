@@ -116,7 +116,7 @@ func openState(tb testing.TB) bus.KeyValue {
 	if err != nil {
 		tb.Fatalf("JetStream: %v", err)
 	}
-	state, err := redeliver.OpenState(js)
+	state, err := redeliver.OpenState(js, 1)
 	if err != nil {
 		tb.Fatalf("open redelivery state: %v", err)
 	}

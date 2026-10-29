@@ -19,10 +19,17 @@ type renderer struct {
 	labelBrackets labelBrackets
 	// heldLineStart is the current line's first text character, held until the line is written.
 	heldLineStart *lineCandidate
+	// openers is each text `<` the inline run being written wrote as it is (angleOpener), and
+	// escapedOpeners those of them its writing again escapes (writeInlineRun).
+	openers, escapedOpeners []angleOpener
 	// footnoteLineAt is where the last footnote definition's first line begins in the markdown,
 	// and footnoteLabel is its label as written, so that the line is read after a reference to it.
 	footnoteLineAt int
 	footnoteLabel  string
+	// checkboxEnd is where the last task item's checkbox (`[ ] `, `[x] `) ends in the markdown, or 0
+	// before any, so that the text written after it on its line is not read as the line's first
+	// (holdLineStart).
+	checkboxEnd int
 	// scopes is a frame for each container the blocks being written stand in, outermost first
 	// (scope).
 	scopes []scope
@@ -503,6 +510,7 @@ func (r *renderer) list(n *Node, prefix string) {
 			} else {
 				r.writeSyntax("[ ] ")
 			}
+			r.checkboxEnd = r.b.Len()
 		}
 		indent := prefix + strings.Repeat(" ", len(marker))
 		// An empty first paragraph is written as nothing, with the next block on the marker's line:
@@ -698,30 +706,28 @@ func isBareURLLink(node *Node, marks []Mark, escapePipes bool) bool {
 }
 
 // isBareAutolink reports whether a link whose text is its href can be written as that bare text for
-// linkify to link again. A backtick in it would be written escaped, and linkify reads the escape's
-// backslash into the URL, so such a link is written as an autolink (isAngleURLLink). A URL the
-// tokenizer reads at all (literalLength), its scheme in any case, must be read whole: one ending in
-// punctuation the tokenizer leaves out of a URL before an end (literalTrail) is never read back
-// whole. One the tokenizer refuses outright, such as a host opening with `-`, goldmark's parser
-// reads (linkifyGuard), and it is held to goldmark's rule, which reads a lowercase scheme alone.
+// the readers to link again. A backtick in it would be written escaped, and the tokenizer reads the
+// escape's backslash into the URL, so such a link is written as an autolink (isAngleURLLink). A URL
+// the tokenizer reads at all (literalLength), its scheme in any case, must be read whole: one ending
+// in punctuation the tokenizer leaves out of a URL before an end (literalTrail) is never read back
+// whole. One the tokenizer refuses, such as a host opening with `-`, the transform reads from the
+// text's decoding, and must be read whole there (findURLs).
 func isBareAutolink(value string) bool {
-	if value == "" || strings.ContainsAny(value, " \t\n<>`") {
+	if value == "" || strings.ContainsAny(value, " \t\n<>`") || len(value) >= len("www.") && strings.EqualFold(value[:len("www.")], "www.") {
 		return false
 	}
 	if length := literalLength(value); length != 0 {
-		return length == len(value) && !(len(value) >= len("www.") && strings.EqualFold(value[:len("www.")], "www."))
+		return length == len(value)
 	}
-	if strings.ContainsAny(value, "()") || !strings.HasPrefix(value, "http://") && !strings.HasPrefix(value, "https://") {
-		return false
-	}
-	return !strings.ContainsAny(value[len(value)-1:], ".,!?;:")
+	urls := findURLs(value)
+	return len(urls) == 1 && urls[0].start == 0 && urls[0].end == len(value)
 }
 
 // isBareWWWLink reports whether node is a www link, its href `http://` and its text, that the
 // tokenizer reads whole from that text (literalLength), which is written as the bare text where the
-// character before it is one a www URL follows (renderer.wwwMayFollow) and its run reads back so
-// (inlineWithEscapes), and as an explicit link otherwise (runSpelling.angleURLs). Text whose run of
-// email characters from its start reaches an `@` is not one: the editor reads it as an email.
+// character before it is one the readers read a www URL after (renderer.wwwMayFollow) and its run
+// reads back so (inlineWithEscapes), and as an explicit link otherwise (runSpelling.angleURLs). Text
+// the tokenizer reads an email from is not one: it tries an email first.
 func isBareWWWLink(node *Node, marks []Mark, escapePipes bool) bool {
 	for _, mark := range marks {
 		if mark.Type != "link" {
@@ -731,42 +737,50 @@ func isBareWWWLink(node *Node, marks []Mark, escapePipes bool) bool {
 		title, _ := mark.Attrs["title"].(string)
 		value := node.Text
 		return title == "" && href == "http://"+value && len(value) > len("www.") && strings.EqualFold(value[:len("www.")], "www.") &&
-			!strings.ContainsAny(value, " \t\n<>`") && !(escapePipes && strings.Contains(value, "|")) && !opensEmail(value) &&
+			!strings.ContainsAny(value, " \t\n<>`") && !(escapePipes && strings.Contains(value, "|")) && literalEmail([]byte(value)) == 0 &&
 			literalLength(value) == len(value)
 	}
 	return false
 }
 
-// opensEmail reports whether the run of email address characters (`+`, `-`, `.`, `_`, letters and
-// digits) value opens with reaches an `@`, where the editor's parser tries an email first.
-func opensEmail(value string) bool {
-	for index := range len(value) {
-		switch c := value[index]; {
-		case c == '@':
-			return true
-		case isASCIIAlphaNumeric(c) || c == '+' || c == '-' || c == '.' || c == '_':
-		default:
+// isBareEmailLink reports whether node is an email link: its text an address the transform's email
+// pattern matches whole and links standing alone (findEmails), its href that address's (emailHref).
+// Such a link is written explicit, and as its text, escaped as text is, only where its run reads
+// back in no other spelling (runSpelling.bareEmails): after an explicit link the engine begins a
+// text node, which it searches for an address of its own, so text after the link that holds one
+// at its start reads back linked; written bare, the link and that text are one text node, searched
+// once.
+func isBareEmailLink(node *Node, marks []Mark) bool {
+	for _, mark := range marks {
+		if mark.Type != "link" {
+			continue
+		}
+		href, _ := mark.Attrs["href"].(string)
+		title, _ := mark.Attrs["title"].(string)
+		value := node.Text
+		if title != "" || href != emailHref(value) {
 			return false
 		}
+		found := findEmails(nil, value, 0, len(value))
+		return len(found) == 1 && found[0].start == 0 && found[0].end == len(value)
 	}
 	return false
 }
 
 // literalLength is the length of the URL the browser editor's tokenizer reads from value, or 0. A
 // bare URL it reads is written as its bytes are: the tokenizer reads a URL's escapes and
-// references as written. goldmark's parser, which reads one the tokenizer refuses, keeps them as
-// written too, but the editor reads such a URL from decoded text, so its text is escaped as other
-// text is.
+// references as written. The transform, which reads one the tokenizer refuses, reads it from the
+// decoded text, so its text is escaped as other text is.
 func literalLength(value string) int {
-	length, _, _ := literalURL([]byte(value), &literalDomains{from: -1, end: -1})
+	length, _ := literalURL([]byte(value), &literalDomains{from: -1, end: -1})
 	return length
 }
 
 // isAngleURLLink reports whether node is a link whose text is its href, holding a backtick, which
 // is written `<href>`, as the browser editor writes it: both parsers read an autolink's text as
-// written, escapes and references included, where bare text would be escaped and linkify would read
-// the escape's backslash into the URL. One an autolink cannot hold (whitespace, `<`, `>`, a pipe in a
-// table cell) is written as an explicit link.
+// written, escapes and references included, where bare text would be escaped and the tokenizer
+// would read the escape's backslash into the URL. One an autolink cannot hold (whitespace, `<`,
+// `>`, a pipe in a table cell) is written as an explicit link.
 func isAngleURLLink(node *Node, marks []Mark, escapePipes bool) bool {
 	for _, mark := range marks {
 		if mark.Type != "link" {
@@ -782,43 +796,66 @@ func isAngleURLLink(node *Node, marks []Mark, escapePipes bool) bool {
 	return false
 }
 
+// escapeLinkDestination writes a link's href as its destination (escapeDestination), an ampersand
+// that would open a character reference written as `&amp;`, so a stored destination such as
+// `x?a=1&amp;amp;b=2` keeps its bytes.
 func escapeLinkDestination(href string, escapePipes bool) string {
-	if escapePipes {
-		href = escapeTableLinkDestination(href)
-	}
-	if strings.ContainsAny(href, " ()") {
-		return "<" + href + ">"
-	}
-	return href
+	return escapeDestination(href, escapePipes, "&amp;")
 }
 
-// escapeImageSource writes an image's address so that the browser editor's parser, which decodes
-// a destination's escapes and character references, reads it back: a backslash before ASCII
-// punctuation or at the address's end, where it would escape the closing parenthesis or angle
-// bracket, is doubled, an ampersand is escaped where it would open a character reference
-// (characterReferenceAt), and in a table a pipe is escaped as well. An address holding a space or
-// a parenthesis is then written in angle brackets, as escapeLinkDestination writes a link's.
+// escapeImageSource writes an image's address as its destination (escapeDestination), an
+// ampersand that would open a character reference written as `\&`.
 func escapeImageSource(src string, escapePipes bool) string {
-	if strings.ContainsAny(src, "\\&|") {
-		var written strings.Builder
-		written.Grow(len(src))
-		for index := range len(src) {
-			char := src[index]
-			switch {
-			case char == '\\' && (index+1 == len(src) || isASCIIPunctuation(src[index+1])):
-				written.WriteByte('\\')
-			case char == '|' && escapePipes:
-				written.WriteByte('\\')
-			case char == '&':
-				if _, _, ok := characterReferenceAt(src, index); ok {
-					written.WriteByte('\\')
-				}
-			}
-			written.WriteByte(char)
-		}
-		src = written.String()
+	return escapeDestination(src, escapePipes, `\&`)
+}
+
+// escapeDestination writes href as a destination that both readers, which decode a destination's
+// escapes and character references, read back as href: a backslash before ASCII punctuation or
+// ending href, which would escape what follows it, is escaped, an ampersand where it would open a
+// character reference (characterReferenceAt) is written as ampersand, an ASCII control character
+// (asciiControl), which ends a destination or is none to the engine's parser, is written as its
+// numeric reference, and a pipe in a table cell is escaped. An href holding a space or a
+// parenthesis is written between angle brackets, a `<` or `>` in it escaped; any other is written
+// bare, a `<` opening it escaped.
+func escapeDestination(href string, escapePipes bool, ampersand string) string {
+	angle := strings.ContainsAny(href, " ()")
+	if !angle && !strings.ContainsAny(href, "\\&") && !strings.HasPrefix(href, "<") && !(escapePipes && strings.Contains(href, "|")) &&
+		!strings.ContainsFunc(href, asciiControl) {
+		return href
 	}
-	return escapeLinkDestination(src, false)
+	var written strings.Builder
+	written.Grow(len(href) + 4)
+	if angle {
+		written.WriteByte('<')
+	}
+	for index := range len(href) {
+		char := href[index]
+		switch {
+		case char == '\\' && (index+1 == len(href) || isASCIIPunctuation(href[index+1])),
+			char == '|' && escapePipes,
+			char == '<' && (angle || index == 0),
+			char == '>' && angle:
+			written.WriteByte('\\')
+		case char == '&':
+			if _, _, ok := characterReferenceAt(href, index); ok {
+				written.WriteString(ampersand)
+				continue
+			}
+		case asciiControl(rune(char)):
+			written.WriteString(numericEntity(rune(char)))
+			continue
+		}
+		written.WriteByte(char)
+	}
+	if angle {
+		written.WriteByte('>')
+	}
+	return written.String()
+}
+
+// asciiControl reports whether char is an ASCII control character, U+0000 to U+001F or U+007F.
+func asciiControl(char rune) bool {
+	return char < ' ' || char == 0x7f
 }
 
 // titleSuffix writes a link or image title, quoted, so that the browser editor's parser, which
@@ -860,25 +897,6 @@ func escapeTableHTMLPipes(value string, escapePipes bool) string {
 		return value
 	}
 	return strings.ReplaceAll(value, "|", "&#124;")
-}
-
-func escapeTableLinkDestination(value string) string {
-	if !strings.ContainsAny(value, "\\|") {
-		return value
-	}
-	var rendered strings.Builder
-	rendered.Grow(len(value))
-	for index := range len(value) {
-		char := value[index]
-		if char == '\\' && index+1 < len(value) && isASCIIPunctuation(value[index+1]) {
-			rendered.WriteByte('\\')
-		}
-		if char == '|' {
-			rendered.WriteByte('\\')
-		}
-		rendered.WriteByte(char)
-	}
-	return rendered.String()
 }
 
 // escapeFootnoteLabel writes label so that the browser editor's parser, which decodes a label's

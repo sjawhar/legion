@@ -40,8 +40,11 @@ func failureLine(action, result string, err error) string {
 // does not accept) is refused the same way on every redelivery while the server's limits stand,
 // so it is a 422 `refused`, and its answer is the error, which says why; Dispatch's redelivery
 // sweep asks for it again like any failed delivery. Any other failure may pass on a redelivery,
-// so it is a 503 `failed`. The listener's `webhook-refused` and `publish-failure` alarms count
-// these lines.
+// so it is a 503 `failed`. A stream at its byte limit (bus.ErrStreamFull) is such a failure: it
+// takes the redelivery once age has made room, on a clustered stream too, where the server
+// acknowledges a redelivery under the refused delivery's MsgId as a duplicate it does not hold and
+// the bus publishes it once more without the id (bus.ErrNotStored); until then that is a 503 as
+// well. The listener's `webhook-refused` and `publish-failure` alarms count these lines.
 func failureOutcome(err error) (result string, status int, answer string) {
 	if errors.Is(err, bus.ErrRefused) {
 		return "refused", http.StatusUnprocessableEntity, err.Error()

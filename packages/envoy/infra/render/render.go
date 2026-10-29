@@ -267,7 +267,7 @@ func webhookListenerEnv(args []string, stdout, stderr io.Writer) int {
 	s.fs.StringVar(&mentionTrigger, "mention-trigger", "", "mentionTrigger: ENVOY_GITHUB_MENTION_TRIGGER, required with --webhook github and refused without it")
 	s.fs.StringVar(&listenHost, "listen-host", "", "listenHost: ENVOY_LISTEN_HOST")
 	s.fs.StringVar(&hostBridge, "host-bridge", "", `hostBridge: ENVOY_HOST_BRIDGE; "" leaves it unset`)
-	s.fs.IntVar(&natsReplicas, "nats-replicas", 0, "natsReplicas: ENVOY_NATS_REPLICAS")
+	s.fs.IntVar(&natsReplicas, "nats-replicas", 0, "natsReplicas: ENVOY_NATS_REPLICAS, the deployment's replica count, 1 to 5")
 	s.fs.BoolVar(&subscribeAllTopics, "subscribe-all-topics", false,
 		"subscribeAllTopics: ENVOY_SUBSCRIBE_ALL_TOPICS=1, only for a NATS user whose grant allows a notifications.> subscribe (HostPermissions); unset leaves it unset")
 	given, code, stop := s.parse(args, "machine-id", "listen-host", "host-bridge", "nats-replicas")
