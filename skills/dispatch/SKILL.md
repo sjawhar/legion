@@ -25,7 +25,6 @@ Which machines, files or people, the numbers, then "A happens to X, or B to Y?" 
 :::
 ```
 
-- A to-do or permission only a person can give, or a decision with no document, is a `dispatch ask`.
 - In Legion, fix a clear defect in code your tree uses, hand others to the controller, and ask about decisions (`skill://legion-worker/references/findings.md`).
 - An open ask is the request. Do not raise it again in each message.
 - Change an open ask's block with `dispatch edit-ask`, or `doc-edit`'s `replace` or `move`. An answered ask is fixed: ask anew.
@@ -77,7 +76,7 @@ dispatch://PROJECT/artifact/<slug>[@vN]
 dispatch://PROJECT/artifact/<slug>/ask/<id>
 ```
 
-A bare id or filename is not a reference. An ask or comment id can be an 8-hex prefix.
+A bare id, filename or local path is not a reference, and outside Dispatch neither is `dispatch://`: give the `https://` link `dispatch` printed. An ask or comment id can be an 8-hex prefix.
 
 ## Setup and the HTTP API
 
