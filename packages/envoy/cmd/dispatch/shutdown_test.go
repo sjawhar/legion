@@ -991,6 +991,14 @@ func (p *dispatchProcess) healthyWithin(within time.Duration) error {
 			}
 			response, err := http.DefaultClient.Do(request)
 			if err == nil {
+				// A body read to its end puts its connection back in the client's pool before the
+				// caller's next request asks for one. Closed unread, Go's transport drains it after
+				// Close returns (since Go 1.27), so a request sent at once dials a second
+				// connection and is then handed the first: the second joins the pool and never
+				// carries a request. Server.Shutdown counts a connection that has sent nothing as
+				// busy until it is more than 5 s old, so that one would hold a SIGTERM's HTTP
+				// drain for 5 to 6 s.
+				_, _ = io.Copy(io.Discard, response.Body)
 				_ = response.Body.Close()
 				if response.StatusCode == http.StatusOK && !exited() {
 					return nil
