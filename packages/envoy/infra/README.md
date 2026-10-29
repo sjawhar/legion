@@ -13,7 +13,15 @@ Pulumi language needs only the Pulumi CLI:
 | `envoy-infra:gcp:Dispatch` | Dispatch on GKE Autopilot, with Cloud SQL, served over a tailnet and, only to the namespaces `allowedNamespaces` names, inside its own cluster: see [gcp:Dispatch](#gcpdispatch). |
 
 The listener creates the `ENVOY_NOTIFICATIONS` stream and its key-value buckets itself when it
-starts, so it needs only a NATS server with JetStream to reach.
+starts, so it needs only a NATS server with JetStream to reach. It creates them at the deployment's
+replica count, `ENVOY_NATS_REPLICAS` (1 to 5, default 1), and raises one it finds with fewer
+copies, at start and every 30 seconds after. The copies stay at that count only when every Envoy
+program of the deployment carries the same value, so a clustered deployment sets it in every
+listener and in the Dispatch server: JetStream's stream update has no compare-and-swap, and a
+start with a lower or unset value can put the old copies back until the next pass raises them.
+More than 1 needs a clustered NATS: a single server, which is what `aws:NatsService` and
+`gcp:NatsHub` deploy, refuses it, and the listener's start then stops with an error naming
+`ENVOY_NATS_REPLICAS`.
 
 The command, `envoy-infra`, writes a NATS user's nkey seed into a secret store and checks the seed
 stored there ([NATS seeds](#nats-seeds)), and prints what the AWS components register for a program
@@ -1296,7 +1304,7 @@ Its outputs are `serviceArn`, `serviceName`, `logGroupName`, `taskDefinitionArn`
 | `logGroupName`, `logRetentionDays` | required | The log group, which the filters read and the alarms' descriptions name. |
 | `listenHost` | required | `ENVOY_LISTEN_HOST`. The listener binds `127.0.0.1` when it is blank, where the target group cannot reach it. |
 | `hostBridge` | required | `ENVOY_HOST_BRIDGE`; `""` leaves it unset. |
-| `natsReplicas` | required | `ENVOY_NATS_REPLICAS`, at least 1. |
+| `natsReplicas` | required | `ENVOY_NATS_REPLICAS`, from 1 to 5: the deployment's replica count, which the listener creates its stream and buckets at and raises them to, at start and every 30 seconds after. Every Envoy program of the deployment carries the same value. More than 1 needs a clustered NATS; `aws:NatsService` runs one server. |
 | `subscribeAllTopics` | `false` | `true` sets `ENVOY_SUBSCRIBE_ALL_TOPICS=1`, as for `host:Listener`: only for a NATS user holding `HostPermissions`, since under any other grant the listener's start ends. |
 | `alarmTopicArn` | required | The SNS topic the alarms page and clear on. |
 | `baseTags`, `metricNamespace` | required | As for `aws:NatsService`. |
@@ -1328,7 +1336,7 @@ the input:
   leading or trailing whitespace, or one holding `.`, `*`, `>`, `/`, `\`, a control character, or
   whitespace other than an interior ordinary space, or one over 246 bytes; a `hostBridge` or `listenHost` holding a
   control character; a `hostBridge` with leading or trailing whitespace; a blank `listenHost`; a
-  `natsReplicas` below 1; an empty `subnetIds`; a `baseTags` holding `service`.
+  `natsReplicas` below 1 or above 5; an empty `subnetIds`; a `baseTags` holding `service`.
 - Either, without an `aws` provider (see [Providers and transformations](#providers-and-transformations)).
 
 `natsUrls` may come from another resource, so the listener checks it when the container's
@@ -2120,9 +2128,13 @@ as its `Publish` and `Subscribe`. Below, `<m>` is the machine id with each space
   `ListenerPermissions`; `SessionPermissions` does not, so a session holding that set alone reads
   what it missed only through the listener;
 - for each key-value bucket, `envoy_interests`, `envoy_roles`, `envoy_sessions` and
-  `envoy_ci_state`, the calls nats.go's key-value store makes: the info and create of the bucket's
-  stream `KV_<bucket>`, its direct and stream message gets, `$KV.<bucket>.>`, and its watchers'
-  consumer create and delete and their flow-control replies;
+  `envoy_ci_state`, the calls nats.go's key-value store makes: the info, create and update of the
+  bucket's stream `KV_<bucket>`, its direct and stream message gets, `$KV.<bucket>.>`, and its
+  watchers' consumer create and delete and their flow-control replies. The update is the raise a
+  start, or the listener's keeper every 30 seconds after, sends when it finds a bucket with fewer
+  copies than `ENVOY_NATS_REPLICAS`; neither writes fewer copies than it found, and a grant without
+  it makes that raise time out after 10 seconds with
+  `raise KV_<bucket>: ENVOY_NATS_REPLICAS=<n>: context deadline exceeded`;
 - `$JS.API.STREAM.PURGE.KV_envoy_interests`, which the interest bucket's delete-marker collection
   sends.
 

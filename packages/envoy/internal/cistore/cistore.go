@@ -313,7 +313,10 @@ type openOpts struct {
 // Option configures Open.
 type Option func(*openOpts)
 
-// WithReplicas overrides the KV bucket replica count. Use 1 for single-node test NATS.
+// WithReplicas sets the deployment's replica count (bus.ReplicasEnvVar, default 1) for the CI
+// state bucket: the count a new bucket is created at, and the count an existing bucket with fewer
+// copies is raised to at open (bus.EnsureKeyValue) and by the listener's keeper after it
+// (bus.WithKeptBuckets). It stays there while every program of the deployment carries one count.
 func WithReplicas(n int) Option {
 	return func(o *openOpts) {
 		if n > 0 {

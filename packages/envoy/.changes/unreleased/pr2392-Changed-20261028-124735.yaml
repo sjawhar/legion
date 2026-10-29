@@ -25,7 +25,7 @@ body: |-
     back. A failed observation is logged (at most every 30 s), and a reader waiting on the horizon
     gets the error back once every observation has failed for 10 s. The horizon is read on the
     primary only. `envoy-infra:gcp:Dispatch` counts the horizon's two connections in each app
-    pod's Postgres budget (`dispatchConnectionsPerPod` 88). Deploy the first release with this change
+    pod's Postgres budget (`dispatchConnectionsPerPod` 89). Deploy the first release with this change
     at one replica, which recreates the pod, and raise the count afterwards: during a roll above one,
     an old pod's live readers can skip an event a new pod commits out of id order.
     A live event stream with no `since` starts at the relay's published cursor. The relay's first
