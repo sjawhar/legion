@@ -760,14 +760,19 @@ func main() {
 		log.Fatal(err)
 	}
 
-	// Wait for the interest cache to finish its initial scan of existing KV
-	// entries before we start accepting NATS messages. Without this gate, real
-	// events that arrive in the warm-up window get "no matching interests"
-	// even when the durable KV entry has subscribers.
+	// Wait for both of the registry's views before accepting NATS messages or HTTP requests.
+	// Without this gate, real events that arrive in the warm-up window get "no matching interests"
+	// even when the durable KV entry has subscribers, and the two routes that report a session's
+	// roles - GET /v1/sessions and GET /v1/registry/<session_id> - answer a live client the
+	// bus-unavailable 503 while the bus is healthy, because the role claim view refuses every read
+	// until its watcher has delivered every claim. So the gate waits for that view to be complete,
+	// not merely ready: a first scan nats.go's idle timer ended releases readiness, and the
+	// watcher's rescan ends this wait.
 	//
 	// Bounded at 30s: a healthy NATS cluster completes the scan in milliseconds.
-	// If the watcher fails to start, signalReady() unblocks startup and the
-	// health endpoint exposes the unavailable registry while NATS recovers.
+	// A timeout still serves, fail open: the warn below says which cache was not ready, the
+	// registry keeps answering from whatever it holds, and /healthz exposes the registry while
+	// NATS recovers.
 	cacheReadyCtx, cacheReadyCancel := context.WithTimeout(context.Background(), 30*time.Second)
 	if err := registry.WaitForCacheReady(cacheReadyCtx); err != nil {
 		logger.Warn("interest or role claim cache warm-up timed out; serving with possibly empty cache",
