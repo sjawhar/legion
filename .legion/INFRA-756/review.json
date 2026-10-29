@@ -1,0 +1,37 @@
+{
+  "schemaVersion": 1,
+  "phase": "review",
+  "issue": "INFRA-756",
+  "completed": "2026-10-29T20:27:08Z",
+  "round": 1,
+  "decision": "changes_requested",
+  "critical": 0,
+  "important": 0,
+  "minor": 4,
+  "reviewedCodeHead": "78fb9dc0d063c135886cebc9dcaaba62ba6f3bfc",
+  "ciRead": "Required set on main (rulesets): lint, typecheck, test, pr-title; no branch-protection checks. CI head 793974db91a695c276c70be58a344297199fcc66 (run 40921821162): every check completed success except worker-image / attest skipped; envoy-go-race-docs and envoy-go-race success. Compare 793974db...78fb9dc0: handoffsOnly true, 2 files.",
+  "thermonuclear": "thermonuclear-deep-review: APPROVE, no critical or important, two minor. thermonuclear-code-quality: three minor, all prose. Both ran check-ci-filters.sh at 78fb9dc0 (25 gates, envoy-go-race-docs 755 files 0 uncovered) and go list -deps -test -race over ./internal/dispatch/docs/ against the filter.",
+  "whyNotFixedByReviewer": "The two ci.yaml findings are prose, but GitHub refused the review App's push: 'refusing to allow a GitHub App to create or update workflow `.github/workflows/ci.yaml` without `workflows` permission'. The reviewer fixed the one prose finding outside .github/workflows/ itself and requests the two in ci.yaml, with their exact text, from the implementer.",
+  "keyFindings": [
+    {
+      "severity": "minor",
+      "file": ".github/workflows/ci.yaml",
+      "description": "Line 2449-2450: the new job's cache comment says it 'builds no binary', while the same job's timeout comment (line 2419) says it compiles the race binary. Requested text: 'go-envoy, restored only: its modules are the envoy module's, but this job builds the document service's race test binary, not the listener and natsd the family's saving jobs build, so it saves none.' (the wording of line 2072-2074)."
+    },
+    {
+      "severity": "minor",
+      "file": ".github/workflows/ci.yaml",
+      "description": "Line 2407-2413: the new job's comment does not say why the document service runs under -race; that reason (a read that walks a live document without its lock races the room's peers, LEGION-499, TestReadsOfALiveDocumentRunBesideItsPeers in internal/dispatch/docs/live_read_race_test.go:39) is only in envoy-go-race's comment, which keeps it for api. Requested: add it to envoy-go-race-docs's comment."
+    },
+    {
+      "severity": "minor",
+      "file": "docs/solutions/testing/a-new-tests-race-cost-is-charged-to-a-package-already-near-its-lanes-limit-so-size-the-fixture-by-the-cases-pr2497.md",
+      "description": "Active guidance still told a reader that envoy-go-race runs docs under -timeout 30m. Fixed by the reviewer in its own commit: it names envoy-go-race-docs at -timeout 60m and keeps 1706-1746 s of 1800 s as the measurement from before the split."
+    },
+    {
+      "severity": "minor",
+      "file": "PR body",
+      "description": "The body said a change the docs suite does not compile no longer starts it; each <dir>/* pattern also matches the closure's own _test.go files and two testdata trees. Fixed by the reviewer in the body: a change outside the directories that suite compiles no longer starts it."
+    }
+  ]
+}
