@@ -9,6 +9,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	natsgo "github.com/nats-io/nats.go"
 	"github.com/sjawhar/envoy/internal/bus"
 	"github.com/sjawhar/envoy/internal/contracts"
 	"github.com/sjawhar/envoy/internal/testnats"
@@ -556,6 +557,220 @@ func TestAnOverLongGitHubDeliveryIsNeverRememberedAsAFailure(t *testing.T) {
 			t.Fatalf("log = %q, want both failures logged `github publish refused: …`", logged.String())
 		}
 	})
+}
+
+// A delivery whose publish finds the stream full is answered 503, which GitHub redelivers, and not
+// the 422 of a refusal, which it takes as final; it is logged as a failed publish naming the full
+// stream, and the stream keeps every message it held (a real server, a small byte limit).
+func TestADeliveryToAFullStreamIsAnswered503(t *testing.T) {
+	const limit = 16 << 10
+	client, err := bus.ConnectOwningStream([]string{testnats.URL(t)}, bus.WithStreamMaxBytes(limit))
+	if err != nil {
+		t.Fatalf("start: %v", err)
+	}
+	t.Cleanup(client.Close)
+	for i := 0; ; i++ {
+		if i == 64 {
+			t.Fatalf("the stream took %d messages of 1 KiB under a %d-byte limit", i, limit)
+		}
+		err := client.Publish(contracts.Envelope{
+			EventID: fmt.Sprintf("fill-%d", i), Source: "github", Topic: fmt.Sprintf("notifications.github.fill.%d", i),
+			DedupeKey: fmt.Sprintf("fill.%d", i), PayloadSummary: strings.Repeat("x", 1<<10),
+		})
+		if err != nil {
+			if !errors.Is(err, bus.ErrStreamFull) {
+				t.Fatalf("fill publish %d = %v, want bus.ErrStreamFull", i, err)
+			}
+			break
+		}
+	}
+	before, err := client.JS().StreamInfo(bus.Stream)
+	if err != nil {
+		t.Fatalf("read the full stream: %v", err)
+	}
+
+	var logged bytes.Buffer
+	previous := log.Writer()
+	log.SetOutput(&logged)
+	t.Cleanup(func() { log.SetOutput(previous) })
+	push := []byte(`{"ref":"refs/heads/main","repository":{"name":"legion","owner":{"login":"sjawhar"},"full_name":"sjawhar/legion"}}`)
+	req := httptest.NewRequest(http.MethodPost, "/webhook/github", bytes.NewReader(push))
+	req.Header.Set("X-GitHub-Delivery", "d-full")
+	req.Header.Set("X-GitHub-Event", "push")
+	req.Header.Set("X-Hub-Signature-256", githubSign("s", push))
+	rec := httptest.NewRecorder()
+	GitHubHandler("s", "@legion", "", client, &mockRecorder{}).ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusServiceUnavailable {
+		t.Fatalf("status = %d, want 503; body = %s", rec.Code, rec.Body.String())
+	}
+	if got := logged.String(); !strings.Contains(got, "github publish failed:") || !strings.Contains(got, bus.ErrStreamFull.Error()) {
+		t.Fatalf("log = %q, want a github publish failed line naming %q", got, bus.ErrStreamFull)
+	}
+	after, err := client.JS().StreamInfo(bus.Stream)
+	if err != nil {
+		t.Fatalf("read the stream after the delivery: %v", err)
+	}
+	if after.State.Msgs != before.State.Msgs || after.State.FirstSeq != before.State.FirstSeq || after.State.LastSeq != before.State.LastSeq {
+		t.Fatalf("stream state after the delivery = %+v, want the state before it, %+v", after.State, before.State)
+	}
+}
+
+// Dispatch's sweep and GitHub itself redeliver under the same X-GitHub-Delivery, and a clustered
+// nats-server records the Nats-Msg-Id of a message a full stream refused at sequence 0: every
+// later publish under that id is acknowledged as a duplicate the stream does not hold
+// (bus.ErrNotStored), and the bus sends the envelope once more without the id. While the stream is
+// still full that second send is refused too, so the delivery is answered 503 and its failure is
+// logged once as the counted `github publish failed` line, every later one behind
+// `redelivery <delivery>: `, which no alarm counts. Once the stream has room the send without the
+// id is stored, so the redelivery is answered 200, the stream holds the delivery once, under no
+// id, and no failure line is logged for it at all.
+func TestAGitHubDeliveryAnsweredNotStoredIsRepublishedWithoutItsID(t *testing.T) {
+	const limit = 16 << 10
+	cluster := testnats.StartCluster(t, 3)
+	client, err := bus.ConnectOwningStream(cluster.URLs(), bus.WithReplicas(3), bus.WithStreamMaxBytes(limit))
+	if err != nil {
+		t.Fatalf("start: %v", err)
+	}
+	t.Cleanup(client.Close)
+	js := cluster.JetStream(t)
+	testnats.AwaitSettledStream(t, js, bus.Stream)
+
+	// pushBody is GitHub's body for a push to branch, and pushEnvelope the envelope the handler
+	// publishes for it: its topic, and the dedupe key its Nats-Msg-Id is built from.
+	pushBody := func(branch string) []byte {
+		return []byte(`{"ref":"refs/heads/` + branch + `","repository":{"name":"legion","owner":{"login":"sjawhar"},"full_name":"sjawhar/legion"}}`)
+	}
+	pushEnvelope := func(delivery, branch string) contracts.Envelope {
+		t.Helper()
+		var body map[string]any
+		if err := json.Unmarshal(pushBody(branch), &body); err != nil {
+			t.Fatal(err)
+		}
+		items := contracts.GithubEnvelopes(contracts.GithubEnvelopeInput{
+			Event: "push", Delivery: delivery, Body: body, EventID: "event-" + delivery, TraceID: "trace-" + delivery,
+		}, "@legion")
+		if len(items) != 1 || !contracts.DedupeKeyNamesTheUpstreamEvent(items[0]) {
+			t.Fatalf("the push delivered as %s makes %d envelopes, want one published under a Nats-Msg-Id", delivery, len(items))
+		}
+		return items[0]
+	}
+	refused, stored := pushEnvelope("d-refused", "refused"), pushEnvelope("d-stored", "stored")
+	if refused.Topic == stored.Topic {
+		t.Fatalf("both deliveries publish to %s, want a topic each", refused.Topic)
+	}
+
+	var logged bytes.Buffer
+	previous, flags := log.Writer(), log.Flags()
+	log.SetOutput(&logged)
+	log.SetFlags(log.LstdFlags)
+	t.Cleanup(func() { log.SetOutput(previous); log.SetFlags(flags) })
+	handler := GitHubHandler("s", "@legion", "", client, &mockRecorder{})
+	// post delivers branch's push under GitHub's delivery id, which its first delivery and each of
+	// its redeliveries carry alike, and reports the answer's status.
+	post := func(delivery, branch string) int {
+		t.Helper()
+		body := pushBody(branch)
+		req := httptest.NewRequest(http.MethodPost, "/webhook/github", bytes.NewReader(body))
+		req.Header.Set("X-GitHub-Delivery", delivery)
+		req.Header.Set("X-GitHub-Event", "push")
+		req.Header.Set("X-Hub-Signature-256", githubSign("s", body))
+		rec := httptest.NewRecorder()
+		handler.ServeHTTP(rec, req)
+		return rec.Code
+	}
+	// lines takes the log's lines since the last read, each without the date and time the alarms'
+	// filters read past.
+	lines := func() []string {
+		t.Helper()
+		var rest []string
+		for _, line := range strings.Split(strings.TrimSpace(logged.String()), "\n") {
+			if line == "" {
+				continue
+			}
+			words := strings.SplitN(line, " ", 3)
+			if len(words) < 3 {
+				t.Fatalf("log line %q has no date and time", line)
+			}
+			rest = append(rest, words[2])
+		}
+		logged.Reset()
+		return rest
+	}
+
+	for i := 0; ; i++ {
+		if i == 64 {
+			t.Fatalf("the stream took %d messages of 1 KiB under a %d-byte limit", i, limit)
+		}
+		err := client.Publish(contracts.Envelope{
+			EventID: fmt.Sprintf("fill-%d", i), Source: "github", Topic: fmt.Sprintf("notifications.github.fill.%d", i),
+			DedupeKey: fmt.Sprintf("fill.%d", i), PayloadSummary: strings.Repeat("x", 1<<10),
+		})
+		if err != nil {
+			if !errors.Is(err, bus.ErrStreamFull) {
+				t.Fatalf("fill publish %d = %v, want bus.ErrStreamFull", i, err)
+			}
+			break
+		}
+	}
+
+	// The full stream refuses each delivery's first publish, recording its id at sequence 0, and
+	// each failure is that delivery's first, so each logs the line the alarms count.
+	for _, delivery := range []string{"d-refused", "d-stored"} {
+		if code := post(delivery, strings.TrimPrefix(delivery, "d-")); code != http.StatusServiceUnavailable {
+			t.Fatalf("%s into the full stream answered %d, want 503", delivery, code)
+		}
+	}
+	if got := lines(); len(got) != 2 ||
+		!strings.HasPrefix(got[0], "github publish failed: ") || !strings.HasPrefix(got[1], "github publish failed: ") {
+		t.Fatalf("the log of the two refused deliveries = %q, want each logged `github publish failed: …` once", got)
+	}
+
+	// The same delivery again, with the stream still full: its id is acknowledged as a duplicate
+	// the stream does not hold and the send without it is refused too, so the answer is 503 again
+	// and the line is the redelivery's, which no alarm counts.
+	if code := post("d-refused", "refused"); code != http.StatusServiceUnavailable {
+		t.Fatalf("the redelivery of d-refused into the full stream answered %d, want 503", code)
+	}
+	if got := lines(); len(got) != 1 || !strings.HasPrefix(got[0], "redelivery d-refused: github publish failed: ") ||
+		!strings.Contains(got[0], bus.ErrNotStored.Error()) || !strings.Contains(got[0], bus.ErrStreamFull.Error()) {
+		t.Fatalf("the log of d-refused's redelivery = %q, want one `redelivery d-refused: github publish failed: …` line naming %q and %q",
+			got, bus.ErrNotStored, bus.ErrStreamFull)
+	}
+	if _, err := js.GetLastMsg(bus.Stream, refused.Topic); !errors.Is(err, natsgo.ErrMsgNotFound) {
+		t.Fatalf("reading %s after both of its sends failed = %v, want no message", refused.Topic, err)
+	}
+
+	// With room made, the delivery whose id the stream still holds at sequence 0 is stored by the
+	// send the bus makes without it: 200, the delivery once, under no id, and nothing logged.
+	if err := js.PurgeStream(bus.Stream); err != nil {
+		t.Fatalf("purge the stream: %v", err)
+	}
+	if code := post("d-stored", "stored"); code != http.StatusOK {
+		t.Fatalf("the redelivery of d-stored after the purge answered %d, want 200", code)
+	}
+	if got := lines(); len(got) != 0 {
+		t.Fatalf("the log of the stored redelivery = %q, want no line: nothing failed", got)
+	}
+	info, err := js.StreamInfo(bus.Stream)
+	if err != nil {
+		t.Fatalf("read the stream: %v", err)
+	}
+	if info.State.Msgs != 1 {
+		t.Fatalf("the stream holds %d messages after the stored redelivery, want the delivery once", info.State.Msgs)
+	}
+	msg, err := js.GetLastMsg(bus.Stream, stored.Topic)
+	if err != nil {
+		t.Fatalf("read %s: %v", stored.Topic, err)
+	}
+	var held contracts.Envelope
+	if err := json.Unmarshal(msg.Data, &held); err != nil {
+		t.Fatalf("read the stored envelope: %v", err)
+	}
+	if held.DedupeKey != stored.DedupeKey || msg.Header.Get(natsgo.MsgIdHdr) != "" {
+		t.Fatalf("stored %s = dedupe key %q, id %q; want %q and no id, the send the bus made without it",
+			stored.Topic, held.DedupeKey, msg.Header.Get(natsgo.MsgIdHdr), stored.DedupeKey)
+	}
 }
 
 // githubSign computes HMAC SHA256 signature matching GitHub's format.

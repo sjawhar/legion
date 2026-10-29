@@ -1202,18 +1202,26 @@ func TestStartCheckConfigRefusesARequestItCannotRender(t *testing.T) {
 
 // --check-config's plugins line names the pair runtime.kubernetes.plugins sets, "from
 // legion.yaml", or, absent that, this binary's linked pair, "from the binary"; absent both, the
-// gap (TestStartCheckConfigReportsTheConfigurationsCapabilityGaps's pluginsGap).
+// gap (TestStartCheckConfigReportsTheConfigurationsCapabilityGaps's pluginsGap). When
+// worker_backends runs any role on Claude Code, the line gains one sentence naming those roles,
+// whose plugin is the worker image's and never an install.
 func TestStartCheckConfigNamesTheResolvedPluginPair(t *testing.T) {
 	legionState(t)
-	for _, tc := range []struct {
-		name, extra, legion, envoy, want string
-	}{
+	const claudeSentence = ". Claude Code runs implementer, tester, whose plugin is the worker image's: " +
+		"a plugin-contract change for such a role is answered by a new image, not by an install."
+	const claudeRoles = "worker_backends: {implementer: claude, tester: claude}\n"
+	for _, tc := range []struct{ name, extra, legion, envoy, want string }{
 		{"the file's own pair", "    plugins: {pi_legion: 9.7.0, pi_envoy: 9.6.1}\n", "", "",
 			"plugins: @sjawhar/pi-legion 9.7.0 @sjawhar/pi-envoy 9.6.1 (from legion.yaml)\n"},
 		{"the binary's linked pair, the file setting none", "", "9.7.0", "9.6.1",
 			"plugins: @sjawhar/pi-legion 9.7.0 @sjawhar/pi-envoy 9.6.1 (from the binary)\n"},
 		{"the file's pair wins over the binary's", "    plugins: {pi_legion: 9.7.1, pi_envoy: 9.6.2}\n", "9.7.0", "9.6.1",
 			"plugins: @sjawhar/pi-legion 9.7.1 @sjawhar/pi-envoy 9.6.2 (from legion.yaml)\n"},
+		{"the Claude Code roles' plugin is the image's", "    plugins: {pi_legion: 9.7.0, pi_envoy: 9.6.1}\n" + claudeRoles, "", "",
+			"plugins: @sjawhar/pi-legion 9.7.0 @sjawhar/pi-envoy 9.6.1 (from legion.yaml)" + claudeSentence + "\n"},
+		{"the Claude Code roles are named beside the gap too", claudeRoles, "", "",
+			"plugins: none — set runtime.kubernetes.plugins or run a release build; " +
+				"a daemon that knows none relaunches no process on another plugin contract" + claudeSentence + "\n"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			linkedLegion, linkedEnvoy := piLegionVersion, piEnvoyVersion

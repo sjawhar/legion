@@ -1,5 +1,55 @@
 # Changelog
 
+## [21.1.2] - 2026-10-29
+
+### Fixed
+
+- A Mermaid diagram in a Dispatch document no longer restyles the rest of the page, and no reader's
+  browser fetches Google Fonts or any address in the diagram's markup for it; the document draws it
+  with the same stricter sanitizer, in its own shadow root and off the page's main thread, as
+  comments do, so a large diagram no longer freezes the tab while it draws or on each edit. A
+  document diagram that takes longer than 5 seconds to draw shows `Unable to render Mermaid
+  diagram: it did not finish within 5 seconds` above its source, and an edited diagram redraws once
+  typing pauses.
+- Reopening an issue closes its document rooms on the server process that reopened it, as closing it does, so a page whose socket was admitted read-only while the issue was closed reconnects and is admitted writable, instead of staying read-only until the person reloads.
+- A closed issue's document no longer says "Reload to edit.", which a reload cannot make true; the dashboard shows that line only for a read-only admission that came while the issue was open, while the issue is open and the document's socket is connected.
+
+## [21.1.1] - 2026-10-29
+
+### Fixed
+
+- A bare web address or email in a Dispatch document written through the API (`dispatch doc-edit`,
+  an uploaded version) is now a link wherever a comment and the browser editor link it: after
+  punctuation (`x;https://…`, `"a@b.test"`), a letter outside ASCII, an escape or a character
+  reference, a URL after a digit too, or at a line or table cell opening with punctuation, an email
+  there linking to its `mailto:` URL. The server reads an address with both of the editor's readers,
+  the one that reads the markdown as written and the one that reads the decoded text it leaves, so
+  where the two end an address differently (`x;https://x.test/a_` leaves the `_` out,
+  `see http\://x.test/a_` keeps it) each ends it as in the editor. The stored markdown no longer
+  carries a backslash before such a URL's colon (`http\://`): the server writes one, or one before
+  an `@` or after a `www`, only where plain text would otherwise come back as a link the editor does
+  not show, such as `http://localhost`. Plain-text addresses already stored read back as links on
+  the next read, as the editor already shows them. A link's destination now has its escapes and
+  character references decoded, as the editor reads it (a stored `[a](x\_y)` links to `x_y`, and
+  `[a](x&amp;y)` to `x&y`), and a destination holding `>`, a control character or a final
+  backslash is written so it reads back. A text `<` that the markdown written after it would close
+  into an autolink, such as `&lt;javascript:void(a@b.cc)>`, is written escaped, so no write turns
+  it into one link. A text `<` that the markdown written after it would close into inline HTML
+  (`Set \<input value=me@x.cc> in the form.`) is now stored with `\<`, so the write reads back and
+  no html node replaces the text. An email address in a document stored before emails linked to
+  their `mailto:` URL keeps its old link target until the document is written again.
+
+## [21.1.0] - 2026-10-29
+
+### Changed
+
+- `envoy-dispatch census` exempts from its 1 GiB table limit a migration whose every statement is a `create function` (or procedure) in `plpgsql` or `sql`, or a `create trigger`, as Postgres's own parser (libpg_query, through `github.com/wasilibs/go-pgquery`) reads them: each does its work in the catalog and reads no row of the table. No migration is exempt while an enabled event trigger runs on those commands. The report still prints the table's size beside the limit and why the migration is exempt, and the migration's lock holders still refuse it. Every refusal a lock holder causes now carries that holder's diagnosis, read when the census refused: its state, transaction start, `backend_xid`, wait event and query (literals, numbers and comments replaced) from `pg_stat_activity`, and its locks from `pg_locks`.
+- Dispatch's migration runner tries a migration again when its lock wait outlasts its five-second `lock_timeout`: it rolls the migration's transaction back, holds nothing for two seconds so the reads and writes queued behind it run, and tries again, up to three attempts (`pgmigrate.RetryLockTimeouts`), logging each timed-out attempt at WARN. A migration that times out on every attempt fails the boot, as one timing out once did before. The lock-timeout error now carries a diagnosis of each session the migration was queued behind, as the census's refusals do. The secrets broker's runner, which applies every migration in one transaction, does not retry.
+
+### Fixed
+
+- `envoy-dispatch census` no longer refuses a young lock holder of its own role as one whose transaction age Postgres hides, naming `pg_read_all_stats` as the fix. Postgres serves a transaction's first read of `pg_stat_activity` until the transaction ends, and the census reads every pending migration in one transaction, so a later migration's holders were joined to activity read at an earlier one: a session idle then showed no transaction start. The census now clears that copy before each read of lock holders and long transactions, measures ages with `clock_timestamp()`, and names `pg_read_all_stats` only for a holder that Postgres hides from the census's role: a session of another role, or an autovacuum worker.
+
 ## [21.0.0] - 2026-10-29
 
 ### Added
