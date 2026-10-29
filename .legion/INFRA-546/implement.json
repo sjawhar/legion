@@ -1,0 +1,29 @@
+{
+  "schemaVersion": 1,
+  "phase": "implement",
+  "issue": "INFRA-546",
+  "completed": "2026-10-29T08:20:52Z",
+  "round": 11,
+  "pullRequest": "https://github.com/sjawhar/legion/pull/2362",
+  "answers": {
+    "mainConflict": "After retro at a92ebcca35ac GitHub reported CONFLICTING; per the architect, one forward merge of main@origin cc5dd8865047 at cf2e84f13dfb (jj new, no rebase), no other change. Conflicts were text only: .dispatch/architecture/envoy-listener.md keeps this PR's sentence and adds main's #2331 plugin/plugin_version sentence; packages/envoy/docs/architecture.md keeps this PR's bullet and envoy_interests line and takes main's envoy_sessions line. Fingerprint 794bd1d9f07bcb43 -> 06dde7f97b1d6b6c, differing only in that envoy-listener.md line (comment 6491621803). GitHub reports MERGEABLE."
+  },
+  "proof": [
+    {
+      "criterion": "On the tree merged with main, the stream and buckets reach the replica count, keep the byte limit, DiscardNew and envoy_stream_id across listener and background-connecting Dispatch starts; an operator's raise stands; a full stream refuses and keeps what it holds",
+      "surface": "Real envoy-listener and envoy-dispatch binaries built at the merge head against three nats-server v2.15.1 processes, one standalone v2.15.1 server and a Postgres 17, read with natscli v0.5.1",
+      "command": "bash /legion/scratch/tmp/p546b/proof.sh /legion/workspaces/sjawhar/legion/infra-546 (log https://github.com/sjawhar/legion/pull/2362#issuecomment-6491621803)",
+      "observed": "P1 R1 -> 3 current peers, limit 44023414784, discard new, one envoy_stream_id, buckets envoy_interests/roles/sessions and the durable at 3; P2 setting 1 changed nothing; P5 a 50 GiB operator raise stood, a lowering to 1000000 was restored by the keeper; P3 envoy-dispatch reached 'dispatch: listening' and its first-connection reconcile restored subjects 5 -> 8 keeping copies, limit and id; P4 10 of 30 publishes acknowledged, 20 refused 'maximum bytes exceeded (10077)', messages 1-10 kept.",
+      "headSha": "cf2e84f13dfb48276cdc77bc504bbaba8c68bea7",
+      "negativeControl": "Standalone v2.15.1: listener ENVOY_NATS_REPLICAS=3 -> exit 1 naming the setting ('replicas > 1 not supported in non-clustered mode'); ENVOY_STREAM_MAX_BYTES=44023414784 -> exit 1 'insufficient storage resources available'; ENVOY_NATS_REPLICAS=0 and ENVOY_STREAM_MAX_BYTES=-5 refused at load"
+    }
+  ],
+  "filesChanged": [
+    "cf2e84f13dfb (merge): .dispatch/architecture/envoy-listener.md, packages/envoy/docs/architecture.md resolved; everything else as main and the PR had it"
+  ],
+  "trickyParts": [
+    "The workspace and $TMPDIR were recreated; proof.sh was recovered from this session's record and its environment (nats-server v2.15.1, natscli v0.5.1, Postgres 17 under /legion/scratch/tmp/pg546) rebuilt with the same commands"
+  ],
+  "deviations": [],
+  "openQuestions": []
+}
