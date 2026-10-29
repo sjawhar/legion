@@ -62,6 +62,14 @@ type relayFrameRec struct {
 	Recv      int64 // Unix ns
 	EventID   int64 // 0 when the payload held none
 	Duplicate bool  // a stream sequence the session had already received
+	// Identity is the frame's dedupe identity as the plugin reads it
+	// (packages/envoy-client/src/consumer-delivery.ts parseIdentity): the envelope's event_id,
+	// else its dedupe_key, else "" for a frame the plugin's ledger could never recognise again.
+	Identity string
+	// Done is set when the session answered this frame `done`. The plugin answers done once the
+	// frame is in its transcript and its ledger, so a later copy of a done-answered frame is one
+	// the ledger hides (restart-report).
+	Done bool
 }
 
 // relaySessions is the consumer-delivery side of the sessions: each NATS connection's epoch, each
@@ -158,9 +166,10 @@ func (r *relaySessions) delivery(session int) map[string]any {
 	return d
 }
 
-// handler takes session's relay frames: it answers `received` at once, records the frame, counts a
-// first frame of each stream sequence as a receipt (an agent-topic one when the frame's subject is
-// the session's agent subject), then answers `done`, which moves the session's resume point.
+// handler takes session's relay frames: it answers `received` at once, counts a first frame of
+// each stream sequence as a receipt (an agent-topic one when the frame's subject is the session's
+// agent subject), then answers `done`, which moves the session's resume point, and records the
+// frame with that answer, as the plugin answers done once the frame is written.
 func (r *relaySessions) handler(ns *natsSessions, session int, agentSubject string, nonce int64) nats.MsgHandler {
 	return func(m *nats.Msg) {
 		now := time.Now().UnixNano()
@@ -190,6 +199,9 @@ func (r *relaySessions) handler(ns *natsSessions, session int, agentSubject stri
 		} else {
 			rec.EventID = ev.ID
 		}
+		if rec.Identity = env.EventID; rec.Identity == "" {
+			rec.Identity = env.DedupeKey
+		}
 		switch {
 		case rec.Duplicate:
 			r.duplicates.Add(1)
@@ -202,20 +214,23 @@ func (r *relaySessions) handler(ns *natsSessions, session int, agentSubject stri
 			ns.envelopes.offer(key, m.Data, nonce)
 			ns.receipts.add(receipt{EventID: ev.ID, Recv: now, Agent: agent, Published: rec.StoredAt})
 		}
+		rec.Done = r.reply(m, relayReplyDone)
 		r.frames.add(rec)
-		r.reply(m, relayReplyDone)
 		r.wrote(session, m.Header.Get(relayHeaderStreamID), rec.Seq)
 	}
 }
 
-func (r *relaySessions) reply(m *nats.Msg, word []byte) {
+// reply answers m with word and reports whether the answer went out.
+func (r *relaySessions) reply(m *nats.Msg, word []byte) bool {
 	if m.Reply == "" {
 		r.replyErrors.Add(1)
-		return
+		return false
 	}
 	if err := m.Respond(word); err != nil {
 		r.replyErrors.Add(1)
+		return false
 	}
+	return true
 }
 
 // coreCopy takes a core copy of a relayed session's subject: on the agent topic it answers the lane
@@ -279,7 +294,8 @@ func (r *relaySessions) summary() sessionDeliverySummary {
 }
 
 // writeFrames writes relay-frames.csv in dir: one row per relay frame, in arrival order per
-// session, with the session id.
+// session, with the session id, the frame's dedupe identity and whether the session answered it
+// done (restart-report reads them).
 func (r *relaySessions) writeFrames(dir string, sessions []session, lg *log.Logger) {
 	f, err := os.Create(filepath.Join(dir, "relay-frames.csv"))
 	if err != nil {
@@ -288,10 +304,11 @@ func (r *relaySessions) writeFrames(dir string, sessions []session, lg *log.Logg
 	}
 	defer f.Close()
 	w := csv.NewWriter(f)
-	_ = w.Write([]string{"session", "subject", "stream_seq", "delivered", "stored_at_ns", "recv_ns", "event_id", "duplicate"})
+	_ = w.Write([]string{"session", "subject", "stream_seq", "delivered", "stored_at_ns", "recv_ns", "event_id", "duplicate", "identity", "done"})
 	for _, rec := range r.frames.snapshot() {
 		_ = w.Write([]string{sessions[rec.Session].id, rec.Subject, strconv.FormatUint(rec.Seq, 10), strconv.Itoa(rec.Delivered),
-			strconv.FormatInt(rec.StoredAt, 10), strconv.FormatInt(rec.Recv, 10), strconv.FormatInt(rec.EventID, 10), strconv.FormatBool(rec.Duplicate)})
+			strconv.FormatInt(rec.StoredAt, 10), strconv.FormatInt(rec.Recv, 10), strconv.FormatInt(rec.EventID, 10),
+			strconv.FormatBool(rec.Duplicate), rec.Identity, strconv.FormatBool(rec.Done)})
 	}
 	w.Flush()
 	if err := w.Error(); err != nil {
