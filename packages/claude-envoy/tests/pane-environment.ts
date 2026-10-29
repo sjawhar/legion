@@ -22,8 +22,14 @@ const paneVariables = [
 
 // Starts each test in the calling file with those variables unset, and ENVOY_CONFIG_FILE naming a
 // file that holds no section, so nothing comes from the caller's own envoy.json; restores the
-// process's own values after it. A test that spawns a subprocess with a literal env needs none of
-// this.
+// process's own values after it, so a test that sets one of them needs no save and restore of its
+// own. A test that spawns a subprocess with a literal env needs none of this.
+//
+// Set and delete the variables themselves; never replace `process.env` with a copy to restore it.
+// That swaps the runtime's environment object for a plain one, so later writes reach neither the
+// real environment nor `Bun.env`, which other packages' code reads (`@oh-my-pi/pi-utils`'s
+// `refreshShellConfigCache` builds a child shell's environment from `Bun.env`), and `bun test`
+// runs every package's files in one process.
 export function isolatePaneEnvironment(): void {
   const original = paneVariables.map((name) => [name, process.env[name]] as const)
   let configDirectory = ""

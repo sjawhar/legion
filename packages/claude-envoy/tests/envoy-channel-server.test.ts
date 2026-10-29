@@ -456,7 +456,6 @@ test("answers a rejected targeted frame on Dispatch instead of notifying the mod
       return Response.json({})
     },
   })
-  const previous = { ...process.env }
   process.env["DISPATCH_URL"] = `http://127.0.0.1:${server.port}`
   process.env["DISPATCH_TOKEN"] = "reply-token"
   const notifier = new FakeNotifier()
@@ -485,7 +484,6 @@ test("answers a rejected targeted frame on Dispatch instead of notifying the mod
     ])
   } finally {
     server.stop(true)
-    process.env = previous
   }
 })
 
@@ -510,7 +508,6 @@ test("a Dispatch frame the channel answered with an error is answered again when
       return Response.json({})
     },
   })
-  const previous = { ...process.env }
   process.env["DISPATCH_URL"] = `http://127.0.0.1:${server.port}`
   process.env["DISPATCH_TOKEN"] = "reply-token"
   const nats = new FakeNats()
@@ -543,7 +540,6 @@ test("a Dispatch frame the channel answered with an error is answered again when
   } finally {
     await session.shutdown()
     server.stop(true)
-    process.env = previous
     await rm(stateDirectory, { recursive: true, force: true })
   }
 })
@@ -565,7 +561,6 @@ test("answers a malformed targeted comment through its supplied comment reply ad
       return Response.json({})
     },
   })
-  const previous = { ...process.env }
   process.env["DISPATCH_URL"] = `http://127.0.0.1:${server.port}`
   process.env["DISPATCH_TOKEN"] = "reply-token"
   const notifier = new FakeNotifier()
@@ -593,7 +588,6 @@ test("answers a malformed targeted comment through its supplied comment reply ad
     ])
   } finally {
     server.stop(true)
-    process.env = previous
   }
 })
 

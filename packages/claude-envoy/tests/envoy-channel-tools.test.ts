@@ -158,7 +158,6 @@ test("a dispatch_* call is an unknown tool even with Dispatch configured, and re
       return Response.json({ error: "unexpected" }, { status: 500 })
     },
   })
-  const previous = { ...process.env }
   process.env["DISPATCH_URL"] = `http://127.0.0.1:${server.port}`
   process.env["DISPATCH_TOKEN"] = "test-token"
   const runtime: ChannelToolRuntime = {
@@ -174,7 +173,6 @@ test("a dispatch_* call is an unknown tool even with Dispatch configured, and re
     expect(requests).toEqual([])
   } finally {
     server.stop(true)
-    process.env = previous
   }
 })
 
