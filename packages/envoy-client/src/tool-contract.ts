@@ -177,7 +177,11 @@ export const envoyToolSpecs = [
     arguments: (schema) => ({
       session_id: schema
         .string()
-        .describe("Target session ID; find it with envoy_sessions or envoy_whoami."),
+        .describe(
+          "The target's whole session ID, a UUID: find it with envoy_sessions or envoy_whoami. " +
+            "Never complete or guess one. A UUID's first group is shared by every session started " +
+            "in the same 65-second window, so part of an id names no session and the send is refused."
+        ),
       ...messageArguments(schema),
     }),
     operation: EnvoyToolOperation.send,

@@ -479,8 +479,12 @@ func TestListenerRecordsEverySendAndPublishRequest(t *testing.T) {
 		"payload_summary": "ship it",
 	})
 
+	// A well-formed UUID the store holds no record of, as every live session's id is: a target
+	// that is not one is a refusal of its own (TestSendRefusesATargetThatIsNotASessionID) with a
+	// record line of its own, so it would not record this outcome.
+	const goneTarget = "01a17b06-9430-7bbb-8ccc-0d2c4a5d7cf7"
 	gone, goneRecord := send(sendBody(map[string]any{
-		"target_session": "ses_recorded_gone",
+		"target_session": goneTarget,
 		"source":         "agent",
 		"source_session": sender,
 		"message":        "anyone there?",
@@ -493,7 +497,7 @@ func TestListenerRecordsEverySendAndPublishRequest(t *testing.T) {
 		"level":           "WARN",
 		"outcome":         "no_live_session",
 		"status":          float64(http.StatusNotFound),
-		"target_session":  "ses_recorded_gone",
+		"target_session":  goneTarget,
 		"source":          "agent",
 		"source_session":  sender,
 		"payload_summary": "anyone there?",
@@ -640,7 +644,10 @@ func TestListenerRecordsEverySendAndPublishRequest(t *testing.T) {
 // it in one thing only — the bucket no longer answers — so a rig that refused every send could
 // not produce the pair.
 func TestSendRefusesTheBusRatherThanTheSessionWhenTheStoreReadDoesNotAnswer(t *testing.T) {
-	const target = "ses_unanswered_store_read"
+	// A well-formed UUID, as every live session's id is: the negative control has to be the 404
+	// about a session, and a target that is not a session id is refused 400 before the bucket is
+	// ever asked a second time (TestSendRefusesATargetThatIsNotASessionID).
+	const target = "01a17b06-9430-7bbb-8ccc-0d2c4a5d7cf7"
 	const sender = "ses_unanswered_store_sender"
 	_, observer := trailingListeners(t)
 	send := func() (*httptest.ResponseRecorder, map[string]any, time.Duration) {
@@ -721,8 +728,13 @@ func TestSendRefusesTheBusRatherThanTheSessionWhenTheStoreReadDoesNotAnswer(t *t
 // target. Each is answered by the same route with the same status, and the bodies and the
 // records must name which fact it is, or the pair cannot be told apart by anything downstream.
 func TestSendNamesWhetherTheTargetLapsedOrNeverRegistered(t *testing.T) {
+	// The lapsed target keeps an id of another shape on purpose: it registered, so this listener
+	// knows the id was real, and it must still be told as a lapsed registration rather than as a
+	// malformed id. The unregistered one is the shape every live session carries - 417 of 417
+	// measured against the production listener on 2026-10-29 - because an id nothing registered
+	// is refused as not a session id unless it is a well-formed UUID.
 	const lapsedTarget = "ses_lapsed_registration"
-	const unknownTarget = "ses_never_registered"
+	const unknownTarget = "01a17b06-bac0-7626-b8bb-0d2c4a5d7cf7"
 	const sender = "ses_bounce_sender"
 	// A short bucket TTL ages the registration out as a stalled session's does, inside a test.
 	const ttl = 2 * time.Second
@@ -827,5 +839,100 @@ func TestSendNamesWhetherTheTargetLapsedOrNeverRegistered(t *testing.T) {
 	}
 	if _, carried := unknownRecord["last_seen"]; carried {
 		t.Fatalf("the unregistered target's line carries last_seen %#v, want the field left off: this listener never saw it heartbeat", unknownRecord["last_seen"])
+	}
+}
+
+// The third fact the send route's refusal must name, and the one that cost a message on
+// 2026-10-29: a target that is not a session id at all. An agent was given a session id as its
+// first group alone, 01a17b06; a model completed the rest into a whole UUID that no session ever
+// carried; the send bounced, and "no live session" was read and written down as that session
+// being dead, while it registered every 90 s throughout.
+//
+// A UUIDv7's first group is the top 32 bits of its 48-bit millisecond timestamp, so every session
+// started inside the same 65.536-second window shares it: 157 of 409 live sessions shared a first
+// group with another session that night, across 68 groups, five in the largest. So a first group
+// identifies nobody, and the two sends below must be refused as the caller's own malformed target
+// - 400, saying what a session id is and where the whole one is read from - rather than answered
+// with a sentence about a session's liveness that no waiting or retrying can change. Neither may
+// be resolved to a session: nothing on this path matches a prefix, and this test says so out loud.
+func TestSendRefusesATargetThatIsNotASessionID(t *testing.T) {
+	const sender = "ses_malformed_target_sender"
+	registry, sessions := setupSessionsTest(t, nil, nil)
+	deps := &listenerDeps{registry: registry, sessions: sessions}
+	send := func(target string) (*httptest.ResponseRecorder, map[string]any) {
+		t.Helper()
+		return serveRecorded(t, func(logger *logging.Logger) http.HandlerFunc {
+			return sendHandler(deps, logger)
+		}, postJSON("/v1/messages/send", sendBody(map[string]any{
+			"target_session": target,
+			"source":         "agent",
+			"source_session": sender,
+			"message":        "are you there?",
+		})))
+	}
+	refusalOf := func(recorder *httptest.ResponseRecorder, target string) string {
+		t.Helper()
+		if recorder.Code != http.StatusBadRequest {
+			t.Fatalf("send to %q: status %d, body %s; want 400, the caller's own target being wrong",
+				target, recorder.Code, recorder.Body.String())
+		}
+		var refusal apiError
+		if err := json.Unmarshal(recorder.Body.Bytes(), &refusal); err != nil {
+			t.Fatalf("decode the refusal %s: %v", recorder.Body.String(), err)
+		}
+		return refusal.Error
+	}
+
+	// A UUID's first group, the id the lost message was addressed from.
+	firstGroup, firstGroupRecord := send("01a17b06")
+	firstGroupError := refusalOf(firstGroup, "01a17b06")
+	if strings.HasPrefix(firstGroupError, "no live session") || strings.Contains(firstGroupError, "lapsed") {
+		t.Fatalf("the first group's refusal reads %q: it must not read as a session's liveness, which is the sentence that was believed", firstGroupError)
+	}
+	if !strings.Contains(firstGroupError, "is not a session id") {
+		t.Fatalf("the first group's refusal reads %q: it must say the target is not a session id", firstGroupError)
+	}
+	if !strings.Contains(firstGroupError, "first part of one") || !strings.Contains(firstGroupError, "65.536-second window") {
+		t.Fatalf("the first group's refusal reads %q: it must say this is part of an id and why a first group names no session", firstGroupError)
+	}
+	if !strings.Contains(firstGroupError, "envoy_sessions") {
+		t.Fatalf("the first group's refusal reads %q: it must say where the whole id is read from", firstGroupError)
+	}
+	assertRecordFields(t, firstGroupRecord, map[string]any{
+		"msg":            "listener send",
+		"level":          "WARN",
+		"outcome":        "not_a_session_id",
+		"status":         float64(http.StatusBadRequest),
+		"target_session": "01a17b06",
+		"source_session": sender,
+	})
+
+	// Anything else that is not a UUID is the same refusal without the first-part sentence.
+	word, wordRecord := send("the-reviewer")
+	wordError := refusalOf(word, "the-reviewer")
+	if strings.HasPrefix(wordError, "no live session") {
+		t.Fatalf("the malformed target's refusal reads %q: it must not read as a session's liveness", wordError)
+	}
+	if !strings.Contains(wordError, "is not a session id") || !strings.Contains(wordError, "8-4-4-4-12") {
+		t.Fatalf("the malformed target's refusal reads %q: it must say what a session id is", wordError)
+	}
+	if strings.Contains(wordError, "first part of one") {
+		t.Fatalf("the malformed target's refusal reads %q: it is no part of an id, so it must not be called one", wordError)
+	}
+	assertRecordFields(t, wordRecord, map[string]any{
+		"msg":            "listener send",
+		"level":          "WARN",
+		"outcome":        "not_a_session_id",
+		"status":         float64(http.StatusBadRequest),
+		"target_session": "the-reviewer",
+		"source_session": sender,
+	})
+
+	// A whole UUID nothing registered keeps the other refusal, a 404 about a session: this
+	// listener cannot say such an id was never minted, only that it holds no record of it.
+	whole, _ := send("01a17b06-bac0-7626-b8bb-0d2c4a5d7cf7")
+	if whole.Code != http.StatusNotFound {
+		t.Fatalf("a well-formed id nothing registered: status %d, body %s; want 404, not the malformed refusal",
+			whole.Code, whole.Body.String())
 	}
 }

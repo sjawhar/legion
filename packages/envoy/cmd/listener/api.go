@@ -489,15 +489,24 @@ func sendHandler(d *listenerDeps, logger *logging.Logger) http.HandlerFunc {
 		// key no session can register under) is the 404 a sender routes around the pane on; a read
 		// that did not answer is the 503 below, which asks it to try again instead.
 		//
-		// That 404 names which of the two it is (noLiveSessionRefusal): a registration this
-		// listener saw lapse, which says the session may come back, or no record of one at all,
-		// which says the id is worth checking. The sender cannot tell them apart from the outside,
-		// and reading them as one sentence is how a session that is running gets written down as
-		// dead.
+		// That answer names which of three facts it is. A registration this listener saw lapse
+		// says the session may come back (noLiveSessionRefusal, lastSeen); it is decided first,
+		// because a session that registered had a real id whatever its shape. Otherwise an id not
+		// written as a session id is - a session id's first group alone, a fragment, a word - is
+		// the caller's own mistake and is refused 400 as one (notASessionIDRefusal), never again
+		// as a session that is not live: nothing can ever register under it, so telling a sender
+		// that it may come back, or to route around a pane that never existed, is a lie. What is
+		// left is a well-formed id with no record at all, the 404 that says the id is worth
+		// checking. The sender can tell none of the three apart from the outside, and reading them
+		// as one sentence is how a session that is running gets written down as dead.
 		target, err := liveSessionEntry(ctx, d.sessions, targetSession, sendSessionReadTimeout, registered)
 		if errors.Is(err, nats.ErrKeyNotFound) {
 			lastSeen := d.sessions.LastSeen(targetSession)
 			record.lastSeen = lastSeen
+			if refusal := notASessionIDRefusal(targetSession); lastSeen == 0 && refusal != "" {
+				record.refuse(w, http.StatusBadRequest, outcomeNotASessionID, refusal, "target_session")
+				return
+			}
 			record.refuse(w, http.StatusNotFound, outcomeNoLiveSession,
 				noLiveSessionRefusal(targetSession, lastSeen, d.sessions.TTL(), time.Now()))
 			return

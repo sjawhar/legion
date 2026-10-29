@@ -59,9 +59,15 @@ readonly webhook_secret
 session_id="ses_e2e_local"
 readonly session_id
 # The destination of the refused send: an id nothing registers in this run, so the store cannot
-# hold it however late the assertion runs.
-absent_session_id="ses_e2e_local_absent"
+# hold it however late the assertion runs. It is a well-formed UUID, as every live session's id
+# is, because an id that is not one is refused as a malformed target instead (`malformed_target`
+# below).
+absent_session_id="01a17b06-bac0-7626-b8bb-0d2c4a5d7cf7"
 readonly absent_session_id
+# A target that is not a session id at all: a UUID's first group, which every session started in
+# the same 65.536-second window shares, so it names no session and nothing can register under it.
+malformed_target="01a17b06"
+readonly malformed_target
 
 readonly envelopes_file="${out_dir}/envelopes.jsonl"
 readonly session_prompts_file="${out_dir}/session-prompts.jsonl"
@@ -85,6 +91,7 @@ readonly lock_file="${out_dir}/run.lock"
 readonly session_ready_fifo="${out_dir}/session-ready.fifo"
 readonly subscriber_ready_fifo="${out_dir}/subscriber-ready.fifo"
 readonly absent_session_response_file="${out_dir}/absent-session-response.json"
+readonly malformed_target_response_file="${out_dir}/malformed-target-response.json"
 readonly bus_down_response_file="${out_dir}/bus-down-send-response.json"
 readonly bus_down_headers_file="${out_dir}/bus-down-send-headers.txt"
 readonly bus_down_result_file="${out_dir}/bus-down-send-result.txt"
@@ -140,7 +147,7 @@ trap 'cleanup 143' TERM
 
 rm -f "$envelopes_file" "$session_prompts_file" "$rendered_ts_file" "$rendered_go_file" \
   "$direct_response_file" "$unwired_response_file" "$unheld_role_response_file" "$role_claim_response_file" "$held_role_response_file" \
-  "$absent_session_response_file" "$bus_down_response_file" "$bus_down_headers_file" "$bus_down_result_file" "$bus_down_client_file" \
+  "$absent_session_response_file" "$malformed_target_response_file" "$bus_down_response_file" "$bus_down_headers_file" "$bus_down_result_file" "$bus_down_client_file" \
   "$registry_session_response_file" "$registry_missing_response_file" \
   "$listener_log_file" "$session_log_file" "$subscriber_log_file" "$nats_log_file" \
   "$listener_binary" "$nats_binary" "$session_ready_fifo" "$subscriber_ready_fifo"
@@ -457,6 +464,29 @@ if [[ "$absent_status" != 404 ]] || ! jq -e --arg session_id "$absent_session_id
   exit 1
 fi
 
+# A send to a target that is not a session id. This is the refusal that was missing on 2026-10-29,
+# when an agent completed an id it had been given as its first group alone and read "no live
+# session" as being about the session it meant. It is the caller's own mistake, not a session's
+# liveness, so it is a 400 that says so and names where the whole id is read from.
+printf 'posting a direct message to a target that is not a session id\n'
+malformed_body="$(jq -nc \
+  --arg session_id "$malformed_target" \
+  --arg message "Malformed target acceptance summary." \
+  '{source:"agent",source_session:"octocat",target_session:$session_id,message:$message}')"
+malformed_status="$(curl -sS -o "$malformed_target_response_file" -w '%{http_code}' \
+  -X POST -H 'Content-Type: application/json' \
+  "${listener_url}/v1/messages/send" -d "$malformed_body")"
+if [[ "$malformed_status" != 400 ]] || ! jq -e --arg session_id "$malformed_target" \
+  '(.error | startswith($session_id + " is not a session id"))
+   and (.error | contains("first part of one"))
+   and (.error | contains("envoy_sessions"))
+   and ((.error | startswith("no live session")) | not)' "$malformed_target_response_file" >/dev/null; then
+  printf 'ERR: a send to %s answered HTTP %s, not a 400 saying it is not a session id.\n' \
+    "$malformed_target" "$malformed_status" >&2
+  cat "$malformed_target_response_file" >&2
+  exit 1
+fi
+
 # Why this step reads the listener's own log, which nothing in this script read before: a refused
 # send publishes nothing at all, so no envelope, no stream entry and no "listener received" line
 # will ever name it, and this record is the only server-side trace it leaves. The issue exists
@@ -470,6 +500,7 @@ count_listener_records() {
   # of non-record line instead of failing the whole read over them.
   jq -R 'fromjson? // empty | select(type == "object")' "$listener_log_file" \
     | jq -s --arg session_id "$session_id" --arg absent_session_id "$absent_session_id" \
+      --arg malformed_target "$malformed_target" \
       "[.[] | select(${selector})] | length"
 }
 
@@ -503,6 +534,14 @@ wait_for_listener_record 'refused send' \
   '.msg == "listener send" and .level == "WARN" and .outcome == "no_live_session" and .status == 404
    and .target_session == $absent_session_id and .source == "agent" and .source_session == "octocat"
    and .payload_summary == "Absent session acceptance summary." and (.event_id | length) > 0'
+
+# The third outcome, and the one an operator counts apart from the second: a run of
+# no_live_session is sessions coming and going, a run of not_a_session_id is senders addressing
+# ids nobody has.
+wait_for_listener_record 'send to a target that is not a session id' \
+  '.msg == "listener send" and .level == "WARN" and .outcome == "not_a_session_id" and .status == 400
+   and .target_session == $malformed_target and .source == "agent" and .source_session == "octocat"
+   and .payload_summary == "Malformed target acceptance summary." and (.event_id | length) > 0'
 
 # The one question a caller holding a session id asks before it addresses that session: is this
 # session live? The per-session registry read answers with the row GET /v1/sessions would carry,

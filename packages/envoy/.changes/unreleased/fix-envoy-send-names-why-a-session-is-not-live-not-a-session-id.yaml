@@ -1,0 +1,17 @@
+kind: Changed
+body: |-
+    `POST /v1/messages/send` now refuses a `target_session` that is not a session id as the
+    caller's own mistake, `400 <id> is not a session id and nothing is registered under it: a
+    session id is a UUID, 8-4-4-4-12 hexadecimal digits. Nothing was sent; read the target's whole
+    id from envoy_sessions or envoy_whoami.`, with `outcome=not_a_session_id` on its record line,
+    instead of a 404 about a session's liveness. A target that is the first part of a UUID is told
+    so: a UUIDv7's first group is the top 32 bits of a millisecond timestamp, so every session
+    started inside the same 65.536-second window carries it, and part of an id names no session.
+    The refusal is reached only after the store itself answered that nothing is registered under
+    the id and this listener never saw a registration under it lapse, so a session registered under
+    an id of any other shape is still reached, and a registration that lapsed is still reported as
+    lapsed. Nothing on this path resolves a partial id: the target is a key, read whole or not at
+    all.
+time: 2026-10-29T06:25:00.000000000Z
+custom:
+    Issue: fix-envoy-send-names-why-a-session-is-not-live

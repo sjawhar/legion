@@ -12,6 +12,8 @@ Envoy delivers external events and messages between sessions. Delivery is at-lea
 ## Send a message to another session
 
 - Take the target id from the delivery's `reply_with`, or from `envoy_sessions` (filter by `machine`, `dir` or `title`). Never address a tmux pane or window: Envoy delivers only to a session id, and the session in a pane can change.
+- Copy the id whole, and never complete one from part of it. A session id is a UUID; its first group is a timestamp every session started inside the same 65-second window carries, so part of an id names no session. A send to one is refused `<id> is not a session id`. When you were given part of an id, find the whole one with `envoy_sessions` or ask whoever gave it to you.
+- `no live session <id>` is about a session, not about your id: the refusal says whether its registration lapsed (it may come back; try again) or Envoy holds no registration under it (the id is worth checking). Never record a session as dead on it without reading which it said.
 - Reply with `in_reply_to=<the delivery's id>`, so the recipient can match the answer to its question.
 - Read the `recipient` in the send result, the session Envoy targeted: if it is not the one you meant, resend to the right id.
 - Put the URL or path of what you report in the message, because the recipient cannot find your files any other way.

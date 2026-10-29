@@ -926,11 +926,13 @@ func TestSendHandler_RejectsUnknownTarget(t *testing.T) {
 	registry, sessions := setupSessionsTest(t, nil, nil)
 	state := &listenerDeps{registry: registry, sessions: sessions}
 
+	// A well-formed UUID nothing registered: the shape every live session's id has.
+	const missingTarget = "01a17b06-9430-7bbb-8ccc-0d2c4a5d7cf7"
 	rr := httptest.NewRecorder()
 	req := httptest.NewRequest(
 		http.MethodPost,
 		"/v1/messages/send",
-		strings.NewReader(`{"target_session":"ses_missing","message":"hello"}`),
+		strings.NewReader(`{"target_session":"`+missingTarget+`","message":"hello"}`),
 	)
 	sendHandler(state, logging.New("test")).ServeHTTP(rr, req)
 
@@ -943,13 +945,14 @@ func TestSendHandler_RejectsUnknownTarget(t *testing.T) {
 	if err := json.NewDecoder(rr.Body).Decode(&response); err != nil {
 		t.Fatalf("decode error response: %v", err)
 	}
-	// The prefix is the contract Dispatch classifies on; what follows it says which of the two
+	// The prefix is the contract Dispatch classifies on; what follows it says which of the three
 	// absences this is, and an id nothing ever registered is the one a sender can act on. The
 	// window named is the bucket's own TTL, over which this listener would still hold a lapsed
-	// registration's last heartbeat.
+	// registration's last heartbeat. The target is a well-formed UUID, as every live session's id
+	// is: one that is not is a different refusal again (TestSendRefusesATargetThatIsNotASessionID).
 	want := fmt.Sprintf(
-		"no live session ses_missing: no registration, and none lapsed in the last %s; check the session id",
-		sessions.TTL(),
+		"no live session %s: no registration, and none lapsed in the last %s; check the session id",
+		missingTarget, sessions.TTL(),
 	)
 	if response.Error != want {
 		t.Fatalf("error = %q, want %q", response.Error, want)

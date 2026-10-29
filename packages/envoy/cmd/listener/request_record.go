@@ -25,6 +25,14 @@ const (
 	// said the target's key is gone, or the target is live but will not take this delivery mode.
 	outcomeNoLiveSession     requestOutcome = "no_live_session"
 	outcomeCapabilityRefused requestOutcome = "capability_refused"
+	// outcomeNotASessionID is the send route's third absence, and deliberately not
+	// outcomeNoLiveSession: the store holds no record under the target and this listener never saw
+	// one lapse, and the id is not written as a session id is, so no session can ever have carried
+	// it. It answers 400, because the caller's own target is wrong, where the other two answer 404
+	// about a session. An operator counting bounces apart needs the two separated: a run of
+	// no_live_session is sessions coming and going, a run of not_a_session_id is senders
+	// addressing ids nobody has.
+	outcomeNotASessionID requestOutcome = "not_a_session_id"
 	// outcomeRoleUnclaimed and outcomeRoleLapsed belong to the publish route alone. Both answer
 	// 404 and neither is outcomeNoLiveSession: the request named a role, not a session, and the
 	// two say different things about the claim behind it.
