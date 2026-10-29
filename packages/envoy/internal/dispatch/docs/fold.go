@@ -16,6 +16,8 @@ import (
 	"github.com/jackc/pgx/v5"
 	"github.com/reearth/ygo/crdt"
 	"github.com/reearth/ygo/persistence"
+
+	"github.com/sjawhar/envoy/internal/dispatch/store"
 )
 
 // stateThrough returns the state the room's stored updates through version, which updates replays,
@@ -114,11 +116,12 @@ const foldBufferBytes = 32 << 20
 
 // bufferedFolds is how many folds of rows read into memory (foldRead) run at once in a process,
 // across its room loads, cold reads and compactions (PgVersioned.foldSlots): each holds up to
-// foldBufferBytes of rows beside its fold's document and the read-back's. It equals the rooms
-// pool's size (store's roomsPoolSize, which the store does not export): a load used to fold inside
-// its transaction on that pool, whose connections bounded how many folds ran at once, and a
-// buffered fold that has ended its transaction holds no connection to bound it.
-const bufferedFolds = 4
+// foldBufferBytes of rows beside its fold's document and the read-back's, so a process holds at most
+// bufferedFolds × foldBufferBytes of buffered rows. It is the rooms pool's size
+// (store.RoomsPoolSize): a load used to fold inside its transaction on that pool, whose connections
+// bounded how many folds ran at once, and a buffered fold that has ended its transaction holds no
+// connection to bound it.
+const bufferedFolds = store.RoomsPoolSize
 
 // foldRead hands use the room's stored updates through version, the rows of them tx reads, which
 // number rows and total bytes, and ends tx, committing it as what names. Rows within foldBuffer

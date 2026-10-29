@@ -266,6 +266,8 @@ type compactionEntry struct {
 	// renoted says a note of the room came while its step was in flight: the step may have read the
 	// room before the noted rows were stored, so its end queues the room again (settle).
 	renoted bool
+	// index is the entry's place in the queue's heap (compactionHeap), -1 while it is not there.
+	index int
 }
 
 // startCompactionQueue creates a compaction queue whose worker runs step, and starts the worker.
@@ -283,23 +285,36 @@ func startCompactionQueue(step func(ctx context.Context, room string, retrying b
 	return q
 }
 
-// note queues room for its first check, unless the queue holds it already or takes no notes. A
+// note queues room for its first check, firstCheck from now, unless the queue takes no notes. A
 // note of the room in flight marks it (renoted), so its step's end queues it again however the step
-// ended; a note of a room waiting in the queue changes nothing.
+// ended. A note of a room waiting in the queue brings its check forward to firstCheck from now when
+// it was later: the rows the note announces come of age then, and a room checked quiet minutes ago
+// may be waiting out its oldest row's compactMaxTailAge while a burst of appends stacks rows the
+// compactMinRows rule would fold first.
 func (q *compactionQueue) note(room string) {
 	q.mu.Lock()
 	if q.shut || q.paused {
 		q.mu.Unlock()
 		return
 	}
+	at := time.Now().Add(q.timing.firstCheck)
 	if held := q.rooms[room]; held != nil {
 		if held == q.current {
 			held.renoted = true
+			q.mu.Unlock()
+			return
 		}
+		if held.index < 0 || !at.Before(held.at) {
+			q.mu.Unlock()
+			return
+		}
+		held.at = at
+		heap.Fix(&q.due, held.index)
 		q.mu.Unlock()
+		q.signal()
 		return
 	}
-	entry := &compactionEntry{room: room, at: time.Now().Add(q.timing.firstCheck)}
+	entry := &compactionEntry{room: room, at: at}
 	q.rooms[room] = entry
 	heap.Push(&q.due, entry)
 	q.mu.Unlock()
@@ -470,12 +485,21 @@ type compactionHeap []*compactionEntry
 
 func (h compactionHeap) Len() int           { return len(h) }
 func (h compactionHeap) Less(i, j int) bool { return h[i].at.Before(h[j].at) }
-func (h compactionHeap) Swap(i, j int)      { h[i], h[j] = h[j], h[i] }
-func (h *compactionHeap) Push(x any)        { *h = append(*h, x.(*compactionEntry)) }
+func (h compactionHeap) Swap(i, j int) {
+	h[i], h[j] = h[j], h[i]
+	h[i].index, h[j].index = i, j
+}
+
+func (h *compactionHeap) Push(x any) {
+	entry := x.(*compactionEntry)
+	entry.index = len(*h)
+	*h = append(*h, entry)
+}
 
 func (h *compactionHeap) Pop() any {
 	old := *h
 	entry := old[len(old)-1]
+	entry.index = -1
 	old[len(old)-1] = nil
 	*h = old[:len(old)-1]
 	return entry

@@ -304,9 +304,10 @@ deleted (LEGION-496), beside whatever rows its load read into memory. A room loa
 the rows at or below it - the compacted row and the rows written since - and when they total at
 most 32 MiB (`foldBufferBytes`) reads them into memory, ends the transaction and folds them with
 no connection held; a larger log it folds one row at a time as it streams it inside the
-transaction (`foldRead`). At most four buffered folds - loads and compactions together, the rooms
-pool's size, which bounded folds when they ran inside its transactions - hold their rows at once
-in a process (`bufferedFolds`, `PgVersioned.foldSlots`); a fifth waits within its context. Either
+transaction (`foldRead`). At most `bufferedFolds` buffered folds - loads and compactions together,
+`store.RoomsPoolSize` (four), the pool whose connections bounded folds when they ran inside its
+transactions - hold their rows at once in a process, so at most four times 32 MiB of buffered rows
+(`PgVersioned.foldSlots`); a fifth waits within its context. Either
 way it notes the room for compaction once its transaction ends
 (`noteStoredUpdates`). Nothing reads deleted content back from the store: every document built from
 it is a `crdt.New`, which drops an item's content in the transaction that deletes it, the one that

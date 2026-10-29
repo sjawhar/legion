@@ -166,11 +166,11 @@ func NewPool(pool *pgxpool.Pool) *Pool {
 // ConnectionsPerProcess with it.
 const sharedPoolSize = 64
 
-// roomsPoolSize bounds the connections document loads use. Loading takes no lock and always
+// RoomsPoolSize bounds the connections document loads use. Loading takes no lock and always
 // finishes, so one is enough for the pool to be deadlock-free; a few let cold rooms load
 // concurrently. Measured on the real server, eight cold rooms loading at once are no faster at
 // eight connections than at one, so this is small on purpose.
-const roomsPoolSize = 4
+const RoomsPoolSize = 4
 
 // healthPoolSize bounds the connections the health probe uses. The probe answers one question -
 // is Postgres reachable, and at which schema - and asks it on a connection nothing else can take,
@@ -207,7 +207,7 @@ var ErrPoolClosed = errors.New("connection pool is closed")
 // the loads have their own, opened on demand and closed with this pool: one per store, not one
 // per caller who wants to read a document.
 func (p *Pool) Rooms() (*pgxpool.Pool, error) {
-	return p.separate(&p.rooms, roomsPoolSize, "document rooms")
+	return p.separate(&p.rooms, RoomsPoolSize, "document rooms")
 }
 
 // Healthy reports the highest schema migration Postgres has applied, read within
@@ -313,7 +313,7 @@ const permanentListeners = 3
 // every pool's size - the shared, rooms, health, lease, outbox and compaction pools, and the
 // registry's own pool (processes.Register) - and one connection per permanent listener, which the
 // listener pool dials and hands off rather than holds.
-const ConnectionsPerProcess = sharedPoolSize + roomsPoolSize + healthPoolSize + leasePoolSize + outboxPoolSize + compactionPoolSize + registryPoolSize + permanentListeners
+const ConnectionsPerProcess = sharedPoolSize + RoomsPoolSize + healthPoolSize + leasePoolSize + outboxPoolSize + compactionPoolSize + registryPoolSize + permanentListeners
 
 // Outbox is the pool the events outbox claims, reads and records events through, and reads the
 // followers and authors a publish routes to. Under load the API's requests queue for the shared

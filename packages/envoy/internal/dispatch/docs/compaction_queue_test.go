@@ -362,6 +362,51 @@ func TestTheCompactionQueueKeepsANoteThatComesWhileItsDocumentsStepRuns(t *testi
 	}
 }
 
+// A burst of appends that starts after a quiet check brings the document's check forward: the
+// document waits out its oldest row's compactMaxTailAge after a check that found it not due, and
+// every append of the burst notes it, so once compactMinRows of the burst's rows are older than the
+// tail the next note's check folds them, rather than leaving them all for the 15-minute check. The
+// document then holds its fold point, the rows younger than the tail and no older row.
+func TestABurstAfterAQuietCheckBringsTheDocumentsCheckForward(t *testing.T) {
+	database := storetest.Open(t)
+	persist := NewPgVersioned(database)
+	service := New(Deps{Store: database, Persistence: persist, Events: events.NewBroker(), Settle: time.Hour})
+	t.Cleanup(func() { _ = service.Shutdown(context.Background()) })
+	steps := quickCompactionQueue(service, 50*time.Millisecond)
+	artifactID := createDocument(t, database, "burst")
+	writer := newProofHistory(t, 101)
+	quiet := NewPgVersioned(database)
+	for index := range 4 {
+		appendUpdates(t, quiet, artifactID, writer.write(fmt.Sprintf("Quiet %d.\n", index)))
+	}
+	ageUpdatesThrough(t, database, artifactID, everyVersion, 5*time.Minute)
+
+	loadStored(t, service, artifactID)
+	step := steps.await(t, artifactID, 0, "the quiet check", func(step compactionStepRecord) bool {
+		return step.next.kind == compactionLater
+	})
+	if wait := step.next.after; wait < 9*time.Minute {
+		t.Fatalf("the quiet check schedules the next in %s, want about 10 minutes, the oldest row's age rule", wait)
+	}
+	waitFor(t, 10*time.Second, "the queue to schedule the quiet document's check", func() bool {
+		return queueWaitsOn(service, artifactID)
+	})
+
+	for index := range 20 {
+		appendUpdates(t, persist, artifactID, writer.write(fmt.Sprintf("Burst %d.\n", index)))
+	}
+	// The burst comes of age, as it does compactTail after it was written.
+	ageUpdatesThrough(t, database, artifactID, everyVersion, 5*time.Minute)
+	from := steps.count()
+	appendUpdates(t, persist, artifactID, writer.write("Young.\n"))
+	steps.await(t, artifactID, from, "the check the burst's last note brought forward to compact it", func(step compactionStepRecord) bool {
+		return step.next.kind == compactionAgain
+	})
+	if after := storedRows(t, database, artifactID); len(after) != 2 {
+		t.Fatalf("the document holds rows %v, want the fold point and the young row alone", rowVersions(after))
+	}
+}
+
 // The queue's compaction never runs on a request: a joined write and a browser's edit of the
 // document each return while the queue's compaction of it is held inside its fold, and the
 // compaction then folds the rows it read beneath theirs.

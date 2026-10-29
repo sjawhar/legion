@@ -9,6 +9,7 @@ import (
 
 	"github.com/jackc/pgx/v5"
 
+	"github.com/sjawhar/envoy/internal/dispatch/duty"
 	"github.com/sjawhar/envoy/internal/dispatch/events"
 	"github.com/sjawhar/envoy/internal/dispatch/store"
 	"github.com/sjawhar/envoy/internal/dispatch/store/storetest"
@@ -380,4 +381,10 @@ func waitOutTheSweepHour(t *testing.T, database *store.Store) {
 	if left < 30*time.Second {
 		time.Sleep(left + time.Second)
 	}
+}
+
+// compactionSweepTick is one tick of the sweep, due now, as RunCompactionSweep's ticker makes one:
+// the pass, when this process takes the lease and no process has swept this hour.
+func (s *Service) compactionSweepTick(ctx context.Context, leases duty.Leases) {
+	duty.Exclusive(ctx, leases, compactionSweepLease, time.Now(), compactionSweepPeriod, s.compactionSweepPass)
 }

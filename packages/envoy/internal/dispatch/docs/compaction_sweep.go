@@ -42,12 +42,6 @@ func (s *Service) RunCompactionSweep(ctx context.Context, leases duty.Leases) {
 	duty.RunLeased(ctx, leases, compactionSweepLease, compactionSweepPeriod, duty.TickAtStart, s.compactionSweepPass)
 }
 
-// compactionSweepTick is one tick of the sweep, due now: the pass, when this process takes the
-// lease and no process has swept this hour.
-func (s *Service) compactionSweepTick(ctx context.Context, leases duty.Leases) {
-	duty.Exclusive(ctx, leases, compactionSweepLease, time.Now(), compactionSweepPeriod, s.compactionSweepPass)
-}
-
 // compactionSweepPass lists the documents with rows to fold (compactionCandidates) and tries each
 // one's compaction as the queue's check does (tryCompaction): compacted when due, under the tail
 // rule and without waiting for its lock, one at a time on the compaction pool. The list is read
