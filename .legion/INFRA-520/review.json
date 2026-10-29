@@ -2,21 +2,16 @@
   "schemaVersion": 1,
   "phase": "review",
   "issue": "INFRA-520",
-  "completed": "2026-10-29T10:28:48Z",
-  "round": 9,
-  "reviewedHead": "4b04b754f8602aa9d3373484202cabe80c77c011 (code head 0dc57a01ebfa, the merge of main 5443d99b)",
-  "decision": "changes_requested",
+  "completed": "2026-10-29T12:12:02Z",
+  "round": 10,
+  "reviewedHead": "e4cdb36954d87d57de98ab561be9bac497b5f8d1 (code head ae8b66d6f233, the merge of main 8a911ecc)",
+  "decision": "approved",
   "critical": 0,
-  "important": 1,
+  "important": 0,
   "minor": 0,
-  "keyFindings": [
-    {
-      "severity": "important",
-      "file": ".github/workflows/envoy-and-contracts.yaml (conflict with main 8a911ecc)",
-      "description": "GitHub reports CONFLICTING/DIRTY at 4b04b754 again: main's #2486 (8a911ecc) edits the deleted envoy-and-contracts.yaml (modify/delete, the only conflict). #2486 runs dispatch-browser-multiprocess on the pgvector-on-18 digest and gates it on its own filter, the dispatch list plus the workflow file. ci.yaml already does all of that (2358fcba image; dispatch_browser_multiprocess = *dispatch, which names .github/workflows/ci.yaml), so the resolution keeps the deletion and changes nothing in ci.yaml beyond what the drift check asks. Required checks green at the merged head."
-    }
-  ],
-  "roundEightItem": "Verified at 0dc57a01: worker-image.yaml keeps no pull_request trigger and takes #2186's comments; ci.yaml's worker_image filter gains packages/claude-envoy/** and .bun-version; bridge_test.go is main's; main's new packages (daemon/internal/claudelaunch, envoy/internal/bus/bustest) are in their filters and docs-pages.yaml's paths. On a copy of 0dc57a01: check-ci-filters.sh exit 0 (23 gates), check-image-trigger-paths.sh exit 0 (worker_image matches only files its build reads).",
-  "ci": "CI run 40851398418 at 0dc57a01: lint, typecheck and pr-title success; test still queued at 10:28Z when the head went CONFLICTING.",
-  "thermonuclear": "Not run: the scope is the merge port the architect narrowed it to."
+  "keyFindings": [],
+  "roundNineItem": "Verified at ae8b66d6: the merge takes main through 8a911ecc (#2486) and keeps envoy-and-contracts.yaml deleted; ci.yaml is unchanged by the merge (it already runs dispatch-browser-multiprocess on the pgvector-on-18 image with a filter of *dispatch, which names ci.yaml); the merge adds only #2486's docs/solutions note under .github-adjacent paths. main@origin is still 8a911ecc; git merge-tree shows no conflict. On a copy of ae8b66d6: check-ci-filters.sh exit 0 (23 gates), check-image-trigger-paths.sh exit 0 (5 image builds).",
+  "ci": "Required set (rulesets): lint, typecheck, test, pr-title. Newest pull_request CI head ae8b66d6 (run 40867902214): lint, typecheck, test and pr-title completed success by 12:10Z. Compare ae8b66d6...e4cdb369: only .legion/INFRA-520/ (2 files). The router's full run was accepted at bb1a700a (run 40768558349) by the architect.",
+  "threads": "12 threads, all answered by me and resolved by the implementer; none from a bot.",
+  "thermonuclear": "Not rerun: round 5's pair approved the router at 8d2720de; rounds 6-10 were merge ports and the docs-on-push Fast-follow, each verified by hand and by the drift and image-trigger checks, as the architect narrowed them."
 }
