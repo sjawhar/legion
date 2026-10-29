@@ -1,6 +1,7 @@
 // The init-script and worker helpers `e2e/mermaid.e2e.ts`'s rows share: the wrappers that record,
-// hold, refuse or fail the page's `Worker`, the scroll helpers those rows read offsets with, and
-// the route that makes the real worker chunk hold a diagram's source.
+// hold, refuse or fail the page's `Worker`, the two scroll helpers (one turns the browser's scroll
+// anchoring off, one reads the offset once it settles), and the route that makes the real worker
+// chunk hold a diagram's source.
 import { expect, type Page } from "@playwright/test";
 
 // What this file's init scripts keep on the page's window.
