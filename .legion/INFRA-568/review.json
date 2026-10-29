@@ -2,23 +2,35 @@
   "schemaVersion": 1,
   "phase": "review",
   "issue": "INFRA-568",
-  "completed": "2026-10-29T00:22:48Z",
+  "completed": "2026-10-29T02:39:17Z",
   "decision": "approved",
-  "round": 10,
-  "reviewedCodeHead": "1d89163d5f616f3a593ee5fa566302dea37ca474",
+  "round": 11,
+  "reviewedCodeHead": "b12e0766218ac8156d485a69dab9fba80c50e84e",
   "critical": 0,
   "important": 0,
   "minor": 0,
   "keyFindings": [],
+  "notDefects": [
+    {
+      "file": "packages/envoy/internal/dispatch/api/server_test.go:221-223",
+      "description": "directServer gives its server lifetime context.Background(), so a related check run through it may leave a record retry (bounded at 30 s) or a statistics refresh (only for a project with no statistics, bounded at 10 min) running past the test. This is test-only. Production servers come from register, which refuses a nil lifetime. The focused api tests pass, including under -race. Moving directServer to t.Context() with a retry wait is a test-hygiene change, not a correctness one."
+    },
+    {
+      "file": "packages/envoy/internal/dispatch/api/server_test.go:209-212",
+      "description": "The test cleanup lists the same four waits as waitBackground; one t.Cleanup(served.waitBackground) would do. Duplication only."
+    },
+    {
+      "file": "packages/envoy/internal/dispatch/api/server.go:369",
+      "description": "The comment names TestTheDeploymentsSuggestionAllowanceIsTheDocumentedBound, which the pull request renamed to TestTheDeploymentsRelatedCheckAllowanceIsTheDocumentedBound. Wording only."
+    }
+  ],
   "verified": {
-    "fingerprint": "Last review commit_id 7f6965f6: a0b437d3...; code head 1d89163d: 1b7f7441..., changed. Narrowed round; thermonuclear pair run.",
-    "scope": "Since 7f6965f6: retro's five docs/solutions/*-pr2397.md and its removal of .legion/INFRA-568/ (ac606b0d, 8e58845b); merge of main bb9fe49c (e64224e5); removal of a leftover jj conflict-marker line from cmd/dispatch/README.md (1d89163d).",
-    "merge": "This branch's migrations are now 0137_related_checks and 0138_issue_embedding_spec, after main's 0136_dashboard_assets, with no gap, collision or stale reference. registeredRoutes is 145 (main's 142 plus the branch's 3). envoy-client.md keeps both sides. No conflict marker is left in the tree. dispatchConnectionsPerPod 87 still equals store.ConnectionsPerProcess, since main added no lease.",
-    "tests": "In a scratch copy, go vet ./internal/dispatch/... and ./cmd/dispatch/ passed, and so did TestMigrationSetIsNumberedOneToN, TestEveryMigrationFileIsEmbedded, TestRoutesTablePinsEveryRegisteredRoute and TestDispatchConnectionsPerPodIsTheServers. envoy-client bun test passed 1049 and contracts 302, both tsc-clean.",
-    "retroDocs": "The five docs/solutions files name symbols, lines, tests and commits that exist; no false claim.",
-    "ci": "At the CI head cb22a5bc, the first Tests run was cancelled at 22:44Z. Its rerun (run 40778443890, attempt 2) ended success: lint, typecheck and test. pr-title success (run 40778467499). The compare from cb22a5bc to 3883c082 changes only .legion/. GitHub reported CONFLICTING at 00:22Z, after main moved again.",
-    "thermonuclear": "deep-review APPROVE and code-quality APPROVE at 3883c082.",
-    "threads": "All ten threads resolved; no new thread this round.",
-    "knownMainFailures": "pmdoc's build on main (docstest.NestedValue and cpuTimeOf, fixed by #2481) is main's and not in this branch's base."
+    "fingerprint": "Last review commit_id 05e1deef: 1b7f7441...; code head b12e0766: 7cced850..., changed. Narrowed round; thermonuclear pair run.",
+    "merge": "Merge of main 56a39157 (#2396 and others). RunSearchTermStatsRefresh uses duty.RunLeased with TickAtStart: a pass at boot, then every interval. The check's two s.lifetime readers (ensureSearchTermStats, the record retry) get a non-nil lifetime in production from register, and in every test-built server that reaches them; each &server{} literal without a lifetime reaches neither. Register's wait still ends with relatedRecordRetries.Wait before the pool closes.",
+    "tests": "In a scratch copy against Postgres: go test ./internal/dispatch/api -run 'TestRelated|TestDecisionBlock|Suggestion|TestRoutesTable|TestTheDeployments' passed in 145.9 s (2 corpus-gated skips). go test -race -run 'TestRelatedCheckBounds|TestRelatedCheckRecord' passed. go vet passed on 42 packages. pmdoc's typed_nesting_test.go fails to vet on main at 56a39157 (#2396 against #2403), and #2484 on main fixes it; it is main's.",
+    "ci": "Required lint, typecheck, test and pr-title all success at the CI head b12e0766. The compare to fc0c14e8 changes only .legion/.",
+    "thermonuclear": "deep-review APPROVE; code-quality CHANGES on the three items above, each judged not a defect.",
+    "threads": "All ten threads resolved; none new.",
+    "e2eLines": "E2E (implementer) and E2E (tester) present."
   }
 }
