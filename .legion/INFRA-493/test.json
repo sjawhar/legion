@@ -1,0 +1,40 @@
+{
+  "schemaVersion": 1,
+  "phase": "test",
+  "issue": "INFRA-493",
+  "completed": "2026-10-29T13:45:00Z",
+  "round": 5,
+  "headTested": "98d9a1052efb2ec3160f577afa98415917f76deb",
+  "codeHead": "6e7e399aad07e9b74c01689aa4838e84e9937953",
+  "earlierRounds": "Rounds 1-4 (55eb11c8 fail, ac10118d, e0332ad9, 7f8ec966 pass) are in .legion/INFRA-493/test.json at 00b7e93c, which retro's 9526e9e9 removed, and in the PR body's E2E (tester) history.",
+  "forwardMerge": "Fingerprint (conflicts-and-rewrites.md) at my round-4 code head fa20b0e2 3fc3493d… vs 6e7e399a 7c1f068e…: changed. Per file, the only line of the pull request's own diff that differs is packages/envoy/internal/dispatch/api/routes_table_test.go `registeredRoutes` (141 over main's 140 → 144 over main's 143, main's #2397 having added three routes); no product file changed. Retro's docs/solutions commit is outside the fileset.",
+  "implementerProof": {
+    "verdict": "verified",
+    "how": "Its round-6 proof is the dispatch/api suite with the pin at 144. I drove the surface the pin guards independently: the real Dispatch server built at 6e7e399a on embedded Postgres 16.4 with pgvector 0.8.7, booting with main's new routes and this branch's GET /api/v1/github/app-installation/{owner}/{repo}, and called that route."
+  },
+  "failures": [],
+  "failed": 0,
+  "mainRedsNotThisChange": [
+    "packages/dispatch/e2e/close-withdraws-asks.e2e.ts:126 (INFRA-138)",
+    "packages/envoy/internal/dispatch/pmdoc typed_nesting_test.go:23 cpuTimeOf (until #2484)"
+  ],
+  "ciAtHead": "Read on GitHub at 13:41Z at code head 6e7e399a: changes and pr-title queued, one pr-title cancelled, nothing else started yet (main's #2316 makes ci-ok the required check); read as running, not waited on. GitHub reports #2478 MERGEABLE.",
+  "proof": [
+    {
+      "criterion": "1.3 Dispatch's GET /api/v1/github/app-installation/{owner}/{repo} serves beside main's routes after the merge (the route-count pin the merge changed)",
+      "surface": "the real Dispatch server binary built from packages/envoy at 6e7e399a, embedded Postgres 16.4 with pgvector, a throwaway GitHub App key and a loopback GitHub fake answering /repos/{o}/{r}/installation",
+      "command": "dispatch with DISPATCH_APP_CLIENT_ID, DISPATCH_APP_PEM_B64, DISPATCH_GITHUB_API_BASE=http://127.0.0.1:15751; curl -H 'Authorization: Bearer <agent token>' /api/v1/github/app-installation/acme/widgets, …/acme/other, …/acme/broken; the same with no bearer and a wrong one",
+      "observed": "the server migrated and listened with every route registered; acme/widgets 200 {\"installed\":true}; acme/other (GitHub 404) 200 {\"installed\":false}; acme/broken (GitHub 500) 502 GITHUB_UNREADABLE naming the read",
+      "headSha": "6e7e399aad07e9b74c01689aa4838e84e9937953",
+      "negativeControl": "no bearer: 401 NO_IDENTITY; a wrong bearer: 401 UNAUTHORIZED `invalid bearer token`"
+    },
+    {
+      "criterion": "Smoke at the merge head: 1.1 and 1.5 a delivery NATS refused is redelivered by the real sweep and applied once; a delivery published twice is applied once by its dedupe_key",
+      "surface": "the real listener and `dispatch redeliver-webhooks` binaries built at 6e7e399a, a fake GitHub, the daemon's consumer on Postgres 16.4 and nats-server 2.10.22",
+      "command": "cd packages/daemon && go test -count=1 ./internal/intake/ -run Redelivered -v",
+      "observed": "listener 503 `github publish failed: nats: no response from stream`; one redelivery request, answered 200; github.8a4f2c10-… applied once, acme/widgets#7 open on ACME-7; the dedupe test PASS",
+      "headSha": "6e7e399aad07e9b74c01689aa4838e84e9937953",
+      "negativeControl": "the stream without notifications.github.> stores nothing on the pull request's subject until the sweep's redelivery"
+    }
+  ]
+}
