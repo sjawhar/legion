@@ -9,7 +9,7 @@ import (
 // string is read as the document it names; any other JSON value leaves ArtifactID empty, which
 // names no document, rather than failing the decode and with it the whole read. Every other field
 // of the anchor decodes the same either way.
-func TestAnchorDecodesOnlyAStringArtifactID(t *testing.T) {
+func TestDecodeAnchorReadsOnlyAStringArtifactID(t *testing.T) {
 	const documentID = "11111111-1111-4111-8111-111111111111"
 	for _, stored := range []struct {
 		name  string
@@ -25,7 +25,7 @@ func TestAnchorDecodesOnlyAStringArtifactID(t *testing.T) {
 		t.Run(stored.name, func(t *testing.T) {
 			var anchor Anchor
 			encoded := `{"artifact_id": ` + stored.value + `, "block_id": "b-7", "mark_id": "m-7", "version": 3, "quote": "the lazy dog", "orphaned": true}`
-			if err := json.Unmarshal([]byte(encoded), &anchor); err != nil {
+			if err := DecodeAnchor([]byte(encoded), &anchor); err != nil {
 				t.Fatalf("decode the anchor: %v", err)
 			}
 			if anchor.ArtifactID != stored.want {
@@ -44,7 +44,7 @@ func TestAnchorDecodesOnlyAStringArtifactID(t *testing.T) {
 // Only artifact_id is read leniently: another field of the wrong type is still a decode error, so
 // no malformed anchor passes as a valid one. That holds whichever field the decoder reaches
 // first, so the lenient read of a number artifact_id never swallows the error beside it.
-func TestAnchorDecodeStillFailsOnAnotherMalformedField(t *testing.T) {
+func TestDecodeAnchorStillFailsOnAnotherMalformedField(t *testing.T) {
 	const documentID = "11111111-1111-4111-8111-111111111111"
 	for _, encoded := range []struct{ name, value string }{
 		{name: "a string artifact_id", value: `{"artifact_id": "` + documentID + `", "version": "seven"}`},
@@ -53,7 +53,7 @@ func TestAnchorDecodeStillFailsOnAnotherMalformedField(t *testing.T) {
 	} {
 		t.Run(encoded.name, func(t *testing.T) {
 			var anchor Anchor
-			if err := json.Unmarshal([]byte(encoded.value), &anchor); err == nil {
+			if err := DecodeAnchor([]byte(encoded.value), &anchor); err == nil {
 				t.Fatalf("decoding a string version = %#v, want an error", anchor)
 			}
 		})

@@ -470,7 +470,7 @@ func (s *Service) openAnchoredMarks(ctx context.Context, source Queryer, artifac
 				rows.Close()
 				return nil, fmt.Errorf("scan %s anchor: %w", target.table, err)
 			}
-			if err := json.Unmarshal(encoded, &mark.anchor); err != nil {
+			if err := model.DecodeAnchor(encoded, &mark.anchor); err != nil {
 				rows.Close()
 				return nil, fmt.Errorf("decode %s anchor: %w", target.table, err)
 			}
@@ -654,7 +654,7 @@ func loadAnchorRefreshedComment(ctx context.Context, tx pgx.Tx, id string) (mode
 	}
 	if len(anchor) > 0 {
 		value := model.Anchor{}
-		if err := json.Unmarshal(anchor, &value); err != nil {
+		if err := model.DecodeAnchor(anchor, &value); err != nil {
 			return model.Comment{}, fmt.Errorf("decode refreshed comment %q anchor: %w", id, err)
 		}
 		comment.Anchor = &value
@@ -798,7 +798,7 @@ func (s *Service) recordedMarkRefs(ctx context.Context, artifactID string) (map[
 				return nil, fmt.Errorf("scan recorded %s mark: %w", target.table, err)
 			}
 			var anchor model.Anchor
-			if err := json.Unmarshal(encoded, &anchor); err != nil {
+			if err := model.DecodeAnchor(encoded, &anchor); err != nil {
 				rows.Close()
 				return nil, fmt.Errorf("decode recorded %s mark: %w", target.table, err)
 			}
