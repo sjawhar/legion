@@ -1,0 +1,32 @@
+{
+  "schemaVersion": 1,
+  "phase": "test",
+  "issue": "INFRA-719",
+  "completed": "2026-10-29T12:40:00Z",
+  "headTested": "1c5f55d01360b5769704a7124f4414c4e7086841",
+  "implementerProof": {
+    "verdict": "verified",
+    "how": "Re-ran each command myself at 1c5f55d0. A4: the Chromium e2e passed 4 of 4 on the real stack; at main a09a2f25 the same spec failed 3 and passed 1 (the comment view), as the implementer reported. A1: the Go tests pass at the head; at a09a2f25 with the new tests copied in, there are 50 FAIL lines. The differential was re-run against a09a2f25 over the implementer's corpus plus mine: every GATE line is 0. The census (A3) was re-run against production on a filter that also catches the fenced change (any whitespace-only line holding a space or tab, quote markers and CR allowed): 172 of 32,478 distinct markdowns were read at main 8a911ecc and at the head, and 0 change."
+  },
+  "failed": 2,
+  "failures": [
+    {
+      "criterion": "A1/A4: indented code keeps the trailing whitespace-only lines the browser keeps, less one final line ending, for every reader, ParseForWrite (the API write) included",
+      "evidence": "At 1c5f55d0, when the document ends with no line feed and its last line is a whitespace-only line that is empty once the code's four columns are eaten, the head drops two line endings and the engine drops one. Example: Parse(\"    code\\n    \\n    \") gives code \"code\" where the engine reads \"code\\n\". codeBlockText (code_text.go:120) drops the 'last line's own line feed' even when the last line has none, so the previous line's feed is dropped in its place. Red test: TestIndentedCodeKeepsTheWhitespaceLinesTheEngineKeeps, rows 'at the document's end with no final line feed', 'after a shorter blank line, with no final line feed' and 'in a list item, with no final line feed', in commit 45eb7c14. They fail for Parse, ParseRendering and ParseForWrite, and their 'the engine' subtests pass. Shown by: cd packages/envoy && go test ./internal/dispatch/pmdoc -run TestIndentedCodeKeepsTheWhitespaceLinesTheEngineKeeps -count=1. My fuzzer found 5 such documents (fuzz:317, 2367, 7053, 10225, 15948): 2 were wrong at main and are wrong in another way at the head, 3 read the same at both."
+    },
+    {
+      "criterion": "PR change bullet: in fenced code whose fence is indented, a whitespace-only line holding fewer columns than the fence is an empty line, as the browser reads it",
+      "evidence": "At 1c5f55d0, when a fenced code block no fence closes ends the document with no line feed, and its last line holds no more than the fence's indentation, the engine ends the code before that empty line and Go keeps a final line feed. Examples: Parse(\"  ~~~\\nx\\n \") gives \"x\\n\" where the engine reads \"x\"; Parse(\" ```js\\n\\n \") gives \"\\n\" where the engine reads \"\". This is the same function the PR changes (fenceClosure, then fencedCodeText at code_text.go:17-26). Main reads these wrong too: before the PR, short lines kept their spaces; at the head, the PR's fix makes them empty and they still misread. Red test: TestFencedCodeDropsAWhitespaceLineShortOfTheFenceIndent, rows 'short last line with no final line feed', 'last line of the fence's indentation with no final line feed' and 'only such a line, with no final line feed', in commit 45eb7c14. They fail for all three Go readers, and their 'the engine' subtests pass. Shown by: cd packages/envoy && go test ./internal/dispatch/pmdoc -run TestFencedCodeDropsAWhitespaceLineShortOfTheFenceIndent -count=1. My fuzzer found 12 such documents (fuzz:825, 1681, 3515, 5975, 8102, 11073, 15009, 16413, 16703, 17042, 18517, 18638)."
+    }
+  ],
+  "reach": "No stored version in production lacks a final line feed (0 of 32,478 distinct markdowns), so no stored document is misread today. The case reaches Dispatch through ParseForWrite: caller text with no final line feed, from the API, doc-edit or an artifact. ParseForWrite fails in both red tests.",
+  "checks": [
+    "A4 browser test at 1c5f55d0 (Chromium, Go server and production SPA built from the checkout, Postgres 17): 4 passed (14.8s); at main a09a2f25 the same spec: 3 failed, 1 passed (comment). The editor and the past version received lists [true,true] and code \"    x\", \"      y\"",
+    "A1 Go tests at 1c5f55d0: pass, 30 new fixture subtests; at a09a2f25 with the new tests copied in: 50 FAIL lines",
+    "gen/indented-code-corpus.ts 20000 regenerated a file byte-identical to the implementer's corpus",
+    "Differential: base a09a2f25, head 1c5f55d0, 63,261 documents (the implementer's 43,197, 20,000 from my fuzzer with seed 719, 64 hand-picked shapes): every GATE line 0, fixed 14,690, head stores correctly 52,645 vs base 37,955. https://github.com/sjawhar/legion/pull/2481#issuecomment-6485998685",
+    "Differential: base main 8a911ecc, head 1c5f55d0, my 20,064 documents plus the in-repo corpus, with extra flags in a scratch copy of the head: every GATE line 0; fixed 2,582; base and head both read 103 otherwise than the engine and refuse 3,983. Of the 103: 17 are the two failures above (5 indented, 12 fenced); 83 are a table whose header row has fewer cells than its delimiter row, read as a paragraph by the engine and as a table by Go at base and at head (in 5 of them the head fixes the code and the table remains); 1 is an empty list item in a quote that the engine reads as a list and Go as a paragraph '-' at both; 2 are CRLF (normalised by LineFeeds where text enters, so unreachable)",
+    "Census at head vs main 8a911ecc: crawled 13 projects, 6,773 documents, 32,836 versions, 32,478 distinct markdowns. The broad filter kept 172, and 0 change in tree, refusal or bytes. Negative control: the same runner over my 64 hand-picked shapes reports 40 changed, and the broad filter keeps all 40",
+    "CI at 1c5f55d0: every lane that ran is green (envoy-go, envoy-go-race, dispatch-browser-multiprocess, lint, typecheck, test among them)"
+  ]
+}
