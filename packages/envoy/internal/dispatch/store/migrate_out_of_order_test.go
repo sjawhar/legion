@@ -207,3 +207,38 @@ func versionColumnType(t *testing.T, store *Store) string {
 	}
 	return dataType
 }
+
+// A health probe that read the version before the widening keeps answering after it. The probe's
+// connection prepared its statement while the column was an integer, and a widened column changes
+// that statement's result type: an uncast read fails once on every such connection with "cached
+// plan must not change result type", which is a /healthz failure on every running process that a
+// deploy's first boot of this change widens under.
+func TestHealthyAnswersAcrossTheWideningOfTheVersionColumn(t *testing.T) {
+	ctx := context.Background()
+	store := openEmptyTestStore(t)
+	if _, err := store.Pool.Exec(ctx, `
+		create table schema_migrations (
+			version integer primary key,
+			applied_at timestamptz not null default now()
+		)
+	`); err != nil {
+		t.Fatalf("create the version table as it was: %v", err)
+	}
+	if _, err := store.Pool.Exec(ctx, "insert into schema_migrations (version) values ($1)", oooVersion(t, oooNumbered)); err != nil {
+		t.Fatalf("record the numbered migration that database already applied: %v", err)
+	}
+	if got, err := store.Pool.Healthy(ctx); err != nil || got != int(oooVersion(t, oooNumbered)) {
+		t.Fatalf("Healthy before the widening = %d, %v; want %d", got, err, oooVersion(t, oooNumbered))
+	}
+
+	if err := store.migrate(ctx, oooSet(oooNumbered, oooT1)); err != nil {
+		t.Fatalf("migrate a database whose version column is an integer: %v", err)
+	}
+	got, err := store.Pool.Healthy(ctx)
+	if err != nil {
+		t.Fatalf("Healthy after the widening: %v", err)
+	}
+	if want := int(oooVersion(t, oooT1)); got != want {
+		t.Errorf("Healthy after the widening = %d, want %d", got, want)
+	}
+}
