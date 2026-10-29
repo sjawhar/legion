@@ -232,13 +232,14 @@ test("a code span's tag line is stored behind the quote's prefix and draws the s
 });
 
 // 6. A quoted closing tag a tab ends opens a block of HTML in the browser's engine and none in
-// the server's reader, and the Proof schema holds no block of HTML, so nothing the document could
-// be stored as reads back as written: the write is refused instead, naming the line.
+// the server's reader. Where the block holds that one line and nothing else the two agree, and
+// the document is stored; where the block swallows the line under it, as here, nothing the
+// document could be stored as reads back as written, so the write is refused, naming the line.
 test("a spec whose quoted closing tag ends in a tab is refused as invalid markdown, naming the line", async () => {
   await createProject({ key: "CORE", name: "Core" });
   const answer = await refusalOf(
     createIssue(
-      { project: "CORE", spec: "> </a\t>\n", title: "A closing tag a tab ends" },
+      { project: "CORE", spec: "> </a\t>\n> text\n", title: "A closing tag a tab ends" },
       agentSession
     )
   );
