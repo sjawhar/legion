@@ -915,11 +915,12 @@ func fastestOf(timed func() time.Duration) time.Duration {
 // this file's bound allows fails fast and names its own shape and size (the file-level comment
 // above has why that matters). It is a wall-clock bound guarding a CPU-time budget, so box-load
 // scheduling starvation, not only a regression, could in principle trip it on a healthy call -
-// measured margin against that: the slowest observed healthy call at this file's current sizes,
-// under real ambient box load, was "<a" rendering at parseFullTarget/renderFullTarget's race-mode
-// size in about 0.8s, and "a_b*" parsing at the non-race size in about 0.9s - both over 60x under
-// this deadline. A margin under 10x would call for raising it; this one does not.
-const perCallDeadline = 60 * time.Second
+// measured margin against that: the slowest observed healthy call at this file's current sizes is
+// a tag shape of TestBareURLShapesParseAndRenderLinearly at tagShapeSizes' 256 KiB under -race,
+// which took 4.5s on a two-core pod and 11.2s on a box at a load of 127, and about 7.6s on a
+// GitHub runner, scaled from its own reading of a CDATA shape there. A margin under 10x calls for
+// raising it, and a minute gave 5x to 13x, so it is two minutes: 10.7x over the slowest of those.
+const perCallDeadline = 2 * time.Minute
 
 // growsLinearly times what at each of sizes in turn and fails t at the first size whose time grew
 // more than allowance times faster than the size did (growthVerdict, which this wraps). Every
