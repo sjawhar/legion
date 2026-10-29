@@ -37,7 +37,8 @@ related_issues:
   `git diff -z --no-renames --name-only "$base" "$tip" -- "${pathspecs[@]}"`
   (`.github/scripts/release-push.sh:704`). `.github/scripts/release-push.test.sh:1541` states rules
   1-3 above the rename-inside case. With `--no-renames` removed, only that case failed (614 passed,
-  1 failed). The rename-out-of-the-plugin case kept passing.
+  1 failed at d7b3cc91; 622 passed, 1 failed at af843c86). The rename-out-of-the-plugin case kept
+  passing.
 - Review thread PRRT_kwDORFy7ds6xe-nZ, fixed in 2d7200de83ad: push-built read root-relative
   pathspecs before moving to the root. Disabling the move fails the subdirectory newer-build case
   (621 passed, 2 failed). The subdirectory landing case passes either way, because a later helper

@@ -4,10 +4,10 @@
 #
 # This is the one statement of what main's rebuild must accept. The rebuild's build job
 # (.github/workflows/claude-envoy-rebuild.yaml) runs it and hands <tar> to its push job, whose
-# `release-push.sh push-built` checks the same tar again before it commits it; pr-and-main.yaml's
-# required test job and envoy-and-contracts.yaml's claude-envoy job run the very same command on a
-# pull request, so a pull request fails a check for whatever main's push job would refuse instead
-# of merging and then failing every rebuild on main.
+# `release-push.sh push-built` checks the same tar again before it commits it; ci.yaml's required
+# test job and its claude-envoy job run the very same command on a pull request, so a pull request
+# fails a check for whatever main's push job would refuse instead of merging and then failing every
+# rebuild on main.
 #
 # It writes no file of the checkout: a pull request never commits dist/ or legion/, and jj records
 # whatever a command writes into the working copy. Every build goes into a scratch directory

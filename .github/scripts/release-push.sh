@@ -185,10 +185,10 @@
 #            rev-parse --show-toplevel`) are replaced by the tar's content, so
 #            a file the tar lacks is deleted; a failed extraction is an
 #            ::error::. The rebuild's build job runs it to compare the build
-#            with the files main tracks, and envoy-and-contracts.yaml's
-#            claude-envoy job to pack the build, each in its own disposable
-#            checkout; push-built does the same before it commits. Nothing a
-#            person runs locally writes the two directories.
+#            with the files main tracks, and ci.yaml's claude-envoy job to
+#            pack the build, each in its own disposable checkout; push-built
+#            does the same before it commits. Nothing a person runs locally
+#            writes the two directories.
 # push-built: land a build of the Claude Envoy plugin on main, for
 #            claude-envoy-rebuild.yaml's push job. <tar> is what its build
 #            job built from <base-sha>, main's tip when that job started: the
