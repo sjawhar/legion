@@ -100,10 +100,10 @@ Each item below names a task and where its code is, then notes on it.
 
   JetStream KV subscriptions
 
-- **KV cache watchers**: `internal/kvwatch/kvwatch.go`, `internal/kvwatch/scan.go`
+- **KV cache watchers**: `internal/kvwatch/kvwatch.go`, `internal/kvwatch/scan.go`, `internal/bus/kvresume.go`
 
   the interest, role claim, session and CI caches' one watch lifecycle:
-  first start, readiness, whether the current watcher's first scan delivered every key (`Complete`, and `WithRescan`, which scans again after a scan nats.go's idle timer ended), rewatch, recreated buckets, stop;
+  first start, readiness, whether the current watcher's first scan delivered every key (`Complete`, and `WithRescan`, which scans again after a scan nats.go's idle timer ended), rewatch (resuming after the last revision applied, `bus.KeyValue.WatchAllFrom`), recreated buckets, stop;
   and the one-shot scan of a bucket's existing keys (`ScanExistingKeys`); `kvwatchtest` fakes nats.go's scan idle timeout
 
 - **Topic matching**: `internal/routing/match.go`
@@ -541,10 +541,11 @@ a 524 KiB document's tree read took about 68 ms walking the live tree, 283 ms th
 The replica is listed for its document's reads (`Service.replicas`), the document and the replica each held weakly there;
 the update observer, which the document holds, is the replica's one strong holder, so the replica is collected with an evicted document, in the same collection, and the listing goes once the document is collected (`keepReplica`, `TestAnEvictedRoomsReplicaGoesWithIt`).
 A reader holding an evicted instance of a room reaches that instance's replica or none, never its successor's.
-`TestReadsOfALiveDocumentRunBesideItsPeers` runs each of these reads while a websocket peer types, until 50 of its runs have overlapped one of the peer's updates, and CI's `envoy-go-race` job runs the `docs` and `api` packages under `-race`, which reports a walk of the live tree beside a write;
-the unit tests' own step runs without it.
-The race job runs only when a file its `envoy_go_race` filter in `.github/workflows/ci.yaml` names changes;
-see Critical conventions for what keeps that filter current.
+`TestReadsOfALiveDocumentRunBesideItsPeers` runs each of these reads while a websocket peer types, until 50 of its runs have overlapped one of the peer's updates, and CI runs the `docs` package under `-race` in `envoy-go-race-docs` and the `api` package in `envoy-go-race`;
+the detector reports a walk of the live tree beside a write, and the unit tests' own step runs without it.
+Each race job runs only when a file its filter in `.github/workflows/ci.yaml` names changes
+— `envoy_go_race_docs`, the closure of the `docs` package alone, whose job gives it a 60-minute deadline, and `envoy_go_race` for the rest;
+see Critical conventions for what keeps those filters current.
 
 Writes to one room never meet each other unlocked.
 A browser's update reaches the room as ygo applies it, inside one Yjs transaction under the document's lock (`sync.ApplySyncMessage`, `crdt.ApplyUpdateV1`), so two browsers' updates take turns.
@@ -768,14 +769,14 @@ A splice cuts a text node only where a range's edge falls between characters:
 
 Accepting a suggestion (`POST /api/v1/comments/{id}/accept`, `docs/marks.go` `applySuggestion`) splices its `replace_with`, which unlike an edit's `with` may be blocks, with ProseMirror's range fitting (`pmdoc.Splice`).
 A non-empty replacement fitted into a typed block stays inside it, and a fit never replaces the typed block it lands in:
-a callout takes what its content rule allows, a code block included (the engine oracle's `callout-paragraph-and-code` case), and an ask takes any block at this step, since `Validate` lets an ask hold other blocks while a browser edit passes through.
+a callout takes what its content rule allows, a code block included (the engine oracle's `callout-paragraph-and-code` case), and an ask takes any block at this step, since `Validate` lets an ask hold other blocks, which concurrent browser edits can leave there.
 The one exception is a replacement holding exactly one block of the typed block's own type under its id, at any depth, which is that block rewritten:
 it replaces the block in place rather than nesting inside it, and the replacement's other blocks, and any it sits inside (a blockquote, a list item, a typed block under another id), go in the same parent, where they stand in the replacement.
 The same type under another id, or under none, is a new block and lands inside like any other.
 Either way the accept keeps only what reads back as it wrote it (above).
 The accept then reads each ask by its id before and after the splice (`docs/ask_blocks.go` `askReadability`, `docs/marks.go` `refuseBrokenAsks`):
 an ask is unreadable when settlement's parse fails, when its children break the content rule `paragraph+ bullet_list?` (`pmdoc.AskContentError`:
-a paragraph after its options or a second bullet list parses, but the browser editor drops such an ask from the shared document when it renders it, and settlement then retracts it), or when it repeats an earlier ask's id.
+a paragraph after its options or a second bullet list parses, but the browser's card takes its question from the ask's first child and its options from its last, so settlement marks such an ask `invalid` and keeps its row as it was, open or decided, `readAskBlockStrictly`), or when it repeats an earlier ask's id.
 The first ask left unreadable whose id was readable before is `400 INVALID_ASK_BLOCK` with that reason, so a question given a code block, a paragraph after the options, a second list or an emptied question is refused.
 An ask under a held id is refused one step earlier, by the write's block-id check (`400 INVALID_MARKDOWN`, the block-id paragraph above).
 An id the document already held unreadable (a browser edit can leave one, and an upload can carry it on) does not refuse an accept, whether the accept leaves that ask alone or writes into it, unless the accept adds a second ask under it:
@@ -1277,8 +1278,19 @@ and a closer looks only at the last opener of each of the at most six buckets it
 A correctly stored rendering keeps its bytes:
 the writer keeps a spelling that reads back under that parser's rules (`inlineMarkdown`, `editorRules`) and both readers Dispatch stored markdown under (`storedMarkdown`:
 `*`/`_` judged beside another `*` or `_` but not a `~`, `~` runs of either length paired, a run after any `~` refused, every run in one loop;
-`flankingMarkdown`: the same with flanking alone), and failing that under the first two, and failing that under that parser's alone (`inlineWithEscapes`), so wherever the bytes main wrote read back as that parser reads them they stay;
-an image's alt text is kept the same way under `Parse` and `storedMarkdown` (`altReadsBack`).
+`flankingMarkdown`: the same with flanking alone), and failing that under the first two, and failing that under that parser's alone (`inlineWithEscapes`), so wherever the bytes the writer before sjawhar/legion#2360 wrote read back as that parser reads them they stay:
+the one rule is that the writer keeps the earliest spelling of the greatest read-back prefix depth under `readBackReaders` (`inlineWithEscapes`, `readsBackUnder`).
+A text `!` written right before a link's `[` is written `\!`, since `![` opens an image (`needsInlineEscape`'s `beforeLabel`).
+A code block whose language holds a backtick is fenced with tildes, since a backtick fence's info string cannot hold one (`codeBlockFence`).
+Every order the writer opens marks in opens a code span's mark innermost, since a mark opened inside the span would be its text (`codeInnermost`).
+Only where no spelling before reads back under `inlineMarkdown` does the writer try `lastResorts`, so that no stored run's bytes change.
+A letter written as a character reference for the flanking rules takes one more backslash there where the bytes before it end in an odd run of backslashes, since `\&#97;` reads as an escaped `&` (`pairBackslash`).
+A run whose one free asterisk run stands beside a bold or italic code span is read back and written there with every `*` and `_` escaped (`delimitersInText`'s `lastHeld`).
+An escaped tilde is written `\~` there, beside which the browser editor's parser lets a `*` run open or close, where the `;` ending `&#126;` is punctuation that keeps it from closing before a letter (`tildeBackslash`).
+Marks are opened by reach there, the one the texts after carry furthest outermost, so that a nearer one ending closes no other (`byReach`).
+And marks a text shares with the one before are closed and opened again there inside the marks it opens (`*a*~~*b*~~`), so that the new run stands beside a delimiter run rather than a letter (`reopening`).
+And a bare URL whose text is its href is written there as text with the colon of its scheme escaped, so that the tokenizer reads no URL and reads no delimiter run written after it on into one, while the decoded text is the URL the transform links again (`bareURLColons`).
+An image's alt text is kept the same way under `Parse` and `storedMarkdown` (`altReadsBack`).
 A code span keeps the whitespace that starts each of its later lines past the prefix of the containers around it, as the browser editor's parser reads it, a line holding only whitespace before the closer included;
 goldmark's paragraph trims it (`lineRecordingParagraph`, `multilineCodeSpanText`).
 A space or a line feed is the padding such a span sheds at each end (`codeSpanPadded`) where something else stands between, and the writer pads a span whose text starts and ends with one.
@@ -1312,9 +1324,16 @@ Goldmark measured such indentation as if it began the line, or took a list marke
 An indented code block right after a list, outside it - which only a last item holding its content five or more columns in allows, by a wide ordered marker, spaces or tabs - or right after a quote, on the line after the quote's last, is refused when it holds more than one line:
 the browser editor's parser keeps the list or quote open across the code's first line, which it does not continue, and reads the code's later lines as a second code block.
 A blank line before the code ends a quote, so there the code is read whole.
+Code right after such a list, or right after a quote with no blank line between, keeps none of the whitespace-only lines after it, which that parser leaves to the list or quote it holds open (`codeColumns.Close`).
 A fenced code block whose language - the info string's first word - holds a backslash escape or a character reference is refused:
 that parser decodes both, and goldmark keeps them as written.
 What it leaves as written (`\q`, `&bogus;`) is read as before, as is the rest of the info string, which both drop.
+A whitespace-only line inside fenced code whose opening fence stands past its container's content is an empty line of the code when it holds fewer columns past that content than the fence does:
+that parser takes up to the fence's indentation from each line, and goldmark kept the whole line, so `  ~~~\n \nx` holds the code `\nx`;
+a last line of the document with no line feed holding nothing past the fence's indentation is no line of the code, so `  ~~~\nx\n ` holds `x`, as a quote takes such a line in place of the code's last (`fenceClosure`, `fencedCodeText`).
+The document's last line with no line feed is read as that parser reads it whatever block it ends:
+the columns its containers leave of a tab they took part of are the line's, where goldmark read no line past the source's end and dropped them, so `> ```\n> x\n>\t` holds the code `x\n  `, and a container inside them or an item takes its own columns from them (`lastLineColumns`);
+a typed block indented in its container takes its indentation from that line too (`typedDirectiveParser`).
 A task list item's marker (`[ ]`, `[x]` or `[X]` opening a list item's first paragraph) is read as the browser editor's parser reads it (`taskList`):
 followed by a space or a tab and then more text on the line, or by a line ending the paragraph continues past, and it takes only the one character after it.
 Goldmark's took the marker with anything after it, so it read a link opening a list item (`- [x](https://…)`) as a checked task.
@@ -1335,7 +1354,7 @@ Its tokenizer (`linkify.go`) reads the markdown as written, before emphasis, cod
 `linkifyGuard`, asked at every ASCII punctuation character, whitespace and head after every other inline parser declines, reads from there to the next character goldmark asks at (`readLiteralAddress`), and `underscoreEmail` reads an email at `_` before emphasis.
 Asking at a character no other parser triggers on ends goldmark's text there, so the guard gives the split text back (`linkifyBlock.settle`), and a markdown holding no address is counted and weighed as without it.
 Its transform (`autolink_transform.go`) reads, at block close, each run of text nodes between other nodes, decoded, its URL pattern first and its email pattern over what that leaves (`linkTextAddresses`);
-one decoder gives each text's decoded text and the source offset each of its characters was written at (`decodeMarkdownTextOffsets`), where an address's edges split the text.
+one decoder gives each text's decoded text and the source offset each of its characters was written at (`decodeMarkdown`), where an address's edges split the text.
 The two readers end an address differently (`x;https://x.test/a_ b` leaves the `_` out, `see
 http\://x.test/a_ b` keeps it), each as the engine does.
 So an address is a link after any punctuation, a letter outside ASCII, `]`, `|`, `!`, a character reference or an escape, a URL after a digit too, and at a line or table cell opening with punctuation, as in a comment and the browser editor.
@@ -1356,7 +1375,7 @@ A text `<` first after its line's container prefix is also escaped where microma
 `<span title=a=b;[a@b.cc](mailto:a@b.cc)>` alone on a paragraph's first line is a complete tag to the engine, whose unquoted value ends at `=` and reads another, and `<!x` opens a declaration.
 Marks are written in one order - link, strong, emphasis - so where a text still carries a mark the text before it opened, and the order puts that mark after the text's other marks, the mark is closed and opened again;
 where that puts two runs of one delimiter character side by side (bold inside italic: `*`, `**` and `*`), the parser reads one run.
-Such a run is kept where it reads back, as the parser then splits it as written, and one that does not is written again in the plain respellings, as main writes it again.
+Such a run is kept where it reads back, as the parser then splits it as written, and one that does not is written again in the plain respellings, as the writer before sjawhar/legion#1464 writes it again.
 Only where none of those reads back, and a text is under more than one mark (`nestsMarks`), is it written with the marks still open kept open, then the marks the next text still carries, and the text's others opened inside them (`keepingOpen`), kept only where that reads back with nothing fused, so `_**a** b_` is written `***a** b*`;
 a run that fuses nothing is written as before, so italic closed around a link keeps its bytes.
 A spelling that writes a delimiter run's neighbouring letter as a reference (`flanking`) is made only where such a letter stands beside one (`letterBesideDelimiter`).
@@ -1387,6 +1406,8 @@ blank lines after an item that ends in a quote or a list are that block's, and i
 and a quote and a footnote definition together mix the two (`footnotedQuoteListSpread`).
 A blank line after a fenced code block no fence closed is the code's and spreads nothing, even where the code's text drops it, unless a quote between ends at it (`keepsBlankLinesAfter`).
 The code's text drops that line where it ends a list item or a footnote definition that flow content follows (a paragraph, a heading, a rule, a fence, a typed block or a table), or a quote no container opens right after, and keeps it before a quote, a list item or a definition, as that parser reads it (`blankTaker`).
+Indented code keeps the whitespace-only lines after it that hold four or more columns past where its container's content starts (a list item measured from its content, a footnote definition from its own start), and the shorter blank lines between them, as that parser reads it, so they are its text, less one final line ending (a last line with no line feed has none of its own, so `    code\n    \n    ` holds `code\n`), and space nothing (`codeColumns`, `heldCodeLines`, `markBlocksAfterHeldCode`, `codeBlockText`).
+The two refusals the lines alone do not decide, of a typed block holding a blank line inside a list item (`blankInside`) and of a blank line in a quote at or after a list that quotes and typed blocks nest around more than once (`nestedQuotedListBlank`), still read those lines, and a last line `lastLineColumns` kept, as the blank lines they were before (`asHeldBefore`), so they refuse what they refused before.
 A list item decides by what follows its list only inside its own quote or typed block;
 past one, that container's rule decides, so a typed block's fence keeps the line and a quote's end judges it by what opens right after.
 The renderer writes each spacing so that it reads back (`blanksAfterList`, `writesBlankAfterItem`):
@@ -1496,12 +1517,26 @@ Text the block cannot carry unchanged is refused `400 ASK_BLOCK_TEXT` naming the
 The rule is a round trip through settlement's own parser and the canonical markdown a version records, never a list of forbidden characters:
 whatever the block cannot carry back unchanged is refused, and an option label containing `": "` - the separator between a label and its description - is one example rather than the only one.
 A single newline is carried as a hard break; surrounding whitespace is trimmed, as the parser trims it.
+An edit of an ask whose body breaks its content rule (`pmdoc.AskContentError`:
+a second bullet list, or a block after its list, which concurrent browser edits can leave) is refused `400 ASK_BLOCK_TEXT` with field `block` (`ErrAskBlockUnrepresentable`), whatever it names (`refuseAskContentEdit` in `docs/ask_block_text.go`):
+the route never rebuilds such an ask, so it never moves or drops what a collaborator wrote.
+The reason quotes every child block of the ask in full (its rendered markdown, Go-quoted) with its block id given only as Go-quoted data - no shell command and no ready-made ops, since a block id is document text - and names one path:
+delete, all in one document edit (`dispatch doc-edit`, one delete per block by its id;
+doc-edit refuses an edit that leaves the ask broken, so one list at a time would be refused), the blocks it lists, which keep the question's paragraphs (from the first paragraph holding text) and the first list after them, then edit the ask, which the route then applies as for any valid ask.
+While a child has no id or an id repeats in the document (before settlement stamps ids), it names no delete and says to retry once the document settles.
+The one edit it names also deletes, by id, the extra blocks of every decision nested in the blocks it keeps that breaks its own rule, so one doc-edit repairs them together;
+before naming it, the refusal checks that, with those deletes applied, the ask, every nested decision losing a block and every decision holding the ask read strictly, as doc-edit requires (`planAskRepair`).
+When no such edit exists - a delete here would leave a decision holding this one unreadable, or a decision needs words written rather than blocks deleted - it names no delete and no ask edit of another decision, and says the decision is repaired in the document editor.
+An ask with no paragraph holding text is refused earlier, as having an empty question.
+Tests follow the refusal for every body of up to five blocks drawn from paragraphs, empty paragraphs, lists and lists holding a nested list, and for every body of up to four that adds an option holding a decision of up to three such blocks.
+Before, an edit naming only `urgency` or `multiple` wrote the options joined across both lists to the row.
 Settlement retracts an ask whose block left the document in its own name, `{kind: "system", id: "document-settlement"}`, and restores only a retraction it wrote - a person's or a session's retract stands however the document moves, which is why `resolve` refuses a caller reason beginning `removed from the document in version`.
 The `ask.opened` or `ask.answered` a restore appends carries `restored: true` (`model.AskEventPayload.Restored`):
 it records the ask's return to the state it had, never a new answer.
 A restore the release before the mark writes - every one already in the event log, and one written during a rollout or an image rollback - carries none, so a missing mark does not prove a new answer.
-An invalid browser-edited ask retains its indexed ask, carries the server-owned `invalid` parse-error attribute, and emits `block.invalid`;
-repairing its body clears `invalid` before updating the ask row.
+A browser-edited ask settlement cannot read (`readAskBlockStrictly`) - one its parse refuses, such as a heading or code block in it, an emptied question or an option without a label, or one that breaks its content rule, a second bullet list or a paragraph after its list, which concurrent edits can leave and the browser editor keeps - carries the server-owned `invalid` attribute naming the reason and emits `block.invalid`.
+An open ask's indexed row stays open and unchanged; an answered or resolved ask keeps its decided row and answer.
+Repairing its body clears `invalid` before updating the ask row, and writes a decided ask's decided wording back into the block.
 Markdown that becomes a whole document - a spec at issue creation, an uploaded document or version - is refused with `400 INVALID_ASK_BLOCK` when an ask's body breaks its content rule, `paragraph+ bullet_list?` - one or more paragraphs, then at most one bullet list, last (`pmdoc.AskContentError`) - as the browser editor's parser refuses to build such a block.
 A new document is held to it for every ask, and so are a version that repairs a stored tree outside the schema, which has no readable asks to compare with, and a rebuild from supplied markdown;
 any other new version only for each ask it writes or changes (`refuseChangedAsks`), comparing the ask's rendering with the current one (`newAskMarkdown`, the asks of one check sharing one budget of span cells, spent in document order as the document's own render spent it, so a live ask over a table with colspans or rowspans matches the cells its stored markdown wrote them out as while that budget lasts), since a version is markdown and cannot carry a comment's anchor mark or the id a reader's browser derives for a heading;
@@ -2074,6 +2109,8 @@ Why it is not a read-path repair is `cmd/dispatch/README.md`'s ("Pre-deploy cens
   How the SPA shows and marks threads is `packages/dispatch/AGENTS.md`'s.
 
 - `GET /api/v1/issues/{key}/subscribers` and `GET /api/v1/artifacts/{id}/subscribers` (human-only) list the sessions whose persisted Envoy interests match that issue's or unlinked document's topic family, merging `GET /v1/interests/` with `GET /v1/sessions` for live status and title.
+  A live subscriber's `last_seen` is its session's;
+  a subscriber no longer live has its last heartbeat, the interest row's `last_seen`, when the listener still knows it, else the interest row's `updated_at`, which can lag that heartbeat by up to `store.InterestRefreshAge` (a listener that restarted since the session died, or one predating the field, sends no `last_seen`).
   `DELETE .../subscribers/{session_id}` removes matching topics with `POST /v1/interests/unsubscribe`;
   it first commits `subscription.remove_requested` with `pending: true`, which the outbox does not publish.
   After idempotent listener removal succeeds, Dispatch appends `subscription.removed` with the `request_event_id` it settles and routes that notice directly to the unsubscribed session's `notifications.agent.<session_id>` topic in addition to the owner topic.
@@ -2214,7 +2251,7 @@ Why it is not a read-path repair is `cmd/dispatch/README.md`'s ("Pre-deploy cens
   the listener passes `store.InterestReapGrace` (10 minutes), so a dead session's interest stays 15 minutes after its row's last write, and a row exactly that old is kept.
   The refresh allowance exists because a build that skips rewriting an unchanged interest row younger than `InterestRefreshAge` lets the row's `UpdatedAt` lag the session's last heartbeat by up to that age;
   adding it keeps a paused session's grace at least `InterestReapGrace` after its last heartbeat.
-  Release order follows from it: no build that skips unchanged interest writes may run while any listener on the shared `envoy_interests` bucket still reaps at 10 minutes.
+  Release order follows from it: no build that skips unchanged interest writes may run while any listener on the shared `envoy_interests` bucket still reaps at 10 minutes, and this build is one that skips them (`Registry.UpsertWithin`).
 
 - `store.Open` snapshots the revision of every stored claim (`roleRevisions`, `internal/store/kv.go`) so a restored claim keeps its grace only while the bucket still holds the revision the restart read.
   It takes that snapshot from one watch over the bucket's existing keys, as the interest, session and CI caches read theirs (`internal/kvwatch`), so listener readiness costs one pass over the bucket rather than a round trip per claim (LEGION-360).
@@ -2268,8 +2305,8 @@ Why it is not a read-path repair is `cmd/dispatch/README.md`'s ("Pre-deploy cens
   — consider whether the cost justifies the benefit over the generic MCP bridge before adding custom source-specific logic to Envoy.
   When using the MCP bridge, Envoy should stay naive about the message content — the MCP server owns the domain logic.
 
-- Every Go job of `.github/workflows/ci.yaml` runs only when a file its own filter there names changes, the six Envoy jobs this module's tagged and race suites run in among them:
-  `dispatch-memory` (`dispatch_memory`), `dispatch-multiprocess` (`dispatch_multiprocess`), `listener-server-change` (`listener_server_change`), `broker-multiprocess` (`broker_multiprocess`), `envoy-go-race` (`envoy_go_race`) and `envoy-infra-go` (`envoy_infra_go`).
+- Every Go job of `.github/workflows/ci.yaml` runs only when a file its own filter there names changes, the seven Envoy jobs this module's tagged and race suites run in among them:
+  `dispatch-memory` (`dispatch_memory`), `dispatch-multiprocess` (`dispatch_multiprocess`), `listener-server-change` (`listener_server_change`), `broker-multiprocess` (`broker_multiprocess`), `envoy-go-race` (`envoy_go_race`), `envoy-go-race-docs` (`envoy_go_race_docs`) and `envoy-infra-go` (`envoy_infra_go`).
   Each filter lists the packages the job's command compiles with its build tags, the packages of each binary its tests build, and the files its tests read.
   Any change that makes a job's command, or a binary its tests build, compile a new package or read a new file - production code included, not only a test - adds that package or file to that job's filter in the same pull request.
   `.github/scripts/check-ci-filters.sh` (ci.yaml's `ci-filters` job) recomputes each go command's package closure and fails naming a file a filter misses;
@@ -2419,10 +2456,25 @@ and the 401 is the same `unauthorized` in every case, so a rejected caller learn
   the shutdown deletes each watcher's consumer itself before the connection drains, so a delete nats.go's drain reports belongs to a watcher nothing ended, and an ordered consumer nats.go failed to recreate wraps the error.
 
 - Every cache warm-up logs one line when its initial scan ends
-  — `<cache> cache warm-up` with the bucket, `elapsed_ms`, `entries`, `delete_markers` and `outcome` — at INFO when the scan delivered every existing key and at WARN when nats.go's idle timer gave up on it (`outcome: "timed out"`, `internal/kvwatch`).
+  — `<cache> cache warm-up` with the bucket, `elapsed_ms`, `entries`, `delete_markers` and `outcome` — at INFO when the scan delivered every existing key (`outcome: "completed"`) or a resumed watch delivered what was written since the revision it resumed after (`outcome: "resumed"`), and at WARN when nats.go's idle timer gave up on it (`outcome: "timed out"`, `internal/kvwatch`).
   The two counts are disjoint: `entries` is the live keys the scan delivered, `delete_markers` what it streamed past to find them;
   a cache can hold fewer keys than `entries`, since it evicts a value it cannot decode.
-  The line, like every line a cache watcher writes (a failed first start, a recreated bucket, its own end), goes through the logger its store hands it (`store.WithLogger`, `session.WithSessionLogger`, and the CI store's own), so in the listener it is a JSON record with `machine_id`, as `internal/store`'s lines are.
+
+- A `Rewatch` (the reconnect hook's and the self-health rebuild's) resumes after the last revision the cache's watcher applied, delete and purge markers included (the stores' own write-through revisions never count), through `bus.KeyValue.WatchAllFrom`, which opens the bucket with nats.go's `jetstream` package because the legacy KV API has no resume option.
+  Its line's counts are then what was written since:
+  the puts, and the delete and purge markers, after that revision, so a rewatch of a large bucket costs what changed rather than the bucket.
+  A first `Start` still reads the bucket in full, since no applied revision survives the process, and so does a `WithRescan` rescan, which repeats a scan that did not complete;
+  a `Rewatch` reads in full instead of resuming when no generation completed (no revision applied yet, or the current watcher has not reached its end-of-scan marker, or reached it only through the idle timer), when the bucket was recreated (its stream's creation time changed, and the cache is emptied first), when the stream's `LastSeq` is below the last revision applied (a restore of an older snapshot), or when another watch emptied the cache for a recreated bucket after this one read where to resume.
+  It also reads in full, in the same `Rewatch`, when the resuming watcher cannot be created:
+  nats.go holds that watcher's consumer create to the legacy JetStream context's 5 s default, where the full read's requests get 10 s, so a server slow enough to fail the resume still gets the full read rather than a failed repair, and the rewatch logs `<cache> watcher could not resume; the bucket is read in full` at WARN, with the bucket and the error, before the full read's own warm-up line.
+  A resumed watch has no idle timer, so it never logs `timed out`, and it completes at its own end-of-scan marker, which makes its cache complete for `kvwatch.Watcher.Complete` as a full scan's marker does:
+  the one flag that says a generation reached its marker decides both.
+  Each bucket keeps one revision per key, so a resume delivers at most one message per key that still has one.
+  A delete marker the interest marker collector purged while the watcher was away, and a value `MaxAge` expired, leave no message, so a resume cannot see them, exactly as the same-bucket full `WatchAll` it replaces could not: that replay does no reset either.
+  The watcher being replaced can apply more entries after the resume point is read and before the switch;
+  the new one delivers them again, which is harmless because every store fences its cache by revision.
+
+- The line, like every line a cache watcher writes (a failed first start, a recreated bucket, a resume that could not be created, its own end), goes through the logger its store hands it (`store.WithLogger`, `session.WithSessionLogger`, and the CI store's own), so in the listener it is a JSON record with `machine_id`, as `internal/store`'s lines are.
   A timed-out scan is logged and never recorded as the watcher's error, because the watcher is still running and its cache still follows the bucket:
   `Err`, `Ping`, `/healthz` and the self-health rebuild must keep meaning "this watcher is dead".
   Reading the timeout consumes nats.go's single buffered error, so a watcher that later ends after a timed-out scan records `<cache> watcher stopped` rather than the timeout;
@@ -2430,6 +2482,20 @@ and the 401 is the same `unauthorized` in every case, so a rejected caller learn
   A watcher that ends on its own writes that end as two lines, not one:
   `<cache> watcher stopped` at WARN when the stop happens, and one ERROR, `<cache> watcher was not repaired` with the bucket, the recorded error and a `reason` of `repair failed` or `no repair within 1m0s`, only once a repair has failed or no repair has run within a minute (`unrepairedDelay`), because an ERROR at the stop itself is noise whenever the self-health rebuild repairs it a moment later.
   A repair that lands first clears the wait, so a repaired stop leaves the WARN alone, and the ERROR is logged at most once however a failed repair and the wait race.
+
+- The session cache (`internal/session`) keeps each entry until its deadline, one registry TTL (the session bucket's `MaxAge`) after the write:
+  the revision's creation time, or `updated_at` for the listener's own write-through, because JetStream delivers no event when `MaxAge` expires a key.
+  Reads (`Get`, `List`, `LastSeen`, and `LiveCount`, which the `envoy_active_sessions` gauge counts with, without copying the cache) take the shared lock and change nothing:
+  an entry past its deadline reads as absent.
+  The entry leaves the cache at that deadline, from a deadline heap one `time.AfterFunc` timer serves (`expireDue`), not on a read, and its final heartbeat moves to the `last_seen` record for the registry's last-seen retention (`session.WithLastSeenRetention`, one TTL by default and never less), so `LastSeen` answers the same before and after the removal.
+  The listener keeps that record until the interest reaper's grace has passed, `store.InterestReapGrace` + `store.InterestRefreshAge` after the session left the cache, so `/v1/interests/` can give a dead session's last heartbeat for every row the reaper still holds.
+  An id's revision fence leaves with that record, the retention after the id left the cache, expired or deleted, so the fence map holds only live ids and ids that left within the retention;
+  since the retention is at least one TTL, a late delivery of an older revision then has a deadline already passed and is not cached.
+  A non-positive TTL schedules nothing.
+  The interest reaper (`store.Registry.Reap`) copies the session id and revision of each cached interest past its grace (the grace window plus `store.InterestRefreshAge`) under the interest registry's read lock and releases it, then calls the liveness check (`isAlive`, the session cache's `Get`) with no interest lock held, so a subscribe never waits on a pass's liveness checks.
+  It re-reads each candidate before deleting it, skips one whose revision changed or that is now within grace, and deletes it only at the revision it checked:
+  a write that lands after that check makes JetStream refuse the delete, and the interest is kept.
+  Each pass logs `reaper cycle` with `reaped` and `elapsed_ms`.
 
 - The role claim view (`store.Registry.RolesHeldBy`, which `GET /v1/sessions`, `GET /v1/registry/<session_id>` and a send's `sender.roles` read) answers only while it is complete (`kvwatch.Watcher.Complete`):
   the current role claim watcher's first scan delivered every claim, its nil marker not the idle timer's, and after a recreated bucket's reset only once the refill's own scan has.
@@ -2784,7 +2850,7 @@ Each item below names an endpoint and its method, then its contract, and an item
   — every one of `roleHolderResolutionAttempts` (2) spent on a supersession, `errRoleHolderChanged` — keeps that 503 and its `Retry-After: 1`, since a fresh read wins the race as soon as the replacement claim settles, but answers `{"error":"envoy: the holder of role <role> changed while this publish was resolving it"}` (`writeRoleHolderChanged`).
 
 - A role topic answers `200` with the envelope and `holder`, the session that took it, once the holder's receipt arrived, and also, forwarding nothing, when `source_session` holds the role or the holder already confirmed this dedupe key through the route.
-  It answers `404 {"error":…,"reason":"unclaimed"}` for a role with no claim, or `reason: "holder_lapsed"` with the prior `holder`, `claim_released`, and a `last_seen` timestamp when the final heartbeat remains in its one-TTL diagnostic window, whether the first resolution or a later attempt's finds it so.
+  It answers `404 {"error":…,"reason":"unclaimed"}` for a role with no claim, or `reason: "holder_lapsed"` with the prior `holder`, `claim_released`, and a `last_seen` timestamp when the listener still keeps the holder's final heartbeat (until the interest reaper's grace has passed, `store.InterestReapGrace` + `store.InterestRefreshAge` after the holder left the session cache), whether the first resolution or a later attempt's finds it so.
   It answers `403 {"error":…,"reason":"capability","holder":…}`, forwarding nothing, when the holder does not advertise the payload's delivery mode or the mode cannot be read unambiguously, as `/v1/messages/send` refuses it.
   It answers `504 {"error":…,"reason":…,"event_id":…,"dedupe_key":…,"holder":…,"attempts":N}` when the window ended without a receipt:
   `reason` is `receipt_timeout` when the last forward reached the server and drew no receipt (a holder that stopped running while its registration lives gives it), else `delivery_failed` (no live holder to forward to, a later attempt's read that failed or ran out of time, a forward not shown to have reached the server);
@@ -2842,7 +2908,7 @@ Each item below names an endpoint and its method, then its contract, and an item
   Returns the live role holder, including its capabilities, `machine_id` (the listener it registered through, which owns its delivery unless its stored subscription names another, as `/v1/interests/subscribe` below says), `host` (the machine it actually runs on, as its own plugin reported it, and where its owning listener reaches a serve-port holder;
   falls back to `machine_id` for a session whose plugin predates the field) and `last_seen`.
   A 404 has `reason: "unclaimed"` when no role claim exists;
-  for an absent holder it has `reason: "holder_lapsed"` with the prior holder's ID, whether this lookup released the claim, and any final last-seen time retained for one TTL.
+  for an absent holder it has `reason: "holder_lapsed"` with the prior holder's ID, whether this lookup released the claim, and any final last-seen time the listener still keeps (until the interest reaper's grace has passed, `store.InterestReapGrace` + `store.InterestRefreshAge` after the holder left the session cache).
   The holder is resolved as a role send's first resolution through the publish route resolves it (`resolveRoleHolder` with `registered`), within 3.5 s (`sendRequestBudget`) of the request's own context.
   A lookup that lost the race for the role's claim (`errRoleHolderChanged`) is `503 {"error":"envoy: the holder of role <role> changed while this lookup was resolving it"}` with `Retry-After: 1`, since a fresh lookup wins the race once the replacement claim settles;
   a role store call that did not answer within its cap or that budget (the claim read, the holder's session read or the conditional release) is, as on the publish route, `503 {"error":"envoy: the message bus did not answer: <reason>"}` with `Retry-After: 1`, naming the call that did not answer (`writeBusUnavailable`;
@@ -2876,6 +2942,10 @@ Each item below names an endpoint and its method, then its contract, and an item
 
 - The stored subscription keeps the `machine_id` of the listener the session first subscribed through, and a later registration through another listener changes only the session entry's:
   the subscription's says which listener fans a topic out to the session (`store.Registry.Match`).
+  The stored subscription's `updated_at` is its last change or refresh, at most `store.InterestRefreshAge` (5 minutes) stale:
+  a registration that leaves it unchanged (no new topic;
+  its machine and directory are kept) writes it only once it is that old, and until then answers with the stored row, `updated_at` included (`store.Registry.UpsertWithin`);
+  the session entry is still written on every registration, since its bucket's `MaxAge` is the liveness clock.
   A listener delivers only to a serve-port session it owns.
   Its owner is the listener its stored subscription names, the one `Match` delivers on, else, with no subscription stored, the listener it registered through (the entry's `machine_id`);
   a session neither names is every listener's (`session.Deliverer.DeliverWithResultForEntry`).
@@ -2927,10 +2997,12 @@ Each item below names an endpoint and its method, then its contract, and an item
 - `/v1/interests/` (GET)
 
   Lists persisted interests.
+  Each row carries `last_seen` (Unix ms): its session's last heartbeat as this listener's session cache knows it, the live entry's `updated_at` while the session is live, else the final heartbeat the cache keeps after it left, omitted when unknown (a session that died before this listener started).
+  The row's own `updated_at` can lag that heartbeat by up to `store.InterestRefreshAge`.
 
 - `/v1/interests/<session_id>` (GET, DELETE)
 
-  Gets or removes a session's persisted interests.
+  Gets or removes a session's persisted interests; a GET's row carries `last_seen` as the list's rows do.
   A GET the cache misses reads the bucket within 3.5 s:
   `404` only when the bucket holds no key for the session, a 413 or 400 for an id NATS refuses as a key, `500 {"error":"envoy: the interest record of session <id> is unreadable: <reason>"}` with no `Retry-After` for a record this build cannot decode (`store.ErrMalformedInterest`;
   the bus answered, and a retry reads the same record), and `503 {"error":"envoy: the message bus did not answer: <reason>"}` with `Retry-After: 1` for a read that did not answer.
@@ -3113,8 +3185,8 @@ The browser suite drives a write Dispatch is slow to finish with it.
 
 A key is kept 24 hours (`IDEMPOTENCY_KEY_TTL_MS`):
 the suggestion-outcome sweep's pass deletes every older row (`sweepRequestKeys`), a row a dead process left in flight with it, and a repeat that finds an older row not yet swept treats the key as unused.
-The hand-written key path before it is gone:
-`broadcast_idempotency_keys` (migration `0055`), which this release neither reads nor writes and a later release drops.
+The hand-written key path before it is gone, and so is its table:
+`broadcast_idempotency_keys` (migration `0055`), dropped by `0141_drop_broadcast_idempotency_keys`, in a release later than `0137`'s, which stopped reading and writing it.
 Neither send route takes a body `idempotency_key` any more; the header carries the key.
 
 ## Targeted Dispatch messages
@@ -3202,7 +3274,7 @@ Each recipient starts with attempt 1, opened pending and unclaimed in the same t
 all three routes are human-only, like the one-session route they are built from.
 
 A broadcast is keyed by its `Idempotency-Key` header like every write ("Keyed Dispatch writes" above);
-the body's `idempotency_key` of LEGION-446 and its `broadcast_idempotency_keys` table are gone from the route.
+the body's `idempotency_key` of LEGION-446 is gone from the route and its `broadcast_idempotency_keys` table from the schema.
 The send commits the broadcast and its exclusions, with their reasons, as the key's recovery point (`broadcastRecovery`) in the broadcast's own transaction, so a repeat under the key is answered by `replayBroadcast` however the first request ended, even while the listener is down:
 the broadcast is read as `GET /api/v1/broadcasts/{id}` reads it, every recipient's attempts as they stand, with the send's own `excluded`, under the send's own `201` and `Idempotency-Replayed: ?1`, answered at once as the send was, while `sendOwedBroadcastRecipients` puts every recipient the broadcast still owes on its way behind the answer (`owedMessageAttempts`, the rule a single send's repeat, `sendHeldMessageOn`, also reads:
 the first attempt of a message with none, or its latest attempt when that is pending under a claim that has lapsed).

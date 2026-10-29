@@ -1,10 +1,10 @@
-import { type Browser, expect, type Locator, type Page, test } from "@playwright/test";
+import { expect, type Locator, type Page, test } from "@playwright/test";
 
 import { answerAsk, createComment, createIssue, createProject } from "./api";
 import { conversationThreadScope, documentEditor, indexedBlockAsk } from "./editor";
 import { resetDatabase } from "./seed";
 import { centerOf } from "./touch";
-import { asUser } from "./users";
+import { withAlice } from "./users";
 
 test.beforeEach(async () => {
   await resetDatabase();
@@ -221,15 +221,6 @@ async function openChecklistThread(
   // A comment's turn shows a one-line preview until the reader expands its thread.
   await turn.getByRole("button", { name: "Expand thread" }).click();
   return conversationThreadScope(page, project, turn);
-}
-
-async function withAlice(browser: Browser, run: (page: Page) => Promise<void>): Promise<void> {
-  const alice = await asUser(browser, "alice");
-  try {
-    await run(await alice.newPage());
-  } finally {
-    await alice.close();
-  }
 }
 
 for (const colorScheme of ["light", "dark"] as const) {

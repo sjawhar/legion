@@ -495,6 +495,8 @@ Releases after this one roll again.
 A rollback to an earlier release brings the same hazard back, the other way:
 a tab still open, and a `dispatch` client that saw this release keep keys within the last five minutes (`KEYED_LAYER_MEMORY_MS`), retry a write whose answer was lost against the earlier server, which runs it again.
 Fix forward instead; if you must roll back, stop this release first, knowing a write in flight at that moment may land twice.
+Once `0141_drop_broadcast_idempotency_keys` has applied, a rollback past this release also loses broadcasts:
+the earlier build's broadcast send reads and writes the table `0141` drops, so every broadcast send fails while the rest of that build keeps working.
 A tab opened before the deploy needs a reload:
 `GET /api/v1/events` is gone, so it shows `Live updates unavailable`, and its broadcast body still carries `idempotency_key`, which this release refuses as an unknown field (`400 INVALID_JSON`).
 
@@ -620,7 +622,7 @@ A migration that needs another bound sets its own `SET LOCAL lock_timeout`, whic
 The secrets broker's runner applies every migration in one transaction, so it does not try again:
 rolling one attempt back would roll back the migrations before it too.
 
-The notes below describe migrations through `0140`.
+The notes below describe migrations through `0141`.
 A new migration describes itself in the header comment of its own `.up.sql`, as `0129_document_edit_notices.up.sql` does, and adds nothing here, so two pull requests that each add a migration do not edit this section.
 
 Migrations `0056`–`0062` make search indexing linear.
@@ -947,8 +949,8 @@ Migration `0137_request_keys` creates `request_keys`, the one record of every ke
 `request_keys_created_at`, for the sweep that deletes a key past its 24 hours, and the partial `request_keys_owed_sends` (`created_at`, over rows with no answer yet whose recovery point names a message), for the delivery sweep's read of a keyed send whose process died before its first attempt.
 It is a new table that touches no row, which the release before it neither reads nor writes; its census answers `0`.
 It follows `0129_document_edit_notices`, `0130_comments_written_version`, `0131_asks_written_version`, `0132_component_facts`, `0133_comments_written_version_backfill`, `0134_asks_written_version_backfill`, `0135_server_processes` and `0136_dashboard_assets`, which already use the preceding migration numbers.
-From its release on, nothing reads or writes `broadcast_idempotency_keys` (`0055`), the broadcast's own key table before it, and the table is kept:
-dropping it is a contracting migration, so it ships no earlier than the release after this one.
+From its release on, nothing reads or writes `broadcast_idempotency_keys` (`0055`), the broadcast's own key table before it;
+it was kept through that release so a deploy of it could roll back, and `0141_drop_broadcast_idempotency_keys` drops it in a later release.
 
 Migration `0138_pending_delivery_indexes` adds two partial indexes, `message_deliveries_pending` and `comment_deliveries_pending`, on the delivery attempts still pending, which the delivery sweep reads every minute (Keyed writes, below).
 It reads, refuses and rewrites no row, and the release before it neither reads nor depends on them; its census answers `0`.
@@ -974,6 +976,13 @@ The coverage pass (Search, below) builds the same text, so an existing issue, wh
 nothing is re-embedded by the migration itself, and its census answers `0`.
 While the release before it still serves, its coverage pass points those rows back at the title alone, and each pass of either release queues them again, so a roll that spans passes embeds some issues more than once;
 a deployment with no embedder runs no pass and sees none of this.
+
+Migration `0141_drop_broadcast_idempotency_keys` drops `broadcast_idempotency_keys`, the contracting half of `0137`:
+a deploy that carries it can no longer roll back to a build from before `0137`, whose broadcast send writes that table.
+It reads no row; dropping the table takes `ACCESS
+EXCLUSIVE` on `broadcasts` too, because the table's foreign key puts triggers there, so a broadcast read or send waits for the instant the migration's transaction lasts.
+Its census answers `0`.
+It follows `0139_related_checks` and `0140_issue_embedding_spec`, which already use the preceding migration numbers.
 
 Migration `0009_project_artifacts` deletes malformed derived artifact references, reports their count, and re-derives them from source text on the next write.
 It aborts server boot before a migration record or schema change only when an existing artifact has no owning issue.
@@ -1771,10 +1780,12 @@ Each item below names a path with its method and identity, then its purpose.
   another is `400 INVALID_QUERY`) when given:
   `{project, source_kind, from, to}` echo the filters (null when absent), then `total`, `by_source_kind`, `by_outcome`, `by_search` (a check not made counted under `not_made`), `by_reason`, `completed` (found or none), `skipped_for_time` (reason `timeout`), and `keyword_ms` and `total_ms`, each `{count, p50, p95, max, over_300ms}` over the checks holding that time (`model.RelatedChecksReport`).
 
-- `/api/v1/issues/{key}/references` (GET; cookie, trusted header, or bearer)
+- `/api/v1/issues/{key}/references?versions=` (GET; cookie, trusted header, or bearer)
 
   Read the issue's eight-hop artifact reference closure; a reference to a block reaches the block's document while a current version holds the block.
   An `If-None-Match` value equal to the response ETag returns `304`.
+  `versions=latest` leaves each member's `artifact.versions` holding only its latest version and carries its own ETag;
+  absent, empty or `all` is the full answer; any other value, or `versions` given more than once, is `400 INVALID_QUERY`.
 
 - `/api/v1/references?to=|from=&kind=&since=` (GET; cookie, trusted header, or bearer)
 
