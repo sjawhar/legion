@@ -17,6 +17,7 @@ import {
   type LegionRoleClaimInstance,
   legionRoleClaimBridge,
 } from "./role-claim-bridge";
+import { clearStartupTurn, markStartupTurnPending, markStartupTurnSent } from "./startup-turn";
 
 const store = globalThis as typeof globalThis & { [key: symbol]: unknown };
 
@@ -156,5 +157,37 @@ describe("the Envoy plugin interface", () => {
     );
     expect(Symbol.keyFor(LEGION_PLUGIN_LOADED_KEY)).toBe("legion.pi-legion.loaded");
     expect(Symbol.keyFor(LEGACY_LEGION_LOADED_KEY)).toBe("legion.pi-envoy.legion-loaded");
+  });
+
+  // Version 5: the mark carries a start that is due and not sent yet (`sentAt` undefined), which
+  // the operator's controller sets at `session_start` and its start command's send overwrites.
+  test("carries the startup-turn mark unsent, then sent, cleared only by the session it names and only at this build's version", () => {
+    publishEnvoyPluginInterface("file:///plugins/pi-envoy/dist/envoy.js");
+    const iface = envoyPluginInterface();
+    expect(iface.startupTurn).toBeUndefined();
+
+    markStartupTurnPending("ses_controller");
+    expect(iface.startupTurn).toEqual({ session: "ses_controller", sentAt: undefined });
+    clearStartupTurn("ses_task_subagent");
+    expect(iface.startupTurn).toEqual({ session: "ses_controller", sentAt: undefined });
+
+    const before = Date.now();
+    markStartupTurnSent("ses_controller");
+    expect(iface.startupTurn?.session).toBe("ses_controller");
+    expect(iface.startupTurn?.sentAt).toBeGreaterThanOrEqual(before);
+    expect(iface.startupTurn?.sentAt).toBeLessThanOrEqual(Date.now());
+
+    clearStartupTurn("ses_controller");
+    expect(iface.startupTurn).toBeUndefined();
+
+    // An object another build's Envoy entry published is left as it is.
+    const foreign = foreignInterface(
+      ENVOY_PLUGIN_INTERFACE_VERSION + 1,
+      "file:///plugins/pi-envoy-next/dist/envoy.js"
+    );
+    foreign.startupTurn = { session: "ses_controller", sentAt: undefined };
+    store[ENVOY_PLUGIN_INTERFACE_KEY] = foreign;
+    clearStartupTurn("ses_controller");
+    expect(foreign.startupTurn).toEqual({ session: "ses_controller", sentAt: undefined });
   });
 });

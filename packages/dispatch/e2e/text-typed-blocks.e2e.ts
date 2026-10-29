@@ -344,10 +344,7 @@ test("typing a new option into a decision with no options stores it as a typed o
 
     await expect
       .poll(async () => (await getArtifactText(issue.primary_artifact_id)).markdown)
-      .toContain("- Option A");
-    const stored = (await getArtifactText(issue.primary_artifact_id)).markdown;
-    expect(stored).not.toContain("Which one?Option A");
-    expect(stored).toMatch(/\nWhich one\?\n\n- Option A\n:::\n/);
+      .toMatch(/\nWhich one\?\n\n- Option A\n:::\n/);
   } finally {
     await alice.close();
   }

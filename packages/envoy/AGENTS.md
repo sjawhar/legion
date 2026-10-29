@@ -13,7 +13,8 @@ Envoy owns transport, routing, delivery, and the native Dispatch event path:
 
 - ingests Slack, GitHub, Ghost Wispr, and agent events
 
-- publishes ordinary notifications through JetStream, and role lanes and ad-hoc topics (any `notifications.` topic no stream subject captures) through core NATS
+- publishes ordinary notifications through JetStream and ad-hoc topics (any `notifications.` topic no stream subject captures) through core NATS;
+  `POST /v1/messages/publish` forwards a role message to its holder, and an ad-hoc topic's message to each self-subscribed session registered on it, with a receipt, answering once each recipient confirmed it, or 504
 
 - resolves target OpenCode sessions
 
@@ -68,8 +69,28 @@ Each item below names a task and where its code is, then notes on it.
 
 - **Stream definition**: `internal/bus/stream.go`
 
-  `ENVOY_NOTIFICATIONS` subjects, retention and duplicate window, and their reconciliation at start;
+  `ENVOY_NOTIFICATIONS` subjects, age and duplicate window, replicas, byte limit and discard policy, and their reconciliation at start (`ensureStreamWithConfig`);
   the names of the stores' KV buckets, listener and Dispatch durables, the Dispatch webhook-redelivery bucket, the listener role-lane queue, and the notification and exception topic prefixes, which envoy-infra's NATS grants are built from (`packages/envoy/infra/core/permissions.go`)
+
+- **Stream and bucket copies, stream byte limit**:
+  `internal/bus/nats.go` (`ParseNATSReplicas`, `ParseStreamMaxBytes`, `MaxReplicas`, `ErrStreamFull`, `ErrNotStored`), `internal/config/config.go`, `cmd/dispatch/settings.go`, `internal/bus/kv.go` (`EnsureKeyValue`), `internal/bus/keeper.go`
+
+  `ENVOY_NATS_REPLICAS`, the deployment's replica count:
+  a whole number from 1 to 5 (`bus.MaxReplicas`, which aws:WebhookListener's rendering also refuses above), default 1;
+  0, a negative number, more than 5 or a word refuses startup naming the variable.
+  The stream and every bucket Envoy opens (`envoy_interests`, `envoy_roles`, `envoy_sessions`, `envoy_ci_state`, `envoy_webhook_redelivery`) are created at it, and one found with fewer copies is raised to it, at start and by the owning program's keeper every 30 seconds; more than 1 needs a clustered NATS.
+  `ENVOY_STREAM_MAX_BYTES`: a positive whole number of bytes, the stream's byte limit, past which a full stream refuses new publishes (`DiscardNew`;
+  the retryable `bus.ErrStreamFull`) and keeps every stored message until it is 72 hours old.
+  A GitHub webhook a full stream refuses is answered 503, and Dispatch's redelivery sweep (`internal/dispatch/redeliver`) asks GitHub to resend it, so it comes back once the stream has room;
+  INFRA-493 extends that sweep to GitHub's 3-day redelivery window.
+  Unset, the stream is created with no limit and a start keeps a deployed one.
+  Set, a start and the keeper raise a smaller deployed limit, or none, to it and never lower one, as for the copies, so an operator's raise of a full stream stands;
+  lowering a limit is an operator step once every program's setting is lowered.
+  The listener reads both in `config.Load` and envoy-dispatch's server through its settings table, each through `bus.ParseNATSReplicas` and `bus.ParseStreamMaxBytes`;
+  `redeliver-webhooks` reads the replica count for the redelivery bucket.
+  The stream holds the most copies and the largest limit any Envoy program of a deployment carries, so programs with different values do not fight and the largest stands;
+  a clustered deployment sets both alike in every envoy-listener and in the Dispatch server.
+  A server's refusal of a create or raise stops the start naming the setting and its value, and a bucket raise's also names the bucket (`refusedSettings`, `raiseReplicas`)
 
 - **Session delivery**: `internal/session/session.go`
 
@@ -191,6 +212,7 @@ one that wrote nothing still committed that transaction, and ygo hands the worke
 A settlement that wrote into the room renders its version from the document as it stands after the repairs (`readSettlementTree`, `liveTree`), so a peer's edit made since its read is in that version too.
 A settlement that wrote nothing into the room and repaired nothing in the tree it read versions the rendering it made of that read, offsets included, and renders no second time;
 it renders again when a stamp's tree replaced the read, when it read the document again after a write, or when `reconcileAskBlocks` repaired the read in place (`changedTree`), so nothing but `reconcileAskBlocks` may change that read.
+The settlement tests (`settlement_read_invariant_test.go`, `settlement_render_once_test.go`) check, for each settlement they drive that reuses the rendering, that the read is unchanged since it was read.
 A document's pending authors are in one of two places:
 F, the room's local in-flight credits (`roomState.inflight`), or R, the durable `doc_pending_authors` rows from migration `0084`.
 `creditContentChange` puts a browser update's connected peers in F.
@@ -213,7 +235,7 @@ A task never reads, consumes, or releases another task's F; every author crosses
 A settlement that wrote into the room commits what it wrote even when the document moved after its read, since the room and its browsers hold it;
 one that wrote nothing leaves a moved document to the settlement the move scheduled.
 A repair is written only into the document the settlement read (`applySuppressed`): one whose room was evicted and reloaded since is refused and retried.
-Every close of a room the service makes - a failed room's eviction, the close of a room behind the durable head (`closeRoomInstance`), `Evict` (tests) and `Quiesce`, an issue's close, `Shutdown`'s close of a room with an editor - goes through its server's close gate (`roomServer`:
+Every close of a room the service makes - a failed room's eviction, the close of a room behind the durable head (`closeRoomInstance`), `Evict` (tests) and `Quiesce`, an issue's close or reopen, `Shutdown`'s close of a room with an editor - goes through its server's close gate (`roomServer`:
 its `CloseRoom`, which shadows ygo's, so a call written against ygo's API is gated too, its `closeInstance` for the instance-only close, or its `closeOwned` for a failed room's eviction).
 That close waits for a repair committing into the room and refuses new repairs while it closes;
 a repair never waits for a close and gives the write up as for a replaced room (`holdOpen`).
@@ -263,7 +285,7 @@ A 1 MiB `a_b*` document's settlement took 4.5-6.8 s at load 90-170 on the develo
 
 `cmd/dispatch/shutdown.go` orders the process's shutdown inside `stopGrace` (30 s:
 ECS's default stop timeout, which Dispatch's task definition leaves unset, `stop_grace_period` in `deploy/compose/dispatch.compose.yml`, and the pod `infra`'s `gcp:Dispatch` renders, whose `terminationGracePeriodSeconds` is this value plus its five-second pre-stop wait, which the kubelet spends inside the same period - `cmd/dispatch/pod_grace_period_test.go` fails when the pod's budget stops covering it).
-Every open event stream ends at the signal through `api.Deps.Lifetime`, so HTTP shutdown waits only for the requests in flight, and it waits for them first, with no deadline of its own.
+Every open live socket ends at the signal through the lifetime `api.Register` takes, closing with 1012 and ending its subscriptions, so HTTP shutdown waits only for the requests in flight, and it waits for them first, with no deadline of its own.
 The document service starts when they are done, or 11 s after the signal with some still running (`httpDrainBeforeDocuments`, `dispatch: settle documents with
 requests still in flight`), and gets `documentShutdownTimeout`, 5 s more than its drain budget (14 s total - the reserve outlasting a settlement still committing when the budget ends, not only reading back what did), so it is done 5 s before the runtime's kill.
 The database pool closes once every request has answered and no connection of the shared or document-rooms pool is in use.
@@ -344,14 +366,17 @@ text deleted before a version captured it is gone (the operator's decision, LEGI
 Each `doc_updates` row records `content_changed` - whether the update changed the document's rendered markdown, the only document content a version stores (`pmdoc.Render` of the tree before and after;
 the one measure the room's update observer, `updateChangesMarkdown`, a transactional live write in `applyLive` and settlement's own closure, `closureChangedMarkdown`, all apply) - and settlement writes a version only when a content-class row lies past the latest version's `doc_update_version` cursor and the settled document renders differently from that version.
 It stays one measure where a rendering is reused rather than made again:
-a write takes the rendering of its fork before the operation from the room's replica or from its own previous operation, and the observer takes a published write's own rendering, only where each is the rendering of the very state being measured (`warmFork`, `applyLive`, `renderedReplica.changedBy`), since rendering is deterministic over one state.
+a write takes the rendering of its fork before the operation from the room's replica or from its own previous operation, and the observer takes a published write's own rendering, only where each is the rendering of the very state being measured (`warmFork`, `applyLive`, `renderedReplica.changedBy`), since rendering is deterministic over one state;
+a margin write (`applyMargin`) renders nothing before it writes.
 Indexing an ask block fails the second half:
-it writes an `asks` row and an `ask.opened` event over words the edit that wrote the block already versioned, and a settlement that versioned the document for that event alone would write a byte-identical version credited to nobody, staling an approval pinned to what an agent had just written and closing Legion's design gate with nothing in the event stream to explain it (LEGION-273).
+it writes an `asks` row and an `ask.opened` event over words the edit that wrote the block already versioned, and a settlement that versioned the document for that event alone would write a byte-identical version credited to nobody, staling an approval pinned to what an agent had just written and closing Legion's design gate with nothing in the event log to explain it (LEGION-273).
 Settlement's tree writes - stamping block ids, restoring an ask block's server-owned attributes - move the stored Proof state and usually render the same markdown, so a version for one of those would repeat the version before it too (LEGION-229 requirement 2);
 their `doc_updates` row records what they rendered rather than `true`, so a repair that changed no text leaves nothing past the cursor for a later settlement to version.
 The version a settlement that writes none leaves the document at is the one it found, and that is the number its `block.repaired`, `block.invalid` and retraction events name (`settlementReconciliation.nameVersion`).
 An update that changes only what no rendering carries therefore versions no document by that route:
 a margin projection, the attributes a reader's browser editor derives on its own - each heading's `id` when it opens the document, and each ordered list item's `label` and `listType` on the first keyboard caret move or edit - or a comment's, suggestion's or ask's anchor mark, wherever it splits the text it covers.
+A margin record changes the marks map alone, never the text, so its transactional write (`applyMargin`) records `false` without rendering the document again, and the room's update observer keeps its rendering for the publish of one whose fork was built from that same room (`liveWriteOrigin.marginOnly`).
+One forked from the store (`coldFork`) can carry deletes the room never took, since ygo encodes an update with its document's whole delete set, so its publish is rendered as any other update is.
 Routes that write a version on request do so whatever changed, so each can write a version whose markdown equals the previous one's and stale an approval pinned to it:
 an upload to an existing document (`POST /api/v1/issues/{key}/artifacts`, `POST /api/v1/projects/{key}/artifacts`) always inserts one;
 `POST /artifacts/{id}/versions` and accepting a suggestion always name one through `NamedVersion`;
@@ -366,9 +391,11 @@ A browser is credited as a version's author only for browser edits made while it
 opening a document or an agent's edit credits it nothing, so a reader whose editor changes nothing the rendering carries causes no version and cannot stale an approval.
 A handler joins its document operations to its transaction with `Docs.Join`, which returns the transaction's ledger (`docs/ledger.go`), the only way to give a document operation a transaction:
 every document write takes its transaction from the ledger and refuses a context that was not joined (`errUnjoined`):
-`SeedText`, a rebuild (`RebuildDocument`), the version writes, and every write that runs through `applyLive` (`docs/mutation.go`) - an upload's replacement, an edit batch, an accepted or rejected suggestion, an ask's edited text and its answer or resolution, a comment's anchor mark and its margin record - each of which `applyLive` also weighs by what it leaves (`docs/growth.go`).
+`SeedText`, a rebuild (`RebuildDocument`), the version writes, every write that runs through `applyLive` (`docs/mutation.go`) - an upload's replacement, an edit batch, an accepted or rejected suggestion, an ask's edited text and its answer or resolution, a comment's anchor mark - and a comment's or suggestion's margin record, which runs through `applyMargin` on the same steps that open and record an `applyLive` write (`openLiveOperation`, `recordLiveOperation`).
+`applyLive` weighs each of its writes by what it leaves (`docs/growth.go`);
+a margin record leaves the rendering and the anchor marks as they were, so `applyMargin` weighs it by the margin bound alone and reuses the rendering the transaction's last operation kept (`liveWrite.tree`) rather than reading and rendering the document again.
 An answer the document has no room for is left out of its block, which records who answered and when, and kept on its ask.
-The server writes outside `applyLive` are a rebuild, settlement's repairs, the block-id backfill and the sweep of unrecorded marks.
+The server writes outside `applyLive` and `applyMargin` are a rebuild, settlement's repairs, the block-id backfill and the sweep of unrecorded marks.
 Of those, a rebuild and settlement's repairs carry caller text.
 A rebuild's supplied markdown is weighed as a new document's rendering is (`SeedText`), and its latest version, the server's own text, is restored whatever it weighs.
 Settlement's is the answer an ask keeps, written back into a block that returns to the document:
@@ -381,7 +408,7 @@ A browser's room load takes no lock the write holds, so a room that loads while 
 Every mutate starts from the tree `applyLive` already read (`startTree`, `editTree`) rather than reading its own;
 `applyLive` lets that tree go before the one check that decodes a second copy of the state (`refuseUndecodable`);
 and a write drops its fork and rendering once it commits, before its publish loads the room (`releaseFork`), since a pooled connection's context can keep the write reachable long after it answered (LEGION-504).
-A token's encoding (`pmdoc.AppendTokenJSON`) is held once per call, in one buffer for the document and all its blocks, and dropped when the call returns;
+A token's encoding (`pmdoc.EncodeTokenJSON`) is held once per call, in one buffer for the document and all its blocks, and dropped when the call returns;
 LEGION-504's concern was more copies per token and their retention, and neither holds.
 The handler ends the transaction with `ledger.Commit`, which records each settlement credit with the document content and takes each version's authors back out of that record, commits, credits the writes' actor to their rooms, releases the authors a version the transaction wrote named, then applies and broadcasts the updates, and last publishes the events its document operations appended, ahead of the handler's own;
 it defers `ledger.Discard`, so a transaction that does not commit leaves the room, every connected browser, every version and the durable document as they were.
@@ -405,13 +432,15 @@ typed block openings (`:::name{`) in its text outside code, written inside a lin
 A writer who meant a block learns it is text; a count of zero alone reads as a document needing no decision (LEGION-416).
 A document edit reports `decision_blocks_added` instead, on an issue document's advice and as the whole advice of a project document's edit:
 the ask blocks the edited tree holds whose block id no ask block in the tree before the batch carried (`addedAskBlocks`, counted in the transaction that applies the batch), so an inserted or retyped block counts wherever the parser reads one and a moved or reworded block does not.
+Beside it, `decision_block_checks` lists each block the edit added, in document order (`docs.EditOutcome.AddedAskBlocks`), as `{block_id, question, suggestions}`:
+the related-item check run on the block's question once the edit has committed (`decisionBlockChecks`), the first five checked at once under one 5 s allowance and each past them answered, and recorded, as not made; it is omitted when the edit added none.
+A conditional edit releases its document's edit gate at the commit, before those checks run, so they never hold the next conditional edit.
 Issue-state advice is computed in the write transaction after its event is appended, so it includes that write.
 A stored document's decision blocks and unparsed openers are read from one parse of the canonical Markdown after the write transaction commits (`readDocumentBlocks`).
 Advice queries run behind a savepoint with a 500 ms timeout that is restored before the savepoint is released:
 a failure of either session-scoped query is logged and omits `advice` without preventing the write from committing, while the `legion_managed_status` walk, which takes a savepoint of its own inside that one, is logged and omits that field alone, keeping the advice already assembled.
-That matters most on an issue creation, where `computeAndPersistSuggestions` runs only once the advice survives (`if advice
-!= nil`, `issue_create.go`), after it: a fatal advice failure there means LEGION-550's suggestions are never computed and no row is ever written, so what the walk's tolerance saves is the whole of that offer rather than a copy of something already stored.
-An ask is the other way round - `asks.go` computes its suggestions first and falls back to a suggestions-only advice, so they survive a fatal advice failure there.
+Neither failure costs a creation its related-item check:
+issue and ask creation run it after the write commits whatever the advice answered, and when the advice was omitted its result rides a suggestions-only advice (`withSuggestions`).
 The consecutive-write query counts only the calling actor's own events (it runs for a session caller alone;
 any other actor reports zero with no query) and materializes the last-human fence so its `max(id)` runs once, and relies on the `events (issue_key, seq)` unique index's issue prefix and commit-ordered event ids;
 the open-ask query relies on the `asks_open (issue_key) where state = 'open'` partial index;
@@ -454,6 +483,8 @@ An entry's weight counts every string and slice it holds, and a table's cells, h
 `TestADocumentReadWeighsAboutTheHeapItHolds` holds it within 0.97-1.25x of the heap an entry holds.
 A read hands out a copy of the blocks and of a path's entries, which callers write, and shares a table's descendant ids and a path's table position with every later read of that head, which no caller writes (`documentRead`).
 Concurrent misses of one head share one bounded document fold, while a request that ends leaves that fold running for the other callers.
+The fold reads the history it has just decoded, which nothing else holds, through `pmdoc.ReadUnshared` (`docs.foldLoaded`):
+each text's items walked directly rather than through ygo's `ToDelta`, the tree copied as `pmdoc.Read` copies it and validated once, and the rendering's placement walk, token encoding and render take that `pmdoc.ValidDocument` without validating it again.
 A document outside the schema stores no rendering and keeps the tree/error behavior each read had before.
 Websocket admission still uses `loadTree`, because it needs the raw stored update to preload the room.
 
@@ -509,7 +540,7 @@ the update observer, which the document holds, is the replica's one strong holde
 A reader holding an evicted instance of a room reaches that instance's replica or none, never its successor's.
 `TestReadsOfALiveDocumentRunBesideItsPeers` runs each of these reads while a websocket peer types, until 50 of its runs have overlapped one of the peer's updates, and CI's `envoy-go-race` job runs the `docs` and `api` packages under `-race`, which reports a walk of the live tree beside a write;
 the unit tests' own step runs without it.
-The race job runs only when a file its `envoy_go_race` filter in `.github/workflows/envoy-and-contracts.yaml` names changes;
+The race job runs only when a file its `envoy_go_race` filter in `.github/workflows/ci.yaml` names changes;
 see Critical conventions for what keeps that filter current.
 
 Writes to one room never meet each other unlocked.
@@ -590,14 +621,26 @@ The document socket's cap of 1,000 rooms (`maxLiveRooms`, `canOpenRoom`) counts 
 A room an `Apply` opened with no peer is idle-evicted only by a ygo whose `Apply` stamps the empty room idle (LEGION-484).
 `PgVersioned`'s per-room locks likewise live only while a caller holds or waits for one.
 
+A document socket's peer hears from it at least every 15 s (`documentKeepAlive`, `docs/keepalive.go`), as `/ws/live`'s page does.
+`@hocuspocus/provider` closes a socket that has delivered no message for 30 s, and counts every message and nothing else:
+a websocket ping reaches no page, and ygo, unlike `@hocuspocus/server`, sends no peer its own awareness renewal back, so a lone idle editor heard nothing after its sync and closed and re-synced every 33 s.
+The keep-alive is the protocol's own message, an awareness update naming no client, which the provider applies as no change.
+ygo gives no application a way to write to one of its peers, so `Service.ServeHTTP` hands ygo's upgrade a response writer whose hijacked connection follows the frames gorilla/websocket writes on it (`frameWatch`) and puts the keep-alive only between two of its messages:
+never inside a frame gorilla writes in two parts, between a streamed message's frames, or after a close (`TestAKeepAliveGoesOutOnlyBetweenTheWritersMessages`).
+A keep-alive that cannot be written within 10 s closes the connection, which ends ygo's read of it.
+A ygo that sends its peers a keep-alive of its own makes this wrapper removable;
+a provider upgrade that counts something other than messages needs `TestAnIdleDocumentSocketIsSentAKeepAliveTheProviderCounts` checked against it again.
+
 The room's update observer renders a replica of the room, the one its reads walk, not the live tree, since ygo fires it after the transaction has released the document's lock and another write can be integrating meanwhile (`renderedReplica`).
 The replica moves only through the room's commits, one at a time and in commit order:
 ygo appends each committed transaction's update to the room's update log under the document's lock, before any observer of that transaction runs (`crdt.UpdateLog`, sjawhar/ygo v1.51.3-sami.4), and the observer that holds the replica's lock drains the log, applying each update in turn and comparing the rendering it leaves with the one before it (`renderedReplica.changedBy`).
-It renders the replica for that only when it cannot know the rendering otherwise, and two cases it knows exactly.
+It renders the replica for that only when it cannot know the rendering otherwise, and three cases it knows exactly.
+A margin write's publish into the room instance its fork was warm-built from changes no text (`liveWriteOrigin.marginOnly`, the margin record paragraph above), so it is unchanged.
 A published live write's update carries its operation's rendering, taken when the replica still stands at the epoch and foreign-commit count the operation's fork read found before it encoded the room:
 the replica has then consumed nothing since that read but published writes' commits, which under the writer slot are this write's own earlier updates, so after the update it is the fork the write rendered.
 ygo encodes the room's whole delete set in every update, so that holds only on the room instance the fork was read from:
-a cold fork carries no rendering, and a reloaded room's replica has a fresh epoch.
+a cold fork carries no rendering, and a reloaded room's replica has a fresh epoch;
+for the same reason a margin write forked cold, or published into a replaced room, is not taken as margin-only.
 And an update whose version is at or below the head the room instance's load folded (`roomInstance.loadedHead`) is already in the replica, which starts from the room as of its first commit, so applying it changes nothing:
 a cold write's publish into the room its own publish loaded is never rendered.
 So every committed update is classified, and its authors credited, exactly once, by whichever observer reaches the log first, against the room as the commit before it left it.
@@ -944,7 +987,9 @@ The listener prefixes the recipient (`agent.<session>.<key>`) to make the envelo
 That is what makes a retry after a receipt timeout safe:
 the listener publishes the envelope before it answers, so an answer that misses the client's window says nothing about whether the message landed, and only the same key can be recognised as the repeat it is.
 **Who recognises it, for how long, and where that fails is stated once, on `DELIVERY_DUPLICATE_WINDOW_MS` in `packages/contracts/src/dispatch-api.ts`; read it there rather than here.**
-The stream's duplicate window equals its retention by construction (both are `streamDuplicateWindow`, `internal/bus/stream.go`) and is reconciled on every `bus.ConnectOwningStream` by `ensureStreamWithConfig`.
+The stream's duplicate window equals its age by construction (both are `streamDuplicateWindow`, `internal/bus/stream.go`) and is reconciled on every `bus.ConnectOwningStream` by `ensureStreamWithConfig`.
+The stream's byte limit (`ENVOY_STREAM_MAX_BYTES`) does not shorten the window:
+a full stream refuses a new message (`DiscardNew`, `bus.ErrStreamFull`, which the send and publish routes answer `503` with `Retry-After: 1` under `streamFullPrefix`, recorded as `stream_full`) rather than drop a stored one, so every message it took stays, and is recognised as a repeat, for the whole window.
 A retry in a DIFFERENT mode is a different key and genuinely does deliver again, which is what the dashboard's retry row says:
 its **Retry** re-sends the attempt's own mode, and the two mode-change actions say "instead".
 A mode change never rides on a stranded attempt - resuming it would publish a second frame under one attempt number - so the claim transaction settles that attempt `failed` ("superseded by a retry in another mode"), moves its `claimed_at` so the original sender stops owning it, appends its own `message.delivery` receipt, and opens a new attempt pinned to the session the stranded row named.
@@ -958,8 +1003,8 @@ it makes the promise only for a failed attempt inside the window, and an attempt
 The mode-change actions are not gated: they always deliver.
 Their clause ("sending in a different mode delivers it again") is added only for a receipt timeout, the one cause whose send may already have reached the recipient;
 `RECEIPT_TIMEOUT_CAUSE` in `packages/contracts` is that cause's single literal, generated into Go as `contracts.ReceiptTimeoutCause` so the string Dispatch stores and the string the dashboard keys on cannot drift.
-This window bounds a delivery retry only:
-a broadcast's `idempotency_key` is a `broadcast_idempotency_keys` row that lives as long as its broadcast, so a repeated create is recognised however late it arrives (the broadcast paragraphs below).
+This window bounds a delivery retry only, not a repeated write:
+a write's `Idempotency-Key` is recognised for 24 hours (`IDEMPOTENCY_KEY_TTL_MS`), however late within that its repeat arrives ("Keyed Dispatch writes" below).
 
 An attempt the stream recognised records `duplicate` and no envelope id:
 an earlier attempt landed, so this one is a repeat (`DELIVERY_DUPLICATE_WINDOW_MS` says who drops it), and it reads as "already delivered" rather than as a fresh send.
@@ -1274,21 +1319,45 @@ Goldmark's took the marker with anything after it, so it read a link opening a l
 Front matter is read as the browser editor's parser reads it (`pmdoc.parseFrontmatterBlock`):
 a first line that is `---`, with any spaces or tabs after it, opens it, the first later line that is the same closes it, and its text is stored between plain `---` fences with line feeds between its lines.
 A `---` opener nothing closes is a thematic break.
-That parser, having tried such an opener as front matter to the document's end, reads no list, quote or footnote definition at the document's level in the rest, since no container opens inside front matter;
-the lines read as the other blocks they make, so `---\n- a\n- b` is a rule and one paragraph holding both lines.
+That parser, having tried such an opener as front matter to the document's end, reads no list, quote, footnote definition or typed block at the document's level in the rest, since no container opens inside front matter;
+the lines read as the other blocks they make, so `---\n- a\n- b` is a rule and one paragraph holding both lines, and `---\n:::callout{kind="note" title="T"}\na\n:::` a rule and one paragraph holding the three lines after it.
 Parse reads them so too (`pmdoc.frontmatterAttempt`); a typed block's content opens them as anywhere.
-So the renderer writes a rule that opens a document as `***` where `---` would be misread - a later `---` line would close front matter, or the document holds a list, quote or footnote definition at its level (`holdsAContainerTheBrowserDrops`) - and `---` everywhere else.
+So the renderer writes a rule that opens a document as `***` where `---` would be misread - a later `---` line would close front matter, or the document holds a list, quote, footnote definition or typed block at its level (`holdsAContainerTheBrowserDrops`) - and `---` everywhere else.
 
 Two lists of one kind side by side read back as one when written with one marker, so the renderer writes a list whose kind matches the block before it - past an empty paragraph, which it writes as nothing - with its kind's other marker, `*` after `-` and `)` after `.`, alternating as the browser editor does (`otherListMarkers`); a list anywhere else keeps `-` or `.`.
 An edit that leaves two lists side by side (deleting or emptying what stood between them, inserting or accepting a list beside one) therefore stores the two lists it made, and a `replace` refusal that names a list item's marker names the one it is written with (`BlockMarker.Other`).
 
+A bare web address or email is read as the browser editor's engine, remark-gfm, reads it, by both of its readers (INFRA-531).
+Its tokenizer (`linkify.go`) reads the markdown as written, before emphasis, code or links form:
+`linkifyGuard`, asked at every ASCII punctuation character, whitespace and head after every other inline parser declines, reads from there to the next character goldmark asks at (`readLiteralAddress`), and `underscoreEmail` reads an email at `_` before emphasis.
+Asking at a character no other parser triggers on ends goldmark's text there, so the guard gives the split text back (`linkifyBlock.settle`), and a markdown holding no address is counted and weighed as without it.
+Its transform (`autolink_transform.go`) reads, at block close, each run of text nodes between other nodes, decoded, its URL pattern first and its email pattern over what that leaves (`linkTextAddresses`);
+one decoder gives each text's decoded text and the source offset each of its characters was written at (`decodeMarkdownTextOffsets`), where an address's edges split the text.
+The two readers end an address differently (`x;https://x.test/a_ b` leaves the `_` out, `see
+http\://x.test/a_ b` keeps it), each as the engine does.
+So an address is a link after any punctuation, a letter outside ASCII, `]`, `|`, `!`, a character reference or an escape, a URL after a digit too, and at a line or table cell opening with punctuation, as in a comment and the browser editor.
+An email links to its `mailto:` URL (`emailHref`), as in the engine.
+
 The renderer writes a run of inline text so that it reads back as written.
-A bare URL ends where linkify stops, so where a run does not read back because linkify would continue a URL into the character after it, that character is written behind a backslash (`endsBareURL`) - a backslash even for `&` and `~`, whose other escapes are character references, which linkify runs through.
+A bare URL is written as its bytes where the readers read it back whole (`isBareAutolink`, `isBareWWWLink`);
+where the run then reads back otherwise, because what follows runs on into it, it is written again as `<url>`, a www link as `[www…](http://www…)` (`runSpelling.angleURLs`).
+An email link is written as an explicit link, and as its address only where its run reads back in no other spelling (`runSpelling.bareEmails`), an address being text the transform's email matcher links whole (`isBareEmailLink` asks `findEmails`).
+Plain text is written as it is: a scheme's colon or an `@` is escaped only as a respelling, where the run would otherwise read back holding an address only the tokenizer reads, such as `http://localhost` or an email after a letter outside ASCII (`schemeColons`, `ats`, alone or with `angleURLs`).
+Plain text the transform reads (`see https://x.test`) has no plain spelling, since the transform reads the decoded text, so it is written as it is and reads back as a link, as the engine reads it.
+A text `<` the escape rules leave as it is, judged within its own text (`angleConstruct`), is escaped where what the run writes after it, out to a `>` in a later node, closes it into an autolink (`writeInlineRun`, `autolinkAt`) or inline raw HTML - an open or closing tag, a comment, a processing instruction, a declaration or a CDATA section, as goldmark's raw HTML parser or the engine reads one from that `<` (`rawHTMLScan`):
+`&lt;javascript:void(a@b.cc)>`, whose email the readers link, would otherwise be written `<javascript:void([a@b.cc](mailto:a@b.cc))>` and read back as one autolink to a `javascript:` address, and `Set \<input value=me@x.cc> in the form.` as `Set <input value=[me@x.cc](mailto:me@x.cc)> in the form.`, which reads back as raw HTML.
+Either grammar decides, since an escaped `<` reads as text in both:
+goldmark reads a declaration only after `<!` and an uppercase letter, and an unquoted attribute value holding no control character, where CommonMark 0.31 and the engine also read a lowercase one (`<!doctype x;[a@b.cc](mailto:a@b.cc)>`) and a U+0001 in an unquoted value as raw HTML.
+Only a `<` the run's first writing reads so is escaped, so a run that reads back keeps its bytes.
+A text `<` first after its line's container prefix is also escaped where micromark's html-flow start conditions open an HTML block there, judged in `endLine` on the line as written across nodes (`htmlBlockStart`), since goldmark can read a paragraph there:
+`<span title=a=b;[a@b.cc](mailto:a@b.cc)>` alone on a paragraph's first line is a complete tag to the engine, whose unquoted value ends at `=` and reads another, and `<!x` opens a declaration.
 Marks are written in one order - link, strong, emphasis - so where a text still carries a mark the text before it opened, and the order puts that mark after the text's other marks, the mark is closed and opened again;
 where that puts two runs of one delimiter character side by side (bold inside italic: `*`, `**` and `*`), the parser reads one run.
 Such a run is kept where it reads back, as the parser then splits it as written, and one that does not is written again in the plain respellings, as main writes it again.
-Only where none of those reads back is it written with the marks still open kept open, then the marks the next text still carries, and the text's others opened inside them (`keepingOpen`), kept only where that reads back with nothing fused, so `_**a** b_` is written `***a** b*`;
+Only where none of those reads back, and a text is under more than one mark (`nestsMarks`), is it written with the marks still open kept open, then the marks the next text still carries, and the text's others opened inside them (`keepingOpen`), kept only where that reads back with nothing fused, so `_**a** b_` is written `***a** b*`;
 a run that fuses nothing is written as before, so italic closed around a link keeps its bytes.
+A spelling that writes a delimiter run's neighbouring letter as a reference (`flanking`) is made only where such a letter stands beside one (`letterBesideDelimiter`).
+The respellings are listed in one order (`runSpellings`, over the run's `runNeeds`), and many write the same bytes, so each distinct writing is read back once (`inlineWithEscapes`, by the digest of its bytes), and the spelling kept is the one trying every spelling in that order would keep.
 
 A container that holds nothing is read as the browser editor's parser reads it, holding one empty paragraph (`emptyParagraphFirst`):
 an empty list item (`-`), quote (`>`), typed block or footnote definition, and a list item that opens with another block (`- # h`) holds an empty paragraph ahead of it.
@@ -1320,14 +1389,19 @@ past one, that container's rule decides, so a typed block's fence keeps the line
 The renderer writes each spacing so that it reads back (`blanksAfterList`, `writesBlankAfterItem`):
 no blank line before a block that opens on the line after a list where one would spread what it follows, none inside a list item after a list ending in an empty item, where goldmark ends the item at a blank line, and none in a quote after a footnote definition ending in a list no line continues, where the reader refuses one (`endsInClosedList`);
 a footnote definition a tight list item holds writes its blocks with the item's tight lines, since that parser reads them as the item's (`itemBlocks`).
-Where the lines alone do not decide the spread - a typed block holding a blank line in a list item, a blank line at the end of a quote after a list, or at or after a list in a typed block in a footnote definition, whatever quotes or typed blocks stand between - a document holding one of those shapes, or a footnote definition that ends in a block other than a paragraph, is refused, and so it is where goldmark reads its blocks otherwise:
+Where the lines alone do not decide the spread - a typed block holding a blank line in a list item, a blank line at the end of a quote after a list, or at or after a list in a typed block in a footnote definition, whatever quotes or typed blocks stand between - or where this reader does not read them - the blank lines that would spread a quoted list item ending in a footnote definition whose typed block holds a fence no fence closed, which that parser reads as the code's (`quotedDefinitionFenceBlank`) - a document holding one of those shapes, or a footnote definition that ends in a block other than a paragraph, is refused, and so it is where goldmark reads its blocks otherwise:
 an empty list item and a blank line before a block an item around it holds, however far out, since goldmark ends every item around the empty one there (`emptyItemEndsOuterItem`), an item's content starting one column past its marker where its marker line holds nothing more or indented code (`itemContentColumn`).
 Every other document keeps goldmark's looseness there - a loose list's items holding more than one block are spread, the list when none is - which is how the documents Dispatch stores were read;
 but a blank line at or after a list in a typed block in a footnote definition is refused there too, unless goldmark spreads every item a blank line follows (`goldmarkSpreadsItemsBeforeBlanks`), since that parser spreads such an item and never the list.
 
 A footnote definition is read where it is written, as that parser keeps it:
 inside another block, ahead of other blocks, in any order, and whether or not anything refers to it.
-One inside another footnote definition is refused, since that parser reads a line of `=` or `-` continuing the inner one's paragraph as a heading's underline, where CommonMark reads it as the paragraph's text, and so is one inside a typed block, which that parser's references reach only from inside a typed block or after it.
+One inside another footnote definition is refused, since that parser reads a line of `=` or `-` continuing the inner one's paragraph as a heading's underline, where CommonMark reads it as the paragraph's text.
+One inside a typed block is read like one inside a quote: that parser reads a typed block as a container, so a reference anywhere in the document reaches it.
+One inside a typed block with a list item around it, inside the typed block or outside it, is refused, since that parser counts the definition's lines and the blank lines next to it otherwise when it decides whether the item is spread:
+it reads the first line of a definition opening on a later line, or of an empty one, as a blank line of the typed block, and a blank line inside the typed block as spacing the item.
+So is one inside a typed block that holds any block but paragraphs (a list, a quote, code):
+that parser reads a list there spread where this one stores it tight, so only a definition of paragraphs is read alike by both.
 A definition whose label holds whitespace is refused, which that parser reads as a paragraph.
 A label is stored as that parser reads it, its escapes and character references decoded (`[^a\*]` is `a*`, `[^f&amp;g]` is `f&g`), while a reference still finds its definition by the label as written;
 the writer escapes a bracket, a pipe, a backslash before punctuation or at the end, an ampersand opening a character reference, and white space as a numeric one, so each label reads back and one that needs none is written as it is (`escapeFootnoteLabel`).
@@ -1336,16 +1410,22 @@ A definition's later lines start four columns past where its container's content
 Goldmark gathers each definition, as it closes, into a list the parser keeps ahead of every block written while the document parses, so a check of the block before another meets the block written there (`footnoteDefinitionParser.Close`), and the parser puts each definition back where it was written and removes the list once the document is read (`definitionsInPlace`).
 Goldmark's footnote transformer, which would order the definitions by first reference, drop the rest and append backlinks, is not used.
 
-Inline text, a link's and an image's title, an image's address and a footnote label are decoded in one pass from the left, as CommonMark and the browser editor's parser decode them (`decodeMarkdownText`):
+Inline text, a link's and an image's title, a link's and an image's address and a footnote label are decoded in one pass from the left, as CommonMark and the browser editor's parser decode them (`decodeMarkdownText`):
 a backslash before ASCII punctuation is that character, so `\&amp;` is the text `&amp;`, and a character reference is decoded only where it is one to that parser (`characterReferenceAt`).
 Goldmark's `util.UnescapePunctuations` and Go's `html.UnescapeString` are not used for this, since they read by HTML's rules:
 escapes went first and the reference after (`\&amp;` was `&`), a reference without its `;` decoded (`&copy 2024`), and so did a numeric one of more than seven decimal or six hexadecimal digits, a legacy name used as a prefix (`&notit;` was `¬it;`) and a control character or noncharacter, which that parser reads as U+FFFD.
 Named references come from Go's HTML table, but for `&nLt;` and `&nGt;`, which it lacks.
 A line feed in text, a decoded `&#10;` among them, is a space, as that parser's import reads every line feed in a text node; an image's alt text keeps it.
 A typed block's attribute values keep HTML's attribute rules, as the parser reads them.
-The title writer (`titleSuffix`) and the image address writer (`escapeImageSource`) put a backslash before an `&` that would open a reference, and the image address writer doubles a backslash before punctuation in and out of a table, so each reads back;
-an `&` that opens none, as in `&foo;` or `AT&T`, is written as it is.
-A text link's address is still read as written (dispatch://INFRA-425).
+The title writer (`titleSuffix`) puts a backslash before an `&` that would open a reference.
+One writer writes a link's and an image's address (`escapeDestination`):
+an `&` that would open a reference as `&amp;` in a link's (`escapeLinkDestination`), so a stored `x?a=1&amp;amp;b=2` keeps its bytes, and as `\&` in an image's (`escapeImageSource`);
+a backslash before punctuation or ending the address doubled, in and out of a table;
+and an ASCII control character, which a decoded `&#9;`, `&#10;`, `&#12;` or `&#13;` leaves there and which ends a destination or is none to the engine's parser, as its numeric reference (`asciiControl`).
+So each of these reads back but a control character other than those four:
+`&#9;`, `&#10;`, `&#12;` and `&#13;` read back as the character, and every other byte 0x00–0x1F and 0x7F is written as its reference too, which both readers decode to U+FFFD, as CommonMark specifies;
+no markdown makes such an href, so no write is refused.
+An `&` that opens none, as in `&foo;` or `AT&T`, is written as it is.
 
 A typed block renders its `blockId`, defaulted attributes, and every explicitly set optional attribute.
 Parsing mints an omitted id, while live document reads and writes validate each node against its schema content rule.
@@ -1573,6 +1653,13 @@ Why it is not a read-path repair is `cmd/dispatch/README.md`'s ("Pre-deploy cens
   an advisory lock on the repository, the event owners of every project it touches, then the row.
   So two writes to one repository serialize, even while it has no row yet, and the seed's own additions are announced like any other.
 
+- An issue's `updated_at` never moves backwards.
+  Every write that stamps it itself - `PATCH /api/v1/issues/{key}`, a claim and its release - sets it to `issueUpdatedNow` (`api/issue_patch.go`), `greatest(updated_at, clock_timestamp())`:
+  the statement's own moment, never below what the row holds.
+  Such a write's transaction begins before it takes the issue's locks, so `now()`, that beginning, would let a write that waited behind another one's commit stamp an older time over that write's newer one.
+  An event append keeps its own rule, `greatest(updated_at, created_at)` (`events.Broker.Append`), which never moves it backwards either.
+  The dashboard's issue cache keeps the newest `updated_at` it has seen and drops an older answer (`packages/dispatch/AGENTS.md`), so a stamp that went back would hide the waiting write's answer and every read after it.
+
 - Open asks accept `PATCH /api/v1/asks/{id}` from their asking session or any human.
   Each edit carries the full current ask, prior mutable fields, and its editor in an `ask.edited` event; `edited_at` is nullable until the first edit.
   Ask anchors are set on creation and are not editable through this route.
@@ -1622,7 +1709,7 @@ Why it is not a read-path repair is `cmd/dispatch/README.md`'s ("Pre-deploy cens
   the move rewords its question to the new version, stamps `edited_at` and appends `ask.edited`, while `requested_version` remains the version the agent last handed to the human, so a moved request is Waiting on agents.
   Only the first move since the request was opened or handed back wakes anyone, even when a thread reply had already left the request waiting on the agent:
   a later move, while `requested_version` is already below the version it named, carries `quiet: true` (`model.AskEditEventPayload.Quiet`), so `events.Broker.Notify` records it with `notify` false and the outbox routes it to no follower, as a human's unnamed `artifact.version` is recorded;
-  the log and SSE still carry it, so a person typing in the document wakes the asker once rather than at every settled version.
+  the log and the live event feed still carry it, so a person typing in the document wakes the asker once rather than at every settled version.
 
 - Calling the request route again reads the open row's `waiting_on` once, before it writes anything (`renewApprovalAsk`, `api/reviews.go`).
   While it is `agent` - the request moved, or a thread reply newer than its last hand-back holds the turn - the call hands it back to the human:
@@ -1833,14 +1920,14 @@ Why it is not a read-path repair is `cmd/dispatch/README.md`'s ("Pre-deploy cens
   exact counts split by whose reply is next plus the full oldest-first inventory, with `session_id` echoing the selector (empty under project scope).
   `[&since=<RFC3339>]` reports `opened_since` over all asks in scope so a just-closed ask still disarms an automatic reminder.
 
-- Event IDs are the SSE resume cursor.
+- Event IDs are the events view's resume cursor on `/ws/live`.
   `events.Broker.Append` takes one global transaction-scoped advisory lock after it locks the event owner and before inserting, so IDs are allocated in commit order.
   A transaction that appends to multiple owners must call `LockOwners` with every owner before its first append;
   it locks them deterministically before any transaction can hold the global lock.
   This deliberately serializes concurrent event-producing transactions across every owner; do not bypass the broker with direct event inserts.
-  `GET /api/v1/events` answers `X-Dispatch-Event-Replay: complete` (`eventReplayHeader`, `api/events.go`) on a resuming connection (`since`, or `Last-Event-ID`) whose `since` is at or below the log's head when it subscribed:
-  it is replayed every event after `since` before it goes live, so the client missed nothing and may skip the refresh it owes a gap.
-  A cold connect, and a `since` above the head (an id of a log that was reset), get no header.
+  An events subscription's `events_start` says `replay_complete: true` (`LiveEventsStart`, `feedEvents` in `api/live_events.go`) when its resume is at or below the log's head when it subscribed:
+  it is replayed every event after the resume before it goes live, so the page missed nothing and may skip the refresh it owes a gap.
+  A subscription with no resume, and a resume above the head (an id of a log that was reset), say `false`.
 
 - Project creation, repository mappings, and architecture sources own project-scoped events (`project.created`, `project.updated`, `settings.repo_project.updated`, `settings.architecture_source.updated`, and the importer's `architecture.synced` `{repo, branch, commit, components}` / `architecture.sync_failed` `{repo, branch, error}`, each naming the one source it judges (`components` is that source's count;
   events retained from before migration `0117` carry no `repo` or `branch`), authored by the system actor `{kind: "system", id: "architecture-importer"}` and emitted only on that source's state change:
@@ -1944,7 +2031,7 @@ Why it is not a read-path repair is `cmd/dispatch/README.md`'s ("Pre-deploy cens
   `DELETE /api/v1/me/asks/{id}/snooze` removes it and answers `204` whether or not a row was there.
   Neither write touches the ask or reaches any other login: a snooze is one viewer's view state.
   A write that moves the row - a `PUT` whose moment differs from the one stored (the upsert reads the previous moment from its own statement's snapshot) or a `DELETE` that removed a row - appends, in its own transaction, `user_state.updated` `{login, changed: ["snoozed"]}` owned by the ask's project (`askSnoozeEvent`, `api/ask_snooze.go`), and nothing more:
-  `GET /api/v1/events` has no per-viewer filter, so every signed-in person and agent replays it, and it names neither the ask nor any issue state of the writer's.
+  the event feed on `/ws/live` has no per-viewer filter, so every signed-in person and agent replays it, and it names neither the ask nor any issue state of the writer's.
   The writer's other tabs and devices refetch their whole Inbox from it; it names nobody but the writer and, like every `user_state.updated`, never notifies.
   A write that moves nothing appends none, since each event refetches the Inbox in every tab the person has open.
   Keyed on the ask, not its issue, so a document ask snoozes exactly like an issue ask.
@@ -2027,6 +2114,13 @@ Why it is not a read-path repair is `cmd/dispatch/README.md`'s ("Pre-deploy cens
   a document-edit quote miss (`TARGET_NOT_FOUND`) names the three nearest blocks and a `# Title` quote selects a heading.
   The outbox `payload_summary` of `ask.answered` is the answer rendering (`<selected> - <text>`), not the question.
 
+- Every timestamp Dispatch marshals is UTC, whatever zone its process runs in:
+  every connection the pool opens scans `timestamptz` in UTC (`store.scanTimestampsInUTC`, `store.Open`'s `AfterConnect`, a `pgtype.TimestamptzCodec` with `ScanLocation: time.UTC` registered per connection rather than in pgtype's shared default map, and over the array and range types of `timestamptz` as well, each of which holds the element type as it was registered), and a time the server makes itself and writes is `time.Now().UTC()`.
+  So one instant leaves Dispatch as `…T00:00:01.12Z` from a Pacific host as from a UTC one;
+  only the zone a value carries changes, never the instant, and the connection's own session timezone is Postgres's and is untouched.
+  Readers compare these as strings (`packages/dispatch/web/src/lib/timestamps.ts`'s `compareTimestamps`, and the e2e specs), so an offset the host's zone decided would order them wrongly;
+  nothing pins `TZ` to keep that from happening.
+
 - The comment, comment-edit, message and broadcast body cap is `contracts.DispatchBodyMax` (32,000 UTF-16 units), generated from `DISPATCH_BODY_MAX` in `packages/contracts` rather than spelled here:
   `comment_create.go`, `comment_actions.go`, `messages.go` and `broadcasts.go` are its four enforcement sites, each refusing with the `CAP_EXCEEDED` wording above.
   Change it in `packages/contracts/src/dispatch-tools.ts` and regenerate (`bun run gen:go` there), never in `internal/contracts/generated.go`;
@@ -2066,26 +2160,38 @@ Why it is not a read-path repair is `cmd/dispatch/README.md`'s ("Pre-deploy cens
 
 - NATS peer storage uses named Docker volumes, not repo-path bind mounts.
 
-- Role lanes use core NATS, not JetStream:
-  the listener queue subscriber resolves the live holder at delivery time, then makes a receipt-backed request to that holder's agent subject (`bus.Client.RequestCoreTo`).
-  The agent pump returns an empty receipt after accepting the envelope.
-  No receipt within two seconds from a registered, live holder is `receipt_timeout` (the message was forwarded and not acknowledged;
-  the Legion daemon treats it as delivered to a live process)
+- Role messages use core NATS, not JetStream, and none is stored for a later claimant.
+  `POST /v1/messages/publish` delivers a role topic itself (`sendToRole`, `cmd/listener/confirmed.go`) and does not publish it on the role lane.
+  Its first resolution of the holder reads the claim as `GET /v1/roles/<role>` does (`resolveRoleHolder` with `registered`, any entry), within `sendRequestBudget` (3.5 s) of the request's arrival, and gives that route's answers:
+  404 `unclaimed` or `holder_lapsed`, the bus-unavailable 503 with `Retry-After: 1` for a read that did not answer, the 503 that names a lost race for the claim, the 500 for a claim record no read can decode.
+  Every later attempt resolves the live holder by the lane's rule (a claim whose holder heartbeated within `session.ClaimStaleAfter`), so a holder that relaunched between attempts gets the next one, and makes a receipt-backed request to that holder's agent subject (`bus.Client.RequestCoreTo`) with a receipt window of two seconds or what is left of the send;
+  after a miss it waits 100 ms (`publishRetryPause`) and tries again, until a receipt arrives or 4 s from the request's arrival have passed (`publishDeliveryWindow`, which bounds every read, forward and pause of the send, and keeps the answer inside envoy-client's 5 s attempt and the Legion daemon's 10 s client).
+  Every attempt forwards the same envelope, one `event_id` under the dedupe key `envoy.role.forward.<key>`, so a holder that took two copies drops the second.
+  The route answers the outcome to its sender (the Listener API's `/v1/messages/publish` row), writes it on its `listener publish` record line, and publishes no exception.
+
+- The role lane — the listener's core queue subscriber on the role subjects
+  — stays the transport for a client that publishes a role topic straight onto NATS (a listener of an earlier release during a rollout, an operator's `nats pub`):
+  it resolves the live holder at delivery time, then makes one receipt-backed request to that holder's agent subject.
+  The agent pump returns an empty receipt after accepting the envelope, and `RequestCoreTo` counts as one only a reply with no data and no header field:
+  the forward carries a header (its `Nats-Msg-Id`, under "Operational notes"), so the server hands its replies back with a header block, empty for a receipt, while the stream's acknowledgement of the stored copy carries data and the server's no-responders answer a `Status` header, so neither is a receipt.
+  No receipt within two seconds from a registered, live holder is `receipt_timeout` (the message was forwarded and not acknowledged, which a holder that stopped running while its registration lives gives;
+  the Legion daemon queues its notice again on it, at most three copies, and retries one answered `delivery_failed` without a cap)
   — keyed on `bus.ErrReceiptTimeout`, which `RequestCoreTo` returns only after the publish and the flush both succeeded, the server was shown to have accepted the forward, and the receipt wait ran out;
   the flush is bounded by the same two-second window, and a forward whose window ends while NATS is reconnecting, or a flush that fails or times out (a stalled connection still buffering the forward), is the client's own error, so it is `delivery_failed`, never `receipt_timeout`.
   So is a forward the server denies under the listener's grant (`bus.ErrPublishDenied`, returned as soon as the flush answers), and one the server cannot be shown to have accepted when no receipt came;
   `bus.confirmPublished` holds how either is told apart from an accepted forward.
   `delivery_failed` is a claim whose message is not known to have reached the holder (holder lookup failed, holder stale, the publish or flush failed or was denied); `no_holder` is no claim at all.
-  Every reason emits an exception; the attempt cache holds an entry only while a forward is in flight and both forward failures roll it back, while the dedupe cache records a forward only when its receipt arrived
+  On the lane every reason emits an exception;
+  the lane's attempt cache holds an entry only while a forward is in flight and both forward failures roll it back, while the dedupe cache, which the route shares, records a forward only when its receipt arrived
   — so a publish that re-uses a `dedupe_key` after a `receipt_timeout` is forwarded again, while one after a delivered forward is skipped.
   An agent delivery this listener cannot place clears its own attempt entry before each NAK (`clearAttempt`, `agentSubjectDelivery`), because the redelivery that NAK asks for would otherwise find the entry still there and be dropped as `listener attempt-dedupe skip` before it reached the session at all.
-  Do not add durable role consumers or retry transit for role messages.
+  The route's bounded retry inside its window is the one retry a role message gets: do not add a durable role consumer, or retry role messages anywhere else.
 
 - Role ownership is durable in the `envoy_roles` JetStream KV bucket.
   Each role key records `holder_session_id`, `claimed_at`, and `previous_session_id`;
   listener restart restores the claim from that record, but routes only while the holder is present in the `envoy_sessions` registry.
   Reaping stale interests never releases a role;
-  a restored absent holder gets one registry TTL to re-register, then loses its claim atomically on the role reaper or next resolution, while the first core role delivery still emits its normal delivery exception.
+  a restored absent holder gets one registry TTL to re-register, then loses its claim atomically on the role reaper or next resolution, while the first role delivery still reports its normal failure (an exception on the role lane, the answer itself on the publish route).
   A listener reads a claim from the role bucket itself but a holder's liveness from its cache of `envoy_sessions`, which trails that bucket, so a holder another listener registered and gave the role a moment ago is in both buckets before it is in this cache;
   during a rolling deploy the old task resolves every claim the replacement accepts.
   Nothing is taken from a holder on the cache's word:
@@ -2093,10 +2199,11 @@ Why it is not a read-path repair is `cmd/dispatch/README.md`'s ("Pre-deploy cens
   A holder no session can register as (a key `bus.KeyValue` refuses, one outside nats.go's key alphabet such as `ses:bad` among them) counts as gone.
   A read that does not answer within `roleHolderReadTimeout` (2 s, inside the 10 s HTTP write timeout) releases nothing:
   a lookup and a soft claim answer 503, a role delivery reports `delivery_failed`, and the reaper keeps the claim and logs a WARN.
-  The reaper and role delivery hold no request context and make that read through `roleHolderSession`, bounded by `roleHolderReadTimeout` alone.
-  The two routes that resolve a holder, `GET /v1/roles/<role>` and a role-lane publish (`resolveLiveRoleHolder`), and a soft claim (`POST /v1/roles/set`) also hold the whole resolution to the request's own context bounded by `sendRequestBudget` (3.5 s):
+  The reaper (`roleHolderSession`) and the role lane (`resolveRoleHolder` under `context.Background()`) hold no request context and bound that read by `roleHolderReadTimeout` alone.
+  The two routes that resolve a holder, `GET /v1/roles/<role>` and a role send through the publish route (its first resolution within `sendRequestBudget`, its later attempts within `publishDeliveryWindow`;
+  all through `resolveRoleHolder`), and a soft claim (`POST /v1/roles/set`) also hold the whole resolution to the request's own context:
   the claim read, the holder's session read and the conditional release of a lapsed claim each stop when it ends (`store.Registry`'s `RoleClaim` and `ReleaseExpiredRoleClaim` bound their own bucket calls by the context, through `bus.Bounded` in `internal/bus/kv.go`, since nats.go's KV calls take none;
-  `liveSessionEntry` bounds the session read), and no second attempt starts after it, so a role store that does not answer is reported inside the caller's attempt, as the bus-unavailable 503 with `Retry-After: 1`.
+  `liveSessionEntry` bounds the session read), and no second attempt starts after it, so a role store that does not answer is reported inside the caller's attempt, as the bus-unavailable 503 with `Retry-After: 1` (a role send's later attempt that runs out of the window is its 504).
   That read is a direct get, so the listener's NATS user needs publish on `$JS.API.DIRECT.GET.KV_envoy_sessions.>`.
   A session-addressed send and an agent delivery read the session they name through the same read-through (`liveSessionEntry`), each under its own bound - `sendSessionReadTimeout` (1 s, inside the send's own budget) and `deliverySessionReadTimeout` (2 s) - so neither needs any NATS permission beyond that same direct get.
 
@@ -2141,14 +2248,15 @@ Why it is not a read-path repair is `cmd/dispatch/README.md`'s ("Pre-deploy cens
 
 - A failed control delivery or a terminal capability refusal during generic fanout emits `notifications.envoy.exceptions.<original-topic>`.
   Control exceptions keep their ordinary transport:
-  a role lane's `notifications.envoy.exceptions.notifications.role.<role>` takes core NATS because no stream subject captures it (`usesCoreTransport`), and an agent subject's `notifications.envoy.exceptions.notifications.agent.<id>` is the one exception subject the stream captures, so it keeps JetStream.
+  a role lane's `notifications.envoy.exceptions.notifications.role.<role>` takes core NATS because no stream subject captures it (`bus.UsesCoreTransport`), and an agent subject's `notifications.envoy.exceptions.notifications.agent.<id>` is the one exception subject the stream captures, so it keeps JetStream.
   A fanout refusal's original topic is never a control topic, since `listenerDeliveryHandler` sends a `notifications.role.` topic to `roleTopicDelivery` and a `notifications.agent.` topic to `agentSubjectDelivery` and only what remains to `fanoutDelivery`, the one place `fanoutRefusal` is set;
-  its exception subject is therefore never one the stream captures either, so `bus.usesCoreTransport` already routes it over core NATS and the explicit `client.PublishCore` in `publishDeliveryException` now only restates the routing rule's own answer for every reachable input.
+  its exception subject is therefore never one the stream captures either, so `bus.UsesCoreTransport` already routes it over core NATS and the explicit `client.PublishCore` in `publishDeliveryException` now only restates the routing rule's own answer for every reachable input.
   The payload preserves `original_topic`, `event_id`, `reason` (one of `no_holder`, `delivery_failed`, `receipt_timeout`), `recipient_session` when a recipient is known (the receiving session, not `source_session`;
   omitted rather than empty when unknown), `payload_summary`, the original machine `payload`, `dedupe_key`, `source`, and `source_session`;
   the exception lane is not recursively exceptional.
   Each refusal records its recipient before publishing its exception, so an identical redelivery emits at most one exception during the attempt-cache window and never NAKs the original envelope.
-  An API publish to an unheld role is rejected synchronously with 404 instead.
+  A role or ad-hoc topic sent through `/v1/messages/publish` raises no exception:
+  the route answers its sender instead, 404 for an unheld role and 403 or 504 for a recipient that did not take it (the Listener API).
 
 - **Source-specific vs generic ingestion**:
   Envoy has two ingestion paths: listener-hosted webhook handlers behind the listener's starting gate (`internal/webhook/{github,slack,ghostwispr}.go`, `startingGate` in `cmd/listener/main.go`) and the generic MCP bridge (`cmd/mcp/`).
@@ -2157,13 +2265,14 @@ Why it is not a read-path repair is `cmd/dispatch/README.md`'s ("Pre-deploy cens
   — consider whether the cost justifies the benefit over the generic MCP bridge before adding custom source-specific logic to Envoy.
   When using the MCP bridge, Envoy should stay naive about the message content — the MCP server owns the domain logic.
 
-- Five Go jobs of `.github/workflows/envoy-and-contracts.yaml` run only when a file their own filter there names changes:
-  `dispatch-memory` (`dispatch_memory`), `dispatch-multiprocess` (`dispatch_multiprocess`), `broker-multiprocess` (`broker_multiprocess`), `envoy-go-race` (`envoy_go_race`) and `envoy-infra-go` (`envoy_infra_go`).
+- Every Go job of `.github/workflows/ci.yaml` runs only when a file its own filter there names changes, the six Envoy jobs this module's tagged and race suites run in among them:
+  `dispatch-memory` (`dispatch_memory`), `dispatch-multiprocess` (`dispatch_multiprocess`), `listener-server-change` (`listener_server_change`), `broker-multiprocess` (`broker_multiprocess`), `envoy-go-race` (`envoy_go_race`) and `envoy-infra-go` (`envoy_infra_go`).
   Each filter lists the packages the job's command compiles with its build tags, the packages of each binary its tests build, and the files its tests read.
-  Any change that makes a job's command, or a binary its tests build, compile a new package or read a new file - production code included, not only a test - adds that package or file to that job's filter in the same pull request:
-  the pull request that adds the import still runs the job, so nothing else reports the filter falling behind.
-  `envoy-go`, gated by the broad `envoy` filter, runs every untagged unit test of the `packages/envoy` module on every Envoy change (`internal/integration` in a step of its own in that job), so it also runs the untagged tests of every other job's packages in that module;
-  `packages/envoy/infra` is a module of its own, which that `go test` does not reach, so envoy-infra's unit tests run only in `envoy-infra-go` and nothing else backs up the `envoy_infra_go` filter when it falls behind.
+  Any change that makes a job's command, or a binary its tests build, compile a new package or read a new file - production code included, not only a test - adds that package or file to that job's filter in the same pull request.
+  `.github/scripts/check-ci-filters.sh` (ci.yaml's `ci-filters` job) recomputes each go command's package closure and fails naming a file a filter misses;
+  a file a test reads through `..` and a go command a test starts are rows of `.github/scripts/ci_job_reads.py`, which the change that adds them extends, since the check finds neither by itself.
+  `envoy-go`, gated by its broad `envoy_go` filter, runs every untagged unit test of the `packages/envoy` module on every Envoy change (`internal/integration` in a step of its own in that job), so it also runs the untagged tests of every other job's packages in that module;
+  `packages/envoy/infra` is a module of its own, which that `go test` does not reach, so envoy-infra's unit tests run only in `envoy-infra-go`.
 
 ## Security
 
@@ -2220,8 +2329,9 @@ the window sends nothing on a connection that came back, so what of the batch re
 A core-NATS destination (a role lane) counts as published only once its flush has shown the server accepted it, at the cost of one flush round trip (`bus.confirmFlushed` and `bus.confirmPublished` hold how):
 one the server denies under Dispatch's grant (`bus.ErrPublishDenied`, naming the subject) or cannot be shown to have accepted is left unrecorded and retried, rather than recorded in `published_destinations` for a message nobody received.
 Each retry line (`dispatch outbox: publish event`) names the destination by label and target (`publish owner topic "<subject>"` for the event's own topic, `publish route "role:reviewer"` or `publish route "session:<id>"` for the issue's route, `publish author route to "<session>"`, `publish follower route to "<session>"`, `publish claim change to "<session>"`);
-a core denial, which only a `role:` route can be since of the outbox's destinations only the role lanes take core transport (`usesCoreTransport`), adds the subject and the server's violation.
-The listener's own core publishes (a role topic or an ad-hoc topic through `/v1/messages/publish`, a fanout exception) fail the same way, the API publish answering 500 with the violation.
+a core denial, which only a `role:` route can be since of the outbox's destinations only the role lanes take core transport (`bus.UsesCoreTransport`), adds the subject and the server's violation.
+The listener's own core publishes (a role message's forward or an ad-hoc topic's publish through `/v1/messages/publish`, a fanout exception) fail the same way, the API publish answering 403 opening with `publishDeniedPrefix`;
+a denied forward of an ad-hoc topic's copy to one of its recipients is named `delivery_failed` in the route's 504 instead.
 A destination NATS refuses (`bus.ErrRefused`:
 an event past the server's max payload, or a subject past NATS's limit or holding whitespace or an empty token, which an unbounded document slug or a bearer's session id such as `sess..x` can make) is refused the same way on every retry, so it is logged once (`dispatch outbox: destination refused`, naming the event and topic) and counted done, and the event goes on to its other destinations.
 The listener holds one line for both of the bearer kinds `/v1` accepts:
@@ -2236,7 +2346,7 @@ and the 401 is the same `unauthorized` in every case, so a rejected caller learn
   `unmatched` for a path under `/api`, `/v1`, `/auth`, `/ws` or `/healthz` no route answers, a known path called with a method its route does not serve among them), `path` (`r.URL.EscapedPath()`, so `a%2Fb` stays escaped, never the query string), `caller_kind` and `caller`, `address` (`auth.ForwardedAddress`, the rightmost `X-Forwarded-For` entry or the connection's address), `peer` (the connection's own address, which a direct caller cannot forge) and `user_agent`, `status`, `elapsed_ms` and `bytes` (the body the handler wrote;
   a hijacked websocket upgrade is `101` with `0` bytes and the connection's whole lifetime as its `elapsed_ms`), plus `credential` on a `session` line and `aborted=true` on a request whose handler panicked.
   Every caller-written field (`method`, `path`, a session's `caller`, `address`, `user_agent`) is cut to 256 bytes, as the previous-token log cuts its caller fields.
-  `internal/dispatch/accesslog` owns it: `accesslog.Handler` wraps each route where it is mounted - every `/api/v1` route and the two websockets in `api.register`, and `/auth/*`, the GitHub proxy and the `unmatched` 404 in `routes.New` - so the dashboard's own files, which `staticHandler` serves, write none, nor do `/healthz` and `/livez`, which `dispatchHandler` mounts in front of the routes for the probes that call them every few seconds, and neither do the `403` of `enforceCookieOrigin`, the `421` of `requireHost` and the `307` redirects `http.ServeMux` gives an unclean path or a missing trailing slash, which answer before any route;
+  `internal/dispatch/accesslog` owns it: `accesslog.Handler` wraps each route where it is mounted - every `/api/v1` route (outside every other layer `register` puts on it, the keyed layer and the login check included) and the two websockets in `api.register` (`/ws/doc/{room}` and `/ws/live`), and `/auth/*`, the GitHub proxy and the `unmatched` 404 in `routes.New` - so the dashboard's own files, which `staticHandler` serves, write none, nor do `/healthz` and `/livez`, which `dispatchHandler` mounts in front of the routes for the probes that call them every few seconds, and neither do the `403` of `enforceCookieOrigin`, the `421` of `requireHost` and the `307` redirects `http.ServeMux` gives an unclean path or a missing trailing slash, which answer before any route;
   a reader matches `msg="dispatch: request"` whole, since the previous-shared-token warning starts with the same words.
   The line is written in a `defer`, so a handler that panics (an artifact download aborts with `http.ErrAbortHandler`) still writes it, as `500` when it wrote nothing (the client gets a closed connection, not a status), and the panic still reaches net/http.
   The caller is what the authentication layer already resolved, recorded with `accesslog.Note` where it resolves it (`api.optionalActor`, `api.bearerSessionActor`, `docs.Service.requestActor`, `routes.router.login`, and `routes.router.authCallback` once a sign-in succeeds) and never looked up again:
@@ -2244,7 +2354,7 @@ and the 401 is the same `unauthorized` in every case, so a rejected caller learn
   since that id is the caller's own text, the line keeps the credential that named it as `credential`:
   `token:<owner>`, `service:<subject>` or `shared-token`), `token` with a personal token's owner, `service` with a verified service-account subject, `shared-token` with no id, and `anonymous` for a public route, a refused credential or an `unmatched` path.
 
-- A connection that resolves its caller again on every heartbeat (`api.whileCallerResolves` for the two websockets, the event and agent streams through `heartbeatRequest`) does so on `accesslog.Detached`, a context whose recorder is masked, so the line names the caller the connection was admitted as.
+- A connection that resolves its caller again on every heartbeat (`api.whileCallerResolves`, for the two websockets) does so on `accesslog.Detached`, a context whose recorder is masked, so the line names the caller the connection was admitted as.
   The line carries no token, cookie, query string, request body or response body.
   It costs one wrapper, one context value and the line itself, and no database call:
   measured on the test host, the line adds about 2.6 µs, 12 allocations and 1.1 kB to a request (`BenchmarkTheAccessLogLineAlone`:
@@ -2489,8 +2599,26 @@ and the 401 is the same `unauthorized` in every case, so a rejected caller learn
   A head-gated listener run after a rollback decodes a stamped record, ignoring the field, and its own writes drop it.
   Seven days after the last head-gated listener stops, no record without a schema remains.
 
-- The `ENVOY_NOTIFICATIONS` duplicate window is 72 hours, matching the retained notification lifetime.
-  Startup reconciles that setting with `UpdateStream`, so a Dispatch outbox retry after a post-publish crash cannot create another retained message while the original remains available.
+- The `ENVOY_NOTIFICATIONS` duplicate window is 72 hours, equal to the stream's age.
+  Startup reconciles both with `UpdateStream`, so a Dispatch outbox retry after a post-publish crash cannot create another retained message while the original remains available.
+  The byte limit (`ENVOY_STREAM_MAX_BYTES`) never shortens that:
+  a full stream refuses a new publish (`DiscardNew`) and keeps every stored message until it is 72 hours old, so the limit must be sized above the stream's 72-hour volume.
+  nats-server answers the refused publish with API error 10077 (`JSStreamStoreFailedF`) `maximum bytes exceeded`, which nats.go returns as `nats: maximum bytes exceeded` and the bus wraps as `bus.ErrStreamFull` (`stream ENVOY_NOTIFICATIONS is full: nats: maximum bytes exceeded`;
+  `publishJetStream` and a window's send, `streamFull`).
+  It is not a `bus.ErrRefused`, so every publisher treats it as a failure to retry:
+  the webhook listener answers GitHub 503 and logs `github publish failed`, and Dispatch's redelivery sweep has GitHub redeliver it (five times, over about half an hour);
+  Dispatch's outbox backs the event off and retries it with no attempt limit;
+  the CI store releases its claim and settles again on a later tick;
+  `/v1/messages/send` and `/v1/messages/publish` answer `503` with `Retry-After: 1` under `streamFullPrefix` (`envoy: the message bus refused the message because its stream is full: …`), recorded with the outcome `stream_full` rather than `bus_unavailable`, which `@legion/envoy-client` retries once before the session's tool reports it, Dispatch records as a failed delivery attempt its dashboard offers to Retry, and the Legion daemon's notice outbox retries on its backoff.
+  A clustered nats-server (v2.10.29, the Go tests' server, among them) records a publish's `Nats-Msg-Id` at sequence 0 before it stores the message and keeps that record on the stream's leader for the 72-hour window, a purge notwithstanding, when the full stream refuses it, so a retry under the id is acknowledged `{"seq":0,"duplicate":true}` though nothing was stored (`bus.ErrNotStored`, `stream ENVOY_NOTIFICATIONS acknowledged a duplicate of a message it does not hold`; `notStored`).
+  `publishJetStream` and a window's send (`sendJetStream`) answer that acknowledgement by sending the same envelope once more without its `Nats-Msg-Id`, which no record matches:
+  stored, the publish succeeds, so a refused message is stored as soon as the stream has room, with no leader step-down;
+  refused, the publish fails with an error wrapping `bus.ErrNotStored` and the send's own error (`..., and its publish without its id failed: stream ENVOY_NOTIFICATIONS is full: nats: maximum bytes exceeded`), never a success, and every publisher retries it as it does `bus.ErrStreamFull` (`TestARetryOfAGitHubDeliveryTheFullClusterStreamRefusedIsStoredOnceTheStreamHasRoom`).
+  The stream drops no repeat of a copy sent without the id:
+  a retry of a message still being stored, acknowledged the same way, stores a second copy, and once a refused message is stored without its id, every later publish under the id stores another while the leader keeps the record.
+  A copy from the same publish carries the same `event_id`;
+  a GitHub redelivery's copy carries a new `event_id` (the webhook mints one per request) under the same `dedupe_key`.
+  A core-NATS publish to a subject the stream captures (a receipt-backed forward to an agent subject, or a topic only a newer build's stream subject captures) still reaches its live subscribers but is not stored.
 
 - An envelope publishes under a JetStream MsgId of its dedupe key and topic when that key names its event:
   `contracts.DedupeKeyNamesTheUpstreamEvent`, which asks the envelope rather than its source name, and holds for a `github`, `slack` or `ghostwispr` key that is the source plus the envelope's own `SourceEventID` (the webhook normalizers' shape), for every `dispatch` envelope (LEGION-271), and for a key minted once for its message, from any source (`contracts.MintedDedupeKeyPattern`:
@@ -2507,6 +2635,15 @@ and the 401 is the same `unauthorized` in every case, so a rejected caller learn
   None is a redelivery, and none is deduped.
   An envelope under any other key its caller chose carries no MsgId.
 
+- A receipt-backed forward to a session's agent subject (`bus.Client.RequestCoreTo`:
+  a role message, an ad-hoc topic's copy) carries a `Nats-Msg-Id` of its dedupe key and that subject (`bus.ForwardMsgID`) whatever the key is, so the stream, which captures every agent subject, keeps one copy per message and recipient however many attempts the publish route makes, while every attempt still reaches the core subscribers on the subject.
+  Every listener's durable takes that stored copy, and `listenerDeliveryHandler` acknowledges an envelope stored on an agent subject whose `topic` is not that subject without delivering it:
+  the forward already reached its session over core NATS, and fanning the copy out by its topic would push it to serve-port sessions a second time.
+  The durable no longer needs the role forward mark for this;
+  the mark stays for the sessions' dedupe and for `/v1/replay`'s readers, which pass a role forward over.
+  A session's replay of its own agent subject shows an ad-hoc topic's stored copy it was not shown live, once.
+  A listener of an earlier release reads only the mark, so during a rollout it sends a stored ad-hoc copy to `fanoutDelivery`, which pushes it to its serve-port sessions subscribed to the topic once per key (its dedupe cache).
+
 - A `bus.ConnectOwningStream` caller reconciles `ENVOY_NOTIFICATIONS`'s subjects by adding its own to the deployed list:
   the listener at start, and Dispatch's server, which connects in the background, on its first connection.
   Only the deployed services call it: the listener (including the on-prem fleet's) and Dispatch's server.
@@ -2515,7 +2652,8 @@ and the 401 is the same `unauthorized` in every case, so a rejected caller learn
   both read `envoy.natsUrls` from the user `envoy.json` (`${XDG_CONFIG_HOME:-~/.config}/legion/envoy.json`), which on an agent machine names production.
   Each deployment states its reach instead (`deploy/compose/*.compose.yml`, the production deployment's listener and Dispatch service definitions, the on-prem fleet's Pulumi), and each must carry it **before** an image whose binaries read it runs there, or that start refuses the shared NATS its deployment names and exits;
   setting it early is free, because a binary built before the variable ignores it (LEGION-249).
-  Once every writer runs a build with this reconciliation, a restart during a rollout cannot drop a subject another deployment needs, except when two writers with different lists start within one read-update round trip (JetStream's stream update has no compare-and-swap).
+  Once every writer runs a build with this reconciliation, a restart during a rollout cannot drop a subject another deployment needs for longer than one keeper period:
+  two writers with different lists that each read before the other writes (JetStream's stream update has no compare-and-swap) can drop the first one's added subject, and that deployment's keeper adds it back within 30 seconds (below).
   A start removes a deployed subject only when it overlaps a role lane (`notifications.role.>` or its exceptions twin) or one of the binary's own subjects (a widened, narrowed or split subject, which JetStream refuses beside it).
   In the second case the binary's shape wins, and a WARN names the dropped subject and every subject that replaced it.
   Each start also logs, at INFO, the deployed subjects it keeps without compiling them, which is the list the retire step works from.
@@ -2524,13 +2662,48 @@ and the 401 is the same `unauthorized` in every case, so a rejected caller learn
 
 - The same reconcile keeps `ENVOY_NOTIFICATIONS`'s metadata as deployed, since `UpdateStream` writes the whole configuration and would otherwise drop it, and sets `envoy_stream_id` (`bus.StreamIDMetadataKey`) once:
   a fresh random id on a stream the start creates, and, on a deployed stream without one, an id derived from the stream's name and the Created time `STREAM.INFO` answers.
-  A deployed stream without one whose subjects, retention and duplicate window need no change gets it in one `UpdateStream` that writes the stream's own deployed configuration with only the id added to its metadata, so its replicas, storage, limits and every other setting stay as they are;
-  one that needs a reconcile gets it in the reconcile's `UpdateStream`.
+  A deployed stream without one that needs nothing else gets it in one `UpdateStream` that writes the stream's own deployed configuration with only the id added to its metadata;
+  one that needs a reconcile gets it in the reconcile's `UpdateStream`, which keeps every deployed field the next bullet does not name.
   An id the stream holds is never changed.
   JetStream's stream update has no compare-and-swap, so two starts racing to add the id would each write their own;
   the derived id makes them write the same one.
   A start that finds no stream and is refused `stream name already in use` (another start created it in between, with an id of its own) reconciles that stream and keeps its id.
   A build older than the id writes the configuration without metadata whenever it updates the stream, and the next start of this build derives the id again.
+
+- Every stream update the reconcile sends starts from the deployed configuration and sets only what Envoy owns (`reconciledStream`, `internal/bus/stream.go`):
+  the subjects (above), the age and the duplicate window (72 hours), the replicas (the deployed count or `ENVOY_NATS_REPLICAS`, whichever is more), the byte limit (the deployed one or `ENVOY_STREAM_MAX_BYTES`, whichever is more;
+  the setting on a stream with none, the deployed one when unset) and `DiscardNew`, which switches a stream an earlier build created with `DiscardOld`.
+  The metadata and every other deployed field - `MaxMsgsPerSubject`, `MaxMsgSize`, storage, placement, compression and the rest - stay as they are, and a start that finds all of that in place sends no update.
+  A start's own write never lowers the stream's copies or its byte limit, so an operator's raise of either stands, and the stream holds the most copies and the largest limit any program of a deployment carries;
+  a clustered deployment sets both alike in every envoy-listener and in the Dispatch server.
+  JetStream's stream update has no compare-and-swap:
+  a start with other (or no) settings, or another subject list, that reads the stream before another start's write and writes after it puts the old subjects, copies, byte limit and metadata back.
+
+- The keeper (`internal/bus/keeper.go`) ends that:
+  every program that owns the stream (the listener, Dispatch's server) reads it again every 30 seconds and puts back copies below its `ENVOY_NATS_REPLICAS`, a byte limit below its `ENVOY_STREAM_MAX_BYTES`, or none (when set), a missing `envoy_stream_id`, and the 72-hour age and duplicate window and `DiscardNew` (constants every release compiles alike;
+  `discard DiscardOld -> DiscardNew` in its line), and adds back each subject its binary compiles that the stream lacks, unless it overlaps a subject the stream carries or captures a role lane (`keptStream`, `keptSubjects`, `internal/bus/stream.go`), logging `envoy nats keeper restored the stream` at WARN with, for example, `restored="replicas 1 -> 3, max_bytes -1 -> 2000000, envoy_stream_id added as <id>, subjects added notifications.legion.>"`.
+  Like a start, it never lowers the copies or the byte limit (`ownedStream`), so an operator's emergency raise of a full stream's limit stands (`TestTheKeeperKeepsAnOperatorsRaiseOfTheByteLimitAndRaisesALowerOne`).
+  Its write is the stream as it read it with that put back, so it only adds subjects and removes or replaces none:
+  two releases with different subject lists do not switch the stream back and forth, and a concurrent write the keeper's lands over loses its subject only until that release's own keeper adds it back a period later.
+  A stream that still carries a role-lane subject it leaves to a start, which moves the role lanes off, so a stale read never puts one back;
+  while such a stream needs anything, the keeper sends nothing and logs `envoy nats keeper could not restore the stream`.
+  It also raises the buckets its program opens (`bus.WithKeptBuckets`:
+  the listener's interests, roles, sessions and CI state buckets, Dispatch's webhook redelivery bucket) back to `ENVOY_NATS_REPLICAS`, logging `envoy nats keeper raised a bucket` with `replicas="1 -> 3"`.
+  A failed pass logs `envoy nats keeper could not restore the stream` or `envoy nats keeper could not raise a bucket` and the next period tries again;
+  it never stops the program, and a pass the program's own shutdown interrupts logs nothing.
+  So with mixed settings during a rollout the stream can sit below the setting for up to one period after the last start;
+  programs with different byte limits do not fight, since no keeper lowers a limit, and the largest stands.
+  Lowering the copies (`nats stream edit ENVOY_NOTIFICATIONS --replicas=<n>`) and lowering or removing the limit (`nats stream edit ENVOY_NOTIFICATIONS --max-bytes=<n>`, `--max-bytes=-1` for none) are operator steps that need every program's setting changed first, or the keeper puts them back.
+
+- Every KV bucket Envoy opens through `bus.EnsureKeyValue` is created at `ENVOY_NATS_REPLICAS`, and one found with fewer copies is raised by an update of its stream `KV_<bucket>` that changes only its replicas, which needs `$JS.API.STREAM.UPDATE.KV_<bucket>` in the program's NATS grant (`bucketPermissions`, `packages/envoy/infra/core/permissions.go`);
+  lowering a bucket (`nats stream edit KV_<bucket> --replicas=<n>`) likewise needs every program's setting lowered first.
+  A replica count above 1 needs a clustered NATS: nats-server v2.15.1 refuses both a create and a raise above 1 on a single server.
+  A byte limit above what the server can reserve is refused at create or update.
+  Either refusal stops the listener's start with an error naming the setting and its value, `ENVOY_NATS_REPLICAS=<n>` or `ENVOY_STREAM_MAX_BYTES=<n>` (`refusedSettings`);
+  Dispatch's server, which connects in the background (`bus.WithConnectInBackground`), reconciles on its first connection, so the same refusal leaves it serving and logs `envoy nats reconnect hook failed` with that error at each retry;
+  a refused bucket raise also names the bucket's stream, `raise KV_envoy_interests: ENVOY_NATS_REPLICAS=3: context deadline exceeded`, and a grant without `$JS.API.STREAM.UPDATE.KV_<bucket>` shows as that timeout after 10 seconds.
+  With one of three clustered servers stopped, nats-server v2.15.1 creates a new stream at 3 copies (one offline peer assigned) and the start succeeds;
+  v2.10.29, the Go tests' server, refuses that create.
 
 - Cross-machine route correctness depends on valid session registry entries with non-null ports.
 
@@ -2579,21 +2752,17 @@ Each item below names an endpoint and its method, then its contract, and an item
 
 - `/v1/messages/publish` (POST)
 
-  Publishes a non-agent topic, through JetStream when the stream captures it and over core NATS for a role lane or an ad-hoc topic it does not (`bus.usesCoreTransport`), answering once the server has accepted the publish;
-  a core publish the NATS server denies under this listener's own grant (`bus.ErrPublishDenied`, which only a core publish's confirmation produces, so only a role lane or an ad-hoc topic can be denied this way) is a `403 {"error":"envoy: the message bus denied the publish under this listener's own permissions: <reason>"}` carrying the server's violation, with no `Retry-After` and recorded `outcome=publish_denied`, because the bus answered and no retry gets past a grant that forbids the subject until an operator changes it (`packages/envoy-client/src/transport.ts` retries every status at or past 500 and none below it);
-  a publish the bus did not serve at all, and a role-holder read that did not answer, which says nothing about the claim, are both the `503 {"error":"envoy: the message bus did not answer: <reason>"}` with `Retry-After: 1`;
-  a role claim record no read can decode (`store.ErrMalformedRoleClaim`:
-  one naming no holder, or JSON that is not a claim) is `500 {"error":"envoy: the claim record of role <role> is unreadable: <reason>"}` with no `Retry-After` (`writeRoleClaimUnreadable`), recorded `outcome=role_claim_unreadable`, because the bus answered and a retry reads the same record;
-  and a resolution that lost the race for the role's claim
-  — every one of `roleHolderResolutionAttempts` (2) spent on a supersession, `errRoleHolderChanged` — keeps that 503 and its `Retry-After: 1`, since a fresh read wins the race as soon as the replacement claim settles, but answers `{"error":"envoy: the holder of role <role> changed while this publish was resolving it"}` (`writeRoleHolderChanged`) and is recorded `outcome=role_holder_changed` rather than `bus_unavailable`, every bus read having answered.
-  The role-holder resolution and the publish share the same 3.5 s `sendRequestBudget` from the request's own context that a send's read and publish do:
-  the claim read, the holder's session read (still capped at `roleHolderReadTimeout`, 2 s, per read) and the conditional release of a lapsed claim each stop when it ends (`store.Registry` bounds its claim read and release by the context itself, since nats.go's KV calls take none), no second attempt starts after it, and a resolution it runs out on is that 503, naming the call that did not answer.
-  A publish on either route whose request context has already ended
-  — its budget spent, which a role-holder resolution answering just as the budget ends can leave it, or the request cancelled
-  — puts nothing on the wire and is that 503:
-  on a core publish `bus.publishConfirmed` (`internal/bus/confirm.go`) checks the context immediately before it publishes, one check that sees both a spent deadline and a cancel with the deadline still ahead, so a cancel during a wait for a reconnect sends nothing (a cancel after that check cannot be undone:
-  the publish goes ahead), and the JetStream path relies on nats.go's own check instead, whose request returns the context's error before it sends anything.
-  A core subject has no duplicate window and the client retries every 5xx, so a message emitted behind a failure answer would reach its subscriber twice.
+  Publishes a non-agent topic.
+  A topic the stream captures goes through JetStream and is answered `200` with the envelope once the stream stored it;
+  a session that missed it live reads it back through `/v1/replay`.
+  Its sender stamp's read and its publish share the same 3.5 s `sendRequestBudget` from the request's own context that a send's read and publish do, and a publish the bus did not serve is the `503 {"error":"envoy: the message bus did not answer: <reason>"}` with `Retry-After: 1`.
+  A `notifications.role.<role>` topic is not published on the role lane:
+  the listener forwards it to the live holder's agent subject itself and waits for the holder's receipt, forwarding again until one arrives (`sendToRole`, `cmd/listener/confirmed.go`;
+  the "Role messages use core NATS" rule under "Critical conventions" has the retry).
+  An ad-hoc topic (`bus.UsesCoreTransport`) is published over core NATS, for the serve-port sessions the live topics lane delivers to and any subscriber the registry does not know, then forwarded the same way, `event_id` and `dedupe_key` unchanged, to the agent subject of each `self_subscribed` session registered on it on any machine (`store.Registry.MatchAll`), the `source_session` excepted, all at once (`sendToTopic`).
+  Both are answered once each recipient confirmed, or once 4 s from the request's arrival have passed (`publishDeliveryWindow`), and neither publishes a delivery exception: the sender has the answer.
+  Only a receipt that arrived through the route counts as a confirmation:
+  the route keeps its own record of each session that confirmed a dedupe key (`listenerDeps.confirmed`, 10 minutes), which a later send of the key reads, apart from the delivery handlers' dedupe cache, where the live topics lane's fanout and the durable's inbox delivery record a self-subscribed session whose push they skipped without hearing from it.
 
 - A topic that does not begin with `notifications.` is refused `400 {"error":"topic must begin with notifications.","expected":["topic"]}` and nothing is published, which closes the raw-subject route a bearer could otherwise use to write the listener's own key-value buckets
   — the role-claim records among them — and reach `$JS.API.*`.
@@ -2603,8 +2772,38 @@ Each item below names an endpoint and its method, then its contract, and an item
   the role arbiter drops such an envelope on sight, so accepting it would be a 200 for a message that vanishes), it may not ride a `source: "dispatch"` envelope (a 400 naming `dedupe_key`:
   every host drops a repeat of a dispatch key, and Dispatch's outbox keys are sequential, so a chosen `dispatch-<next id>` would make hosts drop the real event;
   Dispatch's outbox publishes to the bus and its sends take the listener's key, so it never sets one here), and an empty string is absent; without either key the key is minted.
-  A `notifications.role.<role>` topic requires a live holder and returns that session ID in `holder`.
-  Its 404 adds `reason: "unclaimed"` for a role with no claim, or `reason: "holder_lapsed"` with the prior `holder`, `claim_released`, and a `last_seen` timestamp when the final heartbeat remains in its one-TTL diagnostic window.
+  A role topic's first resolution of its holder reads it as `GET /v1/roles/<role>` does, within the same 3.5 s budget:
+  the claim read, the holder's session read (still capped at `roleHolderReadTimeout`, 2 s, per read) and the conditional release of a lapsed claim each stop when it ends (`store.Registry` bounds its claim read and release by the context itself, since nats.go's KV calls take none), and no second attempt starts after it.
+  A role-holder read there that did not answer, which says nothing about the claim, is the bus-unavailable 503 with `Retry-After: 1`, naming the call that did not answer;
+  a role claim record no read can decode (`store.ErrMalformedRoleClaim`:
+  one naming no holder, or JSON that is not a claim) is `500 {"error":"envoy: the claim record of role <role> is unreadable: <reason>"}` with no `Retry-After` (`writeRoleClaimUnreadable`), because the bus answered and a retry reads the same record;
+  and a resolution that lost the race for the role's claim
+  — every one of `roleHolderResolutionAttempts` (2) spent on a supersession, `errRoleHolderChanged` — keeps that 503 and its `Retry-After: 1`, since a fresh read wins the race as soon as the replacement claim settles, but answers `{"error":"envoy: the holder of role <role> changed while this publish was resolving it"}` (`writeRoleHolderChanged`).
+
+- A role topic answers `200` with the envelope and `holder`, the session that took it, once the holder's receipt arrived, and also, forwarding nothing, when `source_session` holds the role or the holder already confirmed this dedupe key through the route.
+  It answers `404 {"error":…,"reason":"unclaimed"}` for a role with no claim, or `reason: "holder_lapsed"` with the prior `holder`, `claim_released`, and a `last_seen` timestamp when the final heartbeat remains in its one-TTL diagnostic window, whether the first resolution or a later attempt's finds it so.
+  It answers `403 {"error":…,"reason":"capability","holder":…}`, forwarding nothing, when the holder does not advertise the payload's delivery mode or the mode cannot be read unambiguously, as `/v1/messages/send` refuses it.
+  It answers `504 {"error":…,"reason":…,"event_id":…,"dedupe_key":…,"holder":…,"attempts":N}` when the window ended without a receipt:
+  `reason` is `receipt_timeout` when the last forward reached the server and drew no receipt (a holder that stopped running while its registration lives gives it), else `delivery_failed` (no live holder to forward to, a later attempt's read that failed or ran out of time, a forward not shown to have reached the server);
+  `holder` is the holder last resolved, empty when none was, and `attempts` counts the forwards, every one the same envelope.
+  An ad-hoc topic answers `200` with the envelope once it was published and every recipient confirmed or there was none.
+  Its own publish not reaching NATS is `504 {"error":"<topic> was not published within 4s: <cause>; no session was sent it","reason":"publish_failed","event_id":…,"dedupe_key":…}`, with no recipient list since none was forwarded it, whether the window ended first (the wait for a reconnecting connection used it up) or the publish failed at once on a connection that is down:
+  the status does not depend on how soon the failure came.
+  A topic that was published and that some recipient did not confirm is `504 {"error":…,"reason":"not_confirmed","event_id":…,"dedupe_key":…,"delivered":[…],"undelivered":[{"session_id":…,"reason":…}]}`, `delivered` naming each session that confirmed (`[]` when none did) and `undelivered` each that did not, with a role send's `receipt_timeout` or `delivery_failed`.
+  A session that stopped without unregistering stays registered until its registration lapses, 5 minutes after its last heartbeat, and is named in `undelivered` in that time;
+  a session named there is not a failed delivery to the sessions `delivered` lists.
+  A session served on a port holds no NATS connection to answer a receipt, so it is no recipient and keeps the live topics lane's delivery.
+  A core publish or forward the NATS server denies under this listener's own grant (`bus.ErrPublishDenied`, which only a core publish's confirmation produces, so only a role send's forward or an ad-hoc topic's own publish can be denied this way) is a `403 {"error":"envoy: the message bus denied the publish under this listener's own permissions: <reason>"}` carrying the server's violation, with no `Retry-After`, because the bus answered and no retry gets past a grant that forbids the subject until an operator changes it (`packages/envoy-client/src/transport.ts` retries every status at or past 500 and none below it);
+  a denied forward to one ad-hoc recipient names that session `delivery_failed` instead.
+
+- A publish whose request context has already ended
+  — the budget or the window spent, or the request cancelled
+  — puts nothing on the wire: on a core publish `bus.publishConfirmed` (`internal/bus/confirm.go`) checks the context immediately before it publishes, one check that sees both a spent deadline and a cancel with the deadline still ahead, so a cancel during a wait for a reconnect sends nothing (a cancel after that check cannot be undone:
+  the publish goes ahead), and the JetStream path relies on nats.go's own check instead, whose request returns the context's error before it sends anything;
+  a topic the stream captures answers it as that 503, an ad-hoc topic as its 504 `publish_failed`.
+  A core subject has no duplicate window and the client retries every 5xx, so a message emitted behind a failure answer would reach its subscriber twice.
+  Every answer is written with the route's one `listener publish` record line (`requestRecord`, `request_record.go`), its `outcome` naming it:
+  `accepted`, `invalid_request`, `too_large`, `bus_unavailable`, `publish_denied`, `role_unclaimed`, `role_lapsed`, `role_holder_changed`, `role_claim_unreadable`, `capability_refused`, `receipt_timeout`, `delivery_failed`, `not_confirmed` or `publish_failed`.
   A message NATS cannot take whole is a 413 naming its size against the server's max payload, and a topic NATS does not accept (one holding whitespace or an empty token) a 400.
 
 - `/v1/replay` (POST)
@@ -2641,7 +2840,7 @@ Each item below names an endpoint and its method, then its contract, and an item
   falls back to `machine_id` for a session whose plugin predates the field) and `last_seen`.
   A 404 has `reason: "unclaimed"` when no role claim exists;
   for an absent holder it has `reason: "holder_lapsed"` with the prior holder's ID, whether this lookup released the claim, and any final last-seen time retained for one TTL.
-  The holder is resolved as a role-lane publish resolves it, within 3.5 s (`sendRequestBudget`) of the request's own context.
+  The holder is resolved as a role send's first resolution through the publish route resolves it (`resolveRoleHolder` with `registered`), within 3.5 s (`sendRequestBudget`) of the request's own context.
   A lookup that lost the race for the role's claim (`errRoleHolderChanged`) is `503 {"error":"envoy: the holder of role <role> changed while this lookup was resolving it"}` with `Retry-After: 1`, since a fresh lookup wins the race once the replacement claim settles;
   a role store call that did not answer within its cap or that budget (the claim read, the holder's session read or the conditional release) is, as on the publish route, `503 {"error":"envoy: the message bus did not answer: <reason>"}` with `Retry-After: 1`, naming the call that did not answer (`writeBusUnavailable`;
   a key NATS refuses keeps the 413 or 400 `writeNATSError` gives);
@@ -2773,11 +2972,160 @@ A session id or role that becomes a KV key NATS would refuse (`bus.EnsureKeyValu
 Every `/v1` 4xx/5xx response, including the startup gate's 503, is JSON: `{"error":"<message>","expected":["field"]}`.
 `expected` appears when the caller must provide a field.
 
+## Keyed Dispatch writes
+
+Every Dispatch write has one keyed path (INFRA-258, after the IETF `Idempotency-Key` draft and Google AIP-155).
+A caller names the intent behind a `POST` or `PATCH` with the request header `Idempotency-Key` (`contracts.IdempotencyKeyHeader`), the same on every retry of that intent and new for every new one:
+the dashboard mints one per press and the agents' client one per command, and both retry under it by one rule (`retriesUnderKey` in `packages/contracts`):
+a failed fetch, an attempt silent too long, a 5xx, a 408, a 429 and a `409 KEY_IN_FLIGHT`, none of which says whether the first attempt ran.
+The key is optional on every route, and no route requires it;
+a write without one runs as it always did, unkeyed, logged at DEBUG only, since the Legion daemon's outbox and scripts send such writes.
+`PUT` and `DELETE` are idempotent already and take no key.
+A key is 1 to 128 (`IDEMPOTENCY_KEY_MAX`) letters, digits, `.`, `_`, `:` and `-`, bare or as a structured-field string in double quotes;
+any other value, or the header sent twice, is `400 KEY_INVALID` (`IDEMPOTENCY_KEY_INVALID`).
+
+A write the page pressed names its presser in the `Dispatch-Login` request header (`contracts.DispatchLoginHeader`), and every `POST`, `PATCH`, `PUT` and `DELETE` route that gets it runs only as that person (`refuseChangedLogin`, `api/server.go`, wrapped outside the key layer):
+a caller that is another person, compared as `model.CanonicalLogin` compares them, or no person at all (any bearer), is answered `409 LOGIN_CHANGED` (`contracts.DispatchLoginChanged`) before anything runs and before its key is read, so the key is untouched.
+Another tab can sign someone else in in place, and a retry can go out on the new cookie before this tab knows;
+the page drops the presser's writes on that answer.
+A caller that resolves to nobody (a lapsed cookie) keeps the route's own `401`, and a write without the header (the `dispatch` command, an agent, a script) is not checked.
+
+`keyedWrites` (`internal/dispatch/api/request_keys.go`), which `register` wraps around every `POST` and `PATCH` route, keeps one `request_keys` row per key (migration `0137`), keyed on `(login, idempotency_key)`:
+`login` is a person's canonical login whether they write from the dashboard or through an agent's personal token, a service token's subject, or `agent-token` for the shared agent token, so one caller's key is never another's.
+The row holds a SHA-256 of the method, the route pattern, its path values, the query, the media type and the body (a multipart body with its boundary masked, since a client mints a boundary per attempt), so a repeat is told from a reuse:
+
+- Before it spools a byte of the body, the layer looks the key up by login and key alone, naming no digest.
+  A repeat that finds its key held by a first request still running is never spooled:
+  its body is read off the connection and discarded, hashed on the way into the same digest a fresh request is judged by, and the key is then read again and judged by that digest as `claimRequestKey` judges any repeat (`answerDrainedRepeat`).
+  A first that answered while the body arrived is replayed its stored answer (`Idempotency-Replayed: ?1`), or the route's `keyedReplay`;
+  a different body is `422 KEY_REUSED`, whether the first has answered or still runs;
+  a first still running is `409 KEY_IN_FLIGHT` with `Retry-After: 1`;
+  one that committed and lost its answer is `409 KEY_COMMITTED`;
+  and a first that gave the key up meanwhile (released after a 5xx, a dead holder with nothing committed, its window past) is `409 KEY_IN_FLIGHT` with `Retry-After: 1`, its message saying it ended while this one's body arrived, so the retry under the same key runs the request.
+  So a repeat of a large upload whose first attempt still runs is never written to disk.
+  A repeat whose body runs past the route's limit gets the route's `413`, unkeyed;
+  an `Expect: 100-continue` repeat gets `409 KEY_IN_FLIGHT` at once with nothing read.
+  A fresh upload to a closed or missing issue (`POST /api/v1/issues/{key}/artifacts`) is refused as its handler would refuse it (`409 ISSUE_CLOSED` for a closed one) before its body is spooled, keyed or not, and claims no key (`refuseUploadToAClosedIssue`, mounted ahead of the layer).
+  That refusal stands in for the handler, so it answers only a request whose handler would run - a fresh key, one past its window, an abandoned one:
+  a repeat under a key the layer answers itself (`requestKeyAnswersItself`:
+  a stored answer, a first still running, a write that committed and lost its answer) goes on to the layer whatever the issue's state now, so an upload that landed before the issue closed is replayed its `201`.
+  The key is looked up only when the issue refuses with its own 4xx.
+
+- Every other answer given before a request's body is read waits for that body (`drainBeforeAnswer`, `api/body_drain.go`, which `register` puts around every route but a `GET`):
+  the layer's `KEY_INVALID`, the closed-issue refusal, `LOGIN_CHANGED`, a refused path parameter, a handler's refusal made before it decodes.
+  The layer's `KEY_IN_FLIGHT` is not one of them: the layer reads that body itself, above.
+  The answer is written only once the rest of the body is read and discarded, never spooled, at most `routeBodyLimit` and one byte more.
+  An HTTP/1.1 client that sends a whole body before it reads the answer - WebKit and Firefox uploading a file - otherwise met net/http's close of a connection with its body unread as a reset, and dropped the answer with it (the browser suite's 20 MB in-flight upload row).
+  Both reads, the drain's and the layer's, are bounded at `bodyDrainLimit` (a minute), a read deadline through `http.ResponseController.SetReadDeadline` lifted only once the body has reached its end:
+  a body that stops arriving gets its answer as it stood, with `Connection: close`, and the connection closes as soon as the answer is out.
+  A read that failed, or stopped at the limit, leaves the deadline in place, because net/http reads on after the answer, up to 256 KiB more of a `Content-Length` body that leaves that little unread (its discard before the answer's header, and its `Close` of the body once the handler returns):
+  lifted, those reads let a stalled 100 KB body hold its connection open after its answer, and withheld the answer to one that stalled just past the limit (`TestADrainStopsWaitingForABodyThatStalls`).
+  A body past the limit is answered as the limit answers it, in place of the early answer and without its `Idempotency-Key` and `Retry-After` (`413 CAP_EXCEEDED` on the three upload routes, `413 REQUEST_TOO_LARGE` on every other), and the connection closes, so a client that sends past 26 MiB may still see a failed connection.
+  The one early answer the limit does not replace is a `401`:
+  a caller that resolves to nobody is refused before any limit is judged, and a page whose session lapsed reads that `401` as its cue to sign in again.
+  A body a layer read to its end or past the limit itself is left as it is.
+  Nothing of Dispatch reads the body of an `Expect: 100-continue` request it answers early (the drain's guard and the layer's), so net/http sends no `100 Continue`, sends the answer and closes the connection;
+  on go1.27 net/http decides that from the reader its own response keeps, not from the copy of the request `trackTransactions` hands the handler (the comment at the drain's mount in `server.go`).
+  `routes.enforceCookieOrigin`'s `403` for a cross-origin cookie write is answered before the route, outside the drain.
+
+- The layer then reads the body, spooling at most the route's own limit (`routeBodyLimit`:
+  an upload's file and a megabyte of fields for the three upload routes, `keyedUploads`, 26 MiB;
+  `maxJSONRequestBytes`, 1 MiB, for every other); a body past it runs unkeyed and its route refuses it.
+  A body the client did not finish sending is `400 REQUEST_BODY_UNREADABLE`, and a spill Dispatch could not write (`keyedSpillError`:
+  a full disk, a temporary directory it cannot write) is a 5xx with the key echoed, Dispatch's own failure, which the client asks again.
+
+- The row is inserted in flight, in a statement of its own, before the handler runs;
+  the claim and every later bookkeeping statement run under `context.WithoutCancel`, bounded by `keyedBookkeeping` (10 s), so a client that goes away mid-claim leaves no half-claimed key.
+  A repeat that finds the row answers from it instead.
+  A different request under the key is `422 KEY_REUSED`, whose message names the method and path that used it; nothing runs.
+  A first request still running is `409 KEY_IN_FLIGHT` with `Retry-After: 1`, which a client asks again after.
+  A finished one is replayed: its stored status, every header its handler set (`request_keys.headers`, a `Content-Type` among them) and its body, with `Idempotency-Replayed: ?1`, and the handler does not run again.
+  The table's checks hold a row to those states: an answered row holds no lease, and nothing of an answer is stored without its status.
+
+- The handler finishes whatever its client does:
+  it runs on the request's context with the client's cancellation taken off (`context.WithoutCancel`), bounded by `keyedHandlerLimit` (ten minutes, past which its work rolls back and the key is released as for a 5xx) and counted in the server's background wait (`detached`, a `backgroundWork`).
+  A shutdown lets it finish within the stop grace (`stopGrace`, 30 s, `cmd/dispatch/shutdown.go`);
+  one still running past it dies with the process, and its key is taken over by the lease handover (below) once its lease lapses.
+  While it runs it renews its key's lease (`IDEMPOTENCY_LEASE_MS`, 60 s) every `keyedLeaseRenewal` (20 s, `renewRequestKeyLease`), each renewal a statement of its own, and only until `keyedHandlerLimit`, so a handler that runs past its limit holds its key one lease longer at most.
+  A client that gave up and asks again is answered `409 KEY_IN_FLIGHT` for as long as the first run lives and then its stored answer, and only a run whose process died is taken over.
+  A handler cut off with its client would roll its transactions back and leave every retry to start over, so a write that takes the server longer than the client waits could never land.
+  Every handler that reads `r.Context()` for its work gets this detached context, the architecture importer's `Sync` among them.
+
+- The handler answers on a writer that holds its answer (`keyedAnswer`) until the row has it.
+  A 2xx or a 4xx is stored and the row finished in one statement;
+  a 5xx, a 401 (a session that lapsed mid-write), a 408, a 429 and a panic release the key, so the next attempt runs the handler again - unless the request had already committed something (below).
+  One route keeps no answer at all: `POST /api/v1/me/agent-tokens`, whose answer carries the plaintext token, which `request_keys` would otherwise hold for 24 hours beside `agent_tokens`' hash.
+  A repeat of a keyed mint that minted is `409 KEY_COMMITTED` once the first has finished (`409 KEY_IN_FLIGHT` while it still runs), never a replay of the token, and no second token is minted;
+  a mint refused with a 4xx commits nothing, so its key is released and a repeat runs it again.
+  A route whose answer holds a credential is the one exception to "a 2xx or a 4xx is stored and replayed", and the mint is the one such route.
+  An answer past 1 MiB is answered in full but kept as its status alone, and its replay is that status with the body `ANSWER_NOT_KEPT` (`IDEMPOTENCY_ANSWER_NOT_KEPT`):
+  the write ran, and the client reads what it wrote again.
+
+- Every transaction a keyed request commits that wrote - one holding the `ROW EXCLUSIVE` lock an `INSERT`, `UPDATE`, `DELETE` or `MERGE` takes on a table other than `request_keys` - sets the row's `committed_at` in that same transaction (`markRequestKeyCommitted`, through `store.WithBeforeCommit`, the pool's hook), so the key knows the write landed even when its answer never made it into the row;
+  a lock-only `SELECT … FOR UPDATE` marks nothing, and a COMMIT refused after the mark leaves none.
+  `TestEveryKeyedWriteCommitsInsideATransactionTheMarkHooks` (`keyed_write_guard_test.go`) walks the copy-lock graph from every `POST` and `PATCH` route and fails the build on a write outside the shared pool's transactions, the one way a write could miss the mark.
+  It follows `go` statements, Go callbacks (an `errgroup` or `WaitGroup` function, `time.AfterFunc`) and `select` arms into what they call, treats only `goDetached` as detached, and reads a `select` of a SQL function a migration defines to write (`embeddings_enqueue`, `user_threads_record`, `delivery_change_log` and the triggers that call them) as a write.
+  A repeat that finds a marked row in flight past its lease, or released after a 5xx or a panic, is `409 KEY_COMMITTED` (`IDEMPOTENCY_KEY_COMMITTED`) at once, with the echo and no `Retry-After`:
+  `the write under Idempotency-Key "k" (POST /path) landed, but Dispatch lost its
+  answer, so it is not run again and has no answer to replay: read what it wrote`.
+  A client treats it as a landing and reads again what it wrote.
+  A request that wrote nothing is not marked, so a repeat past the lease runs it again.
+
+- A row whose holder never finished and committed nothing (its process died first) is taken over by the first repeat past the lease, `attempt + 1`;
+  every write the holder makes to the row is scoped to its own attempt, so a holder that was only slow changes nothing once it has lost the key.
+
+- A write that also mutates foreign state keeps its own recovery point ("Implementing Stripe-like Idempotency Keys in Postgres"):
+  it commits what it made into the row in its own transaction (`bindRequestKeyRecovery`), and a repeat that finds the point is answered by its route's `keyedReplay` rather than from the stored bytes or a `KEY_COMMITTED`, however its first request ended (finished, lapsed, or released after a 5xx):
+  whatever delivery is still owed is resumed first, then what it made is read again, under `201` and `Idempotency-Replayed: ?1`.
+  Four routes do: the single-session send and the broadcast (below), the issue message (`POST /api/v1/issues/{key}/messages`), and a comment (`POST /api/v1/issues/{key}/comments` and `POST /api/v1/artifacts/{id}/comments`), whose replay resumes every mention whose latest attempt is pending under a lapsed claim, under that attempt's own number (so its dedupe key is the same and the stream drops a frame that landed), then answers the comment with its mentions and deliveries in the first answer's shape, read fresh, keeping from the stored answer only its `advice` and `ask_waiting_on`, and only when that answer was a 2xx; the issue message does the same.
+  The layer replays the answer; the delivery code decides what is still owed.
+  A repeat only resumes owed deliveries sooner: the delivery sweep ("The delivery sweep", below) makes each of them whether anyone asks again or not.
+
+The delivery sweep (`internal/dispatch/api/delivery_sweep.go`) finishes the deliveries a dead process left.
+Every write that delivers to sessions - a send to one session, the live view's model and thinking switch, a broadcast's recipients, an issue message to a session, a comment's and a document comment's mentions, and a retry from an agent card - claims each attempt before its send and settles it after, on a context its client's cancellation does not reach.
+A process that dies between the two leaves the attempt pending under a claim nobody holds.
+Every pass of the maintenance loop (`RunSuggestionOutcomeSweep`, once a minute, the `ResumeDeliveries` that `api.Register` and `routes.New` return in `api.Background` beside `Wait`) calls `resumeOwedDeliveries`.
+It first settles `failed`, with the receipt the row owes, every owed attempt nothing can send, 100 of each kind a read until a read comes back short or a round settles nothing:
+a message attempt on a closed issue and a keyed send with no attempt on a closed issue (given a failed attempt 1), `not sent: the issue closed before this attempt was delivered`;
+a mention attempt whose document is no longer a project's, `not sent: the document is gone`, or whose issue closed, as above;
+and one whose comment no longer holds the mention, `not sent: the
+comment no longer mentions this target`.
+Each settle is a transaction of its own that takes the owner's lock first and checks the cause again under it, so an issue reopened meanwhile keeps its attempt owed.
+It then sends, `broadcastDeliveryWorkers` at a time and at most `deliverySweepBatch` (100) of each kind a pass, every attempt that is its message's or its mention's latest, still pending, its claim lapsed (`claimLapsed`, a minute), opened over a minute ago and inside `DeliveryDuplicateWindow` - the exact attempt it selected, bound to its attempt number for a message and a mention alike, never an older pending one a card retry overtook - and the first attempt of a keyed send whose process died between committing its message and opening that attempt, found by its key's recovery point once the key's holder is gone.
+One rule says what is owed (`owedMessageAttempt`, `owedCommentAttempt`, `owedKeyedSend` and the closed or gone predicates, package constants):
+the settle reads use them as they are and the send reads (`owedDeliveries`) their negations, so no attempt that cannot be sent ever fills a send batch.
+Of two senders that find one attempt owed - the sweep and a repeat, or two processes' sweeps - the one that claims it sends and the other sends nothing.
+The sweep's reads stay as small as the work still owed:
+migration `0138` indexes the pending attempts (`message_deliveries_pending`, `comment_deliveries_pending`, partial on `state = 'pending'`), and `0137` the keyed sends still owed (`request_keys_owed_sends`, on `created_at`, partial on rows with no status whose recovery names a message).
+`cmd/dispatch/keyed_kill_multiprocess_test.go` proves the takeover on two real processes:
+one killed mid-handler (held there by the slow-write hook), the other answers `409 KEY_IN_FLIGHT` while the lease lasts, then makes the write once and replays it.
+
+Every answer the layer judged echoes the key back (`Idempotency-Key: <key>`) - not the `400 KEY_INVALID`, nor a request whose caller it could not resolve, nor one whose body is past its route's limit, each of which runs unkeyed - and `/healthz` answers `idempotency_keys: true` on every build that judges the header, a fact of the binary rather than of the probe, so its `503` carries it too.
+Together they are how a client tells a Dispatch that runs this layer from one that ignores the header and would run a retried write a second time:
+the agents' client resends only against a Dispatch whose answer carried the echo, or whose `/healthz` said so, in the last five minutes (`packages/envoy-client/README.md`).
+
+With `DISPATCH_TEST_HOOKS=1`, `POST /api/v1/writes/_test/slow` `{method, path, delay_ms}` (`slow_write_hook.go`) makes every keyed run of that method and exact path wait `delay_ms` on its handler's context once its key is claimed;
+a context that ends during the wait answers `503 SLOW_WRITE_CUT_OFF` and the handler never runs.
+The browser suite drives a write Dispatch is slow to finish with it.
+
+A key is kept 24 hours (`IDEMPOTENCY_KEY_TTL_MS`):
+the suggestion-outcome sweep's pass deletes every older row (`sweepRequestKeys`), a row a dead process left in flight with it, and a repeat that finds an older row not yet swept treats the key as unused.
+The hand-written key path before it is gone:
+`broadcast_idempotency_keys` (migration `0055`), which this release neither reads nor writes and a later release drops.
+Neither send route takes a body `idempotency_key` any more; the header carries the key.
+
 ## Targeted Dispatch messages
 
 Any authenticated caller — a browser session or a bearer naming its session in `actor` — can create an issue message with `target: "session:<id>"` or `target: "role:<name>"` and `delivery: "btw" | "aside" | "steer"`;
 a bearer-authored targeted message is authored by that session, never by a human.
-A human may also create an issue-less, session-targeted message with `POST /api/v1/agents/{session_id}/messages` `{body, delivery, in_reply_to?}`, and `GET /api/v1/agents/{session_id}/messages` returns that session's issue-less and issue-anchored targeted roots:
+A human may also create an issue-less, session-targeted message with `POST /api/v1/agents/{session_id}/messages` `{body, delivery, in_reply_to?}`, keyed by its `Idempotency-Key` header ("Keyed Dispatch writes" above).
+Its write commits the message and its mode as the key's recovery point (`agentMessageRecovery`), so a repeat under the key is answered by `replayAgentMessage` however the first request ended:
+`sendHeldMessageOn` first puts the message on its way when it is owed (`owedMessageAttempts`:
+no attempt at all, or its latest attempt pending under a claim that has lapsed), then the message is read as the list below reads it, with its deliveries as they stand, under the send's own `201` and `Idempotency-Replayed: ?1`.
+It is answered from the database before the listener is read, so a repeat never fails because the listener is down;
+a different request under the key is `422 KEY_REUSED`.
+`GET
+/api/v1/agents/{session_id}/messages` returns that session's issue-less and issue-anchored targeted roots:
 the 50 whose thread moved last, plus every conversation holding a reply the caller has not read, in one activity order (`greatest(root.created_at, newest reply)`), so the window always covers what `unread_replies` counts.
 `unread_replies` and the window's unread term share one definition, `unreadDirectRepliesCTE` (`api/unread_replies.go`), which both queries build on:
 the count is its rows per session and the window is the 50 most active union its roots.
@@ -2807,7 +3155,7 @@ A thread on an issue follows the issue's rule, exactly as `GET /api/v1/issues/{k
 An issue-less thread is a direct conversation:
 a human reads any of them, and a bearer names its session in `?session=` (400 `SESSION_REQUIRED` without it) and reads only one that session is in, whose root targets `session:<id>` or where it authored a reply; any other is 403 `THREAD_FORBIDDEN`.
 The session is the caller's own claim, like `actor` on a write, so this keeps a session from reading another session's direct conversation by mistake and is not an authorization boundary.
-Direct-conversation text also reaches every authenticated caller through `GET /api/v1/events`; nothing in Dispatch restricts it by session.
+Direct-conversation text also reaches every authenticated caller through that caller's `events` view on `/ws/live`; nothing in Dispatch restricts it by session.
 The command sends the host's session id.
 
 Messages thread: `in_reply_to` names a message in the same conversation - a message of the same issue, or, for `POST /api/v1/agents/{session_id}/messages`, an issue-less message whose thread root targets that same session (400 `MESSAGE_INPUT` otherwise) - and the reply's event and delivery frame carry `reply_body`, the parent's first 160 characters.
@@ -2833,33 +3181,33 @@ kept on a resume; null on a row from before migration 0054), and at most one att
 the session it went to took it as its user's own turn, through `POST /api/v1/messages/{id}/deliveries/{attempt}/accept` (its conditions are that route's row in `packages/envoy/cmd/dispatch/AGENTS.md`, whose requester checks read `requested_by`).
 What a session does with the answer is `packages/pi-envoy/AGENTS.md`'s.
 
-A human reaches many sessions at once with `POST /api/v1/broadcasts` `{body, delivery, session_ids, idempotency_key}`.
+A human reaches many sessions at once with `POST /api/v1/broadcasts` `{body, delivery, session_ids}`.
 A broadcast is a grouping over the targeted messages above, not a second delivery mechanism:
 one row in `broadcasts` plus one issue-less message per recipient carrying its `broadcast_id`, all in one transaction, then the ordinary `deliverMessage` path per recipient - so each recipient's attempts, retries and replies are exactly a single targeted message's.
 Recipients are judged against one listener read:
 a selected session that is not live, or does not advertise the chosen mode, is excluded before anything is written and named in the response's `excluded`, never switched to another mode (the mode is part of what the sender said).
-Exclusions are not stored; a send with no reachable recipient is `400 BROADCAST_EMPTY` and writes nothing.
-The send answers 201 as soon as the messages are committed and delivers behind the request, four recipients at a time, each worker on its own `store.WithTransactionTracking` context derived from the server's lifetime (the pool's one-connection guard is per context, and a request's context would strand every recipient after the one in flight when a tab closes or a deploy shuts the server down).
+Exclusions are stored only with a keyed send's recovery point (below); a send with no reachable recipient is `400 BROADCAST_EMPTY` and writes nothing.
+The send answers 201 as soon as the messages are committed and delivers behind the request, `broadcastDeliveryWorkers` (four) recipients at a time, on a context detached from the request's (`context.WithoutCancel`), each worker with a tracking mark of its own (`store.ForConcurrentRead`:
+the pool's one-connection guard is per context, so workers sharing one would refuse each other a connection):
+a fan-out to many sessions, each bounded by the listener client's receipt timeout, is too long to hold an answer for.
+A single send to one session answers once its own attempt has settled instead (`createStoredMessage`), which keeps a person's sends to one session in the order they pressed them;
+a broadcast is not ordered against a later single send to one of its recipients.
+That delivery is counted in the server's background wait (`detached`, which `waitBackground` waits for before the pool closes), so a shutdown lets it finish instead of ending it with the lifetime `api.Register` takes, which SIGTERM cancels before the HTTP drain.
+A process killed before every recipient settled leaves them owed, for the delivery sweep, or a repeat (below), to resume.
 Each recipient starts with attempt 1, opened pending and unclaimed in the same transaction as its message, which a delivery worker then claims and settles.
 `GET /api/v1/broadcasts` lists the newest sends with recipient and reply counts, and `GET /api/v1/broadcasts/{id}` reads every recipient's message, attempts and replies in the order the send named them;
 all three routes are human-only, like the one-session route they are built from.
 
-Every send carries an `idempotency_key` naming that one send (LEGION-446):
-letters, digits, `.`, `_`, `:` and `-`, at most 128 characters; a missing or malformed key is `400 BROADCAST_INPUT`, a longer one `400 CAP_EXCEEDED`.
-A key belongs to the human who sent it: its `broadcast_idempotency_keys` row (migration `0055`) is keyed on `(login, idempotency_key)`, `login` being `model.CanonicalLogin`, so one person's key is never another's and `Alice` is `alice`.
-The row also stores a SHA-256 of what the send asked for - its body, mode and requested sessions in order, after validation trims and de-duplicates them.
-A repeat (the same human, key and request) is answered `200` with the broadcast the key made, in the create response's shape and read as `GET /api/v1/broadcasts/{id}` reads it, its `excluded` recomputed as the requested sessions it has no recipient for, each with the reason `excluded by the original send`, since the original reasons are not stored.
-A reuse for a different request is `409 BROADCAST_KEY_REUSED`, whose text says the request was not sent and whose body names the broadcast that used the key as `broadcast_id`; nothing is written.
-The key is looked up before the listener's registry is read, so a retry of a send that landed is answered even while the listener is down.
-Two requests carrying one key at once both miss that lookup and reach the write together:
-the key row is inserted in the broadcast's own transaction, so the second waits on the first's uncommitted row, is refused it (`23505`) once the first commits, rolls back everything it wrote and answers the first's broadcast - one broadcast, one frame per recipient.
-A replay reads the broadcast as it stands:
-a recipient whose attempt a process death stranded pending before delivery comes back pending, for the broadcast view's same-mode retry to resume, so a `200` says the broadcast exists, not that delivery is under way.
-A key is recognised for as long as its broadcast exists; there is no window, and a broadcast from before `0055` has no key.
+A broadcast is keyed by its `Idempotency-Key` header like every write ("Keyed Dispatch writes" above);
+the body's `idempotency_key` of LEGION-446 and its `broadcast_idempotency_keys` table are gone from the route.
+The send commits the broadcast and its exclusions, with their reasons, as the key's recovery point (`broadcastRecovery`) in the broadcast's own transaction, so a repeat under the key is answered by `replayBroadcast` however the first request ended, even while the listener is down:
+the broadcast is read as `GET /api/v1/broadcasts/{id}` reads it, every recipient's attempts as they stand, with the send's own `excluded`, under the send's own `201` and `Idempotency-Replayed: ?1`, answered at once as the send was, while `sendOwedBroadcastRecipients` puts every recipient the broadcast still owes on its way behind the answer (`owedMessageAttempts`, the rule a single send's repeat, `sendHeldMessageOn`, also reads:
+the first attempt of a message with none, or its latest attempt when that is pending under a claim that has lapsed).
+A different request under the key is `422 KEY_REUSED`, and nothing is written.
 
-The issue stream retains the targeted `message.created`, `message.delivery`, and `message.answered` events for the Conversation card.
+The event feed retains the targeted `message.created`, `message.delivery`, and `message.answered` events for the Conversation card.
 Issue-less targeted-message events have no issue owner, use sequence `0`, and reach their recipient through the synchronous listener send;
-the outbox marks them published without republishing an agent-topic envelope, while the browser receives them through the server's SSE stream.
+the outbox marks them published without republishing an agent-topic envelope, while every authenticated browser receives them through its live socket's events subscription.
 They are excluded from global `/search` and issue reference closures.
 Targeted issue `message.created` skips bound-route and author fan-out because the synchronous listener call records the sent or failed attempt instead of blind republishing.
 
@@ -3055,17 +3403,26 @@ an issuer whose key set cannot be retrieved still lands there, because go-oidc f
   with no window open the version holds a row with no actor and no due time, and the next version that names a person sends one notice covering both.
 
 - Dispatch project events use `notifications.dispatch.project.<PROJECT>.<type>` and are retained in JetStream.
-  They have no issue route; project, repository-setting, and user-interface state consumers refresh from the event stream.
+  They have no issue route; project, repository-setting, and user-interface state consumers refresh through the live socket's events subscription.
 
 - Direct agent topics use `notifications.agent.<session_id>`.
 
 - Role topics use `notifications.role.<role>` and are normally published to, rather than subscribed to by role holders.
 
 - An ad-hoc topic is any other `notifications.` topic an agent names, such as `notifications.team.deploy-squad`.
-  `/v1/messages/publish` sends it over core NATS (`bus.usesCoreTransport`, which takes every topic `ENVOY_NOTIFICATIONS` does not capture), so it is live:
-  it reaches every session subscribed to it at that moment, once, and is neither retained nor retried.
-  A session with a NATS connection of its own (pi-envoy, claude-envoy) receives it directly.
-  A session the listener delivers to on its serve port (the OpenCode plugin) receives it through its machine's listener when that listener runs with `ENVOY_SUBSCRIBE_ALL_TOPICS=1`:
+  `/v1/messages/publish` sends it over core NATS (`bus.UsesCoreTransport`, which takes every topic `ENVOY_NOTIFICATIONS` does not capture), so the topic itself is live:
+  it reaches every session subscribed to it at that moment, once, and is not retained there.
+  The route then confirms it with each registered self-subscribed session:
+  it forwards the same envelope, `event_id` and `dedupe_key` unchanged, with a receipt to the agent subject of every session whose registered interests match the topic on any machine (`store.Registry.MatchAll`), whose session entry is live and `self_subscribed`, other than the `source_session`, retrying each as a role message is retried, and answers once each confirmed, or 504 naming each that did not (the Listener API's `/v1/messages/publish` row).
+  Only a receipt that arrived through the route counts:
+  with the live topics lane on, the lane receives the route's own publish and records each self-subscribed session on its machine whose push it skipped in the delivery handlers' dedupe cache, so the route reads a record of its own (`listenerDeps.confirmed`) instead.
+  A topic whose own publish did not reach NATS, the window ending first or the publish failing at once for any reason but a refusal, is answered 504 `publish_failed` and forwarded to no one, so a topic with no recipient is answered 200 only once it was published.
+  A session that stopped without unregistering stays registered until its registration lapses (5 minutes) and is named in every `not_confirmed` 504 in that time;
+  it is not a failed delivery to the others.
+  A session with a NATS connection of its own (pi-envoy, claude-envoy) receives it directly and through the forward, and drops the second copy by its `event_id`;
+  the forward's copy is stored on its agent subject (once, by `Nats-Msg-Id`), which is how its replay recovers one it missed while disconnected.
+  A session the listener delivers to on its serve port (the OpenCode plugin) is not confirmed:
+  it holds no NATS connection to answer a receipt, and receives the topic through its machine's listener when that listener runs with `ENVOY_SUBSCRIBE_ALL_TOPICS=1`:
   the live topics lane (`openLiveTopics`, `liveDeliveryHandler`) is a second bus client holding one core queue subscription on `notifications.>` in the group `envoy-listener-live-<machine id>` (`bus.ListenerLiveQueue`), which leaves a subject under `notifications.role.` to the role lane and a subject the stream captures (`bus.StreamCaptures`) to the durable, and fans every other topic out to the sessions on its machine subscribed to it, by the same `prompt_async`.
   A refused delivery publishes its exception over core NATS, which the lane reads back and fans out like any topic;
   the exceptions guard keeps it from raising a second one.
@@ -3965,7 +4322,7 @@ the table starts empty, so the first deploy restores nothing; and a pod whose re
 Tests: `cd packages/envoy && go vet ./... && go test ./internal/broker/... ./cmd/broker/...
 ./cmd/agent-secrets/... ./cmd/agent-secrets-devrelay/... ./cmd/dev-oidc-issuer/...`.
 The Postgres-backed tests skip, rather than fail, when `BROKER_TEST_DATABASE_URL` is unset (`t.Skip`, e.g. `internal/broker/store`, `internal/broker/requests`);
-`packages/envoy/scripts/dev-postgres.sh` starts a local Postgres for them, the same script `cmd/dispatch/README.md` documents for its own Postgres-backed tests, and CI's `envoy-go` job (`.github/workflows/envoy-and-contracts.yaml`) points `BROKER_TEST_DATABASE_URL` at the same server as `DISPATCH_TEST_DATABASE_URL`.
+`packages/envoy/scripts/dev-postgres.sh` starts a local Postgres for them, the same script `cmd/dispatch/README.md` documents for its own Postgres-backed tests, and CI's `envoy-go` job (in `.github/workflows/ci.yaml`) points `BROKER_TEST_DATABASE_URL` at the same server as `DISPATCH_TEST_DATABASE_URL`.
 `storetest.URL` stays the helper for everything ordinary: a migrated schema of its own per test, cheaper than a database and isolating rows just as well.
 `storetest.DatabaseURL` hands out a fresh, unmigrated database instead, for the two things that are per database rather than per schema
 — a `LISTEN`/`NOTIFY` channel name, so a test on a schema would hear a sibling test's notifications on the one channel constant, and the migration advisory lock, which `Migrate` takes database-wide.
@@ -3973,7 +4330,7 @@ The Postgres-backed tests skip, rather than fail, when `BROKER_TEST_DATABASE_URL
 one refresh token and one device code each raced against both processes, both migrating one empty database at once, a retag one process is told to reread being enforced by the other through the fan-out, that fan-out spending no rate-limit token on the pod it reaches, and a signalled process failing readiness while it serves a request out past the old ten-second shutdown budget.
 CI's `broker-multiprocess` job runs them
 — `go test -tags multiprocess -count=1 -timeout 20m ./cmd/broker` in `packages/envoy` — in a job of its own, since each row waits out tens of seconds and `envoy-go`'s unit step runs under go test's default ten-minute package deadline.
-The job runs only when a file its `broker_multiprocess` filter in `.github/workflows/envoy-and-contracts.yaml` names changes;
+The job runs only when a file its `broker_multiprocess` filter in `.github/workflows/ci.yaml` names changes;
 see Critical conventions for what keeps that filter current.
 Every client-facing lane's own test mounts the real broker handlers (`api.Register` with real, Postgres-backed services) rather than a hand-rolled fake standing in for broker behavior
 — `internal/broker/api/api_test.go`, `internal/broker/e2e/e2e_test.go`, and `cmd/agent-secrets-devrelay/main_test.go` all wire real `enroll.Service`/`requests.Machine`/`machine.Service` behind an `httptest.Server`;
@@ -4042,6 +4399,6 @@ Each wraps its `bin/` in one top-level `agent-secrets/` directory
 a bare `bin/...` top level would itself be the directory mise strips.
 `release_build` builds them with the tag it decided stamped in, and `release_publish` attests every `agent-secrets-*.tar.gz`;
 the `build` matrix job builds only `legion-envoy-<arch>.tar.gz` (envoy-listener alone, with its `THIRD_PARTY_NOTICES`).
-Each `agent-secrets` tarball also holds `agent-secrets/THIRD_PARTY_NOTICES`, the licenses of the Go modules its binaries compile in, and `pr-and-main.yaml` writes those notices for every archive and compiles the darwin client on each pull request.
+Each `agent-secrets` tarball also holds `agent-secrets/THIRD_PARTY_NOTICES`, the licenses of the Go modules its binaries compile in, and the lint job of `ci.yaml` writes those notices for every archive and compiles the darwin client on each pull request whose change its `go_notices` filter matches.
 A host installs both binaries from this release (through the operator's dotfiles, under the broker design's devbox-enrollment plan), and a laptop the CLI.
 
