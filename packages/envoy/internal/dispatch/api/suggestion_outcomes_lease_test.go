@@ -11,6 +11,7 @@ import (
 
 	"github.com/sjawhar/envoy/internal/dispatch/store"
 	"github.com/sjawhar/envoy/internal/dispatch/store/storetest"
+	"github.com/sjawhar/envoy/internal/logtest"
 )
 
 // sweepLeaseSchedule is the pace both runners keep: a short gap, so a held lease is retried at
@@ -42,9 +43,7 @@ func countLeaseLines(logs *storetest.LockedLog, message, lease string) int {
 func captureSweepLogs(t *testing.T) *storetest.LockedLog {
 	t.Helper()
 	logs := &storetest.LockedLog{}
-	previous := slog.Default()
-	slog.SetDefault(slog.New(slog.NewTextHandler(logs, nil)))
-	t.Cleanup(func() { slog.SetDefault(previous) })
+	logtest.SetDefault(t, slog.NewTextHandler(logs, nil))
 	return logs
 }
 

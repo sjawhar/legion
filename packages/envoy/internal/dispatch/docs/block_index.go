@@ -58,6 +58,12 @@ type BlockIndexTick struct {
 // index with the block grammar (block_grammar_owed, migrations 0123-0126), which a build older
 // than the block grammar indexes without. One tick per lease, at start, then every blockIndexStep
 // while a batch is full and every BlockIndexReconcileInterval once none is, until ctx ends.
+//
+// The ticks are duty.RunLeasedAfterEachPass's, each one the wait the pass before it asked for after
+// that pass returned, and so is the period each runs under: that wait, blockIndexStep while a batch
+// is full and the full interval once none is, so a tick inside it is one some process already
+// made. A tick whose lease another process holds, or whose period that process has already served,
+// waits the full interval: that process is doing this work.
 func (s *Service) RunBlockIndexReconciliation(ctx context.Context, leases duty.Leases) {
 	ctx = store.WithTransactionTracking(ctx)
 	var cursor string
@@ -65,23 +71,11 @@ func (s *Service) RunBlockIndexReconciliation(ctx context.Context, leases duty.L
 	// counts (an open issue's document whose live text stays ahead, skipped every tick) logs nothing.
 	var logged BlockIndexTick
 	liveAhead := liveAheadDocuments{}
-	// period is this loop's own interval at this moment, the wait the last tick asked for, as
-	// in RunReferenceExcerptReconciliation: a tick inside it is one some process already made.
-	period := BlockIndexReconcileInterval
-	for {
-		// A tick whose lease another process holds, or whose period that process has already
-		// served, waits the full interval: that process is doing this work.
-		wait := BlockIndexReconcileInterval
-		duty.Exclusive(ctx, leases, blockIndexLease, period, func(ctx context.Context) {
-			wait, cursor = s.blockIndexTick(ctx, cursor, liveAhead, &logged)
-		})
-		period = wait
-		select {
-		case <-ctx.Done():
-			return
-		case <-time.After(wait):
-		}
-	}
+	duty.RunLeasedAfterEachPass(ctx, leases, blockIndexLease, BlockIndexReconcileInterval, func(ctx context.Context) time.Duration {
+		var wait time.Duration
+		wait, cursor = s.blockIndexTick(ctx, cursor, liveAhead, &logged)
+		return wait
+	})
 }
 
 // blockIndexTick runs one tick from cursor, logs what it did unless it indexed nothing and left the

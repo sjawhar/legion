@@ -268,7 +268,7 @@ func eventually(t *testing.T, fn func() bool, msg string) {
 // subject is Enroll/Revoke's request shape and error handling.
 func withCredential(t *testing.T, c *Client, id string) {
 	t.Helper()
-	c.cred.Store(&credential{key: mustTestKey(t), id: id, expires: time.Now().Add(time.Hour)})
+	c.state.Store(&loginState{cred: &credential{key: mustTestKey(t), id: id, expires: time.Now().Add(time.Hour)}})
 }
 
 func newIssuedClient(t *testing.T) (*fakeBroker, *Client) {
@@ -396,8 +396,8 @@ func TestALoginTheBrokerRefusesIsFailedAndAsksNoOne(t *testing.T) {
 		if !errors.As(err, &api) || api.Code != code {
 			t.Fatalf("login %d = %v, want the broker's %s", i, err, code)
 		}
-		if got := c.LoginStatus().State; got != "failed" || c.cred.Load() != nil {
-			t.Fatalf("after login %d: state %q, credential %v; want failed and none", i, got, c.cred.Load() != nil)
+		if got := c.LoginStatus().State; got != "failed" || c.snapshot().cred != nil {
+			t.Fatalf("after login %d: state %q, credential %v; want failed and none", i, got, c.snapshot().cred != nil)
 		}
 		if _, err := c.Enroll(context.Background(), podEnrollment); !isNoCredential(err, code) {
 			t.Fatalf("Enroll after login %d = %v, want NO_MACHINE_CREDENTIAL naming %s", i, err, code)
@@ -444,7 +444,7 @@ func TestARefusedRenewalLeavesTheHeldCredentialIssued(t *testing.T) {
 	broker.refuseLogins = []enrollAnswer{{http.StatusTooManyRequests, `{"code":"RATE_LIMITED","error":"slow down"}`}}
 	broker.mu.Unlock()
 	eventually(t, func() bool { return broker.loginCount() == 2 }, "the renewal to reach the broker")
-	eventually(t, func() bool { return c.failure.Load() != nil }, "the refused renewal to be recorded")
+	eventually(t, func() bool { return c.snapshot().failure != "" }, "the refused renewal to be recorded")
 	if got := c.LoginStatus().State; got != "issued" {
 		t.Fatalf("state after a refused renewal under a live credential = %q, want issued", got)
 	}
@@ -506,7 +506,7 @@ func TestARefusedProofLogsInAgain(t *testing.T) {
 	if _, err := c.Enroll(ctx, podEnrollment); !isNoCredential(err, "refused") {
 		t.Fatalf("Enroll refused by the broker = %v, want NO_MACHINE_CREDENTIAL", err)
 	}
-	eventually(t, func() bool { return broker.loginCount() == 2 && c.cred.Load() != nil }, "the login loop to log in again")
+	eventually(t, func() bool { return broker.loginCount() == 2 && c.snapshot().cred != nil }, "the login loop to log in again")
 	if got, err := c.Enroll(ctx, podEnrollment); err != nil || got.ID != "enr-2" {
 		t.Fatalf("Enroll after logging in again = %+v, %v; want enr-2", got, err)
 	}
@@ -529,7 +529,7 @@ func TestTheLoginLoopRenewsHalfwayToExpiry(t *testing.T) {
 	if n := broker.loginCount(); n < 5 {
 		t.Fatalf("%d logins in a second of 200 ms credentials, want at least five", n)
 	}
-	if cred := c.cred.Load(); cred == nil || !cred.expires.After(time.Now()) {
+	if cred := c.snapshot().cred; cred == nil || !cred.expires.After(time.Now()) {
 		t.Fatal("no live credential after renewals, want one")
 	}
 	if got := strings.Count(logged.String(), "logged in with the daemon's ServiceAccount token"); got != broker.loginCount() && got != broker.loginCount()-1 {

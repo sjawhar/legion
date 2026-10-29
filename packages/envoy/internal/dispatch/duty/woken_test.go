@@ -60,7 +60,7 @@ func wantPassesAt(t *testing.T, passes *passClock, start time.Time, offsets ...t
 
 // noLease is an exclusive the rows without a lease never call.
 func noLease(t *testing.T) exclusiveFunc {
-	return func(context.Context, Leases, string, time.Duration, func(context.Context)) bool {
+	return func(context.Context, Leases, string, time.Time, time.Duration, func(context.Context)) bool {
 		t.Error("a loop with no lease asked for one")
 		return false
 	}
@@ -221,19 +221,21 @@ func TestADueTimeWaitsOutTheMinimumGap(t *testing.T) {
 
 // fakeLease is Exclusive's shape over a lease the test controls: it refuses the first refusals
 // attempts, as a lease held by another process (or one that could not be taken) does, and runs the
-// pass on every attempt after. It records each attempt's time, name and period.
+// pass on every attempt after. It records each attempt's time, name, due time and period.
 type fakeLease struct {
 	mu       sync.Mutex
 	refusals int
 	attempts []time.Time
 	names    []string
+	dues     []time.Time
 	periods  []time.Duration
 }
 
-func (f *fakeLease) exclusive(ctx context.Context, _ Leases, name string, period time.Duration, pass func(context.Context)) bool {
+func (f *fakeLease) exclusive(ctx context.Context, _ Leases, name string, due time.Time, period time.Duration, pass func(context.Context)) bool {
 	f.mu.Lock()
 	f.attempts = append(f.attempts, time.Now())
 	f.names = append(f.names, name)
+	f.dues = append(f.dues, due)
 	f.periods = append(f.periods, period)
 	refused := len(f.attempts) <= f.refusals
 	f.mu.Unlock()
@@ -247,7 +249,7 @@ func (f *fakeLease) exclusive(ctx context.Context, _ Leases, name string, period
 // A pass refused its lease is retried every MinGap, plus up to a tenth again, until a pass of
 // its own runs, with no wake: the process holding the lease may have read before the change that
 // woke this loop. Once it has run, the loop is idle again. Every attempt goes through the lease
-// named for the loop, with no period.
+// named for the loop, with no period and no due time.
 func TestARefusedLeaseIsRetriedUntilAPassOfItsOwnRuns(t *testing.T) {
 	const minGap = 2 * time.Second
 	fixJitter(t, func(n time.Duration) time.Duration { return n - 1 })
@@ -275,8 +277,8 @@ func TestARefusedLeaseIsRetriedUntilAPassOfItsOwnRuns(t *testing.T) {
 			}
 		}
 		for i := range lease.attempts {
-			if lease.names[i] != "suggestion-outcomes" || lease.periods[i] != 0 {
-				t.Errorf("attempt %d took lease %q with period %v, want suggestion-outcomes with none", i+1, lease.names[i], lease.periods[i])
+			if lease.names[i] != "suggestion-outcomes" || lease.periods[i] != 0 || !lease.dues[i].IsZero() {
+				t.Errorf("attempt %d took lease %q with period %v due %v, want suggestion-outcomes with neither", i+1, lease.names[i], lease.periods[i], lease.dues[i])
 			}
 		}
 		wantPassesAt(t, &passes, booted, lease.attempts[3].Sub(booted))
@@ -326,7 +328,7 @@ func TestAWokenLoopReturnsAtOnceWhenItsContextEnds(t *testing.T) {
 		synctest.Test(t, func(t *testing.T) {
 			ctx, cancel := context.WithCancel(context.Background())
 			attempts := 0
-			cutShort := func(context.Context, Leases, string, time.Duration, func(context.Context)) bool {
+			cutShort := func(context.Context, Leases, string, time.Time, time.Duration, func(context.Context)) bool {
 				attempts++
 				cancel()
 				return false

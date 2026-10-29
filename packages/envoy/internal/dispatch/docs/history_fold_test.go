@@ -14,7 +14,7 @@ import (
 	"github.com/reearth/ygo/crdt"
 	"github.com/reearth/ygo/persistence"
 
-	"github.com/sjawhar/envoy/internal/dispatch/docs/docstest"
+	"github.com/sjawhar/envoy/internal/dispatch/docs/crafted"
 	"github.com/sjawhar/envoy/internal/dispatch/pmdoc"
 	"github.com/sjawhar/envoy/internal/dispatch/store"
 	"github.com/sjawhar/envoy/internal/dispatch/store/storetest"
@@ -522,7 +522,7 @@ func documentHistory(t *testing.T, initial, other []byte) [][]byte {
 	if err := crdt.ApplyUpdateV1(browser, initial, nil); err != nil {
 		t.Fatalf("open the second client: %v", err)
 	}
-	browserText := docstest.FirstText(browser.GetXmlFragment(fragmentName))
+	browserText := crafted.FirstText(browser.GetXmlFragment(fragmentName))
 
 	history := [][]byte{initial}
 	step := func(what string, change func(*crdt.Transaction) error) {

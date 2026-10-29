@@ -149,6 +149,15 @@ type Service struct {
 	// afterSettleRead runs after settleRoom has read the document and before it stamps block ids
 	// into the room. Nil outside tests; tests use it to edit the room in that window.
 	afterSettleRead func(room string)
+	// afterSettleTreeRead runs as soon as settleRoom has read the tree it settles
+	// (readSettlementTree), before anything renders or changes that tree. Nil outside tests; tests
+	// use it to record the tree as read.
+	afterSettleTreeRead func(room string, read *pmdoc.Node)
+	// beforeSettleVersionRender runs once a settlement has decided whether its version takes the
+	// rendering it made of read, the tree it read (reused), or renders the tree it versions again,
+	// and before either. Nil outside tests; tests use it to require read unchanged since
+	// afterSettleTreeRead whenever its rendering is reused.
+	beforeSettleVersionRender func(room string, read *pmdoc.Node, reused bool)
 	// afterSettleReconcile runs after settleRoom has reconciled the document's ask blocks with
 	// their rows and before it writes their repairs into the room. Nil outside tests; tests use it
 	// to edit the room in that window.
@@ -1063,12 +1072,18 @@ func (s *Service) scheduleSettleAfterAppend(room string) {
 }
 
 func (s *Service) retrySettleSoon(room string) {
-	if s.stopping.Load() || s.shuttingDown(room) {
+	s.settleAfter(room, 10*time.Millisecond)
+}
+
+// settleAfter arms the document's settlement to run after delay, replacing the timer armed for it,
+// unless the service or the room is shutting down.
+func (s *Service) settleAfter(artifactID string, delay time.Duration) {
+	if s.stopping.Load() || s.shuttingDown(artifactID) {
 		return
 	}
-	state := s.lockState(room)
-	defer s.unlockState(room, state)
-	s.scheduleSettleAfterLocked(room, state, 10*time.Millisecond)
+	state := s.lockState(artifactID)
+	defer s.unlockState(artifactID, state)
+	s.scheduleSettleAfterLocked(artifactID, state, delay)
 }
 
 // nextRoomGeneration is the generation a state moves to when something invalidates what a
@@ -1493,6 +1508,9 @@ func (s *Service) settleRoomWithin(parent context.Context, room string, generati
 		}
 		return stoppedShort(err)
 	}
+	if s.afterSettleTreeRead != nil {
+		s.afterSettleTreeRead(room, read)
+	}
 
 	// What the document renders before its closure runs. The closure's own update is classified
 	// against it (closureChangedMarkdown), as a transactional live write classifies its own
@@ -1662,7 +1680,11 @@ func (s *Service) settleRoomWithin(parent context.Context, room string, generati
 	// (changedTree). versioned is another tree once a stamp replaced the read or a write read the
 	// document again. So the version takes the rendering of the read when it is that tree, unchanged.
 	markdown, offsets, err := beforeMarkdown, beforeOffsets, beforeRenderErr
-	if versioned != read || reconciliation.changedTree() {
+	reused := versioned == read && !reconciliation.changedTree()
+	if s.beforeSettleVersionRender != nil {
+		s.beforeSettleVersionRender(room, read, reused)
+	}
+	if !reused {
 		markdown, offsets, err = renderTreeWithOffsets(versioned)
 	}
 	if err != nil {
@@ -2137,6 +2159,15 @@ func referenceSource(event model.Event, artifactID string) (string, string, bool
 // ScheduleSettlement queues the document closer after its caller's transaction commits.
 func (s *Service) ScheduleSettlement(artifactID string) {
 	s.scheduleSettle(artifactID)
+}
+
+// SettleNow arms the document's settlement to run at once rather than at the end of the settle
+// window, as a settlement retry is armed (retrySettleSoon): it replaces the timer a write armed, and
+// a settlement with nothing owed writes nothing. Nothing in production calls it. It exists for
+// tests that hold a write unsettled across a window wide enough to land another write in it: once
+// that write has landed, the test settles the document now instead of waiting the window out.
+func (s *Service) SettleNow(artifactID string) {
+	s.settleAfter(artifactID, 0)
 }
 
 type BlockIDBackfill struct {

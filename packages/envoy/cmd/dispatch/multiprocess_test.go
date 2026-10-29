@@ -58,6 +58,7 @@ import (
 	"github.com/sjawhar/envoy/internal/dispatch/startup"
 	"github.com/sjawhar/envoy/internal/dispatch/store"
 	"github.com/sjawhar/envoy/internal/dispatch/store/storetest"
+	"github.com/sjawhar/envoy/internal/logtest"
 	"github.com/sjawhar/envoy/internal/oidc/oidctest"
 	"github.com/sjawhar/envoy/internal/testnats"
 )
@@ -1108,9 +1109,7 @@ func durableText(t *testing.T, pair *dispatchPair, artifactID string) string {
 func captureDefaultLog(t *testing.T) *storetest.LockedLog {
 	t.Helper()
 	logs := &storetest.LockedLog{}
-	previous := slog.Default()
-	slog.SetDefault(slog.New(slog.NewTextHandler(logs, nil)))
-	t.Cleanup(func() { slog.SetDefault(previous) })
+	logtest.SetDefault(t, slog.NewTextHandler(logs, nil))
 	return logs
 }
 
@@ -1210,7 +1209,7 @@ func lockTables(t *testing.T, database *store.Store, mode string, tables ...stri
 // read before whatever woke it, so after the release each process runs at least one pass and no
 // count is held to one. suggestion-outcomes, a woken loop too, has a row of its own below. The
 // other five are not observable, and this row says so rather than pretending:
-// document-compaction's ticker is 24 h; issue-ask-repair's first leased pass is one
+// document-compaction's interval is 24 h; issue-ask-repair's first leased pass is one
 // IssueAskRepairInterval (10 min) in, the boot's repair taking no lease; architecture-import's
 // and delivery-reconcile's first pass is jittered uniformly over SyncInterval/ReconcileInterval
 // (5 min) and each process draws its own, so whether their passes ever overlap is a coin toss no
@@ -1270,7 +1269,7 @@ func TestALeasedLoopsPassesNeverOverlapAcrossBothProcesses(t *testing.T) {
 	// room for the held pass to finish and for that retry to run a pass of its own.
 	waitForLeaseInEach(t, pair, leaseRan, "reference-excerpts", 60*time.Second)
 	for _, unobserved := range []struct{ lease, why string }{
-		{"document-compaction", "its ticker is 24 h, so no pass is due inside any window a test can wait out"},
+		{"document-compaction", "its interval is 24 h, so no pass is due inside any window a test can wait out"},
 		{"issue-ask-repair", "its first leased pass is one IssueAskRepairInterval (10 min) after each process started"},
 		{"architecture-import", "its first pass is jittered over SyncInterval (5 min) and each process draws its own"},
 		{"delivery-reconcile", "its first pass is jittered over ReconcileInterval (5 min) and each process draws its own"},
@@ -1313,7 +1312,7 @@ func TestTheSuggestionOutcomeSweepNeverPassesAtOnceAcrossBothProcessesAndBothPas
 }
 
 // A rolling update starts the second process minutes after the first, and at a steady two
-// replicas each process keeps a ticker of its own: two ticks of one leased loop almost never
+// replicas each process keeps a timer of its own: two ticks of one leased loop almost never
 // overlap, because a pass is seconds and its interval is minutes. This row is that shape - the
 // second process is started only after the first has finished a pass and given the lease back -
 // and it is where "runs once overall" has to hold, not only while a pass is in flight.
@@ -1324,14 +1323,14 @@ func TestTheSuggestionOutcomeSweepNeverPassesAtOnceAcrossBothProcessesAndBothPas
 // list calls for one result", redeliver/sweep.go). So the GitHub fake's count of those listings
 // is what one sweep window cost the installation's rate limit, whichever process paid it.
 //
-// A period is a bucket of the database's clock (duty.Exclusive, migration 0115), so both
+// A period is a bucket of the tick's due time (duty.Exclusive, migration 0115), so both
 // processes are started inside one bucket on purpose: a second process whose first tick lands
 // past a bucket boundary is entitled to sweep, and this row is about the one that lands inside
 // the bucket its peer has already served. waitOutABucketBoundary is what keeps which of the two
 // this run gets from being luck.
 func TestALeasedLoopRunsOnceAcrossAStaggeredStart(t *testing.T) {
 	pair := newPair(t)
-	waitOutABucketBoundary(t, pair, redeliver.Interval)
+	waitOutABucketBoundary(t, redeliver.Interval)
 	fake := startGitHubFake(t)
 	// Nothing is held here: this row is about two passes that never meet, so the first one must
 	// finish and give the lease back before the second process exists.
@@ -1370,20 +1369,16 @@ func TestALeasedLoopRunsOnceAcrossAStaggeredStart(t *testing.T) {
 }
 
 // waitOutABucketBoundary returns with enough of period's current bucket left for a row to start
-// both processes and read their first ticks inside it. A period is floor(epoch / period) on the
-// database's clock, so a row that straddles a boundary watches a second process legitimately
-// sweep rather than skip; this waits the boundary out instead, on the same clock the gate reads,
-// and waits at most the margin it needs.
-func waitOutABucketBoundary(t *testing.T, pair *dispatchPair, period time.Duration) {
+// both processes and read their first ticks inside it. A period is floor(epoch / period) of a
+// tick's due time, on the clock of the process that ticks, so a row that straddles a boundary
+// watches a second process legitimately sweep rather than skip; this waits the boundary out
+// instead, on the clock both processes share with this test (one host), and waits at most the
+// margin it needs.
+func waitOutABucketBoundary(t *testing.T, period time.Duration) {
 	t.Helper()
 	// What one run of the row needs inside the bucket: two process starts and their first ticks.
 	const margin = 45 * time.Second
-	var left time.Duration
-	if err := pair.database.Pool.QueryRow(context.Background(),
-		`select make_interval(secs => $1 - mod(extract(epoch from now()), $1))`, period.Seconds(),
-	).Scan(&left); err != nil {
-		t.Fatalf("read how much of the period's bucket is left: %v", err)
-	}
+	left := period - time.Duration(time.Now().UnixNano()%period.Nanoseconds())
 	if left >= margin {
 		return
 	}

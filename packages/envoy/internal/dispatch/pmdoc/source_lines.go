@@ -162,11 +162,11 @@ func (l sourceLines) blankLines(from, until ast.Node, blank func([]byte) bool) [
 	return l.blanks(l.lineOf(startOf(from)), last, blank)
 }
 
-// blankLinesOutsideCode is blankLines less the lines a code block inside from holds: a blank line
-// of code is the code's text, which spaces nothing.
-func (l sourceLines) blankLinesOutsideCode(from, until ast.Node, blank func([]byte) bool) []int {
+// blanksOutsideCode is blanks less the lines a code block inside within holds: a blank line of code
+// is the code's text, which spaces nothing.
+func (l sourceLines) blanksOutsideCode(within ast.Node, blanks []int) []int {
 	code := map[int]bool{}
-	_ = ast.Walk(from, func(node ast.Node, entering bool) (ast.WalkStatus, error) {
+	_ = ast.Walk(within, func(node ast.Node, entering bool) (ast.WalkStatus, error) {
 		if !entering {
 			return ast.WalkContinue, nil
 		}
@@ -181,7 +181,7 @@ func (l sourceLines) blankLinesOutsideCode(from, until ast.Node, blank func([]by
 		return ast.WalkContinue, nil
 	})
 	var outside []int
-	for _, line := range l.blankLines(from, until, blank) {
+	for _, line := range blanks {
 		if !code[line] {
 			outside = append(outside, line)
 		}
@@ -254,7 +254,9 @@ func (l sourceLines) blanksThroughOuterQuotes(position, depth int) int {
 }
 
 // blankInside reports whether a line between typed block directive's opening and closing fences
-// is blank; one that runs to its parent's end runs to the next block.
+// is blank, outside the code it holds; one that runs to its parent's end runs to the next block. A
+// blank line of code is the code's text, as are the blank lines a fenced code block no fence closed
+// takes up to the next block, which space nothing (keepsBlankLinesAfter).
 func (l sourceLines) blankInside(directive *typedDirective) bool {
 	// In a quote, a line blank but for the quote's markers is blank, and a line without them ends
 	// the quote and the typed block with it.
@@ -263,9 +265,9 @@ func (l sourceLines) blankInside(directive *typedDirective) bool {
 		blank = quoteBlankLine
 	}
 	if !directive.Closed {
-		return len(l.blankLines(directive, nextBlock(directive), blank)) > 0
+		return len(l.blanksOutsideCode(directive, l.blankLines(directive, nextBlock(directive), blank))) > 0
 	}
-	return len(l.blanks(l.lineOf(directive.Pos())+1, l.lineOf(directive.closer), blank)) > 0
+	return len(l.blanksOutsideCode(directive, l.blanks(l.lineOf(directive.Pos())+1, l.lineOf(directive.closer), blank))) > 0
 }
 
 // markersOrWhitespace reports whether line holds nothing but whitespace and quote markers.

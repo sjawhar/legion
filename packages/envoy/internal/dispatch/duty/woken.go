@@ -39,19 +39,20 @@ type WokenLoop struct {
 
 // exclusiveFunc is Exclusive's signature: RunWoken passes Exclusive itself, and a test of the
 // schedule passes a lease of its own making in its place.
-type exclusiveFunc func(ctx context.Context, leases Leases, name string, period time.Duration, pass func(context.Context)) bool
+type exclusiveFunc func(ctx context.Context, leases Leases, name string, due time.Time, period time.Duration, pass func(context.Context)) bool
 
 // RunWoken runs loop until ctx is cancelled: one pass at once, then a pass on each wake and at each
 // due time a pass returned, never sooner than loop.MinGap after the previous pass started. Between
 // those it holds no timer and makes no statement, so a loop with nothing to do costs nothing - the
 // point of the shape, against RunJittered's pass every period whatever changed.
 //
-// A leased loop runs each pass under Exclusive with no period, which is mutual exclusion and
-// nothing else, and the lease name passes through Exclusive like every other loop's. An attempt
-// Exclusive reports did not run - the lease held elsewhere, or a failure to take it - is retried
-// every loop.MinGap until one runs: the other process's pass may have read before the change,
-// and a failure must neither spin nor drop the wake. A pass shutdown cut short also reports it
-// did not run, and the loop returns then rather than retrying.
+// A leased loop runs each pass under Exclusive with no period and no due time (the zero time),
+// which is mutual exclusion and nothing else: no period is read or recorded, so no tick can be
+// judged into a period another pass served. The lease name passes through Exclusive like every
+// other loop's. An attempt Exclusive reports did not run - the lease held elsewhere, or a failure
+// to take it - is retried every loop.MinGap until one runs: the other process's pass may have read
+// before the change, and a failure must neither spin nor drop the wake. A pass shutdown cut short
+// also reports it did not run, and the loop returns then rather than retrying.
 func RunWoken(ctx context.Context, loop WokenLoop) {
 	loop.run(ctx, Exclusive)
 }
@@ -125,7 +126,7 @@ func (l WokenLoop) attempt(ctx context.Context, exclusive exclusiveFunc) (next t
 	if l.Lease == "" {
 		return l.Pass(ctx), true
 	}
-	ran = exclusive(ctx, l.Leases, l.Lease, 0, func(ctx context.Context) {
+	ran = exclusive(ctx, l.Leases, l.Lease, time.Time{}, 0, func(ctx context.Context) {
 		next = l.Pass(ctx)
 	})
 	return next, ran

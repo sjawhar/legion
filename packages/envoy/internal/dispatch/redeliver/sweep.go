@@ -249,18 +249,23 @@ var jittered = duty.Jittered
 // the installation's rate limit pays for that interval however many processes sweep - a process
 // that starts in the middle of another's interval, which is what a rolling update makes, finds that
 // interval swept and skips. The period is interval itself, the loop's own tick, and not the
-// package's Interval; a wait of at least one interval always reaches the next period, so the jitter
-// never makes a process skip its own next sweep. leases is required, as it is of every leased loop
-// (cmd/dispatch exits at boot if the lease pool cannot be opened).
+// package's Interval. Each sweep's due time, the moment it hands duty.Exclusive and the one its
+// period is judged by, is the moment Run started for the first and the moment its timer fired for
+// every later one - never the moment the lease was taken, which a slow lease would carry into the
+// next period and so cost the sweep after it that period. A timer armed once the sweep before has
+// returned, for at least one interval, always reaches the next period, so neither a slow lease nor
+// the jitter ever makes a process skip its own next sweep. leases is required, as it is of every
+// leased loop (cmd/dispatch exits at boot if the lease pool cannot be opened).
 func (s *Sweeper) Run(ctx context.Context, interval time.Duration, leases duty.Leases) {
+	due := time.Now()
 	for {
-		duty.Exclusive(ctx, leases, webhookRedeliveryLease, interval, s.sweepAndReport)
+		duty.Exclusive(ctx, leases, webhookRedeliveryLease, due, interval, s.sweepAndReport)
 		timer := time.NewTimer(jittered(interval))
 		select {
 		case <-ctx.Done():
 			timer.Stop()
 			return
-		case <-timer.C:
+		case due = <-timer.C:
 		}
 	}
 }
