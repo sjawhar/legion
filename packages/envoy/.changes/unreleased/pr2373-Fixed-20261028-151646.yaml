@@ -1,0 +1,25 @@
+kind: Fixed
+body: |-
+    A bare web address or email in a Dispatch document written through the API (`dispatch doc-edit`,
+    an uploaded version) is now a link wherever a comment and the browser editor link it: after
+    punctuation (`x;https://…`, `"a@b.test"`), a letter outside ASCII, an escape or a character
+    reference, a URL after a digit too, or at a line or table cell opening with punctuation, an email
+    there linking to its `mailto:` URL. The server reads an address with both of the editor's readers,
+    the one that reads the markdown as written and the one that reads the decoded text it leaves, so
+    where the two end an address differently (`x;https://x.test/a_` leaves the `_` out,
+    `see http\://x.test/a_` keeps it) each ends it as in the editor. The stored markdown no longer
+    carries a backslash before such a URL's colon (`http\://`): the server writes one, or one before
+    an `@` or after a `www`, only where plain text would otherwise come back as a link the editor does
+    not show, such as `http://localhost`. Plain-text addresses already stored read back as links on
+    the next read, as the editor already shows them. A link's destination now has its escapes and
+    character references decoded, as the editor reads it (a stored `[a](x\_y)` links to `x_y`, and
+    `[a](x&amp;y)` to `x&y`), and a destination holding `>`, a control character or a final
+    backslash is written so it reads back. A text `<` that the markdown written after it would close
+    into an autolink, such as `&lt;javascript:void(a@b.cc)>`, is written escaped, so no write turns
+    it into one link. A text `<` that the markdown written after it would close into inline HTML
+    (`Set \<input value=me@x.cc> in the form.`) is now stored with `\<`, so the write reads back and
+    no html node replaces the text. An email address in a document stored before emails linked to
+    their `mailto:` URL keeps its old link target until the document is written again.
+time: 2026-10-28T15:16:46.931510261Z
+custom:
+    Issue: pr2373
