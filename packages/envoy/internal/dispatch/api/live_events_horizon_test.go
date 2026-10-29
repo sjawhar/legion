@@ -56,6 +56,12 @@ func holdEventWriterTransactionID(t *testing.T, database *store.Store) (release 
 	return release
 }
 
+// liveHorizonHeartbeat is the heartbeat of these tests' servers: a socket waits two heartbeats for
+// its page's pong (serveLiveSocket), and a loaded test machine can hold the test client's pong back
+// past the 200 ms a 100 ms heartbeat would allow, which ends the socket with no close frame (1006)
+// and fails the test for a reason not its own.
+const liveHorizonHeartbeat = time.Second
+
 // awaitHeartbeat waits for client's next frame, which must be a heartbeat: the socket is open and
 // alive, and nothing of the subscription has arrived, since one still waiting for its relay
 // subscription is owed nothing yet, its events_start included.
@@ -149,7 +155,7 @@ func TestAColdSubscriptionIsSentAnIdStillOpenWhenItSubscribed(t *testing.T) {
 // transaction it has nothing to do with. Once the holder ends, each is sent its events_start, whose
 // replay is complete for a since of the log as it stands, and the event committed during the hold.
 func TestAnEventsSubscriptionStaysAliveWhileTheHorizonIsHeld(t *testing.T) {
-	rig := newLiveSocketRig(t, testServerOptions{streamHeartbeat: 100 * time.Millisecond}, nil)
+	rig := newLiveSocketRig(t, testServerOptions{streamHeartbeat: liveHorizonHeartbeat}, nil)
 	issue := createInteractionIssue(t, rig.handler, "TEST", "Issue", "A spec")
 	since := eventHead(t, rig.database)
 
@@ -198,7 +204,7 @@ func TestAnEventsSubscriptionOnARelayStillOnAReplacedLogWaitsForItsReset(t *test
 
 func replacedLogConnection(t *testing.T, since *int64) {
 	t.Helper()
-	rig := newLiveSocketRig(t, testServerOptions{streamHeartbeat: 100 * time.Millisecond}, nil)
+	rig := newLiveSocketRig(t, testServerOptions{streamHeartbeat: liveHorizonHeartbeat}, nil)
 	issue := createInteractionIssue(t, rig.handler, "TEST", "Issue", "A spec")
 
 	// The first subscription starts the relay; once it has been sent an event, the relay's cursor
@@ -243,7 +249,7 @@ func replacedLogConnection(t *testing.T, since *int64) {
 // and reaches the subscription; a cursor taken under the horizon proven after the wait would cover
 // it instead.
 func TestAColdSubscriptionThatStartsTheRelayIsSentAnEventCommittedWhileItStarts(t *testing.T) {
-	rig := newLiveSocketRig(t, testServerOptions{streamHeartbeat: 100 * time.Millisecond}, nil)
+	rig := newLiveSocketRig(t, testServerOptions{streamHeartbeat: liveHorizonHeartbeat}, nil)
 	issue := createInteractionIssue(t, rig.handler, "TEST", "Issue", "A spec")
 	// A since read answers a mention only once the horizon is proven past its event, so the
 	// mention's answer is the proof this test starts from.
@@ -278,7 +284,7 @@ func TestAColdSubscriptionThatStartsTheRelayIsSentAnEventCommittedWhileItStarts(
 // an event that commits after the page's own reads and while the relay's first start waits on a
 // transaction open elsewhere on the instance must still reach it, or the page never shows it.
 func TestTheFirstColdSubscriptionOfAFreshProcessIsSentAnEventCommittedWhileTheRelayStarts(t *testing.T) {
-	rig := newLiveSocketRig(t, testServerOptions{streamHeartbeat: 100 * time.Millisecond}, nil)
+	rig := newLiveSocketRig(t, testServerOptions{streamHeartbeat: liveHorizonHeartbeat}, nil)
 	issue := createInteractionIssue(t, rig.handler, "TEST", "Issue", "A spec")
 
 	release := holdClusterTransactionID(t, 30*time.Second)
@@ -434,7 +440,7 @@ func TestTheRelaysFirstStartDoesNotReadTheWholeEventLogWhileAWriterFromBeforeBoo
 // first start must not start above it: it reads the log's gaps when it starts, and once every id is
 // final starts below the lowest one that has filled, so that event reaches the subscription, first.
 func TestTheFirstColdSubscriptionIsSentAnEventThatDrewItsIdBeforeIt(t *testing.T) {
-	rig := newLiveSocketRig(t, testServerOptions{streamHeartbeat: 100 * time.Millisecond}, nil)
+	rig := newLiveSocketRig(t, testServerOptions{streamHeartbeat: liveHorizonHeartbeat}, nil)
 	issue := createInteractionIssue(t, rig.handler, "TEST", "Issue", "A spec")
 	other := createInteractionIssue(t, rig.handler, "OTHER", "Other issue", "A spec")
 
@@ -464,7 +470,7 @@ func TestTheFirstColdSubscriptionIsSentAnEventThatDrewItsIdBeforeIt(t *testing.T
 // floor rather than only above the log's newest id (firstRelayFloor). With no write open, no event
 // id can still be open, the floor stands at the newest id and the start reads no gap at all.
 func TestTheFirstColdSubscriptionSkipsAnIdThatRolledBack(t *testing.T) {
-	rig := newLiveSocketRig(t, testServerOptions{streamHeartbeat: 100 * time.Millisecond}, nil)
+	rig := newLiveSocketRig(t, testServerOptions{streamHeartbeat: liveHorizonHeartbeat}, nil)
 	issue := createInteractionIssue(t, rig.handler, "TEST", "Issue", "A spec")
 	// An id drawn and never written, as a rolled-back write leaves one, then an event above it.
 	if _, err := rig.database.Pool.Exec(t.Context(), `select nextval('events_id_seq')`); err != nil {
@@ -498,7 +504,7 @@ func TestTheFirstColdSubscriptionSkipsAnIdThatRolledBack(t *testing.T) {
 // transaction open elsewhere on the instance, ends then too, instead of holding the shutdown until
 // that transaction ends.
 func TestShutdownEndsAnEventsSubscriptionWaitingOnTheHorizon(t *testing.T) {
-	rig := newLiveSocketRig(t, testServerOptions{streamHeartbeat: 100 * time.Millisecond}, nil)
+	rig := newLiveSocketRig(t, testServerOptions{streamHeartbeat: liveHorizonHeartbeat}, nil)
 	createInteractionIssue(t, rig.handler, "TEST", "Issue", "A spec")
 	since := eventHead(t, rig.database)
 
