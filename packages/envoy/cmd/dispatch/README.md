@@ -1219,6 +1219,14 @@ reads every minute (Keyed writes, below). It reads, refuses and rewrites no row,
 before it neither reads nor depends on them; its census answers `0`. Each build holds its table's
 writes (a `SHARE` lock) for as long as it reads the table once.
 
+Migration `0139_dpop_proofs` creates `dpop_proofs`, the record of every RFC 9449 DPoP proof
+Dispatch has accepted, and its expiry index. A caller presenting an access token the secrets
+broker issued signs a fresh proof of that token's key for each request
+(`internal/brokertoken`), and the row keyed on the proof's `jti` and normalized `htu` is what
+refuses the same proof presented twice; the maintenance pass deletes every record past its
+proof's acceptance window beside the idempotency-key sweep. It is a new table that touches no
+row, which the release before it neither reads nor writes; its census answers `0`.
+
 Migration `0009_project_artifacts` deletes malformed derived artifact references, reports their
 count, and re-derives them from source text on the next write. It aborts server boot before a
 migration record or schema change only when an existing artifact has no owning issue. On success

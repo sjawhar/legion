@@ -11,6 +11,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/sjawhar/envoy/internal/brokertoken"
 )
 
 // capturedRequest snapshots what the client actually put on the wire, so a subtest can assert
@@ -262,10 +264,10 @@ func TestARewrittenTokenFileReachesTheBrokerOnceTheCacheLapses(t *testing.T) {
 		t.Fatalf("the call inside the cache window: %v", err)
 	}
 	if captured.Auth != "Bearer first-token" {
-		t.Fatalf("Authorization = %q within %v of the read, want the cached Bearer first-token", captured.Auth, tokenCacheTTL)
+		t.Fatalf("Authorization = %q within %v of the read, want the cached Bearer first-token", captured.Auth, brokertoken.AccountTokenCacheTTL)
 	}
 
-	client.tokenTTL = 0
+	client.Account.TTL = 0
 	if _, err := client.Pending(context.Background(), "sjawhar"); err != nil {
 		t.Fatalf("the call after the cache lapsed: %v", err)
 	}

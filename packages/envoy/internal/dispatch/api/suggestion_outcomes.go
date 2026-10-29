@@ -155,7 +155,8 @@ func sweepSuggestionOutcomes(ctx context.Context, pool *store.Pool) error {
 // RunSuggestionOutcomeSweep resolves LEGION-550's write_suggestions on its own schedule, off the
 // write path entirely: whether the agent acted on a suggestion (cited it, or updated the
 // suggested issue directly) or overrode it (kept working on what it filed instead). The same pass
-// deletes every Idempotency-Key past its window (sweepRequestKeys, INFRA-258), and then sends every
+// deletes every Idempotency-Key past its window (sweepRequestKeys, INFRA-258) and every spent
+// DPoP proof past its acceptance window (store.DPoPProofs.Sweep, INFRA-264), and then sends every
 // delivery a process that died left owed (resumeDeliveries, the server's resumeOwedDeliveries;
 // INFRA-258), which need a pass once a minute across the processes as much as the suggestions do
 // and are no reason for a loop of their own. resumeDeliveries is nil where nothing delivers. It
@@ -180,6 +181,9 @@ func RunSuggestionOutcomeSweep(
 		}
 		if err := sweepRequestKeys(ctx, pool); err != nil {
 			slog.Warn("dispatch: idempotency key sweep failed", "error", err)
+		}
+		if _, err := store.NewDPoPProofs(pool).Sweep(ctx); err != nil {
+			slog.Warn("dispatch: DPoP proof sweep failed", "error", err)
 		}
 		if resumeDeliveries == nil {
 			return
