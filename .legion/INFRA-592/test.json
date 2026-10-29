@@ -2,79 +2,79 @@
   "schemaVersion": 1,
   "phase": "test",
   "issue": "INFRA-592",
-  "completed": "2026-10-29T01:08:30Z",
-  "headSha": "6410259f8a808e4ae6d16574dd2142c89cb9aa70",
+  "completed": "2026-10-29T21:27:00Z",
+  "round": 2,
+  "headSha": "8e87c0d858eaf5d64accc688fd2fbbd2b0250a4f",
   "implementerProof": {
     "verdict": "verified",
-    "how": "Re-ran the implementer's 10x step three times at the same head on INFRA-589's harness (t-head-10x-a/b/c): 137-151 reads/s served (theirs 146.7), 80,202-82,744 reads and 6,742-6,778 writes refused 429 OVERLOADED (theirs 80,925 / 6,753), read refusal p50 16-18 ms p99 116-122 ms, 0 connection failures, at most 5 goroutines waiting for a pool connection. Their 1x step (t-head-1x-a) reproduced exactly: 0 refusals, 3.99 events/s committed, 1.16 request-pool checkouts per request. Their negative control reproduced on today's main (59f2ec9b): 10x 0 reads/s served, 107,347 reads timed out at 30 s, 19,740 goroutines waiting."
+    "how": "Re-ran the implementer's steps at the current head 8e87c0d8 (their proof was at 5ad0b4f9; 8e87c0d8 merges main on top) on the same harness and seeded root (lt2). 10x three times (r2-head-10x-a/b/c): 111.5-132.4 reads/s served (theirs 107.0), 83,528-87,285 reads and 6,788-6,837 writes refused 429 OVERLOADED (theirs 88,094 / 6,849), 0 connection failures, at most 14 goroutines waiting (theirs 13). 1x: 0 reads and 0 writes refused (theirs 27 / 35, within their stated band), 3.99 events/s committed. Their negative control on main e9398987 reproduced: 5 of 107,355 reads 2xx, 19,713 goroutines waiting (theirs 4 and 19,705). Their registry-pool proof reproduced on the running binary and by the red test."
   },
-  "failed": 2,
+  "failed": 3,
   "failures": [
     {
-      "criterion": "The process exports pool size, in-use, waiting and acquire time per pool (spec acceptance line 4; the architect's check that /metrics names every pool with its waiters)",
-      "evidence": "Live scrape of 127.0.0.1:16062/metrics during t-head-1x-a lists 9 pools (requests, rooms, health, listen, leases, outbox, background, live, settlements) and no registry, while pg_stat_activity in the same stack shows a dispatch-registry connection, counted in store.ConnectionsPerProcess. The registry pool carries the heartbeat that keeps a serving process live (processes.Register opens it with pgxpool.NewWithConfig outside store.Pool, so store.Pool.Stats never reports it, though store/acquire.go poolNames lists RegistryPool); in the freeze run its heartbeat timed out 5 times and the process rejoined the registry, a wait no /metrics series showed. Red test: packages/envoy/cmd/dispatch/metrics_test.go TestAServingProcessScrapeListsTheRegistryPool (commit 'test(dispatch): red test: a serving process's /metrics lists the registry pool'). It boots a real envoy-dispatch with DISPATCH_METRICS_ADDR and requires every per-pool series with pool=\"registry\" and dispatch_db_pool_max_conns{pool=\"registry\"} 1. Fails at the head: `cd packages/envoy && DISPATCH_TEST_DATABASE_URL=postgres://... go test ./cmd/dispatch/ -run TestAServingProcessScrapeListsTheRegistryPool -count=1` -> 8 lines 'the scrape has no line beginning \"dispatch_db_pool_..._{pool=\\\"registry\\\"} \"'; TestTheMetricsEndpointListsEverySeriesForEveryOpenPool passes beside it."
+      "criterion": "Background work cannot starve requests or the reverse: background work takes connections from limits of its own (spec acceptance line 2)",
+      "evidence": "api/related_terms.go ensureSearchTermStats (from main's #2397, merged into this branch) runs refreshSearchTermStats on s.deps.Store.Pool, the request pool, on the server's lifetime, after the request that started it has answered and outside admission; its transaction rebuilds the project's whole term statistics (ts_stat over every item) and is bounded only by SearchTermStatsInterval (10 min). The periodic pass (RunSearchTermStatsRefresh) is on the background pool; this per-project refresh is not. Real binary (load stack, head build, /legion/scratch/tmp/infra-592-tester/demo.sh): a person creates a project, a psql session holds that project's totals row, the person creates the project's first issue (201 in 0.34 s); pg_stat_activity then shows `dispatch-requests|active|Lock|insert into search_term_totals ...` at 2, 5 and 10 s after the create answered. Red test: packages/envoy/internal/dispatch/api/related_terms_test.go TestARefreshTheRelatedCheckStartedHoldsNoRequestPoolConnection (commit 'test(dispatch): red test: the statistics refresh a related-item check starts holds no request-pool connection'): it holds the row from a second process's pool, creates the issue, waits until the refresh waits on the row, and requires database.Pool.Stat().AcquiredConns() == 0. `cd packages/envoy && DISPATCH_TEST_DATABASE_URL=postgres://... go test ./internal/dispatch/api/ -run TestARefreshTheRelatedCheckStartedHoldsNoRequestPoolConnection -count=1` fails 3 of 3 at the head: '1 request-pool connections taken while the statistics refresh the create started waits, want 0'. This is the likely cause of CI envoy-go's failure at 8e87c0d8 (https://github.com/sjawhar/legion/actions/runs/40938335761, job envoy-go): TestTheWriterGateAdmitsAWriteAndRefusesAPinnedRead 'pinned_connection_test.go:216: 1 request-pool connections taken after both requests answered, want 0'; that test creates an issue in a project whose check starts this refresh, then counts the same pool."
     },
     {
-      "criterion": "CI green at the tested head",
-      "evidence": "Check 'Dispatch Go suite on production's Postgres 16 (until production runs Postgres 18)' failed at 6410259f (https://github.com/sjawhar/legion/actions/runs/40783330768/job/123171994481): `panic: test timed out after 10m0s`, `FAIL github.com/sjawhar/envoy/internal/dispatch/api 600.172s` (running at the alarm: TestComputeAndPersistSuggestionsRespectsDeadlineWhenProjectLookupIsLocked, 3 s in). Every other package of that job passed. The same package took 526.9 s and 513.4 s on the last two completed main runs of that job (runs 40755822492 and 40741493684), so this branch's added api tests push the package past go test's default 10-minute limit. The check is not in main's required set (lint, typecheck, test, pr-title). At the time of reading, 'dispatch', 'envoy-go' and 'envoy-go-race' were still in progress; read as running."
+      "criterion": "CI green at the tested head: ci-filters",
+      "evidence": "Check ci-filters failed at 8e87c0d8 (job 123686573575, https://github.com/sjawhar/legion/actions/runs/40938335761/job/123686573575), and ci-ok with it: 46 errors '<job> reads <file>, which its filter <job> does not match, so a change to it skips the job', for the new files packages/envoy/internal/dispatch/admission/{admission,answer}{,_test}.go, internal/dispatch/logging/logging{,_test}.go and internal/metrics/metrics{,_test}.go, in the filters of jobs test (6), dispatch (8), dispatch-browser-multiprocess (8), docs (8), envoy-infra-go (6), listener-server-change (4), dispatch-memory (2) and dispatch-multiprocess (2). main's ci-filters is green (run 40929631815 at e9398987). The existing check .github/scripts/check-ci-filters.sh is the test that pins it; no new test written (deployment rule: no new checks of workflow files)."
+    },
+    {
+      "criterion": "CI green at the tested head: envoy-go-race",
+      "evidence": "Check envoy-go-race failed at 8e87c0d8 (job 123686573540): 'panic: test timed out after 30m0s', 'FAIL github.com/sjawhar/envoy/internal/dispatch/docs 1801.062s' (running then: subtests of TestSetAskBlockTextRefusalOfEveryBrokenBodyLeadsToAValidDecision, main's #2433); api passed in 1,227.6 s. main's same lane took 1,170.4 s (run 40917571325), 1,720.7 s (40913369816) and 1,368.5 s (40922034243, at #2433) for docs. On this pod, without the race detector, one after the other: `go test -count=1 ./internal/dispatch/docs/` took 900.6 s at the head and 820.8 s on main e9398987 (about 10% more), so the branch plausibly takes main's 1,170-1,721 s race run past the 30-minute limit [INFERENCE from the non-race ratio]."
     }
   ],
+  "architectChecks": {
+    "gate": "On a local merge of #2392's current head c3498e52 into 8e87c0d8 (commit 27f908c1 in /legion/scratch/tmp/infra-592-tester/m2392; horizon pool folded into the named pools, ConnectionsPerProcess 89, infra already 89), three 1x runs g2-1x-a/b/c refused 0 of about 10,750 reads and 0 of 720 writes each, 3.99 of 3.99 events/s committed, read p99 166-226 ms. Within the band. Build, vet, store/events/api relay tests and the metrics tests passed on the merge.",
+    "registryPool": "Confirmed: /metrics scraped from the running binary under 10x lists pool=\"registry\" with every per-pool series and dispatch_db_pool_max_conns{pool=\"registry\"} 1; the red test TestAServingProcessScrapeListsTheRegistryPool passes at the head unmodified.",
+    "apiPackageTime": "envoy-go at the head: internal/dispatch/api 499.9 s (it failed one test), within the lane's -timeout 20m; main 389.9 s, 482.9 s and 540.5 s on its last three envoy-go runs. Under race the api package took 1,227.6 s at the head (main 824-1,109 s), inside that lane's 30 m.",
+    "flake": "TestARepeatedSubReplacesAnotherKind (package internal/dispatch/api), test binaries built unloaded, run alternately head/main under CPU hogs (`yes`, not shell loops): 4 hogs, -count=10, 3 rounds: head 0/30, main 0/30; 8 hogs, -count=20, 2 rounds: head 0/40, main 1/40 ('live_subscriptions_test.go:224: the hub answers x: not within 10s'). Head 0/70, main 1/70: main's flake, not this PR's failure."
+  },
   "observations": [
-    "1x without #2392 (#2392 still open): refused reads 0 / 165 / 36 of about 10,750 (0-1.53%), writes 0 / 34 / 36 of 720 (0-5.0%). The architect (Envoy 00:10Z) set the 1x band (0-0.1% reads, 0.7-1.5% writes) on #2402 merged after #2392 and asked these shares be recorded as measured.",
-    "The gate: a local merge of #2392's code head 38ee69626 into 6410259f (commit 09aad1cf in a scratch clone; conflicts in store/pool.go, api/events.go, api/event_stream_relay.go, api/delivery_live_hub_intake.go, docs/edit_notices.go resolved by folding #2392's horizon pool into #2402's named pools as 'horizon', 2 connections, budget 88): three 1x runs t-m2392-1x-a/b/c refused 0 reads and 0 writes, 3.99 of 3.99 events/s committed, read p99 247-282 ms. #2402's forward merge after #2392 will meet the same five conflicts and the budget moving to 88.",
-    "At 2x without #2392, 20-42% of writes are refused (293-605 of 1,440) and 4.62-6.36 of 8 events/s commit; the write class's 12 slots are full for the whole step.",
-    "CLI retry: the head's DispatchClient retries at most twice (RETRIES = 2). At 10x, where 75-77% of reads are refused, it recovered 76 of 170 refused reads and 94 failed after 3 attempts; at 2x it recovered 1 of 1 refused read and 31 of 40 refused writes (the write probe used the shared agent token without an actor, so an admitted retry answered 400 ACTOR_KIND: admission recovered, the write itself was refused by its own rule). Main's client recovered none.",
-    "One write refusal in t-head-10x-a took 6,293 ms (p99 1,126 ms) although admission's wait is 1 s; the refused body drain or a GC stall is the likely cause [INFERENCE, not traced].",
-    "pg_stat_activity under 10x shows 2 dispatch-listen connections, not the 3 permanent listeners ConnectionsPerProcess counts; the budget is an upper bound, so this is within it."
+    "Two copies of my round-2 script ran at once for the first 30 minutes (a pkill that matched nothing). The run lock refused every second step, so no two load steps overlapped; the r2-head-10x-a step had two CLI probes (4 calls/s beside 600 req/s) and two pg_stat_activity samplers, and the shutdown step got a second SIGTERM about 0.2 s after the first. The main controls that ran while the merge subagent compiled (box 32-55% busy before them) were discarded and re-run clean as r3-main-2x/10x (box 2% busy).",
+    "The forward merge after #2392 has conflicts in 6 Go files (store/pool.go, api/events.go, api/live_events.go, api/event_stream_relay.go, api/delivery_live_hub_intake.go, docs/edit_notices.go) and 2 docs; one clean-merging semantic conflict (api/references.go writeHandlerError arity); the budget moves to 89; api/delivery_live_hub_test.go TestAHubGapRereadTakesNoSharedConnectionWhileTheHorizonStandsStill must name the pools it counts once Use() counts every opened pool. Resolution diff in dispatch://INFRA-592/artifact/infra-592-tester-round2-tar-gz.",
+    "One 10x run (r2-head-10x-b) had read refusal p99 1,248 ms and write refusal p99 1,757 ms; the other two 107-130 ms and 1,125-1,153 ms."
   ],
   "proof": [
     {
-      "criterion": "Requests beyond what the server can serve are refused early with a retryable status; 0 connection failures; well above the collapse at every step",
-      "surface": "INFRA-589's 2-core load reproduction (packages/envoy/loadtest), Dispatch built from the head, Postgres through the 1 ms proxy, NATS and the listener",
-      "command": "run-step.sh t-head-{1x,2x,5x,10x}-{a,b,c} with the README's step flags (1x --events 4 --sessions 400 --requests 60 ... 10x --events 40 --sessions 1000 --requests 600), LOADTEST_SRC = the workspace at the head",
-      "observed": "every refusal 429 OVERLOADED (0 DATABASE_BUSY/REQUEST_TIMEOUT/EDIT_QUEUE_FULL), 0 connect timeouts/refusals/resets/30 s timeouts and 0 other non-2xx in all 12 runs; successful reads/s 58.8-59.7 / 117.4-119.5 / 158.3-170.8 / 136.7-150.9; committed events/s 3.79-3.99 / 4.62-6.36 / 2.42-2.58 / 2.15-2.35; read refusal p50 16-44 ms; goroutines waiting for a pool connection at most 5",
-      "headSha": "6410259f8a808e4ae6d16574dd2142c89cb9aa70",
-      "negativeControl": "main@origin 59f2ec9b with the same harness, run-step.sh t-main-{1x,2x,5x,10x}: 2x 79 reads/s served with 7,323 reads and 351 writes timed out at 30 s and 2,933 goroutines waiting; 5x 0.1 reads/s; 10x 0 reads/s, 107,347 reads timed out, 19,740 goroutines waiting"
+      "criterion": "Requests beyond what the server can serve are refused early with a retryable status; 0 connection failures; well above the collapse",
+      "surface": "INFRA-589's 2-core load reproduction, Dispatch built from the head, Postgres through the 1 ms proxy, NATS and the listener",
+      "command": "LOADTEST_ROOT=lt2 run-step.sh r2-head-{1x,2x,5x,10x-a,10x-b,10x-c} with the README's step flags",
+      "observed": "every refusal 429 OVERLOADED with Retry-After: 1; 0 connection failures and 0 other non-2xx; reads/s 59.7 / 119.3 / 150.9 / 111.5-132.4; committed events/s 3.99 / 6.16 / 2.34 / 1.82-2.09; 1x 0 refusals; at most 14 goroutines waiting for a pool connection",
+      "headSha": "8e87c0d858eaf5d64accc688fd2fbbd2b0250a4f",
+      "negativeControl": "main e9398987 with the same harness (r3-main-2x, r3-main-10x): 2x 7,244 reads and 396 writes timed out at 30 s, 2,862 goroutines waiting; 10x 5 of 107,355 reads 2xx, 19,713 goroutines waiting"
     },
     {
-      "criterion": "At 1x the refused share stays within 0-0.1% of reads and 0.7-1.5% of writes on 2 cores, on #2402 merged after #2392 (the architect's gate)",
-      "surface": "the same harness, Dispatch built from a local merge of #2392 38ee69626 into 6410259f",
-      "command": "LOADTEST_SRC=<merge clone> run-step.sh t-m2392-1x-{a,b,c} --events 4 --sessions 400 --requests 60",
-      "observed": "0 of about 10,750 reads and 0 of 720 writes refused in each of the three runs; 3.99 events/s committed; read p99 247-282 ms; 0 goroutines waiting for a pool connection",
-      "headSha": "6410259f8a808e4ae6d16574dd2142c89cb9aa70 merged with 38ee69626 (local 09aad1cf)",
-      "negativeControl": "the head alone without #2392 at the same step refused 165 and 36 reads and 34 and 36 writes in two of three runs (1.53% / 0.33% reads, 4.7% / 5.0% writes)"
+      "criterion": "1x refusals within 0-0.1% of reads and 0.7-1.5% of writes on #2402 merged after #2392 (the architect's gate)",
+      "surface": "the same harness, Dispatch built from a local merge of #2392 c3498e52 into 8e87c0d8",
+      "command": "LOADTEST_SRC=<merge clone 27f908c1> run-step.sh g2-1x-{a,b,c} --events 4 --sessions 400 --requests 60",
+      "observed": "0 reads and 0 writes refused in each run; 3.99 events/s committed; read p99 166-226 ms",
+      "headSha": "8e87c0d858eaf5d64accc688fd2fbbd2b0250a4f merged with c3498e52 (local 27f908c1)",
+      "negativeControl": "round 1: the head alone without #2392 refused up to 1.53% of reads and 5.0% of writes at 1x"
     },
     {
-      "criterion": "The agent CLI's retry recovers overload refusals, honouring Retry-After",
-      "surface": "the dispatch command's DispatchClient (packages/envoy-client/src/dispatch-http.ts) driven against the stack during load steps, one client per call as one CLI invocation constructs",
-      "command": "bun cli-retry.ts <head envoy-client src> and <main envoy-client src> side by side, 2 calls/s for 165 s, 25% comments, during run-step.sh t-cli-10x and t-cli-2x",
-      "observed": "every first refusal was 429 with Retry-After: 1; head client: 2x 233/233 reads ok (1 refused, recovered on attempt 2), 31 of 40 refused writes admitted on retry; 10x 151/245 reads ok, 76 of 170 refused reads recovered, p50 2.2 s, p99 3.5 s (within the 60 s deadline)",
-      "headSha": "6410259f8a808e4ae6d16574dd2142c89cb9aa70",
-      "negativeControl": "main's DispatchClient beside it: 10x 0 of 173 refused reads recovered (one attempt each, 63/236 ok); 2x its 1 refused read and 41 refused writes failed at once"
+      "criterion": "The process exports per-pool size, in-use, waiting and acquire time, the registry pool included",
+      "surface": "Dispatch's GET /metrics on DISPATCH_METRICS_ADDR, scraped from the running binary 20 s into the 10x window",
+      "command": "curl -s 127.0.0.1:16062/metrics during r2-head-10x-a; go test ./cmd/dispatch/ -run 'TestAServingProcessScrapeListsTheRegistryPool|TestTheMetricsEndpointListsEverySeriesForEveryOpenPool'",
+      "observed": "20 series lines for each of 10 pools: background, health, leases, listen, live, outbox, registry, requests, rooms, settlements; dispatch_db_pool_max_conns{pool=\"registry\"} 1; both tests PASS",
+      "headSha": "8e87c0d858eaf5d64accc688fd2fbbd2b0250a4f",
+      "negativeControl": "at 6410259f the same scrape listed 9 pools and no registry (round 1, red test failed)"
     },
     {
       "criterion": "A shutdown stays inside its deadline under 10x",
-      "surface": "the envoy-dispatch process of the harness's stack, SIGTERM from outside as the runtime sends it",
-      "command": "run-step.sh t-shutdown-10x-{a,b} --duration 120s at 10x; at 60 s into the window kill -TERM $(cat lt/run/dispatch.pid) and poll /proc until the process is gone",
-      "observed": "exited 5.22 s and 5.51 s after SIGTERM (deadline 27 s, stop grace 30 s), 'deregistered this server process' logged, documents settled before shutdown, 0 ERROR lines",
-      "headSha": "6410259f8a808e4ae6d16574dd2142c89cb9aa70",
-      "negativeControl": "none needed for a timing bound beyond the deadline itself; the process that the harness ends normally (stack.sh stop) is the same binary"
+      "surface": "the stack's envoy-dispatch process, SIGTERM from outside",
+      "command": "run-step.sh r2-shutdown-10x --duration 120s at 10x; kill -TERM <dispatch pid> 60 s into the window",
+      "observed": "exited 5.4 s after SIGTERM (deadline 27 s), documents settled before shutdown, 0 ERROR lines",
+      "headSha": "8e87c0d858eaf5d64accc688fd2fbbd2b0250a4f",
+      "negativeControl": "none beyond the deadline itself; round 1 at 6410259f: 5.2 and 5.5 s"
     },
     {
-      "criterion": "Waiting for a database connection is bounded; every request is answered when the database stops answering",
-      "surface": "the harness's stack at 2x with the Postgres latency proxy stopped",
-      "command": "run-step.sh t-freeze-2x --duration 120s; at 30 s into the window kill -STOP <proxy pid>, 25 s later kill -CONT",
-      "observed": "0 connection failures and 0 client timeouts; request latency max 6.6 s; 27 x 503 DATABASE_BUSY and 4,152 x 429 OVERLOADED (reads), 743 x 429 OVERLOADED (writes); requests-pool waiters peaked at 32 and went to 0 in the first sample after SIGCONT; committed events resumed in that sample (63 -> 73 -> 82 ... 284)",
-      "headSha": "6410259f8a808e4ae6d16574dd2142c89cb9aa70",
-      "negativeControl": "main at 2x without any freeze already timed out 7,323 reads at 30 s"
-    },
-    {
-      "criterion": "Pools take connections from limits of their own, named in application_name; ConnectionsPerProcess equals infra's dispatchConnectionsPerPod",
-      "surface": "Postgres pg_stat_activity of the stack's dispatch database during load; CI's envoy-infra-go lane",
-      "command": "psql ... -c \"select application_name, count(*) from pg_stat_activity where datname='dispatch' group by 1\" every ~1.5 s during t-cli-10x (113 samples) and t-cli-2x (126 samples); read the envoy-infra-go check at 6410259f",
-      "observed": "maxima at 10x: requests 48, background 4, rooms 4, settlements 4, leases 3, listen 2, live 1, outbox 1, health 1, registry 1 (each at or below its size), 68 dispatch connections at most, of the 86 budget; envoy-infra-go (which runs TestDispatchConnectionsPerPodIsTheServers) success at 6410259f",
-      "headSha": "6410259f8a808e4ae6d16574dd2142c89cb9aa70",
-      "negativeControl": "a connection string carrying pool_max_conns is refused by design (README); not driven here"
+      "criterion": "The agent CLI's retry recovers overload refusals, honouring Retry-After",
+      "surface": "the dispatch command's DispatchClient from the head, one client per call, driven during a 10x step",
+      "command": "bun cli-retry.ts <head envoy-client src> head-r2-head-10x-a 140 2 0.25",
+      "observed": "every first refusal 429 Retry-After: 1; 62 of 148 refused reads recovered by retry (3 attempts max), 121 of 207 reads ok, p99 3.7 s within the 60 s deadline",
+      "headSha": "8e87c0d858eaf5d64accc688fd2fbbd2b0250a4f",
+      "negativeControl": "round 1: main's client recovered 0 of 173 refused reads at 10x"
     }
   ]
 }
