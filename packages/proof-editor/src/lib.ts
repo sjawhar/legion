@@ -56,7 +56,12 @@ import { proofMarkPlugins } from 'proof-sdk-upstream/src/editor/schema/proof-mar
 import { codeBlockExtPlugins } from 'proof-sdk-upstream/src/editor/schema/code-block-ext';
 import { frontmatterSchema } from 'proof-sdk-upstream/src/editor/schema/frontmatter';
 import { libraryRemarkFrontmatterPlugin } from './lib-remark-frontmatter-plugin';
-import { libraryRemarkDirectivePlugin, libraryRemarkHtmlFlowPlugin, typedBlockRemarkPlugin } from './lib-remark-directive-plugin';
+import {
+  libraryRemarkDirectivePlugin,
+  libraryRemarkHtmlBlockPlugin,
+  libraryRemarkHtmlFlowPlugin,
+  typedBlockRemarkPlugin
+} from './lib-remark-directive-plugin';
 import { unfitTypedBlocksRemarkPlugin } from './typed-block-drawing';
 import { remarkProofMarksPlugin } from 'proof-sdk-upstream/src/editor/schema/remark-proof-marks-plugin';
 import { proofMarkHandler } from 'proof-sdk-upstream/src/formats/remark-proof-marks';
@@ -318,6 +323,10 @@ export async function createProofEditor(
     // Register remark plugins for proof marks and dispatchAsk parsing
     .use(remarkProofMarksPlugin)
     .use(remarkDispatchMarksPlugin)
+    // After the mark plugins, whose own block-level span is a pair of HTML blocks until they have
+    // read it: a block of HTML becomes a paragraph holding the same text, which the schema has a
+    // node for. Before the fit check below, which reads that paragraph as the block's content.
+    .use(libraryRemarkHtmlBlockPlugin)
     // After the mark plugins, so a block-level mark span is a mark node when the fit check reads it.
     .use(opts.blockSchema ? unfitTypedBlocksRemarkPlugin : [])
     // Register contexts

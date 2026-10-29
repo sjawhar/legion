@@ -112,7 +112,10 @@ at the top and each JSDoc `@import` an `import type` (INFRA-581);
 `src/lib-remark-directive-plugin.ts`'s `strictHtmlFlowSyntax`, `remarkStrictHtmlFlow` and
 `libraryRemarkHtmlFlowPlugin`, which register `htmlFlowStrict` from `./html-flow` under `<` and
 disable micromark's `htmlFlow` by name, with `src/lib-headless.ts` installing that plugin on its
-parse processor and its serialize processor and `src/lib.ts` on the editor's; and annotations,
+parse processor and its serialize processor and `src/lib.ts` on the editor's, and its
+`remarkHtmlBlockParagraphs` and `libraryRemarkHtmlBlockPlugin`, the mdast transform that draws a
+block of HTML as a paragraph of the same text (the paragraph below says why), installed on the
+same parse processor and on the editor after the mark plugins (#2507); and annotations,
 casts and assertions that make a file type-check, each of which erases before runtime (below).
 
 To audit a copied file, diff it against `jj --ignore-working-copy -R <proof-sdk> file show -r
@@ -158,7 +161,22 @@ paragraph of `a ` and the inline HTML. Here the block opened, exiting the contai
 lazy line, and milkdown, which has no node for a block of HTML there, dropped the block with its
 container and the container's text, so a reader of that comment saw neither the quote nor the
 word `a`. Every other kind of HTML block reads as micromark reads it, a kind-7 block that opens a
-paragraph of its own included; `tests/html-flow.test.ts` holds both halves.
+paragraph of its own included.
+
+A block of HTML that does open still has to draw: the schema has no node for one and gains none,
+and Milkdown built the schema's inline `html` node where only a block may stand, so the parse
+threw `Cannot create node for doc` and the whole view failed to draw rather than drawing — and in
+a block quote, a list item or a footnote definition it dropped the container with the block and
+every word around it, the same loss of a reader's text the lazy line used to cause.
+`src/lib-remark-directive-plugin.ts`'s `remarkHtmlBlockParagraphs` draws each block of HTML as a
+paragraph whose one child is that block's text as one inline `html` node, so the block draws in
+place, keeps its container, and writes back as the markdown it was written as, with neither the
+copied construct nor the schema touched (#2507). It is registered after the mark plugins, since a
+record mark covering whole blocks is written as a `<span …>` line and a `</span>` line — two
+blocks of HTML until `remarkProofMarks` and `remarkDispatchMarks` have paired them — and before
+the typed-block transforms, which check a `:::` block's content against the node types its rule
+names. `tests/html-flow.test.ts` holds every half, in both engines, with the markdown each tree
+writes back.
 
 ## The upstream boundary
 
