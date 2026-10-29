@@ -376,6 +376,17 @@ func sessionHealthFields(sessions *session.SessionRegistry) map[string]interface
 // live client that is not connected or holds no valid subscription is 503 "live subscription
 // inactive", since every topic the stream does not store then reaches no session.
 //
+// A rewatch of the KV caches that keeps failing after a reconnect ends no watcher and clears no
+// cache, so every check above still passes while the caches follow buckets they no longer watch
+// (INFRA-743). The handler therefore reads the client's HookStall, how long the bus's reconnect
+// hooks have been due without a run that succeeded, and answers 503 "unhealthy" as the dependency
+// "KV watch rebuild" once it reaches bus.RepairGrace. A shorter stall is reported nowhere here:
+// the bus runs the hooks again within seconds of a failure (internal/bus/recovery.go,
+// recoverUntilHealthy), so a rebuild under the bound is being repaired, and a listener would
+// otherwise fail its container health check over every reconnect. The stall is one bus.Client's,
+// naming no cache, so a listener that keeps no CI cache needs no branch of its own, and the live
+// topics lane's client, which carries no reconnect hook, has no stall to report.
+//
 // The checks that go to the bus share one healthzBudget taken from the request's own context: the
 // flush, each cache's KV ping and the durable consumer's info read. A ping or that read that has
 // not answered when it ends (healthzPing) is 503 unhealthy naming the dependency and the
@@ -420,6 +431,20 @@ func healthzHandler(deps *atomic.Pointer[listenerDeps]) http.HandlerFunc {
 				writeDependencyHealth(w, c.name+" KV", err, !answered || c.cache.WatchErr() != nil || errors.Is(err, nats.ErrConnectionClosed))
 				return
 			}
+		}
+		if stall, hookErr := d.client.HookStall(); stall >= bus.RepairGrace {
+			// The rebuild has been due a whole grace with no run that succeeded, so the caches
+			// behind it follow buckets nothing is repairing. A rewatch that keeps failing ends no
+			// watcher and clears no cache, so neither loop above reports it (INFRA-743).
+			rebuild := fmt.Errorf("no rebuild has succeeded for %s", stall.Round(time.Second))
+			if hookErr != nil {
+				// The last failure says what is broken; the stall, for how long. A run still in
+				// flight past the grace has no error of its own, and writeDependencyHealth needs
+				// one, so then the stall is the whole report.
+				rebuild = fmt.Errorf("%w (no rebuild has succeeded for %s)", hookErr, stall.Round(time.Second))
+			}
+			writeDependencyHealth(w, "KV watch rebuild", rebuild, true)
+			return
 		}
 		response := map[string]interface{}{"status": "healthy"}
 		for k, v := range sessionHealthFields(d.sessions) {
