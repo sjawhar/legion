@@ -460,6 +460,111 @@ func TestParseJoinsAParagraphsLinesOnce(t *testing.T) {
 	}
 }
 
+// A list whose first item could not interrupt a paragraph - an empty item, a bare marker, an
+// ordered marker that is not a lone `1` - opens after indented code only where the code is no
+// longer the open construct, as the browser editor's parser reads it (interruptsOpenBlock). That
+// parser keeps the code open while the line opening the item opens the container it stands in, so
+// `    code\n> -` is a quote holding the paragraph `-`, and a blank line between them opens
+// nothing and leaves it open; but a line carrying the container's markers opened that container a
+// line earlier, and in its flow nothing is open by the item's line, so `    code\n>\n> -` is a
+// quote holding a list with one empty item. Where the code is the container's own last block
+// instead, lines of markers and whitespace inside it leave the code open, so `>     code\n>  \n> -`
+// is a quoted paragraph. Before this, every line of markers and whitespace left the code open, so
+// the five rows below whose quote opened a line earlier read as that quote's paragraph.
+func TestParseOpensAnItemAfterIndentedCodeWhereTheContainerOpenedEarlier(t *testing.T) {
+	text := func(value string) *Node { return &Node{Type: "text", Text: value} }
+	paragraph := func(children ...*Node) *Node { return &Node{Type: "paragraph", Children: children} }
+	code := func(value string) *Node {
+		return &Node{Type: "code_block", Children: []*Node{text(value)}}
+	}
+	quote := func(children ...*Node) *Node { return &Node{Type: "blockquote", Children: children} }
+	emptyItem := &Node{Type: "list_item", Attrs: Attrs{"label": "•", "listType": "bullet", "spread": false}, Children: []*Node{paragraph()}}
+	bullets := func(items ...*Node) *Node {
+		return &Node{Type: "bullet_list", Attrs: Attrs{"spread": false}, Children: items}
+	}
+	ordered := func(order int, items ...*Node) *Node {
+		return &Node{Type: "ordered_list", Attrs: Attrs{"order": order, "spread": false}, Children: items}
+	}
+	item := func(children ...*Node) *Node {
+		return &Node{Type: "list_item", Attrs: Attrs{"label": "•", "listType": "bullet", "spread": false}, Children: children}
+	}
+	for _, test := range []struct {
+		name     string
+		markdown string
+		want     *Node
+	}{
+		{
+			name:     "a quote opening on the item's own line holds the marker as a paragraph",
+			markdown: "    code\n> -\n",
+			want:     &Node{Type: "doc", Children: []*Node{code("code"), quote(paragraph(text("-")))}},
+		},
+		{
+			name:     "a blank line between the code and that quote opens nothing",
+			markdown: "    code\n\n> -\n",
+			want:     &Node{Type: "doc", Children: []*Node{code("code"), quote(paragraph(text("-")))}},
+		},
+		{
+			name:     "an ordered marker on the quote's own opening line is that paragraph too",
+			markdown: "    code\n> 2. b\n",
+			want:     &Node{Type: "doc", Children: []*Node{code("code"), quote(paragraph(text("2. b")))}},
+		},
+		{
+			name:     "a quote opened a line earlier holds a list with one empty item",
+			markdown: "    code\n>\n> -\n",
+			want:     &Node{Type: "doc", Children: []*Node{code("code"), quote(bullets(emptyItem))}},
+		},
+		{
+			name:     "the quote's earlier line holding spaces opens it just as well",
+			markdown: "    code\n>  \n> -\n",
+			want:     &Node{Type: "doc", Children: []*Node{code("code"), quote(bullets(emptyItem))}},
+		},
+		{
+			name:     "spaces after the marker leave the item empty",
+			markdown: "    code\n>       \n> -    \n",
+			want:     &Node{Type: "doc", Children: []*Node{code("code"), quote(bullets(emptyItem))}},
+		},
+		{
+			name:     "a paragraph before the code changes none of it",
+			markdown: "a\n\n    code\n>   \n> -\n",
+			want:     &Node{Type: "doc", Children: []*Node{paragraph(text("a")), code("code"), quote(bullets(emptyItem))}},
+		},
+		{
+			name:     "an ordered marker in a quote opened a line earlier opens its list",
+			markdown: "    code\n>\n> 2. b\n",
+			want:     &Node{Type: "doc", Children: []*Node{code("code"), quote(ordered(2, item(paragraph(text("b")))))}},
+		},
+		{
+			name:     "code the quote itself holds stays open across the quote's whitespace line",
+			markdown: ">     code\n>  \n> -\n",
+			want:     &Node{Type: "doc", Children: []*Node{quote(code("code"), paragraph(text("-")))}},
+		},
+		{
+			name:     "a quote with no code before it holds the list",
+			markdown: ">   \n> -\n",
+			want:     &Node{Type: "doc", Children: []*Node{quote(bullets(emptyItem))}},
+		},
+		{
+			name:     "code, a rule and code again, then a quote opened a line earlier",
+			markdown: "\t ```js\n---\n         \n  \n    >    \n>       \n> -    \n",
+			want: &Node{Type: "doc", Children: []*Node{
+				code(" ```js"), {Type: "hr"}, code(">    "), quote(bullets(emptyItem)),
+			}},
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			got, err := ParseForWrite(test.markdown, nil)
+			if err != nil {
+				t.Fatalf("ParseForWrite(%q): %v", test.markdown, err)
+			}
+			if !got.Equal(test.want) {
+				g, _ := got.JSON()
+				w, _ := test.want.JSON()
+				t.Fatalf("ParseForWrite(%q)\n got: %s\nwant: %s", test.markdown, g, w)
+			}
+		})
+	}
+}
+
 func tablePaddingBomb(width int) string {
 	return strings.Repeat("| header ", width) + "|\n" +
 		strings.Repeat("| --- ", width) + "|\n" +

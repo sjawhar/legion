@@ -145,8 +145,10 @@ var bareMarkerLine = regexp.MustCompile(`^ {0,3}(?:[-+*]|[0-9]{1,9}[.)])[ \t]*$`
 // and there lets an item numbered `01.` interrupt it; that parser also refuses one opening a
 // container on a line that already interrupted the paragraph, so `- a\n  - -` is an item holding
 // the text `-`, `- a\n  > -` a quote holding it, and `a\n> 2. b` a quote holding the paragraph
-// `2. b`, and refuses one after indented code (interruptsOpenBlock), so `    code\n> 2. b` is a
-// quote holding that paragraph too.
+// `2. b`, and refuses one where indented code is still the open construct (interruptsOpenBlock),
+// so `    code\n> 2. b` is a quote holding that paragraph too, the quote opening on the item's own
+// line, while in `    code\n>\n> 2. b` the quote opened a line earlier, which ends the code, and
+// the item opens the ordered list that quote holds.
 type emptyItemGuard struct{ parser.BlockParser }
 
 func (p emptyItemGuard) Open(parent ast.Node, reader gmtext.Reader, pc parser.Context) (ast.Node, parser.State) {
@@ -484,15 +486,23 @@ func columnOf(text []byte) int {
 // interruptsOpenBlock reports whether a list opening in parent on the line starting at start
 // interrupts a block the browser editor's parser holds open there, other than a paragraph parent
 // holds, which goldmark names: a paragraph ending on the line before, reached across the containers
-// the line opens first, that forms no table, or an indented code block with only blank lines after
-// it. That parser decides once per line whether it interrupts, from the construct it holds open,
-// before opening the containers the line starts with, and keeps indented code open to the line -
-// except code right after a list, or right after a quote with no blank line between them. The list
-// stays open across the blank lines before the code, and the quote across the code's first line;
-// neither continues the line after it, and that parser ends indented code at a line no open
-// container continues, so the code has ended and the line interrupts nothing (which is also why it
-// reads a second code line there as a second code block). A container opened on a line after the
-// code, such as a typed block's fence, starts a flow of its own that holds nothing open.
+// the line opens first, that forms no table, or an indented code block the flow the line belongs to
+// still holds open. That parser decides once per line whether it interrupts, from the construct it
+// holds open, before opening the containers the line starts with, and keeps indented code open to
+// the line - except code right after a list, or right after a quote with no blank line between
+// them. The list stays open across the blank lines before the code, and the quote across the code's
+// first line; neither continues the line after it, and that parser ends indented code at a line no
+// open container continues, so the code has ended and the line interrupts nothing (which is also
+// why it reads a second code line there as a second code block). A container opened on a line after
+// the code, such as a typed block's fence, starts a flow of its own that holds nothing open: where
+// the code is reached only by walking up out of the containers the line opens (opensContainers),
+// it is the open construct only while no line between it and this one carries a container's marker,
+// since a line carrying one is a line that container was already open on, and by this line its own
+// flow holds nothing. So `    code\n> -` is a quote holding the paragraph `-` and `    code\n\n> -`
+// is too, the quote opening on the item's own line and the blank line between opening nothing,
+// while `    code\n>\n> -` is a quote holding a list with one empty item, its quote having opened a
+// line earlier. Where the code is parent's own last child instead, no container opened after it and
+// lines of markers and whitespace leave it open, so `>     code\n>  \n> -` is a quoted paragraph.
 func interruptsOpenBlock(parent ast.Node, source []byte, start int, pc parser.Context) bool {
 	previous := parent.LastChild()
 	opensContainers := previous == nil
@@ -527,7 +537,10 @@ func interruptsOpenBlock(parent ast.Node, source []byte, start int, pc parser.Co
 		between := source[last.Start:start]
 		between = between[bytes.IndexByte(between, '\n')+1:]
 		for _, line := range bytes.Split(bytes.TrimSuffix(between, []byte("\n")), []byte("\n")) {
-			if len(line) > 0 && !markersOrWhitespace(line) {
+			if util.IsBlank(line) {
+				continue
+			}
+			if opensContainers || !markersOrWhitespace(line) {
 				return false
 			}
 		}

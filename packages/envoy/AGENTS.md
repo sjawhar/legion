@@ -1986,11 +1986,17 @@ An empty list item that would interrupt a paragraph is not opened, as that parse
 whole line (`emptyItemGuard`): after `- a`, the line `  - -` is an item holding the text `-`. Nor is
 an ordered item numbered anything but a lone `1` (`orderedCannotInterrupt`): goldmark takes the
 number's value and so lets `01.` interrupt a paragraph, where that parser reads `a` over `01. b` as one
-paragraph. Neither is opened on a line after indented code, blank lines between or not, whatever
-containers the line opens first, since that parser holds the code open to that line and decides
-once per line whether it interrupts - except code right after a list, which that parser ends on its
-own line (`interruptsOpenBlock`): `    code\n> 2. b` is a quote holding the paragraph `2. b`, and
-`1.\n\n    code\n2. b` is two lists with the code between. A table is no paragraph to that parser,
+paragraph. Neither is opened on a line after indented code, blank lines between or not, where the
+containers the line opens first open on that line, since that parser holds the code open to it and
+decides once per line whether it interrupts - except code right after a list, which that parser
+ends on its own line (`interruptsOpenBlock`): `    code\n> 2. b` is a quote holding the paragraph
+`2. b`, `    code\n> -` and `    code\n\n> -` are quotes holding the paragraph `-`, and
+`1.\n\n    code\n2. b` is two lists with the code between. A line carrying a container's markers
+between the code and the item is a line that container opened on, and in its flow the code has
+ended and nothing is open, so `    code\n>\n> -` is a quote holding a list with one empty item and
+`    code\n>\n> 2. b` a quote holding an ordered list; inside a container that held the code
+itself, lines of markers and whitespace leave it open, so `>     code\n>  \n> -` is a quoted
+paragraph. A table is no paragraph to that parser,
 so after one such an item opens in a container the line opens first (`| a |\n| - |\n* -` is a list
 item holding an empty one). An item whose marker line holds nothing
 takes its content from the next line when that line reaches its content column with no blank line
