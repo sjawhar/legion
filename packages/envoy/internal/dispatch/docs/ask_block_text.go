@@ -489,15 +489,16 @@ func normalizeAskOptions(options []model.AskOption) []model.AskOption {
 // options, where the browser's card reads its question from the first child and its options from
 // the last, so the row must not take that reading, and rebuilding the body from it would move,
 // merge or flatten what a collaborator wrote. The route rebuilds no broken decision: a document
-// edit deletes, in one edit, the blocks the refusal names (askBlocksToDrop), and the ask edit
+// edit deletes, in one edit, the blocks the refusal names (planAskRepair), and the ask edit
 // follows. Until the document settles its block ids (a child with no id, or an id repeated in the
-// tree, which ApplyOps would restamp first) the refusal names no delete and asks for a retry. When
-// the blocks it would keep still do not read strictly - a decision nested in them breaks its own
-// rule - no delete of the ask's own blocks leaves it valid, and the refusal names none.
+// tree, which ApplyOps would restamp first) the refusal names no delete and asks for a retry.
+// Where no one edit of deletes leaves every decision it changes readable, the refusal names none
+// and says which decision must be repaired, so that following the refusals cannot circle.
 //
 // The refusal quotes every block of the decision in full, nested content and all, so a caller
 // deleting one can restore every word, and gives each block id as quoted data, never inside a
-// command a caller might paste into a shell.
+// command a caller might paste into a shell. Every block it names to delete is one of those or is
+// nested in one, so every word it drops is quoted.
 func refuseAskContentEdit(tree *pmdoc.Node, block askBlock) error {
 	broken := pmdoc.AskContentError(block.node)
 	if broken == nil {
@@ -521,39 +522,161 @@ func refuseAskContentEdit(tree *pmdoc.Node, block askBlock) error {
 	}
 	reason := broken.Error() + "; the ask-edit route does not rebuild a decision that breaks its content rule"
 	quoted := "; its blocks are: " + strings.Join(parts, "; ")
-	drop, kept := askBlocksToDrop(children)
+	// The plan reads the document's block ids, which an unsettled document has yet to stamp.
+	var plan askRepairPlan
+	if settled {
+		plan = planAskRepair(tree, block.node)
+	}
 	switch {
 	case !settled:
 		reason += ", and the document has not settled its block ids yet (a block has no id, or an id repeats), " +
 			"so a document edit (dispatch doc-edit, deleting a block by its id) cannot name its blocks now; " +
 			"retry the edit once the document settles (a few seconds)"
-	case len(drop) == 0 || readAskBlockStrictly(withChildren(block.node, kept)) != nil:
-		// The kept blocks (all of them when none is to drop) break the rule only through a decision
-		// nested in them (AskContentError reads descendants), which no delete of the ask's own blocks repairs.
-		reason += ", and no document edit deleting this ask's own blocks (dispatch doc-edit, deleting a block " +
-			"by its id) leaves it valid"
-		if nested := brokenNestedAsk(kept); nested != "" {
-			reason += fmt.Sprintf(", since the decision nested in them, ask block %q, does not read as one; "+
-				"edit that decision first", nested)
-		}
-	default:
-		ids := make([]string, len(drop))
-		for i, child := range drop {
-			ids[i] = strconv.Quote(child.Attrs[pmdoc.BlockIDAttr].(string))
-		}
+	case len(plan.drop) > 0:
 		reason += ", so delete the blocks to drop, all in one document edit (dispatch doc-edit, deleting a block " +
 			"by its id; one edit holding one delete per block), which keeps the question's paragraphs and the " +
-			"first list after them; the blocks to delete are " + strings.Join(ids, ", ") + "; then edit the ask"
+			"first list after them, here and in every decision nested in the blocks it keeps; the blocks to " +
+			"delete are " + strings.Join(plan.drop, ", ") + "; then edit the ask"
+	case plan.holder != "":
+		reason += ", and no document edit deleting blocks of this decision leaves every decision it changes " +
+			"readable: a delete inside this one changes ask block " + strconv.Quote(plan.holder) + ", which holds " +
+			"it, and an edit may not leave a decision it changes unreadable, where " + plan.blocked.Error() +
+			"; edit ask block " + strconv.Quote(plan.holder) + " first"
+	case plan.blocked != nil:
+		reason += ", and no document edit deleting this decision's blocks, or those of a decision nested in it, " +
+			"leaves it valid, since with them deleted " + plan.blocked.Error() + ", which needs words written, " +
+			"not blocks deleted"
+	default:
+		reason += ", and no document edit deleting this decision's blocks, or those of a decision nested in it, " +
+			"leaves it valid"
 	}
 	return &ErrAskBlockUnrepresentable{Field: "block", Reason: reason + quoted}
+}
+
+// askRepairPlan is the one document edit that repairs a decision breaking its content rule.
+type askRepairPlan struct {
+	// drop is the id of each block to delete, Go-quoted, in document order. It is empty when no
+	// one edit of deletes leaves the decision valid.
+	drop []string
+	// blocked is why the deletes the plan would have named leave a decision the edit changes
+	// unreadable, nil when they do not.
+	blocked error
+	// holder is the block id of the decision holding the edited one that blocked is about, "" when
+	// blocked is about the edited decision or one nested in it.
+	holder string
+}
+
+// planAskRepair is the one document edit that repairs ask, the decision of tree being edited,
+// which breaks its content rule. It deletes the blocks ask's own rule leaves no room for
+// (askBlocksToDrop) and, in every decision nested in the blocks it keeps that breaks the rule,
+// that decision's own, as deep as they nest: the rule reads the decisions nested in one
+// (pmdoc.AskContentError), so repairing them is part of repairing this one, and a nested
+// decision's block is deleted by its id like any other.
+//
+// A document edit is refused where it leaves a decision it wrote or changed unreadable
+// (validateEditedAskBlocks), and a delete inside a decision changes every decision holding it, so
+// the plan is held to what one such edit allows: with the deletes applied, ask, every decision
+// nested in it that loses a block and every decision holding ask must read strictly
+// (readAskBlockStrictly, which the deletes alone cannot give a decision with no question left, or
+// one whose options the parse cannot read). Where one would not, the plan names no delete and
+// carries why. A decision holding this one comes first, outermost first: its own repair holds the
+// repair of every decision nested in it, this one among them, so a caller sent to it is sent to
+// the one edit that repairs them all, where a caller sent inwards could be sent back out again.
+func planAskRepair(tree, ask *pmdoc.Node) askRepairPlan {
+	drop, changed := askRepairDrops(ask)
+	if len(drop) == 0 {
+		return askRepairPlan{}
+	}
+	dropped := make(map[*pmdoc.Node]struct{}, len(drop))
+	for _, node := range drop {
+		dropped[node] = struct{}{}
+	}
+	repaired := asksByBlockID(withoutNodes(tree, dropped))
+	for _, id := range askHolderIDs(tree, ask) {
+		if node, found := repaired[id]; found {
+			if reason := readAskBlockStrictly(node); reason != nil {
+				return askRepairPlan{blocked: reason, holder: id}
+			}
+		}
+	}
+	for _, id := range changed {
+		if node, found := repaired[id]; found {
+			if reason := readAskBlockStrictly(node); reason != nil {
+				return askRepairPlan{blocked: reason}
+			}
+		}
+	}
+	return askRepairPlan{drop: droppedBlockIDs(ask, dropped)}
+}
+
+// askRepairDrops is every block to delete inside ask, an ask breaking its content rule, and the
+// block id of each decision losing one - ask first, then the decisions nested in it, as deep as
+// they nest. A decision whose own blocks keep the rule loses none of them: only the decisions
+// nested in it that break it are repaired.
+func askRepairDrops(ask *pmdoc.Node) (drop []*pmdoc.Node, changed []string) {
+	if pmdoc.AskContentError(ask) == nil {
+		return nil, nil
+	}
+	kept := ask.Children
+	if askBreaksItsOwnRule(ask) {
+		var own []*pmdoc.Node
+		own, kept = askBlocksToDrop(ask.Children)
+		drop = append(drop, own...)
+	}
+	var nested []string
+	for _, inner := range nestedAsks(kept) {
+		innerDrop, innerChanged := askRepairDrops(inner)
+		drop = append(drop, innerDrop...)
+		nested = append(nested, innerChanged...)
+	}
+	if len(drop) == 0 {
+		return nil, nil
+	}
+	id, _ := ask.Attrs[pmdoc.BlockIDAttr].(string)
+	return drop, append([]string{id}, nested...)
+}
+
+// askBreaksItsOwnRule reports whether ask's own blocks break the content rule, where
+// pmdoc.AskContentError reads the decisions nested in it too: it holds ask to the rule over its
+// blocks' types alone, which is all the rule reads of them.
+func askBreaksItsOwnRule(ask *pmdoc.Node) bool {
+	types := make([]*pmdoc.Node, len(ask.Children))
+	for index, child := range ask.Children {
+		if child != nil {
+			types[index] = &pmdoc.Node{Type: child.Type}
+		}
+	}
+	return pmdoc.AskContentError(withChildren(ask, types)) != nil
+}
+
+// nestedAsks is each decision nested in blocks that no nearer decision holds, in document order.
+func nestedAsks(blocks []*pmdoc.Node) []*pmdoc.Node {
+	var found []*pmdoc.Node
+	var collect func(node *pmdoc.Node)
+	collect = func(node *pmdoc.Node) {
+		switch {
+		case node == nil:
+		case node.Type == "ask":
+			found = append(found, node)
+		default:
+			for _, child := range node.Children {
+				collect(child)
+			}
+		}
+	}
+	for _, block := range blocks {
+		collect(block)
+	}
+	return found
 }
 
 // askBlocksToDrop splits the children of a broken ask into the ones to delete and the ones to
 // keep, each in document order. It keeps the run of paragraphs starting at the first paragraph
 // holding text, up to the next other block, and the bullet list right after them; it drops every
 // other child, the paragraphs holding no text before that run among them, since a question read
-// from those alone is empty. The caller checks the kept children read strictly: a decision nested
-// in them can still break the rule.
+// from those alone is empty. The caller checks what the kept children leave reads strictly: a
+// decision nested in them can still break the rule, and a kept list can hold an option the parse
+// cannot read.
 func askBlocksToDrop(children []*pmdoc.Node) (drop, kept []*pmdoc.Node) {
 	first := slices.IndexFunc(children, func(child *pmdoc.Node) bool {
 		return child.Type == "paragraph" && strings.TrimSpace(pmdoc.TextContent(child)) != ""
@@ -573,28 +696,98 @@ func askBlocksToDrop(children []*pmdoc.Node) (drop, kept []*pmdoc.Node) {
 	return append(drop, children[end:]...), children[first:end]
 }
 
-// withChildren is a copy of ask holding children in place of its own.
-func withChildren(ask *pmdoc.Node, children []*pmdoc.Node) *pmdoc.Node {
-	copied := *ask
+// withChildren is a copy of node holding children in place of its own.
+func withChildren(node *pmdoc.Node, children []*pmdoc.Node) *pmdoc.Node {
+	copied := *node
 	copied.Children = children
 	return &copied
 }
 
-// brokenNestedAsk is the block id of the first decision nested in blocks that does not read
-// strictly (readAskBlockStrictly), or "".
-func brokenNestedAsk(blocks []*pmdoc.Node) string {
-	found := ""
-	for _, block := range blocks {
-		pmdoc.Walk(block, func(node *pmdoc.Node) bool {
-			if found != "" {
-				return false
-			}
-			if node.Type == "ask" && readAskBlockStrictly(node) != nil {
-				found, _ = node.Attrs[pmdoc.BlockIDAttr].(string)
-				return found == ""
-			}
-			return true
-		})
+// withoutNodes is a copy of node holding neither the nodes of dropped nor anything nested in
+// them, or nil when node itself is one. A node holding none of them is shared, not copied.
+func withoutNodes(node *pmdoc.Node, dropped map[*pmdoc.Node]struct{}) *pmdoc.Node {
+	if _, drop := dropped[node]; drop {
+		return nil
 	}
+	if len(node.Children) == 0 {
+		return node
+	}
+	children := make([]*pmdoc.Node, 0, len(node.Children))
+	changed := false
+	for _, child := range node.Children {
+		kept := child
+		if child != nil {
+			kept = withoutNodes(child, dropped)
+		}
+		changed = changed || kept != child
+		if kept != nil {
+			children = append(children, kept)
+		}
+	}
+	if !changed {
+		return node
+	}
+	return withChildren(node, children)
+}
+
+// asksByBlockID is each ask block of tree by its block id. Block ids are unique in a settled
+// document (pmdoc.BlockIDRepairCount), which the caller has checked.
+func asksByBlockID(tree *pmdoc.Node) map[string]*pmdoc.Node {
+	found := map[string]*pmdoc.Node{}
+	pmdoc.Walk(tree, func(node *pmdoc.Node) bool {
+		if node.Type != "ask" {
+			return true
+		}
+		if id, _ := node.Attrs[pmdoc.BlockIDAttr].(string); id != "" {
+			found[id] = node
+		}
+		return true
+	})
 	return found
+}
+
+// askHolderIDs is the block id of each decision holding ask in tree, outermost first.
+func askHolderIDs(tree, ask *pmdoc.Node) []string {
+	var holders []string
+	var find func(node *pmdoc.Node, holding []string) bool
+	find = func(node *pmdoc.Node, holding []string) bool {
+		if node == ask {
+			holders = holding
+			return true
+		}
+		if node.Type == "ask" {
+			if id, _ := node.Attrs[pmdoc.BlockIDAttr].(string); id != "" {
+				holding = append(slices.Clone(holding), id)
+			}
+		}
+		for _, child := range node.Children {
+			if child != nil && find(child, holding) {
+				return true
+			}
+		}
+		return false
+	}
+	find(tree, nil)
+	return holders
+}
+
+// droppedBlockIDs is the id of each node of dropped, Go-quoted, in the order ask holds them. A
+// node nested in another the edit deletes is not named: deleting the block holding it takes it.
+func droppedBlockIDs(ask *pmdoc.Node, dropped map[*pmdoc.Node]struct{}) []string {
+	ids := make([]string, 0, len(dropped))
+	var collect func(node *pmdoc.Node)
+	collect = func(node *pmdoc.Node) {
+		if _, drop := dropped[node]; drop {
+			id, _ := node.Attrs[pmdoc.BlockIDAttr].(string)
+			ids = append(ids, strconv.Quote(id))
+			return
+		}
+		for _, child := range node.Children {
+			if child != nil {
+				collect(child)
+			}
+		}
+	}
+	collect(ask)
+	return ids
 }
