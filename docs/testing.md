@@ -37,8 +37,8 @@ cd packages/envoy
 go test -timeout 20m ./internal/dispatch/api
 ```
 
-CI's `envoy-go` and `dispatch-go-postgres-16` jobs run it that way, alone and before the module's
-other packages (`.github/workflows/envoy-and-contracts.yaml`), and `envoy-go-race` gives it 30
+CI's `envoy-go` job runs it that way, alone and before the module's other packages
+(`.github/workflows/envoy-and-contracts.yaml`), and `envoy-go-race` gives it 30
 minutes. A
 command that runs one of its tests by name (`-run`) needs no deadline of its own. Run it alone
 rather than beside the module's other Postgres-backed packages: together they share one database

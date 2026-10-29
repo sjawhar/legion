@@ -2005,5 +2005,5 @@ go vet ./...
 ```
 
 `internal/dispatch/api` alone takes close to `go test`'s default ten-minute package deadline (about
-600 s), so it runs first and on its own, with 20 minutes, as CI's `envoy-go` and
-`dispatch-go-postgres-16` jobs run it (`docs/testing.md`, "Go's package deadline").
+600 s), so it runs first and on its own, with 20 minutes, as CI's `envoy-go` job runs it
+(`docs/testing.md`, "Go's package deadline").

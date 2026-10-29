@@ -698,8 +698,8 @@ go vet ./...
 ```
 
 `internal/dispatch/api` alone takes close to `go test`'s default ten-minute package deadline (about
-600 s), so it runs first and on its own, with 20 minutes, as CI's `envoy-go` and
-`dispatch-go-postgres-16` jobs run it (`docs/testing.md`, "Go's package deadline").
+600 s), so it runs first and on its own, with 20 minutes, as CI's `envoy-go` job runs it
+(`docs/testing.md`, "Go's package deadline").
 
 The real-process memory tests (`memory_test.go`, LEGION-481) start a Dispatch server per row and
 read its resident memory from `/proc`, so they build only under the `memory` tag and run in their
