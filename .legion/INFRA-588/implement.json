@@ -2,13 +2,29 @@
   "schemaVersion": 1,
   "phase": "implement",
   "issue": "INFRA-588",
-  "completed": "2026-10-29T21:31:44Z",
-  "round": "migration identifiers folded in (plan.md v3, from the closed migration-numbering issue)",
+  "completed": "2026-10-29T21:58:19Z",
+  "round": "tester's round-6 finding: no widening at a boot without a timestamped migration",
   "pullRequest": "https://github.com/sjawhar/legion/pull/2411",
-  "head": "7fcdf0e1d50804a23fd05ace20be96de3785e53a",
-  "proofComment": "https://github.com/sjawhar/legion/pull/2411#issuecomment-6508771513",
-  "reviewAnswered": "New scope, not a review: migration identifiers for the daemon and Dispatch runners. Commits 6cab7987 (daemon), 6a8ede0d (Dispatch + pgmigrate), c635b7a9 (Dispatch health probe across the widening, found by the proof), 7fcdf0e1 (two renumbering learnings marked superseded). The router move (a4ca5918) is unchanged; no existing migration file changed.",
+  "head": "7ab3f40f9cdf4e72ede9d871ece4dc13901d0a36",
+  "proofComment": "https://github.com/sjawhar/legion/pull/2411#issuecomment-6509260491",
+  "reviewAnswered": "Tester's verdict fail (round 6): createVersionTable widened schema_migrations.version at every boot, so this release's roll failed main's uncast health read once per serving pod. 7ab3f40f widens only when the loaded set holds a version above int4, as the daemon does. The red test 017d1df01dcb passes unmodified.",
   "proof": [
+    {
+      "criterion": "After the version columns widen from int4 to bigint, no prepared or cached read of them fails, including old pods' open connections during a rolling deploy",
+      "surface": "a rolling deploy on PostgreSQL 18.6 + pgvector: the old release's real Pool.Healthy every 50 ms on one connection while the new release's real store.Migrate boots on the same database (rollproof.sh)",
+      "command": "bash $TMPDIR/i588/rollproof.sh (cc3 binaries built from the fork point on main, this head, and a merged tree with two timestamped migrations) plus the whole path main -> this release -> later release",
+      "observed": "this release over main's pod: 41 reads, 0 failed, column stays integer; a later release with timestamped migrations over this release's pods: 41 reads, 0 failed, column bigint; whole path from main: 0 failed, bigint at the end",
+      "headSha": "7ab3f40f9cdf4e72ede9d871ece4dc13901d0a36",
+      "negativeControl": "the previous head c635b7a9 (widening at every boot) over main's pod: 'cached plan must not change result type', 1 of 41 reads failed"
+    },
+    {
+      "criterion": "The tester's red test passes unmodified, and the migrate tests still pass",
+      "surface": "go test against the real Postgres",
+      "command": "cd packages/envoy && DISPATCH_TEST_DATABASE_URL='postgres://postgres@127.0.0.1:55432/postgres?sslmode=disable' go test ./internal/pgmigrate/... ./internal/dispatch/store/ ./internal/broker/store/ and ./cmd/dispatch -run 'Healthz|Census|Migrat'",
+      "observed": "all ok (dispatch/store 289.528s); TestMigrateWithNoTimestampedMigrationKeepsThePreviousReleasesHealthProbeAnswering, TestHealthyAnswersAcrossTheWideningOfTheVersionColumn, TestMigrateWidensAnIntegerVersionColumnAndRecordsATimestamp, both out-of-order tests, TestMigrateCreatesEmptySchemaAndIsIdempotent and TestMigrateSkipsVersionRecordedOutsideTheRunner pass; the red test's file is unchanged against 017d1df01dcb",
+      "headSha": "7ab3f40f9cdf4e72ede9d871ece4dc13901d0a36",
+      "negativeControl": "the red test fails on 7fcdf0e1 with 'cached plan must not change result type' (tester, test.json)"
+    },
     {
       "criterion": "Two concurrent branches that each add a migration to each runner merge in either order with no conflict",
       "surface": "git merge-tree on commits built off the head with git plumbing (concurrent.sh)",
@@ -67,38 +83,14 @@
     }
   ],
   "filesChanged": [
-    "packages/daemon/internal/store/migrations/embed.go",
-    "packages/daemon/internal/store/migrations/embed_test.go",
-    "packages/daemon/internal/store/store.go",
-    "packages/daemon/internal/store/migrate_timestamped_test.go",
-    "packages/daemon/internal/api/version.go (comment)",
-    "docs/kubernetes.md (rollback note)",
-    "packages/envoy/internal/pgmigrate/set.go",
-    "packages/envoy/internal/pgmigrate/set_test.go",
-    "packages/envoy/internal/pgmigrate/pgmigratetest/pgmigratetest.go",
-    "packages/envoy/internal/pgmigrate/pgmigratetest/pgmigratetest_test.go",
     "packages/envoy/internal/dispatch/store/store.go",
-    "packages/envoy/internal/dispatch/store/pool.go",
-    "packages/envoy/internal/dispatch/store/store_test.go",
-    "packages/envoy/internal/dispatch/store/migrate_guard_test.go",
-    "packages/envoy/internal/dispatch/store/migrate_out_of_order_test.go",
     "packages/envoy/cmd/dispatch/README.md",
-    "packages/envoy/internal/dispatch/store/README.md",
-    "packages/envoy/.changes/unreleased/pr-2411-migration-timestamps.yaml",
-    "two docs/solutions/envoy renumbering learnings (front-matter status)"
+    "packages/envoy/.changes/unreleased/pr-2411-migration-timestamps.yaml"
   ],
   "trickyParts": [
-    "The version columns are int4; a 14-digit timestamp needs bigint. The daemon's schema_version is created by migration 0001, so the runner widens it inside the first timestamped migration's transaction; Dispatch's schema_migrations is created by the runner, so createVersionTable creates bigint and widens an existing integer under its lock.",
-    "pgx encodes a parameter for the column type it finds, so the exists check and the insert cast $1::bigint, or a 14-digit version is refused client-side before the widening runs.",
-    "A connection that prepared max(version) while the column was integer fails once after the widening (cached plan must not change result type): the daemon's SchemaVersion and Dispatch's Healthy cast the result to bigint. The live upgrade proof found the Dispatch case (140 -> 0); TestHealthyAnswersAcrossTheWideningOfTheVersionColumn reproduces it.",
-    "The secrets broker also uses pgmigrate; it stays numbered (CheckNumberedOneToN, integer column), and its tests pass."
+    "The widening must happen only in a release whose pods replace pods that read the version cast: this release (no timestamped migration) leaves an integer column alone; the first release with a timestamped migration widens it, rolling over this release's pods, whose Healthy reads ::bigint."
   ],
-  "deviations": [
-    "Duplicate-identifier refusals already existed in both loaders; this round adds a timestamped-pair case to each, and a CheckIdentifiers rule (numbered 1..last each once, every later version a real 14-digit UTC instant) that replaces Dispatch's TestMigrationSetIsNumberedOneToN.",
-    "Two docs/solutions learnings about renumbering are marked superseded in their front matter."
-  ],
+  "deviations": [],
   "openQuestions": [],
-  "discoveredComplexity": [
-    "The pod's test Postgres is a rootless PostgreSQL 18.6 (zonky binaries, as scripts/dispatch/README.md stands one up) with pgvector 0.8.7 from the PGDG package, on 127.0.0.1:55432; the census tests that append &search_path need a DSN with a query string (?sslmode=disable)."
-  ]
+  "discoveredComplexity": []
 }
