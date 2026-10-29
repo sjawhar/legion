@@ -2,19 +2,15 @@
   "schemaVersion": 1,
   "phase": "review",
   "issue": "INFRA-645",
-  "completed": "2026-10-29T13:45:30Z",
-  "round": 1,
+  "completed": "2026-10-29T14:54:00Z",
+  "round": 2,
   "decision": "approved",
-  "reviewedCodeHead": "6fc96db18c30c7f955dd1852eef90c59fef709bb",
-  "ci": "Required set (rulesets): lint, typecheck, test, pr-title, all completed success at CI head 6fc96db1; compare 6fc96db1...e613cab4 handoffsOnly true (2 files). envoy-go-race (not required) failed in internal/bus TestAStuckDeliveryStillEndsTheKVWatchers, main's flake tracked by dispatch://INFRA-750; the docs package passed there in 1641.536 s of 1800 s (job 123455236887), so round 1's overflow is gone in CI.",
-  "thermonuclear": "deep review APPROVE, no Medium/High; code quality 2 Important + 1 Minor, all judged not a defect (below).",
+  "reviewedCodeHead": "f009ee1aaa2dd44813381870ef8d5b8ffd1da9b2",
+  "previousApproval": "771413e59e55f9e7e254357eaeab5c8f12f34ce8 (code 6fc96db1)",
+  "roundDiff": "771413e5..36be1bcf outside .legion/INFRA-645/: only packages/envoy/.changes/unreleased/INFRA-645-write-rendering-reuse.yaml deleted and pr2497-Fixed-20261029-134737.yaml added (same kind Fixed, same body text, custom Issue pr2497, name matching .changie.yaml fragmentFileFormat). No runtime code changed since 6fc96db1, so the round-1 thermonuclear verdicts stand and the pair was not re-run.",
+  "ci": "Required set lint, test, pr-title success and typecheck skipped (passing) at CI head f009ee1a; compare f009ee1a...36be1bcf handoffsOnly true (2 files).",
   "critical": 0,
   "important": 0,
   "minor": 0,
-  "keyFindings": [
-    {"severity": "not a defect", "file": "packages/envoy/internal/dispatch/docs/livewrite.go", "description": "docTree inside a write transaction returns the write's own tree (quality #1). The plan's C2 chose this, with the read-only contract written in docTree's comment and packages/envoy/AGENTS.md and the checkRendering hook comparing at publish and capture; deep review audited all six callers read-only, including prevalidateLiveOperations' edit engine (13 op kinds leave a parsed tree byte-identical). Recorded under Not proven / risk."},
-    {"severity": "not a defect", "file": "packages/envoy/internal/dispatch/docs/livewrite.go", "description": "forkLive restructure for the 'fork' hook (quality #2): forkLive is also reached from joinRead (livewrite.go:722), so the suggested move to openLiveOperation would drop the check on joined reads' fork builds; the single exit covers cold and warm."},
-    {"severity": "not a defect", "file": "packages/envoy/internal/dispatch/docs/ledger.go", "description": "writtenRendering keeps its own write.tree check (quality #3): it answers 'what this transaction last wrote' with no fork argument and is unchanged by this PR; the changelog's 'one rule' names docTree, capture and margin, which all go through liveWrite.rendering."},
-    {"severity": "not a defect", "file": "packages/envoy/internal/dispatch/docs/write_corpus_test.go", "description": "TestWriteCorpus t.Fatal when DISPATCH_WRITE_CORPUS_OUT is unset (deep minor 1) mirrors TestTokenCorpus's own pattern for DISPATCH_TOKEN_CORPUS_OUT; manual-only workflow, no CI sets these."}
-  ]
+  "keyFindings": []
 }
