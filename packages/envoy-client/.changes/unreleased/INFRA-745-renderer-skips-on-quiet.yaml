@@ -9,4 +9,4 @@ body: |-
     receipts or autosaves.
 time: 2026-10-29T06:00:01.000000000Z
 custom:
-    Issue: envoy-issue-topic-quiet
+    Issue: INFRA-745

@@ -1,0 +1,14 @@
+kind: Fixed
+body: |-
+    A JetStream publish NATS denies is now named a denial rather than reported as an unreachable
+    NATS. The server acknowledges such a publish with nothing, so the denial is read off the
+    connection's last error (`bus.ErrPublishDenied`), where the publish's own answer is a
+    publish-window timeout. An operator sees the difference on Dispatch's outbox: such a publish
+    was released at INFO with no attempt counted, logged as `NATS is unreachable`, and the rest of
+    that scan's backlog was abandoned; now the attempt is counted and backed off by its retry
+    delay, and the ERROR line `dispatch outbox: publish event` names the subject and the server's
+    permissions violation, so a missing grant reads as a missing grant and the events behind it
+    still publish.
+time: 2026-10-29T06:00:03.000000000Z
+custom:
+    Issue: INFRA-745

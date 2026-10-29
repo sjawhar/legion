@@ -11,4 +11,4 @@ body: |-
     activity and silently dropped every agent's. `Notify` itself is unchanged.
 time: 2026-10-29T06:00:00.000000000Z
 custom:
-    Issue: envoy-issue-topic-quiet
+    Issue: INFRA-745
