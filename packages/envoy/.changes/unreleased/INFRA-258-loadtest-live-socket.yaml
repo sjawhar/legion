@@ -1,5 +1,0 @@
-kind: Changed
-body: 'The load test''s dashboard share now opens `GET /ws/live` and subscribes to the event feed as a dashboard tab does, in place of the removed `GET /api/v1/events` stream: `run-step.sh --live <n>` replaces `--sse <n>` (same default), and `summary.json` carries `live` (`live_frames`, `live_order_violations`, `live_frame_ms_from_created_at`, `live_frame_ms_from_write_response`) and `live_bytes` in place of `sse` and `sse_bytes`.'
-time: 2026-10-28T20:40:00.000000000Z
-custom:
-    Issue: INFRA-258

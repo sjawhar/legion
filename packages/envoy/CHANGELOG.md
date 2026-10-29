@@ -1,5 +1,269 @@
 # Changelog
 
+## [21.0.0] - 2026-10-29
+
+### Added
+
+- Every Dispatch `POST` and `PATCH` route takes an optional `Idempotency-Key` request header (INFRA-258). A repeat with the same key and request replays the stored status, headers and body with `Idempotency-Replayed: ?1`; a different request is `422 KEY_REUSED`; and a still-running request is `409 KEY_IN_FLIGHT` with `Retry-After: 1`. A keyed handler finishes detached from its client, is bounded at ten minutes, renews its 60-second lease every 20 seconds, and is counted in shutdown's background wait. A write that committed but lost its answer is `409 KEY_COMMITTED`, so it is never run again. Keys belong to the caller's login and are kept for 24 hours in migration `0137_request_keys`; `POST /api/v1/writes/_test/slow` drives a keyed handler that is slow to finish.
+
+  A write the dashboard pressed runs only as the person who pressed it: every write carrying `Dispatch-Login` is `409 LOGIN_CHANGED` before anything runs when its caller is another person or no person.
+
+  A delivery a process left half-done is finished without anyone asking again. The maintenance pass sends lapsed keyed-send and delivery attempts once under their durable recovery points; migration `0138_pending_delivery_indexes` adds the partial indexes its pending-attempt read uses.
+- Dispatch now keeps a browser tab's delivery, event-feed, and agent-view subscriptions on one `GET /ws/live` socket (INFRA-258). Delivery views retain their snapshots, deltas, freshness, and resume semantics; an `events` view sends `events_start` then event frames; and an `agent` view sends responder, replay, and frame events. The server rotates each socket at a random age from 30 to 60 minutes with `4001 max age`; a page reconnects and resumes without a gap. Shutdown and `POST /api/v1/live/_test/disconnect` close with `1012`; loss of identity closes with `1008`; a full hub queue closes with `1013`; oversized and unencodable frames close with `1009` and `1011`; and a disappeared peer is the ordinary `1006` connection loss. `POST /api/v1/live/_test/rotate` exercises the age rotation. The routes this socket replaces are gone.
+
+  `GET /auth/whoami` answers `event_head`, the newest committed event id as of the sign-in check (INFRA-292). A page's first events subscription on `/ws/live` resumes from it, so a change committed between that answer and the socket opening reaches the page instead of being lost until something else refreshed it.
+
+### Changed
+
+- **Breaking:** Dispatch's live routes before `GET /ws/live` are gone (INFRA-258): `GET /api/v1/events`, `GET /api/v1/agents/{session_id}/stream`, `GET /ws/delivery`, and their disconnect test hooks answer `404`. A tab opened before the deploy shows `Live updates unavailable` until it reloads.
+
+  **Breaking:** the body field `idempotency_key` is gone from `POST /api/v1/broadcasts`; the `Idempotency-Key` header names the send instead. A body that still carries the field is `400 INVALID_JSON`.
+
+  **Deploy with no earlier server running:** an earlier server ignores `Idempotency-Key`, so while both versions serve one database a write whose answer was lost can run once on each when its retry reaches the other version. At one replica the Deployment's `Recreate` stops the old pod first; scale a deployment above one replica to zero before this release starts. Releases after it roll again. A rollback to an earlier release brings the hazard back: open tabs, and a `dispatch` client that saw keys kept in the last five minutes, retry a lost write against the earlier server, which runs it again. Fix forward; if you must roll back, stop this release first, knowing a write in flight then may land twice.
+- The load test's dashboard share now opens `GET /ws/live` and subscribes to the event feed as a dashboard tab does, in place of the removed `GET /api/v1/events` stream: `run-step.sh --live <n>` replaces `--sse <n>` (same default), and `summary.json` carries `live` (`live_frames`, `live_order_violations`, `live_frame_ms_from_created_at`, `live_frame_ms_from_write_response`) and `live_bytes` in place of `sse` and `sse_bytes`.
+
+### Fixed
+
+- An open document no longer closes its connection and syncs again every 33 seconds while nobody types. Dispatch's document socket (`/ws/doc`) now sends each editor a protocol keep-alive every 15 seconds, an awareness update naming no client, so the dashboard provider and a proxy with an idle timeout above 15 seconds keep a quiet document socket open.
+- An issue's `updated_at` never moves backwards: a `PATCH`, claim, or release now keeps the later of the stored value and its statement's clock time, so a dashboard cache does not drop a write that waited behind another issue update. Dispatch also marshals every JSON timestamp in UTC, whatever zone its process runs in.
+
+## [20.1.0] - 2026-10-29
+
+### Added
+
+- Dispatch events say what their write moved, read in the write's own transaction:
+  `issue.created`, `issue.updated` and `issue.closed` carry `changed`, the fields whose value moved
+  (`closed_at` among them on a close or a reopen), and `ancestors`, the issue's parent chain;
+  `comment.created`, `comment.answered`, an issue message's `message.created` and
+  `message.answered`, `ask.opened`, `ask.answered`, `ask.resolved`, and an issue event that moved
+  the status carry `thread_logins`, whose Replies count the write can move; `user_state.updated`
+  carries `changed`, which of `pinned`, `last_read_seq` and `dismissed` moved. Each is absent from
+  an event written before this release. A snooze or an un-snooze of an Inbox row
+  (`PUT`/`DELETE /api/v1/me/asks/{id}/snooze`), which appended no event, now appends the writer's
+  `user_state.updated` when it moves the row, so the writer's other tabs and devices refetch their
+  Inbox; its payload is exactly `{login, changed: ["snoozed"]}`, since every signed-in feed
+  replays it, so it names no ask, no issue state and nobody else, and wakes no one.
+  An events subscription's `events_start` on `GET /ws/live` says `replay_complete: true` when its
+  resume is at or below the log's head, which it replays in full (`cmd/dispatch/README.md`,
+  "Routes"). `references_changed` names a cited block of a document as
+  `{kind: "block", id, ref, artifact_id}` when a write adds or removes a citation of it, and when a
+  version of its document changes or deletes it; a document version also names the target of each
+  mention it kept in a block whose text it changed. `references_changed` is capped at 100 targets
+  of each kind (issue, ask, artifact, block) on its own, where 20 targets of every kind together
+  were: past the cap of a kind the event names none of that kind and lists it in the new
+  `references_changed_truncated_kinds`, still names the targets of the other kinds, and still sets
+  `references_changed_truncated: true` for a reader that predates the kinds.
+- Dispatch answers what a rendered `dispatch://` reference shows without the full read:
+  `GET /api/v1/issues/{key}/summary` is the issue's `{key, project, title, status, documents}`,
+  each document `{id, slug, name, kind, latest_version, primary}` in the order the issue read
+  lists them (`primary` marks the spec, which a reference to a block of the spec names), and
+  `GET /api/v1/projects/{key}/artifacts/{slug}/summary` a project document's
+  `{id, project, slug, name, kind, latest_version}`, resolved as the project document read
+  resolves its slug. Neither reads a version body, an approval, a child or an open ask; both are
+  open to every signed-in caller, as the full reads are.
+- `POST /v1/interests/subscribe` stores the `plugin` and `plugin_version` a registration sends
+  (the npm package the session registers through and that plugin's build, trimmed of surrounding
+  space) on the session entry, and `GET /v1/sessions` and `GET /v1/registry/<id>` return both. A
+  session registered by a plugin that sends neither shows neither key. The `listener subscribe`
+  log line names both.
+- `packages/envoy/loadtest/` reproduces the load of the 2026-10-26 Dispatch outage on one 2-core machine, so a fix of the commit-order lock or the shared pool is measured before and after on the same load. `run-step.sh <name> --events --sessions --requests` sets up a local stack built from the checkout (Postgres with pgvector from the `pgserver` wheel, a 1 ms latency proxy, `nats-server` with JetStream, the listener and Dispatch, no Docker), seeds it once with 1,000 issues and 8,000 comments, resets it to that seed before every step, and runs sessions on agent and issue topics, five kinds of write at production's mix and GET requests at a route mix read from a file. Each step writes `summary.json`, Dispatch's CPU and heap profiles and a `TABLES.md` with delivery latency from the write's arrival and from its commit, write latency by kind, process CPU and memory, the commit-order lock's holds and waiters, every ungranted Postgres lock with its waiter's and first blocker's statements, the dashboard streams' frame latency and order, transaction ids per second, and latency by route. `run-series.sh` runs the six steps from 0.25x to 10x on one build into one `TABLES.md`. Every endpoint comes from the stack's own `stack.json`, and a step checks that NATS, Dispatch and the listener hold the stack's name and random tokens before its first write, so it refuses the pod's live listener and production; a run aimed at another stack with `-allow-foreign` must name every endpoint and token. Each run marks its writes with its own random number, so it counts only its own commits. One run at a time holds a `LOADTEST_ROOT`: `run-step.sh`, `run-series.sh`, and `stack.sh setup`, `start`, `seed`, `reset` and `stop` on a root another run holds are refused, naming the holder, and a series' running step keeps the root if the series process dies. A step in which Dispatch or another stack process exits fails, naming the process, and its row carries a mark; a read of the run's database that fails shows `-` with a mark, never 0, and a step whose commit rows were not read fails; `meta.json` records how busy the box was just before the step. `packages/envoy/loadtest/README.md` says how to run it, what every column means and how the stack differs from production.
+- `GET /api/v1/dashboard/builds` says which dashboard builds Dispatch serves, to any
+  authenticated caller: `{serving, live}`, `serving` the entry chunk (`/assets/index-*.js`) of the
+  build the answering process serves (`""` when it serves none) and `live` the distinct entry
+  chunks of the builds every live server process serves, sorted. The dashboard's update notice
+  reads it (Changed, below).
+- `DISPATCH_DEV_SIGNIN_SHARED_KEY`, only beside `DISPATCH_DEV_SIGNIN=1` (boot refuses it
+  otherwise), gives every dev-sign-in process set to one value one session-cookie key, so a person
+  signed in on one of them is signed in on the others. The key is HMAC-SHA256 of the value under
+  the fixed label `dispatch dev sign-in`, never the value itself, so a production
+  `DISPATCH_SIGNING_KEY` placed there signs no cookie a production server accepts. Unset, each
+  dev-sign-in process still generates a key of its own. The Dispatch browser suite's two-process
+  mode relies on it: `DISPATCH_E2E_PROCESSES=2` (`bun run e2e:multiprocess` in
+  `packages/dispatch`) runs two servers on one database, serving two builds of the dashboard,
+  behind a round-robin proxy, and runs the `*.multiprocess.e2e.ts` specs in Chromium; CI runs it
+  as the `dispatch-browser-multiprocess` job.
+
+### Changed
+
+- Dispatch's document settlement lists a document's comment and ask marks without computing the
+  position of every node, which took a quarter to two thirds of a render on a large spec, and reads
+  the marks its comments and asks record through the `comments_anchor_artifact` and
+  `asks_anchor_artifact` indexes instead of scanning both tables; the marks it lists, the versions
+  it writes and every API response are unchanged.
+- Dispatch's `references_changed` also names a cited document or file, as
+  `{kind: "artifact", id, ref}` (its uuid and the `dispatch://` address its `Referenced by` panel
+  is opened on), so that panel follows a citation made elsewhere. It also names a target whose
+  edge the write kept but whose excerpt it moved, which the target's `Referenced by` panel shows:
+  an edit of an ask's question or a comment's body that changes the head of its text names every
+  target the text still cites, a document version names each target whose stored excerpt it
+  changed, and an issue retitle names the issue's parent and the issues it is blocked by. An issue
+  write that adds or removes a `blocked_by` entry names each blocker it added or removed, and an
+  `issue.created` every blocker it holds, so the blocker's open page keeps its `Referenced by`
+  count current.
+- A Dispatch tab fetches again only what an event can change. The dashboard's rules
+  (`packages/dispatch/web/src/api/event-refresh.ts`) read the events' new fields, so a title change
+  on an issue no page shows sends no read of it, a message on another issue sends no Inbox or
+  pinned-list read, and a reply in a thread the viewer never wrote in sends no Replies read; an
+  event from an older server, without the fields, refreshes what any value could have moved. Every
+  refresh goes through one scheduler (`api/query-refresh.ts`): events are batched for 100 ms, and
+  each read is fetched at most once a second, never twice at once and never by cancelling the
+  request in flight, so a first load's response is kept; an inactive read is only marked stale.
+  A test of a read's data waits, while a fetch of it is out, for the response that lands, and a
+  read left while it owes a refresh stays stale once that fetch lands, so it fetches when it
+  mounts again. An ancestor's detail refreshes on any write of a descendant, whose activity its
+  Children tab shows; the Replies page on a retitle of an issue it lists; the Architecture tab on
+  any write of an issue its tree lists; a document's `Referenced by` panel when the event's
+  `references_changed` names the document, and when an ask or comment that document owns or
+  holds the anchor of is written, re-anchored or edited; and the whole Inbox on the viewer's own
+  snooze in another tab. An event whose `references_changed_truncated_kinds` names the kinds it
+  cut refreshes every read of those kinds alone (every issue detail and issue panel, every ask
+  read, ask list, ask panel and the Inbox, every document panel, every block read), beside the
+  targets of the other kinds it still names; only a truncated event without the kinds refreshes
+  every count and panel. A read the server refuses with a 503 carrying `Retry-After` is retried
+  after that many seconds, at most 30, plus a random share of them again, so tabs refused together
+  do not all come back at once and a proxy's day-long `Retry-After` still retries within a
+  minute; any other failure is still retried after 500 ms.
+  The app's query client (`api/query-client.ts`) gives every mutation's invalidation the same
+  never-cancel rule. A resume of the event feed whose replay Dispatch calls complete
+  (`replay_complete`) refreshes nothing beyond what its events change, where every reconnect, a
+  tab regaining focus among them, refetched every read. A `dispatch://` reference reads the new
+  summary routes in place of the full issue, and an inline link reads no document text. A
+  reference's summary or block read is fetched again on a window focus only after it failed, so a
+  503 past its retries recovers on the open page.
+- A comment's margin-record write (a new anchored comment, a reply, a resolve, a reopen, an edit,
+  and an accept's or a reject's projection) no longer reads and renders the document a second time
+  or walks every anchor mark to weigh it, and the room's update observer no longer renders the
+  publish of a margin write forked from that same room. Responses and stored state are unchanged.
+- A cold read of a Dispatch document now encodes the token representation of its tree once, into
+  one buffer held for that call alone, and takes the document's token and every block's token from
+  that one encoding, where it encoded each block again apart (a nested block once per enclosing
+  block) and then the whole tree once more. It lists the blocks inside each table without
+  measuring every node's position, and reads a mark's name from its Y.Text key without a regular
+  expression. Tokens, block lists, markdown and responses are byte for byte unchanged, errors
+  included.
+- A write to a large Dispatch document costs less CPU and allocates less. Every walk of a
+  document's tree (each anchored comment's refresh on a write, each find, each edit) now counts a
+  text's UTF-16 length without copying it and measures each subtree once, where it copied every
+  text twice and measured each node again for each of its ancestors; an insertion measures the
+  children only of the nodes whose range holds its position. On a replay of a production write
+  load (3 runs each side) the server used a median 236 CPU-seconds where it used 368 (−36%) and
+  allocated 48 GB where it allocated 89 GB (−45%). On a 427 KB generated spec one walk takes 94%
+  less time and allocates 94% fewer bytes (`BenchmarkPositionedWalk`), and its time no longer grows
+  with the document's depth. Positions, sizes, quotes, tokens, rendered markdown and API responses
+  are unchanged.
+- A Markdown document now nests at most 32 typed blocks inside one another, whatever other blocks
+  stand between them, within its 100 blocks. A document write refuses a typed block opened inside
+  32 typed blocks, `400 INVALID_MARKDOWN` with `line N opens a typed block inside 32 typed blocks;
+  a document nests at most 32 typed blocks`, and a write whose own markdown nests within the bound
+  but lands deep enough that the result would nest past it is refused with `the result nests N
+  typed blocks inside one another` (an accepted suggestion's `INVALID_OP` on `replace_with`). 32 is
+  where the browser's parser stops opening `:::` blocks, so the server stores no document the
+  browser would read differently.
+- A write to a Dispatch document with many open anchored comments and asks no longer costs a walk
+  of the whole document per anchor. Every edit, upload, version and new anchored comment refreshes
+  the open anchors from one walk (`pmdoc.FindMarks`) with the same quotes and rows as before. The
+  refresh now lists its rows in a stable order, the open asks and then the unresolved comments,
+  each by creation time and id, so one refresh announces its `*.anchor_refreshed` events in the
+  same order every time; before, the listing had no order. An upload re-anchors every row with
+  one quote finder and one mark writer, and a miss it drops no longer ranks the nearest blocks. A
+  new anchored comment or ask reads its anchor off the tree its write already read, and
+  `MarkRange` and `Unmark` read the document's text ranges in one pass. On a 150 KB document a
+  doc-edit, an anchored comment and an upload cost the same at 80 open anchors as at 10.
+- A write to a Dispatch document no longer renders the whole document before the write when that rendering is already known: the first operation of a write to a resident room takes the room replica's rendering when nothing but the write's own updates reached the replica since its fork was read, and a later operation of the same transaction takes the previous operation's. The room's update observer no longer renders the document again after a published write's update: it takes the write's own rendering on the same condition, and it classifies an update the room already held when it loaded (a write published into a room that its publish loaded) as unchanged. Every rendering, change record and ask-block record is the same as before. On a replay of a production write load (GOMAXPROCS = 2) the server used 31.5 s less CPU in an 8-minute step, 427.0 s against 458.6 s (6.9%, about 0.065 cores).
+- Every Dispatch server process now stores its dashboard build's assets in Postgres at boot,
+  before it listens (migration `0136_dashboard_assets`: `dashboard_builds`, `dashboard_assets` and
+  `dashboard_build_assets`), and answers a file under `/assets/` that its own image lacks from
+  there, through a cache of at most 64 MiB its requests share, with one database read per file
+  however many requests ask for it at once. While a rolling update or a rollback runs two builds
+  behind one load balancer, a page of either build is served its chunks by whichever process
+  answers, so a tab no longer gets a failed chunk or a blank page from the process that did not
+  build it. A restart on a build already stored writes no bytes, and each boot then prunes every
+  build no live server process serves that is not among the 20 started most recently. A publish
+  that fails, a build holding a file over 8 MiB among them, refuses the boot, so a rolling update
+  keeps the processes it would have replaced; `bun run check:asset-sizes` in `packages/dispatch`,
+  run in CI after the build, refuses such a build first. A release before `0136` neither reads
+  nor writes the new tables, so it serves beside this one unchanged, its pages' chunks from its
+  own image alone as before, and rolling back past `0136` is an image rollback.
+- **Breaking:** `DISPATCH_ASSET_STORE_BUCKET` and its S3 reader of earlier builds' assets are
+  removed: a Dispatch that still sets the variable refuses to start, naming it and saying that
+  every server process now keeps its build's dashboard assets in Dispatch's database. Unset it
+  before deploying this release.
+- A dashboard tab now recovers from a failed script, module preload or stylesheet of its build,
+  the main stylesheet included, by reloading while fewer than 3 of its recovery reloads fall in
+  the last 5 minutes, where it reloaded once per tab: a tab open across many deployments recovers
+  from each, and a page whose assets fail on every load still stops after three reloads. The
+  inline script in `index.html` and the lazy-chunk recovery keep the reloads' times on one
+  sessionStorage key, `dispatch.chunk-reloads`, and share the budget; the once-only
+  `dispatch.reloaded-for-chunk` key is neither read nor written.
+- The dashboard's "A new version is available" notice now asks `GET /api/v1/dashboard/builds`
+  once, on focus at most once a minute, where it compared `/healthz` and a fresh `/`, and offers
+  itself only when `live` names exactly one build and it is not the tab's own: while a rolling
+  update or a rollback still runs two builds, no tab is told to reload. A `404` from a process
+  older than the route, a `401`, a `5xx` or a network failure offers nothing.
+- After a dropped connection, the dashboard's first reconnect of the workspace event stream, an
+  agent's live stream, the Delivery and Pipeline socket and a document's socket waits a random
+  time under 2 s, so the tabs one restart or roll dropped reconnect, and refresh their reads,
+  spread over two seconds rather than in one burst. Later attempts back off exponentially with
+  equal jitter, half of `min(1 s × 2^n, 30 s)` plus a random share of the other half, where the
+  streams waited that whole delay and the Delivery socket ±25 % of it. Dispatch's restart close
+  (1012) no longer reopens the Delivery socket at once but waits that first spread, and a
+  document's socket that had opened reconnects after the spread too; its first connect is still
+  immediate, and `online` or a tab turning visible still reconnects the event stream at once.
+
+### Fixed
+
+- A person's reply in a Dispatch comment thread now reaches the agents in that thread (#2366). A
+  reply stores its thread root as `reply_to`, so the outbox sent it to the root's author and the
+  direct parent's author, which were both the person when a person started the thread, and the agent
+  that answered in the thread never heard the person's next reply. The outbox now sends a person's
+  reply, and its edit, to every session that wrote a comment in the thread and to every session that
+  wrote the document the thread is on. It reads these sessions for a whole batch in one query
+  (`outbox/recipients.go`). On an issue with no route and no session claim (unclaimed, or a person
+  holds the claim), a person's comment, and its edit, now reach every session that wrote the issue's
+  primary document (its creator and every version's authors), in an ask's thread too, so a session
+  that wrote the spec without a claim still hears comments on the issue. The outbox reads these
+  sessions for a whole batch in one query too. The claimant's copy is the claimant route of #2225,
+  which these copies join: a session reached more than one way gets one copy. A thread session or a
+  spec session the comment's mentions resolved to (its `mentions`, as the claimant and follower
+  routes read them) hears it once, from the mention, once the mention was delivered; one whose
+  mention failed still gets the outbox's copy. A resolve or a reopen reaches none of the thread,
+  document or spec sessions this change adds; it reaches the route, the claimant and the thread
+  root's author as before, so the reopen that a reply makes in the same transaction tells no new
+  session twice. When a batch's recipient query fails, the comment's owner topic, route and claimant
+  are still sent, and the event is retried for the rest, or released when the process is stopping.
+  A `comment.created` payload no longer carries `suppressed_authors`: the session routes read the
+  comment's `mentions`, and nothing read the field.
+- A leased periodic loop (webhook redelivery, suggestion outcomes, document compaction, reference excerpts, the block index, edit notices, the issue-ask repair, the architecture import and the delivery reconcile) counts each tick in the period it was due in, so a lone process no longer loses a period when a tick's lease or its period query is late.
+- The live event stream reads the event log's cursor check in one statement, so a reset of the log between two reads is no longer taken for a second reset that closes the next subscription.
+- A Dispatch body that nests `:::` blocks deeply no longer freezes the reader's browser tab. The
+  browser's parser, micromark-extension-directive's container construct, read a block's content
+  once for each block around it: a comment of 2,000 nested unclosed `:::a` lines and one long line
+  held the page for about a minute, and one of 1,000 nested blocks, closed again, about 15 s. A
+  construct of `@legion/proof-editor`'s own reads that content once, and an opener inside 32 open
+  blocks reads as the text it is, so each of those bodies now draws in well under a second, in
+  every surface that shows one and in the document editor. A body nesting 32 blocks or fewer reads
+  as before, with three exceptions, since the browser now opens a `:::` block as it opens a quote
+  or a list: after a leading `---` that no later line closes, a `:::name{...}` line opens no typed
+  block at the document's level and reads as text, as a list, a quote or a footnote definition
+  there already did, and a document write reads it so too; a footnote definition inside a `:::`
+  block also defines its footnote for a call in the text before the block, so a document write no
+  longer refuses a footnote definition inside a typed block and reads it where it is written, as
+  it reads one inside a quote, when it holds paragraphs alone and no list item stands around it;
+  one with a list item around it, or holding any other block, whose spacing the browser reads
+  otherwise, is still refused; and a link reference definition inside a `:::` block also defines
+  its reference for the text before the block, so `[r]` before a block holding
+  `[r]: https://u.example` now shows as a link where it showed as the text `[r]`. A document write
+  refuses a link reference definition, so no stored document reads differently, only a body that
+  is displayed. A rule opening a document that holds a typed block at its level is now written
+  `***`, so it no longer reads back as an unclosed front-matter opener that turns the typed block
+  into text.
+- A document write now reads an unclosed code fence inside a typed block in a list item, a quote
+  or a footnote definition as the browser does, without the trailing newline it kept from the
+  blank line its container ends at; one in a quote that a last `>` line with no line feed ends
+  keeps that blank line, as the browser keeps it.
+- A document write now reads the spacing of a list and its items around an unclosed code fence
+  inside a typed block in a list item, a quote or a footnote definition as the browser does.
+
 ## [20.0.0] - 2026-10-28
 
 ### Added
