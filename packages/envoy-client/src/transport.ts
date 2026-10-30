@@ -69,6 +69,11 @@ const SessionWireSchema = z.object({
   // fields and for a session whose plugin predates them.
   plugin: z.string().optional(),
   plugin_version: z.string().optional(),
+  // How the listener delivers to the session: "consumer" when its own session consumer holds its
+  // stored messages, "" for a session on the core path. A listener that reports delivery writes
+  // the key for every session, so an absent key is only a listener predating the field, never a
+  // session on the core path; optional here so such a listener's row still parses.
+  delivery: z.string().optional(),
 });
 
 const RoleWireSchema = z.object({

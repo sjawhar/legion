@@ -2574,6 +2574,68 @@ func TestSubscribeHandlerStoresAndListsThePluginAndItsVersion(t *testing.T) {
 	}
 }
 
+// The production reading of "how many sessions are still on the core path" is taken from these
+// two routes, so each says how the listener delivers to every session it reports: the consumer
+// path by name (session.DeliveryConsumer), the core path as the empty string under a key that is
+// always written. A row with no "delivery" key at all is then a listener older than the field,
+// which that reading must not count as a session on the core path.
+func TestSessionRoutesReportEachSessionsDeliveryMode(t *testing.T) {
+	registry, sessions := setupSessionsTest(t, nil, nil)
+	state := &listenerDeps{registry: registry, sessions: sessions}
+	for id, entry := range map[string]session.SessionEntry{
+		"ses_relayed": {
+			Port:      4242,
+			MachineID: "test-machine",
+			Dir:       "/test/ses_relayed",
+			Delivery:  session.DeliveryConsumer,
+			Epoch:     "epoch-1",
+		},
+		"ses_core": {Port: 4243, MachineID: "test-machine", Dir: "/test/ses_core"},
+	} {
+		if err := sessions.Put(id, entry); err != nil {
+			t.Fatalf("register %s: %v", id, err)
+		}
+	}
+
+	list := httptest.NewRecorder()
+	sessionsHandler(registry, sessions).ServeHTTP(list, httptest.NewRequest(http.MethodGet, "/v1/sessions", nil))
+	if list.Code != http.StatusOK {
+		t.Fatalf("GET /v1/sessions: status %d %s, want 200", list.Code, list.Body.String())
+	}
+	var rows []map[string]any
+	if err := json.NewDecoder(list.Body).Decode(&rows); err != nil {
+		t.Fatalf("decode GET /v1/sessions: %v", err)
+	}
+	byID := map[string]map[string]any{}
+	for _, row := range rows {
+		byID[row["session_id"].(string)] = row
+	}
+	for id, want := range map[string]string{"ses_relayed": session.DeliveryConsumer, "ses_core": ""} {
+		row, listed := byID[id]
+		if !listed {
+			t.Fatalf("GET /v1/sessions did not list %s: %v", id, rows)
+		}
+		got, present := row["delivery"]
+		if !present || got != want {
+			t.Fatalf("the row of %s reports delivery %#v (key present %v), want %q under a key that is always there",
+				id, got, present, want)
+		}
+
+		answer := sessionEntryRoute(t, state, id)
+		if answer.Code != http.StatusOK {
+			t.Fatalf("GET /v1/registry/%s: status %d %s, want 200", id, answer.Code, answer.Body.String())
+		}
+		var single map[string]any
+		if err := json.Unmarshal(answer.Body.Bytes(), &single); err != nil {
+			t.Fatalf("decode GET /v1/registry/%s: %v", id, err)
+		}
+		if got, present := single["delivery"]; !present || got != want {
+			t.Fatalf("GET /v1/registry/%s reports delivery %#v (key present %v), want %q under a key that is always there",
+				id, got, present, want)
+		}
+	}
+}
+
 // A session on a serving port is reached at the host its registration records, so a registration
 // whose host could move the delivery to another authority or path is refused before anything is
 // written: neither the session's interests nor its session entry appear. The same registration

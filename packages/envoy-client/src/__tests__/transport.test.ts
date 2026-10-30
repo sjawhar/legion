@@ -537,6 +537,30 @@ describe("EnvoyClient", () => {
     expect(recorded.requests[0]?.url).toBe("http://listener/v1/sessions");
   });
 
+  test("keeps each session's delivery mode apart from a listener that reports none", async () => {
+    const row = {
+      machine_id: "host-a",
+      dir: "/work",
+      port: 13381,
+      title: "Envoy QA",
+      topics: [],
+      self_subscribed: false,
+    };
+    const relayed = { ...row, session_id: "ses_relayed", delivery: "consumer" };
+    // A listener that reports delivery writes the key for every session, so "" is the core path
+    // and an absent key is a listener older than the field: a measurement of how much traffic is
+    // still on core counts them differently, and neither may become the other here.
+    const core = { ...row, session_id: "ses_core", delivery: "" };
+    const unreported = { ...row, session_id: "ses_unreported" };
+    const recorded = recordFetch([jsonResponse([relayed, core, unreported])]);
+    const client = createEnvoyClient({ baseUrl: "http://listener", fetch: recorded.fetch });
+
+    const sessions = await client.listSessions();
+
+    expect(sessions).toEqual([relayed, core, unreported]);
+    expect(sessions.map((session) => session.delivery)).toEqual(["consumer", "", undefined]);
+  });
+
   test("normalizes non-success responses into a typed API error", async () => {
     const recorded = recordFetch([new Response("invalid role", { status: 400 })]);
     const client = createEnvoyClient({ baseUrl: "http://listener", fetch: recorded.fetch });

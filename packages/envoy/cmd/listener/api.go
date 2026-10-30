@@ -779,6 +779,14 @@ type sessionInfo struct {
 	// predates the fields.
 	Plugin        string `json:"plugin,omitempty"`
 	PluginVersion string `json:"plugin_version,omitempty"`
+	// Delivery is how this listener delivers to the session: session.DeliveryConsumer
+	// ("consumer") when its own session consumer holds its stored messages, empty for a session on
+	// the core path. Written always, never omitempty: the production reading of "0 sessions on
+	// core" has to tell a listener that does not report delivery at all - a build older than this
+	// field, which sends no such key - from a session this listener reports as on the core path.
+	// With omitempty both are a row with no "delivery" key and the two cannot be told apart, so
+	// the count of core sessions would read as zero on a fleet that never reported one.
+	Delivery string `json:"delivery"`
 }
 
 // sessionInterestReadTimeout bounds sessionInfoFor's read of one session's interest record from
@@ -820,6 +828,7 @@ func sessionInfoFor(ctx context.Context, registry *store.Registry, sessionID str
 		LastSeen:       entry.UpdatedAt,
 		Plugin:         entry.Plugin,
 		PluginVersion:  entry.PluginVersion,
+		Delivery:       entry.Delivery,
 	}
 	readCtx, cancel := context.WithTimeout(ctx, sessionInterestReadTimeout)
 	defer cancel()
