@@ -26,14 +26,14 @@ import (
 //     outbox's own record of each topic it published the event to (outbox.publishDestination), so
 //     the list holds what the follower, author and session routes delivered, and never what an
 //     issue's role: route delivered to a role topic, which names no session. It reads the partial
-//     index events_person_words (0142) for the window and filters the array on those rows.
+//     index events_person_words (0145) for the window and filters the array on those rows.
 //   - S2 (message_ids' second arm): the session's sent message deliveries: targeted messages, direct
 //     or on an issue, and broadcast copies. It is an index-only scan of
-//     message_deliveries_session_created (0144), whose predicate is the arm's state = 'sent' and
+//     message_deliveries_session_created (0147), whose predicate is the arm's state = 'sent' and
 //     which carries message_id, so a cached generic plan chooses it over message_deliveries_session
 //     (0051, session_id alone) too.
 //   - S3 (mentioned): the session's sent comment deliveries, a mention's (comment_deliveries_session,
-//     0143).
+//     0146).
 //
 // A delivery row's created_at is its transaction's now(), which for a first attempt can precede the
 // comment's or message's own clock_timestamp() created_at by as long as that transaction ran, so

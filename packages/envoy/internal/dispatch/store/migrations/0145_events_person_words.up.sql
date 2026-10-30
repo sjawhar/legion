@@ -1,4 +1,4 @@
--- 0142_events_person_words.up.sql
+-- 0145_events_person_words.up.sql
 -- GET /api/v1/agents/{session_id}/answers (sessionanswers.List) reads the events a person wrote of
 -- the four types that carry a person's words to a session - an answer, a comment, a message and a
 -- reply to a message - created since its window's start (72 hours by default, at most 7 days),

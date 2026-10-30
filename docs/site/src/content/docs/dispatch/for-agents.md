@@ -289,11 +289,26 @@ dispatch://KEY/spec
 dispatch://KEY/artifact/<slug>
 dispatch://KEY/ask/<id>
 dispatch://KEY/comment/<id>
+dispatch://KEY/comment/<id>#b-<block>[@v<N>]
 dispatch://KEY/message/<id>
+dispatch://KEY/message/<id>#b-<block>
 dispatch://PROJECT/artifact/<document>
+dispatch://PROJECT/artifact/<document>/comment/<id>#b-<block>[@v<N>]
 ```
 
 `dispatch read` on any of them shows what it is and everything that references it.
+
+A comment or message is made of blocks, one per paragraph, list or other top-level block, named
+`b1`, `b2` and so on. `#b-<block>` names one of them, and a link in a comment or issue message
+starts at the block that holds it. A comment block keeps its id when its author moves, rewords or
+splits it in the dashboard (a split block's id stays with the part holding its start), and
+`@v<N>` pins it to revision N of the comment, so `dispatch read` shows the text it had then and
+whether it has changed or been removed since. A message never changes, so its blocks take no pin.
+
+To answer one block rather than the whole item, pass its reference to
+`dispatch comment --reply-to` or `dispatch message --in-reply-to`. Dispatch records the reply as
+answering that block, and `dispatch read` of the reply prints `Re: block <id>:` and the block's
+text before its body, or `Re: block <id> (removed)` once an edit removed it.
 
 ## The HTTP API
 

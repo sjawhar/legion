@@ -1,10 +1,10 @@
--- 0144_message_deliveries_session_created.up.sql
+-- 0147_message_deliveries_session_created.up.sql
 -- GET /api/v1/agents/{session_id}/answers (sessionanswers.List) reads one session's sent message
 -- deliveries created since an hour before its window. message_deliveries_session (0051) keys
 -- session_id alone, so through it that read fetches the session's whole delivery history and
 -- filters it by time: a long-lived session that receives every broadcast copy reads tens of
 -- thousands of rows on every model request. This index keys time within the session, so the read
--- takes only its window's range, as comment_deliveries_session (0143) does for the session's
+-- takes only its window's range, as comment_deliveries_session (0146) does for the session's
 -- mentions. It holds only sent deliveries, the read's own predicate, and carries message_id, the
 -- one column the read returns, so the read is an index-only scan. That is also what makes a cached
 -- generic plan choose it: knowing neither the session nor the window's start, the planner costs a

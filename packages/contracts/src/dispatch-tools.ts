@@ -823,7 +823,9 @@ export const dispatchToolSpecs = [
         .string()
         .describe(
           "A comment id (uuid); replying to any comment in a thread continues that thread (an " +
-            "ask's clarification thread included). To reply to an ask, use reply_to_ask with the " +
+            "ask's clarification thread included). A block reference to one block of the comment " +
+            "(dispatch://KEY/comment/<id>#b-<block id>) replies to that comment and names the " +
+            "passage the reply answers. To reply to an ask, use reply_to_ask with the " +
             "ask id instead."
         )
         .optional(),
@@ -918,6 +920,8 @@ export const dispatchToolSpecs = [
         .describe(
           "Optional message id or dispatch://KEY/message/<id> reference to reply to, threading " +
             "this message under it so the reply stays with the original in the Conversation. " +
+            "A block reference to one block of the message (dispatch://KEY/message/<id>#b-<block id>) " +
+            "replies to that message and names the passage the reply answers. " +
             "A bare id with no issue answers a human's direct message to this session; a " +
             "dispatch://KEY/message/<id> names the issue its message lives on, so that form is a " +
             "reply on that issue."
