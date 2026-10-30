@@ -42,15 +42,19 @@ it, and `nak` when the session cannot take it; `progress` goes out every 20 s un
 whose `deliver` throws is answered `nak`, and from its third delivery `done`, with the replay
 ledger's `liveFailed` showing its failure notice instead. A frame the replay ledger holds, one on
 a subject no followed topic matches, and one stored more than 2 s before its topic was followed
-(`setFollowed`) are answered `done` and never handed over. A frame delivered before, or stored
-before the current epoch began, is `late`, and a host runs no side turn for it. `beginEpoch`
-starts a new epoch for each new NATS connection. `resumePoint` is the stream id and the sequence
-below which the session holds nothing unwritten; `snapshot` and `restore` carry it and the follow
-times across a restart, and the `persist` option is offered a snapshot whenever it changed, so a
-host writes only changes. A session with no resume point of its own, one moving from the core
-path, registers the lowest cursor the replay ledger holds over its agent subject and the followed
-topics the stream stores: its first consumer starts there instead of at the stream's end, so
-nothing stored while it was away is acked away unshown. A registration answer that reports a gap
+(`setFollowed`) whose subject no replay cursor on the frame's stream followed from below the
+frame's sequence either (`since`) are answered `done` and never handed over. A frame delivered
+before, or stored before the current epoch began, is `late`, and a host runs no side turn for it.
+`beginEpoch` starts a new epoch for each new NATS connection. `resumePoint` is the stream id and
+the sequence below which the session holds nothing unwritten; `snapshot` and `restore` carry it
+and the follow times across a restart, and the `persist` option is offered a snapshot whenever it
+changed, so a host writes only changes. A session with no resume point of its own, one moving
+from the core path, registers the lowest cursor the replay ledger holds over its agent subject
+and the followed topics the stream stores: its first consumer starts there instead of at the
+stream's end, so nothing stored while it was away is acked away unshown. Such a session has no
+follow times either, so every topic it follows is stamped at the resume time; the replay cursors
+are what say it followed the topic before then, so its frames are shown and not dropped.
+A registration answer that reports a gap
 or names another stream, and a frame that carries `Envoy-Gap`, call the host's `gap` once. `close`
 answers every unsettled frame, and every later one, `nak`, and leaves consumer mode.
 `streamStores` (`@legion/envoy-client/stream-topics`) says whether the stream stores a topic, so a

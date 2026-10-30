@@ -666,6 +666,82 @@ describe("the move from the core path to consumer delivery", () => {
     expect(delivery.relaying()).toBe(false);
     expect(consumerMode).toEqual([true, false]);
   });
+
+  // A session that ran the released plugin comes back with the core path's cursors and no
+  // consumer snapshot, so `setFollowed` stamps every topic it follows at the resume time and the
+  // follow times say nothing about what it was owed. The cursors are what say since which
+  // sequence it followed each topic, so the comments stored while it was away are shown.
+  describe("a session resuming with cursors and no snapshot", () => {
+    const ROLE_TOPIC = "notifications.role.reviewer";
+    const UNFOLLOWED = "notifications.dispatch.issue.OTHER-1.comment";
+    const RESUMED = T0 + 60 * MINUTE;
+    const state: ReplayState = {
+      stream_id: STREAM,
+      subjects: {
+        [AGENT]: { since: 2, after: 9 },
+        [ISSUE_TOPIC]: { since: 3, after: 12 },
+        [ROLE_TOPIC]: { since: 1, after: 1 },
+      },
+    };
+
+    /** The session back an hour later, following again what its cursors hold. */
+    const resumed = () => {
+      const session = setup({ clock: { now: RESUMED }, state });
+      session.delivery.setFollowed([AGENT, ISSUE_TOPIC, ROLE_TOPIC]);
+      session.delivery.answered(CONSUMER, [AGENT, ISSUE_TOPIC, ROLE_TOPIC]);
+      return session;
+    };
+
+    test("it seeds at the lowest stored cursor, and every topic is stamped at the resume", () => {
+      const { delivery } = resumed();
+
+      // The role topic's cursor is the lowest, but the stream stores no role lane, so the agent
+      // subject's is the seed.
+      expect(delivery.registration().resume).toEqual({ stream_id: STREAM, seq: 9 });
+      expect(delivery.snapshot().follows).toEqual({
+        [ISSUE_TOPIC]: RESUMED,
+        [ROLE_TOPIC]: RESUMED,
+      });
+    });
+
+    test("a comment stored while it was away, past its topic's cursor, is shown once", () => {
+      const { delivery, handed, replies } = resumed();
+
+      delivery.receive(relay({ seq: 20, subject: ISSUE, storedAt: T0 }));
+      delivery.receive(relay({ seq: 20, subject: ISSUE, storedAt: T0, delivered: 2 }));
+      handed[0]?.done();
+
+      expect(seqs(handed)).toEqual([20]);
+      expect(repliesTo(replies, "_INBOX.20.1")).toEqual(["received", "done"]);
+    });
+
+    test("a role forward stored on the agent subject while it was away is shown once", () => {
+      const { delivery, handed } = resumed();
+
+      delivery.receive(relay({ seq: 21, storedAt: T0, eventID: "evt-role-forward" }));
+      delivery.receive(relay({ seq: 21, storedAt: T0, delivered: 2, eventID: "evt-role-forward" }));
+
+      expect(seqs(handed)).toEqual([21]);
+    });
+
+    test("a comment stored at its topic's cursor, which the sweeps handled, stays dropped", () => {
+      const { delivery, handed, replies } = resumed();
+
+      delivery.receive(relay({ seq: 3, subject: ISSUE, storedAt: T0 }));
+
+      expect(seqs(handed)).toEqual([]);
+      expect(repliesTo(replies, "_INBOX.3.1")).toEqual(["received", "done"]);
+    });
+
+    test("a topic followed on neither path stays dropped", () => {
+      const { delivery, handed, replies } = resumed();
+
+      delivery.receive(relay({ seq: 30, subject: UNFOLLOWED, storedAt: T0 }));
+
+      expect(seqs(handed)).toEqual([]);
+      expect(repliesTo(replies, "_INBOX.30.1")).toEqual(["received", "done"]);
+    });
+  });
 });
 
 describe("persisting the snapshot", () => {

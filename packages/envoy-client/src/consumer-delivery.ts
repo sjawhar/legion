@@ -214,8 +214,10 @@ export interface ConsumerDeliveryOptions {
   /**
    * The persisted ledger of frames written (`ReplayEngine.delivered`), which also shows the failure
    * notice of a frame given up on (`ReplayEngine.liveFailed`). Its cursors seed the first
-   * registration of a session that moves from the core path to consumer delivery (`registration`),
-   * and `setConsumerMode` tells it whether the listener relays the stream now (`answered`).
+   * registration of a session that moves from the core path to consumer delivery (`registration`)
+   * and say since which stream sequence that session followed each topic, so a frame stored while
+   * it was away is shown rather than dropped as stored before its follow time (`receive`), and
+   * `setConsumerMode` tells it whether the listener relays the stream now (`answered`).
    */
   readonly ledger: Pick<ReplayEngine, "delivered" | "liveFailed" | "state" | "setConsumerMode">;
   /**
@@ -276,9 +278,10 @@ export interface ConsumerDelivery {
   relaying(): boolean;
   /**
    * Takes the topics the session follows now (its agent subject is always taken, and never kept
-   * among them). A new one is stamped now, so frames stored before it are dropped; a dropped one
-   * is forgotten. Call it before the registration that adds a topic. Persists the snapshot when it
-   * changed.
+   * among them). A new one is stamped now, so frames stored before it are dropped unless the
+   * ledger's cursors say the core path already followed it from below their sequence; a dropped
+   * one is forgotten. Call it before the registration that adds a topic. Persists the snapshot
+   * when it changed.
    */
   setFollowed(topics: Iterable<string>): void;
   /** Offers the snapshot to the host's `persist`, when it changed: call it after a frame is
@@ -389,6 +392,27 @@ export function createConsumerDelivery(options: ConsumerDeliveryOptions): Consum
       if (earliest === undefined || at < earliest) earliest = at;
     }
     return earliest;
+  };
+
+  // Whether the core path's ledger says the session followed a topic reaching this frame's
+  // subject from before the frame was stored. Its cursors are stream sequences, not wall clocks:
+  // `since` is the sequence the session started following that subject at, so a frame above it
+  // was stored while the session followed the topic however long ago it was away. A session
+  // moving from the core path has those cursors and no consumer snapshot, so `setFollowed` stamps
+  // every topic at the resume time; without this, every frame the relay owes it on a followed
+  // topic would be dropped as stored before the follow. Cursors read on another stream say
+  // nothing about this frame's sequence. Read only when the follow time would drop the frame.
+  const followedOnCorePath = (frame: RelayFrame): boolean => {
+    const state = ledger.state();
+    if (state.stream_id !== frame.streamID) return false;
+    for (const [topic, cursor] of Object.entries(state.subjects)) {
+      if (cursor.since === undefined || frame.streamSeq <= cursor.since) continue;
+      const reaches = expandSubscriptionTopics([topic]).some((pattern) =>
+        subjectsOverlap(pattern, frame.subject)
+      );
+      if (reaches) return true;
+    }
+    return false;
   };
 
   const settle = (entry: Entry, body: "done" | "nak") => {
@@ -513,10 +537,14 @@ export function createConsumerDelivery(options: ConsumerDeliveryOptions): Consum
       return;
     }
 
-    // Not followed (the agent subject always is), stored before its topic was followed, or
-    // already written: answered done, and the resume point passes it.
+    // Not followed (the agent subject always is), stored before its topic was followed and not
+    // followed before that on the core path either (`followedOnCorePath`, which recovers what a
+    // session moving from the core path was owed), or already written: answered done, and the
+    // resume point passes it.
     const since = followedAt(frame.subject);
-    const unfollowed = since === undefined || frame.storedAtMs < since - FOLLOW_CLOCK_ALLOWANCE_MS;
+    const unfollowed =
+      (since === undefined || frame.storedAtMs < since - FOLLOW_CLOCK_ALLOWANCE_MS) &&
+      !followedOnCorePath(frame);
     const identity = unfollowed ? undefined : parseIdentity(frame.data);
     if (unfollowed || alreadyWritten(identity)) {
       send(frame.reply, "done");

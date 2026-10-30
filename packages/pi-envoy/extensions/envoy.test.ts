@@ -17438,6 +17438,41 @@ describe("consumer delivery", () => {
     expect(session.replays()).toBe(0);
   });
 
+  // The same session also followed a Dispatch issue topic on the core path, and follows it again
+  // from its replay state. With no consumer snapshot every follow is stamped at the resume, so
+  // only the topic's cursor says since which sequence the session followed it: without that, the
+  // comments stored while it was away would be answered `done` unshown.
+  test("a session moving from the core path is shown a followed issue topic's comments stored while it was away", async () => {
+    const issueTopic = dispatchIssueSubject("LIVE-1", ">");
+    const issueSubject = dispatchIssueSubject("LIVE-1", "issue.updated");
+    const cursors = {
+      type: "custom",
+      customType: "envoy-replay-state",
+      data: {
+        stream_id: STREAM,
+        subjects: { [AGENT]: { since: 2, after: 9 }, [issueTopic]: { since: 3, after: 8 } },
+      },
+    };
+
+    const session = await bootConsumer("consumer-core-to-consumer-issue", { entries: [cursors] });
+    await until(
+      () => session.registrations.some((registration) => registration.topics.includes(issueTopic)),
+      "the registration following the issue topic again"
+    );
+    expect(session.registrations[0]?.delivery?.resume).toEqual({ stream_id: STREAM, seq: 8 });
+
+    // Stored on the issue topic while the session was down, so long before it followed again.
+    const comment = JSON.stringify({ ...JSON.parse(peer("away-comment")), topic: issueSubject });
+    const inbox = session.relay(10, comment, {
+      subject: issueSubject,
+      storedAt: new Date(Date.now() - 60 * 60 * 1_000),
+    });
+    await until(() => session.replies(inbox).includes("done"), "the comment's done");
+
+    expect(session.cards("evt-away-comment")).toHaveLength(1);
+    expect(session.replays()).toBe(0);
+  });
+
   test("the session file carries the follows map only when it changes, and either shape restores", async () => {
     const issueTopic = dispatchIssueSubject("INFRA-7", ">");
 

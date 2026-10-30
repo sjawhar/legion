@@ -8,7 +8,8 @@ body: |-
   settles it), sends `progress` every 20 s while a frame is held unwritten, and answers `done`
   once the host wrote it, or `nak` when the session cannot take it. A frame the replay ledger
   already holds, one on a subject no followed topic matches, and one stored before its topic was
-  followed (2 s of clock allowance) are answered `done` unshown. A frame whose delivery threw is
+  followed (2 s of clock allowance) that no replay cursor on its stream followed from below its
+  sequence either are answered `done` unshown. A frame whose delivery threw is
   answered `nak`, and from its third delivery on `done` with the host's failure notice. A frame
   delivered before, or stored before the current NATS connection's epoch began, is marked `late`,
   so a host never starts a side turn for it. The resume point (the lowest sequence held unwritten
@@ -18,7 +19,9 @@ body: |-
   session with no resume point of its own — one moving from the core path, whose consumer has
   never relayed it a frame — registers the lowest cursor the replay ledger holds over its agent
   subject and the followed topics the stream stores, so its first consumer starts there instead
-  of at the stream's end and what was stored while it was away is still delivered. `answered`
+  of at the stream's end and what was stored while it was away is still delivered; such a session
+  has no follow times either, so the ledger's cursors are what say it followed each topic before
+  the resume, and its stored frames are shown rather than dropped. `answered`
   also records the stored topics the listener relays (`relays`, `relaying`) and puts the replay
   engine in consumer mode, which `close` leaves again. `transport` gains the registration's
   `delivery` field (`DeliveryRequest`, with `epoch` and `resume`) and the answer's

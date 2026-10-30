@@ -38,7 +38,9 @@ those subjects answer only a lane's receipt (`relaysCoreTopic`), and the replay 
 its own that has replay cursors — one coming from a release before this relay, or a session whose
 listener gains the grant later — registers the lowest cursor the engine holds over its agent
 subject and its followed stored topics, so the listener creates the consumer there instead of at
-the stream's end and what was stored while the session was away is still relayed.
+the stream's end and what was stored while the session was away is still relayed, and shown: such
+an id has no follow times either, and a frame stored before a topic's follow time is kept when
+the engine's cursor for it says the core path followed the topic from below that frame's sequence.
 Answered `core`, or not at all, the core path below runs:
 the rollout fallback for a plugin or listener of an earlier release and for a listener whose NATS
 user lacks the session-consumer grant, which dispatch://INFRA-771 removes.
