@@ -17,8 +17,7 @@ func acquireCount(pool *Pool) uint64 {
 // Every way the request pool hands out a connection runs on a pinned context's one connection:
 // the first call takes it, and every later one - cursors, rows, statements, transactions, batches,
 // copies, AcquireFunc - runs on it without another acquire. The request holds it between calls
-// and gives it back at its end, after which a call takes a connection for itself again. Another
-// pool pins nothing.
+// and gives it back at its end, after which a call takes a connection for itself again.
 func TestAPinnedContextRunsEveryCallOnOneConnection(t *testing.T) {
 	pool := smallRequestPool(t, 2, testAcquireBound)
 	ctx, end := PinConnection(WithTransactionTracking(context.Background()))
@@ -62,17 +61,7 @@ func TestAPinnedContextRunsEveryCallOnOneConnection(t *testing.T) {
 		t.Fatal("a pinned context between calls reports no connection held, want its pinned one")
 	}
 
-	background, err := pool.Background()
-	if err != nil {
-		t.Fatalf("open the background pool: %v", err)
-	}
 	var one int
-	if err := background.QueryRow(ctx, "select 1").Scan(&one); err != nil {
-		t.Fatalf("a background-pool read under an idle pin: %v, want it served", err)
-	}
-	if acquires := acquireCount(pool) - before; acquires != 1 {
-		t.Fatalf("a background-pool read took a request-pool connection: %d acquires, want 1", acquires)
-	}
 
 	end()
 	if acquired := pool.Stat().AcquiredConns(); acquired != 0 {
@@ -86,6 +75,55 @@ func TestAPinnedContextRunsEveryCallOnOneConnection(t *testing.T) {
 	}
 	if acquired, acquires := pool.Stat().AcquiredConns(), acquireCount(pool)-before; acquired != 0 || acquires != 2 {
 		t.Fatalf("a read after the pin ended left %d connections taken after %d acquires, want 0 after 2", acquired, acquires)
+	}
+}
+
+// A pinned request is refused a connection of the other guarded pools. It holds its request-pool
+// connection between its statements, so a background, live or settlements connection handed to it
+// would be a second connection of these pools held at once, which is the cycle ErrNestedAcquire
+// exists to prevent; only the request pool serves a pin (PinConnection). Once the pin has ended
+// those pools serve the context as they serve any other caller.
+func TestAPinnedContextIsRefusedTheOtherPools(t *testing.T) {
+	pool := smallRequestPool(t, 2, testAcquireBound)
+	ctx, end := PinConnection(WithTransactionTracking(context.Background()))
+	defer end()
+	var one int
+	if err := pool.QueryRow(ctx, "select 1").Scan(&one); err != nil {
+		t.Fatalf("pin a connection: %v", err)
+	}
+	if !ConnectionHeld(ctx) {
+		t.Fatal("the pin holds no connection, so nothing here is tested")
+	}
+
+	for _, separate := range []struct {
+		name string
+		open func() (*Pool, error)
+	}{
+		{BackgroundPool, pool.Background},
+		{LivePool, pool.Live},
+		{SettlementsPool, pool.Settlements},
+	} {
+		opened, err := separate.open()
+		if err != nil {
+			t.Fatalf("open the %s pool: %v", separate.name, err)
+		}
+		for _, call := range poolCalls("select 1") {
+			if err := call.call(ctx, opened); !errors.Is(err, ErrNestedAcquire) {
+				t.Errorf("%s on the %s pool under a held pin: %v, want ErrNestedAcquire", call.name, separate.name, err)
+			}
+		}
+		if conns := opened.Stat().AcquiredConns(); conns != 0 {
+			t.Errorf("the %s pool has %d connections taken under a held pin, want 0", separate.name, conns)
+		}
+	}
+
+	end()
+	background, err := pool.Background()
+	if err != nil {
+		t.Fatalf("open the background pool: %v", err)
+	}
+	if err := background.QueryRow(ctx, "select 1").Scan(&one); err != nil {
+		t.Fatalf("a background-pool read after the pin ended: %v, want it served", err)
 	}
 }
 

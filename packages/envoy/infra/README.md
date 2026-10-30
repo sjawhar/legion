@@ -643,7 +643,7 @@ its own uid alone.
 SQL's default `max_connections` follows the instance's memory, and from 15 to under 30 GB it is
 500 ([Configure database flags](https://cloud.google.com/sql/docs/postgres/flags),
 `max_connections`). Every app pod opens up to `ConnectionsPerProcess` connections
-(`packages/envoy/internal/dispatch/store/pool.go`: the sum of its counted pools and its permanent
+(`packages/envoy/internal/dispatch/store/pools.go`: the sum of its counted pools and its permanent
 `LISTEN` connections); the listener's and the front door's pods open none. During a roll, every
 app pod that holds connections, the replicas, the surge pod and pods still terminating for up to
 their grace period, times `ConnectionsPerProcess` must fit in the instance's `max_connections` less

@@ -737,3 +737,40 @@ func TestAWriteWhoseRoomReloadsBeforeItsFirstAppendFailsFast(t *testing.T) {
 		t.Fatalf("latest version = %d, want the seeded version only", latest)
 	}
 }
+
+// A read holding its request-pool connection does not wait for a failed room's eviction. The API
+// pins each ordinary read (store.PinConnection), the artifact, issue and project /text routes
+// among them, so such a read holds one request-pool connection from its first statement to its
+// end; the eviction it would wait for flushes and compacts the document under its advisory lock
+// on a request-pool connection of its own (PgVersioned.withRoomLock). A pinned reader waiting
+// here waits on the pool its own connection is out of, so with the readers holding it the
+// eviction's acquire runs out its bound and the readers run out their deadlines on a room nobody
+// compacted.
+func TestAPinnedReadOfAFailedRoomDoesNotWaitForItsEviction(t *testing.T) {
+	service, artifactID := newTestService(t)
+	service.settle = time.Hour
+	hold := make(chan struct{})
+	release := sync.OnceFunc(func() { close(hold) })
+	t.Cleanup(release)
+	service.beforeFailedEviction = func(room string) {
+		if room == artifactID {
+			<-hold
+		}
+	}
+	service.failRoom(artifactID, errors.New("test: the room failed"))
+
+	ctx, end := store.PinConnection(context.Background())
+	defer end()
+	var pinned int
+	if err := service.store.Pool.QueryRow(ctx, `select 1`).Scan(&pinned); err != nil {
+		t.Fatalf("take the read's pinned connection: %v", err)
+	}
+	if !store.ConnectionHeld(ctx) {
+		t.Fatal("the read holds no connection, so nothing here is tested")
+	}
+
+	failsFast(t, "a pinned read of a failed room's text", func() error {
+		_, _, err := service.TextWithToken(ctx, artifactID)
+		return err
+	})
+}

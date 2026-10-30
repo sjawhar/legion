@@ -502,11 +502,14 @@ writer slot, then the advisory lock; a joined read takes the owner row before it
 slot. With the gate held, a writer's wait for the slot is only for the previous writer's publish.
 The gate and the slot are in memory, where Postgres cannot see a wait for them, so no transaction
 may wait for the slot while holding a lock its holder still needs. A failed room's eviction
-flushes and compacts under the advisory lock, so no transaction waits for a failed room to recover
-either: a document operation inside a transaction (a handler's, or settlement's own) that meets one
+flushes and compacts under the advisory lock on a request-pool connection, so nothing holding
+one of these pools' connections waits for a failed room to recover (`store.ConnectionHeld`):
+a document operation inside a transaction (a handler's, or settlement's own) that meets one
 fails with `ErrServiceUnavailable` (`503 DOC_SERVICE_UNAVAILABLE`, whatever failed the room), the
 transaction rolls back, and the caller retries once the room has reloaded; so does a write whose
-room fails before its first append, since the reloaded room may lack it. A room's own load never
+room fails before its first append, since the reloaded room may lack it; and so does a pinned
+read (`store.PinConnection`, every ordinary `GET`), which holds the very connection the eviction
+waits for between its statements. A room's own load never
 waits for that recovery either - the eviction waits in ygo's `CloseRoom` for the load's ready
 barrier, so the two would hold each other - and refuses instead, which ends the eviction; the
 replacement room's load then runs the settlement the failure dropped, which the document's
@@ -612,8 +615,10 @@ refused stays `400 INVALID_ASK_BLOCK`. Anything else is `INTERNAL`, as `writeHan
 it. Only a request that has gone away fails, decided by that request's
 own context rather than the error, since a room a writer's cancelled commit failed carries that
 writer's `context.Canceled` in its cause. Nor does that read wait for a failed room's recovery
-(`docs.WithoutRecoveryWait`): it is `DOC_SERVICE_UNAVAILABLE` at once, where `GET /text`,
-`GET /blocks` and the block route wait.
+(`docs.WithoutRecoveryWait`): it is `DOC_SERVICE_UNAVAILABLE` at once. Neither do `GET /text`,
+`GET /blocks` and the block route, for a reason of their own: each holds its pinned request-pool
+connection, which is what the eviction they would wait for needs (above). What waits for a
+recovery is a reader holding no connection, the document websocket's admission read among them.
 
 A read whose caller holds no transaction fork and whose server holds no resident room reads the
 stored document through a rendering cache. The cache is keyed by `doc_updates`' stored head
@@ -1313,7 +1318,8 @@ event's owner lock deadlocks against a settlement holding that row.
 **One caller, one connection.** Nothing holding a connection of a pool `store.Pool` guards - the
 request pool `store.Open` opens, and the background, live, settlements and outbox pools it wraps
 (`store.Pool.Background`, `Live`, `Settlements`, `Outbox`) - a transaction, an open cursor, which
-holds its connection until it closes, or a connection taken with `Acquire` - acquires a second one
+holds its connection until it closes, a connection taken with `Acquire`, or a request's pinned
+connection, which only the pool that pinned it serves (below) - acquires a second one
 from any of them, and nothing a connection-holder waits for needs one either: neither a
 connection nor a document's writer gate, the outermost wait of every live write, which refuses a
 connection holder at once (above). A transaction holds its connection until it commits, and a
@@ -1359,8 +1365,10 @@ under the read's own open cursor, transaction or unscanned row, or from a gorout
 context while another statement runs, is refused with `ErrNestedAcquire`. `store.ConnectionHeld`
 reports a pinned connection as held, so a document's writer gate refuses a pinned read; writes,
 weight-two reads (whose reads run side by side through `ForConcurrentRead`, which drops the pin)
-and the file downloads (`Deadline` set) are not pinned. Only the request pool pins: a call on
-any other pool takes its own connection as before. `store/pin_test.go` and
+and the file downloads (`Deadline` set) are not pinned. Only the request pool pins, and while the
+pin holds its connection it is the only pool that serves the read: a call on any other guarded
+pool under it is refused with `ErrNestedAcquire`, since it would be a second connection of these
+pools held at once. `store/pin_test.go` and
 `api/pinned_connection_test.go` hold it: one checkout per hot read, the refusals on the pinned
 connection, a one-connection request pool answering an issue read, and the writer gate admitting
 a write and refusing a pinned read.
@@ -1382,7 +1390,7 @@ loops, the live-update readers and the settlements waited for the same connectio
 requests, and past capacity each side starved the other.
 
 So a process's connections are one budget, partitioned rather than grown, 87 in all (`store.ConnectionsPerProcess`), as many as before the partition (the comment
-on `store.sharedPoolSize` is its record): each pool below is sized in `store/pool.go`, and every
+on `store.sharedPoolSize` is its record): each pool below is sized in `store/pools.go`, and every
 connection carries `dispatch-<pool>` in `application_name`, so `pg_stat_activity` groups a
 process's connections by pool (`configurePool`; a connection string's own `application_name` is
 replaced), and the metrics' `pool` label is the part after `dispatch-`.

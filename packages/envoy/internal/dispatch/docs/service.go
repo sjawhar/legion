@@ -2094,8 +2094,9 @@ func (s *Service) failRoomLocked(room string, state *roomState, cause error) {
 	// (onLoadDocument).
 	// Shutdown joins the evictions it did not cause. The consequence differs from settleWG's
 	// gate, which skips the work as well as the waiting: this eviction runs either way, because
-	// awaitRoomRecovery blocks every reader of a failed room on the close(done) below, and a
-	// gated eviction that never ran would strand them. Only the joining is skipped.
+	// awaitRoomRecovery blocks on the close(done) below every reader of a failed room that holds
+	// no connection of its own, and a gated eviction that never ran would strand them. Only the
+	// joining is skipped.
 	tracked := s.addUnlessStopping(&s.evictWG)
 	go func() {
 		if tracked {
@@ -2104,7 +2105,15 @@ func (s *Service) failRoomLocked(room string, state *roomState, cause error) {
 		if s.beforeFailedEviction != nil {
 			s.beforeFailedEviction(room)
 		}
-		_ = s.evictFailed(room, state)
+		if err := s.evictFailed(room, state); err != nil {
+			// Nothing waits on this goroutine's error, and the readers the
+			// close(done) below releases see only that the room has gone: an
+			// eviction that failed - its flush or its compaction refused a
+			// connection, its close returning an error - is otherwise invisible,
+			// and the room reloads from a history it did not compact.
+			slog.Warn("dispatch: a failed document room's eviction did not finish",
+				"room", room, "error", err)
+		}
 		close(done)
 	}()
 }
@@ -2113,12 +2122,17 @@ func (s *Service) failRoomLocked(room string, state *roomState, cause error) {
 // then reloads the persisted document into a new room state. A room without
 // state has nothing to recover, so this lookup must not allocate one.
 //
-// An operation inside a database transaction does not wait: it fails with
-// ErrServiceUnavailable, and the transaction rolls back. The eviction flushes and
-// compacts the document under its advisory lock, which the transaction may hold,
-// or which a transaction waiting on one of its locks may hold; Postgres cannot see
-// a wait here, so it would never break the cycle. Neither does a read whose context
-// WithoutRecoveryWait marked.
+// An operation that holds one of the request pool's connections does not wait: it fails with
+// ErrServiceUnavailable. The eviction flushes and compacts the document under its advisory lock
+// on a request-pool connection of its own (PgVersioned.withRoomLock), so the wait would be a
+// connection holder waiting for a connection, which is what store.ErrNestedAcquire exists to
+// prevent. A transaction holds one, and so does a pinned read (store.PinConnection: every
+// ordinary API read, the /text routes among them) between its statements, which the pool hands
+// to nothing else: twenty-eight such readers waiting here hold every connection the eviction's
+// acquire waits for, so it runs out its bound and they run out their deadlines on a room nobody
+// compacted. The transaction's case is worse still, since its lock may be the one the eviction
+// waits for and Postgres cannot see a wait here to break the cycle. Neither does a read whose
+// context WithoutRecoveryWait marked.
 //
 // A room's own load never calls this: the eviction it would wait for waits for that load
 // (onLoadDocument).
@@ -2133,11 +2147,11 @@ func (s *Service) awaitRoomRecovery(ctx context.Context, room string) error {
 	if failure == nil {
 		return nil
 	}
-	if ledgerFrom(ctx).inTransaction() {
+	if ledgerFrom(ctx).inTransaction() || store.ConnectionHeld(ctx) {
 		// A room that stays failed is otherwise visible only in its callers' 503s, which
 		// reach no server log at all: the refusal is what the server knows about the
 		// failure, so it names the room and the cause it refused for.
-		slog.Warn("dispatch: refuse a transaction's operation on a failed document room",
+		slog.Warn("dispatch: refuse a connection holder's operation on a failed document room",
 			"room", room, "error", failure)
 		return fmt.Errorf("%w: %w", ErrServiceUnavailable, failure)
 	}

@@ -33,8 +33,12 @@ import (
 // statements on it. A read that must run its statements side by side gives each its own context
 // with ForConcurrentRead before the first one runs; each of those takes a connection of its own.
 //
-// Only the request pool pins. A call on any other pool, and a call after end, takes a connection
-// for itself as without a pin, and a context already holding a connection is returned as it is.
+// Only the request pool pins, and it is the only pool a pinned request may take a connection of
+// while it holds its own: a call on any other guarded pool (Background, Live, Settlements,
+// Outbox) under a held pin is refused with ErrNestedAcquire, since it would be a second
+// connection of these pools held at once. A call after end, and one made before the pin's first
+// call, takes a connection for itself as without a pin, and a context already holding a
+// connection is returned as it is.
 func PinConnection(ctx context.Context) (context.Context, func()) {
 	if ConnectionHeld(ctx) {
 		return ctx, func() {}
