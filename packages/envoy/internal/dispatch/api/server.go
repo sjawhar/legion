@@ -410,7 +410,7 @@ type queryer interface {
 // returned wait would block for ever once an events subscription had started the relay.
 func Register(mux *http.ServeMux, lifetime context.Context, deps Deps) Background {
 	s := register(mux, lifetime, deps)
-	return Background{Wait: s.waitBackground, ResumeDeliveries: s.resumeOwedDeliveries, EventHead: s.eventFeedHead}
+	return Background{Wait: s.waitBackground, ResumeDeliveries: s.resumeOwedDeliveries, EventHead: s.eventFeedHead, EventHorizon: s.horizon}
 }
 
 // Background is the work a registered server does beside answering its requests, for the process
@@ -425,6 +425,13 @@ type Background struct {
 	// EventHead is the event_head GET /auth/whoami answers (eventFeedHead): an id at or below which
 	// every event is already final, which a page resumes its first events subscription from.
 	EventHead func(context.Context) (int64, error)
+	// EventHorizon answers the server's one events.Horizon (horizon(), event_stream_relay.go),
+	// built on the first call: the safe horizon every reader that pages the event log by a global
+	// id cursor reads up to. The suggestion outcome sweep takes it (RunSuggestionOutcomeSweep) so
+	// it trails that horizon as the live event feed does, rather than observing on a Horizon of
+	// its own: one per process is what lets its readers share an observation. Only a server
+	// registered with a Store has an event log to answer for.
+	EventHorizon func() *events.Horizon
 }
 
 // waitBackground waits for every keyed handler and every delivery a request left running past

@@ -615,10 +615,12 @@ func main() {
 
 	routesHandler, background := routes.New(appCtx)
 	// LEGION-550: resolves write_suggestions outcomes off the write path, from the events written
-	// since its last pass, woken by every event commit whichever process made it. It takes no
-	// lease: each of its pages holds the suggestion_outcome_cursor row for update, which is what
-	// keeps two processes from judging one page twice.
-	go api.RunSuggestionOutcomeSweep(ctx, database.Pool, eventsWake)
+	// since its last pass, woken by every event commit whichever process made it. It reads the log
+	// only up to the safe horizon of the API server's one events.Horizon, as the live event feed
+	// does, since event ids are not commit order; it takes no lease: each of its pages holds the
+	// suggestion_outcome_cursor row for update, which is what keeps two processes from judging one
+	// page twice.
+	go api.RunSuggestionOutcomeSweep(ctx, database.Pool, background.EventHorizon(), eventsWake)
 	// The Idempotency-Keys past their 24 hours and the deliveries a process that died
 	// left owed, once a minute across the processes under the suggestion-outcomes lease. It is a
 	// timer and not a woken loop because no commit announces either, and it starts here because

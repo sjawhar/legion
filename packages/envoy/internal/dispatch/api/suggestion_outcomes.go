@@ -9,6 +9,7 @@ import (
 	"github.com/jackc/pgx/v5"
 
 	"github.com/sjawhar/envoy/internal/dispatch/duty"
+	"github.com/sjawhar/envoy/internal/dispatch/events"
 	"github.com/sjawhar/envoy/internal/dispatch/store"
 )
 
@@ -215,23 +216,25 @@ var (
 )
 
 // startSuggestionCursor is what the first pass on a database reads before its rules run: the
-// highest event id, which the cursor moves to once the rules have judged every pending suggestion
-// against every event up to it, and up to $1 of the suggestions not yet swept, oldest first (all
-// of them recorded since migration 0154), which the rules judge too and the pass then marks.
+// highest event id at or below the safe horizon ($2, judgeSuggestionPage), which the cursor moves
+// to once the rules have judged every pending suggestion against every event up to it, and up to
+// $1 of the suggestions not yet swept, oldest first (all of them recorded since migration 0154),
+// which the rules judge too and the pass then marks.
 const startSuggestionCursor = `
-select coalesce((select max(id) from events), 0),
+select coalesce((select max(id) from events where id <= $2::bigint), 0),
        array(select id::text from write_suggestions where not swept order by created_at limit $1)`
 
 // readSuggestionPage is what a later pass reads before its rules run, from up to $2 events after
-// the cursor ($1) and up to $2 suggestions not yet swept, oldest first: of the events, those
-// before the first one younger than $3 seconds, as the last id, how many, and their issues and
-// documents; of the suggestions, the ids of those at least $3 seconds old; and the seconds until
-// the first thing it held back for being younger than that is old enough, null when it held back
-// nothing. Events stop at the first young one, rather than skipping it, so the cursor never moves
-// past an event no pass has read.
+// the cursor ($1) and at or below the safe horizon ($4, judgeSuggestionPage) and up to $2
+// suggestions not yet swept, oldest first: of the events, those before the first one younger than
+// $3 seconds, as the last id, how many, and their issues and documents; of the suggestions, the
+// ids of those at least $3 seconds old; and the seconds until the first thing it held back for
+// being younger than that is old enough, null when it held back nothing. Events stop at the first
+// young one, rather than skipping it, so the cursor never moves past an event no pass has read.
 const readSuggestionPage = `
 with page as (
-  select id, issue_key, artifact_id, created_at from events where id > $1 order by id limit $2
+  select id, issue_key, artifact_id, created_at from events
+   where id > $1 and id <= $4::bigint order by id limit $2
 ),
 young as (
   select id, created_at from page
@@ -262,12 +265,12 @@ with swept as (
 )
 update suggestion_outcome_cursor set event_id = coalesce($2::bigint, event_id)`
 
-// sweepSuggestionOutcomePages judges page after page, each in a transaction of its own
+// sweepSuggestionOutcomePages judges page after page up to safe, each in a transaction of its own
 // (judgeSuggestionPage), until one comes back short, and returns when what it held back for being
 // younger than settle is old enough to judge, or the zero time when it held back nothing.
-func sweepSuggestionOutcomePages(ctx context.Context, pool *store.Pool, page int, settle time.Duration) (next time.Time, err error) {
+func sweepSuggestionOutcomePages(ctx context.Context, pool *store.Pool, safe int64, page int, settle time.Duration) (next time.Time, err error) {
 	for {
-		full, settlesIn, err := judgeSuggestionPageInTransaction(ctx, pool, page, settle)
+		full, settlesIn, err := judgeSuggestionPageInTransaction(ctx, pool, safe, page, settle)
 		switch {
 		case err != nil:
 			return time.Time{}, err
@@ -282,13 +285,13 @@ func sweepSuggestionOutcomePages(ctx context.Context, pool *store.Pool, page int
 
 // judgeSuggestionPageInTransaction is judgeSuggestionPage in a transaction of its own, committed
 // when the page is judged.
-func judgeSuggestionPageInTransaction(ctx context.Context, pool *store.Pool, page int, settle time.Duration) (full bool, settlesIn time.Duration, err error) {
+func judgeSuggestionPageInTransaction(ctx context.Context, pool *store.Pool, safe int64, page int, settle time.Duration) (full bool, settlesIn time.Duration, err error) {
 	tx, err := pool.Begin(ctx)
 	if err != nil {
 		return false, 0, err
 	}
 	defer func() { _ = tx.Rollback(context.Background()) }()
-	full, settlesIn, err = judgeSuggestionPage(ctx, tx, page, settle)
+	full, settlesIn, err = judgeSuggestionPage(ctx, tx, safe, page, settle)
 	if err != nil {
 		return false, 0, err
 	}
@@ -296,18 +299,19 @@ func judgeSuggestionPageInTransaction(ctx context.Context, pool *store.Pool, pag
 }
 
 // judgeSuggestionPage runs the three rules over one page, in tx, which holds the cursor row for
-// update until it ends. It reports whether the page was full - more events or suggestions may be
-// waiting - and, when it held back an event or a suggestion younger than settle, how long until
-// that one is old enough to judge.
+// update until it ends. A page holds only events at or below safe, the safe horizon the pass read
+// (suggestionOutcomePass). It reports whether the page was full - more events or suggestions may
+// be waiting - and, when it held back an event or a suggestion younger than settle, how long
+// until that one is old enough to judge.
 //
 // A cursor still null is the first pass on this database: the rules run over every suggestion,
-// as each pass of the previous release did, and the cursor moves to the highest event id read
-// before they ran. After that a page is the events after the cursor and the suggestions not yet
-// swept, and the rules run over the suggestions those can touch (touchedSuggestions). A
-// suggestion is recorded after its write commits, outside the events' commit-order lock
-// (persistSuggestions), so it can commit after an event that started later than it did and that
-// an earlier page already read; judging each newly recorded suggestion against all its events,
-// rather than only this page's, is what still finds that event.
+// as each pass of the previous release did, and the cursor moves to the highest event id at or
+// below safe. After that a page is the events after the cursor and at or below safe, and the
+// suggestions not yet swept, and the rules run over the suggestions those can touch
+// (touchedSuggestions). A suggestion is recorded after its write commits (persistSuggestions), so
+// it can commit after an event that started later than it did and that an earlier page already
+// read; judging each newly recorded suggestion against all its events, rather than only this
+// page's, is what still finds that event.
 //
 // An event or suggestion younger than settle waits for a later page, also when an older event of
 // its issues or document is in this one (touchedSuggestions). The rules see every event committed
@@ -317,14 +321,18 @@ func judgeSuggestionPageInTransaction(ctx context.Context, pool *store.Pool, pag
 // comment on the source counts as acted_on, both acted_on rules running before the overridden
 // one, rather than the comment being judged alone the moment it woke the loop.
 //
-// Reading `id > cursor` skips no event because events.id is commit order today:
-// events.Broker.Append takes the database-wide commit-order lock before its insert and holds it
-// until its transaction commits, and nothing else inserts an event
-// (TestOnlyTheBrokerInsertsEvents), so no id at or below a committed one can still commit, and a
-// page holds only committed events. That rests on the commit-order lock in events.Broker.Append,
-// which a later change may replace: one that does must move this sweep, with the event log's
-// other readers by id, to reading only below the id under which nothing can still commit.
-func judgeSuggestionPage(ctx context.Context, tx pgx.Tx, page int, settle time.Duration) (full bool, settlesIn time.Duration, err error) {
+// Reading `id > cursor` alone would skip an event. An event draws its id from one sequence when
+// its write inserts the row, and two writes that wait on nothing commit out of id order
+// (events.Broker.Append), so an id below a committed one can still commit: a page that read the
+// higher one and moved the cursor there would never read the lower. The cap at safe is what
+// closes that: every event at or below the safe horizon H of the server's one events.Horizon is
+// final - committed and visible to every later statement, or rolled back for good - so a page of
+// (cursor, H] holds every event it passes over, and the cursor, which moves at most to H, never
+// stands above an id that can still commit. The event of such an id is read by a pass once the
+// horizon has reached it: its own commit notifies dispatch_events, which wakes the loop, and
+// while the horizon stands below it the pass asks for one of its own (suggestionOutcomePass,
+// RunSuggestionOutcomeSweep).
+func judgeSuggestionPage(ctx context.Context, tx pgx.Tx, safe int64, page int, settle time.Duration) (full bool, settlesIn time.Duration, err error) {
 	var cursor *int64
 	if err := tx.QueryRow(ctx, `select event_id from suggestion_outcome_cursor for update`).Scan(&cursor); err != nil {
 		return false, 0, fmt.Errorf("read the suggestion outcome cursor: %w", err)
@@ -332,7 +340,7 @@ func judgeSuggestionPage(ctx context.Context, tx pgx.Tx, page int, settle time.D
 	if cursor == nil {
 		var high int64
 		var fresh []string
-		if err := tx.QueryRow(ctx, startSuggestionCursor, page).Scan(&high, &fresh); err != nil {
+		if err := tx.QueryRow(ctx, startSuggestionCursor, page, safe).Scan(&high, &fresh); err != nil {
 			return false, 0, fmt.Errorf("read where the first suggestion outcome pass starts: %w", err)
 		}
 		if err := runSuggestionRules(ctx, tx, everySuggestionRules); err != nil {
@@ -349,7 +357,7 @@ func judgeSuggestionPage(ctx context.Context, tx pgx.Tx, page int, settle time.D
 		issues, documents, fresh []string
 		settlesInSeconds         *float64
 	)
-	if err := tx.QueryRow(ctx, readSuggestionPage, *cursor, page, settle.Seconds()).Scan(
+	if err := tx.QueryRow(ctx, readSuggestionPage, *cursor, page, settle.Seconds(), safe).Scan(
 		&last, &events, &issues, &documents, &fresh, &settlesInSeconds,
 	); err != nil {
 		return false, 0, fmt.Errorf("read the events and suggestions after the outcome cursor: %w", err)
@@ -380,6 +388,50 @@ func runSuggestionRules(ctx context.Context, tx pgx.Tx, rules [3]string, args ..
 	return nil
 }
 
+// suggestionOutcomePass is one pass of the loop: it reads the safe horizon of the event log once
+// (events.Horizon.Safe, one observation, which waits on no transaction), judges page after page
+// up to it (sweepSuggestionOutcomePages), and answers when the loop should run again.
+//
+// A safe of 0 is a horizon that has proven nothing yet: one snapshot never proves its own A
+// (events.Horizon), so the first pass after a process starts reads 0 however much the log holds.
+// That pass takes a horizon with Await instead, which is at or above every id committed before
+// the call, rather than start a null cursor at the highest id at or below 0 (startSuggestionCursor)
+// and leave every later pass paging the log from its start.
+//
+// A pass that leaves an id standing above the horizon it read has read less than the log holds:
+// an event that committed while a lower id was still open, which this pass could not judge by. It
+// asks for a pass schedule.minGap away rather than for the soonest thing it held back, because
+// nothing announces the moment those open writes end and the horizon moves, so a horizon held
+// back costs one pass per gap instead of a loop re-reading as fast as it can. The wait loses
+// nothing: each pass works out afresh what it held back for being younger than settle, and the
+// late commit's own notification on dispatch_events wakes the loop as any other commit does.
+//
+// Two answers say an id stands above what this pass read, and a pass needs both: Pending, this
+// pass's own observation having seen an id above H, and a horizon now proven past the safe this
+// pass read, which is what Pending reads as settled once another reader of the one Horizon - the
+// relay, the delivery hub - proves that observation while this pass's pages run. Neither alone
+// covers the other: without the second, a pass whose gap closed under it would ask for nothing
+// and leave those events to the next commit's wake.
+func suggestionOutcomePass(ctx context.Context, pool *store.Pool, horizon *events.Horizon, schedule suggestionSchedule) (time.Time, error) {
+	safe, err := horizon.Safe(ctx)
+	if err != nil {
+		return time.Time{}, fmt.Errorf("read the event log's safe horizon: %w", err)
+	}
+	if safe == 0 {
+		if safe, err = horizon.Await(ctx); err != nil {
+			return time.Time{}, fmt.Errorf("await the event log's safe horizon: %w", err)
+		}
+	}
+	next, err := sweepSuggestionOutcomePages(ctx, pool, safe, schedule.page, schedule.settle)
+	if err != nil {
+		return time.Time{}, err
+	}
+	if horizon.Pending() || horizon.Proven() > safe {
+		return time.Now().Add(schedule.minGap), nil
+	}
+	return next, nil
+}
+
 // RunSuggestionOutcomeSweep resolves LEGION-550's write_suggestions off the write path entirely:
 // whether the agent acted on a suggestion (cited it, or updated the suggested issue directly) or
 // overrode it (kept working on what it filed instead). It stops when ctx is done.
@@ -389,10 +441,16 @@ func runSuggestionRules(ctx context.Context, tx pgx.Tx, rules [3]string, args ..
 // whichever process made it, and which the hub also signals after each successful LISTEN, so what
 // was written while the listener had no connection is caught up then - and when a pass asks for
 // one: once what it held back for being under a minute old is a minute old
-// (judgeSuggestionPage), and a minute after a pass that failed. Passes start at least a minute
+// (judgeSuggestionPage), once the gap the safe horizon left open may have closed
+// (suggestionOutcomePass), and a minute after a pass that failed. Passes start at least a minute
 // apart, and each reads page after page until it has caught up (sweepSuggestionOutcomePages). A
 // nil wake leaves the loop with its start pass and the passes those ask for. With nothing
-// written and nothing due it holds no timer and makes no statement.
+// written, nothing due and the horizon current it holds no timer and makes no statement.
+//
+// It reads the event log only up to the safe horizon of horizon, the server's one events.Horizon
+// (api.Background's EventHorizon, the Horizon the live event feed reads through too): event ids
+// are not commit order, so a cursor moved by an uncapped `id > cursor` read could pass an event
+// that was still committing and never judge by it (judgeSuggestionPage).
 //
 // It takes no lease (duty.WokenLoop.Lease empty), as the embedding queue takes none: every page
 // runs in a transaction holding the suggestion_outcome_cursor row `for update`
@@ -410,17 +468,17 @@ func runSuggestionRules(ctx context.Context, tx pgx.Tx, rules [3]string, args ..
 // a suggestion that commits after every pass its own write's event earned stays unswept until the
 // next event wakes the loop, which is no later than anything could resolve it, and is judged then
 // against all its events.
-func RunSuggestionOutcomeSweep(ctx context.Context, pool *store.Pool, wake <-chan struct{}) {
-	runSuggestionOutcomeSweep(ctx, pool, wake, suggestionOutcomeSchedule)
+func RunSuggestionOutcomeSweep(ctx context.Context, pool *store.Pool, horizon *events.Horizon, wake <-chan struct{}) {
+	runSuggestionOutcomeSweep(ctx, pool, horizon, wake, suggestionOutcomeSchedule)
 }
 
-func runSuggestionOutcomeSweep(ctx context.Context, pool *store.Pool, wake <-chan struct{}, schedule suggestionSchedule) {
+func runSuggestionOutcomeSweep(ctx context.Context, pool *store.Pool, horizon *events.Horizon, wake <-chan struct{}, schedule suggestionSchedule) {
 	ctx = store.WithTransactionTracking(ctx)
 	duty.RunWoken(ctx, duty.WokenLoop{
 		Wake:   wake,
 		MinGap: schedule.minGap,
 		Pass: func(ctx context.Context) time.Time {
-			next, err := sweepSuggestionOutcomePages(ctx, pool, schedule.page, schedule.settle)
+			next, err := suggestionOutcomePass(ctx, pool, horizon, schedule)
 			if err != nil && ctx.Err() == nil {
 				slog.Warn("dispatch: suggestion outcome sweep failed", "error", err)
 				next = time.Now().Add(schedule.minGap)

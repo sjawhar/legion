@@ -8,6 +8,7 @@ import (
 
 	"github.com/jackc/pgx/v5/pgxpool"
 
+	"github.com/sjawhar/envoy/internal/dispatch/events"
 	"github.com/sjawhar/envoy/internal/dispatch/store"
 	"github.com/sjawhar/envoy/internal/dispatch/store/storetest"
 )
@@ -22,8 +23,8 @@ var sweepRunnerSchedule = suggestionSchedule{minGap: 50 * time.Millisecond, page
 // run only over a page that holds something (judgeSuggestionPage).
 const (
 	cursorHeld    = "select event_id from suggestion_outcome_cursor for update"
-	firstPassRead = "select coalesce((select max(id) from events), 0)"
-	laterPageRead = "from events where id > $1 order by id limit $2"
+	firstPassRead = "select coalesce((select max(id) from events where id <= $2::bigint), 0)"
+	laterPageRead = "where id > $1 and id <= $4::bigint order by id limit $2"
 	judgingRule   = "update write_suggestions ws"
 )
 
@@ -65,6 +66,12 @@ func recordedPool(t *testing.T, database *store.Store) (*store.Pool, *storetest.
 	t.Helper()
 	recorder := &storetest.StatementRecorder{}
 	return storetest.Traced(t, database.Pool, recorder, nil), recorder
+}
+
+// sweepHorizon is one runner's events.Horizon, one per process as a server keeps one
+// (api.Background's EventHorizon), observing through that process's own pool.
+func sweepHorizon(pool *store.Pool) *events.Horizon {
+	return events.NewHorizon(pool)
 }
 
 // runSweep runs run on a goroutine until the test ends, and fails the test if it does not return
@@ -127,8 +134,12 @@ func TestTwoSuggestionSweepRunnersNeverJudgeOnePageTwiceAndBothPass(t *testing.T
 		t.Fatalf("hold the cursor: %v", err)
 	}
 
-	runSweep(t, func(ctx context.Context) { runSuggestionOutcomeSweep(ctx, firstPool, nil, sweepRunnerSchedule) })
-	runSweep(t, func(ctx context.Context) { runSuggestionOutcomeSweep(ctx, secondPool, nil, sweepRunnerSchedule) })
+	runSweep(t, func(ctx context.Context) {
+		runSuggestionOutcomeSweep(ctx, firstPool, sweepHorizon(firstPool), nil, sweepRunnerSchedule)
+	})
+	runSweep(t, func(ctx context.Context) {
+		runSuggestionOutcomeSweep(ctx, secondPool, sweepHorizon(secondPool), nil, sweepRunnerSchedule)
+	})
 	if waiting := storetest.WaitForLockWaiters(t, gate, 2, 30*time.Second); waiting < 2 {
 		t.Fatalf("%d of the two runners' passes reached the cursor lock, want both: the cursor row, not a lease, is what serialises them", waiting)
 	}
@@ -166,7 +177,9 @@ func TestALoneSuggestionSweepRunnerPassesOnEveryWake(t *testing.T) {
 	database := storetest.Open(t)
 	pool, statements := recordedPool(t, database)
 	wake := make(chan struct{}, 1)
-	runSweep(t, func(ctx context.Context) { runSuggestionOutcomeSweep(ctx, pool, wake, sweepRunnerSchedule) })
+	runSweep(t, func(ctx context.Context) {
+		runSuggestionOutcomeSweep(ctx, pool, sweepHorizon(pool), wake, sweepRunnerSchedule)
+	})
 	passes := func() int { return countStatements(statements.Statements(), cursorHeld) }
 
 	const wakes = 5

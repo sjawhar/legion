@@ -730,19 +730,25 @@ replaced, so under load each runs no more often than that ticker did.
 - The suggestion outcome sweep (`api.RunSuggestionOutcomeSweep`) is woken by `dispatch_events`
   (`0107`), which every event commit notifies whichever process made it. Passes start at least
   60 s apart. A pass reads the events after its cursor
-  (`suggestion_outcome_cursor`, `0153`) and the suggestions no pass has judged yet
-  (`write_suggestions.swept`, `0154`), in pages of 1,000, each page in a transaction that holds the
-  cursor row `for update`, and judges only the pending suggestions those can resolve: the newly
-  recorded ones, against all their events, and those whose source issue, source document or
-  suggested issue a page's event names. An event or suggestion less than 60 s old waits for a
-  later pass, which the pass asks for as its due time, so an agent's writes within a minute are
-  judged together. The first pass on a database, whose cursor is null, judges every pending
-  suggestion once, as every pass of the release before it did. A failed pass is retried a minute
-  later. Like the embedding queue, it takes no lease: the cursor row each page holds is what
-  serialises two processes woken by one commit, the first pass included, since the row is there
-  from `0153` with a null `event_id`. The second process's page waits on the row and then reads
-  the cursor the first advanced, so it judges what the first did not rather than the same page
-  twice, and no wake is given up to another process's pass.
+  (`suggestion_outcome_cursor`, `0153`) and at or below the event log's safe horizon, as the
+  per-process relay behind a reader's events subscription reads: event ids are not commit order,
+  so a cursor moved past an event that could still commit would never judge by it. The pass takes
+  that horizon once (`events.Horizon.Safe`, the server's one `Horizon`, which waits on no
+  transaction), and one left with an event above it asks for a pass 60 s on rather than re-reading
+  at once, so a horizon an open transaction holds back costs one pass a minute; the late commit's
+  own `dispatch_events` notification wakes the loop as any other does. A pass also reads the
+  suggestions no pass has judged yet (`write_suggestions.swept`, `0154`), in pages of 1,000, each
+  page in a transaction that holds the cursor row `for update`, and judges only the pending
+  suggestions those can resolve: the newly recorded ones, against all their events, and those
+  whose source issue, source document or suggested issue a page's event names. An event or
+  suggestion less than 60 s old waits for a later pass, which the pass asks for as its due time,
+  so an agent's writes within a minute are judged together. The first pass on a database, whose
+  cursor is null, judges every pending suggestion once, as every pass of the release before it
+  did. A failed pass is retried a minute later. Like the embedding queue, it takes no lease: the
+  cursor row each page holds is what serialises two processes woken by one commit, the first pass
+  included, since the row is there from `0153` with a null `event_id`. The second process's page
+  waits on the row and then reads the cursor the first advanced, so it judges what the first did
+  not rather than the same page twice, and no wake is given up to another process's pass.
 - The delivery settings both GitHub intakes route by are one cache per process
   (`delivery.SettingsCache`), read at start and again when `delivery_settings` changes:
   `delivery_settings_changed` notifies `dispatch_delivery_settings` (`0155`) for a change to any
