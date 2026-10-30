@@ -256,9 +256,10 @@ func (w *servePortWorkers) pushUntilSettled(push servePortPush) (retry, ended bo
 		switch verdict {
 		case servePortConsumerRelays:
 			// The session's consumer holds this message after all - its entry moved to consumer
-			// delivery while the push waited - and the relay of that consumer pushes it. The
-			// attempt the path that handed this push over recorded is cleared and no dedupe key
-			// is recorded: only a real push writes what the relay reads
+			// delivery while the push waited - and the relay of that consumer pushes it, which
+			// target answers only while that relay would push rather than skip this message
+			// (relayAcksOnAnAttempt). The attempt the path that handed this push over recorded is
+			// cleared and no dedupe key is recorded: only a real push writes what the relay reads
 			// (session.SessionEntry.ConsumerRelaysStored).
 			applyDeliveryOutcome(cfg, push.item, deliveryOutcome{
 				sessionID:    push.sessionID,
@@ -339,7 +340,7 @@ const (
 )
 
 // target reads push's session's current state: its entry, and what to do with the push. The
-// verdicts are session.Deliverer.Resolve's, read again at each try because the entry may have
+// verdicts are session.Deliverer.Resolve's, resolved again at each try because the entry may have
 // moved since the path that handed the push over resolved it: a session whose consumer holds this
 // stored message is relayed from there, one that subscribes on NATS itself with no port has it,
 // and a message stored below a consumer's start is in no consumer, so this push is how the session
@@ -349,16 +350,30 @@ func (w *servePortWorkers) target(push servePortPush) (session.SessionEntry, ser
 	if err != nil {
 		return session.SessionEntry{}, servePortGone
 	}
-	if entry.ConsumerRelaysStored(push.storedSubject(), push.storedSeq) {
-		return entry, servePortConsumerRelays
+	interest, err := w.cfg.registry.Get(context.Background(), push.sessionID)
+	if err != nil {
+		interest = store.Interest{SessionID: push.sessionID}
 	}
-	if entry.SelfSubscribed && entry.Port == 0 {
+	// The copy the session's consumer may hold is this message as it is stored (storedSubject).
+	// A push the relay of that consumer would ack unpushed, on the attempt the path that handed
+	// this push over recorded, is resolved against no stored copy instead: the relay delivers
+	// nothing it skips, so this worker is the only delivery left and finishes its push
+	// (relayAcksOnAnAttempt).
+	storedSubject := push.storedSubject()
+	if relayAcksOnAnAttempt(w.cfg.followedTopicRules(), push.sessionID, entry, push.item) {
+		storedSubject = ""
+	}
+	result, err := w.cfg.deliverer.Resolve(push.item, interest, &entry, storedSubject, push.storedSeq)
+	switch {
+	case err != nil:
+		return entry, servePortGone
+	case result.Relayed:
+		return entry, servePortConsumerRelays
+	case result.Push:
+		return entry, servePortPushIt
+	default:
 		return entry, servePortSkip
 	}
-	if !ownsServingPortSession(w.cfg, push.sessionID, entry) {
-		return entry, servePortGone
-	}
-	return entry, servePortPushIt
 }
 
 // ownsServingPortSession reports whether sessionID, of entry, is a serving-port session this

@@ -3108,9 +3108,18 @@ listener's NATS user manages the consumer: it creates, reads, pulls, acknowledge
   unpushed, and one whose delivery mode the session does not advertise is acked with a
   `delivery_failed` exception. So one upstream event published on several of a session's topics
   under one dedupe key (`contracts/normalize.go`) reaches its port once.
-  Because the relay reads those two caches, only a real push may write what it reads: a path that
-  does not push to the session records nothing for it (the bullet below), so a record the relay
-  finds always names a copy the session has.
+  Because the relay reads those two caches, a record it finds never names a message nobody
+  delivers. Two rules hold that. A path that does not push to the session records nothing for it
+  (the bullet below). And a path whose own attempt record the relay would skip a message by
+  finishes its push rather than dropping it (`relayAcksOnAnAttempt`, which the serving-port
+  workers' `target` reads): an attempt record is a push in flight, not a delivery. That is the
+  case of a serving-port session whose entry flips from core delivery back to consumer delivery
+  under a push already handed to its worker -- a registration answered `core` on a transient
+  consumer call failure, then one that finds the consumer again -- where the relay acks the
+  message unpushed on that attempt and the worker's push, with its 204 writing the dedupe key, is
+  the delivery. A dedupe record over the attempt is a push that did reach the port, so the worker
+  drops its own, and a portless session refuses nothing (its frames are published whatever the
+  caches hold), so the worker leaves that message to the relay.
 - **No consumer:** a listener whose consumer call the server refuses for want of a grant
   (`bus.ErrConsumerNotGranted`) answers `core` with `no_grant`, logs one WARN for the episode, and
   answers `no_grant` without a server call for 10 minutes (`noGrantBackoff`); any other failed call

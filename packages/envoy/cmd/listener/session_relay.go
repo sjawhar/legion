@@ -930,6 +930,25 @@ func (m *sessionRelays) refuseFollowedTopic(sessionID string, item contracts.Env
 	return true
 }
 
+// relayAcksOnAnAttempt reports whether the relay of sessionID's consumer, at entry, would ack item
+// unpushed on an attempt record another path left for it: refuseFollowedTopic reads such a record
+// as a copy the session already has (followedTopicAttempted), while an attempt record is a push in
+// flight, not a delivery. Only a serving-port session's relay refuses anything - a portless
+// session's frames are published whatever the caches hold (relayNATS) - and only on a topic the
+// session follows, since a message on its own agent subject, a role forward included, is never
+// refused. A dedupe record over the attempt is a delivery that did reach the session, so the
+// message is the relay's to skip and nothing else owes it a push.
+//
+// The path holding such a push finishes it rather than dropping it (serve_port_workers.go's
+// target): the record it wrote is what the relay would skip the message by, so dropping the push
+// loses the message with no exception.
+func relayAcksOnAnAttempt(rules followedTopicRules, sessionID string, entry session.SessionEntry, item contracts.Envelope) bool {
+	if entry.Port <= 0 || isControlTopic(item.Topic) {
+		return false
+	}
+	return rules.attemptCache.Seen(item.DedupeKey, sessionID) && !rules.dedupeCache.Seen(item.DedupeKey, sessionID)
+}
+
 // decodeStoredEnvelope decodes a stored message into item under the durable path's rules
 // (listenerDeliveryHandler): JSON, the wire rules, then the envelope's own.
 func decodeStoredEnvelope(data []byte, item *contracts.Envelope) error {
