@@ -1,0 +1,6 @@
+kind: Added
+body: |-
+    Dispatch splits every comment and message into blocks that a reference can name (`dispatch://KEY/comment/<id>#b-<block>[@v<N>]`, `dispatch://KEY/message/<id>#b-<block>`); a link in a comment or issue message starts at its block, a reply names the block it answers with `reply_to_block` or `in_reply_to_block` and carries `reply_block` on every read and event, `GET /api/v1/comments/{id}/blocks` and `GET /api/v1/messages/{id}/blocks` list an item's blocks, and a comment edit keeps each block's id. A comment edit's `references_changed` names a target whose link moved to another block of the comment, and an open dashboard page shows a comment block's new text after its comment is edited, and a new reply under a block it names, with no reload.
+time: 2026-10-28T12:34:46.000000000Z
+custom:
+    Issue: pr2463

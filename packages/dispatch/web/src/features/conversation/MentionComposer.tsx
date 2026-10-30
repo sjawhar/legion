@@ -16,13 +16,7 @@ import {
   useState,
 } from "react";
 
-import {
-  ApiError,
-  type ArtifactOwner,
-  api,
-  apiErrorMessage,
-  type WriteBounds,
-} from "../../api/client";
+import { ApiError, type ArtifactOwner, api, apiErrorMessage } from "../../api/client";
 import type { Agent, AskOption, AskUrgency } from "../../api/types";
 import { Chip } from "../../components/Chip";
 import { QueryError } from "../../components/QueryError";
@@ -69,6 +63,13 @@ import { ReferencePicker } from "../refs/ReferencePicker";
 import { composerReferences } from "../refs/routes";
 import { SendStoppedError } from "../writes/keyed-write";
 import { StopTrying } from "../writes/StopTrying";
+import {
+  type FollowedBlocks,
+  followEdit,
+  spansFromBlocks,
+  type TextEditRange,
+  textareaValue,
+} from "./block-spans";
 import type {
   AcceptedMention,
   ComposerAnchor,
@@ -80,23 +81,21 @@ import { MODE_LABELS, plainDelivery } from "./delivery";
 import type { HeldSend } from "./held-sends";
 import { ReplyQuote } from "./ReplyQuote";
 import {
+  carriedIdsOf,
   DELIVERY_COMMANDS,
   type DeliveryPlan,
   deliveryPlan,
   KEYED_SEND_LATE_TEXT,
   mentionText,
   requestFor,
+  type SaveCommentEdit,
   type SentRequest,
+  saveCommentEdit,
   survivingMentions,
   unedited,
 } from "./send-request";
 import { useAgents } from "./useAgents";
 import { useComposerSend } from "./useComposerSend";
-
-interface TextEditRange {
-  readonly end: number;
-  readonly start: number;
-}
 
 /** A draft as the composer holds it: the text, the mentions accepted in it, and, when it is a
  *  suggestion, its replacement. Mentions are offsets into that exact text. */
@@ -437,7 +436,7 @@ interface MentionComposerProps {
   readonly onSent: () => void;
   readonly owner: ComposerOwner;
   readonly replyTo?: ReplyTarget | null;
-  readonly saveEdit?: (id: string, body: string, bounds: WriteBounds) => Promise<unknown>;
+  readonly saveEdit?: SaveCommentEdit;
   /** Shows the Comment / Suggest / Ask switch and hands each pick to the host, which answers
    *  through `kind` - a selected document mark is the only surface where the kind can change, and
    *  its mark has to change with it (the margin retypes it) - or returns, in the reader's words,
@@ -501,19 +500,25 @@ export function MentionComposer({
   const optionLabelRefs = useRef<Array<HTMLInputElement | null>>([]);
   const focusAddedOption = useRef(false);
   const previousBody = useRef(initial.body);
-  const pendingTextEdit = useRef<{ before: string; range: TextEditRange } | undefined>(undefined);
+  const pendingTextEdit = useRef<
+    { before: string; inputType: string; range: TextEditRange } | undefined
+  >(undefined);
   const previousReply = useRef<string | undefined>(undefined);
   // Whether this mount took a held send's draft, which the reply prefill must not replace.
   const mountedHeld = useRef(outgoing.held !== undefined);
   const [body, setBody] = useState(initial.body);
   const [replacement, setReplacement] = useState(initial.replacement);
   const [mentions, setMentions] = useState<AcceptedMention[]>(initial.mentions);
+  /** The edited comment's blocks as the field's edits moved them, while the blocks route has
+   *  answered them; Save carries their ids (`carriedBlocks`). */
+  const followedBlocks = useRef<FollowedBlocks | undefined>(undefined);
   /** Puts a whole draft in the field at once - its text, mentions, and replacement in step with
    *  the request that supplied them - where the reader did not type it, so their next edit is
    *  measured from here (`previousBody`). */
   const replaceDraft = useCallback((draft: Draft) => {
     setBody(draft.body);
     previousBody.current = draft.body;
+    followedBlocks.current = followEdit(followedBlocks.current, draft.body, undefined, undefined);
     setMentions([...draft.mentions]);
     setReplacement(draft.replacement ?? "");
   }, []);
@@ -595,6 +600,35 @@ export function MentionComposer({
     editedFrom.current = editBody;
     replaceDraft({ body: editBody, mentions: [] });
   }, [editBody, replaceDraft]);
+  // The edited comment's blocks, read when the edit opens and again whenever the comment changes,
+  // then followed through every edit of the field, so Save carries each block's id. A read that
+  // fails (an older server has no blocks route), or that answers the comment not indexed, leaves
+  // none to follow, and the save carries no ids.
+  const editId = edit?.id;
+  useEffect(() => {
+    followedBlocks.current = undefined;
+    if (editId === undefined || editBody === undefined) return;
+    let current = true;
+    api.commentBlocks(editId).then(
+      (answer) => {
+        if (!current || !answer.indexed || answer.revision === undefined) return;
+        const opened = textareaValue(editBody);
+        const spans = spansFromBlocks(editBody, opened, answer.blocks);
+        if (spans === undefined) return;
+        // What the reader typed while the read was out, measured from the body it answered.
+        followedBlocks.current = followEdit(
+          { revision: answer.revision, spans, value: opened },
+          previousBody.current,
+          undefined,
+          undefined
+        );
+      },
+      () => {}
+    );
+    return () => {
+      current = false;
+    };
+  }, [editBody, editId]);
   const autoFocused = useRef(false);
   useEffect(() => {
     if (!autoFocus || autoFocused.current) return;
@@ -798,6 +832,14 @@ export function MentionComposer({
         pending?.before === before ? pending.range : undefined
       )
     );
+    // `mapSpans` takes the range only where it explains the edit of the value the spans follow,
+    // which is the textarea's own (LF for an edited body's CR LF).
+    followedBlocks.current = followEdit(
+      followedBlocks.current,
+      value,
+      pending?.range,
+      pending?.inputType
+    );
     previousBody.current = value;
     setBody(value);
     if (edit !== undefined || owner.kind === "session") {
@@ -807,17 +849,31 @@ export function MentionComposer({
     setAutocomplete(mentionQuery(value, selectionStart));
     setConfirmingDiscard(false);
   };
-  const onBeforeBodyInput = (event: FormEvent<HTMLTextAreaElement>) => {
-    const input = event.nativeEvent as InputEvent;
-    const element = event.currentTarget;
-    let start = element.selectionStart ?? 0;
-    let end = element.selectionEnd ?? start;
-    if (start === end && input.inputType === "deleteContentBackward")
-      start = Math.max(0, start - 1);
-    if (start === end && input.inputType === "deleteContentForward")
-      end = Math.min(element.value.length, end + 1);
-    pendingTextEdit.current = { before: element.value, range: { end, start } };
-  };
+  // The body field records each edit from the browser's own `beforeinput`: its type, which tells
+  // `mapSpans` a cut or a paste, and the range it replaces. React's `onBeforeInput` is the
+  // `textInput` event, which carries no type and which no deletion or cut fires.
+  const bodyFieldRef = useCallback((element: HTMLTextAreaElement | null) => {
+    textarea.current = element;
+    if (element === null) return;
+    const recordEdit = (input: InputEvent) => {
+      let start = element.selectionStart;
+      let end = element.selectionEnd;
+      if (start === end && input.inputType === "deleteContentBackward")
+        start = Math.max(0, start - 1);
+      if (start === end && input.inputType === "deleteContentForward")
+        end = Math.min(element.value.length, end + 1);
+      pendingTextEdit.current = {
+        before: element.value,
+        inputType: input.inputType,
+        range: { end, start },
+      };
+    };
+    element.addEventListener("beforeinput", recordEdit);
+    return () => {
+      element.removeEventListener("beforeinput", recordEdit);
+      textarea.current = null;
+    };
+  }, []);
   const addAskOption = () => {
     focusAddedOption.current = true;
     setAskOptions((current) => [...current, emptyAskOption()]);
@@ -833,34 +889,42 @@ export function MentionComposer({
   };
   /** The send as the composer's own state addresses and shapes it: what Send puts on the wire,
    *  and what a held send is compared with to tell an untouched draft from an edited one. */
-  const composedRequest = (): Omit<SentRequest, "sendKey"> => ({
+  const composedRequest = (
+    sentBody = body,
+    sentReplacement = replacement
+  ): Omit<SentRequest, "sendKey"> => ({
     anchor,
     ask: { multiple, options: submittedAskOptions(askOptions), urgency },
-    draft: { body, mentions, replacement },
+    draft: { body: sentBody, mentions, replacement: sentReplacement },
     edit:
       edit === undefined
         ? undefined
         : {
+            // Worked out from the body the send carries, never from another copy of the text:
+            // the field holds LF where a comment stored with CR LF had CR LF, and so do the
+            // followed spans.
+            carried: carriedIdsOf(followedBlocks.current, sentBody),
             id: edit.id,
-            save: saveEdit ?? ((id, text, bounds) => api.editComment(id, { body: text }, bounds)),
+            save: saveEdit ?? saveCommentEdit,
           },
     kind,
     owner,
     plainDelivery: plainMode,
     replyTo,
   });
-  /** The send as it stands, for `sendRequest`: the fields' own text, since a keystroke in Send's
-   *  task may not have rendered yet, and every prop and setting that addresses or shapes it - or,
-   *  for a Retry, what `requestFor` makes of the refused send it replaces. */
+  /** The send as it stands, for `sendRequest`: the fields' own text, read once, since a keystroke
+   *  in Send's task may not have rendered yet and the field holds its own line endings, and every
+   *  prop and setting that addresses or shapes it - or, for a Retry, what `requestFor` makes of
+   *  the refused send it replaces. */
   const sentRequest = (refused: HeldSend | undefined): SentRequest =>
-    requestFor(refused?.request, refused?.status === "refused" ? refused.refusal : undefined, {
-      ...composedRequest(),
-      draft: {
-        body: textarea.current?.value ?? body,
-        mentions,
-        replacement: replacementTextarea.current?.value ?? replacement,
-      },
-    });
+    requestFor(
+      refused?.request,
+      refused?.status === "refused" ? refused.refusal : undefined,
+      composedRequest(
+        textarea.current?.value ?? body,
+        replacementTextarea.current?.value ?? replacement
+      )
+    );
   const activeMentions = useMemo(() => survivingMentions(body, mentions), [body, mentions]);
   const effectiveTargets: readonly string[] =
     owner.kind === "session"
@@ -1111,7 +1175,6 @@ export function MentionComposer({
           aria-label={bodyLabel}
           className={`mt-1 block w-full rounded-lg border px-3 py-2 font-normal outline-none ${inline ? "min-h-11 resize-none" : "min-h-24"} ${inputClasses(true)} ${textPrimaryOnSurface}`}
           maxLength={kind === "ask" ? ASK_QUESTION_MAX : DISPATCH_BODY_MAX}
-          onBeforeInput={onBeforeBodyInput}
           onChange={(event) => onBodyChange(event.target.value, event.target.selectionStart)}
           onDrop={
             uploadOwner === undefined
@@ -1144,7 +1207,7 @@ export function MentionComposer({
               ? undefined
               : (event: ClipboardEvent<HTMLTextAreaElement>) => upload.paste(event, uploadOwner)
           }
-          ref={textarea}
+          ref={bodyFieldRef}
           rows={1}
           value={body}
         />
