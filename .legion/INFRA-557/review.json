@@ -2,20 +2,21 @@
   "schemaVersion": 1,
   "phase": "review",
   "issue": "INFRA-557",
-  "completed": "2026-10-30T17:30:52Z",
-  "round": 10,
-  "scope": "The round-9 sentence and CI at 9d8b44af (architect, 13:49Z); after the drain the architect (17:30Z) set exactly two required changes: one forward merge of main keeping both sides, and the two listener filters covering the api testdata the listener tests read. The next round checks only those, by fingerprint, and CI.",
-  "reviewedHead": "9d8b44af94219d8de2f2e401a96465d161ef5da2",
-  "decision": "changes_requested",
+  "completed": "2026-10-30T19:56:52Z",
+  "round": 11,
+  "scope": "The two round-10 items, by fingerprint, and CI (architect, 17:30Z).",
+  "reviewedHead": "18194addea3c22b90b91c00522a550549ff70ddc",
+  "decision": "approved",
   "critical": 0,
-  "important": 2,
+  "important": 0,
   "minor": 0,
-  "ci": "CI run 41063948989 at 9d8b44af: lint, typecheck, test and pr-title success; ci-filters failure (job 124104513284), so ci-ok failure. GitHub reports the PR CONFLICTING (DIRTY).",
+  "fingerprint": "9d8b44af 74de1ce93e4b4e9abda59361f9954c3998e87879af19c7ce8cdcfb5b1197fbc9 -> 18194add fe6e72c157776befc9cd55938fc6fba3e253be13cb7e43dbbcbaa78222b65ad1: changed, by exactly the two items (the api testdata pattern in two ci.yaml filters, and the merge's conflict resolution in main.go, durable_unbound_test.go, healthz_hook_stall_test.go, receive_test.go, AGENTS.md, docs/architecture.md, infra/README.md and envoy.md)",
   "items": {
-    "round-9 sentence": "done: the exact replacement text in main.go, README.md, receive.go and the changelog fragment, and nothing else changed (git diff 22298a3c 9d8b44af: 4 files, +17/-13)"
+    "filters": "done: listener_multiprocess and listener_server_change gain 'packages/envoy/internal/dispatch/api/testdata/**'; the reviewer ran ci_filter_coverage locally: 27 gates, listener-multiprocess and listener-server-change 1439 files, 0 uncovered, exit 0",
+    "forward merge 18194add": "faithful: main's KV watch rebuild stall (#INFRA-743) joins this branch's lease answers through okAnswer, last after every 503 check, for active and standby alike, keeping a degraded report the pod already carries; main's healthz_hook_stall_test and durable_unbound_test now run on a receiver rig; docs keep both sides. HookStall tests pass (reviewer run)."
   },
-  "keyFindings": [
-    {"severity": "important", "file": ".github/workflows/ci.yaml", "description": "ci-filters fails at 9d8b44af: listener-multiprocess and listener-server-change read packages/envoy/internal/dispatch/api/testdata/decision-block-inserts.json (added on main by #2161), which their filters listener_multiprocess and listener_server_change do not match. Add 'packages/envoy/internal/dispatch/api/testdata/**' (as envoy_go's filter has) to both, and run the ci-filters check green locally."},
-    {"severity": "important", "file": "PR #2404", "description": "The PR conflicts with main (mergeStateStatus DIRTY): listener main.go, durable_unbound_test.go and docs. One forward merge of main keeping both sides, pushed without the skip-checks trailer so CI runs."}
-  ]
+  "ci": "Required set (rulesets) lint, typecheck, test, pr-title. At 18194add (CI run 41108412705, PR Title run 41108541704): lint, typecheck, test success; pr-title success; ci-filters success; every other job success or skipped; ci-ok queued at 19:56Z with all the jobs it aggregates green. The compare 18194add...8cf954c2 changes only .legion/INFRA-557/ (2 files).",
+  "thermonuclear": "No new pass: the range is two filter lines and a merge resolution checked by fingerprint, as the architect fixed; the last pair at code (a8a5d08a) and the round-8 and round-9 passes stand.",
+  "threads": "Every thread carries my answer; PRRT_kwDORFy7ds6x-6rs (the round-9 sentence) is accepted and left for the implementer to resolve.",
+  "keyFindings": []
 }
