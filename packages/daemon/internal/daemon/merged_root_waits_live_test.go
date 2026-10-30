@@ -110,8 +110,14 @@ func newMergedRootWaitsLive(t *testing.T) *mergedRootWaitsLive {
 	if err != nil {
 		t.Fatal(err)
 	}
+	// The runtime provisions each claim's workspace itself (fake.Runtime's InPod), as the two
+	// sibling proofs do, so the architect's launch reaches the fake without the daemon cloning
+	// acme/widgets from github.com, which the tmux answer would have it try and which no machine
+	// can do: that repository does not exist.
+	rt := fake.NewRuntime()
+	rt.InPod = true
 	r := &mergedRootWaitsLive{
-		liveProof: proof, rt: fake.NewRuntime(), built: &built{},
+		liveProof: proof, rt: rt, built: &built{},
 		parent: proof.cfg.Project + "-1", child: proof.cfg.Project + "-2",
 		parentPR: int(number) + 1, childPR: int(number) + 2, openedPR: int(number) + 3,
 		github: mergedRootWaitsGitHub(t), seq: 1,
