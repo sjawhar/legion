@@ -688,7 +688,15 @@ export function ProofDocument({
       readmitRef.current = undefined;
       teardown();
     };
-  }, [artifact.id, blockSchema, createEditor, documentRef, focusInEditor, loadTransport, queryClient]);
+  }, [
+    artifact.id,
+    blockSchema,
+    createEditor,
+    documentRef,
+    focusInEditor,
+    loadTransport,
+    queryClient,
+  ]);
 
   // A blocked admission is admitted again by the next successful read of the document's text: the
   // refetch a repair upload's or a rebuild's invalidation makes, or any other. Each successful read
