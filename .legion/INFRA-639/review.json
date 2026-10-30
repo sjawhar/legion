@@ -2,24 +2,32 @@
   "schemaVersion": 1,
   "phase": "review",
   "issue": "INFRA-639",
-  "completed": "2026-10-30T12:55:00Z",
-  "round": 2,
-  "decision": "changes_requested",
-  "reviewedCodeHead": "ff76e646ce911385c3937c29e9a0489157171909",
-  "ci": "required lint, typecheck, test, pr-title completed success at CI head ff76e646 (ci-ok, not required, still queued); compare ff76e646...a131a14e handoffsOnly true (2 files)",
-  "threads": "12 threads of round 1, all resolved by the implementer; 11 answered as accepted (fixed), PRRT_kwDORFy7ds6x44ta answered and unresolved (decodePayload not used in replay_reconstruct.go), PRRT_kwDORFy7ds6x44tV answered (v2 fixed, v1 still stands as a new finding)",
-  "thermonuclear": "deep review APPROVE (4 Minor) and code quality CHANGES (4 Important, 2 Minor) at a131a14e",
-  "proseFixByReviewer": "README.md:119 and stack.sh:79 name start, not setup, as the command that refuses a colliding port (check_port runs only from cmd_start and the start_* helpers); replay.sh:8-13 header states the real source order and lists PGBIN and BUILT_TREE",
-  "notRequested": "replay_plan.go (1,403 lines) and replay_seed.go (1,349 lines): round 1's named splits were made; a further split is a style choice, not a defect",
+  "completed": "2026-10-30T14:05:00Z",
+  "round": 3,
+  "scope": "the six items of review 2 (5712152276), per the INFRA-512 architect's round cap of 2026-10-30T12:22:04Z",
+  "decision": "approved",
+  "reviewedCodeHead": "b1106b94df24 (implementer), 2e7cce66 (merge of main, nothing under packages/envoy/loadtest), plus the reviewer's prose commits 5c9baa33 and the one this push carries",
+  "itemsVerified": [
+    "1 cgroup v1 quota: readCgroupCPUQuota reads cpu/cpu.cfs_quota_us and cpu.cfs_period_us when cpu.max is absent (-1 no quota), meta.json replay.cgroup_cpu_quota; TestReadCgroupCPUQuota and TestReplaySaturationRules cover v2, v1 and neither; tester's t-v1 and implementer's r8-v1 on this v1 pod record {version 1, 300000, 100000} and saturation_cores 2 from nproc",
+    "2 replay_reconstruct.go: six decodePayload sites, one wrap, lg.Key once at buildState",
+    "3 TestReplayEventTypeConstants deleted; its replacement's doc comment over-claimed (it builds events from the same constants), corrected by the reviewer's prose commit",
+    "4 replay.dispatch_build removed; top-level dispatch_build kept (run.go:905)",
+    "5 check_port block explanation only for the block default; tester drove all three branches",
+    "6 one sessionActor (map[string]any); fileBytes beside multipartFile in replay_run.go"
+  ],
+  "proseFixByReviewer": [
+    "5c9baa33: each check_port refusal says stop and rerun start, or set the port variable and rerun setup with it set, then start (start reads stack.json), at the architect's request of 13:23:12Z",
+    "this push: stack.sh:382 drops 'so no other root's block of ports explains it' (false when the port is another block's default); replay_bundle_test.go:119-122 doc comment says what TestReplayPlannerHandlesEveryTypeItNames checks and that it does not catch a misspelt constant"
+  ],
+  "thermonuclear": "pair at 5c9baa33: deep review APPROVE (2 Minor, both prose, fixed by the reviewer); code quality CHANGES (the over-claiming comment, fixed as prose; three copies of refusal text and a v2 naming nit, judged Minor, outside the six items, not requested)",
+  "threads": "all 7 round-2 threads answered and accepted: PRRT_kwDORFy7ds6x44ta, PRRT_kwDORFy7ds6x9g-3, PRRT_kwDORFy7ds6x9g-8, PRRT_kwDORFy7ds6x9g_B, PRRT_kwDORFy7ds6x9g_E, PRRT_kwDORFy7ds6x9g_K, PRRT_kwDORFy7ds6x9g_Q",
   "critical": 0,
-  "important": 1,
-  "minor": 5,
+  "important": 0,
+  "minor": 4,
   "keyFindings": [
-    {"severity": "important", "file": "packages/envoy/loadtest/replay_record.go:182", "description": "saturationCores reads only cgroup v2 /sys/fs/cgroup/cpu.max; the issue pods run cgroup v1 (cpu.max absent; /sys/fs/cgroup/cpu/cpu.cfs_quota_us 300000, cpu.cfs_period_us 100000, nproc 2, read in this pod), so a v1 quota below nproc is never seen. Read cpu.cfs_quota_us/cpu.cfs_period_us when cpu.max is absent (-1 = no quota), record the value, test each format."},
-    {"severity": "minor", "file": "packages/envoy/loadtest/replay_reconstruct.go:170", "description": "replayIssueAt keeps its own where() wrap and five json.Unmarshal copies plus an inline copy at :301; round 1 asked for one decodePayload across planner and fetch code."},
-    {"severity": "minor", "file": "packages/envoy/loadtest/replay_bundle_test.go:110", "description": "TestReplayEventTypeConstants compares each constant with a second copy of its literal: a tautology. Delete the map half; keep the decodePayload error check."},
-    {"severity": "minor", "file": "packages/envoy/loadtest/replay_record.go:179", "description": "replay.dispatch_build duplicates meta.json's top-level dispatch_build from the same file; remove the replay copy and its README mention."},
-    {"severity": "minor", "file": "packages/envoy/loadtest/stack.sh:378", "description": "check_port always says a second root in block N holds these ports, even when the port came from stack.json or a LOADTEST_*_PORT override; say it only when the port is the block's default."},
-    {"severity": "minor", "file": "packages/envoy/loadtest/replay_seed.go:783", "description": "The seed actor is typed by hand here and at :293 beside sessionActor (api.go:189); fileBytes (replay_seed.go:750) has its one caller in replay_run.go. Use one actor helper and keep fileBytes beside multipartFile."}
+    {"severity": "minor", "file": "packages/envoy/loadtest/replay_bundle_test.go:119", "description": "The doc comment claimed the test catches a misspelt constant; it builds events from the same constants. Fixed by the reviewer (comment only). evMessageDelivery and evMessageAccepted are caught by no test; they name events the replay never sends."},
+    {"severity": "minor", "file": "packages/envoy/loadtest/stack.sh:382", "description": "'so no other root's block of ports explains it' is false when the port is another block's default. Fixed by the reviewer."},
+    {"severity": "minor", "file": "packages/envoy/loadtest/stack.sh:379-383", "description": "Three die strings repeat clauses. Not a defect; outside the six items."},
+    {"severity": "minor", "file": "packages/envoy/loadtest/replay_record.go:145", "description": "saturation_cores_from says cgroup_cpu_max on v2 while meta.json's field is cgroup_cpu_quota; README:995 and :1003-1011 state both, so it is unambiguous. Not a defect."}
   ]
 }
