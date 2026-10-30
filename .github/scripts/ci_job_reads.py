@@ -768,6 +768,7 @@ GATES = [
                                    f"{at('ci-images', PACKAGE_STEP)} reads each row's digest"),
         (".github/scripts/mirror-ci-images.sh", f"{at('ci-images', COPY_STEP)} runs it"),
         (".github/scripts/check-ci-images.sh", f"{at('ci-images', PACKAGE_STEP)} runs it"),
+        (".github/scripts/ci_images.py", "both scripts read a row's upstream with it"),
         (".github/actions/install-crane/**", at("ci-images", "./.github/actions/install-crane")),
     ) + CI_SELF),
 ]

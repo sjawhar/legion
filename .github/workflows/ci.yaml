@@ -1125,6 +1125,7 @@ jobs:
               - '.github/ci-images.yaml'
               - '.github/scripts/mirror-ci-images.sh'
               - '.github/scripts/check-ci-images.sh'
+              - '.github/scripts/ci_images.py'
               - '.github/actions/install-crane/**'
               - '.github/workflows/ci.yaml'
 

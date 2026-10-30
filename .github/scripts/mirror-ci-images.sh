@@ -26,11 +26,17 @@
 # text of that row's upstream tag (.github/scripts/check-ci-images.sh rules 3 and 7), so a row
 # labelled with one Go and holding the digest of another passes every other gate. library/golang
 # writes its own version into the image config, so the bytes themselves say which Go they are:
-# `crane config --platform linux/amd64 <the row's upstream>@<the row's digest>` answers a config
-# whose `.config.Env` holds GOLANG_VERSION. This run reads it, and fails when it is not the
-# version the row's upstream tag names. The read asks for the row's digest and for no tag, so
-# its answer is the same on every day, and this run makes it for every library/golang row, held
-# or copied. No read of a tag could say as much.
+# `crane config --platform linux/amd64 <a reference at the row's digest>` answers a config whose
+# `.config.Env` holds GOLANG_VERSION. This run reads it for every library/golang row, held or
+# copied, and fails when it is not the version the row's upstream tag names. Where it reads it
+# is wherever those bytes are: `crane copy` keeps the manifest digest, so the package's copy and
+# the upstream are the same bytes under the same digest, and the answer is the same from either.
+# A row the package holds is read in the package, `<registry>@<the row's digest>`, so a run that
+# copies nothing — the common one — reads no registry but the package this repository publishes.
+# A row this run copies is read at `<the row's upstream>@<the row's digest>` before the copy, so
+# bytes whose label is wrong never land in the package; that read is a read of the upstream, as
+# the copy beside it is. The read asks for the row's digest and for no tag, so its answer is the
+# same on every day. No read of a tag could say as much.
 #
 # THE BUN SIDE. An oven/bun image declares its version in no part of its config, so no read of
 # this kind can hold a Bun row to its label. The builds that run those bytes hold them to the
@@ -41,9 +47,9 @@
 #
 # It prints one line for each row the package already holds, two for each row it copies (the
 # copy it starts, then the digest that copy landed at), one more before either for each
-# library/golang row (the Go that row's bytes carry), and one summary line at the end. It
-# copies with `crane` from PATH (.github/actions/install-crane installs it) under a login that
-# may write the package.
+# library/golang row (the reference it read and the Go those bytes carry), and one summary line
+# at the end. It copies with `crane` from PATH (.github/actions/install-crane installs it)
+# under a login that may write the package.
 #
 # Run from anywhere: .github/scripts/mirror-ci-images.sh
 # CI runs it in ci.yaml's ci-images job, before the package mode of
@@ -58,14 +64,16 @@ if ! command -v crane >/dev/null 2>&1; then
   exit 1
 fi
 
-# PYTHONDONTWRITEBYTECODE keeps the yaml import from leaving a __pycache__ in the tree.
-rows=$(PYTHONDONTWRITEBYTECODE=1 python3 - <<'PY'
+# The reference grammar is .github/scripts/ci_images.py's, beside this script in the repository
+# it copies for, which PYTHONPATH names: the gate reads a row's upstream with the same two
+# functions, so a row it counts as the library/golang row is a row this script checks.
+# PYTHONDONTWRITEBYTECODE keeps the imports from leaving a __pycache__ in the tree.
+rows=$(PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=.github/scripts python3 - <<'PY'
 import yaml
 
+from ci_images import upstream_parts
+
 GOLANG = "library/golang"
-# The host spellings of Docker Hub. `library/` is implicit there, so docker.io/golang and
-# docker.io/library/golang are one image, and the Go check reads the two spellings alike.
-DOCKER_HUB = {"docker.io", "index.docker.io", "registry-1.docker.io"}
 
 document = yaml.safe_load(open(".github/ci-images.yaml"))
 registry = document["registry"]
@@ -74,18 +82,11 @@ for row in document["images"]:
     # digest, which is what the copy asks for: crane drops a tag written before the `@`.
     labelled = row["upstream"].partition("@")[0]
     source = f"{labelled}@{row['digest']}"
-    # That upstream's repository and tag. A tag is in the last path element, after a colon.
-    head, slash, last = labelled.rpartition("/")
-    name, _, tag = last.partition(":")
-    parts = (head + slash + name).split("/")
-    if parts[0] in DOCKER_HUB:
-        parts = parts[1:]
-    if len(parts) == 1:
-        parts = ["library"] + parts
     # The Go version this row's label claims, empty where the row copies another image or
     # names no tag. The Go a `1.27.1-alpine` tag names is the part before the first `-`, which
     # is how rule 7 of check-ci-images.sh reads the same tag.
-    claimed_go = tag.partition("-")[0] if "/".join(parts) == GOLANG else ""
+    _, repository, tag, _ = upstream_parts(row["upstream"])
+    claimed_go = tag.partition("-")[0] if repository == GOLANG else ""
     print("\t".join((registry, row["tag"], row["digest"], source, claimed_go)))
 PY
 )
@@ -108,26 +109,41 @@ for entry in (json.load(sys.stdin).get("config") or {}).get("Env") or []:
 '
 }
 
+# check_go <reference> <the Go the row's upstream tag names> <the row's upstream>: holds the
+# bytes at <reference> to the row's label, and fails naming the row where they carry another Go.
+# <reference> holds the row's digest, in the package or at the upstream, and the message names
+# it, so a refusal says which copy of those bytes was read.
+check_go() {
+  local reference=$1 claimed_go=$2 upstream=$3 carried_go carries
+  carried_go=$(image_go "$reference")
+  if [ "$carried_go" != "$claimed_go" ]; then
+    carries="Go $carried_go"
+    [ -n "$carried_go" ] || carries="no GOLANG_VERSION, which every library/golang image declares"
+    echo "::error file=.github/ci-images.yaml::$reference carries $carries, and this row's upstream tag names Go $claimed_go. The row's label and its bytes disagree, and every other gate reads the label: it is the row's upstream text that says which Go this image is. That read named $reference, which holds this row's digest. Write the digest $upstream names now, or label this row with the version its digest carries." >&2
+    exit 1
+  fi
+  echo "go     $reference carries Go $carried_go, the version its upstream tag names"
+}
+
 held=0
 copied=0
 while IFS=$'\t' read -r registry tag digest source claimed_go; do
-  # The Go check, before the row is held or copied: it reads the row's digest, so it answers the
-  # same for a row this run writes and for one the package has held for a year.
-  if [ -n "$claimed_go" ]; then
-    carried_go=$(image_go "$source")
-    if [ "$carried_go" != "$claimed_go" ]; then
-      carries="Go $carried_go"
-      [ -n "$carried_go" ] || carries="no GOLANG_VERSION, which every library/golang image declares"
-      echo "::error file=.github/ci-images.yaml::$source carries $carries, and this row's upstream tag names Go $claimed_go. The row's label and its bytes disagree, and every other gate reads the label: it is the row's upstream text that says which Go this image is. Write the digest golang:$claimed_go names now, or label this row with the version its digest carries." >&2
-      exit 1
-    fi
-    echo "go     $source carries Go $carried_go, the version its upstream tag names"
-  fi
   have=$(crane digest "$registry:$tag" 2>/dev/null || true)
   if [ "$have" = "$digest" ]; then
+    # The Go check on the package's own copy: `crane copy` kept the manifest digest, so those
+    # are this row's bytes under this row's digest, and a run that copies nothing — the common
+    # one — reads no registry but the package.
+    if [ -n "$claimed_go" ]; then
+      check_go "$registry@$digest" "$claimed_go" "${source%@*}"
+    fi
     echo "held   $registry:$tag $digest"
     held=$((held + 1))
     continue
+  fi
+  # The same check at the upstream the copy below reads, and before it: bytes whose label is
+  # wrong never land in the package. The copy reads that registry anyway.
+  if [ -n "$claimed_go" ]; then
+    check_go "$source" "$claimed_go" "${source%@*}"
   fi
   echo "copy   $source -> $registry:$tag"
   crane copy "$source" "$registry:$tag"

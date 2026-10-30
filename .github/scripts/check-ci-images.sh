@@ -141,9 +141,9 @@ case "$#:${1:-}" in
 esac
 export CI_IMAGES_MODE="$1"
 
-# The sweep's walk is workflow_paths.py's, beside this script in the repository it checks, which
-# PYTHONPATH names. PYTHONDONTWRITEBYTECODE keeps the imports from leaving a __pycache__ in the
-# tree.
+# The sweep's walk is workflow_paths.py's and the reference grammar is ci_images.py's, both
+# beside this script in the repository it checks, which PYTHONPATH names.
+# PYTHONDONTWRITEBYTECODE keeps the imports from leaving a __pycache__ in the tree.
 PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=.github/scripts python3 <<'PY'
 import json
 import os
@@ -155,6 +155,8 @@ import urllib.request
 from pathlib import Path
 
 import yaml
+
+from ci_images import DIGEST, split_reference, upstream_parts
 
 
 class LineLoader(yaml.SafeLoader):
@@ -208,8 +210,6 @@ WORKER_DOCKERFILE = Path("packages/daemon/docker/worker.Dockerfile")
 # out.
 BUN_REPOSITORY = "oven/bun"
 GOLANG_REPOSITORY = "library/golang"
-# The host spellings of Docker Hub, where a repository of one path element is under `library/`.
-DOCKER_HUB_HOSTS = {"", "docker.io", "index.docker.io", "registry-1.docker.io"}
 MIRROR = "mirror.gcr.io"
 # The directories workflow_paths.walk skips (.git, .jj, node_modules, .venv, vendor) are every
 # directory this sweep skips but one, and this set holds that one.
@@ -302,10 +302,8 @@ EXCEPTIONS = {
 }
 
 # ---------------------------------------------------------------- reference grammar
-HOST = re.compile(r"[A-Za-z0-9](?:[A-Za-z0-9.-]*[A-Za-z0-9])?(?::[0-9]+)?")
-COMPONENT = re.compile(r"[a-z0-9]+(?:(?:[._]|__|-+)[a-z0-9]+)*")
-TAG = re.compile(r"[A-Za-z0-9_][A-Za-z0-9._-]{0,127}")
-DIGEST = re.compile(r"sha256:[0-9a-f]{64}")
+# The grammar of a reference, and the two readers of one, are ci_images.py's, imported above:
+# mirror-ci-images.sh reads a row's upstream with the same two.
 VARIABLE = re.compile(r"\$\{?([A-Za-z_][A-Za-z0-9_]*)\}?")
 ASSIGNMENT = re.compile(r"^(?:export\s+)?([A-Za-z_][A-Za-z0-9_]*)=(\S*)")
 STRING = re.compile(r"\"([^\"\n\\]*)\"|'([^'\n\\]*)'|`([^`\n\\]*)`")
@@ -326,32 +324,6 @@ def fatal(message: str) -> None:
     """Nothing downstream can be judged without the rows, so stop here."""
     print(f"::error file={CI_IMAGES}::{message}", file=sys.stderr)
     raise SystemExit(1)
-
-
-def split_reference(text: str) -> tuple[str, str, str, str] | None:
-    """(host, path, tag, digest) for a string shaped like an image reference, else None. `host`
-    and `tag` and `digest` are "" where the reference carries none."""
-    if not text or any(character.isspace() for character in text) or "//" in text:
-        return None
-    body, at, digest = text.partition("@")
-    if at and not DIGEST.fullmatch(digest):
-        return None
-    head, slash, last = body.rpartition("/")
-    name, tag = body, ""
-    if ":" in last:
-        base, _, tag = last.partition(":")
-        name = head + slash + base
-        if not TAG.fullmatch(tag):
-            return None
-    parts = name.split("/")
-    host = ""
-    if len(parts) > 1 and ("." in parts[0] or ":" in parts[0] or parts[0] == "localhost"):
-        host, parts = parts[0], parts[1:]
-        if not HOST.fullmatch(host):
-            return None
-    if not parts or not all(COMPONENT.fullmatch(part) for part in parts):
-        return None
-    return host, "/".join(parts), tag, digest
 
 
 def reads_as_reference(text: str) -> bool:
@@ -533,19 +505,6 @@ if MODE == PACKAGE:
         f"between {CI_IMAGES} and the package",
         f"{CI_IMAGES} holds {len(readable)} row(s), {held} of them in the package",
     )
-
-
-def upstream_parts(upstream: str) -> tuple[str, str, str, str]:
-    """(host, path, tag, digest) of a row's upstream, each "" where the reference carries none.
-
-    `path` carries Docker Hub's implicit `library/`, which a reference may leave out:
-    docker.io/golang and docker.io/library/golang are one image, and a rule that compared the
-    text of the row would read the first as a repository no pin of this repository names. Every
-    rule that compares a row's repository reads it from here, so both spellings answer alike."""
-    host, path, tag, digest = split_reference(upstream) or ("", "", "", "")
-    if path and host in DOCKER_HUB_HOSTS and "/" not in path:
-        path = f"library/{path}"
-    return host, path, tag, digest
 
 
 def tag_rule(upstream: str, digest: str) -> str:

@@ -3,9 +3,10 @@
 # that refusal, one per ground of its exception list, and the repository's own tree in each mode.
 #
 # Each case builds a miniature repository under a temporary directory and symlinks the real
-# script, and the path model its sweep walks the tree with (workflow_paths.py), into it, so the
-# code under test is the code CI runs, not a copy that can drift: the script resolves its root
-# from its own path (`cd "$(dirname "$0")/../.."`), which the symlink puts at the fixture root.
+# script, the path model its sweep walks the tree with (workflow_paths.py) and the reference
+# grammar it reads a reference with (ci_images.py), into it, so the code under test is the code
+# CI runs, not a copy that can drift: the script resolves its root from its own path
+# (`cd "$(dirname "$0")/../.."`), which the symlink puts at the fixture root.
 # A fixture holds every file CI's reach names, because the check fails on a reach file that is
 # gone.
 #
@@ -87,6 +88,7 @@ fixture() {
     "$root/scripts/e2e/lib" "$root/packages/pi-legion/scripts/skill-scenarios"
   ln -s "$check_script" "$root/.github/scripts/check-ci-images.sh"
   ln -s "$script_dir/workflow_paths.py" "$root/.github/scripts/workflow_paths.py"
+  ln -s "$script_dir/ci_images.py" "$root/.github/scripts/ci_images.py"
   echo "1.3.14" > "$root/.bun-version"
   cat > "$root/.github/ci-images.yaml" <<YAML
 registry: $REGISTRY
