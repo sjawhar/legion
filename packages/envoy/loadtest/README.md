@@ -1516,16 +1516,33 @@ credential: every token and password is random and made for the run.
 - **The lock.** One copy runs in a namespace at a time. `up` creates the ConfigMap
   `dispatch-loadtest-lock` with six data keys: `holder-pod`, `holder-uid`, `issue`, `run`,
   `started` and `heartbeat`. `up` reads the uid and the issue from `POD_UID` and `LEGION_ISSUE`,
-  which a Legion pod sets. The heartbeat changes every 60 s while a command of the run is alive:
-  each command registers its pid and start time in `<run>/commands/`, and the heartbeat stops
-  once none of them is the same live process any more. A run whose command was killed without its
+  which a Legion pod sets. The heartbeat changes every 60 s while the run is being driven: each
+  command registers its pid and start time in `<run>/commands/`, and the heartbeat stops once
+  none of them is the same live process any more and no hold (`all --keep-for`, `cluster.sh
+  hold`) holds the run. A run whose command was killed without its
   EXIT trap (a SIGKILL, an OOM, an interrupted worker turn) thus leaves a lock that ages, and the
-  run's next command starts the heartbeat again. While the lock exists, `up` refuses with exit
+  run's next command starts the heartbeat again. The sampler stops with the heartbeat: once
+  `heartbeat.pid` has named no live heartbeat of the run for 60 s, or the run directory is gone,
+  it stops its eight `kubectl exec` reads and exits, so a killed or torn-down run leaves neither
+  open execs nor error lines appended to `cgroup.jsonl` every 5 s. While the lock exists, `up`
+  refuses with exit
   status 2 and names the holder and the heartbeat's age. A heartbeat older than 15 min is stale,
-  and `up` then names the `down` command that clears it (Clean up after a killed run, below).
+  and `up` then names the holder's pod and issue, says to confirm with that issue's holder that
+  the run is abandoned, and gives the `down` command that clears it (Clean up after a killed run,
+  below).
   prove-loadtest's pod mode
   refuses to run while this ConfigMap exists, so its quota fill cannot starve a running copy. The
   name and the six keys are that contract: do not change them.
+- **One PID namespace drives a run.** `up` records its PID namespace (`readlink
+  /proc/self/ns/pid`) in `state.json` as `pid_ns`. A Legion pod runs each role in a PID namespace
+  of its own over one `LOADTEST_CLUSTER_ROOT`, so the pids one role recorded (the run's command
+  files, the daemons' pidfiles) name nothing in another. Every subcommand but `status` and `down`
+  is refused from another PID namespace, before it registers a command or starts a daemon, naming
+  the recorded namespace, the holder pod and the issue: only the role that ran `up` drives that
+  run, and another role runs a copy of its own in another namespace. `down` still deletes the
+  run's objects and the lock; it says that it cannot stop daemons it cannot see, which stop on
+  their own (the heartbeat once the lock is gone, the sampler once that heartbeat is). A
+  `state.json` from before `pid_ns` is not checked.
 - **The quota.** The copy at the 16-vCPU tier requests 47.2 CPUs, 121.25Gi of memory, 14.25Gi of
   ephemeral storage, 8 pods, 6 Services, and 4 claims of 20Gi (80Gi) on `--storage-class`. At the
   4-vCPU tier (`db-size 4 15Gi`) Postgres requests 12 CPUs and 45Gi less. No Service is a
@@ -1562,10 +1579,12 @@ packages/envoy/loadtest/cluster/cluster.sh all --namespace loadtest --storage-cl
 replay). A manifest whose seed is null, or whose seed check failed, skips the replay phases:
 `all` prints one line for each (`skipped phase replay-prepare: …`, `… replay r16: …`, `… replay
 r4: …`) and goes on. A replay-prepare that fails skips both replays the same way. Any exit runs
-`down`, unless `--keep`. A full run takes hours: start it with `setsid`, with its output in a file.
+`down`, unless `--keep`, which instead holds the run for `--keep-for` (default 2h). A full run
+takes hours: start it with `setsid`, with its output in a file.
 `all` runs no browser typing, so its curves and replays are the load alone; the typing runs (for
 INFRA-514: `replay r16-typing`, `replay r4-typing` and `step 10x-typing 10`, each with `--typing`)
-run on a copy that `up --browsertype-commit` (or `all --browsertype-commit --keep`) left up
+run on a copy that `up --browsertype-commit` (or `all --browsertype-commit --keep`) left up, whose
+hold `cluster.sh hold --namespace <ns> --for <duration>` extends while you type them
 (Browser typing, below).
 
 | Flag | What it sets |
@@ -1582,7 +1601,8 @@ run on a copy that `up --browsertype-commit` (or `all --browsertype-commit --kee
 | `--profile` | `quick` or `full` (Profiles, below). Required. |
 | `--manifest` | The replay's manifest. Default: the committed `replay-2026-10-26.json`. |
 | `--upload-issue` | A Dispatch issue key. Each phase's tar parts go to that issue with `dispatch artifact`. |
-| `--keep` | No `down` at the end or on a failure. The run stays up for debugging. |
+| `--keep` | No `down` at the end or on a failure. The run stays up for debugging, held for `--keep-for`. |
+| `--keep-for` | How long `--keep` holds the run: a duration (`90s`, `30m`, `2h`). Default `2h`, and valid only with `--keep`. Until the hold expires the heartbeat renews the lock with no command of the run running, so no other worker's `up` calls it stale; `cluster.sh hold` extends it. |
 
 ### Subcommands
 
@@ -1605,9 +1625,10 @@ so. A write (`drop database`, a `kubectl cp`, a start in the runner) is never re
 | `replay-prepare [--manifest FILE] [--from-dir DIR]` | The replay's template `dispatch_replay` (The replay on the copy, below). It refuses, before it touches the copy, a manifest whose seed is null or whose seed check failed. |
 | `replay NAME [--from 0] [--to 39m] [--typing [--typing-peers 2] [--typing-rate 5] [--typing-docs 20]]` | One replay step from `dispatch_replay` (refused without it) over the sub-window FROM to TO after 22:55, then the step's after-work and `loadgen codepaths` beside the outage. `--typing` adds browser typing (below). |
 | `collect [--upload-issue KEY]` | The cross-step outputs, with every step in the order the steps ran (`meta.json` `start`): `STORED-ORDER.md` (with each step's typing), `TABLES.md`, `loadgen curves` into `curves/` over every step but the phase `replay`'s and those that ran browser typing, and `loadgen codepaths` in each step directory that holds `summary.json` (a replay step's with the flags `replay` gives it). Then it packs each phase and the phase `results`. A failed command is reported, the rest still runs, and `collect` exits with status 1. |
-| `status` | The lock, the run, its heartbeat and sampler, and its pods. |
-| `down [--run ID]` | Stops the heartbeat and the sampler, deletes everything labelled with the run id (the claims, the Secrets and the lock too), waits until nothing of the run is left, and prints that listing. It removes the lock of another run only when `--run` names that run. |
-| `all <up's flags> --profile quick\|full [--manifest FILE] [--upload-issue KEY] [--keep]` | The one command (above). |
+| `status` | The lock, the run, its PID namespace when it is not this one, its hold, its heartbeat and sampler, and its pods. It runs from any PID namespace. |
+| `down [--run ID]` | Removes the run's hold, stops the heartbeat and the sampler, deletes everything labelled with the run id (the claims, the Secrets and the lock too), waits until nothing of the run is left, and prints that listing. It removes the lock of another run only when `--run` names that run. It runs from any PID namespace: a run another one started keeps its daemons, which `down` says and which then stop on their own. |
+| `hold [--for DURATION]` | Holds the run that is up for DURATION (default `2h`), starting its heartbeat and sampler again when they stopped. While the hold lasts the heartbeat renews the lock with no command of the run running, so the copy keeps its seed for the steps and replays you type by hand. Each call sets the hold afresh, so it extends one. Refused when no run is up. |
+| `all <up's flags> --profile quick\|full [--manifest FILE] [--upload-issue KEY] [--keep [--keep-for DURATION]]` | The one command (above). |
 
 **The refinement** (profile `full`, and `series`): `loadgen curves` over the steps of the series
 and of the refinement writes `refine.txt`. Each line is one factor at which a refinement step
@@ -1905,7 +1926,7 @@ the worker pod.
 
 | File | What it holds |
 | --- | --- |
-| `state.json` | Mode 600. The namespace, the run id, the storage class, the commit, the Postgres major, the deployment repository, the start time, the holder pod, every image by digest, the Postgres tier and its settings, `stored_order` (the stored-order checker: `dispatch_commit`, `built_from`, `overlay_source`, `overlay_files`, `registration`, `renderer_matches` and the sha256 of its `envoy-dispatch`), `browsertype` (the `--browsertype-commit` and the sha256 of its `browsertype`, or `null` without the flag), and the run's random credentials. |
+| `state.json` | Mode 600. The namespace, the run id, the storage class, the commit, the Postgres major, the deployment repository, the start time, the holder pod, the holder's PID namespace (`pid_ns`, which every subcommand but `status` and `down` must run in), every image by digest, the Postgres tier and its settings, `stored_order` (the stored-order checker: `dispatch_commit`, `built_from`, `overlay_source`, `overlay_files`, `registration`, `renderer_matches` and the sha256 of its `envoy-dispatch`), `browsertype` (the `--browsertype-commit` and the sha256 of its `browsertype`, or `null` without the flag), and the run's random credentials. |
 | `loadgen` | The static `loadgen` of this checkout, which the runner also gets. |
 | `envoy-dispatch` | The stored-order checker: the static `envoy-dispatch` of `--dispatch-commit`'s tree (with `--stored-order-source`'s overlay, or of `--stored-order-checker-commit`), which the runner also gets (The stored-order check, above). |
 | `browsertype` | Only with `--browsertype-commit`: the static `browsertype` of that commit, which the runner also gets (Browser typing, above). |
@@ -1924,6 +1945,8 @@ the worker pod.
 | `curves/TREND.md` | Only with an hour step: the trend of Dispatch's cores, working set and Go heap over minutes 5 to 60. The heap series is `Go heap live MiB (heap profile)`, or, from an older run's `samples.json` (`heap_inuse`), `MemStats HeapInuse MiB (older run)`. |
 | `upload/` | The tar parts, `cluster-load-test-<run id>-raw-<phase>.tar.zst.partNN`, each under 24 MiB, and the markers `<phase>.packed` and `<phase>.uploaded`. The run id begins with the run's date and time, so two runs of one day upload apart. The phase `results` holds `curves/`, `TABLES.md`, `STORED-ORDER.md`, and each step's `CODEPATHS.md` and `codepaths.json`. |
 | `logs/` | The heartbeat's and the sampler's logs, `seed.log`, `seed-finish.log`, `replay-restore.log` (`pg_restore`'s output), and the reset record of each `redeploy`. |
+| `commands/<pid>`, `hold-until` | What holds the run alive for the heartbeat: the start time of each command that registered its pid, and the epoch second a hold (`all --keep-for`, `cluster.sh hold`) ends. `down` removes the hold. |
+| `heartbeat.pid`, `sampler.pid` | The daemons' pids, in the PID namespace that `up` ran in. Each daemon removes its own when it stops. |
 
 A step directory holds the files of `loadgen run` (The step directory, above). `TABLES.md` takes
 its cores and working set from `cgroup.json`. It also holds:
@@ -2014,16 +2037,28 @@ ancestor on main that has an image.
 
 ### Clean up after a killed run
 
-A run killed with no `down` leaves the copy and the lock. Its heartbeat stops. 15 min later, `up`
-in that namespace says: `that heartbeat is older than 15 min, so the holder is stale. Clear its
-copy and the lock with: cluster.sh down --namespace <ns> --run <id>`. Run that command:
+A run killed with no `down` leaves the copy and the lock. Its heartbeat stops (and its sampler
+within 60 s of that). 15 min later, `up` in that namespace says:
+
+```text
+that heartbeat is older than 15 min, so the holder is stale: pod <pod>, issue <KEY>.
+confirm with issue <KEY>'s holder that run <id> is abandoned before you clear it (ask on <KEY>: a
+kept run holds its copy for typing steps and replays, and the down below deletes it).
+once they confirm, clear its copy and the lock with: cluster.sh down --namespace <ns> --run <id>
+```
+
+A stale heartbeat is not proof that the run is abandoned: a run that `all --keep` held may have
+outlived its `--keep-for`, and its copy holds an hour of seeding and the steps its issue is
+measuring. Ask that issue's holder first (`dispatch ask --issue <KEY>`, or a comment on it); when
+they confirm, run the command:
 
 ```bash
 packages/envoy/loadtest/cluster/cluster.sh down --namespace <ns> --run <id>
 ```
 
 It deletes everything labelled with the run id and the lock, and prints the empty listing. `down`
-without `--run` refuses to remove the lock of another run.
+without `--run` refuses to remove the lock of another run. A holder who needs the copy for longer
+runs `cluster.sh hold --namespace <ns> --for <duration>` instead, which keeps the lock fresh.
 
 ## What this harness does not do
 

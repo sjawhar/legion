@@ -70,18 +70,25 @@
 #       STORED-ORDER.md, each step's CODEPATHS.md and codepaths.json), as zstd tar parts under
 #       24 MiB in <run>/upload/; with --upload-issue, each part goes to that Dispatch issue. A
 #       failure is reported, the rest still runs, and collect exits 1.
-#   cluster.sh status --namespace NS          the lock, the run, its daemons and its pods.
+#   cluster.sh status --namespace NS          the lock, the run, its hold, its daemons and its pods.
 #   cluster.sh down --namespace NS [--run ID] deletes everything labelled with the run id and the
-#       lock, and waits until nothing of the run is left. A lock of another run is deleted only
-#       when --run names that run.
+#       lock, removes the run's hold, and waits until nothing of the run is left. A lock of
+#       another run is deleted only when --run names that run. A run another PID namespace
+#       started keeps its daemons: down says so, and they stop on their own (below).
+#   cluster.sh hold --namespace NS [--for DURATION]   holds the run that is up for DURATION
+#       (default 2h), starting its daemons again when they stopped: while the hold lasts its
+#       heartbeat renews the lock with no command of the run running, so no other worker's up
+#       calls it stale. Refused when no run is up.
 #   cluster.sh all --namespace NS <up's flags> --profile quick|full [--manifest FILE]
-#                  [--upload-issue KEY] [--keep]
+#                  [--upload-issue KEY] [--keep [--keep-for DURATION]]
 #       up, seed, the series, the refinement (full only), soak, replay-prepare, replay r16,
 #       db-size 4 15Gi, step 1x-db4, replay r4, collect, down; any exit runs down unless --keep.
 #       quick: 2 min steps, a 5 min hour, replays over 0-5m; full: 10 and 60 min, replays over
 #       0-39m. A manifest whose seed is null or fails its check skips the replay phases, one
 #       line each. all runs no browser typing; with --browsertype-commit and --keep, the run
-#       stays up for typing steps and replays named by the caller.
+#       stays up for typing steps and replays named by the caller, held (--keep-for, default 2h,
+#       valid only with --keep) so it does not go stale while they are typed; cluster.sh hold
+#       extends that hold.
 #
 # The stored-order checker: up builds a static envoy-dispatch from --dispatch-commit's own tree
 # (git archive of this checkout's git store, built in a scratch directory), so the checker's
@@ -139,6 +146,16 @@
 # A read-only kubectl exec (psql reads, nats-box reads, the runner's file reads) that fails on a
 # transient API server error (error dialing backend, a refused or reset connection to the API
 # server) is retried once, 5 s later; a write is never retried.
+#
+# The run's two daemons, started under setsid: the heartbeat renews the lock every 60 s while a
+# command of the run is alive or a hold holds it, and the sampler reads every copy container's
+# cgroup. The sampler ends with the heartbeat (no live heartbeat of the run for 60 s, or no run
+# directory), so a killed or torn-down run leaves neither kubectl execs nor growing cgroup.jsonl
+# error lines; the run's next command starts both again. up records its PID namespace in
+# state.json (pid_ns); a command of the run from another PID namespace is refused before it
+# registers anything or starts a daemon, because the pids of one namespace mean nothing in
+# another (a Legion pod gives each role its own over one CLUSTER_ROOT). status and down are not
+# refused: neither registers a command, and down deletes the run's objects and the lock.
 #
 # Every subcommand needs --namespace (no default; a Legion pod's own namespace is builds), and
 # every kubectl call names it. Subcommands after up find the run from the lock's `run` and its
@@ -538,7 +555,8 @@ pg_tier() {
 # ---- run state --------------------------------------------------------------------------------------
 
 # use_run: RUN from --run, else from the lock; then its directory and state.json, which must name
-# NS.
+# NS and, when it records one, this PID namespace (pid_ns_check); then this command is registered
+# as one that holds the run alive.
 use_run() {
   local run=${OPT[run]:-} lock
   if [ -z "$run" ]; then
@@ -550,7 +568,41 @@ use_run() {
   set_run "$run"
   [ -f "$STATE" ] || die "no $STATE: run $run was not started from this pod (LOADTEST_CLUSTER_ROOT $CLUSTER_ROOT)"
   [ "$(jq -r .namespace "$STATE")" = "$NS" ] || die "run $run is in namespace $(jq -r .namespace "$STATE"), not $NS"
+  pid_ns_check
   register_command
+}
+
+# pid_ns: this process's PID namespace (readlink /proc/self/ns/pid), empty where /proc gives none.
+pid_ns() { readlink /proc/self/ns/pid 2>/dev/null || true; }
+
+# pid_ns_check: refuse, before anything is registered or started, a command of a run that another
+# PID namespace started. A Legion pod runs each role in a PID namespace of its own over one
+# CLUSTER_ROOT, so the pids that role recorded (the run's command files, the daemons' pidfiles)
+# name nothing here, and a command from here would register itself as alive for a heartbeat it
+# cannot see. Only the role that ran up drives its run; another role runs a copy of its own. A
+# state.json from before pid_ns (an older run) and a pod whose /proc gives no namespace are not
+# checked, and status (read-only) and down (which deletes the run's objects and the lock without
+# reading a pid) never come through here.
+pid_ns_check() {
+  local recorded here
+  recorded=$(jq -r '.pid_ns // ""' "$STATE")
+  [ -n "$recorded" ] || return 0
+  here=$(pid_ns)
+  [ -n "$here" ] || return 0
+  [ "$here" != "$recorded" ] || return 0
+  note "run $RUN was started in PID namespace $recorded by pod $(state '.holder_pod // "?"'), and this command runs in $here."
+  die "$CMD: only the role that ran up can drive run $RUN: its pids mean nothing in this PID namespace, so a command from here would hold a heartbeat it cannot see. Run your own copy in another namespace, or ask that role's holder (issue $(lock_issue)) to run it. cluster.sh status and cluster.sh down work from here."
+}
+
+# lock_issue: the issue the lock names, "?" when there is no lock or no issue in it.
+lock_issue() {
+  local lock
+  lock=$(kube_lock_get 2>/dev/null) || lock=""
+  [ -n "$lock" ] || {
+    echo '?'
+    return 0
+  }
+  jq -r '.data.issue // "?"' <<<"$lock"
 }
 
 # proc_start PID: the process's start time (field 22 of /proc/PID/stat, read after the command name,
@@ -565,10 +617,11 @@ register_command() {
   proc_start "$$" >"$RUN_DIR/commands/$$"
 }
 
-# run_command_alive: some command of RUN that registered itself is still the same live process;
-# the file of each one that is not is removed.
+# run_command_alive: the run is being driven: some command of RUN that registered itself is still
+# the same live process, or a hold (--keep-for, cluster.sh hold) has not expired yet. The file of
+# each command that is not that live process any more is removed.
 run_command_alive() {
-  local f pid alive=1
+  local f pid until alive=1
   for f in "$RUN_DIR"/commands/*; do
     [ -f "$f" ] || continue
     pid=${f##*/}
@@ -578,8 +631,36 @@ run_command_alive() {
       rm -f -- "$f"
     fi
   done
+  if ((alive != 0)); then
+    until=$(hold_until)
+    [ -z "$until" ] || ((EPOCHSECONDS >= until)) || alive=0
+  fi
   return "$alive"
 }
+
+# The hold: <run>/hold-until, the epoch second a hold of the run ends. run_command_alive calls a
+# held run alive, so its heartbeat keeps renewing the lock with no command of it running and the
+# copy stays whole for the steps and replays its caller types by hand; after the hold expires an
+# abandoned run ages and goes stale as any other. all --keep writes one for --keep-for (default
+# KEEP_FOR_DEFAULT), cluster.sh hold sets or extends it, and down removes it.
+KEEP_FOR_DEFAULT=2h
+
+# hold_until: the run's hold's end as epoch seconds; empty when it holds none.
+hold_until() {
+  local until
+  until=$(cat -- "$RUN_DIR/hold-until" 2>/dev/null) || return 0
+  [[ $until =~ ^[0-9]+$ ]] || return 0
+  printf '%s\n' "$until"
+}
+
+# hold_set SECONDS: hold the run for SECONDS from now. It fails when the run has no directory here.
+hold_set() {
+  [ -d "$RUN_DIR" ] || return 1
+  printf '%s\n' "$((EPOCHSECONDS + $1))" >"$RUN_DIR/hold-until"
+}
+
+# hold_at EPOCH: an epoch second as RFC 3339 UTC.
+hold_at() { date -u -d "@$1" +%Y-%m-%dT%H:%M:%SZ; }
 
 set_run() {
   RUN=$1
@@ -635,14 +716,19 @@ heartbeat_age() {
 }
 
 # refuse_lock JSON: exit 2, naming the lock's holder and its heartbeat's age; past 15 min it is
-# stale, and the command that clears it is named.
+# stale, and then the holder to confirm with before the down command that clears it is named. A
+# stale heartbeat is not proof that the run is abandoned: a held run (--keep-for) whose hold
+# expired, or a holder whose pod is wedged, still owns the copy its issue is measuring, and the
+# down deletes a seeded copy that took an hour to make.
 refuse_lock() {
   local pod uid issue run started hb age
   IFS=$'\t' read -r pod uid issue run started hb < <(jq -r '.data | [."holder-pod", ."holder-uid", .issue, .run, .started, .heartbeat] | map(. // "?") | @tsv' <<<"$1")
   age=$(heartbeat_age "$hb")
   note "namespace $NS is locked: ConfigMap $LOCK names run $run, holder pod $pod (uid $uid, issue $issue), started $started, last heartbeat $hb, $age s ago."
   if [[ $age =~ ^[0-9]+$ ]] && ((age > STALE_SECONDS)); then
-    note "that heartbeat is older than $((STALE_SECONDS / 60)) min, so the holder is stale. Clear its copy and the lock with: cluster.sh down --namespace $NS --run $run"
+    note "that heartbeat is older than $((STALE_SECONDS / 60)) min, so the holder is stale: pod $pod, issue $issue."
+    note "confirm with issue $issue's holder that run $run is abandoned before you clear it (ask on $issue: a kept run holds its copy for typing steps and replays, and the down below deletes it)."
+    note "once they confirm, clear its copy and the lock with: cluster.sh down --namespace $NS --run $run"
   else
     note "one copy at a time: wait for that run to end (its holder updates the heartbeat every 60 s)"
   fi
@@ -712,10 +798,11 @@ stop_daemon() {
 }
 
 # The heartbeat: every 60 s, the lock's heartbeat, by a JSON patch that first tests that the lock
-# still names this run; it ends when the lock is gone or another run's, and when no command of the
-# run is alive (run_command_alive). A command that dies without its EXIT trap (killed, an OOM, a
-# worker turn interrupted) then leaves a lock that ages, so after 15 min the next up names it stale
-# with the down command; the run's next command restarts the heartbeat (ensure_daemons).
+# still names this run; it ends when the lock is gone or another run's, and when nothing drives the
+# run any more (run_command_alive: no registered command of it is alive, and no hold holds it). A
+# command that dies without its EXIT trap (killed, an OOM, a worker turn interrupted) then leaves a
+# lock that ages, so after 15 min the next up names it stale with the down command; the run's next
+# command restarts the heartbeat (ensure_daemons), and the sampler ends with the heartbeat.
 cmd__heartbeat() {
   parse "namespace run" "" "$@"
   use_run
@@ -724,7 +811,7 @@ cmd__heartbeat() {
   while :; do
     sleep 60
     if ! run_command_alive; then
-      note "heartbeat: no command of run $RUN is alive; stopping, so the lock ages and goes stale"
+      note "heartbeat: no command of run $RUN is alive and no hold holds it; stopping, so the lock ages and goes stale"
       rm -f -- "$RUN_DIR/heartbeat.pid"
       exit 0
     fi
@@ -745,6 +832,12 @@ cmd__heartbeat() {
 }
 
 # ---- the cgroup sampler ---------------------------------------------------------------------------
+
+# SAMPLER_GRACE_CHECKS: the sampler ends by the heartbeat's rule (sampler_wait), so no role loop of
+# a killed or torn-down run samples on: every 60 s it looks for a live heartbeat of the run, and
+# stops after this many checks in a row with none, a grace of at least 60 s for a heartbeat that
+# the run's next command is restarting.
+SAMPLER_GRACE_CHECKS=2
 
 # The script each copy container runs under one long-lived kubectl exec: every 5 s, its cgroup v2
 # counters as "key value" lines, then "end". One exec per container for the whole run, not one per
@@ -857,6 +950,8 @@ sample_role_once() {
   rm -f -- "$errf"
 }
 
+# The sampler: one role loop per sampled container, each holding its own kubectl exec, until
+# sampler_wait says the run is over.
 cmd__sampler() {
   parse "namespace run" "" "$@"
   use_run
@@ -869,7 +964,33 @@ cmd__sampler() {
       sleep 5
     done &
   done
-  wait
+  sampler_wait
+}
+
+# sampler_wait: hold the role loops while a heartbeat of the run lives, then stop every one of them
+# and exit. Without it, a run whose commands and heartbeat are gone (killed, or a down from another
+# pod) keeps eight kubectl execs open for ever and appends an error line of each to cgroup.jsonl
+# every 5 s. The sampler is a session of its own (start_daemon), so one TERM of its process group
+# ends every role loop with its kubectl exec; the pidfile goes first, so the run's next command
+# starts a sampler again (ensure_daemons), and TERM is ignored here (the loops were started before
+# that, so they still take it) so this process reaches its own exit.
+sampler_wait() {
+  local misses=0 why=""
+  while [ -z "$why" ]; do
+    sleep 60
+    if [ ! -d "$RUN_DIR" ]; then
+      why="the run directory $RUN_DIR is gone"
+    elif daemon_alive heartbeat; then
+      misses=0
+    elif ((++misses >= SAMPLER_GRACE_CHECKS)); then
+      why="no heartbeat of run $RUN has been alive for $((SAMPLER_GRACE_CHECKS * 60)) s"
+    fi
+  done
+  note "sampler: $why; stopping every role loop with its kubectl exec, and exiting"
+  rm -f -- "$RUN_DIR/sampler.pid"
+  trap '' TERM
+  kill -TERM -- "-$$" 2>/dev/null || true
+  exit 0
 }
 
 # ---- the copy -------------------------------------------------------------------------------------
@@ -2548,12 +2669,24 @@ collect_run() {
 
 # ---- down -----------------------------------------------------------------------------------------
 
-# down_run: stop the run's daemons, delete everything labelled with it (the lock too, when it
-# names this run), and wait until nothing of it is left; then print that listing.
+# down_run: remove the run's hold, stop its daemons, delete everything labelled with it (the lock
+# too, when it names this run), and wait until nothing of it is left; then print that listing. A
+# run another PID namespace started has daemons this command cannot see, let alone stop: it says
+# so, and they stop on their own, the heartbeat because the lock is gone and the sampler because
+# the heartbeat is.
 down_run() {
-  local name deadline listing
+  local name deadline listing recorded here
   if [ -d "$RUN_DIR" ]; then
-    for name in sampler heartbeat; do stop_daemon "$name"; done
+    rm -f -- "$RUN_DIR/hold-until"
+    recorded=""
+    [ ! -f "$STATE" ] || recorded=$(jq -r '.pid_ns // ""' "$STATE")
+    here=$(pid_ns)
+    if [ -n "$recorded" ] && [ -n "$here" ] && [ "$recorded" != "$here" ]; then
+      note "down: run $RUN was started in PID namespace $recorded, not this one ($here), so this command can stop no daemon of it: it drops their pidfiles here, and they stop on their own, the heartbeat once the lock below is gone and the sampler once that heartbeat is."
+      rm -f -- "$RUN_DIR/heartbeat.pid" "$RUN_DIR/sampler.pid"
+    else
+      for name in sampler heartbeat; do stop_daemon "$name"; done
+    fi
   fi
   kube delete "$DELETE_KINDS" -l "$RUN_LABEL=$RUN" --ignore-not-found --wait=false >/dev/null ||
     die "kubectl delete of run $RUN's objects failed"
@@ -2665,12 +2798,12 @@ up_run() {
   tier=$(pg_tier 16 60)
   (umask 077 && jq -n --arg ns "$NS" --arg run "$RUN" --arg sc "$sc" --arg commit "$commit" --arg major "$major" \
     --argjson stored_order "$STORED_ORDER_STATE" \
-    --arg repo "$PRODUCTION_REPO" --arg created "$(utc_now)" --arg holder "$HOLDER_POD" \
+    --arg repo "$PRODUCTION_REPO" --arg created "$(utc_now)" --arg holder "$HOLDER_POD" --arg pidns "$(pid_ns)" \
     --arg dispatch "$dispatch_image" --arg listener "$listener_image" --arg listener_ref "$listener_ref" \
     --arg pg "$pg_image" --arg socat "$socat_image" --arg runner "$runner_image" --argjson nats "$nats_images" \
     --argjson tier "$tier" --arg pgpw "$(random_hex 24)" --arg dt "$(random_hex 32)" --arg lt "$(random_hex 32)" \
     --arg sk "$(random_hex 32)" '{namespace: $ns, run: $run, storage_class: $sc, dispatch_commit: $commit,
-      pg_major: $major, production_repo: $repo, created: $created, holder_pod: $holder,
+      pg_major: $major, production_repo: $repo, created: $created, holder_pod: $holder, pid_ns: $pidns,
       images: ({dispatch: $dispatch, listener: $listener, postgres: $pg, socat: $socat, runner: $runner} + $nats),
       image_sources: {listener: $listener_ref}, postgres: $tier, stored_order: $stored_order, browsertype: null,
       secrets: {pg_password: $pgpw, dispatch_token: $dt, listener_token: $lt, signing_key: $sk}}' >"$STATE")
@@ -2863,10 +2996,11 @@ cmd_replay() {
   run_replay "${POS[0]}" "${OPT[from]:-0}" "${OPT[to]:-39m}" replay
 }
 
+# status: the lock, the run (its PID namespace and its hold), its daemons and its pods.
 cmd_status() {
   parse "namespace run" "" "$@"
   positional 0 "no positional arguments"
-  local lock run=${OPT[run]:-} name
+  local lock run=${OPT[run]:-} name hold recorded
   lock=$(kube_lock_get)
   if [ -n "$lock" ]; then
     jq -r '.data | "lock: run \(.run), holder pod \(."holder-pod") (uid \(."holder-uid"), issue \(.issue)), started \(.started), heartbeat \(.heartbeat)"' <<<"$lock"
@@ -2881,6 +3015,18 @@ cmd_status() {
   if [ -f "$STATE" ]; then
     jq -r '"run \(.run): commit \(.dispatch_commit), Postgres \(.postgres.tier), created \(.created)"' "$STATE"
     printf 'run directory: %s\n' "$RUN_DIR"
+    recorded=$(jq -r '.pid_ns // ""' "$STATE")
+    if [ -n "$recorded" ] && [ -n "$(pid_ns)" ] && [ "$recorded" != "$(pid_ns)" ]; then
+      printf 'PID namespace: %s, not this one (%s): only the role that ran up can drive this run; status and down work from here\n' "$recorded" "$(pid_ns)"
+    fi
+    hold=$(hold_until)
+    if [ -z "$hold" ]; then
+      printf 'hold: none\n'
+    elif ((EPOCHSECONDS < hold)); then
+      printf 'hold: until %s (%s s left; cluster.sh hold --namespace %s --for DURATION extends it)\n' "$(hold_at "$hold")" "$((hold - EPOCHSECONDS))" "$NS"
+    else
+      printf 'hold: expired at %s (%s s ago)\n' "$(hold_at "$hold")" "$((EPOCHSECONDS - hold))"
+    fi
     for name in heartbeat sampler; do
       if daemon_alive "$name"; then printf '%s: running (pid %s)\n' "$name" "$(<"$RUN_DIR/$name.pid")"; else printf '%s: not running\n' "$name"; fi
     done
@@ -2915,8 +3061,21 @@ cmd_down() {
   down_run
 }
 
+# hold: set or extend the hold on the run that is up, so its heartbeat renews the lock while no
+# command of it runs. It starts the run's daemons again when they stopped before it.
+cmd_hold() {
+  parse "namespace run for" "" "$@"
+  positional 0 "no positional arguments"
+  local d=${OPT[for]:-$KEEP_FOR_DEFAULT}
+  valid duration "$d" || die "hold: --for '$d' is not a whole number of s, m or h (for example 2h)"
+  use_run
+  hold_set "$(duration_seconds "$d")" || die "hold: run $RUN has no directory in $CLUSTER_ROOT on this pod"
+  ensure_daemons
+  note "run $RUN is held until $(hold_at "$(hold_until)") ($d from now): its heartbeat renews the lock with no command of it running. cluster.sh hold --namespace $NS --for DURATION extends it; cluster.sh down --namespace $NS --run $RUN removes the copy."
+}
+
 cmd_all() {
-  parse "namespace storage-class dispatch-commit pg-major production-repo listener-image stored-order-source stored-order-checker-commit browsertype-commit profile manifest upload-issue" "keep" "$@"
+  parse "namespace storage-class dispatch-commit pg-major production-repo listener-image stored-order-source stored-order-checker-commit browsertype-commit profile manifest upload-issue keep-for" "keep" "$@"
   positional 0 "no positional arguments"
   local step_d hour_d replay_to refine collect_rc issue=${OPT[upload-issue]:-} manifest=${OPT[manifest]:-$REPLAY_MANIFEST} why
   case ${OPT[profile]:-} in
@@ -2924,9 +3083,13 @@ cmd_all() {
     full) step_d=10m hour_d=60m replay_to=39m refine=true ;;
     *) die "all: --profile quick or --profile full is required" ;;
   esac
+  ALL_KEEP=${OPT[keep]:-}
+  ALL_KEEP_FOR=${OPT[keep-for]:-$KEEP_FOR_DEFAULT}
+  [ -n "$ALL_KEEP" ] || [ -z "${OPT[keep-for]:-}" ] ||
+    die "all: --keep-for is valid only with --keep: without --keep the run is torn down at the end, so there is nothing to hold"
+  valid duration "$ALL_KEEP_FOR" || die "all: --keep-for '$ALL_KEEP_FOR' is not a whole number of s, m or h (for example 2h)"
   [ -z "$issue" ] || valid issue "$issue" || die "--upload-issue '$issue' is not an issue key"
   replay_manifest_valid "$manifest"
-  ALL_KEEP=${OPT[keep]:-}
   RUN_TAKEN=""
   trap all_exit EXIT
   up_run
@@ -2981,7 +3144,8 @@ cmd_all() {
 }
 
 # all_exit: all's trap: up's scratch directory for the checker removed; any exit with a run taken
-# runs down, unless --keep.
+# runs down, unless --keep, which instead holds the run for --keep-for, so its heartbeat renews the
+# lock while the caller types steps and replays and no up of another worker calls it stale.
 all_exit() {
   local rc=$?
   trap - EXIT
@@ -2991,7 +3155,12 @@ all_exit() {
     isolated down_run
     ((ISOLATED_RC == 0)) || note "all: down failed; run: cluster.sh down --namespace $NS --run $RUN"
   elif [ -n "${RUN_TAKEN:-}" ]; then
-    note "all: --keep: run $RUN stays up; cluster.sh down --namespace $NS --run $RUN removes it"
+    if hold_set "$(duration_seconds "${ALL_KEEP_FOR:-$KEEP_FOR_DEFAULT}")"; then
+      note "all: --keep: run $RUN stays up, held until $(hold_at "$(hold_until)") (--keep-for ${ALL_KEEP_FOR:-$KEEP_FOR_DEFAULT}): until then its heartbeat renews the lock with no command running, so no other worker's up calls it stale. cluster.sh hold --namespace $NS --for DURATION extends the hold."
+    else
+      note "all: --keep: run $RUN stays up, with no hold: it has no directory in $CLUSTER_ROOT on this pod"
+    fi
+    note "all: cluster.sh down --namespace $NS --run $RUN removes run $RUN"
   fi
   exit "$rc"
 }
@@ -3013,6 +3182,7 @@ main() {
     status) cmd_status "$@" ;;
     down) cmd_down "$@" ;;
     all) cmd_all "$@" ;;
+    hold) cmd_hold "$@" ;;
     _heartbeat) cmd__heartbeat "$@" ;;
     _sampler) cmd__sampler "$@" ;;
     *) usage ;;

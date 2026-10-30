@@ -6,8 +6,10 @@ body: |-
   worker pod. It refuses a commit with no published envoy image (naming the newest first-parent
   ancestor that has one) and a Postgres major other than production's, before it creates
   anything, and refuses while the ConfigMap `dispatch-loadtest-lock` names another run; the lock's
-  heartbeat runs only while a command of its run is alive, so a killed run's lock goes stale and
-  `up` names the `down` that clears it. It stands
+  heartbeat and the cgroup sampler run only while a command of the run is alive or a hold
+  (`all --keep --keep-for`, `cluster.sh hold`) holds it, so a killed run's lock goes stale, and
+  `up` then names the holder's issue to confirm with before the `down` that clears it. Only the PID
+  namespace that ran `up` drives a run. It stands
   up Postgres at the 16-vCPU Cloud SQL tier's size, Dispatch at production's pod size, the
   listener, a three-pod NATS JetStream hub and a runner pod; seeds it; resets it before each step;
   runs 1x to 10x, the reads-only control, the hour at 10x and 1x on a 4-vCPU Postgres; samples

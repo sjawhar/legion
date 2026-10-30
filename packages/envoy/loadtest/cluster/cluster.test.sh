@@ -98,7 +98,16 @@
 # heartbeat renews the lock only while a command of its run is alive, so an abandoned run's lock
 # goes stale; (p) stored_order_summary reads a summary line that ends with `unchecked=N` and one
 # without it; (q) a step whose copy-back from the runner failed is marked failed with kind
-# copy_back, keeps no truncated file of the cut stream, and leaves its files in the runner.
+# copy_back, keeps no truncated file of the cut stream, and leaves its files in the runner;
+# (r) the sampler stops with its run's heartbeat, with the kubectl exec of every role loop, and
+# removes its pidfile; (s) all refuses --keep-for without --keep, cluster.sh hold holds a run
+# whose commands have all ended (its heartbeat keeps patching the lock, and status shows the
+# hold's expiry), and an expired hold stops it; (t) up's refusal of a stale lock names the
+# holder's pod and issue and says to confirm with that issue's holder that the run is abandoned
+# before the down command it then gives; (u) a run whose state.json records another PID namespace
+# refuses every command that would drive it, registering nothing and starting no daemon, while
+# status still reads it and down still deletes it, saying that the daemons it cannot see stop on
+# their own.
 set -euo pipefail
 
 here=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
@@ -2043,3 +2052,158 @@ grep -qF 'step cut failed: copy_back' "$tmp/out" || fail "the step did not say t
   fail "the step directory was removed from the runner although the copy back failed"
 run_cluster down --namespace "$ns"
 pass "a step whose copy-back from the runner failed is marked failed with kind copy_back, keeps no truncated file of the cut stream, and leaves its files in the runner"
+
+# (r) The sampler ends with its run's heartbeat. Its eight role loops, each holding a kubectl exec
+# of a copy container, outlived every command of the run and the heartbeat alike: a killed run
+# kept eight execs open for ever, and a run torn down from elsewhere appended an error line of
+# each to cgroup.jsonl every 5 s with nothing left to read.
+reset_fake
+export LOADTEST_CLUSTER_ROOT=$tmp/root-sampler-stop FAKE_FAST_SLEEP=60
+run_cluster up "${up_args[@]}" --dispatch-commit "$commit_ok"
+((RC == 0)) || fail "up exited $RC"
+sampler_dir=$LOADTEST_CLUSTER_ROOT/$(jq -r .data.run "$fake/lock.json")
+sampler_pid=$(<"$sampler_dir/sampler.pid")
+# up has returned, so no command of this run is alive: its heartbeat stops, and the sampler with it.
+sampler_alive=yes
+for ((i = 0; i < 200; i++)); do
+  kill -0 "$sampler_pid" 2>/dev/null || {
+    sampler_alive=no
+    break
+  }
+  sleep 0.1
+done
+sampler_lines=$(wc -l <"$sampler_dir/cgroup.jsonl" 2>/dev/null || echo 0)
+sleep 6
+sampler_lines_after=$(wc -l <"$sampler_dir/cgroup.jsonl" 2>/dev/null || echo 0)
+run_cluster down --namespace "$ns"
+[ "$sampler_alive" = no ] ||
+  fail "the sampler daemon (pid $sampler_pid) still runs 20 s after the last command of its run ended and its heartbeat stopped: its eight kubectl execs stay open and it appends an error line of each to cgroup.jsonl every 5 s for ever"
+[ ! -f "$sampler_dir/sampler.pid" ] || fail "the sampler that stopped left its pidfile $sampler_dir/sampler.pid"
+[ "$sampler_lines_after" = "$sampler_lines" ] ||
+  fail "cgroup.jsonl grew by $((sampler_lines_after - sampler_lines)) lines in the 6 s after the sampler was gone: a role loop of it still samples"
+unset FAKE_FAST_SLEEP
+pass "the sampler stops once no heartbeat of its run is alive, with the kubectl exec of every role loop, and removes its pidfile"
+
+# (s) The hold. all --keep leaves the copy up for the typing steps and replays its caller types by
+# hand, but the heartbeat stops 60 s after the last command, so 15 min later any worker's up calls
+# that lock stale and prints the down that deletes a copy an hour of seeding made. --keep-for, and
+# cluster.sh hold, hold the run: the heartbeat renews the lock while the hold lasts, and only an
+# expired hold lets the run age as an abandoned one.
+reset_fake
+export LOADTEST_CLUSTER_ROOT=$tmp/root-hold
+run_cluster all "${up_args[@]}" --dispatch-commit "$commit_ok" --profile quick --keep-for 1h
+((RC != 0)) || fail "all --keep-for without --keep was not refused"
+grep -q -- '--keep-for is valid only with --keep' "$tmp/out" ||
+  fail "all --keep-for without --keep did not say that the flag needs --keep: $(cat "$tmp/out")"
+no_create || fail "all --keep-for without --keep created something before it refused"
+export FAKE_FAST_SLEEP=60
+run_cluster up "${up_args[@]}" --dispatch-commit "$commit_ok"
+((RC == 0)) || fail "up exited $RC"
+hold_run=$(jq -r .data.run "$fake/lock.json")
+hold_dir=$LOADTEST_CLUSTER_ROOT/$hold_run
+# up has returned, so no command of the run is alive and its heartbeat stops, as (o) proves.
+for ((i = 0; i < 100; i++)); do
+  [ -f "$hold_dir/heartbeat.pid" ] || break
+  sleep 0.1
+done
+run_cluster hold --namespace "$ns" --for 1h
+((RC == 0)) || fail "cluster.sh hold exited $RC: $(cat "$tmp/out")"
+[ -f "$hold_dir/hold-until" ] || fail "hold wrote no hold-until in $hold_dir: $(cat "$tmp/out")"
+hold_hb=$(<"$hold_dir/heartbeat.pid")
+hold_patches=$(grep -c "patch configmap dispatch-loadtest-lock" "$fake/kubectl.log" || true)
+sleep 1
+hold_patches_after=$(grep -c "patch configmap dispatch-loadtest-lock" "$fake/kubectl.log" || true)
+hold_alive=no
+kill -0 "$hold_hb" 2>/dev/null && hold_alive=yes
+[ "$hold_alive" = yes ] ||
+  fail "the heartbeat of a held run stopped although no command of it runs: 15 min later another worker's up calls the kept copy stale and prints the down that deletes it"
+((hold_patches_after > hold_patches)) ||
+  fail "the heartbeat of a held run patched the lock no more than before ($hold_patches_after, was $hold_patches): the kept run's lock ages and goes stale"
+run_cluster status --namespace "$ns"
+grep -q 'hold: until ' "$tmp/out" || fail "status does not show the hold's expiry: $(cat "$tmp/out")"
+# An expired hold holds nothing, so an abandoned kept run goes stale as any other.
+printf '%s\n' "$((EPOCHSECONDS - 1))" >"$hold_dir/hold-until"
+hold_expired_alive=yes
+for ((i = 0; i < 200; i++)); do
+  kill -0 "$hold_hb" 2>/dev/null || {
+    hold_expired_alive=no
+    break
+  }
+  sleep 0.1
+done
+run_cluster down --namespace "$ns"
+[ "$hold_expired_alive" = no ] ||
+  fail "the heartbeat went on renewing the lock 20 s after the hold expired: a kept run nobody extends never goes stale"
+[ ! -f "$hold_dir/hold-until" ] || fail "down left the run's hold in $hold_dir"
+unset FAKE_FAST_SLEEP
+pass "all refuses --keep-for without --keep; a hold keeps the heartbeat renewing the lock with no command of the run alive, status shows its expiry, down removes it, and an expired hold stops the heartbeat"
+
+# (t) The refusal of a stale lock. The heartbeat's age alone is no proof that the run is
+# abandoned: a run held for typing steps may have outlived its hold, and the down command deletes
+# a copy that hours of seeding and steps made. So the refusal names the lock's holder and issue
+# and says to confirm with that issue's holder, before it gives the command.
+reset_fake
+export LOADTEST_CLUSTER_ROOT=$tmp/root-stale
+write_lock "$other_run" "$(date -u -d '-20 minutes' +%Y-%m-%dT%H:%M:%SZ)"
+run_cluster up "${up_args[@]}" --dispatch-commit "$commit_ok"
+((RC == 2)) || fail "up against a stale lock exited $RC, not 2"
+stale_confirm=$(grep -n -i 'confirm' "$tmp/out" | head -n1 | cut -d: -f1 || true)
+[ -n "$stale_confirm" ] ||
+  fail "up's stale refusal does not say to confirm with the holder that the run is abandoned before clearing it: $(cat "$tmp/out")"
+grep -qi 'confirm with issue OTHER-9' "$tmp/out" ||
+  fail "the confirm instruction does not name the holder's issue OTHER-9: $(cat "$tmp/out")"
+grep -q 'holder is stale: pod other-worker-3, issue OTHER-9' "$tmp/out" ||
+  fail "the stale line does not name the holder pod and issue the lock holds: $(cat "$tmp/out")"
+stale_down=$(grep -n -- "cluster.sh down --namespace $ns --run $other_run" "$tmp/out" | head -n1 | cut -d: -f1 || true)
+[ -n "$stale_down" ] || fail "up's stale refusal no longer gives the down command: $(cat "$tmp/out")"
+((stale_confirm < stale_down)) ||
+  fail "up gives the down command (line $stale_down) before it says to confirm with the holder (line $stale_confirm)"
+rm -f "$fake/lock.json"
+pass "up's refusal of a stale lock names the holder pod and issue and says to confirm with that issue's holder that the run is abandoned, before the down command that clears it"
+
+# (u) One PID namespace drives a run. A Legion pod runs each role in a PID namespace of its own
+# over one LOADTEST_CLUSTER_ROOT, so the pids another role recorded (the run's command files, the
+# daemons' pidfiles) name nothing here: a command from this one would register itself as alive for
+# a heartbeat it cannot see, and ensure_daemons would start a second pair of daemons on the same
+# run. Only status and down, which register no command, run from another namespace.
+reset_fake
+export LOADTEST_CLUSTER_ROOT=$tmp/root-pidns
+run_cluster up "${up_args[@]}" --dispatch-commit "$commit_ok"
+((RC == 0)) || fail "up exited $RC"
+pidns_run=$(jq -r .data.run "$fake/lock.json")
+pidns_dir=$LOADTEST_CLUSTER_ROOT/$pidns_run
+[ "$(jq -r '.pid_ns // ""' "$pidns_dir/state.json")" = "$(readlink /proc/self/ns/pid)" ] ||
+  fail "up did not record its PID namespace in state.json: pid_ns is '$(jq -r '.pid_ns // ""' "$pidns_dir/state.json")', not $(readlink /proc/self/ns/pid)"
+# The run as another role of the pod finds it: started in a PID namespace that is not this one.
+jq '.pid_ns = "pid:[1]"' "$pidns_dir/state.json" >"$tmp/pidns-state.json"
+mv "$tmp/pidns-state.json" "$pidns_dir/state.json"
+chmod 600 "$pidns_dir/state.json"
+for d in heartbeat sampler; do
+  pidns_pid=$(<"$pidns_dir/$d.pid")
+  kill -TERM -- "-$pidns_pid" 2>/dev/null || true
+  rm -f "$pidns_dir/$d.pid"
+done
+rm -rf "$pidns_dir/commands"
+run_cluster step --namespace "$ns" foreign 1 --duration 1m
+((RC != 0)) || fail "a step of a run that another PID namespace started was not refused"
+grep -qF 'pid:[1]' "$tmp/out" ||
+  fail "the refusal does not name the PID namespace the run recorded: $(cat "$tmp/out")"
+grep -qF 'only the role that ran up' "$tmp/out" ||
+  fail "the refusal does not say that only the role that ran up can drive the run: $(cat "$tmp/out")"
+grep -qF 'test-worker-0' "$tmp/out" || fail "the refusal does not name the holder pod: $(cat "$tmp/out")"
+grep -qF 'TEST-1' "$tmp/out" || fail "the refusal does not name the holder's issue: $(cat "$tmp/out")"
+[ ! -e "$pidns_dir/commands" ] ||
+  fail "a command refused for its PID namespace registered itself in $pidns_dir/commands: $(ls "$pidns_dir/commands")"
+[ ! -e "$pidns_dir/steps/foreign" ] || fail "the refused step made the step directory $pidns_dir/steps/foreign"
+for d in heartbeat sampler; do
+  [ ! -f "$pidns_dir/$d.pid" ] || fail "the refused command started the $d daemon of a run it cannot drive"
+done
+run_cluster status --namespace "$ns"
+((RC == 0)) || fail "status of a run that another PID namespace started exited $RC: $(cat "$tmp/out")"
+grep -q "run $pidns_run" "$tmp/out" || fail "status does not name the run: $(cat "$tmp/out")"
+run_cluster down --namespace "$ns"
+((RC == 0)) || fail "down of a run that another PID namespace started exited $RC: $(cat "$tmp/out")"
+[ ! -f "$fake/lock.json" ] || fail "down of a run that another PID namespace started left the lock"
+grep -q 'PID namespace pid:\[1\]' "$tmp/out" ||
+  fail "down does not say that it cannot stop the daemons of a run another PID namespace started: $(cat "$tmp/out")"
+pass "a command of a run another PID namespace started is refused before it registers anything or starts a daemon, while status still reads the run and down still deletes it"
