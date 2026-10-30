@@ -118,11 +118,12 @@ func deliveredSeries(status string) string {
 // about reading through to the bucket, since every warm-cache delivery already pushes.
 func TestAgentDeliveryReadsTheSessionStoreWhileTheCacheIsCold(t *testing.T) {
 	const target = "ses_cold_cache_delivery_target"
-	// The handler runs on this goroutine, so the pushes it makes are recorded without
-	// synchronisation.
-	var pushed []string
+	// Each push to a serving port runs on that session's own worker (servePortWorkers), off this
+	// goroutine, so the pushes are recorded through the shared log (pushLog, main_test.go) and read
+	// back once the handler has waited for them.
+	pushes := &pushLog{}
 	harness := newListenerDeliveryHarness(t, listenerTransport(func(request *http.Request) (*http.Response, error) {
-		pushed = append(pushed, request.URL.String())
+		pushes.record(request.URL.String())
 		return listenerDeliveryResponse(http.StatusNoContent), nil
 	}))
 
@@ -155,6 +156,7 @@ func TestAgentDeliveryReadsTheSessionStoreWhileTheCacheIsCold(t *testing.T) {
 	item := listenerTestEnvelope(contracts.AgentSubject(target), "cold-cache-agent-delivery")
 	harness.handler(&natsgo.Msg{Data: marshalListenerEnvelope(t, item)})
 
+	pushed := pushes.all()
 	if len(pushed) != 1 {
 		t.Fatalf("the cold-cache delivery pushed %d times (%v), want exactly one push to the record only the bucket holds:\n%s", len(pushed), pushed, harness.logs.String())
 	}

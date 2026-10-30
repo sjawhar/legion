@@ -3244,10 +3244,9 @@ func TestListenerDeliveryHandler_DedupesSuccessfulDelivery(t *testing.T) {
 // incapable subscriber cannot receive a tagged delivery or prevent a capable
 // subscriber on the same topic from receiving it.
 func TestListenerDeliveryHandler_FanoutRefusesUnadvertisedDeliveryMode(t *testing.T) {
-	deliveries := map[string]int{}
+	pushes := &pushLog{}
 	harness := newListenerDeliveryHarness(t, listenerTransport(func(request *http.Request) (*http.Response, error) {
-		sessionID := strings.TrimSuffix(strings.TrimPrefix(request.URL.Path, "/session/"), "/prompt_async")
-		deliveries[sessionID]++
+		pushes.record(strings.TrimSuffix(strings.TrimPrefix(request.URL.Path, "/session/"), "/prompt_async"))
 		return listenerDeliveryResponse(http.StatusNoContent), nil
 	}))
 	const (
@@ -3279,10 +3278,10 @@ func TestListenerDeliveryHandler_FanoutRefusesUnadvertisedDeliveryMode(t *testin
 		t.Fatalf("flush delivery exception: %v", err)
 	}
 
-	if got := deliveries[capable]; got != 1 {
+	if got := pushes.count(capable); got != 1 {
 		t.Fatalf("capable subscriber deliveries = %d, want 1", got)
 	}
-	if got := deliveries[incapable]; got != 0 {
+	if got := pushes.count(incapable); got != 0 {
 		t.Fatalf("incapable subscriber deliveries = %d, want 0", got)
 	}
 	if recipient := exceptionRecipient(t, assertDeliveryException(t, probe, item, "delivery_failed")); recipient != incapable {
@@ -3358,19 +3357,20 @@ func TestListenerDeliveryHandler_FanoutRechecksCapabilitiesAtDelivery(t *testing
 	)
 	harness.registerFanoutTarget(t, firstTarget, topic, []string{"btw"})
 	harness.registerFanoutTarget(t, secondTarget, topic, []string{"btw"})
-	deliveries := map[string]int{}
-	var deliveredTarget, revokedTarget string
+	pushes := &pushLog{}
+	// other names the recipient of the two that sessionID is not: the one whose capability the
+	// first push revokes, and the one no push may reach after that.
+	other := func(sessionID string) string {
+		if sessionID == firstTarget {
+			return secondTarget
+		}
+		return firstTarget
+	}
 	cfg := harness.config
 	cfg.deliverer.HTTPClient = &http.Client{Transport: listenerTransport(func(request *http.Request) (*http.Response, error) {
 		sessionID := strings.TrimSuffix(strings.TrimPrefix(request.URL.Path, "/session/"), "/prompt_async")
-		deliveries[sessionID]++
-		if deliveredTarget == "" {
-			deliveredTarget = sessionID
-			revokedTarget = firstTarget
-			if sessionID == firstTarget {
-				revokedTarget = secondTarget
-			}
-			if err := harness.sessions.Put(revokedTarget, session.SessionEntry{
+		if pushes.record(sessionID) == 1 {
+			if err := harness.sessions.Put(other(sessionID), session.SessionEntry{
 				Port:      1,
 				MachineID: "test-machine",
 			}); err != nil {
@@ -3396,15 +3396,11 @@ func TestListenerDeliveryHandler_FanoutRechecksCapabilitiesAtDelivery(t *testing
 		t.Fatalf("flush capability refusal: %v", err)
 	}
 
-	if deliveredTarget == "" || revokedTarget == "" {
-		t.Fatalf("delivery transition = delivered %q, revoked %q", deliveredTarget, revokedTarget)
+	pushed := pushes.all()
+	if len(pushed) != 1 {
+		t.Fatalf("recipients pushed = %v, want exactly one: the recipient whose push revoked the other's capability", pushed)
 	}
-	if got := deliveries[deliveredTarget]; got != 1 {
-		t.Fatalf("first recipient deliveries = %d, want 1", got)
-	}
-	if got := deliveries[revokedTarget]; got != 0 {
-		t.Fatalf("capability-revoked recipient deliveries = %d, want 0", got)
-	}
+	revokedTarget := other(pushed[0])
 	if recipient := exceptionRecipient(t, assertDeliveryException(t, probe, item, "delivery_failed")); recipient != revokedTarget {
 		t.Fatalf("exception recipient = %q, want capability-revoked %q", recipient, revokedTarget)
 	}
@@ -3414,10 +3410,9 @@ func TestListenerDeliveryHandler_FanoutRechecksCapabilitiesAtDelivery(t *testing
 // notifications remain available to every matching subscriber regardless of
 // its delivery capabilities.
 func TestListenerDeliveryHandler_FanoutAllowsUntaggedPayload(t *testing.T) {
-	deliveries := map[string]int{}
+	pushes := &pushLog{}
 	harness := newListenerDeliveryHarness(t, listenerTransport(func(request *http.Request) (*http.Response, error) {
-		sessionID := strings.TrimSuffix(strings.TrimPrefix(request.URL.Path, "/session/"), "/prompt_async")
-		deliveries[sessionID]++
+		pushes.record(strings.TrimSuffix(strings.TrimPrefix(request.URL.Path, "/session/"), "/prompt_async"))
 		return listenerDeliveryResponse(http.StatusNoContent), nil
 	}))
 	const (
@@ -3432,10 +3427,10 @@ func TestListenerDeliveryHandler_FanoutAllowsUntaggedPayload(t *testing.T) {
 
 	harness.handler(&natsgo.Msg{Data: marshalListenerEnvelope(t, item)})
 
-	if got := deliveries[firstTarget]; got != 1 {
+	if got := pushes.count(firstTarget); got != 1 {
 		t.Fatalf("first untagged subscriber deliveries = %d, want 1", got)
 	}
-	if got := deliveries[nextTarget]; got != 1 {
+	if got := pushes.count(nextTarget); got != 1 {
 		t.Fatalf("next untagged subscriber deliveries = %d, want 1", got)
 	}
 }
@@ -3450,10 +3445,9 @@ func TestListenerDeliveryHandler_FanoutRefusesUnreadableOrAmbiguousDeliveryMode(
 	}
 	for name, payload := range cases {
 		t.Run(name, func(t *testing.T) {
-			deliveries := map[string]int{}
+			pushes := &pushLog{}
 			harness := newListenerDeliveryHarness(t, listenerTransport(func(request *http.Request) (*http.Response, error) {
-				sessionID := strings.TrimSuffix(strings.TrimPrefix(request.URL.Path, "/session/"), "/prompt_async")
-				deliveries[sessionID]++
+				pushes.record(strings.TrimSuffix(strings.TrimPrefix(request.URL.Path, "/session/"), "/prompt_async"))
 				return listenerDeliveryResponse(http.StatusNoContent), nil
 			}))
 			const (
@@ -3476,10 +3470,10 @@ func TestListenerDeliveryHandler_FanoutRefusesUnreadableOrAmbiguousDeliveryMode(
 
 			harness.handler(&natsgo.Msg{Data: marshalListenerEnvelope(t, item)})
 
-			if got := deliveries[firstTarget]; got != 0 {
+			if got := pushes.count(firstTarget); got != 0 {
 				t.Fatalf("first malformed subscriber deliveries = %d, want 0", got)
 			}
-			if got := deliveries[nextTarget]; got != 0 {
+			if got := pushes.count(nextTarget); got != 0 {
 				t.Fatalf("next malformed subscriber deliveries = %d, want 0", got)
 			}
 			recipients := map[string]bool{}
@@ -3814,6 +3808,45 @@ func (f listenerTransport) RoundTrip(request *http.Request) (*http.Response, err
 
 func listenerDeliveryResponse(status int) *http.Response {
 	return &http.Response{StatusCode: status, Body: http.NoBody, Header: make(http.Header)}
+}
+
+// pushLog records what a harness's transport was pushed, for the test goroutine to read once the
+// pushes have ended. Every push to a serving-port session runs on that session's own worker
+// (servePortWorkers), so a transport records its pushes from the workers' goroutines, one session's
+// beside another's: a harness that counts what it was pushed shares the count through this log
+// rather than through a map or a slice of its own.
+type pushLog struct {
+	mu      sync.Mutex
+	entries []string
+}
+
+// record keeps one push -- named by whatever the test reads back, a session ID or a request URL --
+// and reports how many pushes the log holds, this one included.
+func (l *pushLog) record(entry string) int {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	l.entries = append(l.entries, entry)
+	return len(l.entries)
+}
+
+// count reports how many of the pushes recorded were entry's.
+func (l *pushLog) count(entry string) int {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	total := 0
+	for _, held := range l.entries {
+		if held == entry {
+			total++
+		}
+	}
+	return total
+}
+
+// all reports every push recorded, in the order the log took them.
+func (l *pushLog) all() []string {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return slices.Clone(l.entries)
 }
 
 // inlineForward is a role forward seam (listenerDeliveryHandlerConfig.forwardRole) whose publish
