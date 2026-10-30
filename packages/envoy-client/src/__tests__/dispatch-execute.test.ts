@@ -8997,8 +8997,9 @@ describe("executeDispatchTool", () => {
     expect(await problems(`dispatch://DSP-1/comment/${parent}#b-b2@v1`)).toEqual([
       `reply_to dispatch://DSP-1/comment/${parent}#b-b2@v1 names revision 1 of the block, but a reply answers the block whatever its text becomes: drop @v1`,
     ]);
-    expect(await problems(`dispatch://DSP-1/ask/${parent}#b-b2`)).toEqual([
-      `reply_to dispatch://DSP-1/ask/${parent}#b-b2 names no block; a block of a comment reads dispatch://KEY/comment/<id>#b-<block id>`,
+    // An ask's parts are blocks of their own, so a part names a block - of the wrong item.
+    expect(await problems(`dispatch://DSP-1/ask/${parent}#b-b3`)).toEqual([
+      `reply_to dispatch://DSP-1/ask/${parent}#b-b3 names a block of an ask, but a comment reply answers a block of a comment (dispatch://KEY/comment/<id>#b-<block id>)`,
     ]);
   });
 

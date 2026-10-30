@@ -704,7 +704,8 @@ function replyBlockProblem(
         : other === "message"
           ? `; answer it with ${commandLine("dispatch_message", { in_reply_to: value })}`
           : "";
-    return `${field} ${value} names a block of ${other === undefined ? "a document" : `a ${other}`}, but a ${kind} reply answers a block of a ${kind} (${form})${answer}`;
+    const named = other === undefined ? "a document" : other === "ask" ? "an ask" : `a ${other}`;
+    return `${field} ${value} names a block of ${named}, but a ${kind} reply answers a block of a ${kind} (${form})${answer}`;
   }
   if (ref.pin !== undefined) {
     return `${field} ${value} names revision ${ref.pin} of the block, but a reply answers the block whatever its text becomes: drop @v${ref.pin}`;
@@ -1075,9 +1076,9 @@ function readWithoutEvents(args: ToolArguments): string | undefined {
  * The dispatch:// form of a dashboard URL on the configured server, or undefined when the
  * value is not such a URL. Accepts the issue, spec, artifact, ask, comment, log and activity
  * pages, project document pages (with their ?ask= / ?comment= deep links, which name the item
- * whatever the fragment), the `#b-<block id>` of a live document page or of an issue comment's or
- * message's page, which names that block, and the page of an upload an agent's conversation owns
- * (`/agents/<session id>/artifacts/<slug>`).
+ * whatever the fragment), the `#b-<block id>` of a live document page or of an issue ask's,
+ * comment's or message's page, which names that block, and the page of an upload an agent's
+ * conversation owns (`/agents/<session id>/artifacts/<slug>`).
  */
 export function dispatchRefFromUrl(value: string, serverUrl: string): string | undefined {
   let url: URL;
@@ -1127,7 +1128,7 @@ export function dispatchRefFromUrl(value: string, serverUrl: string): string | u
       const slug = decodeURIComponent(artifact);
       return `dispatch://${key}/artifact/${slug}${version}${blockOf("v")}`;
     }
-    if (ask !== undefined) return `dispatch://${key}/ask/${ask}`;
+    if (ask !== undefined) return `dispatch://${key}/ask/${ask}${blockOf()}`;
     if (comment !== undefined) return `dispatch://${key}/comment/${comment}${blockOf()}`;
     if (message !== undefined) return `dispatch://${key}/message/${message}${blockOf()}`;
     return `dispatch://${key}`;
@@ -1228,7 +1229,7 @@ function innerRefProblem(
         : ref.kind === "children"
           ? "the children"
           : ref.kind === "block"
-            ? `block ${ref.block}${ref.item === undefined ? "" : ` of a ${ref.item.kind}`}`
+            ? `block ${ref.block}${ref.item === undefined ? "" : ` of ${ref.item.kind === "ask" ? "an" : "a"} ${ref.item.kind}`}`
             : `a ${ref.kind}`;
   return `ref ${refText} names ${item} on ${owner}; dispatch ${commandName(tool)} would act on ${owner} and drop the ${ref.kind}: ${fix}`;
 }

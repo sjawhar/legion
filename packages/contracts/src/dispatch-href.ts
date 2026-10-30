@@ -54,14 +54,14 @@ export function itemFromSearch(search: string): DispatchHrefItem | undefined | n
  * `packages/envoy/internal/dispatch/text` through its JSON copy of these rows - so a new href
  * shape cannot reach one of them and not the others.
  *
- * A `#b-<block>` href names that block of its document, or of the comment or issue message an
- * item page (`/comments/<id>`, `/messages/<id>`) shows: its reference is the document's or the
- * item's with `#b-` and the id written by `encodeBlockId`. A document page's `?comment=` names the
- * comment whatever its fragment: the dashboard writes a document block's fragment beside it, so
- * the fragment there is never a block of the comment. Any other fragment leaves the document or
- * item, and so does a document's version page whatever its fragment, a version's stored text
- * holding no block ids: the version of an issue's spec (`/spec?v=N`) is the spec's artifact at
- * that version.
+ * A `#b-<block>` href names that block of its document, or of the ask, the comment or the issue
+ * message an item page (`/asks/<id>`, `/comments/<id>`, `/messages/<id>`) shows: its reference is
+ * the document's or the item's with `#b-` and the id written by `encodeBlockId`. A document
+ * page's `?comment=` or `?ask=` names the item whatever its fragment: the dashboard writes a
+ * document block's fragment beside it, so the fragment there is never a block of the item. Any
+ * other fragment leaves the document or item, and so does a document's version page whatever its
+ * fragment, a version's stored text holding no block ids: the version of an issue's spec
+ * (`/spec?v=N`) is the spec's artifact at that version.
  */
 export const DISPATCH_HREF_REFERENCES: readonly { href: string; ref: string }[] = [
   { href: "/issues/CORE-1", ref: "dispatch://CORE-1" },
@@ -125,8 +125,16 @@ export const DISPATCH_HREF_REFERENCES: readonly { href: string; ref: string }[] 
     ref: "dispatch://CORE-1/message/33333333-3333-4333-8333-333333333333#b-b2",
   },
   {
+    href: "/issues/CORE-1/asks/22222222-2222-4222-8222-222222222222#b-b3",
+    ref: "dispatch://CORE-1/ask/22222222-2222-4222-8222-222222222222#b-b3",
+  },
+  {
     href: "/projects/CORE/documents/handbook-md?comment=88888888-8888-4888-8888-888888888888#b-b2",
     ref: "dispatch://CORE/artifact/handbook-md/comment/88888888-8888-4888-8888-888888888888",
+  },
+  {
+    href: "/projects/CORE/documents/handbook-md?ask=99999999-9999-4999-8999-999999999999#b-b2",
+    ref: "dispatch://CORE/artifact/handbook-md/ask/99999999-9999-4999-8999-999999999999",
   },
   {
     href: "/issues/CORE-1/spec#b-d%C3%A9cision%3A1",
