@@ -2,7 +2,7 @@
   "schemaVersion": 1,
   "phase": "implement",
   "issue": "INFRA-606",
-  "completed": "2026-10-30T02:00:39Z",
+  "completed": "2026-10-30T08:05:38Z",
   "pullRequest": "https://github.com/sjawhar/legion/pull/2406",
   "proof": [
     {
@@ -204,6 +204,14 @@
       "observed": "A send queued past a lease: the event is published, the session's copy held as a row, settled unpublished when the send lands (one copy) or published once when it fails; with real claim ageing and a keepClaims tick the sweep leaves the lane alone and order holds; a keyed repeat's claim is kept; a Retry while attempt 1 is queued leaves one send, attempt 1 superseded.",
       "headSha": "5a26d3ab1b6f7d3638ac6e496622cbbbc1e91fd6",
       "negativeControl": "74779bec's MentionResumedSQL leaves the event unpublished; with the keepClaims loop removed the held-lane test finds the claims lapsed; each other fix removed fails its test."
+    },
+    {
+      "criterion": "Review round 6 (architect's ruling): an attempt a failed Retry overtook while its lane holds it does not keep comment.created deferred past about a lease; a fallback pass stopped during its claim leaves no row claimed; the claimant test passes -count=50.",
+      "surface": "The API handler, the post-response mention sender, a Retry through POST /api/v1/comments/{id}/deliveries, and the real outbox and fallback pass against Postgres",
+      "command": "go test -p 2 -parallel 4 ./internal/dispatch/api/ -run 'TestARetryThatFailsDoesNotHoldTheCommentOfTheAttemptItOvertook' -count=1; go test ./internal/dispatch/outbox/ -run TestAFallbackPassThatIsStoppingReleasesEveryRowItClaimed -count=1; go test -p 2 -parallel 4 ./internal/dispatch/api/ -run TestAClaimantWhoseResentMentionFailsStillHearsTheComment -count=50",
+      "observed": "The event publishes with one held row for s1; once the lane supersedes attempt 1, s1 gets exactly one copy. A pass on an ended context releases its row. The claimant test: 50 of 50, no 'claim fallback copies' error.",
+      "headSha": "e4846fb7e96ad5ca8c5efb4e1f3ecd2cdffe5607",
+      "negativeControl": "With the previous MentionResumedSQL the event stays unpublished; with the claim on the pass's context the row stays claimed and 'context canceled' is logged."
     }
   ],
   "filesChanged": [
@@ -271,6 +279,7 @@
     "packages/envoy/internal/dispatch/api/routes_table_test.go",
     "packages/envoy/internal/dispatch/api/server.go",
     "packages/envoy/internal/dispatch/api/server_test.go",
+    "packages/envoy/internal/dispatch/api/session_answers_test.go",
     "packages/envoy/internal/dispatch/api/storable_text_test.go",
     "packages/envoy/internal/dispatch/events/broker.go",
     "packages/envoy/internal/dispatch/events/stream.go",
@@ -280,8 +289,8 @@
     "packages/envoy/internal/dispatch/outbox/publisher.go",
     "packages/envoy/internal/dispatch/outbox/publisher_claimant_test.go",
     "packages/envoy/internal/dispatch/outbox/publisher_mentions_test.go",
-    "packages/envoy/internal/dispatch/store/migrations/0145_comment_fallback_copies.census.sql",
-    "packages/envoy/internal/dispatch/store/migrations/0145_comment_fallback_copies.up.sql",
+    "packages/envoy/internal/dispatch/store/migrations/0148_comment_fallback_copies.census.sql",
+    "packages/envoy/internal/dispatch/store/migrations/0148_comment_fallback_copies.up.sql",
     "packages/envoy/internal/dispatch/store/pool.go",
     "packages/envoy/loadtest/README.md",
     "packages/envoy/loadtest/live.go",
@@ -336,7 +345,9 @@
     "Forward merge of main at ab986cd2: main's #2513 fixed TestARepeatedSubReplacesAnotherKind in its own rig, so this branch's rig change and pin test are dropped in favour of main's.",
     "Forward merge of main at df929648: main's #2501 took 0141, so the fallback table is 0142_comment_fallback_copies; main's #2377 reference seed kept beside --min-events in the load test.",
     "A card Retry while a send is still queued now opens attempt 2 rather than resuming attempt 1 (the queued attempt holds a live claim), the documented rule for a live claim.",
-    "Forward merges at 1b1b727a (main de546ed2) and 5a26d3ab (main cd5ca7c3): main's #2463 took 0142-0144, so the fallback table is 0145_comment_fallback_copies; route pin 146."
+    "Forward merges at 1b1b727a (main de546ed2) and 5a26d3ab (main cd5ca7c3): main's #2463 took 0142-0144, so the fallback table is 0145_comment_fallback_copies; route pin 146.",
+    "Forward merge at e4846fb7 (main a21100c5): main took 0145-0147, so the fallback table is 0148_comment_fallback_copies; route pin 147; main's session_answers_test.go fixture waits for a mentioned comment's post-response send.",
+    "TestAnAbandonedMentionIsSettledByTheOutboxOrLeftToTheClaimThatTookItFirst's 'a claim commits first' case now expects the event published with a held fallback row (the attempt is past a lease), not deferred."
   ],
   "openQuestions": [],
   "discoveredComplexity": [
@@ -345,7 +356,7 @@
     "The NUL-refusal test raced the fixture mention's asynchronous send (a comment.delivery event landing between its table snapshots); it now waits for the send to settle.",
     "The pod was replaced mid-round and the unpushed first fix was lost; every verified fix is now pushed as it lands."
   ],
-  "round": 13,
+  "round": 14,
   "answersTest": "735b6cde36e432bdc4bd6290e57e7dd4b71f6e0e",
-  "answersReview": "35427967ef738f7becd4439aeec549acef044fe5"
+  "answersReview": "9472e8497461b65289223bb963e2b16db812c7ec"
 }
