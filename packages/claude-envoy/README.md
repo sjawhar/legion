@@ -54,8 +54,11 @@ events and sends them to the current Claude Code session as supported
   took longer, carrying the last list read (`answers.json` in the session's Dispatch state
   directory) when Dispatch has not answered by then, or one line saying the list could not be read
   and why when no list read before has an item to show, and exits 50 ms after that, always with
-  status 0 and with no output when there is nothing to show or the Dispatch has no answers route
-  (it answers 404, or 200 with no answers list); its `timeout` is 5 s. A `!` command
+  status 0 and with no output when there is nothing to show; its `timeout` is 5 s. A Dispatch build
+  older than the answers route answers its own `404 NOT_FOUND` "no route for …": the hook then adds
+  no line (a list read before from it is still carried, its left-out line naming no command) and
+  writes one line to stderr naming that Dispatch. A proxy's 404 page or a 200 that is no answers
+  list is a failed read like any other. A `!` command
   in envoy.json runs in a process of its own that the hook starts detached, one per session at a
   time, and waits on until that same deadline: a slower command costs that hook the fresh list,
   never the bound, and still runs to its end (or its 10 s timeout, its output file removed either

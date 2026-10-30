@@ -1,12 +1,14 @@
 kind: Fixed
 body: |-
-    A model request against a Dispatch that has no answers route (it answers 404, or 200 with a
-    body that is no answers list) carries no line about people's answers when no list read before
-    from that Dispatch has an item to show. Before, every request carried a line saying the answers
-    could not be read and telling the agent to run `dispatch answers`, a command that fails against
-    that same Dispatch; agents ran it again and again. A list read before from that Dispatch is
-    still carried, and every other failed read (a timeout, the network, a 401, a 5xx) still carries
-    the line naming why.
+    A model request against a Dispatch build older than the answers route, which answers its own
+    `404 NOT_FOUND` "no route for …", carries no line about people's answers when no list read
+    before from that Dispatch has an item to show. Before, every request carried a line saying the
+    answers could not be read and telling the agent to run `dispatch answers`, a command that fails
+    against that same Dispatch. A list read before from that Dispatch is still carried, its
+    left-out line naming no command. The extension logs once per session and Dispatch URL, with
+    `logger.warn`, that the Dispatch has no answers route, and again only after a read of it
+    answered with a list. A proxy's 404 page, a 200 that is no answers list, a 503 and every other
+    failed read still carry the line naming why.
 time: 2026-10-30T09:08:26.929143037Z
 custom:
     Issue: answers-line-on-old-dispatch

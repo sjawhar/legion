@@ -84,10 +84,14 @@ items that do not fit are left out, and its last line says how many and that `di
 prints them all. It is read on every request and waits at most 800 ms for Dispatch. Past that,
 or when the read fails, the request carries the last list read, with the time it was read and why
 this read failed, or, when no list read has an item from the last 72 hours, one line saying the
-list could not be read and why. A Dispatch without the answers route (it answers 404, or 200 with
-no answers list) adds no such line, since `dispatch answers` cannot read it either, and one that
-answers 404 is not asked again for 5 minutes. The list sits at the tail so that a change in it
-costs only its own tokens: the cached conversation before it is sent byte for byte as before.
+list could not be read and why. A Dispatch build older than the answers route answers it with its
+own `404 NOT_FOUND` "no route for …". Against that Dispatch a request carries no such line, since
+`dispatch answers` cannot read it either; a list read before from it is still carried, its
+left-out line naming no command; the log says once per session that the Dispatch has no answers
+route; and that Dispatch is not asked again for 5 minutes. Any other answer, a proxy's 404 page or
+a 200 that is no answers list included, is a failed read. The list sits at the tail so that a
+change in it costs only its own tokens: the cached conversation before it is sent byte for byte as
+before.
 
 Oh My Pi also builds requests that are not turns of the conversation from it; those carry the
 skill but no list, and wait on no read: a side turn (a Dispatch BTW, the stop-time self-check,

@@ -17,7 +17,8 @@ body: |-
     still runs to its end or its 10 s timeout in that process, which removes its output file and
     reads the list with its token for the next hook. While it runs, only a list read from the
     Dispatch URL envoy.json names now stands in, never one another Dispatch answered. Against a
-    Dispatch older than this release, which has no answers route, the hook adds nothing.
+    Dispatch older than this release, which answers its own 404 "no route for …", the hook adds
+    nothing to the context and writes one line naming that Dispatch to stderr.
 time: 2026-10-28T10:08:10.266998642Z
 custom:
     Issue: pr2376

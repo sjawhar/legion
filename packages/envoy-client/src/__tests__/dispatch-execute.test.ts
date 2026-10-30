@@ -2224,6 +2224,32 @@ describe("executeDispatchTool", () => {
     );
   });
 
+  test("dispatch_answers against a proxy's 404 page reports that page, never an old Dispatch build", async () => {
+    const fetchImpl = async (_url: RequestInfo | URL): Promise<Response> =>
+      new Response("<html><body><h1>404 Not Found</h1><hr>nginx</body></html>", {
+        status: 404,
+        statusText: "Not Found",
+        headers: { "Content-Type": "text/html" },
+      });
+
+    const error: unknown = await executeDispatchTool({
+      tool: "dispatch_answers",
+      args: {},
+      cwd: "/workspace",
+      host: "omp",
+      sessionId: "session-1",
+      config,
+      env: {},
+      exec: repoExec("owner/repo"),
+      fetchImpl: fetchImpl as typeof fetch,
+    }).catch((thrown: unknown) => thrown);
+    expect(error).toBeInstanceOf(Error);
+    expect((error as Error).message).toMatch(
+      /answered 404 Not Found with a body that is not Dispatch's error JSON .*which looks like a proxy or gateway page rather than Dispatch's own answer/
+    );
+    expect((error as Error).message).not.toContain("no answers route");
+  });
+
   test("dispatch_claim claims for the calling session and releases with release: true", async () => {
     const calls: Array<{ method: string; pathname: string; body: unknown }> = [];
     const claim = {

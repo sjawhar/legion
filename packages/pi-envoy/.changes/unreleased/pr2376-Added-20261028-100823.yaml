@@ -9,8 +9,9 @@ body: |-
     counts them and names `dispatch answers`. Each request waits at most 800 ms for Dispatch,
     then carries the last list read from that Dispatch, with its read time and why this read
     failed, or, when that list shows nothing, a line saying the list could not be read and why;
-    a Dispatch without the answers route adds no such line and is not asked again for 5 minutes,
-    and no `!` token command runs for the read. The list is a separate user message after the
+    a Dispatch older than this release, which answers its own 404 "no route for …", adds no such
+    line, is logged once per session, and is not asked again for 5 minutes, and no `!` token
+    command runs for the read. The list is a separate user message after the
     conversation, so a change in it leaves the cached conversation byte for byte and Oh My Pi puts
     no cache anchor on it; the `dispatch-first` skill stays at the head as before. Requests Oh My
     Pi builds from the conversation that are not its turns carry no list and wait on no read: a
