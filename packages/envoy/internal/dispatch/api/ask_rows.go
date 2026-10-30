@@ -181,7 +181,7 @@ func attachAskBacklinkCounts(ctx context.Context, q queryer, asks []*model.Ask) 
 // A part is matched to the option it stands for by its stored position and type, never by
 // hashing the option's label a second time: the index owns the identity of a part, and a reader
 // of this id must get back exactly the part the index wrote. An ask whose parts are not indexed
-// yet - owed by migration 0150's trigger and never drained, so no build with the index has
+// yet - owed by migration 0151's trigger and never drained, so no build with the index has
 // written them - has no state row or no parts, and carries no id and revision 0: a read of an ask
 // never depends on the index being current. So does an ask whose stored parts stand for other
 // options than the row now holds, where the index is behind the row and positions no longer line

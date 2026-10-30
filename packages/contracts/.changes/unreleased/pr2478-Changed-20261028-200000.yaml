@@ -1,9 +1,0 @@
-kind: Changed
-body: |-
-    `GithubPushSubject` cuts a ref segment that would make the subject longer than 4,032 bytes
-    (`SUBJECT_MAX_BYTES`, the bus's limit) and ends it in `~` and 16 hex digits of the whole ref's
-    SHA-256, so NATS stores a push whatever its ref's length and two refs keep two subjects. The
-    daemon API state schema (contract 43) gains `consumers` and `repositories.withoutWebhookApp`.
-time: 2026-10-28T20:00:00Z
-custom:
-    Issue: pr2478

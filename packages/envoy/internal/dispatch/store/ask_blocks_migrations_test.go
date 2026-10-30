@@ -10,12 +10,12 @@ import (
 	"github.com/jackc/pgx/v5"
 )
 
-// beforeAskBlocks is the last migration before an ask's parts are blocks: 0149_ask_blocks and
-// 0150_asks_block_parts_trigger apply after it. askBlockTables is 0149, which creates the tables
-// 0150 attaches its trigger to and seeds.
+// beforeAskBlocks is the last migration before an ask's parts are blocks: 0150_ask_blocks and
+// 0151_asks_block_parts_trigger apply after it. askBlockTables is 0150, which creates the tables
+// 0151 attaches its trigger to and seeds.
 const (
-	beforeAskBlocks = 148
-	askBlockTables  = 149
+	beforeAskBlocks = 149
+	askBlockTables  = 150
 )
 
 // askBlockState is an ask's row of ask_block_state.
@@ -150,7 +150,7 @@ func TestAnOlderBuildsWriteLeavesTheAskBlocksOwed(t *testing.T) {
 }
 
 // Every ask stored before the ask block index is owed one by the migrations: an ask written
-// before 0149, and one written after 0149 and before the trigger that owes it (an older build's
+// before 0150, and one written after 0150 and before the trigger that owes it (an older build's
 // write during the migrations), each gets an owed state row.
 func TestTheAskBlockMigrationsOweEveryStoredAsk(t *testing.T) {
 	ctx := context.Background()
@@ -171,8 +171,8 @@ func TestTheAskBlockMigrationsOweEveryStoredAsk(t *testing.T) {
 		t.Fatalf("migrate: %v", err)
 	}
 	for _, ask := range []struct{ what, id string }{
-		{"an ask stored before 0149", olderAsk},
-		{"an ask written between 0149 and its trigger", racedAsk},
+		{"an ask stored before 0150", olderAsk},
+		{"an ask written between 0150 and its trigger", racedAsk},
 	} {
 		if state := assertAskOwed(t, store, ask.what, ask.id); state.revision != 0 || state.nextBlock != 1 {
 			t.Errorf("%s: revision %d, next_block %d; want 0 and 1", ask.what, state.revision, state.nextBlock)

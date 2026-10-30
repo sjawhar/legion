@@ -1,5 +1,0 @@
-kind: Changed
-body: '`dispatch-first` says that a result a person asked for is like a blocker: a document or artifact notifies nobody, so the document that holds the result ends with an ask block asking their next step, else a `dispatch ask`. Its rule that each ask and message stands alone is gone, since `dispatch-writing-specs` carries it where an ask is written; the three Dispatch skills stay under their 2,000-word budget.'
-time: 2026-10-30T03:00:00.000000000Z
-custom:
-    Issue: dispatch-ask-surfaces-the-result

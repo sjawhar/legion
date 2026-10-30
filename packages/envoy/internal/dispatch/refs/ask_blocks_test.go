@@ -423,7 +423,7 @@ func TestIndexingAnUnchangedAskWritesNoRevision(t *testing.T) {
 	}
 }
 
-// An ask any build writes is owed a block index of its parts (migration 0150's trigger), and the
+// An ask any build writes is owed a block index of its parts (migration 0151's trigger), and the
 // block-index reconciliation drains it: it is listed beside the comments and messages owed, and
 // indexed in a transaction of its own, which leaves the ask indexed and owing nothing. A pass
 // that finds the parts already indexed indexes nothing.
