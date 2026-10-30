@@ -210,6 +210,48 @@ test("a comment written while its author is offline past the TTL keeps its ancho
   }
 });
 
+/** The re-anchor path on its own, with no sweep and no clock in it: another writer rewrites the
+ *  sentence the composer is anchored in, which takes the provisional mark away and leaves the
+ *  selected words in the document. Send must attach the comment to those words. */
+test("a comment whose mark another writer's edit removed re-anchors to the same text", async ({
+  browser,
+}) => {
+  test.setTimeout(240_000);
+  const issue = await reviewIssue();
+  const alice = await asUser(browser, "alice");
+  try {
+    const page = await alice.newPage();
+    const { markId } = await openComposer(page, issue.key, "Still worth asking.");
+    await editArtifact(
+      issue.primary_artifact_id,
+      {
+        ops: [
+          {
+            find: "The quick brown fox jumps over the lazy dog.",
+            op: "replace",
+            with: "The swift red fox jumps over the lazy dog.",
+          },
+        ],
+      },
+      { actor: { id: "e2e-compose-wait", kind: "session" }, as: "agent" }
+    );
+    await expect(documentEditor(page)).toContainText("swift red fox");
+    // The edit took the mark and left the words: that is the state Send has to recover from.
+    await expect(markSpan(page, markId)).toHaveCount(0);
+    await expect(documentEditor(page)).toContainText(QUOTE);
+
+    await send(page);
+    const comment = await theComment(issue.key, issue.primary_artifact_id);
+    expect(comment.body).toBe("Still worth asking.");
+    expect(comment.anchor?.quote).toBe(QUOTE);
+    expect(comment.anchor?.orphaned).toBe(false);
+    await expectMark(page, comment.anchor?.mark_id ?? "", QUOTE);
+    await expect(composer(page)).toHaveCount(0);
+  } finally {
+    await alice.close();
+  }
+});
+
 test("a comment whose selected text another writer deleted says so and keeps its draft", async ({
   browser,
 }) => {
