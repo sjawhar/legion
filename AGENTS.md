@@ -445,71 +445,30 @@ step, a registration approves the gate whatever it held, and no artifact event m
 an approval does not open a carried copy that was closed before the switch either; a changes
 request is still told to the architect, once, without closing the gate. Whether a human
 must approve a pull request before it merges is the repository's own branch-protection or
-CODEOWNERS rule: Legion neither reads nor writes it. Only retro's commits
-may sit above the reviewer's approved head, those that change `docs/solutions/` and its removal of
-`.legion/<issue>/`: READY compares the review round's recorded approved head with READY's head on
-GitHub, as the implement App, and refuses anything else above it (`READY_UNREVIEWED_CHANGE`, naming
-the paths; also a compare GitHub may have cut at its 300 files or that gives no file list, a head
-not built on the approved one, or an approved head GitHub does not know) and a round with no
-recorded approval (`READY_NOT_APPROVED`), so the change goes back to
-review. The merger sends its
-`READY` packet with its completion; the daemon posts it on the Dispatch issue and, when the project's
-`projects.<KEY>.merge_queue_role` names one, publishes it to that role. A project may configure
-`projects.<KEY>.merge.by_hand` regular-expression paths: a matching pull request completes READY
-without auto-arming, the daemon tells that READY with its `MANUAL_MERGE_REQUIRED:` note at the head
-of the packet and the packet's `Merge:` line replaced, so neither the issue nor that role is asked to
-arm it, and the repository's authorized person merges it. A by-hand READY refuses
-`READY_DISARM_PENDING` while an earlier auto-merge disarm for that pull request remains unfinished:
-the stale arm must be gone before the person-only head is accepted. Ordinary READY does not wait for
-that row. Otherwise, on acceptance the daemon queues a
-`ready_merge` outbox row for READY's head, which submits the merge as the implement App with that head
-as GitHub's expected head: a merge queue enqueues it once GitHub reports it mergeable, a pull request
-GitHub reports mergeable merges at once, a repository that allows auto-merge arms it, and in one that
-allows neither the row waits until GitHub reports the pull request mergeable and then merges it. On a
-merge-queue base the row never arms auto-merge: GitHub's enable arms a pull request it does not
-report mergeable rather than enqueueing it, and a required check may judge the arm, so the row waits,
-logged at debug, while a required check still runs. An arm or queue entry is not the end: the row
-keeps reading GitHub until it reports the pull request merged at READY's head, and once it has seen
-the arm or entry it never submits again after a removal it did not make. The merge queue taking the
-pull request out because the merge failed (GitHub's reason `failed_checks`, or an unexplained reason
-with a check that failed, timed out, failed to start, needed action or went stale on the commit the
-queue built for its `merge_group` CI, every page of its checks read) sends the issue from `awaiting_merge` back to
-`implementing`, its implementer told the failing run, as a red head does; any other removal (a person
-dequeuing it, whose cancelled runs are no failure, or a person or GitHub turning auto-merge off) ends
-the row and tells the architect once (`merge-removed`). Two removals are submitted again: the
-implement App's own disarm sent before READY that GitHub applied late (auto-merge
-`manually_disabled`, or a `manual` dequeue, by that App), and auto-merge a close turned off
-(`closed`), which the reopen at READY's head undid. The repository's required reviews and checks
-decide when it merges; Legion bypasses
-none, and a review only a person can give is waited for. READY reads no check of the head at all:
-whether the merge happens is GitHub's to decide, under the base branch's own rules. The row reads
-GitHub, then the record, and submits nothing once the record shows the issue has left that READY or
-applied a close; while the record still awaits it, a pull request GitHub shows closed or at another
-head waits for the two to agree. Two bounds hold the wait. The first is GitHub's own clock: once
-GitHub's last change to the pull request (its `updatedAt`) is more than 10 minutes old, a webhook
-never arrived, so the row ends and tells the architect once (`merge-stalled`); routine waits and
-rate-limit deferrals never count toward it. The second ends nothing: a merge the daemon submitted
-that GitHub has not completed within an hour of the workflow queueing the row at READY's acceptance
-tells the issue's architect once (`merge-waiting`) and goes on waiting - nothing is withdrawn, the
-issue stays in `awaiting_merge`, and the row keeps submitting - so what is left to find is on
-GitHub: a required check that never ran or failed, a review only a person can give, a merge queue
-that has not landed it.
-A reopen at READY's head reuses that row, starts it over as though nothing had been armed,
-and takes it from any worker still holding it, so the merge is never lost. A refusal GitHub would
-repeat on a retry ends the row and is told to the architect once (`merge-refused`).
-GitHub checks the expected head only when auto-merge is enabled, and arming is right only for an
-awaiting issue's READY head, so the daemon queues an `auto_merge_disable` outbox row on every other
-push or reopen, when a child is set back to
-`todo`, and when an issue leaves the workflow. The row reads GitHub, then the record: it keeps the arm
-only while the issue awaits its merge, its READY is not by hand, and the pull request's head is the
-merger's READY commit, and otherwise disables auto-merge and removes the merge-queue entry, as the
-implement App; READY is refused (`READY_HEAD_MOVED`) when the head moved past its commit. When a push
-or reopen moves the head past
-the one READY named, the head's own CI turns red before the merge, the head starts conflicting
-with its base (GitHub computes no merge ref for a conflicting head and runs no checks on it at all),
-or the merge queue fails its merge, the daemon sends the issue back to
-`implementing`, disarms the pull request, posts the READY's withdrawal on the Dispatch issue, and
-publishes it to that role. GitHub's own merge queue (`merge_group`
+CODEOWNERS rule: Legion neither reads nor writes it. Retro's commits are the only ones that may sit
+above the reviewer's approved head, those that change `docs/solutions/` and its removal of
+`.legion/<issue>/`, and no Legion check compares the head that merges with the approved one: a
+repository that wants a later push reviewed says so in its own rulesets. The merger merges the pull
+request itself, as the implement App and at the head it read, which it names as the head GitHub
+must match (`gh pr merge <n> --squash --match-head-commit <head>`; on a base with a merge queue it
+enqueues the pull request with GraphQL `enqueuePullRequest` and `expectedHeadOid` instead, since
+`gh pr merge` there turns auto-merge on while a required check is pending, and it then watches the
+pull request until GitHub merges it or takes it out of the queue). Merging at a named head is how
+bors and Prow's Tide merge only what they tested. The merger never turns auto-merge on, and the
+daemon submits no merge and changes no merge setting of any pull request. A head that still carries
+`.legion/<issue>/` goes back to retro instead of merging, since retro's last commit is what removes
+it. When a merge fails, the merger decides what to do: wait for what GitHub waits for, try again at
+the head it re-reads, send the issue back, or tell the architect what only a person can change. The
+repository's required reviews and checks decide when a pull request merges; Legion bypasses none,
+and a review only a person can give is waited for. The merger sends its `READY` packet with its
+completion; the daemon posts it on the Dispatch issue and, when the project's
+`projects.<KEY>.merge_queue_role` names one, publishes it to that role, and the merge closes the
+issue. When a push or reopen moves the head past the one READY named, the head's own CI turns red
+before the merge, the head starts conflicting with its base (GitHub computes no merge ref for a
+conflicting head and runs no checks on it at all), or the merge queue fails its merge, the daemon
+sends the issue back to `implementing`, posts the READY's withdrawal on the Dispatch issue, and
+publishes it to that role; READY itself is refused (`READY_HEAD_MOVED`) when the head moved past
+the commit it names. GitHub's own merge queue (`merge_group`
 trigger) is a repository setting Legion does not modify. No lifecycle labels exist; GitHub issues
 are never read or written by Legion.
 

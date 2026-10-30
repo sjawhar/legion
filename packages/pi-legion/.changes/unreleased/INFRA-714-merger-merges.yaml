@@ -1,0 +1,25 @@
+kind: Changed
+body: |-
+    The merger merges the pull request itself (dispatch://INFRA-714 R2). Its role prompt, the Go
+    daemon fragment beside it, the architects' prompts and the `legion-worker`, `legion-architect`,
+    `legion-retro` and `legion-controller` skills now say that the merger reads the pull request
+    with `gh pr view`, merges that head as the implement App with
+    `gh pr merge <n> --squash --match-head-commit <head>` — or, on a base whose rules carry a
+    `merge_queue` rule, enqueues it with GraphQL `enqueuePullRequest` and the same head as
+    `expectedHeadOid`, because `gh pr merge` there turns auto-merge on while a required check is
+    pending — then watches a queued pull request until GitHub merges it or takes it out, and decides
+    for itself what a failed merge needs: wait, merge again at the head it re-reads, send the issue
+    back, or tell the architect what only a person can change. Merging at a named head is how bors
+    and Prow's Tide merge only what they tested. The prompts and skills no longer say the daemon
+    submits the merge, arms or disarms auto-merge, or that an accepted READY is what makes a merge
+    happen, and the `merge-refused`, `merge-stalled`, `merge-removed` and `merge-waiting` notices
+    are gone from the architect's prompt and skill, with
+    `legion-architect/references/merge-notices.md` deleted. One hygiene step is the merger's own: a
+    head that still carries `.legion/<issue>/` goes back to retro instead of merging, since retro's
+    last commit is what removes it. No prompt or skill compares the head that merges with the head a
+    review approved any more: a repository that wants a later push reviewed says so in its own
+    rulesets, which GitHub enforces at the merge. The daemon code these words describe is removed in
+    the commits that follow.
+time: 2026-10-30T00:00:00.000000000Z
+custom:
+    Issue: INFRA-714

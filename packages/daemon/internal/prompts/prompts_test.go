@@ -48,10 +48,12 @@ func TestComposeOrdersSharedRolePartsBeforeTheGoDaemonParts(t *testing.T) {
 			"read CI for everything static", "try to break it"}},
 		{"reviewer", claim.RoleReviewer, false, []string{"core/common.md", "core/reviewer.md", "mechanics/headless.md", "reviewer.md"}, []string{"reviewer.md", "worker-common.md"}, []string{`op: "handoff_complete"`,
 			"Retro's last commit removes that directory above your approved head", "`pullRequest.head` is the commit you pushed"}},
-		// The packet limit the merger is told is the one the handoff route enforces.
+		// The packet limit the merger is told is the one the handoff route enforces, and the merge
+		// it is told to run names the head GitHub must match, on a queue base and off it.
 		{"merger", claim.RoleMerger, false, []string{"mechanics/headless.md", "merger.md"}, []string{"merger.md", "worker-common.md"}, []string{`op: "handoff_complete"`, "`ready: true`", "`READY_HEAD_CONFLICTS`: the pull request conflicts with its base",
-			"`READY_HEAD_CARRIES_HANDOFFS`", "`READY_DISARM_PENDING`", fmt.Sprintf("at most %d characters", record.MessagePostLimit),
-			"`READY_HEAD_MOVED`", "`READY_FILES_TRUNCATED`", "`READY_PULL_REQUEST_CLOSED`",
+			"`READY_HEAD_CARRIES_HANDOFFS`", fmt.Sprintf("at most %d characters", record.MessagePostLimit),
+			"gh pr merge <n> --squash --match-head-commit <head>", "enqueuePullRequest",
+			"`READY_HEAD_MOVED`", "`READY_PULL_REQUEST_CLOSED`",
 			"`GITHUB_READ_FAILED`", "`DESIGN_GATE_CLOSED`", "`NO_PULL_REQUEST`", "`READY_REQUIRED`"}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -182,9 +184,9 @@ func composedText(t *testing.T, composer *Composer, role claim.Role, isRoot bool
 // No role's handoffs reach the default branch: retro's last commit removes the issue's own
 // .legion/<issue>/ from the head that merges (dispatch://LEGION-605). No phase worker's composed
 // prompt still carries the rule this replaced: that the approved and the merged head keep .legion/,
-// and that the daemon strips the leftovers from the next issue's branch. READY, not the merger,
-// holds the commits above the approved head to retro's removal and its docs/solutions/ ones, so no
-// prompt carries the merger's own fileset check any more, and the merger's names READY's refusals.
+// and that the daemon strips the leftovers from the next issue's branch. The merger reads the head
+// for the directory itself before it merges (dispatch://INFRA-714, R2), and no prompt holds the
+// head that merges to the head a review approved: the repository's own rulesets decide that.
 func TestNoComposedPromptKeepsTheIssuesHandoffsOnTheMergedHead(t *testing.T) {
 	stateDir := t.TempDir()
 	composer, err := New(stateDir)
@@ -193,7 +195,7 @@ func TestNoComposedPromptKeepsTheIssuesHandoffsOnTheMergedHead(t *testing.T) {
 	}
 	retired := []string{"No role pushes a `.legion/` deletion", "No role removes `.legion/`", "nobody removes it before the merge", "strips whatever `.legion/`", "still carries `.legion/`",
 		"Retro then commits only `docs/solutions/`", "no file changes above the approved head", "the same sha when retro added nothing", "Retro's `docs/solutions/` commit is never",
-		"'~(docs/solutions | .legion/<issue>)'"}
+		"'~(docs/solutions | .legion/<issue>)'", "`READY_UNREVIEWED_CHANGE`", "`READY_NOT_APPROVED`", "Approved head:"}
 	for _, role := range []claim.Role{claim.RolePlanner, claim.RoleImplementer, claim.RoleTester, claim.RoleReviewer, claim.RoleMerger} {
 		text := composedText(t, composer, role, false)
 		for _, phrase := range retired {
@@ -201,10 +203,8 @@ func TestNoComposedPromptKeepsTheIssuesHandoffsOnTheMergedHead(t *testing.T) {
 				t.Errorf("the composed %s prompt still says %q", role, phrase)
 			}
 		}
-		for _, want := range []string{"`READY_UNREVIEWED_CHANGE`", "`READY_NOT_APPROVED`"} {
-			if role == claim.RoleMerger && !strings.Contains(text, want) {
-				t.Errorf("the merger's prompt does not name %s, READY's refusal of a change above the approved head no review approved", want)
-			}
+		if want := "repos/{owner}/{repo}/contents/.legion/<issue>?ref=<head>"; role == claim.RoleMerger && !strings.Contains(text, want) {
+			t.Errorf("the merger's prompt does not name %s, its own read of the head for the issue's handoffs", want)
 		}
 	}
 }

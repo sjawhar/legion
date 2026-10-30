@@ -239,16 +239,18 @@ func TestEveryTaskAgentARolePromptDispatchesIsShipped(t *testing.T) {
 	}
 }
 
-// The daemon submits the merge itself once it accepts READY, and Legion enforces no GitHub
-// restriction the repository itself does not: a part that says Legion never merges, shared or the
-// Go daemon's, contradicts what the merger is told the daemon does. The phrases, in any case,
-// are a pattern rather than spelled out, so a grep for them over this directory finds only prompt
-// text.
-func TestNoPartSaysLegionNeverMerges(t *testing.T) {
-	saysLegionNeverMerges := regexp.MustCompile(`(?i)never merg(es)|merg(e|es) nothing`)
+// The merger merges the pull request itself, at the head it read, and the daemon submits no merge
+// and changes no merge setting (dispatch://INFRA-714, R2). So a part that has the daemon submit a
+// merge, arm auto-merge or enqueue a pull request contradicts what the merger is told to do, while
+// the parts may — and do — say the daemon merges nothing. The claim is a pattern rather than
+// spelled out, so a grep for it over this directory finds only prompt text; it matches the claim
+// made of the daemon and not its denial, which is why the verb must follow `daemon` directly and
+// name what is merged.
+func TestNoPartSaysTheDaemonMerges(t *testing.T) {
+	daemonMerges := regexp.MustCompile(`(?i)daemon\s+(submits|arms|enqueues|enables|merges|turns)\s+(the|a|an|that|its|it|ready|auto)\b`)
 	for dir, parts := range map[string]embed.FS{"roles": roleParts, "go": goParts} {
 		err := eachPart(parts, dir, func(name string, body []byte) error {
-			if phrase := saysLegionNeverMerges.Find(body); phrase != nil {
+			if phrase := daemonMerges.Find(body); phrase != nil {
 				t.Errorf("%s/%s says %q", dir, name, phrase)
 			}
 			return nil
@@ -256,5 +258,19 @@ func TestNoPartSaysLegionNeverMerges(t *testing.T) {
 		if err != nil {
 			t.Fatalf("read the %s parts: %v", dir, err)
 		}
+	}
+	// The merger's own parts carry the other half: the merge it runs, the head GitHub is held to,
+	// the one setting it never touches, and the daemon's own silence on all three.
+	for _, want := range []string{"gh pr merge <n> --squash --match-head-commit <head>", "Never turn auto-merge on"} {
+		if !strings.Contains(rolePart(t, "merger.md"), want) {
+			t.Errorf("roles/merger.md does not say %q", want)
+		}
+	}
+	goMerger, err := goParts.ReadFile("go/merger.md")
+	if err != nil {
+		t.Fatalf("read go/merger.md: %v", err)
+	}
+	if want := "It submits no merge and changes no merge setting"; !strings.Contains(string(goMerger), want) {
+		t.Errorf("go/merger.md does not say %q", want)
 	}
 }

@@ -118,9 +118,9 @@ daemon's table; a worker that reports no surface reaches the changed path gets a
 this tree to build it, and waits, idle and not suspended, until you tell it to continue
 (`envoy_publish` to its role topic) once that child closes.
 
-A merge is never a human to-do: open no `dispatch ask` for it. The daemon submits the usual READY's
-merge itself once it accepts READY, under the repository's own rules; a by-hand READY tells you
-that a person merges under the repository's rules.
+A merge is never a human to-do: open no `dispatch ask` for it. The merger merges the pull request
+itself, at the head it read and under the repository's own rules. Only what no worker can do — a
+repository setting or an App permission a person must change — reaches you, from the merger.
 
 The root architect writes no `.legion/` handoff: unlike a phase worker, it is not a file-backed
 phase, and its root-issue close plus Envoy messaging are the durable record of its work.

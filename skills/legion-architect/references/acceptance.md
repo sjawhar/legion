@@ -57,16 +57,16 @@ The daemon keeps this order from its fixed table; you start none of its steps:
    one final commit, the removal of `.legion/<issue>/`, so no merge carries a handoff onto the
    default branch. Those commits do not void the approval and never return the tree to the tester
    or reviewer.
-4. The merger quotes what sits above the approved head
-   (`jj diff --from <approved-sha> --to <tip-sha> --summary`) in READY and sends the READY packet
-   with its completion. The daemon refuses a head carrying anything above the approved head but
-   retro's commits (`READY_UNREVIEWED_CHANGE`) and a head that still carries `.legion/<issue>/`. It
-   posts `READY #<n> at <current sha> (approved at <approved sha>) for <KEY> (<pr url>)` on the
-   Dispatch issue, publishes it to the project's merge queue role when one is set, and submits the
-   merge of that head itself, as the implement App with GitHub's expected-head check. The
-   repository's required reviews and checks decide when it lands; Legion neither reads nor writes
-   those rules, and a review only a person can give is waited for, never bypassed. A READY the
-   design gate refused is submitted by the daemon once that spec version is approved.
+4. The merger reads the pull request and merges that head itself, as the implement App and with the
+   head it read as the head GitHub must match (`--match-head-commit`, or `expectedHeadOid` on a
+   merge-queue base, where it enqueues the pull request); it never turns auto-merge on, and the
+   daemon submits no merge and changes no merge setting. A head that still carries
+   `.legion/<issue>/` goes back to retro instead of merging. The repository's required reviews and
+   checks decide when it lands; Legion neither reads nor writes those rules, and a review only a
+   person can give is waited for, never bypassed. Nothing compares that head with the approved one:
+   a repository that wants a later push reviewed says so in its own rulesets. The merger then sends
+   its packet with its completion, `READY #<n> at <head> for <KEY> (<pr url>)`, which the daemon
+   posts on the Dispatch issue and publishes to the project's merge queue role when one is set.
 5. The merge lands under the repository's rules and closes the issue; a root's close waits until
    the rest of its tree has left the workflow.
 
@@ -77,20 +77,20 @@ from `accepting` you send an issue back only to `implementing` or `testing`.
 - The merger reports a failed verification: handle it as the `pr-blocked` row of
   `skill://legion-architect/references/wake-routing.md` says. Tell the merger to move the issue
   back with `request_backward_move`, naming what failed; never bypass.
-- `READY_UNREVIEWED_CHANGE`, or a merger task with no approved head (`READY_NOT_APPROVED`): the
-  merger moves it back to `reviewing`, the reason naming the code and what it found, so the
-  reviewer runs a new round.
+- A merge GitHub refuses for a repository setting or an App permission: the merger tells you, and
+  only a person can change it. Ask one with `dispatch ask`, naming the pull request, the head and
+  GitHub's refusal; never bypass a rule.
 - Refused because the head still carries `.legion/<issue>/`: the merger moves it back to `retro`,
   so the implementer's retro removes it.
 
 ## A conflicting head
 
-What returns the tree to review is a changed diff: a commit above the approved head that touches
-anything outside `docs/solutions/` and `.legion/<issue>/`, or a conflict-resolution merge whose
+What returns the tree to review is a changed diff: a conflict-resolution merge whose
 fingerprint (the unchanged-diff check,
 `skill://legion-worker/references/conflicts-and-rewrites.md`) differs from the approved head's.
 Retro's commits and a merge forced by a GitHub-reported conflict whose fingerprint is unchanged do
-not.
+not, and no Legion check compares the head that merges with the approved one: a repository that
+wants a later push reviewed says so in its own rulesets.
 
 Make a conflict-resolution merge only when GitHub reports `CONFLICTING`
 (`gh pr view <n> --json mergeable,mergeStateStatus`). Outside `awaiting_merge` the daemon records
