@@ -58,7 +58,7 @@ func reasonFor(err error) HandleAgentReason {
 type HandleAgentResult struct {
 	Delivered bool
 	Skipped   bool
-	// Push is set by ResolveAgentMessage for a serving-port session this listener owns, with its
+	// Push is set by ResolveStoredAgentMessage for a serving-port session this listener owns, with its
 	// entry: the caller pushes the message to the session's port (Deliverer.Push). HandleAgentMessage
 	// makes that push itself, and never sets it.
 	Push  bool

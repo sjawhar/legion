@@ -909,11 +909,11 @@ func main() {
 	roleForwards := newRoleForwarder(deliveryConfig)
 	deliveryConfig.roleForwards = roleForwards
 
-	// The role lane is a core-NATS queue subscription on a connection of its own with its pending
-	// limits off (bus.ConnectRoleLane), in the queue group every listener shares, or this machine's
-	// group on a hub whose grant predates it. During a rolling deploy the task being replaced is a
-	// member too, and NATS hands each role message to one member of a group, so opening the lane
-	// before the durable binds forwards no message twice.
+	// The role lane is a core-NATS queue subscription on a connection of its own with finite pending
+	// limits (bus.RoleLanePendingMsgs, bus.RoleLanePendingBytes; bus.ConnectRoleLane), in the queue
+	// group every listener shares, or this machine's group on a hub whose grant predates it. During a
+	// rolling deploy the task being replaced is a member too, and NATS hands each role message to one
+	// member of a group, so opening the lane before the durable binds forwards no message twice.
 	roleLaneClient, roleQueue, err := bus.ConnectRoleLane(cfg.NATSURLs, cfg.MachineID, coreNATSDeliveryHandler(deliveryConfig))
 	if err != nil {
 		logger.Error("core role subscription failed", slog.String("error", err.Error()))
