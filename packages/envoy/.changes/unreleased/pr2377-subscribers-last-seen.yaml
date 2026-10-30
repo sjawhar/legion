@@ -1,0 +1,15 @@
+kind: Fixed
+body: |-
+    Dispatch's subscribers list shows a subscriber whose session is no longer live with its session's
+    last heartbeat again, not its interest row's `updated_at`, which can be up to 5 minutes earlier
+    since the listener rewrites an unchanged row only that often (sjawhar/legion#2377). The
+    listener's `GET /v1/interests/` and `GET /v1/interests/<session_id>` rows now carry `last_seen`,
+    the session's last heartbeat as its session cache knows it, omitted when unknown, and the
+    listener keeps a dead session's last heartbeat until the interest reaper's grace has passed
+    (`store.InterestReapGrace` + `store.InterestRefreshAge` after the session left the cache,
+    `session.WithLastSeenRetention`), so every row the reaper still holds can carry it. Dispatch
+    falls back to the row's `updated_at` when the listener sends no `last_seen` (it restarted since
+    the session died, or predates the field).
+time: 2026-10-29T15:00:01.000000000Z
+custom:
+    Issue: pr2377
