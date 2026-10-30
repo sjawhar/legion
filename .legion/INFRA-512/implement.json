@@ -1,0 +1,86 @@
+{
+  "schemaVersion": 1,
+  "phase": "implement",
+  "issue": "INFRA-512",
+  "completed": "2026-10-30T01:58:00Z",
+  "scope": "This round is the plan's section 0 items (c) and (d) only: the issue read's database round trips and INFRA-653's four pmdoc render cleanups, plus the project artifact list route's one-statement version read (the last per-artifact version query; the architect put it in scope). Items (a), the garbage-collection pass, and (b), deliverable 3, are NOT in this head: they start when the last child of INFRA-512 closes. The architect holds the root in accepting until then and sends it back to implementing for (a)+(b) in this same pull request.",
+  "pullRequest": "https://github.com/sjawhar/legion/pull/2535",
+  "proof": [
+    {
+      "criterion": "(c) The issue read's round trips are cut, and the count is quoted before and after",
+      "surface": "GET /api/v1/issues/{key} on a Postgres-backed Dispatch test server, with a pgx tracer that counts each statement and each batch (packages/envoy/internal/dispatch/api/issue_read_batch_test.go)",
+      "command": "cd packages/envoy && DISPATCH_TEST_DATABASE_URL=postgres://postgres@127.0.0.1:15432/postgres?sslmode=disable go test ./internal/dispatch/api/ -count=1 -v -run 'TestIssueReadCostsTwoRoundTrips|TestBatchedIssueRead'",
+      "observed": "The full test issue (4 artifacts, documents with an approval and an open approval request, open asks, children, links, backlinks) took 14 round trips with the old composition and takes 2 now. An issue with no artifact and no open ask takes 1. A load-test seed issue (1 spec, no ask) took 9. The batched body equals the sequential loaders' body byte for byte. A missing key still answers 404 NOT_FOUND.",
+      "headSha": "7c3be794b3fecb9953f91e8202aab2de9a7bbd25",
+      "negativeControl": "The full issue's batched read was checked against the old sequential composition built in the test, and the test fails on any byte difference. On the live stack, a head with its batch path's approval fill removed answered 2,180 of 2,180 seeded-issue reads differently."
+    },
+    {
+      "criterion": "(c) The issue read's answer stays byte-identical over real issues",
+      "surface": "Dispatch server under packages/envoy/loadtest on this pod (Postgres 16.2, real migrations), INFRA-639's LINUX replay seed (linux-replay-seed-0114, dump sha256 9b0349e4...)",
+      "command": "INFRA-639's stack.sh replay-get and replay-prepare at legion/INFRA-639@origin 4f53011a, with the base build de546ed2 (migrations 114 to 141). The head build 7c3be794 started from a copy of that same migrated template. Each side ran `stack.sh reset --replay`, then GET /api/v1/issues/{key} for all 1,047 LINUX issues and GET /api/v1/projects/LINUX/artifacts, as a person and as an agent (augment.py dump; script linux-cmp2.sh in dispatch://INFRA-512/artifact/infra512-pr2535-final-head-evidence-tar-gz)",
+      "observed": "2,096 answers, all 200, 8,876,360 bytes. Base gave the same answers on two resets, and head matched base: list sha256 1e9eb013... on both sides. The answers include 238 issues with children, 583 with more than one document (up to 43 documents and 220 versions on one issue), and approved and changes-requested documents. The same comparison at 633c9e5b against 2b427f93 (2,094 issue answers, f691e9fd...) was also identical.",
+      "headSha": "7c3be794b3fecb9953f91e8202aab2de9a7bbd25",
+      "negativeControl": "The head with its batch path's approval fill removed (applyApprovals skipped) answered 2,180 of 2,180 reads of the 1,090-issue seed differently (every issue has a spec, so its approval was null)."
+    },
+    {
+      "criterion": "(c) The parts LINUX lacks (external links, blockers, open and answered asks, cited asks, approvals) stay byte-identical",
+      "surface": "Dispatch server under packages/envoy/loadtest on this pod: the load-test seed (1,000 issues) with 300 of them given those parts through the API (augment.py augment), kept as a template",
+      "command": "aug-cmp2.sh: reset from that template with main de546ed2 and with head 7c3be794, then GET /api/v1/issues/{key} for all 1,090 issues and GET /api/v1/projects/{LGA,LGB,LGC,LGD}/artifacts, as a person and as an agent",
+      "observed": "2,188 answers, all 200, identical at base and head (list sha256 40b8ec74...). The seed covers 150 issues with external links and blockers, 118 with more than one document, 25 approved, 17 awaiting approval and 25 stale documents, 92 issues with open asks, 90 with children and grandchildren, and 10 cited asks.",
+      "headSha": "7c3be794b3fecb9953f91e8202aab2de9a7bbd25",
+      "negativeControl": "Two base runs from two resets gave identical answers, so the comparison is deterministic. The approval-fill mutation above changed 2,180 of 2,180."
+    },
+    {
+      "criterion": "(c) The change is not slower: the median head run's whole-process CPU is not above the highest base run's",
+      "surface": "packages/envoy/loadtest route mix (INFRA-589's routes-2026-10-26-1719Z.txt) on this pod",
+      "command": "run-step.sh <side>-<n> --events 1.5 --sessions 150 --requests 22 --rng-seed 1, 180 s window, each run from its own reset, alternating base and head in one session (runs2.sh)",
+      "observed": "Base de546ed2, window starts 01:31:14, 01:39:44, 01:48:12 UTC on 2026-10-30: 29.16, 28.95, 27.13 CPU-s, getIssue share 1.93%, 2.41%, 1.70%. Head 7c3be794, window starts 01:35:30, 01:43:58, 01:52:26: 27.86, 26.70, 29.69 CPU-s, getIssue share 0.64%, 0.43%, 0.92%. The median head (27.86) is not above the highest base (29.16), and the base spread is 2.03 s. The issue route's p50 was 43.8-45.8 ms (browser) and 39.8-42.3 ms (cli) at base, and 17.2-17.5 ms and 13.3-13.4 ms at head. Every run had 4,088 of 4,088 requests 2xx and 261 of 261 writes committed, with box busy before it at 0.5-1.9%. The first set at 633c9e5b against 2b427f93 (19:43-20:05Z) also passed: median head 27.26 against highest base 28.02.",
+      "headSha": "7c3be794b3fecb9953f91e8202aab2de9a7bbd25",
+      "negativeControl": "Calibration found 100% 2xx at these flags (box 25% busy). INFRA-651 found that --events 2 --sessions 200 --requests 30 saturates the pod (76.8% 2xx), so those flags measure nothing."
+    },
+    {
+      "criterion": "(d) Rendered output is byte-identical on every LINUX spec",
+      "surface": "pmdoc renderer, read-back and misread checks, and StripAnchorMarks, over every LINUX issue's current spec (1,210 specs fetched read-only on 2026-10-29 with the Dispatch API, 64 MB, not committed, corpus sha256 50f7dbc1...)",
+      "command": "1) bash packages/envoy/internal/dispatch/pmdoc/gen/differential.sh --base 633c9e5b --corpus linux.jsonl, at b73c558e before the forward merge. 2) A throwaway harness (harness_dump_test.go) built in main de546ed2's tree and in the merge head's tree. It writes RenderWithBlockOffsets, RefuseMisreadDocument, NewMisread against the read-back, StripAnchorMarks and the render of what it gives, for each spec and for an anchored copy of it (every text run cut in three, the middle third under dispatchAsk or proofComment, every seventh run holding a U+0000). Parse's random block ids are masked by order (mask.py).",
+      "observed": "1) The differential's base and head dumps were cmp identical over 1,339 documents (the corpus plus the in-repo documents). 2) The harness dumps were identical at main and the merge head: 1,210 documents, sha256 fa44c0fe... on both sides. The full pmdoc suite passes at the merge head, as do -race on the Strip, Written, Marks and ReadBack tests and the docs package's Strip, Anchor, Edit and Tree tests.",
+      "headSha": "7c3be794b3fecb9953f91e8202aab2de9a7bbd25",
+      "negativeControl": "The head with StripAnchorMarks as cloneNode(node) dumped 1,210 of 1,210 anchored specs differently. TestStripAnchorMarksSharesNothingWithItsDocument fails when StripAnchorMarks returns writtenTree(node, false) without the copy."
+    }
+  ],
+  "filesChanged": [
+    "packages/envoy/internal/dispatch/api/issue_queries.go",
+    "packages/envoy/internal/dispatch/api/artifacts.go",
+    "packages/envoy/internal/dispatch/api/reviews.go",
+    "packages/envoy/internal/dispatch/api/asks.go",
+    "packages/envoy/internal/dispatch/api/ask_rows.go",
+    "packages/envoy/internal/dispatch/api/project_artifacts.go",
+    "packages/envoy/internal/dispatch/api/issue_read_batch_test.go",
+    "packages/envoy/internal/dispatch/api/server_test.go",
+    "packages/envoy/internal/dispatch/events/identity.go",
+    "packages/envoy/internal/dispatch/refs/graph.go",
+    "packages/envoy/internal/dispatch/store/storetest/traced.go",
+    "packages/envoy/internal/dispatch/pmdoc/render.go",
+    "packages/envoy/internal/dispatch/pmdoc/find.go",
+    "packages/envoy/internal/dispatch/pmdoc/marks.go",
+    "packages/envoy/internal/dispatch/pmdoc/node.go",
+    "packages/envoy/internal/dispatch/pmdoc/run_spellings.go",
+    "packages/envoy/internal/dispatch/pmdoc/readback_test.go",
+    "packages/envoy/internal/dispatch/pmdoc/strip_anchor_marks_test.go",
+    "packages/envoy/AGENTS.md",
+    "packages/envoy/.changes/unreleased/pr2535-Changed-20261030-010000.yaml"
+  ],
+  "trickyParts": [
+    "pgx runs a batch's callbacks in order in results.Close() and returns the first error. The issue row is queued first, so a missing key still answers its pgx.ErrNoRows (404). A statement's own failure reaches its callback through rows.Err(), so the scans check rows.Err() first and wrap it as the sequential path wraps its Query error.",
+    "Each batch's results are closed before anything else uses the pool. store.Pool.SendBatch does not mark the context as holding a connection, and pool.go is left alone because sjawhar/legion#2402 rewrites it. Whichever merges second keeps both.",
+    "The forward merge of main (de546ed2) met main's #2458, which moved inlineWithEscapes, readBackReaders, readsBackUnder and holdsTilde from render_inline.go to run_spellings.go. The merge takes main's render_inline.go and applies cleanups 2 and 4 to run_spellings.go.",
+    "Parse gives block ids at random, so the render corpus comparison masks uuids by order of appearance within each document."
+  ],
+  "deviations": [
+    "The plan's section 0 says to measure with INFRA-589's route-mix file. At the architect's instruction (19:31Z) the flags are the calibrated --events 1.5 --sessions 150 --requests 22, because the 0.5x flags saturate the pod.",
+    "The simplify pass also changed GET /api/v1/projects/{key}/artifacts (project_artifacts.go, outside the original diff) to read all versions in one statement. It was the last per-artifact version query, and the architect agreed it is in scope. Its answers matched at base and head on both seeds."
+  ],
+  "openQuestions": [],
+  "discoveredComplexity": [
+    "TestIssueRanksStayOrderedPastLowercaseDigitsAndProductionShapedMoves fails on this pod's pgserver Postgres, whose default collation is already byte order. The test refuses such a database at its first line (rank_test.go:313-318), before any code this change touches runs. CI's Postgres is not affected."
+  ]
+}
