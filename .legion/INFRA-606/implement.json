@@ -2,7 +2,7 @@
   "schemaVersion": 1,
   "phase": "implement",
   "issue": "INFRA-606",
-  "completed": "2026-10-30T19:23:00Z",
+  "completed": "2026-10-30T23:17:37Z",
   "pullRequest": "https://github.com/sjawhar/legion/pull/2406",
   "proof": [
     {
@@ -228,6 +228,14 @@
       "observed": "s1 is handed one frame (attempt 1 sent under the shared key, recorded duplicate); the sweep settles attempt 1 superseded after a reply turns the Retry sent; every round-7 path test green.",
       "headSha": "afab3fdca01bad52fda2aff7fac839a8f3641b11",
       "negativeControl": "With d8b5a38f's product code (model.go, comment_delivery.go, delivery_sweep.go, envoy_resolve.go, outbox/mentions.go) on the pre-merge tree, both new tests fail: attempt 1 sent as a second frame (not a duplicate), and attempt 1 left pending."
+    },
+    {
+      "criterion": "Tester round 16 (the conflict with main) and the architect's full-round merge of #2392: the event horizon intact (every global id-cursor read of this PR only up to events.Horizon or the relay's published cursor), the fallback table renumbered above main, #2392's connection count kept, every INFRA-606 outcome still holding.",
+      "surface": "The merged server against Postgres: the relay, /ws/live events subscriptions, GET /api/v1/events/log, the Delivery hub, the outbox; cmd/dispatch's real-process and multiprocess suites",
+      "command": "go test -p 2 -parallel 4 ./internal/dispatch/api/ -count=1; GOMAXPROCS=4 go test -race ./internal/dispatch/api/ -run 'Hub|Live|Relay|Horizon'; go test ./internal/dispatch/events/... ./internal/dispatch/outbox/... ./internal/dispatch/store/... ./internal/dispatch/model/... ./internal/pgmigrate/... ./internal/dispatch/routes/...; go test ./cmd/dispatch/...; go test -tags multiprocess ./cmd/dispatch/",
+      "observed": "All pass except the local collation test; #2392's horizon tests and this PR's bound, generation, hub and mention tests pass together; dispatchConnectionsPerPod stays 89.",
+      "headSha": "ed9b67599c7c73016199563d60ef3a626a0cca53",
+      "negativeControl": "At 8f68d44d four hub tests fail (the relay-fed generation's seed recompute) while passing on main and the branch alone; 57c4a697 settles the seed in the rigs and they pass 5 of 5."
     }
   ],
   "filesChanged": [
@@ -306,8 +314,8 @@
     "packages/envoy/internal/dispatch/outbox/publisher.go",
     "packages/envoy/internal/dispatch/outbox/publisher_claimant_test.go",
     "packages/envoy/internal/dispatch/outbox/publisher_mentions_test.go",
-    "packages/envoy/internal/dispatch/store/migrations/0149_comment_fallback_copies.census.sql",
-    "packages/envoy/internal/dispatch/store/migrations/0149_comment_fallback_copies.up.sql",
+    "packages/envoy/internal/dispatch/store/migrations/0150_comment_fallback_copies.census.sql",
+    "packages/envoy/internal/dispatch/store/migrations/0150_comment_fallback_copies.up.sql",
     "packages/envoy/internal/dispatch/store/pool.go",
     "packages/envoy/loadtest/README.md",
     "packages/envoy/loadtest/live.go",
@@ -368,7 +376,9 @@
     "Forward merge at fd9f4e1c (main 96a7e5ea): the fallback pass counts its publish failures through Deps.countPublishFailure; route pin 148 (main's own pin is stale at 146 against 147 routes).",
     "Two existing assertions changed with the supersede rule: the routed failed-Retry test now expects the lane to send attempt 1 (the copy assertions unchanged), and the sweep test expects the overtaken attempt 1 settled superseded once attempt 2 lands.",
     "The mention dedupe key drops the mode (<comment>:<target>): a Retry in any mode of a mention that already reached the session is recorded duplicate and dropped (architect's ruling).",
-    "Forward merge at afab3fdc (main d126b19d): main's #2483 took 0148, so the fallback table is 0149_comment_fallback_copies; route pin 148."
+    "Forward merge at afab3fdc (main d126b19d): main's #2483 took 0148, so the fallback table is 0149_comment_fallback_copies; route pin 148.",
+    "Forward merges at 8f68d44d (main 6fa26c74, #2392's event horizon: the relay, bounded resume, overflow catch-up and the events-log route read only up to the horizon; the hub keeps #2392's asynchronous feed take, costing one seed recompute per hub generation start) and ed9b6759 (main 4ca6415a, #2466's load-test replay beside the restart scenario); fallback table 0150_comment_fallback_copies.",
+    "Four hub tests (main's) settle the relay feed's seed before measuring (57c4a697), because this PR starts a hub generation at the first subscribe; no assertion weakened."
   ],
   "openQuestions": [],
   "discoveredComplexity": [
@@ -377,7 +387,7 @@
     "The NUL-refusal test raced the fixture mention's asynchronous send (a comment.delivery event landing between its table snapshots); it now waits for the send to settle.",
     "The pod was replaced mid-round and the unpushed first fix was lost; every verified fix is now pushed as it lands."
   ],
-  "round": 16,
-  "answersTest": "735b6cde36e432bdc4bd6290e57e7dd4b71f6e0e",
+  "round": 17,
+  "answersTest": "1300c5c68d983835c33bd303dacd3cdee73ae7d2",
   "answersReview": "d8b5a38fcddc4e3a4c504d787c6371812805bec0"
 }
