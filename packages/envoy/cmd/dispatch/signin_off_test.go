@@ -36,3 +36,23 @@ func TestABootWithNoSignInServesAgentsAndRefusesBrowserSignIn(t *testing.T) {
 		t.Errorf("DISPATCH_SIGNIN_CLIENT_ID alone: err = %v, want a refusal naming %q", err, missing)
 	}
 }
+
+// A deployment converted to no sign-in -- its DISPATCH_SIGNIN_* settings dropped, its persistent
+// DISPATCH_SIGNING_KEY kept -- refuses the session cookies its sign-in once minted: the key still
+// signs them for their thirty days, and nobody is left to confirm that the person they name may
+// still use Dispatch. GET /api/v1/whoami is the person-level API such a cookie would otherwise
+// reach, naming its person by cookie when no bearer names one.
+func TestABootWithNoSignInRefusesACookieIssuedWhileSignInWasOn(t *testing.T) {
+	boot, err := resolveBootConfig(envGetter(noSignInEnvironment(nil)))
+	if err != nil {
+		t.Fatalf("resolve boot config: %v", err)
+	}
+
+	handler := routerFor(t, boot, routes.AppContextOptions{Store: storetest.Open(t)})
+	request := signedIn(t, httptest.NewRequest(http.MethodGet, "http://dispatch.test/api/v1/whoami", nil), "someone@example.com")
+	response := httptest.NewRecorder()
+	handler.ServeHTTP(response, request)
+	if response.Code != http.StatusUnauthorized || errorCode(response) != "NO_IDENTITY" {
+		t.Errorf("GET /api/v1/whoami with a cookie signed by the deployment's own key answered %d %s, want 401 NO_IDENTITY", response.Code, response.Body.String())
+	}
+}

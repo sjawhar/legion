@@ -789,7 +789,8 @@ func resolveBootConfig(env settingValues) (bootConfig, error) {
 	switch mode := identityMode; {
 	case mode == "" || mode == "cookie":
 		// Cookie identity takes no sign-in setting: with none set Dispatch asks nobody to sign
-		// in and serves its agent-token API alone.
+		// in, refuses every cookie an earlier sign-in minted (requestIdentityFor), and serves
+		// its agent-token API alone.
 	case strings.HasPrefix(mode, "header:"):
 		boot.IdentityHeader = strings.TrimSpace(strings.TrimPrefix(mode, "header:"))
 		if boot.IdentityHeader == "" {
