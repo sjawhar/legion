@@ -152,11 +152,7 @@ func attachAskBacklinkCounts(ctx context.Context, q queryer, asks []*model.Ask) 
 	if len(asks) == 0 {
 		return nil
 	}
-	ids := make([]string, 0, len(asks))
-	for _, ask := range asks {
-		ids = append(ids, ask.ID)
-	}
-	counts, err := refs.BacklinkCounts(ctx, q, "ask", ids, refs.AskBacklinkExclusions)
+	counts, err := refs.BacklinkCounts(ctx, q, "ask", distinctAskIDs(asks), refs.AskBacklinkExclusions)
 	if err != nil {
 		return err
 	}

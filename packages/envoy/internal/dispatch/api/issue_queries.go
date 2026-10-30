@@ -424,34 +424,29 @@ func (s *server) readIssue(ctx context.Context, key string) (issueRead, error) {
 	read.issue.ExternalLinks = links
 	read.referencedByCount = issueCounts[read.issue.Key]
 
-	artifacts := artifactPointers(read.artifacts)
-	askRows := askReadPointers(asks)
-	versionIDs := artifactIDs(artifacts)
-	approvalIDs, approvalTargetsByID := approvalTargets(artifacts)
-	askIDs := distinctAskIDs(askRows)
-	if len(versionIDs) > 0 || len(askIDs) > 0 {
-		if err := s.readIssueDetails(ctx, artifacts, askRows, versionIDs, approvalIDs, approvalTargetsByID, askIDs); err != nil {
-			return issueRead{}, err
-		}
+	if err := s.readIssueDetails(ctx, artifactPointers(read.artifacts), askReadPointers(asks)); err != nil {
+		return issueRead{}, err
 	}
 	read.openAsks = issueOpenAsksOf(asks, replies)
 	return read, nil
 }
 
 // readIssueDetails is getIssue's second batch: what only the first batch's answers name, filled
-// into the artifacts and asks it read.
-func (s *server) readIssueDetails(
-	ctx context.Context,
-	artifacts []*model.Artifact,
-	asks []*model.Ask,
-	versionIDs, approvalIDs []string,
-	approvalTargetsByID map[string]*model.Artifact,
-	askIDs []string,
-) error {
-	versions := map[string][]model.Version{}
-	latestReviews := map[string]model.ArtifactReview{}
-	requests := map[string]openApprovalRequest{}
-	openedEventIDs := map[string]int64{}
+// into the artifacts and asks it read. An issue with no artifact and no open ask names nothing,
+// so it sends no batch.
+func (s *server) readIssueDetails(ctx context.Context, artifacts []*model.Artifact, asks []*model.Ask) error {
+	versionIDs := artifactIDs(artifacts)
+	approvalIDs, approvalTargetsByID := approvalTargets(artifacts)
+	askIDs := distinctAskIDs(asks)
+	if len(versionIDs) == 0 && len(askIDs) == 0 {
+		return nil
+	}
+	// Each scan returns a map of its own, which replaces the nil one here; a statement not queued
+	// leaves its map nil, which every apply below only indexes.
+	var versions map[string][]model.Version
+	var latestReviews map[string]model.ArtifactReview
+	var requests map[string]openApprovalRequest
+	var openedEventIDs map[string]int64
 	askCounts := map[string]int{}
 
 	batch := &pgx.Batch{}

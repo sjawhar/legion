@@ -1433,10 +1433,12 @@ const artifactVersionsStatement = `
 func scanVersion(row pgx.Row, extra ...any) (model.Version, error) {
 	var version model.Version
 	var authors []byte
-	targets := append([]any{
+	targets := make([]any, 0, 8+len(extra))
+	targets = append(targets,
 		&version.Number, &version.Named, &version.Summary, &authors,
 		&version.CreatedAt, &version.Size, &version.MIME, &version.SHA256,
-	}, extra...)
+	)
+	targets = append(targets, extra...)
 	if err := row.Scan(targets...); err != nil {
 		return model.Version{}, err
 	}
