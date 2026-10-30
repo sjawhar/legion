@@ -17,7 +17,6 @@ supersedes:
   - docs/solutions/legion/an-implement-handoff-push-runs-ci-in-full-and-cancels-the-code-heads-runs-cite-the-tips-runs-and-give-the-lane-the-code-heads-image-LEGION-631.md
   - docs/solutions/legion/lint-the-handoffs-you-inherit-before-your-first-code-push-a-redaction-commit-answers-another-roles-private-name-LEGION-791.md
   - docs/solutions/legion/handoff-file-conflicts-during-rebases.md
-  - docs/solutions/legion/a-branch-whose-every-round-pushes-never-settles-a-required-check-pr2512.md
   - docs/solutions/legion/handoff-complete-checks-the-handoff-commits-app-and-nothing-checks-a-code-commits-INFRA-92.md
   - docs/solutions/legion/a-solutions-note-cannot-cite-a-legion-handoff-because-retro-removes-it-before-the-merge-INFRA-69.md
   - docs/solutions/skill-patterns/workflow-ordering-and-stale-workspace-data.md
@@ -61,6 +60,8 @@ in the past tense, beside one sentence that says what holds now:
   handoff commits and the empty `@` a handoff split left;
 - `docs/solutions/github/zero-check-runs-on-a-pushed-head-is-a-conflicting-head-not-a-trailer-pr2504.md`,
   its handoff-push clauses, corrected in place;
+- `docs/solutions/legion/a-branch-whose-every-round-pushes-never-settles-a-required-check-pr2512.md`,
+  the `.legion/`-only handoff commit that followed the code;
 - `docs/solutions/legion/a-commit-made-outside-your-assignment-….md`, the App check
   `handoff_complete` makes;
 - `docs/solutions/legion/a-conflict-that-arrives-while-another-role-holds-the-phase-….md`, the
@@ -115,6 +116,8 @@ in the past tense, beside one sentence that says what holds now:
 - `docs/solutions/legion/the-private-names-check-reads-each-events-frozen-body-….md`, its handoff
   half, and its title;
 - `docs/solutions/legion/the-record-is-not-the-reader-….md`, the grep over the handoff files;
+- `docs/solutions/legion/the-trailer-on-a-pushs-tip-suppresses-the-runs-of-every-code-commit-beneath-it-pr2542.md`,
+  the inherited handoff trailer, the rewrite it guarded and the handoff-only cause of no runs;
 - `docs/solutions/testing/a-docker-free-rig-renders-the-real-authorization-….md`, where the rig
   lives;
 - `docs/solutions/testing/fresh-state-dir-boot-beside-a-busy-rig.md`, the `.legion/`-only pushes
