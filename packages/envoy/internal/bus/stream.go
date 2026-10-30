@@ -562,15 +562,16 @@ func ownedStream(info *nats.StreamInfo, cfg *nats.StreamConfig) nats.StreamConfi
 }
 
 // keptSubjects is the subject list the keeper writes: the deployed list, then each of own, this
-// binary's subjects, that the list lacks, that captures no role lane (subjectCapturesRoleLanes) and
-// that overlaps no deployed subject. It only adds: unlike a start (reconcileSubjects) it removes and
-// replaces nothing, so two releases with different subject lists never switch the stream back and
-// forth, and a subject of this binary's that another release's overlapping one replaced stays
-// replaced until this binary's next start.
+// binary's subjects, that the list lacks and that overlaps no deployed subject. It does not check
+// own for a subject that captures a role lane, because no subject this binary compiles captures
+// one, which TestStreamConfigExcludesRoleLanes in stream_config_test.go guarantees. It only adds:
+// unlike a start (reconcileSubjects) it removes and replaces nothing, so two releases with
+// different subject lists never switch the stream back and forth, and a subject of this binary's
+// that another release's overlapping one replaced stays replaced until this binary's next start.
 func keptSubjects(deployed, own []string) []string {
 	kept := slices.Clone(deployed)
 	for _, subject := range own {
-		if subjectCapturesRoleLanes(subject) || slices.ContainsFunc(kept, func(other string) bool { return subjectsOverlap(subject, other) }) {
+		if slices.ContainsFunc(kept, func(other string) bool { return subjectsOverlap(subject, other) }) {
 			continue
 		}
 		kept = append(kept, subject)

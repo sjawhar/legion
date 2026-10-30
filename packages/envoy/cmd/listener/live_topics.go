@@ -30,19 +30,30 @@ const (
 	streamSubjectsReadRecoveredLine = "live topics read the stream's subjects again"
 )
 
+// liveTopicsClientName is the prefix of the name the lane's client carries in the NATS server's
+// connection listings and in its own log lines: the name is this and the pod's instance
+// (`envoy-live-topics <instance>`), which a test reads to tell this client from the listener's
+// other one, and an operator to tell this pod's lane from the other pod's.
+const liveTopicsClientName = "envoy-live-topics"
+
 // openLiveTopics opens the live topics lane: a bus client of its own, named
 // `envoy-live-topics <instance>`, since a client holds one core subscription and the main client's
-// is the role lane, subscribed to every notification
-// topic in the machine's live queue group (bus.ListenerLiveQueue), apart from the role lane's
-// group, which NATS would merge across subjects and hand a role message to this lane. It connects
-// as the main client does, as the NATS user, through the proxy and under the remote-NATS rule the
+// is the role lane, subscribed to every notification topic in the machine's live queue group
+// (bus.ListenerLiveQueue), apart from the role lane's group, which NATS would merge across
+// subjects and hand a role message to this lane. It connects as the main client does, as the NATS
+// user, through the proxy and under the remote-NATS rule the
 // environment names, and it reconnects and re-subscribes on its own. It reads the stream's subjects
 // before it subscribes, so its first message is already split on the server's list, and keeps them
 // current from then (liveLane.follow). It returns once NATS has accepted the subscription: a server
 // that refuses it answers before the flush's PONG, and nats.go records the refusal as the
 // connection's last error.
+//
+// The lane's connection declares itself lost two to three seconds after the hub stops answering it
+// (bus.WithSilentCutDetection). A hub whose packets stop closes nothing. On nats.go's default
+// pings (one every two minutes, two outstanding) the lane reads connected for four to six minutes
+// while no message reaches it, and it re-subscribes only once it has reconnected.
 func openLiveTopics(urls []string, machineID, instance string, lane *liveLane) (*bus.Client, error) {
-	live, err := bus.Connect(urls, bus.WithName("envoy-live-topics "+instance))
+	live, err := bus.Connect(urls, bus.WithName(liveTopicsClientName+" "+instance), bus.WithSilentCutDetection())
 	if err != nil {
 		return nil, fmt.Errorf("connect: %w", err)
 	}

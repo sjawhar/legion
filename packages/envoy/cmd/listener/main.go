@@ -1003,11 +1003,17 @@ func newDeliveryLedger(deliveryLease *lease, machineID string, requestLimit time
 // bucket is not named here but added once the lease has opened it (bus.Client.KeepBucket, main),
 // so a pod whose NATS user lacks the grant for it is not refused on it every period. main and the
 // tests that start the listener's stream both take them from here.
+//
+// Each connection the client makes declares itself lost two to three seconds after the hub stops
+// answering it (bus.WithSilentCutDetection). A hub whose packets stop closes nothing. On nats.go's
+// default pings (one every two minutes, two outstanding) the connection reads connected for four
+// to six minutes, and the reconnect that finds a hub which answers starts only once it reads lost.
 func listenerStreamOptions(cfg config.Service) []bus.ConnectOption {
 	return []bus.ConnectOption{
 		bus.WithReplicas(cfg.NATSReplicas),
 		bus.WithStreamMaxBytes(cfg.StreamMaxBytes),
 		bus.WithKeptBuckets(bus.ListenerBuckets()...),
+		bus.WithSilentCutDetection(),
 	}
 }
 

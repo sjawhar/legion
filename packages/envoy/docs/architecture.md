@@ -93,6 +93,7 @@ attempt:
 | The target is live but does not advertise the frame's `delivery.mode`, or that mode cannot be read unambiguously | `403` naming the session, and the mode when it could be read |
 | The publish is refused as too large (`bus.ErrTooLarge`) | `413` naming the size against the server's max payload |
 | The publish is refused for its subject or key (`bus.ErrRefused`) | `400` naming the refusal, with no `Retry-After` |
+| The stream refuses the publish because it holds its byte limit (`bus.ErrStreamFull`), a republish the full stream refused (`bus.ErrNotStored` wrapping it) among them | `503 {"error":"envoy: the message bus refused the message because its stream is full: <reason>"}` with `Retry-After: 1`, recorded `stream_full` |
 | The server denies the publish under this listener's own grant (`bus.ErrPublishDenied`) | `403 {"error":"envoy: the message bus denied the publish under this listener's own permissions: <reason>"}` with no `Retry-After`, recorded `publish_denied` (below) |
 | Any other publish failure | `503` with the same prefix and `Retry-After: 1`, carrying the bus's own reason |
 
@@ -160,10 +161,10 @@ reach its subscriber twice.
 Each inbound send and publish is recorded in one line, INFO when accepted and WARN when refused:
 `listener send` (`target_session`) and `listener publish` (`topic`), both carrying `event_id`,
 `source`, `source_session`, `payload_summary`, `outcome` and `status`, and `holder` as well when a
-role topic resolved one. `outcome` is one of `accepted`, `invalid_request`, `too_large` and
-`bus_unavailable`, plus `no_live_session` for send, `capability_refused` for send and a role send,
-`publish_denied` for send and publish alike, since a publish on either transport can be denied,
-and `role_unclaimed`, `role_lapsed`, `role_holder_changed`,
+role topic resolved one. `outcome` is one of `accepted`, `invalid_request`, `too_large`,
+`bus_unavailable` and `stream_full`, plus `no_live_session` for send, `capability_refused` for send
+and a role send, `publish_denied` for send and publish alike, since a publish on either transport
+can be denied, and `role_unclaimed`, `role_lapsed`, `role_holder_changed`,
 `role_claim_unreadable` and a confirmed send's 504 reason (`receipt_timeout`, `delivery_failed`,
 `not_confirmed`, `publish_failed`) for publish. Two
 refusals carry no such line, because neither reaches a handler: the 401 the API auth wrapper
