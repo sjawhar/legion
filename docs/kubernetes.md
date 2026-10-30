@@ -188,7 +188,7 @@ the CodeGraph CLI, the CodeGraph plugin, TypeScript and the two npm language ser
 ### The tools a role's own work needs
 
 The image carries the five clients above
-— `psql`, `redis-cli`, `sqlite3`, `nc` and `dig` — and for everything else the one documented step is the pinned form of the three package runners the image already has:
+— `psql`, `redis-cli`, `sqlite3`, `nc` and `dig` — the PostgreSQL 18 server with `pgvector` and `/usr/local/bin/legion-testpg` ("A test database in the pod" below), and for everything else the one documented step is the pinned form of the three package runners the image already has:
 `uvx`, `bunx` and `go run`, plus `uv run --with` where what a role needs is a library rather than a command.
 The two answer different halves of the question.
 The image answers the tools a role may not arrange for itself
@@ -255,6 +255,31 @@ Each item below names an option and its measurement, then the verdict on it.
 The forms a role types, the rule that a pin names a coordinate as well as a version, and the line between a sanctioned pinned run and the withheld `operator-setup` capability are a role's own documentation rather than an operator's, and they live in one place:
 `skills/legion-worker/references/tools.md`.
 The worker image ships that skill, so a role reads it where it works, and a tool no runner reaches is the image change that reference spells out, with the grep that finds its sites.
+
+### A test database in the pod
+
+A role whose change owes a Postgres test has one in its own pod. The image carries the PostgreSQL 17
+server with `pgvector` beside the `psql` above, and `/usr/local/bin/legion-testpg`, whose `ensure`
+starts a cluster on the issue volume (`LEGION_TESTPG_DIR`, `/legion/testpg`) and serves exactly the
+server `LEGION_TEST_PG_DSN` names. A deployment sets that variable in
+`runtime.kubernetes.pod.env` and `legion-testpg ensure` in `runtime.kubernetes.setup`, so the
+server is listening before Oh My Pi starts and no agent looks for a database of its own.
+
+- `ensure` is idempotent and cheap when the server is up: it returns after one `pg_isready` on the
+  DSN's port, never reading a pid file, and otherwise runs `initdb` and starts the server under
+  `flock -o`, so the roles of one pod make one server between them. The `-o` closes the lock's
+  descriptor in the child, without which the server inherits it and every later role's `ensure`
+  waits on a lock the server holds for the pod's life.
+- It refuses a DSN that carries a password or names a host that is not loopback: a test's
+  `create database` and `drop database` belong in the pod, never on a deployment's own instance.
+  The cluster's superuser is the pod's own uid 1000 user, and the server trusts loopback alone, so
+  the DSN needs no password and is a plain `legion.yaml` line.
+- The data directory dies with the pod, as the disk does ("The disk dies with its pod"), so every
+  issue starts on an empty cluster. `template1` carries the `vector` extension, so a database made
+  from it has pgvector and the Dispatch browser suite runs on `DATABASE_URL=$LEGION_TEST_PG_DSN`.
+- The image's own build runs `legion-testpg check` and a real `initdb`, start, `create database`
+  and extension read as the runtime user, so a build whose server package or script stops working
+  fails there rather than at every role's start.
 
 ### Image size and pull time
 

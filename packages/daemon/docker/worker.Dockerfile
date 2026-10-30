@@ -40,6 +40,8 @@
 # and trixie's python3 with PyYAML (python3-yaml), curl, wget, jq, openssh-client (ssh-keygen),
 # util-linux (flock), postgresql-client (psql), redis-tools (redis-cli), sqlite3,
 # netcat-openbsd (nc), bind9-dnsutils (dig) and chromium (the browser Oh My Pi finds on PATH);
+# the PostgreSQL 17 server with pgvector and /usr/local/bin/legion-testpg, the pod's own test
+# database on the issue volume (the runtime-base stage says why);
 # and a generic toolchain for the
 # repositories the workers work, specific to none of them: uv and uvx, Node LTS with npm and
 # corepack's pnpm and yarn, the AWS CLI v2 and kubectl —
@@ -518,6 +520,17 @@ FROM ghcr.io/sjawhar/legion/ci@sha256:f6b08b09a05725f9431502d3b5714f5c4576e82c1a
 # psql on PATH — so a role whose image lacks psql cannot run the suite its own change owes. The
 # Debian psql is a Perl wrapper around the versioned client; perl-base is already in the image, so
 # the wrapper resolves.
+# postgresql-17 and postgresql-17-pgvector (the server and the vector extension): the pod's own test
+# database, which /usr/local/bin/legion-testpg starts on the issue volume
+# (runtime.kubernetes.setup's `legion-testpg ensure`) and LEGION_TEST_PG_DSN names. Without a server
+# in the image, a role that needs Postgres either unpacks debs onto the issue volume for twenty
+# minutes or points its test at the deployment's sessions database, whose login drops databases on
+# the instance the whole fleet's sessions live in. The extension goes into template1 at start, so
+# every database a test makes from it carries pgvector and the Dispatch suite needs no step of its
+# own. The RUN below deletes the cluster `pg_createcluster` makes from the package's postinst
+# (/var/lib/postgresql, /etc/postgresql): no pod runs it, since a pod's cluster is initdb's on the
+# issue volume, under the runtime user. The server programs stay off PATH — postgresql-common wraps
+# the client programs alone — so legion-testpg names initdb, pg_ctl and postgres by path.
 # redis-tools (redis-cli): no repository of the project speaks Redis today. It is carried anyway,
 # at about a megabyte, because a second image roll costs more than a megabyte.
 # sqlite3: a repository's own SQLite fixture or database has no other way to open from a shell, and
@@ -559,8 +572,8 @@ FROM ghcr.io/sjawhar/legion/ci@sha256:f6b08b09a05725f9431502d3b5714f5c4576e82c1a
 # volumes over the same paths, as it always has. The final step refuses an image where any is not
 # root's or is not empty.
 # hadolint ignore=DL3008
-RUN apt-get update && apt-get install -y --no-install-recommends bind9-dnsutils ca-certificates chromium curl gcc git jq libc6-dev netcat-openbsd openssh-client postgresql-client python3 python3-yaml redis-tools socat sqlite3 util-linux wget \
-    && rm -rf /var/lib/apt/lists/* \
+RUN apt-get update && apt-get install -y --no-install-recommends bind9-dnsutils ca-certificates chromium curl gcc git jq libc6-dev netcat-openbsd openssh-client postgresql-17 postgresql-17-pgvector postgresql-client python3 python3-yaml redis-tools socat sqlite3 util-linux wget \
+    && rm -rf /var/lib/apt/lists/* /var/lib/postgresql /etc/postgresql \
     && chmod u-s /usr/lib/openssh/ssh-keysign \
     && chmod g-s /usr/bin/ssh-agent \
     && groupadd --gid 1000 legion \
@@ -824,6 +837,9 @@ COPY --from=go --chown=1000:1000 /gomodcache/cache/download /home/legion/go/pkg/
 USER root
 COPY --from=toolchain /out/chromium /opt/chromium
 COPY packages/daemon/docker/tls-roots /usr/share/legion/tls-roots
+# legion-testpg: root-owned and mode 0555, like every other program on the image's PATH, so a role
+# cannot rewrite the script its own next start runs as the pod's setup step.
+COPY --chmod=555 packages/daemon/docker/legion-testpg /usr/local/bin/legion-testpg
 # Keep Debian's chromium package for its shared-library dependency closure, but make its vulnerable
 # executable unreachable and expose the pinned Chrome for Testing binary under the usual name.
 RUN rm -f /opt/codegraph/node /usr/bin/chromium /usr/lib/chromium/chromium \
@@ -885,6 +901,12 @@ ENV AWS_CA_BUNDLE=/etc/ssl/certs/ca-certificates.crt COREPACK_DEFAULT_TO_LATEST=
 # prints its version on stdout, measured in a pod of this image (`dig -v 2>/dev/null` prints
 # `DiG 9.20.30-1~deb13u1-Debian`, `dig -v 2>&1 >/dev/null` prints nothing), so the step takes it as
 # it comes.
+# legion-testpg runs here for real, not as a version print: it initdbs a cluster in the scratch
+# directory as the runtime user, starts it, makes a database from template1 and reads pgvector back
+# out of it, then stops it through its pid file. The pod's setup step runs the same command, so a
+# build whose server package, extension or script no longer works fails here rather than at every
+# role's start in every pod. The DSN is the shape a deployment sets in
+# runtime.kubernetes.pod.env: a loopback host, no password, and the runtime user as the superuser.
 RUN set -eu; \
     scratch="$(mktemp -d)"; \
     export TMPDIR="$scratch" COREPACK_HOME="$scratch/corepack" XDG_CONFIG_HOME="$scratch/config"; \
@@ -906,6 +928,13 @@ RUN set -eu; \
     ssh-keygen -q -t ed25519 -N '' -f "$scratch/probe-key"; ssh-keygen -l -f "$scratch/probe-key.pub"; \
     flock --version; \
     psql --version; redis-cli --version; sqlite3 --version; nc -h; dig -v; \
+    legion-testpg check; \
+    probe_dsn='postgres://legion@127.0.0.1:5433/postgres?sslmode=disable'; \
+    LEGION_TESTPG_DIR="$scratch/testpg" LEGION_TEST_PG_DSN="$probe_dsn" legion-testpg ensure; \
+    psql -X -q "$probe_dsn" -c 'create database probe'; \
+    psql -X -tAq 'postgres://legion@127.0.0.1:5433/probe?sslmode=disable' -c "select extname from pg_extension where extname = 'vector'" | grep -qx vector; \
+    psql -X -q "$probe_dsn" -c 'drop database probe with (force)'; \
+    kill -INT "$(sed -n 1p "$scratch/testpg/data/postmaster.pid")"; \
     rm -rf "$scratch"
 # Claude Code's pin, packages/daemon/docker/claude-code's package.json and package-lock.json, at
 # /opt/legion/claude-code (claudeCodePin, packages/daemon/internal/runtime/sandbox/names.go):

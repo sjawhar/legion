@@ -1,0 +1,174 @@
+#!/bin/sh
+# legion-testpg: the pod's own PostgreSQL for tests, on loopback, from the server the worker image
+# ships. `ensure` serves exactly the server LEGION_TEST_PG_DSN names, so the deployment's DSN is the
+# one contract and no caller has to agree on a port: a DSN naming anything but a loopback host is
+# refused rather than served, since a test must never reach a database that holds real rows.
+#
+# The data directory lives on the issue's volume (LEGION_TESTPG_DIR, /legion/testpg), which the
+# pod's kubelet creates with the pod and deletes with it, so every issue pod gets an empty cluster
+# and nothing of one issue's tests reaches another.
+#
+# `ensure` runs at every role start (runtime.kubernetes.setup), and an issue pod's roles share one
+# network namespace, so it is one server per pod: the first role's start makes it and the rest find
+# it listening. It is idempotent and holds a lock over the work, because two roles can start at
+# once.
+set -eu
+
+name=legion-testpg
+dir=${LEGION_TESTPG_DIR:-/legion/testpg}
+data=$dir/data
+sockets=$dir/sockets
+log=$dir/server.log
+
+die() {
+	echo "$name: $*" >&2
+	exit 1
+}
+
+# bindir is the newest PostgreSQL server bin directory Debian's postgresql-<major> packages install
+# (PGBIN overrides it). The server programs are not on PATH: postgresql-common wraps the client
+# programs alone (psql, pg_isready, createdb), so initdb, pg_ctl and postgres are named by path.
+bindir() {
+	if [ -n "${PGBIN:-}" ]; then
+		echo "$PGBIN"
+		return
+	fi
+	newest=
+	for candidate in /usr/lib/postgresql/*/bin; do
+		[ -x "$candidate/postgres" ] || continue
+		version=${candidate#/usr/lib/postgresql/}
+		version=${version%/bin}
+		case $version in
+		'' | *[!0-9]*) continue ;;
+		esac
+		if [ -z "$newest" ] || [ "$version" -gt "$newest" ]; then
+			newest=$version
+		fi
+	done
+	[ -n "$newest" ] || die "no PostgreSQL server under /usr/lib/postgresql/*/bin: this image ships none"
+	echo "/usr/lib/postgresql/$newest/bin"
+}
+
+# parse_dsn sets user, host, port and database from a DSN, and refuses one this script must not
+# serve: a password means the DSN names a server with accounts, which is somebody else's, and a
+# host that is not loopback means a server outside this pod, where creating and dropping databases
+# is not ours to do.
+parse_dsn() {
+	rest=${1#postgres://}
+	if [ "$rest" = "$1" ]; then
+		rest=${1#postgresql://}
+		[ "$rest" != "$1" ] || die "DSN $1 is no postgres:// URL"
+	fi
+	rest=${rest%%\?*}
+	case $rest in
+	*@*) ;;
+	*) die "DSN names no user before @: initdb needs the superuser's name" ;;
+	esac
+	user=${rest%%@*}
+	rest=${rest#*@}
+	case $user in
+	*:*) die "DSN carries a password, so it names a server with accounts, not this pod's own" ;;
+	'') die "DSN names an empty user" ;;
+	esac
+	case $rest in
+	*/*)
+		database=${rest#*/}
+		rest=${rest%%/*}
+		;;
+	*) die "DSN names no database" ;;
+	esac
+	host=${rest%%:*}
+	port=${rest#*:}
+	if [ "$port" = "$rest" ]; then
+		port=5432
+	fi
+	case $host in
+	127.0.0.1 | localhost | '[::1]') ;;
+	*) die "DSN names host $host, which is no loopback address: a test database is this pod's own" ;;
+	esac
+	case $port in
+	'' | *[!0-9]*) die "DSN names port $port, which is no number" ;;
+	esac
+	case $database in
+	'' | *[!A-Za-z0-9_]*) die "DSN names database $database, which is no plain identifier" ;;
+	esac
+}
+
+listening() {
+	pg_isready -q -h 127.0.0.1 -p "$port" -U "$user" -d "$database"
+}
+
+start() {
+	bin=$(bindir)
+	mkdir -p "$data" "$sockets"
+	chmod 700 "$data"
+	# An interrupted initdb leaves a directory with no PG_VERSION, which no server starts on.
+	if [ ! -f "$data/PG_VERSION" ]; then
+		rm -rf "${data:?}"/* "${data:?}"/.[!.]* 2> /dev/null || true
+		"$bin/initdb" --pgdata "$data" --username "$user" --auth-local=trust --auth-host=trust \
+			--encoding=UTF8 --no-sync > "$log" 2>&1 ||
+			die "initdb failed; $log holds its output"
+	fi
+	# A throwaway cluster trades durability for speed: nothing in it survives the pod. 100
+	# connections cover a package's parallel tests, and 256MB of shared buffers their fixtures.
+	"$bin/pg_ctl" --pgdata "$data" --log "$log" --wait --timeout 120 \
+		--options "-p $port -k $sockets -c listen_addresses=127.0.0.1 -c fsync=off -c full_page_writes=off -c synchronous_commit=off -c max_connections=100 -c shared_buffers=256MB" \
+		start >> "$log" 2>&1 ||
+		die "pg_ctl start failed; $log holds its output"
+	# vector in template1 reaches every database a test makes from it, so a suite that needs
+	# pgvector (Dispatch's) runs on this server with no extension step of its own.
+	if [ -f "$(pg_config --sharedir 2> /dev/null || echo /usr/share/postgresql/unknown)/extension/vector.control" ]; then
+		psql -X -q -h 127.0.0.1 -p "$port" -U "$user" -d template1 \
+			-c 'create extension if not exists vector' >> "$log" 2>&1 ||
+			die "create extension vector in template1 failed; $log holds its output"
+	fi
+	if [ "$database" != postgres ]; then
+		psql -X -tAq -h 127.0.0.1 -p "$port" -U "$user" -d postgres \
+			-c "select 1 from pg_database where datname = '$database'" 2> /dev/null | grep -q 1 ||
+			createdb -h 127.0.0.1 -p "$port" -U "$user" "$database" >> "$log" 2>&1 ||
+			die "createdb $database failed; $log holds its output"
+	fi
+}
+
+ensure() {
+	[ -n "${LEGION_TEST_PG_DSN:-}" ] ||
+		die "LEGION_TEST_PG_DSN is unset: nothing names the server to serve"
+	parse_dsn "$LEGION_TEST_PG_DSN"
+	listening && {
+		echo "$name: a server already answers on 127.0.0.1:$port"
+		return 0
+	}
+	mkdir -p "$dir"
+	# flock serialises the roles that start together; the second finds the first's server listening.
+	# -o closes the lock's descriptor in the child, so the server flock's child starts does not
+	# inherit it and hold the lock for the pod's whole life: without -o, measured, the second and
+	# third role's ensure blocked until their own timeout. -w bounds the wait at one cold start, so
+	# a holder that dies mid-start costs a role one wait and never its launch.
+	flock -w 180 -o "$dir/.lock" "$0" start-locked
+	echo "$name: serving $LEGION_TEST_PG_DSN from $data"
+}
+
+case ${1:-} in
+ensure)
+	ensure
+	;;
+start-locked)
+	# flock's child: the environment names the DSN, and another role may have started the server
+	# while this one waited for the lock.
+	parse_dsn "${LEGION_TEST_PG_DSN:?}"
+	listening || start
+	;;
+check)
+	# The image probe's toolchain check runs this: a worker image whose server package went missing
+	# fails the build instead of every role's start.
+	bin=$(bindir)
+	"$bin/postgres" --version
+	"$bin/initdb" --version
+	control=$(pg_config --sharedir)/extension/vector.control
+	[ -f "$control" ] || die "no pgvector: $control is missing"
+	echo "pgvector $(sed -n "s/^default_version = '\(.*\)'/\1/p" "$control")"
+	;;
+*)
+	die "usage: $name ensure|check"
+	;;
+esac
