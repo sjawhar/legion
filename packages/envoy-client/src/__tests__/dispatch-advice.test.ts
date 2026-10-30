@@ -360,7 +360,7 @@ describe("Dispatch write advice", () => {
     );
 
     expect(result.text).toEndWith(
-      'Posted. You\'ve sent 6 messages on DSP-42 with no human response. Stop posting here until a human replies. See the `dispatch` skill, "Structure over stream".'
+      'Posted. You\'ve sent 6 messages on DSP-42 with no human response. Stop posting here until a human replies. Their reply ends this: post then what you held back. See the `dispatch` skill, "Structure over stream".'
     );
     expect(result.details.advice).toEqual(rawAdvice);
   });
@@ -1123,6 +1123,44 @@ describe("dispatch_doc_edit's decision block checks", () => {
     );
 
     expect(result.text).toBe([appliedLine, "Document token: sha256:edited"].join("\n"));
+  });
+});
+
+// The server sends `superseded_approval` only on the write that replaced a person's approved
+// version, so the line is about that one write: what it stored, whose approval it staled, and
+// what the reader does next. The negative is the ordinary case - a write on a document nobody
+// approved, one whose approval was already stale, and one whose version carried that approval
+// forward all arrive here with the field absent, and print nothing.
+describe("a document write that superseded a person's approval", () => {
+  const supersededLine =
+    "Stored version 15, superseding version 14, which alice approved. That approval is stale until someone approves version 15, and no undo restores it: a Legion design gate on this document is closed meanwhile, so every READY in its tree is refused. Meant to change the approved design? Request approval with `dispatch request-approval`. Meant a correction beside it? Tell the tree's architect, and keep the next one in a comment or in the plan.";
+  const superseded = { approved_version: 14, version: 15, approved_by: "alice" };
+
+  test.each([
+    [
+      "dispatch_doc_edit",
+      {
+        issue: "DSP-42",
+        artifact: "spec",
+        ops: [{ op: "replace", find: "a stale sentence", with: "" }],
+      },
+    ],
+    ["dispatch_artifact", { issue: "DSP-42", name: "spec.md", content: "# Spec\n" }],
+  ])("%s names the approval its version superseded, last", async (tool, args) => {
+    const result = await executeWrite(tool, args, advice({ superseded_approval: superseded }));
+
+    expect(result.text).toEndWith(supersededLine);
+  });
+
+  test("a write that superseded no approval says nothing about one", async () => {
+    const result = await executeWrite(
+      "dispatch_doc_edit",
+      { issue: "DSP-42", artifact: "spec", ops: [{ op: "replace", find: "draft", with: "final" }] },
+      advice({ decision_blocks_added: 0 })
+    );
+
+    expect(result.text).not.toContain("design gate");
+    expect(result.text).not.toContain("superseding version");
   });
 });
 
