@@ -2,14 +2,14 @@
   "schemaVersion": 1,
   "phase": "implement",
   "issue": "INFRA-594",
-  "completed": "2026-10-30T06:45:25Z",
+  "completed": "2026-10-30T07:12:04Z",
   "proof": [
     {
       "criterion": "Sessions take every event (agent, issue, role) once through restarts of the session, its NATS connection, either listener and a Dispatch pod; the plugin acks after the transcript write; an unacked message is redelivered",
       "surface": "Real Oh My Pi (omp 18.12.2, this checkout's pi-envoy) and real Claude Code 2.1.311 under this checkout's `legion claude-bridge` with claude-envoy built from the checkout; natsd with JetStream; two real envoy-listener processes; real envoy-dispatch on Postgres 17 with pgvector; in the issue pod",
       "command": "LEGION_TEST_PG_DSN='postgres://postgres@127.0.0.1:5433/postgres?sslmode=disable' bash scripts/e2e/envoy-session-delivery.sh",
-      "observed": "ENVOY SESSION DELIVERY: PASS (every event once, the issue in order), exit 0; bridge argv --replay-user-messages; 60 events x 6 windows, each counted 1 in its session. Table .legion/INFRA-594/evidence/live/head-a592.table.txt, output head-a592.out.",
-      "headSha": "a592ce7e88f1fb293e87adfa9a4230f325cc17b9",
+      "observed": "At 1099510d (merge of main a21100c5): ENVOY SESSION DELIVERY: PASS (every event once, the issue in order), exit 0, 60 events x 6 windows each counted 1 (evidence/live/head-1099.table.txt). Also PASS at a592ce7e before the merge (head-a592.table.txt).",
+      "headSha": "1099510d6f47626e6c36db4b86c726083b71d115",
       "negativeControl": "--build-from c3d09eec --expect-lost agent,issue,role at a592ce7e: NEGATIVE CONTROL HOLDS: every agent,issue,role event of window a counted 0 in both sessions (evidence/live/c3d09eec-at-a592.out)."
     },
     {
@@ -91,6 +91,14 @@
       "observed": "ok cmd/listener 573.5s; race run ok 148.0s; ./internal/bus 300.6s ok; serverchange ok 140.6s; infra/core ok",
       "headSha": "a592ce7e88f1fb293e87adfa9a4230f325cc17b9",
       "negativeControl": "dedupeCache.Record removed from pushUntilAccepted: TestServePortRelayPushesOneDedupeKeyOnce fails (second copy pushed); ConsumerHoldsStored ignoring the sequence: TestServePortMessageStoredBelowTheConsumerStartReachesThePort fails (never reached the port)"
+    },
+    {
+      "criterion": "Forward merge of main a21100c5 (GitHub reported CONFLICTING) keeps both sides",
+      "surface": "the merged tree: Go build/vet and bus/session suites; the three plugin suites, claude-envoy built as CI builds it",
+      "command": "go build ./... && go vet ./cmd/... ./internal/... ./loadtest/; go test ./internal/bus ./internal/session; bun test packages/envoy-client packages/pi-envoy; (cd packages/claude-envoy && bun run verify-build <tar>) && release-push.sh extract-built <tar> && bun run test",
+      "observed": "all OK: bus 317.6s, session 10.1s; 2704 pass 0 fail; claude-envoy 280 pass 0 fail. Fingerprint 3eed8cf5\u2026 -> 940da58d\u2026 (changed only on the five conflicted files' lines), posted as issuecomment-6517049622",
+      "headSha": "1099510d6f47626e6c36db4b86c726083b71d115",
+      "negativeControl": "claude-envoy's answers-hook tests (main's #2376) fail 16 against the tracked dist/, which main's rebuild workflow has not regenerated yet; they pass once built as CI builds it"
     }
   ],
   "filesChanged": [
