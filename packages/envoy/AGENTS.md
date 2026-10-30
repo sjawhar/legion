@@ -2841,8 +2841,11 @@ reaches the handler, and one that resolves to another project, to no project at 
 belonging to none, such as an agent conversation's artifact or a direct message), or to nothing
 at all (no such row, or an id Postgres will not read as a uuid) is `403 PROJECT_SCOPE`, naming
 the project the credential covers and the project the write belongs to where one resolved, and
-nothing of the credential. That also closes an existence oracle, since a scoped caller used to
-read `403` for another project's object and the handler's `404` for an id nobody holds. Each
+nothing of the credential. The two refusals still read differently — a target of another project
+names that project, one that resolved to nothing says the write resolves to no project of that
+credential's — so failing closed does not close an existence oracle and does not claim to; nothing
+is read out that way, since no GET route is project-scoped, so every answer this check can colour
+is a refusal of the caller's own write. Each
 resolver sends the raw path value to Postgres, as the handler behind it does, so the parser
 that decides what the check resolved is the parser the handler then addresses its row by:
 Postgres reads a uuid with a hyphen after any group of four digits, which Go's `uuid.Parse`

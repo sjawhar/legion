@@ -133,9 +133,13 @@ caller's own project. It fails closed, so a target that resolves to another
 project, to no project at all (an object belonging to none), or to nothing at
 all (no such row, or an id Postgres will not read as a uuid) is
 `403 PROJECT_SCOPE`, naming the project the credential covers and the project
-the write belongs to where one resolved, and nothing of the credential. That
-also closes an existence oracle: a scoped caller used to read `403` for another
-project's object and the handler's `404` for an id nobody holds. Each resolver
+the write belongs to where one resolved, and nothing of the credential. The two
+refusals still read differently — a target of another project names that
+project, one that resolved to nothing says the write resolves to no project of
+that credential's — so failing closed does not close an existence oracle and
+does not claim to. Nothing is read out that way: no GET route is
+project-scoped, so every answer this check can colour is a refusal of the
+caller's own write. Each resolver
 sends the raw path value to Postgres, as the handler behind it does, so the
 check reads a path exactly as the handler then addresses its row by it —
 Postgres's uuid parser takes a hyphen after any group of four digits, and a

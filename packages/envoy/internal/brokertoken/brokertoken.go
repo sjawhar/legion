@@ -353,9 +353,11 @@ func (v *Verifier) live(ctx context.Context, r *http.Request) (string, Introspec
 	}
 	// The fourth clause is the scope the Project beside it is read under: a word this package
 	// does not know is a token it cannot read, and is refused here rather than taken as a token
-	// that names no project at all (ErrNotASession).
+	// that names no project at all (ErrNotASession). A named scope with no project beside it is
+	// the same case: it is refused rather than read as a caller no project check covers.
 	if answer.Session == "" || answer.Person == "" || answer.ClientID != ExchangeClientID ||
-		(answer.ProjectScope != ProjectScopeNamed && answer.ProjectScope != ProjectScopePerson) {
+		(answer.ProjectScope != ProjectScopeNamed && answer.ProjectScope != ProjectScopePerson) ||
+		(answer.ProjectScope == ProjectScopeNamed && answer.Project == "") {
 		return "", Introspection{}, ErrNotASession
 	}
 	return token, answer, nil
