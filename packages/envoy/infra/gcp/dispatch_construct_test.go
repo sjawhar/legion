@@ -31,6 +31,14 @@ func dispatchConstructInputs() map[string]property.Value {
 		"tailnetService":      property.New("svc:example-dispatch"),
 		"signInClientId":      property.New("example-client-id"),
 		"signInDomain":        property.New("example.com"),
+		// The three NATS settings, so every Construct test decodes them through the plugin, where a
+		// value the plugin could not decode would refuse the Construct: the pods dial the hub in
+		// their own cluster, with three copies of every stream and a 64 MiB limit. What they render
+		// is asserted on the direct path (dispatch_test.go's natsInCluster tests). natsUrl stays the
+		// tailnet name each test sets, which is remote either way.
+		"natsInCluster":  property.New(true),
+		"natsReplicas":   property.New(float64(dispatchNatsReplicas)),
+		"streamMaxBytes": property.New(float64(dispatchStreamMaxBytes)),
 	}
 }
 
@@ -256,6 +264,12 @@ var azureConstructForms = []struct {
 func appEnv(t *testing.T, m *pulumitest.Mocks) map[string]any {
 	t.Helper()
 	return containerEnv(t, podContainer(t, deploymentPodTemplate(t, m, "example-dispatch"), "envoy-dispatch"))
+}
+
+// listenerEnv is the listener's envoy-listener container's environment, appEnv's counterpart.
+func listenerEnv(t *testing.T, m *pulumitest.Mocks) map[string]any {
+	t.Helper()
+	return containerEnv(t, podContainer(t, deploymentPodTemplate(t, m, "example-dispatch-listener"), "envoy-listener"))
 }
 
 // The endpoint, the deployment and either credential are Inputs, typically an Azure resource's or

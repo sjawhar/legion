@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/sjawhar/envoy/internal/dispatch/model"
+	"github.com/sjawhar/envoy/internal/dispatch/store"
 )
 
 // maxEventReplay is one page of the event log readEventsAfterID reads: an events subscription's
@@ -365,7 +366,7 @@ func (s *server) attachAskDocumentArtifacts(ctx context.Context, eventPayloads [
 		select a.id::text, aa.project_key, aa.slug, aa.name, aa.is_primary,
 			pa.project_key, pa.slug, pa.name, pa.is_primary
 		from asks a
-		left join artifacts aa on aa.id = (a.anchor->>'artifact_id')::uuid
+		left join artifacts aa on aa.id = `+store.CastableUUID(`a.anchor->>'artifact_id'`)+`
 		left join artifacts pa on pa.id = (a.approval->>'artifact_id')::uuid
 		where a.id::text = any($1)
 	`, askIDs)

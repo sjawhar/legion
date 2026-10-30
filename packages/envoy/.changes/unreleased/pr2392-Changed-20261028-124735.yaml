@@ -34,7 +34,7 @@ body: |-
     commits after it subscribed. The first start reads only the ids written since a mark the process
     takes at boot or at the start, so its cost follows recent writes, not the size of the log.
     When an event insert from before boot keeps every mark from counting, it reads above the
-    horizon the process before it persisted (the new one-row table `event_horizon`, migration 0148)
+    horizon the process before it persisted (the new one-row table `event_horizon`, migration 0149)
     rather than the whole log. GET /auth/whoami answers `503 EVENT_HEAD_UNAVAILABLE` only while no
     event id is proven final yet, which the dashboard asks again for as long as it lasts, showing
     its loading skeleton; it answers `503 EVENT_HEAD_READ_FAILED` when the database does not answer,

@@ -68,6 +68,61 @@ func TestParsePreservesTaskListCheckboxState(t *testing.T) {
 	}
 }
 
+// An image's alt text keeps the characters of the raw HTML in its label, as the browser editor's
+// reader keeps them: `mdast-util-to-string`, which that reader builds an image's `alt` with,
+// writes a literal node's own value, and an mdast `html` node is a literal node. parseImage
+// writes each `html` node's value into the alt beside the label's text and its nested images, so
+// every kind of raw HTML a label can hold reaches the alt. An anchor span is one of them: inside
+// a label parseInlineMarks reads a `<span data-proof=…>` as the raw HTML it is rather than as
+// the mark it is elsewhere, since the browser editor's reader builds the alt as the label closes,
+// before it turns such a span into a mark.
+//
+// Measured with gen/differential.ts against the engine of this head: `![p <!a> q](i.png)` reads
+// with alt `p <!a> q`, `![r <b> s](i.png)` with alt `r <b> s`, the same for a comment
+// (`<!-- c -->`), a processing instruction and a CDATA section, and an anchored label with the
+// span's own characters. An alt holding less would have a comment drawing the markdown and the
+// document editor drawing the stored document show different alt text, the divergence this
+// package exists to close.
+func TestParseKeepsRawHTMLInAnImageAltText(t *testing.T) {
+	for _, row := range []struct{ markdown, alt string }{
+		// A declaration at a lowercase letter: inline raw HTML to both readers
+		// (inlineRawHTMLParser), so its characters are the alt's.
+		{"![p <!a> q](i.png)\n", "p <!a> q"},
+		{"![<!a>](i.png)\n", "<!a>"},
+		{"![p <!a> q](i.png \"t\")\n", "p <!a> q"},
+		// Every other kind of raw HTML in a label, which both readers read as raw HTML.
+		{"![r <b> s](i.png)\n", "r <b> s"},
+		{"![r <!A> s](i.png)\n", "r <!A> s"},
+		{"![r <!-- c --> s](i.png)\n", "r <!-- c --> s"},
+		{"![r <?x?> s](i.png)\n", "r <?x?> s"},
+		{"![r <![CDATA[x]]> s](i.png)\n", "r <![CDATA[x]]> s"},
+		// An anchor span, which parseInlineMarks reads as a mark everywhere but in a label. The
+		// mark would reach nothing here, an attribute holding none, and the engine's alt carries
+		// the span's characters.
+		{"![a <span data-proof=\"comment\" data-id=\"c1\" data-by=\"user:x\">b</span> c](i.png)\n", "a <span data-proof=\"comment\" data-id=\"c1\" data-by=\"user:x\">b</span> c"},
+	} {
+		t.Run(row.markdown, func(t *testing.T) {
+			doc, err := Parse(row.markdown)
+			if err != nil {
+				t.Fatalf("parse %q: %v", row.markdown, err)
+			}
+			var images []*Node
+			Walk(doc, func(node *Node) bool {
+				if node.Type == "image" {
+					images = append(images, node)
+				}
+				return true
+			})
+			if len(images) != 1 {
+				t.Fatalf("parse %q: %d images, want 1", row.markdown, len(images))
+			}
+			if alt, _ := images[0].Attrs["alt"].(string); alt != row.alt {
+				t.Fatalf("alt of %q = %q, want %q", row.markdown, alt, row.alt)
+			}
+		})
+	}
+}
+
 func TestParseRejectsBlockHTML(t *testing.T) {
 	_, err := Parse("<div>\nblock HTML\n</div>\n")
 	if err == nil || !errors.Is(err, ErrSchema) {

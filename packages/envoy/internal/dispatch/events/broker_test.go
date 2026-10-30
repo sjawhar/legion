@@ -43,6 +43,96 @@ func TestAnchorRefreshEventsDoNotWakeAgents(t *testing.T) {
 	}
 }
 
+// Quiet and Notify answer different questions, and the difference is the whole point of Quiet:
+// an agent's comment, document or ask wakes nobody (Notify false) but is the activity a session
+// following `notifications.dispatch.issue.<KEY>.>` subscribed for, so it is not quiet.
+func TestQuietSeparatesAnAgentsActivityFromBookkeeping(t *testing.T) {
+	broker := NewBroker()
+	agent := model.Actor{Kind: "session", ID: "5a660655-04ad-4ce0-8a9b-93dd03c412b7"}
+	person := model.Actor{Kind: "user", ID: "alice"}
+	for _, tc := range []struct {
+		name  string
+		event model.Event
+		quiet bool
+	}{
+		{name: "an agent's comment", event: model.Event{Type: "comment.created", Actor: agent}, quiet: false},
+		{name: "an agent's document", event: model.Event{Type: "artifact.created", Actor: agent}, quiet: false},
+		{name: "an agent's ask", event: model.Event{Type: "ask.opened", Actor: agent}, quiet: false},
+		{name: "an agent's issue update", event: model.Event{Type: "issue.updated", Actor: agent}, quiet: false},
+		{name: "a person's comment", event: model.Event{Type: "comment.created", Actor: person}, quiet: false},
+		{name: "a delivery receipt", event: model.Event{Type: "comment.delivery", Actor: agent}, quiet: true},
+		{name: "a message receipt", event: model.Event{Type: "message.delivery", Actor: person}, quiet: true},
+		{name: "an anchor refresh", event: model.Event{Type: "comment.anchor_refreshed", Actor: person}, quiet: true},
+		{name: "per-viewer bookkeeping", event: model.Event{Type: "user_state.updated", Actor: person}, quiet: true},
+		{
+			name: "a targeted message its session already had",
+			event: model.Event{Type: "message.created", Actor: person, Payload: model.MessageEventPayload{
+				Message: model.Message{
+					ID:     "d7657c0d-71b9-43d5-8783-a5d98f7812e0",
+					Target: new("5a660655-04ad-4ce0-8a9b-93dd03c412b7"),
+				},
+			}},
+			quiet: true,
+		},
+		// The outbox asks Quiet of the event it scanned out of Postgres, whose payload JSON
+		// decoded into a map (outbox/publisher.go, scanPendingEvents): one event is quiet
+		// whichever shape its payload reached Quiet in.
+		{
+			name: "that targeted message as the outbox scanned it",
+			event: model.Event{Type: "message.created", Actor: person, Payload: map[string]any{
+				"id":     "d7657c0d-71b9-43d5-8783-a5d98f7812e0",
+				"target": "5a660655-04ad-4ce0-8a9b-93dd03c412b7",
+			}},
+			quiet: true,
+		},
+		{
+			name: "a message the outbox scanned that names no session",
+			event: model.Event{Type: "message.created", Actor: person, Payload: map[string]any{
+				"id":     "d7657c0d-71b9-43d5-8783-a5d98f7812e0",
+				"target": nil,
+			}},
+			quiet: false,
+		},
+		{
+			name: "an ask edit that only moved the version it names",
+			event: model.Event{Type: "ask.edited", Actor: person, Payload: model.AskEditEventPayload{
+				Ask:   model.Ask{ID: "ask-1"},
+				Quiet: true,
+			}},
+			quiet: true,
+		},
+		{
+			name: "that ask edit as the outbox scanned it",
+			event: model.Event{Type: "ask.edited", Actor: person, Payload: map[string]any{
+				"id":    "ask-1",
+				"quiet": true,
+			}},
+			quiet: true,
+		},
+		{
+			name:  "an unnamed version",
+			event: model.Event{Type: "artifact.version", Actor: agent, Payload: map[string]any{"version": map[string]any{"named": false}}},
+			quiet: true,
+		},
+		{
+			name:  "a named version",
+			event: model.Event{Type: "artifact.version", Actor: agent, Payload: map[string]any{"version": map[string]any{"named": true}}},
+			quiet: false,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := Quiet(tc.event); got != tc.quiet {
+				t.Fatalf("Quiet(%s by %s) = %t, want %t", tc.event.Type, tc.event.Actor.Kind, got, tc.quiet)
+			}
+			// Notify is unchanged by the split: it is quiet, a child event, or a person's.
+			wantNotify := !tc.quiet && tc.event.Actor.Kind == "user"
+			if got := broker.Notify(tc.event); got != wantNotify {
+				t.Fatalf("Notify(%s by %s) = %t, want %t", tc.event.Type, tc.event.Actor.Kind, got, wantNotify)
+			}
+		})
+	}
+}
+
 func TestAppendSequencesArtifactOwnedEvents(t *testing.T) {
 	ctx := context.Background()
 	database := storetest.Open(t)

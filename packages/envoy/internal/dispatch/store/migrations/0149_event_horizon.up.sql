@@ -1,4 +1,4 @@
--- 0148_event_horizon.up.sql
+-- 0149_event_horizon.up.sql
 --
 -- The newest safe horizon of the event log any Dispatch process has proven (events.Horizon): the
 -- highest event id at or below which every event is final. Finality is permanent, so a value one
