@@ -2,67 +2,53 @@
   "schemaVersion": 1,
   "phase": "test",
   "issue": "INFRA-750",
-  "completed": "2026-10-30T11:30:00Z",
+  "completed": "2026-10-30T12:20:00Z",
   "generation": 2,
-  "round": 4,
+  "round": 5,
   "pullRequest": "sjawhar/legion#2542",
-  "head": "44100bb7654a4d4c17f023b30d56d1f0d67e95fa",
-  "codeHead": "3de30a206f8e32c83507fce5e1730e67fda22843",
-  "forwardMergeCheck": {
-    "procedure": "skill://legion-worker/references/conflicts-and-rewrites.md, The unchanged-diff check, run from the head my round-3 E2E line names to the new head.",
-    "from": "ac614cc15b803736c5ee18f548e955d63394bd49 (fingerprint 47c0c5cf22cfd099e0ba99c934efcfdfe59118461d1ec5e8f7b6942ca9ad312f)",
-    "to": "44100bb7654a4d4c17f023b30d56d1f0d67e95fa (fingerprint 2210db3128b1bcee1b8f4aa8e8b891486c1ecdfacbff948536802197c5a14d9f)",
-    "verdict": "changed, so this is a full test round, not a bare-gates re-check. The two fingerprints agree with the implementer's own.",
-    "changedFile": "packages/envoy/docs/architecture.md, and that file alone. A line-by-line diff of the two fingerprint inputs shows one hunk: main rewrote the `outcome` sentence to add `publish_denied` for send and publish alike, and this branch's `stream_full` addition now sits inside main's wording, so the branch's own added lines there read differently. Every other file of the 34 is byte for byte the same contribution; the first resolution's table row left the branch's diff because main now carries its neighbour."
-  },
+  "head": "445d159fc48c7dee0ca8af43e27a4e8d00183619",
+  "codeHead": "3fec0f3465e2",
+  "answers": "The second review round (.legion/INFRA-750/review.json, decision changes_requested, 0 critical, 0 important, 2 minor): the fill loop main added in internal/webhook takes bustest.FillStream, and the duplicate-window paragraph of packages/envoy/AGENTS.md names both places that send a copy again without its id, which the reviewer fixed itself in cb63e006.",
+  "scope": "Everything that changed since the head my round-4 line named (44100bb7): packages/envoy/AGENTS.md, internal/bus/bustest/bustest.go, internal/webhook/github_test.go and the three handoff files. No production code of this pull request changed, which `jj diff -r '44100bb7654a::445d159fc48c' --stat` shows; the proofs below were still re-run at this head rather than carried.",
   "implementerProof": {
     "verdict": "verified",
-    "how": "Every proof entry was re-run at the merge head rather than carried: the kvwatch unit test (both rows, twice under -race, ok 1.605s), both listener tests 3 of 3 (ok 33.813s), the daemon's 2 of 2 under -race (ok 7.067s), and the suites that cover the files both sides changed — internal/bus (ok 347.968s), internal/webhook (ok 2.686s), internal/dispatch/outbox (ok 5.693s) and cmd/dispatch (ok 50.159s). The merge's own resolution was checked on both sides of the paragraph it touched, and three negative controls go red at this head. The entry for the merge (`The forward merge leaves the change working`) is sound and its fingerprints match mine."
+    "how": "The round's one code change is the fold, and it was driven twice over and then broken from the production side. `go test -count=2 -run 'TestADeliveryToAFullStreamIsAnswered503$|TestAGitHubDeliveryAnsweredNotStoredIsRepublishedWithoutItsID$' ./internal/webhook/` passes both tests in both runs, and the whole package is green (ok 2.938s). The fold's risk is a test that still passes but no longer catches anything: removing the id-less resend from publishJetStream makes the folded test fail by name, so it still pins what it pinned. The headline proofs were re-run at this head: the kvwatch unit test twice under -race (ok 1.590s), both listener cut tests (ok 11.734s), the daemon 2 of 2 under -race (ok 7.100s). The reviewer's and the implementer's doc claims were checked against the tree rather than taken."
   },
   "failed": 0,
   "failures": [],
   "proof": [
     {
-      "criterion": "The forward merge leaves the change working: the branch's own behaviour is unchanged at the merge head, and the one paragraph both sides edited says what each side's code does.",
-      "surface": "The merged tree of packages/envoy: the real envoy-listener binary, the listener's request records through its own routes, and the Go suites of every package both sides changed.",
-      "command": "From packages/envoy: `go test -count=3 -timeout 20m -run 'TestBothOfTheListenersNATSClientsReportASilentCutWithinSeconds$|TestASilentCutRewatchesTheCachesWithNoErrorLine$' ./cmd/listener/`; `go test -count=1 -run 'TestAFullStreamIsAnsweredAsFullNotAsABusThatDidNotAnswer$|TestADeniedPublishIsRefusedPermanentlyAndNotRecordedAsBusUnavailable$' ./cmd/listener/`; `go test -count=1 -timeout 25m ./internal/bus/... ./internal/webhook/ ./internal/dispatch/outbox/` and `./cmd/dispatch/`.",
-      "observed": "Both listener cut tests passed 3 of 3 (ok 33.813s), the cut reported between 2.785 s and 2.851 s in every run and by both clients. The merged paragraph holds on both sides: the table at docs/architecture.md:95-96 carries this branch's `stream_full` 503 row and main's `publish_denied` 403 row, and the outcome list at :163-168 carries both names once each, with each row pinned by a passing test of its own — TestAFullStreamIsAnsweredAsFullNotAsABusThatDidNotAnswer (four subtests) and TestADeniedPublishIsRefusedPermanentlyAndNotRecordedAsBusUnavailable (four subtests). The suites of the six files both sides changed clean (AGENTS.md, internal/bus/async.go, internal/bus/nats.go, internal/dispatch/outbox/publisher.go, internal/webhook/github_test.go, packages/envoy-client/README.md) are green: internal/bus ok 347.968s, internal/webhook ok 2.686s, internal/dispatch/outbox ok 5.693s, cmd/dispatch ok 50.159s. bustest.FillStream's one caller still compiles and runs inside internal/webhook's green.",
-      "headSha": "44100bb7654a4d4c17f023b30d56d1f0d67e95fa",
-      "negativeControl": "`bus.WithSilentCutDetection()` removed from openLiveTopics alone at this merge head, the test files untouched: `no disconnect line for envoy-live-topics 5.011s into a silent cut`, with `envoy`'s `nats: stale connection` line present. So the merged tree's tests still pin each call site, and the pass above is the code's doing. live_topics.go was restored with `jj restore`."
+      "criterion": "Review finding 1 (minor, internal/webhook/github_test.go:645-659): the fill loop main added takes bustest.FillStream, and the fold must not weaken what the test catches.",
+      "surface": "internal/webhook's two full-stream tests against a real in-process NATS server with a small stream byte limit, driven through the GitHub webhook route and the bus client production uses.",
+      "command": "From packages/envoy: `go test -count=2 -timeout 20m -v -run 'TestADeliveryToAFullStreamIsAnswered503$|TestAGitHubDeliveryAnsweredNotStoredIsRepublishedWithoutItsID$' ./internal/webhook/`, then `go test -count=1 ./internal/webhook/`.",
+      "observed": "Both tests pass in both runs (ok 1.427s) and the package is green (ok 2.938s). The loop that was duplicated is gone from github_test.go, replaced by `bustest.FillStream(t, client, 64)`, which keeps the same bound and the same refusal requirement (a publish that fails for anything but bus.ErrStreamFull fails the test).",
+      "headSha": "445d159fc48c7dee0ca8af43e27a4e8d00183619",
+      "negativeControl": "The production behaviour the folded test pins was removed rather than the test touched: in internal/bus/nats.go's publishJetStream, the send again without the MsgId after an ErrNotStored acknowledgement was replaced by returning that error. `--- FAIL: TestAGitHubDeliveryAnsweredNotStoredIsRepublishedWithoutItsID ... the redelivery logged \"... acknowledged a duplicate of a message it does not hold\", want it to name \"... acknowledged a duplicate of a message it does not hold\" and \"stream ENVOY_NOTIFICATIONS is full\"`. So the folded test still catches the defect it was written for. nats.go was restored with `jj restore` and `jj status` is clean."
     },
     {
-      "criterion": "Roll call 5 and the review's first finding at the merge head: a watch a rewatch replaced ends at INFO naming the failure, and a watch that fails with no replacement current keeps its ERROR.",
-      "surface": "The kvwatch watcher against a real in-process NATS server, both branches driven through its public API, records read from a JSON logger.",
-      "command": "From packages/envoy: `CGO_ENABLED=1 go test -race -count=2 -timeout 15m -v -run 'TestAFailedFirstStartLogsItsErrorOnlyWhileItIsTheLiveWatch$' ./internal/kvwatch/`.",
-      "observed": "Both rows pass twice (ok 1.605s) at the merge head, the line reading `<cache> first watch failed after a rewatch replaced it; the replacement feeds the cache`.",
-      "headSha": "44100bb7654a4d4c17f023b30d56d1f0d67e95fa",
-      "negativeControl": "The replaced branch made to log at ERROR again (the INFO call swapped for the ERROR one, nothing else touched): `--- FAIL ... a first watch a rewatch replaced logged [test cache watch failed: nats: connection closed], want no ERROR`, while the `no replacement` row still passes. kvwatch.go was restored with `jj restore`."
+      "criterion": "Review finding 2 and the doc claims around it: the duplicate-window paragraph names both places that send a copy again without its id, and bustest's package doc is true of the tree it describes.",
+      "surface": "The two documents and the tree they describe, read with a search for every copy of the two things bustest holds.",
+      "command": "From packages/envoy: `grep -rln 'notifications.github.fill|fill-%d' --include=*.go .`, `grep -rln 'a changed subject list' --include=*.go .`, `grep -rln 'bustest\\.' --include=*.go .`, and a read of internal/bus/nats.go:1294 and internal/bus/async.go.",
+      "observed": "The AGENTS.md paragraph now names both: the send again after an ErrNotStored acknowledgement on the send and publish routes' own path (publishJetStream, internal/bus/nats.go:1334-1340) and in the outbox window (sendJetStream, internal/bus/async.go); both calls are in the code as named. bustest's doc is true at this head: a fill loop exists only in internal/bus/publish_not_stored_test.go and in bustest itself, a drift table only in internal/bus/stream_replicas_test.go:76 and in bustest, and the only callers of bustest outside package bus are internal/webhook/github_test.go, cmd/listener/stream_replicas_test.go and cmd/dispatch/stream_replicas_test.go, so its new sentence `Every test outside package bus takes them from here` holds, and FillStream's doc now names both of its callers, which match the two tests that ran above.",
+      "headSha": "445d159fc48c7dee0ca8af43e27a4e8d00183619",
+      "negativeControl": "The searches are their own control: each was run over the whole module rather than over the files the doc names, so a copy the doc missed would have appeared in the output. None did."
     },
     {
-      "criterion": "The whole cut path still writes no ERROR line at the merge head, and a second cut in the same process ends as the first does.",
-      "surface": "The real envoy-listener binary with its three caches and the live lane, frozen and thawed twice in one process, read through its own log and its GET /v1/interests/.",
-      "command": "From packages/envoy: `go test -run 'TestASilentCutRewatchesTheCachesWithNoErrorLine$' ./cmd/listener/` (in the 3-of-3 run above), and a throwaway two-cut test of the tester's own on the merged tree, run the same way and removed afterwards since it pins no defect.",
-      "observed": "The implementer's guard passed all three runs. The two-cut run passed in 10.73 s: cut 1 reported 2.787 s and 2.837 s in by the two clients and every one of the three caches warmed up again 1.015 s after the thaw; cut 2 reported 2.99 s and 3.04 s in and every cache warmed up again 1.016 s after the thaw; an interest another listener wrote after the second thaw reached this listener's cache 1 ms later; and the process wrote no ERROR line at all.",
-      "headSha": "44100bb7654a4d4c17f023b30d56d1f0d67e95fa",
-      "negativeControl": "The same guard was shown live in round 3 at code head 73196dfca8cd, where one `slog.Error` added to rewatchListenerKVWatchers made it fail; the merge changed neither that function nor the test, which the fingerprint's file-by-file comparison shows."
-    },
-    {
-      "criterion": "The daemon still notices a hub that stops answering within the bound at the merge head.",
-      "surface": "The daemon's own natsauth.Connect, called as internal/daemon/workflow.go:366 calls it, against a server that answers the handshake PING and then nothing.",
-      "command": "From packages/daemon: `CGO_ENABLED=1 go test -race -count=2 -timeout 10m -v -run 'TestAHubThatStopsAnsweringIsNoticedWithinSeconds$' ./internal/natsauth/`.",
-      "observed": "2 of 2 passed under -race (ok 7.067s): the cut noticed 3.008027474 s and 3.006076172 s after the server went quiet.",
-      "headSha": "44100bb7654a4d4c17f023b30d56d1f0d67e95fa",
-      "negativeControl": "`options = append(options, detectSilentCuts)` removed from Connect gives `the connection was not reported lost within 5.0105s ...: IsConnected = true, the warning logged = false`, run in rounds 1 to 3; the forward merge touches no file of packages/daemon, which the fingerprint's file-by-file comparison shows."
+      "criterion": "The pull request's own behaviour is unchanged at this head: the listener and the daemon still report a silent cut within the bound, the cut path still writes no ERROR line, and a replaced watch still ends at INFO.",
+      "surface": "The real envoy-listener binary against a frozen relay, the kvwatch watcher's two branches, and the daemon's own natsauth.Connect against a server that answers the handshake and then nothing.",
+      "command": "From packages/envoy: `go test -count=1 -timeout 20m -v -run 'TestBothOfTheListenersNATSClientsReportASilentCutWithinSeconds$|TestASilentCutRewatchesTheCachesWithNoErrorLine$' ./cmd/listener/`; `CGO_ENABLED=1 go test -race -count=2 -run 'TestAFailedFirstStartLogsItsErrorOnlyWhileItIsTheLiveWatch$' ./internal/kvwatch/`. From packages/daemon: `CGO_ENABLED=1 go test -race -count=2 -timeout 10m -v -run 'TestAHubThatStopsAnsweringIsNoticedWithinSeconds$' ./internal/natsauth/`.",
+      "observed": "Both listener tests pass (ok 11.734s): the rewatch guard reported the cut at 2.784 s and 2.835 s and wrote no ERROR line, the cut test at 2.79 s and 2.852 s. The kvwatch test passes both rows twice (ok 1.590s). The daemon is 2 of 2 under -race (ok 7.100s), the cut noticed 3.008671819 s and 3.014187252 s after the server went quiet.",
+      "headSha": "445d159fc48c7dee0ca8af43e27a4e8d00183619",
+      "negativeControl": "No production file of this pull request changed since the head my round-4 line named, where each of these was broken on its own and went red: the option removed from openLiveTopics alone, and kvwatch.Start's replaced branch logging at ERROR again. `jj diff -r '44100bb7654a::445d159fc48c' --stat` lists only AGENTS.md, bustest.go, github_test.go and the three handoff files."
     }
   ],
-  "ciAtTheHead": "The merge head 3de30a206f8e carries CI run 41026772876's successor, with `changes` queued and `pr-title` queued at 11:25Z; the handoff head 44100bb7 carries none, which is right, since its push touched `.legion/INFRA-750/` alone and its message carries `skip-checks: true`. GitHub now reports the pull request MERGEABLE and APPROVED, where it reported it conflicting before the merge. A queued lane is read as queued; nothing here waited for one and no lane was re-run as evidence.",
+  "ciAtTheHead": "The code head 3fec0f3465e2 carries CI with `changes` queued and `pr-title` queued at 12:05Z; the handoff head 445d159f carries none, which is right, since its push touched `.legion/INFRA-750/` alone and its message carries `skip-checks: true`. A queued lane is read as queued; nothing here waited for one and no lane was re-run as evidence.",
   "environment": [
     "Every test in this handoff runs against an in-process NATS server from internal/testnats; no container is needed and none was left running.",
-    "This pod has no container runtime, so the cmd/listener tests that start a Postgres container and the three natsauth tests that need an authorized-server container do not run here. CI runs them."
+    "The pod's generation changed to 4 between rounds; the workspace holds the branch at 445d159f with no local change, and every command above ran in it."
   ],
   "alsoChecked": [
-    "The merge is one commit, 3de30a206f8e, of the branch's bookmark with main@origin: nothing was rebased and no pushed commit moved, so the reviewer's approved head is still an ancestor.",
-    "The second resolution reads as one sentence, not as two sides pasted together: `... `bus_unavailable` and `stream_full`, plus `no_live_session` for send, `capability_refused` for send and a role send, `publish_denied` for send and publish alike, since a publish on either transport can be denied, and `role_unclaimed` ...`, with each outcome named once.",
+    "The fold is the whole of the code change: github_test.go loses fourteen lines of loop and gains one call, and no assertion of either full-stream test moved.",
     "The new text names no Dispatch key."
   ]
 }
