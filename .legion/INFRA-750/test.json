@@ -1,0 +1,66 @@
+{
+  "schemaVersion": 1,
+  "phase": "test",
+  "issue": "INFRA-750",
+  "completed": "2026-10-30T18:40:00Z",
+  "generation": 2,
+  "round": 6,
+  "pullRequest": "sjawhar/legion#2542",
+  "head": "d2be744d33dc0e834737a86de1395a3e9af56f50",
+  "codeHead": "c23af74674ad07372a16cd62b5b7d59a50339618",
+  "workspace": "The pod's workspace was recreated before this round. It holds the branch at d2be744d with no local change, and retro's commit 4f51f06f had already removed .legion/INFRA-750/, so my rounds 1 to 5 handoffs are not in the tree; their evidence is in the pull request body's E2E history and in this file.",
+  "forwardMergeCheck": {
+    "procedure": "skill://legion-worker/references/conflicts-and-rewrites.md, The unchanged-diff check, from the head my round-5 E2E line names to this head.",
+    "from": "445d159fc48c7dee0ca8af43e27a4e8d00183619 (fingerprint 614b010060d6a65f3a5986a236f81cf310785cb0a81f8d6fe512bf1cedd4b3a2)",
+    "to": "d2be744d33dc0e834737a86de1395a3e9af56f50 (fingerprint d3ff0842b763d151849e6dace2644fdf379d3194e6cf4e75b56acc06fc928443)",
+    "verdict": "changed, so a full test round. The numbers agree with the implementer's own.",
+    "changedFiles": "The two diffs name the same 34 files; the branch's own lines differ in three of them, which a file-by-file comparison of the two fingerprint inputs gives: packages/envoy/AGENTS.md, packages/envoy/cmd/dispatch/settings.go and packages/envoy/internal/bus/nats.go. That is the implementer's list."
+  },
+  "architectQuestions": {
+    "asked": "From the INFRA-14 architect, 2026-10-30T17:59Z: check the composition of this branch's faster cut detection with main's sjawhar/legion#2504 on the real listener — a 2-3 s hub freeze that the recovery repairs logs main's WARN line and no ERROR, and a stall longer than #2504's repair grace still reaches ERROR and /healthz; and confirm HookedConnectionEvents now reads main's hookedEvents field and the dispatch start test's wait still means what it did.",
+    "answer1": "Measured on the real binary, and the first half is not what happens: a freeze the recovery repairs logs NEITHER line, not the WARN. reportHookFailure (internal/bus/recovery.go:251-264) writes a line only when a run of the reconnect hooks fails; while the hub is frozen there is no connection, so no run is attempted, and the run after the thaw succeeds at its first try. Three cuts in one process: 0 WARN lines, 0 ERROR lines, no ERROR of any message, /healthz 503 while the hub is away and 200 healthy again 1.061 s, 1.084 s and 1.033 s after each thaw.",
+    "answer2": "The second half is not reachable by freezing the hub either, for the same reason, and that is main's design rather than this branch's doing: 1 m 33 s frozen, past the 1 m RepairGrace, gives 0 WARN and 0 ERROR lines, and /healthz answers 503 `nats unavailable` — the earlier, stronger check, not the 200 `degraded` stall answer — then 200 healthy 11 ms after the thaw with no transient `degraded`. The stall path is for a connection that came back whose rewatch keeps failing, and it works at this merged head: cmd/listener's TestHealthzAnswersAHookStallPastTheRepairGrace answers `200 KV watch rebuild unavailable: rewatch interest cache: watch role claims KV bucket: context deadline exceeded (no rebuild has succeeded for 1m0s)`, and internal/bus's three line tests pass twice under -race.",
+    "answer3": "Confirmed. One hookedEvents field (internal/bus/nats.go:287), written only by rewatch when a run of the hooks succeeded (internal/bus/recovery.go:217) and read by HookedConnectionEvents (nats.go:539-543); the dispatch start test's wait is still `client.Connected() && client.HookedConnectionEvents() >= 1` (cmd/dispatch/stream_replicas_test.go:76). It still means this client's own reconcile has completed, which the control below shows is load-bearing."
+  },
+  "implementerProof": {
+    "verdict": "verified",
+    "how": "Each of the three entries was re-run at the merge head. Entry 1: both listener cut tests twice (ok 23.577s), the cut reported at 2.792 s to 2.847 s by both clients in every run, and the kvwatch rows twice under -race (ok 1.681s). Entry 2: cmd/dispatch green (ok 52.199s), and its claim about the wait was not taken but broken — see the control. Entry 3: the merged tree builds and its touched packages pass here too (internal/bus's line tests, cmd/listener, cmd/dispatch, daemon/internal/natsauth ok 7.100s); the implementer's own marker-left-behind failure is a real control for a half-resolved merge. The architect's composition question was answered by measurement rather than by reading the merge, and one of its two halves came out other than expected, which the answers above record."
+  },
+  "failed": 0,
+  "failures": [],
+  "proof": [
+    {
+      "criterion": "The composition the architect asked about: this branch's faster cut detection under main's repair-grace reporting (sjawhar/legion#2504), on the real listener.",
+      "surface": "The real envoy-listener binary with its three caches and the live topics lane, against an in-process NATS whose relay freezes and thaws, read through its own log and its /healthz.",
+      "command": "A throwaway test in packages/envoy/cmd/listener, run with `go test -count=1 -timeout 15m -v -run 'TestTheRepairGraceReportingUnderTheFasterCutDetection' ./cmd/listener/` and removed afterwards since it pins no defect: three short freezes in one process, each polled on /healthz every 50 ms from the thaw, and one freeze of 1 m 33 s, past bus.RepairGrace, polled every 2 s.",
+      "observed": "Short freezes: the cut reported 2.785 s to 3.0 s in by both clients; 0 WARN and 0 ERROR lines and no ERROR of any message; /healthz 503 `live subscription inactive` for the last part of the window and 200 healthy again 1.061 s, 1.084 s and 1.033 s after each thaw. The long freeze: 0 WARN and 0 ERROR lines 1 m 33 s in, past the 1 m grace; /healthz 503 `nats unavailable` throughout; 200 healthy 11 ms after the thaw, with no `degraded` answer at any poll. The stall path that does write those lines is driven by main's own tests at this head: cmd/listener/healthz_hook_stall_test.go (both tests pass, the degraded answer naming `KV watch rebuild` and `no rebuild has succeeded for 1m0s`) and internal/bus's TestAReconnectHookFailureIsReportedByItsStallUnlessTheClientStopped, TestHookStallReportsTheStallAndTheLastHookError and TestRewatchRetryAfterAReconnectLogsNoError, all green twice under -race (ok 8.881s).",
+      "headSha": "d2be744d33dc0e834737a86de1395a3e9af56f50",
+      "negativeControl": "The same probe with both call sites stripped of bus.WithSilentCutDetection(), which is the behaviour before this branch: /healthz is already 503 unhealthy 3.0 s into the same freeze, because the cache ping times out, and it is 200 healthy again 6 ms after the thaw, since the connection was never dropped. So the branch's measured cost here is about one second more of 503 after a hub returns — the reconnect and the live lane's resubscribe — against minutes of a listener that answers healthy while its live lane is dead. Both files were restored with `jj restore` and `jj status` is clean."
+    },
+    {
+      "criterion": "HookedConnectionEvents reads main's hookedEvents, and the dispatch start test's wait still means this client's own reconcile has completed.",
+      "surface": "cmd/dispatch's start tests against in-process NATS, through the production dispatchStreamOptions construction, plus a read of the merged field and its one writer.",
+      "command": "From packages/envoy: `go test -count=1 -timeout 25m ./cmd/dispatch/`; and `grep -rn hookedEvents --include=*.go .`",
+      "observed": "ok github.com/sjawhar/envoy/cmd/dispatch 52.199s. One hookedEvents field exists (internal/bus/nats.go:287), written at internal/bus/recovery.go:217 by rewatch only after a run of the hooks succeeded and read at :205 and :242 for whether the hooks are due; HookedConnectionEvents returns it (nats.go:539-543). The wait at cmd/dispatch/stream_replicas_test.go:76 is unchanged, `client.Connected() && client.HookedConnectionEvents() >= 1`.",
+      "headSha": "d2be744d33dc0e834737a86de1395a3e9af56f50",
+      "negativeControl": "The accessor made to ignore the field and return 0, the tests untouched: `--- FAIL: TestADefaultDispatchStartOnASingleServerCreatesEverythingAtOneCopyAndTheNextWritesNothing (30.09s) ... did not reconcile the stream within 30s, nor log a failure: <nil> (<nil>), hooked events 0`. So the wait still binds to the counter and is not vestigial. nats.go was restored with `jj restore`."
+    },
+    {
+      "criterion": "The branch's own acceptance still holds at the merge head: both of the listener's NATS clients report a silent cut within 5 seconds, a watch a rewatch replaced ends with no ERROR line, and the daemon reports a cut within the same bound.",
+      "surface": "The real envoy-listener binary against a frozen relay, the kvwatch watcher's two branches, and the daemon's own natsauth.Connect against a server that answers the handshake and then nothing.",
+      "command": "From packages/envoy: `go test -count=2 -timeout 25m -v -run 'TestBothOfTheListenersNATSClientsReportASilentCutWithinSeconds$|TestASilentCutRewatchesTheCachesWithNoErrorLine$' ./cmd/listener/`; `CGO_ENABLED=1 go test -race -count=2 -run 'TestAFailedFirstStartLogsItsErrorOnlyWhileItIsTheLiveWatch$' ./internal/kvwatch/`. From packages/daemon: `CGO_ENABLED=1 go test -race -count=2 -timeout 10m -v -run 'TestAHubThatStopsAnsweringIsNoticedWithinSeconds$' ./internal/natsauth/`.",
+      "observed": "Both listener tests pass twice (ok 23.577s): `envoy` reported the cut at 2.792 s and 2.796 s, `envoy-live-topics` at 2.843 s and 2.847 s, and the rewatch guard wrote no ERROR line. kvwatch passes both rows twice under -race (ok 1.681s). The daemon is 2 of 2 under -race (ok 7.100s), the cut noticed 3.023515014 s and 3.017345549 s after the server went quiet.",
+      "headSha": "d2be744d33dc0e834737a86de1395a3e9af56f50",
+      "negativeControl": "Both call sites stripped of the option at this merge head, from the composition probe above: the listener never reports the cut at all, and /healthz behaves as the base's does. In earlier rounds each call site was broken on its own and the test failed naming exactly the client that lost it."
+    }
+  ],
+  "ciAtTheHead": "The merge head c23af74674ad carries the CI run of this push: `changes` and `pr-title` completed success at 18:30Z, every other lane queued or running when I read it at 18:35Z. The handoff head d2be744d carries none, which is right, since its push touched `.legion/INFRA-750/` alone and its message carries `skip-checks: true`. GitHub answered `mergeable: UNKNOWN` while it recomputed the merge after the push. A queued lane is read as queued; nothing here waited for one and no lane was re-run as evidence.",
+  "observations": [
+    "For the architect, and not a failure: a hub silence the recovery repairs writes no reconnect-hook line at all, neither main's WARN nor its ERROR, because no run of the hooks is attempted while there is no connection and the run after the thaw succeeds. An operator reading for #2504's WARN line as the sign of a repaired cut will not find one; the sign of a repaired cut is the pair of `envoy nats disconnected` and `envoy nats reconnected` lines with the caches' warm-up lines after them.",
+    "Also for the architect: the branch costs about one second more of 503 on /healthz after a hub returns (`live subscription inactive` until the live lane resubscribes), measured against the stripped-option base, which is healthy again 6 ms after the same thaw. Both answer 503 during the outage itself. A health check that replaces a task on a single failed probe would see this window where it did not before; one that needs two or three consecutive failures will not."
+  ],
+  "environment": [
+    "Every test in this handoff runs against an in-process NATS server from internal/testnats; no container is needed and none was left running.",
+    "This pod has no container runtime, so the cmd/listener tests that start a Postgres container and the three natsauth tests that need an authorized-server container do not run here. CI runs them."
+  ]
+}
