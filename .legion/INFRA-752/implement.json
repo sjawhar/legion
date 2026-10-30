@@ -2,22 +2,22 @@
   "schemaVersion": 1,
   "phase": "implement",
   "issue": "INFRA-752",
-  "completed": "2026-10-29T22:50:00Z",
+  "completed": "2026-10-30T05:40:00Z",
   "proof": [
     {
       "criterion": "A1 and the reader-facing change: a document, a past version of it and a comment holding the same markdown read alike for an inline leaf inside a mark, for an HTML declaration, and for an autolink inside a link label; the declaration is stored unescaped and the label shape is stored at all.",
       "surface": "the Dispatch issue page in Chromium against the real Go server, the production SPA bundle and a real Postgres (packages/dispatch/e2e, harness per docs/solutions/testing/the-real-dispatch-stack-runs-inside-a-legion-pod-with-no-postgres-no-docker-and-no-root-INFRA-42.md)",
       "command": "cd packages/dispatch && bun run e2e -- e2e/leaf-marks.e2e.ts --project=chromium --reporter=list",
-      "observed": "4 passed: the live spec editor, the past version (?v=1) and the comment read the same twelve paragraphs with no mark on any inline leaf (html, image, hardbreak, footnote_reference), the declaration drawn as an html node on all three surfaces, and GET /api/v1/issues/<KEY>/artifacts/spec/text holding `p <!a> q` unescaped and `[a ](u)`/`[ b](u)` around the inner autolink. The issue was created through POST /api/v1/issues, which refused the same spec before this change. Re-run at every head of this round: 4bf45ff2 (the image-alt fix) and e3e93747 (the merge of main).",
-      "headSha": "e3e93747d320",
+      "observed": "4 passed: the live spec editor, the past version (?v=1) and the comment read the same twelve paragraphs with no mark on any inline leaf (html, image, hardbreak, footnote_reference), the declaration drawn as an html node on all three surfaces, and GET /api/v1/issues/<KEY>/artifacts/spec/text holding `p <!a> q` unescaped and `[a ](u)`/`[ b](u)` around the inner autolink. The issue was created through POST /api/v1/issues, which refused the same spec before this change. Re-run at this round's head cfa7155d82cb: 4 passed.",
+      "headSha": "cfa7155d82cb",
       "negativeControl": "the same suite at the branch's red-test commit 29601d733483 (the corpus, the engine test and this spec, none of the three changes): 4 failed, every one while seeding with `POST /api/v1/issues failed: 400 {\"code\":\"INVALID_MARKDOWN\",\"error\":\"... reads back otherwise (a paragraph reads back holding \\\"https://u.test\\\", not \\\"https://u.test\\\")\"}`"
     },
     {
       "criterion": "A2 differential.sh against main: 0 regressions, 0 churn, 0 lost fixed points, and no misread in any corpus.",
       "surface": "the pmdoc differential, two built revisions of packages/envoy over 39,889 documents (the 136 in-repo corpus documents, 20,000 delimiter, 10,000 URL, 8,000 reference and the new 1,753 leaf-mark documents)",
-      "command": "cd packages/envoy/internal/dispatch/pmdoc/gen && bash differential.sh --base 08c2e8ad --corpus $TMPDIR/infra752/diff4/corpus --out $TMPDIR/infra752/diff4/out",
-      "observed": "over 40,105 documents (the corpus now carries the image-label family the tester's shapes named): regressions 0, misreads 0, churn 0, engine-tree regressions 0, head panics 0, lost fixed points 0; fixed 358, engine-tree fixed 41. Two counters above zero, both this change and both from this branch's own generated corpus, accepted by the INFRA-138 architect on 2026-10-29: engine-tree churn 145, every one an image label holding raw HTML, where main had to escape the alt (`![r \\<b\\> s](i.png)`) because it read the markdown back with alt `r  s`, and the head writes the author's bytes, both sides reading back to the engine's tree; and newly refused by the writer 111 with newly refused 44, every one a block whose whole inline content is a declaration (`<!a>` alone on a line, and `**<!a>**`, `*<!a>*`, `[<!a>](u)` in the nine containers), which both readers now read as an HTML block the Proof schema has no node for, so the head refuses the document by name (`block HTML is not accepted by Proof`) as main already refuses `**<b>**`; main stored them escaped only because it misread `<!a>` as text.",
-      "headSha": "e3e93747d320",
+      "command": "cd packages/envoy/internal/dispatch/pmdoc/gen && bash differential.sh --base 08c2e8ad --corpus $TMPDIR/infra752/diff5/corpus --out $TMPDIR/infra752/diff5/out",
+      "observed": "over 40,142 documents: regressions 0, misreads 0, churn 0, engine-tree regressions 0, head panics 0, lost fixed points 0, and the new gate this round adds, `engine readings Go's schema refuses`, 0; fixed 394, engine-tree fixed 41. The two counters the architect accepted on 2026-10-29 stand, larger only because the corpus grew with the anchor-span family: engine-tree churn 181, every one an image label holding raw HTML, where main had to escape the alt and the head writes the author's bytes, both reading back to the engine's tree; and newly refused by the writer 111 with newly refused 44, every one a block whose whole inline content is a declaration, which both readers read as an HTML block the Proof schema has no node for, so the head refuses it by name as main already refuses `**<b>**`.",
+      "headSha": "cfa7155d82cb",
       "negativeControl": "the same run before the HTML-block half of the declaration rule (head cfe26e9c's parent) passed every gate but left 149 documents in a `new engine-only read-back` class — a line holding a lone `<!a>`, which Go stored as a paragraph of inline raw HTML and the engine read as an HTML block; that class is 0 at this head."
     },
     {
@@ -25,24 +25,32 @@
       "surface": "Go's dump of the differential's five corpora at this head, compared with the engine's reading at the fork point and at the head by the differential's own comparison (diffTree, then Node.Equal)",
       "command": "a throwaway Go test in the pmdoc package over diff2/out/corpus.jsonl, diff2/out/head.jsonl and each engine's readings file (the fork-point engine extracted with `git archive 2b427f93 packages/proof-editor` and read with gen/differential.ts)",
       "observed": "against the fork-point engine, 1,101 of the 37,359 documents Go reads had an engine reading outside Go's schema (a mark on an inline leaf: 906 leaf-mark, 125 delimiter, 64 URL, 6 in-repo) and 55 were read otherwise (54 leaf-mark, 1 in-repo, the declaration and label families); against this head's engine, 0 and 0 over every corpus.",
-      "headSha": "d3b727378111",
+      "headSha": "cfa7155d82cb",
       "negativeControl": "the fork-point engine's column of the same measurement, 1,101 + 55 differences, run by the same command with only the engine's readings file swapped"
     },
     {
       "criterion": "A3 a census of every stored version is on the pull request, and each document it finds is rewritten.",
       "surface": "production Dispatch through this pod's agent token (DISPATCH_URL), with INFRA-719's census tools: crawl.ts, dedupe.py, census-run.sh, census-compare.py",
       "command": "bun crawl.ts all-versions.jsonl; python3 dedupe.py all-versions.jsonl distinct.jsonl versions-map.tsv; bash census-run.sh 08c2e8ad candidates-r2.jsonl out-r2; python3 census-compare.py out-r2 versions-map.tsv (and the same over the wide 8,093-candidate backstop)",
-      "observed": "13 projects, 7,053 documents, 33,996 stored versions, 33,614 distinct stored markdowns. Twelve distinct markdowns hold a declaration (`<![A-Za-z]`, 9), an autolink inside a link label (6) or raw HTML in an image label (`!\\[[^\\]]*<`, 5): `distinct markdowns read: 12; changed: 0` and `stored versions: 33996 (latest 7053); changed: 0 (latest 0) in 0 documents`. The wide backstop over all 8,093 candidates of the plan's own filters also reports `distinct markdowns read: 8093; changed: 0`. No stored version is rewritten.",
-      "headSha": "e3e93747d320",
+      "observed": "re-crawled at this head: 14 projects, 7,477 documents, 35,491 stored versions, 35,079 distinct stored markdowns. Twelve hold a declaration, an autolink inside a link label or raw HTML in an image label: `distinct markdowns read: 12; changed: 0` and `stored versions: 35491 (latest 7477); changed: 0 (latest 0) in 0 documents`. No stored version is rewritten.",
+      "headSha": "cfa7155d82cb",
       "negativeControl": "the same runner over the same base and head with the corpus file this change added (testdata/corpus/html-declarations.md and links-holding-an-autolink.md) reports both documents changed — the differential's `fixed: 177` is the same comparison over 39,889 documents, so a 0 here is a comparison and not an echo."
     },
     {
       "criterion": "The tester's finding: an image's alt text keeps the raw HTML in its label, so a document and a comment holding the same markdown read alike.",
       "surface": "the pmdoc reader itself, through the tester's committed red test and the package suite",
       "command": "cd packages/envoy && go test ./internal/dispatch/pmdoc/ -run TestParseKeepsRawHTMLInAnImageAltText -count=1 -v; then go test ./internal/dispatch/pmdoc/ -count=1 -timeout 0 -p 1",
-      "observed": "all eight rows pass unchanged (`![p <!a> q](i.png)`, `![<!a>](i.png)`, the titled form, and `<b>`, `<!A>`, `<!-- c -->`, `<?x?>`, `<![CDATA[x]]>`), and the whole package is green at the merge head: `ok github.com/sjawhar/envoy/internal/dispatch/pmdoc 1359.470s`.",
-      "headSha": "e3e93747d320",
+      "observed": "all eight rows pass unchanged, with a ninth this round adds for an anchor span in a label, and the whole package is green at this head: `ok github.com/sjawhar/envoy/internal/dispatch/pmdoc 1462.283s`.",
+      "headSha": "cfa7155d82cb",
       "negativeControl": "the same test at the head the tester failed (26754ec8): the first row reads alt `p  q` instead of `p <!a> q`, and the differential over the tester's corpus shapes reported GATE regressions 9 for `![p <!a> q](i.png)` in the nine containers"
+    },
+    {
+      "criterion": "Review finding 1 (Medium, transport): the parse of an unclosed raw HTML opener is linear in a block's bytes, for every kind.",
+      "surface": "Parse and ParseForWrite, the write path a document reaches through POST /api/v1/issues, measured at the document size the element limit admits",
+      "command": "a throwaway Go test over 1 MiB of `p ` plus each of `<!a`, `<!--`, `<?`, `<![CDATA[`, run at this head and in a `git archive` of the fork point 08c2e8ad; then `go test ./internal/dispatch/pmdoc/ -run Linear -count=1 -timeout 0`",
+      "observed": "Parse/ParseForWrite at this head: `<!a` 0.21 s/0.55 s (9.44 s/18.60 s at the review's head e59787a8), `<!--` 0.23 s/0.55 s (24.97 s/50.17 s at the fork point), `<?` 0.22 s/0.62 s (46.31 s/93.65 s), CDATA 0.15 s/0.11 s (1.61 s/1.66 s). linear_test.go holds one row per kind and the acknowledgement that goldmark's scan of those openers is quadratic is removed.",
+      "headSha": "cfa7155d82cb",
+      "negativeControl": "the same throwaway test at the review's head e59787a8 and at the fork point, which give the quadratic numbers above; and `bun run check` exits 0 at this head, so no reading moved with the speed"
     }
   ],
   "filesChanged": [
@@ -75,7 +83,8 @@
     "The plan's v2 reading for C3 (the label's link not resuming after the inner autolink, copying the engine) was refused by the INFRA-138 architect on 2026-10-29: both readers now keep the label's link on the runs around the autolink. Implemented as the architect decided and as plan v3 records.",
     "The plan's D8 expected 155 divergences against the fork-point engine over the four older corpora; measured here, with this branch's own corpora and the differential's own comparison, 195 over those four (6 in-repo, 125 delimiter, 64 URL) plus 960 over the new leaf-marks corpus. The classes are the plan's; the counts are this run's, over a leaf-marks corpus of 1,753 documents that did not exist when the plan was written.",
     "The census used an exact candidate filter (`<![A-Za-z]` for the declaration and an autolink's own shape inside a bracket run for the label) rather than the plan's wider `\\[[^]]*<`. The wide filter's 8,093 candidates are being read as a backstop and its result goes on the pull request; the narrow filter is exact for the two constructs this change touches.",
-    "The differential's `engine-tree churn` (145) and `newly refused by the writer` (111, with `newly refused` 44) are above zero at this head. Both are the change: the first is the image alt written as its author wrote it, the second a block of raw HTML alone refused by name. A2's four named numbers are 0. Accepted by the INFRA-138 architect on 2026-10-29 with the classification above."
+    "The differential's `engine-tree churn` (145) and `newly refused by the writer` (111, with `newly refused` 44) are above zero at this head. Both are the change: the first is the image alt written as its author wrote it, the second a block of raw HTML alone refused by name. A2's four named numbers are 0. Accepted by the INFRA-138 architect on 2026-10-29 with the classification above.",
+    "The differential's accepted counters grew with the corpus this round: engine-tree churn 145 to 181 and the declaration-alone refusals unchanged at 111 and 44, because the generated image-label family gained the anchor-span shape. The classes are the ones the architect accepted on 2026-10-29."
   ],
   "openQuestions": [],
   "discoveredComplexity": [
