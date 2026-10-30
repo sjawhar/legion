@@ -2,8 +2,24 @@
   "schemaVersion": 1,
   "phase": "implement",
   "issue": "INFRA-598",
-  "completed": "2026-10-30T10:39:25Z",
+  "completed": "2026-10-30T18:08:16Z",
   "proof": [
+    {
+      "criterion": "Review round 2 finding: the disk watcher never outlives its step after a SIGKILL and never stops another run's job",
+      "surface": "GKE namespace loadtest, from this Legion worker pod, Dispatch 9b92ac14",
+      "command": "run lt-20261030t174428-4d16 at 9e0fc70a: up, hold --for 2h, seed, step 1x, `step killed 1 --duration 4m` then kill -9 after 100 s, wait 145 s, then step after, down; log dispatch://INFRA-598/artifact/cluster-load-test-review2-watcher-log-txt; comment https://github.com/sjawhar/legion/pull/2462#issuecomment-6530011758",
+      "observed": "after the kill at 17:59:37 the watcher logged 'step killed: the step that started this disk watcher is gone; it stops, recording nothing and stopping no job'; the killed step's .pg-disk.jsonl stayed at 3 readings over 70 s and no step-failed.json was written; step after exited 0 and was not marked failed",
+      "headSha": "9e0fc70a00cff09bd7873a3a5e3341e92b8c9bce",
+      "negativeControl": "cluster.test.sh case (w) against 3f904713's cluster.sh: 'FAIL: the disk watcher of a killed step stopped the runner job step-pgkill after the kill'"
+    },
+    {
+      "criterion": "Review round 2 findings: classify without a phase, heap.txt-only copy failure, the five minors; CI's envoy-go reaches cluster.test.sh and run-step.test.sh",
+      "surface": "loadgen curves Go tests and cluster.sh under cluster.test.sh's fakes, at the merge with main e65900f4 (#2551, #2552)",
+      "command": "cd packages/envoy && go test -p 2 -parallel 4 -count=1 ./loadtest/ && bash loadtest/run-step.test.sh && bash loadtest/common.test.sh && timeout 1800 bash loadtest/cluster/cluster.test.sh; uv run --with pyyaml bash .github/scripts/check-ci-filters.sh",
+      "observed": "go test ok; run-step and common exit 0; cluster.test.sh 48 PASS, 0 FAIL (cases (w) watcher and (x) heap.txt-only added); check-ci-filters 26 gates; fingerprint 026bd53baa63a433 unchanged across both merges",
+      "headSha": "9e0fc70a00cff09bd7873a3a5e3341e92b8c9bce",
+      "negativeControl": "against 3f904713: TestCurvesNameTheKindOfACopyWithoutAPhase 'kinds: 10x-hour \"grid\", 1x-db4 \"grid\"'; case (x) 'a step whose heap.txt alone did not come back was marked failed'"
+    },
     {
       "criterion": "Review round 1 findings 3-5: the sampler stops after an abandoned run; a kept run is held for a bound; a command from another PID namespace is refused",
       "surface": "GKE namespace loadtest, from this Legion worker pod, Dispatch 9b92ac14",
