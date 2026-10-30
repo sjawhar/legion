@@ -2,35 +2,51 @@
   "schemaVersion": 1,
   "phase": "test",
   "issue": "INFRA-557",
-  "completed": "2026-10-30T13:50:00Z",
-  "round": 15,
-  "testedHead": "9d8b44af94219d8de2f2e401a96465d161ef5da2",
-  "handoffHead": "40673492240ae277aaaad3314ff907f6605e6bc8",
-  "scope": "Architect 13:27Z: one sentence of text in four places; check that only that text changed, run go vet and the listener unit tests, read the four required checks. No real-binary run needed.",
+  "completed": "2026-10-30T18:55:00Z",
+  "round": 16,
+  "testedHead": "18194addea3c22b90b91c00522a550549ff70ddc",
+  "handoffHead": "141e6d5fc12932ddcdb837f259a7ecc76150e50b",
+  "scope": "Architect 18:38Z: the forward merge of main combining #2504's KV watch rebuild stall with this branch's /healthz role answers through okAnswer, on real binaries; the rest by fingerprint (conflict resolution and the api/testdata/** filter lines), check-ci-filters, the multiprocess rows, a kill, and ci-ok plus the four required checks.",
   "implementerProof": {
     "verdict": "verified",
-    "how": "The change is text only (proof 1); go vet and the listener unit tests pass at 9d8b44af (proof 2)."
+    "how": "Re-ran `cd packages/envoy && go test -tags multiprocess -count=1 -timeout 40m -v -run '^Test(TwoPods|TwoBuilds)' ./cmd/listener` at 18194add (29 rows PASS, ok 623.618s) and `.github/scripts/check-ci-filters.sh` (27 gates pass)."
   },
   "failures": [],
   "failed": 0,
   "proof": [
     {
-      "criterion": "Only text changed since the verified head 7469fd63",
-      "surface": "the branch's diff",
-      "command": "git diff --stat 7469fd63 9d8b44af -- . ':(exclude).legion'; git diff 7469fd63 9d8b44af -- '*.go', counting changed lines outside comments",
-      "observed": "4 files: README.md, the pr2404 changie fragment, main.go, receive.go; 0 changed lines outside comments in the .go files",
-      "headSha": "9d8b44af94219d8de2f2e401a96465d161ef5da2",
-      "negativeControl": "any non-comment Go line in the diff would have meant a full round; there were none"
+      "criterion": "With main's KV watch rebuild stalled, an active pod and a standby each answer 200 degraded, keep their role, and never answer 503",
+      "surface": "real cmd/listener processes built at 18194add under the rendered ListenerPermissions nkey grant on a real nats-server 2.10.29; the server restarted with box-smoke's grant lacking CONSUMER.CREATE on KV_envoy_roles, so every reconnect's rewatch fails",
+      "command": "python3 $TMPDIR/infra557-test/health.py $TMPDIR/infra557-test/listener-head16 h-stall stall (polls both /healthz every second for 90 s)",
+      "observed": "both 200 healthy until 61.7 s, then 200 degraded (role active and role standby) with error 'KV watch rebuild unavailable: rewatch interest cache: watch role claims KV bucket: context deadline exceeded ...'; never 503; both logged 'envoy nats reconnect hooks have not succeeded'",
+      "headSha": "18194addea3c22b90b91c00522a550549ff70ddc",
+      "negativeControl": "the same run with a 9d8b44af binary: both stayed 200 healthy for all 90 s although their rewatch failed"
     },
     {
-      "criterion": "go vet and the listener unit tests pass at the new head",
-      "surface": "packages/envoy/cmd/listener",
-      "command": "cd packages/envoy && go vet ./cmd/listener/ && go vet -tags multiprocess ./cmd/listener/ && go test -count=1 -timeout 25m -skip 'TestDispatch' ./cmd/listener/",
-      "observed": "vet clean (both tag sets); ok github.com/sjawhar/envoy/cmd/listener 861.700s (four Postgres-backed TestDispatch* skipped)",
-      "headSha": "9d8b44af94219d8de2f2e401a96465d161ef5da2",
-      "negativeControl": "round 14 at 7469fd63 holds the real-binary evidence for the unchanged code (https://github.com/sjawhar/legion/pull/2404#issuecomment-6523833609)"
+      "criterion": "A holder still preparing its durable answers degraded, and the 503 cases are unchanged",
+      "surface": "as above: a sole pod without the durable's CONSUMER.CREATE; and NATS stopped under an active pod and a standby",
+      "command": "python3 $TMPDIR/infra557-test/health.py <head> h-prep prepare; ... h-down natsdown",
+      "observed": "prepare: 503 starting, then 200 degraded standby (durable consumer unavailable from 10.1 s), never healthy in 30 s; natsdown: both 503 unhealthy 'nats unavailable'",
+      "headSha": "18194addea3c22b90b91c00522a550549ff70ddc",
+      "negativeControl": "round 9: a 9c5cd05b binary answered healthy while preparing its durable"
+    },
+    {
+      "criterion": "Kills under the grant: 40 of 40 in order; per-machine write scope",
+      "surface": "two cmd/listener processes built at 18194add under the rendered grant; a port session; sends through the standby",
+      "command": "python3 $TMPDIR/infra557-test/health.py <head> h-kill kill",
+      "observed": "SIGKILL after message 15: 40 sent, 0 refused, 40 delivered, in send order, last 6.15 s after the kill; pod-b active",
+      "headSha": "18194addea3c22b90b91c00522a550549ff70ddc",
+      "negativeControl": "as machine box-other's NATS user: put lease.listener-box-smoke and handback.listener-box-smoke.999 refused with a permissions violation; lease.listener-box-other accepted"
+    },
+    {
+      "criterion": "The rest of the merge is the conflict resolution and the filter lines; the filters cover every file their jobs read",
+      "surface": "the branch's diff and .github/scripts/check-ci-filters.sh",
+      "command": "unchanged-diff fingerprints at 9d8b44af and 18194add; git diff --name-only 18194add^2 18194add against the branch's own file list; uv run --no-project --with pyyaml==6.0.2 -- bash .github/scripts/check-ci-filters.sh",
+      "observed": "fingerprints differ (74de1ce9 -> fe6e72c1), as a conflict-resolving merge does; the branch-side file set gains only main's healthz_hook_stall_test.go (adapted to the pod's durable subscription); the resolution is main.go's okAnswer and ci.yaml's filters, which now take dispatch/api/testdata/** in place of api/testdata/*; check-ci-filters: every ci.yaml filter matches every file its job reads (27 gates)",
+      "headSha": "18194addea3c22b90b91c00522a550549ff70ddc",
+      "negativeControl": "the stall control above shows the merged okAnswer is what makes the stalled rewatch visible"
     }
   ],
-  "ci": "Required checks NOT green. At 7469fd63 every check (changes, lint, typecheck, test, ci-ok, pr-title) ended cancelled, superseded by the 9d8b44af code push. At 9d8b44af, read 13:47Z: changes and pr-title queued; lint, typecheck and test not started. No required check of this PR's code has completed yet.",
-  "notes": ["Evidence: https://github.com/sjawhar/legion/pull/2404#issuecomment-6524384254"]
+  "ci": "Required checks at 18194add, read 18:49Z: changes success, pr-title success; lint, typecheck, test and listener-multiprocess queued; ci-ok not run. Not green yet; not waited on.",
+  "notes": ["Throwaway scripts in $TMPDIR/infra557-test (health.py, probe); not committed.", "Evidence: https://github.com/sjawhar/legion/pull/2404#issuecomment-6530945937"]
 }
