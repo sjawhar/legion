@@ -79,7 +79,7 @@ func TestCheckPodRefusesWhatCollidesWithLegionsOwn(t *testing.T) {
 		byEnvoy      = "every launch sets (the pointer to the launch secret ENVOY_TOKEN)"
 		bySessions   = "the pod baseline sets, and it decides where Oh My Pi keeps the session a resume reads"
 		byStore      = "Legion sets to place the sessions a resume reads (runtime.kubernetes.session_store)"
-		byBaseline   = "the pod baseline sets (internal/podsafety)"
+		byOverlays   = "the runtime composes in every pod from the operator's own overlays and the role's own (role_config_files)"
 		byOperator   = "runtime.kubernetes.pod.env sets"
 		byController = "Legion's runtime sets for the controller it launches, from the project's slack_channels alone"
 		byClaude     = "Legion's runtime sets for a role it launches on Claude Code (worker_backends)"
@@ -175,7 +175,7 @@ func TestCheckPodRefusesWhatCollidesWithLegionsOwn(t *testing.T) {
 		{name: "a provider key whose pointer the runtime sets", keys: map[string]string{"DISPATCH_TOKEN": "dispatch"},
 			want: keyPointer("DISPATCH_TOKEN", byRuntime)},
 		{name: "a provider key for the settings overlays", keys: map[string]string{"PI_CONFIG_FILES": "overlays"},
-			want: keyNames("PI_CONFIG_FILES", byBaseline)},
+			want: keyNames("PI_CONFIG_FILES", byOverlays)},
 		{name: "a provider key for the config root", keys: map[string]string{"PI_CONFIG_DIR": "root"}, want: keyNames("PI_CONFIG_DIR", bySessions)},
 		{name: "a provider key for the session store", keys: map[string]string{"OMP_SESSION_STORAGE": "store"},
 			want: keyNames("OMP_SESSION_STORAGE", byStore)},
@@ -194,7 +194,7 @@ func TestCheckPodRefusesWhatCollidesWithLegionsOwn(t *testing.T) {
 		{name: "a provider key reading the session database's URL", keys: map[string]string{"DATABASE_URL": "SESSION_DSN"},
 			want: "provider_keys names DATABASE_URL from the providers Secret's key SESSION_DSN, which holds the session database's URL (runtime.kubernetes.session_dsn_secret): the shim would export that URL into Oh My Pi's environment as DATABASE_URL"},
 		{name: "the live harnesses' operator pod", pod: fixture, keys: map[string]string{"ANTHROPIC_API_KEY": "anthropic"}},
-		{name: "an operator's own overlays, which the baseline composes with",
+		{name: "an operator's own overlays, which the role's are composed after",
 			pod: Pod{Env: map[string]string{"PI_CONFIG_FILES": "/etc/operator/overlay.yml"}}},
 		// Dispatch's dashboard as people open it, which the dispatch command links to in place of the
 		// in-cluster DISPATCH_URL the runtime hands every agent.

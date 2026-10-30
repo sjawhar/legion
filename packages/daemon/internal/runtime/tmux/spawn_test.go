@@ -3,6 +3,7 @@ package tmux
 import (
 	"crypto/sha256"
 	"encoding/hex"
+	"io/fs"
 	"maps"
 	"os"
 	"path/filepath"
@@ -14,7 +15,6 @@ import (
 
 	"github.com/sjawhar/legion/daemon/internal/claim"
 	"github.com/sjawhar/legion/daemon/internal/ghrepo"
-	"github.com/sjawhar/legion/daemon/internal/podsafety"
 	"github.com/sjawhar/legion/daemon/internal/runtime"
 	"github.com/sjawhar/legion/daemon/internal/runtime/fake"
 	"github.com/sjawhar/legion/daemon/internal/runtime/shellprefix"
@@ -96,8 +96,8 @@ func testSpec() runtime.SpawnSpec {
 // bundle — GH_CONFIG_DIR its default owner's directory, with GH_TOKEN, GITHUB_TOKEN and GH_HOST
 // emptied so no token in the daemon's environment outranks the file, LEGION_GH_OWNERS_DIR the
 // bundle's root and LEGION_GH_PATH the real gh the `legion gh` wrapper runs — PI_SHELL_PREFIX over
-// the launcher directory alone, PI_CONFIG_FILES naming the turn-scoping overlay
-// writeTurnScopeOverlay writes under the state directory, the XDG base directories under
+// the launcher directory alone, PI_CONFIG_FILES holding the operator's overlays and the role's own
+// and nothing else — empty where neither names one — the XDG base directories under
 // `<state_dir>/home` explicitly, the caller's own variables sorted, then one `<NAME>_FILE` pointer
 // per secret — the boot token's first. PATH is never a pair: tmux would discard it (LEGION-91); the
 // shell command exports it. No other tool path is a pair: a pane's git and jj are its PATH's. No
@@ -135,7 +135,7 @@ func TestPanePairs(t *testing.T) {
 		"-e", "LEGION_GH_OWNERS_DIR=/state/secrets/legion-omp-legion-43-tester-gh",
 		"-e", "LEGION_GH_PATH=/usr/bin/gh",
 		"-e", "PI_SHELL_PREFIX=" + shellprefix.For("/state/bin"),
-		"-e", "PI_CONFIG_FILES=/state/" + podsafety.TurnScopeFile,
+		"-e", "PI_CONFIG_FILES=",
 		"-e", "GIT_TERMINAL_PROMPT=0",
 		"-e", "XDG_CONFIG_HOME=/state/home/.config",
 		"-e", "XDG_CACHE_HOME=/state/home/.cache",
@@ -238,26 +238,36 @@ func TestTmuxRuntimeNeverReadsSpecPlugins(t *testing.T) {
 	}
 }
 
-// PaneVariables (and launch, the same way) writes the turn-scoping overlay under the state
-// directory, read-only, and names it in PI_CONFIG_FILES — the one settings overlay a pane gets at
-// all — so Quiesce's own promise holds under tmux too (LEGION-462).
-func TestPaneVariablesNamesAndWritesTheTurnScopeOverlay(t *testing.T) {
+// PaneVariables (and launch, the same way) writes no settings overlay under the state directory
+// and names none of Legion's own: a pane's PI_CONFIG_FILES is the operator's overlays and the
+// role's own alone, empty where neither names one, so Oh My Pi's own defaults for the protocol
+// every role runs reach a pane's agent (INFRA-338).
+func TestPaneVariablesNamesNoOverlayOfLegionsOwn(t *testing.T) {
 	stateDir := t.TempDir()
-	spec := testSpec()
-	variables, err := PaneVariables(spec, PaneInputs{StateDir: stateDir}, nil)
+	variables, err := PaneVariables(testSpec(), PaneInputs{StateDir: stateDir}, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
-	want := "PI_CONFIG_FILES=" + filepath.Join(stateDir, podsafety.TurnScopeFile)
-	if !slices.Contains(variables, want) {
-		t.Errorf("a pane's variables = %q, want %q among them", variables, want)
+	if !slices.Contains(variables, "PI_CONFIG_FILES=") {
+		t.Errorf("a pane's variables = %q, want an empty PI_CONFIG_FILES among them", variables)
 	}
-	got, err := os.ReadFile(filepath.Join(stateDir, podsafety.TurnScopeFile))
-	if err != nil {
+	var settings []string
+	if err := filepath.WalkDir(stateDir, func(path string, entry fs.DirEntry, err error) error {
+		switch {
+		case err != nil:
+			return err
+		case entry.IsDir():
+			return nil
+		}
+		if ext := filepath.Ext(path); ext == ".yml" || ext == ".yaml" {
+			settings = append(settings, path)
+		}
+		return nil
+	}); err != nil {
 		t.Fatal(err)
 	}
-	if !reflect.DeepEqual(got, podsafety.TurnScopeOverlay) {
-		t.Errorf("the turn-scope overlay on disk = %q, want %q", got, podsafety.TurnScopeOverlay)
+	if len(settings) != 0 {
+		t.Errorf("PaneVariables wrote %q under the state directory, want no settings file of Legion's", settings)
 	}
 }
 

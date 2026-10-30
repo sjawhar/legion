@@ -2,21 +2,19 @@ package tmux
 
 import (
 	"context"
-	"path/filepath"
 	"slices"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/sjawhar/legion/daemon/internal/claim"
-	"github.com/sjawhar/legion/daemon/internal/podsafety"
 	"github.com/sjawhar/legion/daemon/internal/runtime"
 	"github.com/sjawhar/legion/daemon/internal/runtime/fake"
 )
 
 // The operator's `runtime.tmux` block reaches every pane: its plain variables after the runtime's
-// own and before the spec's, sorted, and its Oh My Pi overlays in PI_CONFIG_FILES ahead of the
-// turn-scoping overlay, which stays last so its two keys outrank theirs.
+// own and before the spec's, sorted, and its Oh My Pi overlays in PI_CONFIG_FILES, which names
+// them and the role's own and nothing else.
 func TestThePaneIsToldTheOperatorsVariablesAndOverlays(t *testing.T) {
 	spec := testSpec()
 	in := PaneInputs{
@@ -29,7 +27,7 @@ func TestThePaneIsToldTheOperatorsVariablesAndOverlays(t *testing.T) {
 	for i := 1; i < len(pairs); i += 2 {
 		values = append(values, pairs[i])
 	}
-	want := "PI_CONFIG_FILES=/etc/legion-operator/overlay.yml:/etc/legion-operator/project.yml:/state/" + podsafety.TurnScopeFile
+	want := "PI_CONFIG_FILES=/etc/legion-operator/overlay.yml:/etc/legion-operator/project.yml"
 	if !slices.Contains(values, want) {
 		t.Errorf("a pane's pairs = %q, want %q among them", values, want)
 	}
@@ -174,7 +172,7 @@ func TestALaunchedPaneIsToldTheOperatorsBlock(t *testing.T) {
 		t.Fatalf("Spawn: %v", err)
 	}
 	pairs := f.pairs(t)
-	for _, want := range []string{"LAKE_CACHE_DIR=/legion/lake-cache", "PI_CONFIG_FILES=/etc/legion-operator/overlay.yml:" + filepath.Join(f.stateDir, podsafety.TurnScopeFile)} {
+	for _, want := range []string{"LAKE_CACHE_DIR=/legion/lake-cache", "PI_CONFIG_FILES=/etc/legion-operator/overlay.yml"} {
 		if !slices.Contains(pairs, want) {
 			t.Errorf("the pane's pairs = %q, want %q", pairs, want)
 		}
@@ -187,9 +185,9 @@ func TestALaunchedPaneIsToldTheOperatorsBlock(t *testing.T) {
 }
 
 // role_config_files reaches the panes of the roles it names alone: such a pane's PI_CONFIG_FILES is
-// the operator's overlays, then the role's own in order, then the turn-scoping overlay, still last
-// so its two keys outrank them all — the daemon-launched controller's pane too. A pane of a role it
-// does not name gets the very pane command a daemon without the key gives it.
+// the operator's overlays, then the role's own in order, and nothing after them — the
+// daemon-launched controller's pane too. A pane of a role it does not name gets the very pane
+// command a daemon without the key gives it.
 func TestOnlyTheNamedRolesPanesAreToldTheirOwnOverlays(t *testing.T) {
 	own := map[claim.Role][]string{
 		claim.RoleTester:     {"/etc/legion-operator/fallback.yml", "/etc/legion-operator/tester.yml"},
@@ -223,10 +221,9 @@ func TestOnlyTheNamedRolesPanesAreToldTheirOwnOverlays(t *testing.T) {
 		t.Fatal("no new-window")
 		return nil, nil
 	}
-	turnScope := filepath.Join(stateDir, podsafety.TurnScopeFile)
 	for role, want := range map[claim.Role]string{
-		claim.RoleTester:     "PI_CONFIG_FILES=/etc/legion-operator/overlay.yml:/etc/legion-operator/fallback.yml:/etc/legion-operator/tester.yml:" + turnScope,
-		claim.RoleController: "PI_CONFIG_FILES=/etc/legion-operator/overlay.yml:/etc/legion-operator/fallback.yml:" + turnScope,
+		claim.RoleTester:     "PI_CONFIG_FILES=/etc/legion-operator/overlay.yml:/etc/legion-operator/fallback.yml:/etc/legion-operator/tester.yml",
+		claim.RoleController: "PI_CONFIG_FILES=/etc/legion-operator/overlay.yml:/etc/legion-operator/fallback.yml",
 	} {
 		if _, pairs := launch(t, own, role); !slices.Contains(pairs, want) {
 			t.Errorf("the %s's pane pairs = %q, want %q", role, pairs, want)
@@ -238,7 +235,7 @@ func TestOnlyTheNamedRolesPanesAreToldTheirOwnOverlays(t *testing.T) {
 		if !slices.Equal(with, without) {
 			t.Errorf("the %s's new-window with another role's overlays =\n%q\nwant the one without the key:\n%q", role, with, without)
 		}
-		if want := "PI_CONFIG_FILES=/etc/legion-operator/overlay.yml:" + turnScope; !slices.Contains(pairs, want) {
+		if want := "PI_CONFIG_FILES=/etc/legion-operator/overlay.yml"; !slices.Contains(pairs, want) {
 			t.Errorf("the %s's pane pairs = %q, want %q", role, pairs, want)
 		}
 	}
