@@ -1260,93 +1260,6 @@ func typingDocument() string {
 	return b.String()
 }
 
-// typingBrowser is a browser's editor on a room: its own copy of the document, synced from the
-// room once, which sends the room the update each edit it makes leaves, as the room's one
-// connected peer, and takes in what another wrote when the room broadcasts it (sync).
-type typingBrowser struct {
-	t          *testing.T
-	service    *Service
-	artifactID string
-	doc        *crdt.Doc
-	fragment   *crdt.YXmlFragment
-}
-
-func newTypingBrowser(t *testing.T, service *Service, artifactID string, actor model.Actor) *typingBrowser {
-	t.Helper()
-	if err := service.warmLiveDocument(context.Background(), artifactID); err != nil {
-		t.Fatalf("warm the room for %s's typing: %v", actor.ID, err)
-	}
-	service.addConnection(artifactID, 1, actor)
-	t.Cleanup(func() { service.removeConnection(artifactID, 1) })
-	b := &typingBrowser{t: t, service: service, artifactID: artifactID, doc: crdt.New()}
-	b.fragment = b.doc.GetXmlFragment(fragmentName)
-	b.sync()
-	return b
-}
-
-// sync takes in what the room holds that the browser's document does not.
-func (b *typingBrowser) sync() {
-	b.t.Helper()
-	room := b.service.srv.GetDoc(b.artifactID)
-	if err := crdt.ApplyUpdateV1(b.doc, crdt.EncodeStateAsUpdateV1(room, b.doc.StateVector()), nil); err != nil {
-		b.t.Fatalf("sync the browser from the room: %v", err)
-	}
-}
-
-// send makes edit in the browser's document, in one transaction, and sends the room the update it
-// made, which the room commits in one transaction of its own.
-func (b *typingBrowser) send(edit func(txn *crdt.Transaction)) {
-	b.t.Helper()
-	before := b.doc.StateVector()
-	b.doc.Transact(edit)
-	room := b.service.srv.GetDoc(b.artifactID)
-	if err := crdt.ApplyUpdateV1(room, crdt.EncodeStateAsUpdateV1(b.doc, before), "peer"); err != nil {
-		b.t.Fatalf("apply the browser's update to the room: %v", err)
-	}
-}
-
-// editTree sends the room edit of the browser's tree, written as pmdoc.Update writes a tree.
-func (b *typingBrowser) editTree(edit func(*pmdoc.Node) *pmdoc.Node) {
-	b.t.Helper()
-	tree, err := treeOf(b.doc)
-	if err != nil {
-		b.t.Fatalf("read the browser's document: %v", err)
-	}
-	want := edit(tree)
-	var updateErr error
-	b.send(func(txn *crdt.Transaction) { updateErr = pmdoc.Update(txn, b.fragment, want) })
-	if updateErr != nil {
-		b.t.Fatalf("edit the browser's document: %v", updateErr)
-	}
-}
-
-// text is the text node of the browser's document whose text starts with prefix, wherever it
-// stands.
-func (b *typingBrowser) text(prefix string) *crdt.YXmlText {
-	b.t.Helper()
-	var find func(parent *crdt.YXmlFragment) *crdt.YXmlText
-	find = func(parent *crdt.YXmlFragment) *crdt.YXmlText {
-		for _, child := range parent.Children() {
-			switch node := child.(type) {
-			case *crdt.YXmlText:
-				if strings.HasPrefix(node.ToString(), prefix) {
-					return node
-				}
-			case *crdt.YXmlElement:
-				if found := find(&node.YXmlFragment); found != nil {
-					return found
-				}
-			}
-		}
-		return nil
-	}
-	text := find(b.fragment)
-	if text == nil {
-		b.t.Fatalf("the browser's document holds no text starting %q", prefix)
-	}
-	return text
-}
-
 // splitParagraph is the edit Enter makes in the top-level paragraph whose text starts with
 // prefix, typed just before the word at: the words from at on move into a new paragraph after it,
 // which the browser editor stamps with a block id of its own.
@@ -1418,7 +1331,7 @@ func TestRenderReuseABrowserTypingScript(t *testing.T) {
 		t.Fatalf("the typing document is %d bytes, short of a real-size document", len(document))
 	}
 	seedServiceText(t, service, artifactID, document)
-	browser := newTypingBrowser(t, service, artifactID, reuseBob)
+	browser := newRoomPeer(t, service, artifactID, 1, reuseBob, nil)
 	m := sh.measure()
 
 	var spliced, untouched, enters, blockEdits, agentWrites, recovered int
@@ -1521,7 +1434,7 @@ func TestRenderReuseAnUnreadableAskBlockKeepsTheRoomsAskAuthors(t *testing.T) {
 	service, artifactID := newTestService(t)
 	service.settle = time.Hour
 	seedServiceText(t, service, artifactID, "The typed paragraph opens the document.\n\nThe last paragraph closes it.\n")
-	browser := newTypingBrowser(t, service, artifactID, reuseBob)
+	browser := newRoomPeer(t, service, artifactID, 1, reuseBob, nil)
 	browser.editTree(insertBlocksAfter(t, "The typed paragraph",
 		":::ask{#unreadable-ask urgency=\"high\" multiple=\"false\"}\nWhich option does the room take?\n:::\n"))
 	waitForLandedAppends(t, service, artifactID)

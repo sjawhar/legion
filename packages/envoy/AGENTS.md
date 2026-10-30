@@ -653,36 +653,18 @@ The replica's lock is the one a room's browsers wait on. The update observer tak
 update (`renderedReplica.observe`), and ygo broadcasts the update to the room's other browsers only
 once the observer has returned (sjawhar/ygo v1.51.3-sami.1, `provider/websocket/peer.go`), so a read
 holding the replica for its walk holds every other browser's copy of the keystroke. A read
-therefore only tries the lock, and
-reads a copy when another read holds it or an observer waits for it (`lockForUpdate`), so reads
+therefore only tries the lock, and reads a copy when another read holds it or an observer waits
+for it (`lockForUpdate`), so reads
 never queue behind each other or ahead of a waiting observer. `BenchmarkKeystrokeBesideReads`
-measures the wait: a keystroke's transaction and the observer's whole turn with the replica -
-the drain of the room's update log, the update applied to the replica and the whole render the
-observer then ran after every update (`renderedReplica.observe`, through `renderDocumentForUpdate`
-since the copy's removal), 120 keystrokes 20 ms apart on a 524 KiB document, beside reads. One run
-of each - the render's own cost, then hundreds of ms a keystroke regardless of which read mechanism
-races beside it, put repeated sampling out of this pass's time budget - keystroke latency p50 / p90 /
-p99 in ms, on the development machine (32 cores, load 75 to 80) and on half a processor
-(`GOMAXPROCS=1` under a 50% CPU quota, production's allotment):
-
-| Reads beside the keystrokes | 32 cores, one every 250 ms | 32 cores, back to back | Half a processor, one every 250 ms | Half a processor, back to back |
-| --- | --- | --- | --- | --- |
-| none | 551.8 / 849.1 / 1120 | | 635.5 / 810.9 / 881.5 | |
-| copies | 634.5 / 940.3 / 1264 | 663.2 / 823.7 / 974.4 | 1205 / 1478 / 1676 | 1337 / 1547 / 1691 |
-| the replica, tried (this design) | 685.8 / 990.7 / 1469 | 705.7 / 1107 / 2015 | 1137 / 1437 / 1606 | 1368 / 1558 / 1692 |
-
-These runs predate INFRA-644: the observer rendered the whole replica after every update then, and
-it now renders only the top-level blocks an update touched wherever it can (below); the table has
-not been measured again since. The render dominated every row then, on both designs: at half a
-processor the three keystroke counts are within one run's noise of each other, matching round 2's
-real-browser, end-to-end measurement of the same three modes (PR comment, not reproduced here). On
-32 cores the replica still costs more at the tail than a copy does - about 50 ms at its median and
-200 ms at p99 reading every 250 ms, growing to about 1 s at p99 reading back to back - the same
-direction this design's trade-off has shown since round 1, now measured on top of the render's own
-cost rather than in isolation from it. A replica of the reads' own would remove that tail (measured
-early in this PR's history, before this benchmark counted the render, at `93a77af2`) and was
-rejected for
-its memory: a room read while resident would hold a second whole copy of its document until
+measures the wait: a keystroke's transaction and the observer's whole turn with the replica - the
+drain of the room's update log, the update applied to the replica, and the render the observer
+runs for it (`renderedReplica.observe`) - 120 keystrokes 20 ms apart on a 524 KiB document,
+beside no reads, beside reads that take copies, and beside reads that try the replica, which is
+this design. Run it for the three modes' keystroke latencies on the machine in question, on all
+its cores and on half a processor (`GOMAXPROCS=1` under a 50% CPU quota, production's
+allotment). A replica of the reads' own, which no observer would ever hold, would leave a read
+waiting for nothing, and was rejected for its memory: a room read while resident would hold a
+second whole copy of its document until
 eviction, about 6.6 MiB of heap at 51 KiB, 63 MiB at 524 KiB and 123 MiB at 1 MiB,
 with nothing bounding how many rooms hold one. Copying the observer's rendered tree under the lock
 instead of walking the replica would hold it about 45 ms rather than about 105 ms at 524 KiB, but
@@ -915,24 +897,25 @@ touched nothing under the document's fragment changed no rendering, and nothing 
 rendered (`observerUntouched`); one that changed something inside some top-level blocks,
 and added, deleted or moved none, renders just those blocks, each read alone
 (`pmdoc.ReadBlockForRendering`), into the markdown the replica keeps (`pmdoc.Layout.Splice`,
-`observerIncremental`). Anything else renders the whole replica, as every update did before
-INFRA-644, and records a fresh layout from the same render (`renderDocumentForUpdate`,
-`observerRendered`): an update that changed the fragment itself, one that touched more than 64
-blocks (`maxTouchedBlocks`), one on a replica that holds no rendering, and one `Splice`
-declines. `Splice` answers exactly what the whole render of the new document writes, and declines
+`observerIncremental`). Anything else renders the whole replica and records a fresh layout from
+the same render (`renderDocumentForUpdate`, `observerRendered`): an update that changed the
+fragment itself, one that touched more than 64 blocks (`maxTouchedBlocks`), one on a replica
+that holds no rendering, and one `Splice` declines. `Splice` answers exactly what the whole
+render of the new document writes, and declines
 wherever the rest of the document could read a changed block differently (its guards, G0 to G8):
 a document of one block or whose first block is a rule, a changed block that held or holds a
 footnote definition, one whose list kind or empty-paragraph status changed, which moves the list
 markers after it, one whose tables charged the render's span budget or would exhaust it, a
 document or changed block that writes a blank empty code block, and a block that does not read,
-validate or render alone. The replica learns which blocks an update touched through its block
-change finder (`blockChangeFinder`, `changedTypesFinder`): after each transaction that applies an
-update to the replica, it reads the shared types ygo says the transaction changed
-(`crdt.Transaction.ChangedTypes`) and walks each up its `Parent` chain to the top-level block it
-sits in, and it marks the update for a whole render when one is the fragment itself or sits deeper
-than any document in the schema nests (`noteChangedTypes`). Both accessors are the sjawhar/ygo
-fork's since v1.51.3-sami.8 (reearth/ygo#336). The markdown the replica keeps and that markdown's
-`pmdoc.Layout`, 5 bytes per top-level block (each block's end offset and flags), are one value
+validate or render alone. The replica learns which blocks an update touched from the transactions
+of its own document: `renderedReplica.start` subscribes `noteChangedTypes` to them as it makes the
+document, and after each transaction that applies an update to the replica it reads the shared
+types ygo says the transaction changed (`crdt.Transaction.ChangedTypes`) and walks each up its
+`Parent` chain to the top-level block it sits in, marking the update for a whole render when one
+is the fragment itself or sits deeper than any document in the schema nests. Both accessors are
+the sjawhar/ygo fork's since v1.51.3-sami.8 (reearth/ygo#336). The markdown the replica keeps
+and that markdown's `pmdoc.Layout`, 5 bytes per top-level block (each block's end offset and
+flags), are one value
 (`replicaRendering`), so a replica holding a rendering holds that rendering's layout; a published
 live write's rendering is one value too (`publishedRendering`), which the replica takes whole when
 it takes it. The ask blocks an update left are walked only when its classification asks for them,
