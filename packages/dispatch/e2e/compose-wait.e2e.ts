@@ -605,3 +605,56 @@ test("a comment whose own paragraph lost the words is not moved to another parag
     await alice.close();
   }
 });
+
+/** Another writer deletes the sentence the reader's own words were in, leaving the block reading
+ *  those words once - in the other sentence, which the reader never selected. Their passage is
+ *  gone, so Send must say so and keep the draft: the one reading left is somebody else's, and a
+ *  comment put there is a record on a passage no refusal ever tells the reader about
+ *  (dispatch://INFRA-727 acceptance 2; the rule the INFRA-512 architect's decisions rest on). */
+test("a comment is not moved to the block's other reading when its own words are deleted", async ({
+  browser,
+}) => {
+  test.setTimeout(240_000);
+  await createProject({ key: "CORE", name: "Core" });
+  const issue = await createIssue({
+    project: "CORE",
+    spec: TWO_READINGS_SPEC,
+    title: "Review the spec",
+  });
+  const alice = await asUser(browser, "alice");
+  try {
+    const page = await alice.newPage();
+    await openSpec(page, issue.key, "Alpha");
+    await expect(connectedDot(page)).toHaveText("connected");
+    await selectSecondReading(page, REPEATED_QUOTE);
+    await barAction(page, "Comment");
+    await expect(documentEditor(page).locator('span[data-proof="comment"][data-id]')).toHaveCount(
+      1
+    );
+    await composer(page).getByLabel("Comment").fill("Which dog is this?");
+
+    await editArtifact(
+      issue.primary_artifact_id,
+      {
+        ops: [
+          {
+            find: "Alpha the lazy dog. Beta the lazy dog.",
+            op: "replace",
+            with: "Alpha the lazy dog.",
+          },
+        ],
+      },
+      { actor: { id: "e2e-compose-wait", kind: "session" }, as: "agent" }
+    );
+    await expect(documentEditor(page)).not.toContainText("Beta");
+
+    await send(page);
+    await expect(composer(page)).toContainText("Your draft is kept");
+    await expect(composer(page).getByLabel("Comment")).toHaveValue("Which dog is this?");
+    expect(await listComments(issue.key, issue.primary_artifact_id)).toHaveLength(0);
+    // Nothing is left on "Alpha the lazy dog", the reading the reader never selected.
+    expect(await markOffsets(page)).toEqual([]);
+  } finally {
+    await alice.close();
+  }
+});
