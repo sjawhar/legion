@@ -73,6 +73,7 @@ jobs:
   # and no secret and ends in the tripwire.
   fold_build:
     runs-on: ubuntu-24.04
+    timeout-minutes: 10
     # contents: read is for the checkout; nothing here writes to the repository.
     permissions:
       contents: read
@@ -134,6 +135,7 @@ jobs:
     needs: fold_build
     if: github.ref == 'refs/heads/main' && needs.fold_build.outputs.fold == 'true'
     runs-on: ubuntu-24.04
+    timeout-minutes: 10
     # contents: read is for the checkout; actions: write lets push-fold start a new run of this
     # workflow on main when main moved since the base (`gh workflow run`). The push itself uses the
     # deploy key over SSH, held only by the "Fold and push" step's env, not either scope.

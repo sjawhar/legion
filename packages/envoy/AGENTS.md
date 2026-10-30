@@ -5297,7 +5297,10 @@ which signs the same digest `image_index` hands over. The attestation is separat
 BuildKit provenance (`provenance: mode=min`) each `docker` leg attaches to its platform's image,
 and the index carries both legs' provenance, which a deployment reads to map a digest to its
 commit. The `docker` legs keep no BuildKit layer cache across runs: `LEGION_COMMIT` enters the
-build stage, so a cache would only serve a re-run at the same commit. They keep no registry cache
+build stage, so a `mode=min` cache, which exports the final stage's layers alone, would serve only
+a re-run at the same commit. Uncached, each leg takes 4.2-5.3 minutes
+(`docs/solutions/github/measure-a-build-cache-by-what-a-new-commit-invalidates-and-a-hit-by-same-run-job-reruns-pr2297.md`).
+They keep no registry cache
 either, since any run holding `packages: write` can push the ghcr.io tag `main`'s attested build
 would read (GHSA-f2v9-hprr-32q3). The package's `buildcache-amd64` and `buildcache-arm64` tags,
 left from a branch measurement run, are not images, and nothing reads them.
