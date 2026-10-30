@@ -13,11 +13,11 @@ import (
 // inlineParsers is goldmark's default inline parsers, each found by its type as blockParsers finds
 // the block parsers it wraps: its emphasis parser replaced by emphasisParser, its link parser
 // measuring the images it makes and pairing their labels' runs (imageNesting), and its raw HTML
-// parser reading an inline HTML declaration itself (declarationParser), where that parser stands
-// (400), so a `<` is read by one parser and every declaration by the one rule (opensDeclaration),
-// which opens one at any ASCII letter where goldmark's parser opens one only after an uppercase
-// letter. tildeParser is added at the priority goldmark's strikethrough extension gives its own
-// (500), and every delimiter run is read by rules.
+// parser wrapped by the package's own (inlineRawHTMLParser), where that parser stands (400), so
+// every kind of inline raw HTML is read by one parser and every declaration by the one rule
+// (opensDeclaration), which opens one at any ASCII letter where goldmark's parser opens one only
+// after an uppercase letter. tildeParser is added at the priority goldmark's strikethrough
+// extension gives its own (500), and every delimiter run is read by rules.
 func inlineParsers(rules delimiterRules) []util.PrioritizedValue {
 	parsers := parser.DefaultInlineParsers()
 	emphasisType := reflect.TypeOf(parser.NewEmphasisParser())
@@ -30,7 +30,7 @@ func inlineParsers(rules delimiterRules) []util.PrioritizedValue {
 		case linkType:
 			parsers[index].Value = imageNesting{prioritized.Value.(goldmarkLinkParser)}
 		case rawHTMLType:
-			parsers[index].Value = declarationParser{prioritized.Value.(parser.InlineParser)}
+			parsers[index].Value = inlineRawHTMLParser{prioritized.Value.(parser.InlineParser)}
 		}
 	}
 	return append(parsers, util.Prioritized(tildeParser{rules: rules}, 500))

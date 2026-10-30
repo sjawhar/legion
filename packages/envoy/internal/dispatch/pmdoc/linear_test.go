@@ -336,20 +336,20 @@ func TestBareURLShapesParseAndRenderLinearly(t *testing.T) {
 // a declaration after an uppercase letter, walked each of them again after this package's parser
 // gave up; `x <!a` on each line, where a walk crosses every later line of the paragraph, grew
 // about fourfold per doubling, 6.88 s at 64 KiB and 27.60 s at 128 KiB. The block's record of the
-// offset from which it holds no `>` (declarationBlock) now answers every later opener without a
-// walk, and the one parser that reads every kind of inline raw HTML (declarationParser, swapped
-// in for goldmark's own) walks a declaration once rather than twice: the same reads take 0.21 s,
+// offset from which it holds no `>` (unclosedRawHTML) now answers every later opener without a
+// walk, and the one parser that reads every kind of inline raw HTML (inlineRawHTMLParser, which
+// wraps goldmark's own) walks a declaration once rather than twice: the same reads take 0.21 s,
 // 0.67 s, 0.20 s, 0.51 s, 0.05 s and 0.13 s.
 //
 // So is a paragraph of the three other kinds of inline raw HTML that end at a closer of their own
 // - a comment at `-->`, a processing instruction at `?>`, a CDATA section at `]]>` - whose walk
 // is goldmark's, inside the wrapped parser, and which goldmark has walked from every opener to
-// the block's end since it had a raw HTML parser. At this pull request's fork point a mebibyte of
-// `p ` and `<!--` repeated took 24.97 s to Parse and 50.17 s to ParseForWrite, `<?` 46.31 s and
-// 93.65 s, and `<![CDATA[`, whose parse the element limit refuses past, 1.61 s and 1.66 s. The
-// record holds one offset per kind, and the wrapper records for those three what the wrapped
-// parser's own walk answered, so the same reads take 0.23 s and 0.55 s, 0.22 s and 0.62 s, and
-// 0.15 s and 0.11 s.
+// the block's end since it had a raw HTML parser. Before the record a mebibyte of `p ` and
+// `<!--` repeated took 24.97 s to Parse and 50.17 s to ParseForWrite, `<?` 46.31 s and 93.65 s,
+// and `<![CDATA[`, whose parse the element limit refuses past, 1.61 s and 1.66 s. The record
+// holds one offset per kind, and the wrapper records for those three what the wrapped parser's
+// own walk answered, so the same reads take 0.23 s and 0.55 s, 0.22 s and 0.62 s, and 0.15 s
+// and 0.11 s.
 //
 // Each shape is one paragraph, read as a rendering is and written from that tree, at the sizes
 // TestBareURLShapesParseAndRenderLinearly reads its own shapes at. All but the CDATA sections are

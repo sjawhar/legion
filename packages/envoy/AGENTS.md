@@ -2077,10 +2077,15 @@ grammar decides, since an escaped `<` reads as text in both: goldmark reads a de
 CommonMark 0.31 and the engine also read a lowercase one (`<!doctype x;[a@b.cc](mailto:a@b.cc)>`)
 and a U+0001 in an unquoted value as raw HTML. Only a `<` the run's first writing reads so is
 escaped, so a run that reads back keeps its bytes. The reader opens a declaration by the rule the
-scan already judged it by (`opensDeclaration`, which `declarationParser` and `rawHTMLCloser` both
-ask): `<!` and any ASCII letter, as CommonMark 0.31 and the engine open one, where goldmark's raw
-HTML parser opens one only after an uppercase letter, so `p <!a> q` is read as inline raw HTML and
-stored unescaped. A text `<` first after its line's container
+scan already judged it by (`opensDeclaration`, which `rawHTMLCloser` asks for the reader and for the
+scan alike): `<!` and any ASCII letter, as CommonMark 0.31 and the engine open one, where goldmark's
+raw HTML parser opens one only after an uppercase letter, so `p <!a> q` is read as inline raw HTML
+and stored unescaped. Every kind of inline raw HTML that ends at a closer of its own is read by the
+one parser (`inlineRawHTMLParser`), which walks a block to its end at most once per kind: the first
+opener of a kind whose walk finds no closer is recorded (`unclosedRawHTML` for a parse,
+`rawHTMLScan.ends` for a write) and every later opener of it in that block is refused without a
+walk, so a kind added to `rawHTMLCloser` keeps that guarantee only by recording what its own walk
+answered. A text `<` first after its line's container
 prefix is also escaped where micromark's html-flow start conditions open an HTML block there, judged
 in `endLine` on the line as written across nodes (`htmlBlockStart`), since goldmark can read a
 paragraph there: `<span title=a=b;[a@b.cc](mailto:a@b.cc)>` alone on a paragraph's first line is a
