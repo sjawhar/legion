@@ -2,58 +2,27 @@
   "schemaVersion": 1,
   "phase": "implement",
   "issue": "INFRA-168",
-  "completed": "2026-10-30T05:40:00Z",
-  "round": "the narrowed round answering the review of fb41159d (4 findings, the architect's Narrow decision; code commits c0d1d13e and 451e53fc, code head 451e53fcee72189100fb9da9a74bc354ac1c15ea)",
+  "completed": "2026-10-30T08:25:00Z",
+  "round": "the forward merge of main at 71e31498 the architect asked for at acceptance (GitHub reported #2161 CONFLICTING, mergeStateStatus DIRTY); merge commit 9dba3116, no other change",
   "proof": [
     {
-      "criterion": "Every decision reaches Dispatch once, or the session counts it as not confirmed, under load, with the session's document created once and every record appended (thread PRRT_kwDORFy7ds6x189x) and the unmarked write's record started after its entry and tool result (PRRT_kwDORFy7ds6x189z).",
-      "surface": "22 nested headless Oh My Pi sessions at once on this branch's build, its dispatch CLI first on PATH, in this Legion pod, against the real model and production Dispatch, on the scratch issue dispatch://INFRA-814 (reopened for the run, every ask retracted, closed after): 20 sessions sent a no-change dispatch ask (10 block, 10 warn) that the rules check refused and resent it with --advisor-rebuttal; 2 sessions (block, warn) sent an unmarked ask through `| cat`.",
-      "command": "$TMPDIR/i168/g7/run2.sh P<i>-<mode> <mode> (i 1..10) and PROMPT=prompt-u.txt run2.sh U1-<mode> <mode>, all in parallel 05:22:46Z-05:25:10Z; per session the advisor-gate entries' ids (recordId for an unmarked entry) against `dispatch doc-read --project INFRA --artifact askgate-decisions-<session>-md`; `bun packages/pi-envoy/scripts/askgate-report.ts --dispatch-project INFRA --since 2026-10-30T05:22:46Z` and `--sessions <the 22 sessions> --since … --sample 0`.",
-      "observed": "43 advisor-gate entries, 43 records in Dispatch, 0 missing, 0 duplicate, 0 advisor-gate-record follow-ups. Each document holds the fixed header with no record, then one appended block per record (U1-warn: the unmarked record with id `toolu_…#0`). Dispatch reader: sessions 22, duplicate records 0, rules calls 21, refusals 20, overrides 20, unmarked writes refused in block mode 1, posted in warn mode 1. Session-file report: gated calls 43, decision records not confirmed 0.",
-      "headSha": "451e53fcee72189100fb9da9a74bc354ac1c15ea",
-      "negativeControl": "Two sessions with DISPATCH_URL at a local port where nothing answers: N2-block (a gated ask and its rebuttal) wrote 2 advisor-gate-record follow-ups with recordError ECONNREFUSED; N2u-warn (an unmarked ask) wrote its advisor-gate entry first and then 1 follow-up keyed on its recordId `toolu_…#0`; the session-file report printed `decision records not confirmed: 3` of `gated calls: 3`. Unit red test 'a first create this side gave up on, committed late, cannot replace the records written since' fails on fb41159d's recorder (document holds [\"t1\"]); 'an unmarked write's tool result returns while its record still waits on Dispatch' times out on the awaiting handler; 'a gated call's unconfirmed record is counted once, not again on each unmarked entry of its tool call' gives 3 on the old join."
-    },
-    {
-      "criterion": "The report counts each unconfirmed record once and names the figure as an upper bound (PRRT_kwDORFy7ds6x1893, PRRT_kwDORFy7ds6x189-).",
-      "surface": "pi-envoy and envoy-client test suites.",
-      "command": "cd packages/pi-envoy && bun run build && bunx tsc --noEmit && bun test && bun run lint; bun test extensions/askgate/askgate.test.ts -t 'byte for byte'; cd packages/envoy-client && bunx tsc --noEmit && bun test; bunx biome check .",
-      "observed": "pi-envoy 1678 pass, 0 fail; A1's pin 1 pass, unedited; envoy-client 0 fail; biome clean. The printed line is `decision records not confirmed: N`, and the reconciliation says the Dispatch report counts at most that many decisions fewer.",
-      "headSha": "451e53fcee72189100fb9da9a74bc354ac1c15ea",
-      "negativeControl": "With the join reverted to copy a gated follow-up onto every entry of its toolCallId, the reviewer's probe (one gated entry, two unmarked under the same id, one follow-up) counts 3, not 1."
-    },
-    {
-      "criterion": "The forward merge of main (GitHub reported #2161 CONFLICTING after the round push) leaves the change unchanged and working.",
-      "surface": "jj merge of legion/INFRA-168 (c320611a) with main@origin (5dc21cb9); the branch built and smoked at the merge head with 2 nested Oh My Pi sessions against production Dispatch on dispatch://INFRA-814 (reopened, every ask retracted, closed after).",
-      "command": "jj new legion/INFRA-168 main@origin; one conflict, packages/envoy-client/src/dispatch-http.ts (main added commentBlocks/messageBlocks beside docEdit; kept both, docEdit with the caller key); fingerprint `git diff --unified=0 $(git merge-base <main> <head>) <head> -- . :!.legion :!docs/solutions | sed -e /^@@/d -e /^index /d | sha256sum` before and after; run2.sh M1-block block and PROMPT=prompt-u.txt run2.sh M1u-warn warn.",
-      "observed": "Fingerprint 3c9b13b00f54932f at c320611a and at the merge head. envoy-client 1203 pass 0 fail, pi-envoy 1678 pass 0 fail, A1 pin green, pi-shared and score.test.ts 0 fail, biome clean. M1-block: a verdict and a rebuttal entry, both records in its Dispatch document; M1u-warn: the unmarked entry, its record `toolu_…#0` in its document.",
-      "headSha": "5c734003c314cdd0b3c7ae44cf1812a768711921",
-      "negativeControl": "The N2 negative controls at 451e53fc stand: with Dispatch unreachable, 3 of 3 records counted not confirmed."
+      "criterion": "main merged forward into legion/INFRA-168 with both sides kept, and the change still works at the merge head.",
+      "surface": "jj merge of legion/INFRA-168 (639f59e5) with main@origin (71e31498); the branch built, tested and smoked at the merge head with 2 nested Oh My Pi sessions against production Dispatch on dispatch://INFRA-814 (reopened, every ask retracted, closed after).",
+      "command": "jj new legion/INFRA-168 main@origin; five conflicts, all against main's #2376: envoy-client package.json build list (both new entry points kept), dispatch-http.ts (#json, #jsonAnswer and #send each gained a trailing parameter on both sides: main's signal and this change's caller key; kept both, signal then key, and the four callers that pass a key pass undefined for signal), and the imports of askgate.ts, askgate.test.ts and envoy.ts (main's dispatch-session-directory and session-answers imports beside this change's); bun.lock kept as main's; fingerprint `git diff --unified=0 $(git merge-base <main> <head>) <head> -- . :!.legion :!docs/solutions | sed -e /^@@/d -e /^index /d | sha256sum | cut -c1-16`; run2.sh M2-block block and PROMPT=prompt-u.txt run2.sh M2u-warn warn.",
+      "observed": "Fingerprint 168fd9cc4b97de2a at 639f59e5 and 4c4c186a6bf9a8ce at the merge head: changed. The diff of the two diffs holds only the package.json build line (main's two entry points now beside askgate-new-asks) and dispatch-http.ts's parameter threading (the caller key now after main's signal, the call sites with one more undefined, and the #send doc naming both). envoy-client 1252 pass 0 fail, pi-envoy 1701 pass 0 fail, A1 pin green, pi-shared and score.test.ts 0 fail, tsc clean in envoy-client, pi-envoy, pi-shared, pi-legion and claude-envoy, biome clean. M2-block: a verdict and a rebuttal entry, both records in its Dispatch document; M2u-warn: the unmarked entry, its record toolu_…#0 in its document.",
+      "headSha": "9dba31164887da7c1e050f848a09840df6d40065",
+      "negativeControl": "The negative controls at 451e53fc stand (Dispatch unreachable: 3 of 3 records counted not confirmed); a caller key sent on every attempt is pinned by envoy-client's dispatch-keyed-writes test, green at the merge head."
     }
   ],
   "filesChanged": [
+    "packages/envoy-client/package.json",
     "packages/envoy-client/src/dispatch-http.ts",
-    "packages/envoy-client/src/__tests__/dispatch-keyed-writes.test.ts",
-    "packages/envoy-client/.changes/unreleased/INFRA-168-caller-idempotency-key.yaml",
-    "packages/pi-envoy/extensions/askgate/decision-record.ts",
-    "packages/pi-envoy/extensions/askgate/decision-record.test.ts",
-    "packages/pi-envoy/extensions/askgate/askgate-core.ts",
     "packages/pi-envoy/extensions/askgate/askgate.ts",
     "packages/pi-envoy/extensions/askgate/askgate.test.ts",
-    "packages/pi-envoy/extensions/envoy.ts",
-    "packages/pi-envoy/extensions/envoy.test.ts",
-    "packages/pi-envoy/scripts/askgate-report.ts",
-    "packages/pi-envoy/scripts/askgate-report.test.ts",
-    "packages/pi-envoy/scripts/askgate-report-dispatch.test.ts",
-    "packages/pi-envoy/README.md",
-    "packages/pi-envoy/AGENTS.md",
-    "packages/pi-envoy/.changes/unreleased/INFRA-168-askgate-decision-record.yaml"
+    "packages/pi-envoy/extensions/envoy.ts"
   ],
   "trickyParts": [
-    "Dispatch has no create-only upload: an upload of a known name replaces its text (artifacts.go:445-516). The rule 'never uploaded twice to effect' rests on Dispatch's Idempotency-Key, agreed with the architect: the create is a fixed header-only body for the session under the key askgate-doc.<sha256(project, name)>, and every record, the first included, is a doc-edit insert at the end under askgate-rec.<sha256(session, record id)>. A repeat create is replayed, 409 KEY_IN_FLIGHT (the client retries), 409 KEY_COMMITTED or 422 KEY_REUSED; the last two go to the read by name and the append, never a second upload.",
-    "Fact 1, the key's scope: Dispatch scopes a key to its login (requestKeyLogin, request_keys.go:465-476). Every Legion pod writes under the shared agent token (login `agent-token`; `dispatch whoami`: 'runs under the shared token: no owner'), and a session's document carries its session id, so every process writing it shares one scope. Residual: a session whose processes write under two different logins while a create is in flight, which one deployment does not produce.",
-    "Fact 2, the key's retention: IdempotencyKeyTTL is 24 h (contracts/generated.go:268) and a keyed handler's run is bounded by keyedHandlerLimit, 10 min (request_keys.go:103), so a create's late commit always lands while its key is remembered; past 24 h a create runs only on a 404, since the read by name comes first.",
-    "claude-envoy's check-dist reports its dist stale; it reports the same three files with this round's envoy-client change reverted, and main's rebuild workflow commits the dist after each merge.",
-    "The forward merge of main was forced by GitHub reporting #2161 CONFLICTING (one conflict in envoy-client dispatch-http.ts); bun install rewrote three workspace version stamps in bun.lock, which this change does not own, so the lock was restored to main's."
+    "The fingerprint changed only by the mechanical join of two trailing parameters in dispatch-http.ts and one build-list line; nothing else of the change differs."
   ],
   "deviations": [],
   "openQuestions": []
