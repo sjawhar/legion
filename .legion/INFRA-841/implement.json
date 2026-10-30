@@ -1,0 +1,55 @@
+{
+  "schemaVersion": 1,
+  "phase": "implement",
+  "issue": "INFRA-841",
+  "completed": "2026-10-30T22:20:00Z",
+  "proof": [
+    {
+      "criterion": "Item 3: a test makes the first reconcile fail once, then succeed; startDispatchStream waits and returns a client with the hooks run.",
+      "surface": "The packages/envoy/cmd/dispatch test binary against a real in-process three-member NATS cluster (testnats.StartCluster), with the Dispatch publisher built exactly as main builds it (bus.ConnectOwningStream over serverClient(dispatchStreamOptions(boot, env)...)), the third member stopped before the start and started again from the helper's own repair callback.",
+      "command": "cd packages/envoy && go test ./cmd/dispatch/ -run 'TestADispatchStartWaitsOutAReconcileFailureTheBusRetries' -v -count=5",
+      "observed": "5 of 5 PASS, 1.61-1.86 s each. The start logs the retried WARN `envoy nats reconnect hook failed; it is retried` with `reconcile the ENVOY_NOTIFICATIONS stream: ENVOY_NATS_REPLICAS=3: nats: no suitable peers for placement, peer offline`, the helper waits instead of ending, the repair starts the stopped member, and the helper returns a client whose hooks covered at least one connection event with the stream at the three copies the settings ask of it, re-read from a cluster connection (testnats.AwaitSettledStream over cluster.JetStream).",
+      "headSha": "48d2ba2026de956d4bb627d04a34e8dba32e8639",
+      "negativeControl": "The old helper's rule put back in the working copy (a logged failure closes the client and ends the start, nothing else changed) and the same -run command: `--- FAIL: TestADispatchStartWaitsOutAReconcileFailureTheBusRetries (0.58s)` with `start Dispatch's stream: reconcile the ENVOY_NOTIFICATIONS stream: ENVOY_NATS_REPLICAS=3: nats: no suitable peers for placement, peer offline` - the retried warning the old helper ended on. Reverted from the working copy; nothing of it was committed."
+    },
+    {
+      "criterion": "Item 2: the two settings descriptions state the real bound between the WARN and the ERROR, on the surface an operator reads them through.",
+      "surface": "The Dispatch binary's own published settings table (`go run ./cmd/dispatch settings`) and the documentation site's generated configuration reference, which docs/site/generators/dispatch-config.ts builds from that output.",
+      "command": "cd packages/envoy && go run ./cmd/dispatch settings ; cd ../../docs/site && bun run generate",
+      "observed": "Both rows print 'the minute runs from the connection event the reconcile has not covered, not from the first retry, and `stall_ms` on both lines is how long it has been due' (2 occurrences, 0 of the old 'while the retries stay under a minute'). `bun run generate` wrote docs/site/src/content/docs/dispatch/reference/configuration.md carrying the same sentence in both rows.",
+      "headSha": "48d2ba2026de956d4bb627d04a34e8dba32e8639",
+      "negativeControl": "The same `go run ./cmd/dispatch settings` with cmd/dispatch/settings.go taken from the base commit ab3193265e73 and put in place: 2 occurrences of 'while the retries stay under a minute' and 0 of the new sentence. Restored; nothing of it was committed."
+    },
+    {
+      "criterion": "Acceptance: `go test ./cmd/dispatch/ ./internal/bus/...` passes at the head.",
+      "surface": "The two packages' test binaries, which run real in-process nats-server instances.",
+      "command": "cd packages/envoy && go test ./cmd/dispatch/ ./internal/bus/... -count=1",
+      "observed": "ok github.com/sjawhar/envoy/cmd/dispatch 58.703s; ok github.com/sjawhar/envoy/internal/bus 331.788s; ? github.com/sjawhar/envoy/internal/bus/bustest [no test files].",
+      "headSha": "25e58cbc6d79b37e56743e70fa7583f1a849507f, with cmd/dispatch re-run alone at 48d2ba2026de956d4bb627d04a34e8dba32e8639 (ok, 57.753s) after the simplify pass and the changelog fragment; internal/bus is unedited by this change.",
+      "negativeControl": "With the old helper's rule back in the working copy, the same cmd/dispatch run fails on TestADispatchStartWaitsOutAReconcileFailureTheBusRetries, as the first proof's control records."
+    }
+  ],
+  "filesChanged": [
+    "packages/envoy/AGENTS.md: the hook-failure bullet now names both paths that report a run which fails after the client stopped, each by its guard and its log call.",
+    "packages/envoy/cmd/dispatch/settings.go: the ENVOY_NATS_REPLICAS and ENVOY_STREAM_MAX_BYTES descriptions state the bound the guard enforces and name stall_ms.",
+    "packages/envoy/cmd/dispatch/stream_replicas_test.go: connectDispatchStream (the shared start), startDispatchStream (wait only, *bus.Client with no error), startDispatchStreamRepairing (the repair variant), refusedDispatchStream (the first logged refusal), hookFailure and the two message constants, and TestADispatchStartWaitsOutAReconcileFailureTheBusRetries.",
+    "packages/envoy/cmd/dispatch/settings_test.go: the ENVOY_NATS_REPLICAS refusal case moved to refusedDispatchStream; three error checks of startDispatchStream dropped.",
+    "packages/envoy/.changes/unreleased/pr2580-Fixed-20261030-221102.yaml: one Fixed fragment for the corrected descriptions, which the binary and the docs site publish."
+  ],
+  "trickyParts": [
+    "The spec's starting point (reconcileFailure matching the ERROR alone) cannot work: the ERROR needs RepairGrace (a minute, internal/bus/nats.go:545-551) of stall while reconcileWait is 30 s, so it never fires inside the helper's own wait. The plan's D1 split the helper by what each caller asks for instead; this round implements that.",
+    "The repair callback runs on the helper's own polling goroutine, which is the test's goroutine, because testnats.Server.Start, Server.Stop and Cluster.AwaitReady call t.Fatal*, which Go forbids off the test goroutine.",
+    "reconcileWait restarts after the repair, so it bounds the reconcile the repair makes possible rather than the repair itself. Measured here: one run in three of testnats.Cluster.AwaitReady spent 15 s on a member no peer heard from before restarting it (nats-server 2.10.29's known start race, internal/testnats/cluster.go:138-145). Without the restart, two such waits inside one 30 s deadline would make the test flaky in the three CI jobs that run cmd/dispatch."
+  ],
+  "deviations": [
+    "The plan's Task 1.2 said the ordinary helper's fatal message names the last logged failure; Task 1.5 said reconcileFailure stays the first logged failure and feeds that message. The code reports the first, which is what one scanner gives, and the message says so. The failure repeats with backoff, so the first and the later ones carry the same error.",
+    "The plan predicted the new test at about 12 s (the planner measured a 10 s JetStream deadline). Measured here it is 1.6-1.9 s: a three-member cluster with one member stopped refuses a three-copy create at once with `nats: no suitable peers for placement, peer offline` rather than letting the request time out. reconcileWait is unchanged at 30 s.",
+    "The simplify pass applied four findings rather than none: logtest.SetDefault in place of the hand-rolled slog swap (the hand-rolled restore left the log package's output pointing at the finished buffer, a defect the old helper already carried in a file this change touches), the connectDispatchStream rename, the two message constants, and splitting the latch from the repair trigger. Both proofs were re-run after it."
+  ],
+  "openQuestions": [
+    "The plan's D4 asked the architect whether the operator-facing settings cells must carry the Go identifiers themselves. They do not: each cell states the rule in operator terms and names stall_ms, and the pull request cites reportHookFailure, RepairGrace, hooksDueSince, Client.onReconnect and recoverUntilHealthy by symbol with file and line. Say so if the acceptance means otherwise and the cells get the identifiers."
+  ],
+  "discoveredComplexity": [
+    "reportHookFailure is reached from two places (internal/bus/recovery.go:90 and :361), and recoverUntilHealthy has three stop checks, of which only the one after its own attempt (recovery.go:343-349) carries an error. The AGENTS.md sentence names that one and the onReconnect guard, and leaves the two error-less sites (recovery.go:311-313, 363-366) out: they report a stop seen before an attempt, not a failed run."
+  ]
+}
