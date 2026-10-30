@@ -2,32 +2,42 @@
   "schemaVersion": 1,
   "phase": "review",
   "issue": "INFRA-567",
-  "completed": "2026-10-30T01:59:00Z",
-  "round": 3,
-  "reviewedHead": "8bda117fcc69e5d338f22a62f6c10a98a696c96b",
-  "codeHead": "35db766a1a1d6aae247858ae98ca808e7e964b2f",
+  "completed": "2026-10-30T04:00:00Z",
+  "round": 4,
+  "reviewedHead": "e719a7f203f2d339a8f13881c704fa0f08b32f05",
+  "codeHead": "45c0fb686c2ccdea9f34e645335314c52b329581",
   "decision": "changes_requested",
-  "critical": 1,
-  "important": 0,
-  "minor": 2,
-  "ci": "Required set (rulesets): lint, typecheck, test, pr-title. CI run 40986598621 at code head 35db766a is queued; no CI run has completed on this branch since 65da1690 (run 40913687637). The compare 35db766a...8bda117f changes only .legion/INFRA-567/.",
-  "threads": "Round 2's six threads: five accepted (rule 7, newRuntime, the copy source, the whole-tag rule, the unconditional ARG check), with a Minor gap in rule 7 raised as a new inline comment; the label-check thread PRRT_kwDORFy7ds6xz7yX is unresolved because its fix fails a correctly labelled row.",
-  "thermonuclear": "Both run at 8bda117f; both CHANGES, both independently finding the label-check failure and the rule-7 spelling gap. I verified the first with anonymous reads of Docker Hub and ghcr.io.",
+  "critical": 0,
+  "important": 2,
+  "minor": 3,
+  "ci": "Required set (rulesets): lint, typecheck, test, pr-title. CI run 40991734132 at code head 45c0fb68 was cancelled at 03:17Z during the re-pin drain and has been re-run (queued). No CI run has completed on this branch since 65da1690 (run 40913687637). The compare 45c0fb68...e719a7f2 changes only .legion/INFRA-567/. A request for changes does not wait on CI.",
+  "threads": "Round 3's threads: all four accepted (PRRT_kwDORFy7ds6xz7yX re-answered, PRRT_kwDORFy7ds6x0i2Y, PRRT_kwDORFy7ds6x0i2d, PRRT_kwDORFy7ds6x0i2i); each already resolved. The replacement Go check brought two new findings, raised as new inline comments.",
+  "thermonuclear": "Both run at e719a7f2, both CHANGES. The deep review found the Go-row classifier mismatch and confirmed the real golang row passes (GOLANG_VERSION=1.27.1 at its amd64 config); the quality review found the same mismatch, dead test fixtures and a misleading error message. The Docker Hub read on every run is my own finding.",
   "keyFindings": [
     {
-      "severity": "critical",
-      "file": ".github/scripts/mirror-ci-images.sh:77",
-      "description": "The label check runs on every row whose per-digest tag the package lacks, which at this head is every row whose upstream names a tag (the package holds only the old tag names). Docker Hub's library/nats:2.15.1-alpine now names sha256:7ae34c25…, while the row (upstream already written nats:2.15.1-alpine@sha256:2ae57dfb…) pins 2ae57dfb…, an honest earlier build of that tag. So ci-images exits 1 on this pull request, its merge group and main, ci-ok goes red, and a re-run gets the same answer; the header's premise that a copied row 'was written now' is false whenever a tag is renamed or lost. Fix: skip the label check for an upstream that names its own @digest (rule 1 refusing one that is not the row's digest), or otherwise make the check fire only for a row whose digest is new, and correct the header, ci-images.yaml:8-11 and AGENTS.md."
+      "severity": "important",
+      "file": ".github/scripts/mirror-ci-images.sh:117",
+      "description": "image_go reads `$source`, the row's Docker Hub upstream at its digest, for every library/golang row on every ci-images run, held or copied. The package holds the same digest, so the read can come from `$registry@$digest`. As written it puts an anonymous Docker Hub fetch back into a CI job on every run that selects ci_images (each pull request touching the three filter files, each merge group, each such push to main), which is the fault class this change removes, and makes ci-images.yaml:10-11's 'reads Docker Hub a few times a year' false. Fix: read the config from the package for a held row and from the upstream only before a copy (or from the package after the copy), and keep the prose true."
+    },
+    {
+      "severity": "important",
+      "file": ".github/scripts/mirror-ci-images.sh:88",
+      "description": "The mirror script decides which rows are library/golang with its own parser, stripping only Docker Hub hosts, while check-ci-images.sh's upstream_parts strips any host. A row such as mirror.gcr.io/library/golang:1.27.1-alpine counts as the Go row for rules 3 and 7 but gets claimed_go='' here, so the Go check skips it silently: the label-bytes mismatch this round set out to catch. Fix: one shared parser module both scripts import (PYTHONPATH=.github/scripts, as workflow_paths is), or rule 1 refusing a row whose upstream host is not Docker Hub; add a case."
     },
     {
       "severity": "minor",
-      "file": ".github/scripts/check-ci-images.sh:687",
-      "description": "Rule 7 compares the parsed path with the literal library/golang; an upstream spelled docker.io/golang:… or golang:… parses to `golang` and escapes it (reproduced by both thermonuclear passes). Normalize Docker Hub's implicit library/ in upstream_parts, or refuse an upstream not written docker.io/<namespace>/<name>; one helper for the Go version rule 3 and rule 7 both read."
+      "file": ".github/scripts/mirror-ci-images.sh:121",
+      "description": "The refusal says to write the digest golang:$claimed_go names, which drops the -alpine variant (golang:1.27.1 is the Debian image); name the row's own upstream instead."
     },
     {
       "severity": "minor",
-      "file": ".github/scripts/mirror-ci-images.sh:29",
-      "description": "'It prints one line per row and one summary line' is no longer true: a copied row prints label, copy and copied lines."
+      "file": ".github/scripts/mirror-ci-images.test.sh:142",
+      "description": "Dead fixture lines left by the deleted tag read (:142-143, :204's tags append) and the harness prose describing upstream-tag reads (:8-9, :12-13, :116-117)."
+    },
+    {
+      "severity": "minor",
+      "file": ".github/scripts/mirror-ci-images.sh:32",
+      "description": "'every library/golang row' — a golang row whose upstream names a digest alone is skipped; say 'every tagged library/golang row'."
     }
   ],
   "contractCensus": "Not required: the refusals are this repository's own CI gates, every input in this tree, passing at the head."
