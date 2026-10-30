@@ -1,0 +1,14 @@
+kind: Fixed
+body: |-
+    The `answers` hook adds nothing to the context when Dispatch answers its own `404 NOT_FOUND`
+    "no route for …", as a build older than the answers route does, and no list read before from
+    that Dispatch has an item to show. Before, it added a line saying the answers could not be read
+    and telling the agent to run `dispatch answers`, a command that fails against that same
+    Dispatch. A list read before from that Dispatch is still carried, its left-out line naming no
+    command. The hook writes one line to stderr naming that Dispatch and that it has no answers
+    route, also when the refresher that ran a `!` token command made the read
+    (`answers-refresh.json` carries the `notice`). A proxy's 404 page, a 200 that is no answers
+    list and every other failed read still add the line naming why.
+time: 2026-10-30T09:08:26.929143037Z
+custom:
+    Issue: answers-line-on-old-dispatch
