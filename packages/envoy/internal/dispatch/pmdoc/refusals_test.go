@@ -154,6 +154,41 @@ func TestParseReadsALineBothParsersReadAsText(t *testing.T) {
 	}
 }
 
+// The refusal of a line that opens a block of HTML is a document's, not an inline replacement's:
+// a textblock's inline markdown lands inside a paragraph the document already holds, where no
+// line opens a block, so ParseInline reads such a line as what it is - inline HTML, or the text of
+// a tag no `>` closes - where every reader of a document's markdown refuses it
+// (dropHTMLFlowLines). Goldmark opens a block of HTML on both lines below when it reads a
+// document, so the refusal that still stands on that path is its own (ErrBlockHTML), the one the
+// inline reader never reached.
+func TestParseInlineReadsHTMLADocumentIsRefusedFor(t *testing.T) {
+	for _, test := range []struct{ name, markdown, kind, written string }{
+		{"a block-level tag after a hard break", "x  \n<div>y</div>", "html", "<div>"},
+		{"an unclosed block-level tag after a hard break", "Title\\\n<div", "text", "<div"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			nodes, err := ParseInline(test.markdown, NewWriteBudget())
+			if err != nil {
+				t.Fatalf("ParseInline(%q) = %v, want it read", test.markdown, err)
+			}
+			read := false
+			for _, node := range nodes {
+				written := node.Text
+				if value, ok := node.Attrs["value"].(string); ok {
+					written = value
+				}
+				read = read || node.Type == test.kind && strings.Contains(written, test.written)
+			}
+			if !read {
+				t.Errorf("ParseInline(%q) read no %s node holding %q", test.markdown, test.kind, test.written)
+			}
+			if _, err := ParseForWrite(test.markdown, nil); !errors.Is(err, ErrBlockHTML) {
+				t.Errorf("ParseForWrite(%q) = %v, want it refused as block HTML", test.markdown, err)
+			}
+		})
+	}
+}
+
 // browserBlockHTML is the part of htmlFlowRefusal's reason (html_flow.go) that says why the line it
 // names cannot be stored; the reason names the line itself, which differs from document to
 // document.

@@ -118,12 +118,7 @@ const documentLevel: Case[] = [
     `doc[${htmlParagraph("</script>")}]`,
     "</script>\n",
   ],
-  [
-    "a block opening three spaces in",
-    "   <b>\n",
-    `doc[${htmlParagraph("<b>")}]`,
-    "<b>\n",
-  ],
+  ["a block opening three spaces in", "   <b>\n", `doc[${htmlParagraph("<b>")}]`, "<b>\n"],
   [
     "a block of more than one line keeps every line after its first",
     "  <div>\n  foo\n  </div>\n",

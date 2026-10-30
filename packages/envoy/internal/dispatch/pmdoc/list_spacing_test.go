@@ -254,10 +254,14 @@ func TestQuotedListsAreSpreadWhereTheBrowserEditorsExitLands(t *testing.T) {
 // The corpus-errors documents whose list item the browser editor spreads otherwise than this parser
 // would store it are refused by every reader of caller markdown: the blank lines after a quoted item
 // ending in a footnote definition whose typed block holds a fence no fence closed, which that
-// parser reads as the code's, and a definition inside a typed block with a list item around it,
-// whose lines and the blank lines next to it that parser counts otherwise.
+// parser reads as the code's; a definition inside a typed block with a list item around it,
+// whose lines and the blank lines next to it that parser counts otherwise; and indented code in a
+// typed block in a list item ending in a whitespace-only line shorter than its indentation, which
+// that parser reads as a blank line spacing the item where goldmark drops it (measured for
+// PR #2507, at the fork point and at this head).
 func TestCorpusErrorsOfItemSpreadReadOtherwiseAreRefused(t *testing.T) {
 	for name, refusal := range map[string]string{
+		"item-callout-code-ending-in-a-short-whitespace-line":                                     typedCodeBlankInItem,
 		"quoted-star-item-definition-callout-unclosed-fence-then-blank-lines":                     quotedDefinitionFenceBlank,
 		"quoted-star-item-unspaced-definition-callout-unclosed-fence-then-blank-lines":            quotedDefinitionFenceBlank,
 		"quoted-star-item-definition-unspaced-callout-unclosed-fence-then-blank-lines":            quotedDefinitionFenceBlank,

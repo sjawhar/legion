@@ -274,10 +274,13 @@ test("a long body is parsed whole, so formatting past any visible cut renders an
 });
 
 test("a body the engine cannot parse shows its literal text, led and highlighted, and never as HTML", async () => {
-  // Proof's schema has no node for raw HTML, so the parse throws. A comment holding
-  // `<script>alert(1)</script> astrolabe <mark>x</mark>`, found by q=astrolabe, comes back escaped
-  // with one server mark, which `snippetSegments` decodes into exactly this source and one hit.
-  const source = "<script>alert(1)</script> astrolabe <mark>x</mark>";
+  // A span of a mark kind this schema has no parser for is a body the parse still throws on
+  // (`markdown-engine.test.ts`); raw HTML is no longer one, since the engine draws a block of
+  // HTML as a paragraph holding its text. A comment holding
+  // `<span data-dispatch="bogus">alert(1)</span> astrolabe <mark>x</mark>`, found by q=astrolabe,
+  // comes back escaped with one server mark, which `snippetSegments` decodes into exactly this
+  // source and one hit.
+  const source = '<span data-dispatch="bogus">alert(1)</span> astrolabe <mark>x</mark>';
   const { preview, rerender, view } = renderPreview({
     highlight: ["astrolabe"],
     lead: "Replying to Planner — ",
@@ -287,7 +290,7 @@ test("a body the engine cannot parse shows its literal text, led and highlighted
   try {
     await waitFor(() => expect(preview().getAttribute("data-markdown-fallback")).toBe("true"));
     expect(preview().textContent).toBe(`Replying to Planner — ${source}`);
-    expect(preview().querySelector("script")).toBeNull();
+    expect(preview().querySelector("span[data-dispatch]")).toBeNull();
     // The author's own `<mark>` is text; only the server's hit is a mark.
     expect(marks(preview())).toEqual(["astrolabe"]);
 

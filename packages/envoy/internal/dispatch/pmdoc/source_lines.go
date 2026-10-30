@@ -320,6 +320,41 @@ func (l sourceLines) blankInside(directive *typedDirective) bool {
 	return len(l.blanksOutsideCode(directive, l.blanks(l.lineOf(directive.Pos())+1, l.lineOf(directive.closer), blank))) > 0
 }
 
+// codeEndsBeforeABlankLine reports whether indented code directly inside typed block directive
+// ends before a whitespace-only line that still stands inside the block, above its closing fence:
+// a line shorter than the code's indentation, which both parsers leave out of the code
+// (codeColumns) and the browser editor's parser reads as a blank line of the list item around the
+// block, which it spreads (typedCodeBlankInItem). A line the code holds, its held lines among
+// them, is the code's text and no blank line, so the first line past the code's last is the one
+// that decides. In a quote, a line blank but for the quote's markers is such a line, and a line
+// without them ends the quote and the typed block with it.
+//
+// Only a block a fence closes answers: where none does, the block ends with its content, and the
+// blank lines after that content are the container's, which that parser was measured counting
+// both ways - it spreads the item of a block running to the document's end and leaves one whose
+// blank lines end the list item itself unspread (PR #2507).
+func (l sourceLines) codeEndsBeforeABlankLine(directive *typedDirective) bool {
+	if !directive.Closed {
+		return false
+	}
+	blank := whitespaceLine
+	if _, quoted := ancestor[*ast.Blockquote](directive); quoted {
+		blank = quoteBlankLine
+	}
+	fence := l.lineOf(directive.closer)
+	for child := directive.FirstChild(); child != nil; child = child.NextSibling() {
+		code, indented := child.(*ast.CodeBlock)
+		if !indented || code.Lines().Len() == 0 {
+			continue
+		}
+		after := l.lineOf(code.Lines().At(code.Lines().Len()-1).Start) + 1
+		if after < fence && l.blank(after, blank) {
+			return true
+		}
+	}
+	return false
+}
+
 // markersOrWhitespace reports whether line holds nothing but whitespace and quote markers.
 func markersOrWhitespace(line []byte) bool {
 	return len(bytes.Trim(line, " \t>\n")) == 0

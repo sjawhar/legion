@@ -96,19 +96,31 @@ func goldmarkSpreadsItemsBeforeBlanks(list *ast.List) bool {
 
 // readExactListSpacing reads, in a document holding no shape only the browser editor's parser and
 // this one read alike, each list whose spacing the lines alone decide as that parser reads it
-// (readListSpacing), and leaves every other list to goldmark's looseness. It names the one list it
-// cannot leave there: one in a typed block in a footnote definition with a blank line at or after
-// it (typedFootnoteListBlank) where goldmark leaves an item a blank line follows unspread. The
-// browser editor spreads such an item and never the list, and goldmark's looseness then reads the
-// list tight, or spreads it, or leaves the item a blank line follows holding one block unspread.
+// (readListSpacing), and leaves every other list to goldmark's looseness. It names the two lists it
+// cannot leave there, where that looseness reads an item the browser editor spreads as tight: one
+// in a typed block in a footnote definition with a blank line at or after it
+// (typedFootnoteListBlank), where that editor spreads the item a blank line follows and never the
+// list, and goldmark's looseness then reads the list tight, or spreads it, or leaves that item
+// holding one block unspread; and one whose item holds a typed block whose indented code ends in a
+// whitespace-only line (typedCodeBlankInItem).
 func readExactListSpacing(root ast.Node, lines sourceLines) (refusal string) {
 	_ = ast.Walk(root, func(node ast.Node, entering bool) (ast.WalkStatus, error) {
 		switch node := node.(type) {
 		case *ast.Paragraph, *ast.TextBlock, *ast.Heading:
 			return ast.WalkSkipChildren, nil
 		case *ast.List:
-			if entering && readListSpacing(node, lines) == typedFootnoteListBlank && !goldmarkSpreadsItemsBeforeBlanks(node) {
+			if !entering {
+				return ast.WalkContinue, nil
+			}
+			reason := readListSpacing(node, lines)
+			if reason == typedFootnoteListBlank && !goldmarkSpreadsItemsBeforeBlanks(node) {
 				refusal = typedFootnoteListBlank
+				return ast.WalkStop, nil
+			}
+			// A list the lines decide carries that reading already; only one left to goldmark's
+			// looseness, which reads such an item tight, is refused.
+			if reason != "" && codeBlankSpreadsATightItem(node, lines) {
+				refusal = typedCodeBlankInItem
 				return ast.WalkStop, nil
 			}
 		}
@@ -362,6 +374,52 @@ const typedFootnoteListBlank = "a blank line at or after a list in a typed block
 // a footnote definition whose typed block ends in a fenced code block no fence closed
 // (typedFenceKeepsBlankLinesAfter), where they would spread the item (definitionEndSpreadsItem).
 const quotedDefinitionFenceBlank = "blank lines after a list item in a quote ending in a footnote definition whose typed block holds a fenced code block no fence closed, which the browser editor reads as that code's lines and not as spacing the item"
+
+// typedCodeBlankInItem is the refusal of indented code in a typed block a fence closes, in a list
+// item, that ends in a whitespace-only line the code does not hold (codeEndsBeforeABlankLine).
+// Indented code keeps a blank line of four columns or more past its container and ends before a
+// shorter one, in both parsers (codeColumns), so that line is a blank line of the list item to the
+// browser editor, which spreads the item by it, while goldmark drops the line and leaves the item
+// to its looseness, which reads it tight. A blank line anywhere else in a typed block in a list
+// item is left to that looseness, since the writer writes such a line - a tight item's typed block
+// holding two blocks is written that way - and the documents Dispatch stores were read with it.
+// The writer writes no indented code, so no document it wrote holds this shape, and a caller who
+// writes it can write the code fenced or the line as wide as the code.
+const typedCodeBlankInItem = "indented code in a typed block in a list item ending in a whitespace-only line shorter than the code's indentation, which the browser editor reads as a blank line spacing the item"
+
+// codeBlankSpreadsATightItem reports whether an item of list holds such code
+// (holdsCodeEndingInABlankLine) where goldmark's looseness leaves that item unspread: a tight
+// list's item, or one holding a single block (parseList), which is the item the browser editor
+// reads spread.
+func codeBlankSpreadsATightItem(list *ast.List, lines sourceLines) bool {
+	for item := list.FirstChild(); item != nil; item = item.NextSibling() {
+		if (list.IsTight || item.ChildCount() < 2) && holdsCodeEndingInABlankLine(item, lines) {
+			return true
+		}
+	}
+	return false
+}
+
+// holdsCodeEndingInABlankLine reports whether container holds, in a typed block it holds, indented
+// code ending in a whitespace-only line the code does not hold (codeEndsBeforeABlankLine). It
+// looks through the typed blocks and the footnote definitions inside it, whose lines are the list
+// item's own, and through no quote or list, which the browser editor's parser counts a blank line
+// inside as that quote's or that list's.
+func holdsCodeEndingInABlankLine(container ast.Node, lines sourceLines) bool {
+	for child := container.FirstChild(); child != nil; child = child.NextSibling() {
+		switch child := child.(type) {
+		case *typedDirective:
+			if lines.codeEndsBeforeABlankLine(child) || holdsCodeEndingInABlankLine(child, lines) {
+				return true
+			}
+		case *extensionast.Footnote:
+			if holdsCodeEndingInABlankLine(child, lines) {
+				return true
+			}
+		}
+	}
+	return false
+}
 
 // blankAtOrAfterTypedList reports whether a line blank(line) holds stands from list's start up to
 // the next block, or to the closing fence of directive, the typed block around it, where nothing

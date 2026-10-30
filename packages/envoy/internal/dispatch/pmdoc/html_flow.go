@@ -62,6 +62,19 @@ func htmlFlowLines(node ast.Node) map[int]struct{} {
 	return lines
 }
 
+// dropHTMLFlowLines takes the lines a parse recorded on root off it (htmlFlowLinesAttr), so that
+// nothing is refused for opening a block of HTML the browser editor's parser reads. The reader of
+// one textblock's inline markdown calls it (readInline): that refusal is about a document's block
+// structure - a line that opens a block of HTML where it lands - and inline markdown lands inside
+// a textblock the document already holds, where a line opens no block at all, since the renderer
+// escapes a marker that would open one there (escape.go, htmlBlockStart). The readers of a
+// document's markdown keep the recording, so a caller who writes such a line as a document's own
+// is refused as before. Goldmark's node only sets attributes, so the lines are set to none rather
+// than removed, which htmlFlowLines reads as a document that holds none.
+func dropHTMLFlowLines(root ast.Node) {
+	root.SetAttribute(htmlFlowLinesAttr, map[int]struct{}(nil))
+}
+
 // htmlFlowRefusal is why node, a paragraph, text block or setext heading holding lines, cannot be
 // stored when the browser editor's parser reads one of them as opening a block of HTML (recorded,
 // from htmlFlowLines), naming the first such line as source's markdown numbers it from firstLine,
