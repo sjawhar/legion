@@ -751,8 +751,8 @@ func (s *Service) observeRoomLog(room string, instance *roomInstance, replica *r
 
 // observeRoomUpdates drains live's update log for a caller that is not one of its observers
 // (observeRoomLog), and arms the settlement what it classified asks for, as the observer it
-// stood in for would have. A room with no replica - no transaction since it loaded - or no listed
-// instance has nothing to drain.
+// stood in for would have. A document this process lists no replica or no instance for - one no
+// room of its loaded, or whose room's document has been collected - has nothing to drain.
 func (s *Service) observeRoomUpdates(room string, live *crdt.Doc) {
 	instance := s.instanceOf(live)
 	replica := s.replicaOf(live)

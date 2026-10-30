@@ -343,8 +343,15 @@ func newDocumentCopy(options ...crdt.DocOption) *crdt.Doc {
 // caller. A replica outside the schema (a nil markdown) renders the update, so such an update
 // still logs and counts as changed.
 //
-// The replica starts from the state the log records as of just before the room's first transaction
-// since its load, so a room that is only read holds no replica.
+// The replica starts from the room as of its last commit, which is either the state the log
+// records as of just before the room's first transaction since its load (start) or, for a room
+// that has committed nothing since the log opened, the copy a read of that room takes
+// (startFromRead). The second is why a room in use holds one copy of its document rather than a
+// fresh one for every read: a read of a room with no replica copies the whole document under the
+// room's lock and throws the copy away (holdLive), and a room nothing has written in this process
+// - the room a cold write's settlement loads (publishLiveWrite), or one opened to be read - is
+// read like that for as long as it stands. Handing the first such copy to the replica also keeps
+// the room's next commit from building a second document beside the one the room already holds.
 type renderedReplica struct {
 	mu sync.Mutex
 	// waiting counts the update observers waiting for mu (lockForUpdate).
@@ -467,7 +474,10 @@ func (r *renderedReplica) observe(room string, classify func(update crdt.LoggedU
 	r.lockForUpdate()
 	defer r.mu.Unlock()
 	base, updates := r.log.Drain()
-	if base != nil {
+	// A base recorded for a replica that already holds a copy is the state that copy was taken
+	// at (startFromRead), so it starts nothing: the first commit after a read started the replica
+	// records the room as it stood when that read copied it, and no transaction moved it since.
+	if base != nil && r.doc == nil {
 		r.start(room, base)
 	}
 	for i, update := range updates {
@@ -578,6 +588,38 @@ func (r *renderedReplica) start(room string, base []byte) {
 		r.doc, r.markdown = nil, nil
 		return
 	}
+	r.startAt(doc)
+}
+
+// startFromRead is the replica started from doc, the copy a read of the room has just taken
+// (snapshotDocument), for that read to walk while it holds mu, which the caller releases. It
+// returns nil, taking nothing and holding nothing, for a replica the copy cannot start, and the
+// read walks its copy as it did before. The copy is taken either way (holdLive), so a read pays
+// for this the replica's render alone, once for the room.
+//
+// The copy stands for the room only while the room has committed nothing the replica has yet to
+// take: a replica holding no document whose log holds no update, read here after the copy was
+// taken. The copy encodes under the room's own document lock, so a transaction committing while
+// it is taken either logged its update, which this read of the log sees, or had not reached the
+// lock when the encode read the room. So a copy this starts the replica from is the room as of
+// its last commit, which is the state the log's own base would start the replica from: the first
+// transaction to commit after this records that same state as the base, which observe then
+// passes over.
+func (r *renderedReplica) startFromRead(doc *crdt.Doc) *crdt.Doc {
+	if r.waiting.Load() > 0 || !r.mu.TryLock() {
+		return nil
+	}
+	if r.doc != nil || r.log.Pending() > 0 {
+		r.mu.Unlock()
+		return nil
+	}
+	r.startAt(doc)
+	return doc
+}
+
+// startAt makes doc the replica's document and takes its rendering as the one the replica's next
+// update is measured against. The caller holds mu.
+func (r *renderedReplica) startAt(doc *crdt.Doc) {
 	r.doc = doc
 	if markdown, _, err := renderDocumentForUpdate(doc); err == nil {
 		r.markdown = &markdown
@@ -633,16 +675,18 @@ func listResident(listing *sync.Map, live *crdt.Doc, value any) {
 }
 
 // readLive runs read against live, a room's resident document, as of one moment: live's replica
-// when it holds every update the room has committed (renderedReplica.hold), else a copy taken under
-// live's document lock (snapshotDocument) - while live has no replica, since the room has had no
-// transaction since it loaded, whenever another holds the replica's lock or the update observer
-// waits for it, and in the moment between a commit and the observer that classifies it. A read
-// never waits for that lock: the update observer takes it for each peer update before ygo
-// broadcasts the update to the room's other browsers, so a read queued behind it would stall their
-// keystrokes for its walk, and every read queued behind that one too. It opens no transaction on
-// live, since ygo hands the room's persistence an update for every transaction it commits, even one
-// that only reads. The caller must not hold live's document lock - be inside a Yjs transaction on
-// it - since the copy encodes under that lock, and read must not keep doc past its return.
+// when it holds every update the room has committed (renderedReplica.hold), else a copy taken
+// under live's document lock (snapshotDocument) - whenever another holds the replica's lock or
+// the update observer waits for it, and in the moment between a commit and the observer that
+// classifies it. A copy taken because the room has committed nothing since it loaded starts the
+// replica instead of being thrown away (startFromRead), so a room read and never written is
+// copied once rather than once a read. A read never waits for the replica's lock: the update
+// observer takes it for each peer update before ygo broadcasts the update to the room's other
+// browsers, so a read queued behind it would stall their keystrokes for its walk, and every read
+// queued behind that one too. It opens no transaction on live, since ygo hands the room's
+// persistence an update for every transaction it commits, even one that only reads. The caller
+// must not hold live's document lock - be inside a Yjs transaction on it - since the copy encodes
+// under that lock, and read must not keep doc past its return.
 func (s *Service) readLive(room string, live *crdt.Doc, read func(doc *crdt.Doc)) error {
 	doc, release, err := s.holdLive(room, live)
 	if err != nil {
@@ -654,14 +698,16 @@ func (s *Service) readLive(room string, live *crdt.Doc, read func(doc *crdt.Doc)
 }
 
 // holdLive is live as of one moment, as readLive reads it, for the caller to walk until it calls
-// release: the replica, holding its lock, or a copy. A caller that must take the room as of one
-// moment under a lock of its own takes it here under that lock and walks it once it has released
-// that lock (captureLiveTextAndAuthors).
+// release: the replica, holding its lock, or a copy, which starts the replica when it can
+// (startFromRead) and is then held under that lock too. A caller that must take the room as of
+// one moment under a lock of its own takes it here under that lock and walks it once it has
+// released that lock (captureLiveTextAndAuthors).
 func (s *Service) holdLive(room string, live *crdt.Doc) (doc *crdt.Doc, release func(), err error) {
 	if live == nil {
 		return nil, nil, errDocUnloaded
 	}
-	if replica := s.replicaOf(live); replica != nil {
+	replica := s.replicaOf(live)
+	if replica != nil {
 		if doc := replica.hold(); doc != nil {
 			return doc, replica.mu.Unlock, nil
 		}
@@ -669,6 +715,11 @@ func (s *Service) holdLive(room string, live *crdt.Doc) (doc *crdt.Doc, release 
 	copied, err := snapshotDocument(live)
 	if err != nil {
 		return nil, nil, err
+	}
+	if replica != nil {
+		if doc := replica.startFromRead(copied); doc != nil {
+			return doc, replica.mu.Unlock, nil
+		}
 	}
 	return copied, func() {}, nil
 }
@@ -696,10 +747,11 @@ func (s *Service) liveTree(room string, live *crdt.Doc) (*pmdoc.Node, error) {
 // hold returns the replica holding mu, which the caller releases, when it holds every update the
 // room has committed - its log holds none the observer has yet to classify - so it is the room as
 // of the last commit. It returns nil, holding nothing, for a replica another holds mu on (the
-// update observer, or another read) or the observer waits for (lockForUpdate), one the room's
-// first transaction has not made yet, and one behind the room's latest commit: a read never moves
-// the replica, since an update applied by a read would be rendered by no observer and credited to
-// nobody, which is the loss the log exists to prevent (renderedReplica).
+// update observer, or another read) or the observer waits for (lockForUpdate), one neither a
+// commit nor a read has started yet (start, startFromRead), and one behind the room's latest
+// commit: a read never moves the replica, since an update applied by a read would be rendered by
+// no observer and credited to nobody, which is the loss the log exists to prevent
+// (renderedReplica).
 func (r *renderedReplica) hold() *crdt.Doc {
 	if r.waiting.Load() > 0 || !r.mu.TryLock() {
 		return nil
