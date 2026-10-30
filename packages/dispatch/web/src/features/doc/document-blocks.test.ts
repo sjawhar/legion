@@ -48,13 +48,13 @@ test("a list is one block, each of its items with it", () => {
   expect(blocks).toEqual([{ source: list, kind: "list" }]);
 });
 
-test("a heading records its level", () => {
+test("a heading is one block at every depth, whatever follows it", () => {
   const blocks = splitBlocks("# Rollout plan\n\nThe plan.\n\n###### Footnote\n");
 
   expect(blocks).toEqual([
-    { source: "# Rollout plan", kind: "heading", level: 1 },
+    { source: "# Rollout plan", kind: "heading" },
     { source: "The plan.", kind: "paragraph" },
-    { source: "###### Footnote", kind: "heading", level: 6 },
+    { source: "###### Footnote", kind: "heading" },
   ]);
 });
 

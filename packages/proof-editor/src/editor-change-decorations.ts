@@ -104,16 +104,18 @@ function positionAt(
 }
 
 /** The position a widget is drawn at: the one its offset names inside the block's text, or the
- *  start of the whole block where it names none. */
+ *  start of the whole block where it names none. `runsOf` is the walk of the block's inline
+ *  content, shared with the rest of the set. */
 function widgetPosition(
   doc: ProseMirrorNode,
   blocks: readonly TopLevelBlock[],
-  widget: BlockWidget
+  widget: BlockWidget,
+  runsOf: (blockIndex: number) => readonly TextRun[]
 ): number | undefined {
   const block = blocks[widget.blockIndex];
   if (widget.offset !== undefined) {
     if (block === undefined) return undefined;
-    return positionAt(textRuns(block), widget.offset, "from");
+    return positionAt(runsOf(widget.blockIndex), widget.offset, "from");
   }
   if (widget.blockIndex === blocks.length) return doc.content.size;
   return block?.start;
@@ -133,10 +135,23 @@ function widgetElement(view: EditorView, widget: BlockWidget): HTMLElement {
 }
 
 /** The set the entries draw over `doc`. An entry naming a block the document does not hold, or
- *  offsets its text does not reach, names nothing to draw and is dropped. */
+ *  offsets its text does not reach, names nothing to draw and is dropped.
+ *
+ *  Each block's inline content is walked once for the whole set, however many entries and
+ *  widgets name it: a rewritten paragraph carries an entry for every run of words it gained and
+ *  a widget for every run it lost, and the set is rebuilt on every change of the document. */
 function changeDecorations(doc: ProseMirrorNode, value: ChangeDecorations): DecorationSet {
   if (value.text.length === 0 && value.widgets.length === 0) return DecorationSet.empty;
   const blocks = topLevelBlocks(doc);
+  const walked = new Map<number, readonly TextRun[]>();
+  /** The runs of the block at `blockIndex`, which the caller has already found in `blocks`. */
+  const runsOf = (blockIndex: number): readonly TextRun[] => {
+    const cached = walked.get(blockIndex);
+    if (cached !== undefined) return cached;
+    const runs = textRuns(blocks[blockIndex]);
+    walked.set(blockIndex, runs);
+    return runs;
+  };
   const decorations: Decoration[] = [];
   for (const entry of value.text) {
     const block = blocks[entry.blockIndex];
@@ -149,14 +164,14 @@ function changeDecorations(doc: ProseMirrorNode, value: ChangeDecorations): Deco
       }
       continue;
     }
-    const runs = textRuns(block);
+    const runs = runsOf(entry.blockIndex);
     const from = positionAt(runs, entry.from, "from");
     const to = positionAt(runs, entry.to, "to");
     if (from === undefined || to === undefined || from >= to) continue;
     decorations.push(Decoration.inline(from, to, { class: entry.className }));
   }
   for (const widget of value.widgets) {
-    const position = widgetPosition(doc, blocks, widget);
+    const position = widgetPosition(doc, blocks, widget, runsOf);
     if (position === undefined) continue;
     decorations.push(
       Decoration.widget(position, (view) => widgetElement(view, widget), {

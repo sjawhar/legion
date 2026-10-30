@@ -400,10 +400,10 @@ export function ProofDocument({
   // pressed. A document is its own scope, since the issue page and a project's document page both
   // render one. A pane pushes no scope and registers no binding: the scope stack belongs to the
   // page the reader is on, and a pane's editor takes no edits, so it would never offer Comment.
-  useKeymapScope(surface === "pane" ? null : "document");
+  useKeymapScope(inPane ? null : "document");
   useKeymap(
     "document",
-    surface === "pane"
+    inPane
       ? []
       : [
           {
@@ -843,7 +843,7 @@ export function ProofDocument({
       ) : null}
       {/* The Open-decisions navigator walks the page's own document; a pane leaves it to the
           list beside it. */}
-      {surface === "page" && version === undefined && openDecision !== undefined ? (
+      {!inPane && version === undefined && openDecision !== undefined ? (
         <nav
           aria-label="Open decisions"
           className="flex min-h-11 items-center gap-2 md:h-7 md:min-h-0"

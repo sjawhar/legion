@@ -9,13 +9,13 @@ import { LoadingSkeleton } from "../../components/LoadingSkeleton";
 import { quoteAccentBorder } from "../../theme/classes";
 import { versionsNewestFirst } from "../artifacts/ArtifactHeader";
 import { CHANGED_BLOCK_CLASS } from "../doc/change-marks";
-import { blockOffsets } from "../doc/marks";
 import { ProofDocument } from "../doc/ProofDocument";
 import { DocumentRuntime } from "../doc/runtime";
 import { loadBlockSchema } from "../doc/schema";
-import { scrollBlockToTop } from "../doc/scroll-block";
+import { BLOCK_ID_ATTRIBUTE, scrollBlockToTop, scrollElementToTop } from "../doc/scroll-block";
 import { VersionView } from "../doc/VersionView";
 import { AskCard } from "./AskCard";
+import { isDecisionAsk } from "./ask-decision";
 import { ReadingPaneHead } from "./ReadingPaneHead";
 
 /**
@@ -24,11 +24,6 @@ import { ReadingPaneHead } from "./ReadingPaneHead";
  * holding `j` down a list of thirty questions opens one room, not thirty.
  */
 const DOCUMENT_SETTLE_MS = 200;
-
-/** The attribute `@legion/proof-editor` stamps a block's id onto (`BLOCK_ID_DOM_ATTR`), written
- *  out rather than imported for the reason `features/doc/scroll-block.ts` gives: a value import
- *  from the editor library would pull it out of the editor's lazy chunk. */
-const BLOCK_ID_ATTRIBUTE = "data-block-id";
 
 /** What the selected question is, which is what the column shows. */
 type PaneSubject =
@@ -43,9 +38,8 @@ function subjectOf(ask: InboxRow): PaneSubject {
   if (ask.kind === "approval" && ask.approval !== undefined) {
     return { approval: ask.approval, kind: "approval" };
   }
-  const blockId = ask.block_id;
-  if (blockId !== undefined && blockId !== null && ask.block_artifact !== undefined) {
-    return { artifactId: ask.block_artifact.id, blockId, kind: "decision" };
+  if (isDecisionAsk(ask)) {
+    return { artifactId: ask.block_artifact.id, blockId: ask.block_id, kind: "decision" };
   }
   return { kind: "card" };
 }
@@ -78,24 +72,26 @@ function sectionHeadingId(content: HTMLElement, blockId: string): string | undef
   return undefined;
 }
 
-/** The bar that marks the section down to the decision block, from the offsets `marks.ts`
- *  already computes for the margin, plus the decision block's own height. */
+/** The bar that marks the section down to the decision block: where the section's heading
+ *  stands in the column's own scrolled content, and from there to the foot of that block. Both
+ *  are read as single rects - the margin's `blockOffsets` measures every block in the document,
+ *  and this runs on every batch of mutations a live document makes. */
 function sectionBarOf(
   content: HTMLElement,
   headingId: string | undefined,
-  blockId: string
+  block: HTMLElement
 ): SectionBar | undefined {
   if (headingId === undefined) {
     return undefined;
   }
-  const offsets = blockOffsets(content);
-  const top = offsets.get(headingId);
-  const blockTop = offsets.get(blockId);
-  const block = blockElement(content, blockId);
-  if (top === undefined || blockTop === undefined || block === null) {
+  const heading = blockElement(content, headingId);
+  if (heading === null) {
     return undefined;
   }
-  return { height: blockTop - top + block.getBoundingClientRect().height, top };
+  const contentTop = content.getBoundingClientRect().top;
+  const top = heading.getBoundingClientRect().top - contentTop;
+  const blockRect = block.getBoundingClientRect();
+  return { height: blockRect.top - contentTop - top + blockRect.height, top };
 }
 
 function sameBar(left: SectionBar | undefined, right: SectionBar | undefined): boolean {
@@ -261,7 +257,7 @@ export function ReadingPane({
           setSectionBlockId(headingId);
         }
       }
-      const bar = sectionBarOf(drawn, headingId, blockId);
+      const bar = sectionBarOf(drawn, headingId, block);
       setSectionBar((current) => (sameBar(current, bar) ? current : bar));
     };
     place();
@@ -298,7 +294,7 @@ export function ReadingPane({
       return;
     }
     nextChangeAt.current = { askId, at: (nextChangeAt.current.at + 1) % marked.length };
-    column.scrollTop += block.getBoundingClientRect().top - column.getBoundingClientRect().top;
+    scrollElementToTop(block, column);
   }, [askId]);
 
   const body = (): ReactNode => {

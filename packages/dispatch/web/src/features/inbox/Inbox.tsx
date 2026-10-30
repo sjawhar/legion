@@ -33,6 +33,7 @@ import { AssigneeFilter } from "./AssigneeFilter";
 import { AssignToMe } from "./AssignToMe";
 import { formatAskAge } from "./ask-age";
 import { outsideAskCard } from "./ask-card";
+import { isDecisionAsk } from "./ask-decision";
 import { type AskOrdinal, askOrdinals, controlName } from "./ask-name";
 import { BlockedOnYou, waitingOnHuman } from "./BlockedOnYou";
 import { BulkSnoozeBar } from "./BulkSnoozeBar";
@@ -99,7 +100,7 @@ function rowAround(node: Element | null): HTMLElement | null {
 /** The kind a short row names: a question written as a decision block of a document, a request
  *  to approve a document version, or any other question. */
 function askKind(ask: InboxRow): string {
-  if (ask.block_id !== undefined && ask.block_id !== null && ask.block_artifact !== undefined) {
+  if (isDecisionAsk(ask)) {
     return "Decision";
   }
   return ask.kind === "approval" ? "Approval" : "Question";
@@ -600,16 +601,27 @@ export function Inbox({
     const next = visible[at === -1 ? (delta === 1 ? 0 : visible.length - 1) : at + delta];
     if (next !== undefined) select(next.ask.id);
   };
-  const inFocusedRow = (selector: string) => focusedRow()?.querySelector<HTMLElement>(selector);
-  /** A control of the reading column: its head's Snooze, owner link and Copy ref, and the answer
-   *  form of whatever it is showing. */
-  const inPane = (selector: string) => paneRef.current?.querySelector<HTMLElement>(selector);
+  /** Where the Inbox's keys act: the reading column while it is on - its head's Snooze, owner
+   *  link and Copy ref, and the answer form of whatever it is showing - else the row holding
+   *  the focus. Null where there is neither, which is an Inbox with nothing selected (a wide
+   *  but empty list, or the commit a snooze of the selected row leaves behind) and a list
+   *  nothing in is focused. */
+  const hand = () => (paneShown ? paneRef.current : focusedRow());
+  /** The control `selector` names in whichever of the two that is, or null for none: every
+   *  `when` below tests this against `null`, so the accessor never answers `undefined`. */
+  const inHand = (selector: string) => hand()?.querySelector<HTMLElement>(selector) ?? null;
   const focusInPane = () => paneRef.current?.contains(document.activeElement) === true;
   const focusInList = () => listRef.current?.contains(document.activeElement) === true;
-  const selectedRow = () =>
-    selectedId === undefined
-      ? null
-      : (listRef.current?.querySelector<HTMLElement>(`[${ROW_ATTRIBUTE}="${selectedId}"]`) ?? null);
+  /** The row the column is showing, or null while it is showing none. Held to the selection,
+   *  because the effect keeping that row on screen is the selection's and nothing else's. */
+  const selectedRow = useCallback(
+    () =>
+      selectedId === undefined
+        ? null
+        : (listRef.current?.querySelector<HTMLElement>(`[${ROW_ATTRIBUTE}="${selectedId}"]`) ??
+          null),
+    [selectedId]
+  );
   // The bar is reached through its own ref: the empty state a pick can leave behind renders it
   // outside the list.
   const bulkPicker = () => bulkBarRef.current?.querySelector<HTMLElement>(BULK_PICKER_SELECTOR);
@@ -660,16 +672,13 @@ export function Inbox({
       keys: "Enter",
       label: paneShown ? "Answer the selected ask" : "Answer the focused ask",
       run: () => {
-        if (!paneShown) {
-          inFocusedRow("[data-ask-answer]")?.focus();
-          return;
-        }
         // A decision block's compact card folds its answer box behind "Add a note or answer in
-        // your own words"; Enter opens that disclosure and lands in the box it reveals.
-        if (inPane("[data-ask-answer]") === null) {
-          inPane(NOTE_DISCLOSURE_SELECTOR)?.click();
+        // your own words"; Enter opens that disclosure and lands in the box it reveals. Only
+        // the column draws that compact card: from a row the key goes straight to the box.
+        if (paneShown && inHand("[data-ask-answer]") === null) {
+          inHand(NOTE_DISCLOSURE_SELECTOR)?.click();
         }
-        inPane("[data-ask-answer]")?.focus();
+        inHand("[data-ask-answer]")?.focus();
       },
       // Enter is the list's key: it carries the reader from the row they are on into the
       // column's answer box. Inside the column the key is already somebody's - the card's own
@@ -680,8 +689,8 @@ export function Inbox({
       when: () =>
         paneShown
           ? !focusInPane() &&
-            (inPane("[data-ask-answer]") !== null || inPane(NOTE_DISCLOSURE_SELECTOR) !== null)
-          : inFocusedRow("[data-ask-answer]") != null,
+            (inHand("[data-ask-answer]") !== null || inHand(NOTE_DISCLOSURE_SELECTOR) !== null)
+          : inHand("[data-ask-answer]") !== null,
     },
     {
       id: "option",
@@ -690,34 +699,24 @@ export function Inbox({
         ? "Select option 1–9 of the selected ask"
         : "Select option 1–9 of the focused ask",
       run: (event) => {
-        const options = (paneShown ? paneRef.current : focusedRow())?.querySelectorAll<HTMLElement>(
-          "[data-ask-option]"
-        );
+        const options = hand()?.querySelectorAll<HTMLElement>("[data-ask-option]");
         options?.[Number(event.key) - 1]?.click();
       },
-      when: () =>
-        paneShown
-          ? inPane("[data-ask-option]") !== null
-          : inFocusedRow("[data-ask-option]") != null,
+      when: () => inHand("[data-ask-option]") !== null,
     },
     {
       id: "open",
       keys: "o",
       label: "Open the ask's issue or document",
-      run: () =>
-        (paneShown ? inPane("[data-inbox-owner]") : inFocusedRow("[data-inbox-owner]"))?.click(),
-      when: () =>
-        paneShown
-          ? inPane("[data-inbox-owner]") !== null
-          : inFocusedRow("[data-inbox-owner]") != null,
+      run: () => inHand("[data-inbox-owner]")?.click(),
+      when: () => inHand("[data-inbox-owner]") !== null,
     },
     {
       id: "copy-ref",
       keys: "y",
       label: paneShown ? "Copy the selected ask's reference" : "Copy the focused ask's reference",
-      run: () => (paneShown ? inPane(COPY_REF_SELECTOR) : inFocusedRow(COPY_REF_SELECTOR))?.click(),
-      when: () =>
-        paneShown ? inPane(COPY_REF_SELECTOR) !== null : inFocusedRow(COPY_REF_SELECTOR) != null,
+      run: () => inHand(COPY_REF_SELECTOR)?.click(),
+      when: () => inHand(COPY_REF_SELECTOR) !== null,
     },
     {
       id: "back",
@@ -765,10 +764,7 @@ export function Inbox({
         if (selected.length === 0) {
           // The short row carries no Snooze of its own: the reading column's head does, for the
           // row it is showing.
-          (paneShown
-            ? inPane("[data-inbox-snooze]")
-            : inFocusedRow("[data-inbox-snooze]")
-          )?.focus();
+          inHand("[data-inbox-snooze]")?.focus();
           return;
         }
         bulkPicker()?.focus();
@@ -777,11 +773,11 @@ export function Inbox({
       // they just ticked, the bar - but not from inside an ask they are answering: an option
       // radio takes no typed text, so the registry passes the key through, and the card's own
       // controls are not the list's. The issue page withholds its writing keys the same way.
+      // Inside the column that rule covers the lone Snooze too, the card there being the
+      // column's own.
       when: () =>
         (selected.length > 0 && outsideAskCard()) ||
-        (paneShown
-          ? inPane("[data-inbox-snooze]") !== null && outsideAskCard()
-          : inFocusedRow("[data-inbox-snooze]") != null),
+        (inHand("[data-inbox-snooze]") !== null && (!paneShown || outsideAskCard())),
     },
     {
       id: "back-from-bulk",
@@ -858,9 +854,8 @@ export function Inbox({
     if (!paneShown || selectedId === undefined) {
       return;
     }
-    const row = listRef.current?.querySelector<HTMLElement>(`[${ROW_ATTRIBUTE}="${selectedId}"]`);
-    row?.scrollIntoView?.({ block: "nearest" });
-  }, [paneShown, selectedId]);
+    selectedRow()?.scrollIntoView?.({ block: "nearest" });
+  }, [paneShown, selectedId, selectedRow]);
 
   if (inbox.isPending || whoAmI.isPending) {
     return <LoadingSkeleton label="Loading your inbox" />;

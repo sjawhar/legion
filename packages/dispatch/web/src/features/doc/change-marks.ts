@@ -1,7 +1,7 @@
 import type { BlockWidget, TextDecoration } from "@legion/proof-editor";
 import type { Node as ProseMirrorNode } from "prosemirror-model";
 
-import { type MarkdownEngine, renderWithEngine } from "../refs/markdown-engine";
+import { loadedEngine } from "../refs/markdown-engine";
 import { changedWords, pairBlocks } from "./change-set";
 
 /** The whole block a change touched. It marks the block without hiding any of its text. */
@@ -24,18 +24,6 @@ export interface ChangeMarks {
 /** Nothing marked: each caller owns the lists it is handed. */
 function noMarks(): ChangeMarks {
   return { text: [], widgets: [] };
-}
-
-/** The shared headless engine when a load has already resolved. `renderWithEngine` calls back in
- *  this task for an engine that is ready - the shell warms it after the first paint - and the
- *  cancel drops the later call this synchronous answer has no place for. */
-function readyEngine(): MarkdownEngine | undefined {
-  let engine: MarkdownEngine | undefined;
-  const cancel = renderWithEngine((ready) => {
-    engine = ready;
-  });
-  cancel();
-  return engine;
 }
 
 /** The text of each top-level block of `doc`, in the units the editor counts its own text in. */
@@ -70,7 +58,7 @@ function blockTexts(doc: ProseMirrorNode): string[] {
  */
 export function changeMarksAgainst(baselineMarkdown: string, doc: ProseMirrorNode): ChangeMarks {
   if (baselineMarkdown === "") return noMarks();
-  const baseline = readyEngine()?.parse(baselineMarkdown);
+  const baseline = loadedEngine()?.parse(baselineMarkdown);
   if (baseline === undefined) return noMarks();
 
   const before = blockTexts(baseline);

@@ -19,8 +19,8 @@ const CODE_FENCE = /^((?:[ \t]*>)*[ \t]*)((?:[-*+]|\d+[.)])[ \t]+)?(`{3,}|~{3,})
 /** A line that separates blocks: nothing, or only spaces and quote markers (`>` inside a quote). */
 export const BLANK_LINE = /^[ \t>]*$/;
 
-/** An ATX heading's first line, its hashes telling its level. */
-const HEADING = /^ {0,3}(#{1,6})(?:[ \t]|$)/;
+/** An ATX heading's first line, at any of its six depths. */
+const HEADING = /^ {0,3}#{1,6}(?:[ \t]|$)/;
 
 /** A block quote's first line. Its content is read as the quote, not as what it holds. */
 const QUOTE = /^ {0,3}>/;
@@ -83,18 +83,16 @@ export function codeFenceEnd(lines: readonly string[], start: number): number | 
 /** What a reader sees a block as. `other` is a quote, a callout, a thematic break or raw HTML. */
 export type BlockKind = "heading" | "paragraph" | "list" | "table" | "code" | "ask" | "other";
 
-/** One unit a reader sees, its `source` the block's own lines and `level` a heading's depth. */
+/** One unit a reader sees, its `source` the block's own lines exactly as they stand. */
 export interface DocumentBlock {
   source: string;
   kind: BlockKind;
-  level?: number;
 }
 
 /** The block `lines` spell, read from its first line (and, for a table, its second). */
 function describeBlock(lines: readonly string[]): DocumentBlock {
   const source = lines.join("\n");
-  const heading = HEADING.exec(lines[0]);
-  if (heading !== null) return { source, kind: "heading", level: heading[1].length };
+  if (HEADING.test(lines[0])) return { source, kind: "heading" };
   if (QUOTE.test(lines[0])) return { source, kind: "other" };
   if (lines.length > 1 && lines[0].includes("|") && TABLE_DELIMITER.test(lines[1])) {
     return { source, kind: "table" };

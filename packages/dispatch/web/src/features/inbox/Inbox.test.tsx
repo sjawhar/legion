@@ -2590,6 +2590,33 @@ test("Enter pressed inside the column belongs to the control holding it, and sti
   }
 });
 
+test("at the column's width with no column on the page, Enter is the focused control's", async () => {
+  // The Inbox is wide enough for the reading column and has nothing to select, so no column is
+  // mounted: `inbox-pane` is absent, exactly as it is in the commit a snooze of the last
+  // selected row leaves behind. The column's keys have nothing to act on there, and the
+  // registry's handler calls `preventDefault` for every binding it matches, so a key they claim
+  // anyway is a key the control holding the focus never gets - Enter on the assignee filter,
+  // on `Answers`, on the `Later` disclosure.
+  const narrow = widenToReadingPane();
+  const getInbox = spyOn(api, "getInbox").mockResolvedValue([]);
+  const { unmount } = renderInbox();
+
+  try {
+    await screen.findByTestId("inbox-list");
+    expect(screen.queryByTestId("inbox-pane")).toBeNull();
+    const filter = filterTrigger();
+    filter.focus();
+    // `fireEvent` answers whether the event survived its listeners: the button's own Enter is
+    // the browser's default action, so a swallowed key never presses it.
+    expect(fireEvent.keyDown(filter, { key: "Enter" })).toBe(true);
+    expect(document.activeElement).toBe(filter);
+  } finally {
+    unmount();
+    narrow();
+    getInbox.mockRestore();
+  }
+});
+
 test("a bulk snooze of the selected row keeps the list and the picker the reader is holding", async () => {
   const narrow = widenToReadingPane();
   const rows = [

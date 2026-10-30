@@ -10,7 +10,7 @@ import { CopyRefButton } from "../refs/CopyRefButton";
 import { buildIssuePath, buildProjectPath, itemRoute } from "../refs/routes";
 import { InboxOwnerLink } from "./AskOwnerLink";
 import { AssignToMe } from "./AssignToMe";
-import { controlName } from "./ask-name";
+import { askIssueKey, controlName } from "./ask-name";
 import { EarlierApproval } from "./EarlierApproval";
 import { SnoozeControl } from "./SnoozeControl";
 import { isUnassigned } from "./sections";
@@ -21,8 +21,8 @@ import { isSnoozed } from "./snooze";
  *  heading the pane found; before the document has drawn, the question's own block, and for an
  *  anchored question the block its quote sits in. */
 function openPagePath(ask: InboxRow, sectionBlockId: string | undefined): string | undefined {
-  const issueKey = ask.issue?.key ?? ask.issue_key;
-  if (issueKey !== null && issueKey !== undefined) {
+  const issueKey = askIssueKey(ask);
+  if (issueKey !== null) {
     return buildIssuePath({ key: issueKey, kind: "issue" });
   }
   if (ask.document === undefined) {

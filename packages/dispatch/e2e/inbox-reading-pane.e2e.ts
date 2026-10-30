@@ -1,4 +1,4 @@
-import { expect, type Locator, type Page, test } from "@playwright/test";
+import { expect, type Page, test } from "@playwright/test";
 import type { InboxRow } from "../web/src/api/types";
 
 import {
@@ -13,6 +13,7 @@ import {
   patchIssue,
   requestApproval,
 } from "./api";
+import { inboxList, inboxPane, selectedRow } from "./inbox-pane";
 import { resetDatabase } from "./seed";
 import { asUser } from "./users";
 
@@ -269,8 +270,8 @@ async function seedInbox(): Promise<Seed> {
 
 /** The reading column's two columns, as rendered boxes: the list and the pane beside it. */
 async function expectTwoColumns(page: Page): Promise<void> {
-  const list = page.getByTestId("inbox-list");
-  const pane = page.getByTestId("inbox-pane");
+  const list = inboxList(page);
+  const pane = inboxPane(page);
   await expect(list).toBeVisible();
   await expect(pane).toBeVisible();
   const [listBox, paneBox] = await Promise.all([list.boundingBox(), pane.boundingBox()]);
@@ -278,11 +279,6 @@ async function expectTwoColumns(page: Page): Promise<void> {
     throw new Error("the Inbox drew no box for one of its two columns");
   }
   expect(paneBox.x).toBeGreaterThanOrEqual(listBox.x + listBox.width);
-}
-
-/** The row the column is showing, which is the one the list marks as selected. */
-function selectedRow(page: Page): Locator {
-  return page.getByTestId("inbox-list").locator('[data-inbox-selected="true"]');
 }
 
 /**
@@ -331,8 +327,8 @@ test("the Inbox shows a decision block in the reading pane and answers it in two
   const alice = await asUser(browser, "alice");
   try {
     const page = await alice.newPage();
-    const list = page.getByTestId("inbox-list");
-    const pane = page.getByTestId("inbox-pane");
+    const list = inboxList(page);
+    const pane = inboxPane(page);
     const block = pane.locator(`[data-dispatch-ask-block="${DECISION_BLOCK}"]`);
 
     // The column shows from 1280 px, so both widths draw the same two columns, select the same
@@ -402,7 +398,7 @@ test("the reading pane approves a version and marks what changed since the last 
   try {
     const page = await alice.newPage();
     await page.setViewportSize({ height: 900, width: 1440 });
-    const pane = page.getByTestId("inbox-pane");
+    const pane = inboxPane(page);
     await page.goto(inboxAt(seed.approvalAskId));
     await expect(selectedRow(page)).toHaveAttribute("data-inbox-row", seed.approvalAskId);
 
@@ -447,9 +443,9 @@ test("the reading pane approves a version and marks what changed since the last 
     await expect
       .poll(async () => (await getArtifact(seed.approvalArtifactId, { login: "alice" })).approval)
       .toMatchObject({ state: "approved", version: 4 });
-    await expect(
-      page.getByTestId("inbox-list").locator(`[data-inbox-row="${seed.approvalAskId}"]`)
-    ).toHaveCount(0);
+    await expect(inboxList(page).locator(`[data-inbox-row="${seed.approvalAskId}"]`)).toHaveCount(
+      0
+    );
 
     // A first request has no approval to compare against, so the column marks nothing.
     await page.goto(inboxAt(seed.firstApprovalAskId));
@@ -471,7 +467,7 @@ test("the reading pane shows an anchored question and a question in no document 
   try {
     const page = await alice.newPage();
     await page.setViewportSize({ height: 900, width: 1440 });
-    const pane = page.getByTestId("inbox-pane");
+    const pane = inboxPane(page);
 
     await page.goto(inboxAt(seed.anchoredAskId));
     await expectTwoColumns(page);
@@ -495,7 +491,7 @@ test("the arrow keys, j, k, Enter and ?item= drive the reading pane", async ({ b
   try {
     const page = await alice.newPage();
     await page.setViewportSize({ height: 900, width: 1440 });
-    const pane = page.getByTestId("inbox-pane");
+    const pane = inboxPane(page);
 
     // A bare address selects the first row and writes it into the address.
     await page.goto(INBOX);
@@ -543,8 +539,8 @@ test("the Inbox keeps today's card below 1280 px and in the drawer @phone", asyn
     // One pixel below the column's width the Inbox is the list of cards it has always been.
     await page.setViewportSize({ height: 900, width: 1279 });
     await page.goto(INBOX);
-    await expect(page.getByTestId("inbox-list")).toBeVisible();
-    await expect(page.getByTestId("inbox-pane")).toHaveCount(0);
+    await expect(inboxList(page)).toBeVisible();
+    await expect(inboxPane(page)).toHaveCount(0);
     const decisionCard = page.getByTestId(`ask-${seed.decisionAskId}`);
     await expect(decisionCard.locator("[data-ask-answer]")).toBeVisible();
     await expect(decisionCard.getByRole("link", { name: "Open in document" })).toBeVisible();
@@ -552,7 +548,7 @@ test("the Inbox keeps today's card below 1280 px and in the drawer @phone", asyn
     // And so it is on a phone.
     await page.setViewportSize({ height: 844, width: 390 });
     await page.goto(INBOX);
-    await expect(page.getByTestId("inbox-pane")).toHaveCount(0);
+    await expect(inboxPane(page)).toHaveCount(0);
     await expect(decisionCard.locator("[data-ask-answer]")).toBeVisible();
     await expect(decisionCard.getByRole("link", { name: "Open in document" })).toBeVisible();
 

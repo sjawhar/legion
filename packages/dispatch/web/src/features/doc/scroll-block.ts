@@ -2,8 +2,23 @@ import { refocusAfterDiagrams } from "./refocus-after-diagrams";
 
 /** The attribute `@legion/proof-editor` stamps a block's id onto (`BLOCK_ID_DOM_ATTR`), written
  * out rather than imported: a value import from the editor library would pull it out of
- * `editor.ts`'s lazy chunk into every page that loads this module, as `ask-block.ts` explains. */
-const BLOCK_ID_ATTRIBUTE = "data-block-id";
+ * `editor.ts`'s lazy chunk into every page that loads this module, as `ask-block.ts` explains.
+ * Exported, so a reader of the drawn document names the attribute the same way. */
+export const BLOCK_ID_ATTRIBUTE = "data-block-id";
+
+/**
+ * Scrolls `container` so `element` sits at its top. A container already showing it there is not
+ * moved, the two rect tops being equal.
+ *
+ * This is the whole of the placement `scrollBlockToTop` performs, and the reading column's
+ * `Next change` performs it too, for a block it has found by its mark rather than by its id.
+ * That caller is deliberately not `scrollBlockToTop`: it wants this scroll alone, without the
+ * re-run after the diagrams draw and without cancelling a pending one.
+ */
+export function scrollElementToTop(element: Element, container: HTMLElement): void {
+  container.scrollTop +=
+    element.getBoundingClientRect().top - container.getBoundingClientRect().top;
+}
 
 /** The dispose of the latest scroll's re-run after the diagrams draw. One waits at a time, as the
  * live document's focus does (`focusInEditor` in `ProofDocument.tsx`): a newer scroll drops an
@@ -36,8 +51,7 @@ export function scrollBlockToTop(blockId: string, container: HTMLElement): boole
     if (block === null) {
       return;
     }
-    container.scrollTop +=
-      block.getBoundingClientRect().top - container.getBoundingClientRect().top;
+    scrollElementToTop(block, container);
   };
   scroll();
   disposeRerun = refocusAfterDiagrams(scroll);
