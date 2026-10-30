@@ -2,44 +2,37 @@
   "schemaVersion": 1,
   "phase": "test",
   "issue": "INFRA-562",
-  "completed": "2026-10-30T10:22:03Z",
-  "round": 14,
-  "testedHead": "d77a4ae02b0fdae6a04aa05bb4a9de32fdf7eb93",
-  "codeHead": "51702b24f103",
-  "scope": "Forward merge with main's #2478 (redelivery schedule) and #2508 (architect): fingerprint, item 3 on real binaries together with #2478's redeliver change, the two-process suite, CI at the code head.",
+  "completed": "2026-10-30T12:04:30Z",
+  "round": 15,
+  "testedHead": "02362d13a6dadfcdaca9719211492fe336b14daf",
+  "codeHead": "1d914afe59a7",
+  "scope": "Review round 10: main's #2478 daemon intake test runs envoy-dispatch redeliver-webhooks, which this PR makes refuse without DATABASE_URL (census item 1); the implementer gave that test a migrated Dispatch database.",
   "fingerprint": {
-    "previousVerifiedHead": "1668fdbecc780b874d9b3cfacdecf54d8dd1d682",
-    "previous": "fcf838eb300c3f49363a7ffa27f570df5433856d7368bc5bfe3a5b85fa33049a",
-    "current": "58631f688be6185a1038982427f91dff9a3040743fd30fb8398dea05b1a8d7da",
-    "verdict": "changed, read per file: only redeliver/sweep.go, redeliver/sweep_test.go, cmd/dispatch/README.md and cmd/dispatch/AGENTS.md differ, every line the resolution of #2478's rewrite of the sweep (72-hour schedule: NextAttemptAt, FirstDeliveredAt, Expired; 4xx asked for again; no 'exhausted'). This branch's item-3 logic survives in the merged sweep (redeliver/sweep.go:502-612): decide judges an in-flight claim before anything but Closed (:522-531, ClaimedElsewhere inside claimDeadline, voided after it); the claim writes only InFlight, ClaimedAt and Delivery (:566-570); a rate limit, shared or GitHub's, undoes the claim (:576-588); the outcome is one write on the claim's revision after GitHub answers (:589-609); refusedUnlisted revives an in-flight record outside the listing window. sweep_test.go: the helpers start a NATS server of their own, and one priming sweep sets the cursor. No other file's diff changed."
+    "previousVerifiedHead": "d77a4ae02b0fdae6a04aa05bb4a9de32fdf7eb93",
+    "previous": "58631f688be6185a1038982427f91dff9a3040743fd30fb8398dea05b1a8d7da",
+    "current": "05048b3785bfb0431be690916daa095a8457cf8bb0c823506262c32211ea9378",
+    "verdict": "changed by one test file alone: `jj diff --from d77a4ae0 --to 02362d13 --name-only` lists packages/daemon/internal/intake/redelivered_test.go beside the .legion/ handoffs, on the same fork point 96a7e5ea. No Dispatch (packages/envoy) file changed since round 14, so round 14's whole two-process suite (134/0/0 at d77a4ae0) and its redelivery row stand for this code; this round runs the changed test and its package."
   },
   "implementerProof": {
     "verdict": "verified",
-    "how": "Re-ran at d77a4ae0 (code 51702b24, merged with main through 96a7e5ea; GitHub MERGEABLE at 10:22Z against main b260b0c7, whose two later commits touch the broker and Envoy identity tokens): `cd packages/envoy && DISPATCH_TEST_DATABASE_URL=postgres://postgres@127.0.0.1:55432/postgres?sslmode=disable go test -count=1 -v ./internal/dispatch/redeliver/` -> ok 18.447s, 31 PASS, 0 FAIL, 0 SKIP (the four claim tests: died before its request past the deadline, outside the window, died after GitHub accepted, live claimant inside the deadline; and the dry-run claim test); `go test -count=1 ./internal/dispatch/githubapp/... ./internal/dispatch/githubapi/...` -> ok; `go test -tags multiprocess -count=1 -timeout 50m -v ./cmd/dispatch` -> ok 1014.067s, 134 top-level PASS, 0 FAIL, 0 '--- SKIP' (TestAWebhookRedeliveryWhoseProcessDiedAfterItsClaimIsRequestedAgain 5.42s, TestARateLimitOneProcessMetStopsTheOtherFromCallingGitHub 8.78s, TestADeliveryAKilledProcessLeftPendingIsSentByTheOther 137.51s, TestASendWhoseRequestIsCancelledAfterItsCommitReachesItsRecipient 13.12s, TestASendDuringAListenerTakeOverReachesItsSession 106.07s). Logs: $TMPDIR/redeliver-d77a4ae0.log, gh-d77a4ae0.log, mp-d77a4ae0.log."
+    "how": "Re-ran its command at 02362d13 against the pod's Postgres 17 and a running JetStream NATS 2.10.29 (another container's, listening at 127.0.0.1:14222 with monitoring at :18222; my own start on those ports was refused as already bound, and I left that server alone): `cd packages/daemon && LEGION_TEST_PG_DSN=postgres://postgres@127.0.0.1:55432/postgres?sslmode=disable LEGION_TEST_NATS_URL=nats://127.0.0.1:14222 LEGION_TEST_NATS_MONITOR_URL=http://127.0.0.1:18222 go test -count=1 -v -run TestADeliveryNATSRefusedIsRedeliveredByTheSweepAndApplied ./internal/intake/` -> PASS 8.23s: real envoy-dispatch and listener binaries; the listener answered GitHub 503 while NATS refused the subject; `envoy-dispatch redeliver-webhooks --since 1h` (now with DATABASE_URL on a database `envoy-dispatch backfill-block-ids` migrated) exited 0 and asked GitHub once; GitHub re-sent the delivery, the listener answered 200, and the daemon applied github.<id> once. The rest of the package: `go test -count=1 -skip TestConsumerLagCountsEveryConsumerWhileNATSRefusesTheOldestMessageRead ./internal/intake/` -> ok 57.106s, 73 PASS, 0 FAIL, 0 SKIP; the skipped test starts its own NATS container through testcontainers and panics here for want of a Docker host, an environment limit of this pod (as the implementer noted), in a file this PR does not touch. Logs: $TMPDIR/intake-02362d13.log, intake-all.log."
   },
   "failed": 0,
   "failures": [],
-  "item3NegativeControl": "Throwaway edit in the merged sweep (redeliver/sweep.go:523, a stale claim always read as held; restored after, nothing committed): `go test -tags multiprocess -count=1 -v -run TestAWebhookRedeliveryWhoseProcessDiedAfterItsClaimIsRequestedAgain ./cmd/dispatch` -> FAIL 'GitHub got redelivery requests [], want [3844000000000000017] once'. The two-process row (two real `envoy-dispatch redeliver-webhooks --since 1h` processes, one NATS, one Postgres, the GitHub webhook fake behind a proxy holding the POST, the first SIGKILLed while held) therefore pins item 3 on the merged code.",
-  "ci": "Read on GitHub at 10:22Z at head d77a4ae0 (the code and the handoff went out in one push without the skip-checks trailer, so CI runs on the pushed head): pr-title and changes queued; no lane settled. Not waited for.",
+  "negativeControl": "The test as it stood before this round (redelivered_test.go restored from 5287cc39 into the working copy, put back after; nothing committed), same command: FAIL 'envoy-dispatch redeliver-webhooks --since 1h: exit status 2 / redeliver-webhooks: DATABASE_URL is required: the GitHub rate limits every process obeys live there' - the merged tree's red `test` job the review named, and the refusal census item 1 promises.",
+  "ci": "Read on GitHub at 12:04Z at head 02362d13 (pushed without the skip-checks trailer, so CI runs on it): changes and pr-title queued; no lane settled. Not waited for. GitHub reports PR #2387 MERGEABLE.",
   "observations": [
+    "Census item 1 now has a consumer outside Dispatch: the daemon's #2478 intake test. Whether any deployment script runs `envoy-dispatch redeliver-webhooks` without DATABASE_URL is the census's claim (no hit in theorem-labs/agent-infra), not re-searched this round.",
     "Unchanged and not failures: a person's Retry during a take-over wait opens attempt 2 beside the renewed attempt 1 (existing rule); a resumed comment attempt opened by another person's Retry names the comment's author as actor; the test-hook fan-out (DISPATCH_TEST_HOOKS only) can miss a process whose LISTEN connection redials between the caller's pg_locks read and its NOTIFY; a claim or ask follow made during a comment request mid take-over can still give that session two copies."
   ],
   "proof": [
     {
-      "criterion": "Item 3 with #2478's redelivery schedule: a webhook redelivery whose process died between its claim and its request is requested again",
-      "surface": "envoy-dispatch redeliver-webhooks --since 1h, two real processes against one NATS, one Postgres 17 and the GitHub webhook fake behind a proxy that holds the POST",
-      "command": "cd packages/envoy && DISPATCH_TEST_DATABASE_URL=postgres://postgres@127.0.0.1:55432/postgres?sslmode=disable go test -tags multiprocess -count=1 -v -run TestAWebhookRedeliveryWhoseProcessDiedAfterItsClaimIsRequestedAgain ./cmd/dispatch (within the whole suite)",
-      "observed": "PASS 5.42s: GitHub got the delivery's redelivery request exactly once, from the second process",
-      "headSha": "d77a4ae02b0fdae6a04aa05bb4a9de32fdf7eb93",
-      "negativeControl": "a stale claim always read as held (throwaway edit at sweep.go:523) -> FAIL 'GitHub got redelivery requests [], want [3844000000000000017] once'"
-    },
-    {
-      "criterion": "Items 1, 2 and 8 on the merged head",
-      "surface": "Dispatch HTTP API on two real envoy-dispatch processes over one Postgres 17 and one NATS, with a fake Envoy listener",
-      "command": "cd packages/envoy && DISPATCH_TEST_DATABASE_URL=postgres://postgres@127.0.0.1:55432/postgres?sslmode=disable go test -tags multiprocess -count=1 -timeout 50m -v ./cmd/dispatch",
-      "observed": "ok 1014.067s, 134 PASS, 0 FAIL, 0 SKIP",
-      "headSha": "d77a4ae02b0fdae6a04aa05bb4a9de32fdf7eb93",
-      "negativeControl": "TestASendDuringAListenerTakeOverReachesItsSession/sent_to_a_session_the_listener_never_knows: a session the listener never knows settles failed: no live session after the real 12 s window"
+      "criterion": "Review round 10: main's daemon intake test runs redeliver-webhooks with the DATABASE_URL this PR requires, so the redelivery reaches the daemon",
+      "surface": "packages/daemon/internal/intake's end-to-end redelivery test: real envoy-dispatch and listener binaries, Postgres 17, JetStream NATS and the daemon's intake",
+      "command": "cd packages/daemon && LEGION_TEST_PG_DSN=postgres://postgres@127.0.0.1:55432/postgres?sslmode=disable LEGION_TEST_NATS_URL=nats://127.0.0.1:14222 LEGION_TEST_NATS_MONITOR_URL=http://127.0.0.1:18222 go test -count=1 -v -run TestADeliveryNATSRefusedIsRedeliveredByTheSweepAndApplied ./internal/intake/",
+      "observed": "PASS 8.23s: redeliver-webhooks exited 0, asked GitHub once, the listener answered the re-sent delivery 200 and the daemon applied it once; internal/intake 73 PASS",
+      "headSha": "02362d13a6dadfcdaca9719211492fe336b14daf",
+      "negativeControl": "the pre-change test (no DATABASE_URL) -> FAIL 'redeliver-webhooks: DATABASE_URL is required', exit status 2"
     }
   ]
 }
