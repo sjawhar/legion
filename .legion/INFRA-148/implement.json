@@ -2,7 +2,7 @@
   "schemaVersion": 1,
   "phase": "implement",
   "issue": "INFRA-148",
-  "completed": "2026-10-30T00:54:08Z",
+  "completed": "2026-10-30T01:24:50Z",
   "proof": [
     {
       "criterion": "A1: a session whose ask a person answered carries that answer word for word in its next model request (Oh My Pi)",
@@ -115,6 +115,14 @@
       "observed": "18 of 18 loaded runs `16 pass 0 fail`, every exit 0; unloaded 16 pass twice. The setup runs startup hooks (at most four) until answers.json holds the empty list, each run printing nothing or the failure line naming a wait of at least 150 ms.",
       "headSha": "6f0a2bba5db5677c012e96cf90557bda7dc4a297",
       "negativeControl": "With session-answers.ts's carry returning an empty cache as a list (no failure line), rebuilt: the repaired test fails at contextOf (stdout \"\", wanted the failure line); the file was restored."
+    },
+    {
+      "criterion": "Forward merge of main 10fc3b77 (item_blocks): both sides kept, the route count main's plus this branch's, this branch's migrations renumbered 0145-0147 and still applied in order",
+      "surface": "Dispatch Go tests on a cluster pgvector Postgres 18; the CI filter check",
+      "command": "cd packages/envoy && go test ./internal/dispatch/store ./internal/dispatch/sessionanswers -count=1; go test ./internal/dispatch/outbox -run 'SessionAnswers|Answers'; go test ./internal/dispatch/api -run 'SessionAnswers|RoutesTable|Routes|DecisionBlock|RelatedCheckBounds'; uv run --with pyyaml==6.0.2 bash .github/scripts/check-ci-filters.sh",
+      "observed": "store ok (593.953s, every migration through 0147 applied on a fresh database and the index list holds main's item_blocks indexes and this branch's three), sessionanswers ok (index-only scan of message_deliveries_session_created), outbox and api ok with registeredRoutes 146; check-ci-filters: every filter matches every file its job reads (25 gates) once envoy_go_race_docs names internal/dispatch/itemblocks; tsc clean in contracts, envoy-client, pi-envoy, claude-envoy.",
+      "headSha": "0e80c27f0b687310508449757cf877abc2337168",
+      "negativeControl": "Before the filter line, check-ci-filters.sh reported 6 problems: envoy-go-race-docs reads internal/dispatch/itemblocks/*.go, which its filter did not match."
     }
   ],
   "filesChanged": [
@@ -138,7 +146,8 @@
     "Forward merge of main 0a921021 (merge 5c38603c, #2225's claimant route and delivered-mention rule): envoy AGENTS.md, model.go and publisher.go keep this PR's reply-on-a-document routing and suppressed_authors rule with main's leftToMention wording; the outbox reply-mention case now records the mention as sent, and the session-answers mention-plus-follower test expects the follower copy left to the delivered mention",
     "Acceptance round: api/session_answers_test.go (stale paragraph dropped, follower+mention test renamed, new route+mention dedupe test with setCommentDelivery); claude-envoy answers-hook.test.ts request count compared against the expected count; forward merge of main 5fbd8391 (clean)",
     "Final round: forward merge of main 421055ab (merge ae693c92): main's comment-recipient routing (outbox recipients.go) and main's doc-read open-thread printing replace this branch's suppressed_authors/loadThreadRoot routing and doc-read comment printing, with their tests, help sentence, AGENTS.md text and fragments; migrations renumbered 0142-0144; claude-envoy dist/legion are main's; ci.yaml (which replaced envoy-and-contracts.yaml) installs the pinned Claude Code in the claude-envoy job; client census and tool count (25) updated. 865c9a6c: suggestions.go relatedBounds and the cancelled answer, related_check_test.go decision-block timeout test. 7ff7de30: ci.yaml and docs-pages.yaml filters name internal/dispatch/sessionanswers.",
-    "Round after the tester's final fail: packages/claude-envoy/tests/answers-hook.test.ts (READ_MISSED_LEAST_WAIT, fillAnswersCache, the empty-list hang case's setup). No product code."
+    "Round after the tester's final fail: packages/claude-envoy/tests/answers-hook.test.ts (READ_MISSED_LEAST_WAIT, fillAnswersCache, the empty-list hang case's setup). No product code.",
+    "Merge of main 10fc3b77 (fe58cd60): routes_table_test.go 146, store_test.go index list keeps both sides, migrations 0145-0147 with censuses, the cmd/dispatch README paragraphs, sessionanswers comments and the envoy fragment. 0e80c27f: ci.yaml envoy_go_race_docs names internal/dispatch/itemblocks (main's #2463 left it out)."
   ],
   "trickyParts": [
     "A person's reply to a message is a message.answered event, so S1 and the 0121 index take message.answered as well as message.created.",
