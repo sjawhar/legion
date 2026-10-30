@@ -2,32 +2,26 @@
   "schemaVersion": 1,
   "phase": "review",
   "issue": "INFRA-639",
-  "completed": "2026-10-30T14:05:00Z",
-  "round": 3,
-  "scope": "the six items of review 2 (5712152276), per the INFRA-512 architect's round cap of 2026-10-30T12:22:04Z",
+  "completed": "2026-10-30T20:45:00Z",
+  "round": 4,
+  "scope": "4f6d4d8e, the implementer's commit above my approval of 6b840b6c: the manifest names no issue key; replay-get and run-step.sh --replay take it from LOADTEST_REPLAY_ISSUE and refuse without it; fixtures LINUX-n -> ACME-n; changelog fragment pr2466",
   "decision": "approved",
-  "reviewedCodeHead": "b1106b94df24 (implementer), 2e7cce66 (merge of main, nothing under packages/envoy/loadtest), plus the reviewer's prose commits 5c9baa33 and the one this push carries",
-  "itemsVerified": [
-    "1 cgroup v1 quota: readCgroupCPUQuota reads cpu/cpu.cfs_quota_us and cpu.cfs_period_us when cpu.max is absent (-1 no quota), meta.json replay.cgroup_cpu_quota; TestReadCgroupCPUQuota and TestReplaySaturationRules cover v2, v1 and neither; tester's t-v1 and implementer's r8-v1 on this v1 pod record {version 1, 300000, 100000} and saturation_cores 2 from nproc",
-    "2 replay_reconstruct.go: six decodePayload sites, one wrap, lg.Key once at buildState",
-    "3 TestReplayEventTypeConstants deleted; its replacement's doc comment over-claimed (it builds events from the same constants), corrected by the reviewer's prose commit",
-    "4 replay.dispatch_build removed; top-level dispatch_build kept (run.go:905)",
-    "5 check_port block explanation only for the block default; tester drove all three branches",
-    "6 one sessionActor (map[string]any); fileBytes beside multipartFile in replay_run.go"
+  "reviewedCodeHead": "4f6d4d8e08aa plus the reviewer's prose commit carried by this push",
+  "verified": [
+    "no remaining reader of the manifest's issue or ref (replay_fetch_part reads file, slug, version, sha256)",
+    "both refusals run before any lock, download or build; run-step.test.sh case covers run-step's",
+    "fixture rename changes no digest or golden; go test ./loadtest/ green",
+    "no added line in the diff against main carries an issue key; check-private-names.sh clean",
+    "changie folds .Body only; Issue feeds the file name, and pr<N> fragments are existing practice"
   ],
-  "proseFixByReviewer": [
-    "5c9baa33: each check_port refusal says stop and rerun start, or set the port variable and rerun setup with it set, then start (start reads stack.json), at the architect's request of 13:23:12Z",
-    "this push: stack.sh:382 drops 'so no other root's block of ports explains it' (false when the port is another block's default); replay_bundle_test.go:119-122 doc comment says what TestReplayPlannerHandlesEveryTypeItNames checks and that it does not catch a misspelt constant"
-  ],
-  "thermonuclear": "pair at 5c9baa33: deep review APPROVE (2 Minor, both prose, fixed by the reviewer); code quality CHANGES (the over-claiming comment, fixed as prose; three copies of refusal text and a v2 naming nit, judged Minor, outside the six items, not requested)",
-  "threads": "all 7 round-2 threads answered and accepted: PRRT_kwDORFy7ds6x44ta, PRRT_kwDORFy7ds6x9g-3, PRRT_kwDORFy7ds6x9g-8, PRRT_kwDORFy7ds6x9g_B, PRRT_kwDORFy7ds6x9g_E, PRRT_kwDORFy7ds6x9g_K, PRRT_kwDORFy7ds6x9g_Q",
+  "proseFixByReviewer": "README.md:111 says how to find LOADTEST_REPLAY_ISSUE (search the bundle parts' name prefix, for this manifest dispatch search --query 'linux-replay-2026-10-26', which I ran: the hits include the issue's comment naming the parts); README.md:1025 merge-rule pointer no longer names an issue that need not carry the rule",
+  "thermonuclear": "pair at ad91a5f8 (code 4f6d4d8e): deep review APPROVE (2 Minor: fragment name vs AGENTS.md wording, merge-rule pointer; 1 hardening: issue value not pattern-checked); code quality CHANGES (refusal in two scripts with two messages, judged not a defect: each entry point refuses before its own work)",
   "critical": 0,
   "important": 0,
-  "minor": 4,
+  "minor": 3,
   "keyFindings": [
-    {"severity": "minor", "file": "packages/envoy/loadtest/replay_bundle_test.go:119", "description": "The doc comment claimed the test catches a misspelt constant; it builds events from the same constants. Fixed by the reviewer (comment only). evMessageDelivery and evMessageAccepted are caught by no test; they name events the replay never sends."},
-    {"severity": "minor", "file": "packages/envoy/loadtest/stack.sh:382", "description": "'so no other root's block of ports explains it' is false when the port is another block's default. Fixed by the reviewer."},
-    {"severity": "minor", "file": "packages/envoy/loadtest/stack.sh:379-383", "description": "Three die strings repeat clauses. Not a defect; outside the six items."},
-    {"severity": "minor", "file": "packages/envoy/loadtest/replay_record.go:145", "description": "saturation_cores_from says cgroup_cpu_max on v2 while meta.json's field is cgroup_cpu_quota; README:995 and :1003-1011 state both, so it is unambiguous. Not a defect."}
+    {"severity": "minor", "file": "packages/envoy/loadtest/README.md:1025", "description": "Pointer to 'the measuring change's own issue' named a place that need not carry the rule; fixed by the reviewer."},
+    {"severity": "minor", "file": "packages/envoy/loadtest/replay.sh:475", "description": "LOADTEST_REPLAY_ISSUE goes unescaped into the download URL path; only the operator sets it, to the operator's own DISPATCH_URL with its own token, and every part is sha256-checked. Hardening, no exploit path; not requested."},
+    {"severity": "minor", "file": "packages/envoy/loadtest/run-step.sh:129", "description": "The refusal is in run-step.sh and replay.sh with two messages; each entry point refuses before its own work. Not a defect."}
   ]
 }
