@@ -189,6 +189,42 @@ func TestAThreadReadWaitsForAWritersReadPhase(t *testing.T) {
 	}
 }
 
+// transactionIDHolders is how many backends of this test's database hold a transaction id, and
+// what each of them is running, so a holder this test does not drive is named rather than
+// counted alone.
+func transactionIDHolders(t *testing.T, database *store.Store) (int, string) {
+	t.Helper()
+	var holders int
+	var running string
+	if err := database.Pool.QueryRow(context.Background(), `
+		select count(*), coalesce(string_agg(query, ' | '), '') from pg_stat_activity
+		where datname = current_database() and backend_xid is not null and pid <> pg_backend_pid()
+	`).Scan(&holders, &running); err != nil {
+		t.Fatalf("read pg_stat_activity: %v", err)
+	}
+	return holders, running
+}
+
+// awaitNoTransactionIDHolder waits until no backend holds a transaction id. An issue create
+// leaves one write running past its answer: the refresh of the project's search term statistics
+// its related-item check starts for a project that has none (ensureSearchTermStats), a
+// background write with an id of its own. A test that counts every backend waits it out first,
+// as the refusal tests wait it out, so what it counts afterwards is the writers it drives.
+func awaitNoTransactionIDHolder(t *testing.T, database *store.Store) {
+	t.Helper()
+	deadline := time.Now().Add(30 * time.Second)
+	for {
+		holders, running := transactionIDHolders(t, database)
+		if holders == 0 {
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("%d backends still hold a transaction id after 30s: %s", holders, running)
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+}
+
 // Two anchored comments on one spec still run one at a time, and the second waits for the first
 // holding no transaction id, so a transaction waiting its turn holds back no live update capped by
 // the event horizon. Both land, their events in the order they arrived and the issue's sequence
@@ -204,6 +240,7 @@ func TestTwoWritersOfOneOwnerSerializeWithoutATransactionID(t *testing.T) {
 	release := func() { released.Do(func() { close(gate.release) }) }
 	defer release()
 	issue := createInteractionIssue(t, handler, "TEST", "Serialized writers", "alpha bravo charlie delta")
+	awaitNoTransactionIDHolder(t, database)
 
 	comment := func(quote, body string) *httptest.ResponseRecorder {
 		return dispatchRequest(t, handler, http.MethodPost, "/api/v1/issues/"+issue.Key+"/comments", map[string]any{
@@ -219,15 +256,9 @@ func TestTwoWritersOfOneOwnerSerializeWithoutATransactionID(t *testing.T) {
 	case <-time.After(10 * time.Second):
 		t.Fatal("the first comment never reached its quote's mark")
 	}
-	var holders int
-	if err := database.Pool.QueryRow(context.Background(), `
-		select count(*) from pg_stat_activity
-		where datname = current_database() and backend_xid is not null and pid <> pg_backend_pid()
-	`).Scan(&holders); err != nil {
-		t.Fatalf("read pg_stat_activity: %v", err)
-	}
+	holders, running := transactionIDHolders(t, database)
 	if holders != 0 {
-		t.Fatalf("%d backends hold a transaction id while the first comment is in its read phase, want none", holders)
+		t.Fatalf("%d backends hold a transaction id while the first comment is in its read phase, want none: %s", holders, running)
 	}
 
 	seconds := make(chan *httptest.ResponseRecorder, 1)
