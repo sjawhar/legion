@@ -224,12 +224,13 @@ type receiveReport struct {
 	// is the lease's status otherwise.
 	NoLease bool
 	Lease   leaseStatus
-	// Deliverer is whether this pod is the machine's deliverer as far as it knows: it holds the
-	// lease or runs without one (durableReceiver.holding), the lease record names this pod's own
-	// instance though it is not holding (its renewals lapsed and no other pod has taken the
-	// record yet), or the record names no holder at all as this pod last read it. With State
-	// other than receiveActive it says that nothing of the durable reaches a session and this pod
-	// knows of no other pod that would deliver it, which no answer of /healthz may call healthy.
+	// Deliverer is whether this pod is the machine's deliverer as far as it knows, from the one
+	// snapshot of the lease the report takes (durableReceiver.report): it holds the lease or runs
+	// without one, the lease record names this pod's own instance though it is not holding (its
+	// renewals lapsed and no other pod has taken the record yet), or the record names no holder
+	// at all as this pod last read it. With State other than receiveActive it says that nothing
+	// of the durable reaches a session and this pod knows of no other pod that would deliver it,
+	// which no answer of /healthz may call healthy.
 	Deliverer bool
 	// Failing is how long the term has failed to read, create, correct or subscribe to the
 	// durable (durableReceiver.failed), zero while it is not failing; FailingReason is the latest
@@ -386,12 +387,16 @@ func (r *durableReceiver) report() receiveReport {
 		report.Stuck = report.Failing >= r.timing.alarmAfter
 	}
 	r.mu.Unlock()
-	report.Deliverer = r.holding()
-	if r.lease != nil {
-		report.Lease = r.lease.Status()
-		report.Deliverer = report.Deliverer ||
-			report.Lease.ActiveInstance == "" || report.Lease.ActiveInstance == r.lease.instance
+	// One snapshot answers both questions the report asks of the lease, so the hold and the
+	// record it names are the lease at one instant rather than two reads a change falls between.
+	if r.lease == nil {
+		report.Deliverer = true
+		return report
 	}
+	status := r.lease.Status()
+	report.Lease = status
+	report.Deliverer = status.Holding ||
+		status.ActiveInstance == "" || status.ActiveInstance == r.lease.instance
 	return report
 }
 

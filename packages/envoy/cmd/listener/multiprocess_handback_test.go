@@ -40,11 +40,11 @@ func mpTakeoverHolder(t *testing.T, within time.Duration, first, second *mpPod) 
 // pod's connection, and with it the durable's push binding, until its ping timeout, minutes in
 // production; the second standby takes the released lease and must deliver all the same: every
 // message published since the node was lost reaches its session, and every message published after
-// the SIGTERM within 10 s of it. At 24a88452 (the INFRA-557 tester's finding) the second standby
-// logs "durable is push-bound by a subscriber without the lease; waiting for its binding to end"
-// and delivers nothing until the lost pod's connection goes (3 min 42 s against a real
-// nats-server 2.10.29), while the server redelivers each message to that connection every ack
-// wait until MaxDeliver is spent, so a message published meanwhile is never delivered at all.
+// the SIGTERM within 10 s of it. A standby that waited for the lost pod's binding to end instead
+// would log "durable is push-bound by a subscriber without the lease; waiting for its binding to
+// end" and deliver nothing until that connection goes (3 min 42 s against a real nats-server
+// 2.10.29), while the server redelivers each message to that connection every ack wait until
+// MaxDeliver is spent, so a message published meanwhile is never delivered at all.
 func TestTwoPodsGracefulStopAfterANodeLossHandsOverWithin10s(t *testing.T) {
 	uri := mpNATS(t)
 	binary := cmdtest.Build(t, "envoy-listener")
@@ -83,9 +83,9 @@ func TestTwoPodsGracefulStopAfterANodeLossHandsOverWithin10s(t *testing.T) {
 // that acknowledges nothing and comes back only at its ack wait. The pod started then takes the
 // released record, which no linger bridged to it (leaseHandBackBridge), so its term settles for an
 // ack wait, 7 s, not for a hand-back's 2 s delay: every message reaches its session in the order it
-// was published. At d3787812 (INFRA-557 review finding) the released record counted as a graceful
-// hand-back however long it had stood, so the new pod held for 3 s and delivered the messages
-// published after the stop before the older ones still due from the lost node's binding.
+// was published. A released record counted a graceful hand-back however long it had stood would
+// let the new pod hold for 3 s and deliver the messages published after the stop before the
+// older ones still due from the lost node's binding.
 func TestTwoPodsGracefulStopWithNoStandbyAfterANodeLossKeepsOrder(t *testing.T) {
 	uri := mpNATS(t)
 	binary := cmdtest.Build(t, "envoy-listener")
@@ -130,9 +130,9 @@ func TestTwoPodsGracefulStopWithNoStandbyAfterANodeLossKeepsOrder(t *testing.T) 
 // the server pushed to the lost pod come back over one ack wait, after newer ones, some to the
 // stopping holder and the rest to the second standby, which takes the released lease: each
 // session must still take its messages in the order they were published, as after a hard
-// take-over alone. At 24a88452 (the INFRA-557 tester's finding) the stopping holder NAKs what it
-// holds in the order it received it, and the second standby delivers at once, without the hold,
-// so messages published before the take-over reach their session after newer ones.
+// take-over alone. A stopping holder that NAKed what it holds in the order it received it, with
+// the second standby delivering at once and without the hold, would let messages published
+// before the take-over reach their session after newer ones.
 func TestTwoPodsGracefulStopDuringAHardTakeoversHoldKeepsOrder(t *testing.T) {
 	uri := mpNATS(t)
 	binary := cmdtest.Build(t, "envoy-listener")
@@ -169,11 +169,11 @@ func TestTwoPodsGracefulStopDuringAHardTakeoversHoldKeepsOrder(t *testing.T) {
 // A graceful stop of the active pod while messages are on the wire to it: its link delivers
 // 300 ms late, so when it unsubscribes the server has already pushed it the messages of the last
 // 300 ms. Per-session order must still hold across the hand-over (README "Take-over": the stopping
-// pod NAKs what it has not handled, and the durable redelivers those before newer messages). At
-// 2e592cc8 (the INFRA-557 tester's round-2 finding) the stopping pod drops what reaches it after
-// its unsubscribe without a NAK, the standby delivers newer messages at once, and the dropped ones
-// come back one ack wait (6 s) later, behind them. Without the delay the same happens under load:
-// at a message every 2 ms one message in about three stops arrived 6 s late and out of order.
+// pod NAKs what it has not handled, and the durable redelivers those before newer messages). A
+// stopping pod that dropped what reaches it after its unsubscribe without a NAK would let the
+// standby deliver newer messages at once and the dropped ones come back one ack wait (6 s)
+// later, behind them. Without the delay the same happens under load: at a message every 2 ms one
+// message in about three stops arrived 6 s late and out of order.
 func TestTwoPodsGracefulStopWithMessagesOnTheWireKeepsOrder(t *testing.T) {
 	uri := mpNATS(t)
 	binary := cmdtest.Build(t, "envoy-listener")
@@ -205,11 +205,10 @@ func TestTwoPodsGracefulStopWithMessagesOnTheWireKeepsOrder(t *testing.T) {
 // standby takes over: T must take every message, the one in flight at the kill included, in the
 // order they were published and within the hard bound (architect Q2: in order within 15 s; a
 // repeat with the same id is allowed). TestTwoPodsSIGKILLHandsOverInOrderWithin15s leaves the
-// message in flight out of what it checks. At 39a73080 (the INFRA-557 tester's round-4 finding)
-// the killed pod's ledger attempt for that message, under 35 s old, makes the new holder defer it
-// as another pod's live attempt, so it reaches T 35 s after the kill, after every newer message.
-// The killed pod is the lease holder whose expired record the new holder took, so its attempt is
-// no live pod's.
+// message in flight out of what it checks. The new holder must take the killed pod's ledger
+// attempt for that message over at once: deferred as another pod's live attempt, it would reach
+// T 35 s after the kill, after every newer message. The killed pod is the lease holder whose
+// expired record the new holder took, so its attempt is no live pod's.
 func TestTwoPodsSIGKILLMidPromptKeepsTheSessionsOrderWithin15s(t *testing.T) {
 	uri := mpNATS(t)
 	binary := cmdtest.Build(t, "envoy-listener")
@@ -277,9 +276,8 @@ func mpTo(messages []mpMessage, sessions ...string) []mpMessage {
 // in the durable's pending until its delay ends, so the standby's settle hold never finds every
 // outstanding message in hand: it ends at what the stopping pod can still have outstanding, the
 // 2 s hand-back delay and a second after the subscribe, and every message to a healthy session
-// published after the SIGTERM reaches it within 10 s, each session's in order. At 18779a03 (INFRA-557
-// review finding) the hold runs to its 13 s cap, and those messages arrive about 14 s after the
-// SIGTERM.
+// published after the SIGTERM reaches it within 10 s, each session's in order. A hold that ran
+// to its 13 s cap instead would let those messages arrive about 14 s after the SIGTERM.
 func TestTwoPodsGracefulStopWithARetryOutstandingDeliversWithin10s(t *testing.T) {
 	uri := mpNATS(t)
 	binary := cmdtest.Build(t, "envoy-listener")
@@ -311,10 +309,9 @@ func TestTwoPodsGracefulStopWithARetryOutstandingDeliversWithin10s(t *testing.T)
 // the prompt after the 3 s grace and NAKs it for a retry, so with the failing session's retry it
 // holds every next pod's settle hold to its cap: every hand-over must be a graceful hand-back's,
 // whose cap is 3 s, and every message to a healthy session reaches it within 10 s of its publish,
-// each session's in order. At 1fe15e1b (INFRA-557 review finding) the pod that took a hand-back
-// marked the record stale_binding for subscribing beside the stopping pod's linger, so from the
-// second hand-over on the hold ran to the 7 s cap of a hard take-over, and the messages queued at
-// the SIGTERM arrived about 11 s after their publish.
+// each session's in order. A pod that marked the record stale_binding for subscribing beside the
+// stopping pod's linger would, from the second hand-over on, hold to the 7 s cap of a hard
+// take-over, and the messages queued at the SIGTERM would arrive about 11 s after their publish.
 func TestTwoPodsEveryGracefulStopWithAPromptInHandAndARetryOutstandingDeliversWithin10s(t *testing.T) {
 	uri := mpNATS(t)
 	binary := cmdtest.Build(t, "envoy-listener")
@@ -344,10 +341,10 @@ func TestTwoPodsEveryGracefulStopWithAPromptInHandAndARetryOutstandingDeliversWi
 // minutes in production, so B subscribes beside it and marks the record stale_binding, which every
 // later holder carries on. B's hold ends before its stop, so nothing is left with the lost pod's
 // binding alone: each hand-over is a graceful hand-back's, whose cap is 3 s, and every message to a
-// healthy session reaches it within 10 s of its publish, each session's in order. At 1fe15e1b
-// (INFRA-557 review finding) stale_binding also stood for an ack wait owed, so after the node loss
-// every hand-over's hold ran to the 7 s cap of a hard take-over, and the messages queued at each
-// SIGTERM arrived about 11 s after their publish.
+// healthy session reaches it within 10 s of its publish, each session's in order. Were
+// stale_binding to stand for an ack wait owed as well, every hand-over after the node loss would
+// hold to the 7 s cap of a hard take-over, and the messages queued at each SIGTERM would arrive
+// about 11 s after their publish.
 func TestTwoPodsEveryGracefulStopAfterANodeLossWithAPromptInHandAndARetryOutstandingDeliversWithin10s(t *testing.T) {
 	uri := mpNATS(t)
 	binary := cmdtest.Build(t, "envoy-listener")
@@ -415,8 +412,8 @@ func mpGracefulStopsInTurn(t *testing.T, binary, uri string, serving *mpServingP
 // expired lease and its settle hold never finds every outstanding message in hand: it ends at what
 // the killed pod can still have outstanding, one 6 s ack wait and a second after the subscribe, and
 // every message to a healthy session published after the kill reaches it within 15 s, each
-// session's in order. At 18779a03 (INFRA-557 review finding) the hold runs to its 13 s cap, and
-// those messages arrive about 19 s after the kill.
+// session's in order. A hold that ran to its 13 s cap instead would let those messages arrive
+// about 19 s after the kill.
 func TestTwoPodsSIGKILLWithARetryOutstandingHandsOverInOrderWithin15s(t *testing.T) {
 	uri := mpNATS(t)
 	binary := cmdtest.Build(t, "envoy-listener")

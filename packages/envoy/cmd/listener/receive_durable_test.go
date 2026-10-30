@@ -306,9 +306,8 @@ func TestAListenerWithoutTheLeaseGrantDeliversWithoutALease(t *testing.T) {
 // A holder whose renewals lapse stops receiving while its record still names it, so no other pod
 // has taken the lease and nothing of the durable reaches a session. Its /healthz must not call
 // that healthy: it answers 200 degraded, a standby naming itself, until it resumes or another pod
-// takes the record. At 57c6d1c5 (INFRA-557 review finding) the degraded branch asked only
-// whether the record named a holder, and the lapsed pod's own record answered that, so the pod
-// delivering nothing answered healthy.
+// takes the record. A degraded branch that asked only whether the record named a holder would
+// read the lapsed pod's own record as an answer and call the pod delivering nothing healthy.
 func TestALapsedHolderDoesNotAnswerHealthy(t *testing.T) {
 	uri := testnats.URL(t)
 	const machineID = "box-lapsed-health"

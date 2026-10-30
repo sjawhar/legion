@@ -1,9 +1,12 @@
 package main
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"log/slog"
+	"strings"
 
 	"github.com/sjawhar/envoy/internal/bus"
 	"github.com/sjawhar/envoy/internal/contracts"
@@ -12,6 +15,37 @@ import (
 	"github.com/sjawhar/envoy/internal/logging"
 	"github.com/sjawhar/envoy/internal/metrics"
 )
+
+type deliveryExceptionPayload struct {
+	OriginalTopic    string `json:"original_topic"`
+	EventID          string `json:"event_id"`
+	Reason           string `json:"reason"`
+	RecipientSession string `json:"recipient_session,omitempty"`
+	PayloadSummary   string `json:"payload_summary"`
+	Payload          string `json:"payload"`
+	DedupeKey        string `json:"dedupe_key"`
+	Source           string `json:"source"`
+	SourceSession    string `json:"source_session"`
+}
+
+func isControlTopic(topic string) bool {
+	return strings.HasPrefix(topic, contracts.RoleTopicPrefix) || strings.HasPrefix(topic, contracts.AgentTopicPrefix)
+}
+
+func isExceptionsTopic(topic string) bool {
+	return strings.HasPrefix(topic, bus.ExceptionTopicPrefix)
+}
+
+// deliveryExceptionID is the id of the exception reporting that the delivery of the event eventID
+// to recipientSession ended in reason: 32 hex of the sha256 of the three, the shape of a minted
+// id. A redelivery that ends the same way publishes the same exception, so every repeat carries
+// one id and one dedupe key (bus.DeliveryExceptionDedupePrefix and the id), and the stream, which
+// publishes a delivery exception under a MsgId of that key, stores it once.
+func deliveryExceptionID(eventID, recipientSession, reason string) string {
+	fields, _ := json.Marshal([3]string{eventID, recipientSession, reason})
+	sum := sha256.Sum256(fields)
+	return hex.EncodeToString(sum[:16])
+}
 
 func publishDeliveryException(client *bus.Client, item contracts.Envelope, reason, recipientSession string, fanoutRefusal bool) error {
 	payload, err := json.Marshal(deliveryExceptionPayload{
@@ -89,7 +123,8 @@ func settleClearIf(clear bool) ledgerSettle {
 // label to record, the log line to emit, whether to publish a delivery
 // exception (and how an exception-publish failure should be treated), and
 // how to settle the pair's delivery-ledger attempt. Each branch of the three
-// delivery paths below produces one of these; applyDeliveryOutcome performs
+// delivery paths in delivery.go (roleTopicDelivery, agentSubjectDelivery and
+// fanoutDelivery) produces one of these; applyDeliveryOutcome performs
 // the mechanical side effects so they happen in exactly one place.
 type deliveryOutcome struct {
 	// sessionID is the recipient the outcome is about, named in its exception; "" when there is

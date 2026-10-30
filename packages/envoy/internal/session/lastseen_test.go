@@ -101,9 +101,8 @@ func TestEveryPodReportsALapsedSessionsLastSeenAlike(t *testing.T) {
 // so a pod that watched the session answers exactly what a pod that never saw it answers for as
 // long as the window lasts, and nothing once the record is gone. The bucket is sized to keep the
 // record past that window (listenerStateMaxAge), so a live deployment never reaches the second
-// case; this is what it would answer if it did. At 57c6d1c5 (INFRA-557 review finding) the pod
-// that had watched the session kept answering from a record of its own after the bucket's was
-// gone, so from about ten to twenty minutes after the last heartbeat two pods answered
+// case; this is what it would answer if it did. A pod that kept an answer of its own would go on
+// reporting the session after the bucket's record was gone, and two pods would answer
 // GET /v1/interests/ differently for one session.
 func TestEveryPodAnswersAlikeOnceTheBucketsLastSeenRecordIsGone(t *testing.T) {
 	const (

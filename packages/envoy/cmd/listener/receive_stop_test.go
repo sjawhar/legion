@@ -312,9 +312,9 @@ func TestAGracefulStopLingersToItsCapForATakerThatNeverReceives(t *testing.T) {
 // keeps the subscription for the floor it guarantees its successor, lingerUntaken and a poll
 // after the release: a take-over that subscribes inside the hand-back window
 // (leaseHandBackBridge, a poll inside that floor) settles for the hand-back delay alone, on the
-// premise that this subscription was still on the deliver subject when it did. At 57c6d1c5
-// (INFRA-557 review finding) the linger returned "timeout" at its first read, leaving the deliver
-// subject to a lost node's binding, or to no subscriber at all, while the next holder held for 3 s.
+// premise that this subscription was still on the deliver subject when it did. A linger that
+// returned "timeout" at its first read would leave the deliver subject to a lost node's binding,
+// or to no subscriber at all, while the next holder held for 3 s.
 func TestAStoppingPodsLingerOutlastsTheHandBackWindowThoughItsCapHasRun(t *testing.T) {
 	uri := testnats.URL(t)
 	handle, _ := recordingHandler()
@@ -332,7 +332,7 @@ func TestAStoppingPodsLingerOutlastsTheHandBackWindowThoughItsCapHasRun(t *testi
 // pushes between that and the successor's subscribe reaches no subscriber of this machine's and
 // comes back only at its ack wait. The successor judges itself by the same window and holds for
 // 7 s, so that message lands in its held batch and is delivered in stream order, before the newer
-// one published after it subscribed. At 9baccf21 (INFRA-557 review finding) it counted the
+// one published after it subscribed. Before this fix it counted the
 // hand-back from the take-over alone, held for 3 s, delivered what it had, and the message that
 // had gone nowhere came back behind newer events of the same session.
 func TestASuccessorThatSubscribesPastTheHandBackWindowSettlesForTheAckWait(t *testing.T) {

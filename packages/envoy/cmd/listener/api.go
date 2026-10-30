@@ -977,9 +977,11 @@ func sessionEntryHandler(d *listenerDeps) http.HandlerFunc {
 }
 
 // interestRow is one persisted interest as GET /v1/interests/ and GET /v1/interests/<session_id>
-// answer it: the stored record plus LastSeen, the session's last heartbeat (Unix ms) as this
-// listener's session cache knows it, omitted when unknown. The record's own UpdatedAt can lag that
-// heartbeat by up to store.InterestRefreshAge, since an unchanged row is rewritten only that often.
+// answer it: the stored record plus LastSeen, the session's last heartbeat (Unix ms), omitted when
+// unknown. While the session is live it is the live entry's UpdatedAt, and once it has lapsed the
+// session's `seen.` record in the listener state bucket, which every pod of the fleet answers
+// alike (interestRowFor). The record's own UpdatedAt can lag that heartbeat by up to
+// store.InterestRefreshAge, since an unchanged row is rewritten only that often.
 type interestRow struct {
 	store.Interest
 	LastSeen int64 `json:"last_seen,omitempty"`

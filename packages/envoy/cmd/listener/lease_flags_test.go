@@ -228,9 +228,9 @@ func TestLeaseATermTakenFromAHandBackOwesTheAckWaitUntilItSubscribes(t *testing.
 // A term stopped while its renewals have lapsed releases the record unsettled and owing an ack
 // wait, whatever its own flags stand at: the lapse dropped what it held and what the durable
 // pushed it without an ack, and those come back only at their ack wait, so the next holder must
-// settle for one as it would have over the expired record this release replaces. At 57c6d1c5
-// (INFRA-557 review finding) the release wrote the lapsed term's clean flags, and the standby
-// that took it delivered new messages at once, ahead of the dropped ones.
+// settle for one as it would have over the expired record this release replaces. A release that
+// wrote the lapsed term's own clean flags would let the standby that takes the record deliver
+// new messages at once, ahead of the dropped ones.
 func TestLeaseAStopDuringALapseReleasesTheRecordUnsettled(t *testing.T) {
 	kv := leaseBucket(t)
 	clock := newFakeLeaseClock()
@@ -274,12 +274,11 @@ func TestLeaseAStopDuringALapseReleasesTheRecordUnsettled(t *testing.T) {
 // bridged to the take-over (leaseHandBackBridge): a linger no pod has taken the record in ends
 // lingerUntaken after the release, and what the durable pushed after that went to a lost node's
 // binding alone, or to no subscriber at all, and comes back only at its ack wait. A pod that
-// takes such a record later settles as after a hard take-over, however the record reads. At
-// 57c6d1c5 (INFRA-557 review finding) the window was lingerUntaken and a standby poll, half a
-// second longer than any linger lasts, so a take-over at 1.2 s - a pod starting, or a standby
-// whose poll at 0.7 s failed - held for the hand-back's 3 s with nothing on the deliver subject
-// to have bridged to it, and delivered the messages it then held before the older ones still due
-// from the lost node's binding.
+// takes such a record later settles as after a hard take-over, however the record reads. The
+// window may therefore be no longer than a linger lasts: a wider one would let a take-over at
+// 1.2 s - a pod starting, or a standby whose poll at 0.7 s failed - hold for the hand-back's 3 s
+// with nothing on the deliver subject to have bridged to it, and deliver the messages it then
+// held before the older ones still due from the lost node's binding.
 func TestLeaseTakesAReleasedRecordPastTheLingerAsNoHandBack(t *testing.T) {
 	for _, row := range []struct {
 		name       string

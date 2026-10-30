@@ -345,8 +345,8 @@ func TestLeaseReleasedRecordIsTakenAtTheNextPollKeepingServiceSince(t *testing.T
 // has stopped: the receiver's own stop calls Release again with the shutdown context a graceful
 // stop can have overrun (durableReceiver.Stop, after the hand-back's own release timed out at
 // handBackReleaseWait), and a record left unreleased is taken only once its TTL runs out, with
-// the ack wait's cap - a graceful stop delivering like a hard one. At 9baccf21 (INFRA-557 review
-// finding) Release selected over the stopped loop and the ended context together, so Go picked
+// the ack wait's cap - a graceful stop delivering like a hard one. Before this fix Release
+// selected over the stopped loop and the ended context together, so Go picked
 // either: half of those stops skipped the write and logged a false warning.
 func TestLeaseReleaseWritesWithAnExpiredContextAfterTheLoopStopped(t *testing.T) {
 	kv := leaseBucket(t)

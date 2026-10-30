@@ -56,8 +56,10 @@ func TestListenerStateBucketIsCreatedAtTheConfiguredReplicas(t *testing.T) {
 // session's last_seen for, so the record every pod reads outlives the answer: the session
 // registry reports a lapsed session for the session TTL and the retention main gives it
 // (store.InterestReapAllowance of the reaper's grace) past the last registration write
-// (session.SessionRegistry.LastSeen). A shorter bucket age would leave a pod that never saw the
-// session with nothing to read while a pod that had watched it still answered.
+// (session.SessionRegistry.LastSeen). Every pod reads that record alone and keeps no answer of
+// its own, so a shorter bucket age would end the answer for the whole fleet while the registry
+// still reports the session, and /v1/interests/ would list rows the reaper still holds with no
+// last heartbeat.
 func TestTheListenerStateBucketOutlivesTheLastSeenWindow(t *testing.T) {
 	conn := testnats.Connect(t, testnats.URL(t))
 	t.Cleanup(conn.Close)

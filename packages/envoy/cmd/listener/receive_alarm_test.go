@@ -175,9 +175,9 @@ func TestAHolderThatCannotPrepareItsDurableAlarmsAndGivesTheLeaseUp(t *testing.T
 // connections cut, no release) with a message in hand. pod-x takes the expired record: that term
 // is over a dead holder's record, not pod-x's own resumed after a lapse, so it settles, holding
 // what it receives until the dead pod's message is back at its ack wait, and delivers that
-// message before the newer one. At 1fe15e1b (INFRA-557 review finding) the give-up left pod-x
-// counting the binding it had waited out as its own, so the term did not settle and pod-x
-// delivered the newer message first, the dead pod's one ack wait later.
+// message before the newer one. A give-up that left pod-x counting the binding it had waited out
+// as its own would keep the term from settling, and pod-x would deliver the newer message first,
+// the dead pod's one ack wait later.
 func TestAPodThatGaveTheLeaseUpWhileWaitingOutABindingSettlesAHardTakeoverAfterIt(t *testing.T) {
 	const machineID = "box-gave-up"
 	seed, public := testnats.User(t)
@@ -270,9 +270,9 @@ func TestAPodThatGaveTheLeaseUpWhileWaitingOutABindingSettlesAHardTakeoverAfterI
 // message in hand. pod-x takes pod-y's expired record: the lease reports it no resume of pod-x's
 // own record (leaseStatus.Resumed), so the binding pod-x once waited out counts for nothing and
 // the term settles, holding what it receives until the dead pod's message is back at its ack wait
-// and delivering that before the newer one. At d3787812 (INFRA-557 review finding) the flag
-// outlived a term that ended by losing the lease, so the term did not settle and pod-x delivered
-// the newer message first, the dead pod's one ack wait later.
+// and delivering that before the newer one. A flag that outlived a term ended by losing the
+// lease would keep the term from settling, and pod-x would deliver the newer message first, the
+// dead pod's one ack wait later.
 func TestAPodThatLostTheLeaseWhileWaitingOutABindingSettlesAHardTakeoverAfterIt(t *testing.T) {
 	const machineID = "box-lost-lease"
 	seed, public := testnats.User(t)
@@ -360,9 +360,9 @@ func TestAPodThatLostTheLeaseWhileWaitingOutABindingSettlesAHardTakeoverAfterIt(
 // ack wait. The stopping pod's linger reached no subscription of this pod, and a lost node's
 // binding had the deliver subject to itself meanwhile, so what the durable pushed comes back only
 // at its ack wait: the next holder's hold is the 7 s one, and the message the lost binding was
-// pushed reaches its session before a newer one. At d3787812 (INFRA-557 review finding) such a
-// release carried no debt, the next holder took it for a graceful hand-back, held for 3 s and
-// delivered the newer message first.
+// pushed reaches its session before a newer one. A release that carried no debt would be taken
+// for a graceful hand-back, and the next holder would hold for 3 s and deliver the newer message
+// first.
 func TestATermThatNeverSubscribedOwesTheNextHolderAnAckWait(t *testing.T) {
 	for _, row := range []struct {
 		name, machineID string

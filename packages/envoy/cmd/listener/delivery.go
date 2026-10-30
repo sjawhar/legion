@@ -2,8 +2,6 @@ package main
 
 import (
 	"context"
-	"crypto/sha256"
-	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"log/slog"
@@ -188,37 +186,6 @@ func coreNATSDeliveryHandler(cfg listenerDeliveryHandlerConfig) nats.MsgHandler 
 	return func(msg *nats.Msg) {
 		handler(deliveryMessage{data: msg.Data, mode: coreDelivery})
 	}
-}
-
-type deliveryExceptionPayload struct {
-	OriginalTopic    string `json:"original_topic"`
-	EventID          string `json:"event_id"`
-	Reason           string `json:"reason"`
-	RecipientSession string `json:"recipient_session,omitempty"`
-	PayloadSummary   string `json:"payload_summary"`
-	Payload          string `json:"payload"`
-	DedupeKey        string `json:"dedupe_key"`
-	Source           string `json:"source"`
-	SourceSession    string `json:"source_session"`
-}
-
-func isControlTopic(topic string) bool {
-	return strings.HasPrefix(topic, contracts.RoleTopicPrefix) || strings.HasPrefix(topic, contracts.AgentTopicPrefix)
-}
-
-func isExceptionsTopic(topic string) bool {
-	return strings.HasPrefix(topic, bus.ExceptionTopicPrefix)
-}
-
-// deliveryExceptionID is the id of the exception reporting that the delivery of the event eventID
-// to recipientSession ended in reason: 32 hex of the sha256 of the three, the shape of a minted
-// id. A redelivery that ends the same way publishes the same exception, so every repeat carries
-// one id and one dedupe key (bus.DeliveryExceptionDedupePrefix and the id), and the stream, which
-// publishes a delivery exception under a MsgId of that key, stores it once.
-func deliveryExceptionID(eventID, recipientSession, reason string) string {
-	fields, _ := json.Marshal([3]string{eventID, recipientSession, reason})
-	sum := sha256.Sum256(fields)
-	return hex.EncodeToString(sum[:16])
 }
 
 // clearLedgerAttempt gives attempt up so a retry prompts its pair again. A clear the ledger

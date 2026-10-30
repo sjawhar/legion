@@ -89,8 +89,9 @@ func productionLeaseConfig() leaseConfig {
 // session's `seen.` record is the one answer they share (session.SessionRegistry.LastSeen), and
 // the registry reports it for the session TTL and the interest reaper's allowance past its write
 // (store.InterestReapAllowance, the retention main sets), 20 minutes with the default 5-minute
-// TTL, so the record must outlive that window or a pod that never saw the session would answer
-// nothing while another still answered. A record nobody renews living twice as long changes
+// TTL. The record must outlive that window, because every pod reads the record alone and keeps
+// no answer of its own: once the bucket drops it, the whole fleet answers nothing for a session
+// the registry still reports. A record nobody renews living twice as long changes
 // nothing else: a lease record is taken over once it has stood unchanged for the lease's ttl,
 // whatever its age, and the delivery ledger judges every record by its own ages (dedupe.KV).
 // listenerStateRequestWait is the JetStream wait of every request on the bucket's handle: a
@@ -149,7 +150,7 @@ func openListenerState(conn *nats.Conn, replicas int, wait time.Duration) (bus.K
 		Replicas: replicas,
 	})
 	if err == nil {
-		_, err = bus.RaiseMaxAge(js, bus.ListenerStateBucket, listenerStateMaxAge)
+		err = bus.RaiseMaxAge(js, bus.ListenerStateBucket, listenerStateMaxAge)
 	}
 	if err == nil {
 		return kv, nil
