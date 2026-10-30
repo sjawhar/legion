@@ -2,31 +2,38 @@
   "schemaVersion": 1,
   "phase": "review",
   "issue": "INFRA-841",
-  "completed": "2026-10-30T22:52:00Z",
+  "completed": "2026-10-30T23:45:00Z",
+  "round": 2,
   "decision": "changes_requested",
   "critical": 0,
-  "important": 3,
-  "minor": 1,
+  "important": 2,
+  "minor": 3,
+  "roundOneFindings": "All three fixed in 6b9377f42e78: the deadline reset is gone and the repaired reconcile is bounded by repairedReconcileWait = reconcileWait + 30 s (the bus's maxBackoff, internal/bus/recovery.go:309), proven by the tester's 32 s sleep probe; the repair callback and the copied loop are replaced by dispatchStart.awaitReconciled and awaitHookFailure; the HookedConnectionEvents assertion is deleted.",
   "keyFindings": [
     {
       "severity": "important",
-      "file": "packages/envoy/cmd/dispatch/stream_replicas_test.go:84-111",
-      "description": "The restarted reconcileWait after the repair races the bus's recovery backoff. recoverUntilHealthy waits 1, 2, 4, 8, 16, then 30 s between attempts (internal/bus/recovery.go:308-309, 363-369), and each attempt fails at once while the member is down, so attempts run at about t0, +1, +3, +7, +15, +31, +61. A repair that ends after t0+31 (Cluster.AwaitReady restarting the started member twice: muteAfter 15 s, muteRestarts 3, internal/testnats/cluster.go:156-163, 185-189; the implementer measured one AwaitReady in three restarting once) leaves the next attempt up to 30 s away while the new deadline is also 30 s away, so the Fatalf can fire just before the bus reconciles. The wait after a repair must cover reconcileWait plus the bus's 30 s maximum backoff, and the doc comment must stop claiming reconcileWait alone bounds the reconcile the repair makes possible."
+      "file": "packages/envoy/cmd/dispatch/stream_replicas_test.go:238-241",
+      "description": "A second assertion that cannot fail: awaitReconciled (:236) returns only once reconciledFor(s.boot) held on this stream, resolveWith(t, overrides) resolves the same boot, and the keeper only raises, so the Errorf never fires while its message claims to report copies. Replace it with testnats.AwaitStreamCopies(t, cluster.JetStream(t), bus.Stream, 3) (internal/testnats/streams.go:57), which checks the three settled copies the test's doc promises."
     },
     {
       "severity": "important",
-      "file": "packages/envoy/cmd/dispatch/stream_replicas_test.go:94-147",
-      "description": "The one-caller repair mode (nullable callback, one-shot latch, deadline reset, 10 doc lines) sits inside the wait five tests share, and refusedDispatchStream copies that wait's loop (reconciled check, deadline, fatal, sleep). Split into two single-purpose waits over connectDispatchStream's client (await the reconcile; await the first logged hook failure), so the new test reads connect, await failure, restart member, await reconcile on the test goroutine, and the settings_test.go:922 case reads connect, await failure, close. The code-quality pass built this on a scratch copy: vet clean, the affected tests pass, the file 31 lines shorter."
+      "file": "packages/envoy/cmd/dispatch/stream_replicas_test.go:104-108",
+      "description": "awaitReconciled's timeout names the wrong error: reconcileFailure returns the first logged failure, which after a repair is always the expected pre-repair 'peer offline' WARN, not what blocks the reconcile now. Report the client's HookStall() (stall and the last run's error, internal/bus/nats.go:560-568) in the fatal instead."
     },
     {
       "severity": "minor",
-      "file": "packages/envoy/cmd/dispatch/stream_replicas_test.go:236-238",
-      "description": "The HookedConnectionEvents() < 1 check cannot fail: the helper returns only under HookedConnectionEvents() >= 1, and hookedEvents never decreases (internal/bus/recovery.go:201-217). Delete it; the split above removes it anyway."
+      "file": "packages/envoy/cmd/dispatch/stream_replicas_test.go:121,126-130",
+      "description": "awaitHookFailure copies awaitReconciled's own-reconcile check. HookedConnectionEvents() >= 1 alone says the server accepted the start, since the reconcile is the publisher's only hook and ConnectOwningStream registers it first (internal/bus/nats.go:423, 532-538); fatal on that and drop the second reconciledFor."
     },
     {
-      "severity": "important",
-      "file": "packages/envoy/cmd/dispatch/settings.go:83,85",
-      "description": "Fixed by the reviewer in 4430e212: both rows said Dispatch 'reconciles the stream on each connection'; ensureStreamOnce does nothing once one run has succeeded (internal/bus/nats.go:490-505), and the minute runs from the first uncovered connection event, which for Dispatch is its first connection (nats.go:584-589). The rows and the changelog fragment now say so."
+      "severity": "minor",
+      "file": "packages/envoy/cmd/dispatch/stream_replicas_test.go:30-34,39,59-61,217-220",
+      "description": "Comments: reconcileWait also bounds awaitHookFailure's wait for a logged failure; the package comment's added sentence and connectDispatchStream's field list repeat the type and constant docs; the test doc says 'within repairedReconcileWait of the restart', but the deadline starts once cluster.AwaitReady returns."
+    },
+    {
+      "severity": "minor",
+      "file": "docs/solutions/testing/a-cmd-test-of-a-background-connect-builds-its-client-with-mains-options-and-reads-failures-from-the-log-pr2362.md:38-42",
+      "description": "Fixed by the reviewer in 60fa08227392: the active solution doc said the helper reads either logged failure as a refusal; it now says a retried failure no longer ends startDispatchStream and only awaitHookFailure reads a refusal."
     }
   ]
 }
