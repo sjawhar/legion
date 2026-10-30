@@ -2,105 +2,74 @@
   "schemaVersion": 1,
   "phase": "test",
   "issue": "INFRA-757",
-  "completed": "2026-10-30T05:58:00Z",
-  "round": 3,
+  "completed": "2026-10-30T06:35:00Z",
+  "round": 4,
   "implementerProof": {
     "verdict": "verified",
-    "how": "This pod was recreated between rounds, so every binary, overlay and device of rounds 1 and 2 was gone and this round rebuilt all of them from the merged tree before it read anything. Round 2's review items were then driven on their own surfaces: the health report's new place among the checks, with the control at the commit before the reorder; the /livez assertion's removal; the dead-pattern check's two new branches; the wake removed at kvwatch.go:668 and every wake that remains; the documents the report's second meaning touches; and the docs race job against main's own copy. The acceptance proofs were re-run at this head as well, since the branch took main again. Every observation matched the implementer's handoff."
+    "how": "This round changes no executable line: between the head this phase passed in round 3 (f5a17777) and this head, the only changed files are .github/workflows/ci.yaml and packages/envoy/cmd/listener/main.go, in comment lines alone, plus the site page, AGENTS.md, the changelog fragment and the handoffs, which this phase read line by line. The round was therefore driven as the review asked: each sentence the two commits write was checked against the code it describes, and the one claim no test held - that a transient KV failure is reported before the role claim view, as a 200 degraded carrying status and error alone - was driven on the handler itself with a throwaway probe. The gates the changed files feed were re-run: the drift check over the edited workflow, and the whole /healthz family."
   },
   "failures": [],
   "failed": 0,
   "proof": [
     {
-      "criterion": "Review round 2, item 1: a fault that answers 503 is never hidden behind the role claim view's degraded answer, and the degraded answer keeps the healthy body's fields.",
-      "surface": "The listener's own /healthz handler over a role claim view whose watcher completes no scan, with and without the durable consumer the listener binds.",
-      "command": "cd packages/envoy && DISPATCH_TEST_DATABASE_URL=... go test ./cmd/listener/ -count=1 -run '^TestHealthz' -v -timeout 15m, then go test -overlay <cmd/listener/main.go at 0b78e948, the commit before the reorder> ./cmd/listener/ -count=1 -run '^TestHealthzStillReportsALostDurableWhileTheRoleClaimViewIsIncomplete$'.",
-      "observed": "Nine of nine PASS (ok 14.207s), the two role-view tests among them: the degraded answer is 200 with status degraded, the error naming the role claim view, and session_cache_ready, session_cache_size, live_topics, ci_cache, num_pending and num_ack_pending all still in the body; with the durable deleted under the same incomplete view the answer is 503 unhealthy naming the durable consumer. The handler now reads the view after the consumer info and durableUnbound (main.go:476-481), and writeDependencyHealth and the degraded answer share dependencyUnavailable, so both read alike.",
-      "headSha": "0a0d058966950cebb4094c89fb28f667a347b094",
-      "negativeControl": "The overlay run at 0b78e948's main.go, where the view was read before the durable checks: '--- FAIL ... /healthz with the durable gone and the role claim view incomplete = 200 map[error:role claim view unavailable: ... status:degraded], want 503 unhealthy'. That is the Medium the review found, reproduced here and gone at the head.",
+      "criterion": "Round 4 changes no behaviour: the diff since the head round 3 passed is comments and prose.",
+      "surface": "The branch's own diff, read line by line.",
+      "command": "jj diff --from f5a17777fa6d --to @- --git, with every added and removed line of each file classified.",
+      "observed": "Six files change. packages/envoy/cmd/listener/main.go: 25 lines, every one a // comment. .github/workflows/ci.yaml: 10 lines, every one a # comment. docs/site/src/content/docs/dispatch/envoy.md, packages/envoy/AGENTS.md and the changelog fragment: one sentence each. .legion/INFRA-757/{implement,review}.json: the handoffs. No Go statement, no YAML key, no step and no filter pattern changes, so this round's surface is what the prose claims and the gates the edited files feed.",
+      "headSha": "0283147fefcdc8fd92b25a92c99bd3dcaba7f4ab",
+      "negativeControl": "The classification is the control: any changed line that was not a comment or prose would have been listed, and the two handoff files are the only ones whose changed lines are neither.",
       "status": "pass"
     },
     {
-      "criterion": "Review round 2, item 2: the /livez assertion that could not fail is gone, with the claim that the test's mux is the production one.",
-      "surface": "The test file itself and the test run above.",
-      "command": "jj diff -r 615dc86fb80a --git packages/envoy/cmd/listener/healthz_role_view_test.go",
-      "observed": "The test's own http.ServeMux, both /livez requests and the comment calling it the production mux are gone; the rig now calls healthzHandler directly and is shared by the two tests, and the file's remaining prose claims only what a readiness check does. Both tests pass at the head.",
-      "headSha": "0a0d058966950cebb4094c89fb28f667a347b094",
-      "negativeControl": "The control for what the removed assertion was meant to cover is the new durable test above: it is the one that fails when the report takes another fault's place, and unlike the /livez assertion it fails against the previous code.",
+      "criterion": "Review round 3's one open finding: the race job's comment says how each of its tests reaches the Dispatch database.",
+      "surface": "The cited source lines themselves, and the drift check over the edited workflow.",
+      "command": "sed -n over internal/dispatch/store/store_test.go:25-29, internal/dispatch/store/storetest/storetest.go:30-38, internal/dispatch/delivery/intake_test.go:37-43 and cmd/listener/dispatch_resolution_test.go:155-161; then PATH=\"$TMPDIR/q2517venv/bin:$PATH\" .github/scripts/check-ci-filters.sh.",
+      "observed": "Each citation is exact. store_test.go:27 reads os.Getenv(\"DISPATCH_TEST_DATABASE_URL\") and skips with 'DISPATCH_TEST_DATABASE_URL must be set to run Postgres store tests'; storetest.go:34 is const DatabaseURLEnv = \"DISPATCH_TEST_DATABASE_URL\"; intake_test.go:39-41 reads the same variable and skips; dispatch_resolution_test.go:158 opens its store at testpg.URL(t), the one site of the job that goes through internal/testpg. The edited workflow still parses and the check ends 'every ci.yaml filter matches every file its job reads (27 gates), and every PUSH_WORKFLOWS workflow's on.push.paths equals its filter (1)'.",
+      "headSha": "0283147fefcdc8fd92b25a92c99bd3dcaba7f4ab",
+      "negativeControl": "The drift check is the control on the edit itself: it loads ci.yaml, so a comment edit that broke the document's YAML, a filter or the ci-ok table would fail it rather than pass 27 gates. Its sensitivity to a wrong path was shown in round 3 against this same check (134 passed, 0 failed, including the two dead-pattern cases).",
       "status": "pass"
     },
     {
-      "criterion": "Review round 2, item 8 and the wake at kvwatch.go:668: the dead-pattern check covers its RULES branch and its ! exemption, and every wakeComplete call that remains is bound by a test.",
-      "surface": "The repository's drift check and its suite, and internal/kvwatch's tests with each wake removed one at a time in a copy this round generated.",
-      "command": "PATH=\"$TMPDIR/venv/bin:$PATH\" .github/scripts/check-ci-filters.sh; PATH=\"$TMPDIR/venv/bin:$PATH\" bash .github/scripts/check-ci-filters.test.sh; cd packages/envoy && go test ./internal/kvwatch/... -count=1, then the same with each of kvwatch.go's five w.wakeComplete() calls (lines 220, 294, 400, 801, 831) replaced by a comment, over ./internal/kvwatch/... ./internal/store/.",
-      "observed": "The check ends 'every ci.yaml filter matches every file its job reads (27 gates), and every PUSH_WORKFLOWS workflow's on.push.paths equals its filter (1)'; the suite is 134 passed, 0 failed, with 'PASS: fails on the RULES row's dead read' and 'PASS: a ! pattern matching nothing is no dead pattern'. The wake matrix: 220 fails TestWaitCompleteReturnsOnAFailedFirstStart, 294 TestWaitCompleteReturnsWhenCheckFindsTheBucketRecreated, 400 TestWaitCompleteReturnsWhenStopRetiresTheWatcher, 801 TestWaitCompleteReturnsWhenTheWatcherEndsOnItsOwn, each alone, and 831 fails five store tests. No wake is left that a test does not hold: the one round 2 reported unbound, the Rewatch reset at the old line 668, is removed, and its comment now says why a replacement watcher wakes nobody.",
-      "headSha": "0a0d058966950cebb4094c89fb28f667a347b094",
-      "negativeControl": "The five removal runs are the control for the wakes, and the suite's two new cases are their own: each puts a dead path into a fixture, one as a RULES row's read and one as a ! pattern, and asserts the check refuses the first and accepts the second.",
+      "criterion": "The reviewer's prose commit says what the handler does: the role claim view is checked after every check that can answer 503, and a transient failure before it carries status and error alone.",
+      "surface": "The /healthz handler itself, driven with a cache whose Ping fails without a watcher error while the role claim view completes no scan (a throwaway probe, removed before this handoff), and the whole healthz family.",
+      "command": "cd packages/envoy && DISPATCH_TEST_DATABASE_URL=... go test ./cmd/listener/ -count=1 -run '^(TestProbeATransientKVFailureIsReportedBeforeTheRoleClaimView|TestHealthz)' -v -timeout 15m.",
+      "observed": "The probe reads '200 map[error:interest KV unavailable: probe: a transient KV failure status:degraded]': the transient failure is answered first, the body carries exactly status and error, and the role claim view - incomplete at the same moment, as the probe asserts through RolesHeldBy - is never reached. Nine healthz tests pass beside it (ok 16.932s), the durable-under-an-incomplete-view test among them, so the order the prose describes is the order the handler runs: writeDependencyHealth gives 200 degraded with those two fields for a non-terminal failure (main.go), and the role view's own report is the last thing before the answer is written.",
+      "headSha": "0283147fefcdc8fd92b25a92c99bd3dcaba7f4ab",
+      "negativeControl": "The probe is itself the control for the sentence the reviewer corrected: with the old wording ('every check above answers 503') this state would have to answer 503 or carry the healthy fields, and it answers 200 with two fields. The complementary case is already a committed test: TestHealthzStillReportsALostDurableWhileTheRoleClaimViewIsIncomplete, which fails against the pre-reorder main.go.",
       "status": "pass"
     },
     {
-      "criterion": "Review round 2, minors: the documents and comments the report's second meaning touches say what the code does.",
-      "surface": "The files themselves at this head.",
-      "command": "jj diff -r 615dc86fb80a --git over .github/workflows/ci.yaml, docs/site/src/content/docs/dispatch/envoy.md, packages/envoy/infra/README.md, the changelog fragment and internal/kvwatch/waitcomplete_test.go.",
-      "observed": "ci.yaml's daemon comment no longer cites pi-legion's phase-stall.ts, the read this change removed from RULES, and the race job's Postgres reason now names delivery's intake_test.go:39-41 beside the store's and the listener's. The site's health table gives 200 degraded its second meaning and says a fault that does not repair itself is unhealthy and reported ahead of it; infra/README.md says a listener behind a degraded answer is connected and serving. The changelog fragment now says a live watcher whose scans keep timing out holds the start for the gate's full 30 s. timingOutWatcher returns the watcher alone, the discarded *seen gone from its four callers. The main.go comment no longer claims every probe runs curl -f.",
-      "headSha": "0a0d058966950cebb4094c89fb28f667a347b094",
-      "negativeControl": "The reading itself is the control: each claim was checked against the code it describes - the handler's order for the site's table, intake_test.go:39-41 for the Postgres reason, the removed RULES row for the daemon comment, and the 30 s ctx at main.go for the fragment.",
-      "status": "pass"
-    },
-    {
-      "criterion": "The second merge of main: envoy-go-race-docs is still main's own job, now with internal/dispatch/itemblocks in its filter, and four race jobs stand.",
-      "surface": "The workflow file at this head against main@origin's, block for block.",
-      "command": "jj file show -r main@origin .github/workflows/ci.yaml against the head's: the envoy-go-race-docs job block with its comment, and the envoy_go_race_docs filter, compared text for text.",
-      "observed": "Both identical, character for character; the filter names packages/envoy/internal/dispatch/itemblocks, which sjawhar/legion#2537 added on main and the merge a6d0c2ef brought in; the job keeps -race -timeout 60m with timeout-minutes 70, the figure the pull request's job table now gives. Four race jobs: envoy-go-race (30m), -pmdoc (40m), -api (30m), -docs (60m).",
-      "headSha": "0a0d058966950cebb4094c89fb28f667a347b094",
-      "negativeControl": "The character-for-character comparison is the control: a docs job or filter that differed from main's in any way, itemblocks included, would show in it.",
-      "status": "pass"
-    },
-    {
-      "criterion": "Acceptance 1 and 2, flake A, re-verified at this head.",
-      "surface": "This pod's Go test runs under the load recipe (GOMAXPROCS=1, two busy loops, one dd conv=fsync writer) against the rootless PostgreSQL 17 with its default durability, rebuilt in this pod after it was recreated.",
-      "command": "cd packages/envoy/internal/dispatch/startup && GOMAXPROCS=1 bash $TMPDIR/t757c/race-loop.sh r3A-before2 30 2 1 <a binary built here with main@origin's started_test.go through -overlay> -test.run '^TestTwoAnnouncersAtOnceAnnounceAndPublishOnce$', and r3A-after2 40 with the head's binary.",
-      "observed": "Before: 15 pass, 15 fail of 30 (wall 490 s), every failure started_test.go FleetCommit = <nil>. After: 40 pass, 0 fail of 40 (wall 583 s). An earlier pair of loops in this round read 0 of 30 and 0 of 40 in five seconds each: that was this pod's Postgres, which a failed pg_ctl start of mine had shut down, and every run in them failed on 'connect: connection refused' before the test began. The loops above are the re-run with the database up, and the connection-refused runs are recorded here so no reader mistakes them for the test.",
-      "headSha": "0a0d058966950cebb4094c89fb28f667a347b094",
-      "negativeControl": "The before binary is the control: the two differ in one file, started_test.go, and only the one with main's copy fails.",
-      "status": "pass"
-    },
-    {
-      "criterion": "Acceptance 1 and 2, flake B, re-verified at this head.",
-      "surface": "cmd/listener's test binary with the forced device rebuilt against this tree, and the committed regression test in internal/store.",
-      "command": "The four device rows (row 1 main's kv.go, main's main.go and main's six listener test files; row 2 main's product with this branch's tests; row 3 the branch; row 4 main with the device off), the regression test at the head and with -overlay at main@origin's kv.go, then the two 40-run loops under the load recipe.",
-      "observed": "Row 1 FAIL at interest_read_routes_test.go:103 with 'status 503 ... the role claim view is not complete'; row 2 FAIL at :106, the same; row 3 PASS; row 4 PASS. The regression test is ok 1.770s at the head and fails at role_holders_test.go:300 against main's kv.go. Loops: plain 40 pass, 0 fail of 40 (wall 269 s); the forced device on, 40 pass, 0 fail of 40 (wall 296 s). The whole package at the head is ok cmd/listener 444.498s, and go test -race ./internal/store/ ./internal/kvwatch/... is ok 37.511s and ok 67.439s.",
-      "headSha": "0a0d058966950cebb4094c89fb28f667a347b094",
-      "negativeControl": "Rows 1, 2 and 4: with the device off main's product passes, and with it on main's product fails whether the tests are main's or this branch's, so the device makes the window and the product makes the fix.",
-      "status": "pass"
-    },
-    {
-      "criterion": "Also delivered: every race-lane job has real time headroom.",
+      "criterion": "Also delivered: every race-lane job has real time headroom, with the docs job now read from a run of its own.",
       "surface": "GitHub Actions job logs, read through the jobs API.",
-      "command": "gh api repos/sjawhar/legion/actions/jobs/<id>/logs for the race jobs of run 40959437771 (head f2df6dc7, conclusion success) and job 123650917295 of run 40926978371 for the docs figure.",
-      "observed": "envoy-go-race's largest package is cmd/listener at 371.201 s, 34.4 % of its 1080 s bar (bus 314.654 s, dispatch/store 202.860 s, delivery 76.146 s, kvwatch 63.215 s, internal/store 31.338 s, session 11.856 s, measures 1.056 s; the whole job 8 m 52 s); envoy-go-race-api 736.975 s, 68.2 %; envoy-go-race-pmdoc 891.414 s, 61.9 % of 1440 s; envoy-go-race-docs's package 1336.200 s, 61.9 % of 2160 s. Nothing of this round changes a race step's command or deadline, so these readings still hold; the run at this head had not reached its race jobs when this handoff was written.",
-      "headSha": "0a0d058966950cebb4094c89fb28f667a347b094",
+      "command": "gh api repos/sjawhar/legion/actions/jobs/<id>/logs for jobs 123758981368, 123758981335 and 123758981314 of run 40959437771 (head f2df6dc7, success) and job 123834334225 of run 40975440555 (main, success).",
+      "observed": "envoy-go-race's largest package is cmd/listener at 371.201 s, 34.4 % of its 1080 s bar (bus 314.654 s, dispatch/store 202.860 s, delivery 76.146 s, kvwatch 63.215 s, internal/store 31.338 s, session 11.856 s, measures 1.056 s; the job 8 m 52 s); envoy-go-race-api 736.975 s, 68.2 %; envoy-go-race-pmdoc 891.414 s, 61.9 % of 1440 s, and green again at this branch's a6d0c2ef run before that run was cancelled by the next push. envoy-go-race-docs, this branch's copy of main's job, ran green on main at 1324.924 s, 61.3 % of its 2160 s bar, in 23 m 40 s. Nothing of this round touches a race step's command, packages or deadline.",
+      "headSha": "0283147fefcdc8fd92b25a92c99bd3dcaba7f4ab",
       "negativeControl": "The same packages contending in one job on main before the split, run 40877712458 job 123461966609: docs 1772.969 s, pmdoc 1563.552 s, api 1099.487 s, bus 315.651 s FAIL, store 277.864 s, delivery 93.562 s, and no line at all for the listener step.",
+      "status": "pass"
+    },
+    {
+      "criterion": "Acceptance 1 and 2 still hold at this head.",
+      "surface": "Carried from round 3's runs at 0a0d0589, whose code this head repeats exactly.",
+      "command": "The round-3 runs: the four device rows, the committed regression test with and without main's kv.go, the four load loops, the whole cmd/listener package and go test -race over internal/store and internal/kvwatch; re-run here only where this round's diff could reach them, which is the healthz family.",
+      "observed": "Round 3 at 0a0d0589: flake A 15 pass, 15 fail of 30 on main's test file and 40 pass, 0 fail of 40 at the head; flake B rows 1 and 2 FAIL and rows 3 and 4 ok; the regression test ok 1.770s at the head and failing at role_holders_test.go:300 against main's kv.go; loops 40/40 plain and 40/40 with the device; ok cmd/listener 444.498s; race store 37.511s and kvwatch 67.439s. The executable tree is byte for byte that one (the diff above is comments alone), and the healthz family re-run at this head is nine of nine green, so those readings stand at this head.",
+      "headSha": "0283147fefcdc8fd92b25a92c99bd3dcaba7f4ab",
+      "negativeControl": "The comment-only classification above is what lets round 3's readings carry; without it each loop would have been re-run. The controls behind those readings are recorded in round 3's own handoff and in the pull request's history.",
       "status": "pass"
     }
   ],
   "ciAtTheHead": {
-    "head": "0a0d058966950cebb4094c89fb28f667a347b094",
-    "readAt": "2026-10-30T05:55Z",
-    "state": "The handoff head carries no run of its own (handoff-only push, skip-checks: true). The code head a6d0c2ef has CI run 41005358191, queued at 04:53Z and still running at 05:55Z: changes, lint, contracts, docs, envoy-plugin, envoy-client, dispatch-multiprocess and worker-image / build green; test, envoy-go, dispatch and dispatch-browser-multiprocess in progress; the four race jobs and the rest still queued. A lane still running is read as running and never waited for. Two earlier runs of this branch were cancelled rather than red (40983051490 at c60146a7, cancelled at 03:17Z with ten jobs unfinished, its three finished race jobs green; 41004138014 at 615dc86f, cancelled by the merge push that followed it). The last run that finished is 40959437771 at f2df6dc7, conclusion success. The reviewer and the merger read ci-ok at the merging head, as DA-4 binds acceptance 3."
+    "head": "0283147fefcdc8fd92b25a92c99bd3dcaba7f4ab",
+    "readAt": "2026-10-30T06:30Z",
+    "state": "The handoff head carries no run of its own (handoff-only push, skip-checks: true). The code head fcf9f30d has CI run 41013545062, created at 06:20Z and still queued at 06:30Z with no job started. The run before it, 41005358191 at a6d0c2ef, was cancelled by this round's push after finishing changes, lint, contracts, docs, test, envoy-go, envoy-plugin, envoy-client, dispatch-browser-multiprocess, dispatch-multiprocess, listener-server-change, envoy-session-stall, pi-legion, pi-shared, worker-image / build and envoy-go-race-pmdoc green; envoy-go-race, envoy-go-race-api, envoy-go-race-docs, typecheck, ci-filters and the rest were cancelled rather than red. No run of this branch has gone red at any point. A lane still running is read as running and never waited for; the reviewer and the merger read ci-ok at the merging head, as DA-4 binds acceptance 3."
   },
   "observations": [
     {
-      "what": "This pod was recreated between rounds, and the round-1 and round-2 harness went with it.",
-      "evidence": "$TMPDIR/infra757 kept only its PostgreSQL data directory and pg-up.sh; the loop script, every compiled test binary and every overlay were gone. This round rebuilt them under $TMPDIR/t757c, so none of its readings rests on a binary an earlier round built."
-    },
-    {
-      "what": "A failed pg_ctl start removes the running server's pid file and shuts it down, which cost this round one pair of loops.",
-      "evidence": "pg-up.sh's pg_ctl start, run while another role's postmaster already held port 5457, logged 'could not bind IPv4 address 127.0.0.1: Address already in use' and left no postmaster.pid; the running server then logged 'performing immediate shutdown because data directory lock file is invalid' at 04:57:04Z. The two flake A loops that followed failed every run in five seconds on 'connect: connection refused'. The database was started again and the loops re-run, and the figures above are the re-run's. A role that shares this pod's Postgres should check pg_isready before pg-up.sh rather than after it."
+      "what": "Every run of this branch since round 2 has ended cancelled rather than finished, because each round's push arrives before the lane's long jobs get a runner.",
+      "evidence": "41004138014 (615dc86f), 41005358191 (a6d0c2ef) and 41013082044 (c5fdf5b2) are all conclusion cancelled, with ci.yaml's concurrency group cancelling the run in progress at each push; sjawhar/legion's runners have been backed up since 2026-10-29 evening, so the race jobs are the last to start and the first to be cancelled. The last run of this branch to finish is 40959437771 at f2df6dc7 (success). Nothing here is red; the merging head still needs one run that finishes, which is the merger's gate to read."
     },
     {
       "what": "A watcher fault of the role claim bucket is still reported under the interest cache's name.",
-      "evidence": "Unchanged from round 2 and from main: listenerCaches names the whole store.Registry 'interest', so a role claim watcher that ends answers /healthz '503 interest KV watcher unavailable: role claims watcher stopped'. The status and the cause are right and only the dependency's name is wrong; this change adds the degraded report after those checks and alters none of them."
+      "evidence": "Unchanged from rounds 2 and 3 and from main: listenerCaches names the whole store.Registry 'interest', so a role claim watcher that ends answers /healthz '503 interest KV watcher unavailable: role claims watcher stopped'. The status and the cause are right and only the dependency's name is wrong."
     }
   ]
 }
