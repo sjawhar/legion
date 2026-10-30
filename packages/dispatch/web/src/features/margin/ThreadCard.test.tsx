@@ -172,6 +172,53 @@ test("an expanded comment thread renders flat replies and posts an inline reply 
   }
 });
 
+test("a margin reply that names a passage quotes it as its author's, or says it was removed", async () => {
+  const bob = { id: "bob", kind: "user" } as const;
+  const passage = {
+    block_id: "b2",
+    node: "comment/reply-1#b2",
+    ref: "dispatch://CORE-1/comment/reply-1#b-b2",
+    removed: false,
+    text: "Beta.",
+  };
+  const nested = comment("reply-1", "Alpha.\n\nBeta.", "2026-09-10T00:01:00Z", {
+    anchor: null,
+    author: bob,
+    reply_to: root.id,
+  });
+  // A reply's `reply_to` is the thread's root, while the passage it names is another reply's.
+  const toNested = comment("reply-2", "Yes to that.", "2026-09-10T00:02:00Z", {
+    anchor: null,
+    reply_block: passage,
+    reply_to: root.id,
+  });
+  const toRemoved = comment("reply-3", "And that?", "2026-09-10T00:03:00Z", {
+    anchor: null,
+    author: bob,
+    reply_block: { ...passage, block_id: "b1", node: `comment/${root.id}#b1`, removed: true },
+    reply_to: root.id,
+  });
+  const view = renderCard(thread({ replies: [nested, toNested, toRemoved] }));
+
+  try {
+    const row = async (body: string) => {
+      const element = (await screen.findByText(body)).closest("li");
+      if (element === null) throw new Error(`${body} has no reply row`);
+      return element;
+    };
+    const yes = await row("Yes to that.");
+    await waitFor(() => expect(yes.textContent).toContain("Replying to bob's passage — Beta."));
+    const removed = await row("And that?");
+    expect(removed.textContent).toContain(
+      "Replying to alice's passage — This passage was removed."
+    );
+    // A reply that names no passage carries no quote: the thread is its parent.
+    expect((await row("Beta.")).textContent).not.toContain("Replying to");
+  } finally {
+    view.unmount();
+  }
+});
+
 test("a collapsed preview flattens a list-only body onto one line with no nested <ul>", async () => {
   const view = renderCard(listThread(), { expanded: false });
 
@@ -264,7 +311,10 @@ test("the author can edit a comment and an edited comment carries its marker", a
     expect(screen.getByRole("button", { name: "Save" })).not.toBeNull();
     fireEvent.change(screen.getByLabelText("Edit comment"), { target: { value: "Updated root" } });
     fireEvent.click(screen.getByRole("button", { name: "Save" }));
-    await waitFor(() => expect(onEdit).toHaveBeenCalledWith(root.id, "Updated root", keyedAttempt));
+    // No blocks route answered here, so the save carries no block ids.
+    await waitFor(() =>
+      expect(onEdit).toHaveBeenCalledWith(root.id, "Updated root", undefined, keyedAttempt)
+    );
 
     view.rerender(
       <QueryClientProvider client={new QueryClient()}>

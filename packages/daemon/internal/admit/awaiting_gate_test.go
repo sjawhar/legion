@@ -166,9 +166,15 @@ func mirrorAsk(t *testing.T, pool *pgxpool.Pool, ask record.RootAsk) {
 	})
 }
 
-// countSuspends counts the architect suspends in ops.
-func countSuspends(ops []string) int {
-	return strings.Count(strings.Join(ops, " "), "suspend")
+// assertNoArchitectSuspension fails when an awaiting or resumed root queues a daemon suspension
+// for its architect.
+func assertNoArchitectSuspension(t *testing.T, pool *pgxpool.Pool, root string) {
+	t.Helper()
+	for _, op := range architectOps(t, pool, root) {
+		if op == "suspend" {
+			t.Fatalf("architect operations = %v, want no suspension while %s remains in the workflow", architectOps(t, pool, root), root)
+		}
+	}
 }
 
 // runningRoot records LEGION-100 holding the one slot with its architect running a turn it took,
@@ -334,8 +340,8 @@ func assertNoAwaitingEffects(t *testing.T, pool *pgxpool.Pool, key string) {
 }
 
 // A registration of a closed gate whose approval request waits on the person is the architect
-// handing the spec to the person: the root, its architect running the turn it took, gives its slot
-// to the next root, its architect suspended after that turn and the controller told.
+// handing the spec to the person: the root gives its slot to the next root, its architect stays
+// live after its turn, and the controller is told.
 func TestAClosedRegisteredGateReleasesItsRootSlotForAnotherWaitingRoot(t *testing.T) {
 	pool := migratedPool(t)
 	admission := newAdmission(t, 1, nil)
@@ -354,17 +360,22 @@ func TestAClosedRegisteredGateReleasesItsRootSlotForAnotherWaitingRoot(t *testin
 		t.Fatalf("root after closed gate = %#v, want unanswered awaiting_person on gate version 3", root)
 	}
 	assertSlots(t, pool, []record.Slot{{Issue: "LEGION-NEXT", Index: 0, AdmittedAt: fixedNow}})
-	var suspended, noticed bool
+	assertNoArchitectSuspension(t, pool, "LEGION-100")
+	var state string
+	if err := pool.QueryRow(context.Background(), `select state from claims where token = $1`, string(architectToken(t, "LEGION-100"))).Scan(&state); err != nil {
+		t.Fatalf("read architect state: %v", err)
+	}
+	if state != string(supervise.StateWorking) {
+		t.Fatalf("architect state = %q, want it live while the root waits", state)
+	}
+	var noticed bool
 	for _, effect := range effects(t, pool) {
-		switch payload := effect.payload.(type) {
-		case record.SuperviseRequest:
-			suspended = suspended || effect.issue == "LEGION-100" && payload.Op == "suspend" && payload.Role == "architect" && strings.Contains(payload.Reason, "spec version 3")
-		case record.ControllerNotice:
-			noticed = noticed || effect.issue == "LEGION-100" && payload.Kind == record.AwaitingPersonNotice && strings.Contains(payload.Reason, "slot is released")
+		if payload, ok := effect.payload.(record.ControllerNotice); ok && effect.issue == "LEGION-100" && payload.Kind == record.AwaitingPersonNotice && strings.Contains(payload.Reason, "slot is released") {
+			noticed = true
 		}
 	}
-	if !suspended || !noticed {
-		t.Fatalf("outbox effects = %#v, want architect suspend and awaiting-person controller notice", effects(t, pool))
+	if !noticed {
+		t.Fatalf("outbox effects = %#v, want awaiting-person controller notice", effects(t, pool))
 	}
 }
 
@@ -523,15 +534,7 @@ func TestAResumedRootThatRegistersANewClosedVersionReleasesItsSlotAgain(t *testi
 		t.Fatalf("root after closed v4 = %#v, want a new unanswered wait on version 4", again)
 	}
 	assertSlots(t, pool, nil)
-	var suspends int
-	for _, effect := range effects(t, pool) {
-		if request, ok := effect.payload.(record.SuperviseRequest); ok && effect.issue == "LEGION-100" && request.Op == "suspend" && request.Role == "architect" {
-			suspends++
-		}
-	}
-	if suspends != 2 {
-		t.Fatalf("architect suspends = %d, want one per wait", suspends)
-	}
+	assertNoArchitectSuspension(t, pool, "LEGION-100")
 }
 
 // An approved gate that answers a root's wait advances the root and its admitted children together
@@ -576,11 +579,10 @@ func TestAResumeWithTheGateOpenAdvancesTheAdmittedChildren(t *testing.T) {
 	}
 }
 
-// Round 21 same-model P2-1, outside-whole P3-C: the architect asks Q1 and Q2 in one turn, the
-// person answers Q1, and the root resumes with Q2 still with the person. Neither the architect's
-// own claim event nor a parked child sends the resumed root back to awaiting_person: the resume is
-// a handout, and only a hand-back after it starts the next wait. Nothing suspends the architect
-// after its resume's start.
+// The architect asks Q1 and Q2 in one turn, the person answers Q1, and the root resumes with Q2
+// still with the person. Neither the architect's own claim event nor a parked child sends the
+// resumed root back to awaiting_person: the resume is a handout, and only a hand-back after it
+// starts the next wait.
 func TestAResumedRootIsNotSentBackByAClaimEventOrAMemberLeave(t *testing.T) {
 	for _, tc := range []struct {
 		name  string
@@ -615,19 +617,16 @@ func TestAResumedRootIsNotSentBackByAClaimEventOrAMemberLeave(t *testing.T) {
 			takeArchitectTask(t, pool, "LEGION-100")
 			applyFact(t, pool, admission, "tick", intake.ControllerTick{})
 			assertAdmittedInItsSlot(t, pool, "the resume task taken")
-			if ops := architectOps(t, pool, "LEGION-100"); strings.Join(ops, " ") != "suspend" {
-				t.Fatalf("architect ops = %v, want the first wait's suspend alone after the start ran", ops)
-			}
+			assertNoArchitectSuspension(t, pool, "LEGION-100")
 		})
 	}
 }
 
-// Round 21 second-review P2-3: a changes request answers a gate wait and is recorded as told for
-// the resume task. While the resume's start is queued, its claim is launching, or its task is not
-// yet taken, neither a member's leave nor a fresh hand-back of the tree suspends the architect,
-// so the told request reaches it in that task. Once the task is taken, the next fact starts the
-// wait the hand-back declared.
-func TestNoSuspendReachesAResumeBeforeItsTaskIsTaken(t *testing.T) {
+// A changes request answers a gate wait and is recorded as told for the resume task. While the
+// resume's start is queued, its claim is launching, or its task is not yet taken, a member's leave
+// and a fresh hand-back do not start the next wait. Once the task is taken, the next fact starts
+// the wait the hand-back declared.
+func TestAResumeKeepsItsHandBackUntilItsTaskIsTaken(t *testing.T) {
 	pool := migratedPool(t)
 	admission := newAdmission(t, 1, nil)
 	runningRoot(t, pool)
@@ -645,9 +644,7 @@ func TestNoSuspendReachesAResumeBeforeItsTaskIsTaken(t *testing.T) {
 		if gate := storedGate(t, pool, "LEGION-100"); gate.ToldChangesVersion == nil || gate.ToldChangesReason != "name the rollback path" {
 			t.Fatalf("gate %s = %#v, want the changes request still recorded as told", stage, gate)
 		}
-		if suspends := countSuspends(architectOps(t, pool, "LEGION-100")); suspends != 1 {
-			t.Fatalf("architect suspends %s = %d, want the first wait's alone", stage, suspends)
-		}
+		assertNoArchitectSuspension(t, pool, "LEGION-100")
 	}
 	parkChild(t, pool, admission)
 	applyFact(t, pool, admission, "fresh-hand-back", requestHandedBack(13))
@@ -746,9 +743,7 @@ func TestAHandedBackWaitStartsOnEveryGuardClearingPath(t *testing.T) {
 				t.Fatalf("root once the guard cleared = %#v, want it waiting on spec version 4 from the hand-back", got)
 			}
 			assertSlots(t, pool, []record.Slot{{Issue: "LEGION-NEXT", Index: 0, AdmittedAt: fixedNow}})
-			if suspends := countSuspends(architectOps(t, pool, "LEGION-100")); suspends != 1 {
-				t.Fatalf("architect suspends = %d, want one", suspends)
-			}
+			assertNoArchitectSuspension(t, pool, "LEGION-100")
 		})
 	}
 }
@@ -782,9 +777,7 @@ func TestAGateWaitHeldByAGuardIsToldDespiteAnActOnAnotherAsk(t *testing.T) {
 				t.Fatalf("task told in place = %q, want it to name %q", task, want)
 			}
 		}
-		if suspends := countSuspends(architectOps(t, pool, "LEGION-100")); suspends != 0 {
-			t.Fatalf("architect suspends = %d, want none", suspends)
-		}
+		assertNoArchitectSuspension(t, pool, "LEGION-100")
 	})
 	t.Run("the act between the two hand-backs", func(t *testing.T) {
 		pool := migratedPool(t)
@@ -1126,7 +1119,7 @@ func TestARetractionThatOpensAnotherAskKeepsTheRootWaiting(t *testing.T) {
 // spec before the architect's register_gate reads Dispatch, so the review arrives with the
 // registration. The live artifact event and the gate seed that follow find the gate as the
 // registration left it, so only the registration can answer the wait: it does, and the root takes
-// the next free slot. Without that answer the root stays suspended with nobody waiting on it.
+// the next free slot. Without that answer the root stays waiting with its architect live.
 func TestAReviewARegistrationCarriesAnswersTheRootItWaitsFor(t *testing.T) {
 	for _, tc := range []struct {
 		name     string
@@ -1458,8 +1451,8 @@ func TestAChangesRequestBetweenARegistrationsReadAndItsApplyAnswersTheWait(t *te
 // An approval answers a wait whenever it opens the gate, given before the wait began or not: a root
 // can wait on a gate the record still shows closed after an approval whose own event was lost, and
 // were that approval skipped when the gate seed or the boot catch-up applies it, the root would stay
-// suspended with its gate open and nothing left to answer it. Applied again, it answers nothing
-// more, and the root resumes once. An approval of an older version opens nothing and answers
+// waiting with its architect live, its gate open and nothing left to answer it. Applied again, it
+// answers nothing more, and the architect receives its task once the root takes a slot. An approval of an older version opens
 // nothing. (A gate already open answers a waiting root by itself: the question-wait slice's
 // answerOpenGates.)
 func TestAnApprovalThatOpensTheGateAnswersAWaitWhateverItsTime(t *testing.T) {

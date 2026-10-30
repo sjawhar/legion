@@ -107,6 +107,11 @@ type liveSocket struct {
 	// ending counts the subscriptions stopping beside the read loop, which the socket waits for
 	// once it ends.
 	ending sync.WaitGroup
+	// beforePick runs in the writer on every turn, between its look at the hub's queue and its
+	// pick of the next frame, told whether that pick may take a stream frame. Nil outside tests; a
+	// test holds the writer there to put a frame on each queue while it waits
+	// (server.liveWriterBeforePick).
+	beforePick func(socket *liveSocket, takesStream bool)
 }
 
 func newLiveSocket(ctx context.Context, conn *gws.Conn, human bool) *liveSocket {
@@ -209,12 +214,18 @@ func (socket *liveSocket) close(code int, reason string) {
 
 // write sends the page each queued frame, the hub's queue ahead of the stream, and every heartbeat
 // a ping beside a heartbeat frame (a browser shows the page no ping), until the reader ends,
-// something closes the socket, or the socket reaches its age.
+// something closes the socket, or the socket reaches its age. No stream frame goes out ahead of a
+// hub frame queued before it: a sub the read loop replaces has every frame the hub sends it queued
+// before the replacement starts (Unsubscribe takes the hub's lock, which the hub sends under), so
+// the replacement's frames follow the replaced view's last answer.
 func (socket *liveSocket) write(ctx context.Context, lifetime <-chan struct{}, heartbeat, age time.Duration, readerDone <-chan struct{}) {
 	ticker := time.NewTicker(heartbeat)
 	defer ticker.Stop()
 	aged := time.NewTimer(age)
 	defer aged.Stop()
+	// taken is a stream frame the pick took while a hub frame waited; its from is nil while it
+	// holds none. It goes out once the hub's queue is empty.
+	var taken liveStreamFrame
 	for {
 		// A full queue wins over the frames still in it: the page resumes from what it applied.
 		if socket.overflowed() {
@@ -222,10 +233,24 @@ func (socket *liveSocket) write(ctx context.Context, lifetime <-chan struct{}, h
 			socket.close(gws.CloseTryAgainLater, "")
 			return
 		}
-		// While a frame waits on the hub's queue, the stream waits.
+		if taken.from != nil && len(socket.queue) == 0 {
+			queued := taken
+			taken = liveStreamFrame{}
+			if queued.from.stopped.Load() {
+				continue // its subscription has stopped, and what replaced it may already have written
+			}
+			if !socket.writeFrame(queued.frame) {
+				return
+			}
+			continue
+		}
+		// While a frame waits on the hub's queue, the stream waits, and so does a frame taken from it.
 		stream := socket.stream
-		if len(socket.queue) > 0 {
+		if len(socket.queue) > 0 || taken.from != nil {
 			stream = nil
+		}
+		if socket.beforePick != nil {
+			socket.beforePick(socket, stream != nil)
 		}
 		var frame any
 		select {
@@ -253,23 +278,39 @@ func (socket *liveSocket) write(ctx context.Context, lifetime <-chan struct{}, h
 			frame = liveHeartbeat
 		case frame = <-socket.queue:
 		case queued := <-stream:
+			// The look above found the hub's queue empty, but a hub frame can arrive before the pick,
+			// and the pick then chooses between the two at random. One queued before this frame goes
+			// first, so this one waits until the hub's queue is empty.
+			if len(socket.queue) > 0 {
+				taken = queued
+				continue
+			}
 			if queued.from.stopped.Load() {
 				continue // its subscription has stopped, and what replaced it may already have written
 			}
 			frame = queued.frame
 		}
-		data, err := json.Marshal(frame)
-		if err != nil {
-			slog.Error("dispatch: live socket closed: a frame did not encode", "frame", fmt.Sprintf("%T", frame), "error", err)
-			socket.close(gws.CloseInternalServerErr, "")
-			return
-		}
-		_ = socket.conn.SetWriteDeadline(time.Now().Add(liveSocketWriteWait))
-		if err := socket.conn.WriteMessage(gws.TextMessage, data); err != nil {
-			socket.endReads(0)
+		if !socket.writeFrame(frame) {
 			return
 		}
 	}
+}
+
+// writeFrame writes frame to the page, and answers false once the socket is done: a frame that did
+// not encode closes it, and a failed write ends its reads.
+func (socket *liveSocket) writeFrame(frame any) bool {
+	data, err := json.Marshal(frame)
+	if err != nil {
+		slog.Error("dispatch: live socket closed: a frame did not encode", "frame", fmt.Sprintf("%T", frame), "error", err)
+		socket.close(gws.CloseInternalServerErr, "")
+		return false
+	}
+	_ = socket.conn.SetWriteDeadline(time.Now().Add(liveSocketWriteWait))
+	if err := socket.conn.WriteMessage(gws.TextMessage, data); err != nil {
+		socket.endReads(0)
+		return false
+	}
+	return true
 }
 
 // serveLiveSocket serves GET /ws/live to a signed-in person or an agent's bearer, recording which
@@ -288,6 +329,7 @@ func (s *server) serveLiveSocket(w http.ResponseWriter, r *http.Request) {
 	}
 	age := s.liveSocketAge()
 	socket := newLiveSocket(r.Context(), conn, human)
+	socket.beforePick = s.liveWriterBeforePick
 	s.liveSockets.add(socket)
 	defer s.liveSockets.remove(socket)
 	defer conn.Close()

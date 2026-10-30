@@ -86,9 +86,9 @@ func TestAResumeStartsEachReleasedChildOnce(t *testing.T) {
 // An open design gate answers a root waiting on its architect's question, whatever opened it and
 // in whatever order: a person's approval Dispatch recorded before the hand-back but applied after
 // the wait began, a registration that reads an approval, and a registration under gates.design:
-// off. Each resumes the root on the next free slot and advances its tree; none leaves it suspended
-// with its gate open. The resume task says how the spec stands, so no design-approved notice is
-// queued beside it. (Round 1, adversarial P2-1 and P3-1, outside-whole P3-2.)
+// off. Each queues the next task when the root takes a free slot and advances its tree; none leaves
+// the root waiting with its gate open. The resume task says how the spec stands, so no
+// design-approved notice is queued beside it. (Round 1, adversarial P2-1 and P3-1, outside-whole P3-2.)
 func TestAnOpenGateAnswersAQuestionWaitWhateverOpenedIt(t *testing.T) {
 	approvedAt := fixedNow.Add(-time.Minute)
 	for _, tc := range []struct {

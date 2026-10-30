@@ -198,6 +198,7 @@ RULES = {
         ("scripts/pi-plugin-prepack.sh", "internal/daemon/agentmodels_omp_test.go:175 --stage-skills"),
         ("skills/**", "internal/daemon/agentmodels_omp_test.go:175 prepack stages skills/<name>")),
     f"{DAEMON}/internal/daemon/capability_reports_test.go": reads((f"{FIX}/capability-redaction.json", "internal/daemon/capability_reports_test.go:315")),
+    f"{DAEMON}/internal/daemon/check_settlement_test.go": reads((f"{FIX}/checks-settlement/*", "internal/daemon/check_settlement_test.go:56")),
     f"{DAEMON}/internal/daemon/daemon_test.go": reads((f"{DAEMON}/internal/intake/testdata/dispatch/issue-updated.json", "internal/daemon/daemon_test.go:1004")),
     f"{DAEMON}/internal/daemon/nats_permissions_test.go": reads(
         (f"{DAEMON}/internal/intake/testdata/dispatch/issue-updated.json", "internal/daemon/nats_permissions_test.go:76"),
@@ -208,6 +209,8 @@ RULES = {
         Read(g, "internal/daemon/promptreferences_omp_test.go:132,207-228 bun pm pack of packages/pi-envoy and pi-legion runs their prepack")
         for g in PACK_READS] + reads(("packages/envoy-client/scripts/build-dispatch-cli.sh", "scripts/pi-plugin-prepack.sh:92, run by the pack in promptreferences_omp_test.go:228")),
     f"{DAEMON}/internal/daemon/supervision_test.go": reads((f"{DAEMON}/internal/stream/*", "internal/daemon/supervision_test.go:1220 Glob ../stream/*.go")),
+    f"{DAEMON}/internal/intake/redelivered_test.go": [
+        run(ENVOY, ["./cmd/listener", "./cmd/dispatch"], "internal/intake/redelivered_test.go:255 go build -C ../../../envoy ./cmd/listener ./cmd/dispatch", mode="build")],
     f"{DAEMON}/internal/intake/intake_test.go": reads((f"{FIX}/github-envelopes/*", "internal/intake/intake_test.go:698,763")),
     f"{DAEMON}/internal/projection/state_golden_test.go": reads((f"{FIX}/daemon-api/*", "internal/projection/state_golden_test.go:161")),
     f"{DAEMON}/internal/prompts/roles_test.go": reads(("packages/pi-legion/agents/*", "internal/prompts/roles_test.go:236")),
@@ -238,6 +241,8 @@ RULES = {
         (f"{ENVOY}/internal/dispatch/**", "cmd/dispatch/settings_test.go:137 environmentReads walks .go files")),
     f"{ENVOY}/cmd/listener/api_test.go": reads((f"{FIX}/dispatch-targeted-delivery.json", "cmd/listener/api_test.go:191,436,480")),
     f"{ENVOY}/internal/broker/config/config_test.go": reads((f"{ENVOY}/docker/rds-global-bundle.pem", "internal/broker/config/config_test.go:513")),
+    f"{ENVOY}/internal/broker/oauth/claims_doc_test.go": reads(("docs/kubernetes.md", "internal/broker/oauth/claims_doc_test.go:161")),
+    f"{ENVOY}/internal/cistore/settlement_fixture_test.go": reads((f"{FIX}/checks-settlement/*", "internal/cistore/settlement_fixture_test.go:56")),
     f"{ENVOY}/internal/contracts/dedupe_test.go": reads((f"{FIX}/dedupe-keys.json", "internal/contracts/dedupe_test.go:14")),
     f"{ENVOY}/internal/contracts/golden_test.go": reads(
         (f"{ENVOY}/scripts/fixtures/github/*", "internal/contracts/golden_test.go:47"),
@@ -613,8 +618,8 @@ GATES = [
         step_run("envoy-infra-go", "Vet envoy-infra, its live-test tags included", "go vet -tags pulumilive,natslive ./...", INFRA, ["./..."],
                  tags="pulumilive,natslive", mode="vet"),
         step_run("envoy-infra-go", "Unit test envoy-infra", "go test ./...", INFRA, ["./..."]),
-        step_run("envoy-infra-go", "Live tests of envoy-infra against nats-server (natslive)", "go test -tags natslive ./core/ ./seed/", INFRA,
-                 ["./core/", "./seed/"], tags="natslive"),
+        step_run("envoy-infra-go", "Live tests of envoy-infra against nats-server (natslive)", "go test -timeout 30m -tags natslive ./core/ ./seed/ ./gcp/", INFRA,
+                 ["./core/", "./seed/", "./gcp/"], tags="natslive"),
     ], reads=reads(
         (f"{INFRA}/**", f"{at('envoy-infra-go', 'Check Go formatting')}: gofmt -l . in packages/envoy/infra reads every .go file under it"),
         (".github/actions/pull-test-images/**", at("envoy-infra-go", "Pull the NATS and Postgres test container images")),
@@ -623,18 +628,24 @@ GATES = [
     ) + setup_go("envoy-infra-go", f"{INFRA}/go.mod") + CI_SELF),
 
     gate("envoy_go_race", "envoy-go-race", runs=[
-        step_run("envoy-go-race", "Race-test the document service, its API, pmdoc, delivery, the store, and the bus",
-                 "go test -race -timeout 30m ./internal/dispatch/docs/ ./internal/dispatch/api/ ./internal/dispatch/pmdoc/... "
+        step_run("envoy-go-race", "Race-test the API, pmdoc, delivery, the store, and the bus",
+                 "go test -race -timeout 30m ./internal/dispatch/api/ ./internal/dispatch/pmdoc/... "
                  "./internal/dispatch/delivery/... ./internal/dispatch/store/... ./internal/bus/",
-                 ENVOY, ["./internal/dispatch/docs/", "./internal/dispatch/api/", "./internal/dispatch/pmdoc/...",
+                 ENVOY, ["./internal/dispatch/api/", "./internal/dispatch/pmdoc/...",
                          "./internal/dispatch/delivery/...", "./internal/dispatch/store/...", "./internal/bus/"], race=True),
-        step_run("envoy-go-race", "Race-test the listener, the registry store and kvwatch",
-                 "go test -race -timeout 30m ./cmd/listener/ ./internal/store/ ./internal/kvwatch/...", ENVOY,
-                 ["./cmd/listener/", "./internal/store/", "./internal/kvwatch/..."], race=True),
+        step_run("envoy-go-race", "Race-test the listener, the registry store, the session cache and kvwatch",
+                 "go test -race -timeout 30m ./cmd/listener/ ./internal/store/ ./internal/session/ ./internal/kvwatch/...", ENVOY,
+                 ["./cmd/listener/", "./internal/store/", "./internal/session/", "./internal/kvwatch/..."], race=True),
     ], reads=reads(
         (f"{ENVOY}/internal/dispatch/pmdoc/schema/blocks.json", "packages/envoy/internal/dispatch/pmdoc/gen/decode.ts:16, differential.ts:21, edit-blocks.ts:21"),
         ("packages/proof-editor/src/**", "packages/envoy/internal/dispatch/pmdoc/gen/decode.ts:6, differential.ts:12-13, edit-blocks.ts:10 import @legion/proof-editor"),
     ) + setup_go("envoy-go-race", f"{ENVOY}/go.mod") + bun_job("envoy-go-race") + CI_SELF),
+
+    gate("envoy_go_race_docs", "envoy-go-race-docs", runs=[
+        step_run("envoy-go-race-docs", "Race-test the document service",
+                 "go test -race -timeout 60m ./internal/dispatch/docs/", ENVOY,
+                 ["./internal/dispatch/docs/"], race=True),
+    ], reads=setup_go("envoy-go-race-docs", f"{ENVOY}/go.mod") + CI_SELF),
 
     gate("dispatch_memory", "dispatch-memory", runs=[
         step_run("dispatch-memory", "Memory tests of the Dispatch server", "go test -tags memory -count=1 -timeout 60m -v ./cmd/dispatch",

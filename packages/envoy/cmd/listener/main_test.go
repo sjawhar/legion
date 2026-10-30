@@ -1222,11 +1222,11 @@ func setupAdminTestRegistry(t *testing.T, interests map[string][]string) *store.
 }
 
 func TestAdminInterestsHandler_ListAll(t *testing.T) {
-	registry := setupAdminTestRegistry(t, map[string][]string{
+	registry, sessions := setupSessionsTest(t, map[string][]string{
 		"ses_list_b": {"notifications.test.>"},
 		"ses_list_a": {"notifications.github.>"},
-	})
-	handler := adminInterestsHandler(registry)
+	}, nil)
+	handler := adminInterestsHandler(registry, sessions)
 
 	req := httptest.NewRequest(http.MethodGet, "/v1/interests/", nil)
 	rec := httptest.NewRecorder()
@@ -1248,10 +1248,10 @@ func TestAdminInterestsHandler_ListAll(t *testing.T) {
 }
 
 func TestAdminInterestsHandler_GetBySession(t *testing.T) {
-	registry := setupAdminTestRegistry(t, map[string][]string{
+	registry, sessions := setupSessionsTest(t, map[string][]string{
 		"ses_get_test": {"notifications.test.>"},
-	})
-	handler := adminInterestsHandler(registry)
+	}, nil)
+	handler := adminInterestsHandler(registry, sessions)
 
 	req := httptest.NewRequest(http.MethodGet, "/v1/interests/ses_get_test", nil)
 	rec := httptest.NewRecorder()
@@ -1286,7 +1286,11 @@ func TestAdminInterestsHandler_GetAnswers404OnlyForAnUnknownSession(t *testing.T
 		[]string{contracts.AgentSubject("ses_known")}); err != nil {
 		t.Fatalf("failed to upsert interest: %v", err)
 	}
-	handler := adminInterestsHandler(registry)
+	sessions, err := session.OpenSessionRegistry(client.Conn, session.WithSessionReplicas(1))
+	if err != nil {
+		t.Fatalf("failed to create session registry: %v", err)
+	}
+	handler := adminInterestsHandler(registry, sessions)
 	get := func(sessionID string) *httptest.ResponseRecorder {
 		rec := httptest.NewRecorder()
 		handler.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/v1/interests/"+sessionID, nil))
@@ -1312,10 +1316,10 @@ func TestAdminInterestsHandler_GetAnswers404OnlyForAnUnknownSession(t *testing.T
 }
 
 func TestAdminInterestsHandler_DeleteBySession(t *testing.T) {
-	registry := setupAdminTestRegistry(t, map[string][]string{
+	registry, sessions := setupSessionsTest(t, map[string][]string{
 		"ses_delete_target": {"notifications.test.>"},
-	})
-	handler := adminInterestsHandler(registry)
+	}, nil)
+	handler := adminInterestsHandler(registry, sessions)
 
 	req := httptest.NewRequest(http.MethodDelete, "/v1/interests/ses_delete_target", nil)
 	rec := httptest.NewRecorder()
@@ -1333,8 +1337,8 @@ func TestAdminInterestsHandler_DeleteBySession(t *testing.T) {
 }
 
 func TestAdminInterestsHandler_DeleteIdempotent(t *testing.T) {
-	registry := setupAdminTestRegistry(t, nil)
-	handler := adminInterestsHandler(registry)
+	registry, sessions := setupSessionsTest(t, nil, nil)
+	handler := adminInterestsHandler(registry, sessions)
 
 	req := httptest.NewRequest(http.MethodDelete, "/v1/interests/ses_nonexistent", nil)
 	rec := httptest.NewRecorder()
@@ -1346,8 +1350,8 @@ func TestAdminInterestsHandler_DeleteIdempotent(t *testing.T) {
 }
 
 func TestAdminInterestsHandler_MethodNotAllowed(t *testing.T) {
-	registry := setupAdminTestRegistry(t, nil)
-	handler := adminInterestsHandler(registry)
+	registry, sessions := setupSessionsTest(t, nil, nil)
+	handler := adminInterestsHandler(registry, sessions)
 
 	req := httptest.NewRequest(http.MethodPost, "/v1/interests/", nil)
 	rec := httptest.NewRecorder()
@@ -1356,6 +1360,142 @@ func TestAdminInterestsHandler_MethodNotAllowed(t *testing.T) {
 	if rec.Code != http.StatusMethodNotAllowed {
 		t.Fatalf("expected 405, got %d", rec.Code)
 	}
+}
+
+// interestRowLastSeen is a row GET /v1/interests/ answers, with last_seen read as a pointer so a
+// row that leaves it out reads as nil.
+type interestRowLastSeen struct {
+	SessionID string `json:"session_id"`
+	UpdatedAt int64  `json:"updated_at"`
+	LastSeen  *int64 `json:"last_seen"`
+}
+
+// setupInterestLastSeenTest opens an interest registry whose clock stands three minutes in the
+// past, so each interest row it writes for interests is older than any heartbeat written now, as a
+// row the listener did not rewrite on the session's later heartbeats is, and a session registry
+// opened with options on the same bus.
+func setupInterestLastSeenTest(t *testing.T, interests []string, options ...session.SessionRegistryOption) (*store.Registry, *session.SessionRegistry) {
+	t.Helper()
+	client, err := bus.ConnectOwningStream([]string{testnats.URL(t)}, bus.WithReplicas(1))
+	if err != nil {
+		t.Fatalf("failed to connect bus: %v", err)
+	}
+	t.Cleanup(client.Close)
+	rowsWritten := time.Now().Add(-3 * time.Minute)
+	registry, err := store.Open(client.Conn, store.WithReplicas(1), store.WithClock(func() time.Time { return rowsWritten }))
+	if err != nil {
+		t.Fatalf("failed to create registry: %v", err)
+	}
+	waitForRegistry(t, registry)
+	sessions, err := session.OpenSessionRegistry(client.Conn, append([]session.SessionRegistryOption{session.WithSessionReplicas(1)}, options...)...)
+	if err != nil {
+		t.Fatalf("failed to create session registry: %v", err)
+	}
+	t.Cleanup(sessions.StopWatch)
+	for _, sessionID := range interests {
+		if _, err := registry.Upsert(store.Interest{SessionID: sessionID, MachineID: "test-machine", Dir: "/test/" + sessionID},
+			[]string{contracts.AgentSubject(sessionID)}); err != nil {
+			t.Fatalf("failed to upsert interest for %s: %v", sessionID, err)
+		}
+	}
+	waitFor(t, 5*time.Second, "the interest cache to hold every row", func() bool {
+		return len(registry.List()) == len(interests)
+	})
+	return registry, sessions
+}
+
+// heartbeat registers sessionID now and answers the heartbeat time its live entry records.
+func heartbeat(t *testing.T, sessions *session.SessionRegistry, sessionID string) int64 {
+	t.Helper()
+	if err := sessions.Put(sessionID, session.SessionEntry{Port: 1, MachineID: "test-machine", Dir: "/test/" + sessionID}); err != nil {
+		t.Fatalf("failed to put session entry for %s: %v", sessionID, err)
+	}
+	entry, err := sessions.Get(sessionID)
+	if err != nil {
+		t.Fatalf("Get(%s) right after its heartbeat: %v", sessionID, err)
+	}
+	return entry.UpdatedAt
+}
+
+// listedInterestRows answers GET /v1/interests/ by session id, and GET /v1/interests/<id> for each.
+func listedInterestRows(t *testing.T, handler http.Handler) (list, single map[string]interestRowLastSeen) {
+	t.Helper()
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/v1/interests/", nil))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("GET /v1/interests/: status %d %s, want 200", rec.Code, rec.Body.String())
+	}
+	var rows []interestRowLastSeen
+	if err := json.NewDecoder(rec.Body).Decode(&rows); err != nil {
+		t.Fatalf("decode GET /v1/interests/: %v", err)
+	}
+	list, single = map[string]interestRowLastSeen{}, map[string]interestRowLastSeen{}
+	for _, row := range rows {
+		list[row.SessionID] = row
+		rec := httptest.NewRecorder()
+		handler.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/v1/interests/"+row.SessionID, nil))
+		if rec.Code != http.StatusOK {
+			t.Fatalf("GET /v1/interests/%s: status %d %s, want 200", row.SessionID, rec.Code, rec.Body.String())
+		}
+		var one interestRowLastSeen
+		if err := json.NewDecoder(rec.Body).Decode(&one); err != nil {
+			t.Fatalf("decode GET /v1/interests/%s: %v", row.SessionID, err)
+		}
+		single[row.SessionID] = one
+	}
+	return list, single
+}
+
+// wantLastSeen fails unless row carries last_seen equal to want, the session's heartbeat, which is
+// later than the row's own updated_at.
+func wantLastSeen(t *testing.T, route string, row interestRowLastSeen, want int64) {
+	t.Helper()
+	if row.LastSeen == nil || *row.LastSeen != want {
+		t.Fatalf("%s row for %s: last_seen %v, want the session's heartbeat %d (the row's updated_at is %d)", route, row.SessionID, row.LastSeen, want, row.UpdatedAt)
+	}
+	if row.UpdatedAt >= want {
+		t.Fatalf("%s row for %s: updated_at %d is not older than the heartbeat %d; the test proves nothing", route, row.SessionID, row.UpdatedAt, want)
+	}
+}
+
+// A row for a live session carries the session's heartbeat as last_seen, not the row's older
+// updated_at, and a row for a session this listener has never seen leaves last_seen out.
+func TestAdminInterestsHandler_RowsCarryALiveSessionsHeartbeat(t *testing.T) {
+	const live, unknown = "ses_heartbeat_live", "ses_heartbeat_unknown"
+	registry, sessions := setupInterestLastSeenTest(t, []string{live, unknown})
+	beat := heartbeat(t, sessions, live)
+
+	list, single := listedInterestRows(t, adminInterestsHandler(registry, sessions))
+	wantLastSeen(t, "GET /v1/interests/", list[live], beat)
+	wantLastSeen(t, "GET /v1/interests/"+live, single[live], beat)
+	for route, row := range map[string]interestRowLastSeen{"GET /v1/interests/": list[unknown], "GET /v1/interests/" + unknown: single[unknown]} {
+		if row.SessionID != unknown || row.LastSeen != nil {
+			t.Fatalf("%s row for %s = %+v, want it listed with no last_seen", route, unknown, row)
+		}
+	}
+}
+
+// A row for a session that has expired from the session cache still carries its last heartbeat
+// while the cache retains it, as the listener retains it for as long as the interest reaper can
+// still hold the row: the heartbeat, not the row's older updated_at. The read comes more than one
+// TTL after the session left, past the default retention, so only WithLastSeenRetention keeps it.
+func TestAdminInterestsHandler_RowsCarryAnExpiredSessionsLastHeartbeat(t *testing.T) {
+	const (
+		expired    = "ses_heartbeat_expired"
+		sessionTTL = time.Second
+	)
+	registry, sessions := setupInterestLastSeenTest(t, []string{expired},
+		session.WithSessionTTL(sessionTTL), session.WithLastSeenRetention(time.Minute))
+	beat := heartbeat(t, sessions, expired)
+	waitFor(t, 5*time.Second, "the session to expire from the cache", func() bool {
+		_, err := sessions.Get(expired)
+		return err != nil
+	})
+	time.Sleep(sessionTTL + 200*time.Millisecond)
+
+	list, single := listedInterestRows(t, adminInterestsHandler(registry, sessions))
+	wantLastSeen(t, "GET /v1/interests/", list[expired], beat)
+	wantLastSeen(t, "GET /v1/interests/"+expired, single[expired], beat)
 }
 
 func setupSessionsTest(t *testing.T, interests map[string][]string, ports map[string]int) (*store.Registry, *session.SessionRegistry) {
