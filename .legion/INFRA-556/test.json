@@ -2,30 +2,30 @@
   "schemaVersion": 1,
   "phase": "test",
   "issue": "INFRA-556",
-  "completed": "2026-10-30T07:45:00Z",
-  "round": 7,
-  "testedCodeHead": "3b94b7c21d06",
-  "scope": "INFRA-63 architect, 2026-10-30T06:39Z: the per-socket bound of four awareness clients only. The three flood tests unmodified on real binaries; flat memory under the 400k flood and a live flood held open; a reader joining during a live flood seen on both processes within a second; real browsers (several tabs, a reconnecting tab, the editor's own awareness) never dropped; census entry 4 through its own client",
+  "completed": "2026-10-30T10:25:00Z",
+  "round": 8,
+  "testedCodeHead": "c83f0a4e05ed",
+  "scope": "INFRA-63 architect, 2026-10-30T09:50Z: the five-reader test file unchanged and passing; all red tests in workspace mode and GOWORK=off; room bound 256 and the repeated-flood bound restored; census entry 4 matching the code; the new relay not flooding (at most four clients per socket to B) and memory flat",
   "implementerProof": {
-    "verdict": "rejected",
-    "how": "The three flood tests pass at 3b94b7c2, but not because of the per-socket bound. In the repository's build the filter never reads a frame, and the tests pass on the raised room bound (4,000). The implementer's unit tests feed awarenessLimitConn a scripted net.Conn and never go through a websocket upgrade."
+    "verdict": "verified",
+    "how": "At c83f0a4e, on real binaries, all five awareness red tests pass in workspace mode (gorilla v1.5.4-pre) and with GOWORK=off (v1.5.3), 2 of 2 each. The five-reader test also passed 5 more times in workspace mode. The red-test files are byte-identical to what I wrote."
   },
   "failures": [
     {
-      "criterion": "Each document socket holds at most four awareness clients (architect's scope for this round; the fix's own claim)",
-      "evidence": "Red test TestADocumentSocketHoldsItsAwarenessBoundThroughARealUpgrade in packages/envoy/internal/dispatch/docs/awareness_limit_upgrade_test.go (commit da4bb1a5). Command: cd packages/envoy && DISPATCH_TEST_DATABASE_URL=<url> go test -run TestADocumentSocketHoldsItsAwarenessBoundThroughARealUpgrade ./internal/dispatch/docs. In workspace mode, which is how CI's envoy-go job and every local and browser-harness build run, it fails 2 of 2: 'carol on task A holds 10 of them, bob on task B 1; want at most 4 each'. With GOWORK=off it passes 2 of 2. Cause: the root go.work resolves github.com/gorilla/websocket v1.5.4-0.20250319132907-e064f32e3674 (packages/envoy/go.mod says v1.5.3). That version's Upgrade reads through the hijacked brw.Reader without resetting it onto the returned connection (server.go:192-195), so awarenessLimitConn.Read is never called. Temporary prints showed Hijack called for every socket and Read never. On two real binaries in workspace mode: one socket's 2,048-client frame reaches every reader on A and B; a 600-byte first message is not closed; 200 flooding sockets fill A's 4,000-client room, and a joining reader is seen by nobody within 1 s. The image build (Dockerfile, no go.work, gorilla v1.5.3) has the filter working. One possible fix: in awarenessLimitWriter.Hijack, reset buffers.Reader onto the filter connection, as keepAliveWriter.Hijack does for the writer."
+      "criterion": "Census entry 4 and the code agree: a document socket whose first message names no document and type within 512 bytes is closed (architect's instruction for this round)",
+      "evidence": "Red test TestADocumentSocketWhoseShortFirstMessageNamesNoDocumentIsClosed in packages/envoy/internal/dispatch/docs/awareness_limit_short_message_test.go (commit f501ade4). Command: cd packages/envoy && DISPATCH_TEST_DATABASE_URL=<url> go test -run TestADocumentSocketWhoseShortFirstMessageNamesNoDocumentIsClosed ./internal/dispatch/docs. It fails 2 of 2 in workspace mode and 2 of 2 with GOWORK=off: 'the socket is still open 5s after a three-byte first message that names neither a document nor a type'. The first message is ff ff ff, a varuint that never ends. Cause: awareness_limit.go:257-260 (decide's default case) passes a final message too short to name itself on to ygo. Only a nameless message longer than 512 bytes (the implementer's test) and an empty message close. Fix: close a final message that names no document, whatever its length."
     }
   ],
   "failed": 1,
   "proof": [],
-  "observedWithTheFilterActive": [
-    "GOWORK=off (gorilla v1.5.3, as the image builds), two real binaries. All three flood tests pass unmodified. 400,000 invented ids in 6 s: A 58 to 63 MB (live) and 54 to 62 MB (null), B unchanged. A live flood re-announced every 10 s from one socket: A 57 to 59 MB, B holds 4 of the socket's clients. From 200 sockets: B holds 92, and a joining reader is seen on both processes within 1 s.",
-    "Real browsers on main's two-process harness with a GOWORK=off harness binary (go version -m: gorilla v1.5.3): six tabs, three per process, place carets at once and each page shows the other five within 1 s, 4 rounds (also 3x under workspace mode); a tab on B whose socket is cut is shown on A again within 166-235 ms over 6 reconnects; coedit.multiprocess passes.",
-    "Census entry 4 through its own client: the web client's first message on each document socket is its Auth message (type 2), naming the document in a 38-byte header (41 bytes total), on A and B. A 600-byte name is closed; a well-formed awareness or sync message is kept. A 3-byte message naming nothing is passed to ygo and the socket stays open, which the census text ('a document socket whose first message names no document and type within 512 bytes is closed') does not say: text or code needs to change."
+  "observed": [
+    "Red-test files unchanged: awareness_simultaneous_multiprocess_test.go at bbf0f5cd and at head is byte-identical to the copy I sent; the other three red-test files have no change since ec45b9cc. maxAwarenessClientsPerRoom = 256 (repeated-flood bound 512), maxAwarenessClientsPerSocket = 4.",
+    "Filter in the repository's build, workspace mode on two real binaries: one socket's 2,048-client frame reaches carol on A as 4 clients and bob on B as 4; a peer announcing 10 clients in 10 frames is held to 4 on both. A 600-byte nameless first message is closed on A and B.",
+    "Relay and memory, workspace mode: 400,000 invented ids in 6 s took A from 60 to 68 MB (live) and 55 to 62 MB (null), B unchanged. A live flood from one socket re-announced for 41 s: A and B unchanged at 59 MB, B holds 4 of the socket's clients, and a reader joining during it is seen on both processes within 1 s.",
+    "Real browsers on main's two-process harness, workspace build (gorilla v1.5.4-pre, filter active), 2 runs each: six tabs, three per process, see each other's carets within 1 s over 8 rounds; a reconnecting tab is shown on A within 157-237 ms over 6 reconnects; the first message on each document socket is Auth naming the document (38-byte header); coedit.multiprocess passes."
   ],
   "notes": [
-    "Outside this round's scope, in the relay since round 1: ygo's relay lane keeps one awareness blob per room, latest only (internal/relaylane/lane.go:22-23, 111-115). Each blob encodes only the clients its change touched, so concurrent cursor changes from several sockets are lost until each client's next heartbeat (15 s for a browser). A Go probe with five readers on A setting cursors at once left bob on B missing some in 6 of 6 runs at 3b94b7c2 and 2 of 3 at d7ceabb4. Real browsers did not hit it in 15 rounds. Sent to the architect for a decision.",
-    "The repeated-flood test's text is unchanged, but its limit rose from 512 to 8,000 because maxAwarenessClientsPerRoom is now maxRoomConnections x 4."
+    "For the architect: with the room bound back at 256, 200 sockets of one user, each holding its four allowed clients, fill A's room. B then holds 256 bot clients, and a reader who joins A is seen by carol on A at once but not by bob on B within 1 s, nor during the next 45 s of the flood. 64 sockets are enough, and each process admits 1,000 connections. In round 7, with the room bound at 4,000, the same flood passed. This is the chosen bound working as designed, so it is not counted as a failure; whether a per-user connection cap should close it is the architect's call."
   ],
-  "ci": "No CI at 3b94b7c2: PR #2414 conflicts with main and waits for the merge queue (architect, 2026-10-30T00:58Z, 06:39Z)."
+  "ci": "At c83f0a4e only changes and pr-title were queued, and 8400fca7 has 0 check runs. GitHub reads the PR mergeable state as UNKNOWN while it recomputes, and the PR waits for the merge queue (architect)."
 }
