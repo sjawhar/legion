@@ -1,0 +1,46 @@
+{
+  "schemaVersion": 1,
+  "phase": "review",
+  "issue": "INFRA-750",
+  "completed": "2026-10-30T08:24:30Z",
+  "round": 1,
+  "reviewedCodeHead": "d5dbcf927aa7",
+  "reviewedHead": "721792617475ed15f30afb94a8b8e7775ac18594",
+  "decision": "changes_requested",
+  "critical": 0,
+  "important": 0,
+  "minor": 2,
+  "keyFindings": [
+    {
+      "severity": "minor",
+      "file": "packages/envoy/internal/kvwatch/kvwatch.go:212",
+      "description": "The new INFO line `<cache> first watch ended because a rewatch replaced it` gives the wrong cause. watch(w.first, nil, 0) returns an error only before it installs a watcher (bus.ReadStreamState at :513-516, or open with from == 0 at :524-528); with replacing == 0 a replacement never makes it fail. The watch failed on its own (the `error` attribute is the cause, e.g. `nats: connection closed`); a rewatch had only already taken over. Reword it to say that, for example `<cache> first watch failed after a rewatch replaced it; the replacement feeds the cache`, change the `replaced` constant at kvwatch_test.go:189 with it, and fix Start's doc at :191 (`while it is still the live one`: the first watch was never installed, so the condition is `while no watcher is current`, :206). Code and its test change, so it goes through the tester."
+    },
+    {
+      "severity": "minor",
+      "file": "packages/envoy/cmd/listener/cut_rewatch_test.go:43-65",
+      "description": "The freeze-and-wait-for-both-cut-lines sequence is written twice in two new test files of this pull request: cut_rewatch_test.go:43-65 repeats silent_cut_test.go:42-79 (testnats.Start, startListenerProcess with liveLaneEnv, waitHealthy, the log offset, server.Freeze with t.Cleanup(thaw), the loop on disconnectedUnderName for both client names under silentCutBound). Extract one helper in silent_cut_test.go (for example `freezeUntilBothClientsReportTheCut(t, server, listener) (thaw func(), output func() string)`, keeping the per-client missing diagnostic and the timing log) and call it from both tests, so a fix to the wait lands once."
+    }
+  ],
+  "notDefects": [
+    "bustest.FillStream has one caller (internal/webhook/github_test.go:408): item 1.5's fold of 9e is what the architect accepted, and the in-package copies stay because bustest imports bus, as its doc says.",
+    "natsauth.go:179-184 cites ReconnectForever, which the caller passes: the comment speaks of the daemon, whose one production connection (internal/daemon/workflow.go:366) passes it. Accurate as written.",
+    "The timing prose repeated at the two listener call sites (main.go:604-607, live_topics.go:30-33) states why each client needs the option, in the spec's own numbers; not a defect.",
+    "keeper.go:121-123 and :129-132 repeat keptSubjects' doc: item 1.1 asks for the exception in keeper.go's doc by name.",
+    "HookedConnectionEvents is exported for a test outside package bus (cmd/dispatch), which export_test.go cannot reach; its doc matches recovery.go:194-211.",
+    "The three other frozen-bus listener tests the deep review names (write_routes_frozen_bus_test.go:41, confirmed_test.go:238, healthz_jetstream_stall_test.go:155) build their client without the pings, like webhook_frozen_bus_test.go, which the body discloses; the deep review traced each to the same 503s inside their bounds. Recorded in the body's Not proven / risk line."
+  ],
+  "ci": {
+    "requiredChecks": ["lint", "typecheck", "test", "pr-title"],
+    "ciHead": "b41bf83ff20f13ae967537e4b7952e56548a810b",
+    "state": "the CI run at the CI head was still queued at 08:06Z (changes queued, pr-title queued); a request for changes does not wait on it",
+    "handoffsOnlySinceCiHead": true
+  },
+  "thermonuclear": {
+    "head": "721792617475ed15f30afb94a8b8e7775ac18594",
+    "deepReview": "APPROVE: no medium or high finding; two minors (frozen-bus tests without the pings; HookedConnectionEvents exported for tests), neither a correctness defect.",
+    "codeQuality": "CHANGES on five minors; this review takes two (the INFO line's cause and the duplicated freeze wait) and judges the other three not defects, above."
+  },
+  "threads": "none opened by anyone before this review",
+  "security": "secret: the nkey option is unchanged and detectSilentCuts sets only ping fields (packages/daemon/internal/natsauth/natsauth.go:162,195-198); agent-def: the AGENTS.md edits are file locations and behaviour, no reviewer instructions (packages/envoy/AGENTS.md:40,1420-1423); no other sensitive surface."
+}
