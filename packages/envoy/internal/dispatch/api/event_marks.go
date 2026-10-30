@@ -19,9 +19,9 @@ const eventMarksKept = 32
 // without a break a mark taken now never does, but an older one does as soon as the writes open
 // when it was taken have ended, and those are this service's own writes, which take milliseconds. Keeping the recent marks is what
 // lets a reader answer at once from the newest one that counts rather than wait for the writes open
-// at its own mark. Past eventMarksKept the older half is thinned to every other mark, as the
-// horizon's pending list is, so the oldest mark, the first to count during a long write, stays,
-// and the kept ones stay spread over the time they cover.
+// at its own mark. Past eventMarksKept the whole list is thinned to every other mark, starting
+// from the oldest, so the oldest mark, the first to count during a long write, stays, and the kept
+// ones stay spread over the time they cover.
 type eventMarks struct {
 	mu     sync.Mutex
 	boot   events.Mark

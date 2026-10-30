@@ -459,9 +459,13 @@ type whoamiAnswer struct {
 // is written. The page starts every read
 // the event feed keeps current only once whoami has answered, and resumes its first events
 // subscription from event_head, so a change committed while it loads is replayed rather than
-// missed. A head that cannot be read is 503 EVENT_HEAD_UNAVAILABLE, never a whoami without it: a
-// page that took a missing head for an older server's answer would start its feed at the server's
-// head and could miss such a change.
+// missed. A head it cannot answer is a 503, never a whoami without it: a page that took a missing
+// head for an older server's answer would start its feed at the server's head and could miss such a
+// change. EVENT_HEAD_UNAVAILABLE says only that no event id is proven final yet
+// (api.ErrEventHeadUnproven: an event insert open since before every mark, with no horizon proven
+// or persisted), which ends on its own and which the page asks again for as long as it lasts.
+// Every other failure (the database or the horizon's pool not answering) is
+// EVENT_HEAD_READ_FAILED, which the page retries a few times and then shows as an error.
 func (r *router) authWhoami(w http.ResponseWriter, req *http.Request) {
 	email, ok := r.login(w, req)
 	if !ok {
@@ -473,7 +477,11 @@ func (r *router) authWhoami(w http.ResponseWriter, req *http.Request) {
 		if req.Context().Err() == nil {
 			slog.Warn("dispatch: whoami could not read the event log's head", "error", err)
 		}
-		writeCodeError(w, http.StatusServiceUnavailable, "the event log's head could not be read; ask again", "EVENT_HEAD_UNAVAILABLE")
+		if errors.Is(err, api.ErrEventHeadUnproven) {
+			writeCodeError(w, http.StatusServiceUnavailable, "no event id is proven final yet; ask again", "EVENT_HEAD_UNAVAILABLE")
+			return
+		}
+		writeCodeError(w, http.StatusServiceUnavailable, "the event log's head could not be read", "EVENT_HEAD_READ_FAILED")
 		return
 	}
 	api.WriteJSON(w, http.StatusOK, whoamiAnswer{EventHead: strconv.FormatInt(head, 10), Kind: "user", Login: email})

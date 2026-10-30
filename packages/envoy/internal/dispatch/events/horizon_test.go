@@ -686,8 +686,9 @@ func (r scriptedResults) QueryRow() pgx.Row {
 			return r.err
 		}
 		*dest[0].(*int64) = r.observation.newest
-		*dest[1].(*string) = strconv.FormatUint(r.observation.xmin, 10)
-		*dest[2].(*string) = strconv.FormatUint(r.observation.xid, 10)
+		*dest[1].(**time.Time) = nil
+		*dest[2].(*string) = strconv.FormatUint(r.observation.xmin, 10)
+		*dest[3].(*string) = strconv.FormatUint(r.observation.xid, 10)
 		return nil
 	})
 }
@@ -906,5 +907,143 @@ func TestAPersistedHorizonIsReadByALaterProcessAndNotAcrossAReset(t *testing.T) 
 	}
 	if got, err := later.Persisted(ctx); err != nil || got != 0 {
 		t.Fatalf("the persisted horizon after a reset of the log = %d, %v; want 0, the old log's value passed over", got, err)
+	}
+}
+
+// persistCountingDB counts the persist writes (persistHorizonSQL) sent through it, and refuses
+// each while fail is set; every other batch and read goes to the wrapped database.
+type persistCountingDB struct {
+	HorizonDB
+	fail     bool
+	persists atomic.Int32
+}
+
+func (db *persistCountingDB) SendBatch(ctx context.Context, batch *pgx.Batch) pgx.BatchResults {
+	if len(batch.QueuedQueries) == 1 && batch.QueuedQueries[0].SQL == persistHorizonSQL {
+		db.persists.Add(1)
+		if db.fail {
+			return scriptedResults{err: errors.New("connection refused")}
+		}
+	}
+	return db.HorizonDB.SendBatch(ctx, batch)
+}
+
+// A persist write the database refuses is tried again only once horizonPersistEvery has passed,
+// not by every observation that finds H above what was last written: each try runs on an
+// observer's goroutine for up to horizonPersistTimeout, so a refusing database would otherwise hold
+// a reader up at every observation.
+func TestAFailedPersistIsTriedAgainOnlyOnceEveryPersistInterval(t *testing.T) {
+	database := storetest.Open(t)
+	ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
+	defer cancel()
+	db := &persistCountingDB{HorizonDB: database.Pool, fail: true}
+	horizon := NewHorizon(db)
+	horizon.PersistProven()
+	horizon.logger = slog.New(slog.NewTextHandler(io.Discard, nil))
+	var clockMu sync.Mutex
+	clock := time.Date(2026, 10, 30, 0, 0, 0, 0, time.UTC)
+	horizon.now = func() time.Time {
+		clockMu.Lock()
+		defer clockMu.Unlock()
+		return clock
+	}
+	advance := func(by time.Duration) {
+		clockMu.Lock()
+		defer clockMu.Unlock()
+		clock = clock.Add(by)
+	}
+	observeAdvancing := func(times int) {
+		t.Helper()
+		for range times {
+			before := horizon.Proven()
+			commitHorizonEvent(ctx, t, database)
+			for horizon.Proven() == before {
+				if _, err := horizon.Safe(ctx); err != nil {
+					t.Fatalf("observe: %v", err)
+				}
+			}
+		}
+	}
+
+	observeAdvancing(10)
+	if got := db.persists.Load(); got != 1 {
+		t.Fatalf("ten advances of H within one persist interval, every write refused, tried %d persist writes, want 1", got)
+	}
+	advance(horizonPersistEvery)
+	observeAdvancing(3)
+	if got := db.persists.Load(); got != 2 {
+		t.Fatalf("after one more persist interval, %d persist writes tried, want 2", got)
+	}
+}
+
+// A persist write decided before a Reset sends nothing once the Reset has moved the generation:
+// the H it carries is the old log's.
+func TestAPersistDecidedBeforeAResetWritesNothing(t *testing.T) {
+	database := storetest.Open(t)
+	ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
+	defer cancel()
+	db := &persistCountingDB{HorizonDB: database.Pool}
+	horizon := NewHorizon(db)
+	newest := commitHorizonEvent(ctx, t, database)
+	for horizon.Proven() < newest {
+		if _, err := horizon.Safe(ctx); err != nil {
+			t.Fatalf("observe: %v", err)
+		}
+	}
+	horizon.mu.Lock()
+	safe, safeAt, generation := horizon.safe, horizon.safeAt, horizon.generation
+	horizon.persisting = true
+	horizon.mu.Unlock()
+
+	horizon.Reset()
+	horizon.writePersisted(safe, safeAt, generation)
+	if got := db.persists.Load(); got != 0 {
+		t.Fatalf("a persist decided before a Reset sent %d writes after it, want none", got)
+	}
+	horizon.mu.Lock()
+	persisting := horizon.persisting
+	horizon.mu.Unlock()
+	if persisting {
+		t.Fatal("a persist skipped for a Reset left the Horizon persisting, so it would never persist again")
+	}
+}
+
+// A persist write that reaches the database after a reset of the log, with the Horizon not yet
+// Reset, writes nothing: the event now at H's id is the new log's, which does not carry the
+// created_at H was observed with, so the old log's H is never stamped as a value of the new log
+// that a later process would trust (Persisted).
+func TestAPersistOfAnOldLogsHorizonWritesNothingAfterTheLogIsReset(t *testing.T) {
+	database := storetest.Open(t)
+	ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
+	defer cancel()
+	horizon := NewHorizon(database.Pool)
+	newest := commitHorizonEvent(ctx, t, database)
+	for horizon.Proven() < newest {
+		if _, err := horizon.Safe(ctx); err != nil {
+			t.Fatalf("observe: %v", err)
+		}
+	}
+	horizon.mu.Lock()
+	safe, safeAt, generation := horizon.safe, horizon.safeAt, horizon.generation
+	horizon.persisting = true
+	horizon.mu.Unlock()
+	if safeAt.IsZero() {
+		t.Fatalf("H %d carries no created_at", safe)
+	}
+
+	resetEventLog(ctx, t, database)
+	for range int(safe) + 1 {
+		commitHorizonEvent(ctx, t, database)
+	}
+	horizon.writePersisted(safe, safeAt, generation)
+	var rows int
+	if err := database.Pool.QueryRow(ctx, `select count(*) from event_horizon`).Scan(&rows); err != nil {
+		t.Fatalf("count event_horizon: %v", err)
+	}
+	if rows != 0 {
+		t.Fatalf("a persist of the old log's H %d after a reset wrote %d rows, want none", safe, rows)
+	}
+	if got, err := horizon.Persisted(ctx); err != nil || got != 0 {
+		t.Fatalf("Persisted after a reset = %d, %v; want 0", got, err)
 	}
 }

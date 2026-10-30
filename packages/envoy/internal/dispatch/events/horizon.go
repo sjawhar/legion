@@ -11,11 +11,12 @@
 //
 // An observation is one statement in a transaction of its own, sent as one batch:
 //
-//	select coalesce(max(id), 0), pg_snapshot_xmin(pg_current_snapshot())::text, pg_current_xact_id()::text from events
+//	select m.id, e.created_at, pg_snapshot_xmin(pg_current_snapshot())::text, pg_current_xact_id()::text
+//	from (select coalesce(max(id), 0) as id from events) m left join events e on e.id = m.id
 //
-// It yields A, the newest id visible to the statement's snapshot S, the xmin of S, and X, the
-// observer's own transaction id, which pg_current_xact_id assigns while the statement runs, after
-// S was taken.
+// It yields A, the newest id visible to the statement's snapshot S, the created_at of the event at
+// A (which persisting H stamps it with), the xmin of S, and X, the observer's own transaction id,
+// which pg_current_xact_id assigns while the statement runs, after S was taken.
 //
 // A is final once no transaction id below X is still running. Take any transaction T that owns an
 // id g <= A and had not committed when S was taken. T held its transaction id before nextval handed
@@ -104,19 +105,23 @@ const (
 	// horizonDiagnosisTimeout bounds the stall warning's query of pg_stat_activity, which runs
 	// after the observation and must never hold up a reader for long.
 	horizonDiagnosisTimeout = 2 * time.Second
-	// horizonPersistEvery bounds how often a Horizon that persists (PersistProven) writes its H to
-	// event_horizon: at most once a second, by the observation that finds H above what it wrote.
+	// horizonPersistEvery bounds how often a Horizon that persists (PersistProven) tries to write
+	// its H to event_horizon: at most once a second, by the observation that finds H above what it
+	// wrote, whether the last try succeeded or failed.
 	horizonPersistEvery = time.Second
 	// horizonPersistTimeout bounds one such write.
 	horizonPersistTimeout = 2 * time.Second
 )
 
-// persistHorizonSQL writes H to event_horizon with the created_at of the event at it, keeping the
-// higher value, unless the row holds a value of a log since reset (no event at its safe carries its
-// safe_at), which H replaces. An H whose event is gone, a reset since it was proven, writes nothing.
+// persistHorizonSQL writes H ($1) to event_horizon with $2, the created_at of the event at H as the
+// observation that saw it read it, keeping the higher value, unless the row holds a value of a log
+// since reset (no event at its safe carries its safe_at), which H replaces. It writes only while
+// the event at H still carries $2: after a reset of the log, the row at that id, if any, is a new
+// log's, whose created_at is not the one observed, and an H of the old log is never stamped as a
+// value of the new one.
 const persistHorizonSQL = `
 	insert into event_horizon (id, safe, safe_at)
-	select 1, e.id, e.created_at from events e where e.id = $1
+	select 1, e.id, e.created_at from events e where e.id = $1 and e.created_at = $2
 	on conflict (id) do update set safe = excluded.safe, safe_at = excluded.safe_at, updated_at = now()
 	where event_horizon.safe < excluded.safe
 		or not exists (select 1 from events e where e.id = event_horizon.safe and e.created_at = event_horizon.safe_at)
@@ -151,7 +156,7 @@ const horizonStallHolderSQL = `
 // HorizonDB is what a Horizon needs from the store: the shared pool satisfies it.
 type HorizonDB interface {
 	SendBatch(ctx context.Context, b *pgx.Batch) pgx.BatchResults
-	QueryRow(ctx context.Context, sql string, args ...any) pgx.Row // stall diagnosis only
+	QueryRow(ctx context.Context, sql string, args ...any) pgx.Row // the stall diagnosis, WriterFloor and Persisted
 }
 
 // Horizon tracks the safe horizon of the event log (see the package documentation's "Safe
@@ -181,6 +186,8 @@ type Horizon struct {
 	// with an A at or below H when recorded or later. Both are this generation's.
 	safe        int64
 	safeThrough uint64
+	// safeAt is the created_at of the event at safe, as the observation that saw it read it.
+	safeAt time.Time
 	// newest is the highest A observed this generation (Pending).
 	newest int64
 	// pending holds the observations still waiting for a later one to prove them safe, oldest
@@ -191,8 +198,9 @@ type Horizon struct {
 	warnedAt     time.Time
 	failWarnedAt time.Time
 	// persist is whether H is written to event_horizon as it advances (PersistProven);
-	// persistedSafe is the H last written this generation, persistedAt when, and persisting
-	// whether a write is under way. persistWarnedAt is when a failed write was last logged.
+	// persistedSafe is the H last written this generation, persistedAt when the last write was
+	// tried, succeeded or failed, and persisting whether a write is under way. persistWarnedAt is
+	// when a failed write was last logged.
 	persist         bool
 	persistedSafe   int64
 	persistedAt     time.Time
@@ -204,8 +212,11 @@ type Horizon struct {
 type horizonObservation struct {
 	number uint64
 	newest int64
-	xid    uint64
-	at     time.Time
+	// newestAt is the created_at of the event at newest as the observation read it, zero when the
+	// log was empty: what persisting an H of it stamps (persistHorizonSQL).
+	newestAt time.Time
+	xid      uint64
+	at       time.Time
 }
 
 // horizonFlight is the one observation in flight, which concurrent callers share. Its fields
@@ -495,6 +506,7 @@ func (h *Horizon) Reset() {
 	defer h.mu.Unlock()
 	h.generation++
 	h.safe, h.safeThrough, h.newest = 0, 0, 0
+	h.safeAt = time.Time{}
 	h.pending = nil
 	h.persistedSafe = 0
 }
@@ -547,13 +559,14 @@ func (h *Horizon) run(ctx context.Context, flight *horizonFlight) {
 	flight.abandoned = err != nil && ctx.Err() != nil
 	var stalled *horizonObservation
 	var safe, toPersist int64
+	var toPersistAt time.Time
 	var generation uint64
 	if err == nil && flight.generation == h.generation {
 		observation.number, observation.at = flight.number, h.now()
 		h.record(observation, xmin)
 		stalled, safe = h.stalled(observation.at), h.safe
 		if h.persist && !h.persisting && h.safe > h.persistedSafe && observation.at.Sub(h.persistedAt) >= horizonPersistEvery {
-			h.persisting, toPersist, generation = true, h.safe, h.generation
+			h.persisting, toPersist, toPersistAt, generation = true, h.safe, h.safeAt, h.generation
 		}
 	}
 	warnFailure := false
@@ -573,32 +586,42 @@ func (h *Horizon) run(ctx context.Context, flight *horizonFlight) {
 		go h.warnStall(*stalled, observation.at.Sub(stalled.at), safe)
 	}
 	if toPersist > 0 {
-		h.writePersisted(toPersist, generation)
+		h.writePersisted(toPersist, toPersistAt, generation)
 	}
 }
 
-// writePersisted writes safe to event_horizon (persistHorizonSQL), on the observer's goroutine after
-// the observation's waiters have their answer. A failed write is logged at most once every
+// writePersisted writes safe to event_horizon (persistHorizonSQL) with safeAt, the created_at of
+// its event as observed, on the observer's goroutine after the observation's waiters have their
+// answer. It writes nothing once a Reset has moved the generation past the one safe was proven in,
+// checked under h.mu just before the write, and the statement itself writes nothing once the event
+// at safe is another log's, which covers a reset of the log after that check. A try, successful or
+// not, is the last one for horizonPersistEvery. A failed write is logged at most once every
 // warnEvery and leaves the row as it was: a later process then reads the log above an older value.
-func (h *Horizon) writePersisted(safe int64, generation uint64) {
+func (h *Horizon) writePersisted(safe int64, safeAt time.Time, generation uint64) {
+	h.mu.Lock()
+	if generation != h.generation {
+		h.persisting = false
+		h.mu.Unlock()
+		return
+	}
+	h.mu.Unlock()
 	ctx, cancel := context.WithTimeout(context.Background(), horizonPersistTimeout)
 	defer cancel()
 	batch := &pgx.Batch{}
-	batch.Queue(persistHorizonSQL, safe)
+	batch.Queue(persistHorizonSQL, safe, safeAt)
 	results := h.db.SendBatch(ctx, batch)
 	_, err := results.Exec()
 	if closeErr := results.Close(); err == nil {
 		err = closeErr
 	}
 	h.mu.Lock()
-	h.persisting = false
+	now := h.now()
+	h.persisting, h.persistedAt = false, now
 	warn := false
 	if err == nil && generation == h.generation {
-		h.persistedSafe, h.persistedAt = safe, h.now()
-	} else if err != nil {
-		if now := h.now(); h.persistWarnedAt.IsZero() || now.Sub(h.persistWarnedAt) >= h.warnEvery {
-			h.persistWarnedAt, warn = now, true
-		}
+		h.persistedSafe = safe
+	} else if err != nil && (h.persistWarnedAt.IsZero() || now.Sub(h.persistWarnedAt) >= h.warnEvery) {
+		h.persistWarnedAt, warn = now, true
 	}
 	h.mu.Unlock()
 	if warn {
@@ -606,25 +629,29 @@ func (h *Horizon) writePersisted(safe int64, generation uint64) {
 	}
 }
 
-// take runs one observation: A, the xmin of the snapshot S its statement read and X, the
-// observer's own transaction id. synchronous_commit is off for it alone, since the observer
+// take runs one observation: A with its event's created_at, the xmin of the snapshot S its
+// statement read and X, the observer's own transaction id. synchronous_commit is off for it alone, since the observer
 // writes nothing a crash could lose, and its commit need not wait for a WAL flush to end its
 // transaction id.
 func (h *Horizon) take(ctx context.Context) (horizonObservation, uint64, error) {
 	batch := &pgx.Batch{}
 	batch.Queue(`begin`)
 	batch.Queue(`set local synchronous_commit = off`)
-	batch.Queue(`select coalesce(max(id), 0), pg_snapshot_xmin(pg_current_snapshot())::text, pg_current_xact_id()::text from events`)
+	batch.Queue(`
+		select m.id, e.created_at, pg_snapshot_xmin(pg_current_snapshot())::text, pg_current_xact_id()::text
+		from (select coalesce(max(id), 0) as id from events) m left join events e on e.id = m.id
+	`)
 	batch.Queue(`commit`)
 	results := h.db.SendBatch(ctx, batch)
 	var newest int64
+	var newestAt *time.Time
 	var xminText, xidText string
 	_, err := results.Exec()
 	if err == nil {
 		_, err = results.Exec()
 	}
 	if err == nil {
-		err = results.QueryRow().Scan(&newest, &xminText, &xidText)
+		err = results.QueryRow().Scan(&newest, &newestAt, &xminText, &xidText)
 	}
 	if err == nil {
 		_, err = results.Exec()
@@ -643,7 +670,11 @@ func (h *Horizon) take(ctx context.Context) (horizonObservation, uint64, error) 
 	if err != nil {
 		return horizonObservation{}, 0, fmt.Errorf("observe event horizon: parse transaction id %q: %w", xidText, err)
 	}
-	return horizonObservation{newest: newest, xid: xid}, xmin, nil
+	observation := horizonObservation{newest: newest, xid: xid}
+	if newestAt != nil {
+		observation.newestAt = *newestAt
+	}
+	return observation, xmin, nil
 }
 
 // record checks every pending observation against the new one's snapshot xmin, raises H to the
@@ -651,7 +682,7 @@ func (h *Horizon) take(ctx context.Context) (horizonObservation, uint64, error) 
 func (h *Horizon) record(observation horizonObservation, xmin uint64) {
 	for _, pending := range h.pending {
 		if xmin > pending.xid && pending.newest > h.safe {
-			h.safe = pending.newest
+			h.safe, h.safeAt = pending.newest, pending.newestAt
 		}
 	}
 	kept := h.pending[:0]

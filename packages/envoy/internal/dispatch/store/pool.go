@@ -326,21 +326,24 @@ func (p *Pool) Outbox() (*Pool, error) {
 	return NewPool(opened), nil
 }
 
-// horizonPoolSize bounds the pool the event log's safe horizon (events.Horizon) observes through.
-// The server keeps one Horizon, whose concurrent callers share the one observation in flight, so
-// one connection serves every observation; the second is for the stall diagnosis, which runs after
-// an observation has released its waiters and so can run beside the next one.
+// horizonPoolSize bounds the pool the event log's safe horizon (events.Horizon) works through. The
+// server keeps one Horizon, whose concurrent callers share the one observation in flight, so one
+// connection serves every observation. The other statements the Horizon runs share both
+// connections with it: the stall diagnosis and the write of the proven horizon (event_horizon),
+// which run after an observation has released its waiters, and the reads every GET /auth/whoami and
+// the relay's first start make (a mark, the oldest transaction that can write the event log, the
+// persisted horizon), each one statement.
 const horizonPoolSize = 2
 
-// Horizon is the pool the event log's safe horizon (events.Horizon) takes its observations and
-// its stall diagnosis through. Every reader that pages the event log by a global id cursor - the
+// Horizon is the pool the event log's safe horizon (events.Horizon) takes its observations, its
+// marks and the reads beside them, its stall diagnosis and its persist write through. Every reader that pages the event log by a global id cursor - the
 // event stream relay, the delivery hub, a references read since a cursor - reads only up to what
 // an observation has proven safe. Under load the API's requests queue for the shared pool's
 // connections, and an observation queued behind them holds back every live reader of the event
 // log; on a pool of its own it waits for none of them, and holds no connection a request could
 // use. Like the rooms pool it is outside the nested-acquire guard, because a separate pool cannot
-// close the cycle the guard prevents: neither the observation (one batch) nor the diagnosis (one
-// row) asks for a second connection while it holds one.
+// close the cycle the guard prevents: none of those statements (each one batch or one row) asks
+// for a second connection while it holds one.
 func (p *Pool) Horizon() (*pgxpool.Pool, error) {
 	return p.separate(&p.horizon, horizonPoolSize, "event horizon")
 }

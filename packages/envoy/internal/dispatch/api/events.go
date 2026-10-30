@@ -164,9 +164,11 @@ func (s *server) readEventsAfterID(ctx context.Context, after, through int64) ([
 // mark). It waits nowhere else.
 const eventFeedHeadWait = 2 * time.Second
 
-// errEventHeadUnproven is eventFeedHead's answer when it has no id it can vouch for: GET
-// /auth/whoami answers it 503 EVENT_HEAD_UNAVAILABLE, and the page asks again.
-var errEventHeadUnproven = errors.New("no event id is proven final yet: an event insert has been open since before every mark")
+// ErrEventHeadUnproven is eventFeedHead's answer when it has no id it can vouch for: GET
+// /auth/whoami answers it, and only it, 503 EVENT_HEAD_UNAVAILABLE, which the page asks again for
+// as long as it lasts. A failed read of the database or the horizon's pool is another error, which
+// whoami answers 503 EVENT_HEAD_READ_FAILED and the page retries on its bounded rule.
+var ErrEventHeadUnproven = errors.New("no event id is proven final yet: an event insert has been open since before every mark")
 
 // eventFeedHead is the event_head GET /auth/whoami answers, which a page resumes its first events
 // subscription from: an id at or below which every event is final, so a page that starts its reads
@@ -181,7 +183,7 @@ var errEventHeadUnproven = errors.New("no event id is proven final yet: an event
 //
 // It never answers 0 for a log it cannot vouch for: a process with no mark counting and no horizon
 // proven or persisted (a first boot, a reset log) would send its page to replay the whole log. That
-// one waits, eventFeedHeadWait at most, marking again, and past it answers errEventHeadUnproven,
+// one waits, eventFeedHeadWait at most, marking again, and past it answers ErrEventHeadUnproven,
 // which is logged and which the page asks again for.
 func (s *server) eventFeedHead(ctx context.Context) (int64, error) {
 	floor, ok, _, err := s.writerFloor(ctx)
@@ -198,7 +200,7 @@ func (s *server) eventFeedHead(ctx context.Context) (int64, error) {
 		}
 	}
 	slog.Warn("dispatch: whoami has no event_head to answer: no horizon is proven yet and an event insert of this database has been open since before every mark", "wait", eventFeedHeadWait)
-	return 0, errEventHeadUnproven
+	return 0, ErrEventHeadUnproven
 }
 
 func (s *server) readEventRows(ctx context.Context, query string, arguments ...any) ([]model.Event, error) {

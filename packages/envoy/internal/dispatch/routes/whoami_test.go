@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -202,9 +203,11 @@ func TestAnEventsSubscriptionFromTheWhoamiHeadReplaysWhatCommittedSince(t *testi
 	}
 }
 
-// A whoami that cannot read the event log's head answers 503 EVENT_HEAD_UNAVAILABLE rather than a
+// A whoami that cannot read the event log's head answers 503 EVENT_HEAD_READ_FAILED rather than a
 // whoami without it: a page that took a missing head for an older server's answer would start its
-// feed at the server's head and could miss a change committed while it loaded.
+// feed at the server's head and could miss a change committed while it loaded. It is not
+// EVENT_HEAD_UNAVAILABLE, which the page asks again for without limit: a database that does not
+// answer must end at the page's error, not keep it loading for ever.
 func TestWhoamiRefusesWhenItCannotReadTheEventHead(t *testing.T) {
 	for name, build := range map[string]func(t *testing.T) AppContextOptions{
 		"a router with no store": func(*testing.T) AppContextOptions { return AppContextOptions{} },
@@ -235,8 +238,8 @@ func TestWhoamiRefusesWhenItCannotReadTheEventHead(t *testing.T) {
 				Error string `json:"error"`
 			}
 			if err := json.Unmarshal(response.Body.Bytes(), &body); err != nil || response.Code != http.StatusServiceUnavailable ||
-				body.Code != "EVENT_HEAD_UNAVAILABLE" || body.Error == "" {
-				t.Fatalf("whoami: status=%d body=%s, want 503 EVENT_HEAD_UNAVAILABLE", response.Code, response.Body.String())
+				body.Code != "EVENT_HEAD_READ_FAILED" || body.Error == "" {
+				t.Fatalf("whoami: status=%d body=%s, want 503 EVENT_HEAD_READ_FAILED", response.Code, response.Body.String())
 			}
 		})
 	}
@@ -286,11 +289,51 @@ func TestAnAnonymousWhoamiIsUnauthorizedWhileTheEventHeadCannotBeRead(t *testing
 	if n := reads.Load(); n != 0 {
 		t.Fatalf("an anonymous whoami read the event head %d times, want none", n)
 	}
-	if status, code := whoami("alice@d.example"); status != http.StatusServiceUnavailable || code != "EVENT_HEAD_UNAVAILABLE" {
-		t.Fatalf("a signed-in whoami while the head cannot be read: %d %s, want 503 EVENT_HEAD_UNAVAILABLE", status, code)
+	if status, code := whoami("alice@d.example"); status != http.StatusServiceUnavailable || code != "EVENT_HEAD_READ_FAILED" {
+		t.Fatalf("a signed-in whoami while the head cannot be read: %d %s, want 503 EVENT_HEAD_READ_FAILED", status, code)
 	}
 	if n := reads.Load(); n != 1 {
 		t.Fatalf("a signed-in whoami read the event head %d times, want once", n)
+	}
+}
+
+// whoami answers 503 EVENT_HEAD_UNAVAILABLE only while no event id is proven final yet
+// (api.ErrEventHeadUnproven), the one answer the page asks again for without limit, since it ends
+// on its own once the open event insert does. The same error wrapped is answered the same, and a
+// failed read is EVENT_HEAD_READ_FAILED.
+func TestWhoamiAnswersEventHeadUnavailableOnlyWhileNoHeadIsProven(t *testing.T) {
+	for name, tc := range map[string]struct {
+		err  error
+		code string
+	}{
+		"no head proven":          {api.ErrEventHeadUnproven, "EVENT_HEAD_UNAVAILABLE"},
+		"no head proven, wrapped": {fmt.Errorf("event head: %w", api.ErrEventHeadUnproven), "EVENT_HEAD_UNAVAILABLE"},
+		"a failed read":           {errors.New("read the oldest transaction that can write the event log: dial: connection refused"), "EVENT_HEAD_READ_FAILED"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			people := newMemoryPeople()
+			ctx, err := BuildAppContext(AppContextOptions{
+				SigningKey: testSigningKey,
+				People:     people,
+				Identity:   identity.HeaderIdentity{Header: "X-Dispatch-User", People: people},
+				Lifetime:   t.Context(),
+			})
+			if err != nil {
+				t.Fatalf("build context: %v", err)
+			}
+			ctx.eventHead = func(context.Context) (int64, error) { return 0, tc.err }
+			handler, _ := New(ctx)
+			request := httptest.NewRequest(http.MethodGet, "http://dispatch.test/auth/whoami", nil)
+			request.Header.Set("X-Dispatch-User", "alice@d.example")
+			response := httptest.NewRecorder()
+			handler.ServeHTTP(response, request)
+			var body struct {
+				Code string `json:"code"`
+			}
+			if err := json.Unmarshal(response.Body.Bytes(), &body); err != nil || response.Code != http.StatusServiceUnavailable || body.Code != tc.code {
+				t.Fatalf("whoami: status=%d body=%s, want 503 %s", response.Code, response.Body.String(), tc.code)
+			}
+		})
 	}
 }
 
