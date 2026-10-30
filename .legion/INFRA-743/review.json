@@ -2,51 +2,47 @@
   "schemaVersion": 1,
   "phase": "review",
   "issue": "INFRA-743",
-  "completed": "2026-10-29T23:00:00Z",
-  "round": 2,
+  "completed": "2026-10-30T04:39:00Z",
+  "round": 3,
   "decision": "changes_requested",
-  "reviewedCodeHead": "806dbdaf2a1b3ee44a433fb5d24c7838dcb29e03",
-  "ci": "Code head 806dbdaf (compare 806dbdaf...e7c57db4 changes only .legion/INFRA-743/, 2 files): lint, typecheck, pr-title and most lanes success; envoy-go, envoy-go-race and dispatch still in_progress at 22:57Z, so this request for changes does not rest on CI.",
-  "thermonuclear": "deep-review: Verdict CHANGES at 806dbdaf (1 Medium, 3 Minor; the Medium shown by a probe test); code-quality: Verdict CHANGES at 806dbdaf (2 Medium, 3 Low). Both name the same Medium. Every finding below the reviewer checked in the code.",
-  "roundOneItems": "All addressed and each thread answered: the stall answers 200 degraded (da1cdf28) and pages through the reconnect-hooks-stalled filter (7c2ceb90); the zero-stall lock is in healthz_hook_stall_test.go; the census exists; settings.go:83,85 and AGENTS.md name the new lines; the kvwatch comments, the dead timer.Stop, HookStall's zero branch and the single slog.Log call are fixed. Declining HookStallErr() is accepted.",
+  "reviewedCodeHead": "0ae1b454076b",
+  "ci": "Code head 0ae1b454 (only .legion/INFRA-743/ changed up to 79d741f4): lint, typecheck, test, pr-title, envoy-go-race and listener-server-change are success. envoy-go failed (job 123822045224, run 40979135125) on TestAnAskBlockWhoseIDIsPastTheBoundSettles in internal/dispatch/docs (block_id_bound_test.go:201), so ci-ok is cancelled. This PR changes no file of that package, and `go list -deps ./internal/dispatch/docs` names neither internal/bus nor internal/kvwatch. Main's envoy-go passed at edc99283 (run 40976699333), the base of this head's merge, with the same code in that package. Main's newer runs were queued, in progress or cancelled at 04:37Z.",
+  "mergeability": "GitHub reports the pull request CONFLICTING/DIRTY at 79d741f4: main moved after the 0ae1b454 merge.",
+  "thermonuclear": "deep-review: Verdict APPROVE at 0ae1b454. It moved the stall branch back above the durable checks in a scratch copy, and the new test failed. internal/bus, internal/kvwatch and cmd/listener passed under the memory rule. code-quality: Verdict CHANGES at 0ae1b454 (1 Medium, 5 Low, no behaviour change). I checked each finding I carry below in the code.",
+  "roundTwoItems": "The Medium is fixed in a7e0ec2a: the stall check is last, after every 503 check (main.go:486-497), and TestHealthzReportsARecreatedDurableThroughAHookStall locks it. The code minors are fixed: function names in place of line numbers in kvwatch.go and AGENTS.md, 200 degraded in hook_stall_test.go, the HookStall doc, the recovery.go filter comment, and the changelog fragment. I wrote the census rows and the reviewer lines into the PR body myself, which needs no commit.",
   "critical": 0,
-  "important": 1,
-  "minor": 6,
+  "important": 2,
+  "minor": 5,
   "keyFindings": [
     {
       "severity": "important",
-      "file": "packages/envoy/cmd/listener/main.go",
-      "description": "The stall branch (main.go:459-475) returns 200 degraded before the durable-consumer checks (main.go:487-499), so while a stall is past bus.RepairGrace a durable that is gone (ErrConsumerNotFound), unanswered within healthzBudget, or not bound to this listener's subscription answers 200 degraded naming the wrong fault, where it answered 503 before. Such a listener receives nothing, so the reason for 200 (stale caches still place fanout messages) does not hold. The deep review's probe test shows it: recreated durable plus a failing hook gives 503 under the grace and 200 degraded after clock.Advance(bus.RepairGrace). Move the stall check after the durable checks, just before the healthy answer, and add that case to healthz_hook_stall_test.go."
+      "file": "PR #2504",
+      "description": "The pull request is CONFLICTING with main at 79d741f4, so it cannot merge and it gets no CI. Bring main in. Since edc99283, main changed one file of this PR's diff, packages/envoy/AGENTS.md, so by the forward-merge rule the next round is a full round. Read envoy-go green at the merged head, or show TestAnAskBlockWhoseIDIsPastTheBoundSettles failing on main's own envoy-go run, with the run named."
+    },
+    {
+      "severity": "important",
+      "file": "packages/envoy/cmd/listener/healthz_hook_stall_test.go",
+      "description": "hookStallFixture (:104-152) copies setupUnboundDurableFixture (durable_unbound_test.go:42-82) almost line for line, its doc comment included. Only the client differs. Give the existing fixture a *bus.Client parameter (its callers pass setupTestNATS(t)), and build hookStallFixture as the clocked client plus that fixture."
     },
     {
       "severity": "minor",
-      "file": "packages/envoy/internal/kvwatch/kvwatch.go",
-      "description": "kvwatch.go:223, :744-745 and packages/envoy/AGENTS.md:2538 cite cmd/listener/main.go:123 and main.go:177; at this head those are envDuration and a doc-comment line (the numbers were the reviewer's own in round 1 and moved with the merges). Name rewatchListenerKVWatchers, called from rebuildListenerDependencies."
-    },
-    {
-      "severity": "minor",
-      "file": "packages/envoy/internal/bus/hook_stall_test.go",
-      "description": "hook_stall_test.go:68 says the stall is exposed 'so cmd/listener can answer 503 on /healthz', and :96 says the error is 'no reason for /healthz to refuse'; the answer is 200 degraded."
+      "file": "packages/envoy/cmd/listener/healthz_hook_stall_test.go",
+      "description": "The AddReconnectHook + ForceReconnect + waitFor block is pasted at :80-87 and :165-172; one helper beside errHookStallRewatch, carrying the comment. :181 repeats errDurableUnbound's exact text; build it from errDurableUnbound.Error()."
     },
     {
       "severity": "minor",
       "file": "packages/envoy/internal/bus/nats.go",
-      "description": "HookStall's doc (nats.go:570-572) says a run that succeeds clears the error 'in the same locked section that zeroes the stall'; a successful run during which another event landed clears the error but restarts the stall (recovery.go, rewatch's else branch), which is the case main.go:467-472 handles."
+      "description": "HookStall's doc (:569-575) lists when the error is nil, and misses the case of a run still in flight. The rule is simpler: the error is nil when no run has failed since the last run that succeeded. 'That handler is the reader' is also wrong: reportHookFailure reads HookStall too."
     },
     {
       "severity": "minor",
-      "file": "packages/envoy/internal/bus/recovery.go",
-      "description": "recovery.go:250-251 says the two messages and the three attributes are matched by the AWS log-metric filter; the filter (metricfilters.go:103) matches only the ERROR message's words and the level."
+      "file": "packages/envoy/cmd/listener/main.go",
+      "description": "The doc cites infra/gcp/dispatch_kube.go:516, which is a pre-stop comment. The readiness probe is at :523. Cite readyProbe by name. The healthy response map is built at :462-472, before the durable checks and the stall check that can discard it. Build it just before :498, so the code reads as the doc says: every check, then the healthy answer."
     },
     {
       "severity": "minor",
-      "file": "PR body",
-      "description": "The census's own healthz search hits four listener health checks it does not list: packages/envoy/deploy/compose/listener.compose.yml:15 and single-node.compose.yml:43 (curl -f), packages/envoy/infra/host/listener.go:248 (Docker health check) and infra/host/watchdog.go:38 (curl -sf). All pass on 200, so each is 'unchanged', but each needs its row."
-    },
-    {
-      "severity": "minor",
-      "file": "packages/envoy/.changes/unreleased/INFRA-743-rewatch-retry-report.yaml",
-      "description": "The fragment does not name the log contract change an operator's filter reads: the ERROR 'envoy nats reconnect hook failed' is now the WARN 'envoy nats reconnect hook failed; it is retried' under a minute and the ERROR 'envoy nats reconnect hooks have not succeeded' past it, with a new stall_ms attribute, and kvwatch's reason 'repair failed' is gone."
+      "file": "a7e0ec2a",
+      "description": "The fix commit's author is legion-reviewer[bot] and its committer is legion-implementer[bot]. It was written on a working copy that the review App's handoff left. The merge 0ae1b454 above it is the implementer's own, so it is the last code push and nothing is wrong at this head. Start each round's commits with `jj new` on your own commit, so the author is yours."
     }
   ]
 }
