@@ -8,7 +8,14 @@ import { keyedAttempt } from "../../__tests__/keyed-attempt";
 import { answerAskSnoozes, answerIssuePatches } from "../../__tests__/send-answers";
 import { wholeText } from "../../__tests__/whole-text";
 import { ApiError, api } from "../../api/client";
-import type { AskRead, Comment, CredentialPendingRow, InboxRow, Issue } from "../../api/types";
+import type {
+  AskRead,
+  Comment,
+  CredentialPendingRow,
+  InboxRow,
+  Issue,
+  IssueDetails,
+} from "../../api/types";
 import { KeymapProvider } from "../shell/KeymapProvider";
 import { DIALOG_SCOPE } from "../shell/keymap";
 import { Inbox } from "./Inbox";
@@ -2170,5 +2177,380 @@ test("a refused snooze rolls the row back and says why, where the reader can sti
     getAsk.mockRestore();
     getInbox.mockRestore();
     snoozeAsk.mockRestore();
+  }
+});
+
+// ----------------------------------------------------------------------------------------
+// The reading column (INFRA-575). Every test above this line runs at happy-dom's own 1024 px,
+// where the Inbox is the list of cards it has always been - the Inbox below 1280 px, which the
+// spec keeps unchanged - so the tests below say where they stand by widening the window first.
+// ----------------------------------------------------------------------------------------
+
+/** The width the Inbox shows its reading column from (`READING_PANE_QUERY`, 1280 px). happy-dom
+ *  answers `matchMedia` from the window it is given, so the window is the whole fixture. */
+function widenToReadingPane(): () => void {
+  const window_ = window as unknown as {
+    happyDOM: { setViewport(size: { width: number }): void };
+    innerWidth: number;
+  };
+  const was = window_.innerWidth;
+  window_.happyDOM.setViewport({ width: 1440 });
+  return () => window_.happyDOM.setViewport({ width: was });
+}
+
+/** One row by its ask id: a short row holds no card, so there is no `ask-<id>` to find it by. */
+function shortRow(askId: string): HTMLElement {
+  const row = document.querySelector<HTMLElement>(`[data-inbox-row="${askId}"]`);
+  if (row === null) throw new Error(`${askId} row missing`);
+  return row;
+}
+
+/** The ask ids of the rows marked selected: exactly one, or the test has found a second. */
+function selectedIds(): string[] {
+  return [...document.querySelectorAll('[data-inbox-selected="true"]')].map(
+    (row) => row.getAttribute("data-inbox-row") ?? ""
+  );
+}
+
+function address(): string {
+  return screen.getByTestId("location").textContent ?? "";
+}
+
+/** The pane reads one field of the question's issue: whether it is closed. */
+function mockIssueReads() {
+  return spyOn(api, "getIssue").mockResolvedValue({ closed_at: null } as unknown as IssueDetails);
+}
+
+test("from 1280 px the Inbox is two columns: short rows in the list, the question in the pane", async () => {
+  const narrow = widenToReadingPane();
+  const first = inboxIssue("ask-a", "CORE-1", "# Which approach?\n\nThe detail.");
+  const second = inboxIssue("ask-b", "CORE-2", "Which format?");
+  const rows = [first, second];
+  const getInbox = spyOn(api, "getInbox").mockResolvedValue(rows);
+  const getAsk = mockAskReads(rows);
+  const getIssue = mockIssueReads();
+  const { unmount } = renderInbox();
+
+  try {
+    const list = await screen.findByTestId("inbox-list");
+    const pane = await screen.findByTestId("inbox-pane");
+    // The pane is the column to the right of the list: one row, the list first.
+    expect(list.parentElement).toBe(pane.parentElement?.parentElement ?? null);
+    expect(list.compareDocumentPosition(pane) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    // The card is the pane's, never the row's; the row is the question's first line, its kind
+    // and its age.
+    expect(within(list).queryByTestId("ask-ask-a")).toBeNull();
+    expect(within(pane).getByTestId("ask-ask-a")).toBeTruthy();
+    const row = shortRow("ask-a");
+    expect(within(row).getByText("Which approach?")).toBeTruthy();
+    expect(within(row).getByText("Question")).toBeTruthy();
+    expect(within(row).getByText("CORE-1")).toBeTruthy();
+    expect(row.querySelector("time")?.getAttribute("datetime")).toBe(first.created_at);
+    // The first row is selected when the Inbox opens, and the address says so.
+    expect(selectedIds()).toEqual(["ask-a"]);
+    expect(address()).toBe("/?item=ask-a");
+    expect(shortRow("ask-b").getAttribute("data-inbox-selected")).toBeNull();
+  } finally {
+    unmount();
+    narrow();
+    getAsk.mockRestore();
+    getInbox.mockRestore();
+    getIssue.mockRestore();
+  }
+});
+
+test("below 1280 px the Inbox is today's Inbox: the card in the row, no pane and no ?item=", async () => {
+  const rows = [inboxIssue("ask-a", "CORE-1", "Which approach?")];
+  const getInbox = spyOn(api, "getInbox").mockResolvedValue(rows);
+  const getAsk = mockAskReads(rows);
+  const { unmount } = renderInbox();
+
+  try {
+    const card = await screen.findByTestId("ask-ask-a");
+    expect(card.closest("[data-inbox-row]")).toBe(shortRow("ask-a"));
+    expect(screen.queryByTestId("inbox-pane")).toBeNull();
+    expect(selectedIds()).toEqual([]);
+    expect(address()).toBe("/");
+  } finally {
+    unmount();
+    getAsk.mockRestore();
+    getInbox.mockRestore();
+  }
+});
+
+test("a short row names its kind: a decision block, an approval request, and any other question", async () => {
+  const narrow = widenToReadingPane();
+  const question = inboxIssue("ask-question", "CORE-1", "Which approach?");
+  const decision = inboxIssue("ask-decision", "CORE-2", "Ship behind a flag?", {
+    block_artifact: { id: "artifact-1", primary: true, slug: "spec" },
+    block_id: "ship_it",
+  });
+  const approval = inboxIssue("ask-approval", "CORE-3", "Approve spec.md (version 4)?", {
+    approval: { artifact_id: "artifact-1", name: "spec.md", requested_version: 4, version: 4 },
+    approval_artifact: { name: "spec.md", primary: true, project: "CORE", slug: "spec" },
+    kind: "approval",
+  });
+  const rows = [question, decision, approval];
+  const getInbox = spyOn(api, "getInbox").mockResolvedValue(rows);
+  const getAsk = mockAskReads(rows);
+  const getIssue = mockIssueReads();
+  const { unmount } = renderInbox();
+
+  try {
+    await screen.findByTestId("inbox-pane");
+    expect(within(shortRow("ask-question")).getByText("Question")).toBeTruthy();
+    expect(within(shortRow("ask-decision")).getByText("Decision")).toBeTruthy();
+    expect(within(shortRow("ask-approval")).getByText("Approval")).toBeTruthy();
+  } finally {
+    unmount();
+    narrow();
+    getAsk.mockRestore();
+    getInbox.mockRestore();
+    getIssue.mockRestore();
+  }
+});
+
+test("?item= selects the row it names, and one the list does not hold falls back to the first", async () => {
+  const narrow = widenToReadingPane();
+  const first = inboxIssue("ask-a", "CORE-1", "Which approach?");
+  const second = inboxIssue("ask-b", "CORE-2", "Which format?");
+  const rows = [first, second];
+  const getInbox = spyOn(api, "getInbox").mockResolvedValue(rows);
+  const getAsk = mockAskReads(rows);
+  const getIssue = mockIssueReads();
+  const named = renderInbox("/?item=ask-b");
+
+  try {
+    await screen.findByTestId("inbox-pane");
+    await waitFor(() => expect(selectedIds()).toEqual(["ask-b"]));
+    expect(address()).toBe("/?item=ask-b");
+    expect(within(screen.getByTestId("inbox-pane")).getByTestId("ask-ask-b")).toBeTruthy();
+  } finally {
+    named.unmount();
+  }
+
+  const gone = renderInbox("/?item=ask-answered-elsewhere");
+  try {
+    await screen.findByTestId("inbox-pane");
+    await waitFor(() => expect(selectedIds()).toEqual(["ask-a"]));
+    // The address is rewritten to what the Inbox actually shows, so a reload lands there.
+    expect(address()).toBe("/?item=ask-a");
+  } finally {
+    gone.unmount();
+    narrow();
+    getAsk.mockRestore();
+    getInbox.mockRestore();
+    getIssue.mockRestore();
+  }
+});
+
+test("?item= naming a row in the folded Later band opens the band and selects it", async () => {
+  const narrow = widenToReadingPane();
+  const open = inboxIssue("ask-a", "CORE-1", "Which approach?");
+  const later = inboxIssue("ask-later", "CORE-2", "Which format?", { snoozed_until: soon() });
+  const rows = [open, later];
+  const getInbox = spyOn(api, "getInbox").mockResolvedValue(rows);
+  const getAsk = mockAskReads(rows);
+  const getIssue = mockIssueReads();
+  const { unmount } = renderInbox("/?item=ask-later");
+
+  try {
+    await screen.findByTestId("inbox-pane");
+    // A folded band renders no rows at all, so the row being there is the band being open.
+    await waitFor(() => expect(rowIds()).toEqual(["ask-a", "ask-later"]));
+    expect(selectedIds()).toEqual(["ask-later"]);
+    expect(screen.getByRole("button", { name: /^Later \(1\)/ }).getAttribute("aria-expanded")).toBe(
+      "true"
+    );
+  } finally {
+    unmount();
+    narrow();
+    getAsk.mockRestore();
+    getInbox.mockRestore();
+    getIssue.mockRestore();
+  }
+});
+
+test("j and k move the selection down and up the list, the address following each step", async () => {
+  const narrow = widenToReadingPane();
+  const rows = [
+    inboxIssue("ask-a", "CORE-1", "Which approach?"),
+    inboxIssue("ask-b", "CORE-2", "Which format?"),
+  ];
+  const getInbox = spyOn(api, "getInbox").mockResolvedValue(rows);
+  const getAsk = mockAskReads(rows);
+  const getIssue = mockIssueReads();
+  const { unmount } = renderInbox();
+
+  try {
+    await screen.findByTestId("inbox-pane");
+    fireEvent.keyDown(document.body, { key: "j" });
+    await waitFor(() => expect(selectedIds()).toEqual(["ask-b"]));
+    expect(address()).toBe("/?item=ask-b");
+    expect(within(screen.getByTestId("inbox-pane")).getByTestId("ask-ask-b")).toBeTruthy();
+    // The selection is state, not focus: nothing in the list took the keyboard.
+    expect(document.activeElement).toBe(document.body);
+
+    fireEvent.keyDown(document.body, { key: "k" });
+    await waitFor(() => expect(selectedIds()).toEqual(["ask-a"]));
+    expect(address()).toBe("/?item=ask-a");
+    // The last row has nothing below it, and the first nothing above it.
+    fireEvent.keyDown(document.body, { key: "k" });
+    await waitFor(() => expect(selectedIds()).toEqual(["ask-a"]));
+  } finally {
+    unmount();
+    narrow();
+    getAsk.mockRestore();
+    getInbox.mockRestore();
+    getIssue.mockRestore();
+  }
+});
+
+test("a click on a row selects it", async () => {
+  const narrow = widenToReadingPane();
+  const rows = [
+    inboxIssue("ask-a", "CORE-1", "Which approach?"),
+    inboxIssue("ask-b", "CORE-2", "Which format?"),
+  ];
+  const getInbox = spyOn(api, "getInbox").mockResolvedValue(rows);
+  const getAsk = mockAskReads(rows);
+  const getIssue = mockIssueReads();
+  const { unmount } = renderInbox();
+
+  try {
+    await screen.findByTestId("inbox-pane");
+    fireEvent.click(shortRow("ask-b"));
+    await waitFor(() => expect(selectedIds()).toEqual(["ask-b"]));
+    expect(address()).toBe("/?item=ask-b");
+  } finally {
+    unmount();
+    narrow();
+    getAsk.mockRestore();
+    getInbox.mockRestore();
+    getIssue.mockRestore();
+  }
+});
+
+test("the reader's own answer takes its row off the list and selects the next one", async () => {
+  const narrow = widenToReadingPane();
+  const first = inboxIssue("ask-a", "CORE-1", "Which approach?", {
+    options: [{ label: "Ship" }, { label: "Hold" }],
+  });
+  const second = inboxIssue("ask-b", "CORE-2", "Which format?");
+  let served = [first, second];
+  const getInbox = spyOn(api, "getInbox").mockImplementation(async () => served);
+  const getAsk = mockAskReads([first, second]);
+  const getIssue = mockIssueReads();
+  const answerAsk = spyOn(api, "answerAsk").mockImplementation(async () => {
+    served = [second];
+    return {
+      ...first,
+      answer: { at: "2026-09-11T03:00:00Z", selected: ["Ship"], text: "", user: "alice" },
+      state: "answered",
+    };
+  });
+  const { unmount } = renderInbox();
+
+  try {
+    const pane = await screen.findByTestId("inbox-pane");
+    fireEvent.click(within(pane).getByRole("radio", { name: "Ship" }));
+    fireEvent.click(within(pane).getByRole("button", { name: "Answer" }));
+
+    await waitFor(() => expect(rowIds()).toEqual(["ask-b"]));
+    expect(selectedIds()).toEqual(["ask-b"]);
+    expect(address()).toBe("/?item=ask-b");
+    expect(within(screen.getByTestId("inbox-pane")).getByTestId("ask-ask-b")).toBeTruthy();
+    expect(answerAsk).toHaveBeenCalledTimes(1);
+  } finally {
+    unmount();
+    narrow();
+    answerAsk.mockRestore();
+    getAsk.mockRestore();
+    getInbox.mockRestore();
+    getIssue.mockRestore();
+  }
+});
+
+test("a selected row the server drops stays where the reader left it until they select another", async () => {
+  const narrow = widenToReadingPane();
+  const first = inboxIssue("ask-a", "CORE-1", "Which approach?");
+  const second = inboxIssue("ask-b", "CORE-2", "Which format?");
+  let served = [first, second];
+  const getInbox = spyOn(api, "getInbox").mockImplementation(async () => served);
+  const getAsk = mockAskReads([first, second]);
+  const getIssue = mockIssueReads();
+  const { queryClient, unmount } = renderInbox();
+
+  try {
+    await screen.findByTestId("inbox-pane");
+    expect(selectedIds()).toEqual(["ask-a"]);
+
+    // Someone else answers the selected question while the reader is reading it.
+    served = [second];
+    await act(async () => {
+      await queryClient.refetchQueries({ queryKey: ["inbox"] });
+    });
+    expect(rowIds()).toEqual(["ask-a", "ask-b"]);
+    expect(selectedIds()).toEqual(["ask-a"]);
+
+    // Moving on is what lets it go.
+    fireEvent.keyDown(document.body, { key: "j" });
+    await waitFor(() => expect(rowIds()).toEqual(["ask-b"]));
+    expect(selectedIds()).toEqual(["ask-b"]);
+  } finally {
+    unmount();
+    narrow();
+    getAsk.mockRestore();
+    getInbox.mockRestore();
+    getIssue.mockRestore();
+  }
+});
+
+test("the keys act on the selected row and the pane: Enter, 1-9, x, h and Escape", async () => {
+  const narrow = widenToReadingPane();
+  const first = inboxIssue("ask-a", "CORE-1", "Which approach?", {
+    options: [{ label: "Ship" }, { label: "Hold" }],
+  });
+  const rows = [first, inboxIssue("ask-b", "CORE-2", "Which format?")];
+  const getInbox = spyOn(api, "getInbox").mockResolvedValue(rows);
+  const getAsk = mockAskReads(rows);
+  const getIssue = mockIssueReads();
+  const { unmount } = renderInbox();
+
+  try {
+    const pane = await screen.findByTestId("inbox-pane");
+
+    // `1` picks the first option of the selected question, inside the pane.
+    fireEvent.keyDown(document.body, { key: "1" });
+    await waitFor(() =>
+      expect((within(pane).getByRole("radio", { name: "Ship" }) as HTMLInputElement).checked).toBe(
+        true
+      )
+    );
+
+    // Enter moves the focus to the pane's answer box, and Escape brings it back to the row.
+    fireEvent.keyDown(document.body, { key: "Enter" });
+    const answerBox = pane.querySelector("[data-ask-answer]");
+    expect(document.activeElement).toBe(answerBox);
+    fireEvent.keyDown(answerBox ?? document.body, { key: "Escape" });
+    expect(document.activeElement).toBe(shortRow("ask-a"));
+
+    // `h` with nothing checked is the pane head's Snooze, which the short row no longer carries.
+    fireEvent.keyDown(document.body, { key: "h" });
+    expect(document.activeElement?.matches("[data-inbox-snooze]")).toBe(true);
+    expect(pane.contains(document.activeElement)).toBe(true);
+
+    // `x` checks the selected row, which is what the bulk bar then counts.
+    fireEvent.keyDown(document.body, { key: "x" });
+    await screen.findByText("1 selected");
+    expect((within(shortRow("ask-a")).getByRole("checkbox") as HTMLInputElement).checked).toBe(
+      true
+    );
+  } finally {
+    unmount();
+    narrow();
+    getAsk.mockRestore();
+    getInbox.mockRestore();
+    getIssue.mockRestore();
   }
 });

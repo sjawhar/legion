@@ -397,6 +397,56 @@ test("ProofDocument offers no rebuild for a document service that is unavailable
   }
 });
 
+// A reading column (the Inbox's) is not the document's page: it offers no repair and no rebuild,
+// because a reader beside a list of questions has not come to mend a document. Each blocked
+// admission is reported to the host instead, which shows the question's own card in its place.
+test("a pane draws neither prompt for a blocked admission and reports it to its host", async () => {
+  const repair = new ApiError(409, {
+    code: "DOC_SCHEMA",
+    error: "document is outside the Proof schema; replace the document from markdown to repair it",
+  });
+  const getArtifactText = spyOn(api, "getArtifactText").mockRejectedValue(repair);
+  const reported: string[] = [];
+  const schema = renderProofDocument({
+    onUnavailable: (reason) => reported.push(reason),
+    surface: "pane",
+  });
+  try {
+    await waitFor(() =>
+      expect(reported).toEqual([
+        "document is outside the Proof schema; replace the document from markdown to repair it",
+      ])
+    );
+    expect(screen.queryByText("Upload markdown to replace and repair this document.")).toBeNull();
+    expect(screen.queryByLabelText("Upload artifact")).toBeNull();
+    expect(schema.connections).toHaveLength(0);
+  } finally {
+    schema.view.unmount();
+  }
+
+  getArtifactText.mockRejectedValue(
+    new ApiError(409, {
+      code: "DOCUMENT_UNLOADABLE",
+      error: "the document's stored history cannot load; rebuild it from its latest saved version",
+    })
+  );
+  const history = renderProofDocument({
+    onUnavailable: (reason) => reported.push(reason),
+    surface: "pane",
+  });
+  try {
+    await waitFor(() => expect(reported).toHaveLength(2));
+    expect(reported[1]).toBe(
+      "the document's stored history cannot load; rebuild it from its latest saved version"
+    );
+    expect(screen.queryByRole("button", { name: "Rebuild from the latest version" })).toBeNull();
+    expect(history.connections).toHaveLength(0);
+  } finally {
+    history.view.unmount();
+    getArtifactText.mockRestore();
+  }
+});
+
 test("a transport that fails to load is reported instead of connecting forever", async () => {
   const fake = fakeDocumentRuntime({ text: "The live document" });
   const rejection = Promise.reject(new TypeError("Failed to fetch"));

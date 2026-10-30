@@ -215,8 +215,11 @@ function ShellMessagePage({ children, title }: { children?: ReactNode; title: st
 
 function InboxPage(): ReactNode {
   useDocumentTitle("Inbox · Dispatch");
+  // From the reading pane's width the page fills the viewport (`fillsViewport` below), and the
+  // two columns divide the height left under the heading; below it the page scrolls as ever.
+  const readingPaneShown = useMediaQuery(READING_PANE_QUERY);
   return (
-    <section>
+    <section className={readingPaneShown ? "flex min-h-0 flex-1 flex-col" : undefined}>
       {/* Only the page links to the answers page; the drawer's Inbox stays a peek. */}
       <div className="mb-4 flex flex-wrap items-baseline justify-between gap-x-4 gap-y-1">
         <h1 className="text-[22px] font-semibold tracking-tight">Inbox</h1>

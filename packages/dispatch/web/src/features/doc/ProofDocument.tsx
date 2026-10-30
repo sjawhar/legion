@@ -130,6 +130,11 @@ export interface ProofDocumentProps {
    *  one of its decision blocks, so a host that selected the question learns it was answered. */
   onAskAnswered?(askId: string): void;
   onToolbarChange?(toolbar: DocumentToolbar | undefined): void;
+  /** Called in `pane` only, with the server's reason, when the document cannot be opened: a tree
+   *  outside the Proof schema, a history that cannot load, or any other failed admission. The
+   *  page offers a repair or a rebuild for those; a column beside a list offers neither, so it
+   *  tells its host, which shows the question's card instead. */
+  onUnavailable?(reason: string): void;
   onVersionChange(version: number | null): void;
   /** Where this document is drawn. `page` (default) is the document's own page, which claims the
    *  page-level singletons: the margin's document registration, the `document` keymap scope, the
@@ -193,6 +198,7 @@ export function ProofDocument({
   owner,
   onAskAnswered,
   onToolbarChange,
+  onUnavailable,
   onVersionChange,
   showDiff,
   surface = "page",
@@ -257,8 +263,22 @@ export function ProofDocument({
   const [admission, setAdmission] = useState<AdmissionBlock | undefined>(undefined);
   // Set while an admission is blocked: admits again, once the next read of the text succeeds.
   const readmitRef = useRef<(() => void) | undefined>(undefined);
-  const repairError = admission?.kind === "repair" ? admission : undefined;
-  const rebuildError = admission?.kind === "rebuild" ? admission : undefined;
+  // A reading column offers no repair and no rebuild: it is not the document's page, and a
+  // reader beside a list of questions has not come to mend a document. A blocked admission is
+  // reported upward instead (`onUnavailable`), and the host - the Inbox's pane - falls back to
+  // the question's own card. The callback is reached through a ref so a host that re-renders
+  // with a new closure never re-reports the same block.
+  const onUnavailableRef = useRef(onUnavailable);
+  onUnavailableRef.current = onUnavailable;
+  const inPane = surface === "pane";
+  useEffect(() => {
+    if (!inPane || admission === undefined) {
+      return;
+    }
+    onUnavailableRef.current?.(admission.message);
+  }, [admission, inPane]);
+  const repairError = !inPane && admission?.kind === "repair" ? admission : undefined;
+  const rebuildError = !inPane && admission?.kind === "rebuild" ? admission : undefined;
   const shownLoadError = admission?.kind === "failed" ? admission.message : loadError;
   const blockReferencesQuery = useQuery({
     enabled: version === undefined,

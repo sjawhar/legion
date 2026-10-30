@@ -6,7 +6,7 @@ import type { Node as ProseMirrorNode } from "prosemirror-model";
 import { MemoryRouter } from "react-router-dom";
 
 import { fakeDocumentRuntime } from "../../__tests__/document-runtime";
-import { api } from "../../api/client";
+import { ApiError, api } from "../../api/client";
 import type { Artifact, InboxRow, IssueDetails, Version } from "../../api/types";
 import { changeMarksAgainst } from "../doc/change-marks";
 import type { CreateEditor, EditorHandle } from "../doc/editor";
@@ -468,6 +468,34 @@ test("a document that cannot be read falls back to the card, with Open page at t
     // Never the document page's own repair or rebuild prompt: the column opened no document.
     expect(opened).toEqual([]);
     expect(screen.queryByText(/Rebuild from the latest version/)).toBeNull();
+  } finally {
+    view.unmount();
+  }
+});
+
+test("a document the editor is refused admission to leaves the column on the card, with no prompt", async () => {
+  // The column's own read of the text was answered from the cache (seeded below) and the read
+  // the document makes for its own admission is the one the server refuses. Two things then say
+  // the document cannot be opened: the document's report (`onUnavailable`, which
+  // `ProofDocument.admission.test.tsx` covers on its own) and the error that refusal leaves on
+  // the text query both columns share. Either way the column ends on the card and draws neither
+  // of the page's prompts, which is what this test pins.
+  getArtifactText.mockRejectedValue(
+    new ApiError(409, { code: "DOC_SCHEMA", error: "This document is outside the Proof schema." })
+  );
+  const { opened, view } = renderPane({
+    ask: decisionAsk(),
+    seed: (client) => seedDocument(client, document()),
+  });
+
+  try {
+    expect(await screen.findByRole("article", { name: "Urgency: Medium" })).toBeDefined();
+    expect(screen.getByRole("link", { name: "Open page" })).toBeDefined();
+    expect(screen.queryByText(/Upload markdown to replace and repair this document/)).toBeNull();
+    expect(screen.queryByText(/Rebuild from the latest version/)).toBeNull();
+    expect(screen.queryByText(/This document is outside the Proof schema/)).toBeNull();
+    // The refusal is what closed the editor: no room was ever opened.
+    expect(opened).toEqual([]);
   } finally {
     view.unmount();
   }

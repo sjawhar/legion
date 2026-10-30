@@ -77,6 +77,7 @@ export function renderProofDocument({
   highlightTerm,
   isClosed = false,
   onAskAnswered,
+  onUnavailable,
   queryClient = createQueryClient(),
   showDiff = false,
   surface,
@@ -87,6 +88,7 @@ export function renderProofDocument({
   highlightTerm?: string;
   isClosed?: boolean;
   onAskAnswered?(askId: string): void;
+  onUnavailable?(reason: string): void;
   queryClient?: QueryClient;
   showDiff?: boolean;
   surface?: "page" | "pane";
@@ -143,6 +145,7 @@ export function renderProofDocument({
               isClosed={next.isClosed ?? isClosed}
               onAskAnswered={onAskAnswered}
               onToolbarChange={onToolbarChange}
+              onUnavailable={onUnavailable}
               owner={{ key: "CORE-1", kind: "issue" }}
               onVersionChange={onVersionChange}
               showDiff={next.showDiff ?? showDiff}

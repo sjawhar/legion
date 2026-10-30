@@ -208,10 +208,16 @@ export function ReadingPane({ ask, onAnswered, viewer }: ReadingPaneProps): Reac
   const latestVersion =
     artifact === undefined ? undefined : versionsNewestFirst(artifact.versions)[0]?.number;
   // A document the column cannot read, and an approval request on a document that holds no
-  // version to show, both fall back to the card.
+  // version to show, both fall back to the card. So does a document whose own admission failed
+  // after this column's read succeeded: the page answers that with a repair or a rebuild prompt,
+  // which a column beside a list never shows, so the document reports it here instead
+  // (`onUnavailable`) and the card takes its place. The report names the document it is about,
+  // so selecting another question is not answered with the last one's failure.
+  const [unavailable, setUnavailable] = useState<string | undefined>(undefined);
   const failed =
     artifactQuery.isError ||
     textQuery.isError ||
+    unavailable === artifactId ||
     (subject.kind === "approval" && artifact !== undefined && latestVersion === undefined);
   const showsDocument = subject.kind === "decision" && !failed && artifact !== undefined;
 
@@ -292,6 +298,9 @@ export function ReadingPane({ ask, onAnswered, viewer }: ReadingPaneProps): Reac
         <AskCard
           ask={ask}
           initialThread={{ ask, ...ask.thread }}
+          // One card per question: the card holds the answer the reader gave in it, so the next
+          // question selected is a card of its own rather than this one showing that answer.
+          key={ask.id}
           onAnswered={onAnswered}
           variant="full"
         />
@@ -341,6 +350,7 @@ export function ReadingPane({ ask, onAnswered, viewer }: ReadingPaneProps): Reac
         isClosed={issue.data !== undefined && issue.data.closed_at !== null}
         key={artifact.id}
         onAskAnswered={onAnswered}
+        onUnavailable={() => setUnavailable(artifact.id)}
         onVersionChange={noVersionChange}
         owner={
           artifact.issue_key === null
