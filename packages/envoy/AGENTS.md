@@ -2958,7 +2958,8 @@ from a reuse:
   `GET`): the layer's `KEY_INVALID`, the closed-issue refusal, `LOGIN_CHANGED`, a refused path
   parameter, a handler's refusal made before it decodes. The layer's `KEY_IN_FLIGHT` is not one of
   them: the layer reads that body itself, above. The answer is written only once the rest of the
-  body is read and discarded, never spooled, at most `routeBodyLimit` and one byte more. An
+  body is read and discarded, never spooled, at most the route's limit (`routeBody`) and one byte
+  more. An
   HTTP/1.1 client that sends a whole body before it reads the answer - WebKit and Firefox uploading
   a file - otherwise met net/http's close of a connection with its body unread as a reset, and
   dropped the answer with it (the browser suite's 20 MB in-flight upload row).
@@ -2972,8 +2973,9 @@ from a reuse:
   body hold its connection open after its answer, and withheld the answer to one that stalled just
   past the limit (`TestADrainStopsWaitingForABodyThatStalls`).
   A body past the limit is answered as the limit answers it, in place of the early answer and
-  without its `Idempotency-Key` and `Retry-After` (`413 CAP_EXCEEDED` on the three upload routes,
-  `413 REQUEST_TOO_LARGE` on every other), and the connection closes, so a client that sends past
+  without its `Idempotency-Key` and `Retry-After` (`413 CAP_EXCEEDED` on the three upload routes
+  and on the handoff write, `413 REQUEST_TOO_LARGE` on every other; `routeBody` gives each route
+  its limit and its 413 alike), and the connection closes, so a client that sends past
   26 MiB may still see a failed connection. The one early answer the limit does not replace is a
   `401`: a caller that resolves to nobody is refused before any limit is judged, and a page whose
   session lapsed reads that `401` as its cue to sign in again. A body a layer read to its end or
@@ -2984,10 +2986,10 @@ from a reuse:
   `trackTransactions` hands the handler (the comment at the drain's mount in `server.go`).
   `routes.enforceCookieOrigin`'s `403` for a cross-origin cookie write is answered before the
   route, outside the drain.
-- The layer then reads the body, spooling at most the route's own limit (`routeBodyLimit`: an
+- The layer then reads the body, spooling at most the route's own limit (`routeBody`: an
   upload's file and a megabyte of fields for the three upload routes, `keyedUploads`, 26 MiB;
-  `maxJSONRequestBytes`, 1 MiB, for every other); a body past it runs unkeyed and its route
-  refuses it. A body the client did not finish sending is `400 REQUEST_BODY_UNREADABLE`, and a
+  `handoffRequestLimit`, 1,576,960 bytes, for the handoff write; `maxJSONRequestBytes`, 1 MiB, for
+  every other); a body past it runs unkeyed and its route refuses it. A body the client did not finish sending is `400 REQUEST_BODY_UNREADABLE`, and a
   spill Dispatch could not write (`keyedSpillError`: a full disk, a temporary directory it cannot
   write) is a 5xx with the key echoed, Dispatch's own failure, which the client asks again.
 - The row is inserted in flight, in a statement of its own, before the handler runs; the claim and

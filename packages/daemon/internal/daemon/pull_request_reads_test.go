@@ -118,25 +118,26 @@ func TestThePassFollowsAHeadWhoseSynchronizeHasNotArrived(t *testing.T) {
 	}
 }
 
-// A reviewer approves the head it read, and a push lands above it before its webhook arrives. Any
-// push may change code, so the pass follows the new head alone, applies no push of its own (the
-// push is left to its webhook), and the approval of the head before stands for that head alone.
+// A reviewer approves the head it read, and the implementer pushes above it; the push webhook is
+// lost with the synchronize. The pass rebuilds the push from the branch's activity and follows the
+// new head with it, so the push the webhook would have carried is recorded, and that webhook
+// arriving afterwards decides nothing.
 func TestThePassFollowsAPushAboveAnApprovalAsANewHead(t *testing.T) {
 	read := time.Date(2026, 10, 26, 20, 0, 0, 0, time.UTC)
 	pool := isolatedOutboxPool(t)
 	seedCapture(t, pool, phase.Reviewing, "needs_review", record.PhaseRow{Issue: "CAPTURE-1", Role: claim.RoleReviewer, Claim: "review-claim"})
-	w := requiredRuntime(pool, pullRequestStandIn(t, "pushed", read, &atomic.Int32{}).URL, quietLogger())
+	github := &activityGitHub{}
+	github.moved("pushed", read, activityEntry("legion/CAPTURE-1", "push", "code", "pushed", implementerLogin, read.Add(-time.Minute)))
+	w := reviewAppRuntime(pool, github.serve(t).URL, quietLogger())
 	w.readRequiredChecks(context.Background())
 	_, pr := capturePhase(t, pool)
 	if pr.HeadSHA != "pushed" {
 		t.Fatalf("after the pass the record is at %q, want pushed", pr.HeadSHA)
 	}
-	if classify.ApprovalStands(*pr, "code") {
-		t.Fatalf("an approval of code stands for the followed head pushed (pushes %+v), want it to stand for code alone", pr.Pushes)
+	if n := headReads(t, pool, "push-read"); n != 1 {
+		t.Fatalf("the pass applied %d pushes it rebuilt from the branch's activity, want the one code..pushed", n)
 	}
-	if len(pr.Pushes) != 0 {
-		t.Fatalf("the pass recorded pushes %+v, want none: a push is left to its webhook", pr.Pushes)
-	}
+	lateWebhookPushDecidesNothing(t, pool, w, webhookPush("code", "pushed", implementerLogin))
 }
 
 // The pass lists its records once, when it starts, and a webhook can move one before the pass
@@ -1113,9 +1114,8 @@ func TestThePassRebuildsTheImplementersFixPushLost(t *testing.T) {
 
 // The implementer pushes onto a red head and the push webhook is lost with the synchronize,
 // whether the branch's activity calls the move a push or a force push. The pass rebuilds it from
-// that activity: any push may change code, so it is a counted fix attempt, and an approval of the
-// head it replaced does not stand for the head it left. Either way the head is judged with its
-// push, and the push webhook arriving afterwards decides nothing.
+// that activity: any push may change code, so it is a counted fix attempt. Either way the head
+// is judged with its push, and the push webhook arriving afterwards decides nothing.
 func TestThePassRebuildsAPushLostWhateverTheActivityCallsIt(t *testing.T) {
 	at := time.Date(2026, 10, 26, 20, 0, 0, 0, time.UTC)
 	for _, kind := range []string{"push", "force_push"} {
@@ -1130,9 +1130,6 @@ func TestThePassRebuildsAPushLostWhateverTheActivityCallsIt(t *testing.T) {
 			_, pr := capturePhase(t, pool)
 			if pr.HeadSHA != "rewritten" || pr.Run != nil || pr.FixAttempts != 1 {
 				t.Fatalf("after the pass head %q fixAttempts=%d run %+v, want rewritten judged with its push, one attempt counted", pr.HeadSHA, pr.FixAttempts, pr.Run)
-			}
-			if classify.ApprovalStands(*pr, "code") {
-				t.Fatalf("an approval of code stands for the head the %s left, want it to stand for code alone (pushes %+v)", kind, pr.Pushes)
 			}
 			lateWebhookPushDecidesNothing(t, pool, w, webhookPush("code", "rewritten", implementerLogin))
 		})

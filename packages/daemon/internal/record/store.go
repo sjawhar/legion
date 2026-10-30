@@ -238,8 +238,7 @@ func (s *Postgres) UnnamedIssues(ctx context.Context, tx pgx.Tx, project string)
 func (s *Postgres) HandedOffWithoutOpenOrMergedPullRequest(ctx context.Context, tx pgx.Tx, project string) ([]HandedOff, error) {
 	const what = "in implementing with a recorded handoff and no open or merged pull request"
 	rows, err := tx.Query(ctx, "select "+issueColumns+", implementer.handoff_commit from issues"+
-		" join (select issue, handoff_commit from phases where role = '"+string(claim.RoleImplementer)+"'"+
-		" and (handoff_commit <> '' or handoff_record <> ''))"+
+		" join (select issue, handoff_commit from phases where role = '"+string(claim.RoleImplementer)+"' and handoff_commit <> '')"+
 		" implementer (implementer_issue, handoff_commit) on implementer.implementer_issue = issues.key"+
 		" where project = $1 and github_repo <> '' and phase = '"+string(phase.Implementing)+"'"+
 		" and key not in (select issue from pull_requests where state = any($2))"+

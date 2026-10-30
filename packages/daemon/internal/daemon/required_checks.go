@@ -128,7 +128,7 @@ func (w *workflowRuntime) readRequiredChecks(ctx context.Context) {
 			}
 			var answer *githubrest.Answer
 			if errors.As(err, &answer) && answer.RateLimited {
-				w.logPassFailure(pr, "what a pull request's new head changed, to follow it", err)
+				w.logPassFailure(pr, "GitHub's activity of a pull request's branch, to rebuild the pushes to its new head", err)
 				return
 			}
 			// The rest of the pull request's reads go on against the record as it stands, as they
