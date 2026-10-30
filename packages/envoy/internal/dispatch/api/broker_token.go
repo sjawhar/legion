@@ -15,11 +15,11 @@ import (
 	"errors"
 	"log/slog"
 	"net/http"
-	"time"
 
 	"github.com/sjawhar/envoy/internal/brokertoken"
 	"github.com/sjawhar/envoy/internal/dispatch/accesslog"
 	"github.com/sjawhar/envoy/internal/dispatch/model"
+	"github.com/sjawhar/envoy/internal/ratelimit"
 )
 
 // decideBrokerToken decides a request's DPoP presentation before its handler runs and carries
@@ -123,7 +123,9 @@ func (s *server) brokerTokenActor(r *http.Request) (model.Actor, bool, error) {
 		wait := s.deps.BrokerTokens.RetryAfter()
 		refusal := errorf(http.StatusTooManyRequests, "BROKER_TOKEN_RATE_LIMITED",
 			"too many access tokens checked from this address; try again in %s", wait)
-		refusal.retryAfter = retryAfterSeconds(wait)
+		// The one rounding every bucket of internal/ratelimit's refusals carries, the broker's
+		// own 429s included, so a caller reads one wait the same way whichever refused it.
+		refusal.retryAfter = ratelimit.RetryAfterSeconds(wait)
 		return model.Actor{}, false, refusal
 	default:
 		// The class only, as serviceTokenActor logs one: this runs before any authorization, so
@@ -141,12 +143,4 @@ func (s *server) brokerTokenActor(r *http.Request) (model.Actor, bool, error) {
 	}
 	accesslog.Note(r.Context(), accesslog.KindBrokerToken, caller.Person)
 	return actor, false, nil
-}
-
-// retryAfterSeconds is the Retry-After a bucket refilled one every every names: whole seconds
-// rounded up, and never 0, which would invite an immediate retry the bucket would refuse again.
-// It is the broker's own rounding (internal/broker/api/limits.go), so a caller reads one wait
-// the same way whichever of the two refused it.
-func retryAfterSeconds(every time.Duration) int {
-	return max(int((every+time.Second-1)/time.Second), 1)
 }

@@ -54,10 +54,10 @@ func TestOneAddressNeverSustainsMoreThanHalfTheMountedRereadBucket(t *testing.T)
 // address gets (DefaultRereadBurst), which no replica count and no store divides.
 //
 // It is asserted here rather than through an answer's Retry-After because Retry-After cannot
-// carry it: retryAfterSeconds rounds a bucket's Every up to whole seconds, so a header could not
-// tell a derived 600 ms from a chosen 1 s should a later resize of either shared bucket ever go
-// sub-second. The behavioural row reads the header, which is right for what it proves; an exact
-// duration has to be read where it is computed.
+// carry it: ratelimit.RetryAfterSeconds rounds a bucket's Every up to whole seconds, so a header
+// could not tell a derived 600 ms from a chosen 1 s should a later resize of either shared
+// bucket ever go sub-second. The behavioural row reads the header, which is right for what it
+// proves; an exact duration has to be read where it is computed.
 func TestRereadLimitForDerivesTheAddressBucketFromTheMountedOne(t *testing.T) {
 	for _, mounted := range mountedRereadBuckets {
 		t.Run(mounted.name, func(t *testing.T) {

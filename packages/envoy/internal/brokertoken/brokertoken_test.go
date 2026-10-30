@@ -171,9 +171,14 @@ func machineLoginToken(jkt string, life time.Duration) brokertoken.Introspection
 // something other than acting as a session names no session to record writes as, so it is
 // refused with an outcome of its own rather than handed back as a Caller for whoever mounts
 // this check to fill in. Each leg of the rule is its own token: a machine login's own, one the
-// exchange issued that names no person, and one that names a session and a person but comes
-// from another client. The proof-checked Verify and the answer-only Live refuse all three, so
-// an open connection cannot keep one alive either.
+// exchange issued that names no person, one that names a session and a person but comes from
+// another client, and the two whose project scope this package cannot read — an answer carrying
+// none and one carrying a word it does not know. Those last two are refused rather than read as
+// a token that names no project, which would hand their caller every project the person may
+// write; the one naming a project under no scope would otherwise be the louder of the two,
+// since the project beside the scope is then read under nothing at all. The proof-checked
+// Verify and the answer-only Live refuse all five, so an open connection cannot keep one alive
+// either.
 func TestATokenThatIsNoSessionsCredentialIsRefused(t *testing.T) {
 	rig := newRig(t)
 	caller := newSigner(t)
@@ -181,10 +186,16 @@ func TestATokenThatIsNoSessionsCredentialIsRefused(t *testing.T) {
 	noPerson.Person = ""
 	anotherClient := liveToken(caller.jkt, time.Hour)
 	anotherClient.ClientID = "agent-secrets-helper"
+	noScope := liveToken(caller.jkt, time.Hour)
+	noScope.ProjectScope = ""
+	unknownScope := liveToken(caller.jkt, time.Hour)
+	unknownScope.ProjectScope = "organisation"
 	for name, answer := range map[string]brokertoken.Introspection{
-		"a machine login's own token": machineLoginToken(caller.jkt, time.Hour),
-		"a token naming no person":    noPerson,
-		"a token of another client":   anotherClient,
+		"a machine login's own token":         machineLoginToken(caller.jkt, time.Hour),
+		"a token naming no person":            noPerson,
+		"a token of another client":           anotherClient,
+		"a token naming no project scope":     noScope,
+		"a token of an unknown project scope": unknownScope,
 	} {
 		t.Run(name, func(t *testing.T) {
 			token := "a-token-that-is-" + strings.ReplaceAll(name, " ", "-")

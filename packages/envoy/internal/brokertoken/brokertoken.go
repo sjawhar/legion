@@ -58,13 +58,20 @@ var (
 	ErrRateLimited = errors.New("brokertoken: too many introspections from this source address")
 	// ErrNotASession is a live token that is not a session's credential: the broker's answer
 	// names no session, or no person, or the token was issued to a client other than the
-	// exchange every Dispatch access token comes from (ExchangeClientID). A machine login's own
-	// access token is exactly that — the credential a dev box holds to ask the broker for other
-	// credentials, DPoP-bound and perfectly live, for which no exchange ever decided a session,
-	// a person or a project scope — and so is any other token the broker issued for something
+	// exchange every Dispatch access token comes from (ExchangeClientID), or its project scope
+	// is a word this package does not know. A machine login's own access token is exactly that —
+	// the credential a dev box holds to ask the broker for other credentials, DPoP-bound and
+	// perfectly live, for which no exchange ever decided a session, a person or a project scope —
+	// and so is any other token the broker issued for something
 	// other than acting as a session. Whoever mounts this check acts as the session a token
 	// names, so a token that names none is refused here rather than admitted for a request body
 	// to name one in its place.
+	//
+	// The scope is refused for the same reason it is read at all: it says what Project means, so
+	// a word this package does not know is a token it cannot read rather than one that names no
+	// project. Reading an unknown scope as unscoped would hand its caller every project the
+	// moment the broker learns a third word, which is the one mistake a check deciding what a
+	// credential covers must not make.
 	ErrNotASession = errors.New("brokertoken: the access token is not a session's credential")
 )
 
@@ -328,7 +335,7 @@ func (v *Verifier) Live(ctx context.Context, r *http.Request) (Caller, error) {
 }
 
 // live is the broker's half of both checks: the token r presents and an answer saying it is
-// live, bound to a key, and issued for acting as a session.
+// live, bound to a key, issued for acting as a session, and scoped by a word this package reads.
 func (v *Verifier) live(ctx context.Context, r *http.Request) (string, Introspection, error) {
 	token, ok := Presented(r)
 	if !ok {
@@ -344,7 +351,11 @@ func (v *Verifier) live(ctx context.Context, r *http.Request) (string, Introspec
 	if answer.Thumbprint == "" {
 		return "", Introspection{}, ErrKeyMismatch
 	}
-	if answer.Session == "" || answer.Person == "" || answer.ClientID != ExchangeClientID {
+	// The fourth clause is the scope the Project beside it is read under: a word this package
+	// does not know is a token it cannot read, and is refused here rather than taken as a token
+	// that names no project at all (ErrNotASession).
+	if answer.Session == "" || answer.Person == "" || answer.ClientID != ExchangeClientID ||
+		(answer.ProjectScope != ProjectScopeNamed && answer.ProjectScope != ProjectScopePerson) {
 		return "", Introspection{}, ErrNotASession
 	}
 	return token, answer, nil

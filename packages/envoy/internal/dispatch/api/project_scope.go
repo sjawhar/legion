@@ -35,9 +35,15 @@ package api
 // the handler then addresses its row by, and the two cannot disagree about which object a path
 // names: Go's uuid.Parse refuses spellings Postgres accepts (a hyphen after any group of four
 // digits), and a check that resolved nothing where the handler resolves a row would be a write
-// nothing judged. Failing closed also closes the existence oracle the older behaviour had,
-// where a scoped caller got 403 for another project's object and 404 for one that does not
-// exist, and so could read off which ids exist outside its project.
+// nothing judged.
+//
+// Failing closed does not close the existence oracle, and does not claim to. The two refusals
+// still read differently — a target of another project is told which project that is, and one
+// that resolved to nothing is told the write resolves to no project of that credential's — so a
+// scoped caller can tell an object of another project from an id nobody holds. Nothing is read
+// out that way: no GET route is project-scoped, so every answer this check can colour is a
+// refusal of the caller's own write, and what it learns is which of its own refused writes
+// addressed something that exists.
 
 import (
 	"context"
@@ -146,17 +152,12 @@ func (s *server) projectOfIssue(ctx context.Context, q queryer, r *http.Request)
 	return scanProjectKey(q.QueryRow(ctx, `select project_key from issues where key = $1`, r.PathValue("key")))
 }
 
-// projectOfProject is loadProject: a project's own key is the project it belongs to, and a key
-// no project has resolves to none.
+// projectOfProject is the one-row read the other resolvers make, against the projects table
+// itself: a project's own key is the project it belongs to, and a key no project has resolves
+// to none. It reads the key alone rather than going through loadProject, whose 404 this would
+// only have to undo.
 func (s *server) projectOfProject(ctx context.Context, q queryer, r *http.Request) (string, error) {
-	project, err := s.loadProject(ctx, q, r.PathValue("key"))
-	if unaddressed(err) {
-		return "", nil
-	}
-	if err != nil {
-		return "", err
-	}
-	return project.Key, nil
+	return scanProjectKey(q.QueryRow(ctx, `select key from projects where key = $1`, r.PathValue("key")))
 }
 
 // projectOfArtifact reads the project_key every artifact carries (artifactColumns), which is
@@ -223,60 +224,79 @@ func scanProjectKey(row pgx.Row) (string, error) {
 }
 
 // unaddressed answers whether err means the target resolves to no row at all, which is the
-// handler's answer to make for an unscoped caller and a refusal for a scoped one.
+// handler's answer to make for an unscoped caller and a refusal for a scoped one. Every
+// resolver reads its one column itself, so what reaches this is Postgres's own answer and never
+// a refusal some loader already wrote a status onto.
 func unaddressed(err error) bool {
 	if errors.Is(err, pgx.ErrNoRows) {
 		return true
 	}
 	var malformed *pgconn.PgError
-	if errors.As(err, &malformed) && malformed.Code == "22P02" {
-		return true
-	}
-	var refusal *apiError
-	return errors.As(err, &refusal) && refusal.status == http.StatusNotFound
+	return errors.As(err, &malformed) && malformed.Code == "22P02"
 }
 
-// withinProjectScope runs the project check in front of one mutating route's handler. For a
-// caller whose credential names no project — every caller that exists today — it costs one
-// header read and calls the handler. For one that names a project it fails closed: only a
-// target this check resolved to that same project reaches the handler.
+// withinProjectScope runs the project check in front of one mutating route's handler. The row's
+// class is decided once here, at mount, as withinSessionScope decides its own: a class this
+// check does not cover returns the handler unchanged, so no route it leaves alone pays for it.
+//
+// For a caller whose credential names no project — every caller that exists today — a covered
+// route costs one header read and calls the handler. For one that names a project it fails
+// closed: only a target this check resolved to that same project reaches the handler.
 func (s *server) withinProjectScope(route apiRoute, handler http.HandlerFunc) http.HandlerFunc {
-	// Every mounted scopeProject row has one: undecidableWrites names a row that does not and
-	// register refuses to mount that table, so this is read once here rather than per request.
-	resolve, _ := s.projectResolverFor(route.Pattern)
-	return func(w http.ResponseWriter, r *http.Request) {
-		covers, scoped := s.callerProject(r)
-		if !scoped {
-			handler(w, r)
-			return
+	switch route.Scope {
+	case scopeProject:
+		resolve, addressed := s.projectResolverFor(route.Pattern)
+		if !addressed {
+			// Nothing mounts such a row: undecidableWrites names it and register refuses the
+			// table holding it. A project-scoped caller is refused it here all the same, so
+			// what stands between that caller and a write nothing judged is this check rather
+			// than a panic somewhere else.
+			return func(w http.ResponseWriter, r *http.Request) {
+				covers, scoped := s.callerProject(r)
+				if !scoped {
+					handler(w, r)
+					return
+				}
+				refuseWriteOutsideProjectScope(w, covers, "")
+			}
 		}
-		if route.Scope == scopeDeployment {
+		return func(w http.ResponseWriter, r *http.Request) {
+			covers, scoped := s.callerProject(r)
+			if !scoped {
+				handler(w, r)
+				return
+			}
+			belongsTo, err := resolve(r.Context(), s.deps.Store.Pool, r)
+			if err != nil {
+				s.writeHandlerError(w, err)
+				return
+			}
+			if belongsTo != covers {
+				// Including a target that resolved to no project at all: an object belonging
+				// to none, a row that is not there, and an id Postgres will not read.
+				// Refusing those too is what makes the check fail closed — not what hides
+				// which ids exist, which this does not claim to do (the file comment).
+				refuseWriteOutsideProjectScope(w, covers, belongsTo)
+				return
+			}
+			handler(w, r)
+		}
+	case scopeDeployment:
+		return func(w http.ResponseWriter, r *http.Request) {
+			covers, scoped := s.callerProject(r)
+			if !scoped {
+				handler(w, r)
+				return
+			}
 			writeError(w, codeProjectScopeDeployment, http.StatusForbidden, fmt.Sprintf(
 				"this request's credential may write project %s and nothing else; %s %s belongs to the deployment rather than to a project",
 				covers, route.Method, route.Pattern))
-			return
 		}
-		if route.Scope != scopeProject {
-			// A write that belongs to the calling session, and the issue create, whose project
-			// its handler reads from the body (scopeProjectInBody).
-			handler(w, r)
-			return
-		}
-		belongsTo, err := resolve(r.Context(), s.deps.Store.Pool, r)
-		if err != nil {
-			s.writeHandlerError(w, err)
-			return
-		}
-		if belongsTo != covers {
-			// Including a target that resolved to no project at all: an object belonging to
-			// none, a row that is not there, and an id Postgres will not read. Refusing those
-			// too is what makes the check fail closed, and it closes the existence oracle the
-			// older behaviour had, where this caller got 403 for another project's object and
-			// the handler's 404 for an id nobody holds.
-			refuseWriteOutsideProjectScope(w, covers, belongsTo)
-			return
-		}
-		handler(w, r)
+	default:
+		// A write that belongs to the calling session (scopeSession, held to its own session by
+		// withinSessionScope), and the issue create, whose project its handler reads from the
+		// body (scopeProjectInBody).
+		return handler
 	}
 }
 
