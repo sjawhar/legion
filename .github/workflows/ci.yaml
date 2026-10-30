@@ -4,10 +4,11 @@ name: CI
 # Its first job, `changes`, reads the paths the change touched and selects, through one
 # dorny/paths-filter filter per job, the jobs that read those paths; each job runs only when its
 # filter matches (lint runs on every change, and typecheck and test also run when `changes` itself
-# failed). The last job, `ci-ok`, condenses every job's result into one check, the one main's
-# ruleset requires beside pr-title: it fails when a job `changes` selected did not succeed. The
-# docs site's build on a push to main, and its GitHub Pages deploy, are docs-pages.yaml's, a
-# workflow of its own whose header says why; its paths are held to the docs filter below.
+# failed). The last job, `ci-ok`, condenses every job's result into one check: it fails when a job
+# `changes` selected did not succeed. Main's ruleset requires lint, typecheck, test and pr-title,
+# not ci-ok. The docs site's build on a push to main, and its GitHub Pages deploy, are
+# docs-pages.yaml's, a workflow of its own whose header says why; its paths are held to the docs
+# filter below.
 #
 # A new job joins the router in six places: a filter in `changes` that names every file the job
 # reads, an output of `changes` for that filter, the job's `needs: changes` and an `if:` on that
@@ -1265,7 +1266,7 @@ jobs:
             ~/.cache/legion
           key: ${{ steps.go-cache.outputs.cache-primary-key }}
 
-  # lint, typecheck and test keep the names main's ruleset required before ci-ok existed. Each
+  # lint, typecheck and test are the names main's ruleset requires, beside pr-title. Each
   # covers the shipped daemon (packages/daemon, the Go `legion`). Fail-open: when `changes` did not
   # succeed, typecheck and test run rather than skip, since a skipped job reports success and a
   # failed selector must never turn a required check into a passing skip.
