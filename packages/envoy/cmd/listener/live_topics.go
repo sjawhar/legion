@@ -21,8 +21,13 @@ const liveTopicsSubject = bus.NotificationTopicPrefix + ">"
 // environment names, and it reconnects and re-subscribes on its own. It returns once NATS has
 // accepted the subscription: a server that refuses it answers before the flush's PONG, and
 // nats.go records the refusal as the connection's last error.
+//
+// The lane's connection declares itself lost two to three seconds after the hub stops answering it
+// (bus.WithSilentCutDetection). A hub whose packets stop closes nothing. On nats.go's default
+// pings (one every two minutes, two outstanding) the lane reads connected for four to six minutes
+// while no message reaches it, and it re-subscribes only once it has reconnected.
 func openLiveTopics(urls []string, machineID string, handler nats.MsgHandler) (*bus.Client, error) {
-	live, err := bus.Connect(urls, bus.WithName("envoy-live-topics"))
+	live, err := bus.Connect(urls, bus.WithName("envoy-live-topics"), bus.WithSilentCutDetection())
 	if err != nil {
 		return nil, fmt.Errorf("connect: %w", err)
 	}
