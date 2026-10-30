@@ -1,0 +1,32 @@
+{
+  "schemaVersion": 1,
+  "phase": "review",
+  "issue": "INFRA-594",
+  "completed": "2026-10-30T11:20:00Z",
+  "round": 1,
+  "reviewedCode": "ba6e12830854922b793db0006efa56328509a4e0 (head 4f5e1683 adds only .legion/INFRA-594/test.json)",
+  "decision": "changes_requested",
+  "critical": 1,
+  "important": 7,
+  "minor": 8,
+  "ci": "Required set (rulesets: lint, typecheck, test, pr-title; no branch protection) all completed success at CI head ba6e1283 (run 40963658633); compare ba6e1283...4f5e1683 handoffsOnly true, 1 file. envoy-go-race red here and red the same way on main's run 40955932013 at 9ab28e09; ci-ok queued on both and not required.",
+  "thermonuclear": "deep-review: Verdict CHANGES at 4f5e1683 (1 High, 2 Medium, verified by the reviewer in the code); code-quality: Verdict CHANGES at 4f5e1683 (structural).",
+  "keyFindings": [
+    {"severity": "critical", "file": "packages/envoy-client/src/consumer-delivery.ts:526", "description": "A session upgrading from the core path (no consumer snapshot) registers with no resume; the listener creates s-<id> at the stream's end (session_delivery.go:199-208, session_consumers.go:812-814) and setConsumerMode(true) makes sweepOnce return before any /v1/replay read (replay.ts:771), so every agent and issue message stored while it was away is lost with no notice. Same in claude-envoy (restoreReplay -> openRelay with snapshot.consumer undefined)."},
+    {"severity": "important", "file": "packages/envoy/cmd/listener/session_relay.go:868", "description": "The serving-port relay applies only echo and capability refusals; it skips the (dedupe key, session) dedupe and attempt caches fanoutDelivery applies (delivery.go:901-920), so an OpenCode session following a repo gets one prompt_async per mention copy (normalize.go publishes pr.N.mention, mention and the comment topic under one key)."},
+    {"severity": "important", "file": "packages/envoy/cmd/listener/serve_port_workers.go:299", "description": "A serving-port session's first consumer starts at the stream's end, yet takesStoredMessagesItself makes the durable path and the serve-port worker ack every redelivered message for it, including ones stored below the consumer's OptStartSeq: lost at the transition."},
+    {"severity": "important", "file": "packages/envoy/internal/bus/nats.go:1489", "description": "ErrForwardNotStored adds a refusal at the publish/send boundary (delivered -> delivery_failed when the stream gives no PubAck); the PR body carries no ## Contract change census."},
+    {"severity": "important", "file": "packages/envoy/cmd/listener/delivery.go:637", "description": "Production always sets servePorts, roleForwards and relay (main.go:904-910, 960-966); the nil branches (inline push, inline forward, relayed false state) run only in tests."},
+    {"severity": "important", "file": "packages/pi-envoy/extensions/envoy.ts:2152", "description": "Relay lifecycle (takeDeliveryAnswer, persistRelay, relaysCoreTopic, closeRelay) duplicated in claude-envoy; the H1 fix would land twice. Move into @legion/envoy-client/consumer-delivery."},
+    {"severity": "important", "file": "packages/envoy/cmd/listener/role_holder.go:37", "description": "cachedFirstRoleClaims picks cache vs bucket by a call counter and returns a partial RoleClaim."},
+    {"severity": "important", "file": "packages/envoy/cmd/listener/session_relay.go:861", "description": "pushUntilAccepted duplicates serve_port_workers.go pushUntilSettled's backoff loop and fanoutDelivery's refusals; the dedupe gap above is the cost."},
+    {"severity": "minor", "file": "packages/envoy/internal/bus/session_consumers.go:489", "description": "SessionConsumers.Delete has no production caller."},
+    {"severity": "minor", "file": "packages/claude-envoy/src/envoy-channel-server.ts:787", "description": "replay.delivered check appears unreachable after consumer-delivery's alreadyWritten in the same synchronous step."},
+    {"severity": "minor", "file": "packages/envoy-client/src/transport.ts:149", "description": "SubscribeResult.delivery optional though every caller maps absence to core."},
+    {"severity": "minor", "file": "packages/envoy/cmd/listener/main.go:1138", "description": "shutdownListener grows to 10 positional parameters."},
+    {"severity": "minor", "file": "packages/envoy/internal/bus/role_lane.go:64", "description": "Security[transport] hardening: role lane pending limits off; a publisher flood grows listener memory without bound."},
+    {"severity": "minor", "file": "packages/pi-envoy/extensions/envoy.ts:2027", "description": "A CONSUMER_STATE_ENTRY with the whole follows map is appended per written frame."},
+    {"severity": "minor", "file": "packages/envoy/AGENTS.md:2783", "description": "Trust bullet said the threat model does not change; corrected by the reviewer's own commit (a session user can now ack away an away session's stored message)."},
+    {"severity": "minor", "file": ".github/workflows/ci.yaml:7", "description": "Header said ci-ok is required by main's ruleset; corrected by the reviewer's own commit to the ruleset's actual set."}
+  ]
+}
