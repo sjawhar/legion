@@ -1,7 +1,7 @@
 import { type Browser, expect, type Locator, type Page, test } from "@playwright/test";
 
 import { createComment, createIssue, createProject, getIssueArtifactText } from "./api";
-import { documentEditor, openSpec } from "./editor";
+import { documentEditor, expectCommentBody, openSpec } from "./editor";
 import { resetDatabase } from "./seed";
 import { asUser } from "./users";
 
@@ -190,17 +190,13 @@ test("no mark reaches an inline leaf in a past version of the spec, and a declar
 
 test("no mark reaches an inline leaf in a comment, and a declaration is raw HTML", async ({
   browser,
-}) => {
+}, testInfo) => {
   const { commentId, key } = await seed();
-  await withAlice(browser, async (page) => {
-    await page.goto(`/issues/${key}/conversation`);
-    // A collapsed card previews the body inline; the expanded thread draws its paragraphs. This
-    // spec carries no `@phone` tag, so it runs in the `chromium` project alone, where the thread
-    // expands in place in its turn rather than in the phone layout's Thread sheet.
-    const turn = page.locator(`[data-turn="comment:${commentId}"]`);
-    await turn.getByRole("button", { name: "Expand thread" }).click();
-    await expectEngineReading(turn.locator(".dispatch-markdown"));
-  });
+  // expectCommentBody opens the thread as every comment spec opens it and proves the engine drew
+  // the body, with this spec's own reader of the paragraphs in place of the shared one.
+  await withAlice(browser, (page) =>
+    expectCommentBody(page, key, commentId, testInfo.project.name, expectEngineReading)
+  );
 });
 
 test("the stored spec keeps a declaration unescaped and a label's link beside an autolink", async () => {

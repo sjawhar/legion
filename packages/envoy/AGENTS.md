@@ -1876,9 +1876,10 @@ reference - is read without the marks around it, a link among them, by both read
 lives on text alone, as the browser editor's store (y-prosemirror) holds it and as the engine
 itself reads it; so a linked image is stored without its link (LEGION-365) rather than refused,
 and a comment and a past version draw what the document stores. An autolink inside a link label
-carries its own link, in place of the label's, on its own text (`addToMarkSet`, where a mark
-excludes another of its own type), and the label's link covers the runs around it, where the two
-were stacked before, a tree ProseMirror cannot hold, and the write was refused. Delimiter runs
+carries its own link, in place of the label's, on its own text (the autolink arm of
+`parseInlineMarks`, where a mark excludes another of its own type), and the label's link covers the
+runs around it: stacking the two would put a text under two links, a tree ProseMirror cannot hold,
+and the write would be refused. Delimiter runs
 pair as that parser pairs them: CommonMark's rule of three is judged on the
 lengths two runs have left after the pairs already made from them (`emphasisDelimiters`), where
 goldmark judged the lengths they were written with, so in `***a.****&#32;b*` the closer's last `**`

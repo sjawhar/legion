@@ -983,13 +983,16 @@ func parseInlineMarks(parent ast.Node, source []byte, initial []Mark, footnotes 
 		case *ast.AutoLink:
 			// The autolink's own link takes the place of a link the label around it opened, on the
 			// autolink's text alone: a text carries one link, as ProseMirror's Mark.addToSet holds
-			// it (addToMarkSet), where a mark excludes another of its own type. The label's link
-			// is not ended by it, so the text after the autolink carries it again, as the text
-			// before it does. Stacking the two, which this arm did, wrote a text under two links,
-			// a tree ProseMirror cannot hold and a rendering that does not read back as itself, so
-			// ParseForWrite refused a document a person can write in a comment.
+			// it, where a mark excludes another of its own type, so the label's link leaves the set
+			// the autolink's enters. The label's link is not ended by it, so the text after the
+			// autolink carries it again, as the text before it does. Stacking the two would write a
+			// text under two links, a tree ProseMirror cannot hold and a rendering that does not
+			// read back as itself, so ParseForWrite would refuse a document a person can write in a
+			// comment. withoutMark filters in place, so it is given a copy and active is left as it
+			// is.
 			label, href := autolinkText(current, source)
-			children = appendTextPiece(children, label, addToMarkSet(active, Mark{Type: "link", Attrs: Attrs{"href": href, "title": nil}}))
+			link := Mark{Type: "link", Attrs: Attrs{"href": href, "title": nil}}
+			children = appendTextPiece(children, label, append(withoutMark(slices.Clone(active), "link"), link))
 		case *extensionast.Strikethrough:
 			content, err := within(current, Mark{Type: "strike_through"})
 			if err != nil {

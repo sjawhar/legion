@@ -350,9 +350,9 @@ func taskCheckboxText(value string, offset int) bool {
 // 0.31) opens an HTML block at the `<` line begins with, line being the markdown written from that
 // `<` to its line's end, where the `<` is the first character after its line's container prefix.
 // goldmark reads one of those as a paragraph: a complete tag whose unquoted attribute value ends
-// at an `=`, after which the engine reads another value (`<span title=a=b;x>`). A declaration
-// after a lowercase letter is no longer one of them, since the reader opens an HTML block there
-// too (declarationBlockParser), by the rule this arm asks as well (opensDeclaration). interrupt
+// at an `=`, after which the engine reads another value (`<span title=a=b;x>`). A declaration whose
+// letter is lowercase is not one of them: this package's reader opens an HTML block there too
+// (declarationBlockParser), by the rule this arm asks as well (opensDeclaration). interrupt
 // reports whether the line would go on a paragraph, which only a complete tag (kind 7) cannot
 // interrupt. Each byte is read at most once.
 func htmlBlockStart(line string, interrupt bool) bool {

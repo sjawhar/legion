@@ -211,16 +211,3 @@ func withoutSameMark(marks []Mark, mark Mark) []Mark {
 	}
 	return out
 }
-
-// addToMarkSet is marks with mark added as ProseMirror's Mark.addToSet adds it to a text's mark
-// set: a mark of mark's type already in the set is dropped, since a mark excludes another of its
-// own type, so one of a type is all a text ever carries. The type alone decides it, where
-// sameMark compares a mark's attributes too: a link replaces a link whatever its href.
-//
-// withoutMark filters in place, so it is given a copy and marks is left as it is; the copy is
-// made with room for mark, so the set costs the one allocation.
-func addToMarkSet(marks []Mark, mark Mark) []Mark {
-	set := make([]Mark, len(marks), len(marks)+1)
-	copy(set, marks)
-	return append(withoutMark(set, mark.Type), mark)
-}

@@ -12,21 +12,22 @@
 //
 //   - A leaf form is an inline node that carries no text of its own - inline HTML, an image, a
 //     hard break, a footnote reference - together with a code span and an autolink, which do carry
-//     text and so must keep the mark either reader puts on them. The browser editor's engine keeps
-//     an emphasis, strong, strikethrough or link mark on such a node; Go keeps marks on text
-//     alone. All eleven mark contexts are written for these, since a mark of each kind, two marks
-//     nested, and a mark that opens or closes beside the form each reach the node differently.
-//   - A declaration form opens with `<!`. goldmark opens an inline declaration only on an
-//     uppercase letter, so a lowercase one is text in Go and raw HTML in the engine; the controls
-//     (`<!A>`, `<!DOCTYPE html>`, `<!>`, `<!1>`, `<! a>`, unclosed, escaped, in a code span) must
-//     read the same in both. A declaration is one raw HTML node or it is text, so only whether a
-//     mark covers it tells the two readings apart: these take the four contexts that settle that,
-//     bare, strong, emphasis and a link label.
-//   - A label form is a link label holding an autolink. Go stacks the label's link mark under the
-//     autolink's, and the engine drops the label's link from the text after the inner autolink.
-//     These take bare, strong and strikethrough; a form that is itself a link label wrapped in
-//     `[...](u)` is a different shape, so the link context is written only for the image control,
-//     which is no link.
+//     text and so must keep the mark either reader puts on them. Neither reader puts an emphasis,
+//     strong, strikethrough or link mark on such a node: a mark lives on text alone, as the
+//     browser editor's store holds it. All eleven mark contexts are written for these, since a
+//     mark of each kind, two marks nested, and a mark that opens or closes beside the form each
+//     reach the node differently.
+//   - A declaration form opens with `<!`. Both readers open an inline declaration at `<!` and any
+//     ASCII letter, lowercase as well as uppercase; the controls (`<!A>`, `<!DOCTYPE html>`,
+//     `<!>`, `<!1>`, `<! a>`, unclosed, escaped, in a code span) must read the same in both. A
+//     declaration is one raw HTML node or it is text, so only whether a mark covers it tells the
+//     two readings apart: these take the four contexts that settle that, bare, strong, emphasis
+//     and a link label.
+//   - A label form is a link label holding an autolink. Both readers give the autolink its own
+//     link, in place of the label's, on its own text, and leave the label's link on the runs
+//     around it. These take bare, strong and strikethrough; a form that is itself a link label
+//     wrapped in `[...](u)` is a different shape, so the link context is written only for the
+//     image control, which is no link.
 //   - An image-label form is an image whose label holds raw HTML: a tag, a lowercase declaration,
 //     an uppercase one, a comment, a processing instruction, CDATA and an anchor span with its
 //     `</span>`, each with text around it and each alone in the label, with and without a title.

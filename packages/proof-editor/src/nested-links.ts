@@ -58,9 +58,10 @@ function linkOver(link: MdastNode, children: MdastNode[]): MdastNode {
  * Whether `node` holds a `link` below it, at any depth: the one thing `splitLink` can change
  * about a label. It allocates nothing, so a label holding none - every label of every comment
  * render, text/plain paste and `setMarkdown` import but the rare one around an autolink - costs
- * the walk alone.
+ * the walk alone. A node that holds one has children, which its type says, so a caller past this
+ * test reaches them without a fallback.
  */
-function holdsLink(node: MdastNode): boolean {
+function holdsLink(node: MdastNode): node is MdastNode & { children: MdastNode[] } {
   if (node.children === undefined) return false;
   for (const child of node.children) {
     if (child.type === 'link' || holdsLink(child)) return true;
@@ -69,17 +70,18 @@ function holdsLink(node: MdastNode): boolean {
 }
 
 /**
- * The siblings that replace `link`: the link itself when its label holds no link (`holdsLink`,
- * asked first so such a label allocates nothing), else its label's parts, with each run of label
- * content wrapped in a copy of the link. A run is wrapped only when it has content, so an inner
- * link first or last in the label leaves no empty copy behind.
+ * The pieces of one split label grouped into the nodes that replace it, in order: each run of
+ * pieces that stay in the label is flushed through `wrapRun`, and each hoisted piece through
+ * `wrapHoisted`. A run is wrapped only when it has content, so a hoisted piece first or last in
+ * the label leaves no empty wrapper behind. `splitLink` and `splitInLabel` group alike and differ
+ * in the two wrappers alone, so the flush rule is written once here.
  */
-function splitLink(link: MdastNode): MdastNode[] {
-  if (!holdsLink(link)) return [link];
-  // Past `holdsLink` a piece is always hoisted: a label child that is a link is a hoisted piece,
-  // and a child holding one is split into parts of which at least one is hoisted.
-  const pieces = (link.children ?? []).flatMap(splitInLabel);
-  const siblings: MdastNode[] = [];
+function regroup<T>(
+  pieces: Piece[],
+  wrapRun: (run: MdastNode[]) => T,
+  wrapHoisted: (node: MdastNode) => T
+): T[] {
+  const grouped: T[] = [];
   let run: MdastNode[] = [];
   for (const piece of pieces) {
     if (!piece.hoisted) {
@@ -87,13 +89,30 @@ function splitLink(link: MdastNode): MdastNode[] {
       continue;
     }
     if (run.length > 0) {
-      siblings.push(linkOver(link, run));
+      grouped.push(wrapRun(run));
       run = [];
     }
-    siblings.push(piece.node);
+    grouped.push(wrapHoisted(piece.node));
   }
-  if (run.length > 0) siblings.push(linkOver(link, run));
-  return siblings;
+  if (run.length > 0) grouped.push(wrapRun(run));
+  return grouped;
+}
+
+/**
+ * The siblings that replace `link`: the link itself when its label holds no link (`holdsLink`,
+ * asked first so such a label allocates nothing), else its label's parts grouped (`regroup`),
+ * with each run of label content wrapped in a copy of the link and each hoisted part standing on
+ * its own.
+ */
+function splitLink(link: MdastNode): MdastNode[] {
+  if (!holdsLink(link)) return [link];
+  // Past `holdsLink` a piece is always hoisted: a label child that is a link is a hoisted piece,
+  // and a child holding one is split into parts of which at least one is hoisted.
+  return regroup(
+    link.children.flatMap(splitInLabel),
+    (run) => linkOver(link, run),
+    (hoisted) => hoisted
+  );
 }
 
 /**
@@ -109,21 +128,11 @@ function splitInLabel(node: MdastNode): Piece[] {
   if (node.children === undefined) return [{ hoisted: false, node }];
   const pieces = node.children.flatMap(splitInLabel);
   if (!pieces.some((piece) => piece.hoisted)) return [{ hoisted: false, node }];
-  const parts: Piece[] = [];
-  let run: MdastNode[] = [];
-  for (const piece of pieces) {
-    if (!piece.hoisted) {
-      run.push(piece.node);
-      continue;
-    }
-    if (run.length > 0) {
-      parts.push({ hoisted: false, node: { ...node, children: run } });
-      run = [];
-    }
-    parts.push({ hoisted: true, node: { ...node, children: [piece.node] } });
-  }
-  if (run.length > 0) parts.push({ hoisted: false, node: { ...node, children: run } });
-  return parts;
+  return regroup<Piece>(
+    pieces,
+    (run) => ({ hoisted: false, node: { ...node, children: run } }),
+    (hoisted) => ({ hoisted: true, node: { ...node, children: [hoisted] } })
+  );
 }
 
 /** Replaces every link of the tree with its own siblings; `splitLink` reaches inside each one. */

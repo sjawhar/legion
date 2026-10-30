@@ -9,7 +9,10 @@ package pmdoc
 // Among what TestDifferentialCompare counts: a document the head reads as the engine but its
 // writer refuses, because its rendering reads back otherwise, is reported ("refused by the
 // writer") and gates where the base stores it ("newly refused by the writer"); any other document
-// the base stores and the head does not is reported ("newly refused").
+// the base stores and the head does not is reported ("newly refused"). A document the engine
+// itself threw on is reported ("engine cannot read"), the throw being the engine's own; one whose
+// reading Go's schema refuses gates ("engine reading Go's schema refuses"), since no other gate
+// can judge a document Go cannot hold.
 
 import (
 	"bufio"
@@ -104,22 +107,29 @@ func diffStep(dump *diffDump, name string, step func() error) (err error) {
 	return step()
 }
 
-// diffTree decodes the engine's ProseMirror JSON as Go holds the document. The engine's reading is
-// compared as it stands: both readers hold a mark on text alone, never on an inline leaf, as the
-// browser editor's store (y-prosemirror) does, so a reading carrying one on a leaf has FromJSON
-// refuse it, diffTree return nil and TestDifferentialCompare count the document under `engine
-// cannot read`, a printed bucket no GATE line reads, which drops it out of every gate rather than
-// failing one. Each short table body row is padded to its header's width as Parse pads it, the
-// documented canonicalisation. No revision is judged by these.
-func diffTree(reading *diffReading) *Node {
+// diffRead decodes the engine's ProseMirror JSON as Go holds the document, and reports whether
+// Go's schema refused what the engine read, which is not the engine failing to read. The engine's
+// reading is compared as it stands: both readers hold a mark on text alone, never on an inline
+// leaf, as the browser editor's store (y-prosemirror) does, so FromJSON refuses a reading carrying
+// one on a leaf, and TestDifferentialCompare counts that document under `engine reading Go's
+// schema refuses`, which gates, rather than under `engine cannot read`, which counts an engine
+// throw and is reported alone. Each short table body row is padded to its header's width as Parse
+// pads it, the documented canonicalisation. No revision is judged by these.
+func diffRead(reading *diffReading) (*Node, bool) {
 	if reading == nil || reading.Err != "" || reading.PM == nil {
-		return nil
+		return nil, false
 	}
 	doc, err := FromJSON(reading.PM)
 	if err != nil {
-		return nil
+		return nil, true
 	}
 	padShortRows(doc)
+	return doc, false
+}
+
+// diffTree is the tree diffRead reads, for a caller that treats either refusal the same way.
+func diffTree(reading *diffReading) *Node {
+	doc, _ := diffRead(reading)
 	return doc
 }
 
@@ -303,8 +313,13 @@ func TestDifferentialCompare(t *testing.T) {
 			break
 		}
 		documents++
-		source := diffTree(read.MD)
-		if source == nil {
+		// A reading the engine threw on is the engine's own refusal, and only reported; one Go's
+		// schema refuses leaves the document out of every gate below, so it gates itself.
+		source, refused := diffRead(read.MD)
+		switch {
+		case refused:
+			counts["engine reading Go's schema refuses"]++
+		case source == nil:
 			counts["engine cannot read"]++
 		}
 		var sides [2]diffSide
@@ -392,6 +407,7 @@ func TestDifferentialCompare(t *testing.T) {
 		{"head panics (recovered or not)", "head panic"},
 		{"lost fixed points (base reads the markdown as the engine and writes it back as read, head does not)", "lost fixed point"},
 		{"newly refused by the writer (base stores, head's rendering reads back otherwise)", "newly refused by the writer"},
+		{"engine readings Go's schema refuses (FromJSON cannot hold what the engine read)", "engine reading Go's schema refuses"},
 	}
 	for _, line := range gates {
 		fmt.Fprintf(&summary, "GATE %-86s %d\n", line.label, counts[line.key])
