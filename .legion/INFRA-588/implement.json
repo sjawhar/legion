@@ -2,13 +2,29 @@
   "schemaVersion": 1,
   "phase": "implement",
   "issue": "INFRA-588",
-  "completed": "2026-10-29T23:35:15Z",
-  "round": "tester's round-8 finding: record where each numbered series closed",
+  "completed": "2026-10-30T00:33:03Z",
+  "round": "review round 7 answered: worker_image filter, deterministic closings, stale text, autodeploy helper, operator section",
   "pullRequest": "https://github.com/sjawhar/legion/pull/2411",
-  "head": "0288986f2521c4350029355134ab7989a6a9876b",
-  "proofComment": "https://github.com/sjawhar/legion/pull/2411#issuecomment-6511038530",
-  "reviewAnswered": "Tester's verdict fail (round 8): with no recorded boundary a branch taking the next number passed alone. 0288986f records the closing file per runner in migrationid.Closed (daemon 0061_pull_request_head_run, Dispatch 0141_drop_broadcast_idempotency_keys) and Check refuses a number above it. The red tests 7feb642d6bbb and a25cec37291a pass unmodified. The table lives in migrationid, not beside each package's migrations, because the Dispatch red test calls migrationid.Check(versions) with no boundary argument and envoy cannot import the daemon's package.",
+  "head": "073ea88737c4f30bf562b53c4d1e20fbc8f95c9e",
+  "proofComment": "https://github.com/sjawhar/legion/pull/2411#issuecomment-6511905286",
+  "reviewAnswered": "Review round 7 (1 Important, 4 Minor) in 073ea88737c4; 4 threads answered and resolved. Finding 2 is fixed in the architect's form (red test a25cec37291a calls Check(versions) unmodified): closings is an unexported slice, one entry per runner; Check needs exactly one closing file (none or two is an error); CheckClosedAt takes an explicit number for crafted sets.",
   "proof": [
+    {
+      "criterion": "The required lint job's image-trigger check passes with migrationid in the worker image",
+      "surface": ".github/scripts/check-image-trigger-paths.sh and check-ci-filters.sh, which the lint and ci-filters jobs run",
+      "command": "PYTHONUSERBASE=$TMPDIR/pyuser bash .github/scripts/check-image-trigger-paths.sh; .github/scripts/check-ci-filters.sh",
+      "observed": "every image trigger covers every input its build reads (5 image build(s)), exit 0; 25 gates exit 0",
+      "headSha": "073ea88737c4f30bf562b53c4d1e20fbc8f95c9e",
+      "negativeControl": "with packages/envoy/migrationid/** removed from worker_image: exit 1, 'packages/envoy/migrationid/migrationid.go is built into the image'"
+    },
+    {
+      "criterion": "A branch taking the next number fails on its own, deterministically, and both red tests pass unmodified",
+      "surface": "branches off the head (nextnumber.sh) and each package's identifier tests; go test suites on the real Postgres",
+      "command": "bash $TMPDIR/i588/nextnumber.sh 073ea887 $TMPDIR/i588/nn2; go test (daemon ./internal/store/... ./internal/api/; envoy ./migrationid/ ./internal/pgmigrate/... ./internal/dispatch/store/ ./internal/broker/store/); LOCPATH=$TMPDIR/locales-out bash packages/envoy/deploy/scripts/autodeploy_test.sh",
+      "observed": "next-number branch alone fails both tests ('the numbered migrations ended at 61' / '141'); timestamp branches pass alone and merged; TestLoadRefusesANewMigrationNumberedAfterTheShippedSet and TestMigrationSetRefusesANewMigrationNumberedAfterTheShippedSet pass, files unchanged; all suites ok; autodeploy PASS",
+      "headSha": "073ea88737c4f30bf562b53c4d1e20fbc8f95c9e",
+      "negativeControl": "TestCheckFindsTheSeriesByItsClosingFile: a set with no closing file and a set with two series' closing files are refused; TestEachSeriesClosesOnce refuses a duplicate entry"
+    },
     {
       "criterion": "Migration identifiers two concurrent pull requests cannot both claim: a branch that takes the next number fails on its own",
       "surface": "branches built off the head with git plumbing (nextnumber.sh), and each package's identifier test on each tree",
@@ -131,17 +147,22 @@
     }
   ],
   "filesChanged": [
+    ".github/workflows/ci.yaml",
     "packages/envoy/migrationid/migrationid.go",
     "packages/envoy/migrationid/migrationid_test.go",
-    "packages/daemon/internal/store/migrations/embed.go (doc)",
-    "packages/envoy/internal/pgmigrate/set.go (doc)",
-    "packages/envoy/cmd/dispatch/README.md"
+    "packages/daemon/internal/store/migrations/embed.go",
+    "packages/daemon/internal/store/migrations/embed_test.go",
+    "packages/envoy/internal/dispatch/store/store_test.go",
+    "packages/envoy/internal/pgmigrate/set.go",
+    "packages/envoy/cmd/dispatch/README.md",
+    "packages/envoy/deploy/scripts/autodeploy.sh",
+    "docs/kubernetes.md"
   ],
   "trickyParts": [
-    "Closed is raised only when a forward merge brings a numbered migration main took before this rule landed; a set holding none of the closing files (a test's crafted set) keeps the 1..N rule."
+    "The reviewer asked for Check(versions, closedAt) with constants beside each runner's set; the architect required the tester's unmodified Dispatch red test (Check(versions)) to keep working, so the closings stay in migrationid, made deterministic and unexported."
   ],
   "deviations": [
-    "The closing numbers live in migrationid.Closed, keyed by file name, rather than as one constant beside each package's migrations: the tester's unmodified Dispatch red test calls migrationid.Check(versions) with no boundary."
+    "Finding 2 implemented as the architect directed (deterministic series by closing file), not the reviewer's signature change."
   ],
   "openQuestions": [],
   "discoveredComplexity": []
