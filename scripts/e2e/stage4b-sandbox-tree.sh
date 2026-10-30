@@ -3522,8 +3522,8 @@ gate_open() {
 # "Approve <name> (version N)?", a human answered at least one of the spec's decision blocks, and no
 # approval request it made on the spec named a version holding one open or came before a human
 # answered one raised before the human's turn on that request. While the root waits on the human (a
-# question, or a closed gate it registered) it is in awaiting_person without a slot and its
-# architect is suspended; the approval answers it, and nothing of its tree advances until it holds a
+# question, or a closed gate it registered) it is in awaiting_person without a slot while its
+# architect stays live; the approval answers it, and nothing of its tree advances until it holds a
 # slot again. Tree 1 is the run's one root under admission_cap 2, so a slot stands free for it.
 drive_gated_spec() {
   local issue=$1 artifact approved asks events version verdict request early blocks requested_versions waits
