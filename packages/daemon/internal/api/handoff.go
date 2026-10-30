@@ -13,6 +13,7 @@ import (
 	"github.com/sjawhar/legion/daemon/internal/config"
 	"github.com/sjawhar/legion/daemon/internal/credential"
 	"github.com/sjawhar/legion/daemon/internal/dispatch"
+	"github.com/sjawhar/legion/daemon/internal/ghrepo"
 	"github.com/sjawhar/legion/daemon/internal/githubrest"
 	"github.com/sjawhar/legion/daemon/internal/intake"
 	"github.com/sjawhar/legion/daemon/internal/phase"
@@ -31,7 +32,9 @@ import (
 // implementer's completion is of — its pushed tip for an implementing round, the commit it stands
 // on for retro — and the head the merger's READY names; the planner, the tester and the reviewer
 // report none. The workflow refuses a record the role already named for its previous phase
-// (HANDOFF_NOT_NEW). A check report carries no commit and no record (nothing was pushed or
+// (HANDOFF_NOT_NEW). The implementer's completion of implementing is also held to an open pull
+// request on its branch, or a merged one recorded (implementationPullRequest:
+// HANDOFF_NO_PULL_REQUEST). A check report carries no commit and no record (nothing was pushed or
 // written) and a Verdict of pass, pending or fail; a tester's completion a Verdict of pass or fail.
 type HandoffCompleteRequest struct {
 	GrantID        string `json:"grantId"`
@@ -58,7 +61,9 @@ type HandoffCompleteResponse struct {
 // issue's check is open, and is refused CHECK_NOT_OPEN otherwise; every other call is a phase
 // completion, held to its commit (the implementer's and the merger's), the Dispatch handoff record
 // a file-backed phase ends with (handoffRecord), its role's verdict rule and the run its claim
-// serves, and the engine refuses one of a phase its role does not run (HANDOFF_NOT_CURRENT_PHASE).
+// serves, the implementer's in implementing to an open pull request on its branch or a merged one
+// recorded (implementationPullRequest), and the engine refuses one of a phase its role does not
+// run (HANDOFF_NOT_CURRENT_PHASE).
 func (s *server) handoffComplete(w http.ResponseWriter, r *http.Request) {
 	var req HandoffCompleteRequest
 	if !s.readBody(w, r, &req, s.redeemIdentityCheck) || !requireFailureFields(w, field{"grantId", req.GrantID}, field{"summary", req.Summary}) {
@@ -194,6 +199,11 @@ func (s *server) handoffComplete(w http.ResponseWriter, r *http.Request) {
 		reported, received = req.HandoffID, fmt.Sprintf("naming handoff record %s (%s version %d)", req.HandoffID, word, req.HandoffVersion)
 	}
 	eventID := fmt.Sprintf("handoff:%s:%d:%d:%d:%s:%s:%d:%s:%s:%t", grant.Issue, treeGeneration, issue.Generation, serving, grant.Role, issue.Phase, round, reported, req.Verdict, req.Ready)
+	if grant.Role == claim.RoleImplementer && issue.Phase == phase.Implementing && !position.lingers && reported != position.lastHandoff {
+		if !s.implementationPullRequest(w, r, issue, position.pullRequest, eventID) {
+			return
+		}
+	}
 	result, err := intake.ApplyFact(r.Context(), s.pool, "api", eventID, intake.HandoffComplete{Generation: serving, Issue: grant.Issue, Role: grant.Role, Claim: grant.Claim,
 		Summary: req.Summary, Verdict: req.Verdict, Ready: req.Ready, Commit: req.Commit, HandoffRecord: req.HandoffID, HandoffVersion: req.HandoffVersion,
 		MergeNote: answer.mergeNote, RecordedHead: answer.recordedHead, RecordedHeadAt: answer.recordedHeadAt, HeadAt: answer.headAt}, s.handlers...)
@@ -294,6 +304,102 @@ func staleCompletion(issue string, current, serving uint64, pending *supervise.D
 			stale, current, pending.ID)
 	}
 	return fmt.Sprintf("%s: the daemon has queued no task of generation %d for this claim, and may queue none (the new run's phase may be another claim's). End this turn without completing and tell the architect; if that task arrives, call the same handoff_complete in its turn", stale, current)
+}
+
+// implementationPullRequest is the implementer's completion's read of GitHub: in implementing, a
+// completion moves its issue to testing only on a pull request recorded open or merged for it
+// (workflow's TriggerImplementationReady), and only the opened webhook, or the required-checks
+// pass reading for one that webhook lost, records one open. So before the completion is applied,
+// the open pull request on the issue's branch (claim.IssueBranch) is read as the implement App,
+// minted for the owner of the issue's repository in GitHub's spelling (record.Issue.GitHubRepo,
+// which the webhook's facts name it by), and it says whether the completion goes on:
+//
+//   - one open: when the record does not already hold it open, the intake.PullRequestOpened its
+//     webhook would have carried is applied first, a reopen when the record holds the same pull
+//     request closed, under the read's stable id (intake.OpenedRead). The completion then
+//     moves the issue to testing. A failure to apply it is FACT_APPLY_FAILED, with the completion
+//     not applied.
+//   - none, with the record holding the pull request merged: the completion is applied and moves
+//     the issue to testing. The work landed, its merge told the architect (pr-merged), and the
+//     workflow runs on.
+//   - none otherwise: HANDOFF_NO_PULL_REQUEST, 409, and nothing is applied, so the completion at
+//     the same commit is applied once the pull request is open. When the record holds the pull
+//     request closed without merging, the refusal names it: the close told the architect, which
+//     decides the phase.
+//   - unreadable (a repository the record cannot name, a failed token mint or a failed read,
+//     GitHub's rate limit among them): logged WARN, and the completion is applied as it was before
+//     this read, so GitHub's trouble never blocks it; the required-checks pass records the pull
+//     request when it finds one.
+//
+// A completion the workflow refuses whatever GitHub shows reads nothing: the route calls this only
+// for one that is not already applied (eventID, its key, read with intake.Applied), whose tree does
+// not linger and whose handoff record is not the one the implementer named for its previous phase
+// (workflow's HANDOFF_NOT_NEW). It returns false when it wrote the answer.
+func (s *server) implementationPullRequest(w http.ResponseWriter, r *http.Request, issue *record.Issue, recorded *record.PullRequest, eventID string) bool {
+	ctx := r.Context()
+	applied, err := intake.Applied(ctx, s.pool, "api", []string{eventID})
+	if err != nil {
+		s.log.Error("api: read whether a completion is already applied", "issue", issue.Key, "error", err)
+		writeFailure(w, http.StatusInternalServerError, "RECORD_UNAVAILABLE", "could not read whether this completion was already received")
+		return false
+	}
+	if applied[eventID] {
+		return true
+	}
+	if s.tokens == nil {
+		writeFailure(w, http.StatusInternalServerError, "GITHUB_TOKEN_SOURCE_UNAVAILABLE", "GitHub token source is unavailable")
+		return false
+	}
+	branch := claim.IssueBranch(issue.Key)
+	logUnread := func(err error) {
+		attributes := []any{"issue", issue.Key, "repo", issue.GitHubRepo, "branch", branch, "error", err}
+		var answer *githubrest.Answer
+		if errors.As(err, &answer) {
+			attributes = append(attributes, "status", answer.Status)
+		}
+		s.log.Warn("api: read the open pull request on a completing implementer's branch; the completion is applied unread, and the required-checks pass records the pull request it finds", attributes...)
+	}
+	repository, err := ghrepo.Parse("the GitHub repository of "+issue.Key, issue.GitHubRepo)
+	if err != nil {
+		logUnread(err)
+		return true
+	}
+	lease, err := s.tokens.Token(ctx, appauth.Implement, repository.Owner())
+	if err != nil {
+		logUnread(fmt.Errorf("mint the implement App token for %s: %w", repository.Owner(), err))
+		return true
+	}
+	github := githubrest.Client{Token: lease.Token, API: githubrest.RepositoryAPI(s.githubAPI, repository)}
+	pull, found, err := github.OpenPullRequestOn(ctx, repository.Owner(), branch)
+	if err != nil {
+		logUnread(err)
+		return true
+	}
+	if !found {
+		// This read is GitHub's own answer on an open pull request, so of the states that let the
+		// implementation move on (record.LetsImplementationMove) only merged still does here: a
+		// record holding the pull request open is one GitHub closed or merged since the daemon last
+		// heard, and the completion waits for whichever of the two the daemon records next.
+		if record.LetsImplementationMove(recorded) && recorded.State != record.PullRequestOpen {
+			return true
+		}
+		message := fmt.Sprintf("no open pull request on %s %s; nothing was recorded. Open the pull request and complete again.", issue.GitHubRepo, branch)
+		if recorded != nil && recorded.State == record.PullRequestClosed {
+			message += fmt.Sprintf(" pull request #%d is closed; your architect was told and decides this issue's phase.", recorded.Number)
+		}
+		writeFailure(w, http.StatusConflict, "HANDOFF_NO_PULL_REQUEST", message)
+		return false
+	}
+	if recorded != nil && recorded.State == record.PullRequestOpen && recorded.Number == pull.Number {
+		return true
+	}
+	fact, read := intake.OpenedRead(issue.Project, issue.GitHubRepo, branch, pull, issue.Generation, recorded)
+	if _, err := intake.ApplyFact(ctx, s.pool, "github", read, fact, s.handlers...); err != nil {
+		s.log.Error("api: apply the open pull request a completing implementer's branch shows", "issue", issue.Key, "pullRequest", pull.Number, "error", err)
+		writeFailure(w, http.StatusInternalServerError, "FACT_APPLY_FAILED", "could not apply the open pull request read from GitHub; this completion changed nothing")
+		return false
+	}
+	return true
 }
 
 // checkReport records the implementer's report on a look of its closed issue's production check
@@ -416,13 +522,19 @@ func (s *server) readyRecord(ctx context.Context, issue string) (*record.PullReq
 }
 
 // completionPosition is where issue key stands as the completion route reads it, in one repeatable-read
-// snapshot: the issue record, its tree's generation (the root's), its review round — the
-// implementer's count of returns to implementing, which tells each implementing, testing, and
-// reviewing pass from the last — and its production check, nil while none was ever opened.
+// snapshot: the issue record, its tree's generation (the root's) and whether the tree lingers, its
+// review round — the implementer's count of returns to implementing, which tells each implementing,
+// testing, and reviewing pass from the last — and the handoff record the implementer last named
+// for a file-backed phase (record.PhaseRow.LastHandoff), its pull request record while it is implementing
+// (the one phase the route reads it in), nil in any other phase or while none is recorded, and its
+// production check, nil while none was ever opened.
 type completionPosition struct {
 	issue          *record.Issue
 	treeGeneration uint64
+	lingers        bool
 	round          int
+	lastHandoff    string
+	pullRequest    *record.PullRequest
 	check          *record.ProductionCheck
 }
 
@@ -451,15 +563,22 @@ func (s *server) handoffPosition(ctx context.Context, key string) (completionPos
 	if err != nil {
 		return completionPosition{}, err
 	}
-	round := 0
+	round, lastHandoff := 0, ""
 	for _, row := range rows {
 		if row.Role == claim.RoleImplementer {
-			round = row.Rounds
+			round, lastHandoff = row.Rounds, row.LastHandoff
+		}
+	}
+	var pr *record.PullRequest
+	if issue.Phase == phase.Implementing {
+		if pr, err = s.records.PullRequest(ctx, tx, key); err != nil {
+			return completionPosition{}, err
 		}
 	}
 	check, err := s.records.ProductionCheck(ctx, tx, key)
 	if err != nil {
 		return completionPosition{}, err
 	}
-	return completionPosition{issue: issue, treeGeneration: root.Generation, round: round, check: check}, tx.Commit(ctx)
+	return completionPosition{issue: issue, treeGeneration: root.Generation, lingers: root.Lingers(), round: round, lastHandoff: lastHandoff,
+		pullRequest: pr, check: check}, tx.Commit(ctx)
 }

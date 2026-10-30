@@ -16,6 +16,7 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/sjawhar/legion/daemon/internal/claim"
+	"github.com/sjawhar/legion/daemon/internal/ghrepo"
 	"github.com/sjawhar/legion/daemon/internal/intake"
 	"github.com/sjawhar/legion/daemon/internal/phase"
 	"github.com/sjawhar/legion/daemon/internal/record"
@@ -106,13 +107,26 @@ func seedUnjudgedRound(t *testing.T, pool *pgxpool.Pool) {
 }
 
 // requiredRuntime is a workflow runtime over pool whose required-checks read goes to api, logging
-// to log.
+// to log, serving acme/widgets alone (servedAcme), with testReviewAppID as the review App's id.
 func requiredRuntime(pool *pgxpool.Pool, api string, log *slog.Logger) *workflowRuntime {
 	engine := workflow.New(record.NewStore(), workflow.Config{Project: "CAPTURE", Repositories: testRepositories}, log)
 	return &workflowRuntime{
 		pool: pool, records: projectRecords{Store: record.NewStore(), project: "CAPTURE"}, engine: engine, handlers: []intake.Handler{engine},
-		tokens: outboxTokens{}, dispatchProject: "CAPTURE", bootID: "test-boot", log: log, githubAPI: api,
+		tokens: outboxTokens{}, dispatchProject: "CAPTURE", bootID: "test-boot", log: log, githubAPI: api, repositories: servedAcme(),
+		reviewAppID: testReviewAppID,
 	}
+}
+
+// testReviewAppID is the review App's id a test runtime is configured with, the App GitHub names
+// as the creator of a check run it made.
+const testReviewAppID = "271000"
+
+// servedAcme is a repository mapping that serves acme/widgets alone, the repository whose open
+// pull requests a pass lists.
+func servedAcme() *repositories {
+	served := newRepositories("CAPTURE")
+	served.set([]mappedRepository{{Repo: ghrepo.MustParse("acme/widgets"), Default: true}}, nil)
+	return served
 }
 
 func capturePhase(t *testing.T, pool *pgxpool.Pool) (phase.Phase, *record.PullRequest) {
@@ -206,9 +220,9 @@ func TestAnUnreadableRulesetLeavesTheHeadUndecided(t *testing.T) {
 }
 
 // A rate-limit answer ends the pass: every further read on the installation meets the same limit,
-// and the panes share it, so the pass reads no other pull request until the next one. Any other
-// refusal skips only the pull request it answered. The stand-in refuses every read; two open pull
-// requests are recorded.
+// and the panes share it, so the pass reads no other pull request, and lists no repository, until
+// the next one. Any other refusal skips only the pull request, or the listing, it answered. The
+// stand-in refuses every read; two open pull requests are recorded, on the one served repository.
 func TestARateLimitAnswerEndsTheRequiredChecksPass(t *testing.T) {
 	for _, tc := range []struct {
 		name    string
@@ -222,7 +236,7 @@ func TestARateLimitAnswerEndsTheRequiredChecksPass(t *testing.T) {
 		{"403 with retry-after", http.StatusForbidden, map[string]string{"Retry-After": "60"}, "", 1},
 		{"403 for a secondary rate limit named only by its message", http.StatusForbidden, map[string]string{"X-RateLimit-Remaining": "4321"},
 			`{"message":"You have exceeded a secondary rate limit. Please wait a few minutes before you try again."}`, 1},
-		{"403 that is not a rate limit", http.StatusForbidden, map[string]string{"X-RateLimit-Remaining": "4999"}, "", 2},
+		{"403 that is not a rate limit", http.StatusForbidden, map[string]string{"X-RateLimit-Remaining": "4999"}, "", 3},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			pool := isolatedOutboxPool(t)

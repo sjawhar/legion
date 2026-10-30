@@ -922,16 +922,16 @@ func TestAnIssueThatLeftTheWorkflowHasNothingRemoved(t *testing.T) {
 }
 
 // The records' daemon is told by its store's schema version: recordsSchema is migration
-// 0062_handoff_records, the one the records' release added.
+// 0065_handoff_records, the one the records' release added.
 func TestTheRecordsSchemaIsTheHandoffRecordsMigration(t *testing.T) {
 	all, err := migrations.All()
 	if err != nil {
 		t.Fatalf("read the migrations: %v", err)
 	}
 	if !slices.ContainsFunc(all, func(m migrations.Migration) bool {
-		return m.Version == recordsSchema && m.Name == "0062_handoff_records.up.sql"
+		return m.Version == recordsSchema && m.Name == "0065_handoff_records.up.sql"
 	}) {
-		t.Fatalf("no migration 0062_handoff_records.up.sql at version %d, the records' daemon's schema", recordsSchema)
+		t.Fatalf("no migration 0065_handoff_records.up.sql at version %d, the records' daemon's schema", recordsSchema)
 	}
 }
 

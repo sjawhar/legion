@@ -1645,9 +1645,11 @@ describe("Legion OMP extension", () => {
           owners: ["acme"],
           mapped: [{ repo: "acme/widgets", default: true }],
           refused: [],
+          withoutWebhookApp: [],
           caches: [],
         },
         settings: { max_fix_attempts: 3, worker_boot_timeout_seconds: 120 },
+        consumers: [],
       };
       const booted = await bootPane({
         role: options.role ?? "implementer",

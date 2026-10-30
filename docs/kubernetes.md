@@ -2138,22 +2138,22 @@ at 53, and a second run changed nothing. Applying 0054 again afterwards, as the 
 `pg_dump`, run as a login that cannot read the session tables, exited 1 without the two `-T`
 options and 0 with them.
 
-**Handoff records on the Dispatch issue (daemon API contract 43).** A release at contract 43
+**Handoff records on the Dispatch issue (daemon API contract 44).** A release at contract 44
 takes a file-backed phase's completion (planning, implementing, testing, reviewing) only when it
 names the handoff record its worker wrote on the Dispatch issue with `dispatch handoff-write`, and
 reads that record back from Dispatch (`GET /api/v1/handoffs/{id}`) before it records anything;
 its workers' plugins report the record, so the daemon and the plugins move together, as every
-contract bump does. Store migration 0062 adds two columns to `phases`, `handoff_record` and
+contract bump does. Store migration 0065 adds two columns to `phases`, `handoff_record` and
 `handoff_version`: the record a role's completion of its current phase named, and its version.
 
-To roll this release back to contract 42, stop the daemon and drop both columns, with the row
-`schema_version` records for 0062, which leaves the store at 61, the earlier release's schema:
+To roll this release back to contract 43, stop the daemon and drop both columns, with the row
+`schema_version` records for 0065, which leaves the store at 64, the earlier release's schema:
 
 ```sh
 psql '<postgres_dsn>' -X -v ON_ERROR_STOP=1 <<'SQL'
 begin;
 alter table phases drop column if exists handoff_record, drop column if exists handoff_version;
-delete from schema_version where version = 62;
+delete from schema_version where version = 65;
 commit;
 SQL
 ```
@@ -2165,14 +2165,14 @@ left in place, but it never clears them: a role it starts on a new phase or roun
 of its last one, and an upgrade back to this release would read that record as the new phase's
 completion (`record.PhaseRow.Completed`), ending a review round on an approval alone or starting
 the implementer on a red without waiting for the tester's turn. Dropping the columns and the row
-makes that upgrade apply 0062 again, to empty columns. `last_handoff` keeps the record id each role
+makes that upgrade apply 0065 again, to empty columns. `last_handoff` keeps the record id each role
 last named; the earlier release compares a completion's commit with it, which no record id equals,
 so no completion is refused `HANDOFF_NOT_NEW` for it. The records themselves stay on their Dispatch
-issues. The `62` is the number of `0062_handoff_records.up.sql`; where that file carries another
+issues. The `65` is the number of `0065_handoff_records.up.sql`; where that file carries another
 number in the release you roll back from, use that number. The SQL was run on 2026-10-26 against
 PostgreSQL 17 on a scratch schema holding `phases` and `schema_version` after that migration (then
-numbered 0055, later 0060 and 0061): the first run dropped both columns and the row, and a second
-printed the two notices and changed nothing.
+numbered 0055, later 0060, 0061 and 0062): the first run dropped both columns and the row, and a
+second printed the two notices and changed nothing.
 
 ### Contract discipline
 
@@ -2698,9 +2698,13 @@ connection authenticates as. That user's grants, which `legion-pane` does not ho
 the connection uses: publish `$JS.API.STREAM.INFO.ENVOY_NOTIFICATIONS`,
 `$JS.API.CONSUMER.INFO.ENVOY_NOTIFICATIONS.>`, `$JS.API.CONSUMER.CREATE.ENVOY_NOTIFICATIONS.>`,
 `$JS.API.CONSUMER.MSG.NEXT.ENVOY_NOTIFICATIONS.>` and `$JS.ACK.ENVOY_NOTIFICATIONS.>` (which its
-two durable consumers, `legion-go-<project>-dispatch` and `legion-go-<project>-github`, use, though
-the trailing `>` reaches every consumer of the stream, each host's listener consumer included, and
-lets the seed create a push consumer that delivers stream messages to any subject), and
+three durable consumers, `legion-go-<project>-dispatch`, `legion-go-<project>-dispatch-server` and
+`legion-go-<project>-github`, use, though the trailing `>` reaches every consumer of the stream,
+each host's listener consumer included, and lets the seed create a push consumer that delivers
+stream messages to any subject), `$JS.API.STREAM.MSG.GET.ENVOY_NOTIFICATIONS` (the stored-message
+get `legion state` reads each consumer's oldest waiting message with; without it the state's
+`consumers` show `unavailable: read the oldest waiting message: context deadline exceeded` on each
+consumer with messages waiting, its waiting count still shown), and
 subscribe `notifications.envoy.exceptions.notifications.role.>` and `_INBOX.>` (which receives
 every reply any client on the server gets, key-value reads and watch updates included, such as
 the listener's `envoy_roles` and `envoy_sessions` watchers). It publishes on no core
@@ -2709,7 +2713,11 @@ over the worker stream, so the Go daemon needs no `legion.ctl` grant. These subj
 live: a server granting exactly them logged no refusal across a boot creating both durables, a
 restart onto the existing ones, Dispatch and GitHub events acknowledged and a poison message
 terminated, and its trace showed no other API subject (no `$JS.API.INFO`, no
-`CONSUMER.DURABLE.CREATE`, which the TypeScript daemon uses instead). It is read by the same rule
+`CONSUMER.DURABLE.CREATE`, which the TypeScript daemon uses instead); the daemon's permission test
+(`internal/daemon/nats_permissions_test.go`) reads the consumers' lag under the same grant and
+expects no refusal. The stored-message get reaches a deployment with the envoy-infra release that
+carries it: until then the daemon runs as before, and only the lag's oldest message is
+`unavailable`. The daemon's seed is read by the same rule
 and refusals as the pane seed, the
 group-readable mount included, and neither seed falls back to the other: an unusable
 daemon seed refuses boot even beside a good pane seed. Unset, the daemon connects as the pane
@@ -5425,8 +5433,8 @@ still in flight at the release carries files its next role would never see.
 moves them. From the daemon's own configuration — `project`, `dispatch_url` and
 `dispatch_token_file`, the implement GitHub App, and `daemon_url` — it reads the running daemon's
 unauthenticated `GET /legion/v1/state` for every issue in a phase other than done, and for the
-daemon's `daemon.schemaVersion`, which tells which release runs: at or past 62, the store migration
-`0062_handoff_records` the records' release added, it is the new daemon; below it, the old one.
+daemon's `daemon.schemaVersion`, which tells which release runs: at or past 65, the store migration
+`0065_handoff_records` the records' release added, it is the new daemon; below it, the old one.
 For each issue, as the implement App, it:
 
 - lists `.legion/` on `legion/<KEY>` through GitHub's contents API, and writes each of

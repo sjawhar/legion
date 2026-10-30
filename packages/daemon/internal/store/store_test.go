@@ -923,7 +923,7 @@ func TestTheUpgradeQueuesTheMergeOfAREADYAlreadyAwaitingIt(t *testing.T) {
 					continue
 				}
 				// So is the merger's row: the record store's has columns later migrations add
-				// (0062's handoff_record and handoff_version).
+				// (0065's handoff_record and handoff_version).
 				if _, err := tx.Exec(ctx, `insert into phases (issue, role, claim, handoff_commit, rounds, verdict, merge_note)
 					values ($1, $2, 'merge-claim', 'ready-head', 0, '', $3)`, seeded.issue.Key, string(claim.RoleMerger), seeded.mergeNote); err != nil {
 					return err

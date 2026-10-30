@@ -1697,9 +1697,14 @@ stop: `<N>-publish-failure` (a JetStream publish that did not complete), `<N>-we
 delivery NATS can never take, answered 422), `<N>-stream-subject-dropped` (a start that dropped
 another deployment's overlapping stream subject), `<N>-durable-refused` (a start that refused its
 durable consumer) and `<N>-subscribe-exhausted` (a start that gave up binding its durable
-subscription). Each description names `logGroupName` as the log to read, and assumes the wiring of
-the deployment the alarms were written for: that GitHub deliveries come from Dispatch's GitHub App
-(`legion-envoy`), whose redelivery sweep retries them, and that Slack retries an event three times.
+subscription). `<N>-publish-failure` and `<N>-webhook-refused` count a GitHub delivery's first
+failure or refusal in each listener task: a later one of the same delivery, such as each of the
+redeliveries Dispatch's sweep asks for over 72 hours, is logged
+`redelivery <delivery>: <action> refused` (or `failed`), which no filter counts, so one delivery
+pages once per task, and again after a restart. Each description names `logGroupName` as the log
+to read, and assumes the wiring of the deployment the alarms were written for: that GitHub
+deliveries come from Dispatch's GitHub App (`legion-envoy`), whose redelivery sweep retries them,
+and that Slack retries an event three times.
 A listener fed otherwise pages the same way, with descriptions that overstate what is retried.
 
 Its outputs are `serviceArn`, `serviceName`, `logGroupName`, `taskDefinitionArn` and
@@ -2602,9 +2607,13 @@ ad-hoc topic to a session's serving port with no refusal, and opted in as a user
 `notifications.>`.
 
 `DaemonPermissions()` is the grant of a Legion daemon's dedicated NATS user. It publishes the
-notification stream's info request, the info, create and next-message requests of any consumer of
-that stream, and their acknowledgements. It subscribes to the daemon's role-lane delivery
-exceptions and to reply inboxes. The consumer subjects are not narrowed to the daemon's own two,
+notification stream's info request, its stored-message get
+`$JS.API.STREAM.MSG.GET.ENVOY_NOTIFICATIONS` (the read `legion state` makes of each durable
+consumer's oldest waiting message, whose time is that consumer's lag; it reads one stored message
+at a time and can create, change or delete nothing), the info, create and next-message requests of
+any consumer of that stream, and their acknowledgements. It subscribes to the daemon's role-lane
+delivery exceptions and to reply inboxes. The consumer subjects are not narrowed to the daemon's
+own three,
 so its seed can read, recreate and drain every consumer of the stream, each host's listener
 consumer included, and create a push consumer that delivers the stream's messages to any subject,
 one it may not publish to included. Its `_INBOX.>` subscription receives every reply any client

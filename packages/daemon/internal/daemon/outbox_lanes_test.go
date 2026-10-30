@@ -183,6 +183,9 @@ func (d *postingDispatch) Handoff(context.Context, string) (dispatch.Handoff, er
 func (d *postingDispatch) ListRepoProjects(context.Context) ([]dispatch.RepoProject, error) {
 	return nil, nil
 }
+func (d *postingDispatch) WebhookAppInstalled(context.Context, string) (bool, error) {
+	return true, nil
+}
 
 // postsTo is how many messages were posted on issue.
 func (d *postingDispatch) postsTo(issue string) int {
@@ -240,6 +243,7 @@ func (d *laneBoard) Handoff(context.Context, string) (dispatch.Handoff, error) {
 func (d *laneBoard) ListRepoProjects(context.Context) ([]dispatch.RepoProject, error) {
 	return nil, nil
 }
+func (d *laneBoard) WebhookAppInstalled(context.Context, string) (bool, error) { return true, nil }
 
 // statuses is each status that landed, in order.
 func (d *laneBoard) statuses() []string {

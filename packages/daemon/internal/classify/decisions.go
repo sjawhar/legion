@@ -34,7 +34,7 @@ func AdvancePullRequestHead(pr record.PullRequest, arrival Arrival, headSHA stri
 		}
 		pr.Run = &record.HeadRun{Anchor: judgementOf(pr), Pushes: clone(pr.Pushes), Since: pr.HeadUpdatedAt}
 	}
-	pr = runStep(pr, record.RunStep{Head: headSHA, Before: arrival.Before, Sender: arrival.Sender, SyncedAt: arrival.At})
+	pr, _ = runStep(pr, record.RunStep{Head: headSHA, Before: arrival.Before, Sender: arrival.Sender, SyncedAt: arrival.At})
 	pr.Pushes = unspentPushes(pr.Pushes, pr.Moves, true)
 	return pr
 }
@@ -68,7 +68,8 @@ func NameMove(pr record.PullRequest, named record.Named) record.PullRequest {
 		run.Names = run.Names[len(run.Names)-maxMoves:]
 	}
 	pr.Run = &run
-	return replayRun(pr)
+	pr, _ = replayRun(pr)
+	return pr
 }
 
 // namedAlready is whether names holds named (sameName): a synchronize delivered again names
@@ -679,10 +680,11 @@ func chainOf(pushes []record.ClassifiedPush, from, to string) []record.Classifie
 	return nil
 }
 
-// settled says whether a CI settlement stands for the pull request's current head: one recorded
+// Settled says whether a CI settlement stands for the pull request's current head: one recorded
 // for the head itself. A checked head is recorded only with a settlement (SettlementFor, then
-// ApplySettlement), and cleared with it (a new generation, migration 0028).
-func settled(pr record.PullRequest) bool {
+// ApplySettlement), and cleared with it (a new generation, migration 0028). The daemon's pass
+// reads a head's check runs only while none stands (PassGeneration).
+func Settled(pr record.PullRequest) bool {
 	return pr.CheckedHead != "" && pr.CheckedHead == pr.HeadSHA
 }
 
@@ -725,6 +727,19 @@ func unchainedPlan(pushes []record.ClassifiedPush, previous, head string) (plann
 		planned, decided = planned && p.ByReviewApp, true
 	}
 	return planned && decided, decided
+}
+
+// HeadPushKnown says whether a push the record holds left head, so the record already knows of a
+// push that took the branch there. Until one does, the push that left head is on its way or lost,
+// and the daemon's pass rebuilds the move's pushes from GitHub's activity of the branch (daemon's
+// headPushes).
+func HeadPushKnown(pr record.PullRequest, head string) bool {
+	for _, p := range pr.Pushes {
+		if p.SHA == head {
+			return true
+		}
+	}
+	return false
 }
 
 // unspentPushes is what the moves made leave of pushes: every push whose own move, its two heads,
@@ -938,7 +953,8 @@ func ApplyPushDropping(pr record.PullRequest, push record.ClassifiedPush) (recor
 		run.Pushes = withoutCopies(run.Pushes, []record.ClassifiedPush{*dropped.Repeat})
 	}
 	pr.Run = &run
-	return replayRun(pr), dropped
+	pr, _ = replayRun(pr)
+	return pr, dropped
 }
 
 // maxCopies bounds the pushes of the same two heads a pull request keeps on their way, before a
@@ -1041,12 +1057,21 @@ func boundedPushes(pushes []record.ClassifiedPush, head string) ([]record.Classi
 	return withoutKeys(pushes, gone), gone
 }
 
-// ApplySettlement applies a listener CI settlement only when ClassifySettlement says it is newer,
-// merging its attempt set into the fence. It returns false for stale, duplicate, and conflicting
-// observations.
-func ApplySettlement(pr record.PullRequest, candidate SettlementCandidate) (record.PullRequest, bool) {
-	if ClassifySettlement(pr, candidate) != SettlementNewer {
-		return pr, false
+// ApplySettlement applies a CI settlement only when ClassifySettlement says it is newer, merging
+// its attempt set into the fence, or, when either settlement is the pass's (PassGeneration),
+// merging it check by check (mergeWithPass). It returns false for stale, duplicate, and conflicting
+// observations. Its third result says the fence was adopted: for the listener's duplicate of the
+// pass's settlement (adoptsFence) it returns pr with the listener's generation and snapshot as its
+// fence, and every check's run and outcome as they were, applied false.
+func ApplySettlement(pr record.PullRequest, candidate SettlementCandidate) (record.PullRequest, bool, bool) {
+	switch classification := ClassifySettlement(pr, candidate); {
+	case classification == SettlementDuplicate && adoptsFence(pr, candidate):
+		pr.Generation, pr.Snapshot = candidate.Generation, candidate.Snapshot
+		return pr, false, true
+	case classification != SettlementNewer:
+		return pr, false, false
+	case pr.CheckRuns != nil && (pr.Generation == PassGeneration || candidate.Generation == PassGeneration):
+		return mergeWithPass(pr, candidate), true, false
 	}
 	outcome := EffectiveOutcome(pr, candidate)
 	pr.CheckRuns = mergeAttemptSets(pr.CheckRuns, candidate.CheckRuns)
@@ -1054,7 +1079,7 @@ func ApplySettlement(pr record.PullRequest, candidate SettlementCandidate) (reco
 	pr.Snapshot = candidate.Snapshot
 	pr.Failing = append([]string(nil), outcome.Failing...)
 	pr.Cancelled = append([]string(nil), outcome.Cancelled...)
-	return pr, true
+	return pr, true, false
 }
 
 // LateLifecycle reports whether a pull request lifecycle observation (opened, reopened,

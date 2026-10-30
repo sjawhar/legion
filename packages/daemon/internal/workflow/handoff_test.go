@@ -2,6 +2,7 @@ package workflow
 
 import (
 	"context"
+	"slices"
 	"strings"
 	"testing"
 
@@ -343,4 +344,59 @@ func TestARerunTesterIsNotCompletedByItsLastRunsRecord(t *testing.T) {
 	if _, quiesce := implementerStart(t, pool); quiesce != claim.RoleTester {
 		t.Fatalf("the implementer's start waits for %q, want the re-run tester still at work", quiesce)
 	}
+}
+
+// The implementer's completion never moves its issue on a pull request closed without merging: it
+// is no pull request a tester can test, and the completion records the handoff and leaves the
+// issue where it is, with no worker started and the status unchanged.
+func TestAnImplementerHandoffOnAPullRequestClosedWithoutMergingLeavesTheIssueInImplementing(t *testing.T) {
+	pool := migratedPool(t)
+	ctx := context.Background()
+	seedIssue(t, pool, record.Issue{Key: "LEGION-208", Repo: "sjawhar/legion", DefaultBranch: "main", GitHubRepo: "sjawhar/legion", Tree: "LEGION-208", Project: "LEGION", Title: "root", Phase: phase.Implementing, Generation: 1, Status: "in_progress", Rank: "U"})
+	seedPR(t, pool, record.PullRequest{State: record.PullRequestClosed, Issue: "LEGION-208", Repo: "sjawhar/legion", Number: 42, Branch: "legion/LEGION-208", HeadSHA: "handoff-0", Failing: []string{}})
+	engine := testEngine(config.DesignGateRootIssues, nil)
+	result, err := intake.ApplyFact(ctx, pool, "api", "implement-0", intake.HandoffComplete{Generation: 1, Issue: "LEGION-208", Role: claim.RoleImplementer, Claim: "implement-claim", Commit: "handoff-0", HandoffRecord: "implement-record-0", HandoffVersion: 1}, engine, admissionStub{})
+	if err != nil {
+		t.Fatalf("ApplyFact handoff: %v", err)
+	}
+	if result.Refusal != nil {
+		t.Fatalf("handoff refused: %+v", *result.Refusal)
+	}
+	assertPhase(t, pool, phase.Implementing)
+	assertOutboxKinds(t, pool, []string{})
+	var commit string
+	if err := pool.QueryRow(ctx, "select handoff_commit from phases where issue = 'LEGION-208' and role = 'implementer'").Scan(&commit); err != nil {
+		t.Fatalf("read the implementer's handoff: %v", err)
+	}
+	if commit != "handoff-0" {
+		t.Fatalf("implementer handoff commit = %q, want handoff-0 recorded", commit)
+	}
+}
+
+// A pull request merged while its issue is in implementing tells the architect (pr-merged), and
+// the workflow runs on: the implementer's completion that follows moves the issue to testing on
+// the merged record, where holding it for an open pull request would stall it on a branch whose
+// pull request can never open again.
+func TestAnImplementerHandoffAfterAMergeInImplementingMovesTheIssueToTesting(t *testing.T) {
+	pool := migratedPool(t)
+	ctx := context.Background()
+	seedIssue(t, pool, record.Issue{Key: "LEGION-208", Repo: "sjawhar/legion", DefaultBranch: "main", GitHubRepo: "sjawhar/legion", Tree: "LEGION-208", Project: "LEGION", Title: "root", Phase: phase.Implementing, Generation: 1, Status: "in_progress", Rank: "U"})
+	seedPR(t, pool, record.PullRequest{State: record.PullRequestOpen, Issue: "LEGION-208", Repo: "sjawhar/legion", Number: 42, Branch: "legion/LEGION-208", HeadSHA: "handoff-0", Failing: []string{}})
+	engine := testEngine(config.DesignGateRootIssues, nil)
+	if _, err := intake.ApplyFact(ctx, pool, "github", "merged", intake.PullRequestMerged{Repo: "sjawhar/legion", Number: 42, MergeSHA: "merge"}, engine, admissionStub{}); err != nil {
+		t.Fatalf("ApplyFact merged: %v", err)
+	}
+	if kinds := noticeKinds(t, pool, "LEGION-208"); !slices.Equal(kinds, []record.NoticeKind{"pr-merged"}) {
+		t.Fatalf("after the merge in implementing the notices are %v, want pr-merged", kinds)
+	}
+	assertPhase(t, pool, phase.Implementing)
+
+	result, err := intake.ApplyFact(ctx, pool, "api", "implement-0", intake.HandoffComplete{Generation: 1, Issue: "LEGION-208", Role: claim.RoleImplementer, Claim: "implement-claim", Commit: "handoff-0", HandoffRecord: "implement-record-0", HandoffVersion: 1}, engine, admissionStub{})
+	if err != nil {
+		t.Fatalf("ApplyFact handoff: %v", err)
+	}
+	if result.Refusal != nil {
+		t.Fatalf("handoff refused: %+v", *result.Refusal)
+	}
+	assertPhase(t, pool, phase.Testing)
 }

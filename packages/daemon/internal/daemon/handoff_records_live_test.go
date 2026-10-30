@@ -143,7 +143,7 @@ func newHandoffRecordsLive(t *testing.T) *handoffRecordsLive {
 	}
 	r := &handoffRecordsLive{
 		liveProof: proof, rt: fake.NewRuntime(), built: &built{}, root: root,
-		github: mergedRootWaitsGitHub(t), cliHome: t.TempDir(), claimants: map[claim.Token]*handoffClaimant{},
+		cliHome: t.TempDir(), claimants: map[claim.Token]*handoffClaimant{},
 	}
 	r.rt.InPod = true
 	r.dispatch = startHandoffDispatch(t, root)
@@ -201,6 +201,9 @@ func (r *handoffRecordsLive) seed() {
 	if err != nil {
 		t.Fatal(err)
 	}
+	// The implementer's completion of implementing reads GitHub for the open pull request on its
+	// branch, so GitHub lists the one the record holds for the issue that completes rounds here.
+	r.github = mergedRootWaitsGitHub(t, "legion/"+r.renew, int(number)+2)
 	type seeded struct {
 		key   string
 		phase phase.Phase

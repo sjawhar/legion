@@ -1,14 +1,19 @@
 // Package redeliver asks GitHub to redeliver the App webhook's failed deliveries.
 //
 // GitHub does not redeliver a webhook delivery the receiver failed: a delivery the Envoy
-// listener answered 5xx (starting up, a CI-store write that ran out of retries) or that GitHub
-// could not complete (the listener down, a reply slower than ten seconds) is lost to every
-// consumer unless someone asks for it again. The sweep is GitHub's documented remedy: list the
-// App webhook's failed attempts, and redeliver each delivery that has no answered attempt,
-// through `POST /app/hook/deliveries/{id}/attempts`. A redelivery carries the original
-// X-GitHub-Delivery GUID, and the listener publishes GitHub envelopes under a JetStream MsgId
-// of that GUID's dedupe key, so asking again for a delivery that did reach the stream adds
+// listener did not answer 2xx (starting up, a CI-store write that ran out of retries, a publish
+// NATS refused) or that GitHub could not complete (the listener down, a reply slower than ten
+// seconds) is lost to every consumer unless someone asks for it again. The sweep is GitHub's
+// documented remedy: list the App webhook's failed attempts, and redeliver each delivery that has
+// no answered attempt, through `POST /app/hook/deliveries/{id}/attempts`. A redelivery carries the
+// original X-GitHub-Delivery GUID, and the listener publishes GitHub envelopes under a JetStream
+// MsgId of that GUID's dedupe key, so asking again for a delivery that did reach the stream adds
 // nothing to it.
+//
+// A delivery is asked for again, on a doubling backoff, whatever status code its failed attempts
+// carry, until GitHub records an OK attempt for it or 72 hours have passed since the first failed
+// attempt the sweep saw: GitHub keeps a delivery 72 hours, and a 404 to the request says it no
+// longer has it.
 //
 // The listing takes every attempt and judges each GUID as GitHub's own redelivery script does: a
 // GUID with an OK attempt is delivered, whatever its failures, and every attempt whose status is
@@ -43,21 +48,19 @@ import (
 const (
 	// Interval is how often the running sweep lists failures.
 	Interval = 2 * time.Minute
-	// Lookback is how far back every continuous sweep lists, and all a first sweep lists: a
-	// retry's failed attempt stays inside it for the whole backoff schedule. Failures older than
-	// a first sweep's hour are a backlog for an operator to decide about (Options.Since), because
-	// a redelivered envelope carries the time it was published, not the time of the event.
+	// Lookback is how far back every continuous sweep with a cursor lists. Failures older than
+	// it are decided from their records (openUnlisted). A first sweep, with no cursor, lists the
+	// 72 hours GitHub keeps, so the first failed attempt of every delivery GitHub still has is in
+	// its listing.
 	Lookback = time.Hour
-	// MaxAttempts bounds the redeliveries GitHub accepts for one delivery, and separately the
-	// redelivery requests GitHub refuses for it.
-	MaxAttempts = 5
 
 	// retention is the bucket's TTL, GitHub's own horizon: past three days GitHub neither lists
-	// nor redelivers an attempt, so nothing older is worth remembering.
+	// nor redelivers an attempt, so nothing older is worth remembering, and a delivery still
+	// failing that long after its first failed attempt is expired.
 	retention       = 72 * time.Hour
 	cursorOverlap   = 2 * time.Minute
 	firstBackoff    = 2 * time.Minute
-	maxBackoff      = 16 * time.Minute
+	maxBackoff      = time.Hour
 	defaultRequests = 300
 	cursorKey       = "cursor"
 	limitKey        = "rate_limit"
@@ -91,18 +94,13 @@ const (
 	WouldRedeliver Outcome = "would-redeliver"
 	// RequestRefused: GitHub refused the redelivery request; it is asked again after the backoff.
 	RequestRefused Outcome = "request-refused"
-	// Waiting: the last redelivery failed and the next one's backoff has not passed.
+	// Waiting: the delivery has had a request and its next one is not due yet.
 	Waiting Outcome = "waiting"
-	// Pending: GitHub accepted the last request and its log holds no attempt since: it has not made
-	// the redelivery yet. Once it has, the listing carries that newer attempt, which decides it.
-	Pending Outcome = "pending"
-	// Terminal: the receiver answered 4xx, refusing the request itself; the same bytes would fail
-	// the same way, so it is never redelivered.
-	Terminal Outcome = "terminal"
-	// Exhausted: MaxAttempts redeliveries failed, or MaxAttempts requests were refused.
-	Exhausted Outcome = "exhausted"
-	// Closed: an earlier sweep settled the delivery (GitHub recorded it OK, or it was terminal or
-	// exhausted). Its failed attempt is still listed, and counted, until it is older than the window.
+	// Expired: GitHub no longer has the delivery (72 hours since its first failed attempt, or a
+	// 404 to the request); it is never asked for again.
+	Expired Outcome = "expired"
+	// Closed: an earlier sweep settled the delivery (GitHub recorded it OK, or it expired). Its
+	// failed attempt is still listed, and counted, until it is older than the window.
 	Closed Outcome = "closed"
 	// ClaimedElsewhere: another sweeper claimed this attempt first.
 	ClaimedElsewhere Outcome = "claimed-elsewhere"
@@ -116,8 +114,8 @@ const (
 
 // Outcomes is every outcome, in the order a sweep's summary counts them.
 var Outcomes = []Outcome{
-	Redelivered, WouldRedeliver, RequestRefused, RateLimited, Waiting, Pending, Delivered, Terminal,
-	Exhausted, Closed, ClaimedElsewhere,
+	Redelivered, WouldRedeliver, RequestRefused, RateLimited, Waiting, Delivered, Expired, Closed,
+	ClaimedElsewhere,
 }
 
 // logKey is the outcome's name as a log attribute key: request-refused is request_refused.
@@ -136,8 +134,8 @@ type Decision struct {
 	Outcome      Outcome
 }
 
-// Report is one sweep's listing and decisions: the listed deliveries newest first, then the
-// refused deliveries it asked again for that the listing no longer returned.
+// Report is one sweep's listing and decisions: the listed deliveries newest first, then the open
+// deliveries the listing no longer returned.
 type Report struct {
 	Since time.Time
 	// Listed counts the failed attempts the listing returned.
@@ -165,8 +163,9 @@ func (r Report) Count(outcome Outcome) int {
 // Options select a sweep's window and whether it acts.
 type Options struct {
 	// Since lists failures delivered at or after it. Zero is the running sweep's window: the last
-	// Lookback, reaching back to the stored cursor after a gap, and a complete sweep advances the
-	// cursor. A sweep with Since set leaves the cursor alone.
+	// Lookback, reaching back to the stored cursor after a gap, or the last 72 hours with no
+	// cursor, and a complete sweep advances the cursor. A sweep with Since set leaves the cursor
+	// alone.
 	Since time.Time
 	// DryRun decides every delivery and requests nothing, writes nothing and logs no alarm line.
 	DryRun bool
@@ -199,17 +198,22 @@ type Sweeper struct {
 type record struct {
 	// Attempts counts redeliveries GitHub accepted.
 	Attempts int `json:"attempts"`
-	// Refusals counts consecutive redelivery requests GitHub refused; accepting one resets it.
+	// Refusals counts redelivery requests GitHub refused. Attempts and Refusals add up to the
+	// requests made for the delivery.
 	Refusals int `json:"refusals"`
-	// LastAttemptAt is when the last request was made, accepted or refused; backoff runs from it.
+	// LastAttemptAt is when the last request was made, accepted or refused.
 	LastAttemptAt time.Time `json:"last_attempt_at,omitzero"`
-	// Answered holds the failed attempts a request has already answered. A failed attempt not in
-	// it is a failure the sweep has not acted on: the delivery's first, or its last redelivery's.
-	Answered  []int64 `json:"answered,omitempty"`
-	Terminal  bool    `json:"terminal,omitempty"`
-	Exhausted bool    `json:"exhausted,omitempty"`
+	// NextAttemptAt is when the next request is due: the last request plus the backoff. A record
+	// without it is due.
+	NextAttemptAt time.Time `json:"next_attempt_at,omitzero"`
+	// FirstDeliveredAt is the oldest failed attempt the sweep has seen for the delivery, kept as
+	// the minimum on every write; the delivery expires 72 hours after it.
+	FirstDeliveredAt time.Time `json:"first_delivered_at,omitzero"`
 	// Delivered is GitHub having recorded an OK attempt for the delivery: nothing more is asked.
 	Delivered bool `json:"delivered,omitempty"`
+	// Expired is the sweep having stopped asking for an undelivered delivery, for ExpiredReason.
+	Expired       bool   `json:"expired,omitempty"`
+	ExpiredReason string `json:"expired_reason,omitempty"`
 	// Delivery is the attempt the last request named. A refused request adds no attempt to
 	// GitHub's log, so this is how a sweep asks again for a delivery its listing no longer returns.
 	Delivery githubapp.Delivery `json:"delivery"`
@@ -272,10 +276,10 @@ func (s *Sweeper) sweepAndReport(ctx context.Context) {
 	s.Logger.Info("webhook redelivery sweep", attrs...)
 }
 
-// Sweep lists the failed deliveries in its window, adds the refused deliveries the listing no
-// longer returns, and decides each: redeliver it, wait out its backoff, leave a pending
-// redelivery alone, or give up on it. A rate-limited answer from GitHub ends the sweep there. It
-// opens the state first unless an earlier sweep has (openState).
+// Sweep lists the failed deliveries in its window, adds the open deliveries the listing no longer
+// returns, and decides each: redeliver it, wait until its next request is due, or expire it. A
+// rate-limited answer from GitHub ends the sweep there. It opens the state first unless an earlier
+// sweep has (openState).
 func (s *Sweeper) Sweep(ctx context.Context, opts Options) (Report, error) {
 	if err := s.openState(); err != nil {
 		return Report{}, err
@@ -291,7 +295,9 @@ func (s *Sweeper) Sweep(ctx context.Context, opts Options) (Report, error) {
 			return Report{}, err
 		}
 		cursorRevision = revision
-		if resume := cursor.Add(-cursorOverlap); revision != 0 && resume.Before(since) {
+		if revision == 0 {
+			since = now.Add(-retention)
+		} else if resume := cursor.Add(-cursorOverlap); resume.Before(since) {
 			if oldest := now.Add(-retention); resume.Before(oldest) {
 				resume = oldest
 			}
@@ -327,11 +333,11 @@ func (s *Sweeper) Sweep(ctx context.Context, opts Options) (Report, error) {
 		}
 		byGUID[delivery.GUID] = append(byGUID[delivery.GUID], delivery)
 	}
-	refused, err := s.refusedUnlisted(byGUID)
+	open, err := s.openUnlisted(byGUID)
 	if err != nil {
 		return Report{}, err
 	}
-	for _, delivery := range refused {
+	for _, delivery := range open {
 		order = append(order, delivery.GUID)
 		byGUID[delivery.GUID] = []githubapp.Delivery{delivery}
 	}
@@ -416,17 +422,20 @@ func nextLimit(current limitRecord, limited *githubapp.RateLimitError, now time.
 	return next
 }
 
-// refusedUnlisted returns the deliveries, newest first, whose last request GitHub refused and
-// whose failed attempts the listing did not return. A refused request adds no attempt to GitHub's
-// log, so once a delivery's failed attempts are older than the window, its record is all that
-// brings it back: to be asked again, or closed when the listing shows GitHub delivered it.
-func (s *Sweeper) refusedUnlisted(listed map[string][]githubapp.Delivery) ([]githubapp.Delivery, error) {
+// openUnlisted returns the deliveries, newest first, whose record is open (neither Delivered nor
+// Expired) and whose failed attempts the listing did not return. A refused request adds no attempt
+// to GitHub's log, and a failed attempt leaves the window long before 72 hours have passed, so
+// once a delivery's failed attempts are older than the window, its record is all that brings it
+// back: to be asked again when it is due, expired, or closed when the listing shows GitHub
+// delivered it. A record that names no delivery is a claim undone before its request was sent;
+// no request was made, and the listing still brings that delivery back.
+func (s *Sweeper) openUnlisted(listed map[string][]githubapp.Delivery) ([]githubapp.Delivery, error) {
 	watcher, err := s.state.Watch(recordPrefix+"*", nats.IgnoreDeletes())
 	if err != nil {
 		return nil, fmt.Errorf("list the redelivery records: %w", err)
 	}
 	defer watcher.Stop()
-	var refused []githubapp.Delivery
+	var open []githubapp.Delivery
 	for entry := range watcher.Updates() {
 		if entry == nil {
 			break
@@ -439,21 +448,22 @@ func (s *Sweeper) refusedUnlisted(listed map[string][]githubapp.Delivery) ([]git
 		if err := json.Unmarshal(entry.Value(), &current); err != nil {
 			return nil, fmt.Errorf("decode the redelivery record of %s: %w", guid, err)
 		}
-		if current.Refusals == 0 || current.Terminal || current.Exhausted || current.Delivered {
+		if current.Delivered || current.Expired || current.Delivery.GUID == "" {
 			continue
 		}
 		if current.Delivery.GUID != guid {
-			return nil, fmt.Errorf("the redelivery record of %s counts %d refused requests and names delivery %q", guid, current.Refusals, current.Delivery.GUID)
+			return nil, fmt.Errorf("the redelivery record of %s names delivery %q", guid, current.Delivery.GUID)
 		}
-		refused = append(refused, current.Delivery)
+		open = append(open, current.Delivery)
 	}
-	slices.SortFunc(refused, func(a, b githubapp.Delivery) int { return b.DeliveredAt.Compare(a.DeliveredAt) })
-	return refused, nil
+	slices.SortFunc(open, func(a, b githubapp.Delivery) int { return b.DeliveredAt.Compare(a.DeliveredAt) })
+	return open, nil
 }
 
 // decide settles one delivery from its failed attempts (newest first), whether GitHub recorded an
-// OK attempt for it, and its record. requested reports that a redelivery request was made,
-// accepted or not.
+// OK attempt for it, and its record, in this order: closed by an earlier sweep, delivered, expired
+// 72 hours after its first failed attempt, waiting for its next request, or asked for. requested
+// reports that a redelivery request was made, accepted or not.
 func (s *Sweeper) decide(ctx context.Context, guid string, attempts []githubapp.Delivery, delivered bool, now time.Time, dryRun bool) (Decision, bool, error) {
 	newest := attempts[0]
 	decision := Decision{
@@ -470,10 +480,12 @@ func (s *Sweeper) decide(ctx context.Context, guid string, attempts []githubapp.
 		return decision, false, err
 	}
 	decision.Attempts = current.Attempts
-	if current.Terminal || current.Exhausted || current.Delivered {
+	if current.Delivered || current.Expired {
 		decision.Outcome = Closed
 		return decision, false, nil
 	}
+	requests := current.Attempts + current.Refusals
+	first := firstDeliveredAt(current, attempts)
 	if delivered {
 		// GitHub's own test, whatever the failures and whatever a request's answer said: an
 		// accepted request whose 202 was lost left a refusal here.
@@ -481,44 +493,23 @@ func (s *Sweeper) decide(ctx context.Context, guid string, attempts []githubapp.
 		if revision != 0 && !dryRun {
 			next := current
 			next.Delivered = true
-			s.writeRecord(guid, next, revision)
+			next.FirstDeliveredAt = first
+			if s.writeRecord(guid, next, revision) && requests > 0 {
+				s.Logger.Info("webhook delivery recovered", append(s.attrs(decision), "requests", requests)...)
+			}
 		}
 		return decision, false, nil
 	}
-
-	if newest.StatusCode >= 400 && newest.StatusCode < 500 {
-		decision.Outcome = Terminal
-		if dryRun {
-			return decision, false, nil
-		}
-		next := current
-		next.Terminal = true
-		if s.writeRecord(guid, next, revision) {
-			s.Logger.Error("webhook delivery refused terminally", s.attrs(decision)...)
+	if !now.Before(first.Add(retention)) {
+		decision.Outcome = Expired
+		if !dryRun {
+			next := current
+			next.FirstDeliveredAt = first
+			s.expire(guid, next, revision, decision, "GitHub keeps a delivery 72 hours")
 		}
 		return decision, false, nil
 	}
-
-	unanswered := slices.ContainsFunc(attempts, func(attempt githubapp.Delivery) bool {
-		return !slices.Contains(current.Answered, attempt.ID)
-	})
-	if revision != 0 && !unanswered && current.Refusals == 0 {
-		decision.Outcome = Pending
-		return decision, false, nil
-	}
-	if current.Attempts >= MaxAttempts || current.Refusals >= MaxAttempts {
-		decision.Outcome = Exhausted
-		if dryRun {
-			return decision, false, nil
-		}
-		next := current
-		next.Exhausted = true
-		if s.writeRecord(guid, next, revision) {
-			s.Logger.Error("webhook redelivery exhausted", append(s.attrs(decision), "refusals", current.Refusals)...)
-		}
-		return decision, false, nil
-	}
-	if revision != 0 && now.Before(current.LastAttemptAt.Add(backoff(current.Attempts+current.Refusals))) {
+	if now.Before(current.NextAttemptAt) {
 		decision.Outcome = Waiting
 		return decision, false, nil
 	}
@@ -529,14 +520,10 @@ func (s *Sweeper) decide(ctx context.Context, guid string, attempts []githubapp.
 
 	claim := current
 	claim.Attempts++
-	claim.Refusals = 0
 	claim.LastAttemptAt = now
+	claim.NextAttemptAt = now.Add(backoff(requests + 1))
+	claim.FirstDeliveredAt = first
 	claim.Delivery = newest
-	for _, attempt := range attempts {
-		if !slices.Contains(claim.Answered, attempt.ID) {
-			claim.Answered = append(claim.Answered, attempt.ID)
-		}
-	}
 	claimRevision, claimed := s.claimRecord(guid, claim, revision)
 	if !claimed {
 		decision.Outcome = ClaimedElsewhere
@@ -560,8 +547,13 @@ func (s *Sweeper) decide(ctx context.Context, guid string, attempts []githubapp.
 		refused := claim
 		refused.Attempts = current.Attempts
 		refused.Refusals = current.Refusals + 1
+		if errors.Is(err, githubapp.ErrNoDelivery) {
+			decision.Outcome = Expired
+			s.expire(guid, refused, claimRevision, decision, "GitHub no longer has the delivery")
+			return decision, true, nil
+		}
 		if !s.writeRecord(guid, refused, claimRevision) {
-			s.Logger.Error("webhook redelivery refusal not recorded; the delivery reads as pending", s.attrs(decision)...)
+			s.Logger.Error("webhook redelivery refusal not recorded; the delivery reads as redelivered", s.attrs(decision)...)
 		}
 		decision.Outcome = RequestRefused
 		s.Logger.Warn("webhook redelivery request refused", append(s.attrs(decision), "error", err.Error())...)
@@ -573,11 +565,40 @@ func (s *Sweeper) decide(ctx context.Context, guid string, attempts []githubapp.
 	return decision, true, nil
 }
 
+// expire closes a delivery the sweep stops asking for, for reason, and logs it: only the write that
+// closes the record logs, so a delivery is logged expired once.
+func (s *Sweeper) expire(guid string, next record, revision uint64, decision Decision, reason string) {
+	next.Expired = true
+	next.ExpiredReason = reason
+	if s.writeRecord(guid, next, revision) {
+		s.Logger.Error("webhook delivery expired undelivered", append(s.attrs(decision),
+			"requests", next.Attempts+next.Refusals,
+			"first_delivered_at", next.FirstDeliveredAt.Format(time.RFC3339),
+			"reason", reason)...)
+	}
+}
+
+// firstDeliveredAt is the oldest failed attempt the sweep has seen for a delivery: the record's
+// and the attempts listed now, whichever is older. A record written before it kept one takes the
+// attempt its last request named.
+func firstDeliveredAt(current record, attempts []githubapp.Delivery) time.Time {
+	first := current.FirstDeliveredAt
+	if first.IsZero() {
+		first = current.Delivery.DeliveredAt
+	}
+	for _, attempt := range attempts {
+		if first.IsZero() || attempt.DeliveredAt.Before(first) {
+			first = attempt.DeliveredAt
+		}
+	}
+	return first
+}
+
 // undoClaim puts a delivery's record back as it was before this sweep claimed it, when the
 // request was never taken: nothing counts against the delivery.
 func (s *Sweeper) undoClaim(guid string, before record, claimRevision uint64, decision Decision) {
 	if !s.writeRecord(guid, before, claimRevision) {
-		s.Logger.Error("webhook redelivery claim not undone after a rate limit; the delivery reads as pending", s.attrs(decision)...)
+		s.Logger.Error("webhook redelivery claim not undone after a rate limit; the delivery reads as redelivered", s.attrs(decision)...)
 	}
 }
 
@@ -614,7 +635,8 @@ func (s *Sweeper) attrs(decision Decision) []any {
 	}
 }
 
-// backoff is the pause before the next request after tries requests: 2, 4, 8, then 16 minutes.
+// backoff is the pause before the next request after tries requests: 2, 4, 8, 16, 32, then 60
+// minutes.
 func backoff(tries int) time.Duration {
 	wait := firstBackoff
 	for i := 1; i < tries && wait < maxBackoff; i++ {

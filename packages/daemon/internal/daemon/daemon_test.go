@@ -1471,15 +1471,25 @@ func (r *workflowTokenRecorder) InstalledOn(_ context.Context, role appauth.AppR
 }
 
 // servedMapping answers Dispatch's repository mapping, acme/widgets the default of project, and
-// reports whether r asked for it.
+// its webhook App check, Dispatch's GitHub App installed on every repository, and reports whether
+// r asked for either.
 func servedMapping(t *testing.T, w http.ResponseWriter, r *http.Request, project string) bool {
 	t.Helper()
-	if r.Method != http.MethodGet || r.URL.Path != "/api/v1/settings/repo-projects" {
+	if r.Method != http.MethodGet {
+		return false
+	}
+	var body any
+	switch {
+	case r.URL.Path == "/api/v1/settings/repo-projects":
+		body = []map[string]any{{"repo": "acme/widgets", "project": project, "default": true}}
+	case strings.HasPrefix(r.URL.Path, "/api/v1/github/app-installation/"):
+		body = map[string]bool{"installed": true}
+	default:
 		return false
 	}
 	w.Header().Set("Content-Type", "application/json")
-	if err := json.NewEncoder(w).Encode([]map[string]any{{"repo": "acme/widgets", "project": project, "default": true}}); err != nil {
-		t.Errorf("write the repository mapping: %v", err)
+	if err := json.NewEncoder(w).Encode(body); err != nil {
+		t.Errorf("write %s: %v", r.URL.Path, err)
 	}
 	return true
 }

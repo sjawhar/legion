@@ -1318,9 +1318,9 @@ func TestWritesBesideALiveRepeatedBlockIDAreTaken(t *testing.T) {
 			_, err = joinedReplaceText(service, artifactID, current+"\nAn added line.\n", alice)
 			return err
 		}, want: func(before string) string {
-			// Minted in preorder: the original's paragraph takes minted-1, the copy minted-2.
+			// The original's paragraph, unchanged, keeps its id, so the copy takes the first id minted.
 			copied := strings.LastIndex(before, "{#note ")
-			return before[:copied] + "{#minted-2 " + before[copied+len("{#note "):] + "\nAn added line.\n"
+			return before[:copied] + "{#minted-1 " + before[copied+len("{#note "):] + "\nAn added line.\n"
 		}},
 	} {
 		t.Run(test.name, func(t *testing.T) {

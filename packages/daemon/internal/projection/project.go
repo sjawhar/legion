@@ -213,11 +213,11 @@ func Project(ctx context.Context, tx pgx.Tx, s record.Store, project string, cla
 	for i, issue := range waiting {
 		projected.Admission.Waiting[i] = issue.Key
 	}
-	// What Legion is waiting for, judged from the project's whole mirror of what Dispatch says
-	// each issue waits on, read in this transaction's snapshot like every other fact here: one
-	// query (blockers.Load), then the deciders' own judgement (blockers.Blocked), so the state
-	// names exactly the roots admission skips and the children the workflow holds.
-	rows, err := blockers.Load(ctx, tx, s, project)
+	// What Legion is waiting for, judged from the mirror of what Dispatch says the issues it judges
+	// wait on, read in this transaction's snapshot like every other fact here: one query
+	// (blockers.Load of blockers.Judged), then the deciders' own judgement (blockers.Blocked), so the
+	// state names exactly the roots admission skips and the children the workflow holds.
+	rows, err := blockers.Load(ctx, tx, s, project, blockers.Judged(issues, waiting))
 	if err != nil {
 		return api.State{}, err
 	}

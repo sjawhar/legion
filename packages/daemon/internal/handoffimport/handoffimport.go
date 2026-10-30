@@ -53,11 +53,11 @@ var phaseWords = func() []string {
 const removalAttempts = 3
 
 // recordsSchema is the store schema version of the daemon release that reads handoffs from
-// Dispatch alone: migration 0062_handoff_records, which that release added. A daemon whose state
+// Dispatch alone: migration 0065_handoff_records, which that release added. A daemon whose state
 // names a daemon.schemaVersion at or past it is that release's, and carries no push; below it, it
 // is the release before, whose carry reads a push changing only `.legion/<KEY>/` (classify's
 // HandoffPath of that release) as handoffs alone, and every other push as code.
-const recordsSchema = 62
+const recordsSchema = 65
 
 // Tokens mints the implement App's installation token for a repository owner (appauth.Manager).
 type Tokens interface {

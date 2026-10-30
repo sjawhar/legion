@@ -69,7 +69,7 @@ const Failed = "failure"
 const Cancelled = "cancelled"
 
 // HeadChecks is each check the pull request's base branch requires (Required), judged by the
-// settlement of its head (settled), then each workflow it requires (Workflows), judged by its
+// settlement of its head (Settled), then each workflow it requires (Workflows), judged by its
 // latest run on the head, as the daemon last read it. A check the settlement names as
 // failed failed, one it reports otherwise passed, one it names as cancelled is Pending, and one it
 // does not report at all is Missing: a settlement can come before a required check is decided,
@@ -92,7 +92,7 @@ func HeadChecks(pr record.PullRequest) (checks []Standing, ok bool) {
 // headStandings is HeadChecks in its two halves: each required check's standing, judged by the
 // settlement, and each required workflow's, judged by its latest run.
 func headStandings(pr record.PullRequest) (checks, workflows []Standing, ok bool) {
-	if !settled(pr) || pr.Required == nil {
+	if !Settled(pr) || pr.Required == nil {
 		return nil, nil, false
 	}
 	results := make(map[string]string, len(pr.CheckRuns)+len(pr.Failing)+len(pr.Cancelled))
@@ -157,7 +157,7 @@ func HeadVerdict(pr record.PullRequest) string {
 // it, so a push on top of it leaves the counted attempt as a push onto a green verdict does
 // (AdvancePullRequestHead).
 func nothingRequired(pr record.PullRequest) bool {
-	return settled(pr) && pr.Required != nil && len(pr.Required) == 0 && len(pr.Workflows) == 0
+	return Settled(pr) && pr.Required != nil && len(pr.Required) == 0 && len(pr.Workflows) == 0
 }
 
 // RedOnlyByWorkflows says whether CI is red at the pull request's head only because a workflow its

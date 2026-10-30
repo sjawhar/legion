@@ -13,6 +13,7 @@ import (
 
 	"github.com/sjawhar/legion/daemon/internal/claim"
 	"github.com/sjawhar/legion/daemon/internal/dispatch"
+	"github.com/sjawhar/legion/daemon/internal/githubrest"
 	"github.com/sjawhar/legion/daemon/internal/phase"
 	"github.com/sjawhar/legion/daemon/internal/record"
 )
@@ -385,6 +386,27 @@ type PullRequestOpened struct {
 
 func (PullRequestOpened) isFact() {}
 
+// OpenedRead is the PullRequestOpened a read of GitHub that found pull open on branch of repo
+// stands for, as its webhook would have carried it - a reopen when recorded is the same pull
+// request - and the event id, under source "github", it is applied under: the project, the
+// repository and number, what the read observed, the head and GitHub's updated_at, and what the
+// workflow decides an opened by beside it, the issue's generation and its pull request record as
+// the read found it (nil for none: its number, state and clock). The id holds no read time and no
+// boot, so the same observation applied twice against the same record is one fact (ApplyFact
+// answers the second Duplicate, and Applied finds it before), whichever reader applies it - the
+// required-checks pass or the implementer's completion - while a pull request that changed since,
+// or a record that changed since (a new generation removes a closed one the opened was declined
+// against), makes a new one.
+func OpenedRead(project, repo, branch string, pull githubrest.PullRequest, generation uint64, recorded *record.PullRequest) (PullRequestOpened, string) {
+	fact := PullRequestOpened{Repo: repo, Number: pull.Number, Branch: branch, HeadSHA: pull.Head.SHA, Body: pull.Body,
+		URL: pull.HTMLURL, UpdatedAt: pull.UpdatedAt, Reopened: recorded != nil && recorded.Number == pull.Number}
+	against := "none"
+	if recorded != nil {
+		against = fmt.Sprintf("%d/%s/%s", recorded.Number, recorded.State, recorded.HeadUpdatedAt.UTC().Format(time.RFC3339Nano))
+	}
+	return fact, fmt.Sprintf("opened-read:%s:%s#%d:%s:%s:%d:%s", project, repo, pull.Number, pull.Head.SHA, pull.UpdatedAt.UTC().Format(time.RFC3339Nano), generation, against)
+}
+
 // PullRequestSynchronized records a new observed head, including the fields the shipped reducer
 // reads to fence stale observations and find its issue. Before is the head GitHub's synchronize
 // says the branch moved from, the move the head arrives by (classify.AdvancePullRequestHead):
@@ -488,10 +510,13 @@ func (r PullRequestReview) Order() record.ReviewOrder {
 // CheckRun is one latest-run identity in a checks settlement.
 type CheckRun = record.AttemptRun
 
-// PullRequestChecks is Envoy's settled checks observation: the latest run of each check, and the
-// checks the settlement names as failed (any failing conclusion) and as cancelled, kept apart since
-// a cancellation is a property of the run - a later push can cancel it - where a failure is of the
-// code. What they come to is the base branch's required set's to say (classify.HeadVerdict).
+// PullRequestChecks is a settled checks observation: the latest run of each check, and the checks
+// the settlement names as failed (any failing conclusion) and as cancelled, kept apart since a
+// cancellation is a property of the run - a later push can cancel it - where a failure is of the
+// code. What they come to is the base branch's required set's to say (classify.HeadVerdict). Envoy's
+// listener publishes one at generation 0 or above; the daemon's two-minute pass applies one it
+// built from GitHub's check runs on a head no settlement stood for at classify.PassGeneration (the
+// daemon's readSettlement), never decoded from an event.
 type PullRequestChecks struct {
 	Repo       string
 	Number     int
@@ -557,6 +582,21 @@ type PullRequestClosed struct {
 
 func (PullRequestClosed) isFact() {}
 
+// PullRequestMissing is the required-checks pass finding, in its listing of Repo's open pull
+// requests, none on Branch, the branch of Issue, whose implementer recorded its handoff at
+// HandoffCommit while Issue is in implementing with no open or merged pull request recorded: never
+// decoded from an event. The issue waits in implementing for a pull request nobody is told is
+// missing, so the workflow tells its architect (workflow's pullRequestMissing), once per handoff
+// commit: the pass applies it under an event id naming the issue and the commit.
+type PullRequestMissing struct {
+	Issue         string
+	Repo          string
+	Branch        string
+	HandoffCommit string
+}
+
+func (PullRequestMissing) isFact() {}
+
 // MergeFailed is the merge queue taking issue's pull request Number out at Head, the head its
 // accepted READY named, because the merge failed (ghautomerge.MergeFailed), as the issue's
 // ready_merge outbox row read it from GitHub: never decoded from an event. Reason names the removal
@@ -586,13 +626,14 @@ type Push struct {
 
 func (Push) isFact() {}
 
-// WorkflowRunCompleted is Envoy's `workflow_run` `completed` envelope: attempt Attempt of GitHub
-// Actions run RunID of the workflow file Path (GitHub's `workflow_run.path`, the run's top-level
-// `.github/workflows/` file) in Repo finished on HeadBranch, whatever its conclusion.
-// Envoy publishes none for a run of a pull request. The workflow compares it with the project's
-// deploy workflows (config.Project.Deploys) and queues a GitHub read of the run for each open
-// production check it may wake; the envelope is anyone's who holds an Envoy bearer, so nothing in
-// it is trusted beyond choosing what to read.
+// WorkflowRunCompleted is Envoy's `workflow_run` `completed` envelope of a run of one of the
+// project's deploy workflows (ConsumerSpec.Deploys; the decoder makes no fact of any other run):
+// attempt Attempt of GitHub Actions run RunID of the workflow file Path (GitHub's
+// `workflow_run.path`, the run's top-level `.github/workflows/` file) in Repo finished on
+// HeadBranch, whatever its conclusion. Envoy publishes none for a run of a pull request. The
+// workflow takes the deploy's step from the project's deploy workflows (config.Project.Deploys) and
+// queues a GitHub read of the run for each open production check it may wake; the envelope is
+// anyone's who holds an Envoy bearer, so nothing in it is trusted beyond choosing what to read.
 type WorkflowRunCompleted struct {
 	Repo       string
 	Path       string
@@ -973,7 +1014,10 @@ func ChildNotAdoptable(key, tree, reason string) *Refusal {
 // API, or supervision. It records the event before running handlers, skips duplicates before any
 // handler runs, remembers the first refusal while completing every handler, and rolls all writes
 // back when any handler returns an error. An Observed issue fact is settled first, under the lock
-// (settleObserved): the handlers see its view only while the workflow records no such issue.
+// (settleObserved): the handlers see its view only while the workflow records no such issue. A
+// fact a durable consumer delivered (withStreamPosition) records that consumer's stream position
+// in the same transaction (recordStreamPosition), so a consumer found missing is created at the
+// last message it applied (openConsumer).
 //
 // Facts apply one at a time. Handlers read and rewrite whole records, and admission's slots span
 // every tree, so two facts in flight together would each act on what the other is about to change;
@@ -1003,6 +1047,11 @@ func ApplyFact(ctx context.Context, pool *pgxpool.Pool, source, eventID string, 
 
 	fresh, err := record.NewStore().MarkProcessed(ctx, tx, source, eventID)
 	if err != nil {
+		return Result{}, err
+	}
+	// A duplicate records its position too: it is acknowledged as applied, so its consumer is past
+	// it either way.
+	if err := recordStreamPosition(ctx, tx); err != nil {
 		return Result{}, err
 	}
 	if !fresh {
