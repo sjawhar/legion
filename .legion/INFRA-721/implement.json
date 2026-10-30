@@ -2,82 +2,71 @@
   "schemaVersion": 1,
   "phase": "implement",
   "issue": "INFRA-721",
-  "completed": "2026-10-30T06:05:00Z",
-  "round": 2,
+  "completed": "2026-10-30T09:10:00Z",
+  "round": 3,
   "proof": [
     {
-      "criterion": "Review finding 1 (High) - a refusal must weigh what the markdown writes, not the marks the nodes hold, so the editor's invisible mark on every typed character is nothing to lose",
-      "surface": "the real dispatch CLI against a real Dispatch server in this pod (packages/dispatch/e2e/run-server.sh on Postgres 17 with pgvector, port 8779, built from the head below), issue HEAD-1",
-      "command": "dispatch comment --issue HEAD-1 --artifact spec.md --quote 'Matches the platform the team already runs' --body '...' (which anchors a comment inside the REST option's line and leaves an invisible mark on it, the class of mark the browser editor writes on every character a person types); then dispatch edit-ask --ask b3231c52-5ea9-42f7-9a58-82a253766b08 --option 'gRPC: Adds streaming, see the note'; then dispatch doc-read --issue HEAD-1 --artifact spec.md",
-      "observed": "the drop was accepted ('Ask edited: Which transport should we expose?') and the document holds the gRPC item whole with the REST item gone. The Go fixtures build the editor's own mark directly: TestAskOptionsEditDropsAnItemTheEditorMarked and TestEditAskRepairsAnEmptyQuestionOfTypedWhitespace, with markAsTyped putting it on every text node as the browser leaves it.",
-      "headSha": "c5591bec163b17aca9de11b30bb4079c45988c6a",
-      "negativeControl": "the same two commands against a server built from the reviewed head 57c0bbe3 (port 8780, project PREV, issue PREV-1): refused 'options: the edit drops the option \"REST\", whose list item holds more than its plain line ... its item reads \"- REST: Matches the platform the team already runs\"' - a refusal whose own quote reads plain, which is the finding."
+      "criterion": "Round 2 finding 1 (Medium) - whitespace a person typed in an option's line is not markup, so a drop or a rewrite of that option applies",
+      "surface": "the real dispatch CLI against a real Dispatch server in this pod, built from the head below (packages/dispatch/e2e/run-server.sh on Postgres 17 with pgvector, port 8781, database dispatch_head3), issue HEAD-1",
+      "command": "dispatch issue --project HEAD --spec-file - with an ask whose options read '- REST: Matches the existing platform&#32;' (a trailing space) and '- gRPC : Adds streaming' (a space before the separator); then dispatch edit-ask --ask 227b57e3-7faf-4271-89c4-0dad1c906b17 --option 'gRPC: Adds streaming'; then the same ask edit with --option 'gRPC: Adds streaming and server push'; dispatch doc-read --issue HEAD-1 --artifact spec.md after each",
+      "observed": "both edits were accepted. The first dropped REST, whose line held the trailing space, and kept the gRPC item whole with the space before its separator as the person typed it; the second rewrote the gRPC line to 'gRPC: Adds streaming and server push'. The ask row reads the same words either way, since the parse trims exactly this whitespace.",
+      "headSha": "1392384e16c4fa163d6d4c692c5e1f08e6a2733f",
+      "negativeControl": "the same two commands against a server built from the reviewed head 95362581 (port 8782, project REV2, issue REV2-1): the drop is refused 'options: the edit drops the option \"REST\", whose list item holds more than its plain line ... its item reads \"- REST: Matches the existing platform&#32;\"' and the rewrite 'options: the edit rewrites the line of the option \"gRPC\", which holds more than its plain text ... its line reads \"gRPC : Adds streaming\"' - both blaming markup the line does not hold, which is the finding."
     },
     {
-      "criterion": "Review finding 3 (Medium) - rewriting a changed option's line must not delete the link, bold, code or image in it unseen",
-      "surface": "the same server and issue",
-      "command": "dispatch edit-ask --ask b3231c52-5ea9-42f7-9a58-82a253766b08 --option 'REST: Matches the platform the team already runs' --option 'gRPC: Adds streaming and server push'",
-      "observed": "refused: 'options: the edit rewrites the line of the option \"gRPC\", which holds more than its plain text, and the ask-edit route does not delete the markup a person wrote in a line; its line reads \"gRPC: **Adds** streaming, see [the note](https://example.com/grpc)\"; send that option back unchanged with this edit, or rewrite the line with a document edit (dispatch doc-edit, replacing quoted text with replace)', and the document was unchanged.",
-      "headSha": "c5591bec163b17aca9de11b30bb4079c45988c6a",
-      "negativeControl": "the same edit sending the gRPC option back unchanged is accepted and the item is read back node for node (step 1 of the pull request body's E2E line); and an option whose line is plain is rewritten in place, which TestAskOptionsEditRewritesAnOptionAndKeepsTheRest pins."
-    },
-    {
-      "criterion": "Review finding 4 (Medium) - with two items of one label, each option must keep the words written under its own item",
-      "surface": "the Go service with a real Postgres, package internal/dispatch/docs",
-      "command": "DISPATCH_TEST_DATABASE_URL=postgres://postgres@127.0.0.1:5433/dispatch_test?sslmode=disable go test ./internal/dispatch/docs/ -count=1 -timeout 25m -run 'TestAskOptionsEditPairsOnTheWholeOptionBeforeTheLabel'",
-      "observed": "PASS. pairedAskOptions pairs in two passes: each sent option first takes the item that says exactly what it says, then an option still unpaired takes an item holding its label. The test's edit keeps the sub-list under the item that holds it and rewrites the other item's line.",
-      "headSha": "c5591bec163b17aca9de11b30bb4079c45988c6a",
-      "negativeControl": "under the old first-unused-label rule the same test fails: the first item is given to the first option sent, so the sub-list moves under the line the edit rewrote and the item that says what the edit left alone is dropped."
-    },
-    {
-      "criterion": "Review finding 2 (Medium) - the ask row must not take the lenient reading of a block holding more than one bullet list",
+      "criterion": "Round 2 finding 2 (Medium) - the ask row keeps its own options for a repair of a two-list decision whichever fields the request names, the options it sends included",
       "surface": "the Go service with a real Postgres, driving PATCH /api/v1/asks/{id} as the route's own tests do, package internal/dispatch/api",
-      "command": "DISPATCH_TEST_DATABASE_URL=... go test ./internal/dispatch/api/ -count=1 -timeout 30m -run 'TestEditOfAnAskWhoseBlockHoldsASecondListKeepsTheRowsOptions'",
-      "observed": "PASS. A browser peer empties the block's question and appends a second list; the route's edit carrying a question is accepted, the question and urgency are written into the row, both lists are still in the document, and the row keeps REST and gRPC rather than the three options of both lists joined, after a settlement too.",
-      "headSha": "c5591bec163b17aca9de11b30bb4079c45988c6a",
-      "negativeControl": "the assertion fails if docs.AskBlockText.SeveralOptionLists is ignored: slices.Equal(repaired.Options, indexed) then reads the joined options. The state cannot be made from the CLI at all - an upload whose ask breaks the content rule is refused 400 INVALID_ASK_BLOCK, which is why this criterion is proven on the route rather than the command."
+      "command": "DISPATCH_TEST_DATABASE_URL=postgres://postgres@127.0.0.1:5433/dispatch_test?sslmode=disable go test ./internal/dispatch/api/ -count=1 -timeout 30m -run 'TestEditOfAnAskWhoseBlockHoldsASecondListKeepsTheRowsOptions'",
+      "observed": "PASS. A browser peer empties the block's question and appends a second list; one PATCH carrying the question alone and one carrying the question beside the joined options are both accepted, and after each the row still holds the two options it held, with the question and urgency written. editAsk sets ask.Options back to previous.Options when docs.AskBlockText.SeveralOptionLists is set, where before it kept the request's own options, which for such a block can only be the joined reading.",
+      "headSha": "1392384e16c4fa163d6d4c692c5e1f08e6a2733f",
+      "negativeControl": "the new PATCH row fails without the fix: the reviewer reproduced it as 200 with the three joined options, and the test asserts the two the row held. The state cannot be made from the CLI at all - an upload whose ask breaks the content rule is refused 400 INVALID_ASK_BLOCK and a document edit that would leave it so is refused too - so this criterion is proven on the route rather than the command."
     },
     {
-      "criterion": "The route still keeps what a person wrote under an option, and an emptied question still has its repair (round 1's criteria, re-driven at this head)",
-      "surface": "the real dispatch CLI against the server at port 8779, issues HEAD-1 and HEAD-2",
-      "command": "dispatch edit-ask --ask b3231c52-... --option 'REST: Matches the platform the team already runs' --option 'gRPC: Adds streaming, see the note'; dispatch doc-read --issue HEAD-1 --artifact spec.md; then on HEAD-2, dispatch artifact --name spec.md --content-file - (a version whose question paragraph holds only &nbsp;), dispatch edit-ask --urgency high, and the same edit with --question",
-      "observed": "the gRPC item is read back with its bold, its link's address, its second paragraph and its sub-list unchanged; the urgency-only edit of the emptied question is refused 'block: ask block \"d7d11295-...\" has an empty question; send this ask edit again with a question, which writes it into the block'; the same edit carrying a question is accepted and the document reads urgency=\"high\" with the new question and both options.",
-      "headSha": "c5591bec163b17aca9de11b30bb4079c45988c6a",
-      "negativeControl": "round 1's control against a server built from 2b427f93, where the same options edit flattens the gRPC item to one line and the question-carrying edit is refused with a sentence naming no step."
+      "criterion": "Round 2 minor - the items an edit sends are charged to the write's own element budget, while the content the document already holds is not",
+      "surface": "the Go service with a real Postgres, package internal/dispatch/docs",
+      "command": "DISPATCH_TEST_DATABASE_URL=... go test ./internal/dispatch/docs/ -count=1 -timeout 25m -run 'TestAskOptionsEditChargesTheItemsItSendsToTheWritesBudget'",
+      "observed": "PASS. On one write budget already half spent by the question, an edit sending 4,731 new options is refused pmdoc.ErrTooManyElements, and an edit of one option's line on a block whose other option holds a sub-list of 4,731 items is accepted with that sub-list untouched. editedOptionList parses the caller's own items (a new item whole, a rewrite's new line alone) on the write's budget and the merged list on a budget of its own.",
+      "headSha": "1392384e16c4fa163d6d4c692c5e1f08e6a2733f",
+      "negativeControl": "the worker ran the refusing row with the new parse disabled and the same call returned nil, which is the behaviour the finding named; with the charge restored it is refused."
+    },
+    {
+      "criterion": "The route's earlier criteria still hold at this head: an option the edit does not change is kept node for node, a drop or a rewrite that would delete a person's markup is refused, and an emptied question is repaired by an ask edit carrying one",
+      "surface": "the real dispatch CLI against the server at port 8781",
+      "command": "the sequence recorded in the pull request body's E2E line: the preserving options edit and its doc-read, the rewrite refusal, the drop refusal, the drop of an option a comment anchors in, the empty-question refusal and the repair",
+      "observed": "each behaved as round 2 recorded it, on a server built from this head.",
+      "headSha": "1392384e16c4fa163d6d4c692c5e1f08e6a2733f",
+      "negativeControl": "round 2's control against a build of 57c0bbe3, where the drop of an option carrying only an invisible mark is refused with a quote that reads plain."
     },
     {
       "criterion": "The package suites, the corpus and the static checks pass at this head",
       "surface": "the Go service with a real Postgres in this pod",
       "command": "cd packages/envoy && DISPATCH_TEST_DATABASE_URL=... go test ./internal/dispatch/docs/ -count=1 -timeout 52m; DISPATCH_TEST_DATABASE_URL=... go test ./internal/dispatch/api/ -count=1 -timeout 55m; go vet ./...; gofmt -l internal/dispatch; bunx biome check packages/envoy packages/envoy-client; bash .github/scripts/check-private-names.sh",
-      "observed": "docs: ok, 1332.929s, the two exhaustive corpus tests among it. api: one failure, TestIssueRanksStayOrderedPastLowercaseDigitsAndProductionShapedMoves, which refuses this pod's Postgres because its default collation is byte order and says so itself; every other test passed. go vet, gofmt and biome: no output. check-private-names: OK.",
-      "headSha": "c5591bec163b17aca9de11b30bb4079c45988c6a",
-      "negativeControl": "the docs package was run before and after the file split, which is a move: the same suite passes at 1340s before and 1332s after, so nothing of the move changed behaviour."
+      "observed": "docs: ok, 1330.053s, the two exhaustive corpus tests among it. api: one failure, TestIssueRanksStayOrderedPastLowercaseDigitsAndProductionShapedMoves, which refuses this pod's Postgres because its default collation is byte order and says so itself; every other test passed. go vet, gofmt and biome: no output. check-private-names: OK.",
+      "headSha": "1392384e16c4fa163d6d4c692c5e1f08e6a2733f",
+      "negativeControl": "the docs package was run at each step of the round, and each new test was seen failing before its fix."
     }
   ],
   "filesChanged": [
-    "packages/envoy/internal/dispatch/docs/ask_block_text.go - the route, the empty-question refusals and the children builder; 1,290 lines down to 737",
-    "packages/envoy/internal/dispatch/docs/ask_option_merge.go - new: the option merge, the pairing, the two refusals of what an edit would delete, and the rendering comparison they weigh it with",
-    "packages/envoy/internal/dispatch/docs/ask_repair_plan.go - new: the repair planner and the step a refusal names",
-    "packages/envoy/internal/dispatch/api/asks.go - editAsk keeps the row's options where the block holds more than one list",
-    "packages/envoy/internal/dispatch/docs/service_test.go - the marked-option, typed-whitespace, rewritten-line and repeated-label tests, and one helper for the empty-question follow",
-    "packages/envoy/internal/dispatch/api/ask_block_edit_settlement_test.go - the row of a block holding a second list",
-    "packages/envoy/AGENTS.md and packages/envoy/.changes/unreleased/pr2525-Fixed-20261029-224000.yaml - the rewrite refusal, what the refusals weigh, settlement's restore, and the row that keeps its options"
+    "packages/envoy/internal/dispatch/docs/ask_option_merge.go - the drop and the rewrite are weighed against a node's own text, the refusal is built from the merge's own result rather than pairing a second time, the caller's items are charged to the write's budget, and renderBlock replaces the four copies of one render",
+    "packages/envoy/internal/dispatch/docs/ask_block_text.go - one branch for the two refusals, refuseEmptyQuestionEdit reads the question out of the edit, the upload step names --issue and why a document edit cannot reach this block, renderBlock, and each rationale stated once",
+    "packages/envoy/internal/dispatch/docs/ask_repair_plan.go - names refuseEmptyQuestionEdit for the reason no document edit writes a paragraph into a decision",
+    "packages/envoy/internal/dispatch/api/asks.go - the row keeps its own options for a block holding more than one list, whichever fields the request named",
+    "packages/envoy/internal/dispatch/docs/service_test.go - typed whitespace for the drop and the rewrite, the reachable repeated-label fixture, the budget test, and the reworded upload step",
+    "packages/envoy/internal/dispatch/api/ask_block_edit_settlement_test.go - a PATCH that sends options beside the question"
   ],
   "trickyParts": [
-    "The pod was replaced during this round. The Postgres for the Go tests is rebuilt on the issue volume: data /legion/scratch/tmp/pgdata, binaries /legion/scratch/tmp/pgroot/usr/lib/postgresql/17/bin, LD_LIBRARY_PATH /legion/scratch/tmp/pgroot/usr/lib/x86_64-linux-gnu:/legion/scratch/tmp/pgroot/usr/lib/postgresql/17/lib, port 5433, user postgres, no password, DISPATCH_TEST_DATABASE_URL=postgres://postgres@127.0.0.1:5433/dispatch_test?sslmode=disable. Do not stop it; make a database of your own in it.",
-    "The Dispatch harness is running again: the three fakes (envoy 38341, github 35791, broker 62131) with logs and pidfiles under /legion/scratch/tmp/harness/, the head build on port 8779 (database dispatch_head), a build of the reviewed head 57c0bbe3 on port 8780 (database dispatch_prev, tree /legion/scratch/tmp/prev-tree) and the round's first server on 8777 (database dispatch_harness). The agent token is e2e-token in /legion/scratch/tmp/harness/token, and a Legion pane's own DISPATCH_TOKEN_FILE outranks DISPATCH_TOKEN, so set DISPATCH_TOKEN_FILE and DISPATCH_URL for a call against the harness and restore them after (the pane's are DISPATCH_URL=http://dispatch.dispatch.svc.cluster.local:8766 and DISPATCH_TOKEN_FILE=/var/run/legion/private/g1/DISPATCH_TOKEN).",
-    "An invisible mark cannot be written from the CLI by hand, but an anchored comment leaves one: dispatch comment --quote '<text of an option's line>' marks that line, and the drop of that option is the real-surface proof of finding 1.",
-    "A block holding two bullet lists cannot be made from the CLI either: an upload whose ask breaks the content rule is refused 400 INVALID_ASK_BLOCK, and a document edit that would leave it so is refused too. Only a browser's write to the live room makes it, which is what the api test does.",
+    "The Postgres for the Go tests is on the issue volume: data /legion/scratch/tmp/pgdata, binaries /legion/scratch/tmp/pgroot/usr/lib/postgresql/17/bin, LD_LIBRARY_PATH /legion/scratch/tmp/pgroot/usr/lib/x86_64-linux-gnu:/legion/scratch/tmp/pgroot/usr/lib/postgresql/17/lib, port 5433, user postgres, no password, DISPATCH_TEST_DATABASE_URL=postgres://postgres@127.0.0.1:5433/dispatch_test?sslmode=disable. Do not stop it; make a database of your own in it.",
+    "Dispatch servers for the proof: this head on port 8781 (database dispatch_head3), the round-2 reviewed head 95362581 on 8782 (database dispatch_rev2, tree /legion/scratch/tmp/rev2-tree), and the round-1 reviewed head 57c0bbe3 on 8780. The three fakes are on 38341, 35791 and 62131, with logs and pidfiles under /legion/scratch/tmp/harness/. The agent token is e2e-token in /legion/scratch/tmp/harness/token, and a Legion pane's own DISPATCH_TOKEN_FILE outranks DISPATCH_TOKEN, so set DISPATCH_TOKEN_FILE and DISPATCH_URL for a call against the harness; the pane's own are DISPATCH_URL=http://dispatch.dispatch.svc.cluster.local:8766 and DISPATCH_TOKEN_FILE=/var/run/legion/private/g1/DISPATCH_TOKEN.",
+    "Whitespace a person types reaches a document from the CLI as a character reference: a spec whose option line ends '&#32;' gives the item a trailing space, and 'gRPC : Adds streaming' gives it a space before the separator the parse cuts at. That is how the proof made the state the finding is about.",
     "api's TestIssueRanksStayOrderedPastLowercaseDigitsAndProductionShapedMoves refuses this pod's Postgres, whose default collation is byte order, and says so itself. It is the environment, not a failure."
   ],
   "deviations": [
-    "The edits this round began with were lost when the pod was replaced; the release roll had saved them on legion/INFRA-721-rescue at ec9200a1. Their tree was taken into the working copy, checked against the review's findings and the tests, folded into the two commits cb02413e and b7569f0b under this role's own authorship, and the rescue branch was deleted from origin.",
-    "Round 1's design stands unchanged. The only behaviour this round adds beyond the review's findings is the refusal of a rewrite of an option's line holding markup, which finding 3 asked for: an option whose line is plain is still rewritten in place.",
-    "The pull request body's Look at first and Not proven / risk lines named code this round removed and risks it answers, so both are back at their placeholders for the next review to write; the pull request comment at this head says so."
+    "None of the round's design changed. The drop and the rewrite are now weighed by whether a node writes more than the text in it, which is the rule the empty-question guard already used, so the three checks of this pull request read the same way.",
+    "The refusal of a drop and of a rewrite is built from the merge's own result, so the write and the refusal cannot disagree; the order of the two refusals is unchanged, a rewrite before a drop, and the whole edit is refused on the first of either."
   ],
   "openQuestions": [],
   "discoveredComplexity": [
-    "Weighing a refusal by rendering rather than by marks also answers what a comment's or a suggestion's anchor is: neither is written by the markdown, so neither is a word to lose, and an edit that drops the option they anchor in applies. The anchor dies with the text, as it does for any document edit that removes it.",
-    "The merge's refusals had to move out of the merge: settlement's restore of a decided ask's recorded wording goes through the same merge with no caller to answer a refusal, so the route weighs what an edit would delete before it builds the children (refuseLostOptionWords) and the merge itself always drops."
+    "pmdoc.WriteBudget charges elements only through a parse (ParseFragment), and RefusePlainText weighs plain letters at nothing, so charging the caller's items to the write's budget means parsing them on it: editedOptionList now parses twice, the caller's own items on the write's budget and the merged list on a budget of its own, which is why both parses exist.",
+    "The round-2 reviewed head refuses an edit whose line differs from the trimmed option only by whitespace, and the refusal quotes the whitespace as '&#32;', so the agent reading it cannot tell what it is being refused for. That is why the fix compares a node with what its own text writes rather than with a node built from the parsed option."
   ]
 }
