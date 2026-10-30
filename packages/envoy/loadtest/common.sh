@@ -5,7 +5,9 @@
 # die MESSAGE prints MESSAGE, prefixed with the script's name, and exits 1. note MESSAGE prints
 # MESSAGE with the same prefix and goes on. usage prints the script's header comment, from its
 # second line to its `set -euo` line, and exits 2. abs_file FLAG FILE prints FILE's absolute path
-# and dies, naming FLAG, when FILE is not a file.
+# and dies, naming FLAG, when FILE is not a file. sha256_of FILE prints FILE's sha256, and
+# joined_sha256 FILE... the sha256 of the files' concatenation (stack.sh's builds, replay.sh's
+# parts).
 #
 # resolve_paths sets SRC to LOADTEST_SRC (default: the checkout holding this file) and ROOT to
 # LOADTEST_ROOT (default ${TMPDIR:-/tmp}/dispatch-loadtest, created), both as physical paths, and
@@ -61,6 +63,12 @@ abs_file() {
   [ -f "$2" ] || die "$1 names $2, which is not a file"
   printf '%s/%s\n' "$(cd -- "$(dirname -- "$2")" && pwd -P)" "$(basename -- "$2")"
 }
+
+# sha256_of FILE: FILE's sha256, the hex alone.
+sha256_of() { sha256sum -- "$1" | cut -d' ' -f1; }
+
+# joined_sha256 FILE...: the sha256 of the files' concatenation.
+joined_sha256() { cat -- "$@" | sha256sum | cut -d' ' -f1; }
 
 usage() {
   sed -n '2,/^set -euo/p' "$0" | sed '$d; s/^# \{0,1\}//' >&2
