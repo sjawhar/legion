@@ -4,6 +4,8 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"net/http"
+	"net/http/httptest"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -18,6 +20,7 @@ import (
 	"github.com/sjawhar/envoy/internal/dispatch/model"
 	"github.com/sjawhar/envoy/internal/dispatch/store"
 	"github.com/sjawhar/envoy/internal/dispatch/store/storetest"
+	"github.com/sjawhar/envoy/internal/metrics"
 	"github.com/sjawhar/envoy/internal/roles"
 	"github.com/sjawhar/envoy/internal/session"
 	envoystore "github.com/sjawhar/envoy/internal/store"
@@ -113,6 +116,51 @@ func (r *roleRig) claim(t *testing.T, role, holder string, entry session.Session
 	if err := r.sessions.Put(holder, entry); err != nil {
 		t.Fatalf("register %s: %v", holder, err)
 	}
+}
+
+// claimStale makes holder role's holder, registered and with a heartbeat older than
+// session.ClaimStaleAfter, so the role's resolution holds its forward pending with nothing sent
+// (forwardOf). The entry goes to the bucket directly: the registry stamps every entry it writes
+// with now.
+func (r *roleRig) claimStale(t *testing.T, role, holder string) {
+	t.Helper()
+	if _, err := r.registry.SetRole(holder, "test-machine", role, false); err != nil {
+		t.Fatalf("claim %s for %s: %v", role, holder, err)
+	}
+	stale, err := json.Marshal(session.SessionEntry{SelfSubscribed: true, UpdatedAt: time.Now().Add(-session.ClaimStaleAfter - time.Minute).UnixMilli()})
+	if err != nil {
+		t.Fatalf("encode the stale entry: %v", err)
+	}
+	js, err := r.conn.JetStream()
+	if err != nil {
+		t.Fatalf("open JetStream: %v", err)
+	}
+	kv, err := js.KeyValue(bus.SessionBucket)
+	if err != nil {
+		t.Fatalf("open the session bucket: %v", err)
+	}
+	if _, err := kv.Put(holder, stale); err != nil {
+		t.Fatalf("register the stale holder %s: %v", holder, err)
+	}
+}
+
+// countingDeps is the rig's dependencies with a publish-failure counter on a registry of its own,
+// so a test can read which reason a send that was not reached was counted under.
+func (r *roleRig) countingDeps(t *testing.T) (Deps, *metrics.Registry) {
+	t.Helper()
+	registry := metrics.New()
+	deps := r.deps()
+	deps.PublishFailures = registry.NewCounter("envoy_dispatch_outbox_publish_failures_total",
+		"Destinations of an outbox publish attempt that were not reached")
+	return deps, registry
+}
+
+// failureReasons is what /metrics serves of registry, the counted reasons among it.
+func failureReasons(t *testing.T, registry *metrics.Registry) string {
+	t.Helper()
+	response := httptest.NewRecorder()
+	registry.Handler().ServeHTTP(response, httptest.NewRequest(http.MethodGet, "/metrics", nil))
+	return response.Body.String()
 }
 
 // routedEvent seeds issue key routed to role:role and appends a human message on it.
@@ -399,25 +447,7 @@ func TestARoleRouteWhoseHolderIsGoneReleasesTheClaimAndIsPublished(t *testing.T)
 func TestARoleRouteToAStaleHolderStaysPending(t *testing.T) {
 	rig := newRoleRig(t)
 	const role, holder = "reviewer", "ses_stale"
-	if _, err := rig.registry.SetRole(holder, "test-machine", role, false); err != nil {
-		t.Fatalf("claim the role: %v", err)
-	}
-	// Written to the bucket directly: the registry stamps every entry it writes with now.
-	stale, err := json.Marshal(session.SessionEntry{SelfSubscribed: true, UpdatedAt: time.Now().Add(-session.ClaimStaleAfter - time.Minute).UnixMilli()})
-	if err != nil {
-		t.Fatalf("encode the stale entry: %v", err)
-	}
-	js, err := rig.conn.JetStream()
-	if err != nil {
-		t.Fatalf("open JetStream: %v", err)
-	}
-	kv, err := js.KeyValue(bus.SessionBucket)
-	if err != nil {
-		t.Fatalf("open the session bucket: %v", err)
-	}
-	if _, err := kv.Put(holder, stale); err != nil {
-		t.Fatalf("register the stale holder: %v", err)
-	}
+	rig.claimStale(t, role, holder)
 	rig.silent(t, contracts.RoleTopicPrefix+role)
 	rig.silent(t, contracts.AgentSubject(holder))
 	event := rig.routedEvent(t, "T-1", role, model.Actor{Kind: "user", ID: "alice"})
@@ -525,5 +555,60 @@ func TestOneRefusedSubjectFailsOnlyItsOwnEvent(t *testing.T) {
 			t.Fatalf("event %d of holder %s: published %v, attempt_count %d, publish_error %v; want it published with no attempt",
 				index, holderOf(index), publishedAt(t, rig.database, event.ID) != nil, attempts, failure)
 		}
+	}
+}
+
+// A role forward its holder's resolution held pending is counted under the holder, not as a
+// publish failure: nothing was sent, so NATS neither refused nor dropped it, while `failed` is
+// what tells an operator the bus failed a send. The holder here is registered and has not
+// heartbeated within session.ClaimStaleAfter; a claim the store kept, a claim that churned and a
+// read that failed hold a forward pending the same way (forwardOf), and the event is backed off
+// as TestARoleRouteToAStaleHolderStaysPending holds.
+func TestAForwardHeldByItsHoldersResolutionIsCountedUnderTheHolder(t *testing.T) {
+	rig := newRoleRig(t)
+	const role, holder = "reviewer", "ses_stale_counted"
+	rig.claimStale(t, role, holder)
+	rig.silent(t, contracts.RoleTopicPrefix+role)
+	rig.silent(t, contracts.AgentSubject(holder))
+	event := rig.routedEvent(t, "T-1", role, model.Actor{Kind: "user", ID: "alice"})
+	deps, registry := rig.countingDeps(t)
+
+	holding(t, deps).scan(context.Background(), unfenced{})
+
+	if publishedAt(t, rig.database, event.ID) != nil {
+		t.Fatal("the event whose role forward stayed pending was published")
+	}
+	body := failureReasons(t, registry)
+	if !strings.Contains(body, `envoy_dispatch_outbox_publish_failures_total{reason="holder"} 1`) {
+		t.Fatalf("/metrics body = %q, want the pending forward counted under its holder", body)
+	}
+	if strings.Contains(body, `reason="failed"`) {
+		t.Fatalf("/metrics body = %q counts a forward that sent nothing as a publish failure", body)
+	}
+}
+
+// A role forward NATS took whose holder sent no receipt is counted unanswered, not failed: the
+// flush confirmed the publish, so what is missing is the holder's answer and not the bus. The
+// holder here is registered and self-subscribed, as a session plugin registers it, with nothing
+// subscribed to its agent subject, which is the shape a holder that stopped reading has.
+func TestAForwardNoHolderAnsweredIsCountedUnanswered(t *testing.T) {
+	rig := newRoleRig(t)
+	const role, holder = "reviewer", "ses_silent"
+	rig.claim(t, role, holder, session.SessionEntry{SelfSubscribed: true})
+	rig.silent(t, contracts.RoleTopicPrefix+role)
+	event := rig.routedEvent(t, "T-1", role, model.Actor{Kind: "user", ID: "alice"})
+	deps, registry := rig.countingDeps(t)
+
+	holding(t, deps).scan(context.Background(), unfenced{})
+
+	if publishedAt(t, rig.database, event.ID) != nil {
+		t.Fatal("the event whose role holder sent no receipt was published")
+	}
+	body := failureReasons(t, registry)
+	if !strings.Contains(body, `envoy_dispatch_outbox_publish_failures_total{reason="unanswered"} 1`) {
+		t.Fatalf("/metrics body = %q, want the forward its holder left unanswered counted unanswered", body)
+	}
+	if strings.Contains(body, `reason="failed"`) {
+		t.Fatalf("/metrics body = %q counts a forward NATS took as a publish failure", body)
 	}
 }

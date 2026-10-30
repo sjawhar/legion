@@ -101,9 +101,10 @@ func (c *Client) recordPublishDenial(nc *nats.Conn, violation error) bool {
 // deniedPublish is the server's refusal of the caller's own publish to subject: the oldest
 // violation of that subject recorded at or after sentAt, named as ErrPublishDenied
 // (deniedPublishError) and taken out of the subject's queue, and nil when the connection reported
-// no such refusal. It is what a JetStream publish reads to learn that a denial, and not the
-// connection, is what it came to: the stream acknowledges a denied publish with nothing
-// (window.acknowledged, publishJetStream).
+// no such refusal. It is what a publish whose own answer cannot name a denial reads to learn that
+// a denial, and not the connection, is what it came to: the stream acknowledges a denied JetStream
+// publish with nothing (window.acknowledged, publishJetStream), and a window's Request meets a
+// flush that one last error per connection can leave unable to confirm the publish (window.request).
 //
 // sentAt is the time the caller put its own message on the wire, which is what keeps a record from
 // naming another publish: a violation recorded before this publish was sent belongs to an earlier

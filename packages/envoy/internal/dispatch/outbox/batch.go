@@ -484,8 +484,9 @@ func planChains(events []*batchEvent) []*chain {
 // connection or a passed deadline (bus.ErrUnavailable; bus.ErrWindowDeadline, the window refusing
 // a send past the publisher hold's deadline) stops the batch: no further send of any chain is
 // made. So does ctx ending; the answers already in are still read, and every other send in flight
-// is lost. Each send that did not reach NATS is counted once as it settles, under the reason it
-// came to (deps.countPublishFailure).
+// is lost. Each send that did not reach its destination is counted once as it settles, under the
+// reason it came to (deps.countPublishFailure); a send the hold's deadline fenced and one ctx's
+// end cut count nothing, neither being an outcome NATS gave.
 func sendChains(ctx context.Context, deps Deps, sender bus.Sender, chains []*chain) {
 	stopped := false
 	var inflight []*chain
@@ -536,11 +537,21 @@ func sendChains(ctx context.Context, deps Deps, sender bus.Sender, chains []*cha
 		case ctx.Err() != nil && errors.Is(err, ctx.Err()):
 			send.state = lost
 		default:
-			// A send the server refused under this connection's own publish permissions is
-			// counted a denial, every other failure a failure (countPublishFailure).
-			if errors.Is(err, bus.ErrPublishDenied) {
+			// Counted under the reason the send came to (countPublishFailure): a send the server
+			// refused under this connection's own publish permissions is a denial; a role forward
+			// its holder's resolution held pending sent nothing at all, and is counted under that
+			// holder rather than as a failure of the bus; a forward NATS took whose holder sent no
+			// receipt is unanswered, which the request reports as a receipt timeout with its
+			// publish confirmed; every other failure, an unconfirmed publish among them, is a
+			// failure.
+			switch forward := send.dest.forward; {
+			case errors.Is(err, bus.ErrPublishDenied):
 				deps.countPublishFailure("denied")
-			} else {
+			case forward != nil && forward.err != nil:
+				deps.countPublishFailure("holder")
+			case errors.Is(err, bus.ErrReceiptTimeout) && !errors.Is(err, bus.ErrPublishUnconfirmed):
+				deps.countPublishFailure("unanswered")
+			default:
 				deps.countPublishFailure("failed")
 			}
 			send.state = failed

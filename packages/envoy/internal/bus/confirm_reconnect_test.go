@@ -109,7 +109,7 @@ func TestConfirmPublishedRefusesADenialAReconnectCleared(t *testing.T) {
 	case <-time.After(5 * time.Second):
 		t.Fatal("the client never saw the server drop the connection")
 	}
-	if err := confirmPublished(conn, subject, before); !errors.Is(err, errPublishUnconfirmed) {
+	if err := confirmPublished(conn, subject, before); !errors.Is(err, ErrPublishUnconfirmed) {
 		t.Fatalf("a denied publish read as %v, want unconfirmed: last error %v, reconnecting %t",
 			err, conn.LastError(), conn.IsReconnecting())
 	}
@@ -145,7 +145,7 @@ func TestConfirmPublishedRefusesADenialACompletedReconnectCleared(t *testing.T) 
 	case <-time.After(5 * time.Second):
 		t.Fatal("the client never reconnected")
 	}
-	if err := confirmPublished(conn, subject, before); !errors.Is(err, errPublishUnconfirmed) {
+	if err := confirmPublished(conn, subject, before); !errors.Is(err, ErrPublishUnconfirmed) {
 		t.Fatalf("a denied publish read as %v, want unconfirmed: before %+v, after %+v", err, before, observe(conn))
 	}
 }
@@ -280,7 +280,7 @@ func TestAnUnconfirmedForwardWithoutAReceiptIsNotAReceiptTimeout(t *testing.T) {
 	client := &Client{Conn: conn}
 
 	err := client.RequestCoreTo("notifications.agent.holder", contracts.Envelope{EventID: "e", Topic: "notifications.role.r"}, "", 300*time.Millisecond)
-	if !errors.Is(err, errPublishUnconfirmed) || errors.Is(err, ErrReceiptTimeout) {
+	if !errors.Is(err, ErrPublishUnconfirmed) || errors.Is(err, ErrReceiptTimeout) {
 		t.Fatalf("an unconfirmed forward with no receipt returned %v, want the unconfirmed error", err)
 	}
 }

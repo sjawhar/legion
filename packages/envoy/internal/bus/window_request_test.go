@@ -100,6 +100,38 @@ func TestARequestNobodyAnswersIsNotAcknowledgedWithinItsTimeout(t *testing.T) {
 	}
 }
 
+// A Request that ran out of time says whether its publish was confirmed: one whose flush confirmed
+// the publish is a receipt timeout alone, a receiver that took the message and answered nothing,
+// and one whose flush could not confirm it wraps ErrPublishUnconfirmed with the flush's own
+// reason. A caller counts the two apart - Dispatch's outbox counts a role holder that sent no
+// receipt under `unanswered` and a forward that may never have left this process under `failed` -
+// and both still wrap ErrNotAcknowledged, so a caller that only backs the send off is unaffected.
+func TestAnUnansweredRequestSaysWhetherItsPublishWasConfirmed(t *testing.T) {
+	server, _, client := requestClient(t)
+	window := client.WindowUntil(nil)
+
+	err := answerOf(t, window.Request("notifications.role.request-confirmed", forwardEnvelope("confirmed"),
+		bus.RequestOptions{Timeout: 300 * time.Millisecond}), 5*time.Second)
+	if !errors.Is(err, bus.ErrNotAcknowledged) || !errors.Is(err, bus.ErrReceiptTimeout) || errors.Is(err, bus.ErrPublishUnconfirmed) {
+		t.Fatalf("an unanswered Request whose publish was confirmed returned %v, want ErrReceiptTimeout and not ErrPublishUnconfirmed", err)
+	}
+
+	// A frozen server answers the flush's PING with nothing, so the flush runs out of the
+	// request's own window while the connection stays connected: the publish is not known to have
+	// been accepted.
+	thaw := server.Freeze(t)
+	err = answerOf(t, window.Request("notifications.role.request-unconfirmed", forwardEnvelope("unconfirmed"),
+		bus.RequestOptions{Timeout: 500 * time.Millisecond}), 5*time.Second)
+	connected := client.Connected()
+	thaw()
+	if !connected {
+		t.Fatal("the client lost its connection while the server was frozen; the Request says nothing about an unconfirmed flush")
+	}
+	if !errors.Is(err, bus.ErrPublishUnconfirmed) || !errors.Is(err, bus.ErrNotAcknowledged) || !errors.Is(err, bus.ErrReceiptTimeout) {
+		t.Fatalf("an unanswered Request whose flush ran out of time returned %v, want ErrReceiptTimeout wrapping ErrPublishUnconfirmed", err)
+	}
+}
+
 // The stream's acknowledgement of the copy it stored answers a Request only when AcceptStreamAck
 // says so, as for a holder delivered from that stored copy; otherwise the Request waits on for a
 // receipt that never comes.

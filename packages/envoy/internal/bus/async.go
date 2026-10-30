@@ -306,16 +306,17 @@ const requestReplies = 4
 //     error wrapping ErrNotStored and ErrWindowDeadline, one whose connection is no longer
 //     current ErrNotStored and ErrUnavailable, and a send nats.go refuses ErrNotStored and its
 //     refusal, the stream holding nothing of the request in each case;
-//   - ErrPublishDenied when the request's flush shows the server denied the publish
-//     (confirmFlushed). The flush runs beside the wait for the answer, not ahead of it, so a
-//     receipt that lands first answers the request while the flush is still out. A denial another
-//     publish on the connection hid in the meantime leaves the request unconfirmed instead, and it
-//     ends as one with no answer;
+//   - ErrPublishDenied when the server denied the publish: the request's flush shows it
+//     (confirmFlushed), or, when a violation of another subject hid it there, the violation the
+//     connection recorded under this subject does (deniedPublish). The flush runs beside the wait
+//     for the answer, not ahead of it, so a receipt that lands first answers the request while the
+//     flush is still out; the record is read on the wait's own goroutine, when a flush that could
+//     not confirm the publish comes back and once more before the timeout is answered;
 //   - ErrUnavailable once the window's connection is lost or reconnects before an answer, whether
 //     the loss came before the flush, during it, or after it;
 //   - when no answer came within opts.Timeout on a connection that stayed current, an error
-//     wrapping ErrNotAcknowledged and ErrReceiptTimeout, and the flush's own failure when the flush
-//     failed or could not confirm the publish.
+//     wrapping ErrNotAcknowledged and ErrReceiptTimeout, and ErrPublishUnconfirmed with the
+//     flush's own reason when the flush failed or could not confirm the publish.
 //
 // Its inbox is unsubscribed once the outcome is decided.
 func (w *window) Request(subject string, item contracts.Envelope, opts RequestOptions) <-chan error {
@@ -352,6 +353,9 @@ func (w *window) request(subject string, item contracts.Envelope, opts RequestOp
 	}
 	deadline := time.Now().Add(cmp.Or(opts.Timeout, publishAcknowledgementTimeout))
 	before := observe(w.conn)
+	// Read right before the send, so the request takes only a violation the server reported of
+	// its own message and never one an earlier send of the subject earned (deniedPublish).
+	sentAt := time.Now()
 	if err := w.conn.PublishMsg(msg); err != nil {
 		_ = receipt.Unsubscribe()
 		return nil, w.unsent(err, len(data))
@@ -374,16 +378,37 @@ func (w *window) request(subject string, item contracts.Envelope, opts RequestOp
 			}
 			flushed <- confirmFlushed(w.conn, subject, before, deadline)
 		}()
-		// unconfirmed is what the flush, once it has returned, leaves the timeout to report;
-		// settleFlush takes that outcome and returns the denial that answers the request at once,
-		// nil for anything else.
+		// denied is the server's refusal of this very send, as the connection recorded it under
+		// the subject (deniedPublish). It is the only evidence of a denial the flush cannot name:
+		// nats.go keeps one last error per connection, so a violation of another subject recorded
+		// between the publish and the flush's read leaves the flush unable to confirm the publish
+		// (confirmPublished), and the request would wait out its timeout and end as one nobody
+		// answered, naming another subject's violation. It is read on this goroutine alone and
+		// never on the flush's: a flush still running after an early answer would take the
+		// violation another send of the subject is owed.
+		denied := func() error { return w.client.deniedPublish(subject, sentAt) }
+		// unconfirmed is what the flush, once it has returned, leaves the timeout to report, named
+		// as ErrPublishUnconfirmed whatever the reason; settleFlush takes the flush's outcome and
+		// returns the denial that answers the request at once, nil for anything else.
 		var unconfirmed error
 		settleFlush := func(err error) error {
 			flushed = nil
+			if err == nil {
+				return nil
+			}
 			if errors.Is(err, ErrPublishDenied) {
 				return err
 			}
+			if denial := denied(); denial != nil {
+				return denial
+			}
 			unconfirmed = err
+			if !errors.Is(err, ErrPublishUnconfirmed) {
+				// A flush that failed or ran out of the window leaves the publish as unconfirmed
+				// as one confirmPublished could not judge, and says so under the one sentinel a
+				// caller reads to tell the two timeouts apart.
+				unconfirmed = fmt.Errorf("%w: %w", ErrPublishUnconfirmed, err)
+			}
 			return nil
 		}
 		// resend sends the request once more, to the same inbox and without its Nats-Msg-Id, after
@@ -440,8 +465,8 @@ func (w *window) request(subject string, item contracts.Envelope, opts RequestOp
 		for {
 			select {
 			case err := <-flushed:
-				if denied := settleFlush(err); denied != nil {
-					return denied
+				if settled := settleFlush(err); settled != nil {
+					return settled
 				}
 			case reply := <-replies:
 				if settled, err := outcome(reply, true); settled {
@@ -469,9 +494,16 @@ func (w *window) request(subject string, item contracts.Envelope, opts RequestOp
 				if flushed != nil {
 					// The flush is bounded by this very deadline, so it is returning now, and
 					// what it says belongs in the timeout's answer.
-					if denied := settleFlush(<-flushed); denied != nil {
-						return denied
+					if settled := settleFlush(<-flushed); settled != nil {
+						return settled
 					}
+				}
+				// The violation is recorded on nats.go's error callback, which can run after the
+				// flush has returned, so the record is read once more here, with every send of
+				// this request behind it: a denial found now is this request's answer, and the
+				// timeout would have named another subject's violation or nothing at all.
+				if denial := denied(); denial != nil {
+					return denial
 				}
 				if unconfirmed != nil {
 					return fmt.Errorf("bus: request to %q: %w: %w: %w", subject, ErrNotAcknowledged, ErrReceiptTimeout, unconfirmed)

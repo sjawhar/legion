@@ -96,16 +96,20 @@ type Deps struct {
 	// both, reading on Publisher's connection.
 	RoleClaims roles.ClaimStore
 	Sessions   roles.SessionLookup
-	// PublishFailures counts a destination of a publish attempt that did not reach NATS, by
+	// PublishFailures counts a destination of a publish attempt that did not reach it, by
 	// reason (countPublishFailure). cmd/dispatch registers it on the process's metrics
 	// registry, so a denied or refused destination shows on /metrics rather than only in the
 	// log.
 	PublishFailures *metrics.Counter
 }
 
-// countPublishFailure counts one destination of a publish attempt that did not reach NATS, under
-// reason ("denied", "refused" or "failed"). Every increment goes through here: a Deps built
-// without a counter - the package's own tests - then counts nothing instead of dereferencing nil.
+// countPublishFailure counts one destination of a publish attempt that did not reach it, under
+// reason: "denied" for a send the server refused under this connection's own publish permissions,
+// "refused" for one NATS refuses however often it is retried, "holder" for a role forward its
+// holder's resolution held pending with nothing sent, "unanswered" for a forward NATS took whose
+// holder sent no receipt, and "failed" for every other failure (sendChains). Every increment goes
+// through here: a Deps built without a counter - the package's own tests - then counts nothing
+// instead of dereferencing nil.
 func (d Deps) countPublishFailure(reason string) {
 	if d.PublishFailures == nil {
 		return

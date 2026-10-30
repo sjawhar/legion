@@ -42,7 +42,11 @@ body: |-
     wait for those last milliseconds and the commit. A process of the release before this one takes
     no hold and goes on publishing beside the holder while a rolling update runs both, so deploy this
     release by replacing the running server (`strategy: Recreate`) to keep every issue's
-    notifications in order across the deploy.
+    notifications in order across the deploy. The outbox publish-failure counter
+    (`envoy_dispatch_outbox_publish_failures_total`) gains two reasons for a role forward:
+    `holder`, a forward its holder's resolution held pending with nothing sent, and `unanswered`,
+    a forward NATS took that the role's holder sent no receipt for. A denied role forward is
+    counted `denied` and names its own subject.
 time: 2026-10-28T13:11:37.592238351Z
 custom:
     Issue: pr2395

@@ -320,9 +320,12 @@ itself.
 `GET /metrics` needs no credential either, so whoever reaches the server's HTTP port can read it.
 It answers in the Prometheus text format with one counter,
 `envoy_dispatch_outbox_publish_failures_total`: one count for each destination of an event
-publish that did not reach NATS, labelled `reason`. `denied` is a publish NATS refused under the
-server's own grant, `refused` one NATS refuses however often it is retried, and `failed` any other
-failure. A denied publish also logs `dispatch outbox: publish event` at ERROR, naming the subject.
+publish that was not reached, labelled `reason`. `denied` is a publish NATS refused under the
+server's own grant, `refused` one NATS refuses however often it is retried, `holder` a role
+forward its holder's resolution held pending with nothing sent (a stale holder, a claim the store
+kept, a read that failed), `unanswered` a forward NATS took whose role holder sent no receipt, and
+`failed` any other failure. A denied publish also logs `dispatch outbox: publish event` at ERROR,
+naming the subject.
 
 ## Behind a proxy
 

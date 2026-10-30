@@ -387,12 +387,12 @@ func TestRunRetriesAnIssueTopicNATSDenies(t *testing.T) {
 // What makes this its own test is that nats.go keeps one last error per connection, so the
 // violations of the destinations one publish window sent together overwrite one another there.
 // While window.acknowledged read that last error, it could match only the subject the connection
-// kept, and every other denied destination answered the window's acknowledgement timeout, which
-// settle reads as bus.ErrUnavailable and so as an outage of the bus rather than a refusal of the
-// event: the event was released with no attempt counted, the counter recorded `failed` where the
-// denial belongs, no line named the subject, and publishBatch abandoned the rest of that scan's
-// backlog. The per-subject record (deniedPublish) answers each send its own denial, and this test
-// holds that for the shape a notifying event has in production.
+// kept, and every other denied destination waited out the window's acknowledgement timeout, which
+// settle reads as bus.ErrNotAcknowledged - a send NATS gave no answer for, not a refusal of the
+// event: the counter recorded `failed` where the denial belongs, no line named the subject or the
+// violation, and the batch probed its connection for an outage that was not there. The
+// per-subject record (deniedPublish) answers each send its own denial, and this test holds that
+// for the shape a notifying event has in production.
 func TestRunCountsEveryDeniedJetStreamDestinationOfOneEvent(t *testing.T) {
 	var logged lockedBuffer
 	logtest.SetDefault(t, slog.NewTextHandler(&logged, nil))
@@ -460,11 +460,10 @@ func TestRunCountsEveryDeniedJetStreamDestinationOfOneEvent(t *testing.T) {
 //
 // What makes this its own test is that a record holding one violation per connection, or one per
 // subject, answers one of the window's sends and leaves the rest to the acknowledgement timeout,
-// which settle reads as bus.ErrUnavailable and so as an outage of the bus. Those events are
-// released with no attempt counted, the counter records `failed` where the denial belongs, no
-// line names the subject, and publishBatch abandons the rest of that scan's backlog - the same
-// pathology as the test above, reached by the commonest traffic there is. The contract the bus
-// owes is one violation per refused message.
+// which settle reads as bus.ErrNotAcknowledged: those events are backed off naming a timeout
+// rather than the refusal, the counter records `failed` where the denial belongs, no line names
+// the subject, and the batch probes a connection nothing is wrong with. The contract the bus owes
+// is one violation per refused message.
 //
 // The two events are of two issues, which is what puts two messages in one window here: the
 // sends of one owner to one destination key are one chain, in id order, so a second comment on

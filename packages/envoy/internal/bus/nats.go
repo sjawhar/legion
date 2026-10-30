@@ -297,10 +297,11 @@ type Client struct {
 	// (WithReconnectWaitTick, export_test.go) to know a publish is inside that wait, or to act at
 	// the moment the wait ends.
 	reconnectWaitTick func()
-	// beforeRequestFlush, when not nil, runs on a Request's wait for its answer right before that
-	// wait flushes the request's publish (window.request). It is nil outside tests: a test sets it
-	// (WithBeforeRequestFlush, export_test.go) to hold the flush until the connection it would
-	// flush is gone, the interleaving a flush begun after the connection turned reconnecting has.
+	// beforeRequestFlush, when not nil, runs on the goroutine that flushes a Request's publish,
+	// right before that flush begins, while the wait for the request's answer runs beside it
+	// (window.request). It is nil outside tests: a test sets it (WithBeforeRequestFlush,
+	// export_test.go) to hold the flush until the connection it would flush is gone, the
+	// interleaving a flush begun after the connection turned reconnecting has.
 	beforeRequestFlush func()
 	mu                 sync.Mutex
 
@@ -1579,7 +1580,7 @@ func (c *Client) RequestCoreTo(subject string, item contracts.Envelope, msgID st
 		forward.Header = nats.Header{nats.MsgIdHdr: []string{msgID}}
 	}
 	err = c.publishConfirmed(ctx, conn, forward, conn.PublishMsg)
-	if err != nil && !errors.Is(err, errPublishUnconfirmed) {
+	if err != nil && !errors.Is(err, ErrPublishUnconfirmed) {
 		return err
 	}
 	timedOut := cmp.Or(err, ErrReceiptTimeout)

@@ -13,19 +13,23 @@ import (
 
 // ErrPublishDenied is returned, wrapping nats.ErrPermissionViolation and the server's own text,
 // for a publish the server refused under its connection's publish permissions: a core publish
-// confirmPublished names, and a JetStream publish whose subject's violation the connection
-// recorded (deniedPublish).
+// confirmPublished names, and a publish whose subject's violation the connection recorded
+// (deniedPublish), which a JetStream publish and a window's Request both read.
 var ErrPublishDenied = errors.New("NATS denied the publish")
 
-// errPublishUnconfirmed is wrapped, with the reason, by a core publish confirmPublished cannot
-// confirm: not known to be denied, and not known to be accepted either.
-var errPublishUnconfirmed = errors.New("publish not known to have been accepted")
+// ErrPublishUnconfirmed is wrapped, with the reason, by a publish that is not known to have been
+// accepted: a core publish confirmPublished cannot confirm - not known to be denied, and not known
+// to be accepted either - and the timeout of a window's Request whose flush failed or could not
+// confirm the publish (window.request). That second case is what it is exported for: a caller that
+// counts a request which ran out of time reads it to tell a forward NATS took, whose holder sent
+// no receipt, from one that is not known to have reached the server at all.
+var ErrPublishUnconfirmed = errors.New("publish not known to have been accepted")
 
 // publishConfirmed publishes msg on conn with publish, flushes within ctx's deadline, and confirms
 // the server accepted it (confirmPublished). A nil error means the server accepted the publish;
 // otherwise the error is a window already spent (errWindowElapsed), nats.go's refusal before
 // sending (refused), a flush that failed or ran out of the window, ErrPublishDenied, or one
-// wrapping errPublishUnconfirmed. publish is conn.PublishMsg, bound to the same conn: every caller
+// wrapping ErrPublishUnconfirmed. publish is conn.PublishMsg, bound to the same conn: every caller
 // reads its connection once and passes it and its PublishMsg, so publish publishes on the
 // connection observe and confirmPublished judge. It is a parameter so a test can make the server's
 // answer arrive before publish returns, which is the case the state read before it exists for.
@@ -132,7 +136,7 @@ func observe(conn *nats.Conn) connState {
 func confirmPublished(conn *nats.Conn, subject string, before connState) error {
 	after := observe(conn)
 	if !after.connected || after.reconnects != before.reconnects {
-		return fmt.Errorf("bus: %w: NATS disconnected during the publish to %q", errPublishUnconfirmed, subject)
+		return fmt.Errorf("bus: %w: NATS disconnected during the publish to %q", ErrPublishUnconfirmed, subject)
 	}
 	if sameError(after.lastError, before.lastError) {
 		return nil
@@ -141,18 +145,18 @@ func confirmPublished(conn *nats.Conn, subject string, before connState) error {
 		return denied
 	}
 	return fmt.Errorf("bus: %w: NATS reported an error during the publish to %q: %w",
-		errPublishUnconfirmed, subject, after.lastError)
+		ErrPublishUnconfirmed, subject, after.lastError)
 }
 
 // publishDenial names err as ErrPublishDenied when it is the server's refusal of a publish to
 // subject under the connection's own publish permissions, and nil when it is anything else. A core
 // publish reads it off the last error the connection recorded across the publish and its flush
-// (confirmPublished), which is where the core path's documented ambiguity lives: nats.go keeps one
-// last error per connection, so a violation of another subject recorded in between leaves this
-// publish unconfirmed rather than denied, and its caller publishes it again. A JetStream publish,
-// which the stream acknowledges with nothing when the server refuses it, reads the violation
-// recorded under its own subject instead (deniedPublish), so a window whose sends were denied
-// several subjects at once names each of them.
+// (confirmPublished), which is where the core path's ambiguity lives: nats.go keeps one last error
+// per connection, so a violation of another subject recorded in between leaves this publish
+// unconfirmed rather than denied, and its caller publishes it again. A JetStream publish, which
+// the stream acknowledges with nothing when the server refuses it, and a window's Request, whose
+// flush meets that same ambiguity, read the violation recorded under their own subject instead
+// (deniedPublish), so a window whose sends were denied several subjects at once names each of them.
 func publishDenial(err error, subject string) error {
 	if errors.Is(err, nats.ErrPermissionViolation) &&
 		strings.Contains(err.Error(), fmt.Sprintf("Publish to %q", subject)) {
