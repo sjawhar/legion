@@ -323,9 +323,18 @@ func sameTokenProjection(held, want *corev1.ServiceAccountTokenProjection) bool 
 // pod holds one as StaleAddress, and relaunch replaces a pod that holds one for any of its roles,
 // ending every process in it.
 //
-// Everything else a running pod cannot be changed to carry is drift, not a moved address
-// (driftedInPod, podShapeDrift): its worker can be asked to push its work first, and an update
-// round asks it before the pod is replaced.
+// Where a round covers the pod (roundCovers), everything else a running pod cannot be changed to
+// carry is drift, not a moved address (driftedInPod, podShapeDrift): its worker can be asked to
+// push its work first, and an update round asks it before the pod is replaced.
+//
+// A pod no round covers holds every facet here, those three included. No round is ever opened
+// over such a pod — PodDrift answers nothing for it — so a facet that was neither a moved address
+// nor a round's would leave its role in the pod it was created in for ever, with nothing saying
+// so: today that is the project controller's pod, which has nobody in it to task and no issue disk
+// to protect, and so keeps the replacement it has always had, at the next launch into it. The rest
+// of such a pod's drift, the shape its template was built from, is its launch's too (relaunch,
+// shapeDrift), so a round covers every drift of a pod or a launch covers every drift of it, and no
+// drifted pod is left to neither.
 func (r *Runtime) movedInPod(pod *corev1.Pod, role claim.Role) []movedAddress {
 	var moved []movedAddress
 	if layout, ok := movedLayout(pod); ok {
@@ -333,6 +342,9 @@ func (r *Runtime) movedInPod(pod *corev1.Pod, role claim.Role) []movedAddress {
 	}
 	if stream, ok := r.movedStream(pod, podContainer(role)); ok {
 		moved = append(moved, stream)
+	}
+	if !roundCovers(podKindFor(role)) {
+		moved = append(moved, r.driftedInPod(pod, role)...)
 	}
 	return moved
 }
@@ -346,7 +358,9 @@ func (r *Runtime) movedInPod(pod *corev1.Pod, role claim.Role) []movedAddress {
 // already in the pod running and able to reach this daemon, so each is a reason to open a round
 // (PodDrift) and ask them to push, where replacing the pod under them would end every turn in it
 // and take the issue's disk with it. The two facets whose worker cannot be reached at all are
-// movedInPod's and are never a round's.
+// movedInPod's and are never a round's — and for a pod no round covers (roundCovers), the project
+// controller's today, so are these three: no round is opened over such a pod, so movedInPod holds
+// every facet there and its launch replaces it, as it always did.
 func (r *Runtime) driftedInPod(pod *corev1.Pod, role claim.Role) []movedAddress {
 	var moved []movedAddress
 	if overlays, ok := r.movedRoleOverlays(pod.Spec, role); ok {

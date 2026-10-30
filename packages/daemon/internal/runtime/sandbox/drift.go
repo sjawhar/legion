@@ -22,9 +22,27 @@ import (
 // what the round is opened on, and ReplacePod what ends the round; the round itself, its task and
 // its sweep are the daemon's (internal/daemon).
 //
-// A launch never replaces a live pod for one of these reasons (relaunch): it keeps the pod and
-// starts its role in it, since the round, not the launch, is what ends the roles already running
-// there.
+// A launch never replaces a live pod a round covers for one of these reasons (relaunch,
+// roundCovers): it keeps the pod and starts its role in it, since the round, not the launch, is
+// what ends the roles already running there. A pod no round covers has no such round to wait for,
+// so its launch replaces it for every kind of drift, as every launch did before the round existed.
+
+// roundCovers is whether an update round can be opened over a pod of kind: the one predicate that
+// says who replaces such a pod when it has drifted, read by both sides of that answer. PodDrift
+// answers nothing for a pod it excludes, so no round is ever opened over one; a launch into a live
+// pod it excludes replaces that pod for every kind of drift (relaunch, movedInPod), where a launch
+// into a pod it covers keeps the pod and leaves it to its round.
+//
+// A round covers every issue pod and nothing else. The project controller's pod is the one kind it
+// excludes: the controller holds no issue workspace and has nothing to push, so there is nobody in
+// it to task and no disk to protect, and a drift neither its launch nor a round replaced would
+// leave it in the pod it was created in for ever — with no broker, so the token its slack_post is
+// granted never reaches it, with none of the files role_config_files.controller names, and writing
+// its session against the store that pod projects, while nothing said so.
+func roundCovers(kind podKind) bool {
+	_, controller := kind.(controllerPod)
+	return !controller
+}
 
 // podShapeAnnotation records on a pod template's metadata the configuration the pod was built
 // from (podShape). It is written where the template is built (podTemplate) and reaches the cluster
@@ -164,6 +182,19 @@ func templateImageDrift(s *sandbox, image string) []string {
 	return nil
 }
 
+// shapeDrift is why the pod of the Sandbox read as s, a pod of kind, was built from a
+// configuration other than the one a pod of that kind is built from now: podShapeDrift against the
+// shape the runtime computed for that kind when it was built (r.podShapes).
+//
+// It is the one reading of a pod's shape, which both sides of a drifted pod's replacement take:
+// the round names its reasons in the task it opens with (PodDrift), and a launch into a live pod
+// no round covers replaces that pod when it answers anything (relaunch, roundCovers). So the two
+// can never disagree about whether a pod's shape has moved, or about which kind's shape it is
+// compared with.
+func (r *Runtime) shapeDrift(s *sandbox, kind podKind) []string {
+	return podShapeDrift(s, r.podShapes[kind])
+}
+
 // PodDrift satisfies runtime.Runtime: why the pod k's process runs in no longer matches the
 // configuration a pod created now is built from, each reason a phrase an operator reads in a task
 // and in a log line, nil when nothing drifted.
@@ -175,10 +206,11 @@ func templateImageDrift(s *sandbox, image string) []string {
 // the session store (driftedInPod). The two facets whose worker cannot be reached at all stay a
 // launch's business and are never a round's (movedInPod).
 //
-// It answers nothing for a claim with no process, and nothing for the project controller's pod:
-// the controller has no issue workspace and nothing to push, so its pod is replaced by its next
-// launch as it always was. It answers nothing when the Sandbox or the pod is absent, or when the
-// pod is not the one the locator records: a pod that is not there needs no round.
+// It answers nothing for a claim with no process, and nothing for a pod no round covers
+// (roundCovers), today the project controller's: there is nobody in such a pod to task, so its
+// drift is its launch's to replace rather than a round's. It answers nothing when the Sandbox or
+// the pod is absent, or when the pod is not the one the locator records: a pod that is not there
+// needs no round.
 //
 // The sweep asks this of every claim of the deployment at every tick, so the steady state — a pod
 // built from the configuration the runtime still has — costs one read of the annotation the
@@ -197,7 +229,7 @@ func (r *Runtime) PodDrift(_ context.Context, k runtime.Known) ([]string, error)
 	}
 	role, _ := k.Locator.Claim.Role()
 	kind := podKindFor(role)
-	if _, controller := kind.(controllerPod); controller {
+	if !roundCovers(kind) {
 		return nil, nil
 	}
 	name := k.Locator.Sandbox.Name
@@ -213,13 +245,15 @@ func (r *Runtime) PodDrift(_ context.Context, k runtime.Known) ([]string, error)
 		return nil, nil
 	}
 	var drifted []string
-	want := r.podShapes[kind]
-	if held, _, _ := unstructured.NestedString(u.Object, "spec", "podTemplate", "metadata", "annotations", podShapeAnnotation); held != want {
+	if held, _, _ := unstructured.NestedString(u.Object, "spec", "podTemplate", "metadata", "annotations", podShapeAnnotation); held != r.podShapes[kind] {
+		// Only a template whose recorded shape differs is decoded, which is the pod a round is
+		// about to be opened over; shapeDrift reads that same recorded shape and answers nothing
+		// where the two are equal, so the skipped decode hides no reason.
 		s, err := decodeSandbox(u)
 		if err != nil {
 			return nil, fmt.Errorf("sandbox runtime: pod drift %s: %w", k.Claim, err)
 		}
-		drifted = podShapeDrift(s, want)
+		drifted = r.shapeDrift(s, kind)
 	}
 	for _, moved := range r.driftedInPod(pod, role) {
 		drifted = append(drifted, moved.String())

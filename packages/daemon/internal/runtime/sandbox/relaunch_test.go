@@ -701,12 +701,14 @@ const nextImage = "ghcr.io/sjawhar/legion-worker@sha256:2e2e2e2e0000000000000000
 // A pod launched from another release's image — every container of it, or an init container alone,
 // since a pod is built whole from one image — runs agents that call this daemon as that release,
 // for a route it no longer serves or a variable it no longer sets. It has drifted, and a live
-// drifted pod is kept by every launch into it (INFRA-484): replacing it there would end every
-// role's turn in it and delete the issue's disk with everything unpushed on it, so the pod is left
-// to its update round, which first has every worker in it push its work. The controller's pod, of
-// which no worker holds an issue workspace, is kept by a launch too. A Sandbox that is not live —
-// here one suspended under the running pod — is replaced by its next start as it always was, and
-// every container of the new pod runs the configured image.
+// drifted pod a round covers is kept by every launch into it (INFRA-484, roundCovers): replacing
+// it there would end every role's turn in it and delete the issue's disk with everything unpushed
+// on it, so the pod is left to its update round, which first has every worker in it push its work.
+// The controller's pod is covered by no round — nobody in it holds an issue workspace, so there is
+// nobody to task — and is replaced by its next launch as it always was
+// (TestALaunchReplacesAPodNoRoundCoversWhoseShapeHasDrifted holds that for every key of a pod's
+// shape). A Sandbox that is not live — here one suspended under the running pod — is replaced by
+// its next start as it always was, and every container of the new pod runs the configured image.
 func TestRelaunchKeepsADriftedPodAndReplacesASuspendedSandboxs(t *testing.T) {
 	olderInit := func(pod *corev1.Pod) {
 		for i := range pod.Spec.InitContainers {
@@ -731,7 +733,7 @@ func TestRelaunchKeepsADriftedPodAndReplacesASuspendedSandboxs(t *testing.T) {
 		"an issue pod on the configured image":                       {workerSpec, resumeSession, testImage, nil, nil, false, false, false},
 		"an issue pod under a release pinning another image":         {workerSpec, resumeSession, nextImage, nil, nil, false, false, true},
 		"an issue pod whose init container alone runs another image": {workerSpec, resumeSession, testImage, olderInit, nil, false, false, true},
-		"the controller's pod under a release pinning another image": {controllerSpec, controllerSession, nextImage, nil, nil, false, false, true},
+		"the controller's pod under a release pinning another image": {controllerSpec, controllerSession, nextImage, nil, nil, false, true, false},
 		"an installing Resume keeps a drifted pod":                   {workerSpec, resumeSession, nextImage, nil, plugins, false, false, true},
 		"a suspended sandbox under a release pinning another image":  {workerSpec, resumeSession, nextImage, nil, nil, true, true, false},
 	} {

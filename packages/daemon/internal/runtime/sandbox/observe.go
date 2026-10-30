@@ -211,6 +211,9 @@ func displaced(v view, loc runtime.Locator, obs observation) bool {
 // drifted from the configuration is never StaleAddress (PodDrift): its roles keep running until
 // every worker of the pod has answered its update round, which is the whole point of the round —
 // repointing one of them would end the pod's turns mid-flight, which this verdict must never do.
+// In a pod no update round covers (roundCovers, today the project controller's) movedInPod holds
+// every facet, so each of those reads StaleAddress there and its launch replaces the pod, which is
+// what keeps such a pod from being left behind by a configuration it cannot carry.
 // A role running its recorded generation whose Sandbox records it was started with other
 // addresses than a generation started now in its pod is handed (movedEnvironment, which reads the
 // pod for the one thing that pod decides, whether the generation holds the secrets broker) is

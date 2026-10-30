@@ -7,9 +7,127 @@ import (
 	"time"
 
 	corev1 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/api/resource"
 
 	"github.com/sjawhar/legion/daemon/internal/claim"
+	"github.com/sjawhar/legion/daemon/internal/runtime"
 )
+
+// movedControllerReservation is the controller pod's reservation with another CPU request, the
+// kind's own and nothing the daemon derives (movedReservation is the issue pod's).
+func movedControllerReservation(o *Options) {
+	resources := reservations()
+	resources.Controller.Requests[corev1.ResourceCPU] = resource.MustParse("5")
+	resources.Controller.Limits[corev1.ResourceCPU] = resource.MustParse("5")
+	o.Resources = resources
+}
+
+// A pod no round covers (roundCovers) is replaced by its next launch for every kind of drift, as
+// every launch did before the round existed. Its three facets reach that launch as moved addresses
+// (movedInPod, TestTheControllersPodIsNotLeftBehindByAConfigurationItCannotCarry); the kind of
+// drift that does not is the shape its template was built from — the image, the kind's own
+// reservation, an operator volume or mount, and the disk size, each key of podShapeRecord — which
+// the launch reads through the same one computation the round's reasons are named from
+// (shapeDrift). Nothing else would: PodDrift answers nothing for such a pod, so no round is ever
+// opened over it, and a launch that kept it would leave the project controller running for ever in
+// a pod the deployment has moved away from, on the image, reservation, volumes, mounts and disk it
+// was created with.
+//
+// A launch that installs a stale-plugin pair into such a pod keeps it, as it always did
+// (spec.Plugins, LEGION-164): the install, not a fresh pod on the configured image, is what brings
+// that agent onto the current plugin. And a daemon restarted on the configuration its pod was
+// built from replaces nothing — the failure that would matter most here, since it would rebuild
+// the controller's pod at every launch of it.
+func TestALaunchReplacesAPodNoRoundCoversWhoseShapeHasDrifted(t *testing.T) {
+	plugins := &runtime.PluginInstall{PiLegion: "9.7.0", PiEnvoy: "9.6.1", Contract: 24}
+	for name, tc := range map[string]struct {
+		now      func(*Options)
+		plugins  *runtime.PluginInstall
+		replaced bool
+	}{
+		"the same configuration":                           {func(*Options) {}, nil, false},
+		"another image":                                    {func(o *Options) { o.Image = nextImage }, nil, true},
+		"another reservation":                              {movedControllerReservation, nil, true},
+		"an operator volume added":                         {withOperatorVolume, nil, true},
+		"an operator mount added":                          {withOperatorMount, nil, true},
+		"another disk size":                                {func(o *Options) { o.IssueVolume = resource.MustParse("40Gi") }, nil, true},
+		"an installing launch into a pod on another image": {func(o *Options) { o.Image = nextImage }, plugins, false},
+	} {
+		t.Run(name, func(t *testing.T) {
+			g := newRig(t, nil)
+			spec := controllerSpec(t)
+			loc := g.spawn(spec)
+			r2 := secondRuntime(t, g, tc.now)()
+			g.connectRunning(controllerToken, loc.Sandbox.Generation)
+			g.eventually("the controller's launcher to report its child to the restarted daemon", func() bool {
+				state, connected := r2.launchers.state(controllerToken, loc.Sandbox.PodUID)
+				return connected && state.Child != nil
+			})
+			if drifted := driftOf(t, g.ctx, r2, loc); len(drifted) > 0 {
+				t.Fatalf("PodDrift = %q of a pod no round covers, want nothing: its launch is what replaces it", drifted)
+			}
+			shape := func() string {
+				return g.sandbox(loc.Sandbox.Name).Spec.PodTemplate.Metadata.Annotations[podShapeAnnotation]
+			}
+			built := shape()
+			spec.Generation, spec.BootToken, spec.ResumeSessionFile, spec.Plugins = 2, "boot-controller-g2", controllerSession, tc.plugins
+			next, err := r2.Resume(g.ctx, &loc, spec)
+			if err != nil {
+				t.Fatalf("Resume the controller: %v", err)
+			}
+			if replaced := next.Sandbox.PodUID != loc.Sandbox.PodUID; replaced != tc.replaced {
+				t.Fatalf("Resume replaced the controller's pod: %t, want %t (pod %s, then %s)",
+					replaced, tc.replaced, loc.Sandbox.PodUID, next.Sandbox.PodUID)
+			}
+			switch want := r2.podShapes[controllerPod{}]; {
+			case tc.replaced && shape() != want:
+				t.Errorf("the controller's new pod is built from %s, want the configuration as it now reads, %s", shape(), want)
+			case !tc.replaced && shape() != built:
+				t.Errorf("the kept pod's template records %s, want the shape that pod was built from, %s", shape(), built)
+			}
+		})
+	}
+}
+
+// The same five keys over a pod a round does cover: an issue pod whose shape has moved is kept by
+// every launch into it, whatever moved, and the round PodDrift names the reasons of is what
+// replaces it. This is the direction that must never break — replacing an issue pod where it
+// stands ends every role's turn in it and deletes the disk they work on, with everything unpushed
+// (INFRA-484) — and the four keys beside the image reach a launch through nothing but shapeDrift,
+// which a pod a round covers is never read by (relaunch, roundCovers).
+func TestALaunchKeepsAnIssuePodWhateverOfItsShapeMoved(t *testing.T) {
+	for name, now := range map[string]func(*Options){
+		"another image":            func(o *Options) { o.Image = nextImage },
+		"another reservation":      movedReservation,
+		"an operator volume added": withOperatorVolume,
+		"an operator mount added":  withOperatorMount,
+		"another disk size":        func(o *Options) { o.IssueVolume = resource.MustParse("40Gi") },
+	} {
+		t.Run(name, func(t *testing.T) {
+			g := newRig(t, nil)
+			spec := workerSpec(t)
+			loc := g.spawn(spec)
+			r2 := secondRuntime(t, g, now)()
+			g.connectRunning(workerToken, loc.Sandbox.Generation)
+			g.eventually("the tester's launcher to report its child to the restarted daemon", func() bool {
+				state, connected := r2.launchers.state(workerToken, loc.Sandbox.PodUID)
+				return connected && state.Child != nil
+			})
+			if drifted := driftOf(t, g.ctx, r2, loc); len(drifted) == 0 {
+				t.Fatalf("PodDrift of the issue pod is empty, so this case proves nothing: its round is what replaces it")
+			}
+			spec.Generation, spec.BootToken, spec.ResumeSessionFile = 2, "boot-tester-g2", resumeSession
+			next, err := r2.Resume(g.ctx, &loc, spec)
+			if err != nil {
+				t.Fatalf("Resume the tester: %v", err)
+			}
+			if next.Sandbox.PodUID != loc.Sandbox.PodUID {
+				t.Errorf("Resume replaced the issue pod %s with %s, want it kept for its update round",
+					loc.Sandbox.PodUID, next.Sandbox.PodUID)
+			}
+		})
+	}
+}
 
 // A launch into a live drifted pod keeps the pod (relaunch) and starts the role in it. Two of the
 // drift facets that reach a round are configuration the role's own start command is built from,

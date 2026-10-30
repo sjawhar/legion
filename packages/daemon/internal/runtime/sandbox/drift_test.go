@@ -309,9 +309,13 @@ func TestPodDriftReadsTheFacetsThatAreNoLongerStaleAddresses(t *testing.T) {
 	}
 }
 
-// The project controller's pod has drifted from nothing, whatever the configuration says now: the
-// controller holds no issue workspace and has nothing to push, so there is nothing to open a round
-// over, and its pod is replaced by its next launch as it always was.
+// No round covers the project controller's pod (roundCovers), so its pod has drifted from nothing
+// whatever the configuration says now: the controller holds no issue workspace and has nothing to
+// push, so there is nobody in that pod to task and no round to open over it. What this answers
+// nothing for, its next launch replaces instead, for every kind of drift and as it always did
+// (TestALaunchReplacesAPodNoRoundCoversWhoseShapeHasDrifted,
+// TestTheControllersPodIsNotLeftBehindByAConfigurationItCannotCarry): a pod neither covers would
+// run on for ever against a configuration it cannot carry.
 func TestPodDriftIsNothingForTheControllersPod(t *testing.T) {
 	g := newRig(t, nil)
 	loc := g.spawn(controllerSpec(t))

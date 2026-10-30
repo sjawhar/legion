@@ -61,9 +61,10 @@ func (r *Runtime) Resume(ctx context.Context, prev *runtime.Locator, spec runtim
 // they never redial, so they never reach this daemon at all. The first role relaunched after one
 // of these replaces it, and its siblings resume into the new pod.
 //
-// A live pod that has merely drifted from the configuration — a container on another image, the
-// kind's reservation, an operator volume or mount, the disk size, the role's overlays, the secrets
-// broker's enrollment or the session store (PodDrift) — is kept, and this role is started in it.
+// A live pod a round covers (roundCovers) that has merely drifted from the configuration — a
+// container on another image, the kind's reservation, an operator volume or mount, the disk size,
+// the role's overlays, the secrets broker's enrollment or the session store (PodDrift) — is kept,
+// and this role is started in it.
 // Such a pod is replaced by an update round, which first tasks every worker in it to push its work
 // and answer, and then ends the pod (ReplacePod): replacing it at a launch would end every role's
 // turn in it and delete the issue's disk with everything unpushed on it (INFRA-484). A launch into
@@ -76,6 +77,16 @@ func (r *Runtime) Resume(ctx context.Context, prev *runtime.Locator, spec runtim
 // registers, and so never answers the round that is to replace that pod. A pod whose template says
 // nothing this daemon can read is replaced at the launch instead, as every drifted pod was before
 // the round.
+//
+// A live pod no round covers is replaced here for every kind of drift instead, as every launch did
+// before the round existed: no round is ever opened over such a pod, so a launch that kept it
+// would leave its role in a pod the configuration has left behind for ever (movedInPod,
+// roundCovers). Its three facets reach this launch as moved addresses, and the shape its template
+// was built from is read here (shapeDrift, the one reading PodDrift takes of a covered pod's
+// shape). A launch installing a stale-plugin pair into such a pod keeps it, as it always did
+// (spec.Plugins, LEGION-164): the install, not a fresh pod on the configured image, is what brings
+// that agent onto the current plugin, and a pod replaced for any other reason in the same sweep
+// still is.
 //
 // Replacing a live pod — its Sandbox Running, the pod its own, not ended, its init containers
 // passed — ends the process of every role
@@ -138,8 +149,12 @@ func (r *Runtime) relaunch(ctx context.Context, prev *runtime.Locator, spec runt
 	live := s.mode() != modeSuspended && ownedBy(pod, s.UID) && !terminal(pod) && initExit == nil
 	installing := l.spec.Plugins != nil
 	migrate := supersededDisk(s, l)
+	// A live pod no round covers is this launch's to replace for every kind of drift: its three
+	// facets come through movedInPod, and the shape its template was built from is read here,
+	// unless this launch is installing a stale-plugin pair into it (roundCovers, shapeDrift).
 	replace := !live || migrate ||
-		slices.ContainsFunc(l.roles, func(role claim.Role) bool { return len(r.movedInPod(pod, role)) > 0 })
+		slices.ContainsFunc(l.roles, func(role claim.Role) bool { return len(r.movedInPod(pod, role)) > 0 }) ||
+		(!installing && !roundCovers(l.kind) && len(r.shapeDrift(s, l.kind)) > 0)
 	if !replace {
 		bound, err := r.launcherBound(bounded, s, pod, &l)
 		if err != nil {
