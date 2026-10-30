@@ -2278,7 +2278,9 @@ jobs:
       # package binaries makes all of their per-test database cleanup queue on the service's one
       # checkpointer, so run it before the rest of the module. Alone it takes close to go test's
       # default ten minutes (523 s on a workstation), and the documents package about nine with the
-      # rest, so every package here gets 20.
+      # rest, so every package here gets 20. The API package's live-feed and delivery-hub tests also
+      # wait for the event log's safe horizon, which any open transaction on this job's Postgres
+      # delays.
       - name: Unit test envoy Go package
         run: |
           go test -timeout 20m ./internal/dispatch/api

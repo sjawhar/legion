@@ -181,7 +181,7 @@ const (
 )
 
 // deliveryHubFeedBuffer is the hub's slots on the relay's feed: more than one relay page
-// (eventRelayPage), which the relay publishes at once, so a page never overflows an intake that
+// (maxEventReplay), which the relay publishes at once, so a page never overflows an intake that
 // was busy when it came.
 const deliveryHubFeedBuffer = 1024
 
@@ -199,7 +199,9 @@ const deliveryHubFeedBuffer = 1024
 // with no open page holds no connection for the hub and reads neither log for it. A generation
 // runs three goroutines on a context of its own: the listener; the intake, which alone moves the
 // change log's cursor, applies the relay's events and marks views dirty; and the worker, which
-// alone recomputes, so one recompute runs at a time. A generation owns its views and conns, and
+// alone recomputes, so one recompute runs at a time. Its relay subscription, which waits for a
+// safe horizon, is taken on a fourth that ends once it has (seedEvents), at the start and after
+// a feed closes. A generation owns its views and conns, and
 // the drop of its last conn is what stops it, so a goroutine of a stopped generation reaches only
 // its own empty maps, never the next generation's, and returns once its context ends.
 type deliveryHub struct {
@@ -232,12 +234,15 @@ type deliveryHub struct {
 type hubGeneration struct {
 	ctx  context.Context
 	stop context.CancelFunc
-	// ready closes once the intake has subscribed to the relay's feed and read where the change log
-	// stands, which the worker waits for.
+	// ready closes once the intake has read where the change log stands, which the worker waits
+	// for. The relay subscription is taken apart (seedEvents), so neither waits on the horizon.
 	ready chan struct{}
 	// Each wake holds at most one pending signal: what it asks for covers every signal before it.
 	wakeWork, wakeChanges, connected chan struct{}
 	barrier                          chan chan struct{}
+	// feeds hands the intake the relay subscription seedEvents took; one slot, as one runs at a
+	// time.
+	feeds chan hubEventFeed
 
 	views map[string]*deliveryView // by canonical view key
 	conns map[deliveryLiveConn]map[string]*deliverySub
@@ -364,10 +369,12 @@ type deliveryFreshnessVerdict struct {
 
 // deliveryHubNote is one thing the hub did, for a test's observe.
 type deliveryHubNote struct {
-	what    string // "recompute begin", "recompute read", "recompute end", "connected", "event", "feed closed"
-	view    string // the view's key
-	cause   string
-	sent    int
+	what  string // "recompute begin", "recompute read", "recompute end", "connected", "events seeded", "event", "feed closed"
+	view  string // the view's key
+	cause string
+	sent  int
+	// eventID is the event an "event" note applied, or the head an "events seeded" note's feed
+	// began at.
 	eventID int64
 }
 
@@ -407,7 +414,8 @@ func newDeliveryHub(s *server, lifetime context.Context, clock hubClock) *delive
 	}
 }
 
-// startLocked runs a new generation's listener, intake and worker, with mu held.
+// startLocked runs a new generation's listener, intake, worker and first relay subscribe, with mu
+// held.
 func (h *deliveryHub) startLocked() *hubGeneration {
 	ctx, stop := context.WithCancel(h.lifetime)
 	g := &hubGeneration{
@@ -415,6 +423,7 @@ func (h *deliveryHub) startLocked() *hubGeneration {
 		ready:    make(chan struct{}),
 		wakeWork: make(chan struct{}, 1), wakeChanges: make(chan struct{}, 1), connected: make(chan struct{}, 1),
 		barrier: make(chan chan struct{}),
+		feeds:   make(chan hubEventFeed, 1),
 		views:   map[string]*deliveryView{},
 		conns:   map[deliveryLiveConn]map[string]*deliverySub{},
 		p0:      map[string]struct{}{},
@@ -433,6 +442,7 @@ func (h *deliveryHub) startLocked() *hubGeneration {
 	go func() { defer h.running.Done(); listener.Run(ctx) }()
 	go func() { defer h.running.Done(); h.intake(g) }()
 	go func() { defer h.running.Done(); h.work(g) }()
+	h.seedEvents(g)
 	h.generation = g
 	return g
 }

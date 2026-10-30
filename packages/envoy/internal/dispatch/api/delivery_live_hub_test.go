@@ -32,8 +32,6 @@ type hubRig struct {
 	deps     Deps
 	hub      *deliveryHub
 	relay    *eventStreamRelay
-	// relayReads counts the relay's page reads of the event log, each counted once it returns.
-	relayReads atomic.Int64
 	// clock is the hub's clock; a test dates the rows it writes from it, so where they fall in a
 	// view's window is the test's choice rather than the wall clock's.
 	clock *fakeHubClock
@@ -44,7 +42,7 @@ type hubRig struct {
 }
 
 // newHubRig starts a hub on a new test server, on a clock that runs with the wall clock from noon
-// UTC (newNoonHubClock); configure, when given, sets the hub's seams before anything subscribes.
+// UTC (newNoonHubClock); configure, when given, sets the hub's seams before it starts.
 func newHubRig(t *testing.T, configure func(*deliveryHub)) *hubRig {
 	t.Helper()
 	handler, database, deps := newTestServer(t, testServerOptions{})
@@ -169,18 +167,16 @@ func (c *fakeHubClock) Advance(d time.Duration) {
 	}
 }
 
-// hubOn starts a hub and its relay on an existing test server, as a second Dispatch task's would be.
+// hubOn builds a hub and its relay on an existing test server, as a second Dispatch task's would
+// be. Nothing runs until the first Subscribe starts a generation, which takes the relay's feed on
+// a goroutine of its own; a test that must have the hub holding it, and acting on everything its
+// setup wrote, waits with settle.
 func hubOn(t *testing.T, handler http.Handler, database *store.Store, deps Deps, clock *fakeHubClock, configure func(*deliveryHub)) *hubRig {
 	t.Helper()
 	rig := &hubRig{handler: handler, database: database, deps: deps, clock: clock}
 	lifetime, cancel := context.WithCancel(context.Background())
 	served := directServer(deps)
 	rig.relay = newEventStreamRelay(served, lifetime)
-	rig.relay.readAfter = func(ctx context.Context, after int64) ([]model.Event, error) {
-		page, err := served.readEventsAfterID(ctx, after, eventRelayPage)
-		rig.relayReads.Add(1)
-		return page, err
-	}
 	served.eventRelay = rig.relay
 	rig.hub = newDeliveryHub(served, lifetime, clock)
 	rig.hub.observe = func(note deliveryHubNote) {
@@ -205,6 +201,94 @@ func (r *hubRig) changeCursor() int64 {
 	r.hub.mu.Lock()
 	defer r.hub.mu.Unlock()
 	return r.hub.generation.changeSeq
+}
+
+// settle waits until the hub has acted on everything the test's setup wrote, so none of it counts
+// against the measurement that follows: its change cursor at the delivery change log's newest
+// entry (settings and pull requests seeded through delivery.PutSettings and its kin), its feed at
+// or past the event log's head, and then no recompute for longer than a view's quiet window, by
+// which time a view either dirtied has begun and finished its recompute. The hub takes delivery
+// changes independently of the safe horizon the relay reads events up to, and a transaction
+// another package holds open on the shared test Postgres can keep that horizon below the setup's
+// events for a while, so either can land after the test's snapshots.
+func (r *hubRig) settle(t *testing.T) {
+	t.Helper()
+	latest, err := delivery.LatestChangeSeq(t.Context(), r.database.Pool)
+	if err != nil {
+		t.Fatalf("read the newest delivery change: %v", err)
+	}
+	for deadline := time.Now().Add(eventFeedWait); r.changeCursor() < latest; time.Sleep(10 * time.Millisecond) {
+		if time.Now().After(deadline) {
+			t.Fatalf("the hub's change cursor did not reach %d within %s", latest, eventFeedWait)
+		}
+	}
+	r.waitEventsThrough(t, eventHead(t, r.database), "the log's head before the measurement")
+	r.waitNoRecompute(t, 2*viewQuiet)
+}
+
+// waitEventsThrough waits until the hub holds every event through want: either its feed began at
+// or above want, whose events its first read of the database already held, or it applied one at
+// or above want. The wait is generous: an open write anywhere on the test cluster holds back the
+// safe horizon the relay publishes up to.
+func (r *hubRig) waitEventsThrough(t *testing.T, want int64, what string) {
+	t.Helper()
+	through := func() int64 {
+		r.mu.Lock()
+		defer r.mu.Unlock()
+		var highest int64
+		for _, note := range r.notes {
+			if note.what == "events seeded" || note.what == "event" {
+				highest = max(highest, note.eventID)
+			}
+		}
+		return highest
+	}
+	for deadline := time.Now().Add(eventFeedWait); ; time.Sleep(10 * time.Millisecond) {
+		if got := through(); got >= want {
+			return
+		} else if time.Now().After(deadline) {
+			t.Fatalf("the hub holds the event log through %d after %s, want %d (%s)", got, eventFeedWait, want, what)
+		}
+	}
+}
+
+// waitNoRecompute waits until the hub has begun or ended no recompute for quiet. It counts no
+// other note: while a gap stands open above the safe horizon, which a transaction held anywhere on
+// the shared test Postgres keeps open, the relay re-reads the log every 10-250 ms, and a wait for
+// no note at all could last as long as that transaction.
+func (r *hubRig) waitNoRecompute(t *testing.T, quiet time.Duration) {
+	t.Helper()
+	recomputes := func() int {
+		r.mu.Lock()
+		defer r.mu.Unlock()
+		n := 0
+		for _, note := range r.notes {
+			if note.what == "recompute begin" || note.what == "recompute end" {
+				n++
+			}
+		}
+		return n
+	}
+	deadline := time.Now().Add(eventFeedWait)
+	last, since := recomputes(), time.Now()
+	for time.Since(since) < quiet {
+		if time.Now().After(deadline) {
+			t.Fatalf("the hub was still recomputing after %s", eventFeedWait)
+		}
+		time.Sleep(10 * time.Millisecond)
+		if n := recomputes(); n != last {
+			last, since = n, time.Now()
+		}
+	}
+}
+
+// isP0 is whether the hub's generation holds key among the open P0 issues, which it keeps from the
+// issue events it acts on (applyEventLocked).
+func (r *hubRig) isP0(key string) bool {
+	r.hub.mu.Lock()
+	defer r.hub.mu.Unlock()
+	_, p0 := r.hub.generation.p0[key]
+	return p0
 }
 
 // mark is how many notes the hub has made, for counting the ones after it.
@@ -562,6 +646,7 @@ func TestAPRChecksRunMarksOnlyPipelineViews(t *testing.T) {
 	rig.hub.Subscribe(conn, subscribeFrame("p", livePipelineView(nil)))
 	conn.firstSnapshots(t, 5*time.Second, "t", "m", "p")
 
+	rig.settle(t)
 	start := rig.mark()
 	now := rig.clock.Now()
 	started, done := now.Add(-time.Hour), now.Add(-50*time.Minute)
@@ -852,9 +937,10 @@ func TestAnIssueTitleChangeReachesPagesThatNameTheIssue(t *testing.T) {
 	rig.hub.Subscribe(conn, subscribeFrame("other", timelineRange(time.Date(2024, 6, 1, 0, 0, 0, 0, time.UTC), time.Date(2024, 6, 8, 0, 0, 0, 0, time.UTC), "")))
 	held := conn.firstSnapshots(t, 5*time.Second, "names", "other")["names"].Body
 
+	rig.settle(t)
 	start := rig.mark()
 	patchHubIssue(t, rig.handler, named, map[string]any{"title": "Ship the widgets"})
-	delta := conn.delta(t, 3*time.Second, "names")
+	delta := conn.delta(t, eventFeedWait, "names")
 	if got := liveMapValues(t, delta, "issue_titles"); got[named] != "Ship the widgets" {
 		t.Fatalf("the delta's issue_titles = %v, want %s retitled", got, named)
 	}
@@ -880,7 +966,7 @@ func TestAParentsComponentChangeReachesPagesHoldingItsChildren(t *testing.T) {
 
 	// The child inherits what its parent chooses.
 	patchHubIssue(t, rig.handler, parent, map[string]any{"components": map[string]any{"mode": "explicit", "ids": []string{"api"}}})
-	delta := conn.delta(t, 3*time.Second, "t")
+	delta := conn.delta(t, eventFeedWait, "t")
 	if got := liveUpsertIDs(t, delta, "prs"); !slices.Equal(got, []string{"acme/widgets#1"}) {
 		t.Fatalf("the parent's component change upserts %v, want the child's pull request", got)
 	}
@@ -1136,7 +1222,7 @@ func TestAResetEventLogIsCaughtAndEveryViewRecomputed(t *testing.T) {
 		t.Fatalf("truncate events: %v", err)
 	}
 	patchHubIssue(t, rig.handler, key, map[string]any{"title": "Ship the widgets"})
-	delta := conn.delta(t, 3*time.Second, "t")
+	delta := conn.delta(t, eventFeedWait, "t")
 	if got := liveMapValues(t, delta, "issue_titles"); got[key] != "Ship the widgets" {
 		t.Fatalf("after the event log's reset the delta's issue_titles = %v, want %s retitled", got, key)
 	}
@@ -1270,6 +1356,108 @@ func TestAClosedFeedReloadsTheOpenP0sAndRecomputesEveryView(t *testing.T) {
 	requireEveryViewShowsTheUnownedP0s("the reloaded P0 lowered to P1")
 }
 
+// TestAHubActsOnAnEventOnlyOnceEveryLowerIDIsFinal: event ids are not commit order, so a write
+// that drew the lower id a can still be open after one that drew b > a has committed. The hub acts
+// only on what the relay publishes, and the relay publishes only up to the safe horizon, which a's
+// open transaction holds below a: so the hub acts on neither while a is open (acting on b would
+// leave a to a feed that will never carry it), and on both once a commits. Each event makes its
+// own issue a P0 in the hub's view, which is what shows it was acted on.
+func TestAHubActsOnAnEventOnlyOnceEveryLowerIDIsFinal(t *testing.T) {
+	rig := newHubRig(t, nil)
+	seedHubSettings(t, rig.database)
+	first := createHubIssue(t, rig.handler, map[string]any{"title": "First"})
+	second := createHubIssue(t, rig.handler, map[string]any{"title": "Second"})
+	conn := newFakeLiveConn()
+	rig.hub.Subscribe(conn, subscribeFrame("t", presetView(deliveryLiveTimeline, 7, "")))
+	conn.snapshot(t, 5*time.Second, "t")
+	rig.settle(t)
+
+	alice := model.Actor{Kind: "user", ID: "alice"}
+	ctx := t.Context()
+	open, err := rig.database.Pool.Begin(ctx)
+	if err != nil {
+		t.Fatalf("begin the lower id's transaction: %v", err)
+	}
+	t.Cleanup(func() { _ = open.Rollback(context.Background()) })
+	low, err := rig.deps.Events.Append(ctx, open, issueOwner(first).event("issue.updated", alice,
+		map[string]any{"key": first, "priority": 0, "status": "open"}))
+	if err != nil {
+		t.Fatalf("append the lower id: %v", err)
+	}
+	high := appendHubEvent(t, rig, issueOwner(second).event("issue.updated", alice,
+		map[string]any{"key": second, "priority": 0, "status": "open"}))
+	if high.ID <= low.ID {
+		t.Fatalf("event ids %d (open) and %d (committed) are not out of commit order, so this test proves nothing", low.ID, high.ID)
+	}
+
+	for deadline := time.Now().Add(time.Second); time.Now().Before(deadline); time.Sleep(50 * time.Millisecond) {
+		if rig.isP0(first) || rig.isP0(second) {
+			t.Fatalf("while %d is open: %s a P0 = %v, %s a P0 = %v; want neither acted on",
+				low.ID, first, rig.isP0(first), second, rig.isP0(second))
+		}
+	}
+
+	if err := open.Commit(ctx); err != nil {
+		t.Fatalf("commit the lower id: %v", err)
+	}
+	rig.waitEventsThrough(t, high.ID, "both ids committed")
+	if !rig.isP0(first) || !rig.isP0(second) {
+		t.Fatalf("after both commits: %s a P0 = %v, %s a P0 = %v; want both acted on", first, rig.isP0(first), second, rig.isP0(second))
+	}
+}
+
+// A transaction that holds an id anywhere on the Postgres instance keeps every safe horizon of the
+// event log from being proven, and an operator's psql session, a migration or another database's
+// job can hold one for as long as it likes. A fresh hub still serves its pages meanwhile: the
+// delivery change log has nothing to do with that horizon, and the relay subscription that waits
+// on it is taken on a goroutine of the generation's own (seedEvents), so the hub is ready at once,
+// answers a page its snapshot and carries a delivery change to it while the transaction is open,
+// and the issue event committed meanwhile reaches the page once the horizon is proven.
+func TestAFreshHubServesDeliveryChangesWhileATransactionHoldsTheEventHorizon(t *testing.T) {
+	handler, database, deps := newTestServer(t, testServerOptions{})
+	rig := hubOn(t, handler, database, deps, newNoonHubClock(), nil)
+	seedHubSettings(t, rig.database)
+	key := createHubIssue(t, rig.handler, map[string]any{"title": "Ship widgets"})
+	upsertPR(t, rig.database, prNaming(1, rig.clock.Now().Add(-3*time.Hour), key))
+
+	const hold = 3 * time.Second
+	heldAt := time.Now()
+	release := holdClusterTransactionID(t, hold)
+	// The page's subscribe starts the hub's generation.
+	conn := newFakeLiveConn()
+	rig.hub.Subscribe(conn, subscribeFrame("t", presetView(deliveryLiveTimeline, 7, "")))
+	rig.hub.mu.Lock()
+	ready := rig.hub.generation.ready
+	rig.hub.mu.Unlock()
+	select {
+	case <-ready:
+	case <-time.After(time.Second):
+		t.Fatal("the hub was not ready a second after it started, while a transaction held the event horizon")
+	}
+	held := conn.snapshot(t, hold, "t").Body
+
+	upsertPR(t, rig.database, hubPR(2, rig.clock.Now().Add(-time.Hour)))
+	delta := conn.delta(t, hold, "t")
+	if elapsed := time.Since(heldAt); elapsed >= hold {
+		t.Fatalf("the delivery change reached the page %s after the transaction began, once its %s hold could have ended", elapsed, hold)
+	}
+	if got := liveUpsertIDs(t, delta, "prs"); !slices.Equal(got, []string{"acme/widgets#2"}) {
+		t.Fatalf("the change's delta upserts %v, want acme/widgets#2", got)
+	}
+	held = requireLandsOnGET(t, rig.handler, deliveryLiveTimeline, held, delta, "")
+
+	patchHubIssue(t, rig.handler, key, map[string]any{"title": "Ship the widgets"})
+	if elapsed := time.Since(heldAt); elapsed >= hold {
+		t.Fatalf("the retitle committed %s after the transaction began, once its %s hold could have ended", elapsed, hold)
+	}
+	release()
+	delta = conn.delta(t, eventFeedWait, "t")
+	if got := liveMapValues(t, delta, "issue_titles"); got[key] != "Ship the widgets" {
+		t.Fatalf("after the hold the delta's issue_titles = %v, want %s retitled", got, key)
+	}
+	requireLandsOnGET(t, rig.handler, deliveryLiveTimeline, held, delta, "")
+}
+
 // countBackends counts the backends the pg_stat_activity condition where selects.
 func countBackends(t *testing.T, database *store.Store, where string) int {
 	t.Helper()
@@ -1382,7 +1570,7 @@ func TestAnEventAnotherTaskCommittedReachesThisHub(t *testing.T) {
 	otherTask := http.NewServeMux()
 	t.Cleanup(Register(otherTask, t.Context(), deps).Wait)
 	patchHubIssue(t, otherTask, key, map[string]any{"title": "Ship the widgets"})
-	delta := conn.delta(t, 3*time.Second, "t")
+	delta := conn.delta(t, eventFeedWait, "t")
 	if got := liveMapValues(t, delta, "issue_titles"); got[key] != "Ship the widgets" {
 		t.Fatalf("the delta's issue_titles = %v, want %s retitled by the other task", got, key)
 	}
@@ -1392,18 +1580,23 @@ func TestAnEventAnotherTaskCommittedReachesThisHub(t *testing.T) {
 // acquires is how many connections the shared pool has handed out so far.
 func acquires(database *store.Store) int64 { return database.Pool.Stat().AcquireCount() }
 
-// waitConnected waits for the hub's listener to have connected and caught the change log up, and
-// for the relay's first read of the event log after its own LISTEN, after which neither reads
-// anything until something changes.
+// waitConnected waits for the hub's listener to have connected and caught the change log up, for
+// the hub to hold the relay's feed, and then for the shared pool to stand still for 300 ms: the
+// generation's start, its reads of the change log and the relay's reset check all take a
+// connection, and a measurement of what one change costs is taken after them.
 func (r *hubRig) waitConnected(t *testing.T) {
 	t.Helper()
 	r.waitFor(t, 0, 5*time.Second, "the listener's connection", func(note deliveryHubNote) bool { return note.what == "connected" })
-	deadline := time.Now().Add(5 * time.Second)
-	for r.relayReads.Load() == 0 {
+	r.waitFor(t, 0, eventFeedWait, "the hub's event feed", func(note deliveryHubNote) bool { return note.what == "events seeded" })
+	deadline := time.Now().Add(eventFeedWait)
+	for last, since := acquires(r.deps.Store), time.Now(); time.Since(since) < 300*time.Millisecond; {
 		if time.Now().After(deadline) {
-			t.Fatal("the relay read nothing within 5s")
+			t.Fatalf("the hub and its relay were still taking connections after %s", eventFeedWait)
 		}
 		time.Sleep(10 * time.Millisecond)
+		if got := acquires(r.deps.Store); got != last {
+			last, since = got, time.Now()
+		}
 	}
 }
 
@@ -1432,6 +1625,26 @@ func TestAPresetViewSendsItsOldestPullRequestLeavingWithoutAReadingTheDatabase(t
 	rig.hub.Subscribe(conn, subscribeFrame("p", presetView(deliveryLiveTimeline, 28, "")))
 	snapshot := conn.snapshot(t, 5*time.Second, "p")
 	rig.waitConnected(t)
+	rig.settle(t)
+	// A delivery change the snapshot did not hold may have marked the view dirty, and on this
+	// clock, standing still, its recompute is due only once the clock moves. Moving it by less than
+	// the two seconds the oldest pull request has left runs that recompute before the measurement,
+	// and its delta, if any, is applied to the page's copy here.
+	held := snapshot.Body
+	clock.Advance(2 * viewQuiet)
+	rig.waitNoRecompute(t, 2*viewQuiet)
+	for drained := false; !drained; {
+		select {
+		case frame := <-conn.frames:
+			earlier, ok := frame.(DeliveryLiveDelta)
+			if !ok {
+				t.Fatalf("frame before the expiry = %+v, want a delta of a change the snapshot did not hold", frame)
+			}
+			held = requireLandsOnGET(t, rig.handler, deliveryLiveTimeline, held, earlier, "")
+		default:
+			drained = true
+		}
+	}
 	before := acquires(rig.database)
 
 	clock.Advance(3 * time.Second)
@@ -1443,7 +1656,7 @@ func TestAPresetViewSendsItsOldestPullRequestLeavingWithoutAReadingTheDatabase(t
 		t.Fatalf("the expiry's delta removes %v, want acme/widgets#1", got)
 	}
 	conn.none(t, time.Second, "the expiry's one delta")
-	requireLandsOnGET(t, rig.handler, deliveryLiveTimeline, snapshot.Body, delta, "")
+	requireLandsOnGET(t, rig.handler, deliveryLiveTimeline, held, delta, "")
 }
 
 func TestAPipelineViewMovesItsDaysAtMidnightWithoutReadingTheDatabase(t *testing.T) {
@@ -1454,6 +1667,7 @@ func TestAPipelineViewMovesItsDaysAtMidnightWithoutReadingTheDatabase(t *testing
 	rig.hub.Subscribe(conn, subscribeFrame("p", livePipelineView(nil)))
 	conn.snapshot(t, 5*time.Second, "p")
 	rig.waitConnected(t)
+	rig.settle(t)
 	before := acquires(rig.database)
 
 	now := clock.Now()
@@ -1875,6 +2089,7 @@ func TestABurstCoalescesIntoOneRecompute(t *testing.T) {
 	rig.hub.Subscribe(conn, subscribeFrame("p", presetView(deliveryLiveTimeline, 7, "")))
 	conn.snapshot(t, 5*time.Second, "p")
 
+	rig.settle(t)
 	start := rig.mark()
 	now := clock.Now()
 	for n := 1; n <= 50; n++ {
@@ -1950,6 +2165,7 @@ func TestAChangeOutsideAWindowRecomputesNothing(t *testing.T) {
 	rig.hub.Subscribe(conn, subscribeFrame("m", measuresRange(from, to, "")))
 	conn.snapshot(t, 5*time.Second, "m")
 
+	rig.settle(t)
 	start := rig.mark()
 	upsertPR(t, rig.database, hubPR(1, rig.clock.Now()))
 	rig.hub.catchUpNow()

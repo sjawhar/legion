@@ -1,4 +1,4 @@
--- 0149_comment_fallback_copies.up.sql
+-- 0150_comment_fallback_copies.up.sql
 --
 -- The copies of a new comment the outbox held back for a mention no answer has come for within a
 -- claim lease (internal/dispatch/outbox/mentions.go): one row per (comment, destination topic)

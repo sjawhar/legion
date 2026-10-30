@@ -14,29 +14,45 @@ import (
 
 // intake moves g's change-log cursor and applies the relay's events, until g ends.
 //
-// It subscribes to the relay before it reads anything, so no event falls between the two: an event
-// at or below the subscription's head was committed before the subscription returned, so the
-// reads that follow it (the open P0 issues here, each view's first recompute after ready) see it,
-// and every event above the head arrives on the feed. An event both read and delivered is applied
-// twice, which marks a view dirty once more and leaves p0 as the newest payload says. The
-// listener's connection (onConnected) catches the change log up after its LISTEN for the same
-// reason.
+// ready closes once the change log's cursor is read. The relay subscription the events arrive on
+// waits for a safe horizon (firstRelayCursor), which a transaction holding an id anywhere on the
+// Postgres instance holds back for as long as it stays open, and neither the worker's answers nor
+// the change log depend on it, so it is taken on a goroutine of its own (seedEvents) and handed to
+// this one (applyFeed). Until it is, the hub acts on no event; the subscription's head, read
+// before the open P0 issues it arrives with, is what leaves no gap: every event at or below the
+// head was committed and is final before the reads that follow it (those P0 issues, each view's
+// recompute) run, and every event above it arrives on the feed. The listener's connection
+// (onConnected) catches the change log up after its LISTEN for the same reason.
 func (h *deliveryHub) intake(g *hubGeneration) {
-	feed, ok := h.follow(g)
-	if !ok {
-		return
-	}
-	defer func() { feed.cancel() }()
-	for attempt := 1; !h.readStart(g); attempt++ {
+	var feed relaySubscription
+	var held, open bool
+	defer func() {
+		if held {
+			feed.cancel()
+		}
+	}()
+	for attempt := 1; !h.readChangeCursor(g); attempt++ {
 		if !waitFor(g.ctx, pglisten.RedialBackoff(attempt)) {
 			return
 		}
 	}
 	close(g.ready)
 	for {
+		var events <-chan relayedEvent
+		if open {
+			events = feed.events
+		}
 		select {
 		case <-g.ctx.Done():
 			return
+		case taken := <-g.feeds:
+			// The overflowed or ended subscription is cancelled only once the new one stands, so
+			// the relay's generation runs on between the two.
+			if held {
+				feed.cancel()
+			}
+			feed, held, open = taken.feed, true, true
+			h.applyFeed(g, taken)
 		case <-g.wakeChanges:
 			h.catchUp(g)
 		case <-g.connected:
@@ -45,23 +61,15 @@ func (h *deliveryHub) intake(g *hubGeneration) {
 		case done := <-g.barrier:
 			h.catchUp(g)
 			close(done)
-		case relayed, open := <-feed.events:
-			if !open {
-				// The feed fell its buffer behind, or the relay's generation ended (a reset of the event
-				// log): events may have gone by unapplied. Subscribe again first, as at
-				// the start, then read the open P0 issues afresh and recompute every view, which reads
-				// what the missed events changed. The overflowed subscription is cancelled only once the
-				// new one stands, so the relay's generation runs on between the two.
+		case relayed, more := <-events:
+			if !more {
+				// The feed fell its buffer behind, or the relay's generation ended (a reset of the
+				// event log): events may have gone by unapplied. Subscribe again, then read the
+				// open P0 issues afresh and recompute every view, which reads what the missed
+				// events changed (applyFeed).
+				open = false
 				h.note(deliveryHubNote{what: "feed closed"})
-				next, ok := h.follow(g)
-				if !ok {
-					return
-				}
-				feed.cancel()
-				feed = next
-				if !h.reload(g) {
-					return
-				}
+				h.seedEvents(g)
 				continue
 			}
 			h.receive(g, relayed.Event)
@@ -69,34 +77,76 @@ func (h *deliveryHub) intake(g *hubGeneration) {
 	}
 }
 
-// follow subscribes g to the relay's feed, trying again while the relay cannot start (its cursor
-// read failed); false once g has ended.
-func (h *deliveryHub) follow(g *hubGeneration) (relaySubscription, bool) {
-	for attempt := 1; ; attempt++ {
-		feed, err := h.server.eventRelay.subscribe(g.readContext(), deliveryHubFeedBuffer)
-		if err == nil {
-			return feed, true
-		}
-		if g.ctx.Err() == nil {
-			slog.Warn("dispatch: delivery live hub could not subscribe to the live event stream; retrying", "error", err)
-		}
-		if !waitFor(g.ctx, pglisten.RedialBackoff(attempt)) {
-			return relaySubscription{}, false
-		}
-	}
+// hubEventFeed is a relay subscription seedEvents took for the intake, with the open P0 issues as
+// they stood once it had.
+type hubEventFeed struct {
+	feed relaySubscription
+	p0   map[string]struct{}
 }
 
-// readStart reads where the change log stands and the open P0 issues.
-func (h *deliveryHub) readStart(g *hubGeneration) bool {
+// seedEvents subscribes g to the relay's feed on a goroutine of its own, run on g's context, and
+// hands it to the intake on g.feeds; until the intake takes it the hub acts on no event. It is
+// the generation's first subscription and the one after a feed closed.
+//
+// The subscribe waits for the relay's first cursor when it starts a generation, which an open
+// write anywhere on the instance can hold back, which is why it does not run on the intake's
+// goroutine: the hub's ready, its delivery changes and its views' answers do not wait for the
+// event horizon. The open P0 issues are read after the subscription stands, so they hold every
+// event at or below its head, none of which arrives on the feed.
+//
+// A subscribe or a read that fails is tried again after the listener's redial backoff. The hand
+// over gives up when g ends, so a feed the intake will never take leaves no goroutine behind for
+// running to wait on, and no subscription the relay would keep its generation running for.
+func (h *deliveryHub) seedEvents(g *hubGeneration) {
+	h.running.Add(1)
+	go func() {
+		defer h.running.Done()
+		for attempt := 1; ; attempt++ {
+			feed, err := h.server.eventRelay.subscribe(g.readContext(), deliveryHubFeedBuffer)
+			var p0 map[string]struct{}
+			if err == nil {
+				if p0, err = delivery.OpenP0Keys(g.readContext(), h.server.deps.Store.Pool); err != nil {
+					feed.cancel()
+				}
+			}
+			if err == nil {
+				select {
+				case g.feeds <- hubEventFeed{feed: feed, p0: p0}:
+				case <-g.ctx.Done():
+					feed.cancel()
+				}
+				return
+			}
+			if g.ctx.Err() != nil {
+				return
+			}
+			slog.Warn("dispatch: delivery live hub could not take the live event stream's feed; retrying", "error", err)
+			if !waitFor(g.ctx, pglisten.RedialBackoff(attempt)) {
+				return
+			}
+		}
+	}()
+}
+
+// applyFeed takes the feed seedEvents stood up, with the open P0 issues read with it, and marks
+// every view dirty: a view computed before it read the database at a moment the hub cannot place
+// against the feed's head, so it may have missed an event at or below it, which no feed will carry.
+func (h *deliveryHub) applyFeed(g *hubGeneration, taken hubEventFeed) {
+	now := h.clock.Now()
+	h.mu.Lock()
+	g.p0 = taken.p0
+	h.dirtyAllLocked(g, now)
+	h.mu.Unlock()
+	h.note(deliveryHubNote{what: "events seeded", eventID: taken.feed.head})
+}
+
+// readChangeCursor reads where the delivery change log stands.
+func (h *deliveryHub) readChangeCursor(g *hubGeneration) bool {
 	ctx, pool := g.readContext(), h.server.deps.Store.Pool
 	seq, err := delivery.LatestChangeSeq(ctx, pool)
 	var at *time.Time
 	if err == nil && seq > 0 {
 		at, err = delivery.ChangeAt(ctx, pool, seq)
-	}
-	var p0 map[string]struct{}
-	if err == nil {
-		p0, err = delivery.OpenP0Keys(ctx, pool)
 	}
 	if err != nil {
 		if g.ctx.Err() == nil {
@@ -107,30 +157,7 @@ func (h *deliveryHub) readStart(g *hubGeneration) bool {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	g.changeSeq, g.changeAt = seq, timeOrZero(at)
-	g.p0 = p0
 	return true
-}
-
-// reload reads the open P0 issues afresh and marks every view dirty, trying the read again while
-// it fails; false once g has ended.
-func (h *deliveryHub) reload(g *hubGeneration) bool {
-	for attempt := 1; ; attempt++ {
-		p0, err := delivery.OpenP0Keys(g.readContext(), h.server.deps.Store.Pool)
-		if err == nil {
-			now := h.clock.Now()
-			h.mu.Lock()
-			defer h.mu.Unlock()
-			g.p0 = p0
-			h.dirtyAllLocked(g, now)
-			return true
-		}
-		if g.ctx.Err() == nil {
-			slog.Warn("dispatch: delivery live hub could not read the open P0 issues; retrying", "error", err)
-		}
-		if !waitFor(g.ctx, pglisten.RedialBackoff(attempt)) {
-			return false
-		}
-	}
 }
 
 // catchUp catches the change log up; a read that fails is tried again a second later.

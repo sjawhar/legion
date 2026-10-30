@@ -85,8 +85,8 @@ func newCountedRelay(t *testing.T, deps Deps) (*eventStreamRelay, chan int64) {
 	relay := newEventStreamRelay(directServer(deps), lifetime)
 	relay.coalesce = time.Millisecond
 	reads := make(chan int64, 1024)
-	relay.readAfter = func(ctx context.Context, after int64) ([]model.Event, error) {
-		page, err := relay.server.readEventsAfterID(ctx, after, eventRelayPage)
+	relay.readAfter = func(ctx context.Context, after, through int64) ([]model.Event, error) {
+		page, err := relay.server.readEventsAfterID(ctx, after, through, maxEventReplay)
 		reads <- after
 		return page, err
 	}
@@ -136,14 +136,33 @@ func receiveRelayedThrough(t *testing.T, subscription <-chan relayedEvent, after
 	}
 }
 
-// waitRelayRead waits for the relay's next page read.
-func waitRelayRead(t *testing.T, reads <-chan int64) {
+// quietRelayReads drains every page read the relay has made and waits until it has made none for
+// 300 ms: a generation's start, its LISTEN catch-up and the re-reads a gap above the horizon
+// schedules all read on their own, so a count of the reads one commit costs is taken after them.
+func quietRelayReads(t *testing.T, reads <-chan int64) {
 	t.Helper()
-	select {
-	case <-reads:
-	case <-time.After(5 * time.Second):
-		t.Fatal("the relay read nothing in 5s")
+	deadline := time.Now().Add(eventFeedWait)
+	for quiet := time.Now(); time.Since(quiet) < 300*time.Millisecond; {
+		if time.Now().After(deadline) {
+			t.Fatalf("the relay was still reading the event log after %s", eventFeedWait)
+		}
+		select {
+		case <-reads:
+			quiet = time.Now()
+		case <-time.After(10 * time.Millisecond):
+		}
 	}
+}
+
+// relayPublished is the id the relay's running generation has published through, and 0 while none
+// runs.
+func relayPublished(relay *eventStreamRelay) int64 {
+	relay.mu.Lock()
+	defer relay.mu.Unlock()
+	if relay.generation == nil {
+		return 0
+	}
+	return relay.generation.cursor
 }
 
 // relayListenBackend selects, in pg_stat_activity, the backends whose last statement is the
@@ -200,10 +219,7 @@ func TestEventStreamRelayReadsNothingWithoutASubscriber(t *testing.T) {
 	idle("before anyone subscribed")
 
 	subscription, cancel, head := subscribeRelay(t, relay)
-	waitRelayRead(t, reads)
-	if count := countBackends(t, database, relayListenBackend); count != 1 {
-		t.Fatalf("%d relay LISTEN backends with one subscriber, want 1", count)
-	}
+	waitForBackends(t, database, 1, relayListenBackend)
 	last := seedEvents(t, database, issue, 1, 0)
 	receiveRelayedThrough(t, subscription, head, last)
 	cancel()
@@ -227,8 +243,10 @@ func TestEventStreamRelayReadsEachCommitOnceForEverySubscriber(t *testing.T) {
 	for index := range subscriptions {
 		subscriptions[index], _, _ = subscribeRelay(t, relay)
 	}
-	// The generation's catch-up after its LISTEN, which finds nothing new.
-	waitRelayRead(t, reads)
+	// The generation's start, its catch-up after its LISTEN and any re-read a gap above the
+	// horizon scheduled, none of which this commit paid for.
+	waitForBackends(t, database, 1, relayListenBackend)
+	quietRelayReads(t, reads)
 
 	committed := seedEvents(t, database, issue, 1, 0)
 	frames := make([][]byte, subscribers)
@@ -269,6 +287,68 @@ func TestEventStreamRelaySubscribeRacingTheLastCancelReceivesTheNextEvent(t *tes
 		receiveRelayedThrough(t, subscription, head, committed)
 		cancelSecond()
 	}
+}
+
+// TestOutOfOrderCommitsOnAnotherProcessReachAnOpenSubscriptionInIDOrder: process A commits two
+// events out of id order -- tx A appends on issue X (id a) and stays open while tx B appends on
+// issue Y (id b > a) and commits -- and the page's socket is on process B. B's relay hears B's
+// commit and must not publish b while a is open: a relay that read `id > cursor` and moved its
+// cursor to b would never publish a, and the page would miss it for good. B's relay reads only up
+// to its own process's horizon, which A's open transaction holds below a however far the two
+// processes are apart, so the subscription on B is sent nothing past a while A is open, and a and
+// then b once A commits.
+func TestOutOfOrderCommitsOnAnotherProcessReachAnOpenSubscriptionInIDOrder(t *testing.T) {
+	first, database := newTestHandlerWithStore(t)
+	issue := createInteractionIssue(t, first, "TEST", "Issue", "A spec")
+	other := createInteractionIssue(t, first, "OTHER", "Other issue", "A spec")
+	second := httptest.NewServer(secondProcessHandler(t, database))
+	t.Cleanup(second.Close)
+	client := openLiveSocketAt(t, gws.DefaultDialer, "ws"+strings.TrimPrefix(second.URL, "http")+"/ws/live", withBearer("agent-token")).read()
+	subscribeEvents(t, client, "events", nil)
+
+	// Appended through a broker of process A's own: B learns of them only from the rows.
+	low, high, commitLow := appendOutOfOrder(t, database, events.NewBroker(), issue.Key, other.Key)
+	expectNoEventAbove(t, client, "events", low-1, time.Second, "on process B while process A's lower id is open")
+	commitLow()
+	expectEventsInOrder(t, client, "events", low, high)
+}
+
+// A gap held open above the safe horizon (an id still open below one that committed) has the relay
+// re-read the event log every 10-250 ms until the gap closes, for as long as the transaction
+// holding it stays open. That re-read asks only the horizon, on the horizon's own connections, and
+// reads the shared pool once the horizon has moved past the generation's cursor, so a gap a long
+// transaction holds open takes no connection a request needs. The reset check, a shared-pool
+// query, runs on the reads a notification wakes.
+func TestARelayGapRereadTakesNoSharedConnectionWhileTheHorizonStandsStill(t *testing.T) {
+	handler, database, deps := newTestServer(t, testServerOptions{})
+	// The relay reads through a pool of its own, so its acquires are its alone.
+	deps.Store = storetest.SecondProcess(t, database)
+	issue := createInteractionIssue(t, handler, "TEST", "Issue", "A spec")
+	other := createInteractionIssue(t, handler, "OTHER", "Other issue", "A spec")
+	relay, reads := newCountedRelay(t, deps)
+	subscription, _, opened := subscribeRelay(t, relay)
+	waitForBackends(t, database, 1, relayListenBackend)
+	quietRelayReads(t, reads)
+
+	low, high, commitLow := appendOutOfOrder(t, database, deps.Events, issue.Key, other.Key)
+	// The higher id's commit notifies: that read checks for a reset, takes the horizon and leaves
+	// the gap open, publishing nothing.
+	select {
+	case event := <-subscription:
+		t.Fatalf("the relay published event %d while the lower id %d was still open", event.Event.ID, low)
+	case <-time.After(time.Second):
+	}
+	before := acquires(deps.Store)
+	time.Sleep(time.Second)
+	if got := acquires(deps.Store); got != before {
+		t.Fatalf("the relay's gap re-reads took %d shared-pool connections while %d stayed open, want none", got-before, low)
+	}
+	if len(reads) != 0 {
+		t.Fatalf("the relay read the event log %d times while the gap below %d stood open, want none", len(reads), high)
+	}
+
+	commitLow()
+	receiveRelayedThrough(t, subscription, opened, high)
 }
 
 // TestEventStreamRelayCatchesUpWhenItsListenerReconnects covers the window a redial leaves: a
@@ -384,6 +464,84 @@ func TestEventStreamRelayRecoversWhenTheEventLogIsReset(t *testing.T) {
 	receiveRelayedThrough(t, reopened, head, next)
 }
 
+// TestEventLogResetClearsTheRelaysHorizon: a reset log (`truncate events restart identity`, what
+// e2e/seed.ts does between browser scenarios) hands out ids from 1 again, far below the horizon the
+// relay read the old log through. The relay forgets that horizon (Horizon.Reset) and takes its new
+// cursor under one proven afresh, ends every subscription open across the reset as it always has,
+// and serves the new log to the subscriptions made after it.
+//
+// The refill here commits out of id order on process A -- id a still open, id b > a committed --
+// and the page's socket is on process B. Without Horizon.Reset, B's horizon stands at the old log's
+// head, above every new id, so its relay takes the new log's b for its cursor at once while a is
+// open, and a subscription made after that reset is never sent a when it commits, though it is sent
+// the event after it. With the horizon forgotten, the relay's new cursor waits for a to end. A
+// subscription made meanwhile finds the relay still on the old cursor, so it hands over only once
+// the relay has reset, and is sent a, which committed after it subscribed, below that new cursor.
+func TestEventLogResetClearsTheRelaysHorizon(t *testing.T) {
+	first, database := newTestHandlerWithStore(t)
+	issue := createInteractionIssue(t, first, "TEST", "Issue", "A spec")
+	other := createInteractionIssue(t, first, "OTHER", "Other issue", "A spec")
+	second := httptest.NewServer(secondProcessHandler(t, database))
+	t.Cleanup(second.Close)
+	dial := func() *socketClient {
+		t.Helper()
+		return openLiveSocketAt(t, gws.DefaultDialer, "ws"+strings.TrimPrefix(second.URL, "http")+"/ws/live", withBearer("agent-token")).read()
+	}
+
+	// B's relay publishes through the old log's head, so its cursor and horizon stand there.
+	across := dial()
+	subscribeEvents(t, across, "events", nil)
+	renameIssue(t, first, issue.Key, "Renamed before the reset")
+	head := eventHead(t, database)
+	expectEventsInOrder(t, across, "events", head)
+
+	if _, err := database.Pool.Exec(t.Context(), `truncate events restart identity cascade`); err != nil {
+		t.Fatalf("reset the event log: %v", err)
+	}
+	low, high, commitLow := appendOutOfOrder(t, database, events.NewBroker(), issue.Key, other.Key)
+	if high >= head {
+		t.Fatalf("event %d committed after the reset is not below the pre-reset head %d: the reset reused no id, so this test proves nothing", high, head)
+	}
+	// Time for B's relay to hear the refill's commit and find the reset.
+	time.Sleep(500 * time.Millisecond)
+	// This subscription hands over only once the relay's reset, which waits for a, has run, so it
+	// subscribes first and a commits once it has had time to reach the relay.
+	waiting := dial()
+	sendEventsSubscribe(t, waiting, "events", nil)
+	time.Sleep(300 * time.Millisecond)
+	commitLow()
+	renameIssue(t, first, issue.Key, "Renamed after the reset")
+
+	// The subscription open across the reset ends without an event of the new log, whose ids it has
+	// already seen stand for other events.
+	for ended := false; !ended; {
+		switch frame := across.next(t, eventFeedWait, "the end of the subscription open across the reset").(type) {
+		case LiveEventFrame:
+			if id := mustEventFrameID(t, frame); id <= head {
+				t.Fatalf("the subscription open across the reset was sent event %d of the new log", id)
+			}
+		case LiveEnded:
+			if frame.Sub != "events" || frame.Reason != "behind" {
+				t.Fatalf("ended = %+v, want the events subscription's, behind", frame)
+			}
+			ended = true
+		default:
+			t.Fatalf("frame = %+v, want the events subscription's end", frame)
+		}
+	}
+	// The subscription made while a was open is sent it first.
+	eventsStartID(t, waiting, "events")
+	if id := mustEventFrameID(t, waiting.event(t, eventFeedWait, "events")); id != low {
+		t.Fatalf("the subscription made while %d was open was sent event %d first, want %d, which committed after it subscribed", low, id, low)
+	}
+
+	// And a subscription made now is served the new log.
+	after := dial()
+	subscribeEvents(t, after, "events", nil)
+	renameIssue(t, first, issue.Key, "Renamed for the subscription made after the reset")
+	expectEventsInOrder(t, after, "events", eventHead(t, database))
+}
+
 // mustEventFrameID is the decimal id an event frame names.
 func mustEventFrameID(t *testing.T, frame LiveEventFrame) int64 {
 	t.Helper()
@@ -477,18 +635,18 @@ func seedLiveEvents(t *testing.T, database *store.Store, seeds []liveEventSeed) 
 // liveUser is the actor of the events a test writes.
 const liveUser = `{"kind":"user","id":"alice"}`
 
-// eventCursorCheck reads the newest event's id and time, and the time of the event at the cursor;
-// once the cursor's row is gone (a reset of the log), cursorAt is nil.
+// eventCursorCheck reads the newest event's id and the time of the event at the cursor; once the
+// cursor's row is gone (a reset of the log), cursorAt is nil.
 func TestEventCursorCheckReadsTheNewestEventAndTheCursorsRow(t *testing.T) {
 	database := storetest.Open(t)
 	ctx := context.Background()
 
-	maxID, maxAt, cursorAt, err := eventCursorCheck(ctx, database.Pool, 0)
+	maxID, cursorAt, err := eventCursorCheck(ctx, database.Pool, 0)
 	if err != nil {
 		t.Fatalf("eventCursorCheck on an empty log: %v", err)
 	}
-	if maxID != 0 || !maxAt.IsZero() || cursorAt != nil {
-		t.Fatalf("an empty log = %d, %v, %v; want 0, zero, nil", maxID, maxAt, cursorAt)
+	if maxID != 0 || cursorAt != nil {
+		t.Fatalf("an empty log = %d, %v; want 0, nil", maxID, cursorAt)
 	}
 
 	base := time.Date(2026, 10, 12, 9, 0, 0, 0, time.UTC)
@@ -497,12 +655,12 @@ func TestEventCursorCheckReadsTheNewestEventAndTheCursorsRow(t *testing.T) {
 		{kind: "artifact.version", actor: liveUser, payload: `{}`, at: base.Add(time.Minute)},
 		{kind: "issue.updated", actor: liveUser, payload: `{}`, at: base.Add(2 * time.Minute)},
 	})
-	maxID, maxAt, cursorAt, err = eventCursorCheck(ctx, database.Pool, ids[1])
+	maxID, cursorAt, err = eventCursorCheck(ctx, database.Pool, ids[1])
 	if err != nil {
 		t.Fatalf("eventCursorCheck: %v", err)
 	}
-	if maxID != ids[2] || !maxAt.Equal(base.Add(2*time.Minute)) {
-		t.Fatalf("newest event = %d at %v, want %d at %v", maxID, maxAt, ids[2], base.Add(2*time.Minute))
+	if maxID != ids[2] {
+		t.Fatalf("newest event = %d, want %d", maxID, ids[2])
 	}
 	if cursorAt == nil || !cursorAt.Equal(base.Add(time.Minute)) {
 		t.Fatalf("the cursor's row time = %v, want %v", cursorAt, base.Add(time.Minute))
@@ -511,19 +669,19 @@ func TestEventCursorCheckReadsTheNewestEventAndTheCursorsRow(t *testing.T) {
 	if _, err := database.Pool.Exec(ctx, `delete from events where id = $1`, ids[1]); err != nil {
 		t.Fatalf("delete the cursor's row: %v", err)
 	}
-	maxID, maxAt, cursorAt, err = eventCursorCheck(ctx, database.Pool, ids[1])
+	maxID, cursorAt, err = eventCursorCheck(ctx, database.Pool, ids[1])
 	if err != nil {
 		t.Fatalf("eventCursorCheck once the cursor's row is gone: %v", err)
 	}
-	if maxID != ids[2] || !maxAt.Equal(base.Add(2*time.Minute)) || cursorAt != nil {
-		t.Fatalf("with the cursor's row gone = %d, %v, %v; want %d, %v, nil", maxID, maxAt, cursorAt, ids[2], base.Add(2*time.Minute))
+	if maxID != ids[2] || cursorAt != nil {
+		t.Fatalf("with the cursor's row gone = %d, %v; want %d, nil", maxID, cursorAt, ids[2])
 	}
 
 	if _, err := database.Pool.Exec(ctx, `truncate events restart identity cascade`); err != nil {
 		t.Fatalf("reset the event log: %v", err)
 	}
 	reset := seedLiveEvents(t, database, []liveEventSeed{{kind: "issue.created", actor: liveUser, payload: `{}`, at: base.Add(time.Hour)}})
-	maxID, _, cursorAt, err = eventCursorCheck(ctx, database.Pool, ids[2])
+	maxID, cursorAt, err = eventCursorCheck(ctx, database.Pool, ids[2])
 	if err != nil {
 		t.Fatalf("eventCursorCheck after a reset: %v", err)
 	}
@@ -535,12 +693,11 @@ func TestEventCursorCheckReadsTheNewestEventAndTheCursorsRow(t *testing.T) {
 // cursorCheck is one answer of eventCursorCheck.
 type cursorCheck struct {
 	maxID    int64
-	maxAt    time.Time
 	cursorAt *time.Time
 }
 
 func (c cursorCheck) equal(other cursorCheck) bool {
-	if c.maxID != other.maxID || !c.maxAt.Equal(other.maxAt) {
+	if c.maxID != other.maxID {
 		return false
 	}
 	if c.cursorAt == nil || other.cursorAt == nil {
@@ -554,7 +711,7 @@ func (c cursorCheck) String() string {
 	if c.cursorAt != nil {
 		cursorAt = c.cursorAt.UTC().Format(time.RFC3339)
 	}
-	return fmt.Sprintf("newest id %d at %s, cursor's row %s", c.maxID, c.maxAt.UTC().Format(time.RFC3339), cursorAt)
+	return fmt.Sprintf("newest id %d, cursor's row %s", c.maxID, cursorAt)
 }
 
 // resetAfterFirstStatement is a queryer that resets the event log the moment the first statement
@@ -605,11 +762,11 @@ func TestEventCursorCheckReadsOneLogWhenTheLogIsResetMidCheck(t *testing.T) {
 	cursor := ids[1]
 	check := func(q queryer) cursorCheck {
 		t.Helper()
-		maxID, maxAt, cursorAt, err := eventCursorCheck(ctx, q, cursor)
+		maxID, cursorAt, err := eventCursorCheck(ctx, q, cursor)
 		if err != nil {
 			t.Fatalf("eventCursorCheck: %v", err)
 		}
-		return cursorCheck{maxID: maxID, maxAt: maxAt, cursorAt: cursorAt}
+		return cursorCheck{maxID: maxID, cursorAt: cursorAt}
 	}
 
 	oldLog := check(database.Pool)

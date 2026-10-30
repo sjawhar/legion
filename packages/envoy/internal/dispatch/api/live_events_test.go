@@ -37,29 +37,50 @@ func eventHead(t *testing.T, database *store.Store) int64 {
 // not nil, and answers the id the subscription's events_start names: the one it starts after.
 func subscribeEvents(t *testing.T, client *socketClient, sub string, since *int64) int64 {
 	t.Helper()
-	start := subscribeEventsStart(t, client, sub, since)
-	id, err := strconv.ParseInt(start.Since, 10, 64)
-	if err != nil {
-		t.Fatalf("events_start.since = %q, not a decimal event id: %v", start.Since, err)
-	}
-	return id
+	sendEventsSubscribe(t, client, sub, since)
+	return eventsStartID(t, client, sub)
 }
 
 // subscribeEventsStart subscribes client to the event feed under sub, resuming after since when it
 // is not nil, and answers the subscription's events_start frame.
 func subscribeEventsStart(t *testing.T, client *socketClient, sub string, since *int64) LiveEventsStart {
 	t.Helper()
+	sendEventsSubscribe(t, client, sub, since)
+	return eventsStart(t, client, eventFeedWait, sub)
+}
+
+// sendEventsSubscribe sends client's subscribe frame for sub, resuming after since when it is not
+// nil, and reads nothing: a test of what the socket sends before the events_start arrives -- which
+// waits for the relay subscription the feed hands over at (feedEvents) -- reads the frames itself.
+func sendEventsSubscribe(t *testing.T, client *socketClient, sub string, since *int64) {
+	t.Helper()
 	resume := ""
 	if since != nil {
 		resume = `{"since":"` + strconv.FormatInt(*since, 10) + `"}`
 	}
 	client.send(t, liveSubscribe(sub, eventsView(), resume))
-	frame := client.next(t, eventFeedWait, "the events_start of "+sub)
+}
+
+// eventsStart reads sub's events_start, the frame its subscription opens with, within within.
+func eventsStart(t *testing.T, client *socketClient, within time.Duration, sub string) LiveEventsStart {
+	t.Helper()
+	frame := client.next(t, within, "the events_start of "+sub)
 	start, ok := frame.(LiveEventsStart)
 	if !ok || start.Sub != sub {
 		t.Fatalf("the first frame of %s = %+v, want its events_start", sub, frame)
 	}
 	return start
+}
+
+// eventsStartID is the id sub's events_start names: the event its subscription starts after.
+func eventsStartID(t *testing.T, client *socketClient, sub string) int64 {
+	t.Helper()
+	start := eventsStart(t, client, eventFeedWait, sub)
+	id, err := strconv.ParseInt(start.Since, 10, 64)
+	if err != nil {
+		t.Fatalf("events_start.since = %q, not a decimal event id: %v", start.Since, err)
+	}
+	return id
 }
 
 // feedEvent is what a test reads of the event an event frame carries.
@@ -286,84 +307,49 @@ func TestTheEventFeedSendsNoReplayPastItsBounds(t *testing.T) {
 	}
 }
 
+// TestTheEventFeedResumeCursorOrdersConcurrentEventCommits: writes to two issues take no lock in
+// common (events.Broker.Append), so a lower event id can commit after a higher one: tx A appends
+// on issue X (id a) and stays open while tx B appends on issue Y (id b > a) and commits. A page
+// resuming from just before a must be sent nothing while A is open, then a and b in that order, on
+// the subscription it holds and on a fresh resume alike. Reading the log by `id > since` alone, the
+// catch-up would send b at once and move the page past a, which would then never reach it. The
+// catch-up and the live feed hand over at the relay's published cursor, which is read only up to
+// the horizon (events.Horizon), and that stays below a while A is open.
 func TestTheEventFeedResumeCursorOrdersConcurrentEventCommits(t *testing.T) {
 	rig := newLiveSocketRig(t, testServerOptions{}, nil)
-	broker := rig.served.deps.Events
 	issue := createInteractionIssue(t, rig.handler, "TEST", "Issue", "A spec")
 	other := createInteractionIssue(t, rig.handler, "OTHER", "Other issue", "A spec")
+	// This subscription starts the relay before A opens. A relay starting while A is open takes its
+	// first cursor under a horizon proven after the call, which waits for A to end, and the resuming
+	// subscriptions below would be sent nothing while A is open for that reason alone.
+	subscribeEvents(t, rig.dial(t, withBearer("agent-token")), "starter", nil)
 
-	ctx := context.Background()
-	first, err := rig.database.Pool.Begin(ctx)
-	if err != nil {
-		t.Fatalf("begin first transaction: %v", err)
-	}
-	defer first.Rollback(ctx)
-	low, err := broker.Append(ctx, first, model.Event{
-		IssueKey: new(issue.Key),
-		Type:     "test.concurrent",
-		Actor:    model.Actor{Kind: "session", ID: "seed"},
-		Payload:  map[string]any{},
-	})
-	if err != nil {
-		t.Fatalf("append first event: %v", err)
-	}
-
-	type appendResult struct {
-		event model.Event
-		err   error
-	}
-	started := make(chan struct{})
-	secondResult := make(chan appendResult, 1)
-	go func() {
-		second, err := rig.database.Pool.Begin(ctx)
-		if err != nil {
-			secondResult <- appendResult{err: err}
-			return
+	low, high, commitLow := appendOutOfOrder(t, rig.database, rig.served.deps.Events, issue.Key, other.Key)
+	resume := func(sub string) *socketClient {
+		t.Helper()
+		client := rig.dial(t, withBearer("agent-token"))
+		if start := subscribeEvents(t, client, sub, new(low-1)); start != low-1 {
+			t.Fatalf("%s's events_start.since = %d, want the %d it resumed from", sub, start, low-1)
 		}
-		defer second.Rollback(ctx)
-		close(started)
-		event, err := broker.Append(ctx, second, model.Event{
-			IssueKey: new(other.Key),
-			Type:     "test.concurrent",
-			Actor:    model.Actor{Kind: "session", ID: "seed"},
-			Payload:  map[string]any{},
-		})
-		if err == nil {
-			err = second.Commit(ctx)
-		}
-		secondResult <- appendResult{event: event, err: err}
-	}()
-	<-started
-	waitForDatabaseLocks(t, first, 1)
+		return client
+	}
+	open := resume("open")
+	expectNoEventAbove(t, open, "open", low-1, time.Second, "while the lower id is still open")
 
-	if err := first.Commit(ctx); err != nil {
-		t.Fatalf("commit first event: %v", err)
-	}
-	high := <-secondResult
-	if high.err != nil {
-		t.Fatalf("append second event: %v", high.err)
-	}
-	if high.event.ID <= low.ID {
-		t.Fatalf("event ids did not follow commit order: first=%d second=%d", low.ID, high.event.ID)
-	}
-
-	client := rig.dial(t, withBearer("agent-token"))
-	subscribeEvents(t, client, "events", new(low.ID))
-	if id := nextEventID(t, client, "events"); id != high.event.ID {
-		t.Fatalf("resume replay sent event %d, want the second committed event %d", id, high.event.ID)
-	}
+	commitLow()
+	expectEventsInOrder(t, open, "open", low, high)
+	expectEventsInOrder(t, resume("resumed"), "resumed", low, high)
 }
 
-// TestTheEventFeedDoesNotResendAnEventAtOrBelowItsSince covers the one id comparison the live loop
-// makes. The relay is one per process and can stand behind a subscription opened after it: it then
-// publishes ids that subscription's catch-up has already covered, which sentDuringCatchup cannot be
-// asked about, since it holds only the ids above since that catch-up sent. Forwarding them would
-// show a page an event it has already seen.
+// TestTheEventFeedDoesNotResendAnEventAtOrBelowItsSince covers a since above the relay's published
+// cursor. The relay is one per process and can stand behind a subscription opened after it: a page
+// resuming from the last id it was sent, which this process's relay has not yet read up to. The
+// relay then publishes into that subscription ids at or below its since, events the page already
+// has; forwarding them would show it an event twice.
 //
-// The comparison is safe because since is fixed for the subscription, and the commit-order lock
-// events.Broker.Append holds until its transaction commits leaves no uncommitted id at or below a
-// committed max(id). A late-committing lower id -- what the live loop used to carry a rule against
-// -- is now the lock's to prevent and TestOnlyTheBrokerInsertsEvents's to keep.
+// The live loop drops every id at or below max(since, published), and that is safe because the
+// relay publishes into a subscription only ids above published, in strictly increasing order: no
+// event above since can arrive later below it.
 func TestTheEventFeedDoesNotResendAnEventAtOrBelowItsSince(t *testing.T) {
 	rig := newLiveSocketRig(t, testServerOptions{}, nil)
 	// Long enough that the second subscription below opens between a commit and the read that
@@ -414,20 +400,23 @@ func TestTheEventFeedColdStartSendsNoBacklogAndDeliversTheNextCommit(t *testing.
 	}
 }
 
-// A cold subscription's events_start names the head it resolved after subscribing to the relay, so
-// a page holding no cursor adopts it and resumes from it without a gap; and the commit right after
-// it reaches the subscription.
-func TestAColdSubscriptionStartsWithTheHead(t *testing.T) {
+// A cold subscription's events_start names the cursor the relay had published through when its
+// relay subscription began, which is at or below the log's newest id and never above it: the page
+// holding no cursor adopts it and resumes from it without a gap, since every event above it is the
+// subscription's to send. The commit right after it reaches the subscription.
+func TestAColdSubscriptionStartsAtTheRelaysPublishedCursor(t *testing.T) {
 	rig := newLiveSocketRig(t, testServerOptions{}, nil)
-	issue := createInteractionIssue(t, rig.handler, "TEST", "Issue", "A spec")
+	// An issue with no spec, whose document settles nothing, so nothing commits but the test's own
+	// writes and the relay's cursor stands where the subscription was handed it.
+	issue := createPlainIssue(t, rig.handler, "TEST")
 	client := rig.dial(t, withBearer("agent-token"))
-	before := eventHead(t, rig.database)
 	start := subscribeEvents(t, client, "events", nil)
-	if after := eventHead(t, rig.database); start < before || start > after {
-		t.Fatalf("a cold subscription starts after event %d, outside the heads %d..%d around its subscribe", start, before, after)
+	published := relayPublished(rig.served.eventRelay)
+	if head := eventHead(t, rig.database); start != published || start > head {
+		t.Fatalf("a cold subscription starts after event %d, want the relay's published cursor %d, at or below the log's newest id %d", start, published, head)
 	}
 
-	renameIssue(t, rig.handler, issue.Key, "Renamed after the start")
+	renameIssue(t, rig.handler, issue, "Renamed after the start")
 	for {
 		_, event := nextEvent(t, client, "events")
 		if event.ID <= start {
@@ -439,18 +428,20 @@ func TestAColdSubscriptionStartsWithTheHead(t *testing.T) {
 	}
 }
 
-// A since above the head is an id of a log this one replaced (or no id at all): the subscription
-// starts at the head, and is served what commits next.
-func TestASinceAboveTheHeadStartsAtTheHead(t *testing.T) {
+// A since above the log's newest id is an id of a log this one replaced (or no id at all): the
+// subscription starts where a cold one does, at the relay's published cursor, rather than at that
+// since, which would drop every event of the log as it now stands; and it is served what commits
+// next.
+func TestASinceAboveTheHeadStartsAtTheRelaysPublishedCursor(t *testing.T) {
 	rig := newLiveSocketRig(t, testServerOptions{}, nil)
-	issue := createInteractionIssue(t, rig.handler, "TEST", "Issue", "A spec")
+	issue := createPlainIssue(t, rig.handler, "TEST")
 	client := rig.dial(t, withBearer("agent-token"))
-	before := eventHead(t, rig.database)
-	start := subscribeEvents(t, client, "events", new(before+1000))
-	if after := eventHead(t, rig.database); start < before || start > after {
-		t.Fatalf("a since of %d starts after event %d, want the head (%d..%d)", before+1000, start, before, after)
+	head := eventHead(t, rig.database)
+	start := subscribeEvents(t, client, "events", new(head+1000))
+	if published := relayPublished(rig.served.eventRelay); start != published || start > head {
+		t.Fatalf("a since of %d starts after event %d, want the relay's published cursor %d, at or below the log's newest id %d", head+1000, start, published, head)
 	}
-	renameIssue(t, rig.handler, issue.Key, "Renamed above the head")
+	renameIssue(t, rig.handler, issue, "Renamed above the head")
 	if _, event := eventOfType(t, client, "events", "issue.updated"); !strings.Contains(string(event.Payload), "Renamed above the head") {
 		t.Fatalf("the clamped subscription was sent %+v, want the rename", event)
 	}

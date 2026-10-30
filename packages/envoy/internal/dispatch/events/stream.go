@@ -13,11 +13,13 @@ import "sync"
 // The reader's live feed is a Stream of its own, held by the event stream relay
 // (api/event_stream_relay.go) and published into only by that relay, from the rows it reads back
 // out of Postgres once they have committed, each with its event encoded once. Nothing at a write
-// site publishes into it, so an events subscription sees exactly the rows the database holds, in
-// the id order the commit-order lock gives them (Broker.Append) — including the events another
-// envoy-dispatch process committed, which no in-process fan-out can carry. The delivery hub's
-// intake takes the same feed (api/delivery_live_hub_intake.go). Broker holds a Stream of its own
-// for the subscriber that does want this process's own writes: the outbox's local wake.
+// site publishes into it, so an events subscription sees exactly the rows the database holds,
+// including the events another envoy-dispatch process committed, which no in-process fan-out can
+// carry. Writes to different owners can commit out of id order (Broker.Append), so the relay reads
+// only up to the safe horizon (Horizon), below which every event is final, and publishes in id
+// order. The delivery hub's intake takes the same feed (api/delivery_live_hub_intake.go), so it
+// reads no event log of its own. Broker holds a Stream of its own for the subscriber that does
+// want this process's own writes: the outbox's local wake.
 //
 // Every subscriber receives the same value, so a value that holds a slice or a map shares it:
 // a subscriber reads what it receives and modifies none of it.

@@ -3,10 +3,13 @@ package api
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"log/slog"
 	"net/http"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/sjawhar/envoy/internal/dispatch/model"
 	"github.com/sjawhar/envoy/internal/dispatch/store"
@@ -16,8 +19,10 @@ const (
 	// maxEventPage is the most events one page of an issue's or a document's event log holds,
 	// and its default.
 	maxEventPage = 200
-	// maxEventLogPage is the most events one page of the whole event log holds, and its default.
-	maxEventLogPage = 1000
+	// maxEventReplay is the most events one page of the global event log holds (readEventsAfterID):
+	// the relay's read, an events subscription's catch-up and GET /api/v1/events/log each page
+	// through the log at it, and it is that route's default.
+	maxEventReplay = 1000
 )
 
 const eventSelect = `select e.id, e.issue_key, e.artifact_id::text, coalesce(e.project_key, i.project_key, ar.project_key, ''), e.seq, e.type, e.actor, e.notify, e.created_at, e.payload
@@ -46,6 +51,12 @@ func (s *server) listIssueEvents(w http.ResponseWriter, r *http.Request) {
 // a project or nothing. It answers the events after ?after= (default 0) in ascending id order,
 // at most ?limit= of them. Any authenticated caller may read it, as the events view on a page's
 // live socket carries every event to them.
+//
+// Ids are not commit order (events.Broker.Append), so a caller that pages by the id of the last
+// row it was answered would step over a lower id still open and never see it. The page is
+// therefore capped at the safe horizon, at or below which every event is final, the same cap and
+// the same wait GET /api/v1/references?since= reads under (sinceHorizon): every event committed
+// before the request stands at or below it, so paging to the end of this answer skips nothing.
 func (s *server) listEventLog(w http.ResponseWriter, r *http.Request) {
 	if !s.requireAuthenticated(w, r) {
 		return
@@ -56,12 +67,17 @@ func (s *server) listEventLog(w http.ResponseWriter, r *http.Request) {
 		s.writeHandlerError(w, err)
 		return
 	}
-	limit, err := parseEventLimit(query.Get("limit"), maxEventLogPage)
+	limit, err := parseEventLimit(query.Get("limit"), maxEventReplay)
 	if err != nil {
 		s.writeHandlerError(w, err)
 		return
 	}
-	events, err := s.readEventsAfterID(r.Context(), after, limit)
+	through, err := s.sinceHorizon(r.Context())
+	if err != nil {
+		s.writeHandlerError(w, err)
+		return
+	}
+	events, err := s.readEventsAfterID(r.Context(), after, through, limit)
 	if err != nil {
 		s.writeHandlerError(w, err)
 		return
@@ -151,17 +167,75 @@ func (s *server) readEvents(ctx context.Context, owner owner, options eventListO
 	`, ownerValue, options.after, options.limit)
 }
 
-// EventHead is the id of the newest committed event, 0 while the log is empty, read through
-// database's shared pool, the one readEventsAfterID reads the log through (the relay's page and
-// GET /api/v1/events/log): the head an events subscription resolves, and the event_head GET
-// /auth/whoami answers. Every row at or below it has committed (events.Broker.Append's
-// commit-order lock), so a reader that starts after it misses nothing that commits later.
-func EventHead(ctx context.Context, database *store.Store) (int64, error) {
-	var head int64
-	if err := database.Pool.QueryRow(ctx, `select coalesce(max(id), 0) from events`).Scan(&head); err != nil {
-		return 0, err
+// readEventsAfterID reads one page of the global event log in id order: at most limit of the
+// events whose ids are in (after, through]. Ids are not commit order, so a reader that moves its
+// cursor to a page's last row passes a through at or below the safe horizon (events.Horizon),
+// where every event is final: no lower id the page skipped can commit later.
+func (s *server) readEventsAfterID(ctx context.Context, after, through int64, limit int) ([]model.Event, error) {
+	return s.readEventRows(ctx, eventSelect+`
+		where e.id > $1 and e.id <= $2
+		order by e.id asc limit $3
+	`, after, through, limit)
+}
+
+// eventLogUnbrokenThrough is the id before the first one missing from the event log counted up
+// from 1, or its newest id when none is missing: every id at or below it is a committed event.
+// It reads the whole log, so feedEvents asks it only of a log that was reset beneath the relay,
+// whose ids restart at 1 (`truncate events restart identity`) and which is as short as the time
+// since that reset.
+func (s *server) eventLogUnbrokenThrough(ctx context.Context) (int64, error) {
+	var through int64
+	err := s.deps.Store.Pool.QueryRow(ctx, `
+		select coalesce(
+			(select min(n) - 1 from (select id, row_number() over (order by id) as n from events) numbered where id <> n),
+			(select max(id) from events),
+			0)
+	`).Scan(&through)
+	return through, err
+}
+
+// eventFeedHeadWait bounds how long eventFeedHead waits on a process that has proven no horizon
+// yet, while no mark it keeps counts (an event insert of this database open since before every
+// mark). It waits nowhere else.
+const eventFeedHeadWait = 2 * time.Second
+
+// ErrEventHeadUnproven is eventFeedHead's answer when it has no id it can vouch for: GET
+// /auth/whoami answers it, and only it, 503 EVENT_HEAD_UNAVAILABLE, which the page asks again for
+// as long as it lasts. A failed read of the database or the horizon's pool is another error, which
+// whoami answers 503 EVENT_HEAD_READ_FAILED and the page retries on its bounded rule.
+var ErrEventHeadUnproven = errors.New("no event id is proven final yet: an event insert has been open since before every mark")
+
+// eventFeedHead is the event_head GET /auth/whoami answers, which a page resumes its first events
+// subscription from: an id at or below which every event is final, so a page that starts its reads
+// after it and is replayed every event above it misses nothing that commits later.
+//
+// It answers at once (server.writerFloor): the newest of the server's marks that counts, a mark
+// older than every transaction that holds a write lock on events, or the horizon already proven
+// here or persisted by any process when none counts. A mark taken a moment ago counts as soon as the event
+// writes open then have ended, which for this service's own writes is milliseconds, so the head
+// trails the log's newest id by about that. A transaction that holds a transaction id and has
+// inserted no event, here or in another database, keeps nothing waiting.
+//
+// It never answers 0 for a log it cannot vouch for: a process with no mark counting and no horizon
+// proven or persisted (a first boot, a reset log) would send its page to replay the whole log. That
+// one waits, eventFeedHeadWait at most, marking again, and past it answers ErrEventHeadUnproven,
+// which is logged and which the page asks again for.
+func (s *server) eventFeedHead(ctx context.Context) (int64, error) {
+	floor, ok, _, err := s.writerFloor(ctx)
+	if err != nil || ok || floor > 0 {
+		return floor, err
 	}
-	return head, nil
+	deadline := time.Now().Add(eventFeedHeadWait)
+	for wait := 10 * time.Millisecond; time.Now().Before(deadline); wait = min(2*wait, 250*time.Millisecond) {
+		if !waitFor(ctx, wait) {
+			return 0, ctx.Err()
+		}
+		if floor, ok, _, err = s.writerFloor(ctx); err != nil || ok || floor > 0 {
+			return floor, err
+		}
+	}
+	slog.Warn("dispatch: whoami has no event_head to answer: no horizon is proven yet and an event insert of this database has been open since before every mark", "wait", eventFeedHeadWait)
+	return 0, ErrEventHeadUnproven
 }
 
 func (s *server) readEventRows(ctx context.Context, query string, arguments ...any) ([]model.Event, error) {
