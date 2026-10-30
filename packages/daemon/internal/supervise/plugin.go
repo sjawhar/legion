@@ -11,8 +11,8 @@ import (
 // 44). A claim whose registration declared a contract below it cannot answer an update task: the
 // op list is a closed enum compiled into the plugin, and a Claude Code role's plugin is its
 // image's own, never installed. Such a claim is never asked — an update round records itself on
-// it and sends it nothing (openPodUpdate) — and the stale-plugin lane keeps today's immediate
-// relaunch for it (refreshPlugin), which keeps the pod and the disk and so loses nothing.
+// it and sends it nothing (openPodUpdate) — and the stale-plugin lane relaunches it once its turn
+// ends (refreshPlugin, holdStaleRelaunch), which keeps the pod and the disk and so loses nothing.
 //
 // That relaunch is what takes a worker of the release before this one past the constant: it
 // installs this daemon's plugin, and the registration that follows records this daemon's
@@ -26,9 +26,8 @@ import (
 const PodUpdateContract = 44
 
 // CanAnswerUpdate says whether c's registration declared PodUpdateContract or above, so its
-// plugin has the ready_for_update op. It reads the contract alone, which is what a suspended
-// claim's revive asks (askForUpdate) and what the stale-plugin lane that decides between a round
-// and an immediate relaunch asks of a process it holds (refreshPlugin).
+// plugin has the ready_for_update op. It reads the contract alone; its one reader is
+// CannotAnswerUpdate, which adds the running process the rule also needs.
 func CanAnswerUpdate(c Claim) bool { return c.PluginContract >= PodUpdateContract }
 
 // CannotAnswerUpdate says whether c's worker can never answer the update task it is given: its

@@ -148,8 +148,8 @@ type PodUpdateOpen struct {
 //
 // The three steps are the same for both kinds. The consequence is not. A pod's round deletes the
 // pod and the disk the workspace is on, so work the worker does not push is lost. A plugin round
-// keeps both: the daemon starts the process again on its own plugin, in the same pod, and only
-// the turn is lost.
+// keeps both: the daemon starts the process again on its own plugin, in the same pod, once the
+// worker's turn has ended (endPodUpdate relaunches no working claim), so no turn is lost.
 //
 // Another agent reads it, so it follows ASD-STE100: one instruction per sentence, active voice,
 // and no word that has a second reading.
@@ -162,7 +162,7 @@ The daemon starts your process again on the new pod, in this same session.`
 	// words can never disagree with what endPodUpdate does for the same round.
 	if (Claim{UpdateRound: round}).InPluginRound() {
 		first, consequence = "The daemon must start your process again on a different plugin.",
-			`The restart keeps the pod and the disk. The disk holds your workspace. Work that you do not push stays on the disk. The restart stops the turn that you are in.
+			`The restart keeps the pod and the disk. The disk holds your workspace. Work that you do not push stays on the disk. The restart waits until your turn ends.
 
 The daemon starts your process again on this same pod, in this same session.`
 	}
