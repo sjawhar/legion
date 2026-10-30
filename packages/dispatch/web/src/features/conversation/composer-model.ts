@@ -17,6 +17,14 @@ export interface ComposerAnchor {
   readonly quote: string;
 }
 
+/** Why a compose's mark could not be written again after the server refused its send for a mark
+ *  the document does not hold, in the reader's words, kept with the mark it answers: the composer
+ *  shows it in place of the server's words, and a newer anchor leaves it behind. */
+export interface AnchorRefusal {
+  readonly markId: string;
+  readonly text: string;
+}
+
 export interface ReplyTarget {
   /** The parent's author, which the Replying-to chip draws through `AgentName`. */
   readonly actor: Actor;

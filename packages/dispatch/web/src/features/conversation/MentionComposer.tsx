@@ -16,7 +16,7 @@ import {
   useState,
 } from "react";
 
-import { ApiError, type ArtifactOwner, api, apiErrorMessage } from "../../api/client";
+import { type ArtifactOwner, api, apiErrorMessage, isAnchorMissing } from "../../api/client";
 import type { Agent, AskOption, AskUrgency } from "../../api/types";
 import { Chip } from "../../components/Chip";
 import { QueryError } from "../../components/QueryError";
@@ -72,6 +72,7 @@ import {
 } from "./block-spans";
 import type {
   AcceptedMention,
+  AnchorRefusal,
   ComposerAnchor,
   ComposerKind,
   ComposerOwner,
@@ -402,10 +403,9 @@ function draftRefusal(
 function refusalMessage(
   refusal: Error,
   anchor: ComposerAnchor | undefined,
-  anchorRefusal: { readonly markId: string; readonly text: string } | undefined
+  anchorRefusal: AnchorRefusal | undefined
 ): string {
-  const anchorMissing =
-    refusal instanceof ApiError && refusal.status === 409 && refusal.code === "ANCHOR_MISSING";
+  const anchorMissing = isAnchorMissing(refusal);
   if (anchorMissing && anchorRefusal !== undefined && anchorRefusal.markId === anchor?.mark_id) {
     return anchorRefusal.text;
   }
@@ -421,7 +421,7 @@ interface MentionComposerProps {
    *  document no longer holds (`ANCHOR_MISSING`) and could not write that mark again: the margin's
    *  message, kept with the mark it answers, since the composer stays mounted when a newer compose
    *  replaces the anchor. */
-  readonly anchorRefusal?: { readonly markId: string; readonly text: string };
+  readonly anchorRefusal?: AnchorRefusal;
   /** Focuses the field once, on the first render this is true. A host that keeps the composer
    *  mounted out of sight - the margin's, under its collapsed sheet, its rail or the Pinned tab -
    *  passes it once the composer is on screen, since a field out of sight takes no focus. */

@@ -75,7 +75,7 @@ export type RetypeOutcome = RetypedMark | RetypeRefusal;
  *  (`"gone"`). A re-mark never answers `"missing"`: a mark the document has lost is the case it
  *  is for. */
 export interface RemarkRefusal {
-  readonly refused: RetypeRefusal["refused"] | "gone";
+  readonly refused: "gone" | "unmarkable";
 }
 
 export type RemarkOutcome = RetypedMark | RemarkRefusal;
@@ -152,8 +152,12 @@ function recordMarksWrittenBy(transaction: Transaction): Map<string, MarkRange> 
 function trackedAfter(tracked: TrackedMarks, transaction: Transaction): TrackedMarks {
   const written = recordMarksWrittenBy(transaction);
   const ended: unknown = transaction.getMeta(recordMarkTracking);
-  if (written === undefined && ended === undefined) {
-    if (tracked.size === 0 || !transaction.docChanged) return tracked;
+  if (
+    written === undefined &&
+    ended === undefined &&
+    (tracked.size === 0 || !transaction.docChanged)
+  ) {
+    return tracked;
   }
   const next = new Map<string, MarkRange>();
   for (const [id, range] of tracked) {
@@ -318,13 +322,10 @@ function trackedRange(state: EditorState, markId: string, quote: string): MarkRa
   if (to > from && state.doc.textBetween(from, to, "\n", "\n") === quote) {
     return { from, to };
   }
+  // A textblock holds inline content alone, so no ancestor of a parent that is not one can be a
+  // textblock either: the mapped start either sits in text or in nothing this can mark.
   const $start = state.doc.resolve(from);
-  for (let depth = $start.depth; depth > 0; depth -= 1) {
-    const block = $start.node(depth);
-    if (!block.isTextblock) continue;
-    return soleOccurrence(block, $start.start(depth), quote);
-  }
-  return null;
+  return $start.parent.isTextblock ? soleOccurrence($start.parent, $start.start(), quote) : null;
 }
 
 /**

@@ -9,8 +9,8 @@ import {
   useRef,
   useState,
 } from "react";
-import { ApiError } from "../../api/client";
-import type { ComposerAnchor, ComposerKind } from "../conversation/composer-model";
+import { isAnchorMissing } from "../../api/client";
+import type { AnchorRefusal, ComposerAnchor, ComposerKind } from "../conversation/composer-model";
 import type { HeldSend } from "../conversation/held-sends";
 import { heldSends } from "../conversation/held-sends";
 import type { RemarkOutcome, RetypeOutcome, RetypeRefusal } from "../doc/editor";
@@ -61,12 +61,6 @@ const REANCHOR_REFUSAL =
  *  the server take another tab's, so the wait always ends and the retry goes either way. */
 const REANCHOR_SEND_WAIT_MS = 5000;
 
-/** Whether `refusal` is the server refusing a send because the document does not hold the mark it
- *  names (`docs.VerifyMark`). */
-function isAnchorMissing(refusal: Error): boolean {
-  return refusal instanceof ApiError && refusal.status === 409 && refusal.code === "ANCHOR_MISSING";
-}
-
 interface MarkComposeRequest {
   anchor: ComposerAnchor;
   kind: ComposerKind;
@@ -114,7 +108,7 @@ interface MarginContextValue {
   /** Why the compose's mark could not be written again after the server refused its send for a
    *  mark it cannot see, in the reader's words, kept with the mark it answers: the composer shows
    *  it in place of the server's words, and a newer anchor leaves it behind. */
-  anchorRefusal: { markId: string; text: string } | undefined;
+  anchorRefusal: AnchorRefusal | undefined;
   blockFilterId: string | undefined;
   blockPlacements: ReadonlyMap<string, MarkPlacement>;
   /** Ends the open compose `seq` unsaved, if it is still the open one: its mark leaves the
@@ -209,7 +203,7 @@ export function MarginProvider({ children }: { children: ReactNode }): ReactNode
   const [pendingCompose, setPendingCompose] = useState<PendingCompose>();
   const [shownCompose, setShownCompose] = useState<ShownCompose>();
   const [selectedItemId, setSelectedItemId] = useState<string>();
-  const [anchorRefusal, setAnchorRefusal] = useState<{ markId: string; text: string }>();
+  const [anchorRefusal, setAnchorRefusal] = useState<AnchorRefusal>();
   const markItemIds = useRef<ReadonlyMap<string, string>>(new Map());
   const sequence = useRef(0);
   // The marks the margin wrote again itself. A send the server refuses for one of them is the

@@ -650,7 +650,9 @@ export function ProofDocument({
               if (mounted) {
                 pendingRef.current = state;
                 setPending(state);
-                for (const waiter of [...pendingWaiters.current]) waiter();
+                // A waiter only ever drops itself, which Set iteration already allows, and none
+                // adds one: no copy of the set is needed on a callback every edit fires.
+                for (const waiter of pendingWaiters.current) waiter();
               }
             },
             onSynced: () => {

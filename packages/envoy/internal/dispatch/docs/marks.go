@@ -824,7 +824,13 @@ func (s *Service) sweepUnrecordedMarks(room string, tree *pmdoc.Node) {
 	var expired []pmdoc.MarkRef
 	var next time.Duration
 	state := s.lockState(room)
-	authors := connectedMarkAuthors(state.connected)
+	// With nothing unrecorded, every mark here is seen for the first time and its author cannot
+	// change the answer, so the settlement of a room with no stray mark - the steady state - builds
+	// no set and concatenates no reference.
+	var authors map[string]struct{}
+	if len(state.unrecorded) > 0 {
+		authors = connectedMarkAuthors(state.connected)
+	}
 	for _, mark := range marks {
 		if mark.Type != string(MarkAsk) && mark.Type != string(MarkComment) && mark.Type != string(MarkSuggestion) {
 			continue
