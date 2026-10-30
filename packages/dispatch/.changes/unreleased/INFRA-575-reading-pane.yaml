@@ -1,0 +1,16 @@
+kind: Added
+body: |-
+  From 1280 px wide the Inbox is a reading pane: the questions on the left, and the selected
+  question's own document on the right, where the answer is given. A decision block opens the
+  document at its section heading, with a bar down to the block and "Skip to the answer"; an
+  approval request shows Approve at the head of the column and the latest version below it, with
+  every word changed since the last approval marked and "Next change" stepping them. The URL
+  carries the selection, the first row is selected when the Inbox opens, the reader's own answer
+  or snooze hands the selection to the next row they can see - and names none at all once the
+  list has none left, so a reload never opens the folded Later band in front of them - and every
+  keyboard binding keeps its meaning against the selected row, standing down wherever the key
+  belongs to the control the reader's focus is on. A
+  narrower screen and the Inbox drawer keep today's card.
+time: 2026-10-30T03:20:00.000000000Z
+custom:
+  Issue: INFRA-575
