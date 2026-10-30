@@ -2,31 +2,23 @@
   "schemaVersion": 1,
   "phase": "implement",
   "issue": "INFRA-557",
-  "completed": "2026-10-30T13:45:00Z",
-  "round": "review round 8",
+  "completed": "2026-10-30T14:00:00Z",
+  "round": "review round 9",
   "pullRequest": "https://github.com/sjawhar/legion/pull/2404",
-  "codeHead": "7469fd634604c2830553fdbe4af61d7573b2b195",
-  "answersReview": "2681e19579c51364bb201d083f1655b8a5b4d9f9",
+  "codeHead": "9d8b44af94219d8de2f2e401a96465d161ef5da2",
+  "answersReview": "22298a3ce3b7ee819b6ea014e5118c6e32e983d3",
   "proof": [
     {
-      "criterion": "Item 3: each no-mark row asserts which gate stopped the mark",
-      "surface": "in-process pods on one NATS server under the rendered grant (receiving successor, lost binding, relay swallowing the UNSUB)",
-      "command": "cd packages/envoy && go test -count=1 -v -run 'TestAStopMarksNoHandBackWhenItsLingerOrItsTermFellShort|TestAStopWhoseHandlerIgnoresItsCancelMarksNoHandBack' ./cmd/listener/",
-      "observed": "all four rows and the stuck-handler test pass, each with its no_mark reason",
-      "headSha": "7469fd634604c2830553fdbe4af61d7573b2b195",
-      "negativeControl": "drain gate returning the release gate's reason: the drain row fails at receive_stop_test.go:416"
-    },
-    {
-      "criterion": "Item 4 and no behaviour change: the overrun texts name the listener's own exit; the stop paths still pass",
-      "surface": "the listener's hand-back, settle, mark, linger, stop and lease tests; the changelog fragment",
-      "command": "cd packages/envoy && go test -count=1 -timeout 20m -run 'Settle|HandBack|Mark|Linger|Stop|Graceful|Successor|Lease' ./cmd/listener/ && go run github.com/miniscruff/changie@v1.26.0 batch --dry-run v0.0.0",
-      "observed": "ok 264.021s; the fragment renders with the new text",
-      "headSha": "7469fd634604c2830553fdbe4af61d7573b2b195",
-      "negativeControl": "before: main.go said a stop past the budget loses its mark 'if the runtime kills the process', which shutdownListener's client.Drain and os.Exit(1) contradict"
+      "criterion": "The overrun sentence in main.go, README.md, receive.go and the changelog fragment is the reviewer's exact text; nothing else changes",
+      "surface": "the diff of this head against 7469fd63; go vet; the changelog fragment rendered by changie",
+      "command": "jj diff --from 7469fd63 --to 9d8b44af9421 --stat; cd packages/envoy && go vet ./cmd/listener/ && go run github.com/miniscruff/changie@v1.26.0 batch --dry-run v0.0.0",
+      "observed": "4 files changed, 17 insertions, 13 deletions, comments and docs only; vet clean; the fragment renders with 'a mark write still in flight'",
+      "headSha": "9d8b44af94219d8de2f2e401a96465d161ef5da2",
+      "negativeControl": "at 7469fd63 the four texts named os.Exit(1) as what cuts a lingering or draining hand-back off, which shutdownListener's client.Drain contradicts"
     }
   ],
   "filesChanged": [
-    "7469fd63: cmd/listener/main.go, README.md, receive.go, changie fragment (overrun text), receive_stop.go (no-mark reasons as constants, markHandBack doc), receive_stop_test.go (noMark column, lingerEnd constants)"
+    "cmd/listener/main.go, cmd/listener/README.md, cmd/listener/receive.go, .changes/unreleased/pr2404-Changed-20261028-102427.yaml: the overrun sentence"
   ],
   "deviations": [],
   "openQuestions": [],
