@@ -1,0 +1,48 @@
+{
+  "schemaVersion": 1,
+  "phase": "review",
+  "issue": "INFRA-750",
+  "completed": "2026-10-30T18:30:30Z",
+  "round": 5,
+  "reviewedCodeHead": "c23af74674ad",
+  "previousReview": "5713743472, APPROVE at 6a484140afef (code 3fec0f3465e2)",
+  "forwardMerge": {
+    "merge": "c23af74674ad brings main e65900f4438b (sjawhar/legion#2504 among it) into the branch after retro's 18d21757552a and 4f51f06f2005",
+    "fingerprintBefore": "614b010060d6a65f3a5986a236f81cf310785cb0a81f8d6fe512bf1cedd4b3a2 at 6a484140afef",
+    "fingerprintAfter": "d3ff0842b763d151849e6dace2644fdf379d3194e6cf4e75b56acc06fc928443 at b90f13b0caab",
+    "verdict": "changed, so a new round: the PR's own lines moved in packages/envoy/AGENTS.md, cmd/dispatch/settings.go and internal/bus/nats.go, the four conflicts with #2504"
+  },
+  "decision": "approved",
+  "critical": 0,
+  "important": 0,
+  "minor": 2,
+  "keyFindings": [
+    {
+      "severity": "minor",
+      "file": "packages/envoy/AGENTS.md:2831, packages/envoy/cmd/dispatch/settings.go:83,85",
+      "description": "Fixed by the reviewer in 9eddf894 (prose only). The merge kept this PR's clause that each recovery retry logs `envoy nats recovery resubscribe failed` with an `attempt`, which #2504 made untrue: recovery.go:326-361 keeps a failed hook run out of that line and reports it through reportHookFailure, and main's own AGENTS.md:2798 says so. The clause is gone in all three places; settings.go:83 keeps the true redelivery-sweep clause (redeliver/sweep.go:261)."
+    },
+    {
+      "severity": "minor",
+      "file": "docs/solutions/testing/bind-a-wait-to-the-actor-under-test-and-prove-the-accessor-before-you-lean-on-it-pr2542.md:22-37",
+      "description": "Fixed by the reviewer in 9eddf894: retro's learning cited pre-merge line numbers that main moved (nats.go:529, :414, :523-528, recovery.go:198-215); it now cites symbols."
+    }
+  ],
+  "mergeChecks": [
+    "HookedConnectionEvents (nats.go:532-543) matches main's rewatch: hookedEvents is set to the event count the run began at only after a run that succeeded (recovery.go:204, :217).",
+    "startDispatchStream keeps both sides: main's reconcileFailure matches both of main's hook messages (stream_replicas_test.go:117, recovery.go:257-259), beside the PR's HookedConnectionEvents() >= 1 wait.",
+    "The PR's 1 s pings and main's RepairGrace stall reporting do not interact badly: the tester's probe measured 0 WARN and 0 ERROR across short freezes and a 1 m 33 s freeze, and /healthz healthy about 1 s after each thaw.",
+    "Retro's commits above my last approval touch only docs/solutions/ and .legion/."
+  ],
+  "prBody": "Refreshed the roll call's stale citations after the merge (rows 1.1, 1.5 to 1.10, 3), rewrote row 1.9 to say main now owns the hook wording, and corrected the E2E (implementer) code head. Body edit only.",
+  "ci": {
+    "requiredChecks": ["lint", "typecheck", "test", "pr-title"],
+    "note": "This push carries a prose fix outside .legion/, so it runs CI; the approval waits for that head's required checks to be green."
+  },
+  "thermonuclear": {
+    "head": "b90f13b0caab9b3f7f0819379b0ca86d456f0058",
+    "deepReview": "APPROVE; one minor (the retry clause), fixed in 9eddf894; read-only, no builds",
+    "codeQuality": "CHANGES on the same clause and the learning's stale citations, both fixed in 9eddf894"
+  },
+  "security": "agent-def: the AGENTS.md edits are factual corrections with no instructions to agents (packages/envoy/AGENTS.md:40,1439-1443,2831-2832); secret: the nkey option is unchanged and detectSilentCuts sets only ping fields (packages/daemon/internal/natsauth/natsauth.go:162,195-198); no other sensitive surface."
+}
