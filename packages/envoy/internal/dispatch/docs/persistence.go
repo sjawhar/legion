@@ -151,9 +151,19 @@ func (p *PgVersioned) appendUpdate(ctx context.Context, room string, update []by
 
 // AppendUpdateTx appends an already validated V1 update inside tx, recording whether it changes
 // the document's content: settlement versions a document only past a content update.
+//
+// Every caller hands it an update this process encoded moments before - a new document's whole
+// tree (encodeDocumentTree), the transactions of one write's fork (mergeUpdates), a settlement's
+// own repair - so the one refusal decoding such an update into a document of its own ever made is
+// the item cap, which the update's header declares (refuseUpdateItemCap). Reading that header
+// rather than decoding the update took 88 ms and 36 MB off the request of an 8,000-item
+// document's upload, near a quarter of that request's time and a fifth of its allocation, and
+// that allocation is what the garbage collector then charged the writes after it on a two-core
+// pod (sjawhar/legion#2519). Bytes a caller sends, which no document encoded, are decoded as
+// they were (appendUpdate).
 func (p *PgVersioned) AppendUpdateTx(ctx context.Context, tx pgx.Tx, room string, update []byte, contentChanged bool) (persistence.Version, error) {
-	if err := crdt.ApplyUpdateV1(newDocumentCopy(), update, nil); err != nil {
-		return 0, itemCapError(update, err)
+	if err := refuseUpdateItemCap(update); err != nil {
+		return 0, err
 	}
 	return p.appendUpdateTxClass(ctx, tx, room, update, contentChanged, nil)
 }
@@ -874,4 +884,26 @@ func itemCapError(update []byte, err error) error {
 		return fmt.Errorf("%w: its %d items exceed the %d one document update can hold (%v)", ErrDocumentTooLarge, items, maxUpdateItems, err)
 	}
 	return err
+}
+
+// refuseUpdateItemCap is the refusal of update - one this process encoded from a document it
+// built (AppendUpdateTx), or a stored history about to be decoded into a room
+// (servicePersistenceAdapter.LoadDoc) - that holds more items than one document update may
+// (maxUpdateItems), which is what ygo refuses such an update for before it integrates anything of
+// it. The count comes from the update's header (updateItems), which names it exactly for the one
+// client a server-encoded update is written by. An update of several clients declares no single
+// count, and one whose header does not read is no update at all: both are decoded to be judged,
+// as every update was (itemCapError).
+func refuseUpdateItemCap(update []byte) error {
+	items, named := updateItems(update)
+	if !named {
+		if err := crdt.ApplyUpdateV1(newDocumentCopy(), update, nil); err != nil {
+			return itemCapError(update, err)
+		}
+		return nil
+	}
+	if items > maxUpdateItems {
+		return fmt.Errorf("%w: its %d items exceed the %d one document update can hold", ErrDocumentTooLarge, items, maxUpdateItems)
+	}
+	return nil
 }

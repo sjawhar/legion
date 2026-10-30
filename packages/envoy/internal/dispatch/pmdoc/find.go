@@ -404,12 +404,24 @@ func (t flattenedText) normalizedForm() ([]rune, []range16) {
 	return t.forms.normalized, t.forms.spans
 }
 
+// buildFlattenedText reads doc's inline text into one string with the index the matchers read it
+// through. The index is allocated once, at the document's own size, which bounds it: every unit of
+// text takes one entry and so does every gap between two runs, and each of those gaps stands where
+// the document holds a position no text does. Growing it instead copied the whole index at every
+// doubling, which on a document whose paragraph is a mebibyte long was most of what a cold
+// one-word edit allocated (sjawhar/legion#2519).
 func buildFlattenedText(doc *Node) flattenedText {
 	var out strings.Builder
 	var positions []int
 	var marks []inlineMarkup
 	lastEnd := -1
 	walk(doc, func(node *Node, _ []int, pos, end int) bool {
+		if positions == nil {
+			// The walk visits the document first, so end is its size.
+			out.Grow(end)
+			positions = make([]int, 0, end)
+			marks = make([]inlineMarkup, 0, end)
+		}
 		if node.Type != "text" {
 			return true
 		}

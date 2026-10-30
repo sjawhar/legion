@@ -455,40 +455,56 @@ func readInline(markdown string, inline parser.Parser, context parser.Context, b
 	return paragraph.Children, nil
 }
 
-// BlockReadError is the parser's refusal of a document-level block's markdown, or nil when the
-// parser reads it back. A table in it is written spanless (renderSpanless): the cells a span adds
-// are empty, which the parser refuses nowhere, and the header still reaches every cell a row holds,
-// so the verdict is the one its markdown written with the spans gets.
-func BlockReadError(block *Node) error {
-	markdown, err := renderSpanless(readAlone(block))
+// BlockReadBack is what one rendering and parse of a document-level block says of it: Read is the
+// parser's refusal of its markdown (BlockReadError) and Shape what that markdown reads back as
+// when it is not blocks of the same kinds nested the same way (BlockShapeError). A write runs both
+// checks over the blocks it changed (docs' refuseUnreadableReplacement and
+// refuseReshapedReplacement, refuseUnreadableAccept and refuseReshapedAccept), and a caller that
+// takes the two from one read-back renders and parses each block once rather than once a check:
+// the block a write lands in can hold the whole document's text, and a one-word edit of a
+// mebibyte-long paragraph rendered and parsed it four times (sjawhar/legion#2519).
+type BlockReadBack struct {
+	Read  error
+	Shape error
+}
+
+// ReadBackBlock reads a document-level block's markdown back once and answers both verdicts
+// (BlockReadBack). A table in it is written spanless (renderSpanless): the cells a span adds are
+// empty, which the parser refuses nowhere, and the header still reaches every cell a row holds, so
+// the parser's verdict is the one its markdown written with the spans gets, while each row reads
+// back as wide as its widest row as it holds cells, where written with its spans a row would read
+// back wider wherever a span covers a cell. A block the renderer or the parser refuses has that
+// refusal as both verdicts: its markdown reads back as nothing to compare.
+func ReadBackBlock(block *Node) BlockReadBack {
+	doc := readAlone(block)
+	markdown, err := renderSpanless(doc)
 	if err != nil {
-		return err
+		return BlockReadBack{Read: err, Shape: err}
 	}
-	_, err = ParseRendering(markdown)
-	return renderedNesting(block, err)
+	back, err := ParseRendering(markdown)
+	if err != nil {
+		refusal := renderedNesting(block, err)
+		return BlockReadBack{Read: refusal, Shape: refusal}
+	}
+	if reason := readDifference(doc, back, shapeOnly); reason != "" {
+		return BlockReadBack{Shape: readsBackAs(reason)}
+	}
+	return BlockReadBack{}
+}
+
+// BlockReadError is the parser's refusal of a document-level block's markdown, or nil when the
+// parser reads it back (ReadBackBlock).
+func BlockReadError(block *Node) error {
+	return ReadBackBlock(block).Read
 }
 
 // BlockShapeError says what a document-level block's markdown reads back as when that is not
 // blocks of the same kinds nested the same way - the first block that reads back as another - or
-// is nil when it reads back so, or the parser's refusal of the markdown. What a textblock holds is
-// not compared. Every verdict it gives is ErrSchema, as the parser's own refusals are. A table in
-// it is written spanless (renderSpanless), so each of its rows reads back as wide as its widest row
-// as it holds cells, where written with its spans a row would read back wider wherever a span
-// covers a cell.
+// is nil when it reads back so, or the parser's refusal of the markdown (ReadBackBlock). What a
+// textblock holds is not compared. Every verdict it gives is ErrSchema, as the parser's own
+// refusals are.
 func BlockShapeError(block *Node) error {
-	doc := readAlone(block)
-	markdown, err := renderSpanless(doc)
-	if err != nil {
-		return err
-	}
-	back, err := ParseRendering(markdown)
-	if err != nil {
-		return renderedNesting(block, err)
-	}
-	if reason := readDifference(doc, back, shapeOnly); reason != "" {
-		return readsBackAs(reason)
-	}
-	return nil
+	return ReadBackBlock(block).Shape
 }
 
 // readsBackAs is a block's markdown reading back as blocks of another shape (BlockShapeError):

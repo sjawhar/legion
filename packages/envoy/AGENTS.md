@@ -960,7 +960,12 @@ blocks. Outside an ask it then runs, over every document-level block it changed,
 `refuseUnreadableReplacement`'s check (`refuseUnreadableAccept`) and the shape comparison
 (`refuseReshapedAccept`: `pmdoc.BlockShapeError`). Both write a table without the empty cells its
 colspans and rowspans add, which the read-back of the whole document below writes, so an accept
-across many tables costs no more there than the cells those tables hold. A non-empty replacement
+across many tables costs no more there than the cells those tables hold. Both verdicts come from
+one rendering and parse of each block (`pmdoc.ReadBackBlock`), which the checks of one write share
+through a `blockReadBacks` map, so a block two or three of them read - the block a write lands in
+can hold the whole document's text - is read back once rather than once a check. A replace shares
+one the same way (`refuseUnreadableReplacement`, `refuseReshapedReplacement`,
+`refuseCodeThatReshapesItsBlock`). A non-empty replacement
 inside a typed block is
 checked by that block's own `Splice` content rule, and `refuseBrokenAsks` checks an ask's
 `paragraph+ bullet_list?` rule. Last, the whole document is read back (`refuseMisreadAccept`:

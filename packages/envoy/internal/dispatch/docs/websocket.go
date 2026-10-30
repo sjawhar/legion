@@ -78,7 +78,7 @@ func (a *servicePersistenceAdapter) LoadDoc(room string) ([]byte, error) {
 	}
 	result, err := a.store.Load(context.Background(), room)
 	if err == nil {
-		err = validateUpdate(result.Update)
+		err = loadableHistory(result.Update)
 	}
 	if err != nil {
 		a.service.failRoom(room, err)
@@ -152,6 +152,24 @@ func validateUpdate(update []byte) error {
 		return nil
 	}
 	return crdt.ApplyUpdateV1(newDocumentCopy(), update, nil)
+}
+
+// loadableHistory is the refusal of a stored history the room ygo is loading could not take, so
+// the failure names the room (failRoom) rather than reaching a reader as a half-loaded document.
+// ygo decodes these same bytes into that room's document the moment LoadDoc returns them, with
+// the same pending queue this server's own decode takes (newDocumentCopy, Server.MaxPendingItems
+// in New), so decoding them here as well only moved that refusal one step earlier - and on a
+// history one client wrote, which is every document the server seeded, it cost 65 ms and 36 MB of
+// each cold settlement of an 8,000-item document, time and garbage the writes running beside it
+// paid for on a two-core pod (sjawhar/legion#2519). Such a history is judged by the item count
+// its header declares, which is what ygo refuses a history for before it integrates any of it
+// (refuseUpdateItemCap); a history of several clients, and one whose header does not read, are
+// decoded here as they were.
+func loadableHistory(update []byte) error {
+	if len(update) == 0 {
+		return nil
+	}
+	return refuseUpdateItemCap(update)
 }
 
 // preloadedDocument is the durable state a document socket's admission check decoded, kept for the
