@@ -974,7 +974,7 @@ func testJetStream(t *testing.T) jetstream.JetStream {
 // consumer's ReviewPermission (nil reads none).
 func startConsume(t *testing.T, js jetstream.JetStream, pool *pgxpool.Pool, engine *Engine, permission func(context.Context, intake.PullRequestReview) (bool, error)) func() {
 	t.Helper()
-	consumers, err := intake.OpenConsumers(t.Context(), js, intake.ConsumerSpec{
+	consumers, err := intake.OpenConsumers(t.Context(), js, pool, intake.ConsumerSpec{
 		Project: "CAPTURE", Repositories: []ghrepo.Repository{ghrepo.MustParse("sjawhar/legion")}, AckWait: time.Second, NakDelay: time.Millisecond,
 		Logger: slog.Default(), ReviewPermission: permission,
 	})
@@ -983,7 +983,7 @@ func startConsume(t *testing.T, js jetstream.JetStream, pool *pgxpool.Pool, engi
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan error, 1)
-	go func() { done <- consumers.Run(ctx, pool, engine, admissionStub{}) }()
+	go func() { done <- consumers.Run(ctx, engine, admissionStub{}) }()
 	return func() {
 		cancel()
 		if err := <-done; err != nil {

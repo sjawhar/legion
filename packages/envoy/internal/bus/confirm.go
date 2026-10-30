@@ -12,7 +12,9 @@ import (
 )
 
 // ErrPublishDenied is returned, wrapping nats.ErrPermissionViolation and the server's own text,
-// for a core publish the server refused under its connection's publish permissions.
+// for a publish the server refused under its connection's publish permissions: a core publish
+// confirmPublished names, and a JetStream publish whose subject's violation the connection
+// recorded (deniedPublish).
 var ErrPublishDenied = errors.New("NATS denied the publish")
 
 // errPublishUnconfirmed is wrapped, with the reason, by a core publish confirmPublished cannot
@@ -148,18 +150,28 @@ func confirmPublished(conn *nats.Conn, subject string, before connState) error {
 	if sameError(after.lastError, before.lastError) {
 		return nil
 	}
-	if publishDenied(after.lastError, subject) {
-		return fmt.Errorf("bus: %w to %q: %w", ErrPublishDenied, subject, after.lastError)
+	if denied := publishDenial(after.lastError, subject); denied != nil {
+		return denied
 	}
 	return fmt.Errorf("bus: %w: NATS reported an error during the publish to %q: %w",
 		errPublishUnconfirmed, subject, after.lastError)
 }
 
-// publishDenied reports whether err is the server's permissions violation of a publish to subject:
-// nats.ErrPermissionViolation carrying the server's `Publish to "<subject>"` text.
-func publishDenied(err error, subject string) bool {
-	return errors.Is(err, nats.ErrPermissionViolation) &&
-		strings.Contains(err.Error(), fmt.Sprintf("Publish to %q", subject))
+// publishDenial names err as ErrPublishDenied when it is the server's refusal of a publish to
+// subject under the connection's own publish permissions, and nil when it is anything else. A core
+// publish reads it off the last error the connection recorded across the publish and its flush
+// (confirmPublished), which is where the core path's documented ambiguity lives: nats.go keeps one
+// last error per connection, so a violation of another subject recorded in between leaves this
+// publish unconfirmed rather than denied, and its caller publishes it again. A JetStream publish,
+// which the stream acknowledges with nothing when the server refuses it, reads the violation
+// recorded under its own subject instead (deniedPublish), so a window whose sends were denied
+// several subjects at once names each of them.
+func publishDenial(err error, subject string) error {
+	if errors.Is(err, nats.ErrPermissionViolation) &&
+		strings.Contains(err.Error(), fmt.Sprintf("Publish to %q", subject)) {
+		return deniedPublishError(subject, err)
+	}
+	return nil
 }
 
 // sameError reports whether a and b are the same error value. nats.go records each permissions
