@@ -108,6 +108,37 @@ func dispatchConstructChildURN(typ, name string) string {
 	return "urn:pulumi:stack::project::" + dispatchType + "$" + typ + "::" + name
 }
 
+// databaseWaitsFor orders the Cloud SQL instance's update after the resource its value comes
+// from, so that a consumer's own step — deleting the old tailnet device before the front door
+// comes back, say — runs before the instance restarts. The value reaches no resource, only the
+// dependencies it carries do, so the direct path cannot show this: only Construct takes an input
+// with a consumer's dependencies on it, as a real consumer's output arrives.
+func TestConstructOrdersTheDatabaseInstanceAfterDatabaseWaitsFor(t *testing.T) {
+	instance := func(t *testing.T, m *pulumitest.Mocks) pulumitest.Registration {
+		t.Helper()
+		return m.Named(t, "gcp:sql/databaseInstance:DatabaseInstance", "example-dispatch")
+	}
+	t.Run("set", func(t *testing.T) {
+		inputs := dispatchConstructBaseInputs()
+		inputs["databaseWaitsFor"] = property.New("example-tailnet-device-deleted").WithDependencies([]resource.URN{upstream})
+		m, _, err := constructDispatch(t, inputs, false)
+		require.NoError(t, err)
+
+		require.Contains(t, instance(t, m).RPC.GetDependencies(), string(upstream),
+			"the instance's update follows the resource the value came from")
+		for input, deps := range instance(t, m).RPC.GetPropertyDependencies() {
+			require.NotContains(t, deps.GetUrns(), string(upstream), "the value itself reaches no input of the instance: %s", input)
+		}
+	})
+	t.Run("unset", func(t *testing.T) {
+		m, _, err := constructDispatch(t, dispatchConstructBaseInputs(), false)
+		require.NoError(t, err)
+
+		require.NotContains(t, instance(t, m).RPC.GetDependencies(), string(upstream),
+			"with the input unset the instance waits for nothing of the consumer's")
+	})
+}
+
 func TestConstructAcceptsUnknownDispatchInputsUnderPreview(t *testing.T) {
 	inputs := dispatchConstructInputs()
 	inputs["agentSecretsUrl"] = property.New("https://example-broker.internal.example")

@@ -196,7 +196,14 @@ type DispatchArgs struct {
 	// the default, or REGIONAL, a standby in a second zone that Cloud SQL fails over to. Switching
 	// changes the instance in place, restarting it once.
 	DatabaseAvailabilityType *string `pulumi:"databaseAvailabilityType,optional"`
-	Namespace                *string `pulumi:"namespace,optional"`
+	// DatabaseWaitsFor is a value of the resource whose update the Cloud SQL instance's must
+	// follow, so that a step of the consumer's own — deleting the old tailnet device before the
+	// front door comes back, for instance — runs before the instance restarts. The component never
+	// reads the value, and it reaches no resource: only the resources the value came from are
+	// used, which is what pulumi.DependsOnInputs reads off it. Unset, the instance's ordering is
+	// what it is today.
+	DatabaseWaitsFor pulumi.StringInput `pulumi:"databaseWaitsFor,optional"`
+	Namespace        *string            `pulumi:"namespace,optional"`
 	// ExistingNamespace: use the namespace as it exists in the cluster rather than creating it
 	// (another program owns the namespace).
 	ExistingNamespace *bool `pulumi:"existingNamespace,optional"`
@@ -632,6 +639,7 @@ func dispatchClusterOnlyRefusals(args *DispatchArgs) []dispatchInput {
 		{"databaseVersion", args.DatabaseVersion != nil},
 		{"databaseTier", args.DatabaseTier != nil},
 		{"databaseAvailabilityType", args.DatabaseAvailabilityType != nil},
+		{"databaseWaitsFor", args.DatabaseWaitsFor != nil},
 		{"namespace", args.Namespace != nil},
 		{"existingNamespace", args.ExistingNamespace != nil},
 		{"replicas", args.Replicas != nil},

@@ -163,6 +163,16 @@ func newDispatchDatabase(ctx *pulumi.Context, comp *Dispatch, name string, args 
 	if err != nil {
 		return nil, err
 	}
+	// databaseWaitsFor names a value of a resource the consumer wants the instance's update to
+	// follow, its own step before the restart (deleting the old tailnet device, say). The value
+	// itself reaches no resource here: only the dependencies it carries do, which is all
+	// dependsOnInput reads off it. A seed is still refused once it resolves, as it is in every
+	// other Pulumi input of this component, since refuseDispatchSeed's ApplyT keeps the input's
+	// own dependencies.
+	instanceOpts := []pulumi.ResourceOption{child, pulumi.DependsOn([]pulumi.Resource{connection})}
+	if args.DatabaseWaitsFor != nil {
+		instanceOpts = append(instanceOpts, dependsOnInput(refuseDispatchSeed(args.DatabaseWaitsFor, dispatch, "databaseWaitsFor")))
+	}
 	// AvailabilityType is databaseAvailabilityType. The bridged Terraform provider declares
 	// settings.availability_type without ForceNew (terraform-provider-google-beta v8.6.0, commit
 	// e6f3d61a347c, the upstream pulumi-gcp v10.1.0 bridges:
@@ -177,7 +187,7 @@ func newDispatchDatabase(ctx *pulumi.Context, comp *Dispatch, name string, args 
 			IpConfiguration:     &sql.DatabaseInstanceSettingsIpConfigurationArgs{Ipv4Enabled: pulumi.Bool(false), PrivateNetwork: network.ID(), SslMode: pulumi.String("ENCRYPTED_ONLY")},
 			BackupConfiguration: &sql.DatabaseInstanceSettingsBackupConfigurationArgs{Enabled: pulumi.Bool(true), PointInTimeRecoveryEnabled: pulumi.Bool(true), StartTime: pulumi.String("08:00"), TransactionLogRetentionDays: pulumi.Int(7), BackupRetentionSettings: &sql.DatabaseInstanceSettingsBackupConfigurationBackupRetentionSettingsArgs{RetainedBackups: pulumi.Int(14)}},
 		},
-	}, child, pulumi.DependsOn([]pulumi.Resource{connection}))
+	}, instanceOpts...)
 	if err != nil {
 		return nil, err
 	}

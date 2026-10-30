@@ -234,6 +234,14 @@ func refuseDispatchSeed(value pulumi.StringInput, dispatch, input string) pulumi
 	}).(pulumi.StringOutput)
 }
 
+// dependsOnInput orders a child after the resources in's value comes from. A value used only for
+// ordering reaches no input of the child, so the dependencies a consumer's output carries into the
+// component would otherwise be lost; DependsOnInputs takes the dependencies of the output it is
+// given, which are in's.
+func dependsOnInput(in pulumi.StringInput) pulumi.ResourceOption {
+	return pulumi.DependsOnInputs(in.ToStringOutput().ApplyT(func(string) []pulumi.Resource { return nil }).(pulumi.ResourceArrayOutput))
+}
+
 // refuseDispatchSecret is the one check every secret credential input of the component runs once
 // it resolves (tailnetAuthKey, signInClientSecret): a blank or whitespace-only value is a
 // credential that cannot work (the front door cannot join the tailnet, Dispatch refuses a blank
@@ -543,17 +551,21 @@ func newDispatchKubernetes(ctx *pulumi.Context, comp *Dispatch, name string, arg
 			return err
 		}
 	}
-	// In the SOCKS5 mode both other workloads dial the NATS hub through the front door's proxy, so
-	// each waits for its pod and its Service, for a reason of its own. envoy-listener exits on a
-	// failed initial connect (packages/envoy/cmd/listener/main.go), so a listener pod started
-	// before the proxy exists never goes ready and the rollout waits it out. envoy-dispatch serves
-	// without NATS: its /healthz readiness reads only Postgres, reporting nats false meanwhile, and
-	// its bus clients connect in the background once the proxy answers. So an app pod started first
-	// would go ready and serve without the bus (no outbox publish, no delivery intake) until then;
-	// the app waits for the front door only so that it starts connected. With natsInCluster neither
-	// waits for it: the proxy was the only reason either did, the port-1055 Service is not
-	// registered at all, and waiting would let a front-door outage hold up a listener rollout that
-	// no longer depends on it. Without a front door neither waits either, there being nothing to
+	// In the SOCKS5 mode the listener dials the NATS hub through the front door's proxy and waits
+	// for its pod and its Service; the app, which dials the same proxy, does not. envoy-listener
+	// exits when its first bus connection fails (packages/envoy/cmd/listener/main.go), so a
+	// listener pod started before the proxy exists never goes ready and the rollout waits it out:
+	// that wait earns its keep. envoy-dispatch serves without the bus: its /healthz readiness
+	// reads Postgres alone, reporting nats false meanwhile, and its bus clients connect in the
+	// background once the proxy answers, so the app pod goes ready and serves either way. It
+	// waited only so that it started connected, and that is now outweighed: during the cutover
+	// the front door is deliberately away while the database's availability type changes, and the
+	// server must come back inside that stop rather than behind the front door. Its database
+	// ordering is untouched by this — database.instance.ConnectionName is a cloud-sql-proxy
+	// argument on the app's own pod, so the pod still waits for the instance. With natsInCluster
+	// the listener does not wait either: the proxy was the only reason it did, the port-1055
+	// Service is not registered at all, and waiting would let a front-door outage hold up a
+	// listener rollout that no longer depends on it. Without a front door there is nothing to
 	// wait for, and the sandbox is in-cluster NATS by the resolver's own rule.
 	frontDoor := pulumi.DependsOn(frontDoorResources)
 	// Both also mount the NATS seed, which the pod can read only once its principal holds
@@ -729,7 +741,7 @@ func newDispatchKubernetes(ctx *pulumi.Context, comp *Dispatch, name string, arg
 	// envoy-dispatch reads the dispatch Secret and ENVOY_TOKEN from the listener's, so a change to
 	// either rolls the app.
 	appChecksums := map[string]*corev1.Secret{dispatchSecretName: dispatchSecret, listenerName: listenerSecret}
-	if _, err := deployment(s.hostname, s.replicas, s.disruption.appPDBMinAvailable, appChecksums, appPod, frontDoor, pulumi.DependsOn(appGrants)); err != nil {
+	if _, err := deployment(s.hostname, s.replicas, s.disruption.appPDBMinAvailable, appChecksums, appPod, pulumi.DependsOn(appGrants)); err != nil {
 		return err
 	}
 	if _, err := service(s.hostname, 8766); err != nil {

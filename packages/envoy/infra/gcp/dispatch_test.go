@@ -754,6 +754,20 @@ func TestDispatchRefusesABadNatsURLOnceItResolves(t *testing.T) {
 	}
 }
 
+// databaseWaitsFor is an ordering value, so nothing renders it and no child takes it; it is still
+// refused when it holds an nkey seed, as every other Input of the component is, once it resolves
+// and before the instance is registered with its dependencies. The refusal names the input and
+// never echoes the value.
+func TestDispatchRefusesASeedInDatabaseWaitsFor(t *testing.T) {
+	seed, _ := testnats.User(t)
+	args := dispatchArgs()
+	args.DatabaseWaitsFor = pulumi.String(seed)
+
+	_, err := runDispatch(t, args, true)
+	require.ErrorContains(t, err, "envoy-infra:gcp:Dispatch example-dispatch: databaseWaitsFor holds an nkey seed (not echoed)")
+	require.NotContains(t, strings.ToUpper(err.Error()), seed)
+}
+
 func TestDispatchRegistersItsCloudResources(t *testing.T) {
 	m, err := runDispatch(t, dispatchArgs(), true)
 	require.NoError(t, err)
@@ -1296,16 +1310,23 @@ func requireWaitsForTheFrontDoor(t *testing.T, m *pulumitest.Mocks, deployment, 
 	require.Contains(t, deps, frontDoorServiceURN, dials+" dials the proxy at its Service, not at the pod")
 }
 
-// envoy-dispatch serves without NATS: its /healthz readiness reads only Postgres, reporting nats
-// false, and its bus clients connect in the background once the front door's proxy answers. So an
-// app pod started before the front door and its Service would still go ready, serving without
-// the bus until the proxy answers; the app waits for the front door only so that it starts
-// connected.
-func TestDispatchAppWaitsForTheFrontDoor(t *testing.T) {
+// The two workloads that dial the proxy no longer order alike, and dispatchArgs leaves
+// natsInCluster unset, the only mode where there is a front door to wait for. envoy-listener
+// exits when its first bus connection fails (packages/envoy/cmd/listener/main.go), so a listener
+// pod started before the proxy never goes ready and the rollout waits it out: it still waits.
+// envoy-dispatch serves without the bus — /healthz reads Postgres alone, reporting nats false,
+// and its bus clients connect in the background once the proxy answers — so its wait bought only
+// a connected start, and during the cutover, where the front door is deliberately away while the
+// database's availability type changes, the server must come back inside that stop rather than
+// behind the front door.
+func TestDispatchAppDoesNotWaitForTheFrontDoorButTheListenerDoes(t *testing.T) {
 	m, err := runDispatch(t, dispatchArgs(), true)
 	require.NoError(t, err)
 
-	requireWaitsForTheFrontDoor(t, m, "example-dispatch", "the app")
+	app := m.Named(t, "kubernetes:apps/v1:Deployment", "example-dispatch").RPC.GetDependencies()
+	require.NotContains(t, app, frontDoorPodURN, "the server comes back inside the front door's stop, not behind it")
+	require.NotContains(t, app, frontDoorServiceURN, "the server comes back inside the front door's stop, not behind it")
+	requireWaitsForTheFrontDoor(t, m, "example-dispatch-listener", "the listener")
 }
 
 // envoy-listener dials the hub through the same proxy and exits on a failed initial connect
