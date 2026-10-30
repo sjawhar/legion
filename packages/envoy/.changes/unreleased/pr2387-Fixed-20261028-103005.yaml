@@ -5,11 +5,12 @@ body: |-
     - A direct message's first delivery attempt is written in the same transaction that stores the
       message, as a broadcast recipient's already was, so a stored message always has an attempt.
       Before, the attempt was written only after a listener lookup, and a process that stopped in
-      between left a message with no attempt that nothing would ever send.
+      between left a stored message with no attempt; the recovery that opens a first attempt for
+      such a message now serves only messages an earlier release stored.
     - A request's own send no longer stops when its connection is cut (a closed tab, a front-door
       pod roll): a direct message, a comment's mentions, and a Retry finish their send and record
       its outcome after the browser has gone.
-    - Migration `0142` adds `message_deliveries.urgency`, so a message attempt the delivery sweep
+    - Migration `0145` adds `message_deliveries.urgency`, so a message attempt the delivery sweep
       resumes after its sender stopped keeps the urgency it was sent with, as does a person's
       same-mode Retry of it (an attempt a Retry opens carries none). A resumed direct message is
       more than a minute old, so its session shows it as a card rather than as its user's own

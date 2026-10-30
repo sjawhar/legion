@@ -31,6 +31,9 @@ type Rebuild struct {
 	Edges int
 	// BlocksOwed is the number of documents marked owed a block index (document_block_versions).
 	BlocksOwed int
+	// ItemsOwed is the number of comments and messages marked owed a block index of their own
+	// blocks (comment_block_state and message_block_state owed_at).
+	ItemsOwed int
 }
 
 // RebuildAll reparses every reference source and reconciles refs with it, one transaction per
@@ -45,8 +48,11 @@ type Rebuild struct {
 //
 // A document's blocks and the mentions they hold are cut from its tree too, so the rebuild marks
 // every document owed a block index (document_block_versions.version null), which the block-index
-// reconciliation (docs.Service.RunBlockIndexReconciliation) indexes. It leaves block_grammar_owed
-// alone: it has just re-read every comment, ask and issue message with this build's grammar itself.
+// reconciliation (docs.Service.RunBlockIndexReconciliation) indexes. It marks every comment and
+// message, direct messages included, owed a block index of its own blocks too (owed_at, a missing
+// state row inserted owed), so the same reconciliation re-reads each item's blocks and the
+// mentions each holds with this build's parser and grammar. It leaves block_grammar_owed alone: it
+// has just re-read every comment, ask and issue message with this build's grammar itself.
 func RebuildAll(ctx context.Context, pool Pool, serverURL string) (Rebuild, error) {
 	var report Rebuild
 	sources := []struct {
@@ -101,6 +107,20 @@ func RebuildAll(ctx context.Context, pool Pool, serverURL string) (Rebuild, erro
 		return report, fmt.Errorf("mark every document owed a block index: %w", err)
 	}
 	report.BlocksOwed = int(owed.RowsAffected())
+	for _, mark := range []struct{ kind, query string }{
+		{"comment", `
+			insert into comment_block_state (comment_id, owed_at) select id, now() from comments
+			on conflict (comment_id) do update set owed_at = excluded.owed_at`},
+		{"message", `
+			insert into message_block_state (message_id, owed_at) select id, now() from messages
+			on conflict (message_id) do update set owed_at = excluded.owed_at`},
+	} {
+		owed, err := pool.Exec(ctx, mark.query)
+		if err != nil {
+			return report, fmt.Errorf("mark every %s owed a block index: %w", mark.kind, err)
+		}
+		report.ItemsOwed += int(owed.RowsAffected())
+	}
 	if err := pool.QueryRow(ctx, `select count(*) from refs`).Scan(&report.Edges); err != nil {
 		return report, fmt.Errorf("count references: %w", err)
 	}
@@ -207,7 +227,9 @@ func OwedItems(ctx context.Context, q Queryer, limit int) ([]OwedItem, error) {
 // owed for the next pass. A new edge takes the time the text was written (sourceText) and no
 // source_seq, since no event introduced it, as a rebuild's does; a re-index of text no one
 // rewrote appends no event, as rebuild-refs appends none. An item whose source is gone has its
-// edges deleted with its owed row.
+// edges deleted with its owed row. A comment or message has its blocks indexed too (IndexItem,
+// which takes the item's block state row after the source row), so the mentions its blocks hold
+// are read with the same grammar as its own.
 func ReindexOwedItem(ctx context.Context, pool Pool, item OwedItem, serverURL string) error {
 	tx, err := pool.Begin(ctx)
 	if err != nil {
@@ -219,7 +241,13 @@ func ReindexOwedItem(ctx context.Context, pool Pool, item OwedItem, serverURL st
 		return err
 	}
 	if found {
-		if _, err := replaceRefs(ctx, tx, item.Kind, item.ID, text.Extract(body, serverURL), &writtenAt); err != nil {
+		located := text.ExtractAt(body, serverURL)
+		if kind := ItemKind(item.Kind); kind == ItemComment || kind == ItemMessage {
+			if _, err := IndexItem(ctx, tx, kind, item.ID, body, writtenAt, located, nil); err != nil {
+				return fmt.Errorf("index the blocks of %s %s: %w", item.Kind, item.ID, err)
+			}
+		}
+		if _, err := replaceRefs(ctx, tx, item.Kind, item.ID, text.Refs(located), &writtenAt); err != nil {
 			return fmt.Errorf("index %s %s: %w", item.Kind, item.ID, err)
 		}
 	} else if _, err := tx.Exec(ctx, `delete from refs where from_kind = $1 and from_id = $2`, item.Kind, item.ID); err != nil {

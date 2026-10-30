@@ -1253,6 +1253,53 @@ type Comment struct {
 	CreatedAt  time.Time         `json:"created_at"`
 	Mentions   []Mention         `json:"mentions"`
 	Deliveries []CommentDelivery `json:"deliveries"`
+	// ReplyBlock is the block of the comment this reply answers, when it names one
+	// (reply_to_block); null on every other comment.
+	ReplyBlock *ReplyBlock `json:"reply_block"`
+	// RepliesToBlock is the node id comments.replies_to_block stores, null for a comment that
+	// names no block; ReplyBlock is read from it, and only for a comment that names one.
+	RepliesToBlock *string `json:"-"`
+}
+
+// ReplyBlock is the block a reply answers: its node id ('<item kind>/<item id>#<block id>') and
+// reference (none for a block of a direct message, which has no address), its id, its stored
+// excerpt (its text cut to refs.BlockExcerptRunes, the last text it held once removed), and
+// whether its item's current revision no longer holds it.
+type ReplyBlock struct {
+	Node    string `json:"node"`
+	Ref     string `json:"ref,omitempty"`
+	BlockID string `json:"block_id"`
+	Text    string `json:"text"`
+	Removed bool   `json:"removed"`
+}
+
+// ItemBlocks is the answer of GET /api/v1/comments/{id}/blocks and GET
+// /api/v1/messages/{id}/blocks: the comment or message as a graph node, the comment's revision (a
+// message, which is never edited, has none), whether its blocks are indexed from the body it
+// stores, and its current blocks in body order. While the item is owed an index, or its index was
+// made from another body than the stored one, Indexed is false and Blocks is empty: a read writes
+// nothing, and the dashboard's editor then edits the comment without carrying block ids.
+type ItemBlocks struct {
+	Item     GraphNode   `json:"item"`
+	Revision *int        `json:"revision,omitempty"`
+	Indexed  bool        `json:"indexed"`
+	Blocks   []ItemBlock `json:"blocks"`
+}
+
+// ItemBlock is one current block of a comment or message: its id, its Proof type, its whole text as
+// its author wrote it, its reference (none for a block of a direct message, which has no address),
+// and From and To, where it starts and ends in the stored body in UTF-16 code units (a JavaScript
+// string index). A comment block also carries the revision its text last changed in and that
+// revision's time; a message block has neither.
+type ItemBlock struct {
+	ID              string     `json:"id"`
+	Type            string     `json:"type"`
+	Text            string     `json:"text"`
+	Ref             string     `json:"ref,omitempty"`
+	From            int        `json:"from"`
+	To              int        `json:"to"`
+	ChangedRevision *int       `json:"changed_revision,omitempty"`
+	ChangedAt       *time.Time `json:"changed_at,omitempty"`
 }
 
 // Suggestion carries a proposed document replacement and its resolution.
@@ -1401,6 +1448,12 @@ type Message struct {
 	BroadcastID *string           `json:"broadcast_id"`
 	CreatedAt   time.Time         `json:"created_at"`
 	Deliveries  []MessageDelivery `json:"deliveries"`
+	// ReplyBlock is the block of the message this reply answers, when it names one
+	// (in_reply_to_block); null on every other message.
+	ReplyBlock *ReplyBlock `json:"reply_block"`
+	// RepliesToBlock is the node id messages.replies_to_block stores, null for a message that
+	// names no block; ReplyBlock is read from it, and only for a message that names one.
+	RepliesToBlock *string `json:"-"`
 }
 
 // MessageDelivery records one attempt to reach a live agent with a targeted message.
@@ -1431,7 +1484,8 @@ type MessageDelivery struct {
 }
 
 // MessageEventPayload wraps a Message with the reply target's body preview (first 160
-// characters, ReplyBody) so a reply can render "re: <preview>" without a second lookup.
+// characters, ReplyBody), or the preview of the block it names (ReplyBlock), so a reply can
+// render "re: <preview>" without a second lookup.
 type MessageEventPayload struct {
 	Message
 	ReplyBody string `json:"reply_body,omitempty"`

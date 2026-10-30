@@ -5,9 +5,11 @@ import type {
   CreateAgentMessageInput,
   CreateCommentInput,
   DeliveryCapability,
+  EditCommentInput,
 } from "../../api/types";
 import { newSendKey } from "../../lib/send-key";
 import { retriesUnderItsKey } from "../writes/keyed-write";
+import { carriedBlocks, type FollowedBlocks } from "./block-spans";
 import type {
   AcceptedMention,
   ComposerAnchor,
@@ -23,6 +25,24 @@ export interface SentDraft {
   readonly mentions: readonly AcceptedMention[];
   readonly replacement: string;
 }
+
+/** The block ids an edit's save carries (`PATCH /api/v1/comments/{id}`): the revision the blocks
+ *  route answered, and each carried id with where its block starts in the body sent. */
+export type CarriedBlockIds = Required<Pick<EditCommentInput, "base_revision" | "blocks">>;
+
+/** Saves an edit of comment `id`: its new body, the block ids the editor carried through the
+ *  edit, or undefined to carry none, and the write's own bounds (its key among them). */
+export type SaveCommentEdit = (
+  id: string,
+  body: string,
+  carried: CarriedBlockIds | undefined,
+  bounds: WriteBounds
+) => Promise<unknown>;
+
+/** The save of an edit whose host gave the composer none, and the one a send restored after a
+ *  reload saves through (`held-sends.ts`): the comment's new body with the ids it carries. */
+export const saveCommentEdit: SaveCommentEdit = (id, body, carried, bounds) =>
+  api.editComment(id, { body, ...carried }, bounds);
 
 /**
  * A send, whole, as it stood when Send started it: where it goes (the owner, the reply it answers,
@@ -43,8 +63,14 @@ export interface SentRequest {
   readonly draft: SentDraft;
   readonly edit:
     | {
+        /** The block ids the save carries, worked out at the press from the blocks the editor
+         *  followed through the edit (`carriedIdsOf`), and kept with the send across a reload, so
+         *  every attempt under the send's key sends the same body. Undefined when the blocks
+         *  route did not answer them (it failed, or the comment is not indexed yet): the save then
+         *  carries no ids, and the server matches blocks by their text. */
+        readonly carried: CarriedBlockIds | undefined;
         readonly id: string;
-        readonly save: (id: string, body: string, bounds: WriteBounds) => Promise<unknown>;
+        readonly save: SaveCommentEdit;
       }
     | undefined;
   readonly kind: ComposerKind;
@@ -273,6 +299,22 @@ function attempt(
     : api.createArtifactComment(owner.artifactId, input, bounds);
 }
 
+/** The block ids an edit's save carries, given `followed`, the comment's blocks as the editor
+ *  followed them, and `body`, the text the save sends: the revision the blocks route answered,
+ *  and where each carried id starts in `body` once trimmed. None when the blocks route never
+ *  answered, or when the spans are no longer offsets into `body`; the server then matches blocks
+ *  by their text.
+ *  The one place they are worked out, so a send kept across a reload carries exactly what its
+ *  first attempt did (`held-sends.ts`) and Dispatch reads one body under that send's key. */
+export function carriedIdsOf(
+  followed: FollowedBlocks | undefined,
+  body: string
+): CarriedBlockIds | undefined {
+  if (followed === undefined) return undefined;
+  const carried = carriedBlocks(followed.spans, followed.value, body.trim());
+  return carried === undefined ? undefined : { base_revision: followed.revision, blocks: carried };
+}
+
 /**
  * One attempt of a `SentRequest`, built from that value alone, so no later render's props or state
  * can reach the request it makes, whichever surface made it and whenever the store makes it again
@@ -283,7 +325,10 @@ function attempt(
  */
 export function sendAttempt(sent: SentRequest): (bounds: WriteBounds) => Promise<unknown> {
   const { edit, kind, owner, replyTo } = sent;
-  if (edit !== undefined) return (bounds) => edit.save(edit.id, sent.draft.body.trim(), bounds);
+  if (edit !== undefined) {
+    const body = sent.draft.body.trim();
+    return (bounds) => edit.save(edit.id, body, edit.carried, bounds);
+  }
   if (owner.kind === "session") {
     if (kind === "ask") {
       return () => Promise.reject(new Error("The direct session channel does not support asks."));

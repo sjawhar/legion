@@ -391,11 +391,12 @@ func main() {
 	// which is what makes a loop run once per period rather than once per process: two tickers
 	// started minutes apart almost never meet inside a pass, so the lease alone would exclude
 	// nothing. The leased loops are the document compaction (the outbox's), the
-	// suggestion-outcome sweep, the delivery resume, the reference-excerpt reconciliation, the
-	// edit-notice sweep, the block-index reconciliation, the repair of closed and reopened issues'
-	// asks, the webhook redelivery sweep, the architecture import, the delivery reconcile, the
-	// server process registry's prune (joinRegistry) and the delivery intakes' consumer
-	// reconciliation; store.leasePoolSize counts their callers.
+	// suggestion-outcome sweep (whose pass also runs the delivery sweep), the reference-excerpt
+	// reconciliation, the term-statistics refresh, the edit-notice sweep, the block-index
+	// reconciliation, the repair of closed and reopened issues' asks, the webhook redelivery
+	// sweep, the architecture import, the delivery reconcile, the server process registry's prune
+	// (joinRegistry) and the delivery intakes' consumer reconciliation; store.leasePoolSize
+	// counts their callers.
 	//
 	// Deliberately NOT leased, in three classes:
 	//   - already claims its own work, so two processes never do one unit of it twice: the
