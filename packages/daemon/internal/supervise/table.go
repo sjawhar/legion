@@ -561,8 +561,8 @@ func fillTable(t *builder) {
 		StateRegistered, StateReady, StateIdle)
 	t.row(onSuspend, "hold the suspension for the turn's end: stopping the agent now would cut its turn off", holdSuspension,
 		nil, StateWorking)
-	t.row(onSuspend, "a suspension of a rule-resuming launch is held until the agent is ready", holdSuspendUntilReady,
-		nil, StateLaunching, StateShimConnected)
+	t.row(onSuspend, "a suspension of a launch stops the start, and is otherwise held until the agent is ready", holdSuspendUntilReady,
+		[]ClaimState{StateSuspended}, StateLaunching, StateShimConnected)
 	t.row(onSuspend, "already suspended: an operator's suspend takes the suspension over", suspendedAgain, nil, StateSuspended)
 	t.ignore(onSuspend, notRegistered,
 		StateQueued, StateLaunchUncertain)
@@ -592,9 +592,9 @@ func fillTable(t *builder) {
 	t.row(onTreeClose, "the workflow's close of the tree: release the claim and retire it", treeClose, []ClaimState{StateRetired}, stoppable...)
 	t.row(onTreeClose, "already retired", nothingToDo, nil, StateRetired)
 
-	t.row(onIssueClose, "the workflow's close of the issue as done: release the claim, drop its session and retire it", issueClose,
+	t.row(onIssueClose, "the workflow's close of the issue as done: release the claim and retire it, its session kept", issueClose,
 		[]ClaimState{StateRetired}, stoppable...)
-	t.row(onIssueClose, "already retired: the session it kept goes with the issue", issueCloseRetired, nil, StateRetired)
+	t.row(onIssueClose, "already retired, with its session kept for a reopen", nothingToDo, nil, StateRetired)
 
 	t.row(onOperatorClose, "the operator's close of the tree, if no workflow issue backs it", operatorClose, []ClaimState{StateRetired}, stoppable...)
 	// A close of a tree already retired is the outcome the operator asked for, so it answers as
@@ -949,8 +949,13 @@ func turnStarted(m *Machine, ctx context.Context, ev Event) error {
 // nothing is left to ask it after a restart. The claim records when the turn ended
 // (Claim.LastTurnEnd) before any of that: every path out of here persists the claim, and the time
 // is what tells an idle worker that finished a moment ago from one idle since yesterday.
+//
+// A turn that ends is also the end of the work the deaths were charged against (chargeDeath), so
+// the count goes with it: an agent killed twice in its turns and through the third is making
+// progress, and only deaths that keep a turn from ending should ever fail its claim.
 func turnEnded(m *Machine, ctx context.Context, _ Event) error {
 	m.claim.LastTurnEnd = m.deps.Clock.Now()
+	m.claim.Budgets.Deaths = 0
 	m.askFirst = false
 	m.interruptOver()
 	if m.held != nil {
@@ -1066,8 +1071,12 @@ func reregister(m *Machine, ctx context.Context, ev Event) error {
 	return m.staleRegistration(ctx, r.PluginContract)
 }
 
+// ready is the agent saying it can be prompted. The time is kept on the claim (Claim.LastReady),
+// since it is what dates the two causes beside it — a death and a failed start are both older
+// than the agent that is running now (machine.go's Claim).
 func ready(m *Machine, ctx context.Context, _ Event) error {
 	m.claim.State = StateReady
+	m.claim.LastReady = m.deps.Clock.Now()
 	m.claim.Budgets.LaunchFailures = 0
 	m.disarm(TimerRegistration)
 	if m.held != nil {
@@ -1169,30 +1178,20 @@ func treeClose(m *Machine, ctx context.Context, _ Event) error { return m.end(ct
 // claim's and nothing else (Runtime.Release, releaseControllerSandbox) — so an issue's pod and the
 // disk it owns go with the separately fenced IssueSuspend, or with the tree cleanup once every
 // claim of the tree has retired. That is why a merged close leaves the implementer's pod standing:
-// its five siblings take this close and no IssueSuspend is queued (workflow/linger.go). The claim
-// ends as a tree close ends it, and the session it recorded goes first — the session is a row in
-// the session database rather than a file on any disk, so what is dropped is the record of which
-// session this claim held. Nothing of the workspace is recovered, and a later start of the issue,
-// re-entered by a person's todo, is a fresh spawn on a pod and a disk of its own. A release that
-// fails changes nothing, so the close can be asked again.
+// its five siblings take this close and no IssueSuspend is queued (workflow/linger.go). A release
+// that fails changes nothing, so the close can be asked again.
+//
+// The claim keeps the session it recorded. A done issue is reopened — a person moves it back, a
+// production check fails — and its roles are started again on the same issue, where a session
+// forgotten here would start each as a fresh agent that has read none of the work it is
+// continuing. The session is a row in the session database, not a file on the issue's disk, so it
+// outlives the pod and the workspace, and a resume that cannot find it is the one case that
+// starts fresh, uncharged and reported (machine.go's start).
 func issueClose(m *Machine, ctx context.Context, _ Event) error {
 	if err := m.release(ctx); err != nil {
 		return err
 	}
-	m.forgetSession()
 	return m.retire(ctx)
-}
-
-// issueCloseRetired is the issue's close reaching a claim already retired (a tree's close retired it
-// with its session kept): the issue is finished, so the session goes with it — a later start of the
-// issue, re-entered by a person's todo, is a fresh one — and a claim recording none is left as it
-// is.
-func issueCloseRetired(m *Machine, ctx context.Context, _ Event) error {
-	if m.claim.Session == "" && m.claim.SessionFile == "" {
-		return nil
-	}
-	m.forgetSession()
-	return m.persist(ctx)
 }
 
 // operatorClose is the operator's own close, asked of a claim through the API. TreeClosable is

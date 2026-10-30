@@ -773,14 +773,46 @@ func (f CloseRoot) Message() string {
 }
 
 // ClaimFailed is the supervision terminal failure observation. Reason is the persisted cause when
-// the supervisor has one, so workflow notices can say what failed after a daemon restart.
+// the supervisor has one, so workflow notices can say what failed after a daemon restart. Death is
+// why the claim's process was last found gone and StartFailure why its last start did not produce
+// a running agent, each as the runtime said it and empty when the claim has none: the two answer
+// different questions — a worker that kept dying and a worker that could never start — and the
+// notices this fact sends name both, since the architect reading them has no other way to learn
+// either (dispatch://INFRA-714 R6).
 type ClaimFailed struct {
-	Issue  string
-	Role   claim.Role
-	Reason string
+	Issue        string
+	Role         claim.Role
+	Reason       string
+	Death        string
+	StartFailure string
 }
 
 func (ClaimFailed) isFact() {}
+
+// SessionLost is a claim whose recorded session no session store holds any more: its worker now
+// runs a fresh agent that has read none of its own earlier work (supervise's startFresh). Detail
+// is why, as the runtime said it. It is told on the issue, to its architect and to the controller,
+// because a worker that silently lost its memory looks like one that is merely slow.
+type SessionLost struct {
+	Issue  string
+	Role   claim.Role
+	Detail string
+}
+
+func (SessionLost) isFact() {}
+
+// SessionStoreFault is a start that could not reach the session store at all, which is a
+// deployment fault rather than the claim's: nothing of the claim is lost and nothing is charged,
+// and the start is tried again every minute until the store answers (supervise's
+// startWaitsForStore). It is told on the issue and to the controller at the first such start and
+// hourly while it lasts, since no worker of the issue runs meanwhile.
+type SessionStoreFault struct {
+	Issue  string
+	Role   claim.Role
+	Detail string
+}
+
+func (SessionStoreFault) isFact() {}
 
 // ClaimReady is a claim ready to be prompted, from either of two sources: the supervision
 // observation of a launch's ready, its agent having taken its Envoy role and said it can be

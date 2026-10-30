@@ -133,7 +133,7 @@ func TestTheRunAClaimServes(t *testing.T) {
 		},
 		{
 			name:    "a task the agent refused, which it never read",
-			claim:   Claim{Pending: &Delivery{Generation: 5}},
+			claim:   Claim{Pending: &Delivery{Generation: 5, Prompted: true}},
 			serving: 0,
 		},
 		{

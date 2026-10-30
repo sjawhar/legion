@@ -70,6 +70,15 @@ type OperatorClaim struct {
 	// one wedged in a turn or idle since long before now.
 	LastTurnStart *time.Time `json:"lastTurnStart,omitempty"`
 	LastTurnEnd   *time.Time `json:"lastTurnEnd,omitempty"`
+	// LastDeathCause is why the claim's process was last found gone, LastStartFailure why its last
+	// start did not produce a running agent, and LastReady when its agent last said it could be
+	// prompted. Each is absent until it happens, and the two causes are kept apart because they
+	// answer different questions: a claim that cannot start and a claim that keeps dying are
+	// different faults. LastReady dates them — a cause older than it is one the running agent has
+	// already survived.
+	LastDeathCause   string     `json:"lastDeathCause,omitempty"`
+	LastStartFailure string     `json:"lastStartFailure,omitempty"`
+	LastReady        *time.Time `json:"lastReady,omitempty"`
 }
 
 // BudgetsView is the claim's retry counters (`supervise.Budgets`).
@@ -130,12 +139,15 @@ func operatorView(c supervise.Claim) OperatorClaim {
 			PromptFailures: c.Budgets.PromptFailures,
 			PromptRetires:  c.Budgets.PromptRetires,
 		},
-		UncertainStreak: c.UncertainStreak,
-		SuspendedBy:     string(c.SuspendedBy),
-		SuspensionHeld:  c.SuspensionHeld,
-		PluginContract:  c.PluginContract,
-		LastTurnStart:   instant(c.LastTurnStart),
-		LastTurnEnd:     instant(c.LastTurnEnd),
+		UncertainStreak:  c.UncertainStreak,
+		SuspendedBy:      string(c.SuspendedBy),
+		SuspensionHeld:   c.SuspensionHeld,
+		PluginContract:   c.PluginContract,
+		LastTurnStart:    instant(c.LastTurnStart),
+		LastTurnEnd:      instant(c.LastTurnEnd),
+		LastDeathCause:   c.LastDeathCause,
+		LastStartFailure: c.LastStartFailure,
+		LastReady:        instant(c.LastReady),
 	}
 	if p := c.Pending; p != nil {
 		view.Pending = &DeliveryView{
@@ -240,6 +252,12 @@ func (s *server) spawn(w http.ResponseWriter, r *http.Request) {
 // machine is posted, or answers the caller itself and reports false. A suspension the machine holds
 // for the agent's turn (supervise.ErrSuspendHeld) is not a refusal: it answers 202 with the claim as
 // it is, still working.
+//
+// Both reads of the claim are the machine's published view (supervise.Machine.View), never
+// Machine.Claim: a claim whose launch is running holds its machine's lock for as long as the
+// runtime waits on its pod, and a route that read through that lock would not even reach the
+// machine with the suspension that stops that start (dispatch://INFRA-714 R10). The view is what
+// the claim's latest decision left, which is what the answer reports.
 func (s *server) claimRequest(request string, event func(http.ResponseWriter, *http.Request, supervise.Claim) (supervise.Event, bool)) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		token := claim.Token(r.PathValue("token"))
@@ -248,7 +266,7 @@ func (s *server) claimRequest(request string, event func(http.ResponseWriter, *h
 			writeJSON(w, http.StatusNotFound, errorBody("no claim "+string(token)))
 			return
 		}
-		ev, ok := event(w, r, m.Claim())
+		ev, ok := event(w, r, m.View().Claim)
 		if !ok {
 			return
 		}
@@ -265,7 +283,7 @@ func (s *server) claimRequest(request string, event func(http.ResponseWriter, *h
 			return
 		}
 		s.operatorDone(r, token)
-		writeJSON(w, status, operatorView(m.Claim()))
+		writeJSON(w, status, operatorView(m.View().Claim))
 	}
 }
 

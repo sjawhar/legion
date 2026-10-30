@@ -313,10 +313,12 @@ func TestUnderTakeOverEverySessionFoundNowhereStartsFresh(t *testing.T) {
 	}
 }
 
-// With take_over off, the same resumes are the refusal to start fresh, never
-// runtime.ErrSessionFileMissing: the claim resumes the agent it recorded or none, and the refusal
-// is charged by the claim's machine, which keeps the recorded session.
-func TestWithoutTakeOverAMissingSessionIsRefused(t *testing.T) {
+// With take_over off, the same resumes answer exactly as they do with it on: a session no folder
+// the runtime searched holds is runtime.ErrSessionFileMissing either way, because the search is
+// the same search and a session nothing holds is gone whichever runtime last wrote it. The claim's
+// machine then starts a fresh agent in its place, charged nothing and reported
+// (dispatch://INFRA-714 R8).
+func TestWithoutTakeOverAMissingSessionIsStillTheMissingSession(t *testing.T) {
 	ctx := context.Background()
 	for name, session := range map[string]func(f *fakeServerRuntime) string{
 		"a pod's session": func(*fakeServerRuntime) string { return podSession },
@@ -330,11 +332,11 @@ func TestWithoutTakeOverAMissingSessionIsRefused(t *testing.T) {
 			spec := f.spec(t, claim.RoleTester)
 			spec.ResumeSessionFile = session(f)
 			_, err := f.Resume(ctx, nil, spec)
-			if err == nil || errors.Is(err, runtime.ErrSessionFileMissing) || !strings.HasPrefix(err.Error(), "Refusing to start LEGION-43 fresh while respawning: recorded OMP session file is missing: "+spec.ResumeSessionFile) {
-				t.Fatalf("Resume without take_over = %v, want the refusal to start fresh", err)
+			if !errors.Is(err, runtime.ErrSessionFileMissing) || !strings.HasPrefix(err.Error(), "resume "+string(spec.Claim)+": the recorded session file is missing: no OMP session at "+spec.ResumeSessionFile) {
+				t.Fatalf("Resume without take_over = %v, want runtime.ErrSessionFileMissing naming %s", err, spec.ResumeSessionFile)
 			}
 			if opened(f.argvs) {
-				t.Errorf("a refused resume opened a pane: %q", f.argvs)
+				t.Errorf("a resume of a missing session opened a pane: %q", f.argvs)
 			}
 		})
 	}

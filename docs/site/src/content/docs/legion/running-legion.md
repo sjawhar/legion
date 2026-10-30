@@ -694,9 +694,13 @@ Closing the terminal leaves the project without one, and the daemon logs
    ```
 
    An operator's suspension of an agent in a turn waits for that turn to land, at most
-   `worker_stop_timeout_seconds`, and the cut-off task is re-sent on the resume. One that reaches a
-   claim while it is still launching waits until the agent is ready, or until its registration
-   deadline. Until the stop lands the hold lives only in the daemon's memory, so before restarting
+   `worker_stop_timeout_seconds`, and the cut-off task is re-sent on the resume. One that reaches
+   a claim whose start is still running stops that start — which is charged nothing — and suspends
+   the claim at once, rather than waiting out a launch that can take minutes. Every `legion
+   claims` subcommand takes a `--wait`, one minute by default, that bounds the whole call: a call
+   that reaches it is refused with a line naming the bound, and the daemon goes on with what it
+   began under its own deadlines. Until the stop lands the hold lives only in the daemon's memory,
+   so before restarting
    the daemon wait until `legion claims list` shows the claim `suspended`, not merely
    `suspensionHeld`. The resumed agent continues the same conversation in a new pod — and that
    pod brings a disk of its own, so its workspace is provisioned afresh from the issue's branch

@@ -12,17 +12,15 @@ import (
 //     refused, a process that died, one whose agent never registered or registered and never said
 //     it was ready. Reset only by the agent's ready: a registration alone proves nothing about the
 //     next launch.
-//   - Deaths: processes that died after their agent was ready and while it had work outstanding —
-//     a pending task, whose turn was running or which was sent and not yet begun. The relaunch
-//     reaches ready again whatever killed the last process, so ready cannot bound these; an agent
-//     that dies before it completes a turn each time it is given the task would otherwise be
-//     relaunched for ever. The count is charged against the pending task and reset only when that
-//     task ends (retirePending): its turn ends, which a killed Oh My Pi never reports, or a
-//     suspension or a phase change retires it. A turn that never ran the task — a notice's —
-//     clears nothing. A death with nothing pending is not counted: a parked agent — idle, holding
-//     no task — that the environment kills now and then is relaunched however often it happens, and
-//     so is one killed in a turn no delivery started, a notice's, whose work waits for whatever
-//     next wakes the relaunched agent. Bounded by the launch failure limit.
+//   - Deaths: processes that died after their agent was ready with work outstanding — a pending
+//     task, or a turn the agent had begun and not ended, whether or not a task was behind it
+//     (chargeDeath). The relaunch reaches ready again whatever killed the last process, so ready
+//     cannot bound these; an agent that dies in its turn each time it is woken would otherwise be
+//     relaunched for ever. The count ends with the work it was charged against: the task's retire
+//     (retirePending) or a turn that ends normally (turnEnded), either of which says the agent got
+//     through what it was doing. A death with no turn open and nothing pending is not counted: a
+//     parked agent — idle, holding no task — that the environment kills now and then is relaunched
+//     however often it happens. Bounded by the launch failure limit.
 //   - PromptFailures: prompts the agent refused, acknowledged prompts that started no turn, and
 //     prompts refused after their acknowledgement. A prompt lost to the transport, not sent for
 //     want of a connection, or refused because the agent is in a turn of its own (Oh My Pi's busy
@@ -62,16 +60,32 @@ func (m *Machine) relaunchAfterFailure(ctx context.Context) error {
 	return m.launchAfter(ctx, true)
 }
 
-// chargeDeath counts a process that died after its agent was ready while it had work
-// outstanding, and reports whether those deaths have reached the limit.
+// chargeDeath counts a process that died after its agent was ready with work outstanding, and
+// reports whether those deaths have reached the limit. Work is outstanding when the claim holds a
+// task, and also when a turn of the agent's was open at the death — the claim's last turn started
+// and has not ended — since a turn an Envoy message began does the issue's work with no task
+// behind it, and a root architect killed six times inside its turns was relaunched for ever
+// because each death found nothing pending. A death with no turn open and nothing pending is a
+// parked agent the environment killed, which is not counted however often it happens.
 func (m *Machine) chargeDeath() bool {
-	if m.claim.Pending == nil || slices.Contains(unready, m.claim.State) {
+	if slices.Contains(unready, m.claim.State) {
+		return false
+	}
+	if m.claim.Pending == nil && !m.turnOpen() {
 		return false
 	}
 	m.claim.Budgets.Deaths++
 	m.log.Warn("supervise: the agent died with work outstanding", "deaths", m.claim.Budgets.Deaths,
-		"limit", m.deps.Limits.LaunchFailures)
+		"limit", m.deps.Limits.LaunchFailures, "pending", pendingID(m.claim.Pending), "turnOpen", m.turnOpen())
 	return m.claim.Budgets.Deaths >= m.deps.Limits.LaunchFailures
+}
+
+// turnOpen is whether the agent began a turn it has not ended: the claim is working, which is the
+// state a turn's start puts it in and its end takes it out of, or the claim's recorded turn times
+// say so. Both are persisted, so the answer survives the restart that rebuilt the machine, and
+// the times answer for a claim whose state has already moved on.
+func (m *Machine) turnOpen() bool {
+	return m.claim.State == StateWorking || m.claim.LastTurnStart.After(m.claim.LastTurnEnd)
 }
 
 // chargePrompt counts one prompt failure. At the limit the process is retired — suspended, the

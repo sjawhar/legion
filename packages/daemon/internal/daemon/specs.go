@@ -290,6 +290,14 @@ func AddressingFragment(project string, c supervise.Claim, repo ghrepo.Repositor
 	fragment := fmt.Sprintf("Legion addressing: your role topic is `%s%s`; the architect that owns your issue is `%s%s`; "+
 		"the project's controller is `%s%s`; a sibling role on your issue is your topic with the trailing `-<role>` replaced.",
 		notify.RoleTopicPrefix, c.Token, notify.RoleTopicPrefix, architect, notify.RoleTopicPrefix, claim.ControllerToken(project))
+	if c.SessionLost {
+		// The agent this launch starts is a fresh session on a claim that had one: nothing in it
+		// says an earlier session existed, so it would read an empty transcript as a fresh start
+		// and redo work that is already pushed (dispatch://INFRA-714 R8).
+		fragment += " The session this claim recorded was found in no session store, so this is a new session: " +
+			"the turns, tool calls and subagents of your earlier work are gone, and only what you pushed and committed survives. " +
+			"Read your issue and the committed handoffs in your workspace before you continue, and tell your architect what you found."
+	}
 	if repo.IsZero() {
 		return fragment, nil
 	}

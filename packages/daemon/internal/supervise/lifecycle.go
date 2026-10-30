@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"slices"
+	"time"
 
 	"github.com/sjawhar/legion/daemon/internal/treelifecycle"
 	"github.com/sjawhar/legion/daemon/internal/wait"
@@ -55,19 +56,20 @@ func (m *Machine) relaunchRefused(ctx context.Context, relaunch func(context.Con
 		return errors.Join(err, m.suspended(ctx, SuspendedByDaemon))
 	}
 	m.log.Warn("supervise: the lifecycle check of the retired process's relaunch failed; trying it again at the probe interval", "error", err)
-	m.relaunchLater(relaunch)
+	m.relaunchLater(m.deps.Timeouts.Probe, relaunch)
 	return errors.Join(err, m.persist(ctx))
 }
 
 // relaunchLater leaves a claim whose process is already let go waiting launching with no process,
-// its task kept, and tries relaunch again at the probe interval (TimerRelaunch, relaunchAgain): a
-// relaunch whose lifecycle check the store did not answer (relaunchRefused), or a launch whose
-// write failed (launchAfter). Nothing else would relaunch such a claim before a restart, which
-// takes it up from what the store last holds.
-func (m *Machine) relaunchLater(relaunch func(context.Context) error) {
+// its task kept, and tries relaunch again after wait (TimerRelaunch, relaunchAgain): a relaunch
+// whose lifecycle check the store did not answer (relaunchRefused), or a launch whose write failed
+// (launchAfter), each at the probe interval, and a start the session store could not answer, at
+// its own minute (startWaitsForStore). Nothing else would relaunch such a claim before a restart,
+// which takes it up from what the store last holds.
+func (m *Machine) relaunchLater(wait time.Duration, relaunch func(context.Context) error) {
 	m.claim.State = StateLaunching
 	m.relaunch = relaunch
-	m.arm(TimerRelaunch, m.deps.Timeouts.Probe, "")
+	m.arm(TimerRelaunch, wait, "")
 }
 
 // relaunchAgain is the relaunch relaunchLater left waiting (TimerRelaunch). A suspension held

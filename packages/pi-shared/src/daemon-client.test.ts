@@ -8,6 +8,7 @@ import {
   LegionDaemonContractError,
   type ReadyInput,
 } from "./daemon-client";
+import { type ClaimCapability, executePhaseOp } from "./legion-phase-ops";
 
 /** A response the daemon's own golden test wrote (`packages/daemon/internal/api`). */
 function daemonFixture(name: string): Record<string, unknown> {
@@ -58,9 +59,9 @@ test("registers with the claim wire's request and returns the claim the daemon i
   ]);
 });
 
-test("refuses a registration answer the daemon API contract does not describe, without quoting its secret", async () => {
+test("refuses a registration answer whose field is not the shape the contract describes, without quoting its secret", async () => {
   const registered = daemonFixture("register.json");
-  const issued = { ...registered, roleTokens: {} };
+  const issued = { ...registered, promptAgents: "deep-worker" };
   const client = createLegionDaemonClient(
     "http://daemon.test",
     daemon(() => Response.json(issued)).fetch
@@ -70,7 +71,7 @@ test("refuses a registration answer the daemon API contract does not describe, w
   await expect(refused).rejects.toBeInstanceOf(LegionDaemonContractError);
   await expect(refused).rejects.toThrow("POST /legion/v1/claims/register answered 200");
   await refused.catch((error: Error) => {
-    expect(error.message).toContain("roleTokens");
+    expect(error.message).toContain("promptAgents");
     expect(error.message).not.toContain(String(registered.secret));
   });
 });
@@ -147,7 +148,7 @@ test("a ready carrying the capability report is the daemon's golden ReadyRequest
   expect(golden.capabilities?.rows).toHaveLength(3);
 });
 
-test("reads the daemon's state strictly, refusing the TypeScript daemon's shape", async () => {
+test("reads the daemon's state, refusing a field it knows whose type is not the contract's", async () => {
   const state = daemonFixture("state.json");
   const { fetch, requests } = daemon(() => Response.json(state));
 
@@ -158,12 +159,42 @@ test("reads the daemon's state strictly, refusing the TypeScript daemon's shape"
     { method: "GET", url: "http://daemon.test/legion/v1/state", body: undefined },
   ]);
 
-  const typescriptState = daemon(() =>
-    Response.json({ ...state, workerAdmission: { queue: [] } })
-  ).fetch;
+  const malformed = daemon(() => Response.json({ ...state, capabilities: "none" })).fetch;
   await expect(
-    createLegionDaemonClient("http://daemon.test", typescriptState).state()
+    createLegionDaemonClient("http://daemon.test", malformed).state()
   ).rejects.toBeInstanceOf(LegionDaemonContractError);
+});
+
+// A session runs the release before its daemon's through every roll, so the state it reads can
+// carry fields this build has no schema line for. read_record is what every phase worker reads its
+// own record with, so it is what proves such a response is not merely parsed but used.
+test("a state from a daemon a release ahead parses without its unknown top-level and nested fields, and read_record reads the record out of it", async () => {
+  const state = daemonFixture("state.json") as { issues: Record<string, unknown> };
+  const record = state.issues["LEGION-208"] as Record<string, unknown>;
+  const ahead = {
+    ...state,
+    runnerPools: [{ name: "gvisor", size: 4 }],
+    issues: { ...state.issues, "LEGION-208": { ...record, reparentedAt: "2026-10-30T09:00:00Z" } },
+  };
+  const client = createLegionDaemonClient(
+    "http://daemon.test",
+    daemon(() => Response.json(ahead)).fetch
+  );
+  const claim: ClaimCapability = {
+    sessionID: "ses_implementer_208",
+    tree: "LEGION-208",
+    issue: "LEGION-208",
+    role: "implementer",
+    secret: "U2VjcmV0",
+  };
+
+  await expect(client.state()).resolves.toEqual(state as never);
+  await expect(
+    executePhaseOp(
+      { daemon: client, claim, handoffCommit: async () => "a".repeat(40) },
+      { op: "read_record", issue: "LEGION-208" }
+    )
+  ).resolves.toEqual({ record });
 });
 
 test("a state read hands fetch its caller's signal, and an abort ends a read the daemon never answers", async () => {

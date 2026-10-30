@@ -298,6 +298,7 @@ func run(ctx context.Context, cfg config.Config, build Build, log *slog.Logger, 
 		// tree closes.
 		plan.phaseHolds, plan.treeClosable = workflow.phaseHolds, workflow.treeClosable
 		plan.taskConfirmed = workflow.taskConfirmed
+		plan.sessionLost, plan.sessionStoreFault = workflow.sessionLost, workflow.sessionStoreFault
 	}
 	if cfg.Runtime.Name == "tmux" {
 		executable, err := os.Executable()
@@ -565,6 +566,11 @@ type plan struct {
 	treeClosable func(ctx context.Context, c supervise.Claim) (bool, error)
 	// taskConfirmed tells the workflow each agent that took its task; nil without a workflow.
 	taskConfirmed func(c supervise.Claim)
+	// sessionLost and sessionStoreFault tell the workflow that a claim's recorded session is in no
+	// session store any more, and that a start could not reach that store at all; nil without a
+	// workflow, where neither is reported to anyone.
+	sessionLost       func(c supervise.Claim, detail string)
+	sessionStoreFault func(c supervise.Claim, detail string)
 	// tools are the git and jj boot resolved on the host, by name, for workspace provisioning;
 	// nil without a repository, and under a runtime whose agents run the worker image's own.
 	tools         map[string]string
@@ -1075,13 +1081,15 @@ func openSupervision(boot context.Context, cfg config.Config, log *slog.Logger, 
 			runtimeName: cfg.Runtime.Name, plugins: p.plugins,
 			backend: cfg.BackendFor, hostWorkspaces: !rt.ProvisionsWorkspaces(), ensureWorkspace: p.ensureWorkspace,
 		},
-		Identity:      adoptIdentity(p.identity, p.repository),
-		Secrets:       p.secretsEnroller,
-		PhaseHolds:    p.phaseHolds,
-		TreeClosable:  p.treeClosable,
-		TaskConfirmed: p.taskConfirmed,
-		Clock:         p.clock,
-		Log:           log,
+		Identity:          adoptIdentity(p.identity, p.repository),
+		Secrets:           p.secretsEnroller,
+		PhaseHolds:        p.phaseHolds,
+		TreeClosable:      p.treeClosable,
+		TaskConfirmed:     p.taskConfirmed,
+		SessionLost:       p.sessionLost,
+		SessionStoreFault: p.sessionStoreFault,
+		Clock:             p.clock,
+		Log:               log,
 		Limits: supervise.Limits{
 			LaunchFailures: cfg.LaunchFailureLimit,
 			PromptFailures: cfg.PromptFailureLimit,

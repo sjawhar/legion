@@ -69,19 +69,25 @@ func Project(ctx context.Context, tx pgx.Tx, s record.Store, project string, cla
 			}
 		}
 		view := api.ClaimView{
-			Session:        current.Session,
-			State:          string(current.State),
-			Locator:        current.Locator,
-			PluginContract: current.PluginContract,
+			Session:          current.Session,
+			State:            string(current.State),
+			Locator:          current.Locator,
+			PluginContract:   current.PluginContract,
+			LastDeathCause:   current.LastDeathCause,
+			LastStartFailure: current.LastStartFailure,
 		}
-		// The turn times are absent until the claim records them, and stay absent for one whose
-		// last turn ran before the daemon kept them: the reader of a state distinguishes a worker
-		// that never worked from one that worked at a known time, never from a zero time.
+		// The turn times, and the ready that dates the causes beside them, are absent until the
+		// claim records them, and stay absent for one whose last turn ran before the daemon kept
+		// them: the reader of a state distinguishes a worker that never worked from one that
+		// worked at a known time, never from a zero time.
 		if started := current.LastTurnStart; !started.IsZero() {
 			view.LastTurnStart = &started
 		}
 		if ended := current.LastTurnEnd; !ended.IsZero() {
 			view.LastTurnEnd = &ended
+		}
+		if ready := current.LastReady; !ready.IsZero() {
+			view.LastReady = &ready
 		}
 		if report, reported := reports[current.Token]; reported {
 			view.Capabilities = api.CapabilityReportViewOf(report)

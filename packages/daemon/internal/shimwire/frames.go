@@ -200,12 +200,20 @@ type LauncherStart struct {
 // it writes them.
 func GenerationDir(generation uint64) string { return "g" + strconv.FormatUint(generation, 10) }
 
-// LauncherStartResult is the launcher's answer to LauncherStart.
+// LauncherStartResult is the launcher's answer to LauncherStart. A start the launcher refused over
+// the session it was asked to resume says which of the two refusals it is, so the daemon never has
+// to read an error's prose to tell them apart (runtime.ErrSessionFileMissing,
+// runtime.ErrSessionStore): SessionMissing is the session table answering that it holds no such
+// session, a session that is gone, and SessionStoreFault is that table being absent or the store
+// not answering, which says nothing about the session. Neither is set when the start succeeded,
+// and at most one is ever set; Error carries the sentence either way.
 type LauncherStartResult struct {
 	ID                string `json:"id"`
 	OK                bool   `json:"ok"`
 	RunningGeneration uint64 `json:"runningGeneration,omitempty"`
 	Error             string `json:"error,omitempty"`
+	SessionMissing    bool   `json:"sessionMissing,omitempty"`
+	SessionStoreFault bool   `json:"sessionStoreFault,omitempty"`
 }
 
 // LauncherStop stops only the child of Generation. The launcher refuses an older generation

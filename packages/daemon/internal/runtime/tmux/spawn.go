@@ -383,14 +383,12 @@ func (r *Runtime) Spawn(ctx context.Context, spec runtime.SpawnSpec) (runtime.Lo
 // is refused, naming the key (paneOf). The session is resumed where it is: at its recorded path,
 // or, by its name, in another working directory's folder of the recorded path's sessions directory
 // or of the pane's own (sessionFileOf), where a session carried over from a pod lands. One found
-// nowhere starts nothing. While take_over is set (takingOverSession), a session found nowhere
-// wraps runtime.ErrSessionFileMissing, which the claim's machine answers by forgetting the session
-// and spawning a fresh agent: most such sessions are the taken-over runtime's, and the operator
-// chose that cost. It holds for a resume over a foreign prev and for every other resume alike,
-// since neither the recorded path nor the previous incarnation tells the
-// other runtime's sessions from this host's own. With the key off, a session found nowhere is a
-// refusal, never a fresh agent: the claim resumes the agent it recorded or none
-// (assertResumeSessionFile, runtime.ts), and the refusal is charged as any launch failure is.
+// nowhere starts nothing and wraps runtime.ErrSessionFileMissing, which the claim's machine
+// answers by forgetting the session and spawning a fresh agent, charged nothing and reported. That
+// holds whether or not take_over is set: the folders searched are the same, and a session no
+// folder holds is gone whichever runtime last wrote it — under the key most such sessions are the
+// taken-over runtime's, which neither the recorded path nor the previous incarnation tells from
+// this host's own.
 func (r *Runtime) Resume(ctx context.Context, prev *runtime.Locator, spec runtime.SpawnSpec) (runtime.Locator, error) {
 	if spec.ResumeSessionFile == "" {
 		return runtime.Locator{}, fmt.Errorf("resume %s: no session file to resume from", spec.Claim)
@@ -436,10 +434,12 @@ func (r *Runtime) awaitGone(ctx context.Context, loc runtime.Locator) error {
 // launch is Spawn's and Resume's shared half: every check that needs no tmux, then, under the launch
 // lock, the refusal of a claim whose process still runs, the secret files, the claim's gh bundle
 // and the pane. The refusal comes first, so a refused launch rewrites none of the files the live
-// process reads. While the operator's takeover is on (takingOverSession), a session found nowhere
-// is runtime.ErrSessionFileMissing rather than a refusal, whatever the claim recorded: a resume
-// over the taken-over runtime's own incarnation is one such launch, and nothing tells its session
-// from this host's own (sessionfile.go).
+// process reads. A session found in no folder it searched is runtime.ErrSessionFileMissing,
+// whatever the claim recorded and whether or not the operator's takeover is on
+// (takingOverSession): the search is the same search either way, and a session nothing holds is
+// the same fact however the daemon is configured. The caller starts a fresh agent in its place,
+// charged nothing and reported (supervise's start), which is also what a taken-over runtime's
+// session gets, since nothing tells it from this host's own (sessionfile.go).
 func (r *Runtime) launch(ctx context.Context, spec runtime.SpawnSpec) (runtime.Locator, error) {
 	if err := validateSpawnSpec(spec, r.providerKeys, r.operatorEnv); err != nil {
 		return runtime.Locator{}, err
@@ -476,16 +476,9 @@ func (r *Runtime) launch(ctx context.Context, spec runtime.SpawnSpec) (runtime.L
 		switch {
 		case err != nil:
 			return runtime.Locator{}, fmt.Errorf("spawn %s: %w", spec.Claim, err)
-		case found == "" && r.takingOverSession():
+		case found == "":
 			return runtime.Locator{}, fmt.Errorf("resume %s: %w: no %s session at %s, and no other folder of %s holds that session",
 				spec.Claim, runtime.ErrSessionFileMissing, harness, spec.ResumeSessionFile, searchedIn(searched))
-		case found == "":
-			verb := "respawning"
-			if claim.IsTreeArchitect(spec.Role, spec.Issue, spec.Tree) {
-				verb = "resurrecting"
-			}
-			return runtime.Locator{}, fmt.Errorf("Refusing to start %s fresh while %s: recorded %s session file is missing: %s, and no other folder of %s holds that session",
-				spec.Issue, verb, harness, spec.ResumeSessionFile, searchedIn(searched))
 		case found != spec.ResumeSessionFile:
 			r.log.Warn("tmux runtime: the recorded session is in another folder; resuming it there",
 				"claim", spec.Claim, "backend", backend, "recorded", spec.ResumeSessionFile, "session", found)

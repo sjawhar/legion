@@ -146,6 +146,10 @@ func (e *Engine) Apply(ctx context.Context, tx pgx.Tx, fact intake.Fact) (intake
 		return e.claimReady(ctx, tx, fact)
 	case intake.ClaimFailed:
 		return e.claimFailed(ctx, tx, fact)
+	case intake.SessionLost:
+		return e.sessionLost(ctx, tx, fact)
+	case intake.SessionStoreFault:
+		return e.sessionStoreFault(ctx, tx, fact)
 	case intake.RetryOrEscalate:
 		return e.retryOrEscalate(ctx, tx, fact)
 	case intake.BackwardMove:
@@ -713,10 +717,75 @@ func (e *Engine) claimFailed(ctx context.Context, tx pgx.Tx, fact intake.ClaimFa
 	if err := e.store.PutIssue(ctx, tx, *issue); err != nil {
 		return intake.Result{}, err
 	}
-	if err := e.noticeWithController(ctx, tx, issue.Key, record.Notice{Kind: "held", Role: fact.Role, Phase: from}); err != nil {
+	if err := e.noticeWithController(ctx, tx, issue.Key, record.Notice{Kind: "held", Role: fact.Role, Phase: from,
+		Reason: claimCauses(fact)}); err != nil {
 		return intake.Result{}, err
 	}
-	return intake.Result{}, e.notice(ctx, tx, issue.Key, record.Notice{Kind: "worker-died", Role: fact.Role, Phase: from})
+	return intake.Result{}, e.notice(ctx, tx, issue.Key, record.Notice{Kind: "worker-died", Role: fact.Role, Phase: from,
+		Reason: claimCauses(fact)})
+}
+
+// claimCauses is what a failed claim's notices say of it: why its process was last found gone and
+// why its last start did not produce a running agent, each named only when the claim recorded it.
+// The two are different questions and are never merged into one sentence; a claim that recorded
+// neither says so, so a reader never has to wonder whether the daemon simply left one out
+// (dispatch://INFRA-714 R6).
+func claimCauses(fact intake.ClaimFailed) string {
+	causes := []string{}
+	if fact.Reason != "" {
+		causes = append(causes, fact.Reason)
+	}
+	if fact.Death != "" {
+		causes = append(causes, "its last death: "+fact.Death)
+	}
+	if fact.StartFailure != "" {
+		causes = append(causes, "its last failed start: "+fact.StartFailure)
+	}
+	if len(causes) == 0 {
+		return "the daemon recorded no cause for it"
+	}
+	return strings.Join(causes, "; ")
+}
+
+// sessionLost tells the issue, its architect and the controller that a worker's recorded session
+// is in no session store any more, so the agent working the issue now has read none of its own
+// earlier work: it runs from a fresh session, and only what it pushed and committed survives.
+// Nothing of the issue moves — the worker is running — and nothing is held: the report is the
+// whole point, since a worker that lost its memory is otherwise indistinguishable from one that
+// is merely slow. An issue the record does not hold tells nobody.
+func (e *Engine) sessionLost(ctx context.Context, tx pgx.Tx, fact intake.SessionLost) (intake.Result, error) {
+	issue, err := e.store.Issue(ctx, tx, fact.Issue)
+	if err != nil || issue == nil {
+		return intake.Result{}, err
+	}
+	told := fmt.Sprintf("The %s of %s lost the session it recorded: %s. It is running a fresh agent, which has read none of its own earlier turns; only what it pushed and committed survives.",
+		fact.Role, issue.Key, fact.Detail)
+	if err := e.enqueue(ctx, tx, issue.Key, record.MessagePost{Body: told}); err != nil {
+		return intake.Result{}, err
+	}
+	e.warnOnCommit(ctx, "workflow: a worker's recorded session was in no session store", "issue", issue.Key, "role", fact.Role, "detail", fact.Detail)
+	return intake.Result{}, e.noticeWithController(ctx, tx, issue.Key, record.Notice{
+		Kind: "session-lost", Role: fact.Role, Phase: issue.Phase, Reason: told})
+}
+
+// sessionStoreFault tells the issue and the controller that no worker of the issue can start
+// because the session store cannot be asked. It is not the claim's failure and holds no phase: the
+// daemon keeps the session and starts again every minute, and this is how the people who can fix
+// the store learn that they must. The supervisor decides how often it is told — at the first such
+// start, then hourly — so every fact that reaches here is reported.
+func (e *Engine) sessionStoreFault(ctx context.Context, tx pgx.Tx, fact intake.SessionStoreFault) (intake.Result, error) {
+	issue, err := e.store.Issue(ctx, tx, fact.Issue)
+	if err != nil || issue == nil {
+		return intake.Result{}, err
+	}
+	told := fmt.Sprintf("The %s of %s cannot be started: the session store could not be asked for its session: %s. Nothing is lost and nothing is charged; the daemon tries again every minute, and no worker of this issue runs until the store answers.",
+		fact.Role, issue.Key, fact.Detail)
+	if err := e.enqueue(ctx, tx, issue.Key, record.MessagePost{Body: told}); err != nil {
+		return intake.Result{}, err
+	}
+	e.warnOnCommit(ctx, "workflow: the session store could not be asked for a start", "issue", issue.Key, "role", fact.Role, "detail", fact.Detail)
+	return intake.Result{}, e.enqueue(ctx, tx, issue.Key, record.ControllerNotice(record.Notice{
+		Kind: "session-store-fault", Role: fact.Role, Phase: issue.Phase, Reason: told}))
 }
 
 func (e *Engine) retryOrEscalate(ctx context.Context, tx pgx.Tx, fact intake.RetryOrEscalate) (intake.Result, error) {

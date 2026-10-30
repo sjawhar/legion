@@ -400,6 +400,15 @@ type ClaimView struct {
 	// one that last ended a turn yesterday has been told nothing since.
 	LastTurnStart *time.Time `json:"lastTurnStart,omitempty"`
 	LastTurnEnd   *time.Time `json:"lastTurnEnd,omitempty"`
+	// LastDeathCause is why the claim's process was last found gone, LastStartFailure why its last
+	// start did not produce a running agent — a launcher that refused it, a failed init container,
+	// a pod that never became ready — and LastReady when its agent last said it could be prompted.
+	// Each is absent until it happens. The two causes are separate because they answer separate
+	// questions, and LastReady is what dates them: a cause older than it is one the agent running
+	// now has already survived.
+	LastDeathCause   string     `json:"lastDeathCause,omitempty"`
+	LastStartFailure string     `json:"lastStartFailure,omitempty"`
+	LastReady        *time.Time `json:"lastReady,omitempty"`
 }
 
 // CapabilityReportView is one session's capability report as the state shows it: when the session

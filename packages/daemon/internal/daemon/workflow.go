@@ -751,7 +751,7 @@ func (w *workflowRuntime) applyTerminal(ctx context.Context, c supervise.Claim, 
 	case supervise.StateReady:
 		fact = intake.ClaimReady{Issue: c.Issue, Role: c.Role, Launch: c.Generation}
 	case supervise.StateFailed:
-		fact = intake.ClaimFailed{Issue: c.Issue, Role: c.Role, Reason: c.Failure}
+		fact = intake.ClaimFailed{Issue: c.Issue, Role: c.Role, Reason: c.Failure, Death: c.LastDeathCause, StartFailure: c.LastStartFailure}
 	default:
 		return fmt.Errorf("claim %s has non-terminal workflow state %s", c.Token, state)
 	}
@@ -1124,6 +1124,42 @@ func (w *workflowRuntime) taskConfirmed(c supervise.Claim) {
 		}
 		if _, err := intake.ApplyFact(ctx, w.pool, "supervise", id, fact, w.handlers...); err != nil {
 			w.log.Warn("apply the confirmation of a task", "claim", c.Token, "error", err)
+		}
+	}()
+}
+
+// sessionLost applies the fact that a claim's recorded session is in no session store any more
+// and a fresh agent is running in its place (supervise's Deps.SessionLost): the workflow tells
+// the issue, its architect and the controller. The event id carries the claim's launch, so the
+// one launch that lost the session reports once however often the fact is applied.
+func (w *workflowRuntime) sessionLost(c supervise.Claim, detail string) {
+	w.applySessionFact(c, fmt.Sprintf("session-lost:%s:%d", c.Token, c.Generation),
+		intake.SessionLost{Issue: c.Issue, Role: c.Role, Detail: detail}, "apply a claim's lost session")
+}
+
+// sessionStoreFault applies the fact that a start could not reach the session store at all
+// (supervise's Deps.SessionStoreFault): the workflow tells the issue and the controller. The
+// machine decides how often this is called — at the first such start, then hourly — so each call
+// is a report, and the event id names the moment rather than the launch.
+func (w *workflowRuntime) sessionStoreFault(c supervise.Claim, detail string) {
+	w.applySessionFact(c, fmt.Sprintf("session-store-fault:%s:%d", c.Token, time.Now().UnixNano()),
+		intake.SessionStoreFault{Issue: c.Issue, Role: c.Role, Detail: detail}, "apply a session store fault")
+}
+
+// applySessionFact applies one of the two session facts on a goroutine of its own, bounded like a
+// terminal fact: the machine calls both inside its own decision, so neither waits for the
+// database. A failure is logged and is not the daemon's end — the report is a report, and the
+// start it describes has already been decided. A claim on no issue, the daemon's own controller,
+// has nobody to tell.
+func (w *workflowRuntime) applySessionFact(c supervise.Claim, id string, fact intake.Fact, what string) {
+	if c.Issue == "" || c.Role == claim.RoleController {
+		return
+	}
+	go func() {
+		ctx, cancel := context.WithTimeout(context.Background(), readyReleaseTimeout)
+		defer cancel()
+		if _, err := intake.ApplyFact(ctx, w.pool, "supervise", id, fact, w.handlers...); err != nil {
+			w.log.Warn(what, "claim", c.Token, "error", err)
 		}
 	}()
 }

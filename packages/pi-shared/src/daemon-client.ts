@@ -30,11 +30,12 @@ import type { z } from "zod";
  * The plugin's client for the daemon (`packages/daemon`), the one `extensions/legion.ts` boots
  * every Legion session through.
  *
- * Every response is read through the strict schemas of `@legion/contracts/legion-api`, which the
- * daemon's golden tests hold to its own types; the requests are the claim wire of
- * `packages/daemon/internal/claim/wire.go`, which refuses a member it does not read. There is no
- * secret recovery: the daemon persists a registration's capability before it answers, so a
- * restart forgets no secret.
+ * Every response is read through the schemas of `@legion/contracts/legion-api`, which the
+ * daemon's golden tests hold to its own types; a field those schemas do not name is dropped
+ * rather than refused (`parseResponse`), so a session one release behind its daemon keeps
+ * working. The requests are the claim wire of `packages/daemon/internal/claim/wire.go`, which
+ * refuses a member it does not read. There is no secret recovery: the daemon persists a
+ * registration's capability before it answers, so a restart forgets no secret.
  */
 
 /** `claim.RegisterRequest`: the pane's boot token and the session this agent became.
@@ -310,8 +311,43 @@ export async function retryWhileDaemonRestarts<T>(
   }
 }
 
-/** `body` read through `schema`, or the reason it is not what the schema describes. */
-function parseStrictly<T>(
+/** Deletes from `json` every key the schema did not recognize, at the paths zod reported them at,
+ * and answers whether any key went. What it deletes from is this module's own `JSON.parse` result,
+ * which no caller has seen yet. */
+function dropUnknownFields(json: unknown, issues: readonly z.core.$ZodIssue[]): boolean {
+  let dropped = false;
+  for (const issue of issues) {
+    if (issue.code !== "unrecognized_keys") continue;
+    let node: unknown = json;
+    for (const step of issue.path) {
+      node =
+        typeof node === "object" && node !== null
+          ? (node as Record<PropertyKey, unknown>)[step]
+          : undefined;
+    }
+    if (typeof node !== "object" || node === null) continue;
+    const object = node as Record<string, unknown>;
+    for (const key of issue.keys) {
+      if (key in object) {
+        delete object[key];
+        dropped = true;
+      }
+    }
+  }
+  return dropped;
+}
+
+/**
+ * `body` read through `schema`, or the reason it is not what the schema describes.
+ *
+ * A field the schema does not name is dropped and the parse run again, because a session runs the
+ * release before its daemon's through every roll: on 2026-10-30 a daemon that had begun answering
+ * `GET /legion/v1/state` with two new fields left every session of the release before it with a
+ * dead `legion` tool, each call refused here over a field no agent had asked for. A field the
+ * schema does name, carrying the wrong type, is still refused: tolerating a field this build never
+ * heard of is not tolerating one the daemon got wrong.
+ */
+function parseResponse<T>(
   schema: z.ZodType<T>,
   body: string
 ): { readonly value: T } | { readonly problem: string } {
@@ -321,13 +357,20 @@ function parseStrictly<T>(
   } catch (error) {
     return { problem: `not JSON (${messageFor(error)})` };
   }
-  const parsed = schema.safeParse(json);
-  if (parsed.success) return { value: parsed.data };
-  return {
-    problem: parsed.error.issues
-      .map((issue) => `${issue.path.join(".") || "(root)"}: ${issue.message}`)
-      .join("; "),
-  };
+  // Every pass drops at least one key and a body holds finitely many, so this ends. A pass is run
+  // again rather than once because dropping a key can take the parse further into the body, to a
+  // shape whose own unknown fields the refused pass never reached.
+  for (;;) {
+    const parsed = schema.safeParse(json);
+    if (parsed.success) return { value: parsed.data };
+    if (!dropUnknownFields(json, parsed.error.issues)) {
+      return {
+        problem: parsed.error.issues
+          .map((issue) => `${issue.path.join(".") || "(root)"}: ${issue.message}`)
+          .join("; "),
+      };
+    }
+  }
 }
 
 export function createLegionDaemonClient(
@@ -355,7 +398,7 @@ export function createLegionDaemonClient(
     });
     const text = await response.text();
     if (response.ok) return { status: response.status, text };
-    const refusal = parseStrictly(LegionErrorResponse, text);
+    const refusal = parseResponse(LegionErrorResponse, text);
     if ("value" in refusal) {
       const code =
         "code" in refusal.value && typeof refusal.value.code === "string"
@@ -380,14 +423,14 @@ export function createLegionDaemonClient(
     signal?: AbortSignal
   ): Promise<T> => {
     const { status, text } = await call(method, path, body, signal);
-    const parsed = parseStrictly(schema, text);
+    const parsed = parseResponse(schema, text);
     if ("problem" in parsed) {
       throw new LegionDaemonContractError(method, path, status, parsed.problem);
     }
     return parsed.value;
   };
 
-  /** Parses the request before it leaves the pane, then parses the route's strict success body. */
+  /** Parses the request before it leaves the pane, then parses the route's success body. */
   const post = <Input, Output>(
     path: string,
     request: z.ZodType<Input>,
