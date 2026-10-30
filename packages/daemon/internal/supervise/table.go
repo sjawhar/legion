@@ -1473,7 +1473,7 @@ func exit(m *Machine, ctx context.Context, ev Event) error {
 // registration declared a plugin contract below PodUpdateContract cannot answer at all (that
 // constant says why), so it is never asked, and the round blocks on it until an operator drains
 // it. Every other claim with a registered agent (HoldsCapability), and every suspended one, is
-// given the round's task — once, under an id the round is the whole of, and again only once the
+// given the round's task — once, under an id of its own (updateTaskID), and again only once the
 // last send is PodUpdateRetask old. A suspended claim is revived for the task, as deliverResuming
 // revives one, whatever contract it last recorded: the revive launches it onto this daemon's
 // plugin, so the process that comes up can answer. A claim an operator's suspension holds is

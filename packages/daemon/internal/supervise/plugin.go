@@ -8,7 +8,7 @@ import (
 )
 
 // PodUpdateContract is the daemon contract that introduced ready_for_update (api/version.go's
-// 43). A claim whose registration declared a contract below it cannot answer an update task: the
+// 44). A claim whose registration declared a contract below it cannot answer an update task: the
 // op list is a closed enum compiled into the plugin, and a Claude Code role's plugin is its
 // image's own, never installed. Such a claim is never asked — an update round records itself on
 // it and sends it nothing (openPodUpdate) — and the stale-plugin lane keeps today's immediate

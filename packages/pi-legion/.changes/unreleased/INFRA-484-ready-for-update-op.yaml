@@ -6,4 +6,4 @@ body: |-
   when the branch is not on the remote. The operation ends no phase, so the phase reminder keeps
   running; the daemon replaces the pod only once every worker of that pod has answered, and holds
   the worker's next task until its process comes back on the new pod in the same session.
-  `legion.daemonApiVersion` is 43.
+  `legion.daemonApiVersion` is 44.
