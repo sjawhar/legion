@@ -24,6 +24,14 @@ type AskBlockText struct {
 	Options  []model.AskOption
 	Multiple bool
 	Urgency  string
+	// SeveralOptionLists reports that the block the write left holds more than one bullet
+	// list, so no parse reads it as a decision (readAskBlockStrictly) and Options above is the
+	// options of every one of those lists joined, which is the lenient reading an ask's row
+	// must not take (refuseAskContentEdit). One edit leaves such a block: the question written
+	// into a decision whose question a person emptied, which keeps every list the block holds
+	// (askBlockChildren). Settlement leaves the row of a block it cannot read as it is, so a
+	// row given the joined options would offer them until someone repairs the block.
+	SeveralOptionLists bool
 }
 
 // AskBlockEdit names the fields one edit changes. A nil field is not written, and the block keeps
@@ -52,9 +60,11 @@ func (e *ErrAskBlockUnrepresentable) Error() string {
 }
 
 // SetAskBlockText applies edit to the ask block blockID of artifactID and returns what the block
-// then parses back to, which is what its ask row must hold. The caller writes the row from the
-// return value, never from its own request, so normalisation cannot leave the two disagreeing,
-// and a field the edit did not name comes back as the block's own.
+// then parses back to, which is what its ask row must hold, except where the return value says
+// the block does not read as a decision (AskBlockText.SeveralOptionLists): its options are then
+// a reading no row may take. The caller writes the row from the return value, never from its own
+// request, so normalisation cannot leave the two disagreeing, and a field the edit did not name
+// comes back as the block's own.
 //
 // It returns *ErrAskBlockUnrepresentable, having written nothing, when the block would not carry
 // the text unchanged.
@@ -109,6 +119,12 @@ func (s *Service) SetAskBlockText(
 			Options:  block.options,
 			Multiple: block.multiple,
 			Urgency:  block.urgency,
+			// The write leaves more than one bullet list only where it repairs an emptied
+			// question: the lists of such a block are kept as they are, and an options edit
+			// of it is refused (askBlockChildren). Every other edit reaching here is of a
+			// block that keeps its content rule, which leaves it at most one list, and
+			// writes at most one itself.
+			SeveralOptionLists: writesTheQuestion && len(askBlockLists(block.node)) > 1,
 		}
 		attributes := pmdoc.Attrs{}
 		if edit.Multiple != nil {
@@ -953,9 +969,11 @@ func normalizeAskOptions(options []model.AskOption) []model.AskOption {
 // An ask asking nothing has no text in the paragraphs the write replaces, so replacing them
 // loses no word. It can still lose what is no word - an image, a link whose text is empty - so a
 // paragraph that writes more than the text in it is refused before the write, and the refusal
-// quotes it and names the one place it can be kept: the document editor, where a person writes
-// the question beside it. The block and the paragraph are quoted as data (quotedAskChild),
-// never written into the reason raw.
+// quotes it and names the two places the question can be written without losing it: an upload of
+// the document as a new version, which carries a block whose question it writes and is the path
+// an agent has, and the document editor, where a person writes the question beside the
+// paragraph. The block and the paragraph are quoted as data (quotedAskChild), never written into
+// the reason raw.
 func refuseEmptyQuestionEdit(block askBlock, writesTheQuestion bool) error {
 	for _, child := range block.node.Children {
 		if child.Type == "bullet_list" || writesNothingButItsText(child) {
@@ -967,8 +985,10 @@ func refuseEmptyQuestionEdit(block askBlock, writesTheQuestion bool) error {
 		}
 		return &ErrAskBlockUnrepresentable{Field: "block", Reason: fmt.Sprintf(
 			"ask block %q has an empty question, and writing a question into it would delete what one of its "+
-				"paragraphs holds, which is no text: %s; write the question beside it in the document editor, "+
-				"which keeps it",
+				"paragraphs holds, which is no text: %s; upload the document again as a new version with the "+
+				"question written beside that paragraph (dispatch artifact --name <the document> "+
+				"--content-file -), which is accepted for such a block, or write the question beside it in "+
+				"the document editor; either keeps what the paragraph holds",
 			block.id, quoted)}
 	}
 	if writesTheQuestion {
@@ -1069,7 +1089,9 @@ func refuseAskContentEdit(tree *pmdoc.Node, block askBlock) error {
 }
 
 // askRepairStep is the step a refusal names for plan, the one document edit that repairs the
-// decision, and the ask edit after it.
+// decision, and the ask edit after it. It says what that edit keeps of a decision nested in the
+// blocks it keeps - the same blocks - and that one the content rule leaves nothing of is deleted
+// whole (askRepairKeepsNothingOfItsOwn), which the plan names in place of its children.
 //
 // Where the edit deletes a decision, it carries what the client refuses: a document edit may not
 // take a decision block out of the document while its ask is open
@@ -1079,7 +1101,8 @@ func refuseAskContentEdit(tree *pmdoc.Node, block askBlock) error {
 func askRepairStep(plan askRepairPlan) string {
 	step := ", so delete the blocks to drop, all in one document edit (dispatch doc-edit, deleting a block " +
 		"by its id; one edit holding one delete per block), which keeps the question's paragraphs and the " +
-		"first list after them, here and in every decision nested in the blocks it keeps" +
+		"first list after them, and keeps the same of every decision nested in the blocks it keeps, deleting " +
+		"whole a nested decision the rule leaves nothing of" +
 		"; the blocks to delete are " + strings.Join(plan.drop, ", ")
 	if plan.decision {
 		step += "; a decision among them whose ask is still open cannot be deleted by a document edit, so " +
