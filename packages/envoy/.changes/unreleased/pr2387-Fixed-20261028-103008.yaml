@@ -3,7 +3,7 @@ body: |-
     The two Delivery page configuration warnings (a successful run with no job matching
     `production_job_names`, and a production job with no step named `production_apply_step_name`)
     are logged once across every Dispatch process, not once in each: the process whose insert into
-    the new table `delivery_run_warnings` (migration `0152`) writes the run's row logs it. A
+    the new table `delivery_run_warnings` (migration `0153`) writes the run's row logs it. A
     database that cannot record the row leaves the process to log it anyway.
 time: 2026-10-28T10:30:08.000000000Z
 custom:

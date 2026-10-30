@@ -21,10 +21,10 @@ type Leases interface {
 // leaseNamespace is the first key of every loop lease ("LOOP"), and the reason a lease is taken in
 // the two-key form at all: Postgres keeps the two-key space apart from the single-key one, which
 // internal/dispatch/docs already fills - a document's room, a project's rank allocation, an agent's
-// artifacts, the events' commit order and the migration runner are each a single key (the
-// enumeration in docs/copied_asks.go, at lockProjectCopies) - so a lease can never collide with one
-// of those, whatever its name hashes to. Within the two-key space the only other namespaces are the
-// copy locks' (docs.copiedAsksLockNamespace, "COPY") and the test hooks' (the api package's
+// artifacts and the migration runner are each a single key (the enumeration in docs/copied_asks.go,
+// at lockProjectCopies) - so a lease can never collide with one of those, whatever its name hashes
+// to. Within the two-key space the only other namespaces are the copy locks'
+// (docs.copiedAsksLockNamespace, "COPY") and the test hooks' (the api package's
 // testHookLockNamespace, "HOOK", taken only under DISPATCH_TEST_HOOKS), each a first key of its
 // own, so a lease's second key, its name's hashtext, separates the leases from each other and from
 // nothing else.

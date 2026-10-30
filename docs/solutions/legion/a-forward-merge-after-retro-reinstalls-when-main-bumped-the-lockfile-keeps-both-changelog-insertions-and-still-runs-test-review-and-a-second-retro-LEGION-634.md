@@ -38,7 +38,8 @@ a forward merge after retro whose fingerprint is unchanged, and what the round s
   (`chore: release pi-legion vX.Y.Z`) left that heading where it was, so each concurrent branch
   inserted at the same line. The resolution was to keep both insertions, this branch's first.
   Now an entry is a fragment file of its own
-  (`packages/<pkg>/.changes/unreleased/<ISSUE KEY>-<slug>.yaml`), so this conflict is gone.
+  (`packages/<pkg>/.changes/unreleased/pr<number>-<Kind>-<YYYYMMDD-HHMMSS>.yaml`), so this
+  conflict is gone.
 - **An unchanged fingerprint is a confirmation for the tester and the reviewer, and still a full
   pass through the daemon's table.** The daemon moves the issue to implementing on the conflict,
   the implementer merges and completes, the tester re-runs the bare gates and completes, the

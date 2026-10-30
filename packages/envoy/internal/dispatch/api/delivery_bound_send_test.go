@@ -217,7 +217,7 @@ func TestACommentResumeSendsNothingBesideALiveSenderAndTakesTheAttemptOnceItLaps
 }
 
 // The urgency a targeted message was sent with lives on its attempt row
-// (message_deliveries.urgency, migration 0149), and the claim of a bound send reads it from there
+// (message_deliveries.urgency, migration 0150), and the claim of a bound send reads it from there
 // (pendingMessageDelivery). The delivery sweep therefore carries no urgency of its own - its
 // resumeOwedDelivery hands deliverMessageResuming the attempt's number and nothing else - and a
 // stranded urgent message it resumes still reaches the listener as urgent, not as a plain steer.

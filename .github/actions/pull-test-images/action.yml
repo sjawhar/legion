@@ -1,10 +1,12 @@
 name: Pull the images tests start
 description: >-
-  Pulls each image a job's tests start before they run, with a bounded retry: testcontainers
-  pulls a missing image when a test first asks for it, and the Docker daemon reports a registry
-  connection reset as an internal error that testcontainers does not retry, so one reset failed
-  every test sharing that container. The images are read from the Go string constants that
-  declare them (testnats.Image and testnats.HubImage, tests3.Image), so the tests and the pull
+  Pulls each image a job's tests start, before the tests run. Testcontainers pulls a missing
+  image when a test first asks for it. The Docker daemon reports a registry connection reset as
+  an internal error, and testcontainers does not retry it. One such reset failed every test that
+  shared that container. The pull itself does not retry either. Every image comes from
+  ghcr.io/sjawhar/legion/ci, a registry this repository publishes, so a failed pull is a fault of
+  this repository and must be seen. The action reads each image from the Go string constant that
+  declares it (testnats.Image and testnats.HubImage, tests3.Image), so the tests and the pull
   never name two images.
 inputs:
   consts:
@@ -38,9 +40,5 @@ runs:
         done <<<"$IMAGES"
         [ "${#images[@]}" -gt 0 ] || { echo "::error::no image to pull"; exit 1; }
         for image in "${images[@]}"; do
-          for attempt in 1 2 3; do
-            docker pull "$image" && break
-            [ "$attempt" -lt 3 ] || exit 1
-            sleep 10
-          done
+          docker pull "$image"
         done
