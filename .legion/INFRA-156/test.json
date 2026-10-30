@@ -2,13 +2,13 @@
   "schemaVersion": 1,
   "phase": "test",
   "issue": "INFRA-156",
-  "completed": "2026-10-30T07:40:00Z",
-  "headTested": "ca49e4c68c96ebfe79f8e370189c7f4a10df2c99",
+  "completed": "2026-10-30T10:55:00Z",
+  "headTested": "af449427686b164ac65d9d783109469347636c74",
   "provider": "Anthropic (anthropic/claude-opus-5-5), the model that answered this testing session",
-  "outcome": "Pass. No defect found at ca49e4c6. CI at ca49e4c6: changes and pr-title queued when read; not waited for. GitHub: MERGEABLE.",
+  "outcome": "Pass on the bare gates: upgrade 147 -> 148 keeps every edge, t.py 80/80, editor checks, check-ci-filters.sh exit 0. CI run 41041448873 at af449427 was cancelled at 10:33:11Z with no newer push, close or edited trigger; the head has no CI result (not red, not green). Reported to the architect; not re-run by the tester. GitHub: MERGEABLE.",
   "implementerProof": {
     "verdict": "verified",
-    "how": "Drove the same surface independently at ca49e4c6 on a database first migrated by main a21100c5 (147): t.py 80/80, t2.py 26/26, the item-block refusals (https://github.com/sjawhar/legion/pull/2394#issuecomment-6517302856)."
+    "how": "Bare gates at af449427 on a database first migrated by main 0e636ed7: t.py 80/80 (its A3 steps 1, 5, 12) (https://github.com/sjawhar/legion/pull/2394#issuecomment-6520654713)."
   },
   "failures": [],
   "failed": 0,
@@ -18,7 +18,7 @@
       "surface": ".github/scripts/check-ci-filters.sh in a scratch clone at the head (PyYAML via uv run --with pyyaml==6.0.2); the real Dispatch server upload route and contracts' blockPointerValueProblem; the proof-editor parse",
       "command": "uv run --no-project --with pyyaml==6.0.2 bash .github/scripts/check-ci-filters.sh at a32b7eaf, main 49e23926 and ba17acf8; curl uploads of cites=\"<value>\"; bun -e blockPointerValueProblem (https://github.com/sjawhar/legion/pull/2394#issuecomment-6515090927)",
       "observed": "a32b7eaf exit 1, envoy-go-race-docs 7 uncovered (six itemblocks, pmdoctest); main 49e23926 exit 0; head exit 0, envoy-go-race-docs 788 files 0 uncovered. dispatch://UPG-1/artifact/notes-md/comment/c1#b-x and dispatch://UPG-1/comment/%ZZ#b-x: server 400 INVALID_MARKDOWN and contracts both 'is not a block reference as Dispatch writes one: ...', identical; a project document's comment block and a real issue comment block: both 'is a block of a comment: a block[] attribute points only at a block of a document'; the editor refuses all four",
-      "headSha": "ca49e4c68c96ebfe79f8e370189c7f4a10df2c99",
+      "headSha": "af449427686b164ac65d9d783109469347636c74",
       "negativeControl": "check-ci-filters.sh at a32b7eaf exits 1 naming pmdoc/pmdoctest/pmdoctest.go; cites=\"dispatch://UPG-1/spec#b-k1\" is accepted"
     },
     {
@@ -26,7 +26,7 @@
       "surface": "real Dispatch server at the head on the upgraded database (upload and edits routes); contracts' parseBlockPointerValue/blockPointerValueProblem under bun; the proof-editor library parse",
       "command": "curl uploads of :::claim{#c1 cites|serves=\"<value>\"} against a real comment and message of UPG-1; bun -e contracts check; bun test zz-item.test.ts (https://github.com/sjawhar/legion/pull/2394#issuecomment-6514552854)",
       "observed": "cites naming the comment block, its @v1 pin, the message block, a spec block then a message block, a project document's comment block, and serves naming the comment block: each 400 INVALID_MARKDOWN '\"...\" is a block of a comment|message: a block[] attribute points only at a block of a document'; an edit op inserting one 400 INVALID_OP markdown; contracts refuses the same values with the same reason; the editor refuses comment and message blocks and accepts a spec block",
-      "headSha": "ca49e4c68c96ebfe79f8e370189c7f4a10df2c99",
+      "headSha": "af449427686b164ac65d9d783109469347636c74",
       "negativeControl": "cites=\"dispatch://UPG-1/spec#b-k1\" -> 201"
     },
     {
@@ -34,7 +34,7 @@
       "surface": "real Dispatch server at the head: the document websocket (Hocuspocus/Yjs client) and settlement, artifact_versions; contracts' typedBlockIdAttribute run under bun",
       "command": "python3 $TMPDIR/infra156-tester/parity-ids.py http://127.0.0.1:8798 <src> <db> (https://github.com/sjawhar/legion/pull/2394#issuecomment-6467047070)",
       "observed": "for each of the table's 30 non-empty ids a browser write gave a claim that id and the opener of settled version 2 equalled the table's written form and contracts' output: 30/30 (e.g. a b -> id=\"a b\", a\\u2028b -> #a\\u2028b, a\\\"b -> id=\"a\\&#x22;b\", &amp; -> id=\"&amp;amp;\", x\\r\\ny -> id=\"x&#xD;&#xA;y\")",
-      "headSha": "ca49e4c68c96ebfe79f8e370189c7f4a10df2c99",
+      "headSha": "af449427686b164ac65d9d783109469347636c74",
       "negativeControl": "an open ask with id a b -> dispatch request-approval exit 1 naming the block as open (approve.sh NOANSWER=1)"
     },
     {
@@ -42,7 +42,7 @@
       "surface": "the real dispatch CLI (bun packages/envoy-client/bin/dispatch.ts request-approval) against a real Dispatch server at 7c11b41c (build of cdf4f947) and at the head; the ask answered by a person over the human API",
       "command": "ID=<id> [NOANSWER=1] bash $TMPDIR/infra156-tester/approve.sh <binary> <fresh db> <port> <src> (https://github.com/sjawhar/legion/pull/2394#issuecomment-6466244127)",
       "observed": "answered a b: 7c11b41c exit 1 '(block a b, ask ...), which version 2 does not hold yet'; head exit 0 'Approval requested for spec.md ... at version 2'. Head: R&D (id=\"R&amp;D\"), a\"b (id=\"a&#x22;b\"), x.y#z exit 0; control q1 exit 0 at both. Open a b at the head: exit 1 naming the block as open, with no 'does not hold' reason (7c11b41c gave 'version 1 does not hold yet'). claude-envoy/dist/dispatch.js carries typedBlockIdAttribute and no ask{# needle",
-      "headSha": "ca49e4c68c96ebfe79f8e370189c7f4a10df2c99",
+      "headSha": "af449427686b164ac65d9d783109469347636c74",
       "negativeControl": "an open ask with id a b -> request-approval exit 1, 1 open decision block"
     },
     {
@@ -50,7 +50,7 @@
       "surface": "real Dispatch server at fe1918c7 (build of 8c232738) and at the head: the document websocket (Hocuspocus/Yjs client), settlement (version write), rebuild-refs and the block index pass (reconciliation), artifact_versions, block_refs, GET /api/v1/references",
       "command": "CASE=weird [ID=<id>] STORED=0 bash $TMPDIR/infra156-tester/rig.sh <binary> <fresh db> <port> <src> (https://github.com/sjawhar/legion/pull/2394#issuecomment-6465423892)",
       "observed": "fe1918c7: version 2 ':::claim{#a b serves=...}', version write '\"a b\" serves -> r1', reconciliation '\"a b\" mentions -> r1' (paths disagree). Head: version 2 ':::claim{id=\"a b\" serves=...}', both paths '\"a b\" serves -> r1'; ?to=r1 lists serves ...#b-a%20b. Ids a\"b, 100%_done, x&amp;y, a}b{c, q.1#2, é 😀, line\\nbreak and a'b<c>=`d: both paths agree at the head",
-      "headSha": "ca49e4c68c96ebfe79f8e370189c7f4a10df2c99",
+      "headSha": "af449427686b164ac65d9d783109469347636c74",
       "negativeControl": "the same a b browser write on the fe1918c7 build: the reconciliation stores mentions where the version write stored serves"
     },
     {
@@ -58,7 +58,7 @@
       "surface": "upload and issue-create routes on the head server; the editor library parse",
       "command": "python3 inline script against http://127.0.0.1:8798; bun test zz-tester.test.ts round-7 check (https://github.com/sjawhar/legion/pull/2394#issuecomment-6465423892)",
       "observed": "spec with requirement id=\"r 1\" and callout id=\"k 1\" created with those ids; claim id=\"c 1\" serves=\"...#b-r%201\" 201 and listed; at #b-k%201 400 block pointer refused naming id=\"c 1\"; id=\"a&#x22;b\" 201; the editor reads id=\"a b\", id=\"a&#x22;b\", id=\"line&#xA;break\", id=\"q.1#2\", #100%_done back as those ids",
-      "headSha": "ca49e4c68c96ebfe79f8e370189c7f4a10df2c99",
+      "headSha": "af449427686b164ac65d9d783109469347636c74",
       "negativeControl": "id=\"\", #x id=\"y\", two id=, blockId=, unterminated, unquoted, #a&b and #z beside id=\"z\" -> each 400 INVALID_MARKDOWN"
     },
     {
@@ -66,7 +66,7 @@
       "surface": "real Dispatch server at 57e13278 (build of f2cebf09) and at the head: the document websocket (Hocuspocus/Yjs client), rebuild-refs, the block index pass, GET /api/v1/references and block_refs",
       "command": "DUP_CASE=claims|list|para bash $TMPDIR/infra156-tester/dup3.sh <binary> <fresh db> <port> <src> at each head (https://github.com/sjawhar/legion/pull/2394#issuecomment-6449109401)",
       "observed": "two claims: stored [c1 claim, c1 claim] -> only 'c1 serves -> r1', r2 a document-level mention; list item: claim under the list_item's id -> '<id> serves -> r2' from the claim, list paragraph's mention kept; paragraph: [P paragraph, P claim] -> the paragraph's mention only; identical at 57e13278 and the head",
-      "headSha": "ca49e4c68c96ebfe79f8e370189c7f4a10df2c99",
+      "headSha": "af449427686b164ac65d9d783109469347636c74",
       "negativeControl": "the paragraph case re-indexed by the f5cc766b build writes '<P> serves -> r1' and drops the paragraph's mention (round 5, observed)"
     },
     {
@@ -74,7 +74,7 @@
       "surface": "real Dispatch server at f5cc766b's code (build of f7e33c2a) and at the head: the document websocket (Hocuspocus/Yjs client), rebuild-refs, the block index pass, GET /api/v1/references and block_refs",
       "command": "bash $TMPDIR/infra156-tester/dup2.sh <binary> <fresh db> <port> <src> at each head (script posted in https://github.com/sjawhar/legion/pull/2394#issuecomment-6447894240)",
       "observed": "stored state GET blocks [P paragraph, P claim, ...] at both heads; after rebuild-refs + block index pass: f5cc766b block_refs only '<P> serves -> DUP-1/spec#r1' and ?to=r1 [serves #P] (edge from the paragraph, its mention lost); head f2cebf09 only '<P> mentions -> DUP-1/spec#r1' and ?to=r1 [mentions #P] (no edge from the paragraph, mention kept, none doubled)",
-      "headSha": "ca49e4c68c96ebfe79f8e370189c7f4a10df2c99",
+      "headSha": "af449427686b164ac65d9d783109469347636c74",
       "negativeControl": "the same stored repeat re-indexed by the f5cc766b build writes the wrong serves edge from the paragraph and drops its mention"
     },
     {
@@ -82,7 +82,7 @@
       "surface": "same head server: upload/edit routes, the document websocket, settlement",
       "command": "route 1: t.py 13; routes 2 and 3: MODE=none|edit DB=infra156_tester_r5 ./dup.sh http://127.0.0.1:8798 <src> (https://github.com/sjawhar/legion/pull/2394#issuecomment-6447894240)",
       "observed": "markdown naming an id twice 400 'block id \"c1\" would name two blocks'; a browser write giving the claim the paragraph's id then settlement: claim takes fresh id 032a7f00..., serves from it, paragraph mention kept; same browser write then an API edit while connected: claim repaired to 957393f2... before the version, same correct edges",
-      "headSha": "ca49e4c68c96ebfe79f8e370189c7f4a10df2c99",
+      "headSha": "af449427686b164ac65d9d783109469347636c74",
       "negativeControl": "markdown naming id c1 twice -> 400 INVALID_MARKDOWN, no version written"
     },
     {
@@ -90,7 +90,7 @@
       "surface": "real Dispatch server built from the head (scratch schema with loose{serves block[]}, wide{serves targets [requirement, callout]}, draft{serves string}, claim{serves targets [requirement]}): upload, POST /edits retype op, dispatch doc-edit, POST /rebuild; and the editor library retypeBlock",
       "command": "python3 $TMPDIR/infra156-tester/t2.py http://127.0.0.1:8793 (R1-R9); dispatch doc-edit --issue RT-1 --artifact draft.md --ops-json <retype d1 -> claim>; curl POST /api/v1/artifacts/<rb>/rebuild; bun test zz-tester.test.ts (https://github.com/sjawhar/legion/pull/2394#issuecomment-6441104814); re-run at 645a7712: t2.py 26/26, editor retype checks (https://github.com/sjawhar/legion/pull/2394#issuecomment-6443934028)",
       "observed": "loose{c1 serves=k1} 201; re-upload as claim{c1 serves=k1} 400 INVALID_MARKDOWN; retype loose->claim [k1] 400 INVALID_OP attributes; loose->wide [k1] 200 and listed; wide->claim [k1] 400; wide->claim [r1] 200 (edge to r1, none to k1); held pointer at a later-callout: unrelated edit 200, same-type retype 200, claim->wide->claim second write 400; draft (string) -> claim at k1 refused by retype, re-upload, doc-edit; rebuild of a loose pointer at k1 as claim 400, at r1 200; editor retypeBlock loose->claim throws with the document unchanged, loose->wide accepted, wide->claim refused",
-      "headSha": "ca49e4c68c96ebfe79f8e370189c7f4a10df2c99",
+      "headSha": "af449427686b164ac65d9d783109469347636c74",
       "negativeControl": "the same retypes with serves at requirement r1 are accepted (200, Applied 1 ops; retyped 1 block)"
     },
     {
@@ -98,7 +98,7 @@
       "surface": "POST /api/v1/issues on the same server",
       "command": "t2.py C1-C3 and a create whose spec points at its own callout under the predicted key RT-10 (https://github.com/sjawhar/legion/pull/2394#issuecomment-6441104814)",
       "observed": "claim at another issue's callout 400 INVALID_MARKDOWN; at its own callout (RT-10) 400; doubled-space value 400 'exactly one space'; claim at its own requirement 201 with the serves edge listed",
-      "headSha": "ca49e4c68c96ebfe79f8e370189c7f4a10df2c99",
+      "headSha": "af449427686b164ac65d9d783109469347636c74",
       "negativeControl": "spec claim{serves=\"dispatch://RT-1/spec#b-k1\"} (a callout) -> 400 INVALID_MARKDOWN block pointer refused"
     },
     {
@@ -106,7 +106,7 @@
       "surface": "upload route on the same server",
       "command": "t2.py B1-B4 (https://github.com/sjawhar/legion/pull/2394#issuecomment-6441104814)",
       "observed": "six requirements in six issues 201 with six edges; plus the fourth issue's callout 400 naming it; two claims, the second repeating a target and holding a pinned callout, 400 naming the pinned ref; six pinned requirements 201",
-      "headSha": "ca49e4c68c96ebfe79f8e370189c7f4a10df2c99",
+      "headSha": "af449427686b164ac65d9d783109469347636c74",
       "negativeControl": "good list + dispatch://RT-7/spec#b-x3 -> 400 INVALID_MARKDOWN naming it"
     },
     {
@@ -114,7 +114,7 @@
       "surface": "real Dispatch server process (run-server.sh, go build of a git archive of the head with a scratch blocks.json), local Postgres 17 + pgvector, real migrations, over HTTP",
       "command": "python3 $TMPDIR/infra156-tester/t.py (posted in https://github.com/sjawhar/legion/pull/2394#issuecomment-6439576707), sections 1-2; re-run at 02903bfa: python3 t.py http://127.0.0.1:8792 -> 80/80 (https://github.com/sjawhar/legion/pull/2394#issuecomment-6440214585)",
       "observed": "one and two canonical refs, @v1 and @v9223372036854775807 accepted (201, one edge per ref); 19 malformed values refused 400 INVALID_MARKDOWN naming attribute \"serves\": doubled/leading/trailing space, tab, U+FEFF, repeat, lower-case hex, needless %31, unencoded _, artifact/spec spelling, @v0, @v01, @v9223372036854775808, document ref, issue ref, dashboard URL, trailing junk, comma list, lower-case key. Go and contracts' parseBlockPointerValue agree on 19 further edge values.",
-      "headSha": "ca49e4c68c96ebfe79f8e370189c7f4a10df2c99",
+      "headSha": "af449427686b164ac65d9d783109469347636c74",
       "negativeControl": "serves=\"dispatch://TST-4/spec#b-r1\\tdispatch://TST-4/spec#b-r2\" -> 400 INVALID_MARKDOWN 'is not a block reference as Dispatch writes one', no version written"
     },
     {
@@ -122,7 +122,7 @@
       "surface": "same server: upload route (agent and human cookie), POST /api/v1/artifacts/{id}/edits, dispatch doc-edit CLI, POST /api/v1/artifacts/{id}/rebuild on a real unloadable history",
       "command": "t.py sections 1, 4, 7, 8, 9, 13b; dispatch doc-edit --issue TST-4 --artifact checks.md --ops-json <insert claim>; curl POST .../rebuild after setting the document's one doc_updates row to \\xff; re-run at 02903bfa (rebuild, CLI, t.py) (https://github.com/sjawhar/legion/pull/2394#issuecomment-6440214585)",
       "observed": "pointers at a paragraph, a callout (same document, other issue, project document), a pinned callout, a same-document callout in the same upload, a target retyped to callout in the same edit batch, and a paragraph retyped into a claim each refused (400 INVALID_MARKDOWN, or INVALID_OP field attributes on edits/CLI) naming the type and 'it points only at requirement'; rebuild with a claim at callout k1 -> 400 INVALID_MARKDOWN, then at r1 -> 200 removed_updates 1; untargeted cites accepts a callout and a paragraph",
-      "headSha": "ca49e4c68c96ebfe79f8e370189c7f4a10df2c99",
+      "headSha": "af449427686b164ac65d9d783109469347636c74",
       "negativeControl": "the same pointers at a requirement are accepted (201/200) and listed as serves edges"
     },
     {
@@ -130,7 +130,7 @@
       "surface": "same server: GET /api/v1/references (?to, ?from, ?kind), GET /api/v1/block-links, dispatch read --ref; rebuild-refs subcommand and the block-index pass",
       "command": "t.py sections 1, 5, 10, 11, 15; dispatch read --ref dispatch://TST-4/spec#b-r1; delete pointer block_refs rows then dispatch-e2e rebuild-refs; restart with targets [requirement, callout]; re-run at 02903bfa: t.py 80/80 on a database migrated by main at 2e8c68cd (schema 129) then upgraded by the head to 130, existing mention edges unchanged (https://github.com/sjawhar/legion/pull/2394#issuecomment-6440214585)",
       "observed": "serves edges listed on ?kind=serves, ?from, ?to, block-links and dispatch read ('serves block dispatch://TST-4/artifact/checks-md#b-cli1'); a pointer at an absent block is accepted and unlisted, hidden while that block is a callout, listed once a requirement, hidden again when retyped back; after 24 concurrent pointer writes and retypes the edge is listed iff the target is a requirement; rebuild-refs + block-index restore identical (from, kind, to, to_types) rows; after a targets widening the stale row stays hidden until the citing document's next index, then lists (as packages/envoy/AGENTS.md:1941-1943 documents)",
-      "headSha": "ca49e4c68c96ebfe79f8e370189c7f4a10df2c99",
+      "headSha": "af449427686b164ac65d9d783109469347636c74",
       "negativeControl": "?kind=nope -> 400 INVALID_KIND naming cites, serves; ?kind=SERVES -> 400"
     },
     {
@@ -138,7 +138,7 @@
       "surface": "the dispatch server binary booted with eight variant schemas",
       "command": "bash $TMPDIR/infra156-tester/variants.sh",
       "observed": "child_of and mentions -> panic 'named after a structural edge kind'; Serves and ser-ves -> 'must match ^[a-z][a-z0-9_]*$'; targets [nope] -> 'neither a type the schema declares nor a built-in block'; targets on a string attribute -> 'only a block[] attribute may carry'; non-empty block[] default -> refused; targets [paragraph, callout] boots. Not rebuilt at 02903bfa: the schema code is unchanged by the merges (diff of branch diffs touches only the migration number and docs).",
-      "headSha": "ca49e4c68c96ebfe79f8e370189c7f4a10df2c99",
+      "headSha": "af449427686b164ac65d9d783109469347636c74",
       "negativeControl": "each of the seven bad schemas stops the server at init with exit 2"
     },
     {
@@ -146,7 +146,7 @@
       "surface": "the proof-editor library (createTypedBlockCommands with documentRef, createHeadlessProof) from the head's packages",
       "command": "bun test src/tests/zz-tester.test.ts (throwaway, rewritten after the disk was recreated; 12/12 at cdf4f947) (https://github.com/sjawhar/legion/pull/2394#issuecomment-6465423892)",
       "observed": "9/9: insertTypedBlock and retypeBlock at a same-document callout refused with the document unchanged; pinned same-document pointer refused; project documentRef refuses its own callout and accepts its requirement; untargeted cites accepts a callout; a held pointer is not refused while adding a paragraph beside it is; a two-pointer value round-trips through markdown; at 02903bfa also main's read-only parse path: a canonical serves value parses as the claim, a doubled-space value is shown as text; at 645a7712 also: the swapped markdown parser refuses a doubled space and a repeated reference naming typed block \"claim\" attribute \"serves\", serves=\"\" parses to [], and a refused setBlockAttributes names #c1 from the prior node",
-      "headSha": "ca49e4c68c96ebfe79f8e370189c7f4a10df2c99",
+      "headSha": "af449427686b164ac65d9d783109469347636c74",
       "negativeControl": "setBlockAttributes serves values with a trailing space, a repeat, a lower-case key, an unencoded _, @v0, a number and a bare string each throw naming \"serves\"; a tab in markdown is refused on parse"
     },
     {
@@ -154,7 +154,7 @@
       "surface": "main's Dispatch server at 2e8c68cd then the head's server on the same Postgres database",
       "command": "bash $TMPDIR/infra156-tester/upgrade.sh <main a21100c5 binary> <head binary> infra156_tester_up14 8795 (seeds a spec, a document, an issue comment and an issue message citing a callout); then t.py and t2.py on that DB (https://github.com/sjawhar/legion/pull/2394#issuecomment-6514552854)",
       "observed": "schema_version 147 -> 148; graph_edges holds block_ref_listed; the same four mentions edges before and after, from the spec block, the document block, the comment block .../comment/<id>#b-b1 and the message block .../message/<id>#b-b1; t.py 80/80 and t2.py 26/26 on it",
-      "headSha": "ca49e4c68c96ebfe79f8e370189c7f4a10df2c99",
+      "headSha": "af449427686b164ac65d9d783109469347636c74",
       "negativeControl": "a pointer to a callout on the upgraded database is refused 400 INVALID_MARKDOWN (t.py 1f)"
     },
     {
@@ -162,15 +162,15 @@
       "surface": ".github/workflows/envoy-and-contracts.yaml at the head, read against the files it names",
       "command": "ls packages/envoy/internal/dispatch/pmdoc/testdata/block-pointer-values.json; grep the path in packages/contracts/src/dispatch-block-ref.test.ts; grep @legion/contracts in packages/proof-editor/src/block-pointers.ts",
       "observed": "the contracts filter's new entry is the file dispatch-block-ref.test.ts:125 reads; the envoy_go_race filter's packages/contracts/src/** holds what proof-editor/src/block-pointers.ts:19 imports; whether GitHub selects the lanes is read on CI",
-      "headSha": "ca49e4c68c96ebfe79f8e370189c7f4a10df2c99",
+      "headSha": "af449427686b164ac65d9d783109469347636c74",
       "negativeControl": "none possible locally: a filter is exercised only by a push, which this phase does not make for code"
     }
   ],
   "defectsFoundByBreaking": [],
   "redTests": [],
-  "previousHeadTested": "ba17acf8907db7c4ef16bf6ff8992fbff2cf5abe",
-  "round": "Review round 13 finding: the migration collided with main's 0145; merge main forward and renumber.",
+  "previousHeadTested": "ca49e4c68c96ebfe79f8e370189c7f4a10df2c99",
+  "round": "Mechanical merge ec745ac9 of main 0e636ed7 (README text).",
   "limits": "The version-write half of round 6 cannot be driven on a real server: every live write (settlement, every API write) repairs a repeated id before it indexes, so the version write never sees one; only the reconciliation path does, and there 57e13278 and this head write the same correct rows for all three cases. The version-write proof is the implementer's two-path tests in docs/block_pointer_links_test.go, which CI runs.",
-  "fingerprint": "5fc553f1d8395c203a35d2bae33d55390592f9d08ba9030e5094a6f449360150",
-  "fingerprintCheck": "changed: d430da5d... (ba17acf8) -> 5fc553f1... (ca49e4c6): merge 38596285 with main a21100c5, migration 0145 -> 0148_block_pointer_links and its references, and a contracts doc comment (8128ad81); main 0145-0147 restate no graph_edges. Re-tested what that touches."
+  "fingerprint": "84ec081704d7d8de",
+  "fingerprintCheck": "forward-merge re-check ca49e4c6 -> af449427: changed in README text only (one row of packages/envoy/cmd/dispatch/README.md), bare gates only"
 }
