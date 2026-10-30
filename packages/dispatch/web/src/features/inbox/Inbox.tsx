@@ -94,7 +94,7 @@ function rowAround(node: Element | null): HTMLElement | null {
  *  write is live (pending or failed) and the Inbox keeps the row listed until then: `Assigning…`,
  *  and on refusal the server's reason with Retry, are shown by this same instance rather than
  *  lost to a remount. */
-function AssignToMe({
+export function AssignToMe({
   askId,
   issueKey,
   onLive,
