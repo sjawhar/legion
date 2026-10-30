@@ -15,11 +15,11 @@ import (
 )
 
 // requestClient starts a NATS server of the test's own and connects a client that owns the
-// notification stream, which captures every agent subject.
-func requestClient(t *testing.T) (*testnats.Server, string, *bus.Client) {
+// notification stream, which captures every agent subject, under options of the test's own.
+func requestClient(t *testing.T, options ...bus.ConnectOption) (*testnats.Server, string, *bus.Client) {
 	t.Helper()
 	server, url := testnats.Start(t)
-	client, err := bus.ConnectOwningStream([]string{url})
+	client, err := bus.ConnectOwningStream([]string{url}, options...)
 	if err != nil {
 		t.Fatalf("connect: %v", err)
 	}
@@ -154,8 +154,20 @@ func TestRequestsUnderOneMsgIDLeaveTheStreamOneCopy(t *testing.T) {
 // A Request whose connection is lost before an answer answers ErrUnavailable once the loss is
 // seen, without waiting out its timeout, and a Request after it answers ErrUnavailable before
 // sending anything.
+//
+// The request's flush is held until the client has lost the connection (WithBeforeRequestFlush),
+// which is the interleaving a server that goes away right behind the publish has: nats.go clears
+// its pending flushes as the connection turns reconnecting, so a flush begun after that waits out
+// its whole timeout - 30 s here - for a PONG no server sends. The loss is the answer either way,
+// and it is given the moment the loss is seen.
 func TestARequestWhoseConnectionIsLostAnswersUnavailable(t *testing.T) {
-	server, _, client := requestClient(t)
+	var client *bus.Client
+	server, _, client := requestClient(t, bus.WithBeforeRequestFlush(func() {
+		waitUntil := time.Now().Add(5 * time.Second)
+		for client.Connected() && time.Now().Before(waitUntil) {
+			time.Sleep(time.Millisecond)
+		}
+	}))
 	window := client.WindowUntil(nil)
 
 	pending := window.Request("notifications.role.request-lost", forwardEnvelope("lost"), bus.RequestOptions{Timeout: 30 * time.Second})

@@ -46,6 +46,7 @@ type connectOpts struct {
 	reconnectErrClock           func() time.Time
 	environment                 func(string) (string, bool)
 	reconnectWaitTick           func()
+	beforeRequestFlush          func()
 	background                  bool
 	silentCutDetection          bool
 }
@@ -296,7 +297,12 @@ type Client struct {
 	// (WithReconnectWaitTick, export_test.go) to know a publish is inside that wait, or to act at
 	// the moment the wait ends.
 	reconnectWaitTick func()
-	mu                sync.Mutex
+	// beforeRequestFlush, when not nil, runs on a Request's wait for its answer right before that
+	// wait flushes the request's publish (window.request). It is nil outside tests: a test sets it
+	// (WithBeforeRequestFlush, export_test.go) to hold the flush until the connection it would
+	// flush is gone, the interleaving a flush begun after the connection turned reconnecting has.
+	beforeRequestFlush func()
+	mu                 sync.Mutex
 
 	// deniedPublishes holds, under mu, the server's refusals of publishes per subject it refused a
 	// publish to, as the connection reported them (recordPublishDenial), queued in arrival order
@@ -460,6 +466,7 @@ func newClient(urls []string, ownsStream bool, opts connectOpts) (*Client, error
 		publishAcknowledgementClock: opts.publishAcknowledgementClock,
 		reconnectErrClock:           opts.reconnectErrClock,
 		reconnectWaitTick:           opts.reconnectWaitTick,
+		beforeRequestFlush:          opts.beforeRequestFlush,
 		stopCh:                      make(chan struct{}),
 	}
 	stream := opts.streamConfig()

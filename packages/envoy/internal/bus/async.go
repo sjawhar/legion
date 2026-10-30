@@ -307,9 +307,12 @@ const requestReplies = 4
 //     current ErrNotStored and ErrUnavailable, and a send nats.go refuses ErrNotStored and its
 //     refusal, the stream holding nothing of the request in each case;
 //   - ErrPublishDenied when the request's flush shows the server denied the publish
-//     (confirmFlushed). A denial another publish on the connection hid in the meantime leaves the
-//     request unconfirmed instead, and it ends as one with no answer;
-//   - ErrUnavailable once the window's connection is lost or reconnects before an answer;
+//     (confirmFlushed). The flush runs beside the wait for the answer, not ahead of it, so a
+//     receipt that lands first answers the request while the flush is still out. A denial another
+//     publish on the connection hid in the meantime leaves the request unconfirmed instead, and it
+//     ends as one with no answer;
+//   - ErrUnavailable once the window's connection is lost or reconnects before an answer, whether
+//     the loss came before the flush, during it, or after it;
 //   - when no answer came within opts.Timeout on a connection that stayed current, an error
 //     wrapping ErrNotAcknowledged and ErrReceiptTimeout, and the flush's own failure when the flush
 //     failed or could not confirm the publish.
@@ -355,9 +358,33 @@ func (w *window) request(subject string, item contracts.Envelope, opts RequestOp
 	}
 	return func() error {
 		defer receipt.Unsubscribe()
-		unconfirmed := confirmFlushed(w.conn, subject, before, deadline)
-		if errors.Is(unconfirmed, ErrPublishDenied) {
-			return unconfirmed
+		// The flush runs beside the wait for the answer rather than ahead of it. nats.go clears
+		// the flushes pending on a connection only as that connection turns from connected to
+		// reconnecting (clearPendingFlushCalls), so a flush begun after that moment - a server
+		// that goes away right behind the publish is enough - queues a PING no server answers and
+		// returns only at its timeout, which is the request's whole remaining time. Waiting for it
+		// there would hold a request whose connection is already gone until its deadline, when the
+		// loss is its answer the moment it is seen. A flush left out this way ends with its own
+		// timeout, on a goroutine that then has nothing left to do; its outcome has no reader, and
+		// settles nothing, because the request is answered already.
+		flushed := make(chan error, 1)
+		go func() {
+			if tick := w.client.beforeRequestFlush; tick != nil {
+				tick()
+			}
+			flushed <- confirmFlushed(w.conn, subject, before, deadline)
+		}()
+		// unconfirmed is what the flush, once it has returned, leaves the timeout to report;
+		// settleFlush takes that outcome and returns the denial that answers the request at once,
+		// nil for anything else.
+		var unconfirmed error
+		settleFlush := func(err error) error {
+			flushed = nil
+			if errors.Is(err, ErrPublishDenied) {
+				return err
+			}
+			unconfirmed = err
+			return nil
 		}
 		// resend sends the request once more, to the same inbox and without its Nats-Msg-Id, after
 		// the stream acknowledged a duplicate with no sequence: the record of an id at sequence 0
@@ -412,6 +439,10 @@ func (w *window) request(subject string, item contracts.Envelope, opts RequestOp
 		defer timer.Stop()
 		for {
 			select {
+			case err := <-flushed:
+				if denied := settleFlush(err); denied != nil {
+					return denied
+				}
 			case reply := <-replies:
 				if settled, err := outcome(reply, true); settled {
 					return err
@@ -434,6 +465,13 @@ func (w *window) request(subject string, item contracts.Envelope, opts RequestOp
 				}
 				if !w.current() {
 					return lost()
+				}
+				if flushed != nil {
+					// The flush is bounded by this very deadline, so it is returning now, and
+					// what it says belongs in the timeout's answer.
+					if denied := settleFlush(<-flushed); denied != nil {
+						return denied
+					}
 				}
 				if unconfirmed != nil {
 					return fmt.Errorf("bus: request to %q: %w: %w: %w", subject, ErrNotAcknowledged, ErrReceiptTimeout, unconfirmed)
