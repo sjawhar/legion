@@ -126,7 +126,10 @@ func (c *Client) awaitKeeper() {
 // would otherwise switch the stream back and forth every period. Its write still carries every
 // other field as it read it, the other subjects included, so a concurrent write that lands between
 // its read and its write is lost again; the keeper of the program whose write it was puts its part
-// back a period later. It returns each field it restored, old and new value, none when the stream
+// back a period later. One part never comes back that way: the keeper skips a subject this
+// binary's start put in place of an overlapping one while that overlapping subject is back
+// (keptSubjects), so a stale write that put the replaced subject back stands until this binary's
+// next start. It returns each field it restored, old and new value, none when the stream
 // already held them, in which case it sends nothing. A stream whose subjects capture the role lanes
 // it leaves to a start, sending nothing and returning an error when it needs anything: only a start
 // moves the role lanes off the stream, their consumers' filters first (migrateRoleLanesOffStream),

@@ -38,9 +38,10 @@ type Sender interface {
 // a connection, and pins the window to it. Every later send goes out on that connection only while
 // it is connected and has not reconnected since; otherwise it answers ErrUnavailable at once,
 // without sending. A NATS server takes one connection's messages in the order they arrive, so the
-// stream stores, and a core subscriber receives, a window's envelopes in send order, and what of
-// them reached NATS is always a prefix of what was sent: once one is lost to the connection, none
-// sent after it can land after it on a connection that came back.
+// stream stores, and a core subscriber receives, a window's envelopes in send order, with one
+// exception, the two resends below, and what of them reached NATS is always a prefix of what was
+// sent: once one is lost to the connection, none sent after it can land after it on a connection
+// that came back.
 //
 // Each send goes on the transport Publish would use (UsesCoreTransport), under the same MsgId. An
 // outcome decided before anything was sent is in the channel when PublishAsync returns: a refusal
@@ -49,12 +50,15 @@ type Sender interface {
 // own flush, confirmed as PublishCoreTo confirms one (confirmFlushed). A JetStream acknowledgement
 // of a duplicate with no sequence (ErrNotStored) has the envelope sent once more without its
 // MsgId, as Publish does, and that send's acknowledgement, within another such timeout, answers
-// for it (sendJetStream). A core publish that its own flush cannot confirm because another
+// for it (sendJetStream). The stream does not deduplicate a copy sent without its MsgId: it
+// stores that copy as a message of its own, and the resend leaves the connection after the
+// window's later sends. A core publish that its own flush cannot confirm because another
 // publish on the connection changed its last error in the meantime is published again alone on the
 // window's connection, which answers for it: once every core flush of the window has returned, and
 // one such republish at a time, so that another of the window's denials cannot land during it and
-// leave it unconfirmed too. A republish costs a round trip of its own, so a batch in which one
-// denial left many sends unconfirmed takes that many round trips more.
+// leave it unconfirmed too. That republish also leaves after the window's later sends. A republish
+// costs a round trip of its own, so a batch in which one denial left many sends unconfirmed takes
+// that many round trips more.
 func (c *Client) Window() Sender {
 	w := &window{client: c}
 	w.settled = sync.NewCond(&w.mu)
