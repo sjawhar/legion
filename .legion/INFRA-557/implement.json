@@ -2,51 +2,31 @@
   "schemaVersion": 1,
   "phase": "implement",
   "issue": "INFRA-557",
-  "completed": "2026-10-30T13:00:00Z",
-  "round": "review round 7",
+  "completed": "2026-10-30T13:45:00Z",
+  "round": "review round 8",
   "pullRequest": "https://github.com/sjawhar/legion/pull/2404",
-  "codeHead": "5a088bf9b19a7dc8b1454145d6da7251838c4a62",
-  "answersReview": "f1d28bd6bd7282b6ab45029fd6fd2d69bdf204d9",
+  "codeHead": "7469fd634604c2830553fdbe4af61d7573b2b195",
+  "answersReview": "2681e19579c51364bb201d083f1655b8a5b4d9f9",
   "proof": [
     {
-      "criterion": "Item 1: a stop whose handler is still running after its cancel writes no mark; the successor holds past 3 s",
-      "surface": "two in-process pods on one NATS server under the rendered grant, the standby receiving",
-      "command": "cd packages/envoy && go test -count=1 -run TestAStopWhoseHandlerIgnoresItsCancelMarksNoHandBack ./cmd/listener/",
-      "observed": "pass: hand_back_marked false, no_mark names the running handler, successor unmarked past 3 s",
-      "headSha": "5a088bf9b19a7dc8b1454145d6da7251838c4a62",
-      "negativeControl": "gate disabled: 'hand_back_marked:true ... linger_end:receiving holder seen'"
+      "criterion": "Item 3: each no-mark row asserts which gate stopped the mark",
+      "surface": "in-process pods on one NATS server under the rendered grant (receiving successor, lost binding, relay swallowing the UNSUB)",
+      "command": "cd packages/envoy && go test -count=1 -v -run 'TestAStopMarksNoHandBackWhenItsLingerOrItsTermFellShort|TestAStopWhoseHandlerIgnoresItsCancelMarksNoHandBack' ./cmd/listener/",
+      "observed": "all four rows and the stuck-handler test pass, each with its no_mark reason",
+      "headSha": "7469fd634604c2830553fdbe4af61d7573b2b195",
+      "negativeControl": "drain gate returning the release gate's reason: the drain row fails at receive_stop_test.go:416"
     },
     {
-      "criterion": "Item 2: a mark vouches only for the stopping term's own release",
-      "surface": "lease on a real NATS KV bucket with a renewal held past the release bound",
-      "command": "cd packages/envoy && go test -count=1 -run TestLeaseAStopMarksNoHandBackForTheRevisionAnEarlierGiveUpReleased ./cmd/listener/",
-      "observed": "pass: MarkHandBack false, no handback key for the give-up's revision",
-      "headSha": "5a088bf9b19a7dc8b1454145d6da7251838c4a62",
-      "negativeControl": "reset removed: 'the stop marked the hand-back true (<nil>), want none'"
-    },
-    {
-      "criterion": "Item 3: the stale and drained gates each write no mark",
-      "surface": "two in-process pods with a receiving successor; a relay swallowing the UNSUB for the drain row",
-      "command": "cd packages/envoy && go test -count=1 -run 'TestAGracefulStop.*Mark|Unmarked' ./cmd/listener/ (rows 'the term had a lost node's binding open', 'the drain's wait ran out')",
-      "observed": "pass",
-      "headSha": "5a088bf9b19a7dc8b1454145d6da7251838c4a62",
-      "negativeControl": "each gate disabled: 'hand_back_marked:true' with 'linger_end:receiving holder seen'"
-    },
-    {
-      "criterion": "Everything holds after the merge of main; the PR merges",
-      "surface": "real cmd/listener binaries under the rendered grant; listener suite; infra core/gcp; ci.yaml router check; GitHub",
-      "command": "go test -tags multiprocess -count=1 -timeout 30m -run '^Test(TwoPods|TwoBuilds)' ./cmd/listener; untagged ./cmd/listener; infra ./core/... ./gcp/...; .github/scripts/check-ci-filters.sh; gh api repos/sjawhar/legion/pulls/2404",
-      "observed": "multiprocess ok 651.190s; listener ok 868.168s; core ok; gcp ok (mkfs.ext4 tests skipped: not installed); 26 gates; mergeable true, blocked. https://github.com/sjawhar/legion/pull/2404#issuecomment-6522807750",
-      "headSha": "5a088bf9b19a7dc8b1454145d6da7251838c4a62",
-      "negativeControl": "before the merge GitHub read dirty (infra/README.md)"
+      "criterion": "Item 4 and no behaviour change: the overrun texts name the listener's own exit; the stop paths still pass",
+      "surface": "the listener's hand-back, settle, mark, linger, stop and lease tests; the changelog fragment",
+      "command": "cd packages/envoy && go test -count=1 -timeout 20m -run 'Settle|HandBack|Mark|Linger|Stop|Graceful|Successor|Lease' ./cmd/listener/ && go run github.com/miniscruff/changie@v1.26.0 batch --dry-run v0.0.0",
+      "observed": "ok 264.021s; the fragment renders with the new text",
+      "headSha": "7469fd634604c2830553fdbe4af61d7573b2b195",
+      "negativeControl": "before: main.go said a stop past the budget loses its mark 'if the runtime kills the process', which shutdownListener's client.Drain and os.Exit(1) contradict"
     }
   ],
   "filesChanged": [
-    "3e68eaae: receive_stop.go (settleInHand reports the handler, markHandBack(end, drained, handled) with a reason, typed lingerEnd), lease.go (startTermLocked resets released/releasedStale), lease_handback.go doc, receive.go/receive_term.go (termStart and fromHandBack deleted, readHandBackMark helper), README.md, main.go, changie fragment, tests",
-    "5a088bf9: merge of main (infra/README.md listener probe paragraph)"
-  ],
-  "trickyParts": [
-    "The stop's worst-case sum is now 11 s (12.25 s with flush and release at their bounds); past the 10 s shutdown budget a stop loses at most the mark, and the next holder holds its 7 s cap."
+    "7469fd63: cmd/listener/main.go, README.md, receive.go, changie fragment (overrun text), receive_stop.go (no-mark reasons as constants, markHandBack doc), receive_stop_test.go (noMark column, lingerEnd constants)"
   ],
   "deviations": [],
   "openQuestions": [],
