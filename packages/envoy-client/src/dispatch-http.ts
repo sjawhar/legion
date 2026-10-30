@@ -39,6 +39,7 @@ import type {
   IssueRouteStatus,
   IssueSummary,
   IssueSummaryPage,
+  ItemBlocks,
   Message,
   MessageRead,
   MessageReplyInput,
@@ -1333,6 +1334,24 @@ export class DispatchClient {
 
   async artifactBlocks(id: string): Promise<ArtifactBlock[]> {
     return this.#json("GET", ["api", "v1", "artifacts", id, "blocks"]);
+  }
+
+  /** `GET /api/v1/comments/{id}/blocks`: the comment's current blocks with their ids, text,
+   *  references and UTF-16 offsets into its stored body, and the comment's revision. */
+  async commentBlocks(id: string): Promise<ItemBlocks> {
+    return this.#json("GET", ["api", "v1", "comments", id, "blocks"]);
+  }
+
+  /** `GET /api/v1/messages/{id}/blocks`: the message's current blocks, read under
+   *  `GET /api/v1/messages/{id}`'s rule, so a direct message is read as `session`, a session in
+   *  its conversation (`getMessageThread`). */
+  async messageBlocks(id: string, session?: string): Promise<ItemBlocks> {
+    return this.#json(
+      "GET",
+      ["api", "v1", "messages", id, "blocks"],
+      undefined,
+      session === undefined ? undefined : { session }
+    );
   }
 
   async docEdit(id: string, input: EditArtifactInput): Promise<EditArtifactResponse> {

@@ -64,11 +64,13 @@ func IsSessionID(value string) bool {
 // the component id for components. Project is set instead of IssueKey for
 // unlinked project-document references and for components, and Session instead of
 // both for an artifact an agent's conversation owns (`agent/<session id>/artifact/<slug>`).
-// A block of a document (Kind "block") carries its document's fields, the block's id as
-// written in the document in Block, and in Pin the version a pinned reference (`@v<N>` after
-// the fragment) names, or 0.
+// A block (Kind "block") carries the block's id as written in Block, and in Pin the version or
+// revision a pinned reference (`@v<N>` after the fragment) names, or 0. A block of a document
+// carries its document's fields; a block of a comment or a message carries the item's kind in
+// Item and the item's fields, its id in ID.
 type Ref struct {
 	Kind     string
+	Item     string
 	IssueKey string
 	Project  string
 	Session  string
@@ -91,7 +93,11 @@ type Located struct {
 // (pageInBound), and one whose document or item is past them is the URL it is, as one that names
 // no page is.
 func Extract(body, serverURL string) []Ref {
-	located := ExtractAt(body, serverURL)
+	return Refs(ExtractAt(body, serverURL))
+}
+
+// Refs is the references of located, without their offsets.
+func Refs(located []Located) []Ref {
 	refs := make([]Ref, len(located))
 	for index, item := range located {
 		refs[index] = item.Ref
@@ -155,8 +161,8 @@ func extractAt(body, serverURL string, bounded bool) []Located {
 }
 
 // pageInBound is what a dashboard page cites in text: what the page names while it is in bound
-// (inBound), else the document of a block that is not, while the document's target id fits - the
-// page still opens that document - else nothing.
+// (inBound), else the document or item of a block that is not, while that one's target id fits -
+// the page still opens it - else nothing.
 func pageInBound(ref Ref) (Ref, bool) {
 	if inBound(ref) {
 		return ref, true
@@ -165,6 +171,9 @@ func pageInBound(ref Ref) (Ref, bool) {
 		return Ref{}, false
 	}
 	ref.Kind, ref.Block = "artifact", ""
+	if ref.Item != "" {
+		ref.Kind, ref.Item = ref.Item, ""
+	}
 	return ref, targetFits(ref)
 }
 
@@ -192,8 +201,9 @@ func trimReference(raw string) string {
 
 // parseDispatch reads a `dispatch://` reference, without its scheme, by the grammar the dashboard's
 // `parseDispatchReference` reads: a slug as written, an `@v` version, an agent's session id as
-// written, an item id decoded as `itemSegment` decodes it, and a `#b-` block of a document as
-// parseBlock reads it. A reference holding a control character names nothing.
+// written, an item id decoded as `itemSegment` decodes it, and a `#b-` block of a document, a
+// comment or a message as parseBlock reads it. A reference holding a control character names
+// nothing.
 func parseDispatch(value string) (Ref, bool) {
 	if hasControl(value) {
 		return Ref{}, false
@@ -311,8 +321,10 @@ const MaxTargetBytes = 2048
 
 // TargetID is the durable id the reference graph stores an edge to ref under, refs.to_id and
 // block_refs.to_id: an issue's key; a document's ref_key, `<issue key or project>/<slug>` (`spec`
-// for an issue's spec) or `agent/<session id>/<slug>`; a block's `<document's ref_key>#<block id>`;
-// a component's `<project>/<id>` node address; and an ask's, a comment's or a message's id. A
+// for an issue's spec) or `agent/<session id>/<slug>`; a document block's `<document's
+// ref_key>#<block id>`; a comment's or message's block's `<item kind>/<item id>#<block id>`
+// (`comment/<uuid>#b2`, a lowercase kind no issue key, project or `agent/` can be); a
+// component's `<project>/<id>` node address; and an ask's, a comment's or a message's id. A
 // document's version and a block's pin are not part of it: a pinned and an unpinned reference to
 // one block are one target.
 func TargetID(ref Ref) string {
@@ -329,6 +341,9 @@ func TargetID(ref Ref) string {
 	case "component":
 		return ref.Project + "/" + ref.ID
 	case "block":
+		if ref.Item != "" {
+			return ref.Item + "/" + ref.ID + "#" + ref.Block
+		}
 		document := ref
 		document.Kind, document.Block, document.Pin = "artifact", "", 0
 		return TargetID(document) + "#" + ref.Block
@@ -370,14 +385,17 @@ func EncodeBlockID(id string) string {
 	return b.String()
 }
 
-// parseBlock reads `<document reference>#b-<block id>[@v<N>]`: a block of an issue's spec, an
-// issue's document or a project's document, optionally pinned to version N of that document. The
-// id is read with any valid percent-encoding (EncodeBlockID writes one), so `%40` is an `@` in the
-// id and a raw `@` is only ever the pin. Any other fragment, a raw `@` that does not start a
-// well-formed pin, a versioned document, an agent conversation's document, an item, or an id that
-// is empty or does not decode names nothing. (Extract holds the block's id to MaxBlockIDBytes and
-// its whole target id to MaxTargetBytes in text, inBound.) A document version shows only as an
-// `@` in the document part: no key or slug holds one.
+// parseBlock reads `<document or item reference>#b-<block id>[@v<N>]`: a block of an issue's
+// spec, an issue's document or a project's document, optionally pinned to version N of that
+// document, or a block of a comment (`KEY/comment/<id>`, or a project document's
+// `PROJECT/artifact/<slug>/comment/<id>`), optionally pinned to revision N of that comment, or of
+// an issue's message (`KEY/message/<id>`). A message never changes, so a pinned message block is
+// no reference. The id is read with any valid percent-encoding (EncodeBlockID writes one), so
+// `%40` is an `@` in the id and a raw `@` is only ever the pin. Any other fragment, a raw `@` that
+// does not start a well-formed pin, a versioned document, an agent conversation's document, an
+// ask, or an id that is empty or does not decode names nothing. (Extract holds the block's id to
+// MaxBlockIDBytes and its whole target id to MaxTargetBytes in text, inBound.) A document version
+// shows only as an `@` in the document part: no key or slug holds one.
 func parseBlock(document, fragment string) (Ref, bool) {
 	encoded, ok := strings.CutPrefix(fragment, "b-")
 	if !ok || strings.Contains(document, "@") {
@@ -400,7 +418,13 @@ func parseBlock(document, fragment string) (Ref, bool) {
 		return Ref{}, false
 	}
 	ref, ok := parseDispatch(document)
-	if !ok || ref.Kind != "artifact" || ref.Session != "" {
+	switch {
+	case !ok:
+		return Ref{}, false
+	case ref.Kind == "artifact" && ref.Session == "":
+	case ref.Kind == "comment", ref.Kind == "message" && pin == 0:
+		ref.Item = ref.Kind
+	default:
 		return Ref{}, false
 	}
 	ref.Kind, ref.Block, ref.Pin = "block", id, pin
@@ -442,8 +466,9 @@ func decodeItemID(value string) (string, bool) {
 // parseServer reads a dashboard URL against its parsed server URL as the dashboard's
 // `referenceRouteFromHref` reads it: the key and the path's item id as written, the query as
 // `searchParams` reads it, a version a positive decimal, and a `#b-` fragment on a document page
-// as documentPage reads it. A URL holding a control character names nothing; net/url refuses only
-// the ASCII ones.
+// as documentPage reads it and on an issue comment's or message's page as pageBlock reads it (an
+// ask's page names the ask whatever its fragment). A URL holding a control character names
+// nothing; net/url refuses only the ASCII ones.
 func parseServer(raw string, base *url.URL) (Ref, bool) {
 	if base == nil || base.Scheme == "" || base.Host == "" {
 		return Ref{}, false
@@ -488,7 +513,11 @@ func parseServer(raw string, base *url.URL) (Ref, bool) {
 			return documentPage(Ref{Kind: "artifact", IssueKey: key, ID: slug}, query, "v", value)
 		case len(parts) == 4 && (parts[2] == "asks" || parts[2] == "comments" || parts[2] == "messages"):
 			if id, ok := itemSegment(parts[3]); ok {
-				return Ref{Kind: strings.TrimSuffix(parts[2], "s"), IssueKey: key, ID: id}, true
+				item := Ref{Kind: strings.TrimSuffix(parts[2], "s"), IssueKey: key, ID: id}
+				if item.Kind == "ask" {
+					return item, true
+				}
+				return pageBlock(item, value), true
 			}
 		}
 		return Ref{}, false
@@ -511,22 +540,38 @@ func parseServer(raw string, base *url.URL) (Ref, bool) {
 }
 
 // documentPage reads a document page of an issue or a project: the item its query names, as
-// documentItem reads it, else the block its `#b-<block id>` fragment names (blockID; a raw `@` is
-// no pin here, since pins are written only as `dispatch://` references), else the document. A
-// version page (`versionParam` set) is the document whatever its fragment: a version's stored
-// markdown carries no block ids to land on. Extract holds what this names to the bounds in text
-// (pageInBound): a block past them is the document, a document or item past them nothing.
+// documentItem reads it, else the block of the document its `#b-<block id>` fragment names
+// (pageBlock), else the document. A `?comment=` names the comment whatever the fragment: the
+// dashboard writes a document block's fragment beside it, so the fragment there is never a block
+// of the comment. A version page (`versionParam` set) is the document whatever its fragment: a
+// version's stored markdown carries no block ids to land on. Extract holds what this names to
+// the bounds in text (pageInBound): a block past them is the document, a document or item past
+// them nothing.
 func documentPage(document Ref, query url.Values, versionParam string, page *url.URL) (Ref, bool) {
 	ref, ok := documentItem(document, query)
 	if !ok || ref.Kind != "artifact" || query.Get(versionParam) != "" {
 		return ref, ok
 	}
-	if encoded, found := strings.CutPrefix(page.EscapedFragment(), "b-"); found {
-		if id, ok := blockID(encoded); ok {
-			ref.Kind, ref.Block = "block", id
-		}
+	return pageBlock(ref, page), true
+}
+
+// pageBlock is what a dashboard page showing ref - a document, or a comment or a message - names:
+// the block its `#b-<block id>` fragment names (blockID; a raw `@` is no pin here, since pins are
+// written only as `dispatch://` references), else ref itself.
+func pageBlock(ref Ref, page *url.URL) Ref {
+	encoded, found := strings.CutPrefix(page.EscapedFragment(), "b-")
+	if !found {
+		return ref
 	}
-	return ref, true
+	id, ok := blockID(encoded)
+	if !ok {
+		return ref
+	}
+	if ref.Kind != "artifact" {
+		ref.Item = ref.Kind
+	}
+	ref.Kind, ref.Block = "block", id
+	return ref
 }
 
 // agentArtifactPage reads the dashboard page of an artifact an agent's conversation owns,
