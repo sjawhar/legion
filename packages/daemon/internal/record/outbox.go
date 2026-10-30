@@ -36,6 +36,7 @@ const (
 	OutboxKindCheckLook         OutboxKind = "check_look"
 	OutboxKindCheckBound        OutboxKind = "check_bound"
 	OutboxKindApprovalCarry     OutboxKind = "approval_carry"
+	OutboxKindRoleMessage       OutboxKind = "role_message"
 )
 
 // OutboxLane is which executor of an issue runs a kind. An issue's rows run on two lanes side by
@@ -63,7 +64,7 @@ const (
 // one lane (TestEveryOutboxKindIsInExactlyOneLane).
 var laneKinds = map[OutboxLane][]OutboxKind{
 	LaneLifecycle: {OutboxKindSupervise, OutboxKindIssueSuspend, OutboxKindLingerClose, OutboxKindWorkspaceRemove, OutboxKindGateSeed, OutboxKindIssueBranch, OutboxKindAutoMergeDisable, OutboxKindReadyMerge, OutboxKindCheckCompare, OutboxKindCheckLook, OutboxKindCheckBound, OutboxKindApprovalCarry},
-	LaneBoard:     {OutboxKindDispatchStatus, OutboxKindDispatchMessage, OutboxKindNotice, OutboxKindControllerNotice, OutboxKindMergeQueuePublish},
+	LaneBoard:     {OutboxKindDispatchStatus, OutboxKindDispatchMessage, OutboxKindNotice, OutboxKindControllerNotice, OutboxKindMergeQueuePublish, OutboxKindRoleMessage},
 }
 
 // LaneOf is the lane that runs kind.
@@ -417,6 +418,21 @@ type MergeQueuePublish struct {
 
 func (MergeQueuePublish) OutboxKind() OutboxKind { return OutboxKindMergeQueuePublish }
 
+// RoleMessage is one message the daemon sends a role holder, published to that role's topic the
+// way a merge queue role's packet is (MergeQueuePublish): Role is the claim token, which the
+// runner addresses as a role topic, and Body is the whole of what the holder is told. It is how
+// the daemon reaches a worker with something to read rather than a task to do - a settled head's
+// check results, which move nothing (workflow's tellChecks, dispatch://INFRA-714/spec R1). A role
+// with no live holder is told nothing: the row finishes, since the message is of a moment that
+// has passed by the time anyone claims the role, and every recipient can read the pull request's
+// checks on GitHub for itself.
+type RoleMessage struct {
+	Role string `json:"role"`
+	Body string `json:"body"`
+}
+
+func (RoleMessage) OutboxKind() OutboxKind { return OutboxKindRoleMessage }
+
 // IssueBranch creates the row's issue's branch, legion/<KEY>, on GitHub at the repository's default
 // branch, where GitHub does not have it yet, before any role of the issue starts: GitHub can refuse
 // the push that creates a branch of a large repository, where it takes a push that moves one. A
@@ -630,6 +646,12 @@ func decodeOutboxJSON(row OutboxRow) (OutboxPayload, error) {
 			return nil, fmt.Errorf("decode outbox row %d: %w", row.ID, err)
 		}
 		payload = value
+	case OutboxKindRoleMessage:
+		value := RoleMessage{}
+		if err := decoder.Decode(&value); err != nil {
+			return nil, fmt.Errorf("decode outbox row %d: %w", row.ID, err)
+		}
+		payload = value
 	case OutboxKindIssueBranch:
 		value := IssueBranch{}
 		if err := decoder.Decode(&value); err != nil {
@@ -753,6 +775,13 @@ func validateOutboxPayload(payload OutboxPayload) error {
 		}
 		if value.Packet == "" {
 			return fmt.Errorf("merge queue publish requires packet")
+		}
+	case RoleMessage:
+		if value.Role == "" {
+			return fmt.Errorf("role message requires role")
+		}
+		if value.Body == "" {
+			return fmt.Errorf("role message requires body")
 		}
 	case AutoMergeDisable:
 		if value.Number <= 0 {

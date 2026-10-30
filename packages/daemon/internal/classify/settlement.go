@@ -13,11 +13,10 @@ const (
 )
 
 // SettlementCandidate is the listener's proposed CI outcome for one commit and its ordering
-// identity. Envoy listener settlements are the Go daemon's only input about check runs: it never
-// reads GitHub's checks, only which of them the base branch requires (record.PullRequest.Required),
-// which decides what a settlement comes to (HeadVerdict); what it reads of GitHub's own is the runs
-// of a workflow the base branch requires (record.PullRequest.Workflows), which no settlement
-// carries by workflow. The listener publishes a settlement for every settled
+// identity. Envoy listener settlements are the Go daemon's only input about check runs: it reads
+// GitHub's checks nowhere else, and judges none of them - what a settlement names is told to the
+// roles that work the issue and read by them (workflow's tellChecks,
+// dispatch://INFRA-714/spec R1). The listener publishes a settlement for every settled
 // commit of a pull request, its current head or not, and the daemon takes one for the head when it
 // is the head's own or a head the current one replaced through pushes that each changed only
 // .legion/ (SettlementFor), since a handoff push can carry GitHub's skip-checks trailer and run no

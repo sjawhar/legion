@@ -56,8 +56,7 @@
         "number": 1239,
         "head": "7d1e4f2a9c3b5e8d0a6f2c4b8e1d3a5f7c9b2e40",
         "state": "merged",
-        "reviewDecision": "approved",
-        "fixAttempts": 0
+        "reviewDecision": "approved"
       },
       "check": {
         "repo": "acme/widgets",
@@ -160,9 +159,7 @@
         "number": 1247,
         "head": "5b3d9e2c8f1a47d06b2e5c9f3a8d1e4b7c0f6a29",
         "state": "open",
-        "checksVerdict": "pending",
-        "reviewDecision": "changes_requested",
-        "fixAttempts": 1
+        "reviewDecision": "changes_requested"
       },
       "designGate": {
         "artifactId": "d2f1c6b4-8e07-4a53-9c1d-6b8f2e5a7093",
@@ -555,7 +552,6 @@
     "linger_hours": 1.5,
     "production_check_hours": 240,
     "review_round_cap": 4,
-    "max_fix_attempts": 5,
     "controller": "daemon",
     "capabilities": {
       "decided": {

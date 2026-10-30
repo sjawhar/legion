@@ -410,9 +410,9 @@ func scanPhase(row scanner) (PhaseRow, error) {
 }
 
 const pullRequestColumns = `issue, repo, number, branch, base, base_moved, head_sha, head_updated_at,
-	failing, cancelled, fix_attempts, blocked_attempts, check_runs,
-	generation, snapshot, pushes, head_moves, head_counted, head_run, planned_red, review_seen, review_seen_at, state,
-	checked_head, required, required_workflows, required_workflows_head, mergeability, merge_state, merge_sha`
+	failing, cancelled, check_runs,
+	generation, snapshot, pushes, head_moves, head_run, review_seen, review_seen_at, state,
+	checked_head, mergeability, merge_state, merge_sha`
 
 func (s *Postgres) PullRequest(ctx context.Context, tx pgx.Tx, issue string) (*PullRequest, error) {
 	pr, err := scanPullRequest(tx.QueryRow(ctx, "select "+pullRequestColumns+" from pull_requests where issue = $1", issue))
@@ -519,17 +519,6 @@ func (s *Postgres) PutPullRequest(ctx context.Context, tx pgx.Tx, pr PullRequest
 	if err != nil {
 		return fmt.Errorf("put pull request for %s: encode moves: %w", pr.Issue, err)
 	}
-	// A set never read is null, never an empty list, which is a base that requires no check.
-	var required []byte
-	if pr.Required != nil {
-		if required, err = json.Marshal(pr.Required); err != nil {
-			return fmt.Errorf("put pull request for %s: encode required checks: %w", pr.Issue, err)
-		}
-	}
-	workflows, err := json.Marshal(append([]RequiredWorkflow{}, pr.Workflows...))
-	if err != nil {
-		return fmt.Errorf("put pull request for %s: encode required workflows: %w", pr.Issue, err)
-	}
 	// No head run is null.
 	var run []byte
 	if pr.Run != nil {
@@ -537,28 +526,32 @@ func (s *Postgres) PutPullRequest(ctx context.Context, tx pgx.Tx, pr PullRequest
 			return fmt.Errorf("put pull request for %s: encode the head run: %w", pr.Issue, err)
 		}
 	}
+	// fix_attempts, blocked_attempts and head_counted are stopped columns: nothing reads them since
+	// a CI result stopped moving an issue (dispatch://INFRA-714/spec R1), and they are kept rather
+	// than dropped so a rollback to the daemon before it still runs. Each is `not null` with no
+	// default (migration 0004), so a new row is given its zero here and no write ever touches it
+	// again; planned_red, required, required_workflows and required_workflows_head are stopped too
+	// and need not be named at all, being nullable or defaulted (migrations 0013, 0028, 0029).
 	_, err = tx.Exec(ctx, `insert into pull_requests (issue, repo, number, branch, base, base_moved, head_sha, head_updated_at,
-		failing, cancelled, fix_attempts, blocked_attempts, check_runs, generation, snapshot, pushes, head_moves,
-		head_counted, head_run, planned_red, review_seen, review_seen_at, state, checked_head, required,
-		required_workflows, required_workflows_head, mergeability, merge_state, merge_sha)
-		values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24, $25, $26, $27, $28, $29, $30)
+		failing, cancelled, check_runs, generation, snapshot, pushes, head_moves,
+		head_run, review_seen, review_seen_at, state, checked_head, mergeability, merge_state, merge_sha,
+		fix_attempts, blocked_attempts, head_counted)
+		values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, 0, 0, '')
 		on conflict (issue) do update set repo = excluded.repo, number = excluded.number, branch = excluded.branch,
 		base = excluded.base, base_moved = excluded.base_moved,
 		head_sha = excluded.head_sha, head_updated_at = excluded.head_updated_at,
-		failing = excluded.failing, cancelled = excluded.cancelled, fix_attempts = excluded.fix_attempts,
-		blocked_attempts = excluded.blocked_attempts, check_runs = excluded.check_runs,
+		failing = excluded.failing, cancelled = excluded.cancelled, check_runs = excluded.check_runs,
 		generation = excluded.generation, snapshot = excluded.snapshot,
-		pushes = excluded.pushes, head_moves = excluded.head_moves, head_counted = excluded.head_counted, head_run = excluded.head_run,
-		planned_red = excluded.planned_red, review_seen = excluded.review_seen,
+		pushes = excluded.pushes, head_moves = excluded.head_moves, head_run = excluded.head_run,
+		review_seen = excluded.review_seen,
 		review_seen_at = excluded.review_seen_at, state = excluded.state, checked_head = excluded.checked_head,
-		required = excluded.required, required_workflows = excluded.required_workflows,
-		required_workflows_head = excluded.required_workflows_head, mergeability = excluded.mergeability,
+		mergeability = excluded.mergeability,
 		merge_state = excluded.merge_state, merge_sha = excluded.merge_sha`,
 		pr.Issue, pr.Repo, pr.Number, pr.Branch, pr.Base, pr.BaseMoved, pr.HeadSHA, pr.HeadUpdatedAt,
-		failing, cancelled, pr.FixAttempts, pr.BlockedAttempts, checkRuns,
-		pr.Generation, pr.Snapshot, pushes, moves, pr.HeadCounted, run, pr.PlannedRed,
-		pr.ReviewSeen.ID, pr.ReviewSeen.SubmittedAt, pr.State, pr.CheckedHead, required,
-		workflows, pr.WorkflowsHead, pr.Mergeability, pr.MergeState, pr.MergeSHA,
+		failing, cancelled, checkRuns,
+		pr.Generation, pr.Snapshot, pushes, moves, run,
+		pr.ReviewSeen.ID, pr.ReviewSeen.SubmittedAt, pr.State, pr.CheckedHead,
+		pr.Mergeability, pr.MergeState, pr.MergeSHA,
 	)
 	if err != nil {
 		return fmt.Errorf("put pull request for %s: %w", pr.Issue, err)
@@ -607,14 +600,12 @@ func clearGeneration(ctx context.Context, tx pgx.Tx, where, issues, key, describ
 	for _, statement := range []string{
 		"delete from pull_requests where " + where + " and state <> 'open'",
 		// An open pull request is kept across a new generation, but the last one's reading of it is
-		// not: its counters and its checks settlement are of a head nobody has judged since, and the
-		// review round's decision goes with the phases below, and so does its head run, whose
-		// replay would put the old generation's judgement back. Its pushes stay, each a fact about
-		// two commits, and so does its newest review, which orders every review it will have, and
-		// the checks its base branch requires, which belong to the base, not the generation.
-		"update pull_requests set fix_attempts = 0, blocked_attempts = 0, head_counted = '', " +
-			"head_run = null, planned_red = false, checked_head = '', failing = '[]'::jsonb, cancelled = '[]'::jsonb, " +
-			"check_runs = '[]'::jsonb where " + where,
+		// not: its checks settlement is of a head nobody has judged since, and the review round's
+		// decision goes with the phases below, and so does its head run, whose replay would put the
+		// old generation's judgement back. Its pushes stay, each a fact about two commits, and so
+		// does its newest review, which orders every review it will have.
+		"update pull_requests set head_run = null, checked_head = '', failing = '[]'::jsonb, " +
+			"cancelled = '[]'::jsonb, check_runs = '[]'::jsonb where " + where,
 		"delete from design_gates where " + where,
 		// The review rounds go with the generation that ran them, since review_round_cap bounds the
 		// rounds of one run. The pass does not: it is what tells one pass through a phase from the
@@ -634,11 +625,11 @@ func clearGeneration(ctx context.Context, tx pgx.Tx, where, issues, key, describ
 
 func scanPullRequest(row scanner) (*PullRequest, error) {
 	var pr PullRequest
-	var failing, cancelled, checkRuns, pushes, moves, required, workflows, run []byte
+	var failing, cancelled, checkRuns, pushes, moves, run []byte
 	if err := row.Scan(&pr.Issue, &pr.Repo, &pr.Number, &pr.Branch, &pr.Base, &pr.BaseMoved, &pr.HeadSHA, &pr.HeadUpdatedAt,
-		&failing, &cancelled, &pr.FixAttempts, &pr.BlockedAttempts, &checkRuns, &pr.Generation, &pr.Snapshot,
-		&pushes, &moves, &pr.HeadCounted, &run, &pr.PlannedRed, &pr.ReviewSeen.ID, &pr.ReviewSeen.SubmittedAt, &pr.State,
-		&pr.CheckedHead, &required, &workflows, &pr.WorkflowsHead, &pr.Mergeability, &pr.MergeState, &pr.MergeSHA); err != nil {
+		&failing, &cancelled, &checkRuns, &pr.Generation, &pr.Snapshot,
+		&pushes, &moves, &run, &pr.ReviewSeen.ID, &pr.ReviewSeen.SubmittedAt, &pr.State,
+		&pr.CheckedHead, &pr.Mergeability, &pr.MergeState, &pr.MergeSHA); err != nil {
 		return nil, err
 	}
 	if err := json.Unmarshal(failing, &pr.Failing); err != nil {
@@ -655,14 +646,6 @@ func scanPullRequest(row scanner) (*PullRequest, error) {
 	}
 	if err := json.Unmarshal(moves, &pr.Moves); err != nil {
 		return nil, fmt.Errorf("decode moves: %w", err)
-	}
-	if required != nil {
-		if err := json.Unmarshal(required, &pr.Required); err != nil {
-			return nil, fmt.Errorf("decode required checks: %w", err)
-		}
-	}
-	if err := json.Unmarshal(workflows, &pr.Workflows); err != nil {
-		return nil, fmt.Errorf("decode required workflows: %w", err)
 	}
 	if run != nil {
 		if err := json.Unmarshal(run, &pr.Run); err != nil {

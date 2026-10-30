@@ -108,7 +108,6 @@ func (e *Engine) holdReadyToItsHead(ctx context.Context, tx pgx.Tx, issue record
 	}
 	if pr.HeadSHA != fact.Commit {
 		*pr = classify.AdvancePullRequestHead(*pr, classify.Arrival{}, fact.Commit)
-		e.stampRun(pr)
 	}
 	pr.HeadUpdatedAt = classify.LatestClock(pr.HeadUpdatedAt, fact.HeadAt)
 	return intake.Result{}, e.store.PutPullRequest(ctx, tx, *pr)
@@ -117,7 +116,7 @@ func (e *Engine) holdReadyToItsHead(ctx context.Context, tx pgx.Tx, issue record
 // withdrawReady tells the READY's audience (tellReadyAudience) that the READY no longer stands:
 // the head's own CI turned red, it started conflicting with its base, a push moved it past the
 // head READY named, or the merge queue failed its merge (reason, which names the cause;
-// classify.RedWithdrawsReady, classify.ConflictWithdrawsReady, withdrawMovedReady, mergeFailed), so
+// classify.ConflictWithdrawsReady, withdrawMovedReady, mergeFailed), so
 // the issue left awaiting_merge for implementing, and a new READY follows once the work comes back
 // through testing and review. It queues the disarm of the merge armed for the READY (disarm) before
 // it tells anyone, so no withdrawal leaves that merge armed. The architect hears it through its

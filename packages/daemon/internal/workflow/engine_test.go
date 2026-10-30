@@ -49,7 +49,6 @@ func TestGateRegistrationWithDesignGateOffStartsPlanningAndSeedsApprovalRead(t *
 		Project:        "LEGION",
 		DesignGate:     config.DesignGateOff,
 		ReviewRoundCap: 3,
-		MaxFixAttempts: 3,
 		Linger:         time.Hour,
 		Clock:          func() time.Time { return time.Date(2026, 9, 23, 0, 0, 0, 0, time.UTC) },
 	}, nil)
@@ -195,19 +194,18 @@ func TestReadyRefusedWithNoDesignGateCommitsAndRecordsNoPendingVersion(t *testin
 	}
 }
 
-// A pull request GitHub reopens is the same pull request. Its fix attempts and blocked attempts
-// are what bound the review rounds, and rebuilding the record from the reopen zeroed them: closing
-// and reopening a pull request bought a fresh set of attempts, which is the cap the workflow has.
-// The head the count last counted is carried with them, since the fix-attempt cap holds a red at
-// the attempt it marks (classify.FixAttemptCapHolds) and a reopen judges no head green.
-func TestAReopenedPullRequestKeepsItsAttemptCounters(t *testing.T) {
+// A pull request GitHub reopens is the same pull request: it keeps its newest review, which
+// orders every review it will have, and takes the head the reopen names - commits pushed while it
+// was closed reach no synchronize, so the reopen is the only fact that carries them.
+func TestAReopenedPullRequestTakesItsNewHeadAndKeepsItsReview(t *testing.T) {
 	pool := migratedPool(t)
 	ctx := context.Background()
 	seedIssue(t, pool, record.Issue{Key: "LEGION-208", Repo: "acme/widgets", DefaultBranch: "main", GitHubRepo: "acme/widgets", Tree: "LEGION-208", Project: "LEGION", Title: "root", Phase: phase.Implementing, Generation: 1, Status: "in_progress", Rank: "U"})
 	seedPR(t, pool, record.PullRequest{
 		Issue: "LEGION-208", Repo: "acme/widgets", Number: 7, Branch: "legion/LEGION-208", HeadSHA: "old",
 		HeadUpdatedAt: time.Date(2026, 9, 24, 0, 0, 0, 0, time.UTC), Failing: []string{},
-		FixAttempts: 2, BlockedAttempts: 1, HeadCounted: "old", State: record.PullRequestOpen,
+		ReviewSeen: record.ReviewOrder{ID: 91, SubmittedAt: time.Date(2026, 9, 24, 12, 0, 0, 0, time.UTC)},
+		State:      record.PullRequestOpen,
 	})
 	engine := testEngine(config.DesignGateRootIssues, nil)
 
@@ -218,16 +216,16 @@ func TestAReopenedPullRequestKeepsItsAttemptCounters(t *testing.T) {
 		t.Fatalf("ApplyFact reopened: %v", err)
 	}
 
-	var fix, blocked int
-	var head, counted string
-	if err := pool.QueryRow(ctx, "select fix_attempts, blocked_attempts, head_sha, head_counted from pull_requests where issue = $1", "LEGION-208").Scan(&fix, &blocked, &head, &counted); err != nil {
+	var head string
+	var review int64
+	if err := pool.QueryRow(ctx, "select head_sha, review_seen from pull_requests where issue = $1", "LEGION-208").Scan(&head, &review); err != nil {
 		t.Fatalf("read the reopened pull request: %v", err)
-	}
-	if fix != 2 || blocked != 1 || counted != "old" {
-		t.Fatalf("reopened pull request counters = %d/%d, counted head %q, want the 2/1 and %q it carried", fix, blocked, counted, "old")
 	}
 	if head != "new" {
 		t.Fatalf("reopened pull request head = %q, want the head the reopen named", head)
+	}
+	if review != 91 {
+		t.Fatalf("reopened pull request review seen = %d, want the 91 it carried", review)
 	}
 }
 
@@ -303,7 +301,7 @@ func TestCapturedArtifactVersionAndApprovalFlowThroughConsume(t *testing.T) {
 	pool := migratedPool(t)
 	ctx := context.Background()
 	seedIssue(t, pool, record.Issue{Key: "CAPTURE-4", Repo: "sjawhar/legion", DefaultBranch: "main", GitHubRepo: "sjawhar/legion", Tree: "CAPTURE-4", Project: "CAPTURE", Title: "captured gate", Phase: phase.Admitted, Generation: 1, Status: "in_progress", Rank: "U"})
-	engine := New(record.NewStore(), Config{Project: "CAPTURE", ReviewRoundCap: 3, MaxFixAttempts: 3, Linger: time.Hour, Repositories: testRepositories, Clock: func() time.Time { return time.Date(2026, 9, 23, 0, 0, 0, 0, time.UTC) }}, nil)
+	engine := New(record.NewStore(), Config{Project: "CAPTURE", ReviewRoundCap: 3, Linger: time.Hour, Repositories: testRepositories, Clock: func() time.Time { return time.Date(2026, 9, 23, 0, 0, 0, 0, time.UTC) }}, nil)
 	if _, err := intake.ApplyFact(ctx, pool, "api", "register-captured-gate", intake.GateRegistered{Issue: "CAPTURE-4", ArtifactID: "0544d460-0931-4374-b20b-790408519edd", Version: 1}, engine, admissionStub{}); err != nil {
 		t.Fatalf("register gate: %v", err)
 	}
@@ -335,7 +333,7 @@ func TestCapturedApprovedReviewFlowsThroughConsumeToAccepting(t *testing.T) {
 	ctx := context.Background()
 	seedIssue(t, pool, record.Issue{Key: "LEGION-208", Repo: "sjawhar/legion", DefaultBranch: "main", GitHubRepo: "sjawhar/legion", Tree: "LEGION-208", Project: "LEGION", Title: "captured review", Phase: phase.Reviewing, Generation: 1, Status: "needs_review", Rank: "U"})
 	// The base requires no check, so the head's settlement gives no verdict, and an approval waits on none.
-	seedPR(t, pool, record.PullRequest{State: record.PullRequestOpen, Issue: "LEGION-208", Repo: "sjawhar/legion", Number: 42, Branch: "legion/LEGION-208", HeadSHA: "head-captured", CheckedHead: "head-captured", Failing: []string{}, Required: []string{}})
+	seedPR(t, pool, record.PullRequest{State: record.PullRequestOpen, Issue: "LEGION-208", Repo: "sjawhar/legion", Number: 42, Branch: "legion/LEGION-208", HeadSHA: "head-captured", CheckedHead: "head-captured", Failing: []string{}})
 	seedPhase(t, pool, record.PhaseRow{Issue: "LEGION-208", Role: claim.RoleReviewer, Claim: "review-claim", HandoffCommit: "review-1"})
 	var mu sync.Mutex
 	var asked []string
@@ -368,7 +366,7 @@ func TestReviewRoundCapPostsOneMessageAndNoticeForTheThirdRound(t *testing.T) {
 	pool := migratedPool(t)
 	ctx := context.Background()
 	seedIssue(t, pool, record.Issue{Key: "LEGION-208", Repo: "sjawhar/legion", DefaultBranch: "main", GitHubRepo: "sjawhar/legion", Tree: "LEGION-208", Project: "LEGION", Title: "root", Phase: phase.Reviewing, Generation: 1, Status: "needs_review", Rank: "U"})
-	seedPR(t, pool, record.PullRequest{State: record.PullRequestOpen, Issue: "LEGION-208", Repo: "sjawhar/legion", Number: 42, Branch: "legion/LEGION-208", HeadSHA: "head", CheckedHead: "head", Failing: []string{}, Required: []string{}})
+	seedPR(t, pool, record.PullRequest{State: record.PullRequestOpen, Issue: "LEGION-208", Repo: "sjawhar/legion", Number: 42, Branch: "legion/LEGION-208", HeadSHA: "head", CheckedHead: "head", Failing: []string{}})
 	seedPhase(t, pool, record.PhaseRow{Issue: "LEGION-208", Role: claim.RoleReviewer, Claim: "review-claim", HandoffCommit: "review-1"})
 	seedPhase(t, pool, record.PhaseRow{Issue: "LEGION-208", Role: claim.RoleImplementer, Claim: "implement-claim", Rounds: 2})
 	engine := testEngine(config.DesignGateRootIssues, nil)
@@ -382,63 +380,6 @@ func TestReviewRoundCapPostsOneMessageAndNoticeForTheThirdRound(t *testing.T) {
 	}
 }
 
-// The merger is started with the head the review round approved, from the round's recorded
-// decision, so it never chooses among the pull request's reviews itself. A round with no recorded
-// approval names no head, and the merger refuses for want of it.
-func TestTheMergerIsStartedWithTheRoundsApprovedHead(t *testing.T) {
-	for _, tc := range []struct {
-		name     string
-		decision *record.ReviewDecision
-		want     string
-	}{
-		{"an approved round", &record.ReviewDecision{State: "approved", Head: "approved-head"}, " Approved head: approved-head."},
-		{"no recorded approval", nil, ""},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			pool := migratedPool(t)
-			seedIssue(t, pool, record.Issue{Key: "LEGION-208", Repo: "sjawhar/legion", DefaultBranch: "main", GitHubRepo: "sjawhar/legion", Tree: "LEGION-208", Project: "LEGION", Title: "root", Phase: phase.Retro, Generation: 1, Status: "retro", Rank: "U"})
-			seedPhase(t, pool, record.PhaseRow{Issue: "LEGION-208", Role: claim.RoleImplementer, Claim: "implement-claim"})
-			seedPhase(t, pool, record.PhaseRow{Issue: "LEGION-208", Role: claim.RoleReviewer, Claim: "review-claim", HandoffCommit: "approved-head", Decision: tc.decision})
-			if _, err := intake.ApplyFact(context.Background(), pool, "api", "retro", intake.HandoffComplete{Generation: 1,
-				Issue: "LEGION-208", Role: claim.RoleImplementer, Claim: "implement-claim", Summary: "learnings recorded", Commit: "retro-docs",
-			}, testEngine(config.DesignGateRootIssues, nil), admissionStub{}); err != nil {
-				t.Fatalf("ApplyFact retro: %v", err)
-			}
-			task := startTask(t, pool, claim.RoleMerger)
-			if !strings.Contains(task, "Phase: merging.") {
-				t.Fatalf("merger task %q, want a merger started on merging", task)
-			}
-			if got := strings.Contains(task, "Approved head:"); got != (tc.want != "") || !strings.HasSuffix(task, tc.want) {
-				t.Fatalf("merger task %q, want it to end with %q", task, tc.want)
-			}
-		})
-	}
-}
-
-// The merger reads the approved head from its task by the label this package writes, so a rename
-// on either side alone fails here rather than leaving the merger reading a line it never gets.
-func TestTheMergerPromptReadsTheApprovedHeadLabel(t *testing.T) {
-	composer, err := prompts.New(t.TempDir())
-	if err != nil {
-		t.Fatalf("compose the shipped prompts: %v", err)
-	}
-	parts, err := composer.Compose(claim.RoleMerger, false)
-	if err != nil {
-		t.Fatalf("compose the merger's prompt: %v", err)
-	}
-	var prompt strings.Builder
-	for _, path := range parts.RolePromptPaths {
-		part, err := os.ReadFile(path)
-		if err != nil {
-			t.Fatalf("read role prompt part %s: %v", path, err)
-		}
-		prompt.Write(part)
-	}
-	if want := "task's `" + approvedHeadLabel + ":` line"; !strings.Contains(prompt.String(), want) {
-		t.Fatalf("the merger's prompt does not say %q, the label its start task carries", want)
-	}
-}
-
 // A reviewer started on the tester's pass is told the tester's verdict as the tester's, never as a
 // bare "Handoff verdict" it could take for a field of its own completion, which the daemon refuses
 // from a reviewer (VERDICT_ROLE_FORBIDDEN).
@@ -446,7 +387,7 @@ func TestAReviewerIsToldTheTestersVerdictAsTheTesters(t *testing.T) {
 	pool := migratedPool(t)
 	seedIssue(t, pool, record.Issue{Key: "LEGION-208", Repo: "sjawhar/legion", DefaultBranch: "main", GitHubRepo: "sjawhar/legion", Tree: "LEGION-208", Project: "LEGION", Title: "root", Phase: phase.Testing, Generation: 1, Status: "testing", Rank: "U"})
 	seedPhase(t, pool, record.PhaseRow{Issue: "LEGION-208", Role: claim.RoleTester, Claim: "test-claim"})
-	seedPR(t, pool, record.PullRequest{State: record.PullRequestOpen, Issue: "LEGION-208", Repo: "sjawhar/legion", Number: 42, Branch: "legion/LEGION-208", HeadSHA: "head", Failing: []string{}, Required: []string{}})
+	seedPR(t, pool, record.PullRequest{State: record.PullRequestOpen, Issue: "LEGION-208", Repo: "sjawhar/legion", Number: 42, Branch: "legion/LEGION-208", HeadSHA: "head", Failing: []string{}})
 	if _, err := intake.ApplyFact(context.Background(), pool, "api", "tester-passed", intake.HandoffComplete{
 		Generation: 1, Issue: "LEGION-208", Role: claim.RoleTester, Claim: "test-claim", Summary: "passed", Verdict: "pass", Commit: "test-handoff",
 	}, testEngine(config.DesignGateRootIssues, nil), admissionStub{}); err != nil {
@@ -690,7 +631,7 @@ func TestRemainingForwardRowsApplyThroughIntake(t *testing.T) {
 				// The reviewer has completed its round, so GitHub's approval on a green head is the
 				// review's second half and ends it.
 				seedPhase(t, pool, record.PhaseRow{Issue: "LEGION-208", Role: claim.RoleReviewer, Claim: "claim", HandoffCommit: "review-1"})
-				seedPR(t, pool, record.PullRequest{State: record.PullRequestOpen, Issue: "LEGION-208", Repo: "sjawhar/legion", Number: 42, Branch: "legion/LEGION-208", HeadSHA: "head", CheckedHead: "head", Failing: []string{}, Required: []string{}})
+				seedPR(t, pool, record.PullRequest{State: record.PullRequestOpen, Issue: "LEGION-208", Repo: "sjawhar/legion", Number: 42, Branch: "legion/LEGION-208", HeadSHA: "head", CheckedHead: "head", Failing: []string{}})
 			},
 			fact: func() intake.Fact {
 				return intake.PullRequestReview{Repo: "sjawhar/legion", Number: 42, State: "approved", CommitID: "head", HeadSHA: "head", Author: testReviewApp}
@@ -921,7 +862,7 @@ const testReviewApp = "legion-reviewer[bot]"
 // logging to log (the default logger when nil).
 func testEngine(policy config.DesignGate, log *slog.Logger) *Engine {
 	return New(record.NewStore(), Config{
-		Project: "LEGION", DesignGate: policy, ReviewRoundCap: 3, MaxFixAttempts: 3, Linger: time.Hour, ReviewAppLogin: testReviewApp, Repositories: testRepositories,
+		Project: "LEGION", DesignGate: policy, ReviewRoundCap: 3, Linger: time.Hour, ReviewAppLogin: testReviewApp, Repositories: testRepositories,
 		Clock: func() time.Time { return time.Date(2026, 9, 23, 0, 0, 0, 0, time.UTC) },
 	}, log)
 }

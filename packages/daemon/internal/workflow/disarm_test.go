@@ -195,25 +195,24 @@ func parentOf(key string) string {
 	return "LEGION-208"
 }
 
-// A READY withdrawn because the head's own CI turned red, or because the head started conflicting
-// with its base, sends the issue back to implementing: an auto-merge armed for that READY must not
-// outlive it, so the withdrawal queues a disarm too.
+// A READY withdrawn because the head started conflicting with its base, or because the merge
+// queue failed its merge, sends the issue back to implementing: an auto-merge armed for that
+// READY must not outlive it, so the withdrawal queues a disarm too. A CI result withdraws
+// nothing: it moves no issue at all (dispatch://INFRA-714/spec R1).
 func TestAWithdrawnREADYDisarmsTheMerge(t *testing.T) {
-	const required = "pr-checks-result"
 	for _, tc := range []struct {
 		name string
 		fact intake.Fact
 	}{
-		{"red CI", intake.PullRequestChecks{Repo: "sjawhar/legion", Number: 42, HeadSHA: "head",
-			CheckRuns: []record.AttemptRun{{Name: required, ID: 1}}, Generation: 1, Snapshot: "red", Failing: []string{required}}},
 		{"a conflicting head", intake.PullRequestMergeability{Repo: "sjawhar/legion", Number: 42, Base: "main", Mergeable: record.MergeabilityConflicting}},
+		{"a merge the queue failed", intake.MergeFailed{Issue: "LEGION-208", Number: 42, Head: "head", Reason: "the merge_group run failed"}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			pool := migratedPool(t)
 			seedIssue(t, pool, record.Issue{Key: "LEGION-208", Repo: "sjawhar/legion", DefaultBranch: "main", GitHubRepo: "sjawhar/legion", Tree: "LEGION-208", Project: "LEGION", Title: "root",
 				Phase: phase.AwaitingMerge, Generation: 1, Status: "retro", Rank: "U"})
 			seedPR(t, pool, record.PullRequest{State: record.PullRequestOpen, Issue: "LEGION-208", Repo: "sjawhar/legion",
-				Number: 42, Branch: "legion/LEGION-208", HeadSHA: "head", Required: []string{required}})
+				Number: 42, Branch: "legion/LEGION-208", HeadSHA: "head"})
 			seedPhase(t, pool, record.PhaseRow{Issue: "LEGION-208", Role: claim.RoleImplementer, Claim: "implement-claim"})
 			seedPhase(t, pool, record.PhaseRow{Issue: "LEGION-208", Role: claim.RoleMerger, Claim: "merge-claim", HandoffCommit: "head", Summary: "READY #42 at head"})
 			applyRefusingNothing(t, pool, readyEngine(""), tc.fact)

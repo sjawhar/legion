@@ -16,28 +16,26 @@ import (
 // arrived first is never cut loose from it, however many heads follow one lost push.
 const maxRunSteps = 32
 
-// A head run (record.PullRequest.Run) makes the fix-attempt count, its mark, the planned mark and
-// the CI settlement the same in every order GitHub delivers a pull request's pushes, heads and
-// settlements in. A head that arrives before every push of its move is recorded opens one: its
-// anchor is the judgement before that head, and every fact applied while it is open is a step -
-// a head, a settlement, a required read, the clearing of the head the required workflows were
-// read at, and a reopen. Each step and each push recorded meanwhile replays the run (replayRun):
-// the steps again, from the anchor, with every push recorded - which is the order in which every
-// push arrived before every head. The run closes once every head in it was judged with a chain of
+// A head run (record.PullRequest.Run) makes the moves made and the CI settlement that stands the
+// same in every order GitHub delivers a pull request's pushes, heads and settlements in. A head
+// that arrives before every push of its move is recorded opens one: its anchor is the judgement
+// before that head, and every fact applied while it is open is a step - a head, a settlement, or
+// a reopen. Each step and each push recorded meanwhile replays the run (replayRun): the steps
+// again, from the anchor, with every push recorded - which is the order in which every push
+// arrived before every head. The run closes once every head in it was judged with a chain of
 // pushes, and its front - the steps before the first head still waiting - folds into the anchor.
 // The replay decides the judgement only; the pull request's own pushes stay as the facts left
 // them (AdvancePullRequestHead).
 
 // JudgementChanged says whether the part of a pull request a head run replays differs between
-// before and after: a replay that changed it changes what the CI rule decides at the head. A set
-// never read and a settlement never made (Required, CheckRuns nil) differ from empty ones; the
-// other lists are compared by what they hold, which the store and the run keep in either form.
+// before and after: a replay that changed it changes which settlement stands for the head. A
+// settlement never made (CheckRuns nil) differs from an empty one; the other lists are compared by
+// what they hold, which the store and the run keep in either form.
 func JudgementChanged(before, after record.PullRequest) bool {
 	b, a := judgementOf(before), judgementOf(after)
-	return b.HeadSHA != a.HeadSHA || b.FixAttempts != a.FixAttempts || b.HeadCounted != a.HeadCounted || b.PlannedRed != a.PlannedRed ||
-		b.CheckedHead != a.CheckedHead || !sameItems(b.Failing, a.Failing) || !sameItems(b.Cancelled, a.Cancelled) || !same(b.CheckRuns, a.CheckRuns) ||
-		b.Generation != a.Generation || b.Snapshot != a.Snapshot || !same(b.Required, a.Required) || !sameItems(b.Workflows, a.Workflows) ||
-		b.WorkflowsHead != a.WorkflowsHead
+	return b.HeadSHA != a.HeadSHA || b.CheckedHead != a.CheckedHead ||
+		!sameItems(b.Failing, a.Failing) || !sameItems(b.Cancelled, a.Cancelled) || !same(b.CheckRuns, a.CheckRuns) ||
+		b.Generation != a.Generation || b.Snapshot != a.Snapshot
 }
 
 // runStep applies step to pr's open run and replays it.
@@ -59,11 +57,9 @@ func runStep(pr record.PullRequest, step record.RunStep) record.PullRequest {
 // that took it. The run stays open from its first head judged with no chain of pushes, or still
 // waiting for what its synchronize named, its anchor the judgement before that head, and closes
 // when there is none; past maxRunSteps its oldest steps fold into the anchor too. The pull request
-// keeps its own pushes. BlockedAttempts is what was reported, so it stays, unless the count it
-// reported is no longer reached, as when a count is taken back.
+// keeps its own pushes.
 func replayRun(pr record.PullRequest) record.PullRequest {
 	run, live := pr.Run, pr.Pushes
-	blocked := pr.BlockedAttempts
 	at := withJudgement(pr, run.Anchor)
 	at.Pushes, at.Run = clone(run.Pushes), nil
 	for _, p := range live {
@@ -104,12 +100,9 @@ func replayRun(pr record.PullRequest) record.PullRequest {
 	}
 	if waiting < len(run.Steps) {
 		at.Run = &record.HeadRun{Anchor: before[waiting].judgement, Pushes: before[waiting].pushes, Names: clone(before[waiting].names),
-			Since: before[waiting].since, Steps: clone(run.Steps[waiting:]), Decided: run.Decided}
+			Since: before[waiting].since, Steps: clone(run.Steps[waiting:])}
 	}
-	at.Pushes, at.BlockedAttempts = unspentPushes(live, at.Moves, false), blocked
-	if at.FixAttempts < blocked {
-		at.BlockedAttempts = 0
-	}
+	at.Pushes = unspentPushes(live, at.Moves, false)
 	return at
 }
 
@@ -133,12 +126,6 @@ func applyStep(pr record.PullRequest, step record.RunStep, names []record.Named,
 		return advance(pr, Arrival{Before: step.Before, Sender: step.Sender, At: step.SyncedAt, Since: since}, step.Head, names)
 	case step.Settlement != nil:
 		pr, _ = settle(pr, candidateOf(*step.Settlement))
-	case step.Required != nil:
-		pr.Required = clone(step.Required.Names)
-		pr.Workflows = clone(step.Required.Workflows)
-		pr.WorkflowsHead = step.Required.WorkflowsHead
-	case step.WorkflowsCleared:
-		pr.WorkflowsHead = ""
 	case step.Reopened:
 		pr.CheckedHead, pr.Failing, pr.Cancelled, pr.CheckRuns, pr.Generation, pr.Snapshot = "", []string{}, nil, nil, 0, ""
 	}
@@ -209,20 +196,6 @@ func sameSettlement(a, b record.Settlement) bool {
 		sameItems(a.Failing, b.Failing) && sameItems(a.Cancelled, b.Cancelled)
 }
 
-// ApplyRequiredRead records a read of what the base branch requires, as the daemon made one while
-// it read rulesets: its required checks, and its required workflows with their runs' results at
-// head. While a head run is open the read is a step of it, which a stored run can still carry.
-func ApplyRequiredRead(pr record.PullRequest, names []string, workflows []record.RequiredWorkflow, head string) record.PullRequest {
-	read := record.RequiredRead{Names: append([]string{}, names...), Workflows: append([]record.RequiredWorkflow{}, workflows...), WorkflowsHead: head}
-	return withStep(pr, record.RunStep{Required: &read})
-}
-
-// ClearWorkflowsHead clears the head the required workflows' runs were read at, so their result
-// stands for no head (WorkflowStanding). While a head run is open it is a step of it.
-func ClearWorkflowsHead(pr record.PullRequest) record.PullRequest {
-	return withStep(pr, record.RunStep{WorkflowsCleared: true})
-}
-
 // settle applies candidate when it stands for the head and is newer than the recorded settlement,
 // and otherwise leaves pr as it was.
 func settle(pr record.PullRequest, candidate SettlementCandidate) (record.PullRequest, bool) {
@@ -244,24 +217,22 @@ func candidateOf(s record.Settlement) SettlementCandidate {
 
 // judgementOf is the part of pr a head run replays.
 func judgementOf(pr record.PullRequest) record.Judgement {
-	return record.Judgement{HeadSHA: pr.HeadSHA, FixAttempts: pr.FixAttempts, HeadCounted: pr.HeadCounted, PlannedRed: pr.PlannedRed,
+	return record.Judgement{HeadSHA: pr.HeadSHA,
 		CheckedHead: pr.CheckedHead, Failing: clone(pr.Failing), Cancelled: clone(pr.Cancelled), CheckRuns: clone(pr.CheckRuns),
-		Generation: pr.Generation, Snapshot: pr.Snapshot, Required: clone(pr.Required), Workflows: clone(pr.Workflows), WorkflowsHead: pr.WorkflowsHead,
-		Moves: clone(pr.Moves)}
+		Generation: pr.Generation, Snapshot: pr.Snapshot, Moves: clone(pr.Moves)}
 }
 
 // withJudgement is pr with j as its judgement.
 func withJudgement(pr record.PullRequest, j record.Judgement) record.PullRequest {
-	pr.HeadSHA, pr.FixAttempts, pr.HeadCounted, pr.PlannedRed = j.HeadSHA, j.FixAttempts, j.HeadCounted, j.PlannedRed
+	pr.HeadSHA = j.HeadSHA
 	pr.CheckedHead, pr.Failing, pr.Cancelled, pr.CheckRuns = j.CheckedHead, clone(j.Failing), clone(j.Cancelled), clone(j.CheckRuns)
 	pr.Generation, pr.Snapshot = j.Generation, j.Snapshot
-	pr.Required, pr.Workflows, pr.WorkflowsHead = clone(j.Required), clone(j.Workflows), j.WorkflowsHead
 	pr.Moves = clone(j.Moves)
 	return pr
 }
 
-// clone is a copy of s, nil when s is: a nil required set is one never read, and a nil set of
-// check runs one never settled, both apart from an empty one.
+// clone is a copy of s, nil when s is: a nil set of check runs is one never settled, apart from an
+// empty one.
 func clone[T any](s []T) []T {
 	if s == nil {
 		return nil

@@ -404,6 +404,9 @@ type PhaseView struct {
 // daemon's last read of the pull request found it (record.PullRequest.MergeState); absent until
 // that read has run. It is what says whether GitHub would merge the head now ("clean") or holds
 // it on a check or a review the repository requires ("blocked").
+// No CI verdict is shown: a CI result moves no issue, so the daemon keeps none
+// (dispatch://INFRA-714/spec R1), and GitHub's own merge state is what says whether a check the
+// repository requires holds the head.
 type PullRequestView struct {
 	// Repo is the repository (owner/name) the pull request is in, its issue's.
 	Repo           string `json:"repo"`
@@ -411,9 +414,7 @@ type PullRequestView struct {
 	Head           string `json:"head"`
 	State          string `json:"state"`
 	MergeState     string `json:"mergeState,omitempty"`
-	ChecksVerdict  string `json:"checksVerdict,omitempty"`
 	ReviewDecision string `json:"reviewDecision,omitempty"`
-	FixAttempts    int    `json:"fixAttempts"`
 }
 
 // GateView is the design gate: the spec document, the version Dispatch currently holds, and the

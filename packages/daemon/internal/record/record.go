@@ -423,16 +423,15 @@ type PullRequest struct {
 	// Snapshot record, empty while none is recorded: the current head, or a head the current one
 	// replaced through pushes that changed only .legion/ (a handoff push starts no CI of its own,
 	// so the code head's settlement is the head's), or an earlier head whose settlement no longer
-	// counts. What the settlement comes to is the required set's to say (classify.HeadVerdict).
+	// counts. A settlement moves no issue (dispatch://INFRA-714/spec R1): what it names is told to
+	// the roles that work the issue and judged by them (workflow's checks).
 	CheckedHead string
 	// Failing and Cancelled are the checks the settlement names as failed and as cancelled.
-	Failing         []string
-	Cancelled       []string
-	FixAttempts     int
-	BlockedAttempts int
-	CheckRuns       []AttemptRun
-	Generation      int64
-	Snapshot        string
+	Failing    []string
+	Cancelled  []string
+	CheckRuns  []AttemptRun
+	Generation int64
+	Snapshot   string
 	// Pushes are the branch's pushes as they were classified: every push that changed only .legion/
 	// and said which head it replaced, which carry an approval across, each pair of heads once; and
 	// every other push whose heads have not arrived yet, in the order they were delivered, two
@@ -446,35 +445,11 @@ type PullRequest struct {
 	// and otherwise queued on the move (Move.Repeats). A push for a move not made yet - one that
 	// returns the branch to a commit it held before, say - is not spent.
 	Moves []Move
-	// HeadCounted is the head the fix-attempt count last counted, a push onto a red verdict, kept
-	// across every head pushed on top of it until one is pushed onto a green verdict, or onto a
-	// settled head whose base branch requires no check and no workflow
-	// (classify.AdvancePullRequestHead); empty when no such attempt stands. The fix-attempt cap holds
-	// a red within that attempt (classify.FixAttemptCapHolds).
-	HeadCounted string
 	// Run is the head run: the pull request's judgement as it stood before the first head still
-	// waiting for a push of its move, and every head, settlement, required read, clearing of the
-	// head the required workflows were read at, and reopen applied since, replayed at each step and
-	// each push (classify.ApplyPush). Nil when no head waits for a push, and once a run is cut to
-	// its bound with none left waiting.
+	// waiting for a push of its move, and every head, settlement and reopen applied since,
+	// replayed at each step and each push (classify.ApplyPush). Nil when no head waits for a push,
+	// and once a run is cut to its bound with none left waiting.
 	Run *HeadRun
-	// PlannedRed is whether the newest head that changed a path outside .legion/ was the review
-	// App's (the tester's red tests): a red on it is planned, so the next head is not a fix attempt.
-	PlannedRed bool
-	// Required is the checks the pull request's base branch requires (its rulesets' required status
-	// checks and its branch protection's), as the daemon last read them from GitHub before it
-	// stopped reading rulesets (dispatch://INFRA-714's R1: GitHub applies the repository's own
-	// required checks, so the daemon reads none). Only a required check or workflow decides the
-	// checks verdict (classify.HeadVerdict), so nil, a set never read, decides none; an empty set,
-	// with no required workflow, is a base that requires nothing, which gives the head no verdict
-	// and where nothing is red.
-	Required []string
-	// Workflows is each workflow the base branch's rulesets require to succeed, read with Required,
-	// and the result of its latest run on WorkflowsHead, the head the daemon read the runs of; empty
-	// when the base requires no workflow, and WorkflowsHead then too. A result stands only for the
-	// head whose settlement is recorded (classify.HeadChecks). A reopen keeps both, with Required.
-	Workflows     []RequiredWorkflow
-	WorkflowsHead string
 	// ReviewSeen is the newest deciding review (changes requested or approved, from the review App
 	// or an account with write access to the repository) GitHub reported for the pull request: a
 	// deciding review not after it was submitted before one already processed, and records nothing.
@@ -519,9 +494,6 @@ type HeadRun struct {
 	// zero when unknown: a named move older than it is no arrival's of the run.
 	Since time.Time `json:"since,omitzero"`
 	Steps []RunStep `json:"steps"`
-	// Decided is the head whose held red a lapsed hold let be decided as it stands (workflow's
-	// holdLapsed), so one lapse is said once however many facts decide the head after it.
-	Decided string `json:"decided,omitempty"`
 }
 
 // Named is a move a synchronize named without moving the head: the move from Before to SHA, made by
@@ -533,24 +505,17 @@ type Named struct {
 	At     time.Time `json:"at,omitzero"`
 }
 
-// Judgement is the part of a pull request a head run replays: its head, its fix-attempt count and
-// marks, its planned mark, its CI settlement, what its base branch requires, and the moves it has
-// made. BlockedAttempts is what was reported, and is not replayed.
+// Judgement is the part of a pull request a head run replays: its head, its CI settlement, and
+// the moves it has made.
 type Judgement struct {
-	HeadSHA       string             `json:"headSha"`
-	FixAttempts   int                `json:"fixAttempts"`
-	HeadCounted   string             `json:"headCounted,omitempty"`
-	PlannedRed    bool               `json:"plannedRed,omitempty"`
-	CheckedHead   string             `json:"checkedHead,omitempty"`
-	Failing       []string           `json:"failing"`
-	Cancelled     []string           `json:"cancelled"`
-	CheckRuns     []AttemptRun       `json:"checkRuns"`
-	Generation    int64              `json:"generation,omitempty"`
-	Snapshot      string             `json:"snapshot,omitempty"`
-	Required      []string           `json:"required"`
-	Workflows     []RequiredWorkflow `json:"workflows"`
-	WorkflowsHead string             `json:"workflowsHead,omitempty"`
-	Moves         []Move             `json:"moves,omitempty"`
+	HeadSHA     string       `json:"headSha"`
+	CheckedHead string       `json:"checkedHead,omitempty"`
+	Failing     []string     `json:"failing"`
+	Cancelled   []string     `json:"cancelled"`
+	CheckRuns   []AttemptRun `json:"checkRuns"`
+	Generation  int64        `json:"generation,omitempty"`
+	Snapshot    string       `json:"snapshot,omitempty"`
+	Moves       []Move       `json:"moves,omitempty"`
 }
 
 // Move is a move from the head Before to the head SHA, which a push with the same two heads makes.
@@ -575,21 +540,19 @@ type Move struct {
 // RunStep is one fact a head run replays: exactly one of a head's arrival (Head, with Before the
 // head its synchronize says the branch moved from and Sender the account whose push moved it, each
 // empty when the fact named none, and SyncedAt GitHub's clock of the synchronize), a CI settlement
-// (Settlement), a read of what the base branch requires (Required), the clearing of the head the
-// required workflows' runs were read at (WorkflowsCleared), or a reopen, which starts the CI
-// settlement afresh (Reopened). At is when a head arrived, by the daemon's clock: a red at that
-// head is held for a bounded time from then (workflow's holdsRed). A step stored before Before,
-// Sender or SyncedAt existed reads as naming none.
+// (Settlement), or a reopen, which starts the CI settlement afresh (Reopened). A step stored
+// before Before, Sender or SyncedAt existed reads as naming none, and one a daemon before
+// dispatch://INFRA-714 wrote for a read of what the base branch required, for the clearing of the
+// head its workflow runs were read at, or for the arrival clock of a head whose red was held,
+// reads as a step that replays as nothing: no required set and no held red is left to replay
+// (classify.applyStep).
 type RunStep struct {
-	Head             string        `json:"head,omitempty"`
-	Before           string        `json:"before,omitempty"`
-	Sender           string        `json:"sender,omitempty"`
-	SyncedAt         time.Time     `json:"syncedAt,omitzero"`
-	At               time.Time     `json:"at,omitzero"`
-	Settlement       *Settlement   `json:"settlement,omitempty"`
-	Required         *RequiredRead `json:"required,omitempty"`
-	WorkflowsCleared bool          `json:"workflowsCleared,omitempty"`
-	Reopened         bool          `json:"reopened,omitempty"`
+	Head       string      `json:"head,omitempty"`
+	Before     string      `json:"before,omitempty"`
+	Sender     string      `json:"sender,omitempty"`
+	SyncedAt   time.Time   `json:"syncedAt,omitzero"`
+	Settlement *Settlement `json:"settlement,omitempty"`
+	Reopened   bool        `json:"reopened,omitempty"`
 }
 
 // Settlement is a CI settlement of Head as the listener reported it (classify.SettlementFor).
@@ -600,26 +563,6 @@ type Settlement struct {
 	Snapshot   string       `json:"snapshot"`
 	Failing    []string     `json:"failing"`
 	Cancelled  []string     `json:"cancelled"`
-}
-
-// RequiredRead is a read of what the base branch requires, as the daemon made one while it read
-// rulesets: a step a stored head run can still carry.
-type RequiredRead struct {
-	Names         []string           `json:"names"`
-	Workflows     []RequiredWorkflow `json:"workflows"`
-	WorkflowsHead string             `json:"workflowsHead,omitempty"`
-}
-
-// RequiredWorkflow is one workflow the base branch requires, named by its path, and the result of
-// its latest run on a head as the daemon read it: success, pending,
-// missing (the head has no run of it), or the conclusion it failed with. Run and Attempt are that
-// run's id and attempt, both zero when the head has no run of it: a re-run keeps its run's id and
-// raises its attempt, so a re-run that ends as the run did before is still a new read.
-type RequiredWorkflow struct {
-	Path    string `json:"path"`
-	Result  string `json:"result"`
-	Run     int64  `json:"run,omitempty"`
-	Attempt int    `json:"attempt,omitempty"`
 }
 
 // PullRequestState is whether a pull request is open, merged, or closed unmerged.

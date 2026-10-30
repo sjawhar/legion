@@ -141,7 +141,7 @@ func seedSecondIssue(t *testing.T, pool *pgxpool.Pool) {
 		}
 		if err := records.PutPullRequest(ctx, tx, record.PullRequest{State: record.PullRequestOpen, Issue: "CAPTURE-2", Repo: "acme/widgets",
 			Number: 87, Branch: "legion/CAPTURE-2", HeadSHA: "code", CheckedHead: "code", Failing: []string{},
-			Generation: 1, Snapshot: "settled", Required: []string{"pr-checks-result"}}); err != nil {
+			Generation: 1, Snapshot: "settled"}); err != nil {
 			return err
 		}
 		return records.PutPhase(ctx, tx, record.PhaseRow{Issue: "CAPTURE-2", Role: claim.RoleImplementer, Claim: "implement-claim-2"})

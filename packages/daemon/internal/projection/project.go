@@ -12,7 +12,6 @@ import (
 	"github.com/sjawhar/legion/daemon/internal/blockers"
 	"github.com/sjawhar/legion/daemon/internal/capabilities"
 	"github.com/sjawhar/legion/daemon/internal/claim"
-	"github.com/sjawhar/legion/daemon/internal/classify"
 	"github.com/sjawhar/legion/daemon/internal/record"
 	"github.com/sjawhar/legion/daemon/internal/supervise"
 )
@@ -160,9 +159,7 @@ func Project(ctx context.Context, tx pgx.Tx, s record.Store, project string, cla
 				Head:           pr.HeadSHA,
 				State:          string(pr.State),
 				MergeState:     string(pr.MergeState),
-				ChecksVerdict:  classify.HeadVerdict(*pr),
 				ReviewDecision: reviewDecision,
-				FixAttempts:    pr.FixAttempts,
 			}
 		}
 

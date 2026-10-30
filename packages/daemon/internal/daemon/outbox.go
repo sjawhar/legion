@@ -486,6 +486,8 @@ func (r *outbox) execute(ctx context.Context, row record.OutboxRow) error {
 		return r.removeWorkspace(ctx, row, value)
 	case record.MergeQueuePublish:
 		return r.mergeQueue(ctx, row, value)
+	case record.RoleMessage:
+		return r.roleMessage(ctx, row, value)
 	case record.IssueBranch:
 		return r.issueBranch(ctx, row, value)
 	case record.AutoMergeDisable:
@@ -721,6 +723,27 @@ func (r *outbox) mergeQueue(ctx context.Context, row record.OutboxRow, payload r
 	}
 	if err != nil {
 		return fmt.Errorf("publish %s's READY packet or its withdrawal to merge queue role %s: %w", row.Issue, payload.Role, err)
+	}
+	return nil
+}
+
+// roleMessage publishes one message to a role's topic, keyed by the row so a retried row is one
+// delivery (record.RoleMessage). A role with no live holder is told nothing and the row is done:
+// the message reports a moment - a head's checks as they settled - that has passed by the time
+// anyone claims the role, and every recipient reads the pull request on GitHub for itself, so
+// waiting would retry forever for a message that is stale when it lands.
+func (r *outbox) roleMessage(ctx context.Context, row record.OutboxRow, payload record.RoleMessage) error {
+	if r.notices == nil {
+		return errors.New("role message executor has no Envoy publisher")
+	}
+	err := r.notices.Publish(ctx, notify.RoleTopicPrefix+payload.Role, payload.Body, payload.Body, record.OutboxKey(row.ID))
+	if errors.Is(err, notify.ErrNoHolder) {
+		r.log.Info("outbox role message finished undelivered: its role has no live holder",
+			"row", row.ID, "issue", row.Issue, "role", payload.Role)
+		return nil
+	}
+	if err != nil {
+		return fmt.Errorf("publish %s's message to role %s: %w", row.Issue, payload.Role, err)
 	}
 	return nil
 }

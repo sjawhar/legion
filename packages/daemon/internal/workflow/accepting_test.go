@@ -14,7 +14,7 @@ import (
 	"github.com/sjawhar/legion/daemon/internal/record"
 )
 
-const acceptingRequired = "ci"
+const acceptingCheck = "ci"
 
 // seedAccepting seeds LEGION-208 in accepting on an open pull request at head, its implementer's,
 // reviewer's and merger's phase rows as the review round left them: the reviewer's round completed
@@ -23,7 +23,7 @@ func seedAccepting(t *testing.T, pool *pgxpool.Pool) {
 	t.Helper()
 	seedIssue(t, pool, record.Issue{Key: "LEGION-208", Repo: "sjawhar/legion", DefaultBranch: "main", GitHubRepo: "sjawhar/legion", Tree: "LEGION-208", Project: "LEGION", Title: "root", Phase: phase.Accepting, Generation: 1, Status: "needs_review", Rank: "U"})
 	seedPR(t, pool, record.PullRequest{State: record.PullRequestOpen, Issue: "LEGION-208", Repo: "sjawhar/legion", Number: 42, Branch: "legion/LEGION-208", HeadSHA: "head",
-		CheckedHead: "head", Required: []string{acceptingRequired}, CheckRuns: []record.AttemptRun{{Name: acceptingRequired, ID: 1}}, Failing: []string{}})
+		CheckedHead: "head", CheckRuns: []record.AttemptRun{{Name: acceptingCheck, ID: 1}}, Failing: []string{}})
 	seedPhase(t, pool, record.PhaseRow{Issue: "LEGION-208", Role: claim.RoleImplementer, Claim: "implement-claim", HandoffCommit: "implement-1"})
 	seedPhase(t, pool, record.PhaseRow{Issue: "LEGION-208", Role: claim.RoleReviewer, Claim: "review-claim", HandoffCommit: "review-1", Summary: "reviewed",
 		Decision: &record.ReviewDecision{State: "approved", Head: "head"}})
@@ -37,7 +37,7 @@ func TestAnApprovalMovesTheIssueToAcceptingAndStartsNobody(t *testing.T) {
 	pool := migratedPool(t)
 	seedIssue(t, pool, record.Issue{Key: "LEGION-208", Repo: "sjawhar/legion", DefaultBranch: "main", GitHubRepo: "sjawhar/legion", Tree: "LEGION-208", Project: "LEGION", Title: "root", Phase: phase.Reviewing, Generation: 1, Status: "needs_review", Rank: "U"})
 	seedPhase(t, pool, record.PhaseRow{Issue: "LEGION-208", Role: claim.RoleReviewer, Claim: "review-claim", HandoffCommit: "review-1", Summary: "looks right"})
-	seedPR(t, pool, record.PullRequest{State: record.PullRequestOpen, Issue: "LEGION-208", Repo: "sjawhar/legion", Number: 42, Branch: "legion/LEGION-208", HeadSHA: "head", CheckedHead: "head", Failing: []string{}, Required: []string{}})
+	seedPR(t, pool, record.PullRequest{State: record.PullRequestOpen, Issue: "LEGION-208", Repo: "sjawhar/legion", Number: 42, Branch: "legion/LEGION-208", HeadSHA: "head", CheckedHead: "head", Failing: []string{}})
 
 	applyRefusingNothing(t, pool, testEngine(config.DesignGateRootIssues, nil),
 		intake.PullRequestReview{Repo: "sjawhar/legion", Number: 42, State: "approved", CommitID: "head", HeadSHA: "head", Author: testReviewApp})
@@ -181,27 +181,6 @@ func TestAPlannersBackwardMoveFromAcceptingIsRefused(t *testing.T) {
 		t.Fatalf("implementer pass = %d, want none", pass)
 	}
 	assertOutboxKinds(t, pool, []string{})
-}
-
-// CI red in accepting sends the work back to implementing as it does in review. The architect holds
-// no workspace turn, so the implementer's start waits on nobody (an empty quiesce).
-func TestChecksRedInAcceptingSendsTheWorkBackWaitingOnNobody(t *testing.T) {
-	pool := migratedPool(t)
-	seedAccepting(t, pool)
-	applyRefusingNothing(t, pool, testEngine(config.DesignGateRootIssues, nil),
-		intake.PullRequestChecks{Repo: "sjawhar/legion", Number: 42, HeadSHA: "head", CheckRuns: []record.AttemptRun{{Name: acceptingRequired, ID: 2}}, Generation: 2, Snapshot: "red-2", Failing: []string{acceptingRequired}})
-	assertPhase(t, pool, phase.Implementing)
-	task, quiesce := implementerStart(t, pool)
-	if quiesce != "" || !strings.Contains(task, "Phase: implementing.") {
-		t.Fatalf("the implementer's start %q waits for %q, want the implementing task waiting on nobody", task, quiesce)
-	}
-	reason, from := checksRedNotice(t, pool)
-	if from != phase.Accepting || !strings.Contains(reason, "CI is red at head") {
-		t.Fatalf("checks-red notice %q in %s, want the red told in accepting", reason, from)
-	}
-	if pass := implementerPass(t, pool); pass != 1 {
-		t.Fatalf("implementer pass = %d, want the red counted as one", pass)
-	}
 }
 
 // A backward move onto accepting from a later phase writes needs_review, the status the board shows

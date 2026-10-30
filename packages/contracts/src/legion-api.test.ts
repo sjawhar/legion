@@ -748,19 +748,20 @@ test("the state golden names the held lifecycle rows, and the list cannot be dro
   expect(LegionStateResponse.safeParse(dropped).success).toBeFalse();
 });
 
-// The daemon's resolved legion.yaml (contract 35): the golden carries the file's `max_fix_attempts`
-// and `worker_boot_timeout_seconds` and its GitHub Apps' ids and installations with no key, a
-// Stage 3 state carries the defaults, the two typed keys are positive integers, the rest rides
-// loosely, and the block cannot be dropped: a plugin from before the field refuses the state.
+// The daemon's resolved legion.yaml (contract 35): the golden carries the file's
+// `review_round_cap` and `worker_boot_timeout_seconds` and its GitHub Apps' ids and installations
+// with no key, a Stage 3 state carries the defaults, the two typed keys are positive integers,
+// the rest rides loosely, and the block cannot be dropped: a plugin from before the field refuses
+// the state.
 test("the state golden carries the daemon's settings with no credential, and the block cannot be dropped", () => {
   const state = LegionStateResponse.parse(fixture("state.json"));
-  expect(state.settings.max_fix_attempts).toBe(5);
+  expect(state.settings.review_round_cap).toBe(4);
   expect(state.settings.worker_boot_timeout_seconds).toBe(180);
   const apps = state.settings.github_apps as { implement: Record<string, unknown> };
   expect(Object.keys(apps.implement).sort()).toEqual(["app_id", "installations"]);
 
   const stage3 = LegionStateResponse.parse(fixture("state-stage3.json"));
-  expect(stage3.settings.max_fix_attempts).toBe(3);
+  expect(stage3.settings.review_round_cap).toBe(3);
   expect(stage3.settings.worker_boot_timeout_seconds).toBe(120);
 
   const dropped = fixture("state.json") as Record<string, unknown>;
@@ -768,11 +769,11 @@ test("the state golden carries the daemon's settings with no credential, and the
   expect(LegionStateResponse.safeParse(dropped).success).toBeFalse();
 
   const zero = fixture("state.json") as { settings: Record<string, unknown> };
-  zero.settings.max_fix_attempts = 0;
+  zero.settings.review_round_cap = 0;
   expect(LegionStateResponse.safeParse(zero).success).toBeFalse();
 
   const typed = fixture("state.json") as { settings: Record<string, unknown> };
-  typed.settings.max_fix_attempts = "5";
+  typed.settings.review_round_cap = "5";
   expect(LegionStateResponse.safeParse(typed).success).toBeFalse();
 
   const text = readFileSync(path.join(fixtureDir, "state.json"), "utf8");

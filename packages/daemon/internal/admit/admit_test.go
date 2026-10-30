@@ -885,7 +885,7 @@ func TestReadmissionClearsTheGenerationOfEveryIssueOfTheTree(t *testing.T) {
 		if err := records.PutPullRequest(context.Background(), tx, record.PullRequest{
 			Issue: "LEGION-CHILD", Repo: "acme/widgets", Number: 9, Branch: "legion/LEGION-CHILD", HeadSHA: "abc",
 			HeadUpdatedAt: fixedNow, CheckedHead: "abc", Failing: []string{"ci"},
-			FixAttempts: 2, State: record.PullRequestOpen,
+			State: record.PullRequestOpen,
 		}); err != nil {
 			t.Fatalf("seed the child's open pull request: %v", err)
 		}
@@ -918,7 +918,7 @@ func TestReadmissionClearsTheGenerationOfEveryIssueOfTheTree(t *testing.T) {
 		if pr == nil {
 			t.Fatal("the child's open pull request went with the generation; an open one is kept")
 		}
-		if pr.CheckedHead != "" || len(pr.Failing) != 0 || pr.FixAttempts != 0 {
+		if pr.CheckedHead != "" || len(pr.Failing) != 0 {
 			t.Errorf("the kept pull request carried the last generation's reading: %#v", pr)
 		}
 	})

@@ -603,13 +603,13 @@ func TestAMergersREADYOnALingeringTreeIsRefused(t *testing.T) {
 }
 
 // Linger holds every member of a closed tree where it stood, whichever path a fact takes: no
-// approval, green checks, red checks that send a head back or exhaust max_fix_attempts, a
-// conflicting head awaiting merge, changes requested, reviewer's comment on a round no review
-// decided, backward move, retry of a held phase or failed claim moves a member, counts a review
-// round, posts or notifies, or starts a worker, whose start would resume a suspended claim inside
-// a tree that has left the workflow. A worker's own request is refused, so it is told nothing
-// moved. The one fact that moves a lingering member is its merge, which GitHub never sends again:
-// it closes the member and opens its production check (merge_close_test.go).
+// approval, green checks, a settlement with a failed check, a conflicting head awaiting merge,
+// changes requested, reviewer's comment on a round no review decided, backward move, retry of a
+// held phase or failed claim moves a member, counts a review round, posts or notifies, tells a
+// role, or starts a worker, whose start would resume a suspended claim inside a tree that has
+// left the workflow. A worker's own request is refused, so it is told nothing moved. The one
+// fact that moves a lingering member is its merge, which GitHub never sends again: it closes the
+// member and opens its production check (merge_close_test.go).
 func TestNoFactMovesAMemberOfALingeringTree(t *testing.T) {
 	hold := record.Hold{From: phase.Testing}
 	for _, tc := range []struct {
@@ -629,9 +629,7 @@ func TestNoFactMovesAMemberOfALingeringTree(t *testing.T) {
 			fact: intake.PullRequestChecks{Repo: "sjawhar/legion", Number: 42, HeadSHA: "head", CheckRuns: []record.AttemptRun{{Name: "ci", ID: 1}}, Generation: 1, Snapshot: "green-1", Failing: []string{}}},
 		{name: "the reviewer's comment on a round no review decided", at: phase.Reviewing, pr: record.PullRequest{CheckedHead: "head", CheckRuns: []record.AttemptRun{{Name: "ci", ID: 1}}},
 			fact: intake.PullRequestReview{Repo: "sjawhar/legion", Number: 42, State: "commented", CommitID: "head", HeadSHA: "head", Author: testReviewApp, Body: "a thought"}},
-		{name: "red checks at max_fix_attempts", at: phase.Testing, pr: record.PullRequest{FixAttempts: 3},
-			fact: intake.PullRequestChecks{Repo: "sjawhar/legion", Number: 42, HeadSHA: "head", CheckRuns: []record.AttemptRun{{Name: "ci", ID: 2}}, Generation: 1, Snapshot: "red-1", Failing: []string{"ci"}}},
-		{name: "red checks that send a code head back", at: phase.Testing,
+		{name: "a settlement with a failed check", at: phase.Testing,
 			fact: intake.PullRequestChecks{Repo: "sjawhar/legion", Number: 42, HeadSHA: "head", CheckRuns: []record.AttemptRun{{Name: "ci", ID: 2}}, Generation: 1, Snapshot: "red-1", Failing: []string{"ci"}}},
 		{name: "a conflicting head at awaiting_merge", at: phase.AwaitingMerge,
 			fact: intake.PullRequestMergeability{Repo: "sjawhar/legion", Number: 42, Base: "main", Mergeable: record.MergeabilityConflicting}},
@@ -651,9 +649,9 @@ func TestNoFactMovesAMemberOfALingeringTree(t *testing.T) {
 			seedIssue(t, pool, record.Issue{Key: "LEGION-209", Repo: "sjawhar/legion", DefaultBranch: "main", GitHubRepo: "sjawhar/legion", Tree: "LEGION-208", Project: "LEGION", Title: "child", Parent: &parent, Phase: tc.at, Hold: tc.hold, Generation: 1, Status: "in_progress", Rank: "V"})
 			pr := tc.pr
 			pr.State, pr.Issue, pr.Repo, pr.Number, pr.Branch, pr.HeadSHA = record.PullRequestOpen, "LEGION-209", "sjawhar/legion", 42, "legion/LEGION-209", "head"
-			// The base requires ci, the check every settlement here names, so a green or red head is
-			// one the workflow would act on if the linger did not hold it.
-			pr.Failing, pr.Required = []string{}, []string{"ci"}
+			// The settlement names ci either way, so a head the workflow would tell its roles about
+			// is one the linger holds instead.
+			pr.Failing = []string{}
 			seedPR(t, pool, pr)
 			// The implementer is one round short of the review round cap, so a counted round would
 			// post the cap message and notify the architect. A review ends when both of its halves
@@ -679,9 +677,9 @@ func TestNoFactMovesAMemberOfALingeringTree(t *testing.T) {
 			if err := pool.QueryRow(t.Context(), `select phase,
 				(select count(*) from outbox where issue = 'LEGION-209' and kind = 'supervise' and payload->>'op' = 'start'),
 				(select rounds from phases where issue = 'LEGION-209' and role = 'implementer'),
-				(select count(*) from outbox where issue = 'LEGION-209' and kind in ('dispatch_message', 'notice', 'controller_notice'))
+				(select count(*) from outbox where issue = 'LEGION-209' and kind in ('dispatch_message', 'notice', 'controller_notice', 'role_message'))
 				from issues where key = 'LEGION-209'`).Scan(&got, &starts, &rounds, &told); err != nil || got != tc.at || starts != 0 || rounds != 2 || told != 0 {
-				t.Fatalf("the lingering tree's LEGION-209 = %q, %d worker starts, %d rounds, %d messages and notices (the controller's included), %v; want %s, none, 2, none", got, starts, rounds, told, err, tc.at)
+				t.Fatalf("the lingering tree's LEGION-209 = %q, %d worker starts, %d rounds, %d messages and notices (the controller's and the roles' included), %v; want %s, none, 2, none", got, starts, rounds, told, err, tc.at)
 			}
 		})
 	}
@@ -809,9 +807,6 @@ func readyEngineAt(mergeQueue string, now time.Time) *Engine {
 		Clock: func() time.Time { return now },
 	}, nil)
 }
-
-// heldRedLapses is readyEngine's clock once a red it held while a head waited has lapsed (redHold).
-var heldRedLapses = time.Date(2026, 9, 25, 0, 0, 0, 0, time.UTC).Add(redHold + time.Second)
 
 // applyFacts applies each fact to pool through engine, failing the test on an error, and returns
 // the fact's result.

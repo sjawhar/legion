@@ -122,19 +122,17 @@ func TestTheReadCarriesAnApprovalAcrossCommitsThatChangeOnlyTheIssuesHandoffs(t 
 	}
 }
 
-// The handoff-only push the compare records leaves the approved head, not the head the fix-attempt
-// count moved from, so it takes back no count: here the recorded head was counted as a fix pushed
-// from a red head between the two (middle) before its push arrived, and the head run that count
-// opened replays with the compare's push and still finds no chain from middle. The approval stands
-// and the count stands with it, its run still waiting for the push from middle.
-func TestTheCarryFromAnApprovedHeadTakesBackNoCountFromAnotherHead(t *testing.T) {
+// The handoff-only push the compare records leaves the approved head, not the head the record's
+// run is waiting for a push from: here the head run opened at a head pushed from a commit between
+// the two (middle) before its push arrived, and the run replays with the compare's push and still
+// finds no chain from middle. The approval stands, and the run stays open waiting for that push.
+func TestTheCarryFromAnApprovedHeadLeavesTheRunWaitingForAnotherHeadsPush(t *testing.T) {
 	pool := isolatedOutboxPool(t)
 	seedApprovalBelowHead(t, pool, "code")
 	setCapturePullRequest(t, pool, func(pr *record.PullRequest) {
-		pr.FixAttempts, pr.HeadCounted = 3, "handoff"
 		pr.Run = &record.HeadRun{Steps: []record.RunStep{{Head: "handoff"}},
-			Anchor: record.Judgement{HeadSHA: "middle", FixAttempts: 2, CheckedHead: "middle", Failing: []string{"ci"},
-				CheckRuns: []record.AttemptRun{{Name: "ci", ID: 1}}, Required: []string{"ci"}, Workflows: []record.RequiredWorkflow{}}}
+			Anchor: record.Judgement{HeadSHA: "middle", CheckedHead: "middle", Failing: []string{"ci"},
+				CheckRuns: []record.AttemptRun{{Name: "ci", ID: 1}}}}
 	})
 	var compares atomic.Int64
 	review, test := `{"filename":".legion/CAPTURE-1/review.json","status":"modified"}`, `{"filename":".legion/CAPTURE-1/test.json","status":"modified"}`
@@ -144,9 +142,8 @@ func TestTheCarryFromAnApprovedHeadTakesBackNoCountFromAnotherHead(t *testing.T)
 	if got != phase.Accepting {
 		t.Fatalf("after the read the issue is in %s, want %s: the approval of code stands", got, phase.Accepting)
 	}
-	if pr.FixAttempts != 3 || pr.HeadCounted != "handoff" || pr.Run == nil {
-		t.Fatalf("after the read fixAttempts=%d headCounted=%q run open %v, want 3, \"handoff\" and open: the carry from code took back the count of the move from middle",
-			pr.FixAttempts, pr.HeadCounted, pr.Run != nil)
+	if pr.Run == nil {
+		t.Fatalf("after the read the head run is closed, want it open: the carry from code is no chain from middle")
 	}
 }
 

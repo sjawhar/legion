@@ -228,10 +228,6 @@ func (e *Engine) suspend(ctx context.Context, tx pgx.Tx, issue record.Issue, rol
 	return e.enqueue(ctx, tx, issue.Key, record.SuperviseRequest{Op: "suspend", Tree: issue.Tree, Role: role, Generation: issue.Generation, Reason: reason})
 }
 
-// approvedHeadLabel labels the head a merger's task carries. The merger's prompt reads its task by
-// this label (prompts/roles/merger.md, step 2), which a test ties to it.
-const approvedHeadLabel = "Approved head"
-
 // testerVerdictLabel labels the tester's verdict a started worker's task carries. The reviewer's
 // prompt names it as the tester's result rather than its own (prompts/go/reviewer.md), which a test
 // ties to it.
@@ -240,42 +236,14 @@ const testerVerdictLabel = "Tester's verdict"
 // start starts the phase worker of the issue's current phase, a start stamped with that phase. A
 // start that takes the phase over from a role still at work in it names that role, quiesce, so it
 // waits for that role's turn to end (record.SuperviseRequest's Quiesce); every other start names
-// none. A merger is told the head the review round approved (withApprovedHead), the one head its
-// READY may name, so it never chooses among the pull request's reviews itself. A phase with no
-// worker, and accepting, whose architect admission started with the tree, start nobody.
+// none. A phase with no worker, and accepting, whose architect admission started with the tree,
+// start nobody.
 func (e *Engine) start(ctx context.Context, tx pgx.Tx, issue record.Issue, role claim.Role, task string, quiesce claim.Role) error {
 	if role == "" || role == claim.RoleArchitect {
 		return nil
 	}
-	task, err := withApprovedHead(ctx, e.store, tx, issue.Key, role, task)
-	if err != nil {
-		return err
-	}
 	return e.enqueue(ctx, tx, issue.Key, record.SuperviseRequest{Op: "start", Tree: issue.Tree, Role: role, Task: task,
 		Generation: issue.Generation, Phase: issue.Phase, Quiesce: quiesce})
-}
-
-// withApprovedHead is a merger's task with the head the issue's review round approved appended
-// under approvedHeadLabel, and any other role's task as it is. That head is the reviewer row's
-// recorded decision (record.ApprovedHead; the review that ended the round, review.go); the task
-// gets no line when the round recorded no approval, and READY refuses that round too
-// (READY_NOT_APPROVED). The reviewer's row keeps that decision until the reviewer starts
-// again (clearHandoff), until a re-admission of the tree clears the generation's handoffs with it
-// (record.ClearTreeGeneration), so a merger resumed into a re-admitted tree is told no head and
-// refuses, and the round is reviewed again rather than merged on the last generation's approval.
-// A hand-over keeps the row, so a carried merger is told the head the carried round approved.
-func withApprovedHead(ctx context.Context, store record.Store, tx pgx.Tx, issue string, role claim.Role, task string) (string, error) {
-	if role != claim.RoleMerger {
-		return task, nil
-	}
-	head, err := record.ApprovedHead(ctx, store, tx, issue)
-	if err != nil {
-		return "", err
-	}
-	if head == "" {
-		return task, nil
-	}
-	return task + " " + approvedHeadLabel + ": " + head + ".", nil
 }
 
 // task is what a started worker is told. It names the phase the worker starts, which the issue
@@ -313,13 +281,9 @@ func ResumePhaseTask(issue record.Issue) string {
 	return continueLine(issue) + " Resume the existing phase work."
 }
 
-// ResumeTask is the task admission gives role when it resumes issue's phase at promotion:
-// ResumePhaseTask, with a merger also told its approved head (withApprovedHead). The mid-phase
-// children of a tree it re-admits had the round's decision cleared with the generation, so their
-// merger is told none and sends the round back for review; a carried root kept its round, so its
-// merger is told the head that round approved.
+// ResumeTask is the task admission gives role when it resumes issue's phase at promotion.
 func ResumeTask(ctx context.Context, store record.Store, tx pgx.Tx, issue record.Issue, role claim.Role) (string, error) {
-	return withApprovedHead(ctx, store, tx, issue.Key, role, ResumePhaseTask(issue))
+	return ResumePhaseTask(issue), nil
 }
 
 // HeldNotice is the notice of issue's hold as its architect answers one, with a retry or an

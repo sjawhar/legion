@@ -153,7 +153,6 @@ type Config struct {
 	// after the close before its last look (`production_check_hours`, 14 days by default).
 	ProductionCheckBound time.Duration
 	ReviewRoundCap       int
-	MaxFixAttempts       int
 	// ControllerWakeInterval is the period of the daemon's `tick` controller wake
 	// (`controller_wake_interval_seconds`, an hour by default); when a tick wakes the controller is
 	// admission's rule (admit.Admission.wakeController and its callers).
@@ -276,7 +275,6 @@ type fileConfig struct {
 	Linger                 *time.Duration
 	ProductionCheckBound   *time.Duration
 	ReviewRoundCap         *int
-	MaxFixAttempts         *int
 	Controller             *string
 	Capabilities           *Capabilities
 	Durations              map[string]int
@@ -410,8 +408,6 @@ func readKeys(root *yaml.Node) (fileConfig, error) {
 			file.ProductionCheckBound, err = readHours(value, key)
 		case "review_round_cap":
 			file.ReviewRoundCap, err = readPositiveInteger(value, key, 0)
-		case "max_fix_attempts":
-			file.MaxFixAttempts, err = readPositiveInteger(value, key, 0)
 		case "controller":
 			file.Controller, err = readString(value, key)
 		case "capabilities":
@@ -870,7 +866,6 @@ func resolve(file fileConfig, env func(string) string, configDir string) (Config
 		Linger:               72 * time.Hour,
 		ProductionCheckBound: 336 * time.Hour,
 		ReviewRoundCap:       3,
-		MaxFixAttempts:       3,
 	}
 	if file.Project == nil || strings.TrimSpace(*file.Project) == "" {
 		return Config{}, errors.New("project is required")

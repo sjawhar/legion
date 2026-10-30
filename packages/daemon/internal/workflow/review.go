@@ -3,6 +3,7 @@ package workflow
 import (
 	"context"
 	"fmt"
+	"slices"
 	"strings"
 	"time"
 
@@ -16,8 +17,10 @@ import (
 	"github.com/sjawhar/legion/daemon/internal/record"
 )
 
-// checks applies a CI settlement to the pull request and then decides what it moves
-// (decideChecks).
+// checks applies a CI settlement to the pull request and tells the roles that work the issue what
+// it says (tellChecks). It moves nothing: a failed CI check is information the worker holding the
+// phase decides on - rerun, wait, or fix - and not the daemon's to read the semantics of
+// (dispatch://INFRA-714/spec R1).
 func (e *Engine) checks(ctx context.Context, tx pgx.Tx, fact intake.PullRequestChecks) (intake.Result, error) {
 	pr, err := e.pullRequest(ctx, tx, fact.Repo, fact.Number)
 	if err != nil || pr == nil {
@@ -28,6 +31,7 @@ func (e *Engine) checks(ctx context.Context, tx pgx.Tx, fact intake.PullRequestC
 	// settlement is for the commit it names, never the head by default. While a head run is open
 	// the settlement is recorded in it whether it stands or not (classify.ApplyCheckSettlement).
 	candidate := classify.SettlementCandidate{Head: fact.HeadSHA, CheckRuns: fact.CheckRuns, Generation: fact.Generation, Snapshot: fact.Snapshot, Failing: fact.Failing, Cancelled: fact.Cancelled}
+	told := settledChecks(*pr)
 	settled, applied := classify.ApplyCheckSettlement(*pr, candidate)
 	if !applied {
 		if pr.Run == nil {
@@ -36,7 +40,10 @@ func (e *Engine) checks(ctx context.Context, tx pgx.Tx, fact intake.PullRequestC
 		return intake.Result{}, e.store.PutPullRequest(ctx, tx, settled)
 	}
 	*pr = settled
-	return intake.Result{}, e.decideChecks(ctx, tx, pr)
+	if err := e.store.PutPullRequest(ctx, tx, *pr); err != nil {
+		return intake.Result{}, err
+	}
+	return intake.Result{}, e.tellChecks(ctx, tx, pr, told)
 }
 
 // carryApproval queues GitHub's compare of the head the reviewer approved with the pull request's
@@ -116,123 +123,96 @@ func (e *Engine) mergeability(ctx context.Context, tx pgx.Tx, fact intake.PullRe
 	return intake.Result{}, e.transition(ctx, tx, *issue, TriggerChecksRed, "", record.PhaseRow{}, pr, reason)
 }
 
-// decideChecks records pr, its checks verdict changed by a CI settlement, and decides, with the
-// issue's phase in hand, what it moves.
-// CI is the daemon's own rule, read beside the review round and never by it (standingRed): in
-// testing, reviewing, retro and merging a red that stands for the head sends the work back to
-// implementing, whatever the tester has found, the round holds or the merger is doing, and takes
-// the phase from a role still at work in it (takenOver). The reviewer's approval of the head ends
-// its round on its own (reviewRound), as the reviewer reads the code commit's checks on GitHub
-// before it approves. In awaiting_merge, the head's own red withdraws the READY
-// (classify.RedWithdrawsReady), and the transition tells the merge queue role so (withdrawReady). A
-// red the tester planned - its own failing tests, pushed for the implementer to make pass - sends
-// nothing back (PlannedRed), and neither does a red in implementing, where the implementer is
-// already at work. The implementer's task and the architect's checks-red notice name the red
-// required checks and workflows, and the implementer's next push is a counted fix attempt, as any
-// new head on a red verdict is (classify.AdvancePullRequestHead).
-//
-// At an exhausted fix-attempt count, a red within the attempt the count last counted - the counted
-// head, or a head pushed on top of it until a push lands on a green verdict or on a settled head
-// whose base branch requires nothing - sends nothing back before awaiting_merge
-// (classify.FixAttemptCapHolds): the architect decides what follows. A red at a head pushed onto
-// green, or onto such a head, moves the issue as below the cap. In awaiting_merge a red always
-// withdraws the READY, whatever the count: no implementer loops there for the cap to bound, and a
-// READY must not stand on a head GitHub will not merge. The count is posted and told to the
-// architect once (classify.BlockFixAttempt), by the first red at that count that sent nothing back:
-// a red that sent the work back is told by its checks-red, and the next push onto it raises the
-// count.
-func (e *Engine) decideChecks(ctx context.Context, tx pgx.Tx, pr *record.PullRequest) error {
-	e.noteLapse(ctx, pr)
-	if err := e.store.PutPullRequest(ctx, tx, *pr); err != nil {
-		return err
+// settledChecks is what the CI settlement standing for the pull request's head says: the head it
+// settled on, and each check it reports with the conclusion it reports for it, in name order; ""
+// while no settlement stands. A check the settlement names as failed failed, one it names as
+// cancelled was cancelled, and one it reports as a run and names neither way succeeded - the
+// listener settles a commit once every check it has seen is terminal. Nothing here judges those
+// conclusions: a job GitHub never started reads like any other, and what they mean for the work is
+// the reading worker's (dispatch://INFRA-714/spec R1). The line is the whole of what the daemon
+// knows of that head's CI, so two settlements that leave it the same say nothing new (tellChecks).
+func settledChecks(pr record.PullRequest) string {
+	if pr.CheckedHead == "" {
+		return ""
+	}
+	conclusions := make(map[string]string, len(pr.CheckRuns)+len(pr.Failing)+len(pr.Cancelled))
+	for _, run := range pr.CheckRuns {
+		conclusions[run.Name] = "succeeded"
+	}
+	for _, name := range pr.Cancelled {
+		conclusions[name] = "cancelled"
+	}
+	for _, name := range pr.Failing {
+		conclusions[name] = "failed"
+	}
+	if len(conclusions) == 0 {
+		return "CI settled at " + pr.CheckedHead + " reporting no check"
+	}
+	names := make([]string, 0, len(conclusions))
+	for name := range conclusions {
+		names = append(names, name)
+	}
+	slices.Sort(names)
+	for i, name := range names {
+		names[i] = name + " " + conclusions[name]
+	}
+	return "CI settled at " + pr.CheckedHead + ": " + strings.Join(names, ", ")
+}
+
+// tellChecks tells the roles that work the issue what the settlement now standing for the pull
+// request's head says (settledChecks), and moves nothing: the daemon passes the CI result on, and
+// the worker that holds the phase decides whether to re-run, wait or fix
+// (dispatch://INFRA-714/spec R1). One message goes to three roles - the worker holding the issue's
+// phase, the implementer, whose code the checks ran on, and the tree's architect - each on its own
+// role topic (record.RoleMessage), the way the daemon reaches a role holder with a message. A role
+// named twice, the implementer holding the phase, is told once, and a phase no worker holds names
+// none. told is what the settlement standing for the head said before this one, so a second
+// settlement of the same head that leaves the same conclusions tells nobody again, and so does a
+// settlement that stands for no head. Linger holds a member of a closed tree where it stood
+// (record.TreeLingers): every role of the tree is suspended there, so the settlement is recorded
+// and nobody is told.
+func (e *Engine) tellChecks(ctx context.Context, tx pgx.Tx, pr *record.PullRequest, told string) error {
+	settled := settledChecks(*pr)
+	if settled == "" || settled == told {
+		return nil
 	}
 	issue, err := e.store.Issue(ctx, tx, pr.Issue)
+	if err != nil || issue == nil {
+		return err
+	}
+	if lingers, err := record.TreeLingers(ctx, e.store, tx, issue.Tree); err != nil || lingers {
+		return err
+	}
+	project, err := claim.ProjectToken(issue.Project)
 	if err != nil {
 		return err
 	}
-	moved := false
-	switch {
-	case issue == nil:
-	case issue.Phase == phase.AwaitingMerge:
-		if !classify.RedWithdrawsReady(*pr) {
-			break
-		}
-		// A required workflow's result is only as old as the last read of its runs, and no read
-		// refreshes it: the daemon reads no rulesets and no workflow runs (dispatch://INFRA-714's
-		// R1). A settlement reads no run either, so a red a required check makes is the one that
-		// withdraws a READY, and a red that only a workflow's last-read run makes clears the head
-		// those runs were read at instead, which leaves them standing for no head
-		// (classify.WorkflowStanding) and the READY where it is.
-		if classify.RedOnlyByWorkflows(*pr) {
-			*pr = classify.ClearWorkflowsHead(*pr)
-			return e.store.PutPullRequest(ctx, tx, *pr)
-		}
-		if moved, err = e.sendBack(ctx, tx, *issue, pr); err != nil {
-			return err
-		}
-	default:
-		if moved, err = e.standingRed(ctx, tx, *issue, pr); err != nil {
-			return err
-		}
-	}
-	if moved {
-		return nil
-	}
-	return e.reportExhaustedCount(ctx, tx, issue, pr)
-}
-
-// sendBack moves issue back to implementing on the red standing for pr's head (TriggerChecksRed),
-// and says whether it moved: a phase with no such row, or a lingering tree, stays where it is.
-func (e *Engine) sendBack(ctx context.Context, tx pgx.Tx, issue record.Issue, pr *record.PullRequest) (bool, error) {
-	if err := e.transition(ctx, tx, issue, TriggerChecksRed, "", record.PhaseRow{}, pr, redAt(*pr)); err != nil {
-		return false, err
-	}
-	after, err := e.store.Issue(ctx, tx, issue.Key)
-	if err != nil || after == nil {
-		return false, err
-	}
-	return after.Phase != issue.Phase, nil
-}
-
-// reportExhaustedCount posts an exhausted fix-attempt count on the issue and tells the architect,
-// once per count (classify.BlockFixAttempt). Linger holds a member of a closed tree where it stood
-// (record.TreeLingers): the count is recorded on the pull request, and nothing is posted on the
-// issue or told to its architect. While a red is held (holdsRed) the count is not yet the one every
-// push arriving first would give, so it is reported once the hold ends (push, requiredChecks).
-func (e *Engine) reportExhaustedCount(ctx context.Context, tx pgx.Tx, issue *record.Issue, pr *record.PullRequest) error {
-	if e.holdsRed(*pr) {
-		return nil
-	}
-	var blocked bool
-	if *pr, blocked = classify.BlockFixAttempt(*pr, e.cfg.MaxFixAttempts); !blocked {
-		return nil
-	}
-	if err := e.store.PutPullRequest(ctx, tx, *pr); err != nil {
+	// The tree's architect owns the tree, so its claim is the tree root's; a phase the architect
+	// itself holds (accepting) is that same claim, and is told once with it.
+	architect, err := claim.NewToken(project, issue.Tree, claim.RoleArchitect)
+	if err != nil {
 		return err
 	}
-	if issue != nil {
-		if lingers, err := record.TreeLingers(ctx, e.store, tx, issue.Tree); err != nil || lingers {
+	tokens := []claim.Token{architect}
+	for _, role := range []claim.Role{RoleFor(issue.Phase), claim.RoleImplementer} {
+		if role == "" || role == claim.RoleArchitect {
+			continue
+		}
+		token, err := claim.NewToken(project, issue.Key, role)
+		if err != nil {
+			return err
+		}
+		if !slices.Contains(tokens, token) {
+			tokens = append(tokens, token)
+		}
+	}
+	body := fmt.Sprintf("Pull request #%d: %s. Nothing moved on it: decide whether to re-run the checks, wait for them, or fix the code.", pr.Number, settled)
+	for _, token := range tokens {
+		if err := e.enqueue(ctx, tx, issue.Key, record.RoleMessage{Role: string(token), Body: body}); err != nil {
 			return err
 		}
 	}
-	message := fmt.Sprintf("Pull request #%d reached max_fix_attempts=%d.", pr.Number, e.cfg.MaxFixAttempts)
-	if err := e.enqueue(ctx, tx, pr.Issue, record.MessagePost{Body: message}); err != nil {
-		return err
-	}
-	return e.notice(ctx, tx, pr.Issue, record.Notice{Kind: "pr-blocked", Role: claim.RoleArchitect, Reason: message})
-}
-
-// redAt is what the red verdict standing for the pull request's head says: the head, and each check
-// and workflow the base branch requires that failed there (classify.HeadChecks).
-func redAt(pr record.PullRequest) string {
-	checks, _ := classify.HeadChecks(pr)
-	var red []string
-	for _, check := range checks {
-		if check.Red() {
-			red = append(red, check.Name)
-		}
-	}
-	return "CI is red at " + pr.HeadSHA + ": " + strings.Join(red, ", ")
+	return nil
 }
 
 // answerSkew bounds how far GitHub's clock, which stamps a review's submission, and the daemon's,
@@ -457,9 +437,8 @@ func (r round) stuckAs(other round) bool {
 // request as a fact left them. A round ends once both of its halves are in: the reviewer's
 // completion, which is its handoff landing - part of its phase's contract, as every role's is - and
 // the decision it posted on GitHub, recorded on the round. Either may arrive second. The round
-// reads no CI verdict: CI is the daemon's separate rule, which sends a red head back to implementing
-// from reviewing as from any phase before READY, on the fact that makes the red stand (decideChecks,
-// standingRed), and the reviewer reads the code commit's checks on GitHub before it approves. A
+// reads no CI verdict: a CI result moves nothing and decides no round
+// (dispatch://INFRA-714/spec R1), and the reviewer reads the head's checks on GitHub itself. A
 // round whose reviewer never completes is not ended by the decision alone: the reviewer's worker
 // gets a reminder at the end of every turn that ends with its phase open (the phase reminder in
 // @legion/pi-shared, driven by each harness's own hooks), and past that the issue stays in
@@ -501,160 +480,13 @@ func (e *Engine) reviewRound(issue record.Issue, row record.PhaseRow, pr *record
 	return round{}
 }
 
-// standingRed is the CI rule, applied to pr's head, and says whether it moved the issue: a red that
-// stands for the head (classify.RedSendsBack) sends the work back to implementing, whatever the
-// tester has found, the round holds or the merger is doing, unless the fix-attempt cap holds the
-// red (classify.FixAttemptCapHolds): then nothing moves on it, and the architect decides what
-// follows (decideChecks's count report), a review round's own decision governing meanwhile. The
-// rule runs before awaiting_merge: there only the head's own red withdraws the READY
-// (classify.RedWithdrawsReady, decideChecks's AwaitingMerge case), never one carried to the READY
-// head from the code head a .legion/-only push replaced, since that red stood before the READY and
-// says nothing new about the submitted head. The invariant is that the rule is applied by whichever
-// fact makes a red stand for the head, in whatever phase the issue is when it does, and never by a
-// review, which changes nothing about the verdict and reads none. A red comes to stand by a
-// settlement or a read of the required set, the facts that change the verdict (decideChecks); by a
-// push classified late, or a head arriving over a push already known, either of which can complete
-// the carry of a code head's settlement to the handoff head above it (classify.SettlementFor; push,
-// pullRequestSynchronized); by a hold's retry, which restores a phase a settlement reached while the
-// issue was held, where nothing moves (retryOrEscalate); and by the implementer's completion, which
-// hands on a head a red may have come to stand for while it was implementing, where nothing moves
-// (implementationReady). A fact that finds no red standing applies nothing, so each applies the rule
-// before whatever else it does. A red is held while its head waits for a push of its move
-// (holdsRed). In awaiting_merge a red withdraws the READY whatever it is (decideChecks), so nothing
-// is held there.
-func (e *Engine) standingRed(ctx context.Context, tx pgx.Tx, issue record.Issue, pr *record.PullRequest) (bool, error) {
-	if issue.Phase == phase.AwaitingMerge || pr == nil || !classify.RedSendsBack(*pr) {
-		return false, nil
-	}
-	if e.holdsRed(*pr) {
-		e.logOnCommit(ctx, "workflow: a red is held while its head waits for the push that reached it; the push, or the pass once the hold lapses, decides it",
-			"issue", pr.Issue, "pullRequest", pr.Number, "head", pr.HeadSHA, "heldSince", heldSince(*pr), "lapses", heldSince(*pr).Add(redHold))
-		return false, nil
-	}
-	if classify.FixAttemptCapHolds(*pr, e.cfg.MaxFixAttempts) {
-		return false, nil
-	}
-	return e.sendBack(ctx, tx, issue, pr)
-}
-
-// redHold bounds how long a red is held while its head waits for a push of its move: GitHub
-// delivers a push webhook and its synchronize seconds apart. A push webhook lost for good, which
-// nothing replays, then leaves the red to be judged as it stands, as before the head run, by the
-// next fact that decides the head's checks.
-const redHold = 10 * time.Minute
-
-// heldSince is when pr's head arrived while a head run was open - the arrival time on the run's
-// last head step, which is the head's own (stampRun) - or zero when no run is open or the step
-// carries no time. Each head is held from its own arrival: a head that joins an open run gets its
-// full hold whenever the run opened.
-func heldSince(pr record.PullRequest) time.Time {
-	if pr.Run == nil {
-		return time.Time{}
-	}
-	for i := len(pr.Run.Steps) - 1; i >= 0; i-- {
-		if step := pr.Run.Steps[i]; step.Head != "" {
-			return step.At
-		}
-	}
-	return time.Time{}
-}
-
-// holdsRed says whether pr's red is held: a head run is open (record.PullRequest.Run) - a head
-// arrived before every push of its move - and the head arrived less than redHold ago. While it
-// holds, whether the red is planned, and the count it stands at, are not yet what every push
-// arriving first would make them, and a send-back cannot be taken back; the push that closes the
-// run, or whose replay changes the judgement, decides the checks (push), and so does the next
-// settlement of the head once the hold has lapsed (holdLapsed).
-func (e *Engine) holdsRed(pr record.PullRequest) bool {
-	since := heldSince(pr)
-	return !since.IsZero() && e.now().Before(since.Add(redHold))
-}
-
-// holdLapsed says whether the hold on pr's red has lapsed by the engine's clock and nothing has
-// decided the red since: the fact that decides the checks then decides the red as it stands
-// (noteLapse), and says so once.
-func (e *Engine) holdLapsed(pr record.PullRequest) bool {
-	since := heldSince(pr)
-	return !since.IsZero() && !e.now().Before(since.Add(redHold)) && pr.Run.Decided != pr.HeadSHA
-}
-
-// noteLapse marks pr's lapsed hold decided (record.HeadRun.Decided) and says so, naming the
-// verdict decided, when the checks are about to be decided with the hold lapsed, so one lapse is
-// said once.
-func (e *Engine) noteLapse(ctx context.Context, pr *record.PullRequest) {
-	if !e.holdLapsed(*pr) {
-		return
-	}
-	run := *pr.Run
-	run.Decided = pr.HeadSHA
-	pr.Run = &run
-	verdict := classify.HeadVerdict(*pr)
-	decided := "the checks are decided as they stand"
-	if verdict != "" {
-		decided = "the " + verdict + " is decided as it stands"
-	}
-	e.logOnCommit(ctx, "workflow: the hold on the checks of a head that waited for its push lapsed; "+decided,
-		"issue", pr.Issue, "pullRequest", pr.Number, "head", pr.HeadSHA, "verdict", verdict, "heldSince", heldSince(*pr), "held", e.now().Sub(heldSince(*pr)))
-}
-
-// stampRun records when pr's head arrived on the run's last head step, the step that arrival
-// added (record.RunStep.At), when a head run is open. The arrival starts the head's hold afresh,
-// so it clears the mark of a lapse decided before it (record.HeadRun.Decided): a branch that
-// returns to a head whose lapse was decided earlier in the run is held, and its lapse decided,
-// again.
-func (e *Engine) stampRun(pr *record.PullRequest) {
-	if pr.Run == nil {
-		return
-	}
-	for i := len(pr.Run.Steps) - 1; i >= 0; i-- {
-		if pr.Run.Steps[i].Head == "" {
-			continue
-		}
-		if pr.Run.Steps[i].At.IsZero() {
-			run := *pr.Run
-			run.Steps = append([]record.RunStep{}, run.Steps...)
-			run.Steps[i].At, run.Decided = e.now(), ""
-			pr.Run = &run
-		}
-		return
-	}
-}
-
 // implementationReady moves issue from implementing to testing on the implementer's completion of
-// the round that row records, once the pull request pr is known (TriggerImplementationReady), and
-// then applies the CI rule to the head it hands on (standingRed). A red in implementing sends
-// nothing back, since the implementer is at work there, so a required check that settled red after
-// the implementer's push and before its completion stands for the head with nothing acted on it:
-// the implementer pushes and completes without waiting for CI, and the settlement does not come
-// again. The completion is the fact that lets that red stand in testing, so the work goes back to
-// implementing at once, as a settlement arriving in testing would send it, rather than through a
-// tester round on code CI has already found broken.
-//
-// The rule is applied only when the record's head is the commit the completion reports
-// (row.HandoffCommit). The completion waits on no
-// webhook, so the record can still hold the head before the round's push, whose red the round may
-// have fixed; that head's arrival applies the rule to it (pullRequestSynchronized), and the round's
-// push does not judge the old head it has not yet replaced (push). A red only a required workflow
-// makes is left behind: its result is only as old as the last read of the runs, which the daemon
-// no longer makes (dispatch://INFRA-714's R1), so the head those runs were read at is cleared and
-// their result stands for no head (classify.WorkflowStanding).
+// the round that row records, once the pull request pr is known (TriggerImplementationReady). It
+// reads no CI result: a settlement that arrived while the implementer worked moved nothing and
+// moves nothing now, since the roles were told what it said when it arrived (checks,
+// dispatch://INFRA-714/spec R1).
 func (e *Engine) implementationReady(ctx context.Context, tx pgx.Tx, issue record.Issue, row record.PhaseRow, pr *record.PullRequest) error {
-	if err := e.transition(ctx, tx, issue, TriggerImplementationReady, "", row, pr, ""); err != nil {
-		return err
-	}
-	if pr == nil || pr.HeadSHA != row.HandoffCommit {
-		return nil
-	}
-	if classify.RedOnlyByWorkflows(*pr) {
-		*pr = classify.ClearWorkflowsHead(*pr)
-		return e.store.PutPullRequest(ctx, tx, *pr)
-	}
-	handed, err := e.store.Issue(ctx, tx, issue.Key)
-	if err != nil || handed == nil {
-		return err
-	}
-	_, err = e.standingRed(ctx, tx, *handed, pr)
-	return err
+	return e.transition(ctx, tx, issue, TriggerImplementationReady, "", row, pr, "")
 }
 
 // settleRound acts on what issue's review round comes to (reviewRound, with row its reviewer's and

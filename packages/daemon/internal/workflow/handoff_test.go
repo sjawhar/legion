@@ -22,7 +22,7 @@ func TestReworkRoundAdvancesOnlyOnThatRoundsHandoff(t *testing.T) {
 	pool := migratedPool(t)
 	ctx := context.Background()
 	seedIssue(t, pool, record.Issue{Key: "LEGION-208", Repo: "sjawhar/legion", DefaultBranch: "main", GitHubRepo: "sjawhar/legion", Tree: "LEGION-208", Project: "LEGION", Title: "root", Phase: phase.Reviewing, Generation: 1, Status: "needs_review", Rank: "U"})
-	seedPR(t, pool, record.PullRequest{State: record.PullRequestOpen, Issue: "LEGION-208", Repo: "sjawhar/legion", Number: 42, Branch: "legion/LEGION-208", HeadSHA: "head-1", CheckedHead: "head-1", Failing: []string{}, Required: []string{}})
+	seedPR(t, pool, record.PullRequest{State: record.PullRequestOpen, Issue: "LEGION-208", Repo: "sjawhar/legion", Number: 42, Branch: "legion/LEGION-208", HeadSHA: "head-1", CheckedHead: "head-1", Failing: []string{}})
 	seedPhase(t, pool, record.PhaseRow{Issue: "LEGION-208", Role: claim.RoleImplementer, Claim: "implement-claim", HandoffCommit: "round-0"})
 	seedPhase(t, pool, record.PhaseRow{Issue: "LEGION-208", Role: claim.RoleReviewer, Claim: "review-claim", HandoffCommit: "review-1"})
 	engine := testEngine(config.DesignGateRootIssues, nil)
@@ -112,14 +112,14 @@ func assertPhase(t *testing.T, pool *pgxpool.Pool, want phase.Phase) {
 	}
 }
 
-// The reviewer usually approves the head it was just shown, before CI settles on it: every new
-// head clears the verdict. The approval ends the round all the same, and the green that settles
-// afterwards finds the issue in accepting and moves nothing.
+// The reviewer usually approves the head it was just shown, before CI settles on it. The approval
+// ends the round all the same, and the settlement that follows finds the issue in accepting and
+// moves nothing (dispatch://INFRA-714/spec R1).
 func TestAnApprovalBeforeTheChecksSettleAdvancesWithoutThem(t *testing.T) {
 	pool := migratedPool(t)
 	ctx := context.Background()
 	seedIssue(t, pool, record.Issue{Key: "LEGION-208", Repo: "sjawhar/legion", DefaultBranch: "main", GitHubRepo: "sjawhar/legion", Tree: "LEGION-208", Project: "LEGION", Title: "root", Phase: phase.Reviewing, Generation: 1, Status: "needs_review", Rank: "U"})
-	seedPR(t, pool, record.PullRequest{State: record.PullRequestOpen, Issue: "LEGION-208", Repo: "sjawhar/legion", Number: 42, Branch: "legion/LEGION-208", HeadSHA: "head", Failing: []string{}, Required: []string{"ci"}})
+	seedPR(t, pool, record.PullRequest{State: record.PullRequestOpen, Issue: "LEGION-208", Repo: "sjawhar/legion", Number: 42, Branch: "legion/LEGION-208", HeadSHA: "head", Failing: []string{}})
 	seedPhase(t, pool, record.PhaseRow{Issue: "LEGION-208", Role: claim.RoleReviewer, Claim: "review-claim", HandoffCommit: "review-1"})
 	engine := testEngine(config.DesignGateRootIssues, nil)
 	if _, err := intake.ApplyFact(ctx, pool, "github", "approved", intake.PullRequestReview{Repo: "sjawhar/legion", Number: 42, State: "approved", CommitID: "head", HeadSHA: "head", Author: testReviewApp}, engine, admissionStub{}); err != nil {
@@ -132,33 +132,6 @@ func TestAnApprovalBeforeTheChecksSettleAdvancesWithoutThem(t *testing.T) {
 		t.Fatalf("ApplyFact checks: %v", err)
 	}
 	assertPhase(t, pool, phase.Accepting)
-}
-
-// The fix that exhausted the count can pass: a green settlement on it is no blocked pull request,
-// and only a red one publishes pr-blocked, once for the count.
-func TestAnExhaustedCountPublishesPRBlockedOnlyOnARedSettlement(t *testing.T) {
-	pool := migratedPool(t)
-	ctx := context.Background()
-	seedIssue(t, pool, record.Issue{Key: "LEGION-208", Repo: "sjawhar/legion", DefaultBranch: "main", GitHubRepo: "sjawhar/legion", Tree: "LEGION-208", Project: "LEGION", Title: "root", Phase: phase.Testing, Generation: 1, Status: "testing", Rank: "U"})
-	seedPR(t, pool, record.PullRequest{State: record.PullRequestOpen, Issue: "LEGION-208", Repo: "sjawhar/legion", Number: 42, Branch: "legion/LEGION-208", HeadSHA: "head", Failing: []string{}, FixAttempts: 3, HeadCounted: "head", Required: []string{"ci"}})
-	engine := testEngine(config.DesignGateRootIssues, nil)
-	settle := func(eventID string, generation int64, failing []string) {
-		t.Helper()
-		if _, err := intake.ApplyFact(ctx, pool, "github", eventID, intake.PullRequestChecks{
-			Repo: "sjawhar/legion", Number: 42, HeadSHA: "head", CheckRuns: []record.AttemptRun{{Name: "ci", ID: generation}}, Generation: generation, Snapshot: eventID, Failing: failing,
-		}, engine, admissionStub{}); err != nil {
-			t.Fatalf("ApplyFact %s: %v", eventID, err)
-		}
-	}
-
-	settle("checks-green", 1, []string{})
-	if kinds := noticeKinds(t, pool, "LEGION-208"); len(kinds) != 0 {
-		t.Fatalf("notices after a green settlement at an exhausted count = %v, want none", kinds)
-	}
-	settle("checks-red", 2, []string{"ci"})
-	if kinds := noticeKinds(t, pool, "LEGION-208"); len(kinds) != 1 || kinds[0] != "pr-blocked" {
-		t.Fatalf("notices after a red settlement at the exhausted count = %v, want one pr-blocked", kinds)
-	}
 }
 
 // A file-backed phase's completion carries the commit that last changed the role's handoff. When a

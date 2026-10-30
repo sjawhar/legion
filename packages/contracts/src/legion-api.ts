@@ -161,7 +161,10 @@ const legionPhaseView = z.strictObject({
  * when the reviewer completes. It shows from the review that decided it until the next round
  * opens or a new generation clears it, so a request for changes stays through implementing and
  * testing, and an approval through retro and every phase after it; absent until a review in a
- * round decides. `state` is always present: a recorded pull request is open, merged or closed. */
+ * round decides. `state` is always present: a recorded pull request is open, merged or closed.
+ * No CI verdict and no fix-attempt count ride here: a CI result moves no issue, so the daemon
+ * keeps neither (dispatch://INFRA-714/spec R1), and `mergeState` is what says whether a check the
+ * repository requires holds the head. */
 const legionPullRequestView = z.strictObject({
   /** The repository (`owner/name`) the pull request is in, its issue's (contract 31). */
   repo: nonEmptyString,
@@ -176,9 +179,7 @@ const legionPullRequestView = z.strictObject({
   mergeState: z
     .enum(["clean", "unstable", "has_hooks", "blocked", "dirty", "behind", "draft", "unknown"])
     .optional(),
-  checksVerdict: nonEmptyString.optional(),
   reviewDecision: nonEmptyString.optional(),
-  fixAttempts: z.number().int().nonnegative(),
 });
 
 /** `api.GateView` — the design gate; `approvedVersion` is null until a human approves one, and
@@ -412,7 +413,7 @@ const legionCapabilityState = z.strictObject({
  * names are typed, the rest ride as the daemon writes them, so a new legion.yaml key is no
  * contract change. */
 const legionSettings = z.looseObject({
-  max_fix_attempts: z.number().int().positive(),
+  review_round_cap: z.number().int().positive(),
   worker_boot_timeout_seconds: z.number().int().positive(),
 });
 

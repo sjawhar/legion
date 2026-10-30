@@ -105,7 +105,7 @@ func seedCapture(t *testing.T, pool *pgxpool.Pool, from phase.Phase, status stri
 		if err := records.PutPullRequest(ctx, tx, record.PullRequest{State: record.PullRequestOpen, Issue: "CAPTURE-1", Repo: "acme/widgets",
 			Number: 86, Branch: "legion/CAPTURE-1", HeadSHA: "code", CheckedHead: "code", Failing: []string{},
 			CheckRuns:  []record.AttemptRun{{Name: "pr-checks-result", ID: 1}, {Name: "review", ID: 2}},
-			Generation: 1, Snapshot: "settled", Required: []string{"pr-checks-result"}}); err != nil {
+			Generation: 1, Snapshot: "settled"}); err != nil {
 			return err
 		}
 		for _, row := range append([]record.PhaseRow{{Issue: "CAPTURE-1", Role: claim.RoleImplementer, Claim: "implement-claim"}}, phases...) {

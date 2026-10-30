@@ -186,9 +186,9 @@ type verdictChange struct {
 }
 
 // failingVerdict is what the failures the fence keeps say of the head: none before any settlement
-// is applied, red while a check is named failing, green otherwise. It is the settlement's half of
-// the verdict, which the base branch's required set then judges (HeadVerdict); LEGION-152 was a
-// failure the fence lost and found again.
+// is applied, red while a check is named failing, green otherwise. It is the settlement's own
+// reading, which no rule of the daemon's judges since (dispatch://INFRA-714/spec R1); LEGION-152
+// was a failure the fence lost and found again.
 func failingVerdict(pr record.PullRequest) string {
 	switch {
 	case pr.CheckRuns == nil:

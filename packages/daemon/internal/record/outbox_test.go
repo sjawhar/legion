@@ -44,6 +44,7 @@ func TestOutboxPayloadsRoundTripThroughPostgres(t *testing.T) {
 		CheckLook{Look: 1},
 		CheckBound{},
 		ApprovalCarry{Repo: "sjawhar/legion", Number: 42, Approved: "c0de", Head: "handoff"},
+		RoleMessage{Role: "legion.sjawhar-legion.LEGION-208.implementer", Body: "Pull request #42: CI settled at c0de: unit failed."},
 	}
 	for _, payload := range payloads {
 		t.Run(string(payload.OutboxKind()), func(t *testing.T) {
@@ -87,7 +88,7 @@ func TestOutboxPayloadsRoundTripThroughPostgres(t *testing.T) {
 func TestEveryOutboxKindIsInExactlyOneLane(t *testing.T) {
 	every := []OutboxKind{OutboxKindDispatchStatus, OutboxKindDispatchMessage, OutboxKindNotice, OutboxKindControllerNotice, OutboxKindSupervise,
 		OutboxKindGateSeed, OutboxKindLingerClose, OutboxKindIssueSuspend, OutboxKindWorkspaceRemove, OutboxKindMergeQueuePublish, OutboxKindIssueBranch, OutboxKindAutoMergeDisable, OutboxKindReadyMerge,
-		OutboxKindCheckCompare, OutboxKindCheckLook, OutboxKindCheckBound, OutboxKindApprovalCarry}
+		OutboxKindCheckCompare, OutboxKindCheckLook, OutboxKindCheckBound, OutboxKindApprovalCarry, OutboxKindRoleMessage}
 	lanes := map[OutboxKind][]OutboxLane{}
 	for _, lane := range []OutboxLane{LaneLifecycle, LaneBoard} {
 		for _, kind := range LaneKinds(lane) {
@@ -134,6 +135,8 @@ func TestNewOutboxRowRefusesInvalidPayloads(t *testing.T) {
 		{name: "start without role", payload: SuperviseRequest{Op: "start", Tree: "LEGION-208"}, reason: "start requires role"},
 		{name: "a merge queue publish without a role", payload: MergeQueuePublish{Packet: "READY #42"}, reason: "merge queue publish requires role"},
 		{name: "a merge queue publish without a packet", payload: MergeQueuePublish{Role: "merge-queue"}, reason: "merge queue publish requires packet"},
+		{name: "a role message without a role", payload: RoleMessage{Body: "Pull request #42 settled."}, reason: "role message requires role"},
+		{name: "a role message without a body", payload: RoleMessage{Role: "legion.sjawhar-legion.LEGION-208.architect"}, reason: "role message requires body"},
 		{name: "a READY merge without a pull request", payload: ReadyMerge{Head: "c0de"}, reason: "READY merge requires its pull request number and head"},
 		{name: "a READY merge without a head", payload: ReadyMerge{Number: 42}, reason: "READY merge requires its pull request number and head"},
 		{name: "a check look on a suspend", payload: SuperviseRequest{Op: "suspend", Tree: "LEGION-208", Role: claim.RoleImplementer, Generation: 3, CheckLook: 1}, reason: "a supervise check look names a start of the implementer with no phase"},
@@ -187,6 +190,7 @@ func TestDecodeOutboxPayloadRefusesInvalidRows(t *testing.T) {
 		{name: "a check bound with a field", row: OutboxRow{ID: 41, Kind: OutboxKindCheckBound, Payload: json.RawMessage(`{"look":1}`)}, reason: "unknown field"},
 		{name: "an approval carry without its pull request", row: OutboxRow{ID: 46, Kind: OutboxKindApprovalCarry, Payload: json.RawMessage(`{"repo":"sjawhar/legion","approved":"c0de","head":"handoff"}`)}, reason: "requires its repository and pull request number"},
 		{name: "an approval carry of one head", row: OutboxRow{ID: 47, Kind: OutboxKindApprovalCarry, Payload: json.RawMessage(`{"repo":"sjawhar/legion","number":42,"approved":"c0de","head":"c0de"}`)}, reason: "an approval of the head needs no carry"},
+		{name: "a role message with no body", row: OutboxRow{ID: 48, Kind: OutboxKindRoleMessage, Payload: json.RawMessage(`{"role":"legion.sjawhar-legion.LEGION-208.architect"}`)}, reason: "role message requires body"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			_, err := DecodeOutboxPayload(tc.row)

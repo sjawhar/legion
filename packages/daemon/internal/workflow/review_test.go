@@ -140,16 +140,15 @@ func TestAnApprovalEndsTheRoundWhateverCISays(t *testing.T) {
 	}
 }
 
-// seedReviewUndecided is seedReviewOf with the head's own settlement in but no verdict from it: the
-// one check the base branch requires, ci, is neither failing nor among the runs the settlement
-// reports (classify.Missing), so classify.HeadVerdict is neither red nor green.
+// seedReviewUndecided is seedReviewOf with a settlement in that reports one check, lint, and
+// names none failing: the round reads none of it either way (dispatch://INFRA-714/spec R1).
 func seedReviewUndecided(t *testing.T, pool *pgxpool.Pool, head string) {
 	t.Helper()
 	seedIssue(t, pool, record.Issue{Key: "LEGION-208", Repo: "sjawhar/legion", DefaultBranch: "main", GitHubRepo: "sjawhar/legion", Tree: "LEGION-208", Project: "LEGION", Title: "root",
 		Phase: phase.Reviewing, Generation: 1, Status: "needs_review", Rank: "U"})
 	seedPR(t, pool, record.PullRequest{State: record.PullRequestOpen, Issue: "LEGION-208", Repo: "sjawhar/legion",
 		Number: 42, Branch: "legion/LEGION-208", HeadSHA: head, CheckedHead: head, Failing: []string{},
-		CheckRuns: []record.AttemptRun{{Name: "lint", ID: 1}}, Required: []string{"ci"}})
+		CheckRuns: []record.AttemptRun{{Name: "lint", ID: 1}}})
 	seedPhase(t, pool, record.PhaseRow{Issue: "LEGION-208", Role: claim.RoleReviewer, Claim: "review-claim"})
 	seedPhase(t, pool, record.PhaseRow{Issue: "LEGION-208", Role: claim.RoleImplementer, Claim: "implement-claim"})
 }
@@ -161,28 +160,28 @@ func seedReview(t *testing.T, pool *pgxpool.Pool, verdict string) {
 
 // seedReviewOf seeds LEGION-208 in reviewing, its pull request's head at head with the settlement
 // verdict names on it ("green", "red", or "" for none yet), and its reviewer's round not yet
-// completed. The base branch requires the one check, ci, every settlement these tests apply names.
+// completed. The settlement reports the one check ci.
 func seedReviewOf(t *testing.T, pool *pgxpool.Pool, head, verdict string) {
 	t.Helper()
-	seedReviewRequiring(t, pool, head, verdict, "ci")
+	seedReviewReporting(t, pool, head, verdict, "ci")
 }
 
-// seedReviewRequiring is seedReviewOf on a base branch that requires the checks named: the head's
-// own settlement, when verdict names one, ran each of them, and in a red one each failed.
-func seedReviewRequiring(t *testing.T, pool *pgxpool.Pool, head, verdict string, required ...string) {
+// seedReviewReporting is seedReviewOf whose settlement reports the checks named: it ran each of
+// them, and in a red one each failed.
+func seedReviewReporting(t *testing.T, pool *pgxpool.Pool, head, verdict string, checks ...string) {
 	t.Helper()
 	seedIssue(t, pool, record.Issue{Key: "LEGION-208", Repo: "sjawhar/legion", DefaultBranch: "main", GitHubRepo: "sjawhar/legion", Tree: "LEGION-208", Project: "LEGION", Title: "root",
 		Phase: phase.Reviewing, Generation: 1, Status: "needs_review", Rank: "U"})
 	pr := record.PullRequest{State: record.PullRequestOpen, Issue: "LEGION-208", Repo: "sjawhar/legion",
-		Number: 42, Branch: "legion/LEGION-208", HeadSHA: head, Required: required}
+		Number: 42, Branch: "legion/LEGION-208", HeadSHA: head}
 	if verdict != "" {
 		pr.CheckedHead = head
-		for i, name := range required {
+		for i, name := range checks {
 			pr.CheckRuns = append(pr.CheckRuns, record.AttemptRun{Name: name, ID: int64(i + 1)})
 		}
 	}
 	if verdict == "red" {
-		pr.Failing = append([]string{}, required...)
+		pr.Failing = append([]string{}, checks...)
 	}
 	seedPR(t, pool, pr)
 	seedPhase(t, pool, record.PhaseRow{Issue: "LEGION-208", Role: claim.RoleReviewer, Claim: "review-claim"})
@@ -294,10 +293,12 @@ func TestAnApprovalStandsForEveryHeadThatChangesNothingButTheHandoff(t *testing.
 		{name: "the checks of a head a code push replaced", steps: []string{"approve head", "sync", "push code", "green head", "complete"}, want: phase.Reviewing, unsettled: true},
 		{name: "a late settlement of a head a code push replaced leaves the head's own", steps: []string{"sync", "push code", "green", "red head", "approve", "complete"}, want: phase.Accepting, unsettled: true},
 		{name: "the checks of a head a force push replaced", steps: []string{"approve head", "sync head-l", "push handoff forced head-l", "green head", "complete"}, want: phase.Reviewing, unsettled: true},
-		// The handoff head's own settlement outranks the code head's late one (classify.SettlementFor),
-		// and a red that stands for the head sends the work back before the reviewer completes.
-		{name: "the handoff head's own red outranks the code head's late green, and sends the work back", steps: []string{"approve head", "sync", "push handoff", "red", "green head"}, want: phase.Implementing, unsettled: true, quiet: true},
-		{name: "the handoff head's own green outranks the code head's late red", steps: []string{"approve head", "sync", "push handoff", "green", "red head", "complete"}, want: phase.Accepting, unsettled: true},
+		// The handoff head's own settlement outranks the code head's late one
+		// (classify.SettlementFor), and neither moves the issue: the round is the reviewer's to
+		// decide, and a CI result is told to the roles and read by them
+		// (dispatch://INFRA-714/spec R1).
+		{name: "the handoff head's own failed check outranks the code head's late green", steps: []string{"approve head", "sync", "push handoff", "red", "green head", "complete"}, want: phase.Accepting, unsettled: true},
+		{name: "the handoff head's own green outranks the code head's late failed check", steps: []string{"approve head", "sync", "push handoff", "green", "red head", "complete"}, want: phase.Accepting, unsettled: true},
 		{name: "recorded before the chain: an approval of the current head", steps: []string{"approve head", "complete"}, want: phase.Accepting},
 		{name: "recorded before the chain: an approval of an earlier head", steps: []string{"approve older", "complete"}, want: phase.Reviewing},
 	} {
@@ -671,58 +672,19 @@ func TestARetryOfAStuckRoundTellsTheReviewerWhy(t *testing.T) {
 	}
 }
 
-// A red standing for the head sends the work back to implementing, whatever the round holds, as
-// its own settlement does in reviewing (classify.RedSendsBack): the round never decides it, and the
-// retry applies the CI rule before it asks the round anything. It meets a completed round only through a
-// hold - it settled while the issue was held from reviewing, where nothing moves - and the retry
-// that restores reviewing sends the work back rather than reporting the round stuck.
-func TestARetryOfARoundWithARedCodeHeadSendsTheWorkBack(t *testing.T) {
-	pool := migratedPool(t)
-	seedReviewRequiring(t, pool, "c0ffee", "", "lint")
-	apply := applyFacts(t, pool, testEngine(config.DesignGateRootIssues, nil))
-	for i, fact := range []intake.Fact{
-		intake.HandoffComplete{Generation: 1, Issue: "LEGION-208", Role: claim.RoleReviewer, Claim: "review-claim", Summary: "reviewed", Commit: "review-1"},
-		intake.ClaimFailed{Issue: "LEGION-208", Role: claim.RoleReviewer},
-		intake.PullRequestChecks{Repo: "sjawhar/legion", Number: 42, HeadSHA: "c0ffee", CheckRuns: []record.AttemptRun{{Name: "lint", ID: 1}},
-			Generation: 1, Snapshot: "red-c0ffee", Failing: []string{"lint"}},
-		intake.RetryOrEscalate{Issue: "LEGION-208", Decision: intake.RetryDecision},
-	} {
-		if result := apply(fmt.Sprintf("red-%d", i), fact); result.Refusal != nil {
-			t.Fatalf("fact %d (%T) was refused: %+v", i, fact, result.Refusal)
-		}
-	}
-	if got := issuePhase(t, pool); got != phase.Implementing {
-		t.Fatalf("the issue is in %s, want implementing: the code head is red", got)
-	}
-	if got := noticeKinds(t, pool, "LEGION-208"); !containsNotice(got, "checks-red") {
-		t.Fatalf("notices %v, want checks-red", got)
-	}
-	if got := reviewStuckNotices(t, pool); len(got) != 1 {
-		t.Fatalf("the architect was told the round was stuck %d times (%+v), want once: at the completion, before the red", len(got), got)
-	}
-	var starts int
-	if err := pool.QueryRow(t.Context(), `select count(*) from outbox where kind = 'supervise' and payload->>'op' = 'start'
-		and payload->>'role' = 'implementer'`).Scan(&starts); err != nil || starts != 1 {
-		t.Fatalf("implementer starts = %d, %v; want one", starts, err)
-	}
-}
-
-// The retry applies the CI rule from whatever phase the hold was from, not reviewing alone: a
-// settlement that reaches an issue held from testing, retro or merging moves nothing either (Table
-// has no held row), and the retry that restores the phase is the fact that lets its red stand
-// there. The work goes back to implementing with a checks-red naming the restored phase, the
-// implementer's start waiting on the role whose claim failed - the tester, the merger, and nobody
-// for retro, the implementer's own phase - and the restored phase's worker is not started: the red
-// left it no phase to work.
-func TestARetryOfAHoldFromAnyPhaseWithARedHeadSendsTheWorkBack(t *testing.T) {
+// The retry restores the phase the hold came from and starts its worker. It re-decides no CI
+// result: a settlement that reached the issue while it was held moved nothing, as it would have
+// moved nothing had it arrived with the issue in its phase (dispatch://INFRA-714/spec R1), so the
+// restored worker reads the head's checks itself. Nothing goes back to implementing and the
+// architect hears no checks-red, from whatever phase the hold was taken.
+func TestARetryOfAHoldWithASettledHeadRestoresThePhase(t *testing.T) {
 	for _, tc := range []struct {
-		from    phase.Phase
-		status  string
-		quiesce claim.Role
+		from   phase.Phase
+		status string
 	}{
-		{from: phase.Testing, status: "testing", quiesce: claim.RoleTester},
+		{from: phase.Testing, status: "testing"},
 		{from: phase.Retro, status: "retro"},
-		{from: phase.Merging, status: "retro", quiesce: claim.RoleMerger},
+		{from: phase.Merging, status: "retro"},
 	} {
 		t.Run(string(tc.from), func(t *testing.T) {
 			pool := migratedPool(t)
@@ -730,7 +692,7 @@ func TestARetryOfAHoldFromAnyPhaseWithARedHeadSendsTheWorkBack(t *testing.T) {
 			seedIssue(t, pool, record.Issue{Key: "LEGION-208", Repo: "sjawhar/legion", DefaultBranch: "main", GitHubRepo: "sjawhar/legion", Tree: "LEGION-208", Project: "LEGION", Title: "root",
 				Phase: tc.from, Generation: 1, Status: tc.status, Rank: "U"})
 			seedPR(t, pool, record.PullRequest{State: record.PullRequestOpen, Issue: "LEGION-208", Repo: "sjawhar/legion",
-				Number: 42, Branch: "legion/LEGION-208", HeadSHA: "c0ffee", Required: []string{"lint"}})
+				Number: 42, Branch: "legion/LEGION-208", HeadSHA: "c0ffee"})
 			seedPhase(t, pool, record.PhaseRow{Issue: "LEGION-208", Role: claim.RoleImplementer, Claim: "implement-claim"})
 			if role != claim.RoleImplementer {
 				seedPhase(t, pool, record.PhaseRow{Issue: "LEGION-208", Role: role, Claim: claim.Token(string(role) + "-claim")})
@@ -746,11 +708,11 @@ func TestARetryOfAHoldFromAnyPhaseWithARedHeadSendsTheWorkBack(t *testing.T) {
 					t.Fatalf("fact %d (%T) was refused: %+v", i, fact, result.Refusal)
 				}
 			}
-			if got := issuePhase(t, pool); got != phase.Implementing {
-				t.Fatalf("the issue is in %s, want implementing: the head is red", got)
+			if got := issuePhase(t, pool); got != tc.from {
+				t.Fatalf("the issue is in %s, want %s restored: a settlement moves nothing", got, tc.from)
 			}
-			if reason, from := checksRedNotice(t, pool); from != tc.from || !strings.Contains(reason, "CI is red at c0ffee: lint") {
-				t.Fatalf("checks-red %q in %q, want it to name lint and the restored phase %s", reason, from, tc.from)
+			if got := noticeKinds(t, pool, "LEGION-208"); containsNotice(got, "checks-red") {
+				t.Fatalf("notices %v, want no checks-red", got)
 			}
 			starts := func(role claim.Role) int {
 				var n int
@@ -760,11 +722,11 @@ func TestARetryOfAHoldFromAnyPhaseWithARedHeadSendsTheWorkBack(t *testing.T) {
 				}
 				return n
 			}
-			if _, quiesce := implementerStart(t, pool); starts(claim.RoleImplementer) != 1 || quiesce != tc.quiesce {
-				t.Fatalf("implementer starts = %d waiting for %q, want one waiting for %q", starts(claim.RoleImplementer), quiesce, tc.quiesce)
+			if starts(role) != 1 {
+				t.Fatalf("the retry started the %s %d times, want once: the restored phase is its own", role, starts(role))
 			}
-			if role != claim.RoleImplementer && starts(role) != 0 {
-				t.Fatalf("the retry started the %s %d times, want none: the red left it no phase to work", role, starts(role))
+			if role != claim.RoleImplementer && starts(claim.RoleImplementer) != 0 {
+				t.Fatalf("the retry started the implementer %d times, want none: nothing sent the work back", starts(claim.RoleImplementer))
 			}
 		})
 	}

@@ -348,7 +348,7 @@ func engineConfig(cfg config.Config, reviewAppLogin string, build Build) workflo
 	project := cfg.Projects[cfg.Project]
 	engine := workflow.Config{
 		Project: cfg.Project, DesignGate: cfg.Gates.Design, ReviewRoundCap: cfg.ReviewRoundCap,
-		MaxFixAttempts: cfg.MaxFixAttempts, Linger: cfg.Linger, ProductionCheckBound: cfg.ProductionCheckBound,
+		Linger: cfg.Linger, ProductionCheckBound: cfg.ProductionCheckBound,
 		ReviewAppLogin: reviewAppLogin, MergeQueueRole: project.MergeQueueRole, Deploys: project.Deploys,
 	}
 	if build.Revision != "" {
