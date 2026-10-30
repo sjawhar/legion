@@ -2,59 +2,51 @@
   "schemaVersion": 1,
   "phase": "test",
   "issue": "INFRA-251",
-  "completed": "2026-10-30T09:51:00Z",
-  "round": 11,
-  "headSha": "e14702f89259",
-  "handoffHead": "e8a595d31f14c03e7d5033515b35ae7b24df43d6",
-  "rig": "My PostgreSQL 17.2 (UTF8 template1, 127.0.0.1:55433) and nats-server 2.10.29 (127.0.0.1:54333); its shared scratch database had the earlier 0063 applied, so I dropped 0062/0063 there and let the daemon re-apply the edited ones. Drivers not committed; kept at $TMPDIR/tnats/zz_tester_parked_live_test.round11.go.",
+  "completed": "2026-10-30T12:01:00Z",
+  "round": 12,
+  "headSha": "f8391ab47cc7e170dc7308273848e4e4f3518f94",
+  "handoffHead": "78400b187821aaa4cbbb7754a2ade41bdf4d0761",
+  "fingerprint": "changed (the forward merge of main 96a7e5ea brought main's text into files this branch's diff touches, then the renumber and two fixes): a full round",
+  "rig": "My PostgreSQL 17.2 (UTF8 template1, 127.0.0.1:55433; a fresh database tester12 for the whole-daemon drives, since my old scratch database held the branch's former 62/63) and nats-server 2.10.29 (127.0.0.1:54333). Drivers not committed; kept at $TMPDIR/tnats/zz_tester_parked_live_test.round12.go.",
   "implementerProof": {
     "verdict": "verified",
-    "how": "Re-ran on my rig: my red tests TestADecisionAStaleStartReleasesReachesTheRunningArchitect (unmodified: `jj diff --from 2f9a32bebb12 --to e8a595d31f14 --stat` on its file, 0 files changed) and TestAStartWhoseForgetFailedIsNotDeliveredAgainAfterItsTurn PASS, with every forget, claim and running-architect test, TestARootThatMainsCodeResumesGetsItsTaskWithRootHearsWired and the property test at its defaults (45 s); supervise ok. Then drove the same behaviour on the whole daemon (proof 1 and 2) and ran the property test 13x longer than its default (proof 3)."
+    "how": "Re-ran its migration proof my own way on a fresh database and on one at main's latest (proof 1), the wake fix's negative control on the whole daemon (proof 3), and its property test with 500 seeds x 300 steps (proof 4). My two red tests pass unmodified (`jj diff --from 2f9a32bebb12 --to 78400b187821 --stat` on parked_decision_test.go: 0 files changed)."
   },
-  "failures": [
-    {
-      "criterion": "The change merges onto main and the daemon still boots: its migrations apply",
-      "evidence": "main (96a7e5ea9099) now carries 0062_live_issue_reads, 0063_consumer_positions and 0064_pull_request_pass_settlement. This branch adds 0062_parked_decisions and 0063_claim_delivered_rows. GitHub reports the pull request MERGEABLE (the file names differ, so no text conflict), but the merge result cannot migrate. Reproduction: `T=$(git --git-dir=<repo> merge-tree --write-tree e8a595d31f14 96a7e5ea9099)`, archive T to a scratch directory, then in its packages/daemon `LEGION_TEST_PG_DSN=... go test -count=1 -run 'TestParkedDecisionsArriveWith0062AndGoWithTheirRoot|TestAClaimRoundTripsWithItsLocatorAndDelivery' ./internal/store/` -> both FAIL: `migrations 0062_live_issue_reads.up.sql and 0062_parked_decisions.up.sql share version 62`; store.Migrate on a fresh database of that tree returns the same error and applies 0 migrations, so a daemon built from the merge does not boot. A deployed database on main is already at 64 and would never apply a 62 or 63 of this branch. Fix in #2163: renumber this branch's migrations after main's latest (0065, 0066 today), rename migration_0062_test and the store tests and comments that name 62/63, and forward-merge main so the pull request's CI judges the result."
-    }
-  ],
-  "failed": 1,
+  "failures": [],
+  "failed": 0,
   "proof": [
     {
-      "criterion": "Regression and the earlier windows on the whole daemon: the round-7 drive, the crash window, and round 10's stale start",
-      "surface": "The whole Legion daemon (startDaemonWithin) on real PostgreSQL and nats-server; Dispatch events as envelopes on ENVOY_NOTIFICATIONS; the architect's shim, registration and prompts over the daemon's own worker stream and routes",
-      "command": "LEGION_TEST_PG_DSN=... LEGION_E2E_NATS_URL=nats://127.0.0.1:54333 TESTER_REAL_EVENTS=$TMPDIR/real-ask-events.jsonl go test -tags e2e -count=1 -run '^(TestTesterParkedDecisionLive|TestTesterCrashWindowLive|TestTesterStaleStartReleaseLive)$' -v ./internal/daemon/",
-      "observed": "All PASS. Round-7 drive: 14 steps, the 13 real Dispatch events relay 3, the retrying start's row claimed all 6 kept decisions and its delivery left 0; verdict jq over the daemon's JSON log: undelivered 2, sent 1, unrelayed ['its root is not parked'], unmatched []. Crash window: forget refused by a trigger, turn ended, daemon restarted: the retry queued nothing (0 pending), the decision was forgotten, and a newer start delivered ask-2. Stale start (round 10's failure): start A of generation 2 finished stale after generation 3's architect was ready; the decision was handed over and reached that architect in exactly 1 catch-up message, of generation 3, and 0 stayed kept.",
-      "headSha": "e14702f89259",
-      "negativeControl": "Each reverted: `|| root.AwaitingPerson()` dropped from record.WaitsForSlot -> the round-7 drive FAILs at the awaiting-root-set-to-todo step; the RelayNotParked check off -> FAILs at the lingering-root step (`parked-decision notices = 6, want 3`)."
+      "criterion": "At the merge of this head with main as it is now, store.Migrate applies on a fresh database, and a database at main's latest applies 0065 and 0066",
+      "surface": "store.Migrate (store.Open + Migrate, the boot's own call) against new databases of my PostgreSQL 17.2; the merge tree from git merge-tree",
+      "command": "main read again: 88818a3b9b14, ending at 0064_pull_request_pass_settlement. git merge-tree --write-tree 78400b18 88818a3b -> 7549f158 (clean); archive it; go run <store.Open+Migrate> on mergefresh12 -> `migrated: 66 <nil>`; go test ./internal/store/ at the merge tree -> ok 83.6s. Upgrade path: main 88818a3b's Migrate on migupgrade12 -> `migrated: 64`, then this head's Migrate on the same database -> `migrated: 2`; schema_version 60..66; parked_decisions, readmitted_approvals and consumer_positions present; claims.delivered_rows bigint[] not null default '{}'. This head alone on migfresh12 -> `migrated: 66 <nil>`.",
+      "observed": "Fresh at the merge: 66 migrations, store suite ok. A database at main's 64 applies exactly 0065 and 0066.",
+      "headSha": "f8391ab47cc7e170dc7308273848e4e4f3518f94",
+      "negativeControl": "Round 11's merge of e8a595d3 with main refused `migrations 0062_live_issue_reads.up.sql and 0062_parked_decisions.up.sql share version 62` and applied nothing."
     },
     {
-      "criterion": "RootHears leaves main's resume behaviour as it was, and a parked root's held start task is sent by its next start, never lost",
-      "surface": "The same whole daemon (TestTesterRootHearsMainPathsLive), counting the prompt frames the architect's shim receives",
-      "command": "go test -tags e2e -count=1 -run '^TestTesterRootHearsMainPathsLive$' -v ./internal/daemon/",
-      "observed": "PASS, 4 steps. An awaiting_person root a person answered: resumed and prompted its resume task once ('A person answered your ask ask-w ...'). A re-admission: prompted its start task naming ask-p once. A fresh admission: architect spawned, 0 prompts, as main starts a first admission with no task. A parked root: its re-admission start queued the task naming ask-h and forgot the decision; parked before the architect came up, the architect then registered and was held (0 prompts, 1 pending, 0 kept); on the next re-admission (a start with no task of its own) the held task was prompted once.",
-      "headSha": "e14702f89259",
-      "negativeControl": "workflow.ArchitectHears returning false -> FAIL at the first step (`W prompts = [], want its resume task once`), so the daemon consults RootHears on main's path. Returning true leaves the drive green: on the whole daemon the park also suspends the architect claim, which holds the task by itself, so RootHears' own effect (a claim live while its root is parked) is proven only by the property test's seeds and the supervise unit tests."
+      "criterion": "The design gate default: where it changed, and whether main's behaviour changes for any deployment",
+      "surface": "The diff of d71718d0e1c7 against its parent",
+      "command": "jj diff -r d71718d0e1c7 config/stage3.go workflow/engine.go workflow/parked_decision.go daemon/daemon.go",
+      "observed": "config.DesignGate.OrDefault is new: \"\" -> root-issues, any other value unchanged. workflow.New replaces its own `if cfg.DesignGate == \"\" { cfg.DesignGate = DesignGateRootIssues }` with cfg.DesignGate.OrDefault(), the same behaviour. The one behavioural change is in this branch's own workflow.HandOverKept, whose catch-up now states gate.OrDefault() where it passed the raw value; main has no hand-over. legion.yaml's loader already defaults gates.design to root-issues, so no deployment's gate changes. It fixes a defect this change exposed (my round-11 note: the hand-over catch-up said policy \"\" where the ready's said root-issues), so it is in scope.",
+      "headSha": "f8391ab47cc7e170dc7308273848e4e4f3518f94",
+      "negativeControl": "On the whole daemon the hand-over catch-up now carries `\"gate\":{\"policy\":\"root-issues\",\"open\":false}`; in round 11 the same drive's carried `\"policy\":\"\"`."
     },
     {
-      "criterion": "The property test holds over far longer runs than its default",
+      "criterion": "Whole daemon: the round-7 drive, the crash window, round 10's stale start (the hand-over catch-up arrives without waiting for the sweep), and RootHears on main's resume paths",
+      "surface": "The whole Legion daemon (startDaemonWithin) on real PostgreSQL and nats-server; Dispatch events as envelopes on ENVOY_NOTIFICATIONS; the architect's shim, registration and prompt frames over the daemon's own worker stream and routes; no model ran, so no provider applies",
+      "command": "LEGION_TEST_PG_DSN=postgres://...@127.0.0.1:55433/tester12 LEGION_E2E_NATS_URL=nats://127.0.0.1:54333 TESTER_REAL_EVENTS=$TMPDIR/real-ask-events.jsonl TESTER_JSON_LOG=... go test -tags e2e -count=1 -run '^(TestTesterParkedDecisionLive|TestTesterCrashWindowLive|TestTesterStaleStartReleaseLive|TestTesterRootHearsMainPathsLive)$' -v ./internal/daemon/",
+      "observed": "All 4 PASS (84 s). Round-7 drive: 14 steps, 13 real Dispatch events relay 3; verdict jq over the daemon's JSON log: undelivered 2, sent 1, unrelayed ['its root is not parked'], unmatched []. Crash window: the retry after a refused forget, a finished turn and a daemon restart queued nothing; a newer start delivered ask-2. Stale start: the released decision reached the generation-3 architect in 1 catch-up message, 1 s after the stale start finished (23 s in round 11). RootHears: the answered awaiting_person root, the re-admission and the parked root's held task were each prompted once, the fresh admission 0 times.",
+      "headSha": "f8391ab47cc7e170dc7308273848e4e4f3518f94",
+      "negativeControl": "Each reverted with jj restore: projectRecords.EnqueueID's wakeOnCommit commented out -> the stale-start decision waits 23 s again for the sweep; `|| root.AwaitingPerson()` dropped from record.WaitsForSlot -> the round-7 drive FAILs at the awaiting-root-set-to-todo step; the RelayNotParked check off -> FAILs at the lingering-root step (`parked-decision notices = 6, want 3`)."
+    },
+    {
+      "criterion": "The property test, with launch and resume failure, a denied publish and delivery_failed, over far longer runs than its default",
       "surface": "TestKeptDecisionsReachTheCurrentArchitectOnce on my real PostgreSQL",
-      "command": "LEGION_KEPT_PROPERTY_RUNS=400 LEGION_KEPT_PROPERTY_STEPS=300 timeout 2700 ./daemon.test -test.run '^TestKeptDecisionsReachTheCurrentArchitectOnce$' -test.timeout=45m -test.v",
-      "observed": "PASS in 1182 s: 400 seeds x 300 steps = 120,000 steps (the default is 30 x 100), every seed PASS.",
-      "headSha": "e14702f89259",
-      "negativeControl": "The implementer's mutations (hand-over off: 8 of 30 seeds fail; DeliveredRows off: 22; RootHears off: 9) and its 18 failing seeds at 5ef027fb; I did not repeat them."
+      "command": "LEGION_KEPT_PROPERTY_RUNS=500 LEGION_KEPT_PROPERTY_STEPS=300 timeout 3300 ./daemon.test -test.run '^TestKeptDecisionsReachTheCurrentArchitectOnce$' -test.timeout=55m -test.v",
+      "observed": "PASS in 1400 s: 500 seeds x 300 steps = 150,000 steps, every seed PASS. Across them: 1750 launches refused, 452 claim failures, 3852 starts relaunching a failed claim, 26 catch-ups finished for an architect that will not hold its role again; catch-up publishes answered 1071 delivered, 130 no-holder, 96 refused, 80 receipt-timeout, 89 denied, 97 delivery-failed; 364 of 500 seeds reached a failed architect claim.",
+      "headSha": "f8391ab47cc7e170dc7308273848e4e4f3518f94",
+      "negativeControl": "The implementer's mutations (hand-over off: told 0 times; DeliveredRows off: told twice; RootHears off: told while parked); I did not repeat them this round."
     }
   ],
-  "propertyModelGaps": [
-    "Spec decisions arrive only through the ask path: the outbox's parkDecision on an undelivered design-approved/changes-requested notice is not driven, nor RelayNotParked (a lingering root moved back to a running status) or a session's decision. Covered on the whole daemon by the round-7 drive.",
-    "The readmitted_approvals pair is never kept: readmit does not run admission's keepStaleApproval, so the Approved/Latest half of KeptDecisions and its claim, hand-over and forget are untested by the property test.",
-    "The fake runtime never fails a launch or resume: no claim failed, RequestRetry, launch budget, retired claim, or the notice executor's 'architect will not hold its role again' branch. Covered on the whole daemon by the stale-start and round-7 drives' refused resumes.",
-    "No linger expiry or tree close (linger_close, ClearTreeGeneration, a child carried into a tree of its own), no children (a child's decision naming its root), no awaiting_person root or ResumeAwaitedRoot task (the other phase-less run task RootHears holds), no operator delivery or operator suspend.",
-    "Publish answers modelled: delivers, no-holder, refused, receipt-timeout; not modelled: publish denied, delivery_failed retries, an unroutable notice, a re-hold budget spent.",
-    "Single-threaded and the clock never moves: no two lanes or two daemons running rows of the root at once, no lease expiry, backoff, re-hold delay or linger deadline. The model reimplements admission's start enqueue rather than calling admit.Admission, so the two can drift."
-  ],
-  "notes": [
-    "Latency, not a failure: on the whole daemon the hand-over's catch-up waited 23 s after the stale start released the decision before it was published; the hand-over commit wakes no lane, so the row waits for the outbox's next poll.",
-    "In my harness the hand-over catch-up carried gate policy \"\" where the ready's catch-up carries root-issues: the outbox takes cfg.Gates.Design raw, the engine defaults \"\" to root-issues, and the test config leaves gates unset. Production config always sets the gate (config defaults root-issues), so this is a harness artifact."
-  ],
-  "ci": "Head e8a595d3, read 2026-10-30T09:49Z: CI run 41032167787 queued, PR Title 41032354797 queued. Not waited on. Mergeable MERGEABLE/BLOCKED."
+  "ci": "Head 78400b18, read 2026-10-30T11:50Z: CI's changes job queued, PR Title queued, an earlier PR Title cancelled. Not waited on. GitHub: MERGEABLE, BLOCKED (reviews and CI)."
 }
