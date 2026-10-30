@@ -1,0 +1,6 @@
+kind: Added
+body: |-
+    Dispatch stores an ask's question, each of its options and its answer as blocks of the reference graph that a reference can name (`dispatch://KEY/ask/<id>#b-<part>`, optionally pinned with `@v<N>` to a revision of the ask's parts): a link one of them holds starts at that part, every detail, list, Inbox and event read of an ask carries the part id of each option and of its answer with the ask's `revision`, `GET /api/v1/references` reads a part and lists the edges at an ask's parts under the ask, "referenced by" an ask leaves out its own clarification thread and its parts, an issue's reference closure follows the links its parts hold, and a reply in an ask's thread names the part it answers in `reply_to_block`. An ask any build writes is owed a part index, which the block-index reconciliation drains and `rebuild-refs` marks for every ask.
+time: 2026-10-30T00:00:00.000000000Z
+custom:
+    Issue: pr2546

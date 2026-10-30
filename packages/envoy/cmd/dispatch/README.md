@@ -1606,16 +1606,41 @@ build writes during the roll, or after a rollback, is owed its blocks (`owed_at`
 triggers of `0143` and `0144`), which the same block-index reconciliation indexes, at most 200 a
 tick, with no command run.
 
+An ask's parts are blocks too (migrations `0145`-`0146`): its question, each of its options and
+its current answer, in that order (`refs.AskParts`), each a text of its own rather than a span of
+one body, since an ask has no body — the question as the row holds it, an option as
+`<label> — <description>` or its label alone, and the answer as the one line an `ask.answered`
+summary renders it. Parts are named `b1`, `b2`, … as an item's blocks are, and an edit keeps each
+id the same way, except that an answer is replaced rather than reworded
+(`itemblocks.AlignReplaced`): a later answer is a new part, so a reference to the answer it
+replaced reads `removed` where one to a reworded option reads `changed`. A part's reference is
+the ask's with `#b-` and the id: `dispatch://KEY/ask/<id>#b-<part>` or
+`dispatch://PROJECT/artifact/<slug>/ask/<id>#b-<part>`, and an ask's dashboard page with a `#b-`
+fragment names it too; pinned, `#b-<part>@v<N>` names a revision of the ask's parts, as a
+comment's block pins a revision of the comment, and reads the part as that revision held it. Its
+graph node is kind `block`, id `ask/<ask uuid>#<part id>`, whose `parent` is the ask;
+`graph_edges` stores it under the kind `ask_block`, which a build without ask parts skips as an
+unknown kind. An ask's detail read, its owner's ask list, the Inbox and the ask payloads the
+events route serves carry the part id of each option and of the answer, with the ask's
+`revision`, the number a pin names (`attachAskPartIDs`); a write's own response carries neither,
+nor does an ask the index has not reached, whose revision reads 0. An
+ask's own read lists the edges at its parts, each naming its part as `block`, and leaves out both
+its `replies_to` edges, its clarification thread, and its parts' `part_of` edges unless `?kind=`
+names them (`refs.AskBacklinkExclusions`). A reply in an ask's thread names the part it answers
+with `reply_to_block`. A reference to a part no current revision of the ask holds is
+`404 NOT_FOUND` `no part "<part>" in ask <id>`. An ask any build writes is owed a part index
+(`0146`'s trigger on `asks`), which the same block-index reconciliation drains.
+
 ```bash
 DATABASE_URL=postgres://... envoy-dispatch rebuild-refs
 ```
 
 reparses every source and reconciles the index with the text (surviving edges keep their
 provenance, edges of deleted sources are removed), marks every document owed a block index and
-every comment and message owed a block index of its own blocks, which the server's block-index
-reconciliation then indexes, and prints
+every comment, message and ask owed a block index of its own blocks, an ask's parts included,
+which the server's block-index reconciliation then indexes, and prints
 `rebuild-refs: documents=N asks=N comments=N messages=N orphans=N edges=N blocks_owed=N items_owed=N`,
-`blocks_owed` being the documents it marked and `items_owed` the comments and messages. It reads
+`blocks_owed` being the documents it marked and `items_owed` the comments, messages and asks. It reads
 `dispatch.server_url` from the envoy config the same way the server does and refuses an empty
 value: dashboard-URL mentions are recognised only against it, so an empty URL would drop them all.
 

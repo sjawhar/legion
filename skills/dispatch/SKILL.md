@@ -71,6 +71,7 @@ dispatch://KEY
 dispatch://KEY/spec
 dispatch://KEY/artifact/<slug>[@vN]
 dispatch://KEY/ask/<id>
+dispatch://KEY/ask/<id>#b-<part>[@vN]
 dispatch://KEY/comment/<id>
 dispatch://KEY/comment/<id>#b-<block>[@vN]
 dispatch://KEY/message/<id>

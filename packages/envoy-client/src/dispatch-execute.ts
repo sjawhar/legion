@@ -21,6 +21,7 @@ import type {
   EditOp,
   EditPrecondition,
   Event,
+  GraphEdge,
   GraphNode,
   GraphReferences,
   Issue,
@@ -990,9 +991,7 @@ function argumentProblems(tool: string, args: ToolArguments): string[] {
       }
       for (const problem of [
         replyTo === undefined ? undefined : replyBlockProblem("reply_to", "comment", replyTo),
-        replyToAsk === undefined
-          ? undefined
-          : replyBlockProblem("reply_to_ask", "ask", replyToAsk),
+        replyToAsk === undefined ? undefined : replyBlockProblem("reply_to_ask", "ask", replyToAsk),
       ]) {
         if (problem !== undefined) problems.push(problem);
       }
@@ -2017,28 +2016,31 @@ function issueSummary(
 }
 
 /** A graph read's edges as a read shows them: edge type, the other node and its address,
- *  excerpt, when, and on a document's, comment's or message's read its block at the queried end.
- *  A block of a comment or message (a block node naming no document) shows as its item, then the
- *  block: `comment <item ref> block <id>`. */
+ *  excerpt, when, and on a document's, ask's, comment's or message's read its block at the
+ *  queried end. */
 function referenceLines(read: GraphReferences | string): string[] {
   if (typeof read === "string") return [`- ${read}`];
   if (read.edges.length === 0) return ["- none"];
-  return read.edges.map((edge) => {
-    const { node } = edge;
-    const excerpt = edge.excerpt === undefined ? "" : `${textHead(edge.excerpt.text)} · `;
-    const block = edge.block === undefined ? "" : ` (block ${edge.block.ref ?? edge.block.id})`;
-    const item =
-      node.kind === "block" &&
-      node.document === undefined &&
-      (node.parent?.kind === "comment" || node.parent?.kind === "message")
-        ? node.parent
-        : undefined;
-    const source =
-      item === undefined
-        ? `${node.kind} ${node.ref ?? node.id}`
-        : `${item.kind} ${item.ref ?? item.id} block ${node.block_id ?? node.id}`;
-    return `- ${edge.kind} ${source} (${excerpt}${edge.created_at})${block}`;
-  });
+  return read.edges.map(edgeLine);
+}
+
+/** One edge of a graph read. A block of a comment or message (a block node naming no document)
+ *  shows as its item, then the block: `comment <item ref> block <id>`. */
+function edgeLine(edge: GraphEdge): string {
+  const { node } = edge;
+  const excerpt = edge.excerpt === undefined ? "" : `${textHead(edge.excerpt.text)} · `;
+  const block = edge.block === undefined ? "" : ` (block ${edge.block.ref ?? edge.block.id})`;
+  const item =
+    node.kind === "block" &&
+    node.document === undefined &&
+    (node.parent?.kind === "comment" || node.parent?.kind === "message")
+      ? node.parent
+      : undefined;
+  const source =
+    item === undefined
+      ? `${node.kind} ${node.ref ?? node.id}`
+      : `${item.kind} ${item.ref ?? item.id} block ${node.block_id ?? node.id}`;
+  return `- ${edge.kind} ${source} (${excerpt}${edge.created_at})${block}`;
 }
 
 /**
@@ -2129,11 +2131,13 @@ function nodeLine(node: GraphNode): string[] {
  * document it is in (`ref.document`, the reference before the `#b-`), the version its text last
  * changed in and that text. A comment's or message's block: one line naming the block, its item
  * and the comment revision its text last changed in (`Block b2 of comment <id> (changed in
- * revision 1):`), then its text. A block no current version or revision holds has neither a
- * changed version nor text. Then for a pinned ref how the block stands against the version or
- * revision it pins and its text there.
+ * revision 1):`), then its text. A part of an ask reads the same way, under the name `noun`
+ * gives it (`Option b2 of ask <id> (changed in revision 1):`), the revision being the ask's
+ * parts'. A block no current version or revision holds has neither a changed version nor text.
+ * Then for a pinned ref how the block stands against the version or revision it pins and its
+ * text there.
  */
-function blockLines(node: GraphNode, ref: ParsedDispatchRef): string[] {
+function blockLines(node: GraphNode, ref: ParsedDispatchRef, noun = "Block"): string[] {
   const unit = ref.item === undefined ? "version" : "revision";
   const blockID = node.block_id ?? ref.block;
   const head =
@@ -2147,7 +2151,7 @@ function blockLines(node: GraphNode, ref: ParsedDispatchRef): string[] {
           ...(node.text === undefined ? [] : ["Text:", node.text]),
         ]
       : [
-          `Block ${blockID} of ${ref.item.kind} ${ref.item.id}${node.changed_version === undefined ? "" : ` (changed in revision ${node.changed_version})`}:`,
+          `${noun} ${blockID} of ${ref.item.kind} ${ref.item.id}${node.changed_version === undefined ? "" : ` (changed in revision ${node.changed_version})`}:`,
           ...(node.text === undefined ? [] : [node.text]),
         ];
   const { pin } = node;
@@ -2165,6 +2169,24 @@ function blockLines(node: GraphNode, ref: ParsedDispatchRef): string[] {
     `Text at ${unit} ${pin.version}:`,
     pin.text,
   ];
+}
+
+/**
+ * What a block read's head calls a part of an ask: its answer, one of its options, or, where the
+ * ask places every part it holds, its question — no node carries a part's type, so the ask's own
+ * read is what says which part an id names (`AskOption.id`, `AskAnswer.id`, `Ask.revision`). A
+ * part the ask does not place is a `Part`: its options read with no id (the parts are not
+ * indexed yet, or the index stands on other options than the row now holds), or the reference is
+ * pinned to a part the ask has since removed.
+ */
+function askPartNoun(ask: Ask, node: GraphNode, blockID: string): string {
+  if (ask.answer?.id === blockID) return "Answer";
+  if (ask.options.some((option) => option.id === blockID)) return "Option";
+  const placed =
+    (ask.revision ?? 0) > 0 &&
+    ask.options.every((option) => option.id !== undefined) &&
+    (ask.answer === null || ask.answer.id !== undefined);
+  return placed && node.pin?.state !== "removed" ? "Question" : "Part";
 }
 
 function logSummary(issue: IssueDetails, events: readonly Event[]): string {
@@ -2247,9 +2269,26 @@ function childrenSummary(issue: IssueDetails): string {
   ].join("\n");
 }
 
-function askSummary({ ask, replies, answers }: AskRead, graph: readonly string[]): string {
+/**
+ * An ask's read. Each option and the answer is a part of the ask in the reference graph, so each
+ * is named by its own reference (`dispatch://KEY/ask/<id>#b-<part>`) with, under it, the edges
+ * pointing at that part; `askRef` is the ask's own address those are built from. Every other
+ * edge stays under the ask, the ones at its question among them: no read carries the question's
+ * part id. An ask whose parts carry no id — an older server, or an ask the index has not reached,
+ * whose revision is 0 — reads as it did before the parts: its options bare, every edge under the
+ * ask.
+ */
+function askSummary(
+  { ask, replies, answers }: AskRead,
+  askRef: string,
+  pictures: readonly string[],
+  incoming: GraphReferences | string,
+  outgoing: GraphReferences | string
+): string {
   const answer = ask.answer;
   const earlierAnswers = answers.slice(0, -1);
+  const parts = askPartEdges(ask, incoming);
+  const partRef = (id: string) => `${askRef}#b-${encodeBlockId(id)}`;
   const chain = replies.flatMap((reply) => [
     `${reply.id} · ${actorText(reply.author)}`,
     `Body: ${reply.body}`,
@@ -2260,9 +2299,10 @@ function askSummary({ ask, replies, answers }: AskRead, graph: readonly string[]
     "Options:",
     ...(ask.options.length === 0
       ? ["- none"]
-      : ask.options.map(
-          (option) => `- ${option.label}${option.description ? ` — ${option.description}` : ""}`
-        )),
+      : ask.options.flatMap((option) => [
+          `- ${option.label}${option.description ? ` — ${option.description}` : ""}${option.id === undefined ? "" : ` (${partRef(option.id)})`}`,
+          ...partReferenceLines(parts.at, option.id),
+        ])),
     `State: ${ask.state}`,
     // A read can name the ask by its block's id; the writes to it take this one.
     `Ask id: ${ask.id}`,
@@ -2273,6 +2313,8 @@ function askSummary({ ask, replies, answers }: AskRead, graph: readonly string[]
           `- By: ${answer.user}`,
           `- Selected: ${answer.selected.length === 0 ? "none" : answer.selected.join(", ")}`,
           ...(answer.text === null ? [] : [`- Text: ${answer.text}`]),
+          ...(answer.id === undefined ? [] : [`- Reference: ${partRef(answer.id)}`]),
+          ...partReferenceLines(parts.at, answer.id),
         ]),
     ...(earlierAnswers.length === 0
       ? []
@@ -2292,8 +2334,45 @@ function askSummary({ ask, replies, answers }: AskRead, graph: readonly string[]
         ]),
     "Replies:",
     ...(chain.length === 0 ? ["- none"] : chain),
-    ...graph,
+    ...pictures,
+    ...graphSectionLines(parts.rest, outgoing),
   ].join("\n");
+}
+
+/** An ask's inbound edges split by the part each points at: `at` holds the edges at one of its
+ *  options or at its answer, keyed by that part's id, and `rest` is what the ask's own section
+ *  keeps — the edges at the ask itself and at its question. An edge listed under its part names
+ *  no block: the line above it is that part. A graph the server could not serve is passed on as
+ *  it is, and so is one read of an ask whose parts carry no id. */
+function askPartEdges(
+  ask: Ask,
+  incoming: GraphReferences | string
+): { at: Map<string, GraphEdge[]>; rest: GraphReferences | string } {
+  const ids = new Set(
+    [...ask.options.map((option) => option.id), ask.answer?.id].filter(
+      (id): id is string => id !== undefined
+    )
+  );
+  const at = new Map<string, GraphEdge[]>();
+  if (typeof incoming === "string" || ids.size === 0) return { at, rest: incoming };
+  const rest: GraphEdge[] = [];
+  for (const edge of incoming.edges) {
+    const part = edge.block?.block_id;
+    if (part === undefined || !ids.has(part)) {
+      rest.push(edge);
+      continue;
+    }
+    at.set(part, [...(at.get(part) ?? []), { ...edge, block: undefined }]);
+  }
+  return { at, rest: { node: incoming.node, edges: rest } };
+}
+
+/** The edges at one part of an ask, indented under the line naming that part. A part nothing
+ *  points at, and one the ask carries no id for, print nothing. */
+function partReferenceLines(at: Map<string, GraphEdge[]>, id: string | undefined): string[] {
+  const edges = id === undefined ? undefined : at.get(id);
+  if (edges === undefined || edges.length === 0) return [];
+  return ["  Referenced by:", ...edges.map((edge) => `  ${edgeLine(edge)}`)];
 }
 
 function openAskAge(ageSeconds: number): string {
@@ -4354,12 +4433,15 @@ export async function executeDispatchTool(
           documentIdOf(ref)
         );
         const askRef = refTarget(ref, "ask", askRead.ask.id);
-        const [pictures, graph] = await Promise.all([
+        // The ask's graph is read in both directions here rather than through `graphSections`:
+        // the summary lists the edges at each of its parts under that part.
+        const [pictures, incoming, outgoing] = await Promise.all([
           picturesOf(askTexts(askRead)),
-          graphSections(client, askRef),
+          graphReferences(client, { to: askRef }),
+          graphReferences(client, { from: askRef }),
         ]);
         return {
-          text: askSummary(askRead, [...pictures.lines, ...graph]),
+          text: askSummary(askRead, askRef, pictures.lines, incoming, outgoing),
           details:
             ref.owner.kind === "project"
               ? { project: ref.owner.project }
@@ -4428,12 +4510,15 @@ export async function executeDispatchTool(
       if (ownerArguments.ref?.kind === "block") {
         const ref = ownerArguments.ref;
         const blockRef = stringArg(args, "ref");
-        // The document, comment or message the block is in: the reference before its `#b-`.
+        // The document, ask, comment or message the block is in: the reference before its `#b-`.
         const holder = blockRef.slice(0, blockRef.indexOf("#"));
+        // A part of an ask is named by what it is — the question, an option or the answer — and
+        // no node carries a part's type, so the ask's own read is read beside the graph.
+        const askOfPart = ref.item?.kind === "ask" ? client.getAsk(ref.item.id) : undefined;
         // The read names the block's node, so a 404 is the block's own answer: an unpinned ref
         // names a block no current version holds, and a pinned one's answer says which of its
         // version, that version's record or the block the server could not find.
-        const [incoming, outgoing] = await Promise.all([
+        const [incoming, outgoing, partOf] = await Promise.all([
           client.getReferences({ to: blockRef }).catch((error: unknown) => {
             if (ref.pin === undefined && dispatchAnswered(error, 404)) {
               throw new Error(`No block ${ref.block} in ${holder}.`);
@@ -4441,11 +4526,16 @@ export async function executeDispatchTool(
             throw error;
           }),
           graphReferences(client, { from: blockRef }),
+          askOfPart,
         ]);
+        const blockID = incoming.node.block_id ?? ref.block ?? "";
+        const noun =
+          partOf === undefined ? undefined : askPartNoun(partOf.ask, incoming.node, blockID);
         return {
-          text: [...blockLines(incoming.node, ref), ...graphSectionLines(incoming, outgoing)].join(
-            "\n"
-          ),
+          text: [
+            ...blockLines(incoming.node, ref, noun),
+            ...graphSectionLines(incoming, outgoing),
+          ].join("\n"),
           details: {
             ...(ref.owner.kind === "project"
               ? { project: ref.owner.project }

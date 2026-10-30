@@ -1488,7 +1488,9 @@ relation: `mentions`, `child_of` (`issues.parent_key`), `blocked_by` (`issue_lin
 (`ask_followers`), since migration 0121 a block's `mentions` (`block_refs`) and its
 `part_of` edge to its document (`document_blocks`), and since migration 0142 the same two for a
 block of a comment or message (`comment_block_refs` and `message_block_refs`, `comment_blocks` and
-`message_blocks`) and a reply's `replies_to` edge to the block it names (`replies_to_block`). An
+`message_blocks`) and a reply's `replies_to` edge to the block it names (`replies_to_block`), and
+since migration 0145 the same two for a part of an ask (`ask_block_refs` and `ask_blocks`), which
+a reply in its thread answers the same way. An
 issue may wait only on issues in its own
 project through `blocked_by`.
 For cycle checks an issue has two halves: it starts after its `blocked_by` targets are done and
@@ -2624,6 +2626,53 @@ padding its stored rows gives those cells.
 An answered block carries `state`, `answered_by`, `answered_at`, `selected`, and `answer` in
 canonical markdown, and a copy also `copied_from` and `copied_from_document`, the ask it was copied
 from and that ask's document.
+
+An ask's parts are blocks of the graph (migrations `0145_ask_blocks` and
+`0146_asks_block_parts_trigger`): its question, each of its options in the row's order and its
+current answer (`refs.AskParts`, written by `refs.IndexAskParts` in the transaction of every
+write of an ask: the ask routes' insert, edit, answer and resolve, an issue's reopen,
+settlement's own open, edit and restore of a block ask, the approval routes and a decided
+wording's restore). A part's text is the
+ask row's own: the question, an option as `<label> — <description>` or its label alone, and the
+answer as the one line an `ask.answered` summary renders it. A part is a text of its own rather
+than a span of one body, since an ask has none, so the mentions of each part are read from that
+part's text alone (`askPartPairs`) where a comment's are placed by their offsets. Part ids are
+`b1`, `b2`, … and an edit keeps them as a comment's blocks keep theirs, except that the answer is
+replaced rather than reworded (`itemblocks.AlignReplaced`): a later answer is a new part, so a
+reference to the answer it replaced reads `removed` where one to a reworded option reads
+`changed`. `ask_blocks`, `ask_block_texts`, `ask_block_refs` and `ask_block_state` hold them as a
+comment's four tables hold its blocks, `made_by` the answerer on an answer part and null on the
+question and the options, which the ask's author made (`askPartMakers`); an ask has no body to
+hash, so the state row's `body_sha256` is the hash of its parts' identity hashes (`askPartsSum`).
+A part's node is kind `block`, id `ask/<ask uuid>#<part id>`, its `parent` the ask and its
+`changed_version` the revision of the ask's parts its text last changed in; `graph_edges` and
+`refs.to_kind` store it under the kind `ask_block` (`ItemKind.BlockKind`), which `nodeLoaders`
+resolves through `loadAskBlockNodes` and a build without ask parts skips as an unknown kind. Its
+reference is the ask's with `#b-` and the part id - `dispatch://KEY/ask/<id>#b-<part>`, or
+`dispatch://PROJECT/artifact/<slug>/ask/<id>#b-<part>` on a project document's ask - pinned with
+`@v<N>` to a revision of the ask's parts, which reads the part as that revision held it
+(`refs.AskPartAt`, `refs.RemovedAskBlockNode`). A part no current revision holds is
+`404 NOT_FOUND` `no part "<part>" in ask <id>` (`itemBlockNoun`; a comment's and a message's say
+`block`), and a pin past the ask's current revision or to a revision that did not hold the part
+says which. The part id of each option and of the answer, with the ask's `revision`, is batched
+onto an ask's detail read, its owner's ask list, the Inbox and every ask payload the events route
+serves (`attachAskPartIDs`, read beside the backlink count; `attachAskEventPartIDs` writes them
+onto the payload's own options and answer, so a payload names the ask's parts as they stand now,
+never what the write recorded, and one the ask has moved past - an `ask.opened` whose options an
+edit replaced - carries none). A payload published live carries none: it is the write's own, and
+no write knows a part id. No caller writes one either:
+`validateAskOptions` empties the id of every option a write sends, and an ask whose parts are not
+indexed yet carries no id and revision 0, so no reader depends on the index being current. "What
+references this ask" means neither its clarification thread nor its own parts: `replies_to` and
+`part_of` are an ask's default backlink exclusions (`refs.AskBacklinkExclusions`), the exclusion
+its card's count reads too, and an ask's own read lists the edges at its parts, each naming its
+part as `block`, each counted as the ask's (`refs.BacklinkCounts`). An ask's `refs` rows hold its
+question's mentions alone, so an issue's closure reads the links its options and answer hold from
+`ask_block_refs`, the member's `via` the ask at the depth the ask's own link has
+(`refs.Closure`). An ask any build writes is owed a part index (`0146`'s `asks_item_blocks_owed`
+trigger on its question, options and answer, which a part-aware writer's own index clears in the
+same transaction), which the block-index reconciliation drains and `rebuild-refs` marks for every
+ask.
 
 An issue's close withdraws its open asks. Every close - a person's Close or board
 drag, `dispatch issue-update --status done`, the Legion daemon's close when a pull request merges,

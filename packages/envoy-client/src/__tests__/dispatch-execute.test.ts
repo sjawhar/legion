@@ -5645,6 +5645,122 @@ describe("executeDispatchTool", () => {
         ]);
       });
     });
+
+    // A part of an ask reads as one line naming what the part is - the question, an option or the
+    // answer - the part's id, its ask and the revision of the ask's parts its text last changed
+    // in, then its text. No node carries a part's type, so the read asks the ask itself which
+    // part the id names.
+    describe("of an ask", () => {
+      const ask = "22222222-2222-4222-8222-222222222222";
+      const askRef = `dispatch://CORE-1/ask/${ask}`;
+      const part = (id: string, extra: Record<string, unknown> = {}) => ({
+        kind: "block",
+        id: `ask/${ask}#${id}`,
+        block_id: id,
+        issue_key: "CORE-1",
+        project: "CORE",
+        ref: `${askRef}#b-${id}`,
+        parent: { kind: "ask", id: ask, ref: askRef },
+        changed_version: 2,
+        parent_version: 2,
+        ...extra,
+      });
+      /** The ask its own read answers: its options and its answer carry the part ids the index
+       *  minted for them, so b1, which is neither, is its question. */
+      const askBody = {
+        id: ask,
+        issue_key: "CORE-1",
+        author: { kind: "session", id: "author-1" },
+        question: "Ship on Friday?",
+        options: [
+          { id: "b2", label: "Yes" },
+          { id: "b3", label: "No" },
+        ],
+        multiple: false,
+        urgency: "med",
+        anchor: null,
+        state: "answered",
+        answer: {
+          id: "b4",
+          user: "sami",
+          selected: ["Yes"],
+          text: null,
+          at: "2026-10-21T00:00:00Z",
+        },
+        revision: 2,
+        created_at: "2026-10-20T00:00:00Z",
+      };
+      /** A read of part `ref`, whose node the references route answers, against a server whose
+       *  ask read answers `askBody` with `ask` written over it. */
+      const readPart = (ref: string, node: unknown, overrides: Record<string, unknown> = {}) => {
+        const requests: string[] = [];
+        const fetchImpl = async (url: RequestInfo | URL): Promise<Response> => {
+          const target = new URL(String(url));
+          requests.push(target.pathname + target.search);
+          if (target.pathname === `/api/v1/asks/${ask}`) {
+            return response({ ask: { ...askBody, ...overrides }, replies: [], answers: [] });
+          }
+          if (target.pathname === "/api/v1/references") return response({ node, edges: [] });
+          throw new Error(`unexpected request: ${target.pathname}`);
+        };
+        const result = executeDispatchTool({
+          tool: "dispatch_read",
+          args: { ref },
+          cwd: "/workspace",
+          host: "omp",
+          config,
+          env: {},
+          exec: repoExec("owner/repo"),
+          fetchImpl: fetchImpl as typeof fetch,
+        });
+        return { result, requests };
+      };
+      const sections = ["Referenced by:", "- none", "Links:", "- none"];
+
+      test.each([
+        ["b1", "Question", "Ship on Friday?"],
+        ["b2", "Option", "Yes"],
+        ["b4", "Answer", "Yes"],
+      ])("read prints part %s of an ask as its %s", async (id, noun, text) => {
+        const { result, requests } = readPart(`${askRef}#b-${id}`, part(id, { text }));
+        expect((await result).text).toBe(
+          [`${noun} ${id} of ask ${ask} (changed in revision 2):`, text, ...sections].join("\n")
+        );
+        expect(requests).toContain(`/api/v1/asks/${ask}`);
+      });
+
+      test("a pinned reference to a part the ask has moved past names it a part", async () => {
+        const pinned = `${askRef}#b-b5@v1`;
+        const { result } = readPart(pinned, {
+          ...part("b5"),
+          changed_version: undefined,
+          pin: { version: 1, ref: pinned, text: "Maybe", state: "removed", removed_version: 2 },
+        });
+        expect((await result).text).toBe(
+          [
+            `Part b5 of ask ${ask}:`,
+            "Pinned to revision: 1",
+            "Removed in revision 2.",
+            "Text at revision 1:",
+            "Maybe",
+            ...sections,
+          ].join("\n")
+        );
+      });
+
+      // An ask whose parts the index has not placed - revision 0 and no part id - says only that
+      // the block is a part of the ask.
+      test("a part of an ask whose parts carry no id is named a part", async () => {
+        const { result } = readPart(`${askRef}#b-b2`, part("b2", { text: "Yes" }), {
+          options: [{ label: "Yes" }, { label: "No" }],
+          answer: { user: "sami", selected: ["Yes"], text: null, at: "2026-10-21T00:00:00Z" },
+          revision: undefined,
+        });
+        expect((await result).text).toBe(
+          [`Part b2 of ask ${ask} (changed in revision 2):`, "Yes", ...sections].join("\n")
+        );
+      });
+    });
   });
 
   test("reads a named artifact version from a singular dispatch URI", async () => {
@@ -8549,6 +8665,158 @@ describe("executeDispatchTool", () => {
       "/api/v1/references?to=dispatch%3A%2F%2FDSP-42%2Fask%2Faaaaaaaa-0000-4000-8000-000000000042",
       "/api/v1/references?from=dispatch%3A%2F%2FDSP-42%2Fask%2Faaaaaaaa-0000-4000-8000-000000000042",
     ]);
+  });
+
+  // Each option of an ask and its answer is a part of its own in the reference graph, so the read
+  // names the reference of each and lists the edges on that option under it. Every other edge
+  // stays under the ask, the ones at its question among them: no read carries the question's part
+  // id, so nothing places them on it.
+  describe("an ask's parts", () => {
+    const ask = "aaaaaaaa-0000-4000-8000-000000000042";
+    const askRef = `dispatch://DSP-42/ask/${ask}`;
+    const part = (id: string) => ({
+      kind: "block",
+      id: `ask/${ask}#${id}`,
+      block_id: id,
+      issue_key: "DSP-42",
+      project: "DSP",
+      ref: `${askRef}#b-${id}`,
+      parent: { kind: "ask", id: ask, ref: askRef },
+    });
+    const citer = (kind: string, id: string, ref: string) => ({ kind, id, ref });
+    const edge = (blockId: string, node: unknown, text: string) => ({
+      kind: "mentions",
+      direction: "in",
+      node,
+      block: part(blockId),
+      excerpt: { text },
+      created_at: "2026-09-10T08:00:00Z",
+      source_seq: 918,
+    });
+    /** A read of the ask against a server answering `GET /api/v1/asks/{id}` with `ask`, whose
+     *  inbound graph carries one edge at an option, one at the answer and one at the question. */
+    const readAsk = async (askBody: Record<string, unknown>) => {
+      const fetchImpl = async (url: RequestInfo | URL): Promise<Response> => {
+        const target = new URL(String(url));
+        if (target.pathname === `/api/v1/asks/${ask}`) {
+          return response({ ask: askBody, replies: [], answers: [] });
+        }
+        if (target.pathname === "/api/v1/references" && target.searchParams.has("to")) {
+          return response({
+            node: { kind: "ask", id: ask },
+            edges: [
+              edge(
+                "b2",
+                citer("comment", "comment-9", "dispatch://DSP-42/comment/comment-9"),
+                "I'd take JSON."
+              ),
+              edge("b4", citer("issue", "OPS-1", "dispatch://OPS-1"), "The answer decides it."),
+              edge(
+                "b1",
+                citer("message", "message-7", "dispatch://ACME-3/message/message-7"),
+                "Which API?"
+              ),
+            ],
+          });
+        }
+        if (target.pathname === "/api/v1/references" && target.searchParams.has("from")) {
+          return response({ node: { kind: "ask", id: ask }, edges: [] });
+        }
+        throw new Error(`unexpected request: ${target.pathname}`);
+      };
+      const result = await executeDispatchTool({
+        tool: "dispatch_read",
+        args: { ref: askRef },
+        cwd: "/workspace",
+        host: "omp",
+        config,
+        env: {},
+        exec: repoExec("owner/repo"),
+        fetchImpl: fetchImpl as typeof fetch,
+      });
+      return result.text.split("\n");
+    };
+    const askBody = {
+      id: ask,
+      issue_key: "DSP-42",
+      author: { kind: "session", id: "author-1" },
+      question: "The service needs a public API. Which approach should we use?",
+      options: [
+        { id: "b2", label: "JSON API", description: "Use the HTTP API." },
+        { id: "b3", label: "MCP API" },
+      ],
+      multiple: false,
+      urgency: "high",
+      anchor: null,
+      state: "answered",
+      answer: {
+        id: "b4",
+        user: "sami",
+        selected: ["JSON"],
+        text: "Ship JSON.",
+        at: "2026-09-09T00:00:00Z",
+      },
+      revision: 2,
+      created_at: "2026-09-09T00:00:00Z",
+    };
+
+    test("the read names each option and its answer, and lists the edges on that option under it", async () => {
+      expect(await readAsk(askBody)).toEqual([
+        "Question: The service needs a public API. Which approach should we use?",
+        "Options:",
+        `- JSON API — Use the HTTP API. (${askRef}#b-b2)`,
+        "  Referenced by:",
+        "  - mentions comment dispatch://DSP-42/comment/comment-9 (I'd take JSON. · 2026-09-10T08:00:00Z)",
+        `- MCP API (${askRef}#b-b3)`,
+        "State: answered",
+        `Ask id: ${ask}`,
+        "Answer:",
+        "- By: sami",
+        "- Selected: JSON",
+        "- Text: Ship JSON.",
+        `- Reference: ${askRef}#b-b4`,
+        "  Referenced by:",
+        "  - mentions issue dispatch://OPS-1 (The answer decides it. · 2026-09-10T08:00:00Z)",
+        "Replies:",
+        "- none",
+        "Referenced by:",
+        `- mentions message dispatch://ACME-3/message/message-7 (Which API? · 2026-09-10T08:00:00Z) (block ${askRef}#b-b1)`,
+        "Links:",
+        "- none",
+      ]);
+    });
+
+    // Until the index has run, `revision` is 0 and no part carries an id: the options read as
+    // they did before an ask had parts, and every edge is listed under the ask.
+    test("an ask whose parts are not indexed yet prints its options as before", async () => {
+      expect(
+        await readAsk({
+          ...askBody,
+          options: [{ label: "JSON API", description: "Use the HTTP API." }, { label: "MCP API" }],
+          answer: { ...askBody.answer, id: undefined },
+          revision: undefined,
+        })
+      ).toEqual([
+        "Question: The service needs a public API. Which approach should we use?",
+        "Options:",
+        "- JSON API — Use the HTTP API.",
+        "- MCP API",
+        "State: answered",
+        `Ask id: ${ask}`,
+        "Answer:",
+        "- By: sami",
+        "- Selected: JSON",
+        "- Text: Ship JSON.",
+        "Replies:",
+        "- none",
+        "Referenced by:",
+        `- mentions comment dispatch://DSP-42/comment/comment-9 (I'd take JSON. · 2026-09-10T08:00:00Z) (block ${askRef}#b-b2)`,
+        `- mentions issue dispatch://OPS-1 (The answer decides it. · 2026-09-10T08:00:00Z) (block ${askRef}#b-b4)`,
+        `- mentions message dispatch://ACME-3/message/message-7 (Which API? · 2026-09-10T08:00:00Z) (block ${askRef}#b-b1)`,
+        "Links:",
+        "- none",
+      ]);
+    });
   });
 
   test("posts a comment reply to an ask using reply_to_ask", async () => {
