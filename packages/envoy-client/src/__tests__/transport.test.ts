@@ -1,11 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import { machineID } from "../machine";
-import {
-  createEnvoyClient,
-  type DeliveryAnswer,
-  deliveryAnswerOf,
-  EnvoyApiError,
-} from "../transport";
+import { createEnvoyClient, type DeliveryAnswer, EnvoyApiError } from "../transport";
 
 type RecordedFetch = {
   readonly fetch: (input: RequestInfo | URL, init?: RequestInit) => Promise<Response>;
@@ -62,6 +57,7 @@ describe("EnvoyClient", () => {
       dir: "/work",
       topics: ["notifications.agent.ses_sender"],
       updated_at: undefined,
+      delivery: { mode: "core", reason: "not_answered" },
     });
     expect(recorded.requests).toHaveLength(1);
     expect(recorded.requests[0]?.method).toBe("POST");
@@ -112,12 +108,12 @@ describe("EnvoyClient", () => {
         plugin: PLUGIN,
       });
 
-    expect(deliveryAnswerOf(await register())).toEqual(consumer);
-    expect(deliveryAnswerOf(await register())).toEqual({ mode: "core", reason: "no_grant" });
+    expect((await register()).delivery).toEqual(consumer);
+    expect((await register()).delivery).toEqual({ mode: "core", reason: "no_grant" });
     // A listener of an earlier release answers no `delivery`: core.
-    expect(deliveryAnswerOf(await register())).toEqual({ mode: "core", reason: "not_answered" });
+    expect((await register()).delivery).toEqual({ mode: "core", reason: "not_answered" });
     // A mode this build does not know does not fail the registration: core.
-    expect(deliveryAnswerOf(await register())).toEqual({
+    expect((await register()).delivery).toEqual({
       mode: "core",
       reason: "unreadable_answer",
     });

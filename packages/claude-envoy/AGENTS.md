@@ -34,7 +34,12 @@ answers `nak`, and from the frame's third delivery `done` with a notice naming i
 arrives after a `/clear` moved the session to another id is answered `nak`. The core copies of
 those subjects answer only a lane's receipt (`relaysCoreTopic`), and the replay engine makes no
 `/v1/replay` call. The relay's snapshot (the resume point and each topic's follow time) is the
-`consumer` part of the id's state file. Answered `core`, or not at all, the core path below runs:
+`consumer` part of the id's state file, written whenever it changes. An id with no snapshot of
+its own that has replay cursors — one coming from a release before this relay, or a session whose
+listener gains the grant later — registers the lowest cursor the engine holds over its agent
+subject and its followed stored topics, so the listener creates the consumer there instead of at
+the stream's end and what was stored while the session was away is still relayed.
+Answered `core`, or not at all, the core path below runs:
 the rollout fallback for a plugin or listener of an earlier release and for a listener whose NATS
 user lacks the session-consumer grant, which dispatch://INFRA-771 removes.
 

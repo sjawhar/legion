@@ -92,7 +92,6 @@ import {
   sessionSettings,
 } from "@legion/envoy-client/session-settings";
 import { postSlackReply } from "@legion/envoy-client/slack-post";
-import { streamStores } from "@legion/envoy-client/stream-topics";
 import {
   EnvoyToolOperation,
   envoyToolSpecs,
@@ -103,7 +102,6 @@ import {
 } from "@legion/envoy-client/tool-contract";
 import {
   createEnvoyClient,
-  deliveryAnswerOf,
   EnvoyApiError,
   expandSubscriptionTopics,
   mergeInterestSources,
@@ -1468,9 +1466,9 @@ export default function envoyExtension(pi: PiApi): void {
     }
     if (removed) {
       void replayFollowedChanged();
-      // The listener's consumer still relays the topic: registered again without it, the relay
-      // stops taking it at once (`setFollowed`) and the listener's filter drops it.
-      if (relayedFor !== undefined) {
+      // The listener's consumer still relays the session's topics: registered again without this
+      // one, the relay stops taking it at once (`setFollowed`) and the listener's filter drops it.
+      if (relay?.sessionID === sessionID && relay.delivery.relaying()) {
         void Promise.resolve()
           .then(registerSession)
           .catch(() => undefined);
@@ -1500,7 +1498,7 @@ export default function envoyExtension(pi: PiApi): void {
             settle: () => {
               held.settle();
               relayed.done();
-              persistRelay();
+              relay?.delivery.persist();
             },
             release: () => {
               held.release();
@@ -1998,34 +1996,17 @@ export default function envoyExtension(pi: PiApi): void {
   // `consumer`, the listener relays the session's durable consumer on that subject: its agent
   // subject and every followed topic the stream stores, each frame handed to `deliver` in stream
   // order and answered `done` once written. The core copies of those subjects are then shown
-  // nothing (`relaysCoreTopic`), the agent subject's lane receipt still answered, and the replay
+  // nothing (`relays`), the agent subject's lane receipt still answered, and the replay
   // engine makes no `/v1/replay` call. Answered `core`, or not at all, the core path runs as before.
   interface Relay {
     readonly sessionID: string;
     readonly delivery: ConsumerDelivery;
     subscription: Subscription | undefined;
-    /** The snapshot last appended (`persistRelay`): an unchanged one is not appended again. */
-    persisted: string;
   }
   let relay: Relay | undefined;
-  // The session and the topics of the last registration answered `consumer`: the listener relays
-  // those the stream stores (`streamStores`). Undefined on the core path.
-  let relayedFor: { readonly sessionID: string; readonly topics: ReadonlySet<string> } | undefined;
 
   const relaysCoreTopic = (topic: string): boolean =>
-    relayedFor !== undefined && relayedFor.sessionID === sessionID && relayedFor.topics.has(topic);
-
-  // Appends the relay's snapshot (`CONSUMER_STATE_ENTRY`: the resume point and the follow times)
-  // to the transcript of the session it is for, when it changed: after a frame is written, after
-  // the followed topics change, and after a registration answer moves the stream.
-  const persistRelay = (owner: Relay | undefined = relay): void => {
-    if (owner === undefined || relay !== owner || transcriptSessionID() !== owner.sessionID) return;
-    const data = { session_id: owner.sessionID, ...owner.delivery.snapshot() };
-    const serialized = JSON.stringify(data);
-    if (serialized === owner.persisted) return;
-    owner.persisted = serialized;
-    pi.appendEntry(CONSUMER_STATE_ENTRY, data);
-  };
+    relay?.sessionID === sessionID && relay.delivery.relays(topic);
 
   // A relay frame for a session the host is no longer on (a switch, before the next pass closes
   // its relay), or one that drains in while the session shuts down, is one the session cannot
@@ -2039,8 +2020,14 @@ export default function envoyExtension(pi: PiApi): void {
     await deliver(frame.subject, frame.subject, frame.data, "", Date.now(), frame);
   };
 
-  // The relay of session `id`, its snapshot restored from `entries` (before any `setFollowed`).
+  // The relay of session `id`, its snapshot restored from `entries` (before any `setFollowed`),
+  // and every later change of it appended to the transcript of the session it is for
+  // (`CONSUMER_STATE_ENTRY`): after a frame is written, after the followed topics change, and
+  // after a registration answer moves the stream. The follows map goes with an entry only when it
+  // changed, so a written frame costs one resume point beside the frame's own entries; what the
+  // relay restored is stored already and is not appended again.
   const createRelay = (id: string, entries: readonly unknown[], ledger: ReplayEngine): Relay => {
+    let persistedFollows = "";
     const delivery: ConsumerDelivery = createConsumerDelivery({
       sessionID: id,
       ledger,
@@ -2057,15 +2044,24 @@ export default function envoyExtension(pi: PiApi): void {
         if (connection === undefined) throw new Error("no NATS connection");
         connection.publish(reply, codec.encode(body));
       },
+      persist: (snapshot) => {
+        // Another session's transcript is not this relay's to write to: the change is appended
+        // once the host records in this session again.
+        if (relay?.delivery !== delivery || transcriptSessionID() !== id) return false;
+        const follows = JSON.stringify(snapshot.follows);
+        pi.appendEntry(CONSUMER_STATE_ENTRY, {
+          session_id: id,
+          ...(snapshot.resume === undefined ? {} : { resume: snapshot.resume }),
+          ...(follows === persistedFollows ? {} : { follows: snapshot.follows }),
+        });
+        persistedFollows = follows;
+        return true;
+      },
     });
     const restored = consumerSnapshot(entries, id);
     if (restored !== undefined) delivery.restore(restored);
-    return {
-      sessionID: id,
-      delivery,
-      subscription: undefined,
-      persisted: JSON.stringify({ session_id: id, ...delivery.snapshot() }),
-    };
+    persistedFollows = JSON.stringify(delivery.snapshot().follows);
+    return { sessionID: id, delivery, subscription: undefined };
   };
 
   // Subscribes the relay subject, unless it is open: a subscription on a connection the listener
@@ -2080,8 +2076,7 @@ export default function envoyExtension(pi: PiApi): void {
     void pumpRelay(owner, subscription);
   };
 
-  // Opens session `id`'s relay subject, closing another session's relay first. What it restored
-  // counts as persisted already: only a change is appended.
+  // Opens session `id`'s relay subject, closing another session's relay first.
   const openRelay = async (context: SessionContext, id: string, live: Fence): Promise<void> => {
     if (replay === undefined) return;
     if (relay?.sessionID !== id) {
@@ -2091,14 +2086,13 @@ export default function envoyExtension(pi: PiApi): void {
     await subscribeRelay(relay, live);
   };
 
-  // The session left (or shut down): its unsettled frames are answered `nak`, and its relay
-  // subject closed. The next registration answers the new session's mode.
+  // The session left (or shut down): its unsettled frames are answered `nak`, the replay engine
+  // leaves consumer mode, and its relay subject is closed. The next registration answers the new
+  // session's mode.
   const closeRelay = (): void => {
     const owner = relay;
     if (owner === undefined) return;
     relay = undefined;
-    relayedFor = undefined;
-    replay?.setConsumerMode(false);
     owner.delivery.close();
     const subscription = owner.subscription;
     owner.subscription = undefined;
@@ -2147,8 +2141,10 @@ export default function envoyExtension(pi: PiApi): void {
 
   // What a registration's answer says of consumer delivery, for the session it registered with
   // the topics it carried, and the relay it asked for. One that asked nothing (no relay subject
-  // open) has the listener relay nothing. An answer for a session this instance has left, or for
-  // a relay since closed, changes nothing.
+  // open) relays nothing, whatever the listener answered, so the relay takes none of the topics
+  // and the replay engine sweeps again. An answer for a session this instance has left, or for a
+  // relay since closed, changes nothing.
+  const NOT_ASKED = { mode: "core", reason: "not_asked" } as const;
   const takeDeliveryAnswer = (
     registeredSession: string,
     topics: readonly string[],
@@ -2156,17 +2152,12 @@ export default function envoyExtension(pi: PiApi): void {
     result: SubscribeResult
   ): void => {
     if (sessionID !== registeredSession || (asked !== undefined && relay !== asked)) return;
-    const mode = asked?.delivery.answered(deliveryAnswerOf(result)) ?? "core";
-    if (mode === "consumer") {
-      relayedFor = {
-        sessionID: registeredSession,
-        topics: new Set(topics.filter((topic) => streamStores(topic))),
-      };
-    } else {
-      relayedFor = undefined;
+    const owner = asked ?? (relay?.sessionID === registeredSession ? relay : undefined);
+    if (owner === undefined) {
+      replay?.setConsumerMode(false);
+      return;
     }
-    replay?.setConsumerMode(mode === "consumer");
-    persistRelay(asked);
+    owner.delivery.answered(asked === undefined ? NOT_ASKED : result.delivery, topics);
   };
 
   // The live agent conversation stream (LEGION-232). This session's own turns, tool calls and
@@ -2471,7 +2462,7 @@ export default function envoyExtension(pi: PiApi): void {
   // heartbeat's own direct refresh all feed the one clock.
   // While the session's relay subject is open, the registration asks for consumer delivery
   // (`delivery`: the relay's epoch and resume point), the relay taking the topics it carries as
-  // followed first and persisting that; its answer says whether the listener relays them.
+  // followed first; its answer says whether the listener relays them.
   const registerSession = () => {
     const registeringFor = sessionID;
     const own = agentSubject(sessionID);
@@ -2490,10 +2481,7 @@ export default function envoyExtension(pi: PiApi): void {
     ];
     const asking =
       relay?.sessionID === sessionID && relay.subscription !== undefined ? relay : undefined;
-    if (asking !== undefined) {
-      asking.delivery.setFollowed(topics.filter((topic) => topic !== own));
-      persistRelay(asking);
-    }
+    if (asking !== undefined) asking.delivery.setFollowed(topics);
     return requireEnvoy()
       .client.subscribe({
         sessionID,
@@ -4285,10 +4273,15 @@ export default function envoyExtension(pi: PiApi): void {
           const directory = optionalStringFor(parameters, "dir");
           const title = optionalStringFor(parameters, "title");
           const sessions = await client.listSessions({ directory, title });
+          // A session answers for two machines: `host`, where its process runs, and `machine_id`,
+          // the listener it registered through. A filter naming either one is that machine's
+          // filter, so a hub's id (`envoy-hub`, `gke`) lists the sessions registered through it.
           const result =
             machine === undefined
               ? sessions
-              : sessions.filter((session) => (session.host ?? session.machine_id) === machine);
+              : sessions.filter(
+                  (session) => session.host === machine || session.machine_id === machine
+                );
           return toolSuccess(JSON.stringify(result, null, 2), {
             count: result.length,
             machine,

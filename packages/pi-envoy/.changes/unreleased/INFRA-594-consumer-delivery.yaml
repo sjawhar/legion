@@ -14,8 +14,11 @@ body: |-
   published while the session was killed, restarting or disconnected, a role message to a role it
   holds included, is shown once when it is back, for up to 72 hours. A nats.js reconnect begins a
   new epoch and registers at once, so the listener restarts the relay at the consumer's ack floor;
-  the resume point and each topic's follow time are kept in the session file
-  (`envoy-consumer-state`), so a resumed session's missing consumer starts where it stopped. A BTW
+  the resume point is kept in the session file (`envoy-consumer-state`), with each topic's follow
+  time whenever it changes, so a resumed session's missing consumer starts where it stopped. A
+  session coming from the previous plugin has no resume point of its own: its first consumer
+  starts at the replay cursors its session file holds, so the messages stored while it was away
+  are shown instead of acked away. A BTW
   that arrives late (delivered before, or stored before the connection's epoch began) is one inert
   card and starts no side turn. Answered `core`, or by a listener of an earlier release, delivery
   works as before (INFRA-594).

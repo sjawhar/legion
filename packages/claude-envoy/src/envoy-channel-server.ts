@@ -51,7 +51,6 @@ import {
   sessionSettings,
 } from "@legion/envoy-client/session-settings"
 import { postSlackReply } from "@legion/envoy-client/slack-post"
-import { streamStores } from "@legion/envoy-client/stream-topics"
 import {
   EnvoyToolOperation,
   envoyToolSpecs,
@@ -62,7 +61,6 @@ import {
 } from "@legion/envoy-client/tool-contract"
 import {
   createEnvoyClient,
-  deliveryAnswerOf,
   EnvoyApiError,
   type EnvoyClient,
   expandSubscriptionTopics,
@@ -729,36 +727,11 @@ export async function startChannelSession(options: ChannelSessionOptions): Promi
     /** The id's state file, which also holds the relay's snapshot. */
     readonly state: ReplayStateWriter
     subscription: ChannelTopicSubscription | undefined
-    /** The snapshot last written (`persistRelay`): an unchanged one is not written again. */
-    persisted: string
   }
   let relay: Relay | undefined
-  /**
-   * The session and the topics of the last registration answered `consumer`: the listener relays
-   * those the stream stores (`streamStores`). Undefined on the core path.
-   */
-  let relayed: { readonly sessionID: string; readonly topics: ReadonlySet<string> } | undefined
 
   const relaysCoreTopic = (topic: string): boolean =>
-    relayed !== undefined && relayed.sessionID === identity.id && relayed.topics.has(topic)
-
-  /**
-   * Writes the relay's snapshot (the resume point and the follow times) into its id's state file
-   * when it changed: after a frame is written, after the followed topics change, and after a
-   * registration answer moves the stream.
-   */
-  const persistRelay = (owner: Relay | undefined): void => {
-    if (owner === undefined || relay !== owner) return
-    const snapshot: ConsumerDeliverySnapshot = owner.delivery.snapshot()
-    const serialized = JSON.stringify(snapshot)
-    if (serialized === owner.persisted) return
-    owner.persisted = serialized
-    owner.state.consumer(snapshot).catch((error: unknown) => {
-      process.stderr.write(
-        `envoy-channel: could not persist the consumer delivery state — ${messageFor(error)}\n`,
-      )
-    })
-  }
+    relay?.sessionID === identity.id && relay.delivery.relays(topic)
 
   /**
    * Hands one relay frame to the channel's write queue, and answers it once Claude Code has it:
@@ -784,11 +757,6 @@ export async function startChannelSession(options: ChannelSessionOptions): Promi
       frame.done()
       return
     }
-    if (identityOf !== undefined && replay.delivered(identityOf)) {
-      claim.settle()
-      frame.done()
-      return
-    }
     let shown: boolean
     try {
       const queued = delivery.enqueue({ subject: frame.subject, raw: frame.data, late: frame.late })
@@ -807,13 +775,15 @@ export async function startChannelSession(options: ChannelSessionOptions): Promi
     if (identityOf !== undefined) await replay.recordDelivered(identityOf)
     claim.settle()
     frame.done()
-    persistRelay(owner)
+    owner.delivery.persist()
   }
 
   /**
    * A new relay for session `sessionID`, its snapshot `restored` (before any `setFollowed`), its
    * subject subscribed at once; another id's relay is closed first. Its epoch begins as it is
    * made, on this process's one NATS connection; a reconnect begins another (`renewRelayEpoch`).
+   * Every later change of its snapshot goes into the id's state file: after a frame is written,
+   * after the followed topics change, and after a registration answer moves the stream.
    */
   const openRelay = (
     sessionID: string,
@@ -834,6 +804,15 @@ export async function startChannelSession(options: ChannelSessionOptions): Promi
         },
       },
       publish: (reply, body) => options.connection.publish(reply, encoder.encode(body)),
+      persist: (snapshot) => {
+        if (relay !== owner) return false
+        state.consumer(snapshot).catch((error: unknown) => {
+          process.stderr.write(
+            `envoy-channel: could not persist the consumer delivery state — ${messageFor(error)}\n`,
+          )
+        })
+        return true
+      },
     })
     if (restored !== undefined) consumer.restore(restored)
     const owner: Relay = {
@@ -841,7 +820,6 @@ export async function startChannelSession(options: ChannelSessionOptions): Promi
       delivery: consumer,
       state,
       subscription: undefined,
-      persisted: JSON.stringify(consumer.snapshot()),
     }
     relay = owner
     const subscription = options.connection.subscribe(consumer.subject)
@@ -864,14 +842,13 @@ export async function startChannelSession(options: ChannelSessionOptions): Promi
 
   /**
    * The relay's session left (a `/clear`) or shuts down: its unsettled frames are answered `nak`,
-   * its subject unsubscribed, and the core path runs until a registration answers otherwise.
+   * the replay engine leaves consumer mode, its subject is unsubscribed, and the core path runs
+   * until a registration answers otherwise.
    */
   function closeRelay(): void {
     const owner = relay
     if (owner === undefined) return
     relay = undefined
-    relayed = undefined
-    replay.setConsumerMode(false)
     owner.delivery.close()
     owner.subscription?.unsubscribe()
     owner.subscription = undefined
@@ -893,15 +870,14 @@ export async function startChannelSession(options: ChannelSessionOptions): Promi
 
   /** The relay takes the topics the session follows now, before a registration carries them. */
   const refollow = (owner: Relay | undefined, topics: readonly string[]): void => {
-    if (owner === undefined) return
-    owner.delivery.setFollowed(topics.filter((topic) => topic !== directSubject))
-    persistRelay(owner)
+    owner?.delivery.setFollowed(topics)
   }
 
   /**
    * What a registration's answer says of consumer delivery, for the id it registered with the
-   * topics it carried, and the relay it asked for. An answer for an id this process has left, or
-   * for a relay since closed, changes nothing.
+   * topics it carried, and the relay it asked for. One that asked nothing (no relay open) is
+   * answered `core` by the listener, and nothing is relayed. An answer for an id this process has
+   * left, or for a relay since closed, changes nothing.
    */
   const takeDeliveryAnswer = (
     sessionID: string,
@@ -910,11 +886,11 @@ export async function startChannelSession(options: ChannelSessionOptions): Promi
     result: SubscribeResult,
   ): void => {
     if (sessionID !== identity.id || relay !== asked) return
-    const mode = asked?.delivery.answered(deliveryAnswerOf(result)) ?? "core"
-    relayed =
-      mode === "consumer" ? { sessionID, topics: new Set(topics.filter(streamStores)) } : undefined
-    replay.setConsumerMode(mode === "consumer")
-    persistRelay(asked)
+    if (asked === undefined) {
+      replay.setConsumerMode(false)
+      return
+    }
+    asked.delivery.answered(result.delivery, topics)
   }
 
   const forwarder: ChannelForwarder = createChannelForwarder(options.connection, {
@@ -1614,8 +1590,13 @@ export async function executeEnvoyTool(
         ...(args.dir === undefined ? {} : { directory: args.dir }),
         ...(args.title === undefined ? {} : { title: args.title }),
       })
+      // A session answers for two machines: `host`, where its process runs, and `machine_id`, the
+      // listener it registered through. A filter naming either one is that machine's filter, so a
+      // hub's id (`envoy-hub`, `gke`) lists the sessions registered through it.
       return args.machine
-        ? sessions.filter((session) => (session.host ?? session.machine_id) === args.machine)
+        ? sessions.filter(
+            (session) => session.host === args.machine || session.machine_id === args.machine,
+          )
         : sessions
     }
     case EnvoyToolOperation.setRole: {

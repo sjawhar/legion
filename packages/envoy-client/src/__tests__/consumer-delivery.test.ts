@@ -1,6 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import {
   type ConsumerDeliveryOptions,
+  type ConsumerDeliverySnapshot,
   type ConsumerFrame,
   type ConsumerGapNotice,
   createConsumerDelivery,
@@ -12,7 +13,12 @@ import {
   type RelayMessage,
   type RelayReply,
 } from "../consumer-delivery";
-import { createReplayEngine, type ReplayEngine, type ReplaySnapshot } from "../replay";
+import {
+  createReplayEngine,
+  type ReplayEngine,
+  type ReplaySnapshot,
+  type ReplayState,
+} from "../replay";
 
 const SESSION = "ses_a";
 const AGENT = "notifications.agent.ses_a";
@@ -101,6 +107,8 @@ function setup(
   options: {
     readonly clock?: { now: number };
     readonly ledger?: Pick<ReplayEngine, "delivered">;
+    /** The replay state the ledger reports: the cursors the core path left. */
+    readonly state?: ReplayState;
   } = {}
 ) {
   const clock = options.clock ?? { now: T0 };
@@ -116,6 +124,9 @@ function setup(
     readonly receivedAt: number;
   }> = [];
   const logs: string[] = [];
+  // The snapshots the host was asked to write, and every `setConsumerMode` the ledger was told.
+  const persisted: ConsumerDeliverySnapshot[] = [];
+  const consumerMode: boolean[] = [];
   const state = {
     deliver: (_frame: ConsumerFrame): void | Promise<void> => undefined,
   };
@@ -137,6 +148,12 @@ function setup(
       liveFailed: async (followed, envelope, _error, receivedAt) => {
         failed.push({ subject: followed, eventID: envelope.event_id, receivedAt });
       },
+      state: () => options.state ?? { subjects: {} },
+      setConsumerMode: (on) => consumerMode.push(on),
+    },
+    persist: (snapshot) => {
+      persisted.push(snapshot);
+      return true;
     },
     now: () => clock.now,
     every: timers.every,
@@ -150,7 +167,20 @@ function setup(
       await Promise.allSettled(running);
     } while (running.length !== seen);
   };
-  return { clock, timers, replies, handed, gaps, failed, logs, state, delivery, settled };
+  return {
+    clock,
+    timers,
+    replies,
+    handed,
+    gaps,
+    failed,
+    logs,
+    state,
+    delivery,
+    settled,
+    persisted,
+    consumerMode,
+  };
 }
 
 const seqs = (frames: readonly ConsumerFrame[]) => frames.map((frame) => frame.streamSeq);
@@ -497,12 +527,15 @@ describe("resume point", () => {
 describe("gaps", () => {
   test("a gap the answer reports is told once, not again by the frame after it", () => {
     const { delivery, gaps } = setup();
-    const mode = delivery.answered({
-      mode: "consumer",
-      subject: deliverSubject(SESSION),
-      stream_id: STREAM,
-      gap: true,
-    });
+    const mode = delivery.answered(
+      {
+        mode: "consumer",
+        subject: deliverSubject(SESSION),
+        stream_id: STREAM,
+        gap: true,
+      },
+      [AGENT]
+    );
     delivery.receive(relay({ seq: 1, gap: true }));
 
     expect(mode).toBe("consumer");
@@ -521,18 +554,14 @@ describe("gaps", () => {
     const { delivery, gaps } = setup();
     delivery.restore({ resume: { stream_id: "stream-old", seq: 90 }, follows: {} });
 
-    delivery.answered({
+    const consumer = {
       mode: "consumer",
       subject: deliverSubject(SESSION),
       stream_id: STREAM,
       gap: false,
-    });
-    delivery.answered({
-      mode: "consumer",
-      subject: deliverSubject(SESSION),
-      stream_id: STREAM,
-      gap: false,
-    });
+    } as const;
+    delivery.answered(consumer, [AGENT]);
+    delivery.answered(consumer, [AGENT]);
 
     expect(gaps.map((notice) => notice.kind)).toEqual(["stream_recreated"]);
     expect(delivery.resumePoint()).toBeUndefined();
@@ -542,7 +571,130 @@ describe("gaps", () => {
     const { delivery, gaps } = setup();
     delivery.restore({ resume: { stream_id: "stream-old", seq: 90 }, follows: {} });
 
-    expect(delivery.answered({ mode: "core", reason: "no_grant" })).toBe("core");
+    expect(delivery.answered({ mode: "core", reason: "no_grant" }, [AGENT])).toBe("core");
     expect(gaps).toEqual([]);
+  });
+});
+
+describe("the move from the core path to consumer delivery", () => {
+  const CONSUMER = {
+    mode: "consumer",
+    subject: deliverSubject(SESSION),
+    stream_id: STREAM,
+    gap: false,
+  } as const;
+
+  test("with no snapshot, the registration resumes at the lowest cursor the sweeps left", () => {
+    const { delivery } = setup({
+      state: {
+        stream_id: STREAM,
+        subjects: { [AGENT]: { since: 2, after: 12 }, [ISSUE_TOPIC]: { since: 3, after: 7 } },
+      },
+    });
+
+    expect(delivery.registration().resume).toEqual({ stream_id: STREAM, seq: 7 });
+  });
+
+  test("a cursor of a topic the stream does not store is not one the relay resumes at", () => {
+    const { delivery } = setup({
+      state: {
+        stream_id: STREAM,
+        subjects: { [AGENT]: { after: 12 }, "notifications.team.alpha": { after: 1 } },
+      },
+    });
+
+    expect(delivery.registration().resume).toEqual({ stream_id: STREAM, seq: 12 });
+  });
+
+  test("a subject no sweep has read yet, and a state without a stream, seed nothing", () => {
+    const unread = setup({ state: { stream_id: STREAM, subjects: { [AGENT]: {} } } });
+    const older = setup({
+      state: { stream_created: "2026-10-01T00:00:00Z", subjects: { [AGENT]: { after: 4 } } },
+    });
+
+    expect(unread.delivery.registration()).not.toHaveProperty("resume");
+    expect(older.delivery.registration()).not.toHaveProperty("resume");
+  });
+
+  test("the session's own resume point is the one registered once it has taken a frame", () => {
+    const { delivery, handed } = setup({
+      state: { stream_id: STREAM, subjects: { [AGENT]: { after: 7 } } },
+    });
+    delivery.receive(relay({ seq: 20 }));
+    handed[0]?.done();
+
+    expect(delivery.registration().resume).toEqual({ stream_id: STREAM, seq: 20 });
+  });
+
+  test("a message stored past the cursor is shown once, and the ledger is in consumer mode", () => {
+    const { delivery, handed, consumerMode } = setup({
+      state: { stream_id: STREAM, subjects: { [AGENT]: { after: 7 } } },
+    });
+
+    const registration = delivery.registration();
+    expect(registration.resume).toEqual({ stream_id: STREAM, seq: 7 });
+    delivery.answered(CONSUMER, [AGENT]);
+    // The listener creates the consumer at the resume point plus one: message 8 is relayed.
+    delivery.receive(relay({ seq: 8 }));
+    delivery.receive(relay({ seq: 8, delivered: 2 }));
+
+    expect(seqs(handed)).toEqual([8]);
+    expect(consumerMode).toEqual([true]);
+  });
+
+  test("a consumer answer relays the stored topics it carried, and a core one none", () => {
+    const { delivery, consumerMode } = setup();
+
+    delivery.answered(CONSUMER, [AGENT, ISSUE_TOPIC, "notifications.team.alpha"]);
+    expect(delivery.relaying()).toBe(true);
+    expect(delivery.relays(AGENT)).toBe(true);
+    expect(delivery.relays(ISSUE_TOPIC)).toBe(true);
+    expect(delivery.relays("notifications.team.alpha")).toBe(false);
+
+    delivery.answered({ mode: "core", reason: "not_answered" }, [AGENT, ISSUE_TOPIC]);
+    expect(delivery.relaying()).toBe(false);
+    expect(delivery.relays(ISSUE_TOPIC)).toBe(false);
+    expect(consumerMode).toEqual([true, false]);
+  });
+
+  test("the relay closing leaves consumer mode and relays nothing", () => {
+    const { delivery, consumerMode } = setup();
+    delivery.answered(CONSUMER, [AGENT, ISSUE_TOPIC]);
+
+    delivery.close();
+
+    expect(delivery.relaying()).toBe(false);
+    expect(consumerMode).toEqual([true, false]);
+  });
+});
+
+describe("persisting the snapshot", () => {
+  test("a change is written once; what a restore brought back is not written again", () => {
+    const { delivery, handed, persisted, clock } = setup();
+    delivery.setFollowed([ISSUE_TOPIC]);
+    delivery.setFollowed([ISSUE_TOPIC]);
+    delivery.receive(relay({ seq: 4 }));
+    handed[0]?.done();
+    delivery.persist();
+    delivery.persist();
+
+    expect(persisted).toEqual([
+      { follows: { [ISSUE_TOPIC]: T0 } },
+      { resume: { stream_id: STREAM, seq: 4 }, follows: { [ISSUE_TOPIC]: T0 } },
+    ]);
+
+    const restarted = setup({ clock });
+    restarted.delivery.restore(delivery.snapshot());
+    restarted.delivery.setFollowed([ISSUE_TOPIC]);
+    restarted.delivery.persist();
+
+    expect(restarted.persisted).toEqual([]);
+  });
+
+  test("the session's own agent subject is not one of the follow times", () => {
+    const { delivery } = setup();
+    delivery.setFollowed([AGENT, ISSUE_TOPIC]);
+
+    expect(delivery.snapshot().follows).toEqual({ [ISSUE_TOPIC]: T0 });
   });
 });

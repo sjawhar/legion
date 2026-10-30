@@ -2,6 +2,7 @@ import { agentSubject } from "@legion/contracts";
 import { z } from "zod";
 import { type DedupeIdentity, DedupeIdentitySchema, renderInbound } from "./delivery";
 import { type ReplayEngine, type ReplayNotice, subjectsOverlap } from "./replay";
+import { streamStores } from "./stream-topics";
 import {
   type DeliveryAnswer,
   type DeliveryRequest,
@@ -212,9 +213,17 @@ export interface ConsumerDeliveryOptions {
   readonly publish: (reply: string, body: RelayReply) => void;
   /**
    * The persisted ledger of frames written (`ReplayEngine.delivered`), which also shows the failure
-   * notice of a frame given up on (`ReplayEngine.liveFailed`).
+   * notice of a frame given up on (`ReplayEngine.liveFailed`). Its cursors seed the first
+   * registration of a session that moves from the core path to consumer delivery (`registration`),
+   * and `setConsumerMode` tells it whether the listener relays the stream now (`answered`).
    */
-  readonly ledger: Pick<ReplayEngine, "delivered" | "liveFailed">;
+  readonly ledger: Pick<ReplayEngine, "delivered" | "liveFailed" | "state" | "setConsumerMode">;
+  /**
+   * Stores the snapshot the host persists, called only when it changed since the last write; the
+   * host keeps it where it keeps the session's state, and answers whether it stored it. A `false`
+   * leaves the snapshot unstored, so the next change offers it again.
+   */
+  readonly persist?: (snapshot: ConsumerDeliverySnapshot) => boolean;
   readonly now?: () => number;
   /** Runs `callback` every `ms` until the returned stop runs; `setInterval` by default. */
   readonly every?: (ms: number, callback: () => void) => () => void;
@@ -243,19 +252,38 @@ export interface ConsumerDelivery {
   epoch(): ConsumerEpoch;
   /** Begins a new epoch: call it for every new NATS connection, then register again. */
   beginEpoch(): ConsumerEpoch;
-  /** The registration's `delivery` field: the epoch, and the resume point when one is known. */
+  /**
+   * The registration's `delivery` field: the epoch, and the resume point. That is where this
+   * session is up to when it has one; with none — a session that has never taken a frame from a
+   * consumer — it is seeded from the ledger's cursors, so a session moving from the core path to
+   * consumer delivery resumes where its sweeps left off instead of at the stream's end.
+   */
   registration(): DeliveryRequest;
   /**
-   * Takes the registration's answer (`deliveryAnswerOf`) and returns its mode. A consumer answer
-   * that reports a gap, or names another stream than the resume point's, tells the session once.
+   * Takes the registration's answer and the topics that registration carried, and returns the
+   * answer's mode. A consumer answer that reports a gap, or names another stream than the resume
+   * point's, tells the session once; its stored topics (`streamStores`) become the ones the
+   * listener relays (`relays`), and the ledger is put in consumer mode. Any other answer leaves
+   * the core path running. Persists the snapshot when it changed.
    */
-  answered(answer: DeliveryAnswer): DeliveryAnswer["mode"];
+  answered(answer: DeliveryAnswer, topics: readonly string[]): DeliveryAnswer["mode"];
   /**
-   * Takes the topics the session follows now (its agent subject is always taken). A new one is
-   * stamped now, so frames stored before it are dropped; a dropped one is forgotten. Call it before
-   * the registration that adds a topic, and persist `snapshot()` after it.
+   * Whether the listener relays `topic` from the session's consumer: the core copy of a frame on
+   * it is shown nothing, since the relay's copy is the one shown.
+   */
+  relays(topic: string): boolean;
+  /** Whether the last registration was answered `consumer`. */
+  relaying(): boolean;
+  /**
+   * Takes the topics the session follows now (its agent subject is always taken, and never kept
+   * among them). A new one is stamped now, so frames stored before it are dropped; a dropped one
+   * is forgotten. Call it before the registration that adds a topic. Persists the snapshot when it
+   * changed.
    */
   setFollowed(topics: Iterable<string>): void;
+  /** Offers the snapshot to the host's `persist`, when it changed: call it after a frame is
+   *  written. */
+  persist(): void;
   /**
    * Below this point the session holds nothing unwritten: the lowest stream sequence received and
    * not yet written, minus one, or, with none held, the highest written. Undefined before any.
@@ -314,6 +342,12 @@ export function createConsumerDelivery(options: ConsumerDeliveryOptions): Consum
   // A retention gap the registration answer told: the next frame's `Envoy-Gap` is the same one.
   let gapTold = false;
   let closed = false;
+  // The stored topics of the last registration answered `consumer`, which the listener relays
+  // (`streamStores`); undefined on the core path.
+  let relayed: ReadonlySet<string> | undefined;
+  // The snapshot the host last wrote (`persist`): an unchanged one is not offered again. A new
+  // delivery holds nothing, which is what a host with no snapshot of its own stored.
+  let persisted = JSON.stringify({ follows: {} } satisfies ConsumerDeliverySnapshot);
   // Frames received and unsettled, by stream and sequence: a redelivery joins its first copy.
   const entries = new Map<string, Entry>();
   const queue: Entry[] = [];
@@ -515,6 +549,44 @@ export function createConsumerDelivery(options: ConsumerDeliveryOptions): Consum
     return written === undefined ? undefined : { stream_id: streamID, seq: written };
   };
 
+  // Where a session with no resume point of its own starts its first consumer: the lowest cursor
+  // the core path left over the subjects a relay carries (its agent subject and the followed
+  // topics the stream stores), on the stream those cursors were read on. Everything the sweeps
+  // handled is at or below it and what they never reached is above it, so the consumer the
+  // listener creates at that sequence plus one relays what is still owed and the stream's order
+  // holds; a frame below another followed topic's own cursor is already written, and the ledger
+  // drops it. A ledger with no cursor yet, or a state older than stream ids (a `resume` names the
+  // stream), seeds nothing: that consumer starts at the stream's end, as a session with no
+  // history does.
+  const seededResume = (): ResumePoint | undefined => {
+    const state = ledger.state();
+    const stream = state.stream_id;
+    if (stream === undefined) return undefined;
+    let lowest: number | undefined;
+    for (const [subject, cursor] of Object.entries(state.subjects)) {
+      if (cursor.after === undefined || !streamStores(subject)) continue;
+      if (lowest === undefined || cursor.after < lowest) lowest = cursor.after;
+    }
+    return lowest === undefined ? undefined : { stream_id: stream, seq: lowest };
+  };
+
+  const snapshot = (): ConsumerDeliverySnapshot => {
+    const resume = resumePoint();
+    return {
+      ...(resume === undefined ? {} : { resume }),
+      follows: Object.fromEntries(follows),
+    };
+  };
+
+  const persist = (): void => {
+    if (options.persist === undefined) return;
+    const current = snapshot();
+    const serialized = JSON.stringify(current);
+    if (serialized === persisted) return;
+    if (!options.persist(current)) return;
+    persisted = serialized;
+  };
+
   return {
     subject: deliverSubject(sessionID),
     receive,
@@ -524,50 +596,63 @@ export function createConsumerDelivery(options: ConsumerDeliveryOptions): Consum
       return currentEpoch;
     },
     registration() {
-      const resume = resumePoint();
+      const resume = resumePoint() ?? seededResume();
       return {
         consumer: true,
         epoch: currentEpoch.id,
         ...(resume === undefined ? {} : { resume }),
       };
     },
-    answered(answer) {
-      if (answer.mode !== "consumer") return answer.mode;
-      const resume = resumePoint();
-      if (answer.stream_id !== "" && answer.stream_id !== streamID) {
-        if (resume !== undefined) tellGap("stream_recreated");
-        switchStream(answer.stream_id);
+    answered(answer, topics) {
+      if (answer.mode === "consumer") {
+        const resume = resumePoint();
+        if (answer.stream_id !== "" && answer.stream_id !== streamID) {
+          if (resume !== undefined) tellGap("stream_recreated");
+          switchStream(answer.stream_id);
+        }
+        if (answer.gap) {
+          tellGap("retention_gap");
+          gapTold = true;
+        }
+        relayed = new Set([...topics].filter(streamStores));
+      } else {
+        relayed = undefined;
       }
-      if (answer.gap) {
-        tellGap("retention_gap");
-        gapTold = true;
-      }
+      ledger.setConsumerMode(relayed !== undefined);
+      persist();
       return answer.mode;
     },
+    relays: (topic) => relayed?.has(topic) === true,
+    relaying: () => relayed !== undefined,
     setFollowed(topics) {
       const at = now();
       const next = new Map<string, number>();
-      for (const topic of topics) next.set(topic, follows.get(topic) ?? at);
+      for (const topic of topics) {
+        // The session's own agent subject is always followed (`followedAt`), so it is never one of
+        // the follow times a host persists.
+        if (topic === ownSubject) continue;
+        next.set(topic, follows.get(topic) ?? at);
+      }
       follows = next;
+      persist();
     },
+    persist,
     resumePoint,
-    snapshot() {
-      const resume = resumePoint();
-      return {
-        ...(resume === undefined ? {} : { resume }),
-        follows: Object.fromEntries(follows),
-      };
-    },
-    restore(snapshot) {
-      const restored = new Map(Object.entries(snapshot.follows));
-      for (const [topic, at] of follows) if (!restored.has(topic)) restored.set(topic, at);
-      follows = restored;
-      streamID = snapshot.resume?.stream_id;
+    snapshot,
+    restore(restored) {
+      const merged = new Map(Object.entries(restored.follows));
+      for (const [topic, at] of follows) if (!merged.has(topic)) merged.set(topic, at);
+      follows = merged;
+      streamID = restored.resume?.stream_id;
       held = new Set();
-      written = snapshot.resume?.seq;
+      written = restored.resume?.seq;
+      // What a host restored is already stored: only a change after it is written.
+      persisted = JSON.stringify(snapshot());
     },
     close() {
       closed = true;
+      relayed = undefined;
+      ledger.setConsumerMode(false);
       queue.length = 0;
       for (const entry of [...entries.values()]) settle(entry, "nak");
       blocking = undefined;

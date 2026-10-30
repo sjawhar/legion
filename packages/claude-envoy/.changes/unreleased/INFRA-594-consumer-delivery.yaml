@@ -17,5 +17,8 @@ body: |-
   published while Claude Code was not running or its connection was down, a role message to a
   role it holds included, is delivered once when it is back, for up to 72 hours. A NATS reconnect
   begins a new epoch and registers at once, so the listener restarts the relay at the consumer's
-  ack floor. A BTW that arrives late is passed over, as a replayed one is. Answered `core`, or by
+  ack floor. A session coming from the previous plugin has no resume point of its own: its first
+  consumer starts at the replay cursors its state file holds, so the messages stored while it was
+  away are delivered instead of acked away.
+  A BTW that arrives late is passed over, as a replayed one is. Answered `core`, or by
   a listener of an earlier release, delivery works as before (INFRA-594).

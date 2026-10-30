@@ -369,11 +369,19 @@ order; that relay, not a subscription of this plugin's, is where the session's m
   arrives late (`ConsumerFrame.late`: delivered before, or stored before the current epoch began)
   never starts a side turn: a late BTW is one inert card, as a replayed one is.
 - The relay's snapshot (the resume point and each followed topic's follow time) is appended to the
-  session file as `envoy-consumer-state` (`{session_id, resume?, follows}`) when it changes, and
-  restored from there when the relay opens (`consumerSnapshot`). A frame stored before the session
-  followed its topic is answered `done` and not shown. A registration answer that reports a gap or
-  names another stream, and a frame that carries `Envoy-Gap`, are told once, as the replay engine's
-  notice of the same kind.
+  session file as `envoy-consumer-state` (`{session_id, resume?, follows?}`) when it changes, and
+  restored from there when the relay opens (`consumerSnapshot`): the follows map goes with an
+  entry only when it changed, so a written frame costs an entry of a resume point alone, and a
+  restore takes the newest resume point and the newest follows map the entries hold. A frame
+  stored before the session followed its topic is answered `done` and not shown. A registration
+  answer that reports a gap or names another stream, and a frame that carries `Envoy-Gap`, are
+  told once, as the replay engine's notice of the same kind.
+- A session with no snapshot of its own that has cursors — one coming from a release before this
+  relay, or a core-path session whose listener gains the grant later — registers the lowest cursor
+  the replay engine holds over its agent subject and its followed stored topics
+  (`ConsumerDelivery.registration`), so the listener creates the consumer there instead of at the
+  stream's end and what was stored while the session was away is still relayed. A session with
+  neither snapshot nor cursors starts at the stream's end.
 - Each frame is shown once across restarts through the replay engine's ledger (`recordDelivered`
   before the claim settles, `delivered` read before a frame is shown), which drops the frames a
   restart at the ack floor sends again.

@@ -143,10 +143,10 @@ export type Interest = z.infer<typeof InterestWireSchema>;
 export type DeliveryAnswer = z.infer<typeof DeliveryAnswerWireSchema>;
 
 /**
- * The registration's answer: the interest, and the delivery mode when the listener answered one.
- * A listener of an earlier release answers none, which `deliveryAnswerOf` reads as `core`.
+ * The registration's answer: the interest, and the delivery mode. A listener of an earlier release
+ * answers no `delivery` field, which reads as `core` (`not_answered`).
  */
-export type SubscribeResult = Interest & { readonly delivery?: DeliveryAnswer };
+export type SubscribeResult = Interest & { readonly delivery: DeliveryAnswer };
 
 /** Where a session's stream sequence was up to: what a new consumer may be seeded from. */
 export interface ResumePoint {
@@ -169,18 +169,15 @@ const DELIVERY_NOT_ANSWERED = "not_answered";
 /** The reason an answer whose `delivery` field this build cannot read reads as. */
 const DELIVERY_UNREADABLE = "unreadable_answer";
 
-/** The delivery mode a registration answered: `core` when it answered none. */
-export function deliveryAnswerOf(result: Pick<SubscribeResult, "delivery">): DeliveryAnswer {
-  return result.delivery ?? { mode: "core", reason: DELIVERY_NOT_ANSWERED };
-}
-
-// An unreadable `delivery` (a mode a later listener adds) is `core`: the core path still works,
-// so it must not fail the registration.
+// An answer without a `delivery` field (an earlier listener), or with an unreadable one (a mode a
+// later listener adds), is `core`: the core path still works, so neither fails the registration.
 function parseSubscribeAnswer(body: unknown): SubscribeResult {
   const interest = InterestWireSchema.parse(body);
   const raw =
     typeof body === "object" && body !== null && "delivery" in body ? body.delivery : undefined;
-  if (raw === undefined || raw === null) return interest;
+  if (raw === undefined || raw === null) {
+    return { ...interest, delivery: { mode: "core", reason: DELIVERY_NOT_ANSWERED } };
+  }
   const delivery = DeliveryAnswerWireSchema.safeParse(raw);
   return {
     ...interest,

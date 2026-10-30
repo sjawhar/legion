@@ -211,3 +211,42 @@ test("envoy_list reports the union of live NATS subscriptions and registry inter
     ],
   })
 })
+
+test("envoy_sessions filters by the machine a session runs on and by the listener it registered through", async () => {
+  const sessions = [
+    {
+      session_id: "ses_on_hub",
+      machine_id: "envoy-hub",
+      host: "gke-node-7",
+      dir: "/work",
+      port: 0,
+      title: "",
+      topics: [],
+      self_subscribed: true,
+    },
+    {
+      session_id: "ses_on_devbox",
+      machine_id: "devbox",
+      host: "devbox",
+      dir: "/work",
+      port: 0,
+      title: "",
+      topics: [],
+      self_subscribed: true,
+    },
+  ]
+  const client = createEnvoyClient({
+    baseUrl: "http://envoy.test",
+    fetch: async () => Response.json(sessions),
+  })
+  const runtime: ChannelToolRuntime = { identity, client, session: sessionWith([]) }
+  const listed = async (machine: string) =>
+    (
+      (await executeEnvoyTool(runtime, "envoy_sessions", { machine })) as { session_id: string }[]
+    ).map((session) => session.session_id)
+
+  expect(await listed("envoy-hub")).toEqual(["ses_on_hub"])
+  expect(await listed("gke-node-7")).toEqual(["ses_on_hub"])
+  expect(await listed("devbox")).toEqual(["ses_on_devbox"])
+  expect(await listed("other")).toEqual([])
+})

@@ -4724,6 +4724,51 @@ console.log(JSON.stringify(args));
     expect(requests).toEqual([]);
   });
 
+  test("envoy_sessions filters by the machine a session runs on and by the listener it registered through", async () => {
+    const sessions = [
+      {
+        session_id: "ses_on_hub",
+        machine_id: "envoy-hub",
+        host: "gke-node-7",
+        dir: "/tmp",
+        port: 0,
+        title: "",
+        topics: [],
+        self_subscribed: true,
+      },
+      {
+        session_id: "ses_on_devbox",
+        machine_id: "devbox",
+        host: "devbox",
+        dir: "/tmp",
+        port: 0,
+        title: "",
+        topics: [],
+        self_subscribed: true,
+      },
+    ];
+    globalThis.fetch = async () => response(sessions);
+    const { default: envoyExtension } = await import("./envoy.ts?sessions-machine-filter");
+    const fixture = createPi();
+    envoyExtension(fixture.pi);
+    const sessionsTool = fixture.tools.find((tool) => tool.name === "envoy_sessions");
+    if (sessionsTool === undefined) throw new Error("envoy_sessions was not registered");
+    const listed = async (machine: string) => {
+      const result = await sessionsTool.execute("", { machine });
+      const listedSessions = JSON.parse(result.content[0]?.text ?? "[]") as {
+        session_id: string;
+      }[];
+      return listedSessions.map((session) => session.session_id);
+    };
+
+    // The hub's id is the listener the session registered through, `gke-node-7` the machine its
+    // process runs on: a filter by either one finds it.
+    expect(await listed("envoy-hub")).toEqual(["ses_on_hub"]);
+    expect(await listed("gke-node-7")).toEqual(["ses_on_hub"]);
+    expect(await listed("devbox")).toEqual(["ses_on_devbox"]);
+    expect(await listed("other")).toEqual([]);
+  });
+
   test("injects a structured envelope payload as a TOON block that round-trips to the payload", async () => {
     const payload = {
       failed: [
@@ -17222,6 +17267,81 @@ describe("consumer delivery", () => {
     expect(second.replies(again)).toEqual(["received", "done"]);
     expect(first.cards("evt-restart")).toHaveLength(1);
     expect(second.cards("evt-restart")).toHaveLength(0);
+  });
+
+  // A session that ran on the core path has replay cursors in its transcript and no consumer
+  // snapshot. Resuming on this plugin, its first consumer must start at those cursors: a consumer
+  // created at the stream's end would ack away everything stored while the session was down, and
+  // no sweep would read it back (the relay answers `consumer`, so the engine stops sweeping).
+  test("a session moving from the core path resumes at its replay cursors and is shown what was stored while it was away", async () => {
+    const cursors = {
+      type: "custom",
+      customType: "envoy-replay-state",
+      data: { stream_id: STREAM, subjects: { [AGENT]: { since: 2, after: 9 } } },
+    };
+    // What the stream stored on the session's agent subject while it was away.
+    const stored = [10, 11, 12, 13].map((seq) => ({ seq, label: `away-${seq}` }));
+    const end = stored[stored.length - 1]?.seq ?? 0;
+
+    const session = await bootConsumer("consumer-core-to-consumer", { entries: [cursors] });
+
+    // The listener starts the consumer at the resume point plus one, and at the stream's end when
+    // the registration names none (`cmd/listener/session_delivery.go`).
+    const resume = session.registrations[0]?.delivery?.resume;
+    const start = resume?.seq ?? end;
+    const inboxes = stored
+      .filter((message) => message.seq > start)
+      .map((message) => session.relay(message.seq, peer(message.label)));
+    for (const inbox of inboxes) {
+      await until(() => session.replies(inbox).includes("done"), `${inbox}'s done`);
+    }
+
+    for (const message of stored) {
+      expect(session.cards(`evt-${message.label}`)).toHaveLength(1);
+    }
+    expect(resume).toEqual({ stream_id: STREAM, seq: 9 });
+    expect(session.replays()).toBe(0);
+  });
+
+  test("the session file carries the follows map only when it changes, and either shape restores", async () => {
+    const issueTopic = dispatchIssueSubject("INFRA-7", ">");
+
+    const first = await bootConsumer("consumer-follows-a");
+    await first.follow(issueTopic);
+    await settle();
+    const inbox = first.relay(4, peer("follows"));
+    await until(() => first.replies(inbox).includes("done"), "the frame's done");
+
+    const states = first.fixture.entries
+      .filter((entry) => entry.customType === "envoy-consumer-state")
+      .map((entry) => entry.data as Record<string, unknown>);
+    // The follow wrote the map; the written frame wrote its resume point alone beside it.
+    expect(states.filter((state) => "follows" in state)).toHaveLength(1);
+    expect(states.at(-1)).toEqual({ session_id: SESSION, resume: { stream_id: STREAM, seq: 4 } });
+    await first.stop();
+
+    // A session file written before the entry was split carries the whole snapshot in one entry.
+    const whole = {
+      type: "custom",
+      customType: "envoy-consumer-state",
+      data: { session_id: SESSION, resume: { stream_id: STREAM, seq: 9 }, follows: {} },
+    };
+    const second = await bootConsumer("consumer-follows-b", { entries: [whole] });
+    expect(second.registrations[0]?.delivery?.resume).toEqual({ stream_id: STREAM, seq: 9 });
+    await second.stop();
+
+    // The split entries restore the same snapshot: the newest resume point, and the follow times
+    // of the newest entry that carried them, so following the topic again writes nothing.
+    const third = await bootConsumer("consumer-follows-c", { entries: first.entries() });
+    expect(third.registrations[0]?.delivery?.resume).toEqual({ stream_id: STREAM, seq: 4 });
+    await third.follow(issueTopic);
+    await settle();
+    expect(
+      third.fixture.entries
+        .filter((entry) => entry.customType === "envoy-consumer-state")
+        .map((entry) => entry.data as Record<string, unknown>)
+        .filter((state) => "follows" in state)
+    ).toEqual([]);
   });
 
   for (const answer of ["core", "none"] as const) {

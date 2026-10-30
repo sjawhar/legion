@@ -30,26 +30,33 @@ can steer or record them in its inbox, as well as events authored by the reader'
 `createConsumerDelivery` (`@legion/envoy-client/consumer-delivery`) is a session's side of the
 listener's relay of its durable consumer ("Session consumers" in `packages/envoy/AGENTS.md`). A
 host makes one per session, subscribes its `subject` (`notifications.envoy.deliver.<session id>`)
-before it registers, passes `registration()` as the registration's `delivery` field, and gives
-the registration's answer (`deliveryAnswerOf`) to `answered`, which returns `consumer` or `core`.
-It hands `receive` each relay message. The delivery decodes the frame's `Envoy-*` headers
-(`decodeRelayFrame`), answers `received` on the frame's reply subject before any host work, and
-hands the host the frames one at a time in stream order (`ConsumerDeliveryHost.deliver`): the next
-waits until `deliver` returns or the host calls `release`, `done` or `nak`. The host calls `done`
-once it wrote the frame, or skipped or refused it, and `nak` when the session cannot take it;
-`progress` goes out every 20 s until then. A frame whose `deliver` throws is answered `nak`, and
-from its third delivery `done`, with the replay ledger's `liveFailed` showing its failure notice
-instead. A frame the replay ledger holds, one on a subject no followed topic matches, and one
-stored more than 2 s before its topic was followed (`setFollowed`) are answered `done` and never
-handed over. A frame delivered before, or stored before the current epoch began, is `late`, and a
-host runs no side turn for it. `beginEpoch` starts a new epoch for each new NATS connection.
-`resumePoint` is the stream id and the sequence below which the session holds nothing unwritten;
-`snapshot` and `restore` carry it and the follow times across a restart. A registration answer
-that reports a gap or names another stream, and a frame that carries `Envoy-Gap`, call the host's
-`gap` once. `close` answers every unsettled frame, and every later one, `nak`. `streamStores`
-(`@legion/envoy-client/stream-topics`) says whether the stream stores a topic, so a host knows
-which of its subscriptions the relay carries. On `core` a host runs the replay engine below, and
-`setConsumerMode(true)` stops its `POST /v1/replay` calls while the relay serves the session.
+before it registers, passes `registration()` as the registration's `delivery` field, and gives the
+registration's answer and the topics it carried to `answered`, which returns `consumer` or `core`,
+records the stored topics the listener relays (`relays`, `relaying`) and puts the replay engine in
+or out of consumer mode. It hands `receive` each relay message. The delivery decodes the frame's
+`Envoy-*` headers (`decodeRelayFrame`), answers `received` on the frame's reply subject before any
+host work, and hands the host the frames one at a time in stream order
+(`ConsumerDeliveryHost.deliver`): the next waits until `deliver` returns or the host calls
+`release`, `done` or `nak`. The host calls `done` once it wrote the frame, or skipped or refused
+it, and `nak` when the session cannot take it; `progress` goes out every 20 s until then. A frame
+whose `deliver` throws is answered `nak`, and from its third delivery `done`, with the replay
+ledger's `liveFailed` showing its failure notice instead. A frame the replay ledger holds, one on
+a subject no followed topic matches, and one stored more than 2 s before its topic was followed
+(`setFollowed`) are answered `done` and never handed over. A frame delivered before, or stored
+before the current epoch began, is `late`, and a host runs no side turn for it. `beginEpoch`
+starts a new epoch for each new NATS connection. `resumePoint` is the stream id and the sequence
+below which the session holds nothing unwritten; `snapshot` and `restore` carry it and the follow
+times across a restart, and the `persist` option is offered a snapshot whenever it changed, so a
+host writes only changes. A session with no resume point of its own, one moving from the core
+path, registers the lowest cursor the replay ledger holds over its agent subject and the followed
+topics the stream stores: its first consumer starts there instead of at the stream's end, so
+nothing stored while it was away is acked away unshown. A registration answer that reports a gap
+or names another stream, and a frame that carries `Envoy-Gap`, call the host's `gap` once. `close`
+answers every unsettled frame, and every later one, `nak`, and leaves consumer mode.
+`streamStores` (`@legion/envoy-client/stream-topics`) says whether the stream stores a topic, so a
+host knows which of its subscriptions the relay carries. On `core` a host runs the replay engine
+below, and `setConsumerMode(true)` stops its `POST /v1/replay` calls while the relay serves the
+session.
 
 ## Missed messages
 

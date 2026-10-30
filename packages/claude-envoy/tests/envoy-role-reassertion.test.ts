@@ -2,7 +2,7 @@ import { expect, test } from "bun:test"
 import { mkdir, rm, writeFile } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { dirname, join } from "node:path"
-import type { Interest } from "@legion/envoy-client/transport"
+import type { Interest, SubscribeResult } from "@legion/envoy-client/transport"
 import type {
   ChannelConnectionStatus,
   ChannelForwarderConnection,
@@ -62,6 +62,11 @@ function interest(): Interest {
   }
 }
 
+/** The listener's answer to a registration: the interest, and the core delivery mode. */
+function registered(): SubscribeResult {
+  return { ...interest(), delivery: { mode: "core", reason: "not_answered" } }
+}
+
 test("reasserts a restored role after a successful registration heartbeat loses it", async () => {
   const stateDirectory = join(tmpdir(), `claude-envoy-reassert-${crypto.randomUUID()}`)
   const roleFile = roleStateFile(stateDirectory, "ses_current")
@@ -70,7 +75,7 @@ test("reasserts a restored role after a successful registration heartbeat loses 
   const setRoles: unknown[] = []
   const reasserted = Promise.withResolvers<void>()
   const client: FakeClient = {
-    subscribe: async () => interest(),
+    subscribe: async () => registered(),
     getInterest: async () => interest(),
     unsubscribe: async () => undefined,
     unregisterSession: async () => undefined,
@@ -112,7 +117,7 @@ test("runs the regain hook once a heartbeat's soft claim takes the held role bac
   const regains: string[] = []
   const regained = Promise.withResolvers<void>()
   const client: FakeClient = {
-    subscribe: async () => interest(),
+    subscribe: async () => registered(),
     getInterest: async () => interest(),
     unsubscribe: async () => undefined,
     unregisterSession: async () => undefined,

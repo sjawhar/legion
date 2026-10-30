@@ -13,10 +13,16 @@ body: |-
   delivered before, or stored before the current NATS connection's epoch began, is marked `late`,
   so a host never starts a side turn for it. The resume point (the lowest sequence held unwritten
   minus one, else the highest written) and each topic's follow time are a snapshot the host
-  persists, and a registration answer that reports a gap or names another stream tells the
-  session once. `transport` gains the registration's `delivery` field (`DeliveryRequest`, with
-  `epoch` and `resume`) and the answer's (`DeliveryAnswer`, `deliveryAnswerOf`, which reads a
-  missing or unreadable field as `core`). `@legion/envoy-client/stream-topics`' `streamStores`
-  says whether the stream stores a topic, as the listener's `bus.StreamCaptures` does. The replay
-  engine's `setConsumerMode(true)` stops its `POST /v1/replay` calls while the listener relays the
-  session's consumer (INFRA-594).
+  persists through the delivery's `persist` option, which offers it only when it changed, and a
+  registration answer that reports a gap or names another stream tells the session once. A
+  session with no resume point of its own — one moving from the core path, whose consumer has
+  never relayed it a frame — registers the lowest cursor the replay ledger holds over its agent
+  subject and the followed topics the stream stores, so its first consumer starts there instead
+  of at the stream's end and what was stored while it was away is still delivered. `answered`
+  also records the stored topics the listener relays (`relays`, `relaying`) and puts the replay
+  engine in consumer mode, which `close` leaves again. `transport` gains the registration's
+  `delivery` field (`DeliveryRequest`, with `epoch` and `resume`) and the answer's
+  (`DeliveryAnswer`, always read: a missing or unreadable field is `core`).
+  `@legion/envoy-client/stream-topics`' `streamStores` says whether the stream stores a topic, as
+  the listener's `bus.StreamCaptures` does. The replay engine's `setConsumerMode(true)` stops its
+  `POST /v1/replay` calls while the listener relays the session's consumer (INFRA-594).

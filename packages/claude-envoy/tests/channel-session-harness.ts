@@ -13,9 +13,9 @@ import { deliverSubject, RelayHeader } from "@legion/envoy-client/consumer-deliv
 import { sessionConfigFile } from "@legion/envoy-client/session-settings"
 import type {
   EnvoyClient,
-  Interest,
   ReplayInput,
   ReplayResult,
+  SubscribeResult,
 } from "@legion/envoy-client/transport"
 import type {
   ChannelBrokerMessage,
@@ -339,12 +339,15 @@ export async function scratchState(): Promise<string> {
   return mkdtemp(join(tmpdir(), "claude-envoy-state-"))
 }
 
-export function noInterest(): Interest {
+/** A registration answer with no interest and no consumer delivery, as a listener of an earlier
+ *  release leaves it (`parseSubscribeAnswer` fills the core mode in). */
+export function noInterest(): SubscribeResult {
   return {
     session_id: "ses_claude",
     machine_id: "devbox",
     dir: "/tmp",
     topics: [directSubject],
+    delivery: { mode: "core", reason: "not_answered" },
   }
 }
 
