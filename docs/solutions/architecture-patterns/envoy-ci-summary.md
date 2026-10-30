@@ -65,7 +65,7 @@ named terms are a floor:
 | delivery lease: an unreleased record (the old listener killed at the end of its grace) is taken after the lease TTL and one standby poll | 6 s |
 | **floor, before container start and image pull** | **140 s** |
 
-`cistore.go` (`handoverGrace`) cites this total; update it if it changes. Before INFRA-557 the
+`cistore.go` (`handoverGrace`) cites this total; update it if it changes. Before #2404 the
 floor was 260 s: the durable's bind was polled for up to 135 s in place of the lease row.
 
 The degraded path adds terms that are bounded but not counted: `cistore.Open`, `store.Open`'s two
@@ -75,7 +75,7 @@ an update, each up to the 10 s MaxWait, 20 s). A NATS that does not answer is no
 the start retries the connect, and a store or bucket open that fails for want of a connection,
 every 2 s for as long as it takes, so such a handover is an outage the grace does not cover.
 Production's ECS rollouts took 0.6 to 20.5 s from SIGTERM to ready, once 58.9 s (2026-09-28,
-before INFRA-557).
+before #2404).
 
 Every admitted record is at most debounce plus grace old, by construction. The head-gated listener
 keeps leaving non-head records until its SIGTERM, so any width admits the ones it left in its last

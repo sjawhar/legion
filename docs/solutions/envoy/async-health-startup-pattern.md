@@ -18,7 +18,7 @@ module: envoy
 related_issues:
   - "#235"
   - "#1269"
-  - "INFRA-557"
+  - "#2404"
 symptoms:
   - "Pulumi deploy timeout waiting for health check"
   - "health endpoint unreachable during NATS connection"
@@ -158,7 +158,7 @@ while the old pod still delivers.
 Every answer comes within 5 s (`healthzDeadline`): a check still running then makes the answer
 503, so a readiness probe with a longer timeout always gets one.
 
-Returning **503 during startup** is deliberate since INFRA-557: `/healthz` is the readiness of
+Returning **503 during startup** is deliberate since #2404: `/healthz` is the readiness of
 every pod of a machine id, and a pod that answered 200 before it served would be sent traffic it
 refuses. Startup is not short, and it never gives up on NATS: the connect is retried every 2 s for
 as long as NATS does not answer, so a listener started before its NATS stays up and `starting`
@@ -171,7 +171,7 @@ heartbeat or an ack policy NATS cannot change in place) is the one durable failu
 fix, so the listener checks its durable right after the NATS connect, before the cache warm-ups,
 and on a refusal exits 1 at once; so does a store bucket the NATS user's grant refuses.
 
-**A 200 means the pod serves.** Before INFRA-557 the listener answered 200 `starting` from the
+**A 200 means the pod serves.** Before #2404 the listener answered 200 `starting` from the
 moment its port was bound, and anything that called `/v1` after starting it had to wait for the
 `"healthy"` body: the container smoke waited for a bare 200 and flaked on a slow runner, its `/v1`
 subtests running inside the 503 window (sjawhar/legion#1269). Waiting for `"healthy"` is still the

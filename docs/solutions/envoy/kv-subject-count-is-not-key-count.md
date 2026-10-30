@@ -79,7 +79,7 @@ production. It would have scaled to 35 s only on a deployment that really held 7
   took one watch over existing keys, as `internal/kvwatch` does for the interest, session and CI
   caches. Timed on loopback against that function, best of five: 9 claims 0.87 ms, 9 claims and
   1,000 markers 4.9 ms, 9 claims and 5,000 markers 17.2 ms. Linear and cheap, but not free, and
-  markers accrue with nothing expiring them — which is what `PurgeDeletes` is for. INFRA-557
+  markers accrue with nothing expiring them — which is what `PurgeDeletes` is for. #2404
   removed that snapshot: a claim's grace now counts from the machine's service start in its
   delivery lease record, so `store.Open` reads no claim and the role bucket costs a start nothing.
 - **A scan can end early, and one of the two ways looks like success.** nats.go sends a nil entry
