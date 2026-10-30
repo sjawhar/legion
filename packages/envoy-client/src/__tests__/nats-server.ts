@@ -2,8 +2,12 @@ import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 
-/** The NATS server image the tests run; CI pulls it before the tests. */
-const NATS_IMAGE = "mirror.gcr.io/library/nats:2.10";
+/**
+ * The NATS server image the tests run; CI pulls it before the tests.
+ * ghcr.io/sjawhar/legion/ci, the copy of nats:2.10 (.github/ci-images.yaml).
+ */
+const NATS_IMAGE =
+  "ghcr.io/sjawhar/legion/ci@sha256:5498ba57b9471840be3d15b033a4eec554d1c02fa6c2cc0ca2d888637f6c6e2f";
 
 export interface NatsServer {
   readonly url: string;

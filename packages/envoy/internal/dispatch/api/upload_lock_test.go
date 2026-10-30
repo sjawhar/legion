@@ -66,15 +66,15 @@ func TestProjectDocumentUploadTakesItsOwnerRowBeforeTheRoomLock(t *testing.T) {
 }
 
 // An upload of a project document holding a copied ask block and an answer to the block's source
-// meet on the copy's pending-settlement row and on the events' commit-order lock, and both take the
-// row first. The upload takes it with its document write (appendUpdateTxClass), before it appends
-// its event; the answer takes it under the project's copy lock (docs.SettleCopiesOf), before it
-// appends its own. The test holds the upload between its document write and its event and the
-// answer just before its event, lets the answer reach the row, then lets the upload's event go
-// first and the answer's after it: both finish. An upload that took the row only at its commit
-// (Ledger.Commit's recordLatestEditSource), after its event, would wait on the row the answer
-// marked while holding the commit-order lock the answer's event waits for, and Postgres would end
-// one of them with 40P01.
+// meet on the copy's pending-settlement row, and both take it before their events. The upload
+// takes it with its document write (appendUpdateTxClass), before it appends its event; the answer
+// takes it under the project's copy lock (docs.SettleCopiesOf), before it appends its own. The test
+// holds the upload between its document write and its event and the answer just before its event,
+// lets the answer reach the row, then lets the upload's event go first and the answer's after it:
+// both finish. Their events share no lock: each append locks only its own owner's row, the copy
+// for the upload and the source for the answer. So even an upload that took the row only at its
+// commit (Ledger.Commit's recordLatestEditSource), after its event, would wait for the answer and
+// then finish; what fails this test is a lock the two come to share in opposite orders.
 func TestAnUploadOfACopyAndAnAnswerToItsSourceBothTakeTheCopysPendingRowBeforeTheirEvents(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 120*time.Second)
 	defer cancel()

@@ -13,11 +13,6 @@ import (
 	"github.com/sjawhar/envoy/internal/dispatch/store"
 )
 
-// commitOrderAdvisoryLock serializes event inserts until their transaction commits.
-// PostgreSQL allocates a bigserial value before commit, so this makes the event feed's resume
-// cursor's ID order match the only order a page that resubscribes can observe.
-const commitOrderAdvisoryLock int64 = 0x4449535041544348
-
 // Broker appends owner-scoped events transactionally and fans committed events
 // to local subscribers. NATS publication is an outbox concern owned by A5.
 //
@@ -37,11 +32,15 @@ func NewBroker() *Broker {
 }
 
 // LockOwners takes the owner locks of every event owner (store.LockOwners), sorted by lock key. A
-// transaction that appends events for more than one owner must call this before its first Append,
-// so no owner lock is waited for after the global commit-order lock: each Append then takes its
-// owner's lock again, which returns at once, and its owner's row, which no other writer holds
-// without that lock. An ownerless event addressed to a session has no owner lock and adds none.
-// It locks no row, so the transaction holds no transaction id on its account.
+// transaction that appends events for more than one owner must call this before its first Append.
+// Append takes each owner's lock as it reaches it, so two transactions that share owners and
+// reached them in opposite orders (a child patch locks the child and then appends the parent's
+// child.status; a parent patch locks the parent and then the child) would each hold the lock the
+// other waits for, until Postgres killed one. Taking every owner up front in one order leaves no
+// cycle to wait in: each Append then takes its owner's lock again, which returns at once, and its
+// owner's row, which no other writer holds without that lock. An ownerless event addressed to a
+// session has no owner lock and adds none; its Append takes the transaction id itself. LockOwners
+// locks no row, so the transaction holds no transaction id on its account.
 func (b *Broker) LockOwners(ctx context.Context, tx pgx.Tx, owners ...model.Event) error {
 	if b == nil {
 		return fmt.Errorf("event broker required")
@@ -61,6 +60,45 @@ func (b *Broker) LockOwners(ctx context.Context, tx pgx.Tx, owners ...model.Even
 // Append assigns the next sequence of the event's owner, writes e in tx, and returns the appended
 // event with its database-assigned ID, sequence and time. Its statements go to the server as one
 // batch (QueueAppend). The caller must call Publish only after tx commits.
+//
+// The transaction holds its transaction id before the insert draws e's id from events_id_seq:
+// lockEventOwner takes it with pg_current_xact_id in the statement that locks the owner row,
+// queued before the insert, or in a statement of its own for an ownerless event. That is the
+// writer invariant the safe horizon's proof rests on (horizon.go): a transaction that drew an id
+// g holds an xid below that of any observer that saw a later id commit.
+//
+// Append takes no lock beyond its owner's: the owner lock (store.LockOwner) and the owner row,
+// and those are all the order event ids carry:
+//
+//   - One owner's events commit in id order. The owner lock is taken and the owner row locked
+//     for no key update before the id is drawn, and both stay held until the transaction ends,
+//     so a second write on the same owner allocates its id only after it gets the owner lock,
+//     which the first holds until it commits: its id and its seq are above the first's.
+//   - Different owners' writes do not wait for each other and may commit out of id order: the
+//     write that drew id 7 can still be open after the write that drew id 8 has committed. A
+//     reader that pages the log by a global id cursor reads through a Horizon, only up to the
+//     safe horizon, never up to max(id).
+//   - An ownerless (session-addressed) event takes no lock of its own: its seq is 0, so there
+//     is no sequence to allocate, and two transactions that touch no common row have no defined
+//     order, so either commit order is a valid serialization. Order matters only between writes
+//     that conflict, and every ownerless append follows its transaction's own lock on the row
+//     it changes, which orders it against every write that changes that row. A message create
+//     (api/messages.go createStoredMessage) and a broadcast (api/broadcasts.go writeBroadcast)
+//     append after inserting the new message row, a reply's insert taking its parent message
+//     row for key share through the foreign key, and a broadcast's new broadcasts and
+//     idempotency-key rows before it. An accept (api/message_delivery.go acceptDelivery) and a
+//     pending delivery's supersede receipt (recordPendingMessageDelivery) append after locking
+//     the message row for no key update and writing the attempt's message_deliveries row. The
+//     reply route's failure receipt and a session's reply (replyMessage, insertSessionReply)
+//     append after locking the attempt row for update. A viewer's state (api/state.go
+//     putUserAgentState) appends only after it wrote a user_agent_state, user_agent_read or
+//     user_agent_reply_read row. A delivery settle (api/envoy_resolve.go settleDeliveryAttempt)
+//     appends after its update writes the attempt row it claimed; on the branch where that
+//     update finds the row already settled by the session's committed reply, it only reads the
+//     row, which no transaction writes a receipt for again. A per-session lock would add no
+//     order these row locks do not give, only deadlock cycles: the accept path would take it
+//     before the message row and a pending delivery after, and a broadcast one per recipient
+//     in no sorted order.
 func (b *Broker) Append(ctx context.Context, tx pgx.Tx, e model.Event) (model.Event, error) {
 	var appended model.Event
 	if err := store.RunWrite(ctx, tx, func(batch *store.WriteBatch) error {
@@ -72,10 +110,10 @@ func (b *Broker) Append(ctx context.Context, tx pgx.Tx, e model.Event) (model.Ev
 }
 
 // QueueAppend queues e's append on a write phase's batch: its owner's lock and row
-// (lockEventOwner), the commit-order lock, and the insert, which takes the next sequence from
-// the owner row as it stands when the insert runs and advances the row's last_seq (and an issue's
-// updated_at) to the row it inserted, in the same statement. An ask.opened event's payload then
-// records the event's own id (opened_event_id) through the id sequence's currval, the id the
+// (lockEventOwner), which take the transaction's id, and the insert, which takes the next sequence
+// from the owner row as it stands when the insert runs and advances the row's last_seq (and an
+// issue's updated_at) to the row it inserted, in the same statement. An ask.opened event's payload
+// then records the event's own id (opened_event_id) through the id sequence's currval, the id the
 // insert just took. So no value of one statement is read in Go before the next one is sent.
 // appended receives the event as written - its id, sequence, time, the owner's project and the
 // payload as stored - once the batch has read those statements' results, before any statement
@@ -120,7 +158,6 @@ func (b *Broker) QueueAppendWithLogins(batch *store.WriteBatch, e model.Event, l
 	}
 	event := &e
 	lockEventOwner(batch, event)
-	batch.Queue("acquire event commit order lock", `select pg_advisory_xact_lock($1)`, commitOrderAdvisoryLock)
 	// One statement takes the next sequence from the owner row and advances the row to the event
 	// it inserted. Every statement of a data-modifying CTE reads one snapshot, so the insert reads
 	// last_seq as the statements before it left it, and the owner's update writes the very
@@ -264,35 +301,40 @@ func eventOwnerLock(e model.Event) (store.Owner, bool) {
 // lockEventOwner queues e's owner lock (store.QueueLockOwner), which returns at once when the
 // transaction took it in its read phase, as every writer does, and then its owner's row `for no
 // key update`, whose callback records the owner's project on e. The row lock is a write-phase lock:
-// it is the statement that gives a transaction appending its first event its transaction id, before
-// the insert takes an id from the events sequence, and every Dispatch writer of an owner row takes
-// the owner lock first, so the row is never contended among them. The two stay two statements: the
-// row's read takes its snapshot once the lock is granted. An ownerless event locks nothing.
+// every Dispatch writer of an owner row takes the owner lock first, so the row is never contended
+// among them. The two stay two statements: the row's read takes its snapshot once the lock is
+// granted.
+//
+// Every branch also takes the transaction's id (pg_current_xact_id, scanned and discarded) in a
+// statement queued before the insert draws an event id: the writer invariant Append documents.
+// Inside a savepoint pg_current_xact_id assigns and returns the top-level transaction's id, which
+// is the one snapshots list. An ownerless event has no lock and no row and takes only the id.
 func lockEventOwner(batch *store.WriteBatch, e *model.Event) {
 	owner, ok := eventOwnerLock(*e)
 	if !ok {
+		batch.Queue("take transaction id for event", `select pg_current_xact_id()`)
 		return
 	}
 	var what, row string
 	switch owner.Kind {
 	case store.OwnerIssue:
 		what = "issue"
-		row = `select project_key from issues where key = $1 for no key update`
+		row = `select project_key, pg_current_xact_id() from issues where key = $1 for no key update`
 	case store.OwnerArtifact:
 		what = "unlinked artifact"
 		row = `
-			select project_key
+			select project_key, pg_current_xact_id()
 			from artifacts
 			where id = $1 and issue_key is null
 			for no key update
 		`
 	default:
 		what = "project"
-		row = `select key from projects where key = $1 for no key update`
+		row = `select key, pg_current_xact_id() from projects where key = $1 for no key update`
 	}
 	store.QueueLockOwner(batch, owner)
 	batch.Queue("", row, owner.Key).QueryRow(func(row pgx.Row) error {
-		if err := row.Scan(&e.Project); err != nil {
+		if err := row.Scan(&e.Project, nil); err != nil {
 			return fmt.Errorf("lock %s for event: %w", what, err)
 		}
 		return nil

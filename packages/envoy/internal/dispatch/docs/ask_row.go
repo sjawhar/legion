@@ -37,7 +37,7 @@ func ScanAsk(row pgx.Row, extra ...any) (model.Ask, error) {
 	}
 	if len(anchor) > 0 {
 		var value model.Anchor
-		if err := json.Unmarshal(anchor, &value); err != nil {
+		if err := model.DecodeAnchor(anchor, &value); err != nil {
 			return model.Ask{}, fmt.Errorf("decode ask anchor: %w", err)
 		}
 		ask.Anchor = &value

@@ -195,12 +195,10 @@ func (s *server) listMyReplies(w http.ResponseWriter, r *http.Request) {
 // The transaction takes the thread's owner lock in shared mode (store.LockOwnerShared) before it
 // touches the caller's row: every writer that moves a user_threads row (a comment, an answer, an
 // issue message) holds that owner's lock exclusively from its read phase on, before its trigger
-// fires, and the answer route can hold the events' commit-order lock by then too (docs/marks.go's
-// anchor refresh appends an event before the answer's update), so a mark that took the row first
-// could wait on a writer waiting on it. The shared lock waits for that writer to commit, as the
-// owner row's `for share` waited for its `for no key update`, and two marks never wait on each
-// other. Owner first, then the project the event names, is the order every multi-owner
-// transaction takes (LockOwners).
+// fires, so a mark that took the row first could wait on a writer waiting on it. The shared lock
+// waits for that writer to commit, as the owner row's `for share` waited for its `for no key
+// update`, and two marks never wait on each other. Owner first, then the project the event names,
+// is the order every multi-owner transaction takes (LockOwners).
 func (s *server) putThreadRead(w http.ResponseWriter, r *http.Request) {
 	actor, ok := s.requireHuman(w, r)
 	if !ok {

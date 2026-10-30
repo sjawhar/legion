@@ -1118,8 +1118,10 @@ func TestThreeProjectCopiesOfARetractedAskSettlingAtOnceShareOneAsk(t *testing.T
 // pending row, then the source's block, then the ask.answered event), and the copy's settlement,
 // whose block the copy no longer holds, takes no copy lock and so runs beside it. The settlement
 // deletes its own pending row before it appends an event, so it waits for the answer holding no
-// lock the answer needs, and both finish. Deleting the row after its events would hold the events'
-// commit-order lock, which the answer's event waits for, while waiting on the row the answer holds.
+// lock the answer needs, and both finish. Its events lock only the copy's own row, which the
+// answer, appending on its source's owner, never takes, so a settlement that deleted the row after
+// them would wait for the answer too; what fails this test is a lock the two come to share in
+// opposite orders.
 func TestACopySettlingWhileItsSourceIsAnsweredWaitsForTheAnswerAndNeitherFails(t *testing.T) {
 	service, _ := newTestService(t)
 	service.settle = time.Hour

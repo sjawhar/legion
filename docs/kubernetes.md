@@ -71,7 +71,8 @@ phase worker `worker_backends` puts on `claude`, on Claude Code. It carries:
   `packages/daemon/docker/omp-plugins` (its `package.json` is the pin; the build resolves nothing from
   npm), the one plugin linked into the OMP profile `legion`
   (`OMP_PROFILE=legion`; plugins resolve to `/home/legion/.omp/profiles/legion/plugins/node_modules`),
-  backed by the CodeGraph CLI (`@colbymchenry/codegraph`, pinned) at `/opt/codegraph/bin` (`PATH`) — the
+  backed by the CodeGraph CLI (`@colbymchenry/codegraph`, installed at `/opt/codegraph` from the
+  committed lockfile at `packages/daemon/docker/codegraph`) at `/opt/codegraph/bin` (`PATH`) — the
   `codegraph` tool a tester queries for `affected` tests and a reviewer for `impact`/`callers` blast
   radius (`packages/daemon/internal/prompts/roles/core/tester.md`, `core/reviewer.md`). A pod's agent has that tool because its launch loads profile plugins (dispatch://LEGION-629), which the capability report's `codegraph` row says ([The deployment's capability report](#the-deployments-capability-report));
 - OMP's native module, extracted at build into `/home/legion/.omp/natives/<version>/`: from 18.11.0 OMP writes only the variant the CPU selects (AVX2 or not), so this is the build runner's variant, and a pod whose node selects the same one extracts nothing, while a node that selects the other has each role write that one (111 MiB) into its own home overlay, on the pod's `role-homes` volume, at its first OMP run;
@@ -91,7 +92,9 @@ phase worker `worker_backends` puts on `claude`, on Claude Code. It carries:
   `node`, `npm`, `npx` and `corepack` from Node 24 LTS, with `pnpm`, `pnpx`, `yarn` and `yarnpkg` linked
   to corepack's shims (the links `corepack enable` would write, which uid 1000 cannot); the Go toolchain
   at `go.work`'s version — `go` and `gofmt`, the tree at `/opt/go` (its `GOROOT`, which `go` finds by
-  resolving the `/usr/local/bin/go` symlink; the image sets no `GOROOT`); the AWS CLI v2's `aws`; and
+  resolving the `/usr/local/bin/go` symlink; the image sets no `GOROOT`), with the warm module cache
+  of the two modules `go.work` binds, which the second paragraph after this list places; the AWS
+  CLI v2's `aws`; and
   `kubectl` 1.35, the minor version of the API server of the production cluster the workers run on,
   which Kubernetes' version skew policy requires within one minor of kubectl (a deployment whose
   cluster runs another minor layers its own `kubectl` on the image:
@@ -119,7 +122,9 @@ phase worker `worker_backends` puts on `claude`, on Claude Code. It carries:
   the TypeScript installed beside it unless the repository's own
   `node_modules` holds one, which it prefers. From Debian trixie's archive, at `/usr/bin`: `python3`
   (the interpreter Oh My Pi's Python eval runs — `omp setup python --check` answers `available: true`
-  on it), `curl`, `wget`, `jq`, `flock` (from `util-linux`: the install Legion renders for an
+  on it) with Debian's PyYAML, `python3-yaml`, so `python3 -c "import yaml"` answers in a pod (the
+  third paragraph after this list names the gates that need it),
+  `curl`, `wget`, `jq`, `flock` (from `util-linux`: the install Legion renders for an
   installing launch serialises on the issue's shared bun install cache with `/usr/bin/flock`, so a
   `roles` container whose image lacks it fails every installing launch; the apt line names the package
   even though Debian's `priority:required` set already brings it into the base, so the day a base
@@ -201,20 +206,57 @@ runs. A deployment still pinning an older image digest has no `gcc`
 and needs zig as `CC`
 (`docs/solutions/testing/the-race-detector-runs-in-a-worker-pod-with-zig-as-the-c-compiler-and-a-library-callback-from-an-earlier-test-writes-your-log-sink-INFRA-182.md`).
 
+The image also carries the Go module cache of the two modules `go.work` binds, so a role's first Go
+build in this repository reads no package registry. The build fills it in the Dockerfile's `go`
+stage, in the layer that copies `go.work`, `go.work.sum` and each module's `go.mod` and `go.sum` and
+runs `go mod download`, above every source `COPY`, so a commit never rebuilds it. The runtime stage
+copies the download cache alone — the module zips, `.mod` and `.info` files and their hashes, 380
+MiB over 419 module zips — to `/home/legion/go/pkg/mod/cache/download`, as the runtime user, its
+files 0644 in 0755 directories, so a role can add a module the cache does not hold. The extracted
+module trees are left out: `go` extracts what a build needs from the zips, and the whole module
+cache — those trees and this download cache together — is 2.2 GiB, which buys nothing in every
+pull. A pod tells every role `GOMODCACHE=/legion/go/mod` on the issue's volume
+(`roleEnvironment`, `manifest.go`), which is empty in a fresh pod and dies with it ([The disk dies
+with its pod](#the-disk-dies-with-its-pod)), so the image's copy reaches a role as a proxy rather
+than as its `GOMODCACHE`: the build rewrites `/opt/go/go.env`'s `GOPROXY` line to
+`file:///home/legion/go/pkg/mod/cache/download|https://proxy.golang.org|direct`, and the `|` makes
+a go command fall through to the public proxy after any error, so a module the cache does not hold
+still resolves. The `go` stage deletes every `@v/list` and `@latest` file from the cache before the
+runtime stage copies it, and the final stage's toolchain step fails the build if one is there. Such
+a file would name the versions of this image and no other, and a file proxy answers a list request
+from it with no error, so `go get X@latest`, `go get -u`, `go list -m -u all` and
+`go list -m -versions` would stop at this image's pins in every repository a role opens. Without
+those files the file proxy answers a version query with a 404, and the query falls through to
+`proxy.golang.org`, while the `.info`, `.mod` and `.zip` of a pinned version still come from the
+cache. `go.env` is the place for it rather than the final stage's `ENV`, for the reason
+the cgo paragraph above gives in reverse: a variable the image's `ENV` sets is one
+`runtime.kubernetes.pod.env` may not set, while a `go.env` default leaves `GOPROXY` to an operator,
+a role, or one command, each of which outranks it through the process environment.
+
+The image's `python3` carries Debian's PyYAML, `python3-yaml`, because six of this repository's own
+gates read a workflow or `.github/ci-images.yaml` with `import yaml`:
+`.github/scripts/check-action-pins.sh`, `check-bun-version.sh`, `check-ci-images.sh`,
+`check-image-trigger-paths.sh`, `check-release-credentials.sh`, and `check-ci-filters.sh` through
+`ci_filter_coverage.py`. A role runs those gates on its own change, so an image without PyYAML
+fails every one of them. Debian's package is the route rather than `pip`, because the image
+installs system packages in one `apt` step and trixie marks its `python3` externally managed
+(PEP 668).
+
 It runs as user `legion` (uid 1000, declared numerically so `runAsNonRoot` can verify it from the image
 alone) with `HOME=/home/legion`, which must be writable (OMP writes logs and `models.db` under
 `~/.omp/profiles/legion`; every session is a row in the session database). Mount writable volumes
 below the profile directory, never at `/home/legion`
 itself: everything the image-time probe proved lives under `HOME` — the CodeGraph plugin's link and the
-lock at `~/.omp/profiles/legion/plugins`, the natives at `~/.omp/natives` — and a volume at `HOME` (an `emptyDir`,
+lock at `~/.omp/profiles/legion/plugins`, the natives at `~/.omp/natives`, the warm Go module cache at
+`~/go/pkg/mod/cache/download` — and a volume at `HOME` (an `emptyDir`,
 or a `HOME` volume under `readOnlyRootFilesystem`) shadows all of it silently. It is `linux/amd64` only:
 the OMP fork release has no linux/arm64 build. One commit ⇒ one image, with one exception: a
 fresh pod still loads the image's own copies of `@sjawhar/pi-envoy` and `@sjawhar/pi-legion`, from
 the commit, never from an npm release, but a role relaunched onto a newer plugin contract in a
 kept pod loads the release's published pair, installed from npm under the generation directory
-("Contract discipline" below) — what the image does take from npm is pinned: the CodeGraph CLI by an
-`ARG` at the top of `worker.Dockerfile`, and the CodeGraph plugin, TypeScript and the two npm language
-servers by the committed lockfiles under `packages/daemon/docker/` (`omp-plugins`, `language-servers`).
+("Contract discipline" below) — what the image does take from npm is pinned: the CodeGraph CLI, the
+CodeGraph plugin, TypeScript and the two npm language servers all by the committed lockfiles under
+`packages/daemon/docker/` (`codegraph`, `omp-plugins`, `language-servers`).
 
 ### The tools a role's own work needs
 
@@ -278,7 +320,13 @@ image's compressed size is a cold launch's first cost. Before the capability too
 them it is 22 layers and 1007 MiB compressed (1,056,280,622 bytes, the `sha-ff33c8c9fb1b` build of the
 pull request that added them): the Debian layer grows from about 30 MiB to 307 MiB, almost all of it
 Chromium and the library closure it depends on; the Go toolchain is 64 MiB and `gopls` 20 MiB; Node's
-tree with the two npm language servers is 66 MiB. The five client tools
+tree with the two npm language servers is 66 MiB. The warm Go module cache is a layer of its own,
+380 MiB over 419 module zips with their `.mod`, `.info` and hash files — the download cache alone,
+not the whole 2.2 GiB module cache, whose other half is the extracted trees — measured on disk
+from `go mod download` over `go.work`'s two
+modules in a worker pod on 2026-10-29 rather than from a built image: the zips are compressed
+already, so the layer should land near that figure, and the image's first build is what measures
+it. The five client tools
 ([The tools a role's own work needs](#the-tools-a-roles-own-work-needs)) cost 7.9 MiB — not a slice
 of that 22-layer figure, but a difference measured like for like between a later pair of builds,
 this branch's head and the base it forks from: the head
@@ -476,8 +524,12 @@ the image `PATH` — the language servers (`gopls version`, `typescript-language
 version` with `go env GOROOT` required to be `/opt/go`, `gcc --version` (Go's cgo, and so its race
 detector, needs it), `go env CGO_ENABLED` with `CGO_ENABLED` removed from the environment required
 to be `0` (so the build fails if `/opt/go/go.env`'s `CGO_ENABLED=0` line, the default a scrubbed
-environment depends on, is ever lost), `gofmt`, `kubectl version --client`, and trixie's
-`python3`, `curl`, `wget`, `jq --version`, `flock --version`, `psql --version`, `redis-cli --version`,
+environment depends on, is ever lost), `go env GOPROXY` read the same way and required to be the
+`file:///home/legion/go/pkg/mod/cache/download|https://proxy.golang.org|direct` that same `go.env`
+carries, with the cache it names held to the runtime user, to a writable download directory and to
+carrying no `@v/list` and no `@latest` file,
+`gofmt`, `kubectl version --client`, and trixie's
+`python3` with `python3 -c "import yaml"` for its PyYAML, `curl`, `wget`, `jq --version`, `flock --version`, `psql --version`, `redis-cli --version`,
 `sqlite3 --version`, `nc -h`, `dig -v`, `chromium --version` and `socat -V` included — the corepack shims fetching their shipped default pnpm and yarn
 into a scratch directory the step removes. `ssh-keygen` takes no `--version`, so the step generates a
 throwaway ed25519 key in that scratch directory and fingerprints it with `ssh-keygen -l`. Two of the
@@ -488,7 +540,7 @@ prints its usage and exits 0, under the `nc` name the alternatives system instal
 when the toolchain or an earlier layer changes, so a commit that only rebuilds `legion` needs no package
 registry.
 To check a published image's toolchain end to end, a project Python install included:
-`docker run --rm --entrypoint sh ghcr.io/sjawhar/legion-worker@sha256:… -c 'uv --version && node --version && npm --version && aws --version && kubectl version --client && go version && gcc --version && gopls version && python3 --version && jq --version && flock --version && psql --version && redis-cli --version && sqlite3 --version && nc -h && dig -v && ssh-keygen -t ed25519 -N "" -f /tmp/k && chromium --version && uv python install 3.13 && uv run --python 3.13 python -c "print(1)"'`.
+`docker run --rm --entrypoint sh ghcr.io/sjawhar/legion-worker@sha256:… -c 'uv --version && node --version && npm --version && aws --version && kubectl version --client && go version && go env GOPROXY && gcc --version && gopls version && python3 --version && python3 -c "import yaml" && jq --version && flock --version && psql --version && redis-cli --version && sqlite3 --version && nc -h && dig -v && ssh-keygen -t ed25519 -N "" -f /tmp/k && chromium --version && uv python install 3.13 && uv run --python 3.13 python -c "print(1)"'`.
 
 ### Pin by digest, never by tag
 
@@ -1708,7 +1760,8 @@ this order:
      runtime.kubernetes.resources.controller.cpu`, the same `members`);
    - every other key of the `runtime.kubernetes` block this release added, each refused by name
      the same way: `session_database`, `plugins`, `repository_cache`, `setup`,
-     `agent_secrets.token_file`, and a pod volume of kind `persistent_volume_claim` or `nfs`;
+     `agent_secrets.token_file`, a pod volume of kind `persistent_volume_claim` or `nfs`, and a
+     `secret` or `config_map` volume's `default_mode`;
    - a database session store: the file puts `session_store` back to `pvc`, or leaves it unset,
      and removes `session_dsn_secret` with it. The earlier release refuses `postgres`
      (`runtime.kubernetes.session_store postgres is not supported until Stage 6: a pod's session
@@ -2520,6 +2573,23 @@ exist in the daemon's namespace, with every key the volume asks of it: the image
 boot at once, naming it, when it does not, for every volume a `volume_mounts` entry mounts (the
 kubelet attempts no other)
 ([The image is probed before it publishes](#the-image-is-probed-before-it-publishes)).
+
+A `secret` or `config_map` volume may set `default_mode`, the mode of every file it projects,
+in octal digits after a leading `0` or `0o`, from 0 to 0777:
+`secret: {name: <Secret>, items: [{key: <key>, path: key}], default_mode: 0440}`. `0o440` reads
+the same, and so does the string `"0440"`, the one spelling a pod block written as JSON can carry.
+Left out, Kubernetes' default stands, 0644, which every user in the pod can read; Legion mounts
+its own Secrets, the providers Secret among them, at 0440. Every pod runs as user 1000 with group
+1000 as its `fsGroup`, so every role still reads a 0440 file. Under that `fsGroup` the kubelet
+adds group read to every file such a volume writes, so a mode below 0440 (`0400`, `0`) reaches the
+files as 0440, root-owned with group 1000: no mode makes them readable by user 1000 alone, and the
+narrowest a pod gets is 0440. Load refuses a mode written in
+decimal, quoted or not (`440` would be 0670), one above 0777, and a `default_mode` on a projected
+volume's source. A change of a mode replaces no running pod, which keeps the mode its files were
+written with: the mode reaches each pod made after the change. A daemon of
+an earlier release refuses the key at boot (`unknown key
+runtime.kubernetes.pod.volumes[<n>].secret.default_mode`), so set it only once the daemon runs a
+release that reads it; `legion start --check-config` of that release says so first.
 
 A volume may also be an existing network share: [Network shares](#network-shares) lists the sources
 and what each runtime supports.
@@ -3376,7 +3446,10 @@ too. The two Go caches
 are the issue's as they already were, one pair every role of the issue is told:
 `GOCACHE=/legion/go/build` and `GOMODCACHE=/legion/go/mod` (`goBuildCache` and `goModCache`,
 `manifest.go`), beside the workspaces rather than under the scratch, on the same volume beside
-uv's cache. Both hold content addressed
+uv's cache. Both are empty in a fresh pod, since the disk dies with its pod, and the module cache
+fills from the image rather than from `proxy.golang.org`: `/opt/go/go.env` names the image's own
+copy of this repository's modules first in `GOPROXY` ([Worker image](#worker-image)).
+Both hold content addressed
 by its hash, and the roles of one issue may fill them at once: of the build cache `go help cache`
 says "The cache is safe for concurrent invocations of the go command", and what reaches the
 module cache is a module zip or `go.mod` the go command has verified against a known hash
@@ -4305,7 +4378,7 @@ spec:
         <the compute-class selector the deployment's declaration names>
       containers:
         - name: db
-          image: mirror.gcr.io/library/postgres@sha256:979bccfde35445db618c65107d27d08c6c21339d8dc3ad4c830c6633947be0e4   # the mirror, as every image here is pulled
+          image: mirror.gcr.io/library/postgres@sha256:979bccfde35445db618c65107d27d08c6c21339d8dc3ad4c830c6633947be0e4   # Google's mirror: the cluster pulls this image itself, and this example is outside CI's reach
           terminationMessagePolicy: FallbackToLogsOnError   # an exited server's last lines stay in its status
           env:
             - { name: POSTGRES_PASSWORD, value: "$password" }
@@ -5589,7 +5662,9 @@ issue's pod (every role of it alike) and the image probe's.
 - **`runtime.kubernetes.pod`** has four keys. `env` is variables set in the agent's container.
   `volumes` are each one `secret`, `config_map`, `projected`, `persistent_volume_claim` (a claim of
   the daemon's namespace, by `name`) or `nfs` (`server` and `path`) source, never an inline `csi`
-  volume ([Network shares](#network-shares)); a projected
+  volume ([Network shares](#network-shares)); a `secret` or `config_map` source may set
+  `default_mode`, the octal mode of every file it projects, such as `0440` in place of
+  Kubernetes' default 0644 ([Configuration](#configuration)); a projected
   `service_account_token` must last at least 600 s, the least the API server issues, and its
   `audience` may not still hold a `${…}` placeholder, which nothing expands. `volume_mounts`
   are read-only unless `read_only: false`, and may use `sub_path`. `service_account` is the pods'
@@ -5650,13 +5725,18 @@ issue's pod (every role of it alike) and the image probe's.
 - **AskGate's time limit** is the operator's too. Every pod loads pi-envoy, whose AskGate reviews
   each Dispatch write of a role's main agent before it posts. Its review must finish inside Oh My
   Pi's limit for one `tool_call` handler, `extensionHandlers.toolCallTimeoutMs`, and the gate holds
-  its deadline 5 s under that limit. The limit is 30 s by default, so the deadline is then 25 s. A
-  review of a long session often takes longer, a review that times out lets the write post
+  its deadline 5,000 ms under that limit: the room its handler still needs for an aborted call's
+  usage report and its entry. The Dispatch decision record is no part of it, since it runs after
+  the handler has returned. The limit is 30 s by default, so the deadline is then
+  25,000 ms. A
+  review of a long session can take longer, a review that times out lets the write post
   unreviewed, and three timeouts in a row stop the gate for the rest of that session. Set
   `extensionHandlers.toolCallTimeoutMs: 120000` in the operator's `overlay.yml`, as the example
   overlay does (pi-envoy's README, "The time limit"). Legion's own turn-scoping overlay does not set
   it. Without it, the gate logs one warning at start, `AskGate: the review deadline is 25000 ms`,
-  through Oh My Pi's logger. The gate binds in a pod because the pod has Dispatch; one without it
+  through Oh My Pi's logger. A limit under 15,000 ms leaves no room for a verdict: the gate does
+  not bind there, and a gate that did not load refuses every Dispatch write it would have
+  reviewed. The gate binds in a pod because the pod has Dispatch; one without it
   gets no gate. The pod's `dispatch` command enforces the review: while the gate is bound, a
   gated write that is not one literal `dispatch` call the gate reviewed (a pipe other than one
   trailing `head` or `tail`, a script, `python3 -c`, an eval cell's process) is refused by the

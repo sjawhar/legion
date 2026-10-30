@@ -35,7 +35,9 @@
 // answers (every SessionStart, and SubagentStart): puts what people wrote to the session in the
 // last 72 hours into the model's context, as
 // `hookSpecificOutput.additionalContext` under the event that ran it: `readSessionAnswers`' list,
-// or its failure line naming why when a read failed and no list read before has an item to show.
+// or its failure line naming why when a read failed and no list read before has an item to show,
+// and nothing when Dispatch answered that it has no answers route (`source: "unavailable"`): the
+// read's notice naming that Dispatch goes to stderr instead, one line per hook process.
 // The session is the hook input's `session_id`, which at SubagentStart is the parent's, the
 // session a subagent's `dispatch` command writes as.
 // The hook prints by `ANSWERS_BY_MS` after its process started (bun's start-up included), or
@@ -48,7 +50,8 @@
 // `answers-refresh` (never named by hooks.json): that process resolves Dispatch with commands run,
 // reads the list with a long deadline, which writes `answers.json`, and leaves what it read in
 // `answers-refresh.json` beside it, with the Dispatch URL it targeted (`sessionDispatchUrl`, which
-// runs no command), its failure line included when the command failed. The hook carries that when
+// runs no command), its failure line included when the command failed and the read's notice when
+// it gave one. The hook carries that when
 // it lands by the print deadline and names the Dispatch URL envoy.json names to the hook now, and
 // otherwise the last list read from that URL (resolved the same way; a list another Dispatch
 // answered never stands in) or the failure line: the refresher is in its own
@@ -135,6 +138,9 @@ const RefreshOutcome = z.object({
   dispatch_url: z.string().nullable(),
   /** `readSessionAnswers`' message; null when there was nothing to show. */
   text: z.string().nullable(),
+  /** `readSessionAnswers`' notice that the Dispatch has no answers route, which the hook writes to
+   *  stderr; null or absent when the read gave none. */
+  notice: z.string().nullable().optional(),
 })
 /** Tests only: the file the answers hook writes its own timing to, `{ began, printed, ended }` in
  *  ms after its process started (when its code began, when it printed or found nothing to print,
@@ -298,8 +304,11 @@ function refreshOutcome(file: string, since: number): z.infer<typeof RefreshOutc
   return outcome.success && outcome.data.finished_at >= since ? outcome.data : undefined
 }
 
-/** What the refresher gave the hook: its message (undefined: nothing to show), or why none. */
-type Refreshed = { readonly text: string | undefined } | { readonly reason: string }
+/** What the refresher gave the hook: its message (undefined: nothing to show) and the notice the
+ *  hook reports, or why none. */
+type Refreshed =
+  | { readonly text: string | undefined; readonly notice: string | undefined }
+  | { readonly reason: string }
 
 /** Starts the session's refresher unless one is running, and waits until `by` for what it reads.
  *  `startedAt` is when this process started (epoch ms): an outcome from before then is not this
@@ -334,7 +343,9 @@ async function refreshedAnswers(
   for (;;) {
     const outcome = refreshOutcome(file, startedAt)
     if (outcome !== undefined) {
-      if (outcome.dispatch_url === dispatchUrl) return { text: outcome.text ?? undefined }
+      if (outcome.dispatch_url === dispatchUrl) {
+        return { text: outcome.text ?? undefined, notice: outcome.notice ?? undefined }
+      }
       return {
         reason: `the refresher read ${outcome.dispatch_url ?? "no Dispatch"}, not the Dispatch envoy.json names now`,
       }
@@ -349,16 +360,17 @@ async function refreshedAnswers(
   }
 }
 
-/** The answers hook's message for `session`. Dispatch is read first without running any `!`
- *  command; when that is off with an error, the refresher's message stands, or, when it has not
- *  landed by `by`, the last list read from the Dispatch URL envoy.json names now (resolved without
- *  the token), never another's, or the failure line naming why. */
+/** The answers hook's message for `session`, and the notice it reports on stderr when the Dispatch
+ *  has no answers route. Dispatch is read first without running any `!` command; when that is off
+ *  with an error, the refresher's message stands, or, when it has not landed by `by`, the last list
+ *  read from the Dispatch URL envoy.json names now (resolved without the token), never another's,
+ *  or the failure line naming why. */
 async function answersMessage(
   session: string,
   cwd: string,
   startedAt: number,
   by: number,
-): Promise<string | undefined> {
+): Promise<{ readonly text: string | undefined; readonly notice?: string | undefined }> {
   const file = sessionConfigFile("claude", process.env)
   let { dispatch } = sessionDispatchSettings(file, process.env, { cwd, commands: "kept" })
   let dispatchUrl: string | undefined
@@ -369,11 +381,11 @@ async function answersMessage(
     dispatchUrl = sessionDispatchUrl(file, process.env, { cwd })
     if (dispatchUrl !== undefined) {
       const refreshed = await refreshedAnswers(session, cwd, dispatchUrl, startedAt, by)
-      if ("text" in refreshed) return refreshed.text
+      if ("text" in refreshed) return refreshed
       dispatch = offWithError(refreshed.reason)
     }
   }
-  const read = await readSessionAnswers({
+  return readSessionAnswers({
     session,
     dispatch,
     dispatchUrl,
@@ -382,7 +394,6 @@ async function answersMessage(
     // budget on a loaded host never cost a list Dispatch answers at once.
     deadlineMs: Math.max(ANSWERS_LEAST_WAIT_MS, remainingUntil(by)),
   })
-  return read.text
 }
 
 /** The answers mode: never throws, and ends the process with status 0. */
@@ -399,7 +410,14 @@ async function answers(text: string): Promise<never> {
       { CLAUDE_PROJECT_DIR: process.env["CLAUDE_PROJECT_DIR"] },
       input.cwd ?? process.cwd(),
     )
-    const message = await answersMessage(input.session_id, directory, startedAt, by)
+    const { text: message, notice } = await answersMessage(
+      input.session_id,
+      directory,
+      startedAt,
+      by,
+    )
+    // Never to the model: a Dispatch with no answers route is the operator's to know of.
+    if (notice !== undefined) process.stderr.write(`envoy: ${notice}\n`)
     if (message !== undefined) {
       await Bun.write(
         Bun.stdout,
@@ -459,6 +477,7 @@ async function answersRefresh(session: string, cwd: string): Promise<never> {
         finished_at: Date.now(),
         dispatch_url: dispatchUrl,
         text: read.text ?? null,
+        notice: read.notice ?? null,
       }
       writeAtomically(join(directory, REFRESH_OUTCOME), JSON.stringify(outcome))
     } finally {

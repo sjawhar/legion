@@ -214,11 +214,11 @@ func ignoreUnclaimed(err error) error {
 // the document owner's lock (lockArtifactOwner), under which it reads the notice, both versions it
 // names, tells a server-state-only change from a person's edit and cuts the diff, all before its
 // first write; then it claims the notice (claimEditNotice) and appends the event
-// (events.Broker.QueueAppend, which takes the owner's lock again, the owner's row and the
-// commit-order lock) in one batch, so the transaction holds a transaction id only for those and
-// the commit. The claim still decides: a notice it does not delete as read is not sent, which the
-// claim's callback reports (errEditNoticeUnclaimed), stopping the batch before the append is read,
-// and the transaction rolls back. No statement here locks `for update`.
+// (events.Broker.QueueAppend, which takes the owner's lock again and the owner's row) in one
+// batch, so the transaction holds a transaction id only for those and the commit. The claim still
+// decides: a notice it does not delete as read is not sent, which the claim's callback reports
+// (errEditNoticeUnclaimed), stopping the batch before the append is read, and the transaction
+// rolls back. No statement here locks `for update`.
 //
 // A document deleted since the unlocked read has taken its notice with it (on delete cascade), and
 // one whose issue has closed takes no more edits: either way nothing is sent, and a closed issue's

@@ -306,6 +306,18 @@ type server struct {
 	// eventRelay is the live feed every events subscription reads (INFRA-66), on every server
 	// register mounts: it starts its listening connection on the first subscription.
 	eventRelay *eventStreamRelay
+	// eventHorizon is the server's one events.Horizon: the safe horizon every reader that pages
+	// the event log by a global id cursor reads up to, shared through horizon() so one
+	// observation in flight serves them all. horizonOnce builds it on first use rather than in
+	// register, which must not touch the Store.
+	horizonOnce  sync.Once
+	eventHorizon *events.Horizon
+	// bootMark closes once the server's boot mark has been taken (takeBootMark), which the marks
+	// in eventMarks begin with; nil on a server with no Store.
+	bootMark chan struct{}
+	// eventMarks is the event log marks the relay's first start and GET /auth/whoami bound the ids
+	// a writer can still hold open by (event_marks.go).
+	eventMarks eventMarks
 	// detached is everything a request started that runs on past its client: every keyed write's
 	// handler (keyedWrites, which runs it on a context the client's going away does not cancel) and
 	// every delivery a handler started and did not wait for (a broadcast's recipients, a sweep's
@@ -398,7 +410,7 @@ type queryer interface {
 // returned wait would block for ever once an events subscription had started the relay.
 func Register(mux *http.ServeMux, lifetime context.Context, deps Deps) Background {
 	s := register(mux, lifetime, deps)
-	return Background{Wait: s.waitBackground, ResumeDeliveries: s.resumeOwedDeliveries}
+	return Background{Wait: s.waitBackground, ResumeDeliveries: s.resumeOwedDeliveries, EventHead: s.eventFeedHead}
 }
 
 // Background is the work a registered server does beside answering its requests, for the process
@@ -410,6 +422,9 @@ type Background struct {
 	// process that died left owed is sent, once, under its own attempt number. The maintenance loop
 	// runs it (RunSuggestionOutcomeSweep).
 	ResumeDeliveries func(context.Context) error
+	// EventHead is the event_head GET /auth/whoami answers (eventFeedHead): an id at or below which
+	// every event is already final, which a page resumes its first events subscription from.
+	EventHead func(context.Context) (int64, error)
 }
 
 // waitBackground waits for every keyed handler and every delivery a request left running past
@@ -479,7 +494,8 @@ func (b *backgroundWork) wait() {
 // relay a test waits out before its database closes. It is also called with an empty Deps, as
 // TestTheDeploymentsSuggestionAllowanceIsTheDocumentedBound does, so it must stay cheap and must
 // not dial or read the nil Store: whatever reaches the database or the network starts later, from
-// a handler, the relay's first subscriber or the hub's.
+// a handler, the relay's first subscriber or the hub's, or on a goroutine of its own, as the event
+// log's boot mark does (takeBootMark), for a server that has a Store.
 func register(mux *http.ServeMux, lifetime context.Context, deps Deps) *server {
 	if lifetime == nil {
 		panic("api.Register: the lifetime parameter is required: it is the context that ends the delivery hub, the event stream relay and every live socket (a test passes t.Context())")
@@ -490,6 +506,7 @@ func register(mux *http.ServeMux, lifetime context.Context, deps Deps) *server {
 		liveAgentView:  {start: s.startAgentView},
 	}
 	s.eventRelay = newEventStreamRelay(s, lifetime)
+	s.takeBootMark()
 	s.deliveryHub = newDeliveryHub(s, lifetime, deliveryHubClock{})
 	routes := s.routes()
 	s.routeIndex = routeIndexEntries(routes)

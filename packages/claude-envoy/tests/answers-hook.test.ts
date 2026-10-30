@@ -26,9 +26,13 @@ afterEach(async () => {
 type Route =
   | { readonly kind: "list"; readonly items: readonly SessionAnswer[] }
   | { readonly kind: "hang" }
+  | { readonly kind: "missing" }
+  | { readonly kind: "not-a-list" }
+  | { readonly kind: "proxy-404" }
 
 /** The stand-in Dispatch: its answers route answers as `route.kind` says at the time of each
- *  request; every request is recorded with its bearer. */
+ *  request (`missing` as a Dispatch build without the route, `not-a-list` with a 200 that is no
+ *  answers list, `proxy-404` with a proxy's 404 page); every request is recorded with its bearer. */
 function standinDispatch(): {
   readonly base: string
   readonly requests: string[]
@@ -50,6 +54,24 @@ function standinDispatch(): {
       }
       const { route } = state
       if (route.kind === "hang") return new Promise<Response>(() => {})
+      if (route.kind === "missing") {
+        // What a Dispatch build without the route answers (its router's fallback).
+        return Response.json(
+          {
+            code: "NOT_FOUND",
+            error: `no route for GET ${url.pathname}`,
+            hint: "GET /api/v1 lists every route",
+          },
+          { status: 404 },
+        )
+      }
+      if (route.kind === "not-a-list") return Response.json({ session_id: SESSION, topics: [] })
+      if (route.kind === "proxy-404") {
+        return new Response("<html><body><h1>404 Not Found</h1><hr>nginx</body></html>", {
+          status: 404,
+          headers: { "Content-Type": "text/html" },
+        })
+      }
       return Response.json({
         session_id: SESSION,
         since: new Date(Date.now() - 72 * 3_600_000).toISOString(),
@@ -531,6 +553,87 @@ test("adds nothing when the list is empty or Dispatch is not configured", async 
   // nothing.
   const expectedRequests = empty.stdout === "" ? [1] : [0, 1]
   expect(expectedRequests).toContain(dispatch.requests.length)
+}, 20_000)
+
+/** What the hook writes to stderr, once, when Dispatch at `base` has no answers route. */
+function noRouteLine(base: string): string {
+  return `envoy: Dispatch at ${base} has no answers route (its build is older than the route), so people's answers cannot be read from it\n`
+}
+
+test("a Dispatch with no answers route adds nothing to the context, and the hook says so once on stderr", async () => {
+  const dispatch = standinDispatch()
+  dispatch.route = { kind: "missing" }
+  const { home, state } = await scratch()
+  const run = await runHook(
+    {
+      HOME: home,
+      DISPATCH_STATE_DIR: state,
+      DISPATCH_URL: dispatch.base,
+      DISPATCH_TOKEN: "hook-token",
+    },
+    sessionStart("startup", home),
+  )
+  expect(run.exitCode).toBe(0)
+  if (run.stdout === "") {
+    // The read landed: nothing for the model, and one line for whoever reads the hook's stderr.
+    expect(run.stderr).toBe(noRouteLine(dispatch.base))
+  } else {
+    // A read that missed the hook's wait, with no list read before, says so, as on any Dispatch.
+    expect(allowedOutcome(contextOf(run, "SessionStart"), [], READ_MISSED)).toBe("failure")
+    expect(run.stderr).toBe("")
+  }
+  expect(run.stdout).not.toContain("answers route")
+  expect(existsSync(join(state, "sessions", SESSION, "answers.json"))).toBe(false)
+}, 20_000)
+
+test("a 200 that is no answers list, and a proxy's 404 page, carry the failure line naming them", async () => {
+  for (const [kind, reason] of [
+    ["not-a-list", /^Dispatch answered with something that is not an answers list$/],
+    ["proxy-404", /answered 404( Not Found)? with a body that is not Dispatch's error JSON/],
+  ] as const) {
+    const dispatch = standinDispatch()
+    dispatch.route = { kind }
+    const { home, state } = await scratch()
+    const run = await runHook(
+      {
+        HOME: home,
+        DISPATCH_STATE_DIR: state,
+        DISPATCH_URL: dispatch.base,
+        DISPATCH_TOKEN: "hook-token",
+      },
+      sessionStart("startup", home),
+    )
+    const named = new RegExp(`${reason.source}|${READ_MISSED.source}`)
+    expect(allowedOutcome(contextOf(run, "SessionStart"), [], named)).toBe("failure")
+    expect(run.stderr).toBe("")
+  }
+}, 20_000)
+
+test("a refresher that met a Dispatch with no answers route hands the hook its notice, and no line", async () => {
+  const dispatch = standinDispatch()
+  dispatch.route = { kind: "missing" }
+  const { home, state, config, tmp } = await scratch()
+  const env = { HOME: home, DISPATCH_STATE_DIR: state, CLAUDE_CONFIG_DIR: config, TMPDIR: tmp }
+  await writeFile(
+    join(config, "envoy.json"),
+    JSON.stringify({ dispatch: { serverUrl: dispatch.base, token: "!printf command-token" } }),
+  )
+  cleanup.push(() => eventually(() => noRefresher(home, state), "the refreshers' end"))
+
+  // As in the failing-command case: the waiting hook holds its code until the refresher the
+  // starting hook starts has finished, so it carries that refresher's outcome.
+  const ready = join(home, "ready")
+  const preload = await preloadAfterRefresher(home, state, ready)
+  const waiting = runHook(env, sessionStart("resume", home), { preload })
+  await eventually(() => existsSync(ready), "the waiting hook's start")
+  const starting = await runHook(env, sessionStart("startup", home))
+  const carried = await waiting
+
+  expect(carried).toMatchObject({ exitCode: 0, stdout: "", stderr: noRouteLine(dispatch.base) })
+  expect(starting.exitCode).toBe(0)
+  expect(starting.stdout).not.toContain("answers route")
+  await eventually(() => noRefresher(home, state), "the refreshers' end")
+  expect(dispatch.requests).toContain(`Bearer command-token /api/v1/agents/${SESSION}/answers`)
 }, 20_000)
 
 test("a `!` token command runs outside the hook: a quick one gives the bearer, a slow one cannot hold the hook", async () => {
