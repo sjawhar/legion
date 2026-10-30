@@ -752,7 +752,7 @@ func (s *server) productionApplies(ctx context.Context, runs []delivery.Delivery
 
 // firstToWarn reports whether this process is the one to log the warning key names, jobNames
 // being key's names as a list. This process's warnedUnmatchedRuns answers first, so each process
-// asks the database once per key; then the insert into delivery_run_warnings (migration 0148)
+// asks the database once per key; then the insert into delivery_run_warnings (migration 0151)
 // decides between processes: only the one whose insert wrote the row logs, and every other finds
 // the row and stays quiet.
 //

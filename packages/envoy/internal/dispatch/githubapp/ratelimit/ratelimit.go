@@ -1,5 +1,5 @@
 // Package ratelimit is the GitHub rate limits every Dispatch process obeys together: one row of
-// github_rate_limits (migration 0147) per scope, judged by the database's clock.
+// github_rate_limits (migration 0150) per scope, judged by the database's clock.
 //
 // GitHub budgets the App and each installation, not a process, and warns that requests sent while
 // limited may get the integration banned. So a limit one process meets is recorded here, and every

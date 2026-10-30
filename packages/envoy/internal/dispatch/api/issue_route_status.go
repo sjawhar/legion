@@ -23,7 +23,7 @@ import (
 // issue read carries route_status beside the route, judged against the listener's live-session
 // list (GET /v1/sessions, each row carrying the roles its session holds), never one lookup per
 // issue. Every process judges against one stored copy of that list, the route_roster row
-// (migration 0146), and GET /api/v1/agents (listAgents) lists the sessions of that same copy: a
+// (migration 0149), and GET /api/v1/agents (listAgents) lists the sessions of that same copy: a
 // read uses it while it is fresh by the database's clock, so a route_status or an agents list can
 // be up to routeRosterTTL (5 s) old, and inside that age every process reads a route the same way,
 // and a filtered listing paged across processes is cut from one answer. A process that finds the

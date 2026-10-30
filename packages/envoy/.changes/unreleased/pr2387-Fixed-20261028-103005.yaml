@@ -10,7 +10,7 @@ body: |-
     - A request's own send no longer stops when its connection is cut (a closed tab, a front-door
       pod roll): a direct message, a comment's mentions, and a Retry finish their send and record
       its outcome after the browser has gone.
-    - Migration `0145` adds `message_deliveries.urgency`, so a message attempt the delivery sweep
+    - Migration `0148` adds `message_deliveries.urgency`, so a message attempt the delivery sweep
       resumes after its sender stopped keeps the urgency it was sent with, as does a person's
       same-mode Retry of it (an attempt a Retry opens carries none). A resumed direct message is
       more than a minute old, so its session shows it as a card rather than as its user's own

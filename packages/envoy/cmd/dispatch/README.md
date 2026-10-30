@@ -104,7 +104,7 @@ reach the stream adds nothing to the stream.
   stops the sweep and counts nothing against the delivery. No sweep sends GitHub anything until
   the time GitHub gave (`Retry-After`, or `x-ratelimit-reset` when no requests remain), and at
   least one minute, doubling while limits follow one another, up to 64 minutes. Both live in
-  `github_rate_limits` (migration `0147`), judged by the database's clock: GitHub's own wait under
+  `github_rate_limits` (migration `0150`), judged by the database's clock: GitHub's own wait under
   the App's scope, `app`, which every process's App calls obey (Running more than one process,
   below), and the doubling under the sweep's own, `redelivery`, so a limit met on redelivery
   requests never holds token mints and installation lookups past GitHub's wait. Each sweep reads
@@ -620,7 +620,7 @@ What the two processes share, and what each keeps to itself:
   the future" check, as the delivery claims' lease, the route roster's age and the GitHub rate
   limits are.
 - Route status and the agents list come from one stored listener answer. Every issue read judges
-  its `route_status` against the `route_roster` row (migration `0146`), the listener's last
+  its `route_status` against the `route_roster` row (migration `0149`), the listener's last
   live-session list, and `GET /api/v1/agents` lists that row's sessions, so both processes read a
   route the same way, list the same agents, and a `route_status` page read on either is cut from
   the same answer. A process that finds the row older than five seconds by the database's clock
@@ -631,7 +631,7 @@ What the two processes share, and what each keeps to itself:
   can still move issues across a page boundary, as any change does under offset paging.
 - GitHub's rate limits hold every process. GitHub budgets the App and each installation, not a
   process, and warns that requests sent while limited may get the integration banned, so a limit
-  one process meets is recorded in `github_rate_limits` (migration `0147`) and every process reads
+  one process meets is recorded in `github_rate_limits` (migration `0150`) and every process reads
   it before it sends GitHub anything (`githubapp.Client.request`, `githubapp/ratelimit`). Scope
   `app` holds the calls the App JWT signs (installation lookups, token mints, the webhook delivery
   endpoints) and `installation:<id>` the calls under that installation's token, each for the wait
@@ -673,7 +673,7 @@ What the two processes share, and what each keeps to itself:
 - A Delivery page configuration warning is logged once across the processes. Every read judges
   each deploy run, and a successful run holding none of `production_job_names`, or whose production
   job lists no step named `production_apply_step_name`, is named in the log; the process whose
-  insert into `delivery_run_warnings` (migration `0148`) writes the run's row logs it, and every
+  insert into `delivery_run_warnings` (migration `0151`) writes the run's row logs it, and every
   other process finds the row and stays quiet. A database that cannot record the row leaves the
   process to log it anyway.
 - A test hook acts on every process (`DISPATCH_TEST_HOOKS=1` only, so never in a real
@@ -1370,6 +1370,43 @@ EXCLUSIVE` on `broadcasts` too, because the table's foreign key puts triggers th
 read or send waits for the instant the migration's transaction lasts. Its census answers `0`. It
 follows `0139_related_checks` and `0140_issue_embedding_spec`, which already use the preceding
 migration numbers.
+Migrations `0145_events_person_words` and `0146_comment_deliveries_session` add two partial
+indexes for `GET /api/v1/agents/{session_id}/answers` (`sessionanswers.List`, Routes below), which
+every agent host reads on every model request. `0145` creates `events_person_words` on `events
+(created_at desc, id desc)` where the actor is a person and the type is `ask.answered`,
+`comment.created`, `message.created` or `message.answered`: the route reads the window's human
+events of those types through it, newest first, and keeps those whose `published_destinations`
+hold the session's own topic. A GIN index on `published_destinations` would find the session's
+events directly, but the outbox appends each topic it published an event to that array, and every
+such append would then also write the new element's entry into the index: a write load every
+outbox append would pay for a read only this route makes. `0146` creates
+`comment_deliveries_session` on `comment_deliveries (session_id, created_at desc)` where
+`session_id` is not null: the route reads the session's mentions created since an hour before its
+window as one range of it. Each is a plain `create index` inside the runner's
+transaction, so it holds `SHARE` on its table while it builds: writes to it wait, reads do not. On
+a local Postgres 17 (two CPUs, `maintenance_work_mem` 64 MB) with `events` seeded to 1,000,000
+rows (421 MB with its indexes, 126,541 of them in the index), `0145` built in 0.66-1.13 s over
+three runs and `0146` in 0.11-0.14 s on 50,003 deliveries. Both censuses answer `0`: an index
+build refuses and rewrites no row, and the census report already counts and sizes each table it
+reads.
+
+Migration `0147_message_deliveries_session_created` creates `message_deliveries_session_created`
+on `message_deliveries (session_id, created_at desc) include (message_id)` where `state` is
+`sent`, for the same route's read of the session's sent message deliveries created since an hour
+before its window. `message_deliveries_session` (`0051`) keys `session_id` alone, so through it
+that read fetched the session's whole delivery history and filtered it by time: a long-lived
+session that receives every broadcast copy read all of its deliveries on every model request.
+The new index holds only the read's sent rows and carries the one column it returns, so the read
+is an index-only scan of the window's range, and a cached generic plan, which knows neither the
+session nor the window, chooses it too: costed as a plain `(session_id, created_at desc)` index it
+came within a percent of `0051`, which the generic plan kept. `0051` stays for the conversation
+window, which reads every delivery a session ever received. On the seeded database above, with one
+session given 60,003 sent deliveries (1,019 since an hour before its window), the read of them
+went from 58,984 rows fetched and discarded (798 buffers, 20-22 ms) to an index-only scan of the
+1,019 (11 buffers, 0.3-0.4 ms), in the custom and the generic plan alike; the index built in
+0.34-0.52 s over three runs on 110,003 deliveries. A plain `create index` inside the runner's
+transaction, it holds `SHARE` on `message_deliveries` while it builds: writes to it wait, reads do
+not. Its census answers `0`.
 
 Migration `0142_item_blocks` creates the tables behind the blocks of a comment or message as graph
 nodes (`packages/envoy/AGENTS.md`, "References form one graph"): `comment_blocks`,
@@ -1405,7 +1442,7 @@ message included (a message is never edited), and owes an index to every message
 reading `messages` once. Its trigger takes `SHARE ROW EXCLUSIVE` on `messages` alone, so a message
 write waits behind it while a read does not. Its census answers `0` for the same reasons.
 
-Migration `0145_message_delivery_urgency` adds `message_deliveries.urgency`, the urgency a targeted
+Migration `0148_message_delivery_urgency` adds `message_deliveries.urgency`, the urgency a targeted
 message was sent with, so a send that resumes a stranded attempt - the delivery sweep's
 (`api/delivery_sweep.go`, `resumeOwedDeliveries`) or a person's same-mode Retry - hands the
 listener the urgency the person chose; an attempt a Retry opens records none and sends none. A
@@ -1417,11 +1454,11 @@ rolls beside it; an attempt that release wrote is resumed without an urgency, as
 was. Its check, one of `low`, `med`, `high` and `blocking`, is a second statement added
 `not valid`, as the rule below requires, and nothing validates it later, since every row below
 the migration carries no urgency. The sweep reads its candidates through `0138`'s partial indexes
-(above); `0145` builds none of its own. The census answers `0`. `0145` is additive, so rolling
-back past it is an image rollback alone. It follows `0144_messages_item_blocks_trigger`, which
+(above); `0148` builds none of its own. The census answers `0`. `0148` is additive, so rolling
+back past it is an image rollback alone. It follows `0147_message_deliveries_session_created`, which
 already uses the preceding migration number.
 
-Migration `0146_route_roster` creates `route_roster`, one row (its `id` checked `true`, as
+Migration `0149_route_roster` creates `route_roster`, one row (its `id` checked `true`, as
 `embeddings_rate_limit`'s is) holding the listener's last answer to `GET /v1/sessions` that every
 process judges issue reads' `route_status` against and lists `GET /api/v1/agents` from: whether it
 answered, the sessions it listed as the listener listed them, when the call was sent and until
@@ -1432,7 +1469,7 @@ The release before it neither reads nor writes the table and keeps its per-proce
 list while both serve, so only processes of this release agree on a route and on the agents list;
 rolling back past it is an image rollback alone.
 
-Migration `0147_github_rate_limits` creates `github_rate_limits`, one row per scope GitHub
+Migration `0150_github_rate_limits` creates `github_rate_limits`, one row per scope GitHub
 budgets (`app`, `installation:<id>`) and one for the webhook redelivery sweep's own backoff
 (`redelivery`): until when no process sends GitHub a request under the scope, judged against the
 database's `now()` as `embeddings_rate_limit`'s budget is, the strikes the sweep doubles its wait
@@ -1442,7 +1479,7 @@ rewritten, and the census answers `0`. The release before it neither reads nor w
 while both serve, its processes obey only the answers GitHub gives each of them, and its sweeps
 keep their backoff in the NATS KV bucket; rolling back past it is an image rollback alone.
 
-Migration `0148_delivery_run_warnings` creates `delivery_run_warnings`, one row per Delivery page
+Migration `0151_delivery_run_warnings` creates `delivery_run_warnings`, one row per Delivery page
 configuration warning logged: the deploy run (`repo`, `run_id`) and the configuration it was
 warned under (`job_names`, and `apply_step`, `''` for a run holding no production job), all four
 the primary key, so a changed configuration is warned about again. A read inserts the row before
@@ -2159,6 +2196,7 @@ Dispatch uses cookie identity through the sign-in pool.
 | `/api/v1/me/replies?limit=&offset=&issue=\|artifact=` | GET | cookie or trusted header (human only) | List the threads the caller wrote in where someone else has written since the caller last read them, newest reply first, less an open ask the Inbox lists. A row names the thread, its owner, its subject, its root's deep link and the newest reply's author, first line and time. `issue` or `artifact` narrows to one owner (both is `400 INVALID_QUERY`); `limit` is 1–200 (default 50). |
 | `/api/v1/me/threads/{id}/read` | PUT | cookie or trusted header (human only) | Move the caller's read mark on one thread forward to `{read_through}`; it never moves back, a value more than a minute ahead of the server is `400 INVALID_STATE`, and a non-uuid id is `400 THREAD_ID_INPUT`. Answers `204`, writing nothing for a thread the caller never wrote in. |
 | `/api/v1/agents` | GET | cookie, trusted header, or bearer | List live Envoy sessions (`session_id`, `title`, `dir`, `machine_id`, `roles`, `capabilities`, `last_seen`), newest first, from Dispatch's copy of the listener's session list, at most 5 s old; `503 ENVOY_UNAVAILABLE` when the listener cannot be reached, and for up to 5 s after a failed listener read without asking the listener again. |
+| `/api/v1/agents/{session_id}/answers?since=&max_chars=` | GET | cookie, trusted header, or bearer | What people wrote that Dispatch delivered to one session, newest first: each ask's current answer (`replaced` when it changed an earlier one), each comment at its current body (`edited_at` when edited) and each message, once however it arrived: a person's `ask.answered`, `comment.created`, `message.created` or `message.answered` event whose `published_destinations` hold the session's own topic, its sent message deliveries, and its sent comment deliveries (mentions). Never an agent's or the system's words, an ask's resolution or hand-back, or a delivery to a `role:` route. Each item carries its `relation`, the `ask` and its question where it answers or replies in one, and its `owner`, `ref` and `href`. `since` defaults to 72 hours ago (older than 7 days or in the future is `400 INVALID_QUERY`); `max_chars` (1–100,000) stops the list after the item whose text takes the running sum past it, `total` still counting every item; a bad `session_id` is `400 INVALID_SESSION_ID`. Not an authorization boundary: direct-message text already reaches every caller through `GET /api/v1/events`, and a person may read any session's list. |
 | `/api/v1/projects` | GET | cookie, trusted header, or bearer | List projects (`key`, `name`, `open_asks`, `created_at`), ordered by key. |
 | `/api/v1/projects` | POST | cookie, trusted header, or bearer | Create a project from `key` and `name`, for a person or an agent session alike; rejects a key that is not a project key, an empty name, a name holding a control character or a bidi embedding, override or isolate (U+202A-U+202E, U+2066-U+2069), and a name with no visible character (a letter, number, punctuation or symbol other than the blank fillers U+115F, U+1160, U+3164, U+FFA0 and U+2800, or a code point Go's Unicode tables leave unassigned, such as an emoji newer than them, other than a noncharacter (U+FDD0-U+FDEF and each code point ending in FFFE or FFFF) or a reserved default-ignorable (U+2065, U+FFF0-U+FFF8, U+E0000-U+E0FFF); combining marks, format characters, private-use characters and whitespace don't count) with `400 INVALID_PROJECT`, a name over 80 characters (`contracts.ProjectNameMax`, UTF-16 units after the trim) with `400 CAP_EXCEEDED`, and a duplicate key with `409 PROJECT_EXISTS`. |
 | `/api/v1/settings/repo-projects` | GET | cookie, trusted header, or bearer | List repository-to-project mappings, each with `default`, whether it is its project's default repository. |
@@ -2369,7 +2407,7 @@ node type weighs:
 | `409 ANCHOR_MISSING` | A browser submitted a `mark_id` that the server did not observe in the live tree. |
 | `409 ANCHOR_ORPHANED` | An operation needs a mark whose anchored text has been deleted. |
 | `400 INVALID_ANCHOR` | An anchor must provide exactly one of a nonempty `quote` or nonempty `mark_id`, with its document artifact. |
-| `400 INVALID_MARKDOWN` | Uploaded document content cannot be represented by the Proof schema, such as a table row holding text in a cell past its delimiter row's width, which a pipe inside code or a link that is not backslash-escaped makes. A Markdown document nests at most 100 blocks (quotes, lists and their items, typed blocks, and footnote definitions), of them at most 32 typed blocks inside one another whatever other blocks stand between them, and one textblock's inline markdown at most 100 marks (emphasis, strong, strikethrough, links, images, and code); deeper content is refused naming the line. An accepted suggestion whose blocks nest within those bounds but land deep enough that the document would nest past one is `INVALID_OP` on `replace_with`, naming how many blocks, or typed blocks, the result nests. Malformed edit replacements report `INVALID_OP`. |
+| `400 INVALID_MARKDOWN` | Uploaded document content cannot be represented by the Proof schema, such as a table row holding text in a cell past its delimiter row's width, which a pipe inside code or a link that is not backslash-escaped makes. A Markdown document nests at most 100 blocks (quotes, lists and their items, typed blocks, and footnote definitions), of them at most 32 typed blocks inside one another whatever other blocks stand between them, and one textblock's inline markdown at most 100 marks (emphasis, strong, strikethrough, links, images, and code); deeper content is refused naming the line. An accepted suggestion whose blocks nest within those bounds but land deep enough that the document would nest past one is `INVALID_OP` on `replace_with`, naming how many blocks, or typed blocks, the result nests. Malformed edit replacements report `INVALID_OP`. An upload that moves an open anchor's quote where that anchor cannot stand - an ask's quote into a code block, or any open ask's, comment's or suggestion's quote into the front matter - and leaves no copy where it can is refused naming the anchor, its quote and where the text landed: move the text out, or resolve the anchor first. A copy there beside the original is taken, and the anchor stays on the original. |
 | `409 DOC_SCHEMA` | A stored tree is outside the Proof schema, such as one holding a node more than 1,000 levels below the document, a node attribute value nesting more than 100 arrays and objects, or a mark attribute value nesting more than 99; settlement writes no version of such a tree. Every route that starts from that tree answers it alike, with one message - reading its text or blocks (`/text`, `/blocks`), editing it (`POST /edits`) and naming a version (`POST /versions`) - and a schema refusal of a tree the request itself produced is a `500`. Replace it by uploading markdown under the same document name; an upload preserves every open ask block, and is refused `400 INVALID_ASK_BLOCK` for an ask block that breaks the ask content rule, as a new document is. The document websocket admits no connection to such a room: it completes the upgrade and closes with code `4409` (reason `DOC_SCHEMA`, `DOCUMENT_SCHEMA_CLOSE_CODE` and `DOCUMENT_SCHEMA_CLOSE_REASON` in `packages/contracts`, generated into Go) before any sync, so a browser editor never receives a tree it would normalize and write back. |
 | `409 DOCUMENT_UNLOADABLE` | A document's stored history does not decode, so nothing can read or open it. Rebuild it from its latest saved version (`POST /api/v1/artifacts/{id}/rebuild`); the dashboard offers that rebuild for this code alone. A room or store that could not serve the document stays `503 DOC_SERVICE_UNAVAILABLE`, which is retried, not rebuilt. |
 | `409 DOCUMENT_LIVE` | A rebuild found the document resident in this server: open in an editor, or left by its last editor less than 90 seconds ago (a room stays resident a minute after its last peer leaves, and the sweep that evicts it runs every 30 seconds). Close its editors and retry two minutes later, or repair a schema-invalid tree by replacing it from markdown. |
