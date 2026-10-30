@@ -2,30 +2,27 @@
   "schemaVersion": 1,
   "phase": "review",
   "issue": "INFRA-557",
-  "completed": "2026-10-30T10:51:48Z",
-  "round": 7,
-  "scope": "The INFRA-63 architect's rule (2026-10-30 06:30Z): explicit, default-safe clean-hand-back mark; 3 s only on the mark read after the successor's flush, 7 s otherwise; the two round-6 gaps as rows that fail first; a clean graceful stop within 10 s; the four round-6 required changes. The architect ruled at 10:51Z that the six other findings are required changes now (the 17:02Z no-deferral rule wins), and that the next round checks exactly these six and CI.",
-  "reviewedHead": "a8a5d08a1046bf5c5a3b1e614f2af3aa0a8f0f55",
+  "completed": "2026-10-30T12:54:57Z",
+  "round": 8,
+  "scope": "The six round-7 required changes and CI, as the INFRA-63 architect fixed at 10:51Z.",
+  "reviewedHead": "5a088bf9b19a7dc8b1454145d6da7251838c4a62",
   "decision": "changes_requested",
   "critical": 0,
   "important": 1,
-  "minor": 5,
-  "ci": "Required set (rulesets) lint, typecheck, test, pr-title. CI run 41038750792 at a8a5d08a queued since 10:10Z; lint, typecheck and test had not started at 10:51Z. A request for changes does not wait on it.",
-  "thermonuclear": "deep-review: APPROVE at a8a5d08a (no correctness defect introduced; ran the new targeted tests, internal/testnats, infra core Permissions and gcp golden tests); code-quality: CHANGES at a8a5d08a (structural only). Each item below was checked in the code by the reviewer.",
-  "ruleChecks": {
-    "every unmarked path gets 7 s": "holds: hold starts at settleCap (receive.go), ends at 3 s only on a mark read for the replaced revision (receive_term.go:321-336, lease_handback.go:77-97); failed or slow flush, timed-out release and late release, linger timeout or not taken, unconfirmed drain, stale_binding, expiry or lapse, give-up, stop before subscribing, failed mark write or read, other revision all give 7 s",
-    "round-6 gaps rows": "TestASuccessorWhoseSubscribeTheServerNeverGotSettlesForTheAckWait and TestLeaseAReleaseThatTimedOutLeavesTheTermOwingTheAckWait; implementer's negative controls quoted in implement.json",
-    "clean graceful stop within 10 s": "mark read every settlePoll; tester: 254 messages, slowest 7.31 s, holds ended 'handed back' at 3.0 s",
-    "four round-6 required changes": "done: HandBackMarked is the one judgement, lease.go 786 lines, awaitDone at all four waits, test comments state rules",
-    "grant": "handback.listener-<m>.> in ListenerPermissions, goldens, fixtures; grant_test.go refuses another machine's mark",
-    "merge a8a5d08a": "faithful: sessionanswers in one ci.yaml filter; the infra/README.md alarm paragraph keeps this branch's subscribe-exhausted text and main's redelivery sentence"
+  "minor": 1,
+  "ci": "Required set (rulesets) lint, typecheck, test, pr-title. CI run 41055308591 at 5a088bf9 queued; lint, typecheck and test had not started at 12:54Z. A request for changes does not wait on it.",
+  "thermonuclear": "deep-review: CHANGES at 5a088bf9 (item 4 text; no correctness defect introduced; ran the new tests and an overlay that logs which gate each new row hits); code-quality: CHANGES at 5a088bf9 (items 3 and 4).",
+  "items": {
+    "1 stuck handler earns no mark": "done: settleInHand reports the handler, markHandBack refuses on it (receive_stop.go:167); TestAStopWhoseHandlerIgnoresItsCancelMarksNoHandBack",
+    "2 released reset per term": "done: startTermLocked (lease.go:599); TestLeaseAStopMarksNoHandBackForTheRevisionAnEarlierGiveUpReleased",
+    "3 rows for the stale and drained gates": "rows added and reach their gates (deep review's overlay run), but the table asserts only hand_back_marked and linger_end, so a row passes whichever gate fires; rows 1-2 still use string literals (keyFindings[1])",
+    "4 stop-budget sums": "sums right (11 s, 12.25 s); the overrun text gives the wrong cause and does not parse (keyFindings[0])",
+    "5 one hand-back check": "done: termStart and fromHandBack gone; HandBackMarked answers for non-candidates",
+    "6 mark-read helper and typed linger end": "done: readHandBackMark, lingerEnd constants",
+    "merge 5a088bf9": "faithful: the infra/README.md readiness paragraph keeps this branch's 503 starting / role text and main's natsInCluster text"
   },
   "keyFindings": [
-    {"severity": "important", "file": "packages/envoy/cmd/listener/receive_stop.go:259", "description": "settleInHand returns after inflightCancelWait even when the handler is still running, and markHandBack does not know: the stop marks the hand-back clean, the stuck message's InProgress stops with the term, it returns at its 6 s ack wait after the successor's 3 s hold, behind newer messages of its session. Predates the mark, which now claims to cover it. A stop whose handler is still running after its cancel must write no mark (architect, 10:51Z)."},
-    {"severity": "minor", "file": "packages/envoy/cmd/listener/lease.go:459", "description": "released and releasedStale are set by every letGo (give-up included) and never reset in startTermLocked, so after a give-up and a later timed-out release MarkHandBack writes a mark for the old revision and logs hand_back_marked true, against its doc. Reset them per term or pass the revision Release returned."},
-    {"severity": "minor", "file": "packages/envoy/cmd/listener/receive_stop_test.go:306", "description": "The row 'the term had a lost node's binding open' ends 'not taken', so it never reaches the stale check in MarkHandBack; the drained gate has no row. Add a row with a receiving successor and a stale term, and one with a drain that times out."},
-    {"severity": "minor", "file": "packages/envoy/cmd/listener/README.md:198", "description": "The stop-budget sums (README.md:197-198, main.go:1450-1452) leave out the mark write: 3 + 1 + 3 + 2 + 2 = 11 s, not 9 s. Correct them, or bound the write by what is left of the 10 s."},
-    {"severity": "minor", "file": "packages/envoy/cmd/listener/receive.go:756", "description": "The hand-back flag is carried leaseStatus.HandBack -> termStart -> receiveTerm.fromHandBack and then checked again inside HandBackMarked; delete termStart and fromHandBack and let HandBackMarked answer for non-candidates."},
-    {"severity": "minor", "file": "packages/envoy/cmd/listener/receive_term.go:321", "description": "Move the mark read with its log-once state into a helper on receiveTerm; give the linger's end a type (lingerEnd) with three named constants instead of 'timeout' and 'not taken' literals compared in markHandBack and the tests."}
+    {"severity": "important", "file": "packages/envoy/cmd/listener/main.go:1455", "description": "The overrun text (main.go:1455-1459, README.md:207-210, receive.go:94-98, changelog pr2404-Changed-20261028-102427.yaml:22-25) says a stop past the 10 s budget loses its mark only if the runtime kills the process, and that the hand-back runs on to its own bounds. The shutdown instead goes on at once to server.Shutdown with the spent context, the live drain, client.Drain (the subscription's own connection) and os.Exit(1), so the listener's own exit cuts off a hand-back still draining or writing its mark. 'leaving the HTTP stop below none of it', 'leaves the HTTP stop below none of it' and 'which an overrun leaves none of the budget' do not parse."},
+    {"severity": "minor", "file": "packages/envoy/cmd/listener/receive_stop_test.go:413", "description": "The no-mark table checks hand_back_marked and linger_end only, so the stale-binding row passes if the drain gate fires and the drain row passes on any gate; add a noMark column asserted against end[\"no_mark\"] in every row, and use lingerEndUntaken and lingerEndTimeout in rows 1-2."}
   ]
 }
