@@ -1173,9 +1173,9 @@ legion claims forget-session --claim <token> --session <recorded session id> --o
 ```
 
 `--session` is required and must equal the session the claim currently records. The claim must have
-no live process: suspend it first, or use a failed or retired claim. The daemon clears and persists
-only `session` and `session_file`, logs the forgotten session and file, and returns them in the
-answer. It does not read or change the session database, so the old session row remains there.
+no live process: suspend it first, or use a queued, failed, or retired claim. The daemon clears and
+persists only `session` and `session_file`, logs the forgotten session and file, and returns them in
+the answer. It does not read or change the session database, so the old session row remains there.
 
 Retrying a failed architect then spawns a fresh agent, the daemon's controller keeper does the same
 for its failed controller claim, and a retired claim starts fresh at its next workflow start or
@@ -1274,8 +1274,8 @@ controller this release launches starts a fresh session.
    The command does not read the session database. It clears only the matching session record from
    the claim, and an old row in the session database stays there. A refusal naming a different
    recorded session means the saved list is stale: suspend writers, save the list again, and copy
-   again before deciding whether to clear it. A live claim is refused; suspend it or wait for it to
-   fail or retire before running the command.
+   again before deciding whether to clear it. A live or launch-uncertain claim is refused; suspend
+   it, or wait for it to reach queued, failed, or retired before running the command.
 
    Retry each failed architect with `legion claims retry --claim <token> --operator-token-file
    <file>`. A daemon-launched controller is retried by its keeper; a retired workflow claim starts

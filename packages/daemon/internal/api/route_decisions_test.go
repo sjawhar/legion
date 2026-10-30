@@ -29,6 +29,10 @@ func TestTheOperatorsRequestsThatWouldChangeAClaimAreRefusedOnceTheStopHasBegun(
 	if recorder := h.operator(http.MethodPost, "/legion/v1/operator/claims", worker); recorder.Code != http.StatusCreated {
 		t.Fatalf("spawn the worker = %d; body %s", recorder.Code, recorder.Body)
 	}
+	h.ready(architectToken, "ses_architect", 1)
+	if recorder := h.operator(http.MethodPost, "/legion/v1/operator/claims/"+string(architectToken)+"/suspend", nil); recorder.Code != http.StatusOK {
+		t.Fatalf("suspend the architect = %d; body %s", recorder.Code, recorder.Body)
+	}
 	stopping, beginStop := context.WithCancel(context.Background())
 	beginStop()
 	decisions := NewRouteDecisions()

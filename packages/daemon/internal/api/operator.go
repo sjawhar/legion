@@ -299,7 +299,7 @@ func retryEvent(_ http.ResponseWriter, _ *http.Request, c supervise.Claim) (supe
 // claim has no live process. The session store is deliberately untouched.
 func (s *server) forgetSession(w http.ResponseWriter, r *http.Request) {
 	var req ForgetSessionRequest
-	if !s.readBody(w, r, &req, nil) || s.stopped(w, "forget-session") {
+	if !s.readBody(w, r, &req, nil) {
 		return
 	}
 	if !requireFields(w, field{"session", req.Session}) {
@@ -327,6 +327,9 @@ func (s *server) forgetSession(w http.ResponseWriter, r *http.Request) {
 	}
 	ctx, decided := s.decision(r, token)
 	defer decided()
+	if s.stopped(w, "forget-session") {
+		return
+	}
 	if err := m.Handle(ctx, supervise.RequestForgetSession{Claim: token, Session: req.Session}); err != nil {
 		s.operatorFailure(w, "forget-session", token, err)
 		return
@@ -339,7 +342,7 @@ func (s *server) forgetSession(w http.ResponseWriter, r *http.Request) {
 }
 
 func forgettable(state supervise.ClaimState) bool {
-	return state == supervise.StateSuspended || state == supervise.StateFailed || state == supervise.StateRetired
+	return state == supervise.StateQueued || state == supervise.StateSuspended || state == supervise.StateFailed || state == supervise.StateRetired
 }
 
 // retryClaim is the operator's retry of a failed claim. A failed phase worker whose issue the

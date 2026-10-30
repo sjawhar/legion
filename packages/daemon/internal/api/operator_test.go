@@ -3,6 +3,7 @@ package api
 import (
 	"context"
 	"errors"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"slices"
@@ -1190,5 +1191,50 @@ func TestForgetSessionRechecksItsSessionInsideTheMachine(t *testing.T) {
 		"forget-session refused: legion-legion-legion-208-architect records session ses_replacement; pass --session ses_replacement to start fresh")
 	if got := h.stored(architectToken); got.State != supervise.StateSuspended || got.Session != "ses_replacement" || got.SessionFile != "/sessions/ses_replacement.jsonl" {
 		t.Fatalf("paused forget changed the replacement claim to %+v", got)
+	}
+}
+
+func TestForgetSessionRefusesDaemonStopAfterPreflight(t *testing.T) {
+	h := newHarness(t)
+	h.operator(http.MethodPost, "/legion/v1/operator/claims", spawnBody())
+	h.ready(architectToken, "ses_architect", 1)
+	if recorder := h.operator(http.MethodPost, "/legion/v1/operator/claims/"+string(architectToken)+"/suspend", nil); recorder.Code != http.StatusOK {
+		t.Fatalf("suspend = %d, want 200; body %s", recorder.Code, recorder.Body)
+	}
+	stopping, beginStop := context.WithCancel(context.Background())
+	snapshotted, resumeForget := make(chan struct{}), make(chan struct{})
+	testServer := &server{
+		log:        slog.Default(),
+		supervisor: h.supervisor,
+		project:    testProject,
+		stopping:   stopping,
+		drained:    context.Background(),
+		decisions:  NewRouteDecisions(),
+		beforeForgetSessionHandle: func() {
+			close(snapshotted)
+			<-resumeForget
+		},
+	}
+	mux := http.NewServeMux()
+	mux.HandleFunc("POST /legion/v1/operator/claims/{token}/forget-session", testServer.forgetSession)
+	h.handler = mux
+	response := make(chan *httptest.ResponseRecorder, 1)
+	go func() {
+		response <- h.operator(http.MethodPost, "/legion/v1/operator/claims/"+string(architectToken)+"/forget-session",
+			map[string]string{"session": "ses_architect"})
+	}()
+	select {
+	case <-snapshotted:
+	case recorder := <-response:
+		t.Fatalf("forget-session completed before its snapshot hook: %d %s", recorder.Code, recorder.Body)
+	case <-time.After(time.Second):
+		t.Fatal("forget-session did not reach its snapshot hook")
+	}
+	beginStop()
+	close(resumeForget)
+
+	wantRefusal(t, <-response, http.StatusServiceUnavailable, "forget-session refused: the daemon is stopping; ask again once it is back")
+	if got := h.stored(architectToken); got.State != supervise.StateSuspended || got.Session != "ses_architect" || got.SessionFile != "/sessions/ses_architect.jsonl" {
+		t.Fatalf("stopped forget changed the claim to %+v", got)
 	}
 }

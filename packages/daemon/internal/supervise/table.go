@@ -632,8 +632,8 @@ func fillTable(t *builder) {
 	t.ignore(onOperatorRetry, "a retired claim runs again only when the workflow starts it", StateRetired)
 
 	t.row(onForgetSession, "drop the session so the next launch is fresh", forgetSession, nil,
-		StateSuspended, StateFailed, StateRetired)
-	t.ignore(onForgetSession, "the claim has a live process or launch", StateQueued, StateLaunchUncertain, StateLaunching,
+		StateQueued, StateSuspended, StateFailed, StateRetired)
+	t.ignore(onForgetSession, "the claim has a live process or launch", StateLaunchUncertain, StateLaunching,
 		StateShimConnected, StateRegistered, StateReady, StateWorking, StateIdle)
 
 	t.row(onDeliver, "queue the task; it goes when the claim is next ready or idle", deliverLater, nil,
