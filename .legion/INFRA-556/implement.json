@@ -2,9 +2,17 @@
   "schemaVersion": 1,
   "phase": "implement",
   "issue": "INFRA-556",
-  "completed": "2026-10-30T02:09:05Z",
-  "round": "tester round 4 failed on former Fast-follow item 12 (the awareness bound counted tombstones); narrowed by the INFRA-63 architect to that fix and two PR-body notes; no merge of main",
+  "completed": "2026-10-30T04:15:31Z",
+  "round": "tester round 5 failed: without ygo's client cap, repeated awareness floods grew a room without limit; narrowed by the INFRA-63 architect to that fix; no merge of main",
   "proof": [
+    {
+      "criterion": "A room's stored awareness stays bounded on both processes under repeated floods, and a reader joining after a flood is still seen on the other process within a second",
+      "surface": "docs package two-Service test of repeated floods (the tester's red test), and two real envoy-dispatch binaries (the tester's round-4 red test)",
+      "command": "cd packages/envoy && go test -count=2 -run Awareness ./internal/dispatch/docs/ && go test -tags multiprocess -count=2 -run 'TestAReaderJoiningAfterAnAwarenessFloodIsSeenOnTheOtherProcess|TwoEditors' ./cmd/dispatch",
+      "observed": "both pass 2 of 2, unmodified: 'task A's room tracks 256 client entries, task B's 256 (bound 512)'; ygo's MaxAwarenessClientsPerRoom 256 is set again, and Dispatch frees a departed client's tombstone at once (PurgeTombstones on a removal, before a relayed inject, and at a reader's admission), so departed flood clients never hold the bound against a new reader",
+      "headSha": "65dccc7c0612",
+      "negativeControl": "at b0a2d131 the floods test fails 2 of 2: 'task A's room tracks 16384 client entries, want at most 512'; at d7ceabb4 (ygo's cap without the purge) the joining-reader test fails: 'seen at once by carol on A but not by bob on B within 1s'"
+    },
     {
       "criterion": "Spec item 1 with the awareness bound: a reader joining after one tab's flood of invented awareness clients is seen on the other process within a second, and a flood still relays no more than the bound",
       "surface": "two real envoy-dispatch binaries on one Postgres (the tester's red test), and the docs package's relay tests",
