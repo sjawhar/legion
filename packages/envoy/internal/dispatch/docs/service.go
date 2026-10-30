@@ -721,17 +721,18 @@ func New(deps Deps) *Service {
 	// A room forgets an awareness client it has not heard from in awarenessExpiry: a reader
 	// relayed from another process that died without removing it goes once its heartbeats stop.
 	srv.AwarenessExpiry = awarenessExpiry
-	// What a room's awareness may hold, whoever sent it: at most maxAwarenessClientsPerRoom
-	// client entries, the tombstones of the clients that left included
-	// (Server.MaxAwarenessClientsPerRoom, which ygo forwards to awareness.Awareness.SetMaxClients),
-	// and the bytes of the states those entries hold now (maxAwarenessBytesPerRoom). Unbounded,
-	// ygo's default, one peer's frame can claim client ids each with a state of up to 1 MiB, and
-	// a frame of thousands of ids with cursor-sized states - or of nulls for ids the room has
-	// never held, which cost no bytes at all - grows the room's map by every id it names, which
-	// the byte bound does not stop. Past the client bound ygo refuses a client id the room has
-	// not seen before, whoever sends it; what keeps that from shutting a reader out is that a
-	// room of this service frees a departed client's entry as it leaves, rather than two
-	// expiries later (reclaimAwarenessSlots).
+	// What a room's awareness may hold: the bytes of the states its clients hold now
+	// (maxAwarenessBytesPerRoom), and, as a last resort, maxAwarenessClientsPerRoom client
+	// entries whoever sent them (Server.MaxAwarenessClientsPerRoom, which ygo forwards to
+	// awareness.Awareness.SetMaxClients). Unbounded, ygo's default, one peer's frame can claim
+	// client ids each with a state of up to 1 MiB, and a frame of thousands of ids with
+	// cursor-sized states - or of nulls for ids the room has never held, which cost no bytes at
+	// all - grows the room's map by every id it names, which the byte bound does not stop. What
+	// keeps a room to its readers is the bound each socket is held to before ygo reads its
+	// frames (maxAwarenessClientsPerSocket, awareness_limit.go) and the entry a client gives
+	// back as it leaves (reclaimAwarenessSlots); the client bound is above every reader this
+	// process can admit, so it refuses no reader of a room, only a path that reaches a room's
+	// awareness without passing either.
 	srv.MaxAwarenessClientsPerRoom = maxAwarenessClientsPerRoom
 	srv.MaxAwarenessBytesPerRoom = maxAwarenessBytesPerRoom
 

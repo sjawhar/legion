@@ -29,10 +29,12 @@ import (
 // Each process's room sync hears the others' on its awareness lane (roomSync.handlers) and applies
 // each to its own room of the document (Server.Inject), which hands it to that room's peers.
 //
-// A room holds at most maxAwarenessClientsPerRoom awareness clients at once, whoever sends them
-// (docs/service.go), and frees a client's entry as the client leaves, rather than two expiries
-// later (watchAwarenessDepartures, reclaimAwarenessSlots): a peer's frame inventing client ids
-// neither grows a room's awareness without limit nor keeps the readers who join after it out.
+// What a room relays is bounded by the sockets it holds: a socket may announce no more than
+// maxAwarenessClientsPerSocket awareness clients, and the clients a frame names past that are
+// taken out of it before ygo applies it (awareness_limit.go), so a peer's frame inventing client
+// ids grows neither a room's awareness nor the relay's fan-out. A client's entry is freed as the
+// client leaves, rather than two expiries later (watchAwarenessDepartures,
+// reclaimAwarenessSlots), so what a room tracks is what it holds now.
 //
 // Wire format, one JSON object per notification:
 //
@@ -65,23 +67,19 @@ const (
 	// on its home process too; the y-protocols client then sees its own state removed and
 	// announces itself again, which is how it comes back everywhere.
 	awarenessExpiry = 30 * time.Second
-	// maxAwarenessClientsPerRoom is how many awareness clients a room of this process tracks at
-	// once - the ones present and the tombstones of the ones that left - and so how many of them
-	// it can relay to the other processes. A document's readers are a handful of browser tabs,
-	// each one client, on every process together, so 256 is far past what any real room holds.
-	// ygo enforces it on every room's awareness (Server.MaxAwarenessClientsPerRoom in
-	// docs/service.go, which it forwards to awareness.Awareness.SetMaxClients): past the bound a
-	// client id the room has not seen before is refused, whether it arrives in a browser's frame
-	// or in another process's notification (awareness/awareness.go:608-623). That bounds the
-	// room's memory, which the byte bound alone does not - a client id costs an entry whether its
-	// state is cursor-sized or null - and with it the relay's fan-out: a room's batch holds the
-	// clients the room tracks, which go out whole clients to a notification within
-	// roomSyncPayloadLimit (awarenessNotifications), so one frame inventing thousands of ids
-	// costs a handful of pg_notify sends and not thousands. A client that leaves gives its entry
-	// back at once rather than two expiries later (reclaimAwarenessSlots), so the bound counts
-	// the clients a room holds now and the clients of a frame that invented thousands and left
-	// cost the reader who joins after it nothing.
-	maxAwarenessClientsPerRoom = 256
+	// maxAwarenessClientsPerRoom is the last-resort cap on the client entries a room of this
+	// process holds - the ones present and the tombstones of the ones that left - which ygo
+	// enforces on every room's awareness (Server.MaxAwarenessClientsPerRoom in docs/service.go,
+	// which it forwards to awareness.Awareness.SetMaxClients): past it a client id the room has
+	// not seen before is refused (awareness/awareness.go:608-623). It is every connection this
+	// process admits (maxRoomConnections) holding the clients one socket may
+	// (maxAwarenessClientsPerSocket), so no reader of this process can be shut out by it - the
+	// process refuses the connection first (canAddConnection) - and the relayed clients of a
+	// process that is not at that ceiling fit beside them. What actually holds a room to a
+	// handful of clients is the socket's own bound, applied to a frame before ygo reads it
+	// (awareness_limit.go), and the same bound on the sender's side of every relayed state; this
+	// one only keeps a room's memory finite if some other path ever reaches its awareness.
+	maxAwarenessClientsPerRoom = maxRoomConnections * maxAwarenessClientsPerSocket
 	// awarenessTombstoneAge is the age reclaimAwarenessSlots frees a room's tombstones from. ygo
 	// takes an age and refuses a non-positive one (awareness/awareness.go:883-886), so the
 	// shortest positive one stands for "every tombstone the room holds now".
@@ -89,14 +87,13 @@ const (
 	// maxAwarenessBytesPerRoom is how many bytes of its clients' states, as they arrived on the
 	// wire, a room holds at once (Server.MaxAwarenessBytesPerRoom, which ygo forwards to
 	// awareness.Awareness.SetMaxBytes). It counts what a room holds now and nothing else: a
-	// client's bytes are released as it leaves or expires, so the entry it leaves behind costs
-	// nothing against this bound, which is why the room's client bound is the one that holds a
-	// frame of invented ids. It is the room's bound of clients each holding a state as large as
-	// one notification carries (roomSyncPayloadLimit), so no state small enough for the relay to
-	// send is refused for the room's total, and presence costs a room no more than this. Past it
-	// ygo takes the state as null, which removes that client's presence; the client's next
-	// announcement, under a room back below the bound, brings it back.
-	maxAwarenessBytesPerRoom = maxAwarenessClientsPerRoom * roomSyncPayloadLimit
+	// client's bytes are released as it leaves or expires. It is what 256 readers cost with
+	// states as large as one notification carries (roomSyncPayloadLimit) - far past the handful
+	// of tabs any document has - so no state small enough for the relay to send is refused for
+	// the room's total, and presence costs a room no more than this. Past it ygo takes the state
+	// as null, which removes that client's presence; the client's next announcement, under a
+	// room back below the bound, brings it back.
+	maxAwarenessBytesPerRoom = 256 * roomSyncPayloadLimit
 )
 
 // awarenessMessage is one documentAwarenessChannel notification (see the wire format above).
@@ -174,10 +171,10 @@ type awarenessRelay struct {
 	// local is, per room, the awareness clients of this process's own peers that the relay is
 	// sending to the other processes: every client ygo has handed the relay a state of and not
 	// since a removal. Entries this process applied from another process's notification never
-	// reach the relay (ygo's echo guard), so they are never listed, and the room's own bound
-	// holds the list to maxAwarenessClientsPerRoom clients: ygo hands the relay the clients a
-	// change touched, and a room tracks no more than the bound of them. It is what a query is
-	// answered with and what a close of a room removes (localRemoval).
+	// reach the relay (ygo's echo guard), so they are never listed, and the room's sockets hold
+	// the list to maxAwarenessClientsPerSocket clients each (awareness_limit.go): ygo hands the
+	// relay the clients a change touched, and no socket's frame touches more than its own. It is
+	// what a query is answered with and what a close of a room removes (localRemoval).
 	local map[string]map[uint64]struct{}
 	// closed refuses every later send; Close sets it.
 	closed bool
@@ -263,11 +260,10 @@ func (r *awarenessRelay) Close() error {
 // entry replacing any earlier one of its own there, and arms the batch's send when it is the
 // room's first. It keeps the room's list of the clients it relays (local) as it goes: a client's
 // state puts it on the list, a removal takes it off and is relayed like any other entry. What
-// one batch can hold is the room's own bound: ygo hands the relay the clients a change touched
-// (provider/websocket/cluster.go:456-468) and a room tracks no more than
-// maxAwarenessClientsPerRoom of them, so a frame inventing thousands reaches the relay as the
-// bound's clients at most, and the clients of one that invented thousands and left take no slot
-// from the reader who joins after it.
+// one batch can hold is what the room's sockets may announce: ygo hands the relay the clients a
+// change touched (provider/websocket/cluster.go:456-468), and a socket's frame touches no more
+// than maxAwarenessClientsPerSocket of them (awareness_limit.go), so a tab inventing thousands
+// reaches the relay as its own handful and the readers who join after it are relayed at once.
 func (r *awarenessRelay) enqueue(room string, update []byte) {
 	entries, err := decodeAwarenessEntries(update)
 	if err != nil {
@@ -457,13 +453,14 @@ func (r *awarenessRelay) localRemoval(room string, aw *awareness.Awareness) []by
 // load the document on every process and keep a room nobody here reads resident for good.
 //
 // What a notification carries is injected as it stands: the inbound side counts no clients of
-// its own. The room it lands in holds it to maxAwarenessClientsPerRoom entries like any other
-// (docs/service.go), so what the other processes together can cost a room here is that bound,
-// and the sender's room has already cut a peer's frame inventing thousands to it. The entries
-// of the clients that left are freed first (reclaimAwarenessSlots), because a removal of a
-// client this process never held leaves a tombstone ygo tells no observer about, so the
-// watcher a room's own departures run through would never free it, and a run of them would
-// hold the room at its bound against the next reader relayed here.
+// its own. What the other processes together cost a room here is their own sockets' bound, since
+// each cut a peer's frame to maxAwarenessClientsPerSocket before relaying it
+// (awareness_limit.go). The entries of the clients that left are freed once the update has
+// landed (reclaimAwarenessSlots), because a removal of a client this process never held leaves
+// a tombstone ygo tells no observer about (awareness/awareness.go:669-686), so the watcher a
+// room's own departures run through never sees it, and a run of them - every reader of a
+// process that shut down, say - would otherwise sit in the room until a purge two expiries
+// later.
 func (r *awarenessRelay) received(ctx context.Context, payload string) {
 	var message awarenessMessage
 	if err := json.Unmarshal([]byte(payload), &message); err != nil || message.Room == "" {
@@ -485,9 +482,6 @@ func (r *awarenessRelay) received(ctx context.Context, payload string) {
 	if !r.service.holdsRoomForReaders(message.Room) {
 		return
 	}
-	if aw, resident := r.service.srv.GetAwareness(message.Room); resident {
-		reclaimAwarenessSlots(message.Room, aw)
-	}
 	// The room can retire between that check and Inject - its last reader left and the idle sweep
 	// took it, or a close - and then Inject loads it again for this one update. That room has no
 	// peer, so it idles out after roomIdleTimeout like any room a write loads; the window is the
@@ -495,6 +489,9 @@ func (r *awarenessRelay) received(ctx context.Context, payload string) {
 	err = r.service.srv.Inject(ctx, cluster.Inbound{Room: message.Room, Kind: cluster.KindAwareness, Data: update})
 	if err != nil && !errors.Is(err, context.Canceled) {
 		slog.Debug("dispatch: apply another process's awareness to a document room", "room", message.Room, "error", err)
+	}
+	if aw, resident := r.service.srv.GetAwareness(message.Room); resident {
+		reclaimAwarenessSlots(message.Room, aw)
 	}
 }
 
@@ -517,8 +514,8 @@ func (r *awarenessRelay) answer(room string) {
 // client leaves. ygo fires a room's awareness observers with the clients each change removed -
 // a peer's disconnect, a frame taking its own clients away, an expiry, another process's relayed
 // removal - and the entry each leaves behind is reclaimed there and then
-// (reclaimAwarenessSlots), so a room is never held at its client bound by clients that have
-// gone (maxAwarenessClientsPerRoom).
+// (reclaimAwarenessSlots), so a room of readers that come and go costs no more than the readers
+// in it now.
 //
 // It watches updates rather than changes, and ygo calls a room's update observers in the order
 // they were registered (awareness/awareness.go:448-452): ygo registers the relay's own as the
@@ -538,13 +535,12 @@ func watchAwarenessDepartures(room string, aw *awareness.Awareness) {
 }
 
 // reclaimAwarenessSlots frees the entries of room's departed clients - every tombstone its
-// awareness holds - against the room's client bound (maxAwarenessClientsPerRoom). ygo keeps a
-// removed client's entry for two expiries, a minute and a half here, so that a state of that
-// client still in flight when it left is dropped rather than taken for a new one
-// (awareness/awareness.go:861-882). A room of this service keeps it only until the clients that
-// come after it need the slot: inventing thousands of client ids and taking them away again
-// costs a peer nothing, and entries held for a minute and a half would shut out every reader
-// joining after such a frame - a worse outcome than a cursor outliving its reader by a moment.
+// awareness holds. ygo keeps a removed client's entry for two expiries, a minute and a half
+// here, so that a state of that client still in flight when it left is dropped rather than
+// taken for a new one (awareness/awareness.go:861-882). A room of this service keeps it only
+// until the room's next change: a tab that opens and closes a document costs its process an
+// entry for a minute and a half otherwise, on every process its cursor reached, and the
+// cursors of a room nobody is in are memory and nothing else.
 // What the shorter life gives up is that state of a departed client arriving after its removal
 // is taken for a new client, and shows that cursor until it expires (awarenessExpiry); the
 // relay's own order makes it rare, since a room's changes are coalesced and sent in order and a

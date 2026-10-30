@@ -673,15 +673,17 @@ process holds its own room for a document. Postgres is the only channel between 
   that loads for a reader, and a reader that joins a loaded room, ask the other processes for
   their readers' states, so a reader who opens second sees the first reader's cursor at once. A
   room forgets a client it hears nothing from for 30 seconds (`AwarenessExpiry`), so a cursor
-  relayed from a process that stopped without a word goes away. A room tracks at most 256
-  awareness clients, the ones that have left included (`maxAwarenessClientsPerRoom`, ygo's
-  `MaxAwarenessClientsPerRoom`), and holds about 2 MB of their states
-  (`MaxAwarenessBytesPerRoom`), so one frame that claims thousands of clients neither fills a
-  room's memory nor becomes thousands of notifications: past the bound the room refuses a client
-  id it has not seen before. The bound counts the clients a room holds now, because a client that
-  leaves gives its entry back at once rather than two expiries later
-  (`reclaimAwarenessSlots`), so a reader who joins after such a frame is taken in and relayed at
-  once.
+  relayed from a process that stopped without a word goes away. A document socket may hold at
+  most four awareness clients at once (`maxAwarenessClientsPerSocket`), one more than a browser
+  tab ever announces: the clients a frame names past that are taken out of it before ygo applies
+  it (`awareness_limit.go`), so a tab claiming thousands of client ids neither fills a room's
+  memory, nor shows the room's other readers thousands of cursors, nor becomes thousands of
+  notifications. A socket's clients go when it does, and a client that leaves gives its entry
+  back at once rather than two expiries later (`reclaimAwarenessSlots`), so a reader who joins
+  after such a frame is taken in and relayed at once. A room also holds about 2 MB of its
+  clients' states (`MaxAwarenessBytesPerRoom`) and, as a last resort, as many client entries as
+  the process has connections to give (`maxAwarenessClientsPerRoom`), which is above every
+  reader it can admit.
 - **Issue close and reopen.** Migration `0142`'s trigger notifies `dispatch_issue_open_changed`
   when an issue's `closed_at` changes, whichever process or build wrote it. Every process of this
   build then closes its rooms of the issue's documents, and their browsers reconnect read-only or

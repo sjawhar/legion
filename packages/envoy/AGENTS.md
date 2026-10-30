@@ -881,15 +881,20 @@ keep a room resident. A room that loads for a reader, and a reader that joins a 
 query the other processes, which answer with their local clients' states. Before the service
 closes a room itself, it removes its local clients' states, so the removal is relayed
 (`removeLocalAwareness`). `AwarenessExpiry` is 30 s, so a cursor relayed from a process that died
-without a word expires. A room tracks at most `maxAwarenessClientsPerRoom` (256) awareness
-clients, whoever sends them, the ones that have left included (ygo's
-`MaxAwarenessClientsPerRoom`, `docs/service.go`): past it a client id the room has not seen
-before is refused, which is what keeps a peer's frame of invented ids from growing a room's
-awareness map and the relay's fan-out. A client that leaves gives its entry back as it goes
-rather than two expiries later - the room's own departure watcher frees it
-(`watchAwarenessDepartures`, `reclaimAwarenessSlots`), as does a reader's admission and the
-arrival of another process's awareness - so the bound counts the clients a room holds now and a
-reader joining after such a frame is taken in at once.
+without a word expires. A document socket may hold at most `maxAwarenessClientsPerSocket` (4)
+awareness clients at once, where a browser tab announces one: ygo applies and broadcasts a peer's
+frame whole and offers no hook on it, so the clients a frame names past that are taken out of it
+on the connection the upgrade hijacks, before ygo reads the frame (`docs/awareness_limit.go`,
+`awarenessLimitConn`). Filtering there is what makes the room's own readers and the readers on
+every other process see the same clients, and it is what keeps a peer's frame of invented ids
+from growing a room's awareness map and the relay's fan-out. ygo removes the clients a peer owned
+as it disconnects, and a client that leaves gives its entry back as it goes rather than two
+expiries later - the room's own departure watcher frees it (`watchAwarenessDepartures`,
+`reclaimAwarenessSlots`), as does the arrival of another process's awareness. A room also holds
+at most `maxAwarenessBytesPerRoom` (about 2 MB) of its clients' states and, as a last resort,
+`maxAwarenessClientsPerRoom` client entries (ygo's `MaxAwarenessClientsPerRoom`,
+`docs/service.go`), which is `maxRoomConnections` sockets at their own bound and so above every
+reader this process can admit.
 
 An issue's close and reopen reach every process through migration 0142's trigger, which notifies
 `dispatch_issue_open_changed` with the issue's key when `closed_at` changes, whoever wrote it. Each

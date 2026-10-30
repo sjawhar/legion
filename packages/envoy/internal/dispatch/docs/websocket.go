@@ -338,9 +338,10 @@ func (s *Service) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	connection := &connectionState{}
 	ctx := context.WithValue(r.Context(), connectionContextKey{}, connection)
 	// The socket's peer hears from it at least every s.keepAlive (documentKeepAlive), however idle
-	// the room (keepalive.go), so its provider never takes the socket for dead.
+	// the room (keepalive.go), so its provider never takes the socket for dead; the awareness
+	// clients the peer may announce are bounded before ygo reads its frames (awareness_limit.go).
 	keepAlive := newKeepAliveWriter(w, room, s.keepAlive)
-	s.srv.ServeHTTP(keepAlive, r.WithContext(ctx))
+	s.srv.ServeHTTP(&awarenessLimitWriter{ResponseWriter: keepAlive, room: room}, r.WithContext(ctx))
 	keepAlive.stop()
 	if connection.added {
 		s.removeConnection(connection.room, connection.id)
@@ -442,14 +443,6 @@ func (s *Service) authorize(r *http.Request) (websocket.ConnectionConfig, bool) 
 	// lets the answers in (holdsRoomForReaders).
 	if s.srv.GetDoc(room) != nil {
 		s.awarenessRelay.query(room)
-	}
-	// The entries of the clients that have left the room go before this reader announces its own
-	// client, so a frame of null states for client ids a room never held - which ygo stores as
-	// entries it tells no observer about, the one case the room's own departure watcher cannot
-	// see - cannot hold the room at its client bound and keep this reader out
-	// (maxAwarenessClientsPerRoom, reclaimAwarenessSlots).
-	if aw, resident := s.srv.GetAwareness(room); resident {
-		reclaimAwarenessSlots(room, aw)
 	}
 	return websocket.ConnectionConfig{
 		ReadOnly: schemaReadOnly(open, r.URL.Query().Get("schema_version")),
