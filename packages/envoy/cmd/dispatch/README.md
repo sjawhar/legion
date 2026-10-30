@@ -1,7 +1,7 @@
 # Dispatch HTTP server
 
 Go binary serving the Dispatch dashboard and API.
-People sign in through a Cognito sign-in pool or with Google directly and are named by lowercase email;
+People sign in through a Cognito sign-in pool or with Google directly, where the `DISPATCH_SIGNIN_*` settings configure one, and are named by lowercase email;
 the web app's GitHub reads go to GitHub as the GitHub App.
 Dispatch keeps application state in Postgres.
 
@@ -119,8 +119,9 @@ Dispatch resolves every external issue through the stored mapping, then falls ba
 An unmapped external repository without a default project is rejected.
 An issue created through the default also gets a `repo:owner/name` label.
 
-`DISPATCH_SERVER_URL` IS the sign-in callback origin.
-It must equal the URL humans type into their browser, and the sign-in pool's app client must list `<DISPATCH_SERVER_URL>/auth/callback` as a callback URL.
+Where browser sign-in is configured, `DISPATCH_SERVER_URL` IS the sign-in callback origin:
+it must equal the URL humans type into their browser, and the sign-in pool's app client must list `<DISPATCH_SERVER_URL>/auth/callback` as a callback URL.
+With no `DISPATCH_SIGNIN_*` setting nobody signs in through a browser, and the variable is the origin Dispatch builds its own links from and nothing more.
 
 `DISPATCH_ALLOWED_LOGINS`, `DISPATCH_APP_CLIENT_SECRET` and `DISPATCH_ASSET_STORE_BUCKET` are removed:
 a boot that still sets any of them is refused, naming what replaced it.
@@ -171,12 +172,14 @@ The webhook the App delivers to is the Envoy listener's `/webhook/github`.
 A redelivery carries the original `X-GitHub-Delivery`, and the listener publishes GitHub envelopes under a JetStream MsgId of it.
 So redelivering a delivery that did reach the stream adds nothing to the stream.
 
-- A delivery the listener answered with 5xx, or that GitHub could not complete, is redelivered on the next sweep.
-  If that redelivery fails too, it is retried after 2, 4, 8 and 16 minutes, at most five times.
+- Every failed delivery is asked for again, whatever status code its failed attempts carry:
+  a 5xx, an attempt GitHub could not complete, and a 4xx alike (the listener's 401 for a signature it cannot check, 400 for a body it cannot use, 422 for a publish NATS refused), since what the listener cannot take now it may take later.
+  The first request goes on the next sweep.
+  While no attempt is `OK`, the next request is due 2, 4, 8, 16 and 32 minutes after the one before, then every 60 minutes.
+  A redelivery request GitHub refuses (for example 422) delivers nothing and is asked again on the same schedule, as is an accepted request whose redelivery never appears in GitHub's log.
 
-- A redelivery request GitHub refuses (for example 422) delivers nothing.
-  It is asked again on the same backoff, at most five times, even after its failed attempt is older than the sweep's hour:
-  a refused request adds no attempt to GitHub's log, so the sweep's record brings it back.
+- The sweep stops asking 72 hours after the first failed attempt it saw for the delivery, since GitHub keeps a delivery 72 hours, or when GitHub answers the redelivery request 404 (it no longer has the delivery).
+  It logs `level=ERROR msg="webhook delivery expired undelivered"` once per delivery, with `requests`, `first_delivered_at` and `reason` (`GitHub keeps a delivery 72 hours` or `GitHub no longer has the delivery`).
 
 - A rate-limited answer (403 or 429, as GitHub's REST rate-limit documentation describes one) stops the sweep and counts nothing against the delivery.
   No sweep sends GitHub anything until the time GitHub gave (`Retry-After`, or `x-ratelimit-reset` when no requests remain), and at least one minute, doubling while limits follow one another.
@@ -185,23 +188,20 @@ So redelivering a delivery that did reach the stream adds nothing to the stream.
   It logs `level=WARN msg="webhook redelivery rate-limited by GitHub"`.
   Redelivery requests go a second apart, as GitHub asks of a large number of POSTs.
 
-- A delivery the listener answered with 4xx is never redelivered: the listener refused the request itself, and the same bytes would fail the same way.
-
 - A delivery GitHub has recorded an `OK` attempt for is never asked for again, even when a request for it was recorded as refused (an accepted request whose answer was lost).
+  When the sweep had made at least one request for it, it logs `level=INFO msg="webhook delivery recovered"` once, with `requests`, the number of requests the delivery took.
 
-- Giving up logs `level=ERROR msg="webhook redelivery exhausted"`.
-  A 4xx logs `level=ERROR msg="webhook delivery refused terminally"`.
-  Each is logged once per delivery.
-  Every sweep logs an INFO `msg="webhook redelivery sweep"` line:
+- Every sweep logs an INFO `msg="webhook redelivery sweep"` line:
   `failed_attempts` (the failed attempts listed), `deliveries` (the deliveries the sweep decided:
-  the GUIDs of the listed failed attempts, plus refused deliveries the listing no longer returns), and one count per outcome, which add up to `deliveries`.
-  `closed` is a delivery an earlier sweep settled (GitHub recorded it `OK`, it was refused terminally, or it was given up on):
+  the GUIDs of the listed failed attempts, plus the open deliveries the listing no longer returns), and one count per outcome, which add up to `deliveries`.
+  `closed` is a delivery an earlier sweep settled (GitHub recorded it `OK`, or it expired):
   its failed attempt stays listed until it is older than the sweep's hour, so after a burst of failures is redelivered, the next hour's sweeps count the burst as `closed`.
-  `pending` is a redelivery GitHub accepted and has not made yet.
+  `waiting` is a delivery whose next request is not due yet.
+  A delivery the sweep's cap of 300 requests left over is not counted; the next sweep takes it.
 
-- A sweep looks back one hour.
+- A sweep looks back one hour, and decides every delivery whose record is still open, neither delivered nor expired, even when its attempts are older than that.
   After a gap in sweeping (Dispatch down), it resumes from its cursor, back to GitHub's three days.
-  The first sweep ever made looks back one hour only.
+  The first sweep ever made, with no cursor, looks back 72 hours.
 
 The cursor, the last rate limit, and one record per delivery acted on live in the JetStream KV bucket `envoy_webhook_redelivery`.
 Its 72-hour TTL matches GitHub's horizon.
@@ -267,6 +267,14 @@ The Go tests start one (`internal/tests3`, SeaweedFS in a container, since MinIO
 - `cookie` (the default) accepts signed `dsession` cookies, which a sign-in issues (OpenID Connect authorization code), through one of two issuers.
   Beside `DISPATCH_SIGNIN_ISSUER`, `DISPATCH_SIGNIN_CLIENT_ID` and `DISPATCH_SIGNIN_CLIENT_SECRET`, exactly one of `DISPATCH_SIGNIN_GROUP` and `DISPATCH_SIGNIN_DOMAIN` is set;
   both, some without the others, a domain under any issuer but `https://accounts.google.com`, a group under that one, or a domain that is not a lowercase DNS name refuse the boot, each naming what is wrong (`checkSignInSettings`).
+
+  With no `DISPATCH_SIGNIN_*` setting at all the server boots and runs no browser sign-in:
+  it issues no `dsession` cookie, and it refuses every one it has issued, answering each request that needs a person `401 NO_IDENTITY` (`requestIdentityFor`).
+  A cookie minted while sign-in was on still verifies for its thirty days, since the key signing it is the deployment's `DISPATCH_SIGNING_KEY` and outlives the configuration, and with no issuer nothing is left to confirm that the person it names may still use Dispatch.
+  The agent-token API is served as it always is, and `GET /auth/start` answers `503 SIGNIN_UNCONFIGURED`.
+  That is what a sandbox deployment runs (`envoy-infra:gcp:Dispatch` with its tailnet inputs unset, which has no origin an OAuth provider takes).
+  A partial set is still half a sign-in and refuses the boot, naming every setting it misses (`checkSignInSettings`).
+  Dev sign-in (`DISPATCH_DEV_SIGNIN`, below) sets none of these either and keeps its cookies: it mints them itself.
 
   The issuer's discovery document is read in the background from boot, on the service-account issuer's schedule (above), and an issuer that cannot be reached refuses nothing:
   until the document has been read, `/auth/start` and the callback answer `503 SIGNIN_UNAVAILABLE`, and the rest of Dispatch serves.
@@ -622,7 +630,7 @@ A migration that needs another bound sets its own `SET LOCAL lock_timeout`, whic
 The secrets broker's runner applies every migration in one transaction, so it does not try again:
 rolling one attempt back would roll back the migrations before it too.
 
-The notes below describe migrations through `0147`.
+The notes below describe migrations through `0148`.
 A new migration describes itself in the header comment of its own `.up.sql`, as `0129_document_edit_notices.up.sql` does, and adds nothing here, so two pull requests that each add a migration do not edit this section.
 
 Migrations `0056`–`0062` make search indexing linear.
@@ -1024,6 +1032,15 @@ Its census answers `0`: the one table it writes is `0142`'s, which holds no row 
 Migration `0144_messages_item_blocks_trigger` does the same for `messages`, `after insert`, a direct message included (a message is never edited), and owes an index to every message already stored, reading `messages` once.
 Its trigger takes `SHARE ROW EXCLUSIVE` on `messages` alone, so a message write waits behind it while a read does not.
 Its census answers `0` for the same reasons.
+
+Migration `0148_asks_anchor_artifact_id` creates `asks_anchor_artifact_id`, an index over the asks whose `anchor` is set of `case when anchor->>'artifact_id' ~ '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$' then (anchor->>'artifact_id')::uuid end`:
+the uuid cast `comments_anchor_artifact` (`0032`) indexes, guarded by the form every server-written anchor carries, since an unguarded cast would fail the boot over an anchor an earlier release could store.
+Settlement's sweep reads through it the marks a document's asks record, by the anchor's document alone, so an ask that also names an ask block on another document (`block_artifact_id`) keeps its mark on the document its anchor names.
+Building it takes `SHARE` on `asks`, so ask writes wait for the build; it rewrites no row and refuses none, so its census answers `0`.
+An anchor whose artifact id is not a lower-case document id is left out of the index, which costs the read nothing
+— its text comparison never matched such a spelling either — and each boot logs the count of those asks with a warning when there are any.
+The release before it never reads the index and serves beside it unchanged, except that its sweep still drops the mark of an ask holding both columns (no such row is written today), and rolling Dispatch back past `0148` is an image rollback alone:
+the index is left for the next release that reads it.
 
 Migration `0009_project_artifacts` deletes malformed derived artifact references, reports their count, and re-derives them from source text on the next write.
 It aborts server boot before a migration record or schema change only when an existing artifact has no owning issue.
@@ -1554,7 +1571,7 @@ A websocket resolves its caller again on every heartbeat, and that resolution do
 Every route the server answers writes one:
 every `/api/v1` route, the document websocket and the live socket (`/ws/live`), `/auth/*`, the GitHub proxy `/api/github/rest/`, and the 404 an `unmatched` path gets (a known path called with a method its route does not serve is one too).
 The dashboard's own pages and assets write none, so a browser's page loads do not bury the callers.
-`/healthz`, which a load balancer calls every few seconds, and `/livez`, which a liveness or startup probe calls, write none either.
+`/healthz`, which a load balancer calls every few seconds, `/livez`, which a liveness or startup probe calls, and `/metrics`, which a scraper calls, write none either.
 Three answers are given before any route runs and write none:
 the `403` a cookie request from another origin gets, the `421` a request for another host gets on a server with local sign-in, and the `307` redirect Go's router gives an unclean path (`/api/v1//issues`) or a prefix route called without its trailing slash (`/api/github/rest`).
 Match the line as `msg="dispatch: request"`: the previous-shared-token warning's message starts with the same words.
@@ -1608,9 +1625,10 @@ Each item below names a path with its method and identity, then its purpose.
 
 - `/auth/whoami` (GET; cookie or trusted header)
 
-  Return the resolved person, `{kind: "user", login, event_head}` with `login` their lowercase email and `event_head` the newest committed event id when the sign-in check answered.
+  Return the resolved person, `{kind: "user", login, event_head}` with `login` their lowercase email and `event_head` an event id at or below which every event is final, read when the sign-in check answered.
   The page starts its events subscription from that id.
-  The sign-in check comes first: a caller who is not signed in is `401 NO_IDENTITY` and the head is never read, and a signed-in caller whose head cannot be read is `503 EVENT_HEAD_UNAVAILABLE`.
+  The sign-in check comes first: a caller who is not signed in is `401 NO_IDENTITY` and the head is never read.
+  A signed-in caller is `503 EVENT_HEAD_UNAVAILABLE` while no event id is proven final yet, which ends on its own and which the page asks again for, and `503 EVENT_HEAD_READ_FAILED` when the head cannot be read, which the page retries twice and then shows as an error.
 
 - `/auth/_dev/signin` (GET; none; `DISPATCH_DEV_SIGNIN=1` only; loopback peer, no forwarding header)
 
@@ -1652,6 +1670,13 @@ Each item below names a path with its method and identity, then its purpose.
 
   Answer `204` with no body, reading nothing: it says only that the process answers.
   A liveness or startup probe asks it rather than `/healthz`, so a slow or unreachable Postgres, NATS or file store neither restarts the process nor adds load on every probe period.
+
+- `/metrics` (GET; none)
+
+  The process's metrics in the Prometheus text format:
+  `envoy_dispatch_outbox_publish_failures_total{reason}`, one count per destination of an outbox publish attempt that did not reach NATS, `reason` being `denied` (the server refused it under the connection's own publish permissions), `refused` (NATS refuses the envelope or its subject however often it is retried) or `failed` (every other failure).
+  It is answered above the router, so it is never the dashboard's shell, and whoever reaches the HTTP port can read it.
+  Nothing scrapes it yet.
 
 - `/api/v1/artifacts/_test/quiesce` (POST; cookie, trusted header, or bearer; `DISPATCH_TEST_HOOKS=1`)
 
@@ -1748,6 +1773,13 @@ Each item below names a path with its method and identity, then its purpose.
   Create or replace, or remove, a repository mapping; PUT takes `{project, default?}`, and `default: true` moves the project's one default to it.
   A mapping an issue names as its `repo` is neither deleted nor moved: `409 REPO_PROJECT_IN_USE`.
   `AGENTS.md` gives the rules and the `settings.repo_project.updated` events.
+
+- `/api/v1/github/app-installation/{owner}/{repo}` (GET; cookie, trusted header, or bearer)
+
+  Whether Dispatch's GitHub App, which GitHub sends the repository's webhook events through, is installed on the repository:
+  `200 {installed}`, `false` when GitHub answers 404.
+  `503 GITHUB_APP_UNCONFIGURED` when Dispatch holds no App key, `502 GITHUB_UNREADABLE` naming the repository and GitHub's error on any other failure.
+  The Legion daemon asks it for every repository it serves, for `legion state`.
 
 - `/api/v1/settings/project-default-assignees` (GET; cookie or trusted header (human only))
 
@@ -1875,6 +1907,8 @@ Each item below names a path with its method and identity, then its purpose.
   pinned to a version (`#b-<id>@v<N>`; for a comment's block, a revision of the comment) it also carries `pin` (`version`, `ref`, the block's `text` at that version, `state` `unchanged`, `changed` or `removed`, and `removed_version`), and a removed block answers no edges.
   `400 INVALID_REFERENCE` / `INVALID_KIND` / `INVALID_SINCE`, `INVALID_REFERENCE` too for a message block pinned with `@v<N>` (a message never changes);
   `404` for a node that does not exist, a block no current version or revision holds (unpinned) or whose id is past 256 bytes (no node), or a pinned version the document lacks, has no record of the blocks of, or did not hold the block at, or a revision past the comment's current one or that did not hold the block.
+  A `since` read stops at the event log's safe horizon, and first waits up to 1 s for the horizon to pass every event committed before the read, so it answers every mention committed before it, the caller's own included;
+  when an open transaction holds the horizon back past that wait, it answers the mentions at or below the horizon and a later read the rest.
 
 - `/api/v1/block-links?from=&to=` (GET; cookie, trusted header, or bearer)
 
@@ -2410,6 +2444,9 @@ Each item below names a status and code, then its meaning.
   deeper content is refused naming the line.
   An accepted suggestion whose blocks nest within those bounds but land deep enough that the document would nest past one is `INVALID_OP` on `replace_with`, naming how many blocks, or typed blocks, the result nests.
   Malformed edit replacements report `INVALID_OP`.
+  An upload that moves an open anchor's quote where that anchor cannot stand - an ask's quote into a code block, or any open ask's, comment's or suggestion's quote into the front matter - and leaves no copy where it can is refused naming the anchor, its quote and where the text landed:
+  move the text out, or resolve the anchor first.
+  A copy there beside the original is taken, and the anchor stays on the original.
 
 - `409 DOC_SCHEMA`
 

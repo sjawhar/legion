@@ -238,6 +238,22 @@ export interface WriteAdvice {
    */
   readonly unparsed_openers?: { readonly count: number; readonly examples: readonly string[] };
   /**
+   * The approval a document write superseded: the version it stored replaced the one a person
+   * had approved, so that approval is stale until someone approves the new version. A Legion
+   * design gate is such an approval, so this write closed it. Set by a document edit and by an
+   * upload that replaced an existing document, and only on the write that superseded the
+   * approval: a write on a document nobody approved, one whose approval was already stale, and
+   * one whose version carried that approval forward (the approval carry) each omit it.
+   */
+  readonly superseded_approval?: {
+    /** The version a person approved, the one this write superseded. */
+    readonly approved_version: number;
+    /** The version this write stored. */
+    readonly version: number;
+    /** Who gave that approval. */
+    readonly approved_by: string;
+  };
+  /**
    * The related-item check (LEGION-550), set on an issue or ask creation: the items
    * most like what was just filed, any past decision that matches, and what the check did
    * (`outcome`). Never refuses the write; it waits at most five seconds, and a check that did not
@@ -2474,6 +2490,9 @@ interface DispatchEventBase {
   readonly project?: string;
   readonly seq: number;
   readonly actor: Actor;
+  /** Whether the event wakes the issue's route, claimant and authors (`events.Notify`), so an
+   *  agent's own event is not a wake. A reader following an owner topic on the bus skips on the
+   *  published copy's `quiet` instead (`PublishedDispatchEvent`). */
   readonly notify: boolean;
   readonly created_at: string;
 }
@@ -2694,10 +2713,13 @@ export const AUTH_NO_IDENTITY = "NO_IDENTITY";
 export interface AuthenticatedUser {
   readonly kind: "user";
   readonly login: string;
-  /** The decimal id of the newest event when Dispatch answered. Every read the page makes after
-   *  this answer holds every event at or below it, so the event feed resumes from it on its first
+  /** The decimal id at or below which every event is final (committed or rolled back for good)
+   *  when Dispatch answered. Every read the page makes after this answer holds every event at or
+   *  below it, so the event feed resumes from it on its first
    *  subscription and replays exactly what committed since. Always answered: a server that cannot
-   *  read the head answers `503 EVENT_HEAD_UNAVAILABLE` rather than a whoami without one, and a
+   *  answer the head answers a 503 rather than a whoami without one (`EVENT_HEAD_UNAVAILABLE` while
+   *  no event id is proven final yet, which ends on its own; `EVENT_HEAD_READ_FAILED` when its
+   *  database does not answer), and a
    *  server older than the field serves no `/ws/live` either, so no page of this release ever
    *  reads one of its answers. */
   readonly event_head: string;
@@ -3158,6 +3180,21 @@ export const DispatchEventSchema = z.object({
 });
 
 export type InboundDispatchEvent = z.infer<typeof DispatchEventSchema>;
+
+/**
+ * One event as Dispatch's outbox publishes it to NATS: the event this API serves, plus `quiet`.
+ *
+ * `quiet` is whether the event carries nothing for a reader following its owner topic
+ * (`events.Quiet` in envoy): a delivery receipt, an anchor refresh, settings or per-viewer
+ * bookkeeping, a targeted message its session already had, an ask edit that only moved a version,
+ * or a version nobody named. That is what such a reader skips on, where `notify` answers only
+ * whether the event wakes the issue's route, claimant and authors - false for every event an agent
+ * wrote, so a reader skipping on it drops the activity a session subscribed to the issue asked
+ * for. It is optional because a frame published before Dispatch stated it carries none, and such a
+ * frame is judged by `notify` instead. The API's own event shape carries no `quiet`: the outbox
+ * adds it to the copy it publishes.
+ */
+export type PublishedDispatchEvent = DispatchEvent & { readonly quiet?: boolean };
 
 export const IssueEventPayloadSchema = z.object({
   title: z.string().optional(),
