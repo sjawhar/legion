@@ -2098,6 +2098,22 @@ It deletes everything labelled with the run id and the lock, and prints the empt
 without `--run` refuses to remove the lock of another run. A holder who needs the copy for longer
 runs `cluster.sh hold --namespace <ns> --for <duration>` instead, which keeps the lock fresh.
 
+A step whose `cluster.sh` command is killed (SIGKILL, an OOM, an interrupted worker turn) leaves
+its runner job going in the copy: `loadgen run` (job `step-<name>`, or `replay-<name>` for a
+replay) and, with `--typing`, `browsertype` (job `typing-<name>`) run in the runner pod until they
+end by themselves, after the step's window, grace and drain. They keep sending load to the copy
+meanwhile, so a step started before then measures both. The run's daemons stop on their own; the
+jobs do not. `down` ends them with the runner pod. To keep the copy, stop each job by the pid it
+recorded, then start the next step:
+
+```bash
+kubectl -n <ns> exec runner -c runner -- sh -c 'kill -TERM "$(cat /work/logs/step-<name>.pid)"'
+kubectl -n <ns> exec runner -c runner -- sh -c 'kill -TERM "$(cat /work/logs/typing-<name>.pid)"'
+```
+
+`kubectl -n <ns> exec runner -c runner -- ls /work/logs` lists the jobs; a job whose `.rc` file
+exists has ended.
+
 ## What this harness does not do
 
 - A run of `loadgen run -allow-foreign` against another stack, with every endpoint and token flag

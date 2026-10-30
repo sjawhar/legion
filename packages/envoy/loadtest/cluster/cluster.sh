@@ -173,6 +173,13 @@
 # registers anything or starts a daemon, because the pids of one namespace mean nothing in
 # another (a Legion pod gives each role its own over one CLUSTER_ROOT). status and down are not
 # refused: neither registers a command, and down deletes the run's objects and the lock.
+# The daemons stop on their own; a step's runner jobs do not. A step whose command is killed
+# (SIGKILL, an OOM, an interrupted worker turn) leaves loadgen run (job step-NAME, or
+# replay-NAME) and, with --typing, browsertype (typing-NAME) running in the runner pod until they
+# end by themselves after the step's window, grace and drain, still loading the copy. down ends
+# them with the runner pod; to keep the copy, stop each by the pid it recorded before the next
+# step: kubectl -n NS exec runner -c runner -- sh -c 'kill -TERM "$(cat /work/logs/JOB.pid)"'
+# (README.md, "Clean up after a killed run").
 #
 # Every subcommand needs --namespace (no default; a Legion pod's own namespace is builds), and
 # every kubectl call names it. Subcommands after up find the run from the lock's `run` and its
