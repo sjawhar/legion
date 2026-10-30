@@ -5,6 +5,7 @@ import (
 	"errors"
 	"net/http"
 	"slices"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -105,9 +106,11 @@ func hasKeyWithPrefix(keys []string, prefix string) bool {
 }
 
 // One machine's grant writes its own delivery lease as the lease does (Create, a read back by key,
-// Update) and is refused a write to another machine's lease key or delivery ledger: no machine's
-// user can take or clear another machine's lease.
-func TestAMachinesGrantRefusesAnotherMachinesLeaseAndLedger(t *testing.T) {
+// Update) and its own clean-hand-back mark, and reads that mark back as the pod taking the record
+// does; it is refused a write to another machine's lease key, hand-back mark or delivery ledger:
+// no machine's user can take or clear another machine's lease, or vouch for another machine's
+// hand-over.
+func TestAMachinesGrantRefusesAnotherMachinesLeaseMarkAndLedger(t *testing.T) {
 	seed, public := testnats.User(t)
 	granted := testnats.StartGranted(t, testnats.GrantedUser{Public: public, Grant: testnats.ListenerGrant(t, "box-a")})
 	errs := make(chan error, 8)
@@ -133,9 +136,16 @@ func TestAMachinesGrantRefusesAnotherMachinesLeaseAndLedger(t *testing.T) {
 	if _, err := kv.Update(own, []byte(`{"holder":"pod-a","boot":"0123456789abcdef","released":true}`), taken); err != nil {
 		t.Fatalf("release box-a's lease: %v", err)
 	}
+	mark := bus.ListenerHandBackPrefix(bus.ListenerDurable("box-a")) + strconv.FormatUint(taken, 10)
+	if _, err := kv.Put(mark, []byte(`{"instance":"pod-a","boot":"0123456789abcdef","revision":1}`)); err != nil {
+		t.Fatalf("mark box-a's hand-back: %v", err)
+	}
+	if entry, err := kv.Get(mark); err != nil || len(entry.Value()) == 0 {
+		t.Fatalf("read back box-a's hand-back mark = %v, %v; want the mark the stop wrote", entry, err)
+	}
 	select {
 	case err := <-errs:
-		t.Fatalf("the server refused box-a's own lease: %v", err)
+		t.Fatalf("the server refused box-a's own lease or mark: %v", err)
 	default:
 	}
 
@@ -145,6 +155,10 @@ func TestAMachinesGrantRefusesAnotherMachinesLeaseAndLedger(t *testing.T) {
 	}{
 		{"lease." + bus.ListenerDurable("box-b"), func(key string) error {
 			_, err := kv.Create(key, []byte(`{"holder":"pod-a","boot":"0123456789abcdef"}`))
+			return err
+		}},
+		{bus.ListenerHandBackPrefix(bus.ListenerDurable("box-b")) + "7", func(key string) error {
+			_, err := kv.Put(key, []byte(`{"instance":"pod-a","boot":"0123456789abcdef","revision":7}`))
 			return err
 		}},
 		{"delivery." + bus.ListenerDurable("box-b") + ".0123456789abcdef0123456789abcdef.ses_x", func(key string) error {

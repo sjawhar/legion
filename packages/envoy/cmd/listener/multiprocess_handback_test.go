@@ -80,12 +80,12 @@ func TestTwoPodsGracefulStopAfterANodeLossHandsOverWithin10s(t *testing.T) {
 // push binding, and the stopping pod's linger ends "not taken" a second after its release
 // (lingerUntaken), so from then on that binding is the deliver subject's only subscriber: what the
 // stopping pod handed back, and every message published after it drained, reaches a connection
-// that acknowledges nothing and comes back only at its ack wait. The pod started then takes the
-// released record, which no linger bridged to it (leaseHandBackBridge), so its term settles for an
-// ack wait, 7 s, not for a hand-back's 2 s delay: every message reaches its session in the order it
-// was published. A released record counted a graceful hand-back however long it had stood would
-// let the new pod hold for 3 s and deliver the messages published after the stop before the
-// older ones still due from the lost node's binding.
+// that acknowledges nothing and comes back only at its ack wait. That stop writes no
+// clean-hand-back mark - its linger saw no other pod receiving - so the pod started afterwards
+// settles for an ack wait, 7 s, not for a hand-back's 2 s delay: every message reaches its
+// session in the order it was published. A record counted a clean hand-back by what it carries
+// alone would let the new pod hold for 3 s and deliver the messages published after the stop
+// before the older ones still due from the lost node's binding.
 func TestTwoPodsGracefulStopWithNoStandbyAfterANodeLossKeepsOrder(t *testing.T) {
 	uri := mpNATS(t)
 	binary := cmdtest.Build(t, "envoy-listener")
@@ -118,8 +118,8 @@ func TestTwoPodsGracefulStopWithNoStandbyAfterANodeLossKeepsOrder(t *testing.T) 
 	serving.awaitAll(t, messages, mpHardBound+20*time.Second)
 	serving.requireKnown(t, messages)
 	serving.requireOrder(t, messages)
-	if line := mpLineWith(c.Output.String(), "listener lease term must settle", `"cap":"7s"`); line == "" {
-		t.Fatalf("%s did not hold for an ack wait after a stop no linger of its own bridged to it:\n%s",
+	if line := mpLineWith(c.Output.String(), "settle hold ended", `"hand_back_marked":false`); line == "" {
+		t.Fatalf("%s did not hold for an ack wait after a stop that marked no hand-back:\n%s",
 			c.instance, mpTail(mpLinesWithout(c.Output.String()), 40))
 	}
 }
@@ -274,10 +274,11 @@ func mpTo(messages []mpMessage, sessions ...string) []mpMessage {
 // A graceful stop of the active pod while a message to a session whose prompts fail waits out its
 // 30 s retry delay, with a message published every 100 ms to two healthy sessions. The retry stays
 // in the durable's pending until its delay ends, so the standby's settle hold never finds every
-// outstanding message in hand: it ends at what the stopping pod can still have outstanding, the
-// 2 s hand-back delay and a second after the subscribe, and every message to a healthy session
-// published after the SIGTERM reaches it within 10 s, each session's in order. A hold that ran
-// to its 13 s cap instead would let those messages arrive about 14 s after the SIGTERM.
+// outstanding message in hand: it ends on the stopping pod's clean-hand-back mark, at what that
+// pod can still have outstanding, the 2 s hand-back delay and a second after the subscribe, and
+// every message to a healthy session published after the SIGTERM reaches it within 10 s, each
+// session's in order. Without that mark the hold would run to its 7 s cap and those messages
+// would arrive about 14 s after the SIGTERM.
 func TestTwoPodsGracefulStopWithARetryOutstandingDeliversWithin10s(t *testing.T) {
 	uri := mpNATS(t)
 	binary := cmdtest.Build(t, "envoy-listener")
@@ -300,6 +301,12 @@ func TestTwoPodsGracefulStopWithARetryOutstandingDeliversWithin10s(t *testing.T)
 	serving.requireKnown(t, publisher.all())
 	a.WaitExit(t, "SIGTERM")
 	mpWaitActive(t, b, time.Second)
+	if line := mpLineWith(a.Output.String(), "handed the durable's messages back", `"hand_back_marked":true`); line == "" {
+		t.Fatalf("%s did not mark its hand-back clean:\n%s", a.instance, mpTail(mpLinesWithout(a.Output.String()), 40))
+	}
+	if line := mpLineWith(b.Output.String(), "settle hold ended", `"outcome":"handed back"`); line == "" {
+		t.Fatalf("%s did not end its settle hold on %s's mark:\n%s", b.instance, a.instance, mpTail(mpLinesWithout(b.Output.String()), 40))
+	}
 }
 
 // Graceful stops one after another, A to B to C to D, each with a prompt in hand that the serving
@@ -307,11 +314,13 @@ func TestTwoPodsGracefulStopWithARetryOutstandingDeliversWithin10s(t *testing.T)
 // delay, with a message published every 100 ms to two healthy sessions. Each stop comes a second
 // into the prompt, with the healthy sessions' messages queued behind it; the stopping pod cancels
 // the prompt after the 3 s grace and NAKs it for a retry, so with the failing session's retry it
-// holds every next pod's settle hold to its cap: every hand-over must be a graceful hand-back's,
-// whose cap is 3 s, and every message to a healthy session reaches it within 10 s of its publish,
-// each session's in order. A pod that marked the record stale_binding for subscribing beside the
-// stopping pod's linger would, from the second hand-over on, hold to the 7 s cap of a hard
-// take-over, and the messages queued at the SIGTERM would arrive about 11 s after their publish.
+// holds every next pod's settle hold open: each hand-over must end on the stopping pod's
+// clean-hand-back mark, 3 s after the subscribe, and every message to a healthy session must
+// reach it within 10 s of its publish, each session's in order. The pod taking over subscribes
+// beside the stopping pod's own linger and records stale_binding for it, which the mark clears
+// again; were it left standing, the next stop in the chain would mark nothing and the hand-over
+// after it would hold to the 7 s cap of a hard take-over, with the messages queued at the SIGTERM
+// arriving about 11 s after their publish.
 func TestTwoPodsEveryGracefulStopWithAPromptInHandAndARetryOutstandingDeliversWithin10s(t *testing.T) {
 	uri := mpNATS(t)
 	binary := cmdtest.Build(t, "envoy-listener")
@@ -338,14 +347,15 @@ func TestTwoPodsEveryGracefulStopWithAPromptInHandAndARetryOutstandingDeliversWi
 // each pod after it, B to C to D, each with a prompt in hand and a retry outstanding as in
 // TestTwoPodsEveryGracefulStopWithAPromptInHandAndARetryOutstandingDeliversWithin10s. The server
 // keeps the lost pod's connection, and with it the durable's push binding, until its ping timeout,
-// minutes in production, so B subscribes beside it and marks the record stale_binding, which every
-// later holder carries on. B's hold ends before its stop, so nothing is left with the lost pod's
-// binding alone: each hand-over is a graceful hand-back's, whose cap is 3 s, and every message to a
-// healthy session reaches it within 10 s of its publish, each session's in order. Were
-// stale_binding to stand for an ack wait owed as well, every hand-over after the node loss would
-// hold to the 7 s cap of a hard take-over, and the messages queued at each SIGTERM would arrive
-// about 11 s after their publish.
-func TestTwoPodsEveryGracefulStopAfterANodeLossWithAPromptInHandAndARetryOutstandingDeliversWithin10s(t *testing.T) {
+// minutes in production, so B subscribes beside it and marks the record stale_binding, which no
+// later holder can clear while that binding stands. A stop whose term had such a binding open
+// marks no clean hand-back: what the durable pushed to that connection it may have pushed there
+// alone, and that comes back only at its ack wait. So every hand-over of this row settles for
+// 7 s, the hard take-over's bound, rather than the hand-back's 3 s, and every message to a
+// healthy session still reaches it in order, within the 15 s a hard take-over is given. The cost
+// is the node loss's: it lasts until the server drops that connection, and no mark is written in
+// the meantime, which is the safe answer rather than the fast one.
+func TestTwoPodsEveryGracefulStopAfterANodeLossWithAPromptInHandAndARetryOutstandingDeliversInOrderWithin15s(t *testing.T) {
 	uri := mpNATS(t)
 	binary := cmdtest.Build(t, "envoy-listener")
 	a, b := mpStartPair(t, binary, uri)
@@ -366,10 +376,15 @@ func TestTwoPodsEveryGracefulStopAfterANodeLossWithAPromptInHandAndARetryOutstan
 	stop()
 
 	messages := mpTo(publisher.all(), healthy...)
-	serving.awaitAll(t, messages, mpGracefulBound+10*time.Second)
-	serving.requireWithin(t, messages, mpGracefulBound, time.Time{})
+	serving.awaitAll(t, messages, mpHardBound+10*time.Second)
+	serving.requireWithin(t, messages, mpHardBound, time.Time{})
 	serving.requireOrder(t, messages)
 	serving.requireKnown(t, publisher.all())
+	for _, pod := range []*mpPod{holder, other} {
+		if line := mpLineWith(pod.Output.String(), "handed the durable's messages back", `"hand_back_marked":true`); line != "" {
+			t.Fatalf("%s marked its hand-back clean though a lost node's binding stood beside it: %s", pod.instance, line)
+		}
+	}
 }
 
 // mpGracefulStopsInTurn stops stopping gracefully, then each pod that takes its place in turn, with

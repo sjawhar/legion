@@ -2,9 +2,12 @@ kind: Changed
 body: |-
     `envoy-infra`'s `ListenerPermissions`, `DispatchPermissions` and `HostPermissions` grant the
     `envoy_listener` bucket's key-value calls, with writes only to the machine's own keys:
-    `$KV.envoy_listener.lease.listener-<machine id>`, `$KV.envoy_listener.delivery.listener-<machine
+    `$KV.envoy_listener.lease.listener-<machine id>`,
+    `$KV.envoy_listener.handback.listener-<machine id>.>` (the clean-hand-back marks its stopping
+    pods write), `$KV.envoy_listener.delivery.listener-<machine
     id>.>` and `$KV.envoy_listener.seen.>`, so one machine's user cannot take or clear another
-    machine's lease or delivery ledger. The listener reads every write back by key, which a grant
+    machine's lease or delivery ledger, or vouch for another machine's hand-over. The listener
+    reads every write back by key, which a grant
     rendered before this scoping allows too. Deploy the grant before a second listener pod of a
     machine id: a listener whose grant refuses the bucket does not exit but logs one ERROR, `listener
     lease unavailable: the NATS user lacks the grant for KV bucket envoy_listener; delivering without

@@ -109,9 +109,9 @@ func TestLeaseUnsettledIsHandedOnByAReleaseBeforeTheHoldEnds(t *testing.T) {
 // ack_wait_owed is the ack wait the releasing term still owed its successor: a term that must
 // settle owes one from its acquiring write until its settle hold ends (Settled). Every release
 // writes the debt as the term stands and every acquiring write writes it false. A released record
-// carrying unsettled is a graceful hand-back (leaseStatus.HandedBack) unless it carries
-// ack_wait_owed, with stale_binding or without. A call for a term that is no longer current
-// changes nothing.
+// carrying unsettled is a candidate for a clean hand-back (leaseStatus.HandBack) unless it
+// carries ack_wait_owed or stale_binding. A call for a term that is no longer current changes
+// nothing.
 func TestLeaseAckWaitOwedIsTheTermsDebtAndDecidesTheHandBack(t *testing.T) {
 	kv := leaseBucket(t)
 	clock := newFakeLeaseClock()
@@ -123,12 +123,13 @@ func TestLeaseAckWaitOwedIsTheTermsDebtAndDecidesTheHandBack(t *testing.T) {
 	clock.advance(leaseTTL)
 	a.step()
 	status := a.Status()
-	if !status.Holding || status.How != leaseTakenExpired || !status.Settle || status.HandedBack {
+	if !status.Holding || status.How != leaseTakenExpired || !status.Settle || status.HandBack {
 		t.Fatalf("pod-a status = %+v, want held over an expired record, settling, no hand-back", status)
 	}
 	a.SetStaleBinding(status.Term, true)
-	// A term that is no hand-back goes on owing the ack wait past its subscribe: what the dead
-	// holder had comes back at its ack wait, whatever this pod has subscribed to.
+	// A term that must settle goes on owing the ack wait past its subscribe: what the dead holder
+	// had comes back at its ack wait, whatever this pod has subscribed to, and only its settle
+	// hold's end says otherwise.
 	a.SetReceiving(status.Term)
 	clock.advance(leaseRenewEvery)
 	a.step()
@@ -144,7 +145,7 @@ func TestLeaseAckWaitOwedIsTheTermsDebtAndDecidesTheHandBack(t *testing.T) {
 
 	b.step()
 	next := b.Status()
-	if !next.Holding || next.How != leaseTakenReleased || !next.Settle || next.HandedBack {
+	if !next.Holding || next.How != leaseTakenReleased || !next.Settle || next.HandBack {
 		t.Fatalf("pod-b status = %+v, want held from a released record, settling, no hand-back: an ack wait is owed", next)
 	}
 	if record, _ := readLease(t, kv); record.Holder != "pod-b" || record.AckWaitOwed || !record.StaleBinding || !record.Unsettled {
@@ -162,52 +163,47 @@ func TestLeaseAckWaitOwedIsTheTermsDebtAndDecidesTheHandBack(t *testing.T) {
 	b2 := testLease(kv, "pod-b2", productionLeaseConfig(), clock.now)
 	b2.step()
 	settled := b2.Status()
-	if !settled.Holding || !settled.Settle || settled.HandedBack {
+	if !settled.Holding || !settled.Settle || settled.HandBack {
 		t.Fatalf("pod-b2 status = %+v, want held from a released record, settling, no hand-back", settled)
 	}
 	b2.Settled(settled.Term)
 	b2.Unsettle(settled.Term)
+	// The durable read not push-bound before pod-b2 subscribed: the stale binding the record
+	// carried is gone, so the record it releases is a hand-back candidate.
+	b2.SetStaleBinding(settled.Term, false)
 	if err := b2.Release(context.Background()); err != nil {
 		t.Fatalf("release pod-b2: %v", err)
 	}
-	if record, _ := readLease(t, kv); !record.Released || !record.Unsettled || record.AckWaitOwed || !record.StaleBinding {
-		t.Fatalf("record handed back after the hold ended = %+v, want released, unsettled, with a stale binding, owing nothing", record.leaseFields)
+	if record, _ := readLease(t, kv); !record.Released || !record.Unsettled || record.AckWaitOwed || record.StaleBinding {
+		t.Fatalf("record handed back after the hold ended = %+v, want released, unsettled, owing nothing, with no stale binding", record.leaseFields)
 	}
 
 	c.step()
-	if status := c.Status(); !status.Holding || status.How != leaseTakenReleased || !status.Settle || !status.HandedBack {
-		t.Fatalf("pod-c status = %+v, want held from a released record, settling for a graceful hand-back", status)
+	if status := c.Status(); !status.Holding || status.How != leaseTakenReleased || !status.Settle || !status.HandBack {
+		t.Fatalf("pod-c status = %+v, want held from a released record, settling as a hand-back candidate", status)
 	}
 }
 
-// A term taken from a graceful hand-back owes its successor an ack wait until the server has its
-// subscription inside the hand-back's window: the stopping pod's linger bridges the deliver
-// subject to that subscription and no further. A term that stops, or gives the lease up, before
-// it subscribes (a Stop during prepare, a holder stuck on its durable) releases the record owing
-// the ack wait, so the next holder's hold waits one out; one whose subscription the server had
-// inside the window releases it owing nothing, and the hand-over keeps the 3 s cap. One judged
-// past the window, and one whose subscribe the server never got, owe it like any other settling
-// term (HandBackHolds, which the receive loop asks before each subscribe and again when the
-// subscribe's flush returns): what the durable pushed while the server had no subscription of
-// this pod's comes back only at its ack wait, and the subscription that lands later clears no
-// debt.
-func TestLeaseATermTakenFromAHandBackOwesTheAckWaitUntilItSubscribes(t *testing.T) {
+// Every settling term owes its successor an ack wait until its own settle hold ends, a term
+// taken from a hand-back candidate included: what the stopping pod handed back is back at the
+// hand-back delay, but only this term's hold knows it has it. So a term that stops, or gives the
+// lease up, before it subscribes (a Stop during prepare, a holder stuck on its durable) releases
+// the record owing the ack wait; so does one that subscribed and was recorded receiving, since
+// receiving says nothing of what is in hand; and only Settled, which the hold's end calls - on
+// the durable's count or on the hand-back's mark - clears it.
+func TestLeaseEverySettlingTermOwesTheAckWaitUntilItsHoldEnds(t *testing.T) {
 	clock := newFakeLeaseClock()
 	for _, row := range []struct {
 		name string
-		// judged is whether the receive loop judged the hand-back at all, which a term that never
-		// reached its subscribe does not; advance is how long after the take it judged it, and
-		// subscribed what it told the lease of the server's reading of its SUB.
-		judged     bool
-		advance    time.Duration
-		subscribed bool
-		holds      bool
-		owed       bool
+		// receiving is whether the term's subscription was recorded, and settled whether its
+		// settle hold ended before the release.
+		receiving bool
+		settled   bool
+		owed      bool
 	}{
-		{"stopped before it subscribed", false, 0, false, false, true},
-		{"the server had its subscription inside the window", true, 0, true, true, false},
-		{"the server had its subscription past the window", true, leaseHandBackBridge, true, false, true},
-		{"its subscribe never reached the server", true, 0, false, false, true},
+		{"stopped before it subscribed", false, false, true},
+		{"stopped while its hold ran", true, false, true},
+		{"stopped once its hold had ended", true, true, false},
 	} {
 		t.Run(row.name, func(t *testing.T) {
 			kv := leaseBucket(t)
@@ -215,23 +211,22 @@ func TestLeaseATermTakenFromAHandBackOwesTheAckWaitUntilItSubscribes(t *testing.
 			a := testLease(kv, "pod-a", productionLeaseConfig(), clock.now)
 			a.step()
 			status := a.Status()
-			if !status.Holding || status.How != leaseTakenReleased || !status.Settle || !status.HandedBack {
-				t.Fatalf("pod-a status = %+v, want held from a graceful hand-back, settling", status)
+			if !status.Holding || status.How != leaseTakenReleased || !status.Settle || !status.HandBack {
+				t.Fatalf("pod-a status = %+v, want held from a hand-back candidate, settling", status)
 			}
-			if row.judged {
-				clock.advance(row.advance)
-				if holds, _ := a.HandBackHolds(status.Term, row.subscribed); holds != row.holds {
-					t.Fatalf("the hand-back holds %v %s after the take, subscribed %v, want %v", holds, row.advance, row.subscribed, row.holds)
-				}
-			}
-			if row.subscribed {
+			if row.receiving {
 				a.SetReceiving(status.Term)
+			}
+			if row.settled {
+				a.Settled(status.Term)
 			}
 			if err := a.Release(context.Background()); err != nil {
 				t.Fatalf("release pod-a: %v", err)
 			}
-			if record, _ := readLease(t, kv); !record.Released || !record.Unsettled || record.AckWaitOwed != row.owed {
-				t.Fatalf("record released %s = %+v, want released, unsettled, ack_wait_owed %v", row.name, record.leaseFields, row.owed)
+			record, _ := readLease(t, kv)
+			if !record.Released || record.Unsettled == row.settled || record.AckWaitOwed != row.owed {
+				t.Fatalf("record released %s = %+v, want released, unsettled %v, ack_wait_owed %v",
+					row.name, record.leaseFields, !row.settled, row.owed)
 			}
 		})
 	}
@@ -277,41 +272,58 @@ func TestLeaseAStopDuringALapseReleasesTheRecordUnsettled(t *testing.T) {
 
 	b.step()
 	next := b.Status()
-	if !next.Holding || next.How != leaseTakenReleased || !next.Settle || next.HandedBack {
+	if !next.Holding || next.How != leaseTakenReleased || !next.Settle || next.HandBack {
 		t.Fatalf("pod-b status = %+v, want held from a released record, settling for an ack wait, no hand-back", next)
 	}
 }
 
-// A released record is a graceful hand-back only while the stopping pod's linger can still have
-// bridged to the take-over (leaseHandBackBridge): a linger no pod has taken the record in ends
-// lingerUntaken after the release, and what the durable pushed after that went to a lost node's
-// binding alone, or to no subscriber at all, and comes back only at its ack wait. A pod that
-// takes such a record later settles as after a hard take-over, however the record reads. The
-// window may therefore be no longer than a linger lasts: a wider one would let a take-over at
-// 1.2 s - a pod starting, or a standby whose poll at 0.7 s failed - hold for the hand-back's 3 s
-// with nothing on the deliver subject to have bridged to it, and deliver the messages it then
-// held before the older ones still due from the lost node's binding.
-func TestLeaseTakesAReleasedRecordPastTheLingerAsNoHandBack(t *testing.T) {
+// A released record makes the term that takes it a hand-back candidate by what it carries and by
+// nothing else: unsettled, so its holder handed messages back, without ack_wait_owed, so it owed
+// its successor nothing of its own, and without stale_binding, so no lost node's binding was open
+// beside its subscription. How long the record has stood does not enter into it - a record
+// released to no standby at all reads the same - and neither does the take-over's own timing: a
+// candidate holds for the ack wait like any other settling term until the mark of the stop it
+// took the record from is there (HandBackMarked), and that mark is keyed by the revision the
+// term replaced. The judgement reads the bucket for a candidate alone, and a term that is no
+// longer current is no candidate.
+func TestLeaseAHandBackCandidateIsJudgedByItsMarkAlone(t *testing.T) {
+	const handedBack = `{"holder":"pod-gone","boot":"0011223344556677","released":true,"unsettled":true}`
 	for _, row := range []struct {
-		name       string
-		record     string
-		after      time.Duration
-		handedBack bool
+		name      string
+		record    string
+		after     time.Duration
+		candidate bool
 	}{
-		{"taken while the linger holds", `{"holder":"pod-gone","boot":"0011223344556677","released":true,"unsettled":true}`, 0, true},
-		{"taken past the linger, no pod running to take it", `{"holder":"pod-gone","boot":"0011223344556677","released":true,"unsettled":true}`, lingerUntaken + 200*time.Millisecond, false},
-		{"taken past the linger beside a lost node's binding", `{"holder":"pod-gone","boot":"0011223344556677","released":true,"unsettled":true,"stale_binding":true}`, lingerUntaken + 200*time.Millisecond, false},
+		{"released unsettled", handedBack, 0, true},
+		{"released unsettled long ago, no pod running to take it", handedBack, lingerUntaken + 200*time.Millisecond, true},
+		{"released beside a lost node's binding", `{"holder":"pod-gone","boot":"0011223344556677","released":true,"unsettled":true,"stale_binding":true}`, 0, false},
+		{"released owing an ack wait", `{"holder":"pod-gone","boot":"0011223344556677","released":true,"unsettled":true,"ack_wait_owed":true}`, 0, false},
 	} {
 		t.Run(row.name, func(t *testing.T) {
 			kv := leaseBucket(t)
 			clock := newFakeLeaseClock()
-			putLease(t, kv, row.record)
+			replaced := putLease(t, kv, row.record)
 			time.Sleep(row.after)
 			a := testLease(kv, "pod-a", productionLeaseConfig(), clock.now)
 			a.step()
 			status := a.Status()
-			if !status.Holding || status.How != leaseTakenReleased || !status.Settle || status.HandedBack != row.handedBack {
-				t.Fatalf("pod-a status = %+v, want held from a released record, settling, handed back %v", status, row.handedBack)
+			if !status.Holding || status.How != leaseTakenReleased || !status.Settle || status.HandBack != row.candidate {
+				t.Fatalf("pod-a status = %+v, want held from a released record, settling, hand-back candidate %v", status, row.candidate)
+			}
+			if row.candidate && status.Replaced != replaced {
+				t.Fatalf("pod-a's term replaced revision %d, want the released record's %d: the mark is keyed by it", status.Replaced, replaced)
+			}
+			ctx := context.Background()
+			if marked, err := a.HandBackMarked(ctx, status.Term); marked || err != nil {
+				t.Fatalf("the term reads marked %v (%v) with no mark written, want unmarked: the hold keeps its ack wait", marked, err)
+			}
+			putHandBackMark(t, kv, leaseTestMachine, replaced)
+			marked, err := a.HandBackMarked(ctx, status.Term)
+			if err != nil || marked != row.candidate {
+				t.Fatalf("the term reads marked %v (%v) with the mark for revision %d written, want %v", marked, err, replaced, row.candidate)
+			}
+			if marked, err := a.HandBackMarked(ctx, status.Term+1); marked || err != nil {
+				t.Fatalf("a term that is no longer current reads marked %v (%v), want unmarked", marked, err)
 			}
 		})
 	}

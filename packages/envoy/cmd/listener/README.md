@@ -39,6 +39,14 @@ answer. Its value is JSON: `holder`
 `service_since`, `acquired_at`, `released`, and `stale_binding`, `unsettled`, `ack_wait_owed` and
 `receiving` ("Take-over" below); a field this build does not know is kept across every rewrite.
 
+Beside the lease, a pod that stopped gracefully writes one key per hand-over it saw through:
+`handback.<durable>.<revision>` (`bus.ListenerHandBackPrefix`), the clean-hand-back mark, named
+for the revision of the lease record its own release wrote. Its value is JSON: `instance`, `boot`
+and `revision`. The pod that takes that very revision reads it inside its settle hold and ends
+the hold at the hand-back delay instead of an ack wait ("Take-over" below). Nothing deletes a
+mark: the bucket's 20 minute `MaxAge` drops it, no pod reads a mark for a revision it did not
+replace, and revisions never repeat, so an old mark is never read as a newer hand-over's.
+
 | Constant (`lease.go`) | Value | What it does |
 | --- | --- | --- |
 | `leaseRenewEvery` | 1 s | The holder renews the record with a compare-and-set at its last revision. |
@@ -65,8 +73,9 @@ wait only once the pod holding it has died or lost the lease.
   NAKs those messages with a 2 s delay (`handBackDelay`), as one batch in stream order, and
   releases the lease marked `unsettled`. A standby takes the released lease at its next poll and
   settles (below): it subscribes at once and holds what it receives until every outstanding
-  message is in its hands, or for the hand-back delay and a second (3 s) after it subscribed at
-  most, then delivers in stream order, so per-session order is kept. The stopping pod keeps its
+  message is in its hands, or until the stopping pod's clean-hand-back mark is there and the
+  hand-back delay and a second (3 s) have passed since it subscribed, then delivers in stream
+  order, so per-session order is kept. The stopping pod keeps its
   subscription meanwhile, since nats-server loses a message whose first delivery is still in its
   send queue when the deliver subject's last subscriber goes: it NAKs with the same delay each
   message that reaches it after the stop, a repeat of one it already handed back included (three
@@ -75,20 +84,23 @@ wait only once the pod holding it has died or lost the lease.
   writes once its subscription is up), or for 3 s (`lingerMax`) after the batch at most. When no
   other pod has taken the record, there is no standby to wait for and it stops waiting; no end but
   a receiving holder comes before 1 s (`lingerUntaken`, two standby polls) and one poll have
-  passed since the release, however far its 3 s cap has run. That floor, 1.25 s after the release,
-  is the stop's guarantee to its successor: a standby whose term is to settle for the hand-back
-  delay alone must have had the server read its SUB within 1 s of the release
-  (`leaseHandBackBridge`, a poll inside the floor, which leaves that SUB a round trip). Then it
-  drains the
-  subscription. So everything it
-  handed back is back within the standby's 3 s cap, as long as a standby took the record and the
-  server had its subscription inside that window: a pod that takes the record later (none was
-  running, so the linger ended "not taken"), takes it in time and is slower than that to
-  subscribe, or subscribes in time with a flush that fails or returns past the window, finds what
-  the durable pushed meanwhile gone to no subscriber,
-  or to a lost node's binding alone, and settles for an ack wait instead (below). The standby
+  passed since the release, however far its 3 s cap has run, so a standby taking the record has
+  the deliver subject held for it while it subscribes. Then it drains the subscription.
+
+  Once that is done the stopping pod writes the mark, `handback.<durable>.<the revision its own
+  release wrote>`, and only when every part of the hand-over went through: its own release wrote
+  that record (a release its lease loop outlasted writes none), the term had no lost node's push
+  binding open beside it (`stale_binding` false on the record it released), its linger ended by
+  reading another holder `receiving`, and the server confirmed its drain rather than the 2 s
+  drain wait running out. So everything it handed back is back within the standby's 3 s hold. A
+  stop that falls short of any of that - no standby took the record, none was receiving when the
+  linger ended, the successor's subscribe never reached the server, the release timed out and a
+  later one wrote the record, or a lost node's binding stood beside the term - writes no mark, and
+  what the durable pushed meanwhile may have gone to no subscriber, or to that binding alone, so
+  the next holder settles for an ack wait instead (below). A failed write of the mark costs the
+  same and nothing more. The standby
   delivers about 2 to 3 s after the stop (the hand-back delay and a settle read), about 3 to 4 s
-  after it when a message waits out a retry's delay and holds the hold to its cap, plus the
+  after it when a message waits out a retry's delay and holds the hold to the mark, plus the
   message in hand's grace when it takes it. The tests bound it at 10 s.
 - **Hard stop** (SIGKILL, node or network loss): a standby takes the expired lease about 5 to 6 s
   after the last renewal (the TTL and one poll). Its term must settle: it subscribes at once,
@@ -109,35 +121,34 @@ wait only once the pod holding it has died or lost the lease.
 - **Graceful stop after a hard one.** The lease record carries three flags for the next holder.
   `stale_binding` is set by a holder that subscribed beside a push binding it did not wait out (a
   lost node's lingering connection, or a stopping pod's subscription it keeps until this one
-  receives, unless this one took the record from that pod's graceful hand-back), carried by every
-  renewal, release and take-over, and cleared by a holder that finds the durable not push-bound.
+  receives), carried by every
+  renewal, release and take-over, and cleared by a holder that finds the durable not push-bound,
+  or, for a holder that took a hand-back candidate, by that hand-back's mark: the mark says the
+  binding it subscribed beside was the stopping pod's own linger.
   `unsettled` is written from the acquiring write of a term that must settle until its hold ends,
   and a release keeps it, so a pod stopped mid-hold hands the hold on; a graceful stop that hands
   messages back always releases it set, and so does a stop taken while the term's renewals have
   lapsed, whatever its own flags stood at: the lapse dropped what it held without an ack.
   `ack_wait_owed` is the ack wait the releasing term still
-  owed its successor: a term that must settle owes one from its acquiring write until its own hold
-  ends, and a term taken from a graceful hand-back until the server has its subscription inside
-  that hand-back's window, so every release -
+  owed its successor: every term that must settle owes one from its acquiring write until its own
+  settle hold ends, one taken from a hand-back included, so every release -
   a stop, a lapse, a give-up, a stop before the term ever subscribed - writes the debt as the term
   stands, a release during a lapse writing it set, and every take-over writes it false. A release
   the lease's loop outlasts (`handBackReleaseWait`, 2 s) writes no record and records the debt
   instead, so the release that lands after the linger has let go of the deliver subject carries
-  it: no linger follows that write. A pod that
+  it, and that release is vouched for by no mark. A pod that
   takes a released record carrying
   `stale_binding` or `unsettled` settles too, subscribing at once beside any binding rather than
-  waiting it out as a pre-lease build's. Its cap is the hand-back delay and a second when the
-  record carries `unsettled` without `ack_wait_owed`, the take-over's write is less than 1 s after
-  the release (`leaseHandBackBridge`, `lingerUntaken`, by the server's timestamps of the two
-  writes) and the server has the pod's subscription inside that same second, which the pod judges
-  by the server's gap between the two writes and its own clock since just before the second of
-  them, before each subscribe and again when that subscribe's flush returns: the stopping
-  pod's linger guarantees the deliver subject its subscription for a poll longer than that and no
-  more, and a SUB the server has not read bridges to nothing. The cap is one
-  ack wait and a second otherwise: the messages the stopping pod handed back come back after the
+  waiting it out as a pre-lease build's. Its hold ends at the hand-back delay and a second only
+  when the record carries `unsettled` without `ack_wait_owed` and without `stale_binding` - which
+  makes the term a hand-back candidate - and the mark for the revision it replaced is there,
+  read every `settlePoll` inside the hold. Otherwise the cap is one
+  ack wait and a second: the messages the stopping pod handed back come back after the
   hand-back delay to the next pod and to a lingering binding alike, but one that went to such a
   binding alone, or to no subscriber at all once the linger ended, or that a dead pod before the
-  stopping one still held, comes back one ack wait later.
+  stopping one still held, comes back one ack wait later. A mark that cannot be read leaves the
+  ack wait's cap standing, so a bucket that does not answer costs 4 s of a hand-over and no
+  message.
 - **A holder that cannot use the durable.** A holder whose reads, creations, policy corrections or
   subscribes of the durable fail retries every second (`durableBindPoll`) and times the failures
   from the start of the first since its term began or an attempt last succeeded. Once they have
@@ -153,17 +164,19 @@ wait only once the pod holding it has died or lost the lease.
   (`durableTakeoverAlarmEvery`).
 
 The lines to read are `listener lease acquired` (with `from`: `absent`, `released` or `expired`,
-and `settle`, `stale_binding` and `handed_back`), `listener lease term must settle; receiving at
-once and holding what arrives until the durable's outstanding messages are in hand` (with `cap`),
-`hand-back window passed before subscribing; holding for the ack wait` (with `cap` and
-`since_release_ms`, logged by a term that took a hand-back and was slower than its window to
-subscribe, or whose SUB the server had not read by then),
+and `settle`, `stale_binding`, `hand_back` - the term is a hand-back candidate - and `replaced`,
+the revision its mark would be keyed by), `listener lease term must settle; receiving at
+once and holding what arrives until the durable's outstanding messages are in hand` (with `cap`
+and `hand_back`),
 `durable still push-bound by an earlier lease holder; receiving beside it`, `settle hold ended;
-delivering the held messages in stream order` (with `outcome` `settled` or `cap`, `held_ms`,
-`messages` and `ack_pending`), `durable receiving` (with `lease`, `waited_ms` and `settle`),
+delivering the held messages in stream order` (with `outcome` `settled`, `cap` or `handed back`,
+`held_ms`, `messages`, `ack_pending` and `hand_back_marked`), `settle hold: hand-back mark read
+failed; holding on` (with `error`), `durable receiving` (with `lease`, `waited_ms` and `settle`),
 `handed the durable's messages back to the next holder` (with `handed_back`, `lingered_ms`,
-`linger_end` `receiving holder seen`, `not taken` or `timeout`, `renaked_repeats` and
-`dropped_repeats`), `durable consumer read failed; retrying` and `durable subscribe failed;
+`linger_end` `receiving holder seen`, `not taken` or `timeout`, `renaked_repeats`,
+`dropped_repeats` and `hand_back_marked`), `clean hand-back not marked; the next holder settles
+for an ack wait` (with `error`),
+`durable consumer read failed; retrying` and `durable subscribe failed;
 retrying` (with `error`), `lease holder cannot deliver from the durable` (ERROR, with `reason` and
 `waited_ms`), `giving the listener lease up: this pod cannot deliver from the durable`, `listener
 lease lost: another listener holds it` and `listener lease released`.
@@ -178,9 +191,12 @@ On SIGTERM or SIGINT, once `/v1` serves (`shutdownListener`):
    before its prompt is cancelled (a cancelled prompt is a retryable failure: its ledger attempt
    is cleared and the message NAKed), every message not handled (queued, or held by a settle hold)
    is NAKed with the 2 s hand-back delay in stream order, the lease is marked released and
-   `unsettled`, and the subscription stays until the next holder receives, 3 s after the NAKs at
-   most and 1.25 s after the release at least (the window the next holder's hold counts on), then
-   drains (2 s at most): 9 s in all, and 10.25 s when the flush (1 s) and the release (2 s) both
+   `unsettled`, the subscription stays until the next holder receives, 3 s after the NAKs at
+   most and 1.25 s after the release at least (the floor that holds the deliver subject while a
+   standby subscribes), then
+   drains (2 s at most) and, when all of that went through, the clean-hand-back mark is written
+   (one bucket call, 2 s at most): 9 s in all, and 10.25 s when the flush (1 s) and the release
+   (2 s) both
    run to their bounds and leave that floor past the cap, which the budget then takes out of the
    HTTP stop. A
    listener without a lease drains its subscription and NAKs what it has not handled at once, in
@@ -239,6 +255,10 @@ standby answering `/v1`, answers as the active pod would:
 - **Delivery exceptions** carry an id derived from the event id, the recipient session and the
   reason, so a redelivery that fails the same way publishes an exception with the same id and
   dedupe key, which the stream stores once.
+- **Clean-hand-back marks** (`handback.<durable>.<revision>` in `envoy_listener`): a pod that
+  stopped gracefully vouches for the lease record it released, and the pod that took that record
+  reads the mark inside its settle hold ("Take-over" above). A mark nobody reads leaves the
+  bucket with its 20 minute `MaxAge`.
 - **Last seen** (`seen.<session>` in `envoy_listener`): every session registration write records
   when the session was last seen, and every pod answers a lapsed session's `last_seen` out of that
   record alone, so two pods never answer one session differently - a pod that watched the session
@@ -306,7 +326,8 @@ stops every pod of this build before starting the old one carries no such risk.
 
 The listener's NATS user needs the `envoy_listener` bucket in its grant (`infra/core`
 `ListenerPermissions`, `DispatchPermissions` and `HostPermissions` carry it from this release).
-That grant writes only the machine's own keys, `lease.listener-<machine id>` and
+That grant writes only the machine's own keys, `lease.listener-<machine id>`,
+`handback.listener-<machine id>.>` and
 `delivery.listener-<machine id>.>`, and the `seen.` records. It reads each of its buckets by key, a
 direct get on the key's own subject, and refuses a get by revision, a direct get on the stream's
 bare subject. So the listener reads back each write it must stamp, the lease's acquiring write and

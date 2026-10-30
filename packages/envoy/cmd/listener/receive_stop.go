@@ -71,7 +71,7 @@ func (r *durableReceiver) endLost(ctx context.Context, t *receiveTerm) {
 func (r *durableReceiver) endWithoutLease(t *receiveTerm) {
 	t.stopHandling()
 	r.settleInHand(t)
-	conn := r.drain(t)
+	conn, _ := r.drain(t)
 	t.close()
 	queued := t.takeQueued()
 	sortByStreamSequence(queued)
@@ -96,18 +96,20 @@ func (r *durableReceiver) endWithoutLease(t *receiveTerm) {
 // NAK (it comes back at its ack wait). The linger ends once the lease record names another holder
 // that is receiving, or lingerMax after the batch was NAKed, the flush and the release included,
 // or once no other pod has taken the record; no end but a receiving holder comes before
-// lingerUntaken and a poll have passed since the release, so this subscription is on the deliver
-// subject for at least that long. That floor is what a take-over counts on: a term whose
-// subscription the server has within leaseHandBackBridge of the release, a lingerPoll inside the
-// floor, settles for the hand-back delay alone, and one slower than that settles for an ack wait
-// instead (durableReceiver.linger, lease.HandBackHolds). Then the subscription
-// drains, by the same rule.
+// lingerUntaken and a poll have passed since the release, so a standby still taking the record
+// finds the deliver subject held for it. Then the subscription drains.
+//
+// A stop that went through all of that writes the lease's clean-hand-back mark for the record it
+// released (markHandBack), which is the whole of what its successor's settle hold rests on: its
+// 3 s cap says no message of this hand-over is waiting out an ack wait, and only this pod knows
+// that. Nothing is vouched for by timing.
 //
 // A release the lease's loop outlasts (handBackReleaseWait) writes nothing and records the term's
 // ack-wait debt instead (lease.Release): the linger then reads this pod's own unreleased record,
-// ends "not taken" at its floor and lets go of the deliver subject, and the release the
-// receiver's own stop makes next writes the record with that debt (durableReceiver.Stop). No
-// linger follows that write, so a standby taking it moments later must settle for an ack wait.
+// ends "not taken" at its floor and lets go of the deliver subject, the release the receiver's
+// own stop makes next writes the record with that debt (durableReceiver.Stop), and this stop
+// marks nothing, since by then the deliver subject has been let go. A standby that takes that
+// record must settle for an ack wait.
 func (r *durableReceiver) handBack(t *receiveTerm) {
 	t.stopHandling()
 	r.settleInHand(t)
@@ -125,8 +127,9 @@ func (r *durableReceiver) handBack(t *receiveTerm) {
 		r.logger.Warn("listener lease not released; a standby takes it once it expires", slog.String("error", err.Error()))
 	}
 	lingered, how := r.linger(deadline)
-	r.drain(t)
+	_, drained := r.drain(t)
 	t.close()
+	marked := r.markHandBack(how, drained)
 	handedBack, renaked, dropped := t.handBackCounts()
 	r.logger.Info("handed the durable's messages back to the next holder",
 		slog.String("consumer", r.consumer),
@@ -135,21 +138,47 @@ func (r *durableReceiver) handBack(t *receiveTerm) {
 		slog.String("linger_end", how),
 		slog.Int("renaked_repeats", renaked),
 		slog.Int("dropped_repeats", dropped),
+		slog.Bool("hand_back_marked", marked),
 	)
 }
 
+// markHandBack writes the lease's clean-hand-back mark for the record this stop released, and
+// reports whether it wrote one. Every part of the hand-over must have gone through: how is the
+// linger's end, which must be another pod receiving on the deliver subject, and drained the
+// server's word that this pod's subscription is closed, rather than the drain's wait running out
+// with messages possibly still coming. The lease adds what it knows: its own release wrote the
+// record, and that record carried no stale binding (lease.MarkHandBack). A write that fails
+// leaves the next holder the settle hold of a hard take-over and nothing worse, so it is a
+// warning and no more; listenerStateRequestWait bounds it, inside the stop's own budget.
+func (r *durableReceiver) markHandBack(how string, drained bool) bool {
+	if how != lingerEndReceiving || !drained {
+		return false
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), listenerStateRequestWait)
+	defer cancel()
+	marked, err := r.lease.MarkHandBack(ctx)
+	if err != nil {
+		r.logger.Warn("clean hand-back not marked; the next holder settles for an ack wait",
+			slog.String("consumer", r.consumer), slog.String("error", err.Error()))
+	}
+	return marked
+}
+
+// lingerEndReceiving is the linger end that a clean hand-back needs: the lease record named
+// another holder of this machine receiving on the deliver subject before this pod let go of it.
+const lingerEndReceiving = "receiving holder seen"
+
 // linger waits, reading the lease record every lingerPoll, until it names another holder that is
 // receiving, or until deadline, or until every read has answered that no other pod has taken the
-// record, and reports how long it waited and which ended it.
+// record, and reports how long it waited and which ended it. Only lingerEndReceiving earns the
+// stop its clean-hand-back mark (durableReceiver.markHandBack).
 //
 // It starts just after the release, and holds the subscription for lingerUntaken and a poll past
 // that start however far the deadline has run: the deadline is set before the flush and the
-// release, which a slow one can leave in the past. That floor is this stop's guarantee to its
-// successor - a term whose subscription the server has within leaseHandBackBridge of the
-// release, a lingerPoll inside it, settles for the hand-back delay alone, and judges itself no
-// hand-back past that (lease.HandBackHolds), so nothing rests on the linger lasting longer. A
-// take-over read as taken past the floor is waited for until the deadline all the same, which is
-// where a stop with its cap unspent holds the deliver subject for a successor still preparing.
+// release, which a slow one can leave in the past. That floor is what gives a standby taking the
+// record the time to subscribe at all, so the linger has a receiving holder to see. A take-over
+// read as taken past the floor is waited for until the deadline all the same, which is where a
+// stop with its cap unspent holds the deliver subject for a successor still preparing.
 func (r *durableReceiver) linger(deadline time.Time) (time.Duration, string) {
 	start := time.Now()
 	bridged := start.Add(r.timing.lingerUntaken + r.timing.lingerPoll)
@@ -165,7 +194,7 @@ func (r *durableReceiver) linger(deadline time.Time) (time.Duration, string) {
 		case err != nil:
 			untaken = false
 		case receiving:
-			return time.Since(start), "receiving holder seen"
+			return time.Since(start), lingerEndReceiving
 		case taken:
 			untaken = false
 		}
@@ -181,28 +210,32 @@ func (r *durableReceiver) linger(deadline time.Time) (time.Duration, string) {
 
 // drain ends the term's subscription as nats.go drains one: the server is told to stop sending,
 // and what it sent before that still reaches intake. It waits handBackDrainWait at most, then
-// unsubscribes, and returns the subscription's connection (nil when there was none).
-func (r *durableReceiver) drain(t *receiveTerm) *nats.Conn {
+// unsubscribes, and returns the subscription's connection (nil when there was none) and whether
+// the server confirmed the subscription closed inside that wait. A drain that ran out, or that
+// the client refused, can have left messages the server had sent unreceived, so no clean
+// hand-back is marked for it (durableReceiver.markHandBack).
+func (r *durableReceiver) drain(t *receiveTerm) (*nats.Conn, bool) {
 	r.mu.Lock()
 	sub, conn := t.sub, t.conn
 	t.sub = nil
 	r.mu.Unlock()
 	if sub == nil {
-		return nil
+		return nil, false
 	}
 	closed := sub.StatusChanged(nats.SubscriptionClosed)
 	if sub.Drain() != nil {
 		_ = sub.Unsubscribe()
-		return conn
+		return conn, false
 	}
 	wait := time.NewTimer(handBackDrainWait)
 	defer wait.Stop()
 	select {
 	case <-closed:
+		return conn, true
 	case <-wait.C:
 		_ = sub.Unsubscribe()
+		return conn, false
 	}
-	return conn
 }
 
 // settleInHand gives the message in hand inflightGrace to settle, then cancels its handling, which

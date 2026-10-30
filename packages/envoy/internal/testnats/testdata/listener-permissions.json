@@ -52,6 +52,7 @@
       "$JS.API.DIRECT.GET.KV_envoy_listener.>",
       "$JS.API.STREAM.MSG.GET.KV_envoy_listener",
       "$KV.envoy_listener.lease.listener-@MACHINE_ID@",
+      "$KV.envoy_listener.handback.listener-@MACHINE_ID@.>",
       "$KV.envoy_listener.delivery.listener-@MACHINE_ID@.>",
       "$KV.envoy_listener.seen.>",
       "$JS.API.CONSUMER.CREATE.KV_envoy_listener.>",

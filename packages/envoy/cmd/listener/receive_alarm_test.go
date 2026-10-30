@@ -355,14 +355,15 @@ func TestAPodThatLostTheLeaseWhileWaitingOutABindingSettlesAHardTakeoverAfterIt(
 	}
 }
 
-// A term taken from a graceful hand-back that ends before it ever subscribed - a holder stuck on
+// A term taken from a hand-back candidate that ends before it ever subscribed - a holder stuck on
 // its durable that gives the lease up, or a stop while it prepares - releases the record owing an
-// ack wait. The stopping pod's linger reached no subscription of this pod, and a lost node's
-// binding had the deliver subject to itself meanwhile, so what the durable pushed comes back only
-// at its ack wait: the next holder's hold is the 7 s one, and the message the lost binding was
-// pushed reaches its session before a newer one. A release that carried no debt would be taken
-// for a graceful hand-back, and the next holder would hold for 3 s and deliver the newer message
-// first.
+// ack wait. No stopping pod ever saw this one receiving, and a lost node's binding had the
+// deliver subject to itself meanwhile, so what the durable pushed comes back only at its ack
+// wait: the next holder's record carries the debt, which makes its term no candidate at all, its
+// hold the 7 s one, and the message the lost binding was pushed reaches its session before a
+// newer one. A release that carried no debt would leave the next holder waiting for a mark that
+// never comes, and its hold would run to the same 7 s - but a term that stopped mid-hold may owe
+// what it held, which only the debt says.
 func TestATermThatNeverSubscribedOwesTheNextHolderAnAckWait(t *testing.T) {
 	for _, row := range []struct {
 		name, machineID string
@@ -384,14 +385,13 @@ func TestATermThatNeverSubscribedOwesTheNextHolderAnAckWait(t *testing.T) {
 			stuckLease.standbyPoll = 2 * time.Second
 			stuckHandle, stuckReceived := recordingHandler()
 			stuck := newReceiverRigVia(t, denied, granted, row.machineID, "pod-a", stuckHandle, timing, stuckLease)
-			// The record is written last, so pod-a takes it inside leaseHandBackBridge of the
-			// release, as a standby takes a graceful hand-back.
+			// The record is written last, as a standby reads a graceful hand-back's.
 			putLeaseRecord(t, granted, row.machineID, `{"holder":"pod-gone","boot":"0123456789abcdef","released":true,"unsettled":true}`)
 			stuck.lease.Start(context.Background())
 			stuck.receiver.Start()
 			waitFor(t, 10*time.Second, "pod-a to take the hand-back", func() bool {
 				status := stuck.lease.Status()
-				return status.Holding && status.Settle && status.HandedBack
+				return status.Holding && status.Settle && status.HandBack
 			})
 			stuck.awaitState(t, receivePreparing, 10*time.Second)
 
@@ -413,8 +413,8 @@ func TestATermThatNeverSubscribedOwesTheNextHolderAnAckWait(t *testing.T) {
 			next := newReceiverRig(t, granted, row.machineID, "pod-b", handle, testReceiveTiming(), testLeaseTiming())
 			next.lease.Start(context.Background())
 			waitFor(t, 15*time.Second, "pod-b to take the released record", next.lease.Holding)
-			if status := next.lease.Status(); !status.Settle || status.HandedBack {
-				t.Fatalf("pod-b's lease = %+v, want settling and no hand-back: pod-a's term never subscribed", status)
+			if status := next.lease.Status(); !status.Settle || status.HandBack {
+				t.Fatalf("pod-b's lease = %+v, want settling and no hand-back candidate: pod-a's term never subscribed", status)
 			}
 			// The lost node's binding takes the older message alone, before pod-b subscribes.
 			publishToTheDeadHolder(t, client, row.machineID, "older")

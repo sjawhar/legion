@@ -2545,10 +2545,13 @@ as its `Publish` and `Subscribe`. Below, `<m>` is the machine id with each space
   neither writes fewer copies than it found, and a grant without it makes that raise time out
   after 10 seconds with `raise KV_<bucket>: ENVOY_NATS_REPLICAS=<n>: context deadline exceeded`.
   The writes are `$KV.<bucket>.>` for every bucket but `envoy_listener`, where they are
-  the machine's own keys alone: its lease `$KV.envoy_listener.lease.listener-<m>`, its delivery
+  the machine's own keys alone: its lease `$KV.envoy_listener.lease.listener-<m>`, the
+  clean-hand-back marks of its stopping pods
+  `$KV.envoy_listener.handback.listener-<m>.>`, its delivery
   ledger `$KV.envoy_listener.delivery.listener-<m>.>`, and every session's last-seen record
   `$KV.envoy_listener.seen.>`, so one machine's user cannot take or clear another machine's lease
-  or ledger. The last-seen keys are not scoped to the writing machine because they are read
+  or ledger, or vouch for another machine's hand-over. The last-seen keys are not scoped to the
+  writing machine because they are read
   across machines: a role claim names its holder session and no machine, and
   `GET /v1/roles/<role>` on any listener answers a lapsed holder's `last_seen` out of that
   session's record, whichever machine it registered through. A listener whose grant lacks

@@ -1446,8 +1446,10 @@ func shutdownListener(logger *logging.Logger, server *http.Server, client *bus.C
 	// before its prompt is cancelled and it is NAKed, every message not handled is NAKed with a
 	// delay for the next holder, and the lease is marked released, so a standby takes the lease at
 	// its next poll; the subscription then stays until the standby receives, at least 1.25 s after
-	// the release (lingerUntaken and a poll, the window the standby's hold counts on) and up to
-	// lingerMax (3 s) after the NAKs, and then drains (durableReceiver.handBack): 9 s at most, and
+	// the release (lingerUntaken and a poll, the floor that holds the deliver subject while the
+	// standby subscribes) and up to lingerMax (3 s) after the NAKs, then drains and, when the
+	// whole hand-over went through, writes the lease's clean-hand-back mark, which ends the
+	// standby's settle hold at 3 s (durableReceiver.handBack): 9 s at most, and
 	// 10.25 s when the flush (1 s) and the release (2 s) both run to their bounds and leave that
 	// floor past the cap, which this budget then cuts short in the HTTP stop.
 	// HTTP keeps serving meanwhile.

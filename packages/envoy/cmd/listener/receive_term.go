@@ -33,9 +33,11 @@ type receiveTerm struct {
 	logger      *logging.Logger
 	// hold, when it is above zero, is the longest the handler holds what the term receives before
 	// it delivers it in stream order (settle): a term that must settle. leaseTerm is the lease
-	// term the hold's end reports settled.
-	hold      time.Duration
-	leaseTerm uint64
+	// term the hold's end reports settled, and fromHandBack whether that term is a candidate for
+	// a clean hand-back, whose mark can end the hold sooner (lease.HandBackMarked).
+	hold         time.Duration
+	leaseTerm    uint64
+	fromHandBack bool
 
 	mu sync.Mutex
 	// closed is set once the term takes no more messages (close).
@@ -285,8 +287,18 @@ func (t *receiveTerm) handle(r *durableReceiver) {
 // the hand-back delay does, after newer messages pushed to this pod, and the stream-order sort
 // puts it back before them. The batch is gathered before each read, so every message it counts
 // was still outstanding at the read. A read that fails keeps the hold. The hold ends at its cap
-// regardless, and its end clears the lease term's unsettled. It reports false when the term
-// closed first.
+// regardless, and its end clears the lease term's unsettled and the ack wait it owed.
+//
+// A term taken from a hand-back candidate reads the stopping pod's mark beside the durable, and
+// ends the hold once that mark is there and handBackSettleCap has passed since the subscribe
+// (lease.HandBackMarked): the mark says the stop NAKed what it held with the hand-back delay and
+// held the deliver subject until this pod was receiving, so nothing of it is waiting out an ack
+// wait. It comes after this pod is receiving, which is why the hold is where it is read and not
+// the subscribe. The mark also says that a binding this term subscribed beside was that stop's
+// own linger, so the stale binding the term recorded is cleared with it. A mark that is absent,
+// or that cannot be read - logged once, as a failed durable read is - leaves the hold to its cap.
+//
+// It reports false when the term closed first.
 func (t *receiveTerm) settle(r *durableReceiver) bool {
 	start := time.Now()
 	ctx, cancel := context.WithCancel(t.handling)
@@ -302,10 +314,26 @@ func (t *receiveTerm) settle(r *durableReceiver) bool {
 	defer limit.Stop()
 	poll := time.NewTicker(r.timing.settlePoll)
 	defer poll.Stop()
-	outcome, pending, failing := "cap", -1, false
+	outcome, pending, failing, marked, markFailing := "cap", -1, false, false, false
 read:
 	for {
 		held := t.gather(false)
+		if t.fromHandBack && !marked {
+			seen, err := r.lease.HandBackMarked(ctx, t.leaseTerm)
+			switch {
+			case err != nil && ctx.Err() == nil && !markFailing:
+				markFailing = true
+				r.logger.Warn("settle hold: hand-back mark read failed; holding on",
+					slog.String("consumer", r.consumer), slog.String("error", err.Error()))
+			case seen:
+				marked = true
+				r.lease.SetStaleBinding(t.leaseTerm, false)
+			}
+		}
+		if marked && time.Since(start) >= r.timing.handBackSettleCap {
+			outcome = "handed back"
+			break read
+		}
 		info, err := listenerDurable(ctx, r.client, r.consumer)
 		switch {
 		case err == nil && info != nil:
@@ -344,6 +372,7 @@ read:
 		slog.Int64("held_ms", time.Since(start).Milliseconds()),
 		slog.Int("messages", held),
 		slog.Int("ack_pending", pending),
+		slog.Bool("hand_back_marked", marked),
 	)
 	return true
 }

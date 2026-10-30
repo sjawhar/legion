@@ -2,9 +2,11 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"io"
 	"regexp"
+	"strconv"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -83,6 +85,20 @@ func putLease(t *testing.T, kv bus.KeyValue, record string) uint64 {
 		t.Fatalf("write the lease record: %v", err)
 	}
 	return rev
+}
+
+// putHandBackMark writes machineID's clean-hand-back mark for the lease record released at
+// revision, as a pod that stopped gracefully writes it (lease.MarkHandBack).
+func putHandBackMark(t *testing.T, kv bus.KeyValue, machineID string, revision uint64) {
+	t.Helper()
+	durable := bus.ListenerDurable(machineID)
+	value, err := json.Marshal(handBackMark{Instance: "pod-gone", Boot: "0011223344556677", Revision: revision})
+	if err != nil {
+		t.Fatalf("encode the hand-back mark: %v", err)
+	}
+	if _, err := kv.Put(bus.ListenerHandBackPrefix(durable)+strconv.FormatUint(revision, 10), value); err != nil {
+		t.Fatalf("write the hand-back mark: %v", err)
+	}
 }
 
 // drainChanges empties a lease's change signal and reports whether it held one.
@@ -400,10 +416,10 @@ func (k *stalledRenewKV) Update(key string, value []byte, revision uint64) (uint
 }
 
 // A Release the lease's loop outlasts records the term's ack-wait debt before it gives up, so the
-// release that lands later writes ack_wait_owed: a graceful stop whose first release timed out
-// (durableReceiver.handBack) has let go of the deliver subject by the time the second one writes
-// the record, and no linger follows that write, so a standby that takes it moments later must
-// hold for an ack wait rather than count the write a graceful hand-back.
+// release that lands later writes ack_wait_owed, and that release is vouched for by no mark: a
+// graceful stop whose first release timed out (durableReceiver.handBack) has let go of the
+// deliver subject by the time the second one writes the record. A standby that takes it moments
+// later must hold for an ack wait, which both the debt on the record and the missing mark say.
 func TestLeaseAReleaseThatTimedOutLeavesTheTermOwingTheAckWait(t *testing.T) {
 	kv := leaseBucket(t)
 	clock := newFakeLeaseClock()
@@ -433,6 +449,11 @@ func TestLeaseAReleaseThatTimedOutLeavesTheTermOwingTheAckWait(t *testing.T) {
 	if !errors.Is(err, context.DeadlineExceeded) {
 		t.Fatalf("release while the loop is held = %v, want the context's deadline", err)
 	}
+	// Where the stop asks to mark the hand-back: its linger has ended and its drain is done, and
+	// this release wrote no record, so there is nothing to vouch for.
+	if marked, err := a.MarkHandBack(context.Background()); marked || err != nil {
+		t.Fatalf("the stop whose release timed out marked the hand-back %v (%v), want none: no record of its own was written", marked, err)
+	}
 	close(stalled.letGo)
 	<-a.done
 	if err := a.Release(context.Background()); err != nil {
@@ -446,11 +467,10 @@ func TestLeaseAReleaseThatTimedOutLeavesTheTermOwingTheAckWait(t *testing.T) {
 	b := testLease(kv, "pod-b", testLeaseTiming(), clock.now)
 	b.step()
 	next := b.Status()
-	if !next.Holding || next.How != leaseTakenReleased || !next.Settle || next.HandedBack {
-		t.Fatalf("pod-b status = %+v, want held from a released record, settling, no hand-back: no linger followed that write", next)
+	if !next.Holding || next.How != leaseTakenReleased || !next.Settle || next.HandBack {
+		t.Fatalf("pod-b status = %+v, want held from a released record, settling, no hand-back candidate: the release carried the term's debt", next)
 	}
-	receiver := &durableReceiver{durableReceiverOptions: durableReceiverOptions{timing: productionReceiveConfig()}}
-	if hold := receiver.settleHold(next.HandedBack); hold != consumerAckWait+settleMargin {
-		t.Fatalf("pod-b's settle hold is capped at %s, want the %s of a term owed an ack wait", hold, consumerAckWait+settleMargin)
+	if marked, err := b.HandBackMarked(context.Background(), next.Term); marked || err != nil {
+		t.Fatalf("pod-b reads its term marked %v (%v), want unmarked: it holds for the %s cap", marked, err, consumerAckWait+settleMargin)
 	}
 }

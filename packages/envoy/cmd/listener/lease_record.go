@@ -37,9 +37,10 @@ const (
 // messages or a push binding, so that a binding it finds is not a pre-lease build's and its term
 // must settle (leaseAcquisition). stale_binding is set by a holder that subscribed while the
 // durable was push-bound by a binding it did not wait out (an expired holder's lingering
-// connection), but for one whose term still counts as taken from a graceful hand-back
-// (lease.HandBackHolds), beside the stopping holder's linger, and cleared by one that finds the
-// durable not push-bound before it subscribes; every other write carries it on. unsettled is set
+// connection, or a stopping holder's linger it has no clean-hand-back mark for yet), cleared by
+// one that finds the durable not push-bound before it subscribes, and cleared by a term whose
+// settle hold read the mark of the release it replaced (HandBackMarked): the binding beside it was
+// that release's linger, drained since. Every other write carries it on. unsettled is set
 // from the acquiring write of a term that must settle until that term's settle hold ends, and a
 // release keeps it as it stands, so a holder stopped mid-hold hands the duty on; a graceful stop
 // that hands messages back sets it before its release (Unsettle), so a release after one always
@@ -50,14 +51,14 @@ const (
 // lost node's connection had may come back only at its ack wait. The debt is the term's own state
 // (lease.ackWaitOwed), so every release writes it as the term stands and every acquiring write
 // writes it false: a term that must settle owes an ack wait from its acquisition until its settle
-// hold ends (Settled), and one taken from a graceful hand-back until the server has its
-// subscription, which it stops owing only if the hand-back still holds then (HandBackHolds,
-// SetReceiving), the stopping holder's linger having bridged to it. The release of a term whose
-// validity had run out writes it whatever the term owed, and so does one that outlasted its bound
-// and left the record to a later release (Release): what the lapse dropped without an ack, and
-// what the deliver subject lost once that stop let go of it, come back only at their ack wait. A
-// released record carrying unsettled without it, taken while that linger could still have bridged
-// to the take-over (leaseHandBackBridge), is a graceful hand-back (leaseStatus.HandedBack).
+// hold ends (Settled), a term taken from a released record included, whatever its settle hold
+// learns of the stop before it. The release of a term whose validity had run out writes it
+// whatever the term owed, and so does one that outlasted its bound and left the record to a later
+// release (Release): what the lapse dropped without an ack, and what the deliver subject lost
+// once that stop let go of it, come back only at their ack wait. A released record carrying
+// unsettled with neither it nor stale_binding makes the take a hand-back candidate
+// (leaseStatus.HandBack), whose settle hold ends at the hand-back delay only once it reads the
+// stopping pod's clean-hand-back mark for that release (lease_handback.go).
 //
 // receiving says the holder's subscription to the durable's deliver subject is up: every
 // acquiring write and every release writes it false, the holder sets it once it has subscribed

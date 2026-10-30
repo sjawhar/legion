@@ -44,9 +44,10 @@ const inboxes = nats.InboxPrefix + ">"
 //     stream info, create and update, direct and stream message gets, writes to its keys, its
 //     watchers' consumer create and delete, and their flow-control replies;
 //   - the same calls for the listener state bucket, whose writes are the machine's own keys
-//     alone: its delivery lease (bus.ListenerLeaseKey) and its delivery ledger
-//     (bus.ListenerLedgerPrefix), so one machine's user cannot take or clear another machine's
-//     lease or ledger, beside every session's last-seen record (bus.LastSeenPrefix), which is
+//     alone: its delivery lease (bus.ListenerLeaseKey), the clean-hand-back marks of its stopping
+//     pods (bus.ListenerHandBackPrefix) and its delivery ledger (bus.ListenerLedgerPrefix), so one
+//     machine's user cannot take or clear another machine's lease or ledger, or vouch for another
+//     machine's hand-over, beside every session's last-seen record (bus.LastSeenPrefix), which is
 //     read across machines and so stays fleet-wide. A listener whose grant lacks this bucket does
 //     not exit: it logs an ERROR naming the bucket and delivers without a lease, receiving from
 //     its durable only while no other subscriber holds it;
@@ -71,6 +72,7 @@ func ListenerPermissions(machineID string) Permissions {
 	}
 	publish = append(publish, bucketPermissions(bus.ListenerStateBucket,
 		bus.ListenerLeaseKey(machineID),
+		bus.ListenerHandBackPrefix(durable)+">",
 		bus.ListenerLedgerPrefix(durable)+">",
 		// Every session's last-seen record, not only the ones this machine wrote: the key is
 		// fleet-wide, for the reason bus.LastSeenPrefix's doc gives.

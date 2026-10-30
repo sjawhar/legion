@@ -46,8 +46,9 @@ const (
 	// webhook's failed deliveries (internal/dispatch/redeliver).
 	WebhookRedeliveryBucket = "envoy_webhook_redelivery"
 	// ListenerStateBucket holds the state every listener pod of a machine shares: the machine's
-	// delivery lease (ListenerLeaseKey, cmd/listener), its delivery ledger (ListenerLedgerPrefix,
-	// internal/dedupe) and every session's last-seen record (LastSeenPrefix, internal/session).
+	// delivery lease (ListenerLeaseKey, cmd/listener), the clean-hand-back marks of its stopping
+	// pods (ListenerHandBackPrefix), its delivery ledger (ListenerLedgerPrefix, internal/dedupe)
+	// and every session's last-seen record (LastSeenPrefix, internal/session).
 	ListenerStateBucket = "envoy_listener"
 )
 
@@ -81,6 +82,18 @@ func ListenerLeaseKey(machineID string) string {
 // ledger and no other.
 func ListenerLedgerPrefix(durable string) string {
 	return "delivery." + durable + "."
+}
+
+// ListenerHandBackPrefix begins each clean-hand-back mark in ListenerStateBucket of the listeners
+// that bind durable (ListenerDurable): a pod that stopped gracefully writes
+// `handback.<durable>.<revision>` to vouch for the lease record it released at that revision, and
+// the pod that takes that record reads the mark before it shortens its settle hold
+// (cmd/listener, lease.MarkHandBack and lease.HandBackMarked). The listener's grant writes its own
+// machine's marks and no other's, and the bucket's MaxAge removes a mark nobody reads. A mark is
+// keyed by the revision it vouches for, not by the machine alone, so a stopping pod writes
+// nothing about the lease record once another pod has taken it.
+func ListenerHandBackPrefix(durable string) string {
+	return "handback." + durable + "."
 }
 
 // NotificationTopicPrefix begins every notification topic: the subjects the stream carries, the
