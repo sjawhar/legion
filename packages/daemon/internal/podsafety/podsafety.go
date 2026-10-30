@@ -83,9 +83,8 @@ func Variables() []Variable {
 // Apply is environ as a pod's Oh My Pi starts with it: each baseline variable set where environ
 // leaves it unset or empty, and nothing else. PI_CONFIG_FILES rides through as the pod carries it,
 // the operator's overlays and the role's own, already composed by the runtime that starts the
-// role. stateDir, the pod's state directory, is what the shim and the image probe pass; Apply
-// writes nothing under it, since Legion names no settings overlay of its own.
-func Apply(environ []string, stateDir string) ([]string, error) {
+// role, and no file is written anywhere, since Legion names no settings overlay of its own.
+func Apply(environ []string) []string {
 	out := make([]string, 0, len(environ)+len(baseline))
 	set := map[string]bool{}
 	for _, pair := range environ {
@@ -100,7 +99,7 @@ func Apply(environ []string, stateDir string) ([]string, error) {
 			out = append(removed(out, v.name), v.name+"="+v.value)
 		}
 	}
-	return out, nil
+	return out
 }
 
 // removed is environ without its entries for name.

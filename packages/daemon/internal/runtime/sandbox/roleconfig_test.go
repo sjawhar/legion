@@ -56,11 +56,7 @@ func TestARoleIsToldItsOwnOverlaysAfterTheOperators(t *testing.T) {
 			if got != tc.want {
 				t.Fatalf("the %s's PI_CONFIG_FILES = %q, want %q", tc.role, got, tc.want)
 			}
-			state := t.TempDir()
-			applied, err := podsafety.Apply([]string{"PI_CONFIG_FILES=" + got}, state)
-			if err != nil {
-				t.Fatal(err)
-			}
+			applied := podsafety.Apply([]string{"PI_CONFIG_FILES=" + got})
 			if want := "PI_CONFIG_FILES=" + tc.want; !slices.Contains(applied, want) {
 				t.Errorf("the %s's Oh My Pi starts on %q, want %q among them", tc.role, applied, want)
 			}

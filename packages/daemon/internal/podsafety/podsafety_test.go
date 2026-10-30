@@ -54,24 +54,13 @@ func TestApplyLeavesTheOverlaysThePodCarriesAlone(t *testing.T) {
 		"no overlay of the pod's":  {},
 	} {
 		t.Run(name, func(t *testing.T) {
-			state := t.TempDir()
-			env, err := Apply(append([]string{"HOME=/home/legion"}, tc.operator...), state)
-			if err != nil {
-				t.Fatal(err)
-			}
+			env := Apply(append([]string{"HOME=/home/legion"}, tc.operator...))
 			got, set := envMap(env)["PI_CONFIG_FILES"]
 			if got != tc.want || set != tc.set {
 				t.Errorf("PI_CONFIG_FILES = %q (set %v), want %q (set %v)", got, set, tc.want, tc.set)
 			}
 			if n := named(env, "PI_CONFIG_FILES"); n > 1 {
 				t.Errorf("PI_CONFIG_FILES is named %d times in %q", n, env)
-			}
-			entries, err := os.ReadDir(state)
-			if err != nil {
-				t.Fatal(err)
-			}
-			if len(entries) != 0 {
-				t.Errorf("Apply wrote %v under the state directory, want nothing: Legion writes no settings overlay", entries)
 			}
 		})
 	}
@@ -101,10 +90,7 @@ func TestApplySetsEachBaselineVariableOnlyWhereThePodLeavesItUnset(t *testing.T)
 			for variable, value := range tc.pod {
 				environ = append(environ, variable+"="+value)
 			}
-			env, err := Apply(environ, t.TempDir())
-			if err != nil {
-				t.Fatal(err)
-			}
+			env := Apply(environ)
 			got := envMap(env)
 			for variable, want := range tc.want {
 				if got[variable] != want {
@@ -326,10 +312,7 @@ func TestARepositorysSettingsReachTheAgentUnderTheOperators(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			env := append([]string{"HOME=" + home, "PATH=/usr/bin:/bin"}, tc.pod...)
 			if !tc.noApply {
-				var err error
-				if env, err = Apply(env, t.TempDir()); err != nil {
-					t.Fatal(err)
-				}
+				env = Apply(env)
 			}
 			cmd := exec.Command(omp, "config", "get", tc.setting, "--json")
 			cmd.Dir, cmd.Env = repo, env

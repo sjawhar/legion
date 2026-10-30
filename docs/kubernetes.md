@@ -5646,8 +5646,9 @@ issue's pod (every role of it alike) and the image probe's.
   review of a long session often takes longer, a review that times out lets the write post
   unreviewed, and three timeouts in a row stop the gate for the rest of that session. Set
   `extensionHandlers.toolCallTimeoutMs: 120000` in the operator's `overlay.yml`, as the example
-  overlay does (pi-envoy's README, "The time limit"). Legion's own turn-scoping overlay does not set
-  it. Without it, the gate logs one warning at start, `AskGate: the review deadline is 25000 ms`,
+  overlay does (pi-envoy's README, "The time limit"). Legion writes no settings overlay of its own,
+  so nothing but the operator's own overlays sets it. Without it, the gate logs one warning at
+  start, `AskGate: the review deadline is 25000 ms`,
   through Oh My Pi's logger. The gate binds in a pod because the pod has Dispatch; one without it
   gets no gate. The pod's `dispatch` command enforces the review: while the gate is bound, a
   gated write that is not one literal `dispatch` call the gate reviewed (a pipe other than one
@@ -5714,10 +5715,9 @@ issue's pod (every role of it alike) and the image probe's.
   ```
 
   (beside the block's other volumes and mounts). Both runtimes name a role's own files right after
-  the operator's overlays, so each outranks them, and keep the turn-scoping overlay where they always
-  have: in a pod the shim names it first (so the operator's overlays, and now a role's own, outrank
-  it), in a pane the runtime names it last. Such a role's `PI_CONFIG_FILES` in a pod is therefore
-  the turn-scoping overlay, then the `pod.env` value, then its own files in order; the overlays
+  the operator's overlays, so each outranks them, and Legion names no overlay of its own anywhere
+  in the list: it writes none. Such a role's `PI_CONFIG_FILES` in a pod is therefore the `pod.env`
+  value, then its own files in order; the overlays
   reach the role with its start command, so its pod is the one it would be without the key, and a
   role the key leaves out is told exactly what it was told before. The loader refuses, at
   `legion start --check-config` too, an
@@ -5890,12 +5890,14 @@ issue's pod (every role of it alike) and the image probe's.
   naming the Secret and keys. A `provider_keys` variable that anything else in the pod sets is
   refused at load.
 - **Settings order.** Oh My Pi reads `PI_CONFIG_FILES` in order, each overlay outranking the ones
-  before it and all of them outranking a repository's `.omp/config.yml`. Legion writes one overlay,
-  the turn-scoping one (`bash.autoBackground.enabled` and `async.enabled` off, the two keys a
-  takeover's abort depends on, `packages/daemon/internal/podsafety/turnscope.yml`), and names it
-  first, ahead of the operator's, so the operator's overlay outranks it. Nothing of a repository's
-  settings is held off: they reach a pod's agent as they reach any agent session, under the
-  operator's overlay. The pod sets `PI_CONFIG_DIR=.omp` and `OMP_SESSION_STORAGE=file` on the agent
+  before it and all of them outranking a repository's `.omp/config.yml`. Legion writes no overlay
+  at all: the list a role reads is the operator's own overlays with that role's own
+  (`role_config_files`) after them, composed by the runtime that starts the role, and the shim
+  passes it through untouched. So nothing of Legion's holds a repository's settings off — they
+  reach a pod's agent as they reach any agent session, under the operator's overlay — and nothing
+  of Legion's turns a pinned binary's own defaults off either: background work (`async.enabled`,
+  `bash.autoBackground.enabled`) is on for every role, as it is for `--mode rpc`. The pod sets
+  `PI_CONFIG_DIR=.omp` and `OMP_SESSION_STORAGE=file` on the agent
   where the pod leaves them unset, which an operator's pod may not set, since they decide where Oh
   My Pi keeps the session a resume reads.
 - **Model roles.** Legion's shipped agents dispatch by role alias: `oracle` and the planner's
@@ -6359,7 +6361,7 @@ on the Legion pool under gVisor, with the operator's pod (`runtime.kubernetes.po
 providers Secret, so it reaches models by the route every worker does. Its one container,
 `controller`, runs `legion launcher --role controller`: it authenticates to the worker stream with
 its own launcher token and starts and stops the controller's `legion worker-shim` and Oh My Pi, on
-the pod baseline (`--pod-safety`: the turn-scoping overlay first in `PI_CONFIG_FILES`, the two
+the pod baseline (`--pod-safety`: the two
 session-placing variables, [Settings order](#operator-configuration), and Oh My Pi's profile
 directory made under its state home, `/legion/scratch/state/controller`), on the daemon's
 command, as an issue pod's launcher does each role's, so a relaunch in a healthy pod is a new

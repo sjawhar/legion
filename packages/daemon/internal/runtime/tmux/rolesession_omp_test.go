@@ -94,11 +94,7 @@ func TestEveryRolesOhMyPiHasAsyncAndAutoBackgroundOnInAPodAndInAPane(t *testing.
 		for layout, environment := range map[string]func(*testing.T) []string{
 			"a pod": func(t *testing.T) []string {
 				t.Helper()
-				env, err := podsafety.Apply(append(append([]string{}, bare...), "PI_CONFIG_FILES="+wantOverlays), t.TempDir())
-				if err != nil {
-					t.Fatal(err)
-				}
-				return env
+				return podsafety.Apply(append(append([]string{}, bare...), "PI_CONFIG_FILES="+wantOverlays))
 			},
 			"a pane": func(t *testing.T) []string {
 				t.Helper()
