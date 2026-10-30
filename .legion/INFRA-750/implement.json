@@ -1,0 +1,63 @@
+{
+  "schemaVersion": 1,
+  "phase": "implement",
+  "issue": "INFRA-750",
+  "completed": "2026-10-30T19:05:00Z",
+  "round": 6,
+  "head": "c23af74674ad07372a16cd62b5b7d59a50339618",
+  "roundReason": "GitHub reported the head CONFLICTING, so it ran no checks on it. This round is the forward merge of main@origin and nothing else: no product change, no new test.",
+  "forwardMerge": {
+    "from": "4f51f06f2005cb46abe7f9b1b86e9363b267f0a8",
+    "to": "c23af74674ad07372a16cd62b5b7d59a50339618",
+    "base": "main@origin at e65900f4438b, 19 commits ahead of the branch's old fork point",
+    "fingerprint": "614b0100… → d3ff0842…, changed",
+    "changedFiles": [
+      "packages/envoy/AGENTS.md: this branch's sentences now sit inside main's new WARN/ERROR reporting wording from sjawhar/legion#2504.",
+      "packages/envoy/cmd/dispatch/settings.go: both the ENVOY_NATS_REPLICAS and the ENVOY_STREAM_MAX_BYTES description, same reason.",
+      "packages/envoy/internal/bus/nats.go: the HookedConnectionEvents accessor now sits above main's RepairGrace, HookStall, now and markHooksDueLocked, and its doc takes main's words for the field it reads."
+    ],
+    "resolution": "Four two-sided conflicts, every one in a file sjawhar/legion#2504 also changed, each resolved keeping both sides. Main's own hookedEvents field (internal/bus/recovery.go:205,217) is the one HookedConnectionEvents reads: its meaning, the count the last run that succeeded began at, is what the dispatch start test's wait needs. Both log lines this branch's documentation added still exist in the merged code (internal/bus/recovery.go:329, internal/dispatch/redeliver/sweep.go:261), so both sentences stay true beside main's new wording.",
+    "comment": "https://github.com/sjawhar/legion/pull/2542#issuecomment-6529790180"
+  },
+  "filesChanged": [
+    "packages/envoy/AGENTS.md",
+    "packages/envoy/cmd/dispatch/settings.go",
+    "packages/envoy/cmd/dispatch/stream_replicas_test.go",
+    "packages/envoy/internal/bus/nats.go"
+  ],
+  "proof": [
+    {
+      "criterion": "The branch's own proof still holds at the merge head: the listener's two NATS clients report a silent cut within seconds, and a watch a rewatch replaced ends with no ERROR line.",
+      "surface": "The real envoy-listener binary against a NATS server whose relay the test freezes, and internal/kvwatch's live watcher.",
+      "command": "From packages/envoy: `go test -count=2 -timeout 20m -run 'TestBothOfTheListenersNATSClientsReportASilentCutWithinSeconds$|TestASilentCutRewatchesTheCachesWithNoErrorLine$' ./cmd/listener/`; `CGO_ENABLED=1 go test -race -count=2 -timeout 20m -run 'TestAFailedFirstStartLogsItsErrorOnlyWhileItIsTheLiveWatch$' ./internal/kvwatch/`.",
+      "observed": "ok github.com/sjawhar/envoy/cmd/listener 22.401s (both tests twice) and ok github.com/sjawhar/envoy/internal/kvwatch 1.586s (both rows twice under -race).",
+      "headSha": "c23af74674ad07372a16cd62b5b7d59a50339618",
+      "negativeControl": "The merge's own risk is a clean merge that changes behaviour, so the control is the pair of tests themselves at the new base: each failed at main's base in earlier rounds (no disconnect line for envoy and envoy-live-topics 5.021s into a silent cut; the replaced watch's ERROR), and each is re-run here unchanged against main's reworked recovery.go, where a resolution that dropped this branch's option or its INFO line would fail it."
+    },
+    {
+      "criterion": "The wait this branch added still binds to the client under test now that main owns the counter it reads.",
+      "surface": "cmd/dispatch's start tests against a real three-server NATS cluster, through the production dispatchStreamOptions construction.",
+      "command": "From packages/envoy: `go test -count=1 -timeout 20m ./cmd/dispatch/`.",
+      "observed": "ok github.com/sjawhar/envoy/cmd/dispatch 50.418s. HookedConnectionEvents now returns main's hookedEvents, which recovery.go sets to the connection-event count the last successful hook run began at, so `>= 1` still means this client's own reconcile has completed.",
+      "headSha": "c23af74674ad07372a16cd62b5b7d59a50339618",
+      "negativeControl": "The accessor reading a field that never advances would hang the helper at reconcileWait (30 s) and fail every start test in that package; the suite passes in 50 s with both start tests in it."
+    },
+    {
+      "criterion": "The merged tree compiles and its touched packages pass, with no conflict marker left.",
+      "surface": "The whole envoy module and the daemon's natsauth package.",
+      "command": "From packages/envoy: `go build ./...`, `go vet ./cmd/dispatch/ ./internal/bus/... ./cmd/listener/ ./internal/kvwatch/ ./internal/webhook/`, `gofmt -l cmd internal`, `go test -count=1 -timeout 40m ./internal/bus/... ./internal/webhook/ ./internal/dispatch/outbox/`; from packages/daemon: `CGO_ENABLED=1 go test -race -count=2 -run 'TestAHubThatStopsAnsweringIsNoticedWithinSeconds$' ./internal/natsauth/`.",
+      "observed": "BUILD_OK and VET_OK with gofmt silent; ok internal/bus 325.781s, ok internal/webhook 2.526s, ok internal/dispatch/outbox 5.785s, ok daemon/internal/natsauth 7.082s. A grep for conflict markers over packages/ and docs/ returns nothing.",
+      "headSha": "c23af74674ad07372a16cd62b5b7d59a50339618",
+      "negativeControl": "The first build after the resolution failed with `internal/bus/nats.go:591:1: expected declaration, found '>>'` — a leftover marker — so the build does discriminate a half-resolved merge; it passes once the marker is gone."
+    }
+  ],
+  "trickyParts": [
+    "Main's sjawhar/legion#2504 introduced a field named hookedEvents of its own, with the semantics this branch's accessor needs. The merge left one definition; a resolution that had kept both would not have compiled.",
+    "Three of the four conflicts are prose. Each merged sentence was checked against the merged code before it was written: the WARN and ERROR at internal/bus/recovery.go:257-259, the recovery retry line at :329, the redelivery sweep line at internal/dispatch/redeliver/sweep.go:261."
+  ],
+  "deviations": [],
+  "openQuestions": [],
+  "discoveredComplexity": [
+    "The branch now carries main's RepairGrace reporting under its own faster cut detection: a hub silence is found in two to three seconds, the recovery repairs it within seconds, and only a stall of a minute reaches ERROR. The two changes compose — the faster detection makes the WARN path the usual one — and no test of either side had to change."
+  ]
+}
