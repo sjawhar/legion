@@ -11,6 +11,21 @@ FROM ghcr.io/sjawhar/legion/ci@sha256:1d22548f177f4ff38e0c15baa3c2c46c6c2060ba2d
 
 WORKDIR /repo
 
+# The row above names a Bun in its text, and an oven/bun image declares its version in no part
+# of its config, so no registry read can hold that label to the bytes it points at
+# (.github/scripts/mirror-ci-images.sh says so where it holds a library/golang row to its own
+# GOLANG_VERSION). This build is where the two meet: it refuses any Bun but the one
+# .bun-version pins, before it installs or builds anything, as the plugin stage of
+# packages/daemon/docker/worker.Dockerfile does through its build script.
+COPY .bun-version .bun-version
+RUN set -eu; \
+    pinned="$(tr -d '[:space:]' < .bun-version)"; \
+    running="$(bun --version)"; \
+    if [ "$running" != "$pinned" ]; then \
+      echo "This stage runs Bun $running, and .bun-version pins $pinned. The row this stage's FROM names is labelled with one Bun and carries another, so that row's label and its bytes disagree. Read the oven/bun row of .github/ci-images.yaml, then write the digest of the Bun the pin names." >&2; \
+      exit 1; \
+    fi
+
 RUN apt-get update && apt-get install -y --no-install-recommends python3 make g++ \
     && rm -rf /var/lib/apt/lists/*
 

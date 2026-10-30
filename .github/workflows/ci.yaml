@@ -897,10 +897,12 @@ jobs:
             envoy_smoke:
               - '.github/workflows/ci.yaml'
               # The image: the Dockerfile, its context's .dockerignore, the web stage's frozen
-              # install (every workspace manifest), the packages it builds the SPA and the Go
-              # binaries from, and the notices scripts.
+              # install (every workspace manifest) and the Bun pin that stage holds its own Bun
+              # to, the packages it builds the SPA and the Go binaries from, and the notices
+              # scripts.
               - 'packages/envoy/docker/Dockerfile'
               - '.dockerignore'
+              - '.bun-version'
               - 'package.json'
               - 'bun.lock'
               - 'patches/**'

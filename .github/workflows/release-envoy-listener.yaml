@@ -5,12 +5,13 @@ on:
     branches: [main]
     # Every file packages/envoy/docker/Dockerfile builds from: the Go module and the Dockerfile
     # (packages/envoy/**), the web stage's frozen install (the root manifest, lockfile, patches and
-    # every root workspace's package.json), the sources it builds the SPA and the Go contracts from,
-    # the context's .dockerignore, and this workflow. A commit touching only one of them would
-    # otherwise publish no image, so no pin could name it. .github/scripts/check-image-trigger-paths.sh
-    # fails the build when this list misses a file the image build reads. The envoy-infra plugin's
-    # module (packages/envoy/infra) is no input of the image or of this release's binaries, and
-    # release-envoy-infra.yaml releases it.
+    # every root workspace's package.json), the Bun pin that stage holds its own Bun to, the
+    # sources it builds the SPA and the Go contracts from, the context's .dockerignore, and this
+    # workflow. A commit touching only one of them would otherwise publish no image, so no pin
+    # could name it. .github/scripts/check-image-trigger-paths.sh fails the build when this list
+    # misses a file the image build reads. The envoy-infra plugin's module (packages/envoy/infra)
+    # is no input of the image or of this release's binaries, and release-envoy-infra.yaml
+    # releases it.
     paths:
       - "packages/envoy/**"
       - "!packages/envoy/infra/**"
@@ -28,6 +29,7 @@ on:
       - "packages/claude-envoy/package.json"
       - "docs/site/package.json"
       - ".dockerignore"
+      - ".bun-version"
       - ".github/workflows/release-envoy-listener.yaml"
       # The image's and the binaries' third-party notices, and the archives' target list.
       - "scripts/third-party-notices.ts"

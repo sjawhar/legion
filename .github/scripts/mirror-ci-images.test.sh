@@ -1,20 +1,21 @@
 #!/usr/bin/env bash
 # Tests for `mirror-ci-images.sh`: it copies the rows the package does not hold, it copies no row
 # the package already holds, it asks for the row's digest and not the row's upstream tag, it
-# refuses a row whose upstream tag names another digest, and it fails naming the row when a copy
-# lands at another digest.
+# refuses a library/golang row whose image carries another Go than the row's tag names, and it
+# fails naming the row when a copy lands at another digest.
 #
 # NO CASE REACHES THE NETWORK. Every case puts a stand-in `crane` first on PATH, which reads and
 # writes a stand-in registry under $CRANE_STATE: `tags` is one `<reference>\t<digest>` line per
 # tag `crane digest` can read, in the package and upstream both, `upstreams` is one
-# `<reference>\t<digest>` line per reference a copy can read, `package` is one digest per line,
-# and `copied` is one reference per line the stand-in copied. A later line of `tags` wins, so a
-# case moves an upstream tag by appending one. The reference the script copies from is the row's
-# upstream at the row's digest, so a fixture line on the upstream tag alone says where a run that
-# read the tag would land. The first five cases build a miniature repository under a temporary
-# directory and symlink the real script into it, so the script under test is the file CI runs: it
-# resolves its root from its own path (`cd "$(dirname "$0")/../.."`), which the symlink puts at
-# the fixture root.
+# `<reference>\t<digest>` line per reference a copy can read, `configs` is one
+# `<reference>\t<GOLANG_VERSION>` line per reference `crane config` can read, `package` is one
+# digest per line, and `copied` is one reference per line the stand-in copied. A later line of
+# `tags` wins, so a case moves an upstream tag by appending one. The reference the script copies
+# from is the row's upstream at the row's digest, so a fixture line on the upstream tag alone
+# says where a run that read the tag would land. The first six cases build a miniature repository
+# under a temporary directory and symlink the real script into it, so the script under test is
+# the file CI runs: it resolves its root from its own path (`cd "$(dirname "$0")/../.."`), which
+# the symlink puts at the fixture root.
 #
 # The last case is the ordering ci.yaml's ci-images job keeps: the package mode of
 # check-ci-images.sh reads which rows the package holds, so the copy for this change must run
@@ -44,12 +45,15 @@ source "$script_dir/test-lib.sh"
 # they match.
 NATS=sha256:0a1b2c3d4e5f60710a1b2c3d4e5f60710a1b2c3d4e5f60710a1b2c3d4e5f6071
 BUN=sha256:1b2c3d4e5f6071821b2c3d4e5f6071821b2c3d4e5f6071821b2c3d4e5f607182
+GOLANG=sha256:3d4e5f60718293a43d4e5f60718293a43d4e5f60718293a43d4e5f60718293a4
 OTHER=sha256:9f8e7d6c5b4a30219f8e7d6c5b4a30219f8e7d6c5b4a30219f8e7d6c5b4a3021
 REGISTRY=ghcr.io/sjawhar/legion/ci
 
 # The stand-in crane: `digest` prints what the registry's tag points at, and exits 1 where it
 # points at nothing, as crane does for a tag the registry does not hold. `copy` reads the
 # upstream's digest and writes it under the tag, so a copy lands where `upstreams` says.
+# `config` prints an image config of the shape library/golang's own build writes, carrying the
+# Go version `configs` gives that reference.
 mkdir -p "$work/bin"
 cat > "$work/bin/crane" <<'SH'
 #!/usr/bin/env bash
@@ -70,8 +74,25 @@ case "${1:-}" in
     printf '%s\n' "$digest" >> "$state/package"
     printf '%s\n' "$2" >> "$state/copied"
     ;;
+  config)
+    # `crane config --platform <platform> <reference>`, the call the script makes. The platform
+    # is read here so that a call without it fails this stand-in rather than passing unseen.
+    shift
+    if [ "${1:-}" != "--platform" ]; then
+      echo "crane: this test's stand-in reads config with --platform, not ${1:-nothing}" >&2
+      exit 1
+    fi
+    shift 2
+    version=$(awk -F'\t' -v reference="${1:-}" '$1 == reference { print $2 }' "$state/configs")
+    if [ -z "$version" ]; then
+      echo "crane: ${1:-} is in no config of this test" >&2
+      exit 1
+    fi
+    printf '{"architecture":"amd64","os":"linux","config":{"Env":["PATH=/usr/local/go/bin:/usr/local/bin:/bin","GOLANG_VERSION=%s","GOTOOLCHAIN=local","GOPATH=/go"]}}\n' \
+      "$version"
+    ;;
   *)
-    echo "crane: this test's stand-in reads digest and copy, not ${1:-nothing}" >&2
+    echo "crane: this test's stand-in reads digest, copy and config, not ${1:-nothing}" >&2
     exit 1
     ;;
 esac
@@ -121,8 +142,26 @@ YAML
   printf '%s\t%s\n' "docker.io/library/nats:2.10" "$NATS" >> "$root/state/tags"
   printf '%s\t%s\n' "docker.io/oven/bun:1.3.14" "$BUN" >> "$root/state/tags"
   printf '%s\n' "$NATS" > "$root/state/package"
+  : > "$root/state/configs"
   : > "$root/state/copied"
   echo "$root"
+}
+
+# golang_row <root> <version>: appends a library/golang row to that tree, which the package does
+# not hold, with a stand-in registry that reads its digest reference and answers `crane config`
+# with an image carrying Go <version>. The row's own upstream tag names 1.27.1, so any other
+# <version> is an image whose bytes are another Go than its label claims.
+golang_row() {
+  local root=$1 version=$2
+  cat >> "$root/.github/ci-images.yaml" <<YAML
+  - upstream: docker.io/library/golang:1.27.1-alpine
+    tag: golang-1.27.1-alpine-3d4e5f60
+    digest: $GOLANG
+YAML
+  printf '%s\t%s\n' "docker.io/library/golang:1.27.1-alpine@$GOLANG" "$GOLANG" \
+    >> "$root/state/upstreams"
+  printf '%s\t%s\n' "docker.io/library/golang:1.27.1-alpine@$GOLANG" "$version" \
+    >> "$root/state/configs"
 }
 
 # run_mirror <root>: runs the script under test against that tree, with the stand-in crane first
@@ -142,7 +181,6 @@ root=$(fixture copies-the-missing-row)
 run_mirror "$root"
 check "exits 0" "$(is "$status" 0)"
 check "names the copy" "$(contains "$out" "copy   docker.io/oven/bun:1.3.14@$BUN -> $REGISTRY:bun-1.3.14-1b2c3d4e")"
-check "read the row's label first" "$(contains "$out" "label  docker.io/oven/bun:1.3.14 is $BUN, this row's digest")"
 check "and the digest it landed at" "$(contains "$out" "copied $REGISTRY:bun-1.3.14-1b2c3d4e $BUN")"
 check "counts the row it held" "$(contains "$out" '^1 row(s) already in the package, 1 copied$')"
 check "copied that row alone" "$(is "$(cat "$root/state/copied")" "docker.io/oven/bun:1.3.14@$BUN")"
@@ -158,31 +196,45 @@ check "holds both rows" "$(contains "$out" "held   $REGISTRY:bun-1.3.14-1b2c3d4e
 check "copies nothing" "$(is "$(cat "$root/state/copied")" "")"
 check "and says so" "$(contains "$out" '^2 row(s) already in the package, 0 copied$')"
 
-echo "case: an upstream tag that has moved since a held row was written"
-# The nats row is in the package already, and its upstream tag now points at another digest, as a
-# floating upstream tag does between two runs. Nothing copies a held row, so nothing reads its
-# label: the comparison below belongs to the copy, which writes its row now.
+echo "case: an upstream tag that has moved since the row was written"
+# The row's upstream names docker.io/oven/bun:1.3.14, and that tag now points at another digest,
+# as a floating upstream tag does between two runs. The copy asks for the row's digest, so it
+# lands at the row's digest and the run passes.
 root=$(fixture upstream-tag-moved)
-printf '%s\t%s\n' "docker.io/library/nats:2.10" "$OTHER" >> "$root/state/tags"
-printf '%s\t%s\n' "docker.io/library/nats:2.10" "$OTHER" >> "$root/state/upstreams"
+printf '%s\t%s\n' "docker.io/oven/bun:1.3.14" "$OTHER" >> "$root/state/tags"
+printf '%s\t%s\n' "docker.io/oven/bun:1.3.14" "$OTHER" >> "$root/state/upstreams"
 run_mirror "$root"
 check "exits 0" "$(is "$status" 0)"
-check "holds the row whose upstream tag moved" "$(contains "$out" "held   $REGISTRY:nats-2.10-0a1b2c3d $NATS")"
-check "asked for the other row's digest" "$(is "$(cat "$root/state/copied")" "docker.io/oven/bun:1.3.14@$BUN")"
-check "and the package holds no digest a moved tag names" \
+check "asked for the row's digest" "$(is "$(cat "$root/state/copied")" "docker.io/oven/bun:1.3.14@$BUN")"
+check "and landed there" "$(contains "$out" "copied $REGISTRY:bun-1.3.14-1b2c3d4e $BUN")"
+check "and the package holds the row's digest, not the tag's" \
   "$(is "$(contains "$(cat "$root/state/package")" "$OTHER")" false)"
 
-echo "case: an upstream tag that names another digest than the row it labels"
-# The row says oven/bun:1.3.14 and its digest holds other bytes. Every gate of this repository
-# reads that label and never the bytes, so the copy is the one place the two are compared.
-root=$(fixture upstream-tag-disagrees)
-printf '%s\t%s\n' "docker.io/oven/bun:1.3.14" "$OTHER" >> "$root/state/tags"
+echo "case: a held library/golang row whose image carries another Go than its tag names"
+# The row is labelled 1.27.1-alpine and its digest holds a Go 1.26.3 image. Every other gate
+# reads that label and never the bytes. library/golang writes its own version into the image
+# config, so this run reads it, and the row below is in the package already: the read names a
+# digest, so it holds a row this run copies nothing for.
+root=$(fixture golang-config-disagrees)
+golang_row "$root" 1.26.3
+printf '%s\t%s\n' "$REGISTRY:golang-1.27.1-alpine-3d4e5f60" "$GOLANG" >> "$root/state/tags"
+printf '%s\n' "$GOLANG" >> "$root/state/package"
 run_mirror "$root"
 check "fails" "$(is "$status" 1)"
-check "names the upstream and both digests" \
-  "$(contains "$out" "docker.io/oven/bun:1.3.14 is $OTHER, and this row's digest is $BUN")"
+check "names the row and both versions" \
+  "$(contains "$out" "docker.io/library/golang:1.27.1-alpine@$GOLANG carries Go 1.26.3, and this row's upstream tag names Go 1.27.1")"
 check "says the label and the bytes disagree" "$(contains "$out" "The row's label and its bytes disagree")"
-check "and copies nothing" "$(is "$(cat "$root/state/copied")" "")"
+check "and copies no golang row" \
+  "$(is "$(contains "$(cat "$root/state/copied")" "golang")" false)"
+
+echo "case: a library/golang row whose image carries the Go its tag names"
+root=$(fixture golang-config-agrees)
+golang_row "$root" 1.27.1
+run_mirror "$root"
+check "exits 0" "$(is "$status" 0)"
+check "names the Go the row's bytes carry" \
+  "$(contains "$out" "go     docker.io/library/golang:1.27.1-alpine@$GOLANG carries Go 1.27.1, the version its upstream tag names")"
+check "and copies the row" "$(contains "$out" "copied $REGISTRY:golang-1.27.1-alpine-3d4e5f60 $GOLANG")"
 
 echo "case: a copy that lands at another digest"
 root=$(fixture copy-lands-elsewhere)
@@ -209,19 +261,23 @@ import yaml
 repository, state = sys.argv[1], sys.argv[2]
 document = yaml.safe_load(open(f"{repository}/.github/ci-images.yaml"))
 registry, rows = document["registry"], document["images"]
-with open(f"{state}/upstreams", "w") as upstreams, open(f"{state}/tags", "w") as tags:
+with open(f"{state}/upstreams", "w") as upstreams, open(f"{state}/configs", "w") as configs:
     for row in rows:
-        # The row's upstream without the digest it may carry. The script copies from that string
-        # at the row's digest, and reads the row's label from the string itself, so the stand-in
-        # answers both. A row whose upstream names no tag is never read as a label, and the line
-        # that holds it here is a line the script asks for nothing.
-        labelled = row["upstream"].partition("@")[0]
-        upstreams.write(f"{labelled}@{row['digest']}\t{row['digest']}\n")
-        tags.write(f"{labelled}\t{row['digest']}\n")
-    with open(f"{state}/package", "w") as package:
-        for row in rows[:-1]:
-            tags.write(f"{registry}:{row['tag']}\t{row['digest']}\n")
-            package.write(f"{row['digest']}\n")
+        # The reference the script reads for this row: its upstream without the digest it may
+        # carry, at the row's digest. The copy asks for that string, and the Go check reads the
+        # config of that same string.
+        source = f"{row['upstream'].partition('@')[0]}@{row['digest']}"
+        upstreams.write(f"{source}\t{row['digest']}\n")
+        if "/golang:" in row["upstream"]:
+            # The Go the row's upstream tag names, which a library/golang image declares as
+            # GOLANG_VERSION. These bytes carry the Go their label claims, so the Go check
+            # passes over the repository's own rows.
+            carried = row["upstream"].partition("@")[0].rpartition(":")[2]
+            configs.write(f"{source}\t{carried.partition('-')[0]}\n")
+with open(f"{state}/tags", "w") as tags, open(f"{state}/package", "w") as package:
+    for row in rows[:-1]:
+        tags.write(f"{registry}:{row['tag']}\t{row['digest']}\n")
+        package.write(f"{row['digest']}\n")
 print(rows[-1]["tag"])
 PY
 )

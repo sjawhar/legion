@@ -391,6 +391,27 @@ sed -i 's|ARG GO_VERSION=1.25.0|ARG GO_VERSION=1.26.3|' \
 run_check tree "$root"
 check "the ARG and the FROM moved together passes" "$(is "$status" 0)"
 
+# The same rows, with Docker Hub's implicit `library/` left out of the golang upstreams:
+# docker.io/golang:1.25.0-alpine and docker.io/library/golang:1.25.0-alpine are one image. Rule
+# 3 and rule 7 read a repository of one path element under `library/`, so both rules read the
+# two spellings alike. Reading the row's text instead would lose the pinned row to rule 3 and
+# hide the FROM below from rule 7.
+root=$(fixture golang-short-spelling)
+sed -i 's|upstream: docker.io/library/golang:|upstream: docker.io/golang:|' \
+  "$root/.github/ci-images.yaml"
+cat >> "$root/.github/ci-images.yaml" <<YAML
+  - upstream: docker.io/golang:1.26.3-alpine
+    tag: golang-1.26.3-alpine-5f607182
+    digest: $GOLANG_NEXT
+YAML
+sed -i "s|$GOLANG|$GOLANG_NEXT|" "$root/packages/envoy/docker/Dockerfile"
+run_check tree "$root"
+check "a FROM on the short-spelled other golang row fails" "$(is "$status" 1)"
+check "names that row and the Go it copies" \
+  "$(contains "$out" 'the row for docker.io/golang:1.26.3-alpine on line .*, which copies Go 1.26.3-alpine')"
+check "and rule 3 reads the pinned row under its short spelling" \
+  "$(is "$(contains "$out" 'no row copies library/golang')" false)"
+
 echo "case: rule 8 — a row the package does not hold"
 root=$(fixture not-published)
 MISSING=$GOLANG run_check package "$root"

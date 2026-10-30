@@ -49,7 +49,10 @@
 #      version is admitted, so raising Bun or Go is two commits: the new version's row first,
 #      which ci.yaml's ci-images job copies, then the pin and every FROM. One commit holding
 #      both would let a consumer job pull the new digest while that same run's copy is still
-#      landing it. Rule 7 below is what keeps a Go FROM on the row the ARG names.
+#      landing it. Rule 7 below is what keeps a Go FROM on the row the ARG names. This rule and
+#      rule 7 read a row's repository with Docker Hub's implicit `library/` written out, so
+#      `docker.io/golang:1.27.1-alpine` and `docker.io/library/golang:1.27.1-alpine` are one
+#      repository to both of them.
 #   4. a reference in CI's reach that names a registry other than ghcr.io/sjawhar/legion/ci,
 #   5. a reference in CI's reach that is not pinned by digest (`@sha256:` and 64 hex characters):
 #      a tag is a name the registry can move, so only a digest names the bytes a job ran,
@@ -200,9 +203,13 @@ MIRROR_JOB = "ci.yaml's ci-images job"
 BUN_PIN = Path(".bun-version")
 WORKER_DOCKERFILE = Path("packages/daemon/docker/worker.Dockerfile")
 # The two upstream repositories a pin of this repository names: rule 3 asks for a row at each
-# pin, and rule 7 holds every reference on a GOLANG_REPOSITORY row to ARG GO_VERSION.
+# pin, and rule 7 holds every reference on a GOLANG_REPOSITORY row to ARG GO_VERSION. Both are
+# written as upstream_parts gives a repository, with Docker Hub's implicit `library/` spelled
+# out.
 BUN_REPOSITORY = "oven/bun"
 GOLANG_REPOSITORY = "library/golang"
+# The host spellings of Docker Hub, where a repository of one path element is under `library/`.
+DOCKER_HUB_HOSTS = {"", "docker.io", "index.docker.io", "registry-1.docker.io"}
 MIRROR = "mirror.gcr.io"
 # The directories workflow_paths.walk skips (.git, .jj, node_modules, .venv, vendor) are every
 # directory this sweep skips but one, and this set holds that one.
@@ -529,8 +536,16 @@ if MODE == PACKAGE:
 
 
 def upstream_parts(upstream: str) -> tuple[str, str, str, str]:
-    """(host, path, tag, digest) of a row's upstream, each "" where the reference carries none."""
-    return split_reference(upstream) or ("", "", "", "")
+    """(host, path, tag, digest) of a row's upstream, each "" where the reference carries none.
+
+    `path` carries Docker Hub's implicit `library/`, which a reference may leave out:
+    docker.io/golang and docker.io/library/golang are one image, and a rule that compared the
+    text of the row would read the first as a repository no pin of this repository names. Every
+    rule that compares a row's repository reads it from here, so both spellings answer alike."""
+    host, path, tag, digest = split_reference(upstream) or ("", "", "", "")
+    if path and host in DOCKER_HUB_HOSTS and "/" not in path:
+        path = f"library/{path}"
+    return host, path, tag, digest
 
 
 def tag_rule(upstream: str, digest: str) -> str:
