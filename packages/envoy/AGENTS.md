@@ -2367,9 +2367,10 @@ the editor's own on every character a person types - is nothing to lose. Settlem
 decided ask's recorded wording goes through the same merge with no caller to answer a refusal
 (`writeDecidedWording`), so it drops an item no decided option is paired with, whatever that item
 holds, and rewrites a line this route would refuse: a block left disagreeing with the row of the
-ask it was decided on would disagree for good. The merged list is rendered and parsed back as any
-other document write is, on a budget of its own, since what it carries under an option is the
-document's text and not the caller's, and the list's
+ask it was decided on would disagree for good. The items the caller sends - a new option's item
+whole, a rewritten line alone - are parsed on the write's own budget beside the question, and
+the merged list is rendered and parsed back as any other document write is, on a budget of its
+own, since what it carries under an option is the document's text and not the caller's, and the list's
 and the kept items' own block ids and nodes are put back afterwards. A field named but unchanged
 is not rewritten, so an idempotent retry of the whole ask writes nothing, versions nothing and
 keeps every anchor.
@@ -2407,7 +2408,7 @@ here would leave a
 decision holding this one unreadable, or a decision needs words written rather than blocks
 deleted - it names no delete and no ask edit of another decision, and says the decision is
 repaired in the document editor. An ask no paragraph of which holds text is weighed on that
-question before its content rule: no document edit repairs it, since an insert anchored on one of
+question instead of its content rule: no document edit repairs it, since an insert anchored on one of
 its blocks lands beside the decision rather than in it (`pmdoc.BlockBoundary` reads the
 document-level block holding the anchor) and a delete may not leave a decision asking nothing, so
 an ask edit carrying a question is what repairs it. Such an edit is written into the block

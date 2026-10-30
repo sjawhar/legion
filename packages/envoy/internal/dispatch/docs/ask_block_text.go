@@ -226,7 +226,7 @@ func withoutUnchanged(current askBlock, edit AskBlockEdit) AskBlockEdit {
 // already holds, with its block id, its items and their marks. A block holding more than one
 // reaches here only for the edit that writes a question into a block whose question a person
 // emptied (parseAskBlockLeniently), the one edit of such a block that applies: every other edit
-// of it is refused with its content rule first (refuseAskContentEdit). An options edit of such a
+// of it is refused on its empty question (refuseEmptyQuestionEdit). An options edit of such a
 // block is refused, since the merge pairs each sent option with the item of one list
 // (mergeAskOptions) and such a block gives it no way to say which, so rebuilding across them
 // would move a person's words from one list into another.
@@ -599,7 +599,7 @@ func normalizeAskOptions(options []model.AskOption) []model.AskOption {
 // paragraphs are, and an edit carrying none is refused with that step, since the block's own
 // sentence names none and an agent reading it has nowhere to go.
 //
-// This is where the reason the rest of this file names lives: no document edit writes a decision
+// This is where the reason the rest of this package names lives: no document edit writes a decision
 // a question, since a delete writes no words and an insert anchored on a block of a decision
 // lands beside that decision rather than in it (pmdoc.BlockBoundary reads the document-level
 // block holding the anchor); and a decision left asking nothing is refused every document edit
@@ -676,7 +676,7 @@ func renderBlock(block *pmdoc.Node) (string, error) {
 // merge or flatten what a collaborator wrote. The route rebuilds no broken decision: a document
 // edit deletes, in one edit, the blocks the refusal names (planAskRepair), and the ask edit
 // follows. A decision reaching here asks something: one whose question a person emptied is
-// weighed on that question first, and an edit carrying one writes it (refuseEmptyQuestionEdit).
+// weighed on that question instead, and an edit carrying one writes it (refuseEmptyQuestionEdit).
 // Where a decision nested in this one holds no paragraph with text, no document edit repairs
 // that one either, for the reason refuseEmptyQuestionEdit holds, so the refusal says what it
 // needs is words written, and names the editor. Until the document settles its block ids (a
