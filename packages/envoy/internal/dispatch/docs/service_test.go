@@ -2791,6 +2791,71 @@ func TestAskOptionsEditDropsAnItemTheEditorMarked(t *testing.T) {
 	assertAskRepaired(t, service, artifactID, "ask-lists", "Should we ship?", options)
 }
 
+// A person typing an option in the browser leaves the whitespace they typed in its line - a
+// trailing space, or one before the colon the parse cuts the label at - under the editor's own
+// mark. That whitespace is text of the item's own, which a rebuilt item writes again, and the
+// ask row reads the same words either way, so an edit dropping such an option and one rewording
+// it are both applied rather than refused for markup the line does not hold.
+func TestAskOptionsEditOfALineHoldingTypedWhitespace(t *testing.T) {
+	ship := model.AskOption{Label: "Ship", Description: "Release it"}
+	for _, line := range []string{"Hold: Wait for review ", "Hold : Wait for review"} {
+		t.Run("the drop of "+strconv.Quote(line), func(t *testing.T) {
+			service, artifactID := seedTypedOptionLine(t, line)
+			held := askOptionList(t, service, artifactID).Children[0]
+
+			options := []model.AskOption{ship}
+			if err := sendAskOptions(service, artifactID, AskBlockEdit{Options: &options}); err != nil {
+				t.Fatalf("options edit dropping an option whose line holds the whitespace a person typed: %v", err)
+			}
+
+			after := askOptionList(t, service, artifactID)
+			if len(after.Children) != 1 || !after.Children[0].EqualWithBlockIDs(held) {
+				t.Fatalf("the list holds %d items, want the Ship item alone as it was", len(after.Children))
+			}
+			settleCurrentGeneration(t, service, artifactID)
+			assertAskRepaired(t, service, artifactID, "ask-lists", "Should we ship?", options)
+		})
+		t.Run("the rewrite of "+strconv.Quote(line), func(t *testing.T) {
+			service, artifactID := seedTypedOptionLine(t, line)
+
+			options := []model.AskOption{ship, {Label: "Hold", Description: "Wait for the sign-off"}}
+			if err := sendAskOptions(service, artifactID, AskBlockEdit{Options: &options}); err != nil {
+				t.Fatalf("options edit rewording an option whose line holds the whitespace a person typed: %v", err)
+			}
+
+			after := askOptionList(t, service, artifactID)
+			if len(after.Children) != 2 {
+				t.Fatalf("the list holds %d items after the edit, want 2", len(after.Children))
+			}
+			rewritten := after.Children[1]
+			if got := pmdoc.TextContent(rewritten.Children[0]); got != "Hold: Wait for the sign-off" {
+				t.Fatalf("the rewritten item reads %q, want the line the edit sent", got)
+			}
+			settleCurrentGeneration(t, service, artifactID)
+			assertAskRepaired(t, service, artifactID, "ask-lists", "Should we ship?", options)
+		})
+	}
+}
+
+// seedTypedOptionLine is seedIndexedShipAsk with the Hold option's line written as a person
+// typed it in the browser: the text line holds, under the editor's mark on every character of
+// it. The parse trims that whitespace away, so the ask row reads the option it was indexed with.
+func seedTypedOptionLine(t *testing.T, line string) (*Service, string) {
+	t.Helper()
+	service, artifactID := seedIndexedShipAsk(t, "ask-lists")
+	editLiveTree(t, service, artifactID, func(tree *pmdoc.Node) *pmdoc.Node {
+		hold := firstAsk(tree).Children[1].Children[1]
+		hold.Children[0].Children = []*pmdoc.Node{{Type: "text", Text: line}}
+		markAsTyped(hold, "typed")
+		return tree
+	})
+	if got := pmdoc.TextContent(askOptionList(t, service, artifactID).Children[1]); got != line {
+		t.Fatalf("the seeded option line reads %q, want %q", got, line)
+	}
+	assertShipAskRow(t, service, artifactID, "ask-lists")
+	return service, artifactID
+}
+
 // A person who empties a decision's question in the browser can leave the whitespace they typed
 // behind, under the editor's own mark. The markdown writes nothing of that mark, so a question
 // written over the paragraph deletes no word, and the ask edit carrying one repairs the decision
@@ -2925,47 +2990,38 @@ func TestAskOptionsEditRefusesDroppingALineHoldingMarkup(t *testing.T) {
 }
 
 // Two items can carry one label, and what a person wrote belongs to the item they wrote it
-// under. An edit sending both options pairs the option it does not change with the item that
-// already says it, whole, wherever that item stands, and rewrites the other's line. Pairing on
-// the label alone would give the first item to the first option sent, moving the sub-list under
-// the line the edit rewrote and dropping the item that holds nothing.
+// under. An ask's labels are unique, so one option of that label is what an edit can send, and
+// it pairs with the item that says exactly what it says, wherever that item stands, keeping it
+// whole. Pairing on the label alone would give it the first item of that label instead,
+// rewriting that item's line and dropping the item holding the sub-list, which is no edit's to
+// delete.
 func TestAskOptionsEditPairsOnTheWholeOptionBeforeTheLabel(t *testing.T) {
 	service, artifactID := newTestService(t)
 	service.settle = time.Hour
 	seedServiceText(t, service, artifactID, ":::ask{#ask-lists urgency=\"med\" multiple=\"false\" state=\"open\"}\n"+
-		"Should we ship?\n\n- Hold: Wait for review\n\n  - only if **finance** agrees\n\n- Hold: Wait for the memo\n:::\n")
+		"Should we ship?\n\n- Hold: Wait for review\n\n- Hold: Wait for the memo\n\n  - only if **finance** agrees\n:::\n")
 	settleCurrentGeneration(t, service, artifactID)
 	list := askOptionList(t, service, artifactID)
 	if len(list.Children) != 2 {
 		t.Fatalf("the seeded list holds %d items, want the two of one label", len(list.Children))
 	}
-	held := list.Children[0]
+	held := list.Children[1]
 
-	// The option whose description changed is sent first, which is where the two pairings differ:
-	// on the label alone it would take the first item, the one holding the sub-list.
-	options := []model.AskOption{
-		{Label: "Hold", Description: "Wait for the sign-off"},
-		{Label: "Hold", Description: "Wait for review"},
-	}
+	// The option says what the second item says, and the first, which says something else, is a
+	// plain line the edit may drop. On the label alone it would take that first item, rewrite
+	// its line, and drop the second - the one holding the sub-list a person wrote.
+	options := []model.AskOption{{Label: "Hold", Description: "Wait for the memo"}}
 	if err := sendAskOptions(service, artifactID, AskBlockEdit{Options: &options}); err != nil {
 		t.Fatalf("options edit of two items of one label: %v", err)
 	}
 
 	after := askOptionList(t, service, artifactID)
-	if len(after.Children) != 2 {
-		t.Fatalf("the list holds %d items after the edit, want 2", len(after.Children))
+	if len(after.Children) != 1 {
+		t.Fatalf("the list holds %d items after the edit, want the one option the edit sent", len(after.Children))
 	}
-	if !after.Children[1].EqualWithBlockIDs(held) {
-		t.Fatalf("the option the edit left alone reads %q, want the item the document held, %q",
-			askOptionItemMarkdown(t, after, after.Children[1]), askOptionItemMarkdown(t, list, held))
-	}
-	rewritten := after.Children[0]
-	if got := strings.TrimSpace(pmdoc.TextContent(rewritten.Children[0])); got != "Hold: Wait for the sign-off" {
-		t.Fatalf("the rewritten item reads %q, want the line the edit sent", got)
-	}
-	if len(rewritten.Children) != 1 {
-		t.Fatalf("the rewritten item holds %d nodes, want its line alone: the sub-list is the other item's",
-			len(rewritten.Children))
+	if !after.Children[0].EqualWithBlockIDs(held) {
+		t.Fatalf("the option the edit sent reads %q, want the item that already said it, %q",
+			askOptionItemMarkdown(t, after, after.Children[0]), askOptionItemMarkdown(t, list, held))
 	}
 	settleCurrentGeneration(t, service, artifactID)
 	assertAskRepaired(t, service, artifactID, "ask-lists", "Should we ship?", options)

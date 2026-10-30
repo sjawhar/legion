@@ -1005,7 +1005,9 @@ func TestAskBlockOptionsEditKeepingContentSettlesUnchanged(t *testing.T) {
 // still reads as no decision, and what it parses back to joins the options of both lists. The row
 // keeps the options it was indexed with - settlement leaves the row of a block it cannot read as
 // it was, so a row given that reading would offer a person options read out of a stray list until
-// somebody repairs the block - while the question and the urgency the edit named are written.
+// somebody repairs the block - while the question and the urgency the edit named are written. It
+// keeps them whichever fields the request named: a repair that sends the options beside the
+// question sends that joined reading, the only options such a block accepts.
 func TestEditOfAnAskWhoseBlockHoldsASecondListKeepsTheRowsOptions(t *testing.T) {
 	var documentService *docs.Service
 	handler, _ := newInteractionHandler(t, func(database *store.Store) docs.API {
@@ -1069,5 +1071,47 @@ func TestEditOfAnAskWhoseBlockHoldsASecondListKeepsTheRowsOptions(t *testing.T) 
 		stored.Question != "Which transport ships this week?" {
 		t.Fatalf("the ask reads question=%q options=%#v after settling, want the repaired question and the "+
 			"options its row held", stored.Question, stored.Options)
+	}
+
+	// The same repair, sent again by a caller that names the options beside the question. The
+	// only options such a block accepts are the joined reading of its two lists - any others
+	// are refused, since no options edit can say which list an option is in - so a row taking
+	// the request's own would hold that reading too.
+	peer.edit(t, func(tree *pmdoc.Node) error {
+		for _, child := range tree.Children {
+			if id, _ := child.Attrs[pmdoc.BlockIDAttr].(string); id != "decision" {
+				continue
+			}
+			child.Children[0].Children = nil
+			return nil
+		}
+		return fmt.Errorf("the document holds no block under %q", "decision")
+	})
+	peer.barrier(t)
+
+	withOptions := sessionRequest(t, handler, http.MethodPatch, "/api/v1/asks/"+askID, map[string]any{
+		"question": "Which transport ships next week?",
+		"options": []map[string]string{
+			{"label": "REST", "description": "Matches the platform"},
+			{"label": "gRPC", "description": "Adds streaming"},
+			{"label": "Ship", "description": "Release it"},
+		},
+		"actor": sessionActor(),
+	})
+	if withOptions.Code != http.StatusOK {
+		t.Fatalf("repair the emptied question with options beside it: status=%d body=%s",
+			withOptions.Code, withOptions.Body.String())
+	}
+	repairedAgain := decodeBody[model.Ask](t, withOptions)
+	if repairedAgain.Question != "Which transport ships next week?" {
+		t.Fatalf("the repaired ask asks %q, want the question the edit sent", repairedAgain.Question)
+	}
+	if !slices.Equal(repairedAgain.Options, indexed) {
+		t.Fatalf("the ask edited with options holds %#v, want the %#v its row held: the block's two lists "+
+			"joined are no decision's options, whichever fields the request named", repairedAgain.Options, indexed)
+	}
+	if stored := readBlockAsk(t, handler, askID); !slices.Equal(stored.Options, indexed) {
+		t.Fatalf("the ask row reads options %#v after the edit naming them, want the %#v it held",
+			stored.Options, indexed)
 	}
 }
