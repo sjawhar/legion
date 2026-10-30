@@ -2,52 +2,32 @@
   "schemaVersion": 1,
   "phase": "review",
   "issue": "INFRA-567",
-  "completed": "2026-10-30T01:05:00Z",
-  "round": 2,
-  "reviewedHead": "982af4715c97d9d6c90ec5d57e664984f12447d3",
-  "codeHead": "368e3d2bbdff611006ec4dc00c2b4c9133c2bdb4",
+  "completed": "2026-10-30T01:59:00Z",
+  "round": 3,
+  "reviewedHead": "8bda117fcc69e5d338f22a62f6c10a98a696c96b",
+  "codeHead": "35db766a1a1d6aae247858ae98ca808e7e964b2f",
   "decision": "changes_requested",
-  "critical": 0,
-  "important": 3,
-  "minor": 4,
-  "ci": "Required set (rulesets): lint, typecheck, test, pr-title. CI run 40979433555 at code head 368e3d2b is queued; no CI run has completed on this branch since 65da1690 (run 40913687637, success), every later one cancelled by the next push. The compare 368e3d2b...982af471 changes only .legion/INFRA-567/ (2 files). A request for changes does not wait on CI.",
-  "threads": "All eight round-1 threads were fixed in 3996e427 and resolved by the implementer; I replied on each, accepting all eight. Three of the fixes brought new findings, each a new inline comment of this round.",
-  "thermonuclear": "Both run at 982af471. thermonuclear-deep-review: CHANGES (1 High, 1 Medium, 1 Minor, 1 hardening). thermonuclear-code-quality: CHANGES (3 findings). I checked each carried finding against the code; the Go-pin gap is my own, reproduced on a copy of the tree.",
+  "critical": 1,
+  "important": 0,
+  "minor": 2,
+  "ci": "Required set (rulesets): lint, typecheck, test, pr-title. CI run 40986598621 at code head 35db766a is queued; no CI run has completed on this branch since 65da1690 (run 40913687637). The compare 35db766a...8bda117f changes only .legion/INFRA-567/.",
+  "threads": "Round 2's six threads: five accepted (rule 7, newRuntime, the copy source, the whole-tag rule, the unconditional ARG check), with a Minor gap in rule 7 raised as a new inline comment; the label-check thread PRRT_kwDORFy7ds6xz7yX is unresolved because its fix fails a correctly labelled row.",
+  "thermonuclear": "Both run at 8bda117f; both CHANGES, both independently finding the label-check failure and the rule-7 spelling gap. I verified the first with anonymous reads of Docker Hub and ghcr.io.",
   "keyFindings": [
     {
-      "severity": "important",
-      "file": ".github/scripts/check-ci-images.sh:600",
-      "description": "Rule 3 now asks only that some golang row carries ARG GO_VERSION, so nothing binds a FROM on a golang row to that ARG. Reproduced on a copy of the tree: a golang 1.28.0-alpine row added and every golang FROM (worker.Dockerfile:298, envoy Dockerfile:42, heldportwrapper:16) moved onto it while ARG GO_VERSION stays 1.27.1 passes check-ci-images.sh tree with exit 0; before this round it was refused. The worker's go stage would then compile with 1.28 while its toolchain stage downloads and its notices name 1.27.1. Bun keeps the binding through check-bun-version.sh (verified refused). Fix: refuse a reference whose row is a library/golang row at another version than ARG GO_VERSION, with a red case."
-    },
-    {
-      "severity": "important",
-      "file": ".github/scripts/mirror-ci-images.sh:45",
-      "description": "With the copy reading <repository>@<row digest>, nothing ever compares a row's digest with the version its upstream names, and rule 3 and check-bun-version.sh read that version from the upstream text alone. Reproduced by the deep review: both bun rows relabelled 1.4.5 with the 1.4.4 digests and .bun-version at 1.4.5 pass both gates and the copy; the Envoy listener's web stage would build with 1.4.4. Before this round the copy failed on that row. Fix: when a row is copied, check that the tag its upstream names resolves to the row's digest (or write upstreams as repo:tag@digest read from the registry, with rule 1 comparing that digest with the row's)."
-    },
-    {
-      "severity": "important",
-      "file": "packages/daemon/internal/daemon/merged_root_waits_live_test.go:118",
-      "description": "InPod is set only on the first boot's runtime; restart() at :225 builds fake.NewRuntime() again with InPod false, and step 5 relaunches the child's implementer, so the daemon takes the tmux answer and clones github.com/acme/widgets as before, now at step 5. The sibling proofs never restart. Fix: set InPod on the restart's runtime too (one helper for both sites). E2E run 40979438094 is still queued, so the fix is not observed either way."
+      "severity": "critical",
+      "file": ".github/scripts/mirror-ci-images.sh:77",
+      "description": "The label check runs on every row whose per-digest tag the package lacks, which at this head is every row whose upstream names a tag (the package holds only the old tag names). Docker Hub's library/nats:2.15.1-alpine now names sha256:7ae34c25…, while the row (upstream already written nats:2.15.1-alpine@sha256:2ae57dfb…) pins 2ae57dfb…, an honest earlier build of that tag. So ci-images exits 1 on this pull request, its merge group and main, ci-ok goes red, and a re-run gets the same answer; the header's premise that a copied row 'was written now' is false whenever a tag is renamed or lost. Fix: skip the label check for an upstream that names its own @digest (rule 1 refusing one that is not the row's digest), or otherwise make the check fire only for a row whose digest is new, and correct the header, ci-images.yaml:8-11 and AGENTS.md."
     },
     {
       "severity": "minor",
-      "file": ".github/scripts/mirror-ci-images.sh:42",
-      "description": "The hand-written repository split is copied into the test, which then cannot catch a wrong split. crane (go-containerregistry name.NewDigest) drops a tag written before @, so the source can be row upstream minus its @digest, plus @<row digest>."
+      "file": ".github/scripts/check-ci-images.sh:687",
+      "description": "Rule 7 compares the parsed path with the literal library/golang; an upstream spelled docker.io/golang:… or golang:… parses to `golang` and escapes it (reproduced by both thermonuclear passes). Normalize Docker Hub's implicit library/ in upstream_parts, or refuse an upstream not written docker.io/<namespace>/<name>; one helper for the Go version rule 3 and rule 7 both read."
     },
     {
       "severity": "minor",
-      "file": ".github/scripts/check-ci-images.sh:556",
-      "description": "The header (:43-44) says the tag a row must carry is the full name-tag-eight form, while the code checks only the eight-character suffix. Every row already matches the full form; check tag == the rule's tag, or correct the header."
-    },
-    {
-      "severity": "minor",
-      "file": ".github/scripts/check-bun-version.sh:466",
-      "description": "reads_version lets a Dockerfile keep an ARG BUN_VERSION default nothing reads, which the header (:7) says no Dockerfile declares; no file needs the branch. Delete it and its test case, or refuse an unread ARG."
-    },
-    {
-      "severity": "minor",
-      "file": ".github/actions/setup-bun/action.yml:11",
-      "description": "Still says raising Bun edits .bun-version and the two Dockerfile ARG BUN_VERSION defaults together; one default is left, and AGENTS.md now says a bump is two commits."
+      "file": ".github/scripts/mirror-ci-images.sh:29",
+      "description": "'It prints one line per row and one summary line' is no longer true: a copied row prints label, copy and copied lines."
     }
   ],
   "contractCensus": "Not required: the refusals are this repository's own CI gates, every input in this tree, passing at the head."
