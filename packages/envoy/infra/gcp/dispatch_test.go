@@ -1475,6 +1475,23 @@ func TestDispatchListenerWaitsForTheFrontDoor(t *testing.T) {
 	requireWaitsForTheFrontDoor(t, m, "example-dispatch-listener", "the listener")
 }
 
+// Switching the Cloud SQL instance's availability type updates it in place rather than replacing
+// it (dispatch_cloud.go names the provider's line), so Cloud SQL restarts the instance once, and
+// the name readers reach Dispatch at must come back only once that restart is over, never while
+// the database is away. Both halves of that name therefore wait for the instance: the Tailscale
+// Service svc:example-dispatch itself, which is the name, and the front door's Deployment, whose
+// pods advertise it and terminate its TLS.
+func TestDispatchTheFrontDoorWaitsForTheDatabaseInstance(t *testing.T) {
+	m, err := runDispatch(t, dispatchArgs(), true)
+	require.NoError(t, err)
+
+	instanceURN := "urn:pulumi:s::p::" + dispatchType + "$gcp:sql/databaseInstance:DatabaseInstance::example-dispatch"
+	require.Contains(t, m.Named(t, "tailscale:index/service:Service", "example-dispatch").RPC.GetDependencies(), instanceURN,
+		"the Tailscale Service is declared only once the instance's restart is over")
+	require.Contains(t, m.Named(t, "kubernetes:apps/v1:Deployment", "example-dispatch-tailnet").RPC.GetDependencies(), instanceURN,
+		"the front door's pods come back only once the instance's restart is over")
+}
+
 // A listener bound to 0.0.0.0 refuses to start without a bearer. The app reaches the listener and
 // the proxy over the network, each running in pods of its own.
 func TestDispatchListenerIsAuthenticated(t *testing.T) {

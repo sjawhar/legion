@@ -57,19 +57,20 @@ var (
 	dispatchConstructTailscale = p.ProviderReference{Urn: resource.URN("urn:pulumi:s::p::" + tailscaleProviderType + "::tailscale-example"), ID: "tailscale-example-id"}
 )
 
-func constructDispatch(t *testing.T, inputs map[string]property.Value, dryRun bool) (*pulumitest.Mocks, p.ConstructResponse, error) {
+func constructDispatch(t *testing.T, inputs map[string]property.Value, dryRun bool, dependsOn ...resource.URN) (*pulumitest.Mocks, p.ConstructResponse, error) {
 	t.Helper()
 	return constructDispatchWithProviders(t, inputs, dryRun, map[tokens.Package]p.ProviderReference{
 		"gcp": dispatchConstructGCP, "random": dispatchConstructRandom, "tailscale": dispatchConstructTailscale,
-	})
+	}, dependsOn...)
 }
 
 // constructDispatchWithProviders constructs the component through the plugin's own Construct, the
-// path a consumer's pulumi up takes, with the provider references the consumer's program declares.
-func constructDispatchWithProviders(t *testing.T, inputs map[string]property.Value, dryRun bool, providers map[tokens.Package]p.ProviderReference) (*pulumitest.Mocks, p.ConstructResponse, error) {
+// path a consumer's pulumi up takes, with the provider references the consumer's program declares
+// and the resources its pulumi.DependsOn on the component names.
+func constructDispatchWithProviders(t *testing.T, inputs map[string]property.Value, dryRun bool, providers map[tokens.Package]p.ProviderReference, dependsOn ...resource.URN) (*pulumitest.Mocks, p.ConstructResponse, error) {
 	t.Helper()
 	m := newMocks()
-	response, err := pulumitest.Construct(t, m, dispatchType, "example-dispatch", inputs, dryRun, providers)
+	response, err := pulumitest.Construct(t, m, dispatchType, "example-dispatch", inputs, dryRun, providers, dependsOn...)
 	return m, response, err
 }
 
@@ -137,6 +138,29 @@ func TestConstructOrdersTheDatabaseInstanceAfterDatabaseWaitsFor(t *testing.T) {
 		require.NotContains(t, instance(t, m).RPC.GetDependencies(), string(upstream),
 			"with the input unset the instance waits for nothing of the consumer's")
 	})
+}
+
+// Measured, rather than read off the SDK: a consumer's pulumi.DependsOn on the component itself
+// does not reach the component's children. Constructed with one URN in the ConstructRequest's
+// Dependencies, the field that option arrives in, the Cloud SQL instance registers with its two
+// siblings alone — the network and the private-services Connection it already waits for — and
+// never that URN. The SDK gives a component-level DependsOn to the component's own resource
+// options (pulumi/sdk/v3 v3.268.0's go/pulumi/provider.go:174-178), and each child's register
+// request carries only the DependsOn the component gave that child.
+//
+// So a consumer that must order a child of Dispatch after one of its own resources cannot get it
+// by depending on the component: databaseWaitsFor, the explicit input
+// TestConstructOrdersTheDatabaseInstanceAfterDatabaseWaitsFor measures, is the supported way to
+// order the Cloud SQL instance, and the only one.
+func TestConstructComponentDependsOnDoesNotReachTheChildren(t *testing.T) {
+	m, _, err := constructDispatch(t, dispatchConstructBaseInputs(), false, upstream)
+	require.NoError(t, err)
+
+	require.Equal(t, []string{
+		dispatchConstructChildURN("gcp:compute/network:Network", "example-dispatch-network"),
+		dispatchConstructChildURN("gcp:servicenetworking/connection:Connection", "example-dispatch-services"),
+	}, m.Named(t, "gcp:sql/databaseInstance:DatabaseInstance", "example-dispatch").RPC.GetDependencies(),
+		"the instance waits for its own siblings alone, never for what the consumer's DependsOn on the component names")
 }
 
 func TestConstructAcceptsUnknownDispatchInputsUnderPreview(t *testing.T) {
