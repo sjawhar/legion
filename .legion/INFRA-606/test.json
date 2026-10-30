@@ -2,39 +2,54 @@
   "schemaVersion": 1,
   "phase": "test",
   "issue": "INFRA-606",
-  "completed": "2026-10-29T23:45:00Z",
-  "round": 12,
-  "headTested": "74779becb2c8",
-  "handoffHead": "9ac0b806d181278f9ccb3cd85e8df969fd4a1a81",
-  "evidence": "dispatch://INFRA-606/artifact/infra606-tester-round12-tar-gz (RESULTS.md, steal/, crash-r12*, rolling/); earlier rounds: infra606-tester-evidence-tar-gz, infra606-tester-round2..11-tar-gz",
-  "ci": "On 74779bec only pr-title and changes were queued (some pr-title runs cancelled) when read; nothing on 9ac0b806. Not waited for.",
+  "completed": "2026-10-30T06:00:00Z",
+  "round": 13,
+  "headTested": "5a26d3ab1b6f",
+  "handoffHead": "18c05c997146cc3d4e94354e4f36ccd365b5f21c",
+  "evidence": "dispatch://INFRA-606/artifact/infra606-tester-round13-tar-gz (RESULTS.md); scripts: dispatch://INFRA-606/artifact/infra606-tester-scripts-tar-gz version 3",
   "implementerProof": {
     "verdict": "verified",
-    "how": "Built Dispatch from the workspace (74779bec, migrations through main's 0141 and this PR's 0142, applied over the stack's seed at boot) and round 11's head (dc3ad918), and drove review round 4 finding 2 on the load-test stack: a recipient behind a lane backlog longer than the lease receives its comments in order at head and out of order at dc3ad918. The kill and rolling-update paths, which the new claim-holding changes, deliver every attempt once. Every red test passes, unmodified this round."
+    "how": "Re-drove the round-13 proof on the real surface, against a freshly seeded load-test stack (seed at migration 145, Dispatch built from 5a26d3ab). The implementer's claims held: a send queued past a lease publishes comment.created with the session's copy held as a fallback row, which is settled unpublished when the send lands; order holds through a sweep with real claim ageing; a Retry while attempt 1 is queued leaves one send."
   },
   "failures": [],
   "failed": 0,
   "proof": [
     {
-      "criterion": "Mention delivery runs off the request path, in order per recipient within a live process (review round 4 finding 2): the delivery sweep never sends a live process's queued mention ahead of the recipient's earlier comments.",
-      "surface": "The load-test stack with two live envoy-dispatch processes on one database (A on 38777, B on 38778), Dispatch's ENVOY_URL through a 2 s round-trip proxy; ses-a's NATS subject read with $JS.API.STREAM.MSG.GET",
-      "command": "swap.sh head 2s; MAXWAIT=500 steal.sh 45 (45 comments to A, each mentioning only session:ses-a, back to back)",
-      "observed": "All 45 settled 190 s after the first post (a backlog of more than three leases); ses-a stores c1..c45 once each, in order; every attempt is attempt 1, none marked duplicate; no comment_fallback_copies row.",
-      "headSha": "74779becb2c8",
-      "negativeControl": "Round 11's build dc3ad918, same run: ses-a stores c30..c33 as c33, c30, c32, c31 - the sweep sent queued attempts a minute old while the lane was still sending earlier ones."
+      "criterion": "Review round 5 finding 1: a queued mention's claim does not keep comment.created deferred past about a minute.",
+      "surface": "POST /api/v1/issues/LGA-6/comments as a person on the local stack (listener at a 30 s round trip, so every send fails after its window); LGA-6 routed to the mentioned session:ses-x",
+      "command": "defer.sh head 40 (40 comments back to back on one lane; samples unpublished comment.created rows; counts ses-x's NATS copies)",
+      "observed": "Every comment.created was published within 63 s (p50 61 s) while its mention was still queued. All 40 attempts failed; 27 fallback rows were published and the rest got the route copy, so ses-x stores each comment exactly once. The same run on the pod before it was recreated gave the same numbers.",
+      "headSha": "5a26d3ab1b6f",
+      "negativeControl": "defer.sh r12 40 with round 12's build 74779bec on the same database: publish delay max 188 s, p50 97 s, because each comment.created waited for its send to fail."
     },
     {
-      "criterion": "Mention delivery is not lost and reaches each session once through a Dispatch kill and a rolling update, now that queued attempts hold claims.",
-      "surface": "The stack, a person's 8 comments on LGA-10 (routed to session:ses-a) mentioning ses-a/b/c; SIGKILL 0.3 s into stack.sh restart-dispatch's drain; a successor process beside one sent SIGTERM",
-      "command": "AS_PERSON=1 crash.sh r12person (listener up); STOP_LISTENER=1 AS_PERSON=1 crash.sh r12down (listener at 4 s, stopped after the restart); rolling.sh (successor up, SIGTERM to the old process after 6 comments x 3 mentions)",
-      "observed": "r12person: 24 attempts claimed at the kill, all sent 60-90 s later; each session stores each comment once; the 8 fallback rows settled unpublished. r12down: each comment once on ses-a, from 8 published fallback rows. Rolling: all 18 attempts sent once by the successor, the last about 2 minutes after the SIGTERM; ses-a received c3 before c2 (both resumed after the handoff, which the PR's order rule does not cover), ses-b and ses-c in order.",
-      "headSha": "74779becb2c8",
-      "negativeControl": "Round 6's head ab61c138 (round 6): with the listener down after a kill, the claimed comment never reached the route session."
+      "criterion": "Review round 5 finding 5: an API Retry while attempt 1 is queued leaves the recipient one copy, in either mode.",
+      "surface": "POST /api/v1/comments/{id}/deliveries as a person on the local stack (listener at 2 s; ses-y offers steer and aside)",
+      "command": "retry.sh head-aside aside; retry.sh head-steer steer (6 comments queue one lane; c6 is retried while its attempt 1 is pending and claimed)",
+      "observed": "Retry answers 201 with attempt 2 sent; attempt 1 is settled failed, 'not sent: a later attempt of this mention superseded it'; ses-y stores c6 once, in either mode, and c1-c5 once each.",
+      "headSha": "5a26d3ab1b6f",
+      "negativeControl": "retry.sh r12-aside aside on round 12's build: attempt 1 (steer) and attempt 2 (aside) are both sent, and ses-y stores c6 twice."
+    },
+    {
+      "criterion": "Review round 5 findings 3 and 4, and round 4's order rule: a recipient behind a lane backlog longer than a lease, with two live processes and the delivery sweep running, receives every comment once and in order.",
+      "surface": "Two envoy-dispatch processes on one database (38777 and 38778), listener at 2 s, 45 comments to ses-a",
+      "command": "steal.sh 45 (no route, session author); stealr.sh 45 (LGA-11 routed to ses-a); stealp.sh 45 (routed, person author)",
+      "observed": "The backlog settles about 187-190 s after the first post. In all three runs ses-a stores c1-c45 once each, in order, and process B sends nothing. In the person-authored routed run, 29 queued-past-a-lease attempts wrote fallback rows, all settled unpublished; comment.created was published within 65 s.",
+      "headSha": "5a26d3ab1b6f",
+      "negativeControl": "Round 12 recorded the same steal.sh run on round 11's build delivering c33 before c30-c32."
+    },
+    {
+      "criterion": "Review round 5 finding 2, and delivery through a kill and a rolling update: a stopping process hands its queued claims over at once, and every attempt is sent once.",
+      "surface": "The local stack: SIGKILL during shutdown (crash.sh), and SIGTERM with a successor process (rolling.sh)",
+      "command": "crash.sh r13person 1 150 (listener up); STOP_LISTENER=1 crash.sh r13down 1 170 (listener down after the restart); rolling.sh",
+      "observed": "Kill with the listener up: ses-a, ses-b and ses-c each get c1-c8 once; 8 fallback rows settled unpublished. Kill with the listener down: ses-a gets each comment once, from 8 published fallback rows. Rolling update: the old process releases its 27 queued claims at SIGTERM (27 pending and unclaimed at t+2 s; round 12 kept them claimed until they lapsed). The successor sends all 30 attempts once each to each session, in comment-creation order, including 4 comments committed during the drain; the last went out about 2 minutes after the SIGTERM.",
+      "headSha": "5a26d3ab1b6f",
+      "negativeControl": "Round 12's rolling run on 74779bec showed the queued attempts still claimed (pending/unclaimed=false) until the lease lapsed."
     }
   ],
-  "observations": [
-    "In the rolling run the four comments posted during the old process's SIGTERM were refused at connect (curl status 000), so the drain-window path was not exercised; main's lifetime model (#2396) closes the listener at SIGTERM.",
-    "A rolling update now delivers the old process's queued mentions up to about two minutes after its SIGTERM (claims refreshed until it exits, a lease to lapse, then a sweep pass); round 9's bound was lease plus one 30 s pass.",
-    "Round 10's /ws/live results and round 11's browser tests are not re-run: this round's runtime change is the mention sender, the sweep's owed rule and the outbox's fallback wait."
+  "notes": [
+    "Every red test passes at head (5 tests x 2 runs, go test -p 2 -parallel 4); none was modified this round.",
+    "CI: on 5a26d3ab every job but changes and pr-title was cancelled when I read it; the handoff head 18c05c99 reported no runs.",
+    "The pod was recreated during the round (02:10Z drain); the stack was rebuilt from the attached scripts and reseeded, and every check above ran after the rebuild."
   ]
 }
