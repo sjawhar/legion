@@ -1,5 +1,11 @@
 # Changelog
 
+## [12.0.1] - 2026-10-30
+
+### Changed
+
+- `dispatch-first`, which an OpenCode session reads as an instruction file, says that a result a person asked for is like a blocker: a document or artifact notifies nobody, so the document that holds the result ends with an ask block asking their next step, else a `dispatch ask`. Its rule that each ask and message stands alone is gone, since `dispatch-writing-specs` carries it where an ask is written.
+
 ## [9.8.0] - 2026-10-28
 
 ### Added

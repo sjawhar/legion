@@ -1,8 +1,0 @@
-kind: Added
-body: |-
-    `dispatch_answers` (`dispatch answers`), with no arguments: every answer and comment a person
-    wrote to this session in the last 72 hours, newest first, in full, the command the per-request
-    list names when it leaves older items out.
-time: 2026-10-28T10:08:11.409306065Z
-custom:
-    Issue: pr2376
