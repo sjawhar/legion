@@ -40,14 +40,39 @@ type StoredMessage struct {
 // permissions violation, when the connection's user may not make the read, reported as soon as the
 // server refuses it rather than once the wait runs out; and ctx's error when ctx ends first.
 func (c *Client) NextStoredMessage(ctx context.Context, subject string, seq uint64) (StoredMessage, error) {
-	request, err := json.Marshal(struct {
+	return c.storedMessage(ctx, struct {
 		Seq     uint64 `json:"seq"`
 		NextFor string `json:"next_by_subj"`
 	}{Seq: seq, NextFor: subject})
+}
+
+// LastStoredMessage reads the newest message the notification stream holds on a subject that
+// subject matches (wildcards allowed), with STREAM.MSG.GET and last_by_subj. The listener's kept
+// lanes are read this way: a role's kept subject and its drain cursor each hold the one message
+// that counts, and that is the newest. It is the same request NextStoredMessage makes, over the
+// same stored-message API subject (storedMessageAPI), so it needs no grant beyond the one the
+// listener already holds for that read.
+//
+// Its errors are NextStoredMessage's: the stream's own API errors as *nats.APIError, so errors.Is
+// matches nats.ErrMsgNotFound (the stream holds nothing on subject) and nats.ErrStreamNotFound (no
+// such stream); nats.ErrNoResponders when no JetStream answers; ErrPublishDenied when the
+// connection's user may not make the read; and ctx's error when ctx ends first.
+func (c *Client) LastStoredMessage(ctx context.Context, subject string) (StoredMessage, error) {
+	return c.storedMessage(ctx, struct {
+		LastFor string `json:"last_by_subj"`
+	}{LastFor: subject})
+}
+
+// storedMessage makes one stored-message read of the notification stream and reads its answer, for
+// NextStoredMessage and LastStoredMessage alike: request is the body each builds, naming the
+// message it wants. The stream's error answer comes back as the *nats.APIError it is, and an
+// answer that names neither a message nor an error is this package's own error.
+func (c *Client) storedMessage(ctx context.Context, request any) (StoredMessage, error) {
+	body, err := json.Marshal(request)
 	if err != nil {
 		return StoredMessage{}, err
 	}
-	reply, err := c.requestConfirmed(ctx, storedMessageAPI, request)
+	reply, err := c.requestConfirmed(ctx, storedMessageAPI, body)
 	if err != nil {
 		return StoredMessage{}, err
 	}
