@@ -2,43 +2,16 @@
   "schemaVersion": 1,
   "phase": "review",
   "issue": "INFRA-591",
-  "completed": "2026-10-30T07:34:26Z",
-  "decision": "changes_requested",
-  "round": 5,
-  "reviewedHead": "f779f7eebef1a9d42a3b983edf024a012577096b",
-  "codeHead": "629fe0eec6ec",
+  "completed": "2026-10-30T11:42:19Z",
+  "decision": "approved",
+  "round": 6,
+  "codeHead": "7d09eefb1310",
   "critical": 0,
-  "important": 2,
-  "minor": 2,
-  "previousRound": "Round 4's docs finding is fixed in 84299bf5: running-dispatch.md counts the event horizon's two connections. The rounds since (marks, writerFloor, the persisted horizon, the relay's first start, whoami's event_head on the live socket) are sound on the traces the deep review ran: a mark never stands above an id that can still commit, the first start publishes every event once in id order, and whoami's handover to the live feed misses and repeats nothing.",
-  "keyFindings": [
-    {
-      "severity": "important",
-      "file": "packages/envoy/internal/dispatch/api/events.go:201; packages/dispatch/web/src/api/query-client.ts:33",
-      "description": "authWhoami (routes/router.go:470-476) answers 503 EVENT_HEAD_UNAVAILABLE for every eventHead error: the new unproven case (errEventHeadUnproven) and also a failed database or horizon-pool read (writerFloor's error, events.go:188, :196). The app now retries EVENT_HEAD_UNAVAILABLE without limit (queryRetry), so a database outage leaves the page on its skeleton for ever instead of 'Couldn't reach Dispatch.' with Retry. This hides an error. The server answers EVENT_HEAD_UNAVAILABLE only for the unproven case and a different code for a failed read; the app retries only EVENT_HEAD_UNAVAILABLE without limit and every other error on its bounded rule; with a test of each on the server and in the app (the architect's requirement)."
-    },
-    {
-      "severity": "important",
-      "file": "packages/envoy/internal/dispatch/store/migrations/0145_event_horizon.up.sql:8",
-      "description": "main now holds 0145_events_person_words, 0146 and 0147. The migration runner refuses a set in which two files share a version, whole, before it touches the database (store/migrate_guard_test.go:57-81), so the merged tree migrates nothing and no Dispatch process boots. No text conflict shows it, and GitHub reports the PR mergeable. Forward-merge main and renumber to the next free version (0148 at main today), with its census file."
-    },
-    {
-      "severity": "minor",
-      "file": "packages/envoy/internal/dispatch/events/horizon.go:596",
-      "description": "writePersisted sets persistedAt only on success. After a failed write, every later observation is due again (h.safe > h.persistedSafe, persistedAt old), so the persist write runs every 10-250 ms instead of at most once a second, synchronously on the observing goroutine (the relay, the hub or a Safe/Await caller), each up to horizonPersistTimeout (2 s). Set persistedAt on failure too."
-    },
-    {
-      "severity": "minor",
-      "file": "packages/envoy/internal/dispatch/events/horizon.go:575",
-      "description": "The generation is checked only after the persist write ran. If a Reset (a truncated log) falls between the decision at :555 and the write, or a pre-reset observation is proven after the new log has refilled past its id, persistHorizonSQL pairs the old log's H with the new row's created_at, Persisted trusts it, and writerFloor's fallback can answer an id that is not final in the new log. Reset path only (e2e seed). Check the generation under h.mu immediately before the write, and do not write when it moved."
-    }
-  ],
-  "proseWhileThere": [
-    "store/pool.go:330-343: the horizon pool now also serves every whoami (Mark, the pg_locks read, Persisted), not only one observation and one diagnosis.",
-    "events/horizon.go:154: QueryRow is no longer 'stall diagnosis only'.",
-    "api/event_marks.go:22: add thins the whole list, not the older half.",
-    "the changelog fragment still names SSE and Last-Event-ID, which #2449 removed."
-  ],
-  "ci": "At code head 629fe0ee every job but changes and pr-title was still queued when this review was submitted; nothing is read green or red. Main's known red: packages/dispatch/e2e/close-withdraws-asks.e2e.ts:126.",
-  "thermo": "thermonuclear-deep-review at 629fe0ee: APPROVE on the five traces, minors adopted above. thermonuclear-code-quality at 629fe0ee: CHANGES, its F1 (persist retry) and F2 (reset persist) adopted; its duplication and dead-return items are maintainability and not raised under the cap."
+  "important": 0,
+  "minor": 0,
+  "previousRound": "All four round-5 findings are fixed, verified in the code at 7d09eefb. (1) whoami answers EVENT_HEAD_UNAVAILABLE only for api.ErrEventHeadUnproven and EVENT_HEAD_READ_FAILED for every other error (routes/router.go:480-484); the app retries only EVENT_HEAD_UNAVAILABLE without limit (query-client.ts:33, client.ts:289), and READ_FAILED ends at 'Couldn't reach Dispatch.' after two retries; tests on the server (whoami_test.go) and in the app (query-client.test.ts, e2e/shell.e2e.ts). (2) event_horizon is migration 0148, above main's 0147; the merge 7d09eefb's own resolution is only that rename and the changelog line. (3) writePersisted sets persistedAt after every try. (4) writePersisted re-checks the generation under h.mu before it writes, and persistHorizonSQL writes only while the event at H carries the created_at the observation read. The four prose items from round 5 are fixed.",
+  "reviewerProseFix": "ded84055: packages/envoy/cmd/dispatch/README.md:2039 and AGENTS.md:592 still said event_head is 'the newest committed event id' and that a head that cannot be read is EVENT_HEAD_UNAVAILABLE; both rows now name the final head and both 503 codes, as the contract comment and the changelog already do.",
+  "keyFindings": [],
+  "ci": "At code head 7d09eefb, green: lint, typecheck, test, pr-title, envoy-go, envoy-go-race, envoy-go-race-docs, dispatch, dispatch-browser-multiprocess and every other lane but pi-envoy. pi-envoy is red on two RPC queue tests ('a person's Send sent after five cards...', 'an RPC abort during a held model request...'); the PR touches no file of packages/pi-envoy, and the architect names it main's (#2376, run 41016236644, fixed by #2550). ci-ok is red with it and is not required. The approval waits for lint, typecheck, test and pr-title green at the head of this push, which changes only markdown and .legion/.",
+  "thermo": "thermonuclear-deep-review and thermonuclear-code-quality at 7d09eefb: both APPROVE, no blocking finding. code-quality's doc rows (README/AGENTS whoami) are fixed in ded84055; its horizon.go duplication of the newest-event read and horizon_test.go passing 1000 lines are maintainability, not raised under the architect's cap."
 }
