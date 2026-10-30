@@ -2,34 +2,26 @@
   "schemaVersion": 1,
   "phase": "review",
   "issue": "INFRA-562",
-  "completed": "2026-10-30T05:09:47Z",
-  "round": 7,
-  "scope": "Full review of the cutover the INFRA-63 architect chose (item 2 rides on main's #2449 delivery sweep, resumeOwedDeliveries; this PR's RunDeliveryResume and its lease deleted), the forward merge 30a70bc9 onto main de546ed2, migrations 0142-0145, and the old Fast-follow wording. Per the architect: the PR conflicts with main (which now holds 0142-0144), so no CI ran; do not hold the review for that.",
-  "reviewedHead": "8cf68ea957756d6f30170fb1cc7770fcd8e8dd24",
-  "codeHead": "c2378eb6b6e6",
+  "completed": "2026-10-30T08:18:32Z",
+  "round": 8,
+  "scope": "Narrowed by the INFRA-63 architect: the forward merge by fingerprint (the accepted diff plus only the conflict resolution and the renumbering), the six text fixes from round 7, and the required checks at the code head; approve if they hold.",
+  "reviewedHead": "79a62abe8f13b5b6f451465d12b72f2f808766d4",
+  "codeHead": "79a62abe8f13b5b6f451465d12b72f2f808766d4",
   "decision": "changes_requested",
   "critical": 0,
   "important": 1,
-  "minor": 6,
-  "accepted": {
-    "cutover": "Main's sweep keeps every property this PR built. (1) It never sends beside a live sender or a take-over retry: owedMessageAttempt/owedCommentAttempt require claimLapsed and an attempt over a minute old (delivery_sweep.go:67-81); the claim is re-checked under the row lock (message_delivery.go:367-382, comment_delivery.go:196-213); takeoverRetry renews claimed_at before each try; listener_takeover_test.go:386 runs a sweep pass during the wait and expects 1:pending. (2) It sends the owed attempt or nothing (resumeOwedDelivery binds owed.attempt, delivery_sweep.go:184-212). (3) Attempts refused for good are settled failed, not sent. (4) A routed comment's attempt 1 keeps its resolution: the sweep loads comment.created from the database, and mentionsDecideRoutes reads the map form; comment_mention_takeover_test.go:209 drives it through resumeOwedDeliveries. (5) Urgency is read from the row; main's sweep had passed nil (TestTheDeliverySweepResumesAnAttemptWithTheUrgencyItRecorded).",
-    "removal": "Nothing of RunDeliveryResume remains outside .legion/ (no code, lease name, DISPATCH_TEST_DELIVERY_RESUME_INTERVAL, allowlist entry). leasePoolSize 13 and dispatchConnectionsPerPod 87 have no diff against main de546ed2. Migration 0142 adds only the urgency column and its not-valid check; main's 0138_pending_delivery_indexes serves the sweep.",
-    "merge": "30a70bc9 keeps both sides: main's /api/v1/live/_test/{disconnect,rotate} now fan out to every process, writes/_test/slow stays local, Background{Wait, ResumeDeliveries} kept, issueClaimedNow = greatest(updated_at, now()) beside main's issueUpdatedNow.",
-    "item2Acceptance": "At production's one-minute sweep with no override: tester round 11 saw both killed-sender attempts delivered once, 1m59s after SIGKILL; with the sweep switched off the kill rows read [1:pending] after 2m30s.",
-    "duplicatePathWording": "Now stated: packages/envoy/AGENTS.md:3327-3334 names a process stopping between a mention's claim and its send, the outbox's copy once the claim lapses, and the delivery sweep's resend."
+  "minor": 0,
+  "scopeResults": {
+    "forwardMerge": "Faithful. I compared the PR's patch before the merge (de546ed2 -> c2378eb6) with its patch after (3c2691a7 -> 6256e014), file by file. The only differences are: the renumbering 0142-0145 -> 0145-0148, with file headers and references in delivery.go, issue_route_status.go, ratelimit.go, delivery_bound_send_test.go, README.md, AGENTS.md and the fragments; and the six text fixes. No other code line differs. go vet (with and without -tags multiprocess) and gofmt are clean.",
+    "textFixes": "All six done in 6256e014. (2) Fragment 103003 names /api/v1/live/_test/disconnect and /rotate. (3) Fragment 103010 says 'a nullable column with a check added not valid, and three new tables' and that either release's sweep resumes. (4) main.go's leased-loop list drops the delivery resume and adds the term-statistics refresh. (5) messages.go, message_delivery.go and fragment 103005 say the no-attempt recovery serves only messages an earlier release stored. (6) AGENTS.md's stranded-attempt paragraph points to 'The delivery sweep' and keeps only requested_by, urgency and ACCEPT_STALE. (7) delivery_sweep.go states the worst-case pass of about 21 minutes under a take-over.",
+    "proseFixOfMine": "79a62abe corrects packages/envoy/AGENTS.md:2745, which still named route_roster's migration 0143 after the renumbering; it is 0146. Docs only; it is the head reviewed here."
   },
-  "thermonuclear": {
-    "deepReview": "Verdict: APPROVE at c2378eb6 (four Minor stale-text findings)",
-    "codeQuality": "Verdict: APPROVE at c2378eb6 (five Minor maintainability/text findings)"
-  },
-  "ci": "No pull_request CI at c2378eb6: GitHub reports CONFLICTING. The next head runs it.",
+  "ci": "At 79a62abe: lint, test and pr-title success, typecheck skipped (counts as passing); envoy-go success (job 123939641979, internal/dispatch/api ok 538.598 s); envoy-infra-go success; dispatch-multiprocess in progress at 08:18Z. My push cancelled 6256e014's runs, so 79a62abe, which has the same code plus one AGENTS.md line, is the code head CI ran.",
   "keyFindings": [
-    {"severity": "important", "file": "packages/envoy/internal/dispatch/store/migrations/0142_message_delivery_urgency.up.sql", "description": "main now holds 0142_item_blocks, 0143_comments_item_blocks_trigger and 0144_messages_item_blocks_trigger, so this PR's 0142-0145 collide and pgmigrate refuses the shared versions. Forward-merge main, keep both sides, renumber this PR's four migrations above main's highest with every reference (file headers, delivery.go, issue_route_status.go, ratelimit.go, AGENTS.md, README.md, the pr2387 fragments), and push without the skip-checks trailer so CI runs."},
-    {"severity": "minor", "file": "packages/envoy/.changes/unreleased/pr2387-Changed-20261028-103003.yaml:5", "description": "Names POST /api/v1/events/_test/disconnect and /api/v1/delivery/_test/disconnect, which main's #2449 removed (live_events_test.go:787 and live_socket_test.go:955 expect 404). Name /api/v1/live/_test/disconnect and /api/v1/live/_test/rotate."},
-    {"severity": "minor", "file": "packages/envoy/.changes/unreleased/pr2387-Fixed-20261028-103010.yaml:3", "description": "Says the migrations add 'two indexes'; none of them creates an index now. Line 5's 'only this release's processes ... resume stranded deliveries' is also stale, since the resume is main's sweep."},
-    {"severity": "minor", "file": "packages/envoy/cmd/dispatch/main.go:394", "description": "The leased-loop list still names 'the delivery resume' and omits the term-statistics refresh, which takes a lease; match the list in README.md:647-653."},
-    {"severity": "minor", "file": "packages/envoy/internal/dispatch/api/messages.go:180", "description": "With attempt 1 written in the transaction that stores a message, main's no-attempt recovery (owedKeyedSend, openFirstMessageDeliveryAttempt) serves only rows the release before 0142 wrote. messages.go:180-181, :319-320, message_delivery.go:692-693 and fragment pr2387-Fixed-20261028-103005.yaml:8 ('nothing would ever send') describe it as a live path or as absent. Say what serves only old rows."},
-    {"severity": "minor", "file": "packages/envoy/AGENTS.md:1467", "description": "Restates the sweep's rules (72 h horizon, bound claim, never opens an attempt) that 'The delivery sweep' section (AGENTS.md:2914-2947) already states. Keep only what this PR adds (requested_by fallback, urgency from the row, the ACCEPT_STALE card) and point to that section."},
-    {"severity": "minor", "file": "packages/envoy/internal/dispatch/api/delivery_sweep.go:51", "description": "No comment bounds a pass now that each send may retry through a listener take-over (about 12 s window plus the client's 5 s): 100 attempts per kind over broadcastDeliveryWorkers can hold the suggestion-outcomes lease for minutes during a take-over. State that bound beside deliverySweepBatch."}
+    {
+      "severity": "important",
+      "file": "packages/envoy/internal/dispatch/store/migrations/0145_message_delivery_urgency.up.sql",
+      "description": "After the implementer's merge (base 3c2691a7), main added 0145_events_person_words, 0146_comment_deliveries_session and 0147_message_deliveries_session_created (#2376 at 06:48Z and the commits after it). This PR's 0145, 0146 and 0147 now share versions with them, and pgmigrate refuses that (internal/pgmigrate/set.go:138). GitHub reports MERGEABLE because the file names differ. Merge main forward again, keep both sides, renumber this PR's four migrations above main's highest (0148-0151 today) with every reference, and push without the skip-checks trailer. main's 0146 and 0147 add indexes on comment_deliveries and message_deliveries, the tables this PR writes; check that nothing conflicts with them."
+    }
   ]
 }
