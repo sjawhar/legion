@@ -1,0 +1,176 @@
+{
+  "schemaVersion": 1,
+  "phase": "test",
+  "issue": "INFRA-264",
+  "completed": "2026-10-30T09:05:00Z",
+  "implementerProof": {
+    "verdict": "verified",
+    "how": "Each of the ten proofs in .legion/INFRA-264/implement.json was re-driven independently, not re-run from the implementer's rig: a second DPoP/RFC 8693 client written from RFC 9449 and RFC 8693 with the Go standard library alone (ES256 JWS, RFC 7638 thumbprint, jti/htm/htu/iat/ath), never internal/broker/helper, against the same live pair (packages/envoy/scripts/dev-broker.sh at http://127.0.0.1:65136 and packages/dispatch e2e/local-instance.ts at http://127.0.0.1:16410, both on the issue pod's own Postgres). Every status, code and message the handoff records was reproduced, and the broker-side tests it names were run against the real cmd/broker binary. Two things the handoff claims only by argument were driven as well and hold: the fifteen-second re-resolution of an open stream (a /ws/live socket under a broker token stayed open 45 s, three heartbeats, with two frames and no close) and that brokertoken.Presented does not eat a multipart body (a multipart artifact upload under a broker token answered 201). The eleventh proof the architect required (the dev box token half of the revocation line) is absent from the handoff and from the pull request body; it is recorded as a failure below, and the behaviour itself was driven here and holds."
+  },
+  "failed": 2,
+  "failures": [
+    {
+      "criterion": "The change can be reviewed and merged: the base branch's required checks (lint, typecheck, test — pr-and-main.yaml, no path filter) run on the head under test.",
+      "evidence": "No workflow run has ever existed for this pull request. `gh run list --repo sjawhar/legion --branch legion/INFRA-264 --limit 30` prints nothing; `gh api repos/sjawhar/legion/commits/<sha>/check-runs` is empty at both the code head e9d7da2e8848f33dc4c9e3c97793975e7a966a2d and the pull request head e48e947fc0b69754d22d0e5da54c9be391726ed8; `gh pr checks 2541` answers 'no checks reported on the legion/INFRA-264 branch'; `gh api repos/sjawhar/legion/commits/e48e947f.../status` answers state=pending with 0 statuses. The cause is that the pull request conflicts with its base: `gh pr view 2541 --json mergeable,mergeStateStatus` answers mergeable=CONFLICTING, mergeStateStatus=DIRTY, and GitHub starts no run triggered `on: pull_request` at a head that conflicts (skill://legion-worker/references/skip-checks-trailer.md states this; pull_request is this branch's only trigger, since envoy-and-contracts.yaml and pr-and-main.yaml take push on main alone). The conflict is real and wide: main has moved 62 commits past the fork point 8a911ecca3a5, and seventeen files are changed on both sides, among them packages/envoy/internal/dispatch/api/{server.go,routes_table.go,issue_create.go}, internal/dispatch/docs/websocket.go, internal/dispatch/model/model.go, cmd/dispatch/main.go, packages/contracts/src/{dispatch-api.ts,dispatch-tools.ts} and packages/envoy-client/src/dispatch-execute.ts. So nothing static — lint, types, the Go and Bun suites, the private-name check in CI, the worker-image and docs lanes — has ever judged this change, a base that requires a check will not merge a head whose checks never ran, and a pull-request body edit re-triggers nothing here (the head also ends with the `skip-checks: true` trailer). Remedy: bring the base in on this real conflict (skill://legion-worker/references/conflicts-and-rewrites.md, 'Reintegrating the base'), push that head carrying no trailer so the required checks run, and keep the handoff-only push separate. The forward merge moves the unchanged-diff fingerprint, so a full test round follows it rather than a bare-gate re-check.",
+      "redTest": "none: this is the state of the branch on GitHub, not a behaviour a test in this repository can pin, and the deployment instructions forbid a test that reads a workflow file or checks a check."
+    },
+    {
+      "criterion": "A revoked token stops working within the cache's few seconds, proven on the dev box token as well as on an exchanged one (INFRA-264; plan P14 as the architect amended it in dispatch://INFRA-264/comment/f968ddb6 point 4: 'The dev box token proof stays too').",
+      "evidence": "The implement handoff's ten proofs and the pull request body carry only the exchanged-token half (POST /v1/oauth/revoke, RFC 7009). Neither names a machine login, POST /v1/launcher-credentials/{id}/revoke-by-approver, or a token whose project_scope is person. The behaviour itself is sound — this phase drove it end to end (proof entry 'revocation, dev box token' below): a device-authorization machine login approved through agent-secrets-devrelay, its machine access token exchanged for session ada-devbox (introspection: project_scope person, no project), accepted at whoami, then revoked by approver, and Dispatch refused it at t=+5.2 s having accepted it at t=+4.7 s. What is missing is the implementer's own record of it, which the architect asked for by name; add the eleventh proof entry and the pull request body's matching clause. Note for whoever drives it next: `agent-secrets machine login` cannot run in this pod at all — the helper socket answers PEER_UNIDENTIFIED: SO_PEERPIDFD: protocol not available under gVisor — so the login has to be driven as the four HTTP steps (device_authorization with an RFC 9101 request object and dpop_jkt, devrelay machine-approve, the device_code redemption, then the token exchange with subject_token_type=urn:ietf:params:oauth:token-type:access_token).",
+      "redTest": "none: no behaviour is wrong, so there is nothing to pin red. What is missing is a recorded proof."
+    }
+  ],
+  "proof": [
+    {
+      "criterion": "A caller presenting a broker-issued token is accepted, and Dispatch reports the session, the person and the project (INFRA-264).",
+      "surface": "The live pair: packages/envoy/scripts/dev-broker.sh (real cmd/broker, real dev-oidc-issuer, its own Postgres database) and packages/dispatch `bun run dispatch:local` (real Go server, real Postgres, the production SPA build), driven by a second DPoP client written from the RFCs with the Go standard library alone.",
+      "command": "dpopdrv exchange --subject-token-file $DEV_BROKER_DIR/exchange-token --session example-worker-session; then GET http://127.0.0.1:16410/api/v1/whoami under 'Authorization: DPoP <token>' with a proof carrying jti/htm/htu/iat/ath",
+      "observed": "200 {\"kind\":\"agent\",\"owner\":\"ada@example.com\",\"project\":\"EXAMPLE\",\"service\":null,\"session\":\"example-worker-session\"} — every field from the token; the request carried no actor and no body.",
+      "headSha": "e48e947fc0b69754d22d0e5da54c9be391726ed8",
+      "negativeControl": "The same token under Bearer → 401 UNAUTHORIZED 'invalid bearer token'; under DPoP with no proof header → 401 BROKER_TOKEN_PROOF_INVALID; with the proof's ath removed → 401 BROKER_TOKEN_PROOF_INVALID; with an ath of another token → 401 BROKER_TOKEN_PROOF_INVALID; with htu naming another origin (http://evil.example/api/v1/whoami) → 401 BROKER_TOKEN_PROOF_INVALID; with typ jwt rather than dpop+jwt → 401 BROKER_TOKEN_PROOF_INVALID; one jti presented twice → the second 401 BROKER_TOKEN_PROOF_INVALID (the replay store); iat ten minutes either side of now → 401 BROKER_TOKEN_PROOF_INVALID. 'Authorization: dpop <token>' lower-cased is accepted, as the scheme is case-insensitive."
+    },
+    {
+      "criterion": "A call whose actor names a session the token does not is refused (INFRA-264).",
+      "surface": "The same live pair: POST /api/v1/issues/EXAMPLE-1/comments with one broker token, varying the body's actor.",
+      "command": "POST /api/v1/issues/EXAMPLE-1/comments under DPoP four times: no actor; actor {kind session, id example-worker-session}; actor {kind session, id ses-not-mine}; actor {kind user, id alice}",
+      "observed": "No actor → 201, author {\"kind\":\"session\",\"id\":\"example-worker-session\",\"owner\":\"ada@example.com\",\"project\":\"EXAMPLE\"}; the matching actor → 201 with the same author; another session → 403 ACTOR_SESSION_MISMATCH 'this request's credential acts for session example-worker-session; its actor names another writer'; a user actor → the same 403.",
+      "headSha": "e48e947fc0b69754d22d0e5da54c9be391726ed8",
+      "negativeControl": "The absent and matching actors both write in the same run, so the refusal is the mismatch and not the presence of an actor."
+    },
+    {
+      "criterion": "A token whose key the caller cannot prove it holds is refused (INFRA-264).",
+      "surface": "The same live pair: GET /api/v1/whoami proved by a second ES256 key.",
+      "command": "dpopdrv request GET /api/v1/whoami --proof-key <a freshly generated P-256 key>, then the same request with the token's own key",
+      "observed": "The other key → 401 BROKER_TOKEN_KEY_MISMATCH 'the DPoP proof's key is not the key this access token is bound to'; the token's own key → 200 with the session, person and project.",
+      "headSha": "e48e947fc0b69754d22d0e5da54c9be391726ed8",
+      "negativeControl": "The accepted half above, in the same run, so the refusal is the key and not the token."
+    },
+    {
+      "criterion": "A revoked token stops working within the cache's few seconds, and a refusal is never served from a cache — the exchanged-token half (INFRA-264, the architect's point 4).",
+      "surface": "The same live pair, with a counting reverse proxy between Dispatch and the broker so every introspection Dispatch makes is observable from outside Dispatch (Dispatch's DISPATCH_AGENT_SECRETS_URL pointed at it).",
+      "command": "whoami (caches the affirmative answer at t=0), then POST /v1/oauth/revoke at the broker as the dispatch caller (form token=<access token>&token_type_hint=access_token&client_id=dispatch-token-exchange), then whoami every half second",
+      "observed": "Accepted at t=+0.0 through +4.7 s, 401 BROKER_TOKEN_NOT_ACTIVE at t=+5.3 s — the five-second affirmative cache and no longer. The whole window cost two introspections, the cached one and the one that saw the revocation. A refusal is never cached: one unknown token presented twice cost two introspections and answered 401 BROKER_TOKEN_NOT_ACTIVE twice. The cache and its single flight were measured in the same way: five presentations of a fresh token within 1.5 s cost one introspection, a sixth after five seconds cost a second, and ten concurrent presentations of a fresh token cost exactly one introspection with all ten answered 200.",
+      "headSha": "e48e947fc0b69754d22d0e5da54c9be391726ed8",
+      "negativeControl": "The same revocation presented by the introspection-only caller → 403 ACCOUNT_LACKS_POWER 'the caller \"listener\" may not call POST /v1/oauth/revoke', and whoami stayed 200, so the refusal is the power and not the request."
+    },
+    {
+      "criterion": "A revoked token stops working within the cache's few seconds — the dev box token half (INFRA-264; the architect's point 4, which the implement handoff does not carry).",
+      "surface": "The same live pair, driving a person's machine login by hand: POST /v1/oauth/device_authorization with an RFC 9101 request object (typ agent-secrets-request+jwt, launcher_credential detail, login_hint ada@example.com) and dpop_jkt, approved with agent-secrets-devrelay machine-approve, redeemed for the machine access token, then exchanged for a Dispatch token under session ada-devbox.",
+      "command": "POST /v1/oauth/token (token-exchange, subject_token_type=urn:ietf:params:oauth:token-type:access_token, session=ada-devbox); GET /api/v1/whoami; POST /v1/launcher-credentials/4f947816-2ad4-40be-8212-667e31780313/revoke-by-approver as the dispatch caller; then whoami every half second",
+      "observed": "Introspection: {\"active\":true,\"session\":\"ada-devbox\",\"person\":\"ada@example.com\",\"project_scope\":\"person\",\"client_id\":\"dispatch-token-exchange\"} with no project. whoami → 200 {\"kind\":\"agent\",\"owner\":\"ada@example.com\",\"project\":null,\"service\":null,\"session\":\"ada-devbox\"}, and that token wrote both CORE-1 and EXAMPLE-1 (201 each), which is the documented rule: a person-scoped token carries no project and the project check is a no-op for it. The revoke answered {\"state\":\"revoked\"}; Dispatch accepted at t=+4.7 s and refused at t=+5.2 s with 401 BROKER_TOKEN_NOT_ACTIVE.",
+      "headSha": "e48e947fc0b69754d22d0e5da54c9be391726ed8",
+      "negativeControl": "The same revoke-by-approver presented by the introspection-only caller → 403 ACCOUNT_LACKS_POWER naming that caller and that route, with the token still accepted afterwards."
+    },
+    {
+      "criterion": "The document editor's live connection no longer accepts a shared bearer, and a person's own connection still edits (INFRA-264).",
+      "surface": "The live Dispatch: GET /ws/doc/{document} upgraded three ways with curl --http1.1, and the repository's own browser suite in a real Chromium against the production SPA build.",
+      "command": "Upgrade /ws/doc/cd16858b-f577-44e9-a790-394cd460fc17 with 'Authorization: Bearer e2e-token' and the old X-Dispatch-Actor header; with a signed-in person's cookie; with a broker token under DPoP. Then `bunx playwright test --config e2e/playwright.config.ts --project=chromium e2e/doc.e2e.ts e2e/collab-cursor.e2e.ts` against the same instance.",
+      "observed": "The deployment's shared token → 401 Unauthorized; a broker token → 401 Unauthorized; the person's cookie → 101 Switching Protocols. The browser suite: 17 of 17 rows passed in 1.7 m, two people editing one document live, their cursors, named versions, the diff, an agent edit landing in an open editor, reconnection after a dropped transport. `grep -rn 'X-Dispatch-Actor'` over the tree finds the name in packages/envoy/CHANGELOG.md and nowhere else.",
+      "headSha": "e48e947fc0b69754d22d0e5da54c9be391726ed8",
+      "negativeControl": "The same shared token on the HTTP API in the same run → 200 at /api/v1/whoami, so the socket's 401 is the deleted door and not a wrong token."
+    },
+    {
+      "criterion": "A write to an object of a project the token does not cover is refused and names both projects; the same call against its own project succeeds; a write that belongs to no project is refused to a project-scoped token (INFRA-265).",
+      "surface": "The same live pair, with two projects (EXAMPLE, which the token names, and the seed's CORE) and one object of every addressing kind in each.",
+      "command": "Under one EXAMPLE-scoped token: POST /api/v1/issues/{EXAMPLE-1,CORE-1}/comments; PATCH /api/v1/issues/CORE-1; POST /api/v1/comments/{a CORE comment}/reply; POST /api/v1/asks/{a CORE ask}/{resolve,answer}; POST /api/v1/artifacts/{a CORE document}/versions; POST /api/v1/projects/CORE/artifacts; POST /api/v1/issues with project CORE and with project EXAMPLE; POST /api/v1/projects; POST /api/v1/broadcasts",
+      "observed": "Its own project → 201 (a comment) and 201 (EXAMPLE-2, the issue create, whose project the body names). Every CORE address → 403 PROJECT_SCOPE 'this request's credential may write project EXAMPLE; this write belongs to project CORE', one for each of the issue-key, comment-id, ask-id, artifact-id and project-key kinds. POST /api/v1/projects → 403 PROJECT_SCOPE_DEPLOYMENT naming the route; POST /api/v1/broadcasts → the same. An id that names nothing (an unknown uuid, a non-uuid) is left to its handler and answers what it always answered, so the check never turns an unknown id into an answer about which projects exist.",
+      "headSha": "e48e947fc0b69754d22d0e5da54c9be391726ed8",
+      "negativeControl": "In the same run a signed-in person's cookie created both projects and their issues and held the document socket, and the shared token answered 200 at whoami: the check is a no-op for every credential that names no project. The route table's own walk carries the other direction — `go test ./internal/dispatch/api -run TestEveryMutatingRouteIsClassed` passes, and its two sub-tests are the negative control, failing on a fixture with an unclassed mutating row and on one classed as a project's write whose address names no object."
+    },
+    {
+      "criterion": "A project-scoped token reaches nothing it should not through a route classed as the calling session's or the deployment's (INFRA-265, read as an attacker rather than as a table).",
+      "surface": "The same live pair: every scopeSession row a session caller can address, driven across sessions and projects.",
+      "command": "Under the EXAMPLE token: POST /api/v1/me/agent-tokens; POST /api/v1/agents/{another session}/messages; POST /api/v1/agents/{another session}/artifacts; PUT /api/v1/me/issues/CORE-1/state; POST /api/v1/messages/{a direct message}/reply",
+      "observed": "403 HUMAN_ONLY for the personal-token mint, for a message into another session's conversation and for the user state; 400 ARTIFACT_INPUT for the conversation upload; 403 REPLY_FORBIDDEN for the delivery reply. No path from a project-scoped pod token to an unscoped credential or to another session's conversation.",
+      "headSha": "e48e947fc0b69754d22d0e5da54c9be391726ed8",
+      "negativeControl": "The same calls as the signed-in person succeed in the seed (the instance's own seeding makes them), so the refusals are the caller's standing and not a broken route."
+    },
+    {
+      "criterion": "Dispatch's unauthenticated path cannot spend the people's approval budget (plan P5), and the broker is never asked twice for one answer.",
+      "surface": "The same live pair with the counting proxy between Dispatch and the broker.",
+      "command": "Forty presentations of forty distinct unknown tokens from one source address, counting the introspections that reached the broker",
+      "observed": "31 reached the broker (31 × 401 BROKER_TOKEN_NOT_ACTIVE) and 9 were refused 401 BROKER_TOKEN_RATE_LIMITED without the broker being asked at all; the bound is the per-source-address bucket, spent inside the single flight.",
+      "headSha": "e48e947fc0b69754d22d0e5da54c9be391726ed8",
+      "negativeControl": "The honest caller in the same stack is unaffected: ten concurrent presentations of one live token cost one introspection and all ten answered 200."
+    },
+    {
+      "criterion": "A broker outage refuses a broker-token caller rather than quietly unscoping it (the project check reads the caller itself, so this is where it could fail open).",
+      "surface": "The same live pair with the broker stopped.",
+      "command": "With cmd/broker killed: GET /api/v1/whoami; POST /api/v1/issues/EXAMPLE-1/comments; POST /api/v1/issues/CORE-1/comments; POST /api/v1/projects — all under a token minted before the outage",
+      "observed": "503 BROKER_UNAVAILABLE 'the secrets broker cannot be reached; try again in a minute' on every one, the write to its own project included, so no write runs unscoped while the broker is down.",
+      "headSha": "e48e947fc0b69754d22d0e5da54c9be391726ed8",
+      "negativeControl": "In the same outage the shared token and a person's cookie both answered 200 at /api/v1/whoami, so the 503 is the broker-token branch alone."
+    },
+    {
+      "criterion": "A pod cannot obtain a token naming a session of another issue, a relaunch is never refused, and a fixed-session account survives a rollout (INFRA-382).",
+      "surface": "The real cmd/broker binary against a real Postgres, and the live dev stack.",
+      "command": "BROKER_TEST_DATABASE_URL=… go test -count=1 -run TestAPodWritesOnlyUnderASessionRegisteredForIt -v ./cmd/broker; and go test -tags multiprocess -count=1 -run TestAFixedSessionNameAcrossARollout -v ./cmd/broker",
+      "observed": "Both pass. The registered pod exchanges (200); a second pod uid of the same account registered for the same name — the relaunch — exchanges too; an unregistered third pod uid is 400 invalid_grant 'No registration says this pod may write under the session name …. A pod writes under a session name its deployment registered for it'; registering that third pod answers it. The rollout test's four parts pass, including a fixed-session entry whose pods need no registration and the stranger refused the fixed name. The live stack showed the same refusal by hand.",
+      "headSha": "e48e947fc0b69754d22d0e5da54c9be391726ed8",
+      "negativeControl": "The identical request naming the session the dev script registered for that pod mints a token in the same run. The real-pod relaunch stays with dispatch://INFRA-267 by the architect's ruling (dispatch://INFRA-264/comment/f968ddb6 point 1)."
+    },
+    {
+      "criterion": "The pull request body states exactly what the session binding holds and what it does not (INFRA-382).",
+      "surface": "The pull request body's section 'What the session binding holds, and what it does not (INFRA-382)' read against the code it describes.",
+      "command": "Each of its five sentences read against packages/envoy/internal/broker/exchange/exchange.go:295-330 and packages/envoy/internal/broker/oauthstore/exchange.go:49-63",
+      "observed": "All five hold: the principal is the account (accountPrincipal at :323, so a registered successor keeps the name); Instance is set only for an entry that fixes no session (:325-327), so the registration is the only thing separating two pods of one account; a fixed entry answers no Instance and needs none (:304-306); the token is verified offline, so the broker asks the cluster nothing (:295-296); PodSessionRetention is 24 hours from each write (oauthstore/exchange.go:63), which is the window a daemon that stops registering costs its pods.",
+      "headSha": "e48e947fc0b69754d22d0e5da54c9be391726ed8",
+      "negativeControl": "The claim the body does not make is the one the code does not support: nothing there says a deleted pod's token stops working, and the code shows it does not."
+    },
+    {
+      "criterion": "An account listed only for introspection is refused approve, deny and both revokes by name, and listing a second account cannot silently widen the first (INFRA-401).",
+      "surface": "The real cmd/broker binary with two listed accounts, and the live dev stack's two callers.",
+      "command": "BROKER_TEST_DATABASE_URL=… go test -count=1 -run TestAListedAccountReachesOnlyItsOwnRoutes -v ./cmd/broker; go test -run TestEveryAccountRouteDeclaresItsPower -v ./internal/broker/api; and by hand against the live broker as the listener token",
+      "observed": "Twenty-two subtests pass: the listener caller is 403 ACCOUNT_LACKS_POWER on every relay route, naming itself and the route, reaches introspection, and the dispatch caller reaches all eleven. By hand the listener token was refused POST /v1/oauth/revoke and POST /v1/launcher-credentials/{id}/revoke-by-approver with the same code and message while the dispatch token carried both out. Every accountAuth row declares a power (eleven subtests).",
+      "headSha": "e48e947fc0b69754d22d0e5da54c9be391726ed8",
+      "negativeControl": "TestEveryAccountRouteDeclaresItsPower fails on a row that declares none and api.Register refuses to mount such a table; a caller name BROKER_API_ACCOUNTS gives that the broker does not know refuses the boot."
+    },
+    {
+      "criterion": "Account authentication verifies through the same key cache with its minimum refresh; a flood of unknown-key tokens from many addresses costs no more fetches than that interval allows; a legitimate caller is answered throughout; a rotation is still picked up (INFRA-402).",
+      "surface": "The broker's own account-authenticated routes with a counting test issuer, and the oidc package's suite.",
+      "command": "go test -count=1 -run 'Flood' -v ./internal/broker/api; go test -count=1 ./internal/oidc/...",
+      "observed": "All pass: TestAForgedAccountTokenFloodFromManyAddressesCostsOneFetchPerMinute, TestOneAddressFloodingItsLimitLeavesOthersTheirRereads (the legitimate caller during the flood), TestAForgedAccountTokenFloodIsLimitedByAddress and TestAForgedAccountTokenFloodStopsReachingTheVerifier, and the oidc suite with the rotation and the issuer-unavailable classes.",
+      "headSha": "e48e947fc0b69754d22d0e5da54c9be391726ed8",
+      "negativeControl": "TestAForgedAccountTokenFloodCostsAFetchEachWithoutTheKeyCachesMinimumRefresh is the control and passes: the identical flood against a key source whose MinRefresh is zero costs a read per address."
+    },
+    {
+      "criterion": "The private-name check passes (the repository's own required check).",
+      "surface": "The repository's own script, run over this working copy.",
+      "command": "bash .github/scripts/check-private-names.sh",
+      "observed": "exit 0 — 'no file or path names the private deployment repository or the company, and no text names a private internal host or a Tailscale MagicDNS host (6217 files in the repository)'.",
+      "headSha": "e48e947fc0b69754d22d0e5da54c9be391726ed8",
+      "negativeControl": "none needed: the script's own refusal path is the repository's, not this change's."
+    }
+  ],
+  "acceptanceLines": {
+    "note": "The twenty-two rows of the plan's section 5 table (dispatch://INFRA-264/artifact/plan-md@v1), each checked against the implement handoff and re-driven here. 'implementer' says whether the handoff carried a proof of it.",
+    "lines": [
+      { "line": "A caller presenting a broker-issued token is accepted, and Dispatch reports the session, the person and the project (264)", "implementer": "proof 1", "tester": "verified" },
+      { "line": "A call whose actor names a session the token does not is refused (264)", "implementer": "proof 2", "tester": "verified" },
+      { "line": "A token whose key the caller cannot prove it holds is refused (264)", "implementer": "proof 3", "tester": "verified" },
+      { "line": "A revoked token stops working within the cache's few seconds, and a refusal is never served from a cache (264; P14 as amended) — exchanged token", "implementer": "proof 4", "tester": "verified" },
+      { "line": "The same line's dev box token half ('The dev box token proof stays too')", "implementer": "absent", "tester": "verified here, recorded as failure 2" },
+      { "line": "The document editor's live connection no longer accepts a shared bearer (264)", "implementer": "proof 5", "tester": "verified, with the browser suite's 17 document rows as the control" },
+      { "line": "A write to an issue of a project the token does not cover is refused and names the project; the same call against its own project succeeds (265)", "implementer": "proof 6", "tester": "verified across every addressing kind" },
+      { "line": "Every write route is covered (265)", "implementer": "not in the proof array", "tester": "verified: TestEveryMutatingRouteIsClassed and its two negative-control sub-tests pass" },
+      { "line": "A write that belongs to no project is refused to a project-scoped token (265)", "implementer": "proof 6", "tester": "verified (POST /api/v1/projects and POST /api/v1/broadcasts)" },
+      { "line": "A browser session, which carries no project, is unaffected (265)", "implementer": "proof 10 (576 of 905 chromium rows, one unrelated timeout)", "tester": "verified on the document surface this change touches: 17 of 17 rows of e2e/doc.e2e.ts and e2e/collab-cursor.e2e.ts pass; the suite whole is CI's, and CI has never run (failure 1)" },
+      { "line": "A pod cannot obtain a token naming a session of a different issue of its own project, and the refusal names the reason (382)", "implementer": "proof 7", "tester": "verified" },
+      { "line": "A pod that resumes its own issue's session after a relaunch is not refused (382; departure 4)", "implementer": "proof 7", "tester": "verified at the broker; the real-pod relaunch is dispatch://INFRA-267's by the architect's ruling" },
+      { "line": "The next run of a fixed-session workflow, and the replacement pod of a fixed-session account, both succeed (382)", "implementer": "not in the proof array", "tester": "verified: TestAFixedSessionNameAcrossARollout (multiprocess) passes, four parts" },
+      { "line": "The pull request body states exactly what the binding holds and what it does not (382)", "implementer": "the body carries the paragraph", "tester": "verified sentence by sentence against the code" },
+      { "line": "An account listed only for introspection is refused approve, deny and both revokes, by name, against the running binary (401)", "implementer": "proof 8", "tester": "verified, and by hand against the live broker" },
+      { "line": "Listing a second account cannot silently widen what the first may do (401)", "implementer": "proof 8's negative control", "tester": "verified: TestEveryAccountRouteDeclaresItsPower passes" },
+      { "line": "A reader of the configuration sees powers rather than names (401)", "implementer": "the body's table", "tester": "verified: the BROKER_API_ACCOUNTS comment in internal/broker/config/config.go now names the two powers and what each caller reaches, and the AGENTS.md table matches it" },
+      { "line": "Account authentication verifies through the same key cache, with its minimum refresh (402)", "implementer": "proof 9", "tester": "verified" },
+      { "line": "A flood of unknown-key tokens from many addresses costs no more fetches than that interval allows, counted (402)", "implementer": "proof 9", "tester": "verified, with the no-MinRefresh control" },
+      { "line": "A legitimate caller is answered throughout such a flood (402)", "implementer": "proof 9", "tester": "verified: TestOneAddressFloodingItsLimitLeavesOthersTheirRereads" },
+      { "line": "A key rotation is picked up within the cache's own bound (402)", "implementer": "proof 9", "tester": "verified in the oidc suite" },
+      { "line": "Dispatch's unauthenticated path cannot spend the people's approval budget (P5)", "implementer": "not in the proof array", "tester": "verified live, counted at a proxy: 40 unknown tokens from one address cost 31 introspections and 9 BROKER_TOKEN_RATE_LIMITED" },
+      { "line": "The private-name check passes", "implementer": "not in the proof array", "tester": "verified: exit 0" }
+    ]
+  },
+  "environment": {
+    "note": "The issue pod has no Docker, no root and no Postgres of its own; the harness is the unpacked-Debian Postgres 17 the implementer left at /legion/harness (docs/solutions/testing/the-real-dispatch-stack-runs-inside-a-legion-pod-with-no-postgres-no-docker-and-no-root-INFRA-42.md). Two pod limits bear on what can be driven here, neither a defect of this change: gVisor answers SO_PEERPIDFD 'protocol not available', so agent-secrets-helper refuses every local client (PEER_UNIDENTIFIED) and a machine login has to be driven as its four HTTP steps; and playwright's webkit and firefox cannot be installed, so only chromium rows run."
+  }
+}
