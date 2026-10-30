@@ -512,7 +512,11 @@ a tool.
 In a phase-worker session (planner, implementer, tester, reviewer, merger: never an architect, the
 controller, a session with no Legion environment, or a `task` subagent), the phase-stall machine
 `@legion/pi-shared/phase-stall` tracks the phase: the daemon's assignment (a user message) opens it, the tool's successful
-`handoff_complete` closes it. A person's direct message the Envoy extension sent in as the user's
+`handoff_complete` closes it, and its successful `ready_for_update` (`onUpdateAnswered`), which
+closes no phase, moves it to the `waiting` state a WAITING reply buys, so the turn the worker
+answered the daemon's update task in ends with no reminder continuing it: work a continuation did
+would go with the replaced pod, and the daemon would see no turn end.
+A person's direct message the Envoy extension sent in as the user's
 own turn is a user message too (for a `/skill:`, the host's `skill-prompt` custom message), and
 counts as an Envoy delivery rather than an assignment: the Envoy extension records each turn it
 sends in, process-wide, on the shared interface (`injectedUserTurns`,

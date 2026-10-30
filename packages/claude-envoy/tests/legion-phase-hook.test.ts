@@ -271,6 +271,47 @@ test("a successful handoff_complete closes the phase, and the next settle blocks
   }
 })
 
+// INFRA-484: the update task reaches Claude Code as a prompt, which opens the phase as an
+// assignment does, and `ready_for_update` closes no phase. The `Stop` of the turn the worker
+// answers in must still block nothing: a blocked `Stop` continues that same turn, so the work it
+// did would go with the pod, and the daemon would see no turn end.
+test("a ready_for_update answer blocks no Stop: the answering turn ends, with the phase still open", async () => {
+  const { endpoint, record, inbox, close } = await harness({
+    record: recorded("open", 1),
+    claim: implementer,
+  })
+  try {
+    // What the server's CallTool handler does once `ready_for_update` returned without throwing
+    // (`./src/envoy-channel-server`): the worker has pushed what it wants kept and waits for its
+    // process to be replaced.
+    endpoint.updateAnswered()
+    expect(await record()).toEqual({ state: "waiting", count: 0, reported: false })
+    // Claude Code's own `PostToolUse` for the call that answered: the worker ran a real tool
+    // call, which does not take the wait back.
+    expect(await endpoint.handle({ event: "PostToolUse" })).toEqual({})
+    expect(await record()).toEqual({ state: "waiting", count: 0, reported: false })
+
+    const answered = "Pushed everything and answered; waiting for the new pod."
+    expect(await endpoint.handle({ event: "Stop", lastAssistantMessage: answered })).toEqual({})
+    const said = { reported: false, lastMessage: answered }
+    expect(await record()).toEqual({ state: "waiting", count: 0, ...said })
+    // Nothing is written into the wait itself: the answer bought the quiet wait, not the
+    // reminder's own shorter one. A case asserting that nothing happens has no condition to
+    // wait for, so this is one of the file's fixed waits, under the quiet wait above and over
+    // the reminder interval, and the endpoint's own `setTimeout` is what runs on the real clock.
+    await Bun.sleep(30)
+    expect(inbox).toEqual([])
+
+    // The phase is open, so the reminding has not stopped: a replacement that never comes is
+    // asked about once the quiet wait is over, exactly as a WAITING reply's wait is.
+    await waitFor(async () => inbox.length > 0, "the reminder the wait earned")
+    expect(inbox).toEqual([REMINDER])
+    expect(await record()).toEqual({ state: "open", count: 1, ...said })
+  } finally {
+    await close()
+  }
+})
+
 test("the prompt that carries this endpoint's own reminder does not reset its count", async () => {
   const { endpoint, record, inbox, close } = await harness({
     record: recorded("open", 1),

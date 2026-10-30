@@ -159,6 +159,7 @@ const toolFor = (active: LegionToolSession) =>
     daemon: recordingDaemon({}).daemon,
     controllerGrant: noControllerGrant,
     onPhaseCompleted: () => undefined,
+    onUpdateAnswered: () => undefined,
     handoffCommit: noHandoffCommit,
     branchHead: noBranchHead,
     resolveDocument: noDocumentLookup,
@@ -282,6 +283,7 @@ test("the legion tool exposes only the workflow operations each role owns", asyn
       daemon,
       controllerGrant: noControllerGrant,
       onPhaseCompleted: () => undefined,
+      onUpdateAnswered: () => undefined,
       handoffCommit: noHandoffCommit,
       branchHead: noBranchHead,
       resolveDocument: noDocumentLookup,
@@ -294,6 +296,7 @@ test("the legion tool exposes only the workflow operations each role owns", asyn
     daemon,
     controllerGrant: noControllerGrant,
     onPhaseCompleted: () => undefined,
+    onUpdateAnswered: () => undefined,
     handoffCommit: noHandoffCommit,
     branchHead: noBranchHead,
     resolveDocument: noDocumentLookup,
@@ -459,6 +462,7 @@ test("the legion tool's description gives a verdict to the tester alone", () => 
     daemon: recordingDaemon({}).daemon,
     controllerGrant: noControllerGrant,
     onPhaseCompleted: () => undefined,
+    onUpdateAnswered: () => undefined,
     handoffCommit: noHandoffCommit,
     branchHead: noBranchHead,
     resolveDocument: noDocumentLookup,
@@ -486,6 +490,7 @@ test("a workflow refusal tells the agent both its code and message", async () =>
     })) as never,
     controllerGrant: noControllerGrant,
     onPhaseCompleted: () => undefined,
+    onUpdateAnswered: () => undefined,
     handoffCommit: noHandoffCommit,
     branchHead: noBranchHead,
     resolveDocument: noDocumentLookup,
@@ -519,6 +524,7 @@ test("register_gate takes the document reference the Dispatch tools take, and re
       daemon,
       controllerGrant: noControllerGrant,
       onPhaseCompleted: () => undefined,
+      onUpdateAnswered: () => undefined,
       handoffCommit: noHandoffCommit,
       branchHead: noBranchHead,
       resolveDocument: async (issue: string, reference: string) => {
@@ -625,6 +631,7 @@ test("handoff_complete finds the pushed commit carrying the handoff, posts it wi
       daemon,
       controllerGrant: noControllerGrant,
       onPhaseCompleted: (ctx) => completed.push(ctx.sessionManager.getSessionId()),
+      onUpdateAnswered: () => undefined,
       handoffCommit: (phase, role) => findHandoffCommit({ phase, role, env: paneEnv, jj }),
       branchHead: noBranchHead,
       resolveDocument: noDocumentLookup,
@@ -797,6 +804,7 @@ test("the implementer's report on its closed issue's production check carries a 
       daemon,
       controllerGrant: noControllerGrant,
       onPhaseCompleted: (ctx) => completed.push(ctx.sessionManager.getSessionId()),
+      onUpdateAnswered: () => undefined,
       // A check report resolves no commit: the lookup is never asked.
       handoffCommit: noHandoffCommit,
       branchHead: noBranchHead,
@@ -862,6 +870,7 @@ test("the implementer's report on its closed issue's production check carries a 
     daemon: testerDaemon,
     controllerGrant: noControllerGrant,
     onPhaseCompleted: () => undefined,
+    onUpdateAnswered: () => undefined,
     handoffCommit: noHandoffCommit,
     branchHead: noBranchHead,
     resolveDocument: noDocumentLookup,
@@ -889,6 +898,7 @@ test("the implementer's report on its closed issue's production check carries a 
     daemon: closedDaemon,
     controllerGrant: noControllerGrant,
     onPhaseCompleted: () => undefined,
+    onUpdateAnswered: () => undefined,
     handoffCommit: noHandoffCommit,
     branchHead: noBranchHead,
     resolveDocument: noDocumentLookup,
@@ -918,6 +928,7 @@ test("a refused completion surfaces the daemon's code and leaves the phase open"
     daemon,
     controllerGrant: noControllerGrant,
     onPhaseCompleted: (ctx) => completed.push(ctx.sessionManager.getSessionId()),
+    onUpdateAnswered: () => undefined,
     handoffCommit: (phase, role) =>
       findHandoffCommit({ phase, role, env: paneEnv, jj: paneJj({}) }),
     branchHead: noBranchHead,
@@ -952,6 +963,9 @@ test("the controller reads the whole state without a grant and sets an issue's s
     },
     onPhaseCompleted: () => {
       throw new Error("a controller completes no phase");
+    },
+    onUpdateAnswered: () => {
+      throw new Error("a controller answers no update task");
     },
     handoffCommit: noHandoffCommit,
     branchHead: noBranchHead,

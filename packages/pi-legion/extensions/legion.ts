@@ -392,6 +392,14 @@ export default function legionExtension(pi: PiApi): void {
     if (phaseWorkerSession(context)) phaseReminder.apply({ kind: "phase-closed" });
   };
 
+  // A successful `ready_for_update`: the worker has pushed what it wants kept and waits for the
+  // process its claim runs in to be replaced. Its phase stays open, and the reminder must not
+  // continue the turn it answered in — the work that continuation did would go with the pod, and
+  // the daemon would see no turn end.
+  const onUpdateAnswered = (context: SessionContext): void => {
+    if (phaseWorkerSession(context)) phaseReminder.apply({ kind: "update-answered" });
+  };
+
   const activateLegionTool = async (): Promise<void> => {
     const activeTools = pi.getActiveTools();
     if (activeTools.includes("legion")) return;
@@ -422,6 +430,7 @@ export default function legionExtension(pi: PiApi): void {
         },
         controllerGrant: (sessionId) => controllerSession.mintGrant(sessionId),
         onPhaseCompleted,
+        onUpdateAnswered,
         // The pane's own environment: its workspace and issue, and the identity the daemon put
         // on it; PATH's jj, the one its shell runs.
         handoffCommit: (phase, role) => findHandoffCommit({ phase, role, env: process.env }),

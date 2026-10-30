@@ -151,6 +151,7 @@ function toolFor(
       throw new Error("no controller grant expected");
     },
     onPhaseCompleted: (ctx) => completed.push(ctx.sessionManager.getSessionId()),
+    onUpdateAnswered: () => undefined,
     handoffCommit: async () => COMMIT,
     branchHead: async () => "",
     resolveDocument: async () => {

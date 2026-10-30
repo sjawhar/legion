@@ -138,6 +138,9 @@ export function createLegionTool(deps: {
   readonly controllerGrant: (sessionId: string) => Promise<LegionGrant>;
   /** Told of each `handoff_complete` that succeeded: the session's phase is complete. */
   readonly onPhaseCompleted: (context: SessionContext) => void;
+  /** Told of each `ready_for_update` that succeeded: the session has answered the daemon's
+   * update task on its pod, and its phase stays open. */
+  readonly onUpdateAnswered: (context: SessionContext) => void;
   /** The commit a completion of `phase` by `role` reports: for a file-backed phase the role
    * works, the pushed commit carrying `.legion/<issue>/<phase>.json`, found with the pane's jj
    * (`findHandoffCommit`); otherwise the commit the workspace stands on. Throws naming the remedy
@@ -159,6 +162,7 @@ export function createLegionTool(deps: {
     session,
     controllerGrant,
     onPhaseCompleted,
+    onUpdateAnswered,
     handoffCommit,
     branchHead,
     resolveDocument,
@@ -215,9 +219,14 @@ export function createLegionTool(deps: {
           );
           // A call that returned without throwing: a completion, and a backward move, which hands
           // the issue to another phase. Either way this session's phase is no longer open.
-          // `ready_for_update` is neither: it answers the pod's update task and ends no phase.
+          // `ready_for_update` ends no phase: it answers the pod's update task, and the worker
+          // then waits for its process to be replaced rather than working, so the turn it ends
+          // after answering earns no reminder (the `update-answered` input of
+          // `@legion/pi-shared/phase-stall`).
           if (operation === "handoff_complete" || operation === "request_backward_move") {
             onPhaseCompleted(context);
+          } else if (operation === "ready_for_update") {
+            onUpdateAnswered(context);
           }
           return jsonSuccess(answer);
         }

@@ -1507,10 +1507,13 @@ export async function runEnvoyChannelServer(): Promise<void> {
       // A call that returned without throwing: a completion, and a backward move, which hands the
       // issue to another phase. Either way this session's phase is no longer open, and the
       // reminder must stop — the same two operations the Oh My Pi host closes its phase on
-      // (`createLegionTool` in `packages/pi-legion/src/tools.ts`). `ready_for_update` is neither:
-      // it answers the pod's update task and ends no phase.
+      // (`createLegionTool` in `packages/pi-legion/src/tools.ts`). `ready_for_update` ends no
+      // phase: it answers the pod's update task, and the worker then waits for its process to be
+      // replaced, so the `Stop` of the turn it answered in blocks nothing (`updateAnswered`,
+      // `./legion-phase-hook`), as the Oh My Pi host's `onUpdateAnswered` does.
       const op = request.params.arguments?.["op"]
       if (op === "handoff_complete" || op === "request_backward_move") phaseHook?.phaseClosed()
+      else if (op === "ready_for_update") phaseHook?.updateAnswered()
       return mcpResult(answer)
     }
     if (runtime === undefined) throw new Error("Envoy channel server is still starting")

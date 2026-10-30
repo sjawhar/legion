@@ -19,8 +19,10 @@ import { LOCAL_ENVOY_NOTICE } from "./envoy-notice";
  * `handoff_complete`:
  * - `closed`: no assignment since the last successful completion, or none seen yet;
  * - `open`: assigned and not completed, so a turn that settles now earns a reminder;
- * - `waiting`: still open, and the worker's last reply said with a WAITING line what it waits on,
- *   which buys the longer quiet wait `LEGION_STALL_WAITING_MS` before the next reminder.
+ * - `waiting`: still open, and the worker is waiting rather than working: its last reply said
+ *   with a WAITING line what it waits on, or it has answered the daemon's update task and waits
+ *   for the process its claim runs in to be replaced. Either buys the longer quiet wait
+ *   `LEGION_STALL_WAITING_MS` before the next reminder.
  * The reminding never stops: a reminder that changes nothing is followed by another. */
 export type PhaseStall = "closed" | "open" | "waiting";
 
@@ -36,6 +38,9 @@ export type PhaseStallInput =
   | { readonly kind: "assignment" }
   | { readonly kind: "inbound-event" }
   | { readonly kind: "phase-closed" }
+  /** The `legion` tool's `ready_for_update` returned without throwing: the worker has pushed
+   * what it wants kept and answered the daemon's update task on its pod (INFRA-484). */
+  | { readonly kind: "update-answered" }
   /** The settling assistant message ran at least one real tool call (`assistantRanTool`). */
   | { readonly kind: "tool-call" }
   | { readonly kind: "settle"; readonly lastAssistantText: string }
@@ -92,6 +97,15 @@ export function stepPhaseStall(state: PhaseStallState, input: PhaseStallInput): 
       return { state: { state: "open", count: 0 } };
     case "phase-closed":
       return { state: { state: "closed", count: 0 } };
+    case "update-answered":
+      // The worker has answered the update task and is to start nothing until its process comes
+      // back, so a turn ending now has earned no reminder: a reminder here would continue that
+      // turn in the same run, with work the replacement would throw away and no new turn for the
+      // daemon to see. The phase stays open — answering is not completing — and the worker waits
+      // on the daemon as a WAITING reply waits on CI, so a replacement that never comes is
+      // reminded about once the quiet wait is over. A closed phase is not reopened by one: a
+      // worker between phases is told nothing, and `handoff_complete` would refuse it anyway.
+      return state.state === "closed" ? { state } : { state: { state: "waiting", count: 0 } };
     case "inbound-event":
       // A delivery may be what the worker waited on, and it is something happening: an open phase
       // starts its count again. A closed phase is not reopened by one.

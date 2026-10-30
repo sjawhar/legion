@@ -1668,6 +1668,9 @@ describe("Legion OMP extension", () => {
             return options.complete?.() ?? Response.json({});
           }
           if (url.pathname === "/legion/v1/phase/backward") return Response.json({});
+          if (url.pathname === "/legion/v1/claims/ready-for-update") {
+            return new Response(null, { status: 204 });
+          }
           return undefined;
         },
       });
@@ -2043,6 +2046,56 @@ describe("Legion OMP extension", () => {
       expect(steered(worker)).toEqual([]);
       expect(worker.timers).toEqual([]);
       expect(recorded(worker).at(-1)).toEqual({ state: "closed", count: 0, reported: false });
+    });
+
+    // INFRA-484: the update task arrives as the daemon's own prompt, which opens the phase as an
+    // assignment does, and `ready_for_update` closes no phase. The turn the worker answers in
+    // must still end: a continuation would do work the pod's replacement throws away, and the
+    // daemon, which waits for a turn to end before it replaces anything, would see none.
+    test("a ready_for_update answer earns no continuation: the answering turn ends, with the phase still open", async () => {
+      const worker = await bootStalling({});
+      await worker.arrives(assignment);
+
+      const before = worker.requests.length;
+      const result = await worker.legionTool.execute(
+        "call-update",
+        { op: "ready_for_update" },
+        undefined,
+        undefined,
+        worker.context
+      );
+
+      expect(result).toEqual({ content: [{ type: "text", text: "{}" }], details: {} });
+      expect(daemonRequests(worker.requests.slice(before)).map((call) => call.path)).toEqual([
+        "/legion/v1/claims/ready-for-update",
+      ]);
+      expect(recorded(worker).at(-1)).toEqual({ state: "waiting", count: 0, reported: false });
+
+      // The host's own `message_end` for the message that held the answer: the worker ran a real
+      // tool call, which does not take the wait back.
+      await hook(worker.handlers, "message_end")(ranTool, worker.context);
+      const answered = "Pushed everything and answered; waiting for the new pod.";
+
+      expect(await worker.settles(answered)).toBeUndefined();
+      expect(steered(worker)).toEqual([]);
+      expect(worker.timers.map((timer) => timer.delayMs)).toEqual([DEFAULT_STALL_LIMITS.waitingMs]);
+      expect(recorded(worker).at(-1)).toEqual({
+        state: "waiting",
+        count: 0,
+        reported: false,
+        lastMessage: answered,
+      });
+
+      // The phase is open, so the reminding has not stopped: a replacement that never comes is
+      // asked about once the quiet wait is over, exactly as a WAITING reply's wait is.
+      await fires(worker);
+      expect(steered(worker)).toEqual([steeredReminder(REMINDER)]);
+      expect(recorded(worker).at(-1)).toEqual({
+        state: "open",
+        count: 1,
+        reported: false,
+        lastMessage: answered,
+      });
     });
 
     test("a successful handoff_complete posts the completion with a fresh grant and the commit found in the pane, and closes the phase; an inbound event does not reopen it, the next assignment does", async () => {

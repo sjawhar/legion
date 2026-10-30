@@ -109,6 +109,12 @@ export interface PhaseHookEndpoint {
    * throwing: this session's phase is no longer open. The CallTool handler of the same server
    * calls it (`./envoy-channel-server`), as `onPhaseCompleted` does on the Oh My Pi host. */
   readonly phaseClosed: () => void
+  /** The `legion` tool's `ready_for_update` returned without throwing: the worker has pushed
+   * what it wants kept and waits for the process its claim runs in to be replaced. Its phase
+   * stays open, and the `Stop` of the turn it answered in must block nothing: the work a
+   * continuation did would go with the pod, and the daemon would see no turn end. The same
+   * CallTool handler calls it, as `onUpdateAnswered` does on the Oh My Pi host. */
+  readonly updateAnswered: () => void
   /** Drops the armed timer, so a 15-minute WAITING wait never holds a shutting-down server
    * open (the server's own `stop`). */
   readonly stop: () => void
@@ -398,6 +404,7 @@ export function createPhaseHookEndpoint(deps: PhaseHookDeps): PhaseHookEndpoint 
   return {
     deliveryWritten: noteWritten,
     phaseClosed: () => reminder.apply({ kind: "phase-closed" }),
+    updateAnswered: () => reminder.apply({ kind: "update-answered" }),
     stop: dropTimer,
     handle: async (input) => {
       const parsed = hookArguments.safeParse(input)
