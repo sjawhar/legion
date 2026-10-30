@@ -10,7 +10,6 @@ date: 2026-10-30
 status: active
 module: packages/envoy
 related_issues:
-  - "INFRA-745"
   - "sjawhar/legion#2508"
 ---
 
@@ -39,7 +38,7 @@ regression: absent, and present with the wrong value. A test that decodes it int
 
 ## Evidence
 
-INFRA-745 put `quiet` on every event Dispatch's outbox publishes and had the TypeScript renderer
+sjawhar/legion#2508 put `quiet` on every event Dispatch's outbox publishes and had the TypeScript renderer
 judge it, falling back to `notify` when it is absent so the 72 hours the stream retains stay as
 they were (`packages/envoy-client/src/delivery.ts`). The fallback is what makes absence
 indistinguishable from `false` at the consumer, and so what makes a producer-side presence
