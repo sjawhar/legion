@@ -8,10 +8,16 @@ import {
 } from "@legion/contracts";
 import { z } from "zod";
 import { formatZodIssues, ToolInputError } from "./tool-input-errors";
-import type { MessageMetadataInput } from "./transport";
+import type { MessageMetadataInput, SessionInfo } from "./transport";
 
 const DELIVERY_CONTRACT =
   "Delivery is at-least-once, possibly out of order across topics; use id for dedupe and at for freshness.";
+
+const STORED_DELIVERY =
+  "Stored topics (agent, dispatch, github, slack, legion, ghostwispr, whatsapp; a role message " +
+  "reaches its holder as a stored copy on the holder's agent topic) reach each subscribed session " +
+  "once from the durable consumer its listener relays to it, also one that was away or restarted. " +
+  "Team and other ad-hoc topics are live only.";
 
 const TOPIC_GUIDE =
   "Topic guide (all are under notifications.): agent.<session_id> (subscribe: own inbox); role.<role> " +
@@ -145,7 +151,7 @@ export type ToolSpec = {
 export const envoyToolSpecs = [
   {
     name: "envoy_subscribe",
-    description: `Subscribe this session to Envoy notification topics. ${TOPIC_GUIDE}`,
+    description: `Subscribe this session to Envoy notification topics. ${STORED_DELIVERY} ${TOPIC_GUIDE}`,
     arguments: (schema) => ({
       topics: schema.array(schema.string()).describe("NATS-style topic patterns to subscribe to."),
     }),
@@ -184,7 +190,7 @@ export const envoyToolSpecs = [
   },
   {
     name: "envoy_publish",
-    description: `Publish an Envoy message to a notifications. topic. A role or built-in topic is delivered as its guide says; a role message errs when its holder did not confirm it within the listener's window. Any other notifications. topic you name (a team topic such as notifications.team.deploy-squad.all) reaches every session subscribed to it when you publish, and is not kept for a session that subscribes later. The listener confirms it with each other session that holds its own NATS connection and registered the topic, and errs naming each session that did not confirm; a session that stopped without unregistering stays registered for up to 5 minutes and is named in that time, and a named session is not a failed delivery to the other sessions. A session that holds its own NATS connection receives it directly, yours included; a session the listener delivers to over a serve port, such as an OpenCode agent, is not confirmed and receives it through its machine's listener when that listener subscribes to every topic (ENVOY_SUBSCRIBE_ALL_TOPICS=1; the shared hub's listener does not). ${DELIVERY_CONTRACT}`,
+    description: `Publish an Envoy message to a notifications. topic. ${STORED_DELIVERY} A role or built-in topic is delivered as its guide says; a role message errs when its holder did not confirm it within the listener's window. A team or ad-hoc topic (such as notifications.team.deploy-squad.all) reaches every session subscribed to it when you publish, and is not kept for a session that subscribes later. The listener confirms it with each other session that holds its own NATS connection and registered the topic, and errs naming each session that did not confirm; a session that stopped without unregistering stays registered for up to 5 minutes and is named in that time, and a named session is not a failed delivery to the other sessions. A session that holds its own NATS connection receives such a live topic directly, yours included; a session the listener delivers to over a serve port, such as an OpenCode agent, is not confirmed and receives it through its machine's listener when that listener subscribes to every topic (ENVOY_SUBSCRIBE_ALL_TOPICS=1; the shared hub's listener does not). ${DELIVERY_CONTRACT}`,
     arguments: (schema) => ({ topic: schema.string(), ...messageArguments(schema) }),
     operation: EnvoyToolOperation.publish,
   },
@@ -243,6 +249,21 @@ export function sendConfirmationText(result: {
   readonly confirmed: boolean;
 }): string {
   return `sent ${result.envelope.event_id} to ${result.recipient}${result.confirmed ? "" : " (recipient unconfirmed by listener)"}`;
+}
+
+/**
+ * The sessions an `envoy_sessions` call's `machine` argument names, which both hosts filter for
+ * themselves: the listener's `/v1/sessions` takes no machine. A session answers for two machines:
+ * `host`, where its process runs, and `machine_id`, the listener it registered through. A filter
+ * naming either one is that machine's filter, so a hub's id (`envoy-hub`, `gke`) lists the
+ * sessions registered through it. No filter — the argument absent or empty — lists them all.
+ */
+export function sessionsOnMachine(
+  sessions: readonly SessionInfo[],
+  machine: string | undefined
+): readonly SessionInfo[] {
+  if (machine === undefined || machine === "") return sessions;
+  return sessions.filter((session) => session.host === machine || session.machine_id === machine);
 }
 
 // The specs are frozen module constants, so each operation's schema is built once and shared;

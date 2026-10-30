@@ -1,0 +1,45 @@
+kind: Added
+body: |-
+  Session consumers. `POST /v1/interests/subscribe` takes an optional `delivery`,
+  `{consumer, epoch, resume?}`. A registration that asks for a consumer, and every registration
+  with a serving port, gets a durable JetStream pull consumer of its own, `s-<session id>`, on
+  `ENVOY_NOTIFICATIONS` (explicit ack, 60 s ack wait, 1,024 pending, unlimited deliveries, 72 h
+  inactive threshold, the stream's replicas), filtered on the session's agent subject and each
+  followed topic the stream stores, and created or updated before the registration answers. Team
+  and other ad-hoc topics and role lanes stay on core NATS, live only. The answer carries
+  `delivery`: `{"mode": "consumer", "subject": "notifications.envoy.deliver.<id>", "stream_id",
+  "gap"}`, or `{"mode": "core", "reason"}` (`no_grant`, `invalid_session_id`, `consumer_error`,
+  `not_requested`); a registration with neither a `delivery` nor a port gets no field. An
+  unsubscribe and an interest DELETE set the consumer's filter before they answer. The listener
+  that owns the session (the machine id on its entry, the task holding that machine's durable
+  binding; for a serving port, the machine on its interest row) relays the consumer in stream
+  order: over NATS as a core frame on `notifications.envoy.deliver.<id>`, which the stream does not
+  store and the live topics lane skips, answered `received`, `progress`, `done` or `nak` and acked
+  only on `done`; or to a serving port as the `prompt_async` push, acked on the port's 204 and
+  pushed again after 1 s doubling to 30 s otherwise, later messages waiting behind it. A session
+  that answers no frame within 3 s is taken for unreachable: the relay sends it nothing more and
+  sends again after a backoff of 2 s doubling to 30 s, at once when the session registers, and
+  from 2 s again once the session answers a frame, so a session that was only slow has its
+  messages about 5 s after the frame it missed rather than at its next heartbeat. Every start
+  of a relay restarts the consumer at its ack floor, so a session takes its messages in stream
+  order after any break, and a missing consumer starts from the plugin's resume point when that
+  names the stream's current `envoy_stream_id`. A restart of a consumer with nothing awaiting an
+  ack keeps it, updating its filter in place, since it already goes on at the floor; one with a
+  message awaiting an ack deletes it and creates it again at the floor. A restart whose delete or
+  create fails leaves the consumer to the relay's retry, which creates it at that floor, and a
+  registration meanwhile creates it there too, so a failed restart loses no message. At most 32
+  relays of a listener restart at once, each call's 5 s timeout starting once it holds its turn,
+  so a listener restarting 1,000 sessions times none out. A listener that starts, or gains its
+  machine's durable binding, reads every session consumer with the stream's paged consumer list
+  and starts pulling each one a restart would keep unchanged with no call of its own; a pull sends
+  its own pull requests and reads no consumer info, and restarts made at once share their stream
+  reads. On the 2-CPU load-test box, 1,000 sessions of a restarted listener each had their backlog
+  within 4.1 to 9.9 s of its restart (median 5.7 s with resume points, 6.6 s without). The
+  durable path skips a session whose
+  entry records consumer delivery, so a stored message waits in its consumer, for up to 72 hours,
+  while the session restarts, its connection is down, or its owning listener restarts. Without the
+  grant below the listener answers `core` and delivery works as before: the session's own
+  subscriptions, the durable's `Skipped`, `/v1/replay`. Any rollout order works: a plugin of an
+  earlier release sends no `delivery` and stays on the core path, and a plugin of this release
+  reads an earlier listener's answer, which has no `delivery`, as `core`. No stream setting
+  changes (INFRA-594).

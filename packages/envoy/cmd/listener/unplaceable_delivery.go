@@ -50,19 +50,6 @@ const unplaceableDeferralCap = consumerMaxAckPending / 4
 // TestUnplaceableRetryWindowFitsTheBoundsItDependsOn pins both.
 const defaultUnplaceableRetryWindow = 60 * time.Second
 
-// pushFailedDeferrals is how many times a push_failed delivery (session.ReasonPushFailed) is
-// deferred, whatever the window would buy the other two causes: one, so such a message is
-// delivered at most twice. The other causes push nothing, so retrying them repeats nothing; this
-// one is different. A deferral clears the attempt-cache entry the delivery recorded, the entry
-// that otherwise keeps a redelivery from pushing a second time, and session.Deliverer's prompt
-// returns the same error for a session server that refused the prompt, a connection that never
-// reached it, and an answer lost after the server had taken the prompt - so every retry of a
-// push that may have landed repeats an instruction the session may already have. One retry
-// covers the blip the retry exists for, a peer restarting or a connection refused for a moment,
-// and bounds that repeat at one; a window's dozen would let the same instruction arrive thirteen
-// times. TestAPushFailureIsDeferredOnceWhereOtherCausesAreDeferredFurther pins it.
-const pushFailedDeferrals = 1
-
 // unplaceableDeferralExpiry is how long a slot in unplaceableDeferrals lasts after the deferral
 // that took it, the longest a deferred message can legitimately stay pending before a delivery of
 // it reaches this listener's handler again and gives the slot back. It is the sum of three waits:
@@ -175,31 +162,28 @@ func (d *unplaceableDeferrals) sweepLocked(now time.Time) {
 // enough to NAK (agentSubjectDelivery's undelivered, error-free result). It either defers the
 // message for redelivery or gives it up with its record, and finalizes the message either way.
 func unplaceableAgentDelivery(cfg listenerDeliveryHandlerConfig, message deliveryMessage, item contracts.Envelope, sessionID string, metadata *nats.MsgMetadata, result session.HandleAgentResult) {
-	// Nothing placed this message and nothing failed hard enough to NAK: the session has
-	// no record this listener could find, its record names nothing to push to, or the push
-	// to the port it names did not land. Each can be true of a session that is about to be
-	// placeable - a record still propagating from the bucket, a server still binding its
-	// serve port, a session process restarting - so the message is kept in the stream and
-	// redelivered for as long as cfg.unplaceableRetryWindow, or once for a push that failed
-	// (pushFailedDeferrals), and only then given up, with a record and a counter of its own
-	// rather than the ACKed skip that lost it.
+	// Nothing placed this message and nothing failed hard enough to NAK: the session has no
+	// record this listener could find, or its record names nothing to push to. Each can be true
+	// of a session that is about to be placeable - a record still propagating from the bucket, a
+	// server still binding its serve port, a session process restarting - so the message is kept
+	// in the stream and redelivered for as long as cfg.unplaceableRetryWindow, and only then
+	// given up, with a record and a counter of its own rather than the ACKed skip that lost it.
 	//
-	// reason names which of the three causes this is, for the operator and for the counter
-	// label. session.ReasonNone keeps no_push_target's label only because the switch needs a
-	// default: in a deployed listener nothing reaches here with it. HandleAgentMessage
-	// answers undelivered, error-free and ReasonNone only for a session another listener owns
-	// (session.ErrWrongMachine), which it reports as OwnedElsewhere, and agentSubjectDelivery
-	// acknowledges that result before it calls here. The arm is defensive, and no_push_target
-	// on a dashboard never means it.
+	// reason names which of the two causes this is, for the operator and for the counter label.
+	// session.ReasonNone and session.ReasonPushFailed keep no_push_target's label only because
+	// the switch needs a default: in a deployed listener nothing reaches here with either.
+	// HandleAgentMessage answers undelivered, error-free and ReasonNone only for a session
+	// another listener owns (session.ErrWrongMachine), which it reports as OwnedElsewhere, and
+	// agentSubjectDelivery acknowledges that result before it calls here; a push that fails is no
+	// longer this path's either, since the durable hands every push to a serving-port session to
+	// that session's worker, which pushes it until the port accepts it (servePortWorkers), and
+	// the live and core lanes' own failed push is answered delivery_failed by the interest path.
+	// Both arms are defensive, and no_push_target on a dashboard never means them.
 	reason := "no_push_target"
 	giveUpStatus := "unplaceable_no_push_target"
-	switch result.Reason {
-	case session.ReasonNoSessionRecord:
+	if result.Reason == session.ReasonNoSessionRecord {
 		reason = "no_session_record"
 		giveUpStatus = "unplaceable_no_record"
-	case session.ReasonPushFailed:
-		reason = "push_failed"
-		giveUpStatus = "unplaceable_push_failed"
 	}
 	// The window is counted from this message's first delivery, not from the time the
 	// stream stored it: a backlog replayed into a listener whose caches are still cold -
@@ -215,24 +199,15 @@ func unplaceableAgentDelivery(cfg listenerDeliveryHandlerConfig, message deliver
 	if cfg.unplaceableRetryWindow > 0 {
 		windowDeferrals = uint64(cfg.unplaceableRetryWindow / unplaceableRetryDelay)
 	}
-	// A push that failed may have landed, so it is retried once and no more
-	// (pushFailedDeferrals); the two causes that push nothing keep the window's whole
-	// allowance. The deferral line below reports this allowance, the number the decision
-	// was made on, under window_deferrals.
-	if result.Reason == session.ReasonPushFailed {
-		windowDeferrals = min(windowDeferrals, pushFailedDeferrals)
-	}
 	// What does not hold the retry open is session.ReasonNone, the defensive arm above: an
 	// undelivered result that carries it is another listener's session to place, however often
-	// this one sees the message. Every outcome a
-	// deployed listener reaches here with carries one of the three reasons - no entry is
-	// ReasonNoSessionRecord, a record with no port ReasonNoPushTarget, and any error the
-	// push itself returns, a refusal or an unreachable peer, ReasonPushFailed
-	// (internal/session/handler.go, reasonFor) - and the interest path's failures return
-	// ShouldNAK with an Err set and are answered by agentSubjectDelivery. A read that did not
-	// answer is no evidence of absence and must not end the retries, and it does not: it leaves
-	// no entry, and an attempt with no entry reports ReasonNoSessionRecord here, so the reason
-	// alone already holds the window open for it.
+	// this one sees the message. Every outcome a deployed listener reaches here with carries one
+	// of the two reasons - no entry is ReasonNoSessionRecord and a record with no port
+	// ReasonNoPushTarget (internal/session/handler.go, reasonFor) - and the interest path's
+	// failures return ShouldNAK with an Err set and are answered by agentSubjectDelivery. A read
+	// that did not answer is no evidence of absence and must not end the retries, and it does
+	// not: it leaves no entry, and an attempt with no entry reports ReasonNoSessionRecord here,
+	// so the reason alone already holds the window open for it.
 	placementMayChange := result.Reason != session.ReasonNone
 	deferred := false
 	if metadata != nil && placementMayChange && metadata.NumDelivered <= windowDeferrals &&
@@ -303,6 +278,7 @@ func unplaceableAgentDelivery(cfg listenerDeliveryHandlerConfig, message deliver
 			logger.DeliveryLog(slog.LevelWarn, "listener agent delivery given up", sessionID, item.Topic, item.EventID, giveUpStatus, slog.String("reason", reason))
 		},
 		exceptionReason: "no_holder",
+		origin:          exceptionOrigin(message),
 	})
 	message.finalize(false)
 }

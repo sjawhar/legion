@@ -1,0 +1,8 @@
+kind: Changed
+body: |-
+  In a Legion pane, `legion claude-bridge` runs Claude Code with `--replay-user-messages` and
+  answers an Envoy delivery on its inbox (`LEGION_CLAUDE_INBOX`) only once Claude Code re-emits it
+  as the user message it took, no longer once the bridge queued it; a delivery Claude Code ended a
+  step without taking, or had not taken when it exited, is answered with an error. The inbox reads
+  a client's next deliveries while it waits and answers them in the order they came. So a relayed
+  frame is `done` only once Claude Code took the delivery (INFRA-594).

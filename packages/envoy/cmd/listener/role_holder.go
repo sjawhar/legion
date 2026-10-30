@@ -21,6 +21,25 @@ type roleClaimResolver interface {
 	ReleaseExpiredRoleClaim(ctx context.Context, role, sessionID string, sessionTTL time.Duration) (store.ExpiredRoleClaimRelease, error)
 }
 
+// readRoleClaim reads role's claim for attempt of a resolution (resolveRoleHolderFrom, whose
+// attempts are numbered from 0). Attempt 0 of a resolution given a firstHolder reads it from
+// there — the registry's watched copy of the role bucket (store.Registry.CachedRoleHolder), which
+// costs no round trip, so a role message the lane forwards reads no bucket — and every later
+// attempt from registry itself, since a retry after a superseded release must see the claim that
+// superseded it, which the copy can trail. A route, which answers a caller within its own
+// deadline, passes no firstHolder and reads the bucket on every attempt. The copy names a holder,
+// not a whole claim, and the resolution reads nothing else from it.
+func readRoleClaim(ctx context.Context, registry roleClaimResolver, firstHolder func(role string) (string, error), role string, attempt int) (store.RoleClaim, error) {
+	if attempt > 0 || firstHolder == nil {
+		return registry.RoleClaim(ctx, role)
+	}
+	holder, err := firstHolder(role)
+	if err != nil {
+		return store.RoleClaim{}, err
+	}
+	return store.RoleClaim{HolderSessionID: holder}, nil
+}
+
 type roleHolderState string
 
 const (
@@ -268,12 +287,20 @@ var errRoleHolderChanged = errors.New("role holder changed while resolving")
 // can name it. It unwraps to the read's own error: an ended ctx, wrapped naming the call that did
 // not answer, which a route answers as a bus that did not answer; store.ErrMalformedRoleClaim, a
 // claim record that cannot be read (writeRoleClaimUnreadable); or errRoleHolderChanged.
+// It reads every claim from registry. Role delivery, whose first read is the registry's watched
+// copy of the role bucket, resolves through resolveRoleHolderFrom instead.
 func resolveRoleHolder(ctx context.Context, registry roleClaimResolver, sessions *session.SessionRegistry, role string, live func(session.SessionEntry) bool) (roleHolderResult, error) {
-	for range roleHolderResolutionAttempts {
+	return resolveRoleHolderFrom(ctx, registry, nil, sessions, role, live)
+}
+
+// resolveRoleHolderFrom is resolveRoleHolder reading each attempt's claim through readRoleClaim,
+// so a resolution given a firstHolder spends no bucket round trip on its first attempt.
+func resolveRoleHolderFrom(ctx context.Context, registry roleClaimResolver, firstHolder func(role string) (string, error), sessions *session.SessionRegistry, role string, live func(session.SessionEntry) bool) (roleHolderResult, error) {
+	for attempt := range roleHolderResolutionAttempts {
 		if err := ctx.Err(); err != nil {
 			return roleHolderResult{}, &roleHolderFailure{step: roleHolderClaimRead, cause: fmt.Errorf("resolve role %s's holder: %w", role, err)}
 		}
-		claim, err := registry.RoleClaim(ctx, role)
+		claim, err := readRoleClaim(ctx, registry, firstHolder, role, attempt)
 		if err != nil {
 			return roleHolderResult{}, &roleHolderFailure{step: roleHolderClaimRead, cause: err}
 		}

@@ -1,0 +1,33 @@
+{
+  "run": "/legion/scratch/tmp/infra594/load/root/runs/restart-resume-2",
+  "listener_down_s": 30.11922421,
+  "starts": 1,
+  "first_start_to_restart_ms": 7.417838,
+  "restart_to_first_answer_ms": 1059.06677,
+  "frames": 6600,
+  "sessions_with_backlog": 1000,
+  "backlog_frames": 3000,
+  "backlog_frames_per_session_median": 3,
+  "backlog_ms_after_restart": {
+    "n": 1000,
+    "p50": 3041.223903,
+    "p90": 3069.763498,
+    "p99": 3128.754387,
+    "max": 3169.845299
+  },
+  "backlog_ms_after_first_answer_max": 2110.778529,
+  "backlog_published": 3000,
+  "backlog_publish_errors": 0,
+  "backlog_envelopes_received_once": 3000,
+  "backlog_envelopes_received_more_than_once": 0,
+  "backlog_envelopes_missing": 0,
+  "duplicate_counts": {
+    "total": 0,
+    "before_the_kill": 0,
+    "after_the_kill": 0,
+    "ledger_dedupe": 0,
+    "unwritten_redelivery": 0,
+    "shown_twice": 0
+  },
+  "duplicates": []
+}

@@ -26,9 +26,16 @@ import {
   writeAskgateRecord,
 } from "@legion/envoy-client/askgate-marker";
 import {
+  type ConsumerDelivery,
+  type ConsumerFrame,
+  createConsumerDelivery,
+  registeredWithoutRelay,
+} from "@legion/envoy-client/consumer-delivery";
+import {
   createDeliveryDedupe,
   type DedupeIdentity,
   DedupeIdentitySchema,
+  type DeliveryClaim,
   type DispatchDelivery,
   expectsLaneReceipt,
   inboundTimestamp,
@@ -73,6 +80,7 @@ import {
   type ReplayDeliveryOutcome,
   type ReplayEngine,
   type ReplayFrame,
+  type ReplayNotice,
   reachesPrivateStreamSubject,
   replayedText,
   replayFollowedSubjects,
@@ -97,6 +105,7 @@ import {
   type MessageMetadataArguments,
   parseEnvoyToolArguments,
   sendConfirmationText,
+  sessionsOnMachine,
   toMessageMetadata,
 } from "@legion/envoy-client/tool-contract";
 import {
@@ -104,6 +113,7 @@ import {
   EnvoyApiError,
   expandSubscriptionTopics,
   mergeInterestSources,
+  type SubscribeResult,
 } from "@legion/envoy-client/transport";
 import {
   dropInjectedUserTurn,
@@ -164,6 +174,8 @@ import {
 } from "../src/dispatch-user-turn";
 import { recordEnvoySession, resolveEnvoySession } from "../src/envoy-session";
 import {
+  CONSUMER_STATE_ENTRY,
+  consumerSnapshot,
   heldReplayNotices,
   REPLAY_DELIVERED_ENTRY,
   REPLAY_NOTICE_ENTRY,
@@ -1097,13 +1109,17 @@ export default function envoyExtension(pi: PiApi): void {
   };
 
   // nats.js resubscribes every subscription once it reconnects, but nothing published while it was
-  // away is kept for it: each reconnect sweeps the stream for what this session missed. The reader
-  // ends with the connection, and stops acting once another connection replaced it.
+  // away is kept for it: each reconnect sweeps the stream for what this session missed, and, while
+  // the relay subscription is open, begins a new epoch and registers it at once, so the listener
+  // restarts the session's relay at its ack floor (`renewRelayEpoch`). The reader ends with the
+  // connection, and stops acting once another connection replaced it.
   const watchReconnects = async (watched: NatsConnection): Promise<void> => {
     try {
       for await (const status of watched.status()) {
         if (connection !== watched) return;
-        if (status.type === Events.Reconnect) triggerReplay();
+        if (status.type !== Events.Reconnect) continue;
+        renewRelayEpoch();
+        triggerReplay();
       }
     } catch (error) {
       logger.warn("envoy: the NATS connection's status reader failed", {
@@ -1407,12 +1423,18 @@ export default function envoyExtension(pi: PiApi): void {
   // `topic` is the subscription the frame came on, `subject` the subject it was published to, and
   // `receivedAt` when the subscription yielded it (`readArrivals`): a cursor that started after
   // that may stand past it (`liveFailed`), however long the frames before it took to deliver.
+  // `relayed` is the relay frame (consumer delivery) a frame came as; a core frame has none. A
+  // relay frame is answered `done` once it is written, or skipped, suppressed, a repeat, or
+  // rejected (after the rejection reply is posted), and `nak` once the host dropped it unwritten.
+  // A BTW's side turn and every Dispatch reply run off the caller (`offWorker`), so the frames
+  // after one never wait on a model call or a reply.
   const deliver = async (
     topic: string,
     subject: string,
     raw: string,
     reply: string,
-    receivedAt: number
+    receivedAt: number,
+    relayed?: ConsumerFrame
   ): Promise<void> => {
     const rendered = renderInbound(raw, sessionID, subject);
     // Acknowledge first. The listener waits two seconds for this receipt: its
@@ -1444,6 +1466,10 @@ export default function envoyExtension(pi: PiApi): void {
         );
       }
     }
+    // The listener relays this subscription's subject from the session's consumer
+    // (`relaysCoreTopic`): the relay's frame is the one shown, and this core copy answered only its
+    // lane receipt above.
+    if (relayed === undefined && relaysCoreTopic(topic)) return;
     // A human unsubscribed one of our topics: drop it locally too, the same
     // way envoy_unsubscribe does, so the resubscribe-on-drop recovery path
     // below does not undo the human's action a few seconds later. The event
@@ -1453,170 +1479,246 @@ export default function envoyExtension(pi: PiApi): void {
     for (const topic of subscriptionRemovedTopics(raw, sessionID) ?? []) {
       if (closeIntentionally(topic)) removed = true;
     }
-    if (removed) void replayFollowedChanged();
+    if (removed) {
+      void replayFollowedChanged();
+      // The listener's consumer still relays the session's topics: registered again without this
+      // one, the relay stops taking it at once (`setFollowed`) and the listener's filter drops it.
+      if (relay?.sessionID === sessionID && relay.delivery.relaying()) {
+        void Promise.resolve()
+          .then(registerSession)
+          .catch(() => undefined);
+      }
+    }
     const dedupeIdentity = ClaimIdentitySchema.safeParse(rendered.envelope);
     const identity = dedupeIdentity.success ? dedupeIdentity.data : undefined;
-    const claim = rendered.skip ? undefined : delivered.claim(identity);
-    if (claim !== undefined) {
-      // A repeat of a frame this session was shown before a restart, which the in-memory claim
-      // cannot know of: the replay ledger, rebuilt from the transcript, holds it.
-      if (identity !== undefined && replay?.delivered(identity) === true) {
-        claim.settle();
-        return;
-      }
-      const envelope = rendered.envelope;
-      if (envelope !== undefined) noteInbox(envelope);
-      // The session the frame is delivered in, whose transcript records what became of it.
-      const deliveredIn = sessionID;
-      // The host wrote the frame, or handled it without writing anything: the ledger records it,
-      // so no sweep shows the stream's copy again, here or after a restart, and the claim is
-      // settled, so a sweep stops waiting on it. The record reaches the transcript of the session
-      // it was delivered in even while that session shuts down (`recordDeliveredFor`): a BTW
-      // answered as the session stops must not come back from a sweep after its resume.
-      const taken = async (): Promise<void> => {
-        if (identity !== undefined) await replay?.recordDeliveredFor(deliveredIn, identity);
-        claim.settle();
-      };
-      // An error reply means the agent was not handed the frame: Dispatch records the attempt
-      // failed, and a same-mode re-send of it must reach this session again, so the claim is
-      // released before the reply goes out. A BTW side turn adds nothing to the transcript, so
-      // running it again for that re-send repeats no work the session kept.
-      const refuse = async (delivery: DispatchDelivery, error: string): Promise<void> => {
-        claim.release();
-        await postDispatchReply(delivery, { error });
-      };
-      try {
-        if (rendered.rejectedDelivery !== undefined) {
-          console.warn(
-            `[envoy] rejecting malformed Dispatch targeted delivery ${rendered.rejectedDelivery.id}`
-          );
-          await refuse(rendered.rejectedDelivery, "Invalid Dispatch targeted delivery frame");
-        } else if (rendered.malformedDelivery === true) {
-          console.warn(
-            "[envoy] dropping malformed Dispatch targeted delivery without a reply address"
-          );
-          claim.settle();
-        } else if (rendered.delivery?.mode === "btw") {
-          // A BTW is answered on Dispatch or refused there, never shown as a card: the stream's
-          // copy must never come back from a sweep as a card that starts a turn. The ledger
-          // records it by its event id alone before the side turn and before any reply is posted,
-          // so no sweep finds it unrecorded whatever happens after (a reply that fails, a sweep
-          // while the POST is in flight, the process ending mid-turn or mid-POST), and the record
-          // reaches the transcript of the session it was delivered in even while that session
-          // shuts down (`recordDeliveredFor`), so a resume of it passes the stream's copy over too.
-          // A same-mode Retry carries a new event id under the same dedupe key, and still reaches
-          // the session once a refusal released the claim.
-          noteBtw(identity?.event_id);
-          if (identity?.event_id !== undefined) {
-            await replay?.recordDeliveredFor(deliveredIn, { event_id: identity.event_id });
-          }
-          const answer = sideTurn(activeSessionContext);
-          if (shuttingDown) {
-            // A session that is shutting down starts no model call, but a frame can still drain in.
-            await refuse(rendered.delivery, "This OMP session is shutting down");
-          } else if (answer === undefined) {
-            await refuse(rendered.delivery, "This OMP host does not support BTW delivery");
-          } else {
-            try {
-              const reply = await answer({ prompt: rendered.delivery.body });
-              await postDispatchReply(rendered.delivery, { body: reply.replyText });
-              await taken();
-            } catch (error) {
-              await refuse(rendered.delivery, messageFor(error));
-            }
-          }
-        } else {
-          const acceptedSessionID = sessionID;
-          const accepted = await acceptedUserTurn(rendered, acceptedSessionID);
-          // The pictures the delivered text embeds reach the model beside it, read with this
-          // session's own Dispatch bearer, each picture once in this session. They count as shown
-          // only once the host took the send: one that throws releases the claim, and the delivery
-          // Dispatch retries must carry them again. `acceptedSessionID` is only the accept's and
-          // its replies': what to name is read from the set of the session live once the accept
-          // answers, which a switch during it changes, and what was shown joins the set of the
-          // session live once the pictures load, which the send goes into.
-          const shown = shownPictures(sessionID);
-          if (accepted === undefined) {
-            const card = await withDeliveredPictures(
-              rendered.content,
-              rendered.pictures ?? [],
-              () => timedDispatchClient(DELIVERY_PICTURES_TIMEOUT_MS),
-              true,
-              shown
-            );
-            // Settled once the host writes the card, or at once when nothing waits on that. How
-            // the card goes, and why, is the wake's (`handCard`, `../src/card-wake`).
-            unwritten.sendCard(
-              card.content,
-              rendered.delivery?.mode === "aside" ? "aside" : "steer",
-              identity,
-              claim
-            );
-            markPicturesShown(shownPictures(sessionID), card.shown);
-          } else {
-            const { turn } = accepted;
-            // Sent exactly as Enter, or an aside, at the terminal sends it, the person's pictures
-            // beside their text.
-            const delivery = await withDeliveredPictures(
-              turn.body,
-              pictureAddresses(turn.body),
-              () => timedDispatchClient(DELIVERY_PICTURES_TIMEOUT_MS),
-              false,
-              shown
-            );
-            const sendUserInput = pi.sendUserInput;
-            if (sendUserInput === undefined) {
-              const refusal = typedInputReply(turn.body, { hostVersion: VERSION });
-              if (refusal !== undefined) {
-                // A host that cannot run typed input would hand the command to the model as words.
-                await postDispatchReply(accepted.delivery, { body: refusal }, acceptedSessionID);
-                await taken();
-              } else {
-                // Noted right before the send, after the pictures load: a run that ends while they
-                // load clears every text note (endInjectedUserTurns), and this turn must still be found.
-                const injectionSessionID = sessionID;
-                noteInjectedUserTurn(injectionSessionID, turn.body, turn.messageId);
-                notedSessionIDs.add(injectionSessionID);
-                pi.sendUserMessage(
-                  delivery.content,
-                  turn.mode === "aside" ? { deliverAs: "aside" } : undefined
-                );
-                markPicturesShown(shownPictures(injectionSessionID), delivery.shown);
-                // Done once the host writes the user message its text is found as, or at the
-                // run's end, which stops that search (`endInjectedUserTurns`).
-                unwritten.awaitTurn(turn.messageId, {
-                  sessionID: injectionSessionID,
-                  identity,
-                  claim,
-                  via: "text",
-                });
-              }
-            } else {
-              unwritten.awaitTurn(turn.messageId, { sessionID, identity, claim, via: "typed" });
-              runTypedInput(
-                sendUserInput,
-                accepted.delivery,
-                acceptedSessionID,
-                turn,
-                delivery.content,
-                delivery.shown
-              );
-            }
-          }
-        }
-      } catch (error) {
-        claim.release();
+    const held = rendered.skip ? undefined : delivered.claim(identity);
+    if (held === undefined) {
+      // Skipped for this session, or a copy of a frame this process shows or has shown: nothing
+      // waits on a relay frame's write.
+      relayed?.done();
+      return;
+    }
+    // A relay frame's claim answers the listener as the claim ends: `done` once it settles (the
+    // host wrote the frame, or handled it with nothing to write, the ledger recording it first),
+    // `nak` once it is released with nothing recorded (the host dropped the frame unwritten: a
+    // session change, an interrupt that withdrew a person's turn), so the listener sends it again.
+    // A release while this call still runs answers only once the call returns: a throw is the
+    // relay's own to count (its failure notice comes from `createConsumerDelivery`).
+    let handing = true;
+    let releasedWhileHanding = false;
+    const claim: DeliveryClaim =
+      relayed === undefined
+        ? held
+        : {
+            settle: () => {
+              held.settle();
+              relayed.done();
+              relay?.delivery.persist();
+            },
+            release: () => {
+              held.release();
+              if (handing) releasedWhileHanding = true;
+              else relayed.nak();
+            },
+          };
+    // A repeat of a frame this session was shown before a restart, which the in-memory claim
+    // cannot know of: the replay ledger, rebuilt from the transcript, holds it.
+    if (identity !== undefined && replay?.delivered(identity) === true) {
+      claim.settle();
+      return;
+    }
+    const envelope = rendered.envelope;
+    if (envelope !== undefined) noteInbox(envelope);
+    // The session the frame is delivered in, whose transcript records what became of it.
+    const deliveredIn = sessionID;
+    // The host wrote the frame, or handled it without writing anything: the ledger records it,
+    // so no sweep shows the stream's copy again, here or after a restart, and the claim is
+    // settled, so a sweep stops waiting on it. The record reaches the transcript of the session
+    // it was delivered in even while that session shuts down (`recordDeliveredFor`): a BTW
+    // answered as the session stops must not come back from a sweep after its resume.
+    const taken = async (): Promise<void> => {
+      if (identity !== undefined) await replay?.recordDeliveredFor(deliveredIn, identity);
+      claim.settle();
+    };
+    // An error reply means the agent was not handed the frame: Dispatch records the attempt
+    // failed, and a same-mode re-send of it must reach this session again, so the claim is
+    // released before the reply goes out. A BTW side turn adds nothing to the transcript, so
+    // running it again for that re-send repeats no work the session kept. A relay frame is done
+    // once the reply is posted: the re-send is a new frame.
+    const refuse = async (delivery: DispatchDelivery, error: string): Promise<void> => {
+      held.release();
+      await postDispatchReply(delivery, { error });
+      relayed?.done();
+    };
+    // Runs a side turn or a Dispatch reply off the caller (a pump or the relay's queue), so the
+    // next frame is handed without waiting on it. One that throws is handled as a delivery that
+    // throws: its claim is released, and a core frame no sweep will show again gets its notice; a
+    // relay frame is done (a BTW is in the ledger already, so its redelivery would be dropped).
+    const offWorker = (work: () => Promise<void>): void => {
+      relayed?.release();
+      void work().catch((error: unknown) => {
+        held.release();
         console.warn(
           `[envoy] failed to deliver envelope ${envelope?.event_id ?? "unknown"}`,
           error
         );
-        // A frame no sweep will show again (a role forward, already acknowledged; one on a
-        // subscription the replay does not read: refused, not started, or the listener's replay
-        // failing) gets its notice at once. The stream's copy of any other waits for a sweep.
-        if (envelope !== undefined) void replay?.liveFailed(topic, envelope, error, receivedAt);
-        throw error;
+        if (relayed !== undefined) relayed.done();
+        else if (envelope !== undefined)
+          void replay?.liveFailed(topic, envelope, error, receivedAt);
+      });
+    };
+    try {
+      if (rendered.rejectedDelivery !== undefined) {
+        console.warn(
+          `[envoy] rejecting malformed Dispatch targeted delivery ${rendered.rejectedDelivery.id}`
+        );
+        const rejected = rendered.rejectedDelivery;
+        offWorker(() => refuse(rejected, "Invalid Dispatch targeted delivery frame"));
+      } else if (rendered.malformedDelivery === true) {
+        console.warn(
+          "[envoy] dropping malformed Dispatch targeted delivery without a reply address"
+        );
+        claim.settle();
+      } else if (rendered.delivery?.mode === "btw" && relayed?.late === true) {
+        // A BTW that arrives late (delivered before, or stored before this connection's epoch
+        // began) never starts a side turn: it is one inert card, as a replayed BTW is, written to
+        // the transcript and done then. Its answer, if any, is on Dispatch.
+        noteBtw(identity?.event_id);
+        unwritten.sendCard(
+          `${replayedText(rendered.content, relayed.storedAt)}\n${REPLAYED_BTW_NOTE}`,
+          "inert",
+          identity,
+          claim
+        );
+      } else if (rendered.delivery?.mode === "btw") {
+        // A BTW is answered on Dispatch or refused there, never shown as a card: the stream's
+        // copy must never come back from a sweep as a card that starts a turn. The ledger
+        // records it by its event id alone before the side turn and before any reply is posted,
+        // so no sweep finds it unrecorded whatever happens after (a reply that fails, a sweep
+        // while the POST is in flight, the process ending mid-turn or mid-POST), and the record
+        // reaches the transcript of the session it was delivered in even while that session
+        // shuts down (`recordDeliveredFor`), so a resume of it passes the stream's copy over too.
+        // A same-mode Retry carries a new event id under the same dedupe key, and still reaches
+        // the session once a refusal released the claim. The side turn and the reply run off the
+        // caller: the next frame does not wait for the model.
+        noteBtw(identity?.event_id);
+        if (identity?.event_id !== undefined) {
+          await replay?.recordDeliveredFor(deliveredIn, { event_id: identity.event_id });
+        }
+        const delivery = rendered.delivery;
+        const answer = sideTurn(activeSessionContext);
+        if (shuttingDown) {
+          // A session that is shutting down starts no model call, but a frame can still drain in.
+          offWorker(() => refuse(delivery, "This OMP session is shutting down"));
+        } else if (answer === undefined) {
+          offWorker(() => refuse(delivery, "This OMP host does not support BTW delivery"));
+        } else {
+          offWorker(async () => {
+            try {
+              const reply = await answer({ prompt: delivery.body });
+              await postDispatchReply(delivery, { body: reply.replyText });
+              await taken();
+            } catch (error) {
+              await refuse(delivery, messageFor(error));
+            }
+          });
+        }
+      } else {
+        const acceptedSessionID = sessionID;
+        const accepted = await acceptedUserTurn(rendered, acceptedSessionID);
+        // The pictures the delivered text embeds reach the model beside it, read with this
+        // session's own Dispatch bearer, each picture once in this session. They count as shown
+        // only once the host took the send: one that throws releases the claim, and the delivery
+        // Dispatch retries must carry them again. `acceptedSessionID` is only the accept's and
+        // its replies': what to name is read from the set of the session live once the accept
+        // answers, which a switch during it changes, and what was shown joins the set of the
+        // session live once the pictures load, which the send goes into.
+        const shown = shownPictures(sessionID);
+        if (accepted === undefined) {
+          const card = await withDeliveredPictures(
+            rendered.content,
+            rendered.pictures ?? [],
+            () => timedDispatchClient(DELIVERY_PICTURES_TIMEOUT_MS),
+            true,
+            shown
+          );
+          // Settled once the host writes the card, or at once when nothing waits on that. How
+          // the card goes, and why, is the wake's (`handCard`, `../src/card-wake`).
+          unwritten.sendCard(
+            card.content,
+            rendered.delivery?.mode === "aside" ? "aside" : "steer",
+            identity,
+            claim
+          );
+          markPicturesShown(shownPictures(sessionID), card.shown);
+        } else {
+          const { turn } = accepted;
+          // Sent exactly as Enter, or an aside, at the terminal sends it, the person's pictures
+          // beside their text.
+          const delivery = await withDeliveredPictures(
+            turn.body,
+            pictureAddresses(turn.body),
+            () => timedDispatchClient(DELIVERY_PICTURES_TIMEOUT_MS),
+            false,
+            shown
+          );
+          const sendUserInput = pi.sendUserInput;
+          if (sendUserInput === undefined) {
+            const refusal = typedInputReply(turn.body, { hostVersion: VERSION });
+            if (refusal !== undefined) {
+              // A host that cannot run typed input would hand the command to the model as words.
+              offWorker(async () => {
+                await postDispatchReply(accepted.delivery, { body: refusal }, acceptedSessionID);
+                await taken();
+              });
+            } else {
+              // Noted right before the send, after the pictures load: a run that ends while they
+              // load clears every text note (endInjectedUserTurns), and this turn must still be found.
+              const injectionSessionID = sessionID;
+              noteInjectedUserTurn(injectionSessionID, turn.body, turn.messageId);
+              notedSessionIDs.add(injectionSessionID);
+              pi.sendUserMessage(
+                delivery.content,
+                turn.mode === "aside" ? { deliverAs: "aside" } : undefined
+              );
+              markPicturesShown(shownPictures(injectionSessionID), delivery.shown);
+              // Done once the host writes the user message its text is found as, or at the
+              // run's end, which stops that search (`endInjectedUserTurns`).
+              unwritten.awaitTurn(turn.messageId, {
+                sessionID: injectionSessionID,
+                identity,
+                claim,
+                via: "text",
+              });
+            }
+          } else {
+            unwritten.awaitTurn(turn.messageId, { sessionID, identity, claim, via: "typed" });
+            runTypedInput(
+              sendUserInput,
+              accepted.delivery,
+              acceptedSessionID,
+              turn,
+              delivery.content,
+              delivery.shown
+            );
+          }
+        }
       }
+    } catch (error) {
+      handing = false;
+      held.release();
+      console.warn(`[envoy] failed to deliver envelope ${envelope?.event_id ?? "unknown"}`, error);
+      // A frame no sweep will show again (a role forward, already acknowledged; one on a
+      // subscription the replay does not read: refused, not started, or the listener's replay
+      // failing) gets its notice at once. The stream's copy of any other waits for a sweep. A
+      // relay frame's failure is the relay's to count: it comes again, or gets its notice.
+      if (relayed === undefined && envelope !== undefined) {
+        void replay?.liveFailed(topic, envelope, error, receivedAt);
+      }
+      throw error;
     }
+    handing = false;
+    if (releasedWhileHanding) relayed?.nak();
   };
 
   const RESUBSCRIBE_DELAY_MS = Number(process.env.ENVOY_RESUBSCRIBE_DELAY_MS ?? "") || 5_000;
@@ -1834,6 +1936,17 @@ export default function envoyExtension(pi: PiApi): void {
     return host !== "" && host === sessionID ? host : undefined;
   };
 
+  // Tells the session a replay or relay notice: one about the listener as a warning, one about the
+  // stream as a card held until the host is settled (`UnwrittenFrames.sendNotice`), which the
+  // transcript records held, so a restart holds it again.
+  const tellReplayNotice = (notice: ReplayNotice): void => {
+    logger.warn(`envoy: ${notice.message}`);
+    routeReplayNotice(notice, {
+      warn: (message) => activeSessionContext?.ui.notify(`envoy: ${message}`, "warning"),
+      card: (content) => unwritten.sendNotice(content),
+    });
+  };
+
   // Shows the session each message the notification stream stored for it while its subscriptions
   // were down, once (`@legion/envoy-client/replay`). Its sessions are this instance's: work started
   // for one session stops once the host, or this instance, is on another.
@@ -1864,13 +1977,7 @@ export default function envoyExtension(pi: PiApi): void {
                 "warning"
               );
             },
-            notify: (notice) => {
-              logger.warn(`envoy: ${notice.message}`);
-              routeReplayNotice(notice, {
-                warn: (message) => activeSessionContext?.ui.notify(`envoy: ${message}`, "warning"),
-                card: (content) => unwritten.sendNotice(content),
-              });
-            },
+            notify: tellReplayNotice,
             log: (message, error) =>
               logger.warn(
                 `envoy: ${message}`,
@@ -1896,6 +2003,177 @@ export default function envoyExtension(pi: PiApi): void {
   };
   const replayFollowedChanged = async (): Promise<void> => {
     if (replay !== undefined && replayOpen()) await replay.followedChanged();
+  };
+
+  // Consumer delivery (`@legion/envoy-client/consumer-delivery`). While a pass holds the session's
+  // agent subject open, it holds the session's relay subject open too, subscribed before any
+  // registration, and every registration then asks the listener for consumer delivery. Answered
+  // `consumer`, the listener relays the session's durable consumer on that subject: its agent
+  // subject and every followed topic the stream stores, each frame handed to `deliver` in stream
+  // order and answered `done` once written. The core copies of those subjects are then shown
+  // nothing (`relays`), the agent subject's lane receipt still answered, and the replay
+  // engine makes no `/v1/replay` call. Answered `core`, or not at all, the core path runs as before.
+  interface Relay {
+    readonly sessionID: string;
+    readonly delivery: ConsumerDelivery;
+    subscription: Subscription | undefined;
+  }
+  let relay: Relay | undefined;
+
+  const relaysCoreTopic = (topic: string): boolean =>
+    relay?.sessionID === sessionID && relay.delivery.relays(topic);
+
+  // A relay frame for a session the host is no longer on (a switch, before the next pass closes
+  // its relay), or one that drains in while the session shuts down, is one the session cannot
+  // take: `nak`, so the listener sends it again to whoever takes the session next.
+  const deliverRelayed = async (delivery: ConsumerDelivery, frame: ConsumerFrame) => {
+    const owner = relay;
+    if (shuttingDown || owner?.delivery !== delivery || !sessionOpen(owner.sessionID)) {
+      frame.nak();
+      return;
+    }
+    await deliver(frame.subject, frame.subject, frame.data, "", Date.now(), frame);
+  };
+
+  // The relay of session `id`, its snapshot restored from `entries` (before any `setFollowed`),
+  // and every later change of it appended to the transcript of the session it is for
+  // (`CONSUMER_STATE_ENTRY`): after a frame is written, after the followed topics change, and
+  // after a registration answer moves the stream. The follows map goes with an entry only when it
+  // changed, so a written frame costs one resume point beside the frame's own entries; what the
+  // relay restored is stored already and is not appended again.
+  const createRelay = (id: string, entries: readonly unknown[], ledger: ReplayEngine): Relay => {
+    let persistedFollows = "";
+    const delivery: ConsumerDelivery = createConsumerDelivery({
+      sessionID: id,
+      ledger,
+      host: {
+        deliver: (frame) => deliverRelayed(delivery, frame),
+        gap: tellReplayNotice,
+        log: (message, error) =>
+          logger.warn(
+            `envoy: ${message}`,
+            error === undefined ? undefined : { error: messageFor(error) }
+          ),
+      },
+      publish: (reply, body) => {
+        if (connection === undefined) throw new Error("no NATS connection");
+        connection.publish(reply, codec.encode(body));
+      },
+      persist: (snapshot) => {
+        // Another session's transcript is not this relay's to write to: the change is appended
+        // once the host records in this session again.
+        if (relay?.delivery !== delivery || transcriptSessionID() !== id) return false;
+        const follows = JSON.stringify(snapshot.follows);
+        pi.appendEntry(CONSUMER_STATE_ENTRY, {
+          session_id: id,
+          ...(snapshot.resume === undefined ? {} : { resume: snapshot.resume }),
+          ...(follows === persistedFollows ? {} : { follows: snapshot.follows }),
+        });
+        persistedFollows = follows;
+        return true;
+      },
+    });
+    const restored = consumerSnapshot(entries, id);
+    if (restored !== undefined) delivery.restore(restored);
+    persistedFollows = JSON.stringify(delivery.snapshot().follows);
+    return { sessionID: id, delivery, subscription: undefined };
+  };
+
+  // Subscribes the relay subject, unless it is open: a subscription on a connection the listener
+  // has not been told of begins a new epoch, which the next registration carries.
+  const subscribeRelay = async (owner: Relay, live: Fence = UNFENCED): Promise<void> => {
+    if (owner.subscription !== undefined) return;
+    const connected = await ensureConnection(live);
+    if (!live() || relay !== owner || owner.subscription !== undefined) return;
+    const subscription = connected.subscribe(owner.delivery.subject);
+    owner.subscription = subscription;
+    owner.delivery.beginEpoch();
+    void pumpRelay(owner, subscription);
+  };
+
+  // Opens session `id`'s relay subject, closing another session's relay first.
+  const openRelay = async (context: SessionContext, id: string, live: Fence): Promise<void> => {
+    if (replay === undefined) return;
+    if (relay?.sessionID !== id) {
+      closeRelay();
+      relay = createRelay(id, context.sessionManager.getEntries(), replay);
+    }
+    await subscribeRelay(relay, live);
+  };
+
+  // The session left (or shut down): its unsettled frames are answered `nak`, the replay engine
+  // leaves consumer mode, and its relay subject is closed. The next registration answers the new
+  // session's mode.
+  const closeRelay = (): void => {
+    const owner = relay;
+    if (owner === undefined) return;
+    relay = undefined;
+    owner.delivery.close();
+    const subscription = owner.subscription;
+    owner.subscription = undefined;
+    subscription?.unsubscribe();
+  };
+
+  // Hands each relay message to the session's consumer delivery, which answers `received` at once
+  // and queues the frame in stream order. A subscription that ends under the session (its
+  // connection closed) is opened again after the resubscribe delay, on a new epoch, and
+  // registered, so the listener restarts the relay at its ack floor.
+  const pumpRelay = async (owner: Relay, subscription: Subscription): Promise<void> => {
+    try {
+      for await (const message of subscription) {
+        owner.delivery.receive(message);
+      }
+    } catch {
+      // Iterator failure falls through to the resubscribe path below.
+    }
+    if (owner.subscription !== subscription) return;
+    owner.subscription = undefined;
+    if (!shuttingDown && relay === owner) retryRelay(owner, RESUBSCRIBE_DELAY_MS);
+  };
+
+  const retryRelay = (owner: Relay, delayMs: number): void => {
+    setTimeout(() => {
+      if (shuttingDown || relay !== owner || owner.subscription !== undefined) return;
+      subscribeRelay(owner).then(
+        () =>
+          void Promise.resolve()
+            .then(registerSession)
+            .catch(() => undefined),
+        () => retryRelay(owner, NATS_RETRY_INTERVAL_MS)
+      );
+    }, delayMs);
+  };
+
+  // nats.js reconnected: the relay subscription is the same object, but the listener must restart
+  // the relay at its ack floor, so a new epoch is registered at once.
+  const renewRelayEpoch = (): void => {
+    if (shuttingDown || relay?.subscription === undefined || relay.sessionID !== sessionID) return;
+    relay.delivery.beginEpoch();
+    void Promise.resolve()
+      .then(registerSession)
+      .catch(() => undefined);
+  };
+
+  // What a registration's answer says of consumer delivery, for the session it registered with
+  // the topics it carried, and the relay it asked for. One that asked nothing (no relay subject
+  // open) relays nothing, whatever the listener answered, so the relay takes none of the topics
+  // and the replay engine sweeps again (`registeredWithoutRelay`, the module that owns the
+  // ledger's consumer mode). An answer for a session this instance has left, or for a relay since
+  // closed, changes nothing.
+  const takeDeliveryAnswer = (
+    registeredSession: string,
+    topics: readonly string[],
+    asked: Relay | undefined,
+    result: SubscribeResult
+  ): void => {
+    if (sessionID !== registeredSession || (asked !== undefined && relay !== asked)) return;
+    if (asked !== undefined) {
+      asked.delivery.answered(result.delivery, topics);
+      return;
+    }
+    if (replay === undefined) return;
+    const open = relay?.sessionID === registeredSession ? relay : undefined;
+    registeredWithoutRelay(replay, open?.delivery, topics);
   };
 
   // The live agent conversation stream (LEGION-232). This session's own turns, tool calls and
@@ -2198,6 +2476,9 @@ export default function envoyExtension(pi: PiApi): void {
   // settles.
   // Every accepted registration is timed here — the pass's, `envoy_subscribe`'s and the
   // heartbeat's own direct refresh all feed the one clock.
+  // While the session's relay subject is open, the registration asks for consumer delivery
+  // (`delivery`: the relay's epoch and resume point), the relay taking the topics it carries as
+  // followed first; its answer says whether the listener relays them.
   const registerSession = () => {
     const registeringFor = sessionID;
     const own = agentSubject(sessionID);
@@ -2206,18 +2487,22 @@ export default function envoyExtension(pi: PiApi): void {
       abandonedHolds.delete(key);
       pendingHandBacks.set(key, { topic: hold.topic, id: sessionID });
     }
+    const topics = [
+      ...new Set([
+        own,
+        ...[...subscriptions.keys()].filter(
+          (subject) => !isRoleBound(subject) && !reachesPrivateStreamSubject(own, subject)
+        ),
+      ]),
+    ];
+    const asking =
+      relay?.sessionID === sessionID && relay.subscription !== undefined ? relay : undefined;
+    if (asking !== undefined) asking.delivery.setFollowed(topics);
     return requireEnvoy()
       .client.subscribe({
         sessionID,
         directory: sessionDirectory,
-        topics: [
-          ...new Set([
-            own,
-            ...[...subscriptions.keys()].filter(
-              (subject) => !isRoleBound(subject) && !reachesPrivateStreamSubject(own, subject)
-            ),
-          ]),
-        ],
+        topics,
         port: 0,
         // Read at every registration: the heartbeat re-registers, which picks up
         // titles assigned after session_start and later renames.
@@ -2229,10 +2514,12 @@ export default function envoyExtension(pi: PiApi): void {
         driving: false,
         selfSubscribed: true,
         plugin: { name: packageName, version: packageVersion },
+        ...(asking === undefined ? {} : { delivery: asking.delivery.registration() }),
       })
       .then((result) => {
         registeredFor = registeringFor;
         registeredAt = Date.now();
+        takeDeliveryAnswer(registeringFor, topics, asking, result);
         return result;
       });
   };
@@ -2822,6 +3109,8 @@ export default function envoyExtension(pi: PiApi): void {
       agentSessions.delete(other);
       if (inboundOpenFor === other) inboundOpenFor = "";
     }
+    // Another session's relay: its unsettled frames go back to the listener (`nak`).
+    if (relay !== undefined && relay.sessionID !== host) closeRelay();
     if (host === "") {
       establishedSession = host;
       ensureHeartbeat(context);
@@ -2841,6 +3130,10 @@ export default function envoyExtension(pi: PiApi): void {
         // deadline: a fenced pass opened nothing, so it records nothing as open either.
         if (!owns()) return false;
         await subscribe(agentSubject(host), live);
+        if (!owns()) return false;
+        // The relay subject opens before any registration asks for consumer delivery, so the
+        // listener's first relayed frame has a subscriber.
+        await openRelay(context, host, live);
         if (!owns()) return false;
         // A viewer's replay request and its watch pings reach the session here. Opening it costs
         // one core subscription and publishes nothing: a session nobody opens stays silent.
@@ -3317,6 +3610,8 @@ export default function envoyExtension(pi: PiApi): void {
       sessionFile: undefined,
       sessionID: "",
     });
+    // The relay's unsettled frames go back to the listener before the connection drains.
+    closeRelay();
     // The process ends, and with it every record it keeps live; removing them, and its store, is
     // tidiness (a dead process's record is inert). Only the instance that wrote records has any.
     if (askgateOwner !== undefined && askgateRecords.size > 0) {
@@ -4015,9 +4310,10 @@ export default function envoyExtension(pi: PiApi): void {
           });
           // The skip is the listener's own delivery: the role lane skips the resolved holder,
           // and the fanout skips its push to any interest whose session is the message's source.
-          // A session that holds its own NATS subscription — every Oh My Pi session — takes no
-          // push at all and still receives the message on any topic it subscribes to, built-in
-          // or ad-hoc, so its own publish, and a subagent's, does reach it. Only the role lane,
+          // A session with no serving port — every Oh My Pi session — takes no push at all and
+          // still gets the message: a topic the stream stores comes back on its own consumer's
+          // relay, and an ad-hoc topic on its core subscription, so its own publish, and a
+          // subagent's, does reach it. Only the role lane,
           // which its holder does not subscribe to, actually goes undelivered: a subagent's
           // source is its parent, so a publish to a role that parent holds is accepted, answers
           // with that holder, and reaches nobody. Only the role case is visible here (a plain
@@ -4109,10 +4405,7 @@ export default function envoyExtension(pi: PiApi): void {
           const directory = optionalStringFor(parameters, "dir");
           const title = optionalStringFor(parameters, "title");
           const sessions = await client.listSessions({ directory, title });
-          const result =
-            machine === undefined
-              ? sessions
-              : sessions.filter((session) => (session.host ?? session.machine_id) === machine);
+          const result = sessionsOnMachine(sessions, machine);
           return toolSuccess(JSON.stringify(result, null, 2), {
             count: result.length,
             machine,

@@ -1,0 +1,132 @@
+== build
+[19:22:28Z] listener and the bridge from this checkout (c6be54a40 plus the working copy); pi-envoy and claude-envoy from this checkout (c6be54a40 plus the working copy); natsd and Dispatch from this checkout
+[19:22:55Z] pi-envoy 13.8.0; claude-envoy 1.0.0; Claude Code 2.1.311 (Claude Code); omp omp/18.12.2; bridge argv --replay-user-messages; the listeners serve on kept ports (ENVOY_LISTEN_FD)
+== services
+[19:22:57Z] listener shared (pid 35595) healthy at http://127.0.0.1:34985
+[19:22:58Z] listener dispatch (pid 35612) healthy at http://127.0.0.1:65246
+[19:23:01Z] Dispatch (pid 35652) serving http://127.0.0.1:19107, with NATS
+[19:23:02Z] Dispatch issues: LIVE-1 (followed, notifications.dispatch.issue.LIVE-1.>) and LIVE-2 (direct messages)
+== sessions
+[19:23:07Z] omp (pid 35693) session 01a18e43-fdc4-71b0-a181-c33147b26e66
+[19:23:07Z] legion claude-bridge (pid 35775) for Claude Code session c7b47467-212a-4962-9d45-be7f9f755261 (--session-id)
+[19:23:11Z] pi: entry {"session_id":"01a18e43-fdc4-71b0-a181-c33147b26e66","machine_id":"shared","host":"legion-infra-infra-594","dir":"/legion/scratch/tmp/infra594/live/head-c6be/sessions/pi/cwd","port":0,"title":"","capabilities":["aside","btw","steer"],"self_subscribed":true,"topics":["notifications.agent.01a18e43-fdc4-71b0-a181-c33147b26e66","notifications.dispatch.issue.LIVE-1","notifications.dispatch.issue.LIVE-1.>","notifications.role.live-delivery-pi-bba0"],"roles":["live-delivery-pi-bba0"],"updated_at":1793388190797,"last_seen":1793388190797,"plugin":"@sjawhar/pi-envoy","plugin_version":"13.8.0"}; interest ["notifications.agent.01a18e43-fdc4-71b0-a181-c33147b26e66","notifications.dispatch.issue.LIVE-1","notifications.dispatch.issue.LIVE-1.>","notifications.role.live-delivery-pi-bba0"]; role {"capabilities":["aside","btw","steer"],"dir":"/legion/scratch/tmp/infra594/live/head-c6be/sessions/pi/cwd","holder":"01a18e43-fdc4-71b0-a181-c33147b26e66","host":"legion-infra-infra-594","last_seen":1793388190797,"machine_id":"shared","role":"live-delivery-pi-bba0","title":""}
+[19:23:19Z] cc: entry {"session_id":"c7b47467-212a-4962-9d45-be7f9f755261","machine_id":"shared","host":"legion-infra-infra-594","dir":"/legion/scratch/tmp/infra594/live/head-c6be/sessions/cc/cwd","port":0,"title":"cwd c7b47467","capabilities":["aside","steer"],"self_subscribed":true,"topics":["notifications.agent.c7b47467-212a-4962-9d45-be7f9f755261","notifications.dispatch.issue.LIVE-1","notifications.dispatch.issue.LIVE-1.>","notifications.role.live-delivery-cc-bba0"],"roles":["live-delivery-cc-bba0"],"updated_at":1793388199100,"last_seen":1793388199100,"plugin":"@sjawhar/claude-envoy","plugin_version":"source"}; interest ["notifications.agent.c7b47467-212a-4962-9d45-be7f9f755261","notifications.dispatch.issue.LIVE-1","notifications.dispatch.issue.LIVE-1.>","notifications.role.live-delivery-cc-bba0"]; role {"capabilities":["aside","steer"],"dir":"/legion/scratch/tmp/infra594/live/head-c6be/sessions/cc/cwd","holder":"c7b47467-212a-4962-9d45-be7f9f755261","host":"legion-infra-infra-594","last_seen":1793388199100,"machine_id":"shared","role":"live-delivery-cc-bba0","title":"cwd c7b47467"}; transcript /legion/scratch/tmp/infra594/live/head-c6be/sessions/cc/config/projects/-legion-scratch-tmp-infra594-live-head-c6be-sessions-cc-cwd/c7b47467-212a-4962-9d45-be7f9f755261.jsonl
+== window a (session-restart)
+[19:23:19Z] both sessions SIGKILLed; their registrations stay until they lapse
+[19:23:36Z] omp (pid 36085) session 01a18e43-fdc4-71b0-a181-c33147b26e66, resumed from /legion/scratch/tmp/infra594/live/head-c6be/sessions/pi/sessions/2026-10-30T19-23-02-980Z_01a18e43-fdc4-71b0-a181-c33147b26e66.jsonl
+[19:23:36Z] legion claude-bridge (pid 36162) for Claude Code session c7b47467-212a-4962-9d45-be7f9f755261 (--resume)
+[19:23:51Z] window a: every event shown; holding 15s for a repeat
+== window b (nats-cut)
+[19:24:06Z] both proxies cut; natsd shows neither session's agent or relay subscription
+[19:24:19Z] both proxies back
+[19:24:29Z] window b: every event shown; holding 15s for a repeat
+== window c (listener-shared)
+[19:24:44Z] listener shared SIGKILLed
+[19:24:49Z] listener shared (pid 36569) healthy at http://127.0.0.1:34985
+[19:24:59Z] window c: every event shown; holding 15s for a repeat
+== window d (listener-dispatch)
+[19:25:14Z] listener dispatch SIGKILLed; the listener sends go to shared
+[19:25:29Z] listener dispatch (pid 36770) healthy at http://127.0.0.1:65246
+[19:25:33Z] window d: every event shown; holding 15s for a repeat
+== window e (dispatch-kill)
+[19:25:48Z] Dispatch's NATS connection cut, its writes made, and Dispatch SIGKILLed right after they returned
+[19:25:53Z] Dispatch (pid 36925) serving http://127.0.0.1:19107, with NATS
+[19:26:49Z] window e: every event shown; holding 15s for a repeat
+[19:27:04Z] Dispatch restarted at 2026-10-30T19:25:52.997Z; the stream stored window e's comments at:
+   LDTbba0-042Z stream seq 66, stored 2026-10-30T19:25:53.567Z
+   LDTbba0-041Z stream seq 71, stored 2026-10-30T19:26:48.605Z
+== window f (none)
+[19:27:12Z] window f: every event shown; holding 15s for a repeat
+== table
+build: listener and bridge this checkout (c6be54a40 plus the working copy); plugins this checkout (c6be54a40 plus the working copy); listener grant current
+disruption             kind   event             marker           pi   cc
+a session-restart      issue  comment-1         LDTbba0-001Z      1    1
+a session-restart      issue  comment-2         LDTbba0-002Z      1    1
+a session-restart      agent  dispatch-message  LDTbba0-003Z      1    -
+a session-restart      agent  dispatch-message  LDTbba0-004Z      -    1
+a session-restart      agent  listener-send     LDTbba0-005Z      1    -
+a session-restart      agent  listener-send     LDTbba0-006Z      -    1
+a session-restart      role   listener-publish  LDTbba0-007Z      1    -
+a session-restart      role   listener-publish  LDTbba0-008Z      -    1
+a session-restart      role   core-publish      LDTbba0-009Z      1    -
+a session-restart      role   core-publish      LDTbba0-010Z      -    1
+b nats-cut             issue  comment-1         LDTbba0-011Z      1    1
+b nats-cut             issue  comment-2         LDTbba0-012Z      1    1
+b nats-cut             agent  dispatch-message  LDTbba0-013Z      1    -
+b nats-cut             agent  dispatch-message  LDTbba0-014Z      -    1
+b nats-cut             agent  listener-send     LDTbba0-015Z      1    -
+b nats-cut             agent  listener-send     LDTbba0-016Z      -    1
+b nats-cut             role   listener-publish  LDTbba0-017Z      1    -
+b nats-cut             role   listener-publish  LDTbba0-018Z      -    1
+b nats-cut             role   core-publish      LDTbba0-019Z      1    -
+b nats-cut             role   core-publish      LDTbba0-020Z      -    1
+c listener-shared      issue  comment-1         LDTbba0-021Z      1    1
+c listener-shared      issue  comment-2         LDTbba0-022Z      1    1
+c listener-shared      agent  dispatch-message  LDTbba0-023Z      1    -
+c listener-shared      agent  dispatch-message  LDTbba0-024Z      -    1
+c listener-shared      agent  listener-send     LDTbba0-025Z      1    -
+c listener-shared      agent  listener-send     LDTbba0-026Z      -    1
+c listener-shared      role   listener-publish  LDTbba0-027Z      1    -
+c listener-shared      role   listener-publish  LDTbba0-028Z      -    1
+c listener-shared      role   core-publish      LDTbba0-029Z      1    -
+c listener-shared      role   core-publish      LDTbba0-030Z      -    1
+d listener-dispatch    issue  comment-1         LDTbba0-031Z      1    1
+d listener-dispatch    issue  comment-2         LDTbba0-032Z      1    1
+d listener-dispatch    agent  dispatch-message  LDTbba0-033Z    0/0    -
+d listener-dispatch    agent  dispatch-message  LDTbba0-034Z      -  0/0
+d listener-dispatch    agent  listener-send     LDTbba0-035Z      1    -
+d listener-dispatch    agent  listener-send     LDTbba0-036Z      -    1
+d listener-dispatch    role   listener-publish  LDTbba0-037Z      1    -
+d listener-dispatch    role   listener-publish  LDTbba0-038Z      -    1
+d listener-dispatch    role   core-publish      LDTbba0-039Z      1    -
+d listener-dispatch    role   core-publish      LDTbba0-040Z      -    1
+e dispatch-kill        issue  comment-1         LDTbba0-041Z      1    1
+e dispatch-kill        issue  comment-2         LDTbba0-042Z      1    1
+e dispatch-kill        agent  dispatch-message  LDTbba0-043Z      1    -
+e dispatch-kill        agent  dispatch-message  LDTbba0-044Z      -    1
+e dispatch-kill        agent  listener-send     LDTbba0-045Z      1    -
+e dispatch-kill        agent  listener-send     LDTbba0-046Z      -    1
+e dispatch-kill        role   listener-publish  LDTbba0-047Z      1    -
+e dispatch-kill        role   listener-publish  LDTbba0-048Z      -    1
+e dispatch-kill        role   core-publish      LDTbba0-049Z      1    -
+e dispatch-kill        role   core-publish      LDTbba0-050Z      -    1
+f none                 issue  comment-1         LDTbba0-051Z      1    1
+f none                 issue  comment-2         LDTbba0-052Z      1    1
+f none                 agent  dispatch-message  LDTbba0-053Z      1    -
+f none                 agent  dispatch-message  LDTbba0-054Z      -    1
+f none                 agent  listener-send     LDTbba0-055Z      1    -
+f none                 agent  listener-send     LDTbba0-056Z      -    1
+f none                 role   listener-publish  LDTbba0-057Z      1    -
+f none                 role   listener-publish  LDTbba0-058Z      -    1
+f none                 role   core-publish      LDTbba0-059Z      1    -
+f none                 role   core-publish      LDTbba0-060Z      -    1
+(a cell is the count of entries carrying the marker in that session's transcript; "!" marks a count other than expected; "/0" marks an event its publisher refused, expected 0 times; "-" an event not meant for that session)
+jq: error (at /legion/scratch/tmp/infra594/live/head-c6be/events.jsonl:1): startswith() requires string inputs
+jq: error (at /legion/scratch/tmp/infra594/live/head-c6be/events.jsonl:2): startswith() requires string inputs
+jq: error (at /legion/scratch/tmp/infra594/live/head-c6be/events.jsonl:11): startswith() requires string inputs
+jq: error (at /legion/scratch/tmp/infra594/live/head-c6be/events.jsonl:12): startswith() requires string inputs
+jq: error (at /legion/scratch/tmp/infra594/live/head-c6be/events.jsonl:21): startswith() requires string inputs
+jq: error (at /legion/scratch/tmp/infra594/live/head-c6be/events.jsonl:22): startswith() requires string inputs
+jq: error (at /legion/scratch/tmp/infra594/live/head-c6be/events.jsonl:31): startswith() requires string inputs
+jq: error (at /legion/scratch/tmp/infra594/live/head-c6be/events.jsonl:32): startswith() requires string inputs
+jq: error (at /legion/scratch/tmp/infra594/live/head-c6be/events.jsonl:41): startswith() requires string inputs
+jq: error (at /legion/scratch/tmp/infra594/live/head-c6be/events.jsonl:42): startswith() requires string inputs
+jq: error (at /legion/scratch/tmp/infra594/live/head-c6be/events.jsonl:51): startswith() requires string inputs
+jq: error (at /legion/scratch/tmp/infra594/live/head-c6be/events.jsonl:52): startswith() requires string inputs
+jq: error (at /legion/scratch/tmp/infra594/live/head-c6be/events.jsonl:1): startswith() requires string inputs
+jq: error (at /legion/scratch/tmp/infra594/live/head-c6be/events.jsonl:2): startswith() requires string inputs
+jq: error (at /legion/scratch/tmp/infra594/live/head-c6be/events.jsonl:11): startswith() requires string inputs
+jq: error (at /legion/scratch/tmp/infra594/live/head-c6be/events.jsonl:12): startswith() requires string inputs
+jq: error (at /legion/scratch/tmp/infra594/live/head-c6be/events.jsonl:21): startswith() requires string inputs
+jq: error (at /legion/scratch/tmp/infra594/live/head-c6be/events.jsonl:22): startswith() requires string inputs
+jq: error (at /legion/scratch/tmp/infra594/live/head-c6be/events.jsonl:31): startswith() requires string inputs
+jq: error (at /legion/scratch/tmp/infra594/live/head-c6be/events.jsonl:32): startswith() requires string inputs
+jq: error (at /legion/scratch/tmp/infra594/live/head-c6be/events.jsonl:41): startswith() requires string inputs
+jq: error (at /legion/scratch/tmp/infra594/live/head-c6be/events.jsonl:42): startswith() requires string inputs
+jq: error (at /legion/scratch/tmp/infra594/live/head-c6be/events.jsonl:51): startswith() requires string inputs
+jq: error (at /legion/scratch/tmp/infra594/live/head-c6be/events.jsonl:52): startswith() requires string inputs
+note: Dispatch published LIVE-1's comments in another order than they were written: written ; stored 
+issue order: every comment of LIVE-1 appears in its stream order in both transcripts
+transcripts: pi /legion/scratch/tmp/infra594/live/head-c6be/sessions/pi/sessions/2026-10-30T19-23-02-980Z_01a18e43-fdc4-71b0-a181-c33147b26e66.jsonl; cc /legion/scratch/tmp/infra594/live/head-c6be/sessions/cc/config/projects/-legion-scratch-tmp-infra594-live-head-c6be-sessions-cc-cwd/c7b47467-212a-4962-9d45-be7f9f755261.jsonl
+ENVOY SESSION DELIVERY: PASS (every event once, the issue in order)
+envoy-session-delivery: evidence kept in /legion/scratch/tmp/infra594/live/head-c6be
