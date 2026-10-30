@@ -2,14 +2,14 @@
   "schemaVersion": 1,
   "phase": "implement",
   "issue": "INFRA-594",
-  "completed": "2026-10-30T19:56:54Z",
+  "completed": "2026-10-30T22:50:30Z",
   "proof": [
     {
       "criterion": "Sessions take every event (agent, issue, role) once through restarts of the session, its NATS connection, either listener and a Dispatch pod; the plugin acks after the transcript write; an unacked message is redelivered",
       "surface": "Real Oh My Pi (omp 18.12.2, this checkout's pi-envoy) and real Claude Code 2.1.311 under this checkout's `legion claude-bridge` with claude-envoy built from the checkout; natsd with JetStream; two real envoy-listener processes; real envoy-dispatch on Postgres 17 with pgvector; in the issue pod",
       "command": "LEGION_TEST_PG_DSN='postgres://postgres@127.0.0.1:5433/postgres?sslmode=disable' bash scripts/e2e/envoy-session-delivery.sh",
-      "observed": "At c6be54a4 (main cc825086 merged; key read from /var/run/model-gateway-key/key): ENVOY SESSION DELIVERY: PASS (every event once, the issue in order), exit 0, 60 events x 6 windows each counted 1 (evidence/live/head-c6be.table.txt); the key appears in no output or log.",
-      "headSha": "c6be54a40eae45bf8d6a9e0cfe9236692697d2d5",
+      "observed": "At cb5250e7 (main e4dc7c4f merged, review round 3 fixes): ENVOY SESSION DELIVERY: PASS, exit 0, 60 events x 6 windows each counted 1 (evidence/live/head-cb52.table.txt).",
+      "headSha": "cb5250e70df0ab3b912573e96593879aa32f4735",
       "negativeControl": "--build-from c3d09eec --expect-lost agent,issue,role at a592ce7e: NEGATIVE CONTROL HOLDS: every agent,issue,role event of window a counted 0 in both sessions (evidence/live/c3d09eec-at-a592.out)."
     },
     {
@@ -104,8 +104,8 @@
       "criterion": "Tester round 5: a session upgrading from the released plugin (96a7e5ea, pi-envoy 13.5.1, claude-envoy 1.0.0) to this head is shown every agent, issue and role event stored while it was away, once",
       "surface": "real Oh My Pi and Claude Code sessions started on the plugins built from 96a7e5ea, SIGKILLed, the window's events stored, resumed on this checkout's plugins; natsd, two listeners, Dispatch on Postgres",
       "command": "LEGION_TEST_PG_DSN='postgres://postgres@127.0.0.1:5433/postgres?sslmode=disable' bash scripts/e2e/envoy-session-delivery.sh --disruptions a --resume-plugins-from 96a7e5ea9099aabf25dc8b524177b6f73df4eab5 --second-followed-issue",
-      "observed": "At c6be54a4: ENVOY SESSION DELIVERY: PASS, exit 0; comment-1, comment-2 and second-comment counted 1 in both sessions, every agent and role event 1 (evidence/live/upgrade-c6be.table.txt).",
-      "headSha": "c6be54a40eae45bf8d6a9e0cfe9236692697d2d5",
+      "observed": "At cb5250e7: PASS, exit 0; comment-1, comment-2, second-comment counted 1 in both sessions, every agent and role event 1 (evidence/live/upgrade-cb52.table.txt).",
+      "headSha": "cb5250e70df0ab3b912573e96593879aa32f4735",
       "negativeControl": "same command with followedOnCorePath neutered in consumer-delivery.ts (working copy, restored after): ENVOY SESSION DELIVERY: FAIL, issue comment-1 and comment-2 counted 0! 0! (evidence/live/upgrade-neg.table.txt), matching the tester's two runs at 1099510d"
     },
     {
@@ -163,6 +163,30 @@
       "observed": "Results: 94 passed, 0 failed; PASS: select-e2e-proofs.sh; the selector prints no ::error",
       "headSha": "f2c0ca9efd28cd48a9d8b5c99c88d08ef3efbd37",
       "negativeControl": "at c6be54a4 (no entry) the tester's run of the same suite failed 17 cases with JSONDecodeError, and the selector printed ::error file=.github/e2e-scripts.json naming scripts/e2e/envoy-session-delivery.sh"
+    },
+    {
+      "criterion": "Review round 3 (High, 4428628799): a serving-port push in flight when the entry flips from core back to consumer delivery reaches the port",
+      "surface": "listener binary, real nats-server, serving-port session with a consumer whose entry was written core, a refused push, a flip back, then 204",
+      "command": "cd packages/envoy && go test -count=10 -run TestServePortPushInFlightReachesThePortAcrossAFlipBackToConsumer ./cmd/listener; full ./cmd/listener, -race ./cmd/listener, serverchange, internal/session, internal/bus",
+      "observed": "-count=10 ok 31.3s; ./cmd/listener ok 665.0s; -race ok 699.1s no DATA RACE; serverchange ok 143.9s; session 10.6s, bus 332.6s ok",
+      "headSha": "cb5250e70df0ab3b912573e96593879aa32f4735",
+      "negativeControl": "fix reverted in target: FAIL 'the message ... never reached the port', log 'session relay skipped a copy the session already has' delivery_status dedupe"
+    },
+    {
+      "criterion": "Review round 3 (Medium, 4428628810): stream_recreated is told when the relay's first frame from the new stream arrives before the registration answer",
+      "surface": "envoy-client consumer delivery",
+      "command": "bun test packages/envoy-client packages/pi-envoy; claude-envoy built as CI builds it then bun run test",
+      "observed": "3050 pass 0 fail; claude-envoy 283 pass 0 fail; tsc clean; biome exit 0",
+      "headSha": "cb5250e70df0ab3b912573e96593879aa32f4735",
+      "negativeControl": "tellReplacedResume removed from receive(): 'gaps > a frame from another stream than the seeded resume's, before the answer, is told once' fails (+ [])"
+    },
+    {
+      "criterion": "envoy-go-race's TestAReconnectCatchesUpWhatTheListenerMissed (internal/dispatch/api, outside this diff): this PR's or main's",
+      "surface": "go test -race in packages/envoy/internal/dispatch/api, at the merged head and at main's tip",
+      "command": "GOMAXPROCS=4 CGO_ENABLED=1 go test -race -count=20 -run '^TestAReconnectCatchesUpWhatTheListenerMissed$' ./internal/dispatch/api (head workspace; main ecbc2c8f from git archive)",
+      "observed": "head: 1 of 20 failed; main ecbc2c8f: 3 of 20 failed; same assertion delivery_live_hub_test.go:776 (evidence/reconnect-race-head.txt, reconnect-race-main-ecbc2c8f.txt): main's flake",
+      "headSha": "cb5250e70df0ab3b912573e96593879aa32f4735",
+      "negativeControl": "main's tip without this PR fails the same assertion more often, so the failure is not introduced here"
     }
   ],
   "filesChanged": [
@@ -186,7 +210,8 @@
     "Round 6: packages/envoy-client/src/consumer-delivery.ts (followedOnCorePath) + its test, README.md and changelog fragment; packages/pi-envoy/extensions/envoy.test.ts, AGENTS.md; packages/claude-envoy/AGENTS.md; packages/envoy/cmd/listener/main_test.go and unplaceable_delivery_acceptance_test.go (pushLog); merge: packages/envoy/internal/bus/nats.go (onAsyncError), packages/envoy/AGENTS.md",
     "Review round 2: packages/envoy/cmd/listener/{delivery,serve_port_workers,role_lane,session_delivery,session_relay,api,claim_wiring,main}.go and tests (session_relay_test, main_test, dispatch_resolution_test, serve_port_workers_test, api_test, delivery_role_supersession_test), internal/session/session.go, packages/envoy/AGENTS.md, changelog fragment; packages/envoy-client/src/{consumer-delivery,tool-contract}.ts and tests, changelog fragment; packages/pi-envoy/extensions/envoy.ts; packages/claude-envoy/src/envoy-channel-server.ts; merge of main d9aee5bf: packages/envoy-client/package.json",
     "Round 8: merge of main cc825086 (76da2c10: .github/workflows/ci.yaml, docs/site/.../dispatch/envoy.md, packages/envoy/AGENTS.md, cmd/listener/main.go, internal/bus/nats.go); packages/envoy/cmd/listener/interest_record_unreadable_test.go; scripts/e2e/envoy-session-delivery.sh, scripts/e2e/README.md",
-    "Round 9: .github/e2e-scripts.json (envoy-session-delivery.sh under elsewhere, never hosted: it needs an issue pod and a model provider)"
+    "Round 9: .github/e2e-scripts.json (envoy-session-delivery.sh under elsewhere, never hosted: it needs an issue pod and a model provider)",
+    "Round 10: merge of main e4dc7c4f (9d83f1c1: internal/bus/nats.go, claude-envoy/tests/envoy-channel-stall.test.ts); packages/envoy/cmd/listener/{delivery,serve_port_workers,session_relay,role_lane}.go + session_relay_test.go, internal/session/{session,handler}.go, AGENTS.md, changelog; packages/envoy-client/src/consumer-delivery.ts + test; scripts/e2e/envoy-session-delivery.sh"
   ],
   "trickyParts": [
     "nats-server 2.10.29 reports ack floor 0 for a fresh consumer, so every session consumer is created at a start sequence (stream last+1) and the floor is read never below it",
@@ -208,7 +233,8 @@
     "Round 1: pi-envoy's test afterEach forgets the keyed-layer memory, since bun test of envoy-client and pi-envoy in one process failed dispatch-execute's gateway test after a pi-envoy test taught the process its Dispatch origin.",
     "Review round 2: the serving-port worker now uses Resolve's predicate (ConsumerRelaysStored), so a consumer-delivery serving-port session sent an ad-hoc topic the stream does not store is pushed rather than skipped.",
     "Review round 2: envoy_sessions with an empty machine argument lists all sessions in both plugins (pi-envoy filtered to none before).",
-    "Round 8: GET /v1/registry keeps depending on the role claim view (its answer carries roles); the test waits for the view. The CI failure did not reproduce in the pod, so its negative control is the reasoning, not a local red run."
+    "Round 8: GET /v1/registry keeps depending on the role claim view (its answer carries roles); the test waits for the view. The CI failure did not reproduce in the pod, so its negative control is the reasoning, not a local red run.",
+    "Round 10: session.Resolve takes the stored subject as well as the stored sequence, since a role forward's copy is stored on the holder's agent subject, not its role topic."
   ],
   "openQuestions": []
 }
