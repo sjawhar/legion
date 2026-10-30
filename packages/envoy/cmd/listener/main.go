@@ -396,6 +396,18 @@ func sessionHealthFields(sessions *session.SessionRegistry) map[string]interface
 // fails the container health check inside the budget, as the 10 s JetStream wait it replaces
 // failed it by running past the check's timeout. A check that answered with a failure keeps its
 // answer.
+//
+// The role claim view is reported too, after those checks and as a 200 "degraded" naming it
+// (store.Registry.RoleViewErr): until its watcher's first scan has delivered every claim the view
+// answers no read, so GET /v1/sessions and GET /v1/registry/<session_id> answer 503 while every
+// bus check here passes, and the report reads the very state those routes read. Degraded and not
+// unhealthy, because that view fills itself through its watcher's own rescan: a 503 would take a
+// serving listener out of a load balancer for a state that repairs itself, while every probe of
+// this listener runs curl -f or -sf against /healthz, which a 200 passes. For the same reason the
+// view is no part of Ping or WatchErr, whose terminal failures the self-health monitor
+// self-terminates the listener over: a restart completes no scan that keeps timing out. Liveness
+// reads nothing at all here: the listener mounts no /livez, so the liveness probe's curl, which
+// runs without -f, is answered by this mux without a dependency being touched.
 func healthzHandler(deps *atomic.Pointer[listenerDeps]) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
@@ -433,6 +445,10 @@ func healthzHandler(deps *atomic.Pointer[listenerDeps]) http.HandlerFunc {
 				writeDependencyHealth(w, c.name+" KV", err, !answered || c.cache.WatchErr() != nil || errors.Is(err, nats.ErrConnectionClosed))
 				return
 			}
+		}
+		if err := d.registry.RoleViewErr(); err != nil {
+			writeDependencyHealth(w, "role claim view", err, false)
+			return
 		}
 		response := map[string]interface{}{"status": "healthy"}
 		for k, v := range sessionHealthFields(d.sessions) {
@@ -778,13 +794,17 @@ func main() {
 	// not merely ready: a first scan nats.go's idle timer ended releases readiness, and the
 	// watcher's rescan ends this wait.
 	//
-	// Bounded at 30s: a healthy NATS cluster completes the scan in milliseconds.
-	// A timeout still serves, fail open: the warn below says which cache was not ready, the
-	// registry keeps answering from whatever it holds, and /healthz exposes the registry while
+	// Bounded at 30s: a healthy NATS cluster completes the scan in milliseconds. The wait also
+	// ends before that bound with the role claim watcher's terminal error - a first start that
+	// failed, a bucket recreated under it, the watcher's own end - or its stop, none of which the
+	// watcher completes a scan after.
+	// A warm-up that does not complete still serves, fail open: the warn below names the cache and
+	// carries the cause, whichever of those it was, the registry keeps answering from whatever it
+	// holds, and /healthz reports the role claim view as degraded and the buckets themselves while
 	// NATS recovers.
 	cacheReadyCtx, cacheReadyCancel := context.WithTimeout(context.Background(), 30*time.Second)
 	if err := registry.WaitForCacheReady(cacheReadyCtx); err != nil {
-		logger.Warn("interest or role claim cache warm-up timed out; serving with possibly empty cache",
+		logger.Warn("interest or role claim cache warm-up did not complete; serving with possibly empty cache",
 			slog.String("error", err.Error()))
 	}
 	cacheReadyCancel()
