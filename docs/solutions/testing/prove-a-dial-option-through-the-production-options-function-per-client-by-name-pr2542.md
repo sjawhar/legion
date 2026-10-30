@@ -19,22 +19,22 @@ where no call site carries the option, so it is no pin at all.
 ## Rules
 
 - **Drive the production construction.** The listener's test starts the real `envoy-listener`
-  binary, so the clients come from `listenerStreamOptions` (`cmd/listener/main.go:608-614`) and
-  `openLiveTopics` (`cmd/listener/live_topics.go:35`). The daemon's test calls `natsauth.Connect`
-  (`packages/daemon/internal/natsauth/natsauth.go:150-199`), the module's sole dialer.
+  binary, so the clients come from `listenerStreamOptions` and `openLiveTopics`
+  (`cmd/listener/main.go`, `cmd/listener/live_topics.go`). The daemon's test calls
+  `natsauth.Connect` (`packages/daemon/internal/natsauth/natsauth.go`), the module's sole dialer.
 - **Assert per constructed client, by the name it carries.** One process builds several clients from
   different call sites: the listener's main client owns the stream, its live-topics lane is a second
-  client of its own. Collect the names that reported, and fail naming the ones missing
-  (`cmd/listener/silent_cut_test.go:68-76`), or a change that gives the option to one sibling and
-  not the other passes.
+  client of its own. Collect the names that reported, and fail naming the ones missing (the poll
+  loop over `names` in `freezeUntilBothClientsReportTheCut`, `cmd/listener/silent_cut_test.go`), or
+  a change that gives the option to one sibling and not the other passes.
 - **The negative control is removing the option from one call site**, not from the test. Measured at
   the merge head: `bus.WithSilentCutDetection()` taken out of `openLiveTopics` alone →
   `no disconnect line for envoy-live-topics 5.011s into a silent cut`, with `envoy`'s line present.
   Taken out of the daemon's `Connect` →
   `the connection was not reported lost within 5.010739211s of the server going quiet: IsConnected = true, the warning logged = false`.
-- The test says so in its own words, so the next reader does not weaken it:
-  `silent_cut_test.go:37-40` records that a test which connected with the option itself would report
-  the cut whether or not the two call sites carry it.
+- The test says so in its own words, so the next reader does not weaken it: the doc comment of
+  `TestBothOfTheListenersNATSClientsReportASilentCutWithinSeconds` records that a test which
+  connected with the option itself would report the cut whether or not the two call sites carry it.
 
 ## Coverage
 

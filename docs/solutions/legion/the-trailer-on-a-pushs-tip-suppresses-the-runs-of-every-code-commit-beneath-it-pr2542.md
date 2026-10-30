@@ -37,16 +37,17 @@ handoff commit starts **no run at all**, however much code it carries beneath th
 
 ## What this adds to the pages already on the topic
 
-`docs/solutions/legion/an-implement-handoff-push-runs-ci-in-full-and-cancels-the-code-heads-runs-and-give-the-lane-the-code-heads-image-LEGION-631.md:20-23`
-says "a push that carries code and a handoff together, or a handoff commit pushed without the
-trailer, carries no trailer and runs CI at its head". That is true as a **discipline** a role must
-keep, and it is not a mechanism: nothing removes the trailer when code joins the push. Read it as
-the rule the role obeys, and L1 above as what happens when it does not.
+`docs/solutions/legion/an-implement-handoff-push-runs-ci-in-full-and-cancels-the-code-heads-runs-and-give-the-lane-the-code-heads-image-LEGION-631.md`
+says, in its first rule, "a push that carries code and a handoff together, or a handoff commit
+pushed without the trailer, carries no trailer and runs CI at its head". That is true as a
+**discipline** a role must keep, and it is not a mechanism: nothing removes the trailer when code
+joins the push. Read it as the rule the role obeys, and the rules above as what happens when it
+does not.
 
-`docs/solutions/github/gh-run-list-commit-takes-the-full-sha-and-an-empty-answer-is-not-a-measurement-INFRA-92.md:54-57`
-records a force-push ordered to drop a trailer where reading the code commit's check runs showed
-the content **was** checked. The case here is the other one: the code was checked nowhere, and the
-remedy was still not a rewrite.
+`docs/solutions/github/gh-run-list-commit-takes-the-full-sha-and-an-empty-answer-is-not-a-measurement-INFRA-92.md`
+records, in its evidence, a force-push ordered to drop a trailer where reading the code commit's
+check runs showed the content **was** checked. The case here is the other one: the code was checked
+nowhere, and the remedy was still not a rewrite.
 
 ## Evidence
 

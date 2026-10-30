@@ -15,18 +15,20 @@ related_issues:
 
 A hub whose packets stop without closing the socket closes nothing: `IsConnected` stays true and no
 reconnect is attempted until the pings run out. nats.go's defaults are one ping every two minutes
-with two outstanding, so the cut is found after four to six minutes
-(`internal/bus/connect.go:60-76`). Every reader waiting on that connection waits with it.
+with two outstanding, so the cut is found after four to six minutes (the doc of
+`silentCutPingInterval`, `internal/bus/connect.go`). Every reader waiting on that connection waits
+with it.
 
 ## Rules
 
 - **Size the bound from the ping settings** — the Go client is the same arithmetic as the
   TypeScript one in
-  `docs/solutions/envoy/nats-js-2-29-3-never-finishes-a-stale-close-behind-a-dead-path-and-leaks-an-abandoned-dial-patch-both-pr2331.md:21-25`:
+  `docs/solutions/envoy/nats-js-2-29-3-never-finishes-a-stale-close-behind-a-dead-path-and-leaks-an-abandoned-dial-patch-both-pr2331.md`:
   the cut is found within (`MaxPingsOut` + 1) × `PingInterval`. One second with two out puts it at
-  two to three seconds, which is `bus.WithSilentCutDetection()`
-  (`internal/bus/connect.go:72-73`) and, in the daemon, `detectSilentCuts`
-  (`packages/daemon/internal/natsauth/natsauth.go:150-199`).
+  two to three seconds, which is `bus.WithSilentCutDetection` (`internal/bus/nats.go`, whose
+  `nats.Option` is `detectSilentCuts` over the constants `silentCutPingInterval` and
+  `silentCutMaxPingsOut`, `internal/bus/connect.go`) and, in the daemon, `detectSilentCuts` inside
+  `natsauth.Connect` (`packages/daemon/internal/natsauth/natsauth.go`).
 - **Set it where the module dials, not where each caller dials.** The daemon reaches NATS only
   through `natsauth.Connect`, so the fields belong inside it and its doc says every connection it
   opens pings that way; a module whose callers pass the options has to be audited caller by caller.
