@@ -209,8 +209,9 @@ func autolinkAt(after []byte) bool {
 }
 
 // rawHTMLParser is the package's inline raw HTML parser (inlineRawHTMLParser), which every reader
-// of Parse's reads raw HTML with (inlineParsers), so the writer's scan and the readers read every
-// kind of it by the one walk.
+// of Parse's reads raw HTML with (inlineParsers), so the writer's scan and the readers read a
+// comment, a processing instruction, a declaration, a CDATA section and a closing tag by the one
+// parser; an open tag the scan matches against openTagPattern instead.
 var rawHTMLParser = inlineRawHTMLParser{parser.NewRawHTMLParser()}
 
 // openTagPattern is an open tag as CommonMark 0.31 and the browser editor's engine (micromark's
@@ -223,9 +224,7 @@ var openTagPattern = regexp.MustCompile("^<[A-Za-z][A-Za-z0-9-]*" +
 
 // htmlEndUnasked and htmlEndNone are what a kind's entry in rawHTMLScan.ends holds beside the end
 // of a construct: before any ask of that kind, and where the last ask found no closer. The end of
-// a construct is never 0, which the reader's record cannot say of what it holds, an opener's own
-// offset, so that record spells its empty state as a value no offset takes (htmlUnclosedUnwalked)
-// and this one as the zero a scan starts at.
+// a construct is never 0.
 const (
 	htmlEndUnasked = 0
 	htmlEndNone    = -1

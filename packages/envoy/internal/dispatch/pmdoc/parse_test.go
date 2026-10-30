@@ -85,9 +85,8 @@ func TestParsePreservesTaskListCheckboxState(t *testing.T) {
 // package exists to close.
 func TestParseKeepsRawHTMLInAnImageAltText(t *testing.T) {
 	for _, row := range []struct{ markdown, alt string }{
-		// A declaration at a lowercase letter: inline raw HTML to both readers since this
-		// package's own declarationParser, text to the reader before it, so its characters are
-		// the alt's either way.
+		// A declaration at a lowercase letter: inline raw HTML to both readers
+		// (inlineRawHTMLParser), so its characters are the alt's.
 		{"![p <!a> q](i.png)\n", "p <!a> q"},
 		{"![<!a>](i.png)\n", "<!a>"},
 		{"![p <!a> q](i.png \"t\")\n", "p <!a> q"},

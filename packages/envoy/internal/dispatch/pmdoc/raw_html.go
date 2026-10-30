@@ -66,9 +66,10 @@ func rawHTMLCloser(line []byte) int {
 // newline.
 //
 // Every reader configuration swaps it in for goldmark's own parser where that parser stands, by
-// its type (inlineParsers), rather than asking a parser of its own at a `<` before it, and the
-// writer's scan asks it too (rawHTMLParser), so every kind of inline raw HTML is read by this one
-// parser. goldmark's own reads a declaration opening at an uppercase letter by that same walk, to
+// its type (inlineParsers), rather than asking a parser of its own at a `<` before it, so every
+// kind of inline raw HTML a reader reads is read by this one parser; the writer's scan asks it too
+// (rawHTMLParser) for every kind but an open tag, which it matches against openTagPattern.
+// goldmark's own reads a declaration opening at an uppercase letter by that same walk, to
 // the first `>` over as many lines of the block as it takes (parseUntil over closeDecl,
 // parser/raw_html.go:101-120 at v1.8.6), so `<!A` is read as it was read before, and `<!a`, which
 // that parser declines, as the engine reads it.
@@ -148,8 +149,8 @@ var unclosedRawHTMLKey = parser.NewContextKey()
 
 // htmlUnclosedUnwalked is what a kind's entry in unclosedRawHTML.from holds before any walk of
 // that kind reached the block's end, no offset being known to hold no closer of it. What is
-// recorded there is the offset of an opener, which in the first block of a document is 0, so the
-// empty state cannot be 0 as the writer's own record spells its own (htmlEndUnasked).
+// recorded there is the offset of an opener, which in the first block of a document can be 0, so
+// the empty state cannot be 0 as the writer's own record spells its own (htmlEndUnasked).
 const htmlUnclosedUnwalked = -1
 
 // unclosedRawHTML is what the inline raw HTML parser knows of the block it is reading. It is kept
