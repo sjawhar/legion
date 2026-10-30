@@ -69,7 +69,13 @@ func (r *Runtime) Resume(ctx context.Context, prev *runtime.Locator, spec runtim
 // turn in it and delete the issue's disk with everything unpushed on it (INFRA-484). A launch into
 // a drifted pod is therefore an ordinary launch, the install of a stale-plugin pair (spec.Plugins,
 // LEGION-164) included, which brings this launch's agent onto the current plugin without a fresh
-// pod.
+// pod. Its role is started as the kept pod was built, from the volumes and mounts of that pod's
+// own stored template (keptBy, keptPod) and not from the configuration as it now reads: two of
+// those drift facets, the broker's enrollment and the role's overlays, are named in the role's own
+// start command, and a process started against what its pod cannot carry refuses to run, never
+// registers, and so never answers the round that is to replace that pod. A pod whose template says
+// nothing this daemon can read is replaced at the launch instead, as every drifted pod was before
+// the round.
 //
 // Replacing a live pod — its Sandbox Running, the pod its own, not ended, its init containers
 // passed — ends the process of every role
@@ -140,6 +146,22 @@ func (r *Runtime) relaunch(ctx context.Context, prev *runtime.Locator, spec runt
 			return fail("read its pod's launcher bindings", err)
 		}
 		replace = !bound
+	}
+	if !replace {
+		// The pod is kept, so this role is started as that pod was built rather than as the
+		// configuration now reads (keptBy): a drifted pod the update round has not replaced yet
+		// carries neither an enrollment nor an overlay the configuration gained after it was
+		// created, and a start naming either would refuse to run, never register, and so never
+		// answer the round that is to replace it (INFRA-484). Where the stored template says
+		// nothing the daemon can read, it cannot tell what the pod carries, and the launch
+		// replaces the pod where it stands, which is what every launch into a drifted pod did
+		// before the round existed.
+		kept, readable := r.keptBy(s, l)
+		if !readable {
+			replace = true
+		} else {
+			l.kept = &kept
+		}
 	}
 	if installing && replace {
 		// Replaced for some other reason: the fresh pod's image is already current, so nothing is
@@ -228,6 +250,29 @@ func (r *Runtime) relaunch(ctx context.Context, prev *runtime.Locator, spec runt
 	}
 	r.join(loc)
 	return loc, nil
+}
+
+// keptBy is what the live pod of the Sandbox read as s was built with, for the role l starts in
+// it: whether it carries the secrets broker's enrollment for that role (carriesEnrollment) and
+// which of the role's own overlays its container holds (heldRoleOverlays). A launch that keeps
+// such a pod builds its start command from these rather than from the configuration as it now
+// reads, so the role is started as its pod was built (launcherCommand, roleOperatorEnv) and runs
+// degraded until the update round replaces the pod — able to push its work and answer that round,
+// where a start naming what its pod cannot carry would refuse to run at all (keptPod, INFRA-484).
+//
+// It reads the Sandbox's stored pod template, the build of the pod the controller made from it,
+// and not the pod-shape annotation (podShapeAnnotation): the annotation is written only by this
+// release and records the operator's volumes and mounts alone, where every release writes the
+// template, so a pod created before this one is read as well. readable is false when the template
+// holds no container for the role — a template of another shape, or one this daemon cannot read:
+// the daemon then cannot tell what the pod carries, and relaunch replaces the pod.
+func (r *Runtime) keptBy(s *sandbox, l launch) (keptPod, bool) {
+	spec := s.Spec.PodTemplate.Spec
+	overlays, readable := r.heldRoleOverlays(spec, l.spec.Role)
+	if !readable {
+		return keptPod{}, false
+	}
+	return keptPod{enrolled: carriesEnrollment(spec, l.spec.Role), overlays: overlays}, true
 }
 
 // stopIssuedChild stops generation of token's launcher in podUID after its Start returned startErr,

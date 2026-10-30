@@ -267,7 +267,7 @@ func TestMovingARoleOverlaysMountPathIsAMove(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			r1, r2 := runtimeWithOptions(t, tc.before), runtimeWithOptions(t, tc.after)
 			for _, spec := range []runtime.SpawnSpec{workerSpec(t), controllerSpec(t)} {
-				pod := &corev1.Pod{Spec: podOf(t, r1, spec)}
+				pod := podOf(t, r1, spec)
 				got, moved := r2.movedRoleOverlays(pod, spec.Role)
 				if tc.moved == "" && moved {
 					t.Errorf("%s: moved %s, want no move", spec.Role, got)
@@ -322,7 +322,7 @@ func TestAMissingRoleOverlayMountIsDriftForEveryRoleOfThePod(t *testing.T) {
 			t.Errorf("the %s's pod holds %+v, want %s among it", role, moved, want)
 		}
 	}
-	controller := &corev1.Pod{Spec: podOf(t, before, controllerSpec(t))}
+	controller := podOf(t, before, controllerSpec(t))
 	if got, moved := after.movedRoleOverlays(controller, claim.RoleController); moved {
 		t.Errorf("the controller's pod moved for an issue role's mount: %+v", got)
 	}
@@ -350,7 +350,7 @@ func TestADroppedMountThatHidTheFileIsAMove(t *testing.T) {
 		o.RoleConfigFiles = files
 	})
 	for _, spec := range []runtime.SpawnSpec{workerSpec(t), controllerSpec(t)} {
-		pod := &corev1.Pod{Spec: podOf(t, before, spec)}
+		pod := podOf(t, before, spec)
 		if got, moved := after.movedRoleOverlays(pod, spec.Role); !moved || got.where != "role_config_files."+string(spec.Role)+" "+file {
 			t.Errorf("%s: moved %v %+v, want a move of its file under the dropped mount", spec.Role, moved, got)
 		}

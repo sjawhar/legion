@@ -230,6 +230,47 @@ type launch struct {
 	// claude is what a Claude Code launch needs beyond an Oh My Pi one, resolved once in prepare
 	// and zero for every other backend (claudeInputs).
 	claude claudeInputs
+	// kept is what the live pod this launch keeps rather than replaces already carries for its
+	// role, read from that pod's stored template (relaunch's keptBy). Nil is a launch that builds
+	// the pod itself — every replacing launch, and every caller that only builds a manifest — whose
+	// pod carries the configuration as it now reads.
+	kept *keptPod
+}
+
+// keptPod is what a live pod a launch keeps was built with, for the one role that launch starts in
+// it: the facets of the pod the role's own start command names, which a pod cannot be changed to
+// carry (INFRA-484). A pod that has drifted from the configuration is replaced by an update round,
+// which first tasks every worker in it to push its work and answer, and not by the launch that
+// finds it; so the launch starts its role as that pod was built, and the role runs degraded —
+// without the secrets broker, without an overlay added since — until the round replaces the pod.
+// It can still push its work and answer the round, which a process that refused to start could
+// not.
+type keptPod struct {
+	// enrolled is whether the pod carries the secrets broker's enrollment for the role: both the
+	// projected token volume and the role's own key volume, the two the shim's agent-secrets flags
+	// name and stat (carriesEnrollment, launcherCommand).
+	enrolled bool
+	// overlays are the role's own overlay files (Options.RoleConfigFiles) the pod's container
+	// actually holds, in configuration order: the only ones its generation's PI_CONFIG_FILES may
+	// name (heldRoleOverlays, roleOperatorEnv).
+	overlays []string
+}
+
+// enrolls is whether this launch's start command tells the shim to enrol with the secrets broker
+// (launcherCommand): the runtime enrols its pods, and the pod the role will run in carries that
+// enrollment — a kept pod's own answer, and always so for a launch that builds the pod itself.
+func (l launch) enrolls(r *Runtime) bool {
+	return r.agentSecrets != nil && (l.kept == nil || l.kept.enrolled)
+}
+
+// overlays are this launch's role's own settings overlays, which its generation is told in
+// PI_CONFIG_FILES (roleOperatorEnv): the ones a kept pod holds, which may be fewer than
+// role_config_files now names, and all of the configuration's for a launch that builds the pod.
+func (l launch) overlays(r *Runtime) []string {
+	if l.kept != nil {
+		return l.kept.overlays
+	}
+	return r.roleConfigFiles[l.spec.Role]
 }
 
 // claudeInputs are the parts of a Claude Code launch that are decided before the pod is touched:
@@ -758,13 +799,20 @@ func (r *Runtime) operatorEnv() []corev1.EnvVar {
 // and a role's own overlays extend (roleOperatorEnv).
 const settingsOverlays = "PI_CONFIG_FILES"
 
-// roleOperatorEnv is operatorEnv as role's agent is told it: with role's own overlays
-// (Options.RoleConfigFiles) after the operator's in PI_CONFIG_FILES, so each of them outranks the
-// operator's, or as PI_CONFIG_FILES in name order when the operator's pod env names none. A role
-// with none is told operatorEnv unchanged.
-func (r *Runtime) roleOperatorEnv(role claim.Role) []corev1.EnvVar {
+// roleOperatorEnv is operatorEnv as the launch's role is told it: with that role's own overlays
+// (launch.overlays, from Options.RoleConfigFiles) after the operator's in PI_CONFIG_FILES, so each
+// of them outranks the operator's, or as PI_CONFIG_FILES in name order when the operator's pod env
+// names none. A role with none is told operatorEnv unchanged.
+//
+// The overlays are the launch's, not the configuration's, so a role started in a live pod the
+// launch keeps is told only the files that pod holds (keptPod): Oh My Pi refuses to start on an
+// entry that is not there, and a role of a drifted pod that never starts never answers the update
+// round that is to replace that pod (INFRA-484). A role whose kept pod holds none of its overlays
+// is told operatorEnv unchanged, exactly as a role with none configured is, and runs without them
+// until the round replaces its pod.
+func (r *Runtime) roleOperatorEnv(l launch) []corev1.EnvVar {
 	env := r.operatorEnv()
-	own := strings.Join(r.roleConfigFiles[role], ":")
+	own := strings.Join(l.overlays(r), ":")
 	if own == "" {
 		return env
 	}
@@ -1089,7 +1137,7 @@ func (r *Runtime) mainEnvironment(l launch) []corev1.EnvVar {
 	env = append(env, corev1.EnvVar{Name: "POD_UID", ValueFrom: &corev1.EnvVarSource{
 		FieldRef: &corev1.ObjectFieldSelector{FieldPath: "metadata.uid"},
 	}})
-	env = append(env, r.roleOperatorEnv(spec.Role)...)
+	env = append(env, r.roleOperatorEnv(l)...)
 	for _, name := range sortedKeys(spec.Env) {
 		add(name, spec.Env[name])
 	}

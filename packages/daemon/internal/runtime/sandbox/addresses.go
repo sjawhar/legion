@@ -341,7 +341,7 @@ func (r *Runtime) movedInPod(pod *corev1.Pod, role claim.Role) []movedAddress {
 // movedInPod's and are never a round's.
 func (r *Runtime) driftedInPod(pod *corev1.Pod, role claim.Role) []movedAddress {
 	var moved []movedAddress
-	if overlays, ok := r.movedRoleOverlays(pod, role); ok {
+	if overlays, ok := r.movedRoleOverlays(pod.Spec, role); ok {
 		moved = append(moved, overlays)
 	}
 	if enrollment, ok := r.movedEnrollment(pod, role); ok {
@@ -354,51 +354,123 @@ func (r *Runtime) driftedInPod(pod *corev1.Pod, role claim.Role) []movedAddress 
 }
 
 // movedRoleOverlays is the first overlay of any role role_config_files names (Options.RoleConfigFiles)
-// that runs in role's container of pod — every issue role shares an issue pod's one container, the
-// controller has its own pod — whose holder in a pod created now, the deepest operator mount at or
-// above the file (runtime.kubernetes.pod volume_mounts) with its volume, is not the deepest mount
-// at or above the file in pod's container as a role sees it (an issue pod's HomeMountsDir view
-// mapped back to the image's home): another volume, sub_path or mount path, a mount that hides it
-// there or none at all, or a volume of that name filled from another ConfigMap or Secret, or
-// projecting other items. Every role of the pod reports the same move, as for the secrets broker's
-// enrollment, so the whole pod is replaced at the boot's re-adoption of any role running in it, or,
-// with none running, at the first launch into it; a named role's next generation is started with
-// the file in its PI_CONFIG_FILES (roleOperatorEnv), on which its Oh My Pi would refuse to start
-// in the old pod. Only what decides whether the file is there is compared, so the fields the API
-// server defaults on a stored volume never read as a move.
-func (r *Runtime) movedRoleOverlays(pod *corev1.Pod, role claim.Role) (movedAddress, bool) {
+// that runs in role's container of the pod spec — every issue role shares an issue pod's one
+// container, the controller has its own pod — whose holder in a pod created now, the deepest
+// operator mount at or above the file (runtime.kubernetes.pod volume_mounts) with its volume, is
+// not the deepest mount at or above the file in that container as a role sees it (an issue pod's
+// HomeMountsDir view mapped back to the image's home): another volume, sub_path or mount path, a
+// mount that hides it there or none at all, or a volume of that name filled from another ConfigMap
+// or Secret, or projecting other items (movedOverlay). Every role of the pod reports the same
+// move, as for the secrets broker's enrollment, so the whole pod is replaced at the boot's
+// re-adoption of any role running in it, or, with none running, at the first launch into it; a
+// named role's next generation is started with the file in its PI_CONFIG_FILES (roleOperatorEnv),
+// on which its Oh My Pi would refuse to start in the old pod — unless the launch keeps that pod,
+// which starts the role with the overlays the pod does hold (heldRoleOverlays).
+//
+// It is asked of a running pod's spec and of a Sandbox's stored pod template alike: the template
+// is the pod's own build, which is what a launch that keeps the pod reads.
+func (r *Runtime) movedRoleOverlays(pod corev1.PodSpec, role claim.Role) (movedAddress, bool) {
 	if len(r.roleConfigFiles) == 0 {
 		return movedAddress{}, false
 	}
-	container := slices.IndexFunc(pod.Spec.Containers, func(c corev1.Container) bool { return c.Name == podContainer(role) })
-	if container < 0 {
+	seen, ok := roleMounts(pod, role)
+	if !ok {
 		return movedAddress{}, false
-	}
-	seen := make([]corev1.VolumeMount, len(pod.Spec.Containers[container].VolumeMounts))
-	for i, m := range pod.Spec.Containers[container].VolumeMounts {
-		m.MountPath = roleViewPath(m.MountPath)
-		seen[i] = m
 	}
 	for _, named := range roleConfigRoles {
 		if podContainer(named) != podContainer(role) {
 			continue
 		}
 		for _, file := range r.roleConfigFiles[named] {
-			holder := holderMount(r.pod.VolumeMounts, file)
-			if holder == nil {
-				continue
-			}
-			want := volumeFillName(r.pod.Volumes, holder.Name)
-			held := "(unset)"
-			if in := holderMount(seen, file); in != nil && in.Name == holder.Name && in.SubPath == holder.SubPath && in.MountPath == holder.MountPath {
-				held = volumeFillName(pod.Spec.Volumes, holder.Name)
-			}
-			if held != want {
+			if held, want, moved := r.movedOverlay(seen, pod.Volumes, file); moved {
 				return movedAddress{where: "role_config_files." + string(named) + " " + file, held: held, handed: want}, true
 			}
 		}
 	}
 	return movedAddress{}, false
+}
+
+// heldRoleOverlays are the overlays role_config_files names for role (Options.RoleConfigFiles), in
+// that order, that the pod spec's own container for role holds: each file the pod carries where a
+// pod created now would (movedOverlay), none of the ones it was built too early to carry. ok is
+// false when the spec has no container for role at all, where nothing can be said of what the pod
+// holds.
+//
+// It is what a launch that keeps a live pod builds that role's PI_CONFIG_FILES from, read from the
+// pod's stored template (relaunch's keptBy, roleOperatorEnv): Oh My Pi refuses to start on an
+// entry that is not there, so a role started in a drifted pod against the configuration as it now
+// reads would never register and never answer the round that is to replace that pod.
+func (r *Runtime) heldRoleOverlays(pod corev1.PodSpec, role claim.Role) ([]string, bool) {
+	seen, ok := roleMounts(pod, role)
+	if !ok {
+		return nil, false
+	}
+	var held []string
+	for _, file := range r.roleConfigFiles[role] {
+		if _, _, moved := r.movedOverlay(seen, pod.Volumes, file); !moved {
+			held = append(held, file)
+		}
+	}
+	return held, true
+}
+
+// carriesEnrollment is whether the pod spec carries the secrets broker's enrollment for role: the
+// projected token volume, which holds the broker's audience token, and role's own key volume,
+// which its agent-secrets client keeps its key in (agentSecretsVolumes). They are the two the
+// shim's agent-secrets flags name, and it stats both and exits 1 when either is absent
+// (launcherCommand, shim.ReadAgentSecretsFlags), so a launch that keeps a pod carrying neither —
+// one created before the runtime enrolled — starts its role without those flags (relaunch's
+// keptBy). A pod's volumes are fixed when it is created; the update round replaces such a pod.
+func carriesEnrollment(pod corev1.PodSpec, role claim.Role) bool {
+	token, key := false, false
+	for _, volume := range pod.Volumes {
+		switch volume.Name {
+		case agentSecretsTokenVolume:
+			token = volume.Projected != nil
+		case roleVolume(agentSecretsKeyVolume, role):
+			key = true
+		}
+	}
+	return token && key
+}
+
+// roleMounts are the mounts of the pod spec's container for role as a role sees them
+// (roleViewPath): every issue role shares an issue pod's one container, the controller has its
+// own pod. ok is false when the spec holds no such container — a template of another kind of pod,
+// or one this daemon cannot read at all.
+func roleMounts(pod corev1.PodSpec, role claim.Role) ([]corev1.VolumeMount, bool) {
+	container := slices.IndexFunc(pod.Containers, func(c corev1.Container) bool { return c.Name == podContainer(role) })
+	if container < 0 {
+		return nil, false
+	}
+	seen := make([]corev1.VolumeMount, len(pod.Containers[container].VolumeMounts))
+	for i, m := range pod.Containers[container].VolumeMounts {
+		m.MountPath = roleViewPath(m.MountPath)
+		seen[i] = m
+	}
+	return seen, true
+}
+
+// movedOverlay compares how a container whose mounts are seen, in a pod whose volumes are volumes,
+// holds the overlay file with how a pod created now would: the file's holder is the deepest
+// operator mount at or above it (holderMount over runtime.kubernetes.pod volume_mounts), and the
+// volume that mount names must be filled from the same source (volumeFillName). held is what that
+// pod fills it from, "(unset)" where the container does not hold the file under that mount at all,
+// and want what a pod created now is handed. Only what decides whether the file is there is
+// compared, so the fields the API server defaults on a stored volume never read as a move. A file
+// no operator mount holds is never moved: the daemon has no mount to compare it by, and a
+// configuration naming one is refused before the runtime is built (config's checkRoleConfigMount).
+func (r *Runtime) movedOverlay(seen []corev1.VolumeMount, volumes []corev1.Volume, file string) (held, want string, moved bool) {
+	holder := holderMount(r.pod.VolumeMounts, file)
+	if holder == nil {
+		return "", "", false
+	}
+	want = volumeFillName(r.pod.Volumes, holder.Name)
+	held = "(unset)"
+	if in := holderMount(seen, file); in != nil && in.Name == holder.Name && in.SubPath == holder.SubPath && in.MountPath == holder.MountPath {
+		held = volumeFillName(volumes, holder.Name)
+	}
+	return held, want, held != want
 }
 
 // roleViewPath is path, a mount path of a pod's container, as a role sees it: an issue pod's
