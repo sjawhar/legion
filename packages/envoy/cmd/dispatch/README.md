@@ -686,22 +686,27 @@ process holds its own room for a document. Postgres is the only channel between 
   opens second sees the first reader's cursor at once. A room forgets a client it hears nothing
   from for 30 seconds (`AwarenessExpiry`), so a cursor relayed from a process that stopped
   without a word goes away. A document socket may hold at most four awareness clients at once
-  (`maxAwarenessClientsPerSocket`), one more than a browser tab ever announces: the clients a
-  frame names past that are taken out of it before ygo applies it (`awareness_limit.go`), so a
-  tab claiming thousands of client ids neither fills a room's memory, nor shows the room's other
-  readers thousands of cursors, nor becomes thousands of notifications. A socket's clients go
-  when it does, and a client that leaves gives its entry back at once rather than two expiries
-  later (`reclaimAwarenessSlots`), so a reader who joins after such a frame is taken in and
-  relayed at once. A socket whose message names neither a document nor a message type - a
-  three-byte message as much as one that has said nothing by 512 bytes
+  (`maxAwarenessClientsPerSocket`). A tab sends its own client first, and then echoes the room's
+  other readers back on the same socket, so the other three places hold echoes:
+  `@hocuspocus/provider` 2.15.3 sends every client that an awareness change touched, and applying
+  the room's other readers makes such a change. The clients a frame names past the four are taken
+  out of it before ygo applies it (`awareness_limit.go`), and a dropped echo tells the room
+  nothing it does not hold already. So a tab claiming thousands of client ids neither fills a
+  room's memory, nor shows the room's other readers thousands of cursors, nor becomes thousands
+  of notifications. A socket's clients go when it does, and a client that leaves gives its entry
+  back at once rather than two expiries later (`reclaimAwarenessSlots`), so a reader who joins
+  after such a frame is taken in and relayed at once. A client's removal is relayed at the clock
+  the relay recorded for that client, so the other processes take it rather than drop it as older
+  than the state they hold. A socket whose message names neither a document nor a message type -
+  a three-byte message as much as one that has said nothing by 512 bytes
   (`maxDocumentMessageHeader`) - is closed rather than read on: nothing this service reads looks
   like that. A room also holds about 31 MB of its clients' states (`MaxAwarenessBytesPerRoom`)
-  and, as a last resort, `maxAwarenessClientsPerRoom` client entries - the connections one
+  and, as a last resort, `maxAwarenessClientsPerRoom` client entries - 4,000, the connections one
   process admits (`maxRoomConnections`, 1,000) each holding the four clients a socket may, which
   is the same bound another process's relayed clients passed before they crossed - so it stands
   above every client real readers can put in a room and refuses none of them, here or on another
   process.
-- **Issue close and reopen.** Migration `0142`'s trigger notifies `dispatch_issue_open_changed`
+- **Issue close and reopen.** Migration `0149`'s trigger notifies `dispatch_issue_open_changed`
   when an issue's `closed_at` changes, whichever process or build wrote it. Every process of this
   build then closes its rooms of the issue's documents, and their browsers reconnect read-only or
   read-write as the issue now allows. A browser's append also reads the issue's state in its own
@@ -734,14 +739,15 @@ process holds its own room for a document. Postgres is the only channel between 
   takes the stored document and does not wait for the catch-up, so no read returns text older
   than the store.
 - **Ask authors and the edit queue.** The author of an ask block is stored
-  (`doc_ask_block_authors`, migration `0143`), so a settlement on any process names who wrote it.
+  (`doc_ask_block_authors`, migration `0150`), so a settlement on any process names who wrote it.
   The cap of 32 queued conditional edits of one document counts the queue of this process and of
-  every other member (`doc_conditional_edit_queue`, migration `0144`). Each process first queues a
+  every other member (`doc_conditional_edit_queue`, migration `0151`). Each process first queues a
   document's conditional edits in memory and admits them one at a time, and the admitted edits
-  take turns. On each process, at most two of a document's conditional edits hold a database
-  connection at once: the edit being admitted holds one for its short admission transaction, and
-  the edit whose turn it is holds its write transaction. An edit that waits for its admission, or
-  for its turn, holds none.
+  take turns. On each process, at most three of a document's conditional edits hold a database
+  connection at once: the edit being admitted holds one for its short admission transaction, the
+  edit whose turn it is holds its write transaction, and an edit that has just left holds one to
+  write this process's count, which it does after it hands the turn on
+  (`releaseConditionalEdit`). An edit that waits for its admission, or for its turn, holds none.
 - **Which process served a socket.** Every answer that the document service's handler sends to a
   `/ws/doc/{room}` request carries `X-Dispatch-Process: <host name>`: the pod's name in
   production. That includes the `101` upgrade and the handler's `401`, `404` and `503` answers. A
@@ -1492,7 +1498,7 @@ never reads the index and serves beside it unchanged, except that its sweep stil
 of an ask holding both columns (no such row is written today), and rolling Dispatch back past
 `0148` is an image rollback alone: the index is left for the next release that reads it.
 
-Migration `0142_issue_open_notify` adds the function `issues_open_notify` and an `after update of
+Migration `0149_issue_open_notify` adds the function `issues_open_notify` and an `after update of
 closed_at` row trigger on `issues`. The trigger notifies `dispatch_issue_open_changed` with the
 issue's key when `closed_at` changes, so an issue that any process closes or reopens, one of the
 earlier release included, reaches the rooms of every process of this release. `create trigger`
@@ -1501,20 +1507,20 @@ and a read does not. The trigger is in a migration of its own, so the transactio
 that lock while it waits for another table's. It is additive, so the release before it runs over
 the new schema unchanged, and its census answers `0`.
 
-Migrations `0143_doc_ask_block_authors` and `0144_doc_conditional_edit_queue` let the document
+Migrations `0150_doc_ask_block_authors` and `0151_doc_conditional_edit_queue` let the document
 rooms of every process follow each other with it (Running more than one process, above). Each one
 is additive too, and each census answers `0`, since neither refuses nor rewrites a row.
 
-- `0143_doc_ask_block_authors` creates `doc_ask_block_authors`, the author of each ask block that
+- `0150_doc_ask_block_authors` creates `doc_ask_block_authors`, the author of each ask block that
   no settlement has indexed yet, unique by document and `block_id_key` of the block id (`0127`'s
   SHA-256), so a block id of any length has its row. A settlement on any process reads the author
   from it, and deletes the rows of the blocks it indexes. The earlier release neither writes nor
   deletes a row.
-- `0144_doc_conditional_edit_queue` creates `doc_conditional_edit_queue`, the count of queued
+- `0151_doc_conditional_edit_queue` creates `doc_conditional_edit_queue`, the count of queued
   conditional edits of each document per process, which the cap of 32 sums over the members. The
   earlier release neither reads nor writes it, and keeps its own cap per process.
 
-`0143` and `0144` each take `ACCESS EXCLUSIVE` on the new table, which nothing else reads yet, and
+`0150` and `0151` each take `ACCESS EXCLUSIVE` on the new table, which nothing else reads yet, and
 `SHARE ROW EXCLUSIVE` on `artifacts` for the foreign key to it (`on delete cascade`): a write to
 `artifacts` waits behind the migration's short transaction, and a read does not.
 

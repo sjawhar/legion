@@ -7,18 +7,15 @@ import (
 	"fmt"
 	"testing"
 	"time"
-
-	gws "github.com/gorilla/websocket"
-	"github.com/reearth/ygo/encoding"
 )
 
 // One tab on A sends a single awareness frame that names 2,048 clients, then leaves. A reader who
 // opens the document on A a moment later must still be shown to a reader on B within a second, as
-// a reader on A is shown to the other readers on A at once. With the room's client bound at 256
-// (maxAwarenessClientsPerRoom), B's room is full of the frame's clients, which stay there until
-// they expire and their tombstones are purged (about 75 s, though the flooding tab left at once), and
-// B drops every client it has not seen before: the new reader stays invisible on B for that long,
-// while on A it is seen at once.
+// a reader on A is shown to the other readers on A at once. With a room client bound below what
+// the sockets of a process may hold (maxAwarenessClientsPerRoom), B's room is full of the frame's
+// clients, which stay there until they expire and their tombstones are purged (about 75 s, though
+// the flooding tab left at once), and B drops every client it has not seen before: the new reader
+// stays invisible on B for that long, while on A it is seen at once.
 func TestAReaderJoiningAfterAnAwarenessFloodIsSeenOnTheOtherProcess(t *testing.T) {
 	pair := startPair(t, nil)
 	project := uniqueProjectKey(t, "FLD")
@@ -27,32 +24,9 @@ func TestAReaderJoiningAfterAnAwarenessFloodIsSeenOnTheOtherProcess(t *testing.T
 	bob := pair.openStoredEditor(t, pair.b, "bob", artifactID, "x\n")
 	carol := pair.openStoredEditor(t, pair.a, "carol", artifactID, "x\n")
 
-	flood, _, err := gws.DefaultDialer.Dial(pair.a.documentURL(artifactID), asUser("mallory"))
-	if err != nil {
-		t.Fatalf("connect the flooding tab to A: %v", err)
-	}
-	go func() {
-		for {
-			if _, _, err := flood.ReadMessage(); err != nil {
-				return
-			}
-		}
-	}()
+	flood := dialTabSocket(t, pair.a, artifactID, "mallory")
 	const invented = 2048
-	update := encoding.EncodeBytes(func(e *encoding.Encoder) {
-		e.WriteVarUint(invented)
-		for i := range invented {
-			e.WriteVarUint(uint64(500_000 + i))
-			e.WriteVarUint(1)
-			e.WriteVarString(fmt.Sprintf(`{"user":{"name":"invented %d"}}`, i))
-		}
-	})
-	frame := encoding.EncodeBytes(func(e *encoding.Encoder) {
-		e.WriteVarString(artifactID)
-		e.WriteVarUint(1) // awareness
-		e.WriteVarBytes(update)
-	})
-	if err := flood.WriteMessage(gws.BinaryMessage, frame); err != nil {
+	if err := announceAwarenessClients(flood, artifactID, 500_000, invented, 1, inventedState(500_000)); err != nil {
 		t.Fatalf("send the flooding frame: %v", err)
 	}
 	if err := bob.WaitForAwareness(5*time.Second, func(states map[uint64]json.RawMessage) bool { return len(states) > 0 }); err != nil {
@@ -89,34 +63,10 @@ func TestAReaderJoiningDuringALiveAwarenessFloodIsSeenOnTheOtherProcess(t *testi
 	bob := pair.openStoredEditor(t, pair.b, "bob", artifactID, "x\n")
 	carol := pair.openStoredEditor(t, pair.a, "carol", artifactID, "x\n")
 
-	flood, _, err := gws.DefaultDialer.Dial(pair.a.documentURL(artifactID), asUser("mallory"))
-	if err != nil {
-		t.Fatalf("connect the flooding tab to A: %v", err)
-	}
-	defer flood.Close()
-	go func() {
-		for {
-			if _, _, err := flood.ReadMessage(); err != nil {
-				return
-			}
-		}
-	}()
+	flood := dialTabSocket(t, pair.a, artifactID, "mallory")
 	const invented = 2048
 	announce := func(clock uint64) {
-		update := encoding.EncodeBytes(func(e *encoding.Encoder) {
-			e.WriteVarUint(invented)
-			for i := range invented {
-				e.WriteVarUint(uint64(600_000 + i))
-				e.WriteVarUint(clock)
-				e.WriteVarString(fmt.Sprintf(`{"user":{"name":"invented %d"}}`, i))
-			}
-		})
-		frame := encoding.EncodeBytes(func(e *encoding.Encoder) {
-			e.WriteVarString(artifactID)
-			e.WriteVarUint(1) // awareness
-			e.WriteVarBytes(update)
-		})
-		if err := flood.WriteMessage(gws.BinaryMessage, frame); err != nil {
+		if err := announceAwarenessClients(flood, artifactID, 600_000, invented, clock, inventedState(600_000)); err != nil {
 			t.Errorf("announce the flooding tab's clients at clock %d: %v", clock, err)
 		}
 	}
@@ -147,5 +97,13 @@ func TestAReaderJoiningDuringALiveAwarenessFloodIsSeenOnTheOtherProcess(t *testi
 	if err := bob.WaitForAwareness(liveWithin, holdsState(aliceAwarenessClient, cursorState("alice", 0))); err != nil {
 		t.Fatalf("alice, who opened the document on A while one tab there kept %d invented awareness clients alive, was seen at once by carol on A but not by bob on B within %v: A's room is full of that tab's clients and never relays hers",
 			invented, liveWithin)
+	}
+}
+
+// inventedState is the state a flooding tab gives each of the client ids it invents from first:
+// a cursor-sized one, as the tabs of this suite's readers announce.
+func inventedState(first uint64) func(client uint64) string {
+	return func(client uint64) string {
+		return fmt.Sprintf(`{"user":{"name":"invented %d"}}`, client-first)
 	}
 }

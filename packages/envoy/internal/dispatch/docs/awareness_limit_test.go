@@ -160,19 +160,6 @@ func awarenessClients(t *testing.T, message readMessage) (string, []uint64) {
 	return room, clients
 }
 
-// awarenessStates is one awareness update announcing count clients from first, each with a
-// cursor-sized state, as one tab's frame can.
-func awarenessStates(first, count uint64, state string) []byte {
-	return encoding.EncodeBytes(func(encoder *encoding.Encoder) {
-		encoder.WriteVarUint(count)
-		for client := first; client < first+count; client++ {
-			encoder.WriteVarUint(client)
-			encoder.WriteVarUint(1)
-			encoder.WriteVarString(state)
-		}
-	})
-}
-
 // One tab's frame naming thousands of invented awareness clients reaches ygo as the clients the
 // socket may hold, in the order the frame named them, under the document the frame named.
 func TestADocumentSocketAnnouncesNoMoreAwarenessClientsThanItsBound(t *testing.T) {

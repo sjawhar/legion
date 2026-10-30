@@ -6,19 +6,21 @@ body: |-
   rather than the last of them. A reader who opens a document second sees the first reader's
   cursor at once, and a reader who leaves on one process leaves on the other. A room forgets a
   client it hears nothing from for 30 s, so a cursor relayed from a process that stopped without
-  a word goes away. A document socket may hold at most four awareness
-  clients at once, where a browser tab announces one, and the clients a frame names past that
-  are dropped before the room applies it, so one tab claiming thousands of client ids neither
-  grows a room's memory, nor shows the document's other readers thousands of cursors, nor fans
-  out into thousands of notifications; a socket's clients go when it does, and a client that
-  leaves gives its entry back at once, so a reader who joins after such a frame is seen on every
-  process at once. A socket whose message names neither a document nor a message type, a
-  three-byte message as much as one that has said nothing by 512 bytes, is closed rather than
-  read on. A room's own last-resort bound on client entries is derived from the sockets that
-  fill it - every connection a process admits, each holding its four clients, which is what
-  another process's relayed clients passed too - so no reader is ever refused a place in a room,
-  on their own process or another. Processes of the earlier build relay none, and show no other
-  process's cursors.
+  a word goes away. A document socket may hold at most four awareness clients at once. A browser
+  tab sends its own client first, and then echoes the room's other readers back on the same
+  socket, so the other three places hold echoes. The clients a frame names past the four are
+  dropped before the room applies it, and a dropped echo tells the room nothing it does not hold
+  already. So one tab claiming thousands of client ids neither grows a room's memory, nor shows
+  the document's other readers thousands of cursors, nor fans out into thousands of
+  notifications. A socket's clients go when it does, and a client that leaves gives its entry
+  back at once, so a reader who joins after such a frame is seen on every process at once. A
+  socket whose message names neither a document nor a message type, a three-byte message as much
+  as one that has said nothing by 512 bytes, is closed rather than read on. A room holds about
+  31 MB of its readers' states at most. Its own last-resort bound on client entries is 4,000,
+  derived from the sockets that fill it - every connection a process admits, each holding its
+  four clients, which is what another process's relayed clients passed too - so no reader is
+  ever refused a place in a room, on their own process or another. Processes of the earlier
+  build relay none, and show no other process's cursors.
 time: 2026-10-28T12:12:12Z
 custom:
   Issue: pr2414

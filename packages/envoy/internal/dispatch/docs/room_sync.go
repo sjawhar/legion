@@ -57,7 +57,7 @@ const (
 	// and the queries for it; awareness_relay.go has its wire format.
 	documentAwarenessChannel = "dispatch_doc_awareness"
 	// issueOpenChangedChannel carries the key of an issue that was closed or reopened, sent by the
-	// trigger migration 0142 puts on issues.closed_at (Service.issueOpenChanged).
+	// trigger migration 0149 puts on issues.closed_at (Service.issueOpenChanged).
 	issueOpenChangedChannel = "dispatch_issue_open_changed"
 	// documentQueryChannel carries one process's question about a room to every other member,
 	// and documentAnswerChannel each member's answer to it; room_query.go has their wire format.
@@ -147,13 +147,11 @@ type roomSyncChannel struct {
 // its handler's lane; the handlers run there (handlers).
 type roomSync struct {
 	service *Service
-	// awareness, issueOpenChanged, query and answer handle the four channels beside the
-	// document-change channels the service's catch-up follows (handlers): documentAwarenessChannel,
-	// issueOpenChangedChannel, documentQueryChannel and documentAnswerChannel. awareness is the
-	// service's awareness relay (awarenessRelay.received), issueOpenChanged the service's
-	// Service.issueOpenChanged, and query and answer the service's room queries
-	// (roomQueries.query, roomQueries.answer).
-	awareness, issueOpenChanged, query, answer func(ctx context.Context, payload string)
+	// awareness handles documentAwarenessChannel: the service's awareness relay
+	// (awarenessRelay.received). The other handlers are the service's own methods, called where
+	// the channel names them (handlers); this one is a field because the awareness tests wrap it
+	// to see what the relay has handled.
+	awareness func(ctx context.Context, payload string)
 	// listening runs after each LISTEN's connected work has run (connected). Nil outside tests: a
 	// test waits on it before the write whose notification it expects, since a notification sent
 	// before the LISTEN reaches nobody.
@@ -161,13 +159,7 @@ type roomSync struct {
 }
 
 func newRoomSync(service *Service) *roomSync {
-	return &roomSync{
-		service:          service,
-		awareness:        service.awarenessRelay.received,
-		issueOpenChanged: service.issueOpenChanged,
-		query:            service.roomQueries.query,
-		answer:           service.roomQueries.answer,
-	}
+	return &roomSync{service: service, awareness: service.awarenessRelay.received}
 }
 
 // ProcessID is this process's id among the envoy-dispatch processes on its database, minted once
@@ -209,11 +201,11 @@ func (r *roomSync) handlers() []roomSyncHandler {
 		},
 		{channels: []roomSyncChannel{{name: documentAwarenessChannel, notified: r.awareness}}},
 		{
-			channels:  []roomSyncChannel{{name: issueOpenChangedChannel, notified: r.issueOpenChanged}},
+			channels:  []roomSyncChannel{{name: issueOpenChangedChannel, notified: r.service.issueOpenChanged}},
 			connected: r.service.recheckResidentIssues,
 		},
-		{channels: []roomSyncChannel{{name: documentQueryChannel, notified: r.query}}},
-		{channels: []roomSyncChannel{{name: documentAnswerChannel, notified: r.answer}}},
+		{channels: []roomSyncChannel{{name: documentQueryChannel, notified: r.service.roomQueries.query}}},
+		{channels: []roomSyncChannel{{name: documentAnswerChannel, notified: r.service.roomQueries.answer}}},
 	}
 }
 

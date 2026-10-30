@@ -181,7 +181,7 @@ func (s *server) restoreIssueAsksTx(ctx context.Context, tx pgx.Tx, issueKey str
 }
 
 // sweepClosedIssueAsks is the close's last pass over its issue's documents, run once the close
-// has committed. The commit's notification (migration 0142's trigger) closes the issue's rooms on
+// has committed. The commit's notification (migration 0149's trigger) closes the issue's rooms on
 // every process, so a room stops taking a browser's ask block within moments of it; the sweep
 // catches the blocks written before then. In a transaction of its own, holding the issue's row, it
 // writes the blocks of withdrawn - the asks the close withdrew - and of every other resolved block

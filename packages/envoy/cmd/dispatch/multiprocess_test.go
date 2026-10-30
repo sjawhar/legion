@@ -40,9 +40,11 @@ import (
 	"testing"
 	"time"
 
+	gws "github.com/gorilla/websocket"
 	"github.com/jackc/pgx/v5"
 	natsgo "github.com/nats-io/nats.go"
 	"github.com/reearth/ygo/crdt"
+	"github.com/reearth/ygo/encoding"
 
 	"github.com/sjawhar/envoy/internal/bus"
 	"github.com/sjawhar/envoy/internal/cmdtest"
@@ -1937,6 +1939,47 @@ const (
 	aliceAwarenessClient uint64 = 1001
 	bobAwarenessClient   uint64 = 2002
 )
+
+// dialTabSocket connects a document socket of its own to process, as a browser tab's provider
+// does, and drains what the room sends it so the connection never stalls on an unread message.
+// The socket closes with the test; a test whose tab must leave sooner closes it itself.
+func dialTabSocket(t *testing.T, process *dispatchProcess, artifactID, user string) *gws.Conn {
+	t.Helper()
+	socket, response, err := gws.DefaultDialer.Dial(process.documentURL(artifactID), asUser(user))
+	if err != nil {
+		t.Fatalf("connect %s's document socket to the document: response=%#v err=%v", user, response, err)
+	}
+	t.Cleanup(func() { _ = socket.Close() })
+	go func() {
+		for {
+			if _, _, err := socket.ReadMessage(); err != nil {
+				return
+			}
+		}
+	}()
+	return socket
+}
+
+// announceAwarenessClients has socket announce count awareness clients from first, each at clock
+// with the state its id is given, in one awareness frame under artifactID: what a tab's provider
+// sends for its own client, re-sent at a later clock as its heartbeat, and what a flooding tab
+// sends for the ids it invents.
+func announceAwarenessClients(socket *gws.Conn, artifactID string, first, count, clock uint64, state func(client uint64) string) error {
+	update := encoding.EncodeBytes(func(e *encoding.Encoder) {
+		e.WriteVarUint(count)
+		for client := first; client < first+count; client++ {
+			e.WriteVarUint(client)
+			e.WriteVarUint(clock)
+			e.WriteVarString(state(client))
+		}
+	})
+	frame := encoding.EncodeBytes(func(e *encoding.Encoder) {
+		e.WriteVarString(artifactID)
+		e.WriteVarUint(1) // awareness
+		e.WriteVarBytes(update)
+	})
+	return socket.WriteMessage(gws.BinaryMessage, frame)
+}
 
 // Spec item 1: two people on one document, each connected to a different process, see each
 // other's typing and cursors within a second, and nobody is disconnected. Each subtest has a

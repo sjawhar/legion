@@ -172,7 +172,7 @@ carries it; any other rename's does not. A rename whose own update's observer ha
 an author carries none forward, and is named after the settlement's own actor rather than its
 editor. A seeded spec's blocks are its creator's. A block in the tree whose update the observer
 has not rendered yet waits for the settlement that observer arms. Each author is also stored, in
-the transaction that makes the block durable (`doc_ask_block_authors`, migration 0143), so a block
+the transaction that makes the block durable (`doc_ask_block_authors`, migration 0150), so a block
 that another process's write introduced, or that the room held when it loaded, takes the stored
 author (`askBlockSources.author`). A block whose author is neither in the room's memory nor in
 that table is attributed as the settlement's other events are. Those name the room's latest editor
@@ -907,15 +907,24 @@ resident room, query the other processes, which answer with their local clients'
 the service closes a room itself, it removes its local clients' states, so the removal is relayed
 (`removeLocalAwareness`). `AwarenessExpiry` is 30 s, so a cursor relayed from a process that died
 without a word expires. A document socket may hold at most `maxAwarenessClientsPerSocket` (4)
-awareness clients at once, where a browser tab announces one: ygo applies and broadcasts a peer's
-frame whole and offers no hook on it, so the clients a frame names past that are taken out of it
-on the connection the upgrade hijacks, before ygo reads the frame (`docs/awareness_limit.go`,
-`awarenessLimitConn`). Filtering there is what makes the room's own readers and the readers on
-every other process see the same clients, and it is what keeps a peer's frame of invented ids
-from growing a room's awareness map and the relay's fan-out. ygo removes the clients a peer owned
+awareness clients at once. A tab sends its own client first (`startSync`), and then echoes the
+room's other readers back on the same socket: `@hocuspocus/provider` 2.15.3 sends every client
+that an awareness change touched, and applying the room's other readers makes such a change
+(`hocuspocus-provider.cjs` 2522, 2595-2601, 2265, 1582-1586). So the other three places hold
+echoes, which cost the room nothing: an echo carries the state and clock the tab read from the
+room. ygo applies and broadcasts a peer's frame whole and offers no hook on it, so the clients a
+frame names past the four are taken out of it on the connection the upgrade hijacks,
+before ygo reads the frame (`docs/awareness_limit.go`, `awarenessLimitConn`). Filtering
+there is what makes the room's own readers and the readers on every other process see the
+same clients, and it is what keeps a peer's frame of invented ids from growing a room's
+awareness map and the relay's fan-out. ygo removes the clients a peer owned
 as it disconnects, and a client that leaves gives its entry back as it goes rather than two
 expiries later - the room's own observer frees it (`watchRoomAwareness`,
-`reclaimAwarenessSlots`), as does the arrival of another process's awareness. A socket whose
+`reclaimAwarenessSlots`), as does the arrival of another process's awareness. A removal is
+relayed at the clock the relay recorded for that client when it last saw a state of it (`local`,
+`touched`), never at what the room's awareness would encode by then: ygo fires its observers with
+the awareness unlocked, so a purge racing the encode would leave it naming the client at clock 0,
+which every other process drops as older than the state it holds. A socket whose
 message names neither a document nor a message type - a three-byte message as much as one that
 has said nothing by `maxDocumentMessageHeader` (512) bytes - is closed rather than read on, since
 nothing this service reads looks like that. A room also holds at most `maxAwarenessBytesPerRoom`
@@ -927,7 +936,7 @@ passed before they crossed - so it stands above every client the sockets of a pr
 a room and refuses no reader, here or on another process; it is what bounds a room's memory if
 any path other than a socket ever reaches its awareness.
 
-An issue's close and reopen reach every process through migration 0142's trigger, which notifies
+An issue's close and reopen reach every process through migration 0149's trigger, which notifies
 `dispatch_issue_open_changed` with the issue's key when `closed_at` changes, whoever wrote it. Each
 process, the patching one included, reads the issue's state and closes its rooms of the issue's
 documents (`issueOpenChanged`, `setRoomIssueOpen`), so their browsers reconnect with the scope the
@@ -958,10 +967,10 @@ when this process holds the room or a member that answers within 500 ms holds it
 publishes only into a room this process holds, resident or loading (`publishLiveWrite`). A room
 that retires between that check and the publish's `Apply` is loaded again by that `Apply`, from a
 store that holds the write, and idles out like any room a write loads.
-An ask block's author is stored in `doc_ask_block_authors` (migration 0143) in the transaction that
+An ask block's author is stored in `doc_ask_block_authors` (migration 0150) in the transaction that
 makes the block durable, and a settlement on any process reads it (`askBlockSources.author`). The
 cap of 32 queued conditional edits counts every member's row of `doc_conditional_edit_queue`
-(migration 0144). Each process first serializes the admissions of one document in memory
+(migration 0151). Each process first serializes the admissions of one document in memory
 (`conditionalEditGate`), so the waiting admissions hold no connection. The one admission that
 runs takes a short transaction of its own on the shared pool. Under a two-key advisory lock
 (`conditionalEditQueueLockNamespace`) it sums the other members' rows, deletes the rows of
@@ -1368,7 +1377,7 @@ depends on document order. Tokens include inline marks, so a fresh anchor makes 
 document or block guard stale. After resolving the artifact, the conditional path joins the
 document's bounded queue before starting the write transaction or warming its room
 (`AcquireConditionalEdit`). The queue is an in-memory queue per process plus a count across
-processes in `doc_conditional_edit_queue` (migration 0144). A process admits one edit of a document
+processes in `doc_conditional_edit_queue` (migration 0151). A process admits one edit of a document
 at a time, and the others wait in memory before they take a database connection. The admission is
 a short transaction of its own on the shared pool, under the document's queue lock, which refuses
 the 33rd edit queued across the members with `EDIT_QUEUE_FULL`. Admitted edits take turns in
@@ -1376,7 +1385,10 @@ admission order. The edit whose turn it is then takes the document's owner row a
 then `pg_advisory_xact_lock(hashtext(artifact_id))`, and enters its one Yjs transaction; it
 reads, checks, resolves, and applies the batch inside that transaction. So a document's retry
 storm holds at most one shared-pool connection per process while it waits for admission, and
-none while it waits for its turn. `EDIT_QUEUE_FULL` is a `429` response that means back off, while
+none while it waits for its turn. At most three of one document's edits hold a connection at once
+on a process: the admission that runs, the edit whose turn it is, and the edit that has just
+left, which writes this process's count after it hands the turn on (`releaseConditionalEdit`).
+`EDIT_QUEUE_FULL` is a `429` response that means back off, while
 `PRECONDITION_FAILED` means re-read. This protects unrelated document reads, websocket
 authorisation, room loading, settlement, and browser persistence from a stale-edit flood exhausting
 the shared pool. The advisory → Yjs order matches durable writer and persistence

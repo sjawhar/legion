@@ -22,21 +22,13 @@ const socketCloseWait = 5 * time.Second
 
 // A document socket whose first message names neither a document nor a message type within the
 // bytes the filter reads for them (maxDocumentMessageHeader) is sending nothing this service
-// reads, and its connection ends rather than carry a frame past the filter unread. It takes a
-// real upgrade to show: the filter sits on the connection the upgrade hijacks, which gorilla may
-// read through the hijacked buffered reader instead, so the reader is reset onto the filter
+// reads, and its connection ends rather than carry a frame past the filter unread. The message's
+// length is no part of it: three bytes holding one variable-length integer that never ends name
+// as little as six hundred bytes claiming a document name of 100,000. It takes a real upgrade to
+// show: the filter sits on the connection the upgrade hijacks, which gorilla may read through the
+// hijacked buffered reader instead, so the reader is reset onto the filter
 // (awarenessLimitWriter.Hijack) - without that the frame reaches ygo and the socket stays open.
 func TestADocumentSocketWhoseFirstMessageNamesNoDocumentIsClosedThroughARealUpgrade(t *testing.T) {
-	service, artifactID := newTestService(t)
-	seedServiceText(t, service, artifactID, "First.\n")
-	server := newTestServer(t, service)
-	url := "ws" + strings.TrimPrefix(server.URL, "http") + "/ws/doc/" + artifactID
-	socket, response, err := gws.DefaultDialer.Dial(url, http.Header{"X-Dispatch-User": []string{"mallory"}})
-	if err != nil {
-		t.Fatalf("connect a socket to document %s: response=%#v err=%v", artifactID, response, err)
-	}
-	t.Cleanup(func() { _ = socket.Close() })
-
 	// 600 bytes claiming a document name of 100,000: the message names no document, let alone a
 	// type, within the maxDocumentMessageHeader bytes the filter reads for them.
 	unnameable := encoding.EncodeBytes(func(encoder *encoding.Encoder) {
@@ -46,23 +38,42 @@ func TestADocumentSocketWhoseFirstMessageNamesNoDocumentIsClosedThroughARealUpgr
 	if len(unnameable) <= maxDocumentMessageHeader {
 		t.Fatalf("the message is %d bytes, which the filter reads whole; want more than %d", len(unnameable), maxDocumentMessageHeader)
 	}
-	if err := socket.WriteMessage(gws.BinaryMessage, unnameable); err != nil {
-		t.Fatalf("send a first message that names no document: %v", err)
-	}
+	for _, message := range []struct {
+		name  string
+		first []byte
+	}{
+		{name: "three bytes of an integer that never ends", first: []byte{0xff, 0xff, 0xff}},
+		{name: "600 bytes naming no document", first: unnameable},
+	} {
+		t.Run(message.name, func(t *testing.T) {
+			service, artifactID := newTestService(t)
+			seedServiceText(t, service, artifactID, "First.\n")
+			server := newTestServer(t, service)
+			url := "ws" + strings.TrimPrefix(server.URL, "http") + "/ws/doc/" + artifactID
+			socket, response, err := gws.DefaultDialer.Dial(url, http.Header{"X-Dispatch-User": []string{"mallory"}})
+			if err != nil {
+				t.Fatalf("connect a socket to document %s: response=%#v err=%v", artifactID, response, err)
+			}
+			t.Cleanup(func() { _ = socket.Close() })
 
-	if err := socket.SetReadDeadline(time.Now().Add(socketCloseWait)); err != nil {
-		t.Fatalf("set the socket's read deadline: %v", err)
-	}
-	for {
-		_, _, err := socket.ReadMessage()
-		if err == nil {
-			continue // the document the room sends every socket, or a keep-alive
-		}
-		if errors.Is(err, os.ErrDeadlineExceeded) {
-			t.Fatalf("the socket is still open %v after a %d-byte first message that names neither a document nor a type: want it closed",
-				socketCloseWait, len(unnameable))
-		}
-		return
+			if err := socket.WriteMessage(gws.BinaryMessage, message.first); err != nil {
+				t.Fatalf("send a first message that names no document: %v", err)
+			}
+			if err := socket.SetReadDeadline(time.Now().Add(socketCloseWait)); err != nil {
+				t.Fatalf("set the socket's read deadline: %v", err)
+			}
+			for {
+				_, _, err := socket.ReadMessage()
+				if err == nil {
+					continue // the document the room sends every socket, or a keep-alive
+				}
+				if errors.Is(err, os.ErrDeadlineExceeded) {
+					t.Fatalf("the socket is still open %v after a %d-byte first message that names neither a document nor a type: want it closed",
+						socketCloseWait, len(message.first))
+				}
+				return
+			}
+		})
 	}
 }
 

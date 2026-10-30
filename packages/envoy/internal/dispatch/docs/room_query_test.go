@@ -30,7 +30,7 @@ import (
 // envoy-dispatch processes do. Task B's room appends pass a gate the test holds (gatedAppends), so
 // an update its room applied stays unstored for as long as a test needs.
 
-// newQueryProcesses is the two-process pair (processPair, room_behind_head_test.go) the room
+// newQueryProcesses is the two-process pair (processPair, process_pair_test.go) the room
 // queries are asked over: the lost-edit document, both processes' room sync running, and task B's
 // room resident, while task A holds none.
 func newQueryProcesses(t *testing.T) processPair {

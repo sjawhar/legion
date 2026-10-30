@@ -1,7 +1,7 @@
 kind: Changed
 body: |-
   An ask block keeps its author when another process settles it, or when the process that saw the
-  edit stops first: the author is stored in `doc_ask_block_authors` (migration `0143`) in the
+  edit stops first: the author is stored in `doc_ask_block_authors` (migration `0150`) in the
   transaction that makes the block durable. Before, a settlement on another process named its own
   actor.
 time: 2026-10-28T12:12:14Z
