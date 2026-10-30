@@ -2,22 +2,16 @@
   "schemaVersion": 1,
   "phase": "review",
   "issue": "INFRA-588",
-  "completed": "2026-10-29T23:50:35Z",
-  "round": 7,
-  "decision": "changes_requested",
-  "codeHead": "0288986f2521c4350029355134ab7989a6a9876b",
-  "scope": "Round-6's nine items and the forward merge of main (650e3cb567b7, clean: it brings nothing outside the PR's files beyond main).",
-  "roundSixItems": "1 done (main merged; no stale 140; migrationid.Closed refuses the next number on its own). 2 done (autodeploy compares <max>-<count>-<sha256> of the applied set; old-form record still read). 3 done (cross-release order and authors' rule in cmd/dispatch/README, store/README, docs/kubernetes.md). 4 done (seed check compares sets). 5 done (release order in cmd/dispatch/README and docs/kubernetes.md). 6 done (Check returns error). 7 done (migrationid shared; no re-checks). 8 done (databaseFromBeforeTheWidening). 9 partly: risks added, but the round-6 bullet is stale and the open numbered PRs are not named (fixed by the reviewer in the body).",
-  "ci": "Required lint, typecheck, test, pr-title. Code head 0288986f2521: only changes (queued) and pr-title at 23:41Z. Locally .github/scripts/check-image-trigger-paths.sh (run by the required lint job, ci.yaml:1150) exits 1: worker_image does not cover packages/envoy/migrationid, which the worker image's legion binary now compiles.",
-  "thermonuclear": "At edb7e1d1 (code 0288986f): deep-review CHANGES (High: worker_image filter; Minor: PR body, Closed random pick with two entries, README 758-760); code-quality CHANGES (Closed as a cross-module global with a silent fallback; autodeploy compare spread over four places; stale docs; PR body).",
+  "completed": "2026-10-30T02:23:25Z",
+  "round": 8,
+  "decision": "approved",
+  "codeHead": "073ea88737c4f30bf562b53c4d1e20fbc8f95c9e",
+  "scope": "Round 7's five items only (architect's instruction): one fix commit 073ea88737c4.",
+  "roundSevenItems": "1 done: 'packages/envoy/migrationid/**' in worker_image (ci.yaml:1026); check-image-trigger-paths.sh exit 0 (5 image builds). 2 done: closings is unexported, one entry per runner; Check refuses a set holding no closing file or two (no silent fallback, no random pick), CheckClosedAt takes the closing number for crafted sets; TestEachSeriesClosesOnce. 3 done: no 'no last number' text left. 4 done: one schema_changed helper; schema_max and moved removed. 5 done: docs/kubernetes.md section 'Daemon migration identifiers and release order', the rollback step links to it.",
+  "ci": "Required lint, typecheck, test success at 073ea88737c4 (02:23Z); pr-title success. compare 073ea88737c4...011f99954ce9 handoffsOnly true (2 files).",
+  "thermonuclear": "None this round: the architect narrowed it to round 7's five items, each a small change verified directly; the pair ran at round 7 on the whole design.",
   "critical": 0,
-  "important": 1,
-  "minor": 4,
-  "keyFindings": [
-    {"severity": "important", "file": ".github/workflows/ci.yaml", "description": "worker_image (1018-1027) lists packages/envoy subdirectories by name and lacks migrationid; check-image-trigger-paths.sh exits 1, so the required lint job goes red, and a change to the rule alone would build no worker image. Add 'packages/envoy/migrationid/**' beside listenfd/**."},
-    {"severity": "minor", "file": "packages/envoy/migrationid/migrationid.go", "description": "Closed is an exported mutable cross-module map matched by file name, with a silent 1..N fallback when no name matches, and picks at random if two entries of one series exist (deep review: 109 accepted / 91 refused of 200). Pass each runner's closing number to Check instead (closedAt const beside each runner's set)."},
-    {"severity": "minor", "file": "packages/envoy/cmd/dispatch/README.md", "description": "758-760, store_test.go 352-353 and embed_test.go 10-11 still describe the 'no last number' rule 0288986f replaced; README 710 and pgmigrate/set.go 63 are unwrapped."},
-    {"severity": "minor", "file": "packages/envoy/deploy/scripts/autodeploy.sh", "description": "The two-form comparison is spread over roll_back_or_stop (moved flag, 285-293), schema_max, schema_label and the regex at 347; one schema_changed baseline now helper."},
-    {"severity": "minor", "file": "docs/kubernetes.md", "description": "The apply-order rule and the release-order constraint sit inside step 3 of the 0054 container-rename rollback procedure (2073-2082), where an operator upgrading does not look; give them a place of their own near the store's migration text."}
-  ]
+  "important": 0,
+  "minor": 0,
+  "keyFindings": []
 }
