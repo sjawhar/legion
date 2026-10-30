@@ -587,8 +587,9 @@ different request is `422 KEY_REUSED`; a repeat while the first still runs, whos
 on the server whatever its client does (within the 30 s stop grace on a shutdown, past which the
 lease handover takes its key over) and renews its 60 s lease every 20 s until its ten-minute
 limit, is `409 KEY_IN_FLIGHT` with `Retry-After: 1`. Such a repeat is never spooled: the key layer
-reads its body off the connection and discards it, hashing it on the way, within `bodyDrainLimit`
-(a minute), then reads the key again and judges it by that digest (`answerDrainedRepeat`), so a
+reads its body off the connection and discards it, hashing it on the way, within the bound the
+request's body arrives under (`defaultBodyReadLimit`, a minute), then reads the key again and
+judges it by that digest (`answerDrainedRepeat`), so a
 different body is `KEY_REUSED` and a first that answered meanwhile is replayed; a
 5xx, 401, 408 or 429 is not stored, so the next
 attempt runs again; and a repeat whose first request committed a write but whose answer was lost

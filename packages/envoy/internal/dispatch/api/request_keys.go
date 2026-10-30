@@ -908,11 +908,12 @@ func answerHeldKey(w http.ResponseWriter, r *http.Request, key string, held held
 // answered 409 KEY_IN_FLIGHT at once, with nothing read: it has sent nothing, so the answer is as
 // fresh as the key, and a read would ask it for its whole body only to judge it.
 //
-// The body is read for at most drainTime (readFor): one that stops arriving is answered 409
-// KEY_IN_FLIGHT, which is what the key said, and the connection closes after it. A body past the
-// route's limit is answered as its route answers one (bodyTooLarge), unkeyed, as a request whose
-// body is past the limit runs unkeyed. Either keeps the read's deadline for net/http's own reads
-// after the answer; only a body read to its end lifts it.
+// The body is read under the bound it arrives under, whatever is left of it (drainedBody.arm):
+// one that stops arriving is answered 409 KEY_IN_FLIGHT, which is what the key said, and the
+// connection closes after it. A body past the route's limit is answered as its route answers one
+// (bodyTooLarge), unkeyed, as a request whose body is past the limit runs unkeyed. Either keeps
+// that bound for net/http's own reads after the answer; only a body read to its end lifts it
+// (drainedBody.lift).
 func (s *server) answerDrainedRepeat(
 	w http.ResponseWriter, r *http.Request, method, pattern string, wildcards []string, login, key string, replay keyedReplay,
 ) {
@@ -924,7 +925,6 @@ func (s *server) answerDrainedRepeat(
 	limit := routeBodyLimit(method, pattern)
 	digest := sha256.New()
 	writeRequestFields(digest, r, method, pattern, wildcards)
-	lift := s.readFor(w)
 	size, err := digestKeyedBody(r.Body, digest, r.Header.Get("Content-Type"), limit)
 	switch {
 	case err != nil:
@@ -937,7 +937,6 @@ func (s *server) answerDrainedRepeat(
 		writeError(w, tooLarge.code, tooLarge.status, tooLarge.message)
 		return
 	}
-	lift()
 	w.Header().Set(contracts.IdempotencyKeyHeader, key)
 	ctx, cancel := context.WithTimeout(context.WithoutCancel(r.Context()), keyedBookkeeping)
 	defer cancel()

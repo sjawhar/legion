@@ -4,7 +4,9 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -82,7 +84,7 @@ func TestARequestPastTheAdmissionLimitIsRefusedOverloaded(t *testing.T) {
 	go func() {
 		held <- dispatchRequest(t, handler, http.MethodPatch, "/api/v1/issues/"+issue.Key, map[string]string{"title": "Renamed"}, "alice")
 	}()
-	waitForWriteInFlight(t, limiter)
+	waitForWritesInFlight(t, limiter, 1)
 
 	started := time.Now()
 	refused := dispatchRequest(t, handler, http.MethodPost, "/api/v1/projects", map[string]string{"key": "OTHER", "name": "Other"}, "alice")
@@ -109,13 +111,13 @@ func TestARequestPastTheAdmissionLimitIsRefusedOverloaded(t *testing.T) {
 	}
 }
 
-// waitForWriteInFlight returns once limiter has admitted one write.
-func waitForWriteInFlight(t *testing.T, limiter *admission.Limiter) {
+// waitForWritesInFlight returns once limiter has admitted writes of them.
+func waitForWritesInFlight(t *testing.T, limiter *admission.Limiter, writes int) {
 	t.Helper()
 	deadline := time.Now().Add(5 * time.Second)
-	for limiter.Stats()[admission.Write].InFlight != 1 {
+	for limiter.Stats()[admission.Write].InFlight != writes {
 		if time.Now().After(deadline) {
-			t.Fatal("the held write was never admitted")
+			t.Fatalf("%d writes were admitted, want %d", limiter.Stats()[admission.Write].InFlight, writes)
 		}
 		time.Sleep(time.Millisecond)
 	}
@@ -448,5 +450,111 @@ func TestTheDeliveryTimelineHoldsAtMostTwoConnections(t *testing.T) {
 	}
 	if highWater != 2 {
 		t.Fatalf("the timeline held %d request connections at once, want 2", highWater)
+	}
+}
+
+// A client that sends its headers and then its body a byte at a time does not hold its write unit
+// for as long as it cares to: the body arrives under a bound of its own (defaultBodyReadLimit,
+// here the test's), and once it passes, the read fails, the handler answers and the unit goes
+// back. With both write units held by such tricklers, an ordinary write is admitted inside its
+// queue wait instead of being refused 429 OVERLOADED, which is what twelve of them did to every
+// other write on the process.
+func TestATricklingBodyDoesNotHoldItsWriteUnitWithoutEnd(t *testing.T) {
+	const bodyRead, queueWait = 200 * time.Millisecond, 2 * time.Second
+	limiter := admission.New(admission.Limits{Read: 4, Write: 2, Wait: queueWait})
+	handler, _, _, served := newRegisteredTestServer(t, testServerOptions{admission: limiter})
+	served.bodyReadLimit = bodyRead
+	issue := createInteractionIssue(t, handler, "TEST", "Trickled writes", "A spec")
+	httpServer := httptest.NewServer(handler)
+	t.Cleanup(httpServer.Close)
+
+	header := http.Header{}
+	header.Set("Content-Type", "application/json")
+	header.Set("X-Dispatch-User", "alice")
+	tricklers := make([]*heldBackBody, 0, 2)
+	for range cap(tricklers) {
+		tricklers = append(tricklers, sendPartOfBody(t, httpServer.Listener.Addr().String(),
+			"/api/v1/issues/"+issue.Key+"/comments", header, int(maxJSONRequestBytes), []byte(`{"body":"a`)))
+	}
+	waitForWritesInFlight(t, limiter, cap(tricklers))
+
+	started := time.Now()
+	admitted := dispatchRequest(t, handler, http.MethodPatch, "/api/v1/issues/"+issue.Key, map[string]string{"title": "Renamed"}, "alice")
+	waited := time.Since(started)
+	if admitted.Code != http.StatusOK {
+		t.Fatalf("the write beside the tricklers: status=%d body=%s after %v, want 200 once their units went back at the body read bound",
+			admitted.Code, admitted.Body.String(), waited)
+	}
+	if waited >= queueWait {
+		t.Fatalf("the write beside the tricklers waited %v, want it admitted inside its %v queue wait", waited, queueWait)
+	}
+	for _, trickler := range tricklers {
+		response, answer := trickler.answer()
+		if response.StatusCode < http.StatusBadRequest {
+			t.Fatalf("a trickled write was answered %d %s, want the refusal of a body that did not arrive", response.StatusCode, answer)
+		}
+	}
+}
+
+// awaitRequestPoolIdle returns how long it took the request pool to hold no connection, and fails
+// the test when it still holds one after wait.
+func awaitRequestPoolIdle(t *testing.T, pool *store.Pool, wait time.Duration) time.Duration {
+	t.Helper()
+	started := time.Now()
+	for held := pool.Stat().AcquiredConns(); held != 0; held = pool.Stat().AcquiredConns() {
+		if time.Since(started) > wait {
+			t.Fatalf("%d request-pool connections were still held %v after the client stopped reading", held, wait)
+		}
+		time.Sleep(time.Millisecond)
+	}
+	return time.Since(started)
+}
+
+// A pinned read whose client stops reading its answer gives its request-pool connection back at
+// the read's deadline: the answer is larger than the sockets between the two buffer, so the
+// handler blocks in Write, and the bound its answer is written under (boundedAnswer) is what ends
+// that wait. Without it the read held its pinned connection, and the admission unit around it,
+// for as long as the client cared to leave the answer unread.
+func TestAPinnedReadGivesItsConnectionBackWhenItsClientStopsReading(t *testing.T) {
+	const deadline = 500 * time.Millisecond
+	_, database, _, served := newRegisteredTestServer(t, testServerOptions{})
+	const pattern = "/api/v1/stalled-reader-test"
+	pinned := make(chan struct{})
+	route := apiRoute{routeRow: routeRow{Method: http.MethodGet, Pattern: pattern, Auth: authAny, Handler: func(w http.ResponseWriter, r *http.Request) {
+		var one int
+		if err := database.Pool.QueryRow(r.Context(), "select 1").Scan(&one); err != nil {
+			t.Errorf("take the read's pinned connection: %v", err)
+			return
+		}
+		close(pinned)
+		// Far past what the sockets hold between a handler and a client that reads none of it.
+		chunk := make([]byte, 64<<10)
+		for written := 0; written < 64<<20; written += len(chunk) {
+			if _, err := w.Write(chunk); err != nil {
+				return
+			}
+		}
+	}}}
+	if !route.pinsConnection() {
+		t.Fatal("the test's route is not pinned, so it does not hold a request-pool connection to give back")
+	}
+	mux := http.NewServeMux()
+	mux.HandleFunc(route.Method+" "+pattern, served.serveRoute(route, nil, admission.New(admission.DefaultLimits()), deadline))
+	httpServer := httptest.NewServer(mux)
+	t.Cleanup(httpServer.Close)
+	awaitQuietRequestPool(t, database.Pool)
+
+	connection, err := net.Dial("tcp", httpServer.Listener.Addr().String())
+	if err != nil {
+		t.Fatalf("dial the server: %v", err)
+	}
+	t.Cleanup(func() { connection.Close() })
+	if _, err := fmt.Fprintf(connection, "GET %s HTTP/1.1\r\nHost: %s\r\n\r\n", pattern, httpServer.Listener.Addr()); err != nil {
+		t.Fatalf("send the read: %v", err)
+	}
+	<-pinned
+	// The client reads nothing of the answer; only the read's deadline can end the handler's write.
+	if held := awaitRequestPoolIdle(t, database.Pool, 10*time.Second); held < deadline {
+		t.Fatalf("the pinned connection went back after %v, want it held until the read's %v deadline", held, deadline)
 	}
 }

@@ -2303,6 +2303,18 @@ seconds to answer, and the four file version downloads 5 minutes; a write has no
 once admitted, runs to completion. Every wait for a database connection is bounded too, at 3
 seconds for a request's. The document and delivery websockets are neither admitted nor bounded.
 
+A slow client is bounded as well, so that it holds neither the admission units it was admitted
+with nor the database connection its read pinned for as long as it cares to. A request's whole
+body has 60 seconds to arrive, counted from the first read of it: enough to carry a 26 MiB upload
+over a link of 450 KB/s and a 1 MiB JSON body over one of 17 KB/s. Past it the read of the body
+fails, and the request is answered `400 REQUEST_BODY_UNREADABLE` - or with whatever its layer had
+already answered, such as a refused upload's `409 ISSUE_CLOSED` - with the connection closed after
+it. A read's answer is written under the read's own deadline too (20 seconds, 5 minutes for a file
+version download), counted from its first byte, so a client that stops reading a large answer has
+the connection closed under it there. Each route also bounds its body in bytes: 1 MiB for a JSON
+route (`413 REQUEST_TOO_LARGE`) and 26 MiB for an upload (`413 CAP_EXCEEDED`). Neither bound
+touches the websockets, which are mounted outside the routes.
+
 Each answer below carries `Retry-After` in seconds, and all but `EDIT_QUEUE_FULL` carry
 `Cache-Control: no-store`; none is logged above DEBUG, and a request whose client went away is
 answered nothing. The `dispatch` command waits out `Retry-After` and asks again, at most twice and
@@ -2310,7 +2322,7 @@ within its 60-second deadline: any method on a 429, a read only on a 503.
 
 | Status / code | Meaning |
 | --- | --- |
-| `429 OVERLOADED` | The server had no room for another read or write: its queue was full, or 1 second passed with no room. Nothing ran, so any method may be sent again after `Retry-After: 1`. A refused request's body is read and discarded first, up to the route's body limit and for at most 60 seconds, so a browser reads the 429 rather than a reset connection. A write that waited for a document's writer gate and then found no room is refused this way too. `dispatch_http_refused_total` counts them. |
+| `429 OVERLOADED` | The server had no room for another read or write: its queue was full, or 1 second passed with no room. Nothing ran, so any method may be sent again after `Retry-After: 1`. A refused request's body is read and discarded first, up to the route's body limit and within the 60 seconds the body has to arrive, so a browser reads the 429 rather than a reset connection. A write that waited for a document's writer gate and then found no room is refused this way too. `dispatch_http_refused_total` counts them. |
 | `429 EDIT_QUEUE_FULL` | 32 writes were already waiting for a document this write changes. Every write to a live document waits for that document's writer gate, one write at a time, before its transaction opens: an edit, an upload, a rebuild, an anchored comment or ask, a reply that writes into its document, a comment edited, resolved, reopened, accepted or rejected, an ask answered, resolved or edited. Nothing ran; send it again after `Retry-After: 1`. |
 | `503 DATABASE_BUSY` | No database connection came free within its pool's bound (`store.ErrPoolBusy`). A read may be sent again after `Retry-After: 1`; a write may have committed part of its work before the wait that failed it, so read what it wrote before sending it again. `dispatch_db_pool_acquire_timeouts_total` counts the waits. |
 | `503 REQUEST_TIMEOUT` | A read ran past its deadline: 20 seconds, 5 minutes for a file version download. Send it again after `Retry-After: 1`. |
@@ -2323,6 +2335,7 @@ within its 60-second deadline: any method on a 429, a read only on a 503.
 | `400 INVALID_UTF8` | Caller text holds a byte that is not UTF-8, which PostgreSQL's text cannot store: a multipart upload's field, its markdown file or a binary file part's `Content-Type` (`file Content-Type`), or any route's path or query parameter (`%FF`). JSON cannot carry one, since decoding writes it as U+FFFD. The message names the field, the byte and its position, as `NUL_CHARACTER` does; nothing is written. |
 | `400 ARTIFACT_INPUT` | An artifact upload's multipart body the parser cannot read, such as a part header holding a control character, named with the parser's reason. A body past the upload's size limit stays `413 CAP_EXCEEDED`, and a file part the server cannot spool to its temporary directory is `500 INTERNAL`, logged. A markdown document uploaded to an agent's conversation is refused with this code too: it holds files and images, and a document belongs to an issue or a project. |
 | `400 INVALID_SESSION_ID` | An agent artifact route's `session_id` is empty or holds `/`, `?`, `#`, whitespace, a control character or a character that ends a reference in text, so no reference could name what it owns; nothing is written. |
+| `400 REQUEST_BODY_UNREADABLE` | The request's body did not arrive within the 60 seconds a body has, counted from the first read of it, or its connection broke while it was being read; nothing ran, and the connection closes after the answer. A keyed request answers it too, with its key unclaimed, so the same key may be sent again. |
 
 ## Document errors
 

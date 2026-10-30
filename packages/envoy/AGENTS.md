@@ -1425,20 +1425,42 @@ finds no room waits, first come first served, in a queue twice as long as its cl
 at most 1 s (`admission.DefaultWait`); one
 that finds the queue full or waits that out is answered `429 OVERLOADED` with
 `Retry-After: 1` and `Cache-Control: no-store`. Nothing of it ran, so any method may send it
-again, and its body is drained first, up to the route's body limit and for at most 60 s
-(`drainRequestBody`), so a browser reads the 429 rather than a reset connection. An admitted read
-runs under a deadline: 20 s (`defaultReadDeadline`, below the 30 s a page and the load generator
-wait and the CLI's 60 s), 5 min for the four file version downloads (`apiRoute.Deadline`). A write
-has no deadline: once admitted it runs to completion, its acquires still bounded, since an upload
-takes a minute or more and a write cancelled partway rolls back for its page to retry it. A
-handler's error is classified first by `admission.WriteUnserved` (`writeHandlerError`,
-`identity.WriteError`, the routes package's error writers): the read's deadline passed is `503
-REQUEST_TIMEOUT`; a client that went away is answered nothing; an acquire bound
-(`store.ErrPoolBusy`), or another deadline with the request still live, is `503 DATABASE_BUSY`,
-after which a write may have committed part of its work. Both 503s carry `Retry-After: 1` and
-`Cache-Control: no-store`, and none of the three is logged above DEBUG: under load every request
-may meet one. The websockets are mounted outside the table and are neither admitted nor bounded.
+again, and its body is drained first, up to the route's body limit and within the bound that body
+arrives under (`drainBeforeAnswer`), so a browser reads the 429 rather than a reset connection.
+An admitted read runs under a deadline: 20 s (`defaultReadDeadline`, below the 30 s a page and
+the load generator wait and the CLI's 60 s), 5 min for the four file version downloads
+(`apiRoute.Deadline`). A write has no deadline: once admitted it runs to completion, its acquires
+still bounded, since an upload takes a minute or more and a write cancelled partway rolls back for
+its page to retry it. A handler's error is classified first by `admission.WriteUnserved`
+(`writeHandlerError`, `identity.WriteError`, the routes package's error writers): the read's
+deadline passed is `503 REQUEST_TIMEOUT`; a client that went away is answered nothing; an acquire
+bound (`store.ErrPoolBusy`), or another deadline with the request still live, is `503
+DATABASE_BUSY`, after which a write may have committed part of its work. Both 503s carry
+`Retry-After: 1` and `Cache-Control: no-store`, and none of the three is logged above DEBUG: under
+load every request may meet one. The websockets are mounted outside the table and are neither
+admitted nor bounded.
 `api/request_bounds_test.go` holds it.
+
+**A slow client holds neither its units nor its pinned connection without end.** A request's whole
+body has 60 s to arrive (`defaultBodyReadLimit`), counted from the first read of it whoever reads
+it - the keyed layer's spool, the handler's own decode, the drain behind an early answer - as one
+read deadline on its connection (`drainedBody.arm`, lifted only when the body ends), since the
+units an admitted request holds are held until its handler returns: a minute carries a whole upload
+(26 MiB) over a link of 450 KB/s or more and a JSON body (1 MiB) over one of 17 KB/s, and twelve
+clients trickling a byte at a time held every write unit of a process for as long as they cared to.
+A body that stops arriving fails its read, and the layer reading it answers as it answers an
+unreadable body (`400 REQUEST_BODY_UNREADABLE`, or the answer that layer had already written);
+a handler that wrote nothing, its context cancelled by net/http under the failed read, is answered
+that refusal rather than net/http's empty `200` (`drainingWriter.refuseUnreadBody`). A read's
+answer is written under the read's own deadline, armed at its first byte so a read that used its
+whole deadline still has the length of it to write what it answers (`boundedAnswer`), and lifted
+when the handler returns, since the server sets no `WriteTimeout` of its own (a deadline left in
+place would fail a later answer on the same keep-alive connection). Without it a pinned read whose
+client stopped reading held its request-pool connection, and the unit around it, for as long as
+that client cared to: a handler blocks in `Write` once the sockets between it and its client are
+full. Only a read is wrapped, and the websockets are mounted outside the routes, so no long-lived
+connection is bounded; a download's bound is its own 5 min.
+`api/request_bounds_test.go` and `api/body_drain_test.go` hold both.
 
 **The lease pool counts its leases.** `duty.LeaseNames` is every lease `duty.Exclusive` takes,
 each a constant in `duty/exclusive.go` (a delivery durable's consumer lease spelled out, though
@@ -3103,10 +3125,14 @@ from a reuse:
   HTTP/1.1 client that sends a whole body before it reads the answer - WebKit and Firefox uploading
   a file - otherwise met net/http's close of a connection with its body unread as a reset, and
   dropped the answer with it (the browser suite's 20 MB in-flight upload row).
-  Both reads, the drain's and the layer's, are bounded at `bodyDrainLimit` (a minute), a read
-  deadline through `http.ResponseController.SetReadDeadline` lifted only once the body has reached
-  its end: a body that stops arriving gets its answer as it stood, with `Connection: close`, and
-  the connection closes as soon as the answer is out. A read that failed, or stopped at the limit,
+  Every read of a request's body - the drain's, the layer's spool and the handler's own decode -
+  is bounded together at `defaultBodyReadLimit` (a minute), one read deadline through
+  `http.ResponseController.SetReadDeadline` armed at the first read of that body
+  (`drainedBody.arm`) and lifted only once the body has reached its end: a body that stops
+  arriving gets its answer as it stood, with `Connection: close`, and the connection closes as
+  soon as the answer is out; one whose handler wrote nothing, its context cancelled by net/http
+  under the failed read, is answered `400 REQUEST_BODY_UNREADABLE` rather than net/http's empty
+  `200` (`refuseUnreadBody`). A read that failed, or stopped at the limit,
   leaves the deadline in place, because net/http reads on after the answer, up to 256 KiB more of
   a `Content-Length` body that leaves that little unread (its discard before the answer's header,
   and its `Close` of the body once the handler returns): lifted, those reads let a stalled 100 KB

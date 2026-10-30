@@ -1,0 +1,14 @@
+kind: Changed
+body: |-
+  A request's body now has a minute to arrive, counted from the first read of it, and a read's
+  answer has the read's own deadline to be written, counted from its first byte. Before, a client
+  that sent its headers and then its body a byte at a time held the admission unit it was admitted
+  with for as long as it cared to - twelve such clients held every write unit of a process, and
+  every other write on it was answered `429 OVERLOADED` - and a client slow to read a large answer
+  held the request-pool connection the read had pinned for just as long. A body that stops arriving
+  is now answered `400 REQUEST_BODY_UNREADABLE` (the answer its layer had already written, where one
+  had, such as a refused upload's `409 ISSUE_CLOSED`), and the connection closes after it; an answer
+  that cannot be written within the read's deadline (20 seconds, 5 minutes for the four file version
+  downloads) is cut off there and its connection closed. Every route still bounds its body in bytes
+  as it did: 1 MiB for a JSON route, 26 MiB for an upload. The document and delivery websockets are
+  mounted outside the routes and neither bound touches them (INFRA-592).
