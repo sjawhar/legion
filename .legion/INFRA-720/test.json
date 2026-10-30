@@ -1,0 +1,51 @@
+{
+  "schemaVersion": 1,
+  "phase": "test",
+  "issue": "INFRA-720",
+  "completed": "2026-10-30T09:10:00Z",
+  "scope": "Forward-merge round from awaiting_merge: head 526cd866 (code 73ca6370, merged with main dd552dfd). Compared with my last verified head a46b10cb, the diff changed only by the 0145 -> 0148 renumber. Retro's commits (b6c6ab2d, 6fa32a6c) fall outside the fingerprint. As in rounds 8 and 9, the spec v25 CPU result carries from round 7 (architect's ruling, 23:26Z), and the rest was re-run on the real surface against main dd552dfd.",
+  "rulesApplied": "Spec v25. 'Not slower' carries from round 7 at c9c5430b: alternating 3+3 runs, median head 305.3 <= max base 317.0 CPU-s.",
+  "fingerprint": {
+    "before": {"head": "a46b10cb20fe9a93b917d8cae3397ac20b3872f3", "sha256": "5d2b1d894ab140799ed15afb5849431d4c60c943dff465d70d2f8945fd2a3961"},
+    "after": {"head": "73ca6370836840de255e3987b13837e3d1a58ee9", "sha256": "88c25537a89e0208e0cab3e4b3e24c559c293ed9c68d86535442c6056647f153"},
+    "verdict": "changed only by the renumber: `sed s/0145/0148/g` over the a46b10cb input equals the new input byte for byte"
+  },
+  "implementerProof": {
+    "verdict": "verified",
+    "how": "I drove the merged head myself on a database migrated to 0147 by main dd552dfd with 10 stored anchor shapes: census 0, boot 147 -> 148 with WARN count=9, every route 200. This matches the implementer's merge-round proof (count=8 over its 9 shapes)."
+  },
+  "failures": [],
+  "failed": 0,
+  "proof": [
+    {
+      "criterion": "The merged migration sequence boots over every stored anchor spelling, the census refuses nothing, and the readers answer as the fix requires",
+      "surface": "live local Dispatch, Postgres 17.11, NATS; database migrated to 0147 by main dd552dfd; asks created through main's API, then 10 anchor artifact_id shapes stored by SQL beside block_artifact_id, plus three asks with artifact_id 7",
+      "command": "envoy-dispatch census (head); boot dispatch-head on r10; /legion/scratch/tmp/t720r10/capture.sh; number-routes.sh r10",
+      "observed": "census 0148: 0, ok, exit 0; boot 147 -> 148, WARN count=9; every route 200. Canonical, upper case and braced resolve t720-a-md. The 8 shapes that cannot cast resolve to no document, with refs parent and search href t720-b-md. Number asks: every read and write 200 (reply 201, unsnooze 204), stored values still 7",
+      "headSha": "73ca6370836840de255e3987b13837e3d1a58ee9",
+      "negativeControl": "main dd552dfd on the same data: ask list, events and search 500; single read and references 500 for the 7 shapes that cannot cast"
+    },
+    {
+      "criterion": "Castable anchors: head answers exactly as main does",
+      "surface": "a copy holding only the anchors that cast",
+      "command": "snap.sh main | head; cmp of 11 jq -S responses",
+      "observed": "all 11 byte-identical between main dd552dfd and head 73ca6370",
+      "headSha": "73ca6370836840de255e3987b13837e3d1a58ee9",
+      "negativeControl": "round-4 head 1f4f79e7 gave anchor_artifact null for upper case and braced (red tests 1b43d81b)"
+    },
+    {
+      "criterion": "Spec v25 'correct' for a read: main's and head's API answers for real LINUX issues are identical",
+      "surface": "INFRA-639's replay seed (dispatch_replay_seed, pg_dump into Postgres 17.11), booted by main dd552dfd until repaired and fully block-indexed, then cloned for head",
+      "command": "linux-capture.sh against main on linux10 and head on the clone linux10h; cmp ignoring search's took_ms",
+      "observed": "270 responses per side (14 issues, 76 asks), all 200, byte-identical except took_ms in 63 search responses",
+      "headSha": "73ca6370836840de255e3987b13837e3d1a58ee9",
+      "negativeControl": "a plain cmp reports the took_ms difference in 63 search files, which proves the comparison detects a one-field change"
+    }
+  ],
+  "notes": [
+    "Merge state: GitHub MERGEABLE (BLOCKED on review and checks). git merge-tree against the current main 202d0168 merges cleanly; main's newest migration is still 0147.",
+    "Main's 0145-0147 do not touch asks or anchors.",
+    "CI at 73ca6370 at my reading: changes and pr-title green, every other lane queued.",
+    "I started and stopped the loadtest root's stack only to pg_dump dispatch_replay_seed. My scratch databases are dropped. Evidence: dispatch://INFRA-720/artifact/infra720-r10-tester-evidence-tgz."
+  ]
+}
