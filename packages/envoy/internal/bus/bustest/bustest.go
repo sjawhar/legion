@@ -1,9 +1,9 @@
 // Package bustest holds the deployed stream the start tests of envoy-listener and envoy-dispatch
 // both begin from, the check each makes of what a start left of it, the drift table each start
-// corrects and the fill loop a full-stream test begins from. The bus's own tests cannot import it
-// (it imports the bus) and keep their own copies: the fixture deployedClusterStream, the drift
+// corrects and the fill loop the full-stream tests begin from. The bus's own tests cannot import
+// it (it imports the bus) and keep their own copies: the fixture deployedClusterStream, the drift
 // table in internal/bus/stream_replicas_test.go and the fill loops in that file and in
-// internal/bus/publish_not_stored_test.go.
+// internal/bus/publish_not_stored_test.go. Every test outside package bus takes them from here.
 package bustest
 
 import (
@@ -147,8 +147,10 @@ func RequireFirstStartAtOneCopyAndNoSecondWrite(t testing.TB, url string, stream
 // (bus.WithStreamMaxBytes), or the fill never ends: most bounds the publishes, and a run that
 // reaches it fails the test. A publish that fails for any other reason fails the test too.
 //
-// internal/webhook's full-stream test calls it (TestADeliveryToAFullStreamIsAnswered503). The
-// bus's own tests keep their copies of this loop, because package bus cannot import this package.
+// internal/webhook's two full-stream tests call it: the one whose delivery is answered 503
+// (TestADeliveryToAFullStreamIsAnswered503) and the one whose delivery is republished without its
+// id (TestAGitHubDeliveryAnsweredNotStoredIsRepublishedWithoutItsID). The bus's own tests keep
+// their copies of this loop, because package bus cannot import this package.
 func FillStream(t testing.TB, client *bus.Client, most int) {
 	t.Helper()
 	payload := strings.Repeat("x", 1<<10)
