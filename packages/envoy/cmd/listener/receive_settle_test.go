@@ -365,7 +365,7 @@ func TestAGracefulStopDuringAnAckWaitHoldOwesTheNextHolderAnAckWait(t *testing.T
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 	stopping.receiver.Stop(ctx)
-	if end := handBackEnd(t, stopping); end["handed_back"] != float64(1) || end["linger_end"] != "not taken" {
+	if end := handBackEnd(t, stopping); end["handed_back"] != float64(1) || end["linger_end"] != string(lingerEndUntaken) {
 		t.Fatalf("pod-b's hand-back ended %v, want the newer message handed back and the linger ended with no pod to take the lease", end)
 	}
 	stopping.awaitRecord(t, "released, unsettled, owing an ack wait, without a stale binding", func(record leaseRecord) bool {
@@ -421,7 +421,7 @@ func TestAStoppingPodHandsARepeatBackAgain(t *testing.T) {
 	defer cancel()
 	active.receiver.Stop(ctx)
 	end := handBackEnd(t, active)
-	if end["handed_back"] != float64(1) || end["linger_end"] != "timeout" || end["dropped_repeats"] != float64(0) {
+	if end["handed_back"] != float64(1) || end["linger_end"] != string(lingerEndTimeout) || end["dropped_repeats"] != float64(0) {
 		t.Fatalf("pod-a's hand-back ended %v, want the message handed back, its repeat handed back again rather than dropped, and the linger run to its cap", end)
 	}
 
@@ -531,7 +531,7 @@ func TestAGracefulStopDuringASettleHoldHandsTheHoldOn(t *testing.T) {
 	if got := stoppedHandled.Load(); got != 0 {
 		t.Fatalf("pod-b delivered %d messages during its hold, want none", got)
 	}
-	if end := handBackEnd(t, stopping); end["handed_back"] != float64(2) || end["linger_end"] != "not taken" {
+	if end := handBackEnd(t, stopping); end["handed_back"] != float64(2) || end["linger_end"] != string(lingerEndUntaken) {
 		t.Fatalf("pod-b's hand-back ended %v, want the two messages it held handed back and the linger ended with no pod to take the lease", end)
 	}
 	stopping.awaitRecord(t, "released, unsettled, owing an ack wait, with a stale binding", func(record leaseRecord) bool {

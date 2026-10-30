@@ -90,15 +90,18 @@ wait only once the pod holding it has died or lost the lease.
   Once that is done the stopping pod writes the mark, `handback.<durable>.<the revision its own
   release wrote>`, and only when every part of the hand-over went through: its own release wrote
   that record (a release its lease loop outlasted writes none), the term had no lost node's push
-  binding open beside it (`stale_binding` false on the record it released), its linger ended by
-  reading another holder `receiving`, and the server confirmed its drain rather than the 2 s
-  drain wait running out. So everything it handed back is back within the standby's 3 s hold. A
+  binding open beside it (`stale_binding` false on the record it released), the message in hand's
+  handler returned rather than ignoring its cancel, its linger ended by reading another holder
+  `receiving`, and the server confirmed its drain rather than the 2 s drain wait running out. So
+  everything it handed back is back within the standby's 3 s hold. A
   stop that falls short of any of that - no standby took the record, none was receiving when the
   linger ended, the successor's subscribe never reached the server, the release timed out and a
-  later one wrote the record, or a lost node's binding stood beside the term - writes no mark, and
+  later one wrote the record, a lost node's binding stood beside the term, or a handler was still
+  running after its cancel, holding a message nothing keeps alive once the term stops - writes no
+  mark, and
   what the durable pushed meanwhile may have gone to no subscriber, or to that binding alone, so
   the next holder settles for an ack wait instead (below). A failed write of the mark costs the
-  same and nothing more. The standby
+  same and nothing more. The stop's own line says which of those it was (`no_mark`). The standby
   delivers about 2 to 3 s after the stop (the hand-back delay and a settle read), about 3 to 4 s
   after it when a message waits out a retry's delay and holds the hold to the mark, plus the
   message in hand's grace when it takes it. The tests bound it at 10 s.
@@ -174,8 +177,10 @@ delivering the held messages in stream order` (with `outcome` `settled`, `cap` o
 failed; holding on` (with `error`), `durable receiving` (with `lease`, `waited_ms` and `settle`),
 `handed the durable's messages back to the next holder` (with `handed_back`, `lingered_ms`,
 `linger_end` `receiving holder seen`, `not taken` or `timeout`, `renaked_repeats`,
-`dropped_repeats` and `hand_back_marked`), `clean hand-back not marked; the next holder settles
-for an ack wait` (with `error`),
+`dropped_repeats`, `hand_back_marked` and, when that is false, `no_mark`: why no mark was
+written), `cancelling the message in hand after the shutdown grace` (with `grace`), `the message
+in hand was still being handled after its cancel`, `clean hand-back not marked; the next holder
+settles for an ack wait` (with `error`),
 `durable consumer read failed; retrying` and `durable subscribe failed;
 retrying` (with `error`), `lease holder cannot deliver from the durable` (ERROR, with `reason` and
 `waited_ms`), `giving the listener lease up: this pod cannot deliver from the durable`, `listener
@@ -189,16 +194,20 @@ On SIGTERM or SIGINT, once `/v1` serves (`shutdownListener`):
 2. receiving stops, inside a 10 s budget the HTTP stop shares: the holder-only loops are told to
    stop, the handler takes no more messages, the message in hand gets 3 s (`inflightGrace`)
    before its prompt is cancelled (a cancelled prompt is a retryable failure: its ledger attempt
-   is cleared and the message NAKed), every message not handled (queued, or held by a settle hold)
+   is cleared and the message NAKed) and a second more (`inflightCancelWait`) for its handler to
+   return, every message not handled (queued, or held by a settle hold)
    is NAKed with the 2 s hand-back delay in stream order, the lease is marked released and
    `unsettled`, the subscription stays until the next holder receives, 3 s after the NAKs at
    most and 1.25 s after the release at least (the floor that holds the deliver subject while a
    standby subscribes), then
    drains (2 s at most) and, when all of that went through, the clean-hand-back mark is written
-   (one bucket call, 2 s at most): 9 s in all, and 10.25 s when the flush (1 s) and the release
+   (one bucket call, 2 s at most): 11 s in all, and 12.25 s when the flush (1 s) and the release
    (2 s) both
-   run to their bounds and leave that floor past the cap, which the budget then takes out of the
-   HTTP stop. A
+   run to their bounds and leave that floor past the cap. The budget bounds none of those waits:
+   it is how long the shutdown waits for the receive stop before it goes on, so an overrun leaves
+   the HTTP stop below none of it while the hand-back runs to its own bounds. All a stop past the
+   budget can lose is its mark, when the runtime kills the process before that write lands, and
+   the next holder then settles at its 7 s cap as it does after any stop that wrote none. A
    listener without a lease drains its subscription and NAKs what it has not handled at once, in
    stream order;
 3. the HTTP server shuts down within what is left of the budget;

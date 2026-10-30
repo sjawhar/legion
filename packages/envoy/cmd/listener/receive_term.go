@@ -33,11 +33,12 @@ type receiveTerm struct {
 	logger      *logging.Logger
 	// hold, when it is above zero, is the longest the handler holds what the term receives before
 	// it delivers it in stream order (settle): a term that must settle. leaseTerm is the lease
-	// term the hold's end reports settled, and fromHandBack whether that term is a candidate for
-	// a clean hand-back, whose mark can end the hold sooner (lease.HandBackMarked).
-	hold         time.Duration
-	leaseTerm    uint64
-	fromHandBack bool
+	// term the hold's end reports settled, and whose clean-hand-back mark, when the term was
+	// taken from a candidate for one, can end the hold sooner (readHandBackMark).
+	// markReadFailed is that read's log-once state, the settle hold's own.
+	hold           time.Duration
+	leaseTerm      uint64
+	markReadFailed bool
 
 	mu sync.Mutex
 	// closed is set once the term takes no more messages (close).
@@ -291,12 +292,10 @@ func (t *receiveTerm) handle(r *durableReceiver) {
 //
 // A term taken from a hand-back candidate reads the stopping pod's mark beside the durable, and
 // ends the hold once that mark is there and handBackSettleCap has passed since the subscribe
-// (lease.HandBackMarked): the mark says the stop NAKed what it held with the hand-back delay and
+// (readHandBackMark): the mark says the stop NAKed what it held with the hand-back delay and
 // held the deliver subject until this pod was receiving, so nothing of it is waiting out an ack
 // wait. It comes after this pod is receiving, which is why the hold is where it is read and not
-// the subscribe. The mark also says that a binding this term subscribed beside was that stop's
-// own linger, so the stale binding the term recorded is cleared with it. A mark that is absent,
-// or that cannot be read - logged once, as a failed durable read is - leaves the hold to its cap.
+// the subscribe. A mark that is absent, or that cannot be read, leaves the hold to its cap.
 //
 // It reports false when the term closed first.
 func (t *receiveTerm) settle(r *durableReceiver) bool {
@@ -314,22 +313,11 @@ func (t *receiveTerm) settle(r *durableReceiver) bool {
 	defer limit.Stop()
 	poll := time.NewTicker(r.timing.settlePoll)
 	defer poll.Stop()
-	outcome, pending, failing, marked, markFailing := "cap", -1, false, false, false
+	outcome, pending, failing, marked := "cap", -1, false, false
 read:
 	for {
 		held := t.gather(false)
-		if t.fromHandBack && !marked {
-			seen, err := r.lease.HandBackMarked(ctx, t.leaseTerm)
-			switch {
-			case err != nil && ctx.Err() == nil && !markFailing:
-				markFailing = true
-				r.logger.Warn("settle hold: hand-back mark read failed; holding on",
-					slog.String("consumer", r.consumer), slog.String("error", err.Error()))
-			case seen:
-				marked = true
-				r.lease.SetStaleBinding(t.leaseTerm, false)
-			}
-		}
+		marked = marked || t.readHandBackMark(ctx, r)
 		if marked && time.Since(start) >= r.timing.handBackSettleCap {
 			outcome = "handed back"
 			break read
@@ -374,6 +362,32 @@ read:
 		slog.Int("ack_pending", pending),
 		slog.Bool("hand_back_marked", marked),
 	)
+	return true
+}
+
+// readHandBackMark reports whether the pod that released the record this term was taken from has
+// marked that hand-over clean (lease.HandBackMarked). The lease answers a term that is no
+// candidate for one, or is no longer current, with false and no bucket call, so the settle hold
+// of any term may ask. The mark also says that a binding this term subscribed beside was that
+// stop's own linger, so the stale binding the term recorded is cleared with it. A read that
+// fails is logged once, as a failed durable read is, and holds on.
+func (t *receiveTerm) readHandBackMark(ctx context.Context, r *durableReceiver) bool {
+	if r.lease == nil {
+		return false
+	}
+	seen, err := r.lease.HandBackMarked(ctx, t.leaseTerm)
+	if err != nil {
+		if ctx.Err() == nil && !t.markReadFailed {
+			t.markReadFailed = true
+			r.logger.Warn("settle hold: hand-back mark read failed; holding on",
+				slog.String("consumer", r.consumer), slog.String("error", err.Error()))
+		}
+		return false
+	}
+	if !seen {
+		return false
+	}
+	r.lease.SetStaleBinding(t.leaseTerm, false)
 	return true
 }
 

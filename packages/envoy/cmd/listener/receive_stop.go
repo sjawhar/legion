@@ -102,7 +102,8 @@ func (r *durableReceiver) endWithoutLease(t *receiveTerm) {
 // A stop that went through all of that writes the lease's clean-hand-back mark for the record it
 // released (markHandBack), which is the whole of what its successor's settle hold rests on: its
 // 3 s cap says no message of this hand-over is waiting out an ack wait, and only this pod knows
-// that. Nothing is vouched for by timing.
+// that. Nothing is vouched for by timing. A handler still running after its cancel holds a
+// message this stop cannot account for, so it marks nothing either (settleInHand).
 //
 // A release the lease's loop outlasts (handBackReleaseWait) writes nothing and records the term's
 // ack-wait debt instead (lease.Release): the linger then reads this pod's own unreleased record,
@@ -112,7 +113,7 @@ func (r *durableReceiver) endWithoutLease(t *receiveTerm) {
 // record must settle for an ack wait.
 func (r *durableReceiver) handBack(t *receiveTerm) {
 	t.stopHandling()
-	r.settleInHand(t)
+	handled := r.settleInHand(t)
 	deadline := time.Now().Add(r.timing.lingerMax)
 	t.handBack(r.timing.handBackDelay)
 	r.lease.Unsettle(t.leaseTerm)
@@ -126,47 +127,73 @@ func (r *durableReceiver) handBack(t *receiveTerm) {
 	if err != nil {
 		r.logger.Warn("listener lease not released; a standby takes it once it expires", slog.String("error", err.Error()))
 	}
-	lingered, how := r.linger(deadline)
+	lingered, end := r.linger(deadline)
 	_, drained := r.drain(t)
 	t.close()
-	marked := r.markHandBack(how, drained)
+	marked, why := r.markHandBack(end, drained, handled)
 	handedBack, renaked, dropped := t.handBackCounts()
-	r.logger.Info("handed the durable's messages back to the next holder",
+	fields := []slog.Attr{
 		slog.String("consumer", r.consumer),
 		slog.Int("handed_back", handedBack),
 		slog.Int64("lingered_ms", lingered.Milliseconds()),
-		slog.String("linger_end", how),
+		slog.String("linger_end", string(end)),
 		slog.Int("renaked_repeats", renaked),
 		slog.Int("dropped_repeats", dropped),
 		slog.Bool("hand_back_marked", marked),
-	)
+	}
+	if !marked {
+		fields = append(fields, slog.String("no_mark", why))
+	}
+	r.logger.Info("handed the durable's messages back to the next holder", fields...)
 }
 
 // markHandBack writes the lease's clean-hand-back mark for the record this stop released, and
-// reports whether it wrote one. Every part of the hand-over must have gone through: how is the
-// linger's end, which must be another pod receiving on the deliver subject, and drained the
-// server's word that this pod's subscription is closed, rather than the drain's wait running out
-// with messages possibly still coming. The lease adds what it knows: its own release wrote the
-// record, and that record carried no stale binding (lease.MarkHandBack). A write that fails
-// leaves the next holder the settle hold of a hard take-over and nothing worse, so it is a
-// warning and no more; listenerStateRequestWait bounds it, inside the stop's own budget.
-func (r *durableReceiver) markHandBack(how string, drained bool) bool {
-	if how != lingerEndReceiving || !drained {
-		return false
+// reports whether it wrote one and, when it did not, why in a few words for the stop's own log
+// line. Every part of the hand-over must have gone through: end is the linger's, which must be
+// another pod receiving on the deliver subject, drained the server's word that this pod's
+// subscription is closed, rather than the drain's wait running out with messages possibly still
+// coming, and handled whether the message in hand's handler returned, since one still running
+// holds a message that comes back only at its ack wait, long after the successor's 3 s hold has
+// ended. The lease adds what it knows: its own release wrote the record, and that record carried
+// no stale binding (lease.MarkHandBack). A write that fails leaves the next holder the settle
+// hold of a hard take-over and nothing worse, so it is a warning and no more;
+// listenerStateRequestWait bounds it, inside the stop's own budget.
+func (r *durableReceiver) markHandBack(end lingerEnd, drained, handled bool) (bool, string) {
+	switch {
+	case end != lingerEndReceiving:
+		return false, "no successor was receiving when the linger ended"
+	case !drained:
+		return false, "the server did not confirm the drain"
+	case !handled:
+		return false, "the message in hand was still being handled after its cancel"
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), listenerStateRequestWait)
 	defer cancel()
 	marked, err := r.lease.MarkHandBack(ctx)
-	if err != nil {
+	switch {
+	case err != nil:
 		r.logger.Warn("clean hand-back not marked; the next holder settles for an ack wait",
 			slog.String("consumer", r.consumer), slog.String("error", err.Error()))
+		return false, "the mark's write failed"
+	case !marked:
+		return false, "this stop's own release wrote no record, or one beside a lost node's binding"
 	}
-	return marked
+	return true, ""
 }
 
-// lingerEndReceiving is the linger end that a clean hand-back needs: the lease record named
-// another holder of this machine receiving on the deliver subject before this pod let go of it.
-const lingerEndReceiving = "receiving holder seen"
+// lingerEnd is how a stopping pod's linger ended, the linger_end of its hand-back log line.
+type lingerEnd string
+
+const (
+	// lingerEndReceiving is the end a clean hand-back needs: the lease record named another
+	// holder of this machine receiving on the deliver subject before this pod let go of it.
+	lingerEndReceiving lingerEnd = "receiving holder seen"
+	// lingerEndTimeout is the linger run to its cap with no such holder read.
+	lingerEndTimeout lingerEnd = "timeout"
+	// lingerEndUntaken is every read answering that no other pod has taken the record, past the
+	// floor that holds the deliver subject for a standby still taking it.
+	lingerEndUntaken lingerEnd = "not taken"
+)
 
 // linger waits, reading the lease record every lingerPoll, until it names another holder that is
 // receiving, or until deadline, or until every read has answered that no other pod has taken the
@@ -179,7 +206,7 @@ const lingerEndReceiving = "receiving holder seen"
 // record the time to subscribe at all, so the linger has a receiving holder to see. A take-over
 // read as taken past the floor is waited for until the deadline all the same, which is where a
 // stop with its cap unspent holds the deliver subject for a successor still preparing.
-func (r *durableReceiver) linger(deadline time.Time) (time.Duration, string) {
+func (r *durableReceiver) linger(deadline time.Time) (time.Duration, lingerEnd) {
 	start := time.Now()
 	bridged := start.Add(r.timing.lingerUntaken + r.timing.lingerPoll)
 	if deadline.Before(bridged) {
@@ -200,9 +227,9 @@ func (r *durableReceiver) linger(deadline time.Time) (time.Duration, string) {
 		}
 		switch now := time.Now(); {
 		case !now.Before(deadline):
-			return time.Since(start), "timeout"
+			return time.Since(start), lingerEndTimeout
 		case untaken && !now.Before(bridged):
-			return time.Since(start), "not taken"
+			return time.Since(start), lingerEndUntaken
 		}
 		<-poll.C
 	}
@@ -240,13 +267,16 @@ func (r *durableReceiver) drain(t *receiveTerm) (*nats.Conn, bool) {
 
 // settleInHand gives the message in hand inflightGrace to settle, then cancels its handling, which
 // aborts a prompt in flight and NAKs the message, and waits inflightCancelWait more for the
-// handler to return.
-func (r *durableReceiver) settleInHand(t *receiveTerm) {
+// handler to return. It reports whether the handler returned: one still running holds a message
+// this pod can no longer keep alive, which comes back at its ack wait, long after the next
+// holder's 3 s hold would have ended, so a graceful stop writes no clean-hand-back mark for it
+// (markHandBack).
+func (r *durableReceiver) settleInHand(t *receiveTerm) bool {
 	grace := time.NewTimer(r.timing.inflightGrace)
 	defer grace.Stop()
 	select {
 	case <-t.handled:
-		return
+		return true
 	case <-grace.C:
 	}
 	r.logger.Info("cancelling the message in hand after the shutdown grace", slog.String("consumer", r.consumer), slog.String("grace", r.timing.inflightGrace.String()))
@@ -255,7 +285,9 @@ func (r *durableReceiver) settleInHand(t *receiveTerm) {
 	defer wait.Stop()
 	select {
 	case <-t.handled:
+		return true
 	case <-wait.C:
 		r.logger.Warn("the message in hand was still being handled after its cancel", slog.String("consumer", r.consumer))
+		return false
 	}
 }

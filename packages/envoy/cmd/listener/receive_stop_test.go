@@ -68,7 +68,7 @@ func TestAGracefulStopHandsWhatItHeldBackAndReleasesTheLeaseToTheStandby(t *test
 		t.Fatal("the stopped pod still holds the lease")
 	}
 	end := handBackEnd(t, active)
-	if end["handed_back"] != float64(3) || end["linger_end"] != "receiving holder seen" {
+	if end["handed_back"] != float64(3) || end["linger_end"] != string(lingerEndReceiving) {
 		t.Fatalf("the stopped pod's hand-back ended %v, want all three handed back and the linger ended by the standby receiving", end)
 	}
 
@@ -158,7 +158,7 @@ func TestAGracefulStopOverASlowLinkHandsBackWhatWasOnTheWire(t *testing.T) {
 		t.Fatalf("pod-a handled %d messages, want none: the stop came while all five were on the wire", got)
 	}
 	end := handBackEnd(t, active)
-	if end["handed_back"] != float64(len(published)) || end["linger_end"] != "receiving holder seen" {
+	if end["handed_back"] != float64(len(published)) || end["linger_end"] != string(lingerEndReceiving) {
 		t.Fatalf("pod-a's hand-back ended %v, want all five handed back and the linger ended by the standby receiving", end)
 	}
 	publishDurable(t, standby.client, "newer")
@@ -232,7 +232,7 @@ func TestAGracefulStopKeepsItsSubscriptionUntilTheStandbyReceives(t *testing.T) 
 	}
 	end := handBackEnd(t, active)
 	lingered, _ := end["lingered_ms"].(float64)
-	if end["linger_end"] != "receiving holder seen" || lingered >= float64(lingerMax.Milliseconds()) {
+	if end["linger_end"] != string(lingerEndReceiving) || lingered >= float64(lingerMax.Milliseconds()) {
 		t.Fatalf("pod-a's hand-back ended %v, want its linger ended by the standby receiving, before the %s cap", end, lingerMax)
 	}
 	if state := active.receiver.report().State; state != receiveStandby {
@@ -262,7 +262,7 @@ func TestAGracefulStopMarksTheHandBackForTheRecordItReleased(t *testing.T) {
 	defer cancel()
 	active.receiver.Stop(ctx)
 	end := handBackEnd(t, active)
-	if end["linger_end"] != lingerEndReceiving || end["hand_back_marked"] != true {
+	if end["linger_end"] != string(lingerEndReceiving) || end["hand_back_marked"] != true {
 		t.Fatalf("pod-a's hand-back ended %v, want its linger ended by the standby receiving and the hand-over marked", end)
 	}
 
@@ -287,23 +287,84 @@ func TestAGracefulStopMarksTheHandBackForTheRecordItReleased(t *testing.T) {
 	}
 }
 
+// A stop whose handler ignores its cancel marks nothing, though every other part of the
+// hand-over went through: the message that handler holds is settled by nobody and kept alive by
+// nobody once the term stops, so it comes back at its ack wait, long after the successor's 3 s
+// hold would have ended. The successor holds for the ack wait's cap instead, which is what the
+// unwritten mark tells it, and the stop's own line says why it wrote none.
+func TestAStopWhoseHandlerIgnoresItsCancelMarksNoHandBack(t *testing.T) {
+	uri := testnats.URL(t)
+	const machineID = "box-stuck-handler"
+	// The handler answers neither its prompt's cancel nor the stop: it holds the message past
+	// inflightCancelWait, and is let go only once the test is over.
+	stuck := make(chan struct{})
+	defer close(stuck)
+	inHand := make(chan struct{})
+	active := startReceiverRig(t, uri, machineID, "pod-a", func(_ context.Context, _ *natsgo.Msg) {
+		close(inHand)
+		<-stuck
+	}, handBackTiming(), testLeaseTiming())
+	active.awaitState(t, receiveActive, 10*time.Second)
+	standbyHandle, _ := recordingHandler()
+	standby := startReceiverRig(t, uri, machineID, "pod-b", standbyHandle, testReceiveTiming(), testLeaseTiming())
+	waitFor(t, 5*time.Second, "the standby to read pod-a's lease", func() bool {
+		return standby.lease.Status().ActiveInstance == "pod-a"
+	})
+
+	publishDurable(t, active.client, "held past its cancel")
+	select {
+	case <-inHand:
+	case <-time.After(5 * time.Second):
+		t.Fatal("pod-a never took the message")
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+	active.receiver.Stop(ctx)
+	active.logRecord(t, "the message in hand was still being handled after its cancel", 5*time.Second)
+	end := handBackEnd(t, active)
+	if end["linger_end"] != string(lingerEndReceiving) || end["hand_back_marked"] != false ||
+		end["no_mark"] != "the message in hand was still being handled after its cancel" {
+		t.Fatalf("pod-a's hand-back ended %v, want its linger ended by the standby receiving, no mark written, and the handler still running as the reason", end)
+	}
+	released := active.lease.released
+	if _, err := active.lease.kv.Get(active.lease.handBackKey(released)); !errors.Is(err, natsgo.ErrKeyNotFound) {
+		t.Fatalf("the mark for revision %d reads %v, want no such key", released, err)
+	}
+	hold := standby.logRecord(t, "settle hold ended; delivering the held messages in stream order", 15*time.Second)
+	held, _ := hold["held_ms"].(float64)
+	if hold["hand_back_marked"] != false || hold["outcome"] == "handed back" || held <= float64(handBackDelay.Milliseconds()+settleMargin.Milliseconds()) {
+		t.Fatalf("the standby's settle hold ended %v, want it unmarked and held past the %s hand-back cap, for the ack wait the stuck message comes back at",
+			hold, handBackDelay+settleMargin)
+	}
+}
+
 // A stop writes no mark unless the whole hand-over went through. A linger that ended because no
 // other pod had taken the record, or at its cap with a taker that never received, let go of the
-// deliver subject with nothing subscribed behind it, and a term that subscribed beside a lost
-// node's binding releases a record carrying stale_binding, whose messages come back only at their
-// ack wait. In each case the pod that takes the record next must settle for that ack wait, and an
-// unwritten mark is what tells it so.
+// deliver subject with nothing subscribed behind it; a term that subscribed beside a lost node's
+// binding releases a record carrying stale_binding, whose messages come back only at their ack
+// wait; and a drain whose wait ran out can have left messages the server had already sent
+// unreceived. The last two reach their gate only with a successor receiving, which is what ends
+// the linger the mark's first gate reads. In each case the pod that takes the record next must
+// settle for an ack wait, and an unwritten mark is what tells it so.
 func TestAStopMarksNoHandBackWhenItsLingerOrItsTermFellShort(t *testing.T) {
 	for _, row := range []struct {
-		name, machineID, lingerEnd string
+		name, machineID string
+		lingerEnd       lingerEnd
 		// taker runs a lease without a receive loop, so the record is taken and never received
-		// on; binding leaves a lost node's push binding open beside the stopping pod's own.
-		taker   bool
-		binding bool
+		// on, and successor a whole pod, which takes the record and receives on it; binding
+		// leaves a lost node's push binding open beside the stopping pod's own; swallowDrain
+		// holds back everything the stopping pod sends from its drain's UNSUB on, so the server
+		// never confirms its subscription closed.
+		taker        bool
+		successor    bool
+		binding      bool
+		swallowDrain bool
 	}{
-		{"the linger ended with no pod having taken the record", "box-unmarked-untaken", "not taken", false, false},
-		{"the linger ran to its cap with a taker that never received", "box-unmarked-mute", "timeout", true, false},
-		{"the term had a lost node's binding open", "box-unmarked-stale", "not taken", false, true},
+		{"the linger ended with no pod having taken the record", "box-unmarked-untaken", "not taken", false, false, false, false},
+		{"the linger ran to its cap with a taker that never received", "box-unmarked-mute", "timeout", true, false, false, false},
+		{"the term had a lost node's binding open", "box-unmarked-stale", lingerEndReceiving, false, true, true, false},
+		{"the drain's wait ran out", "box-unmarked-drain", lingerEndReceiving, false, true, false, true},
 	} {
 		t.Run(row.name, func(t *testing.T) {
 			uri := testnats.URL(t)
@@ -312,7 +373,18 @@ func TestAStopMarksNoHandBackWhenItsLingerOrItsTermFellShort(t *testing.T) {
 				putLeaseRecord(t, uri, row.machineID, `{"holder":"pod-dead","boot":"0123456789abcdef"}`)
 				bindAsADeadHolder(t, uri, row.machineID)
 			}
-			active := startReceiverRig(t, uri, row.machineID, "pod-a", handle, handBackTiming(), testLeaseTiming())
+			busURI := uri
+			var relay *listenerRelay
+			if row.swallowDrain {
+				// Only pod-a's bus link goes through the relay: its lease reads the record on a
+				// connection of its own, so its linger still sees pod-b receiving while the
+				// drain it sends reaches nobody.
+				relay = startListenerRelay(t, uri)
+				busURI = relay.relayed
+			}
+			active := newReceiverRigVia(t, busURI, uri, row.machineID, "pod-a", handle, handBackTiming(), testLeaseTiming())
+			active.lease.Start(context.Background())
+			active.receiver.Start()
 			active.awaitState(t, receiveActive, 10*time.Second)
 			if row.taker {
 				// A pod that runs a lease and no receive loop: it takes the released record and
@@ -323,12 +395,22 @@ func TestAStopMarksNoHandBackWhenItsLingerOrItsTermFellShort(t *testing.T) {
 					return mute.lease.Status().ActiveInstance == "pod-a"
 				})
 			}
+			if row.successor {
+				standbyHandle, _ := recordingHandler()
+				standby := startReceiverRig(t, uri, row.machineID, "pod-b", standbyHandle, testReceiveTiming(), testLeaseTiming())
+				waitFor(t, 5*time.Second, "pod-b to read pod-a's lease", func() bool {
+					return standby.lease.Status().ActiveInstance == "pod-a"
+				})
+			}
+			if relay != nil {
+				relay.arm("UNSUB", 1)
+			}
 
 			ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 			defer cancel()
 			active.receiver.Stop(ctx)
 			end := handBackEnd(t, active)
-			if end["linger_end"] != row.lingerEnd || end["hand_back_marked"] != false {
+			if end["linger_end"] != string(row.lingerEnd) || end["hand_back_marked"] != false {
 				t.Fatalf("pod-a's hand-back ended %v, want its linger ended %q and no mark written", end, row.lingerEnd)
 			}
 			released := active.lease.released
@@ -359,7 +441,7 @@ func TestAGracefulStopWithNoOtherPodEndsItsLingerUntaken(t *testing.T) {
 	}
 	end := handBackEnd(t, active)
 	lingered, _ := end["lingered_ms"].(float64)
-	if end["linger_end"] != "not taken" || lingered < float64(lingerUntaken.Milliseconds()) {
+	if end["linger_end"] != string(lingerEndUntaken) || lingered < float64(lingerUntaken.Milliseconds()) {
 		t.Fatalf("pod-a's hand-back ended %v, want its linger ended by no pod taking the lease after %s", end, lingerUntaken)
 	}
 	active.awaitRecord(t, "released, unsettled, not receiving", func(record leaseRecord) bool {
@@ -399,7 +481,7 @@ func TestAGracefulStopLingersToItsCapForATakerThatNeverReceives(t *testing.T) {
 		t.Fatalf("the stop took %s, want the %s linger cap and a drain", took, lingerMax)
 	}
 	end := handBackEnd(t, active)
-	if end["linger_end"] != "timeout" {
+	if end["linger_end"] != string(lingerEndTimeout) {
 		t.Fatalf("pod-a's hand-back ended %v, want its linger to have run to the %s cap", end, lingerMax)
 	}
 	if !mute.lease.Holding() {
@@ -421,7 +503,7 @@ func TestAStoppingPodsLingerHoldsItsFloorThoughItsCapHasRun(t *testing.T) {
 	timing := active.receiver.timing
 	floor := timing.lingerUntaken + timing.lingerPoll
 	lingered, how := active.receiver.linger(time.Now())
-	if how != "timeout" || lingered < floor {
+	if how != lingerEndTimeout || lingered < floor {
 		t.Fatalf("a linger past its cap ended %q after %s, want it held for its %s floor first", how, lingered, floor)
 	}
 }

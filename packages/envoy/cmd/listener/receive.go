@@ -81,17 +81,21 @@ import (
 // its subscription, waiting handBackDrainWait at most for the server's word that it sends no
 // more, and writes the lease's clean-hand-back mark for the record it released when all of this
 // went through: its own release wrote that record, the term had no lost node's binding open, the
-// linger ended with another pod receiving, and the server confirmed the drain. The next holder's
-// settle hold reads that mark and ends at 3 s rather than 7 s (lease.MarkHandBack,
-// durableReceiver.handBack); a stop that falls short of any of it writes nothing and leaves the
-// next holder the 7 s hold. handBackReleaseWait bounds the wait for the lease's loop to stop
-// before the release, and listenerStateRequestWait the mark's write.
-// The 3 s grace, its cancel's 1 s, lingerMax (the flush and the release inside it) and the 2 s
-// drain come to 9 s at most besides a lease call that hangs, inside the 10 s the shutdown gives
-// the receive stop and the HTTP stop together; a flush and a release that both run to their bounds
-// (1 s and 2 s) leave the linger holding its floor past that cap, 1.25 s after the release and
-// 10.25 s in all, which the shutdown's own
-// budget then cuts short in the HTTP stop. The record a stop releases
+// message in hand's handler returned, the linger ended with another pod receiving, and the server
+// confirmed the drain. The next holder's settle hold reads that mark and ends at 3 s rather than
+// 7 s (lease.MarkHandBack, durableReceiver.handBack); a stop that falls short of any of it writes
+// nothing and leaves the next holder the 7 s
+// hold. handBackReleaseWait bounds the wait for the lease's loop to stop before the release, and
+// listenerStateRequestWait the mark's write.
+// The 3 s grace, its cancel's 1 s, lingerMax (the flush and the release inside it), the 2 s drain
+// and the mark's 2 s write come to 11 s at most besides a lease call that hangs; a flush and a
+// release that both run to their bounds (1 s and 2 s) leave the linger holding its floor past
+// that cap, 1.25 s after the release, and 12.25 s in all. The 10 s the shutdown gives the receive
+// stop and the HTTP stop together bounds none of that: it is how long the shutdown waits for the
+// stop before it goes on to the HTTP stop, which then has none of the budget left, while the
+// hand-back runs on to its own bounds. All a stop past that budget can lose is its mark, when the
+// runtime kills the process before the write lands; the next holder then settles at its 7 s cap,
+// as it does after any stop that wrote none. The record a stop releases
 // carries the ack wait its term still owes (lease.ackWaitOwed): a term that must settle owes one
 // until its settle hold ends, so a stop before that leaves the next holder's hold to wait an ack
 // wait. A release the lease's loop outlasts records that debt before it gives up (lease.Release),
@@ -534,12 +538,7 @@ func (r *durableReceiver) serve(ctx, termCtx context.Context, status leaseStatus
 				r.logger.Info("durable still push-bound by an earlier lease holder; receiving beside it", slog.String("consumer", r.consumer))
 			}
 		}
-		err := r.begin(termStart{
-			subject:  info.Config.DeliverSubject,
-			hold:     hold,
-			term:     status.Term,
-			handBack: status.HandBack,
-		})
+		err := r.begin(info.Config.DeliverSubject, hold, status.Term)
 		if err == nil {
 			r.awaitedBinding = false
 			r.succeeded()
@@ -749,45 +748,33 @@ func (r *durableReceiver) awaitUnbound(ctx context.Context) error {
 	}
 }
 
-// termStart is what begin needs of the term it starts: the lease term and the deliver subject it
-// subscribes to, the cap of its settle hold (zero when it has none), and whether the term is a
-// candidate for a clean hand-back, so its hold reads the mark that would end it sooner
-// (lease.HandBackMarked).
-type termStart struct {
-	subject  string
-	hold     time.Duration
-	term     uint64
-	handBack bool
-}
-
-// begin starts a term's receiving: a core subscription on start.subject on the client's current
+// begin starts a term's receiving: a core subscription on subject on the client's current
 // connection, the serial handler and the InProgress ticker. A hold above zero has the handler
 // first hold what arrives until the durable's outstanding messages are all in hand, or for that
-// long at most, then deliver it in stream order (receiveTerm.settle); start.term is the lease
-// term whose unsettled the hold's end clears. Once the server has the subscription, the lease
-// records the term receiving, which a pod that stopped gracefully waits for before it lets go of
-// the deliver subject - and, after that, before it writes the mark that shortens this term's
-// hold. A flush that fails leaves the SUB to nats.go's reconnect, records no term receiving and
-// so earns no mark: the hold runs to its 7 s cap, which is what the messages that reached no
-// subscriber meanwhile need.
-func (r *durableReceiver) begin(start termStart) error {
+// long at most, then deliver it in stream order (receiveTerm.settle); term is the lease term
+// whose unsettled the hold's end clears. Once the server has the subscription, the lease records
+// the term receiving, which a pod that stopped gracefully waits for before it lets go of the
+// deliver subject - and, after that, before it writes the mark that shortens this term's hold. A
+// flush that fails leaves the SUB to nats.go's reconnect, records no term receiving and so earns
+// no mark: the hold runs to its 7 s cap, which is what the messages that reached no subscriber
+// meanwhile need.
+func (r *durableReceiver) begin(subject string, hold time.Duration, term uint64) error {
 	t := &receiveTerm{
-		subject:      start.subject,
-		queue:        make(chan *nats.Msg, receiveQueueCapacity),
-		unsettled:    map[*nats.Msg]struct{}{},
-		closing:      make(chan struct{}),
-		handled:      make(chan struct{}),
-		stopped:      make(chan struct{}),
-		logger:       r.logger,
-		hold:         start.hold,
-		leaseTerm:    start.term,
-		fromHandBack: start.handBack,
-		holding:      start.hold > 0,
+		subject:   subject,
+		queue:     make(chan *nats.Msg, receiveQueueCapacity),
+		unsettled: map[*nats.Msg]struct{}{},
+		closing:   make(chan struct{}),
+		handled:   make(chan struct{}),
+		stopped:   make(chan struct{}),
+		logger:    r.logger,
+		hold:      hold,
+		leaseTerm: term,
+		holding:   hold > 0,
 	}
 	t.handling, t.cancel = context.WithCancel(context.Background())
 	r.mu.Lock()
 	conn := r.conn
-	sub, err := conn.Subscribe(start.subject, t.intake)
+	sub, err := conn.Subscribe(subject, t.intake)
 	if err != nil {
 		r.mu.Unlock()
 		t.cancel()
@@ -801,7 +788,7 @@ func (r *durableReceiver) begin(start termStart) error {
 	// recorded receiving once a resubscribe on the new connection has flushed.
 	flushed := conn.FlushTimeout(time.Second) == nil
 	if flushed && r.lease != nil {
-		r.lease.SetReceiving(start.term)
+		r.lease.SetReceiving(term)
 	}
 	go t.handle(r)
 	go t.keepAlive(r.timing.inProgressEvery)

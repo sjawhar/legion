@@ -18,13 +18,17 @@ body: |-
     until the lease record says the next holder is `receiving` (3 s at most after the NAKs, and
     1.25 s after its release at least, the floor that holds the deliver subject while a standby
     subscribes: a stop whose
-    flush and release both run to their bounds takes 10.25 s rather than the 9 s a stop takes
-    otherwise, which its 10 s budget then takes out of the HTTP stop),
+    flush and release both run to their bounds takes 12.25 s rather than the 11 s a stop takes
+    otherwise, and its 10 s budget bounds none of that - it is how long the shutdown waits before
+    it goes on to the HTTP stop, which an overrun leaves none of the budget. All a stop past it
+    can lose is its mark, if the runtime kills the process first, and the next holder then settles
+    at its 7 s cap),
     handing back what still reaches it, since nats-server loses a message whose
     first delivery is still queued when a push consumer's last subscriber goes. Once it has
     drained, a stop whose hand-over went through every step - its own release wrote the record,
-    its term had no lost node's push binding open, its linger read another holder `receiving`,
-    and the server confirmed the drain - writes a clean-hand-back mark, the new key
+    its term had no lost node's push binding open, the message in hand's handler returned, its
+    linger read another holder `receiving`, and the server confirmed the drain - writes a
+    clean-hand-back mark, the new key
     `handback.<durable>.<the revision it released>` in `envoy_listener` (JSON: `instance`, `boot`,
     `revision`; the bucket's 20 minute `MaxAge` removes it). A pod that takes the lease over a
     holder that was killed or lost its node subscribes at once and holds what it

@@ -43,12 +43,14 @@ func (l *lease) handBackKey(revision uint64) string {
 // MarkHandBack writes the clean-hand-back mark for the record this process released, so the pod
 // that took that record ends its settle hold at the hand-back delay rather than an ack wait
 // (HandBackMarked). The caller vouches for what it alone knows - its linger ended with another
-// pod receiving, and its drain was confirmed - and the lease for what it knows: it writes nothing
-// unless its own release wrote a record (a release that outlasted its bound wrote none, and the
-// late release that follows it is past the linger) and that record carried no stale binding, in
-// which case what a lost node's binding held comes back only at its ack wait. It reports whether
-// the mark was written. ctx bounds the write, which is one bucket call; a write that fails is the
-// caller's to log, and costs the next holder its ack wait and no more.
+// pod receiving, its drain was confirmed, and the message in hand's handler returned - and the
+// lease for what it knows: it writes nothing unless the release of the term being stopped wrote
+// a record (a release that outlasted its bound wrote none, and the late release that follows it
+// is past the linger; a release an earlier term made is cleared when this one starts,
+// startTermLocked) and that record carried no stale binding, in which case what a lost node's
+// binding held comes back only at its ack wait. It reports whether the mark was written. ctx
+// bounds the write, which is one bucket call; a write that fails is the caller's to log, and
+// costs the next holder its ack wait and no more.
 func (l *lease) MarkHandBack(ctx context.Context) (bool, error) {
 	l.mu.Lock()
 	revision, stale := l.released, l.releasedStale

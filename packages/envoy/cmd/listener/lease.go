@@ -172,10 +172,12 @@ type lease struct {
 	unsettled    bool
 	receiving    bool
 	ackWaitOwed  bool
-	// released is the revision this process's own release wrote, zero while it has written none,
+	// released is the revision this term's own release wrote, zero while it has written none,
 	// and releasedStale the stale_binding that release carried: the clean-hand-back mark of a
 	// graceful stop vouches for that revision, and only a release that found no binding beside
-	// its own may be vouched for (MarkHandBack).
+	// its own may be vouched for (MarkHandBack). Each term starts with both cleared
+	// (startTermLocked), so no stop is vouched for by a release an earlier term made - the
+	// give-up of a term this pod then took the lease back after, say.
 	released      uint64
 	releasedStale bool
 	// giveUpTerm is the term GiveUp asked the loop to give up.
@@ -585,14 +587,16 @@ func (l *lease) renew() time.Duration {
 // write replaced, which such a hand-back's mark is keyed by (handBack and replaced, both zero for
 // a term that is no candidate), and whether it is a resume (leaseStatus), and sets the flags that
 // follow from settle: a term that must settle is unsettled and owes its successor an ack wait
-// from here until its settle hold ends (Settled), and no term has subscribed when it starts.
-// acquire records stale_binding itself, which it carries over from the record it took. Callers
-// must hold l.mu.
+// from here until its settle hold ends (Settled), and no term has subscribed when it starts. It
+// clears what an earlier term's release recorded, so this term's stop marks a hand-back only for
+// a record its own release wrote (released, MarkHandBack). acquire records stale_binding itself,
+// which it carries over from the record it took. Callers must hold l.mu.
 func (l *lease) startTermLocked(how leaseAcquisition, settle, handBack bool, replaced uint64, resumed bool) {
 	l.term++
 	l.how = how
 	l.settle, l.handBack, l.replaced, l.resumed = settle, handBack, replaced, resumed
 	l.unsettled, l.ackWaitOwed, l.receiving = settle, settle, false
+	l.released, l.releasedStale = 0, false
 }
 
 // stepDown ends the holder's hold after a renewal found another pod's record.

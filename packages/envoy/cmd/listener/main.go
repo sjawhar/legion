@@ -1443,15 +1443,20 @@ func shutdownListener(logger *logging.Logger, server *http.Server, client *bus.C
 
 	// 2. Stop receiving the durable, inside the 10 s budget the HTTP stop shares: the holder-only
 	// loops stop, the handler takes no more messages, the message in hand gets inflightGrace (3 s)
-	// before its prompt is cancelled and it is NAKed, every message not handled is NAKed with a
-	// delay for the next holder, and the lease is marked released, so a standby takes the lease at
-	// its next poll; the subscription then stays until the standby receives, at least 1.25 s after
-	// the release (lingerUntaken and a poll, the floor that holds the deliver subject while the
-	// standby subscribes) and up to lingerMax (3 s) after the NAKs, then drains and, when the
-	// whole hand-over went through, writes the lease's clean-hand-back mark, which ends the
-	// standby's settle hold at 3 s (durableReceiver.handBack): 9 s at most, and
-	// 10.25 s when the flush (1 s) and the release (2 s) both run to their bounds and leave that
-	// floor past the cap, which this budget then cuts short in the HTTP stop.
+	// before its prompt is cancelled and it is NAKed, with a second for the handler to return,
+	// every message not handled is NAKed with a delay for the next holder, and the lease is marked
+	// released, so a standby takes the lease at its next poll; the subscription then stays until
+	// the standby receives, at least 1.25 s after the release (lingerUntaken and a poll, the floor
+	// that holds the deliver subject while the standby subscribes) and up to lingerMax (3 s) after
+	// the NAKs, then drains (2 s) and, when the whole hand-over went through, writes the lease's
+	// clean-hand-back mark, one bucket call of 2 s at most, which ends the standby's settle hold
+	// at 3 s (durableReceiver.handBack): 11 s at most, and 12.25 s when the flush (1 s) and the
+	// release (2 s) both run to their bounds and leave that floor past the cap. This budget bounds
+	// none of those waits: it is how long this shutdown waits for the stop before it goes on,
+	// leaving the HTTP stop below none of it, while the hand-back runs to its own bounds. All a
+	// stop past the budget can lose is its mark, if the runtime kills the process before that
+	// write lands, and the next holder then settles at its 7 s cap as it does after any stop that
+	// wrote none.
 	// HTTP keeps serving meanwhile.
 	shutdownCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()

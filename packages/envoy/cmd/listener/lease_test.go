@@ -474,3 +474,55 @@ func TestLeaseAReleaseThatTimedOutLeavesTheTermOwingTheAckWait(t *testing.T) {
 		t.Fatalf("pod-b reads its term marked %v (%v), want unmarked: it holds for the %s cap", marked, err, consumerAckWait+settleMargin)
 	}
 }
+
+// A release an earlier term made vouches for nothing. A pod that gives the lease up writes a
+// released record, takes that record back when no other pod has, and is stopped later with a
+// release its lease loop outlasts: that stop wrote no record of its own, so it marks no
+// hand-back, and the revision the give-up wrote keeps no mark either. A mark there would say a
+// hand-over went through that this stop never made.
+func TestLeaseAStopMarksNoHandBackForTheRevisionAnEarlierGiveUpReleased(t *testing.T) {
+	kv := leaseBucket(t)
+	clock := newFakeLeaseClock()
+	// The clock moves only to pass the two standby polls a give-up keeps its own released
+	// revision for another pod, so the term's validity never runs out.
+	stalled := newStalledRenewKV(kv.KeyValue)
+	a := testLease(bus.KeyValue{KeyValue: stalled}, "pod-a", testLeaseTiming(), clock.now)
+	ctx, stop := context.WithCancel(context.Background())
+	defer stop()
+	a.Start(ctx)
+	awaitLease(t, "pod-a to hold the lease", 5*time.Second, a.Holding)
+
+	first := a.Status().Term
+	a.GiveUp(first)
+	awaitLease(t, "pod-a to give the lease up", 5*time.Second, func() bool { return !a.Holding() })
+	_, entry := readLease(t, kv)
+	givenUp := entry.Revision()
+	clock.advance(2 * testLeaseTiming().standbyPoll)
+	awaitLease(t, "pod-a to take the lease back", 5*time.Second, a.Holding)
+	if again := a.Status().Term; again == first {
+		t.Fatalf("pod-a's term after it took the lease back = %d, want one of its own", again)
+	}
+
+	// A graceful stop of that second term, whose release the lease's loop outlasts: it writes no
+	// record, so this term released none for a mark to vouch for.
+	stalled.armed.Store(true)
+	select {
+	case <-stalled.held:
+	case <-time.After(5 * time.Second):
+		t.Fatal("no renewal was held within 5s")
+	}
+	releaseCtx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
+	err := a.Release(releaseCtx)
+	cancel()
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("release while the loop is held = %v, want the context's deadline", err)
+	}
+	if marked, err := a.MarkHandBack(context.Background()); marked || err != nil {
+		t.Fatalf("the stop marked the hand-back %v (%v), want none: the term it stopped released no record", marked, err)
+	}
+	if _, err := kv.Get(a.handBackKey(givenUp)); !errors.Is(err, natsgo.ErrKeyNotFound) {
+		t.Fatalf("the mark for the given-up revision %d reads %v, want no such key: no pod reads that revision as a clean hand-back", givenUp, err)
+	}
+	close(stalled.letGo)
+	<-a.done
+}

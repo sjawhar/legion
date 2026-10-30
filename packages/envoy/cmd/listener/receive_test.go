@@ -254,7 +254,7 @@ func TestADurableMessageReceivedWithoutTheLeaseIsDroppedAndRedeliveredToTheHolde
 	if err != nil {
 		t.Fatalf("create the durable: %v", err)
 	}
-	if err := stray.receiver.begin(termStart{subject: info.Config.DeliverSubject}); err != nil {
+	if err := stray.receiver.begin(info.Config.DeliverSubject, 0, 0); err != nil {
 		t.Fatalf("subscribe the stray pod: %v", err)
 	}
 
