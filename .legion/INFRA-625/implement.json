@@ -2,8 +2,40 @@
   "schemaVersion": 1,
   "phase": "implement",
   "issue": "INFRA-625",
-  "completed": "2026-10-30T13:45:00Z",
+  "completed": "2026-10-30T21:30:00Z",
   "proof": [
+    {
+      "criterion": "Review round 1, finding 1: the worker threshold leaves the slowest body the page still parses itself clear room under the 1,000 ms bound in every engine, measured.",
+      "surface": "The Dispatch Conversation tab in Chromium, WebKit and Firefox against the real Go server and Postgres, on the pod harness: the row 'a comment of 49 list markers on one line then blank lines, just under the worker's threshold', which the page parses on its own thread and the Conversation parses twice (the card's preview and the open body).",
+      "command": "For each candidate threshold: edit markdown-worker-threshold.ts, cd packages/dispatch && bun run build:web, then bun e2e/run.ts -- bunx playwright test --config e2e/playwright.config.ts heavy-bodies.e2e.ts --project=<engine>, three runs an engine, reading the row's longest main-thread gap annotation.",
+      "observed": "At 4,000 (the reviewed value): Chromium 194-217, WebKit 594-1,082, Firefox 684-858 ms - WebKit went over the 1,000 ms bound on a cold run. At 2,000: Chromium 166-238, WebKit 338-350, Firefox 475-484. At 1,500: Firefox 439-486. At 500: Firefox 230-302, which is the page's own floor rather than the parse, so below 2,000 the curve flattens. 2,000 is the last value that buys anything and is what shipped; the table is the constant's docstring. The full suite then ran twice an engine at that value: chromium 18 passed, webkit 18 passed, firefox 15 passed with 3 skipped.",
+      "headSha": "5b4ffd8c3578393745144f46050723e082587f3a",
+      "negativeControl": "The old value is the control and it fails the bound: WebKit 1,082 ms on a cold run at 4,000, against 338-350 ms at 2,000 on the same pod and build method."
+    },
+    {
+      "criterion": "Review round 1, findings 2, 3 and 4: a streaming turn paints its newest frame rather than queueing stale ones, a sliced paint keeps the reader's own scroll, and a changed or cache-served long body is sliced and marked pending.",
+      "surface": "The Dispatch Conversation tab and the live session view in a real browser (the e2e suite), and the render hook driven through MarkdownBody with the fake worker (the unit rows).",
+      "command": "cd packages/dispatch && bun test web/src/features/refs; and bun e2e/run.ts -- bunx playwright test --config e2e/playwright.config.ts heavy-bodies.e2e.ts --project=chromium",
+      "observed": "A job now stays in flight until answered, so nothing is posted behind a stale frame and the deadline is armed at post rather than restarting per frame; the scroll correction runs per batch and re-anchors whenever window.scrollY moved since the last one; painted.current replaces formatted so a changed source is sliced however the element was painted before, and the sliced branch sets the pending marker. Three new rows cover them, and the whole suite is green: 2,976 pass in packages/dispatch, 18 rows an engine in the browser.",
+      "headSha": "5b4ffd8c3578393745144f46050723e082587f3a",
+      "negativeControl": "Each of the three new rows was run against the code before its fix and quoted failing: the one-task repaint at 918 items against a bound of 918, the pending marker as null against \"true\", and 'the reader was carried off the place they scrolled to while the body above them formatted', Expected < 2, Received 200 - exactly the pixels the reader lost."
+    },
+    {
+      "criterion": "Review round 1, findings 5 and 6: one serial worker queue for both workers, one finishing pass for both painters, and the list blank-line fast path inside the dependency patch where the fuzz covers it.",
+      "surface": "The two Web Workers of the Dispatch page (the parse worker and the Mermaid renderer), the painters behind every Markdown body, and the patched micromark-core-commonmark the browser and the pmdoc fixture generator share.",
+      "command": "cd packages/dispatch && bun run test && bun run typecheck; cd packages/proof-editor && bun run test && bun run parity-fuzz",
+      "observed": "worker-queue.ts now holds the ready handshake, one job in flight, the deadline, terminate and replace, drop-abandoned, the stale-id drop and the cache evictor, with the policy carrying what differs (Mermaid refuses and terminates; the parse falls back to the page and keeps its worker): markdown-engine.ts lost about 230 lines and mermaid-diagrams.ts about 130. One finishBlock serves both painters and a sliced row now draws a long task list. takeBlankLineFast is gone from block-nesting.ts and lives in patches/micromark-core-commonmark@2.0.3.patch (lib/list.js and dev/lib/list.js), so the module holds only the bound with no ordering rule. The fuzz after the move: 76,649 documents, 459,894 comparisons, 0 differences; the bound then changes 2,901 documents and Go refuses 2,901 of 2,901.",
+      "headSha": "5b4ffd8c3578393745144f46050723e082587f3a",
+      "negativeControl": "The fuzz asserts the patch markers in the workspace copy and their absence in the oracle, and it now asserts the list hunks' own marker too, so a tree carrying the bound without the fast path's patch fails the run rather than passing quietly."
+    },
+    {
+      "criterion": "Review round 1, finding 7 and the minors: the block-index deferral is documented as what actually indexes a deferred document, and each smaller finding is answered.",
+      "surface": "The Go document service's own code paths and the documents a reader of this repository uses: reference_excerpts.go, packages/envoy/AGENTS.md, the changelog fragments, packages/dispatch/AGENTS.md.",
+      "command": "Read docs/service.go:1746-1761 and docs/block_index.go:29,83 and docs/mutation.go:1860 before writing; then cd packages/envoy && go test -p 1 -timeout 50m ./internal/dispatch/... && go vet ./internal/dispatch/... && gofmt -l internal/dispatch/",
+      "observed": "The deferred blocks reach the index through RunBlockIndexReconciliation, every BlockIndexReconcileInterval (30 s); the settlement indexes them only where it writes a version of its own, which it does only where the document changed after the write. That is now what reference_excerpts.go, packages/envoy/AGENTS.md and the pull request body say, and a new fragment (INFRA-625-large-document-block-index-deferred.yaml) names the deferral and what a caller sees until the index catches up. The minors: two Go helpers hold the ReadBackOf fallback once instead of four times; block_ids.go says why it is not uuid.EnableRandPool; the duplicated nesting_corpus_test.go rows are gone; the four fragments are renamed INFRA-625-<slug>.yaml and the block-count claim now excepts footnote definitions; the directive-container placeholder and the duplicated per-parse record are gone; the worker's DocumentJSON is one type and the two pass-through layers are removed; the headline clears while pending; renderSpec gets node.attrs and the node's marks. Every Go package ok but files (no Docker in a pod), vet and gofmt clean.",
+      "headSha": "5b4ffd8c3578393745144f46050723e082587f3a",
+      "negativeControl": "The documentation claim was checked against the code rather than reasoned about: contentChangedSinceVersion is what makes the settlement skip an unchanged upload, which is why the reconciliation and not the settlement is what the sentence now names."
+    },
     {
       "criterion": "Round 2, the tester's first failure: the pull request is mergeable, so CI can read this change's code at all. A1's browser and write halves hold at the merged head.",
       "surface": "GitHub's own mergeability for #2519, and the Dispatch Conversation tab, the Inbox's ask card and a hover card in Chromium, WebKit and Firefox against the real Go server and Postgres (the pod harness).",
