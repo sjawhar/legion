@@ -2,7 +2,7 @@
   "schemaVersion": 1,
   "phase": "implement",
   "issue": "INFRA-168",
-  "completed": "2026-10-30T05:35:00Z",
+  "completed": "2026-10-30T05:40:00Z",
   "round": "the narrowed round answering the review of fb41159d (4 findings, the architect's Narrow decision; code commits c0d1d13e and 451e53fc, code head 451e53fcee72189100fb9da9a74bc354ac1c15ea)",
   "proof": [
     {
@@ -20,6 +20,14 @@
       "observed": "pi-envoy 1678 pass, 0 fail; A1's pin 1 pass, unedited; envoy-client 0 fail; biome clean. The printed line is `decision records not confirmed: N`, and the reconciliation says the Dispatch report counts at most that many decisions fewer.",
       "headSha": "451e53fcee72189100fb9da9a74bc354ac1c15ea",
       "negativeControl": "With the join reverted to copy a gated follow-up onto every entry of its toolCallId, the reviewer's probe (one gated entry, two unmarked under the same id, one follow-up) counts 3, not 1."
+    },
+    {
+      "criterion": "The forward merge of main (GitHub reported #2161 CONFLICTING after the round push) leaves the change unchanged and working.",
+      "surface": "jj merge of legion/INFRA-168 (c320611a) with main@origin (5dc21cb9); the branch built and smoked at the merge head with 2 nested Oh My Pi sessions against production Dispatch on dispatch://INFRA-814 (reopened, every ask retracted, closed after).",
+      "command": "jj new legion/INFRA-168 main@origin; one conflict, packages/envoy-client/src/dispatch-http.ts (main added commentBlocks/messageBlocks beside docEdit; kept both, docEdit with the caller key); fingerprint `git diff --unified=0 $(git merge-base <main> <head>) <head> -- . :!.legion :!docs/solutions | sed -e /^@@/d -e /^index /d | sha256sum` before and after; run2.sh M1-block block and PROMPT=prompt-u.txt run2.sh M1u-warn warn.",
+      "observed": "Fingerprint 3c9b13b00f54932f at c320611a and at the merge head. envoy-client 1203 pass 0 fail, pi-envoy 1678 pass 0 fail, A1 pin green, pi-shared and score.test.ts 0 fail, biome clean. M1-block: a verdict and a rebuttal entry, both records in its Dispatch document; M1u-warn: the unmarked entry, its record `toolu_…#0` in its document.",
+      "headSha": "5c734003c314cdd0b3c7ae44cf1812a768711921",
+      "negativeControl": "The N2 negative controls at 451e53fc stand: with Dispatch unreachable, 3 of 3 records counted not confirmed."
     }
   ],
   "filesChanged": [
@@ -44,7 +52,8 @@
     "Dispatch has no create-only upload: an upload of a known name replaces its text (artifacts.go:445-516). The rule 'never uploaded twice to effect' rests on Dispatch's Idempotency-Key, agreed with the architect: the create is a fixed header-only body for the session under the key askgate-doc.<sha256(project, name)>, and every record, the first included, is a doc-edit insert at the end under askgate-rec.<sha256(session, record id)>. A repeat create is replayed, 409 KEY_IN_FLIGHT (the client retries), 409 KEY_COMMITTED or 422 KEY_REUSED; the last two go to the read by name and the append, never a second upload.",
     "Fact 1, the key's scope: Dispatch scopes a key to its login (requestKeyLogin, request_keys.go:465-476). Every Legion pod writes under the shared agent token (login `agent-token`; `dispatch whoami`: 'runs under the shared token: no owner'), and a session's document carries its session id, so every process writing it shares one scope. Residual: a session whose processes write under two different logins while a create is in flight, which one deployment does not produce.",
     "Fact 2, the key's retention: IdempotencyKeyTTL is 24 h (contracts/generated.go:268) and a keyed handler's run is bounded by keyedHandlerLimit, 10 min (request_keys.go:103), so a create's late commit always lands while its key is remembered; past 24 h a create runs only on a 404, since the read by name comes first.",
-    "claude-envoy's check-dist reports its dist stale; it reports the same three files with this round's envoy-client change reverted, and main's rebuild workflow commits the dist after each merge."
+    "claude-envoy's check-dist reports its dist stale; it reports the same three files with this round's envoy-client change reverted, and main's rebuild workflow commits the dist after each merge.",
+    "The forward merge of main was forced by GitHub reporting #2161 CONFLICTING (one conflict in envoy-client dispatch-http.ts); bun install rewrote three workspace version stamps in bun.lock, which this change does not own, so the lock was restored to main's."
   ],
   "deviations": [],
   "openQuestions": []
