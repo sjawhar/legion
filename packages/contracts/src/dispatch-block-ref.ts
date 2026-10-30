@@ -126,17 +126,22 @@ const BLOCK_REFERENCE = new RegExp(
   `^dispatch://(?:(${ISSUE_KEY})/spec|(${ISSUE_KEY}|${PROJECT_KEY})/artifact/(${DOCUMENT_SLUG}))#b-(.*)$`,
   "s"
 );
-// A block of a comment (an issue's, or a project document's) or of an issue message, as Go's
-// `text.parseBlock` reads one: the item's kind, then the `#b-` fragment.
+// A block of a comment or of an issue message, in the two shapes Go's `text.parseDispatch` reads
+// with a `#b-` fragment: `<ISSUE>/comment/<id>` or `<ISSUE>/message/<id>`, and a project
+// document's `<PROJECT>/artifact/<slug>/comment/<id>` (a project key only, as Go reads an issue
+// key's `artifact/` tail as a document alone). The id is checked by itemBlockKind.
 const ITEM_BLOCK_REFERENCE = new RegExp(
-  `^dispatch://(?:${ISSUE_KEY}/(comment|message)|(?:${ISSUE_KEY}|${PROJECT_KEY})/artifact/${DOCUMENT_SLUG}/(comment))/[^/?#]+#b-(.*)$`,
+  `^dispatch://(?:${ISSUE_KEY}/(comment|message)|${PROJECT_KEY}/artifact/${DOCUMENT_SLUG}/(comment))/([^/?#]+)#b-(.*)$`,
   "s"
 );
 
 /**
  * The kind of item (`comment` or `message`) whose block `value` names, as Go's `text.Ref.Item`
- * reads it, or undefined when it names no block of a comment or message: a message never changes,
- * so a pinned message block is no reference.
+ * reads it, or undefined when it names no block of a comment or message. The item id is read as
+ * Go's `itemSegment` reads it: written with no whitespace (JavaScript's `\s`), then decoded as
+ * `decodeBlockId` decodes a block id, which refuses a `%` two hex digits do not follow, a
+ * decoding that is not UTF-8 or holds a control character, and an `@`, which Go refuses anywhere
+ * before a block's fragment. A message never changes, so a pinned message block is no reference.
  */
 function itemBlockKind(value: string): "comment" | "message" | undefined {
   const match = ITEM_BLOCK_REFERENCE.exec(value);
@@ -144,7 +149,11 @@ function itemBlockKind(value: string): "comment" | "message" | undefined {
     return undefined;
   }
   const kind = (match[1] ?? match[2]) as "comment" | "message";
-  const fragment = parseBlockFragment(match[3] ?? "");
+  const id = match[3] ?? "";
+  if (/\s/.test(id) || decodeBlockId(id) === undefined) {
+    return undefined;
+  }
+  const fragment = parseBlockFragment(match[4] ?? "");
   if (fragment === undefined || (kind === "message" && fragment.pin !== undefined)) {
     return undefined;
   }
@@ -386,6 +395,18 @@ export const DISPATCH_BLOCK_POINTER_VALUES: readonly {
     ok: false,
     why: "a block of an issue message",
     problem: "a block[] attribute points only at a block of a document",
+  },
+  {
+    value: "dispatch://CORE-1/artifact/notes-md/comment/c1#b-x",
+    ok: false,
+    why: "an issue document's comment, a shape no reference has",
+    problem: "is not a block reference as Dispatch writes one",
+  },
+  {
+    value: "dispatch://CORE-1/comment/%ZZ#b-x",
+    ok: false,
+    why: "a comment id that does not decode",
+    problem: "is not a block reference as Dispatch writes one",
   },
   {
     value:

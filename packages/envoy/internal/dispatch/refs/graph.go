@@ -111,32 +111,26 @@ type edgeRow struct {
 }
 
 // heldByABlock is true of a document's, comment's or message's mention edge (graph_edges row
-// alias) when a block of that item holds a link to the same target: that block's own edge is
-// listed and counted in its place, so each link shows once. A comment's or message's block holds
-// it by a link of the same kind; a document's block by a link of any kind, listed or not, since a
-// typed block's pointer is also written in the document's text, so the document's mention of the
-// target is hidden behind the pointer's edge, and stays hidden while the pointer's target has a
-// type the pointer does not allow (block_ref_listed). An item the block index has not reached
-// holds no block link, so its own edge stays.
+// alias) when a block of that item holds a link of any kind to the same target, listed or not:
+// that block's own edge is listed and counted in its place, so each link shows once. A typed
+// block's pointer is also written in the document's text, so the document's mention of the target
+// is hidden behind the pointer's edge, and stays hidden while the pointer's target has a type the
+// pointer does not allow (block_ref_listed). An item the block index has not reached holds no
+// block link, so its own edge stays.
 func heldByABlock(alias string) string {
-	holders := []string{blockHolds(alias, "artifact", "block_refs", "artifact_id", true)}
+	holders := []string{blockHolds(alias, "artifact", "block_refs", "artifact_id")}
 	for _, item := range []ItemKind{ItemComment, ItemMessage} {
 		tables, _ := item.tables()
-		holders = append(holders, blockHolds(alias, string(item), tables.refs, tables.item, false))
+		holders = append(holders, blockHolds(alias, string(item), tables.refs, tables.item))
 	}
 	return `(` + alias + `.kind = 'mentions' and (` + strings.Join(holders, " or ") + `))`
 }
 
 // blockHolds is true of a graph_edges row alias written by an item of fromKind when one of the
-// item's blocks holds a link to its target in table, whose column keys the item: a link of any
-// kind when anyKind, else one of the row's kind.
-func blockHolds(alias, fromKind, table, column string, anyKind bool) string {
-	sameKind := ` and b.kind = ` + alias + `.kind`
-	if anyKind {
-		sameKind = ``
-	}
+// item's blocks holds a link of any kind to its target in table, whose column keys the item.
+func blockHolds(alias, fromKind, table, column string) string {
 	return `(` + alias + `.from_kind = '` + fromKind + `' and exists (
-		select 1 from ` + table + ` b where b.to_kind = ` + alias + `.to_kind and b.to_id = ` + alias + `.to_id` + sameKind + `
+		select 1 from ` + table + ` b where b.to_kind = ` + alias + `.to_kind and b.to_id = ` + alias + `.to_id
 		and b.` + column + `::text = ` + alias + `.from_id))`
 }
 

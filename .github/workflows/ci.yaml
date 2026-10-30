@@ -798,6 +798,8 @@ jobs:
               # pmdoc/testdata/fixtures.json.
               - 'packages/envoy/internal/dispatch/pmdoc/schema/**'
               - 'packages/envoy/internal/dispatch/pmdoc/testdata/**'
+              # docs/block_pointer_links_test.go imports pmdoc/pmdoctest.
+              - 'packages/envoy/internal/dispatch/pmdoc/pmdoctest/*'
               - 'packages/envoy/internal/dispatch/refs/*'
               - 'packages/envoy/internal/dispatch/store/*'
               # internal/dispatch/store embeds every migration.

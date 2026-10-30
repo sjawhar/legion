@@ -209,6 +209,18 @@
     "problem": "a block[] attribute points only at a block of a document"
   },
   {
+    "value": "dispatch://CORE-1/artifact/notes-md/comment/c1#b-x",
+    "ok": false,
+    "why": "an issue document's comment, a shape no reference has",
+    "problem": "is not a block reference as Dispatch writes one"
+  },
+  {
+    "value": "dispatch://CORE-1/comment/%ZZ#b-x",
+    "ok": false,
+    "why": "a comment id that does not decode",
+    "problem": "is not a block reference as Dispatch writes one"
+  },
+  {
     "value": "dispatch://CORE-1/spec#b-x dispatch://CORE-1/message/33333333-3333-4333-8333-333333333333#b-b2",
     "ok": false,
     "why": "a document's block, then an issue message's",
