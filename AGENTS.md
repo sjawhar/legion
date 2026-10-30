@@ -401,11 +401,18 @@ keeps the newest decision per Dispatch reference, and the root's next architect 
 one: admission's start task, or the catch-up of a later launch (a `legion claims retry` relaunch),
 with both spec versions when the approved one is no longer the current one. Each kept decision is
 claimed by the one start or catch-up that names it, in the transaction that queues it, so no other
-start or catch-up names it; that delivery forgets it, and a start or catch-up that finishes
-without delivering (its tree lingers again first, its generation is stale, its catch-up goes
-undelivered) releases it for the next, so each is told once and none is lost. A retried start
-whose task was delivered is not delivered again. A decision on a root that was set to `todo` and
-waits for its slot is kept the same way and goes to no controller, whichever path finds it. A
+start or catch-up names it; the row that carried it to the architect forgets it (a start once the
+architect's claim has queued its task, which the claim records per start row; a catch-up once it
+is published). A start that reached no claim (its generation is stale, its tree lingers) or a
+catch-up a newer one superseded hands what it claimed, in one transaction with the release, to a
+fresh catch-up of the root's current architect, or leaves it unclaimed for the next start when the
+root has no architect to hear it (parked, lingering, or waiting for its slot); a catch-up its
+architect cannot take (a failed claim, a refusing holder) leaves it for that architect's next
+launch, whose catch-up names it. A root architect's start task waits on its claim while its root
+has no architect to hear it, and is sent once the root runs again. So each is told once and none
+is lost, and a retried start whose task was delivered is not delivered again. A decision on a root
+that was set to `todo` and waits for its slot is kept the same way and goes to no controller,
+whichever path finds it. A
 decision on a lingering root someone moved back to a status of the workflow (`in_progress` and the
 like) is nobody's parked tree: it is neither kept nor relayed. A decision no person made
 (`gates.design: off`) is not relayed. A session's reply on such an ask is not relayed either: the
