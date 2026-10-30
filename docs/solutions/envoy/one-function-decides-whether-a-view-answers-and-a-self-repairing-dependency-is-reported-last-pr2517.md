@@ -10,7 +10,6 @@ date: 2026-10-30
 status: active
 module: packages/envoy/cmd/listener
 related_issues:
-  - "INFRA-757"
   - "sjawhar/legion#2517"
 ---
 
@@ -55,7 +54,7 @@ base tests, base product with the branch's tests, and the branch with both, unde
 device. If the branch's tests still fail on the base product, no test-side wait can fix it and the
 fix belongs in the product.
 
-## Evidence (INFRA-757, sjawhar/legion#2517)
+## Evidence (sjawhar/legion#2517)
 
 `kvwatch.Watcher.Ready` is released by a first scan nats.go's idle timer ended;
 `store.Registry.RolesHeldBy` answers only while that watcher is `Complete`. The listener's startup

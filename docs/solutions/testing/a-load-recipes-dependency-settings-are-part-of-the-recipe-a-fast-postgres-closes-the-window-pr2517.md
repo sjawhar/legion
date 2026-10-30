@@ -10,7 +10,6 @@ date: 2026-10-30
 status: active
 module: packages/envoy/internal/dispatch/startup
 related_issues:
-  - "INFRA-757"
   - "sjawhar/legion#2517"
 ---
 
@@ -29,7 +28,7 @@ a test of an advisory-lock protocol is racing against.
 0 failures in N under load as "the recipe did not reach the window" until the recipe's
 dependencies are shown to be the production ones, and say which settings you used.
 
-## Evidence (INFRA-757, sjawhar/legion#2517)
+## Evidence (sjawhar/legion#2517)
 
 `TestTwoAnnouncersAtOnceAnnounceAndPublishOnce` fails when all twenty of the losing process's
 passes run inside the winner's announcing transaction: a pass that loses

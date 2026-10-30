@@ -9,7 +9,6 @@ date: 2026-10-30
 status: active
 module: .github/workflows
 related_issues:
-  - "INFRA-757"
   - "sjawhar/legion#2517"
 ---
 
@@ -32,7 +31,7 @@ others and keep the runners for the groups the measurement says need one.
 **Isolation, not sharding, is the first move.** Measure each group alone before paying for a
 shard of test files: contention, not size, is often what put a package over its bar.
 
-## Evidence (INFRA-757, sjawhar/legion#2517)
+## Evidence (sjawhar/legion#2517)
 
 Six race binaries shared one four-vCPU runner, so no package's own cost could be read and a red
 package ended the job before the ones after it printed a timing line. Measured alone,

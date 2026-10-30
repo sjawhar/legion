@@ -10,7 +10,6 @@ date: 2026-10-30
 status: active
 module: packages/envoy/internal/kvwatch
 related_issues:
-  - "INFRA-757"
   - "sjawhar/legion#2517"
 ---
 
@@ -67,7 +66,7 @@ the wake deleted. Four devices make it bind:
   scratch copy and run the package through `go test -overlay`; exactly that cause's test must
   fail, and no other.
 
-## Evidence (INFRA-757, sjawhar/legion#2517)
+## Evidence (sjawhar/legion#2517)
 
 `kvwatch.Watcher.WaitComplete` gates the listener's start on the role claim view being complete
 rather than ready. Before `internal/kvwatch/waitcomplete_test.go` existed, the deep review deleted

@@ -9,7 +9,6 @@ date: 2026-10-30
 status: active
 module: .github/scripts
 related_issues:
-  - "INFRA-757"
   - "sjawhar/legion#2517"
 ---
 
@@ -37,7 +36,7 @@ exist in the file it names has not been re-read in a long time; treat the path i
 gate, a dead pattern in a filter, a dead read in a per-source rules row, and a `!` pattern that
 matches nothing and must still pass.
 
-## Evidence (INFRA-757, sjawhar/legion#2517)
+## Evidence (sjawhar/legion#2517)
 
 `.github/workflows/ci.yaml` and `.github/scripts/ci_job_reads.py` named
 `packages/contracts/fixtures/delivery-live/**`. The directory is
