@@ -61,6 +61,7 @@
 #   bash scripts/e2e/envoy-session-delivery.sh [--disruptions a,b,c,d,e,f]
 #       [--build-from <rev> [--expect-lost <agent,issue,role>]] [--plugins-from <rev>]
 #       [--listener-grant current|before-session-consumers] [--resume-plugins-from <rev>]
+#       [--second-followed-issue]
 #
 # --build-from <rev> builds the listener, pi-envoy, claude-envoy and the `legion` bridge from <rev>
 # instead, extracted with `git archive <rev> | tar -x` into the run's directory; natsd and Dispatch
@@ -85,6 +86,11 @@
 # the stream stored its events, and the new plugin opens its first consumer. The run judges the
 # table as it always does, so every event of every window must still be counted once. The flag
 # names one tree, as --plugins-from and --build-from do, and is not given with either.
+#
+# --second-followed-issue makes both sessions follow a second Dispatch issue's topic beside the
+# first, and publishes one more comment there in every window. Two followed issue topics and a
+# role put more than one cursor in the plugin's ledger, so a resume must take each frame on the
+# topic it was stored for, and no cursor of another topic may rescue or drop it.
 #
 # --listener-grant before-session-consumers runs both listeners as a NATS user whose grant is the
 # listener grant from before session consumers (packages/envoy-client/test/listener-grant.ts
@@ -152,13 +158,14 @@ fail() {
 }
 
 usage() {
-  sed -n '/^#   bash scripts/,/^#       \[--listener-grant/p' "$0" | sed 's/^# \{0,3\}//'
+  sed -n '/^#   bash scripts/,/^#       \[--second-followed-issue/p' "$0" | sed 's/^# \{0,3\}//'
 }
 
 # ---- arguments and inputs ---------------------------------------------------------------------
 build_from=""
 plugins_from=""
 resume_plugins_from=""
+second_followed_issue=""
 listener_grant=current
 expect_lost=""
 disruptions="a,b,c,d,e,f"
@@ -167,6 +174,7 @@ while (($#)); do
   --build-from) [ $# -ge 2 ] || refuse "--build-from needs a revision"; build_from=$2; shift 2 ;;
   --plugins-from) [ $# -ge 2 ] || refuse "--plugins-from needs a revision"; plugins_from=$2; shift 2 ;;
   --resume-plugins-from) [ $# -ge 2 ] || refuse "--resume-plugins-from needs a revision"; resume_plugins_from=$2; shift 2 ;;
+  --second-followed-issue) second_followed_issue=1; shift ;;
   --listener-grant) [ $# -ge 2 ] || refuse "--listener-grant needs current or before-session-consumers"; listener_grant=$2; shift 2 ;;
   --expect-lost) [ $# -ge 2 ] || refuse "--expect-lost needs a list of kinds"; expect_lost=$2; shift 2 ;;
   --disruptions) [ $# -ge 2 ] || refuse "--disruptions needs a list"; disruptions=$2; shift 2 ;;
@@ -634,6 +642,17 @@ answer_ok "$answer" || fail "Dispatch refused the messages issue: $answer"
 message_issue=$(answer_body "$answer" | jq -r .key)
 issue_topic="notifications.dispatch.issue.${followed_issue}.>"
 note "Dispatch issues: ${followed_issue} (followed, ${issue_topic}) and ${message_issue} (direct messages)"
+second_topic=""
+second_issue=""
+if [[ -n "$second_followed_issue" ]]; then
+  # force: its title overlaps the first followed issue's, which Dispatch's duplicate check refuses
+  # with POSSIBLE_DUPLICATE (internal/dispatch/api/issue_create.go); the overlap is deliberate here.
+  answer=$(dispatch_user POST /api/v1/issues '{"project":"LIVE","title":"The second followed issue","force":true}')
+  answer_ok "$answer" || fail "Dispatch refused the second followed issue: $answer"
+  second_issue=$(answer_body "$answer" | jq -r .key)
+  second_topic="notifications.dispatch.issue.${second_issue}.>"
+  note "second followed issue ${second_issue} (${second_topic}): both sessions follow two issue topics and a role"
+fi
 
 # ---- the sessions -----------------------------------------------------------------------------
 declare -A sid=() transcript=() launches=() role=() home=()
@@ -738,7 +757,7 @@ registered() { curl -fsS --max-time 5 "$(listener_url shared)/v1/registry/$1" >/
 follows_and_holds() {
   local label=$1
   curl -fsS --max-time 5 "$(listener_url shared)/v1/interests/${sid[$label]}" |
-    jq -e --arg t "$issue_topic" '(.topics // []) | index($t) != null' >/dev/null &&
+    jq -e --args '(.topics // []) as $t | all($ARGS.positional[]; . as $want | $t | index($want) != null)' "$issue_topic" ${second_topic:+"$second_topic"} >/dev/null &&
     curl -fsS --max-time 5 "$(listener_url shared)/v1/roles/${role[$label]}" |
     jq -e --arg s "${sid[$label]}" '.holder == $s' >/dev/null
 }
@@ -793,7 +812,9 @@ start_cc fresh
 setup_prompt() {
   local label=$1 subscribe=envoy_subscribe role_set=envoy_role_set
   [[ "$label" == pi ]] || { subscribe=mcp__legion__envoy_subscribe; role_set=mcp__legion__envoy_role_set; }
-  jq -nc --arg m "Call ${subscribe} with topics [\"${issue_topic}\"]. Then call ${role_set} with role \"${role[$label]}\". Then reply with the single word ok." \
+  local topics
+  topics=$(jq -nc --args '$ARGS.positional' "$issue_topic" ${second_topic:+"$second_topic"})
+  jq -nc --arg m "Call ${subscribe} with topics ${topics}. Then call ${role_set} with role \"${role[$label]}\". Then reply with the single word ok." \
     '{type: "prompt", id: "setup", message: $m}'
 }
 rpc_send pi "$(setup_prompt pi)"
@@ -865,6 +886,14 @@ publish_dispatch() {
     answer_ok "$answer" || expected=0
     record "$d" issue "comment-$n" "pi cc" "$expected" "$answer"
   done
+  if [[ -n "$second_issue" ]]; then
+    next_marker
+    text=$(text_for "$d" issue "a comment on ${second_issue}")
+    answer=$(dispatch_user POST "/api/v1/issues/${second_issue}/comments" "$(jq -nc --arg b "$text" '{body: $b}')" 2>&1 || true)
+    expected=1
+    answer_ok "$answer" || expected=0
+    record "$d" issue "second-comment" "pi cc" "$expected" "$answer"
+  fi
   for label in pi cc; do
     next_marker
     text=$(text_for "$d" agent "a Dispatch message")
@@ -1109,9 +1138,12 @@ while read -r seq_no m; do
 done < <(stored_comments | jq -r '"\(.seq) \(.marker)"')
 published_order=()
 while read -r m; do published_order+=("$m"); done < <(
-  jq -r 'select(.kind == "issue" and .expected == 1) | .marker' "$events" |
+  jq -r 'select(.kind == "issue" and .expected == 1 and (.event | startswith("comment-"))) | .marker' "$events" |
     while read -r m; do printf '%s %s\n' "${stream_seq[$m]:-0}" "$m"; done | sort -n | cut -d' ' -f2)
-written_order=$(jq -r 'select(.kind == "issue" and .expected == 1) | .marker' "$events" | tr '\n' ' ')
+# Only the first followed issue's comments: the order is read back from that issue's own subject,
+# and --second-followed-issue's comment is stored on another (its delivery is counted like any
+# other event, above).
+written_order=$(jq -r 'select(.kind == "issue" and .expected == 1 and (.event | startswith("comment-"))) | .marker' "$events" | tr '\n' ' ')
 if [[ "${published_order[*]} " != "$written_order" ]]; then
   printf 'note: Dispatch published %s'"'"'s comments in another order than they were written: written %s; stored %s\n' \
     "$followed_issue" "$written_order" "${published_order[*]}" | tee -a "$table"
