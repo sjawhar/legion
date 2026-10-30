@@ -523,10 +523,10 @@ path then method. Add a route by adding a row — never a `mux.HandleFunc` line 
 count in `api/routes_table_test.go`. `auth` is `public`, `any` (user or bearer), `human`, or
 `bearer`; it describes the check the handler makes, the handler still enforces it. `Register`
 serves every row admitted and a read under a deadline, answering what it could not serve with a
-retryable `429` or `503` (README "Load errors"); a row served otherwise — the two event streams,
-neither admitted nor bounded like the test hooks, the uploads' body limit, the file downloads'
-deadline, the weight of a route that reads side by side — is an entry of `routeServings` beside
-the table. An unknown path
+retryable `429` or `503` (README "Load errors"); a row served otherwise — an upload's body limit
+(`upload`), a file download's deadline (`download`), the weight of a route that reads side by
+side (`concurrentReads`) — says so on the row itself, through the constructor it is written
+with, where every ordinary row is written with `served`. An unknown path
 under a server root (`/api`, `/v1`, `/auth`, `/ws`, `/healthz`) is answered by
 `routes/router.go` with `404 {"code":"NOT_FOUND","error":"no route for <METHOD> <path>","hint":"GET
 /api/v1 lists every route"}` before any dashboard lookup; only paths outside those roots fall back

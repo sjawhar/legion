@@ -16,14 +16,14 @@ import (
 // OVERLOADED, the keyed layer's KEY_INVALID, the closed-issue refusal of an upload, LOGIN_CHANGED,
 // a refused path parameter, a handler's refusal made before it decodes - waits until the body is
 // off the connection, read and discarded, never spooled, up to the route's own limit
-// (routeBodyLimit) and within the bound the request's body arrives under (defaultBodyReadLimit).
+// (apiRoute.bodyLimit) and within the bound the request's body arrives under (defaultBodyReadLimit).
 // The keyed layer reads a repeat's body itself when it finds the key held by a first request still
 // running, and judges the repeat once that body has arrived (answerDrainedRepeat).
 
 // defaultBodyReadLimit is the longest a request's whole body may take to arrive, counted from the
 // first read of it, whichever layer reads it: the keyed layer's spool (readKeyedBody), the
 // handler's own decode (decodeJSON, an upload's multipart parse), and the drain an early answer
-// waits behind (drainBeforeAnswer). A minute carries a whole upload (routeBodyLimit, 26 MiB) over
+// waits behind (drainBeforeAnswer). A minute carries a whole upload (apiRoute.bodyLimit, 26 MiB) over
 // a link of 450 KB/s or more, and a JSON body (maxJSONRequestBytes, 1 MiB) over one of 17 KB/s;
 // past it a read of the body fails. It is one bound for the request, not one per layer, because
 // what it bounds is what the request holds while its body arrives: an admitted request holds its
@@ -50,7 +50,7 @@ func expectsContinue(r *http.Request) bool {
 	return strings.EqualFold(strings.TrimSpace(r.Header.Get("Expect")), "100-continue")
 }
 
-// errUploadTooLarge is an upload route's answer to a body past its limit (routeBodyLimit), and
+// errUploadTooLarge is an upload route's answer to a body past its limit (apiRoute.bodyLimit), and
 // errJSONTooLarge every other route's (decodeJSON).
 var (
 	errUploadTooLarge = errorf(http.StatusRequestEntityTooLarge, "CAP_EXCEEDED", "artifact blob exceeds 25 MB")
@@ -83,8 +83,7 @@ func bodyTooLarge(method, pattern string) *apiError {
 // sending it (Expect: 100-continue) and was never told: it sends nothing, and the first read would
 // tell it to send all of it. A request whose body failed and whose handler answered nothing is
 // answered here (refuseUnreadBody).
-func (s *server) drainBeforeAnswer(method, pattern string, handler http.HandlerFunc) http.HandlerFunc {
-	limit := routeBodyLimit(method, pattern)
+func (s *server) drainBeforeAnswer(method, pattern string, limit int64, handler http.HandlerFunc) http.HandlerFunc {
 	tooLarge := bodyTooLarge(method, pattern)
 	return func(w http.ResponseWriter, r *http.Request) {
 		if r.Body == nil || r.Body == http.NoBody {

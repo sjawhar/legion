@@ -73,12 +73,25 @@ func newKeyedRigAt(t *testing.T, pattern string, answer func(run int32, w http.R
 	rig := &keyedRig{database: database, server: served}
 	mux := http.NewServeMux()
 	mux.HandleFunc(http.MethodPost+" "+pattern, trackTransactions(served.keyedWrites(
-		http.MethodPost, pattern,
+		http.MethodPost, pattern, routeBodyLimitOf(t, http.MethodPost, pattern),
 		func(w http.ResponseWriter, r *http.Request) { answer(rig.runs.Add(1), w, r) },
 		nil,
 	)))
 	rig.handler = mux
 	return rig
+}
+
+// routeBodyLimitOf is the body limit register serves a route with (apiRoute.bodyLimit): the
+// table's row for it, or a JSON body's limit for a pattern the table has no row for, as a row
+// that sets none takes.
+func routeBodyLimitOf(t *testing.T, method, pattern string) int64 {
+	t.Helper()
+	for _, route := range (&server{}).routes() {
+		if route.Method == method && route.Pattern == pattern {
+			return route.bodyLimit()
+		}
+	}
+	return maxJSONRequestBytes
 }
 
 // send posts body to thing's writes as login under key.
@@ -847,7 +860,7 @@ func TestAnAnswerPastTheKeptSizeReplaysItsStatusAlone(t *testing.T) {
 // A client mints a multipart body's boundary afresh for every attempt, so a retry of one upload
 // under its key is a repeat whatever its boundary; a different file is another request. A body past
 // what the layer holds in memory reaches the handler whole. It runs on an upload route, the only
-// kind whose body the layer reads past a JSON body's megabyte (routeBodyLimit).
+// kind whose body the layer reads past a JSON body's megabyte (apiRoute.bodyLimit).
 func TestAMultipartRetryUnderANewBoundaryIsARepeat(t *testing.T) {
 	rig := newKeyedRigAt(t, "/api/v1/issues/{key}/artifacts", func(run int32, w http.ResponseWriter, r *http.Request) {
 		data, err := io.ReadAll(r.Body)
@@ -979,7 +992,7 @@ func requestDigestOf(t *testing.T, request *http.Request, pattern string) string
 	t.Helper()
 	digest := sha256.New()
 	writeRequestFields(digest, request, request.Method, pattern, patternWildcards(pattern))
-	body, err := readKeyedBody(request.Body, digest, request.Header.Get("Content-Type"), routeBodyLimit(request.Method, pattern))
+	body, err := readKeyedBody(request.Body, digest, request.Header.Get("Content-Type"), routeBodyLimitOf(t, request.Method, pattern))
 	defer body.close()
 	if err != nil {
 		t.Fatalf("read the request's body: %v", err)

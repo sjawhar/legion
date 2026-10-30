@@ -3,9 +3,13 @@ body: |-
   Past what it can serve, Dispatch refuses a request at once rather than queueing it without end.
   Every `/api/v1` route but the test hooks is admitted first: reads
   (GET, HEAD) up to 14 at once and writes up to 6 at once per CPU the server may use, at most 28
-  reads and 12 writes (28 and 12 on two CPUs or more), of the request pool's 48 connections, the
-  delivery timeline, measures and pipeline counting two each (they now run at most two reads at
-  once, where the timeline ran up to seven). Measured on two CPUs, fewer reads committed more
+  reads and 12 writes (28 and 12 on two CPUs or more), of the request pool's 48 connections. A
+  route that runs two reads side by side counts two: the delivery timeline, measures and pipeline
+  (which now run at most two reads at once, where the timeline ran up to seven), and every route
+  that runs the related-item check, whose keyword and meaning searches are two such reads - the
+  two related routes, creating an issue or an ask, and editing a document, whose new decision
+  blocks are now checked one after another rather than five at once, so one check's two reads are
+  all the edit runs at once. Measured on two CPUs, fewer reads committed more
   events at ten times the load but refused 4-6% of the reads at the everyday load. A request that
   finds no room waits at most 1 second in a queue twice as long as its class's limit, and is
   otherwise answered `429 OVERLOADED` with

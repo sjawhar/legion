@@ -2296,8 +2296,11 @@ Past what it can serve, Dispatch refuses a request at once rather than queueing 
 and tells the client when to ask again. Every `/api/v1` route but the test hooks is admitted
 before it runs: reads (GET, HEAD) and writes (every other method) each have
 a limit of the request pool's 48 connections, 14 reads and 6 writes per CPU the server may use up
-to 28 reads and 12 writes (28 and 12 on two CPUs or more), and the delivery timeline, measures and
-pipeline count twice, since each runs two reads side by side. A request that finds no room waits,
+to 28 reads and 12 writes (28 and 12 on two CPUs or more). A route that runs two reads side by
+side counts twice: the delivery timeline, measures and pipeline, and every route that runs the
+related-item check - the two related routes, creating an issue or an ask, and editing a document,
+whose new decision blocks are checked one after another so that one check's two reads are all the
+edit runs at once. A request that finds no room waits,
 in arrival order, at most 1 second in a queue twice as long as its class's limit. An admitted read has 20
 seconds to answer, and the four file version downloads 5 minutes; a write has no deadline and,
 once admitted, runs to completion. Every wait for a database connection is bounded too, at 3

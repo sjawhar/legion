@@ -566,7 +566,7 @@ func (s *server) serveRoute(
 ) http.HandlerFunc {
 	handler := route.Handler
 	if keyedMethod(route.Method) {
-		handler = s.keyedWrites(route.Method, route.Pattern, handler, replays[route.Method+" "+route.Pattern])
+		handler = s.keyedWrites(route.Method, route.Pattern, route.bodyLimit(), handler, replays[route.Method+" "+route.Pattern])
 	}
 	if route.Method+" "+route.Pattern == issueUploadRoute {
 		handler = s.refuseUploadToAClosedIssue(handler)
@@ -599,7 +599,7 @@ func (s *server) serveRoute(
 		// unread is the drain's guard (drainingWriter.askedContinue) and the keyed layer's
 		// (answerDrainedRepeat), which TestAnEarlyAnswerToAClientWaitingToContinueAsksForNoBody
 		// pins: without either, the client is told to continue and the answer waits on its body.
-		handler = s.drainBeforeAnswer(route.Method, route.Pattern, handler)
+		handler = s.drainBeforeAnswer(route.Method, route.Pattern, route.bodyLimit(), handler)
 	}
 	// The access-log line, which register puts outside this, records what every layer answered -
 	// a keyed replay, a refused login, an early answer the drain held, admission's refusal - and

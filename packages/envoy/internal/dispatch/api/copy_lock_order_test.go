@@ -53,7 +53,7 @@ var (
 // takes the copy lock.
 var ownTransactionFunctions = []string{
 	"docs.Service.settleOwedNow",
-	"docs.Service.settlePass",
+	"docs.settlement.settlePass",
 	"api.server.settleIssueBeforeClose",
 	"api.server.sweepClosedIssueAsks",
 }

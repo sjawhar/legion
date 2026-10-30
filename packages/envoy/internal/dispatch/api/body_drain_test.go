@@ -232,7 +232,7 @@ func (b repeatedByte) Read(p []byte) (int, error) {
 }
 
 // INFRA-258. An early answer drains at most the route's own limit and one byte
-// more (routeBodyLimit): a body that runs past it is answered as the limit answers it, 413 with the
+// more (apiRoute.bodyLimit): a body that runs past it is answered as the limit answers it, 413 with the
 // route's refusal and none of the early answer's headers, and the rest is never read. A body inside
 // the limit is read to its end and the early answer stands, whichever layer gave it: the keyed
 // layer's KEY_IN_FLIGHT, the closed-issue refusal of an upload, LOGIN_CHANGED on a JSON route. A

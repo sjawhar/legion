@@ -8,7 +8,6 @@ import (
 	"log/slog"
 	"slices"
 	"strings"
-	"sync"
 	"time"
 
 	"github.com/google/uuid"
@@ -203,15 +202,16 @@ func withSuggestions(payload any, advice *writeAdvice, suggestions *model.Sugges
 // decisionBlockChecks runs the related-item check for each decision block a document edit added,
 // once the edit has committed, so a block whose question restates a decision already made or work
 // already filed is answered with it while the writer is still at the document. The first
-// decisionBlockCheckLimit blocks are checked at once, all under one allowance (relatedBounds), so
-// an edit waits on its checks no longer than an issue create waits on its one; each block past
-// them answers as not made, and all of those are recorded in one round trip. A block's source is
-// the document's issue, or the project document itself when it has no issue, left out of its
-// results as an ask's owner is. Nil when the edit added no block.
+// decisionBlockCheckLimit blocks are checked, one after another and all under one allowance
+// (relatedBounds), so an edit waits on its checks no longer than an issue create waits on its
+// one; each block past them answers as not made, and all of those are recorded in one round trip.
+// A block's source is the document's issue, or the project document itself when it has no issue,
+// left out of its results as an ask's owner is. Nil when the edit added no block.
 //
-// Each check reads and records under a connection mark of its own (store.ForConcurrentRead): on
-// the request's one mark, one check's open cursor would have the pool refuse the others' reads
-// and records (store.ErrNestedAcquire).
+// One check at a time is what the edit's route is admitted for: a request may hold no more
+// request-pool connections than its route's weight (apiRoute.Weight, concurrentReadWeight for
+// every route that runs a check), and one check holds two of them, its keyword read and its
+// meaning read side by side (store.ForConcurrentRead). Five checks at once asked for ten.
 func (s *server) decisionBlockChecks(
 	ctx context.Context, artifact model.Artifact, blocks []docs.AddedAskBlock, actor model.Actor,
 ) []decisionBlockCheck {
@@ -222,7 +222,6 @@ func (s *server) decisionBlockChecks(
 	defer cancel()
 	checks := make([]decisionBlockCheck, len(blocks))
 	var overflow []relatedCheckRecord
-	var running sync.WaitGroup
 	for index, block := range blocks {
 		source := suggestionSource{kind: "decision_block", blockID: block.ID, actor: actor}
 		if artifact.IssueKey != nil {
@@ -241,18 +240,11 @@ func (s *server) decisionBlockChecks(
 			})
 			continue
 		}
-		checkCtx, err := store.ForConcurrentRead(bounded)
-		if err != nil {
-			slog.Warn("dispatch: related-item check not made", "error", err)
-			checks[index].Suggestions = s.relatedCheckNotRun(ctx, input, relatedReasonSearchFailed, relatedSearchFailedMissing)
-			continue
-		}
-		running.Go(func() { checks[index].Suggestions = s.relatedCheck(checkCtx, input) })
+		checks[index].Suggestions = s.relatedCheck(bounded, input)
 	}
 	if len(overflow) > 0 {
 		s.recordRelatedChecks(ctx, overflow...)
 	}
-	running.Wait()
 	return checks
 }
 
@@ -439,7 +431,11 @@ func (s *server) runRelatedCheck(
 		return notMade(relatedReasonBlankText, relatedBlankTextMissing)
 	}
 
-	keywordCtx, err := store.ForConcurrentRead(bounded)
+	// Stage 1 runs on a cancel of its own so that a check which answered without it does not
+	// leave it holding a request-pool connection past the answer (its end below).
+	keywordStage, endKeyword := context.WithCancel(bounded)
+	defer endKeyword()
+	keywordCtx, err := store.ForConcurrentRead(keywordStage)
 	if err != nil {
 		slog.Warn("dispatch: related-item check not made", "error", err)
 		return notMade(relatedReasonSearchFailed, relatedSearchFailedMissing)
@@ -533,11 +529,16 @@ func (s *server) runRelatedCheck(
 	}
 	if answered {
 		suggestions.Search = relatedMeaningAndKeywords
-		// Stage 1's time is recorded when it has answered by now; it is not waited for.
+		// Stage 1's time is recorded when it has answered by now; its answer is not waited for.
+		// One still running is ended instead of left to the allowance, so a check that has
+		// answered holds no request-pool connection: the next check of the same edit is admitted
+		// for its own two, not for these as well (decisionBlockChecks).
 		select {
 		case stage := <-keyword:
 			record.keywordMS = milliseconds(stage.took)
 		default:
+			endKeyword()
+			<-keyword
 		}
 	} else {
 		select {

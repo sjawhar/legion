@@ -88,8 +88,8 @@ const (
 	keyedBodyInMemory = 1 << 20
 	// keyedBodyMax is the largest body an upload route reads: an upload's file and a megabyte of
 	// fields (uploadArtifactFor), which is what the table gives those routes
-	// (routeServings, BodyLimit). Every other route reads a JSON body of at most
-	// maxJSONRequestBytes (routeBodyLimit).
+	// (apiRoute.BodyLimit, upload). Every other route reads a JSON body of at most
+	// maxJSONRequestBytes (apiRoute.bodyLimit).
 	keyedBodyMax = maxUploadRequestBytes
 	// keyedBookkeeping bounds the layer's work around the handler - the claim before it, and each
 	// statement recording its answer after it - which runs on past a client that went away, since
@@ -225,10 +225,9 @@ type resolvedCaller struct {
 // died is taken over, once its lease lapses. A handler cut off with its client would roll its
 // transactions back and leave the next attempt to start again from nothing, so a write that takes
 // the server longer than the client waits could never land.
-func (s *server) keyedWrites(method, pattern string, handler http.HandlerFunc, replay keyedReplay) http.HandlerFunc {
+func (s *server) keyedWrites(method, pattern string, bodyLimit int64, handler http.HandlerFunc, replay keyedReplay) http.HandlerFunc {
 	wildcards := patternWildcards(pattern)
 	keepsAnswer := !answerHoldsSecret[method+" "+pattern]
-	bodyLimit := routeBodyLimit(method, pattern)
 	run := handler
 	if s.deps.TestHooksEnabled {
 		run = s.slowedByTestHook(handler)
@@ -269,7 +268,7 @@ func (s *server) keyedWrites(method, pattern string, handler http.HandlerFunc, r
 			if s.repeatFoundInFlight != nil {
 				s.repeatFoundInFlight()
 			}
-			s.answerDrainedRepeat(w, r, method, pattern, wildcards, login, key, replay)
+			s.answerDrainedRepeat(w, r, method, pattern, bodyLimit, wildcards, login, key, replay)
 			return
 		}
 		digest := sha256.New()
@@ -342,20 +341,6 @@ func (s *server) keyedWrites(method, pattern string, handler http.HandlerFunc, r
 		settled = true
 		answer.deliver()
 	}
-}
-
-// routeBodyLimit is the largest body a route reads: an upload's file and a megabyte of fields
-// (uploadArtifactFor) for an upload route, and a JSON body (decodeJSON) for every other. The
-// table is where a route's own limit is written (routeServings, apiRoute.BodyLimit), so this and
-// the request admission counts are reading one fact. It is the most the keyed layer spools before
-// its handler runs - a body past it is refused by the route's handler whatever its key, so it runs
-// unkeyed rather than spooled - and the most an early answer discards before it is written
-// (drainBeforeAnswer).
-func routeBodyLimit(method, pattern string) int64 {
-	if limit := routeServings[method+" "+pattern].BodyLimit; limit != 0 {
-		return limit
-	}
-	return maxJSONRequestBytes
 }
 
 // keyedUploads is every keyed route whose body may hold a file (uploadArtifactFor).
@@ -548,7 +533,7 @@ func (w spillWriter) Write(p []byte) (int, error) {
 }
 
 // readKeyedBody reads body into a keyedBody, at most one byte past limit, the route's own
-// (routeBodyLimit), writing it to digest as it goes (bodyDigest). A body that fits in
+// (apiRoute.bodyLimit), writing it to digest as it goes (bodyDigest). A body that fits in
 // keyedBodyInMemory never touches the disk: a route whose limit is no more than that holds even its
 // one byte past the limit in memory.
 func readKeyedBody(body io.Reader, digest io.Writer, contentType string, limit int64) (*keyedBody, error) {
@@ -915,14 +900,13 @@ func answerHeldKey(w http.ResponseWriter, r *http.Request, key string, held held
 // that bound for net/http's own reads after the answer; only a body read to its end lifts it
 // (drainedBody.lift).
 func (s *server) answerDrainedRepeat(
-	w http.ResponseWriter, r *http.Request, method, pattern string, wildcards []string, login, key string, replay keyedReplay,
+	w http.ResponseWriter, r *http.Request, method, pattern string, limit int64, wildcards []string, login, key string, replay keyedReplay,
 ) {
 	if expectsContinue(r) {
 		w.Header().Set(contracts.IdempotencyKeyHeader, key)
 		writeKeyInFlight(w, key)
 		return
 	}
-	limit := routeBodyLimit(method, pattern)
 	digest := sha256.New()
 	writeRequestFields(digest, r, method, pattern, wildcards)
 	size, err := digestKeyedBody(r.Body, digest, r.Header.Get("Content-Type"), limit)
