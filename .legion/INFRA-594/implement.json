@@ -2,14 +2,14 @@
   "schemaVersion": 1,
   "phase": "implement",
   "issue": "INFRA-594",
-  "completed": "2026-10-30T07:12:04Z",
+  "completed": "2026-10-30T11:33:43Z",
   "proof": [
     {
       "criterion": "Sessions take every event (agent, issue, role) once through restarts of the session, its NATS connection, either listener and a Dispatch pod; the plugin acks after the transcript write; an unacked message is redelivered",
       "surface": "Real Oh My Pi (omp 18.12.2, this checkout's pi-envoy) and real Claude Code 2.1.311 under this checkout's `legion claude-bridge` with claude-envoy built from the checkout; natsd with JetStream; two real envoy-listener processes; real envoy-dispatch on Postgres 17 with pgvector; in the issue pod",
       "command": "LEGION_TEST_PG_DSN='postgres://postgres@127.0.0.1:5433/postgres?sslmode=disable' bash scripts/e2e/envoy-session-delivery.sh",
-      "observed": "At 1099510d (merge of main a21100c5): ENVOY SESSION DELIVERY: PASS (every event once, the issue in order), exit 0, 60 events x 6 windows each counted 1 (evidence/live/head-1099.table.txt). Also PASS at a592ce7e before the merge (head-a592.table.txt).",
-      "headSha": "1099510d6f47626e6c36db4b86c726083b71d115",
+      "observed": "At afa4eb55 (main 88818a3b merged): ENVOY SESSION DELIVERY: PASS (every event once, the issue in order), exit 0, 60 events x 6 windows each counted 1 (evidence/live/head-afa4.table.txt); also PASS at fa7e9652 before the merge.",
+      "headSha": "afa4eb55b89dd322d6821d16fdb2951466778f3c",
       "negativeControl": "--build-from c3d09eec --expect-lost agent,issue,role at a592ce7e: NEGATIVE CONTROL HOLDS: every agent,issue,role event of window a counted 0 in both sessions (evidence/live/c3d09eec-at-a592.out)."
     },
     {
@@ -99,6 +99,22 @@
       "observed": "all OK: bus 317.6s, session 10.1s; 2704 pass 0 fail; claude-envoy 280 pass 0 fail. Fingerprint 3eed8cf5\u2026 -> 940da58d\u2026 (changed only on the five conflicted files' lines), posted as issuecomment-6517049622",
       "headSha": "1099510d6f47626e6c36db4b86c726083b71d115",
       "negativeControl": "claude-envoy's answers-hook tests (main's #2376) fail 16 against the tracked dist/, which main's rebuild workflow has not regenerated yet; they pass once built as CI builds it"
+    },
+    {
+      "criterion": "Tester round 5: a session upgrading from the released plugin (96a7e5ea, pi-envoy 13.5.1, claude-envoy 1.0.0) to this head is shown every agent, issue and role event stored while it was away, once",
+      "surface": "real Oh My Pi and Claude Code sessions started on the plugins built from 96a7e5ea, SIGKILLed, the window's events stored, resumed on this checkout's plugins; natsd, two listeners, Dispatch on Postgres",
+      "command": "LEGION_TEST_PG_DSN='postgres://postgres@127.0.0.1:5433/postgres?sslmode=disable' bash scripts/e2e/envoy-session-delivery.sh --disruptions a --resume-plugins-from 96a7e5ea9099aabf25dc8b524177b6f73df4eab5",
+      "observed": "ENVOY SESSION DELIVERY: PASS (every event once, the issue in order), exit 0, at afa4eb55 and at fa7e9652: issue comment-1 and comment-2 counted 1 in both sessions, every agent and role event 1 (evidence/live/upgrade-afa4.table.txt, upgrade-fa7e.table.txt)",
+      "headSha": "afa4eb55b89dd322d6821d16fdb2951466778f3c",
+      "negativeControl": "same command with followedOnCorePath neutered in consumer-delivery.ts (working copy, restored after): ENVOY SESSION DELIVERY: FAIL, issue comment-1 and comment-2 counted 0! 0! (evidence/live/upgrade-neg.table.txt), matching the tester's two runs at 1099510d"
+    },
+    {
+      "criterion": "Tester round 5: no data race in the listener's tests (CI envoy-go-race run 41018009099)",
+      "surface": "go test -race on packages/envoy/cmd/listener",
+      "command": "cd packages/envoy && GOMAXPROCS=4 CGO_ENABLED=1 go test -p 2 -parallel 4 -count=1 -race -timeout 40m ./cmd/listener (DISPATCH_TEST_DATABASE_URL set)",
+      "observed": "ok cmd/listener 601.2s at afa4eb55, no DATA RACE; -count=20 of the fanout and cold-cache tests 0 races",
+      "headSha": "afa4eb55b89dd322d6821d16fdb2951466778f3c",
+      "negativeControl": "before the fix (fa7e9652's parent), -race -count=20 -run TestListenerDeliveryHandler_FanoutAllowsUntaggedPayload reported WARNING: DATA RACE x2 at main_test.go:3420/3812"
     }
   ],
   "filesChanged": [
@@ -118,13 +134,16 @@
     "Round 3: packages/envoy/infra/core/{permissions.go,permissions_test.go,permissions_live_test.go}, gcp goldens, infra README/AGENTS/docs/nats-hub.md, packages/envoy/AGENTS.md, the listener-permissions fragment; packages/claude-envoy/tests/{envoy-channel-server.test.ts,envoy-channel-tools.test.ts,pane-environment.ts}",
     "Round 4: forward merges of main (api.go, delivery.go, bus/nats.go, store/kv.go, session/registry.go, session/expiry.go, envoy-client tool-contract.ts, gcp/natshub.go and tests); envoy-infra listenerMachineId kind (core/permissions.go ListenerHostPermissions, gcp/natshub.go, goldens, tests, README, docs/nats-hub.md); the doc census files listed in the PR body",
     "Round 1 review: packages/envoy-client/src/{consumer-delivery,transport}.ts, packages/pi-envoy/extensions/envoy.ts (+test), packages/claude-envoy/src/envoy-channel-server.ts (+tests)",
-    "Round 1 review: packages/envoy/cmd/listener/{session_relay,serve_port_workers,delivery,durable,role_lane,role_holder,main,session_delivery,unplaceable_delivery}.go, internal/bus/{session_consumers,session_pull,stream_state,stored,role_lane,nats,confirm}.go, internal/session/{registry,session,handler}.go, packages/envoy/{AGENTS.md,docs/architecture.md}, .github/workflows/ci.yaml comments"
+    "Round 1 review: packages/envoy/cmd/listener/{session_relay,serve_port_workers,delivery,durable,role_lane,role_holder,main,session_delivery,unplaceable_delivery}.go, internal/bus/{session_consumers,session_pull,stream_state,stored,role_lane,nats,confirm}.go, internal/session/{registry,session,handler}.go, packages/envoy/{AGENTS.md,docs/architecture.md}, .github/workflows/ci.yaml comments",
+    "Round 6: packages/envoy-client/src/consumer-delivery.ts (followedOnCorePath) + its test, README.md and changelog fragment; packages/pi-envoy/extensions/envoy.test.ts, AGENTS.md; packages/claude-envoy/AGENTS.md; packages/envoy/cmd/listener/main_test.go and unplaceable_delivery_acceptance_test.go (pushLog); merge: packages/envoy/internal/bus/nats.go (onAsyncError), packages/envoy/AGENTS.md"
   ],
   "trickyParts": [
     "nats-server 2.10.29 reports ack floor 0 for a fresh consumer, so every session consumer is created at a start sequence (stream last+1) and the floor is read never below it",
     "nats-server 2.10 handles one connection's JetStream API requests one at a time; a 1,000-session restart was bounded by that until the listener read all consumers in one paged CONSUMER.LIST and started pulls without a consumer info",
     "A restart that deleted a consumer and failed its create lost the position; the pending start is now recorded before the delete and used by whichever call creates the consumer next (in-process only; a second listener does not know it)",
-    "The Claude Code bridge answers an inbox delivery only on Claude Code's isReplay echo of that user message; the live test's flag check had to follow main moving the argv into claudelaunch.go"
+    "The Claude Code bridge answers an inbox delivery only on Claude Code's isReplay echo of that user message; the live test's flag check had to follow main moving the argv into claudelaunch.go",
+    "After an upgrade from the core path the consumer snapshot is empty, so every followed topic is stamped at the resume time and a follow-time check alone drops what was stored while away; the replay ledger's per-topic `since` (a stream sequence) is the record of following, matched by pattern because ledger keys are subscription topics (`...issue.X-1.>`) and frames arrive on concrete subjects.",
+    "Forward merge with main 88818a3b: git placed main's recordPublishDenial call inside this PR's readSubscriptionRefusal helper, which has no client or connection; resolved by hand in onAsyncError."
   ],
   "deviations": [
     "Plan's replay-without-polling is proven on the consumer path; the core path keeps #2228's /v1/replay catch-up as the fallback (planned departure 1)",

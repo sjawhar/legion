@@ -1,0 +1,38 @@
+== build
+[10:44:01Z] listener and the bridge from this checkout (fa7e96527 plus the working copy); pi-envoy and claude-envoy from this checkout (fa7e96527 plus the working copy); natsd and Dispatch from this checkout
+[10:44:37Z] pi-envoy 13.5.1; claude-envoy 1.0.0; Claude Code 2.1.311 (Claude Code); omp omp/18.12.2; bridge argv --replay-user-messages; the listeners serve on kept ports (ENVOY_LISTEN_FD)
+[10:44:37Z] upgrade: the sessions start on pi-envoy 13.5.1 and claude-envoy 1.0.0 from 96a7e5ea9099 until the resume of window a, then this run's
+== services
+[10:44:39Z] listener shared (pid 15475) healthy at http://127.0.0.1:53796
+[10:44:39Z] listener dispatch (pid 15492) healthy at http://127.0.0.1:36019
+[10:44:41Z] Dispatch (pid 15532) serving http://127.0.0.1:64727, with NATS
+[10:44:42Z] Dispatch issues: LIVE-1 (followed, notifications.dispatch.issue.LIVE-1.>) and LIVE-2 (direct messages)
+== sessions
+[10:44:45Z] omp (pid 15571) session 01a18c69-708d-700e-85df-f5497f1f28d1
+[10:44:45Z] legion claude-bridge (pid 15647) for Claude Code session 3870cc2d-c1c6-4893-91da-7d960031a4e0 (--session-id)
+[10:44:48Z] pi: entry {"session_id":"01a18c69-708d-700e-85df-f5497f1f28d1","machine_id":"shared","host":"legion-infra-infra-594","dir":"/legion/scratch/tmp/infra594/live/upgrade-fa7e/sessions/pi/cwd","port":0,"title":"","capabilities":["aside","btw","steer"],"self_subscribed":true,"topics":["notifications.agent.01a18c69-708d-700e-85df-f5497f1f28d1","notifications.dispatch.issue.LIVE-1","notifications.dispatch.issue.LIVE-1.>","notifications.role.live-delivery-pi-ca65"],"roles":["live-delivery-pi-ca65"],"updated_at":1793357088167,"last_seen":1793357088167,"plugin":"@sjawhar/pi-envoy","plugin_version":"13.5.1"}; interest ["notifications.agent.01a18c69-708d-700e-85df-f5497f1f28d1","notifications.dispatch.issue.LIVE-1","notifications.dispatch.issue.LIVE-1.>","notifications.role.live-delivery-pi-ca65"]; role {"capabilities":["aside","btw","steer"],"dir":"/legion/scratch/tmp/infra594/live/upgrade-fa7e/sessions/pi/cwd","holder":"01a18c69-708d-700e-85df-f5497f1f28d1","host":"legion-infra-infra-594","last_seen":1793357088167,"machine_id":"shared","role":"live-delivery-pi-ca65","title":""}
+[10:44:55Z] cc: entry {"session_id":"3870cc2d-c1c6-4893-91da-7d960031a4e0","machine_id":"shared","host":"legion-infra-infra-594","dir":"/legion/scratch/tmp/infra594/live/upgrade-fa7e/sessions/cc/cwd","port":0,"title":"cwd 3870cc2d","capabilities":["aside","steer"],"self_subscribed":true,"topics":["notifications.agent.3870cc2d-c1c6-4893-91da-7d960031a4e0","notifications.dispatch.issue.LIVE-1","notifications.dispatch.issue.LIVE-1.>","notifications.role.live-delivery-cc-ca65"],"roles":["live-delivery-cc-ca65"],"updated_at":1793357094655,"last_seen":1793357094655,"plugin":"@sjawhar/claude-envoy","plugin_version":"source"}; interest ["notifications.agent.3870cc2d-c1c6-4893-91da-7d960031a4e0","notifications.dispatch.issue.LIVE-1","notifications.dispatch.issue.LIVE-1.>","notifications.role.live-delivery-cc-ca65"]; role {"capabilities":["aside","steer"],"dir":"/legion/scratch/tmp/infra594/live/upgrade-fa7e/sessions/cc/cwd","holder":"3870cc2d-c1c6-4893-91da-7d960031a4e0","host":"legion-infra-infra-594","last_seen":1793357094655,"machine_id":"shared","role":"live-delivery-cc-ca65","title":"cwd 3870cc2d"}; transcript /legion/scratch/tmp/infra594/live/upgrade-fa7e/sessions/cc/config/projects/-legion-scratch-tmp-infra594-live-upgrade-fa7e-sessions-cc-cwd/3870cc2d-c1c6-4893-91da-7d960031a4e0.jsonl
+== window a (session-restart)
+[10:44:55Z] both sessions SIGKILLed; their registrations stay until they lapse
+[10:45:07Z] upgrade: both sessions resume on this run's pi-envoy and claude-envoy, after the window's events were stored
+[10:45:10Z] omp (pid 15939) session 01a18c69-708d-700e-85df-f5497f1f28d1, resumed from /legion/scratch/tmp/infra594/live/upgrade-fa7e/sessions/pi/sessions/2026-10-30T10-44-42-765Z_01a18c69-708d-700e-85df-f5497f1f28d1.jsonl
+[10:45:10Z] legion claude-bridge (pid 16010) for Claude Code session 3870cc2d-c1c6-4893-91da-7d960031a4e0 (--resume)
+[10:45:26Z] window a: every event shown; holding 15s for a repeat
+== table
+build: listener and bridge this checkout (fa7e96527 plus the working copy); plugins this checkout (fa7e96527 plus the working copy); listener grant current
+disruption             kind   event             marker           pi   cc
+a session-restart      issue  comment-1         LDTca65-001Z      1    1
+a session-restart      issue  comment-2         LDTca65-002Z      1    1
+a session-restart      agent  dispatch-message  LDTca65-003Z      1    -
+a session-restart      agent  dispatch-message  LDTca65-004Z      -    1
+a session-restart      agent  listener-send     LDTca65-005Z      1    -
+a session-restart      agent  listener-send     LDTca65-006Z      -    1
+a session-restart      role   listener-publish  LDTca65-007Z      1    -
+a session-restart      role   listener-publish  LDTca65-008Z      -    1
+a session-restart      role   core-publish      LDTca65-009Z      1    -
+a session-restart      role   core-publish      LDTca65-010Z      -    1
+(a cell is the count of entries carrying the marker in that session's transcript; "!" marks a count other than expected; "/0" marks an event its publisher refused, expected 0 times; "-" an event not meant for that session)
+issue order: every comment of LIVE-1 appears in its stream order in both transcripts
+transcripts: pi /legion/scratch/tmp/infra594/live/upgrade-fa7e/sessions/pi/sessions/2026-10-30T10-44-42-765Z_01a18c69-708d-700e-85df-f5497f1f28d1.jsonl; cc /legion/scratch/tmp/infra594/live/upgrade-fa7e/sessions/cc/config/projects/-legion-scratch-tmp-infra594-live-upgrade-fa7e-sessions-cc-cwd/3870cc2d-c1c6-4893-91da-7d960031a4e0.jsonl
+ENVOY SESSION DELIVERY: PASS (every event once, the issue in order)
+envoy-session-delivery: evidence kept in /legion/scratch/tmp/infra594/live/upgrade-fa7e
