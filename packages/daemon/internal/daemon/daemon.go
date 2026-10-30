@@ -979,15 +979,16 @@ type supervision struct {
 	// reportStore persists each report as it arrives (store.Store), so a restart renders the
 	// sessions it re-adopts without waiting for them to report again.
 	reportStore capabilityReportStore
-	// enqueue writes one outbox row of an issue, the workflow's own enqueue in its own
-	// transaction (workflowRuntime.enqueueOutbox); nil in a deployment with no workflow, which
-	// has no outbox to write to and no Dispatch issue to write on. It is the whole of the record
-	// the update-round sweep needs (reconcilePodUpdates): the controller notice it publishes and
-	// the message it writes on the issue are both outbox rows, and threading the workflow engine
-	// into supervision to post two rows would tie every claim decision to the workflow. The
-	// workflow sets it where it attaches, before supervision restores or launches any claim, as
-	// it sets the supervisor's terminal callback there.
-	enqueue func(ctx context.Context, issue string, payload record.OutboxPayload) error
+	// enqueue writes outbox rows of an issue, all of them in one transaction, the workflow's own
+	// enqueue (workflowRuntime.enqueueOutbox); nil in a deployment with no workflow, which has no
+	// outbox to write to and no Dispatch issue to write on. It is the whole of the record the
+	// update-round sweep needs (reconcilePodUpdates): the controller notice it publishes and the
+	// message it writes on the issue are both outbox rows, and threading the workflow engine into
+	// supervision to post two rows would tie every claim decision to the workflow. Those two go in
+	// one call, since a stall told the controller but not the issue would be told again at every
+	// tick (tellUpdateStalled). The workflow sets it where it attaches, before supervision
+	// restores or launches any claim, as it sets the supervisor's terminal callback there.
+	enqueue func(ctx context.Context, issue string, payloads ...record.OutboxPayload) error
 
 	cancel context.CancelFunc
 	// draining is the worker stream's life and what the API's routes run their decisions on
@@ -1213,13 +1214,21 @@ func (s *supervision) start(boot context.Context, settle func() error) error {
 // launching is left to its own registration, which decides the comparison the moment it arrives,
 // so only the four states whose process has registered are read.
 //
-// A claim in an update round is skipped only while its worker can answer that round
-// (supervise.CanAnswerUpdate): the round is carrying it, and the process is replaced when the
-// round ends (reconcilePodUpdates), so a StalePlugin post would start the round's clock again at
-// every sweep, or relaunch mid-turn a claim the round is waiting on. A claim whose plugin cannot
-// answer is posted all the same, round or no round: the round can never finish on it, and the
-// relaunch is what puts its process on a plugin that has the op — it keeps the pod and the disk,
-// so the pod round it is in loses nothing by it and gains the one worker it was blocked on.
+// A claim in an update round is skipped while its worker can answer that round
+// (supervise.CannotAnswerUpdate false): the round is carrying it, and the process is replaced
+// when the round ends (reconcilePodUpdates), so a StalePlugin post would start the round's clock
+// again at every sweep, or relaunch mid-turn a claim the round is waiting on.
+//
+// A claim in a round whose worker cannot answer is posted only where a relaunch would put it on
+// a plugin that has the op — that is, where its launch installs one (noPluginInstall false). The
+// relaunch keeps the pod and the disk, so for such a claim the round loses nothing by it and
+// gains the one worker it was blocked on. For a Claude Code role it installs nothing at all: the
+// launch keeps the drifted pod the round is open over, the process comes back on that image's
+// own claude-envoy, registers the old contract again, and staleRegistration then charges a
+// relaunch after a relaunch until the budget fails the claim — a failed claim cannot push, which
+// is step 1 of the drain the daemon writes on that issue. It is left running for that drain
+// instead, and the round's own notice is what tells the operator (reconcilePodUpdates'
+// cannotAnswer). Outside a round it is posted as before: there is no round to drain.
 //
 // A daemon that cannot relaunch onto a plugin (PluginRelaunchable false, LEGION-164's degraded
 // Kubernetes mode) posts nothing; it logs one Error line per stale claim at boot only — a sweep's
@@ -1230,7 +1239,7 @@ func (s *supervision) refreshStalePlugins(claims []supervise.Claim, trigger stri
 		if c.Session == "" || c.PluginContract == api.DaemonAPIVersion || !supervise.HoldsCapability(c.State) {
 			continue
 		}
-		if c.UpdateRound != "" && supervise.CanAnswerUpdate(c) {
+		if c.UpdateRound != "" && (!supervise.CannotAnswerUpdate(c) || s.noPluginInstall(c)) {
 			continue
 		}
 		if !s.plan.pluginRelaunchable {
@@ -1242,6 +1251,15 @@ func (s *supervision) refreshStalePlugins(claims []supervise.Claim, trigger stri
 		}
 		s.supervisor.post(c.Token, supervise.StalePlugin{Claim: c.Token, Trigger: trigger})
 	}
+}
+
+// noPluginInstall is c's launch installing no plugin at all, whatever contract the claim records:
+// its role runs on Claude Code, whose plugin is the worker image's own claude-envoy, which no
+// install reaches (specs.stalePluginInstall installs none for that backend, and no workflow
+// releases claude-envoy). A plugin-contract change for such a role is answered by a new image,
+// which is what the pod round replaces the pod for.
+func (s *supervision) noPluginInstall(c supervise.Claim) bool {
+	return runtime.Of(s.cfg.BackendFor(c.Role)) == runtime.BackendClaude
 }
 
 // reconcileBootOrphans retries only the boot reconciliation, boundedly. A listing error does not

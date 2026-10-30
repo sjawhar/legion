@@ -580,20 +580,32 @@ func (w *workflowRuntime) ensureWorkspace(ctx context.Context, issue string, rep
 	return w.outbox.ensureWorkspace(ctx, issue, repo, defaultBranch)
 }
 
-// enqueueOutbox writes one outbox row of issue, due now, in a transaction of its own, which owns
-// the commit hook that write registers (projectRecords, intake.OnCommit) so the row's lane is
+// enqueueOutbox writes outbox rows of issue, due now, in one transaction of its own, which owns
+// the commit hook that write registers (projectRecords, intake.OnCommit) so each row's lane is
 // woken as it commits — exactly as the re-hold of a notice does (reholdNotice). It is what
 // supervision's update-round sweep writes its controller notice and its issue message through
-// (supervision.enqueue), and the narrowest thing that gives supervision an outbox at all: a row
-// to write, and no engine, no admission and no Dispatch client behind it.
-func (w *workflowRuntime) enqueueOutbox(ctx context.Context, issue string, payload record.OutboxPayload) error {
-	row, err := record.NewOutboxRow(issue, payload, time.Now().UTC())
-	if err != nil {
-		return fmt.Errorf("enqueue a %s row of %s: %w", payload.OutboxKind(), issue, err)
+// (supervision.enqueue), and the narrowest thing that gives supervision an outbox at all: rows
+// to write, and no engine, no admission and no Dispatch client behind it. Rows given together
+// land together or not at all, so a stall is never half told.
+func (w *workflowRuntime) enqueueOutbox(ctx context.Context, issue string, payloads ...record.OutboxPayload) error {
+	rows := make([]record.OutboxRow, 0, len(payloads))
+	for _, payload := range payloads {
+		row, err := record.NewOutboxRow(issue, payload, time.Now().UTC())
+		if err != nil {
+			return fmt.Errorf("enqueue a %s row of %s: %w", payload.OutboxKind(), issue, err)
+		}
+		rows = append(rows, row)
 	}
 	scoped, committed := intake.WithCommitHooks(ctx)
-	if err := pgx.BeginFunc(scoped, w.pool, func(tx pgx.Tx) error { return w.records.Enqueue(scoped, tx, row) }); err != nil {
-		return fmt.Errorf("enqueue a %s row of %s: %w", payload.OutboxKind(), issue, err)
+	if err := pgx.BeginFunc(scoped, w.pool, func(tx pgx.Tx) error {
+		for _, row := range rows {
+			if err := w.records.Enqueue(scoped, tx, row); err != nil {
+				return fmt.Errorf("enqueue a %s row of %s: %w", row.Kind, issue, err)
+			}
+		}
+		return nil
+	}); err != nil {
+		return err
 	}
 	committed()
 	return nil

@@ -25,17 +25,28 @@ import (
 // constant above the daemon's own.
 const PodUpdateContract = 44
 
-// CanAnswerUpdate says whether c's worker can answer an update task at all: its registration
-// declared PodUpdateContract or above, so its plugin has the ready_for_update op. It is the one
-// statement of that rule, read by the round itself (askForUpdate), by the stale-plugin lane that
-// decides between a round and an immediate relaunch (refreshPlugin), and by the daemon's sweep,
-// which names the claims a round can never finish on (internal/daemon's cannotAnswer, waitingOf)
-// and keeps the stale-plugin relaunch for the ones it cannot (refreshStalePlugins).
-//
-// It reads the contract alone, so a caller that acts on a running process asks HoldsCapability
-// beside it: a claim with no running process records the contract of a process that is gone, and
-// the one its next launch starts speaks this daemon's.
+// CanAnswerUpdate says whether c's registration declared PodUpdateContract or above, so its
+// plugin has the ready_for_update op. It reads the contract alone, which is what a suspended
+// claim's revive asks (askForUpdate) and what the stale-plugin lane that decides between a round
+// and an immediate relaunch asks of a process it holds (refreshPlugin).
 func CanAnswerUpdate(c Claim) bool { return c.PluginContract >= PodUpdateContract }
+
+// CannotAnswerUpdate says whether c's worker can never answer the update task it is given: its
+// process runs now (HoldsCapability) and the registration that process made declared a plugin
+// contract below the one that introduced the op. It is the one statement of that rule, read by
+// the round's own ask (askForUpdate), by the stale-plugin lane (refreshPlugin), and by the
+// daemon's sweep, which names the claims a round can never finish on, keeps the stale-plugin
+// relaunch for the ones it can relaunch, and marks each in the controller's notice
+// (internal/daemon's cannotAnswer, refreshStalePlugins, waitingOf).
+//
+// The running process is half the rule, and the half a reading of the contract alone would get
+// wrong. A claim with none — suspended, failed, launching, or still queued — records the contract
+// of a process that has ended, and the one its next launch starts speaks this daemon's: a claim
+// relaunched onto the current plugin a moment ago registers at this contract, and a suspended
+// claim the round revives comes back on it. Reading those records as "this claim can never
+// answer" would tell the operator to drain a pod at every roll of this deployment, minutes before
+// the claim answers.
+func CannotAnswerUpdate(c Claim) bool { return HoldsCapability(c.State) && !CanAnswerUpdate(c) }
 
 // refreshPlugin is the claim's process found to speak a plugin contract this daemon does not: at
 // boot, re-adopting a claim whose recorded contract is an earlier daemon's, or none at all (the
@@ -90,7 +101,7 @@ func (m *Machine) refreshPlugin(ctx context.Context, trigger string) error {
 	if m.claim.PluginContract == m.deps.PluginContract {
 		return nil
 	}
-	if CanAnswerUpdate(m.claim) && !claim.IsController(m.claim.Role, m.claim.Issue, m.claim.Tree) {
+	if !CannotAnswerUpdate(m.claim) && !claim.IsController(m.claim.Role, m.claim.Issue, m.claim.Tree) {
 		return m.openPluginUpdate(ctx)
 	}
 	return m.relaunchStale(ctx, trigger)

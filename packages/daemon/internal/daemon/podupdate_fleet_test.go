@@ -202,7 +202,7 @@ func (r *fleetRig) claimOf(issue string, role claim.Role) supervise.Claim {
 // round is the pod round the sweep opens over issue.
 func (r *fleetRig) round(issue string) string {
 	r.t.Helper()
-	return supervise.PodRoundPrefix + r.pods[issue]
+	return supervise.PodRound(r.pods[issue])
 }
 
 // awaitRound waits for the round of issue to be recorded on role's claim with the task it sends,

@@ -211,10 +211,13 @@ type Notice struct {
 // UpdateStalled is what an update-stalled controller notice carries: the update round the daemon
 // opened over an issue's pod, and why it has not replaced that pod. Round is the round's identity
 // (supervise.Claim.UpdateRound), Pod the pod it was opened over, and Reasons the drift the round
-// was opened for, as the task states it. Waiting is every claim of the round that has not
-// answered ready_for_update, so the controller can retry one claim or ask the operator to drain
-// the pod rather than read the whole claims list to find out which worker the round waits on.
-// The notice's issue is the outbox row's own.
+// was opened for, as the task states it. Waiting is every claim the round is blocked on, so the
+// controller can retry one claim or ask the operator to drain the pod rather than read the whole
+// claims list to find out which worker the round waits on. Each entry says whether that claim has
+// already answered ready_for_update (UpdateWaiting.Answered): a round stuck on a turn that will
+// not end, or on a pod replacement the cluster keeps refusing, is blocked on claims that have
+// every one of them answered, and the controller must leave those alone. The notice's issue is
+// the outbox row's own.
 //
 // Reasons is one string, never a list: a single reason carries ", " inside it already — a moved
 // address reads `<where> <held>, now <handed>`, a pod-shape drift `image <was>, now <now>`, and a
@@ -228,15 +231,23 @@ type UpdateStalled struct {
 	Waiting []UpdateWaiting `json:"waiting"`
 }
 
-// UpdateWaiting is one claim an update round waits on: its token, the role it holds, the state it
-// is in (supervise.ClaimState — a `failed` or operator-suspended claim waits for the operator),
-// and CannotAnswer for a claim whose running process holds a plugin that predates
-// supervise.PodUpdateContract, which can never answer and which only an operator's drain releases.
+// UpdateWaiting is one claim an update round is blocked on: its token, the role it holds, the
+// state it is in (supervise.ClaimState — a `failed` or operator-suspended claim waits for the
+// operator), CannotAnswer for a claim whose running process holds a plugin that predates
+// supervise.PodUpdateContract, which can never answer and which only an operator's drain
+// releases, and Answered for a claim that has already answered this round.
+//
+// Answered is what tells the controller which claims are its to prompt. Its playbook publishes
+// the update task to a claim that has not answered, and that publish starts a turn, which takes
+// the claim's answer back (supervise's takeBackSignal): told to do that for a claim that has
+// answered, it would undo the answers of exactly the round the daemon is stuck carrying
+// (skill://legion-controller/references/escalation.md).
 type UpdateWaiting struct {
 	Claim        string     `json:"claim"`
 	Role         claim.Role `json:"role,omitempty"`
 	State        string     `json:"state"`
 	CannotAnswer bool       `json:"cannotAnswer,omitempty"`
+	Answered     bool       `json:"answered,omitempty"`
 }
 
 // MarshalJSON keeps `waiting` an array on the wire, empty rather than `null`: the plugin's strict
