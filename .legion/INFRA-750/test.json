@@ -2,62 +2,67 @@
   "schemaVersion": 1,
   "phase": "test",
   "issue": "INFRA-750",
-  "completed": "2026-10-30T08:40:00Z",
+  "completed": "2026-10-30T11:30:00Z",
   "generation": 2,
-  "round": 3,
+  "round": 4,
   "pullRequest": "sjawhar/legion#2542",
-  "head": "ac614cc15b803736c5ee18f548e955d63394bd49",
-  "codeHead": "73196dfca8cd",
-  "answers": "The review round of 2026-10-30 (.legion/INFRA-750/review.json, decision changes_requested, 0 critical, 0 important, 2 minor). Both findings are in the code and both were driven here.",
+  "head": "44100bb7654a4d4c17f023b30d56d1f0d67e95fa",
+  "codeHead": "3de30a206f8e32c83507fce5e1730e67fda22843",
+  "forwardMergeCheck": {
+    "procedure": "skill://legion-worker/references/conflicts-and-rewrites.md, The unchanged-diff check, run from the head my round-3 E2E line names to the new head.",
+    "from": "ac614cc15b803736c5ee18f548e955d63394bd49 (fingerprint 47c0c5cf22cfd099e0ba99c934efcfdfe59118461d1ec5e8f7b6942ca9ad312f)",
+    "to": "44100bb7654a4d4c17f023b30d56d1f0d67e95fa (fingerprint 2210db3128b1bcee1b8f4aa8e8b891486c1ecdfacbff948536802197c5a14d9f)",
+    "verdict": "changed, so this is a full test round, not a bare-gates re-check. The two fingerprints agree with the implementer's own.",
+    "changedFile": "packages/envoy/docs/architecture.md, and that file alone. A line-by-line diff of the two fingerprint inputs shows one hunk: main rewrote the `outcome` sentence to add `publish_denied` for send and publish alike, and this branch's `stream_full` addition now sits inside main's wording, so the branch's own added lines there read differently. Every other file of the 34 is byte for byte the same contribution; the first resolution's table row left the branch's diff because main now carries its neighbour."
+  },
   "implementerProof": {
     "verdict": "verified",
-    "how": "This round's whole diff is one commit, 73196dfca8cd, over the reviewed head 721792617475: the replaced-watch INFO line's wording, Start's doc, the test constant that reads the line, and the extraction of the freeze-and-wait sequence into freezeUntilBothClientsReportTheCut. Every test that reads either was re-run here. `CGO_ENABLED=1 go test -race -count=2 -run 'TestAFailedFirstStartLogsItsErrorOnlyWhileItIsTheLiveWatch$' ./internal/kvwatch/`: both rows pass twice (ok 1.574s). `go test -run 'TestBothOfTheListenersNATSClientsReportASilentCutWithinSeconds$|TestASilentCutRewatchesTheCachesWithNoErrorLine$' ./cmd/listener/`: both pass (ok 12.042s), each printing the per-client timings the helper kept. `CGO_ENABLED=1 go test -race -count=2 -run 'TestAHubThatStopsAnsweringIsNoticedWithinSeconds$' ./internal/natsauth/` from packages/daemon: 2 of 2 (ok 7.084s). Three negative controls, each a break of production with the tests untouched, go red. The earlier entries were verified at their own heads in rounds 1 and 2 and their code is untouched by this commit."
+    "how": "Every proof entry was re-run at the merge head rather than carried: the kvwatch unit test (both rows, twice under -race, ok 1.605s), both listener tests 3 of 3 (ok 33.813s), the daemon's 2 of 2 under -race (ok 7.067s), and the suites that cover the files both sides changed — internal/bus (ok 347.968s), internal/webhook (ok 2.686s), internal/dispatch/outbox (ok 5.693s) and cmd/dispatch (ok 50.159s). The merge's own resolution was checked on both sides of the paragraph it touched, and three negative controls go red at this head. The entry for the merge (`The forward merge leaves the change working`) is sound and its fingerprints match mine."
   },
   "failed": 0,
   "failures": [],
   "proof": [
     {
-      "criterion": "Review finding 1 (minor, kvwatch.go:212): the replaced-watch line must name the failure as the first watch's own, not as something the rewatch caused, and Start's doc must say the real condition.",
-      "surface": "The kvwatch watcher against a real in-process NATS server, both branches driven through its public API, with the records read from a JSON logger; and the source the finding cites.",
+      "criterion": "The forward merge leaves the change working: the branch's own behaviour is unchanged at the merge head, and the one paragraph both sides edited says what each side's code does.",
+      "surface": "The merged tree of packages/envoy: the real envoy-listener binary, the listener's request records through its own routes, and the Go suites of every package both sides changed.",
+      "command": "From packages/envoy: `go test -count=3 -timeout 20m -run 'TestBothOfTheListenersNATSClientsReportASilentCutWithinSeconds$|TestASilentCutRewatchesTheCachesWithNoErrorLine$' ./cmd/listener/`; `go test -count=1 -run 'TestAFullStreamIsAnsweredAsFullNotAsABusThatDidNotAnswer$|TestADeniedPublishIsRefusedPermanentlyAndNotRecordedAsBusUnavailable$' ./cmd/listener/`; `go test -count=1 -timeout 25m ./internal/bus/... ./internal/webhook/ ./internal/dispatch/outbox/` and `./cmd/dispatch/`.",
+      "observed": "Both listener cut tests passed 3 of 3 (ok 33.813s), the cut reported between 2.785 s and 2.851 s in every run and by both clients. The merged paragraph holds on both sides: the table at docs/architecture.md:95-96 carries this branch's `stream_full` 503 row and main's `publish_denied` 403 row, and the outcome list at :163-168 carries both names once each, with each row pinned by a passing test of its own — TestAFullStreamIsAnsweredAsFullNotAsABusThatDidNotAnswer (four subtests) and TestADeniedPublishIsRefusedPermanentlyAndNotRecordedAsBusUnavailable (four subtests). The suites of the six files both sides changed clean (AGENTS.md, internal/bus/async.go, internal/bus/nats.go, internal/dispatch/outbox/publisher.go, internal/webhook/github_test.go, packages/envoy-client/README.md) are green: internal/bus ok 347.968s, internal/webhook ok 2.686s, internal/dispatch/outbox ok 5.693s, cmd/dispatch ok 50.159s. bustest.FillStream's one caller still compiles and runs inside internal/webhook's green.",
+      "headSha": "44100bb7654a4d4c17f023b30d56d1f0d67e95fa",
+      "negativeControl": "`bus.WithSilentCutDetection()` removed from openLiveTopics alone at this merge head, the test files untouched: `no disconnect line for envoy-live-topics 5.011s into a silent cut`, with `envoy`'s `nats: stale connection` line present. So the merged tree's tests still pin each call site, and the pass above is the code's doing. live_topics.go was restored with `jj restore`."
+    },
+    {
+      "criterion": "Roll call 5 and the review's first finding at the merge head: a watch a rewatch replaced ends at INFO naming the failure, and a watch that fails with no replacement current keeps its ERROR.",
+      "surface": "The kvwatch watcher against a real in-process NATS server, both branches driven through its public API, records read from a JSON logger.",
       "command": "From packages/envoy: `CGO_ENABLED=1 go test -race -count=2 -timeout 15m -v -run 'TestAFailedFirstStartLogsItsErrorOnlyWhileItIsTheLiveWatch$' ./internal/kvwatch/`.",
-      "observed": "Both rows pass twice (ok 1.574s) with the line now reading `<cache> first watch failed after a rewatch replaced it; the replacement feeds the cache`, which the test's `replaced` constant matches. The finding's premise was checked in the code rather than taken: `watch` returns an error at two places only, `bus.ReadStreamState` (internal/kvwatch/kvwatch.go:515) and `open` with `from == 0` (:525-527), both before any watcher is installed, so the new doc's `The watch fails only before it has installed a watcher, so the error is always the first watch's own` is true, and so is its `While no watcher is current` condition.",
-      "headSha": "ac614cc15b803736c5ee18f548e955d63394bd49",
-      "negativeControl": "Start's old body restored (the unconditional ERROR before the lock, `if !current { w.signalReady() }` after it), both test files untouched: `--- FAIL ... a first watch a rewatch replaced logged [test cache watch failed: nats: connection closed], want no ERROR`, while the `no replacement` row still passes. kvwatch.go was restored with `jj restore`."
+      "observed": "Both rows pass twice (ok 1.605s) at the merge head, the line reading `<cache> first watch failed after a rewatch replaced it; the replacement feeds the cache`.",
+      "headSha": "44100bb7654a4d4c17f023b30d56d1f0d67e95fa",
+      "negativeControl": "The replaced branch made to log at ERROR again (the INFO call swapped for the ERROR one, nothing else touched): `--- FAIL ... a first watch a rewatch replaced logged [test cache watch failed: nats: connection closed], want no ERROR`, while the `no replacement` row still passes. kvwatch.go was restored with `jj restore`."
     },
     {
-      "criterion": "Review finding 2 (minor, cut_rewatch_test.go:43-65): the freeze-and-wait-for-both-cut-lines sequence must live in one helper both listener tests call, keeping the per-client diagnostic and the timing log.",
-      "surface": "The real envoy-listener binary with the live lane on, against an in-process NATS whose relay freezes; both tests that now call the helper.",
-      "command": "From packages/envoy: `go test -count=1 -timeout 20m -v -run 'TestBothOfTheListenersNATSClientsReportASilentCutWithinSeconds$|TestASilentCutRewatchesTheCachesWithNoErrorLine$' ./cmd/listener/`.",
-      "observed": "Both pass (ok 12.042s). The timing log survived the extraction and is printed by both callers: `envoy reported the cut 2.799s after it began` and `envoy-live-topics ... 2.85s` from the cut test, `2.786s` and `2.836s` from the rewatch test. The helper takes its own log offset per call, so a caller that freezes twice judges each cut on its own window.",
-      "headSha": "ac614cc15b803736c5ee18f548e955d63394bd49",
-      "negativeControl": "The per-client diagnostic is still live after the extraction: `bus.WithSilentCutDetection()` removed from listenerStreamOptions alone, the test files untouched, fails naming one client only — `no disconnect line for envoy 5.025s into a silent cut`, with `envoy-live-topics`'s `nats: stale connection` line present. main.go was restored with `jj restore`."
-    },
-    {
-      "criterion": "The whole cut path of the real listener still writes no ERROR line, and a second cut in the same process ends as the first does.",
+      "criterion": "The whole cut path still writes no ERROR line at the merge head, and a second cut in the same process ends as the first does.",
       "surface": "The real envoy-listener binary with its three caches and the live lane, frozen and thawed twice in one process, read through its own log and its GET /v1/interests/.",
-      "command": "From packages/envoy: `go test -run 'TestASilentCutRewatchesTheCachesWithNoErrorLine$' ./cmd/listener/`, and a throwaway two-cut test of the tester's own on the new helper (TestTwoSilentCutsInARowRewatchTheCachesWithNoErrorLine), run the same way and removed afterwards since it pins no defect.",
-      "observed": "The implementer's guard passes. The two-cut run passed in 11.08 s: cut 1 reported 2.835 s in by both clients and every one of the three caches warmed up again 1.064 s after the thaw; cut 2 reported 2.996 s in and every cache warmed up again 1.015 s after the thaw; an interest another listener wrote after the second thaw reached this listener's cache 103 ms later; and the process wrote no ERROR line at all, its start included.",
-      "headSha": "ac614cc15b803736c5ee18f548e955d63394bd49",
-      "negativeControl": "The guard's no-ERROR assertion is live at this head, after the output reader moved into the helper: one `slog.Error` added to rewatchListenerKVWatchers in cmd/listener/main.go, which the cut path runs, makes it fail — `a silent cut and its rewatch logged an error: ... ERROR tester control: rewatching a cache cache=interest`. main.go was restored with `jj restore`."
+      "command": "From packages/envoy: `go test -run 'TestASilentCutRewatchesTheCachesWithNoErrorLine$' ./cmd/listener/` (in the 3-of-3 run above), and a throwaway two-cut test of the tester's own on the merged tree, run the same way and removed afterwards since it pins no defect.",
+      "observed": "The implementer's guard passed all three runs. The two-cut run passed in 10.73 s: cut 1 reported 2.787 s and 2.837 s in by the two clients and every one of the three caches warmed up again 1.015 s after the thaw; cut 2 reported 2.99 s and 3.04 s in and every cache warmed up again 1.016 s after the thaw; an interest another listener wrote after the second thaw reached this listener's cache 1 ms later; and the process wrote no ERROR line at all.",
+      "headSha": "44100bb7654a4d4c17f023b30d56d1f0d67e95fa",
+      "negativeControl": "The same guard was shown live in round 3 at code head 73196dfca8cd, where one `slog.Error` added to rewatchListenerKVWatchers made it fail; the merge changed neither that function nor the test, which the fingerprint's file-by-file comparison shows."
     },
     {
-      "criterion": "The two headline criteria still hold at this head: the listener reports a silent cut within 5 seconds, and the daemon reports one within the same bound.",
-      "surface": "The real envoy-listener binary against a frozen relay, and the daemon's own natsauth.Connect against a server that answers the handshake and then nothing.",
-      "command": "From packages/envoy: `go test -count=1 -run 'TestBothOfTheListenersNATSClientsReportASilentCutWithinSeconds$' ./cmd/listener/`. From packages/daemon: `CGO_ENABLED=1 go test -race -count=2 -timeout 10m -v -run 'TestAHubThatStopsAnsweringIsNoticedWithinSeconds$' ./internal/natsauth/`.",
-      "observed": "The listener: pass, `envoy` 2.799 s and `envoy-live-topics` 2.85 s after the freeze; in the two-cut run both clients reported each of two cuts at 2.835 s and 2.996 s. The daemon: 2 of 2 under -race (ok 7.084s), the cut noticed 3.011111250 s and 3.016850422 s after the server went quiet.",
-      "headSha": "ac614cc15b803736c5ee18f548e955d63394bd49",
-      "negativeControl": "The listener control above (the option removed from listenerStreamOptions alone). For the daemon, the same break ran in rounds 1 and 2 — `options = append(options, detectSilentCuts)` removed from Connect gives `the connection was not reported lost within 5.0105s ...: IsConnected = true, the warning logged = false` — and packages/daemon is untouched by this round's commit, which the diff 721792617475..73196dfca8cd shows: it holds only internal/kvwatch and cmd/listener test files."
+      "criterion": "The daemon still notices a hub that stops answering within the bound at the merge head.",
+      "surface": "The daemon's own natsauth.Connect, called as internal/daemon/workflow.go:366 calls it, against a server that answers the handshake PING and then nothing.",
+      "command": "From packages/daemon: `CGO_ENABLED=1 go test -race -count=2 -timeout 10m -v -run 'TestAHubThatStopsAnsweringIsNoticedWithinSeconds$' ./internal/natsauth/`.",
+      "observed": "2 of 2 passed under -race (ok 7.067s): the cut noticed 3.008027474 s and 3.006076172 s after the server went quiet.",
+      "headSha": "44100bb7654a4d4c17f023b30d56d1f0d67e95fa",
+      "negativeControl": "`options = append(options, detectSilentCuts)` removed from Connect gives `the connection was not reported lost within 5.0105s ...: IsConnected = true, the warning logged = false`, run in rounds 1 to 3; the forward merge touches no file of packages/daemon, which the fingerprint's file-by-file comparison shows."
     }
   ],
-  "ciAtTheHead": "The code head 73196dfca8cd carries CI run 41026772876, queued at 08:34Z with `changes` queued and `pr-title` queued; the handoff head ac614cc1 carries none, which is right, since its push touched `.legion/INFRA-750/` alone and its message carries `skip-checks: true`, so the daemon carries the code head's verdict to it. Round 2's run at b41bf83f reads `cancelled` throughout: the newer push superseded it under ci.yaml's `cancel-in-progress` for a pull request. A queued lane is read as queued; nothing here waited for it and no lane was re-run as evidence.",
+  "ciAtTheHead": "The merge head 3de30a206f8e carries CI run 41026772876's successor, with `changes` queued and `pr-title` queued at 11:25Z; the handoff head 44100bb7 carries none, which is right, since its push touched `.legion/INFRA-750/` alone and its message carries `skip-checks: true`. GitHub now reports the pull request MERGEABLE and APPROVED, where it reported it conflicting before the merge. A queued lane is read as queued; nothing here waited for one and no lane was re-run as evidence.",
   "environment": [
-    "Every test in this handoff runs against an in-process NATS server from internal/testnats; no container and no external server is needed, and none was left running.",
-    "This pod has no container runtime, so the cmd/listener tests that start a Postgres container and the three natsauth tests that need an authorized-server container do not run here, as the implementer records. CI runs them."
+    "Every test in this handoff runs against an in-process NATS server from internal/testnats; no container is needed and none was left running.",
+    "This pod has no container runtime, so the cmd/listener tests that start a Postgres container and the three natsauth tests that need an authorized-server container do not run here. CI runs them."
   ],
   "alsoChecked": [
-    "The helper's contract: it returns the thaw and the output reader, takes a fresh log offset at each call, and registers its own `t.Cleanup(thaw)`; the freeze is a `sync.OnceFunc`, so a caller that thaws and the cleanup that thaws again are safe, which the two-cut run exercises twice.",
-    "The review's two findings are the whole of this round's diff. Nothing else of the pull request changed: `jj diff -r '721792617475::73196dfca8cd' --stat` lists internal/kvwatch/kvwatch.go, internal/kvwatch/kvwatch_test.go, cmd/listener/silent_cut_test.go, cmd/listener/cut_rewatch_test.go and the two handoff files.",
-    "The new text names no Dispatch key: every added line outside .legion/INFRA-750/ holds no INFRA-, LEGION- or dispatch:// text.",
-    "One prose nit the reviewer may want to take itself, not a failure and not a defect: the unit test's name, TestAFailedFirstStartLogsItsErrorOnlyWhileItIsTheLiveWatch, keeps the wording the finding corrected in the doc (`while it is still the live one`). The meaning is right — the first watch is the live watch exactly while no replacement is current — but the doc now says `While no watcher is current` and the name does not."
+    "The merge is one commit, 3de30a206f8e, of the branch's bookmark with main@origin: nothing was rebased and no pushed commit moved, so the reviewer's approved head is still an ancestor.",
+    "The second resolution reads as one sentence, not as two sides pasted together: `... `bus_unavailable` and `stream_full`, plus `no_live_session` for send, `capability_refused` for send and a role send, `publish_denied` for send and publish alike, since a publish on either transport can be denied, and `role_unclaimed` ...`, with each outcome named once.",
+    "The new text names no Dispatch key."
   ]
 }
