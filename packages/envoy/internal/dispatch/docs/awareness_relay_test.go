@@ -282,10 +282,31 @@ func awarenessFlood(clients uint64) []byte {
 	})
 }
 
-// One frame inventing far more awareness clients than a room holds costs the other processes the
-// bound and no more: ygo takes maxAwarenessClientsPerRoom of them and drops every client the room
-// has not seen before past that (Server.MaxAwarenessClientsPerRoom), so the relay is handed the
-// bound's clients at most and sends the few notifications they fill, not one per client.
+// awarenessFloodRemoval takes away the clients awarenessFlood announced, as the disconnect of the
+// peer that sent them does: a null state at the clock they stand at.
+func awarenessFloodRemoval(clients uint64) []byte {
+	return encoding.EncodeBytes(func(encoder *encoding.Encoder) {
+		encoder.WriteVarUint(clients)
+		for client := uint64(1); client <= clients; client++ {
+			encoder.WriteVarUint(client)
+			encoder.WriteVarUint(1)
+			encoder.WriteVarString("null")
+		}
+	})
+}
+
+// relayedClients is how many of room's clients service's relay is sending to the other processes.
+func relayedClients(service *Service, room string) int {
+	relay := service.awarenessRelay
+	relay.mu.Lock()
+	defer relay.mu.Unlock()
+	return len(relay.local[room])
+}
+
+// One frame inventing far more awareness clients than any room has readers costs the other
+// processes the bound and no more: the room takes the frame, and the relay sends the bound's
+// clients at most (maxAwarenessClientsPerRoom) in the few notifications they fill, not one per
+// client.
 func TestAnAwarenessFrameOverTheClientBoundRelaysNoMoreThanTheBound(t *testing.T) {
 	pair := newProcessPair(t)
 	handledB := runAwareness(t, pair.taskB)
@@ -301,9 +322,11 @@ func TestAnAwarenessFrameOverTheClientBoundRelaysNoMoreThanTheBound(t *testing.T
 	if err := aw.ApplyUpdate(awarenessFlood(flood), "a peer of task A"); err != nil {
 		t.Fatalf("apply a frame of %d awareness clients: %v", flood, err)
 	}
-	if held := len(aw.GetStates()); held != maxAwarenessClientsPerRoom {
-		t.Fatalf("task A's room holds %d awareness clients of the %d the frame claimed, want the %d-client bound",
-			held, flood, maxAwarenessClientsPerRoom)
+	waitFor(t, roomWait(t), "task A's relay to be sending the bound's clients of the frame", func() bool {
+		return relayedClients(pair.taskA, pair.artifactID) == maxAwarenessClientsPerRoom
+	})
+	if refused := pair.taskA.awarenessRelay.refused.Load(); refused != flood-maxAwarenessClientsPerRoom {
+		t.Fatalf("task A's relay refused %d of the frame's %d clients, want %d", refused, flood, flood-maxAwarenessClientsPerRoom)
 	}
 
 	deadline := time.After(roomWait(t))
@@ -334,6 +357,43 @@ func TestAnAwarenessFrameOverTheClientBoundRelaysNoMoreThanTheBound(t *testing.T
 			flood, relayed, sends, maxAwarenessClientsPerRoom)
 	}
 	t.Logf("a frame of %d awareness clients relayed %d of them in %d notifications", flood, relayed, sends)
+}
+
+// The clients of a flood that leaves give their slots back as they go: the relay's bound counts
+// the clients a room holds now, not every client id it has ever heard of, so a reader who joins
+// just after a frame of thousands has gone is relayed at once rather than after the frame's
+// clients have expired and been purged.
+func TestAwarenessClientsThatLeaveFreeTheRelaysBoundAtOnce(t *testing.T) {
+	pair := newProcessPair(t)
+	runAwareness(t, pair.taskA)
+	runAwareness(t, pair.taskB)
+	alice := pair.openReader(t, pair.serverA, "alice")
+	bob := pair.openReader(t, pair.serverB, "bob")
+	aw, resident := pair.taskA.srv.GetAwareness(pair.artifactID)
+	if !resident {
+		t.Fatal("task A's room is not resident, so it has no awareness to flood")
+	}
+
+	const flood = 8 * maxAwarenessClientsPerRoom
+	if err := aw.ApplyUpdate(awarenessFlood(flood), "a peer of task A"); err != nil {
+		t.Fatalf("apply a frame of %d awareness clients: %v", flood, err)
+	}
+	waitFor(t, roomWait(t), "task A's relay to be sending the bound's clients of the frame", func() bool {
+		return relayedClients(pair.taskA, pair.artifactID) == maxAwarenessClientsPerRoom
+	})
+	if err := aw.ApplyUpdate(awarenessFloodRemoval(flood), "a peer of task A"); err != nil {
+		t.Fatalf("take the frame's %d awareness clients away: %v", flood, err)
+	}
+	waitFor(t, roomWait(t), "task A's relay to be sending none of the frame's clients once they have left", func() bool {
+		return relayedClients(pair.taskA, pair.artifactID) == 0
+	})
+
+	// A client id of the joining reader's own: awarenessFlood claims 1 through flood, and a
+	// client the frame has left a tombstone of stands at a clock of its own.
+	const joined = flood + aliceClient
+	setAwareness(t, alice, joined, cursorOf("alice", 1))
+	requireAwareness(t, bob, holdsAwareness(joined, cursorOf("alice", 1)),
+		"alice's cursor, announced on task A just after a frame of 2,048 clients had come and gone, reaching bob on task B")
 }
 
 // awarenessEntryUpdate is a one-client awareness update, as y-protocols encodes one.

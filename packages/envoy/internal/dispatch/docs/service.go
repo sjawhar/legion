@@ -721,13 +721,17 @@ func New(deps Deps) *Service {
 	// A room forgets an awareness client it has not heard from in awarenessExpiry: a reader
 	// relayed from another process that died without removing it goes once its heartbeats stop.
 	srv.AwarenessExpiry = awarenessExpiry
-	// What a room's awareness may hold, whoever sent it: the distinct clients it tracks and the
-	// bytes of their states (maxAwarenessClientsPerRoom, maxAwarenessBytesPerRoom). Unbounded,
-	// ygo's default, one peer's frame can claim 10,000 client ids, each with a state of up to
-	// 1 MiB, and this service relays every one of them to the other processes: the awareness
-	// relay splits a batch into whole-client notifications within roomSyncPayloadLimit, so that
-	// one frame would become thousands of pg_notify sends on the process's one sender.
-	srv.MaxAwarenessClientsPerRoom = maxAwarenessClientsPerRoom
+	// What a room's awareness may hold, whoever sent it: the bytes of the states it holds now
+	// (maxAwarenessBytesPerRoom). Unbounded, ygo's default, one peer's frame can claim client
+	// ids each with a state of up to 1 MiB. ygo's companion bound on how many client ids a room
+	// tracks (Server.MaxAwarenessClientsPerRoom) is deliberately left unset: it counts the
+	// tombstones of the clients that left as well as the ones present, and drops every client id
+	// the room has not seen before, so one frame's thousands would keep a room from taking a
+	// reader who joined a moment later until those tombstones were purged, a minute and a half
+	// after the frame's tab had gone. What that bound was here for - keeping one frame from
+	// becoming thousands of pg_notify sends, the relay splitting a batch into whole-client
+	// notifications within roomSyncPayloadLimit - the relay does itself, on the clients a room
+	// holds now (maxAwarenessClientsPerRoom, awarenessRelay.enqueue).
 	srv.MaxAwarenessBytesPerRoom = maxAwarenessBytesPerRoom
 
 	service.srv = newRoomServer(srv)
