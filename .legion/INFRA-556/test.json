@@ -2,30 +2,49 @@
   "schemaVersion": 1,
   "phase": "test",
   "issue": "INFRA-556",
-  "completed": "2026-10-30T10:25:00Z",
-  "round": 8,
-  "testedCodeHead": "c83f0a4e05ed",
-  "scope": "INFRA-63 architect, 2026-10-30T09:50Z: the five-reader test file unchanged and passing; all red tests in workspace mode and GOWORK=off; room bound 256 and the repeated-flood bound restored; census entry 4 matching the code; the new relay not flooding (at most four clients per socket to B) and memory flat",
+  "completed": "2026-10-30T12:30:00Z",
+  "round": 9,
+  "testedCodeHead": "09e42b205f18",
+  "scope": "INFRA-63 architect, 2026-10-30T11:54Z, in workspace mode and with GOWORK=off: the many-sockets file unchanged and passing; it and the short-message test pass; the five earlier red tests still pass; the room bound 4,000 and memory flat under the 400k flood and 200 full sockets; a nameless first message of any length closes while the web client's first message is admitted",
   "implementerProof": {
     "verdict": "verified",
-    "how": "At c83f0a4e, on real binaries, all five awareness red tests pass in workspace mode (gorilla v1.5.4-pre) and with GOWORK=off (v1.5.3), 2 of 2 each. The five-reader test also passed 5 more times in workspace mode. The red-test files are byte-identical to what I wrote."
+    "how": "Re-ran the seven awareness red tests it names at 09e42b20 on real binaries, 2 of 2 each in workspace mode (gorilla v1.5.4-pre) and with GOWORK=off (v1.5.3). The red-test files are byte-identical to what I wrote."
   },
-  "failures": [
+  "failures": [],
+  "failed": 0,
+  "proof": [
     {
-      "criterion": "Census entry 4 and the code agree: a document socket whose first message names no document and type within 512 bytes is closed (architect's instruction for this round)",
-      "evidence": "Red test TestADocumentSocketWhoseShortFirstMessageNamesNoDocumentIsClosed in packages/envoy/internal/dispatch/docs/awareness_limit_short_message_test.go (commit f501ade4). Command: cd packages/envoy && DISPATCH_TEST_DATABASE_URL=<url> go test -run TestADocumentSocketWhoseShortFirstMessageNamesNoDocumentIsClosed ./internal/dispatch/docs. It fails 2 of 2 in workspace mode and 2 of 2 with GOWORK=off: 'the socket is still open 5s after a three-byte first message that names neither a document nor a type'. The first message is ff ff ff, a varuint that never ends. Cause: awareness_limit.go:257-260 (decide's default case) passes a final message too short to name itself on to ygo. Only a nameless message longer than 512 bytes (the implementer's test) and an empty message close. Fix: close a final message that names no document, whatever its length."
+      "criterion": "Every awareness red test passes in both build modes: a reader joining after, or during, a flood (one socket or 200 full sockets) is seen on the other process within a second; five readers placing cursors at once are all seen; repeated floods keep a room's awareness bounded; one socket is held to four clients through a real upgrade; a short nameless first message closes its socket",
+      "surface": "two real envoy-dispatch binaries on one Postgres 17 (go test -tags multiprocess ./cmd/dispatch) and the docs package's two Services on real websocket upgrades",
+      "command": "cd packages/envoy && for mode in workspace GOWORK=off: go test -count=2 -run 'TestRepeatedAwarenessFloodsDoNotGrowARoomsAwarenessWithoutLimit|TestADocumentSocketHoldsItsAwarenessBoundThroughARealUpgrade|TestADocumentSocketWhoseShortFirstMessageNamesNoDocumentIsClosed' ./internal/dispatch/docs && go test -tags multiprocess -count=2 -run 'TestAReaderJoining(After|During)A.*AwarenessFlood|TestFiveReadersPlacingCursorsAtOnceAreAllSeenOnTheOtherProcess|TestAReaderJoiningWhileManySocketsFillTheirBoundsIsSeenOnTheOtherProcess' ./cmd/dispatch",
+      "observed": "All seven pass 2 of 2 in each mode. The repeated-flood test reports 'task A's room tracks 1024 client entries, task B's 0 (bound 8000)'; maxAwarenessClientsPerRoom = 1,000 x 4 = 4,000. One socket's 2,048-client frame reaches carol on A and bob on B as 4 clients each, in both modes. Evidence: https://github.com/sjawhar/legion/pull/2414#issuecomment-6522689220",
+      "headSha": "09e42b205f18",
+      "negativeControl": "At c83f0a4e: the many-sockets test fails 2 of 2 (bob on B holds 256 clients and never alice), and the short-message test fails 2 of 2 in each mode (socket open 5 s later). At 3b94b7c2 the five-reader test fails 4 of 4, and in workspace mode the real-upgrade test fails (carol holds 10 of one socket's clients)."
+    },
+    {
+      "criterion": "Census entry 4: a document socket whose first message names no document and type within 512 bytes is closed, whatever its length, and the real web client's first message is admitted",
+      "surface": "two real envoy-dispatch binaries driven by raw gorilla websockets; Chromium on main's two-process harness for the web client",
+      "command": "go test -tags multiprocess -run TestProbeR7FirstMessage ./cmd/dispatch (throwaway, both modes); bun run e2e:multiprocess -- zz-firstframe.multiprocess (throwaway spec, workspace build)",
+      "observed": "Closed on A and B in both modes: 1 byte (80), 3 bytes (ff ff ff), 100, 511 and 513 bytes of ff, a 600-byte name, a name with no type, and an empty message. A well-formed awareness or sync first message is kept. The web client's first message on each document socket is Auth (type 2), naming the document in a 38-byte header (41 bytes), and its socket stays connected on A and B.",
+      "headSha": "09e42b205f18",
+      "negativeControl": "At c83f0a4e the 3-byte nameless first message left the socket open in both modes (round 8)."
+    },
+    {
+      "criterion": "Memory stays flat under the 400k flood and under 200 full sockets",
+      "surface": "two real envoy-dispatch binaries; VmRSS from /proc",
+      "command": "go test -tags multiprocess -run 'TestProbeR7Memory400k|TestProbeR7LiveFloodHeldOpen' ./cmd/dispatch (throwaway, both modes)",
+      "observed": "400,000 invented ids: A 56 to 60 MB in workspace mode and 59 to 66 MB with GOWORK=off; B unchanged. One live flooding socket re-announced for 41 s: A and B unchanged, B holds 4 clients. 200 full sockets (800 clients) re-announced for 45 s: B holds 800 and moves 57 to 59 MB; A 56 to 123 MB, level from 12 s to 45 s (the 200 open websockets). A reader joining during the 200-socket flood is seen by carol on A and bob on B within 1 s in both modes. My probe's reader sends no heartbeat, so it expired at 30 s (awarenessExpiry), as designed.",
+      "headSha": "09e42b205f18",
+      "negativeControl": "At b0a2d131 the 400,000-id flood grew A to 404 MB and B to 108 MB (round 5)."
+    },
+    {
+      "criterion": "Real readers are never dropped: several tabs, a reconnecting tab, the editor's own awareness",
+      "surface": "Chromium on main's two-process harness, harness binary built in workspace mode (go version -m: gorilla v1.5.4-pre, filter active)",
+      "command": "cd packages/dispatch && DATABASE_URL=… bun run e2e:multiprocess -- zz-firstframe.multiprocess zz-tabs.multiprocess zz-reconnect.multiprocess coedit.multiprocess --repeat-each=2",
+      "observed": "8 passed. Six tabs, three per process, place carets at once and every page shows the other five within 1 s, over 8 rounds. A tab on B whose socket is cut is shown on A again within 148-260 ms, over 6 reconnects. coedit.multiprocess passes 2 of 2.",
+      "headSha": "09e42b205f18",
+      "negativeControl": "coedit.multiprocess fails on a0f877c5, the harness without this change (round 1)."
     }
   ],
-  "failed": 1,
-  "proof": [],
-  "observed": [
-    "Red-test files unchanged: awareness_simultaneous_multiprocess_test.go at bbf0f5cd and at head is byte-identical to the copy I sent; the other three red-test files have no change since ec45b9cc. maxAwarenessClientsPerRoom = 256 (repeated-flood bound 512), maxAwarenessClientsPerSocket = 4.",
-    "Filter in the repository's build, workspace mode on two real binaries: one socket's 2,048-client frame reaches carol on A as 4 clients and bob on B as 4; a peer announcing 10 clients in 10 frames is held to 4 on both. A 600-byte nameless first message is closed on A and B.",
-    "Relay and memory, workspace mode: 400,000 invented ids in 6 s took A from 60 to 68 MB (live) and 55 to 62 MB (null), B unchanged. A live flood from one socket re-announced for 41 s: A and B unchanged at 59 MB, B holds 4 of the socket's clients, and a reader joining during it is seen on both processes within 1 s.",
-    "Real browsers on main's two-process harness, workspace build (gorilla v1.5.4-pre, filter active), 2 runs each: six tabs, three per process, see each other's carets within 1 s over 8 rounds; a reconnecting tab is shown on A within 157-237 ms over 6 reconnects; the first message on each document socket is Auth naming the document (38-byte header); coedit.multiprocess passes."
-  ],
-  "notes": [
-    "For the architect: with the room bound back at 256, 200 sockets of one user, each holding its four allowed clients, fill A's room. B then holds 256 bot clients, and a reader who joins A is seen by carol on A at once but not by bob on B within 1 s, nor during the next 45 s of the flood. 64 sockets are enough, and each process admits 1,000 connections. In round 7, with the room bound at 4,000, the same flood passed. This is the chosen bound working as designed, so it is not counted as a failure; whether a per-user connection cap should close it is the architect's call."
-  ],
-  "ci": "At c83f0a4e only changes and pr-title were queued, and 8400fca7 has 0 check runs. GitHub reads the PR mergeable state as UNKNOWN while it recomputes, and the PR waits for the merge queue (architect)."
+  "ci": "GitHub reads PR #2414 MERGEABLE (mergeStateStatus BLOCKED). At 09e42b20 only changes and pr-title are queued and no other lane has run; the PR waits for the merge queue (architect)."
 }
