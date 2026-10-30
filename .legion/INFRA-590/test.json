@@ -2,64 +2,81 @@
   "schemaVersion": 1,
   "phase": "test",
   "issue": "INFRA-590",
-  "completed": "2026-10-30T13:20:00Z",
-  "round": 17,
-  "testedHead": "141704508a7254de319a64f0b5ee602343f78d1f",
-  "previousTestedHead": "bcf50ed5282d0655405e648be162f1df774ab173",
-  "roundShape": "Full round, as the architect named it: the merge 3760e51c resolves #2508's changes in runtime code this pull request rewrites (outbox/batch.go, outbox/publisher.go, internal/bus), and 14170450 changes internal/bus/async.go.",
+  "completed": "2026-10-30T20:30:00Z",
+  "round": 20,
+  "testedHead": "fd93819c3426058f1f42b121f57c8bb934637473",
+  "previousTestedHead": "141704508a7254de319a64f0b5ee602343f78d1f",
+  "roundShape": "Full round, as the architect briefed it (the round-14 fix 4fc3e0d2 in internal/bus and outbox was never tested; round 18 was stopped before it ran). round-shape.py v3, 43b11284e4bb6fdacc44707f002c0b7a6be74a9b -> fd93819c3426058f1f42b121f57c8bb934637473, pull request 2395: files whose own diff differs: 1 (.github/workflows/ci.yaml); nothing equal only after normalisation.",
   "implementerProof": {
     "verdict": "verified",
-    "how": "Re-ran the implementer's commands at 14170450 on a fresh UTF8 pod Postgres 17 database: bus package ok (355.8 s); TestARequestWhoseConnectionIsLostAnswersUnavailable -count=50 ok and CGO_ENABLED=1 -race -count=10 ok (10 of 10, no data race); outbox, duty and store ok; multiprocess ok (1070.3 s). With the fix reverted and the test hook called before the old synchronous flush, the test fails 3 of 3 with 'no answer within 10s' (window_request_test.go:175), so it pins the fix. Reverting async.go alone does not fail it, because the old code never calls the hook."
+    "how": "Re-ran the implementer's checks at fd93819c on fresh UTF8 pod Postgres 17 databases: build, vet (with -tags multiprocess) and gofmt clean; infra vets clean; bus, outbox, duty, store, cmd/listener and kvwatch ok; multiprocess ok. The round-14 probe test TestEveryDeniedRequestOfOneWindowNamesItsOwnSubject passes 8 of 8 at the head and fails 8 of 8 on 14170450's code (48 of 64 denied requests answered 'NATS did not acknowledge the publish' instead of their own denial)."
   },
-  "failures": [],
-  "failed": 0,
+  "failures": [
+    {
+      "criterion": "The merge is current with main: #2395 merges into main without conflict (architect's 19:49Z brief: if #2391 or #2392 lands mid-round and #2395 conflicts, complete failing on the conflict)",
+      "evidence": "#2392 merged during the round; GitHub reports #2395 CONFLICTING at 20:26Z. git merge-tree fd93819c against main 2b891d474490fea0b1b8969d190477f59240bdeb: content conflicts in docs/site/src/content/docs/dispatch/running-dispatch.md, packages/envoy/AGENTS.md and packages/envoy/infra/README.md; and main now carries 0149_event_horizon.up.sql/.census.sql, the same version number as this pull request's 0149_duty_holds, so the migrations must be renumbered (0150_duty_holds, 0151_outbox_claim, unless #2391 lands first)."
+    },
+    {
+      "criterion": "A stalled destination holds back only itself (plan summary: 'one send in flight per pair ... a stalled destination holds back only itself'); spec: the outbox stays correct and fast",
+      "evidence": "A role holder that takes its forward and never sends the receipt (a session that died holding a role: registered and fresh for up to session.ClaimStaleAfter) holds back every other issue's events for its whole 5 s roleReceiptTimeout, at every retry of its event: no new batch starts while a batch waits for that receipt. Live, real envoy-dispatch built at fd93819c, real nats-server, holders registered through the role and session buckets: with two issues routed to a holder that never answers, 24 of 30 comments written one a second on a third issue reached their answering holder more than 1 s late (median 2.845 s, max 4.962 s; 'sent batch' every 5.0 s from 20:00:54 to 20:01:34). The same run on main's build at 0be366cf8a: 3 of 30 late (median 0.05 s, the listener's single 2 s receipt wait at the start). Red test: packages/envoy/internal/dispatch/outbox/stalled_holder_latency_test.go, TestAHolderThatNeverAnswersDoesNotDelayAnotherIssuesEvents; DISPATCH_TEST_DATABASE_URL=<db> go test -count=3 -run 'TestAHolderThatNeverAnswersDoesNotDelayAnotherIssuesEvents$' ./internal/dispatch/outbox/ fails 3 of 3: 'the answering holder received T-2's forward 4.826s after its commit, want within 1s'. With the first holder answering, the same test passes 3 of 3 (0.35-1.39 s runs)."
+    }
+  ],
+  "failed": 2,
   "proof": [
     {
-      "criterion": "INFRA-745's production scenario on the real binary at this head: five comments in quick succession on one issue routed to a session, under a grant with notifications.> withheld; each event's attempt_count, /metrics by reason, the ERROR lines, and the events behind the head publishing in order once the grant returns",
-      "surface": "real envoy-dispatch built at 14170450, as an nkey user of a real nats-server 2.10.29 whose publish permission is allow > deny notifications.>, changed by a configuration reload (SIGHUP) as an operator changes a grant; a second, ungranted connection subscribed to notifications.dispatch.issue.PV-1.> and notifications.agent.ses_p745 as the session; issue PV-1 routed to session:ses_p745",
-      "command": "natsr -c nats.conf (a copy of internal/testnats/cmd/natsd that reloads on SIGHUP); env NATS_NKEY_SEED_FILE=<seed> NATS_URLS=nats://127.0.0.1:14222 envoy-dispatch; five POST /api/v1/issues/PV-1/comments within 0.9 s; psql select id, attempt_count, published_at, published_destinations, next_attempt_at, publish_error from events; curl /metrics; then the grant restored by reload",
-      "observed": "Withheld, 40 s: event 4 (comment 1) attempt_count 4, publish_error 'bus: NATS denied the publish to \"notifications.dispatch.issue.PV-1.comment.created\" ...'; events 5-8 attempt_count 0, no error, next_attempt_at equal to event 4's (held behind it); /metrics envoy_dispatch_outbox_publish_failures_total{reason=\"denied\"} 8 (4 attempts x 2 destinations), no failed or refused series. Every outbox ERROR line is msg=\"dispatch outbox: publish event\" event_id=4 and names both subjects as 'NATS denied the publish to <subject>'; none says 'NATS is unreachable'. The session received nothing. Grant restored at 12:41:07.8Z: event 4 retried at its back-off (12:41:33.97Z, attempt 6) and all five published in one batch at 12:41:33.977Z, denied total 12 (6 x 2). On both subjects the session received event 4, 5, 6, 7, 8 (comment 1 to 5) in order, each envelope carrying quiet=false.",
-      "headSha": "141704508a7254de319a64f0b5ee602343f78d1f",
-      "negativeControl": "The same scenario on main's own build at the merge base 88818a3b9b: every one of the five events was attempted (attempt_count 4 each after 40 s, denied 40, an ERROR line per event per attempt), and once the grant returned the session received comments 2-5 at 12:44:45.911Z and comment 1 twenty seconds later at 12:45:05.901Z: out of order. This head delivers comment 1 first."
+      "criterion": "A NATS reconnect marks the hooks due and fires this pull request's connection-change signal; #2504's /healthz stall report degrades and recovers",
+      "surface": "real envoy-dispatch and envoy-listener built at fd93819c, each an nkey user of a real nats-server 2.10.29; the listener's publish grant denying $JS.API.CONSUMER.CREATE.KV_envoy_sessions(.>) while NATS restarts, so its rewatch of the session cache fails after the reconnect",
+      "command": "kill -TERM nats at 20:05:00; POST a comment on RH-7 while it is down; restart nats with the denying configuration at 20:05:08; curl the listener's /healthz every 5 s; then restore the grant by reload (SIGHUP) at 20:07:07 and curl every 2 s",
+      "observed": "Dispatch released the publisher hold 3.0 s after the disconnect ('NATS lost'); the comment written while NATS was down was published at 20:05:08.801, 9 ms after the reconnect (20:05:08.792) and the hold taken back (08.793). The listener logged WARN 'reconnect hook failed; it is retried' at stall 15, 30 and 46 s, then ERROR 'reconnect hooks have not succeeded' from stall 63 s; /healthz stayed 200 healthy until 20:06:08 and answered 200 degraded from 20:06:13: 'KV watch rebuild unavailable: rewatch session cache: watch session registry KV bucket: context deadline exceeded (no rebuild has succeeded for 1m5s)'. 4 s after the grant returned it answered healthy again. TestHealthzAnswersAHookStallPastTheRepairGrace, TestHealthzReportsARecreatedDurableThroughAHookStall and TestHookStallReportsTheStallAndTheLastHookError pass.",
+      "headSha": "fd93819c3426058f1f42b121f57c8bb934637473",
+      "negativeControl": "The same /healthz under the grace (stall 10-60 s after the reconnect) answered healthy, and so did every sample after the grant returned."
     },
     {
-      "criterion": "INFRA-745 acceptance 3 and this PR's per-issue order, both on that scenario",
-      "surface": "the run above",
-      "command": "as above",
-      "observed": "Met, with one difference from main for the reviewer to judge: a denied issue-topic publish is counted (reason=\"denied\") and logged at ERROR naming the denied subject, and is retried, never dropped; the issue's later events wait behind it and publish in order once the grant returns. Unlike main, the events behind the head are not attempted while it is denied, so they get no attempt, no publish_error and no log line of their own, and the counter counts attempts of the head (2 per attempt here) rather than of every waiting event. On both builds the outbox's ERROR line comes 5 s after the server's violation (the ack wait), so that delay is main's too.",
-      "headSha": "141704508a7254de319a64f0b5ee602343f78d1f",
-      "negativeControl": "main's build delivers comment 1 after comments 2-5 (above)."
+      "criterion": "Role-holder outcomes counted on /metrics, never failed",
+      "surface": "real envoy-dispatch at fd93819c; three role holders registered in the role and session buckets: one live that never answers, one whose session entry is 10 minutes old, one that answers",
+      "command": "issues RH-1, RH-4 and RH-3 routed to role:t590-unans, role:t590-stale2 and role:t590-ans; a comment on each; curl /metrics",
+      "observed": "envoy_dispatch_outbox_publish_failures_total{reason=\"unanswered\"} for the live silent holder (ERROR names 'request to \"notifications.agent.ses_unans\": NATS did not acknowledge the publish: bus: no receipt inside the request window'); {reason=\"holder\"} 5 after 5 attempts for the stale holder (ERROR 'the role's holder ses_stale2 has not heartbeated within 5m0s'); no failed series; the answering holder's events published. Each held issue's later comment waited behind it with attempt_count 0.",
+      "headSha": "fd93819c3426058f1f42b121f57c8bb934637473",
+      "negativeControl": "A holder registered through the session registry's Put with an old UpdatedAt is stamped fresh by the registry and was counted unanswered, not holder; only the raw stale entry the outbox's own test writes reads as stale."
     },
     {
-      "criterion": "#2508 in the batch model: quiet in every envelope; every send that did not reach NATS counted once",
-      "surface": "the real-binary run above, and the outbox package",
-      "command": "go test -p 2 -parallel 4 -count=1 -v ./internal/dispatch/outbox/ ./internal/dispatch/duty/ ./internal/dispatch/store/",
-      "observed": "Every envelope the session received (issue.created, issue.updated, five comment.created, on both subjects) carried quiet. The denied count was 2 per attempt of the head, matching its 6 ERROR lines across 2 destinations. TestEnvelopePayloadStatesWhetherTheEventIsQuiet, TestRunRetriesAnIssueTopicNATSDenies, TestRunCountsEveryDeniedJetStreamDestinationOfOneEvent, TestRunCountsADeniedSubjectOncePerRefusedMessage (on two issues) and TestAPublishFailureThatEndsTheAttemptIsCountedOnce pass; outbox ok 399.2 s, duty ok 45.6 s, store ok 416.2 s.",
-      "headSha": "141704508a7254de319a64f0b5ee602343f78d1f",
-      "negativeControl": "Main's build on the same denial counted 40 against this head's 8 at the same moment, because it attempts every event (above)."
+      "criterion": "The reviewer's round-14 probe: under concurrent denials each denied Request names its own subject and is counted denied",
+      "surface": "internal/bus package on a real nkey-granted NATS",
+      "command": "go test -count=8 -run 'TestEveryDeniedRequestOfOneWindowNamesItsOwnSubject$' ./internal/bus/ at fd93819c, and the same test file in a tree of 141704508a72's packages/envoy",
+      "observed": "fd93819c: 8 of 8 pass. 14170450: 8 of 8 fail at request_denied_window_test.go:71, 48 of 64 requests answered 'NATS did not acknowledge the publish: bus: no receipt inside the request window'.",
+      "headSha": "fd93819c3426058f1f42b121f57c8bb934637473",
+      "negativeControl": "14170450's code fails the same test 8 of 8."
+    },
+    {
+      "criterion": "Migrations 0149/0150 above main's 0148, both ways",
+      "surface": "real binaries on one fresh database: main's envoy-dispatch at 0be366cf8a, this head, main's again",
+      "command": "roll.sh main1/head1/main2: each starts on t590roll20, writes a comment, reads /healthz, schema_migrations, events and duty_holds, then SIGTERM",
+      "observed": "main: schema 148, 3 of 3 published, no duty_holds table; head: schema 150, outbox_publisher true, 4 of 4 published, 0 duty_holds rows after SIGTERM; main again on 150: 5 of 5 published.",
+      "headSha": "fd93819c3426058f1f42b121f57c8bb934637473",
+      "negativeControl": "main's own schema has no duty_holds relation (ERROR: relation \"duty_holds\" does not exist)."
     },
     {
       "criterion": "One publisher, take-over within 10 s, each session takes each event once and in order",
       "surface": "two real envoy-dispatch processes on one Postgres and one NATS (multiprocess harness)",
-      "command": "cd packages/envoy && DISPATCH_TEST_DATABASE_URL=<fresh pod database> go test -p 2 -parallel 4 -tags multiprocess -count=1 -timeout 40m -v ./cmd/dispatch",
-      "observed": "ok 1070.3 s, peak memory 2.93 GB. Take-over 5.1 s after SIGKILL, 3.0 s after a NATS cut, 2.3 s after a silent cut, 4.4 s after SIGSTOP; the resumed process logged the hold lost 4 ms after it resumed; the watcher took 200 comments, the role's holder 80, the thread's author 60, each once and in order. A first run in a background job was ended by SIGHUP from outside at 12:56:33Z with no test failed; this foreground run replaces it.",
-      "headSha": "141704508a7254de319a64f0b5ee602343f78d1f",
+      "command": "DISPATCH_TEST_DATABASE_URL=<fresh pod database> go test -p 2 -parallel 4 -tags multiprocess -count=1 -timeout 40m -v ./cmd/dispatch",
+      "observed": "ok 788.9 s, peak 4.32 GB. Take-over 4.94 s after SIGKILL, 3.00 s after a NATS cut, 2.45 s after a silent cut, 5.91 s after SIGSTOP; the resumed process logged the hold lost 4 ms after it resumed; the watcher took 200 comments, the role's holder 80, the thread's author 60, each once and in order.",
+      "headSha": "fd93819c3426058f1f42b121f57c8bb934637473",
       "negativeControl": "TestAFrozenPublisherSendsNothingWhenItResumes: the SIGSTOPped holder sent nothing after it resumed."
     },
     {
-      "criterion": "Migrations 0148/0149 above main's 0147, in both directions; connections per process 89",
-      "surface": "real binaries on one database: main's build at 88818a3b9b, then this head, then main's build again",
-      "command": "main's envoy-dispatch on a fresh database; head envoy-dispatch on it; main's envoy-dispatch on it again; each writes a comment; psql select max(version) from schema_migrations; select count(*) filter (where published_at is not null) from events. infra: go vet ./..., go vet -tags natslive ./core/, go test -run TestDispatchConnectionsPerPodIsTheServers ./gcp/",
-      "observed": "Main's database at 147; the head migrates it to 149 (/healthz schema_version 149, outbox_publisher true) and publishes, and on SIGTERM leaves no duty_holds row; main's build runs on 149 and publishes: 10 of 10 events published. Infra vets clean; dispatchConnectionsPerPod = 89 and its test passes.",
-      "headSha": "141704508a7254de319a64f0b5ee602343f78d1f",
-      "negativeControl": "Main's build on its own schema 147 has no duty_holds table, and still runs on the head's 149."
+      "criterion": "Suites, build step, CI filter line, count 89",
+      "surface": "packages/envoy and packages/envoy/infra",
+      "command": "go test -p 2 -parallel 4 ./internal/bus/; ./internal/dispatch/outbox/ ./internal/dispatch/duty/ ./internal/dispatch/store/; ./cmd/listener/ ./internal/kvwatch/; go build ./..., go vet ./..., go vet -tags multiprocess ./cmd/dispatch, gofmt -l; infra go vet ./..., go vet -tags natslive ./core/, TestDispatchConnectionsPerPodIsTheServers; uv run --with pyyaml==6.0.2 bash .github/scripts/check-ci-filters.sh",
+      "observed": "bus ok 337.5 s; outbox ok 287.7 s, duty ok 24.8 s, store ok 263.7 s; cmd/listener ok 496.5 s, kvwatch ok 62.8 s; build, vet and gofmt clean; infra vets clean; dispatchConnectionsPerPod = 89 and its test passes; ci-filters: 2668 files, 0 uncovered, 26 gates.",
+      "headSha": "fd93819c3426058f1f42b121f57c8bb934637473",
+      "negativeControl": "none: suites"
     },
     {
-      "criterion": "CI at 14170450",
+      "criterion": "lint, typecheck, test, pr-title, envoy-go and envoy-go-race at fd93819c",
       "surface": "GitHub check runs",
-      "command": "gh api repos/sjawhar/legion/commits/141704508a7254de319a64f0b5ee602343f78d1f/check-runs",
-      "observed": "At 13:19Z: pr-title success; lint, typecheck, test and the rest queued (26 queued, 3 success, 1 cancelled); the CI run has been queued since 12:30:22Z. No required check has a result yet.",
-      "headSha": "141704508a7254de319a64f0b5ee602343f78d1f",
+      "command": "gh api repos/sjawhar/legion/commits/fd93819c3426058f1f42b121f57c8bb934637473/check-runs --paginate",
+      "observed": "At 20:26Z: pr-title success; lint, typecheck, test, envoy-go and envoy-go-race queued (CI run 41118143147 queued since 19:47:41Z): 23 queued, 2 in progress, 4 success, 1 cancelled. Unread: every lane but pr-title has no result.",
+      "headSha": "fd93819c3426058f1f42b121f57c8bb934637473",
       "negativeControl": "none: a read of CI"
     }
   ]
