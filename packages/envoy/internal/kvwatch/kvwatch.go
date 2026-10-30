@@ -186,28 +186,35 @@ func (w *Watcher) logger() *slog.Logger {
 	return w.log
 }
 
-// Start arms the first watcher in the background, so a store's Open never waits on WatchAll. A
-// first start that fails logs its error. When no watcher is current it records the error and
-// releases readiness, so a caller waiting for the cache sees the empty cache rather than hanging.
-// When a reconnect hook's Rewatch has armed one meanwhile, it does neither: the error is not that
-// watcher's, and that watcher releases readiness once it has delivered every existing key. Start
-// always reads the bucket in full: no applied revision survives the process.
+// Start arms the first watcher in the background, so a store's Open never waits on WatchAll. The
+// watch fails only before it has installed a watcher, so the error is always the first watch's
+// own. While no watcher is current it is logged at ERROR, recorded and followed by the readiness
+// release, so a caller waiting for the cache sees the empty cache rather than hanging. When a
+// reconnect hook's Rewatch has installed one meanwhile, it does none of that: the failure is
+// logged at INFO, since the replacement already feeds the cache, and that watcher releases
+// readiness once it has delivered every existing key. An operator is paged for a cache nothing
+// feeds, not for a failed watch a repair has already taken over, and the end of a replaced
+// watcher is silent on the other path too (consume). Start always reads the bucket in full: no
+// applied revision survives the process.
 func (w *Watcher) Start() {
 	go func() {
 		err := w.watch(w.first, nil, 0)
 		if err == nil {
 			return
 		}
-		w.logger().Error(w.name+" watch failed", slog.String("error", err.Error()))
 		w.mu.Lock()
 		current := w.watcher != nil
 		if !current && !w.stopped {
 			w.err = err
 		}
 		w.mu.Unlock()
-		if !current {
-			w.signalReady()
+		if current {
+			w.logger().Info(w.name+" first watch failed after a rewatch replaced it; the replacement feeds the cache",
+				slog.String("error", err.Error()))
+			return
 		}
+		w.logger().Error(w.name+" watch failed", slog.String("error", err.Error()))
+		w.signalReady()
 	}()
 }
 

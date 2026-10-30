@@ -1079,9 +1079,15 @@ process" in `packages/envoy/cmd/dispatch/README.md` holds the preconditions. The
 the first, since every pod reads the one `DISPATCH_SIGNING_KEY` in the Secret
 `<hostname>-dispatch`. The second bounds what a migration may change, since the rolling update
 runs the new image's migrations while the previous build is still serving: "Database migrations"
-in the same README holds the rule. Each process closes a client connection after its next response
-once the connection is 60 seconds old, so after a roll the front door's and the in-cluster
-callers' keep-alive connections spread onto the pods that have just come up.
+in the same README holds the rule. Event writes on different issues commit out of id order, and a
+process reads the event log for its live readers only up to the safe horizon below which every
+event is final. A build from before that change (#2392) reads past an event still open below the
+newest one, so during a roll that first brings the change, at more than one replica, an old pod's
+live stream and delivery hub can skip an event a new pod commits out of id order; deploy that
+release at one replica, which recreates the pod, and raise the count afterwards. Each process
+closes a client connection after its next response once the connection is 60 seconds old, so
+after a roll the front door's and the in-cluster callers' keep-alive connections spread onto the
+pods that have just come up.
 
 Every container reads its environment once, at start, and Dispatch reads the Azure key file and
 the NATS seed once, at boot, as the listener reads the seed, so a pod boots on a secret's new value
