@@ -13,10 +13,10 @@ const canonicalUUIDForm = `^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9
 //
 // The guard is a regex because an index expression must be immutable: `~` is immutable, while
 // pg_input_is_valid is only stable and create index refuses it. This expression is safe in an
-// index, and must stay equal to the literal SQL migration 0145 spells out, since a migration's
+// index, and must stay equal to the literal SQL migration 0148 spells out, since a migration's
 // text is immutable and Postgres reaches an expression index only through a predicate comparing
 // its exact expression: docs.TestRecordedMarkRefsReadsThroughTheAnchorIndexes fails the moment
-// an edit here diverges from 0145.
+// an edit here diverges from 0148.
 func CanonicalUUID(text string) string {
 	return `(case when ` + text + ` ~ '` + canonicalUUIDForm + `' then (` + text + `)::uuid end)`
 }

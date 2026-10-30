@@ -6,7 +6,7 @@ import (
 )
 
 // AsksOutsideAnchorArtifactIndex counts the anchored asks that asks_anchor_artifact_id (migration
-// 0145) leaves out: those whose anchor names an artifact_id that is not a lower-case document id,
+// 0148) leaves out: those whose anchor names an artifact_id that is not a lower-case document id,
 // so the index expression's regex guard answers null for them rather than casting. It counts them
 // through CanonicalUUID, the guard itself, so the count can never describe a different set of rows
 // than the index leaves out. Settlement's sweep reads asks through that index and keeps the text

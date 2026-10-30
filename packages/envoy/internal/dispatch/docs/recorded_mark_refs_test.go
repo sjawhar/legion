@@ -60,7 +60,7 @@ func TestRecordedMarkRefsListsOnlyTheDocumentsAnchoredRows(t *testing.T) {
 	}
 }
 
-// asks_anchor_artifact_id (migration 0145) guards its uuid cast with a regex, so an anchor whose
+// asks_anchor_artifact_id (migration 0148) guards its uuid cast with a regex, so an anchor whose
 // artifact_id is not a lower-case document id is left out of the index rather than failing its
 // build. recordedMarkRefs compares that same guarded expression, so such a row costs the read
 // neither an error nor a row: the guard answers null for it, and the text comparison beside it

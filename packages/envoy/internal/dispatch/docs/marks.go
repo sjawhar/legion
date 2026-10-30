@@ -751,7 +751,7 @@ func loadAnchorRefreshedCommentDeliveries(ctx context.Context, tx pgx.Tx, id str
 // recordedMarkTarget is one table a document's recorded marks live in: its name, the SQL
 // expression that reads an anchor's artifact_id as a uuid there, and the anchor index that
 // carries exactly that expression. The expression differs per table because the index does: an
-// ask's is store.CanonicalUUID's guarded cast, written out in migration 0145, a comment's the
+// ask's is store.CanonicalUUID's guarded cast, written out in migration 0148, a comment's the
 // plain cast of comments_anchor_artifact (0032).
 type recordedMarkTarget struct {
 	table      string

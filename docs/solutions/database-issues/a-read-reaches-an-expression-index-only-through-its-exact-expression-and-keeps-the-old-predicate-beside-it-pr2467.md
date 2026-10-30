@@ -60,7 +60,7 @@ related_issues:
   enforces this, and rows written by earlier releases are unchecked: an ask holding both columns
   was listed under neither document, so its mark was swept. Since sjawhar/legion#2483 the read no
   longer depends on it: asks are read by the anchor's artifact alone, the same predicate as
-  comments, through `asks_anchor_artifact_id` (migration `0145`), an index added for that exact
+  comments, through `asks_anchor_artifact_id` (migration `0148`), an index added for that exact
   expression rather than a predicate bent to fit the index that existed. That index's expression
   guards the cast with a canonical-form regex (`case when anchor->>'artifact_id' ~ '^[0-9a-f]{8}-…$'
   then (anchor->>'artifact_id')::uuid end`), so a stored anchor that does not cast can fail
@@ -78,7 +78,7 @@ related_issues:
   `api/events.go`, both ask arms of `api/search.go`, `refs/graph.go`'s ask node and
   `docs/marks.go`'s `loadAnchorRefreshedAsk`. `pg_input_is_valid` is only stable, so no index can
   carry it: `store.CanonicalUUID`'s immutable regex stays the expression of
-  `asks_anchor_artifact_id` (migration `0145`), the sweep read (`docs/marks.go`'s
+  `asks_anchor_artifact_id` (migration `0148`), the sweep read (`docs/marks.go`'s
   `recordedMarksQuery`) and the boot count (`store.AsksOutsideAnchorArtifactIndex`), so those three
   describe one set of rows. The comment readers stay unguarded: 0032's
   `comments_anchor_artifact` casts every comment row, so no stored comment anchor fails a cast.

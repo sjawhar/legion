@@ -42,9 +42,9 @@ related_issues:
 - A census that counted those rows (`not pg_input_is_valid(...)`) made `envoy-dispatch census`
   answer `REFUSED ... its census counts 1`. That was rejected: nobody could count production's
   asks, so it could stop a production deploy until someone edited the data by hand.
-- The shipped shape: `store/migrations/0145_asks_anchor_artifact_id.up.sql:31` indexes `case when
+- The shipped shape: `store/migrations/0148_asks_anchor_artifact_id.up.sql:31` indexes `case when
   anchor->>'artifact_id' ~ '<lower-case uuid>' then (anchor->>'artifact_id')::uuid end`; its census
   is `select 0` (`.census.sql:7`); `store.AsksOutsideAnchorArtifactIndex` counts the left-out rows
   through `store.CanonicalUUID`, the same expression, and `cmd/dispatch/main.go:261` logs it as a
-  warning without stopping the boot. `TestMigration0145BootsOverAnAskWhoseAnchorArtifactIDDoesNotCast`
+  warning without stopping the boot. `TestMigration0148BootsOverAnAskWhoseAnchorArtifactIDDoesNotCast`
   pins it.

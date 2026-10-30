@@ -42,7 +42,7 @@ func secondDocument(t *testing.T, handler http.Handler, issueKey string) (string
 // storeAnchorArtifactID rewrites the ask's anchor so its artifact_id is the JSON value rawJSON -
 // a string no uuid cast accepts, a number, a spelling only the cast reads - beside a
 // block_artifact_id. That is the shape only a release before asks_anchor_artifact_id (migration
-// 0145) could store: asks_anchor_artifact (0032) casts an anchor only where block_artifact_id is
+// 0148) could store: asks_anchor_artifact (0032) casts an anchor only where block_artifact_id is
 // null, so no index and no census has ever read this row's artifact_id, and an unguarded cast in
 // a read answers SQLSTATE 22P02 for the whole statement.
 func storeAnchorArtifactID(t *testing.T, database *store.Store, askID, blockDocument, rawJSON string) {

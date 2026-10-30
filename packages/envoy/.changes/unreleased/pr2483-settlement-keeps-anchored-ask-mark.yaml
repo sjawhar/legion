@@ -2,7 +2,7 @@ kind: Fixed
 body: |-
   Dispatch's document settlement keeps the mark of an ask on the document its anchor names when
   the ask also names an ask block on another document; it reads asks by the anchor's document
-  alone through a new index, `asks_anchor_artifact_id` (migration `0145`), so the read stays an
+  alone through a new index, `asks_anchor_artifact_id` (migration `0148`), so the read stays an
   index scan and the marks of every other ask are unchanged. An ask an earlier release stored
   with an anchor whose document id is not a uuid no longer fails the migration, the issue's ask
   list, its events, search or the references graph: it resolves to no document, and each boot

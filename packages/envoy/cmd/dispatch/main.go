@@ -253,7 +253,7 @@ func main() {
 		os.Exit(1)
 	}
 
-	// asks_anchor_artifact_id (migration 0145) indexes the anchors whose artifact_id is a
+	// asks_anchor_artifact_id (migration 0148) indexes the anchors whose artifact_id is a
 	// lower-case document id, the form every server-written anchor carries. A row an earlier
 	// release stored with another spelling is left out, and settlement records no mark for it:
 	// the migration refuses no such row, so the log is where its count is visible. A count that
