@@ -2881,6 +2881,49 @@ func TestAskOptionsEditRefusesRewritingALineHoldingMarkup(t *testing.T) {
 	}
 }
 
+// An option that holds its markup in its own line and nothing under it is a drop the refusal
+// must still catch: the item's words are the link's address and the bold run in that one line,
+// which the plain line a rebuilt list writes would delete, and the row shows the sender none of
+// it. Weighing the item by its text alone would read the item as plain and drop it.
+func TestAskOptionsEditRefusesDroppingALineHoldingMarkup(t *testing.T) {
+	service, artifactID := newTestService(t)
+	service.settle = time.Hour
+	seedServiceText(t, service, artifactID, ":::ask{#ask-lists urgency=\"med\" multiple=\"false\" state=\"open\"}\n"+
+		"Should we ship?\n\n- Ship: Release it\n- Hold: wait for **finance**, see [the memo](https://memo.test)\n:::\n")
+	settleCurrentGeneration(t, service, artifactID)
+	before := liveTree(t, service, artifactID)
+	list := askOptionList(t, service, artifactID)
+
+	options := []model.AskOption{{Label: "Ship", Description: "Release it"}}
+	err := sendAskOptions(service, artifactID, AskBlockEdit{Options: &options})
+
+	var unrepresentable *ErrAskBlockUnrepresentable
+	if !errors.As(err, &unrepresentable) || unrepresentable.Field != "options" {
+		t.Fatalf("err = %v, want ErrAskBlockUnrepresentable on the options", err)
+	}
+	want := `options: the edit drops the option "Hold", whose list item holds more than its plain line, ` +
+		`and the ask-edit route does not delete what a person wrote under an option; its item reads ` +
+		strconv.Quote(askOptionItemMarkdown(t, list, list.Children[1])) +
+		`; send that option back with this edit, or remove what the item holds with a document edit ` +
+		`first (dispatch doc-edit, deleting a block by its id)`
+	if err.Error() != want {
+		t.Fatalf("refusal =\n%v\nwant\n%s", err, want)
+	}
+	for _, word := range []string{"**finance**", "https://memo.test"} {
+		if !strings.Contains(err.Error(), word) {
+			t.Fatalf("err = %v, want it to quote %q", err, word)
+		}
+	}
+	assertAskEditWroteNothing(t, service, artifactID, before, err)
+	_, question, held := blockAskRow(t, service, artifactID, "ask-lists")
+	if question != "Should we ship?" || !slices.Equal(held, []model.AskOption{
+		{Label: "Ship", Description: "Release it"},
+		{Label: "Hold", Description: "wait for finance, see the memo"},
+	}) {
+		t.Fatalf("the ask row = question=%q options=%#v, want it as the refused edit found it", question, held)
+	}
+}
+
 // Two items can carry one label, and what a person wrote belongs to the item they wrote it
 // under. An edit sending both options pairs the option it does not change with the item that
 // already says it, whole, wherever that item stands, and rewrites the other's line. Pairing on
