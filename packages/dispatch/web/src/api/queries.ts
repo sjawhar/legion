@@ -9,8 +9,9 @@ import { beginInboxFetch, finishInboxFetch } from "../features/inbox/ask-thread-
 import { projectIssuesQueryKey } from "../features/project/issue-filters";
 import { compareTimestamps, isTimestamp } from "../lib/timestamps";
 
-import { api } from "./client";
+import { api, isEventHeadUnavailable, isRetryableQueryError } from "./client";
 import { liveSocketFor } from "./live-socket";
+import { queryRetryDelay } from "./query-client";
 import type {
   DeliveryLiveView,
   DeliveryMeasuresResponse,
@@ -20,12 +21,28 @@ import type {
   IssueDetails,
 } from "./types";
 
+/** The longest wait between two asks of the sign-in check while it answers
+ *  `EVENT_HEAD_UNAVAILABLE`: 500 ms, doubling, up to this. */
+export const EVENT_HEAD_RETRY_CEILING_MS = 5_000;
+
 /** The signed-in principal (`/auth/whoami`). One key shared by every surface that reads it; it
- *  names the person by lowercase email, the form issue assignees carry. */
+ *  names the person by lowercase email, the form issue assignees carry.
+ *
+ *  An `EVENT_HEAD_UNAVAILABLE` answer is asked again for as long as it lasts, 500 ms doubling to
+ *  `EVENT_HEAD_RETRY_CEILING_MS` apart, rather than after the two retries every other read gets:
+ *  Dispatch answers it while an event write open since before its restart has not ended, which
+ *  can outlast those retries, and the page opens on its own once it ends. The query stays pending
+ *  meanwhile, so the shell shows its skeleton, never the error page. */
 export const whoAmIQuery = () =>
   queryOptions({
     queryKey: ["whoami"],
     queryFn: () => api.whoAmI(),
+    retry: (failureCount, error) =>
+      isEventHeadUnavailable(error) || (failureCount < 2 && isRetryableQueryError(error)),
+    retryDelay: (failureCount, error) =>
+      isEventHeadUnavailable(error)
+        ? Math.min(500 * 2 ** failureCount, EVENT_HEAD_RETRY_CEILING_MS)
+        : queryRetryDelay(failureCount, error),
   });
 
 /** Every ask the viewer can see, as the Inbox lists them. */
