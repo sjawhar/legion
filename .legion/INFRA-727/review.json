@@ -1,0 +1,35 @@
+{
+  "schemaVersion": 1,
+  "phase": "review",
+  "issue": "INFRA-727",
+  "completed": "2026-10-30T22:39:07Z",
+  "round": 1,
+  "reviewedCodeHead": "50a3a587043681a21cb3ce7b265040be21b7fcc2",
+  "decision": "changes_requested",
+  "critical": 0,
+  "important": 8,
+  "minor": 4,
+  "ci": "CI at the code head 50a3a587 was still queued at 22:31Z (lint, test queued; typecheck skipped; pr-title success). A request for changes does not wait on it.",
+  "thermonuclear": "deep-review and code-quality both run at 50a3a587: CHANGES (deep: 2 important, 4 minor; quality: 3 important, 3 minor). Findings below are the merged, verified set.",
+  "keyFindings": [
+    {"severity": "important", "file": "packages/dispatch/web/src/features/doc/ProofDocument.tsx:354", "description": "whenSent answers from the pending report taken before the re-mark: pending-sync counts a local update only after its IndexedDB write and an async report(), so on a document with nothing pending the wait resolves at once and the retry races the mark to the server; after an offline period with the socket still reconnecting, the retry is refused again and the reader sees the original 'anchor mark is not in the document'. Also: pendingRef is never reset on document change, the boolean is unread, and a real wait opens a window in which the auto-retry sends a draft older than the composer's (KEEP_DRAFT_MS debounce) and the landed send then clears the composer."},
+    {"severity": "important", "file": "packages/proof-editor/src/record-mark-retype.ts:509", "description": "A selection across two blocks never re-anchors: placementOf returns null, readingsInBlock never finds a quote containing the block separator, so remarkRange always answers 'gone' and the reader is told the text was changed or deleted while it is on the page. Reproduced with a throwaway bun test (\"two.\\nBeta\", mark dropped, state rebuilt -> {refused: 'gone'}). The NO_SURROUNDINGS comment and the test at record-mark-retype.test.ts:684 claim this case is handled."},
+    {"severity": "important", "file": "packages/proof-editor/src/record-mark-retype.ts:223", "description": "The tracking plugin can never answer in production: y-prosemirror 1.3.7 applies every remote update as one tr.replace(0, size) (sync-plugin.js:629), which collapses every tracked range, and every local removal goes through removeRecordMark, which ends the entry. Its only test removes the mark with a local tr.removeMark. Delete it and restore removeRecordMark's contract."},
+    {"severity": "important", "file": "packages/envoy/internal/dispatch/docs/marks.go:863", "description": "The TTL is counted from the last sweep that saw the author, not from the author's last presence, so a socket drop just before the re-armed sweep removes the mark at once; README:2290, AGENTS.md:627-631, the changelog fragment and the PR body all claim 'counted from its author's last presence'."},
+    {"severity": "important", "file": "packages/proof-editor/src/record-mark-retype.ts:492", "description": "'unplaceable' ('no longer where you selected it') is answered when two readings inside the reader's own block both match the surroundings, where the words are exactly where selected; margin-context.tsx:273 answers 'gone' ('changed or deleted') when the compose's document is merely not on screen. Both break the architect's 21:48Z rule that each refusal says a true thing."},
+    {"severity": "important", "file": "packages/dispatch/web/src/features/conversation/held-sends.ts:483", "description": "HeldSends.retry copies useSessionSends.ts:58-73's retry line for line; one Retry in two places will drift."},
+    {"severity": "important", "file": "PR body", "description": "No '## Contract change census': MarkAction.placement is a new required field and ProofEditorHandle.remarkMark a new method at the @legion/proof-editor package boundary, pmdoc.ListMarks changes its return type, and the persisted held-send shape gains placement."},
+    {"severity": "important", "file": "packages/envoy/.changes/unreleased/INFRA-727-compose-keeps-anchor.yaml", "description": "Fragment is named and keyed with the Dispatch issue key (Issue: INFRA-727); AGENTS.md requires pr<number>-... and Issue=pr2548, and no issue key in the name or Issue field."},
+    {"severity": "minor", "file": "packages/proof-editor/src/record-mark-retype.ts:421", "description": "readingCount is a second copy of readingsInBlock's scan held in step by a comment, and two ways say 'no filter' (optional surroundings and NO_SURROUNDINGS); one helper returning each reading with a surrounded flag."},
+    {"severity": "minor", "file": "packages/dispatch/web/src/features/margin/margin-context.tsx:299", "description": "The re-addressed anchor literal is built twice (299, 411) with null/undefined conversions at four sites; one anchorAt helper and one representation."},
+    {"severity": "minor", "file": "packages/dispatch/web/src/features/doc/ProofDocument.tsx:354", "description": "The pending-waiter machinery belongs beside the pending report rather than in a 987-line component; return Promise<void> since nothing reads the boolean."},
+    {"severity": "minor", "file": "packages/proof-editor/src/record-mark-retype.ts", "description": "After the tracking plugin goes, the text-quote placement code (QUOTE_CONTEXT_CHARS, surroundings, scans, blockWithId, placementOf) is its own concern with two consumers; dispatch-action-bar.ts imports placementOf from the retype module."}
+  ],
+  "verifiedCorrect": [
+    "Retry carries a fresh Idempotency-Key: retriesUnderItsKey is true only for SendStoppedError (keyed-write.ts:93), so requestFor mints a new key for the 409.",
+    "VerifyMark's final read (marks.go:175-198) is correct; holding the room lock across the sweep loop does no I/O under it.",
+    "pmdoc.ListMarks has one production caller (marks.go:841).",
+    "Server ANCHOR_MISSING wording for agents is unchanged."
+  ],
+  "proseFixedByReviewer": "PR body only (no commit): 'Proven by' row count and 'Size' line corrected, 'Look at first' and 'Not proven / risk' written."
+}
