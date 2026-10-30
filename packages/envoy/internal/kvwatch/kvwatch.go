@@ -79,9 +79,11 @@ type Watcher struct {
 	generation uint64
 	stopped    bool
 	err        error
-	// completeChanged is closed, and replaced with an open channel, at every change to what
-	// WaitComplete answers: completeness, the watcher the generation installs or retires, the
-	// recorded terminal error, and the stop. A waiter takes the state and this channel together
+	// completeChanged is closed, and replaced with an open channel, at every change that can end
+	// a wait: a scan that completed, a terminal error recorded, and the stop. A change that leaves
+	// a blocked waiter's reading as it was - a replacement watcher installed, which is still not
+	// complete - wakes nobody, since such a waiter has already read err == nil, not stopped and
+	// not complete. A waiter takes the state and this channel together
 	// under mu, so a change made after that reading is already a wake-up it will see, and reads
 	// the state again on every wake-up, since completeness is not one-way. New makes it, and
 	// every replacement is made under mu, so it is never nil and no waiter blocks on a nil
@@ -663,9 +665,9 @@ func (w *Watcher) watch(kv bus.KeyValue, conn *nats.Conn, replacing uint64) erro
 		if from == 0 {
 			w.hw.Store(0)
 		}
-		// The replacement's own scan has to complete before the cache is complete again, and this
-		// watch cleared any recorded error, so a caller waiting for a complete view waits for it.
-		w.wakeComplete()
+		// No wake here: a waiter still blocked has read err == nil, not stopped and not complete,
+		// and this switch leaves it not complete, so there is nothing it would read differently.
+		// The replacement's own scan ends that wait, through scanEnded's wake.
 		// The replacement runs, so the stop it repaired needs no ERROR.
 		w.clearRepairArm()
 		w.mu.Unlock()

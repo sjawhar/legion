@@ -376,8 +376,7 @@ jobs:
             # outside the daemon: contracts' fixtures
             # (internal/api/state_golden_test.go:27, internal/intake/intake_test.go:698), the two
             # Oh My Pi plugins internal/daemon/promptreferences_omp_test.go:132 packs, whose prepack
-            # bundles contracts and envoy-client, stages skills/ and writes their notices,
-            # pi-legion's src/phase-stall.ts internal/claudebridge/bridge_test.go:813-817 runs, the
+            # bundles contracts and envoy-client, stages skills/ and writes their notices, the
             # GitHub App helper internal/api/real_github_test.go:88 sources, and the examples and
             # docs its tests hold to the code (cmd/legion/config_example_test.go:24,
             # internal/config/controller_test.go:179, internal/config/kubernetes_test.go:1322,
@@ -2416,9 +2415,11 @@ jobs:
   # the test process (internal/testnats), so no job here needs a container runtime of its own.
   #
   # Delivery, the Dispatch store, the bus, the listener, the registry store, the session cache and
-  # kvwatch share this runner. The store's tests and cmd/listener/dispatch_resolution_test.go open
-  # the Dispatch database through internal/testpg, so the job carries the lane's Postgres service;
-  # the registry store itself is the NATS KV view and needs none.
+  # kvwatch share this runner. The Dispatch store's tests, delivery's
+  # (internal/dispatch/delivery/intake_test.go:39-41, which skips without the database) and
+  # cmd/listener/dispatch_resolution_test.go open the Dispatch database through internal/testpg,
+  # so the job carries the lane's Postgres service; the registry store itself is the NATS KV view
+  # and needs none.
   envoy-go-race:
     needs: changes
     if: needs.changes.outputs.envoy_go_race == 'true'

@@ -397,17 +397,18 @@ func sessionHealthFields(sessions *session.SessionRegistry) map[string]interface
 // failed it by running past the check's timeout. A check that answered with a failure keeps its
 // answer.
 //
-// The role claim view is reported too, after those checks and as a 200 "degraded" naming it
+// The role claim view is reported too, last of all and as a 200 "degraded" naming it
 // (store.Registry.RoleViewErr): until its watcher's first scan has delivered every claim the view
 // answers no read, so GET /v1/sessions and GET /v1/registry/<session_id> answer 503 while every
-// bus check here passes, and the report reads the very state those routes read. Degraded and not
-// unhealthy, because that view fills itself through its watcher's own rescan: a 503 would take a
-// serving listener out of a load balancer for a state that repairs itself, while every probe of
-// this listener runs curl -f or -sf against /healthz, which a 200 passes. For the same reason the
-// view is no part of Ping or WatchErr, whose terminal failures the self-health monitor
-// self-terminates the listener over: a restart completes no scan that keeps timing out. Liveness
-// reads nothing at all here: the listener mounts no /livez, so the liveness probe's curl, which
-// runs without -f, is answered by this mux without a dependency being touched.
+// other check here passes, and the report reads the very state those routes read. It is last so
+// that it hides nothing: every check above answers 503 for a fault that is not self-repairing,
+// and a degraded view must not take the place of one of those. For the same reason the degraded
+// answer carries the healthy body's own fields, so a reader loses no counter while the view
+// fills. Degraded and not unhealthy, because that view fills itself through its watcher's own
+// rescan and a 503 would take a serving listener out of a load balancer for a state that repairs
+// itself: a readiness check runs curl -f or -sf against /healthz, which a 200 passes. For the
+// same reason the view is no part of Ping or WatchErr, whose terminal failures the self-health
+// monitor self-terminates the listener over: a restart completes no scan that keeps timing out.
 func healthzHandler(deps *atomic.Pointer[listenerDeps]) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
@@ -446,10 +447,6 @@ func healthzHandler(deps *atomic.Pointer[listenerDeps]) http.HandlerFunc {
 				return
 			}
 		}
-		if err := d.registry.RoleViewErr(); err != nil {
-			writeDependencyHealth(w, "role claim view", err, false)
-			return
-		}
 		response := map[string]interface{}{"status": "healthy"}
 		for k, v := range sessionHealthFields(d.sessions) {
 			response[k] = v
@@ -476,6 +473,13 @@ func healthzHandler(deps *atomic.Pointer[listenerDeps]) http.HandlerFunc {
 		}
 		response["num_pending"] = consumerInfo.NumPending
 		response["num_ack_pending"] = consumerInfo.NumAckPending
+		// Last, so that no fault above is reported as this one: every check before it answers 503
+		// for something that does not repair itself, and the view does. The answer keeps the
+		// fields above it, so a reader of the counters loses none while the view fills.
+		if err := d.registry.RoleViewErr(); err != nil {
+			response["status"] = "degraded"
+			response["error"] = dependencyUnavailable("role claim view", err)
+		}
 		w.WriteHeader(http.StatusOK)
 		_ = json.NewEncoder(w).Encode(response)
 	}
@@ -505,8 +509,15 @@ func writeDependencyHealth(w http.ResponseWriter, dependency string, err error, 
 	w.WriteHeader(statusCode)
 	_ = json.NewEncoder(w).Encode(map[string]interface{}{
 		"status": status,
-		"error":  dependency + " unavailable: " + err.Error(),
+		"error":  dependencyUnavailable(dependency, err),
 	})
+}
+
+// dependencyUnavailable is the `error` field a /healthz answer gives for a dependency, so the
+// degraded answer that keeps the healthy body's fields reads exactly as writeDependencyHealth's
+// does.
+func dependencyUnavailable(dependency string, err error) string {
+	return dependency + " unavailable: " + err.Error()
 }
 
 // webhookRoute is one configured webhook path and the handler it serves over the only

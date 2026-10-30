@@ -65,7 +65,7 @@ func answerWithin(t *testing.T, cause string, answers <-chan error) error {
 // timer ends one, and which stays live afterwards (kvwatchtest.TimingOut): the cache is ready and
 // never complete, which is the state a WaitComplete blocks in. Without WithRescan nothing scans
 // the bucket again, so only the cause each test turns on can end that wait.
-func timingOutWatcher(t *testing.T, kv bus.KeyValue) (*kvwatch.Watcher, *seen) {
+func timingOutWatcher(t *testing.T, kv bus.KeyValue) *kvwatch.Watcher {
 	t.Helper()
 	into := newSeen()
 	w := kvwatch.New("test cache", bus.KeyValue{KeyValue: kvwatchtest.TimingOut(kv, 0)}, into.apply, into.reset)
@@ -75,7 +75,7 @@ func timingOutWatcher(t *testing.T, kv bus.KeyValue) (*kvwatch.Watcher, *seen) {
 	if _, complete := w.Complete(); complete {
 		t.Fatal("a first scan the idle timer ended reads as complete, so nothing would block in WaitComplete")
 	}
-	return w, into
+	return w
 }
 
 // A first start that fails with no watcher current completes no scan until a Rewatch, so a caller
@@ -154,7 +154,7 @@ func TestWaitCompleteReturnsWhenCheckFindsTheBucketRecreated(t *testing.T) {
 		other:     anotherStreamsStatus(t, conn),
 		recreated: recreated,
 	}}
-	w, _ := timingOutWatcher(t, handle)
+	w := timingOutWatcher(t, handle)
 
 	ctx, cancel := context.WithTimeout(context.Background(), waitCompleteCtx)
 	defer cancel()
@@ -176,7 +176,7 @@ func TestWaitCompleteReturnsWhenCheckFindsTheBucketRecreated(t *testing.T) {
 func TestWaitCompleteReturnsWhenTheWatcherEndsOnItsOwn(t *testing.T) {
 	uri := testnats.URL(t)
 	conn, kv := bucket(t, uri)
-	w, _ := timingOutWatcher(t, kv)
+	w := timingOutWatcher(t, kv)
 
 	ctx, cancel := context.WithTimeout(context.Background(), waitCompleteCtx)
 	defer cancel()
@@ -194,7 +194,7 @@ func TestWaitCompleteReturnsWhenTheWatcherEndsOnItsOwn(t *testing.T) {
 func TestWaitCompleteReturnsWhenStopRetiresTheWatcher(t *testing.T) {
 	uri := testnats.URL(t)
 	_, kv := bucket(t, uri)
-	w, _ := timingOutWatcher(t, kv)
+	w := timingOutWatcher(t, kv)
 
 	ctx, cancel := context.WithTimeout(context.Background(), waitCompleteCtx)
 	defer cancel()
@@ -213,7 +213,7 @@ func TestWaitCompleteReturnsWhenStopRetiresTheWatcher(t *testing.T) {
 func TestWaitCompleteReturnsItsContextsErrorWhileTheViewIsIncomplete(t *testing.T) {
 	uri := testnats.URL(t)
 	_, kv := bucket(t, uri)
-	w, _ := timingOutWatcher(t, kv)
+	w := timingOutWatcher(t, kv)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
 	defer cancel()
