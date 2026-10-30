@@ -1,0 +1,32 @@
+{
+  "schemaVersion": 1,
+  "phase": "review",
+  "issue": "INFRA-841",
+  "completed": "2026-10-30T22:52:00Z",
+  "decision": "changes_requested",
+  "critical": 0,
+  "important": 2,
+  "minor": 1,
+  "keyFindings": [
+    {
+      "severity": "important",
+      "file": "packages/envoy/cmd/dispatch/stream_replicas_test.go:84-111",
+      "description": "The restarted reconcileWait after the repair races the bus's recovery backoff. recoverUntilHealthy waits 1, 2, 4, 8, 16, then 30 s between attempts (internal/bus/recovery.go:308-309, 363-369), and each attempt fails at once while the member is down, so attempts run at about t0, +1, +3, +7, +15, +31, +61. A repair that ends after t0+31 (Cluster.AwaitReady restarting the started member twice: muteAfter 15 s, muteRestarts 3, internal/testnats/cluster.go:156-163, 185-189; the implementer measured one AwaitReady in three restarting once) leaves the next attempt up to 30 s away while the new deadline is also 30 s away, so the Fatalf can fire just before the bus reconciles. The wait after a repair must cover reconcileWait plus the bus's 30 s maximum backoff, and the doc comment must stop claiming reconcileWait alone bounds the reconcile the repair makes possible."
+    },
+    {
+      "severity": "important",
+      "file": "packages/envoy/cmd/dispatch/stream_replicas_test.go:94-147",
+      "description": "The one-caller repair mode (nullable callback, one-shot latch, deadline reset, 10 doc lines) sits inside the wait five tests share, and refusedDispatchStream copies that wait's loop (reconciled check, deadline, fatal, sleep). Split into two single-purpose waits over connectDispatchStream's client (await the reconcile; await the first logged hook failure), so the new test reads connect, await failure, restart member, await reconcile on the test goroutine, and the settings_test.go:922 case reads connect, await failure, close. The code-quality pass built this on a scratch copy: vet clean, the affected tests pass, the file 31 lines shorter."
+    },
+    {
+      "severity": "minor",
+      "file": "packages/envoy/cmd/dispatch/stream_replicas_test.go:236-238",
+      "description": "The HookedConnectionEvents() < 1 check cannot fail: the helper returns only under HookedConnectionEvents() >= 1, and hookedEvents never decreases (internal/bus/recovery.go:201-217). Delete it; the split above removes it anyway."
+    },
+    {
+      "severity": "important",
+      "file": "packages/envoy/cmd/dispatch/settings.go:83,85",
+      "description": "Fixed by the reviewer in 4430e212: both rows said Dispatch 'reconciles the stream on each connection'; ensureStreamOnce does nothing once one run has succeeded (internal/bus/nats.go:490-505), and the minute runs from the first uncovered connection event, which for Dispatch is its first connection (nats.go:584-589). The rows and the changelog fragment now say so."
+    }
+  ]
+}
