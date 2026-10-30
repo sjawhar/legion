@@ -9,12 +9,14 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 
+	"github.com/sjawhar/legion/daemon/internal/admit"
 	"github.com/sjawhar/legion/daemon/internal/claim"
 	"github.com/sjawhar/legion/daemon/internal/intake"
 	"github.com/sjawhar/legion/daemon/internal/notify"
@@ -38,13 +40,20 @@ const (
 	// with every failure switched off is itself a failure of the invariant, reported with its
 	// trace rather than left to the package deadline.
 	keptQuiesceBound = 400
-	// keptRoot is the one root every run drives.
+	// keptRoot is the root every run opens with.
 	keptRoot = "LEGION-1"
+	// keptChild is the root's one child: an issue of the root's tree a person can decide on while
+	// the root lingers, and the issue the root hands over into a tree of its own at the linger's
+	// end (handOver), where it becomes a root with an architect of its own.
+	keptChild = "LEGION-2"
+	// keptTogether is the most rows the concurrent step runs at once, each on a lane of its own.
+	keptTogether = 3
 )
 
-// keptTelling is one time an architect of the root was told a kept decision: the generation the
-// telling names (a catch-up's; a start task names none), whether the root had an architect to hear
-// it when the architect received it, the generation the root stood at then, and what carried it.
+// keptTelling is one time an architect was told a kept decision: the generation the telling names
+// (a catch-up's; a start task names none), whether the root had an architect to hear it when the
+// architect received it, the generation that root stood at then, whose architect heard it, the
+// tree the decision's own issue stood in then, and what carried it.
 type keptTelling struct {
 	ref string
 	// prompt is whether a start task's prompt carried it. A start task names no generation
@@ -55,8 +64,20 @@ type keptTelling struct {
 	hears  bool
 	named  uint64
 	root   uint64
-	how    string
-	step   int
+	// tree is the root whose architect heard it, and issueTree the tree the decision's issue stood
+	// in then. A decision is owed to the architect of the tree its issue is in, so a telling whose
+	// two differ went to an architect that is not the one it was owed to (held).
+	tree      string
+	issueTree string
+	how       string
+	step      int
+}
+
+// keptRef is one decision the run tracks: the Dispatch reference a person decided on, and the
+// issue of that ask, which is the root itself or its child.
+type keptRef struct {
+	ref   string
+	issue string
 }
 
 // keptPublishMode is what the listener does with a role publish this run.
@@ -74,8 +95,11 @@ const (
 	keptRefuses
 	// keptReceiptTimeout: the holder did not confirm in time, so the daemon re-holds the notice
 	// (notify.ErrNotDelivered) and the copy takes the original's claims over (MoveKeptClaims).
-	// Only a notice nobody has re-held yet is answered this way, so the re-hold budget
-	// (noticeReholdDelays) is never spent and the copy is never dropped for exhausting it.
+	// Under the run's own mode only a notice nobody has re-held yet is answered this way, so the
+	// re-hold budget (noticeReholdDelays) is never spent and the copy is never dropped for
+	// exhausting it; the interleaving step answers the one publish it holds open whatever its
+	// resends, which is how a catch-up the run superseded during its publish reaches the
+	// re-hold's superseded branch (raceRow).
 	keptReceiptTimeout
 	// keptDenied: the listener's own NATS grant refuses the forward (notify.ErrPublishDenied),
 	// which no retry can change until an operator changes the grant, so the row finishes
@@ -106,20 +130,57 @@ func (m keptPublishMode) String() string {
 	}
 }
 
+// keptRace is one armed interleaving: the operation that runs, on a goroutine of its own and to
+// completion, while one catch-up's publish is held open, and the answer that publish is then
+// given. The publisher holds no lock of its own while it runs, so the operation meets the daemon
+// exactly where a lane would: the publish is outside every transaction of the row's run.
+type keptRace struct {
+	what string
+	mode keptPublishMode
+	run  func() error
+	// ran says the publish the race was armed for happened, err what the operation failed with,
+	// and outcome what it made of itself, each written by the race's own goroutine before the
+	// publish is answered and read by the step that armed it afterwards.
+	ran     bool
+	err     error
+	outcome string
+}
+
 // keptPublisher is the listener as a role publish meets it, under one mode the run switches. It
-// counts the answer each catch-up drew, so a run reports which modes its catch-ups actually met.
+// counts the answer each catch-up drew, so a run reports which modes its catch-ups actually met,
+// and holds one publish open for the interleaving a step armed (keptRace).
 type keptPublisher struct {
 	mu        sync.Mutex
 	mode      keptPublishMode
 	delivered []outboxPublish
 	answered  [keptModes]int
+
+	raceMu sync.Mutex
+	race   *keptRace
 }
 
 func (p *keptPublisher) Publish(_ context.Context, topic, message string, payload any, key string) error {
+	notice, isNotice := payload.(record.Notice)
+	catchUp := isNotice && notice.CatchUp != nil
+	var raced *keptRace
+	if catchUp {
+		raced = p.disarm()
+	}
+	if raced != nil {
+		// The listener has the notice and has answered nothing. One other operation runs to
+		// completion on a goroutine of its own, and only then is the publish answered.
+		done := make(chan struct{})
+		go func() {
+			defer close(done)
+			raced.err = raced.run()
+		}()
+		<-done
+		raced.ran = true
+	}
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	mode, err := p.answer(topic, payload, key)
-	if notice, ok := payload.(record.Notice); ok && notice.CatchUp != nil {
+	mode, err := p.answer(topic, payload, key, raced)
+	if catchUp {
 		p.answered[mode]++
 	}
 	if err != nil {
@@ -131,24 +192,29 @@ func (p *keptPublisher) Publish(_ context.Context, topic, message string, payloa
 
 // answer is what this run's mode makes of one publish, and the mode that answer is of: a copy the
 // re-hold already queued is delivered rather than timed out again, so the re-hold budget is never
-// spent.
-func (p *keptPublisher) answer(topic string, payload any, key string) (keptPublishMode, error) {
-	switch p.mode {
+// spent. A publish a race held open is answered as the step that armed it chose, whatever the
+// notice's resends: that answer is one the generator picked, not the run's standing mode.
+func (p *keptPublisher) answer(topic string, payload any, key string, raced *keptRace) (keptPublishMode, error) {
+	mode := p.mode
+	if raced != nil {
+		mode = raced.mode
+	}
+	switch mode {
 	case keptNoHolder:
-		return p.mode, fmt.Errorf("publish notice to %s: listener returned 404 Not Found: %w", topic, notify.ErrNoHolder)
+		return mode, fmt.Errorf("publish notice to %s: listener returned 404 Not Found: %w", topic, notify.ErrNoHolder)
 	case keptRefuses:
-		return p.mode, fmt.Errorf("publish notice to %s: listener returned 403 Forbidden: %w", topic,
+		return mode, fmt.Errorf("publish notice to %s: listener returned 403 Forbidden: %w", topic,
 			notify.ErrRefusedByHolder{Holder: "ses-other"})
 	case keptDenied:
-		return p.mode, fmt.Errorf("publish notice to %s: listener returned 403 Forbidden: %w", topic,
+		return mode, fmt.Errorf("publish notice to %s: listener returned 403 Forbidden: %w", topic,
 			notify.ErrPublishDenied{Message: fmt.Sprintf(
 				"envoy: the message bus denied the publish under this listener's own permissions: bus: NATS denied the publish to %q", topic)})
 	case keptDeliveryFailed:
-		return p.mode, fmt.Errorf("publish notice to %s: listener returned 504 Gateway Timeout: %w", topic,
+		return mode, fmt.Errorf("publish notice to %s: listener returned 504 Gateway Timeout: %w", topic,
 			notify.ErrNotDelivered{Reason: notify.ReasonDeliveryFailed, EventID: key})
 	case keptReceiptTimeout:
-		if notice, ok := payload.(record.Notice); ok && notice.Resends == 0 {
-			return p.mode, fmt.Errorf("publish notice to %s: listener returned 504 Gateway Timeout: %w", topic,
+		if notice, ok := payload.(record.Notice); ok && (raced != nil || notice.Resends == 0) {
+			return mode, fmt.Errorf("publish notice to %s: listener returned 504 Gateway Timeout: %w", topic,
 				notify.ErrNotDelivered{Reason: notify.ReasonReceiptTimeout, Holder: "ses-other"})
 		}
 	}
@@ -159,6 +225,22 @@ func (p *keptPublisher) setMode(mode keptPublishMode) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	p.mode = mode
+}
+
+// arm holds the next catch-up publish open for race, and disarm takes the armed race off, so one
+// arming is one interleaving: a step whose publish never came takes its own race back unrun.
+func (p *keptPublisher) arm(race *keptRace) {
+	p.raceMu.Lock()
+	defer p.raceMu.Unlock()
+	p.race = race
+}
+
+func (p *keptPublisher) disarm() *keptRace {
+	p.raceMu.Lock()
+	defer p.raceMu.Unlock()
+	race := p.race
+	p.race = nil
+	return race
 }
 
 // answers is how many catch-up publishes each mode has answered, which a step reads before and
@@ -177,14 +259,15 @@ func (p *keptPublisher) published() []outboxPublish {
 
 // keptForgetStore is the record store with ForgetKeptDecisions failing while the run's toggle is
 // on, as a database error — or the daemon dying — between a start's delivery, or a catch-up's
-// publish, and the forget's commit leaves it.
+// publish, and the forget's commit leaves it. The toggle is read from the lanes the concurrent
+// step runs, so it is held as one word rather than as a field.
 type keptForgetStore struct {
 	record.Store
-	fails bool
+	fails atomic.Bool
 }
 
 func (s *keptForgetStore) ForgetKeptDecisions(ctx context.Context, tx pgx.Tx, root string, kept record.KeptDecisions, row int64) error {
-	if s.fails {
+	if s.fails.Load() {
 		return errors.New("tester: the forget's transaction did not commit")
 	}
 	return s.Store.ForgetKeptDecisions(ctx, tx, root, kept, row)
@@ -251,7 +334,7 @@ func (r *keptRuntime) refused() int {
 type keptCounts struct {
 	// refusedLaunches is every Spawn or Resume the runtime refused.
 	refusedLaunches int
-	// failedClaim is every time the architect's claim spent its launch budget and failed.
+	// failedClaim is every time an architect's claim spent its launch budget and failed.
 	failedClaim int
 	// retriedFailed is every start row that found the claim failed and relaunched it (the
 	// outbox's start, case StateFailed).
@@ -261,6 +344,19 @@ type keptCounts struct {
 	// was the claim itself — failed, retired or unsupervised — rather than the lingering tree.
 	endedCatchUps  int
 	endedByFailure int
+	// raced is every catch-up publish held open for an interleaving, together every step that ran
+	// several rows at once, handovers every child handed into a tree of its own, streamed every
+	// restart whose agent then answered get_state in a turn, and foreign every turn the agent
+	// started on its own on a claim holding a task nobody sent.
+	raced     int
+	together  int
+	handovers int
+	streamed  int
+	foreign   int
+	// supersededTimeouts is every catch-up whose receipt timeout drew no copy from the re-hold
+	// because the operation that ran inside its publish superseded it: the branch that leaves what
+	// the row claims to the row's own deletion (notice_exceptions.go's reholdNotice).
+	supersededTimeouts int
 	// publishes is how many catch-up publishes each listener mode answered.
 	publishes [keptModes]int
 }
@@ -271,6 +367,12 @@ func (c *keptCounts) add(other keptCounts) {
 	c.retriedFailed += other.retriedFailed
 	c.endedCatchUps += other.endedCatchUps
 	c.endedByFailure += other.endedByFailure
+	c.raced += other.raced
+	c.together += other.together
+	c.handovers += other.handovers
+	c.streamed += other.streamed
+	c.foreign += other.foreign
+	c.supersededTimeouts += other.supersededTimeouts
 	for mode := range c.publishes {
 		c.publishes[mode] += other.publishes[mode]
 	}
@@ -279,15 +381,34 @@ func (c *keptCounts) add(other keptCounts) {
 func (c keptCounts) String() string {
 	return fmt.Sprintf("%d launches refused, %d claim failures, %d starts relaunched a failed claim, "+
 		"%d catch-ups finished for an architect that will not hold its role again (%d of them a failed claim); "+
+		"%d publishes held open for an interleaving, %d steps ran rows at once, %d children handed over, "+
+		"%d restarts met a streaming agent, %d foreign turns, %d receipt timeouts the re-hold found superseded; "+
 		"catch-up publishes answered: %d delivered, %d no-holder, %d refused, %d receipt-timeout, %d denied, %d delivery-failed",
 		c.refusedLaunches, c.failedClaim, c.retriedFailed, c.endedCatchUps, c.endedByFailure,
+		c.raced, c.together, c.handovers, c.streamed, c.foreign, c.supersededTimeouts,
 		c.publishes[keptDelivers], c.publishes[keptNoHolder], c.publishes[keptRefuses],
 		c.publishes[keptReceiptTimeout], c.publishes[keptDenied], c.publishes[keptDeliveryFailed])
 }
 
-// keptRun is one seeded life of one root: the real record store, workflow engine, outbox runner
-// and claim supervisor over a database of its own, the model the generator drives them from, and
-// what the architect was told.
+// keptTree is one root the run drives and the architect that hears for it: the root every run
+// opens with, and the child it hands over, which is a root of its own from then on. Each has its
+// claim, its agent's connection and its role topic, and the decisions on the issues of its tree
+// are owed to its architect.
+type keptTree struct {
+	key   string
+	issue record.Issue
+	token claim.Token
+	conn  *fake.Conn
+	topic string
+	// prompts is how many of the connection's prompts observe has read.
+	prompts int
+	// handed is whether this tree exists because the root handed this issue over.
+	handed bool
+}
+
+// keptRun is one seeded life of one root: the real record store, workflow engine, admission,
+// outbox runner and claim supervisor over a database of its own, the model the generator drives
+// them from, and what each architect was told.
 type keptRun struct {
 	t     *testing.T
 	ctx   context.Context
@@ -301,62 +422,86 @@ type keptRun struct {
 	base      record.Store
 	records   *keptForgetStore
 	engine    *workflow.Engine
+	admission *admit.Admission
 	trees     *store.Store
 	claims    *outboxClaimStore
 	rt        *keptRuntime
-	conn      *fake.Conn
 	publisher *keptPublisher
 	sup       *supervisor
 	runner    *outbox
-	token     claim.Token
-	topic     string
 	stateDir  string
 
-	root    record.Issue
-	decided int
-	at      time.Time
-	tracked []string
-	told    map[string][]keptTelling
-	rowGen  map[int64]uint64
-	// sent is every prompt delivery id the architect has been sent, and keys every dedupe key a
-	// notice was delivered under: a repeat of either is the same telling, not a second one.
+	// root is the root the run opens with, child its one child, and roots every tree whose
+	// architect the run drives: the root alone until the hand-over, both after it.
+	root  *keptTree
+	child *keptTree
+	roots []*keptTree
+
+	decided  int
+	at       time.Time
+	tracked  []keptRef
+	told     map[string][]keptTelling
+	rowGen   map[int64]uint64
+	refIssue map[string]string
+	// sent is every prompt delivery id an architect has been sent, keys every dedupe key a notice
+	// was delivered under — a repeat of either is the same telling, not a second one — and applied
+	// every terminal fact key the run has applied, which is what says a launch's ready has been
+	// told to the workflow already.
 	sent     map[string]bool
 	keys     map[string]bool
-	prompts  int
+	applied  map[string]bool
 	publishd int
 	counts   keptCounts
 }
 
-// A person's decision on a root nobody in its tree can hear reaches an architect of the root's
-// current generation exactly once, whatever order the machinery runs in. The test drives random
+// A person's decision on a tree nobody in it can hear reaches an architect of that tree exactly
+// once, whatever order the machinery runs in and whatever runs beside it. The test drives random
 // interleavings of the real parts — record.RelayParkedDecision for the keeping,
 // workflow.Engine.ParkedDecisionTask and EnqueueNaming for the naming, the outbox runner for the
-// delivery and the forget, the supervisor's machines for the architect, and intake.ApplyFact for
-// the ready — over a real PostgreSQL, and holds each run to the invariant after every step:
+// delivery and the forget, the supervisor's machines for the architects, admit.Admission for the
+// hand-over of a child into a tree of its own, and intake.ApplyFact for the ready — over a real
+// PostgreSQL, and holds each run to the invariant after every step:
 //
 //   - no decision is told twice (a start task prompt or a published catch-up naming it again);
-//   - every catch-up telling names the generation the root stands at when the architect receives
+//   - every catch-up telling names the generation its root stands at when the architect receives
 //     it, and every start-task telling reaches a root that has an architect to hear it: a start
 //     task names no generation, and it is held on its claim, unsent, while its root is parked,
 //     lingering or waiting for its slot (supervise's Deps.RootHears);
-//   - once the run quiesces — every injected failure off, every row drained, the architect ready
-//     and its turns ended — every decision kept has been told once and nothing is left kept.
+//   - once the run quiesces — every injected failure off, every row drained, each architect ready
+//     and its turns ended — every decision kept has been told once, to an architect of the tree
+//     its own issue stood in when it was told, and nothing is left kept under any root.
 //
-// Each run is reproducible from its seed alone: the generator is the only source of choices, the
-// machines' clock never moves (stillClock), and every wait is for a goroutine the step started.
+// The last is per root, not per run: the root hands its child into a tree of its own (handOver,
+// the status write a linger's end makes and the re-admission admission makes of it), and from
+// then on a decision a person made on the child's ask is owed to the child's own architect. A
+// telling that reached the architect of another tree than the one its issue stood in then is no
+// telling of that debt, and is reported with the debt it left unpaid.
+//
+// Each seed's operations are its own: the generator is the only source of choices, the machines'
+// clock never moves (stillClock), and every wait is for a goroutine the step started. A run whose
+// steps all ran one at a time replays exactly from its seed; the two steps that run rows beside
+// each other — raceRow, which holds one catch-up's publish open while one other operation runs,
+// and runTogether, which runs several due rows at once on lanes of their own — are ordered by
+// PostgreSQL and the Go scheduler as much as by the seed, so a failure either reaches is reported
+// with its seed and its whole trace and may need more than one replay to come back.
 // LEGION_KEPT_PROPERTY_SEED runs one seed, LEGION_KEPT_PROPERTY_RUNS how many seeds and
 // LEGION_KEPT_PROPERTY_STEPS how many operations each drives.
 //
-// The operations a step chooses among are a person's decision, the root's park (to backlog, or
-// lingering after its close) with the architect's suspend, its hand back to todo with no slot, its
-// re-admission with the start admission writes, one due supervise or notice row of the root run in
-// no particular order (finished, or its finish lost to a crash), the architect's launch coming
-// ready, its turn on the task it holds, the forget's failure switched on and off, the runtime's
-// refusal of every launch switched on and off, the listener switched between delivering, holding
-// no session, refusing the delivery mode, not confirming in time (the re-hold), denying the
-// forward under its own NATS grant and failing to forward at all, and the daemon's restart.
+// The operations a step chooses among are a person's decision on the root or on its child, the
+// root's park (to backlog, or lingering after its close) with the architect's suspend, its hand
+// back to todo with no slot, its re-admission with the start admission writes, the hand-over of
+// its child, one due supervise or notice row of a driven tree run in no particular order
+// (finished, or its finish lost to a crash), several due rows run at once, one catch-up run with
+// its publish held open for another operation, an architect's agent coming up on its launch, the
+// ready fact the daemon's terminal hook then tells the workflow, its turn on the task it holds, a
+// turn the agent started on its own while a task nobody sent waits on the claim,
+// the daemon's restart, the restart whose agent then answers get_state in a turn, the forget's
+// failure switched on and off, the runtime's refusal of every launch switched on and off, and the
+// listener switched between delivering, holding no session, refusing the delivery mode, not
+// confirming in time (the re-hold), denying the forward under its own NATS grant and failing to
+// forward at all.
 //
-// The refused launch is what drives the claim through its launch budget
+// The refused launch is what drives a claim through its launch budget
 // (supervise.Limits.LaunchFailures) into failed, which the run tells the workflow as the daemon's
 // terminal hook does (claimFailed), and from there through the start row's relaunch of a failed
 // claim and the catch-up the executor finishes because nobody will hold the architect's role again
@@ -448,27 +593,47 @@ func newKeptRun(t *testing.T, seed int64, steps int) *keptRun {
 	pool := isolatedOutboxPool(t)
 	base := record.NewStore()
 	records := &keptForgetStore{Store: base}
+	engine := workflow.New(records, workflow.Config{Project: "legion", Repositories: testRepositories}, quietLogger())
 	run := &keptRun{
 		t: t, ctx: ctx, seed: seed, rng: rand.New(rand.NewPCG(uint64(seed), uint64(seed))), steps: steps,
 		pool: pool, base: base, records: records,
-		engine:    workflow.New(records, workflow.Config{Project: "legion", Repositories: testRepositories}, quietLogger()),
+		engine: engine,
+		// Admission runs over the project key the records carry, which is what its own reads of the
+		// project's live issues match (record.Store.LiveIssues); the claims it opens are keyed by
+		// the normalized token of it (claim.ProjectToken), the one the supervisor uses.
+		admission: admit.New(records, engine, 2, "LEGION", quietLogger()),
 		trees:     outboxTreeStore(t, pool, keptRoot),
 		claims:    &outboxClaimStore{},
 		rt:        &keptRuntime{Runtime: fake.NewRuntime()},
-		conn:      fake.NewConn(),
 		publisher: &keptPublisher{},
-		token:     mustClaimToken(t, keptRoot, claim.RoleArchitect),
-		topic:     architectTopic(t, keptRoot),
 		stateDir:  t.TempDir(),
 		at:        time.Date(2026, 10, 24, 9, 0, 0, 0, time.UTC),
 		told:      map[string][]keptTelling{},
 		rowGen:    map[int64]uint64{},
+		refIssue:  map[string]string{},
 		sent:      map[string]bool{},
 		keys:      map[string]bool{},
+		applied:   map[string]bool{},
 	}
-	run.root = record.Issue{Key: keptRoot, Repo: "acme/widgets", DefaultBranch: "main", GitHubRepo: "acme/widgets",
-		Project: "LEGION", Tree: keptRoot, Title: "Root", Phase: phase.Admitted, Generation: 1, Status: "in_progress"}
-	run.putRoot()
+	parent := keptRoot
+	run.root = &keptTree{key: keptRoot, token: mustClaimToken(t, keptRoot, claim.RoleArchitect), conn: fake.NewConn(),
+		topic: architectTopic(t, keptRoot),
+		issue: record.Issue{Key: keptRoot, Repo: "acme/widgets", DefaultBranch: "main", GitHubRepo: "acme/widgets",
+			Project: "LEGION", Tree: keptRoot, Title: "Root", Phase: phase.Admitted, Generation: 1, Status: "in_progress",
+			Rank: "A", LastDispatchSeq: 1},
+	}
+	// The child stands in the root's tree, in a phase of its own, which is what makes it work the
+	// hand-over carries into a tree of its own (record.Issue.CarriesRun) rather than work that
+	// starts again.
+	run.child = &keptTree{key: keptChild, token: mustClaimToken(t, keptChild, claim.RoleArchitect), conn: fake.NewConn(),
+		topic: architectTopic(t, keptChild),
+		issue: record.Issue{Key: keptChild, Repo: "acme/widgets", DefaultBranch: "main", GitHubRepo: "acme/widgets",
+			Project: "LEGION", Tree: keptRoot, Parent: &parent, Title: "Child", Phase: phase.Planning, Generation: 1,
+			Status: "in_progress", Rank: "B", LastDispatchSeq: 1},
+	}
+	run.roots = []*keptTree{run.root}
+	run.putIssue(run.root.issue)
+	run.putIssue(run.child.issue)
 	run.restart()
 	// The run opens as a fresh admission does: the architect's start, naming what the root keeps,
 	// which is nothing yet.
@@ -535,7 +700,7 @@ func (r *keptRun) drive() {
 		enabled := r.enabled()
 		enabled[r.rng.IntN(len(enabled))]()
 		r.observe()
-		r.deliverControllerNotices()
+		r.deliverRowsTheRunDoesNotDrive()
 	}
 }
 
@@ -543,67 +708,108 @@ func (r *keptRun) drive() {
 // the same one.
 func (r *keptRun) enabled() []func() {
 	ops := []func(){r.toggleForget, r.togglePublisher, r.toggleLaunch, r.restartDaemon}
-	if !r.architectHears() {
+	if !r.architectHears(r.root) {
 		ops = append(ops, r.decide)
 	}
-	if r.root.Status == "in_progress" && !r.root.Lingers() {
+	if !r.child.handed && r.root.issue.Lingers() {
+		ops = append(ops, r.decideChild)
+	}
+	if r.root.issue.Status == "in_progress" && !r.root.issue.Lingers() {
 		ops = append(ops, r.park)
 	}
-	if record.OutOfWorkflow(r.root.Status) && !r.root.Lingers() {
+	if record.OutOfWorkflow(r.root.issue.Status) && !r.root.issue.Lingers() {
 		ops = append(ops, r.todoWait)
 	}
 	if r.parkedOrWaiting() {
 		ops = append(ops, r.readmit)
 	}
-	if len(r.rows(true)) > 0 {
+	if r.handOverEnabled() {
+		ops = append(ops, r.handOver)
+	}
+	due := r.rows(true)
+	if len(due) > 0 {
 		ops = append(ops, r.runRow)
 	}
-	if r.readyEnabled() {
-		ops = append(ops, r.ready)
+	if len(due) > 1 {
+		ops = append(ops, r.runTogether)
 	}
-	if r.turnEnabled() {
-		ops = append(ops, r.turn)
+	if len(r.keptCatchUps(due)) > 0 && len(r.raceOps(0)) > 0 {
+		ops = append(ops, r.raceRow)
+	}
+	for _, tree := range r.roots {
+		if r.readyEnabled(tree) {
+			ops = append(ops, func() { r.ready(tree) })
+		}
+		if _, _, told := r.readyFactEnabled(tree); told {
+			ops = append(ops, func() { r.readyFact(tree) })
+		}
+		if r.turnEnabled(tree) {
+			ops = append(ops, func() { r.turn(tree) })
+		}
+		if r.heldTask(tree) {
+			ops = append(ops, func() { r.foreignTurn(tree) }, func() { r.restartStreaming(tree) })
+		}
 	}
 	return ops
 }
 
-// architectHears is whether an agent holds the root's architect role now, so a decision made on
-// the root reaches the tree itself and nothing is kept for it.
-func (r *keptRun) architectHears() bool {
-	machine, found := r.sup.Machine(r.token)
+// architectHears is whether an agent holds the tree's architect role now, so a decision made on
+// an issue of that tree reaches the tree itself and nothing is kept for it.
+func (r *keptRun) architectHears(tree *keptTree) bool {
+	machine, found := r.sup.Machine(tree.token)
 	return found && claimTookRole(machine.Claim().State)
 }
 
 // parkedOrWaiting is whether the root has no run of its own: parked out of the workflow, lingering
 // after its close, or waiting in todo for an admission slot.
 func (r *keptRun) parkedOrWaiting() bool {
-	return r.root.Status != "in_progress" || r.root.Lingers()
+	return r.root.issue.Status != "in_progress" || r.root.issue.Lingers()
+}
+
+// rootKeys is every root the run drives decisions for, which is where kept decisions can stand.
+func (r *keptRun) rootKeys() []string {
+	keys := make([]string, 0, len(r.roots))
+	for _, tree := range r.roots {
+		keys = append(keys, tree.key)
+	}
+	return keys
 }
 
 // decide is a person deciding on an ask of the root while nobody in its tree hears it, kept by the
 // one rule both paths that find such a decision follow (record.RelayParkedDecision).
-func (r *keptRun) decide() {
+func (r *keptRun) decide() { r.decideOn(keptRoot, keptRoot) }
+
+// decideChild is a person deciding on an ask of the root's child while the root lingers: the
+// workflow puts the decision to the same rule under the tree's root as the record holds it
+// (workflow's relayParkedDecision reads the root of the ask's tree), so it is kept under the root,
+// and it is owed to the architect of whatever tree the child stands in when it is told.
+func (r *keptRun) decideChild() { r.decideOn(keptChild, keptRoot) }
+
+// decideOn keeps one person's decision made on an ask of issue, under the root of that issue's
+// tree, which is the record RelayParkedDecision judges.
+func (r *keptRun) decideOn(issue, rootKey string) {
 	r.decided++
-	ref := fmt.Sprintf("dispatch://%s/ask/ask-%04d", keptRoot, r.decided)
+	ref := fmt.Sprintf("dispatch://%s/ask/ask-%04d", issue, r.decided)
 	actor := []string{"user:alice", "user:bob"}[r.rng.IntN(2)]
 	kind := []record.DecisionKind{record.DecisionAskAnswered, record.DecisionAskResolved}[r.rng.IntN(2)]
 	r.at = r.at.Add(time.Minute)
 	outcome := record.RelayNone
 	if err := pgx.BeginFunc(r.ctx, r.pool, func(tx pgx.Tx) error {
-		stored, err := r.records.Issue(r.ctx, tx, keptRoot)
+		stored, err := r.records.Issue(r.ctx, tx, rootKey)
 		if err != nil || stored == nil {
 			return err
 		}
-		outcome, err = record.RelayParkedDecision(r.ctx, tx, r.records, keptRoot, *stored, true,
+		outcome, err = record.RelayParkedDecision(r.ctx, tx, r.records, issue, *stored, true,
 			record.ParkedDecision{Ref: ref, Decision: kind, Actor: actor, At: r.at}, 0, "")
 		return err
 	}); err != nil {
 		r.fatalf("keep the decision %s: %v", ref, err)
 	}
 	if outcome == record.RelayKept || outcome == record.RelaySent {
-		r.tracked = append(r.tracked, ref)
+		r.tracked = append(r.tracked, keptRef{ref: ref, issue: issue})
+		r.refIssue[ref] = issue
 	}
-	r.tracef("decide ref=%s by=%s kind=%s outcome=%s kept=%t", ref, actor, kind, keptOutcome(outcome),
+	r.tracef("decide ref=%s issue=%s by=%s kind=%s outcome=%s kept=%t", ref, issue, actor, kind, keptOutcome(outcome),
 		outcome == record.RelayKept || outcome == record.RelaySent)
 }
 
@@ -630,51 +836,68 @@ func (r *keptRun) park() {
 	lingers := r.rng.IntN(2) == 0
 	if lingers {
 		until := time.Now().Add(time.Hour)
-		r.root.Phase, r.root.Status, r.root.LingerUntil = phase.Done, "done", &until
+		r.root.issue.Phase, r.root.issue.Status, r.root.issue.LingerUntil = phase.Done, "done", &until
 	} else {
-		r.root.Phase, r.root.Status, r.root.LingerUntil = phase.Done, "backlog", nil
+		r.root.issue.Phase, r.root.issue.Status, r.root.issue.LingerUntil = phase.Done, "backlog", nil
 	}
 	r.putRoot()
-	r.enqueue(record.SuperviseRequest{Op: "suspend", Tree: r.root.Tree, Role: claim.RoleArchitect,
-		Generation: r.root.Generation, Reason: "the tree left the workflow"})
-	r.tracef("park status=%s lingers=%t generation=%d suspend-row=%d", r.root.Status, lingers, r.root.Generation, r.lastRow())
+	r.enqueue(keptRoot, record.SuperviseRequest{Op: "suspend", Tree: r.root.issue.Tree, Role: claim.RoleArchitect,
+		Generation: r.root.issue.Generation, Reason: "the tree left the workflow"})
+	r.tracef("park status=%s lingers=%t generation=%d suspend-row=%d", r.root.issue.Status, lingers, r.root.issue.Generation, r.lastRow())
 }
 
 // todoWait hands the parked root back to Legion in todo with no slot, where record.WaitsForSlot
 // finds it waiting: a person's decision on it is kept for the start its admission will queue, and
 // the controller is told nothing.
 func (r *keptRun) todoWait() {
-	r.root.Status, r.root.HandedOver, r.root.LingerUntil = "todo", true, nil
+	r.root.issue.Status, r.root.issue.HandedOver, r.root.issue.LingerUntil = "todo", true, nil
 	r.putRoot()
-	r.tracef("todo-wait generation=%d waits=%t", r.root.Generation, r.waitsForSlot())
+	r.tracef("todo-wait generation=%d waits=%t", r.root.issue.Generation, r.waitsForSlot())
 }
 
 // readmit is the root's next generation: admission's record, and the architect start it enqueues,
 // naming what the root keeps and claiming those rows for that start in one transaction, exactly as
 // admit.Admission writes them.
 func (r *keptRun) readmit() {
-	r.root.Generation++
-	r.root.Status, r.root.Phase, r.root.LingerUntil = "in_progress", phase.Admitted, nil
-	r.putRoot()
-	r.enqueueStart()
+	if err := r.readmitRoot(); err != nil {
+		r.fatalf("re-admit the root: %v", err)
+	}
+}
+
+// readmitRoot is readmit without the test's own end: the interleaving step runs it on a goroutine
+// of its own, where a failure is the step's to report.
+func (r *keptRun) readmitRoot() error {
+	r.root.issue.Generation++
+	r.root.issue.Status, r.root.issue.Phase, r.root.issue.LingerUntil = "in_progress", phase.Admitted, nil
+	if err := r.putIssueErr(r.root.issue); err != nil {
+		return err
+	}
+	return r.enqueueStartRow()
 }
 
 func (r *keptRun) enqueueStart() {
 	r.t.Helper()
-	var task string
+	if err := r.enqueueStartRow(); err != nil {
+		r.fatalf("enqueue the architect start of generation %d: %v", r.root.issue.Generation, err)
+	}
+}
+
+func (r *keptRun) enqueueStartRow() error {
 	var kept *record.KeptDecisions
 	now := time.Now()
 	if err := pgx.BeginFunc(r.ctx, r.pool, func(tx pgx.Tx) error {
-		var err error
-		if task, kept, err = r.engine.ParkedDecisionTask(r.ctx, tx, r.root); err != nil {
+		task, named, err := r.engine.ParkedDecisionTask(r.ctx, tx, r.root.issue)
+		if err != nil {
 			return err
 		}
-		return r.engine.EnqueueNaming(r.ctx, tx, r.root.Key, r.root.Key, record.SuperviseRequest{Op: "start",
-			Tree: r.root.Tree, Role: claim.RoleArchitect, Generation: r.root.Generation, Task: task, Kept: kept}, kept, now)
+		kept = named
+		return r.engine.EnqueueNaming(r.ctx, tx, r.root.issue.Key, r.root.issue.Key, record.SuperviseRequest{Op: "start",
+			Tree: r.root.issue.Tree, Role: claim.RoleArchitect, Generation: r.root.issue.Generation, Task: task, Kept: named}, named, now)
 	}); err != nil {
-		r.fatalf("enqueue the architect start of generation %d: %v", r.root.Generation, err)
+		return err
 	}
-	r.tracef("re-admit generation=%d start-row=%d names=%d", r.root.Generation, r.lastRow(), keptCount(kept))
+	r.tracef("re-admit generation=%d start-row=%d names=%d", r.root.issue.Generation, r.lastRow(), keptCount(kept))
+	return nil
 }
 
 func keptCount(kept *record.KeptDecisions) int {
@@ -684,11 +907,61 @@ func keptCount(kept *record.KeptDecisions) int {
 	return len(kept.Decisions)
 }
 
-// runRow runs one due supervise or notice row of the root, chosen at random rather than in row
-// order: the supervise rows of one issue do not run in row order (record's outboxInOrder). A row
-// whose run returns nothing is finished as its lane finishes it, unless the generator chose the
-// crash: the finish never commits, so the row runs again later. A row whose run failed is left for
-// its next run, as a lane leaves it.
+// handOverEnabled is whether the root's linger has a child to hand over: the child still stands in
+// the root's tree, in the workflow, and the root lingers after its close, which is where the
+// linger's expiry hands a child that is still working to Legion (workflow's settleUnfinished).
+func (r *keptRun) handOverEnabled() bool {
+	return !r.child.handed && r.root.issue.Lingers() && !record.OutOfWorkflow(r.child.issue.Status)
+}
+
+// handOver is the linger's end for a child still in the workflow: the durable fence and the
+// Dispatch status write the workflow queues (its handOver), and then the labelled todo Dispatch
+// shows for it, which admission re-admits as an orphan carrying its run (readmit's orphan branch)
+// and promotes into a tree of its own. From here the child is a root with an architect of its own,
+// and the decisions a person made on its asks are owed to that architect.
+//
+// The status write itself goes to Dispatch, which this run does not drive, so the row is taken off
+// with the others the run leaves to their own tests (deliverRowsTheRunDoesNotDrive) and the event
+// it would make is applied here, which is the path a person's label takes.
+func (r *keptRun) handOver() {
+	now := time.Now()
+	if err := pgx.BeginFunc(r.ctx, r.pool, func(tx pgx.Tx) error {
+		if err := r.records.PutHandover(r.ctx, tx, record.Handover{Issue: keptChild, Tree: r.root.issue.Tree,
+			Generation: r.root.issue.Generation}); err != nil {
+			return err
+		}
+		row, err := record.NewOutboxRow(keptChild, record.StatusWrite{Status: "todo", ObservedStatus: r.child.issue.Status,
+			HandOver: true, HandOverTree: r.root.issue.Tree, HandOverLinger: r.root.issue.Generation}, now)
+		if err != nil {
+			return err
+		}
+		return r.records.Enqueue(r.ctx, tx, row)
+	}); err != nil {
+		r.fatalf("write the hand-over of %s: %v", keptChild, err)
+	}
+	seq := r.child.issue.LastDispatchSeq + 1
+	if _, err := intake.ApplyFact(r.ctx, r.pool, "dispatch", fmt.Sprintf("hand-over:%s:%d", keptChild, seq),
+		intake.DispatchIssue{Key: keptChild, ResolvedRepo: "acme/widgets", Seq: seq, Type: "issue.updated", Status: "todo",
+			Title: r.child.issue.Title, Parent: keptRoot, Rank: r.child.issue.Rank, HandedOver: true},
+		r.engine, r.admission); err != nil {
+		r.fatalf("apply the hand-over of %s: %v", keptChild, err)
+	}
+	carried := r.issueRecord(keptChild)
+	if carried == nil || carried.Tree != keptChild {
+		r.fatalf("the handed-over child = %+v, want a tree of its own", carried)
+	}
+	r.child.issue, r.child.handed = *carried, true
+	r.roots = append(r.roots, r.child)
+	r.counts.handovers++
+	r.tracef("hand-over child=%s tree=%s generation=%d status=%s phase=%s last-row=%d", keptChild, carried.Tree,
+		carried.Generation, carried.Status, carried.Phase, r.lastRow())
+}
+
+// runRow runs one due supervise or notice row of a driven tree, chosen at random rather than in
+// row order: the supervise rows of one issue do not run in row order (record's outboxInOrder). A
+// row whose run returns nothing is finished as its lane finishes it, unless the generator chose
+// the crash: the finish never commits, so the row runs again later. A row whose run failed is left
+// for its next run, as a lane leaves it.
 func (r *keptRun) runRow() {
 	due := r.rows(true)
 	row := due[r.rng.IntN(len(due))]
@@ -699,24 +972,223 @@ func (r *keptRun) runRow() {
 	runErr := r.runOne(&row, payload)
 	crashed := runErr == nil && r.rng.IntN(6) == 0
 	if runErr == nil && !crashed {
-		if err := pgx.BeginFunc(r.ctx, r.pool, func(tx pgx.Tx) error {
-			return r.records.FinishOutbox(r.ctx, tx, row.ID, row.LeaseToken)
-		}); err != nil {
+		if err := r.finishRow(row); err != nil {
 			r.fatalf("finish outbox row %d: %v", row.ID, err)
 		}
 	}
-	r.tracef("run-row id=%d kind=%s what=%s outcome=%s", row.ID, row.Kind, keptRowWhat(payload), keptRunOutcome(runErr, crashed))
+	r.tracef("run-row id=%d issue=%s kind=%s what=%s outcome=%s", row.ID, row.Issue, row.Kind, keptRowWhat(payload),
+		keptRunOutcome(runErr, crashed))
+}
+
+// runTogether is the daemon's lanes as they really run: several due rows of the driven trees,
+// leased at once, each under a lease token of its own, run on a goroutine each and all waited for.
+// One row at a time is the shape every other step has, and it is not the shape the daemon has: two
+// lanes publish, settle and drop catch-ups beside each other, and only the database serializes
+// them. What a step in this mode did is read once every goroutine is done, so a failure it finds
+// is reported with its seed and its trace, which replay may not reproduce exactly.
+func (r *keptRun) runTogether() {
+	due := r.rows(true)
+	r.rng.Shuffle(len(due), func(i, j int) { due[i], due[j] = due[j], due[i] })
+	count := 2
+	if most := min(len(due), keptTogether); most > 2 {
+		count = 2 + r.rng.IntN(most-1)
+	}
+	rows := due[:count]
+	before := r.claimStates()
+	answered := r.publisher.answers()
+	errs := make([]error, count)
+	var wg sync.WaitGroup
+	for i := range rows {
+		rows[i].LeaseToken = leaseOutboxRow(r.t, r.pool, rows[i].ID)
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			errs[i] = r.runner.execute(r.ctx, rows[i])
+		}(i)
+	}
+	wg.Wait()
+	r.waitMachines()
+	what := make([]string, 0, count)
+	for i, row := range rows {
+		payload, err := record.DecodeOutboxPayload(row)
+		if err != nil {
+			r.fatalf("decode outbox row %d: %v", row.ID, err)
+		}
+		if errs[i] == nil {
+			if err := r.finishRow(row); err != nil {
+				r.fatalf("finish outbox row %d: %v", row.ID, err)
+			}
+		}
+		what = append(what, fmt.Sprintf("id=%d issue=%s what=%s outcome=%s", row.ID, row.Issue, keptRowWhat(payload),
+			keptRunOutcome(errs[i], false)))
+	}
+	r.noteTogether(before, answered)
+	r.counts.together++
+	r.tracef("run-together rows=%d [%s]", count, strings.Join(what, " | "))
+}
+
+// raceRow runs one due catch-up with the listener's answer held open: while the listener has the
+// notice and has answered nothing, one other operation runs to completion on a goroutine of its
+// own, and only then does the publish answer. It is the one interleaving the daemon holds no lock
+// across — the publish is outside every transaction of the row's run — and it is where a ready, a
+// start's settlement and a re-admission meet a catch-up that is already on its way: each of them
+// drops the root's queued catch-ups (Store.DropCatchUps) or moves the root past the generation the
+// catch-up states, while the row that is publishing still claims the decisions it names.
+func (r *keptRun) raceRow() {
+	catchUps := r.keptCatchUps(r.rows(true))
+	row := catchUps[r.rng.IntN(len(catchUps))]
+	payload, err := record.DecodeOutboxPayload(row)
+	if err != nil {
+		r.fatalf("decode outbox row %d: %v", row.ID, err)
+	}
+	ops := r.raceOps(row.ID)
+	if len(ops) == 0 {
+		r.fatalf("no operation to interleave with the publish of outbox row %d", row.ID)
+	}
+	race := r.prepareRace(ops[r.rng.IntN(len(ops))])
+	race.mode = []keptPublishMode{keptDelivers, keptReceiptTimeout}[r.rng.IntN(2)]
+	answered := r.publisher.answers()
+	r.publisher.arm(race)
+	runErr := r.runOne(&row, payload)
+	r.publisher.disarm()
+	if runErr == nil {
+		if err := r.finishRow(row); err != nil {
+			r.fatalf("finish outbox row %d: %v", row.ID, err)
+		}
+	}
+	if race.ran {
+		r.counts.raced++
+	}
+	if race.err != nil {
+		r.fatalf("the operation interleaved with the publish of outbox row %d (%s) failed: %v", row.ID, race.what, race.err)
+	}
+	r.tracef("race-row id=%d what=%s answer=%s during=%s ran=%t [%s] outcome=%s", row.ID, keptRowWhat(payload),
+		race.mode, race.what, race.ran, race.outcome, keptRunOutcome(runErr, false))
+	// A receipt timeout the re-hold answered with no copy of its own is the superseded branch
+	// (notice_exceptions.go's reholdNotice): the operation that ran inside the publish moved the
+	// root or its architect past the catch-up, so nothing takes over the claims this row holds and
+	// its deletion releases them. A first publish is under the re-hold budget, so nothing else
+	// refuses it a copy.
+	if r.publisher.answers()[keptReceiptTimeout] > answered[keptReceiptTimeout] && r.copiesOf(row.ID) == 0 {
+		r.counts.supersededTimeouts++
+		r.tracef("the re-hold of row %d queued no copy: the publish was superseded while it ran, so the row's own deletion releases what it claimed", row.ID)
+	}
+}
+
+// copiesOf is how many copies of an outbox row the re-hold has queued (record.Notice.ResendOf).
+func (r *keptRun) copiesOf(row int64) int {
+	var copies int
+	if err := r.pool.QueryRow(r.ctx, "select count(*) from outbox where (payload->>'resend_of')::bigint = $1", row).Scan(&copies); err != nil {
+		r.fatalf("count the copies of outbox row %d: %v", row, err)
+	}
+	return copies
+}
+
+// keptRaceOp is one operation the generator can run inside a catch-up's publish, named before the
+// step picks among them so that one seed always picks the same one.
+type keptRaceOp struct {
+	what   string
+	kind   string
+	tree   *keptTree
+	row    record.OutboxRow
+	key    string
+	launch uint64
+}
+
+// raceOps is every operation that can run inside a catch-up's publish now: the ready fact of a
+// launch whose agent is up and whose ready the daemon has not told the workflow yet, which writes
+// that launch its catch-up; one other due start row of a driven tree — a stale start, whose
+// settlement hands over, or one that finds the architect running and applies the ready fact
+// itself; and the root's re-admission, which is the other thing that supersedes a catch-up
+// (catchUpSuperseded reads the root's generation against the catch-up's). Each of the three drops
+// the root's queued catch-ups or moves the root past the one that is publishing. The row the step
+// is publishing is left out, and so is every row that touches no kept decision.
+func (r *keptRun) raceOps(publishing int64) []keptRaceOp {
+	var ops []keptRaceOp
+	for _, tree := range r.roots {
+		key, launch, told := r.readyFactEnabled(tree)
+		if !told {
+			continue
+		}
+		ops = append(ops, keptRaceOp{kind: "ready", tree: tree, key: key, launch: launch,
+			what: fmt.Sprintf("the ready fact of %s's architect at launch %d", tree.key, launch)})
+	}
+	for _, row := range r.rows(true) {
+		if row.ID == publishing || row.Kind != record.OutboxKindSupervise {
+			continue
+		}
+		payload, err := record.DecodeOutboxPayload(row)
+		if err != nil {
+			continue
+		}
+		if request, ok := payload.(record.SuperviseRequest); !ok || request.Op != "start" {
+			continue
+		}
+		ops = append(ops, keptRaceOp{kind: "row", row: row,
+			what: fmt.Sprintf("the run of row %d of %s (%s)", row.ID, row.Issue, keptRowWhat(payload))})
+	}
+	if r.parkedOrWaiting() {
+		ops = append(ops, keptRaceOp{kind: "readmit", what: fmt.Sprintf("the re-admission of %s", keptRoot)})
+	}
+	return ops
+}
+
+// prepareRace is the armed interleaving for one operation: whatever a lease or a claim token the
+// operation needs is taken here, on the test's own goroutine, so the goroutine the publish starts
+// does nothing but the daemon's work and reports what it made of it.
+func (r *keptRun) prepareRace(op keptRaceOp) *keptRace {
+	race := &keptRace{what: op.what}
+	switch op.kind {
+	case "ready":
+		race.run = func() error {
+			if err := r.applyReadyFact(op.tree, op.key, op.launch); err != nil {
+				return err
+			}
+			race.outcome = "the ready fact was applied"
+			return nil
+		}
+	case "row":
+		row := op.row
+		row.LeaseToken = leaseOutboxRow(r.t, r.pool, row.ID)
+		race.run = func() error {
+			runErr := r.runner.execute(r.ctx, row)
+			if runErr == nil {
+				if err := r.finishRow(row); err != nil {
+					return err
+				}
+			}
+			race.outcome = keptRunOutcome(runErr, false)
+			return nil
+		}
+	default:
+		race.run = func() error {
+			if err := r.readmitRoot(); err != nil {
+				return err
+			}
+			race.outcome = fmt.Sprintf("the root stands at generation %d", r.root.issue.Generation)
+			return nil
+		}
+	}
+	return race
 }
 
 // runOne leases the row and runs it as its lane would, and records what the run did to the
 // architect's claim and to what the row named (noteRun).
 func (r *keptRun) runOne(row *record.OutboxRow, payload record.OutboxPayload) error {
-	state, answered := r.claimState(), r.publisher.answers()
+	tree := r.treeRow(row.Issue)
+	state, answered := r.claimState(tree), r.publisher.answers()
 	row.LeaseToken = leaseOutboxRow(r.t, r.pool, row.ID)
 	runErr := r.runner.execute(r.ctx, *row)
-	r.waitMachine()
-	r.noteRun(state, answered, payload, runErr)
+	r.waitMachines()
+	r.noteRun(tree, state, answered, payload, runErr)
 	return runErr
+}
+
+// finishRow finishes a row as its lane finishes it, under the lease the run took.
+func (r *keptRun) finishRow(row record.OutboxRow) error {
+	return pgx.BeginFunc(r.ctx, r.pool, func(tx pgx.Tx) error {
+		return r.records.FinishOutbox(r.ctx, tx, row.ID, row.LeaseToken)
+	})
 }
 
 // noteRun records what one row's run did, read against the claim and the listener as they stood
@@ -724,7 +1196,7 @@ func (r *keptRun) runOne(row *record.OutboxRow, payload record.OutboxPayload) er
 // catch-up the executor finished because nobody will hold the architect's role again — the only
 // ending a no-holder answer has besides the wait — and the claim's own fall to failed, which the
 // daemon tells the workflow (claimFailed).
-func (r *keptRun) noteRun(before supervise.ClaimState, answered [keptModes]int, payload record.OutboxPayload, runErr error) {
+func (r *keptRun) noteRun(tree *keptTree, before supervise.ClaimState, answered [keptModes]int, payload record.OutboxPayload, runErr error) {
 	switch value := payload.(type) {
 	case record.SuperviseRequest:
 		if value.Op == "start" && before == supervise.StateFailed {
@@ -739,17 +1211,48 @@ func (r *keptRun) noteRun(before supervise.ClaimState, answered [keptModes]int, 
 			r.tracef("catch-up finished undelivered: nobody will hold the architect's role again (claim=%s)", keptClaimState(before))
 		}
 	}
-	if after := r.claimState(); before != supervise.StateFailed && after == supervise.StateFailed {
-		r.counts.failedClaim++
-		r.claimFailed()
+	if tree == nil {
+		return
 	}
+	if after := r.claimState(tree); before != supervise.StateFailed && after == supervise.StateFailed {
+		r.counts.failedClaim++
+		r.claimFailed(tree)
+	}
+}
+
+// noteTogether reads what a step that ran several rows at once did: which architect claims fell to
+// failed while they ran, which the daemon's terminal hook tells the workflow, and how many
+// catch-ups ended for an architect that will not hold its role again. Which row did which is not
+// read: the rows ran beside each other, and only what they left behind is a fact of the step.
+func (r *keptRun) noteTogether(before map[string]supervise.ClaimState, answered [keptModes]int) {
+	if ended := r.publisher.answers()[keptNoHolder] - answered[keptNoHolder]; ended > 0 {
+		r.counts.endedCatchUps += ended
+	}
+	for _, tree := range r.roots {
+		if after := r.claimState(tree); before[tree.key] != supervise.StateFailed && after == supervise.StateFailed {
+			r.counts.failedClaim++
+			r.claimFailed(tree)
+		}
+	}
+}
+
+// claimStates is the state of every driven tree's architect claim now, by root key.
+func (r *keptRun) claimStates() map[string]supervise.ClaimState {
+	states := make(map[string]supervise.ClaimState, len(r.roots))
+	for _, tree := range r.roots {
+		states[tree.key] = r.claimState(tree)
+	}
+	return states
 }
 
 // claimState is the architect's claim as the supervisor holds it now, and "" when this daemon
 // supervises none, which is what the notice executor reads for a claim it does not supervise
 // (claimEnded).
-func (r *keptRun) claimState() supervise.ClaimState {
-	machine, found := r.sup.Machine(r.token)
+func (r *keptRun) claimState(tree *keptTree) supervise.ClaimState {
+	if tree == nil {
+		return ""
+	}
+	machine, found := r.sup.Machine(tree.token)
 	if !found {
 		return ""
 	}
@@ -763,20 +1266,20 @@ func keptClaimState(state supervise.ClaimState) supervise.ClaimState {
 	return state
 }
 
-// claimFailed tells the workflow that the architect's claim spent its launch budget, as the
+// claimFailed tells the workflow that an architect's claim spent its launch budget, as the
 // daemon's terminal hook does (workflowRuntime.applyTerminal): the engine writes the tree's
 // worker-died notice, which goes to that same architect and waits ahead of its catch-ups.
-func (r *keptRun) claimFailed() {
-	machine, found := r.sup.Machine(r.token)
+func (r *keptRun) claimFailed(tree *keptTree) {
+	machine, found := r.sup.Machine(tree.token)
 	if !found {
-		r.fatalf("the architect claim is gone")
+		r.fatalf("the architect claim of %s is gone", tree.key)
 	}
 	held := machine.Claim()
 	if _, err := intake.ApplyFact(r.ctx, r.pool, terminalSource, terminalEventID(held, supervise.StateFailed),
-		intake.ClaimFailed{Issue: keptRoot, Role: claim.RoleArchitect, Reason: held.Failure}, r.engine); err != nil {
-		r.fatalf("apply the architect's failure at launch %d: %v", held.Generation, err)
+		intake.ClaimFailed{Issue: tree.key, Role: claim.RoleArchitect, Reason: held.Failure}, r.engine); err != nil {
+		r.fatalf("apply the failure of %s's architect at launch %d: %v", tree.key, held.Generation, err)
 	}
-	r.tracef("claim-failed launch=%d refusals=%d notice-row=%d", held.Generation, r.rt.refused(), r.lastRow())
+	r.tracef("claim-failed tree=%s launch=%d refusals=%d notice-row=%d", tree.key, held.Generation, r.rt.refused(), r.lastRow())
 }
 
 func keptRunOutcome(err error, crashed bool) string {
@@ -806,10 +1309,10 @@ func keptRowWhat(payload record.OutboxPayload) string {
 	}
 }
 
-// readyEnabled is whether the architect's claim has a launch to make ready: one coming up, or one
-// live whose connection a restart took with it.
-func (r *keptRun) readyEnabled() bool {
-	machine, found := r.sup.Machine(r.token)
+// readyEnabled is whether a tree's architect claim has a launch to make ready: one coming up, or
+// one live whose connection a restart took with it.
+func (r *keptRun) readyEnabled(tree *keptTree) bool {
+	machine, found := r.sup.Machine(tree.token)
 	if !found {
 		return false
 	}
@@ -817,67 +1320,161 @@ func (r *keptRun) readyEnabled() bool {
 	case supervise.StateLaunching, supervise.StateShimConnected, supervise.StateRegistered:
 		return true
 	case supervise.StateReady, supervise.StateWorking, supervise.StateIdle:
-		_, connected := r.sup.deps.Conns.Conn(r.token)
+		_, connected := r.sup.deps.Conns.Conn(tree.token)
 		return !connected
 	default:
 		return false
 	}
 }
 
-// ready is the architect's agent coming up on its launch: its connection, the shim's hello, the
-// registration and the ready, and then the ready fact the daemon applies for that launch
-// (workflowRuntime.applyTerminal), which is what writes the launch its catch-up.
-func (r *keptRun) ready() {
-	machine, found := r.sup.Machine(r.token)
+// ready is an architect's agent coming up on its launch: its connection, the shim's hello, the
+// registration and the ready. What the workflow makes of that ready is a step of its own
+// (readyFact): the daemon's terminal hook runs outside the machine's own transition, so a claim
+// stands ready for as long as that hook takes to tell the workflow, and a restart that forgot it
+// has only the claim's stored state to tell it from.
+func (r *keptRun) ready(tree *keptTree) {
+	machine, found := r.sup.Machine(tree.token)
 	if !found {
-		r.fatalf("the architect claim is gone")
+		r.fatalf("the architect claim of %s is gone", tree.key)
 	}
-	r.sup.deps.Conns.(*fake.Conns).Register(r.token, r.conn)
+	r.sup.deps.Conns.(*fake.Conns).Register(tree.token, tree.conn)
 	launch := machine.Claim().Generation
-	r.handle(machine, supervise.StreamHello{Claim: r.token, Generation: launch})
+	r.handle(machine, supervise.StreamHello{Claim: tree.token, Generation: launch})
 	if state := machine.Claim().State; state == supervise.StateShimConnected || state == supervise.StateRegistered || claimTookRole(state) {
-		r.handle(machine, supervise.RequestRegister{Claim: r.token, Generation: launch, Session: "ses-architect", SessionFile: "/tmp/architect.jsonl"})
+		r.handle(machine, supervise.RequestRegister{Claim: tree.token, Generation: launch, Session: "ses-architect", SessionFile: "/tmp/architect.jsonl"})
 	}
 	if state := machine.Claim().State; state == supervise.StateRegistered || claimTookRole(state) {
-		r.handle(machine, supervise.RequestReady{Claim: r.token, Generation: launch, Session: "ses-architect"})
+		r.handle(machine, supervise.RequestReady{Claim: tree.token, Generation: launch, Session: "ses-architect"})
 	}
-	r.waitMachine()
-	key := terminalEventID(supervise.Claim{Token: r.token, Generation: launch}, supervise.StateReady)
-	if _, err := intake.ApplyFact(r.ctx, r.pool, terminalSource, key,
-		intake.ClaimReady{Issue: keptRoot, Role: claim.RoleArchitect, Launch: launch}, r.engine); err != nil {
-		r.fatalf("apply the architect's ready for launch %d: %v", launch, err)
-	}
-	r.waitMachine()
-	r.tracef("ready launch=%d state=%s catch-up-row=%d", launch, machine.Claim().State, r.lastRow())
+	r.waitMachines()
+	r.tracef("ready tree=%s launch=%d state=%s", tree.key, launch, machine.Claim().State)
 }
 
-// turnEnabled is whether the architect holds a task it acknowledged and has not started a turn on.
-func (r *keptRun) turnEnabled() bool {
-	machine, found := r.sup.Machine(r.token)
+// readyFactEnabled is whether a launch an architect's agent came up on is one the workflow has
+// not been told about yet: the claim holds its role, and the fact that launch's ready writes
+// (terminalEventID, one per launch) has not been applied.
+func (r *keptRun) readyFactEnabled(tree *keptTree) (string, uint64, bool) {
+	machine, found := r.sup.Machine(tree.token)
+	if !found || !claimTookRole(machine.Claim().State) {
+		return "", 0, false
+	}
+	launch := machine.Claim().Generation
+	key := terminalEventID(supervise.Claim{Token: tree.token, Generation: launch}, supervise.StateReady)
+	return key, launch, !r.applied[key]
+}
+
+// readyFact is the ready fact the daemon applies for a launch its agent came up on
+// (workflowRuntime.applyTerminal), which is what writes that launch its catch-up (workflow's
+// claimReady).
+func (r *keptRun) readyFact(tree *keptTree) {
+	key, launch, enabled := r.readyFactEnabled(tree)
+	if !enabled {
+		r.fatalf("the architect of %s has no ready to tell the workflow", tree.key)
+	}
+	if err := r.applyReadyFact(tree, key, launch); err != nil {
+		r.fatalf("apply the ready of %s's architect for launch %d: %v", tree.key, launch, err)
+	}
+	r.waitMachines()
+	r.tracef("ready-fact tree=%s launch=%d catch-up-row=%d", tree.key, launch, r.lastRow())
+}
+
+// applyReadyFact is readyFact's write alone, which the interleaving step runs on a goroutine of
+// its own, where a failure is the step's to report.
+func (r *keptRun) applyReadyFact(tree *keptTree, key string, launch uint64) error {
+	if _, err := intake.ApplyFact(r.ctx, r.pool, terminalSource, key,
+		intake.ClaimReady{Issue: tree.key, Role: claim.RoleArchitect, Launch: launch}, r.engine); err != nil {
+		return err
+	}
+	r.applied[key] = true
+	return nil
+}
+
+// turnEnabled is whether an architect holds a task it acknowledged and has not started a turn on,
+// or is working a turn that confirmed its task — the turn a restart's get_state found, or one the
+// agent started itself — which only its end retires.
+func (r *keptRun) turnEnabled(tree *keptTree) bool {
+	machine, found := r.sup.Machine(tree.token)
 	if !found {
 		return false
 	}
-	pending := machine.Claim().Pending
-	return pending != nil && !pending.DeliveredAt.IsZero() && pending.ConfirmedAt.IsZero()
+	held := machine.Claim()
+	pending := held.Pending
+	if pending == nil {
+		return false
+	}
+	if !pending.DeliveredAt.IsZero() && pending.ConfirmedAt.IsZero() {
+		return true
+	}
+	return held.State == supervise.StateWorking && !pending.ConfirmedAt.IsZero()
 }
 
 // turn is the architect's turn on the task it holds, from the stream's agent_start to its
-// agent_end, which retires the delivery.
-func (r *keptRun) turn() {
-	machine, found := r.sup.Machine(r.token)
+// agent_end, which retires the delivery. A claim already working is in the turn: only its end is
+// left, and the agent's own state says so no longer (SetStreaming).
+func (r *keptRun) turn(tree *keptTree) {
+	machine, found := r.sup.Machine(tree.token)
 	if !found {
-		r.fatalf("the architect claim is gone")
+		r.fatalf("the architect claim of %s is gone", tree.key)
 	}
-	r.handle(machine, supervise.StreamTurnStart{Claim: r.token})
-	r.waitMachine()
-	r.handle(machine, supervise.StreamTurnEnd{Claim: r.token})
-	r.waitMachine()
-	r.tracef("turn state=%s pending=%t", machine.Claim().State, machine.Claim().Pending != nil)
+	if machine.Claim().State != supervise.StateWorking {
+		r.handle(machine, supervise.StreamTurnStart{Claim: tree.token})
+		r.waitMachines()
+	}
+	tree.conn.SetStreaming(false)
+	r.handle(machine, supervise.StreamTurnEnd{Claim: tree.token})
+	r.waitMachines()
+	r.tracef("turn tree=%s state=%s pending=%t", tree.key, machine.Claim().State, machine.Claim().Pending != nil)
+}
+
+// heldTask is whether the architect's claim holds a task of a run that nobody has sent and nobody
+// has acknowledged: a root architect's start task held back because its root has no architect to
+// hear it (supervise's sendPending, Deps.RootHears). Its decisions were forgotten when the start
+// row gave it to the claim, so this task is the only thing that carries them.
+func (r *keptRun) heldTask(tree *keptTree) bool {
+	machine, found := r.sup.Machine(tree.token)
+	if !found {
+		return false
+	}
+	held := machine.Claim()
+	pending := held.Pending
+	return pending != nil && pending.ConfirmedAt.IsZero() && pending.DeliveredAt.IsZero() && pending.Generation != 0 &&
+		(held.State == supervise.StateReady || held.State == supervise.StateIdle)
+}
+
+// foreignTurn is a turn the agent started on its own — an Envoy notice, a person's message in its
+// session — while a task nobody sent waits on its claim: agent_start naming no delivery, and then
+// its end. A restored claim the machine still has to ask about (askFirst) counts that turn as the
+// held task's (table.go's turnStarted), so the task is confirmed without ever being sent.
+func (r *keptRun) foreignTurn(tree *keptTree) {
+	machine, found := r.sup.Machine(tree.token)
+	if !found {
+		r.fatalf("the architect claim of %s is gone", tree.key)
+	}
+	before := machine.Claim().Pending.ID
+	r.handle(machine, supervise.StreamTurnStart{Claim: tree.token})
+	r.waitMachines()
+	r.handle(machine, supervise.StreamTurnEnd{Claim: tree.token})
+	r.waitMachines()
+	r.counts.foreign++
+	r.tracef("foreign-turn tree=%s delivery=%s state=%s pending=%t", tree.key, before, machine.Claim().State,
+		machine.Claim().Pending != nil)
+}
+
+// restartStreaming is the daemon dying and booting while an architect holds a task nobody sent,
+// and its agent then answering get_state that it is in a turn. The restored claim is one the
+// machine has to ask about before it acts (askFirst), and the answer it gets is what
+// sendPending's askFirst block reads before anything asks whether the root hears.
+func (r *keptRun) restartStreaming(tree *keptTree) {
+	r.restart()
+	tree.conn.SetStreaming(true)
+	r.counts.streamed++
+	r.tracef("restart-streaming tree=%s claims=%d architect=%s: its agent answers get_state in a turn",
+		tree.key, r.sup.count(), keptClaimState(r.claimState(tree)))
 }
 
 func (r *keptRun) toggleForget() {
-	r.records.fails = !r.records.fails
-	r.tracef("forget-failure=%t", r.records.fails)
+	r.records.fails.Store(!r.records.fails.Load())
+	r.tracef("forget-failure=%t", r.records.fails.Load())
 }
 
 func (r *keptRun) togglePublisher() {
@@ -886,26 +1483,26 @@ func (r *keptRun) togglePublisher() {
 	r.tracef("publisher=%s", mode)
 }
 
-// toggleLaunch switches the runtime's refusal of the architect's launches on and off: while it is
-// on, every Spawn and Resume is refused, so the next start of the claim spends its launch budget
+// toggleLaunch switches the runtime's refusal of every launch on and off: while it is on, every
+// Spawn and Resume is refused, so the next start of a claim spends its launch budget
 // (supervise.Limits.LaunchFailures) and leaves it failed, where its start rows relaunch it and its
 // catch-ups find nobody to hold its role.
 func (r *keptRun) toggleLaunch() {
 	r.rt.setRefuses(!r.rt.refusing())
-	r.tracef("launch-refusal=%t claim=%s", r.rt.refusing(), keptClaimState(r.claimState()))
+	r.tracef("launch-refusal=%t architect=%s", r.rt.refusing(), keptClaimState(r.claimState(r.root)))
 }
 
 func (r *keptRun) restartDaemon() {
 	r.restart()
-	r.tracef("restart claims=%d architect=%s", r.sup.count(), keptClaimState(r.claimState()))
+	r.tracef("restart claims=%d architect=%s", r.sup.count(), keptClaimState(r.claimState(r.root)))
 }
 
 // quiesce ends the run: every injected failure off, the root re-admitted when it is parked or
 // waiting — never when it runs, which would hand a lost decision a fresh namer and hide it — and
-// then its rows, its architect's launches and its turns driven, in random order, until no row of
-// the root is left and no delivery is pending.
+// then the rows of every driven tree, its architects' launches and their turns driven, in random
+// order, until no row is left and no delivery is pending.
 func (r *keptRun) quiesce() {
-	r.records.fails = false
+	r.records.fails.Store(false)
 	r.rt.setRefuses(false)
 	r.publisher.setMode(keptDelivers)
 	r.tracef("quiesce: every failure off, launches open, publisher delivers")
@@ -919,11 +1516,16 @@ func (r *keptRun) quiesce() {
 		if len(r.rows(false)) > 0 {
 			actions = append(actions, r.runLeftoverRow)
 		}
-		if r.readyEnabled() {
-			actions = append(actions, r.ready)
-		}
-		if r.turnEnabled() {
-			actions = append(actions, r.turn)
+		for _, tree := range r.roots {
+			if r.readyEnabled(tree) {
+				actions = append(actions, func() { r.ready(tree) })
+			}
+			if _, _, told := r.readyFactEnabled(tree); told {
+				actions = append(actions, func() { r.readyFact(tree) })
+			}
+			if r.turnEnabled(tree) {
+				actions = append(actions, func() { r.turn(tree) })
+			}
 		}
 		if len(actions) == 0 {
 			r.tracef("quiesced")
@@ -931,13 +1533,13 @@ func (r *keptRun) quiesce() {
 		}
 		actions[r.rng.IntN(len(actions))]()
 		r.observe()
-		r.deliverControllerNotices()
+		r.deliverRowsTheRunDoesNotDrive()
 	}
-	r.fatalf("the root's rows and deliveries did not drain in %d quiescence steps", keptQuiesceBound)
+	r.fatalf("the rows and deliveries of %s did not drain in %d quiescence steps", strings.Join(r.rootKeys(), ", "), keptQuiesceBound)
 }
 
-// runLeftoverRow runs one of the root's remaining rows whatever its backoff says: a quiesced
-// daemon has run every row it holds, including a re-held copy waiting out its delay.
+// runLeftoverRow runs one of the remaining rows whatever its backoff says: a quiesced daemon has
+// run every row it holds, including a re-held copy waiting out its delay.
 func (r *keptRun) runLeftoverRow() {
 	left := r.rows(false)
 	row := left[r.rng.IntN(len(left))]
@@ -947,13 +1549,12 @@ func (r *keptRun) runLeftoverRow() {
 	}
 	runErr := r.runOne(&row, payload)
 	if runErr == nil {
-		if err := pgx.BeginFunc(r.ctx, r.pool, func(tx pgx.Tx) error {
-			return r.records.FinishOutbox(r.ctx, tx, row.ID, row.LeaseToken)
-		}); err != nil {
+		if err := r.finishRow(row); err != nil {
 			r.fatalf("finish outbox row %d: %v", row.ID, err)
 		}
 	}
-	r.tracef("run-row id=%d kind=%s what=%s outcome=%s", row.ID, row.Kind, keptRowWhat(payload), keptRunOutcome(runErr, false))
+	r.tracef("run-row id=%d issue=%s kind=%s what=%s outcome=%s", row.ID, row.Issue, row.Kind, keptRowWhat(payload),
+		keptRunOutcome(runErr, false))
 }
 
 // report says what the run's injected failures drove, so a reader of the test's output sees the
@@ -964,19 +1565,42 @@ func (r *keptRun) report() {
 	r.t.Logf("seed %d: %s", r.seed, r.counts)
 }
 
-// held is the run's verdict once it has quiesced: every decision kept was told once, and the root
-// keeps nothing.
+// held is the run's verdict once it has quiesced: every decision kept was told once, to an
+// architect of the tree its own issue stood in when it was told, and no root keeps anything. A
+// telling that reached another tree's architect pays no debt: the decision's issue had left that
+// architect's tree, so what it was owed is still owed.
 func (r *keptRun) held() {
-	for _, ref := range r.tracked {
-		if told := r.told[ref]; len(told) != 1 {
-			r.fatalf("%s was told %d times, want once: a person's decision kept while nobody in %s's tree could hear it must reach an architect of its current generation exactly once",
-				ref, len(told), keptRoot)
+	for _, tracked := range r.tracked {
+		var owed int
+		var elsewhere []string
+		for _, telling := range r.told[tracked.ref] {
+			if telling.tree == telling.issueTree {
+				owed++
+				continue
+			}
+			elsewhere = append(elsewhere, fmt.Sprintf("at step %d by %s, the architect of %s, while %s stood in the tree of %s",
+				telling.step, telling.how, telling.tree, tracked.issue, telling.issueTree))
+		}
+		if owed == 1 && len(elsewhere) == 0 {
+			continue
+		}
+		r.fatalf("%s, an ask of %s now in the tree of %s, was told %d times to an architect of its own tree and %d times to another tree's architect (%s), want once and never: "+
+			"a person's decision kept while nobody in its tree could hear it must reach an architect of the tree its issue is in exactly once",
+			tracked.ref, tracked.issue, r.treeOf(tracked.issue), owed, len(elsewhere), keptElsewhere(elsewhere))
+	}
+	for _, root := range r.rootKeys() {
+		if left := keptDecisions(r.t, r.pool, r.base, root); len(left) != 0 {
+			r.fatalf("%s still keeps %d decisions after the run quiesced (%s), want none: each was named by a start or catch-up that never reached an architect, and nothing names them again",
+				root, len(left), keptRefs(left))
 		}
 	}
-	if left := keptDecisions(r.t, r.pool, r.base, keptRoot); len(left) != 0 {
-		r.fatalf("the root still keeps %d decisions after the run quiesced (%s), want none: each was named by a start or catch-up that never reached an architect, and nothing names them again",
-			len(left), keptRefs(left))
+}
+
+func keptElsewhere(elsewhere []string) string {
+	if len(elsewhere) == 0 {
+		return "none"
 	}
+	return strings.Join(elsewhere, "; ")
 }
 
 func keptRefs(decisions []record.ParkedDecision) string {
@@ -987,9 +1611,9 @@ func keptRefs(decisions []record.ParkedDecision) string {
 	return strings.Join(refs, ", ")
 }
 
-// observe reads what the architect was told since the last step — the prompts its connection
+// observe reads what each architect was told since the last step — the prompts its connection
 // received and the catch-ups the publisher delivered to its role topic — and holds each telling to
-// the invariant: no reference twice, a catch-up naming the generation the root stands at now, and
+// the invariant: no reference twice, a catch-up naming the generation its root stands at now, and
 // a start task reaching a root that has an architect to hear it.
 //
 // One telling is one delivery, not one frame: a prompt frame carries the daemon's delivery id, and
@@ -998,28 +1622,32 @@ func keptRefs(decisions []record.ParkedDecision) string {
 // outbox key of the row it is a copy of (record.Notice.Published), which the listener's role lane
 // and the hosts dedupe on, so a copy published under a key already delivered is too.
 func (r *keptRun) observe() {
-	generation := r.storedGeneration()
-	prompts := r.conn.Prompts()
-	for ; r.prompts < len(prompts); r.prompts++ {
-		prompt := prompts[r.prompts]
-		if r.sent[prompt.DeliveryID] {
-			continue
-		}
-		r.sent[prompt.DeliveryID] = true
-		row := keptRowOfDelivery(prompt.DeliveryID)
-		named, known := r.rowGen[row]
-		if !known {
-			r.fatalf("the architect was prompted by delivery %q, whose outbox row %d the run never saw", prompt.DeliveryID, row)
-		}
-		for _, ref := range r.refsIn(prompt.Message) {
-			r.tell(keptTelling{ref: ref, prompt: true, hears: r.architectToHear(), named: named, root: generation, step: r.step,
-				how: fmt.Sprintf("the start task of row %d, prompt %s", row, prompt.DeliveryID)})
+	for _, tree := range r.roots {
+		generation := r.storedGeneration(tree.key)
+		prompts := tree.conn.Prompts()
+		for ; tree.prompts < len(prompts); tree.prompts++ {
+			prompt := prompts[tree.prompts]
+			if r.sent[prompt.DeliveryID] {
+				continue
+			}
+			r.sent[prompt.DeliveryID] = true
+			row := keptRowOfDelivery(prompt.DeliveryID)
+			named, known := r.rowGen[row]
+			if !known {
+				r.fatalf("the architect of %s was prompted by delivery %q, whose outbox row %d the run never saw", tree.key, prompt.DeliveryID, row)
+			}
+			for _, ref := range r.refsIn(prompt.Message) {
+				r.tell(keptTelling{ref: ref, prompt: true, hears: r.architectToHear(tree.key), named: named, root: generation,
+					tree: tree.key, issueTree: r.treeOf(r.refIssue[ref]), step: r.step,
+					how: fmt.Sprintf("the start task of row %d, prompt %s", row, prompt.DeliveryID)})
+			}
 		}
 	}
 	published := r.publisher.published()
 	for ; r.publishd < len(published); r.publishd++ {
 		delivered := published[r.publishd]
-		if delivered.topic != r.topic || r.keys[delivered.key] {
+		tree := r.treeTopic(delivered.topic)
+		if tree == nil || r.keys[delivered.key] {
 			continue
 		}
 		notice, ok := delivered.payload.(record.Notice)
@@ -1027,34 +1655,39 @@ func (r *keptRun) observe() {
 			continue
 		}
 		r.keys[delivered.key] = true
+		generation := r.storedGeneration(tree.key)
 		for _, ref := range r.refsIn(notice.CatchUp.Decided) {
-			r.tell(keptTelling{ref: ref, named: notice.CatchUp.Generation, root: generation, step: r.step,
+			r.tell(keptTelling{ref: ref, named: notice.CatchUp.Generation, root: generation, tree: tree.key,
+				issueTree: r.treeOf(r.refIssue[ref]), step: r.step,
 				how: fmt.Sprintf("the catch-up published under %s", delivered.key)})
 		}
 	}
 }
 
-// architectToHear is whether the root, as the record holds it now, has an architect to hear a
+// architectToHear is whether the root key, as the record holds it now, has an architect to hear a
 // decision: its tree's root, in the workflow, not lingering, and not waiting in `todo` for its
 // slot (workflow.ArchitectHears, the reading the daemon holds a start task to). A start task's
 // prompt is held to this rather than to the generation it names, since it names none and reaches
 // the root's one architect session whenever that session is next ready.
-func (r *keptRun) architectToHear() bool {
+func (r *keptRun) architectToHear(key string) bool {
 	var hears bool
 	if err := pgx.BeginFunc(r.ctx, r.pool, func(tx pgx.Tx) error {
-		root, err := r.records.Issue(r.ctx, tx, keptRoot)
+		root, err := r.records.Issue(r.ctx, tx, key)
 		if err != nil || root == nil {
 			return err
 		}
 		hears, err = workflow.ArchitectHears(r.ctx, tx, r.records, *root)
 		return err
 	}); err != nil {
-		r.fatalf("read whether the root has an architect to hear a decision: %v", err)
+		r.fatalf("read whether %s has an architect to hear a decision: %v", key, err)
 	}
 	return hears
 }
 
 // tell records one telling and holds it to the two invariants a telling can break on its own.
+// Which architect heard it is not one of them: a decision's issue can leave for a tree of its own
+// between the keeping and the telling, so where the debt stands is read once the run has quiesced
+// (held).
 func (r *keptRun) tell(telling keptTelling) {
 	if before := r.told[telling.ref]; len(before) > 0 {
 		r.fatalf("%s was told twice: first at step %d by %s, now by %s; a person's decision reaches its architect once",
@@ -1063,22 +1696,23 @@ func (r *keptRun) tell(telling keptTelling) {
 	switch {
 	case telling.prompt && !telling.hears:
 		r.fatalf("%s was told by %s while %s has no architect to hear it (parked, lingering, or waiting for its slot): a start task reaches an architect of the root's current run",
-			telling.ref, telling.how, keptRoot)
+			telling.ref, telling.how, telling.tree)
 	case !telling.prompt && telling.named != telling.root:
 		r.fatalf("%s was told by %s, which names generation %d, while %s stands at generation %d: every catch-up names the generation the root is at when its architect receives it",
-			telling.ref, telling.how, telling.named, keptRoot, telling.root)
+			telling.ref, telling.how, telling.named, telling.tree, telling.root)
 	}
 	r.told[telling.ref] = append(r.told[telling.ref], telling)
-	r.tracef("told ref=%s generation=%d by=%s", telling.ref, telling.named, telling.how)
+	r.tracef("told ref=%s generation=%d tree=%s issue-tree=%s by=%s", telling.ref, telling.named, telling.tree,
+		telling.issueTree, telling.how)
 }
 
 // refsIn is every tracked reference the text names. The references are fixed width, so no one is a
 // substring of another.
 func (r *keptRun) refsIn(text string) []string {
 	var named []string
-	for _, ref := range r.tracked {
-		if strings.Contains(text, ref) {
-			named = append(named, ref)
+	for _, tracked := range r.tracked {
+		if strings.Contains(text, tracked.ref) {
+			named = append(named, tracked.ref)
 		}
 	}
 	return named
@@ -1098,19 +1732,19 @@ func keptRowOfDelivery(id string) int64 {
 	return row
 }
 
-// rows is the root's supervise and notice rows, those due now or every one left, in id order; the
-// caller picks among them at random.
+// rows is the supervise and notice rows of every driven tree, those due now or every one left, in
+// id order; the caller picks among them at random.
 func (r *keptRun) rows(dueOnly bool) []record.OutboxRow {
 	r.t.Helper()
-	query := `select id, kind, issue, payload from outbox where issue = $1 and kind = any($2)`
-	args := []any{keptRoot, []string{string(record.OutboxKindSupervise), string(record.OutboxKindNotice)}}
+	query := `select id, kind, issue, payload from outbox where issue = any($1) and kind = any($2)`
+	args := []any{r.rootKeys(), []string{string(record.OutboxKindSupervise), string(record.OutboxKindNotice)}}
 	if dueOnly {
 		query += " and next_at <= $3"
 		args = append(args, time.Now())
 	}
 	rows, err := r.pool.Query(r.ctx, query+" order by id", args...)
 	if err != nil {
-		r.fatalf("list the root's outbox rows: %v", err)
+		r.fatalf("list the outbox rows: %v", err)
 	}
 	defer rows.Close()
 	var listed []record.OutboxRow
@@ -1124,14 +1758,35 @@ func (r *keptRun) rows(dueOnly bool) []record.OutboxRow {
 		listed = append(listed, row)
 	}
 	if err := rows.Err(); err != nil {
-		r.fatalf("list the root's outbox rows: %v", err)
+		r.fatalf("list the outbox rows: %v", err)
 	}
 	return listed
 }
 
-// snapshotRows records the generation every outbox row of the root names, so a prompt the
-// architect receives later can be attributed to the start that queued it even once that row is
-// gone. A row's generation never changes, and a row is never seen under two of them.
+// keptCatchUps is the catch-ups among rows that name decisions their root keeps. They are the
+// rows a publish is held open for: a publish that carries nothing is one no interleaving can lose
+// or duplicate, and the point of the interleaving is what the drop, the hand-over and the
+// re-admission do to what the publishing row claims.
+func (r *keptRun) keptCatchUps(rows []record.OutboxRow) []record.OutboxRow {
+	var found []record.OutboxRow
+	for _, row := range rows {
+		if row.Kind != record.OutboxKindNotice {
+			continue
+		}
+		payload, err := record.DecodeOutboxPayload(row)
+		if err != nil {
+			continue
+		}
+		if notice, ok := payload.(record.Notice); ok && notice.CatchUp != nil && keptCount(notice.CatchUp.Kept) > 0 {
+			found = append(found, row)
+		}
+	}
+	return found
+}
+
+// snapshotRows records the generation every outbox row names, so a prompt an architect receives
+// later can be attributed to the start that queued it even once that row is gone. A row's
+// generation never changes, and a row is never seen under two of them.
 func (r *keptRun) snapshotRows() {
 	for _, row := range r.rows(false) {
 		payload, err := record.DecodeOutboxPayload(row)
@@ -1149,26 +1804,81 @@ func (r *keptRun) snapshotRows() {
 	}
 }
 
-// deliverControllerNotices takes the controller's notices off the outbox: they go to the project's
-// controller, not to the root's architect, and the controller is nobody this run drives.
-func (r *keptRun) deliverControllerNotices() {
-	if _, err := r.pool.Exec(r.ctx, "delete from outbox where kind = $1", string(record.OutboxKindControllerNotice)); err != nil {
-		r.fatalf("deliver the controller's notices: %v", err)
+// deliverRowsTheRunDoesNotDrive takes off the outbox every row that is neither a supervise request
+// nor a notice: the controller's notices, which go to the project's controller rather than to an
+// architect, and the Dispatch and GitHub writes admission queues for a promoted root — its status
+// write and its issue branch — which go where this run drives nobody. Each has tests of its own.
+func (r *keptRun) deliverRowsTheRunDoesNotDrive() {
+	if _, err := r.pool.Exec(r.ctx, "delete from outbox where kind <> $1 and kind <> $2",
+		string(record.OutboxKindSupervise), string(record.OutboxKindNotice)); err != nil {
+		r.fatalf("deliver the rows this run does not drive: %v", err)
 	}
 }
 
 func (r *keptRun) putRoot() {
 	r.t.Helper()
-	if err := pgx.BeginFunc(r.ctx, r.pool, func(tx pgx.Tx) error {
-		return r.records.PutIssue(r.ctx, tx, r.root)
-	}); err != nil {
-		r.fatalf("record the root: %v", err)
+	r.putIssue(r.root.issue)
+}
+
+func (r *keptRun) putIssue(issue record.Issue) {
+	r.t.Helper()
+	if err := r.putIssueErr(issue); err != nil {
+		r.fatalf("record %s: %v", issue.Key, err)
 	}
 }
 
-func (r *keptRun) enqueue(payload record.OutboxPayload) {
+func (r *keptRun) putIssueErr(issue record.Issue) error {
+	return pgx.BeginFunc(r.ctx, r.pool, func(tx pgx.Tx) error {
+		return r.records.PutIssue(r.ctx, tx, issue)
+	})
+}
+
+// issueRecord is the record of key, nil for an issue the daemon does not record.
+func (r *keptRun) issueRecord(key string) *record.Issue {
+	var stored *record.Issue
+	if err := pgx.BeginFunc(r.ctx, r.pool, func(tx pgx.Tx) error {
+		var err error
+		stored, err = r.records.Issue(r.ctx, tx, key)
+		return err
+	}); err != nil {
+		r.fatalf("read the record of %s: %v", key, err)
+	}
+	return stored
+}
+
+// treeOf is the tree key stands in now, which is the root whose architect is owed the decisions a
+// person made on its asks.
+func (r *keptRun) treeOf(key string) string {
+	stored := r.issueRecord(key)
+	if stored == nil {
+		r.fatalf("%s has no record", key)
+	}
+	return stored.Tree
+}
+
+// treeRow is the driven tree an outbox row belongs to, nil for a row of none.
+func (r *keptRun) treeRow(issue string) *keptTree {
+	for _, tree := range r.roots {
+		if tree.key == issue {
+			return tree
+		}
+	}
+	return nil
+}
+
+// treeTopic is the driven tree whose architect holds topic, nil for a topic of none.
+func (r *keptRun) treeTopic(topic string) *keptTree {
+	for _, tree := range r.roots {
+		if tree.topic == topic {
+			return tree
+		}
+	}
+	return nil
+}
+
+func (r *keptRun) enqueue(issue string, payload record.OutboxPayload) {
 	r.t.Helper()
-	row, err := record.NewOutboxRow(keptRoot, payload, time.Now())
+	row, err := record.NewOutboxRow(issue, payload, time.Now())
 	if err != nil {
 		r.fatalf("build an outbox row: %v", err)
 	}
@@ -1188,10 +1898,10 @@ func (r *keptRun) lastRow() int64 {
 	return id
 }
 
-func (r *keptRun) storedGeneration() uint64 {
+func (r *keptRun) storedGeneration(key string) uint64 {
 	var generation uint64
-	if err := r.pool.QueryRow(r.ctx, "select generation from issues where key = $1", keptRoot).Scan(&generation); err != nil {
-		r.fatalf("read the root's generation: %v", err)
+	if err := r.pool.QueryRow(r.ctx, "select generation from issues where key = $1", key).Scan(&generation); err != nil {
+		r.fatalf("read the generation of %s: %v", key, err)
 	}
 	return generation
 }
@@ -1200,7 +1910,7 @@ func (r *keptRun) waitsForSlot() bool {
 	var waits bool
 	if err := pgx.BeginFunc(r.ctx, r.pool, func(tx pgx.Tx) error {
 		var err error
-		waits, err = record.WaitsForSlot(r.ctx, tx, r.records, r.root)
+		waits, err = record.WaitsForSlot(r.ctx, tx, r.records, r.root.issue)
 		return err
 	}); err != nil {
 		r.fatalf("read whether the root waits for its slot: %v", err)
@@ -1208,11 +1918,13 @@ func (r *keptRun) waitsForSlot() bool {
 	return waits
 }
 
-// waitMachine waits for every send the architect's machine started to have had its outcome
+// waitMachines waits for every send each architect's machine started to have had its outcome
 // handled, which is what makes a prompt and its acknowledgement part of the step that caused them.
-func (r *keptRun) waitMachine() {
-	if machine, found := r.sup.Machine(r.token); found {
-		machine.Wait()
+func (r *keptRun) waitMachines() {
+	for _, tree := range r.roots {
+		if machine, found := r.sup.Machine(tree.token); found {
+			machine.Wait()
+		}
 	}
 }
 
