@@ -13,7 +13,6 @@ import (
 	"time"
 
 	"github.com/jackc/pgx/v5"
-	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/sjawhar/envoy/internal/dispatch/model"
 	"github.com/sjawhar/envoy/internal/dispatch/refs"
@@ -392,7 +391,7 @@ func TestBatchedIssueReadStillAnswersAMissingKey(t *testing.T) {
 func TestMissingIssueReadKeepsTheConnectionsPreparedStatements(t *testing.T) {
 	handler, database, deps := newTestServer(t, testServerOptions{})
 	fixture := buildFullIssueRead(t, handler)
-	deps.Store = singleConnectionStore(t, database)
+	deps.Store = storetest.SingleConnection(t, database)
 	served := directServer(deps)
 	ctx := context.Background()
 
@@ -419,23 +418,6 @@ func TestMissingIssueReadKeepsTheConnectionsPreparedStatements(t *testing.T) {
 	if again := preparedStatementNames(t, deps.Store); len(again) != len(after) {
 		t.Fatalf("the read after the missing key prepared statements again: %v, where %v were prepared", again, after)
 	}
-}
-
-// singleConnectionStore opens a pool of one connection on the database database is already on,
-// from its own configuration, closed after t ends.
-func singleConnectionStore(t *testing.T, database *store.Store) *store.Store {
-	t.Helper()
-	config := database.Pool.Config()
-	config.MaxConns = 1
-	config.MinConns = 0
-	config.MinIdleConns = 0
-	opened, err := pgxpool.NewWithConfig(context.Background(), config)
-	if err != nil {
-		t.Fatalf("open a pool of one connection on the same database: %v", err)
-	}
-	pool := store.NewPool(opened)
-	t.Cleanup(pool.Close)
-	return &store.Store{Pool: pool}
 }
 
 // preparedStatementNames is what the pool's connection has prepared, which a statement pgx

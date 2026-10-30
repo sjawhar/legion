@@ -1155,42 +1155,24 @@ func artifactIDs(artifacts []*model.Artifact) []string {
 
 // queueArtifactDetails queues in b what a list of artifacts carries beside its rows - every
 // artifact's versions in one statement rather than a query per artifact, and every document's
-// latest review and open approval request - and returns the apply that fills them in once the
-// batch is closed. The statements are queued in that order wherever a list of artifacts is read:
-// the issue read queues them beside its other reads (readIssueDetails), and a list of its own
-// sends them as a batch of its own (loadArtifactDetails). The apply fills the versions first,
-// since an approval's state reads them (applyApprovals), and leaves an artifact with no version a
-// non-nil empty list (applyVersions). No artifact queues nothing and its apply fills nothing.
+// latest review and open approval request (queueApprovals) - and returns the apply that fills
+// them in once the batch is closed. The statements are queued in that order wherever a list of
+// artifacts is read: the issue read queues them beside its other reads (readIssueDetails), and a
+// list of its own sends them as a batch of its own (loadArtifactDetails). The apply fills the
+// versions first, since an approval's state reads them (applyApprovals), and leaves an artifact
+// with no version a non-nil empty list (applyVersions). No artifact queues nothing and its apply
+// fills nothing.
 func queueArtifactDetails(b *pgx.Batch, artifacts []*model.Artifact) func() {
-	ids := artifactIDs(artifacts)
-	approvalIDs, approvalTargetsByID := approvalTargets(artifacts)
-	// Each scan returns a map of its own, which replaces the nil one here; a statement not queued
-	// leaves its map nil, which the apply below only indexes.
-	var versions map[string][]model.Version
-	var latestReviews map[string]model.ArtifactReview
-	var requests map[string]openApprovalRequest
-	if len(ids) > 0 {
+	versions := map[string][]model.Version{}
+	if ids := artifactIDs(artifacts); len(ids) > 0 {
 		b.Queue(artifactVersionsStatement, ids).Query(func(rows pgx.Rows) error {
-			scanned, err := scanVersionsByArtifact(rows)
-			versions = scanned
-			return err
+			return scanVersionsByArtifact(rows, versions)
 		})
 	}
-	if len(approvalIDs) > 0 {
-		b.Queue(latestReviewsStatement, approvalIDs).Query(func(rows pgx.Rows) error {
-			scanned, err := scanLatestReviews(rows)
-			latestReviews = scanned
-			return err
-		})
-		b.Queue(openApprovalAsksStatement, approvalIDs).Query(func(rows pgx.Rows) error {
-			scanned, err := scanOpenApprovalRequests(rows)
-			requests = scanned
-			return err
-		})
-	}
+	approvals := queueApprovals(b, artifacts)
 	return func() {
 		applyVersions(artifacts, versions)
-		applyApprovals(approvalTargetsByID, latestReviews, requests)
+		approvals()
 	}
 }
 
@@ -1383,6 +1365,9 @@ func (s *server) loadArtifactByRefKey(ctx context.Context, q queryer, refKey str
 	`, refKey))
 }
 
+// loadArtifactRow reads one artifact from the row a lookup by id or by ref_key returns, with the
+// details every artifact read carries - its versions, and its approval when it is a document - in
+// one batch (loadArtifactDetails), so the read costs that lookup and one round trip more.
 func (s *server) loadArtifactRow(ctx context.Context, q queryer, row pgx.Row) (model.Artifact, error) {
 	artifact, err := scanArtifact(row)
 	if errors.Is(err, pgx.ErrNoRows) {
@@ -1391,12 +1376,7 @@ func (s *server) loadArtifactRow(ctx context.Context, q queryer, row pgx.Row) (m
 	if err != nil {
 		return model.Artifact{}, err
 	}
-	versions, err := s.loadVersions(ctx, q, artifact.ID)
-	if err != nil {
-		return model.Artifact{}, err
-	}
-	artifact.Versions = versions
-	if err := s.attachApproval(ctx, q, &artifact); err != nil {
+	if err := loadArtifactDetails(ctx, q, []*model.Artifact{&artifact}); err != nil {
 		return model.Artifact{}, err
 	}
 	return artifact, nil
@@ -1482,18 +1462,18 @@ func scanVersion(row pgx.Row, extra ...any) (model.Version, error) {
 	return version, nil
 }
 
-// scanVersionsByArtifact reads the rows artifactVersionsStatement returns, keyed by artifact id.
-func scanVersionsByArtifact(rows pgx.Rows) (map[string][]model.Version, error) {
-	versions := map[string][]model.Version{}
+// scanVersionsByArtifact reads the rows artifactVersionsStatement returns into versions, keyed by
+// artifact id.
+func scanVersionsByArtifact(rows pgx.Rows, versions map[string][]model.Version) error {
 	for rows.Next() {
 		var artifactID string
 		version, err := scanVersion(rows, &artifactID)
 		if err != nil {
-			return nil, err
+			return err
 		}
 		versions[artifactID] = append(versions[artifactID], version)
 	}
-	return versions, rows.Err()
+	return rows.Err()
 }
 
 // applyVersions fills each artifact's versions from what the statement returned; an artifact with
