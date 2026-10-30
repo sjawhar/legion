@@ -174,14 +174,15 @@ var errEventHeadUnproven = errors.New("no event id is proven final yet: an event
 //
 // It answers at once (server.writerFloor): the newest of the server's marks that counts, a mark
 // older than every transaction that holds a write lock on events, or the horizon already proven
-// when it stands higher or none counts. A mark taken a moment ago counts as soon as the event
+// here or persisted by any process when none counts. A mark taken a moment ago counts as soon as the event
 // writes open then have ended, which for this service's own writes is milliseconds, so the head
 // trails the log's newest id by about that. A transaction that holds a transaction id and has
 // inserted no event, here or in another database, keeps nothing waiting.
 //
-// It never answers 0 for a log it cannot vouch for: a process that has proven no horizon yet, with
-// no mark counting, would send its page to replay the whole log. That one waits, eventFeedHeadWait
-// at most, marking again, and past it answers errEventHeadUnproven, which is logged.
+// It never answers 0 for a log it cannot vouch for: a process with no mark counting and no horizon
+// proven or persisted (a first boot, a reset log) would send its page to replay the whole log. That
+// one waits, eventFeedHeadWait at most, marking again, and past it answers errEventHeadUnproven,
+// which is logged and which the page asks again for.
 func (s *server) eventFeedHead(ctx context.Context) (int64, error) {
 	floor, ok, _, err := s.writerFloor(ctx)
 	if err != nil || ok || floor > 0 {

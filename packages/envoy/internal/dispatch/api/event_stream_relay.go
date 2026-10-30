@@ -299,19 +299,23 @@ func (s *server) firstRelayCursor(ctx context.Context) (int64, time.Time, error)
 }
 
 // firstRelayFloor is the id the first start reads the log's gaps above (firstRelayCursor): one at
-// or below which no event can still be open, so no gap there can fill (Horizon.WriterFloor over the
-// server's marks, eventMarks). A mark counts once every transaction that holds a write lock on
-// events took its transaction id after the mark, so the floor is the newest mark that counts, and
-// the read covers only the ids written since it, whatever the size of the log. A transaction that
-// holds a transaction id but has inserted no event (a read in a transaction, a write to another
-// table, another database's job) holds no event id and keeps no mark from counting.
+// or below which no event can still be open, so no gap there can fill (server.writerFloor: the
+// newest of the server's marks that counts, or else the horizon already proven or persisted). A
+// mark counts once every transaction that holds a write lock on events took its transaction id
+// after the mark, so the floor is the newest mark that counts, and the read covers only the ids
+// written since it, whatever the size of the log. A transaction that holds a transaction id but
+// has inserted no event (a read in a transaction, a write to another table, another database's
+// job) holds no event id and keeps no mark from counting.
 //
 // The floor is read once, when the start begins, with the newest id and the gaps above it, so
 // everything that commits after the start began stands above the newest id or in one of those
 // gaps. When no mark counts, an event insert of this database has been open since before every
 // mark kept, the boot mark included, and may hold an id below all of them; no later mark could
-// bound it without skipping what commits meanwhile, so the floor is the horizon already proven, 0
-// on a process where none is, and the read covers the log above it. That is logged.
+// bound it without skipping what commits meanwhile. The floor is then the horizon this process
+// proved or the newest one any process persisted (events.Horizon.Persisted), every id at or below
+// which is final: on a deploy, the horizon the process before it proved before that insert began.
+// Only with neither, a first boot or a log reset, does the read cover the whole log, which is
+// logged.
 func (s *server) firstRelayFloor(ctx context.Context) (int64, error) {
 	if s.bootMark != nil {
 		select {
@@ -324,9 +328,8 @@ func (s *server) firstRelayFloor(ctx context.Context) (int64, error) {
 	if err != nil {
 		return 0, err
 	}
-	if !ok {
-		slog.Warn("dispatch: the event stream relay's first start reads every event id above the proven horizon: an event insert of this database has been open since before every mark it keeps",
-			"above", floor)
+	if !ok && floor == 0 {
+		slog.Warn("dispatch: the event stream relay's first start reads the whole event log: an event insert of this database has been open since before every mark it keeps, and no horizon is proven or persisted")
 	}
 	return floor, nil
 }
@@ -429,6 +432,7 @@ func (s *server) horizon() *events.Horizon {
 				"error", err)
 		}
 		s.eventHorizon = events.NewHorizon(db)
+		s.eventHorizon.PersistProven()
 	})
 	return s.eventHorizon
 }

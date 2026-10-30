@@ -870,3 +870,41 @@ func TestWriterFloorIgnoresATransactionThatHasInsertedNoEvent(t *testing.T) {
 		t.Fatalf("the holder's insert drew id %d, not above the mark's newest %d", id, mark.Newest)
 	}
 }
+
+// A Horizon that persists writes its H to event_horizon once it advances, and another Horizon (a
+// later process) reads it: every event at or below it is final, whichever process proved it. A
+// value of a log since reset is not read: its event is gone, or carries another created_at.
+func TestAPersistedHorizonIsReadByALaterProcessAndNotAcrossAReset(t *testing.T) {
+	database := storetest.Open(t)
+	ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
+	defer cancel()
+	first := NewHorizon(database.Pool)
+	first.PersistProven()
+	later := NewHorizon(database.Pool)
+
+	newest := commitHorizonEvent(ctx, t, database)
+	persisted := int64(0)
+	for deadline := time.Now().Add(30 * time.Second); persisted < newest; time.Sleep(10 * time.Millisecond) {
+		if time.Now().After(deadline) {
+			t.Fatalf("the persisted horizon = %d after %s, want at least %d", persisted, 30*time.Second, newest)
+		}
+		if _, err := first.Safe(ctx); err != nil {
+			t.Fatalf("observe: %v", err)
+		}
+		var err error
+		if persisted, err = later.Persisted(ctx); err != nil {
+			t.Fatalf("read the persisted horizon: %v", err)
+		}
+	}
+	if later.Proven() != 0 {
+		t.Fatalf("the later process proved %d itself, so this test proves nothing", later.Proven())
+	}
+
+	resetEventLog(ctx, t, database)
+	for range int(newest) + 2 {
+		commitHorizonEvent(ctx, t, database)
+	}
+	if got, err := later.Persisted(ctx); err != nil || got != 0 {
+		t.Fatalf("the persisted horizon after a reset of the log = %d, %v; want 0, the old log's value passed over", got, err)
+	}
+}

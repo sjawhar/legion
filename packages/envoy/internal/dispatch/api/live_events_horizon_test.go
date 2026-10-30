@@ -4,13 +4,18 @@ import (
 	"context"
 	"fmt"
 	"net/http"
+	"net/http/httptest"
 	"net/url"
 	"strconv"
+	"strings"
 	"sync"
 	"testing"
 	"time"
 
+	gws "github.com/gorilla/websocket"
+
 	"github.com/sjawhar/envoy/internal/dispatch/docs"
+	"github.com/sjawhar/envoy/internal/dispatch/events"
 	"github.com/sjawhar/envoy/internal/dispatch/store"
 )
 
@@ -529,5 +534,101 @@ func TestShutdownEndsAnEventsSubscriptionWaitingOnTheHorizon(t *testing.T) {
 	rig.stop()
 	if code, _ := client.closeCode(t, time.Second); code != 1012 {
 		t.Fatalf("the socket of a subscription waiting on the horizon closed with %d, want 1012", code)
+	}
+}
+
+// holdEventInsert opens a transaction that takes its transaction id and inserts one event, as
+// events.Broker.Append does, and holds it open: an event insert in flight, holding the lowest id
+// not yet final. release commits it; it is rolled back when the test ends otherwise. It answers
+// the event's id.
+func holdEventInsert(t *testing.T, database *store.Store) (id int64, release func()) {
+	t.Helper()
+	tx, err := database.Pool.Begin(t.Context())
+	if err != nil {
+		t.Fatalf("begin the event insert: %v", err)
+	}
+	if _, err := tx.Exec(t.Context(), `select pg_current_xact_id()`); err != nil {
+		_ = tx.Rollback(context.Background())
+		t.Fatalf("take the event insert's transaction id: %v", err)
+	}
+	if err := tx.QueryRow(t.Context(), `
+		insert into events (seq, type, actor, payload, notify)
+		values (0, 'test.open', '{"kind":"system","id":"test"}', '{}', false)
+		returning id
+	`).Scan(&id); err != nil {
+		_ = tx.Rollback(context.Background())
+		t.Fatalf("insert the open event: %v", err)
+	}
+	var once sync.Once
+	release = func() {
+		once.Do(func() {
+			if err := tx.Commit(context.Background()); err != nil {
+				t.Errorf("commit the open event: %v", err)
+			}
+		})
+	}
+	t.Cleanup(func() { _ = tx.Rollback(context.Background()) })
+	return id, release
+}
+
+// TestTheRelaysFirstStartReadsAboveThePersistedHorizonWhileAnEventInsertFromBeforeBootIsOpen: a
+// deploy under load restarts the process while an event insert is open, so no mark the new process
+// takes counts until that insert ends, and the first start cannot bound its read of the log by
+// one. Every event at or below the horizon the process before it proved is final, whichever process
+// proved it, so the start reads only above the horizon that process persisted (event_horizon),
+// not the whole log, and is still sent the open event and what committed while it waited, in id
+// order. Here the log holds 200,000 events and the start may read at most a tenth of them.
+func TestTheRelaysFirstStartReadsAboveThePersistedHorizonWhileAnEventInsertFromBeforeBootIsOpen(t *testing.T) {
+	const logSize = 200_000
+	first, database := newTestHandlerWithStore(t)
+	issue := createInteractionIssue(t, first, "TEST", "Issue", "A spec")
+	if _, err := database.Pool.Exec(t.Context(), `
+		insert into events (seq, type, actor, payload, notify, published_at)
+		select 0, 'test.filler', '{"kind":"system","id":"test"}', '{}', false, now()
+		from generate_series(1, $1)
+	`, logSize); err != nil {
+		t.Fatalf("fill the event log: %v", err)
+	}
+	if _, err := database.Pool.Exec(t.Context(), `analyze events`); err != nil {
+		t.Fatalf("analyze events: %v", err)
+	}
+	// The process before proves and persists a horizon past the fill, as its relay or hub does.
+	before := events.NewHorizon(database.Pool)
+	before.PersistProven()
+	newest := eventHead(t, database)
+	for deadline := time.Now().Add(eventFeedWait); ; time.Sleep(10 * time.Millisecond) {
+		if _, err := before.Safe(t.Context()); err != nil {
+			t.Fatalf("observe the horizon: %v", err)
+		}
+		persisted, err := before.Persisted(t.Context())
+		if err != nil {
+			t.Fatalf("read the persisted horizon: %v", err)
+		}
+		if persisted >= newest {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("the persisted horizon = %d after %s, want at least %d", persisted, eventFeedWait, newest)
+		}
+	}
+
+	// An event insert that opened before the next process boots, and outlives its first start.
+	open, release := holdEventInsert(t, database)
+	read := eventsTuplesRead(t, database)
+	server := httptest.NewServer(secondProcessHandler(t, database))
+	t.Cleanup(server.Close)
+	client := openLiveSocketAt(t, gws.DefaultDialer, "ws"+strings.TrimPrefix(server.URL, "http")+"/ws/live", withBearer("agent-token")).read()
+	sendEventsSubscribe(t, client, "events", nil)
+	time.Sleep(300 * time.Millisecond)
+	renameIssue(t, first, issue.Key, "Renamed while the insert is open")
+	committed := eventHead(t, database)
+	release()
+
+	eventsStartID(t, client, "events")
+	expectEventsInOrder(t, client, "events", open, committed)
+	server.Close()
+	time.Sleep(1500 * time.Millisecond)
+	if read = eventsTuplesRead(t, database) - read; read > logSize/10 {
+		t.Fatalf("the relay's first start read %d rows of events on a log of %d events while an event insert from before boot was open, want at most %d: it read the whole log, not above the persisted horizon", read, logSize, logSize/10)
 	}
 }

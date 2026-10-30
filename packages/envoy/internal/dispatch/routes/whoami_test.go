@@ -527,3 +527,63 @@ func TestWhoamiDoesNotSendAPageToReplayTheWholeLogWhileAWriteFromBeforeBootIsOpe
 		t.Fatalf("whoami answered event_head %d while a write from before boot was open, want at least %d, the newest of the events that committed before it: the page would be replayed the whole log", head, final)
 	}
 }
+
+// TestWhoamiAnswersThePersistedHorizonWhileAnEventInsertFromBeforeBootIsOpen: after a restart under
+// load an event insert can be open since before the new process took any mark, so no mark counts
+// until it ends, and the process has proven no horizon of its own yet. Every event at or below the
+// horizon the process before it persisted is final, so whoami answers that at once, below the open
+// event, rather than waiting for the insert or answering 503.
+func TestWhoamiAnswersThePersistedHorizonWhileAnEventInsertFromBeforeBootIsOpen(t *testing.T) {
+	database := storetest.Open(t)
+	ctx := t.Context()
+	for _, key := range []string{"ONE", "TWO"} {
+		if _, err := database.Pool.Exec(ctx, `
+			insert into events (seq, type, actor, payload, notify, published_at)
+			values (0, 'test.filler', '{"kind":"system","id":"test"}', jsonb_build_object('key', $1::text), false, now())
+		`, key); err != nil {
+			t.Fatalf("seed an event: %v", err)
+		}
+	}
+	newest := newestEventID(t, database)
+	before := events.NewHorizon(database.Pool)
+	before.PersistProven()
+	for deadline := time.Now().Add(30 * time.Second); ; time.Sleep(10 * time.Millisecond) {
+		if _, err := before.Safe(ctx); err != nil {
+			t.Fatalf("observe the horizon: %v", err)
+		}
+		if persisted, err := before.Persisted(ctx); err != nil {
+			t.Fatalf("read the persisted horizon: %v", err)
+		} else if persisted >= newest {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("no horizon of %d persisted within 30s", newest)
+		}
+	}
+
+	tx, err := database.Pool.Begin(ctx)
+	if err != nil {
+		t.Fatalf("begin the event insert: %v", err)
+	}
+	t.Cleanup(func() { _ = tx.Rollback(context.Background()) })
+	var open int64
+	if _, err := tx.Exec(ctx, `select pg_current_xact_id()`); err != nil {
+		t.Fatalf("take the insert's transaction id: %v", err)
+	}
+	if err := tx.QueryRow(ctx, `
+		insert into events (seq, type, actor, payload, notify)
+		values (0, 'test.open', '{"kind":"system","id":"test"}', '{}', false) returning id
+	`).Scan(&open); err != nil {
+		t.Fatalf("insert the open event: %v", err)
+	}
+
+	handler := storeRouter(t, database)
+	began := time.Now()
+	head := eventHeadID(t, askWhoami(t, handler))
+	if waited := time.Since(began); waited > time.Second {
+		t.Fatalf("whoami answered %s after boot while an event insert from before boot was open, want at once from the persisted horizon", waited)
+	}
+	if head < newest || head >= open {
+		t.Fatalf("whoami answered event_head %d, want the persisted horizon %d or above, and below the open event %d", head, newest, open)
+	}
+}

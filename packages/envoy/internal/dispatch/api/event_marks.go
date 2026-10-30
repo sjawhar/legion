@@ -76,7 +76,9 @@ func (m *eventMarks) candidates() []events.Mark {
 
 // writerFloor takes a mark now, keeps it, and answers WriterFloor over every mark kept: the
 // highest id at or below which no event can still be open, whether a kept mark counted (ok), and
-// the newest id the new mark saw. It waits on no transaction.
+// the newest id the new mark saw. With no mark counting, the floor is the higher of the horizon
+// this process proved and the one persisted (events.Horizon.Persisted). It waits on no
+// transaction.
 func (s *server) writerFloor(ctx context.Context) (floor int64, ok bool, newest int64, err error) {
 	horizon := s.horizon()
 	mark, err := horizon.Mark(ctx)
@@ -85,5 +87,11 @@ func (s *server) writerFloor(ctx context.Context) (floor int64, ok bool, newest 
 	}
 	s.eventMarks.add(mark)
 	floor, ok, err = horizon.WriterFloor(ctx, s.eventMarks.candidates()...)
-	return floor, ok, mark.Newest, err
+	if err != nil || ok {
+		return floor, ok, mark.Newest, err
+	}
+	// No mark counts: the floor is the horizon proven here or persisted by any process, whichever
+	// is higher, every id at or below which is final.
+	persisted, err := horizon.Persisted(ctx)
+	return max(floor, persisted), false, mark.Newest, err
 }
