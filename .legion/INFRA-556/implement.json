@@ -2,104 +2,47 @@
   "schemaVersion": 1,
   "phase": "implement",
   "issue": "INFRA-556",
-  "completed": "2026-10-30T11:53:46Z",
-  "round": "tester round 8 failed: a short nameless first message passed the filter; the architect added deriving the room bound so it never shuts out a real reader; no merge of main",
+  "completed": "2026-10-30T20:37:19Z",
+  "round": "review round 3 (changes requested at cf17a2e1): merge of main e65900f4 with migrations renumbered 0149-0151, the removal-clock fix (item 2), reviewer items 3-15, PR body item 16, and a fix for main's memory test that the merge exposed",
   "proof": [
     {
-      "criterion": "Census entry 4: any complete document message that names no document closes the socket; the room's awareness bound never shuts out a real reader",
-      "surface": "docs package real-upgrade tests (workspace mode and GOWORK=off) and two real envoy-dispatch binaries with 200 sockets of one user each holding its four allowed clients",
-      "command": "cd packages/envoy && go test -count=2 -run 'Awareness|TestADocumentSocket' ./internal/dispatch/docs/ (and GOWORK=off); go test -tags multiprocess -run 'TestAReaderJoiningWhileManySocketsFillTheirBoundsIsSeenOnTheOtherProcess|TestTwoHundredSocketsOfOneUserDoNotFillARoomAgainstANewReader' ./cmd/dispatch; whole multiprocess file; whole docs package",
-      "observed": "the tester's TestADocumentSocketWhoseShortFirstMessageNamesNoDocumentIsClosed and TestAReaderJoiningWhileManySocketsFillTheirBoundsIsSeenOnTheOtherProcess pass unmodified, with every earlier red test; maxAwarenessClientsPerRoom = maxRoomConnections x maxAwarenessClientsPerSocket (4,000); the new row also checks the room's tracked entries stay within the bound (room-counters hook's awareness_clients); multiprocess file ok 1204.627s; docs package ok 1688.011s",
-      "headSha": "09e42b205f18",
-      "negativeControl": "the many-sockets test at fa3212f1 (committed alone, before the fix) fails: 'alice ... was seen at once by carol on A but not by bob on B within 1s'; the short-message test at c83f0a4e fails: 'the socket is still open 5s after a three-byte first message'"
+      "criterion": "Items 1-6 and D10 across two processes, on the tree merged with main: live edits, cursors and presence, close/reopen, ask authors, agent writes, fresh reads, rebuild/resumption/queue, serving-process header, awareness bounds and the removal clock",
+      "surface": "two real envoy-dispatch binaries on one Postgres 17 (pgvector), driven over HTTP and /ws/doc",
+      "command": "cd packages/envoy && DISPATCH_TEST_DATABASE_URL=postgres://postgres@127.0.0.1:5433/dispatch_test?sslmode=disable go test -tags multiprocess -count=1 -timeout 50m ./cmd/dispatch",
+      "observed": "ok github.com/sjawhar/envoy/cmd/dispatch 1081.528s; docs package ok 1612.436s; store 300.738s, processes 23.870s, plain cmd/dispatch 294.892s, room-related api 475.498s, infra/gcp TestDispatchConnectionsPerPodIsTheServers ok; -race render/replica/torn tests ok",
+      "headSha": "4f15d975a2810eee30dba0487b9f9aad727c2eec",
+      "negativeControl": "At cf17a2e1 TestAReaderLeavingIsRelayedAtItsClientsClockThoughAPurgeRacesTheEncode fails (alice's removal relayed at clock 0); at the test-support commit aa50b68c the seven two-process tests fail on their bugs"
     },
     {
-      "criterion": "Every document socket holds at most four awareness clients in every build; a nameless first message closes the socket; every reader's cursor on one process reaches the other within a second",
-      "surface": "docs package real-upgrade tests in workspace mode (gorilla v1.5.4-pre, confirmed with go version -m) and GOWORK=off (v1.5.3); two real envoy-dispatch binaries for the five-reader test",
-      "command": "cd packages/envoy && go test -count=2 -run 'Awareness|TestADocumentSocket' ./internal/dispatch/docs/ (and GOWORK=off); go test -tags multiprocess -count=3 -run TestFiveReadersPlacingCursorsAtOnceAreAllSeenOnTheOtherProcess ./cmd/dispatch; whole multiprocess file; whole docs package",
-      "observed": "the tester's TestADocumentSocketHoldsItsAwarenessBoundThroughARealUpgrade and TestFiveReadersPlacingCursorsAtOnceAreAllSeenOnTheOtherProcess pass unmodified (3 of 3 for the five readers); the flood tests pass with the room bound back at 256 (the repeated-flood test's bound back at 512); multiprocess file ok 1187.356s; docs package ok 1651.010s",
-      "headSha": "c83f0a4e05ed",
-      "negativeControl": "the five-reader test at bbf0f5cd (the test committed alone, before the fix) fails 2 of 2: 'bob on B holds only [8000 8004] after 1s'; the real-upgrade tests built against gorilla v1.5.4 without the reader reset fail: 'carol on task A holds 10 of them ... want at most 4' and 'the socket is still open 5s after a 603-byte first message'"
+      "criterion": "A room fed only by agent writes keeps memory within its bound (main's TestARoomFedOnlyByAgentWritesKeepsMemoryWithinTheBound) after the merge",
+      "surface": "docs package on real Postgres",
+      "command": "cd packages/envoy && go test -count=3 -timeout 20m -run TestARoomFedOnlyByAgentWritesKeepsMemoryWithinTheBound ./internal/dispatch/docs/",
+      "observed": "PASS 3 of 3, BOUND retained=635544 stored=837326 bound=2934478",
+      "headSha": "4f15d975a2810eee30dba0487b9f9aad727c2eec",
+      "negativeControl": "At the merge f89b26c5 (no replica fix) it fails 2 of 2: retained=3319888, 386137 more than stored plus 2097152; main e65900f4 passes with GOWORK=off"
     },
     {
-      "criterion": "All three awareness flood tests: a reader joining during or after a flood is seen on both processes within a second, and repeated floods keep each room's awareness bounded",
-      "surface": "two real envoy-dispatch binaries (the two multiprocess flood tests), the docs package's repeated-flood test, and Chromium on main's two-process harness",
-      "command": "cd packages/envoy && go test -tags multiprocess -count=2 -run 'TestAReaderJoining|TwoEditors' ./cmd/dispatch && go test -count=2 -run Awareness ./internal/dispatch/docs/; whole multiprocess file, whole docs package, api socket tests; cd packages/dispatch && bun run e2e:multiprocess -- coedit.multiprocess --repeat-each=2",
-      "observed": "all three tests pass unmodified, 2 of 2; multiprocess file ok 1266.409s; docs package ok 1701.414s; api (-run 'Live|Peer|Socket|Websocket|WebSocket|Room|Issue|Clos|Approval|Storable|Access|Identity|Doc') ok 641.855s; browser spec 2 passed (21.9s). Mechanism: a reader wrapped around the hijacked document socket rewrites each awareness message to at most four clients per socket before ygo applies or broadcasts it, so local and relayed readers see the same set; the room-wide cap is re-derived as maxRoomConnections x 4 so it shuts out no reader",
-      "headSha": "3b94b7c21d06",
-      "negativeControl": "at 65dccc7c TestAReaderJoiningDuringALiveAwarenessFloodIsSeenOnTheOtherProcess fails: 'alice ... was seen at once by carol on A but not by bob on B within 1s: A's room is full of that tab's clients and never relays hers'"
-    },
-    {
-      "criterion": "A room's stored awareness stays bounded on both processes under repeated floods, and a reader joining after a flood is still seen on the other process within a second",
-      "surface": "docs package two-Service test of repeated floods (the tester's red test), and two real envoy-dispatch binaries (the tester's round-4 red test)",
-      "command": "cd packages/envoy && go test -count=2 -run Awareness ./internal/dispatch/docs/ && go test -tags multiprocess -count=2 -run 'TestAReaderJoiningAfterAnAwarenessFloodIsSeenOnTheOtherProcess|TwoEditors' ./cmd/dispatch",
-      "observed": "both pass 2 of 2, unmodified: 'task A's room tracks 256 client entries, task B's 256 (bound 512)'; ygo's MaxAwarenessClientsPerRoom 256 is set again, and Dispatch frees a departed client's tombstone at once (PurgeTombstones on a removal, before a relayed inject, and at a reader's admission), so departed flood clients never hold the bound against a new reader",
-      "headSha": "65dccc7c0612",
-      "negativeControl": "at b0a2d131 the floods test fails 2 of 2: 'task A's room tracks 16384 client entries, want at most 512'; at d7ceabb4 (ygo's cap without the purge) the joining-reader test fails: 'seen at once by carol on A but not by bob on B within 1s'"
-    },
-    {
-      "criterion": "Spec item 1 with the awareness bound: a reader joining after one tab's flood of invented awareness clients is seen on the other process within a second, and a flood still relays no more than the bound",
-      "surface": "two real envoy-dispatch binaries on one Postgres (the tester's red test), and the docs package's relay tests",
-      "command": "cd packages/envoy && go test -tags multiprocess -count=2 -run TestAReaderJoiningAfterAnAwarenessFloodIsSeenOnTheOtherProcess -v ./cmd/dispatch && go test -count=1 -run Awareness ./internal/dispatch/docs/",
-      "observed": "the tester's test passes 2 of 2 unmodified (18.39 s, 14.41 s); TestAnAwarenessFrameOverTheClientBoundRelaysNoMoreThanTheBound (2,048-client frame relays 256, 1,792 refused) and the new TestAwarenessClientsThatLeaveFreeTheRelaysBoundAtOnce pass; the relay bounds live clients, ygo's tombstone-counting client bound is no longer set, MaxAwarenessBytesPerRoom (which releases bytes on tombstone) stays",
-      "headSha": "b0a2d131affb",
-      "negativeControl": "at d7ceabb4 the tester's test fails 2 of 2: 'alice ... was seen at once by carol on A but not by bob on B within 1s'"
-    },
-    {
-      "criterion": "Items 1-6 and D10 across two processes, at the merged head",
-      "surface": "two real envoy-dispatch binaries on one Postgres 17 (go test -tags multiprocess ./cmd/dispatch)",
-      "command": "cd packages/envoy && DISPATCH_TEST_DATABASE_URL=postgres://postgres@127.0.0.1:5433/dispatch_test?sslmode=disable go test -tags multiprocess -count=1 -timeout 40m ./cmd/dispatch/",
-      "observed": "ok github.com/sjawhar/envoy/cmd/dispatch 995.494s at d7ceabb4 (merged with main de546ed2); also at d7ceabb4: docs ok 1383.073s, store ok 306.687s, processes ok, cmd/dispatch ok 294.396s, api (-run 'Issue|Clos|Ask|Patch|Rebuild|Conditional|Hook|Routes|Comment|Keyed|Live|Artifact|Broadcast') ok 514.345s, infra/gcp TestDispatchConnectionsPerPodIsTheServers ok (89 == store.ConnectionsPerProcess)",
-      "headSha": "d7ceabb48815",
-      "negativeControl": "the seven spec tests at the test-support commit aa50b68c all FAIL on their bugs (https://github.com/sjawhar/legion/pull/2414#issuecomment-6466612269)"
-    },
-    {
-      "criterion": "Review item 2: the close margin counts from the closing transaction's commit, so no keystroke typed while the issue is open is dropped",
-      "surface": "api package: the real PATCH /api/v1/issues/{key} handler closing an issue whose document holds an open decision-block ask, its withdrawal holding the document lock 4 s, and a browser on a second docs.Service typing during that window",
-      "command": "cd packages/envoy && go test -count=1 -run TestAKeystrokeWaitingOnASlowClosesDocumentLockIsStored -v ./internal/dispatch/api/",
-      "observed": "PASS (6.43 s): the keystroke is stored, the room closes and the reconnected browser is granted readonly",
-      "headSha": "b35bc7efb3e9",
-      "negativeControl": "before the fix: 'the keystroke typed while the close's write held the document's lock was dropped: the store holds ... state=\"resolved\" ...'"
-    },
-    {
-      "criterion": "Review item 3: a room storedHistoryHolds lets through is closed and reloaded at once, and later keystrokes no longer take that path",
-      "surface": "docs package against Postgres: a transaction holds the document lock while alice types, then writes past her room's cursor and folds the history; no room sync running",
-      "command": "cd packages/envoy && go test -count=1 -run TestARoomIsReloadedOnceAKeystrokeLandsOnAHistoryACompactionFolded -v ./internal/dispatch/docs/",
-      "observed": "PASS (0.55 s): the first keystroke takes the path once, the room reloads at the stored head, the second keystroke is stored without taking it again",
-      "headSha": "fc2de4395d43",
-      "negativeControl": "before the fix: 'timed out waiting for the room whose history was folded under it to be closed' (120 s)"
-    },
-    {
-      "criterion": "Former Fast-follow item 12: one awareness frame cannot fan out into thousands of pg_notify sends",
-      "surface": "docs package: one 2,048-client awareness frame applied to task A's room, relayed sends counted on task B through the relay seam",
-      "command": "cd packages/envoy && go test -count=1 -run TestAnAwarenessFrameOverTheClientBoundRelaysNoMoreThanTheBound -v ./internal/dispatch/docs/",
-      "observed": "PASS: at most 256 clients relayed (MaxAwarenessClientsPerRoom 256, MaxAwarenessBytesPerRoom about 2 MB)",
-      "headSha": "620bf2904675",
-      "negativeControl": "without the bounds set ygo tracks every client id of the frame, so the relay would send all 2,048 clients' states"
-    },
-    {
-      "criterion": "Browser suite against two server processes on main's harness",
-      "surface": "Chromium, two envoy-dispatch processes behind the round-robin proxy of #2323",
-      "command": "cd packages/dispatch && DATABASE_URL=<url> bun run e2e:multiprocess -- coedit.multiprocess (https://github.com/sjawhar/legion/pull/2414#issuecomment-6481131711); runs in CI's dispatch-browser-multiprocess job at d7ceabb4",
-      "observed": "1 passed twice at ff5c1919; not re-run locally this round: this round's changes are server-internal refactors, the close margin and a room reload, which the spec does not drive; CI runs it at the new head",
-      "headSha": "ff5c1919ec34",
-      "negativeControl": "on the harness without this change (a0f877c5) the spec fails after setup (https://github.com/sjawhar/legion/pull/2414#issuecomment-6464882958)"
+      "criterion": "Browser: two people on two processes see each other's typing and cursor within a second on one socket each",
+      "surface": "Chromium on main's two-process harness (round-robin proxy, two envoy-dispatch processes, one Postgres)",
+      "command": "cd packages/dispatch && DATABASE_URL=postgres://postgres@127.0.0.1:5433/infra556_e2e?sslmode=disable bun run e2e:multiprocess -- coedit.multiprocess",
+      "observed": "✓ coedit.multiprocess.e2e.ts:143:1 two people on two processes ... (6.8s); 1 passed (10.3s)",
+      "headSha": "4f15d975a2810eee30dba0487b9f9aad727c2eec",
+      "negativeControl": "Fails without this change (https://github.com/sjawhar/legion/pull/2414#issuecomment-6464882958)"
     }
   ],
   "filesChanged": [
-    "merges of main d81da651 and de546ed2: migrations now 0142_issue_open_notify, 0143_doc_ask_block_authors, 0144_doc_conditional_edit_queue; leasePoolSize 14, permanentListeners 4, dispatchConnectionsPerPod 89; settlement resumption through duty.RunLeased; main's restoreLastActor kept on reopen",
-    "api/issue_patch.go, api/issue_close_rooms_test.go: closed_at re-stamped with clock_timestamp() as the close's last statement",
-    "docs/append_gate.go, persistence.go, websocket.go, service.go, room_behind_head_test.go: closeRoomOnReplacedHistory after an append storedHistoryHolds lets through",
-    "docs/service.go: a notified reopen closes a room whose record already reads open (d30e98c4)",
-    "new files docs/room_catch_up.go, docs/append_gate.go, docs/room_unstored.go, docs/conditional_edit_queue.go; BrowserAppend parameter; one gateAppend query with decideAppend; parks(); one processPair fixture; send with a header parameter; actors only for a share; dead nil-handler branches removed; awareness bounds",
-    "README, AGENTS.md, running-dispatch.md, pr2414 fragments: the five doc corrections, the commit-time margin, the awareness bounds, renumbered migrations"
+    "packages/envoy/internal/dispatch/docs/tree.go (renderedReplica.startFromRead)",
+    "packages/envoy/internal/dispatch/docs/awareness_relay.go (removal at the recorded clock)",
+    "packages/envoy/internal/dispatch/docs/append_gate.go, awareness_limit.go, room_sync.go, keepalive.go",
+    "packages/envoy/internal/dispatch/store/migrations/0149-0151 (renumbered)",
+    "packages/envoy/cmd/dispatch/*_multiprocess_test.go, process_pair_test.go, docs tests",
+    "packages/envoy README.md, AGENTS.md, .changes/unreleased/pr2414-*"
   ],
   "deviations": [
-    "The gate's batch wrapper (queueAppendGate) is gone on the reviewer's request; #2445's implementer agreed to call decideAppend from its batch path (Envoy, 2026-10-29T17:05Z).",
-    "The issue.closed event keeps the closing transaction's start time; the stored row and the PATCH response carry the re-stamped commit-time closed_at (README says so).",
-    "main moved again after the merge (GitHub reads CONFLICTING); per the architect's word, the branch does not chase it.",
-    "New refusal (census entry 4): a document socket whose first message names no document and type within 512 bytes is closed.",
-    "The relay now learns changed and departed clients from the room awareness's own observer and ignores ygo's latest-only relay lane; at each 50 ms flush it encodes every pending client's current state, and removals at the clock their tombstone held."
+    "Main moved to 0be366cf after the merge; GitHub reads CONFLICTING again. Per the architect the branch does not chase main; main's highest migration is still 0148."
   ],
-  "openQuestions": []
+  "openQuestions": [],
+  "trickyParts": [
+    "The memory test came in from main; the branch's publish loads no room, so a room loaded by a settlement had no replica at the test's base and built a second document copy inside the measured window. A read's copy now starts the replica."
+  ]
 }
