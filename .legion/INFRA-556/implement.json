@@ -2,9 +2,17 @@
   "schemaVersion": 1,
   "phase": "implement",
   "issue": "INFRA-556",
-  "completed": "2026-10-30T06:37:59Z",
-  "round": "tester round 6 failed: one tab keeping 2,048 invented awareness clients alive filled the room so a joining reader was never relayed; narrowed by the INFRA-63 architect to a per-socket bound; no merge of main",
+  "completed": "2026-10-30T09:50:06Z",
+  "round": "tester round 7 failed: the per-socket awareness filter never ran under the workspace's gorilla v1.5.4-pre; the architect added the room bound back at 256, census entry 4's close, and the relay's loss of concurrent cursors; no merge of main",
   "proof": [
+    {
+      "criterion": "Every document socket holds at most four awareness clients in every build; a nameless first message closes the socket; every reader's cursor on one process reaches the other within a second",
+      "surface": "docs package real-upgrade tests in workspace mode (gorilla v1.5.4-pre, confirmed with go version -m) and GOWORK=off (v1.5.3); two real envoy-dispatch binaries for the five-reader test",
+      "command": "cd packages/envoy && go test -count=2 -run 'Awareness|TestADocumentSocket' ./internal/dispatch/docs/ (and GOWORK=off); go test -tags multiprocess -count=3 -run TestFiveReadersPlacingCursorsAtOnceAreAllSeenOnTheOtherProcess ./cmd/dispatch; whole multiprocess file; whole docs package",
+      "observed": "the tester's TestADocumentSocketHoldsItsAwarenessBoundThroughARealUpgrade and TestFiveReadersPlacingCursorsAtOnceAreAllSeenOnTheOtherProcess pass unmodified (3 of 3 for the five readers); the flood tests pass with the room bound back at 256 (the repeated-flood test's bound back at 512); multiprocess file ok 1187.356s; docs package ok 1651.010s",
+      "headSha": "c83f0a4e05ed",
+      "negativeControl": "the five-reader test at bbf0f5cd (the test committed alone, before the fix) fails 2 of 2: 'bob on B holds only [8000 8004] after 1s'; the real-upgrade tests built against gorilla v1.5.4 without the reader reset fail: 'carol on task A holds 10 of them ... want at most 4' and 'the socket is still open 5s after a 603-byte first message'"
+    },
     {
       "criterion": "All three awareness flood tests: a reader joining during or after a flood is seen on both processes within a second, and repeated floods keep each room's awareness bounded",
       "surface": "two real envoy-dispatch binaries (the two multiprocess flood tests), the docs package's repeated-flood test, and Chromium on main's two-process harness",
@@ -82,8 +90,8 @@
     "The gate's batch wrapper (queueAppendGate) is gone on the reviewer's request; #2445's implementer agreed to call decideAppend from its batch path (Envoy, 2026-10-29T17:05Z).",
     "The issue.closed event keeps the closing transaction's start time; the stored row and the PATCH response carry the re-stamped commit-time closed_at (README says so).",
     "main moved again after the merge (GitHub reads CONFLICTING); per the architect's word, the branch does not chase it.",
-    "The repeated-flood test's bound is 2 x maxAwarenessClientsPerRoom; re-deriving that constant as maxRoomConnections x maxAwarenessClientsPerSocket (4000) raised the test's bound from 512 to 8000. A room cap of 256 would shut out real readers past 64 sockets; with the per-socket bound one tab can no longer fill a room. The test still fails without any bound (16,384 entries).",
-    "New refusal (census entry 4): a document socket whose first message names no document and type within 512 bytes is closed."
+    "New refusal (census entry 4): a document socket whose first message names no document and type within 512 bytes is closed.",
+    "The relay now learns changed and departed clients from the room awareness's own observer and ignores ygo's latest-only relay lane; at each 50 ms flush it encodes every pending client's current state, and removals at the clock their tombstone held."
   ],
   "openQuestions": []
 }
