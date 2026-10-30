@@ -106,6 +106,8 @@ jobs:
       envoy_go: ${{ steps.filter.outputs.envoy_go }}
       envoy_infra_go: ${{ steps.filter.outputs.envoy_infra_go }}
       envoy_go_race: ${{ steps.filter.outputs.envoy_go_race }}
+      envoy_go_race_pmdoc: ${{ steps.filter.outputs.envoy_go_race_pmdoc }}
+      envoy_go_race_api: ${{ steps.filter.outputs.envoy_go_race_api }}
       envoy_go_race_docs: ${{ steps.filter.outputs.envoy_go_race_docs }}
       dispatch_memory: ${{ steps.filter.outputs.dispatch_memory }}
       dispatch_multiprocess: ${{ steps.filter.outputs.dispatch_multiprocess }}
@@ -391,8 +393,7 @@ jobs:
             # outside the daemon: contracts' fixtures
             # (internal/api/state_golden_test.go:27, internal/intake/intake_test.go:698), the two
             # Oh My Pi plugins internal/daemon/promptreferences_omp_test.go:132 packs, whose prepack
-            # bundles contracts and envoy-client, stages skills/ and writes their notices,
-            # pi-legion's src/phase-stall.ts internal/claudebridge/bridge_test.go:813-817 runs, the
+            # bundles contracts and envoy-client, stages skills/ and writes their notices, the
             # GitHub App helper internal/api/real_github_test.go:88 sources, and the examples and
             # docs its tests hold to the code (cmd/legion/config_example_test.go:24,
             # internal/config/controller_test.go:179, internal/config/kubernetes_test.go:1322,
@@ -696,7 +697,7 @@ jobs:
               - 'packages/contracts/src/**'
               # web/src/features/delivery/lib/applyDelta.test.ts:2-4 and
               # web/src/features/doc/decision-blocks.test.ts:10.
-              - 'packages/contracts/fixtures/delivery-live/**'
+              - 'packages/contracts/fixtures/live/**'
               - 'packages/contracts/fixtures/decision-blocks/**'
               # e2e/cli-body-cap.e2e.ts:27 runs envoy-client's dispatch CLI.
               - 'packages/envoy-client/src/**'
@@ -751,13 +752,13 @@ jobs:
               - 'packages/proof-editor/**'
               # Fixtures its Go tests read: cmd/listener/api_test.go:191,
               # internal/contracts/dedupe_test.go:14, golden_test.go:72,
-              # internal/dispatch/api/delivery_live_diff_test.go:965,
+              # internal/dispatch/api/delivery_live_diff_test.go:982,1011,
               # internal/dispatch/docs/approval_carry_test.go:26,
               # internal/cistore/settlement_fixture_test.go:56.
               - 'packages/contracts/fixtures/dispatch-targeted-delivery.json'
               - 'packages/contracts/fixtures/dedupe-keys.json'
               - 'packages/contracts/fixtures/github-envelopes/**'
-              - 'packages/contracts/fixtures/delivery-live/**'
+              - 'packages/contracts/fixtures/live/**'
               - 'packages/contracts/fixtures/decision-blocks/**'
               - 'packages/contracts/fixtures/checks-settlement/**'
               # The claim list its fence reads: internal/broker/oauth/claims_doc_test.go:161.
@@ -784,21 +785,43 @@ jobs:
               # The image pull before its tests, of the consts in testnats/nats.go and
               # testpg/testpg.go.
               - '.github/actions/pull-test-images/**'
+            # The shared race job: the closure of `go test -race` over delivery, the Dispatch
+            # store, the bus, the listener, the registry store, the session cache and kvwatch (`go
+            # list -deps -test -race` in packages/envoy). internal/dispatch/store's
+            # search_text_test.go:102-120 walks every .md file under packages/envoy, so this
+            # filter keeps the wide root rather than the package list that closure would give. No
+            # bun_install anchor: no test of these packages runs bun, so the Bun install sits on
+            # the pmdoc race job with the package that needs it.
             envoy_go_race:
+              - '.github/workflows/ci.yaml'
+              - *go_workspace
+              - 'packages/envoy/**'
+              # The fixture cmd/listener/api_test.go:191,436,480 reads.
+              - 'packages/contracts/fixtures/dispatch-targeted-delivery.json'
+            # The pmdoc race job: the closure of `go test -race ./internal/dispatch/pmdoc/...`,
+            # and the Bun install its tests need. pmdoc's tests run pmdoc/gen, which imports the
+            # proof editor (internal/dispatch/pmdoc/update_test.go:236-239,
+            # render_readback_test.go:32), so the editor's package is here too.
+            envoy_go_race_pmdoc:
               - '.github/workflows/ci.yaml'
               - *bun_install
               - *go_workspace
-              # Its packages' tests walk every source file under packages/envoy
-              # (internal/dispatch/api/lock_level_test.go:120-133,
-              # internal/dispatch/store/search_text_test.go:102-120).
-              - 'packages/envoy/**'
-              # pmdoc's tests run pmdoc/gen, which imports the editor
-              # (internal/dispatch/pmdoc/update_test.go:236-239, render_readback_test.go:32).
+              - 'packages/envoy/internal/cputest/*'
+              - 'packages/envoy/internal/dispatch/docs/crafted/*'
+              - 'packages/envoy/internal/dispatch/docs/docstest/*'
+              - 'packages/envoy/internal/dispatch/pmdoc/**'
+              - 'packages/envoy/internal/stacktest/*'
               - 'packages/proof-editor/**'
-              # internal/dispatch/api/delivery_live_diff_test.go:965 and
-              # cmd/listener/api_test.go:191 (the listener's race step).
-              - 'packages/contracts/fixtures/delivery-live/**'
-              - 'packages/contracts/fixtures/dispatch-targeted-delivery.json'
+            # The API race job. internal/dispatch/api's lock_level_test.go:120-133 walks every
+            # non-test .go file under packages/envoy (event_insert_guard_test.go:32 and
+            # review_write_guard_test.go:44 use the same walk), so this filter keeps the wide root
+            # rather than the package list its closure would give.
+            envoy_go_race_api:
+              - '.github/workflows/ci.yaml'
+              - *go_workspace
+              - 'packages/envoy/**'
+              # internal/dispatch/api/delivery_live_diff_test.go:982,1011.
+              - 'packages/contracts/fixtures/live/**'
             # The document service's own race job. Not packages/envoy/**, as envoy_go_race has:
             # a race job of twenty minutes or more must not run on every change under that tree
             # (INFRA-490). This is the closure of ./internal/dispatch/docs/ (`go list -deps -test
@@ -873,7 +896,8 @@ jobs:
               - 'packages/envoy/internal/dispatch/agentsecrets/*'
               - 'packages/envoy/internal/dispatch/agentstream/*'
               - 'packages/envoy/internal/dispatch/api/*'
-              - 'packages/envoy/internal/dispatch/api/testdata/*'
+              # internal/dispatch/api/write_advice_test.go:504 reads testdata/decision-block-inserts.json.
+              - 'packages/envoy/internal/dispatch/api/testdata/**'
               - 'packages/envoy/internal/dispatch/architecture/*'
               - 'packages/envoy/internal/dispatch/asks/*'
               - 'packages/envoy/internal/dispatch/auth/*'
@@ -2411,32 +2435,56 @@ jobs:
             ~/.cache/go-build
           key: ${{ steps.go-cache.outputs.cache-primary-key }}
 
-  # The API that drives the document service, pmdoc (LEGION-571: its own flakes under
-  # -race and load, not a race in production code, cost three review rounds because nothing ran
-  # this package under -race before a PR claimed it), delivery (its intake handler reads the
-  # routing settings the poll loop publishes, from NATS's delivery goroutine), store (the
-  # pool's one-connection guard, and the hold mark of its own each concurrent read takes), and
-  # the bus (two connects on one SOCKS5 dialer record each dial's error in one record and read it
-  # back, TestConnectsSharingADialerRecordItsLastError), all under the race detector. A read that
-  # walks a live document without its lock races the room's peers, which no ordinary run shows:
-  # envoy-go's unit-test step runs without -race (LEGION-499). Its own job beside envoy-go because
-  # -race runs these packages several times slower, and with its own package deadline, since go
-  # test's ten-minute default is a whole package's. pmdoc's tests shell out to the generated
-  # TypeScript fixtures under internal/dispatch/pmdoc/gen (envoy-go's own "Check pmdoc fixtures are
-  # up to date" step), so this job needs Bun installed and its workspace linked the same way, though
-  # not that freshness check itself - a stale fixture is envoy-go's failure to catch, not a race.
-  # delivery's and the bus's NATS runs in the test process (internal/testnats), so the job needs
-  # no container runtime of its own.
-  # The document service itself runs in envoy-go-race-docs, a job of its own.
+  # The race lane: delivery (its intake handler reads the routing settings the poll loop
+  # publishes, from NATS's delivery goroutine), the Dispatch store (the pool's one-connection
+  # guard, and the hold mark of its own each concurrent read takes), the bus (two connects on one
+  # SOCKS5 dialer record each dial's error in one record and read it back,
+  # TestConnectsSharingADialerRecordItsLastError), the listener, where the role claim watcher, the
+  # session and interest watchers and the request handlers meet, with the role claim view, its
+  # lock and its epoch in the registry store and the watchers' completeness and rescans in kvwatch
+  # (INFRA-141), the session cache, whose reads take its shared lock beside watcher writes and the
+  # expiry timer's callback as kvwatch's resume point is read while a replaced watcher still
+  # applies, pmdoc (LEGION-571: its own flakes under -race and load, not a race in production
+  # code, cost three review rounds because nothing ran this package under -race before a PR
+  # claimed it), the Dispatch API and the document service - all under the race detector. A read
+  # that walks a live document without its lock races the room's peers, which no ordinary run
+  # shows: envoy-go's unit-test step runs without -race (LEGION-499). The lane sits beside
+  # envoy-go because -race runs these packages several times slower, and each job carries a
+  # package deadline of its own, since go test's ten-minute default is a whole package's.
+  #
+  # The lane is four jobs: envoy-go-race (delivery, the Dispatch store, the bus, the listener, the
+  # registry store, the session cache and kvwatch), envoy-go-race-pmdoc, envoy-go-race-api and
+  # envoy-go-race-docs, whose own comment below says why the document service runs alone.
+  #
+  # pmdoc and api sit apart because isolation is what made them fast: sharing a runner, the race
+  # binaries contended for the four vCPUs, and alone pmdoc fell from 1563.552 s to 1023.519 s and
+  # api from 1099.487 s to 746.718 s. The packages left in envoy-go-race are cheap enough to share
+  # one: the two heaviest of those measured there, the bus at 286.931 s and the listener at
+  # 365.787 s (run 40926978371), are a quarter and a third of the lane's bar of 1080 s, which is
+  # 60 % of a 30-minute step's own timeout, so a runner each would buy nothing and cost about
+  # 8,000 replayed runner minutes. Running the heavy packages apart also reads each one's seconds
+  # as its own job's, and leaves the others' numbers standing when one is red.
+  #
+  # Only pmdoc installs Bun: its tests shell out to the generated TypeScript fixtures under
+  # internal/dispatch/pmdoc/gen (envoy-go's own "Check pmdoc fixtures are up to date" step), and
+  # render_readback_test.go refuses to run without bun in CI. Not that freshness check itself - a
+  # stale fixture is envoy-go's failure to catch, not a race. delivery's and the bus's NATS runs in
+  # the test process (internal/testnats), so no job here needs a container runtime of its own.
+  #
+  # Delivery, the Dispatch store, the bus, the listener, the registry store, the session cache and
+  # kvwatch share this runner. The Dispatch store's tests (store_test.go:27, storetest.go:34) and
+  # delivery's (internal/dispatch/delivery/intake_test.go:39-41) read DISPATCH_TEST_DATABASE_URL
+  # and skip without it, and cmd/listener/dispatch_resolution_test.go:158 gets its database
+  # through internal/testpg, so the job carries the lane's Postgres service; the registry store
+  # itself is the NATS KV view and needs none.
   envoy-go-race:
     needs: changes
     if: needs.changes.outputs.envoy_go_race == 'true'
     runs-on: ubuntu-24.04
-    # Each race step's -timeout 30m must fire before the runner cancels the job, so a hung test
-    # prints the dump that names it. The worst case that still reaches the second step: about 1
-    # minute of setup, the first step up to its own 30 minutes, up to 5 minutes to compile the
-    # second step's race binaries, then its 30 minutes: 66 minutes.
-    timeout-minutes: 75
+    # The step's -timeout 30m must fire before the runner cancels the job, so a hung test prints
+    # the dump that names it: about 1 minute of setup, up to 5 minutes to compile the race
+    # binaries, then the step's own 30 minutes, which is 36.
+    timeout-minutes: 45
     services:
       postgres:
         # ghcr.io/sjawhar/legion/ci, the copy of pgvector/pgvector (.github/ci-images.yaml)
@@ -2455,23 +2503,76 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: packages/envoy/go.mod
+          cache: false
+      - name: Race-test delivery, the store, the bus, the listener, the registry store, the session cache and kvwatch
+        run: go test -race -timeout 30m ./internal/dispatch/delivery/... ./internal/dispatch/store/... ./internal/bus/ ./cmd/listener/ ./internal/store/ ./internal/session/ ./internal/kvwatch/...
+        working-directory: packages/envoy
+
+  # pmdoc under the race detector, on a runner of its own (the lane's comment above says why). The
+  # one race job that installs Bun: its tests run pmdoc/gen's TypeScript through it. No Postgres:
+  # the package talks to no database. Its step is the one in the lane whose deadline is 40 minutes
+  # and not 30: the package measured 1023.519 s isolated, 94.8 % of the lane's bar of 1080 s,
+  # which is 60 % of a 30-minute step's timeout, and 1210 s under contention, so at 30 minutes it
+  # has no headroom at all; at 40 minutes its bar is 1440 s and it uses 71 % of it.
+  envoy-go-race-pmdoc:
+    needs: changes
+    if: needs.changes.outputs.envoy_go_race_pmdoc == 'true'
+    runs-on: ubuntu-24.04
+    # The step's -timeout 40m must fire before the runner cancels the job, so a hung test prints
+    # the dump that names it: about 1 minute of setup, up to 5 minutes to compile the race
+    # binaries, then the step's own 40 minutes, which is 46.
+    timeout-minutes: 50
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
       - uses: ./.github/actions/setup-bun
       - run: bun install --frozen-lockfile
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           go-version-file: packages/envoy/go.mod
           cache: false
-      - name: Race-test the API, pmdoc, delivery, the store, and the bus
-        run: go test -race -timeout 30m ./internal/dispatch/api/ ./internal/dispatch/pmdoc/... ./internal/dispatch/delivery/... ./internal/dispatch/store/... ./internal/bus/
+      - name: Race-test pmdoc
+        run: go test -race -timeout 40m ./internal/dispatch/pmdoc/...
         working-directory: packages/envoy
-      # The listener is where the role claim watcher, the session and interest watchers and the
-      # request handlers meet; the role claim view, its lock and its epoch live in the store, and
-      # the watchers' completeness and rescans in kvwatch (INFRA-141). A step of its own, so its
-      # time and any race it finds are read apart from the packages above. The session cache runs
-      # here too: its reads take its shared lock beside watcher writes and the expiry timer's
-      # callback, as kvwatch's resume point is read while a replaced watcher still applies.
-      - name: Race-test the listener, the registry store, the session cache and kvwatch
-        run: go test -race -timeout 30m ./cmd/listener/ ./internal/store/ ./internal/session/ ./internal/kvwatch/...
+
+  # The Dispatch API under the race detector, on a runner of its own (the lane's comment above
+  # says why). Its tests drive the store, so the job carries the lane's Postgres service.
+  envoy-go-race-api:
+    needs: changes
+    if: needs.changes.outputs.envoy_go_race_api == 'true'
+    runs-on: ubuntu-24.04
+    # The step's -timeout 30m must fire before the runner cancels the job, so a hung test prints
+    # the dump that names it: about 1 minute of setup, up to 5 minutes to compile the race
+    # binaries, then the step's own 30 minutes, which is 36.
+    timeout-minutes: 45
+    services:
+      postgres:
+        # ghcr.io/sjawhar/legion/ci, the copy of pgvector/pgvector (.github/ci-images.yaml)
+        image: ghcr.io/sjawhar/legion/ci@sha256:2358fcba361ed2233a5ed81b5fe4ca779ccb304120ce531a3bf51c0ed7e2bc11
+        env:
+          POSTGRES_PASSWORD: ci
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+    env:
+      DISPATCH_TEST_DATABASE_URL: postgres://postgres:ci@localhost:5432/postgres?sslmode=disable
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: packages/envoy/go.mod
+          cache: false
+      - name: Race-test the Dispatch API
+        run: go test -race -timeout 30m ./internal/dispatch/api/
         working-directory: packages/envoy
 
   # The document service alone, under the race detector, with a deadline of its own. It is by far
@@ -3025,6 +3126,8 @@ jobs:
       - envoy-go
       - envoy-infra-go
       - envoy-go-race
+      - envoy-go-race-pmdoc
+      - envoy-go-race-api
       - envoy-go-race-docs
       - dispatch-memory
       - dispatch-multiprocess
@@ -3064,6 +3167,8 @@ jobs:
               "envoy-go": "envoy_go",
               "envoy-infra-go": "envoy_infra_go",
               "envoy-go-race": "envoy_go_race",
+              "envoy-go-race-pmdoc": "envoy_go_race_pmdoc",
+              "envoy-go-race-api": "envoy_go_race_api",
               "envoy-go-race-docs": "envoy_go_race_docs",
               "dispatch-memory": "dispatch_memory",
               "dispatch-multiprocess": "dispatch_multiprocess",

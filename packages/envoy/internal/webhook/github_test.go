@@ -11,6 +11,7 @@ import (
 	"fmt"
 	"github.com/nats-io/nats.go"
 	"github.com/sjawhar/envoy/internal/bus"
+	"github.com/sjawhar/envoy/internal/bus/bustest"
 	"github.com/sjawhar/envoy/internal/contracts"
 	"github.com/sjawhar/envoy/internal/testnats"
 	"log"
@@ -569,21 +570,7 @@ func TestADeliveryToAFullStreamIsAnswered503(t *testing.T) {
 		t.Fatalf("start: %v", err)
 	}
 	t.Cleanup(client.Close)
-	for i := 0; ; i++ {
-		if i == 64 {
-			t.Fatalf("the stream took %d messages of 1 KiB under a %d-byte limit", i, limit)
-		}
-		err := client.Publish(contracts.Envelope{
-			EventID: fmt.Sprintf("fill-%d", i), Source: "github", Topic: fmt.Sprintf("notifications.github.fill.%d", i),
-			DedupeKey: fmt.Sprintf("fill.%d", i), PayloadSummary: strings.Repeat("x", 1<<10),
-		})
-		if err != nil {
-			if !errors.Is(err, bus.ErrStreamFull) {
-				t.Fatalf("fill publish %d = %v, want bus.ErrStreamFull", i, err)
-			}
-			break
-		}
-	}
+	bustest.FillStream(t, client, 64)
 	before, err := client.JS().StreamInfo(bus.Stream)
 	if err != nil {
 		t.Fatalf("read the full stream: %v", err)
@@ -655,21 +642,7 @@ func TestAGitHubDeliveryAnsweredNotStoredIsRepublishedWithoutItsID(t *testing.T)
 		return items[0]
 	}
 
-	for i := 0; ; i++ {
-		if i == 64 {
-			t.Fatalf("the stream took %d messages of 1 KiB under a %d-byte limit", i, limit)
-		}
-		err := client.Publish(contracts.Envelope{
-			EventID: fmt.Sprintf("fill-%d", i), Source: "github", Topic: fmt.Sprintf("notifications.github.fill.%d", i),
-			DedupeKey: fmt.Sprintf("fill.%d", i), PayloadSummary: strings.Repeat("x", 1<<10),
-		})
-		if err != nil {
-			if !errors.Is(err, bus.ErrStreamFull) {
-				t.Fatalf("fill publish %d = %v, want bus.ErrStreamFull", i, err)
-			}
-			break
-		}
-	}
+	bustest.FillStream(t, client, 64)
 
 	var logged bytes.Buffer
 	previous, flags := log.Writer(), log.Flags()
