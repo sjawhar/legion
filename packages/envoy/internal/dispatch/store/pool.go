@@ -138,6 +138,7 @@ type Pool struct {
 	leases     *pgxpool.Pool
 	outbox     *pgxpool.Pool
 	compaction *pgxpool.Pool
+	horizon    *pgxpool.Pool
 	closed     bool
 }
 
@@ -310,10 +311,10 @@ const registryPoolSize = 1
 const permanentListeners = 3
 
 // ConnectionsPerProcess is the most connections one Dispatch server process opens to Postgres:
-// every pool's size - the shared, rooms, health, lease, outbox and compaction pools, and the
-// registry's own pool (processes.Register) - and one connection per permanent listener, which the
-// listener pool dials and hands off rather than holds.
-const ConnectionsPerProcess = sharedPoolSize + RoomsPoolSize + healthPoolSize + leasePoolSize + outboxPoolSize + compactionPoolSize + registryPoolSize + permanentListeners
+// every pool's size - the shared, rooms, health, lease, outbox and compaction pools, the
+// registry's own pool (processes.Register) and the event horizon's (Horizon) - and one connection
+// per permanent listener, which the listener pool dials and hands off rather than holds.
+const ConnectionsPerProcess = sharedPoolSize + RoomsPoolSize + healthPoolSize + leasePoolSize + outboxPoolSize + compactionPoolSize + registryPoolSize + horizonPoolSize + permanentListeners
 
 // Outbox is the pool the events outbox claims, reads and records events through, and reads the
 // followers and authors a publish routes to. Under load the API's requests queue for the shared
@@ -344,6 +345,28 @@ func (p *Pool) Compaction() (*pgxpool.Pool, error) {
 	return p.separate(&p.compaction, compactionPoolSize, "dispatch-compaction")
 }
 
+// horizonPoolSize bounds the pool the event log's safe horizon (events.Horizon) works through. The
+// server keeps one Horizon, whose concurrent callers share the one observation in flight, so one
+// connection serves every observation. The other statements the Horizon runs share both
+// connections with it: the stall diagnosis and the write of the proven horizon (event_horizon),
+// which run after an observation has released its waiters, and the reads every GET /auth/whoami and
+// the relay's first start make (a mark, the oldest transaction that can write the event log, the
+// persisted horizon), each one statement.
+const horizonPoolSize = 2
+
+// Horizon is the pool the event log's safe horizon (events.Horizon) takes its observations, its
+// marks and the reads beside them, its stall diagnosis and its persist write through. Every reader that pages the event log by a global id cursor - the
+// event stream relay, the delivery hub, a references read since a cursor - reads only up to what
+// an observation has proven safe. Under load the API's requests queue for the shared pool's
+// connections, and an observation queued behind them holds back every live reader of the event
+// log; on a pool of its own it waits for none of them, and holds no connection a request could
+// use. Like the rooms pool it is outside the nested-acquire guard, because a separate pool cannot
+// close the cycle the guard prevents: none of those statements (each one batch or one row) asks
+// for a second connection while it holds one.
+func (p *Pool) Horizon() (*pgxpool.Pool, error) {
+	return p.separate(&p.horizon, horizonPoolSize, "event horizon")
+}
+
 // separate opens the pool held at field on demand, sized at size and copied from the shared
 // pool's configuration, and closes it with the shared pool. Each caller holds mu for the whole
 // check-and-open so two of them cannot open two pools, and one opened after Close would be a
@@ -372,8 +395,9 @@ func (p *Pool) separate(field **pgxpool.Pool, size int32, name string) (*pgxpool
 	return opened, nil
 }
 
-// Close releases every connection the pool holds, the document rooms, the compaction and the
-// health probe included.
+// Close releases every connection the pool holds, the separate pools' - the document rooms, the
+// compaction, the health probe, the listener, the leases, the outbox and the event horizon -
+// included.
 func (p *Pool) Close() {
 	p.mu.Lock()
 	if p.closed {
@@ -381,10 +405,10 @@ func (p *Pool) Close() {
 		return
 	}
 	p.closed = true
-	rooms, health, listen, leases, outbox, compaction := p.rooms, p.health, p.listen, p.leases, p.outbox, p.compaction
-	p.rooms, p.health, p.listen, p.leases, p.outbox, p.compaction = nil, nil, nil, nil, nil, nil
+	rooms, health, listen, leases, outbox, compaction, horizon := p.rooms, p.health, p.listen, p.leases, p.outbox, p.compaction, p.horizon
+	p.rooms, p.health, p.listen, p.leases, p.outbox, p.compaction, p.horizon = nil, nil, nil, nil, nil, nil, nil
 	p.mu.Unlock()
-	for _, separate := range []*pgxpool.Pool{rooms, health, listen, leases, outbox, compaction} {
+	for _, separate := range []*pgxpool.Pool{rooms, health, listen, leases, outbox, compaction, horizon} {
 		if separate != nil {
 			separate.Close()
 		}

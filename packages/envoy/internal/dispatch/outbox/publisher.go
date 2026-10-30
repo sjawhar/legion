@@ -20,6 +20,7 @@ import (
 	"github.com/sjawhar/envoy/internal/dispatch/retry"
 	"github.com/sjawhar/envoy/internal/dispatch/store"
 	"github.com/sjawhar/envoy/internal/dispatch/text"
+	"github.com/sjawhar/envoy/internal/metrics"
 )
 
 const (
@@ -95,7 +96,9 @@ var errMentionPending = errors.New("a mention's delivery is still undecided")
 // Publisher is the NATS publication boundary used by the Dispatch outbox.
 type Publisher interface {
 	// Window starts one batch's sends: each is sent without waiting for NATS's answer, all on one
-	// connection and in the order they were made, or not at all (bus.Client.Window).
+	// connection and in the order they were made, or not at all (bus.Client.Window). A send the
+	// window has to make again leaves after the window's later sends, and a copy it sends without
+	// its id is stored by the stream as a message of its own.
 	Window() bus.Sender
 }
 
@@ -107,6 +110,21 @@ type Deps struct {
 	Store     *store.Store
 	Publisher Publisher
 	Broker    *events.Broker
+	// PublishFailures counts a destination of a publish attempt that did not reach NATS, by
+	// reason (countPublishFailure). cmd/dispatch registers it on the process's metrics
+	// registry, so a denied or refused destination shows on /metrics rather than only in the
+	// log.
+	PublishFailures *metrics.Counter
+}
+
+// countPublishFailure counts one destination of a publish attempt that did not reach NATS, under
+// reason ("denied", "refused" or "failed"). Every increment goes through here: a Deps built
+// without a counter - the package's own tests - then counts nothing instead of dereferencing nil.
+func (d Deps) countPublishFailure(reason string) {
+	if d.PublishFailures == nil {
+		return
+	}
+	d.PublishFailures.Inc([2]string{"reason", reason})
 }
 
 // Run drains unpublished events at startup, after committed local events, and
@@ -192,11 +210,13 @@ type routing struct {
 // envelope is sent to each of its destinations, in id order and each event's destinations in
 // turn, before any answer is waited for, so a batch costs one NATS round trip rather than one per
 // destination, and NATS takes the envelopes in the order they were sent: on the stream, on the role
-// lanes and on each issue's subject, a batch's events arrive in id order. Then every answer is
-// read, and what the batch came to is written in one statement (recordBatch). An event is marked
-// published only once NATS accepted each of its destinations; one that failed is backed off, so
-// the events queued behind it are not stuck behind it; and one that held a session's copy back for
-// a mention still being sent (errMentionPending) is deferred, its other destinations recorded.
+// lanes and on each issue's subject, a batch's events arrive in id order. A send the window has to
+// make again is the exception: it leaves after the window's later sends (bus.Client.Window). Then
+// every answer is read, and what the batch came to is written in one statement (recordBatch). An
+// event is marked published only once NATS accepted each of its destinations; one that failed is
+// backed off, so the events queued behind it are not stuck behind it; and one that held a
+// session's copy back for a mention still being sent (errMentionPending) is deferred, its other
+// destinations recorded.
 //
 // A failure of the connection rather than the envelope (bus.ErrUnavailable: no connection, one
 // lost or reconnected mid-batch, no answer at all) is no fault of its event. The window sends
@@ -204,11 +224,12 @@ type routing struct {
 // NATS is a prefix of it: no event after the first send that met the lost connection is sent, and
 // every event that met the failure, or was not sent, is released rather than backed off, so the
 // next scan sends them again in id order, and the stream's MsgId drops the copies of those that
-// had landed. An event backed off instead would reach its issue's subject after the later events
-// of that issue, which the Legion daemon then drops as stale by their sequence. The guarantee
-// covers a failed connection only: an answer that times out, or no responders, on a connection
-// still current stops no later send, so the released event can land after a later event of its
-// issue that NATS did store.
+// had landed, except a copy the window sent again without its id, which the stream stored as a
+// message of its own. An event backed off instead would reach its issue's subject after the later
+// events of that issue, which the Legion daemon then drops as stale by their sequence. The
+// guarantee covers a failed connection only: an answer that times out, or no responders, on a
+// connection still current stops no later send, so the released event can land after a later
+// event of its issue that NATS did store.
 func scanBatch(ctx context.Context, deps Deps) (int, bool, error) {
 	pending, blocked, err := scanPendingEvents(ctx, deps)
 	if err != nil {
@@ -579,7 +600,7 @@ func releaseClaim(ctx context.Context, deps Deps, ids []int64) {
 // reports errMentionPending once every answer is in (attempt.err). The destinations the attempt
 // reached are recorded with the batch (recordBatch), so a retry publishes only the rest.
 func send(ctx context.Context, deps Deps, sender bus.Sender, pending pendingEvent, delivered map[string]struct{}) *attempt {
-	a := &attempt{delivered: delivered, sender: sender}
+	a := &attempt{deps: deps, delivered: delivered, sender: sender}
 	event := pending.event
 	if event.IssueKey == nil && event.ArtifactID == nil && event.Project == "" {
 		return a
@@ -664,7 +685,7 @@ func publishPrimaryDocumentAuthors(deps Deps, item contracts.Envelope, event mod
 }
 
 // attempt is one pass over an event's destinations, sent through sender, its batch's window
-// (Publisher.Window). delivered holds the destinations the event
+// (Publisher.Window), for the run deps describes. delivered holds the destinations the event
 // reached before this pass and those this pass sent, so that none is sent twice; sent is what this
 // pass sent, in order, with each one's answer to come. wait reads those answers into reached, the
 // destinations NATS accepted or refused (bus.ErrRefused), denied, the denials
@@ -673,6 +694,7 @@ func publishPrimaryDocumentAuthors(deps Deps, item contracts.Envelope, event mod
 // delivered (a new comment's alone), and deferred whether a session's copy was held back for a
 // mention still being sent.
 type attempt struct {
+	deps      Deps
 	sender    bus.Sender
 	delivered map[string]struct{}
 	sent      []sentDestination
@@ -729,11 +751,14 @@ func (a *attempt) answer(sent sentDestination, err error) error {
 	switch {
 	case err == nil:
 	case errors.Is(err, bus.ErrPublishDenied):
+		a.deps.countPublishFailure("denied")
 		a.denied = append(a.denied, fmt.Errorf("%s %q: %w", sent.label, sent.id, err))
 		return nil
 	case !errors.Is(err, bus.ErrRefused):
+		a.deps.countPublishFailure("failed")
 		return fmt.Errorf("%s %q: %w", sent.label, sent.id, err)
 	default:
+		a.deps.countPublishFailure("refused")
 		slog.Error("dispatch outbox: destination refused", "event_id", sent.eventID, "topic", sent.topic, "error", err)
 	}
 	a.reached = append(a.reached, sent.topic)
@@ -1155,7 +1180,9 @@ func publishedDestinationSet(subjects []string) map[string]struct{} {
 // reached, or this attempt already sent, is skipped. The answer is read later (attempt.wait),
 // except one that came back before anything was sent: a refusal or a denial is kept for wait to
 // read, and any other failure - NATS unreachable (bus.ErrUnavailable), say - ends the attempt,
-// named by label and id.
+// named by label and id. Such a failure is counted here, as attempt.answer counts the ones it
+// reads, and counted once: a destination that ends the attempt is never added to a.sent, so wait
+// never reads its answer.
 func publishDestination(deps Deps, eventID int64, item contracts.Envelope, a *attempt, label, id string) error {
 	if _, ok := a.delivered[item.Topic]; ok {
 		return nil
@@ -1165,6 +1192,7 @@ func publishDestination(deps Deps, eventID int64, item contracts.Envelope, a *at
 	select {
 	case err := <-sent.answer:
 		if err != nil && !errors.Is(err, bus.ErrPublishDenied) && !errors.Is(err, bus.ErrRefused) {
+			deps.countPublishFailure("failed")
 			return fmt.Errorf("%s %q: %w", label, id, err)
 		}
 		answered := make(chan error, 1)
@@ -1195,8 +1223,16 @@ func publishRoute(deps Deps, eventID int64, item contracts.Envelope, a *attempt,
 	return publishDestination(deps, eventID, item, a, "publish route", *route)
 }
 
+// envelope builds the bus envelope of one event. Its payload is the event with one field the
+// event log does not hold: `quiet` (events.Quiet), whether the event carries nothing for a
+// reader following its owner topic. A reader takes it as the whole answer, where `notify` says
+// only whether the event wakes the route, so an agent's comment on an issue reaches the sessions
+// that subscribed to that issue's topic.
 func envelope(event model.Event, slug string) (contracts.Envelope, error) {
-	payload, err := json.Marshal(event)
+	payload, err := json.Marshal(struct {
+		model.Event
+		Quiet bool `json:"quiet"`
+	}{Event: event, Quiet: events.Quiet(event)})
 	if err != nil {
 		return contracts.Envelope{}, fmt.Errorf("encode event: %w", err)
 	}

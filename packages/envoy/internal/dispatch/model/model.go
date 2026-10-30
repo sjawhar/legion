@@ -3,6 +3,7 @@ package model
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"regexp"
 	"strings"
@@ -63,6 +64,48 @@ type Anchor struct {
 	Version    int     `json:"version"`
 	Quote      string  `json:"quote"`
 	Orphaned   bool    `json:"orphaned"`
+}
+
+// DecodeAnchor decodes a stored anchor row, reading artifact_id only where the stored value is a
+// JSON string. No release writes a non-string artifact_id - the server writes a document's id,
+// which is text - but a row an earlier release wrote could hold one, and a read of such a row
+// must answer the ask or comment it belongs to rather than 500 for the whole route, which
+// decoding a number into ArtifactID's string field would. Any other JSON value - a number, null,
+// an object, a bool - leaves ArtifactID empty, which names no document, the same answer the SQL
+// read gives for a value that casts to no uuid. Every other field decodes as its struct tag says,
+// errors included, and encoding is unchanged.
+//
+// This is a function and not an UnmarshalJSON method on Anchor: a method makes encoding/json scan
+// every anchor an extra time before calling it, which costs every well-formed anchor a read
+// decodes. Here the plain decode runs first, so a well-formed anchor costs exactly a plain
+// json.Unmarshal. Only the type error artifact_id itself raises takes the second decode, which
+// reads that one field as raw JSON; any other error is the decode's answer.
+func DecodeAnchor(data []byte, anchor *Anchor) error {
+	err := json.Unmarshal(data, anchor)
+	if err == nil {
+		return nil
+	}
+	var wrongType *json.UnmarshalTypeError
+	if !errors.As(err, &wrongType) || wrongType.Field != "artifact_id" {
+		return err
+	}
+	// The embedded anchorFields decodes every field but artifact_id as before; the field beside
+	// it shadows artifact_id and reads it as raw JSON.
+	type anchorFields Anchor
+	decoded := struct {
+		*anchorFields
+		ArtifactID json.RawMessage `json:"artifact_id"`
+	}{anchorFields: (*anchorFields)(anchor)}
+	if err := json.Unmarshal(data, &decoded); err != nil {
+		return err
+	}
+	var artifactID string
+	if err := json.Unmarshal(decoded.ArtifactID, &artifactID); err != nil {
+		anchor.ArtifactID = ""
+		return nil
+	}
+	anchor.ArtifactID = artifactID
+	return nil
 }
 
 // AnchorInput selects document text by quote or identifies a browser-owned mark.
@@ -1154,6 +1197,65 @@ type MyRepliesResponse struct {
 	Total  int          `json:"total"`
 	Limit  int          `json:"limit"`
 	Offset int          `json:"offset"`
+}
+
+// SessionAnswer kinds: an ask's current answer (its ID is the ask's), a comment, or a message.
+const (
+	SessionAnswerKindAnswer  = "answer"
+	SessionAnswerKindComment = "comment"
+	SessionAnswerKindMessage = "message"
+)
+
+// SessionAnswer relations: what an item is to the session Dispatch delivered it to, spelled as
+// SESSION_ANSWER_RELATIONS in packages/contracts/src/dispatch-api.ts spells them.
+const (
+	SessionAnswerRelationAnsweredYourAsk        = "answered_your_ask"
+	SessionAnswerRelationRepliedOnYourAsk       = "replied_on_your_ask"
+	SessionAnswerRelationRepliedInCommentThread = "replied_in_a_comment_thread"
+	SessionAnswerRelationCommentedOnDocument    = "commented_on_a_document"
+	SessionAnswerRelationCommentedOnIssue       = "commented_on_an_issue"
+	SessionAnswerRelationMentionedYou           = "mentioned_you"
+	SessionAnswerRelationSentYouMessage         = "sent_you_a_message"
+	SessionAnswerRelationRepliedToYourMessage   = "replied_to_your_message"
+)
+
+// SessionAnswerAsk is the ask a session answer item answers or replies in, with the session's
+// whole question.
+type SessionAnswerAsk struct {
+	ID       string `json:"id"`
+	Question string `json:"question"`
+}
+
+// SessionAnswer is one thing a person wrote that Dispatch delivered to a session, on
+// GET /api/v1/agents/{session_id}/answers: an ask's current answer, a comment at its current
+// body, or a message, each (Kind, ID) once. Author is always a user. Text is the person's words in
+// full ("" for an answer that chose options only). Selected and Replaced are an answer's, each
+// omitted when empty or false; EditedAt is an edited comment's; Ask is set on an answer and on a
+// reply in an ask's thread. Owner and Ref are nil for a direct message, which is on no issue and
+// has no dispatch:// address; Href is then /agents/<session>/live.
+type SessionAnswer struct {
+	Kind     string            `json:"kind"`
+	Relation string            `json:"relation"`
+	ID       string            `json:"id"`
+	At       time.Time         `json:"at"`
+	EditedAt *time.Time        `json:"edited_at,omitempty"`
+	Author   Actor             `json:"author"`
+	Text     string            `json:"text"`
+	Selected []string          `json:"selected,omitempty"`
+	Replaced bool              `json:"replaced,omitempty"`
+	Ask      *SessionAnswerAsk `json:"ask,omitempty"`
+	Owner    *OpenAskOwner     `json:"owner"`
+	Ref      *string           `json:"ref"`
+	Href     string            `json:"href"`
+}
+
+// SessionAnswersResponse is what people wrote to one session since Since, newest first by At,
+// then by ID. Total counts every item in the window, also when max_chars stopped Items early.
+type SessionAnswersResponse struct {
+	SessionID string          `json:"session_id"`
+	Since     time.Time       `json:"since"`
+	Total     int             `json:"total"`
+	Items     []SessionAnswer `json:"items"`
 }
 
 // AskResolution records why a question no longer needs a human answer.

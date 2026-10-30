@@ -980,10 +980,10 @@ __export(exports_coerce, {
 });
 
 // ../envoy-client/bin/dispatch.ts
-import { readFileSync as readFileSync6 } from "fs";
+import { readFileSync as readFileSync7 } from "fs";
 
 // ../envoy-client/src/dispatch-cli.ts
-import { closeSync as closeSync4, constants as constants2, fstatSync as fstatSync2, openSync as openSync4, readFileSync as readFileSync5 } from "fs";
+import { closeSync as closeSync4, constants as constants2, fstatSync as fstatSync2, openSync as openSync4, readFileSync as readFileSync6 } from "fs";
 
 // ../envoy-client/src/askgate-marker.ts
 import { createHash, randomBytes } from "crypto";
@@ -1274,6 +1274,667 @@ function consumeMarker(stores, argv, args, files, now) {
     ok: false,
     why: mismatched ? "its arguments differ from the ones AskGate reviewed" : expired ? "its AskGate marker expired before it ran" : "this call carries no AskGate marker"
   };
+}
+
+// ../envoy-client/src/askgate-new-asks.ts
+var OPENING_CODE_POINTS = 60;
+function newAsks(toolName, input) {
+  switch (toolName) {
+    case "dispatch_ask":
+      return [questionAsk(input)];
+    case "dispatch_issue":
+      return typeof input.spec === "string" ? askBlocks(input.spec) : [];
+    case "dispatch_artifact":
+      return typeof input.content === "string" ? askBlocks(input.content) : [];
+    case "dispatch_doc_edit":
+      return (Array.isArray(input.ops) ? input.ops : []).flatMap((op) => {
+        if (typeof op !== "object" || op === null)
+          return [];
+        const { op: kind, markdown, type, block } = op;
+        if (kind === "insert" && typeof markdown === "string") {
+          const { before, after } = op;
+          return scanAsks(markdown, before === "start" || after === "start");
+        }
+        if (kind === "retype" && type === "ask" && typeof block === "string") {
+          return [{ kind: "retype", id: block, text: "", opening: "" }];
+        }
+        return [];
+      });
+    default:
+      return [];
+  }
+}
+function questionAsk(input) {
+  const question = typeof input.question === "string" ? input.question.trim() : "";
+  const options = (Array.isArray(input.options) ? input.options : []).flatMap((option) => {
+    if (typeof option !== "object" || option === null)
+      return [];
+    const { label, description } = option;
+    return [
+      typeof description === "string" && description !== "" ? `- ${String(label ?? "")}: ${description}` : `- ${String(label ?? "")}`
+    ];
+  });
+  return {
+    kind: "ask",
+    text: options.length === 0 ? question : `${question}
+
+${options.join(`
+`)}`,
+    opening: openingOf(question)
+  };
+}
+function openingOf(text) {
+  return Array.from(text.replace(/\s+/g, " ").trim()).slice(0, OPENING_CODE_POINTS).join("");
+}
+var FRONT_MATTER_FENCE = /^---[ \t]*$/;
+function askBlocks(markdown) {
+  return scanAsks(markdown, true);
+}
+function scanAsks(markdown, frontMatter) {
+  let lines = markdown.replace(/\r\n?/g, `
+`).split(`
+`);
+  let unclosedFrontMatter = false;
+  if (frontMatter && FRONT_MATTER_FENCE.test(lines[0] ?? "")) {
+    const close = lines.findIndex((line, index) => index > 0 && FRONT_MATTER_FENCE.test(line));
+    if (close === -1)
+      unclosedFrontMatter = true;
+    else
+      lines = lines.slice(close + 1);
+  }
+  const scan = {
+    lines,
+    index: 0,
+    opened: [],
+    drafts: [],
+    emptyItemWithBlankLines: false,
+    skipList: false,
+    unclosedFrontMatter
+  };
+  const document = {
+    kind: "document",
+    parent: undefined,
+    previous: undefined,
+    children: 0,
+    last: undefined
+  };
+  for (const [index, text] of lines.entries()) {
+    scan.index = index;
+    readLine(scan, document, new Line(text));
+  }
+  return scan.drafts.map(({ id, lines: body }) => {
+    const text = body.join(`
+`).trim();
+    return { kind: "block", ...id === undefined ? {} : { id }, text, opening: openingOf(text) };
+  });
+}
+
+class Line {
+  text;
+  #starts;
+  #pos = 0;
+  #column = 0;
+  constructor(text) {
+    this.text = text;
+    const starts = [0];
+    let column = 0;
+    for (let index = 0;index < text.length; index++) {
+      column += text[index] === "\t" ? 4 - column % 4 : 1;
+      starts.push(column);
+    }
+    this.#starts = starts;
+  }
+  get column() {
+    return this.#column;
+  }
+  columnAt(index) {
+    return this.#starts[index];
+  }
+  #afterSpaces(index) {
+    let end = index;
+    while (end < this.text.length && (this.text[end] === " " || this.text[end] === "\t"))
+      end++;
+    return end;
+  }
+  spacesAt(index) {
+    return this.columnAt(this.#afterSpaces(index)) - this.columnAt(index);
+  }
+  indent() {
+    const at = this.#afterSpaces(this.#pos);
+    return { width: this.columnAt(at) - this.#column, at };
+  }
+  blank() {
+    return this.indent().at === this.text.length;
+  }
+  skip(columns) {
+    this.#column += columns;
+    while (this.#pos < this.text.length && this.columnAt(this.#pos + 1) <= this.#column)
+      this.#pos++;
+  }
+  advanceTo(index) {
+    this.#pos = index;
+    this.#column = this.columnAt(index);
+  }
+  rest() {
+    const start = this.columnAt(this.#pos);
+    if (this.#pos < this.text.length && start < this.#column) {
+      return " ".repeat(this.columnAt(this.#pos + 1) - this.#column) + this.text.slice(this.#pos + 1);
+    }
+    return this.text.slice(this.#pos);
+  }
+}
+function readLine(scan, document, line) {
+  if (scan.opened.length === 0) {
+    if (!line.blank())
+      openBlocks(scan, document, line);
+    return;
+  }
+  const opened = [...scan.opened];
+  const lastIndex = opened.length - 1;
+  for (const [index, block] of opened.entries()) {
+    if (block.kind !== "paragraph") {
+      const continuation = continueBlock(scan, block, line);
+      if (continuation === "children" && index === lastIndex) {
+        openBlocks(scan, block, line);
+        return;
+      }
+      if (continuation !== "close")
+        continue;
+    }
+    if (openBlocks(scan, opened[index - 1] ?? document, line) !== "paragraph") {
+      scan.opened.splice(index, lastIndex - index + 1);
+    }
+    return;
+  }
+}
+function openBlocks(scan, parent, line) {
+  const continuable = scan.opened.at(-1)?.kind === "paragraph";
+  let result = "none";
+  for (let into = parent;; ) {
+    const { width, at } = line.indent();
+    if (at === line.text.length)
+      break;
+    const char = line.text.charAt(at);
+    const interrupting = continuable && result === "none";
+    let opened;
+    for (const parser of BLOCK_PARSERS) {
+      if (parser.triggers !== undefined && !parser.triggers.includes(char))
+        continue;
+      if (interrupting && !parser.interrupts)
+        continue;
+      if (width > 3 && !parser.indented)
+        continue;
+      opened = parser.open(scan, into, line, width, at);
+      if (opened !== undefined)
+        break;
+    }
+    if (opened === undefined)
+      break;
+    into.children++;
+    into.last = opened.block;
+    scan.opened.push(opened.block);
+    result = "opened";
+    if (!opened.children)
+      break;
+    into = opened.block;
+  }
+  const last = scan.opened.at(-1);
+  if (result === "none" && last?.kind === "paragraph" && !line.blank()) {
+    last.rows.push(line.rest());
+    last.lastLine = scan.index;
+    line.advanceTo(line.text.length);
+    return "paragraph";
+  }
+  return result;
+}
+function under(parent) {
+  return { parent, previous: parent.last, children: 0, last: undefined };
+}
+function leafAt(parent, line) {
+  line.advanceTo(line.text.length);
+  return { block: { kind: "leaf", ...under(parent) }, children: false };
+}
+function frontMatterHolds(scan, parent) {
+  return scan.unclosedFrontMatter && parent.kind === "document";
+}
+var BLOCK_PARSERS = [
+  {
+    triggers: "-=",
+    interrupts: true,
+    indented: false,
+    open(scan, parent, line, _width, at) {
+      const last = scan.opened.at(-1);
+      if (last?.kind !== "paragraph" || last.parent !== parent)
+        return;
+      return setextUnderline(line.text.slice(at)) ? leafAt(parent, line) : undefined;
+    }
+  },
+  {
+    triggers: "-*_",
+    interrupts: true,
+    indented: false,
+    open: (_scan, parent, line, _width, at) => thematicBreak(line.text.slice(at)) ? leafAt(parent, line) : undefined
+  },
+  {
+    triggers: "-+*0123456789",
+    interrupts: true,
+    indented: false,
+    open(scan, parent, line) {
+      const last = scan.opened.at(-1);
+      if (last?.kind === "list" || scan.skipList) {
+        scan.skipList = false;
+        return;
+      }
+      const marker = listMarker(line);
+      if (marker === undefined || frontMatterHolds(scan, parent))
+        return;
+      if (marker.empty || marker.number !== undefined && marker.number !== "1") {
+        if (last?.kind === "paragraph" && last.parent === parent)
+          return;
+        if (interruptsOpenBlock(scan, parent))
+          return;
+      }
+      scan.emptyItemWithBlankLines = false;
+      return { block: { kind: "list", marker: marker.char, ...under(parent) }, children: true };
+    }
+  },
+  {
+    triggers: "-+*0123456789",
+    interrupts: true,
+    indented: false,
+    open(scan, parent, line) {
+      if (parent.kind !== "list")
+        return;
+      const previous = parent.last?.kind === "item" ? parent.last.offset : 0;
+      const marker = listMarker(line);
+      if (marker === undefined || marker.indent - previous > 3)
+        return;
+      scan.emptyItemWithBlankLines = false;
+      const after = line.spacesAt(marker.end);
+      const spacing = marker.empty || after > 4 ? 1 : after;
+      const offset = line.columnAt(marker.end) - line.column + spacing;
+      const item = { kind: "item", offset, ...under(parent) };
+      if (marker.empty)
+        return { block: item, children: false };
+      line.advanceTo(marker.end);
+      line.skip(spacing);
+      return { block: item, children: true };
+    }
+  },
+  {
+    interrupts: false,
+    indented: true,
+    open(scan, parent, line, width) {
+      if (width < 4)
+        return;
+      line.skip(4);
+      const previous = scan.lines[scan.index - 1];
+      const block = {
+        kind: "code",
+        lastLine: scan.index,
+        blankBefore: previous === undefined || /^[ \t]*$/.test(previous),
+        ...under(parent)
+      };
+      return { block, children: false };
+    }
+  },
+  {
+    triggers: "#",
+    interrupts: true,
+    indented: false,
+    open: (_scan, parent, line, _width, at) => /^#{1,6}(?:[ \t]|$)/.test(line.text.slice(at)) ? leafAt(parent, line) : undefined
+  },
+  {
+    triggers: "`~",
+    interrupts: true,
+    indented: false,
+    open(_scan, parent, line, _width, at) {
+      const char = line.text.charAt(at);
+      const length = runOf(line.text, at, char);
+      if (length < 3)
+        return;
+      if (char === "`" && line.text.slice(at + length).includes("`"))
+        return;
+      line.advanceTo(line.text.length);
+      return { block: { kind: "fence", char, length, ...under(parent) }, children: false };
+    }
+  },
+  {
+    triggers: ">",
+    interrupts: true,
+    indented: false,
+    open: (scan, parent, line) => !frontMatterHolds(scan, parent) && quoteMarker(line) ? { block: { kind: "quote", ...under(parent) }, children: true } : undefined
+  },
+  {
+    triggers: ":",
+    interrupts: true,
+    indented: false,
+    open: (_scan, parent, line, _width, at) => refusedDirective(line.text.slice(at)) ? leafAt(parent, line) : undefined
+  },
+  {
+    triggers: ":",
+    interrupts: true,
+    indented: false,
+    open(scan, parent, line, width, at) {
+      const opener = typedOpener(line.text.slice(at));
+      if (opener === undefined)
+        return;
+      let draft;
+      if (opener.name === "ask") {
+        draft = { id: opener.id, lines: [] };
+        scan.drafts.push(draft);
+      }
+      line.advanceTo(line.text.length);
+      const block = {
+        kind: "typed",
+        fence: opener.colons,
+        indent: width,
+        draft,
+        ...under(parent)
+      };
+      return { block, children: true };
+    }
+  },
+  {
+    triggers: "[",
+    interrupts: true,
+    indented: false,
+    open(scan, parent, line, _width, at) {
+      const definition = /^\[\^([^\]]*)\]:/.exec(line.text.slice(at));
+      if (definition === null || /^\s*$/.test(definition[1] ?? ""))
+        return;
+      if (frontMatterHolds(scan, parent))
+        return;
+      const label = at + definition[0].length;
+      const content = line.text.slice(label).search(/[^ \t]/);
+      line.advanceTo(content < 0 ? label : label + content);
+      return { block: { kind: "footnote", ...under(parent) }, children: true };
+    }
+  },
+  {
+    interrupts: false,
+    indented: false,
+    open: (scan, parent, line) => {
+      const block = {
+        kind: "paragraph",
+        rows: [line.rest()],
+        lastLine: scan.index,
+        ...under(parent)
+      };
+      line.advanceTo(line.text.length);
+      return { block, children: false };
+    }
+  }
+];
+function interruptsOpenBlock(scan, parent) {
+  let previous = parent.last;
+  const opensContainers = previous === undefined;
+  let node = parent;
+  while (previous === undefined && node !== undefined && node.kind !== "document") {
+    previous = node.previous;
+    node = node.parent;
+  }
+  if (previous?.kind === "paragraph") {
+    return opensContainers && !previous.rows.slice(1).some((row) => TABLE_DELIMITER_ROW.test(row)) && scan.index - previous.lastLine <= 1;
+  }
+  if (previous?.kind !== "code")
+    return false;
+  if (previous.previous?.kind === "list")
+    return false;
+  if (previous.previous?.kind === "quote" && !previous.blankBefore)
+    return false;
+  return scan.lines.slice(previous.lastLine + 1, scan.index).every((row) => /^[ \t>]*$/.test(row));
+}
+var TABLE_DELIMITER_ROW = /^(?=.*\|)[ \t]*\|?[ \t]*:?-+:?[ \t]*(?:\|[ \t]*:?-+:?[ \t]*)*\|?[ \t]*$/;
+function continueBlock(scan, block, line) {
+  switch (block.kind) {
+    case "quote":
+      return quoteMarker(line) ? "children" : "close";
+    case "list":
+      return continueList(scan, block, line);
+    case "item":
+      return continueItem(scan, block, line);
+    case "footnote": {
+      if (line.blank())
+        return "children";
+      const { width } = line.indent();
+      if (width < 4)
+        return "close";
+      line.skip(4);
+      return "children";
+    }
+    case "typed": {
+      const { width, at } = line.indent();
+      if (width < 4 && at < line.text.length && fenceColons(line.text.slice(at)) >= block.fence) {
+        line.advanceTo(line.text.length);
+        return "close";
+      }
+      if (at < line.text.length)
+        line.skip(Math.min(width, block.indent));
+      block.draft?.lines.push(line.rest());
+      return "children";
+    }
+    case "fence": {
+      const { width, at } = line.indent();
+      if (width < 4) {
+        const length = runOf(line.text, at, block.char);
+        if (length >= block.length && /^[ \t]*$/.test(line.text.slice(at + length))) {
+          line.advanceTo(line.text.length);
+          return "close";
+        }
+      }
+      line.advanceTo(line.text.length);
+      return "continue";
+    }
+    case "code": {
+      if (line.blank())
+        return "continue";
+      if (line.indent().width < 4)
+        return "close";
+      block.lastLine = scan.index;
+      line.advanceTo(line.text.length);
+      return "continue";
+    }
+    default:
+      return block.kind === "document" ? "children" : "close";
+  }
+}
+function continueList(scan, list, line) {
+  const last = list.last;
+  const lastIsEmpty = last === undefined || last.children === 0;
+  if (line.blank()) {
+    if (lastIsEmpty)
+      scan.emptyItemWithBlankLines = true;
+    return "children";
+  }
+  const offset = last?.kind === "item" ? last.offset : 0;
+  const { width, at } = line.indent();
+  if (width < offset || lastIsEmpty) {
+    if (width < 4) {
+      const marker = listMarker(line);
+      if (marker !== undefined && marker.indent - offset < 4) {
+        if (marker.char !== list.marker)
+          return "close";
+        const fromMarker = line.text.slice(at);
+        const heading = scan.opened.at(-1)?.kind === "paragraph" && setextUnderline(fromMarker);
+        if (thematicBreak(fromMarker) && !heading)
+          return "close";
+        return "children";
+      }
+    }
+    if (!lastIsEmpty)
+      return "close";
+  }
+  if (lastIsEmpty && width < offset)
+    return "close";
+  if (scan.emptyItemWithBlankLines)
+    return "close";
+  return "children";
+}
+function continueItem(scan, item, line) {
+  const { width } = line.indent();
+  if (line.blank()) {
+    line.skip(Math.min(width, item.offset));
+    return "children";
+  }
+  const isEmpty = item.children === 0 && scan.emptyItemWithBlankLines;
+  if ((isEmpty || width < item.offset) && width < 4) {
+    if (listMarker(line) !== undefined) {
+      scan.skipList = true;
+      return "close";
+    }
+    if (!isEmpty)
+      return "close";
+  }
+  line.skip(Math.min(width, item.offset));
+  return "children";
+}
+function listMarker(line) {
+  const { width, at } = line.indent();
+  if (width > 3)
+    return;
+  const { text } = line;
+  const first = text.charAt(at);
+  let end = at;
+  let number;
+  if (first === "-" || first === "*" || first === "+") {
+    end = at + 1;
+  } else {
+    while (end < text.length && end - at <= 9 && /[0-9]/.test(text.charAt(end)))
+      end++;
+    const delimiter = text.charAt(end);
+    if (end === at || end - at > 9 || delimiter !== "." && delimiter !== ")")
+      return;
+    number = text.slice(at, end);
+    end++;
+  }
+  const after = text.charAt(end);
+  if (end < text.length && after !== " " && after !== "\t")
+    return;
+  return {
+    indent: width,
+    end,
+    char: text.charAt(end - 1),
+    number,
+    empty: /^[ \t]*$/.test(text.slice(end))
+  };
+}
+function quoteMarker(line) {
+  const { width, at } = line.indent();
+  if (width > 3 || line.text.charAt(at) !== ">")
+    return false;
+  line.advanceTo(at + 1);
+  const next = line.text.charAt(at + 1);
+  if (next === " " || next === "\t")
+    line.skip(1);
+  return true;
+}
+function thematicBreak(text) {
+  const marks = text.replace(/[ \t]/g, "");
+  return marks.length >= 3 && /^(?:\*+|-+|_+)$/.test(marks);
+}
+function setextUnderline(text) {
+  return /^(?:=+|-+)[ \t]*$/.test(text);
+}
+function runOf(text, index, char) {
+  let end = index;
+  while (text.charAt(end) === char)
+    end++;
+  return end - index;
+}
+function fenceColons(text) {
+  const trimmed = text.replace(/^[ \t]+|[ \t]+$/g, "");
+  return /^:+$/.test(trimmed) ? trimmed.length : 0;
+}
+function nameChar(char) {
+  return /^[A-Za-z0-9_-]$/.test(char);
+}
+function typedOpener(text) {
+  const colons = runOf(text, 0, ":");
+  if (colons < 3)
+    return;
+  const rest = text.slice(colons);
+  let nameEnd = 0;
+  while (nameEnd < rest.length && nameChar(rest.charAt(nameEnd)))
+    nameEnd++;
+  if (nameEnd === 0 || rest.charAt(nameEnd) !== "{" || !rest.endsWith("}"))
+    return;
+  const attributes = directiveAttributes(rest.slice(nameEnd + 1, -1));
+  if (attributes === undefined)
+    return;
+  return { name: rest.slice(0, nameEnd), id: attributes.id, colons };
+}
+function refusedDirective(text) {
+  if (text.startsWith(":::"))
+    return text !== ":::" && typedOpener(text) === undefined;
+  if (text.startsWith("::"))
+    return text.length > 2 && nameChar(text.charAt(2));
+  return text.length > 1 && nameChar(text.charAt(1)) && text.includes("{");
+}
+function attributeSpace(char) {
+  return char === " " || char >= "\t" && char <= "\r";
+}
+var BLOCK_ID_ATTRIBUTE = "blockId";
+function directiveAttributes(value) {
+  const named = new Set;
+  let id;
+  let offset = 0;
+  const name = () => {
+    const start = offset;
+    while (offset < value.length && nameChar(value.charAt(offset)))
+      offset++;
+    return value.slice(start, offset);
+  };
+  while (offset < value.length) {
+    while (offset < value.length && attributeSpace(value.charAt(offset)))
+      offset++;
+    if (offset === value.length)
+      break;
+    const sigil = value.charAt(offset);
+    if (sigil === "#") {
+      offset++;
+      const read = name();
+      if (read === "" || named.has(BLOCK_ID_ATTRIBUTE))
+        return;
+      named.add(BLOCK_ID_ATTRIBUTE);
+      id = read;
+    } else if (sigil === ".") {
+      offset++;
+      if (name() === "")
+        return;
+      named.add("class");
+    } else {
+      const key = name();
+      if (key === "" || named.has(key))
+        return;
+      named.add(key);
+      if (offset === value.length || value.charAt(offset) === " ")
+        continue;
+      if (value.charAt(offset) !== "=" || value.charAt(offset + 1) !== '"')
+        return;
+      offset += 2;
+      const start = offset;
+      let escaped = false;
+      while (offset < value.length && (value.charAt(offset) !== '"' || escaped)) {
+        escaped = value.charAt(offset) === "\\" && !escaped;
+        offset++;
+      }
+      if (offset === value.length)
+        return;
+      const quoted = value.slice(start, offset);
+      if (!goQuoted(quoted))
+        return;
+      if (key === BLOCK_ID_ATTRIBUTE)
+        id = /[\\&]/.test(quoted) ? undefined : quoted;
+      offset++;
+    }
+    if (offset < value.length && !attributeSpace(value.charAt(offset)))
+      return;
+  }
+  return { id };
+}
+function goQuoted(body) {
+  return /^(?:[^\\\n"]|\\(?:[abfnrtv\\"]|x[0-9A-Fa-f]{2}|[0-3][0-7]{2}|u[0-9A-Fa-f]{4}|U[0-9A-Fa-f]{8}))*$/.test(body);
 }
 
 // ../../node_modules/.bun/zod@4.3.6/node_modules/zod/v4/core/core.js
@@ -14721,7 +15382,7 @@ var dispatchToolSpecs = [
   {
     name: "dispatch_doc_read",
     example: { issue: "DSP-1" },
-    description: "Read a live document or a named document version, or the text of an uploaded file at its latest or named version. " + "Do not use it for issue status, asks, or events; " + "use dispatch read instead. Supply ref, issue, or project plus artifact; issue plus an omitted artifact reads the primary document. " + "A live read returns its document token for an optional dispatch doc-edit precondition. With blocks it lists the live document's blocks instead of its markdown, in document order: each block's id, type, token, anchored comments and asks, and opening words, and under a table each row by the index delete_row takes and each cell by its row and the column delete_column takes; block ids, block tokens and those indexes are what dispatch doc-edit takes. " + "After the markdown it prints every open thread anchored on the document in full: an open ask with its id and question and each reply's author, time and text, and a comment thread with its root's id, author, quote and text and each reply's author, time and text, in order; a resolved thread, and an ask that is answered or resolved, is not printed. " + "A picture (an uploaded PNG, JPEG, GIF or WebP of at most 3,750,000 bytes, 5 MB once base64-encoded) comes back as an image you see, with its name, type, size and version, every time you ask, including one a read already showed this session; " + "any other file that is not UTF-8 text is described, with the route that serves its bytes. " + OWNER_REFERENCE,
+    description: "Read a live document or a named document version, or the text of an uploaded file at its latest or named version. " + "Do not use it for issue status, asks, or events; " + "use dispatch read instead. Supply ref, issue, or project plus artifact; issue plus an omitted artifact reads the primary document. " + "A live read returns its document token for an optional dispatch doc-edit precondition. With blocks it lists the live document's blocks instead of its markdown, in document order: each block's id, type, token, anchored comments and asks, and opening words, and under a table each row by the index delete_row takes and each cell by its row and the column delete_column takes; block ids, block tokens and those indexes are what dispatch doc-edit takes. " + "After the markdown it prints every open thread anchored on the document in full: an open ask with its id and question and each reply's author, time and text, and a comment thread with its root's id, author, time, quote and text and each reply's author, time and text, in order; a resolved thread, and an ask that is answered or resolved, is not printed. " + "A picture (an uploaded PNG, JPEG, GIF or WebP of at most 3,750,000 bytes, 5 MB once base64-encoded) comes back as an image you see, with its name, type, size and version, every time you ask, including one a read already showed this session; " + "any other file that is not UTF-8 text is described, with the route that serves its bytes. " + OWNER_REFERENCE,
     arguments: (z) => ({
       issue: z.string().describe(ISSUE_REFERENCE).optional(),
       project: z.string().describe("Project key owning the document.").optional(),
@@ -14879,6 +15540,13 @@ var dispatchToolSpecs = [
     arguments: (z) => ({
       project: z.string().describe("Project key; when supplied, lists every open ask in the project instead of only this session's own.").optional()
     }),
+    strict: true
+  },
+  {
+    name: "dispatch_answers",
+    example: {},
+    description: "List every answer and comment a person wrote to this session in the last 72 hours, newest first, each in full: " + "answers to its asks, replies on its asks and in its comment threads, comments on its documents and on issues routed to it, " + "mentions of it, messages to it and replies to its messages. Each item names its time, its writer, what it is, its " + "dispatch:// reference and its issue or document, an answer's question and choices, and the words, never cut. " + "Run it when the list of people's answers on a model request says it left older items out. " + "It reads this session's id from CLAUDE_CODE_SESSION_ID under Claude Code and DISPATCH_SESSION_ID elsewhere, so a subagent reads its parent's.",
+    arguments: () => ({}),
     strict: true
   },
   {
@@ -15988,8 +16656,8 @@ class DispatchClient {
   async listProjectArtifacts(project, unlinked = false) {
     return this.#json("GET", ["api", "v1", "projects", project, "artifacts"], undefined, unlinked ? { unlinked: "true" } : undefined);
   }
-  async projectArtifact(project, input) {
-    return this.#upload(["api", "v1", "projects", project, "artifacts"], input);
+  async projectArtifact(project, input, key) {
+    return this.#upload(["api", "v1", "projects", project, "artifacts"], input, key);
   }
   async getProjectArtifact(project, slug) {
     return this.#json("GET", ["api", "v1", "projects", project, "artifacts", slug]);
@@ -16063,6 +16731,12 @@ class DispatchClient {
   }
   async openAsksForProject(project) {
     return this.#json("GET", ["api", "v1", "asks", "open"], undefined, { project });
+  }
+  async sessionAnswers(sessionID, options = {}) {
+    return this.#json("GET", ["api", "v1", "agents", sessionID, "answers"], undefined, {
+      ...options.since === undefined ? {} : { since: options.since },
+      ...options.maxChars === undefined ? {} : { max_chars: options.maxChars }
+    }, options.signal);
   }
   async listAgents() {
     return this.#json("GET", ["api", "v1", "agents"]);
@@ -16235,8 +16909,8 @@ class DispatchClient {
   async messageBlocks(id, session) {
     return this.#json("GET", ["api", "v1", "messages", id, "blocks"], undefined, session === undefined ? undefined : { session });
   }
-  async docEdit(id, input) {
-    return this.#json("POST", ["api", "v1", "artifacts", id, "edits"], input);
+  async docEdit(id, input, key) {
+    return this.#json("POST", ["api", "v1", "artifacts", id, "edits"], input, undefined, undefined, key);
   }
   async nameArtifactVersion(id, input) {
     return this.#json("POST", ["api", "v1", "artifacts", id, "versions"], input);
@@ -16292,17 +16966,17 @@ class DispatchClient {
       throw error;
     }
   }
-  async#json(method, path, body, query) {
-    return (await this.#jsonAnswer(method, path, body, query)).payload;
+  async#json(method, path, body, query, signal, key) {
+    return (await this.#jsonAnswer(method, path, body, query, signal, key)).payload;
   }
-  async#jsonAnswer(method, path, body, query) {
+  async#jsonAnswer(method, path, body, query, signal, key) {
     const url = this.#url(path, query);
-    const response = await this.#send(method, url, body === undefined ? undefined : { content: JSON.stringify(body), type: "application/json" });
+    const response = await this.#send(method, url, body === undefined ? undefined : { content: JSON.stringify(body), type: "application/json" }, undefined, signal, key);
     return { status: response.status, payload: await this.#response(method, url, response) };
   }
-  async#upload(path, input) {
+  async#upload(path, input, key) {
     if ("content" in input)
-      return this.#json("POST", path, input);
+      return this.#json("POST", path, input, undefined, undefined, key);
     const form = new FormData;
     form.set("name", input.name);
     if (input.summary !== undefined)
@@ -16310,17 +16984,17 @@ class DispatchClient {
     if (input.actor !== undefined)
       form.set("actor", JSON.stringify(input.actor));
     form.set("file", input.file, input.name);
-    return this.#form("POST", path, form);
+    return this.#form("POST", path, form, key);
   }
-  async#form(method, path, form) {
+  async#form(method, path, form, key) {
     const url = this.#url(path);
     const encoded = new Response(form);
     const type = encoded.headers.get("Content-Type") ?? "multipart/form-data";
     const content = new Uint8Array(await encoded.arrayBuffer());
-    const response = await this.#send(method, url, { content, type });
+    const response = await this.#send(method, url, { content, type }, undefined, undefined, key);
     return this.#response(method, url, response);
   }
-  async#send(method, url, body, accept = "application/json") {
+  async#send(method, url, body, accept = "application/json", signal, callerKey) {
     const headers = {
       Accept: accept,
       Authorization: `Bearer ${this.token}`
@@ -16331,11 +17005,11 @@ class DispatchClient {
       return this.fetchImpl(url, {
         method,
         headers,
-        signal: this.#signal,
+        signal: signal === undefined ? this.#signal : AbortSignal.any([this.#signal, signal]),
         ...body === undefined ? {} : { body: body.content }
       });
     }
-    const key = crypto.randomUUID();
+    const key = callerKey ?? crypto.randomUUID();
     headers[IDEMPOTENCY_KEY_HEADER] = key;
     const { pausesMs, withinMs, silenceMs, pause = pauseFor } = this.writeRetry;
     const request = `${method} ${url}`;
@@ -16516,6 +17190,9 @@ class DispatchClient {
 // ../envoy-client/src/dispatch-owner.ts
 function documentLabel(project, slug) {
   return `${project}/${slug}`;
+}
+function ownerTitle(owner) {
+  return "issue" in owner ? `${owner.issue.key}: ${owner.issue.title}` : `${owner.document.project} / ${owner.document.name}`;
 }
 function issueTopic(key) {
   return { label: key, topic: dispatchIssueSubject(key, ">") };
@@ -17390,6 +18067,303 @@ function notMadeLine(reason, context, searchQuery) {
   return `No related-item check was made: ${reason}. Search before you rely on this being new: dispatch search --project ${context.project}${query}`;
 }
 
+// ../envoy-client/src/session-answers.ts
+import { mkdirSync as mkdirSync2, readFileSync as readFileSync2 } from "fs";
+import { join as join3 } from "path";
+
+// ../envoy-client/src/dispatch-session-directory.ts
+import { randomUUID } from "crypto";
+import { renameSync as renameSync2, rmSync as rmSync2, writeFileSync as writeFileSync2 } from "fs";
+import { homedir } from "os";
+import { join as join2 } from "path";
+var SESSION_ID = /^[A-Za-z0-9._-]{1,128}$/;
+var PRIVATE_FILE = 384;
+function sessionStateRoot(env) {
+  const stateDir = env["DISPATCH_STATE_DIR"];
+  if (stateDir)
+    return stateDir;
+  return join2(env["XDG_STATE_HOME"] || join2(homedir(), ".local", "state"), "dispatch");
+}
+function sessionDirectory(env, sessionId) {
+  if (!SESSION_ID.test(sessionId) || sessionId === "." || sessionId === "..") {
+    throw new Error(`dispatch: the session id ${JSON.stringify(sessionId)} is not 1-128 letters, digits, ".", "_" or "-"`);
+  }
+  return join2(sessionStateRoot(env), "sessions", sessionId);
+}
+function writeAtomically(path, text) {
+  const temporary = `${path}.${process.pid}.${randomUUID()}.tmp`;
+  try {
+    writeFileSync2(temporary, text, { mode: PRIVATE_FILE });
+    renameSync2(temporary, path);
+  } catch (error) {
+    rmSync2(temporary, { force: true });
+    throw error;
+  }
+}
+
+// ../envoy-client/src/session-answers.ts
+var SESSION_ANSWERS_WINDOW_MS = 72 * 3600000;
+var SESSION_ANSWERS_MAX_CHARS = 8000;
+var SESSION_ANSWERS_DEADLINE_MS = 800;
+var READ_TIMEOUT_MS = 1e4;
+var NO_ROUTE_BACKOFF_MS = 5 * 60000;
+var QUESTION_MAX = 200;
+var SESSION_ANSWERS_MARKER = "[Dispatch: what people wrote to this session in the last 72 hours, newest first, word for word. Reference, not a new request.]";
+var FAILURE_MARKER = "[Dispatch: people's answers from the last 72 hours could not be read (";
+var NO_ANSWERS_ROUTE_REASON = "this Dispatch build has no answers route";
+var RELATION_PHRASES = {
+  answered_your_ask: "answered your ask",
+  replied_on_your_ask: "replied on your ask",
+  replied_in_a_comment_thread: "replied in a comment thread",
+  commented_on_a_document: "commented on a document",
+  commented_on_an_issue: "commented on an issue",
+  mentioned_you: "mentioned you",
+  sent_you_a_message: "sent you a message",
+  replied_to_your_message: "replied to your message"
+};
+function isNoAnswersRoute(error) {
+  return isNoRoute(error);
+}
+function renderSessionAnswerItem(item) {
+  const relation = `${RELATION_PHRASES[item.relation]}${item.replaced === true ? " (replaces an earlier answer)" : ""}`;
+  const head = [item.at, `user ${item.author.id}`, relation];
+  if (item.edited_at !== undefined)
+    head.push(`edited ${item.edited_at}`);
+  const owner = item.owner === null ? undefined : ownerTitle(item.owner);
+  const where = item.ref === null ? `Direct message ${item.id}, on no issue` : owner === undefined ? item.ref : `${item.ref} \xB7 ${owner}`;
+  const lines = [head.join(" \xB7 "), where];
+  if (item.ask !== undefined) {
+    const question = item.ask.question.replace(/\s+/g, " ").trim();
+    lines.push(`Question: ${question.length > QUESTION_MAX ? `${question.slice(0, QUESTION_MAX)}\u2026` : question}`);
+  }
+  if (item.kind === "answer") {
+    const selected = item.selected ?? [];
+    lines.push(`Selected: ${selected.length === 0 ? "none" : selected.join(", ")}`);
+  }
+  if (item.text !== "")
+    lines.push(item.text);
+  return lines.join(`
+`);
+}
+function withinWindow(items, now) {
+  const start = now - SESSION_ANSWERS_WINDOW_MS;
+  return items.filter((item) => Date.parse(item.at) >= start);
+}
+var MAX_CHARS_TEXT = SESSION_ANSWERS_MAX_CHARS.toLocaleString("en-US");
+function leftOutLine(count, namesCommand) {
+  const counted = `${count} older ${count === 1 ? "item" : "items"} left out to stay under ${MAX_CHARS_TEXT} characters`;
+  return namesCommand ? `${counted}: run \`dispatch answers\` to read every one in full.` : `${counted}.`;
+}
+function renderSessionAnswers(items, options) {
+  const shown = withinWindow(items, Number(options.now));
+  const unsent = shown.length === items.length ? Math.max(0, (options.total ?? items.length) - items.length) : 0;
+  const count = shown.length + unsent;
+  if (count === 0)
+    return;
+  const header = options.cached === undefined ? SESSION_ANSWERS_MARKER : `${SESSION_ANSWERS_MARKER}
+As read at ${options.cached.readAt}; this read failed: ${failureSentence(options.cached.reason)}`;
+  const namesCommand = options.withoutCommand !== true;
+  const blocks = [];
+  let length = header.length;
+  for (const item of shown) {
+    const block = renderSessionAnswerItem(item);
+    const after = count - blocks.length - 1;
+    const needed = length + 2 + block.length + (after === 0 ? 0 : 2 + leftOutLine(after, namesCommand).length);
+    if (needed >= SESSION_ANSWERS_MAX_CHARS)
+      break;
+    blocks.push(block);
+    length += 2 + block.length;
+  }
+  const leftOut = count - blocks.length;
+  return [header, ...blocks, ...leftOut === 0 ? [] : [leftOutLine(leftOut, namesCommand)]].join(`
+
+`);
+}
+function renderSessionAnswersList(items, options) {
+  const shown = withinWindow(items, Number(options.now));
+  if (shown.length === 0)
+    return "No person wrote to this session in the last 72 hours.";
+  return [
+    `${shown.length} ${shown.length === 1 ? "item" : "items"} people wrote to this session in the last 72 hours, newest first, word for word:`,
+    ...shown.map(renderSessionAnswerItem)
+  ].join(`
+
+`);
+}
+function failureSentence(reason) {
+  const text = reason.replace(/\s+/g, " ").trim();
+  return /[.?!]$/.test(text) ? text : `${text}.`;
+}
+function sessionAnswersFailureLine(reason) {
+  return `${FAILURE_MARKER}${reason.replace(/\s+/g, " ").trim()}); run \`dispatch answers\`.]`;
+}
+var STATE_KEY = Symbol.for("legion.pi-envoy.session-answers.v3");
+var processGlobal = globalThis;
+var state = processGlobal[STATE_KEY] ?? {
+  sessions: new Map,
+  noRouteUntil: new Map
+};
+processGlobal[STATE_KEY] = state;
+var CACHE_FILE = "answers.json";
+function readCacheFile(directory, url) {
+  try {
+    const value = JSON.parse(readFileSync2(join3(directory, CACHE_FILE), "utf-8"));
+    if (typeof value === "object" && value !== null && "dispatch_url" in value && typeof value.dispatch_url === "string" && value.dispatch_url === url && "read_at" in value && typeof value.read_at === "string" && "total" in value && typeof value.total === "number" && "items" in value && Array.isArray(value.items)) {
+      return {
+        dispatch_url: value.dispatch_url,
+        read_at: value.read_at,
+        total: value.total,
+        items: value.items
+      };
+    }
+  } catch {}
+  return;
+}
+async function settleWithin(promise, ms, signal) {
+  if (signal?.aborted === true)
+    return "aborted";
+  let timer;
+  let onAbort;
+  const stop = new Promise((resolve) => {
+    timer = setTimeout(() => resolve("deadline"), ms);
+    onAbort = () => resolve("aborted");
+    signal?.addEventListener("abort", onAbort, { once: true });
+  });
+  try {
+    return await Promise.race([promise, stop]);
+  } finally {
+    clearTimeout(timer);
+    if (onAbort !== undefined)
+      signal?.removeEventListener("abort", onAbort);
+  }
+}
+async function readSessionAnswers(options) {
+  const now = options.now ?? Date.now;
+  const { dispatch, session } = options;
+  if (!dispatch.enabled && dispatch.error === null) {
+    return { text: undefined, source: "off", reason: dispatch.notice };
+  }
+  let directory;
+  try {
+    directory = sessionDirectory(options.env, session);
+  } catch {}
+  const entries = state.sessions.get(session) ?? new Map;
+  state.sessions.set(session, entries);
+  const carry = (cache, reason, noRoute = false) => {
+    const text = cache === undefined ? undefined : renderSessionAnswers(cache.items, {
+      now: now(),
+      total: cache.total,
+      cached: { readAt: cache.read_at, reason },
+      withoutCommand: noRoute
+    });
+    if (cache === undefined || text === undefined) {
+      if (noRoute)
+        return { text: undefined, source: "unavailable", reason };
+      return { text: sessionAnswersFailureLine(reason), source: "failure", reason };
+    }
+    return { text, source: "cache", readAt: cache.read_at, reason };
+  };
+  if (!dispatch.enabled) {
+    const url = options.dispatchUrl;
+    if (url === undefined)
+      return carry(undefined, dispatch.error);
+    const cache = entries.get(url)?.cache ?? (directory === undefined ? undefined : readCacheFile(directory, url));
+    return carry(cache, dispatch.error);
+  }
+  const { url } = dispatch;
+  const current = entries.get(url) ?? {
+    cache: undefined,
+    inFlight: undefined,
+    overdue: false,
+    noRouteReported: false
+  };
+  entries.set(url, current);
+  if (current.cache === undefined && directory !== undefined) {
+    current.cache = readCacheFile(directory, url);
+  }
+  const noRoute = () => {
+    const read = carry(current.cache, NO_ANSWERS_ROUTE_REASON, true);
+    if (current.noRouteReported)
+      return read;
+    current.noRouteReported = true;
+    return {
+      ...read,
+      notice: `Dispatch at ${url} has no answers route (its build is older than the route), so people's answers cannot be read from it`
+    };
+  };
+  if ((state.noRouteUntil.get(url) ?? 0) > now())
+    return noRoute();
+  if (current.inFlight !== undefined && current.overdue) {
+    return carry(current.cache, "an earlier read is still waiting on Dispatch");
+  }
+  let read = current.inFlight;
+  if (read === undefined) {
+    const client = new DispatchClient(url, dispatch.token, options.fetchImpl ?? fetch);
+    const started = client.sessionAnswers(session, {
+      maxChars: SESSION_ANSWERS_MAX_CHARS,
+      signal: AbortSignal.timeout(READ_TIMEOUT_MS)
+    }).then((response) => {
+      if (!Array.isArray(response?.items) || typeof response.total !== "number") {
+        return { failure: "Dispatch answered with something that is not an answers list" };
+      }
+      const cache = {
+        dispatch_url: url,
+        read_at: new Date(now()).toISOString(),
+        total: response.total,
+        items: response.items
+      };
+      current.cache = cache;
+      current.noRouteReported = false;
+      if (directory !== undefined) {
+        try {
+          mkdirSync2(directory, { recursive: true, mode: 448 });
+          writeAtomically(join3(directory, CACHE_FILE), JSON.stringify(cache));
+        } catch {}
+      }
+      return { cache };
+    }, (error) => {
+      if (isNoAnswersRoute(error)) {
+        state.noRouteUntil.set(url, now() + NO_ROUTE_BACKOFF_MS);
+        return { noRoute: true };
+      }
+      return { failure: messageFor(error) };
+    });
+    read = started.finally(() => {
+      if (current.inFlight === read) {
+        current.inFlight = undefined;
+        current.overdue = false;
+      }
+    });
+    current.inFlight = read;
+    current.overdue = false;
+  }
+  const deadlineMs = options.deadlineMs ?? SESSION_ANSWERS_DEADLINE_MS;
+  const outcome = await settleWithin(read, deadlineMs, options.signal);
+  if (outcome === "deadline") {
+    if (current.inFlight === read)
+      current.overdue = true;
+    return carry(current.cache, `Dispatch did not answer within ${deadlineMs} ms`);
+  }
+  if (outcome === "aborted") {
+    return carry(current.cache, "the request was cancelled before Dispatch answered");
+  }
+  if ("noRoute" in outcome)
+    return noRoute();
+  if ("failure" in outcome)
+    return carry(current.cache, outcome.failure);
+  return {
+    text: renderSessionAnswers(outcome.cache.items, {
+      now: now(),
+      total: outcome.cache.total
+    }),
+    source: "fresh",
+    readAt: outcome.cache.read_at
+  };
+}
+async function sessionAnswersSettled(session) {
+  await Promise.all(Array.from(state.sessions.get(session)?.values() ?? [], (entry) => entry.inFlight));
+}
+
 // ../envoy-client/src/dispatch-execute.ts
 function documentTopic(artifact) {
   return documentTopicOf(artifact.project, artifact.slug);
@@ -17443,8 +18417,12 @@ function renderAdvice(tool, key, advice, opts) {
       lines.push(`You still have an open ask on ${key}: "${ask.question.slice(0, 80)}" (${ask.id}). Still needed? See the \`dispatch\` skill, "Close what you opened".`);
     }
   }
+  const superseded = advice.superseded_approval;
+  if (superseded !== undefined && (tool === "dispatch_doc_edit" || tool === "dispatch_artifact")) {
+    lines.push(`Stored version ${superseded.version}, superseding version ${superseded.approved_version}, which ${superseded.approved_by} approved. That approval is stale until someone approves version ${superseded.version}, and no undo restores it: a Legion design gate on this document is closed meanwhile, so every READY in its tree is refused. Meant to change the approved design? Request approval with \`dispatch request-approval\`. Meant a correction beside it? Tell the tree's architect, and keep the next one in a comment or in the plan.`);
+  }
   if (hasIssueAdvice && writesSinceHuman !== undefined && writesSinceHuman >= 3 && (tool === "dispatch_message" || tool === "dispatch_ask" || tool === "dispatch_comment" && opts.isAskReply !== true)) {
-    const middle = writesSinceHuman >= 6 ? "Stop posting here until a human replies." : "Progress ledger or scratchpad? If so, stop.";
+    const middle = writesSinceHuman >= 6 ? "Stop posting here until a human replies. Their reply ends this: post then what you held back." : "Progress ledger or scratchpad? If so, stop.";
     lines.push(`Posted. You've sent ${writesSinceHuman} messages on ${key} with no human response. ${middle} See the \`dispatch\` skill, "Structure over stream".`);
   }
   return lines;
@@ -17512,6 +18490,7 @@ var issueFreeTools = {
   dispatch_project: true,
   dispatch_projects: true,
   dispatch_open_asks: true,
+  dispatch_answers: true,
   dispatch_whoami: true,
   dispatch_architecture_sync: true
 };
@@ -18195,6 +19174,9 @@ async function resolveOwnerArguments(tool, input, cwd, env, exec, dashboardUrls,
   const issue = `${repo}#${legionIssue}`;
   return { args: { ...args, issue }, ref, owner: { kind: "issue", issue } };
 }
+
+class DocumentNotFoundError extends Error {
+}
 function artifactByReference(artifacts, artifactReference, owner, canonical) {
   const bySlug = artifacts.find((candidate) => candidate.slug === artifactReference);
   if (canonical && bySlug !== undefined)
@@ -18215,7 +19197,7 @@ function artifactByReference(artifacts, artifactReference, owner, canonical) {
   }
   const [artifact] = byName;
   if (artifact === undefined) {
-    throw new Error(documentReferenceProblem(artifactReference, artifacts, owner));
+    throw new DocumentNotFoundError(documentReferenceProblem(artifactReference, artifacts, owner));
   }
   return artifact;
 }
@@ -18246,9 +19228,24 @@ async function resolveArtifact(client, owner, artifactReference, { canonical = f
     artifact = artifactByReference(issue.artifacts, artifactReference, "issue", canonical);
   }
   if (!artifact) {
-    throw new Error(documentReferenceProblem(artifactReference ?? "spec", issue.artifacts, "issue"));
+    throw new DocumentNotFoundError(documentReferenceProblem(artifactReference ?? "spec", issue.artifacts, "issue"));
   }
   return { owner, issue, artifact };
+}
+async function documentTargets(client, resolution) {
+  const refDocument = resolution.ref?.kind === "artifact" ? resolution.ref.id : resolution.ref?.artifact;
+  const owner = resolution.owner?.kind === "issue" ? { kind: "issue", issue: await resolveExistingIssue(client, resolution.owner.issue) } : resolution.owner;
+  return {
+    owner,
+    documentOwner: () => {
+      if (owner === null)
+        throw new Error("issue or project is required");
+      return owner;
+    },
+    resolveDocument: (documentOwner, reference) => resolveArtifact(client, documentOwner, reference, {
+      canonical: reference !== undefined && reference === refDocument
+    })
+  };
 }
 var documentHintLimit = 8;
 function documentReferenceProblem(reference, documents, owner, use) {
@@ -18624,12 +19621,9 @@ function openAskAge(ageSeconds) {
   const days = Math.floor(hours / 24);
   return `${days}d${hours % 24 === 0 ? "" : ` ${hours % 24}h`}`;
 }
-function openAskOwner(ask) {
-  return "issue" in ask.owner ? `${ask.owner.issue.key}: ${ask.owner.issue.title}` : `${ask.owner.document.project} / ${ask.owner.document.name}`;
-}
 function openAskLine(ask, baseUrl) {
   const priority = ask.priority === null ? "" : `P${ask.priority} \xB7 `;
-  return `- ${openAskAge(ask.age_seconds)} \xB7 ${priority}${openAskOwner(ask)} \xB7 ${ask.question} \xB7 ${new URL(ask.ref, baseUrl).toString()}`;
+  return `- ${openAskAge(ask.age_seconds)} \xB7 ${priority}${ownerTitle(ask.owner)} \xB7 ${ask.question} \xB7 ${new URL(ask.ref, baseUrl).toString()}`;
 }
 function formatOpenAsksSummary(response, baseUrl) {
   const scope = "active open asks you authored on open issues and project documents";
@@ -18833,13 +19827,11 @@ ${text}`,
 }
 var BLOCK_OPENING_CHARS = 60;
 async function listDocumentBlocks(client, artifact) {
-  const before = await client.docRead(artifact.id);
-  const blocks = await client.artifactBlocks(artifact.id);
-  const after = await client.docRead(artifact.id);
-  if (before.token !== after.token || before.markdown !== after.markdown) {
+  const live = await liveBlocks(client, artifact);
+  if (live === undefined) {
     throw new Error(`${artifact.name} changed while dispatch doc-read --blocks read it, so the opening words could name the wrong text; nothing is listed. Run it again.`);
   }
-  const bytes = new TextEncoder().encode(before.markdown);
+  const { bytes, blocks } = live;
   const decoder = new TextDecoder;
   const lines = [
     `Blocks of ${artifact.name}, in document order, each indented under the block holding it: id, type, (token; anchored comments and asks), opening words. A table lists its rows by the index delete_row takes and its cells by the row and the column delete_column takes.`
@@ -18870,7 +19862,15 @@ async function listDocumentBlocks(client, artifact) {
     holders.push(block);
   }
   return { text: lines.join(`
-`), token: before.token };
+`), token: live.token };
+}
+async function liveBlocks(client, artifact) {
+  const before = await client.docRead(artifact.id);
+  const blocks = await client.artifactBlocks(artifact.id);
+  const after = await client.docRead(artifact.id);
+  if (before.token !== after.token || before.markdown !== after.markdown)
+    return;
+  return { bytes: new TextEncoder().encode(before.markdown), token: before.token, blocks };
 }
 async function refuseOpenDecisionBlocks(client, tool, resolved) {
   const artifact = resolved.artifact;
@@ -19045,6 +20045,24 @@ async function executeDispatchTool(input) {
     const response = await client.openAsks(sessionId);
     return { text: formatOpenAsksSummary(response, linkBase), details: { ...response } };
   }
+  if (input.tool === "dispatch_answers") {
+    const sessionId = input.sessionId?.trim();
+    if (!sessionId)
+      throw new Error("host session id is required for dispatch answers");
+    let response;
+    try {
+      response = await dispatchClient().sessionAnswers(sessionId);
+    } catch (error) {
+      if (isNoAnswersRoute(error)) {
+        throw new Error(`This Dispatch (${configUrl}) has no answers route yet: its build is older than the answers route.`);
+      }
+      throw error;
+    }
+    return {
+      text: renderSessionAnswersList(response.items, { now: Date.now() }),
+      details: { session: sessionId, since: response.since, total: response.total }
+    };
+  }
   if (input.tool === "dispatch_whoami") {
     const sessionId = input.sessionId?.trim();
     if (!sessionId)
@@ -19062,14 +20080,7 @@ async function executeDispatchTool(input) {
   const args = checked.args;
   const actor = toolActor(await resolveOrigin(env, exec, input.cwd), input);
   const client = dispatchClient();
-  const refDocument = ownerArguments.ref?.kind === "artifact" ? ownerArguments.ref.id : ownerArguments.ref?.artifact;
-  const resolveDocument = (documentOwner, reference) => resolveArtifact(client, documentOwner, reference, {
-    canonical: reference !== undefined && reference === refDocument
-  });
-  const owner = ownerArguments.owner?.kind === "issue" ? {
-    kind: "issue",
-    issue: await resolveExistingIssue(client, ownerArguments.owner.issue)
-  } : ownerArguments.owner;
+  const { owner, documentOwner, resolveDocument } = await documentTargets(client, ownerArguments);
   const issueArgument = optionalString(input.args, "issue");
   const refText = optionalString(ownerArguments.args, "ref");
   if (input.tool !== "dispatch_ask" && owner?.kind === "issue" && issueArgument !== undefined && refText !== undefined && ownerArguments.ref?.owner.kind === "issue" && owner.issue !== ownerArguments.ref.owner.issue) {
@@ -19081,11 +20092,6 @@ async function executeDispatchTool(input) {
     if (owner?.kind !== "issue")
       throw new Error("issue is required");
     return owner.issue;
-  };
-  const documentOwner = () => {
-    if (owner === null)
-      throw new Error("issue or project is required");
-    return owner;
   };
   const postWithPictures = (text, limit, owner, upload) => textWithPictures(input.tool, text, pictures, limit, owner, (picture) => upload(picture).catch((error) => {
     if (!(error instanceof DispatchWriteLandedError))
@@ -20097,21 +21103,18 @@ import {
   appendFileSync,
   closeSync as closeSync2,
   fstatSync,
-  mkdirSync as mkdirSync2,
+  mkdirSync as mkdirSync3,
   openSync as openSync2,
   readdirSync as readdirSync2,
-  readFileSync as readFileSync2,
+  readFileSync as readFileSync3,
   readSync,
-  renameSync as renameSync2,
-  rmSync as rmSync2,
+  rmSync as rmSync3,
   statSync as statSync2,
-  writeFileSync as writeFileSync2
+  writeFileSync as writeFileSync3
 } from "fs";
-import { homedir } from "os";
-import { join as join2 } from "path";
-var SESSION_ID = /^[A-Za-z0-9._-]{1,128}$/;
+import { join as join4 } from "path";
 var PRIVATE_DIR = 448;
-var PRIVATE_FILE = 384;
+var PRIVATE_FILE2 = 384;
 var IDLE_SESSION_MS = 14 * 86400000;
 var PRUNE_INTERVAL_MS = 86400000;
 var PRUNED_STAMP = ".pruned";
@@ -20121,40 +21124,23 @@ var PICTURE_EXTENSIONS = {
   "image/gif": "gif",
   "image/webp": "webp"
 };
-function sessionStateRoot(env) {
-  const stateDir = env["DISPATCH_STATE_DIR"];
-  if (stateDir)
-    return stateDir;
-  return join2(env["XDG_STATE_HOME"] || join2(homedir(), ".local", "state"), "dispatch");
-}
-function sessionDirectory(env, sessionId) {
-  if (!SESSION_ID.test(sessionId) || sessionId === "." || sessionId === "..") {
-    throw new Error(`dispatch: the session id ${JSON.stringify(sessionId)} is not 1-128 letters, digits, ".", "_" or "-"`);
-  }
-  return join2(sessionStateRoot(env), "sessions", sessionId);
-}
 function ensureDirectory(dir) {
-  mkdirSync2(dir, { recursive: true, mode: PRIVATE_DIR });
+  mkdirSync3(dir, { recursive: true, mode: PRIVATE_DIR });
 }
 function readIfPresent(path) {
   try {
-    return readFileSync2(path, "utf-8");
+    return readFileSync3(path, "utf-8");
   } catch (error) {
     if (hasErrnoCode(error, "ENOENT"))
       return;
     throw error;
   }
 }
-function writeAtomically(path, text) {
-  const temporary = `${path}.${process.pid}.${Date.now()}.tmp`;
-  writeFileSync2(temporary, text, { mode: PRIVATE_FILE });
-  renameSync2(temporary, path);
-}
 function stringList(value) {
   return Array.isArray(value) ? value.filter((item) => typeof item === "string") : [];
 }
 function loadSessionMemory(dir, sessionId) {
-  const path = join2(dir, "state.json");
+  const path = join4(dir, "state.json");
   const text = readIfPresent(path);
   if (text === undefined)
     return new Set;
@@ -20178,7 +21164,7 @@ function writeMemory(dir, sessionId, follows) {
     pictures: [...shownPictures(sessionId)],
     follows: [...follows]
   };
-  writeAtomically(join2(dir, "state.json"), `${JSON.stringify(state)}
+  writeAtomically(join4(dir, "state.json"), `${JSON.stringify(state)}
 `);
 }
 function appendResult(dir, entry) {
@@ -20187,8 +21173,8 @@ function appendResult(dir, entry) {
 }
 function writeResult(dir, entry) {
   const line = { at: new Date().toISOString(), ...entry };
-  appendFileSync(join2(dir, "results.jsonl"), `${JSON.stringify(line)}
-`, { mode: PRIVATE_FILE });
+  appendFileSync(join4(dir, "results.jsonl"), `${JSON.stringify(line)}
+`, { mode: PRIVATE_FILE2 });
 }
 function recordOutcome(dir, sessionId, follows, entry) {
   ensureDirectory(dir);
@@ -20198,11 +21184,11 @@ function recordOutcome(dir, sessionId, follows, entry) {
 function writePicture(dir, image) {
   const bytes = Buffer.from(image.data, "base64");
   const name = createHash2("sha256").update(bytes).digest("hex").slice(0, 16);
-  const pictures = join2(dir, "pictures");
-  const path = join2(pictures, `${name}.${PICTURE_EXTENSIONS[image.mimeType]}`);
+  const pictures = join4(dir, "pictures");
+  const path = join4(pictures, `${name}.${PICTURE_EXTENSIONS[image.mimeType]}`);
   ensureDirectory(pictures);
   try {
-    writeFileSync2(path, bytes, { mode: PRIVATE_FILE, flag: "wx" });
+    writeFileSync3(path, bytes, { mode: PRIVATE_FILE2, flag: "wx" });
   } catch (error) {
     if (!hasErrnoCode(error, "EEXIST"))
       throw error;
@@ -20210,21 +21196,21 @@ function writePicture(dir, image) {
   return { path, bytes: bytes.length };
 }
 function writeLongOutput(dir, text) {
-  const out = join2(dir, "out");
+  const out = join4(dir, "out");
   ensureDirectory(out);
-  const path = join2(out, `${new Date().toISOString().replaceAll(":", "-")}-${process.pid}.md`);
-  writeFileSync2(path, text, { mode: PRIVATE_FILE });
+  const path = join4(out, `${new Date().toISOString().replaceAll(":", "-")}-${process.pid}.md`);
+  writeFileSync3(path, text, { mode: PRIVATE_FILE2 });
   return path;
 }
 function writeSessionTitle(dir, title) {
   ensureDirectory(dir);
-  writeAtomically(join2(dir, "title"), title);
+  writeAtomically(join4(dir, "title"), title);
 }
 function readSessionTitle(dir) {
-  return readIfPresent(join2(dir, "title")) || undefined;
+  return readIfPresent(join4(dir, "title")) || undefined;
 }
 function pruneSessions(root, now) {
-  const stamp = join2(root, PRUNED_STAMP);
+  const stamp = join4(root, PRUNED_STAMP);
   try {
     if (now - statSync2(stamp).mtimeMs < PRUNE_INTERVAL_MS)
       return;
@@ -20232,7 +21218,7 @@ function pruneSessions(root, now) {
     if (!hasErrnoCode(error, "ENOENT"))
       throw error;
   }
-  const sessions = join2(root, "sessions");
+  const sessions = join4(root, "sessions");
   let entries = [];
   try {
     entries = readdirSync2(sessions, { withFileTypes: true });
@@ -20243,10 +21229,10 @@ function pruneSessions(root, now) {
   for (const entry of entries) {
     if (!entry.isDirectory())
       continue;
-    const dir = join2(sessions, entry.name);
+    const dir = join4(sessions, entry.name);
     try {
       if (now - statSync2(dir).mtimeMs > IDLE_SESSION_MS && askgateState(dir).kind === "off") {
-        rmSync2(dir, { recursive: true, force: true });
+        rmSync3(dir, { recursive: true, force: true });
       }
     } catch (error) {
       if (!hasErrnoCode(error, "ENOENT"))
@@ -20255,7 +21241,7 @@ function pruneSessions(root, now) {
   }
   sweepStores(root, now);
   ensureDirectory(root);
-  writeFileSync2(stamp, "", { mode: PRIVATE_FILE });
+  writeFileSync3(stamp, "", { mode: PRIVATE_FILE2 });
 }
 
 // ../envoy-client/src/envoy-config.ts
@@ -20266,9 +21252,9 @@ import {
   lstatSync,
   mkdtempSync,
   openSync as openSync3,
-  readFileSync as readFileSync4,
+  readFileSync as readFileSync5,
   readlinkSync,
-  rmSync as rmSync3,
+  rmSync as rmSync4,
   statSync as statSync3
 } from "fs";
 import { homedir as homedir2, tmpdir } from "os";
@@ -20361,14 +21347,14 @@ function jsonErrorPosition(text) {
 }
 
 // ../envoy-client/src/secret-file.ts
-import { readFileSync as readFileSync3 } from "fs";
+import { readFileSync as readFileSync4 } from "fs";
 function sendable(value) {
   return !/[\s\p{Cc}]/u.test(value);
 }
 function readSecretFile(variable, filePath) {
   let contents;
   try {
-    contents = readFileSync3(filePath, "utf8");
+    contents = readFileSync4(filePath, "utf8");
   } catch (error) {
     throw new Error(`${variable} names ${filePath}, which could not be read: ${messageFor(error)}`);
   }
@@ -20503,7 +21489,7 @@ function danglingLink(filePath) {
 function parseFile(filePath, schema, checkout) {
   let raw;
   try {
-    raw = readFileSync4(filePath, "utf-8");
+    raw = readFileSync5(filePath, "utf-8");
   } catch (error) {
     if (hasErrnoCode(error, "ENOENT") || hasErrnoCode(error, "ENOTDIR")) {
       return { kind: "absent", link: danglingLink(filePath) };
@@ -20534,9 +21520,9 @@ function parseFile(filePath, schema, checkout) {
 }
 var FAILURE_KEPT_MS = 60000;
 var COMMAND_OUTCOMES = Symbol.for("legion.envoy-config.commands.v1");
-var processGlobal = globalThis;
-var commandOutcomes = processGlobal[COMMAND_OUTCOMES] ?? new Map;
-processGlobal[COMMAND_OUTCOMES] = commandOutcomes;
+var processGlobal2 = globalThis;
+var commandOutcomes = processGlobal2[COMMAND_OUTCOMES] ?? new Map;
+processGlobal2[COMMAND_OUTCOMES] = commandOutcomes;
 function runCommand(command, env, cwd) {
   const childEnv = {};
   for (const [name, variable] of Object.entries(env)) {
@@ -20579,7 +21565,7 @@ function runCommand(command, env, cwd) {
         timedOut: false
       };
     }
-    const value = readFileSync4(output, "utf-8").trim();
+    const value = readFileSync5(output, "utf-8").trim();
     if (value.length === 0)
       return { failure: "printed nothing", timedOut: false };
     if (!sendable(value)) {
@@ -20590,10 +21576,10 @@ function runCommand(command, env, cwd) {
     }
     return { value };
   } finally {
-    rmSync3(directory, { recursive: true, force: true });
+    rmSync4(directory, { recursive: true, force: true });
   }
 }
-function fileValue(value, field, filePath, env) {
+function fileValue(value, field, filePath, env, commands = "run") {
   if (!value.startsWith("!")) {
     if (!sendable(value)) {
       throw new Error(`${filePath}: ${field} holds whitespace or a control character`);
@@ -20604,7 +21590,11 @@ function fileValue(value, field, filePath, env) {
   const cwd = path.dirname(path.resolve(filePath));
   const key = JSON.stringify([command, filePath, cwd]);
   let outcome = commandOutcomes.get(key);
-  if (outcome === undefined || "failure" in outcome && !outcome.timedOut && Date.now() - outcome.at >= FAILURE_KEPT_MS) {
+  if (commands === "kept") {
+    if (outcome === undefined) {
+      throw new Error(`${filePath}: ${field}'s command has not run in this process yet, and this read does not run it`);
+    }
+  } else if (outcome === undefined || "failure" in outcome && !outcome.timedOut && Date.now() - outcome.at >= FAILURE_KEPT_MS) {
     outcome = { ...runCommand(command, env, cwd), at: Date.now() };
     commandOutcomes.set(key, outcome);
   }
@@ -20714,7 +21704,7 @@ function bearerSource(env, section, written) {
   const bearer = written();
   return bearer === undefined ? { kind: "none" } : { kind: "file", ...bearer };
 }
-function fileBearer(bearer, url, section, env) {
+function fileBearer(bearer, url, section, env, commands = "run") {
   const named = httpUrl2(url)?.origin;
   const paired = httpUrl2(bearer.server)?.origin;
   if (named !== paired) {
@@ -20726,7 +21716,7 @@ function fileBearer(bearer, url, section, env) {
   if (bearer.token === "") {
     throw new Error(`${bearer.field} in ${bearer.path} must be a non-empty bearer token`);
   }
-  return fileValue(bearer.token, bearer.field, bearer.path, env);
+  return fileValue(bearer.token, bearer.field, bearer.path, env, commands);
 }
 
 // ../envoy-client/src/dispatch-config.ts
@@ -20761,7 +21751,34 @@ function writtenToken(config, checkout) {
     checkout: false
   };
 }
-function dispatchSettings(env, config) {
+function dispatchSettings(env, config, options = {}) {
+  const target = dispatchTarget(env, config);
+  if (!target.enabled)
+    return target;
+  const { url, source } = target;
+  let token;
+  try {
+    token = source.kind === "variable" ? source.token : fileBearer(source, url, "DISPATCH", env, options.commands);
+  } catch (error) {
+    return offWithError(messageFor(error));
+  }
+  const publicUrl = nonEmpty(env.DISPATCH_PUBLIC_URL);
+  const publicParsed = publicUrl === undefined ? undefined : httpUrl2(publicUrl);
+  if (publicUrl !== undefined && (publicParsed === undefined || publicParsed.port === "0")) {
+    return offWithError("DISPATCH_PUBLIC_URL must be an http or https URL");
+  }
+  return {
+    enabled: true,
+    url,
+    token,
+    ...publicUrl === undefined ? {} : { publicUrl: publicUrl.replace(/\/+$/, "") }
+  };
+}
+function dispatchUrl(env, config) {
+  const target = dispatchTarget(env, config);
+  return target.enabled ? target.url : undefined;
+}
+function dispatchTarget(env, config) {
   if (config.kind === "failed")
     return offWithError(config.error);
   const explicitUrl = nonEmpty(env.DISPATCH_URL);
@@ -20784,27 +21801,17 @@ function dispatchSettings(env, config) {
   if (explicitUrl !== undefined && httpUrl2(explicitUrl) === undefined) {
     return offWithError("DISPATCH_URL must be an http or https URL");
   }
+  let source;
   try {
-    const source = checkout !== null && checkoutServer !== undefined ? checkoutPair(checkout, checkoutServer) : bearerSource(env, "DISPATCH", () => writtenToken(config, checkout));
-    if (source.kind === "none") {
-      return offWithError(explicitUrl === undefined ? `${config.path}: dispatch is enabled and no token is: set dispatch.token, or DISPATCH_TOKEN or DISPATCH_TOKEN_FILE` : `DISPATCH_URL is set and no token is: set DISPATCH_TOKEN or DISPATCH_TOKEN_FILE, or dispatch.token in ${config.path}`);
-    }
-    const url = (explicitUrl ?? (source.kind === "file" ? source.server : own.serverUrl ?? DEFAULT_SERVER_URL)).replace(/\/+$/, "");
-    const token = source.kind === "variable" ? source.token : fileBearer(source, url, "DISPATCH", env);
-    const publicUrl = nonEmpty(env.DISPATCH_PUBLIC_URL);
-    const publicParsed = publicUrl === undefined ? undefined : httpUrl2(publicUrl);
-    if (publicUrl !== undefined && (publicParsed === undefined || publicParsed.port === "0")) {
-      return offWithError("DISPATCH_PUBLIC_URL must be an http or https URL");
-    }
-    return {
-      enabled: true,
-      url,
-      token,
-      ...publicUrl === undefined ? {} : { publicUrl: publicUrl.replace(/\/+$/, "") }
-    };
+    source = checkout !== null && checkoutServer !== undefined ? checkoutPair(checkout, checkoutServer) : bearerSource(env, "DISPATCH", () => writtenToken(config, checkout));
   } catch (error) {
     return offWithError(messageFor(error));
   }
+  if (source.kind === "none") {
+    return offWithError(explicitUrl === undefined ? `${config.path}: dispatch is enabled and no token is: set dispatch.token, or DISPATCH_TOKEN or DISPATCH_TOKEN_FILE` : `DISPATCH_URL is set and no token is: set DISPATCH_TOKEN or DISPATCH_TOKEN_FILE, or dispatch.token in ${config.path}`);
+  }
+  const url = (explicitUrl ?? (source.kind === "file" ? source.server : own.serverUrl ?? DEFAULT_SERVER_URL)).replace(/\/+$/, "");
+  return { enabled: true, url, source };
 }
 
 // ../envoy-client/src/envoy-settings.ts
@@ -20993,10 +22000,15 @@ function sessionDispatchSettings(file, env, options) {
     return { dispatch: offWithError(file.error), warnings: [], missing: null };
   const config = readEnvoyConfig(file.path, env, options);
   return {
-    dispatch: dispatchSettings(env, config),
+    dispatch: dispatchSettings(env, config, { commands: options.commands }),
     warnings: config.kind === "read" ? config.warnings : [],
     missing: config.kind === "read" ? config.missing : null
   };
+}
+function sessionDispatchUrl(file, env, options) {
+  if (file.path === null)
+    return;
+  return dispatchUrl(env, readEnvoyConfig(file.path, env, options));
 }
 function sessionEnvoySettings(file, env, options) {
   if (file.path === null)
@@ -21421,7 +22433,7 @@ async function runDispatchCli(argv, rawEnv, io) {
             const fd = openSync4(operandPath(io.cwd, file), constants2.O_RDONLY | constants2.O_NONBLOCK);
             try {
               if (fstatSync2(fd).isFile())
-                bytes = readFileSync5(fd);
+                bytes = readFileSync6(fd);
             } finally {
               closeSync4(fd);
             }
@@ -21431,12 +22443,16 @@ async function runDispatchCli(argv, rawEnv, io) {
             uploadBytes = bytes;
         }
         const spent = consumeMarker(gate.stores, argv, parsed.args, files, Date.now());
+        const asksCarried = spent.ok ? 0 : newAsks(parsed.tool, uploadBytes === undefined ? parsed.args : { ...parsed.args, content: new TextDecoder().decode(uploadBytes) }).length;
         if (!spent.ok && gate.mode === "block") {
-          return refuse(spent.changed === undefined ? `${notCalled} AskGate is on for this session, and ${spent.why}. ${LITERAL_FORM} Send the write again in that form, as a bash call of its own.` : `${notCalled} AskGate is on for this session, and ${spent.why}. ${SAME_MESSAGE} Send the call again in a later message.`, REFUSED, parsed.tool, { mode: "block", why: spent.why });
+          return refuse(spent.changed === undefined ? `${notCalled} AskGate is on for this session, and ${spent.why}. ${LITERAL_FORM} Send the write again in that form, as a bash call of its own.` : `${notCalled} AskGate is on for this session, and ${spent.why}. ${SAME_MESSAGE} Send the call again in a later message.`, REFUSED, parsed.tool, { mode: "block", why: spent.why, asksCarried });
         }
         if (!spent.ok) {
           try {
-            appendResult(dir, { tool: parsed.tool, askgate: { mode: "warn", why: spent.why } });
+            appendResult(dir, {
+              tool: parsed.tool,
+              askgate: { mode: "warn", why: spent.why, asksCarried }
+            });
           } catch (error) {
             return refuse(`${notCalled} AskGate is on for this session in warn mode, and ${spent.why}. A write that posts unreviewed is first recorded in this session's ledger, and the ledger could not be written: ${messageFor(error)}.`, REFUSED, parsed.tool);
           }
@@ -21545,7 +22561,7 @@ async function runDispatchCli(argv, rawEnv, io) {
 }
 
 // ../envoy-client/bin/dispatch.ts
-var readText = (path) => readFileSync6(path === "-" ? 0 : path, "utf-8");
+var readText = (path) => readFileSync7(path === "-" ? 0 : path, "utf-8");
 var pending = [];
 var writeTo = (stream) => (text) => {
   const { promise, resolve } = Promise.withResolvers();

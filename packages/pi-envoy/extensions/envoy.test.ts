@@ -26,17 +26,15 @@ import {
 import { createServer } from "node:net";
 import { hostname, tmpdir } from "node:os";
 import { delimiter, dirname, join } from "node:path";
-import { dispatchIssueSubject } from "@legion/contracts";
+import { dispatchIssueSubject, type SessionAnswer } from "@legion/contracts";
 import { askgateState } from "@legion/envoy-client/askgate-marker";
 import { runDispatchCli } from "@legion/envoy-client/dispatch-cli";
 import { shownPictures } from "@legion/envoy-client/dispatch-picture-tools";
-import {
-  appendResult,
-  readSessionTitle,
-  sessionDirectory,
-} from "@legion/envoy-client/dispatch-session-state";
+import { sessionDirectory } from "@legion/envoy-client/dispatch-session-directory";
+import { appendResult, readSessionTitle } from "@legion/envoy-client/dispatch-session-state";
 import { machineID } from "@legion/envoy-client/machine";
 import { ReplayStateSchema } from "@legion/envoy-client/replay";
+import { renderSessionAnswers } from "@legion/envoy-client/session-answers";
 import {
   type EnvoyStack,
   envoyStackEnabled,
@@ -1703,6 +1701,35 @@ describe("envoy OMP extension", () => {
       details: {},
       isError: true,
     });
+    await session.stop();
+    expect(session.asked).toHaveLength(1);
+    expect(session.fixture.deliveries).toEqual([]);
+  });
+
+  test("a rebutted dispatch command, recorded with its override as a trailing comment, does not re-arm the check", async () => {
+    const { default: envoyExtension } = await import("./envoy.ts?ask-nudge-rearm-rebutted");
+    const session = await bootAskNudge(envoyExtension, "ses_nudge_rearm_rebutted", () => ({}), {
+      selfCheck: async () => ({ replyText: "PROCEEDING" }),
+    });
+
+    await session.userTurn();
+    await session.stop();
+    expect(session.asked).toHaveLength(1);
+
+    // AskGate hands a rebutted command back with its override moved into a shell comment where the
+    // command's line ends, and Oh My Pi records the call as handed back: it is still one `dispatch`
+    // command, the agent talking to the humans, so it owes nothing.
+    await session.dispatch(
+      "dispatch comment --issue DSP-1 --body hi # --advisor-rebuttal 'the person asked for it'",
+      "dispatch_comment",
+      { issue: "DSP-1", comment: "c-1" }
+    );
+    await session.stop();
+    await session.dispatch(
+      "dispatch comment --issue DSP-1 --body-file - <<'EOF' # --advisor-rebuttal 'r'\nLooks right.\nEOF",
+      "dispatch_comment",
+      { issue: "DSP-1", comment: "c-2" }
+    );
     await session.stop();
     expect(session.asked).toHaveLength(1);
     expect(session.fixture.deliveries).toEqual([]);
@@ -4053,7 +4080,8 @@ console.log(JSON.stringify(args));
         context
       )) as { block?: boolean; reason?: string } | undefined;
 
-      expect(completions).toEqual([MODEL]);
+      // Two calls: the charter's, and the rules check's, which a `dispatch ask` also gets.
+      expect(completions).toEqual([MODEL, MODEL]);
       expect(result?.block).toBe(true);
       expect(result?.reason).toContain("see the message above");
       // The gate's own entries: the session also records replay state at start, which no gate
@@ -4065,6 +4093,80 @@ console.log(JSON.stringify(args));
         },
       ]);
       expect(notifications).toEqual([]);
+    }, 30_000);
+    // A session whose envoy.json is not there still has Dispatch when its variables name one, and
+    // the gate binds there: the file is only the switch, and no file leaves it on.
+    test("with no envoy.json at ENVOY_CONFIG_FILE and only DISPATCH_URL and its token set, the gate binds and reviews a dispatch ask", async () => {
+      const file = process.env.ENVOY_CONFIG_FILE ?? "";
+      rmSync(file);
+      process.env.DISPATCH_URL = "http://dispatch.test";
+      process.env.DISPATCH_TOKEN = "dispatch-token";
+      standInHost();
+      const { default: envoyExtension } = await import("./envoy.ts?askgate-no-envoy-json");
+      const fixture = createPi();
+      envoyExtension(fixture.pi);
+      const notifications: string[] = [];
+      const context = gateContext(notifications);
+      await fixture.handlers.get("session_start")?.({}, context);
+      standInDispatch();
+
+      const result = (await fixture.handlers.get("tool_call")?.(
+        { toolName: "bash", toolCallId: "call-ask", input: { command: ASK } },
+        context
+      )) as { block?: boolean; reason?: string } | undefined;
+
+      expect(existsSync(file)).toBe(false);
+      // The charter call, and the rules call the `dispatch ask` opens beside it.
+      expect(completions).toEqual([MODEL, MODEL]);
+      expect(result?.block).toBe(true);
+      expect(fixture.entries.filter((entry) => entry.customType === "advisor-gate")).toMatchObject([
+        {
+          customType: "advisor-gate",
+          data: { tool: "dispatch_ask", outcome: "verdict", decision: "revise" },
+        },
+      ]);
+    }, 30_000);
+    // The rules notice is about one session's calls: it goes to the plain log and to that session's
+    // UI, never into the notices every later session start shows again.
+    test("three rules-check failures in a row raise the rules notice, and a new session start does not show it again", async () => {
+      writeFileSync(process.env.ENVOY_CONFIG_FILE ?? "", "{}\n");
+      process.env.DISPATCH_URL = "http://dispatch.test";
+      process.env.DISPATCH_TOKEN = "dispatch-token";
+      standInHost();
+      const { default: envoyExtension } = await import("./envoy.ts?askgate-rules-notice");
+      const fixture = createPi();
+      envoyExtension(fixture.pi);
+      const notifications: string[] = [];
+      const context = gateContext(notifications);
+      await fixture.handlers.get("session_start")?.({}, context);
+      expect(notifications).toEqual([]);
+
+      // The stand-in model answers the rules call with the charter's JSON, which is no rules
+      // verdict; each ask is on its own issue, so no breaker sends one out unasked.
+      for (const issue of ["DSP-1", "DSP-2", "DSP-3"]) {
+        const result = (await fixture.handlers.get("tool_call")?.(
+          {
+            toolName: "dispatch_ask",
+            toolCallId: `call-${issue}`,
+            input: { issue, question: "Ready?" },
+          },
+          context
+        )) as { block?: boolean } | undefined;
+        expect(result?.block).toBe(true);
+      }
+      expect(completions).toHaveLength(6);
+      const gated = fixture.entries.filter((entry) => entry.customType === "advisor-gate");
+      expect(gated).toMatchObject(
+        Array(3).fill({ customType: "advisor-gate", data: { ruleOutcome: "no-verdict" } })
+      );
+      expect(gated).toHaveLength(3);
+      const rulesNotice =
+        "AskGate's rule check failed 3 times in a row, so the new asks of those 3 calls were not checked against the two rules. The check still runs on each new ask, and refuses a match again as soon as it answers.";
+      expect(notifications).toEqual([rulesNotice]);
+
+      const next: string[] = [];
+      await fixture.handlers.get("session_start")?.({}, gateContext(next, "ses_askgate_next"));
+      expect(next).toEqual([]);
     }, 30_000);
     /**
      * The owner files of `sessionID`'s AskGate record in this test's CLI state directory, each
@@ -4337,6 +4439,382 @@ console.log(JSON.stringify(args));
         },
       ]);
     }, 30_000);
+    /** Every AskGate decision record the session published, read off the Dispatch write itself. */
+    const published: Array<Record<string, unknown>> = [];
+    /**
+     * The Dispatch writes those records made: the session's one document, created under its name
+     * with its header, and each record appended to it. A session's records belong in one
+     * document, so a second create is a second recorder's, which Dispatch would answer by
+     * replacing what the first one wrote.
+     */
+    const recordWrites = { uploads: 0, appends: 0 };
+    /** The documents this Dispatch holds, which its list of the project's answers. */
+    const recordDocuments: Array<{ id: string; name: string; slug: string }> = [];
+    /** Woken as each record reaches the stand-in Dispatch: what `recordsLanded` waits on. */
+    const recordWaiters: Array<() => void> = [];
+    /**
+     * Answers the three Dispatch calls a decision record makes — the read of the session's own
+     * document by name, the document's create, then an append to it — and keeps each JSON record
+     * the writes carried, so a test reads what reached Dispatch and nothing else. Every other
+     * request goes on to the suite's own stand-in.
+     */
+    const standInRecordProject = () => {
+      published.length = 0;
+      recordWrites.uploads = 0;
+      recordWrites.appends = 0;
+      recordDocuments.length = 0;
+      process.env.OMP_ASKGATE_RECORD_PROJECT = "INFRA";
+      const other = globalThis.fetch;
+      recordWaiters.length = 0;
+      const keep = (markdown: string) => {
+        for (const [, line] of markdown.matchAll(/```json\n(.*)\n```/g))
+          published.push(JSON.parse(line ?? "{}") as Record<string, unknown>);
+        for (const wake of recordWaiters.splice(0)) wake();
+      };
+      globalThis.fetch = async (input, init) => {
+        const url = String(input instanceof Request ? input.url : input);
+        const byName = /\/api\/v1\/projects\/INFRA\/artifacts\/(.+)$/.exec(url);
+        if (byName !== null && (init?.method ?? "GET").toUpperCase() === "GET") {
+          // The read the recorder makes before it uploads: the one document of that name, as
+          // Dispatch resolves a document reference, and its 404 where the project holds none.
+          const name = decodeURIComponent(byName[1] ?? "");
+          const held = recordDocuments.find((document) => document.name === name);
+          return held === undefined
+            ? Response.json({ code: "ARTIFACT_NOT_FOUND", error: "not found" }, { status: 404 })
+            : Response.json(held);
+        }
+        if (url.endsWith("/api/v1/projects/INFRA/artifacts")) {
+          const body = JSON.parse(String(init?.body ?? "{}")) as {
+            content?: string;
+            name?: string;
+          };
+          recordWrites.uploads += 1;
+          keep(body.content ?? "");
+          const name = body.name ?? "";
+          if (!recordDocuments.some((document) => document.name === name))
+            recordDocuments.push({ id: "doc-decisions", name, slug: name.replace(/\./g, "-") });
+          return Response.json({ artifact: { id: "doc-decisions" } });
+        }
+        if (url.endsWith("/edits")) {
+          const body = JSON.parse(String(init?.body ?? "{}")) as {
+            ops?: Array<{ markdown?: string }>;
+          };
+          recordWrites.appends += 1;
+          for (const op of body.ops ?? []) keep(op.markdown ?? "");
+          return Response.json({ applied: body.ops?.length ?? 0 });
+        }
+        return other(input, init);
+      };
+    };
+    /**
+     * Waits for `wanted` records to reach the stand-in Dispatch. An unmarked write's record runs
+     * behind its tool result (#2161, reviewer round 17), so what a test reads is what landed
+     * after the handler returned, not what it returned with: the wait is on the write itself,
+     * never on a delay.
+     */
+    const recordsLanded = async (wanted: number) => {
+      while (published.length < wanted) {
+        const { promise, resolve } = Promise.withResolvers<void>();
+        recordWaiters.push(resolve);
+        await promise;
+      }
+    };
+    /**
+     * One unmarked write, end to end: the session's gate is bound, the `dispatch` CLI runs the
+     * write with no marker for it — what a pipe, a script or a subagent's call leaves — and the
+     * session's next tool result reads the line the CLI wrote in the ledger. Answers what reached
+     * Dispatch, once the `wanted` records have landed, and the `advisor-gate` entries the entry
+     * appended.
+     */
+    const unmarkedRun = async (
+      envoyExtension: (pi: TestPi) => void,
+      argv: readonly string[],
+      wanted = 1
+    ) => {
+      const fixture = allHandlers();
+      envoyExtension(fixture.pi);
+      const context = gateContext([]);
+      await fixture.handlers.get("session_start")?.({}, context);
+      standInRecordProject();
+      await runDispatchCli(
+        argv,
+        { ...process.env, DISPATCH_HOST: "omp" },
+        {
+          stdout: () => {},
+          stderr: () => {},
+          readText: (path) => readFileSync(path, "utf8"),
+          cwd: configDirectory,
+          fetchImpl: (async () => Response.json({})) as typeof fetch,
+        }
+      );
+      await fixture.handlers.get("tool_result")?.(
+        {
+          toolName: "bash",
+          toolCallId: "call-py",
+          input: { command: "python3 post.py" },
+          content: [],
+          isError: false,
+        },
+        context
+      );
+      await recordsLanded(wanted);
+      return {
+        records: [...published],
+        gateEntries: fixture.entries.flatMap((entry) =>
+          entry.customType === "advisor-gate" ? [entry.data as Record<string, unknown>] : []
+        ),
+        /**
+         * A literal `dispatch ask` the gate itself reviews, in the session the unmarked write ran
+         * in: what the gate answered the call with, and every record Dispatch has by then.
+         */
+        gatedAsk: async (toolCallId: string) => {
+          const before = published.length;
+          const result = (await fixture.handlers.get("tool_call")?.(
+            { toolName: "bash", toolCallId, input: { command: ASK } },
+            context
+          )) as { block?: boolean } | undefined;
+          // The gate's own decision record runs after its handler has returned (#2161), so the
+          // call's answer comes first and the record lands behind it, on the write the stand-in
+          // Dispatch answers.
+          await recordsLanded(before + 1);
+          return { result, records: [...published] };
+        },
+        shutdown: async () => {
+          await fixture.handlers.get("session_shutdown")?.({}, context);
+        },
+      };
+    };
+    const UNMARKED_ASK = [
+      "ask",
+      "--issue",
+      "DSP-1",
+      "--question",
+      "Which deployment window should the rollout take?",
+    ];
+    // A write the gate never saw reaches only this machine's disk as an entry. One that would
+    // have opened an ask for a person also goes to Dispatch, so a session holding a Dispatch
+    // token and nothing else counts the asks that went out, or were refused, unreviewed.
+    test("an unmarked dispatch ask in warn mode publishes one record of it, with its ask count and no ask text", async () => {
+      gateOn();
+      const { default: envoyExtension } = await import("./envoy.ts?unmarked-record-warn");
+      const run = await unmarkedRun(envoyExtension, UNMARKED_ASK);
+      expect(run.records).toMatchObject([
+        {
+          session: "ses_askgate",
+          // The tool call the CLI's line was read from, and the line's own place in it: what
+          // tells this record from another write of the same call (#2161).
+          id: "call-py#0",
+          project: "INFRA",
+          tool: "dispatch_ask",
+          outcome: "unmarked",
+          decision: "allow",
+          verdictMode: "warn",
+          asksCarried: 1,
+          ruleOutcome: null,
+          target: null,
+        },
+      ]);
+      expect(JSON.stringify(run.records)).not.toContain("deployment window");
+      expect(run.gateEntries).toMatchObject([{ tool: "dispatch_ask", outcome: "unmarked" }]);
+      expect(run.gateEntries[0]).not.toHaveProperty("recordError");
+      await run.shutdown();
+    }, 30_000);
+
+    test("an unmarked dispatch ask in block mode publishes one record of it too: the ask was refused, not sent", async () => {
+      process.env.OMP_ASKGATE = "block";
+      try {
+        gateOn();
+        const { default: envoyExtension } = await import("./envoy.ts?unmarked-record-block");
+        const run = await unmarkedRun(envoyExtension, UNMARKED_ASK);
+        expect(run.records).toMatchObject([
+          {
+            tool: "dispatch_ask",
+            outcome: "unmarked",
+            decision: "revise",
+            verdictMode: "block",
+            asksCarried: 1,
+          },
+        ]);
+        expect(JSON.stringify(run.records)).not.toContain("deployment window");
+        await run.shutdown();
+      } finally {
+        delete process.env.OMP_ASKGATE;
+      }
+    }, 30_000);
+
+    test("an unmarked dispatch comment publishes no record: no person waits on it", async () => {
+      gateOn();
+      const { default: envoyExtension } = await import("./envoy.ts?unmarked-record-comment");
+      const run = await unmarkedRun(
+        envoyExtension,
+        ["comment", "--issue", "DSP-1", "--body", "The rollout landed."],
+        0
+      );
+      expect(run.records).toEqual([]);
+      // The entry is still appended: the report counts every unmarked write, asks or none.
+      expect(run.gateEntries).toMatchObject([{ tool: "dispatch_comment", outcome: "unmarked" }]);
+      await run.shutdown();
+    }, 30_000);
+
+    test("an unmarked markdown upload publishes the count of the ask blocks its file carries", async () => {
+      gateOn();
+      const asks = join(configDirectory, "asks.md");
+      writeFileSync(
+        asks,
+        ":::ask{#window}\nWhich deployment window?\n:::\n\n:::ask{#owner}\nWho owns the rollout?\n:::\n"
+      );
+      const { default: envoyExtension } = await import("./envoy.ts?unmarked-record-upload");
+      const run = await unmarkedRun(envoyExtension, [
+        "artifact",
+        "--issue",
+        "DSP-1",
+        "--name",
+        "asks.md",
+        "--path",
+        asks,
+      ]);
+      expect(run.records).toMatchObject([
+        { tool: "dispatch_artifact", outcome: "unmarked", verdictMode: "warn", asksCarried: 2 },
+      ]);
+      expect(JSON.stringify(run.records)).not.toContain("deployment window");
+      await run.shutdown();
+    }, 30_000);
+    // #2161, reviewer round 17: the handler used to await the record, which queues behind the
+    // session's other records and has the client's own deadline on each read and write, so a
+    // Dispatch that accepts the connection and never answers stalled every unmarked write past
+    // the host's handler limit, and the entry that is the only local count of the decision was
+    // not written meanwhile.
+    const hangingRecordProject = () => {
+      standInRecordProject();
+      const other = globalThis.fetch;
+      const reached = Promise.withResolvers<void>();
+      // Accepted and never answered: what an unreachable Dispatch under load looks like here.
+      const { promise: hang } = Promise.withResolvers<Response>();
+      globalThis.fetch = (async (input, init) => {
+        const url = String(input instanceof Request ? input.url : input);
+        if (/\/api\/v1\/projects\/INFRA\/artifacts/.test(url)) {
+          reached.resolve();
+          return hang;
+        }
+        return other(input, init);
+      }) as typeof fetch;
+      return { reached: reached.promise };
+    };
+    /** The session's gate bound, an unmarked `dispatch ask` logged, and nothing read yet. */
+    const unmarkedWriteLogged = async (envoyExtension: (pi: TestPi) => void) => {
+      const fixture = allHandlers();
+      envoyExtension(fixture.pi);
+      const context = gateContext([]);
+      await fixture.handlers.get("session_start")?.({}, context);
+      const dispatch = hangingRecordProject();
+      await runDispatchCli(
+        UNMARKED_ASK,
+        { ...process.env, DISPATCH_HOST: "omp" },
+        {
+          stdout: () => {},
+          stderr: () => {},
+          readText: (path) => readFileSync(path, "utf8"),
+          cwd: configDirectory,
+          fetchImpl: (async () => Response.json({})) as typeof fetch,
+        }
+      );
+      const readLedger = () =>
+        fixture.handlers.get("tool_result")?.(
+          {
+            toolName: "bash",
+            toolCallId: "call-py",
+            input: { command: "python3 post.py" },
+            content: [],
+            isError: false,
+          },
+          context
+        );
+      const entriesOf = (customType: string) =>
+        fixture.entries.flatMap((entry) =>
+          entry.customType === customType ? [entry.data as Record<string, unknown>] : []
+        );
+      return {
+        ...dispatch,
+        readLedger,
+        entriesOf,
+        shutdown: () => fixture.handlers.get("session_shutdown")?.({}, context),
+      };
+    };
+
+    test("an unmarked write's tool result returns while its record still waits on Dispatch", async () => {
+      gateOn();
+      const { default: envoyExtension } = await import("./envoy.ts?unmarked-record-hangs");
+      const run = await unmarkedWriteLogged(envoyExtension);
+      const handled = run.readLedger();
+      // The record is in flight against a Dispatch that will never answer it.
+      await run.reached;
+      // The result is answered all the same: it waits on none of it.
+      await handled;
+      // The entry, the only local count of the decision, is written before the record starts, so
+      // a session killed in this window still counts it.
+      expect(run.entriesOf("advisor-gate")).toMatchObject([
+        { tool: "dispatch_ask", outcome: "unmarked", recordId: "call-py#0" },
+      ]);
+      expect(published).toEqual([]);
+      expect(run.entriesOf("advisor-gate-record")).toEqual([]);
+      await run.shutdown();
+    }, 30_000);
+
+    test("a record the session could not write lands as an advisor-gate-record follow-up keyed on the unmarked entry", async () => {
+      gateOn();
+      const { default: envoyExtension } = await import("./envoy.ts?unmarked-record-follow-up");
+      const run = await unmarkedWriteLogged(envoyExtension);
+      await run.readLedger();
+      await run.reached;
+      // The shutdown's cut gives the record up, and the loss rides on a follow-up of its own,
+      // appended while the session is still live and named by the record's own id: the tool call
+      // id alone can name a gated call and several unmarked writes of one call.
+      await run.shutdown();
+      expect(run.entriesOf("advisor-gate-record")).toEqual([
+        {
+          toolCallId: "call-py",
+          tool: "dispatch_ask",
+          recordId: "call-py#0",
+          recordError: "the session shut down before Dispatch answered the record",
+        },
+      ]);
+      expect(run.entriesOf("advisor-gate")[0]).not.toHaveProperty("recordError");
+    }, 30_000);
+
+    // #2161: the record of an unmarked write is the host's, the record of a gated call the core's,
+    // and a session makes both. Each recorder holds its own map of the documents it created, so
+    // two of them create the session's document twice under its one name, which Dispatch answers
+    // by replacing it: the first recorder's records are dropped. One recorder serves both.
+    test("an unmarked ask and a gated call in one session share the decision document: it is created once and both records append", async () => {
+      gateOn();
+      const { default: envoyExtension } = await import("./envoy.ts?record-one-document");
+      standInDispatch();
+      const run = await unmarkedRun(envoyExtension, UNMARKED_ASK);
+      expect(run.records).toMatchObject([{ outcome: "unmarked", asksCarried: 1 }]);
+      expect(recordWrites).toEqual({ uploads: 1, appends: 1 });
+
+      const gated = await run.gatedAsk("call-ask");
+
+      expect(gated.result?.block).toBe(true);
+      // The charter call and the rules check: this call's rules check ran, so it is recorded too.
+      expect(completions).toEqual([MODEL, MODEL]);
+      expect(gated.records).toMatchObject([
+        { session: "ses_askgate", tool: "dispatch_ask", outcome: "unmarked", ruleOutcome: null },
+        {
+          session: "ses_askgate",
+          tool: "dispatch_ask",
+          outcome: "verdict",
+          decision: "revise",
+          ruleOutcome: "no-verdict",
+          target: "dispatch_ask issue=DSP-1",
+        },
+      ]);
+      // One document holds both: the gated call's record appended to the document the unmarked
+      // write's create made, rather than creating that name again.
+      expect(recordWrites).toEqual({ uploads: 1, appends: 2 });
+      await run.shutdown();
+    }, 30_000);
+
     /** Appends to the session's ledger a gated write the CLI logged as unmarked. */
     const appendUnmarked = () =>
       appendResult(sessionDirectory(process.env, "ses_askgate"), {
@@ -4414,8 +4892,9 @@ console.log(JSON.stringify(args));
       ]);
     }, 30_000);
     // The second re-gate of #2159, non-blocking: at the host's default handler limit of 30 s the
-    // review deadline is 25 s, which measured reviews often pass, and the warning that says so
-    // went only to the log. A profile that sets nothing is the case this gate is for.
+    // review deadline is 25 s (the 5 s margin covers the aborted call's usage report and the
+    // entry), which measured reviews often pass, and the warning that says so went only
+    // to the log. A profile that sets nothing is the case this gate is for.
     test("a review deadline under 30 s is said at session start, not only logged", async () => {
       writeFileSync(process.env.ENVOY_CONFIG_FILE ?? "", "{}\n");
       process.env.DISPATCH_URL = "http://dispatch.test";
@@ -4472,7 +4951,7 @@ console.log(JSON.stringify(args));
         )) as { block?: boolean } | undefined;
 
         expect(result?.block).toBe(true);
-        expect(completions).toEqual([MODEL]);
+        expect(completions).toEqual([MODEL, MODEL]);
       } finally {
         process.chdir(originalCwd);
         rmSync(checkout, { recursive: true, force: true });
@@ -4554,7 +5033,7 @@ console.log(JSON.stringify(args));
         context
       )) as { block?: boolean } | undefined;
       expect(result?.block).toBe(true);
-      expect(completions).toEqual([MODEL]);
+      expect(completions).toEqual([MODEL, MODEL]);
     });
 
     test("a gate that does not load is said at session start and refuses each write it would review, so a load failure is no off switch", async () => {
@@ -13079,6 +13558,189 @@ console.log(JSON.stringify(args));
           },
         },
       ]);
+    } finally {
+      fixture.remove();
+    }
+  });
+
+  /** A Dispatch whose answers route lists `text` as a person's answer, written a minute ago, and
+   *  records each path it is asked for; the listener's routes answer as usual. */
+  function answeringDispatch(text: string): {
+    readonly reads: string[];
+    readonly item: SessionAnswer;
+  } {
+    process.env.DISPATCH_URL = "http://dispatch.test";
+    process.env.DISPATCH_TOKEN = "answers-token";
+    const item: SessionAnswer = {
+      kind: "answer",
+      relation: "answered_your_ask",
+      id: "ask_1",
+      at: new Date(Date.now() - 60_000).toISOString(),
+      author: { kind: "user", id: "alice" },
+      text,
+      ask: { id: "ask_1", question: "Which way?" },
+      owner: { issue: { key: "LEGION-1", title: "The work" } },
+      ref: "dispatch://LEGION-1/ask/ask_1",
+      href: "/issues/LEGION-1#ask-ask_1",
+    };
+    const reads: string[] = [];
+    globalThis.fetch = async (input, init) => {
+      const url = new URL(input.toString());
+      if (url.host !== "dispatch.test") return responseWithRegistration(input, init, {});
+      reads.push(url.pathname);
+      const session = url.pathname.split("/")[4] ?? "";
+      return Response.json({ session_id: session, since: item.at, total: 1, items: [item] });
+    };
+    return { reads, item };
+  }
+
+  /** The messages a `context` handler's result carries. */
+  function contextMessages(result: unknown): unknown[] {
+    if (typeof result !== "object" || result === null || !("messages" in result)) {
+      throw new Error(`the context handler returned ${JSON.stringify(result)}`);
+    }
+    return result.messages as unknown[];
+  }
+
+  test("the context handler appends what people wrote to the session after the request's last message", async () => {
+    const { reads, item } = answeringDispatch("Go the second way.");
+    const { default: envoyExtension } = await import("./envoy.ts?session-answers-top");
+    const fixture = createPi();
+    envoyExtension(fixture.pi);
+    const context = sessionContext("ses_answers_top");
+    await fixture.handlers.get("session_start")?.({}, context);
+    const conversation = [
+      { role: "user", content: [{ type: "text", text: "Fix the bug." }], timestamp: 1 },
+      {
+        role: "assistant",
+        content: [{ type: "toolCall", id: "call-1", name: "read", arguments: { path: "x.ts" } }],
+        timestamp: 2,
+      },
+      {
+        role: "toolResult",
+        toolCallId: "call-1",
+        toolName: "read",
+        content: [{ type: "text", text: "export {};" }],
+        isError: false,
+        timestamp: 3,
+      },
+    ];
+
+    const messages = contextMessages(
+      await fixture.handlers.get("context")?.({ messages: conversation }, context)
+    );
+
+    expect(reads).toEqual(["/api/v1/agents/ses_answers_top/answers"]);
+    // The skill stays at the head, the conversation is untouched, and the list is its own last
+    // message.
+    expect(JSON.stringify(messages[0])).toContain("<dispatch-first-skill>");
+    expect(messages.slice(1, -1)).toEqual(conversation);
+    expect(messages.at(-1)).toEqual({
+      role: "user",
+      content: [{ type: "text", text: renderSessionAnswers([item], { now: Date.now() }) }],
+      timestamp: 0,
+    });
+  });
+
+  // Oh My Pi drops everything a `context` handler returns when it throws: whatever Dispatch
+  // answers, the skill stays and the request says the list could not be read.
+  test("a Dispatch answering 200 with no list keeps the dispatch-first skill and carries the failure line", async () => {
+    process.env.DISPATCH_URL = "http://dispatch.test";
+    process.env.DISPATCH_TOKEN = "answers-token";
+    globalThis.fetch = async (input, init) =>
+      new URL(input.toString()).host === "dispatch.test"
+        ? Response.json({ unexpected: true })
+        : responseWithRegistration(input, init, {});
+    const { default: envoyExtension } = await import("./envoy.ts?session-answers-malformed");
+    const fixture = createPi();
+    envoyExtension(fixture.pi);
+    const context = sessionContext("ses_answers_malformed");
+    await fixture.handlers.get("session_start")?.({}, context);
+    const prompt = { role: "user", content: [{ type: "text", text: "Fix it." }], timestamp: 1 };
+
+    const messages = contextMessages(
+      await fixture.handlers.get("context")?.({ messages: [prompt] }, context)
+    );
+
+    expect(JSON.stringify(messages[0])).toContain("<dispatch-first-skill>");
+    expect(messages.slice(1, -1)).toEqual([prompt]);
+    expect(JSON.stringify(messages.at(-1))).toContain(
+      "[Dispatch: people's answers from the last 72 hours could not be read ("
+    );
+  });
+
+  // A Dispatch URL of its own: the no-route back-off is process-wide, by URL.
+  test("a Dispatch with no answers route adds no line to the model, and the log says so once for the session", async () => {
+    const base = "http://dispatch-no-route.test";
+    process.env.DISPATCH_URL = base;
+    process.env.DISPATCH_TOKEN = "answers-token";
+    const reads: string[] = [];
+    globalThis.fetch = async (input, init) => {
+      const url = new URL(input.toString());
+      if (url.host !== "dispatch-no-route.test") return responseWithRegistration(input, init, {});
+      if (url.pathname.endsWith("/answers")) reads.push(url.pathname);
+      return Response.json(
+        { code: "NOT_FOUND", error: `no route for GET ${url.pathname}` },
+        { status: 404 }
+      );
+    };
+    const { default: envoyExtension } = await import("./envoy.ts?session-answers-no-route");
+    const fixture = createPi();
+    envoyExtension(fixture.pi);
+    const context = sessionContext("ses_answers_no_route");
+    await fixture.handlers.get("session_start")?.({}, context);
+    const warnings: string[] = [];
+    const stopSink = logger.registerLogSink((entry) => {
+      if (entry.level === "warn") warnings.push(entry.message);
+    });
+    const requests: unknown[][] = [];
+    try {
+      for (const text of ["First question.", "Second question."]) {
+        const prompt = { role: "user", content: [{ type: "text", text }], timestamp: 1 };
+        const messages = contextMessages(
+          await fixture.handlers.get("context")?.({ messages: [prompt] }, context)
+        );
+        expect(messages.slice(1)).toEqual([prompt]);
+        requests.push(messages);
+      }
+    } finally {
+      stopSink();
+    }
+
+    for (const messages of requests) {
+      expect(JSON.stringify(messages[0])).toContain("<dispatch-first-skill>");
+      expect(JSON.stringify(messages)).not.toContain("dispatch answers");
+      expect(JSON.stringify(messages)).not.toContain("could not be read");
+    }
+    // The second request falls inside the 5-minute back-off, so Dispatch was asked once.
+    expect(reads).toEqual(["/api/v1/agents/ses_answers_no_route/answers"]);
+    expect(warnings.filter((warning) => warning.includes("no answers route"))).toEqual([
+      `envoy: Dispatch at ${base} has no answers route (its build is older than the route), so people's answers cannot be read from it`,
+    ]);
+  });
+
+  test("a task subagent's context handler reads its parent's list", async () => {
+    const fixture = transcriptFixture();
+    try {
+      const { reads } = answeringDispatch("Go the parent's way.");
+      const host = await subagentProcess(
+        "session-answers-subagent",
+        "ses_answers_parent",
+        fixture.transcript
+      );
+      const child = await host.boot(
+        "ses_answers_child",
+        fixture.transcript("2026-09-23T00-00-00-000Z_ses_answers_parent/Scout.jsonl")
+      );
+      const prompt = { role: "user", content: [{ type: "text", text: "Look." }], timestamp: 1 };
+
+      const messages = contextMessages(
+        await child.handlers.get("context")?.({ messages: [prompt] }, child.context)
+      );
+
+      expect(reads).toEqual(["/api/v1/agents/ses_answers_parent/answers"]);
+      expect(messages.slice(1, -1)).toEqual([prompt]);
+      expect(JSON.stringify(messages.at(-1))).toContain("Go the parent's way.");
     } finally {
       fixture.remove();
     }

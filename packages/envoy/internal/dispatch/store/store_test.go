@@ -207,6 +207,7 @@ func TestMigrateCreatesEmptySchemaAndIsIdempotent(t *testing.T) {
 		"message_deliveries",
 		"refs",
 		"events",
+		"event_horizon",
 		"user_issue_state",
 		"user_agent_state",
 		"document_blocks",
@@ -246,6 +247,7 @@ func TestMigrateCreatesEmptySchemaAndIsIdempotent(t *testing.T) {
 		"issues_parent_key",
 		"artifacts_issue_key",
 		"asks_anchor_artifact",
+		"asks_anchor_artifact_id",
 		"comments_anchor_artifact",
 		"ask_followers_ask_id_text",
 		"events_ask_answered_by_user",
@@ -267,6 +269,9 @@ func TestMigrateCreatesEmptySchemaAndIsIdempotent(t *testing.T) {
 		"message_block_refs_from_node",
 		"comments_replies_to_block",
 		"messages_replies_to_block",
+		"events_person_words",
+		"comment_deliveries_session",
+		"message_deliveries_session_created",
 	}
 	assertDatabaseObjects(t, ctx, store.Pool, `
 		select indexname

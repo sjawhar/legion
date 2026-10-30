@@ -1,5 +1,0 @@
-kind: Changed
-body: '`dispatch read` asks for each referenced document''s latest version only (`GET /api/v1/issues/{key}/references?versions=latest`), so Dispatch builds a fraction of the answer; the printed `References:` section is unchanged, also against a Dispatch that does not know the parameter.'
-time: 2026-10-28T15:58:17.599738103Z
-custom:
-    Issue: pr2469

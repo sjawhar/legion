@@ -69,8 +69,10 @@ versions. Never add the module to the root `go.work`.
 
 - **Component-built Kubernetes providers.** `gcp:Dispatch` requires the consumer's `gcp` and
   `random` providers before registering anything, then builds a Kubernetes provider from its
-  cluster's exec-plugin kubeconfig. Every Kubernetes child uses that explicit provider and depends
-  on the cluster; none falls back to a default Kubernetes provider. `gcp:ClusteredNatsHub` takes
+  cluster's exec-plugin kubeconfig; with `clusterOnly` it requires the `gcp` provider alone and
+  builds no Kubernetes provider, since it registers no `RandomPassword` and no Kubernetes object.
+  Every Kubernetes child uses that explicit provider and depends on the cluster; none falls back
+  to a default Kubernetes provider. `gcp:ClusteredNatsHub` takes
   the cluster's `kubeconfig` as a secret input and builds its own provider, `<name>-kubernetes`,
   with `enableServerSideApply` and `enableConfigMapMutable` on, and calls no `providers.Require`,
   since it creates every resource through that provider (the chart through `pulumi.Providers`).
@@ -162,11 +164,15 @@ versions. Never add the module to the root `go.work`.
   (`TestDispatchHoldsNoBrokerTokenOrAppKeyMaterial`,
   `TestDispatchGrantsTheAzureKeyAccessorOnlyWithTheKeyForm`); the GitHub App's four inputs come
   together, each missing one named, and the Azure inputs come with `azureEmbedEndpoint`, its quota
-  and exactly one credential form (`TestDispatchResolverRefusesInvalidInputs`); and `natsUrl` is checked
-  inside the `ApplyT` that renders the listener container's environment, where core's `Env`
-  refusals — which name core's own inputs, `natsUrls` and `socks5Proxy` — are mapped onto
+  and exactly one credential form (`TestDispatchResolverRefusesInvalidInputs`); and `natsUrl` is
+  checked inside the `ApplyT` that renders the listener container's environment, where core's
+  `Env` refusals — which name core's own inputs, `natsUrls` and `socks5Proxy` — are mapped onto
   `natsUrl`, each a `core.InputError` naming it, wrapped with the component's type and name and
-  never a panic (`gcp.dispatchListenerEnv`, `TestDispatchRefusesABadNatsURLOnceItResolves`).
+  never a panic. With `natsInCluster` there is no proxy whose refusal to map, and core refuses a
+  local URL only beside one, so the component refuses a local `natsUrl` itself
+  (`bus.LocalNATSURL`) before core's `Env` is reached, naming `natsUrl` there too, since the pods
+  dial the URL themselves and a loopback URL would have them dial themselves
+  (`gcp.dispatchListenerEnv`, `TestDispatchRefusesABadNatsURLOnceItResolves`).
 - **Plain or Input.** A field of a plain Go type (`string`, `*int`, a pointer to a struct) takes
   only a value the consumer's program knows when it runs: Construct refuses another resource's
   output there, naming the input (Pulumi SDK v3.265.0 `go/pulumi/provider.go`,
