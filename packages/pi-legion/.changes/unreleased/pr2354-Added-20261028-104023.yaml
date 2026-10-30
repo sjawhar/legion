@@ -14,8 +14,8 @@ body: |-
     this order (docs/kubernetes.md, "Moving the handoffs onto their Dispatch issues"): deploy the
     Dispatch server that carries the handoff routes first, then run `legion handoffs import` while
     the old daemon still runs, then roll out the daemon and the plugins, then run the import again,
-    which catches a file an old worker pushed in between, until it prints `deferred 0` and no `kept`
-    line.
+    which catches a file an old worker pushed in between, until no line asks for another run and
+    none says `kept`.
 time: 2026-10-28T10:40:23.525829083Z
 custom:
     Issue: pr2354
