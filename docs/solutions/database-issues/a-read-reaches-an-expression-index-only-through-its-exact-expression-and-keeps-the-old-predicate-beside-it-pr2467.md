@@ -55,7 +55,7 @@ related_issues:
   (`store/migrations/0032_refs_provenance.up.sql:44,47`). Commit `92a8c7bb` added each table's index
   expression beside the text comparison: Bitmap Index Scan, 0.16 ms, the same 18 rows. Old and new
   predicates selected the same rows for all 1,157 documents (3,400 = 3,400, symmetric difference 0).
-- The only writer of `block_artifact_id` is the ask-block insert (`docs/ask_blocks.go:718`), which
+- The only writer of `block_artifact_id` is the ask-block insert (`docs/ask_blocks.go:778`), which
   writes no anchor, so an anchored ask's `coalesce` is its anchor's artifact id. No constraint
   enforces this, and rows written by earlier releases are unchecked: an ask holding both columns
   was listed under neither document, so its mark was swept. Since sjawhar/legion#2483 the read no

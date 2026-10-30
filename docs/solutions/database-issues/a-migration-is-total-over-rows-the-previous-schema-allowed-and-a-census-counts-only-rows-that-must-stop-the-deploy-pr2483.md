@@ -37,8 +37,9 @@ related_issues:
   null`. Its comment argued the cast could not fail because `asks_anchor_artifact` (migration 0032)
   already cast it, but 0032 indexes `coalesce(block_artifact_id, (anchor->>'artifact_id')::uuid)`,
   which casts the anchor only where `block_artifact_id` is null. A real boot over an ask holding
-  both columns with `artifact_id` `not-a-uuid` exited 1: `apply migration 137: ... invalid input
-  syntax for type uuid: "not-a-uuid" (SQLSTATE 22P02)`, schema left at 136.
+  both columns with `artifact_id` `not-a-uuid` exited 1 (the migration was then numbered 0137):
+  `apply migration 137: ... invalid input syntax for type uuid: "not-a-uuid" (SQLSTATE 22P02)`,
+  schema left at 136.
 - A census that counted those rows (`not pg_input_is_valid(...)`) made `envoy-dispatch census`
   answer `REFUSED ... its census counts 1`. That was rejected: nobody could count production's
   asks, so it could stop a production deploy until someone edited the data by hand.
