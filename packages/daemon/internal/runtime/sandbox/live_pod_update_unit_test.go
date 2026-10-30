@@ -119,3 +119,97 @@ func TestAnUnreadableShapeIsNotMoved(t *testing.T) {
 		})
 	}
 }
+
+// pod-update-fleet drifts the pods of two issues with one change, and both issues' workers push
+// their own issue's branch onto the run's repository, which every Stage 4a run shares. The two
+// keys must therefore be two, neither of them cache-b's, and each of the shape a later run's sweep
+// takes a killed run's leftover by.
+func TestTheFleetRoundsTwoIssuesNameBranchesOfTheirOwn(t *testing.T) {
+	runs := []string{"s4a-20261030101500-4108", "s4a-20261030101500-4109", "s4a-20261030112233-1308"}
+	branches := map[string]string{}
+	for _, project := range runs {
+		keys := map[string]string{
+			"pod-update":       podUpdateRunIssue(project),
+			"pod-update-fleet": podUpdateFleetRunIssue(project),
+			"cache-b":          cacheRunIssue(project),
+		}
+		if keys["pod-update-fleet"] == keys["pod-update"] || keys["pod-update-fleet"] == keys["cache-b"] {
+			t.Fatalf("run %s gives %v one issue key, so two checkpoints push one branch", project, keys)
+		}
+		if again := podUpdateFleetRunIssue(project); again != keys["pod-update-fleet"] {
+			t.Fatalf("podUpdateFleetRunIssue(%q) is %q, then %q", project, keys["pod-update-fleet"], again)
+		}
+		for name, issue := range keys {
+			if !claim.IsIssueKey(issue) {
+				t.Fatalf("%s's issue in run %s is %q, not an issue key", name, project, issue)
+			}
+			if _, err := claim.NewToken("s4a20261030101500", issue, claim.RoleArchitect); err != nil {
+				t.Fatalf("%s's issue %q is one a claim token refuses: %v", name, issue, err)
+			}
+			branch := workspace.Bookmark(issue)
+			if other, taken := branches[branch]; taken {
+				t.Fatalf("%s of run %s and %s both push %s", name, project, other, branch)
+			}
+			branches[branch] = name + " of run " + project
+			// A run killed past its test timeout leaves this branch behind, and the next run's
+			// cache-lost-volume sweep is what deletes it.
+			old := time.Now().Add(-staleRunBranchAge - time.Minute)
+			left := []runBranch{{name: branch, message: runCommitMessage(branch), committed: old}}
+			if stale := staleRunBranches(left, time.Now()); !slices.Equal(stale, []string{branch}) {
+				t.Fatalf("a killed run's %s is swept as %q, want the branch itself: its shape is not the sweep's", branch, stale)
+			}
+		}
+	}
+}
+
+// The fleet check's premise: every issue pod of one runtime is built from the one configuration,
+// so the one moved shape the operator writes onto each Sandbox drifts every one of them, by the
+// same one reason the check holds each worker's PodDrift to. A pod built from another
+// configuration is another fleet, and the check says so rather than patching a shape of its own
+// invention over it.
+func TestOneMovedShapeDriftsEveryPodBuiltFromTheHeldOne(t *testing.T) {
+	image := "example.test/legion/worker@sha256:" + strings.Repeat("b", 64)
+	record := podShapeRecord{
+		Image: image,
+		Resources: corev1.ResourceRequirements{
+			Requests: corev1.ResourceList{corev1.ResourceCPU: resource.MustParse("2"), corev1.ResourceMemory: resource.MustParse("4Gi")},
+			Limits:   corev1.ResourceList{corev1.ResourceCPU: resource.MustParse("2"), corev1.ResourceMemory: resource.MustParse("4Gi")},
+		},
+		Volumes: []corev1.Volume{{Name: "route", VolumeSource: corev1.VolumeSource{EmptyDir: &corev1.EmptyDirVolumeSource{}}}},
+		Mounts:  []corev1.VolumeMount{{Name: "route", MountPath: "/var/run/legion/route"}},
+		Disk:    "20Gi",
+	}
+	encoded, err := json.Marshal(record)
+	if err != nil {
+		t.Fatal(err)
+	}
+	held := string(encoded)
+	moved, reason, err := movedPodShape(held)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Two issues, each a Sandbox of its own, each built from the one held configuration and each
+	// carrying the one moved shape the operator's single change writes.
+	for _, issue := range []string{"S4A-101", "S4A-102"} {
+		s := &sandbox{Spec: sandboxSpec{PodTemplate: podTemplate{
+			Metadata: podMetadata{Annotations: map[string]string{podShapeAnnotation: moved}},
+		}}}
+		if drifted := podShapeDrift(s, held); !slices.Equal(drifted, []string{reason}) {
+			t.Fatalf("%s's pod drifts by %q after the one change, want the one reason %q every pod of the fleet reads", issue, drifted, reason)
+		}
+	}
+	// A pod of another configuration is no part of this fleet: the same moved shape leaves it
+	// drifting by more than that one reason, which is what the check refuses before it patches.
+	other := record
+	other.Image = "example.test/legion/worker@sha256:" + strings.Repeat("c", 64)
+	otherEncoded, err := json.Marshal(other)
+	if err != nil {
+		t.Fatal(err)
+	}
+	s := &sandbox{Spec: sandboxSpec{PodTemplate: podTemplate{
+		Metadata: podMetadata{Annotations: map[string]string{podShapeAnnotation: moved}},
+	}}}
+	if drifted := podShapeDrift(s, string(otherEncoded)); slices.Equal(drifted, []string{reason}) {
+		t.Fatalf("a pod built from another configuration reads the one fleet reason %q, so the check could not tell the two apart", reason)
+	}
+}

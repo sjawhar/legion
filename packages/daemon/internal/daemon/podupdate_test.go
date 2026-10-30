@@ -46,6 +46,12 @@ const (
 	podUpdateNotice = 4 * time.Hour
 	// podUpdateDrift is the drift the fake runtime reports for the issue's pod.
 	podUpdateDrift = "image"
+	// podUpdateKeptDrift is a drift of the kind a launch keeps the pod for and starts its role
+	// degraded in: the operator's volume holding that role's overlay moved, so a pod built before
+	// the move cannot carry the file the role's Oh My Pi would be told to read. The launch starts
+	// the role as the pod was built instead (the Sandbox runtime's relaunch), so the role runs
+	// without that overlay until this round replaces its pod — and can still push and answer.
+	podUpdateKeptDrift = "role_config_files.architect /etc/legion-operator-extra/fallback.yml (unset), now volume operator-roles from ConfigMap legion-operator-roles items []"
 )
 
 // podUpdateRole is one role claim a test seeds: the state the store holds it in, whether an agent
@@ -98,7 +104,7 @@ func newPodUpdateRig(t *testing.T, roles ...podUpdateRole) *podUpdateRig {
 			c.SessionFile = "/sessions/" + string(role.role) + ".jsonl"
 		}
 		if role.inPod {
-			c.Locator = podUpdateLocator(token, podUpdatePod)
+			c.Locator = podUpdateLocator(token, podUpdateIssue, podUpdatePod)
 		}
 		claims = append(claims, c)
 	}
@@ -153,12 +159,13 @@ func newPodUpdateRig(t *testing.T, roles ...podUpdateRole) *podUpdateRig {
 	return rig
 }
 
-// podUpdateLocator is one role process in an issue pod, as the Sandbox runtime records it.
-func podUpdateLocator(token claim.Token, pod string) *runtime.Locator {
+// podUpdateLocator is one role process in an issue pod, as the Sandbox runtime records it. The
+// issue names the pod's Sandbox, which every role claim of that issue shares.
+func podUpdateLocator(token claim.Token, issue, pod string) *runtime.Locator {
 	return &runtime.Locator{
 		Runtime: runtime.RuntimeSandbox, Claim: token, Incarnation: runtime.SandboxIncarnation(pod, 1),
 		Sandbox: &runtime.SandboxLocator{
-			Namespace: "legion", Name: "legion-" + strings.ToLower(podUpdateIssue), PodUID: pod,
+			Namespace: "legion", Name: "legion-" + strings.ToLower(issue), PodUID: pod,
 			Container: runtime.IssuePodContainer, Generation: 1,
 		},
 	}
@@ -231,6 +238,45 @@ func (r *podUpdateRig) handle(role claim.Role, ev supervise.Event) {
 	}
 	if err := m.Handle(r.ctx, ev); err != nil {
 		r.t.Fatalf("%s handled %T: %v", role, ev, err)
+	}
+}
+
+// startInPod is the daemon starting a role into the issue's pod while a round holds that pod: the
+// launch keeps the drifted pod rather than replacing it where it stands, so the process it returns
+// is in that same pod, and the role registers and readies from it as any other worker does. The
+// role runs degraded there — the pod carries neither the overlay nor the enrollment a pod created
+// now is built with — and is a worker of the round all the same.
+func (r *podUpdateRig) startInPod(role claim.Role) {
+	r.t.Helper()
+	token := r.tokens[role]
+	m, ok := r.sup.Machine(token)
+	if !ok {
+		r.t.Fatalf("%s is not supervised", role)
+	}
+	conn := fake.NewConn()
+	r.conns.Register(token, conn)
+	r.workers[role] = conn
+	// A claim the boot restored with no process of its own is launch_uncertain until its release
+	// settles it, which is what the daemon's own unfinished-launch path does before it launches
+	// (launchUnfinishedClaim).
+	if r.claimOf(role).State == supervise.StateLaunchUncertain {
+		if _, err := m.ReleaseUncertainLaunch(r.ctx); err != nil {
+			r.t.Fatalf("release the %s's unfinished launch: %v", role, err)
+		}
+	}
+	r.rt.ScriptSpawn(fake.SpawnResult{Locator: *podUpdateLocator(token, podUpdateIssue, podUpdatePod)})
+	r.handle(role, supervise.RequestSpawn{Claim: token})
+	generation := r.claimOf(role).Generation
+	for _, ev := range []supervise.Event{
+		supervise.StreamHello{Claim: token, Generation: generation},
+		supervise.RequestRegister{Claim: token, Generation: generation, Session: "ses_" + string(role),
+			SessionFile: "/sessions/" + string(role) + ".jsonl", CapabilityHash: []byte(role), PluginContract: api.DaemonAPIVersion},
+		supervise.RequestReady{Claim: token, Generation: generation, Session: "ses_" + string(role)},
+	} {
+		r.handle(role, ev)
+	}
+	if c := r.claimOf(role); c.State != supervise.StateReady || podOf(c.Locator) != podUpdatePod {
+		r.t.Fatalf("the %s started into the kept pod is %s at %+v, want it ready in pod %s", role, c.State, c.Locator, podUpdatePod)
 	}
 }
 
@@ -340,6 +386,64 @@ func TestPodUpdateReplacesThePodOnlyOnceEveryBlockingClaimHasAnswered(t *testing
 		t.Fatalf("ReplacePod called with %+v, want a process of pod %s", calls[0].Pod, podUpdatePod)
 	}
 	for _, role := range []claim.Role{claim.RoleImplementer, claim.RoleTester} {
+		rig.awaitClaim(role, "its round to end with the replacement", func(c supervise.Claim) bool {
+			return c.UpdateRound == "" && c.UpdateSignalledAt == nil
+		})
+	}
+}
+
+// A drift the kept-pod rule leaves a role degraded for — here the operator's volume holding that
+// role's overlay, moved — is still a drift the round replaces the pod for, and the role the daemon
+// starts into that kept pod is still a worker of the round. It registers from the pod it was
+// started in, is tasked with the round like every other worker, holds the replacement back until
+// it answers, and ends the round when it does. A role that never registered would leave the round
+// waiting on the very pod it was opened to replace.
+func TestPodUpdateEndsTheRoundOnceTheRoleStartedIntoTheKeptPodAnswers(t *testing.T) {
+	rig := newPodUpdateRig(t,
+		readyWorker(claim.RoleImplementer),
+		podUpdateRole{role: claim.RoleArchitect, state: supervise.StateQueued},
+	)
+	rig.drifts(podUpdateKeptDrift)
+
+	rig.tick()
+
+	rig.awaitRound(claim.RoleImplementer, podUpdateRound)
+	if c := rig.claimOf(claim.RoleArchitect); c.UpdateRound != "" {
+		t.Fatalf("the architect, which no launch has started, is in round %q; want none", c.UpdateRound)
+	}
+
+	// The launch keeps the drifted pod and starts the architect in it, degraded: the pod carries
+	// neither the overlay the role's configuration now names nor what a pod created now is built
+	// with, and the role runs there until this round replaces the pod.
+	rig.startInPod(claim.RoleArchitect)
+	rig.tick()
+
+	degraded := rig.awaitRound(claim.RoleArchitect, podUpdateRound)
+	if degraded.Pending == nil || degraded.Pending.ID != "update:"+podUpdateRound {
+		t.Fatalf("the degraded architect holds %+v, want the round's own task", degraded.Pending)
+	}
+	if degraded.UpdateReasons != podUpdateKeptDrift {
+		t.Errorf("the degraded architect was tasked for %q, want the drift its pod was kept for %q", degraded.UpdateReasons, podUpdateKeptDrift)
+	}
+
+	rig.signal(claim.RoleImplementer, "a1b2c3d")
+	rig.tick()
+
+	if calls := rig.replacements(); len(calls) != 0 {
+		t.Fatalf("ReplacePod called %d times while the degraded architect had not answered", len(calls))
+	}
+
+	rig.signal(claim.RoleArchitect, "e4f5a6b")
+	rig.tick()
+
+	calls := rig.replacements()
+	if len(calls) != 1 {
+		t.Fatalf("ReplacePod called %d times once the degraded architect answered, want once", len(calls))
+	}
+	if calls[0].Pod.Locator == nil || calls[0].Pod.Locator.Sandbox.PodUID != podUpdatePod {
+		t.Fatalf("ReplacePod called with %+v, want a process of the kept pod %s", calls[0].Pod, podUpdatePod)
+	}
+	for _, role := range []claim.Role{claim.RoleImplementer, claim.RoleArchitect} {
 		rig.awaitClaim(role, "its round to end with the replacement", func(c supervise.Claim) bool {
 			return c.UpdateRound == "" && c.UpdateSignalledAt == nil
 		})

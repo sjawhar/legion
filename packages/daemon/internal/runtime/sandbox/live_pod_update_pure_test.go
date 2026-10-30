@@ -18,6 +18,13 @@ import (
 // left is swept by cache-lost-volume's own sweep (staleRunBranches).
 func podUpdateRunIssue(project string) string { return runIssue(project + " pod-update") }
 
+// podUpdateFleetRunIssue is pod-update-fleet's second issue key in the run whose project is
+// project, seeded as podUpdateRunIssue's is but by this check's own name, so the two issues the
+// one template change drifts at once are two issues, each pushing a branch of its own onto the
+// repository every Stage 4a run shares. It keeps the same `legion/S4A-<digits>` shape, so a
+// branch a killed run left is swept by cache-lost-volume's own sweep (staleRunBranches).
+func podUpdateFleetRunIssue(project string) string { return runIssue(project + " pod-update-fleet") }
+
 // movedPodShape is the recorded shape with its disk moved one gibibyte up, and the one reason the
 // runtime then names for the pod (podShapeDrift). The disk is what the harness moves because it is
 // the operator's own value and nothing of the pod itself: the Sandbox keeps the pod it has, every
