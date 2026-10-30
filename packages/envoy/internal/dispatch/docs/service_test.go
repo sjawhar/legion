@@ -3076,56 +3076,70 @@ func TestAskOptionsEditRefusesDroppingALineHoldingMarkup(t *testing.T) {
 	}
 }
 
-// A ticked option carries its checkbox as its item's own `checked` attribute, which the markdown
-// writes as content, `- [x] ` before the line: the item holds more than its plain line, dropping
-// it would delete the tick and change the issue's task count under the person who wrote it, and
-// the ask row shows the sender none of that. The drop is refused, quoting the item so every word
-// and the tick can be restored, while the plain option beside it is still the edit's to drop.
-func TestAskOptionsEditRefusesDroppingATickedOption(t *testing.T) {
-	service, artifactID := newTestService(t)
-	service.settle = time.Hour
-	seedServiceText(t, service, artifactID, ":::ask{#ask-lists urgency=\"med\" multiple=\"false\" state=\"open\"}\n"+
-		"Should we ship?\n\n- [x] Ship: Release it\n- Hold: Wait for review\n:::\n")
-	settleCurrentGeneration(t, service, artifactID)
-	before := liveTree(t, service, artifactID)
-	list := askOptionList(t, service, artifactID)
-	if ticked, _ := list.Children[0].Attrs["checked"].(bool); !ticked {
-		t.Fatalf("the seeded Ship item is no ticked task: %#v", list.Children[0].Attrs)
-	}
+// A task option carries its checkbox as its item's own `checked` attribute, which the markdown
+// writes as content, `- [x] ` or `- [ ] ` before the line: the item holds more than its plain
+// line, dropping it would delete the box and change the issue's task count under the person who
+// wrote it, and the ask row shows the sender none of that. The drop is refused, quoting the item
+// so every word and the box can be restored, while the plain option beside it is still the
+// edit's to drop. An unticked box is a task of the count as a ticked one is, so weighing an item
+// against one carrying `checked: false` rather than against one carrying no box at all would
+// drop it unseen.
+func TestAskOptionsEditRefusesDroppingATaskOption(t *testing.T) {
+	for _, test := range []struct {
+		name, box string
+		checked   bool
+	}{
+		{name: "a ticked option", box: "[x]", checked: true},
+		{name: "an unticked option", box: "[ ]"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			service, artifactID := newTestService(t)
+			service.settle = time.Hour
+			seedServiceText(t, service, artifactID, ":::ask{#ask-lists urgency=\"med\" multiple=\"false\" state=\"open\"}\n"+
+				"Should we ship?\n\n- "+test.box+" Ship: Release it\n- Hold: Wait for review\n:::\n")
+			settleCurrentGeneration(t, service, artifactID)
+			before := liveTree(t, service, artifactID)
+			list := askOptionList(t, service, artifactID)
+			checked, isTask := list.Children[0].Attrs["checked"].(bool)
+			if !isTask || checked != test.checked {
+				t.Fatalf("the seeded Ship item is no %s task: %#v", test.box, list.Children[0].Attrs)
+			}
 
-	hold := []model.AskOption{{Label: "Hold", Description: "Wait for review"}}
-	err := sendAskOptions(service, artifactID, AskBlockEdit{Options: &hold})
+			hold := []model.AskOption{{Label: "Hold", Description: "Wait for review"}}
+			err := sendAskOptions(service, artifactID, AskBlockEdit{Options: &hold})
 
-	var unrepresentable *ErrAskBlockUnrepresentable
-	if !errors.As(err, &unrepresentable) || unrepresentable.Field != "options" {
-		t.Fatalf("err = %v, want ErrAskBlockUnrepresentable on the options", err)
-	}
-	want := `options: the edit drops the option "Ship", whose list item holds more than its plain line, ` +
-		`and the ask-edit route does not delete what a person wrote under an option; its item reads ` +
-		strconv.Quote(askOptionItemMarkdown(t, list, list.Children[0])) +
-		`; send that option back with this edit, or remove what the item holds with a document edit ` +
-		`first (dispatch doc-edit, deleting a block by its id)`
-	if err.Error() != want {
-		t.Fatalf("refusal =\n%v\nwant\n%s", err, want)
-	}
-	if !strings.Contains(err.Error(), "[x]") {
-		t.Fatalf("err = %v, want it to quote the tick", err)
-	}
-	assertAskEditWroteNothing(t, service, artifactID, before, err)
-	assertShipAskRow(t, service, artifactID, "ask-lists")
+			var unrepresentable *ErrAskBlockUnrepresentable
+			if !errors.As(err, &unrepresentable) || unrepresentable.Field != "options" {
+				t.Fatalf("err = %v, want ErrAskBlockUnrepresentable on the options", err)
+			}
+			want := `options: the edit drops the option "Ship", whose list item holds more than its plain line, ` +
+				`and the ask-edit route does not delete what a person wrote under an option; its item reads ` +
+				strconv.Quote(askOptionItemMarkdown(t, list, list.Children[0])) +
+				`; send that option back with this edit, or remove what the item holds with a document edit ` +
+				`first (dispatch doc-edit, deleting a block by its id)`
+			if err.Error() != want {
+				t.Fatalf("refusal =\n%v\nwant\n%s", err, want)
+			}
+			if !strings.Contains(err.Error(), test.box) {
+				t.Fatalf("err = %v, want it to quote the box %s", err, test.box)
+			}
+			assertAskEditWroteNothing(t, service, artifactID, before, err)
+			assertShipAskRow(t, service, artifactID, "ask-lists")
 
-	// The plain option beside it is the edit's to drop: what the refusal weighs is the tick, not
-	// every item of a list holding one.
-	ship := []model.AskOption{{Label: "Ship", Description: "Release it"}}
-	if err := sendAskOptions(service, artifactID, AskBlockEdit{Options: &ship}); err != nil {
-		t.Fatalf("options edit dropping the plain option beside a ticked one: %v", err)
+			// The plain option beside it is the edit's to drop: what the refusal weighs is the
+			// box, not every item of a list holding one.
+			ship := []model.AskOption{{Label: "Ship", Description: "Release it"}}
+			if err := sendAskOptions(service, artifactID, AskBlockEdit{Options: &ship}); err != nil {
+				t.Fatalf("options edit dropping the plain option beside a task one: %v", err)
+			}
+			after := askOptionList(t, service, artifactID)
+			if len(after.Children) != 1 || !after.Children[0].EqualWithBlockIDs(list.Children[0]) {
+				t.Fatalf("the list holds %d items, want the Ship item alone as it was", len(after.Children))
+			}
+			settleCurrentGeneration(t, service, artifactID)
+			assertAskRepaired(t, service, artifactID, "ask-lists", "Should we ship?", ship)
+		})
 	}
-	after := askOptionList(t, service, artifactID)
-	if len(after.Children) != 1 || !after.Children[0].EqualWithBlockIDs(list.Children[0]) {
-		t.Fatalf("the list holds %d items, want the ticked Ship item alone as it was", len(after.Children))
-	}
-	settleCurrentGeneration(t, service, artifactID)
-	assertAskRepaired(t, service, artifactID, "ask-lists", "Should we ship?", ship)
 }
 
 // Two items can carry one label, and what a person wrote belongs to the item they wrote it
