@@ -2,47 +2,48 @@
   "schemaVersion": 1,
   "phase": "test",
   "issue": "INFRA-562",
-  "completed": "2026-10-30T06:20:16Z",
-  "round": 12,
-  "testedHead": "c8512f2df666e7d6951f2834bfb9e63157907b2c",
-  "codeHead": "6256e0146fc3",
-  "scope": "Forward-merge check only (architect, after the reviewer accepted the code): fingerprint, renumbered migrations on a database main migrated with both builds serving, the two-process suite on the merged head, the required checks at the code head.",
+  "completed": "2026-10-30T09:07:03Z",
+  "round": 13,
+  "testedHead": "1668fdbecc780b874d9b3cfacdecf54d8dd1d682",
+  "codeHead": "05185b3369a9",
+  "scope": "Renumbering merge only (architect): fingerprint, migrations 0148-0151 on a database main migrated to 0147 with both builds serving, the two-process suite.",
   "fingerprint": {
-    "previousVerifiedHead": "7f1779e577ade061d2b9929a67236e45ec5e4003",
-    "previous": "8720e3d9b2defcb74c6f4c2ce0d4cb1cb691afd2e7cb0e0a16df92b04721604a",
-    "current": "40eacd0333af71ea88c971aebb88eea557378580ec2c5967be8c2cf9802ae401",
-    "verdict": "changed, and the change was read line by line (diff of the two fingerprinted diffs, $TMPDIR/fp-delta.txt, 160 changed lines): the four migrations renamed 0142-0145 -> 0145-0148 with each file's first line; every reference to them in AGENTS.md, cmd/dispatch/README.md, the pr2387 fragments, api/delivery.go, api/message_delivery.go, api/issue_route_status.go and githubapp/ratelimit/ratelimit.go renumbered; README's predecessor line now names main's 0144_messages_item_blocks_trigger; AGENTS.md's test-hook routes now name main's /api/v1/live/_test/disconnect and /_test/rotate; and comment-only text (cmd/dispatch/main.go's lease list adds main's term-statistics refresh; delivery_sweep.go, message_delivery.go and messages.go comments say a message with no attempt can only be one an earlier release stored; a fragment's rollout paragraph). No line of executable code differs between the two diffs."
+    "previousVerifiedHead": "c8512f2df666e7d6951f2834bfb9e63157907b2c",
+    "previous": "40eacd0333af71ea88c971aebb88eea557378580ec2c5967be8c2cf9802ae401",
+    "current": "fcf838eb300c3f49363a7ffa27f570df5433856d7368bc5bfe3a5b85fa33049a",
+    "verdict": "changed, read line by line ($TMPDIR/fp-delta2.txt): only the four migrations renamed 0145-0148 -> 0148-0151 with each file's first line, and every reference to them renumbered (AGENTS.md, cmd/dispatch/README.md including the issue-list route line's route_roster number, the pr2387 fragments, api/delivery.go, api/message_delivery.go, api/issue_route_status.go, githubapp/ratelimit/ratelimit.go); README's predecessor line now names main's 0147_message_deliveries_session_created. No line of executable code differs."
   },
   "implementerProof": {
     "verdict": "verified",
-    "how": "Re-ran at c8512f2d (code 6256e014, merged with main through 3c2691a7; GitHub MERGEABLE at 06:03Z): `cd packages/envoy && DISPATCH_TEST_DATABASE_URL=postgres://postgres@127.0.0.1:55432/postgres?sslmode=disable go test -tags multiprocess -count=1 -timeout 50m -v ./cmd/dispatch` -> ok 1021.740s, 133 top-level PASS, 0 FAIL, 0 '--- SKIP' (TestADeliveryAKilledProcessLeftPendingIsSentByTheOther 136.95s on main's 1-minute sweep, TestASendWhoseRequestIsCancelledAfterItsCommitReachesItsRecipient 12.86s, TestASendDuringAListenerTakeOverReachesItsSession 106.24s). Log: $TMPDIR/mp-c8512f2d.log."
+    "how": "Re-ran at 1668fdbe (code 05185b33, merged with main through 71e31498): `cd packages/envoy && DISPATCH_TEST_DATABASE_URL=postgres://postgres@127.0.0.1:55432/postgres?sslmode=disable go test -tags multiprocess -count=1 -timeout 50m -v ./cmd/dispatch` -> ok 1000.279s, 133 top-level PASS, 0 FAIL, 0 '--- SKIP' (TestADeliveryAKilledProcessLeftPendingIsSentByTheOther 136.69s, TestASendWhoseRequestIsCancelledAfterItsCommitReachesItsRecipient 12.67s, TestASendDuringAListenerTakeOverReachesItsSession 104.78s). Log: $TMPDIR/mp-1668fdbe.log."
   },
   "failed": 0,
   "failures": [],
   "migrationChecks": [
-    "main@origin 9d60d92f's newest migration is 0144_messages_item_blocks_trigger; the branch's are 0145_message_delivery_urgency, 0146_route_roster, 0147_github_rate_limits, 0148_delivery_run_warnings. `git grep` for the old numbers on this branch's four names finds none; AGENTS.md:1565's 'migration 0142' is main's item_blocks.",
-    "Roll on real binaries: envoy-dispatch built at the merge point 3c2691a7 booted on a fresh database (schema_migrations max 144); the head's build then booted beside it, still serving, on the same database -> versions 142-148 applied, 2 pending-row indexes (one per table, main's), /healthz 200 and POST /api/v1/agents/{session}/messages 201 on each build. Scratch database dropped, processes stopped, build trees removed.",
-    "leasePoolSize 13 and infra/gcp dispatchConnectionsPerPod 87 equal main@origin's."
+    "Roll on real binaries: envoy-dispatch built at the merge point 71e31498 booted on a fresh database (schema_migrations max 147); the head's build then booted beside it, still serving, on the same database -> versions 148-151 applied; pg_indexes holds main's comment_deliveries_pending, comment_deliveries_session, message_deliveries_pending, message_deliveries_session and message_deliveries_session_created, none duplicated; /healthz 200 and POST /api/v1/agents/{session}/messages 201 on each build. Scratch database dropped, processes stopped, build trees removed.",
+    "Main's 0146_comment_deliveries_session and 0147_message_deliveries_session_created (the review's question) each create an index on (session_id, created_at desc); this branch's 0148 adds message_deliveries.urgency and its check only, so nothing collides.",
+    "main@origin 95356727's newest migration is still 0147; the branch's are 0148-0151."
   ],
-  "ci": "Read on GitHub at 06:20Z at code head 6256e014: pr-title success, changes success, typecheck and contracts skipped by the router; lint, test, envoy-go, dispatch-multiprocess and every other selected job queued; no lane failed. Not waited for.",
+  "mergeState": "Recorded, not a failure (architect's instruction): GitHub reports PR #2387 CONFLICTING at 09:07Z since main's 95356727 (#2508). A trial merge (`jj new 1668fdbecc78 main@origin`, abandoned, nothing pushed) reports one 2-sided conflict, packages/envoy/cmd/dispatch/README.md (doc text); AGENTS.md and cmd/dispatch/main.go, also changed on both sides, merge cleanly. The architect has the implementer resolve it in its retro push, which runs CI before READY.",
+  "ci": "No check run exists at code head 05185b33 (GitHub runs none on a conflicting head). Not waited for.",
   "observations": [
     "Unchanged and not failures: a person's Retry during a take-over wait opens attempt 2 beside the renewed attempt 1 (existing rule); a resumed comment attempt opened by another person's Retry names the comment's author as actor; the test-hook fan-out (DISPATCH_TEST_HOOKS only) can miss a process whose LISTEN connection redials between the caller's pg_locks read and its NOTIFY; a claim or ask follow made during a comment request mid take-over can still give that session two copies."
   ],
   "proof": [
     {
-      "criterion": "The forward merge: the renumbered migrations apply on a database main migrated and both builds then serve",
-      "surface": "the envoy-dispatch binary's boot-time migration, main's build (3c2691a7) and the head's build serving one Postgres 17 database",
+      "criterion": "The renumbering merge: migrations 0148-0151 apply on a database main migrated to 0147 and both builds then serve",
+      "surface": "the envoy-dispatch binary's boot-time migration, main's build (71e31498) and the head's build serving one Postgres 17 database",
       "command": "boot dispatch-main on a fresh database, then dispatch-branch beside it; read schema_migrations and pg_indexes; curl /healthz and POST /api/v1/agents/{session}/messages on each",
-      "observed": "144 -> 142-148 applied; one pending-row index per table; both builds 200 /healthz and 201 on a send",
-      "headSha": "c8512f2df666e7d6951f2834bfb9e63157907b2c",
-      "negativeControl": "round 11: main's tree plus this branch's migrations at 0142 -> boot exits 1 'share version 142', none applied"
+      "observed": "147 -> 148-151 applied; main's delivery indexes intact and unduplicated; both builds 200 /healthz and 201 on a send",
+      "headSha": "1668fdbecc780b874d9b3cfacdecf54d8dd1d682",
+      "negativeControl": "round 11: main's tree with this branch's migrations on main's numbers -> boot exits 1 'share version 142', none applied"
     },
     {
-      "criterion": "Items 1, 2 and 8 on the merged head: a cancelled or killed sender's attempt reaches its recipient; a send during a listener take-over reaches its session",
+      "criterion": "Items 1, 2 and 8 on the merged head",
       "surface": "Dispatch HTTP API on two real envoy-dispatch processes over one Postgres 17 and one NATS, with a fake Envoy listener",
       "command": "cd packages/envoy && DISPATCH_TEST_DATABASE_URL=postgres://postgres@127.0.0.1:55432/postgres?sslmode=disable go test -tags multiprocess -count=1 -timeout 50m -v ./cmd/dispatch",
-      "observed": "ok 1021.740s, 133 PASS, 0 FAIL, 0 SKIP",
-      "headSha": "c8512f2df666e7d6951f2834bfb9e63157907b2c",
+      "observed": "ok 1000.279s, 133 PASS, 0 FAIL, 0 SKIP",
+      "headSha": "1668fdbecc780b874d9b3cfacdecf54d8dd1d682",
       "negativeControl": "TestASendDuringAListenerTakeOverReachesItsSession/sent_to_a_session_the_listener_never_knows: a session the listener never knows settles failed: no live session after the real 12 s window"
     }
   ]
