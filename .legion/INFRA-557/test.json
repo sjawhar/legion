@@ -2,43 +2,35 @@
   "schemaVersion": 1,
   "phase": "test",
   "issue": "INFRA-557",
-  "completed": "2026-10-30T13:22:00Z",
-  "round": 14,
-  "testedHead": "7469fd634604c2830553fdbe4af61d7573b2b195",
-  "handoffHead": "b30e898de37e2b389eb159ef733fc3c81bc68540",
-  "scope": "Architect 12:57Z: the round changes only text and one test table's assertions; check that no non-test code changed, run the no-mark table and the multiprocess rows, read the four required checks.",
+  "completed": "2026-10-30T13:50:00Z",
+  "round": 15,
+  "testedHead": "9d8b44af94219d8de2f2e401a96465d161ef5da2",
+  "handoffHead": "40673492240ae277aaaad3314ff907f6605e6bc8",
+  "scope": "Architect 13:27Z: one sentence of text in four places; check that only that text changed, run go vet and the listener unit tests, read the four required checks. No real-binary run needed.",
   "implementerProof": {
     "verdict": "verified",
-    "how": "Re-ran the no-mark table (3 of 3) and `go test -tags multiprocess -count=1 -timeout 40m -v -run '^Test(TwoPods|TwoBuilds)' ./cmd/listener` (29 rows PASS, ok 638.013s) at 7469fd63."
+    "how": "The change is text only (proof 1); go vet and the listener unit tests pass at 9d8b44af (proof 2)."
   },
   "failures": [],
   "failed": 0,
   "proof": [
     {
-      "criterion": "No non-test code changed in behaviour since the verified head 5a088bf9",
+      "criterion": "Only text changed since the verified head 7469fd63",
       "surface": "the branch's diff",
-      "command": "git diff 5a088bf9 7469fd63 -- . ':(exclude)*_test.go' ':(exclude).legion' ':(exclude)docs/solutions', non-comment lines",
-      "observed": "README.md, the changie fragment and comments in main.go, receive.go and receive_stop.go; one code change: markHandBack's five reason literals moved into constants noMarkNoSuccessor, noMarkUndrained, noMarkHandlerRunning, noMarkWriteFailed, noMarkRelease with byte-identical strings",
-      "headSha": "7469fd634604c2830553fdbe4af61d7573b2b195",
-      "negativeControl": "the skill's unchanged-diff fingerprint differs (text and test edits), so this was checked line by line rather than taken as equal"
+      "command": "git diff --stat 7469fd63 9d8b44af -- . ':(exclude).legion'; git diff 7469fd63 9d8b44af -- '*.go', counting changed lines outside comments",
+      "observed": "4 files: README.md, the pr2404 changie fragment, main.go, receive.go; 0 changed lines outside comments in the .go files",
+      "headSha": "9d8b44af94219d8de2f2e401a96465d161ef5da2",
+      "negativeControl": "any non-comment Go line in the diff would have meant a full round; there were none"
     },
     {
-      "criterion": "The no-mark table, now asserting the gate that stops each mark",
-      "surface": "cmd/listener's receive-stop tests against an in-process nats-server",
-      "command": "cd packages/envoy && go test -count=3 -run '^(TestAStopMarksNoHandBackWhenItsLingerOrItsTermFellShort|TestAStopWhoseHandlerIgnoresItsCancelMarksNoHandBack|TestAGracefulStopMarksTheHandBackForTheRecordItReleased)$' -v ./cmd/listener",
-      "observed": "all rows PASS 3 of 3: untaken, mute taker, lost node's binding open, drain ran out; the handler-past-cancel and clean-stop rows",
-      "headSha": "7469fd634604c2830553fdbe4af61d7573b2b195",
-      "negativeControl": "round 13: the a8a5d08a binary wrote the mark for a stop whose handler outlived its cancel"
-    },
-    {
-      "criterion": "Real-binary smoke at the new head: a stop whose handler outlives its cancel writes no mark and keeps order",
-      "surface": "real cmd/listener processes built at 7469fd63 under the rendered ListenerPermissions nkey grant on a real nats-server 2.10.29; the ledger's connection frozen 2.95-4.6 s after the SIGTERM with a prompt in hand",
-      "command": "python3 $TMPDIR/infra557-test/handler.py $TMPDIR/infra557-test/listener-head14 head14-hd 4.6 2.95",
-      "observed": "pod-a logged 'the message in hand was still being handled after its cancel', hand_back_marked false, no_mark 'the message in hand was still being handled after its cancel'; pod-b took the record from released; all 120 messages in order",
-      "headSha": "7469fd634604c2830553fdbe4af61d7573b2b195",
-      "negativeControl": "the a8a5d08a binary in the same run wrote the mark (round 13)"
+      "criterion": "go vet and the listener unit tests pass at the new head",
+      "surface": "packages/envoy/cmd/listener",
+      "command": "cd packages/envoy && go vet ./cmd/listener/ && go vet -tags multiprocess ./cmd/listener/ && go test -count=1 -timeout 25m -skip 'TestDispatch' ./cmd/listener/",
+      "observed": "vet clean (both tag sets); ok github.com/sjawhar/envoy/cmd/listener 861.700s (four Postgres-backed TestDispatch* skipped)",
+      "headSha": "9d8b44af94219d8de2f2e401a96465d161ef5da2",
+      "negativeControl": "round 14 at 7469fd63 holds the real-binary evidence for the unchanged code (https://github.com/sjawhar/legion/pull/2404#issuecomment-6523833609)"
     }
   ],
-  "ci": "Required checks at 7469fd63 NOT green when read at 13:19Z: changes queued (lint, typecheck, test not started), pr-title queued. At 5a088bf9 lint, typecheck and test ended cancelled (superseded). No required check of this PR's code has completed yet.",
-  "notes": ["Evidence: https://github.com/sjawhar/legion/pull/2404#issuecomment-6523833609"]
+  "ci": "Required checks NOT green. At 7469fd63 every check (changes, lint, typecheck, test, ci-ok, pr-title) ended cancelled, superseded by the 9d8b44af code push. At 9d8b44af, read 13:47Z: changes and pr-title queued; lint, typecheck and test not started. No required check of this PR's code has completed yet.",
+  "notes": ["Evidence: https://github.com/sjawhar/legion/pull/2404#issuecomment-6524384254"]
 }
