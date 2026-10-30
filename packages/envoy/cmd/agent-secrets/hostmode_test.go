@@ -270,7 +270,9 @@ func TestHelperSignerSignsRequestObjects(t *testing.T) {
 }
 
 // TestRegisterWithoutExecPrintsRuntimeEnrollmentState covers register's contract without
-// --exec: "<runtime_id>\t<enrollment_id>\t<state>" on stdout, exit 0.
+// --exec: "<runtime_id>\t<enrollment_id>\t<state>\t<session_id>" on stdout, exit 0. The fourth
+// field is the session id the helper recorded, and it is always there, empty when the launcher
+// named none, so a launcher reads one record shape rather than counting fields.
 func TestRegisterWithoutExecPrintsRuntimeEnrollmentState(t *testing.T) {
 	sock, _ := fakeHelper(t, helper.Response{OK: true, RuntimeID: "h:1:1", EnrollmentID: "enr-h", State: "enrolled"})
 	t.Setenv("AGENT_SECRETS_HELPER_SOCK", sock)
@@ -279,8 +281,84 @@ func TestRegisterWithoutExecPrintsRuntimeEnrollmentState(t *testing.T) {
 	if code != 0 {
 		t.Fatalf("register: exit %d, stderr %q", code, stderr.String())
 	}
-	if got, want := stdout.String(), "h:1:1\tenr-h\tenrolled\n"; got != want {
+	if got, want := stdout.String(), "h:1:1\tenr-h\tenrolled\t\n"; got != want {
 		t.Fatalf("register output: got %q, want %q", got, want)
+	}
+}
+
+// TestRegisterSendsTheLaunchersSessionID: --session-id is the launcher naming the agent session
+// this process is. It reaches the helper in the request, and the reply's id — what the helper
+// recorded, which for a pid already in a session is that session's own — is what register
+// prints, never the value asked for.
+func TestRegisterSendsTheLaunchersSessionID(t *testing.T) {
+	sock, reqs := fakeHelper(t, helper.Response{OK: true, RuntimeID: "h:1:1", EnrollmentID: "enr-h", State: "enrolled", SessionID: "ses-recorded"})
+	t.Setenv("AGENT_SECRETS_HELPER_SOCK", sock)
+	var stdout, stderr bytes.Buffer
+	if code := cmdRegister([]string{"--session-id", "ses-asked"}, &stdout, &stderr); code != 0 {
+		t.Fatalf("register: exit %d, stderr %q", code, stderr.String())
+	}
+	if got, want := stdout.String(), "h:1:1\tenr-h\tenrolled\tses-recorded\n"; got != want {
+		t.Fatalf("register output: got %q, want %q", got, want)
+	}
+	req := <-reqs
+	if req.Op != "register" || req.SessionID == nil || *req.SessionID != "ses-asked" {
+		t.Fatalf("the launcher's session id must reach the helper: %+v", req)
+	}
+}
+
+// TestRegisterSaysWhenTheHelperRecordedAnotherSessionID: the reply's id is the one the
+// enrollment will carry, so a launcher that asked for another one is told, whether the pid was
+// already inside a session that named its own and whether the helper is from before
+// --session-id, which ignores the field and answers a plain success. Neither stops the launch.
+func TestRegisterSaysWhenTheHelperRecordedAnotherSessionID(t *testing.T) {
+	for _, tc := range []struct{ name, recorded, want string }{
+		{"another session's own id", "ses-recorded", `recorded ses-recorded, not "ses-asked"`},
+		{"a helper from before the field", "", `recorded none (`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			sock, _ := fakeHelper(t, helper.Response{OK: true, RuntimeID: "h:1:1", EnrollmentID: "enr-h", State: "enrolled", SessionID: tc.recorded})
+			t.Setenv("AGENT_SECRETS_HELPER_SOCK", sock)
+			var stdout, stderr bytes.Buffer
+			if code := cmdRegister([]string{"--session-id", "ses-asked"}, &stdout, &stderr); code != 0 {
+				t.Fatalf("register: exit %d, stderr %q", code, stderr.String())
+			}
+			if !strings.Contains(stderr.String(), tc.want) {
+				t.Fatalf("stderr %q must say the helper recorded something else (%q)", stderr.String(), tc.want)
+			}
+		})
+	}
+}
+
+// TestRegisterWithoutASessionIDSendsTheFieldNotAtAll: a launcher that names none sends exactly
+// the request it sent before this field existed, so a helper from before it reads the same bytes.
+func TestRegisterWithoutASessionIDSendsTheFieldNotAtAll(t *testing.T) {
+	sock, reqs := fakeHelper(t, helper.Response{OK: true, RuntimeID: "h:1:1", EnrollmentID: "enr-h", State: "enrolled"})
+	t.Setenv("AGENT_SECRETS_HELPER_SOCK", sock)
+	var stdout, stderr bytes.Buffer
+	if code := cmdRegister(nil, &stdout, &stderr); code != 0 {
+		t.Fatalf("register: exit %d, stderr %q", code, stderr.String())
+	}
+	if req := <-reqs; req.SessionID != nil {
+		t.Fatalf("no session id named must send no session_id: %q", *req.SessionID)
+	}
+}
+
+// TestRegisterRefusesAnUnusableSessionID: the id the helper will refuse is a usage error here,
+// before anything is sent, so a launcher's mistake is not a launch that registers nothing.
+func TestRegisterRefusesAnUnusableSessionID(t *testing.T) {
+	sock, reqs := fakeHelper(t, helper.Response{OK: true, RuntimeID: "h:1:1", EnrollmentID: "enr-h", State: "enrolled"})
+	t.Setenv("AGENT_SECRETS_HELPER_SOCK", sock)
+	var stdout, stderr bytes.Buffer
+	if code := cmdRegister([]string{"--session-id", "has space"}, &stdout, &stderr); code != exitUsageError {
+		t.Fatalf("register --session-id 'has space': exit %d, want %d", code, exitUsageError)
+	}
+	if !strings.Contains(stderr.String(), "--session-id") {
+		t.Fatalf("the refusal must name the flag: %q", stderr.String())
+	}
+	select {
+	case req := <-reqs:
+		t.Fatalf("nothing may be sent: %+v", req)
+	default:
 	}
 }
 
@@ -310,7 +388,7 @@ func TestRegisterFindsTheHelperOnItsDefaultSocket(t *testing.T) {
 	if code := cmdRegister(nil, &stdout, &stderr); code != 0 {
 		t.Fatalf("register with only the default socket: exit %d, stderr %q", code, stderr.String())
 	}
-	if got, want := stdout.String(), "h:1:1\tenr-h\tenrolled\n"; got != want {
+	if got, want := stdout.String(), "h:1:1\tenr-h\tenrolled\t\n"; got != want {
 		t.Fatalf("register output: got %q, want %q", got, want)
 	}
 	select {

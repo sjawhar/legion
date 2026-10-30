@@ -23,7 +23,7 @@
 //	agent-secrets unenroll --helper --enrollment <id>
 //	agent-secrets machine login|login-status|list [--json]|revoke <credential_id>
 //	agent-secrets grant list [--json]|revoke <grant_id>
-//	agent-secrets register [--wait SECONDS] [--exec -- COMMAND [ARGS...]]
+//	agent-secrets register [--wait SECONDS] [--session-id ID] [--exec -- COMMAND [ARGS...]]
 //	agent-secrets identity
 //	agent-secrets renew [--pod-token-file FILE]
 //	agent-secrets request NAME... [--reason TEXT] [--ttl DURATION] [--json]
@@ -126,8 +126,8 @@ var commands = []command{
 		"List the live grants of your sessions and those you approved, under this machine's login:\neach one's id, secrets, how it was granted, who approved it, its session and operator, and\nwhen it expires. Dispatch's Live grants page lists the same."},
 	{"grant revoke", "agent-secrets grant revoke <grant_id>",
 		"End a grant as its operator or approver, under this machine's login, as Dispatch's Live\ngrants page does. Ending an automatic grant also makes its session ask before it gets those\nsecrets again."},
-	{"register", "agent-secrets register [--wait SECONDS] [--exec -- COMMAND [ARGS...]]",
-		"Register this process with agent-secrets-helper as a machine session. With --exec, run COMMAND\nas this same process, so it and everything it starts are that session."},
+	{"register", "agent-secrets register [--wait SECONDS] [--session-id ID] [--exec -- COMMAND [ARGS...]]",
+		"Register this process with agent-secrets-helper as a machine session. With --exec, run COMMAND\nas this same process, so it and everything it starts are that session. --session-id is the\nlauncher naming the agent session this is: the helper records it and the enrollment carries it,\nso a credential request names its session on Dispatch's approval page. The helper takes the id\nfrom the launcher and never from the session's own environment, which the session can rewrite;\nit says which session asked, never that the session was entitled to ask."},
 	{"identity", "agent-secrets identity",
 		"Exit 0 when this process has a broker identity and 1 when it does not, asking the broker\nnothing."},
 	{"--version", "agent-secrets --version",

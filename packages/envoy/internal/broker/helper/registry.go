@@ -19,9 +19,18 @@ import (
 // Session is one registered host process and the broker identity the helper holds for it. Key
 // never leaves this process; Record is what survives a restart.
 type Session struct {
-	PID          int
-	StartTicks   uint64
-	RuntimeID    string
+	PID        int
+	StartTicks uint64
+	RuntimeID  string
+	// SessionID is the agent session this process belongs to, as the launcher that registered it
+	// named it (`agent-secrets register --session-id`), and "" when it named none. The helper
+	// records what the registering process said at the one moment the session root was made and
+	// never reads it from anywhere else, so nothing inside the session can set or change it
+	// afterwards: a later register from a descendant is answered with this session's reply
+	// (Server.register), which carries the id recorded here. It is a correlation key — which
+	// session asked — never an entitlement: see Server.register's doc comment for what a reader
+	// may trust it for.
+	SessionID    string
 	Key          *ecdsa.PrivateKey
 	Thumbprint   string
 	RegisteredAt time.Time
@@ -44,7 +53,7 @@ type Session struct {
 	peer  *Peer
 }
 
-func newSession(pid int, ticks uint64, runtimeID string, peer *Peer) (*Session, error) {
+func newSession(pid int, ticks uint64, runtimeID, sessionID string, peer *Peer) (*Session, error) {
 	key, err := proof.NewKey()
 	if err != nil {
 		return nil, err
@@ -54,7 +63,7 @@ func newSession(pid int, ticks uint64, runtimeID string, peer *Peer) (*Session, 
 		return nil, err
 	}
 	return &Session{
-		PID: pid, StartTicks: ticks, RuntimeID: runtimeID, Key: key, Thumbprint: tp,
+		PID: pid, StartTicks: ticks, RuntimeID: runtimeID, SessionID: sessionID, Key: key, Thumbprint: tp,
 		RegisteredAt: time.Now(), ready: make(chan struct{}), stop: make(chan struct{}), peer: peer,
 	}, nil
 }
@@ -162,15 +171,21 @@ func (s *Session) recordedEnrollmentID() string {
 
 func (s *Session) Info() SessionInfo {
 	st := s.snapshot()
-	return SessionInfo{PID: s.PID, RuntimeID: s.RuntimeID, EnrollmentID: st.EnrollmentID, State: st.State, RegisteredAt: s.RegisteredAt.UTC().Format(time.RFC3339)}
+	return SessionInfo{PID: s.PID, RuntimeID: s.RuntimeID, SessionID: s.SessionID, EnrollmentID: st.EnrollmentID, State: st.State, RegisteredAt: s.RegisteredAt.UTC().Format(time.RFC3339)}
 }
 
 // Record is a Session without its key: enough to re-pin the process after a helper restart and
 // to revoke the enrollment it had.
 type Record struct {
-	PID          int    `json:"pid"`
-	StartTicks   uint64 `json:"start_ticks"`
-	RuntimeID    string `json:"runtime_id"`
+	PID        int    `json:"pid"`
+	StartTicks uint64 `json:"start_ticks"`
+	RuntimeID  string `json:"runtime_id"`
+	// SessionID is the session id the launcher named at register (Session.SessionID), so a
+	// re-pinned session enrolls under the same one and a person can read a running machine's
+	// sessions without asking the broker. Omitted when the launcher named none, which is what
+	// every record written before this field holds: such a record loads as a session with no
+	// id, exactly as it enrolled before.
+	SessionID    string `json:"session_id,omitempty"`
 	EnrollmentID string `json:"enrollment_id"`
 }
 
@@ -315,7 +330,7 @@ func (r *Registry) Save() error {
 	}
 	recs := make([]Record, 0)
 	for _, s := range r.List() {
-		recs = append(recs, Record{PID: s.PID, StartTicks: s.StartTicks, RuntimeID: s.RuntimeID, EnrollmentID: s.recordedEnrollmentID()})
+		recs = append(recs, Record{PID: s.PID, StartTicks: s.StartTicks, RuntimeID: s.RuntimeID, SessionID: s.SessionID, EnrollmentID: s.recordedEnrollmentID()})
 	}
 	data, err := json.MarshalIndent(recs, "", "  ")
 	if err != nil {

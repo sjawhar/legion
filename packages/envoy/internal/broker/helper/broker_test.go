@@ -586,7 +586,7 @@ func TestLoginHoldsTheKeyAndEnrollSignsLauncherProofs(t *testing.T) {
 		t.Fatalf("request object: %+v %v", ro, err)
 	}
 	waitFor(t, func() bool { return b.LoginStatus().State == "issued" })
-	sess, _ := newSession(1234, 77, "h:1234:77", nil)
+	sess, _ := newSession(1234, 77, "h:1234:77", "", nil)
 	if _, _, err := b.Enroll(context.Background(), sess); err != nil {
 		t.Fatal(err)
 	}
@@ -611,7 +611,7 @@ func TestNoCredentialAndExpiredCredentialBothNameTheLoginCommand(t *testing.T) {
 	f := newFakeBroker(t)
 	b := &Broker{URL: f.srv.URL, OperatorFile: operatorFile(t, "ada@example.com"), MachineFile: machineFilePath(t), HTTP: f.srv.Client()}
 	t.Cleanup(b.Close)
-	sess, _ := newSession(1, 1, "h:1:1", nil)
+	sess, _ := newSession(1, 1, "h:1:1", "", nil)
 
 	if _, _, err := b.Enroll(context.Background(), sess); err == nil || !strings.Contains(err.Error(), "agent-secrets machine login") {
 		t.Fatalf("no credential yet: expected the remedy in the error, got %v", err)
@@ -805,7 +805,7 @@ func TestDeniedAndExpiredLoginsSurfaceTheirState(t *testing.T) {
 func TestEnrollSendsKindSessionAndAcceptsBothStatuses(t *testing.T) {
 	f := newFakeBroker(t)
 	b := loggedInBroker(t, f, "ada@example.com")
-	sess, _ := newSession(1234, 77, "example-host-devbox:1234:77", nil)
+	sess, _ := newSession(1234, 77, "example-host-devbox:1234:77", "", nil)
 	id, lease, err := b.Enroll(context.Background(), sess)
 	if err != nil || id == "" || time.Until(lease) < 10*time.Minute {
 		t.Fatalf("enroll: %q %v %v", id, lease, err)
@@ -826,7 +826,7 @@ func TestEnrollSendsKindSessionAndAcceptsBothStatuses(t *testing.T) {
 func TestRenewSignsWithTheSessionKeyAndRevokeIsIdempotent(t *testing.T) {
 	f := newFakeBroker(t)
 	b := loggedInBroker(t, f, "ada@example.com")
-	sess, _ := newSession(1, 1, "h:1:1", nil)
+	sess, _ := newSession(1, 1, "h:1:1", "", nil)
 	id, _, err := b.Enroll(context.Background(), sess)
 	if err != nil {
 		t.Fatal(err)
@@ -853,7 +853,7 @@ func TestRenewSignsWithTheSessionKeyAndRevokeIsIdempotent(t *testing.T) {
 
 func TestMissingCredentialNamesTheLoginCommand(t *testing.T) {
 	b := &Broker{URL: "http://127.0.0.1:1", OperatorFile: filepath.Join(t.TempDir(), "none"), HTTP: http.DefaultClient}
-	sess, _ := newSession(1, 1, "h:1:1", nil)
+	sess, _ := newSession(1, 1, "h:1:1", "", nil)
 	_, _, err := b.Enroll(context.Background(), sess)
 	if err == nil || !strings.Contains(err.Error(), "agent-secrets machine login") {
 		t.Fatalf("expected the remedy in the error, got %v", err)

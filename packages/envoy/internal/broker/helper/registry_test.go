@@ -13,7 +13,7 @@ import (
 func TestRootFindsSelfAndDescendantOnly(t *testing.T) {
 	reg := NewRegistry(filepath.Join(t.TempDir(), "sessions.json"))
 	self := os.Getpid()
-	sess, err := newSession(self, 1, "h:1:1", nil)
+	sess, err := newSession(self, 1, "h:1:1", "", nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -42,7 +42,7 @@ func TestRootFindsSelfAndDescendantOnly(t *testing.T) {
 	if reg.Remove(sess) {
 		t.Fatal("a second Remove of the same session is a no-op")
 	}
-	other, _ := newSession(self, 2, "h:1:2", nil)
+	other, _ := newSession(self, 2, "h:1:2", "", nil)
 	reg.Add(other)
 	if reg.Remove(sess) || reg.Get(self) != other {
 		t.Fatal("Remove takes only the very session it is given, never a later one with the same pid")
@@ -52,7 +52,7 @@ func TestRootFindsSelfAndDescendantOnly(t *testing.T) {
 func TestSaveAndLoadRecordsCarryNoKey(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "sessions.json")
 	reg := NewRegistry(path)
-	sess, err := newSession(4242, 99, "h:4242:99", nil)
+	sess, err := newSession(4242, 99, "h:4242:99", "", nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -86,7 +86,7 @@ func TestASaveAfterCloseWritesNothing(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "sessions.json")
 	reg := NewRegistry(path)
-	sess, err := newSession(4242, 99, "h:4242:99", nil)
+	sess, err := newSession(4242, 99, "h:4242:99", "", nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -107,7 +107,7 @@ func TestASaveAfterCloseWritesNothing(t *testing.T) {
 }
 
 func TestStateFollowsEnrollment(t *testing.T) {
-	sess, err := newSession(1, 1, "h:1:1", nil)
+	sess, err := newSession(1, 1, "h:1:1", "", nil)
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -1115,8 +1115,17 @@ func (b *Broker) logger() *slog.Logger {
 
 // Enroll registers the session's key. 201 is a new enrollment; 200 is the live one for the same
 // credential, kind, runtime_id and thumbprint (the contract's idempotent enroll).
+//
+// The enrollment names the session id the launcher gave at register (Session.SessionID), which
+// is what Dispatch's approval page reads as the session that enrolled; a session whose launcher
+// named none sends no session_id at all, exactly as every enrollment did before, so the page
+// says no session is named rather than naming a wrong one.
 func (b *Broker) Enroll(ctx context.Context, s *Session) (string, time.Time, error) {
-	return b.enroll(ctx, s.RuntimeID, s.Thumbprint, nil, "host")
+	var sessionID *string
+	if s.SessionID != "" {
+		sessionID = &s.SessionID
+	}
+	return b.enroll(ctx, s.RuntimeID, s.Thumbprint, sessionID, "host")
 }
 
 // EnrollSessionKey registers a key the helper does not hold, one a launcher enrolls for a session

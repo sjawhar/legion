@@ -10,7 +10,8 @@ import {
 } from "./session";
 
 // Only the enrollment line carries a preamble: when both ids are shown, it says which one the
-// broker verified. The request's line is the request's session as written, with no preamble.
+// session's launcher stated at enrolment, where the other is what the requesting process wrote
+// into its own request. Neither is verified. The request's line has no preamble.
 const SOURCE_PREFIX: Record<CredentialSessionSource, string> = {
   enrollment: "The session that enrolled: ",
   request: "",

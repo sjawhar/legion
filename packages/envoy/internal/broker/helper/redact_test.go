@@ -17,7 +17,7 @@ import (
 // AGENT_SECRETS_URL redact.URL will not print, it names the URL as redact.NotPrinted and the
 // failure's class alone; for a clean one, it reads as net/http wrote it.
 func TestABrokerCallErrorNamesNoCredentialTheURLCarries(t *testing.T) {
-	s, err := newSession(1, 1, "runtime", nil)
+	s, err := newSession(1, 1, "runtime", "", nil)
 	if err != nil {
 		t.Fatal(err)
 	}

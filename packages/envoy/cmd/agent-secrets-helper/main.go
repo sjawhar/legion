@@ -10,7 +10,7 @@
 // descendants, and revokes the enrollment when the session's process exits.
 //
 //	agent-secrets-helper [serve]     run (the unit's ExecStart)
-//	agent-secrets-helper sessions    list live sessions: pid, runtime_id, enrollment_id, state
+//	agent-secrets-helper sessions    list live sessions: pid, runtime_id, enrollment_id, state, session_id
 //	agent-secrets-helper install [--url URL] [--restart-with-sessions]
 //	                                 write and enable this binary's systemd user unit
 //	agent-secrets-helper --version   the release this binary was built as
@@ -69,7 +69,8 @@ func loadConfig(getenv func(string) string) (config, error) {
 const usage = `usage:
   agent-secrets-helper [serve]     run the helper: listen on its socket, sign for the machine sessions
                                    registered with it, and enroll each with the broker
-  agent-secrets-helper sessions    list live sessions: pid, runtime id, enrollment id, state
+  agent-secrets-helper sessions    list live sessions: pid, runtime id, enrollment id, state, and
+                                   the session id its launcher named (empty when it named none)
   agent-secrets-helper install [--url URL] [--restart-with-sessions]
                                    write this binary's systemd user unit, daemon-reload and
                                    enable it; restart a running helper only if it has no
@@ -270,6 +271,9 @@ func clearStaleSocket(sock string) error {
 	return os.Remove(sock)
 }
 
+// printSessions lists every registered session, one tab-separated row each: pid, runtime id,
+// enrollment id, state, and the session id its launcher named at register (empty when it named
+// none). The new field is last, so a reader that took the first four still reads them.
 func printSessions(sock string) error {
 	resp, err := helper.Call(sock, helper.Request{Op: "sessions"}, 5*time.Second)
 	if err != nil {
@@ -279,7 +283,7 @@ func printSessions(sock string) error {
 		return fmt.Errorf("%s: %s", resp.Code, resp.Error)
 	}
 	for _, s := range resp.Sessions {
-		fmt.Printf("%d\t%s\t%s\t%s\n", s.PID, s.RuntimeID, s.EnrollmentID, s.State)
+		fmt.Printf("%d\t%s\t%s\t%s\t%s\n", s.PID, s.RuntimeID, s.EnrollmentID, s.State, s.SessionID)
 	}
 	return nil
 }

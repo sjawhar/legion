@@ -7,9 +7,11 @@ export interface CredentialSessionPlace {
 }
 
 /** Where a `CredentialSessionLine`'s id came from: the session that enrolled, or the session the
- *  request itself names. The broker verifies the enrollment, not the request's override, which is
- *  an unsigned claim any enrolled process may send; the renderer prefixes only the enrollment line,
- *  and only when both lines show. */
+ *  request itself names. Neither is verified. The enrollment's is what the session's launcher
+ *  stated when it enrolled the session, which nothing inside the session can set or change; the
+ *  request's is what the requesting process wrote into its own request, afresh each time. Both
+ *  say which session asked; neither says it was entitled to ask. The renderer prefixes only the
+ *  enrollment line, and only when both lines show. */
 export type CredentialSessionSource = "enrollment" | "request";
 
 /** Whether a line's session runs, by the same rule as `AgentName`'s state mark: `running` (with
@@ -64,7 +66,7 @@ export function credentialSessionNamesAnyone(session: CredentialSession | undefi
  *  all) - the caller then shows "No session named." One line, source null, when the enrollment's
  *  id is the only one set or the two agree. One line, source `"request"`, when only the request
  *  names an id. Two lines, one per source, when both are set and differ; the renderer prefixes
- *  the enrollment's so a reader can tell which one the broker verified. `unresolved` is true
+ *  the enrollment's so a reader can tell which one the launcher stated. `unresolved` is true
  *  while the agents list hasn't answered yet or answered with an error (Envoy unavailable or not
  *  configured): every line is then `unknown`, since a quiet agents list proves nothing when the
  *  list itself never loaded. */

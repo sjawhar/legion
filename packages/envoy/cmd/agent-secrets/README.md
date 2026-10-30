@@ -23,7 +23,8 @@ the URL prints only when it is provably a plain http(s) URL (no user info, query
 escape or control byte), and as `(not printed: the value carries a credential or is not a plain
 http(s) URL)` otherwise. People and launchers use its other forms to log a machine in
 (`agent-secrets machine
-login`), register an agent session (`agent-secrets register --exec -- <agent>`), and inspect a
+login`), register an agent session (`agent-secrets register [--session-id <id>] --exec -- <agent>`),
+and inspect a
 session's grants (`agent-secrets self`). People manage the agent secrets themselves with
 `agent-secrets secret list|show|create|set|retag|delete|restore`, which calls the broker's own
 store (AWS Secrets Manager or GCP Secret Manager) under their own cloud sign-in and then asks the
@@ -40,6 +41,19 @@ service's machine login, and its operator's grants, which include grants the ope
 any session. `agent-secrets enroll --helper` is open to any process of the user, so such a process
 can also enroll a box and read the operator's agent secrets. `agent-secrets --help` lists every
 form, and each form answers `-h`.
+
+`register --session-id <id>` is the launcher saying which agent session the process it is about to
+become belongs to. The helper records it at registration and every enrollment of that session
+carries it, so a credential request names its session on Dispatch's approval page instead of
+showing no session at all. The id comes from the launcher because the session cannot be believed
+about it: a process may rewrite its own environment, so neither the request's environment nor the
+pinned process's `/proc/<pid>/environ` is evidence of anything. Nothing inside the session can set
+or change the recorded id — a register from a descendant is answered with that session's own — but
+the helper does not check that the launcher's id names a real session either. Read it as a
+correlation key: it says which session asked, never that the session was entitled to ask, which is
+what the enrollment, its key and the approver rule decide. A launcher that does not know the id
+leaves the flag out: the session registers, enrolls and gets secrets exactly the same, and the page
+says no session is named.
 
 On a machine that runs agents directly, `agent-secrets-helper` (`../agent-secrets-helper`) holds
 each session's key and signs for it; in a container or a Kubernetes pod, the session's key lives in
