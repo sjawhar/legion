@@ -7,6 +7,10 @@
 #     [--live-resume 0|1] [--live-stale <n>] [--restart-at <duration>]
 #     [--mention-frac <0..1>] [--mentions <n>] [--envoy-rtt <duration>]
 #
+#   run-step.sh <name> --replay [--rate F] [--reads RHO] [--read-mix M] [--uploads U]
+#     [--rng-seed N] [--from D --to D] [--roster N] [--keys-file FILE] [--warmup D]
+#     [--gomaxprocs N] [--dispatch-commit REV] [--manifest FILE] [--out <dir>]
+#
 # From a fresh checkout it sets up, starts and seeds the stack (stack.sh). Then, every step that is
 # not part of a series: it rebuilds the binaries from this checkout (stack.sh setup, incremental) and
 # refuses a build whose highest migration is older than the seed's. A step of run-series.sh skips
@@ -18,6 +22,20 @@
 # another (it must not exist or be empty). Dispatch's log is the step's dispatch.log. --envoy-rtt
 # starts Dispatch with ENVOY_URL through a latency proxy of that round trip in front of the
 # listener (stack.sh LOADTEST_ENVOY_RTT); every other flag goes to `loadgen run`.
+#
+# A --replay step replays the LINUX bundle (README.md, The replay) instead: stack.sh setup
+# (incremental; with --dispatch-commit, envoy-dispatch from that commit, a rev that names no commit
+# refused before anything starts), start, replay-get (the manifest's parts, default
+# replay-2026-10-26.json; nothing to do once done; LOADTEST_REPLAY_ISSUE names the issue they are
+# file artifacts of and is required, refused here before anything starts), replay-prepare (this
+# build's template, once per build) and reset --replay, then `loadgen run -source replay` with the
+# -replay-* flags: --rate, --reads, --read-mix, --uploads, --from, --to, --roster and --keys-file
+# are -replay-rate, -replay-reads, -replay-read-mix, -replay-uploads, -replay-from, -replay-to,
+# -replay-roster and -replay-keys-file. --events, --sessions, --requests and the other flags of
+# the generated load are refused; the synthetic seed and its migration check are not used.
+# Dispatch reaches Postgres directly (LOADTEST_PG_DIRECT=1) unless the environment sets
+# LOADTEST_PG_DIRECT; --gomaxprocs sets LOADTEST_GOMAXPROCS. The reset's replay/last-reset.json is
+# copied into the step directory.
 #
 # Dispatch (and the listener's latency proxy) are stopped when the step ends, pass or fail, so the
 # box is idle between steps; Postgres, the proxy, NATS and the listener keep running (stack.sh stop
@@ -47,47 +65,94 @@ case $name in
 esac
 [[ $name =~ ^[A-Za-z0-9._-]+$ ]] || die "step name '$name' may hold only letters, digits, '.', '_' and '-'"
 
+replay=false
+for flag in "$@"; do
+  [ "$flag" = --replay ] && replay=true
+done
+
 out=$ROOT/runs/$name
 args=()
 have_events=false have_sessions=false have_requests=false
+manifest="" gomaxprocs="" dispatch_rev=""
 while [ $# -gt 0 ]; do
   flag=$1
+  if [ "$flag" = --replay ]; then
+    shift
+    continue
+  fi
   [ $# -ge 2 ] || die "$flag needs a value"
   value=$2
   shift 2
-  case $flag in
-    --events) have_events=true ;;
-    --sessions) have_sessions=true ;;
-    --requests) have_requests=true ;;
-    --duration | --warmup | --grace | --event-mix | --human | --live | --rng-seed | --live-stale | --restart-at | --mention-frac | --mentions) ;;
-    --live-resume)
-      case $value in
-        1) args+=(-live-resume) ;;
-        0) ;;
-        *) die "--live-resume takes 1 or 0, not '$value'" ;;
-      esac
-      continue
-      ;;
-    --envoy-rtt)
-      [[ $value =~ ^[0-9]+(\.[0-9]+)?(ns|us|ms|s|m)$ ]] || die "--envoy-rtt takes a duration such as 200ms, not '$value'"
-      LOADTEST_ENVOY_RTT=$value
-      continue
-      ;;
-    --route-mix)
-      [ -f "$value" ] || die "--route-mix names $value, which is not a file"
-      value=$(cd -- "$(dirname -- "$value")" && pwd -P)/$(basename -- "$value")
-      ;;
-    --out)
-      out=$value
-      continue
-      ;;
-    *) die "unknown flag '$flag'" ;;
-  esac
+  if [ "$flag" = --out ]; then
+    out=$value
+    continue
+  fi
+  if $replay; then
+    case $flag in
+      --events | --sessions | --requests | --duration | --grace | --event-mix | --route-mix | --human | --live)
+        die "$flag is not a replay flag: a --replay step sends the bundle's logged writes"
+        ;;
+      --rate | --reads | --read-mix | --uploads | --from | --to | --roster) flag=--replay-${flag#--} ;;
+      --keys-file)
+        flag=--replay-keys-file
+        value=$(abs_file --keys-file "$value")
+        ;;
+      --warmup | --rng-seed) ;;
+      --gomaxprocs)
+        [[ $value =~ ^[1-9][0-9]*$ ]] || die "--gomaxprocs '$value' is not a positive integer"
+        gomaxprocs=$value
+        continue
+        ;;
+      --dispatch-commit)
+        dispatch_rev=$value
+        continue
+        ;;
+      --manifest)
+        manifest=$(abs_file --manifest "$value")
+        continue
+        ;;
+      *) die "unknown flag '$flag'" ;;
+    esac
+  else
+    case $flag in
+      --events) have_events=true ;;
+      --sessions) have_sessions=true ;;
+      --requests) have_requests=true ;;
+      --duration | --warmup | --grace | --event-mix | --human | --live | --rng-seed | --live-stale | --restart-at | --mention-frac | --mentions) ;;
+      --live-resume)
+        case $value in
+          1) args+=(-live-resume) ;;
+          0) ;;
+          *) die "--live-resume takes 1 or 0, not '$value'" ;;
+        esac
+        continue
+        ;;
+      --envoy-rtt)
+        [[ $value =~ ^[0-9]+(\.[0-9]+)?(ns|us|ms|s|m)$ ]] || die "--envoy-rtt takes a duration such as 200ms, not '$value'"
+        LOADTEST_ENVOY_RTT=$value
+        continue
+        ;;
+      --route-mix) value=$(abs_file --route-mix "$value") ;;
+      *) die "unknown flag '$flag'" ;;
+    esac
+  fi
   args+=("-${flag#--}" "$value")
 done
-$have_events || die "--events is required (0 sends no writes)"
-$have_sessions || die "--sessions is required"
-$have_requests || die "--requests is required (0 sends no requests)"
+if ! $replay; then
+  $have_events || die "--events is required (0 sends no writes)"
+  $have_sessions || die "--sessions is required"
+  $have_requests || die "--requests is required (0 sends no requests)"
+fi
+if [ -n "$dispatch_rev" ]; then
+  dispatch_commit=$(git -C "$SRC" rev-parse --verify --quiet "$dispatch_rev^{commit}" 2>/dev/null) ||
+    die "--dispatch-commit '$dispatch_rev' names no commit in $SRC"
+fi
+if $replay; then
+  # stack.sh replay-get takes the issue the replay's parts are file artifacts of from the
+  # environment, as the manifest names none; refuse here too, before the step touches the stack.
+  [ -n "${LOADTEST_REPLAY_ISSUE:-}" ] ||
+    die "LOADTEST_REPLAY_ISSUE is required for a --replay step: set it to the issue the replay's parts are file artifacts of"
+fi
 
 lock_root "$ROOT"
 
@@ -97,7 +162,19 @@ if [ -e "$out" ] && [ -n "$(ls -A -- "$out")" ]; then
 fi
 
 started=$SECONDS
-if $LOCK_INHERITED && [ -n "${LOADTEST_SERIES_BUILD:-}" ]; then
+if $replay; then
+  # The caller's LOADTEST_PG_DIRECT wins; meta.json's pg_direct records what Dispatch used.
+  export LOADTEST_PG_DIRECT=${LOADTEST_PG_DIRECT-1}
+  [ -z "$gomaxprocs" ] || export LOADTEST_GOMAXPROCS=$gomaxprocs
+  [ -z "$dispatch_rev" ] || export LOADTEST_DISPATCH_COMMIT=$dispatch_commit
+  get_args=()
+  [ -z "$manifest" ] || get_args=(--manifest "$manifest")
+  "$stack" setup
+  "$stack" start
+  "$stack" replay-get "${get_args[@]}"
+  "$stack" replay-prepare
+  BUILD=$("$stack" build-info)
+elif $LOCK_INHERITED && [ -n "${LOADTEST_SERIES_BUILD:-}" ]; then
   # A step of run-series.sh, which holds the lock this script inherited: the series set up, started
   # and seeded the stack once, and every step runs that build.
   BUILD=$LOADTEST_SERIES_BUILD
@@ -113,7 +190,13 @@ mkdir -p -- "$out"
 # the reset, it would show Dispatch's own start-up work instead.
 box_busy=$("$stack" loadgen box-busy)
 trap '"$stack" stop dispatch envoy_proxy' EXIT
-"$stack" reset "$out/dispatch.log"
+if $replay; then
+  "$stack" reset --replay "$out/dispatch.log"
+  cp -- "$ROOT/replay/last-reset.json" "$out/last-reset.json"
+  args=(-source replay -events 0 -requests 0 -replay-inputs "$ROOT/replay/bundle" "${args[@]}")
+else
+  "$stack" reset "$out/dispatch.log"
+fi
 rc=0
 "$stack" loadgen run -name "$name" -out "$out" -build-commit "$commit" -build-dirty="$dirty" -box-busy-before "$box_busy" "${args[@]}" || rc=$?
 "$stack" stop dispatch envoy_proxy

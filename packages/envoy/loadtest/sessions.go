@@ -164,22 +164,29 @@ func (r *registrar) register(ctx context.Context, i int) error {
 	return nil
 }
 
-// registerSessions registers every session, 16 at a time. With -mention-frac, each session
-// advertises the default mention delivery, so Dispatch delivers a mention of it.
-func (st *step) registerSessions(ctx context.Context) *registrar {
-	reg := &registrar{url: st.cfg.ep.listener, token: st.cfg.ep.listenerToken, client: &http.Client{Timeout: 10 * time.Second},
-		bodies: make([][]byte, len(st.sessions))}
+// registrationBody is session s's registration with the listener: its directory, title and the
+// topics of the issues it watches. With -mention-frac, it advertises the default mention
+// delivery, so Dispatch delivers a mention of the session.
+func (st *step) registrationBody(s session) []byte {
+	topics := []string{}
+	for _, w := range s.watched {
+		topics = append(topics, st.issueTopic(w))
+	}
 	capabilities := []string{}
 	if st.cfg.mentionFrac > 0 {
 		capabilities = []string{mentionDelivery}
 	}
+	b, _ := json.Marshal(map[string]any{"session_id": s.id, "dir": "/work/" + s.id, "title": "load " + s.id,
+		"topics": topics, "port": 0, "self_subscribed": true, "driving": false, "capabilities": capabilities})
+	return b
+}
+
+// registerSessions registers every session, 16 at a time.
+func (st *step) registerSessions(ctx context.Context) *registrar {
+	reg := &registrar{url: st.cfg.ep.listener, token: st.cfg.ep.listenerToken, client: &http.Client{Timeout: 10 * time.Second},
+		bodies: make([][]byte, len(st.sessions))}
 	for i, s := range st.sessions {
-		topics := []string{}
-		for _, w := range s.watched {
-			topics = append(topics, st.issueTopic(w))
-		}
-		reg.bodies[i], _ = json.Marshal(map[string]any{"session_id": s.id, "dir": "/work/" + s.id, "title": "load " + s.id,
-			"topics": topics, "port": 0, "self_subscribed": true, "driving": false, "capabilities": capabilities})
+		reg.bodies[i] = st.registrationBody(s)
 	}
 	var wg sync.WaitGroup
 	sem := make(chan struct{}, 16)

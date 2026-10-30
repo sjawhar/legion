@@ -4,12 +4,24 @@
 #
 # die MESSAGE prints MESSAGE, prefixed with the script's name, and exits 1. note MESSAGE prints
 # MESSAGE with the same prefix and goes on. usage prints the script's header comment, from its
-# second line to its `set -euo` line, and exits 2.
+# second line to its `set -euo` line, and exits 2. abs_file FLAG FILE prints FILE's absolute path
+# and dies, naming FLAG, when FILE is not a file. sha256_of FILE prints FILE's sha256, and
+# joined_sha256 FILE... the sha256 of the files' concatenation (stack.sh's builds, replay.sh's
+# parts).
 #
 # resolve_paths sets SRC to LOADTEST_SRC (default: the checkout holding this file) and ROOT to
 # LOADTEST_ROOT (default ${TMPDIR:-/tmp}/dispatch-loadtest, created), both as physical paths, and
 # exports them as LOADTEST_SRC and LOADTEST_ROOT. It sets DISPATCH_SRC, the checkout envoy-dispatch
 # is built from, to LOADTEST_DISPATCH_SRC (default SRC).
+#
+# stack_ports ROOT: the stack's ports for ROOT, "KEY PORT" a line. The defaults follow the root's
+# physical path (port_block, default_port): a root always gets the same block of 8 ports, and two
+# roots get two blocks out of 200, so they share every port about 1 pair of roots in 200 (the block
+# is a hash modulo 200, not a per-root reservation). Each LOADTEST_*_PORT (PORT_VAR) overrides its
+# own port. So two Legion roles of one pod, each with its own LOADTEST_ROOT, almost always run a
+# stack each with no port variable set; when their blocks do collide, check_port refuses the second
+# stack and the roles set the LOADTEST_*_PORT variables (or pick another root). stack.sh setup
+# records the ports in ROOT/stack.json, and `stack.sh status` prints them.
 #
 # lock_root ROOT: one run at a time per root (README.md, "One run at a time"). It takes an
 # exclusive, non-blocking flock on ROOT/.run.lock and keeps it on file descriptor 9. The lock lasts
@@ -47,6 +59,18 @@ die() {
 
 note() { printf '%s: %s\n' "${0##*/}" "$*" >&2; }
 
+# abs_file FLAG FILE: FILE's absolute path, refused when it is not a file.
+abs_file() {
+  [ -f "$2" ] || die "$1 names $2, which is not a file"
+  printf '%s/%s\n' "$(cd -- "$(dirname -- "$2")" && pwd -P)" "$(basename -- "$2")"
+}
+
+# sha256_of FILE: FILE's sha256, the hex alone.
+sha256_of() { sha256sum -- "$1" | cut -d' ' -f1; }
+
+# joined_sha256 FILE...: the sha256 of the files' concatenation.
+joined_sha256() { cat -- "$@" | sha256sum | cut -d' ' -f1; }
+
 usage() {
   sed -n '2,/^set -euo/p' "$0" | sed '$d; s/^# \{0,1\}//' >&2
   exit 2
@@ -59,6 +83,58 @@ resolve_paths() {
   ROOT=$(cd -- "$ROOT" && pwd -P)
   export LOADTEST_SRC=$SRC LOADTEST_ROOT=$ROOT
   DISPATCH_SRC=${LOADTEST_DISPATCH_SRC:-$SRC}
+}
+
+# ---- the stack's ports ---------------------------------------------------------------------------
+
+# The stack's default ports follow LOADTEST_ROOT, so two roots on one machine (two Legion roles of
+# one pod, each with its own root and its own PID namespace) almost always run side by side with no
+# port variable set: each root hashes to one of PORT_BLOCKS blocks, so two roots land in one block
+# about 1 pair in 200, and then every port of the two stacks is the same one (check_port refuses
+# the second stack; the remedy is the LOADTEST_*_PORT variables). PORT_KEYS names stack.json's
+# ports, PORT_VAR each one's environment variable and PORT_OFFSET its place in a root's block of
+# ports.
+PORT_KEYS=(postgres proxy nats nats_monitor listener dispatch pprof envoy_proxy)
+declare -A PORT_VAR=(
+  [postgres]=LOADTEST_PG_PORT [proxy]=LOADTEST_PROXY_PORT [nats]=LOADTEST_NATS_PORT
+  [nats_monitor]=LOADTEST_NATS_MONITOR_PORT [listener]=LOADTEST_LISTENER_PORT
+  [dispatch]=LOADTEST_DISPATCH_PORT [pprof]=LOADTEST_PPROF_PORT [envoy_proxy]=LOADTEST_ENVOY_PROXY_PORT
+)
+declare -A PORT_OFFSET=(
+  [postgres]=0 [proxy]=1 [nats]=2 [nats_monitor]=3 [listener]=4 [dispatch]=5 [pprof]=6
+  [envoy_proxy]=7
+)
+PORT_BASE=15000
+PORT_STRIDE=10
+PORT_BLOCKS=200
+
+# port_block ROOT: ROOT's block of ports, an index k in [0, PORT_BLOCKS): the first 8 hex digits of
+# the sha256 of ROOT's physical path, modulo PORT_BLOCKS. The same root always gets the same block.
+port_block() {
+  local hex
+  hex=$(printf '%s' "$1" | sha256sum | cut -c1-8)
+  printf '%s\n' "$((16#$hex % PORT_BLOCKS))"
+}
+
+# default_port KEY BLOCK: the default port of KEY in block BLOCK:
+#
+#   PORT_BASE + BLOCK * PORT_STRIDE + PORT_OFFSET[KEY] = 15000 + 10k + 0..7
+#
+# The 8 offsets differ and all are below the stride, so no two ports of a block and no two ports of
+# two different blocks ever meet (two roots in one block hold the same 8 ports);
+# every port is between 15000 and 16997, inside 1024-65535 and below the ephemeral range.
+default_port() { printf '%s\n' "$((PORT_BASE + $2 * PORT_STRIDE + PORT_OFFSET[$1]))"; }
+
+# stack_ports ROOT: ROOT's ports, "KEY PORT" a line in PORT_KEYS' order: the block's default port,
+# or the value of the key's PORT_VAR when this environment sets it. stack.sh setup records them in
+# ROOT/stack.json, which `stack.sh status` prints.
+stack_ports() {
+  local block key var
+  block=$(port_block "$1")
+  for key in "${PORT_KEYS[@]}"; do
+    var=${PORT_VAR[$key]}
+    printf '%s %s\n' "$key" "${!var:-$(default_port "$key" "$block")}"
+  done
 }
 
 # lock_field NAME RECORD: the value of NAME= in a lock record.
@@ -210,17 +286,26 @@ prepare_stack() {
   "$stack" setup
   "$stack" start
   "$stack" seed
-  # A build cannot start on a seed that a newer build migrated: compare the highest migration file
-  # of the Dispatch checkout with the seed's level.
-  local migrations=$DISPATCH_SRC/packages/envoy/internal/dispatch/store/migrations build_file build_level seed_level
-  build_file=$(cd -- "$migrations" && printf '%s\n' [0-9]*.up.sql | sort -n | tail -n1)
-  build_level=$((10#${build_file%%_*}))
+  # A build cannot start on a seed that a newer build migrated: compare the highest migration of the
+  # Dispatch that setup built (bin/envoy-dispatch.json, which names LOADTEST_DISPATCH_COMMIT's tree
+  # when that is set, and the Dispatch checkout's otherwise) with the seed's level. Without that
+  # record, the Dispatch checkout's highest migration file stands for it.
+  local build_json=$ROOT/bin/envoy-dispatch.json build_level build_what seed_level
+  if [ -f "$build_json" ]; then
+    build_level=$(jq -er .newest_migration "$build_json")
+    build_what="Dispatch $(jq -r .dispatch_commit "$build_json")"
+  else
+    local migrations=$DISPATCH_SRC/packages/envoy/internal/dispatch/store/migrations build_file
+    build_file=$(cd -- "$migrations" && printf '%s\n' [0-9]*.up.sql | sort -n | tail -n1)
+    build_level=$((10#${build_file%%_*}))
+    build_what=$migrations/$build_file
+  fi
   seed_level=$(jq -er .migration "$ROOT/seed.meta.json")
   if ((build_level < seed_level)); then
-    die "this build's highest migration is $build_level ($migrations/$build_file), older than the seed's $seed_level (seed made by $(jq -r .build_commit "$ROOT/seed.meta.json")); reseed with this build (stack.sh seed --force) or run a newer one"
+    die "this build's highest migration is $build_level ($build_what), older than the seed's $seed_level (seed made by $(jq -r .build_commit "$ROOT/seed.meta.json")); reseed with this build (stack.sh seed --force) or run a newer one"
   fi
   if ((build_level > seed_level)); then
-    note "the seed is at migration $seed_level and this build at $build_level. Dispatch migrates each step's copy forward at start, and any backfill those migrations start runs inside the step; reseed with this build (stack.sh seed --force) to measure it alone"
+    note "the seed is at migration $seed_level and this build ($build_what) at $build_level. Dispatch migrates each step's copy forward at start, and any backfill those migrations start runs inside the step; reseed with this build (stack.sh seed --force) to measure it alone"
   fi
   BUILD=$("$stack" build-info)
 }

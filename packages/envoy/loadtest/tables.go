@@ -220,6 +220,7 @@ func renderTables(steps []stepData) string {
 	restartTable(&md, steps)
 	mentionsTable(&md, steps)
 	routesTable(&md, steps)
+	replayTable(&md, steps)
 	return md.String()
 }
 
@@ -597,6 +598,44 @@ func mentionsTable(md *markdown, steps []stepData) {
 			after = []string{group(m.AfterRestart.With), group(m.AfterRestart.Without)}
 		}
 		md.row(s.label(), fmt.Sprintf("%s%% / %d", num(100*m.Frac, 0), m.PerComment), group(m.Window.With), group(m.Window.Without), after[0], after[1])
+	}
+}
+
+// replayTable is one row per replay step (summary.json `replay`); absent when no step replayed.
+func replayTable(md *markdown, steps []stepData) {
+	var rows []stepData
+	for _, s := range steps {
+		if s.sum.Replay != nil {
+			rows = append(rows, s)
+		}
+	}
+	if len(rows) == 0 {
+		return
+	}
+	md.line("\n## Replay\n")
+	md.line("F is the rate factor, rho the read actions per write, U the share of diff versions re-sent as uploads. Cores at full rate are Dispatch's CPU-seconds over the window divided by the window and by F; idle-corrected takes Dispatch's cores over the 30 s before the window off first. Substitutes are anchored quotes / version contents the client could not take from the log.\n")
+	md.header("step", "F", "rho", "U", "window s", "Dispatch CPU s", "cores at full rate", "idle-corrected", "saturated",
+		"writes sent / planned", "failures", "substitutes quote / edit")
+	opt := func(p *float64, d int) string {
+		if p == nil {
+			return "-"
+		}
+		return num(*p, d)
+	}
+	for _, s := range rows {
+		r := s.sum.Replay
+		sent, planned, failed := 0, 0, 0
+		for _, w := range r.Writes {
+			sent, planned, failed = sent+w.Sent, planned+w.Planned, failed+w.Failed
+		}
+		saturated := "no"
+		if r.Saturated {
+			saturated = "yes (" + strings.Join(r.SaturatedReasons, ", ") + ")"
+		}
+		md.row(s.label(), num(r.Inputs.RateFactor, 3), num(r.Inputs.ReadsPerWrite, 2), num(r.Inputs.UploadShare, 2), num(r.WindowS, 0),
+			opt(r.DispatchCPUS, 1), opt(r.CoresFullRate, 2), opt(r.CoresFullRateIdleCorrected, 2), saturated,
+			fmt.Sprintf("%s / %s", num(float64(sent), 0), num(float64(planned), 0)), num(float64(failed), 0),
+			fmt.Sprintf("%s / %s", num(float64(r.Substitutes.Quote), 0), num(float64(r.Substitutes.Edit), 0)))
 	}
 }
 

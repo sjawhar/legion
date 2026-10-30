@@ -30,6 +30,44 @@ type liveFrame struct {
 	replay bool
 }
 
+// liveFrames builds the frames of one connection in order: each frame's marker and created_at come
+// from the event's JSON, and outOfOrder says the connection's ids did not rise. The live socket
+// reader and the SSE reader (sse.go) share it.
+type liveFrames struct {
+	nonce    int64
+	prevID   int64
+	havePrev bool
+}
+
+// frame is the frame of one event JSON that arrived at at, with id the connection's own id for it.
+// idFromEvent takes the id the event names instead, which is the SSE reader's rule; the live
+// socket keeps the frame's id.
+func (fs *liveFrames) frame(at, id int64, event []byte, idFromEvent bool) liveFrame {
+	f := liveFrame{at: at, id: id}
+	f.marker, _ = findMarker(event, fs.nonce)
+	var ev struct {
+		ID        *int64    `json:"id"`
+		CreatedAt time.Time `json:"created_at"`
+	}
+	if json.Unmarshal(event, &ev) == nil {
+		if idFromEvent && ev.ID != nil {
+			f.id = *ev.ID
+		}
+		if !ev.CreatedAt.IsZero() {
+			f.created = ev.CreatedAt.UnixNano()
+		}
+	}
+	f.outOfOrder = fs.havePrev && f.id <= fs.prevID
+	fs.prevID, fs.havePrev = f.id, true
+	return f
+}
+
+// parseLiveID is a live frame's decimal id, 0 when it names none.
+func parseLiveID(s string) int64 {
+	id, _ := strconv.ParseInt(s, 10, 64)
+	return id
+}
+
 // liveSubscribe is the subscribe frame a dashboard tab sends for the events view. It resumes
 // after the event since, or, with since 0, names no resume and follows the feed from its head.
 func liveSubscribe(since int64) map[string]any {
@@ -67,9 +105,10 @@ func readLive(conn *websocket.Conn, nonce, since int64, now func() time.Time, on
 	if err := conn.WriteJSON(liveSubscribe(since)); err != nil {
 		return 0, err
 	}
-	var n, prevID int64
+	var n int64
+	fr := liveFrames{nonce: nonce}
 	resume, last := since > 0, since
-	havePrev, started := false, false
+	started := false
 	for {
 		_, data, err := conn.ReadMessage()
 		if err != nil {
@@ -100,17 +139,8 @@ func readLive(conn *websocket.Conn, nonce, since int64, now func() time.Time, on
 		case "error":
 			return n, fmt.Errorf("the events subscription was refused: %s: %s", m.Code, m.Message)
 		case "event":
-			f := liveFrame{at: at, bytes: int64(len(data))}
-			f.id, _ = strconv.ParseInt(m.ID, 10, 64)
-			f.marker, _ = findMarker(m.Event, nonce)
-			var ev struct {
-				CreatedAt time.Time `json:"created_at"`
-			}
-			if json.Unmarshal(m.Event, &ev) == nil && !ev.CreatedAt.IsZero() {
-				f.created = ev.CreatedAt.UnixNano()
-			}
-			f.outOfOrder = havePrev && f.id <= prevID
-			prevID, havePrev = f.id, true
+			f := fr.frame(at, parseLiveID(m.ID), m.Event, false)
+			f.bytes = int64(len(data))
 			last = max(last, f.id)
 			onFrame(f)
 		}

@@ -3,7 +3,7 @@ import { REPLAYED_SUFFIX } from "../src/replay";
 import type { StallProxy } from "./stall-proxy";
 
 /** The spec's bound: a session finds a path that answers within a minute of the freeze. */
-const RECOVERY_BOUND_MS = 60_000;
+export const RECOVERY_BOUND_MS = 60_000;
 
 /** A session plugin under test, registered and past its first sweep, whose NATS path `proxy` fronts. */
 export interface FreezeScenarioHost {
