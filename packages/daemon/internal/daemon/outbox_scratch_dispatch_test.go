@@ -16,6 +16,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 
@@ -335,17 +336,21 @@ func (d *scratchDispatch) start() {
 
 // holdPortAgain takes the socket of the port the server served on before its stop (takeSocket), as
 // heldSocket takes one of a port the kernel chooses. From the stop until here the port is any
-// process's, so a run that finds it taken binds it again until deadline.
+// process's, so a run that finds it still held by another process (EADDRINUSE) binds it again
+// until deadline. Every other failure of takeSocket, such as the descriptor the listener could not
+// give, is this run's own and fails the test at once: binding again would never clear it.
 func (d *scratchDispatch) holdPortAgain(deadline time.Time) *os.File {
 	d.t.Helper()
 	address := net.JoinHostPort("127.0.0.1", strconv.Itoa(d.port))
 	for {
 		file, _, err := takeSocket(address)
-		if err == nil {
+		switch {
+		case err == nil:
 			return file
-		}
-		if time.Now().After(deadline) {
+		case !errors.Is(err, syscall.EADDRINUSE):
 			d.t.Fatalf("hold scratch Dispatch's port %d again: %v", d.port, err)
+		case time.Now().After(deadline):
+			d.t.Fatalf("scratch Dispatch's port %d was still taken at the deadline: %v", d.port, err)
 		}
 		d.t.Logf("scratch Dispatch's port %d is still taken (%v); binding it again", d.port, err)
 		time.Sleep(500 * time.Millisecond)

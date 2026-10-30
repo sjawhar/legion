@@ -99,10 +99,9 @@ jobs:
     # number, cancel-in-progress on pull_request) already cancels an older head's whole run, this
     # call included, and which tests-closed.yaml joins when the pull request closes, cancelling a
     # build still waiting or running then; this group also cancels a build that a re-run of an older
-    # head's run starts. Only a head that starts a run of its own can do this. A push carrying
-    # `skip-checks: true` (a `.legion/`-only handoff) starts no run, so it never cancels the code
-    # head's build. Another pull request's build is in another group. Other events key on
-    # github.sha, not github.ref, so a pending run of one main commit never drops another commit's.
+    # head's run starts. Only a head that starts a run of its own can do this. Another pull
+    # request's build is in another group. Other events key on github.sha, not github.ref, so a
+    # pending run of one main commit never drops another commit's.
     # They never cancel: in a call from release.yaml, `github.event_name` is the caller's (`push` or
     # `workflow_dispatch`, never `pull_request`), so no main commit is left without an image to pin.
     # Of a release run's two calls only the build-only one's build enters this group: the

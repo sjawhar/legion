@@ -280,7 +280,7 @@ func (r *runner) issue(ctx context.Context, issue workflowIssue) error {
 // removal (removal). moved says the branch moved between the read and the ref update.
 func (r *runner) attempt(ctx context.Context, b branch, phases map[string]result) (last result, moved bool, err error) {
 	head, err := ghbranch.Head(ctx, b.github, b.repo, b.ref())
-	if ghbranch.NotFound(err) {
+	if githubrest.NotFound(err) {
 		return result{noBranch, "no branch"}, false, nil
 	}
 	if err != nil {
@@ -522,7 +522,7 @@ type contentEntry struct {
 func (b branch) list(ctx context.Context, path, head string) ([]contentEntry, error) {
 	var entries []contentEntry
 	err := b.github.Get(ctx, "/contents/"+path+"?ref="+url.QueryEscape(head), &entries)
-	if ghbranch.NotFound(err) {
+	if githubrest.NotFound(err) {
 		return nil, nil
 	}
 	if err != nil {
@@ -638,7 +638,7 @@ func (b branch) move(ctx context.Context, head, commit string) (moved bool, err 
 		return false, err
 	}
 	now, readErr := ghbranch.Head(ctx, b.github, b.repo, b.ref())
-	if ghbranch.NotFound(readErr) {
+	if githubrest.NotFound(readErr) {
 		return true, nil
 	}
 	if readErr != nil {

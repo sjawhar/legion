@@ -39,9 +39,9 @@ func Create(ctx context.Context, github githubrest.Client, repo ghrepo.Repositor
 
 // Head is the commit branch names on repo, whose REST API github calls, the branch's name read as
 // the one ref it names (refPath). A branch GitHub does not have is the error GitHub answered the
-// read with, which NotFound reads, so a caller that needs the branch returns err as it is, and one
-// that asks whether the branch exists tests it with NotFound. Every other failure of the read, and
-// an answer naming no commit, is an error of its own.
+// read with, which githubrest.NotFound reads, so a caller that needs the branch returns err as it
+// is, and one that asks whether the branch exists tests it with githubrest.NotFound. Every other
+// failure of the read, and an answer naming no commit, is an error of its own.
 func Head(ctx context.Context, github githubrest.Client, repo ghrepo.Repository, branch string) (sha string, err error) {
 	var head struct {
 		Object struct {
@@ -55,13 +55,6 @@ func Head(ctx context.Context, github githubrest.Client, repo ghrepo.Repository,
 		return "", fmt.Errorf("read refs/heads/%s of %s: GitHub named no commit", branch, repo)
 	}
 	return head.Object.SHA, nil
-}
-
-// NotFound says whether err carries GitHub's 404, the answer it gives a ref, a file or a
-// repository it does not have.
-func NotFound(err error) bool {
-	var answer *githubrest.Answer
-	return errors.As(err, &answer) && answer.Status == http.StatusNotFound
 }
 
 // Move updates branch on repo to commit without force, so GitHub moves it only when commit

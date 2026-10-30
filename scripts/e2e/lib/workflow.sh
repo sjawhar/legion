@@ -837,7 +837,7 @@ smoke_commit_files() {
   done
   if grep -qE 'HTTP (404|422)' "$err"; then
     rm -f "$err"
-    fail "the handoff commit $commit the implementer reported is not on $repo"
+    fail "the commit $commit the implementer reported is not on $repo"
   fi
   local said
   said=$(tr '\n' ' ' <"$err" | cut -c1-400)

@@ -404,3 +404,10 @@ type Answer struct {
 func (a *Answer) Error() string {
 	return fmt.Sprintf("GitHub answered %s %s with %d: %s", a.Method, a.Path, a.Status, a.Body)
 }
+
+// NotFound says whether err carries GitHub's 404, the answer it gives a ref, a file or a
+// repository it does not have.
+func NotFound(err error) bool {
+	var answer *Answer
+	return errors.As(err, &answer) && answer.Status == http.StatusNotFound
+}

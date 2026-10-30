@@ -988,12 +988,14 @@ it took beside that budget. The checks, in order, which is the tmux proof's:
   `packages/pi-shared/src/phase-stall.ts`, so a later rewording of the rest of that paragraph does
   not break the proof silently), and an assistant turn follows that feedback, so the block carried
   the turn on in the same session. The run moves no `LEGION_STALL_*` number.
-- `claude-implementer-handoff`: told through Dispatch to make the spec's one-file change, write and
-  push its handoff, and call the `legion` tool's `handoff_complete`, it does: the daemon records the
-  completion's commit, which the implement App authored and committed (read with `jj` in the pod's
-  own workspace), which is on `sjawhar/legion-smoke` and which changes `.legion/<issue>/`, and the
-  transcript holds the `mcp__legion__legion` call with a result that is not an error. No pull
-  request is opened.
+- `claude-implementer-handoff`: told through Dispatch to make the spec's one-file change, push it,
+  write its handoff with `dispatch handoff-write` and call the `legion` tool's `handoff_complete`,
+  it does: the daemon records the completion's Dispatch handoff record, which Dispatch holds as the
+  issue's `implement` handoff written by the implementer's claim session (its Claude Code session,
+  `assert_handoff_record`), and its commit, which the implement App authored and committed (read
+  with `jj` in the pod's own workspace), which is on `sjawhar/legion-smoke` and which changes
+  nothing under `.legion/`, and the transcript holds the `mcp__legion__legion` call with a result
+  that is not an error. No pull request is opened.
 - `pod-deleted-resumes-the-same-claude-session`: the transcript's size and the `sha256sum` of those
   bytes are read in the pod, and the pod is deleted, its disk and the transcript's file with it.
   Once no pod holds the deleted one's uid, and before the replacement's turn, the session table is

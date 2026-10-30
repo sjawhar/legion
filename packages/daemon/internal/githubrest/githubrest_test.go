@@ -336,3 +336,27 @@ func TestARateLimitsResetFarInTheFutureWaitsNoLongerThanAnHour(t *testing.T) {
 		t.Fatalf("a reset six hours out = rate limited %v, retry after %s; want true and an hour's cap", answer.RateLimited, answer.RetryAfter)
 	}
 }
+
+// NotFound reads GitHub's 404 out of an error, however deeply its caller wrapped the *Answer, and
+// is false for every other answer, for an error that carries none, and for no error at all, so a
+// caller reads only a ref, a file or a repository GitHub does not have as missing.
+func TestNotFoundReadsGitHubs404(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		err  error
+		want bool
+	}{
+		{name: "no error", err: nil},
+		{name: "an error carrying no answer", err: errors.New("read refs/heads/main: dial tcp: connection refused")},
+		{name: "another answer", err: &Answer{Method: http.MethodGet, Path: "/git/ref/heads/main", Status: http.StatusForbidden}},
+		{name: "a 404", err: &Answer{Method: http.MethodGet, Path: "/git/ref/heads/main", Status: http.StatusNotFound}, want: true},
+		{name: "a wrapped 404", want: true, err: fmt.Errorf("read refs/heads/main of acme/widgets: %w",
+			fmt.Errorf("get: %w", &Answer{Method: http.MethodGet, Path: "/git/ref/heads/main", Status: http.StatusNotFound}))},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := NotFound(tc.err); got != tc.want {
+				t.Fatalf("NotFound(%v) = %v, want %v", tc.err, got, tc.want)
+			}
+		})
+	}
+}

@@ -1084,13 +1084,12 @@ func TestAPushForAHeadTheBranchLeftDecidesTheChecks(t *testing.T) {
 		name string
 		// seeded is the pull request before the heads arrive, facts what arrives while the run is
 		// open, and late the push, for a head the branch has left, delivered an hour later. closes
-		// says the late push closes the head run, which is the re-check's other clause.
-		seeded   record.PullRequest
-		facts    []intake.Fact
-		late     intake.Fact
-		attempts int
-		planned  bool
-		closes   bool
+		// says the late push closes the head run, which is the re-check's other clause. Every row
+		// ends with the fix attempts back at one and the planned mark clear.
+		seeded record.PullRequest
+		facts  []intake.Fact
+		late   intake.Fact
+		closes bool
 	}{
 		{
 			name: "the late push clears the planned mark h4 and h5 carried",
@@ -1099,7 +1098,6 @@ func TestAPushForAHeadTheBranchLeftDecidesTheChecks(t *testing.T) {
 			facts: []intake.Fact{syncedTo("h4"), syncedTo("h5"), settledAt("h5", required, 2, required)},
 			late:  pushedFromTo("h3", "h4", implementer),
 			// The count is untouched: no verdict stands at h3 or h4 for a move to count.
-			attempts: 1, planned: false,
 		},
 		{
 			name: "the late push spares the fix attempts the moves above it counted",
@@ -1113,7 +1111,6 @@ func TestAPushForAHeadTheBranchLeftDecidesTheChecks(t *testing.T) {
 			// of three, where h6's red was held. The push shows h4's own red to be the review App's
 			// planned one: h4's move is spared and h5's, onto a planned red, counts nothing, so the
 			// count is back where it started and h6's red, which no push planned, sends the work back.
-			attempts: 1, planned: false,
 		},
 		{
 			name: "the late push closes the run with the judgement unchanged",
@@ -1126,7 +1123,7 @@ func TestAPushForAHeadTheBranchLeftDecidesTheChecks(t *testing.T) {
 			// judgement: no verdict stands at h3 for its move to count, and an implementer's push
 			// leaves the planned mark clear, as the unchained move already had it. Closing the run
 			// is what lets h5's held red be judged.
-			attempts: 1, planned: false, closes: true,
+			closes: true,
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -1148,10 +1145,10 @@ func TestAPushForAHeadTheBranchLeftDecidesTheChecks(t *testing.T) {
 				t.Fatalf("after the late push the issue is in %s, want implementing: the push's replay is what makes the red stand", got)
 			}
 			pr := runOf(t, pool)
-			if pr.FixAttempts != tc.attempts || pr.PlannedRed != tc.planned {
-				t.Fatalf("fix attempts %d and planned red %v, want %d and %v", pr.FixAttempts, pr.PlannedRed, tc.attempts, tc.planned)
+			if pr.FixAttempts != 1 || pr.PlannedRed {
+				t.Fatalf("fix attempts %d and planned red %v, want 1 and false", pr.FixAttempts, pr.PlannedRed)
 			}
-			if pr := runOf(t, pool); (pr.Run == nil) != tc.closes {
+			if (pr.Run == nil) != tc.closes {
 				t.Fatalf("the head run is open %v after the late push, want open %v: which clause of the re-check reads the push depends on it", pr.Run != nil, !tc.closes)
 			}
 		})
