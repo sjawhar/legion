@@ -454,10 +454,13 @@ test.describe("inbox selection @phone", () => {
       await expect(picker).toBeFocused();
       await page.keyboard.press("Escape");
 
-      // j moves off the ticked row, and h reaches the picker from there too.
+      // j moves off the ticked row, and h reaches the picker from there too. A tick marks its
+      // row and moves nothing else, so the reading column is still on the row the Inbox opened
+      // on and the step from there is the second row; without the column j roves from the box
+      // holding the focus and lands on the third.
       await page.keyboard.press("j");
       if (hasReadingPane(page)) {
-        await expect(selectedRow(page)).toHaveAttribute("data-inbox-row", await askIdOf(page, 2));
+        await expect(selectedRow(page)).toHaveAttribute("data-inbox-row", await askIdOf(page, 1));
       } else {
         await expect(rows.nth(2)).toBeFocused();
       }

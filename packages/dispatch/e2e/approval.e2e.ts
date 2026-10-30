@@ -727,16 +727,15 @@ test("an approval ask's Inbox row, drawer link and bare ask route land on the sp
   try {
     const page = await alice.newPage();
 
-    // The Inbox's own link for the request lands on the spec, approve control in view — not
+    // The Inbox row's own link for the request lands on the spec, approve control in view — not
     // the Conversation turn `useItemLanding` fell through to before this fix. From 1280 px the
-    // reader follows it from the reading column's head, which carries the selected question's
-    // owner link (INFRA-575); the short row beside it names the same address.
+    // reading column's head carries the selected question's owner link too (INFRA-575), and it
+    // names the same address; following the row's link is the row's click, not the list's
+    // selection, so the issue it opens stays open.
     await page.goto("/");
-    const owner = (await askControls(page, requested.ask.id)).locator("[data-inbox-owner]");
-    await expect(inboxRow(page, requested.ask.id).locator("[data-inbox-owner]")).toHaveAttribute(
-      "href",
-      (await owner.getAttribute("href")) ?? ""
-    );
+    const head = (await askControls(page, requested.ask.id)).locator("[data-inbox-owner]");
+    const owner = inboxRow(page, requested.ask.id).locator("[data-inbox-owner]");
+    await expect(owner).toHaveAttribute("href", (await head.getAttribute("href")) ?? "");
     await owner.click();
     await expect(page).toHaveURL(specPath);
     await expect(page.getByRole("tab", { name: "Spec" })).toHaveAttribute("aria-selected", "true");

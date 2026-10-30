@@ -97,6 +97,14 @@ function rowAround(node: Element | null): HTMLElement | null {
   return closestMatching(node, ROW_SELECTOR);
 }
 
+/** Everything inside a short row that answers a click itself: its owner link, its checkbox, and
+ *  whatever control a row gains later. A click on one of those is that control's - the link
+ *  opens the ask inside its issue or document, the checkbox marks the row - so the row's own
+ *  selection stands down for it, the rule the margin's cards hold to (`margin/ThreadCard.tsx`).
+ *  Everywhere else in the row, the question's first line and its age included, the click is the
+ *  row's and selects it. */
+const ROW_CONTROL_SELECTOR = "a, button, input, label, select, textarea";
+
 /** The kind a short row names: a question written as a decision block of a document, a request
  *  to approve a document version, or any other question. */
 function askKind(ask: InboxRow): string {
@@ -191,7 +199,19 @@ function InboxItem({
       data-inbox-section={section}
       data-inbox-selected={short && selected ? "true" : undefined}
       onBlur={releaseOnFocusOut}
-      onClick={onSelect === undefined ? undefined : () => onSelect(ask.id)}
+      onClick={
+        onSelect === undefined
+          ? undefined
+          : (event) => {
+              if (
+                event.target instanceof Element &&
+                closestMatching(event.target, ROW_CONTROL_SELECTOR) !== null
+              ) {
+                return;
+              }
+              onSelect(ask.id);
+            }
+      }
       onPointerLeave={onRelease}
       tabIndex={-1}
     >

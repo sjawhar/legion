@@ -1,7 +1,7 @@
 import { expect, spyOn, test } from "bun:test";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { act, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
-import { MemoryRouter, useLocation, useNavigate } from "react-router-dom";
+import { MemoryRouter, Route, Routes, useLocation, useNavigate } from "react-router-dom";
 
 import { commentDeliveryFields } from "../../__tests__/comment-fixture";
 import { keyedAttempt } from "../../__tests__/keyed-attempt";
@@ -2422,6 +2422,96 @@ test("a click on a row selects it", async () => {
     fireEvent.click(shortRow("ask-b"));
     await waitFor(() => expect(selectedIds()).toEqual(["ask-b"]));
     expect(address()).toBe("/?item=ask-b");
+  } finally {
+    unmount();
+    narrow();
+    getAsk.mockRestore();
+    getInbox.mockRestore();
+    getIssue.mockRestore();
+  }
+});
+
+/** The Inbox on a route of its own, as the app mounts it (`app.tsx`): a link out of the list
+ *  unmounts it, so the address a followed link leaves behind is the link's. */
+function renderRoutedInbox() {
+  const queryClient = new QueryClient({
+    defaultOptions: { mutations: { retry: false }, queries: { retry: false } },
+  });
+  const view = render(
+    <MemoryRouter initialEntries={["/"]}>
+      <QueryClientProvider client={queryClient}>
+        <KeymapProvider>
+          <RouteProbe />
+          <Routes>
+            <Route element={<Inbox />} path="/" />
+            <Route element={<p>The ask in its issue</p>} path="/issues/:key/asks/:id" />
+          </Routes>
+        </KeymapProvider>
+      </QueryClientProvider>
+    </MemoryRouter>
+  );
+  return { unmount: view.unmount };
+}
+
+test("a click on a short row's owner link opens the ask inside its issue, and the row leaves that address alone", async () => {
+  const narrow = widenToReadingPane();
+  const rows = [
+    inboxIssue("ask-a", "CORE-1", "Which approach?"),
+    inboxIssue("ask-b", "CORE-2", "Which format?"),
+  ];
+  const getInbox = spyOn(api, "getInbox").mockResolvedValue(rows);
+  const getAsk = mockAskReads(rows);
+  const getIssue = mockIssueReads();
+  const { unmount } = renderRoutedInbox();
+
+  try {
+    await screen.findByTestId("inbox-pane");
+    // The question's own words are the row's: clicking them selects it, so the link followed
+    // below is on a row the column is not already showing.
+    fireEvent.click(within(shortRow("ask-b")).getByText("Which format?"));
+    await waitFor(() => expect(selectedIds()).toEqual(["ask-b"]));
+    expect(address()).toBe("/?item=ask-b");
+
+    // The owner link opens the ask inside its issue, and the row holding it does not replace
+    // that address with the Inbox's own.
+    const owner = within(shortRow("ask-a")).getByRole("link", { name: /CORE-1/ });
+    expect(owner.getAttribute("href")).toBe("/issues/CORE-1/asks/ask-a");
+    fireEvent.click(owner);
+    expect(address()).toBe("/issues/CORE-1/asks/ask-a");
+    expect(screen.queryByTestId("inbox-list")).toBeNull();
+    expect(screen.getByText("The ask in its issue")).toBeTruthy();
+  } finally {
+    unmount();
+    narrow();
+    getAsk.mockRestore();
+    getInbox.mockRestore();
+    getIssue.mockRestore();
+  }
+});
+
+test("a short row's checkbox marks the row without selecting it or writing the address", async () => {
+  const narrow = widenToReadingPane();
+  const rows = [
+    inboxIssue("ask-a", "CORE-1", "Which approach?"),
+    inboxIssue("ask-b", "CORE-2", "Which format?"),
+  ];
+  const getInbox = spyOn(api, "getInbox").mockResolvedValue(rows);
+  const getAsk = mockAskReads(rows);
+  const getIssue = mockIssueReads();
+  const { unmount } = renderInbox();
+
+  try {
+    await screen.findByTestId("inbox-pane");
+    await waitFor(() => expect(selectedIds()).toEqual(["ask-a"]));
+
+    fireEvent.click(within(shortRow("ask-b")).getByRole("checkbox"));
+    await screen.findByText("1 selected");
+    expect((within(shortRow("ask-b")).getByRole("checkbox") as HTMLInputElement).checked).toBe(
+      true
+    );
+    // The mark is the checkbox's whole doing: the column is still on the row it was showing.
+    expect(selectedIds()).toEqual(["ask-a"]);
+    expect(address()).toBe("/?item=ask-a");
   } finally {
     unmount();
     narrow();
