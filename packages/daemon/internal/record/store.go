@@ -39,9 +39,20 @@ func (s *Postgres) MarkProcessed(ctx context.Context, tx pgx.Tx, source, eventID
 	return tag.RowsAffected() == 1, nil
 }
 
+// ForgetProcessed removes the processed-events row of one fact, so the same fact id applies again
+// when it is sent anew. ApplyFact uses it for a refused production check report alone: the report
+// of a look is one fact id, and a refusal of it must not stand as the answer to the implementer's
+// next report of that same look (dispatch://INFRA-714/spec R12).
+func (s *Postgres) ForgetProcessed(ctx context.Context, tx pgx.Tx, source, eventID string) error {
+	if _, err := tx.Exec(ctx, "delete from processed_events where source = $1 and event_id = $2", source, eventID); err != nil {
+		return fmt.Errorf("forget processed event %s/%s: %w", source, eventID, err)
+	}
+	return nil
+}
+
 // issueColumns reads an empty ancestry as NULL, so a record with none scans as a nil Ancestry, as
 // it was written.
-const issueColumns = `key, tree, project, title, parent, phase, generation, status, rank, handed_over, taken_back, linger_until, held_from, last_dispatch_seq, coalesce(hold_reason, ''), dispatch_status, repo, default_branch, github_repo, awaiting_ask, awaiting_gate_version, coalesce(awaiting_artifact, ''), awaiting_answered_at, coalesce(awaiting_answered_by, ''), coalesce(awaiting_answered_detail, ''), awaiting_since_seq, awaiting_since, handout_seq, coalesce(declared_seq, 0), declared_at, nullif(ancestry, '{}'), handed_over_from`
+const issueColumns = `key, tree, project, title, parent, phase, generation, status, rank, handed_over, taken_back, linger_until, held_from, last_dispatch_seq, coalesce(hold_reason, ''), dispatch_status, repo, default_branch, github_repo, awaiting_ask, awaiting_gate_version, coalesce(awaiting_artifact, ''), awaiting_answered_at, coalesce(awaiting_answered_by, ''), coalesce(awaiting_answered_detail, ''), awaiting_since_seq, awaiting_since, handout_seq, coalesce(declared_seq, 0), declared_at, nullif(ancestry, '{}'), handed_over_from, coalesce(told_parent, '')`
 
 func (s *Postgres) Issue(ctx context.Context, tx pgx.Tx, key string) (*Issue, error) {
 	issue, err := scanIssue(tx.QueryRow(ctx, "select "+issueColumns+" from issues where key = $1", key))
@@ -195,9 +206,9 @@ func (s *Postgres) PutIssue(ctx context.Context, tx pgx.Tx, issue Issue) error {
 	// the rows hold it so a rollback to a daemon that still reads it finds its data.
 	tag, err := tx.Exec(ctx, `insert into issues (key, tree, project, title, parent, phase, generation, status, rank, handed_over, taken_back, linger_until, held_from, last_dispatch_seq, hold_reason, dispatch_status, repo, default_branch, github_repo,
 		awaiting_ask, awaiting_gate_version, awaiting_artifact, awaiting_answered_at, awaiting_answered_by, awaiting_answered_detail, awaiting_since_seq, awaiting_since,
-		ancestry, handed_over_from)
+		ancestry, handed_over_from, told_parent)
 		values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, nullif($15::text, ''), $16, $17, $18, $19, $20, $21, $22, $23, nullif($24::text, ''), nullif($25::text, ''), $26, $27,
-		coalesce($28::text[], '{}'), $29)
+		coalesce($28::text[], '{}'), $29, nullif($30::text, ''))
 		on conflict (key) do update set tree = excluded.tree, project = excluded.project, title = excluded.title,
 		parent = excluded.parent, phase = excluded.phase, generation = excluded.generation,
 		status = excluded.status, rank = excluded.rank, handed_over = excluded.handed_over, taken_back = excluded.taken_back,
@@ -209,12 +220,12 @@ func (s *Postgres) PutIssue(ctx context.Context, tx pgx.Tx, issue Issue) error {
 		awaiting_answered_at = excluded.awaiting_answered_at, awaiting_answered_by = excluded.awaiting_answered_by,
 		awaiting_answered_detail = excluded.awaiting_answered_detail,
 		awaiting_since_seq = excluded.awaiting_since_seq, awaiting_since = excluded.awaiting_since,
-		ancestry = excluded.ancestry, handed_over_from = excluded.handed_over_from
+		ancestry = excluded.ancestry, handed_over_from = excluded.handed_over_from, told_parent = excluded.told_parent
 		where issues.repo = excluded.repo and issues.default_branch = excluded.default_branch and issues.github_repo = excluded.github_repo`,
 		issue.Key, issue.Tree, issue.Project, issue.Title, issue.Parent, string(issue.Phase), int64(issue.Generation), issue.Status,
 		issue.Rank, issue.HandedOver, issue.TakenBack, issue.LingerUntil, heldFrom, issue.LastDispatchSeq, string(holdReason), issue.DispatchStatus,
 		issue.Repo, issue.DefaultBranch, issue.GitHubRepo, awaitingAsk, awaitingGate, awaitingArtifact, answeredAt, string(answeredBy), answeredDetail,
-		sinceSeq, since, issue.Ancestry, issue.HandedOverFrom,
+		sinceSeq, since, issue.Ancestry, issue.HandedOverFrom, issue.ToldParent,
 	)
 	if err != nil {
 		return fmt.Errorf("put issue %s: %w", issue.Key, err)
@@ -377,7 +388,7 @@ func scanIssue(row scanner) (*Issue, error) {
 	if err := row.Scan(&issue.Key, &issue.Tree, &issue.Project, &issue.Title, &issue.Parent, &phaseValue, &generation, &issue.Status,
 		&issue.Rank, &issue.HandedOver, &issue.TakenBack, &issue.LingerUntil, &heldFrom, &issue.LastDispatchSeq, &holdReason, &issue.DispatchStatus,
 		&issue.Repo, &issue.DefaultBranch, &issue.GitHubRepo, &awaitingAsk, &awaitingGate, &awaitingArtifact, &answeredAt, &answeredBy, &answeredDetail,
-		&sinceSeq, &since, &issue.HandoutSeq, &issue.DeclaredSeq, &declaredAt, &issue.Ancestry, &issue.HandedOverFrom); err != nil {
+		&sinceSeq, &since, &issue.HandoutSeq, &issue.DeclaredSeq, &declaredAt, &issue.Ancestry, &issue.HandedOverFrom, &issue.ToldParent); err != nil {
 		return nil, err
 	}
 	if declaredAt != nil {

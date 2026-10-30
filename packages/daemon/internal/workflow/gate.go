@@ -3,6 +3,7 @@ package workflow
 import (
 	"context"
 	"fmt"
+	"slices"
 
 	"github.com/jackc/pgx/v5"
 
@@ -664,6 +665,11 @@ func (e *Engine) applyArtifact(ctx context.Context, tx pgx.Tx, gate record.Desig
 			return err
 		}
 	}
+	if isOpen != wasOpen {
+		if err := e.tellGateMoved(ctx, tx, key, fact.Version, isOpen); err != nil {
+			return err
+		}
+	}
 	if !wasOpen && isOpen {
 		issue, err := e.store.Issue(ctx, tx, key)
 		if err != nil || issue == nil {
@@ -690,6 +696,73 @@ func (e *Engine) applyArtifact(ctx context.Context, tx pgx.Tx, gate record.Desig
 		}
 	}
 	return nil
+}
+
+// tellGateMoved tells every worker holding a phase in the tree of key, and the tree's root
+// architect, that the design gate closed or opened at version: one message per role topic
+// (record.RoleMessage), the way the daemon reaches a role holder with something to read rather
+// than work to do (tellChecks). A new version of an approved spec closes the gate under workers
+// already running on the old one, and until now it told none of them: they went on building to a
+// design the person was being asked about again (dispatch://INFRA-714/spec R5). The opening is
+// told the same way, so a worker that was told to expect a change hears that it landed.
+//
+// No phase is moved and no turn is interrupted: the gate holds the merger's start while it is
+// closed (the daemon's supervise row) and releases it at the opening, and every other worker
+// decides for itself what the version means for the work in hand. A phase no worker holds names
+// nobody, and the architect, which holds accepting itself, is told once.
+//
+// Linger holds a member of a closed tree where it stood (record.TreeLingers): every role of it is
+// suspended there, so a gate that moves then tells nobody, as a CI settlement tells nobody.
+func (e *Engine) tellGateMoved(ctx context.Context, tx pgx.Tx, key string, version int, open bool) error {
+	root, err := e.store.Issue(ctx, tx, key)
+	if err != nil || root == nil {
+		return err
+	}
+	if lingers, err := record.TreeLingers(ctx, e.store, tx, root.Tree); err != nil || lingers {
+		return err
+	}
+	project, err := claim.ProjectToken(root.Project)
+	if err != nil {
+		return err
+	}
+	// The tree's architect owns the tree, so its claim is the tree root's; the phase it works
+	// itself (accepting) is that same claim, and is told once with it.
+	architect, err := claim.NewToken(project, root.Tree, claim.RoleArchitect)
+	if err != nil {
+		return err
+	}
+	members, err := e.store.TreeIssues(ctx, tx, root.Tree)
+	if err != nil {
+		return err
+	}
+	moved := "closed"
+	detail := "a new version of the spec is with its reviewer, so the design you are working to may change. Your phase goes on; the merge waits until the gate opens again."
+	if open {
+		moved = "opened"
+		detail = "the version is approved, so the design you are working to is the approved one. A merge the closed gate held is released."
+	}
+	body := fmt.Sprintf("The design gate of %s %s at spec version %d: %s", root.Tree, moved, version, detail)
+	told := []claim.Token{architect}
+	for _, member := range members {
+		role := RoleFor(member.Phase)
+		if role == "" || role == claim.RoleArchitect {
+			continue
+		}
+		token, err := claim.NewToken(project, member.Key, role)
+		if err != nil {
+			return err
+		}
+		if slices.Contains(told, token) {
+			continue
+		}
+		told = append(told, token)
+		if err := e.enqueue(ctx, tx, member.Key, record.RoleMessage{Role: string(token), Body: body}); err != nil {
+			return err
+		}
+	}
+	e.logOnCommit(ctx, "workflow: the design gate moved and every phase holder of the tree is told", "issue", key, "tree", root.Tree,
+		"version", version, "open", open, "told", len(told))
+	return e.enqueue(ctx, tx, root.Tree, record.RoleMessage{Role: string(architect), Body: body})
 }
 
 // tellChangesOnce tells fact's changes request to its issue's architect once, by a notice or by the

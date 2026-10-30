@@ -155,6 +155,9 @@ func (d *postingDispatch) GetIssue(_ context.Context, key string) (dispatch.Issu
 func (d *postingDispatch) SetStatus(context.Context, string, string) (dispatch.Issue, error) {
 	return dispatch.Issue{}, errors.New("postingDispatch takes no status")
 }
+func (d *postingDispatch) SetStatusAt(ctx context.Context, issue dispatch.Issue, status string) (dispatch.Issue, error) {
+	return d.SetStatus(ctx, issue.Key, status)
+}
 func (d *postingDispatch) HandOver(context.Context, dispatch.Issue, string) error {
 	return errors.New("postingDispatch takes no hand-over")
 }
@@ -219,6 +222,9 @@ func (d *laneBoard) SetStatus(_ context.Context, _ string, status string) (dispa
 	d.status = status
 	d.landed = append(d.landed, status)
 	return dispatch.Issue{}, nil
+}
+func (d *laneBoard) SetStatusAt(ctx context.Context, issue dispatch.Issue, status string) (dispatch.Issue, error) {
+	return d.SetStatus(ctx, issue.Key, status)
 }
 func (d *laneBoard) HandOver(context.Context, dispatch.Issue, string) error {
 	return errors.New("laneBoard takes no hand-over")

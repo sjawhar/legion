@@ -289,12 +289,12 @@ func (s *server) implementationPullRequest(w http.ResponseWriter, r *http.Reques
 // (CHECK_VERDICT_REQUIRED). No commit is read: the look pushed nothing. No run is read either: the
 // check fences itself on the issue and the look the route read as the current one, which the
 // engine holds the report to (CHECK_LOOK_NOT_OPEN), rather than on the claim's run, since the look's
-// task is no phase's run and a woken session may hold an older one. The event is the issue, the
+// task is no phase's run and a woken session may hold an older one. However that look ended, its
+// report counts while the check is open (dispatch://INFRA-714/spec R12). The event is the issue, the
 // check (record.ProductionCheck.ID: a later merge of the same issue replaces the check and counts
 // its looks from one again, and the rerun's report on look 1 is a new fact, not the first check's),
-// the look and the verdict: a retried report of the same look is the same fact, and a refusal — the
-// look ended by its bound before the report landed — is recorded as processed under it, so the
-// report of the next look is a new fact.
+// the look and the verdict: a retried report of the same look is the same fact, and one the engine
+// refuses is left unmarked (intake's ApplyFact), so the implementer's next send of it applies.
 func (s *server) checkReport(w http.ResponseWriter, r *http.Request, grant credential.Grant, check *record.ProductionCheck, req HandoffCompleteRequest) {
 	if check == nil || !check.Open() {
 		writeFailure(w, http.StatusConflict, "CHECK_NOT_OPEN", fmt.Sprintf("%s has no open production check; this completion changed nothing", grant.Issue))

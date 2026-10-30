@@ -120,7 +120,7 @@ func TestRegisteredOpenGateRecordsChildAndStartsPlanningInTheSameFact(t *testing
 	if tree != "LEGION-208" || gotPhase != string(phase.Planning) {
 		t.Fatalf("child tree/phase = %q/%q, want LEGION-208/planning", tree, gotPhase)
 	}
-	assertOutboxKinds(t, pool, []string{"issue_branch", "supervise", "notice"})
+	assertOutboxKinds(t, pool, []string{"issue_branch", "dispatch_status", "supervise", "notice"})
 	var branchIssue string
 	var generation int
 	if err := pool.QueryRow(ctx, "select issue, (payload->>'generation')::int from outbox where kind = 'issue_branch'").Scan(&branchIssue, &generation); err != nil {

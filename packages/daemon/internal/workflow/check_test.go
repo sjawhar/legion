@@ -173,8 +173,9 @@ func TestAPassOfARootsCheckClosesItsImplementerAndSuspendsTheIssue(t *testing.T)
 }
 
 // A report is refused, and changes nothing, on an issue with no open check (none, or one closed),
-// on a look that is not the open one (ended by its bound or a hold, or an earlier look), and with
-// a verdict other than pass, pending or fail.
+// on a look that is not the check's current one (an earlier look, the check having moved on), and
+// with a verdict other than pass, pending or fail. A report of the current look is taken however
+// that look ended (TestALateReportOfTheCurrentLookIsRecorded).
 func TestACheckReportIsRefusedWhereNoLookIsOpenToIt(t *testing.T) {
 	rig := childCheckRig(t, "")
 	if got := refusalCode(rig.apply("no-check", intake.CheckReport{Issue: "LEGION-208", Look: 1, Verdict: "pass"})); got != "CHECK_NOT_OPEN" {
@@ -184,16 +185,16 @@ func TestACheckReportIsRefusedWhereNoLookIsOpenToIt(t *testing.T) {
 		t.Fatalf("a report with verdict maybe = %q, want CHECK_VERDICT_REQUIRED", got)
 	}
 	if got := refusalCode(rig.apply("wrong-look", intake.CheckReport{Issue: "LEGION-209", Look: 2, Verdict: "pass"})); got != "CHECK_LOOK_NOT_OPEN" {
-		t.Fatalf("a report naming look 2 while look 1 is open = %q, want CHECK_LOOK_NOT_OPEN", got)
+		t.Fatalf("a report naming look 2 while the check is at look 1 = %q, want CHECK_LOOK_NOT_OPEN", got)
 	}
 	if check := productionCheck(t, rig.pool, "LEGION-209"); check == nil || !check.Open() || !check.LookOpen || check.Looks != 1 {
 		t.Fatalf("the check after the refused reports = %+v, want it untouched at look 1 open", check)
 	}
 	rig.apply("pending", intake.CheckReport{Issue: "LEGION-209", Look: 1, Verdict: "pending"})
-	if got := refusalCode(rig.apply("old-look", intake.CheckReport{Issue: "LEGION-209", Look: 1, Verdict: "pass"})); got != "CHECK_LOOK_NOT_OPEN" {
-		t.Fatalf("a second report of look 1 = %q, want CHECK_LOOK_NOT_OPEN", got)
-	}
 	rig.apply("deployed", intake.IssueDeployed{Issue: "LEGION-209", Repo: "sjawhar/legion", Number: 43, RunID: 77, CompletedAt: checkOpened.Add(time.Hour)})
+	if got := refusalCode(rig.apply("old-look", intake.CheckReport{Issue: "LEGION-209", Look: 1, Verdict: "pass"})); got != "CHECK_LOOK_NOT_OPEN" {
+		t.Fatalf("a report of look 1 once the check is at look 2 = %q, want CHECK_LOOK_NOT_OPEN", got)
+	}
 	rig.apply("pass", intake.CheckReport{Issue: "LEGION-209", Look: 2, Verdict: "pass"})
 	if got := refusalCode(rig.apply("closed", intake.CheckReport{Issue: "LEGION-209", Look: 2, Verdict: "pass"})); got != "CHECK_NOT_OPEN" {
 		t.Fatalf("a report on a closed check = %q, want CHECK_NOT_OPEN", got)

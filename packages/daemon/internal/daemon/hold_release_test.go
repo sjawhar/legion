@@ -258,6 +258,9 @@ func (d *pilotDispatch) GetIssue(context.Context, string) (dispatch.Issue, error
 func (d *pilotDispatch) SetStatus(context.Context, string, string) (dispatch.Issue, error) {
 	return dispatch.Issue{}, nil
 }
+func (d *pilotDispatch) SetStatusAt(ctx context.Context, issue dispatch.Issue, status string) (dispatch.Issue, error) {
+	return d.SetStatus(ctx, issue.Key, status)
+}
 func (d *pilotDispatch) PostMessage(context.Context, string, string) error { return nil }
 func (d *pilotDispatch) HandOver(context.Context, dispatch.Issue, string) error {
 	return nil
@@ -305,6 +308,9 @@ func (d *filteringDispatch) GetIssue(context.Context, string) (dispatch.Issue, e
 }
 func (d *filteringDispatch) SetStatus(context.Context, string, string) (dispatch.Issue, error) {
 	return dispatch.Issue{}, nil
+}
+func (d *filteringDispatch) SetStatusAt(ctx context.Context, issue dispatch.Issue, status string) (dispatch.Issue, error) {
+	return d.SetStatus(ctx, issue.Key, status)
 }
 func (d *filteringDispatch) PostMessage(context.Context, string, string) error { return nil }
 func (d *filteringDispatch) HandOver(context.Context, dispatch.Issue, string) error {

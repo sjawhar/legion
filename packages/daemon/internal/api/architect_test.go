@@ -146,6 +146,12 @@ func (r *statusRecorder) SetStatus(_ context.Context, issue, status string) (dis
 	return written, nil
 }
 
+// SetStatusAt is the fenced write, which no architect route makes: the daemon's own queued writes
+// take it, and they run in the outbox.
+func (r *statusRecorder) SetStatusAt(context.Context, dispatch.Issue, string) (dispatch.Issue, error) {
+	return dispatch.Issue{}, errors.New("the architect routes write no status at a sequence")
+}
+
 func (r *statusRecorder) HandOver(context.Context, dispatch.Issue, string) error {
 	return errors.New("the architect routes hand nothing over")
 }

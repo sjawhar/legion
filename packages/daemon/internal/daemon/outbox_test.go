@@ -99,6 +99,13 @@ func (d *outboxDispatch) SetStatus(_ context.Context, _ string, status string) (
 	d.statuses = append(d.statuses, status)
 	return dispatch.Issue{}, d.statusErr
 }
+
+// SetStatusAt is the fenced write the outbox's status row makes, which this stand-in takes as any
+// other: a test that drives the sequence fence runs against the real Dispatch
+// (status_scratch_dispatch_test.go).
+func (d *outboxDispatch) SetStatusAt(ctx context.Context, issue dispatch.Issue, status string) (dispatch.Issue, error) {
+	return d.SetStatus(ctx, issue.Key, status)
+}
 func (d *outboxDispatch) HandOver(_ context.Context, issue dispatch.Issue, status string) error {
 	d.handOvers = append(d.handOvers, fmt.Sprintf("%s %s %v", issue.Key, status, issue.Labels))
 	if d.handOverHook != nil {

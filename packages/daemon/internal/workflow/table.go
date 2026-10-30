@@ -60,10 +60,34 @@ type Row struct {
 
 func allow(Snapshot) bool { return true }
 
+// PhaseStatus is the Dispatch status an issue standing in to shows: what a row that moves an issue
+// into to writes, and what the boot writes for an issue whose status is not its phase's
+// (Engine.correctStatuses). An issue in planning or implementing is in_progress, which is where a
+// child first shows that Legion works it (dispatch://INFRA-714/spec R4); merging keeps retro,
+// which the row into it writes none over. Phases where an issue waits rather than works — admitted
+// before its first phase, held, and awaiting_person, where the root keeps the status of the phase
+// it waits in — have no status of their own, and neither has a phase outside the workflow but done.
+func PhaseStatus(to phase.Phase) string {
+	switch to {
+	case phase.Planning, phase.Implementing:
+		return "in_progress"
+	case phase.Testing:
+		return "testing"
+	case phase.Reviewing, phase.Accepting:
+		return "needs_review"
+	case phase.Retro, phase.Merging:
+		return "retro"
+	case phase.Done:
+		return "done"
+	}
+	return ""
+}
+
 // Table is the complete workflow transition table. Rows, not switch-case scheduling, define every
 // phase change. Backward rows exist for every allowed target so coverage detects a deleted edge.
+// Every status a row writes is its target phase's (PhaseStatus).
 var Table = append([]Row{
-	{From: phase.Admitted, Trigger: TriggerGateOpened, Guard: allow, To: phase.Planning, Effects: []EffectKind{EffectStart, EffectNotice}},
+	{From: phase.Admitted, Trigger: TriggerGateOpened, Guard: allow, To: phase.Planning, Status: "in_progress", Effects: []EffectKind{EffectStatus, EffectStart, EffectNotice}},
 	{From: phase.Planning, Trigger: TriggerPlannerCompleted, Guard: allow, To: phase.Implementing, Effects: []EffectKind{EffectStart, EffectNotice}},
 	{From: phase.Implementing, Trigger: TriggerImplementationReady, Guard: func(s Snapshot) bool { return s.HasOpenOrMergedPR }, To: phase.Testing, Status: "testing", Effects: []EffectKind{EffectStatus, EffectStart, EffectNotice}},
 	{From: phase.Testing, Trigger: TriggerTesterPassed, Guard: allow, To: phase.Reviewing, Status: "needs_review", Effects: []EffectKind{EffectStatus, EffectStart, EffectNotice}},

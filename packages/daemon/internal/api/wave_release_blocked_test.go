@@ -274,14 +274,17 @@ func TestWaveReleaseRecordsABacklogChildFromItsOwnWrite(t *testing.T) {
 	if wantWrites := []statusWrite{{blocked, "todo"}, {free, "todo"}}; !reflect.DeepEqual(statuses.writes, wantWrites) {
 		t.Fatalf("Dispatch writes = %#v, want %#v", statuses.writes, wantWrites)
 	}
+	// A child the release starts shows its phase's status, in_progress, from its first phase; one
+	// held at admitted has started nothing and stays todo.
 	wantPhase := map[string]phase.Phase{blocked: phase.Admitted, free: phase.Planning}
+	wantStatus := map[string]string{blocked: "todo", free: "in_progress"}
 	before := map[string]record.Issue{}
 	rowsBefore := map[string]map[string]int{}
 	for _, key := range []string{blocked, free} {
 		recorded := recordedChild(t, h, key)
-		if recorded == nil || recorded.Tree != releaseRoot || recorded.Phase != wantPhase[key] || recorded.Generation != 1 || recorded.LastDispatchSeq != 8 || recorded.Status != "todo" {
-			t.Fatalf("the record of %s as the release answered = %#v, want it in %s's tree at %s, generation 1, at the write's sequence 8",
-				key, recorded, releaseRoot, wantPhase[key])
+		if recorded == nil || recorded.Tree != releaseRoot || recorded.Phase != wantPhase[key] || recorded.Generation != 1 || recorded.LastDispatchSeq != 8 || recorded.Status != wantStatus[key] {
+			t.Fatalf("the record of %s as the release answered = %#v, want it in %s's tree at %s, %s, generation 1, at the write's sequence 8",
+				key, recorded, releaseRoot, wantPhase[key], wantStatus[key])
 		}
 		before[key], rowsBefore[key] = *recorded, outboxRows(t, h, key)
 	}
@@ -334,9 +337,16 @@ func TestWaveReleaseReentersAParkedChildFromItsOwnWrite(t *testing.T) {
 			if !reflect.DeepEqual(response, want) {
 				t.Fatalf("release answered %#v, want %#v", response, want)
 			}
+			// A child started at planning shows in_progress from that first phase; one held at
+			// admitted has started nothing and stays todo.
+			wantStatus := "todo"
+			if tc.phase == phase.Planning {
+				wantStatus = "in_progress"
+			}
 			recorded := recordedChild(t, h, child)
-			if recorded == nil || recorded.Phase != tc.phase || recorded.Generation != 2 || recorded.Status != "todo" || recorded.LastDispatchSeq != 8 {
-				t.Fatalf("the record of %s as the release answered = %#v, want its next run, generation 2, at %s, at the write's sequence 8", child, recorded, tc.phase)
+			if recorded == nil || recorded.Phase != tc.phase || recorded.Generation != 2 || recorded.Status != wantStatus || recorded.LastDispatchSeq != 8 {
+				t.Fatalf("the record of %s as the release answered = %#v, want its next run, generation 2, at %s, %s, at the write's sequence 8",
+					child, recorded, tc.phase, wantStatus)
 			}
 			rows := outboxRows(t, h, child)
 

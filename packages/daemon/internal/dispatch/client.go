@@ -133,6 +133,24 @@ func (c *HTTPClient) SetStatus(ctx context.Context, key, status string) (Issue, 
 	return response.issue(), nil
 }
 
+// SetStatusAt is SetStatus fenced on the issue's sequence as the caller read it
+// (expected_sequence), as HandOver fences its own write: Dispatch refuses the write with
+// ISSUE_CHANGED when anything was recorded on the issue since that read, rather than writing over
+// it. Every event moves the sequence, the daemon's own messages among them, so a refusal says only
+// that the read is stale: the caller reads the issue again and decides from what it then shows
+// (the outbox's status row).
+func (c *HTTPClient) SetStatusAt(ctx context.Context, issue Issue, status string) (Issue, error) {
+	var response issueResponse
+	if err := c.request(ctx, http.MethodPatch, "/api/v1/issues/"+url.PathEscape(issue.Key), daemonWrite{
+		Status:           status,
+		ExpectedSequence: issue.LastSeq,
+		Actor:            daemonActor(issue.Key),
+	}, &response); err != nil {
+		return Issue{}, err
+	}
+	return response.issue(), nil
+}
+
 // HandOver writes issue's status for its hand-over to Legion, on the issue's sequence as the client
 // read it (expected_sequence), so a person's move since that read is refused (ISSUE_CHANGED) rather
 // than overwritten. An issue that does not yet carry LegionLabel has it added in the same PATCH

@@ -26,7 +26,11 @@ import (
 // check_compare row per check, whose GitHub read wakes the check when the build carries its
 // merge. A boot with no revision — every non-release build — compares nothing.
 //
-// Third, the resume by rule: every claim of this project that owns its issue's current phase and
+// Third, the correction of statuses (correctStatuses): an issue whose Dispatch status is not its
+// phase's gets the write that moves it, so an issue already in a phase when a daemon that writes
+// that phase's status is deployed is corrected at the deploy rather than at its next transition.
+//
+// Fourth, the resume by rule: every claim of this project that owns its issue's current phase and
 // that the daemon or its own exit suspended (supervise's ByRule) is started again. Nothing else
 // would start it: the phase's start ran before the restart, a re-admission's starts are queued
 // only when a tree is re-admitted, and the next start is the next phase's. This is the one trigger
@@ -68,6 +72,9 @@ func (e *Engine) booted(ctx context.Context, tx pgx.Tx, fact intake.DaemonBooted
 	}
 	slots, err := e.store.Slots(ctx, tx)
 	if err != nil {
+		return intake.Result{}, err
+	}
+	if err := e.correctStatuses(ctx, tx, issues); err != nil {
 		return intake.Result{}, err
 	}
 	byKey := make(map[string]record.Issue, len(issues))
@@ -123,6 +130,38 @@ func (e *Engine) booted(ctx context.Context, tx pgx.Tx, fact intake.DaemonBooted
 			"phase", issue.Phase, "suspendedBy", held.SuspendedBy)
 	}
 	return intake.Result{}, nil
+}
+
+// correctStatuses queues the status write of every issue of this project in the workflow whose
+// recorded status is not its phase's (PhaseStatus), and records that status as the issue's. A
+// transition writes its phase's status as it moves an issue, so this reaches only an issue that
+// was already standing in its phase when a daemon that writes that status was deployed: the
+// children planning and implementing under the older daemon, which Dispatch still shows `todo`
+// (dispatch://INFRA-714/spec R4).
+//
+// The write goes through the outbox like every other, so it is fenced as every other is: it writes
+// only while Dispatch still shows the status the record held when the row was queued, and only at
+// the sequence the row's own read found, so a change a person made meanwhile stands and the record
+// takes it instead (the daemon's status row). An issue outside the workflow, one waiting before
+// its first phase, and one held or waiting on a person keep what they show: those phases have no
+// status of their own.
+func (e *Engine) correctStatuses(ctx context.Context, tx pgx.Tx, issues []record.Issue) error {
+	for _, issue := range issues {
+		want := PhaseStatus(issue.Phase)
+		if issue.Project != e.cfg.Project || !InWorkflow(issue) || want == "" || want == issue.Status {
+			continue
+		}
+		if err := e.status(ctx, tx, issue, want); err != nil {
+			return err
+		}
+		issue.Status = want
+		if err := e.store.PutIssue(ctx, tx, issue); err != nil {
+			return err
+		}
+		e.logOnCommit(ctx, "workflow: the boot writes the status of a phase an issue already stood in", "issue", issue.Key,
+			"phase", issue.Phase, "status", want)
+	}
+	return nil
 }
 
 // sweepMerged closes every issue of the project that awaits a merge GitHub already reported

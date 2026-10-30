@@ -494,10 +494,99 @@ func (r *outbox) status(ctx context.Context, row record.OutboxRow, payload recor
 			return err
 		}
 	}
-	if _, err := r.dispatch.SetStatus(ctx, row.Issue, payload.Status); err != nil {
-		return fmt.Errorf("set Dispatch issue %s to %s: %w", row.Issue, payload.Status, err)
+	return r.writeStatus(ctx, row, payload, issue)
+}
+
+// statusWriteReads bounds how often one status row reads its issue again after Dispatch refused
+// the write at the sequence that row read (ISSUE_CHANGED). Every event moves an issue's sequence,
+// the daemon's own message posts among them, so a refusal usually says only that the read was
+// overtaken and the next one wins; a run of them is an issue being edited faster than the daemon
+// writes, which the row's own backoff waits out rather than this loop spinning on.
+const statusWriteReads = 3
+
+// writeStatus writes payload's status on the sequence of the read this row has just made
+// (dispatch.Client.SetStatusAt), so a change Dispatch recorded after that read is refused rather
+// than written over (dispatch://INFRA-714/spec R4). The sequence is the read's, never the one the
+// phase decision saw: every event moves it, the daemon's own posts included, so a row carrying
+// that older number would be refused almost every time.
+//
+// ISSUE_CHANGED is no failure of the write and no permanent refusal (dispatch.PermanentRefusal),
+// so nothing is dropped over it. The row reads the issue again, applies what Dispatch then shows
+// to the record as the event that made it would (applyRead) — which is how a close the daemon
+// learns of only here takes its issue out of the workflow — and writes again only while that
+// fresh read still shows the issue in the workflow and not closed (statusStillWanted). A read
+// already at the status the row carries is this write's work, done by someone else.
+func (r *outbox) writeStatus(ctx context.Context, row record.OutboxRow, payload record.StatusWrite, read dispatch.Issue) error {
+	for range statusWriteReads {
+		_, err := r.dispatch.SetStatusAt(ctx, read, payload.Status)
+		if err == nil {
+			return nil
+		}
+		var refusal *dispatch.Error
+		if !errors.As(err, &refusal) || refusal.Code != "ISSUE_CHANGED" {
+			return fmt.Errorf("set Dispatch issue %s to %s: %w", row.Issue, payload.Status, err)
+		}
+		if read, err = r.dispatch.GetIssue(ctx, row.Issue); err != nil {
+			return fmt.Errorf("read Dispatch issue %s again after it changed under the status write: %w", row.Issue, err)
+		}
+		if err := r.applyRead(ctx, read); err != nil {
+			return err
+		}
+		if read.Status == payload.Status {
+			r.log.Info("outbox status write found Dispatch already at its status after the issue changed under it",
+				"row", row.ID, "issue", row.Issue, "status", payload.Status)
+			return nil
+		}
+		wanted, err := r.statusStillWanted(ctx, row, payload, read)
+		if err != nil || !wanted {
+			return err
+		}
+	}
+	return fmt.Errorf("set Dispatch issue %s to %s: it changed under each of the %d reads this attempt made",
+		row.Issue, payload.Status, statusWriteReads)
+}
+
+// applyRead applies what Dispatch shows of an issue to the record, through the fact path every
+// event takes (intake.ReadIssue), under the read's own sequence as its fact id: the change that
+// refused this row's write reaches the workflow now rather than whenever the consumer delivers
+// its event, so a close learned of here takes the issue out of the workflow and a park stops it.
+// A read Dispatch answered with no sequence carries no fence and applies nothing.
+func (r *outbox) applyRead(ctx context.Context, read dispatch.Issue) error {
+	if read.LastSeq <= 0 || r.pool == nil {
+		return nil
+	}
+	if _, err := intake.ApplyFact(ctx, r.pool, "dispatch-read", fmt.Sprintf("status:%s:%d", read.Key, read.LastSeq),
+		intake.ReadIssue(read), r.handlers...); err != nil {
+		return fmt.Errorf("apply what Dispatch shows of %s at sequence %d: %w", read.Key, read.LastSeq, err)
 	}
 	return nil
+}
+
+// statusStillWanted says whether a row may write its status after its issue changed under it: the
+// fresh read shows a status still in the workflow — neither done nor parked
+// (record.OutOfWorkflow) — and the record, which has just taken that read (applyRead), still has
+// the issue in the workflow too. A close or a park is the issue's state now, and the status this
+// row carries is of a workflow the issue has left, so the row finishes having written nothing. An
+// issue the daemon keeps no record of is judged by the read alone.
+func (r *outbox) statusStillWanted(ctx context.Context, row record.OutboxRow, payload record.StatusWrite, read dispatch.Issue) (bool, error) {
+	left := record.OutOfWorkflow(read.Status)
+	if !left {
+		var issue *record.Issue
+		if err := pgx.BeginFunc(ctx, r.pool, func(tx pgx.Tx) error {
+			var err error
+			issue, err = r.records.Issue(ctx, tx, row.Issue)
+			return err
+		}); err != nil {
+			return false, fmt.Errorf("read workflow issue %s after it changed under its status write: %w", row.Issue, err)
+		}
+		left = issue != nil && !workflow.InWorkflow(*issue)
+	}
+	if left {
+		r.log.Info("outbox status write finished without writing: its issue left the workflow while the write was on its way",
+			"row", row.ID, "issue", row.Issue, "status", payload.Status, "dispatch", read.Status)
+		return false, nil
+	}
+	return true, nil
 }
 
 // consumeHandover applies the hand-over to the record once Dispatch shows it: the row's hand-over
@@ -793,6 +882,20 @@ func (r *outbox) supervise(ctx context.Context, row record.OutboxRow, payload re
 				r.log.Info("outbox start of a member of a lingering tree; finished without acting", "row", row.ID, "issue", issue.Key,
 					"tree", issue.Tree, "role", payload.Role)
 				return nil
+			}
+		}
+		// The merger merges nothing while its tree's design gate is closed: a new version of the
+		// spec is with its reviewer, and what may merge is what that review decides
+		// (dispatch://INFRA-714/spec R5). The start waits on the row's backoff, as a check start
+		// waits on its look (checkLookHolds), and runs when the gate opens again — the opening
+		// tells every phase holder of the tree as well (workflow's tellGateMoved).
+		if payload.Role == claim.RoleMerger {
+			closed, err := r.designGateClosed(ctx, issue)
+			if err != nil {
+				return err
+			}
+			if closed {
+				return wait.Errorf("the merger of %s waits for the design gate of %s to open", issue.Key, issue.Tree)
 			}
 		}
 		// A child carried into a tree of its own — a finished root's hand-over, or a person's label
@@ -1314,6 +1417,23 @@ func (r *outbox) linger(ctx context.Context, row record.OutboxRow, payload recor
 		return fmt.Errorf("apply linger expiration for %s: %w", row.Issue, err)
 	}
 	return nil
+}
+
+// designGateClosed says whether the design gate of the issue's tree is closed, which holds the
+// merger's start (supervise): the gate is the tree root's, so every member of the tree reads the
+// same one, and a tree with no gate recorded — nothing registered one, or the project's design
+// gate is off, which registers it approved — holds nothing. It is read just before the row acts,
+// as every other fence of a row is.
+func (r *outbox) designGateClosed(ctx context.Context, issue record.Issue) (bool, error) {
+	var gate *record.DesignGate
+	if err := pgx.BeginFunc(ctx, r.pool, func(tx pgx.Tx) error {
+		var err error
+		gate, err = r.records.Gate(ctx, tx, issue.Tree)
+		return err
+	}); err != nil {
+		return false, fmt.Errorf("read the design gate of %s: %w", issue.Tree, err)
+	}
+	return gate != nil && !classify.DesignGateOpen(*gate), nil
 }
 
 // checkLookHolds is the production check a check start row still has a look to start in, nil for

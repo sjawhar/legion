@@ -190,9 +190,14 @@ func (e *Engine) dispatchIssue(ctx context.Context, tx pgx.Tx, fact intake.Dispa
 	}
 	// The record keeps the repository it was recorded with, so a newer event resolving the issue
 	// to another is not applied, which the issue is told. This runs before any fence below: an
-	// edit of the repository alone changes no status.
+	// edit of the repository alone changes no status. So does the telling of a root a person has
+	// made a child of a live tree (tellReparented), which is a parent change and often no status
+	// change at all.
 	if fact.Seq == 0 || fact.Seq > issue.LastDispatchSeq {
 		if err := e.NoteRepositoryKept(ctx, tx, *issue, fact.ResolvedRepo); err != nil {
+			return intake.Result{}, err
+		}
+		if err := e.tellReparented(ctx, tx, issue, fact); err != nil {
 			return intake.Result{}, err
 		}
 	}
@@ -444,9 +449,18 @@ func (e *Engine) ReenterChild(ctx context.Context, tx pgx.Tx, child record.Issue
 // person's move of a child to todo, and a rerun or reopen through ReenterChild — so it is where a
 // child that waits on an unfinished Dispatch issue is withheld. Such a child is recorded and left
 // at phase.Admitted, exactly as a child whose tree's design gate is still closed is, and
-// StartUnblockedChildren starts it once the last issue it waits on is done. What it waits on is
-// read from the mirror, which the blockers.Mirror handler wrote this very event's row into, in
-// this same transaction, before the engine was asked anything.
+// StartUnblockedChildren starts it once the last issue it waits on is done.
+//
+// What it waits on is the union of two lists: the mirror's row, which the blockers.Mirror handler
+// wrote this very event's row into, in this same transaction, before the engine was asked
+// anything; and the list the fact itself carries (intake.DispatchIssue.Blockers), which is the
+// event's own, or, for a root a release of children adopts, what that release read from Dispatch
+// (intake.AdoptedChild.BlockedBy). The two agree for a live event. They do not for an adoption:
+// the mirror holds what the daemon's consumer has delivered, and a person who re-parents an issue
+// and links it to another in one edit leaves the release's read ahead of it — which is how three
+// re-parented roots were answered released and started with their blockers open
+// (dispatch://INFRA-714/spec R3). Neither list alone is the truth, so a blocker in either holds
+// the child.
 func (e *Engine) enterChild(ctx context.Context, tx pgx.Tx, root record.Issue, fact intake.DispatchIssue, generation uint64, at Resolution) error {
 	parentKey := fact.Parent
 	child := record.Issue{Key: fact.Key, Tree: root.Tree, Project: root.Project, Title: fact.Title, Parent: &parentKey, Phase: phase.Admitted,
@@ -455,11 +469,19 @@ func (e *Engine) enterChild(ctx context.Context, tx pgx.Tx, root record.Issue, f
 	if err := e.store.PutIssue(ctx, tx, child); err != nil {
 		return err
 	}
-	rows, err := blockers.Load(ctx, tx, e.store, e.cfg.Project, []string{child.Key})
+	rows, err := blockers.Load(ctx, tx, e.store, e.cfg.Project, append([]string{child.Key}, fact.Blockers...))
 	if err != nil {
 		return err
 	}
-	if waits := blockers.Holds(rows, child); len(waits) > 0 {
+	waits := blockers.Holds(rows, child)
+	if blockers.Holdable(child) {
+		for _, key := range blockers.UnfinishedOf(rows, fact.Blockers) {
+			if !slices.Contains(waits, key) {
+				waits = append(waits, key)
+			}
+		}
+	}
+	if len(waits) > 0 {
 		e.logOnCommit(ctx, "workflow: the child waits on unfinished work, so it is recorded admitted and not started",
 			"issue", child.Key, "tree", child.Tree, "blockers", waits)
 		return nil

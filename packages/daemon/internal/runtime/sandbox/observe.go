@@ -414,24 +414,6 @@ func fetchRepository(pod *corev1.Pod) (ghrepo.Repository, bool) {
 	return ghrepo.Repository{}, false
 }
 
-// failedInit includes a failed attempt the kubelet is restarting under restartPolicy Always.
-// A later successful termination wins over LastTerminationState.
-func failedInit(pod *corev1.Pod) (string, *corev1.ContainerStateTerminated) {
-	if pod == nil {
-		return "", nil
-	}
-	for _, status := range pod.Status.InitContainerStatuses {
-		ended := status.State.Terminated
-		if ended == nil {
-			ended = status.LastTerminationState.Terminated
-		}
-		if ended != nil && ended.ExitCode != 0 {
-			return status.Name, ended
-		}
-	}
-	return "", nil
-}
-
 func containerStatus(pod *corev1.Pod, name string) *corev1.ContainerStatus {
 	for i := range pod.Status.ContainerStatuses {
 		if pod.Status.ContainerStatuses[i].Name == name {

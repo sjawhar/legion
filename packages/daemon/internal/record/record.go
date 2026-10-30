@@ -128,6 +128,14 @@ type Issue struct {
 	// adopts it, into the tree it left or any other, and no ancestry hold holds it. Empty for every
 	// other record.
 	HandedOverFrom string
+	// ToldParent is the Dispatch parent the issue was last told it stays its own tree under: a root
+	// that ran as a tree of its own, which no release of children and no admission sweep adopts
+	// (workflow's RanAsRoot), that a person has made a child of a live tree. The telling is one
+	// message on the issue and one notice to that tree's architect, sent once per parent value
+	// (workflow's tellReparented), so every later event under the same parent repeats nothing while
+	// a move under another live tree is told anew. Empty for every other record and for one never
+	// told.
+	ToldParent string
 	// Awaiting is what a root in phase awaiting_person waits on, nil in every other phase: the two
 	// change together, as Hold and held do.
 	Awaiting *Awaiting

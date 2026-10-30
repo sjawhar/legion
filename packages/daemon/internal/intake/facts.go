@@ -128,6 +128,23 @@ func OwnStatusWrite(written dispatch.Issue) DispatchIssue {
 	return event
 }
 
+// ReadIssue is Dispatch's read of an issue, applied as the change it shows: the state Dispatch
+// holds now, at the sequence it has run to, with no actor, since a read never says who wrote what
+// it shows. The outbox reads an issue again when Dispatch refuses its status write at the sequence
+// the row read (ISSUE_CHANGED) and applies the newer state through this, so the record learns of a
+// close or a park the daemon's consumer has not delivered yet rather than writing over it. It is a
+// status move (StatusMove) because the read is Dispatch's own answer, later than every event the
+// consumer still owes the daemon, so the record's view of what Dispatch last showed cannot judge
+// it.
+func ReadIssue(read dispatch.Issue) DispatchIssue {
+	event := ObservedIssue(read)
+	event.Observed, event.StatusMove, event.Type = false, true, "issue.updated"
+	if read.Status == "done" {
+		event.Type = "issue.closed"
+	}
+	return event
+}
+
 // ListedIssue is issue as Dispatch's issue listing shows it, as a fact at the issue's sequence, with
 // no event's type or actor: what a boot's reconcile records or prepares from.
 func ListedIssue(issue dispatch.IssueSummary) DispatchIssue {
@@ -160,10 +177,21 @@ type ChildAdoption struct {
 	Children []AdoptedChild
 }
 
-// AdoptedChild is one child a ChildAdoption moves into its tree, with its Dispatch parent.
+// AdoptedChild is one child a ChildAdoption moves into its tree, as the release's own Dispatch
+// read showed it: its Dispatch parent, the status and the keys it waits on, and the sequence
+// Dispatch had run to at that read. The daemon's mirror of those links can be older than the read
+// — a person's re-parent and link are one edit of Dispatch, whose event the consumer may not have
+// delivered — and an adopted root is already recorded, so no observation of it applies to correct
+// the mirror (settleObserved). The read therefore travels with the fact: the mirror takes it
+// (blockers.Mirror), behind the sequence fence every mirror write has, before the adoption judges
+// the child, and the workflow holds the child on it as well as on the mirror's row (workflow's
+// enterChild).
 type AdoptedChild struct {
-	Issue  string
-	Parent string
+	Issue     string
+	Parent    string
+	Status    string
+	BlockedBy []string
+	Seq       int64
 }
 
 func (ChildAdoption) isFact() {}
@@ -1055,6 +1083,16 @@ func ApplyFact(ctx context.Context, pool *pgxpool.Pool, source, eventID string, 
 			result.Refusal = candidate.Refusal
 		}
 	}
+	// A refused report of a production check leaves its event unmarked, so a report sent again —
+	// the same look and verdict, which is the same fact id its route mints (api's checkReport) —
+	// applies instead of being answered as one already received. It is this fact alone: an
+	// unmarked refusal of any other fact would make a refused handoff apply on its next delivery,
+	// which those refusals exist to stop (dispatch://INFRA-714/spec R12).
+	if _, report := fact.(CheckReport); report && result.Refusal != nil {
+		if err := record.NewStore().ForgetProcessed(ctx, tx, source, eventID); err != nil {
+			return Result{}, err
+		}
+	}
 	if err := tx.Commit(ctx); err != nil {
 		return Result{}, err
 	}
@@ -1064,8 +1102,9 @@ func ApplyFact(ctx context.Context, pool *pgxpool.Pool, source, eventID string, 
 }
 
 // Applied is which of eventIDs from source ApplyFact has already applied, read in one query and
-// outside the fact lock. A fact's processed_events row commits with the fact and is never removed,
-// so an id read here as applied is one ApplyFact would only take the lock to skip. A caller that
+// outside the fact lock. A fact's processed_events row commits with the fact, and only a refused
+// production check report removes its own (ApplyFact), so an id read here as applied is one
+// ApplyFact would only take the lock to skip. A caller that
 // replays many facts it has most likely applied before (the boot's terminal replay) applies only
 // the rest: the duplicates cost one read between them, not a transaction each queued on the lock
 // behind every live fact.

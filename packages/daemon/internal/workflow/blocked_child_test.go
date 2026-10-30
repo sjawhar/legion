@@ -108,12 +108,12 @@ func TestAChildReleasedWhileABlockerIsUnfinishedStaysAdmitted(t *testing.T) {
 	if got := phaseOf(t, pool, "LEGION-210"); got != phase.Planning {
 		t.Fatalf("the unblocked child = %s, want planning", got)
 	}
-	assertOutboxKinds(t, pool, []string{"issue_branch", "supervise", "notice"})
+	assertOutboxKinds(t, pool, []string{"issue_branch", "dispatch_status", "supervise", "notice"})
 }
 
-// The close of the last issue a held child waited on starts it: its branch row, its planner's
-// start behind that row, and one child-status notice to the tree's architect naming the issues it
-// waited on.
+// The close of the last issue a held child waited on starts it: its branch row, the write that
+// shows it in_progress from its first phase, its planner's start behind that row, and one
+// child-status notice to the tree's architect naming the issues it waited on.
 func TestAHeldChildStartsWhenItsLastBlockerCloses(t *testing.T) {
 	pool := migratedPool(t)
 	seedHeldTree(t, pool, record.DesignGate{Issue: "LEGION-208", ArtifactID: "artifact-208", LatestVersion: 3, ApprovedVersion: new(3)})
@@ -136,7 +136,7 @@ func TestAHeldChildStartsWhenItsLastBlockerCloses(t *testing.T) {
 	if got := phaseOf(t, pool, "LEGION-209"); got != phase.Planning {
 		t.Fatalf("the child = %s once every issue it waited on is done, want planning", got)
 	}
-	assertOutboxKinds(t, pool, []string{"issue_branch", "supervise", "notice", "notice"})
+	assertOutboxKinds(t, pool, []string{"issue_branch", "dispatch_status", "supervise", "notice", "notice"})
 	assertBranchRow(t, pool, "LEGION-209", 4)
 	assertPlannerStart(t, pool, "LEGION-209")
 	want := "LEGION-209 starts planning under LEGION-208: every issue it waited on (LEGION-300, LEGION-301) is done"
@@ -207,9 +207,9 @@ func blockedNow(t *testing.T, pool *pgxpool.Pool) []record.BlockedIssue {
 	return blocked
 }
 
-// The opening of a tree's design gate starts every admitted member it was holding, but not one
-// that waits on an unfinished issue of its own: that child's own blockers hold it where the gate
-// left it.
+// The opening of a tree's design gate tells every phase holder of the tree and its architect, and
+// starts every admitted member it was holding, but not one that waits on an unfinished issue of
+// its own: that child's own blockers hold it where the gate left it.
 func TestTheGateOpeningDoesNotStartAHeldChild(t *testing.T) {
 	pool := migratedPool(t)
 	seedHeldTree(t, pool, record.DesignGate{Issue: "LEGION-208", ArtifactID: "artifact-208", LatestVersion: 2})
@@ -228,7 +228,7 @@ func TestTheGateOpeningDoesNotStartAHeldChild(t *testing.T) {
 	if got := phaseOf(t, pool, "LEGION-210"); got != phase.Planning {
 		t.Fatalf("the child that waits on nothing = %s when the tree's gate opened, want planning", got)
 	}
-	assertOutboxKinds(t, pool, []string{"notice", "issue_branch", "supervise", "notice"})
+	assertOutboxKinds(t, pool, []string{"role_message", "role_message", "notice", "issue_branch", "dispatch_status", "supervise", "notice"})
 }
 
 // An unblocked child whose tree would not start it now is not started by this pass either: the
