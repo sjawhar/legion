@@ -2,7 +2,7 @@
   "schemaVersion": 1,
   "phase": "implement",
   "issue": "INFRA-251",
-  "completed": "2026-10-29T23:40:00Z",
+  "completed": "2026-10-30T01:31:20Z",
   "stateTable": [
     "Kept-decision hand-over: one rule",
     "",
@@ -16,77 +16,59 @@
     "1. none -> KEPT: the shared relay (`record.RelayParkedDecision`) or admission's `keepStaleApproval` keeps it.",
     "2. KEPT -> KEPT (newer): a newer decision on the same (root, ref) is upserted with `claimed_by = null`. The same happens to a replaced approval pair. A delivery that named the older version therefore never forgets the newer one.",
     "3. KEPT -> CLAIMED(r): in one transaction, admission's fresh start (or `claimReady` for a catch-up) names the KEPT rows (`ParkedDecisionTask`), enqueues row r carrying `Kept`, and claims those rows for r. Every such transaction runs under `intake.ApplyFact`'s one fact lock, so two namings cannot interleave.",
-    "4. CLAIMED(r) -> FORGOTTEN: the delivery is confirmed. For a start, `RequestDeliver` succeeds; for a catch-up, it publishes. In one transaction, the outbox deletes the rows r claimed and, for a start, writes `MarkProcessed(\"start-delivered\", r)`. Row r then finishes.",
+    "4. CLAIMED(r) -> FORGOTTEN: the delivery is made. For a start, `RequestDeliver` (carrying `Row: r`) queues the task and, in the same write as the delivery (`PutClaimAndDelivery`), sets the claim's `delivered_through` to r; for a catch-up, it publishes. Then, in a transaction of its own, the outbox deletes the rows r claimed. Row r then finishes.",
     "5. CLAIMED(r) -> KEPT (released): row r is deleted without step 4, and the FK sets `claimed_by` to null. This covers every branch where r finishes without acting: a stale generation, a phase left, a lingering tree, the pending-task skip, a superseded or undelivered catch-up, an unroutable notice, an ended architect, and `DropCatchUps`.",
     "6. CLAIMED(r) -> CLAIMED(r'): the re-hold queues r', a copy of catch-up r, and in the same transaction moves r's claims to r'. Then r finishes. The copy carries the claims; nothing is released for another delivery to name.",
-    "7. A retried start r finds `start-delivered:r` processed, so it skips `RequestDeliver` and the forget. It goes on to the running-architect `ClaimReady`, which `ApplyFact` keys once per row.",
+    "7. A retried start r (a forget or `ClaimReady` that failed, or a crash before r finished) asks `RequestDeliver` again with `Row: r`. The claim's `delivered_through` is r or newer, so `supervise.queue` accepts it and queues nothing, whether the delivery is still pending or already retired. The forget then runs again, and the running-architect `ClaimReady` is keyed once per row by `ApplyFact`.",
     "",
     "The reviewer's three windows:",
     "- Pending-task refusal: start S claimed D at step 3. The relaunch's ready runs `claimReady`, which names only KEPT rows, so its catch-up leaves D out. When S retries it delivers, and D is forgotten at step 4. D is told once.",
     "- A ready between `RequestDeliver` and the forget: D is still CLAIMED(S), so the catch-up leaves it out. Step 4 forgets it. D is told once.",
-    "- A crash in that gap: row S and its claim persist, and no mark committed. The retry's `RequestDeliver` with the same id and task is accepted as already queued (`supervise.queue`); then step 4 runs. Any catch-up meanwhile left D out. D is told once.",
-    "- The tester's edge (a retry after the delivery retired): the mark committed with the forget at step 4, so the retry skips the delivery (step 7). D is told once.",
+    "- A crash in that gap: row S and its claim persist, and the claim recorded S in `delivered_through` with the delivery. The retry queues nothing (step 7), then step 4's forget runs. Any catch-up meanwhile left D out. D is told once.",
+    "- The tester's edge (a retry after the forget failed and the architect's turn on the task ended, so the delivery retired): `delivered_through` still holds S after the retire, so the retry queues nothing (step 7). D is told once.",
     "- Never lost: a claim ends only at step 4 (told) or step 5 (released back to KEPT, so the next start or catch-up names it), and step 6 moves it. No row is left claimed by a row that no longer exists.",
     ""
   ],
   "proof": [
     {
-      "criterion": "Review 5705826477 finding 1: a second re-admission keeps a pair no start delivered under an armed gate; the pair is dropped only when a gate exists with no stale approval, or under gates.design off",
-      "surface": "Admission's readmit path (keepStaleApproval) and its architect start, on real PostgreSQL 17.2 in this issue's pod",
-      "command": "cd packages/daemon && LEGION_TEST_PG_DSN=postgres://postgres:pw@127.0.0.1:55432/postgres?sslmode=disable LEGION_TEST_NATS_URL=nats://127.0.0.1:54222 LEGION_TEST_NATS_MONITOR_URL=http://127.0.0.1:58222 go test -count=1 -run 'TestARootReadmittedTwiceWithNoStartDeliveredIsStillToldBothVersions|TestAReadmissionKeepsOrDropsTheApprovalAnEarlierKept|TestARootReadmittedOnAnOlderApprovalIsToldBothVersions' ./internal/admit/",
-      "observed": "PASS (inside admit ok 304.689s). Re-admitted twice under an armed gate, with the first start finishing undelivered, the second start still names both versions. The five keep-or-drop cases (armed: gate at latest, gate without approval, no gate; off: no gate, stale gate) keep only in the armed no-gate case.",
-      "headSha": "331bfa178058c52eb2a656f2834831b5f5301e42",
-      "negativeControl": "With keepStaleApproval's `gate == nil` branch dropping the pair (round 8's behaviour), the twice-re-admitted test FAILs with the second start's Task empty, and the armed no-gate case FAILs with 'kept approval after the re-admission = 0, <nil>; want 2'."
+      "criterion": "The tester's red test passes unmodified: a retried start after a failed forget is not delivered again after the architect's turn on it ended, so every kept decision reaches its architect once",
+      "surface": "Daemon outbox and supervise machine on a real PostgreSQL 17.2 and a local nats-server 2.10.29",
+      "command": "cd packages/daemon && LEGION_TEST_PG_DSN=postgres://postgres:pw@127.0.0.1:55432/postgres?sslmode=disable LEGION_TEST_NATS_URL=nats://127.0.0.1:54222 LEGION_TEST_NATS_MONITOR_URL=http://127.0.0.1:58222 go test -count=1 -v -run 'TestAStartWhoseForgetFailedIsNotDeliveredAgainAfterItsTurn|TestARetriedStartDeliversItsTaskOnce' ./internal/daemon/",
+      "observed": "Both PASS (0.75s, 0.65s). jj diff --from df02ec30801a --to f3ed0a13 on parked_decision_test.go: 0 files changed, so the red test is the tester's, unmodified.",
+      "headSha": "f3ed0a138f3c25555c1f0b93dfdf60718864a271",
+      "negativeControl": "With the supervise queue's DeliveredThrough check disabled (delivered := false && ...), both tests FAIL; restored, both pass. At the pushed head 9b011313 the red test FAILs at parked_decision_test.go:473 (the retried start queued outbox:72 again)."
     },
     {
-      "criterion": "Findings 2 and 3 under one rule: each kept decision is claimed by exactly one delivery, forgotten on its confirmed delivery, released if that delivery is abandoned, and a retried start skips RequestDeliver",
-      "surface": "The daemon outbox start and catch-up executors, workflow.claimReady and admission, against real PostgreSQL 17.2 and nats-server 2.10.29",
-      "command": "cd packages/daemon && LEGION_TEST_PG_DSN=postgres://postgres:pw@127.0.0.1:55432/postgres?sslmode=disable LEGION_TEST_NATS_URL=nats://127.0.0.1:54222 LEGION_TEST_NATS_MONITOR_URL=http://127.0.0.1:58222 go test -count=1 -run 'TestACatchUpLeavesOutWhatAQueuedStartClaims|TestARetriedStartDeliversItsTaskOnce|TestOnlyADeliveredStartForgetsTheDecisionsItNamed|TestOnlyADeliveredCatchUpForgetsTheDecisionsItNamed|TestAStartThatFindsTheRootArchitectRunningNamesEachKeptDecisionOnce' -v ./internal/daemon/",
-      "observed": "All PASS. When a start row claiming a decision is queued, the catch-up of a ready before it is delivered names none of the decisions it claims; the start's delivery then forgets them, leaving nothing. A start that is delivered, then retired when the architect's turn ends, and run again queues no second delivery and sends no prompt. The tester's red test from round 8 still passes, unmodified.",
-      "headSha": "331bfa178058c52eb2a656f2834831b5f5301e42",
-      "negativeControl": "Without the claim (EnqueueNaming skips ClaimKeptDecisions), TestACatchUpLeavesOutWhatAQueuedStartClaims FAILs ('the catch-up names dispatch://LEGION-1/ask/ask-1, which the queued start claims'). Without the delivered-mark skip, TestARetriedStartDeliversItsTaskOnce FAILs ('the retried start queued &supervise.Delivery{ID:\"outbox:71\" ...}, want no second delivery'). Each mutation was reverted."
-    },
-    {
-      "criterion": "Finding 4: every relay outcome logs one line on both paths, and a replay logs 'handled before', never 'already sent'; the verdict script counts it separately",
-      "surface": "Outbox parkDecision and the workflow ask relay logs, and scripts/e2e/lib/parked-decision-verdict.jq",
-      "command": "go test -count=1 -run 'TestAStoppedTreesSpecDecisionReportGoesToTheControllerOnce|TestAPersonsAnswerOnAParkedTreeGoesToTheController' ./internal/daemon/ ./internal/admit/; bun test scripts/e2e/lib/parked-decision-verdict.test.ts scripts/e2e/lib/parked-decision-cleanup.test.ts",
-      "observed": "PASS. The copy of a relayed decision logs 'outbox parked decision handled before under this key'. verdict + cleanup: 11 pass, 0 fail, including the check that every outbox line the verdict matches is the daemon's own text: sent, handled, kept, and the four not-relayed reasons.",
-      "headSha": "331bfa178058c52eb2a656f2834831b5f5301e42",
-      "negativeControl": "Before the change, TestAStoppedTreesSpecDecisionReportGoesToTheControllerOnce read the replay as 'outbox parked decision already sent to the controller', the false line the review named, and the verdict counted it under sent."
-    },
-    {
-      "criterion": "Minor: the start-forget test fails without the start path's forget",
-      "surface": "daemon outbox start executor test",
-      "command": "go test -count=1 -run TestOnlyADeliveredStartForgetsTheDecisionsItNamed ./internal/daemon/",
-      "observed": "PASS. The start's Kept now also names an answer on another ref that nothing replaces. After the delivery that row is gone, and bob's newer decision on the spec ref survives.",
-      "headSha": "331bfa178058c52eb2a656f2834831b5f5301e42",
-      "negativeControl": "With the start path's forgetKept call removed, the test FAILs ('kept after the delivered start = [...spec bob..., ...ask-1 alice...], want only the decision kept since it was named'). The removal was reverted."
+      "criterion": "The claim's delivered_through survives a restart (the store writes and reads it with the claim)",
+      "surface": "internal/store claims round-trip and migration 0063 on the real PostgreSQL",
+      "command": "cd packages/daemon && LEGION_TEST_PG_DSN=postgres://postgres:pw@127.0.0.1:55432/postgres?sslmode=disable LEGION_TEST_NATS_URL=nats://127.0.0.1:54222 LEGION_TEST_NATS_MONITOR_URL=http://127.0.0.1:58222 go test -count=1 ./internal/store/ ./internal/supervise/",
+      "observed": "store ok 68.953s (TestAClaimRoundTripsWithItsLocatorAndDelivery now carries DeliveredThrough: 6, compared by reflect.DeepEqual), supervise ok 26.180s.",
+      "headSha": "f3ed0a138f3c25555c1f0b93dfdf60718864a271",
+      "negativeControl": "sameClaim compares the whole claim with reflect.DeepEqual, so a store that dropped delivered_through would read 0 and fail the round trip."
     },
     {
       "criterion": "Nothing else regresses",
-      "surface": "Every daemon package this change touches, run whole",
-      "command": "cd packages/daemon && LEGION_TEST_PG_DSN=postgres://postgres:pw@127.0.0.1:55432/postgres?sslmode=disable LEGION_TEST_NATS_URL=nats://127.0.0.1:54222 LEGION_TEST_NATS_MONITOR_URL=http://127.0.0.1:58222 go build ./... && go vet ./... && gofmt -l internal cmd; go test -count=1 -p 1 ./internal/record/ ./internal/store/ ./internal/api/ ./internal/admit/ ./internal/workflow/ ./internal/intake/ ./internal/notify/ ./internal/dispatch/ ./internal/classify/ ./internal/prompts/...; go test -count=1 -p 1 -timeout 30m ./internal/daemon/ -skip '<the 7 Docker, pgvector and gVisor-only tests>'",
-      "observed": "vet exit 0 and gofmt empty. record ok 44.327s, store ok 62.199s, api ok 162.135s, admit ok 304.689s, workflow ok 479.292s, intake ok 27.827s, notify, dispatch, classify and prompts ok, daemon ok 536.445s. skills-guard 13 pass. check-private-names clean.",
-      "headSha": "331bfa178058c52eb2a656f2834831b5f5301e42",
-      "negativeControl": "The first daemon run failed in project_scope_test with 'column \"claimed_by\" does not exist': the shared test database had applied the earlier 0062. That proves the suite runs the edited migration. After 0062 was rebuilt in that scratch database, the run passed."
+      "surface": "Every daemon package, run whole",
+      "command": "cd packages/daemon && LEGION_TEST_PG_DSN=postgres://postgres:pw@127.0.0.1:55432/postgres?sslmode=disable LEGION_TEST_NATS_URL=nats://127.0.0.1:54222 LEGION_TEST_NATS_MONITOR_URL=http://127.0.0.1:58222 go build ./... && go vet ./... && gofmt -l internal cmd; go test -count=1 -p 1 -timeout 40m ./internal/... ./cmd/... with the pod's own LEGION_*/OMP_SESSION_* variables unset and the Docker-only tests skipped",
+      "observed": "vet ok, gofmt empty. Every package ok (admit 312.9s, api 160.6s, workflow 472.1s, store 64.8s, record 43.8s, supervise 18.7s, sandbox 178.2s, workspace 247.9s, cmd/legion 106.8s, launcher 49.3s, ...) except: Docker-only tests (rootless Docker not found), tmux's TestNewRefusesLaunchersItCannotRun (tmux not on PATH in this pod), and daemon's TestTheKeeperRetriesAControllerWhoseLaunchesRanOut.",
+      "headSha": "f3ed0a138f3c25555c1f0b93dfdf60718864a271",
+      "negativeControl": "TestTheKeeperRetriesAControllerWhoseLaunchesRanOut passes alone (0.68s) and fails at the pushed head 9b011313 too with -run Controller -count=2 (controller_launch_test.go:182), so it is an existing timing flake of the controller keeper test, not this change; the launcher failures seen with the pod's environment pass once LEGION_WORKSPACE and OMP_SESSION_SQL_DSN_FILE are unset."
     }
   ],
   "filesChanged": [
-    "packages/daemon/internal/store/migrations/0062_parked_decisions.up.sql (claimed_by on both tables, references outbox on delete set null)",
-    "packages/daemon/internal/record/{record.go,store.go,parked_decision.go,store_test.go}",
-    "packages/daemon/internal/workflow/{parked_decision.go,catch_up.go,ask_mirror.go,catch_up_test.go}",
-    "packages/daemon/internal/admit/{admit.go,parked_decision_test.go}",
-    "packages/daemon/internal/daemon/{parked_decision.go,outbox.go,notice_exceptions.go,parked_decision_test.go,notice_exceptions_test.go}",
-    "scripts/e2e/lib/parked-decision-verdict.jq and its test",
-    "docs/site/src/content/docs/legion/troubleshooting.md, skills/legion-controller/references/parked-decisions.md, AGENTS.md"
+    "packages/daemon/internal/supervise/machine.go: Claim.DeliveredThrough",
+    "packages/daemon/internal/supervise/table.go: RequestDeliver.Row",
+    "packages/daemon/internal/supervise/delivery.go: queue accepts a row at or below DeliveredThrough and queues nothing; it records the row with the delivery in one write",
+    "packages/daemon/internal/store/migrations/0063_claim_delivered_through.up.sql, packages/daemon/internal/store/claims.go, claims_test.go: the column",
+    "packages/daemon/internal/daemon/outbox.go, parked_decision.go: the start delivers with its row; the start-delivered processed-event mark and record.Store.Processed are removed",
+    "packages/daemon/internal/record/record.go, store.go: Processed removed"
   ],
   "trickyParts": [
-    "The claim is the outbox row's own id, with on delete set null, so every way a row ends without delivering releases its claims with no branch-by-branch release code. The re-hold's copy of a catch-up moves the claims to itself before the original row finishes.",
-    "ForgetKeptDecisions deletes the named rows that the row claims or nobody claims. The tester's red test executes a start that was never enqueued, whose decisions are unclaimed."
+    "The mark that round 9 wrote in forgetKept's transaction is gone: the claim itself records the newest start row it queued a task from, in the same write as the delivery (PutClaimAndDelivery), so a crash or failure after the delivery and before the forget commits leaves a row the claim already holds. A retry then forgets again and queues nothing, whether the delivery is still pending or retired. An issue's outbox rows run in row order, so an older row is never still to deliver once a newer one has."
   ],
   "deviations": [
-    "Migration 0062 was edited in place. It has never reached main or a release, so no deployed database holds it. The shared scratch test database on this pod had applied the old 0062, and I rebuilt 0062 there (dropped the two tables and deleted schema_version 62); the tester's runs share that database.",
-    "The listener rollout case the reviewer judged out of scope remains: an earlier listener's 200 forgets a catch-up's decisions before its forward fails."
+    "The listener rollout case the reviewer judged out of scope remains: an earlier listener's 200 forgets a catch-up's decisions before its forward fails.",
+    "Migration 0063 is new rather than an edit of 0062, since 0063 changes the claims table, not the parked-decision tables."
   ],
   "openQuestions": []
 }
