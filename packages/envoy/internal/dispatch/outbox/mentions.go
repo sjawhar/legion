@@ -21,8 +21,9 @@ import (
 // holds the send to settle it, short enough that the copy follows a failed send promptly. The
 // retry ticker (retryInterval) is what picks the event up again, so in practice it waits until the
 // next tick after this delay. The wait is bounded: a pending attempt is live
-// (model.MentionLiveSQL) only for model.DeliveryClaimLapse, the minute its sender's claim holds;
-// past it the outbox settles the attempt failed and publishes the copy (attempt.leftTo).
+// (model.MentionLiveSQL) only for model.DeliveryClaimLapse after its comment committed, whoever
+// holds it; past that lease the outbox counts it resumed (model.MentionResumedSQL), holds the
+// session's copy as a comment_fallback_copies row and publishes the event (attempt.leftTo).
 const mentionPendingDelay = 2 * time.Second
 
 // errMentionPending is what an attempt reports (attempt.err) when it failed nowhere but held back
@@ -35,8 +36,9 @@ const mentionPendingDelay = 2 * time.Second
 // comment.edited, comment.resolved and comment.reopened are events of their own and publish at
 // once, so the held-back session's topic - as claimant, follower, document author or route - can
 // receive the edit before the creation: for as long as the mention's send stays undecided,
-// normally the listener's receipt timeout and at most model.DeliveryClaimLapse for an attempt
-// nobody finishes, plus mentionPendingDelay. A host that receives an edit, resolution or
+// normally the listener's receipt timeout and at most model.DeliveryClaimLapse after the comment
+// committed - the lease past which the outbox holds the copy as a fallback row and publishes
+// instead of waiting - plus mentionPendingDelay. A host that receives an edit, resolution or
 // reopening for a comment it has not seen is seeing this window, not a bug; the creation follows.
 var errMentionPending = errors.New("a mention's delivery is still undecided")
 
@@ -128,7 +130,8 @@ type mentionState int
 const (
 	// mentionSent: an attempt reached the session, so the mention delivered the comment.
 	mentionSent mentionState = iota
-	// mentionResending: an attempt the delivery sweep resends (model.MentionResumedSQL).
+	// mentionResending: an attempt past the lease the outbox waits a send out for
+	// (model.MentionResumedSQL): the delivery sweep's to resend, or a queued send's to make.
 	mentionResending
 	// mentionSending: an attempt whose send is live (model.MentionLiveSQL).
 	mentionSending
@@ -189,20 +192,21 @@ func (a *attempt) leftToMention(sessionID string) bool {
 // left to the mention. A destination a fallback row owns is the fallback pass's, so the copy is
 // skipped. A mention that reached the session delivered the comment, so the copy is skipped. A
 // mention still being sent may yet, so the copy is held back and the attempt marked deferred, to
-// be decided again on the next scan. A mention the delivery sweep resends is that resend's: the
-// copy is skipped and held as a fallback row (mentionComment.holdFallbackCopy), which the fallback
-// pass publishes should the resend fail (publishFallbackCopies); an insert that fails holds the
-// copy back and fails the attempt, so the event is retried. A destination this event already
-// reached gave the session a copy, so it needs no row. A mention whose send was abandoned is
-// settled by the outbox first (mentionComment.settleAbandoned), and the copy follows what key's
-// attempts are once that settle commits: one a sender claimed before the settle took its row is
-// pending, so the copy is held back and the sender owns the outcome; one the settle took is
-// failed, and the copy is the outbox's. Only one of the two acts on an attempt, so the session
-// gets the mention or the copy, not both. A settle that fails holds the copy back and fails the
-// attempt, so the event is retried. Any other key - every attempt failed, or none was recorded -
-// is published to as if it had not been mentioned, except that a session copy for a failed
-// attempt carries that attempt's dedupe key (attempt.sessionCopy): a send that landed before its
-// attempt failed has given the host the comment already, and the host drops the copy.
+// be decided again on the next scan. A mention past the lease that wait is bounded by
+// (model.MentionResumedSQL: the delivery sweep resends it, or a sender holds it queued still) is
+// that send's: the copy is skipped and held as a fallback row (mentionComment.holdFallbackCopy),
+// which the fallback pass publishes should the send fail (publishFallbackCopies); an insert that
+// fails holds the copy back and fails the attempt, so the event is retried. A destination this
+// event already reached gave the session a copy, so it needs no row. A mention whose send was
+// abandoned is settled by the outbox first (mentionComment.settleAbandoned), and the copy follows
+// what key's attempts are once that settle commits: one a sender claimed before the settle took
+// its row is pending, so the copy is held back and the sender owns the outcome; one the settle
+// took is failed, and the copy is the outbox's. Only one of the two acts on an attempt, so the
+// session gets the mention or the copy, not both. A settle that fails holds the copy back and
+// fails the attempt, so the event is retried. Any other key - every attempt failed, or none was
+// recorded - is published to as if it had not been mentioned, except that a session copy for a
+// failed attempt carries that attempt's dedupe key (attempt.sessionCopy): a send that landed
+// before its attempt failed has given the host the comment already, and the host drops the copy.
 func (a *attempt) leftTo(outcomes mentionOutcomes, key, destination string) bool {
 	if _, ok := a.mentions.held[destination]; ok {
 		return true
@@ -325,9 +329,9 @@ func payloadMentionedSessions(payload any) map[string]struct{} {
 
 // mentionDeliveryQuery groups a comment's mention attempts by the session each counts under
 // (model.MentionSessionSQL) and by its target, and reports of each group whether an attempt was
-// sent, is owed to the delivery sweep (model.MentionResumedSQL), is live (model.MentionLiveSQL),
-// and is abandoned (model.MentionAbandonedSQL), and the mode of its latest attempt that failed or
-// is abandoned, null when none did (mentionDeliveries.fallbackKeys).
+// sent, is past the lease a send is waited out for (model.MentionResumedSQL), is live
+// (model.MentionLiveSQL), and is abandoned (model.MentionAbandonedSQL), and the mode of its
+// latest attempt that failed or is abandoned, null when none did (mentionDeliveries.fallbackKeys).
 var mentionDeliveryQuery = `
 	select ` + model.MentionSessionSQL + `,
 	       target,
@@ -442,15 +446,15 @@ func (c mentionComment) holdFallbackCopy(kind mentionKind, key, destination stri
 // settleAbandoned settles failed, with mentionAbandonedError, every attempt of the comment whose
 // key of kind is key and whose send was abandoned (model.MentionAbandonedSQL), appends each one's
 // comment.delivery receipt as the API's sender would (the comment's author its actor), and reports
-// the state key's attempts are in then: sent, owed to the delivery sweep, being sent, or failed.
-// It is one transaction, and it takes the comment's owner lock before any attempt row, the order
-// the API's claim and settle transactions take them in (claimCommentDeliveryAttempt,
-// settleDeliveryAttempt in internal/dispatch/api), so it and a sender's claim of the same attempt
-// run one after the other. A claim that commits first leaves the row claimed just now, so the
-// update's guard no longer matches it and the attempt reads pending; an attempt this settles first
-// is no longer pending when the claim reads it, and the claim takes it as settled and sends
-// nothing. The receipts reach the event log in the same commit, so a reader sees the attempt fail,
-// and the outbox publishes them like any event.
+// the state key's attempts are in then: sent, past the lease a send is waited out for, being
+// sent, or failed. It is one transaction, and it takes the comment's owner lock before any
+// attempt row, the order the API's claim and settle transactions take them in
+// (claimCommentDeliveryAttempt, settleDeliveryAttempt in internal/dispatch/api), so it and a
+// sender's claim of the same attempt run one after the other. A claim that commits first leaves
+// the row claimed just now, so the update's guard no longer matches it and the attempt reads
+// pending; an attempt this settles first is no longer pending when the claim reads it, and the
+// claim takes it as settled and sends nothing. The receipts reach the event log in the same
+// commit, so a reader sees the attempt fail, and the outbox publishes them like any event.
 func (c mentionComment) settleAbandoned(kind mentionKind, key string) (state mentionState, err error) {
 	ctx, deps, event, commentID := c.ctx, c.deps, c.event, c.id
 	defer func() {
@@ -576,26 +580,30 @@ func failedFallbackCopy(held fallbackCopy) fallbackRecord {
 // internal/dispatch/api), and every destination of the comment.created event that would reach a
 // mentioned session - the route, the claimant, an author, a follower - leaves that session's copy
 // to the mention by the rule attempt.leftTo applies to the attempts the session counts under
-// (model.MentionSession). A sent attempt delivered the comment, so the copy is skipped; a live one
-// (model.MentionLiveSQL) holds the copy back and defers the event (errMentionPending); a failed one
+// (model.MentionSession). A sent attempt delivered the comment, so the copy is skipped; a live
+// one (model.MentionLiveSQL) holds the copy back and defers the event (errMentionPending), for
+// the model.DeliveryClaimLapse after its comment committed and no longer; a failed one
 // leaves the copy to the outbox, under the failed send's dedupe key. An abandoned attempt
 // (model.MentionAbandonedSQL) is settled failed by the outbox, with its comment.delivery receipt,
 // before it publishes the copy (mentionComment.settleAbandoned); a sender's claim of it runs
 // before or after that settle under the comment's owner lock, so whichever commits first acts on
 // the attempt and the other finds it taken.
 //
-// A mention attempt no sender holds that the delivery sweep owes (model.MentionResumedSQL) is
-// resent by that sweep (resumeOwedDeliveries in internal/dispatch/api) under the attempt's own
-// idempotency key: the process that queued it died with the send in flight, or never started it,
-// perhaps after the listener took it, and the listener drops the resend as a repeat when it did.
-// The outbox cannot tell which, so it neither publishes that copy nor waits on the
-// resend. It records the copy it held back as a comment_fallback_copies row instead, keyed by the
-// comment and the exact destination topic the copy would have gone to and naming the key whose
-// attempts decide it (the session, or the target of a route suppressed by that string alone),
-// inserted idempotently before the event can be marked published; an insert that fails fails the
-// attempt, so the event is retried. From then on the row owns that destination: the event's own
-// publish skips it on every retry (mentionDeliveries.held, publishDestination), so the event never
-// sends it too, and the event is published and recorded as it would be had the mention been sent.
+// A mention attempt past that lease (model.MentionResumedSQL) is a send the outbox waits no
+// longer on: the delivery sweep resends it (resumeOwedDeliveries in internal/dispatch/api) under
+// the attempt's own idempotency key once no sender holds it - the process that queued it died
+// with the send in flight, or never started it, perhaps after the listener took it, and the
+// listener drops the resend as a repeat when it did - or a live sender holds it queued behind a
+// lane its recipient has held longer than a lease, and sends it when that lane reaches it. The
+// outbox cannot tell which, and holding the comment's event for a lane's minutes would be no
+// bound at all, so it neither publishes that copy nor waits on the send. It records the copy it
+// held back as a comment_fallback_copies row instead, keyed by the comment and the exact
+// destination topic the copy would have gone to and naming the key whose attempts decide it (the
+// session, or the target of a route suppressed by that string alone), inserted idempotently
+// before the event can be marked published; an insert that fails fails the attempt, so the event
+// is retried. From then on the row owns that destination: the event's own publish skips it on
+// every retry (mentionDeliveries.held, publishDestination), so the event never sends it too, and
+// the event is published and recorded as it would be had the mention been sent.
 //
 // The pass runs at startup and on every retry tick of Run, beside the event scan. It claims a
 // bounded batch of unsettled rows, oldest first (next_attempt_at pushed out by claimWindow under

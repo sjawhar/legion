@@ -296,8 +296,10 @@ const (
 	released outcomeState = "released"
 	// deferred: the event reached every destination but a session's copy held back for a mention
 	// still being sent (errMentionPending), and waits mentionPendingDelay before it is tried
-	// again, published_at null and no attempt counted: nothing failed, and an undecided send is
-	// bounded by its sender's claim, so the deferral cannot run the event to its dead-letter count.
+	// again, published_at null and no attempt counted: nothing failed, and an attempt counts live
+	// for no longer than model.DeliveryClaimLapse after its comment committed, whoever holds it -
+	// past that lease its copy becomes a fallback row and the event publishes - so the deferral
+	// cannot run the event to its dead-letter count.
 	deferred outcomeState = "deferred"
 )
 

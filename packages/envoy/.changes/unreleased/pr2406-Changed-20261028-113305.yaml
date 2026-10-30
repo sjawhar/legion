@@ -12,11 +12,17 @@ body: |-
     minute after it last wrote that claim - is resent by the delivery sweep, which runs once a
     minute in one process. A session the comment's route or an author route reaches and that a
     mention names hears the comment once, from the mention; when that mention's send fails, the
-    route or author copy skipped for it is published to it then. When the send was in flight at a
-    kill, the outbox records the copy it skipped (migration `0142`, `comment_fallback_copies`) and
-    publishes it to that one destination only once the resend fails; a copy whose publish fails is
+    route or author copy skipped for it is published to it then. The comment's own event waits on a
+    mention for at most a minute after the comment committed, however long the recipient's lane is
+    held: past that the outbox records the copy it skipped (migration `0142`,
+    `comment_fallback_copies`), publishes the event to every other destination, and publishes that
+    copy to its one destination only if the send - the sweep's resend, or the queued send the lane
+    comes to - then fails; a copy whose publish fails is
     retried on the outbox's event backoff, never given up, and logged at Error when it reaches the
-    ten attempts at which the outbox reports an event dead-lettered. The comment's own event is
+    ten attempts at which the outbox reports an event dead-lettered. A Retry of a mention from its
+    card while its first attempt is still waiting on a lane opens the attempt that is sent: the
+    first is settled `failed`, "not sent: a later attempt of this mention superseded it", when its
+    lane reaches it, so the recipient is handed one copy. The comment's own event is
     never published again, so a route, claimant or follower that changed since gets nothing of it.
     A client that read a mention's delivery state from the create response reads it from the
     comment, or from its `comment.delivery` event, afterwards.

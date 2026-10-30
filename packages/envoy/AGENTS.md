@@ -1399,9 +1399,10 @@ suppressed by its string alone by the mention of that target. The two-copy cases
 `role:X` mention whose holder an author or thread route, a primary-document route, the claimant
 route, a follower route or the route under another string names; a `role:X` route whose own lookup
 went unanswered while a mention of another string reaches its holder) remain. What the attempt
-came to - sent, live, abandoned, or owed to the delivery sweep, each a predicate over its row in
-`internal/dispatch/model` (`MentionLiveSQL`, `MentionAbandonedSQL`, `MentionResumedSQL`, all three
-built from `OwedMentionAttemptSQL`, which is what the sweep sends) - decides that copy and which of
+came to - sent, live, abandoned, or past the lease a send is waited out for, each a predicate over
+its row in `internal/dispatch/model` (`MentionLiveSQL`, `MentionAbandonedSQL`,
+`MentionResumedSQL`, all three built from the lease `OwedMentionAttemptSQL`, which is what the
+sweep sends, waits out) - decides that copy and which of
 the outbox, a sender's claim and the sweep acts on the attempt; `publishFallbackCopies` in
 `internal/dispatch/outbox/mentions.go` is the protocol's one description, the
 `comment_fallback_copies` rows (migration `0142`) included. So a mentioned session loses no
@@ -1415,8 +1416,11 @@ recipient gets the comments this process accepted, on one lane, in the order it 
 most 8 lanes send at once, and at most 4,096 sends wait. Each attempt is claimed when its comment
 commits it, and this process writes that claim again every `mentionClaimRefresh`
 (`model.DeliveryClaimLapse`/3) while its send waits on its lane, so a recipient keeps that order
-however long its first send takes: the sweep below takes no attempt a live process holds, and the
-outbox counts each of them live rather than resumed. The lane's own send takes its process's claim
+however long its first send takes: the sweep below takes no attempt a live process holds. The
+outbox counts such an attempt live for the `model.DeliveryClaimLapse` after its comment committed
+and no longer: past that lease it counts it resumed, holds that session's copy as a
+`comment_fallback_copies` row and publishes the comment's event, and the lane's own send settles
+the row with nothing published when it lands. The lane's own send takes its process's claim
 over (`model.DeliveryClaimMineSQL`) and refuses another sender's. A send past the queue's bound
 gives that claim back, so its attempt stays `pending` and unclaimed. Once the server's lifetime ends
 nothing more is queued - a comment that commits during the HTTP drain is answered, its refused
@@ -3308,18 +3312,21 @@ blind republishing.
   target, an unanswered mention the sender has not resolved yet), so its copy waits on it like a
   pinned one's.
   A session (or target) with a `sent` row is skipped: the mention delivered the comment. One whose
-  attempt is live (`model.MentionLiveSQL`: created within `model.MentionSweepWindow`, the 72-hour
-  duplicate window, and claimed - which a mention's attempt is from the moment its comment commits
-  and stays while its send waits on its recipient's lane - or created while unclaimed, less than
-  `model.DeliveryClaimLapse` ago) has its copy held back while every other destination is sent in
+  attempt is live (`model.MentionLiveSQL`: the mention's own attempt, created less than
+  `model.DeliveryClaimLapse` ago - claimed, which it is from the moment its comment commits and
+  stays while its send waits on its recipient's lane, or unclaimed, the shape of an attempt whose
+  send the sender refused - or one past the sweep's reach, created more than
+  `model.MentionSweepWindow` ago or overtaken by a later attempt, that a sender holds all the
+  same) has its copy held back while every other destination is sent in
   the batch's window; the attempt then reports `errMentionPending` (`attempt.err`), `settle`
   records the event `deferred`, and `recordBatch` adds the destinations it reached to
   `published_destinations`, moves `next_attempt_at` out by `mentionPendingDelay` (2 s) and leaves
   `published_at` null and `attempt_count` as it was, so waiting on a send never runs the event to
   its dead letter. An abandoned attempt (`model.MentionAbandonedSQL`) is settled `failed` by the
   outbox, with its `comment.delivery` receipt, before it publishes the copy
-  (`mentionComment.settleAbandoned`), and an attempt the delivery sweep resends
-  (`model.MentionResumedSQL`) has its copy held as a `comment_fallback_copies` row (migration
+  (`mentionComment.settleAbandoned`), and an attempt past that lease
+  (`model.MentionResumedSQL`: the delivery sweep resends it, or a sender holds it queued behind a
+  lane held longer than a lease) has its copy held as a `comment_fallback_copies` row (migration
   `0142`), which the fallback pass decides later; a row whose decision or publish fails counts
   the attempt and backs off by `retry.Delay`, as an event does, and is never given up, its
   `retry.DeadLetterAttempts`th failure logged at Error. The doc comment of
@@ -3359,7 +3366,8 @@ blind republishing.
   `comment.resolved` and `comment.reopened` are events of their own and publish at once, so a
   claimant, follower, author or route topic can receive the edit before the creation - for as
   long as the mention's send is undecided, normally a listener receipt timeout and at most about a
-  minute for a stranded attempt, plus `mentionPendingDelay`. A host that sees an edit, resolution
+  minute after the comment committed, whoever holds the attempt, plus `mentionPendingDelay`.
+  A host that sees an edit, resolution
   or reopening for a comment it does not know is seeing this window, not a bug; the creation
   follows.
   `ask.follower_added` and `ask.follower_removed` also route directly to the session they name,

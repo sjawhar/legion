@@ -33,6 +33,9 @@ type mentionListener struct {
 	sends       []mentionListenerSend
 	held        map[string]chan struct{}
 	heldLookups map[string]chan struct{}
+	// refused holds the sessions whose sends the listener answers 503: a send the recipient's
+	// host refuses, which fails its attempt.
+	refused map[string]struct{}
 	// stalls holds the next send to a session before the listener records it at all, so a send
 	// the test has not released has not reached the recipient yet.
 	stalls  map[string]*mentionStall
@@ -54,7 +57,8 @@ func newMentionListener(t *testing.T) (*httptest.Server, *mentionListener) {
 	t.Helper()
 	state := &mentionListener{
 		held: map[string]chan struct{}{}, heldLookups: map[string]chan struct{}{},
-		stalls: map[string]*mentionStall{}, arrived: make(chan string, 64),
+		refused: map[string]struct{}{},
+		stalls:  map[string]*mentionStall{}, arrived: make(chan string, 64),
 	}
 	listener := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method == http.MethodGet {
@@ -99,6 +103,7 @@ func newMentionListener(t *testing.T) (*httptest.Server, *mentionListener) {
 			state.mu.Lock()
 			state.sends = append(state.sends, mentionListenerSend{request.TargetSession, request.Message})
 			gate := state.held[request.TargetSession]
+			_, refused := state.refused[request.TargetSession]
 			state.mu.Unlock()
 			state.arrived <- request.TargetSession
 			if gate != nil {
@@ -107,6 +112,10 @@ func newMentionListener(t *testing.T) (*httptest.Server, *mentionListener) {
 				case <-r.Context().Done():
 					return
 				}
+			}
+			if refused {
+				w.WriteHeader(http.StatusServiceUnavailable)
+				return
 			}
 			_, _ = w.Write([]byte(`{"event_id":"mention-envelope","recipient":"` + request.TargetSession + `"}`))
 		default:
@@ -127,6 +136,14 @@ func (l *mentionListener) hold(sessions ...string) func() {
 	}
 	l.mu.Unlock()
 	return sync.OnceFunc(func() { close(gate) })
+}
+
+// refuseSends makes every send to session from now on answer 503, so the attempt behind it fails
+// as one whose recipient's host refused it does.
+func (l *mentionListener) refuseSends(session string) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	l.refused[session] = struct{}{}
 }
 
 // stall holds the next send to session before the listener records it - a send that has not
@@ -808,15 +825,15 @@ func TestAMentionPastTheQueueBoundIsSentOnceTheQueueDrains(t *testing.T) {
 }
 
 // runOutboxBeside runs the outbox beside the test, as a Dispatch process runs it beside its API,
-// publishing every event it decides on, until the test ends.
-func runOutboxBeside(t *testing.T, deps Deps) {
+// publishing through publisher every event it decides on, until the test ends.
+func runOutboxBeside(t *testing.T, deps Deps, publisher outbox.Publisher) {
 	t.Helper()
 	ctx, cancel := context.WithCancel(context.Background())
 	stopped := make(chan struct{})
 	go func() {
 		defer close(stopped)
 		outbox.Run(ctx, outbox.Deps{
-			Store: deps.Store, Publisher: acceptingPublisher{}, Broker: events.NewBroker(), Docs: deps.Docs,
+			Store: deps.Store, Publisher: publisher, Broker: events.NewBroker(), Docs: deps.Docs,
 		})
 	}()
 	t.Cleanup(func() {
@@ -825,79 +842,110 @@ func runOutboxBeside(t *testing.T, deps Deps) {
 	})
 }
 
-// fallbackCopiesOf waits until the outbox has published every event of issueKey, for at most 10 s,
-// and answers how many copies of the comments it held back as comment_fallback_copies rows.
-func fallbackCopiesOf(t *testing.T, database *store.Store, issueKey string, commentIDs []string) int {
+// withMentionClaimRefresh gives served a mention sender that writes the claims of its queued sends
+// again every period, in place of the one register built, which uses mentionClaimRefresh (a third
+// of a claim lease). A test calls it before its first comment, while the sender it replaces holds
+// nothing, and the server's background wait waits the replacement out.
+func withMentionClaimRefresh(t *testing.T, served *server, period time.Duration) {
+	t.Helper()
+	served.mentions.wait()
+	served.mentions = newMentionSender(served.lifetime, period,
+		served.sendCommentMention, served.refreshMentionClaims, served.releaseMentionClaims)
+}
+
+// ageQueuedClaims moves every claim the sender holds on a send that has not started back by by,
+// on the attempt row and in the sender's own record together: what a lane held that long leaves
+// behind when nothing writes those claims again. It fails the test when a row no longer carries
+// the claim its sender holds, since the two are meant to agree.
+func ageQueuedClaims(t *testing.T, database *store.Store, sender *mentionSender, by time.Duration) {
+	t.Helper()
+	sender.mu.Lock()
+	defer sender.mu.Unlock()
+	if len(sender.claims) == 0 {
+		t.Fatal("the mention sender holds no queued send whose claim could age")
+	}
+	for key, claimed := range sender.claims {
+		aged := claimed.Add(-by)
+		tag, err := database.Pool.Exec(context.Background(), `
+			update comment_deliveries set claimed_at = $4
+			where comment_id = $1 and target = $2 and attempt = $3 and claimed_at = $5
+		`, key.comment, key.target, key.attempt, aged, claimed)
+		if err != nil {
+			t.Fatalf("age the claim on the queued attempt of %s for %s: %v", key.comment, key.target, err)
+		}
+		if tag.RowsAffected() != 1 {
+			t.Fatalf("the queued attempt of %s for %s does not carry the claim its sender holds",
+				key.comment, key.target)
+		}
+		sender.claims[key] = aged
+	}
+}
+
+// awaitRefreshedClaims waits until every comment's attempt for target is under a live claim
+// again, for at most 10 s: the sender's refresh loop has written the claims it holds.
+func awaitRefreshedClaims(t *testing.T, database *store.Store, commentIDs []string, target string) {
 	t.Helper()
 	deadline := time.Now().Add(10 * time.Second)
 	for {
-		var unpublished, copies int
-		if err := database.Pool.QueryRow(context.Background(), `
-			select (select count(*) from events where issue_key = $1 and published_at is null),
-			       (select count(*) from comment_fallback_copies where comment_id = any($2::uuid[]))
-		`, issueKey, commentIDs).Scan(&unpublished, &copies); err != nil {
-			t.Fatalf("count the outbox's work on %s: %v", issueKey, err)
+		refreshed := 0
+		for _, comment := range commentIDs {
+			if claimedPending(t, database, comment, target) {
+				refreshed++
+			}
 		}
-		if unpublished == 0 {
-			return copies
+		if refreshed == len(commentIDs) {
+			return
 		}
 		if time.Now().After(deadline) {
-			t.Fatalf("the outbox left %d events of %s unpublished", unpublished, issueKey)
+			t.Fatalf("%d of %d queued attempts are still under a lapsed claim: nothing wrote the sender's claims again",
+				len(commentIDs)-refreshed, len(commentIDs))
 		}
 		time.Sleep(10 * time.Millisecond)
 	}
 }
 
+// postMentionOfS1 posts a comment on the issue mentioning s1 and answers its id.
+func postMentionOfS1(t *testing.T, handler http.Handler, issueKey, body string) string {
+	t.Helper()
+	return decodeMentionedComment(t, postMentionedComment(t, handler, issueKey, map[string]any{
+		"body": body, "mentions": []map[string]any{{"target": "session:s1"}},
+	})).ID
+}
+
 // A recipient's comments reach it in the order they were accepted however long its first send is
 // held. The comments behind that send wait on the recipient's lane under the claim their attempts
-// committed with, which the sender writes again while they wait, so a delivery sweep pass that
-// runs while every attempt is old enough to be owed takes none of them and sends nothing past the
-// send in flight. The outbox counts each of them live rather than resumed meanwhile, so it holds
-// the mentioned session's copy back instead of keeping it as a comment_fallback_copies row.
+// committed with, and the sender's refresh loop (keepClaims) writes each of those claims again
+// before it lapses, so a lane held longer than a claim lease keeps them: a delivery sweep pass
+// that runs while every attempt is old enough to be owed takes none of them and sends nothing
+// past the send in flight.
 func TestAHeldLaneKeepsItsQueuedCommentsInOrderThroughASweep(t *testing.T) {
 	listener, state := newMentionListener(t)
-	handler, database, deps, served := newRegisteredTestServer(t, testServerOptions{envoyURL: listener.URL})
+	handler, database, _, served := newRegisteredTestServer(t, testServerOptions{
+		envoyURL: listener.URL, envoyTimeout: 30 * time.Second,
+	})
+	withMentionClaimRefresh(t, served, 20*time.Millisecond)
 	issue := createInteractionIssue(t, handler, "TEST", "A held lane", "before")
-	if patched := dispatchRequest(t, handler, http.MethodPatch, "/api/v1/issues/"+issue.Key, map[string]any{
-		"route": "session:s1",
-	}, "alice"); patched.Code != http.StatusOK {
-		t.Fatalf("set the route: status=%d body=%s", patched.Code, patched.Body.String())
-	}
-	runOutboxBeside(t, deps)
 	reached, release := state.stall("s1")
 	defer release()
-	post := func(body string) string {
-		return decodeMentionedComment(t, postMentionedComment(t, handler, issue.Key, map[string]any{
-			"body": body, "mentions": []map[string]any{{"target": "session:s1"}},
-		})).ID
-	}
 
 	// The first comment's send is at the listener, which has not taken it: s1 holds no copy yet.
-	sending := post("first")
+	sending := postMentionOfS1(t, handler, issue.Key, "first")
 	<-reached
-	queued := []string{post("second"), post("third")}
+	queued := []string{
+		postMentionOfS1(t, handler, issue.Key, "second"),
+		postMentionOfS1(t, handler, issue.Key, "third"),
+	}
 	for _, comment := range queued {
 		if !claimedPending(t, database, comment, "session:s1") {
 			t.Fatalf("the attempt of %s waiting on the held lane is not held by the sender", comment)
 		}
 	}
-	// The sender writes the claims of the sends waiting on the lane again, as its ticker does
-	// every mentionClaimRefresh, so a lane held past a claim lease keeps them.
-	claimed := map[string]time.Time{}
-	for _, comment := range queued {
-		claimed[comment] = attemptClaimedAt(t, database, comment, "session:s1")
-	}
-	served.mentions.refreshHeldClaims(context.Background())
-	for _, comment := range queued {
-		if again := attemptClaimedAt(t, database, comment, "session:s1"); !again.After(claimed[comment]) {
-			t.Fatalf("the claim on the queued attempt of %s is %v, want it written again past %v",
-				comment, again, claimed[comment])
-		}
-	}
-	// Every attempt was opened over a claim lease ago now; only the claims this sender holds keep
-	// the sweep off the two waiting on the lane.
+	// The lane has now been held longer than a claim lease: every attempt was opened that long
+	// ago, and the claims the sender took on the sends waiting on it are that old too.
 	comments := append([]string{sending}, queued...)
 	ageAttempts(t, database, comments...)
+	ageQueuedClaims(t, database, served.mentions, model.DeliveryClaimLapse+time.Second)
+	awaitRefreshedClaims(t, database, queued, "session:s1")
 	if err := served.resumeOwedDeliveries(context.Background()); err != nil {
 		t.Fatalf("resume the owed deliveries: %v", err)
 	}
@@ -912,8 +960,219 @@ func TestAHeldLaneKeepsItsQueuedCommentsInOrderThroughASweep(t *testing.T) {
 		sent[1] != (mentionListenerSend{"s1", "second"}) || sent[2] != (mentionListenerSend{"s1", "third"}) {
 		t.Fatalf("sends = %#v, want each comment sent to s1 once, in the order they were accepted", sent)
 	}
-	if copies := fallbackCopiesOf(t, database, issue.Key, comments); copies != 0 {
-		t.Fatalf("the outbox kept %d copies of the comments as fallback rows, want none: every attempt "+
-			"waiting on the lane was this sender's", copies)
+}
+
+// The claims written again are what keeps the sweep off a held lane. With nothing writing them -
+// the process that queued the sends gone, or its refresh loop stopped - the attempts waiting on
+// the lane fall to the delivery sweep as soon as their claims lapse, and its pass sends them past
+// the send still in flight, out of the order the comments were accepted.
+func TestASweepTakesTheQueuedMentionsOfALaneWhoseClaimsLapsed(t *testing.T) {
+	listener, state := newMentionListener(t)
+	handler, database, _, served := newRegisteredTestServer(t, testServerOptions{
+		envoyURL: listener.URL, envoyTimeout: 30 * time.Second,
+	})
+	// A sender whose refresh cannot tick while the test runs: nothing writes its claims again.
+	withMentionClaimRefresh(t, served, time.Hour)
+	issue := createInteractionIssue(t, handler, "TEST", "A lapsed lane", "before")
+	reached, release := state.stall("s1")
+	defer release()
+
+	sending := postMentionOfS1(t, handler, issue.Key, "first")
+	<-reached
+	queued := []string{
+		postMentionOfS1(t, handler, issue.Key, "second"),
+		postMentionOfS1(t, handler, issue.Key, "third"),
+	}
+	ageAttempts(t, database, append([]string{sending}, queued...)...)
+	ageQueuedClaims(t, database, served.mentions, model.DeliveryClaimLapse+time.Second)
+	if err := served.resumeOwedDeliveries(context.Background()); err != nil {
+		t.Fatalf("resume the owed deliveries: %v", err)
+	}
+
+	// The pass sent them itself, in whichever order its workers took them, while the lane's own
+	// first send is still at the listener.
+	for _, comment := range queued {
+		if settled := settledCommentDeliveries(t, database, comment); !allSent(settled) {
+			t.Fatalf("comment %s attempts = %#v, want the sweep to have sent it", comment, settled)
+		}
+	}
+	swept := state.sent()
+	bodies := make([]string, 0, len(swept))
+	for _, send := range swept {
+		bodies = append(bodies, send.body)
+	}
+	slices.Sort(bodies)
+	if !slices.Equal(bodies, []string{"second", "third"}) {
+		t.Fatalf("sends while the lane is still held = %#v, want the sweep's two, ahead of the send in flight", swept)
+	}
+
+	release()
+	if settled := settledCommentDeliveries(t, database, sending); !allSent(settled) {
+		t.Fatalf("the send in flight = %#v, want it sent", settled)
+	}
+	if sent := state.sent(); len(sent) != 3 || sent[2].body != "first" {
+		t.Fatalf("sends = %#v, want the comment accepted first delivered last: the sweep overtook it", sent)
+	}
+}
+
+// A keyed repeat of a comment whose mention is still waiting on a lane claims that attempt anew
+// before it queues it, and the sender takes the claim the repeat wrote over for the send it
+// already holds: its next refresh writes that claim again, so the attempt stays this process's
+// and the delivery sweep leaves it alone. The repeat queues no second send.
+func TestAKeyedRepeatOfAQueuedMentionLeavesTheSenderHoldingTheNewClaim(t *testing.T) {
+	listener, state := newMentionListener(t)
+	handler, database, _, served := newRegisteredTestServer(t, testServerOptions{
+		envoyURL: listener.URL, envoyTimeout: 30 * time.Second,
+	})
+	// Only the refreshes this test makes itself run.
+	withMentionClaimRefresh(t, served, time.Hour)
+	issue := createInteractionIssue(t, handler, "TEST", "A repeated comment", "before")
+	reached, release := state.stall("s1")
+	defer release()
+
+	postMentionOfS1(t, handler, issue.Key, "first")
+	<-reached
+	keyed := map[string]any{"body": "second", "mentions": []map[string]any{{"target": "session:s1"}}}
+	comments := "/api/v1/issues/" + issue.Key + "/comments"
+	queued := decodeMentionedComment(t,
+		keyedRequest(t, handler, http.MethodPost, comments, keyed, "alice", "mention-queued")).ID
+	if !claimedPending(t, database, queued, "session:s1") {
+		t.Fatal("the attempt waiting on the held lane is not held by the sender")
+	}
+	// The lane has held it longer than a claim lease and nothing wrote its claim again, so the
+	// attempt reads as one no sender holds.
+	ageQueuedClaims(t, database, served.mentions, model.DeliveryClaimLapse+time.Second)
+
+	repeat := keyedRequest(t, handler, http.MethodPost, comments, keyed, "alice", "mention-queued")
+	if repeat.Code != http.StatusCreated || !replayed(repeat) {
+		t.Fatalf("the repeat: status=%d body=%s, want the comment replayed", repeat.Code, repeat.Body.String())
+	}
+	if !claimedPending(t, database, queued, "session:s1") {
+		t.Fatal("the repeat left the queued attempt unclaimed")
+	}
+	claimed := attemptClaimedAt(t, database, queued, "session:s1")
+
+	served.mentions.refreshHeldClaims(context.Background())
+	if again := attemptClaimedAt(t, database, queued, "session:s1"); !again.After(claimed) {
+		t.Fatalf("the claim on the queued attempt is %v, want it written again past the repeat's %v: "+
+			"the sender is holding a claim the repeat replaced", again, claimed)
+	}
+
+	release()
+	settled := settledCommentDeliveries(t, database, queued)
+	if len(settled) != 1 || !allSent(settled) {
+		t.Fatalf("the repeated comment's attempts = %#v, want its one attempt sent", settled)
+	}
+	if sent := state.sent(); len(sent) != 2 || sent[0].body != "first" || sent[1].body != "second" {
+		t.Fatalf("sends = %#v, want each comment sent to s1 once, in the order they were accepted", sent)
+	}
+}
+
+// A person's Retry of a mention whose first attempt is still waiting on a held lane opens the
+// attempt that is sent. When the lane reaches the first attempt it is no longer its mention's
+// latest, so the lane sends nothing, settles it failed as superseded and gives its claim back:
+// the recipient is handed one copy, the Retry's.
+func TestARetryWhileTheFirstAttemptIsQueuedLeavesTheRecipientOneCopy(t *testing.T) {
+	listener, state := newMentionListener(t)
+	handler, database, _, _ := newRegisteredTestServer(t, testServerOptions{
+		envoyURL: listener.URL, envoyTimeout: 30 * time.Second,
+	})
+	issue := createInteractionIssue(t, handler, "TEST", "A retried mention", "before")
+	reached, release := state.stall("s1")
+	defer release()
+
+	postMentionOfS1(t, handler, issue.Key, "first")
+	<-reached
+	retried := postMentionOfS1(t, handler, issue.Key, "retried")
+	if !claimedPending(t, database, retried, "session:s1") {
+		t.Fatal("the attempt waiting on the held lane is not held by the sender")
+	}
+
+	retry := dispatchRequest(t, handler, http.MethodPost, "/api/v1/comments/"+retried+"/deliveries",
+		map[string]any{"delivery": "steer"}, "alice")
+	if retry.Code != http.StatusCreated {
+		t.Fatalf("retry the mention: status=%d body=%s", retry.Code, retry.Body.String())
+	}
+
+	release()
+	settled := settledCommentDeliveries(t, database, retried)
+	if len(settled) != 2 || settled[0].Attempt != 1 || settled[1].Attempt != 2 {
+		t.Fatalf("the retried mention's attempts = %#v, want its first and the Retry's", settled)
+	}
+	if settled[0].State != "failed" || settled[0].Error == nil ||
+		!strings.Contains(*settled[0].Error, "superseded") {
+		t.Fatalf("the attempt the Retry overtook = %#v, want it failed as superseded", settled[0])
+	}
+	if settled[1].State != "sent" {
+		t.Fatalf("the Retry's attempt = %#v, want it sent", settled[1])
+	}
+	if !unclaimedSettled(t, database, retried, "session:s1", 1) {
+		t.Fatal("the superseded attempt kept the claim its queued send held")
+	}
+	// The Retry's send reached the listener while the first comment's was still stalled there.
+	if sent := state.sent(); len(sent) != 2 || sent[0].body != "retried" || sent[1].body != "first" {
+		t.Fatalf("sends = %#v, want the Retry's one copy of the retried comment beside the first comment's", sent)
+	}
+}
+
+// unclaimedSettled reports whether the comment's attempt for target is settled with its claim
+// given back: the shape of an attempt a sender settled without sending it.
+func unclaimedSettled(t *testing.T, database *store.Store, commentID, target string, attempt int) bool {
+	t.Helper()
+	var unclaimed bool
+	if err := database.Pool.QueryRow(context.Background(), `
+		select state <> 'pending' and claimed_at is null from comment_deliveries
+		where comment_id = $1 and target = $2 and attempt = $3
+	`, commentID, target, attempt).Scan(&unclaimed); err != nil {
+		t.Fatalf("read attempt %d of %s for %s: %v", attempt, commentID, target, err)
+	}
+	return unclaimed
+}
+
+// A stop that outlasts the drain still gives back the claims of the sends the sender never
+// started: that release runs on a context of its own, not the one the drain's timeout cancels,
+// so the attempts are left pending and unclaimed for the next delivery sweep pass rather than
+// held by a claim nothing writes again.
+func TestTheMentionDrainGivesBackItsClaimsAfterItsSendContextIsCancelled(t *testing.T) {
+	lifetime, stop := context.WithCancel(context.Background())
+	defer stop()
+	started, finish := make(chan struct{}), make(chan struct{})
+	var released []mentionClaim
+	var releaseErr error
+	sender := newMentionSender(lifetime, time.Hour,
+		func(context.Context, mentionSend) {
+			close(started)
+			<-finish
+		},
+		func(context.Context, []mentionClaim) ([]mentionClaim, error) { return nil, nil },
+		func(ctx context.Context, held []mentionClaim) error {
+			releaseErr = ctx.Err()
+			released = append(released, held...)
+			return ctx.Err()
+		},
+	)
+	queued := mentionSend{
+		comment: model.Comment{ID: "queued"}, mention: ResolvedMention{Target: "session:s1"},
+		attempt: 1, claimed: time.Now(),
+	}
+	sender.enqueue(context.Background(), mentionSend{
+		comment: model.Comment{ID: "in flight"}, mention: ResolvedMention{Target: "session:s1"},
+		attempt: 1, claimed: time.Now(),
+	})
+	<-started
+	sender.enqueue(context.Background(), queued)
+
+	// SIGTERM, then a stop that takes longer than the drain: the sends' context is cancelled
+	// before the drain gets to the claims it still holds.
+	stop()
+	sender.cancel()
+	close(finish)
+	sender.wait()
+
+	if releaseErr != nil {
+		t.Fatalf("the drain released the claims on a context that was already %v, want a live one", releaseErr)
+	}
+	if len(released) != 1 || released[0].key != queued.key() {
+		t.Fatalf("the drain gave back %#v, want the claim of the send it never started", released)
 	}
 }

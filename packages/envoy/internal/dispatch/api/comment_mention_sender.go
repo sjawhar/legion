@@ -34,6 +34,12 @@ const mentionClaimRefresh = model.DeliveryClaimLapse / 3
 // stop grace (cmd/dispatch/shutdown.go).
 const mentionDrainTimeout = 10 * time.Second
 
+// mentionReleaseTimeout bounds the statement the drain makes to give back the claims of the sends
+// it never started (wait). It runs on a context the lifetime's end does not cancel, so a stop
+// that takes longer than mentionDrainTimeout still leaves those attempts pending and unclaimed
+// for the next delivery sweep pass, and it is short because the pool closes behind it.
+const mentionReleaseTimeout = 5 * time.Second
+
 // mentionSend is one comment mention for the mention sender to deliver.
 type mentionSend struct {
 	comment model.Comment
@@ -96,8 +102,11 @@ func (m mentionSend) lane() string {
 // (claimCommentDeliveryAttempt, which accepts this sender's live claim and refuses another
 // sender's). That is what keeps a held lane in order: however long a recipient's first send
 // takes, the comments queued behind it are not owed to the delivery sweep, which would otherwise
-// send them past it (resumeOwedDeliveries), and the outbox counts each of them live rather than
-// resumed, so it holds the mentioned session's copy back instead of writing a fallback row.
+// send them past it (resumeOwedDeliveries). The outbox counts each of them live for the first
+// model.DeliveryClaimLapse of its attempt's life, holding the mentioned session's copy back; past
+// that lease it counts the attempt resumed (model.MentionResumedSQL) and keeps that copy as a
+// comment_fallback_copies row, which the lane's own send settles with nothing published when it
+// lands.
 //
 // The statements the sender makes go through its three functions, which register binds to the
 // server: send (sendCommentMention), refresh (refreshMentionClaims) and release
@@ -127,6 +136,9 @@ type mentionSender struct {
 	release func(context.Context, []mentionClaim) error
 	// capacity is maxQueuedMentionSends; only a test lowers it.
 	capacity int
+	// claimRefresh is how often keepClaims writes the claims of the queued sends again:
+	// mentionClaimRefresh, which only a test shortens.
+	claimRefresh time.Duration
 
 	mu sync.Mutex
 	// lanes holds each lane's sends that have not started. A key is present while its lane is
@@ -153,11 +165,13 @@ type mentionSender struct {
 // lifetime and drains for at most mentionDrainTimeout once it ends. An attempt no sender reaches
 // is the delivery sweep's (resumeOwedDeliveries).
 func (s *server) startMentionSender() *mentionSender {
-	return newMentionSender(s.lifetime, s.sendCommentMention, s.refreshMentionClaims, s.releaseMentionClaims)
+	return newMentionSender(
+		s.lifetime, mentionClaimRefresh, s.sendCommentMention, s.refreshMentionClaims, s.releaseMentionClaims)
 }
 
 func newMentionSender(
 	lifetime context.Context,
+	claimRefresh time.Duration,
 	send func(context.Context, mentionSend),
 	refresh func(context.Context, []mentionClaim) ([]mentionClaim, error),
 	release func(context.Context, []mentionClaim) error,
@@ -166,7 +180,7 @@ func newMentionSender(
 	context.AfterFunc(lifetime, func() { time.AfterFunc(mentionDrainTimeout, cancel) })
 	m := &mentionSender{
 		lifetime: lifetime, ctx: ctx, cancel: cancel, send: send, refresh: refresh, release: release,
-		capacity: maxQueuedMentionSends, lanes: map[string][]mentionSend{},
+		capacity: maxQueuedMentionSends, claimRefresh: claimRefresh, lanes: map[string][]mentionSend{},
 		claims: map[mentionKey]time.Time{}, held: map[mentionKey]struct{}{}, stopped: make(chan struct{}),
 	}
 	m.done.Add(1)
@@ -202,8 +216,8 @@ func (m *mentionSender) enqueue(ctx context.Context, item mentionSend) {
 // queueLocked queues item unless the sender stopped or the queue is full, which it reports, and
 // starts a goroutine for its lane when the lane has none and fewer than mentionSendLanes run. It
 // reports whether this sender holds item's attempt once it returns: it queued it, or it holds it
-// already, a keyed repeat answering while the first send is still queued. A send refused because
-// the sender stopped is logged here.
+// already, a keyed repeat answering while the first send is still queued, whose fresh claim this
+// sender takes over for it. A send refused because the sender stopped is logged here.
 func (m *mentionSender) queueLocked(item mentionSend) (queued, full bool) {
 	if m.stoppedLocked() {
 		slog.Warn("dispatch: comment mention not sent: the mention sender has stopped; the delivery sweep sends the pending attempt",
@@ -212,6 +226,13 @@ func (m *mentionSender) queueLocked(item mentionSend) (queued, full bool) {
 	}
 	key := item.key()
 	if _, mine := m.held[key]; mine {
+		// A keyed repeat claimed the attempt anew before it asked (claimQueuedMention), so the
+		// claim its send waits under is the one that repeat just wrote, and the refreshes and the
+		// drain's release move that one. A send a lane has already started is not among the claims
+		// this sender writes: its claim is the send's own, and nothing here touches it.
+		if _, waiting := m.claims[key]; waiting {
+			m.claims[key] = item.claimed
+		}
 		return true, false
 	}
 	if len(m.claims) >= m.capacity {
@@ -281,12 +302,12 @@ func (m *mentionSender) next(lane string, finished mentionKey) (mentionSend, str
 	return item, lane, true
 }
 
-// keepClaims writes the claims of the sends waiting on the lanes again every mentionClaimRefresh,
-// until the lifetime ends or wait runs. Nothing is written again after that, which is what hands
-// a stopped process's queue to the delivery sweep a lease later.
+// keepClaims writes the claims of the sends waiting on the lanes again every claimRefresh
+// (mentionClaimRefresh), until the lifetime ends or wait runs. Nothing is written again after
+// that, which is what hands a stopped process's queue to the delivery sweep a lease later.
 func (m *mentionSender) keepClaims() {
 	defer m.done.Done()
-	refresh := time.NewTicker(mentionClaimRefresh)
+	refresh := time.NewTicker(m.claimRefresh)
 	defer refresh.Stop()
 	for {
 		select {
@@ -334,7 +355,10 @@ func (m *mentionSender) refreshHeldClaims(ctx context.Context) {
 // back the claims of the sends that never started: a process that stops knows it will send none
 // of them, so their attempts are left pending and unclaimed and the next delivery sweep pass
 // sends them once they have waited a lease, rather than a lease after this process last wrote
-// their claims. Call it once the lifetime has ended, before the pool closes.
+// their claims. That release runs on a context of its own, which the lifetime's end does not
+// cancel and mentionReleaseTimeout bounds, so a stop that takes longer than mentionDrainTimeout
+// still gives the claims back rather than failing cancelled. Call it once the lifetime has ended,
+// before the pool closes.
 func (m *mentionSender) wait() {
 	m.mu.Lock()
 	if !m.closed {
@@ -352,7 +376,10 @@ func (m *mentionSender) wait() {
 	clear(m.claims)
 	m.mu.Unlock()
 	if len(unstarted) > 0 {
-		if err := m.release(m.ctx, unstarted); err != nil {
+		release, cancelRelease := context.WithTimeout(
+			context.WithoutCancel(m.lifetime), mentionReleaseTimeout)
+		defer cancelRelease()
+		if err := m.release(release, unstarted); err != nil {
 			slog.Error("dispatch: give back the claims of the comment mentions this sender never started",
 				"attempts", len(unstarted), "error", err)
 		}
@@ -391,7 +418,9 @@ func mentionClaimArrays(claims []mentionClaim) (comments, targets []string, atte
 // refreshMentionClaims is the mention sender's refresh: one statement writes the claim of every
 // attempt whose send is still waiting on a lane, and answers the claims it wrote. A row that no
 // longer carries the claim this sender wrote is left alone and not answered - its send has taken
-// it over, or another sender has, or it has settled - so the sender stops holding it.
+// it over, or another sender has, or it has settled - so refreshHeldClaims leaves that send's
+// recorded claim as it was, and every later statement of this sender's, the drain's release
+// included, passes over the row too, since each is scoped to the claim it holds.
 func (s *server) refreshMentionClaims(ctx context.Context, queued []mentionClaim) ([]mentionClaim, error) {
 	comments, targets, attempts, claimed := mentionClaimArrays(queued)
 	rows, err := s.deps.Store.Pool.Query(ctx, `
