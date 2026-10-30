@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Copies every image .github/ci-images.yaml names into the package that file's `registry:` names,
-# so no CI job fetches an image from a third-party registry (dispatch://INFRA-567). `crane copy`
+# so no CI job fetches an image from a third-party registry (sjawhar/legion#2512). `crane copy`
 # keeps the manifest digest, so a copy's digest is its upstream's digest, and every consumer names
 # that one string.
 #

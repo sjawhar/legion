@@ -213,7 +213,7 @@ echo "case: a run whose package holds every row"
 # The common run: the package holds each row, and nothing is copied. Every read it makes is a
 # read of the package this repository publishes, the Go check included, which reads the row's
 # digest there. A read of Docker Hub in this run would be a third-party fetch in a CI job on a
-# run that copies nothing, which is what this package exists to end (dispatch://INFRA-567).
+# run that copies nothing, which is what this package exists to end (sjawhar/legion#2512).
 root=$(fixture holds-every-row)
 golang_row "$root" 1.27.1
 printf '%s\t%s\n' "$REGISTRY:bun-1.3.14-1b2c3d4e" "$BUN" >> "$root/state/tags"

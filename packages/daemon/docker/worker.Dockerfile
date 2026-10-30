@@ -301,7 +301,7 @@ WORKDIR /src
 # A `|` between proxy entries makes a go command fall through to the next source after any error,
 # where a `,` falls through only after a 404 or a 410 (Go's module reference, "GOPROXY protocol").
 # go.sum holds each module's hash either way, so this is a second path, not a weaker check
-# (dispatch://INFRA-567).
+# (sjawhar/legion#2512).
 ENV GOPROXY=https://proxy.golang.org|direct
 # The notices stage's Go part: go-licenses (pinned in go-third-party-notices.sh) is built in a layer of
 # its own, before the module files, so neither a source change nor a dependency bump rebuilds it.
@@ -319,8 +319,8 @@ RUN set -eu; \
 # keeps the modules of those two tools out of this cache. The runtime stage ships
 # /gomodcache/cache/download to the workers as their warm module cache. One download serves the
 # build and the workers. A module-cache stage of its own would read the same 380 MiB from
-# proxy.golang.org a second time on every build that rebuilds this layer. This image's issue
-# (dispatch://INFRA-567) counts every such read.
+# proxy.golang.org a second time on every build that rebuilds this layer. This image's change
+# (sjawhar/legion#2512) counts every such read.
 ENV GOMODCACHE=/gomodcache
 COPY go.work go.work.sum ./
 COPY packages/daemon/go.mod packages/daemon/go.sum packages/daemon/

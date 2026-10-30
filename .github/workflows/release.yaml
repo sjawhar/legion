@@ -147,7 +147,7 @@ env:
   # A `|` between proxy entries makes a go command fall through to the next source after ANY error,
   # where a `,` falls through only after a 404 or a 410 (Go's module reference, "GOPROXY protocol").
   # proxy.golang.org reset a download mid-stream and turned a Go lane red on a module whose hash
-  # go.sum already holds (dispatch://INFRA-567); with `|direct` the command fetches the same bytes
+  # go.sum already holds (sjawhar/legion#2512); with `|direct` the command fetches the same bytes
   # straight from the source and checks them against go.sum, so this is a second path, not a weaker
   # check.
   GOPROXY: https://proxy.golang.org|direct

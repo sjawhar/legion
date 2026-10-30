@@ -1,6 +1,6 @@
 # The container images this repository's CI jobs fetch, each copied into one package this
 # repository publishes: ghcr.io/sjawhar/legion/ci. Every job fetches its copy by digest, so no
-# CI job depends on a third-party registry (dispatch://INFRA-567).
+# CI job depends on a third-party registry (sjawhar/legion#2512).
 #
 # One row per distinct upstream image. Each row holds:
 #
@@ -41,7 +41,8 @@
 
 # The package every copy lives in. One package, not one per image: GitHub makes each new
 # container package of an account private, and exposes no API that makes one public, so each
-# package is one irreversible act by a person (dispatch://INFRA-567/ask/1a22b043).
+# package is one irreversible act by a person: Sami made this one public by hand, so a job pulls
+# it with no login (sjawhar/legion#2512).
 registry: ghcr.io/sjawhar/legion/ci
 
 images:

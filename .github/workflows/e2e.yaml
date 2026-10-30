@@ -1,6 +1,6 @@
 name: E2E proofs
 
-# One live proof of scripts/e2e/ per job, on a GitHub-hosted runner (dispatch://INFRA-318).
+# One live proof of scripts/e2e/ per job, on a GitHub-hosted runner.
 #
 # Most of those scripts need a devbox, a throwaway kind cluster or the production cluster, and
 # each says so in its own header. .github/e2e-scripts.json holds both lists: the scripts a hosted
@@ -22,9 +22,9 @@ name: E2E proofs
 #     default branch alone, so the nightly is main's copy of this file, of the list beside it and
 #     of the scripts, never a pull request's.
 #
-# No hosted proof here needs a secret, and none may: Sami answered
-# dispatch://INFRA-567/ask/4fd91c78 that no API key goes into sjawhar/legion, and that a smoke
-# test which calls a model runs in the deployment repository on workload identity federation.
+# No hosted proof here needs a secret, and none may: Sami answered that no API key goes into
+# sjawhar/legion, and that a smoke test which calls a model runs in the deployment repository on
+# workload identity federation (sjawhar/legion#2512).
 # dispatch-session-settings.sh, which drives two real models, is therefore in the refused list
 # with that reason, not in the hosted one.
 #
@@ -53,7 +53,7 @@ permissions:
 # A `|` between proxy entries makes a go command fall through to the next source after ANY error,
 # where a `,` falls through only after a 404 or a 410 (Go's module reference, "GOPROXY protocol").
 # proxy.golang.org reset a download mid-stream and turned a Go lane red on a module whose hash
-# go.sum already holds (dispatch://INFRA-567); with `|direct` the command fetches the same bytes
+# go.sum already holds (sjawhar/legion#2512); with `|direct` the command fetches the same bytes
 # straight from the source and checks them against go.sum, so this is a second path, not a weaker
 # check. Each proof here builds Go binaries and installs a pinned nats-server.
 env:

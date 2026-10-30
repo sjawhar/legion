@@ -11,6 +11,6 @@ body: |-
     test of this package reads a third-party registry, and a failed pull is this repository's own
     fault. The developer scripts under `scripts/`, which fetch nothing in CI, and the compose files
     under `deploy/compose/`, which no CI job runs, still name Google's mirror.
-time: 2026-10-29T12:00:00.000000000Z
+time: 2026-10-30T12:47:00.376127734Z
 custom:
-    Issue: INFRA-567
+    Issue: pr2512

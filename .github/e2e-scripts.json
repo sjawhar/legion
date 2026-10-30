@@ -78,7 +78,7 @@
     },
     {
       "script": "controller-start-tmux.sh",
-      "needs": "a devbox: tmux, the pinned Oh My Pi through mise, and its own Postgres and NATS containers, which it fetches from a registry outside this repository's own package (dispatch://INFRA-567)"
+      "needs": "a devbox: tmux, the pinned Oh My Pi through mise, and its own Postgres and NATS containers, which it fetches from a registry outside this repository's own package (sjawhar/legion#2512)"
     },
     {
       "script": "controller-sweep-kind.sh",
@@ -86,7 +86,7 @@
     },
     {
       "script": "dispatch-session-settings.sh",
-      "needs": "a model provider key of its own for each of its two models, ANTHROPIC_API_KEY and OPENAI_API_KEY, which this repository holds as no secret and will not: Sami answered dispatch://INFRA-567/ask/4fd91c78 that no API key goes into sjawhar/legion, and that a smoke test which calls a model runs in the deployment repository on workload identity federation"
+      "needs": "a model provider key of its own for each of its two models, ANTHROPIC_API_KEY and OPENAI_API_KEY, which this repository holds as no secret and will not: Sami answered that no API key goes into sjawhar/legion, and that a smoke test which calls a model runs in the deployment repository on workload identity federation (sjawhar/legion#2512)"
     },
     {
       "script": "dispatch-user-turns.sh",

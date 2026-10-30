@@ -61,7 +61,7 @@ WORKDIR /src
 # A `|` between proxy entries makes a go command fall through to the next source after any error,
 # where a `,` falls through only after a 404 or a 410 (Go's module reference, "GOPROXY protocol").
 # go.sum holds each module's hash either way, so this is a second path, not a weaker check
-# (dispatch://INFRA-567).
+# (sjawhar/legion#2512).
 ENV GOPROXY=https://proxy.golang.org|direct
 
 # The image's third-party notices: go-licenses (pinned in go-third-party-notices.sh) is built in a
