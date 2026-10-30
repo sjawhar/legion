@@ -442,7 +442,7 @@ func blockedInRegisterReply() bool {
 // failed is told why.
 func TestNotEnrolledNamesTheLastAttemptOnlyWhenThereIsOne(t *testing.T) {
 	r := startRig(t, "")
-	sess, _ := newSession(1, 1, "h:1:1", nil)
+	sess, _ := newSession(1, 1, "h:1:1", "", nil)
 	if got := r.srv.notEnrolled(sess.snapshot()); got.Code != CodeNotEnrolled || got.Error != "this session is not enrolled with the broker yet" {
 		t.Fatalf("no attempt yet: %+v", got)
 	}
@@ -489,7 +489,7 @@ func recordPrior(t *testing.T, state, id string) int {
 		t.Fatal(err)
 	}
 	prior := NewRegistry(state)
-	old, _ := newSession(pid, ticks, fmt.Sprintf("testhost:%d:%d", pid, ticks), nil)
+	old, _ := newSession(pid, ticks, fmt.Sprintf("testhost:%d:%d", pid, ticks), "", nil)
 	old.setEnrolled(id)
 	prior.Add(old)
 	if err := prior.Save(); err != nil {

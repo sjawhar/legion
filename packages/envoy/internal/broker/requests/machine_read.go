@@ -616,9 +616,13 @@ func (m *Machine) RecordKind(ctx context.Context, recordID string) (string, erro
 
 // Session is the two possibly-differing session ids a credential-request record can name, read
 // independently (LEGION-587): Enrollment is the id the requesting session's own enrollment stated
-// when it enrolled (enrollments.session_id — agentbox's --session-id, or the Legion daemon's
-// worker claim session), Request is the id the request itself stated as an unsigned override in
-// its body at Create time (requests.session_id). Either is empty when that id was never set; a
+// when it enrolled (enrollments.session_id — agentbox's --session-id, the Legion daemon's worker
+// claim session, or a machine session's `agent-secrets register --session-id`, each of them the
+// LAUNCHER naming the session it is starting), Request is the id the request itself stated as an
+// unsigned override in its body at Create time (requests.session_id), which any process of the
+// session writes afresh on every request. Neither is verified — a launcher's id is checked
+// against no session registry — so both say which session asked and neither says the session was
+// entitled to ask. Either is empty when that id was never set; a
 // machine login (kind launcher_credential, which has no request row and no requesting enrollment)
 // always answers both empty. An id outlives its enrollment's revocation: enrollments.session_id is
 // never cleared, only revoked_at is set, so the join below still finds it.

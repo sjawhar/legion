@@ -490,3 +490,146 @@ func TestContractSignLauncherProvesTheOperatorRoutes(t *testing.T) {
 		t.Fatalf("a proof for /v1/operator/grants sent to /v1/operator/machines = %d: %s, want 401", status, body)
 	}
 }
+
+// TestContractASessionIDNamedAtRegisterReachesTheApprovalPage is the live proof for the session
+// a credential request came from: against a real broker, a session registered with
+// `--session-id` (what the launcher names) enrolls under that id, and the credential request it
+// then makes is listed to its approver with the id in the `session.enrollment` field Dispatch's
+// approval page reads. A second session on the same broker, registered naming no id, is listed
+// beside it with both ids null — a page that says no session is named, rather than one that
+// names the wrong session.
+func TestContractASessionIDNamedAtRegisterReachesTheApprovalPage(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	cr := newContractRig(t)
+	code, err := cr.srv.Broker.Login(context.Background(), cr.srv.Hostname)
+	if err != nil {
+		t.Fatalf("Broker.Login: %v", err)
+	}
+	cr.broker.DecideMachineLogin(t, code, true)
+	waitForIssued(t, cr.srv.Broker)
+
+	// Two sessions of their own, neither inside the other: this test process registers nothing,
+	// so each child process is a session root, as two launched agents on one machine are.
+	named, anonymous := sleeper(t), sleeper(t)
+	const sessionID = "01a13dca-e979-7264-af32-f654ef57a6f5"
+
+	cr.actAs(named.Process.Pid)
+	reg := cr.call(t, Request{Op: "register", WaitSeconds: 10, SessionID: new(sessionID)})
+	if !reg.OK || reg.State != "enrolled" || reg.SessionID != sessionID {
+		t.Fatalf("register: %+v", reg)
+	}
+	if got := cr.enrollmentSessionID(t, reg.EnrollmentID); got == nil || *got != sessionID {
+		t.Fatalf("enrollments.session_id = %v, want %s", got, sessionID)
+	}
+	record := cr.requestSecret(t, "TEST_SECRET", "the live proof's own request")
+	if got := cr.pendingSession(t, record); got.Enrollment == nil || *got.Enrollment != sessionID {
+		t.Fatalf("the pending record's session.enrollment = %v, want %s", got.Enrollment, sessionID)
+	}
+	// The record page a person opens from that row reads the same field; its body is the
+	// evidence for what the page shows.
+	status, body := cr.broker.UI(t, http.MethodGet, "/v1/credential-requests/"+record, nil)
+	if status != http.StatusOK {
+		t.Fatalf("GET /v1/credential-requests/%s = %d: %s", record, status, body)
+	}
+	if got := contractDecode[struct {
+		Session contractRecordSession `json:"session"`
+	}](t, body).Session; got.Enrollment == nil || *got.Enrollment != sessionID {
+		t.Fatalf("the record page's session.enrollment = %v, want %s", got.Enrollment, sessionID)
+	}
+	t.Logf("the record Dispatch's approval page reads: %s", body)
+
+	// A session whose launcher names none: it registers, enrolls and gets its request listed,
+	// with no id anywhere — the page says no session is named rather than naming a wrong one.
+	cr.actAs(anonymous.Process.Pid)
+	second := cr.call(t, Request{Op: "register", WaitSeconds: 10})
+	if !second.OK || second.State != "enrolled" || second.SessionID != "" || second.EnrollmentID == reg.EnrollmentID {
+		t.Fatalf("register with no session id: %+v", second)
+	}
+	if got := cr.enrollmentSessionID(t, second.EnrollmentID); got != nil {
+		t.Fatalf("an enrollment whose launcher named no session must store none, got %q", *got)
+	}
+	secondRecord := cr.requestSecret(t, "TEST_SECRET", "the live proof's second request")
+	if secondRecord == record {
+		t.Fatal("the second session's request must be its own record")
+	}
+	if got := cr.pendingSession(t, secondRecord); got.Enrollment != nil || got.Request != nil {
+		t.Fatalf("a request from a session with no id must name none: %+v", got)
+	}
+}
+
+// actAs makes every later socket call present pid as its peer, as that process calling
+// agent-secrets would: the contract rig's own peer is this test process, which registers nothing
+// here so that each child is a session root of its own.
+func (cr *contractRig) actAs(pid int) {
+	cr.srv.PeerOf = func(*net.UnixConn) (*Peer, error) { return PinPID(pid) }
+}
+
+// enrollmentSessionID is the broker's own enrollments.session_id for id, the column the approval
+// page's join reads as the session that enrolled.
+func (cr *contractRig) enrollmentSessionID(t *testing.T, id string) *string {
+	t.Helper()
+	var sessionID *string
+	if err := cr.broker.Store.Pool.QueryRow(context.Background(),
+		`select session_id from enrollments where id = $1::uuid`, id).Scan(&sessionID); err != nil {
+		t.Fatalf("read enrollment %s: %v", id, err)
+	}
+	return sessionID
+}
+
+// requestSecret makes the calling session's credential request for name through the helper (the
+// request object and the call's proof are both the helper's, as the CLI makes them) and returns
+// the record id its approver decides on. The request body names no session_id of its own, so the
+// record's `session` carries only what the enrollment stated.
+func (cr *contractRig) requestSecret(t *testing.T, name, reason string) string {
+	t.Helper()
+	signed := cr.call(t, Request{Op: "sign-request", Secrets: []string{name}, Reason: reason})
+	if !signed.OK || signed.RequestObject == "" {
+		t.Fatalf("sign-request: %+v", signed)
+	}
+	call := cr.call(t, Request{Op: "sign", Method: http.MethodPost, URL: cr.broker.URL + "/v1/requests"})
+	if !call.OK || call.Proof == "" {
+		t.Fatalf("sign: %+v", call)
+	}
+	status, body := cr.broker.Req(t, http.MethodPost, "/v1/requests", map[string]string{"Proof": call.Proof},
+		map[string]any{"request": signed.RequestObject, "session_id": nil})
+	if status != http.StatusOK {
+		t.Fatalf("POST /v1/requests = %d: %s", status, body)
+	}
+	created := contractDecode[struct {
+		State    string  `json:"state"`
+		RecordID *string `json:"record_id"`
+	}](t, body)
+	if created.State != "pending" || created.RecordID == nil {
+		t.Fatalf("create = %+v, want a pending record", created)
+	}
+	return *created.RecordID
+}
+
+// pendingSession is the `session` field GET /v1/pending carries for recordID: the two ids
+// Dispatch's approval page renders, read from the broker's own UI route.
+func (cr *contractRig) pendingSession(t *testing.T, recordID string) contractRecordSession {
+	t.Helper()
+	status, body := cr.broker.UI(t, http.MethodGet, "/v1/pending?approver="+cr.broker.Operator, nil)
+	if status != http.StatusOK {
+		t.Fatalf("GET /v1/pending = %d: %s", status, body)
+	}
+	for _, entry := range contractDecode[struct {
+		Pending []struct {
+			RecordID string                `json:"record_id"`
+			Session  contractRecordSession `json:"session"`
+		} `json:"pending"`
+	}](t, body).Pending {
+		if entry.RecordID == recordID {
+			return entry.Session
+		}
+	}
+	t.Fatalf("GET /v1/pending = %s, want record %s listed", body, recordID)
+	return contractRecordSession{}
+}
+
+// contractRecordSession mirrors the broker's recordSessionResp, the shape both the pending list
+// and the record page carry.
+type contractRecordSession struct {
+	Request    *string `json:"request"`
+	Enrollment *string `json:"enrollment"`
+}

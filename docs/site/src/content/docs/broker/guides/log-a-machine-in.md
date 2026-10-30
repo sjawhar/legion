@@ -147,6 +147,15 @@ environment needs `AGENT_SECRETS_URL` (step 1's profile line gives it), and
 a machine login it starts the agent anyway, with a warning that the session's `agent-secrets` calls
 fail until the machine is logged in.
 
+Add `--session-id <id>` when your launcher knows which agent session it is starting. The helper
+records it and the session's enrollment carries it, so a credential request from that session
+names the session on its approval page instead of naming none. The launcher gives the id because
+the session cannot be believed about its own: a process may rewrite its own environment, so
+nothing the session says about itself, or that `/proc` reads back from it, is evidence. Nothing
+inside the session can change the recorded id afterwards. Read it as a label saying which session
+asked, not as proof that the session was allowed to ask, which the enrollment and the approver
+rule decide. Leave it out when the launcher does not know the id: everything else is the same.
+
 An agent in a container instead holds its own key: [run an agent in a
 container](/legion/broker/guides/run-an-agent-in-a-container/) shows how the helper enrolls it.
 

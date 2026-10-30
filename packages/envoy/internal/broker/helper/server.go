@@ -84,7 +84,7 @@ func (s *Server) handle(ctx context.Context, conn *net.UnixConn) {
 		if wait > 0 {
 			_ = conn.SetDeadline(time.Now().Add(wait + 5*time.Second))
 		}
-		resp = s.register(ctx, peer, pid, wait)
+		resp = s.register(ctx, peer, pid, derefString(req.SessionID), wait)
 	case "sign":
 		// sign and unregister keep peer's pidfd open through Registry.Root's ancestry walk too,
 		// for the same pid-reuse reason register does (see register's doc comment below); each
@@ -156,13 +156,42 @@ func (s *Server) reply(conn net.Conn, resp Response) {
 // trusted only once peer.PID() is re-read here and still names pid — otherwise this answers
 // CodeUnidentified instead of adopting or handing back a session for a peer that no longer is
 // who it was.
-func (s *Server) register(ctx context.Context, peer *Peer, pid int, wait time.Duration) Response {
+//
+// sessionID is the agent session the registering process says this is, and it becomes the
+// enrollment's session_id (Broker.Enroll), the field Dispatch's approval page reads as "the
+// session that enrolled". What that field means after this, and what it does not:
+//
+//   - It is what the LAUNCHER said at the one moment the session root was made. A process
+//     inside the session cannot set it or change it: a register from a descendant is answered
+//     with the existing session's reply, which carries the id recorded then, and the id it
+//     asked for is dropped (logged, so the difference is on the record); one whose id is not
+//     well formed is refused before that lookup, which changes nothing either. This is the
+//     whole of the improvement over the request's own session_id, which any process of the
+//     session writes afresh on every request.
+//   - It is NOT verified. The helper does not read the id from the peer's own environment —
+//     /proc/<pid>/environ is that process's own memory, which it may rewrite at any time
+//     (measured: a process that memsets its own OMP_SESSION_ID entry makes /proc show the
+//     forged value), so reading it there would move an unsigned self-claim into a field the
+//     documentation tells a reader to trust. Nothing here proves the launcher's id names a
+//     session that exists, or that no other session already carries it.
+//   - It is a correlation key, not an authentication. It says which session the LAUNCHER says
+//     asked; it never says the session was entitled to ask. Entitlement is the enrollment, its
+//     key thumbprint and the approver rule, none of which this touches.
+//
+// An empty sessionID is a session that named none: it registers, enrolls and gets secrets
+// exactly as before, and its record says it has no id rather than leaving a reader guessing.
+func (s *Server) register(ctx context.Context, peer *Peer, pid int, sessionID string, wait time.Duration) Response {
+	if !ValidSessionID(sessionID) {
+		peer.Close()
+		return Response{Code: CodeBadRequest, Error: fmt.Sprintf("session_id must be at most %d characters with no whitespace or control character", MaxSessionIDLength)}
+	}
 	if existing := s.Registry.Root(pid); existing != nil {
 		if peer.PID() != pid {
 			peer.Close()
 			return Response{Code: CodeUnidentified, Error: "the peer no longer matches the identified pid"}
 		}
 		peer.Close()
+		s.logRefusedSessionID(existing, sessionID)
 		return s.registerReply(existing, wait)
 	}
 	ticks, err := StartTicks(pid)
@@ -170,7 +199,7 @@ func (s *Server) register(ctx context.Context, peer *Peer, pid int, wait time.Du
 		peer.Close()
 		return Response{Code: CodeBadRequest, Error: err.Error()}
 	}
-	sess, err := newSession(pid, ticks, fmt.Sprintf("%s:%d:%d", s.Hostname, pid, ticks), peer)
+	sess, err := newSession(pid, ticks, fmt.Sprintf("%s:%d:%d", s.Hostname, pid, ticks), sessionID, peer)
 	if err != nil {
 		peer.Close()
 		return Response{Code: CodeKeygen, Error: err.Error()}
@@ -189,12 +218,25 @@ func (s *Server) register(ctx context.Context, peer *Peer, pid int, wait time.Du
 	}
 	if !won {
 		peer.Close()
+		s.logRefusedSessionID(existing, sessionID)
 		return s.registerReply(existing, wait)
 	}
 	s.save()
 	s.adopt(ctx, sess)
-	s.Log.Info("session registered", "pid", pid, "runtime_id", sess.RuntimeID)
+	s.Log.Info("session registered", "pid", pid, "runtime_id", sess.RuntimeID, "session_id", sess.SessionID)
 	return s.registerReply(sess, wait)
+}
+
+// logRefusedSessionID records a register that named a session id for a pid already inside a
+// session: the session keeps the id its own registration named, and this line is the only place
+// the asked-for one is written down. It is how a reader tells a launcher that registered twice
+// from a process trying to rename a session it is already in.
+func (s *Server) logRefusedSessionID(existing *Session, sessionID string) {
+	if sessionID == "" || sessionID == existing.SessionID {
+		return
+	}
+	s.Log.Info("a register inside a session named another session id; kept the session's own",
+		"pid", existing.PID, "runtime_id", existing.RuntimeID, "session_id", existing.SessionID, "asked_session_id", sessionID)
 }
 
 // registerReply answers a register, first waiting up to wait for the session to enroll. Without a
@@ -220,7 +262,7 @@ func (s *Server) registerReply(sess *Session, wait time.Duration) Response {
 		}
 	}
 	st := sess.snapshot()
-	resp := Response{OK: true, EnrollmentID: st.EnrollmentID, RuntimeID: sess.RuntimeID, Operator: s.Broker.Operator(), State: st.State, Error: st.LastError}
+	resp := Response{OK: true, EnrollmentID: st.EnrollmentID, RuntimeID: sess.RuntimeID, SessionID: sess.SessionID, Operator: s.Broker.Operator(), State: st.State, Error: st.LastError}
 	if resp.EnrollmentID == "" && !credential {
 		resp.Code, resp.Error = CodeNoCredential, noCredentialMsg
 	}
@@ -437,6 +479,15 @@ func (s *Server) drain() Response {
 		s.Log.Info("draining: refusing new sessions until restart")
 	}
 	return Response{OK: true, Sessions: infos}
+}
+
+// derefString is a request's optional string as the handlers read it: its value, or "" when the
+// client sent the field as null or left it out.
+func derefString(s *string) string {
+	if s == nil {
+		return ""
+	}
+	return *s
 }
 
 // login starts (or reports the running) machine login and returns its human-facing
@@ -762,7 +813,7 @@ func (s *Server) Recover(ctx context.Context) {
 			}
 			continue
 		}
-		sess, err := newSession(rec.PID, rec.StartTicks, rec.RuntimeID, peer)
+		sess, err := newSession(rec.PID, rec.StartTicks, rec.RuntimeID, rec.SessionID, peer)
 		if err != nil {
 			peer.Close()
 			s.Log.Error("key generation", "runtime_id", rec.RuntimeID, "error", err)
@@ -770,7 +821,7 @@ func (s *Server) Recover(ctx context.Context) {
 		}
 		sess.setLapsed(rec.EnrollmentID)
 		s.Registry.Add(sess)
-		s.Log.Warn("session re-pinned after a restart with a fresh key; its previous grants are revoked", "runtime_id", rec.RuntimeID)
+		s.Log.Warn("session re-pinned after a restart with a fresh key; its previous grants are revoked", "runtime_id", rec.RuntimeID, "session_id", rec.SessionID)
 		s.adopt(ctx, sess)
 	}
 	s.save()

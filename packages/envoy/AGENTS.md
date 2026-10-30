@@ -4420,6 +4420,31 @@ Against an older helper an unconditional `--wait 10` stalls every launch 10 s wh
 exists. With `--wait N --exec`, a session the helper cannot enroll for want of a credential starts
 with a warning that its `agent-secrets` calls fail until the machine is logged in.
 
+`agent-secrets register --session-id <id>` is the launcher naming the agent session the process
+it registers belongs to, and it is the only way a machine session's enrollment carries a
+`session_id` (a box's comes from `enroll --helper --session-id`, a pod's from its own launcher).
+The helper records it on the session, writes it into `sessions.json`, restores it when a restart
+re-pins the process, lists it in `sessions`, answers it in the register reply, and sends it as
+the enrollment's `session_id` — which is the `session.enrollment` field of a credential request's
+record, what Dispatch's approval page shows as the session that enrolled. What that field means:
+it is what the LAUNCHER said at the one moment the session root was made. Nothing inside the
+session can set or change it, since a register from a descendant is answered with the existing
+session's reply and its own id (the asked-for one is logged, `a register inside a session named
+another session id`), which is the whole of its advantage over the request body's own
+`session_id`, an unsigned claim any process of the session rewrites on every request. It is not
+verified: the helper never reads the id from the pinned process's environment, because
+`/proc/<pid>/environ` is that process's own memory and it may rewrite the entry at any time
+(measured), so reading it there would dress an unsigned self-claim as the field a reader is told
+to trust; and nothing checks that the launcher's id names a session that exists or that no other
+session carries it. Read it as a correlation key — which session asked — never as an
+entitlement, which stays with the enrollment, its key thumbprint and the approver rule. An id
+that is over 128 runes or holds whitespace or a control character is refused `BAD_REQUEST`
+(`helper.ValidSessionID`, the broker's own rule for a request's `session_id`), and nothing is
+registered. A launcher that names none sends no `session_id` field at all, so an older helper
+sees the request it always saw and the session registers, enrolls and signs exactly as before;
+a `sessions.json` written before this field loads the same way, and its sessions re-enroll with
+no id rather than being logged out.
+
 `agent-secrets machine list|revoke` and `agent-secrets grant list|revoke` (`machine.go`,
 `grant.go`, dispatched by `cmdGroup` from the `commands` rows) are the operator routes from the
 person's own shell, under this machine's login: the CLI asks the helper for a launcher proof with

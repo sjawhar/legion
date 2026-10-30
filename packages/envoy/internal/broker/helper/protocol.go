@@ -18,6 +18,8 @@ import (
 	"path/filepath"
 	"strconv"
 	"time"
+	"unicode"
+	"unicode/utf8"
 )
 
 // Request is the client's one line. Op is register, sign, sign-request, sign-launcher,
@@ -34,7 +36,7 @@ type Request struct {
 	WaitSeconds     int      `json:"wait_seconds,omitempty"`     // register: wait up to this long for the enrollment, unless the helper holds no launcher credential
 	RuntimeID       string   `json:"runtime_id,omitempty"`       // enroll-session-key: the session's runtime id on this machine
 	Thumbprint      string   `json:"thumbprint,omitempty"`       // enroll-session-key: the session key's thumbprint
-	SessionID       *string  `json:"session_id,omitempty"`       // enroll-session-key: optional registry session id
+	SessionID       *string  `json:"session_id,omitempty"`       // register, enroll-session-key: the agent session the launcher says this is, recorded as the enrollment's session_id; absent when it names none
 	EnrollmentID    string   `json:"enrollment_id,omitempty"`    // unenroll-session-key: which enrollment to end
 }
 
@@ -49,6 +51,7 @@ type Response struct {
 	EnrollmentID        string        `json:"enrollment_id,omitempty"`
 	RuntimeID           string        `json:"runtime_id,omitempty"`
 	Operator            string        `json:"operator,omitempty"`
+	SessionID           string        `json:"session_id,omitempty"`            // register: the session id the helper recorded for this session, "" when none was ever named
 	State               string        `json:"state,omitempty"`                 // register: enrolling | enrolled
 	VerificationURI     string        `json:"verification_uri,omitempty"`      // login: where a person types the code, the broker's device authorization verification_uri; empty from a helper before this field
 	LoginState          string        `json:"login_state,omitempty"`           // login/login-status: the most recent login's pending|issued|denied|expired; expired whenever LoginRefused and that login is not pending
@@ -106,11 +109,33 @@ func NoCredentialReason(loginState string, refused bool, dropped string) string 
 
 // SessionInfo is one registered session as `sessions` lists it: never a key.
 type SessionInfo struct {
-	PID          int    `json:"pid"`
-	RuntimeID    string `json:"runtime_id"`
+	PID       int    `json:"pid"`
+	RuntimeID string `json:"runtime_id"`
+	// SessionID is the agent session the launcher named at register, "" when it named none.
+	SessionID    string `json:"session_id"`
 	EnrollmentID string `json:"enrollment_id"`
 	State        string `json:"state"`
 	RegisteredAt string `json:"registered_at"`
+}
+
+// MaxSessionIDLength bounds a session id the helper records, matching the broker's own bound on
+// a request's session_id (requests.maxSessionIDLength).
+const MaxSessionIDLength = 128
+
+// ValidSessionID reports whether id is one the helper will record: empty (none named) or at most
+// MaxSessionIDLength runes with no whitespace or control character. It is the broker's own rule
+// for a request's session_id (requests.validSessionID), applied here so a launcher learns at the
+// socket that its id will not do, rather than through an enrollment that keeps failing.
+func ValidSessionID(id string) bool {
+	if utf8.RuneCountInString(id) > MaxSessionIDLength {
+		return false
+	}
+	for _, r := range id {
+		if unicode.IsSpace(r) || unicode.IsControl(r) {
+			return false
+		}
+	}
+	return true
 }
 
 // The codes a helper answers a request it refuses with. Every one carries a doc comment, and every

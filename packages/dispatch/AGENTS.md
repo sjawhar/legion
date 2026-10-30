@@ -824,11 +824,15 @@ it, ` · <id> isn't running.` when the list answered without it, and
 ` · couldn't check whether <id> is running.` when the list hasn't answered, or Envoy is down or
 unconfigured (the words read the same registry state as the mark); and neither id ever set, "No
 session named." The enrollment's id
-alone, or both agreeing, shows one unlabeled line. A request-only id (the common host-session
-case, which has no enrollment `session_id` of its own) shows one line with no preamble
+alone, or both agreeing, shows one unlabeled line. A request-only id (a host session whose
+launcher named none at `agent-secrets register`, so its enrollment carries no `session_id`)
+shows one line with no preamble
 (`session.ts`'s `credentialSessionLines`). Both ids set and differing shows both lines: the
-enrollment's under "The session that enrolled:", since that is the one the broker verified, and
-the request's bare (`CredentialSessionLines.tsx`, shared with the record page below); never
+enrollment's under "The session that enrolled:", since that one is what the session's LAUNCHER
+stated when it enrolled the session, where the request's is what the requesting process wrote
+into its own request; neither is verified, and both say which session asked rather than that it
+was entitled to ask. The request's line is bare
+(`CredentialSessionLines.tsx`, shared with the record page below); never
 "Requested by". `pending.ts`'s
 `useCredentialRequests` is
 the one reading of that list - `listed` (empty under `null`), `loading` or `failed` - and
