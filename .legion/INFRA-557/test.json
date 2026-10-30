@@ -2,74 +2,59 @@
   "schemaVersion": 1,
   "phase": "test",
   "issue": "INFRA-557",
-  "completed": "2026-10-29T23:25:00Z",
-  "round": 9,
-  "testedHead": "57c6d1c5b12d9534b8811a6b8aff8596a84b5902",
-  "handoffHead": "b508aa2d9d43ccac60a43831ceecc51b20f75216",
-  "scope": "A full round on the merged code (architect 23:03Z): the review-round-3 fixes, the merges with #2377 and #2371's ClusteredNatsHub, real-binary kills under the rendered grant, and INFRA-563 (ci-ok depends on listener-multiprocess), folded into #2404.",
+  "completed": "2026-10-30T02:08:00Z",
+  "round": 10,
+  "testedHead": "f93c21be0ef23067cefff24ba4d3bce08be4b52b",
+  "handoffHead": "ab1e53e9a1ceae839130f184c570af06b0c1a798",
+  "scope": "Architect 01:52Z: the twelve review-round-4 items. The three correctness fixes on real binaries under the rendered grant, each against its pre-fix build 57c6d1c5; a lapsed holder answering degraded; that the splits and cleanups changed no behaviour (the 29 multiprocess rows and a kill run); and what the forward merge changed.",
   "implementerProof": {
     "verdict": "verified",
-    "how": "Re-ran `cd packages/envoy && go test -tags multiprocess -count=1 -timeout 40m -v -run '^Test(TwoPods|TwoBuilds)' ./cmd/listener` at 57c6d1c5: 29 rows PASS, ok 629.391s, including TestTwoPodsGracefulStopWithNoStandbyAfterANodeLossKeepsOrder and both EveryGracefulStop rows. Drove each round-3 item on real binaries (proof 1-3) instead of the unit-lane tests the implement handoff names, which are CI's."
+    "how": "Re-ran `cd packages/envoy && go test -tags multiprocess -count=1 -timeout 40m -v -run '^Test(TwoPods|TwoBuilds)' ./cmd/listener` at f93c21be: 29 rows PASS, ok 621.814s. Drove each fix on real binaries (proof 1-4) in place of the unit-lane tests the implement handoff names, which are CI's."
   },
   "failures": [],
   "failed": 0,
   "proof": [
     {
-      "criterion": "Round 3 item 4: /healthz never answers healthy while the holder is still preparing its durable",
-      "surface": "a sole cmd/listener process built at 57c6d1c5, signed in with box-smoke's nkey under the rendered ListenerPermissions grant minus the durable's CONSUMER.CREATE, against a fresh real nats-server 2.10.29 process",
-      "command": "python3 $TMPDIR/infra557-test/prep.py $TMPDIR/infra557-test/listener-head9 h9 (polls /healthz every 0.5 s for 60 s)",
-      "observed": "503 starting at 0.0 s, then 200 degraded standby 'receive: preparing the durable' for the rest of the 60 s; never healthy",
-      "headSha": "57c6d1c5b12d9534b8811a6b8aff8596a84b5902",
-      "negativeControl": "the same run with a 9c5cd05b binary: '200 healthy standby preparing the durable' at 0.5 s"
+      "criterion": "Review round 4 defect 1: a take-over inside the hand-back window, after the stopping pod's linger ended, gets the full hold",
+      "surface": "real cmd/listener processes under the rendered ListenerPermissions nkey grant on a real nats-server 2.10.29; pod-a SIGSTOPped (a lost node, push binding left open); pod-b took the expired lease (stale_binding) and settled; with no standby, pod-b SIGTERMed; pod-c started 1.15-1.35 s after pod-b's release line; messages published straight to NATS every 100 ms ($TMPDIR/infra557-test/pub)",
+      "command": "python3 $TMPDIR/infra557-test/window.py $TMPDIR/infra557-test/listener-head10 head10-w2 1.15; ... head10-w3 1.35",
+      "observed": "pod-c first took the released record 1.22 s and 1.43 s after the release, with handed_back false; at 1.43 s (linger_end 'not taken' at 1.25 s) it held 6.0 s (outcome settled); 330 messages each run, all delivered in publish order",
+      "headSha": "f93c21be0ef23067cefff24ba4d3bce08be4b52b",
+      "negativeControl": "the same run with a 57c6d1c5 binary: pod-b's linger ended 'not taken' at 1.0 s, pod-c took the record 1.20 s after the release with handed_back true, held only 3.0 s (outcome cap), and the session took messages out of publish order (first out of place smk-158 ... smk-162)"
     },
     {
-      "criterion": "Round 3 item 3: a pod whose term ended by losing the lease while it waited out a binding settles a later hard take-over and keeps per-session order",
-      "surface": "real processes under the rendered grant on a real nats-server: a pre-lease build (main 571f729b) binds the durable; pod-x (nkey box-x) takes the lease and waits the binding out; its lease record is deleted under it ($TMPDIR/infra557-test/kvdel as box-smoke) and pod-x logs 'listener lease lost: another listener holds it'; pod-y takes the lease and waits in turn; the old build stops; pod-y prompts 'older' (never answered) and is SIGSTOPped (a lost node); 30 'newer' sends follow at 200 ms",
-      "command": "python3 $TMPDIR/infra557-test/lose.py $TMPDIR/infra557-test/listener-head9 $TMPDIR/infra557-test/listener-main h9-lose",
-      "observed": "pod-x took the expired lease (settle true), logged 'term must settle', held 6.0 s (outcome settled, 31 messages); the session took older, newer-1 ... newer-30 in publish order, the last 11.07 s after the freeze",
-      "headSha": "57c6d1c5b12d9534b8811a6b8aff8596a84b5902",
-      "negativeControl": "the same run with a 9c5cd05b binary: pod-x took the expired lease, waited on the lost node's binding, and delivered nothing within 60 s"
+      "criterion": "Review round 4 defect 3 (spec item 7): every pod answers the same last_seen at any time after the last write, including 10-20 minutes after it",
+      "surface": "pod-a and pod-b under the rendered grant on a real nats-server; a port session with a topic interest registered once through pod-a, never refreshed; pod-c started 10.5 min later (it never saw the session); GET /v1/interests/ read on every pod",
+      "command": "python3 $TMPDIR/infra557-test/lastseen.py $TMPDIR/infra557-test/listener-head10 h10",
+      "observed": "t+1.0 min: pod-a and pod-b last_seen 1793325239511. t+11.0 min: pod-a, pod-b and pod-c all last_seen 1793325239511, alike",
+      "headSha": "f93c21be0ef23067cefff24ba4d3bce08be4b52b",
+      "negativeControl": "the same run with a 57c6d1c5 binary: at t+11.0 min pod-a and pod-b answered last_seen 1793325239492 and pod-c answered none (DIFFER)"
     },
     {
-      "criterion": "Round 3 item 2: the 3 s hold on every lease-term exit; every graceful hand-over delivers within 10 s, including after a node loss",
-      "surface": "real cmd/listener processes built at 57c6d1c5 under the rendered grant on a real nats-server; graceful stops in turn, each a second into a prompt in hand, with a 30 s retry outstanding and a send every 100 ms to two healthy sessions",
-      "command": "python3 $TMPDIR/infra557-test/roll.py $TMPDIR/infra557-test/listener-head9 h9-roll roll; ... h9-loss loss",
-      "observed": "roll: hand-overs 3.54/3.30/3.29 s, 251 messages, slowest 7.42 s, 0 later than 10 s, in order; loss: pod-b took the frozen pod's lease after 4.9 s, hand-overs 3.55/3.54 s, 183 messages, slowest 7.53 s, 0 later than 10 s, in order; 0 permission violations",
-      "headSha": "57c6d1c5b12d9534b8811a6b8aff8596a84b5902",
-      "negativeControl": "round 8, the same runs at 75ad2486: slowest 11.09 s (12 messages later than 10 s) and 11.59 s (33)"
+      "criterion": "Review round 4 required item 4: a lapsed holder answers degraded, not healthy",
+      "surface": "pod-a behind a TCP relay that freezes only its lease connection (sockets open), so its bus connection stays healthy while its lease lapses; pod-b standby direct",
+      "command": "LEASE_ONLY=1 python3 $TMPDIR/infra557-test/lapse.py $TMPDIR/infra557-test/listener-head10 head10-h2 health",
+      "observed": "from 3.95 s after the freeze (lease lapsed) until pod-b took over: pod-a /healthz 200 degraded, role standby, active_instance pod-a; never healthy",
+      "headSha": "f93c21be0ef23067cefff24ba4d3bce08be4b52b",
+      "negativeControl": "the same run with a 57c6d1c5 binary: 200 healthy, role standby, active_instance pod-a while lapsed"
     },
     {
-      "criterion": "Real-binary kills under the rendered grant: 40 of 40 in order; the #2377 session cache and KV rewatch work with one deliverer per machine and the lease take-over",
-      "surface": "two (then three) cmd/listener processes built at 57c6d1c5 under the rendered grant on a real nats-server 2.10.29; a port session; sends with /v1/messages/send through the standby",
-      "command": "python3 $TMPDIR/infra557-test/kill.py $TMPDIR/infra557-test/listener-head9 h9-KILL KILL; ... h9-TERM TERM",
-      "observed": "SIGKILL after message 15: 40 of 40, 0 refused, no repeat, in send order, last 6.25 s after the signal; SIGTERM: 40 of 40 in order, last 2.74 s. After each take-over pod-b listed the session and a heartbeat through it answered 200. After a 4 s NATS restart, a session registered through standby pod-c was listed by active pod-b 0.6 s (0.2 s) after NATS returned, and a send to it was delivered. 0 permission violations from the listeners",
-      "headSha": "57c6d1c5b12d9534b8811a6b8aff8596a84b5902",
-      "negativeControl": "as machine box-other's NATS user: put lease.listener-box-smoke refused with a permissions violation; put lease.listener-box-other accepted"
-    },
-    {
-      "criterion": "The merge with #2371's ClusteredNatsHub: two listener pods of one machine id on a 3-server JetStream cluster, granted core.ListenerPermissions, with ENVOY_NATS_REPLICAS",
-      "surface": "three clustered real nats-server 2.10.29 processes (one JetStream cluster) and two cmd/listener processes built at 57c6d1c5 dialing all three, with ENVOY_NATS_REPLICAS=3, under the rendered grant",
-      "command": "python3 $TMPDIR/infra557-test/cluster.py $TMPDIR/infra557-test/listener-head9 h9c",
-      "observed": "KV_envoy_listener created with num_replicas 3; SIGKILL of the active pod after message 15: 40 of 40, in order, last 6.37 s after the kill; kill -9 of the NATS server the new holder was connected to: 20 more sends delivered, in order, slowest 2.83 s after the node loss, no lease loss; 0 permission violations",
-      "headSha": "57c6d1c5b12d9534b8811a6b8aff8596a84b5902",
-      "negativeControl": "the box-other refusal above (same grant)"
-    },
-    {
-      "criterion": "INFRA-563: ci-ok depends on listener-multiprocess; a red in that job fails ci-ok",
-      "surface": "ci.yaml's ci-ok job at 57c6d1c5 and its verdict script .github/scripts/ci-ok.sh",
-      "command": "NEEDS=<ci-ok's own needs list, each job success, every changes output true, listener-multiprocess set to the result under test> DRAFT=false EVENT=pull_request SELECTED_BY=<ci-ok's SELECTED_BY from ci.yaml> PULL_REQUEST_ONLY='[\"worker-image\"]' .github/scripts/ci-ok.sh",
-      "observed": "ci-ok needs listener-multiprocess and SELECTED_BY maps it to listener_multiprocess. Result success: exit 0. failure: exit 1, '::error::listener-multiprocess ended failure, but changes selected it (needs.changes.outputs.listener_multiprocess is true); a selected job must succeed ...'. skipped while selected: exit 1. cancelled: exit 1. skipped with listener_multiprocess false (not selected): exit 0",
-      "headSha": "57c6d1c5b12d9534b8811a6b8aff8596a84b5902",
-      "negativeControl": "listener-multiprocess failure -> ci-ok.sh exit 1 with the ::error:: above"
+      "criterion": "The splits and cleanups changed no behaviour: kills under the grant, 40 of 40 in order; session cache and KV rewatch; per-machine write scope",
+      "surface": "two (then three) cmd/listener processes built at f93c21be under the rendered grant on a real nats-server; a port session; sends with /v1/messages/send through the standby",
+      "command": "python3 $TMPDIR/infra557-test/kill.py $TMPDIR/infra557-test/listener-head10 h10-KILL KILL",
+      "observed": "SIGKILL after message 15: 40 of 40, 0 refused, no repeat, in send order, last 6.23 s after the signal; the new holder lists the session and accepts its heartbeat; after a 4 s NATS restart the holder lists a session registered on the standby 0.8 s after NATS returns; 0 permission violations",
+      "headSha": "f93c21be0ef23067cefff24ba4d3bce08be4b52b",
+      "negativeControl": "as machine box-other's NATS user: put lease.listener-box-smoke refused with a permissions violation; its own lease.listener-box-other accepted"
     }
   ],
-  "ci": "Ruleset required checks: lint, typecheck, test, pr-title. At 57c6d1c5 the CI workflow run (created 23:01Z) was queued, with only 'changes' listed and queued, and pr-title queued, when read at 23:15Z. Not waited on.",
-  "observations": [
-    "The interest and role-claim reapers run only on the lease holder (holderLoops, cmd/listener/main.go:1294-1308). The merged 15-minute interest grace (store.InterestReapGrace) puts a full reap past this round's time; the untagged suite covers it, which is CI's lane.",
-    "The PR body carries no Fast-follow line (the 2026-10-29 standup ruling); the former Fast-follow items are in 50dbe7f0."
+  "passedChecks": [
+    "Defect 2 (a stop during a lapse owes the ack wait): with only pod-a's lease link frozen, SIGTERM once its lease lapsed and the link thawed 0.3 s later. At f93c21be pod-b took the released record with settle true, held 5.5 s, and kept order (2 of 2). This form did not reproduce the defect at 57c6d1c5 either (settle true, order kept, 2 of 2), so it is no fail-before control. The defect stays pinned by TestLeaseAStopDuringALapseReleasesTheRecordUnsettled (CI's lane).",
+    "Forward merge f93c21be: in the PR's listener, session, dedupe, bus and infra/core paths, `git diff --stat 9baccf21 f93c21be` changes only .github/workflows/ci.yaml (main's jobs and the itemblocks filter lines) plus AGENTS.md. ci-ok still needs listener-multiprocess (SELECTED_BY listener_multiprocess); ci-ok.sh exits 1 with listener-multiprocess failure and 0 with success.",
+    "All 29 multiprocess rows at f93c21be, ok 621.814s"
   ],
+  "ci": "Required checks lint, typecheck, test, pr-title at f93c21be: queued when read (round started 01:52Z). Not waited on.",
   "notes": [
-    "Throwaway scripts in $TMPDIR/infra557-test (prep.py, lose.py, roll.py, kill.py, cluster.py, abandon.py, kvdel, nkgen); not committed.",
-    "Evidence: https://github.com/sjawhar/legion/pull/2404#issuecomment-6510759293"
+    "Recorded at 02:08Z, before the controller's 02:10Z re-pin drain. The last_seen runs' 13.5 min checkpoint had not come yet; the 11.0 min checkpoint is inside the 10-20 min window the architect named.",
+    "Throwaway scripts in $TMPDIR/infra557-test (window.py, lastseen.py, lapse.py, kill.py, pub); a copy of the earlier ones is on legion/INFRA-557-wip (4a17ba7f), which is deleted once this handoff is pushed."
   ]
 }
