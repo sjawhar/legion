@@ -9,6 +9,7 @@ import (
 	"net"
 	"regexp"
 	"strings"
+	"time"
 
 	"github.com/nats-io/nats.go"
 	"github.com/nats-io/nkeys"
@@ -146,7 +147,8 @@ func (s source) seed() (string, error) {
 }
 
 // Connect dials urls as the nkey user seed is the seed of, a seed Seed answered; "" connects
-// without a credential.
+// without a credential. Every connection it opens pings as detectSilentCuts sets, because the
+// daemon dials NATS here and nowhere else: the pings are this package's, not a caller's to pass.
 func Connect(urls []string, seed string, options ...nats.Option) (*nats.Conn, error) {
 	if seed != "" {
 		user, err := userKey(seed, "the NATS nkey seed")
@@ -159,6 +161,8 @@ func Connect(urls []string, seed string, options ...nats.Option) (*nats.Conn, er
 		}
 		options = append(options, nats.Nkey(public, user.Sign))
 	}
+	// Last, so these pings hold whatever a caller passed before them.
+	options = append(options, detectSilentCuts)
 	return nats.Connect(strings.Join(urls, ","), options...)
 }
 
@@ -170,6 +174,28 @@ func Connect(urls []string, seed string, options ...nats.Option) (*nats.Conn, er
 // minutes of nats.go's own default 2 s reconnect wait rather than a closed connection (LEGION-580).
 func ReconnectForever() nats.Option {
 	return nats.MaxReconnects(-1)
+}
+
+// silentCutPingInterval and silentCutMaxPingsOut are the pings of detectSilentCuts. nats.go counts
+// a ping out at each interval and declares the connection stale on the interval that would put a
+// third one out, and any PONG clears the count, so a server that stops answering is found two to
+// three seconds later, while a PONG may still take two seconds before a loaded server is taken for
+// a cut one. The daemon's ReconnectForever makes that mistake cheap: a false cut costs a redial,
+// never a closed connection.
+const (
+	silentCutPingInterval = time.Second
+	silentCutMaxPingsOut  = 2
+)
+
+// detectSilentCuts is the connection option, set by Connect itself, that finds a server which
+// stops answering without closing the connection: packets that stop, with no reset. nats.go's own
+// defaults (a ping every two minutes, two outstanding) leave the daemon reading connected for
+// minutes into such a cut, and the daemon reads nothing in those minutes. A connection declared
+// lost here reconnects as one whose server closed it does.
+func detectSilentCuts(o *nats.Options) error {
+	o.PingInterval = silentCutPingInterval
+	o.MaxPingsOut = silentCutMaxPingsOut
+	return nil
 }
 
 // permissionRefusal is the operation and subject a server's permissions violation names
