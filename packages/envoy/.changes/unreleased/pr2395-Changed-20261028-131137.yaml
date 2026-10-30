@@ -15,7 +15,12 @@ body: |-
     and with NATS disabled; it never decides `ok`. Each issue's, document's and project's events
     reach each destination in order, one send in flight per destination: an event
     that has not reached a session or the owner's topic family holds back that destination's later
-    events of its owner, and nothing else. A role route is no longer published on
+    events of its owner, and nothing else. One owner never waits on another: the holder reads and
+    publishes up to four batches side by side, each taking only owners no other batch holds, and
+    settles and records an owner as soon as that owner's own sends are answered, so an event
+    waiting out a role holder's five-second receipt delays no other issue's events; the batches
+    run one statement at a time, so the hold's renewal never queues behind them. A role route is
+    no longer published on
     `notifications.role.<role>`: Dispatch resolves the holder as the listener does and forwards the
     event to the holder's own subject, publishing it only once the holder's receipt arrives (for a
     holder with a serving port, the stream's acknowledgement of the stored copy). The listener's role

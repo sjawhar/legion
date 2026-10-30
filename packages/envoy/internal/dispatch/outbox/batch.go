@@ -63,10 +63,12 @@ type routing struct {
 // whose due event has the lowest id. For each chosen owner it reads that owner's unpublished events
 // in id order (events_outbox_owner), batchSize at most, due or not: an event not due holds the
 // later ones back from its unreached destinations. An event with no owner has no destination and
-// forms no chain, and is read alone. A pending subscription command (api/subscribers.go) is in no
-// index this reads, and neither is a backed-off event of an owner the batch does not choose. Every
-// predicate on pending is spelled as the indexes spell it (migration 0151), which is what lets
-// Postgres prove the indexes' predicates from the query's.
+// forms no chain, and is read alone. It reads no event of an owner $2 names, the owners the
+// batches running beside this one hold in flight (lanes), so no two batches ever take one owner
+// and an owner waiting on a send holds back only its own events. A pending subscription command
+// (api/subscribers.go) is in no index this reads, and neither is a backed-off event of an owner
+// the batch does not choose. Every predicate on pending is spelled as the indexes spell it
+// (migration 0151), which is what lets Postgres prove the indexes' predicates from the query's.
 //
 // Of the rows read, the batch keeps every row before its batchSize-th due one in id order, and that
 // row: at most batchSize events are sent per batch, and each owner keeps a prefix of its events, the
@@ -84,6 +86,7 @@ const readBatchSQL = `
 		from events
 		where published_at is null and next_attempt_at is null
 		  and (payload ->> 'pending') is distinct from 'true'
+		  and coalesce(issue_key, artifact_id::text, project_key, '') <> all($2::text[])
 		order by id
 		limit $1
 	), retried as (
@@ -91,6 +94,7 @@ const readBatchSQL = `
 		from events
 		where published_at is null and next_attempt_at is not null
 		  and (payload ->> 'pending') is distinct from 'true'
+		  and coalesce(issue_key, artifact_id::text, project_key, '') <> all($2::text[])
 		  and next_attempt_at <= now()
 		order by next_attempt_at, id
 		limit $1
@@ -146,9 +150,22 @@ const readBatchSQL = `
 
 // readBatch reads a batch (readBatchSQL), in owner order and each owner's events in id order. It
 // writes no row. stopped reports a row that failed to scan, which ends pgx's cursor: the rows after
-// it are not read, and the batch is the rows before it and that row, backed off.
-func readBatch(ctx context.Context, deps Deps) (pending []pendingEvent, stopped bool, err error) {
-	rows, err := deps.Store.Pool.Query(ctx, readBatchSQL, batchSize)
+// it are not read, and the batch is the rows before it and that row, backed off. The read leaves
+// the owners the batches running beside this one hold alone, and takes the owners of the rows it
+// read, both under the lanes' one lock (lanes.reserve): publishBatch gives each of them back.
+func readBatch(ctx context.Context, deps Deps) ([]pendingEvent, bool, error) {
+	return deps.lanes.reserve(func(inFlight []string) ([]pendingEvent, bool, error) {
+		return readRows(ctx, deps, inFlight)
+	})
+}
+
+// readRows is readBatch's statement, run with no other batch's statement beside it (lanes), and
+// its rows drained before it gives the gate back: an open cursor holds one of the outbox pool's
+// two connections.
+func readRows(ctx context.Context, deps Deps, inFlight []string) (pending []pendingEvent, stopped bool, err error) {
+	deps.lanes.lock()
+	defer deps.lanes.unlock()
+	rows, err := deps.Store.Pool.Query(ctx, readBatchSQL, batchSize, inFlight)
 	if err != nil {
 		return nil, false, fmt.Errorf("read the outbox's batch: %w", err)
 	}
@@ -351,8 +368,11 @@ func (s *chainSend) sent() bool {
 }
 
 // chain is the sends of one owner's events to one destination key, in id order. Its next send is
-// made only once the one before it reached its destination.
+// made only once the one before it reached its destination. owner is whose lane the chain runs
+// in: a batch settles and releases an owner once every chain of that owner has finished
+// (sendChains, publishBatch).
 type chain struct {
+	owner string
 	sends []*chainSend
 	next  int
 }
@@ -448,7 +468,7 @@ func planChains(events []*batchEvent) []*chain {
 			}
 			keyed := byOwner[event.owner][key]
 			if keyed == nil {
-				keyed = &chain{}
+				keyed = &chain{owner: event.owner}
 				byOwner[event.owner][key] = keyed
 				chains = append(chains, keyed)
 			}
@@ -487,11 +507,26 @@ func planChains(events []*batchEvent) []*chain {
 // is lost. Each send that did not reach its destination is counted once as it settles, under the
 // reason it came to (deps.countPublishFailure); a send the hold's deadline fenced and one ctx's
 // end cut count nothing, neither being an outcome NATS gave.
-func sendChains(ctx context.Context, deps Deps, sender bus.Sender, chains []*chain) {
+//
+// settled is called once per owner, as soon as the last chain of that owner has finished - its
+// sends all answered, or the rest of them held back or never made - so the batch can settle,
+// record and release that owner while the other owners' chains are still sending (publishBatch).
+func sendChains(ctx context.Context, deps Deps, sender bus.Sender, chains []*chain, settled func(owner string)) {
 	stopped := false
 	var inflight []*chain
+	left := map[string]int{}
+	for _, c := range chains {
+		left[c.owner]++
+	}
+	finish := func(c *chain) {
+		left[c.owner]--
+		if left[c.owner] == 0 {
+			settled(c.owner)
+		}
+	}
 	issue := func(c *chain) {
 		if stopped || ctx.Err() != nil {
+			finish(c)
 			return
 		}
 		send := c.sends[c.next]
@@ -565,11 +600,14 @@ func sendChains(ctx context.Context, deps Deps, sender bus.Sender, chains []*cha
 				}
 			}
 			c.next = len(c.sends)
+			finish(c)
 			return
 		}
 		if c.next < len(c.sends) {
 			issue(c)
+			return
 		}
+		finish(c)
 	}
 	for _, c := range chains {
 		issue(c)

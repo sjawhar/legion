@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5"
 
 	"github.com/sjawhar/envoy/internal/dispatch/duty"
 	"github.com/sjawhar/envoy/internal/dispatch/retry"
@@ -34,6 +35,13 @@ const (
 	// answer the take or the read of the current hold's lapse, or after a probe of its own NATS
 	// connection went unanswered (answering).
 	holdRetry = time.Second
+	// concurrentBatches is how many batches a holder runs side by side (scan). A batch waits for
+	// every answer of its sends, and a role forward waits roleReceiptTimeout for a holder that may
+	// never answer, so one batch at a time would hold every other owner's events back for that
+	// whole wait. Four lets a wake and a released owner start work while a batch waits, and keeps
+	// the statements of the batches in flight, which run one at a time (lanes), from queueing
+	// deeply on the outbox pool's two connections.
+	concurrentBatches = 4
 )
 
 // publisherHoldOptions are the publisher hold's parameters: it lasts 6 s on the database's clock
@@ -335,10 +343,12 @@ func (o *Outbox) publish(ctx context.Context, hold *duty.Hold) holdEnd {
 }
 
 // serve scans while this process holds hold: once at once, then on each wake, while the NATS
-// client is connected. It returns why it stopped: ctx ended, the hold was lost or its deadline
-// passed mid-batch, or NATS was lost - down for natsLossGrace without a break and still down when
-// the grace ends, or a batch's sends failed for the connection and a probe of that connection
-// failed too.
+// client is connected. A scan runs its batches side by side and returns only once every one of
+// them has, so serve answers a lost hold, a disconnection or ctx's end between scans and never
+// while a batch is still sending. It returns why it stopped: ctx ended, the hold was lost or its
+// deadline passed mid-batch, or NATS was lost - down for natsLossGrace without a break and still
+// down when the grace ends, or a batch's sends failed for the connection and a probe of that
+// connection failed too.
 func (o *Outbox) serve(ctx context.Context, hold *duty.Hold) holdEnd {
 	var disconnected, retryTimer *time.Timer
 	var disconnectedFor, retryDue <-chan time.Time
@@ -373,6 +383,10 @@ func (o *Outbox) serve(ctx context.Context, hold *duty.Hold) holdEnd {
 					retryTimer = time.NewTimer(wait)
 					retryDue = retryTimer.C
 				}
+				// The client's state is read again before waiting: a scan takes the wakes that
+				// reach it while it runs (scan), the change of this connection among them, so the
+				// loop would otherwise wait on a grace it never armed.
+				continue
 			}
 		}
 		select {
@@ -406,38 +420,239 @@ type scanEnd struct {
 	fenced, natsLost, failed bool
 }
 
-// scan reads and publishes batches under hold until there is nothing more to send: it takes the
-// next batch while the last one published anything or was full, and nothing went wrong. It takes
-// none once hold's deadline has passed. Every batch that sent anything is logged as a sent batch
-// with this process's instance, the span of event ids it sent, how many events it sent at least one
-// envelope of (sent) and how many it marked published (published).
+// scan reads and publishes batches under hold until there is nothing more to send. The batches
+// run side by side, concurrentBatches of them at most: scan starts one at once, another whenever
+// the batch that returned published anything or was full, and another at every wake that reaches
+// it while batches run - an owner a batch gave back (lanes), an insert of events, a reconnect.
+// Each batch leaves the owners the others hold alone (readBatch), so a batch waiting for a role
+// holder's receipt holds back its own owners' later events and nothing else, while another
+// owner's batch is read, sent and recorded beside it.
+//
+// It starts no batch once hold's deadline has passed, and none after one was fenced, lost NATS,
+// failed or came back blocked; a batch that found nothing more to read ends nothing, since the
+// batches still running give owners back. A fenced batch, one that lost NATS and one whose
+// statement failed also end the batches still running (their context), so a hold that must go to
+// another process is not held by a send waiting out a connection that will not come back; each
+// settles the sends it had in flight as lost, records what NATS answered and releases the rest,
+// as a stopping process's batch does. It returns why it stopped, once every batch it started
+// has returned, each fenced by the hold's deadline itself. A wake it took and did not use is
+// given back (signal), so the scan serve starts next sees it. Every batch that sent anything is
+// logged as a sent batch with this process's instance, the span of event ids it sent, how many
+// events it sent at least one envelope of (sent) and how many it marked published (published).
 func (o *Outbox) scan(ctx context.Context, hold fence) scanEnd {
+	deps := o.deps
+	deps.lanes = newLanes(o.signal)
+	// The batches' own context: a hard stop ends the ones still running at once, while ctx, which
+	// is the process's, still tells a stop from an end of this scan's own making.
+	batches, endBatches := context.WithCancel(ctx)
+	defer endBatches()
+	done := make(chan ranBatch, concurrentBatches)
+	var end scanEnd
+	inflight, due, stop, missed := 0, true, false, false
 	for {
-		if ctx.Err() != nil {
-			return scanEnd{}
-		}
-		if !time.Now().Before(hold.Deadline()) {
-			return scanEnd{fenced: true}
-		}
-		o.claims.Add(1)
-		batch, err := scanBatch(ctx, o.deps, hold, o.instance)
-		if batch.sent > 0 {
-			slog.Info("dispatch outbox: sent batch", "instance", o.instance,
-				"sent", batch.sent, "published", batch.published, "first_id", batch.firstID, "last_id", batch.lastID, "started", batch.started)
-		}
-		switch {
-		case err != nil:
-			if ctx.Err() == nil {
-				slog.Error("dispatch outbox: scan", "instance", o.instance, "error", err)
+		if due && !stop && inflight < concurrentBatches {
+			due = false
+			switch {
+			case ctx.Err() != nil:
+				stop = true
+			case !time.Now().Before(hold.Deadline()):
+				end.fenced, stop = true, true
+			default:
+				inflight++
+				o.claims.Add(1)
+				go func() {
+					ran := ranBatch{}
+					ran.batch, ran.err = scanBatch(batches, deps, hold, o.instance)
+					done <- ran
+				}()
 			}
-			return scanEnd{failed: true}
-		case batch.fenced:
-			return scanEnd{fenced: true}
-		case batch.natsLost:
-			return scanEnd{natsLost: true}
-		case batch.blocked, batch.published == 0 && batch.sendable < batchSize:
-			return scanEnd{}
 		}
+		if inflight == 0 {
+			if missed && !stop {
+				// A batch read nothing because the others held its owners, and they have given
+				// those lanes back since: read once more rather than wait for a wake that may
+				// already have been spent on that batch.
+				missed, due = false, true
+				continue
+			}
+			if due {
+				o.signal()
+			}
+			return end
+		}
+		select {
+		case <-o.wake:
+			due = true
+		case ran := <-done:
+			inflight--
+			batch := ran.batch
+			if batch.sent > 0 {
+				slog.Info("dispatch outbox: sent batch", "instance", o.instance,
+					"sent", batch.sent, "published", batch.published, "first_id", batch.firstID, "last_id", batch.lastID, "started", batch.started)
+			}
+			switch {
+			case ran.err != nil:
+				// A batch this scan ended, or the process's stop ended, reports that end and not
+				// a failure of its own.
+				if batches.Err() == nil {
+					slog.Error("dispatch outbox: scan", "instance", o.instance, "error", ran.err)
+					end.failed = true
+				}
+				stop = true
+				endBatches()
+			case batch.fenced:
+				end.fenced, stop = true, true
+				endBatches()
+			case batch.natsLost:
+				end.natsLost, stop = true, true
+				endBatches()
+			case batch.blocked:
+				stop = true
+			case batch.published == 0 && batch.sendable < batchSize:
+				// Nothing more to read now, which the batches still running may change: the scan
+				// starts none of its own accord and returns once the last one has, unless a wake
+				// or an owner one of them releases falls due first. A batch that read nothing at
+				// all was shut out by the owners they hold, so it is read again once they end.
+				missed = missed || (batch.sendable == 0 && inflight > 0)
+			default:
+				due = true
+			}
+		}
+	}
+}
+
+// ranBatch is one batch a scan started, as it came back.
+type ranBatch struct {
+	batch batchResult
+	err   error
+}
+
+// lanes is what the batches of one scan share: the owners whose events they hold in flight, the
+// one statement at a time they run on the outbox's pool, and the wake a released owner gives the
+// scan. Each owner is a lane of its own - a batch takes an owner by reading its events and gives
+// it back once that owner's sends are settled and recorded (publishBatch), and no other batch
+// reads that owner meanwhile - so an owner's events keep their order across the batches running
+// side by side, and an owner waiting on a receipt holds back only itself.
+type lanes struct {
+	// mu guards inFlight. A batch's read is made under it, so that the read and the taking of the
+	// owners it read are one act and two batches can never take one owner.
+	mu       sync.Mutex
+	inFlight map[string]struct{}
+	// statements is the outbox pool's one statement at a time. The pool has two connections, one
+	// of them the publisher hold's renewal, so a renewal would queue behind two batches running a
+	// statement each. It is held around a statement, the drain of its rows included, and never
+	// across a send.
+	statements sync.Mutex
+	// wake is the scan's wake (Outbox.signal), given when an owner is released, so its next events
+	// and the owners a full batch left behind are read at once.
+	wake func()
+}
+
+// newLanes is the lanes of one scan, whose released owners wake it through wake.
+func newLanes(wake func()) *lanes {
+	return &lanes{inFlight: map[string]struct{}{}, wake: wake}
+}
+
+// reserve runs read with the owners in flight, which read leaves alone, and takes the owners of
+// the rows it read, both under one lock. A batch run with no lanes - one by itself, as scanBatch's
+// other callers run it - leaves no owner out and takes none.
+func (l *lanes) reserve(read func(inFlight []string) ([]pendingEvent, bool, error)) ([]pendingEvent, bool, error) {
+	if l == nil {
+		return read([]string{})
+	}
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	inFlight := make([]string, 0, len(l.inFlight))
+	for owner := range l.inFlight {
+		inFlight = append(inFlight, owner)
+	}
+	pending, stopped, err := read(inFlight)
+	for _, item := range pending {
+		if item.owner != "" {
+			l.inFlight[item.owner] = struct{}{}
+		}
+	}
+	return pending, stopped, err
+}
+
+// release gives owner's lane back, telling the scan nothing: a batch that gives its lanes back as
+// it ends is read by the scan as the batch it returns, and a wake there would have the scan read
+// again at once what a batch that stopped for NATS just released.
+func (l *lanes) release(owner string) {
+	if l == nil {
+		return
+	}
+	l.mu.Lock()
+	delete(l.inFlight, owner)
+	l.mu.Unlock()
+}
+
+// releaseEarly gives owner's lane back before its batch has ended and wakes the scan, so the
+// owner's next events and the owners its batch left behind are read while that batch is still
+// sending.
+func (l *lanes) releaseEarly(owner string) {
+	if l == nil {
+		return
+	}
+	l.release(owner)
+	l.wake()
+}
+
+// lock takes the pool's one statement at a time, and unlock gives it back. Nothing takes mu while
+// holding it: a batch's read takes mu first and this second, and every other statement takes this
+// alone, so the two orders never cross.
+func (l *lanes) lock() {
+	if l != nil {
+		l.statements.Lock()
+	}
+}
+
+func (l *lanes) unlock() {
+	if l != nil {
+		l.statements.Unlock()
+	}
+}
+
+// statement runs fn, one statement on the outbox's pool, with no other batch's statement beside
+// it.
+func (l *lanes) statement(fn func() error) error {
+	l.lock()
+	defer l.unlock()
+	return fn()
+}
+
+// gated is the pool's read surface (queryer) with every statement run under the lanes' gate: the
+// lock is taken for the query and given back when its rows close, which is as long as the
+// statement holds one of the pool's connections. Every read it serves drains and closes its rows
+// within itself (pgx.ForEachRow), so the gate is given back inside the read that took it.
+type gated struct {
+	db    queryer
+	lanes *lanes
+}
+
+func (g gated) Query(ctx context.Context, sql string, args ...any) (pgx.Rows, error) {
+	g.lanes.lock()
+	rows, err := g.db.Query(ctx, sql, args...)
+	if err != nil {
+		g.lanes.unlock()
+		return nil, err
+	}
+	return &gatedRows{Rows: rows, lanes: g.lanes}, nil
+}
+
+// gatedRows gives the gate back when its statement's rows close, once however often Close is
+// called, which pgx.Rows allows and readBatch does.
+type gatedRows struct {
+	pgx.Rows
+	lanes  *lanes
+	closed bool
+}
+
+func (r *gatedRows) Close() {
+	r.Rows.Close()
+	if !r.closed {
+		r.closed = true
+		r.lanes.unlock()
 	}
 }
 

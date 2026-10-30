@@ -101,6 +101,11 @@ type Deps struct {
 	// registry, so a denied or refused destination shows on /metrics rather than only in the
 	// log.
 	PublishFailures *metrics.Counter
+	// lanes is what the batches of one scan share: the owners they hold in flight, the outbox
+	// pool's one statement at a time, and the wake a released owner gives the scan (Outbox.scan).
+	// A batch run with none - one by itself, as this package's tests run it - holds no owner,
+	// leaves none out of its read and takes no lock.
+	lanes *lanes
 }
 
 // countPublishFailure counts one destination of a publish attempt that did not reach it, under
@@ -203,6 +208,15 @@ func scanBatch(ctx context.Context, deps Deps, hold fence, holder uuid.UUID) (ba
 // settles each event and records what the batch came to, under hold and as holder. stopped is
 // readBatch's, a row that failed to scan and ended the read: the batch then defers no event past
 // an owner's window (deferPastWindow) and is reported blocked.
+//
+// An owner is settled, recorded and released as soon as the last chain of its own has finished
+// (sendChains), so its next events and the owners this batch left behind are read while the rest
+// of the batch is still sending: a chain waiting for a role holder's receipt then holds back its
+// own owner's later events alone. An owner with a send that failed for the connection, one with a
+// send the hold's deadline fenced, one with an event released, and every owner of a batch whose
+// context has ended wait for the batch's end instead, where the connection check below decides
+// what their sends came to. Whichever way an owner settles, every lane the read took is given
+// back before the batch returns.
 func publishBatch(ctx context.Context, deps Deps, hold fence, holder uuid.UUID, pending []pendingEvent, stopped bool) (batchResult, error) {
 	result := batchResult{}
 	events := make([]*batchEvent, len(pending))
@@ -212,6 +226,24 @@ func publishBatch(ctx context.Context, deps Deps, hold fence, holder uuid.UUID, 
 			result.sendable++
 		}
 	}
+	var owners []string
+	byOwner := map[string][]*batchEvent{}
+	lanesHeld := map[string]struct{}{}
+	for _, event := range events {
+		if event.owner == "" {
+			continue
+		}
+		if _, ok := byOwner[event.owner]; !ok {
+			owners = append(owners, event.owner)
+			lanesHeld[event.owner] = struct{}{}
+		}
+		byOwner[event.owner] = append(byOwner[event.owner], event)
+	}
+	defer func() {
+		for owner := range lanesHeld {
+			deps.lanes.release(owner)
+		}
+	}()
 	if err := resolveDestinations(ctx, deps, events); err != nil {
 		return batchResult{}, err
 	}
@@ -221,7 +253,71 @@ func publishBatch(ctx context.Context, deps Deps, hold fence, holder uuid.UUID, 
 	changed := deps.Publisher.ConnectionChanged()
 	window := deps.Publisher.WindowUntil(hold.Deadline)
 	result.started = time.Now()
-	sendChains(ctx, deps, window, chains)
+	recorded := map[string]struct{}{}
+	var recordErr error
+	lostHold := false
+	settleOwner := func(owner string) {
+		if ctx.Err() != nil {
+			return
+		}
+		for _, event := range byOwner[owner] {
+			for _, send := range event.sends {
+				if send.connection || send.fenced {
+					return
+				}
+			}
+		}
+		var outcomes []outcome
+		count := 0
+		for _, event := range byOwner[owner] {
+			if !event.due {
+				continue
+			}
+			event.outcome = settleEvent(event, false)
+			if event.outcome.state == released {
+				return
+			}
+			if event.outcome.state == published {
+				count++
+			}
+			outcomes = append(outcomes, event.outcome)
+		}
+		if !stopped {
+			outcomes = append(outcomes, deferPastWindow(byOwner[owner])...)
+		}
+		if !time.Now().Before(hold.Deadline()) {
+			return
+		}
+		// Written even when ctx has ended: a process stopping mid-batch records what NATS already
+		// accepted and releases the rest.
+		record, cancel := context.WithTimeout(context.WithoutCancel(ctx), recordTimeout)
+		defer cancel()
+		holds, err := recordBatch(record, deps, outcomes, holder)
+		recorded[owner] = struct{}{}
+		switch {
+		case err != nil:
+			recordErr = err
+		case !holds:
+			slog.Error("dispatch outbox: the publisher hold is no longer this process's, so the owner's back-offs and releases were not written",
+				"holder", holder, "owner", owner)
+			lostHold = true
+		default:
+			result.published += count
+			delete(lanesHeld, owner)
+			deps.lanes.releaseEarly(owner)
+		}
+	}
+	// An owner with no chain has no send to wait for, so it settles before the window opens.
+	sending := map[string]struct{}{}
+	for _, c := range chains {
+		sending[c.owner] = struct{}{}
+	}
+	for _, owner := range owners {
+		if _, ok := sending[owner]; !ok {
+			settleOwner(owner)
+		}
+	}
+	sendChains(ctx, deps, window, chains, settleOwner)
 
 	connectionFailed := false
 	for _, event := range events {
@@ -258,8 +354,13 @@ func publishBatch(ctx context.Context, deps Deps, hold fence, holder uuid.UUID, 
 	}
 
 	var outcomes []outcome
+	var rest []*batchEvent
 	anyReleased := false
 	for _, event := range events {
+		if _, ok := recorded[event.owner]; ok {
+			continue
+		}
+		rest = append(rest, event)
 		if !event.due {
 			continue
 		}
@@ -273,7 +374,7 @@ func publishBatch(ctx context.Context, deps Deps, hold fence, holder uuid.UUID, 
 		}
 	}
 	if !stopped {
-		outcomes = append(outcomes, deferPastWindow(events)...)
+		outcomes = append(outcomes, deferPastWindow(rest)...)
 	}
 	if anyReleased && !result.fenced && ctx.Err() == nil {
 		slog.Error("dispatch outbox: NATS is unreachable, so the batch's released events wait for the next scan")
@@ -296,9 +397,14 @@ func publishBatch(ctx context.Context, deps Deps, hold fence, holder uuid.UUID, 
 	if !holds {
 		slog.Error("dispatch outbox: the publisher hold is no longer this process's, so the batch's back-offs and releases were not written",
 			"holder", holder)
-		result.fenced = true
+		lostHold = true
 	}
+	result.fenced = result.fenced || lostHold
 	result.blocked = stopped || anyReleased
+	if recordErr != nil {
+		result.blocked = true
+		return result, recordErr
+	}
 	return result, nil
 }
 
@@ -576,7 +682,8 @@ func recordBatch(ctx context.Context, deps Deps, outcomes []outcome, holder uuid
 		}
 	}
 	var holds bool
-	if err := deps.Store.Pool.QueryRow(ctx, `
+	if err := deps.lanes.statement(func() error {
+		return deps.Store.Pool.QueryRow(ctx, `
 		with hold as (
 			select exists (
 				select 1 from duty_holds where name = $1 and holder = $2 and expires_at > now()
@@ -616,7 +723,8 @@ func recordBatch(ctx context.Context, deps Deps, outcomes []outcome, holder uuid
 			  and (o.state = 'published' or h.mine or r.id is not null)
 		)
 		select mine from hold
-	`, publisherHold, holder, ids, states, attempts, delays, until, failures, reachedIDs, reachedTopics).Scan(&holds); err != nil {
+	`, publisherHold, holder, ids, states, attempts, delays, until, failures, reachedIDs, reachedTopics).Scan(&holds)
+	}); err != nil {
 		return false, fmt.Errorf("record the batch's outcome: %w", err)
 	}
 	return holds, nil
@@ -651,7 +759,7 @@ func resolveDestinations(ctx context.Context, deps Deps, events []*batchEvent) e
 		resolvable = append(resolvable, event)
 		_, _, _ = eventDestinations(event.event, item.Topic, event.routing, want)
 	}
-	found, err := loadLookups(ctx, deps.Store.Pool, want)
+	found, err := loadLookups(ctx, gated{db: deps.Store.Pool, lanes: deps.lanes}, want)
 	if err != nil {
 		return err
 	}

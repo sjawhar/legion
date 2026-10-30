@@ -65,8 +65,8 @@ func (p *heldPublisher) accept(from, to int) {
 // An issue's events go to each destination one at a time, in id order: the second event is sent
 // to the issue's topic only once NATS answered the first event's send there, and to the role route
 // only once the first event's role send was answered, while the first event's three destinations
-// go out side by side. The batch is recorded once every answer is in, and an event is marked
-// published only then, with its destinations in the order it has them.
+// go out side by side. The issue's events are recorded once every answer of that owner is in, and
+// an event is marked published only then, with its destinations in the order it has them.
 func TestAnIssuesEventsGoToEachDestinationOneAtATime(t *testing.T) {
 	database := storetest.Open(t)
 	broker := events.NewBroker()
@@ -296,9 +296,9 @@ func TestOneIssuesEventsReachItsSubjectInSeqOrderWhileAnotherIssueCommitsAcrossT
 	}
 	broker.Publish(y1)
 	y2 := committed(deployed(y, 4))
-	// One process scans one batch at a time, lowest id first, and records a batch before it claims
-	// the next, so once Y's second event is published every event below it that the outbox sends
-	// at all has been sent.
+	// An owner's events run in one lane, which one batch at a time holds and no other batch reads
+	// into (lanes), and a lane's sends go in id order, so Y's first event is sent and recorded
+	// before its second, however many batches run beside them.
 	waitFor(t, 30*time.Second, "Y's second event published", func() bool {
 		return publishedAt(t, database, y2.ID) != nil
 	})

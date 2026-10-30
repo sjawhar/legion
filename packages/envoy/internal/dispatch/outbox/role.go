@@ -16,7 +16,10 @@ import (
 )
 
 // roleReceiptTimeout bounds the wait for a role holder's answer to a forward: its empty receipt,
-// or the stream's acknowledgement of the stored copy for a holder with a serving port.
+// or the stream's acknowledgement of the stored copy for a holder with a serving port. A holder
+// that never answers holds back its own owner's later events for that long and nothing else: the
+// batch waiting on it settles and releases every other owner as their own sends come in, and the
+// batches beside it read and publish the owners it does not hold (Outbox.scan, lanes).
 const roleReceiptTimeout = 5 * time.Second
 
 // errNoRoleReaders is a role route's holder resolved with no role-claim or session reader in Deps.

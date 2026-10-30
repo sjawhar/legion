@@ -580,18 +580,25 @@ What the two processes share, and what each keeps to itself:
   only while it holds the publisher hold `dispatch-outbox` (`duty.Hold`, migration
   `0150_duty_holds`), renewed every two seconds on the outbox's own pool, and stands by while the
   other holds it; `/healthz` says which (`outbox_publisher`). A holder that stops sends nothing
-  more, records what NATS already answered, releases the rest of its batch and then the hold, which
-  wakes the standby at once; a graceful stop waits for that before it closes the database pool, up
-  to `outboxStopBudget` after its shutdown starts. One that is killed is replaced once its hold
-  lapses, six seconds after its last renewal; one whose NATS stays down for three seconds, or whose
-  failed sends meet a connection that does not answer a probe, releases the hold too. One that
-  finds its hold lost releases it as well, which stops its renewal and deletes the row only while
-  the row still names it. A holder sends nothing once its hold's deadline has passed, a send
-  already waiting for a connection included (`bus.Client.WindowUntil`), so one that freezes and
-  resumes publishes nothing beside the new holder. Each owner's events (an issue's, a document's or
-  a project's) keep their order per destination: an event goes to a session's subject, or to the
-  owner's topic family, only after every earlier unpublished event of its owner bound there has
-  reached it.
+  more, records what NATS already answered, releases the rest of each batch in flight and then the
+  hold, which wakes the standby at once; a graceful stop waits for that before it closes the
+  database pool, up to `outboxStopBudget` after its shutdown starts. One that is killed is
+  replaced once its hold lapses, six seconds after its last renewal; one whose NATS stays down for
+  three seconds, or whose failed sends meet a connection that does not answer a probe, releases
+  the hold too. One that finds its hold lost releases it as well, which stops its renewal and
+  deletes the row only while the row still names it. A holder sends nothing once its hold's
+  deadline has passed, a send already waiting for a connection included (`bus.Client.WindowUntil`),
+  so one that freezes and resumes publishes nothing beside the new holder. Each owner's events (an
+  issue's, a document's or a project's) keep their order per destination: an event goes to a
+  session's subject, or to the owner's topic family, only after every earlier unpublished event of
+  its owner bound there has reached it.
+- A batch does not block the next. The holder runs up to four side by side, each reading only
+  owners no other batch holds in flight, so an event waiting out a role holder's five-second
+  receipt holds back its own owner's later events and nothing else; every other owner's events are
+  read, sent and recorded beside it. An owner is settled, recorded and given back as soon as its
+  own sends are answered rather than at its batch's end, so its next events follow at once. The
+  batches run one statement at a time on the outbox's two connections, so the hold's renewal never
+  waits behind them.
 - Each event reaches each receiver once, delivered at least once. A holder that dies between
   NATS's acknowledgement and the write that records it leaves the batch to be sent again by the
   next holder: JetStream drops the repeat by its MsgId inside its 72-hour duplicate window, and a
