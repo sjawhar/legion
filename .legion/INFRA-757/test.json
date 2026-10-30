@@ -1,0 +1,92 @@
+{
+  "schemaVersion": 1,
+  "phase": "test",
+  "issue": "INFRA-757",
+  "completed": "2026-10-30T13:50:00Z",
+  "round": 5,
+  "implementerProof": {
+    "verdict": "verified",
+    "how": "This round follows a forward merge of main (89ce0fbf) made after CI went red at the retro head. The unchanged-diff fingerprint differs between the head this phase last passed (0283147f, a7d76655…) and this one (571d7140, 2cd18075…), so the round was a full one: every control binary, overlay and device was rebuilt against the merged tree and against main@origin as it now stands, and every acceptance proof re-run. The branch's own diff differs from round 4's by exactly two lines, which this phase read: the comment and the pattern packages/envoy/internal/dispatch/api/testdata/** added to the listener_server_change filter, which the merge made necessary. The implementer's three proof entries were re-driven here and each matched."
+  },
+  "failures": [],
+  "failed": 0,
+  "proof": [
+    {
+      "criterion": "After the forward merge, the branch's own change is what it was, plus the one filter pattern the merge requires.",
+      "surface": "The unchanged-diff fingerprint of skill://legion-worker/references/conflicts-and-rewrites.md, computed at this phase's own two heads, and the two diffs themselves compared line by line.",
+      "command": "base=$(gh pr view 2517 -R sjawhar/legion --json baseRefName -q '.baseRefName | @json'); jj git fetch; for each head: jj diff --from \"fork_point(${base}@origin | <head>)\" --to <head> --git --context 0 '~(.legion | docs/solutions)' | sed -e '/^@@/d' -e '/^index /d' | sha256sum; then diff of the two diffs.",
+      "observed": "0283147f: a7d766555fecc063a5954408585ed51ffe4a924c1731e5c8043cfc7229feed71. 571d7140: 2cd180755f5e8a366cf575911261cde3b922021e5d8f9cdc736fc039267c36cf. Changed, so a full round. The whole difference between the two diffs is two added lines of .github/workflows/ci.yaml: the comment '# internal/dispatch/api/write_advice_test.go:504 reads testdata/decision-block-inserts.json.' and the pattern 'packages/envoy/internal/dispatch/api/testdata/**'. Every other line of the branch's change, 1202 of them, is identical.",
+      "headSha": "571d7140eafd16217dc6053cee91b5e41301e90a",
+      "negativeControl": "The fingerprints themselves are the control: a merge that had dropped or altered any of the branch's own lines would show in the diff of the two diffs, which here holds two added lines and nothing else.",
+      "status": "pass"
+    },
+    {
+      "criterion": "The filter pattern the merge added is the right one, and the check fails without it.",
+      "surface": "The cited test line, and the repository's own drift check over the merged workflow.",
+      "command": "sed -n '500,508p' packages/envoy/internal/dispatch/api/write_advice_test.go; PATH=\"$TMPDIR/q2517venv/bin:$PATH\" .github/scripts/check-ci-filters.sh; then the same check with the new pattern deleted from listener_server_change.",
+      "observed": "write_advice_test.go:503-504 is readDecisionBlockInserts, which reads filepath.Join(\"testdata\", \"decision-block-inserts.json\"), and that file is the only entry of packages/envoy/internal/dispatch/api/testdata. The check at the merged head ends 'every ci.yaml filter matches every file its job reads (27 gates), and every PUSH_WORKFLOWS workflow's on.push.paths equals its filter (1)'.",
+      "headSha": "571d7140eafd16217dc6053cee91b5e41301e90a",
+      "negativeControl": "With that one pattern deleted from listener_server_change, the real check refuses: '::error file=packages/envoy/internal/dispatch/api/testdata/decision-block-inserts.json::listener-server-change reads packages/envoy/internal/dispatch/api/testdata/decision-block-inserts.json, which its filter listener_server_change does not match, so a change to it skips the job: … go test -tags serverchange ./cmd/listener (the testdata of a package it tests or compiles)', and '1 CI filter problem(s)'. The file was restored at once and jj status is clean.",
+      "status": "pass"
+    },
+    {
+      "criterion": "Acceptance 1 and 2, flake A, at the merged head.",
+      "surface": "This pod's Go test runs under the load recipe (GOMAXPROCS=1, two busy loops, one dd conv=fsync writer) against the rootless PostgreSQL 17 with its default durability.",
+      "command": "cd packages/envoy/internal/dispatch/startup && GOMAXPROCS=1 bash <the loop script> r5A-before 30 2 1 <a binary built here with main@origin's started_test.go through -overlay> -test.run '^TestTwoAnnouncersAtOnceAnnounceAndPublishOnce$', and r5A-after 40 with the head's binary.",
+      "observed": "Before: 18 pass, 12 fail of 30 (wall 482 s), every failure the FleetCommit assertion. After: 40 pass, 0 fail of 40 (wall 576 s). main@origin's copy of started_test.go is still the pre-fix one, so the overlay is a true control after the merge.",
+      "headSha": "571d7140eafd16217dc6053cee91b5e41301e90a",
+      "negativeControl": "The before binary is the control: the two differ in that one file, and only the one with main's copy fails.",
+      "status": "pass"
+    },
+    {
+      "criterion": "Acceptance 1 and 2, flake B, at the merged head.",
+      "surface": "cmd/listener's test binary with the forced device rebuilt against the merged tree, and the committed regression test in internal/store.",
+      "command": "The four device rows (row 1 main@origin's kv.go, main.go and six listener test files; row 2 main's product with this branch's tests; row 3 the branch; row 4 main with the device off), the regression test at the head and with -overlay at main@origin's kv.go, then the two 40-run loops.",
+      "observed": "Row 1 FAIL at interest_read_routes_test.go:103 with 'status 503 ... the role claim view is not complete'; row 2 FAIL at :106; row 3 PASS; row 4 PASS. The regression test is ok 2.115s at the head and fails at role_holders_test.go:300 against main's kv.go. Loops: plain 40 pass, 0 fail of 40 (wall 256 s); the device forced, 40 pass, 0 fail of 40 (wall 300 s). The whole package at the merged head is ok cmd/listener 438.506s, go test -race ./internal/store/ ./internal/kvwatch/... is ok 39.019s and ok 67.882s, and the healthz family is nine of nine green (ok 14.303s).",
+      "headSha": "571d7140eafd16217dc6053cee91b5e41301e90a",
+      "negativeControl": "Rows 1, 2 and 4: with the device off main's product passes, and with it on main's product fails whether the tests are main's or this branch's.",
+      "status": "pass"
+    },
+    {
+      "criterion": "The red that sent this issue back is main's drift and not this change, and the merge is what answers it.",
+      "surface": "The failed run's own logs, the pi_envoy filter, and main's change to the file those assertions live in.",
+      "command": "gh api repos/sjawhar/legion/actions/runs/41029729106/jobs; gh api .../jobs/123998533595/logs; jj diff --from 3c2691a793b8 --to main@origin --git packages/pi-envoy/extensions/card-delivery-omp.test.ts; and cd packages/pi-envoy && bun test ./extensions/card-delivery-omp.test.ts after bun install --frozen-lockfile.",
+      "observed": "Run 41029729106 at the retro head b2d4f76d failed in two jobs only: pi-envoy and, after it, ci-ok. Its seven failures are all of packages/pi-envoy/extensions/card-delivery-omp.test.ts, each 'Expected to contain: PROBE-…'. This branch changes no TypeScript at all; the job ran because pi_envoy's filter names .github/workflows/ci.yaml (ci.yaml:609), which this branch edits, so every head of it runs that job. Between the red head's fork point 3c2691a7 and main@origin, main changed exactly that test file (2d3a725f, sjawhar/legion#2550), adding the /api/v1/agents/<id>/answers route to its fake Dispatch, without which the code under test writes no PROBE line - the assertions that failed. The merge 89ce0fbf brings that commit, so the branch now carries the fix. A local run of the suite here is no evidence either way: after bun install --frozen-lockfile it reports 9 skipped, 0 failed, the suite needing a harness this pod has not got.",
+      "headSha": "571d7140eafd16217dc6053cee91b5e41301e90a",
+      "negativeControl": "The control is the failed job itself read against the file's history: the assertions that failed are the ones main's commit exists to make pass, and the branch's own diff touches no file of that package. The reading CI owes is the pi-envoy job of run 41059086197 at the merged code head 89ce0fbf, which had not started when this handoff was written.",
+      "status": "pass"
+    },
+    {
+      "criterion": "Also delivered: every race-lane job has real time headroom.",
+      "surface": "GitHub Actions job logs, read through the jobs API.",
+      "command": "gh api repos/sjawhar/legion/actions/jobs/<id>/logs for jobs 123758981368, 123758981335 and 123758981314 of run 40959437771 (head f2df6dc7, success) and job 123834334225 of run 40975440555 (main, success).",
+      "observed": "envoy-go-race's largest package cmd/listener 371.201 s, 34.4 % of its 1080 s bar; envoy-go-race-api 736.975 s, 68.2 %; envoy-go-race-pmdoc 891.414 s, 61.9 % of 1440 s; envoy-go-race-docs 1324.924 s on main, 61.3 % of its 2160 s bar. This round changes no race step's command, packages or deadline; the merge leaves all four jobs as they were, and the filter it widened is listener_server_change, not a race filter.",
+      "headSha": "571d7140eafd16217dc6053cee91b5e41301e90a",
+      "negativeControl": "The same packages contending in one job on main before the split, run 40877712458 job 123461966609: docs 1772.969 s, pmdoc 1563.552 s, api 1099.487 s, bus 315.651 s FAIL, store 277.864 s, delivery 93.562 s, and no line at all for the listener step.",
+      "status": "pass"
+    }
+  ],
+  "ciAtTheHead": {
+    "head": "571d7140eafd16217dc6053cee91b5e41301e90a",
+    "readAt": "2026-10-30T13:46Z",
+    "state": "The handoff head carries no run of its own (handoff-only push, skip-checks: true). The code head 89ce0fbf has CI run 41059086197, created at 12:55Z; at 13:46Z only its changes job had finished, green, and every other job was queued, the pi-envoy job this round turns on included. A lane still running is read as running and never waited for. The run before it, 41029729106 at the retro head b2d4f76d, is the only run of this branch ever to finish red, and it failed in pi-envoy and ci-ok alone, for the reason the proof above gives. Every other run since round 2 ended cancelled by the next push; the last run to finish green is 40959437771 at f2df6dc7. The reviewer and the merger read ci-ok at the merging head, as DA-4 binds acceptance 3."
+  },
+  "observations": [
+    {
+      "what": "The branch runs the pi-envoy job on every head because it edits ci.yaml, and that job is the one place main's drift can turn this pull request red.",
+      "evidence": "pi_envoy's filter names .github/workflows/ci.yaml (ci.yaml:609), as most filters do, so a head of this branch runs a TypeScript job whose code it never touches. That is how run 41029729106 went red on main's own card-delivery test at a base three hours stale. The lesson for the merge: a long wait between the last merge of main and the merge itself is the risk here, not this change."
+    },
+    {
+      "what": "The implementer's handoff is stamped 2026-10-30T13:35:00Z, which was in the future when this round began.",
+      "evidence": "The daemon gave this phase its task and the workspace carried 571d7140 by 12:58Z, and the handoff file's completed field reads 13:35Z. Nothing depends on it; the commit's own time is what a reader should trust."
+    },
+    {
+      "what": "The implementer's open question stands, unchanged by this round.",
+      "evidence": "Its handoff records that main's listener_server_change filter still misses packages/envoy/internal/dispatch/api/testdata/** until this pull request merges, so another branch touching that testdata before then skips the listener-server-change job. This round's negative control shows the check catches exactly that case once the pattern is in."
+    },
+    {
+      "what": "A watcher fault of the role claim bucket is still reported under the interest cache's name.",
+      "evidence": "Unchanged since round 2 and on main: listenerCaches names the whole store.Registry 'interest', so a role claim watcher that ends answers /healthz '503 interest KV watcher unavailable: role claims watcher stopped'."
+    }
+  ]
+}
