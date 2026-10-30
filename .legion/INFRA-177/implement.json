@@ -1,0 +1,50 @@
+{
+  "schemaVersion": 1,
+  "phase": "implement",
+  "issue": "INFRA-177",
+  "completed": "2026-10-30T06:41:44Z",
+  "pullRequest": "https://github.com/sjawhar/legion/pull/2354",
+  "proof": [
+    {
+      "criterion": "The Conversation shows a handoff written while it is open, without a reload (tester's T3), on main's one-socket live feed",
+      "surface": "Dispatch's browser suite: the real Go server on Postgres, Chromium through Playwright",
+      "command": "bash /legion/harness/dispatch-e2e.sh 'postgres://postgres@127.0.0.1:5433/d_e2e5?sslmode=disable' e2e/handoffs.e2e.ts",
+      "observed": "3 passed (14.0s): the Conversation lists each version and expands its fields and proof; a handoff written while the tab is open arrives with the document's own mark still on it; the Activity list has one line per version. Before the HandoffTurn fix the page failed with 'pins is not defined' (main removed TurnPin's disabled prop).",
+      "headSha": "b78387087c63",
+      "negativeControl": "with event-refresh.ts's [\"handoffs\", key] target commented out: the live-update test fails (toHaveCount: unexpected value \"2\"), the other two pass"
+    },
+    {
+      "criterion": "A retried handoff write with the same Idempotency-Key returns the first answer and records one version (main's #2449 keyed writes)",
+      "surface": "Dispatch API handler on Postgres",
+      "command": "cd packages/envoy && go test -count=1 -p 1 -timeout 50m ./internal/dispatch/api/ (ICU en-US template for the rank collation test)",
+      "observed": "package ok; TestARetriedHandoffWriteReplaysItsAnswerAndRecordsOneVersion passes, and the client census test lists writeHandoff as a keyed write",
+      "headSha": "b78387087c63",
+      "negativeControl": "the envoy-client census failed to typecheck without the four handoff methods in its table (missing handoff, writeHandoff, listHandoffs, latestHandoff)"
+    },
+    {
+      "criterion": "Handoff records end to end: a worker writes its record, the daemon reads it back and refuses one another session wrote",
+      "surface": "scripts/e2e/handoff-records.sh: the Go daemon and Dispatch on Postgres and NATS",
+      "command": "LEGION_TEST_PG_DSN=postgres://postgres@127.0.0.1:5433/d_hr bash scripts/e2e/handoff-records.sh",
+      "observed": "--- PASS: TestHandoffRecordsLive (30.41s); handoff records e2e: PASS in 70s",
+      "headSha": "4302877cf7b9",
+      "negativeControl": "the live test's own refusal case: a record written by another session is refused by the daemon"
+    },
+    {
+      "criterion": "A push for a head the branch left decides the checks again (review item 14)",
+      "surface": "daemon workflow engine on Postgres",
+      "command": "cd packages/daemon && go test -count=1 -p 1 -timeout 30m ./internal/workflow/",
+      "observed": "ok (416.7s) at the merged tree",
+      "headSha": "4302877cf7b9",
+      "negativeControl": "at 0b0df428, removing each of the four re-check clauses in push() one at a time fails TestAPushForAHeadTheBranchLeftDecidesTheChecks"
+    }
+  ],
+  "filesChanged": [
+    "0b0df428: the reviewer's 18 items and the tester's 3 (handoffimport, ghbranch, classify, api/ready.go, workflow test, runbook, rig, daemon-pane, e2e T3) and no Dispatch key in the change",
+    "3338c1a6 and 4302877c: forward merges with main cd5ca7c3 and 3c2691a7; contract 42 -> 43, Dispatch migration 0137 -> 0145; handoff.recorded moved to event-feed.ts; the handoff write is keyed (request_keys.go, body_drain.go)",
+    "b7838708: HandoffTurn without TurnPin's removed disabled prop; client census lists the handoff methods; scorer row carries main's flagged column; ci.yaml docs filter and docs-pages.yaml paths cover handoffimport"
+  ],
+  "deviations": [
+    "One INFRA key remains in added lines: a supersedes path in the pr2354 learning names a file main holds (…-INFRA-149.md); the path must stay exact.",
+    "claude-envoy check-dist reports dist/ and legion/ stale by design: they stay as main has them and the rebuild workflow regenerates them after the merge."
+  ]
+}
