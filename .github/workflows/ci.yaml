@@ -589,6 +589,9 @@ jobs:
               # src/__tests__/delivery.test.ts:16-17 and dispatch-config.test.ts:5.
               - 'packages/contracts/fixtures/dispatch-targeted-delivery.json'
               - 'packages/contracts/fixtures/dispatch-public-url.json'
+              # The Go copy its test holds the TypeScript to: src/__tests__/askgate-new-asks.test.ts
+              # reads the Dispatch server's decision-block table, which the Go API test reads too.
+              - 'packages/envoy/internal/dispatch/api/testdata/**'
               # src/__tests__/dispatch-advice.test.ts:683-690 holds every skill section a notice
               # cites to a heading of that skill's SKILL.md.
               - 'skills/**'
@@ -863,6 +866,7 @@ jobs:
               - 'packages/envoy/internal/dispatch/agentsecrets/*'
               - 'packages/envoy/internal/dispatch/agentstream/*'
               - 'packages/envoy/internal/dispatch/api/*'
+              - 'packages/envoy/internal/dispatch/api/testdata/*'
               - 'packages/envoy/internal/dispatch/architecture/*'
               - 'packages/envoy/internal/dispatch/asks/*'
               - 'packages/envoy/internal/dispatch/auth/*'

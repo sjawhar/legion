@@ -34,10 +34,10 @@ related_issues:
 
 ## Evidence
 
-- `packages/envoy/internal/dispatch/store/migrations/0149_outbox_claim.up.sql:34-46`: three index
+- `packages/envoy/internal/dispatch/store/migrations/0150_outbox_claim.up.sql:34-46`: three index
   builds, then the column add and the two drops. Built on 1,000,000 and 5,000,000 event rows in
   1.1 s and 7.2 s; with the column add first, reads of `events` would have waited all of it.
-- `0149_outbox_claim.up.sql:7` and `:35-41`: one spelling in every predicate and in
+- `0150_outbox_claim.up.sql:7` and `:35-41`: one spelling in every predicate and in
   `outbox/batch.go`'s queries. Main's old claim, with the `coalesce` spelling, reads `events` by a
   sequential scan after this migration (125 ms on 1,000,000 rows) where it used the dropped
   `events_unpublished` (3.4 ms).

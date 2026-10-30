@@ -578,7 +578,7 @@ What the two processes share, and what each keeps to itself:
 
 - One process publishes the events outbox at a time. Each process's outbox reads and sends events
   only while it holds the publisher hold `dispatch-outbox` (`duty.Hold`, migration
-  `0148_duty_holds`), renewed every two seconds on the outbox's own pool, and stands by while the
+  `0149_duty_holds`), renewed every two seconds on the outbox's own pool, and stands by while the
   other holds it; `/healthz` says which (`outbox_publisher`). A holder that stops sends nothing
   more, records what NATS already answered, releases the rest of its batch and then the hold, which
   wakes the standby at once; a graceful stop waits for that before it closes the database pool, up
@@ -1370,7 +1370,22 @@ message included (a message is never edited), and owes an index to every message
 reading `messages` once. Its trigger takes `SHARE ROW EXCLUSIVE` on `messages` alone, so a message
 write waits behind it while a read does not. Its census answers `0` for the same reasons.
 
-Migration `0148_duty_holds` creates `duty_holds (name, holder, token, expires_at)`, one row per name
+Migration `0148_asks_anchor_artifact_id` creates `asks_anchor_artifact_id`, an index over the asks
+whose `anchor` is set of `case when anchor->>'artifact_id' ~ '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$' then (anchor->>'artifact_id')::uuid end`:
+the uuid cast `comments_anchor_artifact` (`0032`) indexes, guarded by the form every
+server-written anchor carries, since an unguarded cast would fail the boot over an anchor an
+earlier release could store. Settlement's sweep reads through it the marks a document's asks
+record, by the anchor's document alone, so an ask that also names an ask block on another document
+(`block_artifact_id`) keeps its mark on the document its anchor names. Building it takes `SHARE`
+on `asks`, so ask writes wait for the build; it rewrites no row and refuses none, so its census
+answers `0`. An anchor whose artifact id is not a lower-case document id is left out of the index,
+which costs the read nothing — its text comparison never matched such a spelling either — and
+each boot logs the count of those asks with a warning when there are any. The release before it
+never reads the index and serves beside it unchanged, except that its sweep still drops the mark
+of an ask holding both columns (no such row is written today), and rolling Dispatch back past
+`0148` is an image rollback alone: the index is left for the next release that reads it.
+
+Migration `0149_duty_holds` creates `duty_holds (name, holder, token, expires_at)`, one row per name
 a process holds by renewing it (`duty.Hold`): the events outbox's publisher holds `dispatch-outbox`
 there (Running more than one process, above). `expires_at` is always the database's `now()` plus
 the hold's TTL, so a lapse is judged on the database's clock and never on two hosts' wall clocks,
@@ -1379,7 +1394,7 @@ the row and notifies `dispatch_duty_holds` with the name in one statement, which
 once. It creates a table and touches no row, and the release before it neither reads nor writes
 it; its census answers `0`.
 
-Migration `0149_outbox_claim` gives the outbox's batch read three partial indexes and drops the two
+Migration `0150_outbox_claim` gives the outbox's batch read three partial indexes and drops the two
 the per-row claim read. `events_outbox_fresh` on `(id)` holds the unpublished events never tried,
 `events_outbox_retry` on `(next_attempt_at, id)` those waiting on a back-off, and
 `events_outbox_owner` on `(coalesce(issue_key, artifact_id::text, project_key), id)` each owner's
@@ -1405,7 +1420,7 @@ only for those last statements, which rewrite no row, and for the commit. Its ce
 `0`, since it refuses and rewrites no row, and the census reports `events`, the table it locks,
 with its row count and size.
 
-From `0149`'s release on, `next_attempt_at` is only a back-off, and an unpublished event holds back
+From `0150`'s release on, `next_attempt_at` is only a back-off, and an unpublished event holds back
 its owner's later events from each destination it has not reached. The rows that start doing so
 at the deploy are the unpublished events that are not pending commands; count them by attempt
 before the deploy with `select attempt_count, count(*) from events where published_at is null and

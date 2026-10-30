@@ -65,7 +65,7 @@ type routing struct {
 // later ones back from its unreached destinations. An event with no owner has no destination and
 // forms no chain, and is read alone. A pending subscription command (api/subscribers.go) is in no
 // index this reads, and neither is a backed-off event of an owner the batch does not choose. Every
-// predicate on pending is spelled as the indexes spell it (migration 0149), which is what lets
+// predicate on pending is spelled as the indexes spell it (migration 0150), which is what lets
 // Postgres prove the indexes' predicates from the query's.
 //
 // Of the rows read, the batch keeps every row before its batchSize-th due one in id order, and that
