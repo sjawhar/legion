@@ -3,7 +3,6 @@ package api
 import (
 	"context"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"log/slog"
 	"regexp"
@@ -13,6 +12,7 @@ import (
 
 	"github.com/jackc/pgx/v5"
 
+	"github.com/sjawhar/envoy/internal/dispatch/docs"
 	"github.com/sjawhar/envoy/internal/dispatch/model"
 	"github.com/sjawhar/envoy/internal/dispatch/pmdoc"
 )
@@ -295,10 +295,14 @@ type supersededApproval struct {
 // so it reads what the write left: a carried approval is pinned to version itself and reports
 // nothing, which is right - the gate reopens on that carry's own artifact.approved event.
 //
-// The read is the newest review of the document, one lookup of artifact_reviews_by_artifact. It
-// reports only when that review is an approval of the version right below this one: an older
-// approval was already stale before this write, and a newer changes request had already closed
-// the gate.
+// The read is the newest review of the document (docs.NewestReview), one entry of
+// artifact_reviews_by_artifact_event_seq in docs.ReviewOrder, the order the reviews' events
+// committed: artifact_reviews.created_at is its transaction's start and its id is random, so the
+// carry's own approval of this version can carry an earlier pair than an approval committed while
+// this write was open, and ordering by those two alone would report a gate this write did not
+// close. It reports only when that newest review approves the version right below this one: an
+// older approval was already stale before this write, and a newer changes request had already
+// closed the gate.
 //
 // Like every other advice query this runs behind a savepoint, because a failed statement aborts
 // the transaction it ran in and this must never fail the write it describes. It writes nothing,
@@ -330,31 +334,23 @@ func (s *server) supersededApprovalAdvice(
 }
 
 // newestReviewAsApproval is supersededApprovalAdvice's rule, over whatever queryer the caller
-// holds: the newest review of artifactID, reported when it approves the version right below
-// version. A document with no review at all, an approval of an older version, an approval of
-// version itself (the approval carry's own review) and a changes request each report nothing.
-func newestReviewAsApproval(ctx context.Context, q queryer, artifactID string, version int) (*supersededApproval, error) {
-	var (
-		approvedVersion int
-		state           string
-		approvedBy      string
-	)
-	if err := q.QueryRow(ctx, `
-		select version, state, coalesce(actor->>'id', '')
-		from artifact_reviews
-		where artifact_id = $1
-		order by created_at desc, id desc
-		limit 1
-	`, artifactID).Scan(&approvedVersion, &state, &approvedBy); err != nil {
-		if errors.Is(err, pgx.ErrNoRows) {
-			return nil, nil
-		}
+// holds: the document's newest review in docs.ReviewOrder, reported when it approves the version
+// right below version. A document with no review at all, an approval of an older version, an
+// approval of version itself (the approval carry's own review) and a changes request each report
+// nothing.
+func newestReviewAsApproval(ctx context.Context, q docs.Queryer, artifactID string, version int) (*supersededApproval, error) {
+	review, err := docs.NewestReview(ctx, q, artifactID)
+	if err != nil {
 		return nil, fmt.Errorf("read the document's newest review: %w", err)
 	}
-	if state != "approved" || approvedVersion != version-1 {
+	if review == nil || review.State != "approved" || review.Version != version-1 {
 		return nil, nil
 	}
-	return &supersededApproval{ApprovedVersion: approvedVersion, Version: version, ApprovedBy: approvedBy}, nil
+	return &supersededApproval{
+		ApprovedVersion: review.Version,
+		Version:         version,
+		ApprovedBy:      review.Actor.ID,
+	}, nil
 }
 
 // documentWriteAdvice is the whole advice of a document write with no issue state to report: a

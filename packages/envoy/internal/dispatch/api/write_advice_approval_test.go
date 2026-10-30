@@ -142,6 +142,36 @@ func TestNewestReviewAsApprovalReportsOnlyTheVersionItSuperseded(t *testing.T) {
 	}
 }
 
+// The reviews are read in the order their events committed (docs.ReviewOrder), not by
+// created_at and id: created_at is the writing transaction's start and id is random, so a review
+// that committed later can carry the earlier pair. That is the approval carry's own shape - a
+// person's approval of the version below commits while the version write is open, and the carry's
+// approval of the version it stored commits after it with an earlier created_at - and reading by
+// created_at there reports a gate the write did not close.
+func TestNewestReviewAsApprovalReadsTheOrderTheReviewsCommittedIn(t *testing.T) {
+	handler, database := newTestHandlerWithStore(t)
+	createAdviceProject(t, handler, "ORDER")
+	spec := "# Order\n\nApproved once.\n"
+	issue := createAdviceIssue(t, handler, "ORDER", "Commit order", &spec)
+	approved := approveAdviceDocument(t, handler, issue.PrimaryArtifactID)
+
+	// The carry's approval of the version this write stored: appended after the approval above,
+	// so its event sequence is higher, and stamped a second before it, as a transaction that was
+	// already open when that approval committed would stamp it.
+	if _, err := database.Pool.Exec(context.Background(), `
+		insert into artifact_reviews (artifact_id, version, state, actor, event_seq, created_at)
+		select $1, $2, 'approved', '{"kind":"user","id":"alice"}'::jsonb,
+		       max(event_seq) + 1, min(created_at) - interval '1 second'
+		from artifact_reviews where artifact_id = $1
+	`, issue.PrimaryArtifactID, approved+1); err != nil {
+		t.Fatalf("insert the carry's approval: %v", err)
+	}
+
+	if got := newestApprovalOf(t, database, issue.PrimaryArtifactID, approved+1); got != nil {
+		t.Fatalf("superseded approval = %#v, want none: the newest review approves the version this write stored", got)
+	}
+}
+
 func newestApprovalOf(t *testing.T, database *store.Store, artifactID string, version int) *supersededApproval {
 	t.Helper()
 	approval, err := newestReviewAsApproval(context.Background(), database.Pool, artifactID, version)
