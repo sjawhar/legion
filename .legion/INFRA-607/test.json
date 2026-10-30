@@ -1,0 +1,38 @@
+{
+  "schemaVersion": 1,
+  "phase": "test",
+  "issue": "INFRA-607",
+  "completed": "2026-10-30T08:13:40Z",
+  "testedHead": "524d6f3df58d8d59ac6814a47dee821a8afd23f4",
+  "codeHead": "f6aae9bade245cc9118988a86e03f554bf23ae46",
+  "round": 13,
+  "scope": "f6aae9ba is a forward merge of main, from base cd5ca7c3 to base a21100c5, after retro removed the handoffs (e027da2c) and added docs/solutions (29bf3873). Main added migrations 0145-0147 (#2376, events_person_words among them), so the branch's migrations moved from 0145-0151 to 0148-0154. The raw fingerprint changed (9854397f -> e41e3f96). With migration numbers normalised, the PR's own diff is byte-identical to round 12's (0 differing lines). The one conflict, .dispatch/architecture/dispatch-api.md, is text only. Main did change five of the PR's files in the window: two .dispatch/architecture files, packages/envoy/AGENTS.md, cmd/dispatch/README.md and infra/gcp/dispatch.go (#2528 clusterOnly). The rule makes that a full round, with the lanes that build infra/gcp read green at the merged head. Main also added a column to events, which the suggestion cursor reads, so I drove the woken paths on the real binary beside main.",
+  "implementerProof": {
+    "verdict": "verified",
+    "how": "I rebuilt the stack after the pod move, on my builds of f6aae9ba and main a21100c5: Postgres 16 with every statement logged, NATS, the Envoy listener, config A. Main created the database at schema 147. A head process migrated it beside main to 145-154 with no gap, and there was no ERROR line in either log."
+  },
+  "failures": [],
+  "failed": 0,
+  "proof": [
+    {
+      "criterion": "The merged head builds and vets, and infra/gcp (changed by main under the PR) passes",
+      "surface": "An export of packages/envoy at f6aae9ba",
+      "command": "go build ./... and go vet ./... (GOWORK=off) in packages/envoy; in packages/envoy/infra, with its own go.work: go vet ./..., go vet -tags natslive ./core/, go test -p 2 ./gcp/",
+      "observed": "Build and all three vets are clean. infra/gcp: ok in 67.9 s with -skip DataDisk, TestDispatchConnectionsPerPodIsTheServers among them (88 = main's 87 + the wake listener). Run without the skip, only TestTheDataDiskIsFormattedOnlyWhenItReadsAsZerosToItsEnd and TestARefusedDataDiskIsNeverFormattedOnALaterBoot fail, each with 'these tests need mkfs.ext4 on this machine'. This pod has no mkfs.ext4, and data_disk is not in the PR's diff.",
+      "headSha": "f6aae9bade245cc9118988a86e03f554bf23ae46",
+      "negativeControl": "The data-disk tests refuse to run without mkfs.ext4: an environment refusal named by the test, not a product failure."
+    },
+    {
+      "criterion": "The renumbered migrations deploy on main's schema 147, and the woken loops still work beside main after main's events change",
+      "surface": "main a21100c5 seeding through POST /api/v1/projects, /issues and /issues/{key}/comments; a head process migrating that database while main runs; a person's edit through POST /api/v1/artifacts/{id}/edits; refs cleared with psql",
+      "command": "start.sh main 0 t8; seed SUG-1..8 (18 suggestions); start.sh head 1 t8; comments through both ports; agent spec plus person edit on SUG-8; a new spec citing SUG-1 and SUG-2, then update refs set excerpt_version = null; psql -f mainrules.sql and diff (drivers: dispatch://INFRA-607/artifact/tester-drivers-tar-gz)",
+      "observed": "schema_migrations: 145-154 with no gap. Edit notice: due 08:06:48.044; one artifact.human_edited event at 08:06:48.048; row gone. Excerpts: re-recorded within about 1 s. Suggestions: the 21 live outcomes (9 judged) are identical row for row to main's full-table rules on the same data.",
+      "headSha": "f6aae9bade245cc9118988a86e03f554bf23ae46",
+      "negativeControl": "ses-other's comment on SUG-3 resolved nothing in either the live table or main's rules."
+    }
+  ],
+  "ci": "At 08:13Z at f6aae9ba, only changes and pr-title are queued: the router has not yet created the lanes. By the rule, envoy-infra-go (which builds infra/gcp) and envoy-go must read green at f6aae9ba, or each failure must be named as a known main red, before approval. I did not wait for them.",
+  "mainReds": [
+    "close-withdraws-asks.e2e.ts:126. Also the envoy-go-race docs timeout, if #2516's separate docs race job has not cleared it."
+  ]
+}
