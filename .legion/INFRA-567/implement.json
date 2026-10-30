@@ -2,59 +2,56 @@
   "schemaVersion": 1,
   "phase": "implement",
   "issue": "INFRA-567",
-  "completed": "2026-10-30T05:55:00Z",
-  "round": 9,
-  "answers": "Review round 5: one High (Biome), one Medium (a third reader of an image reference), one Minor (a dead constant) and three ci.yaml comment fixes the review App could not push",
+  "completed": "2026-10-30T08:20:00Z",
+  "round": 10,
+  "answers": "Review round 6: lint and test red at the code head for a reference only the merge with main carries, which is a need only the base meets",
   "pullRequest": "https://github.com/sjawhar/legion/pull/2512",
-  "head": "e4d33f454fe58ddf7ec11085c2fd8fab5c678a01",
+  "head": "a205689346992d20023a6fd52495261c570480c2",
   "proof": [
     {
-      "criterion": "Review round 5, High: Biome 2.4.11, the version bun.lock pins, refuses packages/envoy-client/src/__tests__/nats-server.ts:9 and .github/e2e-scripts.json:28 and :58, so lint cannot pass and ci-ok cannot be green",
-      "surface": "Biome, the repository's own lint, at the version bun.lock pins",
-      "command": "bunx biome --version ; bunx biome check . ; bunx biome ci .github/e2e-scripts.json packages/envoy-client/src/__tests__/nats-server.ts",
-      "observed": "Reproduced first: 2.4.11 printed the formatter's diff for the digest constant on one long line and for the two one-element apt arrays. Both files are formatted with that same Biome. `bunx biome check .` now exits 0 over 1318 files, and `bunx biome ci` on the two files exits 0. The typecheck of the package whose file changed, `bun run typecheck` in packages/envoy-client, is clean.",
-      "headSha": "e4d33f454fe58ddf7ec11085c2fd8fab5c678a01",
-      "negativeControl": "The same two commands against the reviewed head printed the formatter's diff for all three sites and exited non-zero; that is the failure CI run 40957622905 recorded at a744ce61."
+      "criterion": "Review round 6: CI run 41009980170 failed lint and test at the code head e4d33f45, both in check-ci-images.sh, because GitHub tests the merge with main and main added envoy-go-race-docs (de546ed2, #2516) whose services Postgres names mirror.gcr.io/pgvector/pgvector, a reference this change's gate forbids",
+      "surface": "The gate over the merged tree, which is the tree GitHub tests",
+      "command": "jj new legion/INFRA-567 main@origin ; uv run --with pyyaml==6.0.2 --no-project -- bash .github/scripts/check-ci-images.sh tree",
+      "observed": "The merge is clean, no conflict. Before the repoint the gate reproduced CI's two problems at the merged head, naming ci.yaml:2486 twice: the postgres service's image names mirror.gcr.io/pgvector/pgvector, and a CI job runs this file and it names mirror.gcr.io. After pointing that service at ghcr.io/sjawhar/legion/ci@sha256:2358fcba... — the digest .github/ci-images.yaml already holds for pgvector/pgvector, with the comment line its ten sibling services carry — the gate passes: 12 rows, 36 references in 32 files of CI's reach, and of 6423 text files swept the 28 that name mirror.gcr.io are all in the exception list.",
+      "headSha": "a205689346992d20023a6fd52495261c570480c2",
+      "negativeControl": "The gate run at the merged head before the repoint is the control: it printed the same two problems CI's lint job printed, and `check-ci-images.test.sh`'s real-tree case failed with it (97 passed, 2 failed in CI's test job). Both pass at this head."
     },
     {
-      "criterion": "Review round 5, Medium (check-bun-version.sh:487): this gate read a row with a reader of its own, which refuses an oven/bun upstream written <repository>:<tag>@<digest> — the shape .github/ci-images.yaml's nats row already carries — while check-ci-images.sh accepts the same row",
-      "surface": "The gate's own harness, over fixture repositories, and the gate over the real tree",
-      "command": "uv run --with pyyaml==6.0.2 --no-project -- bash .github/scripts/check-bun-version.test.sh ; uv run --with pyyaml==6.0.2 --no-project -- bash .github/scripts/check-bun-version.sh",
-      "observed": "121 assertions, 0 failed; the gate over the real tree prints `every Bun install reads .bun-version (1.4.4)`. The heredoc runs under PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=.github/scripts and imports split_reference from ci_images; bun_tag_is_pinned and both FROM rules take the tag and the digest from it, and the hand-written partition splits are gone. oven/bun:${BUN_VERSION}, which no tag grammar accepts, is read by standing the variable in for a string the grammar accepts and restoring it in the tag; a string the grammar refuses answers every field empty, which each rule reads as naming no Bun release and no row's digest, so no refusal became a pass. The fixture symlinks ci_images.py in beside the script, as the other two harnesses do.",
-      "headSha": "e4d33f454fe58ddf7ec11085c2fd8fab5c678a01",
-      "negativeControl": "The two new cases run against the script as the reviewer read it (the file copied aside, restored after): `FAIL: a row whose upstream names the pinned tag beside a digest passes`, `FAIL: a row whose upstream host carries a port passes`, 119 passed 2 failed. The 119 that passed before still pass."
+      "criterion": "Every rule this change adds holds for main's new job too",
+      "surface": "The repository's own gates over the merged tree, and a parse of every workflow file",
+      "command": "uv run --with pyyaml==6.0.2 --no-project -- bash .github/scripts/check-ci-filters.sh ; bash .github/scripts/ci-ok.test.sh ; a yaml parse of the twelve workflow files at both heads",
+      "observed": "envoy-go-race-docs carries timeout-minutes: 70, written by main itself and above its step's -timeout 60m; its filter (envoy_go_race_docs), ci-ok's needs entry (ci.yaml:3017) and its SELECTED_BY mapping (ci.yaml:3056) all came with it from main. check-ci-filters.sh reads 26 gates, one more than before the merge, and reports ci-images at 6 files 0 uncovered; ci-ok.test.sh passes 40 assertions; ci_job_reads.py needs no new entry. The parse of both heads shows the merge added exactly one job definition, that one: 58 definitions with 53 limits before, 59 with 54 after, 5 reusable-workflow calls on both sides, and no job without a limit. The body's job table carries its row and its re-measured counts.",
+      "headSha": "a205689346992d20023a6fd52495261c570480c2",
+      "negativeControl": "check-ci-filters.sh is the control on a job whose filter misses a file it reads, and the timeout parse names any job definition with no limit; it names none at this head, and the body quotes pr-title's removal as its red case."
     },
     {
-      "criterion": "Review round 5's Minor and its three comment-only items, and no regression in the rest of the gate set",
-      "surface": "The repository's own gates over the real tree, and the files the comments describe",
-      "command": "uv run --with pyyaml==6.0.2 --no-project -- bash .github/scripts/check-ci-images.sh tree ; check-ci-images.test.sh ; mirror-ci-images.test.sh ; check-ci-filters.sh ; check-image-trigger-paths.sh ; check-action-pins.sh",
-      "observed": "TREE is deleted from check-ci-images.sh, nothing having read it (it appears nowhere else in the script, its harness, ci_job_reads.py or ci.yaml). 12 rows and 35 references; 99 and 45 assertions, 0 failed; 25 filter gates; 5 image builds; every action pinned. The three ci.yaml comments: the ci-images filter list names the shared module, which ci_job_reads.py:771 already named for that job; the envoy-smoke pre-pull says every FROM of packages/envoy/docker/Dockerfile names a digest and no ARG, read off that file's lines 10, 57 and 118, whose only ARG is LEGION_COMMIT; the NATS pre-pull cites nats-server.ts:9-10, the constant's lines after the Biome fix.",
-      "headSha": "e4d33f454fe58ddf7ec11085c2fd8fab5c678a01",
-      "negativeControl": "check-ci-filters.sh is the control on a file a job reads and its filter does not name: it fails that job. It passes here, the lint job that runs check-bun-version.sh being gated by no filter, as ci_job_reads.py:765 says."
+      "criterion": "The forward merge changed nothing of the branch's own diff but the line it had to change",
+      "surface": "The unchanged-diff fingerprint of skill://legion-worker/references/conflicts-and-rewrites.md, at the tip before and after",
+      "command": "jj diff --from 'fork_point(\"main\"@origin | <head>)' --to <head> --git --context 0 '~(.legion | docs/solutions)' | sed -e '/^@@/d' -e '/^index /d' | sha256sum, at d3396741 and at a2056893, then a diff of the two bodies",
+      "observed": "0818b06b615cfa5b400b9e25e407baa178d0f8313263ebd83c6e3d176e495a1a -> 4dc2c3a98f18472f6cca8e7469cdb90a2c7c5059bd46f57284f46c11be6b3d28, changed. Both sides cover the same 51 files, and the whole difference is the three lines of ci.yaml above: the mirror.gcr.io line removed, the comment and the package reference added. Posted on the pull request as the forward-merge comment, with that diff quoted.",
+      "headSha": "a205689346992d20023a6fd52495261c570480c2",
+      "negativeControl": "The fingerprint is computed with pipefail so a failed read prints nothing and counts as changed; both sides printed, and the per-file diff names the only delta rather than leaving 'changed' unexplained."
     },
     {
-      "criterion": "The pull request's last open risk, which round 5's report still called open: merged-root-waits green on a hosted runner",
-      "surface": "GitHub Actions, the E2E proofs workflow on a hosted runner",
-      "command": "gh api repos/sjawhar/legion/actions/runs/40999737194/jobs",
-      "observed": "select success, merged-root-waits success, at e719a7f2, which carries the restart fix of 35db766a. The body's Not proven / risk line is corrected to match its other two places, and the correction is a conversation comment on the pull request so the reviewer reads it beside the review.",
-      "headSha": "e4d33f454fe58ddf7ec11085c2fd8fab5c678a01",
-      "negativeControl": "The same proof at 368e3d2b, run 40979438094, failed at merged_root_waits_live_test.go:523 in step 5 — the defect this change fixed."
+      "criterion": "The rest of the change still passes at the merged head, which is a new tree: main brought 164 files added, 286 modified and 16 removed",
+      "surface": "The repository's own gates and harnesses over the merged tree, and Biome over the whole tree",
+      "command": "uv run --with pyyaml==6.0.2 --no-project -- bash .github/scripts/<each gate and harness> ; bunx biome check .",
+      "observed": "check-bun-version.sh (1.4.4), check-image-trigger-paths.sh (5 image builds), check-action-pins.sh (21 files, one more than before the merge), check-ci-images.test.sh 99, mirror-ci-images.test.sh 45, check-bun-version.test.sh 121, check-ci-filters.test.sh 132, ci-ok.test.sh 40, all 0 failed; bunx biome check . exits 0.",
+      "headSha": "a205689346992d20023a6fd52495261c570480c2",
+      "negativeControl": "Each harness carries its own red cases, and the gate run before the repoint showed this set is not vacuous at the merged head: it failed exactly where CI failed."
     }
   ],
   "filesChanged": [
-    "packages/envoy-client/src/__tests__/nats-server.ts and .github/e2e-scripts.json: formatted with Biome 2.4.11",
-    ".github/scripts/check-bun-version.sh and its harness: every image reference read with ci_images.py's grammar, two new cases, the fixture symlink",
-    ".github/scripts/check-ci-images.sh: the dead TREE constant deleted",
-    ".github/workflows/ci.yaml: three comments, no step, filter or needs"
+    ".github/workflows/ci.yaml: envoy-go-race-docs's services Postgres repointed onto the package's pgvector row, with its comment line",
+    "the merge commit itself, which brings main up to dd552dfd and changes nothing else of the branch's diff"
   ],
   "deviations": [],
   "openQuestions": [
-    "One behaviour change beyond the two bugs, reported on the thread rather than left silent: FROM OVEN/BUN:${BUN_VERSION} in capitals is now refused, ci_images.py's grammar being lowercase-only, as Docker's own is. No existing assertion covered it.",
-    "CI is running at this code head, started by this round's push. Every run on this branch since 65da1690 was cancelled by the next push before it finished, 41003510761 at 9862c8d8 included, which is why no round read a settled lint. Nobody should push code until CI at this head completes.",
-    "The pod carries no PyYAML, so every gate of this repository is run here through the sanctioned runner form, uv run --with pyyaml==6.0.2 --no-project -- bash .github/scripts/<script> (skills/legion-worker/references/tools.md). The hosted runners are unaffected. The implement handoff at 815bd41e called this an image gap of INFRA-333, which is wrong and is corrected in the pull request's comment 6515134799.",
-    "The gate's package half fails until this change's own ci-images job copies the per-digest tags, which is expected and is why each round runs the tree half alone."
+    "CI is running at the merged head a2056893, which is the head GitHub now tests; the earlier run 41009980170 at e4d33f45 is the one that found this, and its ci-images job succeeded, so the package holds all 12 rows.",
+    "The pod carries no PyYAML, so every gate is run here through uv run --with pyyaml==6.0.2 --no-project -- bash .github/scripts/<script> (skills/legion-worker/references/tools.md). The hosted runners are unaffected.",
+    "The body's Not proven line had been rewritten back to 'not yet observed' between rounds; merged-root-waits is green on a hosted runner in run 40999737194, and the line is corrected again this round."
   ],
   "discoveredComplexity": [
-    "A repository that pins images by digest acquires several readers of an image reference, one per gate, and each reader is wrong in its own way for a shape the others accept. One module both the gate and the copy import ended that for two scripts in round 8; the third turned up only when a reviewer read the whole diff."
+    "A gate that forbids a reference across the whole tree is a gate on the merge, not on either head: a branch and its base can each be green while the tree GitHub tests is red, and the branch is the only side that can fix it."
   ]
 }
