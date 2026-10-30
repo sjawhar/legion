@@ -1,0 +1,13 @@
+<?xml version="1.0" encoding="utf-8"?>
+<shortcuts xmlns:android="http://schemas.android.com/apk/res/android">
+    <shortcut
+        android:enabled="true"
+        android:icon="@drawable/ic_notification"
+        android:shortcutId="change_server"
+        android:shortcutShortLabel="@string/server_title">
+        <intent
+            android:action="dev.legion.dispatch.CHANGE_SERVER"
+            android:targetClass="dev.legion.dispatch.MainActivity"
+            android:targetPackage="dev.legion.dispatch" />
+    </shortcut>
+</shortcuts>

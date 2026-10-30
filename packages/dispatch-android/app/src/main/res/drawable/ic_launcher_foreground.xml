@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- A "D" in a rounded square, inside the adaptive icon's 66dp safe zone. -->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="108dp"
+    android:height="108dp"
+    android:viewportWidth="108"
+    android:viewportHeight="108">
+    <path
+        android:fillColor="#FFFFFFFF"
+        android:pathData="M40,34h14c11,0 20,9 20,20s-9,20 -20,20h-14zM48,42v24h6c6.6,0 12,-5.4 12,-12s-5.4,-12 -12,-12z" />
+</vector>

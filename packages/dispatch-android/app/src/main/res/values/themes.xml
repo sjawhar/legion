@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <style name="Theme.Dispatch" parent="android:Theme.Material.Light.NoActionBar">
+        <item name="android:statusBarColor">#FF1F2937</item>
+        <item name="android:windowBackground">@android:color/white</item>
+    </style>
+</resources>
