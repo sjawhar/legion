@@ -2,7 +2,7 @@
   "schemaVersion": 1,
   "phase": "implement",
   "issue": "INFRA-562",
-  "completed": "2026-10-30T14:45:00Z",
+  "completed": "2026-10-30T18:05:00Z",
   "proof": [
     {
       "criterion": "Items 1 and 2: a message or mention whose request is cancelled after commit reaches its recipient without a retry; pending attempts a killed process left are sent by the other process under their own key",
@@ -179,6 +179,14 @@
       "observed": "both guard tests PASS with migrations 0001..0152; TestADeliveryNATSRefusedIsRedeliveredByTheSweepAndApplied PASS and internal/intake ok 58.4 s (one Docker-only test skipped in this pod); two-process 134/0/0",
       "headSha": "eabadbf1b545",
       "negativeControl": "Merged at 8e994867 with main a4af0341, this branch's 0148_message_delivery_urgency shared version 148 with main's 0148_asks_anchor_artifact_id, which pgmigrate.Load refuses; GitHub reported CONFLICTING in cmd/dispatch/README.md"
+    },
+    {
+      "criterion": "Tester round 16: ci-filters holds - every CI job that reads the new githubapp/ratelimit package runs on a change to it",
+      "surface": "the repository's CI filter check (.github/scripts/check-ci-filters.sh, ci.yaml's ci-filters job)",
+      "command": "uv run --with pyyaml==6.0.2 bash .github/scripts/check-ci-filters.sh",
+      "observed": "the five problems naming packages/envoy/internal/dispatch/githubapp/ratelimit/ratelimit.go (test, docs, dispatch, dispatch-browser-multiprocess, listener-server-change) are gone, and docs-pages.yaml's on.push.paths equals the docs filter (166 patterns). One problem remains locally, listener-server-change reading api/testdata/decision-block-inserts.json: main's own at this branch's base a4af0341, which main fixed afterwards (ci.yaml on main lists api/testdata/*), so CI's merge ref does not report it (CI run 41072982859 reported only the five)",
+      "headSha": "9ebeb9b31bbe",
+      "negativeControl": "At 9867c75e (before the fix) the same check reported 6 problems, five of them this package's; CI run 41072982859's ci-filters job failed on those five"
     }
   ],
   "filesChanged": [
@@ -204,7 +212,8 @@
     "review round 8: forward merge 05185b33 (no conflict; migrations renamed 0148-0151 with references in AGENTS.md, README.md, delivery.go, issue_route_status.go, ratelimit.go, delivery_bound_send_test.go and the pr2387 fragments)",
     "review round 9: forward merge 51702b24 (redeliver/sweep.go, redeliver/sweep_test.go, cmd/dispatch/AGENTS.md, cmd/dispatch/README.md)",
     "review round 10: packages/daemon/internal/intake/redelivered_test.go",
-    "after round 11: forward merge eabadbf1 (cmd/dispatch/README.md conflict; migrations renamed 0149-0152 with references)"
+    "after round 11: forward merge eabadbf1 (cmd/dispatch/README.md conflict; migrations renamed 0149-0152 with references)",
+    "tester round 16: .github/workflows/ci.yaml (dispatch_server and listener_server_change filters), .github/workflows/docs-pages.yaml (on.push.paths)"
   ],
   "trickyParts": [
     "Item 8's take-over wait retries 'no live session' too, so a send to a session that is really gone reads failed about 12 s after its first try, and a request that sends during a take-over answers up to ~12 s later (up to ~22 s against a listener that hangs every read). Browser specs that assert a failed send were given their own timeouts naming listenerTakeoverWindow; 7 affected specs pass on chromium in the pod.",
@@ -228,7 +237,8 @@
     "The route_roster row's sessions JSON holds each session's full listener record, so main's agents list (#2429) and route status read one stored answer; an old row with only session_id, roles and last_seen still decodes.",
     "Test hooks fan out on main's live socket routes (/api/v1/live/_test/disconnect and /api/v1/live/_test/rotate) since #2449 replaced the event-stream and delivery-socket hooks; issueClaimedNow = greatest(updated_at, now()) keeps a claim's updated_at equal to claimed_at beside main's clock_timestamp-based issueUpdatedNow.",
     "c2378eb6 is an empty commit without the skip-checks trailer so the head can run CI; the pushed WIP commits are not rewritten. GitHub reports CONFLICTING (main moved to e4c9ab85 after the merge), so no pull-request CI runs until the next merge; per the architect, main was not chased.",
-    "Migrations are 0149-0152 (above main's 0148_asks_anchor_artifact_id). This round is one forward merge: README.md keeps both sides' migration paragraphs; leasePoolSize 13 and dispatchConnectionsPerPod 87 equal main's (main shows 87, not 88, at a4af0341); no behaviour change. Code and handoff go out in one push with no skip-checks trailer."
+    "Migrations are 0149-0152 (above main's 0148_asks_anchor_artifact_id). This round is one forward merge: README.md keeps both sides' migration paragraphs; leasePoolSize 13 and dispatchConnectionsPerPod 87 equal main's (main shows 87, not 88, at a4af0341); no behaviour change. Code and handoff go out in one push with no skip-checks trailer.",
+    "Tester round 16: a CI-only change: the ratelimit package path added to the dispatch_server and listener_server_change filters in ci.yaml and to docs-pages.yaml's on.push.paths. No code changed; no merge (GitHub reported no conflict)."
   ],
   "openQuestions": [],
   "discoveredComplexity": [
